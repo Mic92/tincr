@@ -702,7 +702,7 @@ static bool check_tarpit(const sockaddr_t *sa, int fd) {
 		}
 	}
 
-	memcpy(&prev_sa, &sa, sizeof(sa));
+	prev_sa = *sa;
 
 	// Check if we get many connections from different hosts
 
