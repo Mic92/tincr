@@ -1732,13 +1732,16 @@ static void handle_incoming_vpn_packet(listen_socket_t *ls, vpn_packet_t *pkt, s
 	if(!n) {
 		// It might be from a 1.1 node, which might have a source ID in the packet.
 		pkt->offset = 2 * sizeof(node_id_t);
-		from = lookup_node_id(SRCID(pkt));
 
-		if(from && from->status.sptps && !memcmp(DSTID(pkt), &nullid, sizeof(nullid))) {
-			if(sptps_verify_datagram(&from->sptps, DATA(pkt), pkt->len - 2 * sizeof(node_id_t))) {
-				n = from;
-			} else {
-				goto skip_harder;
+		if(pkt->len >= pkt->offset) {
+			from = lookup_node_id(SRCID(pkt));
+
+			if(from && from->status.sptps && !memcmp(DSTID(pkt), &nullid, sizeof(nullid))) {
+				if(sptps_verify_datagram(&from->sptps, DATA(pkt), pkt->len - 2 * sizeof(node_id_t))) {
+					n = from;
+				} else {
+					goto skip_harder;
+				}
 			}
 		}
 	}
@@ -1751,9 +1754,9 @@ static void handle_incoming_vpn_packet(listen_socket_t *ls, vpn_packet_t *pkt, s
 skip_harder:
 
 	if(!n) {
-		if(debug_level >= DEBUG_PROTOCOL) {
+		if(debug_level >= DEBUG_TRAFFIC) {
 			hostname = sockaddr2hostname(addr);
-			logger(DEBUG_PROTOCOL, LOG_WARNING, "Received UDP packet from unknown source %s", hostname);
+			logger(DEBUG_TRAFFIC, LOG_WARNING, "Received UDP packet from unknown source %s", hostname);
 			free(hostname);
 		}
 
@@ -1767,6 +1770,12 @@ skip_harder:
 
 		if(relay_enabled) {
 			pkt->offset = 2 * sizeof(node_id_t);
+
+			if(pkt->offset > pkt->len) {
+				logger(DEBUG_TRAFFIC, LOG_WARNING, "Got too short packet from %s (%s)", n->name, n->hostname);
+				return;
+			}
+
 			pkt->len -= pkt->offset;
 		}
 
@@ -1780,7 +1789,7 @@ skip_harder:
 		}
 
 		if(!from || !to) {
-			logger(DEBUG_PROTOCOL, LOG_WARNING, "Received UDP packet from %s (%s) with unknown source and/or destination ID", n->name, n->hostname);
+			logger(DEBUG_TRAFFIC, LOG_WARNING, "Received UDP packet from %s (%s) with unknown source and/or destination ID", n->name, n->hostname);
 			return;
 		}
 
