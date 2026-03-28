@@ -1399,11 +1399,10 @@ next:
 		return 1;
 	}
 
-	if(memcmp(hishash, hash, 18)) {
+	if(!mem_eq(hishash, hash, 18)) {
 		fprintf(stderr, "Peer has an invalid key. Please make sure you're using the correct URL.\n%s\n", line + 2);
 		ecdsa_free(key);
 		return 1;
-
 	}
 
 	ecdsa_t *hiskey = ecdsa_set_base64_public_key(fingerprint);
