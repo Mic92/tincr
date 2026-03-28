@@ -13,7 +13,6 @@ from testlib.feature import Feature
 from testlib.proc import Tinc
 from testlib.test import Test
 
-
 TEST_DATA = b"foo bar baz"
 
 

@@ -26,9 +26,7 @@ SIGNED_BYTES = """Signature = foo 1653397516 \
 T8Bjg7dc7IjsCrZQC/20qLRsWPlrbthnjyDHQM0BMLoTeAHbLt0fxP5CbTy7Cifgg7P0K179GeahBFsnaIr4MA\n\
 fake testing data\n\
 hello there\n\
-""".encode(
-    "utf-8"
-)
+""".encode("utf-8")
 
 RAW_DATA = tempfile.mktemp()
 

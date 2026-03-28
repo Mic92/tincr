@@ -50,13 +50,13 @@ with Test("commandline flags") as context:
     )
 
     for code, flags in tincd_flags:
-        COOKIE = util.random_string(10)
-        server = node.tincd(*flags, env={"COOKIE": COOKIE})
+        cookie = util.random_string(10)
+        server = node.tincd(*flags, env={"COOKIE": cookie})
 
         if not code:
             log.info("waiting for tincd to come up")
             env = node[Script.TINC_UP].wait().env
-            check.equals(COOKIE, env["COOKIE"])
+            check.equals(cookie, env["COOKIE"])
 
         log.info("stopping tinc")
         node.cmd("stop", code=code)

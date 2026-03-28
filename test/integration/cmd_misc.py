@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 """Test miscellaneous commands."""
+
 import os
 import typing as T
 
