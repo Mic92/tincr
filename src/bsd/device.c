@@ -194,16 +194,20 @@ static bool setup_device(void) {
 	}
 
 #ifdef ENABLE_VMNET
+
 	if(routing_mode == RMODE_SWITCH
-		&& device_type != DEVICE_TYPE_TAP && device_type != DEVICE_TYPE_VMNET) {
+	                && device_type != DEVICE_TYPE_TAP && device_type != DEVICE_TYPE_VMNET) {
 		logger(DEBUG_ALWAYS, LOG_ERR, "Only vmnet and tap devices support switch mode!");
 		return false;
 	}
+
 #else
+
 	if(routing_mode == RMODE_SWITCH && device_type != DEVICE_TYPE_TAP) {
 		logger(DEBUG_ALWAYS, LOG_ERR, "Only tap devices support switch mode!");
 		return false;
 	}
+
 #endif
 
 	// Find out which device file to open
@@ -474,6 +478,7 @@ static bool read_packet(vpn_packet_t *packet) {
 	}
 
 #ifdef ENABLE_VMNET
+
 	case DEVICE_TYPE_VMNET:
 #endif
 	case DEVICE_TYPE_TAP:
