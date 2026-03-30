@@ -1,7 +1,7 @@
 project('tinc', 'c',
   version: '1.1pre18',
   license: 'GPL-2.0-or-later',
-  meson_version: '>=0.51',
+  meson_version: '>=0.56',
   default_options: [
     'c_std=c11',
     'warning_level=3',
@@ -68,6 +68,7 @@ if cc_name != 'msvc'
     '-Wmissing-noreturn',
     '-Wmissing-prototypes',
     '-Wno-embedded-directive',
+    '-Wno-ignored-attributes',
     '-Wold-style-definition',
     '-Wredundant-decls',
     '-Wreturn-type',

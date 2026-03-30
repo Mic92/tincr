@@ -4,11 +4,6 @@
 
 static environment_t *device_env = NULL;
 
-// silence -Wmissing-prototypes
-void __wrap_environment_init(environment_t *env);
-void __wrap_environment_exit(environment_t *env);
-bool __wrap_execute_script(const char *name, environment_t *env);
-
 void __wrap_environment_init(environment_t *env) {
 	assert_non_null(env);
 	assert_null(device_env);

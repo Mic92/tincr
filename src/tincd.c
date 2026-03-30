@@ -300,8 +300,12 @@ static bool parse_options(int argc, char **argv) {
 		goto exit_fail;
 	}
 
-	if(!netname && (netname = getenv("NETNAME"))) {
-		netname = xstrdup(netname);
+	if(!netname) {
+		char *env_value = getenv("NETNAME");
+
+		if(env_value) {
+			netname = xstrdup(env_value);
+		}
 	}
 
 	/* netname "." is special: a "top-level name" */

@@ -559,8 +559,9 @@ static bool receive_udppacket(node_t *n, vpn_packet_t *inpkt) {
 
 	if(n->incompression != COMPRESS_NONE) {
 		vpn_packet_t *outpkt = pkt[nextpkt++];
+		outpkt->len = uncompress_packet(DATA(outpkt), MAXSIZE - outpkt->offset, DATA(inpkt), inpkt->len, n->incompression);
 
-		if(!(outpkt->len = uncompress_packet(DATA(outpkt), MAXSIZE - outpkt->offset, DATA(inpkt), inpkt->len, n->incompression))) {
+		if(!outpkt->len) {
 			logger(DEBUG_TRAFFIC, LOG_ERR, "Error while uncompressing packet from %s (%s)",
 			       n->name, n->hostname);
 			return false;
@@ -860,8 +861,9 @@ static void send_udppacket(node_t *n, vpn_packet_t *origpkt) {
 
 	if(n->outcompression != COMPRESS_NONE) {
 		outpkt = pkt[nextpkt++];
+		outpkt->len = compress_packet(DATA(outpkt), MAXSIZE - outpkt->offset, DATA(inpkt), inpkt->len, n->outcompression);
 
-		if(!(outpkt->len = compress_packet(DATA(outpkt), MAXSIZE - outpkt->offset, DATA(inpkt), inpkt->len, n->outcompression))) {
+		if(!outpkt->len) {
 			logger(DEBUG_TRAFFIC, LOG_ERR, "Error while compressing packet to %s (%s)",
 			       n->name, n->hostname);
 			return;

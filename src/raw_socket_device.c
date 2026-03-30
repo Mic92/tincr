@@ -45,7 +45,9 @@ static bool setup_device(void) {
 		device = xstrdup(iface);
 	}
 
-	if((device_fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
+	device_fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+
+	if(device_fd < 0) {
 		logger(DEBUG_ALWAYS, LOG_ERR, "Could not open %s: %s", device_info,
 		       strerror(errno));
 		return false;
@@ -91,9 +93,9 @@ static void close_device(void) {
 }
 
 static bool read_packet(vpn_packet_t *packet) {
-	ssize_t inlen;
+	ssize_t inlen = read(device_fd, DATA(packet), MTU);
 
-	if((inlen = read(device_fd, DATA(packet), MTU)) <= 0) {
+	if(inlen <= 0) {
 		logger(DEBUG_ALWAYS, LOG_ERR, "Error while reading from %s %s: %s", device_info,
 		       device, strerror(errno));
 		return false;
