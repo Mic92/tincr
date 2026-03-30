@@ -4,6 +4,7 @@
 
 static environment_t *device_env = NULL;
 
+// NOLINTBEGIN(misc-use-internal-linkage)
 void __wrap_environment_init(environment_t *env) {
 	assert_non_null(env);
 	assert_null(device_env);
@@ -23,6 +24,7 @@ bool __wrap_execute_script(const char *name, environment_t *env) {
 	// Used instead of mock_type(bool) to silence clang warning
 	return mock() ? true : false;
 }
+// NOLINTEND(misc-use-internal-linkage)
 
 static void run_device_enable_disable(void (*device_func)(void),
                                       const char *script) {
