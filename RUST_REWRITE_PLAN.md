@@ -23,7 +23,7 @@
 | 0b — SPTPS FFI harness | ✅ Done | `tinc-ffi: SPTPS C↔C harness...` | 6 tests; deterministic via seeded ChaCha20 RNG |
 | 0c — Wire-traffic corpus | | | |
 | 0d — CI baseline | | | |
-| 1 — Pure logic crates | 🟡 Partial | `tinc-proto: edge/misc/key...` | `tinc-proto` covers subnet/edge/misc/key (~2400 LOC, 52 tests). `auth.rs`, `tinc-graph`, `tinc-conf` open. |
+| 1 — Pure logic crates | 🟡 Partial | `tinc-graph: SSSP+MST...` | `tinc-proto` (~2400 LOC, 52 tests) + `tinc-graph` (18-case KAT). `tinc-conf`, edge/subnet delete + lookup open. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | | | |
@@ -198,16 +198,37 @@ These have no I/O and are the safest place to start. They map almost 1:1 to exis
 
 **Phase 0c (wire corpus) didn't block.** The KAT strings were transcribed by hand from the format strings + integration test configs. Corpus would still strengthen the tests — promote to nice-to-have.
 
-### `tinc-graph`
-| C source | Rust |
-|---|---|
-| `splay_tree.c`, `list.c`, `hash.h` | `BTreeMap` / `Vec` / `HashMap` — **delete, don't port** |
-| `node.c`, `edge.c`, `subnet.c` | `struct Node`, `struct Edge`, `struct Subnet` in an arena (`slotmap` or `generational-arena`) |
-| `graph.c` (MST + BFS reachability) | `graph.rs` | Port the Prim's-MST and BFS verbatim first, optimize later |
+### 🟡 `tinc-graph` — algorithms done, mutation deferred
+| C source | Rust | Status |
+|---|---|---|
+| `splay_tree.c`, `list.c`, `hash.h` | `BTreeMap` / `Vec` / `VecDeque` | ✅ Not ported, replaced |
+| `graph.c` `sssp_bfs` | `Graph::sssp` | ✅ 18 KATs |
+| `graph.c` `mst_kruskal` | `Graph::mst` | ✅ 18 KATs |
+| `graph.c` `check_reachability` | — | ⏸️ Phase 5 — it's `execute_script`/`sptps_stop`/`timeout_del`, ~10 lines of actual diff logic |
+| `edge.c` `edge_add`/`lookup_edge` | `Graph::add_edge` (auto-links `reverse`) | ✅ |
+| `edge.c` `edge_del` | `Graph::del_edge` | ⏸️ Append-only slab can't delete in O(1); needs free-list or `slotmap`. First consumer is `del_edge_h` in Phase 5. |
+| `node.c` `lookup_node`, `node_add`/`node_del` | name→`NodeId` index | ⏸️ Same: first consumer is the daemon's `*_h` handlers |
+| `subnet.c` `lookup_subnet_*` (longest-prefix match) | route trie | ⏸️ First consumer is `route.c` in Phase 5 |
 
-**Why arena, not `Rc<RefCell<>>`:** the C code is full of cyclic node↔edge↔connection pointers. Index-based arenas (`NodeId(u32)`) sidestep the borrow checker fight entirely and match the C memory model.
+**What landed:** ~540 LOC Rust + 600 LOC KAT generator. The generator includes the real `splay_tree.c`/`list.c` and copies `mst_kruskal`/`sssp_bfs` bodies verbatim from `graph.c`, so divergence shows up as either a build break or a KAT diff. `nix build .#kat-graph` reproduces the committed `tests/kat/graph.json`.
 
-**Testing:** Generate random graphs, run C `graph()` and Rust `graph()` on identical input, diff the resulting reachability/nexthop tables.
+The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` typed handles. No `slotmap` yet — the KAT graphs are append-only, so a plain slab is enough for now. Delete needs the free-list and lands with its first consumer.
+
+`BTreeMap<(weight, from_name, to_name), EdgeId>` is the `edge_weight_tree` analogue. The names are *cloned into the key* to dodge a borrow tangle (iterating the map while indexing `nodes` for compares). Tens of bytes per edge; cheap.
+
+**Findings from `tinc-graph`:**
+
+- **The indirect→direct upgrade overwrites `distance` but not `nexthop`.** `sssp_bfs` line 180's revisit clause (`!e->to->status.indirect || indirect`) makes a direct path always win over an indirect one, *regardless of hop count*. Then lines 188-191 gate `nexthop`/`weighted_distance` separately on a stricter condition (same-hops-and-lighter). So a node first reached indirectly at distance 1, then upgraded to direct at distance 3, ends up with `distance=3, weighted_distance=<from the dist-1 path>`. Internally inconsistent — but `via` (the UDP hole-punch target) is set unconditionally on revisit, and that's what matters. The KAT `diamond_indirect` pins it; `indirect_upgrade_can_increase_distance` is the dedicated trip-wire.
+
+- **Iteration order is part of the contract.** Per-node edges are `splay_each`-ordered by `to->name`; the global edge set by `(weight, from->name, to->name)`. When two paths tie on `(distance, weighted_distance, indirect)`, the alphabetically-earlier neighbor wins. We sort the per-node `Vec` on insert (cached `to_name` field on `Edge` to avoid the comparator borrowing `nodes`).
+
+- **Kruskal-without-union-find rewinds.** Progress-after-skip resets the iterator to head. Without it, a light edge between two unvisited nodes is skipped on the first pass and never revisited. KAT `mst_rewind`.
+
+- **One-way edges are skipped.** `!e->reverse → continue` in both algorithms. They exist transiently between the two halves of an `ADD_EDGE` pair. KAT `oneway`.
+
+- **`sssp` returns a side table, not in-place mutation.** The C writes routing fields directly into `node_t`; we return `Vec<Option<Route>>` indexed by `NodeId`. Two reasons: borrowck (mutating the slab while iterating it), and the daemon wants to diff old-vs-new before applying — `check_reachability`'s up/down detection becomes a clean `old.is_some() != new.is_some()`.
+
+**Testing approach was right.** "Generate random graphs, diff the tables" — except FFI was the wrong harness. `graph.c` reads `node_t` fields scattered across a 200-byte struct embedded in global splay trees; building those from Rust would mean replicating half of `node.c`. The standalone C generator (8 hand-built + 10 random cases → JSON) is the same shape as `kat/gen_kat.c` and dodges all of it. Hand-built cases each pin one branch (the two diamonds, the rewind, the one-way skip, the asymmetric weight); random cases catch interactions.
 
 ### `tinc-conf`
 | C source | Rust |
