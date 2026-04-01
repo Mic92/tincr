@@ -15,6 +15,22 @@
 
 ---
 
+## Status
+
+| Phase | State | Commit | Notes |
+|---|---|---|---|
+| 0a — KAT vectors + `tinc-crypto` | ✅ Done | `tinc-crypto: KAT-verified...` | All 5 primitives pass 7 KATs. See [Findings](#findings-from-phase-0a). |
+| 0b — SPTPS FFI harness | ⏳ Next | | Unblocks the Rust↔C cross-handshake test |
+| 0c — Wire-traffic corpus | | | |
+| 0d — CI baseline | | | |
+| 1 — Pure logic crates | | | |
+| 2 — SPTPS state machine | | | Crypto deps already KAT-locked; could start in parallel with 0b |
+| 3 — Device & transport | | | |
+| 4 — `tinc` CLI | | | |
+| 5 — Daemon core | | | |
+
+---
+
 ## ⚠️ Read This First: Crypto Is Bespoke
 
 After source inspection, **none of the SPTPS crypto primitives match off-the-shelf Rust crates**:
@@ -25,9 +41,19 @@ After source inspection, **none of the SPTPS crypto primitives match off-the-she
 | ECDH | Ed25519 pubkey on wire → Edwards-to-Montgomery birational map → X25519 ladder with `SHA512(seed)[0..32]` clamped scalar | `x25519-dalek` |
 | KDF | TLS 1.0 PRF (RFC 4346 §5) over HMAC-SHA512, with `A(0) = zeros` quirk | `hkdf` |
 | Key files | 96-byte (`SHA512(seed) ‖ pubkey`) in tinc-custom PEM framing | `pem`, `ed25519-dalek::SigningKey` |
-| Base64 | Decoder accepts *union* of standard + URL-safe alphabets | `base64` (strict modes) |
+| Base64 | **LSB-first bit packing** + decoder accepts union of `+/` and `-_` | `base64` (any mode) |
 
-The vendored `src/ed25519/` and `src/chacha-poly1305/` directories **are the wire protocol spec.** They must not be deleted until KAT vectors are extracted and Rust replacements pass byte-for-byte.
+The vendored `src/ed25519/` and `src/chacha-poly1305/` directories **are the wire protocol spec.** As of Phase 0a, KAT vectors are extracted (`crates/tinc-crypto/tests/kat/vectors.json`, reproducible via `nix build .#kat-vectors`) and the Rust replacements pass byte-for-byte. The C sources still must not be deleted — they remain the regenerate-vectors-after-upstream-merge mechanism, and Phase 0b's FFI harness links them.
+
+### Findings from Phase 0a
+
+Three assumptions in the original plan turned out wrong on inspection:
+
+1. **`chacha20` crate has no `legacy` feature.** `ChaCha20Legacy` is unconditionally exported in 0.9.x. The plan's dependency line was a phantom from older docs. (Fixed in `Cargo.toml`.)
+
+2. **tinc's base64 is more broken than "permissive alphabet".** It packs bits LSB-first within each 3-byte group: `triplet = b[0] | b[1]<<8 | b[2]<<16`, then emits the *low* 6 bits first. RFC 4648 packs MSB-first. These are different *output strings*, not just different decode tables — `tinc_b64([0x48]) == "IB"`, RFC 4648 gives `"SA"`. The dual-alphabet decoder is layered on top of that. No `base64` crate engine config can produce this; it's a hand-roll regardless.
+
+3. **`key_exchange.c` does not validate the Edwards point.** It does `fe_frombytes` (which just masks bit 255 and loads whatever's left as a field element) then applies the birational map blindly. The clean Rust path — `CompressedEdwardsY::decompress()?.to_montgomery()` — *validates*, and would reject inputs the C code accepts. `curve25519-dalek` keeps `FieldElement` private with no escape hatch, so `tinc-crypto::ecdh` vendors ~50 lines of 51-bit-limb field arithmetic (`fe` module) to do `(1+y)/(1-y)` without a curve check. The KATs prove it matches; the math is the same ref10 schoolbook every Curve25519 impl uses.
 
 ---
 
@@ -69,17 +95,23 @@ xtask/                      # interop test harness
 
 **Goal:** Lock down ground truth before writing any production Rust.
 
-### 0a. Extract crypto KAT vectors
-Instrument the C build to dump test vectors. Add `fprintf(stderr, ...)` hooks (or a `--dump-kat` mode to `sptps_test`) for:
+### ✅ 0a. Crypto KAT vectors + `tinc-crypto`
 
-- **ChaPoly:** `(key[64], seqno, plaintext, ciphertext‖tag)` — ≥20 tuples spanning seqno=0, seqno=1, seqno near 2³², varied lengths
-- **ECDH:** `(seed[32], ed_pubkey[32], peer_ed_pubkey[32], shared[32])` — ≥10 tuples
-- **PRF:** `(secret, seed, outlen, output)` — ≥10 tuples including the exact call SPTPS makes (`outlen = sizeof(sptps_key_t)`)
-- **Ed25519 sign/verify:** `(private[64], public[32], msg, sig[64])` — confirm it matches RFC 8032 (it should; `sign.c` looks standard)
-- **Key file:** dump a generated `ed25519_key.priv` alongside its `(seed, private[64], public[32])` decomposition
-- **b64:** mixed-alphabet edge cases that the permissive decoder accepts
+**Done.** Approach taken differs from the original plan in one significant way: rather than instrumenting `sptps_test`, we built a standalone generator (`kat/gen_kat.c`) that links the crypto sources directly. This avoids meson entirely — the crypto subset has no per-OS code, so a single `cc` invocation suffices.
 
-Commit vectors as `crates/tinc-crypto/tests/kat/*.json`. **These outlive the C code.**
+The trick that makes it work without patching upstream: predefine the include guards (`-DTINC_SYSTEM_H -DTINC_UTILS_H ...`) so the real headers become no-ops, then force-include a 50-line shim (`kat/system.h`) that provides the three symbols the crypto actually needs (`xzalloc`, `xzfree`, `mem_eq`). Breaks loudly at compile time if upstream renames a guard, which is exactly when we want to notice.
+
+What landed:
+
+| Artifact | Coverage |
+|---|---|
+| `kat/gen_kat.c` (344 LOC) | 10 ChaPoly cases (seqno {0, 1, 256, 2³²-1, distinct-bytes}, ptlen {0, 1, 63, 64, 65, 100, 1500}), 5 ECDH pairs, 9 PRF cases (incl. outlen=128 = `sizeof(sptps_key_t)`, secret>128 = HMAC key-hash path, empty secret), 5 sign cases, 9 b64 cases |
+| `crates/tinc-crypto/tests/kat/vectors.json` | Committed; `nix build .#kat-vectors` reproduces byte-identically |
+| `crates/tinc-crypto` (1000 LOC, `#![forbid(unsafe_code)]`, clippy pedantic) | All 5 primitives; 7 KAT tests pass |
+
+**`sign.c` is confirmed standard RFC 8032** — dalek's `raw_sign::<Sha512>` matches byte-for-byte, fed via `hazmat::ExpandedSecretKey`. Verify uses dalek's `verify` (not `verify_strict`) to accept the same malleable-sig edge cases the C code does.
+
+**Not yet covered:** the on-disk PEM-ish key file format. The 96-byte blob layout is exercised (the `from_blob` constructor exists), but the line-based PEM stripper from `ecdsa.c::read_pem` belongs in `tinc-conf`, not `tinc-crypto`. Deferred to Phase 1.
 
 ### 0b. SPTPS-only FFI
 `tinc-ffi` wraps **only** `sptps.c` + its crypto deps. Do not attempt to FFI the protocol handlers — they `sscanf` and immediately mutate global splay trees, there's no parse seam.
@@ -100,7 +132,7 @@ The 20 `sscanf` format strings in `protocol_*.c` are the spec; the corpus is the
 - [ ] `meson test` unchanged — the bar to clear
 - [ ] Parameterize `test/integration/testlib/` to launch `${TINCD_BIN:-tincd}` so a future Rust binary slots in
 
-**Deliverable:** `cargo test -p tinc-ffi` runs a C↔C SPTPS handshake. KAT JSON files committed.
+**Deliverable:** `cargo test -p tinc-ffi` runs a C↔C SPTPS handshake. ~~KAT JSON files committed.~~ ✅
 
 ---
 
@@ -147,92 +179,58 @@ Straightforward; the format is trivial. Reuse upstream `test/integration/` confi
 
 `sptps.c` (774 LOC) is the most security-sensitive module. It is self-contained, but **every primitive it depends on is non-standard.** Budget two days per primitive to implement, two weeks per primitive to be *certain* it's right.
 
-### `tinc-crypto` — four bespoke primitives
+### ✅ `tinc-crypto` — five bespoke primitives (done in Phase 0a)
 
-Traits stay simple; implementations are the work.
+Landed API — close to the sketch but informed by what the KATs demanded:
 
 ```rust
-pub struct ChaPoly { key: [u8; 64] }   // note: 64, not 32
+// chapoly.rs — ~160 LOC
+pub struct ChaPoly { key: [u8; 64] }
 impl ChaPoly {
-    pub fn seal(&self, seqno: u64, pt: &[u8], out: &mut [u8]);  // out = ct ‖ tag[16]
-    pub fn open(&self, seqno: u64, ct: &[u8], out: &mut [u8]) -> Result<(), ()>;
+    pub fn new(key: &[u8; 64]) -> Self;
+    pub fn seal(&self, seqno: u64, pt: &[u8]) -> Vec<u8>;        // ct ‖ tag[16]
+    pub fn open(&self, seqno: u64, sealed: &[u8]) -> Result<Vec<u8>, OpenError>;
 }
 
-pub struct EcdhPrivate { expanded: [u8; 64] }  // SHA512(seed), not seed
+// ecdh.rs — ~430 LOC (incl. ~180 LOC vendored field arithmetic)
+pub struct EcdhPrivate { expanded: [u8; 64] }
 impl EcdhPrivate {
-    pub fn generate(rng) -> (Self, [u8; 32]);   // pubkey is Ed25519 point
-    pub fn compute_shared(self, peer_ed_pub: &[u8; 32]) -> [u8; 32];
+    pub fn from_seed(seed: &[u8; 32]) -> (Self, [u8; 32]);       // pub is Ed25519 point
+    pub fn from_expanded(expanded: &[u8; 64]) -> Self;           // for on-disk keys
+    pub fn compute_shared(self, peer_ed_pub: &[u8; 32]) -> [u8; 32];  // consumes self
 }
 
-pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]);  // TLS 1.0 PRF, HMAC-SHA512
+// prf.rs — ~90 LOC
+pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]);
 
-pub struct SigningKey { expanded: [u8; 64], public: [u8; 32] }  // on-disk format
+// sign.rs — ~150 LOC
+pub struct SigningKey { expanded: [u8; 64], public: [u8; 32] }
+impl SigningKey {
+    pub fn from_blob(blob: &[u8; 96]) -> Self;                   // on-disk format
+    pub fn from_seed(seed: &[u8; 32]) -> Self;                   // KAT/gen only
+    pub fn sign(&self, msg: &[u8]) -> [u8; 64];
+}
+pub fn verify(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SignError>;
+
+// b64.rs — ~130 LOC
+pub fn encode(src: &[u8]) -> String;          // +/ alphabet
+pub fn encode_urlsafe(src: &[u8]) -> String;  // -_ alphabet
+pub fn decode(src: &str) -> Option<Vec<u8>>;  // accepts both, even mixed
 ```
 
-#### `chapoly.rs` — OpenSSH-style ChaCha20-Poly1305
+Implementation notes that survived contact with the KATs (the doc-comments in each module are the authoritative reference; this is the digest):
 
-Reference: `src/chacha-poly1305/chacha-poly1305.c`. **Not RFC 8439.**
+- **chapoly:** `ChaCha20Legacy` (64/64 layout) + `Poly1305::compute_unpadded`. Nonce is `seqno.to_be_bytes()`. Block 0 keystream → Poly1305 key, then `seek(64)` to block 1 for the actual cipher. The `Vec`-returning API is fine for now; an in-place variant is a Phase 5 perf concern.
 
-| Aspect | Value |
-|---|---|
-| Key | 64 bytes. `key[0..32]` → main cipher. `key[32..64]` → "header" cipher (unused by SPTPS but the offset matters for key derivation) |
-| Nonce | `seqno: u64` serialized **big-endian** into 8 bytes |
-| ChaCha variant | 64-bit nonce / 64-bit counter ("legacy" / DJB original, **not** IETF 96/32) |
-| Poly1305 key | First 32 bytes of keystream at `(nonce=seqno_be, counter=0)` |
-| Ciphertext | Keystream at `(nonce=seqno_be, counter=1)` XOR plaintext |
-| MAC input | `Poly1305(ciphertext)` only — **no AD, no padding, no length suffix** |
+- **ecdh:** the original plan's `CompressedEdwardsY::decompress()` path **does not work** because it validates the point. `key_exchange.c` doesn't — it does raw `fe_frombytes` (mask bit 255) → `(1+y)/(1-y)` → ladder. We vendor the field math in a private `fe` module: 5×51-bit limbs, schoolbook mul with ×19 wrap, ref10's Fermat inversion chain. Runs once per handshake so performance is irrelevant; the KATs are the correctness proof. dalek's `MontgomeryPoint::mul_clamped` handles the ladder itself.
 
-Build from primitives:
-- `chacha20` crate **with `legacy` feature** → `ChaCha20Legacy` (64-bit nonce variant). The default `ChaCha20` type is IETF and will produce the wrong keystream.
-- `poly1305` crate → raw `Poly1305::new(key).compute_unpadded(ct)`
+- **prf:** Mirrors the C buffer layout exactly (`[A(i) | seed]` with in-place overwrite) because that's the simplest way to be sure the `A(0)=zeros` quirk is right. `Hmac::<Sha512>::new_from_slice` handles the long-key-gets-hashed path internally, so we don't replicate `prf.c`'s manual HMAC.
 
-~100 LOC. **Gate on Phase 0a KATs before writing anything else.**
+- **sign:** `hazmat::ExpandedSecretKey::from_bytes` + `raw_sign::<Sha512>`. The expanded key's low half is already clamped on disk; dalek re-clamps internally (idempotent). **Verify uses `verify`, not `verify_strict`** — strict rejects non-canonical S and small-order R that `verify.c` accepts; that's a divergence we must not introduce.
 
-#### `ecdh.rs` — Ed25519-point ECDH
+- **b64:** LSB-first packing (`triplet = b[0]|b[1]<<8|b[2]<<16`, emit low 6 bits first) is the deeper issue; the dual-alphabet decoder is the easy part. Hand-rolled both directions.
 
-Reference: `src/ed25519/ecdh.c` + `key_exchange.c`. **Not X25519.**
-
-Wire format carries an **Ed25519 public key** (compressed Edwards y-coordinate). Receiver does:
-1. Decompress Edwards point from `peer_pubkey[32]`
-2. Birational map to Montgomery: `u = (1+y) / (1-y) mod p`
-3. X25519 ladder with clamped scalar `SHA512(seed)[0..32]`
-
-Key generation uses `ed25519_create_keypair`: `private = SHA512(seed)` clamped, `public` = standard Ed25519 pubkey.
-
-Build from `curve25519-dalek` low-level:
-```rust
-use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint, scalar::clamp_integer};
-let ed = CompressedEdwardsY(peer_pub).decompress()?;  // validates point
-let mont: MontgomeryPoint = ed.to_montgomery();        // birational map, built-in
-let scalar = clamp_integer(sha512(seed)[..32]);        // matches C clamping
-let shared = mont.mul_clamped(scalar).to_bytes();
-```
-
-**Subtle:** `key_exchange.c` reads only `private_key[0..32]` (the clamped scalar half) and re-clamps. Verify with KATs that `clamp_integer(already_clamped) == already_clamped`.
-
-#### `prf.rs` — TLS 1.0 PRF over HMAC-SHA512
-
-Reference: `src/nolegacy/prf.c`. **Not HKDF.**
-
-RFC 4346 §5 P_hash construction, but with a quirk:
-```
-data = [0u8; 64] ‖ seed                    // tinc: A(0) is ZEROS, not seed
-loop:
-    data[0..64] = HMAC-SHA512(secret, data)      // A(i) = HMAC(secret, A(i-1) ‖ seed)
-    out.extend(HMAC-SHA512(secret, data))        // P_hash chunk
-```
-
-~40 LOC over `hmac` + `sha2`. The `A(0) = zeros` deviation from RFC 4346 means no existing TLS-PRF crate will match. **KAT or bust.**
-
-#### `keys.rs` — tinc PEM-ish key files
-
-On-disk private key: 96 bytes (`SHA512(seed)[64] ‖ pubkey[32]`) inside `-----BEGIN ED25519 PRIVATE KEY-----` framing using tinc's permissive base64. Not PKCS#8, not the 32-byte seed format.
-
-- Load: custom PEM-line stripper → `b64decode_tinc` → split 64+32 → `ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(&private[..64])`
-- Sign: `hazmat::raw_sign(&expanded, msg, &verifying_key)` — confirm against KATs that this matches `sign.c` (it should; `sign.c` is standard Ed25519, just fed the expanded key)
-- Verify: standard `ed25519_dalek::VerifyingKey::verify_strict` — but check `verify.c` for cofactor handling edge cases
-
-**Do not delete `src/ed25519/` or `src/chacha-poly1305/` until all four primitives pass KATs.**
+**Deferred to Phase 1:** the PEM-ish file framing (`read_pem` in `ecdsa.c`). It's a line-stripper around `b64::decode`, belongs in `tinc-conf`.
 
 ### Legacy RSA + AES-CBC
 *Do not* port in this phase. Gate behind `--features legacy`, keep calling OpenSSL via FFI permanently for RSA — reimplementing 20-year-old PKCS#1 padding to be byte-compatible is a footgun. Note: legacy mode also needs LZO (see Dependencies).
@@ -395,9 +393,9 @@ Aggressively shed scope:
 
 | Purpose | Crate | Notes |
 |---|---|---|
-| ChaCha20 (DJB 64-bit nonce) | `chacha20` | **Must enable `legacy` feature** for `ChaCha20Legacy` |
+| ChaCha20 (DJB 64-bit nonce) | `chacha20` 0.9 | `ChaCha20Legacy` is unconditionally exported — ~~`legacy` feature~~ doesn't exist |
 | Poly1305 raw | `poly1305` | `compute_unpadded`, not the AEAD wrapper |
-| Curve ops | `curve25519-dalek` | Edwards→Montgomery + `mul_clamped` |
+| Curve ops | `curve25519-dalek` 4 | `MontgomeryPoint::mul_clamped` for the ladder. **`FieldElement` is private** — the unvalidated Edwards→Montgomery map is hand-rolled in `tinc-crypto::ecdh::fe`. |
 | Ed25519 sign | `ed25519-dalek` | Via `hazmat::ExpandedSecretKey` (on-disk is expanded, not seed) |
 | HMAC/SHA | `hmac`, `sha2` | For hand-rolled TLS-PRF |
 | Constant-time | `subtle` | MAC comparison |
@@ -421,7 +419,8 @@ Aggressively shed scope:
 | Bespoke crypto primitive mismatch (ChaPoly, ECDH, PRF) | **Certain** without KATs | Phase 0a KAT extraction is mandatory, not optional. No `tinc-crypto` code merges without passing them. |
 | SPTPS state-machine subtle incompatibility | High | Phase 2's in-process Rust↔C cross-test catches this before any socket is opened |
 | Legacy protocol RSA padding mismatch | High | Keep using OpenSSL via FFI for legacy auth indefinitely |
-| `chacha20` crate drops `legacy` feature | Low | It's been stable, but pin the version. Fallback: vendor DJB ChaCha (~200 LOC). |
+| `chacha20` crate drops `ChaCha20Legacy` | Low | No feature flag involved (unconditional export in 0.9). Pin `=0.9` and check on bumps. Fallback: vendor DJB ChaCha (~200 LOC). |
+| `curve25519-dalek` exposes `FieldElement` | Would let us delete the vendored `fe` module | Monitor; the dalek maintainers have discussed it. Until then, the ~180 LOC stays. |
 | `net_packet.c` perf regression | Medium | Benchmark gate in CI; the C code isn't heavily optimized so matching it is realistic |
 | Windows TUN driver churn | Medium | Switch to wintun (WireGuard's); it's better-maintained than TAP-Windows anyway |
 | `route.c` packet-parsing edge cases (IPv6 ext headers, ARP, NDP) | Medium | Corpus capture from real traffic + fuzz. Consider `etherparse` crate for the parsing. |
