@@ -23,7 +23,7 @@
 | 0b — SPTPS FFI harness | ✅ Done | `tinc-ffi: SPTPS C↔C harness...` | 6 tests; deterministic via seeded ChaCha20 RNG |
 | 0c — Wire-traffic corpus | | | |
 | 0d — CI baseline | | | |
-| 1 — Pure logic crates | 🟡 Partial | `tinc-graph: SSSP+MST...` | `tinc-proto` (~2400 LOC, 52 tests) + `tinc-graph` (18-case KAT). `tinc-conf`, edge/subnet delete + lookup open. |
+| 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115/115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | | | |
@@ -129,7 +129,7 @@ What landed:
 
 **`sign.c` is confirmed standard RFC 8032** — dalek's `raw_sign::<Sha512>` matches byte-for-byte, fed via `hazmat::ExpandedSecretKey`. Verify uses dalek's `verify` (not `verify_strict`) to accept the same malleable-sig edge cases the C code does.
 
-**Not yet covered:** the on-disk PEM-ish key file format. The 96-byte blob layout is exercised (the `from_blob` constructor exists), but the line-based PEM stripper from `ecdsa.c::read_pem` belongs in `tinc-conf`, not `tinc-crypto`. Deferred to Phase 1.
+**PEM-ish key files landed in `tinc-conf`** — see Phase 1.
 
 ### ✅ 0b. SPTPS-only FFI
 
@@ -230,13 +230,31 @@ The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` ty
 
 **Testing approach was right.** "Generate random graphs, diff the tables" — except FFI was the wrong harness. `graph.c` reads `node_t` fields scattered across a 200-byte struct embedded in global splay trees; building those from Rust would mean replicating half of `node.c`. The standalone C generator (8 hand-built + 10 random cases → JSON) is the same shape as `kat/gen_kat.c` and dodges all of it. Hand-built cases each pin one branch (the two diamonds, the rewind, the one-way skip, the asymmetric weight); random cases catch interactions.
 
-### `tinc-conf`
-| C source | Rust |
-|---|---|
-| `conf.c`, `conf_net.c` | `conf.rs` — parse `tinc.conf` and `hosts/*` key=value format |
-| `names.c` | `paths.rs` — `confbase`, `pidfilename`, etc. via `directories` crate respecting tinc's existing lookup order |
+### ✅ `tinc-conf`
+| C source | Rust | Status |
+|---|---|---|
+| `conf.c` `parse_config_line` | `parse::parse_line` | ✅ All 4 separator forms (`K=V`, `K V`, `K = V`, `K\t=\tV`) parse identically |
+| `conf.c` `read_config_file` | `parse::parse_file` | ✅ PEM-block skip (`-----BEGIN`..`END`), `#` comments, CRLF |
+| `conf.c` `config_compare` + `lookup_config{,_next}` | `Config` (sorted `Vec`) | ✅ Full 4-tuple ordering preserved |
+| `conf.c` `get_config_{bool,int,string}` | `Entry::get_{bool,int,str}` | ✅ `get_int` tightened: rejects trailing garbage |
+| `ecdsa.c` `read_pem` / `ecdsagen.c` `write_pem` | `pem::{read,write}_pem` | ✅ `Zeroizing` everywhere keys flow |
+| `conf_net.c` `get_config_subnet` | — | ⏸️ Daemon glue: `tinc-proto::Subnet::from_str` already does the parse |
+| `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
+| `conf.c` `read_server_config` (`conf.d/` scan, `cmdline_conf` merge) | — | ⏸️ Phase 5 — daemon startup. The pieces (`parse_file` + `Config::merge`) are here. |
+| `names.c` | — | ⏸️ Phase 5 — `directories` crate, respecting tinc's lookup order |
+| `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
 
-Straightforward; the format is trivial. Reuse upstream `test/integration/` config fixtures.
+**What landed:** ~740 LOC parse + ~430 LOC PEM, 33 unit + 3 proptest. The PEM body is `b64encode_tinc` (LSB-first — see Phase 0a finding 2); the codec was already KAT-locked, so the only thing tested here is framing: 48-byte chunks → 64-char lines on write, arbitrary line length on read, `strncmp` prefix match for the BEGIN type, END type unchecked.
+
+"Straightforward; the format is trivial" was almost right — the line tokenizer is 30 lines of careful index arithmetic, but the *tree* is where the sharp edges hide. Three findings:
+
+- **`config_compare` sorts by `line` before `file`.** The 4-tuple is `strcasecmp(var)` → `cmdline-before-file` → **`line`** → `strcmp(file)`. So `conf.d/a.conf:5` sorts *after* `conf.d/b.conf:3` — line number wins, filename only tiebreaks within the same line. This is the iteration order for `Subnet`/`ConnectTo`/`Address`, which are multi-valued, which means it's protocol-adjacent (a peer's `hosts/foo` is parsed into a config tree, and `Subnet` order can affect which route wins). Tested explicitly in `lookup_line_before_file`.
+
+- **Values starting with `=` don't round-trip** when the separator is whitespace-only. `"A\t=0"` → variable `A`, value `0` — the separator scan eats `\t` then the optional `=`. The C does the same; proptest found it on the 27th case. Not a bug because tinc never emits `=`-prefixed values (its b64 has no padding, addresses don't start with `=`, port numbers don't). The round-trip property holds over the constrained generator. Noted because a Phase 4 caller adding a new config key needs to know the value space.
+
+- **The PEM stripper in `read_config_file` is what makes `hosts/foo` files work.** Same file holds `Address = 1.2.3.4` lines *and* the public key armor; the parser steps over `-----BEGIN`..`END` without treating the base64 body as `key=value`. Then `read_pem` reads the *same file* a second time and ignores everything before `BEGIN`. Two passes, two different lenses. Tested in `file_skips_pem` + `read_skips_preamble` + the `pem_skips_preamble` proptest.
+
+The splay tree became a `Vec` + stable sort. `O(n)` lookup is fine — config files are tens of entries; the syscall to open them costs more than the scan.
 
 ---
 
@@ -295,7 +313,7 @@ Implementation notes that survived contact with the KATs (the doc-comments in ea
 
 - **b64:** LSB-first packing (`triplet = b[0]|b[1]<<8|b[2]<<16`, emit low 6 bits first) is the deeper issue; the dual-alphabet decoder is the easy part. Hand-rolled both directions.
 
-**Deferred to Phase 1:** the PEM-ish file framing (`read_pem` in `ecdsa.c`). It's a line-stripper around `b64::decode`, belongs in `tinc-conf`.
+**PEM framing landed in `tinc-conf`** (Phase 1). The `signing_key_roundtrip` test there does the full `SigningKey::from_seed` → `to_blob` → `write_pem` → `read_pem` → `from_blob` → same signature on same message.
 
 ### Legacy RSA + AES-CBC
 *Do not* port in this phase. Gate behind `--features legacy`, keep calling OpenSSL via FFI permanently for RSA — reimplementing 20-year-old PKCS#1 padding to be byte-compatible is a footgun. Note: legacy mode also needs LZO (see Dependencies).
