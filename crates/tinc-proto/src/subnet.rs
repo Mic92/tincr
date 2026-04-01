@@ -382,79 +382,63 @@ mod tests {
     #[test]
     fn maskcheck_basics() {
         // 10.0.0.0/24: host byte is zero, ok.
-        assert!(
-            Subnet::V4 {
-                addr: Ipv4Addr::new(10, 0, 0, 0),
-                prefix: 24,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(Subnet::V4 {
+            addr: Ipv4Addr::new(10, 0, 0, 0),
+            prefix: 24,
+            weight: 10
+        }
+        .is_canonical());
         // 10.0.0.1/24: host byte is 1, not ok.
-        assert!(
-            !Subnet::V4 {
-                addr: Ipv4Addr::new(10, 0, 0, 1),
-                prefix: 24,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(!Subnet::V4 {
+            addr: Ipv4Addr::new(10, 0, 0, 1),
+            prefix: 24,
+            weight: 10
+        }
+        .is_canonical());
         // 10.0.0.1/32: no host bits, always ok.
-        assert!(
-            Subnet::V4 {
-                addr: Ipv4Addr::new(10, 0, 0, 1),
-                prefix: 32,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(Subnet::V4 {
+            addr: Ipv4Addr::new(10, 0, 0, 1),
+            prefix: 32,
+            weight: 10
+        }
+        .is_canonical());
         // /23 with bit 23 set: 10.0.1.0 → byte 2 bit 0 is set, mask is /23,
         // so byte 2's low bit is a host bit. Not ok.
-        assert!(
-            !Subnet::V4 {
-                addr: Ipv4Addr::new(10, 0, 1, 0),
-                prefix: 23,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(!Subnet::V4 {
+            addr: Ipv4Addr::new(10, 0, 1, 0),
+            prefix: 23,
+            weight: 10
+        }
+        .is_canonical());
         // /23 with byte 2 = 2 (bit 1 set): that's a network bit, ok.
-        assert!(
-            Subnet::V4 {
-                addr: Ipv4Addr::new(10, 0, 2, 0),
-                prefix: 23,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(Subnet::V4 {
+            addr: Ipv4Addr::new(10, 0, 2, 0),
+            prefix: 23,
+            weight: 10
+        }
+        .is_canonical());
 
         // v6: fe80::/10 — byte 1 is 0x80, mask is 10 bits, so byte 1's
         // low 6 bits must be zero. 0x80 = 0b10000000, low 6 = 0, ok.
-        assert!(
-            Subnet::V6 {
-                addr: "fe80::".parse().unwrap(),
-                prefix: 10,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(Subnet::V6 {
+            addr: "fe80::".parse().unwrap(),
+            prefix: 10,
+            weight: 10
+        }
+        .is_canonical());
         // fe81::/10 — byte 1 = 0x81, low 6 bits = 1, not ok.
-        assert!(
-            !Subnet::V6 {
-                addr: "fe81::".parse().unwrap(),
-                prefix: 10,
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(!Subnet::V6 {
+            addr: "fe81::".parse().unwrap(),
+            prefix: 10,
+            weight: 10
+        }
+        .is_canonical());
 
         // MAC always passes.
-        assert!(
-            Subnet::Mac {
-                addr: [1, 2, 3, 4, 5, 6],
-                weight: 10
-            }
-            .is_canonical()
-        );
+        assert!(Subnet::Mac {
+            addr: [1, 2, 3, 4, 5, 6],
+            weight: 10
+        }
+        .is_canonical());
     }
 }

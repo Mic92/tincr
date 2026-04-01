@@ -1,0 +1,16 @@
+[package]
+name = "tinc-conf"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tinc-crypto = { path = "../tinc-crypto" }
+zeroize = "1"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+tempfile = "3"
+
+[lints.clippy]
+pedantic = "warn"
