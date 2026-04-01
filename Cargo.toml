@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tinc-crypto",
     "crates/tinc-ffi",
+    "crates/tinc-sptps",
 ]
 
 [workspace.package]

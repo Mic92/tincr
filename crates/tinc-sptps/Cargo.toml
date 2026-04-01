@@ -1,0 +1,18 @@
+[package]
+name = "tinc-sptps"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "SPTPS handshake state machine — Rust port of src/sptps.c"
+
+[dependencies]
+tinc-crypto = { path = "../tinc-crypto" }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+rand_core = "0.6"
+
+[dev-dependencies]
+tinc-ffi = { path = "../tinc-ffi" }
+# chacha20 directly: BridgeRng in tests/vs_c.rs needs ChaCha20Legacy to
+# produce the same keystream as csrc/shim.c's randomize(). rand_chacha
+# uses a different (IETF-layout) construction and won't match.
+chacha20 = "0.9"
