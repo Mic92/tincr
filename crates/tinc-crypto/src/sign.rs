@@ -60,6 +60,24 @@ impl SigningKey {
         Self { expanded, public }
     }
 
+    /// Serialize back to the 96-byte on-disk layout.
+    ///
+    /// Round-trips with [`from_blob`](Self::from_blob). Used by the FFI
+    /// harness to feed identical key material to the C side.
+    #[must_use]
+    pub fn to_blob(&self) -> [u8; 96] {
+        let mut out = [0u8; 96];
+        out[..64].copy_from_slice(&self.expanded);
+        out[64..].copy_from_slice(&self.public);
+        out
+    }
+
+    /// The public key half. Same bytes that go on the wire in the KEX.
+    #[must_use]
+    pub fn public_key(&self) -> &[u8; PUBLIC_LEN] {
+        &self.public
+    }
+
     /// Generate from a fresh seed.
     ///
     /// KAT use only — production keys come from disk via [`from_blob`].

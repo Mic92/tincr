@@ -1,0 +1,20 @@
+[package]
+name = "tinc-ffi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Test-only FFI wrapper around tinc's C SPTPS state machine"
+
+# This crate exists solely to be a differential oracle for tinc-sptps.
+# It is never built into the daemon; the C code it links is the same
+# vendored crypto that ships in upstream tinc, compiled fresh by build.rs.
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+# None. The crate links a static lib built from C; everything Rust-side
+# is std.
+
+[dev-dependencies]
+tinc-crypto = { path = "../tinc-crypto" }
