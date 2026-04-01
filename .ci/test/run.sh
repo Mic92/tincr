@@ -28,7 +28,7 @@ run_tests() {
     sudo chown -R "${USER:-$(whoami)}" . || true
   fi
 
-  mkdir -p sanitizer /tmp/logs
+  mkdir -p sanitizer logs
 
   header "Running test flavor $flavor"
 
@@ -49,7 +49,7 @@ run_tests() {
   code=0
   meson test -C "$flavor" --timeout-multiplier $timeout --verbose || code=$?
 
-  sudo tar -c -z -f "/tmp/logs/tests.$flavor.tar.gz" "$flavor" sanitizer/ || true
+  sudo tar -c -z -f "logs/tests.$flavor.tar.gz" "$flavor" sanitizer/ || true
 
   return $code
 }
