@@ -35,10 +35,10 @@ def random_port() -> int:
 
 def temp_file(content: str) -> str:
     """Create a temporary file and write text content into it."""
-    file = tempfile.mktemp()
-    with open(file, "w", encoding="utf-8") as f:
+    fd, path = tempfile.mkstemp()
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(content)
-    return file
+    return path
 
 
 def remove_file(path: T.Union[str, Path]) -> bool:

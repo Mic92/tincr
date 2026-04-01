@@ -90,7 +90,7 @@ jobs:
 
       - name: Install tools
         run: |
-          sudo apt-get install -y astyle clang-tidy-$CLANG shellcheck shfmt black pylint mypy
+          sudo apt install -y astyle clang-tidy-$CLANG shellcheck shfmt black pylint mypy
           sudo update-alternatives --install /usr/bin/clang-tidy     clang-tidy     /usr/bin/clang-tidy-$CLANG     100
           sudo update-alternatives --install /usr/bin/run-clang-tidy run-clang-tidy /usr/bin/run-clang-tidy-$CLANG 100
           python3 -m venv /tmp/venv
@@ -302,14 +302,14 @@ jobs:
         run: sh .ci/deps.sh
 
       - name: Run tests with default settings
-        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh default
+        run: CFLAGS=-I/opt/homebrew/include sh .ci/test/run.sh default
 
       - name: Run tests without legacy protocol
-        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh nolegacy
+        run: CFLAGS=-I/opt/homebrew/include sh .ci/test/run.sh nolegacy
         if: always()
 
       - name: Run tests with libgcrypt
-        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh gcrypt
+        run: CFLAGS=-I/opt/homebrew/include sh .ci/test/run.sh gcrypt
         if: always()
 
       - name: Upload test results

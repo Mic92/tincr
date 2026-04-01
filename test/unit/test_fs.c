@@ -194,7 +194,6 @@ static void test_fopenmask_new(void **state) {
 	struct stat st;
 	strcpy(tmp, tmp_template);
 
-	// mktemp() nags about safety and using better alternatives
 	int fd = mkstemp(tmp);
 	assert_int_not_equal(-1, fd);
 	close(fd);

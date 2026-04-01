@@ -18,7 +18,7 @@ deps_linux_alpine() {
 }
 
 deps_linux_debian_mingw() {
-  apt-get install -y \
+  apt install -y \
     mingw-w64 mingw-w64-tools \
     wine wine-binfmt \
     libgcrypt-mingw-w64-dev \
@@ -30,9 +30,9 @@ deps_linux_debian_linux() {
     dpkg --add-architecture "$HOST"
   fi
 
-  apt-get update
+  apt update
 
-  apt-get install -y \
+  apt install -y \
     binfmt-support binutils gcc make pkgconf \
     zlib1g-dev:"$HOST" \
     libssl-dev:"$HOST" \
@@ -40,7 +40,7 @@ deps_linux_debian_linux() {
     liblz4-dev:"$HOST" \
     libncurses-dev:"$HOST" \
     libreadline-dev:"$HOST" \
-    libgcrypt-dev:"$HOST" \
+    libgcrypt20-dev:"$HOST" \
     libminiupnpc-dev:"$HOST" \
     libvdeplug-dev:"$HOST" \
     libcmocka-dev:"$HOST" \
@@ -48,16 +48,16 @@ deps_linux_debian_linux() {
     "$@"
 
   if [ -n "$HOST" ]; then
-    apt-get install -y crossbuild-essential-"$HOST" qemu-user
+    apt install -y crossbuild-essential-"$HOST" qemu-user
   fi
 }
 
 deps_linux_debian() {
   export DEBIAN_FRONTEND=noninteractive
 
-  apt-get update
-  apt-get upgrade -y
-  apt-get install -y git pkgconf sudo texinfo meson
+  apt update
+  apt upgrade -y
+  apt install -y git pkgconf sudo texinfo meson
 
   HOST=${HOST:-}
   if [ "$HOST" = mingw ]; then

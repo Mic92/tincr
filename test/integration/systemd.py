@@ -77,7 +77,7 @@ def recv_until(sock: socket.socket, want: bytes) -> None:
 def test_watchdog(foo: Tinc) -> None:
     """Test systemd watchdog."""
 
-    address = tempfile.mktemp()
+    address = tempfile.mkstemp()[1] + ".socket"
     foo_log = foo.sub("log")
 
     log.info("watchdog is disabled if no env vars are passed")
