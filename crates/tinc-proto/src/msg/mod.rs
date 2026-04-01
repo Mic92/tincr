@@ -14,6 +14,12 @@
 //! (`%*x` like the C handlers do); the daemon supplies a fresh one when
 //! formatting.
 
+pub mod edge;
+pub mod key;
+pub mod misc;
 pub mod subnet;
 
+pub use edge::{AddEdge, DelEdge};
+pub use key::{AnsKey, KeyChanged, ReqKey, ReqKeyExt};
+pub use misc::{MtuInfo, SptpsPacket, TcpPacket, UdpInfo};
 pub use subnet::SubnetMsg;

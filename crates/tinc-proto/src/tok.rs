@@ -56,9 +56,68 @@ impl<'a> Tok<'a> {
         self.s().map(|_| ())
     }
 
-    // `d()` for signed `%d`, `x()` for `%x`, `rest()` for the
-    // ANS_KEY second-sscanf trick — all land with their consumers.
-    // SubnetMsg only needs `s` and `skip`.
+    /// `%d`. C `sscanf %d` accepts a leading `+` or `-`; the protocol
+    /// only emits unsigned via `%d` so we don't bother with `+`, but
+    /// `-` is observably parsed (e.g. `mtu_info_h` checks `mtu < 512`
+    /// after `%d` — no separate negativity check, so `i32` semantics).
+    pub fn d(&mut self) -> Result<i32, ParseError> {
+        self.s()?.parse().map_err(|_| ParseError)
+    }
+
+    /// `%x`. Used for the dedup nonce and option bitfields. `printf %x`
+    /// is lowercase, no `0x`; that's all we accept. (`sscanf %x` would
+    /// also take uppercase and `0x` — not on the wire, not supported.)
+    pub fn x(&mut self) -> Result<u32, ParseError> {
+        u32::from_str_radix(self.s()?, 16).map_err(|_| ParseError)
+    }
+
+    /// `%lu`. Only `ANS_KEY` uses it, for `digest_length` (a `size_t`
+    /// cast to `unsigned long`). Realistically always tiny, but the
+    /// printf width is `%lu` so we honor that.
+    pub fn lu(&mut self) -> Result<u64, ParseError> {
+        self.s()?.parse().map_err(|_| ParseError)
+    }
+
+    /// `%hd`. `tcppacket_h`/`sptps_tcppacket_h` parse a length as
+    /// `short int` then check `< 0`. The send side emits `%d`/`%lu`
+    /// (unsigned), so a negative parse means corruption — the C
+    /// detects it via the signed type. We do the same.
+    pub fn hd(&mut self) -> Result<i16, ParseError> {
+        self.s()?.parse().map_err(|_| ParseError)
+    }
+
+    /// Next token if there is one; `Ok(None)` if exhausted.
+    ///
+    /// `ADD_EDGE` has 6 mandatory + 2 optional fields (`sscanf` returns
+    /// 6 or 8). `ANS_KEY` has 7 + 2 optional. `REQ_KEY` has 2 + 1
+    /// optional. The C handles all three with `sscanf(...) < N` instead
+    /// of `!= N` and leaves the trailing locals at their initial value.
+    /// This is the moral equivalent.
+    pub fn s_opt(&mut self) -> Result<Option<&'a str>, ParseError> {
+        match self.s() {
+            Ok(tok) => Ok(Some(tok)),
+            // s() returns Err on both "exhausted" and "too long"; we
+            // need to distinguish. Exhausted = rest is empty/whitespace.
+            Err(_) if self.rest_raw().is_empty() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `%d` optional. See `s_opt`.
+    pub fn d_opt(&mut self) -> Result<Option<i32>, ParseError> {
+        match self.s_opt()? {
+            Some(t) => t.parse().map(Some).map_err(|_| ParseError),
+            None => Ok(None),
+        }
+    }
+
+    /// Unconsumed tail, leading whitespace stripped. Factored out so
+    /// `s_opt` can tell "end of input" from "token too long" without
+    /// duplicating the trim.
+    fn rest_raw(&self) -> &'a str {
+        self.rest
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +140,50 @@ mod tests {
         t.skip().unwrap();
         assert_eq!(t.s().unwrap(), "trailing");
         assert!(t.s().is_err()); // trailing whitespace, no token
+    }
+
+    #[test]
+    fn typed() {
+        let mut t = Tok::new("12 deadbeef -5 999999999999");
+        assert_eq!(t.d().unwrap(), 12);
+        assert_eq!(t.x().unwrap(), 0xdead_beef);
+        assert_eq!(t.d().unwrap(), -5);
+        assert_eq!(t.lu().unwrap(), 999_999_999_999);
+    }
+
+    #[test]
+    fn opt() {
+        // mandatory present, optional absent
+        let mut t = Tok::new("a b");
+        assert_eq!(t.s().unwrap(), "a");
+        assert_eq!(t.s().unwrap(), "b");
+        assert_eq!(t.s_opt().unwrap(), None);
+        assert_eq!(t.s_opt().unwrap(), None); // idempotent
+
+        // optional present
+        let mut t = Tok::new("a b c");
+        t.skip().unwrap();
+        t.skip().unwrap();
+        assert_eq!(t.s_opt().unwrap(), Some("c"));
+        assert_eq!(t.s_opt().unwrap(), None);
+
+        // optional present but too long: that's an Err, not None.
+        // (Distinguishes "absent" from "malformed".)
+        let bad = format!("a {}", "x".repeat(MAX_STRING + 1));
+        let mut t = Tok::new(&bad);
+        t.skip().unwrap();
+        assert!(t.s_opt().is_err());
+    }
+
+    #[test]
+    fn hex_lowercase_only() {
+        // printf %x is lowercase. sscanf %x would accept upper too;
+        // from_str_radix(.., 16) does as well. We don't tighten this:
+        // it's never on the wire either way, and the asymmetry doesn't
+        // affect compat (we never emit upper, peers never send it).
+        assert_eq!(Tok::new("DEADBEEF").x().unwrap(), 0xdead_beef);
+        // But 0x prefix is rejected.
+        assert!(Tok::new("0xff").x().is_err());
     }
 
     #[test]

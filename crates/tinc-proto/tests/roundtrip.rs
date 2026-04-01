@@ -10,7 +10,36 @@
 
 use proptest::prelude::*;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use tinc_proto::Subnet;
+use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, ReqKeyExt, UdpInfo};
+use tinc_proto::{AddrStr, Subnet};
+
+// ────────────────────────────────────────────────────────────────────
+// Shared generators
+
+/// Node names: `[A-Za-z0-9_]+`. The proptest regex strategy is the right
+/// fit — it's exactly the `check_id` charset. Cap at 32 chars; real names
+/// are short, and longer ones just slow shrinking without finding bugs.
+fn arb_name() -> impl Strategy<Value = String> {
+    "[A-Za-z0-9_]{1,32}"
+}
+
+/// Two distinct node names. Edges can't self-loop.
+fn arb_name_pair() -> impl Strategy<Value = (String, String)> {
+    (arb_name(), arb_name()).prop_filter("from != to", |(a, b)| a != b)
+}
+
+/// Address-string token. Any non-whitespace ASCII printable, capped
+/// short. Real addresses are `inet_ntop` output but `AF_UNKNOWN` makes
+/// the wire grammar "any token", so we generate the full space.
+fn arb_addr() -> impl Strategy<Value = AddrStr> {
+    "[!-~]{1,40}".prop_map(|s| AddrStr::new(s).unwrap())
+}
+
+/// Generic non-whitespace token (key hex, base64 payload). Same shape
+/// as `arb_addr` but distinct generator so the intent is clear.
+fn arb_token() -> impl Strategy<Value = String> {
+    "[!-~]{1,200}".prop_map(String::from)
+}
 
 // ────────────────────────────────────────────────────────────────────
 // Generators
@@ -136,3 +165,104 @@ proptest! {
         prop_assert!(!macish, "v6 Display produced MAC-ambiguous {wire:?}");
     }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Message round-trips. One per struct that has both parse and format.
+//
+// The pattern is the same throughout: generate a struct, format, parse,
+// assert equal. Macro-ized to keep the boilerplate down.
+
+/// Generate a struct, format it (with whatever args `format` takes),
+/// re-parse, assert. The `nonce` for nonce-taking formats is fixed: it's
+/// not part of the struct (parse skips it with `%*x`), so it doesn't
+/// affect the round-trip.
+macro_rules! roundtrip {
+    ($name:ident, $ty:ty, $strategy:expr, $fmt:expr) => {
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(1000))]
+            #[test]
+            fn $name(m in $strategy) {
+                #[allow(clippy::redundant_closure_call)]
+                let wire = $fmt(&m);
+                let back = <$ty>::parse(&wire).unwrap();
+                prop_assert_eq!(m, back, "wire={:?}", wire);
+            }
+        }
+    };
+}
+
+prop_compose! {
+    fn arb_add_edge()(
+        (from, to) in arb_name_pair(),
+        addr in arb_addr(),
+        port in arb_addr(),
+        options in any::<u32>(),
+        weight in any::<i32>(),
+        local in proptest::option::of((arb_addr(), arb_addr())),
+    ) -> AddEdge {
+        AddEdge { from, to, addr, port, options, weight, local }
+    }
+}
+roundtrip!(add_edge, AddEdge, arb_add_edge(), |m: &AddEdge| m
+    .format(0x42));
+
+prop_compose! {
+    fn arb_del_edge()((from, to) in arb_name_pair()) -> DelEdge {
+        DelEdge { from, to }
+    }
+}
+roundtrip!(del_edge, DelEdge, arb_del_edge(), |m: &DelEdge| m
+    .format(0x42));
+
+prop_compose! {
+    fn arb_udp_info()(
+        from in arb_name(),
+        to in arb_name(),
+        addr in arb_addr(),
+        port in arb_addr(),
+    ) -> UdpInfo {
+        UdpInfo { from, to, addr, port }
+    }
+}
+roundtrip!(udp_info, UdpInfo, arb_udp_info(), UdpInfo::format);
+
+prop_compose! {
+    fn arb_mtu_info()(
+        from in arb_name(),
+        to in arb_name(),
+        mtu in any::<i32>(),
+    ) -> MtuInfo {
+        MtuInfo { from, to, mtu }
+    }
+}
+roundtrip!(mtu_info, MtuInfo, arb_mtu_info(), MtuInfo::format);
+
+prop_compose! {
+    fn arb_req_key()(
+        from in arb_name(),
+        to in arb_name(),
+        ext in proptest::option::of((
+            any::<i32>(),
+            proptest::option::of(arb_token()),
+        ).prop_map(|(reqno, payload)| ReqKeyExt { reqno, payload })),
+    ) -> ReqKey {
+        ReqKey { from, to, ext }
+    }
+}
+roundtrip!(req_key, ReqKey, arb_req_key(), ReqKey::format);
+
+prop_compose! {
+    fn arb_ans_key()(
+        from in arb_name(),
+        to in arb_name(),
+        key in arb_token(),
+        cipher in any::<i32>(),
+        digest in any::<i32>(),
+        maclen in any::<u64>(),
+        compression in any::<i32>(),
+        udp_addr in proptest::option::of((arb_addr(), arb_addr())),
+    ) -> AnsKey {
+        AnsKey { from, to, key, cipher, digest, maclen, compression, udp_addr }
+    }
+}
+roundtrip!(ans_key, AnsKey, arb_ans_key(), AnsKey::format);

@@ -31,11 +31,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod addr;
 pub mod msg;
 pub mod request;
 pub mod subnet;
 mod tok;
 
+pub use addr::AddrStr;
 pub use request::Request;
 pub use subnet::Subnet;
 pub use tok::ParseError;
