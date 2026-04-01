@@ -20,11 +20,11 @@
 | Phase | State | Commit | Notes |
 |---|---|---|---|
 | 0a — KAT vectors + `tinc-crypto` | ✅ Done | `tinc-crypto: KAT-verified...` | All 5 primitives pass 7 KATs. See [Findings](#findings-from-phase-0a). |
-| 0b — SPTPS FFI harness | ⏳ Next | | Unblocks the Rust↔C cross-handshake test |
+| 0b — SPTPS FFI harness | ✅ Done | `tinc-ffi: SPTPS C↔C harness...` | 6 tests; deterministic via seeded ChaCha20 RNG |
 | 0c — Wire-traffic corpus | | | |
 | 0d — CI baseline | | | |
 | 1 — Pure logic crates | | | |
-| 2 — SPTPS state machine | | | Crypto deps already KAT-locked; could start in parallel with 0b |
+| 2 — SPTPS state machine | ⏳ Ready | | Crypto + C oracle both in place. **See [rekey ordering](#findings-from-phase-0b).** |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | | | |
 | 5 — Daemon core | | | |
@@ -52,6 +52,14 @@ Three assumptions in the original plan turned out wrong on inspection:
 1. **`chacha20` crate has no `legacy` feature.** `ChaCha20Legacy` is unconditionally exported in 0.9.x. The plan's dependency line was a phantom from older docs. (Fixed in `Cargo.toml`.)
 
 2. **tinc's base64 is more broken than "permissive alphabet".** It packs bits LSB-first within each 3-byte group: `triplet = b[0] | b[1]<<8 | b[2]<<16`, then emits the *low* 6 bits first. RFC 4648 packs MSB-first. These are different *output strings*, not just different decode tables — `tinc_b64([0x48]) == "IB"`, RFC 4648 gives `"SA"`. The dual-alphabet decoder is layered on top of that. No `base64` crate engine config can produce this; it's a hand-roll regardless.
+
+### Findings from Phase 0b
+
+One behaviour the plan didn't anticipate, surfaced by the re-KEX test:
+
+**During rekey, the responder's SIG and ACK both go out under the *old* `outcipher`.** Reading `receive_sig`: when `outstate` is already true (i.e. this is a rekey, not the initial handshake), it does `send_sig()` → `send_ack()` → *then* `chacha_poly1305_set_key(outcipher, new_key)`. Both sends use `send_record_priv` which checks the `outstate` flag (true) and encrypts with whatever `outcipher` currently holds (old key). The new key takes effect on the *next* record after.
+
+Phase 2's Rust state machine must replicate this ordering. The natural "set key, then send" structure is wrong here — the test will catch it (`rekey_uses_ack_state` diffs the encrypted byte lengths against what the C side produces, which would mismatch if Rust encrypted under the new key).
 
 3. **`key_exchange.c` does not validate the Edwards point.** It does `fe_frombytes` (which just masks bit 255 and loads whatever's left as a field element) then applies the birational map blindly. The clean Rust path — `CompressedEdwardsY::decompress()?.to_montgomery()` — *validates*, and would reject inputs the C code accepts. `curve25519-dalek` keeps `FieldElement` private with no escape hatch, so `tinc-crypto::ecdh` vendors ~50 lines of 51-bit-limb field arithmetic (`fe` module) to do `(1+y)/(1-y)` without a curve check. The KATs prove it matches; the math is the same ref10 schoolbook every Curve25519 impl uses.
 
@@ -113,11 +121,18 @@ What landed:
 
 **Not yet covered:** the on-disk PEM-ish key file format. The 96-byte blob layout is exercised (the `from_blob` constructor exists), but the line-based PEM stripper from `ecdsa.c::read_pem` belongs in `tinc-conf`, not `tinc-crypto`. Deferred to Phase 1.
 
-### 0b. SPTPS-only FFI
-`tinc-ffi` wraps **only** `sptps.c` + its crypto deps. Do not attempt to FFI the protocol handlers — they `sscanf` and immediately mutate global splay trees, there's no parse seam.
+### ✅ 0b. SPTPS-only FFI
 
-- [ ] `build.rs`: `cc::Build` compiles `sptps.c`, `chacha-poly1305/*.c`, `ed25519/*.c`, `nolegacy/prf.c`, plus stubs for `logger`/`xalloc`/`random`. Avoid meson; this subset has no per-OS code.
-- [ ] Safe wrapper: `CSptps::start(role, key, peer_key, label)`, `.receive(&[u8]) -> Vec<Event>`, `.send_record(type, &[u8]) -> Vec<u8>`. Adapt the C callbacks to write into a `Vec` via `void* handle`.
+**Done.** `tinc-ffi` wraps **only** `sptps.c` + its crypto deps. The protocol handlers (`protocol_*.c`) are deliberately not wrapped — they `sscanf` and immediately mutate global splay trees, there's no parse seam.
+
+What landed:
+
+- `build.rs` (`cc::Build`, no bindgen): compiles `sptps.c` + the same crypto file set as Phase 0a + `ecdh.c` (sptps wraps the raw `ed25519_key_exchange` in an alloc-then-compute API). Same header-guard suppression; `csrc/shim.h` force-included for `xzalloc`/`memzero`/`mem_eq`/`randomize`/`prf` prototypes plus the `ecdsa_t` forward typedef.
+- `csrc/shim.c`: deterministic `randomize()` (ChaCha20 keystream, seed set per-test), our own `ecdsa_t` (96-byte blob, matches `tinc-crypto::SigningKey::to_blob`), event sink (flat byte arena, drained after each FFI return). `sizeof.c` is the one TU that includes real `sptps.h` to export `SPTPS_T_SIZE`.
+- `lib.rs`: safe wrapper. `CSptps::start(role, framing, &mykey, &hiskey, label) → (Self, Vec<Event>)`; `.receive(&[u8]) → (consumed, Vec<Event>)`; `.send_record(type, &[u8]) → Vec<Event>`; `.force_kex()`. Lifetime `'k` ties session to keys (sptps_t borrows the `ecdsa_t*`, doesn't copy). Process-global `seed_rng()` + `serial_guard()` mutex.
+- `tests/handshake.rs`: 6 tests — stream handshake, datagram handshake, byte-by-byte dribble feed, determinism (run twice, diff wire bytes), wrong-key SIG-verify failure, re-KEX (the SPTPS_ACK state). Top-of-file comment is a precise trace of the handshake state machine derived from reading `sptps.c`.
+
+The six tests are also the *spec* for Phase 2: the same test bodies will run with one peer swapped for `tinc-sptps`, asserting identical event sequences.
 
 ### 0c. Wire-traffic corpus
 The integration tests already spin up multi-node meshes. Add a capture shim:
