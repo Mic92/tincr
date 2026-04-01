@@ -4,6 +4,7 @@ members = [
     "crates/tinc-crypto",
     "crates/tinc-ffi",
     "crates/tinc-sptps",
+    "crates/tinc-proto",
 ]
 
 [workspace.package]
