@@ -302,14 +302,14 @@ jobs:
         run: sh .ci/deps.sh
 
       - name: Run tests with default settings
-        run: sh .ci/test/run.sh default
+        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh default
 
       - name: Run tests without legacy protocol
-        run: sh .ci/test/run.sh nolegacy
+        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh nolegacy
         if: always()
 
       - name: Run tests with libgcrypt
-        run: sh .ci/test/run.sh gcrypt
+        run: CFLAGS=/opt/homebrew/include sh .ci/test/run.sh gcrypt
         if: always()
 
       - name: Upload test results
