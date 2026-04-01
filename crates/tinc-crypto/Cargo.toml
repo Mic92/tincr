@@ -1,0 +1,22 @@
+[package]
+name = "tinc-crypto"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "tinc's bespoke crypto primitives — wire-compatible, not RFC-compatible"
+
+[dependencies]
+chacha20.workspace = true
+poly1305.workspace = true
+curve25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tinc-crypto",
+]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-2.0-or-later"
+rust-version = "1.75"
+
+# Centralised version pins. The crypto crates here are load-bearing for wire
+# compatibility — bumping them is a protocol-review event, not a routine update.
+[workspace.dependencies]
+# We need `ChaCha20Legacy` (DJB original: 64-bit nonce, 64-bit counter), not
+# the default IETF 96/32 variant. In 0.9 it's unconditionally exported, no
+# feature flag, but it IS gated behind `cfg(chacha20_force_soft)` removal in
+# some older minors — pin tightly and check on bumps.
+chacha20 = "0.9"
+poly1305 = "0.8"
+curve25519-dalek = { version = "4", features = ["digest"] }
+ed25519-dalek = { version = "2", features = ["hazmat", "digest"] }
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.5"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,166 @@
+//! OpenSSH-style ChaCha20-Poly1305, as used by SPTPS.
+//!
+//! C reference: `src/chacha-poly1305/chacha-poly1305.c`.
+//!
+//! ## Why `chacha20poly1305` (the AEAD crate) cannot be used
+//!
+//! | Aspect          | tinc / OpenSSH-style          | RFC 8439 (the crate)         |
+//! |-----------------|-------------------------------|------------------------------|
+//! | Nonce           | 8 bytes, big-endian seqno     | 12 bytes                     |
+//! | ChaCha variant  | DJB original: 64-bit counter  | IETF: 32-bit counter         |
+//! | Poly1305 input  | `tag = Poly1305(ciphertext)`  | AD‖pad‖CT‖pad‖len(AD)‖len(CT)|
+//! | Key size        | 64 bytes (two ChaCha keys)    | 32 bytes                     |
+//!
+//! The 64-byte key splits into a "main" key (`key[0..32]`, used here) and a
+//! "header" key (`key[32..64]`, used by OpenSSH for length encryption but
+//! **never touched by SPTPS**). We accept all 64 bytes anyway because that's
+//! the size the SPTPS key schedule produces; misalignment here would silently
+//! shift everything by 32 bytes.
+//!
+//! ## Construction
+//!
+//! For sequence number `n`:
+//! 1. `nonce = n.to_be_bytes()` (8 bytes)
+//! 2. `poly_key = ChaCha20(main_key, nonce, counter=0)[0..32]`
+//! 3. `ciphertext = plaintext XOR ChaCha20(main_key, nonce, counter=1)`
+//! 4. `tag = Poly1305(poly_key, ciphertext)` — no padding, no AD, no lengths
+//!
+//! The counter is the *block* counter inside ChaCha's state words 12–13, not
+//! a byte offset. The `chacha20` crate's `ChaCha20Legacy` type matches the
+//! 64/64 layout exactly.
+
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
+use chacha20::ChaCha20Legacy;
+use poly1305::universal_hash::KeyInit;
+use poly1305::Poly1305;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Key material size: 64 bytes, even though only the first 32 are used.
+///
+/// SPTPS derives exactly this many bytes per direction from its PRF
+/// (`CHACHA_POLY1305_KEYLEN` in `chacha-poly1305.h`). Shrinking this would
+/// shift the key schedule output and break the *next* primitive in line.
+pub const KEY_LEN: usize = 64;
+
+/// Poly1305 tag size, appended to every sealed record.
+pub const TAG_LEN: usize = 16;
+
+/// SPTPS record sealer.
+///
+/// Unlike a generic AEAD, this is keyed once and then driven entirely by a
+/// monotonically increasing sequence number — there is no separate nonce API
+/// because the protocol never needs one.
+#[derive(ZeroizeOnDrop)]
+pub struct ChaPoly {
+    /// Only the first 32 bytes ever feed ChaCha. We keep all 64 to match the
+    /// C struct layout and to make zeroize-on-drop wipe the full key blob.
+    key: [u8; KEY_LEN],
+}
+
+/// Decryption rejected the ciphertext.
+///
+/// Deliberately uninformative: distinguishing "bad tag" from "too short" leaks
+/// nothing useful to the caller and slightly more to an attacker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenError;
+
+impl ChaPoly {
+    /// Set the 64-byte key.
+    ///
+    /// Equivalent to `chacha_poly1305_set_key`. The C version also sets up a
+    /// `header_ctx` from `key[32..64]`; we don't, because SPTPS never calls
+    /// the header-encrypt path.
+    #[must_use]
+    pub fn new(key: &[u8; KEY_LEN]) -> Self {
+        Self { key: *key }
+    }
+
+    /// Derive the per-record Poly1305 key and a cipher positioned at block 1.
+    ///
+    /// Factored out so seal/open share the exact same setup — the C code
+    /// duplicates these ~6 lines, which is fine in C but in Rust we'd rather
+    /// have one place to get the nonce endianness wrong.
+    fn record_state(&self, seqno: u64) -> (Poly1305, ChaCha20Legacy) {
+        // Big-endian, matching `put_u64` in the C source. The `chacha20`
+        // crate then loads these bytes little-endian into state words 14/15
+        // (because that's what the DJB construction does), so the *effective*
+        // word values are byte-swapped relative to `seqno` — but that's
+        // exactly what the wire protocol expects. Don't "fix" this.
+        let nonce = seqno.to_be_bytes();
+
+        // ChaCha20Legacy: 32-byte key, 8-byte nonce, 64-bit block counter
+        // starting at 0. KeyIvInit::new takes GenericArray refs.
+        let mut cipher = ChaCha20Legacy::new(self.key[..32].into(), (&nonce).into());
+
+        // Block 0: keystream for the Poly1305 key. apply_keystream over zeros
+        // is the idiomatic way to read raw keystream out of a StreamCipher.
+        let mut poly_key = [0u8; 32];
+        cipher.apply_keystream(&mut poly_key);
+        let poly = Poly1305::new((&poly_key).into());
+        poly_key.zeroize();
+
+        // Block 1: where the actual ciphertext keystream starts. The C code
+        // does this by calling chacha_ivsetup again with counter=one; we use
+        // seek (which is in *bytes*, hence the 64-byte block size).
+        cipher.seek(64u64);
+
+        (poly, cipher)
+    }
+
+    /// Encrypt `plaintext` and append a 16-byte tag.
+    ///
+    /// Output length is always `plaintext.len() + TAG_LEN`. SPTPS frames are
+    /// short (≤ 64KiB on the wire) so a `Vec` allocation per record is fine
+    /// at this layer; the hot UDP path in `tinc-net` will want an in-place
+    /// variant later, but that's a Phase 5 concern.
+    #[must_use]
+    pub fn seal(&self, seqno: u64, plaintext: &[u8]) -> Vec<u8> {
+        let (poly, mut cipher) = self.record_state(seqno);
+
+        let mut out = Vec::with_capacity(plaintext.len() + TAG_LEN);
+        out.extend_from_slice(plaintext);
+        cipher.apply_keystream(&mut out);
+
+        // RFC 8439 would do: poly.update_padded(ad); poly.update_padded(ct);
+        // poly.update(len(ad)||len(ct)). tinc does none of that. The MAC is
+        // over the raw ciphertext bytes, period. `compute_unpadded` is the
+        // crate's escape hatch for exactly this kind of legacy construction.
+        let tag = poly.compute_unpadded(&out);
+        out.extend_from_slice(tag.as_slice());
+        out
+    }
+
+    /// Verify the trailing tag and decrypt.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError`] if `sealed` is shorter than [`TAG_LEN`] or the tag does
+    /// not verify. Timing of the error is independent of how many tag bytes
+    /// match (constant-time compare via `subtle`).
+    ///
+    /// Returns the plaintext on success. The C code decrypts in-place into a
+    /// caller-supplied buffer; we return a fresh `Vec` because the borrow
+    /// checker makes "verify then overwrite the same slice" awkward, and
+    /// again, this isn't the hot path yet.
+    pub fn open(&self, seqno: u64, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
+        // Length check first. The C code subtracts TAG_LEN unconditionally
+        // and then reads past the buffer if inlen < 16 — we'd rather not.
+        let ct_len = sealed.len().checked_sub(TAG_LEN).ok_or(OpenError)?;
+        let (ct, tag) = sealed.split_at(ct_len);
+
+        let (poly, mut cipher) = self.record_state(seqno);
+
+        // MAC-then-decrypt, matching the C order. Either order is safe here
+        // (the cipher is a pure stream XOR with no key-dependent branching),
+        // but matching the reference makes side-channel review easier.
+        let expected = poly.compute_unpadded(ct);
+        if expected.as_slice().ct_eq(tag).unwrap_u8() != 1 {
+            return Err(OpenError);
+        }
+
+        let mut out = ct.to_vec();
+        cipher.apply_keystream(&mut out);
+        Ok(out)
+    }
+}
