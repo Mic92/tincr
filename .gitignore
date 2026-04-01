@@ -63,3 +63,4 @@ __pycache__
 /kat/gen_kat
 !/kat/Makefile
 /result
+kat_graph/gen_graph

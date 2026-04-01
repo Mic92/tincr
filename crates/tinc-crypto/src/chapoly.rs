@@ -29,10 +29,10 @@
 //! a byte offset. The `chacha20` crate's `ChaCha20Legacy` type matches the
 //! 64/64 layout exactly.
 
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20::ChaCha20Legacy;
-use poly1305::universal_hash::KeyInit;
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use poly1305::Poly1305;
+use poly1305::universal_hash::KeyInit;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

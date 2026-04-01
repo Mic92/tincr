@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(Request::peek(""), None);
         assert_eq!(Request::peek("x"), None);
         assert_eq!(Request::peek("0x"), None); // not space-terminated
-                                               // atoi would accept this; we don't.
+        // atoi would accept this; we don't.
         assert_eq!(Request::peek(" 8"), None);
     }
 

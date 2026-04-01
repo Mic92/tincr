@@ -21,7 +21,7 @@ use rand_core::RngCore;
 use tinc_crypto::chapoly::{ChaPoly, KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
 use tinc_crypto::prf::prf;
-use tinc_crypto::sign::{self, SigningKey, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN};
+use tinc_crypto::sign::{self, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN, SigningKey};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};

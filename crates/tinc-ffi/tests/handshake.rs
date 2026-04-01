@@ -39,7 +39,7 @@
 //! state only happens when `outstate` is already true). The initial
 //! handshake doesn't put one on the wire.
 
-use tinc_ffi::{seed_rng, serial_guard, CKey, CSptps, Event, Framing, Role};
+use tinc_ffi::{CKey, CSptps, Event, Framing, Role, seed_rng, serial_guard};
 
 const SPTPS_HANDSHAKE: u8 = 128;
 

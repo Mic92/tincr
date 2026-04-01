@@ -5,6 +5,7 @@ members = [
     "crates/tinc-ffi",
     "crates/tinc-sptps",
     "crates/tinc-proto",
+    "crates/tinc-graph",
 ]
 
 [workspace.package]

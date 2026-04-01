@@ -16,7 +16,7 @@
 //! code accepts — fine for new protocols, wrong for interop.
 
 use curve25519_dalek::scalar::clamp_integer;
-use ed25519_dalek::hazmat::{raw_sign, ExpandedSecretKey};
+use ed25519_dalek::hazmat::{ExpandedSecretKey, raw_sign};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha512};
 use zeroize::ZeroizeOnDrop;

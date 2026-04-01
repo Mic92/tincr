@@ -27,8 +27,8 @@
 
 use core::fmt;
 
-use crate::tok::ParseError;
 use crate::MAX_STRING;
+use crate::tok::ParseError;
 
 /// One address-or-port string field, as `sockaddr2str` would emit and
 /// `str2sockaddr` would consume. Opaque token; resolution is the

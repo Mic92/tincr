@@ -26,7 +26,7 @@
 
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{check_id, Request};
+use crate::{Request, check_id};
 
 // ────────────────────────────────────────────────────────────────────
 // KEY_CHANGED
