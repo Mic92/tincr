@@ -23,7 +23,7 @@
 | 0b — SPTPS FFI harness | ✅ Done | `tinc-ffi: SPTPS C↔C harness...` | 6 tests; deterministic via seeded ChaCha20 RNG |
 | 0c — Wire-traffic corpus | | | |
 | 0d — CI baseline | | | |
-| 1 — Pure logic crates | | | |
+| 1 — Pure logic crates | 🟡 Partial | `tinc-proto: edge/misc/key...` | `tinc-proto` covers subnet/edge/misc/key (~2400 LOC, 52 tests). `auth.rs`, `tinc-graph`, `tinc-conf` open. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | | | |
@@ -165,19 +165,38 @@ The 20 `sscanf` format strings in `protocol_*.c` are the spec; the corpus is the
 
 These have no I/O and are the safest place to start. They map almost 1:1 to existing C files.
 
-### `tinc-proto`
+### 🟡 `tinc-proto` — mostly done
 | C source | Rust module | Notes |
 |---|---|---|
-| `protocol.h` request enum | `enum Request` | `#[repr(u8)]` matching wire values |
-| `protocol.c` `send_request`/`receive_request` | `Request::format()` / `Request::parse()` | Replaces `sscanf("%d %2048s")` patterns with `nom` or hand-rolled splits |
-| `protocol_auth.c` message bodies | `auth.rs` | `ID`, `METAKEY`, `CHALLENGE`, `CHAL_REPLY`, `ACK` framing only — *not* the crypto yet |
-| `protocol_edge.c`, `protocol_subnet.c`, `protocol_misc.c`, `protocol_key.c` | one module each | Pure parse/serialize |
-| `subnet_parse.c` | `subnet.rs` | IPv4/IPv6/MAC subnet string ↔ struct |
-| `netutl.c` (`str2sockaddr` etc.) | `addr.rs` | |
+| ✅ `protocol.h` request enum | `request.rs` | `#[repr(u8)]`, `Request::peek()` is the `atoi` dispatch |
+| ✅ `protocol_edge.c` | `msg/edge.rs` | `AddEdge` (6-or-8 fields), `DelEdge` |
+| ✅ `protocol_subnet.c` | `msg/subnet.rs` | Shares one struct — same wire shape |
+| ✅ `protocol_misc.c` | `msg/misc.rs` | `TcpPacket`, `SptpsPacket`, `UdpInfo`, `MtuInfo`. Body-less `PING`/`PONG`/`TERMREQ` need no struct. |
+| ✅ `protocol_key.c` | `msg/key.rs` | `KeyChanged`, `ReqKey` (with the extension hole), `AnsKey` |
+| ✅ `subnet_parse.c` | `subnet.rs` | `str2net`/`net2str`/`maskcheck` |
+| ✅ `netutl.c` (`sockaddr2str` shape) | `addr.rs` | `AddrStr` newtype — see below |
+| ⏸️ `protocol_auth.c` | `msg/auth.rs` | Deferred to Phase 4 — see below |
+| ⏸️ `utils.c` `b64decode_tinc` | | First consumer is the `REQ_KEY` SPTPS payload decode, which is daemon-side. The encoder is already in `tinc-crypto`. |
 
-**Testing:** For every parser, a `proptest` round-trip (`parse(format(x)) == x`) **plus** the Phase 0c wire corpus as golden input. Do *not* try to differentially test against C `*_h()` handlers — they have no parse seam (they `sscanf` then mutate globals). The 20 `sscanf` format strings are short enough to transcribe by hand and verify against the corpus.
+**What landed:** ~2400 LOC across two commits. 41 unit tests (KAT strings lifted directly from the `printf`/`sscanf` format strings) + 11 proptests at 1–2k cases each. `nom` was wrong: 23 sscanf call sites, all `%d`/`%x`/`%s` over space-separated tokens — a 60-LOC tokenizer (`tok.rs`) covers them all.
 
-**`utils.rs`:** Port `b64decode_tinc` exactly — it accepts both `+/` and `-_` simultaneously (decode table maps both to 62/63). The `base64` crate's `GeneralPurpose` engine can't do this; hand-roll the decoder (~40 LOC).
+**Findings from `tinc-proto`:**
+
+- **`AddrStr` is opaque.** `str2sockaddr` has an `AF_UNKNOWN` escape: `getaddrinfo(AI_NUMERICHOST)` failure stuffs the input string verbatim into `sa->unknown.{address,port}`, and `sockaddr2str` round-trips it. So at the parse layer, address fields are arbitrary whitespace-free tokens. `IpAddr::parse` would reject inputs the C accepts and forwards to the next hop. Resolution happens at `connect()` time, not parse time.
+
+- **Optional trailing fields are atomic pairs.** `add_edge_h` accepts `parameter_count == 6 || == 8`, never 7. `ans_key_h` accepts `>= 7` but the 8-case (one trailing token) is UB-adjacent in C. Both modeled as `Option<(_, _)>` with both-or-neither parse.
+
+- **`REQ_KEY` is two messages stapled.** Base `sscanf` accepts an optional fourth `%d` (sub-request type, re-uses `request_t` enum values), then `req_key_ext_h` re-scans for a fifth. We fuse: `Option<ReqKeyExt { reqno: i32, payload: Option<String> }>`. `reqno` stays raw `i32` because the C has a `default:` case that logs and continues — unknown sub-types are not parse errors.
+
+- **`%hd`-then-check-negative is a bounds check.** `tcppacket_h` parses length as `short` then checks `< 0`. Send side emits `%d` from a `uint16_t`; values ≥ 32768 wrap negative under `%hd` and get rejected. Same bound from parsing as `i16`.
+
+- **MAC must be tried before v6 in `str2net`.** `1:2:3:4:5:6` is valid syntax for both. Order matters; `mac_shadows_v6` test pins it.
+
+- **`KEY_CHANGED` skips `check_id`**, just `lookup_node`, fails soft. Replicated.
+
+**Why `protocol_auth.c` is deferred:** `id_h` parses `"%d.%d"` (major.minor) and writes `c->protocol_minor`; `ack_h` reads it back to gate 1.1 features. The parse and the connection-state mutation are *one* `sscanf`-then-if-chain in C with no clean cut point. The struct boundary is artificial there. Better done alongside the `connection_t` port in Phase 4, where the parse output feeds directly into the state it's coupled to.
+
+**Phase 0c (wire corpus) didn't block.** The KAT strings were transcribed by hand from the format strings + integration test configs. Corpus would still strengthen the tests — promote to nice-to-have.
 
 ### `tinc-graph`
 | C source | Rust |
