@@ -34,8 +34,8 @@ header 'Fetch and build muon'
 git clone --depth=1 $git_muon ~/muon
 pushd ~/muon
 ./bootstrap.sh build
-./build/muon setup build
-samu -C build
+./build/muon-bootstrap setup build
+./build/muon-bootstrap -C build samu
 ./build/muon -C build install
 popd
 
