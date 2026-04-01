@@ -49,8 +49,6 @@ deps_linux_debian_linux() {
 
   if [ -n "$HOST" ]; then
     apt-get install -y crossbuild-essential-"$HOST" qemu-user
-  else
-    linux_openssl3
   fi
 }
 
