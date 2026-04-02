@@ -36,6 +36,13 @@
               gcc
               gnumake
               jq # vectors.json sanity-checking
+              # tinc-tools cross-impl test wants a C sptps_test to talk
+              # to. Building via meson is the path of least resistance —
+              # the build graph is already correct. Nolegacy mode means
+              # no openssl dep; same crypto subset tinc-crypto ported.
+              meson
+              ninja
+              pkg-config
             ];
           };
 
@@ -79,6 +86,79 @@
                 make -C build -f kat/Makefile OUT_JSON=$out
               '';
 
+          # The C sptps_test/sptps_keypair binaries, built with meson in
+          # nolegacy mode (no openssl/gcrypt — same crypto subset as
+          # tinc-crypto). nixpkgs#tinc_pre doesn't ship these; they're
+          # build_by_default=false in src/meson.build.
+          #
+          # This is what `TINC_C_SPTPS_TEST` points to for the cross-impl
+          # tests in tinc-tools/tests/self_roundtrip.rs. Set it in the
+          # devshell shellHook? No — leave it explicit. The cross-impl
+          # tests are #[ignore]'d and you opt in by setting the env var,
+          # because rebuilding the C binary on every Rust-only change is
+          # noise. CI sets it; local dev doesn't have to.
+          packages.sptps-test-c = pkgs.stdenv.mkDerivation {
+            pname = "tinc-sptps-test-c";
+            version = "1.1pre18";
+            # Fileset: meson needs the whole src/ tree (the meson.build
+            # files reference each other), plus the top-level meson
+            # config. No point being clever about minimizing this —
+            # it's ~500 small files, derivation rebuild is cheap, and
+            # any src/ change SHOULD invalidate it (that's the point of
+            # cross-impl: test against the C-that-is, not the C-that-was).
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./meson.build
+                ./meson_options.txt
+                ./src
+                # subdir() in the top-level meson.build is unconditional
+                # for these. Easier to ship them than to patch them out.
+                # The bash_completion.d one just installs a file; the
+                # doc one is gated by -Ddocs (we disable). systemd is
+                # gated by opt_systemd (we disable). test is gated by
+                # opt_tests (we disable). But meson opens the build file
+                # *before* checking the gate for `subdir`, so they have
+                # to exist.
+                ./bash_completion.d
+                ./doc/meson.build
+                ./systemd/meson.build
+              ];
+            };
+            nativeBuildInputs = with pkgs; [
+              meson
+              ninja
+              pkg-config
+            ];
+            mesonFlags = [
+              # No openssl, no gcrypt. Disables the legacy protocol
+              # entirely. SPTPS doesn't need it.
+              "-Dcrypto=nolegacy"
+              # Silence everything optional. We only want two binaries.
+              "-Dminiupnpc=disabled"
+              "-Dcurses=disabled"
+              "-Dreadline=disabled"
+              "-Dzlib=disabled"
+              "-Dlzo=disabled"
+              "-Dlz4=disabled"
+              "-Dvde=disabled"
+              "-Ddocs=disabled"
+              "-Dtests=disabled"
+              "-Dsystemd=disabled"
+            ];
+            # build_by_default=false — ask for them explicitly.
+            ninjaFlags = [
+              "src/sptps_test"
+              "src/sptps_keypair"
+            ];
+            # mesonInstallPhase wants to install everything; we only
+            # built two targets. Override.
+            installPhase = ''
+              mkdir -p $out/bin
+              install -m755 src/sptps_test src/sptps_keypair $out/bin/
+            '';
+          };
+
           # KAT JSON for tinc-graph: real splay_tree.c + list.c, copies of
           # mst_kruskal/sssp_bfs from graph.c. Separate derivation from
           # kat-vectors because the file set is disjoint and we don't want
@@ -109,6 +189,13 @@
                 $CC -std=c11 -O1 $src/kat_graph/gen_graph.c -o gen
                 ./gen > $out
               '';
+
+          # TODO: hermetic `checks.cross-impl` derivation. Needs
+          # `rustPlatform.buildRustPackage` to vendor deps; a naive
+          # `runCommand` + `cargo test --offline` dies in the sandbox
+          # (no registry index). For now CI runs the cross-impl tests
+          # via the devshell — see crates/tinc-tools/tests/self_roundtrip.rs
+          # module doc for the invocation. Tracked in RUST_REWRITE_PLAN.md.
 
           treefmt = {
             projectRootFile = "flake.nix";
