@@ -33,6 +33,7 @@
 | **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | **Five-for-five**: chunk-3's deferred row said "daemon side already has `REQ_DUMP_NODES item` (filter by name)" — wrong. `control.c:63` is `case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type. The third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
 | **5b chunk 5 — `cmd_top`** | ✅ +1 cmd | `tinc-tools: top — real-time per-node traffic, hand-rolled curses shim` | **Six-for-six** (ratatui dropped, see chunk-5 section). `top.c:248-257`'s `i` field is a stable-sort EMULATION: `qsort` isn't stable, the `i` tiebreak makes it stable across frames. `slice::sort_by` IS stable; don't port `i`, sort the same Vec in-place. Two C bugs ported: daemon-restart `wrapping_sub` (the spike IS the signal); first-tick epoch-seconds interval (`static struct timeval prev` zero-init → tick-1 rate ≈ counter/1.7e9 ≈ 0). `~400 LOC` estimate → 1984 LOC actual, **5× off**. 608 tests + 9 cross-impl, 28 commands. |
 | **5b chunk 6 — `cmd_log`/`cmd_pcap`** | ✅ +2 cmds | `tinc-tools: log/pcap — streaming commands, the seventh reversal` | **Seven-for-seven**, but #7 is the first reversal where the planned complexity went DOWN: "blocked on draining `BufReader::buffer()` by hand" → `BufReader<T>: Read`, `read_exact` already drains the buffer. One rustc smoke proved it; one unit test pins it. `recv_data` is one line. SIGINT handler NOT ported (first deliberate C-behavior-drop: exit 130 vs 0, daemon doesn't care). pcap headers `to_ne_bytes()` per-field — magic `0xa1b2c3d4` IS the endianness marker, native-endian is the format. y2038 truncation ported faithfully (`i64→u32`). 641 tests + 9 cross-impl, 30 commands. |
+| **5b chunk 7 — `cmd_edit`/`version`/`help`** | ✅ +3 cmds | `tinc-tools: edit/version/help — sh -c "$@", not system()` | The C's `xasprintf("\"%s\" \"%s\"", editor, filename); system(cmd)` is wrong TWICE: filename-with-`$` expands AND double-quoted `"$EDITOR"` doesn't word-split (so `EDITOR="vim -f"` → ENOENT). The C never supported spacey EDITOR — the wrapping quotes defeat `system()`'s tokenization. We do `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` (the git way): editor unquoted (split), filename `"$@"` (literal). `edit_dollar_in_filename_not_expanded` sets `HOME=/tmp/WRONG`, edits `"$HOME"`, asserts stdout has `$HOME` literal. `edit_spacey_editor_tokenized` pins `EDITOR="echo arg"` → stdout `arg <path>`. The path-resolution lattice: conffiles[] check BEFORE dash-split (`tinc-up` would otherwise split to `("tinc","up")` → wrong file). C bare-hostname case validates NOTHING; we reject `/`, `..`, empty. STRICTER. CONFFILES sed-diff'd vs `tincctl.c:2400-2406` (✓). 671 tests + 9 cross-impl, 33 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -591,7 +592,7 @@ Two dead-C-code drops noted at point of decision: `ecdsa_get_base64_public_key` 
 
 fsck `--force` writes the pubkey as a **PEM block**, not `Ed25519PublicKey =` config-line. C does the same (`ecdsa_write_pem_public_key`, `fsck.c:286`). Both forms valid (the loader checks config-line first, PEM second). The visual distinction is *useful*: PEM block in `hosts/NAME` means "fsck repaired this", config-line means "init/genkey wrote this." Preserved deliberately.
 
-`edit` defers to 5b — its `reload` half needs a daemon socket; `$EDITOR` spawn alone isn't useful.
+`edit` landed (chunk 7) — the reload half is best-effort fire-and-forget (`tincctl.c:2465-2467`: connect, sendline, NO recvline). Daemon down? `Err` swallowed. The edit happened; that's success.
 
 The `variables[]` table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
 
@@ -943,12 +944,33 @@ snaplen: all ported faithfully. None are bugs IN OUR CODE; they're
 C behaviors that survive the port. `pcap_packet_header_y2038_
 truncates` and `pcap_loop_snaplen_zero` pin them.
 
+**`cmd::edit` landed at `fee3c7c7`, 776 LOC, +18 unit + 12 integ
+tests.** The C-is-WRONG finding (not a reversal — read the C
+before implementing as usual, but the C was the problem):
+
+| The C `system()` construction | What it does | What the C author probably intended |
+|---|---|---|
+| `"\"%s\" \"%s\""` → `"editor" "filename"` | shell parses as two double-quoted tokens | shell-tokenize editor, quote-literal filename |
+| `"editor"` (one quoted token) | exec("editor"), spaces preserved | word-split if EDITOR has spaces |
+| `"filename"` (one quoted token) | `$` `*` `\`` STILL expand | `$` literal |
+
+The construction defeats itself: it shell-quotes both arguments,
+which means EDITOR doesn't tokenize AND filename doesn't escape
+shell metacharacters. The C gets the worst of both. Our
+`sh -c '$TINC_EDITOR "$@"'` gets the best: `$TINC_EDITOR` unquoted
+(tokenizes), `"$@"` quoted (literal). The git way (`editor.c` in
+git.git, line 63-ish).
+
+Why this isn't a reversal: nothing about the PLAN was wrong. Read
+the C, found the C broken, did better. The seven reversals are about
+plan-estimates being wrong; this is about C-behavior being wrong.
+Different table: "intentional C deviations" — of which `atoi` vs
+`parse` is the most common, and this is the most consequential.
+
 | Command | Blocked on |
 |---|---|
 | `start`/`restart` | Daemon binary needs to exist. |
-| `edit` | `$EDITOR` spawn + the post-edit reload. The reload is one line now. Lands when someone wants it. |
 | `network` | Meta-shell: sets `netname` then re-runs. Weird. Maybe never. |
-| `version`/`help` | Trivial. An afternoon. |
 
 | C source | Rust |
 |---|---|
@@ -956,6 +978,8 @@ truncates` and `pcap_loop_snaplen_zero` pin them.
 | `top.c` | ✅ `tui.rs` shim + `cmd::top` — the `i` field is a stable-sort emulation (don't port; `sort_by` is stable), `wrapping_sub` for daemon-restart spike, first-tick epoch-seconds bug-port. `top.c` fully consumed. |
 | `tincctl.c` `pcap`/`log_control` (590-669) + `cmd_pcap`/`cmd_log` (1518-1567) | ✅ `cmd::stream` — `recv_data` is `read_exact` on the `BufReader` (the shared-buffer worry was already solved by std). `to_ne_bytes()` for pcap headers. SIGINT handler NOT ported. `log_against_fake`/`pcap_against_fake` pin the C-daemon-compat seam: subscribe wire matches `control.c:128/135` sscanf, header wire matches `logger.c:213`/`route.c:1124` send_request. |
 | `console.c` (5-11, Unix branch) | ✅ `cmd::stream::use_ansi_escapes_stdout` — `isatty(stdout) && getenv("TERM") && strcmp(TERM, "dumb")`. |
+| `tincctl.c` `cmd_edit` (2399-2472) + `conffiles[]` (2399-2408) | ✅ `cmd::edit` — the resolution lattice (conffiles BEFORE dash-split), `sh -c '$TINC_EDITOR "$@"'` instead of `system()`. The C's shell-quoting is wrong twice; we fix both. STRICTER `/`/`..`/empty rejects. Silent reload best-effort (`let _ = ctl.send(Reload)`). |
+| `tincctl.c` `cmd_help`/`cmd_version` (2366-2384) | ✅ binary-level `cmd_help`/`cmd_version` — trivial dispatchers to `print_help`/`print_version`. `help: ""` makes them invisible in `--help` (recursive listing is silly; C doesn't list them either). |
 | `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
 | `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
