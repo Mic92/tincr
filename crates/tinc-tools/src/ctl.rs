@@ -602,6 +602,123 @@ impl<S: Read + Write> CtlSocket<S> {
             Err(e) => Err(CtlError::Io(e)),
         }
     }
+
+    /// Receive one dump row. The shared loop body of `cmd_dump`
+    /// (`tincctl.c:1241`): read a line, parse the `"18 N"` prefix,
+    /// check for the 2-int terminator, hand back `(kind, body)`.
+    ///
+    /// Daemon-side dump functions all share one shape:
+    ///
+    /// ```text
+    ///   for x in tree {
+    ///     send_request(c, "18 N <fields>")    // one row
+    ///   }
+    ///   send_request(c, "18 N")               // terminator
+    /// ```
+    ///
+    /// (`node.c:223`, `edge.c:137`, etc.) The terminator is the
+    /// SAME prefix with NO body. The C detects this with `sscanf
+    /// ("%d %d %4095s %4095s") == 2` — four conversions asked for,
+    /// two filled. We're explicit: empty body → `RowEnd`.
+    ///
+    /// `Row(kind, body)` carries the request type because graph mode
+    /// fires TWO dumps (`DUMP_NODES` then `DUMP_EDGES`) and reads
+    /// both responses with one loop. The C `switch(req)` dispatches
+    /// per-row (`tincctl.c:1280`). Same here.
+    ///
+    /// `body` is a `String`, not `&str`, because the caller passes
+    /// it to `Tok::new` which borrows for the parse lifetime, and
+    /// we can't return a borrow into our `BufReader`'s buffer
+    /// across `read_line` calls. The allocation is per-row but
+    /// dump output is dozens of rows, not millions.
+    ///
+    /// # Errors
+    /// `Io` on read failure. `Greeting` if EOF before terminator
+    /// (the C `tincctl.c:1374`: `"Error receiving dump."`). The
+    /// daemon closing the socket mid-dump is daemon-crashed; we
+    /// don't try to use partial results.
+    pub fn recv_row(&mut self) -> Result<DumpRow, CtlError> {
+        let line = self
+            .recv_line()?
+            // C `tincctl.c:1374`: `while(recvline()) {...} return 1;`
+            // — falling out of the loop without seeing the terminator
+            // is the error. EOF mid-dump = daemon crashed.
+            .ok_or_else(|| CtlError::Greeting("Error receiving dump.".to_owned()))?;
+
+        // ─── Prefix: `18 N` ───────────────────────────────────────
+        // `sscanf("%d %d %s %s")` reads code, req, and OPTIONALLY
+        // tries for two more. The two-ints-only case is `n == 2`
+        // (`tincctl.c:1245`). We split prefix from body manually
+        // — same effect, no double-scan.
+        //
+        // The body MUST stay byte-exact: `Tok` will re-tokenize
+        // it, and the line came from `printf %s` of a hostname
+        // that might be `unknown port unknown` (sockaddr2hostname
+        // for AF_UNSPEC). The literal `port` is a token. Don't
+        // collapse spaces; just slice past the second one.
+        let bad = || CtlError::Greeting("Unable to parse dump from tincd.".to_owned());
+
+        let (code_s, after_code) = line.split_once(' ').ok_or_else(bad)?;
+        if code_s.parse::<u8>().ok() != Some(CONTROL) {
+            // C `tincctl.c:1245-1257`: `n < 2` falls out, but
+            // `n >= 2 && code != CONTROL` is unhandled — it falls
+            // into the per-type switch with whatever `req` parsed
+            // as. We tighten: wrong code → row-level failure.
+            return Err(bad());
+        }
+
+        // ─── Request type, then body or terminator ─────────────────
+        // `split_once` again for the SECOND space. None → no body
+        // → terminator. Some("") would mean trailing space, which
+        // `printf` doesn't emit; treat as terminator anyway.
+        match after_code.split_once(' ') {
+            None => {
+                // "18 3\n" — the trailing \n is already stripped.
+                // Just the type. Terminator.
+                let req = after_code.parse::<i32>().map_err(|_| bad())?;
+                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
+                Ok(DumpRow::End(kind))
+            }
+            // clippy::redundant_guard wants us to fold this into the
+            // None arm via `Some((req_s, ""))`. That works but loses
+            // the doc comment positioning. Match a literal empty.
+            Some((req_s, "")) => {
+                // "18 3 " — trailing space. Daemon doesn't emit
+                // this (printf with no trailing space) but the C
+                // sscanf would call it n==2 (the third %s reads
+                // nothing). Same as terminator.
+                let req = req_s.parse::<i32>().map_err(|_| bad())?;
+                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
+                Ok(DumpRow::End(kind))
+            }
+            Some((req_s, body)) => {
+                let req = req_s.parse::<i32>().map_err(|_| bad())?;
+                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
+                // body is the rest of the line, byte-exact. The
+                // caller hands it to `Tok::new`.
+                Ok(DumpRow::Row(kind, body.to_owned()))
+            }
+        }
+    }
+}
+
+/// One line from a dump response. The C inlines this distinction
+/// into the `n == 2` check inside the loop body (`tincctl.c:1245`).
+/// We make it a type so the caller's loop is `match` not `if`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DumpRow {
+    /// `"18 N FIELDS"` — one item. Body is `FIELDS` exactly as
+    /// written, ready for `Tok::new`. The `CtlRequest` is for the
+    /// graph-mode loop where nodes and edges interleave; single-type
+    /// dumps can ignore it (or assert it's the expected one).
+    Row(CtlRequest, String),
+
+    /// `"18 N"` — terminator. Per-dump-type, so graph mode (which
+    /// fires NODES then EDGES) sees TWO of these and exits on the
+    /// second. The C `tincctl.c:1247-1250`: `if(do_graph && req ==
+    /// REQ_DUMP_NODES) continue;` — skip the first terminator. The
+    /// caller does the same here by checking which `End` it got.
+    End(CtlRequest),
 }
 
 /// Read one line, error if EOF. The greeting recvs and `recv_ack`
@@ -1195,6 +1312,189 @@ mod tests {
             drained += 1;
         }
         assert_eq!(drained, 1); // the ack
+
+        daemon.join().unwrap();
+    }
+
+    // ─── recv_row: the dump prefix-strip + terminator detect ─────
+    //
+    // Same harness as `recv_lines_until_eof`, but using the typed
+    // `recv_row` instead of hand-tokenizing. The parse step (body →
+    // NodeRow etc.) lives in cmd::dump tests; this is just the
+    // "18 N " prefix and the End vs Row distinction.
+
+    /// Three rows, terminator. The body is byte-exact: spaces inside
+    /// `"10.0.0.1 port 655"` survive.
+    #[test]
+    fn recv_row_basic() {
+        let cookie = "2".repeat(64);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+
+        let daemon = fake_daemon(theirs, &cookie, 1, |br, w| {
+            let mut line = String::new();
+            br.read_line(&mut line).unwrap();
+            assert_eq!(line.trim_end(), "18 3");
+            // Body with embedded `port` literal — `recv_row` must
+            // NOT touch it. The cmd::dump parse re-tokenizes.
+            writeln!(w, "18 3 alice 10.0.0.1 port 655 fields").unwrap();
+            writeln!(w, "18 3 bob unknown port unknown fields").unwrap();
+            writeln!(w, "18 3").unwrap();
+        });
+
+        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
+        ctl.send(CtlRequest::DumpNodes).unwrap();
+
+        // Row 1: kind = DumpNodes, body byte-exact.
+        let r1 = ctl.recv_row().unwrap();
+        assert_eq!(
+            r1,
+            DumpRow::Row(
+                CtlRequest::DumpNodes,
+                "alice 10.0.0.1 port 655 fields".into()
+            )
+        );
+        // Row 2: same. The double-space wouldn't survive a
+        // re-tokenize-then-join; but recv_row slices, doesn't
+        // tokenize, so single spaces stay single spaces. (The
+        // body never HAS double spaces — daemon's printf has
+        // single — but the slicing approach is correct anyway.)
+        let r2 = ctl.recv_row().unwrap();
+        assert_eq!(
+            r2,
+            DumpRow::Row(
+                CtlRequest::DumpNodes,
+                "bob unknown port unknown fields".into()
+            )
+        );
+        // Terminator.
+        let r3 = ctl.recv_row().unwrap();
+        assert_eq!(r3, DumpRow::End(CtlRequest::DumpNodes));
+
+        daemon.join().unwrap();
+    }
+
+    /// EOF before terminator → error. C `tincctl.c:1374`: the while
+    /// loop falls out, `"Error receiving dump."`. Daemon crashed.
+    #[test]
+    fn recv_row_eof_mid_dump() {
+        let cookie = "3".repeat(64);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+
+        let daemon = fake_daemon(theirs, &cookie, 1, |br, w| {
+            let mut line = String::new();
+            br.read_line(&mut line).unwrap();
+            // One row, then DROP without terminator.
+            writeln!(w, "18 3 alice partial").unwrap();
+            // ← no "18 3\n". Socket closes when |br, w| returns.
+        });
+
+        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
+        ctl.send(CtlRequest::DumpNodes).unwrap();
+
+        // First recv: the partial row. Fine.
+        let r1 = ctl.recv_row().unwrap();
+        assert!(matches!(r1, DumpRow::Row(CtlRequest::DumpNodes, _)));
+        // Second: EOF → error, not Ok(None). The C distinction.
+        let err = ctl.recv_row().unwrap_err();
+        // Message check: it's the C string.
+        assert!(matches!(err, CtlError::Greeting(m) if m.contains("Error receiving dump")));
+
+        daemon.join().unwrap();
+    }
+
+    /// Wrong code (`"19 3 ..."`) → error. C doesn't check this
+    /// (`tincctl.c:1245` only checks `n >= 2`, never re-reads `code`).
+    /// We tighten: a non-18 prefix is corruption.
+    #[test]
+    fn recv_row_bad_code() {
+        let cookie = "4".repeat(64);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+
+        let daemon = fake_daemon(theirs, &cookie, 1, |br, w| {
+            let mut line = String::new();
+            br.read_line(&mut line).unwrap();
+            // 19 is not CONTROL.
+            writeln!(w, "19 3 garbage").unwrap();
+        });
+
+        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
+        ctl.send(CtlRequest::DumpNodes).unwrap();
+
+        let err = ctl.recv_row().unwrap_err();
+        assert!(matches!(err, CtlError::Greeting(m) if m.contains("Unable to parse dump")));
+
+        daemon.join().unwrap();
+    }
+
+    /// Graph mode: TWO sends, TWO terminators. The first End
+    /// (DumpNodes) doesn't end the loop — caller checks which kind.
+    /// `recv_row` itself doesn't track state; it just hands back
+    /// (kind, body) per row. The CALLER's loop knows graph mode
+    /// continues past the first End. This test is the daemon side
+    /// of that contract: send both responses, both terminators.
+    #[test]
+    fn recv_row_graph_two_terminators() {
+        let cookie = "5".repeat(64);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+
+        let daemon = fake_daemon(theirs, &cookie, 1, |br, w| {
+            let mut line = String::new();
+            br.read_line(&mut line).unwrap();
+            assert_eq!(line.trim_end(), "18 3"); // DUMP_NODES
+            line.clear();
+            br.read_line(&mut line).unwrap();
+            assert_eq!(line.trim_end(), "18 4"); // DUMP_EDGES
+
+            // Daemon responds in order. First nodes (1 row + term):
+            writeln!(w, "18 3 alice fields").unwrap();
+            writeln!(w, "18 3").unwrap();
+            // Then edges (1 row + term):
+            writeln!(w, "18 4 alice bob fields").unwrap();
+            writeln!(w, "18 4").unwrap();
+        });
+
+        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
+        // Graph mode sends BOTH. The daemon doesn't pipeline
+        // (strictly request-response), but TCP buffers the second
+        // send while the daemon is still writing the first response.
+        ctl.send(CtlRequest::DumpNodes).unwrap();
+        ctl.send(CtlRequest::DumpEdges).unwrap();
+
+        // Row, End(Nodes), Row, End(Edges) — in that order.
+        assert!(matches!(
+            ctl.recv_row().unwrap(),
+            DumpRow::Row(CtlRequest::DumpNodes, _)
+        ));
+        assert_eq!(ctl.recv_row().unwrap(), DumpRow::End(CtlRequest::DumpNodes));
+        assert!(matches!(
+            ctl.recv_row().unwrap(),
+            DumpRow::Row(CtlRequest::DumpEdges, _)
+        ));
+        assert_eq!(ctl.recv_row().unwrap(), DumpRow::End(CtlRequest::DumpEdges));
+
+        daemon.join().unwrap();
+    }
+
+    /// `"18 3 "` with trailing space (which the daemon never emits,
+    /// but) → terminator. The C `sscanf %d %d %s %s` would get n=2
+    /// (the third %s reads nothing). We match: empty body → End.
+    #[test]
+    fn recv_row_trailing_space_is_terminator() {
+        let cookie = "6".repeat(64);
+        let (ours, theirs) = UnixStream::pair().unwrap();
+
+        let daemon = fake_daemon(theirs, &cookie, 1, |_br, w| {
+            // Trailing space after the type. Daemon's printf doesn't
+            // emit this; defensive against hand-crafted socket input.
+            writeln!(w, "18 3 ").unwrap();
+        });
+
+        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
+        // No send needed — we're just reading what's in the buffer.
+        // (Real usage would send first, but recv_row doesn't track
+        // that.)
+        let r = ctl.recv_row().unwrap();
+        assert_eq!(r, DumpRow::End(CtlRequest::DumpNodes));
 
         daemon.join().unwrap();
     }

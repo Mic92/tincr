@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 pub mod config;
 pub mod ctl_simple;
+pub mod dump;
 pub mod exchange;
 pub mod fsck;
 pub mod genkey;

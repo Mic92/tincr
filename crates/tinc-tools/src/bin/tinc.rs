@@ -278,6 +278,43 @@ const COMMANDS: &[CmdEntry] = &[
         // types. The aliases are the user-facing names.
         help: "",
     },
+    // ─── dump: nodes/edges/subnets/connections/graph/invitations ─
+    // C `tincctl.c:3009-3010`: `dump` and `list` both → cmd_dump.
+    //
+    // `needs_daemon: true` even though `dump invitations` is pure
+    // readdir. The C has `ctl=false` (`tincctl.c:3009`) and connects
+    // INSIDE cmd_dump after the kind switch. We can't — our adapter
+    // gets immutable `&Paths`, and `CtlSocket::connect` needs the
+    // resolved `pidfile()`, and `resolve_runtime` is `&mut`. So:
+    // resolve unconditionally. `dump invitations` pays one harmless
+    // `access(2)` probe and never calls `pidfile()`. The probe-free
+    // principle ("init doesn't stat /var/run") trades against the
+    // signature-churn cost; one stat for a rare subcommand is fine.
+    //
+    // The alternative (`dump-invitations` as a separate top-level
+    // verb) would change the C's argv shape. Don't.
+    CmdEntry {
+        name: "dump",
+        needs_daemon: true,
+        run: cmd_dump,
+        help: concat!(
+            "dump                   Dump a list of one of the following things:\n",
+            "    [reachable] nodes        - all known nodes in the VPN\n",
+            "    edges                    - all known connections in the VPN\n",
+            "    subnets                  - all known subnets in the VPN\n",
+            "    connections              - all meta connections with ourself\n",
+            "    [di]graph                - graph of the VPN in dotty format\n",
+            "    invitations              - outstanding invitations",
+        ),
+    },
+    // C `tincctl.c:3010`: `{"list", cmd_dump, false}`. Exact alias.
+    // No help line (it's `dump` by another name).
+    CmdEntry {
+        name: "list",
+        needs_daemon: true,
+        run: cmd_dump,
+        help: "",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -636,6 +673,58 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
         [name] => cmd::ctl_simple::disconnect(paths, name),
         _ => Err(CmdError::TooManyArgs),
     }
+}
+
+/// `cmd_dump`: argv[1] is the kind. C `tincctl.c:1182-1376` (200 lines).
+///
+/// Two-stage dispatch: argv → `Kind` (the `reachable` shift dance),
+/// then `Kind` → connect-or-readdir. The C does it as one function
+/// with `if(strcasecmp(argv[1], "invitations")) return dump_invitations()`
+/// at the top — same shape here. The kind-parse is in lib code so
+/// it's testable without spawning the binary.
+///
+/// Output goes to stdout line-by-line. For an empty dump (zero rows)
+/// the C is silent (exit 0, no output); for `dump invitations` with
+/// no invitations the C writes `"No outstanding invitations."` to
+/// STDERR (`tincctl.c:1116,1176`). The stderr-not-stdout choice is
+/// a hint: scripts parsing `tinc dump invitations | while read` don't
+/// want a non-data line. We match.
+fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use cmd::dump::{DumpOutput, Kind, dump, dump_invitations, parse_kind};
+
+    // ─── argv → Kind ──────────────────────────────────────────────
+    // The arity errors and `Unknown dump type` live in here. The C
+    // does the same checks inline at `tincctl.c:1185-1232`.
+    let kind = parse_kind(args)?;
+
+    // ─── Invitations: pure readdir, no daemon ─────────────────────
+    // C `tincctl.c:1203-1205`: BEFORE `connect_tincd`. Works
+    // daemon-down. (We did pay one `access(2)` for `resolve_runtime`
+    // — see the table-entry comment.)
+    if kind == Kind::Invitations {
+        let rows = dump_invitations(paths)?;
+        if rows.is_empty() {
+            // C `tincctl.c:1116,1176`: stderr, exit 0. The C has
+            // a typo (`"Cannot not read"`) on the EACCES path but
+            // not on the empty path; we don't replicate the typo.
+            eprintln!("No outstanding invitations.");
+        } else {
+            // C `tincctl.c:1170`: `printf("%s %s\n", filename, name)`.
+            // Space-separated, one per line.
+            for r in rows {
+                println!("{} {}", r.cookie_hash, r.invitee);
+            }
+        }
+        return Ok(());
+    }
+
+    // ─── Daemon-backed: connect, send, recv, format ──────────────
+    let DumpOutput::Lines(lines) = dump(paths, kind)?;
+    for line in lines {
+        println!("{line}");
+    }
+    // Empty dump → silent. C: zero-iteration while loop, return 0.
+    Ok(())
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).

@@ -10,6 +10,23 @@
 //! `%hu`, `%lu`, `%s`, `%*d`, `%*x`, `%*s` (`*` = skip), and one `%2d.%3d`
 //! width pair (in `id_h`, for `17.7` version parsing). The width pair gets
 //! its own helper; everything else is just "next token, parse as int".
+//!
+//! ## The `" port "` literal
+//!
+//! `sockaddr2hostname` (`netutl.c:153`) returns `"10.0.0.1 port 655"` —
+//! a single string with embedded spaces. The daemon writes it via *one*
+//! `%s` (e.g. `node.c:210`), and the CLI parses it back via `%s port %s`
+//! (e.g. `tincctl.c:1282`). The literal `port` in the format string is
+//! how `sscanf` skips the word. `lit()` does the same here.
+//!
+//! That means the dump-format strings have ONE more sscanf conversion
+//! than they have printf conversions, per `" port "` instance. The
+//! ADD_EDGE message-protocol format does NOT have this — there `addr`
+//! and `port` are separate `%s` tokens both ways — because the daemon
+//! formats them with `sockaddr2str` (two outputs) not `sockaddr2hostname`
+//! (one fused). Dump uses the fused form. The asymmetry is annoying;
+//! it's there because dump is "human-readable-ish" and uses the
+//! fused form everywhere it appears in log messages.
 
 use crate::MAX_STRING;
 
@@ -25,7 +42,14 @@ pub struct ParseError;
 /// separator, and protocol lines come with the `\n` already stripped (by
 /// `meta.c`). We use it anyway — if a stray `\n` shows up mid-string,
 /// `sscanf %s` would also stop there.
-pub(crate) struct Tok<'a> {
+///
+/// Public because `tinc-tools` parses dump rows with the same `sscanf`
+/// shape. The dump format is CLI↔daemon (not on the wire to peers) but
+/// the C `tinc` CLI↔C `tincd` cross-impl seam wants to keep working
+/// until the C daemon retires; and the four format strings live in
+/// `tincctl.c` next to the message-protocol ones, so co-locating their
+/// parser here keeps them in lockstep.
+pub struct Tok<'a> {
     /// What's left after the last token. Kept around so `rest()` can
     /// return the unconsumed tail (`ANS_KEY` needs this — it has a
     /// variable-length suffix the C parses with a second `sscanf`).
@@ -82,8 +106,46 @@ impl<'a> Tok<'a> {
     /// `short int` then check `< 0`. The send side emits `%d`/`%lu`
     /// (unsigned), so a negative parse means corruption — the C
     /// detects it via the signed type. We do the same.
+    ///
+    /// `tincctl.c:1282` also uses `%hd` for pmtu/minmtu/maxmtu in
+    /// the node dump (the daemon writes `%d`, those fields are
+    /// `int n->mtu` but they're MTU values ≤ 9000ish so `i16` fits).
     pub fn hd(&mut self) -> Result<i16, ParseError> {
         self.s()?.parse().map_err(|_| ParseError)
+    }
+
+    /// `%ld`. Only `last_state_change` in the node dump uses it —
+    /// it's a `time_t` cast to `long` (`node.c:219`). `time_t` is
+    /// `i64` on every platform we care about; `long` is `i32` on
+    /// 32-bit systems but `time_t` would already have wrapped by
+    /// then, so the C is wrong on 32-bit-with-64-bit-time_t and
+    /// we don't try to be wrong the same way. `i64` everywhere.
+    pub fn ld(&mut self) -> Result<i64, ParseError> {
+        self.s()?.parse().map_err(|_| ParseError)
+    }
+
+    /// Literal token. `sscanf(line, "... port %s ...")` — the
+    /// bare word `port` consumes that exact token (after skipping
+    /// leading whitespace, like everything else in `sscanf`). If
+    /// the next token isn't `port`, `sscanf` returns the count up
+    /// to that point. We hard-fail.
+    ///
+    /// Used for the `" port "` separator in `sockaddr2hostname`
+    /// output — see module doc. The four dump formats use it 1-2
+    /// times each; the message protocol uses it zero times (it
+    /// uses `sockaddr2str`, not `sockaddr2hostname`).
+    ///
+    /// # Errors
+    /// `ParseError` if the next token isn't exactly `expected`.
+    /// Case-sensitive: `sscanf` literal matching is `memcmp`, and
+    /// the daemon writes lowercase `"port"` always (it's a string
+    /// literal in `netutl.c:163,174`, no `tolower` involved).
+    pub fn lit(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.s()? == expected {
+            Ok(())
+        } else {
+            Err(ParseError)
+        }
     }
 
     /// Next token if there is one; `Ok(None)` if exhausted.
@@ -184,6 +246,38 @@ mod tests {
         assert_eq!(Tok::new("DEADBEEF").x().unwrap(), 0xdead_beef);
         // But 0x prefix is rejected.
         assert!(Tok::new("0xff").x().is_err());
+    }
+
+    #[test]
+    fn lit_match() {
+        // The dump-node shape: `... HOST port PORT ...`
+        // sscanf `%s port %s` re-splits sockaddr2hostname output.
+        let mut t = Tok::new("10.0.0.1 port 655");
+        assert_eq!(t.s().unwrap(), "10.0.0.1");
+        t.lit("port").unwrap();
+        assert_eq!(t.s().unwrap(), "655");
+    }
+
+    #[test]
+    fn lit_mismatch() {
+        let mut t = Tok::new("10.0.0.1 PORT 655");
+        t.skip().unwrap();
+        // case-sensitive (sscanf literal is memcmp)
+        assert!(t.lit("port").is_err());
+        // and the cursor is past it now — sscanf doesn't rewind
+        // on literal mismatch either, but it's irrelevant: we
+        // never recover from ParseError, the row is dropped.
+    }
+
+    #[test]
+    fn ld_type() {
+        // time_t-range value, would overflow i32.
+        // 2_000_000_000 fits i32; 3_000_000_000 doesn't.
+        let mut t = Tok::new("3000000000");
+        assert_eq!(t.ld().unwrap(), 3_000_000_000_i64);
+        // Negative ok (C %ld is signed). last_state_change should
+        // never be negative but the parse doesn't enforce.
+        assert_eq!(Tok::new("-1").ld().unwrap(), -1);
     }
 
     #[test]

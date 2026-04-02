@@ -40,7 +40,7 @@ mod tok;
 pub use addr::AddrStr;
 pub use request::Request;
 pub use subnet::Subnet;
-pub use tok::ParseError;
+pub use tok::{ParseError, Tok};
 
 /// `check_id` from `utils.c`: non-empty `[A-Za-z0-9_]+`.
 ///
