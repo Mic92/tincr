@@ -37,6 +37,7 @@
 | **5b chunk 8 — `cmd_network`** | ✅ +1 cmd | `tinc-tools: network — list mode only, switch is C-behavior-drop #2` | C has TWO modes: argless lists `confdir/*/tinc.conf`-bearing dirs; with arg, `switch_network` mutates `netname`/`confbase`/`prompt` globals for the readline loop. We have no readline. Switch would mutate-then-exit — silent no-op, worse than erroring. List ported, switch errors with "use `-n NAME`" advice (`.` sentinel gets distinct "no -n" advice). Second deliberate drop after SIGINT, different shape: SIGINT is "exit code differs, daemon doesn't care"; this is "feature requires scaffolding we don't have." Sorted output (NOT in C — readdir order undefined; sorted is in the set of valid C outputs; deterministic). `Paths::confdir_always()` papers over the C's-always-set vs our-`Option` mismatch. `list_skip_unreadable` gates on euid (root reads `chmod 000` via DAC override). 685 tests + 9 cross-impl, 34 commands. **Phase 5b CLOSED — all Phase-5-reachable commands landed.** |
 | 3 — Device & transport | | | |
 | **3 chunk 1 — `tinc-device` Linux + Dummy** | ✅ 8th crate | `tinc-device: TUN/TAP — the +10 layout pun, NOT the nix macro` | The +10: `read(fd, buf+10, MTU-10)` lands `tun_pi.proto` at byte 12 = the ethertype slot of a synthetic ethernet frame. `memset(buf, 0, 12)` zeroes fake MACs AND `tun_pi.flags` (overlapping bytes 10-11). No reformat; `route.c` never knows the bytes used to be `tun_pi`. `tun_offset_arithmetic` pins `14 - 4 = 10`. **NOT `nix::ioctl_write_ptr_bad!`** — `TUNSETIFF` is encoded `_IOW` (kernel reads from us) but kernel WRITES BACK `ifr_name`; the macro generates `*const`, wrong contract. Direct `libc::ioctl` with `*mut`. Third unsafe-shim instance, same SAFETY shape, but the macro divergence is new. `pack_ifr_name` is the testable seam: validate-first means `open_too_long_iface_err_before_open` passes without CAP_NET_ADMIN. STRICTER than C (rejects 16+ byte ifname; C truncates). 706 tests + 9 cross-impl. |
+| **3 chunk 2 — `tinc-device` fd (Android)** | ✅ third backend | `tinc-device: fd backend — the +14 cousin, nix EARNS the dep here` | The +14: Android `VpnService` writes RAW IP, no prefix; read at `+14` (`ETH_HLEN`), synthesize ethertype from `ip[0]>>4`. The +10's TESTABLE cousin — `linux.rs` couldn't fake `tun_pi` (kernel-side layout); `fd.rs` reads bytes a `pipe()` can feed. `read_ipv4_via_pipe`/`read_ipv6_via_pipe` cover the offset arithmetic with no CAP_NET_ADMIN. **Shim #4 USES nix; #3 BYPASSED it.** `recvmsg`+`SCM_RIGHTS` is well-specified POSIX; nix's `ControlMessageOwned::ScmRights` collapses ~40 LOC of `cmsghdr` boilerplate AND fixes the C's NULL-deref at `fd_device.c:73`. `FdSource::{Inherited(RawFd), UnixSocket(PathBuf)}` makes the C's `sscanf("%d")==1` string-dispatch explicit. STRICTER than C: closes leaked fds before erroring on multi-fd cmsg (C leaks). C-is-WRONG +2 (the NULL deref; the leak — both masked by Java sender always sending 1 cmsg, 1 fd). 723 tests + 9 cross-impl. |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
 
@@ -416,7 +417,7 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 |---|---|---|
 | Linux | `linux/device.c` | ✅ `linux.rs` (907 LOC) — hand-rolled. **NOT** `tun-tap` crate, **NOT** `nix::ioctl_write_ptr_bad!`. Direct `libc::ioctl` because the macro generates `*const` and `TUNSETIFF` writes back. The ~150 LOC estimate was the *unsafe shims alone*; the +10 offset trick + testable seam + 15 tests are the rest. |
 | Dummy | `dummy_device.c` | ✅ `lib.rs` `Dummy` impl. Trivial. Read → `WouldBlock`, write → `Ok(len)`. |
-| `fd` (AF_UNIX) | `fd_device.c` | next — 247 LOC, the socket-passed-fd backend |
+| `fd` (Android) | `fd_device.c` | ✅ `fd.rs` (1330 LOC) — the +14 cousin. `pipe()`-testable. nix `socket`+`uio` features for `recvmsg`+`SCM_RIGHTS`. |
 | BSD/macOS | `bsd/device.c`, `bsd/darwin/` | `/dev/tun*`, utun via `libc::ioctl`. The vmnet path can wait. |
 | Windows | `windows/device.c` | `wintun` crate (WireGuard's driver) — **drop** TAP-Windows support |
 | Multicast/raw/UML/VDE | `*_device.c` | Feature-gated, low priority, port last |
@@ -472,13 +473,65 @@ the shims ARE ~150, the offset trick + testable seam + 15 tests
 are the rest. Nothing about the PLAN was wrong; the estimate was
 optimistic in the usual direction.
 
+**The fd backend** (chunk 2, `ffd64613`) is the +10's TESTABLE
+cousin. `linux.rs` couldn't end-to-end test the offset trick: the
+kernel TUN driver lays out `tun_pi`; faking that needs the actual
+driver. `fd.rs` reads RAW IP packets — Android's `VpnService`
+writes no prefix at all. A `pipe()` is enough. The unfakeable-
+vs-fakeable boundary:
+
+| Backend | What other side writes | Fakeable? | End-to-end test? |
+|---|---|---|---|
+| `linux` (kernel TUN) | `tun_pi { flags; proto }` + IP | no (kernel layout) | `tun_offset_arithmetic` pins math only |
+| `fd` (Android `VpnService`) | raw IP, no prefix | **yes** (`pipe()`) | `read_ipv4_via_pipe` covers full flow |
+| `dummy` | nothing | trivially | `dummy_read_would_block` |
+
+The boundary generalizes: **does the OTHER side write structure?**
+Kernel TUN does (the `tun_pi` struct, kernel-allocated). Android
+doesn't (`VpnService.Builder.establish()` returns a raw fd; the
+Java side is just `write(fd, ip_packet)`). When the other side is
+structure-free, our side's offset arithmetic is fd-agnostic — any
+byte source works.
+
+**The unsafe-shim decision matrix has FOUR data points now, two
+diverging:**
+
+| # | What | nix wraps it? | Use nix? | Why |
+|---|---|---|---|---|
+| 1 | `localtime_r` (`info.rs`) | no | — | hand-rolled `MaybeUninit<libc::tm>` |
+| 2 | `TIOCGWINSZ` (`tui.rs`) | `ioctl_read_bad!` | **yes** | encoding honest (`_IOR`, kernel writes only) |
+| 3 | `TUNSETIFF` (`linux.rs`) | `ioctl_write_ptr_bad!` | **no** | encoding lies (`_IOW`, kernel writes back too) |
+| 4 | `recvmsg`+`SCM_RIGHTS` (`fd.rs`) | full safe API | **yes** | POSIX-standard; ~40 LOC C cmsghdr → 1 iterator; fixes the C's NULL deref |
+
+The pattern isn't "always nix" or "always bypass." The decision
+criterion is **does the wrapper match the kernel's actual
+contract?** `_IOW` lying about TUNSETIFF is a 1990s legacy (the
+`int` size encoding is also wrong; kernel ignores it). `recvmsg` +
+`SCM_RIGHTS` is POSIX-specified, no encoding to lie about. The
+plan's chunk-1 warning ("don't pattern-match on `tui.rs` for the
+BSD shim") generalizes: **don't pattern-match on `linux.rs`
+either.** Read the man page; check if the wrapper's signature
+matches what the kernel actually does.
+
+Trait shape (landed; `write` takes `&mut [u8]` because TUN-mode
+zeroes `buf[10..12]` — the trait constrains; `FdTun::write`
+doesn't mutate but can't tighten):
+
 ```rust
 pub trait Device: Send {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
-    fn iftype(&self) -> IfType;  // TUN vs TAP
+    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    fn mode(&self) -> Mode;       // Tun vs Tap
+    fn iface(&self) -> &str;      // for tinc-up's INTERFACE=
+    fn mac(&self) -> Option<Mac>; // TAP only; route.c ARP path
+    fn fd(&self) -> Option<RawFd>; // for poll(); Dummy is None
 }
 ```
+
+C `setup`/`close` are NOT trait methods — they're constructor +
+`Drop`. The C vtable pattern is "stateless fn pointers + globals";
+the Rust pattern is "stateful struct + trait methods." `setup`/
+`close` don't survive the translation.
 
 ### `tinc-net` (sockets only, not the event loop yet)
 | C source | Rust |
@@ -1021,6 +1074,20 @@ the C, found the C broken, did better. The seven reversals are about
 plan-estimates being wrong; this is about C-behavior being wrong.
 Different table: "intentional C deviations" — of which `atoi` vs
 `parse` is the most common, and this is the most consequential.
+
+**`fd.rs` adds two more C-is-WRONG findings (`ffd64613`):**
+
+| Location | The bug | Why masked | Our fix |
+|---|---|---|---|
+| `fd_device.c:73` | `CMSG_FIRSTHDR` returns NULL on empty control buffer; C dereferences `cmsgptr->cmsg_level` without checking | Java sender always sends a cmsg; in practice never empty | nix's `msg.cmsgs()` iterator: empty → empty iter → `None` from `find_map` → error, not segfault |
+| `fd_device.c:86` | C's `cmsg_len` check rejects multi-fd AFTER `recvmsg` returned — kernel already dup'd the fds into our process; rejecting now = leak | Java sender always sends exactly 1 fd | `let [fd] = fds[..] else { close all; Err }` — close before erroring |
+
+Both findings share a class: **masked-by-well-behaved-sender**. The
+Java side of the Android integration sends exactly one cmsg with
+exactly one fd. Neither bug fires in practice. But "works because
+the other side is nice" is a coupling smell. The `cmd_edit` finding
+was similar — `system()` quoting bug masked by nobody setting
+`EDITOR="vim -f"`. Masked bugs ARE bugs.
 
 | Command | Blocked on |
 |---|---|
