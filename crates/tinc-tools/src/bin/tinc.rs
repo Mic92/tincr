@@ -326,6 +326,23 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_info,
         help: "info NODE|SUBNET|ADDRESS    Give information about a particular NODE, SUBNET or ADDRESS.",
     },
+    // ─── top: real-time per-node traffic ──────────────────────────────
+    // C `tincctl.c:3016`: `{"top", cmd_top, false}`. The `false` is
+    // the `ctl` field meaning "don't pre-connect_tincd" — cmd_top
+    // calls connect itself (`tincctl.c:1506`). Same here:
+    // `needs_daemon: true` makes main() resolve the pidfile path
+    // (which `top::run` needs) but doesn't connect; `top::run`
+    // connects.
+    //
+    // C `tincctl.c:186`: help line. The `#ifdef HAVE_CURSES` else-
+    // branch (`tincctl.c:1513`) prints "compiled without curses
+    // support"; we always have it (tui.rs is always built on Unix).
+    CmdEntry {
+        name: "top",
+        needs_daemon: true,
+        run: cmd_top,
+        help: "top                         Show real-time statistics",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -773,6 +790,28 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         }
     }
     Ok(())
+}
+
+/// `cmd_top`: zero args. The TUI loop. `tincctl.c:1496-1514`.
+///
+/// Unlike every other command, this one DOESN'T return until the
+/// user quits ('q') or the daemon dies. The `Result` return is for
+/// connect failures ("daemon not running") and the `RawMode::enter`
+/// stdin-not-a-tty case (`tinc top </dev/null`). Mid-session daemon
+/// death is `Ok(())` — silent exit, same as the C (`top.c:291`).
+///
+/// `g.netname` for the row-0 header (`top.c:242`: `netname ?
+/// netname : ""`). This is the FIRST adapter to use Globals — the
+/// 4a/5b commands take `_: &Globals`. (cmd_invite uses it too, for
+/// the URL fragment, but that's a Paths concern; this is pure
+/// display.)
+fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        // C `tincctl.c:1499-1502`: `if(argc > 1) "Too many
+        // arguments!"`.
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::top::run(paths, g.netname.as_deref())
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).

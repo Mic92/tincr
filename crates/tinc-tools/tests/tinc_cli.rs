@@ -2896,3 +2896,110 @@ fn wait_for_port(stderr: &mut impl Read) -> u16 {
         }
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// `tinc top` against a fake daemon
+// ════════════════════════════════════════════════════════════════════
+//
+// `top` is a TUI loop. The full loop needs a real terminal (RawMode
+// fails on a pipe). What CAN be tested without a tty:
+//
+//   1. The arity check (`tinc top extra` → "Too many arguments").
+//   2. RawMode::enter failure with stdin=pipe → "stdin is not a
+//      terminal", exit nonzero, daemon socket NEVER touched.
+//   3. The DUMP_TRAFFIC wire format — fetch + Stats::update against
+//      a fake daemon, but THAT'S a unit test (already covered).
+//
+// What we test here is (2): the failure path is well-behaved.
+// Specifically: the connect happens (and succeeds, the fake serves
+// the greeting), and THEN RawMode fails (stdin is a pipe under
+// cargo test). The error is the tty error, not a daemon error.
+// This pins the order in `top::run`: connect FIRST, raw SECOND.
+// If someone swaps them, this test catches it (the error message
+// changes).
+//
+// What's NOT tested (and never will be in CI): the full loop. That's
+// a manual smoke against a real daemon: `tinc top`, watch the
+// numbers, hit `i`/`o`/`c`/`q`. The unit tests cover the merge,
+// sort, render, and parse independently; the loop is glue.
+
+#[test]
+#[cfg(unix)]
+fn top_too_many_args() {
+    let out = tinc(&["top", "extra"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // `tincctl.c:1500`: `"Too many arguments!"`.
+    assert!(stderr.contains("Too many arguments"), "stderr: {stderr}");
+}
+
+/// `top::run` connects FIRST, then enters raw mode. Under cargo
+/// test, stdin is a pipe, so RawMode::enter fails with "stdin is
+/// not a terminal". We assert that:
+///
+///   - The connect SUCCEEDS (fake daemon's greeting is exchanged).
+///   - The error is the tty error, not a daemon error.
+///   - The fake daemon's socket is read for greeting and then
+///     dropped (NO `DUMP_TRAFFIC` request — raw mode failed first).
+///
+/// This pins the connect-before-raw order. The C does the same
+/// (`tincctl.c:1506` connect, `top.c:284` initscr inside `top()`),
+/// for the same reason: "daemon not running" is more useful on a
+/// sane terminal.
+#[test]
+#[cfg(unix)]
+fn top_stdin_not_tty_fails_after_connect() {
+    use std::io::Read;
+
+    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
+
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let (mut br, _w) = serve_greeting(&stream, &cookie);
+
+        // After greeting, the client should DROP the connection
+        // (RawMode::enter failed, top::run returns Err, the
+        // CtlSocket is dropped). We assert NO data after
+        // greeting — specifically, no "18 13" DUMP_TRAFFIC
+        // request.
+        let mut buf = String::new();
+        // read_to_string blocks until EOF. EOF arrives when the
+        // client drops. Timeout via the join below if it hangs.
+        br.read_to_string(&mut buf).unwrap();
+        // `node.c:228`: "18 13" is `CONTROL REQ_DUMP_TRAFFIC`.
+        // Asserting it's NOT here proves raw-mode-failed-first.
+        assert!(
+            !buf.contains("18 13"),
+            "daemon got DUMP_TRAFFIC; raw mode should have failed first. got: {buf:?}"
+        );
+        // The buf SHOULD be empty (greeting consumed by serve_
+        // greeting, then nothing). Assert that too.
+        assert_eq!(buf, "", "expected EOF after greeting, got: {buf:?}");
+    });
+
+    // Stdin redirected to /dev/null (a pipe under cargo test
+    // anyway, but explicit). RawMode::enter → isatty(stdin) →
+    // false → "stdin is not a terminal".
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tinc"))
+        .args(["-c", &cb, "--pidfile", &pf, "top"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    daemon.join().unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The exact phrasing from `tui.rs::RawMode::enter`'s preflight.
+    // Wrapped by `top::run`: "cannot enter raw mode: stdin is not
+    // a terminal".
+    assert!(
+        stderr.contains("stdin is not a terminal"),
+        "expected tty error; got stderr: {stderr}"
+    );
+    // And NOT a daemon error — connect succeeded.
+    assert!(
+        !stderr.contains("Could not"),
+        "unexpected daemon error in stderr: {stderr}"
+    );
+}

@@ -28,6 +28,7 @@ pub mod init;
 pub mod invite;
 pub mod join;
 pub mod sign;
+pub mod top;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention
 /// is `return 1` on any error after `fprintf(stderr, ...)`. This
