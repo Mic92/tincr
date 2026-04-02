@@ -46,6 +46,25 @@ use tinc_tools::names::{Paths, PathsInput};
 /// One row of the dispatch table. Name, handler, one-line help.
 struct CmdEntry {
     name: &'static str,
+    /// `connect_tincd` commands. C: `commands[].ctl` (well — the C
+    /// table doesn't actually have that flag, the comment in 4a lied;
+    /// the C just calls `connect_tincd` inline in each cmd_*. But
+    /// the *intent* is the same: some commands need the daemon, some
+    /// don't.).
+    ///
+    /// When `true`, `main()` calls `paths.resolve_runtime()` before
+    /// dispatch. The fs probe (`access(2)` on `/var/run/tinc.pid`)
+    /// only fires for commands that need it. 4a commands like
+    /// `init` and `export` never reach for `pidfile()`, so the
+    /// `Option<PathBuf>` stays `None` and the panic-on-unresolved
+    /// catches accidental use.
+    ///
+    /// Why a flag and not a second table: the handler signature is
+    /// the same (`&Paths, &Globals, &[String]`). The 4a doc comment
+    /// predicted "separate table because `&mut CtlSocket` instead of
+    /// `&Paths`", but `connect()` takes `&Paths` and creates the
+    /// socket internally. Same shape, one table.
+    needs_daemon: bool,
     /// Positional args after the subcommand name. The handler does its
     /// own arity checking — `init` wants exactly one, `export` wants
     /// zero, etc. Passing `&[String]` instead of typed args keeps the
@@ -82,44 +101,50 @@ struct Globals {
 
 /// `tincctl.c:3000` `static const struct { ... } commands[]`.
 ///
-/// The C table has a `bool ctl` flag for "needs daemon connection".
-/// We don't — daemon-RPC commands aren't here yet (Phase 5b), and when
-/// they are, they'll go in a separate table because the function
-/// signature differs (they take a `&mut CtlSocket`, not `&Paths`).
-/// One table per dispatch shape, not one table with a union of shapes.
+/// 4a (filesystem) and 5b (daemon RPC) commands share one table —
+/// the signature is the same after all (`connect()` takes `&Paths`,
+/// creates its own socket). The `needs_daemon` flag drives whether
+/// `resolve_runtime()` runs before dispatch.
 const COMMANDS: &[CmdEntry] = &[
     CmdEntry {
         name: "init",
+        needs_daemon: false,
         run: cmd_init,
         help: "init NAME              Create initial configuration files.",
     },
     CmdEntry {
         name: "export",
+        needs_daemon: false,
         run: cmd_export,
         help: "export                 Export host configuration of local node to standard output",
     },
     CmdEntry {
         name: "export-all",
+        needs_daemon: false,
         run: cmd_export_all,
         help: "export-all             Export all host configuration files to standard output",
     },
     CmdEntry {
         name: "import",
+        needs_daemon: false,
         run: cmd_import,
         help: "import                 Import host configuration file(s) from standard input",
     },
     CmdEntry {
         name: "exchange",
+        needs_daemon: false,
         run: cmd_exchange,
         help: "exchange               Same as export followed by import",
     },
     CmdEntry {
         name: "exchange-all",
+        needs_daemon: false,
         run: cmd_exchange_all,
         help: "exchange-all           Same as export-all followed by import",
     },
     CmdEntry {
         name: "generate-ed25519-keys",
+        needs_daemon: false,
         run: cmd_genkey,
         help: "generate-ed25519-keys  Generate a new Ed25519 key pair.",
     },
@@ -129,32 +154,81 @@ const COMMANDS: &[CmdEntry] = &[
     // function that calls both keygens). Skip.
     CmdEntry {
         name: "sign",
+        needs_daemon: false,
         run: cmd_sign,
         help: "sign [FILE]            Generate a signed version of a file.",
     },
     CmdEntry {
         name: "verify",
+        needs_daemon: false,
         run: cmd_verify,
         help: "verify NODE [FILE]     Verify that a file was signed by the given NODE.",
     },
     CmdEntry {
         name: "fsck",
+        needs_daemon: false,
         run: cmd_fsck,
         help: "fsck                   Check the configuration files for problems.",
     },
     CmdEntry {
         name: "invite",
+        needs_daemon: false,
         run: cmd_invite,
         help: "invite NODE            Generate an invitation for NODE.",
     },
     CmdEntry {
         name: "join",
+        needs_daemon: false,
         run: cmd_join,
         help: "join INVITATION        Join a VPN using an invitation.",
     },
-    // 4a complete (modulo `edit`, deferred to 5b for its reload half).
-    // 5b commands (`dump`, `top`, `log`, `set`, `get`, ...) go in a
-    // separate table — they take `&mut CtlSocket`, not `&Paths`.
+    // ─── 5b: daemon RPC ───────────────────────────────────────────────
+    // The simple ones. Each is `connect → send → ack → check`.
+    // `dump`/`top`/`log`/`pcap` are the complex ones — streaming or
+    // multi-row — they land separately. `start`/`restart` need the
+    // daemon binary to exist.
+    CmdEntry {
+        name: "pid",
+        needs_daemon: true,
+        run: cmd_pid,
+        help: "pid                    Show PID of currently running tincd.",
+    },
+    CmdEntry {
+        name: "stop",
+        needs_daemon: true,
+        run: cmd_stop,
+        help: "stop                   Stop tincd.",
+    },
+    CmdEntry {
+        name: "reload",
+        needs_daemon: true,
+        run: cmd_reload,
+        help: "reload                 Partially reload configuration of running tincd.",
+    },
+    CmdEntry {
+        name: "retry",
+        needs_daemon: true,
+        run: cmd_retry,
+        help: "retry                  Retry all outgoing connections.",
+    },
+    CmdEntry {
+        name: "purge",
+        needs_daemon: true,
+        run: cmd_purge,
+        help: "purge                  Purge unreachable nodes.",
+    },
+    CmdEntry {
+        name: "debug",
+        needs_daemon: true,
+        run: cmd_debug,
+        help: "debug N                Set debug level.",
+    },
+    CmdEntry {
+        name: "disconnect",
+        needs_daemon: true,
+        run: cmd_disconnect,
+        help: "disconnect NODE        Close meta connection with NODE.",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -302,6 +376,92 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     // The URL is the secret. stdout only.
     println!("{}", *r.url);
     Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 5b adapters — the simple control commands
+// ────────────────────────────────────────────────────────────────────
+//
+// Each is: arity check → `cmd::ctl_simple::*`. The arity check is
+// the only thing the adapter adds; everything else (connect, send,
+// ack) is in the lib function. Same pattern as the 4a adapters.
+
+/// `cmd_pid`: zero args. Prints daemon's pid + newline.
+fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    let pid = cmd::ctl_simple::pid(paths)?;
+    // C: `printf("%d\n", pid)`. Stdout, newline.
+    println!("{pid}");
+    Ok(())
+}
+
+/// `cmd_stop`: zero args. Stops daemon, drains until socket closes.
+fn cmd_stop(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::ctl_simple::stop(paths)
+}
+
+/// `cmd_reload`: zero args.
+fn cmd_reload(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::ctl_simple::reload(paths)
+}
+
+/// `cmd_retry`: zero args.
+fn cmd_retry(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::ctl_simple::retry(paths)
+}
+
+/// `cmd_purge`: zero args.
+fn cmd_purge(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::ctl_simple::purge(paths)
+}
+
+/// `cmd_debug`: exactly one arg (the level). C `tincctl.c:1400`:
+/// `if(argc != 2)` — not optional, must be given. We extend: no arg
+/// queries the current level (sends -1, daemon returns current
+/// without changing). The C doesn't expose this but the daemon
+/// supports it (`control.c:88`: `if(new_level >= 0)`).
+fn cmd_debug(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let level = match args {
+        // Our extension: query mode.
+        [] => -1,
+        [lvl] => lvl
+            .parse()
+            .map_err(|_| CmdError::BadInput(format!("Invalid debug level {lvl:?}.")))?,
+        _ => return Err(CmdError::TooManyArgs),
+    };
+    let prev = cmd::ctl_simple::debug(paths, level)?;
+    // C: `"Old level %d, new level %d.\n"` to stderr (yes, stderr,
+    // `tincctl.c:1422`). We match. The query mode prints just the
+    // level (it's the answer to the question, goes to stdout).
+    if level < 0 {
+        println!("{prev}");
+    } else {
+        eprintln!("Old level {prev}, new level {level}.");
+    }
+    Ok(())
+}
+
+/// `cmd_disconnect`: exactly one arg (node name). C `tincctl.c:1471`.
+fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    match args {
+        [] => Err(CmdError::MissingArg("node name")),
+        [name] => cmd::ctl_simple::disconnect(paths, name),
+        _ => Err(CmdError::TooManyArgs),
+    }
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).
@@ -501,6 +661,17 @@ fn parse_global_options(
                 rest.push("--version".into());
                 return Ok((input, globals, rest));
             }
+            // `--pidfile=FILE`. C `tincctl.c:245`: `OPT_PIDFILE` →
+            // `pidfilename = xstrdup(optarg)`. Overrides the
+            // /var/run ↔ confbase resolution dance entirely. Only
+            // matters for 5b commands. No short form (C: long-only).
+            "--pidfile" => {
+                let val = args.next().ok_or("option --pidfile requires an argument")?;
+                input.pidfile = Some(PathBuf::from(val));
+            }
+            s if s.starts_with("--pidfile=") => {
+                input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
+            }
             // C `OPT_BATCH` sets `tty = false` — disables interactive
             // prompts. We have no prompts (see `cmd/init.rs` doc), so
             // -b is a no-op. Accept-and-ignore for compat with scripts
@@ -664,7 +835,19 @@ fn main() -> ExitCode {
         netname: input.netname.clone(),
         ..globals
     };
-    let paths = Paths::for_cli(&input);
+    let mut paths = Paths::for_cli(&input);
+
+    // 5b commands need pidfile/socket resolved. The probe touches
+    // the fs (`access(2)` on `/var/run/tinc.X.pid`) so we only do
+    // it for commands that need it. 4a commands stay probe-free —
+    // `tinc init` doesn't `stat /var/run` for no reason.
+    //
+    // The `&input` reborrow works because `for_cli` only borrows;
+    // `resolve_runtime` borrows again. (If for_cli consumed, we'd
+    // need `input.clone()` here.)
+    if entry.needs_daemon {
+        paths.resolve_runtime(&input);
+    }
 
     match (entry.run)(&paths, &globals, cmd_args) {
         Ok(()) => ExitCode::SUCCESS,

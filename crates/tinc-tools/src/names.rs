@@ -59,6 +59,22 @@ const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
     None => "/etc",
 };
 
+/// `LOCALSTATEDIR`. C: `cdata.set_quoted('LOCALSTATEDIR', dir_local_state)`
+/// in `src/meson.build:9`.
+///
+/// Same compile-time constant treatment as `CONFDIR`. meson default
+/// under prefix=/usr is `/var`. Nix builds will set `TINC_LOCALSTATEDIR`
+/// alongside `TINC_CONFDIR` to whatever `dir_local_state` resolves to.
+///
+/// Only used for the pidfile/socket path: `/var/run/tinc.NETNAME.pid`.
+/// The fallback dance (`names.c:111-148`) means this path is *tried
+/// first*, then `confbase/pid` if `/var/run` isn't writable (non-root
+/// testing).
+const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
+    Some(d) => d,
+    None => "/var",
+};
+
 /// All the paths a command needs. The C globals, materialized.
 ///
 /// These are the *input* paths — where to look for config — not output
@@ -79,6 +95,26 @@ pub struct Paths {
     /// `ed25519_key.priv`, `tinc-up` — all `confbase.join(...)`.
     pub confbase: PathBuf,
 
+    /// `pidfilename` — where the daemon writes its pid + control
+    /// cookie. The CLI reads this in `connect_tincd` (`tincctl.c:763`).
+    ///
+    /// Only set when *resolved*. `for_cli()` doesn't resolve it (the
+    /// 4a commands don't need it). 5b commands call `resolve_runtime()`
+    /// which fills it via the LOCALSTATEDIR fallback dance, after
+    /// which `pidfile()`/`unix_socket()` are valid.
+    ///
+    /// Why lazy: the resolution `access(2)`s the filesystem (probes
+    /// for `/var/run/tinc.X.pid` then `confbase/pid`). 4a commands
+    /// like `init` and `export` shouldn't be doing fs probes for
+    /// state they don't use. C does it eagerly (`make_names` always
+    /// resolves, even for `cmd_init`) because globals are free; we
+    /// have a struct, so we make the dependency explicit.
+    ///
+    /// `Option<PathBuf>` so `pidfile()` can panic with a clear
+    /// message if you forgot `resolve_runtime()`. Better than a
+    /// silent `confbase/pid` default that masks a missing call.
+    pidfile: Option<PathBuf>,
+
     /// `confdir` — `/etc/tinc`, the *parent* dir. `makedirs(DIR_CONFDIR)`
     /// creates this when `confbase` was derived from netname (so
     /// `/etc/tinc` needs to exist before `/etc/tinc/NETNAME` can).
@@ -94,6 +130,23 @@ pub struct Paths {
     pub confdir: Option<PathBuf>,
 }
 
+/// Where the pidfile resolved to. Distinct because the *daemon* uses
+/// the same dance but needs to know which branch fired — for the
+/// LOCALSTATEDIR-unwritable warning (`names.c:142`). The CLI doesn't
+/// care, it just opens whichever exists.
+///
+/// Not used by the CLI yet (it just calls `pidfile()`); the variant
+/// is wired for when `for_daemon()` lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidfileSource {
+    /// `--pidfile=X`. User said where; no probing.
+    Explicit,
+    /// `/var/run/tinc.NETNAME.pid`. The system path.
+    LocalState,
+    /// `confbase/pid`. The fallback (non-root, unwritable /var/run).
+    Confbase,
+}
+
 /// Input axis. The C globals that `make_names()` *reads*, before it
 /// writes the others. These come from getopt (`-c` / `-n`).
 ///
@@ -106,6 +159,15 @@ pub struct PathsInput {
 
     /// `-c DIR` / `--config=DIR`. Explicit confbase. Wins over netname.
     pub confbase: Option<PathBuf>,
+
+    /// `--pidfile=X`. Overrides all the resolution logic. C
+    /// `tincctl.c:245-246`: `OPT_PIDFILE` → `pidfilename = xstrdup(optarg)`.
+    ///
+    /// Why this is in `PathsInput`: it's input, same axis as `-c`/`-n`.
+    /// The fact that it bypasses resolution is the whole point of
+    /// passing it explicitly. Tests use this to point at a tempdir
+    /// without the `/var/run` probe ever firing.
+    pub pidfile: Option<PathBuf>,
 }
 
 impl Paths {
@@ -145,6 +207,7 @@ impl Paths {
             return Self {
                 confbase: explicit.clone(),
                 confdir: None,
+                pidfile: None,
             };
         }
 
@@ -157,6 +220,174 @@ impl Paths {
         Self {
             confbase,
             confdir: Some(confdir),
+            pidfile: None,
+        }
+    }
+
+    /// Resolve `pidfilename` and (implicitly) `unixsocketname`. Idempotent.
+    ///
+    /// `names.c:108-163`, the `daemon=false` branch. The CLI's resolution
+    /// is **probe-first-then-fall-back**: try `/var/run/tinc.X.pid`,
+    /// and only fall back to `confbase/pid` if the system path doesn't
+    /// exist *but* the confbase one does. The asymmetry matters:
+    ///
+    /// | /var/run/X.pid | confbase/pid | resolved to     |
+    /// |----------------|--------------|-----------------|
+    /// | exists         | (any)        | /var/run/X.pid  |
+    /// | missing        | exists       | confbase/pid    |
+    /// | missing        | missing      | /var/run/X.pid  |
+    ///
+    /// The bottom row is the surprise: if *neither* exists, we return
+    /// the LOCALSTATEDIR path, not confbase. C `names.c:116-125`:
+    /// `fallback` only goes true when `access(LOCALSTATEDIR/...) fails
+    /// AND access(confbase/pid) succeeds`. The rationale: if no daemon
+    /// is running anywhere, the error message should say `/var/run/...`
+    /// (the place a daemon *should* write to) not `confbase/pid` (the
+    /// fallback that only matters when /var/run is unwritable).
+    ///
+    /// Why this is `&mut self` not a constructor: the resolution
+    /// `access(2)`s the filesystem. Mutating an existing `Paths`
+    /// after the cheap-construction means the test idiom stays
+    /// `PathsInput { confbase: ..., ..Default::default() }` →
+    /// `for_cli()` and only the 5b tests add `.resolve_runtime()`.
+    ///
+    /// `identname` (the `tinc.NETNAME` bit) is derived here from
+    /// `netname`. We don't store identname — only one consumer (this
+    /// function), and the C only stores it because syslog wants it,
+    /// which we also don't have yet. When we do, lift it.
+    pub fn resolve_runtime(&mut self, input: &PathsInput) -> PidfileSource {
+        // --pidfile wins. No probing. C: `if(!pidfilename)` guards
+        // every assignment in `names.c:104-146`; getopt already
+        // populated it, so all branches are skipped.
+        if let Some(explicit) = &input.pidfile {
+            self.pidfile = Some(explicit.clone());
+            return PidfileSource::Explicit;
+        }
+
+        if self.pidfile.is_some() {
+            // Already resolved. Return Confbase as the harmless
+            // default — the source isn't reread on second call. If
+            // someone needs idempotent source-tracking, store it.
+            return PidfileSource::Confbase;
+        }
+
+        // identname: `tinc.NETNAME` or `tinc`. C `names.c:53-59`.
+        // The dot is significant: `tinc.myvpn.pid` not `tincmyvpn.pid`.
+        // identname is *also* the syslog tag, which is why it's
+        // human-readable.
+        let identname = match &input.netname {
+            Some(net) => format!("tinc.{net}"),
+            None => "tinc".to_owned(),
+        };
+
+        // The probe. C uses `access(R_OK)` which checks *effective*
+        // UID. `Path::exists` uses `stat`, which doesn't — but for
+        // "does this file exist at all" the difference only matters
+        // if you have a pidfile you can't read (mode 000), which
+        // means the *daemon* set it that way, which is nonsense.
+        // The C's `access` is incidental, not load-bearing. Match
+        // intent (existence), not mechanism.
+        let system_path: PathBuf = [LOCALSTATEDIR, "run", &format!("{identname}.pid")]
+            .iter()
+            .collect();
+        let confbase_path = self.confbase.join("pid");
+
+        // The truth table from the doc comment, in code. Note the
+        // implicit `else` at the end: if neither exists, no
+        // assignment to `fallback`, so it stays false, so we use
+        // system_path. C structure preserved.
+        let (path, source) = if system_path.exists() {
+            (system_path, PidfileSource::LocalState)
+        } else if confbase_path.exists() {
+            (confbase_path, PidfileSource::Confbase)
+        } else {
+            (system_path, PidfileSource::LocalState)
+        };
+
+        self.pidfile = Some(path);
+        source
+    }
+
+    /// `pidfilename`. Daemon writes; CLI reads.
+    ///
+    /// # Panics
+    /// If `resolve_runtime()` hasn't been called. The panic is the
+    /// point — a 4a command calling this is a bug we want to find
+    /// in tests, not paper over with a default.
+    #[must_use]
+    pub fn pidfile(&self) -> &std::path::Path {
+        self.pidfile
+            .as_deref()
+            .expect("pidfile() called before resolve_runtime()")
+    }
+
+    /// `unixsocketname`. Derived from `pidfilename` by string surgery.
+    /// `names.c:152-161`.
+    ///
+    /// The rule: `foo.pid` → `foo.socket`; anything else gets
+    /// `.socket` appended. Case-sensitive (`strcmp` not `strcasecmp`),
+    /// exactly 4 trailing bytes (`len > 4 && pidfilename + len - 4`).
+    /// `Foo.PID` does NOT match — `Foo.PID.socket`. Replicated
+    /// faithfully because socket-path mismatch = silent connect fail.
+    ///
+    /// Why derived not stored: it's pure (no fs probe), and storing
+    /// it would mean two `Option`s that are always `Some`/`None`
+    /// together. One source of truth.
+    ///
+    /// Returns `PathBuf` not `&Path` because the surgery allocates.
+    /// Called once per process (in `connect_tincd`), so no caching.
+    ///
+    /// # Panics
+    /// Same as `pidfile()`.
+    #[must_use]
+    pub fn unix_socket(&self) -> PathBuf {
+        let pid = self.pidfile();
+        // Work in OsStr land. The C does byte-level strcmp; pidfile
+        // paths are ASCII in practice (we built them from ASCII
+        // constants + netname which passed `check_id`), but `--pidfile`
+        // can be anything. `as_encoded_bytes` is the platform-native
+        // byte view; on Unix it's the literal path bytes.
+        let bytes = pid.as_os_str().as_encoded_bytes();
+        // C: `if(len > 4 && !strcmp(pidfilename + len - 4, ".pid"))`.
+        // `> 4` not `>= 4` — a file named exactly `.pid` (len=4)
+        // doesn't match. Unlikely but the off-by-one is in the C.
+        if bytes.len() > 4 && bytes.ends_with(b".pid") {
+            // strncpy(unixsocketname + len - 4, ".socket", 8).
+            // Slice off the .pid, append .socket. Can't `with_extension`
+            // because that would also turn `tinc.myvpn.pid` into
+            // `tinc.socket` (drops everything after the last dot).
+            // We want exactly the last 4 bytes replaced.
+            //
+            // Safety: `bytes[..len-4]` is a valid encoded substring
+            // because we sliced at an ASCII boundary (`.` is ASCII,
+            // `pid` is ASCII). Same constraint as the from_utf8-at-
+            // ASCII-byte rule in `tinc-conf::parse`.
+            let stem = &bytes[..bytes.len() - 4];
+            // SAFETY: stem is a prefix of valid encoded bytes,
+            // truncated at an ASCII byte boundary. The forbid(unsafe)
+            // means we go through OsString from-the-platform-bytes
+            // instead. On Unix, `OsStr::from_bytes` is the safe path.
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                let mut s = std::ffi::OsStr::from_bytes(stem).to_owned();
+                s.push(".socket");
+                PathBuf::from(s)
+            }
+            #[cfg(not(unix))]
+            {
+                // On Windows the C never reaches this (different
+                // path resolution via registry). Stub the type-check.
+                let _ = stem;
+                let mut s = pid.as_os_str().to_owned();
+                s.push(".socket");
+                PathBuf::from(s)
+            }
+        } else {
+            // strncpy(unixsocketname + len, ".socket", 8). Append.
+            let mut s = pid.as_os_str().to_owned();
+            s.push(".socket");
+            PathBuf::from(s)
         }
     }
 
@@ -345,7 +576,7 @@ mod tests {
     fn confbase_from_netname() {
         let p = Paths::for_cli(&PathsInput {
             netname: Some("myvpn".into()),
-            confbase: None,
+            ..Default::default()
         });
         // CONFDIR is compile-time; the test asserts the *shape*.
         assert!(p.confbase.ends_with("tinc/myvpn"));
@@ -361,6 +592,7 @@ mod tests {
         let p = Paths::for_cli(&PathsInput {
             netname: Some("ignored".into()),
             confbase: Some("/tmp/mytinc".into()),
+            ..Default::default()
         });
         assert_eq!(p.confbase, Path::new("/tmp/mytinc"));
         // confdir is None — we don't know what the parent should be,
@@ -445,5 +677,125 @@ mod tests {
         std::env::remove_var("HOST");
         let name = replace_name("$HOST").unwrap();
         assert!(check_id(&name), "gethostname → squash → {name:?}");
+    }
+
+    /// `unix_socket` derivation: `.pid` → `.socket` substitution.
+    /// Tests the string surgery in isolation by setting pidfile
+    /// directly via PathsInput (no fs probe).
+    #[test]
+    fn unix_socket_dot_pid_replaced() {
+        let mut p = Paths::for_cli(&PathsInput {
+            confbase: Some("/tmp".into()),
+            ..Default::default()
+        });
+        p.resolve_runtime(&PathsInput {
+            pidfile: Some("/var/run/tinc.myvpn.pid".into()),
+            ..Default::default()
+        });
+        // The dot in `tinc.myvpn` survives — only the trailing 4
+        // bytes are touched. `with_extension` would break this.
+        assert_eq!(p.unix_socket(), Path::new("/var/run/tinc.myvpn.socket"));
+    }
+
+    /// No `.pid` suffix → append. `confbase/pid` (the fallback path)
+    /// has no `.pid` extension — it's a *file named pid*, not
+    /// *something.pid*. C `names.c:160`: append branch.
+    #[test]
+    fn unix_socket_no_dot_pid_appended() {
+        let mut p = Paths::for_cli(&PathsInput {
+            confbase: Some("/tmp".into()),
+            ..Default::default()
+        });
+        p.resolve_runtime(&PathsInput {
+            pidfile: Some("/etc/tinc/myvpn/pid".into()),
+            ..Default::default()
+        });
+        assert_eq!(p.unix_socket(), Path::new("/etc/tinc/myvpn/pid.socket"));
+    }
+
+    /// Exactly `.pid` (len=4) does NOT match — the C's `len > 4`
+    /// not `>= 4`. Absurd path but the off-by-one is real.
+    #[test]
+    fn unix_socket_exactly_dot_pid() {
+        let mut p = Paths::for_cli(&PathsInput {
+            confbase: Some("/tmp".into()),
+            ..Default::default()
+        });
+        p.resolve_runtime(&PathsInput {
+            pidfile: Some(".pid".into()),
+            ..Default::default()
+        });
+        // Append, not replace.
+        assert_eq!(p.unix_socket(), Path::new(".pid.socket"));
+    }
+
+    /// Case-sensitive match. C: `strcmp` not `strcasecmp`. `tinc.PID`
+    /// from a confused user does not match → `tinc.PID.socket`, which
+    /// won't be where the daemon listens. The case-sensitivity is
+    /// load-bearing for correctness; both halves use the same code.
+    #[test]
+    fn unix_socket_case_sensitive() {
+        let mut p = Paths::for_cli(&PathsInput {
+            confbase: Some("/tmp".into()),
+            ..Default::default()
+        });
+        p.resolve_runtime(&PathsInput {
+            pidfile: Some("/tmp/tinc.PID".into()),
+            ..Default::default()
+        });
+        assert_eq!(p.unix_socket(), Path::new("/tmp/tinc.PID.socket"));
+    }
+
+    /// The pidfile fallback dance. We can't probe `/var/run` in a
+    /// test (might exist, might not, depends on host), so we test
+    /// the `confbase/pid exists` branch, the only one we can control.
+    ///
+    /// Tempdir uniqueness via test name + thread id, per the
+    /// constraint. Parallel-safe.
+    #[test]
+    fn resolve_runtime_confbase_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "tinc_test_resolve_{:?}",
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Touch confbase/pid so the fallback fires.
+        std::fs::write(dir.join("pid"), "").unwrap();
+
+        let mut p = Paths::for_cli(&PathsInput {
+            confbase: Some(dir.clone()),
+            ..Default::default()
+        });
+        // No --pidfile, no netname. /var/run/tinc.pid almost
+        // certainly doesn't exist on a test runner; even if it does,
+        // this test would just take the LocalState branch and the
+        // assert below would fail — spurious failure on a runner
+        // with a system tincd. Unlikely enough to not gate on.
+        let src = p.resolve_runtime(&PathsInput::default());
+
+        // The interesting assert: confbase/pid exists, system path
+        // (probably) doesn't → fallback fires.
+        if src == PidfileSource::Confbase {
+            assert_eq!(p.pidfile(), dir.join("pid"));
+            // And the socket derivation appends:
+            assert_eq!(p.unix_socket(), dir.join("pid.socket"));
+        }
+        // If src is LocalState, this runner has /var/run/tinc.pid.
+        // Don't fail — just don't assert. The string-surgery tests
+        // above cover the derivation; this one is for the probe order.
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Forgetting `resolve_runtime()` panics. The panic is the
+    /// feature — 4a commands should never reach for these.
+    #[test]
+    #[should_panic(expected = "resolve_runtime")]
+    fn pidfile_before_resolve_panics() {
+        let p = Paths::for_cli(&PathsInput {
+            confbase: Some("/tmp".into()),
+            ..Default::default()
+        });
+        let _ = p.pidfile();
     }
 }

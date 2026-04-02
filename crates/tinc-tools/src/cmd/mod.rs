@@ -17,6 +17,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+pub mod ctl_simple;
 pub mod exchange;
 pub mod fsck;
 pub mod genkey;

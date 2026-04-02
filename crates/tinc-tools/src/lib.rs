@@ -29,5 +29,6 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod cmd;
+pub mod ctl;
 pub mod keypair;
 pub mod names;

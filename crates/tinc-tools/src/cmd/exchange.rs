@@ -539,7 +539,7 @@ mod tests {
         fs::write(confbase.join("hosts").join(name), host_content).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
         (dir, paths)
     }
@@ -656,7 +656,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         let blob = "Name = alice\nSubnet = 10.0.1.0/24\nAddress = 192.0.2.1\n";
@@ -675,7 +675,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         let blob = format!(
@@ -702,7 +702,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         // Pre-existing alice.
@@ -734,7 +734,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         let blob = "Name = ../escape\nSubnet = 10.0.0.0/8\n";
@@ -751,7 +751,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         // Junk before first Name = warned and dropped.
@@ -771,7 +771,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         // No Name = line anywhere → count 0, no error (the binary
@@ -789,7 +789,7 @@ mod tests {
         fs::create_dir_all(confbase.join("hosts")).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
 
         // `Name=alice` (no spaces) → not a section header.
@@ -833,7 +833,7 @@ mod tests {
         fs::create_dir_all(import_base.join("hosts")).unwrap();
         let import_paths = Paths::for_cli(&PathsInput {
             confbase: Some(import_base),
-            netname: None,
+            ..Default::default()
         });
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
@@ -863,7 +863,7 @@ mod tests {
         fs::create_dir_all(import_base.join("hosts")).unwrap();
         let import_paths = Paths::for_cli(&PathsInput {
             confbase: Some(import_base),
-            netname: None,
+            ..Default::default()
         });
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
@@ -894,7 +894,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(dir.path().to_path_buf()),
-            netname: None,
+            ..Default::default()
         });
         // No tinc.conf → error mentioning the path.
         let err = get_my_name(&paths).unwrap_err();
@@ -911,7 +911,7 @@ mod tests {
         fs::write(confbase.join("tinc.conf"), "Port = 655\n").unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
-            netname: None,
+            ..Default::default()
         });
         let err = get_my_name(&paths).unwrap_err();
         let msg = format!("{err}");
