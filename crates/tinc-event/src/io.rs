@@ -262,12 +262,38 @@ impl<W: Copy> EventLoop<W> {
     pub fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
         out.clear();
 
-        // C linux/event.c:123-127. EINTR (signal during epoll_wait)
-        // is `sockwouldblock` in C → `continue`. mio handles EINTR
-        // internally on Linux (loops in `Selector::select`); on
-        // kqueue it returns Ok with empty events. Either way: not
-        // an error here.
-        self.poll.poll(&mut self.events, timeout)?;
+        // C `linux/event.c:125-132`: `epoll_wait()` then
+        // `if(n < 0) { if(sockwouldblock(sockerrno)) continue; else
+        // return false; }`. `sockwouldblock` is `EWOULDBLOCK || EINTR`
+        // (`utils.h:62`).
+        //
+        // mio does NOT swallow EINTR. Verified mio 1.2 `epoll.rs:60`:
+        // `syscall!(epoll_wait(...))` — the `syscall!` macro just
+        // `Err(last_os_error())`s on rc<0. EINTR comes through.
+        //
+        // EINTR happens when a signal arrives during `epoll_wait`.
+        // `SA_RESTART` does NOT auto-retry epoll_wait (it's in the
+        // "never restart" list; man 7 signal). So: every signal that
+        // arrives while we're in `epoll_wait` produces EINTR. The C
+        // `continue`s back to the top of `while(running)`; we return
+        // `Ok(())` with empty `out`, same effect (caller's loop
+        // re-ticks timers, re-calls turn).
+        //
+        // We could LOOP here (retry the epoll_wait without returning).
+        // C doesn't — it goes back through the timer check. We do the
+        // same: a signal might have re-armed a timer (it didn't, the
+        // handler is just write-one-byte, but the structure is sound).
+        // The self-pipe byte will be there next turn.
+        match self.poll.poll(&mut self.events, timeout) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                // Empty `out`, caller loops. The self-pipe is
+                // readable next turn (the signal handler wrote a
+                // byte before epoll_wait returned EINTR).
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
 
         // C `for(int i = 0; i < n; i++)` at :140
         for ev in &self.events {

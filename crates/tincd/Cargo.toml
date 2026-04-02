@@ -1,0 +1,42 @@
+[package]
+name = "tincd"
+version = "0.1.0"
+edition = "2021"
+
+# Phase 5 chunk 2: walking-skeleton daemon. Boots, opens dummy device,
+# binds unix control socket, serves REQ_STOP, exits 0. NO TCP/UDP
+# listeners yet (C-behavior-drop, restored in chunk 3).
+#
+# Proves: tinc-event dispatch enum compiles inside an actual loop body;
+# tinc-conf/tinc-device/tinc-event compose; ctl.rs talks to a real
+# daemon (tinc_cli.rs's fake_daemon_setup is the inverse of this).
+
+[[bin]]
+name = "tincd"
+path = "src/main.rs"
+
+[dependencies]
+tinc-conf = { path = "../tinc-conf" }
+tinc-device = { path = "../tinc-device" }
+tinc-event = { path = "../tinc-event" }
+tinc-proto = { path = "../tinc-proto" }
+
+# slotmap for ConnId. Generational keys: a stale ConnId can't dangle
+# into a slot reused by a different connection. The C uses raw
+# connection_t* and the io_tree.generation guard; we use opaque keys.
+slotmap = "1"
+
+# C `randomize` → OsRng. control.c:149 fills 32 bytes for the cookie.
+# rand_core 0.6 (NOT 0.9) — same as tinc-tools, keeps lock unified.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+log = "0.4"
+# Minimal env_logger: no anstream/anstyle/jiff/regex. RUST_LOG=tincd
+# substring filtering works without regex; that's enough.
+env_logger = { version = "0.11", default-features = false }
+
+libc = "0.2"
+
+[dev-dependencies]
+# Integration tests: tempdir for confbase, no other deps.
+# Hand-rolled TmpGuard (per the standing rule: NamedTempFile not used).
