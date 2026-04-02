@@ -27,7 +27,9 @@ libc = "0.2.184"
 # `uio` gates cmsg_space! + recvmsg + ControlMessageOwned. The
 # `socket` feature alone gives the AF_UNIX types but not the cmsg
 # machinery. Both needed.
-nix = { version = "0.29", default-features = false, features = ["socket", "uio"] }
+# `net` for `if_nametoindex` (raw_socket backend's SIOCGIFINDEX
+# substitution).
+nix = { version = "0.29", default-features = false, features = ["socket", "uio", "net"] }
 
 [dev-dependencies]
 # `geteuid()` for the root-skip in tests. `user` feature only.
