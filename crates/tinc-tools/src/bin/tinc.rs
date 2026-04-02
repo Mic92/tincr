@@ -315,6 +315,17 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_dump,
         help: "",
     },
+    // ─── info: node summary or route lookup ──────────────────────────
+    // C `tincctl.c:3011`: `{"info", cmd_info, true}`. Unlike
+    // `dump`'s `ctl=false`, info has `ctl=true` — it ALWAYS hits
+    // the daemon (no readdir-only path). So `needs_daemon: true`
+    // is exact, not a compromise.
+    CmdEntry {
+        name: "info",
+        needs_daemon: true,
+        run: cmd_info,
+        help: "info NODE|SUBNET|ADDRESS    Give information about a particular NODE, SUBNET or ADDRESS.",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -724,6 +735,43 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         println!("{line}");
     }
     // Empty dump → silent. C: zero-iteration while loop, return 0.
+    Ok(())
+}
+
+/// `cmd_info`: one arg (node name OR subnet OR address). C `info.c:
+/// 347-356` for dispatch + `tincctl.c:1378-1393` for the argv glue.
+///
+/// Bimodal output: node → one big block; subnet → zero-to-many
+/// `Subnet:/Owner:` pairs. The lib code returns `InfoOutput`; we
+/// route to print here.
+fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use cmd::info::{InfoOutput, info};
+
+    // C `tincctl.c:1380-1389`: `if(argc != 2)` → "Invalid number
+    // of arguments." Exactly one positional.
+    let item = match args {
+        [] => return Err(CmdError::MissingArg("node name, subnet, or address")),
+        [item] => item,
+        _ => return Err(CmdError::TooManyArgs),
+    };
+
+    match info(paths, item)? {
+        // Node mode: ready-to-print, trailing newline included
+        // (NodeInfo::format ends every line with `\n`). `print!`
+        // not `println!` to avoid a double-newline at the end.
+        InfoOutput::Node(s) => {
+            print!("{s}");
+        }
+        // Subnet mode: per-match block. C `info.c:325-327`:
+        // `printf("Subnet: %s\nOwner:  %s\n", ...)`. Two spaces
+        // after `Owner:` (column alignment with `Subnet:`).
+        InfoOutput::Subnet(matches) => {
+            for m in matches {
+                println!("Subnet: {}", m.subnet);
+                println!("Owner:  {}", m.owner);
+            }
+        }
+    }
     Ok(())
 }
 

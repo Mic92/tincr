@@ -280,13 +280,59 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
 // fake-daemon integration test (which sends a known status hex)
 // catches it.
 
-/// Field 4 of `node_status_t`. `node.h:38`: `bool reachable: 1;`.
-/// Preceded by `unused_active`, `validkey`, `waitingforkey`,
-/// `visited` — so bit 4 (counting from 0).
-const STATUS_REACHABLE: u32 = 1 << 4;
+/// `node_status_t` bit positions. `node.h:32-49`: a 13-field `bool:1`
+/// bitfield in a `u32` union. GCC packs LSB-first on x86-64 (and
+/// every target tinc builds on); bit N is field N counting from 0.
+///
+/// `dump` needs bits 1+4 (validkey/reachable). `info` needs the six
+/// that the `Status:` line prints (`info.c:128-152`). The daemon's
+/// port will define all 13 in its own `NodeStatus` type; for the CLI
+/// these are display-only, so a `u8` newtype + `is(bit)` is the lean
+/// answer. Public so `cmd::info` can share.
+///
+/// sed-verifiable against `node.h:33-46`: each line is `bool NAME: 1;`,
+/// position is line-order. The test `status_bits_match_node_h_order`
+/// pins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusBit(pub u32);
 
-/// Field 1 of `node_status_t`. `node.h:35`: `bool validkey: 1;`.
-const STATUS_VALIDKEY: u32 = 1 << 1;
+impl StatusBit {
+    /// `node.h:35`: `bool validkey: 1;`. Field 1 (after `unused_active`).
+    /// Set when we have a working session key for this node — SPTPS
+    /// or legacy KEY exchange completed. The DOT graph greens when
+    /// validkey AND `minmtu > 0`; else black.
+    pub const VALIDKEY: Self = Self(1 << 1);
+    /// `node.h:37`: `bool visited: 1;`. Field 3. Set during BFS
+    /// (`graph.c`) to mark seen nodes. Transient — cleared at the
+    /// start of each graph walk. Appearing in `info` output means
+    /// "the daemon's last BFS reached this node", which is the same
+    /// thing as `reachable` modulo timing (the bit's sticky between
+    /// the BFS-clear and the next set). Mostly noise, but C prints it.
+    pub const VISITED: Self = Self(1 << 3);
+    /// `node.h:38`: `bool reachable: 1;`. Field 4. The big one —
+    /// can we route packets to this node? `dump reachable nodes`
+    /// filters on it. `info` switches `Online since:` / `Last seen:`.
+    pub const REACHABLE: Self = Self(1 << 4);
+    /// `node.h:39`: `bool indirect: 1;`. Field 5. `via != self`.
+    /// UDP traffic to this node is relayed through another node
+    /// (typically because of `IndirectData = yes` in the host file,
+    /// or because it's behind a NAT we can't punch). The DOT graph
+    /// has a separate orange-via-relay color cascade arm.
+    pub const INDIRECT: Self = Self(1 << 5);
+    /// `node.h:40`: `bool sptps: 1;`. Field 6. Node speaks the new
+    /// (1.1+) handshake. Absence means legacy RSA + AES-CBC-HMAC,
+    /// which is `DISABLE_LEGACY`-gated in our build.
+    pub const SPTPS: Self = Self(1 << 6);
+    /// `node.h:41`: `bool udp_confirmed: 1;`. Field 7. We've SEEN a
+    /// UDP packet from this address (vs just sent to it hoping).
+    /// PMTU discovery sends probes; this bit means one came back.
+    pub const UDP_CONFIRMED: Self = Self(1 << 7);
+}
+
+// Backward-compat aliases for the existing dump.rs callers. Same
+// values, just the old names. Module-private — new code uses StatusBit.
+const STATUS_REACHABLE: u32 = StatusBit::REACHABLE.0;
+const STATUS_VALIDKEY: u32 = StatusBit::VALIDKEY.0;
 
 // ═══════════════════════════════════════════════════════════════════
 // NodeRow — the 22-field beast

@@ -23,6 +23,7 @@ pub mod dump;
 pub mod exchange;
 pub mod fsck;
 pub mod genkey;
+pub mod info;
 pub mod init;
 pub mod invite;
 pub mod join;
