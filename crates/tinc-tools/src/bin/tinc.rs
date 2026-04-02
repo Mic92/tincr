@@ -120,9 +120,17 @@ const COMMANDS: &[CmdEntry] = &[
     // dropped under DISABLE_LEGACY. Could alias `generate-keys` →
     // `generate-ed25519-keys`; the C does *not* (it's a distinct
     // function that calls both keygens). Skip.
-    //
-    // More 4a commands: sign, verify, fsck.
-    // 5b commands (dump, top, log, ...) go in a separate table.
+    CmdEntry {
+        name: "sign",
+        run: cmd_sign,
+        help: "sign [FILE]            Generate a signed version of a file.",
+    },
+    CmdEntry {
+        name: "verify",
+        run: cmd_verify,
+        help: "verify NODE [FILE]     Verify that a file was signed by the given NODE.",
+    },
+    // More 4a commands: fsck. 5b commands go in a separate table.
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -145,6 +153,43 @@ fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
         return Err(CmdError::TooManyArgs);
     }
     cmd::genkey::run(paths)
+}
+
+/// `cmd_sign`: optional file arg. C `tincctl.c:2770`.
+/// `t = time(NULL)` → `SystemTime::now().duration_since(UNIX_EPOCH)`.
+/// `as_secs()` returns `u64`; we need `i64` for the `%ld` format.
+/// `as i64` is safe until 292 billion CE.
+fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let input = match args {
+        [] => None,
+        [file] => Some(std::path::Path::new(file)),
+        [_, _, ..] => return Err(CmdError::TooManyArgs),
+    };
+    // `expect` is fine: `now() < UNIX_EPOCH` only on a system whose
+    // clock is set before 1970. The C `time(NULL)` would return
+    // `(time_t)-1` on the same system (and then `%ld` formats it as
+    // `-1`, and `verify`'s `!t` check passes — a different bug). We
+    // crash. Better.
+    #[allow(clippy::cast_possible_wrap)]
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_secs() as i64;
+    cmd::sign::sign(paths, input, t, std::io::stdout().lock())
+}
+
+/// `cmd_verify`: required signer arg, optional file arg.
+/// C `tincctl.c:2858`.
+fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let (signer_arg, input) = match args {
+        [] => return Err(CmdError::MissingArg("signer")),
+        [s] => (s, None),
+        [s, file] => (s, Some(std::path::Path::new(file))),
+        [_, _, _, ..] => return Err(CmdError::TooManyArgs),
+    };
+    let signer = cmd::sign::Signer::parse(signer_arg, paths)?;
+    cmd::sign::verify_cmd(paths, &signer, input, std::io::stdout().lock())
 }
 
 /// `cmd_export`: zero args, write to stdout.

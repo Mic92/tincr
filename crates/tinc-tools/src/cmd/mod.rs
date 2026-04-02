@@ -20,6 +20,7 @@ use std::path::PathBuf;
 pub mod exchange;
 pub mod genkey;
 pub mod init;
+pub mod sign;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention
 /// is `return 1` on any error after `fprintf(stderr, ...)`. This
