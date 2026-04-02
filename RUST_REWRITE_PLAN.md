@@ -23,8 +23,9 @@
 | 0b — SPTPS FFI harness | ✅ Done | `tinc-ffi: SPTPS C↔C harness...` | 6 tests; deterministic via seeded ChaCha20 RNG |
 | 0c — Wire-traffic corpus | | | |
 | 0d — CI baseline | | | |
-| 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115/115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
+| 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
+| **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust on real sockets, both modes, 64KB stream reassembly. 122 tests total. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | | | |
 | 5 — Daemon core | | | |
@@ -102,6 +103,7 @@ crates/
   tincd/                    # daemon binary
   tinc-cli/                 # `tinc` control client (replaces tincctl.c)
   tinc-ffi/                 # SPTPS-only bindgen wrapper, test-only
+  tinc-tools/               # sptps_test, sptps_keypair binaries
 xtask/                      # interop test harness
 ```
 
@@ -165,7 +167,7 @@ The 20 `sscanf` format strings in `protocol_*.c` are the spec; the corpus is the
 
 These have no I/O and are the safest place to start. They map almost 1:1 to existing C files.
 
-### 🟡 `tinc-proto` — mostly done
+### ✅ `tinc-proto` — done modulo intentional deferrals
 | C source | Rust module | Notes |
 |---|---|---|
 | ✅ `protocol.h` request enum | `request.rs` | `#[repr(u8)]`, `Request::peek()` is the `atoi` dispatch |
@@ -198,7 +200,7 @@ These have no I/O and are the safest place to start. They map almost 1:1 to exis
 
 **Phase 0c (wire corpus) didn't block.** The KAT strings were transcribed by hand from the format strings + integration test configs. Corpus would still strengthen the tests — promote to nice-to-have.
 
-### 🟡 `tinc-graph` — algorithms done, mutation deferred
+### ✅ `tinc-graph` — algorithms done, mutation deferred to first consumer
 | C source | Rust | Status |
 |---|---|---|
 | `splay_tree.c`, `list.c`, `hash.h` | `BTreeMap` / `Vec` / `VecDeque` | ✅ Not ported, replaced |
@@ -332,14 +334,34 @@ pub enum Event { Handshake, Record { type_: u8, data: Vec<u8> } }
 
 Maps directly to C `sptps_start`, `sptps_receive_data`, `sptps_send_record`, but **returns** bytes instead of invoking a callback — the caller does I/O.
 
-**Testing — this is where the budget goes:**
-1. **KAT:** Every `tinc-crypto` primitive passes Phase 0a vectors before SPTPS work starts.
-2. **Self-interop:** Rust initiator ↔ Rust responder.
-3. **Cross-interop:** Rust initiator ↔ C responder (via `tinc-ffi`), and the reverse. Run in a `#[test]` with both state machines stepped in lockstep, no sockets. **This is the single highest-value test in the project** — if it passes, the crypto is right.
-4. **Socket interop:** Rust `sptps_test` ↔ C `sptps_test` over Unix socket.
-5. **Fuzz:** `cargo-fuzz` target on `Sptps::receive` post-handshake. The C code has had CVEs here (replay window, length checks).
+**Testing — this is where the budget went:**
+1. ✅ **KAT:** Every `tinc-crypto` primitive passes Phase 0a vectors. Gate before any SPTPS code.
+2. ✅ **Self-interop:** Rust initiator ↔ Rust responder. (`tinc-sptps/tests/vs_c.rs::rust_self_handshake`)
+3. ✅ **Cross-interop:** Rust↔C in lockstep, no sockets. `byte_identical_wire_output` is stronger than the plan asked for — not just "handshake completes", but "same RNG seed → same wire bytes". Ed25519 accepts any valid sig over the right message; byte-identity proves we *built* the right message.
+4. ✅ **Rust↔Rust socket interop:** `tinc-tools/tests/self_roundtrip.rs`. Stream + datagram + 64KB reassembly. See `tinc-tools` below.
+5. ⏸️ **Rust↔C socket interop:** `sptps_basic.py` parameterized over `SPTPS_TEST_PATH`. Next CI job; the binaries exist.
+6. ⏸️ **Fuzz:** `cargo-fuzz` on `Sptps::receive`. The replay window and length checks are where the C has had CVEs.
 
-**Milestone binary:** `sptps_test` rewritten in Rust, interoperating with the C `sptps_test` over a socket. This is your first shippable artifact.
+### ✅ `tinc-tools` — first shippable binaries
+
+| Binary | C source | Status |
+|---|---|---|
+| `sptps_keypair` | `sptps_keypair.c` (140 LOC) | ✅ `OsRng` seed → `SigningKey::from_seed` → `tinc_conf::write_pem` × 2 |
+| `sptps_test` | `sptps_test.c` (747 LOC) | ✅ Spine: `poll()` loop bridging stdin↔socket through `Sptps`. Dropped: `--tun`, `--packet-loss`, `--special`, Windows stdin-thread. |
+
+The integration test (`tests/self_roundtrip.rs`) spawns both binaries as subprocesses — same shape as `test/integration/sptps_basic.py`, but a `cargo test`. Four cases: `stream_mode`, `datagram_mode`, `stream_swapped_roles`, and `stream_large_payload` (64 KiB — bigger than any TCP segment, forces kernel-level fragmentation, exercises the SPTPS stream-framing reassembly. `sptps_basic.py` only sends 256 bytes and never sees a partial record).
+
+**The binaries are `#![forbid(unsafe_code)]`.** nix 0.29 has an asymmetry: `poll()` takes `BorrowedFd` (safe via `AsFd`), `read()` still takes `RawFd` (the i32, also safe but untyped). The obvious-but-wrong reach was `unsafe { BorrowedFd::borrow_raw(0) }` for stdin; the right answer is `AsFd` for the typed handle and `AsRawFd` only at the `read()` call site.
+
+Three findings:
+
+- **UDP has no FIN.** The C "accepts" a UDP client by `recvfrom(MSG_PEEK)` to learn the peer address, then `connect()` to filter — the peeked datagram stays in the buffer for the main loop's first `recv()`. On shutdown the server `poll()` blocks forever; `sptps_basic.py` reads N bytes then `server.kill()`. We do the same, and that's correct: a UDP listener with no application-layer goodbye has no other option. (`reap(server, expect_clean: !datagram)`.)
+
+- **Dropping the read end of a child stderr pipe = `SIGPIPE`.** `wait_for_port` initially took `stderr` by value and dropped it on return → server's next `eprintln!("Connected")` got `EPIPE` → `SIGPIPE` → dead server. The 0.01s test duration was the tell — too fast for any real I/O. **This will bite the daemon's `script.c` port** (`popen()` of `tinc-up`, same shape: spawn, read until satisfied, drop pipe, child writes more). Fix here: hold the handle for the child's lifetime, drain to EOF on a thread. Noted forward.
+
+- **`Stdin::lock().read()` goes through a `BufReader`.** Would buffer past the requested size, breaking the `readsize=1460` datagram chunking (one stdin read → one wire datagram). C uses raw `read(2)`; we use `nix::unistd::read()` on `stdin.as_raw_fd()`.
+
+**"Listening on {port}...\n" is API.** `sptps_basic.py` regexes it to find the bound port (it passes `0` for ephemeral). Don't reword.
 
 ---
 
