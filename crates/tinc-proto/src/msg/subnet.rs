@@ -10,7 +10,7 @@
 //! we already know which it is.
 
 use crate::tok::{ParseError, Tok};
-use crate::{check_id, Request, Subnet};
+use crate::{Request, Subnet, check_id};
 
 /// Body of `ADD_SUBNET` or `DEL_SUBNET`.
 ///

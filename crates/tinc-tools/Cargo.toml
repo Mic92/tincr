@@ -1,0 +1,29 @@
+[package]
+name = "tinc-tools"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sptps_keypair"
+path = "src/bin/sptps_keypair.rs"
+
+[[bin]]
+name = "sptps_test"
+path = "src/bin/sptps_test.rs"
+
+[dependencies]
+tinc-crypto = { path = "../tinc-crypto" }
+tinc-sptps = { path = "../tinc-sptps" }
+tinc-conf = { path = "../tinc-conf" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["poll", "fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+pedantic = "warn"

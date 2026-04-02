@@ -513,7 +513,13 @@ Aggressively shed scope:
 
 ## Suggested Order of Shipping
 
-1. **`sptps_test` + `sptps_keypair` in Rust** — proves crypto interop, ~6 weeks in
+1. ✅ **`sptps_test` + `sptps_keypair` in Rust** — proves crypto interop. **Shipped as `tinc-tools`.** Rust↔Rust round-trips on real sockets, both modes; cross-impl with C via `sptps_basic.py` is the next CI job.
+
+   Three things the in-process differential test couldn't catch:
+
+   - **`OsRng` for real.** First time non-seeded entropy flows through key derivation.
+   - **TCP record splitting.** `stream_large_payload` pushes 64KB; the kernel fragments it, the SPTPS stream framing reassembles. The Phase 2 byte-identity test pumps whole records and never sees a partial.
+   - **The `SIGPIPE` footgun.** Found while writing the test, not by the test: dropping the read end of a child's stderr pipe means the child's next `eprintln!` is `EPIPE` → `SIGPIPE` → dead. Would have bitten the daemon's `script.c` port (it `popen()`s and reads; same shape). The test harness now holds stderr open for the child's lifetime and drains it on a thread.
 2. **`tinc` CLI in Rust** — talks to C daemon, real users, ~10 weeks in
 3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in

@@ -37,7 +37,7 @@
 
 use rand_core::RngCore;
 use tinc_crypto::sign::SigningKey;
-use tinc_ffi::{seed_rng, serial_guard, CKey, CSptps, Event};
+use tinc_ffi::{CKey, CSptps, Event, seed_rng, serial_guard};
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
 // ────────────────────────────────────────────────────────────────────
@@ -48,8 +48,8 @@ use tinc_sptps::{Framing, Output, Role, Sptps};
 // with key=seed, nonce=0, counter=0, encrypting zeros → raw keystream.
 // `chacha20::ChaCha20Legacy` is the same primitive.
 
-use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 use chacha20::ChaCha20Legacy;
+use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
 
 /// `RngCore` that produces the same bytes as the C harness's `randomize()`
 /// when both are seeded with the same 32-byte key.

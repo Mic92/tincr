@@ -25,7 +25,7 @@
 
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{check_id, Request};
+use crate::{Request, check_id};
 
 /// Body of `ADD_EDGE`. The optional `local` pair is post-1.0.24.
 ///

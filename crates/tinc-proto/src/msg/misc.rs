@@ -24,7 +24,7 @@
 
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{check_id, Request};
+use crate::{Request, check_id};
 
 // ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers

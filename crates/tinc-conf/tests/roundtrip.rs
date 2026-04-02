@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 
 use tinc_conf::pem::{read_pem, write_pem};
-use tinc_conf::{parse_line, Source};
+use tinc_conf::{Source, parse_line};
 
 /// Variable names: tinc only emits `[A-Za-z0-9]+`. The C
 /// `parse_config_line` doesn't validate (it just splits at `[\t =]`),
