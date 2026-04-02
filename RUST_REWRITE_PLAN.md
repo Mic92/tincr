@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | 🟡 6/11 | `tinc-tools: export/import/exchange...` | `init` + the 5 host-shipping commands. The full pre-daemon setup workflow works: `tinc init` → `tinc export \| ssh peer tinc import`. 185 tests + 9 cross-impl. Next: `generate-ed25519-keys`, `sign`/`verify`. |
+| **Ship #2 (4a) — `tinc` CLI** | 🟡 7/11 | `tinc-tools: generate-ed25519-keys...` | `init` + 5 host-shipping commands + key rotation. Full pre-daemon workflow done; rotation via `disable_old_keys` (comment-then-append, `#`-block survives in file as paper trail). 204 tests + 9 cross-impl. Next: `sign`/`verify`. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -461,7 +461,7 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 |---|---|
 | `tincctl.c` command dispatch | hand-rolled `match argv[1]` (same reasoning as `sptps_test`: clap is 10× deps for ~15 subcommands) |
 | `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
-| `tincctl.c` `cmd_generate_ed25519_keys` | `cmd/genkey.rs` — thin wrapper over `cmd::init`'s key codepath. The work is in `disable_old_keys` (`keys.c:10`, see below) |
+| `tincctl.c` `cmd_generate_ed25519_keys` | ✅ `cmd/genkey.rs` — `disable_old_keys` then append. Plan said "thin wrapper"; the wrapper is thin, the disable function is the substance |
 | `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
 | `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — see validated format below |
 | `fsck.c` | `cmd/fsck.rs` — see validated structure below; was underestimated |
@@ -534,16 +534,15 @@ Name = bob
 
 *After the export/import format guess turned out wrong, went back and read every remaining 4a function before estimating.*
 
-##### `generate-ed25519-keys` — small, but `disable_old_keys` was undercounted
+##### ✅ `generate-ed25519-keys` — landed (commit `tinc-tools: generate-ed25519-keys...`)
 
-`cmd_generate_ed25519_keys` (`tincctl.c:2351`) is a 5-line wrapper over `ed25519_keygen(true)` (`tincctl.c:356`), which itself is the same codepath `cmd_init` already uses — we have it. The new piece is `ask_and_open` (`tincctl.c:264`), which we'll strip the `ask` half from (no prompts, same deviation as `init`); what's left is `getcwd` + relative-path absolutization + `disable_old_keys` + `fopenmask`.
+The validated plan was right: `disable_old_keys` is the substance, the wrapper is 5 lines. **~700 LOC** including 14 unit tests. The `disable_old_keys` function itself is ~180 LOC of which ~100 is comments mapping each block to `keys.c` line numbers — the function is too easy to almost-get-right (the END check runs *after* the write, the no-match path unlinks rather than renames, etc.).
 
-`disable_old_keys` (`keys.c:10-100`) is **~90 LOC**, not 50. Read: open `filename`, write `filename.tmp` (preserving the original's `st_mode` via `fstat`+`fopenmask`), copy line-by-line; for any line starting `-----BEGIN ` containing ` ED25519 ` set `block=true` and prefix `#` until `-----END `; for any line `strncasecmp("Ed25519PublicKey", 16) && strchr(" \t=", buf[16])` prefix `#` for that one line; if anything was disabled, atomic `rename(tmpfile, filename)`, else `unlink(tmpfile)`. Two subtleties:
+**One finding worth keeping outside the commit message:** `open_append` does NOT `fchmod` after open. C `fopenmask` does (`fs.c:85` — `if(perms & 0444) fchmod`, which is always-true for any sane mode). So C clamps the private key back to `0600` on every genkey. If you `chmod 0400` (read-only-even-owner — paranoid but legal), C silently undoes it. We respect it. This is the rare "C behavior is the bug" call — recorded in `genkey.rs` because if a future fsck check warns on `0400` private keys, the asymmetry surfaces ("why did rotation stop fixing this?") and the answer is here.
 
-- The `Ed25519PublicKey` match is **prefix-16 + delimiter-at-16**, *not* a full token match. `Ed25519PublicKeyBackup = ...` survives (char 16 is `B`, not in `" \t="`). Different tokenizer than `is_name_line`'s strcspn=4 length check, different again from `tinc-conf`'s parser. This is the third hand-rolled config-line matcher in 4a; document the family in `cmd/mod.rs`.
-- **`what` is matched by `strstr`**, not equality — caller passes `"public Ed25519 key"` and the code does `strstr(what, "Ed25519")`. Any `what` containing `"Ed25519"` triggers the EC branch. We can drop the parameter (we never disable RSA) and just always run both checks.
+`TmpGuard` is hand-rolled, not `tempfile::NamedTempFile`. The latter picks `tmp.XXXXXX` in a system tempdir; C uses `<path>.tmp` in the *same dir as the target* — necessary for `rename(2)` to be atomic (same filesystem) and so a crash leaves an obviously-stale `ed25519_key.priv.tmp` not a mystery file in `/tmp`. The crate's `NamedTempFile::new_in()` would solve the same-dir part but not the predictable-name part. Hand-rolling is one struct + one Drop impl.
 
-Estimate: **~100 LOC** for `disable_old_keys` + tests, **~50 LOC** for the genkey wrapper. Small.
+`disable_old_keys` is now `pub` — `fsck` (still pending) uses it for the keypair-coherence-fix path.
 
 ##### `sign` / `verify` — wrapper format pinned, two non-obvious bits
 
@@ -586,12 +585,11 @@ Revised estimate: **~400 LOC fsck logic + ~100 LOC variables table (in `tinc-con
 
 | Command | Blocked on | Validated estimate |
 |---|---|---|
-| `generate-ed25519-keys` | `disable_old_keys` (`keys.c:10`, ~90 LOC: tmpfile, line-copy with `#`-prefix for PEM-block-or-`Ed25519PublicKey=`-line, atomic rename, preserve `st_mode`) | small (~150 LOC + tests) |
 | `sign` / `verify` | nothing — all primitives exist (`tinc-crypto::sign`, `tinc-conf::parse_file`, `get_my_name`). Envelope: `Signature = name time b64\n` + file; signed message is `file || " " || name || " " || time` with **load-bearing leading space** | medium (~250 LOC + tests) |
-| `fsck` | `disable_old_keys` (above), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
+| `fsck` | ~~`disable_old_keys`~~ ✅ (landed with genkey, `pub` for reuse), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
 
-**Ship order revised:** `generate-ed25519-keys` → `sign`/`verify` → `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
+**Ship order:** `sign`/`verify` → `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
 
 ### Phase 5b: RPC half + new control protocol
 
