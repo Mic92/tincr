@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc init`** | 🟡 1/7 | `tinc-tools: tinc init — first 4a...` | `tinc` binary exists, `init` works, 155 tests + 9 cross-impl. Dispatch table, `Paths` struct, `cmd/` scaffolding done. Next: `generate-keys`, `export`/`import`. |
+| **Ship #2 (4a) — `tinc` CLI** | 🟡 6/11 | `tinc-tools: export/import/exchange...` | `init` + the 5 host-shipping commands. The full pre-daemon setup workflow works: `tinc init` → `tinc export \| ssh peer tinc import`. 185 tests + 9 cross-impl. Next: `generate-ed25519-keys`, `sign`/`verify`. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -462,7 +462,7 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `tincctl.c` command dispatch | hand-rolled `match argv[1]` (same reasoning as `sptps_test`: clap is 10× deps for ~15 subcommands) |
 | `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
 | `tincctl.c` `cmd_generate_ed25519_keys` | `cmd/genkey.rs` — already have `keypair::generate`, just need the host-file output path |
-| `tincctl.c` `cmd_export`/`cmd_import` | `cmd/exchange.rs` — read `hosts/NAME`, wrap in `#---------- BEGIN HOST NAME ----------#` markers, mirror for import |
+| `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
 | `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — `tinc-crypto::sign` over a file, with a tinc-specific signature wrapper |
 | `fsck.c` | `cmd/fsck.rs` — config sanity checker. Reads `tinc.conf` + `hosts/*`, complains about missing keys, bad perms, etc. ~400 LOC of `if(!x) fprintf(stderr, ...)` |
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
@@ -496,13 +496,45 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `check_port` (try-bind-655, random fallback) | Best-effort QoL that often picks a port your firewall doesn't allow. Better to fail loudly at first daemon start. |
 | RSA keygen | `DISABLE_LEGACY` is permanently on. |
 
+#### ✅ What landed (commit `tinc-tools: export/import/exchange...`)
+
+| File | LOC | What |
+|---|---|---|
+| `src/cmd/exchange.rs` | ~920 | All five host-shipping commands. `get_my_name` via `tinc-conf` (the C copy-pastes the strcspn/strspn tokenizer; we don't), `export_one`/`export_all`/`import` with `impl Write`/`BufRead` parameterization. |
+| `src/names.rs` | +152 | `replace_name` — `$HOST`/`$FOO` env-var expansion + non-alnum→`_` squash. `nix::unistd::gethostname` for the `$HOST` fallback. |
+| `src/bin/tinc.rs` | +156 | 5 dispatch entries; `Globals { force }` threaded through dispatch sig; `--force` parsing. |
+| `tests/tinc_cli.rs` | +239 | 8 integration tests. `export_import_workflow` is the contract test — alice's export → bob's import → byte-identical `hosts/alice`. |
+
+**The blob format wasn't what the plan guessed.** Plan said `#-- BEGIN HOST NAME --#` markers. Actually: `Name = X` *is* the framing — export injects it, import parses it. The `#---63 dashes---#` line is the *separator* between hosts in `export-all`, not a per-host wrapper. Shape:
+
+```
+Name = alice
+<hosts/alice contents, with any Name= lines stripped>
+
+#---------------------------------------------------------------#
+Name = bob
+<hosts/bob contents>
+```
+
+**Three findings:**
+
+- **`replace_name`'s squash is asymmetric on purpose.** Non-alnum→`_` only fires for the `$`-prefix branch — the C's for-loop is *inside* `if(name[0]=='$')`. So `Name = my-laptop` fails `check_id` (dash rejected), but `Name = $HOST` on a machine called `my-laptop` succeeds (becomes `my_laptop`). It's a convenience for hostnames, not a general sanitizer. `replace_name_literal` vs `replace_name_envvar_squashes` tests pin the asymmetry.
+
+- **The `Name =` filter on export is a `strcspn` length check, not a prefix match.** `strcspn(buf, "\t =") != 4 || strncasecmp(buf, "Name", 4)`. So `Namespace = foo` survives (strcspn=9), `Named = foo` survives (strcspn=5), and ` Name = foo` with a leading space *also* survives (strcspn=0) — even though `tinc-conf` would parse it as a `Name` line. The leading-space case is a C bug; replicated, because the cost of fixing is a behavioral diff and the cost of replicating is one comment. Test: `name_line_filter`.
+
+- **import's `Name = ` match is `sscanf`-exact.** `sscanf("Name = %s")` matches `Name = foo` only — `Name=foo`, `name = foo`, ` Name = foo` all return 0. Export always writes the canonical form so this is invisible in practice; replicated because looser matching could turn a host-file comment containing `Name=something` into a section boundary. Test: `import_name_format_is_exact`.
+
+**One intentional deviation: `export-all` sorts.** The C uses `readdir` order (filesystem-dependent — ext4 ≠ tmpfs ≠ btrfs). We sort. `tinc export-all > all.txt` is now diffable across machines, and tests don't depend on tmpfs hash order.
+
+**`Globals` struct, not `Paths` extension.** `--force` (and eventually `tty`) are behavior toggles, not paths. Different concern; different lifetime — a future shell mode resets `force` per-command but keeps `Paths`. Threading as a struct (vs the C's bare global) means a command's signature *says* whether it cares: `cmd_init(_, _: &Globals, _)` vs `cmd_import(_, g: &Globals, _)`.
+
+**`exchange` doesn't `fclose(stdout)`.** The C does `if(!tty) fclose(stdout)` after export so the pipe's other end sees EOF before import starts. We don't — the OS pipe buffer means import can start reading while export is writing (full-duplex `exchange | ssh peer exchange` doesn't deadlock unless export-side output exceeds the pipe buffer, which is 64KB on Linux, enough for ~1000 host files). If it ever hangs, revisit; the C's explicit close may be a workaround for exactly that. Noted in `cmd_exchange`'s adapter doc.
+
 #### Remaining 4a commands
 
 | Command | Blocked on | Estimate |
 |---|---|---|
 | `generate-ed25519-keys` | `disable_old_keys` (rewrites file commenting out old PEM blocks before append) — ~50 LOC | small |
-| `export` / `export-all` | nothing — read `hosts/NAME`, wrap in `#-- BEGIN HOST --` markers | small |
-| `import` | `check_id` on the parsed name (have it), append-write to `hosts/NAME` | small |
 | `sign` / `verify` | the tinc-specific signature wrapper format (`tincctl.c:2770`) | medium |
 | `fsck` | nothing structural — it's ~400 LOC of `if(!x) eprintln!` | medium-tedious |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
