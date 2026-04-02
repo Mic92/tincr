@@ -366,6 +366,47 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_pcap,
         help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
     },
+    // ─── edit: spawn $EDITOR on a config file, then reload ────────
+    // C `tincctl.c:3034`: `{"edit", cmd_edit, false}`. The `false`
+    // means "doesn't need pre-connect" — the reload AFTER edit is
+    // best-effort. We set `needs_daemon: true` anyway so the
+    // pidfile path gets resolved (the silent reload needs it).
+    // The connect-can-fail is INSIDE cmd::edit::run.
+    //
+    // C help: NOT LISTED. `tincctl.c:139-202` (the usage block)
+    // has no `edit` line. Undocumented in C. We list it; it's
+    // useful.
+    CmdEntry {
+        name: "edit",
+        needs_daemon: true,
+        run: cmd_edit,
+        help: "edit FILE                   Edit a config file with $VISUAL/$EDITOR/vi",
+    },
+    // ─── version, help: trivial dispatchers ────────────────────────
+    // C `tincctl.c:3031-3032`. `tinc help` ≡ `tinc --help`, `tinc
+    // version` ≡ `tinc --version`. The C `cmd_help` calls `usage(
+    // false)` (`:2370`); `cmd_version` calls `version()` (`:2383`).
+    // Both ignore args (well, version checks `argc > 1`).
+    //
+    // `needs_daemon: false` — these need NOTHING. The Paths is
+    // resolved unconditionally by main but unused.
+    //
+    // Help text is empty: listing `help` in `--help`'s output is
+    // recursive; the user already found it. The C lists neither
+    // (no `version`/`help` lines in the usage block). Our `help:
+    // ""` makes the --help printer skip them.
+    CmdEntry {
+        name: "version",
+        needs_daemon: false,
+        run: cmd_version,
+        help: "",
+    },
+    CmdEntry {
+        name: "help",
+        needs_daemon: false,
+        run: cmd_help,
+        help: "",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -882,6 +923,48 @@ fn cmd_pcap(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     cmd::stream::run_pcap(paths, snaplen)
 }
 
+/// `cmd_edit`: shorthand resolves to confbase or hosts/, spawn
+/// editor, silent reload. `tincctl.c:2410-2472`.
+///
+/// `tinc edit tinc.conf` → `vi /etc/tinc/.../tinc.conf`.
+/// `tinc edit alice` → `vi /etc/tinc/.../hosts/alice`.
+///
+/// The C `argc != 2` check (`:2412`): exactly one arg.
+fn cmd_edit(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let [file] = args else {
+        // C: `"Invalid number of arguments."` Same message for
+        // 0 and 2+.
+        return Err(CmdError::BadInput("Invalid number of arguments.".into()));
+    };
+    cmd::edit::run(paths, file)
+}
+
+/// `cmd_version`: `tincctl.c:2374-2384`. Print and exit. `argc > 1`
+/// is `TooManyArgs` (`:2378`). The print itself is `print_version()`
+/// from this binary — same fn `--version` calls.
+fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        // C `tincctl.c:2378`: `"Too many arguments!"`.
+        return Err(CmdError::TooManyArgs);
+    }
+    print_version();
+    Ok(())
+}
+
+/// `cmd_help`: `tincctl.c:2366-2372`. Print and exit. The C
+/// IGNORES args (`(void)argc; (void)argv`); `tinc help foo` is
+/// the same as `tinc help`. Match it. (Per-subcommand help would
+/// be nice but the C doesn't have it; YAGNI.)
+///
+/// `clippy::unnecessary_wraps`: the dispatch table needs `fn(
+/// &Paths, &Globals, &[String]) -> Result<_,_>`. Can't return
+/// `()`. The wrap IS the table contract.
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
+    print_help();
+    Ok(())
+}
+
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).
 /// C `invitation.c:1218`.
 ///
@@ -1178,8 +1261,10 @@ fn print_help() {
         }
     }
     println!();
-    println!("Streaming commands (dump, top, log, pcap) and start/restart");
-    println!("land with the daemon. See RUST_REWRITE_PLAN.md.");
+    // Footer: only the daemon-gated commands left. The streaming
+    // ones (dump/top/log/pcap) all landed; remove them from the
+    // "coming soon" list.
+    println!("start/restart land with the daemon. See RUST_REWRITE_PLAN.md.");
 }
 
 fn print_version() {

@@ -82,6 +82,282 @@ fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
     cmd.output().expect("spawn tinc")
 }
 
+/// `tinc edit` integration. Doesn't spawn a real editor; we set
+/// `EDITOR` to `/bin/true` (always exits 0) or `/bin/false`
+/// (always exits 1) and assert the exit-code path.
+///
+/// What this DOESN'T cover: the silent-reload (no daemon up).
+/// What it DOES cover: the path resolution, the editor spawn, the
+/// exit-code mapping.
+mod edit_integration {
+    use super::tinc;
+
+    /// `EDITOR=true tinc edit alice` → exits 0. `true` exits 0,
+    /// no reload (no daemon), `Ok(())` → exit 0.
+    ///
+    /// `env_remove("VISUAL")` is essential: `pick_editor()`
+    /// checks VISUAL FIRST. The parent env might have it set;
+    /// `tinc_with_env` only adds, doesn't remove. Inline.
+    #[test]
+    fn edit_true_exits_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        // Remove BOTH first (parent env might have either), then
+        // set EDITOR. `Command::env_remove` is the way.
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", cb, "edit", "alice"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", "true")
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `EDITOR=false` → editor exits 1 → our exit nonzero.
+    /// `tincctl.c:2461`: `if(result) return result`.
+    #[test]
+    fn edit_false_exits_nonzero() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", cb, "edit", "alice"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", "false")
+            .output()
+            .unwrap();
+
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Our error message includes the editor name and the
+        // status. `tincctl.c` just returns the int silently;
+        // we say what failed.
+        assert!(stderr.contains("false"), "stderr: {stderr}");
+        assert!(stderr.contains("exited"), "stderr: {stderr}");
+    }
+
+    /// `EDITOR=echo tinc edit alice` → stdout has the resolved
+    /// path. THE path-resolution proof: echo prints argv[1].
+    ///
+    /// Pins `resolve()` end-to-end through `sh -c '$TINC_EDITOR
+    /// "$@"'`. The path on stdout is the one `"$@"` expanded to.
+    #[test]
+    fn edit_echo_shows_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", cb, "edit", "alice"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", "echo")
+            .output()
+            .unwrap();
+
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // The path: confbase/hosts/alice. echo adds a newline.
+        let expected = confbase.join("hosts").join("alice");
+        assert_eq!(
+            stdout.trim_end(),
+            expected.to_str().unwrap(),
+            "stdout: {stdout}"
+        );
+    }
+
+    /// `EDITOR="echo arg"` (with space) → shell tokenizes →
+    /// `argv = [echo, arg, <path>]` → stdout `"arg <path>"`.
+    ///
+    /// THE proof that `sh -c '$TINC_EDITOR "$@"'` word-splits the
+    /// editor. The C `system("\"%s\" ...")` ALSO does this (the
+    /// double-quote in the C is around the WHOLE editor string,
+    /// `"echo arg"`, which the shell THEN — wait no, double-quoted
+    /// is NOT split in shell. The C does `"echo arg" "filename"`,
+    /// shell parses `"echo arg"` as ONE token, exec("echo arg")
+    /// fails ENOENT. So the C DOESN'T support spacey EDITOR! Only
+    /// `system()` without the wrapping quotes would.
+    ///
+    /// We DO support it (via unquoted `$TINC_EDITOR`). BETTER
+    /// than C. The test pins it.
+    #[test]
+    fn edit_spacey_editor_tokenized() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", cb, "edit", "alice"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            // Editor with an arg. The shell splits.
+            .env("EDITOR", "echo extraarg")
+            .output()
+            .unwrap();
+
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let path = confbase.join("hosts").join("alice");
+        // `echo extraarg <path>` → stdout `extraarg <path>\n`.
+        assert_eq!(stdout.trim_end(), format!("extraarg {}", path.display()));
+    }
+
+    /// `EDITOR=echo`, file with `$` in the name — NOT expanded.
+    /// THE shell-safety proof: `"$@"` quotes the arg.
+    ///
+    /// The C `system("\"echo\" \"$HOME\"")` would expand `$HOME`
+    /// (it's inside double-quotes IN THE SHELL). We don't.
+    ///
+    /// `tinc edit '$HOME'` with sh-reachable input: our argv
+    /// parser gets it literal (`$HOME` as a string). resolve()
+    /// sees `"$HOME"`, no slash, no dash, no `..` — `hosts_dir/
+    /// $HOME`. The `"$@"` keeps the `$` literal.
+    ///
+    /// Can't test the C case (we don't run the C binary). We test
+    /// our case: `$` stays literal in stdout.
+    #[test]
+    fn edit_dollar_in_filename_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        // Set HOME to something recognizable so if it DOES expand
+        // we see it.
+        let out = std::process::Command::new(super::bin("tinc"))
+            // `$HOME` literal (cargo passes argv verbatim).
+            .args(["-c", cb, "edit", "$HOME"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", "echo")
+            .env("HOME", "/tmp/WRONG")
+            .output()
+            .unwrap();
+
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // `$HOME` LITERAL in the path. NOT `/tmp/WRONG`.
+        assert!(stdout.contains("$HOME"), "stdout: {stdout}");
+        assert!(!stdout.contains("/tmp/WRONG"), "stdout: {stdout}");
+    }
+
+    /// Invalid arg count: `tinc edit` (none) and `tinc edit a b`
+    /// (two) both error. C `tincctl.c:2412`: `argc != 2`.
+    #[test]
+    fn edit_argc_check() {
+        let out = tinc(&["edit"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid number of arguments"));
+
+        let out = tinc(&["edit", "a", "b"]);
+        assert!(!out.status.success());
+    }
+
+    /// `tinc edit ../etc/passwd` — our STRICTER reject. The C
+    /// would resolve to `hosts_dir/../etc/passwd` and run vi.
+    #[test]
+    fn edit_reject_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let cb = confbase.to_str().unwrap();
+        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
+
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", cb, "edit", "../etc/passwd"])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", "echo")
+            .output()
+            .unwrap();
+
+        assert!(!out.status.success());
+        // echo NEVER ran. Stdout is empty.
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// version, help — trivial dispatcher tests
+// ────────────────────────────────────────────────────────────────────
+
+/// `tinc version` ≡ `tinc --version`. Same stdout. C `tincctl.c
+/// :2383`: `version()` is the same fn the option calls.
+#[test]
+fn version_subcommand_same_as_option() {
+    let out_cmd = tinc(&["version"]);
+    let out_opt = tinc(&["--version"]);
+    assert!(out_cmd.status.success());
+    assert!(out_opt.status.success());
+    assert_eq!(out_cmd.stdout, out_opt.stdout);
+    // Contains the package name and "(Rust)".
+    let s = String::from_utf8_lossy(&out_cmd.stdout);
+    assert!(s.contains("tinc"), "stdout: {s}");
+    assert!(s.contains("(Rust)"), "stdout: {s}");
+}
+
+/// `tinc version foo` → too many args. C `:2378`.
+#[test]
+fn version_too_many_args() {
+    let out = tinc(&["version", "foo"]);
+    assert!(!out.status.success());
+}
+
+/// `tinc help` ≡ `tinc --help`. C `:2370`: `usage(false)`.
+#[test]
+fn help_subcommand_same_as_option() {
+    let out_cmd = tinc(&["help"]);
+    let out_opt = tinc(&["--help"]);
+    assert!(out_cmd.status.success());
+    assert!(out_opt.status.success());
+    assert_eq!(out_cmd.stdout, out_opt.stdout);
+}
+
+/// `tinc help foo` → still works (C ignores args, `:2368`).
+#[test]
+fn help_ignores_args() {
+    let out = tinc(&["help", "foo", "bar"]);
+    assert!(out.status.success());
+}
+
+/// Help output doesn't list `help` or `version` (recursive). The
+/// `help: ""` empty string makes print_help skip them.
+#[test]
+fn help_does_not_list_itself() {
+    let out = tinc(&["help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The COMMANDS section doesn't have `help`/`version` lines.
+    // (The OPTIONS section has `--help`/`--version`, that's fine.)
+    // Check no line starts with `  help` or `  version` (the
+    // indented command-list format).
+    for line in stdout.lines() {
+        assert!(
+            !line.trim_start().starts_with("help "),
+            "help listed in: {line}"
+        );
+        // `version` would be `version    ...` if listed. Check
+        // it doesn't appear as a command (vs `--version` option).
+        // De Morgan: `!(a && !b)` = `!a || b`.
+        assert!(
+            !line.starts_with("  version") || line.contains("--"),
+            "version listed in: {line}"
+        );
+    }
+}
+
 /// Run `tinc` with stdin fed from a byte slice. For `import`/`exchange`.
 fn tinc_stdin(args: &[&str], stdin: &[u8]) -> std::process::Output {
     let mut child = Command::new(bin("tinc"))
