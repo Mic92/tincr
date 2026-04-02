@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-conf: variables[] table...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. `variables[]` (74 entries, fsck's last `tinc-conf` blocker) landed alongside. 235 tests + 9 cross-impl. fsck has one prereq left (`read_server_config` wrapper, ~50 LOC); `edit` defers to 5b. |
+| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-conf: read_server_config...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. **fsck fully unblocked** — all four prereqs landed in `tinc-conf`/`tinc-tools`. 243 tests + 9 cross-impl. Found upstream bug `40719189` while porting (broke `conf.d/` two days ago); ported pre-regression behavior. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -246,7 +246,7 @@ The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` ty
 | `ecdsa.c` `read_pem` / `ecdsagen.c` `write_pem` | `pem::{read,write}_pem` | ✅ `Zeroizing` everywhere keys flow |
 | `conf_net.c` `get_config_subnet` | — | ⏸️ Daemon glue: `tinc-proto::Subnet::from_str` already does the parse |
 | `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
-| `conf.c` `read_server_config` (`conf.d/` scan, `cmdline_conf` merge) | — | ⏸️ **Next** — fsck's last blocker. Pieces (`parse_file` + `Config::merge`) here. |
+| `conf.c` `read_server_config` (`conf.d/` scan) | `parse::read_server_config` | ✅ cmdline merge skipped (daemon-only, fsck sees empty list). Ports pre-`40719189` behavior — see fsck note |
 | `tincctl.c` `variables[]` (74 entries) | `vars::{VARS, VarFlags, lookup}` | ✅ Order preserved incl. alpha-break; sed-diff verified. +3 invariants the C never asserts |
 | `names.c` | — | ✅ `tinc-tools::names` — first consumer was `tinc init`, not the daemon. Subset: `confbase`/`confdir` only; `pidfilename`/`unixsocketname` come with 5b. |
 | `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
@@ -574,16 +574,20 @@ One deviation noted at point of decision: header parse is split-on-single-space 
   3. **Script executability** (`check_script_confdir` + `check_script_hostdir`, `keys.c:448-528`): scan confbase and `hosts/` for `tinc-up`, `tinc-down`, `host-up`, `host-down`, `subnet-up`, `subnet-down`, `<hostname>-up`, `<hostname>-down`; check `access(R_OK|X_OK)`; with `--force`, `chmod 0755`.
   4. **File modes** (`check_key_file_mode`, `keys.c:205`): warn if private key isn't `0600`.
 
-- **Uses `read_server_config` + `read_host_config`** (`conf_net.c`), the daemon's config-tree builder — not the bare `parse_file`. The merge-multiple-files-and-conf.d wrapper is **~50 LOC** and the pieces are already here. Pull it forward.
+**`read_server_config` landed** (commit `tinc-conf: read_server_config...`). Found while porting: **upstream commit `40719189` (2026-03-30, "Fix warnings from clang-tidy-23") broke `conf.d/` entirely** — `if(!dir && ENOENT) return true; else return false;` falls to else when `opendir` succeeds, returning false before the `readdir` loop. Any HEAD `tincd` with a `conf.d/` directory fails to start. We port the pre-`40719189` behavior (2017 logic, 9 years stable). `server_confd_head_bug_not_ported` is the regression test. Second breakage same commit: `conf.d` as a regular file (`echo > conf.d` accident) used to soft-skip, now fails (`ENOTDIR ≠ ENOENT`). Also pinned. **Upstream patch is a one-liner; not on critical path but worth filing.**
 
-Remaining fsck cost: **~400 LOC fsck logic + ~50 LOC config-tree wrapper**. The `variables[]` table came in over estimate (~500 LOC vs ~100 guessed), but ~half of that is module-doc + structural-invariant tests we didn't plan for and the C never had. Data portion was ~150 LOC.
+`read_host_config` intentionally not a function — it's `cfg.merge(parse_file(hosts/NAME)?)`, two lines, a wrapper would obscure that the host file is just another file. `cmdline_conf` merge skipped: populated only by `tincd -o`, fsck sees an empty list (rg confirms `tincctl.c` never touches it).
+
+Three intentional tightenings, each a one-line allow/comment at the line: `conf.d` entries sorted before merge (readdir order is fs-dependent and lookup-invisible anyway, sorting just makes `entries()` dump deterministic), `read_dir` errors propagate (C's `readdir` returns NULL on both error and EOF, fsck would read transient I/O errors as "no findings"), `.conf` suffix case-sensitive (clippy suggested `eq_ignore_ascii_case`; that diverges from `strcmp`).
+
+Remaining fsck cost: **~400 LOC**, all in `tinc-tools`. Prereq estimate was ~150 LOC across `tinc-conf`; actual ~840 (table 504 + wrapper 339), ~half doc/tests.
 
 | Command | Blocked on | Validated estimate |
 |---|---|---|
-| `fsck` | ~~`disable_old_keys`~~ ✅ ~~pubkey loader~~ ✅ ~~`variables[]`~~ ✅ — only `read_server_config` wrapper left (→ `tinc-conf`, ~50 LOC) | **medium (~450 LOC)** |
+| `fsck` | **nothing** — ~~`disable_old_keys`~~ ~~pubkey loader~~ ~~`variables[]`~~ ~~`read_server_config`~~ all landed | **medium (~400 LOC)** |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
 
-**Ship order:** `read_server_config` wrapper → `fsck`. `edit` defers to 5b.
+**Next:** `fsck`. `edit` defers to 5b.
 
 The table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
 
