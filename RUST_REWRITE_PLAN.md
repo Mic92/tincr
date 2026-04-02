@@ -32,6 +32,7 @@
 | **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. **Four-for-four**: chunk-2's plan said "format depends on daemon, lands with daemon" — wrong, format is pinned by `node.c:210` NOW. `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. |
 | **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | **Five-for-five**: chunk-3's deferred row said "daemon side already has `REQ_DUMP_NODES item` (filter by name)" — wrong. `control.c:63` is `case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type. The third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
 | **5b chunk 5 — `cmd_top`** | ✅ +1 cmd | `tinc-tools: top — real-time per-node traffic, hand-rolled curses shim` | **Six-for-six** (ratatui dropped, see chunk-5 section). `top.c:248-257`'s `i` field is a stable-sort EMULATION: `qsort` isn't stable, the `i` tiebreak makes it stable across frames. `slice::sort_by` IS stable; don't port `i`, sort the same Vec in-place. Two C bugs ported: daemon-restart `wrapping_sub` (the spike IS the signal); first-tick epoch-seconds interval (`static struct timeval prev` zero-init → tick-1 rate ≈ counter/1.7e9 ≈ 0). `~400 LOC` estimate → 1984 LOC actual, **5× off**. 608 tests + 9 cross-impl, 28 commands. |
+| **5b chunk 6 — `cmd_log`/`cmd_pcap`** | ✅ +2 cmds | `tinc-tools: log/pcap — streaming commands, the seventh reversal` | **Seven-for-seven**, but #7 is the first reversal where the planned complexity went DOWN: "blocked on draining `BufReader::buffer()` by hand" → `BufReader<T>: Read`, `read_exact` already drains the buffer. One rustc smoke proved it; one unit test pins it. `recv_data` is one line. SIGINT handler NOT ported (first deliberate C-behavior-drop: exit 130 vs 0, daemon doesn't care). pcap headers `to_ne_bytes()` per-field — magic `0xa1b2c3d4` IS the endianness marker, native-endian is the format. y2038 truncation ported faithfully (`i64→u32`). 641 tests + 9 cross-impl, 30 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -809,7 +810,7 @@ after the NODES terminator. If we'd pipelined (sent all three before
 reading), or didn't short-circuit on not-found, the assert catches
 it — read_line gets `"18 4 dave\n"` not 0 bytes.
 
-#### ✅ chunk 5: `top` landed — `log`/`pcap`/`start`/`edit` deferred
+#### ✅ chunk 5: `top`/`log`/`pcap` landed — `start`/`edit` deferred
 
 ~~**`top`: `ratatui`. The TUI is the work.**~~ **Reversed.** `top.c`'s
 curses surface, exhaustively counted: `initscr`/`endwin`/`erase`/
@@ -879,25 +880,82 @@ actually writing the comparator and noticing the question.
 |---|---|---|---|---|---|
 | `info.c` | 356 | ~150 | ~520 | 3.5× | `info_subnet` half + drain loop + localtime shim + cascade enum + column-exact format |
 | `top.c` | 397 | ~400 | 1984 | 5× | stable-sort discovery + first-tick `Instant`-has-no-zero + wrapping_sub judgment + `chgat(-1)` translation + 29 tests |
+| `tincctl.c` log/pcap | ~80 | "blocked" | 1160 | — | nothing — the blocker WAS the wrong assumption |
 
-The ratio is GROWING. Every chunk so far was a port of C-that-
-works; the C compresses correctness into invisible defaults
-(`static` zero-init, well-defined unsigned wrap, qsort's instability
-being a non-issue when there's a tiebreak). Rust makes each one
-explicit. The explicitness is the LOC. The estimate methodology —
-count C lines, multiply by a factor — can't see the invisible
-defaults because they're invisible.
+The ratio is GROWING for the chunks where the estimate was a number.
+Every chunk so far was a port of C-that-works; the C compresses
+correctness into invisible defaults (`static` zero-init, well-defined
+unsigned wrap, qsort's instability being a non-issue when there's a
+tiebreak). Rust makes each one explicit. The explicitness is the LOC.
+The estimate methodology — count C lines, multiply by a factor —
+can't see the invisible defaults because they're invisible.
+
+**`cmd::stream` landed at `e28270f6`, 1160 LOC, +25 unit + 5 integ
++ 3 ctl tests.** The seventh reversal, structurally inverted:
+
+| Reversal | Direction | What was wrong | Artifact |
+|---|---|---|---|
+| 1-3 | complexity ↑ | guessed without reading the C | C source |
+| 4-5 | complexity ↑ | read the C, stopped at the wrong file | the OTHER C file |
+| 6 (top.c stable-sort) | complexity ↑ | read the right file, meaning lived elsewhere | glibc qsort's contract |
+| 6 (ratatui) | complexity ↓ | overestimated the abstraction | nix crate source |
+| 7 (BufReader) | complexity ↓ | assumed std DIDN'T solve the problem | one rustc smoke |
+
+Reversals 6-ratatui and 7 are the SAME failure as 1-3 — "guessed
+without reading" — but in the opposite direction. The plan said
+"this needs careful work"; the artifact said "no it doesn't." The
+corrective action is identical (read the source); only the SIGN of
+the error differs.
+
+The `recvdata`/`recvline` shared-buffer worry: `tincctl.c:496` has
+`char buffer[4096]; size_t blen;` — file-scope statics. `recvline`
+over-reads past the `\n`; `recvdata` sees the leftover. The plan
+correctly identified this as a real concern. What it MISSED:
+`BufReader<T>: Read`, and its `read()` drains the internal buffer
+before touching `T`. **`BufReader` IS that file-scope static.** The
+smoke (`Cursor::new("18 15 7\nLOGDATA")`, one `read_line`, one
+`read_exact(7)`) proved it before any code was written.
+`recv_data_after_recv_line_shared_buffer` pins it: if someone
+"optimizes" `recv_data` to `self.reader.get_mut()` (bypassing
+`BufReader`), the test catches it.
+
+The SIGINT handler — first deliberate C-behavior-drop:
+
+| C `tincctl.c:1533-1541` | Rust |
+|---|---|
+| `signal(SIGINT, sigint_handler)` → handler does `shutdown(fd, SHUT_RDWR)` → `recvline` returns false → loop exits → `cmd_log` returns 0 | Default SIGINT. Process dies. Exit 130. |
+
+The daemon doesn't care: kernel closes the socket either way,
+`send_request` on a dead connection returns false, the connection-
+reaper removes it next pass. Nobody pipes `tinc log` to a script
+that checks `$?`. The handler would need a `static AtomicI32` for
+the fd (signal handlers can't capture closures). Not worth it.
+
+pcap native-endian: `tincctl.c:618` does `fwrite(&struct, sizeof,
+1, out)` — host-endian struct layout. By DESIGN: magic `0xa1b2c3d4`
+is the endianness marker; readers detect by seeing `a1b2c3d4` vs
+`d4c3b2a1`. `to_ne_bytes()` per-field replicates exactly. NOT
+`to_le_bytes()` (would change behavior on a hypothetical BE build —
+which would then write "BE pcap", which Wireshark also reads).
+
+The y2038 truncation, `origlen = len`, `outmaclength` repurposed for
+snaplen: all ported faithfully. None are bugs IN OUR CODE; they're
+C behaviors that survive the port. `pcap_packet_header_y2038_
+truncates` and `pcap_loop_snaplen_zero` pin them.
 
 | Command | Blocked on |
 |---|---|
-| `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
 | `start`/`restart` | Daemon binary needs to exist. |
 | `edit` | `$EDITOR` spawn + the post-edit reload. The reload is one line now. Lands when someone wants it. |
+| `network` | Meta-shell: sets `netname` then re-runs. Weird. Maybe never. |
+| `version`/`help` | Trivial. An afternoon. |
 
 | C source | Rust |
 |---|---|
 | `info.c` | ✅ `cmd::info` — the dead third arg, `Reachability` cascade, `Subnet::matches`. `info.c` fully consumed. |
 | `top.c` | ✅ `tui.rs` shim + `cmd::top` — the `i` field is a stable-sort emulation (don't port; `sort_by` is stable), `wrapping_sub` for daemon-restart spike, first-tick epoch-seconds bug-port. `top.c` fully consumed. |
+| `tincctl.c` `pcap`/`log_control` (590-669) + `cmd_pcap`/`cmd_log` (1518-1567) | ✅ `cmd::stream` — `recv_data` is `read_exact` on the `BufReader` (the shared-buffer worry was already solved by std). `to_ne_bytes()` for pcap headers. SIGINT handler NOT ported. `log_against_fake`/`pcap_against_fake` pin the C-daemon-compat seam: subscribe wire matches `control.c:128/135` sscanf, header wire matches `logger.c:213`/`route.c:1124` send_request. |
+| `console.c` (5-11, Unix branch) | ✅ `cmd::stream::use_ansi_escapes_stdout` — `isatty(stdout) && getenv("TERM") && strcmp(TERM, "dumb")`. |
 | `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
 | `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
