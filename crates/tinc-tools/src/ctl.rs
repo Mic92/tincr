@@ -359,12 +359,19 @@ impl std::error::Error for CtlError {}
 /// halves. In production it's always `UnixStream`.
 ///
 /// `BufReader` wraps the reader half. The C hand-rolls a buffer
-/// because `recvline` and `recvdata` share it (line read might
-/// over-read into the next packet). We split: `recv_line` is
-/// `BufRead::read_line`, and `recvdata` (when it lands for pcap)
-/// will be `read_exact` on the underlying stream after draining
-/// `BufReader::buffer()`. The shared-buffer concern is real but
-/// `BufReader` already solves it.
+/// (`tincctl.c:496`: `char buffer[4096]; size_t blen`) because
+/// `recvline` and `recvdata` share it: `recvline` might over-read
+/// past the `\n`, into the start of the next data block. The
+/// shared buffer means `recvdata` sees those bytes.
+///
+/// **`BufReader` already solves this.** It IS that shared buffer.
+/// `read_line` over-reads into its internal 8KiB, stops at `\n`.
+/// Then `read_exact` on the `BufReader` (NOT the inner stream —
+/// `BufReader<T>: Read`) drains the internal buffer FIRST, before
+/// touching `T`. The plan's "blocked on draining `buffer()` by
+/// hand" was wrong: that's `BufReader::read`'s default behavior.
+/// Verified by smoke: `Cursor::new("18 15 7\nLOGDATA")`, one
+/// `read_line`, one `read_exact(7)`, both correct.
 ///
 /// Why not `BufWriter`: control commands are fire-and-forget —
 /// send one line, expect a response. Buffering would just need a
@@ -418,6 +425,36 @@ impl<S: Write> Write for WriteHalf<S> {
 }
 
 impl<S: Read + Write> CtlSocket<S> {
+    /// Test seam: wrap an existing stream WITHOUT doing the
+    /// handshake. The unit tests for `cmd::stream` (and `cmd::top`
+    /// later, if `handle_key` becomes testable) want to feed
+    /// canned daemon-output into a `CtlSocket` and observe the
+    /// loop's behavior. They don't want to mock the greeting
+    /// exchange every time.
+    ///
+    /// `pid` is set to 0 (meaningless; only `cmd_pid` reads it).
+    ///
+    /// `pub(crate)` so test modules in `cmd::*` can call it. The
+    /// `Rc<RefCell<S>>` is threaded through so the test can ALSO
+    /// hold a clone and inspect what was written (`shared.borrow().
+    /// wr` for a `Duplex`-shaped `S`). The OWNERSHIP transfer:
+    /// the caller makes the `Rc`, passes a clone here, keeps a
+    /// clone. Both halves see the same stream.
+    ///
+    /// `#[cfg(test)]` because the consumer is `cmd::stream::tests`
+    /// — a DIFFERENT module's test sub-module. `cfg(test)` applies
+    /// to the whole CRATE under `cargo test`, not just `mod tests`,
+    /// so this is visible from `cmd::stream::tests` but compiled
+    /// out of release builds. `pub(crate)` for cross-module reach.
+    #[cfg(test)]
+    pub(crate) fn wrap(shared: Rc<RefCell<S>>) -> Self {
+        Self {
+            reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
+            writer: WriteHalf(shared),
+            pid: 0,
+        }
+    }
+
     /// Do the greeting exchange over an already-connected stream.
     /// `tincctl.c:876-900`.
     ///
@@ -519,12 +556,30 @@ impl<S: Read + Write> CtlSocket<S> {
     }
 
     /// Send with one int argument. `sendline(fd, "%d %d %d", CONTROL,
-    /// type, arg)`. `REQ_SET_DEBUG`, `REQ_PCAP` (snaplen).
+    /// type, arg)`. `REQ_SET_DEBUG`, `REQ_PCAP` (snaplen). NOT
+    /// `REQ_LOG`: that's two ints (`level`, `use_color`), see
+    /// `send_int2`.
     ///
     /// # Errors
     /// Same as `send`.
     pub fn send_int(&mut self, req: CtlRequest, arg: i32) -> Result<(), CtlError> {
         writeln!(self.writer, "{CONTROL} {} {arg}", req as u8).map_err(CtlError::Io)
+    }
+
+    /// Send with two int arguments. `sendline(fd, "%d %d %d %d", CONTROL,
+    /// type, a, b)`. The ONLY consumer is `REQ_LOG` (`tincctl.c:649`):
+    /// `level` then `use_color` (a 0/1 boolean printed as int).
+    ///
+    /// Why not `send_int(..., a) + write " b"` or a builder: the C
+    /// has exactly one two-int request, so does this. The `i32` for
+    /// the second arg is bool-shaped (0/1) but the daemon's `sscanf
+    /// (%d %d)` reads both as int (`control.c:135`). `i32` × 2 keeps
+    /// the wire shape symmetric with `send_int`.
+    ///
+    /// # Errors
+    /// Same as `send`.
+    pub fn send_int2(&mut self, req: CtlRequest, a: i32, b: i32) -> Result<(), CtlError> {
+        writeln!(self.writer, "{CONTROL} {} {a} {b}", req as u8).map_err(CtlError::Io)
     }
 
     /// Send with one string argument. `sendline(fd, "%d %d %s", ...)`.
@@ -699,6 +754,39 @@ impl<S: Read + Write> CtlSocket<S> {
                 Ok(DumpRow::Row(kind, body.to_owned()))
             }
         }
+    }
+
+    /// Receive exactly `len` raw bytes after a header line.
+    /// `tincctl.c:536`'s `recvdata`: read until `len` accumulated,
+    /// memcpy out, memmove the remainder.
+    ///
+    /// The C's `memmove` is the shared-buffer machinery. **We don't
+    /// need it**: `BufReader<T>: Read`, and its `read` impl drains
+    /// the internal buffer before touching `T`. `read_exact` on a
+    /// `BufReader` is the same shared-buffer semantics, for free.
+    /// (See the struct doc-comment for the smoke.)
+    ///
+    /// `buf.len()` IS the requested `len` — the caller sizes it.
+    /// Mirrors `read_exact`'s contract. The C takes `len` separately
+    /// because `data` is a fixed `char[9018]`; we use `Vec` sized
+    /// per-call so the slice carries length.
+    ///
+    /// Why not return `Vec<u8>`: `cmd_log` writes to stdout, `cmd_
+    /// pcap` writes a packet record. Both write-and-discard. A
+    /// reused `Vec` (the caller `clear()`s + `resize()`s) avoids
+    /// per-packet alloc. Same as the C's stack buffer reuse.
+    ///
+    /// EINTR retry: `read_exact` does it (default `Read::read_exact`
+    /// loops on `Ok(0)`-is-err and `Interrupted`). The C `tincctl.c
+    /// :540` does it manually. Same effect.
+    ///
+    /// # Errors
+    /// `Io` on read failure or unexpected EOF mid-data. `read_exact`
+    /// returns `UnexpectedEof` if the daemon dies between the header
+    /// and the data; we surface it as `Io` like every other socket
+    /// error.
+    pub fn recv_data(&mut self, buf: &mut [u8]) -> Result<(), CtlError> {
+        self.reader.read_exact(buf).map_err(CtlError::Io)
     }
 }
 
@@ -1497,5 +1585,128 @@ mod tests {
         assert_eq!(r, DumpRow::End(CtlRequest::DumpNodes));
 
         daemon.join().unwrap();
+    }
+
+    /// `recv_data` after `recv_line`: the shared-buffer concern.
+    ///
+    /// Daemon writes header + data in ONE syscall (it doesn't, but
+    /// TCP can coalesce). `BufReader` reads it ALL into its 8KiB
+    /// buffer on the first `read_line`. The data is now in the
+    /// `BufReader`'s buffer, not the socket. `recv_data` must see it.
+    ///
+    /// THE test for the plan's "blocked on draining `buffer()`".
+    /// `BufReader<T>: Read` is what makes this work — `read_exact`
+    /// drains the buffer first. The test pins it: if someone
+    /// "optimizes" `recv_data` to `self.reader.get_mut().0.borrow_
+    /// mut().read_exact()` (bypassing `BufReader`), this fails.
+    ///
+    /// `Cursor<Vec<u8>>` is the in-memory stream. ONE buffer, two
+    /// records (header + data each), back-to-back, no separator.
+    /// Exactly what TCP coalescing gives.
+    #[test]
+    fn recv_data_after_recv_line_shared_buffer() {
+        // Record 1: "18 15 7\n" + 7 bytes "LOGDATA"
+        // Record 2: "18 15 5\n" + 5 bytes "HELLO"
+        // No newline after data — the daemon doesn't add one
+        // (`logger.c:213`: `send_request` for the header, then
+        // `send_meta` for raw bytes).
+        let mut wire = Vec::new();
+        wire.extend_from_slice(b"18 15 7\n");
+        wire.extend_from_slice(b"LOGDATA");
+        wire.extend_from_slice(b"18 15 5\n");
+        wire.extend_from_slice(b"HELLO");
+
+        // Cursor is Read+Write but we only read. Direct CtlSocket
+        // construction (bypass connect/handshake). The greeting
+        // exchange isn't under test; the buffer behavior is.
+        let stream = std::io::Cursor::new(wire);
+        let shared = Rc::new(RefCell::new(stream));
+        let mut ctl = CtlSocket {
+            reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
+            writer: WriteHalf(shared),
+            pid: 0,
+        };
+
+        // ─── Record 1 ──────────────────────────────────────────────
+        // `recv_line` reads through '\n'. BufReader's first read
+        // pulls EVERYTHING (Cursor returns it all). 'LOGDATA' is
+        // now in BufReader's buffer.
+        let line = ctl.recv_line().unwrap().unwrap();
+        assert_eq!(line, "18 15 7");
+
+        // 7 bytes. They're in BufReader's buffer, NOT the Cursor.
+        // `read_exact` on BufReader drains buffer first.
+        let mut data = [0u8; 7];
+        ctl.recv_data(&mut data).unwrap();
+        assert_eq!(&data, b"LOGDATA");
+
+        // ─── Record 2 ──────────────────────────────────────────────
+        // STILL in BufReader's buffer (Cursor returned everything
+        // on the first read).
+        let line = ctl.recv_line().unwrap().unwrap();
+        assert_eq!(line, "18 15 5");
+
+        let mut data2 = [0u8; 5];
+        ctl.recv_data(&mut data2).unwrap();
+        assert_eq!(&data2, b"HELLO");
+
+        // ─── EOF ───────────────────────────────────────────────────
+        let line = ctl.recv_line().unwrap();
+        assert_eq!(line, None);
+    }
+
+    /// `recv_data` with daemon EOF mid-data: header said 100 bytes,
+    /// daemon dies after 50. `read_exact` returns `UnexpectedEof`.
+    ///
+    /// `tincctl.c:543`: `nrecv <= 0 → return false`. Same effect
+    /// (loop exits) but `read_exact`'s error is more specific.
+    #[test]
+    fn recv_data_short_is_error() {
+        let wire = b"18 15 100\nshort".to_vec();
+        let stream = std::io::Cursor::new(wire);
+        let shared = Rc::new(RefCell::new(stream));
+        let mut ctl = CtlSocket {
+            reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
+            writer: WriteHalf(shared),
+            pid: 0,
+        };
+
+        let line = ctl.recv_line().unwrap().unwrap();
+        assert_eq!(line, "18 15 100");
+
+        let mut data = [0u8; 100];
+        let err = ctl.recv_data(&mut data).unwrap_err();
+        // The Display path: `CtlError::Io(UnexpectedEof)`. We don't
+        // pattern-match the kind (CtlError::Io carries a generic
+        // io::Error); the message contains it. `tinc log` doesn't
+        // surface this anyway (silent loop exit), but the test
+        // pins the type.
+        let CtlError::Io(io) = err else {
+            panic!("expected Io, got {err}")
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// `send_int2` wire shape: `"18 15 -1 1\n"`. The `REQ_LOG`
+    /// request: level=-1 (`DEBUG_UNSET`), color=1. `tincctl.c:649`.
+    #[test]
+    fn send_int2_wire() {
+        let buf: Vec<u8> = Vec::new();
+        let stream = std::io::Cursor::new(buf);
+        let shared = Rc::new(RefCell::new(stream));
+        let mut ctl = CtlSocket {
+            reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
+            writer: WriteHalf(Rc::clone(&shared)),
+            pid: 0,
+        };
+
+        ctl.send_int2(CtlRequest::Log, -1, 1).unwrap();
+
+        // Cursor's inner Vec is the written bytes. Reach in.
+        let written = shared.borrow().get_ref().clone();
+        // `"18 15 -1 1\n"`. CONTROL=18, REQ_LOG=15, level=-1, color=1.
+        // `tincctl.c:649`: `sendline(fd, "%d %d %d %d", CONTROL,
+        // REQ_LOG, level, use_color)`.
+        assert_eq!(written, b"18 15 -1 1\n");
     }
 }

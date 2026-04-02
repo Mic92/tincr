@@ -28,6 +28,7 @@ pub mod init;
 pub mod invite;
 pub mod join;
 pub mod sign;
+pub mod stream;
 pub mod top;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention

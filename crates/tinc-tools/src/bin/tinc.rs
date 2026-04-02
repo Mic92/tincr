@@ -343,6 +343,29 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_top,
         help: "top                         Show real-time statistics",
     },
+    // ─── log: stream daemon's logger() output ────────────────────────
+    // C `tincctl.c:3018`: `{"log", cmd_log, false}`. The `false` is
+    // "don't pre-connect" (cmd_log connects itself, line 1550).
+    // Same as `top`: `needs_daemon: true` resolves the pidfile path
+    // (the connect needs it), but doesn't connect.
+    //
+    // C `tincctl.c:189`: help line. Runs forever; Ctrl-C to stop.
+    CmdEntry {
+        name: "log",
+        needs_daemon: true,
+        run: cmd_log,
+        help: "log [level]                 Dump log output [up to the specified level]",
+    },
+    // ─── pcap: stream packet capture ─────────────────────────────────
+    // C `tincctl.c:3017`: `{"pcap", cmd_pcap, false}`. Same
+    // self-connect pattern. `tinc pcap | wireshark -k -i -` is the
+    // use case.
+    CmdEntry {
+        name: "pcap",
+        needs_daemon: true,
+        run: cmd_pcap,
+        help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -812,6 +835,51 @@ fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> 
         return Err(CmdError::TooManyArgs);
     }
     cmd::top::run(paths, g.netname.as_deref())
+}
+
+/// `cmd_log`: optional level arg. `tincctl.c:1544-1567`.
+///
+/// `tinc log` → daemon's level. `tinc log 5` → filter at 5.
+/// Runs until Ctrl-C (kills process, exit 130) or daemon dies
+/// (clean exit 0).
+///
+/// The C `atoi(argv[1])` accepts garbage → 0; we error. The arity
+/// check is `argc > 2` (`:1545`); ours is `args.len() > 1`.
+fn cmd_log(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let level = match args {
+        [] => None,
+        // `parse::<i32>()` rejects garbage. C's `atoi` doesn't
+        // (returns 0). The change is observable only for invalid
+        // input — `tinc log abc` errors instead of silently using
+        // level 0. Better.
+        [lvl] => Some(
+            lvl.parse::<i32>()
+                .map_err(|_| CmdError::BadInput(format!("Invalid debug level: {lvl}")))?,
+        ),
+        _ => return Err(CmdError::TooManyArgs),
+    };
+    cmd::stream::run_log(paths, level)
+}
+
+/// `cmd_pcap`: optional snaplen arg. `tincctl.c:1518-1530`.
+///
+/// `tinc pcap` → full packets. `tinc pcap 96` → first 96 bytes
+/// (headers only, less throughput). The 0 default means "daemon
+/// don't clip" (`route.c:1120` checks truthy).
+///
+/// `parse::<u32>()` rejects negative — the C's `atoi("-5")` would
+/// be `-5` then implicit-cast to a `uint32_t` arg, becoming a
+/// huge number, daemon never clips. `tinc pcap -5` failing is
+/// better than silently capturing 4GiB packets.
+fn cmd_pcap(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let snaplen = match args {
+        [] => 0,
+        [s] => s
+            .parse::<u32>()
+            .map_err(|_| CmdError::BadInput(format!("Invalid snaplen: {s}")))?,
+        _ => return Err(CmdError::TooManyArgs),
+    };
+    cmd::stream::run_pcap(paths, snaplen)
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).
