@@ -111,7 +111,17 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_exchange_all,
         help: "exchange-all           Same as export-all followed by import",
     },
-    // More 4a commands: generate-keys, fsck, sign, verify.
+    CmdEntry {
+        name: "generate-ed25519-keys",
+        run: cmd_genkey,
+        help: "generate-ed25519-keys  Generate a new Ed25519 key pair.",
+    },
+    // C also has `generate-keys` (→ RSA + Ed25519) but RSA is
+    // dropped under DISABLE_LEGACY. Could alias `generate-keys` →
+    // `generate-ed25519-keys`; the C does *not* (it's a distinct
+    // function that calls both keygens). Skip.
+    //
+    // More 4a commands: sign, verify, fsck.
     // 5b commands (dump, top, log, ...) go in a separate table.
 ];
 
@@ -126,6 +136,15 @@ fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         [name] => cmd::init::run(paths, name),
         [_, _, ..] => Err(CmdError::TooManyArgs),
     }
+}
+
+/// `cmd_generate_ed25519_keys`: zero args. C `tincctl.c:2351`.
+/// The C accepts no args; the wrapper is 5 lines.
+fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::genkey::run(paths)
 }
 
 /// `cmd_export`: zero args, write to stdout.

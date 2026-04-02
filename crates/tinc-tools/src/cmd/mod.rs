@@ -18,6 +18,7 @@ use std::io;
 use std::path::PathBuf;
 
 pub mod exchange;
+pub mod genkey;
 pub mod init;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention
