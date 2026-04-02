@@ -808,19 +808,63 @@ after the NODES terminator. If we'd pipelined (sent all three before
 reading), or didn't short-circuit on not-found, the assert catches
 it — read_line gets `"18 4 dave\n"` not 0 bytes.
 
-#### ⏸️ chunk 5: `log`, streaming, `top` — deferred
+#### ⏸️ chunk 5: `top`, `log`, streaming — partially landed
+
+~~**`top`: `ratatui`. The TUI is the work.**~~ **Reversed.** `top.c`'s
+curses surface, exhaustively counted: `initscr`/`endwin`/`erase`/
+`mvprintw`/`attrset`/`chgat`/`refresh`/`timeout`/`getch`/`scanw`/`move`.
+Seven SGR codes (string constants) + one parameterized CSI cursor-
+position + `tcsetattr` + `poll(stdin, ms)`. `nix` already has
+`termios` + `poll`. ~35 transitive deps via `crossterm` for one
+fixed screen layout with three text attributes is the abstraction-
+level overestimate again — "full-screen TUI" pattern-matched to
+"TUI framework"; `top.c` is `printf` with cursor moves.
+
+**Six-for-six, but the SIXTH is a different artifact.** Reversals
+1-5 were "read the C source, the abstraction-level plan was wrong".
+This one is "read the DEPENDENCY source, the abstraction-level
+plan was wrong". Same failure mode — the concrete artifact is
+ALWAYS more pinned than the layer above it — different concrete
+artifact (`top.c` vs `nix-0.29.0/src/`). The pattern generalizes:
+"read the source" means whatever source the decision depends on.
+For a TUI question that's `top.c`; for an Errno-conversion question
+that's `nix/src/errno.rs`.
+
+Grepping `~/.cargo/registry/src/.../nix-0.29.0` found four things
+the first-draft `tui.rs` should have used:
+
+| Find | What I'd written | Why the wrong version compiled |
+|---|---|---|
+| `From<Errno> for io::Error` (`errno.rs:183`, always-on) | 4× `.map_err(\|e\| io::Error::from_raw_os_error(e as i32))` | The cast IS what nix's impl does. Same machine code. The cast lives in nix where Errno's repr is defined; on our side it'd trip `clippy::cast_possible_truncation`. **The impl doesn't show in docs.rs's module index** — it's an `impl` on a foreign type, lives in `errno.rs`, not where you'd browse. `rg 'impl From<Errno>'` finds it in one second. |
+| `unistd::read(RawFd, &mut [u8])` (always-on) | `PipeRead` extension trait wrapping it | The trait WORKED — it called `nix::unistd::read` inside. Wrapper around a wrapper, written because I'd been thinking in `Read::read` shapes. |
+| `SpecialCharacterIndices::VMIN` (`term` feature) | `libc::VMIN` | `libc::VMIN` is `usize` on every target we BUILD. The linux-sparc64 quirk where VMIN==VEOF (`termios.rs:459`) would've been a silent wrong-index, not a compile error. |
+| `unistd::isatty` (always-on) | Relied on `tcgetattr` ENOTTY | `tcgetattr` does fail on non-tty. Preflight is for the message ("stdin is not a terminal" beats "Inappropriate ioctl for device"), not correctness. |
+
+Writing-then-grepping found things browsing-docs wouldn't have. The
+`From<Errno>` impl is the proof: a foreign-type impl living in a
+module named for the SOURCE type, not the target type. docs.rs's
+type page for `io::Error` doesn't link nix's impl (foreign crate).
+The registry source is greppable; docs.rs's nav isn't.
+
+**`tui.rs` landed at `b6bbd9d7`, 597 LOC, +4 tests.** The escape
+constants + `goto()` + `winsize()` + `RawMode` RAII + `getch_timeout`.
+NOT `cfmakeraw` — it clears OPOST, killing `\n`→`\r\n`; any
+`eprintln!` mid-top would stair-step. Hand-picked `~(ECHO|ICANON|
+ISIG)` keeps OPOST. EOF on stdin → `Some(b'q')` (not `None`, which
+would spin: poll says readable, read returns 0, repeat). Ctrl-C
+still leaves the terminal raw — KNOWN GAP, the C has it too.
 
 | Command | Blocked on |
 |---|---|
+| `top` (the loop + render) | Nothing. `tui.rs` is consumed only by `cmd::top::run()`. The interesting half — `update()` BTreeMap merge + rate compute + 7-way `sortfunc()` — is curses-INDEPENDENT and unit-testable. `redraw()` is `format!` with `goto()` prefixes. ~400 LOC remaining. |
 | `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
-| `top` | `DUMP_TRAFFIC` (`node.c:226`) + `ratatui`. The dump infrastructure is done; the parser is 5-field. The TUI is the work. |
 | `start`/`restart` | Daemon binary needs to exist. |
 | `edit` | `$EDITOR` spawn + the post-edit reload. The reload is one line now. Lands when someone wants it. |
 
 | C source | Rust |
 |---|---|
 | `info.c` | ✅ `cmd::info` — the dead third arg, `Reachability` cascade, `Subnet::matches`. `info.c` fully consumed. |
-| `top.c` | `DUMP_TRAFFIC` + `ratatui` |
+| `top.c` | `tui.rs` shim ✅ + `cmd::top` (the curses-independent half: `update`/`sortfunc`/`redraw`) |
 | `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
 | `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
@@ -924,7 +968,7 @@ Aggressively shed scope:
 | LZO (feature-gated, legacy) | vendor `minilzo.c` via `cc` | `lzo-sys` is unmaintained; LZO is the *default* compression in tinc 1.0 deployments |
 | Net | `mio`, `socket2`, `nix` (Unix), `windows-sys` (Win) |
 | TUN | `tun` (Linux/macOS), `wintun` (Windows) — evaluate vs hand-rolling |
-| CLI | `clap`, `ratatui` (for `tinc top`), `rustyline` |
+| CLI | `clap`, ~~`ratatui` (for `tinc top`)~~ hand-rolled ANSI shim, `rustyline` |
 | Logging | `tracing`, `tracing-subscriber` |
 | Config | hand-rolled (format is trivial, `serde` is overkill) |
 | Testing | `proptest`, `cargo-fuzz`, `criterion` |
