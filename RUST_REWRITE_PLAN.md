@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | ✅ 12 cmds | `tinc-tools: invite — KAT-verified URL crypto...` | Filesystem cmds + `invite`. Reading `invitation.c` showed it's NOT 5b: `cmd_invite`'s daemon calls are best-effort skips, `cmd_join`'s socket goes to a *peer's listen port* (meta-greeting + SPTPS), never the control socket. The plan misfiled it. `tinc-crypto::invite` for the URL kernel (sha512-of-b64-string composition, KAT-tested). 311 tests + 9 cross-impl. `join` next — it's `cmd_invite`'s pair. |
+| **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump (cookie/chunks/finalize/pubkey/ack) → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*` plumbing; lifts to daemon unchanged. 340 tests + 9 cross-impl. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -606,7 +606,15 @@ One sharp boundary: `key_hash = sha512(b64_std(pubkey))[..18]` hashes the **b64 
 
 `get_my_hostname` HTTP probe **dropped** (-120 LOC). C TCP-connects to `tinc-vpn.org:80` with hand-crafted `GET /host.cgi` to discover external IP. We require `Address` to be set. Reorder vs C: address checked *before* `makedirs` so no-Address failure leaves no `invitations/` debris.
 
-**`join` is invite's pair, lands next**, and it brings the daemon stub: `cmd_join`'s receive callback is type-compatible with `protocol_auth.c::receive_invitation_sptps` — the in-process test harness that proves invite↔join roundtrip *is the seed* of the daemon's invitation handler. Not building a stub-then-throwing-it-away.
+##### ✅ `join` — landed (commit `tinc-tools: join — invite's pair, in-process roundtrip...`)
+
+The contract test (`invite_join_roundtrip_in_process`) is the architecture. Two `Sptps` structs sharing a pair of `Vec<u8>` queues run the full protocol: KEX/SIG handshake → cookie (type-0) → file in 512-byte chunks (type-0, deliberately split to exercise the accumulator) → finalize trigger (type-1, zero-len) → pubkey echo (type-1) → ack (type-2, zero-len). The pump asserts `fsck::run` approves the joiner's confbase — if join ever writes something fsck flags, this fires.
+
+**`server_receive_cookie` is the daemon seed.** It's `protocol_auth.c:185-310` minus the `connection_t*`: cookie→filename via `cookie_filename` (KAT-tested composition), atomic `rename` to `.used` (single-use enforcement — second join with same cookie = ENOENT), mtime-vs-expiry check, `Name =` first-line validate, can't-be-own-name. The daemon version takes `&mut Connection` and the extracted name goes into `c->name`. Everything else lifts unchanged. **Forward ref for Phase 5**: this fn moves to `tincd::auth`, the in-process test becomes the daemon's invitation handler test, and `protocol_auth.c`'s 1066-line port shrinks by ~130.
+
+`PROT_MINOR_SENT = 1`, not `PROT_MINOR = 7`: `invitation.c:1368` builds `"%d.%d"` with `PROT_MINOR`, line 1372 sends literal `1`. Build-then-discard suggests refactor accident. Daemon overwrites `c->protocol_minor = 2` anyway so the value's dead, but it's wire bytes. **This is the kind of thing that would silently break against a future C tincd that started checking minor.** Pinned by name.
+
+`recv_line` shares its buffer with the SPTPS pump. C `blen` carries over: greeting line 2 + first SPTPS record can arrive in one `recv()`. `BufReader` would over-read past `\n` and eat handshake bytes. Hand-rolled `Vec<u8>` with explicit drain. The `n==0` partial-record case — SPTPS consumed 0 bytes because the record header says "body is 200 bytes" and we only have 50 — is what the `buf.drain(..off)` compaction is for.
 
 ### Phase 5b: RPC half + new control protocol
 
@@ -658,8 +666,8 @@ of `control.c` + the `sscanf` jungle in `tincctl.c` cmd_dump.
 | `info.c`, `top.c` | control-socket queries + `ratatui` for `tinc top` |
 | `tincctl.c` `cmd_dump` family | one fn per `CtlRequest` variant |
 | `control.c` | daemon-side `match` |
-| ~~`invitation.c`~~ | **Reclassified to 4a.** Neither half uses the control socket. `cmd_invite`'s `connect_tincd` calls are best-effort skips; `cmd_join` TCPs to the *inviter's listen port*, not the control socket. The plan confused "talks to a daemon" with "talks to the control socket". `invite` landed; `join` next. |
-| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` generation. Used by `cmd_join`'s `finalize_join` for `Ifconfig`/`Route` invitation keywords. Stub for now (placeholder `tinc-up.invitation` only); real per-platform script generation lands when someone needs it. |
+| ~~`invitation.c`~~ | **Reclassified to 4a, both halves landed.** 1484 LOC → ~1010 LOC Rust (invite+join+crypto kernel) after dropping HTTP probe / ifconfig.c / tty prompts. `server_receive_cookie` (the daemon's `receive_invitation_sptps` body) lives in `cmd::join` for now; lifts to `tincd::auth` in Phase 5. |
+| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` generation. Used by `finalize_join` for `Ifconfig`/`Route` invitation keywords. **Stubbed**: keywords recognized (no "unknown variable" warning), placeholder `tinc-up` written, no per-platform shell generation. -300 LOC. Lands when someone needs it. |
 
 **Windows caveat unchanged:** named pipe, `windows-sys` raw
 `CreateFileW`. ~100 LOC behind `#[cfg(windows)]`.
@@ -697,7 +705,7 @@ The C code uses a hand-rolled `epoll`/`kqueue`/`select` loop (`event.c`, `linux/
 | `net_packet.c` | 1938 | **the hot path**: UDP rx/tx, MTU probing, relay, compression. Port carefully, benchmark against C. |
 | `meta.c` | 322 | TCP meta-connection framing |
 | `route.c` | 1176 | L2/L3 packet inspection → destination node lookup. Uses `tinc-graph`. |
-| `protocol_auth.c` (handler side) | 1066 | The actual auth state machine driving SPTPS + legacy. Uses `tinc-sptps` + `tinc-proto`. |
+| `protocol_auth.c` (handler side) | 1066 | Auth state machine. **`receive_invitation_sptps` (~130 LOC) already ported as `cmd::join::server_receive_cookie`** — lifts here with `&mut Connection` instead of `&Paths`. The `id_h` `name[0]=='?'` invitation branch is the meta-greeting that `cmd_join`'s test parsers (`parse_greeting_line1/2`) consume — same wire format, different direction. |
 | `autoconnect.c` | small | maintain N outgoing connections |
 | `control.c` | small | control-socket server side |
 | `process.c`, `signal.c`, `script.c`, `pidfile.c`, `logger.c` | small | mostly replaced by `nix`, `tracing`, `daemonize` crates |
