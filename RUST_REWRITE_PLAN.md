@@ -41,7 +41,8 @@
 | **3 chunk 3 — `tinc-device` raw (`PF_PACKET`)** | ✅ fourth backend | `tinc-device: raw_socket — the +0, the SUBSTITUTE shim, SEQPACKET fake` | The +0: `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))` writes raw ethernet, `route.c` wants ethernet at offset 0, done. Three points define the line: `offset = ETH_HLEN − len(prefix)`; linux 14−4=10, fd 14−0=14, raw 14−14=0. **Shim #5 SUBSTITUTES the syscall**: C does `SIOCGIFINDEX` ioctl (2002 code); `if_nametoindex(3)` is the POSIX function (2001) doing the SAME RESOLUTION. nix wraps it. New row class. Shim #6 hand-rolled: nix `LinkAddr` is getters-only (designed for `recvfrom` outputs, not `bind` inputs). The HYBRID file: nix for `socket()`+CLOEXEC (full match), nix for `if_nametoindex` (substitute), raw libc for `bind` (half-baked). **The fakeable boundary HOLDS but the WHICH-FAKE question is new**: `socketpair(SOCK_DGRAM)` BLOCKS on close (UDP-ish, no EOF concept; gcc-verified, eof test hung). `SOCK_SEQPACKET` preserves datagram boundaries AND EOFs on close — both PF_PACKET properties. STRICTER same as `linux::pack_ifr_name`: `if_nametoindex` errors on full name, no truncation. 734 tests + 9 cross-impl. |
 | **3 chunk 4 — `tinc-device` bsd (3 offsets, 1 file)** | ✅ fifth backend, prep commit `1b1a2a85` | `tinc-device: bsd — three offsets, AF_INET6 varies, tested-on-Linux` | `ether.rs` hoist (`1b1a2a85`) made the synthesis reusable; `bsd.rs` 1218 LOC for 592 LOC C is **2.1×** (vs `fd.rs`'s 5.4×). `cfg(unix)` MODULE, `cfg(bsd)` `open()`: `read(2)`/`write(2)` are the same syscalls everywhere; only the fd's SOURCE (open path: `/dev/tun*`, `PF_SYSTEM`, `TUNSIFHEAD`) is BSD-only. **`cfg` goes on the smallest thing that's platform-varying** — the `open()` impl, not the module. 20 tests run on Linux via pipe()/seqpacket fakes. The IGNORED-prefix observation TESTED: `utun_read_ignores_prefix` feeds `[0xFF; 4]` garbage prefix + valid IPv4; if read decoded the prefix it'd error on the nonsense AF; doesn't, synthesizes from `buf[14]>>4`. **`AF_INET6` per-platform**: Linux 10, FreeBSD 28, macOS 30. CAN'T pin golden bytes. Test pins STRUCTURE: `(libc::AF_INET6 as u32).to_be_bytes()`. The RFC-vs-ABI distinction (`ether.rs` doc) operationalized: `0x86DD` is wire-format truth (hoisted); `AF_INET6` is local convention (`libc::` at use site). 754 tests + 9 cross-impl. |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
-| 5 — Daemon core | | | |
+| **5 chunk 1 — `tinc-event` (loop scaffolding)** | ✅ +mio, 9th crate | `tinc-event: dispatch enum, BTreeMap timers, self-pipe — the daemon substrate` | `event.c`+`linux/event.c`+`signal.c`+`event.h` (476 C LOC) consumed; `bsd/event.c`/`event_select.c` are mio's job. 1619 LOC, **3.4×**. **Dispatch enum, not callbacks**: cb set is closed (6 io cbs + 7 timer cbs across all of `src/`) so encode as `enum IoWhat`/`TimerWhat`; loop body is a `match`; `EventLoop<W: Copy>` stays daemon-agnostic. **`BTreeMap<(Instant, u64)>` not `BinaryHeap`**: all 7 timers re-arm; heap entries immutable means push+tombstone churn; BTreeMap remove-reinsert is O(log n) same as C splay. The `u64` seq does what `event.c:62-72`'s ptr-compare does (same-tv tiebreak), stably. **Per-event liveness check, not generation bail**: C `linux/event.c:141` bails batch on ANY change because it can't tell which slot; we check `slab.get(token).is_some() && interest.wants(ready)` per event — process more per wake, correct because mio is level-triggered. C-is-WRONG #5 (`linux/event.c:121` NULL deref masked by `net.c:489` always arming pingtimer) and #6 (`signal()` portability + no CLOEXEC) fixed for free. Shim matrix new class: signal-handler `write` hand-rolled because "probably async-signal-safe" isn't a thing. `while(running)` NOT ported — daemon's `main()`. 780 tests + 9 cross-impl. |
+| 5 — rest of daemon | | | |
 
 ---
 
@@ -112,7 +113,8 @@ crates/
   tinc-graph/               # pure: node/edge/subnet graph + MST/BFS
   tinc-conf/                # config file parser (host files, tinc.conf)
   tinc-device/              # TUN/TAP abstraction (per-OS modules)
-  tinc-net/                 # event loop, sockets, packet routing
+  tinc-event/               # poll loop scaffolding (mio + timers + self-pipe)
+  tinc-net/                 # listener sockets, packet routing
   tincd/                    # daemon binary
   tinc-ffi/                 # SPTPS-only bindgen wrapper, test-only
   tinc-tools/               # sptps_test, sptps_keypair, tinc binaries
@@ -426,12 +428,11 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 | Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write`. nix has `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep pulls DNS (`getaddrinfo`); port after `tinc-proto` exposes addr resolution. |
 | UML/VDE | `*_device.c` | Drop. UML doesn't exist; VDE needs `libvdeplug`. |
 
-**Phase 3 transferable decisions** (full reasoning in source-file
-docs — `linux.rs`, `fd.rs`, `raw.rs`, `bsd.rs`, `ether.rs`):
+**Transferable decisions** (full reasoning in source-file docs —
+`tinc-device/{linux,fd,raw,bsd,ether}.rs`, `tinc-event/sig.rs`):
 
-**Unsafe-shim decision matrix** (six rows, three classes; #7
-`TUNSIFHEAD` and #8 `PF_SYSTEM`/`sockaddr_ctl` are next, in the BSD
-`open()` worklist):
+**Unsafe-shim decision matrix** (seven rows, four classes; `TUNSIFHEAD`
+and `PF_SYSTEM`/`sockaddr_ctl` are next, in the BSD `open()` worklist):
 
 | # | What | C does | We do | Class |
 |---|---|---|---|---|
@@ -441,12 +442,20 @@ docs — `linux.rs`, `fd.rs`, `raw.rs`, `bsd.rs`, `ether.rs`):
 | 4 | `recvmsg`+`SCM_RIGHTS` (`fd.rs`) | ~40 LOC cmsghdr | `nix::sys::socket::recvmsg` | wraps-same-syscall, POSIX-clean, fixes C bug |
 | 5 | `SIOCGIFINDEX` (`raw.rs`) | ioctl | `nix::if_nametoindex` | **substitutes-with-higher-level-POSIX** |
 | 6 | `bind(sockaddr_ll)` (`raw.rs`) | `bind()` | hand-rolled `libc::bind` | nix half-baked (`LinkAddr` getters-only) |
+| 7 | signal-handler `write()` (`sig.rs`) | `write(pipefd[1], &num, 1)` | hand-rolled `libc::write` | **signal-context demands certainty** |
 
 Per-shim decision tree: (1) nix doesn't wrap? hand-roll. (2) higher-
 level POSIX primitive does same job? substitute. (3) wrapper matches
 kernel's actual contract? use. (4) half-baked or encoding lies?
-hand-roll. Don't pattern-match on the neighboring shim; `raw.rs`
-mixes three classes in one file. Read the man page per shim.
+hand-roll. (5) signal-context AND wrapper goes through any abstraction
+you can't audit forever? hand-roll. Row #7's `nix::unistd::write` is
+`libc::write` + `Errno::result` — no allocation, no locks, *probably*
+safe. "Probably" isn't good enough for a handler. (`pipe2`/`sigaction`
+stayed hand-rolled by the same +1-dep-for-−10-LOC call as
+`read_fd`/`write_fd` factoring.)
+
+Don't pattern-match on the neighboring shim; `raw.rs` mixes three
+classes in one file. Read the man page per shim.
 
 **Four standing decisions** (the ones the daemon will hit):
 
@@ -565,6 +574,8 @@ model as ssh-agent. JSON would have cost `serde_json` and the
 | `fd_device.c:86` | `cmsg_len` check rejects multi-fd AFTER `recvmsg` returned — kernel already dup'd; rejecting now leaks | Java sender always sends 1 fd | `let [fd] = fds[..] else { close all; Err }` |
 | `tincctl.c:2458` `system()` | `"\"%s\" \"%s\""` quotes both — `EDITOR="vim -f"` won't tokenize, `$` in filename expands | nobody sets spacey EDITOR | `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` |
 | `conf.c` `40719189` | `conf.d/` early-return bug; opendir success falls through to `return false` | upstream regression 2026-03 | port pre-regression behavior |
+| `linux/event.c:121` | `tv->tv_sec * 1000` when `timeout_execute` returned NULL (empty tree); `event_select.c:98` correctly passes NULL to `select` | `net.c:489-492` arms `pingtimer`+`periodictimer` before `event_loop()` runs | `tick() -> Option<Duration>`, mio handles None |
+| `signal.c:77` + `:58` | `signal()` not `sigaction()` (SysV-vs-BSD semantics); pipe leaks into `script.c` children (no CLOEXEC) | glibc/BSD `signal()` give BSD semantics; children just have an extra fd | `sigaction(SA_RESTART)` explicit; `pipe2(O_CLOEXEC)` |
 
 | Command | Blocked on |
 |---|---|
@@ -611,20 +622,32 @@ table, 39 entries): 34/39 ported. The 5 unported are 2 daemon-gated
 
 Only attempt this once Phases 1–3 are battle-tested.
 
-### Event loop decision
-The C code uses a hand-rolled `epoll`/`kqueue`/`select` loop (`event.c`, `linux/event.c`, `bsd/event.c`, `event_select.c`). Options:
+### Event loop — ✅ `tinc-event` (`aeabcaa6`)
+mio + manual poll, single-threaded. tokio rejected: the C's pervasive
+shared mutable state (`node_tree`, `connection_list` globals) fights
+async borrow rules; one `&mut Daemon` into every handler mirrors the
+C globals without `static mut`. The C design is fine, just unsafe.
 
-| Option | Pro | Con |
-|---|---|---|
-| **`mio` + manual poll** | 1:1 with C structure, minimal churn, easy to reason about state machines | More boilerplate |
-| **`tokio`** | Batteries included, timers/signals free | The C code's pervasive shared mutable state (`node_tree`, `connection_list` globals) fights async borrow rules hard |
-| **`smol`** | Lighter than tokio | Same borrow issues |
+**Dispatch enum, not callbacks.** C `io_add(&io, cb, data, fd, flags)`
+stores fn pointers; cb reaches `node_tree` via globals. Rust can't
+store `fn(&mut Daemon)` inside `Daemon`. The cb set is closed: 6 io
+callbacks (`rg 'io_add\(' src/*.c`), 7 timer callbacks. Encode as
+`enum IoWhat`/`enum TimerWhat`; the loop body is a `match`.
+`EventLoop<W: Copy>` stays daemon-agnostic.
 
-**Recommendation:** `mio`. The C daemon is single-threaded with one poll loop. Replicate that. The graph/node/connection state lives in one big `struct Daemon` passed `&mut` into every handler — exactly mirroring the C globals but without `static mut`. Don't fight the architecture; the C design is actually fine, it's just unsafe.
+**`BTreeMap<(Instant, u64)>` not `BinaryHeap`.** All 7 timers re-arm
+(`timeout_set` from inside the cb, `event.c:127-129` checks if cb
+re-armed past now). Heap entries immutable → re-arm = push+tombstone
+churn. BTreeMap remove-reinsert is O(log n) same as C splay. The `u64`
+seq does what `event.c:62-72`'s ptr-compare does, stably. **Deliberate
+semantic difference**: C auto-deletes if cb didn't re-arm; we make
+re-arm explicit. Every match arm decides.
 
-`mio` gives you the poll mechanism but **not** timers or signals. Build on top:
-- Timer wheel: `BinaryHeap<(Instant, TimerId)>` checked each loop iteration, ~100 LOC. Maps to C `timeout_add`/`timeout_del`.
-- Signals: self-pipe trick (`signal_hook::low_level::pipe`) registered with `mio` as a readable fd. Maps to C `signal.c`.
+**Self-pipe hand-rolled** (`signal-hook` was +3 deps for 90 LOC of C).
+`sigaction(SA_RESTART)` not `signal()`. `pipe2(O_CLOEXEC)`. Shim #7.
+
+**`while(running)` not ported.** `turn()` is one iteration. The loop,
+`event_exit()`, the tick/turn interleave — that's `tincd::main()`.
 
 **SIGHUP reload:** `reload_configuration()` does *not* rebuild from scratch — it walks the live subnet/node trees, marks entries `expires = 1`, re-reads configs, then sweeps expired entries while keeping connections alive. With `slotmap` this means `Daemon::reload(&mut self)` walks and patches in place. Do not assume "drop arena, build new one"; budget ~200 LOC for the selective expiry walk.
 
@@ -632,7 +655,7 @@ The C code uses a hand-rolled `epoll`/`kqueue`/`select` loop (`event.c`, `linux/
 | C source | LOC | Rust module |
 |---|---|---|
 | `tincd.c` | 735 | `main.rs` — argv, signals, drop privs, reload |
-| `event.c` + per-OS | ~500 | thin `mio` wrapper |
+| `event.c` + `linux/event.c` + `signal.c` | 476 | ✅ `tinc-event` — dispatch enum + `BTreeMap` timers + self-pipe. `bsd/event.c`/`event_select.c` are mio's job. |
 | `net.c` | 527 | top-level loop: accept, timeout sweeps, retry outgoing |
 | `net_setup.c` | 1336 | one-time daemon init: read configs, create sockets, load keys |
 | `net_packet.c` | 1938 | **the hot path**: UDP rx/tx, MTU probing, relay, compression. Port carefully, benchmark against C. |
