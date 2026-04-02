@@ -62,6 +62,8 @@
 
 pub mod parse;
 pub mod pem;
+pub mod vars;
 
 pub use parse::{Config, Entry, ParseError, Source, parse_file, parse_line};
 pub use pem::{PemError, read_pem, write_pem};
+pub use vars::{VARS, Var, VarFlags, lookup as lookup_var};
