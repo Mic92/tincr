@@ -10,8 +10,9 @@
 //!
 //! ## Why hand-rolled getopt, not `clap`
 //!
-//! Same call as `sptps_test`: 4 global options (`-c`, `-n`, `--help`,
-//! `--version`) + a subcommand name + per-subcommand positionals.
+//! Same call as `sptps_test`: 5 global options (`-c`, `-n`,
+//! `--force`, `--help`, `--version`) + a subcommand name +
+//! per-subcommand positionals.
 //! `clap` would handle this beautifully but pulls in ~40 transitive
 //! deps and the proc-macro compilation hit. The hand-rolled version
 //! below is ~80 lines and matches getopt's behavior closely enough
@@ -49,8 +50,27 @@ struct CmdEntry {
     /// own arity checking — `init` wants exactly one, `export` wants
     /// zero, etc. Passing `&[String]` instead of typed args keeps the
     /// table uniform; commands that want types parse inside.
-    run: fn(&Paths, &[String]) -> Result<(), CmdError>,
+    ///
+    /// `&Globals` is the C globals (`force`, eventually `tty`, etc.)
+    /// that every `cmd_*` *can* read. Most don't.
+    run: fn(&Paths, &Globals, &[String]) -> Result<(), CmdError>,
     help: &'static str,
+}
+
+/// `tincctl.c`'s globals. The ones every command potentially reads,
+/// not the ones `make_names` writes (those are `Paths`).
+///
+/// In C these are bare globals — `bool force = false;` at file scope.
+/// Threading them as a struct means a command's signature *says*
+/// whether it cares (it takes `_: &Globals` if it doesn't).
+///
+/// Why not fold into `Paths`: `Paths` is path resolution; this is
+/// behavior toggles. Different lifetimes (a future shell mode resets
+/// `force` per-command but keeps `Paths`), different concerns.
+struct Globals {
+    /// `--force`. C: `tincctl.c:75`. Currently used by: `import`
+    /// (overwrite existing), eventually `set` (allow obsolete vars).
+    force: bool,
 }
 
 /// `tincctl.c:3000` `static const struct { ... } commands[]`.
@@ -66,7 +86,32 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_init,
         help: "init NAME              Create initial configuration files.",
     },
-    // More 4a commands land here: generate-keys, export, import, fsck, sign, verify.
+    CmdEntry {
+        name: "export",
+        run: cmd_export,
+        help: "export                 Export host configuration of local node to standard output",
+    },
+    CmdEntry {
+        name: "export-all",
+        run: cmd_export_all,
+        help: "export-all             Export all host configuration files to standard output",
+    },
+    CmdEntry {
+        name: "import",
+        run: cmd_import,
+        help: "import                 Import host configuration file(s) from standard input",
+    },
+    CmdEntry {
+        name: "exchange",
+        run: cmd_exchange,
+        help: "exchange               Same as export followed by import",
+    },
+    CmdEntry {
+        name: "exchange-all",
+        run: cmd_exchange_all,
+        help: "exchange-all           Same as export-all followed by import",
+    },
+    // More 4a commands: generate-keys, fsck, sign, verify.
     // 5b commands (dump, top, log, ...) go in a separate table.
 ];
 
@@ -75,12 +120,94 @@ const COMMANDS: &[CmdEntry] = &[
 ///
 /// C `cmd_init` does `if(argc > 2)` / `if(argc < 2)` inline. We do it
 /// here so `cmd::init::run` gets a nice `&str` and never sees argv.
-fn cmd_init(paths: &Paths, args: &[String]) -> Result<(), CmdError> {
+fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     match args {
         [] => Err(CmdError::MissingArg("Name")),
         [name] => cmd::init::run(paths, name),
         [_, _, ..] => Err(CmdError::TooManyArgs),
     }
+}
+
+/// `cmd_export`: zero args, write to stdout.
+fn cmd_export(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    // `lock()` for the BufWriter; export does many small writes.
+    cmd::exchange::export(paths, std::io::stdout().lock())
+}
+
+/// `cmd_export_all`: zero args, write to stdout.
+fn cmd_export_all(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    cmd::exchange::export_all(paths, std::io::stdout().lock())
+}
+
+/// `cmd_import`: zero args, read from stdin. Maps count→exit-code:
+/// C returns 1 if zero imported. C: `tincctl.c:2640-2648`.
+fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+    let count = cmd::exchange::import(paths, std::io::stdin().lock(), g.force)?;
+    if count > 0 {
+        eprintln!("Imported {count} host configuration files.");
+        Ok(())
+    } else {
+        // The C `fprintf(stderr, ...)` then `return 1`. We surface as
+        // BadInput so the dispatcher prints + exits 1. Same effect.
+        Err(CmdError::BadInput(
+            "No host configuration files imported.".into(),
+        ))
+    }
+}
+
+/// `cmd_exchange`: export, then import. C: `tincctl.c:2650-2652`.
+///
+/// The C is `return cmd_export(...) ? 1 : cmd_import(...)`. Short-
+/// circuit on export failure. The `fclose(stdout)` in `cmd_export`
+/// means stdin's peer (whoever is on the other end of the pipe —
+/// usually another `tinc exchange` over ssh) sees EOF and finishes
+/// its `import` before we start ours.
+///
+/// We need that EOF too. After our `export`, we drop stdout's lock
+/// (just by scope), but the *fd* stays open until process exit. To
+/// get EOF on the wire we have to close fd 1. But we still want to
+/// print error messages (to stderr) after import. So: close stdout's
+/// fd explicitly, after export, before import.
+///
+/// Except — closing fd 1 means any subsequent stdout write fails. The
+/// only stdout write after this point would be... nothing, we never
+/// print to stdout after import. So it's safe. But it's not *obvious*
+/// it's safe. Belt-and-suspenders: we don't actually close fd 1; we
+/// `dup2(/dev/null, 1)` so stdout becomes a black hole. Any
+/// accidental stdout write goes nowhere instead of EBADF-ing.
+///
+/// Actually wait — the C doesn't `dup2`, it `fclose`s. After fclose,
+/// the next `printf` is UB (writing to a closed FILE*). The C gets
+/// away with it because `cmd_import` doesn't printf to stdout. We
+/// can do the same simple thing: leave fd 1 alone, the peer sees EOF
+/// when *we* exit. The exchange use case is full-duplex — both sides
+/// are reading from each other simultaneously, so the import starts
+/// reading *before* export finishes; deadlock isn't possible because
+/// the OS buffers the pipe.
+///
+/// **Decision: do what the simplest reading of the C does — export
+/// then import, no explicit close.** If exchange-over-ssh hangs
+/// because of pipe buffer exhaustion (export of many large hosts),
+/// revisit. The C's `fclose(stdout)` is gated on `if(!tty)` and may
+/// be a workaround for exactly that; we'll find out.
+fn cmd_exchange(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    cmd_export(paths, g, args)?;
+    cmd_import(paths, g, args)
+}
+
+/// `cmd_exchange_all`: export-all, then import. C: `tincctl.c:2654-2656`.
+fn cmd_exchange_all(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    cmd_export_all(paths, g, args)?;
+    cmd_import(paths, g, args)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -95,8 +222,9 @@ fn cmd_init(paths: &Paths, args: &[String]) -> Result<(), CmdError> {
 /// `Err(String)` is the message to print before exiting nonzero.
 fn parse_global_options(
     mut args: impl Iterator<Item = String>,
-) -> Result<(PathsInput, Vec<String>), String> {
+) -> Result<(PathsInput, Globals, Vec<String>), String> {
     let mut input = PathsInput::default();
+    let mut globals = Globals { force: false };
     let mut rest = Vec::new();
 
     // C `getopt_long(argc, argv, "+bc:n:", ...)` — the `+` means stop
@@ -134,17 +262,22 @@ fn parse_global_options(
                 // ugly but avoids a third Result variant. The caller
                 // checks for this.
                 rest.push("--help".into());
-                return Ok((input, rest));
+                return Ok((input, globals, rest));
             }
             "--version" => {
                 rest.push("--version".into());
-                return Ok((input, rest));
+                return Ok((input, globals, rest));
             }
             // C `OPT_BATCH` sets `tty = false` — disables interactive
             // prompts. We have no prompts (see `cmd/init.rs` doc), so
             // -b is a no-op. Accept-and-ignore for compat with scripts
             // that pass it.
             "-b" | "--batch" => {}
+            // `--force`. C: `tincctl.c:250`. No short form — the C
+            // long-only OPT_FORCE doesn't map to a single char.
+            "--force" => {
+                globals.force = true;
+            }
             // Unknown option. C: `usage(true); return false`.
             s if s.starts_with('-') => {
                 return Err(format!("unknown option: {s}"));
@@ -196,7 +329,7 @@ fn parse_global_options(
         }
     }
 
-    Ok((input, rest))
+    Ok((input, globals, rest))
 }
 
 fn print_help() {
@@ -209,6 +342,7 @@ fn print_help() {
     println!("  -c, --config=DIR    Read configuration from DIR.");
     println!("  -n, --net=NETNAME   Connect to net NETNAME.");
     println!("  -b, --batch         Don't ask for anything (no-op; we never prompt).");
+    println!("      --force         Force some commands to work despite warnings.");
     println!("      --help          Display this help and exit.");
     println!("      --version       Output version information and exit.");
     println!();
@@ -233,7 +367,7 @@ fn main() -> ExitCode {
     // Skip argv[0].
     let args = env::args().skip(1);
 
-    let (input, rest) = match parse_global_options(args) {
+    let (input, globals, rest) = match parse_global_options(args) {
         Ok(x) => x,
         Err(msg) => {
             eprintln!("{msg}");
@@ -290,7 +424,7 @@ fn main() -> ExitCode {
     // current command.
     let paths = Paths::for_cli(&input);
 
-    match (entry.run)(&paths, cmd_args) {
+    match (entry.run)(&paths, &globals, cmd_args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");

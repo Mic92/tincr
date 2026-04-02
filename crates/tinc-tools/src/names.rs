@@ -222,6 +222,104 @@ pub fn check_id(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// `replace_name` — expand `$HOST`/`$FOO` in `Name = ...` values, then
+/// `check_id`. C: `utils.c:246-289`.
+///
+/// ## What this is for
+///
+/// `tinc.conf` can say `Name = $HOST` to mean "use the machine's
+/// hostname as the node name". Or `Name = $MYTINCNAME` for an
+/// arbitrary env var. The `$HOST` form is special-cased: if env var
+/// `HOST` isn't set, fall through to `gethostname(2)`.
+///
+/// After expansion, non-alnum characters get squashed to `_` (a
+/// hostname like `my-laptop.local` becomes `my_laptop_local`). Then
+/// `check_id` runs as a final gate — which after squashing can only
+/// fail on empty string.
+///
+/// ## Why this is in `names.rs` not `cmd/exchange.rs`
+///
+/// First consumer is `get_my_name` (`cmd/exchange.rs`). But the daemon
+/// also calls `replace_name` from `net_setup.c:setup_myself` — it's
+/// the *same* code path: read `Name` from config, expand, validate.
+/// Shared infrastructure goes here.
+///
+/// ## Why `Result<String, String>` not `Option`
+///
+/// The C has three distinct error messages: "env var X does not
+/// exist", "could not get hostname", "invalid name". A caller doing
+/// `expect()` gets the right message; a test gets the right discriminant.
+/// `Option` would lose that.
+///
+/// # Errors
+/// - `$FOO` (not `$HOST`) and env var `FOO` is unset
+/// - `$HOST`, env var `HOST` unset, *and* `gethostname` fails
+/// - Result fails `check_id` (empty after squashing)
+#[cfg(unix)]
+pub fn replace_name(raw: &str) -> Result<String, String> {
+    let resolved = if let Some(var_name) = raw.strip_prefix('$') {
+        // C: `if(name[0] == '$')`. The whole tail is the var name —
+        // no `${FOO}` syntax, no `$FOO_suffix` parsing. `$HOST` means
+        // env var `HOST`, full stop.
+        match std::env::var(var_name) {
+            Ok(v) => v,
+            // C distinguishes "not $HOST" (hard error) from "$HOST and
+            // unset" (fall through to gethostname). The `strcmp(name+1,
+            // "HOST")` is exact — `$host` doesn't get the fallback.
+            // `var()` returning `NotUnicode` we treat as not-found:
+            // a non-UTF-8 hostname would fail the alnum-squash anyway
+            // (every byte ≥0x80 → `_`, then likely empty or all-`_`
+            // after the leading bytes), and the C's behavior on a
+            // non-UTF-8 `getenv` result is to feed it to isalnum which
+            // returns 0 for everything ≥0x80, same outcome.
+            Err(_) if var_name == "HOST" => {
+                // C: `gethostname(hostname, HOST_NAME_MAX+1)`. nix's
+                // wrapper allocates the buffer and returns `OsString`.
+                // Same cast-to-String concern as above: non-UTF-8
+                // hostname → lossy → squash → probably-valid. The
+                // C's `isalnum` on raw bytes is no more correct.
+                nix::unistd::gethostname()
+                    .map_err(|e| format!("Could not get hostname: {e}"))?
+                    .to_string_lossy()
+                    .into_owned()
+            }
+            Err(_) => {
+                return Err(format!(
+                    "Invalid Name: environment variable {var_name} does not exist"
+                ));
+            }
+        }
+    } else {
+        // No `$` prefix — use as-is. Still goes through check_id below.
+        raw.to_owned()
+    };
+
+    // C: squash non-alnum to `_`. ONLY for the `$` branch — the C's
+    // for-loop is inside `if(name[0] == '$')`. A literal `Name = a-b`
+    // does NOT get squashed; it goes to `check_id` as-is and fails.
+    //
+    // Subtle: this means `Name = my-laptop` is an error but
+    // `Name = $HOST` on a machine called `my-laptop` succeeds (becomes
+    // `my_laptop`). The squash is a *convenience for hostnames*, not a
+    // general sanitizer. Replicated faithfully.
+    let name = if raw.starts_with('$') {
+        resolved
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>()
+    } else {
+        resolved
+    };
+
+    if check_id(&name) {
+        Ok(name)
+    } else {
+        // C: `"Invalid name for myself!"`. Yes, with the exclamation
+        // mark. Yes, even for the empty case.
+        Err("Invalid name for myself!".to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +374,59 @@ mod tests {
         // which are ASCII alnum (multibyte sequences are all ≥0x80).
         // Same outcome as C `isalnum((uint8_t)*id)` on UTF-8 bytes.
         assert!(!check_id("ünicode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_name_literal() {
+        assert_eq!(replace_name("alice").unwrap(), "alice");
+        // No squashing for literals: dash goes straight to check_id
+        // and fails. This is the asymmetry — see the function doc.
+        assert!(replace_name("has-dash").is_err());
+        assert!(replace_name("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_name_envvar_squashes() {
+        // `set_var` is process-global and tests run multithreaded.
+        // The race would be two threads touching the *same* var name;
+        // we use a sufficiently weird name that no other test touches.
+        // In edition 2024 `set_var` becomes `unsafe` for exactly this
+        // reason — when we bump editions, this test moves to the
+        // integration suite (separate binary, own unsafe policy) or
+        // `replace_name` grows an env-lookup-closure parameter. Until
+        // then, edition 2021's safe `set_var` is fine.
+        std::env::set_var("TINC_TEST_REPLACE_NAME_X1", "my-host.example");
+        // Hostname-ish input gets squashed: dash and dot → underscore.
+        assert_eq!(
+            replace_name("$TINC_TEST_REPLACE_NAME_X1").unwrap(),
+            "my_host_example"
+        );
+        std::env::remove_var("TINC_TEST_REPLACE_NAME_X1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_name_envvar_missing() {
+        // Any `$FOO` where FOO isn't HOST and isn't set → error.
+        let err = replace_name("$TINC_TEST_DEFINITELY_UNSET_ZZZ").unwrap_err();
+        assert!(err.contains("TINC_TEST_DEFINITELY_UNSET_ZZZ"));
+        assert!(err.contains("does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_name_host_falls_through() {
+        // `$HOST` with no `HOST` env var → gethostname. We can't
+        // assert *what* it returns (depends on the test machine), but
+        // we can assert it doesn't error and the result passes check_id.
+        //
+        // First, make sure HOST is actually unset. CI runners sometimes
+        // set it. (We don't restore it — tests shouldn't depend on
+        // ambient HOST.)
+        std::env::remove_var("HOST");
+        let name = replace_name("$HOST").unwrap();
+        assert!(check_id(&name), "gethostname → squash → {name:?}");
     }
 }
