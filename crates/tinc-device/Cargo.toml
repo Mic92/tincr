@@ -15,8 +15,19 @@ libc = "0.2.184"
 # `ioctl` would be the feature for `ioctl_write_ptr_bad!` — but we
 # bypass the macro (TUNSETIFF is encoded _IOW yet kernel writes
 # back; the macro generates `*const`, wrong contract). So: no
-# features needed in the main dep. Direct `libc::ioctl`.
-nix = { version = "0.29", default-features = false }
+# `ioctl` feature. Direct `libc::ioctl` for that shim.
+#
+# `socket` IS pulled. `fd_device.c:39-93` does ~40 LOC of cmsghdr/
+# CMSG_FIRSTHDR/CMSG_DATA boilerplate to receive an SCM_RIGHTS fd
+# over AF_UNIX. nix::sys::socket::recvmsg + ControlMessageOwned::
+# ScmRights collapses it AND fixes the C's NULL-deref bug at line
+# 73 (CMSG_FIRSTHDR returns NULL when control buf is empty; C
+# dereferences without checking; nix iterator handles it). The
+# fourth unsafe-shim instance — but this time, nix earns the dep.
+# `uio` gates cmsg_space! + recvmsg + ControlMessageOwned. The
+# `socket` feature alone gives the AF_UNIX types but not the cmsg
+# machinery. Both needed.
+nix = { version = "0.29", default-features = false, features = ["socket", "uio"] }
 
 [dev-dependencies]
 # `geteuid()` for the root-skip in tests. `user` feature only.

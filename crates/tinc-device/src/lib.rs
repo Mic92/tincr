@@ -436,6 +436,26 @@ mod linux;
 pub use linux::Tun;
 
 // ═══════════════════════════════════════════════════════════════════
+// fd — `fd_device.c` (247 LOC, the Android backend)
+// ═══════════════════════════════════════════════════════════════════
+//
+// Linux-only: the `@abstract` socket namespace (`SocketAddrExt::
+// from_abstract_name`, `std::os::linux::net`) and `MSG_ERRQUEUE`
+// flag are Linux-specific. Android IS Linux. The `cfg` matches
+// the C `#ifdef HAVE_LINUX` gate (`net_setup.c:1079`).
+//
+// (The C builds `fd_device.c` unconditionally then the daemon's
+// `DeviceType=fd` dispatch picks it. We gate at the module level:
+// `FdTun` doesn't exist on non-Linux. Daemon's dispatch will
+// `compile_error!` or runtime-error on `DeviceType=fd` for non-
+// Linux. Same outcome.)
+
+#[cfg(target_os = "linux")]
+mod fd;
+#[cfg(target_os = "linux")]
+pub use fd::{FdSource, FdTun};
+
+// ═══════════════════════════════════════════════════════════════════
 // Tests — Dummy only (Tun needs CAP_NET_ADMIN, separate integration)
 // ═══════════════════════════════════════════════════════════════════
 
