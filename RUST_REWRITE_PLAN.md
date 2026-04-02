@@ -419,9 +419,11 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 | Linux | `linux/device.c` | ✅ `linux.rs` (907 LOC) — hand-rolled. **NOT** `tun-tap` crate, **NOT** `nix::ioctl_write_ptr_bad!`. Direct `libc::ioctl` because the macro generates `*const` and `TUNSETIFF` writes back. The ~150 LOC estimate was the *unsafe shims alone*; the +10 offset trick + testable seam + 15 tests are the rest. |
 | Dummy | `dummy_device.c` | ✅ `lib.rs` `Dummy` impl. Trivial. Read → `WouldBlock`, write → `Ok(len)`. |
 | `fd` (Android) | `fd_device.c` | ✅ `fd.rs` (1330 LOC) — the +14 cousin. `pipe()`-testable. nix `socket`+`uio` features for `recvmsg`+`SCM_RIGHTS`. |
-| BSD/macOS | `bsd/device.c`, `bsd/darwin/` | `/dev/tun*`, utun via `libc::ioctl`. The vmnet path can wait. |
+| `raw` (`PF_PACKET`) | `raw_socket_device.c` | ✅ `raw.rs` (797 LOC) — the +0. Shim #5 SUBSTITUTES (`if_nametoindex` for `SIOCGIFINDEX`). `SOCK_SEQPACKET` test fake. |
+| BSD/macOS | `bsd/device.c` (592 LOC) | **THREE backends in one file** (verified post-chunk-3). `TUN`/`TUNEMU` (+14, byte-identical to `fd.rs::set_etherheader` save for symbolic vs literal constants) · `UTUN`/`TUNIFHEAD` (+10, IGNORES kernel's AF prefix and synthesizes from IP nibble — the prefix is wasted) · `TAP` (+0, identical to `raw.rs`). Port plan: a `BsdVariant` enum dispatching the offset; 80% reuses `fd::from_ip_nibble` + `set_etherheader`; the open() paths (utun `PF_SYSTEM` socket / `/dev/tun*` / `TUNSIFHEAD` ioctl) are the per-variant work. vmnet/tunemu drop. |
 | Windows | `windows/device.c` | `wintun` crate (WireGuard's driver) — **drop** TAP-Windows support |
-| Multicast/raw/UML/VDE | `*_device.c` | Feature-gated, low priority, port last |
+| Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write` (the factoring prediction was WRONG — see below). nix has full `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep on `netutl.c` is the real coupling — not state-sharing, but pulls in DNS resolution (`getaddrinfo`). Port AFTER `tinc-proto` exposes addr resolution OR hand-roll. |
+| UML/VDE | `*_device.c` | Drop. UML `device.c` doesn't exist (the table was wrong); VDE needs `libvdeplug`. |
 
 **The +10 layout pun** (`linux/device.c:148-167`): the kernel's TUN
 driver writes `tun_pi { u16 flags; be16 proto }` (4 bytes) before
@@ -518,11 +520,45 @@ Three backends define the offset-trick line. The arithmetic:
 | `fd` | (nothing — raw IP) | 0 | `14−0 = 14` | `fd_device.c:211`: `read(fd, DATA+ETH_HLEN, ...)` |
 | `raw` | ethernet (it IS the frame) | 14 | `14−14 = 0` | `raw_socket_device.c:89`: `read(fd, DATA, ...)` |
 
-The formula predicts: BSD `utun` writes a 4-byte `AF_INET`/`AF_
-INET6` prefix → offset `14−4=10`, same as Linux. The prefix is
-NOT `tun_pi` (it's just the AF number, native-endian) so the
-ethertype-lands-at-12 free lunch doesn't apply — BSD will need
-synthesis like `fd.rs`. Prediction noted; verify when porting.
+The formula prediction (chunk 3) was **HALF RIGHT, NUANCE WRONG**
+(verified by reading `bsd/device.c` post-chunk-3). The structural
+prediction held: BSD `utun`/`tunifhead` writes a 4-byte AF prefix
+→ offset `14−4=10` ✓, synthesis needed ✓. The nuance: **the C
+IGNORES the prefix.** `bsd/device.c:457`: `switch(DATA[14] >> 4)`
+— it reads the IP version nibble at offset 14 (PAST the 10-byte
+offset where the prefix lives in `[10..14]`). The prefix carries
+the AF number (`htonl(AF_INET)` = `0x00000002`, big-endian); the C
+could decode it. Doesn't. Synthesizes from IP nibble like `fd.rs`.
+Prediction "no free lunch" was right but for the wrong reason —
+the lunch is THERE; the C declines it.
+
+(WHY does the C decline? `git blame` says the synthesis code
+predates the `TUNIFHEAD` case; copy-paste from the `TUN` case at
+`:427` which has NO prefix to read. The two switch bodies are
+byte-identical except `+14` vs `+10` on `packet->len`; sed-diff
+verified. The C author copied the working synthesis instead of
+decoding the prefix. We could decode — but matching C means
+synthesize.)
+
+**Three backends in one file**, sharing the synthesis code:
+
+| BSD `device_type` | Offset | Prefix from kernel | C synthesis? | Reuses? |
+|---|---|---|---|---|
+| `TUN` / `TUNEMU` | +14 | none (raw IP) | yes | `fd::from_ip_nibble` + `set_etherheader` byte-identical save for symbolic-vs-literal constants |
+| `UTUN` / `TUNIFHEAD` | +10 | 4-byte AF (big-endian), IGNORED by read; SYNTHESIZED on write (`:520-539`: ethertype → `htonl(AF_INET)` → `memcpy(DATA+10)`) | yes (read) | same synthesis fns; write needs the inverse map |
+| `TAP` / `VMNET` | +0 | none (raw ether) | no | `raw.rs` body verbatim |
+
+The formula HOLDS at all three offsets. The `+14` row IS `fd.rs`;
+the `+0` row IS `raw.rs`; only `+10` is novel and only for the
+write-side prefix synthesis. Port shape: `BsdVariant` enum,
+dispatching offset; the open() paths (`/dev/tun*` device file vs
+utun `PF_SYSTEM` socket vs `TUNSIFHEAD` ioctl) are the per-
+variant work. **The READ/WRITE bodies are 80% reuse.**
+
+The write-side inverse (`:520-539`) is the one new pure fn:
+ethertype → AF. `0x0800` → `AF_INET`, `0x86DD` → `AF_INET6`, else
+error (NOT silent drop — C errors at `:533-536`). The exact dual
+of `fd::from_ip_nibble`.
 
 **The unsafe-shim decision matrix has SIX data points now, three
 classes:**
@@ -575,16 +611,36 @@ match + atomic CLOEXEC), nix `if_nametoindex` (substitute), raw
 `libc::bind` (half-baked). The mix is fine. Each decision stands
 alone.
 
-**The `read_fd`/`write_fd` factoring question** (chunk 3 raises
-it): third instance. The "two is not a pattern" note from `fd.rs`
-reaches three. STILL don't factor: 48 LOC of duplication vs
-coupling three independent backends. The "re-declare module-
-private when modules are independent" rule WINS over "three is a
-pattern." The factoring discussion REOPENS at the fourth instance
-**IF** that backend isn't independent. `multicast_device.c` (next
-in line) is a UDP socket like the daemon's listen sockets — it
-shares socket-stack state. THAT'S where the calculus changes.
-Prediction noted.
+**The `read_fd`/`write_fd` factoring question** (chunk 3 raised
+it; reading `multicast_device.c` REVISES it): third instance.
+"Two is not a pattern" reaches three. STILL don't factor: 48 LOC
+duplication vs coupling three independent backends.
+
+The chunk-3 prediction said `multicast_device.c` would be the
+fourth instance AND the one that breaks independence. **Prediction
+WRONG on both counts.** Read the C: it uses `recv`/`sendto` (`:183`,
+`:208`), not `read`/`write`. NOT a fourth `read_fd` instance. And
+the "shares socket-stack state" claim was sloppy: it calls
+`str2addrinfo` (`netutl.c:58`) which is a DNS-resolution helper,
+not shared state. The coupling is library-dependency, not state-
+sharing. The factoring trigger doesn't fire.
+
+WHAT IS the next `read_fd`/`write_fd` instance: `bsd/device.c`.
+All three of `TUN`/`UTUN`/`TAP` use `read()`/`write()` (`:419`,
+`:451`, `:485`, `:510`, `:541`, `:551`). That's the fourth-
+through-sixth instances. STILL independent (BSD backend is its
+own OS gate, `cfg(target_os = ...)` separates it from linux/fd/
+raw at compile time). The independence rule holds. Don't factor.
+
+The REVISED factoring criterion: **don't factor across `cfg`
+boundaries.** `linux.rs`/`fd.rs`/`raw.rs` are `cfg(linux)`. `bsd.
+rs` is `cfg(any(bsd, macos))`. They never compile together. A
+shared `syscall` module would have to be `cfg(unix)` and live in
+`lib.rs` — visible API surface, dead-code lints back. The cure
+worse than the 48-LOC disease. **The `cfg` boundary IS the
+factoring boundary.** Within one `cfg`: still don't factor at
+three (linux has three, all independent). Across `cfg`: the
+question doesn't even arise.
 
 Trait shape (landed; `write` takes `&mut [u8]` because TUN-mode
 zeroes `buf[10..12]` — the trait constrains; `FdTun::write`
