@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | 🟡 7/11 | `tinc-tools: generate-ed25519-keys...` | `init` + 5 host-shipping commands + key rotation. Full pre-daemon workflow done; rotation via `disable_old_keys` (comment-then-append, `#`-block survives in file as paper trail). 204 tests + 9 cross-impl. Next: `sign`/`verify`. |
+| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-tools: sign/verify — byte-identical...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. **`golden_c_vector` proves byte-identity to C `cmd_sign`** — transcribed `cmd_sign_verify.py`'s fixed-key blob, our `sign` produces the same 86-char sig. 226 tests + 9 cross-impl. Only `fsck` and `edit` left; `edit` defers to 5b. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -463,7 +463,7 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
 | `tincctl.c` `cmd_generate_ed25519_keys` | ✅ `cmd/genkey.rs` — `disable_old_keys` then append. Plan said "thin wrapper"; the wrapper is thin, the disable function is the substance |
 | `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
-| `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — see validated format below |
+| `tincctl.c` `cmd_sign`/`cmd_verify` | ✅ `cmd/sign.rs` — `golden_c_vector` is the proof: same key + same body + same `t` → same bytes |
 | `fsck.c` | `cmd/fsck.rs` — see validated structure below; was underestimated |
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
@@ -544,28 +544,23 @@ The validated plan was right: `disable_old_keys` is the substance, the wrapper i
 
 `disable_old_keys` is now `pub` — `fsck` (still pending) uses it for the keypair-coherence-fix path.
 
-##### `sign` / `verify` — wrapper format pinned, two non-obvious bits
+##### ✅ `sign` / `verify` — landed (commit `tinc-tools: sign/verify — byte-identical...`)
 
-The signature wrapper (`tincctl.c:2770-2998`) is *not* a PEM-style envelope. It's a **plaintext header line prepended to the file**:
+The validated guesses held: trailer with leading space, `time()` parameterized, `get_pubkey` replaced by `tinc-conf` (the fourth tokenizer collapses to `Config::lookup("Ed25519PublicKey")`). Three tests pin the format, in increasing strength:
 
-```
-Signature = <name> <unix-time> <86-char-tinc-b64>
-<original file contents, byte-exact>
-```
+| Test | Proves |
+|---|---|
+| `trailer_leading_space` | the space is load-bearing (constructs a sig over the spaceless trailer, watches it fail) |
+| `verify_tampered_time` / `_signer_name` | the trailer scheme works (header fields bound by sig — reconstruction differs, verify fails) |
+| `golden_c_vector` | **it's the same format as C, not just a format** |
 
-Two non-obvious bits:
+The golden test was a find. The plan said "we don't have a C `tinc` binary, test the envelope by self-roundtrip + tamper." That was the planned floor. Then `test/integration/cmd_sign_verify.py` turned out to have a fixed-key, fixed-time blob (`SIGNED_BYTES`, `t=1653397516`). Ed25519 is deterministic: same key + same message = same sig. Transcribe the constants, set up a confbase with the same key, call our `sign(paths, body, 1653397516, ...)`, `assert_eq!(ours, SIGNED)`. Passes. **The artifact IS the cross-impl test.** Same kind of free win as `kat-vectors` — the C side already did the work, we just consume it.
 
-1. **The signed message is `file_contents || " " || name || " " || unix_time` (note: leading space, no trailing newline).** `xasprintf(&trailer, " %s %ld", name, t)` then `memcpy` after the file bytes. The trailer is *not* in the output — it's appended to the buffer fed to `ecdsa_sign`, not written. The output is header line + original file. Verifying reconstructs the trailer from the parsed header and re-appends. **The leading space is load-bearing.** Miss it and signatures don't verify.
+The binding-via-reconstruction click: `verify` doesn't *check* a trailer against anything. There's no trailer in the blob to check. It builds a fresh one from the header's name/time and feeds it to the crypto. The signature *is* the check — any header lie produces a different reconstruction, different message, sig fails. The header is bound *as a side effect of verify being lazy*.
 
-2. **`verify`'s signer arg has three modes:** literal `.` → own name (via `get_my_name`); literal `*` → any signer (read the `name` field from the Signature line and look up `hosts/<that>`); anything else → must `check_id` and must equal the parsed signer. The `*` mode means `tinc verify '*' < blob` looks up the signer's pubkey *based on what the blob claims*. Only safe because verification then proves the claim.
+One deviation noted at point of decision: header parse is split-on-single-space (5 fields exact), not sscanf's zero-or-more-whitespace. C accepts `Signature=alice 1 sig` (sscanf format-string space matches zero chars). We don't. `sign` always emits canonical form; only hand-editing hits this.
 
-`get_pubkey` (`tincctl.c:1647`) is **yet another hand-rolled config-line tokenizer** (the fourth) — this one is `strcspn("\t =")` + `strspn("\t ")` + optional-`=`-then-`strspn`. It's a near-copy of `tinc-conf`'s parser for one specific key. We use `tinc-conf` instead, like `get_my_name` already does. **One difference to check:** `get_pubkey` falls back to `ecdsa_read_pem_public_key` if no `Ed25519PublicKey =` line exists — the host file can have an inline PEM block instead. `tinc-conf::parse_file` *also* knows about inline PEM (it skips it), so the lookup returns `None` and we'd try the PEM read. Works.
-
-The `Signature = %s %ld %s` line is `sscanf`-exact like import's `Name =`. `verify` checks `strlen(sig) != 86` — 64 raw bytes → 86 chars in tinc-b64 (no padding, `(64*8).div_ceil(6) == 86`). Hardcoded.
-
-The `time(NULL)` in `cmd_sign` makes output non-deterministic. For testing: parameterize the timestamp, set it from `time()` in the binary adapter.
-
-Estimate: **~250 LOC** + tests. Medium. Cross-impl test is easy here — both sign and verify exist in the C `tinc` binary... which we don't have. But `ecdsa_sign`/`ecdsa_verify` are KAT-locked already, so we test the *envelope*: Rust sign → Rust verify (trivially passes), Rust sign with one byte of payload flipped → verify fails, Rust sign with the trailer's leading space removed → verify fails (this is the one that catches a re-port that misses the space).
+**One thing to revisit if `fsck` keypair-coherence reuses pubkey loading:** `load_host_pubkey` is currently `cmd/sign.rs`-private. fsck does the same dance (config-line then PEM-fallback, `keys.c:315-340`). When fsck lands, lift it to `cmd/mod.rs` rather than duplicating.
 
 ##### `fsck` — was 400 LOC; **is 679, and structurally heavier than guessed**
 
@@ -585,11 +580,12 @@ Revised estimate: **~400 LOC fsck logic + ~100 LOC variables table (in `tinc-con
 
 | Command | Blocked on | Validated estimate |
 |---|---|---|
-| `sign` / `verify` | nothing — all primitives exist (`tinc-crypto::sign`, `tinc-conf::parse_file`, `get_my_name`). Envelope: `Signature = name time b64\n` + file; signed message is `file || " " || name || " " || time` with **load-bearing leading space** | medium (~250 LOC + tests) |
-| `fsck` | ~~`disable_old_keys`~~ ✅ (landed with genkey, `pub` for reuse), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
+| `fsck` | ~~`disable_old_keys`~~ ✅ (genkey, `pub`), ~~pubkey loader~~ ✅ (sign, lift to `cmd/mod.rs`), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
 
-**Ship order:** `sign`/`verify` → `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
+**Ship order:** `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
+
+When the table lands, it should also unblock **`set`/`get`'s parse half** (5b commands, but `VAR_SAFE` gating + name validation are filesystem-only — the daemon socket is for the `reload` notification, same as `edit`). Don't build them yet; just don't bury the table in `cmd/fsck.rs` where they can't reach it.
 
 ### Phase 5b: RPC half + new control protocol
 
