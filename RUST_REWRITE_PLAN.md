@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-tools: sign/verify — byte-identical...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. **`golden_c_vector` proves byte-identity to C `cmd_sign`** — transcribed `cmd_sign_verify.py`'s fixed-key blob, our `sign` produces the same 86-char sig. 226 tests + 9 cross-impl. Only `fsck` and `edit` left; `edit` defers to 5b. |
+| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-conf: variables[] table...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. `variables[]` (74 entries, fsck's last `tinc-conf` blocker) landed alongside. 235 tests + 9 cross-impl. fsck has one prereq left (`read_server_config` wrapper, ~50 LOC); `edit` defers to 5b. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -246,7 +246,8 @@ The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` ty
 | `ecdsa.c` `read_pem` / `ecdsagen.c` `write_pem` | `pem::{read,write}_pem` | ✅ `Zeroizing` everywhere keys flow |
 | `conf_net.c` `get_config_subnet` | — | ⏸️ Daemon glue: `tinc-proto::Subnet::from_str` already does the parse |
 | `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
-| `conf.c` `read_server_config` (`conf.d/` scan, `cmdline_conf` merge) | — | ⏸️ Phase 5 — daemon startup. The pieces (`parse_file` + `Config::merge`) are here. |
+| `conf.c` `read_server_config` (`conf.d/` scan, `cmdline_conf` merge) | — | ⏸️ **Next** — fsck's last blocker. Pieces (`parse_file` + `Config::merge`) here. |
+| `tincctl.c` `variables[]` (74 entries) | `vars::{VARS, VarFlags, lookup}` | ✅ Order preserved incl. alpha-break; sed-diff verified. +3 invariants the C never asserts |
 | `names.c` | — | ✅ `tinc-tools::names` — first consumer was `tinc init`, not the daemon. Subset: `confbase`/`confdir` only; `pidfilename`/`unixsocketname` come with 5b. |
 | `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
 
@@ -569,23 +570,22 @@ One deviation noted at point of decision: header parse is split-on-single-space 
 - **679 LOC**, ~7 of which are `DISABLE_LEGACY` so call it ~500 effective
 - Not just `if(!x) eprintln!`. Four distinct check categories with their own logic:
   1. **Keypair coherence** (`test_ec_keypair`, `keys.c:380`): derive pubkey from private, compare to the `Ed25519PublicKey =` in `hosts/NAME`. If mismatch, *with `--force`*, **rewrite the host file** — `disable_old_keys` then append correct pubkey. fsck *fixes*, not just diagnoses. (`ask_fix_ec_public_key`, `keys.c:269`.)
-  2. **Per-variable validity** (`check_conffile`, `keys.c:122`): walks the config, for each entry looks up the **`variables[]` table** (`tincctl.c:1680-1758`, **74 entries**, bitflags `VAR_SERVER|VAR_HOST|VAR_MULTIPLE|VAR_OBSOLETE|VAR_SAFE`), warns if a server-only var appears in a host file or vice-versa, warns on obsolete vars, **counts duplicates** and warns when a non-`VAR_MULTIPLE` var appears twice (only the first wins, silently — this is the only place that surfaces it).
+  2. **Per-variable validity** (`check_conffile`, `keys.c:122`): walks the config, for each entry calls `tinc_conf::lookup_var` (✅ landed), warns if a server-only var appears in a host file or vice-versa, warns on obsolete, **counts duplicates** and warns when a non-`MULTIPLE` var appears twice (the only place that surfaces silent-first-wins). Straight loop now: `for entry in cfg { match lookup_var(&entry.variable) { ... } }`.
   3. **Script executability** (`check_script_confdir` + `check_script_hostdir`, `keys.c:448-528`): scan confbase and `hosts/` for `tinc-up`, `tinc-down`, `host-up`, `host-down`, `subnet-up`, `subnet-down`, `<hostname>-up`, `<hostname>-down`; check `access(R_OK|X_OK)`; with `--force`, `chmod 0755`.
   4. **File modes** (`check_key_file_mode`, `keys.c:205`): warn if private key isn't `0600`.
 
-- **The `variables[]` table is the hidden cost.** It's not just for fsck — it's also what `cmd_set`/`cmd_get` use for validation ("is this a known variable name?"), and `cmd_set` uses `VAR_SAFE` to decide what's settable without `--force`. Porting it is **~100 LOC of static data** that should live in `tinc-conf` (it's metadata *about* config keys), not in `cmd/fsck.rs`. Doing that now means `set`/`get` (5b commands, but the parse half is fs-only) get it for free.
-- **Uses `read_server_config` + `read_host_config`** (`conf_net.c`), the daemon's config-tree builder — not the bare `parse_file`. We have `parse_file` but not the merge-multiple-files-and-conf.d wrapper. `tinc-conf` has the pieces; the wrapper is **~50 LOC** and was on the Phase 5 list anyway. Pull it forward.
+- **Uses `read_server_config` + `read_host_config`** (`conf_net.c`), the daemon's config-tree builder — not the bare `parse_file`. The merge-multiple-files-and-conf.d wrapper is **~50 LOC** and the pieces are already here. Pull it forward.
 
-Revised estimate: **~400 LOC fsck logic + ~100 LOC variables table (in `tinc-conf`) + ~50 LOC config-tree builder wrapper (in `tinc-conf`) = ~550 LOC**, of which ~150 lands in `tinc-conf` not `tinc-tools`. **Medium-large**, was tagged medium-tedious. Reordered to last in 4a — it's blocked on `disable_old_keys` (genkey ships first) and on the variables table being a small standalone deliverable.
+Remaining fsck cost: **~400 LOC fsck logic + ~50 LOC config-tree wrapper**. The `variables[]` table came in over estimate (~500 LOC vs ~100 guessed), but ~half of that is module-doc + structural-invariant tests we didn't plan for and the C never had. Data portion was ~150 LOC.
 
 | Command | Blocked on | Validated estimate |
 |---|---|---|
-| `fsck` | ~~`disable_old_keys`~~ ✅ (genkey, `pub`), ~~pubkey loader~~ ✅ (sign, lift to `cmd/mod.rs`), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
+| `fsck` | ~~`disable_old_keys`~~ ✅ ~~pubkey loader~~ ✅ ~~`variables[]`~~ ✅ — only `read_server_config` wrapper left (→ `tinc-conf`, ~50 LOC) | **medium (~450 LOC)** |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
 
-**Ship order:** `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
+**Ship order:** `read_server_config` wrapper → `fsck`. `edit` defers to 5b.
 
-When the table lands, it should also unblock **`set`/`get`'s parse half** (5b commands, but `VAR_SAFE` gating + name validation are filesystem-only — the daemon socket is for the `reload` notification, same as `edit`). Don't build them yet; just don't bury the table in `cmd/fsck.rs` where they can't reach it.
+The table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
 
 ### Phase 5b: RPC half + new control protocol
 
