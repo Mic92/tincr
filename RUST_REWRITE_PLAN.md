@@ -36,6 +36,7 @@
 | **5b chunk 7 — `cmd_edit`/`version`/`help`** | ✅ +3 cmds | `tinc-tools: edit/version/help — sh -c "$@", not system()` | The C's `xasprintf("\"%s\" \"%s\"", editor, filename); system(cmd)` is wrong TWICE: filename-with-`$` expands AND double-quoted `"$EDITOR"` doesn't word-split (so `EDITOR="vim -f"` → ENOENT). The C never supported spacey EDITOR — the wrapping quotes defeat `system()`'s tokenization. We do `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` (the git way): editor unquoted (split), filename `"$@"` (literal). `edit_dollar_in_filename_not_expanded` sets `HOME=/tmp/WRONG`, edits `"$HOME"`, asserts stdout has `$HOME` literal. `edit_spacey_editor_tokenized` pins `EDITOR="echo arg"` → stdout `arg <path>`. The path-resolution lattice: conffiles[] check BEFORE dash-split (`tinc-up` would otherwise split to `("tinc","up")` → wrong file). C bare-hostname case validates NOTHING; we reject `/`, `..`, empty. STRICTER. CONFFILES sed-diff'd vs `tincctl.c:2400-2406` (✓). 671 tests + 9 cross-impl, 33 commands. |
 | **5b chunk 8 — `cmd_network`** | ✅ +1 cmd | `tinc-tools: network — list mode only, switch is C-behavior-drop #2` | C has TWO modes: argless lists `confdir/*/tinc.conf`-bearing dirs; with arg, `switch_network` mutates `netname`/`confbase`/`prompt` globals for the readline loop. We have no readline. Switch would mutate-then-exit — silent no-op, worse than erroring. List ported, switch errors with "use `-n NAME`" advice (`.` sentinel gets distinct "no -n" advice). Second deliberate drop after SIGINT, different shape: SIGINT is "exit code differs, daemon doesn't care"; this is "feature requires scaffolding we don't have." Sorted output (NOT in C — readdir order undefined; sorted is in the set of valid C outputs; deterministic). `Paths::confdir_always()` papers over the C's-always-set vs our-`Option` mismatch. `list_skip_unreadable` gates on euid (root reads `chmod 000` via DAC override). 685 tests + 9 cross-impl, 34 commands. **Phase 5b CLOSED — all Phase-5-reachable commands landed.** |
 | 3 — Device & transport | | | |
+| **3 chunk 1 — `tinc-device` Linux + Dummy** | ✅ 8th crate | `tinc-device: TUN/TAP — the +10 layout pun, NOT the nix macro` | The +10: `read(fd, buf+10, MTU-10)` lands `tun_pi.proto` at byte 12 = the ethertype slot of a synthetic ethernet frame. `memset(buf, 0, 12)` zeroes fake MACs AND `tun_pi.flags` (overlapping bytes 10-11). No reformat; `route.c` never knows the bytes used to be `tun_pi`. `tun_offset_arithmetic` pins `14 - 4 = 10`. **NOT `nix::ioctl_write_ptr_bad!`** — `TUNSETIFF` is encoded `_IOW` (kernel reads from us) but kernel WRITES BACK `ifr_name`; the macro generates `*const`, wrong contract. Direct `libc::ioctl` with `*mut`. Third unsafe-shim instance, same SAFETY shape, but the macro divergence is new. `pack_ifr_name` is the testable seam: validate-first means `open_too_long_iface_err_before_open` passes without CAP_NET_ADMIN. STRICTER than C (rejects 16+ byte ifname; C truncates). 706 tests + 9 cross-impl. |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
 
@@ -413,10 +414,63 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 ### `tinc-device`
 | Platform | C source | Rust approach |
 |---|---|---|
-| Linux | `linux/device.c` | `tun-tap` crate or hand-rolled `ioctl(TUNSETIFF)` — ~150 LOC |
+| Linux | `linux/device.c` | ✅ `linux.rs` (907 LOC) — hand-rolled. **NOT** `tun-tap` crate, **NOT** `nix::ioctl_write_ptr_bad!`. Direct `libc::ioctl` because the macro generates `*const` and `TUNSETIFF` writes back. The ~150 LOC estimate was the *unsafe shims alone*; the +10 offset trick + testable seam + 15 tests are the rest. |
+| Dummy | `dummy_device.c` | ✅ `lib.rs` `Dummy` impl. Trivial. Read → `WouldBlock`, write → `Ok(len)`. |
+| `fd` (AF_UNIX) | `fd_device.c` | next — 247 LOC, the socket-passed-fd backend |
 | BSD/macOS | `bsd/device.c`, `bsd/darwin/` | `/dev/tun*`, utun via `libc::ioctl`. The vmnet path can wait. |
 | Windows | `windows/device.c` | `wintun` crate (WireGuard's driver) — **drop** TAP-Windows support |
 | Multicast/raw/UML/VDE | `*_device.c` | Feature-gated, low priority, port last |
+
+**The +10 layout pun** (`linux/device.c:148-167`): the kernel's TUN
+driver writes `tun_pi { u16 flags; be16 proto }` (4 bytes) before
+each IP packet. Reading at `buf+10` lands `tun_pi.proto` at byte
+12 — the ethertype slot of an ethernet frame. `memset(buf, 0, 12)`
+zeroes the synthetic dst-MAC + src-MAC, AND overwrites `tun_pi.
+flags` (bytes 10-11; always 0 from kernel rx anyway). The buffer
+IS an ethernet frame after the memset. `route.c` reads ethertype
+at byte 12, gets the kernel's `tun_pi.proto`, never knows. Write
+path inverts: zero `[10..12]`, write `[10..]`.
+
+```text
+  byte:       0..5   6..11  12..13  14..
+  ether:      dhost  shost  type    payload
+  read+10:                  ┌──tun_pi─┐
+  what kernel writes:       flags proto IP-packet
+  after memset(0..12):  00..00 00..00 proto IP-packet
+                                      ↑ same byte, two names
+```
+
+**`pack_ifr_name` is the testable seam.** C order: open() →
+strncpy → ioctl. Our order: pack() → open() → ioctl. Validate-
+first means the length-check fires BEFORE the syscall that needs
+CAP_NET_ADMIN. The first attempt (`iface_too_long_panics` test
+with assert sandwiched between open and ioctl) was unrunnable in
+CI; the reorder is the fix. STRICTER than C: 16+ byte ifname →
+`Err(InvalidInput)` not silent truncation. The truncation failure
+mode (kernel sees `sixteenchars_lo`, `tinc-up` script's `ip addr
+add ... dev sixteenchars_long` fails ENODEV three steps later) is
+bad enough to reject early.
+
+**The third unsafe-shim instance, but the first to BYPASS the
+macro.** `tui.rs` uses `nix::ioctl_read_bad!` for `TIOCGWINSZ`
+(kernel writes only, `*mut` is right). `TUNSETIFF` is encoded
+`_IOW('T', 202, int)` — `_IOW` means "kernel reads from us" —
+but the kernel writes `ifr_name` back. The encoding is a
+historical lie (the `int` size argument is also wrong; kernel
+treats arg as `struct ifreq *` regardless). `nix::ioctl_write_
+ptr_bad!` generates `*const T`; we'd be passing `*const` to
+something that mutates. Sound (we hold `*mut`, cast to `*const`
+for the call, kernel side is `void __user *`) but documents the
+wrong contract. Direct `libc::ioctl(fd, req, *mut ifreq)` instead.
+The macro's value was the `if ret < 0 { Err(Errno::last()) }`
+wrapper — three lines we wrote ourselves.
+
+NOT a reversal. The plan said "tun-tap crate or hand-rolled"; we
+hand-rolled. The plan said ~150 LOC; we landed 907. But the
+150 was off the same way as every static-table port (3-5× rule):
+the shims ARE ~150, the offset trick + testable seam + 15 tests
+are the rest. Nothing about the PLAN was wrong; the estimate was
+optimistic in the usual direction.
 
 ```rust
 pub trait Device: Send {
@@ -984,13 +1038,24 @@ table); the `comm` output is the ground truth.
 
 | # | Command | What the C does | What we do | Why dropped |
 |---|---|---|---|---|
-| 1 | `log`/`pcap` | `signal(SIGINT)` → `shutdown(fd)` → exit 0 | default SIGINT → exit 130 | daemon doesn't care; nobody scripts `tinc log`'s exit code |
-| 2 | `network NAME` | mutate globals for readline loop | error "use `-n NAME`" | no readline loop → mutation goes to /dev/null |
+| 1 | `log`/`pcap` | `signal(SIGINT)` → `shutdown(fd)` → exit 0 | default SIGINT → exit 130 | daemon doesn't care; nobody scripts `tinc log`'s exit code | needs-scaffolding |
+| 2 | `network NAME` | mutate globals for readline loop | error "use `-n NAME`" | no readline loop → mutation goes to /dev/null | needs-scaffolding |
+| 3 | `IFF_ONE_QUEUE` | reads `IffOneQueue` config, sets flag in `TUNSETIFF` | doesn't | kernel commit `5d09710` (2.6.27, 2008) made it a no-op; flag consumed but ignored | dead-kernel-side |
 
-Both drops are "the C feature works in a context we don't have." The
-SIGINT context is "a process that survives the signal"; the switch
-context is "a process that survives the command." Same shape. The
-right thing for both is the simpler thing.
+Drops #1 and #2 are "the C feature works in a context we don't
+have." The SIGINT context is "a process that survives the signal";
+the switch context is "a process that survives the command." Same
+shape. Drop #3 is a third class: the C wrote a flag the kernel
+stopped reading 18 years ago. Nothing about OUR scaffolding;
+the other side dropped support. The class column distinguishes:
+
+| Class | What's missing |
+|---|---|
+| needs-scaffolding | a Rust subsystem (the readline loop) |
+| dead-kernel-side | nothing — the kernel made it a no-op |
+
+The right thing for #1/#2 is the simpler thing. The right thing
+for #3 is just nothing.
 
 | C source | Rust |
 |---|---|
