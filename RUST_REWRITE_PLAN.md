@@ -38,6 +38,7 @@
 | 3 — Device & transport | | | |
 | **3 chunk 1 — `tinc-device` Linux + Dummy** | ✅ 8th crate | `tinc-device: TUN/TAP — the +10 layout pun, NOT the nix macro` | The +10: `read(fd, buf+10, MTU-10)` lands `tun_pi.proto` at byte 12 = the ethertype slot of a synthetic ethernet frame. `memset(buf, 0, 12)` zeroes fake MACs AND `tun_pi.flags` (overlapping bytes 10-11). No reformat; `route.c` never knows the bytes used to be `tun_pi`. `tun_offset_arithmetic` pins `14 - 4 = 10`. **NOT `nix::ioctl_write_ptr_bad!`** — `TUNSETIFF` is encoded `_IOW` (kernel reads from us) but kernel WRITES BACK `ifr_name`; the macro generates `*const`, wrong contract. Direct `libc::ioctl` with `*mut`. Third unsafe-shim instance, same SAFETY shape, but the macro divergence is new. `pack_ifr_name` is the testable seam: validate-first means `open_too_long_iface_err_before_open` passes without CAP_NET_ADMIN. STRICTER than C (rejects 16+ byte ifname; C truncates). 706 tests + 9 cross-impl. |
 | **3 chunk 2 — `tinc-device` fd (Android)** | ✅ third backend | `tinc-device: fd backend — the +14 cousin, nix EARNS the dep here` | The +14: Android `VpnService` writes RAW IP, no prefix; read at `+14` (`ETH_HLEN`), synthesize ethertype from `ip[0]>>4`. The +10's TESTABLE cousin — `linux.rs` couldn't fake `tun_pi` (kernel-side layout); `fd.rs` reads bytes a `pipe()` can feed. `read_ipv4_via_pipe`/`read_ipv6_via_pipe` cover the offset arithmetic with no CAP_NET_ADMIN. **Shim #4 USES nix; #3 BYPASSED it.** `recvmsg`+`SCM_RIGHTS` is well-specified POSIX; nix's `ControlMessageOwned::ScmRights` collapses ~40 LOC of `cmsghdr` boilerplate AND fixes the C's NULL-deref at `fd_device.c:73`. `FdSource::{Inherited(RawFd), UnixSocket(PathBuf)}` makes the C's `sscanf("%d")==1` string-dispatch explicit. STRICTER than C: closes leaked fds before erroring on multi-fd cmsg (C leaks). C-is-WRONG +2 (the NULL deref; the leak — both masked by Java sender always sending 1 cmsg, 1 fd). 723 tests + 9 cross-impl. |
+| **3 chunk 3 — `tinc-device` raw (`PF_PACKET`)** | ✅ fourth backend | `tinc-device: raw_socket — the +0, the SUBSTITUTE shim, SEQPACKET fake` | The +0: `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))` writes raw ethernet, `route.c` wants ethernet at offset 0, done. Three points define the line: `offset = ETH_HLEN − len(prefix)`; linux 14−4=10, fd 14−0=14, raw 14−14=0. **Shim #5 SUBSTITUTES the syscall**: C does `SIOCGIFINDEX` ioctl (2002 code); `if_nametoindex(3)` is the POSIX function (2001) doing the SAME RESOLUTION. nix wraps it. New row class. Shim #6 hand-rolled: nix `LinkAddr` is getters-only (designed for `recvfrom` outputs, not `bind` inputs). The HYBRID file: nix for `socket()`+CLOEXEC (full match), nix for `if_nametoindex` (substitute), raw libc for `bind` (half-baked). **The fakeable boundary HOLDS but the WHICH-FAKE question is new**: `socketpair(SOCK_DGRAM)` BLOCKS on close (UDP-ish, no EOF concept; gcc-verified, eof test hung). `SOCK_SEQPACKET` preserves datagram boundaries AND EOFs on close — both PF_PACKET properties. STRICTER same as `linux::pack_ifr_name`: `if_nametoindex` errors on full name, no truncation. 734 tests + 9 cross-impl. |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
 
@@ -480,38 +481,110 @@ driver. `fd.rs` reads RAW IP packets — Android's `VpnService`
 writes no prefix at all. A `pipe()` is enough. The unfakeable-
 vs-fakeable boundary:
 
-| Backend | What other side writes | Fakeable? | End-to-end test? |
-|---|---|---|---|
-| `linux` (kernel TUN) | `tun_pi { flags; proto }` + IP | no (kernel layout) | `tun_offset_arithmetic` pins math only |
-| `fd` (Android `VpnService`) | raw IP, no prefix | **yes** (`pipe()`) | `read_ipv4_via_pipe` covers full flow |
-| `dummy` | nothing | trivially | `dummy_read_would_block` |
+| Backend | What other side writes | Fakeable? | **Which fake?** | End-to-end test? |
+|---|---|---|---|---|
+| `linux` (kernel TUN) | `tun_pi { flags; proto }` + IP | no (kernel layout) | — | `tun_offset_arithmetic` pins math only |
+| `fd` (Android `VpnService`) | raw IP, no prefix | **yes** | `pipe()` | `read_ipv4_via_pipe` covers full flow |
+| `raw` (`PF_PACKET`) | raw ethernet (it IS the frame) | **yes** | `socketpair(SEQPACKET)` | `read_ether_via_seqpacket` |
+| `dummy` | nothing | trivially | — | `dummy_read_would_block` |
 
 The boundary generalizes: **does the OTHER side write structure?**
 Kernel TUN does (the `tun_pi` struct, kernel-allocated). Android
 doesn't (`VpnService.Builder.establish()` returns a raw fd; the
-Java side is just `write(fd, ip_packet)`). When the other side is
+Java side is just `write(fd, ip_packet)`). PF_PACKET doesn't (the
+frame IS the structure; nothing added). When the other side is
 structure-free, our side's offset arithmetic is fd-agnostic — any
 byte source works.
 
-**The unsafe-shim decision matrix has FOUR data points now, two
-diverging:**
+**The which-fake column** (chunk 3): `pipe()` worked for `fd.rs`
+(stream-ish was fine; small test packets, no datagram boundary
+tested). DIDN'T work for `raw.rs`: the eof test needs read-
+returns-0 on close. `socketpair(SOCK_DGRAM)` BLOCKS on close (gcc-
+verified; `read()` after `close(peer)` hangs forever — UDP-ish,
+connectionless, no EOF concept). `SOCK_SEQPACKET` preserves
+datagram boundaries (`write 5 + write 5` → `read 5 + read 5`, not
+`read 10`) AND EOFs on close (`read` → `0`). Both `PF_PACKET`
+properties. The which-fake question: **what semantics of the real
+fd does the test exercise?** If "just bytes": `pipe()`. If
+"datagram boundaries": `SOCK_DGRAM`. If "datagram boundaries + EOF
+on close": `SOCK_SEQPACKET`.
 
-| # | What | nix wraps it? | Use nix? | Why |
+Three backends define the offset-trick line. The arithmetic:
+`offset = ETH_HLEN − len(what_other_side_prefixes)`.
+
+| Backend | Prefix | `len` | Offset | C source line |
 |---|---|---|---|---|
-| 1 | `localtime_r` (`info.rs`) | no | — | hand-rolled `MaybeUninit<libc::tm>` |
-| 2 | `TIOCGWINSZ` (`tui.rs`) | `ioctl_read_bad!` | **yes** | encoding honest (`_IOR`, kernel writes only) |
-| 3 | `TUNSETIFF` (`linux.rs`) | `ioctl_write_ptr_bad!` | **no** | encoding lies (`_IOW`, kernel writes back too) |
-| 4 | `recvmsg`+`SCM_RIGHTS` (`fd.rs`) | full safe API | **yes** | POSIX-standard; ~40 LOC C cmsghdr → 1 iterator; fixes the C's NULL deref |
+| `linux` | `tun_pi { __u16 flags; __be16 proto; }` | 4 | `14−4 = 10` | `linux/device.c:152`: `read(fd, DATA+10, ...)` |
+| `fd` | (nothing — raw IP) | 0 | `14−0 = 14` | `fd_device.c:211`: `read(fd, DATA+ETH_HLEN, ...)` |
+| `raw` | ethernet (it IS the frame) | 14 | `14−14 = 0` | `raw_socket_device.c:89`: `read(fd, DATA, ...)` |
 
-The pattern isn't "always nix" or "always bypass." The decision
-criterion is **does the wrapper match the kernel's actual
-contract?** `_IOW` lying about TUNSETIFF is a 1990s legacy (the
-`int` size encoding is also wrong; kernel ignores it). `recvmsg` +
-`SCM_RIGHTS` is POSIX-specified, no encoding to lie about. The
-plan's chunk-1 warning ("don't pattern-match on `tui.rs` for the
-BSD shim") generalizes: **don't pattern-match on `linux.rs`
-either.** Read the man page; check if the wrapper's signature
-matches what the kernel actually does.
+The formula predicts: BSD `utun` writes a 4-byte `AF_INET`/`AF_
+INET6` prefix → offset `14−4=10`, same as Linux. The prefix is
+NOT `tun_pi` (it's just the AF number, native-endian) so the
+ethertype-lands-at-12 free lunch doesn't apply — BSD will need
+synthesis like `fd.rs`. Prediction noted; verify when porting.
+
+**The unsafe-shim decision matrix has SIX data points now, three
+classes:**
+
+| # | What | C does | We do | Class |
+|---|---|---|---|---|
+| 1 | `localtime_r` (`info.rs`) | `localtime_r` | hand-rolled `MaybeUninit<libc::tm>` | nix doesn't wrap |
+| 2 | `TIOCGWINSZ` (`tui.rs`) | ioctl | `nix::ioctl_read_bad!` | wraps-same-syscall, encoding honest |
+| 3 | `TUNSETIFF` (`linux.rs`) | ioctl | bypass; raw `libc::ioctl` | wraps-same-syscall, **encoding lies** |
+| 4 | `recvmsg`+`SCM_RIGHTS` (`fd.rs`) | ~40 LOC cmsghdr | `nix::sys::socket::recvmsg` | wraps-same-syscall, POSIX-clean, fixes C bug |
+| 5 | `SIOCGIFINDEX` (`raw.rs`) | ioctl | `nix::if_nametoindex` | **substitutes-with-higher-level-POSIX** |
+| 6 | `bind(sockaddr_ll)` (`raw.rs`) | `bind()` | hand-rolled `libc::bind` | nix half-baked (`LinkAddr` getters-only) |
+
+The pattern isn't "always nix" or "always bypass." Classes:
+
+**wraps-same-syscall** (#2-4): does the wrapper match the kernel's
+actual contract? `_IOW` lying about TUNSETIFF is a 1990s legacy
+(the `int` size encoding is also wrong; kernel ignores it).
+`recvmsg`+`SCM_RIGHTS` is POSIX-specified, no encoding to lie
+about. Read the man page; check if the wrapper's signature matches
+what the kernel actually does.
+
+**substitutes-with-higher-level-POSIX** (#5, NEW): `SIOCGIFINDEX`
+ioctl and `if_nametoindex(3)` resolve the same name→ifindex
+mapping. The C uses the ioctl because it's 2002 code; `if_
+nametoindex` was IEEE 1003.1-2001, glibc support spotty then. By
+2026 it's everywhere. The decision criterion broadens: not "does
+the wrapper match?" but "is there a HIGHER-LEVEL primitive?" When
+yes, the C's choice was historical. Use the higher level. Side
+benefit: `if_nametoindex` errors on the full name, no truncation
+— the `pack_ifr_name` strictness for free.
+
+**nix half-baked** (#6, NEW): `LinkAddr` has getters (`.ifindex()`,
+`.protocol()`), no constructor. Designed for `recvfrom` outputs
+(kernel writes `sockaddr_ll`, we read it) not `bind` inputs (we
+write, kernel reads). The asymmetry is reasonable from nix's
+perspective — packet sniffers `recvfrom` on unbound sockets;
+`bind` is rare. Wrong abstraction for us. Raw `libc::bind` is 8
+lines.
+
+The plan's chunk-1 warning ("don't pattern-match on `tui.rs` for
+the BSD shim") generalizes: **don't pattern-match on ANY neighbor.
+`raw.rs` is a hybrid of three different decisions.** Per shim, ask
+in order: (1) nix doesn't wrap? hand-roll. (2) higher-level POSIX
+primitive? substitute. (3) wrapper matches kernel contract? use.
+(4) wrapper half-baked or lies? hand-roll.
+
+`raw.rs` is the FIRST file to mix classes: nix `socket()` (full
+match + atomic CLOEXEC), nix `if_nametoindex` (substitute), raw
+`libc::bind` (half-baked). The mix is fine. Each decision stands
+alone.
+
+**The `read_fd`/`write_fd` factoring question** (chunk 3 raises
+it): third instance. The "two is not a pattern" note from `fd.rs`
+reaches three. STILL don't factor: 48 LOC of duplication vs
+coupling three independent backends. The "re-declare module-
+private when modules are independent" rule WINS over "three is a
+pattern." The factoring discussion REOPENS at the fourth instance
+**IF** that backend isn't independent. `multicast_device.c` (next
+in line) is a UDP socket like the daemon's listen sockets — it
+shares socket-stack state. THAT'S where the calculus changes.
+Prediction noted.
 
 Trait shape (landed; `write` takes `&mut [u8]` because TUN-mode
 zeroes `buf[10..12]` — the trait constrains; `FdTun::write`
@@ -1197,7 +1270,7 @@ Aggressively shed scope:
 |---|---|
 | `gcrypt` backend | **Drop.** OpenSSL-via-FFI for legacy, RustCrypto for SPTPS. |
 | Solaris device | **Drop** unless someone asks. |
-| UML, VDE, raw_socket, multicast devices | Feature-gated, port only on demand. |
+| UML, VDE, multicast devices | Feature-gated, port only on demand. raw_socket landed at `5db2ea3e` (chunk 3 reversal of THIS row — it was small and the SUBSTITUTE shim class was worth discovering). |
 | `getopt.c`, `getopt1.c` (1k LOC) | **Delete.** Vendored GNU getopt. `clap` replaces it. |
 | `splay_tree.c`, `list.c` | **Delete.** std collections. |
 | `xalloc.h`, `dropin.c` | **Delete.** libc shims. |
