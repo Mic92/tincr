@@ -18,6 +18,7 @@ use std::io;
 use std::path::PathBuf;
 
 pub mod exchange;
+pub mod fsck;
 pub mod genkey;
 pub mod init;
 pub mod sign;

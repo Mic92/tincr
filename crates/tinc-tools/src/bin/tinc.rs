@@ -130,7 +130,14 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_verify,
         help: "verify NODE [FILE]     Verify that a file was signed by the given NODE.",
     },
-    // More 4a commands: fsck. 5b commands go in a separate table.
+    CmdEntry {
+        name: "fsck",
+        run: cmd_fsck,
+        help: "fsck                   Check the configuration files for problems.",
+    },
+    // 4a complete (modulo `edit`, deferred to 5b for its reload half).
+    // 5b commands (`dump`, `top`, `log`, `set`, `get`, ...) go in a
+    // separate table — they take `&mut CtlSocket`, not `&Paths`.
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -177,6 +184,65 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         .expect("system clock before 1970")
         .as_secs() as i64;
     cmd::sign::sign(paths, input, t, std::io::stdout().lock())
+}
+
+/// `cmd_fsck`: zero args. C `tincctl.c:2732`.
+///
+/// fsck never `Err`s — its job is to report errors, not propagate.
+/// `Report::ok` maps to exit code. The `Err` arm here only fires if
+/// `cmd::fsck::run` itself panics-via-?, which it doesn't.
+///
+/// `cmd_prefix` reconstruction: C does this in `print_tinc_cmd`
+/// (`fsck.c:68`) by reading `confbasegiven`/`netname` globals. We
+/// reconstruct it from `Paths` — we don't have the globals, but we
+/// know `confbase` is always set, so `tinc -c CONFBASE` is the
+/// canonical form. Slightly less pretty than the C (which would say
+/// `tinc -n NETNAME` if you used `-n`), but always correct.
+fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use cmd::fsck::Severity;
+
+    if !args.is_empty() {
+        return Err(CmdError::TooManyArgs);
+    }
+
+    // C `fsck.c:640`: `fsck(orig_argv[0])`. The argv[0] becomes
+    // `exe_name` for the suggestion messages. We hardcode `tinc` —
+    // there's only one binary name. (C cares because of legacy:
+    // `tincctl` was once a separate binary.)
+    let cmd_prefix = format!("tinc -c {}", paths.confbase.display());
+
+    let report = cmd::fsck::run(paths, g.force)?;
+
+    // ERROR: / WARNING: prefixes per the C `fprintf` strings.
+    for f in &report.findings {
+        let prefix = match f.severity() {
+            Severity::Error => "ERROR: ",
+            Severity::Warning => "WARNING: ",
+            Severity::Info => "",
+        };
+        eprintln!("{prefix}{f}");
+        if let Some(sug) = f.suggestion(&cmd_prefix) {
+            eprintln!("\n{sug}\n");
+        }
+    }
+
+    // C `fsck.c:678`: `return success ? EXIT_SUCCESS : EXIT_FAILURE`.
+    // Our dispatch maps `Ok(())` → 0 and `Err` → 1. fsck-fail isn't
+    // a `CmdError` (it's not a usage error or an I/O error — it's
+    // "your config is bad"), so we synthesize a `BadInput`. The
+    // message is empty because we already printed everything.
+    //
+    // Alternative: have `cmd_fsck` return `ExitCode` directly,
+    // bypassing the dispatch table's `Result<(), CmdError>`. That
+    // would mean a separate dispatch shape just for fsck. Not worth
+    // it; the `BadInput("")` hack is contained to this one adapter.
+    if report.ok {
+        Ok(())
+    } else {
+        // The empty message means `eprintln!("")` prints a blank
+        // line. Harmless; the actual diagnostics already printed.
+        Err(CmdError::BadInput(String::new()))
+    }
 }
 
 /// `cmd_verify`: required signer arg, optional file arg.
