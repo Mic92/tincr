@@ -195,6 +195,13 @@ pub struct Pidfile {
     /// the same hex string. Round-tripping through bytes would just
     /// be an opportunity to disagree on case.
     pub cookie: String,
+    /// The port the daemon is listening on. String, not u16 — the
+    /// pidfile says `port 655` but `Port = 655/udp` is also valid
+    /// config syntax (`netutl.c:43` parses with `getaddrinfo`).
+    /// `read_actual_port` (`tincctl.c:1765`) prints this verbatim;
+    /// it's the *runtime* port (the daemon resolved `Port = 0` to
+    /// a real port and wrote it here).
+    pub port: String,
 }
 
 impl Pidfile {
@@ -238,7 +245,7 @@ impl Pidfile {
         // fail here, not connect with a half-read cookie.
         let _host = tok.next().ok_or(CtlError::PidfileMalformed)?;
         let port_lit = tok.next().ok_or(CtlError::PidfileMalformed)?;
-        let _port = tok.next().ok_or(CtlError::PidfileMalformed)?;
+        let port = tok.next().ok_or(CtlError::PidfileMalformed)?;
         if port_lit != "port" {
             return Err(CtlError::PidfileMalformed);
         }
@@ -263,6 +270,7 @@ impl Pidfile {
         Ok(Self {
             pid,
             cookie: cookie.to_owned(),
+            port: port.to_owned(),
         })
     }
 }
@@ -761,6 +769,9 @@ mod tests {
         let pf = Pidfile::read(&path).unwrap();
         assert_eq!(pf.pid, 12345);
         assert_eq!(pf.cookie, cookie);
+        // The runtime port — `tinc get Port` reads this when the
+        // daemon is up. C `read_actual_port`.
+        assert_eq!(pf.port, "655");
     }
 
     /// Pidfile validation: cookie must be exactly 64 hex chars.

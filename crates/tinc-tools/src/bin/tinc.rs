@@ -229,6 +229,55 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_disconnect,
         help: "disconnect NODE        Close meta connection with NODE.",
     },
+    // ─── cmd_config: get/set/add/del + the `config` umbrella ──────
+    // C `tincctl.c:3020-3024`. Five entries route to one function.
+    // The C does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
+    // — if you typed `tinc add Foo bar`, shift argv back so
+    // `argv[1]` is `add` again, then dispatch on it. We do the
+    // shift in cmd_config_dispatch.
+    //
+    // `needs_daemon: true` for ALL of them — even `get` (it might
+    // hit the Port-from-pidfile path). The `set`/`add`/`del` need
+    // it for the post-edit reload. C `commands[].ctl` is `true`
+    // only for `config` (`tincctl.c:3020`); the C aliases are
+    // `false`. Inconsistent (the C author probably forgot). We're
+    // consistent: all `true`.
+    CmdEntry {
+        name: "get",
+        needs_daemon: true,
+        run: cmd_get,
+        help: "get VARIABLE           Print current value of VARIABLE",
+    },
+    CmdEntry {
+        name: "set",
+        needs_daemon: true,
+        run: cmd_set,
+        help: "set VARIABLE VALUE     Set VARIABLE to VALUE",
+    },
+    CmdEntry {
+        name: "add",
+        needs_daemon: true,
+        run: cmd_add,
+        help: "add VARIABLE VALUE     Add VARIABLE with the given VALUE",
+    },
+    CmdEntry {
+        name: "del",
+        needs_daemon: true,
+        run: cmd_del,
+        help: "del VARIABLE [VALUE]   Remove VARIABLE [only ones with watching VALUE]",
+    },
+    // The `config` umbrella: `tinc config get Port` ≡ `tinc get
+    // Port`. The C `bool ctl=true` on this one (line 3020) is the
+    // exception that proves the rule — they remembered for `config`
+    // and forgot for the aliases.
+    CmdEntry {
+        name: "config",
+        needs_daemon: true,
+        run: cmd_config_umbrella,
+        // No help line for `config` — it's a verbosity nobody
+        // types. The aliases are the user-facing names.
+        help: "",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -453,6 +502,131 @@ fn cmd_debug(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError
         eprintln!("Old level {prev}, new level {level}.");
     }
     Ok(())
+}
+
+/// `cmd_config` core. The `action` is decided by the caller — either
+/// from the toplevel command name (get/set/add/del adapters below)
+/// or from `tinc config <verb>` peeling (cmd_config_umbrella).
+///
+/// `args` here is everything AFTER the verb — `["Port", "655"]` for
+/// `tinc set Port 655`.
+fn cmd_config_with_action(
+    paths: &Paths,
+    g: &Globals,
+    action: cmd::config::Action,
+    args: &[String],
+) -> Result<(), CmdError> {
+    // ─── Arity ────────────────────────────────────────────────────────
+    // C `tincctl.c:1797`: `if(argc < 2)` after the verb peel.
+    // "2" because argv includes argv[0]; ours doesn't, so "1".
+    if args.is_empty() {
+        return Err(CmdError::BadInput("Invalid number of arguments.".into()));
+    }
+
+    // ─── Join the rest ───────────────────────────────────────────────
+    // C `tincctl.c:1805-1809`: `strncat` loop with single space.
+    // `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
+    // val="foo bar". The space-join recreates the user's intent
+    // (modulo collapsing multiple shell-quoted spaces, but the
+    // C has the same loss).
+    let joined = args.join(" ");
+
+    // ─── Run ───────────────────────────────────────────────────────────
+    let (out, warnings) = cmd::config::run(paths, action, &joined, g.force)?;
+    config_output(paths, out, &warnings);
+    Ok(())
+}
+
+/// Print the result. Factored out so the integration tests can see
+/// the contract: `Got` → stdout one-per-line, `Edited` → reload.
+fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd::config::Warning]) {
+    use cmd::config::ConfigOutput;
+
+    // ─── Print warnings to stderr ─────────────────────────────────────
+    // C `fprintf(stderr, ...)` inline. We collect-then-print.
+    for w in warnings {
+        eprintln!("{w}");
+    }
+
+    // ─── Handle output ────────────────────────────────────────────────
+    match out {
+        ConfigOutput::Got(values) => {
+            // C `tincctl.c:2025`: `printf("%s\n", bvalue)`.
+            // One per line, stdout.
+            for v in values {
+                println!("{v}");
+            }
+        }
+        ConfigOutput::Edited(result) => {
+            // C `tincctl.c:2132`: `if(connect_tincd(false))
+            // sendline(fd, "%d %d", CONTROL, REQ_RELOAD);`.
+            // Best-effort. The `false` means "don't error if the
+            // daemon's down". We swallow the entire Result —
+            // daemon down? fine. daemon up but reload failed?
+            // also fine, the file's already written, the daemon
+            // will pick it up on next start. The C doesn't check
+            // the ack either.
+            if result.changed {
+                let _ = cmd::ctl_simple::reload(paths);
+            }
+        }
+    }
+}
+
+// ─── The four toplevel adapters ────────────────────────────────────────
+// C uses ONE function and an `argv--` shift to re-read the command
+// name. We can't see argv[0] (dispatch ate it), so each toplevel
+// name passes its action explicitly. Four 1-line wrappers; the
+// alternative (threading argv[0] through Globals) is uglier.
+//
+// The first cut of this had ONE adapter that re-parsed args[0] for
+// the verb. That worked for get/set by accident (get→GET default;
+// set→GET→coerced to SET via get-with-value) but `tinc add
+// ConnectTo bob` would have routed GET→SET, *deleting* other
+// ConnectTo lines instead of appending. Caught by reading the
+// fall-through case carefully before building. Separate adapters.
+
+fn cmd_get(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
+    cmd_config_with_action(p, g, cmd::config::Action::Get, a)
+}
+fn cmd_set(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
+    cmd_config_with_action(p, g, cmd::config::Action::Set, a)
+}
+fn cmd_add(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
+    cmd_config_with_action(p, g, cmd::config::Action::Add, a)
+}
+fn cmd_del(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
+    cmd_config_with_action(p, g, cmd::config::Action::Del, a)
+}
+
+/// `tinc config <verb> ...`. The umbrella form. C `tincctl.c:1780`
+/// is the `if(strcasecmp(argv[0], "config"))` test that DOESN'T
+/// shift — so argv[1] is already the verb to peel.
+///
+/// `tinc config Port` (no verb) → default GET. C `tincctl.c:1785`:
+/// `action = GET` is the init, overwritten only on verb match.
+///
+/// `replace` and `change` are aliases for `set` (C `tincctl.c:1793`).
+/// Only available here, not as toplevel commands — same as C.
+fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use cmd::config::Action;
+
+    let (action, rest) = match args.split_first() {
+        Some((v, r)) if v.eq_ignore_ascii_case("get") => (Action::Get, r),
+        Some((v, r)) if v.eq_ignore_ascii_case("add") => (Action::Add, r),
+        Some((v, r)) if v.eq_ignore_ascii_case("del") => (Action::Del, r),
+        Some((v, r))
+            if v.eq_ignore_ascii_case("set")
+                || v.eq_ignore_ascii_case("replace")
+                || v.eq_ignore_ascii_case("change") =>
+        {
+            (Action::Set, r)
+        }
+        // `tinc config Port` → GET. Safe here: this fn ONLY routes
+        // from the `config` table entry, never from add/del.
+        _ => (Action::Get, args),
+    };
+    cmd_config_with_action(paths, g, action, rest)
 }
 
 /// `cmd_disconnect`: exactly one arg (node name). C `tincctl.c:1471`.
@@ -752,12 +926,16 @@ fn print_help() {
     println!();
     println!("Commands:");
     for c in COMMANDS {
-        println!("  {}", c.help);
+        // `config` has empty help (it's the umbrella nobody types).
+        // C `tincctl.c:100`: `if(commands[i].help) printf(...)` —
+        // same skip-on-empty.
+        if !c.help.is_empty() {
+            println!("  {}", c.help);
+        }
     }
     println!();
-    println!("Phase 4a build — filesystem commands only. Daemon RPC");
-    println!("commands (dump, top, log, ...) land with the daemon in");
-    println!("Phase 5b. See RUST_REWRITE_PLAN.md.");
+    println!("Streaming commands (dump, top, log, pcap) and start/restart");
+    println!("land with the daemon. See RUST_REWRITE_PLAN.md.");
 }
 
 fn print_version() {

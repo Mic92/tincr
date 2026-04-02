@@ -20,6 +20,11 @@ path = "src/bin/tinc.rs"
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-sptps = { path = "../tinc-sptps" }
 tinc-conf = { path = "../tinc-conf" }
+# For Subnet validation in `cmd_config set Subnet ...`. The dep is
+# zero-dependency itself, so cost is one extra crate compile (~2s).
+# Correct layering: tinc-proto IS the wire-format crate, Subnet IS
+# wire-format, cmd_config validates a wire-format thing.
+tinc-proto = { path = "../tinc-proto" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
 
