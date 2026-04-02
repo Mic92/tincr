@@ -1202,6 +1202,95 @@ fn invite_too_many_args() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// join through the binary
+// ────────────────────────────────────────────────────────────────────
+//
+// What this proves over the unit tests in `cmd/join.rs`: argv
+// parsing (`tinc join URL` vs `echo URL | tinc join`), exit-code
+// mapping, the preflight checks running BEFORE TCP connect attempts.
+//
+// What this does NOT prove: the actual TCP+SPTPS path. That needs a
+// server. The in-process roundtrip in `cmd/join.rs` covers the SPTPS
+// + format layer; a real-socket test waits for either (a) a daemon
+// stub that listens, or (b) cross-impl against the C daemon. Both
+// are TODO. The pieces below that path — URL parse, preflight,
+// `finalize_join`, `server_receive_cookie` — are all unit-covered.
+
+/// Bad URL → exit 1 with the C's exact message, no TCP attempted.
+/// The "Invalid invitation URL." message is the C error; matching
+/// it means existing docs/forum posts apply.
+#[test]
+fn join_bad_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap();
+    let out = tinc(&["-c", cb, "join", "not-a-url"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Invalid invitation URL"), "{stderr}");
+}
+
+/// tinc.conf already exists → fail BEFORE attempting connect. The
+/// preflight check. This is important because the cookie is single-
+/// use on the daemon side; failing here means the cookie isn't burned.
+///
+/// We use `127.0.0.1:1` (port 1 is tcpmux, almost never bound) as
+/// the URL host so if the preflight DOESN'T fire we get a fast
+/// connection-refused instead of a DNS timeout. The test asserts
+/// the *preflight* error, not the connect error.
+#[test]
+fn join_existing_config_fails_early() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().join("vpn");
+    let cb_s = cb.to_str().unwrap();
+
+    // init creates tinc.conf.
+    let out = tinc(&["-c", cb_s, "init", "alice"]);
+    assert!(out.status.success());
+
+    // Valid-shape URL pointing nowhere. 48 'a's decode to valid b64.
+    let slug = "a".repeat(tinc_crypto::invite::SLUG_LEN);
+    let url = format!("127.0.0.1:1/{slug}");
+
+    let out = tinc(&["-c", cb_s, "join", &url]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // "already exists", NOT "connection refused". Preflight fired.
+    assert!(
+        stderr.contains("already exists"),
+        "preflight should fail before connect: {stderr}"
+    );
+    assert!(
+        !stderr.contains("connect"),
+        "should not have attempted connect: {stderr}"
+    );
+}
+
+/// URL via stdin. `echo URL | tinc join`. C `invitation.c:1257`
+/// `fgets(line, ..., stdin)`.
+#[test]
+fn join_url_from_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap();
+    // Feed a bad URL via stdin to prove the stdin path is wired.
+    // (We can't feed a *good* URL without a server.)
+    let out = tinc_stdin(&["-c", cb, "join"], b"garbage-url\n");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // The URL was parsed (and rejected) — stdin reached parse_url.
+    assert!(stderr.contains("Invalid invitation URL"), "{stderr}");
+}
+
+#[test]
+fn join_too_many_args() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap();
+    let out = tinc(&["-c", cb, "join", "url1", "url2"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Too many"));
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Cross-impl: `tinc init` key loads in C `sptps_test`
 // ────────────────────────────────────────────────────────────────────
 

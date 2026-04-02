@@ -120,6 +120,32 @@ pub fn key_hash(public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
     // the encoder output to a streaming hasher, but 43 bytes is noise and
     // the allocation makes the C correspondence obvious.
     let fp = fingerprint(public);
+    fingerprint_hash(&fp)
+}
+
+/// `sha512(fingerprint_string)[..18]`. The body of [`key_hash`], exposed
+/// separately because `cmd_join` receives the fingerprint *as a b64 string
+/// off the wire* and hashes it directly. `invitation.c:1400`:
+///
+/// ```c
+/// char *fingerprint = line + 2;  // pointer into the recv buffer
+/// sha512(fingerprint, strlen(fingerprint), hishash);
+/// if(!mem_eq(hishash, hash, 18)) bail;
+/// ```
+///
+/// The C never decodes the fingerprint back to raw bytes — it hashes
+/// the wire string. So `cmd_join` can't call `key_hash(decode(fp))`;
+/// re-encoding might produce a different string (`+/` vs `-_` alphabet)
+/// and the hash would differ. It must hash exactly what the daemon sent.
+///
+/// Relationship: `key_hash(pk) == fingerprint_hash(&fingerprint(pk))`.
+/// `cmd_invite` uses the left side (it has the raw key). `cmd_join`
+/// uses the right side (it has the wire string).
+///
+/// Not part of the KAT (the KAT goes through `key_hash`). The unit test
+/// below pins the relationship.
+#[must_use]
+pub fn fingerprint_hash(fp: &str) -> [u8; COOKIE_LEN] {
     let digest = Sha512::digest(fp.as_bytes());
     let mut out = [0u8; COOKIE_LEN];
     out.copy_from_slice(&digest[..COOKIE_LEN]);
@@ -239,6 +265,15 @@ pub fn parse_slug(slug: &str) -> Option<([u8; COOKIE_LEN], [u8; COOKIE_LEN])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `key_hash(pk) == fingerprint_hash(fingerprint(pk))`. The KAT
+    /// proves `key_hash` matches C; this proves `fingerprint_hash`
+    /// is the same body. Transitively, `fingerprint_hash` matches C.
+    #[test]
+    fn key_hash_via_fingerprint() {
+        let pk = [7u8; PUBLIC_LEN];
+        assert_eq!(key_hash(&pk), fingerprint_hash(&fingerprint(&pk)));
+    }
 
     /// `build_slug` and `parse_slug` are inverses. Property-style with a
     /// fixed key — the KAT covers correctness, this covers the boundary

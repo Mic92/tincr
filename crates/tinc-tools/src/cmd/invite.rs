@@ -96,14 +96,15 @@ use super::{CmdError, io_err, makedir};
 /// daemon-side — it controls how long the *daemon* honors an invitation,
 /// not how long `cmd_invite`'s sweep keeps the file. They're the same
 /// default (604800) but checked independently. We match the C constant.
-const EXPIRY: Duration = Duration::from_secs(604_800);
+pub(crate) const EXPIRY: Duration = Duration::from_secs(604_800);
 
 /// `#` + 63 dashes + `#` = 65 chars. Same string as `cmd::exchange::SEPARATOR`
 /// but the modules are independent — re-declared, same compile-time check.
 /// `invitation.c:586`: hardcoded inline. The invitation file format reuses
 /// the export/import separator because `finalize_join` is essentially a
 /// special-cased `import`.
-const SEPARATOR: &str = "#---------------------------------------------------------------#";
+pub(crate) const SEPARATOR: &str =
+    "#---------------------------------------------------------------#";
 const _: () = assert!(SEPARATOR.len() == 65);
 
 /// `cmd_invite` returns the URL (so the binary can `println!` it) and a

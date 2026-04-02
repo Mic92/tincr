@@ -147,8 +147,12 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_invite,
         help: "invite NODE            Generate an invitation for NODE.",
     },
+    CmdEntry {
+        name: "join",
+        run: cmd_join,
+        help: "join INVITATION        Join a VPN using an invitation.",
+    },
     // 4a complete (modulo `edit`, deferred to 5b for its reload half).
-    // `join` is invite's pair — same module, lands next.
     // 5b commands (`dump`, `top`, `log`, `set`, `get`, ...) go in a
     // separate table — they take `&mut CtlSocket`, not `&Paths`.
 ];
@@ -298,6 +302,42 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     // The URL is the secret. stdout only.
     println!("{}", *r.url);
     Ok(())
+}
+
+/// `cmd_join`: one arg (the URL) or zero (read URL from stdin).
+/// C `invitation.c:1218`.
+///
+/// The C also accepts `tinc join` with no arg + tty prompt. We
+/// support stdin read (so `echo URL | tinc -c CONF join` works)
+/// but no tty prompt — same "no prompts" deviation as elsewhere.
+/// `--force` propagates to `finalize_join`'s VAR_SAFE override.
+fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use std::io::Read;
+
+    let url_buf;
+    let url: &str = match args {
+        [u] => u,
+        [] => {
+            // C `invitation.c:1249-1262`: `if(tty) prompt;
+            // fgets(line, ..., stdin); rstrip(line);`.
+            // We always read from stdin (no tty check). One line,
+            // strip trailing newline. Same as `tinc import` does
+            // for its blob.
+            //
+            // `read_to_string` not `BufRead::read_line` — the URL
+            // is the only thing on stdin, slurp it. Trim trailing
+            // ws (including \r\n on Windows).
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| CmdError::BadInput(format!("Error reading stdin: {e}")))?;
+            url_buf = buf;
+            url_buf.trim()
+        }
+        _ => return Err(CmdError::TooManyArgs),
+    };
+
+    cmd::join::join(url, paths, g.force)
 }
 
 /// `cmd_verify`: required signer arg, optional file arg.

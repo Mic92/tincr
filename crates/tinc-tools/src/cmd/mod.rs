@@ -22,6 +22,7 @@ pub mod fsck;
 pub mod genkey;
 pub mod init;
 pub mod invite;
+pub mod join;
 pub mod sign;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention
