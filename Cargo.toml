@@ -8,6 +8,7 @@ members = [
     "crates/tinc-graph",
     "crates/tinc-conf",
     "crates/tinc-device",
+    "crates/tinc-event",
     "crates/tinc-tools",
 ]
 
