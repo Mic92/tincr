@@ -27,7 +27,8 @@
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
 | **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*`; lifts to daemon unchanged. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
-| **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — the line-JSON-replacement plan didn't survive reading `control.c`; see 5b section for why. `ctl_full_connect_against_fake_daemon`: real `UnixListener` in tempdir, real pidfile pointing at our test pid, binary connects through real syscalls. 376 tests + 9 cross-impl, 20 commands. |
+| **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — the line-JSON-replacement plan didn't survive reading `control.c`; see 5b section for why. |
+| **5b chunk 2 — `cmd_config`** | ✅ +5 cmds | `tinc-tools: get/set/add/del — config-file editing, opportunistic reload` | Three-stage seam (`parse_var_expr` / `build_intent` / `run_edit`). Seventh `strcspn` tokenizer. `tinc-proto` dep added (Subnet validation only). The single-adapter argv→Action bug: `tinc add ConnectTo bob` would have routed GET→SET-via-coercion, *deleting* other ConnectTo lines — caught by reading the fall-through, not by a test. Four 1-line adapters. `config_set_fires_reload`: `tinc set` sends `"18 1\n"` to a real fake-daemon. 457 tests + 9 cross-impl, 24 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -665,22 +666,51 @@ Dead enum values: `REQ_CONNECT`, `REQ_RESTART`, `REQ_DUMP_GRAPH`
 exist in `control_common.h` but no `cmd_*` sends them and `control_h`
 doesn't match them. Included for sequence-gap reasons.
 
-#### ⏸️ chunk 2: `dump`, `cmd_config`, `log` — deferred
+#### ✅ chunk 2: `cmd_config` — the four-action editor
+
+`tincctl.c:1774-2138`, 365 LOC → ~330 LOC Rust + 1400 LOC tests.
+Three-stage seam means each stage is testable without the others:
+argv parsing without a filesystem, validation without file I/O,
+file-walk without argv. 81 tests at the 3× ratio.
+
+The action coercions are the subtle part. The C does three:
+
+| Input | Coercion | Why |
+|---|---|---|
+| `get VAR VALUE` | → `set` (1846) | `tinc get Port 655` — footgun, but C does it |
+| `add VAR VALUE`, VAR not MULTIPLE | → `set` + warn (1918) | `tinc add Port 655` shouldn't make a second `Port` line |
+| `set VAR VALUE`, VAR is MULTIPLE | warn only (1921) | `tinc set Subnet ...` deletes other subnets; you probably wanted `add` |
+
+The argv→Action mapping has the C's `argv--` shift trick (1780)
+which we can't do post-dispatch. **First cut bug**: one adapter
+re-parsing args[0] worked for `get`/`set` *by accident* (default
+GET; GET-with-value coerces to SET) but `tinc add ConnectTo bob`
+would route GET→SET, **deleting other ConnectTo lines**. Caught
+by reading the fall-through carefully, not by a test;
+`config_add_is_not_set` is the regression guard. Four adapters.
+
+**Port is HOST-only**, not dual-tagged. `tinc set Port 655` writes
+to `hosts/$me`. The first cut of `intent_dual_tagged` test assumed
+otherwise; the failing test was wrong, the sed-verified table was
+right. Fourth instance of test-reads-C-not-impl correction.
+
+#### ⏸️ chunk 3: `dump`, `log`, streaming — deferred
 
 | Command | Blocked on |
 |---|---|
 | `dump nodes/edges/subnets/connections` | Format depends on daemon's `Node`/`Edge` structs. Port the *infrastructure* (multi-row recv loop, 2-int terminator) now; the parse is per-type, lands with the daemon. |
 | `dump invitations` | Nothing — it's a 4a freebie hiding in `cmd_dump` (`tincctl.c:1108`, pure readdir). Lands with `cmd_dump` for one-table-row reasons. |
-| `cmd_config` (`get`/`set`/`add`/`del`) | Nothing for the fs half; the opportunistic `reload` is now one line: `let _ = ctl_simple::reload(paths)`. Lands next. |
 | `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
 | `top` | `dump` format + `ratatui`. |
 | `start`/`restart` | Daemon binary needs to exist. |
+| `edit` | `$EDITOR` spawn + the post-edit reload. The reload is one line now. Lands when someone wants it. |
 
 | C source | Rust |
 |---|---|
 | `info.c`, `top.c` | `CtlSocket` queries + `ratatui` for `tinc top` |
 | `tincctl.c` `cmd_dump` family | multi-row recv loop, format is ours |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
+| `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
 | `tincctl.c::connect_tincd` + `recvline`/`sendline` + `pidfile.c::read_pidfile` | ✅ `ctl.rs` — `CtlSocket` + `Pidfile` |
 | `control.c` | daemon-side `match`. **`CtlRequest` discriminants already aligned** — the daemon's switch is a straight transcription. |
 | ~~`invitation.c`~~ | **Reclassified to 4a, both halves landed.** 1484 LOC → ~1010 LOC Rust (invite+join+crypto kernel) after dropping HTTP probe / ifconfig.c / tty prompts. `server_receive_cookie` (the daemon's `receive_invitation_sptps` body) lives in `cmd::join` for now; lifts to `tincd::auth` in Phase 5. |
