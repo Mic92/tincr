@@ -27,19 +27,19 @@
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
 | **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*`; lifts to daemon unchanged. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
-| **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — the line-JSON-replacement plan didn't survive reading `control.c`; see 5b section for why. |
+| **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — pidfile is `0600` (`umask|077` before `fopen`, `pidfile.c:28`), cookie is fs-perms auth, same model as ssh-agent. |
 | **5b chunk 2 — `cmd_config`** | ✅ +5 cmds | `tinc-tools: get/set/add/del — config-file editing, opportunistic reload` | Three-stage seam (`parse_var_expr` / `build_intent` / `run_edit`). Seventh `strcspn` tokenizer. `tinc-proto` dep added (Subnet validation only). The single-adapter argv→Action bug: `tinc add ConnectTo bob` would have routed GET→SET-via-coercion, *deleting* other ConnectTo lines — caught by reading the fall-through, not by a test. Four 1-line adapters. `config_set_fires_reload`: `tinc set` sends `"18 1\n"` to a real fake-daemon. |
-| **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. **Four-for-four**: chunk-2's plan said "format depends on daemon, lands with daemon" — wrong, format is pinned by `node.c:210` NOW. `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. |
-| **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | **Five-for-five**: chunk-3's deferred row said "daemon side already has `REQ_DUMP_NODES item` (filter by name)" — wrong. `control.c:63` is `case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type. The third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
-| **5b chunk 5 — `cmd_top`** | ✅ +1 cmd | `tinc-tools: top — real-time per-node traffic, hand-rolled curses shim` | **Six-for-six** (ratatui dropped, see chunk-5 section). `top.c:248-257`'s `i` field is a stable-sort EMULATION: `qsort` isn't stable, the `i` tiebreak makes it stable across frames. `slice::sort_by` IS stable; don't port `i`, sort the same Vec in-place. Two C bugs ported: daemon-restart `wrapping_sub` (the spike IS the signal); first-tick epoch-seconds interval (`static struct timeval prev` zero-init → tick-1 rate ≈ counter/1.7e9 ≈ 0). `~400 LOC` estimate → 1984 LOC actual, **5× off**. 608 tests + 9 cross-impl, 28 commands. |
-| **5b chunk 6 — `cmd_log`/`cmd_pcap`** | ✅ +2 cmds | `tinc-tools: log/pcap — streaming commands, the seventh reversal` | **Seven-for-seven**, but #7 is the first reversal where the planned complexity went DOWN: "blocked on draining `BufReader::buffer()` by hand" → `BufReader<T>: Read`, `read_exact` already drains the buffer. One rustc smoke proved it; one unit test pins it. `recv_data` is one line. SIGINT handler NOT ported (first deliberate C-behavior-drop: exit 130 vs 0, daemon doesn't care). pcap headers `to_ne_bytes()` per-field — magic `0xa1b2c3d4` IS the endianness marker, native-endian is the format. y2038 truncation ported faithfully (`i64→u32`). 641 tests + 9 cross-impl, 30 commands. |
+| **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. Format pinned by `node.c:210`/`edge.c:128`/`subnet.c:403`/`connection.c:168` (the C daemon's `dump_*` fns). `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. |
+| **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | `info.c:53` sends third arg `"18 3 alice"`; `control.c:63` ignores it (`case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type). Filtering is client-side; the third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
+| **5b chunk 5 — `cmd_top`** | ✅ +1 cmd | `tinc-tools: top — real-time per-node traffic, hand-rolled curses shim` | ratatui dropped — 7 ANSI escapes + nix `termios`/`poll` is enough; `top.c` is `printf` with cursor moves. `top.c:248-257`'s `i` field is a stable-sort EMULATION: `qsort` isn't stable, the `i` tiebreak makes it stable across frames. `slice::sort_by` IS stable; don't port `i`, sort the same Vec in-place. Two C bugs ported: daemon-restart `wrapping_sub` (the spike IS the signal); first-tick epoch-seconds interval (`static struct timeval prev` zero-init → tick-1 rate ≈ counter/1.7e9 ≈ 0). `~400 LOC` estimate → 1984 LOC actual, **5× off**. 608 tests + 9 cross-impl, 28 commands. |
+| **5b chunk 6 — `cmd_log`/`cmd_pcap`** | ✅ +2 cmds | `tinc-tools: log/pcap — streaming commands, the seventh reversal` | `BufReader<T>: Read`; `read_exact` drains the internal buffer before touching `T`. The shared-buffer worry (C `tincctl.c:496` file-scope statics) was already solved by std. `recv_data` is one line. SIGINT handler NOT ported (first deliberate C-behavior-drop: exit 130 vs 0, daemon doesn't care). pcap headers `to_ne_bytes()` per-field — magic `0xa1b2c3d4` IS the endianness marker, native-endian is the format. y2038 truncation ported faithfully (`i64→u32`). 641 tests + 9 cross-impl, 30 commands. |
 | **5b chunk 7 — `cmd_edit`/`version`/`help`** | ✅ +3 cmds | `tinc-tools: edit/version/help — sh -c "$@", not system()` | The C's `xasprintf("\"%s\" \"%s\"", editor, filename); system(cmd)` is wrong TWICE: filename-with-`$` expands AND double-quoted `"$EDITOR"` doesn't word-split (so `EDITOR="vim -f"` → ENOENT). The C never supported spacey EDITOR — the wrapping quotes defeat `system()`'s tokenization. We do `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` (the git way): editor unquoted (split), filename `"$@"` (literal). `edit_dollar_in_filename_not_expanded` sets `HOME=/tmp/WRONG`, edits `"$HOME"`, asserts stdout has `$HOME` literal. `edit_spacey_editor_tokenized` pins `EDITOR="echo arg"` → stdout `arg <path>`. The path-resolution lattice: conffiles[] check BEFORE dash-split (`tinc-up` would otherwise split to `("tinc","up")` → wrong file). C bare-hostname case validates NOTHING; we reject `/`, `..`, empty. STRICTER. CONFFILES sed-diff'd vs `tincctl.c:2400-2406` (✓). 671 tests + 9 cross-impl, 33 commands. |
 | **5b chunk 8 — `cmd_network`** | ✅ +1 cmd | `tinc-tools: network — list mode only, switch is C-behavior-drop #2` | C has TWO modes: argless lists `confdir/*/tinc.conf`-bearing dirs; with arg, `switch_network` mutates `netname`/`confbase`/`prompt` globals for the readline loop. We have no readline. Switch would mutate-then-exit — silent no-op, worse than erroring. List ported, switch errors with "use `-n NAME`" advice (`.` sentinel gets distinct "no -n" advice). Second deliberate drop after SIGINT, different shape: SIGINT is "exit code differs, daemon doesn't care"; this is "feature requires scaffolding we don't have." Sorted output (NOT in C — readdir order undefined; sorted is in the set of valid C outputs; deterministic). `Paths::confdir_always()` papers over the C's-always-set vs our-`Option` mismatch. `list_skip_unreadable` gates on euid (root reads `chmod 000` via DAC override). 685 tests + 9 cross-impl, 34 commands. **Phase 5b CLOSED — all Phase-5-reachable commands landed.** |
 | 3 — Device & transport | | | |
 | **3 chunk 1 — `tinc-device` Linux + Dummy** | ✅ 8th crate | `tinc-device: TUN/TAP — the +10 layout pun, NOT the nix macro` | The +10: `read(fd, buf+10, MTU-10)` lands `tun_pi.proto` at byte 12 = the ethertype slot of a synthetic ethernet frame. `memset(buf, 0, 12)` zeroes fake MACs AND `tun_pi.flags` (overlapping bytes 10-11). No reformat; `route.c` never knows the bytes used to be `tun_pi`. `tun_offset_arithmetic` pins `14 - 4 = 10`. **NOT `nix::ioctl_write_ptr_bad!`** — `TUNSETIFF` is encoded `_IOW` (kernel reads from us) but kernel WRITES BACK `ifr_name`; the macro generates `*const`, wrong contract. Direct `libc::ioctl` with `*mut`. Third unsafe-shim instance, same SAFETY shape, but the macro divergence is new. `pack_ifr_name` is the testable seam: validate-first means `open_too_long_iface_err_before_open` passes without CAP_NET_ADMIN. STRICTER than C (rejects 16+ byte ifname; C truncates). 706 tests + 9 cross-impl. |
 | **3 chunk 2 — `tinc-device` fd (Android)** | ✅ third backend | `tinc-device: fd backend — the +14 cousin, nix EARNS the dep here` | The +14: Android `VpnService` writes RAW IP, no prefix; read at `+14` (`ETH_HLEN`), synthesize ethertype from `ip[0]>>4`. The +10's TESTABLE cousin — `linux.rs` couldn't fake `tun_pi` (kernel-side layout); `fd.rs` reads bytes a `pipe()` can feed. `read_ipv4_via_pipe`/`read_ipv6_via_pipe` cover the offset arithmetic with no CAP_NET_ADMIN. **Shim #4 USES nix; #3 BYPASSED it.** `recvmsg`+`SCM_RIGHTS` is well-specified POSIX; nix's `ControlMessageOwned::ScmRights` collapses ~40 LOC of `cmsghdr` boilerplate AND fixes the C's NULL-deref at `fd_device.c:73`. `FdSource::{Inherited(RawFd), UnixSocket(PathBuf)}` makes the C's `sscanf("%d")==1` string-dispatch explicit. STRICTER than C: closes leaked fds before erroring on multi-fd cmsg (C leaks). C-is-WRONG +2 (the NULL deref; the leak — both masked by Java sender always sending 1 cmsg, 1 fd). 723 tests + 9 cross-impl. |
 | **3 chunk 3 — `tinc-device` raw (`PF_PACKET`)** | ✅ fourth backend | `tinc-device: raw_socket — the +0, the SUBSTITUTE shim, SEQPACKET fake` | The +0: `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))` writes raw ethernet, `route.c` wants ethernet at offset 0, done. Three points define the line: `offset = ETH_HLEN − len(prefix)`; linux 14−4=10, fd 14−0=14, raw 14−14=0. **Shim #5 SUBSTITUTES the syscall**: C does `SIOCGIFINDEX` ioctl (2002 code); `if_nametoindex(3)` is the POSIX function (2001) doing the SAME RESOLUTION. nix wraps it. New row class. Shim #6 hand-rolled: nix `LinkAddr` is getters-only (designed for `recvfrom` outputs, not `bind` inputs). The HYBRID file: nix for `socket()`+CLOEXEC (full match), nix for `if_nametoindex` (substitute), raw libc for `bind` (half-baked). **The fakeable boundary HOLDS but the WHICH-FAKE question is new**: `socketpair(SOCK_DGRAM)` BLOCKS on close (UDP-ish, no EOF concept; gcc-verified, eof test hung). `SOCK_SEQPACKET` preserves datagram boundaries AND EOFs on close — both PF_PACKET properties. STRICTER same as `linux::pack_ifr_name`: `if_nametoindex` errors on full name, no truncation. 734 tests + 9 cross-impl. |
-| **3 chunk 4 — `tinc-device` bsd (3 offsets, 1 file)** | ✅ fifth backend, prep commit `1b1a2a85` | `tinc-device: bsd — three offsets, AF_INET6 varies, tested-on-Linux` | **Prediction half-right, prep paid for itself.** `ed9af4fb` predicted `BsdVariant` enum + 80% reuse. CASHED: `ether.rs` hoist (`1b1a2a85`) was the 80%; `bsd.rs` 1218 LOC for 592 LOC C is **2.1×** (vs `fd.rs`'s 5.4×). The ratio dropped because the synthesis fns were already factored. **`ed9af4fb` ALSO predicted `bsd.rs` would be `cfg(any(bsd, macos))` — WRONG.** Landed `cfg(unix)`: `read(2)`/`write(2)` are the same syscalls everywhere; only the fd's SOURCE (open path: `/dev/tun*`, `PF_SYSTEM`, `TUNSIFHEAD`) is BSD-only. **`cfg` goes on the smallest thing that's platform-varying** — the `open()` impl, not the module. 20 tests run on Linux via pipe()/seqpacket fakes. The IGNORED-prefix observation TESTED: `utun_read_ignores_prefix` feeds `[0xFF; 4]` garbage prefix + valid IPv4; if read decoded the prefix it'd error on the nonsense AF; doesn't, synthesizes from `buf[14]>>4`. **`AF_INET6` per-platform**: Linux 10, FreeBSD 28, macOS 30. CAN'T pin golden bytes. Test pins STRUCTURE: `(libc::AF_INET6 as u32).to_be_bytes()`. The RFC-vs-ABI distinction (`ether.rs` doc) operationalized: `0x86DD` is wire-format truth (hoisted); `AF_INET6` is local convention (`libc::` at use site). 754 tests + 9 cross-impl. |
+| **3 chunk 4 — `tinc-device` bsd (3 offsets, 1 file)** | ✅ fifth backend, prep commit `1b1a2a85` | `tinc-device: bsd — three offsets, AF_INET6 varies, tested-on-Linux` | `ether.rs` hoist (`1b1a2a85`) made the synthesis reusable; `bsd.rs` 1218 LOC for 592 LOC C is **2.1×** (vs `fd.rs`'s 5.4×). `cfg(unix)` MODULE, `cfg(bsd)` `open()`: `read(2)`/`write(2)` are the same syscalls everywhere; only the fd's SOURCE (open path: `/dev/tun*`, `PF_SYSTEM`, `TUNSIFHEAD`) is BSD-only. **`cfg` goes on the smallest thing that's platform-varying** — the `open()` impl, not the module. 20 tests run on Linux via pipe()/seqpacket fakes. The IGNORED-prefix observation TESTED: `utun_read_ignores_prefix` feeds `[0xFF; 4]` garbage prefix + valid IPv4; if read decoded the prefix it'd error on the nonsense AF; doesn't, synthesizes from `buf[14]>>4`. **`AF_INET6` per-platform**: Linux 10, FreeBSD 28, macOS 30. CAN'T pin golden bytes. Test pins STRUCTURE: `(libc::AF_INET6 as u32).to_be_bytes()`. The RFC-vs-ABI distinction (`ether.rs` doc) operationalized: `0x86DD` is wire-format truth (hoisted); `AF_INET6` is local convention (`libc::` at use site). 754 tests + 9 cross-impl. |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
 
@@ -423,170 +423,15 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 | `raw` (`PF_PACKET`) | `raw_socket_device.c` | ✅ `raw.rs` (797 LOC) — the +0. Shim #5 SUBSTITUTES (`if_nametoindex` for `SIOCGIFINDEX`). `SOCK_SEQPACKET` test fake. |
 | BSD/macOS | `bsd/device.c` (592 LOC) | ✅ `bsd.rs` (1218 LOC, 20 tests) — `BsdVariant::{Tun,Utun,Tap}`. **`cfg(unix)` MODULE, `cfg(bsd)` open()** — read/write logic tested on Linux via fakes; only constructors stubbed. `to_af_prefix` (the dual of `from_ip_nibble`) lives HERE not in `ether.rs` because `AF_INET6` is platform-varying. Shims #7 (`TUNSIFHEAD`) + #8 (`PF_SYSTEM`/`sockaddr_ctl`) noted in open() worklist. vmnet/tunemu dropped. |
 | Windows | `windows/device.c` | `wintun` crate (WireGuard's driver) — **drop** TAP-Windows support |
-| Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write` (the factoring prediction was WRONG — see below). nix has full `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep on `netutl.c` is the real coupling — not state-sharing, but pulls in DNS resolution (`getaddrinfo`). Port AFTER `tinc-proto` exposes addr resolution OR hand-roll. |
-| UML/VDE | `*_device.c` | Drop. UML `device.c` doesn't exist (the table was wrong); VDE needs `libvdeplug`. |
+| Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write`. nix has `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep pulls DNS (`getaddrinfo`); port after `tinc-proto` exposes addr resolution. |
+| UML/VDE | `*_device.c` | Drop. UML doesn't exist; VDE needs `libvdeplug`. |
 
-**The +10 layout pun** (`linux/device.c:148-167`): the kernel's TUN
-driver writes `tun_pi { u16 flags; be16 proto }` (4 bytes) before
-each IP packet. Reading at `buf+10` lands `tun_pi.proto` at byte
-12 — the ethertype slot of an ethernet frame. `memset(buf, 0, 12)`
-zeroes the synthetic dst-MAC + src-MAC, AND overwrites `tun_pi.
-flags` (bytes 10-11; always 0 from kernel rx anyway). The buffer
-IS an ethernet frame after the memset. `route.c` reads ethertype
-at byte 12, gets the kernel's `tun_pi.proto`, never knows. Write
-path inverts: zero `[10..12]`, write `[10..]`.
+**Phase 3 transferable decisions** (full reasoning in source-file
+docs — `linux.rs`, `fd.rs`, `raw.rs`, `bsd.rs`, `ether.rs`):
 
-```text
-  byte:       0..5   6..11  12..13  14..
-  ether:      dhost  shost  type    payload
-  read+10:                  ┌──tun_pi─┐
-  what kernel writes:       flags proto IP-packet
-  after memset(0..12):  00..00 00..00 proto IP-packet
-                                      ↑ same byte, two names
-```
-
-**`pack_ifr_name` is the testable seam.** C order: open() →
-strncpy → ioctl. Our order: pack() → open() → ioctl. Validate-
-first means the length-check fires BEFORE the syscall that needs
-CAP_NET_ADMIN. The first attempt (`iface_too_long_panics` test
-with assert sandwiched between open and ioctl) was unrunnable in
-CI; the reorder is the fix. STRICTER than C: 16+ byte ifname →
-`Err(InvalidInput)` not silent truncation. The truncation failure
-mode (kernel sees `sixteenchars_lo`, `tinc-up` script's `ip addr
-add ... dev sixteenchars_long` fails ENODEV three steps later) is
-bad enough to reject early.
-
-**The third unsafe-shim instance, but the first to BYPASS the
-macro.** `tui.rs` uses `nix::ioctl_read_bad!` for `TIOCGWINSZ`
-(kernel writes only, `*mut` is right). `TUNSETIFF` is encoded
-`_IOW('T', 202, int)` — `_IOW` means "kernel reads from us" —
-but the kernel writes `ifr_name` back. The encoding is a
-historical lie (the `int` size argument is also wrong; kernel
-treats arg as `struct ifreq *` regardless). `nix::ioctl_write_
-ptr_bad!` generates `*const T`; we'd be passing `*const` to
-something that mutates. Sound (we hold `*mut`, cast to `*const`
-for the call, kernel side is `void __user *`) but documents the
-wrong contract. Direct `libc::ioctl(fd, req, *mut ifreq)` instead.
-The macro's value was the `if ret < 0 { Err(Errno::last()) }`
-wrapper — three lines we wrote ourselves.
-
-NOT a reversal. The plan said "tun-tap crate or hand-rolled"; we
-hand-rolled. The plan said ~150 LOC; we landed 907. But the
-150 was off the same way as every static-table port (3-5× rule):
-the shims ARE ~150, the offset trick + testable seam + 15 tests
-are the rest. Nothing about the PLAN was wrong; the estimate was
-optimistic in the usual direction.
-
-**The fd backend** (chunk 2, `ffd64613`) is the +10's TESTABLE
-cousin. `linux.rs` couldn't end-to-end test the offset trick: the
-kernel TUN driver lays out `tun_pi`; faking that needs the actual
-driver. `fd.rs` reads RAW IP packets — Android's `VpnService`
-writes no prefix at all. A `pipe()` is enough. The unfakeable-
-vs-fakeable boundary:
-
-| Backend | What other side writes | Fakeable? | **Which fake?** | End-to-end test? |
-|---|---|---|---|---|
-| `linux` (kernel TUN) | `tun_pi { flags; proto }` + IP | no (kernel layout) | — | `tun_offset_arithmetic` pins math only |
-| `fd` (Android `VpnService`) | raw IP, no prefix | **yes** | `pipe()` | `read_ipv4_via_pipe` covers full flow |
-| `raw` (`PF_PACKET`) | raw ethernet (it IS the frame) | **yes** | `socketpair(SEQPACKET)` | `read_ether_via_seqpacket` |
-| `dummy` | nothing | trivially | — | `dummy_read_would_block` |
-
-The boundary generalizes: **does the OTHER side write structure?**
-Kernel TUN does (the `tun_pi` struct, kernel-allocated). Android
-doesn't (`VpnService.Builder.establish()` returns a raw fd; the
-Java side is just `write(fd, ip_packet)`). PF_PACKET doesn't (the
-frame IS the structure; nothing added). When the other side is
-structure-free, our side's offset arithmetic is fd-agnostic — any
-byte source works.
-
-**The which-fake column** (chunk 3): `pipe()` worked for `fd.rs`
-(stream-ish was fine; small test packets, no datagram boundary
-tested). DIDN'T work for `raw.rs`: the eof test needs read-
-returns-0 on close. `socketpair(SOCK_DGRAM)` BLOCKS on close (gcc-
-verified; `read()` after `close(peer)` hangs forever — UDP-ish,
-connectionless, no EOF concept). `SOCK_SEQPACKET` preserves
-datagram boundaries (`write 5 + write 5` → `read 5 + read 5`, not
-`read 10`) AND EOFs on close (`read` → `0`). Both `PF_PACKET`
-properties. The which-fake question: **what semantics of the real
-fd does the test exercise?** If "just bytes": `pipe()`. If
-"datagram boundaries": `SOCK_DGRAM`. If "datagram boundaries + EOF
-on close": `SOCK_SEQPACKET`.
-
-Three backends define the offset-trick line. The arithmetic:
-`offset = ETH_HLEN − len(what_other_side_prefixes)`.
-
-| Backend | Prefix | `len` | Offset | C source line |
-|---|---|---|---|---|
-| `linux` | `tun_pi { __u16 flags; __be16 proto; }` | 4 | `14−4 = 10` | `linux/device.c:152`: `read(fd, DATA+10, ...)` |
-| `fd` | (nothing — raw IP) | 0 | `14−0 = 14` | `fd_device.c:211`: `read(fd, DATA+ETH_HLEN, ...)` |
-| `raw` | ethernet (it IS the frame) | 14 | `14−14 = 0` | `raw_socket_device.c:89`: `read(fd, DATA, ...)` |
-
-The formula prediction (chunk 3) was **HALF RIGHT, NUANCE WRONG**
-(verified by reading `bsd/device.c` post-chunk-3). The structural
-prediction held: BSD `utun`/`tunifhead` writes a 4-byte AF prefix
-→ offset `14−4=10` ✓, synthesis needed ✓. The nuance: **the C
-IGNORES the prefix.** `bsd/device.c:457`: `switch(DATA[14] >> 4)`
-— it reads the IP version nibble at offset 14 (PAST the 10-byte
-offset where the prefix lives in `[10..14]`). The prefix carries
-the AF number (`htonl(AF_INET)` = `0x00000002`, big-endian); the C
-could decode it. Doesn't. Synthesizes from IP nibble like `fd.rs`.
-Prediction "no free lunch" was right but for the wrong reason —
-the lunch is THERE; the C declines it.
-
-(WHY does the C decline? `git blame` says the synthesis code
-predates the `TUNIFHEAD` case; copy-paste from the `TUN` case at
-`:427` which has NO prefix to read. The two switch bodies are
-byte-identical except `+14` vs `+10` on `packet->len`; sed-diff
-verified. The C author copied the working synthesis instead of
-decoding the prefix. We could decode — but matching C means
-synthesize.)
-
-**Three backends in one file**, sharing the synthesis code:
-
-| BSD `device_type` | Offset | Prefix from kernel | C synthesis? | Reuses? |
-|---|---|---|---|---|
-| `TUN` / `TUNEMU` | +14 | none (raw IP) | yes | `fd::from_ip_nibble` + `set_etherheader` byte-identical save for symbolic-vs-literal constants |
-| `UTUN` / `TUNIFHEAD` | +10 | 4-byte AF (big-endian), IGNORED by read; SYNTHESIZED on write (`:520-539`: ethertype → `htonl(AF_INET)` → `memcpy(DATA+10)`) | yes (read) | same synthesis fns; write needs the inverse map |
-| `TAP` / `VMNET` | +0 | none (raw ether) | no | `raw.rs` body verbatim |
-
-The formula HOLDS at all three offsets (verified by `bsd.rs::
-read_offsets_match_c`). The `+14` row IS `fd.rs` (verified by
-`tun_read_ipv4_via_pipe`: same `from_ip_nibble`+`set_etherheader`
-bytes). The `+0` row IS `raw.rs` (verified by `tap_read_ether_
-via_seqpacket`: same fake, same body). Only `+10` is novel and
-only for the WRITE side. **The 80%-reuse prediction CASHED at
-2.1×** (vs `fd.rs`'s 5.4×).
-
-`to_af_prefix` (`bsd/device.c:520-539`, the inverse): ethertype
-→ 4-byte AF prefix. `0x0800` → `(libc::AF_INET as u32).
-to_be_bytes()`, `0x86DD` → `(libc::AF_INET6 as u32).
-to_be_bytes()`, else `None` (C errors at `:533-536`, NOT silent).
-**Lives in `bsd.rs`, not `ether.rs`.** Why: `from_ip_nibble`
-produces RFC values (`0x0800`, same on every wire); `to_af_
-prefix` produces platform-ABI values (`AF_INET6` differs Linux/
-FreeBSD/macOS). The dual is asymmetric in WHERE it lives because
-the domains are asymmetric in WHAT KIND of constant they are.
-
-**The platform-varying-constant test pattern** (chunk 4): when
-the value under test references `libc::*` and that symbol differs
-per platform, **pin the EXPRESSION, not the bytes.**
-
-```rust
-// WRONG (passes on macOS, fails on FreeBSD/Linux):
-assert_eq!(prefix, [0, 0, 0, 0x1e]);
-// RIGHT (passes everywhere; checks the right thing):
-assert_eq!(prefix, (libc::AF_INET6 as u32).to_be_bytes());
-```
-
-What you CAN pin literally: invariants that hold across all
-platforms. `AF_INET = 2` everywhere (4.2BSD legacy, never moved)
-→ `assert_eq!(prefix, [0, 0, 0, 2])` is fine for the IPv4 case.
-`AF_INET6` high three bytes are zero (the values are all <256) →
-`assert_eq!(&prefix[..3], &[0, 0, 0])` is fine. Pin what's
-INVARIANT; reference what VARIES.
-
-**The unsafe-shim decision matrix has SIX data points now, three
-classes:**
+**Unsafe-shim decision matrix** (six rows, three classes; #7
+`TUNSIFHEAD` and #8 `PF_SYSTEM`/`sockaddr_ctl` are next, in the BSD
+`open()` worklist):
 
 | # | What | C does | We do | Class |
 |---|---|---|---|---|
@@ -597,100 +442,23 @@ classes:**
 | 5 | `SIOCGIFINDEX` (`raw.rs`) | ioctl | `nix::if_nametoindex` | **substitutes-with-higher-level-POSIX** |
 | 6 | `bind(sockaddr_ll)` (`raw.rs`) | `bind()` | hand-rolled `libc::bind` | nix half-baked (`LinkAddr` getters-only) |
 
-The pattern isn't "always nix" or "always bypass." Classes:
+Per-shim decision tree: (1) nix doesn't wrap? hand-roll. (2) higher-
+level POSIX primitive does same job? substitute. (3) wrapper matches
+kernel's actual contract? use. (4) half-baked or encoding lies?
+hand-roll. Don't pattern-match on the neighboring shim; `raw.rs`
+mixes three classes in one file. Read the man page per shim.
 
-**wraps-same-syscall** (#2-4): does the wrapper match the kernel's
-actual contract? `_IOW` lying about TUNSETIFF is a 1990s legacy
-(the `int` size encoding is also wrong; kernel ignores it).
-`recvmsg`+`SCM_RIGHTS` is POSIX-specified, no encoding to lie
-about. Read the man page; check if the wrapper's signature matches
-what the kernel actually does.
+**Four standing decisions** (the ones the daemon will hit):
 
-**substitutes-with-higher-level-POSIX** (#5, NEW): `SIOCGIFINDEX`
-ioctl and `if_nametoindex(3)` resolve the same name→ifindex
-mapping. The C uses the ioctl because it's 2002 code; `if_
-nametoindex` was IEEE 1003.1-2001, glibc support spotty then. By
-2026 it's everywhere. The decision criterion broadens: not "does
-the wrapper match?" but "is there a HIGHER-LEVEL primitive?" When
-yes, the C's choice was historical. Use the higher level. Side
-benefit: `if_nametoindex` errors on the full name, no truncation
-— the `pack_ifr_name` strictness for free.
+| Decision | Rule | Where the source-doc lives |
+|---|---|---|
+| `cfg` placement | Gate the smallest thing that's platform-varying. `bsd.rs` is `cfg(unix)` (read/write logic POSIX); `open()` is `cfg(bsd)` (the only platform-varying thing). Module-at-`cfg(unix)` gets you tested-on-Linux for free. | `bsd.rs` doc + `lib.rs` mod-gate comment |
+| Platform-varying constant tests | Pin the EXPRESSION (`(libc::AF_INET6 as u32).to_be_bytes()`), not the bytes (`[0,0,0,0x1e]`). Pin literals only for cross-platform invariants (`AF_INET=2` everywhere). | `bsd.rs::tests::prefix_ipv6_is_libc_af_inet6_be` |
+| RFC vs platform-ABI constants | RFC values (`ETH_P_IP=0x0800`) hoist to `ether.rs`. Platform values (`AF_INET6={10,28,30}`) reference `libc::` at use site. The `cfg`-boundary rule applies to the latter; the former never had a `cfg`. | `ether.rs` doc |
+| `read_fd`/`write_fd` factoring | Four module-private 8-line fns. Don't factor: 32 LOC duplication buys four small `#[allow(unsafe_code)]` scopes. A shared fn in `lib.rs` widens unsafe to crate scope. Trigger isn't instance count; it's "`lib.rs` itself needs raw I/O." | `bsd.rs::read_fd` block comment |
 
-**nix half-baked** (#6, NEW): `LinkAddr` has getters (`.ifindex()`,
-`.protocol()`), no constructor. Designed for `recvfrom` outputs
-(kernel writes `sockaddr_ll`, we read it) not `bind` inputs (we
-write, kernel reads). The asymmetry is reasonable from nix's
-perspective — packet sniffers `recvfrom` on unbound sockets;
-`bind` is rare. Wrong abstraction for us. Raw `libc::bind` is 8
-lines.
-
-The plan's chunk-1 warning ("don't pattern-match on `tui.rs` for
-the BSD shim") generalizes: **don't pattern-match on ANY neighbor.
-`raw.rs` is a hybrid of three different decisions.** Per shim, ask
-in order: (1) nix doesn't wrap? hand-roll. (2) higher-level POSIX
-primitive? substitute. (3) wrapper matches kernel contract? use.
-(4) wrapper half-baked or lies? hand-roll.
-
-`raw.rs` is the FIRST file to mix classes: nix `socket()` (full
-match + atomic CLOEXEC), nix `if_nametoindex` (substitute), raw
-`libc::bind` (half-baked). The mix is fine. Each decision stands
-alone.
-
-**The `read_fd`/`write_fd` factoring question** (chunk 3 raised
-it; reading `multicast_device.c` REVISES it): third instance.
-"Two is not a pattern" reaches three. STILL don't factor: 48 LOC
-duplication vs coupling three independent backends.
-
-The chunk-3 prediction said `multicast_device.c` would be the
-fourth instance AND the one that breaks independence. **Prediction
-WRONG on both counts.** Read the C: it uses `recv`/`sendto` (`:183`,
-`:208`), not `read`/`write`. NOT a fourth `read_fd` instance. And
-the "shares socket-stack state" claim was sloppy: it calls
-`str2addrinfo` (`netutl.c:58`) which is a DNS-resolution helper,
-not shared state. The coupling is library-dependency, not state-
-sharing. The factoring trigger doesn't fire.
-
-**`read_fd` revision #2** (`ed9af4fb`'s criterion FALSIFIED at
-`386ca600`): the prediction said `bsd.rs` would be `cfg(any(bsd,
-macos))` and "they never compile together." We landed it
-`cfg(unix)`. They DO compile together. On a Linux build all four
-`read_fd`s exist: `linux::read_fd`, `fd::read_fd`, `raw::
-read_fd`, `bsd::read_fd`. The cfg-boundary criterion was built on
-a wrong assumption about WHERE the cfg gate would go.
-
-The assumption was wrong because of the `cfg`-placement decision
-(itself a chunk-4 finding): **`cfg` goes on the smallest thing
-that's actually platform-varying.** For `bsd.rs`: the `open()`
-paths vary (`/dev/tun*` vs `PF_SYSTEM` socket); the read/write
-bodies don't (`read(2)`/`write(2)` are POSIX). Gate the `open()`
-impl, not the module. The module is `cfg(unix)` so the read/write
-logic tests on Linux via fakes — the same testing-on-what-you-
-have trick. The cfg-boundary criterion would have FORCED `cfg(
-bsd)` on the module to make the boundary exist. Tail wagging dog.
-
-THE THIRD criterion (the one that survived implementation):
-**would factoring widen the unsafe boundary?** Four `read_fd`s
-scoped to four modules = four small `#[allow(unsafe_code)]`
-scopes, each with its own SAFETY argument tied to its fd's
-lifecycle (the `&mut self` borrow keeping `OwnedFd` alive). One
-shared `read_fd` in `lib.rs` = one `#[allow(unsafe_code)]` at
-crate scope, with a SAFETY argument that has to cover all four
-callers' fd lifecycles. The duplication (32 LOC across four
-modules) BUYS the locality. The factoring trigger isn't "fourth
-instance" or "cfg co-compilation" — it's "`lib.rs` itself needs
-raw I/O." Doesn't.
-
-The criterion-evolution itself is the lesson: instance-count
-(chunk 2) → cfg-boundary (chunk 3, falsified) → unsafe-scope
-(chunk 4). Each criterion seemed right until the next chunk's
-implementation choices exposed a hidden assumption. The cfg-
-boundary criterion assumed `cfg` placement; chunk 4 chose a
-different placement. **Don't reason about what factoring would
-cost based on architectural choices not yet made.**
-
-Trait shape (landed; `write` takes `&mut [u8]` because TUN-mode
-zeroes `buf[10..12]` — the trait constrains; `FdTun::write`
-doesn't mutate but can't tighten):
+Trait shape (settled; `write` takes `&mut [u8]` because `linux.rs`
+zeroes `buf[10..12]` and `bsd.rs` clobbers `buf[10..14]`):
 
 ```rust
 pub trait Device: Send {
@@ -703,10 +471,7 @@ pub trait Device: Send {
 }
 ```
 
-C `setup`/`close` are NOT trait methods — they're constructor +
-`Drop`. The C vtable pattern is "stateless fn pointers + globals";
-the Rust pattern is "stateful struct + trait methods." `setup`/
-`close` don't survive the translation.
+C `setup`/`close` are constructor + `Drop`, not trait methods.
 
 ### `tinc-net` (sockets only, not the event loop yet)
 | C source | Rust |
@@ -759,510 +524,47 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
 
-#### ✅ What landed (commit `tinc-tools: tinc init — first 4a...`)
-
-| File | LOC | What |
-|---|---|---|
-| `src/names.rs` | ~280 | `Paths` struct + `check_id`. The `make_names()` globals materialized as a function return value. |
-| `src/cmd/mod.rs` | ~90 | `CmdError` enum, `io_err()` helper. One error type for all 4a commands. |
-| `src/cmd/init.rs` | ~500 | `tinc init NAME`. makedirs (with chmod-on-exists), tinc.conf write, keygen, PEM private (0600 `O_EXCL`), `Ed25519PublicKey =` config line, tinc-up stub (0755). |
-| `src/bin/tinc.rs` | ~300 | Hand-rolled argv (`+` getopt mode — stop at first non-option), dispatch table, `NETNAME` env fallback, `.` netname normalization, traversal guard. |
-| `tests/tinc_cli.rs` | ~510 | 17 integration tests through the binary. The load-bearing one is `cross_init_key_loads_in_c`. |
-
-**`CONFDIR` resolved as `option_env!("TINC_CONFDIR")` at compile time, default `/etc`.** The C bakes meson's `dir_sysconf`; Rust has no configure step. Packagers set the env var in their build (Nix derivation does this via `env`); a bare `cargo build` gets `/etc`. XDG fallback was considered and rejected — the C doesn't do it, and adding it is a separate behavioral decision (tracked below).
-
-**Three findings:**
-
-- **`init` writes the public key as a config line, not a PEM file.** `hosts/NAME` gets `Ed25519PublicKey = <tinc-b64>` — read by *peers* via the config parser, not via `read_pem`. The private key *is* PEM (read by the daemon's `net_setup.c` via `read_pem`). Different readers, different formats. `keypair::write_pair` (used by `sptps_keypair`) does PEM-both-sides; `cmd::init` does PEM-then-config. The b64 in the config line is **tinc's LSB-first variant** — standard base64 there would fail `ecdsa_set_base64_public_key` and the peer rejects your key. `cross_init_key_loads_in_c` proves the round-trip: `tinc init` → extract pubkey from `hosts/NAME` → decode tinc-b64 → re-wrap as PEM → hand to C `sptps_test` → handshake completes.
-
-- **`makedir` chmod-on-exists is load-bearing.** `fs.c:10-14`: `mkdir; if EEXIST chmod`. An existing `/etc/tinc/myvpn` with mode `0777` (because the user ran shell `mkdir` first) gets clamped to `0755`. We replicate it. Test: `makedir_clamps_mode`.
-
-- **Testing env-var → paths is awkward.** `NETNAME=foo tinc init alice` resolves to `/etc/tinc/foo`, which a test can't write. First attempt: assert `foo` appears in the EPERM error path. Wrong — `makedir(confdir)` runs before `makedir(confbase)` (parent before child), so the error is on `/etc/tinc` and the netname never makes it into a message. Second attempt (the one that works): use the *both-given warning* as the observable. `NETNAME=foo tinc -c /tmp/x init alice` emits "Both netname and configuration directory given" iff `Paths::for_cli` saw `netname.is_some()`. Side-channel observability when you can't observe the direct effect.
-
-**Intentional deviations from C** (see `cmd/init.rs` module doc for full rationale):
-
-| Dropped | Why |
-|---|---|
-| Interactive name prompt | Exists for `tinc> ` shell mode reusing `cmd_init`; we don't have shell mode. When 5b adds it, the prompt becomes a shell-layer concern — shell prompts → calls `init::run("alice")`. |
-| `check_port` (try-bind-655, random fallback) | Best-effort QoL that often picks a port your firewall doesn't allow. Better to fail loudly at first daemon start. |
-| RSA keygen | `DISABLE_LEGACY` is permanently on. |
-
-#### ✅ What landed (commit `tinc-tools: export/import/exchange...`)
-
-| File | LOC | What |
-|---|---|---|
-| `src/cmd/exchange.rs` | ~920 | All five host-shipping commands. `get_my_name` via `tinc-conf` (the C copy-pastes the strcspn/strspn tokenizer; we don't), `export_one`/`export_all`/`import` with `impl Write`/`BufRead` parameterization. |
-| `src/names.rs` | +152 | `replace_name` — `$HOST`/`$FOO` env-var expansion + non-alnum→`_` squash. `nix::unistd::gethostname` for the `$HOST` fallback. |
-| `src/bin/tinc.rs` | +156 | 5 dispatch entries; `Globals { force }` threaded through dispatch sig; `--force` parsing. |
-| `tests/tinc_cli.rs` | +239 | 8 integration tests. `export_import_workflow` is the contract test — alice's export → bob's import → byte-identical `hosts/alice`. |
-
-**The blob format wasn't what the plan guessed.** Plan said `#-- BEGIN HOST NAME --#` markers. Actually: `Name = X` *is* the framing — export injects it, import parses it. The `#---63 dashes---#` line is the *separator* between hosts in `export-all`, not a per-host wrapper. Shape:
-
-```
-Name = alice
-<hosts/alice contents, with any Name= lines stripped>
-
-#---------------------------------------------------------------#
-Name = bob
-<hosts/bob contents>
-```
-
-**Three findings:**
-
-- **`replace_name`'s squash is asymmetric on purpose.** Non-alnum→`_` only fires for the `$`-prefix branch — the C's for-loop is *inside* `if(name[0]=='$')`. So `Name = my-laptop` fails `check_id` (dash rejected), but `Name = $HOST` on a machine called `my-laptop` succeeds (becomes `my_laptop`). It's a convenience for hostnames, not a general sanitizer. `replace_name_literal` vs `replace_name_envvar_squashes` tests pin the asymmetry.
-
-- **The `Name =` filter on export is a `strcspn` length check, not a prefix match.** `strcspn(buf, "\t =") != 4 || strncasecmp(buf, "Name", 4)`. So `Namespace = foo` survives (strcspn=9), `Named = foo` survives (strcspn=5), and ` Name = foo` with a leading space *also* survives (strcspn=0) — even though `tinc-conf` would parse it as a `Name` line. The leading-space case is a C bug; replicated, because the cost of fixing is a behavioral diff and the cost of replicating is one comment. Test: `name_line_filter`.
-
-- **import's `Name = ` match is `sscanf`-exact.** `sscanf("Name = %s")` matches `Name = foo` only — `Name=foo`, `name = foo`, ` Name = foo` all return 0. Export always writes the canonical form so this is invisible in practice; replicated because looser matching could turn a host-file comment containing `Name=something` into a section boundary. Test: `import_name_format_is_exact`.
-
-**One intentional deviation: `export-all` sorts.** The C uses `readdir` order (filesystem-dependent — ext4 ≠ tmpfs ≠ btrfs). We sort. `tinc export-all > all.txt` is now diffable across machines, and tests don't depend on tmpfs hash order.
-
-**`Globals` struct, not `Paths` extension.** `--force` (and eventually `tty`) are behavior toggles, not paths. Different concern; different lifetime — a future shell mode resets `force` per-command but keeps `Paths`. Threading as a struct (vs the C's bare global) means a command's signature *says* whether it cares: `cmd_init(_, _: &Globals, _)` vs `cmd_import(_, g: &Globals, _)`.
-
-**`exchange` doesn't `fclose(stdout)`.** The C does `if(!tty) fclose(stdout)` after export so the pipe's other end sees EOF before import starts. We don't — the OS pipe buffer means import can start reading while export is writing (full-duplex `exchange | ssh peer exchange` doesn't deadlock unless export-side output exceeds the pipe buffer, which is 64KB on Linux, enough for ~1000 host files). If it ever hangs, revisit; the C's explicit close may be a workaround for exactly that. Noted in `cmd_exchange`'s adapter doc.
-
-#### Remaining 4a commands — guesses validated against C source
-
-*After the export/import format guess turned out wrong, went back and read every remaining 4a function before estimating.*
-
-##### ✅ `generate-ed25519-keys` — landed (commit `tinc-tools: generate-ed25519-keys...`)
-
-The validated plan was right: `disable_old_keys` is the substance, the wrapper is 5 lines. **~700 LOC** including 14 unit tests. The `disable_old_keys` function itself is ~180 LOC of which ~100 is comments mapping each block to `keys.c` line numbers — the function is too easy to almost-get-right (the END check runs *after* the write, the no-match path unlinks rather than renames, etc.).
-
-**One finding worth keeping outside the commit message:** `open_append` does NOT `fchmod` after open. C `fopenmask` does (`fs.c:85` — `if(perms & 0444) fchmod`, which is always-true for any sane mode). So C clamps the private key back to `0600` on every genkey. If you `chmod 0400` (read-only-even-owner — paranoid but legal), C silently undoes it. We respect it. This is the rare "C behavior is the bug" call — recorded in `genkey.rs` because if a future fsck check warns on `0400` private keys, the asymmetry surfaces ("why did rotation stop fixing this?") and the answer is here.
-
-`TmpGuard` is hand-rolled, not `tempfile::NamedTempFile`. The latter picks `tmp.XXXXXX` in a system tempdir; C uses `<path>.tmp` in the *same dir as the target* — necessary for `rename(2)` to be atomic (same filesystem) and so a crash leaves an obviously-stale `ed25519_key.priv.tmp` not a mystery file in `/tmp`. The crate's `NamedTempFile::new_in()` would solve the same-dir part but not the predictable-name part. Hand-rolling is one struct + one Drop impl.
-
-`disable_old_keys` is `pub` — `fsck`'s `fix_public_key` calls it before appending the PEM block.
-
-##### ✅ `sign` / `verify` — landed (commit `tinc-tools: sign/verify — byte-identical...`)
-
-The validated guesses held: trailer with leading space, `time()` parameterized, `get_pubkey` replaced by `tinc-conf` (the fourth tokenizer collapses to `Config::lookup("Ed25519PublicKey")`). Three tests pin the format, in increasing strength:
-
-| Test | Proves |
-|---|---|
-| `trailer_leading_space` | the space is load-bearing (constructs a sig over the spaceless trailer, watches it fail) |
-| `verify_tampered_time` / `_signer_name` | the trailer scheme works (header fields bound by sig — reconstruction differs, verify fails) |
-| `golden_c_vector` | **it's the same format as C, not just a format** |
-
-The golden test was a find. The plan said "we don't have a C `tinc` binary, test the envelope by self-roundtrip + tamper." That was the planned floor. Then `test/integration/cmd_sign_verify.py` turned out to have a fixed-key, fixed-time blob (`SIGNED_BYTES`, `t=1653397516`). Ed25519 is deterministic: same key + same message = same sig. Transcribe the constants, set up a confbase with the same key, call our `sign(paths, body, 1653397516, ...)`, `assert_eq!(ours, SIGNED)`. Passes. **The artifact IS the cross-impl test.** Same kind of free win as `kat-vectors` — the C side already did the work, we just consume it.
-
-The binding-via-reconstruction click: `verify` doesn't *check* a trailer against anything. There's no trailer in the blob to check. It builds a fresh one from the header's name/time and feeds it to the crypto. The signature *is* the check — any header lie produces a different reconstruction, different message, sig fails. The header is bound *as a side effect of verify being lazy*.
-
-One deviation noted at point of decision: header parse is split-on-single-space (5 fields exact), not sscanf's zero-or-more-whitespace. C accepts `Signature=alice 1 sig` (sscanf format-string space matches zero chars). We don't. `sign` always emits canonical form; only hand-editing hits this.
-
-~~`load_host_pubkey` lift-to-mod note~~: fsck landed with its own `load_ec_pubkey`. **Intentionally not unified** — the dances differ. sign's loader takes a `&Path` and fails the whole verify on bad b64; fsck's takes a `&Config` (already merged), respects `Ed25519PublicKeyFile`, and treats bad b64 as `None` (falls to `NoPublicKey` finding, not error). The shared kernel (`b64::decode` + `keypair::read_public`) is already shared; the wrapping policy is different per consumer. Not a duplication.
-
-##### ✅ `fsck` — landed (commit `tinc-tools: fsck — keypair coherence...`)
-
-**~2250 LOC** (1100 logic, 800 test, 350 doc). Estimate was ~400 LOC logic; actual 1100. The 2.7× ratio is the `Finding` enum + `Display` impl that the C doesn't have — C interleaves `fprintf` with the checks, we separate them so tests `matches!()` on variants instead of parsing stderr. Subtract that scaffold (~300 LOC enum + Display + Severity) and the check logic itself is ~800. The 800 LOC test ratio held the calibration from `vars.rs`.
-
-The testable-seam architecture decision determined everything else. `Finding` is **not** `PartialEq` — `PathBuf` equality is fragile (absolute/relative, trailing slash). Tests use `matches!(f, Finding::X { .. })` + `path.ends_with(...)`. Slightly more verbose than `assert_eq!(findings, vec![...])`; vastly less flaky. `clean_init_passes` is the contract: init and fsck must agree on "clean."
-
-`ask_fix()` collapsed to `force`. C has a `tty` branch reading `y/n` from stdin (`fsck.c:38-65`); under `cargo test` stdin is a pipe and the C avoids blocking via `tty = isatty(0) && isatty(1)`, false under test. Same observable behavior, minus the prompt code. Same deviation as init/genkey.
-
-**Prereqs landed in `tinc-conf`**: `variables[]` table + `read_server_config`. The latter found upstream bug **`40719189`** (2026-03-30, broke `conf.d/` — `if(!dir && ENOENT) return true; else return false;` falls to else when opendir succeeds). `confd_checked` test in fsck carries the fix forward: fsck on a `conf.d/` config actually checks `conf.d/`. HEAD C never reaches that file. **Upstream patch is a one-liner; worth filing.**
-
-Three fsck-level tightenings (each with C-behavior comment at the line):
-
-- **Unfixed `KeyMismatch` fails fsck.** C `ask_fix_ec_public_key` returns `true` when `ask_fix` returns `false` (`fsck.c:271`) — "user declined = success." A mismatch you didn't fix is a failed fsck. The C "decline = success" is a bug we don't carry.
-- Script scan: confbase fail doesn't skip `hosts/`. C `&&`-short-circuits (`fsck.c:626`); we `&` for more diagnostics on first run. Same intent as the C's own `success & check_scripts_and_configs()` (bitwise, `fsck.c:672`).
-- `verbose_bit_mask` allow on `mode & 0o077`. clippy suggests `trailing_zeros() >= 6`; obfuscates a Unix permission-bit mask. The C is `& 077`; the port is `& 0o077`.
-
-Two dead-C-code drops noted at point of decision: `ecdsa_get_base64_public_key` cannot fail (`xmalloc` aborts on OOM, `b64encode_tinc` has no error path) — `fsck.c:384` `if(!b64_priv_pub)` is unreachable. And `fsck.c:511-518` strips the `-up` suffix into `fname` then `snprintf`s over `fname` before reading it — copy-paste from the confbase scan.
-
-**One finding to act on later: `sign` doesn't respect `Ed25519PrivateKeyFile`.** fsck does — it has the merged config tree and looks up the key. sign reads `paths.ed25519_private()` directly. A user with a relocated key (paranoid hardening, key on a different filesystem, whatever) can `fsck` but can't `sign`. genkey is correct (it *creates* the default-location key). Not fixing sign here; `private_key_file_config` in `fsck.rs` pins the right behavior so when sign is fixed, that's the reference test. The fix is small (read tinc.conf, lookup, fallback) but sign currently doesn't have a config-read at all.
-
-fsck `--force` writes the pubkey as a **PEM block**, not `Ed25519PublicKey =` config-line. C does the same (`ecdsa_write_pem_public_key`, `fsck.c:286`). Both forms valid (the loader checks config-line first, PEM second). The visual distinction is *useful*: PEM block in `hosts/NAME` means "fsck repaired this", config-line means "init/genkey wrote this." Preserved deliberately.
-
-`edit` landed (chunk 7) — the reload half is best-effort fire-and-forget (`tincctl.c:2465-2467`: connect, sendline, NO recvline). Daemon down? `Err` swallowed. The edit happened; that's success.
-
-The `variables[]` table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
-
-##### ✅ `invite` — landed (commit `tinc-tools: invite — KAT-verified URL crypto...`)
-
-**The plan misfiled `invitation.c` under 5b.** Reading the source showed both halves are 4a-shaped:
-
-| | C calls | What it actually is |
-|---|---|---|
-| `cmd_invite` | `connect_tincd(false)` ×2 | best-effort skips ("if daemon down, no-op"). The hosts/NAME exists check covers disk; the daemon check covered "node in live graph but host file deleted" which is operator error |
-| `cmd_join` | `socket()` + `connect()` | TCP to the **inviter's listen port** — meta-protocol `0 ?PUBKEY 17.x` greeting then SPTPS pump. Never touches the control socket. Uses `tinc-sptps` directly |
-
-The "talks to a daemon" surface read confused "talks to *a* daemon over TCP" (4a, just like `sptps_test` does) with "talks to *the local* daemon over the control socket" (5b). `cmd_join` is the former.
-
-The URL crypto kernel went into `tinc-crypto::invite` because it's used by three places identically: `cmd_invite` (computes), `cmd_join` (verifies key_hash), the daemon's `receive_invitation_sptps` (recomputes cookie_hash to find the file). **Any boundary disagreement = silent interop failure** — join connects, handshakes, sends cookie, daemon says "non-existing invitation", no further hint. KAT vectors via `gen_kat.c`; per-stage assertions so the failure points at the broken stage.
-
-One sharp boundary: `key_hash = sha512(b64_std(pubkey))[..18]` hashes the **b64 string**, not the raw key. `strlen` in `sha512(fingerprint, strlen(fingerprint), hash)` is the giveaway. Unusual, but the daemon sends the same b64 string in its meta-greeting and `cmd_join` hashes *that* — raw bytes on one side and b64 on the other = failed auth.
-
-`get_my_hostname` HTTP probe **dropped** (-120 LOC). C TCP-connects to `tinc-vpn.org:80` with hand-crafted `GET /host.cgi` to discover external IP. We require `Address` to be set. Reorder vs C: address checked *before* `makedirs` so no-Address failure leaves no `invitations/` debris.
-
-##### ✅ `join` — landed (commit `tinc-tools: join — invite's pair, in-process roundtrip...`)
-
-The contract test (`invite_join_roundtrip_in_process`) is the architecture. Two `Sptps` structs sharing a pair of `Vec<u8>` queues run the full protocol: KEX/SIG handshake → cookie (type-0) → file in 512-byte chunks (type-0, deliberately split to exercise the accumulator) → finalize trigger (type-1, zero-len) → pubkey echo (type-1) → ack (type-2, zero-len). The pump asserts `fsck::run` approves the joiner's confbase — if join ever writes something fsck flags, this fires.
-
-**`server_receive_cookie` is the daemon seed.** It's `protocol_auth.c:185-310` minus the `connection_t*`: cookie→filename via `cookie_filename` (KAT-tested composition), atomic `rename` to `.used` (single-use enforcement — second join with same cookie = ENOENT), mtime-vs-expiry check, `Name =` first-line validate, can't-be-own-name. The daemon version takes `&mut Connection` and the extracted name goes into `c->name`. Everything else lifts unchanged. **Forward ref for Phase 5**: this fn moves to `tincd::auth`, the in-process test becomes the daemon's invitation handler test, and `protocol_auth.c`'s 1066-line port shrinks by ~130.
-
-`PROT_MINOR_SENT = 1`, not `PROT_MINOR = 7`: `invitation.c:1368` builds `"%d.%d"` with `PROT_MINOR`, line 1372 sends literal `1`. Build-then-discard suggests refactor accident. Daemon overwrites `c->protocol_minor = 2` anyway so the value's dead, but it's wire bytes. **This is the kind of thing that would silently break against a future C tincd that started checking minor.** Pinned by name.
-
-`recv_line` shares its buffer with the SPTPS pump. C `blen` carries over: greeting line 2 + first SPTPS record can arrive in one `recv()`. `BufReader` would over-read past `\n` and eat handshake bytes. Hand-rolled `Vec<u8>` with explicit drain. The `n==0` partial-record case — SPTPS consumed 0 bytes because the record header says "body is 200 bytes" and we only have 50 — is what the `buf.drain(..off)` compaction is for.
-
-### Phase 5b: RPC half — transport landed, format decision reversed
-
-#### ✅ chunk 1: `CtlSocket` + 7 one-shot commands
-
-**The line-JSON replacement plan above didn't survive reading `control.c`.**
-The "problems" list was over-stated:
-
-| "Problem" | What reading the source showed |
-|---|---|
-| Pidfile is `0644`-ish | **Wrong.** `pidfile.c:28`: `umask(mask \| 077)` before `fopen("w")` → file is `0600`. The cookie is auth-via-fs-perms, same model as ssh-agent socket. `SO_PEERCRED` would be tighter but the cookie isn't a leak. |
-| Overloads `connection_t` | True, but **a daemon-side concern**. The CLI doesn't care what struct the daemon stores its end in. Our daemon's `control_h` can use a separate `CtlConn` and the wire bytes are unchanged. The `if(status.control) continue` sprinkle is what we fix in *our* daemon, not the protocol. |
-| Streaming printf format | True for `dump`, but **the format is private**. CLI and daemon ship together. When our `Node` struct exists, our `dump_nodes` emits whatever fields it has and `cmd_dump` parses to match. Not held to the 22-field positional sscanf. |
-
-So: **kept the framing** (`"CONTROL TYPE [args]\n"`, `\n`-delimited),
-**kept the `REQ_*` discriminants** (sed-verified against
-`control_common.h`, zero cost), **kept the cookie auth**. Dropped
-only the obligation to match dump line bodies. The shape was right;
-the content was negotiable. JSON would have cost a `serde_json` dep
-and the `nc -U /var/run/tinc.socket` debuggability.
-
-`ctl.rs` is the transport: `Pidfile::read` (stricter than C —
-validates 64-hex cookie at parse, not at the daemon's `strcmp`
-later) + the `LOCALSTATEDIR` ↔ `confbase/pid` probe + `kill(pid,
-0)` liveness check + `UnixStream::connect` + the 3-line greeting
-(`ID ^cookie 0` → `0 NAME 17.x` → `4 0 PID`). Generic over `Read +
-Write` so tests pass `UnixStream::pair()` halves; the `Rc<RefCell>`
-split is the sync answer to `tokio::split()`.
-
-`ctl_full_connect_against_fake_daemon` is the closure: a real
-`UnixListener` bound in a tempdir, a real pidfile with **our test
-process's pid** (so `kill(pid, 0)` returns 0 without a real daemon),
-the binary's `connect()` doing real `read_to_string` + `kill(2)` +
-`connect(2)`. The fake sends `pid=99999` in greeting line 2 while
-the pidfile says our actual pid; the test asserts `99999` is
-printed, proving `tincctl.c:891`'s pid-from-greeting-not-pidfile.
-
-`needs_daemon: bool` on `CmdEntry` drives whether `main()` calls
-`paths.resolve_runtime()` before dispatch. The 4a doc comment had
-predicted "separate table because `&mut CtlSocket` signature
-differs" — wrong, `connect()` takes `&Paths` and creates the socket
-internally. Same shape, one table. The `Option<PathBuf>` panics if
-a 4a command reaches for `pidfile()`; that's the assertion `init`
-stays probe-free.
-
-Dead enum values: `REQ_CONNECT`, `REQ_RESTART`, `REQ_DUMP_GRAPH`
-exist in `control_common.h` but no `cmd_*` sends them and `control_h`
-doesn't match them. Included for sequence-gap reasons.
-
-#### ✅ chunk 2: `cmd_config` — the four-action editor
-
-`tincctl.c:1774-2138`, 365 LOC → ~330 LOC Rust + 1400 LOC tests.
-Three-stage seam means each stage is testable without the others:
-argv parsing without a filesystem, validation without file I/O,
-file-walk without argv. 81 tests at the 3× ratio.
-
-The action coercions are the subtle part. The C does three:
-
-| Input | Coercion | Why |
-|---|---|---|
-| `get VAR VALUE` | → `set` (1846) | `tinc get Port 655` — footgun, but C does it |
-| `add VAR VALUE`, VAR not MULTIPLE | → `set` + warn (1918) | `tinc add Port 655` shouldn't make a second `Port` line |
-| `set VAR VALUE`, VAR is MULTIPLE | warn only (1921) | `tinc set Subnet ...` deletes other subnets; you probably wanted `add` |
-
-The argv→Action mapping has the C's `argv--` shift trick (1780)
-which we can't do post-dispatch. **First cut bug**: one adapter
-re-parsing args[0] worked for `get`/`set` *by accident* (default
-GET; GET-with-value coerces to SET) but `tinc add ConnectTo bob`
-would route GET→SET, **deleting other ConnectTo lines**. Caught
-by reading the fall-through carefully, not by a test;
-`config_add_is_not_set` is the regression guard. Four adapters.
-
-**Port is HOST-only**, not dual-tagged. `tinc set Port 655` writes
-to `hosts/$me`. The first cut of `intent_dual_tagged` test assumed
-otherwise; the failing test was wrong, the sed-verified table was
-right. Fourth instance of test-reads-C-not-impl correction.
-
-#### ✅ chunk 3: `cmd_dump` — the cross-impl seam
-
-`tincctl.c:1108-1376`, 268 LOC → ~460 LOC Rust + 1500 LOC tests.
-Eight sub-verbs (`nodes`/`reachable nodes`/`edges`/`subnets`/
-`connections`/`graph`/`digraph`/`invitations`) + the `list` alias.
-
-**Four-for-four.** Chunk-2's deferred table said:
-
-> Format depends on daemon's `Node`/`Edge` structs. Port the
-> *infrastructure* now; the parse lands with the daemon.
-
-Wrong on both counts. The format is pinned by `node.c:210`,
-`edge.c:128`, `subnet.c:403`, `connection.c:168` — the C daemon's
-`dump_*` functions, which exist NOW. Reading what THEY write is
-well-defined; we don't need our own daemon to parse it. Porting it
-gets a cross-impl test harness for free: Rust `tinc dump nodes` →
-C `tincd` socket → same output as C `tinc dump nodes`. The
-daemon-side port writes the same format later (and a unit test
-pins it both ways).
-
-The `" port "` literal is the wrinkle. `sockaddr2hostname`
-(`netutl.c:153`) returns `"10.0.0.1 port 655"` as ONE string with
-embedded spaces. Daemon writes via one `%s`; CLI parses via
-`%s port %s`. The literal `port` is a sscanf token-skip. So the
-daemon's printf has FEWER conversions than the CLI's sscanf, per
-hostname instance:
-
-| dump | daemon `%` | CLI `%` | `port` literals |
-|---|---|---|---|
-| nodes | 21 | 22 | 1 |
-| edges | 6 | 8 | 2 (addr + local) |
-| connections | 5 | 6 | 1 |
-| subnets | 2 | 2 | 0 |
-
-The ADD_EDGE *message* protocol does NOT have this — it uses
-`sockaddr2str` (two outputs). Dump uses the fused log-message
-form because dump WAS the log-message form before it was a CLI
-format. `Tok::lit("port")` skips the literal; `Tok` made `pub`.
-
-`node_status_t` is a 13-field `bool:1` bitfield in a `u32` union.
-We read bit 4 (`reachable`, the filter) and bit 1 (`validkey`, the
-DOT color). Named constants, not a struct — the daemon's port
-defines all 13 in its own type.
-
-The DOT color cascade (`tincctl.c:1290-1301`) is first-match-wins:
-MYSELF→green+filled / !reachable→red / via≠name→orange /
-!validkey→black / minmtu>0→green / else→black. Order matters:
-`node_dot_cascade_order` pins it (a self-node that's also somehow
-unreachable is green, not red).
-
-Graph mode sends TWO requests, reads TWO terminators. `recv_row`
-carries the `CtlRequest` so the loop knows the first `End(DumpNodes)`
-doesn't exit. The C `if(do_graph && req == REQ_DUMP_NODES) continue`
-(`tincctl.c:1247`).
-
-`dump invitations` doesn't need daemon. The `b64decode_tinc(d_name,
-_, 24) != 18` check (`tincctl.c:1130`) reads first-24-chars (length
-cap); we tighten to exact-24 (same as `sweep_expired`). The
-`"Name = "` 7-char prefix is NOT the general config tokenizer —
-`Name=X` (no spaces) fails. The format `invite` writes is the
-format `dump` reads; `inv_roundtrip_with_invite` is the contract.
-
-`needs_daemon: true` on the table entry even for invitations: the
-C has `ctl=false` (`tincctl.c:3009`) and connects INSIDE `cmd_dump`
-after the kind switch. We can't — `connect` needs resolved pidfile,
-`resolve_runtime` is `&mut`, our adapter gets `&Paths`. invitations
-pays one harmless `access(2)` probe.
-
-#### ✅ chunk 4: `cmd_info` — the dead third arg
-
-`info.c`, 356 LOC → ~520 LOC Rust + 880 LOC tests (the 3× ratio).
-
-**Five-for-five.** Chunk-3's deferred table said:
-
-> The daemon side already has `REQ_DUMP_NODES item` (filter by
-> name, `info.c:53` sends a third arg).
-
-Wrong. `info.c:53` does send `"18 3 alice"`. But `control.c:63`
-is bare `case REQ_DUMP_NODES: return dump_nodes(c)` — no `sscanf
-(request, "%*d %*d %s")` to read the name. The daemon dumps ALL
-nodes regardless. Filtering is client-side. Either a planned
-daemon-side filter that never landed (in 12 years), or a debug
-breadcrumb. The fake-daemon test asserts `"18 3 bob"` arrives
-(wire-compat) and the CLI filters itself.
-
-The ~150 LOC estimate was off by 3.5×. What it missed:
-
-| Missed | Why |
-|---|---|
-| Three loops not one | NODES match-then-**drain** → EDGES filter → SUBNETS filter. The drain (`info.c:102-106`) is structurally separate — found alice on row 3 of 50, daemon's still sending 47 more. |
-| `info_subnet` half | The estimate row said `info NODE` — forgot `info.c:249-345`, the route-lookup half. `Subnet::matches` + `maskcmp` to `tinc-proto`, +160 LOC there. |
-| `localtime_r` | `nix` doesn't wrap it (TZ-file libc fn, not a syscall). `forbid → deny` + one `#[allow(unsafe_code)]` shim. The decision cost more than the 50 LOC. |
-| 7-way Reachability cascade | Separate enum + Display impl. Same shape as the DOT color cascade but different conditions. |
-| Column-width-exact format | `Status:` is 13 chars (values have leading space); everything else is 14 chars (values don't). Net column 14 either way. `"packets  bytes"` is two spaces. The golden test catches single-space drift. |
-
-The `/` and `#` checks (`info.c:257-258`) are SUBSTRING checks
-(`strchr`), not parsed-value checks. `10.0.0.5/32` and `10.0.0.5`
-parse to the same `Subnet` (V4, /32), but `/` in the string makes
-it exact-mode ("show me who advertises EXACTLY /32") vs address-
-mode ("which subnets ROUTE this"). String shape carries intent that
-the parsed value loses.
-
-Partial parses for edges: `info.c:204` is `sscanf("%d %d %s %s")`
-— only the first two strings of the 8-field row. A malformed
-`weight` would pass C's `n != 4` and fail our `EdgeRow::parse`.
-Match the parse-slack: `split_ascii_whitespace().take(2)`.
-
-`info_node_not_found_short_circuits`: the daemon-side asserts EOF
-after the NODES terminator. If we'd pipelined (sent all three before
-reading), or didn't short-circuit on not-found, the assert catches
-it — read_line gets `"18 4 dave\n"` not 0 bytes.
-
-#### ✅ chunk 5: `top`/`log`/`pcap` landed — `start`/`edit` deferred
-
-~~**`top`: `ratatui`. The TUI is the work.**~~ **Reversed.** `top.c`'s
-curses surface, exhaustively counted: `initscr`/`endwin`/`erase`/
-`mvprintw`/`attrset`/`chgat`/`refresh`/`timeout`/`getch`/`scanw`/`move`.
-Seven SGR codes (string constants) + one parameterized CSI cursor-
-position + `tcsetattr` + `poll(stdin, ms)`. `nix` already has
-`termios` + `poll`. ~35 transitive deps via `crossterm` for one
-fixed screen layout with three text attributes is the abstraction-
-level overestimate again — "full-screen TUI" pattern-matched to
-"TUI framework"; `top.c` is `printf` with cursor moves.
-
-**Six-for-six, but the SIXTH is a different artifact.** Reversals
-1-5 were "read the C source, the abstraction-level plan was wrong".
-This one is "read the DEPENDENCY source, the abstraction-level
-plan was wrong". Same failure mode — the concrete artifact is
-ALWAYS more pinned than the layer above it — different concrete
-artifact (`top.c` vs `nix-0.29.0/src/`). The pattern generalizes:
-"read the source" means whatever source the decision depends on.
-For a TUI question that's `top.c`; for an Errno-conversion question
-that's `nix/src/errno.rs`.
-
-Grepping `~/.cargo/registry/src/.../nix-0.29.0` found four things
-the first-draft `tui.rs` should have used:
-
-| Find | What I'd written | Why the wrong version compiled |
-|---|---|---|
-| `From<Errno> for io::Error` (`errno.rs:183`, always-on) | 4× `.map_err(\|e\| io::Error::from_raw_os_error(e as i32))` | The cast IS what nix's impl does. Same machine code. The cast lives in nix where Errno's repr is defined; on our side it'd trip `clippy::cast_possible_truncation`. **The impl doesn't show in docs.rs's module index** — it's an `impl` on a foreign type, lives in `errno.rs`, not where you'd browse. `rg 'impl From<Errno>'` finds it in one second. |
-| `unistd::read(RawFd, &mut [u8])` (always-on) | `PipeRead` extension trait wrapping it | The trait WORKED — it called `nix::unistd::read` inside. Wrapper around a wrapper, written because I'd been thinking in `Read::read` shapes. |
-| `SpecialCharacterIndices::VMIN` (`term` feature) | `libc::VMIN` | `libc::VMIN` is `usize` on every target we BUILD. The linux-sparc64 quirk where VMIN==VEOF (`termios.rs:459`) would've been a silent wrong-index, not a compile error. |
-| `unistd::isatty` (always-on) | Relied on `tcgetattr` ENOTTY | `tcgetattr` does fail on non-tty. Preflight is for the message ("stdin is not a terminal" beats "Inappropriate ioctl for device"), not correctness. |
-
-Writing-then-grepping found things browsing-docs wouldn't have. The
-`From<Errno>` impl is the proof: a foreign-type impl living in a
-module named for the SOURCE type, not the target type. docs.rs's
-type page for `io::Error` doesn't link nix's impl (foreign crate).
-The registry source is greppable; docs.rs's nav isn't.
-
-**`tui.rs` landed at `b6bbd9d7`, 597 LOC, +4 tests.** The escape
-constants + `goto()` + `winsize()` + `RawMode` RAII + `getch_timeout`.
-NOT `cfmakeraw` — it clears OPOST, killing `\n`→`\r\n`; any
-`eprintln!` mid-top would stair-step. Hand-picked `~(ECHO|ICANON|
-ISIG)` keeps OPOST. EOF on stdin → `Some(b'q')` (not `None`, which
-would spin: poll says readable, read returns 0, repeat). Ctrl-C
-still leaves the terminal raw — KNOWN GAP, the C has it too.
-
-**`cmd::top` landed at `5778a627`, 1984 LOC, +29 unit + 2 integration.**
-The **5× estimate miss** (~400 → 1984): each of the four pieces
-(TrafficRow / Stats merge / 7-way sort / render) was correctly
-identified, but each had an INVARIANT not visible until writing it:
-
-| Piece | The thing the estimate didn't see | Why it wasn't visible from `top.c` |
-|---|---|---|
-| `Stats::sort` | `top.c:248-257`'s `i` field is a stable-sort EMULATION. `qsort` isn't stable; the `i` tiebreak makes it stable across frames. | The 10 lines of C were ALL read pre-estimate. "Stable sort emulation" wasn't apparent until asking "what does the `i` tiebreak DO that `Ordering::Equal` doesn't?" — and the answer is "nothing, IF your sort is already stable." That's a property of the SORT, not the comparator. The C source for `qsort` (glibc's introsort) is where the answer lives. |
-| `Stats::update` first tick | `Instant` has no zero. `static struct timeval prev` zero-init → `gettimeofday() - {0,0}` is wall-clock time. Can't `Instant::default()`. | C `static` zero-init is implicit; `prev = {0,0}` doesn't APPEAR in the source. The bug is in the absence. |
-| `wrapping_sub` | Is the wrap a BUG (clamp it) or BEHAVIOR (port it)? It's both — the daemon-restart spike is observable, self-correcting, and a useful signal. | C unsigned subtraction is well-defined wrap; the C source doesn't ANNOTATE it because nothing's wrong from C's perspective. The decision to port-not-clamp isn't IN the C; it's a judgment call ABOUT the C. |
-| `render_header` row 2 | `chgat(-1, A_REVERSE, ...)` extends reverse to end-of-line. ANSI equivalent: `CLEAR_EOL` while still in REVERSE (background-color-erase). | curses primitives → ANSI is a translation table the C source can't contain. |
-
-The **third failure mode**: 1-3 were "guessed without reading the
-C". 4-5 were "read the C, stopped at the wrong file". This one is
-"read the right file, completely, and the meaning still wasn't
-there." The `i` field's purpose lives in the relationship between
-`top.c` and glibc's `qsort` — neither file alone says "stable sort
-emulation." The estimate methodology can't fix this short of
-actually writing the comparator and noticing the question.
-
-| Estimate-miss tally | C LOC | estimate | actual | ratio | what was forgotten |
-|---|---|---|---|---|---|
-| `info.c` | 356 | ~150 | ~520 | 3.5× | `info_subnet` half + drain loop + localtime shim + cascade enum + column-exact format |
-| `top.c` | 397 | ~400 | 1984 | 5× | stable-sort discovery + first-tick `Instant`-has-no-zero + wrapping_sub judgment + `chgat(-1)` translation + 29 tests |
-| `tincctl.c` log/pcap | ~80 | "blocked" | 1160 | — | nothing — the blocker WAS the wrong assumption |
-
-The ratio is GROWING for the chunks where the estimate was a number.
-Every chunk so far was a port of C-that-works; the C compresses
-correctness into invisible defaults (`static` zero-init, well-defined
-unsigned wrap, qsort's instability being a non-issue when there's a
-tiebreak). Rust makes each one explicit. The explicitness is the LOC.
-The estimate methodology — count C lines, multiply by a factor —
-can't see the invisible defaults because they're invisible.
-
-**`cmd::stream` landed at `e28270f6`, 1160 LOC, +25 unit + 5 integ
-+ 3 ctl tests.** The seventh reversal, structurally inverted:
-
-| Reversal | Direction | What was wrong | Artifact |
-|---|---|---|---|
-| 1-3 | complexity ↑ | guessed without reading the C | C source |
-| 4-5 | complexity ↑ | read the C, stopped at the wrong file | the OTHER C file |
-| 6 (top.c stable-sort) | complexity ↑ | read the right file, meaning lived elsewhere | glibc qsort's contract |
-| 6 (ratatui) | complexity ↓ | overestimated the abstraction | nix crate source |
-| 7 (BufReader) | complexity ↓ | assumed std DIDN'T solve the problem | one rustc smoke |
-
-Reversals 6-ratatui and 7 are the SAME failure as 1-3 — "guessed
-without reading" — but in the opposite direction. The plan said
-"this needs careful work"; the artifact said "no it doesn't." The
-corrective action is identical (read the source); only the SIGN of
-the error differs.
-
-The `recvdata`/`recvline` shared-buffer worry: `tincctl.c:496` has
-`char buffer[4096]; size_t blen;` — file-scope statics. `recvline`
-over-reads past the `\n`; `recvdata` sees the leftover. The plan
-correctly identified this as a real concern. What it MISSED:
-`BufReader<T>: Read`, and its `read()` drains the internal buffer
-before touching `T`. **`BufReader` IS that file-scope static.** The
-smoke (`Cursor::new("18 15 7\nLOGDATA")`, one `read_line`, one
-`read_exact(7)`) proved it before any code was written.
-`recv_data_after_recv_line_shared_buffer` pins it: if someone
-"optimizes" `recv_data` to `self.reader.get_mut()` (bypassing
-`BufReader`), the test catches it.
-
-The SIGINT handler — first deliberate C-behavior-drop:
-
-| C `tincctl.c:1533-1541` | Rust |
-|---|---|
-| `signal(SIGINT, sigint_handler)` → handler does `shutdown(fd, SHUT_RDWR)` → `recvline` returns false → loop exits → `cmd_log` returns 0 | Default SIGINT. Process dies. Exit 130. |
-
-The daemon doesn't care: kernel closes the socket either way,
-`send_request` on a dead connection returns false, the connection-
-reaper removes it next pass. Nobody pipes `tinc log` to a script
-that checks `$?`. The handler would need a `static AtomicI32` for
-the fd (signal handlers can't capture closures). Not worth it.
-
-pcap native-endian: `tincctl.c:618` does `fwrite(&struct, sizeof,
-1, out)` — host-endian struct layout. By DESIGN: magic `0xa1b2c3d4`
-is the endianness marker; readers detect by seeing `a1b2c3d4` vs
-`d4c3b2a1`. `to_ne_bytes()` per-field replicates exactly. NOT
-`to_le_bytes()` (would change behavior on a hypothetical BE build —
-which would then write "BE pcap", which Wireshark also reads).
-
-The y2038 truncation, `origlen = len`, `outmaclength` repurposed for
-snaplen: all ported faithfully. None are bugs IN OUR CODE; they're
-C behaviors that survive the port. `pcap_packet_header_y2038_
-truncates` and `pcap_loop_snaplen_zero` pin them.
-
-**`cmd::edit` landed at `fee3c7c7`, 776 LOC, +18 unit + 12 integ
-tests.** The C-is-WRONG finding (not a reversal — read the C
-before implementing as usual, but the C was the problem):
-
-| The C `system()` construction | What it does | What the C author probably intended |
-|---|---|---|
-| `"\"%s\" \"%s\""` → `"editor" "filename"` | shell parses as two double-quoted tokens | shell-tokenize editor, quote-literal filename |
-| `"editor"` (one quoted token) | exec("editor"), spaces preserved | word-split if EDITOR has spaces |
-| `"filename"` (one quoted token) | `$` `*` `\`` STILL expand | `$` literal |
-
-The construction defeats itself: it shell-quotes both arguments,
-which means EDITOR doesn't tokenize AND filename doesn't escape
-shell metacharacters. The C gets the worst of both. Our
-`sh -c '$TINC_EDITOR "$@"'` gets the best: `$TINC_EDITOR` unquoted
-(tokenizes), `"$@"` quoted (literal). The git way (`editor.c` in
-git.git, line 63-ish).
-
-Why this isn't a reversal: nothing about the PLAN was wrong. Read
-the C, found the C broken, did better. The seven reversals are about
-plan-estimates being wrong; this is about C-behavior being wrong.
-Different table: "intentional C deviations" — of which `atoi` vs
-`parse` is the most common, and this is the most consequential.
-
-**`fd.rs` adds two more C-is-WRONG findings (`ffd64613`):**
+(Per-command findings live in source-file docs: `cmd/init.rs`,
+`cmd/exchange.rs`, `cmd/genkey.rs`, `cmd/sign.rs`, `cmd/fsck.rs`,
+`cmd/invite.rs`, `cmd/join.rs`. Status table at top has the dense
+summaries. Forward refs preserved below.)
+
+**`CONFDIR` = `option_env!("TINC_CONFDIR")` at compile time**, default
+`/etc`. Packagers set the env in their build (Nix derivation does).
+
+**`server_receive_cookie` is the daemon seed.** It's `protocol_auth.
+c:185-310` minus `connection_t*`: cookie→filename via KAT-tested
+`cookie_filename`, atomic `rename` to `.used` (single-use), mtime-
+vs-expiry, `Name =` first-line validate. Lifts to `tincd::auth`
+in Phase 5; the daemon version takes `&mut Connection`.
+
+**Upstream bug `40719189`** (2026-03-30, broke `conf.d/`): `if(!dir
+&& ENOENT) return true; else return false;` falls to else when
+opendir succeeds. `tinc-conf` ports pre-regression behavior. Filed
+upstream.
+
+**`sign` doesn't respect `Ed25519PrivateKeyFile`** (deferred fix).
+fsck does. `private_key_file_config` test in `fsck.rs` is the
+reference for when sign gets fixed.
+
+### Phase 5b: RPC half — transport landed, kept C wire shape
+
+**Kept the C control protocol.** The pidfile is `0600` (`umask|077`
+before `fopen`, `pidfile.c:28`) — cookie is fs-perms auth, same
+model as ssh-agent. JSON would have cost `serde_json` and the
+`nc -U /var/run/tinc.socket` debuggability. (Full reasoning in
+`ctl.rs` doc; per-chunk findings in `cmd/dump.rs`, `cmd/info.rs`,
+`cmd/top.rs`, `cmd/stream.rs`, `cmd/edit.rs`, `cmd/network.rs`.)
+
+**C-is-WRONG findings** (the masked-by-well-behaved-sender class —
+"works because the other side is nice" is a coupling smell):
 
 | Location | The bug | Why masked | Our fix |
 |---|---|---|---|
 | `fd_device.c:73` | `CMSG_FIRSTHDR` returns NULL on empty control buffer; C dereferences `cmsgptr->cmsg_level` without checking | Java sender always sends a cmsg; in practice never empty | nix's `msg.cmsgs()` iterator: empty → empty iter → `None` from `find_map` → error, not segfault |
-| `fd_device.c:86` | C's `cmsg_len` check rejects multi-fd AFTER `recvmsg` returned — kernel already dup'd the fds into our process; rejecting now = leak | Java sender always sends exactly 1 fd | `let [fd] = fds[..] else { close all; Err }` — close before erroring |
-
-Both findings share a class: **masked-by-well-behaved-sender**. The
-Java side of the Android integration sends exactly one cmsg with
-exactly one fd. Neither bug fires in practice. But "works because
-the other side is nice" is a coupling smell. The `cmd_edit` finding
-was similar — `system()` quoting bug masked by nobody setting
-`EDITOR="vim -f"`. Masked bugs ARE bugs.
+| `fd_device.c:86` | `cmsg_len` check rejects multi-fd AFTER `recvmsg` returned — kernel already dup'd; rejecting now leaks | Java sender always sends 1 fd | `let [fd] = fds[..] else { close all; Err }` |
+| `tincctl.c:2458` `system()` | `"\"%s\" \"%s\""` quotes both — `EDITOR="vim -f"` won't tokenize, `$` in filename expands | nobody sets spacey EDITOR | `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` |
+| `conf.c` `40719189` | `conf.d/` early-return bug; opendir success falls through to `return false` | upstream regression 2026-03 | port pre-regression behavior |
 
 | Command | Blocked on |
 |---|---|
@@ -1272,32 +574,17 @@ was similar — `system()` quoting bug masked by nobody setting
 
 **True coverage** (`comm -23` against `tincctl.c:2995-3050` dispatch
 table, 39 entries): 34/39 ported. The 5 unported are 2 daemon-gated
-+ 1 daemon-only-RPC + 2 legacy-crypto. None reachable from Phase 5.
-The "33/36" count from the docs commit was wrong (miscounted the C
-table); the `comm` output is the ground truth.
++ 1 daemon-only-RPC + 2 legacy-crypto. None reachable before Phase 5.
 
-**Deliberate C-behavior-drops** (the table chunk 8 introduced):
+**Deliberate C-behavior-drops:**
 
 | # | Command | What the C does | What we do | Why dropped |
 |---|---|---|---|---|
 | 1 | `log`/`pcap` | `signal(SIGINT)` → `shutdown(fd)` → exit 0 | default SIGINT → exit 130 | daemon doesn't care; nobody scripts `tinc log`'s exit code | needs-scaffolding |
 | 2 | `network NAME` | mutate globals for readline loop | error "use `-n NAME`" | no readline loop → mutation goes to /dev/null | needs-scaffolding |
-| 3 | `IFF_ONE_QUEUE` | reads `IffOneQueue` config, sets flag in `TUNSETIFF` | doesn't | kernel commit `5d09710` (2.6.27, 2008) made it a no-op; flag consumed but ignored | dead-kernel-side |
+| 3 | `IFF_ONE_QUEUE` | reads `IffOneQueue` config, sets flag in `TUNSETIFF` | doesn't | kernel commit `5d09710` (2.6.27, 2008) made it a no-op | dead-kernel-side |
 
-Drops #1 and #2 are "the C feature works in a context we don't
-have." The SIGINT context is "a process that survives the signal";
-the switch context is "a process that survives the command." Same
-shape. Drop #3 is a third class: the C wrote a flag the kernel
-stopped reading 18 years ago. Nothing about OUR scaffolding;
-the other side dropped support. The class column distinguishes:
-
-| Class | What's missing |
-|---|---|
-| needs-scaffolding | a Rust subsystem (the readline loop) |
-| dead-kernel-side | nothing — the kernel made it a no-op |
-
-The right thing for #1/#2 is the simpler thing. The right thing
-for #3 is just nothing.
+**C source consumed:**
 
 | C source | Rust |
 |---|---|
@@ -1372,7 +659,7 @@ Aggressively shed scope:
 |---|---|
 | `gcrypt` backend | **Drop.** OpenSSL-via-FFI for legacy, RustCrypto for SPTPS. |
 | Solaris device | **Drop** unless someone asks. |
-| UML, VDE, multicast devices | Feature-gated, port only on demand. raw_socket landed at `5db2ea3e` (chunk 3 reversal of THIS row — it was small and the SUBSTITUTE shim class was worth discovering). |
+| UML, VDE, multicast devices | Feature-gated, port only on demand. raw_socket landed at `5db2ea3e`. |
 | `getopt.c`, `getopt1.c` (1k LOC) | **Delete.** Vendored GNU getopt. `clap` replaces it. |
 | `splay_tree.c`, `list.c` | **Delete.** std collections. |
 | `xalloc.h`, `dropin.c` | **Delete.** libc shims. |
@@ -1443,23 +730,7 @@ Aggressively shed scope:
    - **`OsRng` for real.** First time non-seeded entropy flows through key derivation.
    - **TCP record splitting.** `stream_large_payload` pushes 64KB; the kernel fragments it, the SPTPS stream framing reassembles. The Phase 2 byte-identity test pumps whole records and never sees a partial.
    - **The `SIGPIPE` footgun.** Found while writing the test, not by the test: dropping the read end of a child's stderr pipe means the child's next `eprintln!` is `EPIPE` → `SIGPIPE` → dead. Would have bitten the daemon's `script.c` port (it `popen()`s and reads; same shape). The test harness now holds stderr open for the child's lifetime and drains it on a thread.
-2. 🟡 **`tinc` CLI in Rust** — sliced. The original "talks to C daemon" framing was wrong; 30 commands split into a filesystem half (no daemon, ships now as 4a) and an RPC half (needs a daemon, waits for 5b). 4a's first command (`init`) **shipped**: `tinc -n NETNAME init NODENAME` produces a confbase the C `sptps_test` accepts.
-
-   `cross_init_key_loads_in_c` is the closure on the wire-compat question for Ship #2. It pulls together every layer: `OsRng` → `SigningKey::from_seed` → `write_pem` → `tinc-b64` → file → C `ecdsa_read_pem_private_key` → C `sptps_start` → C `chacha20-poly1305` decrypt → 256 bytes match. Any link wrong — key derivation, blob layout, PEM armor, LSB-first b64 — the C handshake fails. It doesn't.
-
-   **The control protocol stays.** The line-JSON replacement plan didn't survive reading `control.c`: the pidfile is `0600` not `0644` (`umask\|077` before `fopen`), so the cookie is fs-perms auth, same as ssh-agent. The `connection_t` overload is a *daemon-side* concern — our daemon uses a separate type, wire bytes unchanged. ~~The dump format is *private* (CLI and daemon ship together), so it's ours when our `Node` exists.~~ **Chunk 3 reversed this too**: dump format is pinned by `node.c:210` etc., readable today, and reading it gets a Rust-CLI↔C-daemon cross-impl seam for free. **5b shipped chunks 1–4** at 27 commands. **Five-for-five** on read-before-build reversing the plan: export-format / invite→5b→4a / control→JSON→keep-C / dump→defer→now / info→daemon-filters→client-filters.
-
-   The five reversals split into two failure modes. The first three
-   were "guessed at the abstraction layer, the C source is more
-   concrete": export ISN'T `KEY = VAL`, it's the host file verbatim;
-   pidfile ISN'T `0644`, `umask|077` makes it `0600`. The last two
-   were **"read the C source but stopped at the wrong file"**:
-   `info.c:53` does send the third arg, but `control.c:63` ignores
-   it. The send-side is necessary but not sufficient — reading half
-   of a request/response pair is reading zero of it. The chunk-3
-   estimate read `info.c` (correctly) and inferred `control.c`
-   (wrongly). Same shape as a wire protocol where you've only seen
-   one peer's traffic.
+2. ✅ **`tinc` CLI in Rust** — 34/39 commands. `cross_init_key_loads_in_c` is the wire-compat closure: `OsRng` → `from_seed` → `write_pem` → `tinc-b64` → C `ecdsa_read_pem_private_key` → C `sptps_start` → 256 bytes match. The 5 unported are 2 daemon-gated + 1 daemon-only-RPC + 2 legacy-RSA.
 3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in
 
