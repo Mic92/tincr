@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | 🟡 9/11 | `tinc-conf: read_server_config...` | `init` + 5 host-shipping + rotation + `sign`/`verify`. **fsck fully unblocked** — all four prereqs landed in `tinc-conf`/`tinc-tools`. 243 tests + 9 cross-impl. Found upstream bug `40719189` while porting (broke `conf.d/` two days ago); ported pre-regression behavior. |
+| **Ship #2 (4a) — `tinc` CLI** | ✅ 10/11 | `tinc-tools: fsck — keypair coherence...` | All filesystem commands landed. `fsck` four-check scan with `Finding` enum testable seam. 279 tests + 9 cross-impl. `edit` is 11/11 only if you squint — its `reload` half is 5b-coupled and the `$EDITOR` half alone isn't useful. **4a is done.** |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -465,7 +465,7 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `tincctl.c` `cmd_generate_ed25519_keys` | ✅ `cmd/genkey.rs` — `disable_old_keys` then append. Plan said "thin wrapper"; the wrapper is thin, the disable function is the substance |
 | `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
 | `tincctl.c` `cmd_sign`/`cmd_verify` | ✅ `cmd/sign.rs` — `golden_c_vector` is the proof: same key + same body + same `t` → same bytes |
-| `fsck.c` | `cmd/fsck.rs` — see validated structure below; was underestimated |
+| `fsck.c` | ✅ `cmd/fsck.rs` — `Finding` enum + `Report`. `clean_init_passes` is the contract test |
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
 
@@ -543,7 +543,7 @@ The validated plan was right: `disable_old_keys` is the substance, the wrapper i
 
 `TmpGuard` is hand-rolled, not `tempfile::NamedTempFile`. The latter picks `tmp.XXXXXX` in a system tempdir; C uses `<path>.tmp` in the *same dir as the target* — necessary for `rename(2)` to be atomic (same filesystem) and so a crash leaves an obviously-stale `ed25519_key.priv.tmp` not a mystery file in `/tmp`. The crate's `NamedTempFile::new_in()` would solve the same-dir part but not the predictable-name part. Hand-rolling is one struct + one Drop impl.
 
-`disable_old_keys` is now `pub` — `fsck` (still pending) uses it for the keypair-coherence-fix path.
+`disable_old_keys` is `pub` — `fsck`'s `fix_public_key` calls it before appending the PEM block.
 
 ##### ✅ `sign` / `verify` — landed (commit `tinc-tools: sign/verify — byte-identical...`)
 
@@ -561,35 +561,33 @@ The binding-via-reconstruction click: `verify` doesn't *check* a trailer against
 
 One deviation noted at point of decision: header parse is split-on-single-space (5 fields exact), not sscanf's zero-or-more-whitespace. C accepts `Signature=alice 1 sig` (sscanf format-string space matches zero chars). We don't. `sign` always emits canonical form; only hand-editing hits this.
 
-**One thing to revisit if `fsck` keypair-coherence reuses pubkey loading:** `load_host_pubkey` is currently `cmd/sign.rs`-private. fsck does the same dance (config-line then PEM-fallback, `keys.c:315-340`). When fsck lands, lift it to `cmd/mod.rs` rather than duplicating.
+~~`load_host_pubkey` lift-to-mod note~~: fsck landed with its own `load_ec_pubkey`. **Intentionally not unified** — the dances differ. sign's loader takes a `&Path` and fails the whole verify on bad b64; fsck's takes a `&Config` (already merged), respects `Ed25519PublicKeyFile`, and treats bad b64 as `None` (falls to `NoPublicKey` finding, not error). The shared kernel (`b64::decode` + `keypair::read_public`) is already shared; the wrapping policy is different per consumer. Not a duplication.
 
-##### `fsck` — was 400 LOC; **is 679, and structurally heavier than guessed**
+##### ✅ `fsck` — landed (commit `tinc-tools: fsck — keypair coherence...`)
 
-**The plan undercounted by a wide margin.** Real shape:
+**~2250 LOC** (1100 logic, 800 test, 350 doc). Estimate was ~400 LOC logic; actual 1100. The 2.7× ratio is the `Finding` enum + `Display` impl that the C doesn't have — C interleaves `fprintf` with the checks, we separate them so tests `matches!()` on variants instead of parsing stderr. Subtract that scaffold (~300 LOC enum + Display + Severity) and the check logic itself is ~800. The 800 LOC test ratio held the calibration from `vars.rs`.
 
-- **679 LOC**, ~7 of which are `DISABLE_LEGACY` so call it ~500 effective
-- Not just `if(!x) eprintln!`. Four distinct check categories with their own logic:
-  1. **Keypair coherence** (`test_ec_keypair`, `keys.c:380`): derive pubkey from private, compare to the `Ed25519PublicKey =` in `hosts/NAME`. If mismatch, *with `--force`*, **rewrite the host file** — `disable_old_keys` then append correct pubkey. fsck *fixes*, not just diagnoses. (`ask_fix_ec_public_key`, `keys.c:269`.)
-  2. **Per-variable validity** (`check_conffile`, `keys.c:122`): walks the config, for each entry calls `tinc_conf::lookup_var` (✅ landed), warns if a server-only var appears in a host file or vice-versa, warns on obsolete, **counts duplicates** and warns when a non-`MULTIPLE` var appears twice (the only place that surfaces silent-first-wins). Straight loop now: `for entry in cfg { match lookup_var(&entry.variable) { ... } }`.
-  3. **Script executability** (`check_script_confdir` + `check_script_hostdir`, `keys.c:448-528`): scan confbase and `hosts/` for `tinc-up`, `tinc-down`, `host-up`, `host-down`, `subnet-up`, `subnet-down`, `<hostname>-up`, `<hostname>-down`; check `access(R_OK|X_OK)`; with `--force`, `chmod 0755`.
-  4. **File modes** (`check_key_file_mode`, `keys.c:205`): warn if private key isn't `0600`.
+The testable-seam architecture decision determined everything else. `Finding` is **not** `PartialEq` — `PathBuf` equality is fragile (absolute/relative, trailing slash). Tests use `matches!(f, Finding::X { .. })` + `path.ends_with(...)`. Slightly more verbose than `assert_eq!(findings, vec![...])`; vastly less flaky. `clean_init_passes` is the contract: init and fsck must agree on "clean."
 
-**`read_server_config` landed** (commit `tinc-conf: read_server_config...`). Found while porting: **upstream commit `40719189` (2026-03-30, "Fix warnings from clang-tidy-23") broke `conf.d/` entirely** — `if(!dir && ENOENT) return true; else return false;` falls to else when `opendir` succeeds, returning false before the `readdir` loop. Any HEAD `tincd` with a `conf.d/` directory fails to start. We port the pre-`40719189` behavior (2017 logic, 9 years stable). `server_confd_head_bug_not_ported` is the regression test. Second breakage same commit: `conf.d` as a regular file (`echo > conf.d` accident) used to soft-skip, now fails (`ENOTDIR ≠ ENOENT`). Also pinned. **Upstream patch is a one-liner; not on critical path but worth filing.**
+`ask_fix()` collapsed to `force`. C has a `tty` branch reading `y/n` from stdin (`fsck.c:38-65`); under `cargo test` stdin is a pipe and the C avoids blocking via `tty = isatty(0) && isatty(1)`, false under test. Same observable behavior, minus the prompt code. Same deviation as init/genkey.
 
-`read_host_config` intentionally not a function — it's `cfg.merge(parse_file(hosts/NAME)?)`, two lines, a wrapper would obscure that the host file is just another file. `cmdline_conf` merge skipped: populated only by `tincd -o`, fsck sees an empty list (rg confirms `tincctl.c` never touches it).
+**Prereqs landed in `tinc-conf`**: `variables[]` table + `read_server_config`. The latter found upstream bug **`40719189`** (2026-03-30, broke `conf.d/` — `if(!dir && ENOENT) return true; else return false;` falls to else when opendir succeeds). `confd_checked` test in fsck carries the fix forward: fsck on a `conf.d/` config actually checks `conf.d/`. HEAD C never reaches that file. **Upstream patch is a one-liner; worth filing.**
 
-Three intentional tightenings, each a one-line allow/comment at the line: `conf.d` entries sorted before merge (readdir order is fs-dependent and lookup-invisible anyway, sorting just makes `entries()` dump deterministic), `read_dir` errors propagate (C's `readdir` returns NULL on both error and EOF, fsck would read transient I/O errors as "no findings"), `.conf` suffix case-sensitive (clippy suggested `eq_ignore_ascii_case`; that diverges from `strcmp`).
+Three fsck-level tightenings (each with C-behavior comment at the line):
 
-Remaining fsck cost: **~400 LOC**, all in `tinc-tools`. Prereq estimate was ~150 LOC across `tinc-conf`; actual ~840 (table 504 + wrapper 339), ~half doc/tests.
+- **Unfixed `KeyMismatch` fails fsck.** C `ask_fix_ec_public_key` returns `true` when `ask_fix` returns `false` (`fsck.c:271`) — "user declined = success." A mismatch you didn't fix is a failed fsck. The C "decline = success" is a bug we don't carry.
+- Script scan: confbase fail doesn't skip `hosts/`. C `&&`-short-circuits (`fsck.c:626`); we `&` for more diagnostics on first run. Same intent as the C's own `success & check_scripts_and_configs()` (bitwise, `fsck.c:672`).
+- `verbose_bit_mask` allow on `mode & 0o077`. clippy suggests `trailing_zeros() >= 6`; obfuscates a Unix permission-bit mask. The C is `& 077`; the port is `& 0o077`.
 
-| Command | Blocked on | Validated estimate |
-|---|---|---|
-| `fsck` | **nothing** — ~~`disable_old_keys`~~ ~~pubkey loader~~ ~~`variables[]`~~ ~~`read_server_config`~~ all landed | **medium (~400 LOC)** |
-| `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
+Two dead-C-code drops noted at point of decision: `ecdsa_get_base64_public_key` cannot fail (`xmalloc` aborts on OOM, `b64encode_tinc` has no error path) — `fsck.c:384` `if(!b64_priv_pub)` is unreachable. And `fsck.c:511-518` strips the `-up` suffix into `fname` then `snprintf`s over `fname` before reading it — copy-paste from the confbase scan.
 
-**Next:** `fsck`. `edit` defers to 5b.
+**One finding to act on later: `sign` doesn't respect `Ed25519PrivateKeyFile`.** fsck does — it has the merged config tree and looks up the key. sign reads `paths.ed25519_private()` directly. A user with a relocated key (paranoid hardening, key on a different filesystem, whatever) can `fsck` but can't `sign`. genkey is correct (it *creates* the default-location key). Not fixing sign here; `private_key_file_config` in `fsck.rs` pins the right behavior so when sign is fixed, that's the reference test. The fix is small (read tinc.conf, lookup, fallback) but sign currently doesn't have a config-read at all.
 
-The table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
+fsck `--force` writes the pubkey as a **PEM block**, not `Ed25519PublicKey =` config-line. C does the same (`ecdsa_write_pem_public_key`, `fsck.c:286`). Both forms valid (the loader checks config-line first, PEM second). The visual distinction is *useful*: PEM block in `hosts/NAME` means "fsck repaired this", config-line means "init/genkey wrote this." Preserved deliberately.
+
+`edit` defers to 5b — its `reload` half needs a daemon socket; `$EDITOR` spawn alone isn't useful. **4a is done.**
+
+The `variables[]` table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
 
 ### Phase 5b: RPC half + new control protocol
 
