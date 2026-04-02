@@ -438,6 +438,168 @@ impl Config {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// read_server_config — conf.c:388-433
+//
+// ## What this is, what it isn't
+//
+// The C does three things in sequence:
+//
+//   1. read_config_options(tree, NULL)   ─ walk cmdline_conf, merge
+//                                          dotless entries (-o Port=655)
+//   2. read tinc.conf                    ─ hard fail if absent
+//   3. opendir conf.d, readdir *.conf    ─ soft skip if dir absent,
+//                                          hard fail if any file fails
+//
+// We port (2) and (3). (1) is a no-op for both fsck consumers and
+// (eventually) the daemon's first call — cmdline_conf is populated
+// only by `tincd -o` parsing in tincd.c:main(). The fsck binary
+// (linked into tincctl, not tincd) sees an empty list. Checked: rg
+// for cmdline_conf shows tincd.c, conf.c, conf.h — no tincctl.c.
+//
+// When the daemon lands and needs the cmdline merge, the calling
+// pattern is `cfg.merge(cmdline_entries)` *before* calling this. The
+// caller owns the cmdline list (it's argv-derived); this function
+// doesn't reach for a global.
+//
+// ## The 40719189 mishap
+//
+// HEAD's conf.c:405-410 reads:
+//
+//     if(!dir && errno == ENOENT) {
+//         return true;
+//     } else {
+//         logger(..., "Failed to read `%s'...", dname);
+//         return false;
+//     }
+//
+// When opendir SUCCEEDS, dir is non-NULL, !dir is false, the if
+// fails, control falls to else, function returns false. The readdir
+// loop at line 412 is unreachable. conf.d/ support has been broken
+// since 2026-03-30 (commit 40719189, "Fix warnings from
+// clang-tidy-23" — clang-tidy presumably flagged the old
+// unset-errno-on-success path; the cure introduced this).
+//
+// We port the PRE-40719189 behavior (the 2017 logic, 9 years stable):
+// dir absent for any reason → soft skip, dir present → read it.
+// That's what every released tinc has done; that's what users have.
+// The Rust IS the bugfix — we don't carry the regression.
+//
+// ## conf.d ordering
+//
+// readdir() returns entries in directory order (filesystem-
+// dependent: ext4 is hash order, xfs is creation order). The C
+// merges in readdir order. We sort. Rationale:
+//
+//   - The 4-tuple compare already sorts by (var, cmdline, line,
+//     file), so two conf.d files defining the same key on different
+//     lines are ordered by LINE first, not file. Merge order is
+//     invisible there.
+//   - Same key, same line number, different file: file name
+//     tiebreaks. Merge order STILL invisible — the sort is total.
+//   - The only place merge order leaks is Config::entries() (the
+//     full dump). That's debug output.
+//
+// Sorting costs nothing (handful of files) and makes the dump
+// deterministic across filesystems. The pre-40719189 C didn't sort
+// because it didn't need to; we don't NEED to either, but readdir-
+// order tests are flaky and we'd rather not.
+//
+// ## Why this lives in parse.rs not a new module
+//
+// It's the third caller of parse_file (after tinc-tools' get_my_name
+// and load_host_pubkey). parse_file + merge are this module's bread
+// and butter; this is just a directory loop on top. ~40 LOC of code,
+// ~20 of it the conf.d glob.
+// ────────────────────────────────────────────────────────────────────
+
+/// `read_server_config` minus the cmdline merge.
+///
+/// Reads `<confbase>/tinc.conf`, then every `<confbase>/conf.d/*.conf`
+/// (sorted by name), merging into a fresh [`Config`]. The cmdline
+/// merge (`-o Port=655`) is NOT done here — caller owns that list and
+/// can `cfg.merge(it)` separately. fsck doesn't have one.
+///
+/// `read_host_config` is intentionally NOT a function. It's two lines:
+/// `cfg.merge(parse_file(confbase.join("hosts").join(name))?)`. Adding
+/// a wrapper would obscure that the host file is just another file.
+///
+/// # Errors
+///
+/// - `tinc.conf` absent or unparseable → error. Hard fail in C
+///   (`conf.c:395`); a daemon without a tinc.conf has no Name.
+/// - `conf.d/` absent → fine. Expected case (most installs don't
+///   use it). Pre-40719189 C: any opendir failure is silently OK.
+/// - `conf.d/` present but `read_dir` fails after open → error. C
+///   wouldn't notice (`readdir()` returns NULL on error AND eof; the C
+///   doesn't check errno after the loop). We're stricter — a
+///   transient I/O error during fsck shouldn't read as "no findings."
+/// - Any `*.conf` file in `conf.d/` unparseable → error. C: hard fail
+///   (`conf.c:425`).
+pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadError> {
+    let confbase = confbase.as_ref();
+    let mut cfg = Config::new();
+
+    // (2) tinc.conf. Hard fail. parse_file already wraps the io error
+    // with the path, so the error message says which file.
+    cfg.merge(parse_file(confbase.join("tinc.conf"))?);
+
+    // (3) conf.d/. Soft skip on absent dir.
+    //
+    // C condition is `if(dir)` — ANY opendir failure (ENOENT, EACCES,
+    // ENOTDIR) is a silent skip in the pre-40719189 code. We match
+    // that. If conf.d is a regular file or you can't read it, the
+    // daemon starts anyway with just tinc.conf. Surprising? A bit. But
+    // tightening it would make a Rust daemon refuse to start where a
+    // 1.0.x daemon ran fine, on a config that's been working for years.
+    // fsck can warn separately if it wants.
+    let conf_d = confbase.join("conf.d");
+    let Ok(rd) = std::fs::read_dir(&conf_d) else {
+        return Ok(cfg);
+    };
+
+    // Collect-then-sort. See block comment above for why we sort and
+    // the C doesn't (short version: merge order is invisible to lookup
+    // because the 4-tuple compare is total; sorting just makes the
+    // entries() dump deterministic).
+    //
+    // The filter: C does `l > 5 && !strcmp(".conf", name+l-5)`. The
+    // strict `> 5` rejects a bare ".conf" (5 chars exactly) — you
+    // need at least one character before the extension. ends_with
+    // alone would accept it. The non-UTF-8 check is a side effect of
+    // working in &str-land: a filename with non-UTF-8 bytes can't
+    // pass strcmp(".conf", ...) in C either (the bytes wouldn't
+    // match), so the behavior aligns.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for ent in rd {
+        // C: readdir error is invisible (NULL means error OR eof).
+        // We: surface it. fsck reading a half-directory and saying
+        // "all good" is the failure mode this prevents.
+        let ent = ent.map_err(|err| ReadError::Io {
+            path: conf_d.clone(),
+            err,
+        })?;
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // C: `!strcmp(".conf", name+l-5)` — strcmp is CASE-SENSITIVE.
+        // `foo.CONF` is rejected by the C; we match. clippy's
+        // "use Path::extension + eq_ignore_ascii_case" suggestion
+        // would change behavior. Bytes-suffix is the port-faithful
+        // form (and trivially also rejects non-ASCII look-alikes).
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        if name.len() > 5 && name.ends_with(".conf") {
+            files.push(ent.path());
+        }
+    }
+    files.sort();
+
+    for f in files {
+        cfg.merge(parse_file(f)?);
+    }
+
+    Ok(cfg)
+}
+
 /// `config_compare`. See [`Config`] doc for the 4-tuple breakdown.
 fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
     a.key_folded
@@ -736,5 +898,182 @@ more garbage
         let entries = parse_reader(input.as_bytes(), Path::new("f")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].variable, "Port");
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // read_server_config — directory tests need a real filesystem.
+    // tempdir layouts are cheap; each test builds the exact tree it
+    // checks. No fixture sharing — hermetic per-test.
+    // ────────────────────────────────────────────────────────────────
+
+    /// Unique tempdir, removed on drop. Same pattern as
+    /// `tinc-tools::cmd::genkey::TmpGuard`, smaller.
+    struct Td(PathBuf);
+    impl Td {
+        fn new(tag: &str) -> Self {
+            // Unique by test name + thread id. Tests run parallel by
+            // default; a fixed name races.
+            let p = std::env::temp_dir()
+                .join(format!("tinc_conf_{tag}_{:?}", std::thread::current().id()));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn join(&self, rel: &str) -> PathBuf {
+            self.0.join(rel)
+        }
+    }
+    impl Drop for Td {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write(path: impl AsRef<Path>, content: &str) {
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// The common case: just tinc.conf, no conf.d/. Matches every
+    /// `tinc init`-produced layout (init doesn't make conf.d/).
+    #[test]
+    fn server_no_confd() {
+        let td = Td::new("no_confd");
+        write(td.join("tinc.conf"), "Name = alice\nPort = 655\n");
+
+        let cfg = read_server_config(&td.0).unwrap();
+        assert_eq!(cfg.lookup("Name").next().unwrap().value, "alice");
+        assert_eq!(cfg.lookup("Port").next().unwrap().value, "655");
+        assert_eq!(cfg.entries().len(), 2);
+    }
+
+    /// tinc.conf absent → hard fail. C logs the path + strerror,
+    /// daemon exits.
+    #[test]
+    fn server_no_tincconf() {
+        let td = Td::new("no_tc");
+        // Empty dir, no tinc.conf.
+        let err = read_server_config(&td.0).unwrap_err();
+        // ReadError::Io carries the path. Check it's the right file.
+        let ReadError::Io { path, .. } = err else {
+            panic!("expected Io error")
+        };
+        assert!(path.ends_with("tinc.conf"));
+    }
+
+    /// conf.d/ with two files. Both merged. Multi-value key spans
+    /// tinc.conf and conf.d — lookup iterates all three.
+    #[test]
+    fn server_confd_merged() {
+        let td = Td::new("merged");
+        write(td.join("tinc.conf"), "Name = alice\nConnectTo = bob\n");
+        std::fs::create_dir(td.join("conf.d")).unwrap();
+        write(td.join("conf.d/10-one.conf"), "ConnectTo = carol\n");
+        write(td.join("conf.d/20-two.conf"), "ConnectTo = dave\n");
+
+        let cfg = read_server_config(&td.0).unwrap();
+        let connects: Vec<_> = cfg.lookup("ConnectTo").map(|e| e.value.as_str()).collect();
+        // Three values total. Order: tinc.conf:2 (bob), then conf.d
+        // files at line 1 each. Per the 4-tuple, line-before-file:
+        // both conf.d entries are line 1, so file name tiebreaks →
+        // 10-one before 20-two. THEN tinc.conf line 2 (higher line).
+        //
+        // Wait — line 1 < line 2, so conf.d entries sort BEFORE bob?
+        // Yes. The compare is line-then-file, not file-then-line.
+        // tinc.conf line 2 loses to conf.d/*.conf line 1. This is the
+        // "conf.d/a.conf:5 sorts after conf.d/b.conf:3" finding from
+        // the original Phase 1 work, and it applies cross-file too.
+        //
+        // Is this what users expect? Probably not. Is it what the C
+        // does? Yes (config_compare, conf.c:48). The fix is "put
+        // ConnectTo on line 1 of tinc.conf if you care." We port the
+        // behavior; fsck can warn about this someday.
+        assert_eq!(connects, ["carol", "dave", "bob"]);
+    }
+
+    /// Non-.conf files in conf.d/ are ignored. Including a sneaky
+    /// `.conf.bak` (suffix doesn't match) and bare `.conf` (len 5,
+    /// fails the `> 5` check).
+    #[test]
+    fn server_confd_filter() {
+        let td = Td::new("filter");
+        write(td.join("tinc.conf"), "Name = alice\n");
+        std::fs::create_dir(td.join("conf.d")).unwrap();
+        write(td.join("conf.d/real.conf"), "Port = 655\n");
+        write(td.join("conf.d/backup.conf.bak"), "Port = 999\n");
+        write(td.join("conf.d/README"), "Port = 888\n");
+        // The `> 5` boundary: a file literally named ".conf".
+        write(td.join("conf.d/.conf"), "Port = 777\n");
+
+        let cfg = read_server_config(&td.0).unwrap();
+        // Only real.conf's Port. The other three are filtered.
+        let ports: Vec<_> = cfg.lookup("Port").map(|e| e.value.as_str()).collect();
+        assert_eq!(ports, ["655"]);
+    }
+
+    /// Empty conf.d/. Directory exists but contains nothing. Same as
+    /// absent for our purposes — no files to merge, no error.
+    #[test]
+    fn server_confd_empty() {
+        let td = Td::new("empty");
+        write(td.join("tinc.conf"), "Name = alice\n");
+        std::fs::create_dir(td.join("conf.d")).unwrap();
+
+        let cfg = read_server_config(&td.0).unwrap();
+        assert_eq!(cfg.entries().len(), 1);
+    }
+
+    /// One bad file in conf.d/ fails the whole read. C: hard fail.
+    /// The good file merged before the bad one is lost — we discard
+    /// partial results (see [`parse_file`] docs).
+    #[test]
+    fn server_confd_one_bad() {
+        let td = Td::new("one_bad");
+        write(td.join("tinc.conf"), "Name = alice\n");
+        std::fs::create_dir(td.join("conf.d")).unwrap();
+        write(td.join("conf.d/10-good.conf"), "Port = 655\n");
+        // Missing value — parse error.
+        write(td.join("conf.d/20-bad.conf"), "Port\n");
+
+        // Sorted order: 10-good reads first (succeeds, merges), then
+        // 20-bad fails. Result is Err; the merged Port is gone.
+        let err = read_server_config(&td.0).unwrap_err();
+        assert!(matches!(err, ReadError::Parse(_)));
+    }
+
+    /// **The 40719189 regression test.** conf.d/ exists AND has a
+    /// file — if we'd ported HEAD's C, this would fail (the C
+    /// returns false the moment opendir succeeds). It passing proves
+    /// we ported the pre-40719189 (working) behavior.
+    ///
+    /// This is the same setup as `server_confd_merged` but reduced to
+    /// the minimum that demonstrates the bug. Kept separate so the
+    /// test name is the documentation.
+    #[test]
+    fn server_confd_head_bug_not_ported() {
+        let td = Td::new("head_bug");
+        write(td.join("tinc.conf"), "Name = alice\n");
+        std::fs::create_dir(td.join("conf.d")).unwrap();
+        write(td.join("conf.d/a.conf"), "Port = 655\n");
+
+        let cfg = read_server_config(&td.0).unwrap();
+        // The kill shot: HEAD C would have returned false before the
+        // readdir loop, never reading a.conf. We did read it.
+        assert_eq!(cfg.lookup("Port").next().unwrap().value, "655");
+    }
+
+    /// conf.d is a regular file, not a directory. Pre-40719189 C:
+    /// opendir returns NULL with ENOTDIR, `if(dir)` fails, silent
+    /// skip. We match. (HEAD C: !dir is true, errno is ENOTDIR not
+    /// ENOENT, falls to else, return false. Another way 40719189
+    /// broke things.)
+    #[test]
+    fn server_confd_is_file() {
+        let td = Td::new("is_file");
+        write(td.join("tinc.conf"), "Name = alice\n");
+        // conf.d as a file. Weird but not malicious — someone
+        // ran `echo > conf.d` by accident.
+        write(td.join("conf.d"), "this is not a directory\n");
+
+        let cfg = read_server_config(&td.0).unwrap();
+        assert_eq!(cfg.entries().len(), 1); // just Name
     }
 }
