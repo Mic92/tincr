@@ -437,14 +437,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn list_skip_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
         // Root reads anything. Skip. (`nix::unistd::geteuid` is
         // always-on, no feature gate needed.)
         if nix::unistd::geteuid().is_root() {
             eprintln!("(skipping list_skip_unreadable: running as root)");
             return;
         }
-
-        use std::os::unix::fs::PermissionsExt;
 
         let d = tmpdir("unreadable");
         mknet(d.path(), "ok");
