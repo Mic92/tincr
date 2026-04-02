@@ -74,28 +74,13 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode};
 
-// ═══════════════════════════════════════════════════════════════════
-// Ethernet constants — `ethernet.h`
-// ═══════════════════════════════════════════════════════════════════
-
-/// `ETH_HLEN` — `ethernet.h:31`. dhost(6) + shost(6) + type(2).
-/// The +14 read offset. gcc-verified vs `<linux/if_ether.h>`.
-const ETH_HLEN: usize = 14;
-
-/// `ETHER_TYPE_LEN` — `ethernet.h:35`. The big-endian u16 at
-/// offset 12. `ETH_HLEN - ETHER_TYPE_LEN = 12` is where we write
-/// the synthesized ethertype.
-const ETHER_TYPE_LEN: usize = 2;
-
-/// `ETH_P_IP` — `ethernet.h:44`. IPv4's IANA-registered ethertype.
-/// Network byte order on the wire; we hold host order and `to_
-/// be_bytes()` at write time. gcc-verified.
-const ETH_P_IP: u16 = 0x0800;
-
-/// `ETH_P_IPV6` — `ethernet.h:52`. IPv6's ethertype. gcc-verified.
-const ETH_P_IPV6: u16 = 0x86DD;
+// (Ethernet constants hoisted to `crate::ether` when BSD became
+// the second consumer. See `ether.rs` doc for the factoring
+// rationale: RFC constants don't vary; the `cfg`-boundary rule
+// doesn't apply because there's no `cfg`.)
 
 // ═══════════════════════════════════════════════════════════════════
 // FdSource — the union type the C string dispatch implies
@@ -544,69 +529,9 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// from_ip_nibble — the testable seam for ethertype synthesis
-// ═══════════════════════════════════════════════════════════════════
-
-/// `get_ip_ethertype` (`fd_device.c:192-202`). Read the IP version
-/// nibble, return the ethertype.
-///
-/// IP packets (both v4 and v6) start with a version nibble in the
-/// high 4 bits of byte 0:
-///
-/// ```text
-///   IPv4:  byte 0 = 0x4? (version=4, IHL in low nibble)
-///   IPv6:  byte 0 = 0x6? (version=6, traffic class high nibble in low)
-/// ```
-///
-/// `byte0 >> 4` extracts the version. C `:193`: `DATA(packet)
-/// [ETH_HLEN] >> 4` — `ETH_HLEN` because the IP packet starts
-/// AFTER the (synthetic, about-to-be-written) ethernet header.
-///
-/// `None` for unknown version. C returns `ETH_P_MAX` (0xFFFF) as
-/// a sentinel (`:201`); the caller checks for it and errors
-/// (`:221-224`). We use `Option`. The `None` case is "Java side
-/// sent garbage" — shouldn't happen, but defensive.
-///
-/// PURE FUNCTION. The testable seam. `linux.rs` couldn't test the
-/// offset trick without the kernel driver (the kernel WRITES `tun_
-/// pi`, can't fake it). THIS we can test: feed an IPv4 byte, get
-/// `ETH_P_IP`. The pipe-based integration test below feeds whole
-/// packets.
-#[must_use]
-fn from_ip_nibble(ip0: u8) -> Option<u16> {
-    match ip0 >> 4 {
-        4 => Some(ETH_P_IP),
-        6 => Some(ETH_P_IPV6),
-        _ => None,
-    }
-}
-
-/// `set_etherheader` (`fd_device.c:204-208`). Write the synthetic
-/// ethernet header: zero MACs, set ethertype.
-///
-/// C does it in two steps: `memset(DATA, 0, ETH_HLEN - ETHER_
-/// TYPE_LEN)` then byte-by-byte ethertype write. We do the same.
-/// The memset bound is 12 (= 14 - 2): zero dhost(6) + shost(6),
-/// don't touch ethertype slot, then write it.
-///
-/// `to_be_bytes()`: ethertype on the wire is big-endian (network
-/// byte order). C `:207-208`: `(ethertype >> 8) & 0xFF` then
-/// `ethertype & 0xFF` — manual big-endian split. We use the std
-/// fn. Same bytes.
-///
-/// `buf[..ETH_HLEN]` slice: caller guarantees at least 14 bytes
-/// (the read path always has MTU bytes; debug_assert in `read()`
-/// covers).
-fn set_etherheader(buf: &mut [u8], ethertype: u16) {
-    // Zero MACs. 12 bytes. NOT 14 — leave ethertype slot alone
-    // (we're about to write it; zeroing first would just be
-    // wasted work).
-    buf[..ETH_HLEN - ETHER_TYPE_LEN].fill(0);
-    // Ethertype, big-endian. Bytes 12-13.
-    buf[ETH_HLEN - ETHER_TYPE_LEN..ETH_HLEN].copy_from_slice(&ethertype.to_be_bytes());
-}
-
+// (`from_ip_nibble` + `set_etherheader` hoisted to `crate::ether`
+// when BSD became the second consumer. The fns themselves are
+// pure; the move preserves byte-identical behavior.)
 // ═══════════════════════════════════════════════════════════════════
 // Device impl — the +14 read/write
 // ═══════════════════════════════════════════════════════════════════
@@ -783,121 +708,9 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    // ─────────────────────────────────────────────────────────────────
-    // Ethernet constants — sed-verified
-    // ─────────────────────────────────────────────────────────────────
-
-    /// `ETH_HLEN = 14` per `ethernet.h:31` AND `<linux/if_ether.
-    /// h>`. The +14 read offset. gcc-verified: `printf("%d", ETH_
-    /// HLEN)` → `14`.
-    #[test]
-    fn eth_hlen_14() {
-        assert_eq!(ETH_HLEN, 14);
-        // The arithmetic: dhost(6) + shost(6) + type(2).
-        assert_eq!(ETH_HLEN, 6 + 6 + 2);
-    }
-
-    /// `ETHER_TYPE_LEN = 2`. `ETH_HLEN - ETHER_TYPE_LEN = 12` is
-    /// where ethertype goes.
-    #[test]
-    fn ethertype_at_12() {
-        assert_eq!(ETHER_TYPE_LEN, 2);
-        assert_eq!(ETH_HLEN - ETHER_TYPE_LEN, 12);
-    }
-
-    /// IANA ethertype registrations. Kernel ABI; can't change.
-    /// gcc-verified vs `<linux/if_ether.h>`.
-    #[test]
-    fn ethertypes_iana() {
-        assert_eq!(ETH_P_IP, 0x0800);
-        assert_eq!(ETH_P_IPV6, 0x86DD);
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // from_ip_nibble — the testable seam
-    // ─────────────────────────────────────────────────────────────────
-
-    /// IPv4 byte 0: version=4 in high nibble, IHL in low.
-    /// `0x45` is the canonical IPv4 first byte (IHL=5 words =
-    /// 20 bytes, no options). `0x4F` is max IHL (60 bytes).
-    /// Both → `ETH_P_IP`.
-    #[test]
-    fn nibble_ipv4() {
-        assert_eq!(from_ip_nibble(0x45), Some(ETH_P_IP));
-        assert_eq!(from_ip_nibble(0x40), Some(ETH_P_IP));
-        assert_eq!(from_ip_nibble(0x4F), Some(ETH_P_IP));
-    }
-
-    /// IPv6 byte 0: version=6 in high nibble, traffic class
-    /// high nibble in low. `0x60` is canonical (default traffic
-    /// class).
-    #[test]
-    fn nibble_ipv6() {
-        assert_eq!(from_ip_nibble(0x60), Some(ETH_P_IPV6));
-        assert_eq!(from_ip_nibble(0x6F), Some(ETH_P_IPV6));
-    }
-
-    /// Unknown versions → None. The C returns `ETH_P_MAX`
-    /// sentinel; we use `Option`.
-    ///
-    /// IP version 5 was ST-II (RFC 1819, experimental, dead).
-    /// Version 7-15 are unassigned. Version 0-3 are pre-IPv4
-    /// historical. The Java side never sends these; the test
-    /// is for the error path.
-    #[test]
-    fn nibble_unknown() {
-        assert_eq!(from_ip_nibble(0x00), None);
-        assert_eq!(from_ip_nibble(0x50), None); // ST-II
-        assert_eq!(from_ip_nibble(0x70), None);
-        assert_eq!(from_ip_nibble(0xFF), None);
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // set_etherheader — pure fn
-    // ─────────────────────────────────────────────────────────────────
-
-    /// Zero MACs, write ethertype big-endian. C `:204-208`.
-    #[test]
-    fn set_etherheader_ipv4() {
-        // Pre-fill with garbage to verify the zero.
-        let mut buf = [0xAAu8; 20];
-        set_etherheader(&mut buf, ETH_P_IP);
-        // dhost: zeroed.
-        assert_eq!(&buf[0..6], &[0u8; 6]);
-        // shost: zeroed.
-        assert_eq!(&buf[6..12], &[0u8; 6]);
-        // ethertype: 0x0800 big-endian → [0x08, 0x00].
-        assert_eq!(&buf[12..14], &[0x08, 0x00]);
-        // Past 14: untouched.
-        assert_eq!(buf[14], 0xAA);
-    }
-
-    /// Same for IPv6. 0x86DD → [0x86, 0xDD].
-    #[test]
-    fn set_etherheader_ipv6() {
-        let mut buf = [0xBBu8; 20];
-        set_etherheader(&mut buf, ETH_P_IPV6);
-        assert_eq!(&buf[0..12], &[0u8; 12]);
-        assert_eq!(&buf[12..14], &[0x86, 0xDD]);
-        assert_eq!(buf[14], 0xBB);
-    }
-
-    /// The big-endian split matches the C's manual `>> 8` /
-    /// `& 0xFF`. C `:207-208`.
-    #[test]
-    fn set_etherheader_be_matches_c_manual_split() {
-        // What the C does:
-        //   buf[12] = (ethertype >> 8) & 0xFF;
-        //   buf[13] = ethertype & 0xFF;
-        // What we do: to_be_bytes().
-        // For 0x86DD: high byte 0x86, low byte 0xDD.
-        let et = ETH_P_IPV6;
-        let c_high = ((et >> 8) & 0xFF) as u8;
-        let c_low = (et & 0xFF) as u8;
-        let rust = et.to_be_bytes();
-        assert_eq!([c_high, c_low], rust);
-    }
-
+    // (Ethernet constant tests + nibble tests + set_etherheader
+    // tests hoisted to `crate::ether::tests` with their subjects.
+    // Same assertions; the diff is location.)
     // ─────────────────────────────────────────────────────────────────
     // FdSource::Inherited — the negative-fd check
     // ─────────────────────────────────────────────────────────────────

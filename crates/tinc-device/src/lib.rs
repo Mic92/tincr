@@ -135,6 +135,19 @@ pub const MTU: usize = 1518;
 /// `MTU` for the jumbo build. The daemon picks; we accept either.
 pub const MTU_JUMBO: usize = 9018;
 
+// ═══════════════════════════════════════════════════════════════════
+// ether — RFC 894 / IANA constants + header synthesis
+// ═══════════════════════════════════════════════════════════════════
+//
+// NOT `cfg`-gated: these are wire constants (IEEE 802.3, IANA
+// EtherType registry), not platform ABI. The same `0x0800` on
+// Linux, FreeBSD, macOS, your toaster.
+//
+// Hoisted from `fd.rs` when BSD became the second consumer.
+// `pub(crate)`: backends synthesize headers; the daemon doesn't.
+
+mod ether;
+
 /// L2 vs L3 device. C `device_type_t` (`linux/device.c:33-36`).
 ///
 /// TUN: kernel hands us IP packets prefixed with `tun_pi`. We
