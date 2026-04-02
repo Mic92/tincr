@@ -26,7 +26,8 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump (cookie/chunks/finalize/pubkey/ack) → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*` plumbing; lifts to daemon unchanged. 340 tests + 9 cross-impl. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
+| **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*`; lifts to daemon unchanged. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
+| **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — the line-JSON-replacement plan didn't survive reading `control.c`; see 5b section for why. `ctl_full_connect_against_fake_daemon`: real `UnixListener` in tempdir, real pidfile pointing at our test pid, binary connects through real syscalls. 376 tests + 9 cross-impl, 20 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -248,7 +249,7 @@ The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` ty
 | `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
 | `conf.c` `read_server_config` (`conf.d/` scan) | `parse::read_server_config` | ✅ cmdline merge skipped (daemon-only, fsck sees empty list). Ports pre-`40719189` behavior — see fsck note |
 | `tincctl.c` `variables[]` (74 entries) | `vars::{VARS, VarFlags, lookup}` | ✅ Order preserved incl. alpha-break; sed-diff verified. +3 invariants the C never asserts |
-| `names.c` | — | ✅ `tinc-tools::names` — first consumer was `tinc init`, not the daemon. Subset: `confbase`/`confdir` only; `pidfilename`/`unixsocketname` come with 5b. |
+| `names.c` | — | ✅ `tinc-tools::names` — `confbase`/`confdir` (4a) + `pidfilename`/`unixsocketname` resolution (5b chunk 1). The LOCALSTATEDIR fallback dance is a 3-row truth table; the bottom row (neither `/var/run/X.pid` nor `confbase/pid` exists → return `/var/run` path anyway) is the surprise, replicated. `unix_socket()` derives from `pidfile()` by string surgery: `> 4` not `>= 4`, case-sensitive `.pid` match. |
 | `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
 
 **What landed:** ~740 LOC parse + ~430 LOC PEM, 33 unit + 3 proptest. The PEM body is `b64encode_tinc` (LSB-first — see Phase 0a finding 2); the codec was already KAT-locked, so the only thing tested here is framing: 48-byte chunks → 64-char lines on write, arbitrary line length on read, `strncmp` prefix match for the BEGIN type, END type unchecked.
@@ -616,56 +617,72 @@ The contract test (`invite_join_roundtrip_in_process`) is the architecture. Two 
 
 `recv_line` shares its buffer with the SPTPS pump. C `blen` carries over: greeting line 2 + first SPTPS record can arrive in one `recv()`. `BufReader` would over-read past `\n` and eat handshake bytes. Hand-rolled `Vec<u8>` with explicit drain. The `n==0` partial-record case — SPTPS consumed 0 bytes because the record header says "body is 200 bytes" and we only have 50 — is what the `buf.drain(..off)` compaction is for.
 
-### Phase 5b: RPC half + new control protocol
+### Phase 5b: RPC half — transport landed, format decision reversed
 
-Blocked on the daemon existing. The current C control protocol is the
-meta-protocol re-purposed — `^` prefix in the ID name field tells
-`id_h` "this is a control connection, not a peer". Problems:
+#### ✅ chunk 1: `CtlSocket` + 7 one-shot commands
 
-- **Auth is a bearer token in the pidfile.** Pidfile is
-  `0644`-ish; anyone who can read it can `tinc stop`. Should be
-  `SO_PEERCRED` — kernel tells you the connecting uid, no token.
-- **Overloads `connection_t`.** Control connections sit in
-  `connection_list` next to real peers, with `if(status.control)
-  continue` sprinkled everywhere.
-- **Streaming printf format.** `dump_nodes` does one `send_request`
-  per node, sentinel-terminated. CLI parses line-by-line until it
-  sees `18 3` (`CONTROL REQ_DUMP_NODES` empty payload). No length
-  prefix, no error channel.
+**The line-JSON replacement plan above didn't survive reading `control.c`.**
+The "problems" list was over-stated:
 
-**The control protocol has no compatibility constraint** — CLI and
-daemon ship together, and a 1.0.x peer never speaks it. We can
-replace it. Proposal:
+| "Problem" | What reading the source showed |
+|---|---|
+| Pidfile is `0644`-ish | **Wrong.** `pidfile.c:28`: `umask(mask \| 077)` before `fopen("w")` → file is `0600`. The cookie is auth-via-fs-perms, same model as ssh-agent socket. `SO_PEERCRED` would be tighter but the cookie isn't a leak. |
+| Overloads `connection_t` | True, but **a daemon-side concern**. The CLI doesn't care what struct the daemon stores its end in. Our daemon's `control_h` can use a separate `CtlConn` and the wire bytes are unchanged. The `if(status.control) continue` sprinkle is what we fix in *our* daemon, not the protocol. |
+| Streaming printf format | True for `dump`, but **the format is private**. CLI and daemon ship together. When our `Node` struct exists, our `dump_nodes` emits whatever fields it has and `cmd_dump` parses to match. Not held to the 22-field positional sscanf. |
 
-```rust
-// AF_UNIX, line-delimited JSON. Auth via SO_PEERCRED.
-// Windows: named pipe with ACL (same security model, no token).
-#[derive(Serialize, Deserialize)]
-enum CtlRequest {
-    Stop, Reload, Retry, Purge,
-    DumpNodes, DumpEdges, DumpSubnets, DumpConnections,
-    SetDebug(u8),
-    Connect(String), Disconnect(String),
-    Subscribe(Stream),  // Pcap/Log — connection stays open
-}
-enum CtlResponse {
-    Ok, Err(String),
-    Nodes(Vec<NodeDump>),  // one message, not N+1 lines
-    Edges(Vec<EdgeDump>),
-    // ...
-}
-```
+So: **kept the framing** (`"CONTROL TYPE [args]\n"`, `\n`-delimited),
+**kept the `REQ_*` discriminants** (sed-verified against
+`control_common.h`, zero cost), **kept the cookie auth**. Dropped
+only the obligation to match dump line bodies. The shape was right;
+the content was negotiable. JSON would have cost a `serde_json` dep
+and the `nc -U /var/run/tinc.socket` debuggability.
 
-Daemon side: ~100 lines, one `match` on `CtlRequest` calling the
-same internals (`dump_nodes`, `reload_configuration`, etc.). CLI
-side: `serde_json::to_writer` + `from_reader`. Compare to 240 lines
-of `control.c` + the `sscanf` jungle in `tincctl.c` cmd_dump.
+`ctl.rs` is the transport: `Pidfile::read` (stricter than C —
+validates 64-hex cookie at parse, not at the daemon's `strcmp`
+later) + the `LOCALSTATEDIR` ↔ `confbase/pid` probe + `kill(pid,
+0)` liveness check + `UnixStream::connect` + the 3-line greeting
+(`ID ^cookie 0` → `0 NAME 17.x` → `4 0 PID`). Generic over `Read +
+Write` so tests pass `UnixStream::pair()` halves; the `Rc<RefCell>`
+split is the sync answer to `tokio::split()`.
+
+`ctl_full_connect_against_fake_daemon` is the closure: a real
+`UnixListener` bound in a tempdir, a real pidfile with **our test
+process's pid** (so `kill(pid, 0)` returns 0 without a real daemon),
+the binary's `connect()` doing real `read_to_string` + `kill(2)` +
+`connect(2)`. The fake sends `pid=99999` in greeting line 2 while
+the pidfile says our actual pid; the test asserts `99999` is
+printed, proving `tincctl.c:891`'s pid-from-greeting-not-pidfile.
+
+`needs_daemon: bool` on `CmdEntry` drives whether `main()` calls
+`paths.resolve_runtime()` before dispatch. The 4a doc comment had
+predicted "separate table because `&mut CtlSocket` signature
+differs" — wrong, `connect()` takes `&Paths` and creates the socket
+internally. Same shape, one table. The `Option<PathBuf>` panics if
+a 4a command reaches for `pidfile()`; that's the assertion `init`
+stays probe-free.
+
+Dead enum values: `REQ_CONNECT`, `REQ_RESTART`, `REQ_DUMP_GRAPH`
+exist in `control_common.h` but no `cmd_*` sends them and `control_h`
+doesn't match them. Included for sequence-gap reasons.
+
+#### ⏸️ chunk 2: `dump`, `cmd_config`, `log` — deferred
+
+| Command | Blocked on |
+|---|---|
+| `dump nodes/edges/subnets/connections` | Format depends on daemon's `Node`/`Edge` structs. Port the *infrastructure* (multi-row recv loop, 2-int terminator) now; the parse is per-type, lands with the daemon. |
+| `dump invitations` | Nothing — it's a 4a freebie hiding in `cmd_dump` (`tincctl.c:1108`, pure readdir). Lands with `cmd_dump` for one-table-row reasons. |
+| `cmd_config` (`get`/`set`/`add`/`del`) | Nothing for the fs half; the opportunistic `reload` is now one line: `let _ = ctl_simple::reload(paths)`. Lands next. |
+| `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
+| `top` | `dump` format + `ratatui`. |
+| `start`/`restart` | Daemon binary needs to exist. |
 
 | C source | Rust |
 |---|---|
-| `info.c`, `top.c` | control-socket queries + `ratatui` for `tinc top` |
-| `tincctl.c` `cmd_dump` family | one fn per `CtlRequest` variant |
-| `control.c` | daemon-side `match` |
+| `info.c`, `top.c` | `CtlSocket` queries + `ratatui` for `tinc top` |
+| `tincctl.c` `cmd_dump` family | multi-row recv loop, format is ours |
+| `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
+| `tincctl.c::connect_tincd` + `recvline`/`sendline` + `pidfile.c::read_pidfile` | ✅ `ctl.rs` — `CtlSocket` + `Pidfile` |
+| `control.c` | daemon-side `match`. **`CtlRequest` discriminants already aligned** — the daemon's switch is a straight transcription. |
 | ~~`invitation.c`~~ | **Reclassified to 4a, both halves landed.** 1484 LOC → ~1010 LOC Rust (invite+join+crypto kernel) after dropping HTTP probe / ifconfig.c / tty prompts. `server_receive_cookie` (the daemon's `receive_invitation_sptps` body) lives in `cmd::join` for now; lifts to `tincd::auth` in Phase 5. |
 | `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` generation. Used by `finalize_join` for `Ifconfig`/`Route` invitation keywords. **Stubbed**: keywords recognized (no "unknown variable" warning), placeholder `tinc-up` written, no per-platform shell generation. -300 LOC. Lands when someone needs it. |
 
@@ -707,8 +724,9 @@ The C code uses a hand-rolled `epoll`/`kqueue`/`select` loop (`event.c`, `linux/
 | `route.c` | 1176 | L2/L3 packet inspection → destination node lookup. Uses `tinc-graph`. |
 | `protocol_auth.c` (handler side) | 1066 | Auth state machine. **`receive_invitation_sptps` (~130 LOC) already ported as `cmd::join::server_receive_cookie`** — lifts here with `&mut Connection` instead of `&Paths`. The `id_h` `name[0]=='?'` invitation branch is the meta-greeting that `cmd_join`'s test parsers (`parse_greeting_line1/2`) consume — same wire format, different direction. |
 | `autoconnect.c` | small | maintain N outgoing connections |
-| `control.c` | small | control-socket server side |
-| `process.c`, `signal.c`, `script.c`, `pidfile.c`, `logger.c` | small | mostly replaced by `nix`, `tracing`, `daemonize` crates |
+| `control.c` | small | **CLI side already speaks the protocol** (`ctl.rs`). Daemon side: `match` on `CtlRequest::from_i32`, call internals, `writeln!` ack. The `init_control` half (bind `AF_UNIX`, `umask\|077` for cookie file, `0.0.0.0`→`127.0.0.1` mapping) is the only new piece. |
+| `pidfile.c` | tiny | `read_pidfile` ✅ ported as `Pidfile::read` (stricter: cookie length+hex validated). `write_pidfile` is daemon-side, lands with `control.c`. |
+| `process.c`, `signal.c`, `script.c`, `logger.c` | small | mostly replaced by `nix`, `tracing`, `daemonize` crates |
 
 ### Hot-path concerns (`net_packet.c`)
 - Preallocated packet buffers — no per-packet `Vec` alloc. Use `bytes::BytesMut` pool or fixed `[u8; MAXSIZE]` on stack.
@@ -800,7 +818,7 @@ Aggressively shed scope:
 
    `cross_init_key_loads_in_c` is the closure on the wire-compat question for Ship #2. It pulls together every layer: `OsRng` → `SigningKey::from_seed` → `write_pem` → `tinc-b64` → file → C `ecdsa_read_pem_private_key` → C `sptps_start` → C `chacha20-poly1305` decrypt → 256 bytes match. Any link wrong — key derivation, blob layout, PEM armor, LSB-first b64 — the C handshake fails. It doesn't.
 
-   **The control protocol gets replaced.** It's the meta-protocol re-purposed (`^` prefix on the ID name = "this is a control connection"); auth is a bearer token in a `0644`-ish pidfile; control connections sit in the same `connection_list` as real peers. No compatibility constraint — CLI and daemon ship together. New protocol: `AF_UNIX` + `SO_PEERCRED` auth + line-JSON. Daemon side ~100 lines (one `match`); CLI side `serde_json::{to,from}_reader`. Phase 5b.
+   **The control protocol stays.** The line-JSON replacement plan didn't survive reading `control.c`: the pidfile is `0600` not `0644` (`umask\|077` before `fopen`), so the cookie is fs-perms auth, same as ssh-agent. The `connection_t` overload is a *daemon-side* concern — our daemon uses a separate type, wire bytes unchanged. The dump format is *private* (CLI and daemon ship together), so it's ours when our `Node` exists. **5b chunk 1 shipped** the C framing (`"18 TYPE\n"`, `\n`-delimited, `REQ_*` ints preserved) + 7 simple commands. Third instance of read-before-build reversing a plan: invite/join was the second.
 3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in
 
