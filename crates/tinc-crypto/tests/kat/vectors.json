@@ -46,5 +46,10 @@
   {"raw":"b3a88eafd1f0f5f7b6c1b67c27f592bd77aaa196b34ff0ea1b9a91b0f5d5c2f7","encoded_std":"ziqjvGN81fvtBbLfnUvk9enqha5sPBv6boZkwWf1CfP","encoded_urlsafe":"ziqjvGN81fvtBbLfnUvk9enqha5sPBv6boZkwWf1CfP"},
   {"raw":"fb64488f3ef059176215e8de2769dd640f95b8a4b2b3ab27436a1633c04eb49898","encoded_std":"7TGSP6D8ZdhYVgu3nkW3k9Ql4Sqszu6JDpmFzAsT0iJm","encoded_urlsafe":"7TGSP6D8ZdhYVgu3nkW3k9Ql4Sqszu6JDpmFzAsT0iJm"},
   {"raw":"456833f2b1e69b98cf226b2f2967528b7a180c0d8bf1636988e189d991e33a5387d9fb75f9060edf4b005a9b1dc30914332f974a9a03e9bec51d391b586ca808b0def19516749bc3182b6aef1d13ee2867fb95204e68935d115d869d849c6a51","encoded_std":"Fh2MyHr5bi5zis2LpcmULqHGM0wixPWaIGeiZH546M1hZvfd5bgDfvEAatZHDnAFz8ylKp5Ap7bxdkzGYxGqIAr3xXpF0t5wYsiav3xEujyZ7XJIOh2kdFRXG2JhcqWU","encoded_urlsafe":"Fh2MyHr5bi5zis2LpcmULqHGM0wixPWaIGeiZH546M1hZvfd5bgDfvEAatZHDnAFz8ylKp5Ap7bxdkzGYxGqIAr3xXpF0t5wYsiav3xEujyZ7XJIOh2kdFRXG2JhcqWU"}
+],
+"invitation":[
+  {"key_seed":"7005164c432b07a9146f59df45c1f677f1cec8b4bbdbbec943825bba4c4dbe3a","cookie":"b111ad979d53fcdd320701c47701931b4cc8","pubkey":"5bd1b9282ae6afa60177a1131f67e58967ecd3dc6942e3d6279ca9107e4b0d76","fingerprint":"bFduooi5vaaA3F6EfcW5JeG7TzdaCNu1nwZqQ43SNYH","key_hash_b64":"KFbJXignYRivIVUveGDX1fae","cookie_b64":"xGRrX25U83tMHEAx3FwkbwEy","cookie_hash_b64":"KjzqwSBJaRgCOCbUMSbh7mMb"},
+  {"key_seed":"f11dc3c20db617c9a8358bf3e108c7fde7ce3b411b9af32e9561b9af0c0ce9ab","cookie":"3239d2044efce11fc22bf43f5c540474642f","pubkey":"422a18f467a3d4ed4a16c9d16cab2bdfea297610eaee511b88207d3cfc1e9310","fingerprint":"CpCG0f2oU3uSWkc0st6KfreK2Bh6uH1GICSf8wvHTCB","key_hash_b64":"3snayh5jjnJRBe1hlceAvubT","cookie_b64":"ykj0E4E_h_hwrQ_PcRFB0R2L","cookie_hash_b64":"YjxZ067qKeT2ptnmK1YfPvZX"},
+  {"key_seed":"bf299e99c20dc9ef6db1d82532bb1cbda3aca10577b36added725d9147ef1072","cookie":"bf299e99c20dc9ef6db1d82532bb1cbda3ac","pubkey":"1429ae44ab1d1b89c5dc3a3185837c975eb0148d1239b8893f3fb0de2ed1fa3a","fingerprint":"UkirEtaHbkYxcrTMFOIfX6FsU0oE5gbi/8Dse7S06rD","key_hash_b64":"LsQ37fK_UG-US8d5qLC7Iad6","cookie_b64":"_minZKcDJ_ebxidJysLH9OKr","cookie_hash_b64":"dGazhQIaO33bRrSEiBlsvbEA"}
 ]
 }

@@ -11,7 +11,7 @@
 //! not the test.
 
 use serde::Deserialize;
-use tinc_crypto::{b64, chapoly, ecdh, prf, sign};
+use tinc_crypto::{b64, chapoly, ecdh, invite, prf, sign};
 
 const VECTORS_JSON: &str = include_str!("kat/vectors.json");
 
@@ -26,6 +26,7 @@ struct Vectors {
     prf: Vec<PrfVec>,
     sign: Vec<SignVec>,
     b64: Vec<B64Vec>,
+    invitation: Vec<InvitationVec>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +74,27 @@ struct B64Vec {
     raw: String,
     encoded_std: String,
     encoded_urlsafe: String,
+}
+
+#[derive(Deserialize)]
+struct InvitationVec {
+    /// Seed for `ed25519_create_keypair`. Regenerating the key from this
+    /// (rather than using the JSON's `pubkey` directly) chains the test:
+    /// if `sign::SigningKey::from_seed` were broken, this fails too. We
+    /// already KAT that separately, but layered tests = layered debugging.
+    key_seed: String,
+    /// Raw 18-byte cookie.
+    cookie: String,
+    /// Derived pubkey — we re-derive and compare as a sanity check.
+    pubkey: String,
+    /// `b64_std(pubkey)`. The string that gets hashed.
+    fingerprint: String,
+    /// First 24 chars of the URL slug.
+    key_hash_b64: String,
+    /// Second 24 chars of the URL slug.
+    cookie_b64: String,
+    /// The invitation filename.
+    cookie_hash_b64: String,
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -292,4 +314,83 @@ fn b64_decode_accepts_mixed_alphabet() {
         Some(&raw[..]),
         "mixed-alphabet decode"
     );
+}
+
+/// Invitation crypto kernel: the chain of compositions that builds a URL
+/// slug. Every stage is a place to be silently wrong; we check them all.
+///
+/// The C side is `invitation.c:499-518` (cmd_invite) +
+/// `protocol_auth.c:199-207` (daemon's filename recovery).
+///
+/// Why per-stage assertions instead of just checking the final slug:
+/// when this fails (and it will, if anyone touches b64 or sha2), "slug
+/// is wrong" tells you nothing. "fingerprint matches but key_hash
+/// doesn't" tells you the hash boundary is the bug.
+#[test]
+fn invitation_crypto_kernel_matches_c() {
+    for (i, v) in vectors().invitation.iter().enumerate() {
+        let seed: [u8; 32] = hex_arr(&v.key_seed, "key_seed");
+        let cookie: [u8; invite::COOKIE_LEN] = hex_arr(&v.cookie, "cookie");
+        let want_pubkey: [u8; 32] = hex_arr(&v.pubkey, "pubkey");
+
+        // Stage 0: regenerate the key. Chains to the `sign` KAT.
+        let sk = sign::SigningKey::from_seed(&seed);
+        let pubkey = *sk.public_key();
+        assert_eq!(
+            pubkey, want_pubkey,
+            "case {i}: pubkey mismatch (sign::from_seed disagrees with C)"
+        );
+
+        // Stage 1: fingerprint. The b64-STRING-that-gets-hashed.
+        // Uses the +/ alphabet, NOT urlsafe — if invite::fingerprint
+        // accidentally calls encode_urlsafe, this fires before any hash.
+        let fp = invite::fingerprint(&pubkey);
+        assert_eq!(fp, v.fingerprint, "case {i}: fingerprint (b64 alphabet?)");
+        assert_eq!(fp.len(), 43, "case {i}: fingerprint length");
+
+        // Stage 2: key_hash. sha512(fingerprint)[..18], then b64_url.
+        // The hash is over the b64 STRING. If someone "optimizes" to
+        // hash the raw pubkey, this fires here and not at slug-compare.
+        let kh = invite::key_hash(&pubkey);
+        assert_eq!(
+            b64::encode_urlsafe(&kh),
+            v.key_hash_b64,
+            "case {i}: key_hash (hashed raw pubkey instead of b64 string?)"
+        );
+
+        // Stage 3: cookie b64 — just an encode, but proves the urlsafe
+        // alphabet is used for the URL output.
+        assert_eq!(
+            b64::encode_urlsafe(&cookie),
+            v.cookie_b64,
+            "case {i}: cookie b64 (alphabet?)"
+        );
+
+        // Stage 4: cookie_hash — the filename. Cookie || fingerprint,
+        // cookie FIRST. If the order is swapped, this fires.
+        assert_eq!(
+            invite::cookie_filename(&cookie, &pubkey),
+            v.cookie_hash_b64,
+            "case {i}: cookie_hash (cookie/fingerprint order?)"
+        );
+        assert_eq!(v.cookie_hash_b64.len(), invite::SLUG_PART_LEN);
+
+        // Stage 5: full slug build. By this point each piece has passed,
+        // so this proves build_slug puts them in the right order.
+        let slug = invite::build_slug(&pubkey, &cookie);
+        assert_eq!(slug.len(), invite::SLUG_LEN);
+        assert_eq!(
+            slug,
+            format!("{}{}", v.key_hash_b64, v.cookie_b64),
+            "case {i}: full slug"
+        );
+
+        // Stage 6: parse_slug recovers the original cookie + key_hash.
+        // This is cmd_join's path: it gets the slug from the URL, parses
+        // out the cookie to send to the daemon, and the key_hash to
+        // verify the daemon's greeting against.
+        let (parsed_hash, parsed_cookie) = invite::parse_slug(&slug).unwrap();
+        assert_eq!(parsed_cookie, cookie, "case {i}: parsed cookie");
+        assert_eq!(parsed_hash, kh, "case {i}: parsed key_hash");
+    }
 }

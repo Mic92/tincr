@@ -71,6 +71,13 @@ struct Globals {
     /// `--force`. C: `tincctl.c:75`. Currently used by: `import`
     /// (overwrite existing), eventually `set` (allow obsolete vars).
     force: bool,
+    /// `-n NETNAME` after `.` → None normalization. Separate from
+    /// `Paths` because `Paths` only carries the *resolved* confbase,
+    /// not the original netname — but `tinc invite` needs the netname
+    /// to write into the invitation file (`NetName = X` line).
+    /// `cmd_join` also needs it (it's the directory the new node's
+    /// config goes in). C: `netname` global, `tincctl.c:77`.
+    netname: Option<String>,
 }
 
 /// `tincctl.c:3000` `static const struct { ... } commands[]`.
@@ -135,7 +142,13 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_fsck,
         help: "fsck                   Check the configuration files for problems.",
     },
+    CmdEntry {
+        name: "invite",
+        run: cmd_invite,
+        help: "invite NODE            Generate an invitation for NODE.",
+    },
     // 4a complete (modulo `edit`, deferred to 5b for its reload half).
+    // `join` is invite's pair — same module, lands next.
     // 5b commands (`dump`, `top`, `log`, `set`, `get`, ...) go in a
     // separate table — they take `&mut CtlSocket`, not `&Paths`.
 ];
@@ -243,6 +256,48 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
         // line. Harmless; the actual diagnostics already printed.
         Err(CmdError::BadInput(String::new()))
     }
+}
+
+/// `cmd_invite`: one required arg (the new node's name).
+/// C `invitation.c:332`.
+///
+/// Prints the URL to stdout (the only thing on stdout, so
+/// `tinc invite alice | mail alice@example` works — the C does
+/// the same, `puts(url)` at `invitation.c:607`). Warnings to stderr.
+fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let [invitee] = args else {
+        return Err(if args.is_empty() {
+            CmdError::MissingArg("node name")
+        } else {
+            CmdError::TooManyArgs
+        });
+    };
+
+    let r = cmd::invite::invite(
+        paths,
+        g.netname.as_deref(),
+        invitee,
+        std::time::SystemTime::now(),
+    )?;
+
+    if r.key_is_new {
+        // C `invitation.c:483`: `"Could not signal the tinc daemon.
+        // Please restart or reload it manually."`. We always emit
+        // this (no daemon to signal yet). Phrasing matches the C
+        // exactly so users grepping stack overflow find the right
+        // post.
+        //
+        // TODO(5b): when control protocol lands, replace with
+        // `if ctl.reload().is_err() { eprintln!(...) }`.
+        eprintln!(
+            "Could not signal the tinc daemon. \
+             Please restart or reload it manually."
+        );
+    }
+
+    // The URL is the secret. stdout only.
+    println!("{}", *r.url);
+    Ok(())
 }
 
 /// `cmd_verify`: required signer arg, optional file arg.
@@ -354,7 +409,15 @@ fn parse_global_options(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(PathsInput, Globals, Vec<String>), String> {
     let mut input = PathsInput::default();
-    let mut globals = Globals { force: false };
+    // netname is filled in main() after `.` → None normalization.
+    // parse_global_options only knows the raw `-n` value, not the
+    // normalized one. Separating concerns: this fn parses argv,
+    // main() applies the netname rules (env fallback, `.` sentinel,
+    // traversal guard) and *then* captures it into Globals.
+    let mut globals = Globals {
+        force: false,
+        netname: None,
+    };
     let mut rest = Vec::new();
 
     // C `getopt_long(argc, argv, "+bc:n:", ...)` — the `+` means stop
@@ -552,6 +615,15 @@ fn main() -> ExitCode {
     // filesystem (`for_cli` doesn't, but a future for_cli might
     // probe). Micro-optimization; the order doesn't matter for any
     // current command.
+    //
+    // `globals.netname` is captured *before* `for_cli` because
+    // `for_cli` borrows `input` and we'd otherwise need a clone.
+    // (Not strictly necessary — `for_cli` takes `&input` — but
+    // keeping the clone explicit makes the data flow obvious.)
+    let globals = Globals {
+        netname: input.netname.clone(),
+        ..globals
+    };
     let paths = Paths::for_cli(&input);
 
     match (entry.run)(&paths, &globals, cmd_args) {

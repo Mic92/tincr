@@ -1026,6 +1026,182 @@ fn fsck_too_many_args() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// invite through the binary
+// ────────────────────────────────────────────────────────────────────
+//
+// What this proves over the unit tests in `cmd/invite.rs`: the URL
+// goes to stdout (not stderr), the warning goes to stderr (not
+// stdout), the exit code mapping. The unit tests prove the URL is
+// CORRECT; these prove the binary plumbs it to the right fd.
+
+/// Full flow through the binary: init, append Address, invite.
+/// URL on stdout, warning on stderr, exit 0.
+///
+/// This is also the **fsck contract test for invite**: the
+/// invitation key must NOT trip fsck. If fsck started warning about
+/// `invitations/ed25519_key.priv` (e.g. by being too aggressive
+/// about "what's this private key file doing here"), this test
+/// would catch it.
+#[test]
+fn invite_prints_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().join("vpn");
+    let cb_s = cb.to_str().unwrap();
+
+    let out = tinc(&["-c", cb_s, "init", "alice"]);
+    assert!(out.status.success());
+
+    // Add Address (init doesn't write it; invite needs it).
+    let mut h = std::fs::OpenOptions::new()
+        .append(true)
+        .open(cb.join("hosts/alice"))
+        .unwrap();
+    writeln!(h, "Address = invite-test.example").unwrap();
+    drop(h);
+
+    let out = tinc(&["-c", cb_s, "invite", "bob"]);
+    assert!(out.status.success(), "invite failed: {out:?}");
+
+    // URL on stdout, exactly one line, no other noise.
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let url = stdout.trim();
+    assert!(!url.is_empty());
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "stdout should be exactly one line: {stdout:?}"
+    );
+    assert!(
+        url.starts_with("invite-test.example:655/"),
+        "url was: {url}"
+    );
+    let slug = url.rsplit('/').next().unwrap();
+    assert_eq!(
+        slug.len(),
+        tinc_crypto::invite::SLUG_LEN,
+        "slug should be 48 chars: {slug}"
+    );
+    // Slug parses (proves it's valid b64-urlsafe, not just 48 chars).
+    assert!(tinc_crypto::invite::parse_slug(slug).is_some());
+
+    // Warning on stderr (key was freshly generated, daemon needs
+    // restart). The C phrasing.
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restart or reload"), "stderr was: {stderr}");
+
+    // ─── fsck contract ───
+    // The invitation key + invitation file should NOT trip fsck.
+    // fsck only checks the node's OWN key (ed25519_key.priv at
+    // confbase root), not invitation keys. If fsck's path glob
+    // got too broad, this fires.
+    let out = tinc(&["-c", cb_s, "fsck"]);
+    assert!(
+        out.status.success(),
+        "fsck should pass after invite: {out:?}"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "fsck should be silent: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// invite without Address → exit 1, clear message, no files left.
+#[test]
+fn invite_no_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().join("vpn");
+    let cb_s = cb.to_str().unwrap();
+
+    let out = tinc(&["-c", cb_s, "init", "alice"]);
+    assert!(out.status.success());
+    // Don't add Address.
+
+    let out = tinc(&["-c", cb_s, "invite", "bob"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("No Address"), "{stderr}");
+    assert!(stderr.contains("set Address"), "{stderr}");
+
+    // No invitations/ dir created. Our reorder vs C: we check
+    // Address BEFORE makedirs. C checks late and leaves debris.
+    assert!(
+        !cb.join("invitations").exists(),
+        "no-Address failure should leave no trace"
+    );
+}
+
+/// `-n NETNAME` reaches the invitation file. The Globals.netname
+/// thread-through. Unit test can't see this — it doesn't go through
+/// argv.
+#[test]
+fn invite_netname_threads_through() {
+    let dir = tempfile::tempdir().unwrap();
+    // -n NETNAME → confbase = CONFDIR/tinc/NETNAME, but we override
+    // with -c. So netname is set BUT confbase comes from -c. This
+    // is exactly the "both given" warning case — confbase wins for
+    // path resolution, but netname is still threaded to invite.
+    //
+    // Actually, wait: "-c overrides -n" for confbase, but does the C
+    // still write NetName? Reading invitation.c:559: `if(check_netname
+    // (netname, true))` — yes, the netname global is still set even
+    // when confbasegiven is true. Our Globals.netname mirrors that.
+    let cb = dir.path().join("vpn");
+    let cb_s = cb.to_str().unwrap();
+
+    let out = tinc(&["-c", cb_s, "-n", "mymesh", "init", "alice"]);
+    assert!(out.status.success());
+    let mut h = std::fs::OpenOptions::new()
+        .append(true)
+        .open(cb.join("hosts/alice"))
+        .unwrap();
+    writeln!(h, "Address = x").unwrap();
+    drop(h);
+
+    let out = tinc(&["-c", cb_s, "-n", "mymesh", "invite", "bob"]);
+    assert!(out.status.success(), "{out:?}");
+
+    // Read the invitation file. Only one 24-char-named file in
+    // invitations/ (the key is 16 chars).
+    let inv_dir = cb.join("invitations");
+    let inv_file = std::fs::read_dir(&inv_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.len() == tinc_crypto::invite::SLUG_PART_LEN)
+        })
+        .unwrap();
+    let body = std::fs::read_to_string(inv_file).unwrap();
+
+    // NetName line is in chunk 1.
+    assert!(
+        body.contains("NetName = mymesh\n"),
+        "NetName should be threaded: {body}"
+    );
+}
+
+#[test]
+fn invite_missing_arg() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap();
+    let out = tinc(&["-c", cb, "invite"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("node name"));
+}
+
+#[test]
+fn invite_too_many_args() {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap();
+    let out = tinc(&["-c", cb, "invite", "bob", "extra"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Too many"));
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Cross-impl: `tinc init` key loads in C `sptps_test`
 // ────────────────────────────────────────────────────────────────────
 

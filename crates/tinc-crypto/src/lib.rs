@@ -30,5 +30,6 @@
 pub mod b64;
 pub mod chapoly;
 pub mod ecdh;
+pub mod invite;
 pub mod prf;
 pub mod sign;

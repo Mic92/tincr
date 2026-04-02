@@ -297,40 +297,11 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `fs.c` `makedir`: mkdir, but EEXIST → chmod-and-succeed.
-///
-/// C: `if(mkdir) { if(EEXIST) chmod; return; }` — the chmod-on-exists
-/// is the surprising part. Why: if you previously made `/etc/tinc`
-/// with `mkdir` (mode 0777 from your shell's umask), running `tinc
-/// init` should clamp it to 0755. Paranoia about overly-permissive
-/// existing dirs.
-///
-/// Not `create_dir_all` — we want explicit control over each level's
-/// mode (`confdir` 0755 vs `invitations/` 0700 in `fs.c:43`), and
-/// `create_dir_all` doesn't take a mode.
-fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        match fs::DirBuilder::new().mode(mode).create(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // chmod-on-exists. C `chmod(path, mode)`.
-                fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(io_err(path))
-            }
-            Err(e) => Err(io_err(path)(e)),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        match fs::create_dir(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(io_err(path)(e)),
-        }
-    }
-}
+// `makedir` lifted to mod.rs — invite.rs needs it for invitations/ at
+// 0700, same chmod-on-exists semantics. Re-exported here for the
+// existing call sites; the test below (`makedir_clamps_mode`) stays
+// because it tests a behavior `init` relies on, not where the fn lives.
+use super::makedir;
 
 /// Open for write, create with explicit mode, fail if exists.
 ///

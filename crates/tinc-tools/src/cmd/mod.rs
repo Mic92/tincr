@@ -21,6 +21,7 @@ pub mod exchange;
 pub mod fsck;
 pub mod genkey;
 pub mod init;
+pub mod invite;
 pub mod sign;
 
 /// Unified error for all `cmd_*` functions. The `tincctl.c` convention
@@ -87,6 +88,47 @@ impl std::error::Error for CmdError {
 /// Shorthand for the `?` boilerplate. The C does this inline with
 /// `if(!f) { fprintf; return 1; }` after every fopen/mkdir; we factor
 /// it once.
+/// `fs.c` `makedir`: mkdir, but EEXIST → chmod-and-succeed.
+///
+/// C: `if(mkdir) { if(EEXIST) chmod; return; }` — the chmod-on-exists
+/// is the surprising part. Why: if you previously made `/etc/tinc`
+/// with `mkdir` (mode 0777 from your shell's umask), running `tinc
+/// init` should clamp it to 0755. Paranoia about overly-permissive
+/// existing dirs.
+///
+/// Not `create_dir_all` — we want explicit control over each level's
+/// mode (`confdir` 0755 vs `invitations/` 0700 in `fs.c:43`), and
+/// `create_dir_all` doesn't take a mode.
+///
+/// Shared by init (confbase tree) and invite (invitations/ at 0700).
+/// Lifted from init.rs when invite landed; the test
+/// (`init::tests::makedir_clamps_mode`) stayed where it was — it tests
+/// a property init depends on.
+pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError> {
+    #[cfg(unix)]
+    {
+        use std::fs;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        match fs::DirBuilder::new().mode(mode).create(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // chmod-on-exists. C `chmod(path, mode)`.
+                fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(io_err(path))
+            }
+            Err(e) => Err(io_err(path)(e)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        match std::fs::create_dir(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(io_err(path)(e)),
+        }
+    }
+}
+
 pub(crate) fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(io::Error) -> CmdError {
     let path = path.into();
     move |err| CmdError::Io { path, err }

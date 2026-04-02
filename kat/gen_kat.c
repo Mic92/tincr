@@ -61,6 +61,12 @@ size_t b64encode_tinc(const void *src, char *dst, size_t length);
 size_t b64encode_tinc_urlsafe(const void *src, char *dst, size_t length);
 size_t b64decode_tinc(const char *src, void *dst, size_t length);
 
+/* sha512 — already linked for ed25519. LibTomCrypt's, but it's
+   bog-standard FIPS 180-2 SHA-512; the sha2 crate matches. We need
+   it directly for the invitation fingerprint, which hashes a b64
+   string (not the raw pubkey). */
+int sha512(const void *message, size_t message_len, void *out);
+
 /* --- stubs the linked sources expect ------------------------------------- */
 
 /* chacha-poly1305.c uses xzalloc/xzfree/mem_eq via ../xalloc.h ../utils.h.
@@ -332,13 +338,159 @@ static void gen_b64(void) {
 	printf("]");
 }
 
+/* --- invitation crypto kernel --------------------------------------------
+ *
+ * Why this needs KAT vectors and not just a roundtrip test:
+ *
+ * The invitation URL slug binds three values via a chain of
+ * compositions where every boundary is a place to be off by one:
+ *
+ *   fingerprint  = b64_std(pubkey)         -- 43 chars, NOT urlsafe
+ *   key_hash     = sha512(fingerprint)     -- the b64 STRING, not raw key
+ *   cookie_hash  = sha512(cookie || fingerprint)  -- same fingerprint reused
+ *   slug         = b64_url(key_hash[..18]) || b64_url(cookie[..18])  -- 24+24
+ *   filename     = b64_url(cookie_hash[..18])                        -- 24
+ *
+ * Three places use this identically:
+ *   invitation.c:500   cmd_invite:    computes all three to make the file+URL
+ *   invitation.c:1400  cmd_join:      verifies key_hash from slug after greeting
+ *   protocol_auth.c:199 daemon:       recomputes cookie_hash to find the file
+ *
+ * Silent-failure modes a roundtrip test would miss but a KAT catches:
+ *   - hashing the raw pubkey instead of its b64 ("obviously" simpler...)
+ *   - using b64_urlsafe for the fingerprint (no — ecdsa_get_base64_public_key
+ *     calls b64encode_tinc, the +/ variant; only the OUTPUT is urlsafe)
+ *   - truncating to 16 bytes instead of 18 (still 24 b64 chars at first
+ *     glance because 18 → 24 via b64, but 16 → 22)
+ *   - hashing fingerprint || cookie instead of cookie || fingerprint
+ *
+ * The daemon recomputes cookie_hash; if invite and daemon disagree on
+ * any of these, `tinc join` connects, handshakes, sends the cookie,
+ * and the daemon says "non-existing invitation". Nothing in the Rust
+ * test suite would catch that until the daemon exists.
+ */
+static void gen_invitation(void) {
+	/* Three test cases. All-zeros catches the "forgot to use the input"
+	   class. Two distinct random fills cover the algebraic space. */
+	struct { uint64_t key_seed; uint64_t cookie_seed; } cases[] = {
+		{ 0x9001, 0x9002 },
+		{ 0x9003, 0x9004 },
+		{ 0, 0 },  /* both kat_seed(0) → 0xdeadbeef, but distinct streams */
+	};
+	int n = sizeof(cases) / sizeof(cases[0]);
+
+	printf("\"invitation\":[\n");
+	for(int i = 0; i < n; i++) {
+		/* Generate a real Ed25519 keypair from the seed. We need a
+		   real pubkey because the fingerprint hashes its b64 form,
+		   and the b64 of a random 32-byte buffer would test the
+		   composition just as well — but using ed25519_create_keypair
+		   means these vectors also serve as "what does an actual
+		   invitation key look like", which makes debugging less
+		   abstract. The Rust test parses the seed, regenerates the
+		   key (already KAT'd in 'sign'), and checks the rest. */
+		uint8_t seed[32], pubkey[32], privkey[64];
+		kat_seed(cases[i].key_seed);
+		kat_fill(seed, 32);
+		ed25519_create_keypair(pubkey, privkey, seed);
+
+		/* Cookie: 18 bytes raw. invitation.c:508 `randomize(cookie, 18)`. */
+		uint8_t cookie[18];
+		kat_seed(cases[i].cookie_seed);
+		kat_fill(cookie, 18);
+
+		/* === Replicate invitation.c:499-518 exactly. ===
+		   Same buffer reuse, same in-place encode tricks. We don't
+		   reuse buffers here (clarity > fidelity for the generator)
+		   but the byte values must match. */
+
+		/* fingerprint = b64encode_tinc(pubkey, _, 32) — the +/ variant.
+		   This is ecdsa_get_base64_public_key's body (ecdsa.c:62).
+		   43 chars + NUL. */
+		char fingerprint[44];
+		size_t fplen = b64encode_tinc(pubkey, fingerprint, 32);
+		if(fplen != 43) {
+			fprintf(stderr, "FATAL: pubkey b64 length %zu != 43\n", fplen);
+			exit(1);
+		}
+
+		/* key_hash = sha512(fingerprint, strlen(fingerprint), _).
+		   invitation.c:501. Yes, strlen — the input is the ASCII
+		   string, not the raw bytes. This is the boundary that
+		   matters: 32-byte raw pubkey → 43-char string → hash. */
+		char key_hash[64];
+		sha512(fingerprint, fplen, key_hash);
+
+		/* key_hash_b64 = b64encode_tinc_urlsafe(key_hash, _, 18).
+		   invitation.c:502. ONLY THE FIRST 18 BYTES of the digest.
+		   18 → 24 chars (18*4/3). This is the first 24 chars of the
+		   URL slug — it authenticates the inviting daemon. */
+		char key_hash_b64[25];
+		b64encode_tinc_urlsafe(key_hash, key_hash_b64, 18);
+
+		/* cookie_hash = sha512(cookie || fingerprint).
+		   invitation.c:511-517. The buffer is cookie-first; this
+		   ordering is what protocol_auth.c:199 must replicate to
+		   find the invitation file. */
+		uint8_t hashbuf[18 + 43];
+		memcpy(hashbuf, cookie, 18);
+		memcpy(hashbuf + 18, fingerprint, 43);
+		char cookie_hash[64];
+		sha512(hashbuf, sizeof(hashbuf), cookie_hash);
+
+		/* cookie_hash_b64 = the filename.
+		   invitation.c:518 + protocol_auth.c:207. */
+		char cookie_hash_b64[25];
+		b64encode_tinc_urlsafe(cookie_hash, cookie_hash_b64, 18);
+
+		/* cookie_b64 = the second 24 chars of the URL slug.
+		   invitation.c:522. */
+		char cookie_b64[25];
+		b64encode_tinc_urlsafe(cookie, cookie_b64, 18);
+
+		/* Roundtrip sanity: cmd_join's b64decode_tinc on the slug
+		   halves must recover the same bytes. invitation.c:1310.
+		   The decoder is alphabet-agnostic so urlsafe → raw works
+		   without specifying which. */
+		uint8_t check[18];
+		if(b64decode_tinc(key_hash_b64, check, 24) != 18
+		   || memcmp(check, key_hash, 18) != 0) {
+			fprintf(stderr, "FATAL: key_hash slug roundtrip\n");
+			exit(1);
+		}
+		if(b64decode_tinc(cookie_b64, check, 24) != 18
+		   || memcmp(check, cookie, 18) != 0) {
+			fprintf(stderr, "FATAL: cookie slug roundtrip\n");
+			exit(1);
+		}
+
+		/* Emit. We give the Rust test enough to recompute
+		   everything from (seed, cookie) and check intermediates.
+		   Only seed is the true input — pubkey is derived,
+		   fingerprint is derived from that, etc. — but emitting
+		   intermediates means a KAT failure points at the broken
+		   stage instead of just "slug is wrong". */
+		printf("  {");
+		jhex("key_seed", seed, 32);                 printf(",");
+		jhex("cookie", cookie, 18);                 printf(",");
+		jhex("pubkey", pubkey, 32);                 printf(",");
+		jstr("fingerprint", fingerprint);           printf(",");
+		jstr("key_hash_b64", key_hash_b64);         printf(",");
+		jstr("cookie_b64", cookie_b64);             printf(",");
+		jstr("cookie_hash_b64", cookie_hash_b64);
+		printf("}%s\n", i+1<n ? "," : "");
+	}
+	printf("]");
+}
+
 int main(void) {
 	printf("{\n");
 	gen_chapoly(); printf(",\n");
 	gen_ecdh();    printf(",\n");
 	gen_prf();     printf(",\n");
 	gen_sign();    printf(",\n");
-	gen_b64();
+	gen_b64();     printf(",\n");
+	gen_invitation();
 	printf("\n}\n");
 	return 0;
 }
