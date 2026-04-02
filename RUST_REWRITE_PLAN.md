@@ -461,10 +461,10 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 |---|---|
 | `tincctl.c` command dispatch | hand-rolled `match argv[1]` (same reasoning as `sptps_test`: clap is 10× deps for ~15 subcommands) |
 | `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
-| `tincctl.c` `cmd_generate_ed25519_keys` | `cmd/genkey.rs` — already have `keypair::generate`, just need the host-file output path |
+| `tincctl.c` `cmd_generate_ed25519_keys` | `cmd/genkey.rs` — thin wrapper over `cmd::init`'s key codepath. The work is in `disable_old_keys` (`keys.c:10`, see below) |
 | `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
-| `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — `tinc-crypto::sign` over a file, with a tinc-specific signature wrapper |
-| `fsck.c` | `cmd/fsck.rs` — config sanity checker. Reads `tinc.conf` + `hosts/*`, complains about missing keys, bad perms, etc. ~400 LOC of `if(!x) fprintf(stderr, ...)` |
+| `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — see validated format below |
+| `fsck.c` | `cmd/fsck.rs` — see validated structure below; was underestimated |
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
 
@@ -530,14 +530,68 @@ Name = bob
 
 **`exchange` doesn't `fclose(stdout)`.** The C does `if(!tty) fclose(stdout)` after export so the pipe's other end sees EOF before import starts. We don't — the OS pipe buffer means import can start reading while export is writing (full-duplex `exchange | ssh peer exchange` doesn't deadlock unless export-side output exceeds the pipe buffer, which is 64KB on Linux, enough for ~1000 host files). If it ever hangs, revisit; the C's explicit close may be a workaround for exactly that. Noted in `cmd_exchange`'s adapter doc.
 
-#### Remaining 4a commands
+#### Remaining 4a commands — guesses validated against C source
 
-| Command | Blocked on | Estimate |
+*After the export/import format guess turned out wrong, went back and read every remaining 4a function before estimating.*
+
+##### `generate-ed25519-keys` — small, but `disable_old_keys` was undercounted
+
+`cmd_generate_ed25519_keys` (`tincctl.c:2351`) is a 5-line wrapper over `ed25519_keygen(true)` (`tincctl.c:356`), which itself is the same codepath `cmd_init` already uses — we have it. The new piece is `ask_and_open` (`tincctl.c:264`), which we'll strip the `ask` half from (no prompts, same deviation as `init`); what's left is `getcwd` + relative-path absolutization + `disable_old_keys` + `fopenmask`.
+
+`disable_old_keys` (`keys.c:10-100`) is **~90 LOC**, not 50. Read: open `filename`, write `filename.tmp` (preserving the original's `st_mode` via `fstat`+`fopenmask`), copy line-by-line; for any line starting `-----BEGIN ` containing ` ED25519 ` set `block=true` and prefix `#` until `-----END `; for any line `strncasecmp("Ed25519PublicKey", 16) && strchr(" \t=", buf[16])` prefix `#` for that one line; if anything was disabled, atomic `rename(tmpfile, filename)`, else `unlink(tmpfile)`. Two subtleties:
+
+- The `Ed25519PublicKey` match is **prefix-16 + delimiter-at-16**, *not* a full token match. `Ed25519PublicKeyBackup = ...` survives (char 16 is `B`, not in `" \t="`). Different tokenizer than `is_name_line`'s strcspn=4 length check, different again from `tinc-conf`'s parser. This is the third hand-rolled config-line matcher in 4a; document the family in `cmd/mod.rs`.
+- **`what` is matched by `strstr`**, not equality — caller passes `"public Ed25519 key"` and the code does `strstr(what, "Ed25519")`. Any `what` containing `"Ed25519"` triggers the EC branch. We can drop the parameter (we never disable RSA) and just always run both checks.
+
+Estimate: **~100 LOC** for `disable_old_keys` + tests, **~50 LOC** for the genkey wrapper. Small.
+
+##### `sign` / `verify` — wrapper format pinned, two non-obvious bits
+
+The signature wrapper (`tincctl.c:2770-2998`) is *not* a PEM-style envelope. It's a **plaintext header line prepended to the file**:
+
+```
+Signature = <name> <unix-time> <86-char-tinc-b64>
+<original file contents, byte-exact>
+```
+
+Two non-obvious bits:
+
+1. **The signed message is `file_contents || " " || name || " " || unix_time` (note: leading space, no trailing newline).** `xasprintf(&trailer, " %s %ld", name, t)` then `memcpy` after the file bytes. The trailer is *not* in the output — it's appended to the buffer fed to `ecdsa_sign`, not written. The output is header line + original file. Verifying reconstructs the trailer from the parsed header and re-appends. **The leading space is load-bearing.** Miss it and signatures don't verify.
+
+2. **`verify`'s signer arg has three modes:** literal `.` → own name (via `get_my_name`); literal `*` → any signer (read the `name` field from the Signature line and look up `hosts/<that>`); anything else → must `check_id` and must equal the parsed signer. The `*` mode means `tinc verify '*' < blob` looks up the signer's pubkey *based on what the blob claims*. Only safe because verification then proves the claim.
+
+`get_pubkey` (`tincctl.c:1647`) is **yet another hand-rolled config-line tokenizer** (the fourth) — this one is `strcspn("\t =")` + `strspn("\t ")` + optional-`=`-then-`strspn`. It's a near-copy of `tinc-conf`'s parser for one specific key. We use `tinc-conf` instead, like `get_my_name` already does. **One difference to check:** `get_pubkey` falls back to `ecdsa_read_pem_public_key` if no `Ed25519PublicKey =` line exists — the host file can have an inline PEM block instead. `tinc-conf::parse_file` *also* knows about inline PEM (it skips it), so the lookup returns `None` and we'd try the PEM read. Works.
+
+The `Signature = %s %ld %s` line is `sscanf`-exact like import's `Name =`. `verify` checks `strlen(sig) != 86` — 64 raw bytes → 86 chars in tinc-b64 (no padding, `(64*8).div_ceil(6) == 86`). Hardcoded.
+
+The `time(NULL)` in `cmd_sign` makes output non-deterministic. For testing: parameterize the timestamp, set it from `time()` in the binary adapter.
+
+Estimate: **~250 LOC** + tests. Medium. Cross-impl test is easy here — both sign and verify exist in the C `tinc` binary... which we don't have. But `ecdsa_sign`/`ecdsa_verify` are KAT-locked already, so we test the *envelope*: Rust sign → Rust verify (trivially passes), Rust sign with one byte of payload flipped → verify fails, Rust sign with the trailer's leading space removed → verify fails (this is the one that catches a re-port that misses the space).
+
+##### `fsck` — was 400 LOC; **is 679, and structurally heavier than guessed**
+
+**The plan undercounted by a wide margin.** Real shape:
+
+- **679 LOC**, ~7 of which are `DISABLE_LEGACY` so call it ~500 effective
+- Not just `if(!x) eprintln!`. Four distinct check categories with their own logic:
+  1. **Keypair coherence** (`test_ec_keypair`, `keys.c:380`): derive pubkey from private, compare to the `Ed25519PublicKey =` in `hosts/NAME`. If mismatch, *with `--force`*, **rewrite the host file** — `disable_old_keys` then append correct pubkey. fsck *fixes*, not just diagnoses. (`ask_fix_ec_public_key`, `keys.c:269`.)
+  2. **Per-variable validity** (`check_conffile`, `keys.c:122`): walks the config, for each entry looks up the **`variables[]` table** (`tincctl.c:1680-1758`, **74 entries**, bitflags `VAR_SERVER|VAR_HOST|VAR_MULTIPLE|VAR_OBSOLETE|VAR_SAFE`), warns if a server-only var appears in a host file or vice-versa, warns on obsolete vars, **counts duplicates** and warns when a non-`VAR_MULTIPLE` var appears twice (only the first wins, silently — this is the only place that surfaces it).
+  3. **Script executability** (`check_script_confdir` + `check_script_hostdir`, `keys.c:448-528`): scan confbase and `hosts/` for `tinc-up`, `tinc-down`, `host-up`, `host-down`, `subnet-up`, `subnet-down`, `<hostname>-up`, `<hostname>-down`; check `access(R_OK|X_OK)`; with `--force`, `chmod 0755`.
+  4. **File modes** (`check_key_file_mode`, `keys.c:205`): warn if private key isn't `0600`.
+
+- **The `variables[]` table is the hidden cost.** It's not just for fsck — it's also what `cmd_set`/`cmd_get` use for validation ("is this a known variable name?"), and `cmd_set` uses `VAR_SAFE` to decide what's settable without `--force`. Porting it is **~100 LOC of static data** that should live in `tinc-conf` (it's metadata *about* config keys), not in `cmd/fsck.rs`. Doing that now means `set`/`get` (5b commands, but the parse half is fs-only) get it for free.
+- **Uses `read_server_config` + `read_host_config`** (`conf_net.c`), the daemon's config-tree builder — not the bare `parse_file`. We have `parse_file` but not the merge-multiple-files-and-conf.d wrapper. `tinc-conf` has the pieces; the wrapper is **~50 LOC** and was on the Phase 5 list anyway. Pull it forward.
+
+Revised estimate: **~400 LOC fsck logic + ~100 LOC variables table (in `tinc-conf`) + ~50 LOC config-tree builder wrapper (in `tinc-conf`) = ~550 LOC**, of which ~150 lands in `tinc-conf` not `tinc-tools`. **Medium-large**, was tagged medium-tedious. Reordered to last in 4a — it's blocked on `disable_old_keys` (genkey ships first) and on the variables table being a small standalone deliverable.
+
+| Command | Blocked on | Validated estimate |
 |---|---|---|
-| `generate-ed25519-keys` | `disable_old_keys` (rewrites file commenting out old PEM blocks before append) — ~50 LOC | small |
-| `sign` / `verify` | the tinc-specific signature wrapper format (`tincctl.c:2770`) | medium |
-| `fsck` | nothing structural — it's ~400 LOC of `if(!x) eprintln!` | medium-tedious |
+| `generate-ed25519-keys` | `disable_old_keys` (`keys.c:10`, ~90 LOC: tmpfile, line-copy with `#`-prefix for PEM-block-or-`Ed25519PublicKey=`-line, atomic rename, preserve `st_mode`) | small (~150 LOC + tests) |
+| `sign` / `verify` | nothing — all primitives exist (`tinc-crypto::sign`, `tinc-conf::parse_file`, `get_my_name`). Envelope: `Signature = name time b64\n` + file; signed message is `file || " " || name || " " || time` with **load-bearing leading space** | medium (~250 LOC + tests) |
+| `fsck` | `disable_old_keys` (above), `variables[]` table (→ `tinc-conf`, ~100 LOC, **74 entries**), `read_server_config` wrapper (→ `tinc-conf`, ~50 LOC) | **medium-large (~550 LOC)** — was undercounted |
 | `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
+
+**Ship order revised:** `generate-ed25519-keys` → `sign`/`verify` → `variables[]` table in `tinc-conf` → `fsck`. `edit` defers to 5b (its `reload` half needs a daemon socket; the `$EDITOR` half alone isn't useful).
 
 ### Phase 5b: RPC half + new control protocol
 
