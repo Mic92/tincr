@@ -403,6 +403,32 @@ impl Paths {
         self.confbase.join("hosts")
     }
 
+    /// `confdir` materialized — the C-faithful version. `names.c:86`:
+    /// `confdir = xstrdup(CONFDIR "/tinc")` UNCONDITIONALLY. Our
+    /// `self.confdir` is `Option` (None when `--config` was given,
+    /// because makedirs doesn't NEED the parent then). But `cmd_
+    /// network` (`tincctl.c:2700`) reads `confdir` regardless —
+    /// `tinc -c /foo network` lists `/etc/tinc/*/tinc.conf` not
+    /// `/foo/../*` (the latter would be wrong anyway; `-c` points
+    /// at ONE confbase, not a parent-of-confbases).
+    ///
+    /// This method materializes the C's always-set: `Some(x)` → `x`,
+    /// `None` → `CONFDIR/tinc`. Only `cmd_network` calls it; the
+    /// `Option` field is the right model for the OTHER consumer
+    /// (makedirs).
+    #[must_use]
+    pub fn confdir_always(&self) -> PathBuf {
+        // `self.confdir` is `Some` when confbase was DERIVED (from
+        // netname or default). `None` when `-c` was given. The C
+        // sets `CONFDIR/tinc` either way; we synthesize the same
+        // value here. The two paths ARE the same value when not -c
+        // (line 214 in `for_cli`), so this is just "always /etc/
+        // tinc" with extra steps. The extra steps document WHY.
+        self.confdir
+            .clone()
+            .unwrap_or_else(|| [CONFDIR, "tinc"].iter().collect())
+    }
+
     /// `hosts/NAME` — host config for one peer (or self).
     ///
     /// This is where `Ed25519PublicKey = ...` lives, plus `Address`,

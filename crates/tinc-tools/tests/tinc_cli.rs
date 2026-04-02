@@ -333,6 +333,63 @@ fn help_ignores_args() {
     assert!(out.status.success());
 }
 
+// ────────────────────────────────────────────────────────────────────
+// network — switch-reject + argc only (list reads compile-time
+// CONFDIR /etc/tinc, can't fake from integration test)
+// ────────────────────────────────────────────────────────────────────
+
+/// `tinc network NAME` → error with `-n` advice. Deliberate
+/// C-behavior-drop #2. The C `switch_network` mutates globals
+/// for the readline loop; we have no loop.
+#[test]
+fn network_switch_rejected() {
+    let out = tinc(&["network", "foo"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The advice. "-n" is what to use INSTEAD.
+    assert!(stderr.contains("-n"), "stderr: {stderr}");
+}
+
+/// `tinc network .` → different advice (no -n). The `.` sentinel
+/// from `tinc network` list output means "anonymous network";
+/// `tinc COMMAND` (no -n) reaches it.
+#[test]
+fn network_switch_dot() {
+    let out = tinc(&["network", "."]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("default") || stderr.contains("no -n"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `tinc network a b` → too many. C `tincctl.c:2691`.
+#[test]
+fn network_too_many_args() {
+    let out = tinc(&["network", "a", "b"]);
+    assert!(!out.status.success());
+}
+
+/// `tinc network` (list mode) — we can't control CONFDIR (it's
+/// `option_env!` compile-time). The test runner's /etc/tinc may
+/// or may not exist. Either way the binary shouldn't PANIC.
+///
+/// If /etc/tinc doesn't exist: ENOENT, exit nonzero. If it does:
+/// some output (or none), exit zero. Both fine. Just "doesn't
+/// crash." The unit tests in `cmd::network` cover the actual
+/// list logic against a fake dir.
+#[test]
+fn network_list_doesnt_panic() {
+    let out = tinc(&["network"]);
+    // Either success (confdir exists) or clean error (ENOENT).
+    // No panic, no signal-termination. `code()` is `Some(_)` for
+    // normal exit, `None` for signal.
+    assert!(out.status.code().is_some(), "signal-terminated?");
+    // If it errored, stderr has the path. If it succeeded,
+    // stderr is empty. Either is fine.
+}
+
 /// Help output doesn't list `help` or `version` (recursive). The
 /// `help: ""` empty string makes print_help skip them.
 #[test]

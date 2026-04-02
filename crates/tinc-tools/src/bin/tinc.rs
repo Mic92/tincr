@@ -407,6 +407,25 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_help,
         help: "",
     },
+    // ─── network: list networks under confdir ────────────────────
+    // C `tincctl.c:3042`: `{"network", cmd_network, false}`. The
+    // C has TWO modes (list / switch); we only have list. The
+    // switch is C-behavior-drop #2 — only useful in the readline
+    // loop, which we don't have. `tinc network NAME` errors with
+    // "use -n NAME" advice.
+    //
+    // `needs_daemon: false` — just reads the filesystem. No
+    // daemon, no socket, no pidfile.
+    //
+    // C help (`tincctl.c:197`): "List all known networks, or
+    // switch to the one named NETNAME." We drop the switch half
+    // from the help too.
+    CmdEntry {
+        name: "network",
+        needs_daemon: false,
+        run: cmd_network,
+        help: "network                     List all known networks",
+    },
 ];
 
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
@@ -963,6 +982,20 @@ fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> 
 fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
     print_help();
     Ok(())
+}
+
+/// `cmd_network`: list or (rejected) switch. `tincctl.c:2690-2730`.
+///
+/// `tinc network` → list. `tinc network NAME` → "use -n NAME"
+/// error. `tinc network a b` → too many. C `:2691-2694`: `argc > 2`.
+fn cmd_network(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let arg = match args {
+        [] => None,
+        [name] => Some(name.as_str()),
+        // C `tincctl.c:2693`: `"Too many arguments!"`.
+        _ => return Err(CmdError::TooManyArgs),
+    };
+    cmd::network::run(paths, arg)
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).

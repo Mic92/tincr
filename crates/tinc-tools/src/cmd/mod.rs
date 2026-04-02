@@ -28,6 +28,7 @@ pub mod info;
 pub mod init;
 pub mod invite;
 pub mod join;
+pub mod network;
 pub mod sign;
 pub mod stream;
 pub mod top;
