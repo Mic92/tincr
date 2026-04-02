@@ -26,7 +26,7 @@
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
 | **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
-| **Ship #2 (4a) — `tinc` CLI** | ✅ 10/11 | `tinc-tools: fsck — keypair coherence...` | All filesystem commands landed. `fsck` four-check scan with `Finding` enum testable seam. 279 tests + 9 cross-impl. `edit` is 11/11 only if you squint — its `reload` half is 5b-coupled and the `$EDITOR` half alone isn't useful. **4a is done.** |
+| **Ship #2 (4a) — `tinc` CLI** | ✅ 12 cmds | `tinc-tools: invite — KAT-verified URL crypto...` | Filesystem cmds + `invite`. Reading `invitation.c` showed it's NOT 5b: `cmd_invite`'s daemon calls are best-effort skips, `cmd_join`'s socket goes to a *peer's listen port* (meta-greeting + SPTPS), never the control socket. The plan misfiled it. `tinc-crypto::invite` for the URL kernel (sha512-of-b64-string composition, KAT-tested). 311 tests + 9 cross-impl. `join` next — it's `cmd_invite`'s pair. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -585,9 +585,28 @@ Two dead-C-code drops noted at point of decision: `ecdsa_get_base64_public_key` 
 
 fsck `--force` writes the pubkey as a **PEM block**, not `Ed25519PublicKey =` config-line. C does the same (`ecdsa_write_pem_public_key`, `fsck.c:286`). Both forms valid (the loader checks config-line first, PEM second). The visual distinction is *useful*: PEM block in `hosts/NAME` means "fsck repaired this", config-line means "init/genkey wrote this." Preserved deliberately.
 
-`edit` defers to 5b — its `reload` half needs a daemon socket; `$EDITOR` spawn alone isn't useful. **4a is done.**
+`edit` defers to 5b — its `reload` half needs a daemon socket; `$EDITOR` spawn alone isn't useful.
 
 The `variables[]` table also unblocked **`set`/`get`'s parse half** (`lookup_var` does name validation + canonicalization; `VAR_SAFE` does the `--force` gate). Not building them yet — the daemon-reload half is 5b — but the table sits in `tinc-conf` where both reach it.
+
+##### ✅ `invite` — landed (commit `tinc-tools: invite — KAT-verified URL crypto...`)
+
+**The plan misfiled `invitation.c` under 5b.** Reading the source showed both halves are 4a-shaped:
+
+| | C calls | What it actually is |
+|---|---|---|
+| `cmd_invite` | `connect_tincd(false)` ×2 | best-effort skips ("if daemon down, no-op"). The hosts/NAME exists check covers disk; the daemon check covered "node in live graph but host file deleted" which is operator error |
+| `cmd_join` | `socket()` + `connect()` | TCP to the **inviter's listen port** — meta-protocol `0 ?PUBKEY 17.x` greeting then SPTPS pump. Never touches the control socket. Uses `tinc-sptps` directly |
+
+The "talks to a daemon" surface read confused "talks to *a* daemon over TCP" (4a, just like `sptps_test` does) with "talks to *the local* daemon over the control socket" (5b). `cmd_join` is the former.
+
+The URL crypto kernel went into `tinc-crypto::invite` because it's used by three places identically: `cmd_invite` (computes), `cmd_join` (verifies key_hash), the daemon's `receive_invitation_sptps` (recomputes cookie_hash to find the file). **Any boundary disagreement = silent interop failure** — join connects, handshakes, sends cookie, daemon says "non-existing invitation", no further hint. KAT vectors via `gen_kat.c`; per-stage assertions so the failure points at the broken stage.
+
+One sharp boundary: `key_hash = sha512(b64_std(pubkey))[..18]` hashes the **b64 string**, not the raw key. `strlen` in `sha512(fingerprint, strlen(fingerprint), hash)` is the giveaway. Unusual, but the daemon sends the same b64 string in its meta-greeting and `cmd_join` hashes *that* — raw bytes on one side and b64 on the other = failed auth.
+
+`get_my_hostname` HTTP probe **dropped** (-120 LOC). C TCP-connects to `tinc-vpn.org:80` with hand-crafted `GET /host.cgi` to discover external IP. We require `Address` to be set. Reorder vs C: address checked *before* `makedirs` so no-Address failure leaves no `invitations/` debris.
+
+**`join` is invite's pair, lands next**, and it brings the daemon stub: `cmd_join`'s receive callback is type-compatible with `protocol_auth.c::receive_invitation_sptps` — the in-process test harness that proves invite↔join roundtrip *is the seed* of the daemon's invitation handler. Not building a stub-then-throwing-it-away.
 
 ### Phase 5b: RPC half + new control protocol
 
@@ -637,10 +656,10 @@ of `control.c` + the `sscanf` jungle in `tincctl.c` cmd_dump.
 | C source | Rust |
 |---|---|
 | `info.c`, `top.c` | control-socket queries + `ratatui` for `tinc top` |
-| `invitation.c` | invitation URL generation/consumption — **uses SPTPS from Phase 2**, also writes config (straddles 4a/5b) |
 | `tincctl.c` `cmd_dump` family | one fn per `CtlRequest` variant |
 | `control.c` | daemon-side `match` |
-| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` script generation (used by invitation, not by core RPC) |
+| ~~`invitation.c`~~ | **Reclassified to 4a.** Neither half uses the control socket. `cmd_invite`'s `connect_tincd` calls are best-effort skips; `cmd_join` TCPs to the *inviter's listen port*, not the control socket. The plan confused "talks to a daemon" with "talks to the control socket". `invite` landed; `join` next. |
+| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` generation. Used by `cmd_join`'s `finalize_join` for `Ifconfig`/`Route` invitation keywords. Stub for now (placeholder `tinc-up.invitation` only); real per-platform script generation lands when someone needs it. |
 
 **Windows caveat unchanged:** named pipe, `windows-sys` raw
 `CreateFileW`. ~100 LOC behind `#[cfg(windows)]`.
