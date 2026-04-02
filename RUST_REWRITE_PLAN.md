@@ -31,6 +31,7 @@
 | **5b chunk 2 — `cmd_config`** | ✅ +5 cmds | `tinc-tools: get/set/add/del — config-file editing, opportunistic reload` | Three-stage seam (`parse_var_expr` / `build_intent` / `run_edit`). Seventh `strcspn` tokenizer. `tinc-proto` dep added (Subnet validation only). The single-adapter argv→Action bug: `tinc add ConnectTo bob` would have routed GET→SET-via-coercion, *deleting* other ConnectTo lines — caught by reading the fall-through, not by a test. Four 1-line adapters. `config_set_fires_reload`: `tinc set` sends `"18 1\n"` to a real fake-daemon. |
 | **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. **Four-for-four**: chunk-2's plan said "format depends on daemon, lands with daemon" — wrong, format is pinned by `node.c:210` NOW. `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. |
 | **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | **Five-for-five**: chunk-3's deferred row said "daemon side already has `REQ_DUMP_NODES item` (filter by name)" — wrong. `control.c:63` is `case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type. The third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
+| **5b chunk 5 — `cmd_top`** | ✅ +1 cmd | `tinc-tools: top — real-time per-node traffic, hand-rolled curses shim` | **Six-for-six** (ratatui dropped, see chunk-5 section). `top.c:248-257`'s `i` field is a stable-sort EMULATION: `qsort` isn't stable, the `i` tiebreak makes it stable across frames. `slice::sort_by` IS stable; don't port `i`, sort the same Vec in-place. Two C bugs ported: daemon-restart `wrapping_sub` (the spike IS the signal); first-tick epoch-seconds interval (`static struct timeval prev` zero-init → tick-1 rate ≈ counter/1.7e9 ≈ 0). `~400 LOC` estimate → 1984 LOC actual, **5× off**. 608 tests + 9 cross-impl, 28 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -808,7 +809,7 @@ after the NODES terminator. If we'd pipelined (sent all three before
 reading), or didn't short-circuit on not-found, the assert catches
 it — read_line gets `"18 4 dave\n"` not 0 bytes.
 
-#### ⏸️ chunk 5: `top`, `log`, streaming — partially landed
+#### ✅ chunk 5: `top` landed — `log`/`pcap`/`start`/`edit` deferred
 
 ~~**`top`: `ratatui`. The TUI is the work.**~~ **Reversed.** `top.c`'s
 curses surface, exhaustively counted: `initscr`/`endwin`/`erase`/
@@ -854,9 +855,41 @@ ISIG)` keeps OPOST. EOF on stdin → `Some(b'q')` (not `None`, which
 would spin: poll says readable, read returns 0, repeat). Ctrl-C
 still leaves the terminal raw — KNOWN GAP, the C has it too.
 
+**`cmd::top` landed at `5778a627`, 1984 LOC, +29 unit + 2 integration.**
+The **5× estimate miss** (~400 → 1984): each of the four pieces
+(TrafficRow / Stats merge / 7-way sort / render) was correctly
+identified, but each had an INVARIANT not visible until writing it:
+
+| Piece | The thing the estimate didn't see | Why it wasn't visible from `top.c` |
+|---|---|---|
+| `Stats::sort` | `top.c:248-257`'s `i` field is a stable-sort EMULATION. `qsort` isn't stable; the `i` tiebreak makes it stable across frames. | The 10 lines of C were ALL read pre-estimate. "Stable sort emulation" wasn't apparent until asking "what does the `i` tiebreak DO that `Ordering::Equal` doesn't?" — and the answer is "nothing, IF your sort is already stable." That's a property of the SORT, not the comparator. The C source for `qsort` (glibc's introsort) is where the answer lives. |
+| `Stats::update` first tick | `Instant` has no zero. `static struct timeval prev` zero-init → `gettimeofday() - {0,0}` is wall-clock time. Can't `Instant::default()`. | C `static` zero-init is implicit; `prev = {0,0}` doesn't APPEAR in the source. The bug is in the absence. |
+| `wrapping_sub` | Is the wrap a BUG (clamp it) or BEHAVIOR (port it)? It's both — the daemon-restart spike is observable, self-correcting, and a useful signal. | C unsigned subtraction is well-defined wrap; the C source doesn't ANNOTATE it because nothing's wrong from C's perspective. The decision to port-not-clamp isn't IN the C; it's a judgment call ABOUT the C. |
+| `render_header` row 2 | `chgat(-1, A_REVERSE, ...)` extends reverse to end-of-line. ANSI equivalent: `CLEAR_EOL` while still in REVERSE (background-color-erase). | curses primitives → ANSI is a translation table the C source can't contain. |
+
+The **third failure mode**: 1-3 were "guessed without reading the
+C". 4-5 were "read the C, stopped at the wrong file". This one is
+"read the right file, completely, and the meaning still wasn't
+there." The `i` field's purpose lives in the relationship between
+`top.c` and glibc's `qsort` — neither file alone says "stable sort
+emulation." The estimate methodology can't fix this short of
+actually writing the comparator and noticing the question.
+
+| Estimate-miss tally | C LOC | estimate | actual | ratio | what was forgotten |
+|---|---|---|---|---|---|
+| `info.c` | 356 | ~150 | ~520 | 3.5× | `info_subnet` half + drain loop + localtime shim + cascade enum + column-exact format |
+| `top.c` | 397 | ~400 | 1984 | 5× | stable-sort discovery + first-tick `Instant`-has-no-zero + wrapping_sub judgment + `chgat(-1)` translation + 29 tests |
+
+The ratio is GROWING. Every chunk so far was a port of C-that-
+works; the C compresses correctness into invisible defaults
+(`static` zero-init, well-defined unsigned wrap, qsort's instability
+being a non-issue when there's a tiebreak). Rust makes each one
+explicit. The explicitness is the LOC. The estimate methodology —
+count C lines, multiply by a factor — can't see the invisible
+defaults because they're invisible.
+
 | Command | Blocked on |
 |---|---|
-| `top` (the loop + render) | Nothing. `tui.rs` is consumed only by `cmd::top::run()`. The interesting half — `update()` BTreeMap merge + rate compute + 7-way `sortfunc()` — is curses-INDEPENDENT and unit-testable. `redraw()` is `format!` with `goto()` prefixes. ~400 LOC remaining. |
 | `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
 | `start`/`restart` | Daemon binary needs to exist. |
 | `edit` | `$EDITOR` spawn + the post-edit reload. The reload is one line now. Lands when someone wants it. |
@@ -864,7 +897,7 @@ still leaves the terminal raw — KNOWN GAP, the C has it too.
 | C source | Rust |
 |---|---|
 | `info.c` | ✅ `cmd::info` — the dead third arg, `Reachability` cascade, `Subnet::matches`. `info.c` fully consumed. |
-| `top.c` | `tui.rs` shim ✅ + `cmd::top` (the curses-independent half: `update`/`sortfunc`/`redraw`) |
+| `top.c` | ✅ `tui.rs` shim + `cmd::top` — the `i` field is a stable-sort emulation (don't port; `sort_by` is stable), `wrapping_sub` for daemon-restart spike, first-tick epoch-seconds bug-port. `top.c` fully consumed. |
 | `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
 | `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
