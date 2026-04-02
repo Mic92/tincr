@@ -29,7 +29,8 @@
 | **Ship #2 (4a) — `tinc` CLI** | ✅ 13 cmds | `tinc-tools: join — invite's pair, in-process roundtrip...` | invite/join pair complete. `invite_join_roundtrip_in_process`: two `Sptps` structs ping-pong (no subprocess, no socket) — invite writes file → server stub recovers via cookie→hash → SPTPS pump → `finalize_join` writes confbase → `fsck` approves. The server stub *is* `protocol_auth.c::receive_invitation_sptps` minus `connection_t*`; lifts to daemon unchanged. `invitation.c` (1484 LOC) consumed at ~-470 LOC after dropping HTTP probe / `ifconfig.c` / tty prompts. |
 | **5b chunk 1 — control transport + simple RPCs** | ✅ +7 cmds | `tinc-tools: control socket transport + 7 simple RPC commands` | `CtlSocket` (the `connect_tincd` channel) + `pid`/`stop`/`reload`/`retry`/`purge`/`debug`/`disconnect`. **Kept the C wire shape** — the line-JSON-replacement plan didn't survive reading `control.c`; see 5b section for why. |
 | **5b chunk 2 — `cmd_config`** | ✅ +5 cmds | `tinc-tools: get/set/add/del — config-file editing, opportunistic reload` | Three-stage seam (`parse_var_expr` / `build_intent` / `run_edit`). Seventh `strcspn` tokenizer. `tinc-proto` dep added (Subnet validation only). The single-adapter argv→Action bug: `tinc add ConnectTo bob` would have routed GET→SET-via-coercion, *deleting* other ConnectTo lines — caught by reading the fall-through, not by a test. Four 1-line adapters. `config_set_fires_reload`: `tinc set` sends `"18 1\n"` to a real fake-daemon. |
-| **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. **Four-for-four**: chunk-2's plan said "format depends on daemon, lands with daemon" — wrong, format is pinned by `node.c:210` NOW. `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. 531 tests + 9 cross-impl, 26 commands. |
+| **5b chunk 3 — `cmd_dump`** | ✅ +2 cmds | `tinc-tools: dump nodes/edges/subnets/connections/graph/invitations` | The `" port "` literal: `sockaddr2hostname` returns `"10.0.0.1 port 655"` as ONE string, daemon writes via one `%s`, CLI parses `%s port %s`. Daemon printf has fewer conversions than CLI sscanf, per hostname. `Tok::lit()` + `Tok` made `pub`. **Four-for-four**: chunk-2's plan said "format depends on daemon, lands with daemon" — wrong, format is pinned by `node.c:210` NOW. `dump_nodes_against_fake` is the cross-impl seam: byte-exact `node.c:210` wire → byte-exact `tincctl.c:1310` stdout. |
+| **5b chunk 4 — `cmd_info`** | ✅ +1 cmd | `tinc-tools: info NODE\|SUBNET\|ADDRESS — three sequential dumps + maskcmp` | **Five-for-five**: chunk-3's deferred row said "daemon side already has `REQ_DUMP_NODES item` (filter by name)" — wrong. `control.c:63` is `case REQ_DUMP_NODES: return dump_nodes(c)`, no sscanf past the type. The third arg is dead on the wire. `forbid → deny` for one `localtime_r` shim. `Subnet::matches` + `maskcmp` to `tinc-proto`. The `/` and `#` checks are SUBSTRING checks (`strchr`), not parsed-value: `10.0.0.5/32` ≡ `10.0.0.5` semantically but `/` makes it exact-mode. Actual ~520 LOC vs estimate ~150. 573 tests + 9 cross-impl, 27 commands. |
 | 3 — Device & transport | | | |
 | 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
@@ -763,11 +764,54 @@ after the kind switch. We can't — `connect` needs resolved pidfile,
 `resolve_runtime` is `&mut`, our adapter gets `&Paths`. invitations
 pays one harmless `access(2)` probe.
 
-#### ⏸️ chunk 4: `info`, `log`, streaming, `top` — deferred
+#### ✅ chunk 4: `cmd_info` — the dead third arg
+
+`info.c`, 356 LOC → ~520 LOC Rust + 880 LOC tests (the 3× ratio).
+
+**Five-for-five.** Chunk-3's deferred table said:
+
+> The daemon side already has `REQ_DUMP_NODES item` (filter by
+> name, `info.c:53` sends a third arg).
+
+Wrong. `info.c:53` does send `"18 3 alice"`. But `control.c:63`
+is bare `case REQ_DUMP_NODES: return dump_nodes(c)` — no `sscanf
+(request, "%*d %*d %s")` to read the name. The daemon dumps ALL
+nodes regardless. Filtering is client-side. Either a planned
+daemon-side filter that never landed (in 12 years), or a debug
+breadcrumb. The fake-daemon test asserts `"18 3 bob"` arrives
+(wire-compat) and the CLI filters itself.
+
+The ~150 LOC estimate was off by 3.5×. What it missed:
+
+| Missed | Why |
+|---|---|
+| Three loops not one | NODES match-then-**drain** → EDGES filter → SUBNETS filter. The drain (`info.c:102-106`) is structurally separate — found alice on row 3 of 50, daemon's still sending 47 more. |
+| `info_subnet` half | The estimate row said `info NODE` — forgot `info.c:249-345`, the route-lookup half. `Subnet::matches` + `maskcmp` to `tinc-proto`, +160 LOC there. |
+| `localtime_r` | `nix` doesn't wrap it (TZ-file libc fn, not a syscall). `forbid → deny` + one `#[allow(unsafe_code)]` shim. The decision cost more than the 50 LOC. |
+| 7-way Reachability cascade | Separate enum + Display impl. Same shape as the DOT color cascade but different conditions. |
+| Column-width-exact format | `Status:` is 13 chars (values have leading space); everything else is 14 chars (values don't). Net column 14 either way. `"packets  bytes"` is two spaces. The golden test catches single-space drift. |
+
+The `/` and `#` checks (`info.c:257-258`) are SUBSTRING checks
+(`strchr`), not parsed-value checks. `10.0.0.5/32` and `10.0.0.5`
+parse to the same `Subnet` (V4, /32), but `/` in the string makes
+it exact-mode ("show me who advertises EXACTLY /32") vs address-
+mode ("which subnets ROUTE this"). String shape carries intent that
+the parsed value loses.
+
+Partial parses for edges: `info.c:204` is `sscanf("%d %d %s %s")`
+— only the first two strings of the 8-field row. A malformed
+`weight` would pass C's `n != 4` and fail our `EdgeRow::parse`.
+Match the parse-slack: `split_ascii_whitespace().take(2)`.
+
+`info_node_not_found_short_circuits`: the daemon-side asserts EOF
+after the NODES terminator. If we'd pipelined (sent all three before
+reading), or didn't short-circuit on not-found, the assert catches
+it — read_line gets `"18 4 dave\n"` not 0 bytes.
+
+#### ⏸️ chunk 5: `log`, streaming, `top` — deferred
 
 | Command | Blocked on |
 |---|---|
-| `info NODE` | Nothing structural — `info.c:51-247` re-uses the four `NodeRow`/`EdgeRow`/`SubnetRow` parsers we just built. The daemon side already has `REQ_DUMP_NODES item` (filter by name, `info.c:53` sends a third arg). One more recv loop. ~150 LOC. |
 | `log`, `pcap` | Streaming. `recv_exact` reading from `BufReader::buffer()` first (the C `recvdata`/`recvline` shared-buffer concern). |
 | `top` | `DUMP_TRAFFIC` (`node.c:226`) + `ratatui`. The dump infrastructure is done; the parser is 5-field. The TUI is the work. |
 | `start`/`restart` | Daemon binary needs to exist. |
@@ -775,7 +819,7 @@ pays one harmless `access(2)` probe.
 
 | C source | Rust |
 |---|---|
-| `info.c` | `cmd::info` — `NodeRow::parse` etc. already exist; just the multi-dump glue |
+| `info.c` | ✅ `cmd::info` — the dead third arg, `Reachability` cascade, `Subnet::matches`. `info.c` fully consumed. |
 | `top.c` | `DUMP_TRAFFIC` + `ratatui` |
 | `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
 | `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
@@ -917,7 +961,19 @@ Aggressively shed scope:
 
    `cross_init_key_loads_in_c` is the closure on the wire-compat question for Ship #2. It pulls together every layer: `OsRng` → `SigningKey::from_seed` → `write_pem` → `tinc-b64` → file → C `ecdsa_read_pem_private_key` → C `sptps_start` → C `chacha20-poly1305` decrypt → 256 bytes match. Any link wrong — key derivation, blob layout, PEM armor, LSB-first b64 — the C handshake fails. It doesn't.
 
-   **The control protocol stays.** The line-JSON replacement plan didn't survive reading `control.c`: the pidfile is `0600` not `0644` (`umask\|077` before `fopen`), so the cookie is fs-perms auth, same as ssh-agent. The `connection_t` overload is a *daemon-side* concern — our daemon uses a separate type, wire bytes unchanged. ~~The dump format is *private* (CLI and daemon ship together), so it's ours when our `Node` exists.~~ **Chunk 3 reversed this too**: dump format is pinned by `node.c:210` etc., readable today, and reading it gets a Rust-CLI↔C-daemon cross-impl seam for free. **5b shipped chunks 1–3** at 26 commands. **Four-for-four** on read-before-build reversing the plan: export-format / invite→5b→4a / control→JSON→keep-C / dump→defer→now.
+   **The control protocol stays.** The line-JSON replacement plan didn't survive reading `control.c`: the pidfile is `0600` not `0644` (`umask\|077` before `fopen`), so the cookie is fs-perms auth, same as ssh-agent. The `connection_t` overload is a *daemon-side* concern — our daemon uses a separate type, wire bytes unchanged. ~~The dump format is *private* (CLI and daemon ship together), so it's ours when our `Node` exists.~~ **Chunk 3 reversed this too**: dump format is pinned by `node.c:210` etc., readable today, and reading it gets a Rust-CLI↔C-daemon cross-impl seam for free. **5b shipped chunks 1–4** at 27 commands. **Five-for-five** on read-before-build reversing the plan: export-format / invite→5b→4a / control→JSON→keep-C / dump→defer→now / info→daemon-filters→client-filters.
+
+   The five reversals split into two failure modes. The first three
+   were "guessed at the abstraction layer, the C source is more
+   concrete": export ISN'T `KEY = VAL`, it's the host file verbatim;
+   pidfile ISN'T `0644`, `umask|077` makes it `0600`. The last two
+   were **"read the C source but stopped at the wrong file"**:
+   `info.c:53` does send the third arg, but `control.c:63` ignores
+   it. The send-side is necessary but not sufficient — reading half
+   of a request/response pair is reading zero of it. The chunk-3
+   estimate read `info.c` (correctly) and inferred `control.c`
+   (wrongly). Same shape as a wire protocol where you've only seen
+   one peer's traffic.
 3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in
 
