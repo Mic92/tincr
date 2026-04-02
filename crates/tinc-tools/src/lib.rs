@@ -1,30 +1,26 @@
-//! Standalone binaries: `sptps_keypair`, `sptps_test`.
+//! Standalone binaries: `sptps_keypair`, `sptps_test`, `tinc`.
 //!
-//! These exist for one reason: **cross-implementation testing on real
-//! sockets.** The Phase 2 differential tests (`tinc-sptps/tests/vs_c.rs`)
-//! prove byte-identity in-process — same RNG seed, same wire bytes.
-//! That's necessary but not sufficient: it doesn't exercise the socket
-//! framing assumptions (TCP can split/coalesce, UDP can reorder),
-//! `OsRng` instead of seeded ChaCha, or the PEM key file format end to
-//! end.
+//! ## `sptps_keypair` / `sptps_test`
 //!
-//! `test/integration/sptps_basic.py` drives `sptps_keypair` to generate
-//! keys, then `sptps_test` server ↔ client to push 256 bytes through and
-//! diff. With `SPTPS_TEST_PATH` pointed at *this* binary, the same script
-//! tests Rust↔Rust. With one side C and one Rust: cross-impl on a real
-//! socket.
+//! Cross-implementation testing on real sockets. See `tests/self_roundtrip.rs`
+//! for the Rust↔C 2×2 matrix. The Phase 2 differential tests prove
+//! byte-identity given the same RNG seed; these prove wire compatibility
+//! with independent entropy.
 //!
-//! ## What's not ported
+//! `sptps_test.c`'s debug knobs (`--tun`, `--packet-loss`, `--special`
+//! line prefixes, Windows stdin-thread) aren't ported — not used by
+//! `sptps_basic.py`, port on demand. The `"Listening on (\d+)\.\.\."`
+//! stderr line *is* API — the test harness regexes it.
 //!
-//! `sptps_test.c` has a pile of debug knobs: `--tun` (Linux raw TUN
-//! device instead of stdio), `--packet-loss` (drop N% of inbound),
-//! `--special` (`#seqno`/`^rekey`/`$force-kex` line prefixes), Windows
-//! stdin-thread shim. None used by `sptps_basic.py`; port on demand.
+//! ## `tinc`
 //!
-//! ## What *is* API
+//! The CLI. Phase 4a: filesystem-only commands (`init`, eventually
+//! `generate-keys`/`export`/`import`/`fsck`/`sign`/`verify`). Phase 5b
+//! adds the daemon-RPC commands (`dump`/`top`/`log`/...) once there's
+//! a daemon to RPC against. See `RUST_REWRITE_PLAN.md` for the split.
 //!
-//! `sptps_basic.py` parses `"Listening on (\d+)\.\.\."` from stderr to
-//! find the bound port. That line's format is load-bearing.
+//! Shared code lives here as a lib crate (`names`, `keypair`, `cmd`);
+//! the binaries are thin entry points.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -32,4 +28,6 @@
 // tinc-crypto/tinc-sptps.
 #![allow(clippy::doc_markdown)]
 
+pub mod cmd;
 pub mod keypair;
+pub mod names;

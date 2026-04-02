@@ -1,0 +1,510 @@
+//! Integration tests for the `tinc` binary. Spawns it as a subprocess
+//! via `CARGO_BIN_EXE_tinc`, same pattern as `self_roundtrip.rs`.
+//!
+//! ## What this proves over the unit tests in `cmd/init.rs`
+//!
+//! The unit tests call `cmd::init::run()` directly. They prove the
+//! *function* works. They don't prove:
+//!
+//! - argv parsing (`-c` / `-n` / `--config=` glued form)
+//! - the dispatch table finds `init`
+//! - exit codes (success → 0, error → 1)
+//! - error messages go to stderr, not stdout
+//!
+//! Those are the binary's job. Test the binary.
+//!
+//! ## Cross-impl: `tinc init` → C `sptps_test`
+//!
+//! `cross_init_key_loads_in_c` is the load-bearing test. It runs
+//! `tinc init`, then takes the resulting `ed25519_key.priv` and uses
+//! it as input to the *C* `sptps_test`. If the C binary can establish
+//! an SPTPS session with that key, the PEM format and the 96-byte
+//! blob layout are correct end-to-end.
+//!
+//! Why this matters more than `cross_pem_read` in `self_roundtrip.rs`:
+//! that test uses keys from `sptps_keypair`, which writes PEM to a
+//! standalone `.priv` file. `tinc init` writes the *same* PEM but
+//! through a different code path (`cmd::init` uses `write_pem`
+//! directly with mode 0600 + `O_EXCL`, not `keypair::write_pair`).
+//! Same format, different writer — a future refactor that breaks one
+//! but not the other would slip through `cross_pem_read` but get
+//! caught here.
+
+#![allow(clippy::doc_markdown)]
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+fn bin(name: &str) -> PathBuf {
+    if let Some(p) = option_env!("CARGO_BIN_EXE_tinc") {
+        // The env var Cargo sets is per-binary. Map name → var.
+        // We only have three; hardcode.
+        let var = match name {
+            "tinc" => "CARGO_BIN_EXE_tinc",
+            "sptps_test" => "CARGO_BIN_EXE_sptps_test",
+            "sptps_keypair" => "CARGO_BIN_EXE_sptps_keypair",
+            _ => panic!("unknown bin {name}"),
+        };
+        if let Ok(p) = std::env::var(var) {
+            return PathBuf::from(p);
+        }
+        // Fall through to the path-based fallback.
+        let _ = p;
+    }
+    // CARGO_BIN_EXE_* not set (rare; cargo always sets it for [[bin]]s
+    // of the crate-under-test). Derive from the test binary's location:
+    // tests run from target/{profile}/deps/, binaries are in
+    // target/{profile}/.
+    let exe = std::env::current_exe().unwrap();
+    exe.parent().unwrap().parent().unwrap().join(name)
+}
+
+/// Run `tinc` with args, capture everything.
+fn tinc(args: &[&str]) -> std::process::Output {
+    Command::new(bin("tinc"))
+        .args(args)
+        // NETNAME from the parent env would change confbase resolution.
+        // Strip it so tests are hermetic. We *do* test the env var, but
+        // explicitly (by passing `.env("NETNAME", ...)` in that test).
+        .env_remove("NETNAME")
+        .output()
+        .expect("spawn tinc")
+}
+
+/// Run `tinc` with an extra env var. For NETNAME tests.
+fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(bin("tinc"));
+    cmd.args(args).env_remove("NETNAME");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("spawn tinc")
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Argv parsing & dispatch
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn help_exits_zero() {
+    let out = tinc(&["--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Usage: tinc"));
+    assert!(stdout.contains("init NAME"));
+    // Help goes to stdout, not stderr. C does this; `man` convention.
+    assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn version_exits_zero() {
+    let out = tinc(&["--version"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("tinc"));
+    assert!(stdout.contains("(Rust)"));
+}
+
+#[test]
+fn unknown_command_exits_nonzero() {
+    let out = tinc(&["frobnicate"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Unknown command"));
+    assert!(stderr.contains("frobnicate"));
+    // Error messages go to stderr. stdout is empty.
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn no_command_exits_nonzero() {
+    // Bare `tinc`. C enters shell mode; we don't have shell mode.
+    let out = tinc(&[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("No command given"));
+}
+
+#[test]
+fn unknown_option_exits_nonzero() {
+    let out = tinc(&["--bogus", "init", "alice"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--bogus"));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// `tinc init` through the binary
+// ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn init_via_dash_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+
+    let out = tinc(&["-c", confbase.to_str().unwrap(), "init", "alice"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The unit tests already check file contents/modes exhaustively.
+    // Here we just confirm the binary actually invoked the function.
+    assert!(confbase.join("tinc.conf").exists());
+    assert!(confbase.join("hosts/alice").exists());
+    assert!(confbase.join("ed25519_key.priv").exists());
+
+    // Progress message went to stderr, not stdout.
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Generating Ed25519"));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn init_via_glued_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+
+    // `--config=DIR` glued form. systemd unit files use this.
+    let out = tinc(&[&format!("--config={}", confbase.display()), "init", "bob"]);
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(confbase.join("tinc.conf")).unwrap(),
+        "Name = bob\n"
+    );
+}
+
+#[test]
+fn init_missing_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("No Name given"));
+    // Nothing created — arity check fires before any filesystem op.
+    assert!(!dir.path().join("tinc.conf").exists());
+}
+
+#[test]
+fn init_too_many_args() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init", "alice", "bob"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Too many arguments"));
+}
+
+#[test]
+fn init_bad_name() {
+    let dir = tempfile::tempdir().unwrap();
+    // Dash is not in `check_id`'s allowed set.
+    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init", "has-dash"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Invalid Name"));
+}
+
+#[test]
+fn init_reinit_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let cb = confbase.to_str().unwrap();
+
+    let out1 = tinc(&["-c", cb, "init", "alice"]);
+    assert!(out1.status.success());
+
+    let out2 = tinc(&["-c", cb, "init", "bob"]);
+    assert!(!out2.status.success());
+    let stderr = String::from_utf8(out2.stderr).unwrap();
+    assert!(stderr.contains("already exists"));
+}
+
+#[test]
+fn init_case_insensitive_dispatch() {
+    // C uses `strcasecmp` on the command name. `tinc INIT alice` works.
+    // Nobody types this, but it's free fidelity.
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let out = tinc(&["-c", confbase.to_str().unwrap(), "INIT", "alice"]);
+    assert!(out.status.success());
+    assert!(confbase.join("tinc.conf").exists());
+}
+
+// ────────────────────────────────────────────────────────────────────
+// NETNAME env var
+// ────────────────────────────────────────────────────────────────────
+
+/// `NETNAME` from env reaches `Paths::for_cli`. C: `tincctl.c:258-263`.
+///
+/// Direct testing is tricky — env-derived netname resolves to
+/// `CONFDIR/tinc/NETNAME`, and `CONFDIR` is `/etc` baked at compile
+/// time, which we can't write to in tests. The first attempt was
+/// asserting the netname appears in the error path, but `makedir`
+/// runs on `confdir` (parent) *before* `confbase` (child), so the
+/// EPERM is on `/etc/tinc` and netname never makes it into the error.
+///
+/// Instead: use the both-given warning as the observable. Set
+/// `NETNAME` in env, also pass `-c`, expect the "Both netname and
+/// configuration directory given" warning. The warning is emitted by
+/// `Paths::for_cli` *iff* `input.netname.is_some()`. If the env var
+/// wasn't being read, `netname` would be `None` (we env_remove'd it
+/// from inheritance) and there'd be no warning.
+#[test]
+fn netname_env_reaches_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+
+    let out = tinc_with_env(
+        &[("NETNAME", "fromenv")],
+        &["-c", confbase.to_str().unwrap(), "init", "alice"],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // The warning proves the env var was read. If `parse_global_options`
+    // didn't read NETNAME, `input.netname` would be None and `for_cli`
+    // wouldn't warn.
+    assert!(
+        stderr.contains("Both netname and configuration directory given"),
+        "expected both-given warning, got: {stderr}"
+    );
+    // confbase wins, so init still succeeded at the -c path.
+    assert!(confbase.join("tinc.conf").exists());
+}
+
+/// `-n` flag (not env) also reaches `for_cli`. Same observable.
+#[test]
+fn netname_flag_reaches_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+
+    let out = tinc(&[
+        "-n",
+        "fromflag",
+        "-c",
+        confbase.to_str().unwrap(),
+        "init",
+        "alice",
+    ]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Both netname and configuration"));
+}
+
+#[test]
+fn netname_dot_is_noop() {
+    // `NETNAME=.` means "no netname" — `tincctl.c:267-270`. With `-c`
+    // also given, the netname resolution doesn't matter (confbase
+    // wins), but we shouldn't get the "Both netname and config given"
+    // warning either, because `.` was normalized to None *before* the
+    // both-given check... wait, no. The C does the both-given check
+    // in `make_names`, the `.` normalization in `parse_options`.
+    // `parse_options` runs first. So `NETNAME=. tinc -c /tmp/x init`
+    // sees netname=None confbase=/tmp/x → no warning.
+    //
+    // Our `for_cli` does the both-check; our `parse_global_options`
+    // does the `.` normalization. Same order. Confirm: no warning.
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let out = tinc_with_env(
+        &[("NETNAME", ".")],
+        &["-c", confbase.to_str().unwrap(), "init", "alice"],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // The warning string from `Paths::for_cli`.
+    assert!(!stderr.contains("Both netname and configuration"));
+}
+
+#[test]
+fn netname_traversal_rejected() {
+    let out = tinc_with_env(&[("NETNAME", "../escape")], &["init", "alice"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Invalid character in netname"));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Cross-impl: `tinc init` key loads in C `sptps_test`
+// ────────────────────────────────────────────────────────────────────
+
+/// Run `tinc init`, take the resulting private key, hand it to the C
+/// `sptps_test`. If the C binary can complete a handshake with that
+/// key, the PEM format and blob layout are correct end-to-end.
+///
+/// The test setup is the same shape as `self_roundtrip.rs::scenario` —
+/// server listens, client connects, push bytes, diff. The difference:
+/// the *key files* come from `tinc init`, not `sptps_keypair`.
+///
+/// Why both ends use init-generated keys: maximizes coverage. C-server
+/// loads alice's private key (PEM read), C-client loads alice's
+/// *public* key from a synthesized PEM file (we extract it from
+/// `hosts/alice` and re-wrap). Both directions of the format.
+#[test]
+#[cfg(unix)]
+fn cross_init_key_loads_in_c() {
+    let Some(c_sptps_test) = std::env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from) else {
+        eprintln!("SKIP: TINC_C_SPTPS_TEST not set");
+        return;
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Two confbases — alice and bob — so we have two distinct keypairs.
+    // Real tinc deployment shape.
+    let alice_base = dir.path().join("alice");
+    let bob_base = dir.path().join("bob");
+
+    let out = tinc(&["-c", alice_base.to_str().unwrap(), "init", "alice"]);
+    assert!(out.status.success(), "{out:?}");
+    let out = tinc(&["-c", bob_base.to_str().unwrap(), "init", "bob"]);
+    assert!(out.status.success(), "{out:?}");
+
+    // The private keys are PEM files — sptps_test reads them directly.
+    let alice_priv = alice_base.join("ed25519_key.priv");
+    let bob_priv = bob_base.join("ed25519_key.priv");
+
+    // The *public* keys are config lines in hosts/NAME, not PEM files.
+    // sptps_test wants PEM. Extract the b64, decode (tinc LSB-first),
+    // re-wrap as PEM. This is what a peer would do when reading a
+    // host file: `get_config_string("Ed25519PublicKey")` →
+    // `ecdsa_set_base64_public_key` → key in memory. We replicate that
+    // pipeline, then dump back to PEM for sptps_test.
+    let alice_pub = extract_pubkey_to_pem(&alice_base.join("hosts/alice"), dir.path(), "alice");
+    let bob_pub = extract_pubkey_to_pem(&bob_base.join("hosts/bob"), dir.path(), "bob");
+
+    // ─── Now the actual SPTPS handshake. C both sides. ─────────────
+    // alice serves (responder), bob connects (initiator).
+    // This is the `self_roundtrip.rs` choreography, inlined and
+    // simplified (we don't need the full Impl matrix here, just C↔C
+    // with init-generated keys).
+
+    let mut server = Command::new(&c_sptps_test)
+        .arg("-4")
+        .arg("-r")
+        .arg(&alice_priv)
+        .arg(&bob_pub)
+        .arg("0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn C server");
+
+    let mut server_stderr = server.stderr.take().unwrap();
+    let port = wait_for_port(&mut server_stderr);
+
+    let mut client = Command::new(&c_sptps_test)
+        .arg("-4")
+        .arg("-q")
+        .arg(&bob_priv)
+        .arg(&alice_pub)
+        .arg("localhost")
+        .arg(port.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn C client");
+
+    // Push 256 bytes.
+    let data: Vec<u8> = (0..=255).collect();
+    {
+        let mut stdin = client.stdin.take().unwrap();
+        stdin.write_all(&data).unwrap();
+    }
+
+    // Read it back from the server.
+    let mut server_stdout = server.stdout.take().unwrap();
+    let mut received = vec![0u8; data.len()];
+    let mut got = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while got < data.len() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout reading server stdout (got {got}/{})",
+            data.len()
+        );
+        let n = server_stdout.read(&mut received[got..]).unwrap();
+        assert!(n != 0, "server stdout EOF after {got} bytes");
+        got += n;
+    }
+
+    // The proof.
+    assert_eq!(received, data, "C↔C handshake with tinc-init keys");
+
+    // Cleanup. Stream mode → server exits on TCP FIN.
+    let client_status = client.wait().unwrap();
+    assert!(client_status.success(), "client: {client_status:?}");
+
+    // Hold stderr open until server exits (SIGPIPE footgun — see
+    // self_roundtrip.rs `wait_for_port` doc).
+    let drain = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = server_stderr.read_to_end(&mut sink);
+    });
+    let server_status = server.wait().unwrap();
+    let _ = drain.join();
+    assert!(server_status.success(), "server: {server_status:?}");
+}
+
+/// Read `Ed25519PublicKey = <b64>` from a host file, decode the
+/// tinc-b64, re-wrap as PEM. This is the `ecdsa_set_base64_public_key`
+/// → `ecdsa_write_pem_public_key` pipeline, manually.
+#[cfg(unix)]
+fn extract_pubkey_to_pem(host_file: &Path, out_dir: &Path, name: &str) -> PathBuf {
+    let contents = std::fs::read_to_string(host_file).unwrap();
+    // Parse: `Ed25519PublicKey = <b64>\n`. We could use tinc-conf's
+    // parser here, but the format is simple enough that string ops
+    // suffice and don't pull in another dependency for the test.
+    let b64 = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("Ed25519PublicKey = "))
+        .expect("host file has Ed25519PublicKey line");
+
+    // tinc LSB-first b64 → 32 bytes.
+    let pubkey = tinc_crypto::b64::decode(b64).expect("valid tinc-b64");
+    assert_eq!(pubkey.len(), 32);
+
+    // Re-wrap as PEM. `sptps_test` calls `ecdsa_read_pem_public_key`
+    // which expects `-----BEGIN ED25519 PUBLIC KEY-----`.
+    let out_path = out_dir.join(format!("{name}.pub"));
+    let f = std::fs::File::create(&out_path).unwrap();
+    let mut w = std::io::BufWriter::new(f);
+    tinc_conf::pem::write_pem(&mut w, "ED25519 PUBLIC KEY", &pubkey).unwrap();
+
+    out_path
+}
+
+/// Parse `Listening on PORT...` from stderr. Same as `self_roundtrip.rs`.
+/// Takes `&mut` so the caller keeps stderr alive (SIGPIPE — see that
+/// file's `wait_for_port` doc, hard-won lesson).
+#[cfg(unix)]
+fn wait_for_port(stderr: &mut impl Read) -> u16 {
+    let mut buf = Vec::new();
+    let mut byte = [0u8];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout waiting for 'Listening on'; got: {}",
+            String::from_utf8_lossy(&buf)
+        );
+        let n = stderr.read(&mut byte).unwrap();
+        assert!(
+            n != 0,
+            "stderr EOF before 'Listening on'; got: {}",
+            String::from_utf8_lossy(&buf)
+        );
+        buf.push(byte[0]);
+        if byte[0] == b'\n' {
+            let line = String::from_utf8_lossy(&buf);
+            if let Some(rest) = line.strip_prefix("Listening on ") {
+                let port_str = rest.trim_end_matches("...\n");
+                return port_str.parse().unwrap();
+            }
+            buf.clear();
+        }
+    }
+}

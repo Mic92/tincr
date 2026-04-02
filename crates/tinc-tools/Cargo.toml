@@ -12,6 +12,10 @@ path = "src/bin/sptps_keypair.rs"
 name = "sptps_test"
 path = "src/bin/sptps_test.rs"
 
+[[bin]]
+name = "tinc"
+path = "src/bin/tinc.rs"
+
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-sptps = { path = "../tinc-sptps" }

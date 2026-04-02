@@ -432,21 +432,111 @@ pub trait Device: Send {
 
 ---
 
-## Phase 4 — `tinc` CLI (~2 weeks)
+## Phase 4 — `tinc` CLI (split: 4a filesystem, 5b RPC)
 
-`tincctl.c` is 3.4k LOC but it's the *least* risky: it's a client speaking the control-socket protocol (`doc/CONTROL`) plus an interactive shell.
+`tincctl.c` is 3.4k LOC but on closer inspection it splits cleanly
+into two halves with opposite dependency profiles:
+
+| Half | Commands | Needs daemon? | LOC |
+|---|---|---|---|
+| **Filesystem** | `init`, `generate-keys`, `export`/`import`, `exchange`, `edit`, `fsck`, `sign`/`verify`, `network` | ❌ pure config-file munging | ~2000 |
+| **Daemon RPC** | `dump`, `top`, `pcap`, `log`, `reload`, `connect`/`disconnect`, `purge`, `debug`, `retry`, `pid`, `info` | ✅ control socket | ~1000 |
+
+The `connect_tincd()`-calling commands in `tincctl.c`: 18 of 30. The
+rest never touch a socket. (`stop` is a borderline case — it sends
+`SIGTERM` after reading the pidfile, no protocol.)
+
+### Phase 4a: Filesystem half — **Ship #2**
+
+Lands now, before the daemon. The filesystem commands have no
+testability problem: their inputs are argv + on-disk files, their
+outputs are on-disk files. Integration tests via `tempdir` + actual
+file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 
 | C source | Rust |
 |---|---|
-| `tincctl.c` command dispatch | `clap` subcommands |
+| `tincctl.c` command dispatch | hand-rolled `match argv[1]` (same reasoning as `sptps_test`: clap is 10× deps for ~15 subcommands) |
+| `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
+| `tincctl.c` `cmd_generate_ed25519_keys` | `cmd/genkey.rs` — already have `keypair::generate`, just need the host-file output path |
+| `tincctl.c` `cmd_export`/`cmd_import` | `cmd/exchange.rs` — read `hosts/NAME`, wrap in `#---------- BEGIN HOST NAME ----------#` markers, mirror for import |
+| `tincctl.c` `cmd_sign`/`cmd_verify` | `cmd/sign.rs` — `tinc-crypto::sign` over a file, with a tinc-specific signature wrapper |
+| `fsck.c` | `cmd/fsck.rs` — config sanity checker. Reads `tinc.conf` + `hosts/*`, complains about missing keys, bad perms, etc. ~400 LOC of `if(!x) fprintf(stderr, ...)` |
+| `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
+| `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
+
+**Dropped from `cmd_init`:** RSA keygen (we're nolegacy). `check_port`
+(tries to bind 655, picks random high port if taken) is best-effort
+QoL — init succeeds without it; ship initially without, add later.
+
+**`names.c` baked-in `CONFDIR` problem.** The C build bakes
+`/etc`/`/usr/local/etc` at meson configure time (`dir_sysconf`). The
+Rust binary doesn't have a configure step. Options:
+  - `option_env!("TINC_CONFDIR")` at build time, default `/etc`. Nix
+    package sets it via `RUSTFLAGS` or env in the derivation.
+  - Runtime `--config` always required. Ugly for `tinc init`.
+  - XDG fallback when not root. The C does **not** do this — it's
+    `/etc/tinc` always — but it's the right answer for unprivileged
+    operation. `tinc init` as non-root currently fails with EACCES on
+    `/etc/tinc` mkdir, which is a known papercut.
+
+Going with `option_env!` + `/etc` default. XDG can be a follow-up;
+don't add behavior the C doesn't have without a separate decision.
+
+### Phase 5b: RPC half + new control protocol
+
+Blocked on the daemon existing. The current C control protocol is the
+meta-protocol re-purposed — `^` prefix in the ID name field tells
+`id_h` "this is a control connection, not a peer". Problems:
+
+- **Auth is a bearer token in the pidfile.** Pidfile is
+  `0644`-ish; anyone who can read it can `tinc stop`. Should be
+  `SO_PEERCRED` — kernel tells you the connecting uid, no token.
+- **Overloads `connection_t`.** Control connections sit in
+  `connection_list` next to real peers, with `if(status.control)
+  continue` sprinkled everywhere.
+- **Streaming printf format.** `dump_nodes` does one `send_request`
+  per node, sentinel-terminated. CLI parses line-by-line until it
+  sees `18 3` (`CONTROL REQ_DUMP_NODES` empty payload). No length
+  prefix, no error channel.
+
+**The control protocol has no compatibility constraint** — CLI and
+daemon ship together, and a 1.0.x peer never speaks it. We can
+replace it. Proposal:
+
+```rust
+// AF_UNIX, line-delimited JSON. Auth via SO_PEERCRED.
+// Windows: named pipe with ACL (same security model, no token).
+#[derive(Serialize, Deserialize)]
+enum CtlRequest {
+    Stop, Reload, Retry, Purge,
+    DumpNodes, DumpEdges, DumpSubnets, DumpConnections,
+    SetDebug(u8),
+    Connect(String), Disconnect(String),
+    Subscribe(Stream),  // Pcap/Log — connection stays open
+}
+enum CtlResponse {
+    Ok, Err(String),
+    Nodes(Vec<NodeDump>),  // one message, not N+1 lines
+    Edges(Vec<EdgeDump>),
+    // ...
+}
+```
+
+Daemon side: ~100 lines, one `match` on `CtlRequest` calling the
+same internals (`dump_nodes`, `reload_configuration`, etc.). CLI
+side: `serde_json::to_writer` + `from_reader`. Compare to 240 lines
+of `control.c` + the `sscanf` jungle in `tincctl.c` cmd_dump.
+
+| C source | Rust |
+|---|---|
 | `info.c`, `top.c` | control-socket queries + `ratatui` for `tinc top` |
-| `invitation.c` | invitation URL generation/consumption — **needs SPTPS from Phase 2** |
-| `fsck.c` | config sanity checker |
-| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` script generation |
+| `invitation.c` | invitation URL generation/consumption — **uses SPTPS from Phase 2**, also writes config (straddles 4a/5b) |
+| `tincctl.c` `cmd_dump` family | one fn per `CtlRequest` variant |
+| `control.c` | daemon-side `match` |
+| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` script generation (used by invitation, not by core RPC) |
 
-This can ship **independently** of the daemon — it talks to the existing C `tincd` over the control socket. **Ship this first** to get Rust into users' hands early.
-
-**Windows caveat:** control socket is `\\.\pipe\tinc.NETNAME` (named pipe), not `AF_UNIX`. No good crate; raw `windows-sys` `CreateFileW` + `ReadFile`/`WriteFile`. ~100 LOC behind `#[cfg(windows)]`.
+**Windows caveat unchanged:** named pipe, `windows-sys` raw
+`CreateFileW`. ~100 LOC behind `#[cfg(windows)]`.
 
 ---
 
