@@ -25,9 +25,10 @@
 | 0d — CI baseline | | | |
 | 1 — Pure logic crates | ✅ | `tinc-conf: line parser...` | All four crates exist. 115 tests. The deferrals (`auth.rs`, `edge_del`, route trie, `names.c`) are intentional — they need their consumers to land first. |
 | 2 — SPTPS state machine | ✅ Done | `tinc-sptps: pure-Rust SPTPS, byte-identical...` | 5 diff tests vs C; `byte_identical_wire_output` is the strong claim |
-| **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. 130 tests + 8 cross-impl. |
+| **Ship #1 — `tinc-tools`** | ✅ | `tinc-tools: sptps_test + sptps_keypair...` | First binaries. Rust↔Rust + Rust↔C on real sockets, both modes, 64KB stream reassembly. |
+| **Ship #2 (4a) — `tinc init`** | 🟡 1/7 | `tinc-tools: tinc init — first 4a...` | `tinc` binary exists, `init` works, 155 tests + 9 cross-impl. Dispatch table, `Paths` struct, `cmd/` scaffolding done. Next: `generate-keys`, `export`/`import`. |
 | 3 — Device & transport | | | |
-| 4 — `tinc` CLI | | | |
+| 4 — `tinc` CLI | (split: 4a above, 5b below) | | |
 | 5 — Daemon core | | | |
 
 ---
@@ -101,9 +102,12 @@ crates/
   tinc-device/              # TUN/TAP abstraction (per-OS modules)
   tinc-net/                 # event loop, sockets, packet routing
   tincd/                    # daemon binary
-  tinc-cli/                 # `tinc` control client (replaces tincctl.c)
   tinc-ffi/                 # SPTPS-only bindgen wrapper, test-only
-  tinc-tools/               # sptps_test, sptps_keypair binaries
+  tinc-tools/               # sptps_test, sptps_keypair, tinc binaries
+                            #   src/names.rs    — Paths struct (was: separate tinc-cli crate;
+                            #                     folded in because the binaries share keypair.rs)
+                            #   src/cmd/*.rs    — one module per `tinc` subcommand
+                            #   src/bin/tinc.rs — dispatch table + argv
 xtask/                      # interop test harness
 ```
 
@@ -243,7 +247,7 @@ The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` ty
 | `conf_net.c` `get_config_subnet` | — | ⏸️ Daemon glue: `tinc-proto::Subnet::from_str` already does the parse |
 | `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
 | `conf.c` `read_server_config` (`conf.d/` scan, `cmdline_conf` merge) | — | ⏸️ Phase 5 — daemon startup. The pieces (`parse_file` + `Config::merge`) are here. |
-| `names.c` | — | ⏸️ Phase 5 — `directories` crate, respecting tinc's lookup order |
+| `names.c` | — | ✅ `tinc-tools::names` — first consumer was `tinc init`, not the daemon. Subset: `confbase`/`confdir` only; `pidfilename`/`unixsocketname` come with 5b. |
 | `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
 
 **What landed:** ~740 LOC parse + ~430 LOC PEM, 33 unit + 3 proptest. The PEM body is `b64encode_tinc` (LSB-first — see Phase 0a finding 2); the codec was already KAT-locked, so the only thing tested here is framing: 48-byte chunks → 64-char lines on write, arbitrary line length on read, `strncmp` prefix match for the BEGIN type, END type unchecked.
@@ -464,23 +468,44 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
 
-**Dropped from `cmd_init`:** RSA keygen (we're nolegacy). `check_port`
-(tries to bind 655, picks random high port if taken) is best-effort
-QoL — init succeeds without it; ship initially without, add later.
+#### ✅ What landed (commit `tinc-tools: tinc init — first 4a...`)
 
-**`names.c` baked-in `CONFDIR` problem.** The C build bakes
-`/etc`/`/usr/local/etc` at meson configure time (`dir_sysconf`). The
-Rust binary doesn't have a configure step. Options:
-  - `option_env!("TINC_CONFDIR")` at build time, default `/etc`. Nix
-    package sets it via `RUSTFLAGS` or env in the derivation.
-  - Runtime `--config` always required. Ugly for `tinc init`.
-  - XDG fallback when not root. The C does **not** do this — it's
-    `/etc/tinc` always — but it's the right answer for unprivileged
-    operation. `tinc init` as non-root currently fails with EACCES on
-    `/etc/tinc` mkdir, which is a known papercut.
+| File | LOC | What |
+|---|---|---|
+| `src/names.rs` | ~280 | `Paths` struct + `check_id`. The `make_names()` globals materialized as a function return value. |
+| `src/cmd/mod.rs` | ~90 | `CmdError` enum, `io_err()` helper. One error type for all 4a commands. |
+| `src/cmd/init.rs` | ~500 | `tinc init NAME`. makedirs (with chmod-on-exists), tinc.conf write, keygen, PEM private (0600 `O_EXCL`), `Ed25519PublicKey =` config line, tinc-up stub (0755). |
+| `src/bin/tinc.rs` | ~300 | Hand-rolled argv (`+` getopt mode — stop at first non-option), dispatch table, `NETNAME` env fallback, `.` netname normalization, traversal guard. |
+| `tests/tinc_cli.rs` | ~510 | 17 integration tests through the binary. The load-bearing one is `cross_init_key_loads_in_c`. |
 
-Going with `option_env!` + `/etc` default. XDG can be a follow-up;
-don't add behavior the C doesn't have without a separate decision.
+**`CONFDIR` resolved as `option_env!("TINC_CONFDIR")` at compile time, default `/etc`.** The C bakes meson's `dir_sysconf`; Rust has no configure step. Packagers set the env var in their build (Nix derivation does this via `env`); a bare `cargo build` gets `/etc`. XDG fallback was considered and rejected — the C doesn't do it, and adding it is a separate behavioral decision (tracked below).
+
+**Three findings:**
+
+- **`init` writes the public key as a config line, not a PEM file.** `hosts/NAME` gets `Ed25519PublicKey = <tinc-b64>` — read by *peers* via the config parser, not via `read_pem`. The private key *is* PEM (read by the daemon's `net_setup.c` via `read_pem`). Different readers, different formats. `keypair::write_pair` (used by `sptps_keypair`) does PEM-both-sides; `cmd::init` does PEM-then-config. The b64 in the config line is **tinc's LSB-first variant** — standard base64 there would fail `ecdsa_set_base64_public_key` and the peer rejects your key. `cross_init_key_loads_in_c` proves the round-trip: `tinc init` → extract pubkey from `hosts/NAME` → decode tinc-b64 → re-wrap as PEM → hand to C `sptps_test` → handshake completes.
+
+- **`makedir` chmod-on-exists is load-bearing.** `fs.c:10-14`: `mkdir; if EEXIST chmod`. An existing `/etc/tinc/myvpn` with mode `0777` (because the user ran shell `mkdir` first) gets clamped to `0755`. We replicate it. Test: `makedir_clamps_mode`.
+
+- **Testing env-var → paths is awkward.** `NETNAME=foo tinc init alice` resolves to `/etc/tinc/foo`, which a test can't write. First attempt: assert `foo` appears in the EPERM error path. Wrong — `makedir(confdir)` runs before `makedir(confbase)` (parent before child), so the error is on `/etc/tinc` and the netname never makes it into a message. Second attempt (the one that works): use the *both-given warning* as the observable. `NETNAME=foo tinc -c /tmp/x init alice` emits "Both netname and configuration directory given" iff `Paths::for_cli` saw `netname.is_some()`. Side-channel observability when you can't observe the direct effect.
+
+**Intentional deviations from C** (see `cmd/init.rs` module doc for full rationale):
+
+| Dropped | Why |
+|---|---|
+| Interactive name prompt | Exists for `tinc> ` shell mode reusing `cmd_init`; we don't have shell mode. When 5b adds it, the prompt becomes a shell-layer concern — shell prompts → calls `init::run("alice")`. |
+| `check_port` (try-bind-655, random fallback) | Best-effort QoL that often picks a port your firewall doesn't allow. Better to fail loudly at first daemon start. |
+| RSA keygen | `DISABLE_LEGACY` is permanently on. |
+
+#### Remaining 4a commands
+
+| Command | Blocked on | Estimate |
+|---|---|---|
+| `generate-ed25519-keys` | `disable_old_keys` (rewrites file commenting out old PEM blocks before append) — ~50 LOC | small |
+| `export` / `export-all` | nothing — read `hosts/NAME`, wrap in `#-- BEGIN HOST --` markers | small |
+| `import` | `check_id` on the parsed name (have it), append-write to `hosts/NAME` | small |
+| `sign` / `verify` | the tinc-specific signature wrapper format (`tincctl.c:2770`) | medium |
+| `fsck` | nothing structural — it's ~400 LOC of `if(!x) eprintln!` | medium-tedious |
+| `edit` | `$EDITOR` spawn + post-edit `reload` (5b for the reload half) | small-but-5b-coupled |
 
 ### Phase 5b: RPC half + new control protocol
 
@@ -655,14 +680,18 @@ Aggressively shed scope:
 
 ## Suggested Order of Shipping
 
-1. ✅ **`sptps_test` + `sptps_keypair` in Rust** — proves crypto interop. **Shipped as `tinc-tools`.** Rust↔Rust round-trips on real sockets, both modes; cross-impl with C via `sptps_basic.py` is the next CI job.
+1. ✅ **`sptps_test` + `sptps_keypair` in Rust** — proves crypto interop. **Shipped as `tinc-tools`.** Rust↔Rust + Rust↔C on real sockets (2×2 matrix, gated on `TINC_C_SPTPS_TEST`). Cross-impl is a stronger claim than vs_c: independent entropy on each side, only TCP/UDP bytes between binaries.
 
    Three things the in-process differential test couldn't catch:
 
    - **`OsRng` for real.** First time non-seeded entropy flows through key derivation.
    - **TCP record splitting.** `stream_large_payload` pushes 64KB; the kernel fragments it, the SPTPS stream framing reassembles. The Phase 2 byte-identity test pumps whole records and never sees a partial.
    - **The `SIGPIPE` footgun.** Found while writing the test, not by the test: dropping the read end of a child's stderr pipe means the child's next `eprintln!` is `EPIPE` → `SIGPIPE` → dead. Would have bitten the daemon's `script.c` port (it `popen()`s and reads; same shape). The test harness now holds stderr open for the child's lifetime and drains it on a thread.
-2. **`tinc` CLI in Rust** — talks to C daemon, real users, ~10 weeks in
+2. 🟡 **`tinc` CLI in Rust** — sliced. The original "talks to C daemon" framing was wrong; 30 commands split into a filesystem half (no daemon, ships now as 4a) and an RPC half (needs a daemon, waits for 5b). 4a's first command (`init`) **shipped**: `tinc -n NETNAME init NODENAME` produces a confbase the C `sptps_test` accepts.
+
+   `cross_init_key_loads_in_c` is the closure on the wire-compat question for Ship #2. It pulls together every layer: `OsRng` → `SigningKey::from_seed` → `write_pem` → `tinc-b64` → file → C `ecdsa_read_pem_private_key` → C `sptps_start` → C `chacha20-poly1305` decrypt → 256 bytes match. Any link wrong — key derivation, blob layout, PEM armor, LSB-first b64 — the C handshake fails. It doesn't.
+
+   **The control protocol gets replaced.** It's the meta-protocol re-purposed (`^` prefix on the ID name = "this is a control connection"); auth is a bearer token in a `0644`-ish pidfile; control connections sit in the same `connection_list` as real peers. No compatibility constraint — CLI and daemon ship together. New protocol: `AF_UNIX` + `SO_PEERCRED` auth + line-JSON. Daemon side ~100 lines (one `match`); CLI side `serde_json::{to,from}_reader`. Phase 5b.
 3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in
 
