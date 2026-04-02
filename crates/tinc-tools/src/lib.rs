@@ -45,3 +45,4 @@ pub mod cmd;
 pub mod ctl;
 pub mod keypair;
 pub mod names;
+pub mod tui;
