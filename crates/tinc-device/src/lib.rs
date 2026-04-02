@@ -484,6 +484,31 @@ mod raw;
 pub use raw::RawSocket;
 
 // ═══════════════════════════════════════════════════════════════════
+// bsd — `bsd/device.c` (592 LOC, three backends in one file)
+// ═══════════════════════════════════════════════════════════════════
+//
+// `cfg(unix)` NOT `cfg(any(freebsd, macos, ...))`. The Device
+// impl compiles on Linux — the variant-dispatched read/write
+// logic is fd-agnostic, fully tested via pipe()/seqpacket fakes.
+// Only the open() constructors are BSD-gated (inside the file).
+//
+// This is the testing-on-Linux-for-BSD trick: the read/write
+// LOGIC is the same syscalls (read(2)/write(2)); only the fd's
+// SOURCE (the open path: /dev/tun*, PF_SYSTEM socket, TUNSIFHEAD
+// ioctl) is platform-specific. Separate the source from the use;
+// test the use on whatever you have.
+//
+// `cfg(unix)`: technically the read/write logic would compile on
+// Windows too (libc::read/write exist) but that's a lie; the
+// SEMANTICS (datagram fd, one read = one frame) are Unix-only.
+// `cfg(unix)` is the honest gate.
+
+#[cfg(unix)]
+mod bsd;
+#[cfg(unix)]
+pub use bsd::{BsdTun, BsdVariant};
+
+// ═══════════════════════════════════════════════════════════════════
 // Tests — Dummy only (Tun needs CAP_NET_ADMIN, separate integration)
 // ═══════════════════════════════════════════════════════════════════
 
