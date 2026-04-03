@@ -81,11 +81,12 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ═════════════════════════ the env gate ══════════════════════════════════
@@ -120,7 +121,12 @@ fn enter_netns(test_name: &str) -> Option<NetNs> {
     // common path (most `cargo nextest run` invocations don't set
     // TINC_C_TINCD); the bwrap-skip is the unusual one.
     if c_tincd_bin().is_none() {
-        eprintln!("SKIP {test_name}: TINC_C_TINCD not set (nix build .#tincd-c)");
+        eprintln!(
+            "SKIP {test_name}: TINC_C_TINCD not set. \
+             `nix develop` sets it automatically; \
+             outside nix: `nix build .#tincd-c` then \
+             `TINC_C_TINCD=$PWD/result/sbin/tincd`."
+        );
         return None;
     }
 
@@ -387,8 +393,8 @@ impl Node {
         tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
     }
 
-    fn spawn(&self) -> Child {
-        match self.which {
+    fn spawn(&self) -> ChildWithLog {
+        let child = match self.which {
             Impl::Rust => Command::new(rust_tincd_bin())
                 .arg("-c")
                 .arg(&self.confbase)
@@ -415,7 +421,8 @@ impl Node {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn C tincd"),
-        }
+        };
+        ChildWithLog::spawn(child)
     }
 }
 
@@ -488,10 +495,51 @@ fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
+/// Spawn child with `Stdio::piped()` stderr, then immediately hand the
+/// pipe to a background drain thread. Why: the C tincd at `-d5` floods
+/// stderr; `PingTimeout = 1` makes it retry the meta handshake every
+/// second, each retry logging the full SPTPS state dump. The 64 KiB
+/// pipe buffer fills in ~2s, the next `fprintf(stderr, ...)` blocks,
+/// and the C event loop freezes mid-handshake. Symptom: `Ctl::dump`
+/// blocks forever on `read_line` because the daemon can't reach the
+/// control-socket handler. (Found the very first time these tests
+/// ran for real — they had only ever been SKIPs.)
+struct ChildWithLog {
+    child: Child,
+    log: Arc<Mutex<Vec<u8>>>,
+    drain: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ChildWithLog {
+    fn spawn(mut child: Child) -> Self {
+        let stderr = child.stderr.take().expect("stderr piped");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log2 = Arc::clone(&log);
+        let drain = std::thread::spawn(move || {
+            let mut r = stderr;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = r.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                log2.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Self {
+            child,
+            log,
+            drain: Some(drain),
+        }
+    }
+
+    fn kill_and_log(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(h) = self.drain.take() {
+            let _ = h.join();
+        }
+        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
+    }
 }
 
 /// Dump-node row → status hex. The C `node.c:dump_nodes` and our
@@ -534,25 +582,28 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     // during `setup_network` before entering the event loop, same
     // as ours; `wait_for_file(socket)` is the readiness signal for
     // both impls.
-    let mut bob_child = bob.spawn();
+    let bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
     }
 
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
-        let _ = bob_child.kill();
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "alice setup failed; stderr:\n{}\n=== bob ===\n{bs}",
+            alice_child.kill_and_log()
+        );
     }
 
     // ─── carrier (TUNSETIFF fired on both) ──────────────────────
     // The C's `linux/device.c::setup_device` does the same
     // TUNSETIFF as our `LinuxTun::open`. Carrier flips identically.
-    assert!(
-        wait_for_carrier("tincX0", Duration::from_secs(2)),
-        "alice TUNSETIFF; stderr:\n{}",
-        drain_stderr(alice_child)
-    );
+    if !wait_for_carrier("tincX0", Duration::from_secs(2)) {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("alice TUNSETIFF;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
     assert!(
         wait_for_carrier("tincX1", Duration::from_secs(2)),
         "bob TUNSETIFF"
@@ -577,9 +628,8 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
         });
     }));
     if meta.is_err() {
-        let _ = bob_child.kill();
-        let bs = drain_stderr(bob_child);
-        let asd = drain_stderr(alice_child);
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
         panic!("meta handshake timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
@@ -592,22 +642,31 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
 
     // ─── validkey ───────────────────────────────────────────────
     // PROVES: REQ_KEY ext (SPTPS init), ANS_KEY parse (THE -1 fix),
-    // per-tunnel SPTPS handshake. Status bit 1 = validkey.
+    // per-tunnel SPTPS handshake. Status bit 1 = validkey, bit 7 =
+    // udp_confirmed (`node.h:41`). The C falls back to TCP-tunnelled
+    // `PACKET 17 <len>` for VPN traffic until udp_confirmed flips
+    // (`net_packet.c::send_sptps_data`); we DROP those (`STUB(chunk-
+    // 12-tcp-fallback)`). Polling for validkey alone races: bob's
+    // ICMP echo-reply goes via TCP, alice drops it. Wait for both
+    // sides to confirm UDP — the probe round-trip on loopback is
+    // ~1ms once validkey is set.
+    const VALIDKEY: u32 = 0x02;
+    const UDP_CONFIRMED: u32 = 0x80;
     let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(5), || {
+        poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
             let b = bob_ctl.dump(3);
-            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
-            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            let want = VALIDKEY | UDP_CONFIRMED;
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & want == want);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & want == want);
             if a_ok && b_ok { Some(()) } else { None }
         });
     }));
     if validkey.is_err() {
-        let _ = bob_child.kill();
-        let bs = drain_stderr(bob_child);
-        let asd = drain_stderr(alice_child);
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
         panic!(
-            "validkey timed out — likely ANS_KEY parse or per-tunnel SPTPS;\n\
+            "validkey/udp_confirmed timed out — ANS_KEY, per-tunnel SPTPS, or UDP probe path;\n\
              === alice ===\n{asd}\n=== bob ===\n{bs}"
         );
     }
@@ -623,9 +682,8 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
         .expect("spawn ping");
 
     if !ping.status.success() {
-        let _ = bob_child.kill();
-        let bs = drain_stderr(bob_child);
-        let asd = drain_stderr(alice_child);
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
         panic!(
             "cross-impl ping failed: {:?}\nstdout: {}\nstderr: {}\n\
              === alice ===\n{asd}\n=== bob ===\n{bs}",
@@ -639,9 +697,8 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
 
     drop(alice_ctl);
     drop(bob_ctl);
-    let _ = bob_child.kill();
-    let _ = drain_stderr(bob_child);
-    let _ = drain_stderr(alice_child);
+    let _ = alice_child.kill_and_log();
+    let _ = bob_child.kill_and_log();
     drop(netns);
 }
 

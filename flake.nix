@@ -21,13 +21,29 @@
       ];
 
       perSystem =
-        { pkgs, ... }:
+        { pkgs, self', ... }:
         {
           # Dev shell: enough to run `make -f kat/Makefile && cargo test`.
           # The C toolchain is needed for KAT regeneration, not for the
           # Rust build itself (no build.rs/cc yet — that comes with the
           # SPTPS FFI harness in Phase 0b).
           devShells.default = pkgs.mkShell {
+            # Cross-impl tests (crates/tincd/tests/crossimpl.rs and
+            # crates/tinc-tools/tests/self_roundtrip.rs) gate on these
+            # env vars: unset → SKIP. The earlier comment at the
+            # sptps-test-c derivation about "rebuilding the C binary on
+            # every Rust-only change" was wrong about THIS dependency
+            # edge: both filesets are src/-only, so a Rust edit does NOT
+            # invalidate them — entering the shell after a Rust change
+            # is free. A src/ edit DOES rebuild on entry (~10s warm),
+            # which is correct: any C change should re-run cross-impl.
+            #
+            # The crossimpl.rs tests are THE wire-compat proof; they
+            # need to run with the rest of the suite, not be opt-in.
+            TINC_C_TINCD = "${self'.packages.tincd-c}/sbin/tincd";
+            TINC_C_SPTPS_TEST = "${self'.packages.sptps-test-c}/bin/sptps_test";
+            TINC_C_SPTPS_KEYPAIR = "${self'.packages.sptps-test-c}/bin/sptps_keypair";
+
             packages = with pkgs; [
               cargo
               cargo-nextest
@@ -100,12 +116,10 @@
           # tinc-crypto). nixpkgs#tinc_pre doesn't ship these; they're
           # build_by_default=false in src/meson.build.
           #
-          # This is what `TINC_C_SPTPS_TEST` points to for the cross-impl
-          # tests in tinc-tools/tests/self_roundtrip.rs. Set it in the
-          # devshell shellHook? No — leave it explicit. The cross-impl
-          # tests are #[ignore]'d and you opt in by setting the env var,
-          # because rebuilding the C binary on every Rust-only change is
-          # noise. CI sets it; local dev doesn't have to.
+          # `TINC_C_SPTPS_TEST` / `TINC_C_SPTPS_KEYPAIR` point here for
+          # the cross-impl tests in tinc-tools/tests/self_roundtrip.rs.
+          # The devshell sets both — see the comment there about why
+          # the src/-only fileset makes that free for Rust-side edits.
           packages.sptps-test-c = pkgs.stdenv.mkDerivation {
             pname = "tinc-sptps-test-c";
             version = "1.1pre18";
