@@ -80,95 +80,79 @@ mod tests {
 
     // ─── Constants — gcc/sed-verified
 
-    /// `ETH_HLEN = 14` per `ethernet.h:31`. The arithmetic that
-    /// every offset trick orbits. gcc-verified: `printf("%d",
-    /// ETH_HLEN)` → `14`.
+    /// All ethernet-layout constants. gcc-verified vs C:
+    /// `printf("%d", ETH_HLEN)` → 14, `<linux/if_ether.h>` for
+    /// the IANA ethertypes (same on BSD). The arithmetic
+    /// (`6+6+2`, `14-2=12`) is what every offset trick orbits.
     #[test]
-    fn eth_hlen_14() {
+    fn ether_constants_gcc_verified() {
+        // `ethernet.h:31`. dhost(6) + shost(6) + type(2).
         assert_eq!(ETH_HLEN, 14);
-        // The arithmetic: dhost(6) + shost(6) + type(2).
         assert_eq!(ETH_HLEN, 6 + 6 + 2);
-    }
-
-    /// `ETHER_TYPE_LEN = 2`. `ETH_HLEN - ETHER_TYPE_LEN = 12` is
-    /// where ethertype goes.
-    #[test]
-    fn ethertype_at_12() {
+        // `ETH_HLEN - ETHER_TYPE_LEN = 12` is where ethertype goes.
         assert_eq!(ETHER_TYPE_LEN, 2);
         assert_eq!(ETH_HLEN - ETHER_TYPE_LEN, 12);
-    }
-
-    /// IANA ethertype registrations. Wire format; can't change.
-    /// gcc-verified vs `<linux/if_ether.h>`; same on BSD.
-    #[test]
-    fn ethertypes_iana() {
+        // IANA ethertype registrations. Wire format; can't change.
         assert_eq!(ETH_P_IP, 0x0800);
         assert_eq!(ETH_P_IPV6, 0x86DD);
     }
 
     // ─── from_ip_nibble
 
-    /// IPv4 byte 0: version=4 in high nibble, IHL in low.
-    /// `0x45` is the canonical IPv4 first byte (IHL=5 words =
-    /// 20 bytes, no options). `0x4F` is max IHL (60 bytes).
-    /// Both → `ETH_P_IP`.
+    /// `from_ip_nibble(u8) -> Option<u16>`. Full domain in one
+    /// table: only the HIGH nibble matters (IP version field).
+    /// C `fd_device.c` returns `ETH_P_MAX` sentinel for unknown;
+    /// C `bsd/device.c` errors inline. We use `Option`.
     #[test]
-    fn nibble_ipv4() {
-        assert_eq!(from_ip_nibble(0x45), Some(ETH_P_IP));
-        assert_eq!(from_ip_nibble(0x40), Some(ETH_P_IP));
-        assert_eq!(from_ip_nibble(0x4F), Some(ETH_P_IP));
-    }
-
-    /// IPv6 byte 0: version=6 in high nibble, traffic class
-    /// high nibble in low. `0x60` is canonical (default traffic
-    /// class).
-    #[test]
-    fn nibble_ipv6() {
-        assert_eq!(from_ip_nibble(0x60), Some(ETH_P_IPV6));
-        assert_eq!(from_ip_nibble(0x6F), Some(ETH_P_IPV6));
-    }
-
-    /// Unknown versions → None. C `fd_device.c` returns `ETH_P_
-    /// MAX` sentinel; C `bsd/device.c` errors inline. We use
-    /// `Option`.
-    ///
-    /// IP version 5 was ST-II (RFC 1819, experimental, dead).
-    /// Version 7-15 unassigned. Version 0-3 pre-IPv4 historical.
-    #[test]
-    fn nibble_unknown() {
-        assert_eq!(from_ip_nibble(0x00), None);
-        assert_eq!(from_ip_nibble(0x50), None); // ST-II
-        assert_eq!(from_ip_nibble(0x70), None);
-        assert_eq!(from_ip_nibble(0xFF), None);
+    fn nibble_cases() {
+        #[rustfmt::skip]
+        let cases: &[(u8, Option<u16>)] = &[
+            // ─── IPv4: version=4 in high nibble, IHL in low.
+            // `0x45` is the canonical IPv4 first byte (IHL=5 words =
+            // 20 bytes, no options). `0x4F` is max IHL (60 bytes).
+            (0x45, Some(ETH_P_IP)),
+            (0x40, Some(ETH_P_IP)),
+            (0x4F, Some(ETH_P_IP)),
+            // ─── IPv6: version=6 in high nibble, traffic class high
+            // nibble in low. `0x60` is canonical (default TC).
+            (0x60, Some(ETH_P_IPV6)),
+            (0x6F, Some(ETH_P_IPV6)),
+            // ─── Unknown versions → None.
+            // IP version 5 was ST-II (RFC 1819, experimental, dead).
+            // Version 7-15 unassigned. Version 0-3 pre-IPv4 historical.
+            (0x00, None),
+            (0x50, None),  // ST-II
+            (0x70, None),
+            (0xFF, None),
+        ];
+        for (i, (ip0, expected)) in cases.iter().enumerate() {
+            assert_eq!(from_ip_nibble(*ip0), *expected, "case {i}: {ip0:#04x}");
+        }
     }
 
     // ─── set_etherheader
 
-    /// Zero MACs, write ethertype big-endian. `fd_device.c
-    /// :204-208`; `bsd/device.c:429-445` inline.
+    /// Zero MACs, write ethertype big-endian. `fd_device.c:204-208`;
+    /// `bsd/device.c:429-445` inline. Pre-fill with garbage to
+    /// verify the zero AND that bytes past 14 are untouched.
     #[test]
-    fn set_etherheader_ipv4() {
-        // Pre-fill with garbage to verify the zero.
-        let mut buf = [0xAAu8; 20];
-        set_etherheader(&mut buf, ETH_P_IP);
-        // dhost: zeroed.
-        assert_eq!(&buf[0..6], &[0u8; 6]);
-        // shost: zeroed.
-        assert_eq!(&buf[6..12], &[0u8; 6]);
-        // ethertype: 0x0800 big-endian → [0x08, 0x00].
-        assert_eq!(&buf[12..14], &[0x08, 0x00]);
-        // Past 14: untouched.
-        assert_eq!(buf[14], 0xAA);
-    }
-
-    /// Same for IPv6. 0x86DD → [0x86, 0xDD].
-    #[test]
-    fn set_etherheader_ipv6() {
-        let mut buf = [0xBBu8; 20];
-        set_etherheader(&mut buf, ETH_P_IPV6);
-        assert_eq!(&buf[0..12], &[0u8; 12]);
-        assert_eq!(&buf[12..14], &[0x86, 0xDD]);
-        assert_eq!(buf[14], 0xBB);
+    fn set_etherheader_cases() {
+        #[rustfmt::skip]
+        let cases: &[(u16, u8, [u8; 2])] = &[
+            //  ethertype     fill   bytes 12..14 (BE)
+            (ETH_P_IP,   0xAA, [0x08, 0x00]),
+            (ETH_P_IPV6, 0xBB, [0x86, 0xDD]),
+        ];
+        for (i, (et, fill, et_bytes)) in cases.iter().enumerate() {
+            let mut buf = [*fill; 20];
+            set_etherheader(&mut buf, *et);
+            // dhost + shost: zeroed.
+            assert_eq!(&buf[0..12], &[0u8; 12], "case {i}: MACs");
+            // ethertype: big-endian.
+            assert_eq!(&buf[12..14], et_bytes, "case {i}: ethertype");
+            // Past 14: untouched.
+            assert_eq!(buf[14], *fill, "case {i}: payload clobbered");
+        }
     }
 
     /// Our `to_be_bytes()` matches the C's manual `>> 8` /
