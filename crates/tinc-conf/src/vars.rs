@@ -185,7 +185,6 @@ pub struct Var {
     pub flags: VarFlags,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The table. Transcribed line-for-line from tincctl.c:1680-1758.
 // C order preserved (see module doc). The {NULL, 0} sentinel is just
 // the slice end.
@@ -193,7 +192,6 @@ pub struct Var {
 // Spelling out the macro: `S` = SERVER, `H` = HOST, `M` = MULTIPLE,
 // `O` = OBSOLETE, `F` (saFe) = SAFE. Single-letter consts to keep
 // each row on one line — diff against the C is line-aligned that way.
-// ────────────────────────────────────────────────────────────────────
 
 #[allow(non_upper_case_globals)] // single-letter, scoped to this block
 const S: VarFlags = VarFlags::SERVER;
@@ -321,10 +319,6 @@ const _: () = assert!(VARS.len() == 74);
 pub fn lookup(name: &str) -> Option<&'static Var> {
     VARS.iter().find(|v| v.name.eq_ignore_ascii_case(name))
 }
-
-// ────────────────────────────────────────────────────────────────────
-// Tests
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

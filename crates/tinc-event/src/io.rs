@@ -313,8 +313,7 @@ impl<W: Copy> EventLoop<W> {
         // C `for(int i = 0; i < n; i++)` at :140
         for ev in &self.events {
             let idx = ev.token().0;
-            // The generation-guard substitute, part 1: slot still
-            // exists?
+            // Generation-guard substitute, part 1: slot still exists.
             let Some(slot) = self.slots.get(idx).and_then(Option::as_ref) else {
                 continue; // del'd by an earlier event in this batch
             };
@@ -322,20 +321,15 @@ impl<W: Copy> EventLoop<W> {
             let interest = slot.interest;
 
             // C linux/event.c:143-145: WRITE first.
-            if ev.is_writable() {
-                // Part 2: interest still includes WRITE?
-                if interest.is_some_and(|i| i.wants(Ready::Write)) {
-                    out.push((what, Ready::Write));
-                }
+            // Part 2: interest still includes WRITE.
+            if ev.is_writable() && interest.is_some_and(|i| i.wants(Ready::Write)) {
+                out.push((what, Ready::Write));
             }
 
-            // C :151-153: then READ. Re-look-up interest — the daemon
-            // hasn't run yet (we're just collecting), but a future
-            // refactor might dispatch inline. Belt and suspenders.
-            // Actually no: we're collecting into `out`, not firing.
-            // The interest CAN'T have changed between the WRITE check
-            // above and here. Drop the re-lookup. The C re-check at
-            // :149 is BETWEEN cb invocations; we have no cb yet.
+            // C :151-153: then READ. No re-lookup of interest — we are
+            // collecting into `out`, not firing inline, so it cannot
+            // have changed since the WRITE check. The C re-check at
+            // :149 sits BETWEEN cb invocations; we have no cb yet.
             if ev.is_readable() && interest.is_some_and(|i| i.wants(Ready::Read)) {
                 out.push((what, Ready::Read));
             }

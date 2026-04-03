@@ -513,7 +513,6 @@ impl Config {
 // and load_host_pubkey). parse_file + merge are this module's bread
 // and butter; this is just a directory loop on top. ~40 LOC of code,
 // ~20 of it the conf.d glob.
-// ────────────────────────────────────────────────────────────────────
 
 /// `read_server_config` minus the cmdline merge.
 ///
@@ -622,8 +621,6 @@ fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
         })
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,8 +709,6 @@ mod tests {
         assert!(parse_line("\t\t  \t", s()).is_none());
     }
 
-    // ────────────────────────────────────────────────────────────────
-
     fn cfg(kvs: &[(&str, &str, Source)]) -> Config {
         let mut c = Config::new();
         c.merge(kvs.iter().map(|(k, v, s)| Entry {
@@ -791,8 +786,6 @@ mod tests {
         // b.conf line 3 sorts before a.conf line 5, despite filename order.
         assert_eq!(vals, ["b-3", "a-5"]);
     }
-
-    // ────────────────────────────────────────────────────────────────
 
     #[test]
     fn entry_bool() {
@@ -902,11 +895,9 @@ more garbage
         assert_eq!(entries[0].variable, "Port");
     }
 
-    // ────────────────────────────────────────────────────────────────
     // read_server_config — directory tests need a real filesystem.
     // tempdir layouts are cheap; each test builds the exact tree it
     // checks. No fixture sharing — hermetic per-test.
-    // ────────────────────────────────────────────────────────────────
 
     /// Unique tempdir, removed on drop. Same pattern as
     /// `tinc-tools::cmd::genkey::TmpGuard`, smaller.
@@ -978,16 +969,9 @@ more garbage
         // both conf.d entries are line 1, so file name tiebreaks →
         // 10-one before 20-two. THEN tinc.conf line 2 (higher line).
         //
-        // Wait — line 1 < line 2, so conf.d entries sort BEFORE bob?
-        // Yes. The compare is line-then-file, not file-then-line.
-        // tinc.conf line 2 loses to conf.d/*.conf line 1. This is the
-        // "conf.d/a.conf:5 sorts after conf.d/b.conf:3" finding from
-        // the original Phase 1 work, and it applies cross-file too.
-        //
-        // Is this what users expect? Probably not. Is it what the C
-        // does? Yes (config_compare, conf.c:48). The fix is "put
-        // ConnectTo on line 1 of tinc.conf if you care." We port the
-        // behavior; fsck can warn about this someday.
+        // The compare is line-then-file, not file-then-line
+        // (config_compare, conf.c:48), so conf.d/*.conf:1 sorts before
+        // tinc.conf:2. Surprising but C-faithful; fsck can warn someday.
         assert_eq!(connects, ["carol", "dave", "bob"]);
     }
 

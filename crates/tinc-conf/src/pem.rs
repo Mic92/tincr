@@ -206,8 +206,6 @@ pub fn write_pem(mut w: impl Write, ty: &str, body: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
