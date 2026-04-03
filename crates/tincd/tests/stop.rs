@@ -934,47 +934,31 @@ fn udp_stray_packet_drained() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// SPTPS peer handshake (chunk 4a)
+// SPTPS peer handshake → ACK exchange (chunk 4b)
 //
 // THE TEST IS THE INITIATOR. We don't have outgoing connections
-// (`do_outgoing_connection` is chunk 5+). So: we drive the
-// initiator side from the test process using `tinc-sptps::Sptps`
-// directly. Same shape as `tinc-tools/cmd/join.rs`'s pump loop.
+// (`do_outgoing_connection` is chunk 6). So: we drive the initiator
+// side from the test process using `tinc-sptps::Sptps` directly.
+// Same shape as `tinc-tools/cmd/join.rs`'s pump loop.
 //
-// What this proves:
-//   - id_h peer branch fires (vs being routed to BadId)
-//   - read_ecdsa_public_key loads the peer's pubkey
-//   - Sptps::start as RESPONDER with the right label (incl NUL!)
-//   - feed() routes to feed_sptps after sptps install
-//   - The do-while loop in feed_sptps consumes multi-record reads
-//   - dispatch_sptps_outputs queues Wire bytes correctly
-//   - HandshakeDone is reached (the daemon log line)
+// Chunk 4a stopped at HandshakeDone. Chunk 4b CONTINUES:
+//   - daemon's HandshakeDone arm calls send_ack (NOT terminate)
+//   - the ACK arrives as a SPTPS Record (encrypted)
+//   - we send our ACK back (also encrypted)
+//   - daemon's Record arm → check_gate → ack_h → "activated"
+//   - connection STAYS UP (allow_request = ALL)
+//   - `tinc dump connections` over control socket shows the row
 //
-// What the LABEL-NUL specifically proves: if proto.rs's `tcp_label`
-// forgot the trailing NUL, the SIG transcripts would diverge —
-// daemon hashes 33 bytes (with NUL), test hashes 33 bytes (with
-// NUL), they'd MATCH. Wait no — we use the SAME construction here.
-// The test would pass with a wrong label. The unit test
-// `proto::tests::tcp_label_has_trailing_nul` is the real NUL proof.
-// This integration test proves the END-TO-END handshake works,
-// which transitively proves the labels match — but it can't
-// distinguish "both wrong" from "both right". The cross-impl test
-// (Phase 2, `tinc-sptps/tests/vs_c.rs`) would catch "both wrong"
-// IF it used this label. It doesn't (it uses `b"byte-identity"`).
-//
-// THE REAL CROSS-IMPL FOR THE NUL: a future test that handshakes
-// against a real C tincd. Phase 6. For now: the unit test pins the
-// gcc-verified bytes. Good enough.
+// The label-NUL caveat from 4a still applies: this test uses the
+// same construction on both sides; can't distinguish "both wrong".
+// `proto::tests::tcp_label_has_trailing_nul` pins gcc bytes.
 
-/// SPTPS handshake reaches `HandshakeDone` on both sides.
-///
-/// Daemon as RESPONDER (we accepted the TCP connection). Test as
-/// INITIATOR (we send `"0 testpeer 17.7\n"`). The `tcp_label`
-/// argument order is therefore `(testpeer, testnode)` — initiator,
-/// responder. SAME as the daemon's `tcp_label(name, my_name)` when
-/// `name = "testpeer"` and `my_name = "testnode"`.
+/// SPTPS handshake → ACK exchange → connection activated. The
+/// daemon's HandshakeDone arm queues `send_ack`; we receive it as
+/// an SPTPS `Record`, parse `"%d %s %d %x"`, send our ACK, daemon
+/// activates. `tinc dump connections` then shows ONE peer row.
 #[test]
-fn peer_handshake_reaches_done() {
+fn peer_ack_exchange() {
     use rand_core::OsRng;
     use std::io::Read;
     use std::net::TcpStream;
@@ -1118,6 +1102,7 @@ fn peer_handshake_reaches_done() {
     // Seed the pump with bytes already in `buf` past the ID line.
     let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
     let mut handshake_done = false;
+    let mut daemon_ack: Option<Vec<u8>> = None;
     let pump_deadline = Instant::now() + Duration::from_secs(5);
 
     'pump: loop {
@@ -1161,12 +1146,11 @@ fn peer_handshake_reaches_done() {
                     Output::HandshakeDone => {
                         handshake_done = true;
                     }
-                    Output::Record { .. } => {
-                        // Chunk 4a: daemon terminates at
-                        // HandshakeDone, never sends app records.
-                        // Reaching here means the daemon sent
-                        // something post-handshake. UNEXPECTED.
-                        panic!("got Record from daemon (chunk 4a doesn't send records)");
+                    Output::Record { bytes, .. } => {
+                        // Chunk 4b: the daemon's ACK. First (and
+                        // only, in 4b) post-handshake record.
+                        // Stash for parsing after the pump.
+                        daemon_ack = Some(bytes);
                     }
                 }
             }
@@ -1180,7 +1164,11 @@ fn peer_handshake_reaches_done() {
         }
         pending.clear();
 
-        if handshake_done {
+        // Chunk 4b: pump until we have BOTH HandshakeDone AND the
+        // daemon's ACK record. They might arrive in the same
+        // `pending` chunk (the daemon's SIG + send_ack are queued
+        // in the same outbuf flush) or separate reads.
+        if handshake_done && daemon_ack.is_some() {
             break 'pump;
         }
 
@@ -1211,55 +1199,151 @@ fn peer_handshake_reaches_done() {
         pending.extend_from_slice(&tmp_buf[..n]);
     }
 
-    // ─── OUR side is done. Prove the DAEMON's side too. ──────────
-    // The daemon logs "SPTPS handshake completed with testpeer"
-    // at INFO when it gets HandshakeDone. Then "Dropping testpeer
-    // after handshake" at WARN (the chunk-4a placeholder for
-    // send_ack). Then it terminates the connection — we see EOF.
-    //
-    // Read until EOF (daemon terminates the connection). The 5s
-    // timeout still applies.
-    loop {
-        match (&stream).read(&mut tmp_buf) {
-            Ok(0) => break, // EOF — daemon terminated us
-            Ok(_) => {}     // shouldn't get more bytes, but drain
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Daemon is slow to terminate. Wait one more.
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("read error after handshake: {e}"),
+    // ─── parse the daemon's ACK ─────────────────────────────────
+    // C `:867`: `"%d %s %d %x"` = `"4 <udp-port> <weight> <opts>"`.
+    // Record body has trailing `\n` (`send_request:120` appends).
+    let ack = daemon_ack.expect("pump exited with daemon_ack set");
+    let body = ack.strip_suffix(b"\n").unwrap_or(&ack);
+    let body = std::str::from_utf8(body).expect("ACK is ASCII");
+    let mut t = body.split_whitespace();
+    assert_eq!(t.next(), Some("4"), "ACK reqno: {body:?}");
+    // UDP port: kernel-assigned (Port=0). Just: it's a valid u16,
+    // and ≠ the TCP port (`bind_reusing_port` not yet — chunk 10).
+    let daemon_udp_port: u16 = t.next().unwrap().parse().expect("udp port");
+    assert_ne!(daemon_udp_port, 0);
+    // Weight: RTT in ms. Localhost handshake is fast; >= 0, < some
+    // sane bound. The C `:840` is `(now - c->start)` ms.
+    let daemon_weight: i32 = t.next().unwrap().parse().expect("weight");
+    assert!(
+        (0..5000).contains(&daemon_weight),
+        "weight: {daemon_weight}"
+    );
+    // Options hex: `myself_options_default()` = `0x0700000c` (PMTU
+    // + CLAMP + PROT_MINOR=7 in top byte). The `& 0xffffff` mask
+    // doesn't change it (low 24 bits already include PMTU+CLAMP);
+    // the `| PROT_MINOR<<24` re-adds the top byte. Same value.
+    let daemon_opts = u32::from_str_radix(t.next().unwrap(), 16).expect("opts hex");
+    assert_eq!(daemon_opts, 0x0700_000c, "options: {body:?}");
+
+    // ─── send OUR ACK ─────────────────────────────────────────────
+    // C INITIATOR side: `meta.c:131` `if(allow == ACK) send_ack(c)`.
+    // The initiator's HandshakeDone fires the SAME arm. We model
+    // that here. Port 0 (we have no UDP listener); weight 1ms
+    // (fake); same default options. The `\n` is required (`meta.c:
+    // 156` strips it; daemon's `record_body`).
+    let our_ack = b"4 0 1 700000c\n";
+    let outs = sptps.send_record(0, our_ack).expect("post-handshake");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send our ACK");
         }
     }
 
-    // ─── daemon is still alive (terminating ONE conn != exit) ────
-    // The connection closed but the daemon keeps running (waiting
-    // for more peers, control conns, etc). C: same —
-    // `terminate_connection` doesn't `event_exit`.
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "daemon shouldn't exit on one peer disconnect"
-    );
+    // ─── daemon activates the connection (NO terminate) ──────────
+    // C `:1025` log: "Connection with X (Y) activated". After ACK,
+    // the connection stays up (allow_request = ALL). The chunk-4a
+    // sync-flush + terminate are GONE.
+    //
+    // Prove the conn stays up by reading: should NOT get EOF. The
+    // 100ms timeout returning WouldBlock is the success signal.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed connection after ACK (should stay up); stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => {
+            // Daemon sent something post-ACK. Chunk 4b's `send_
+            // everything` walks empty trees — sends nothing. If
+            // we got bytes here, that's chunk-5 territory. NOT
+            // an error per se but unexpected for 4b.
+            panic!("daemon sent {n} bytes post-ACK (send_everything should be empty)");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // EXPECTED. Connection up, daemon idle.
+        }
+        Err(e) => panic!("read error post-ACK: {e}"),
+    }
 
-    // ─── stderr: prove the daemon REACHED HandshakeDone ────────────
+    // ─── dump connections over control socket ────────────────────
+    // `connection.c:166-175`: walk connection_list, format `"%d %d
+    // %s %s %x %d %x"` per row, then terminator `"%d %d"`. With
+    // ONE peer + ONE control conn (us), we get 2 rows.
+    //
+    // The peer row's name is `testpeer`, hostname is `127.0.0.1
+    // port <some-port>` (the FUSED string — see dump.rs's `" port "`
+    // literal note). options is the OR'd value (PMTU intersection
+    // applied: both sides had it, so it sticks).
+    let cookie = read_cookie(&pidfile);
+    let ctl = UnixStream::connect(&socket).expect("control connect");
+    let mut ctl_r = BufReader::new(&ctl);
+    let mut ctl_w = &ctl;
+    writeln!(ctl_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    ctl_r.read_line(&mut greet).unwrap();
+    assert_eq!(greet, "0 testnode 17.7\n");
+    let mut ack = String::new();
+    ctl_r.read_line(&mut ack).unwrap(); // "4 0 <pid>"
+
+    // REQ_DUMP_CONNECTIONS = 6.
+    writeln!(ctl_w, "18 6").unwrap();
+    let mut rows = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump row");
+        let line = line.trim_end().to_owned();
+        // Terminator: `"18 6"` (no body). Row: `"18 6 <body>"`.
+        if line == "18 6" {
+            break;
+        }
+        rows.push(line);
+    }
+    // 2 conns: testpeer (TCP) + <control> (this unix socket).
+    // Order is slotmap-iteration (insertion order). Don't pin order;
+    // find the testpeer row.
+    assert_eq!(rows.len(), 2, "dump rows: {rows:?}");
+    let peer_row = rows
+        .iter()
+        .find(|r| r.contains("testpeer"))
+        .unwrap_or_else(|| panic!("no testpeer row in: {rows:?}"));
+    // `"18 6 testpeer 127.0.0.1 port <p> <opts-hex> <fd> <status>"`.
+    // The hostname is FUSED (one %s in the daemon, two %s + lit on
+    // CLI parse). We just substring-check for now; `tinc-tools::
+    // dump::ConnRow::parse` is the real parser.
+    assert!(
+        peer_row.starts_with("18 6 testpeer 127.0.0.1 port "),
+        "peer row: {peer_row}"
+    );
+    // options: after PMTU intersection + OR (`ack_h:996-1001`).
+    // Both sides sent `0x0700000c`; intersection keeps PMTU; OR is
+    // idempotent. `c->options` = `0x0700000c`. Hex unpadded.
+    assert!(peer_row.contains(" 700000c "), "peer row: {peer_row}");
+
+    // ─── stderr: prove the daemon's path ─────────────────────────
+    // Hold `stream` until here — dropping it would let the daemon's
+    // ping-timeout sweep close the conn before we dump.
+    drop(stream);
     let _ = child.kill();
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // The exact substring from `dispatch_sptps_outputs`. If the
-    // log message changes, this breaks — intentional. It's the
-    // observable signal.
     assert!(
         stderr.contains("SPTPS handshake completed with testpeer"),
-        "daemon didn't log handshake completion; stderr:\n{stderr}"
+        "stderr:\n{stderr}"
     );
-    // And the chunk-4a placeholder warning.
     assert!(
-        stderr.contains("Dropping testpeer after handshake"),
-        "daemon didn't log the send_ack-NYI drop; stderr:\n{stderr}"
+        stderr.contains("Connection with testpeer") && stderr.contains("activated"),
+        "daemon didn't log activation; stderr:\n{stderr}"
     );
-    // The id_h peer branch logged the start.
+    // The chunk-4a placeholder warning is GONE.
     assert!(
-        stderr.contains("Starting SPTPS handshake with testpeer"),
-        "daemon didn't log handshake start; stderr:\n{stderr}"
+        !stderr.contains("send_ack not implemented"),
+        "chunk-4a placeholder leaked; stderr:\n{stderr}"
     );
 }
 

@@ -108,6 +108,19 @@ impl Listener {
     pub fn fds(&self) -> (RawFd, RawFd) {
         (self.tcp.as_raw_fd(), self.udp.as_raw_fd())
     }
+
+    /// `get_bound_port(sock->udp.fd)` (`net_setup.c:1194`). The UDP
+    /// port, AFTER bind. With `Port = 0` (tests), TCP and UDP get
+    /// DIFFERENT kernel-assigned ports until `bind_reusing_port`
+    /// lands (chunk 10). `myport.udp` is THIS, not `local.port()`.
+    #[must_use]
+    pub fn udp_port(&self) -> u16 {
+        self.udp
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .map_or(0, |a| a.port())
+    }
 }
 
 // setup_listen_socket (TCP)

@@ -52,10 +52,49 @@ use tinc_sptps::{Framing, Output, Role, Sptps};
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
 
-/// `control_common.h`: `REQ_STOP = 0`. Module-private; chunk 3+
-/// adds the rest of the `CtlRequest` enum (or imports from
-/// `tinc-tools::ctl::CtlRequest` if we resolve the layering).
-const REQ_STOP: i32 = 0;
+// OPTION_* (`connection.h:32-36`)
+//
+// `tinc-graph` already exports `OPTION_INDIRECT` (the one bit BFS
+// reads). We don't dep on tinc-graph yet (chunk 5). Same dup-don't-
+// factor call as `check_id`: 4 lines, the right home is somewhere
+// crate-shared (probably tinc-proto — they're WIRE bits, the ACK
+// packet's `%x` field carries them), Phase-6 hoist.
+//
+// The C masks `& 0xffffff` before sending (`protocol_auth.c:867`)
+// because the top byte carries `PROT_MINOR` (`OPTION_VERSION` macro,
+// `connection.h:36`). The four flags fit in the low 4 bits with 20
+// to spare; the mask is future-proofing.
+
+/// `OPTION_INDIRECT`. Set if `IndirectData = yes` or `TCPOnly = yes`.
+/// Means: don't UDP-probe me directly, go through a relay.
+pub const OPTION_INDIRECT: u32 = 0x0001;
+/// `OPTION_TCPONLY`. Set if `TCPOnly = yes`. Implies INDIRECT.
+pub const OPTION_TCPONLY: u32 = 0x0002;
+/// `OPTION_PMTU_DISCOVERY`. Default on (`net_setup.c:442-446`: on
+/// unless `TCPOnly` or `PMTUDiscovery = no`).
+pub const OPTION_PMTU_DISCOVERY: u32 = 0x0004;
+/// `OPTION_CLAMP_MSS`. Default on (`net_setup.c:449-453`).
+pub const OPTION_CLAMP_MSS: u32 = 0x0008;
+
+/// `myself->options` defaults: PMTU + CLAMP_MSS, plus PROT_MINOR in
+/// the top byte (`net_setup.c:800`). The C builds this from config
+/// in `setup_myself_reloadable` (`:383-453`); we hardcode the
+/// defaults until that lands (chunk 9). `IndirectData`/`TCPOnly`/
+/// `PMTUDiscovery`/`ClampMSS` are NOT read yet — the per-host
+/// overrides in `send_ack` are also stubbed (the `c->config_tree`
+/// is not retained, see `handle_id` doc).
+#[must_use]
+pub(crate) const fn myself_options_default() -> u32 {
+    // C: `OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | (PROT_MINOR << 24)`.
+    OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | ((PROT_MINOR as u32) << 24)
+}
+
+/// `control_common.h`. Same enum as `tinc-tools::ctl::CtlRequest`
+/// but daemon doesn't dep on tinc-tools (CLI pulls daemon, not
+/// the other way). Phase-6 hoist to tinc-proto. `pub(crate)` for
+/// daemon.rs's dump_connections format string.
+pub(crate) const REQ_STOP: i32 = 0;
+pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
 /// `control_common.h`: `REQ_INVALID = -1`. The "unknown subtype" reply.
 const REQ_INVALID: i32 = -1;
 
@@ -77,6 +116,9 @@ pub enum DispatchResult {
     /// then exits. The connection stays open until then — the
     /// `"18 0 0"` reply was queued before this returned.
     Stop,
+    /// `dump_connections(c)`. The daemon walks `conns` and queues
+    /// rows. Can't do it here (don't have the slotmap).
+    DumpConnections,
     /// Handler returned `false`. Drop the connection. C `receive_
     /// request:183-188` logs "Error while processing X" and the
     /// caller (`receive_meta`) returns `false` which causes
@@ -100,6 +142,9 @@ pub enum DispatchError {
     /// (Skeleton: also covers `?` and peer names — we don't handle
     /// those yet.)
     BadId(String),
+    /// `ack_h`: sscanf returned `< 3` (`protocol_auth.c:960-963`).
+    /// C: `"Got bad ACK from %s (%s)"`.
+    BadAck(String),
     /// `control_h`: unknown subtype. C `control.c:144` sends
     /// `REQ_INVALID` and returns `true` (connection stays). We do
     /// the same — this is NOT a `Drop`, see `handle_control`.
@@ -590,6 +635,157 @@ pub fn handle_id(
     Ok(IdOk::Peer { needs_write, init })
 }
 
+// send_ack / ack_h (`protocol_auth.c:826-868, 948-1066`)
+
+/// `send_ack` (`protocol_auth.c:826-868`). Called when SPTPS
+/// `HandshakeDone` arrives and `allow_request == ACK` (`meta.c:
+/// 130-131`). Queues `"%d %s %d %x"` = `ACK myport.udp weight
+/// (options&0xffffff)|(PROT_MINOR<<24)` over the SPTPS-encrypted
+/// path (this is the FIRST line that goes through `sptps_send_
+/// record`, not `buffer_add` — `conn.send()` routes by `sptps.
+/// is_some()`).
+///
+/// Weight is the RTT in ms since `c->start` (`send_id`). C: `(now
+/// - c->start)` in microseconds / 1000. We use `Duration::as_millis`
+/// (same arithmetic, no overflow until 24 days). The cast to i32
+/// matches C `(int)` — wraps on absurd RTT, fine, the C also wraps.
+///
+/// `myself_options`: see `myself_options_default`. The C builds it
+/// per-host (`:844-865` reads `IndirectData`/`TCPOnly`/`PMTU`/
+/// `ClampMSS`/`Weight` from `c->config_tree`). We stubbed that
+/// (config_tree not retained); pass the daemon-wide defaults. The
+/// per-host overrides land with chunk 9's reloadable settings.
+///
+/// Returns the io_set signal (outbuf went empty→nonempty).
+///
+/// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight`
+/// (`ack_h` reads `c->options` for the PMTU intersection at
+/// `:996-999` and `c->estimated_weight` for the average at `:1048`).
+pub fn send_ack(
+    conn: &mut Connection,
+    my_udp_port: u16,
+    myself_options: u32,
+    now: Instant,
+) -> bool {
+    // C `:827-829`: `if(protocol_minor == 1) return send_upgrade(c)`.
+    // Legacy upgrade path. We forbid; minor < 2 was rejected in
+    // id_h. Debug-assert.
+    debug_assert!(conn.protocol_minor >= 2);
+
+    // C `:838-840`: weight = (now - c->start) in milliseconds. The
+    // C does `(tv_sec - tv_sec)*1000 + (tv_usec - tv_usec)/1000`.
+    // `as_millis` is the same. `as i32` cast: C `(int)` wraps;
+    // RTT > 24 days is nonsense anyway.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
+    conn.estimated_weight = weight;
+
+    // C `:844-865`: per-host config OR myself->options. STUBBED.
+    // The per-host overrides need `c->config_tree` (deferred per
+    // handle_id doc). Just take myself's. The four `if` blocks all
+    // OR INTO `c->options`; with no per-host overrides they reduce
+    // to `c->options = myself->options & 0x0f`.
+    //
+    // But: PMTU is `myself & PMTU && !(c & TCPONLY)` — the PMTU
+    // bit doesn't stick if THIS connection is TCP-only. With
+    // `c->options` starting at 0 (no per-host TCPOnly), the AND
+    // is true. So: just inherit.
+    conn.options = myself_options
+        & (OPTION_INDIRECT | OPTION_TCPONLY | OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
+
+    // C `:863-865`: per-host Weight override. STUBBED (same).
+
+    // C `:867`: `"%d %s %d %x", ACK, myport.udp, weight, (options &
+    // 0xffffff) | (experimental ? PROT_MINOR << 24 : 0)`.
+    // `experimental` is always true for us. `myport.udp` is a
+    // STRING in C (it goes through getaddrinfo); we have it as u16.
+    // `%s` of a numeric string == `%d` of the int. Same wire bytes.
+    let wire_options = (conn.options & 0x00ff_ffff) | (u32::from(PROT_MINOR) << 24);
+    conn.send(format_args!(
+        "{} {} {} {:x}",
+        Request::Ack as u8,
+        my_udp_port,
+        weight,
+        wire_options
+    ))
+}
+
+/// What `ack_h` parsed. Returned to the daemon for the world-model
+/// mutation (`node_add`, `edge_add`, `graph()`). The C does the
+/// mutation INSIDE `ack_h` (it has the globals); we don't (the
+/// daemon owns the slotmap).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckParsed {
+    /// `hisport`. Peer's UDP port (`%s` in C — string — because
+    /// `myport.udp` is a string. Everyone sends decimal; parse u16.)
+    pub his_udp_port: u16,
+    /// Peer's RTT estimate. Averaged with ours for the edge weight.
+    pub his_weight: i32,
+    /// Peer's options bitfield (with their PROT_MINOR in top byte).
+    pub his_options: u32,
+}
+
+/// `ack_h` parse half (`protocol_auth.c:948-962`). The MUTATION
+/// half (`:965-1064`: node lookup, dup-conn handling, edge_add,
+/// graph()) lives in the daemon — it touches `self.conns` and the
+/// world model.
+///
+/// Line format: `"4 <port> <weight> <options-hex>"`. C `sscanf(
+/// "%*d %s %d %x")` (`:960`). `%s` for the port (it's a string in
+/// C, see `send_ack`); we parse u16.
+///
+/// `line` is the SPTPS record body, `\n` already stripped by
+/// `record_body` (the C `meta.c:156` strips it).
+///
+/// # Errors
+/// `BadAck` if the sscanf would have returned `< 3` (`:960-963`).
+pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
+    // STRICTER than C: `%s` for port reads any non-whitespace; we
+    // want u16. The C never sends non-numeric (it formats `myport.
+    // udp` which `:846-858` ensures is decimal). A peer sending
+    // "http" here would crash our `sockaddr_setport` later anyway;
+    // reject up front.
+    let mut toks = line
+        .split(|&b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty());
+    let _reqno = toks.next(); // %*d
+    let port = toks
+        .next()
+        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| DispatchError::BadAck("bad port".into()))?;
+    let weight = toks
+        .next()
+        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|s| s.parse::<i32>().ok())
+        .ok_or_else(|| DispatchError::BadAck("bad weight".into()))?;
+    // `%x` — hex without `0x` prefix.
+    let options = toks
+        .next()
+        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|s| u32::from_str_radix(s, 16).ok())
+        .ok_or_else(|| DispatchError::BadAck("bad options".into()))?;
+
+    Ok(AckParsed {
+        his_udp_port: port,
+        his_weight: weight,
+        his_options: options,
+    })
+}
+
+/// `meta.c:155-158`: strip the trailing `\n` from an SPTPS record
+/// body before dispatching to `receive_request`.
+///
+/// C: `if(data[length-1] == '\n') data[length-1] = 0`. The check
+/// is conditional because pre-transition records (the PRF-derived
+/// random bytes during early SPTPS development?) might not have
+/// `\n`. In practice, `send_request` always appends one. We strip
+/// if present, leave alone if not. Same.
+#[must_use]
+pub fn record_body(bytes: &[u8]) -> &[u8] {
+    bytes.strip_suffix(b"\n").unwrap_or(bytes)
+}
+
 /// `control_h` (`control.c:45-145`). Second token is the subtype
 /// (`REQ_STOP=0` etc). Skeleton handles STOP only; everything else
 /// gets `REQ_INVALID` reply (C `control.c:144`).
@@ -617,6 +813,12 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         .and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
+        Some(REQ_DUMP_CONNECTIONS) => {
+            // `control.c:80`: `case REQ_DUMP_CONNECTIONS: return
+            // dump_connections(c)`. The walk-and-format is in
+            // the daemon (it has the slotmap). Signal that.
+            (DispatchResult::DumpConnections, false)
+        }
         Some(REQ_STOP) => {
             // C `control.c:59-61`: `event_exit(); return control_ok(
             // c, REQ_STOP)`. `control_ok` is `control_return(c, type,
@@ -1181,5 +1383,115 @@ mod tests {
         assert_eq!(PROT_MAJOR, 17);
         assert_eq!(PROT_MINOR, 7);
         assert_eq!(CTL_VERSION, 0);
+    }
+
+    // ─── send_ack / parse_ack
+
+    /// `myself->options` default. C `net_setup.c:442-453,800`. PMTU
+    /// on (no TCPOnly), ClampMSS on, PROT_MINOR=7 in top byte.
+    /// `0x0700000c`.
+    #[test]
+    fn myself_options_default_value() {
+        let opts = myself_options_default();
+        // Low byte: PMTU(4) | CLAMP(8) = 0xc.
+        assert_eq!(opts & 0xff, 0x0c);
+        // Top byte: PROT_MINOR.
+        assert_eq!(opts >> 24, u32::from(PROT_MINOR));
+        // The other 16 bits are 0.
+        assert_eq!(opts & 0x00ff_ff00, 0);
+        // Full value (pins the literal; if PROT_MINOR bumps, fail).
+        assert_eq!(opts, 0x0700_000c);
+    }
+
+    /// `send_ack` wire format. C `:867`: `"%d %s %d %x"`. The
+    /// connection has SPTPS installed (post-HandshakeDone) so this
+    /// goes through `sptps_send_record` — we DON'T have a real
+    /// post-handshake SPTPS in a unit test (needs the full dance).
+    /// So: test the PRE-SPTPS path (sptps=None). The format
+    /// arguments are identical; only the framing differs.
+    ///
+    /// (The post-handshake path IS tested by the integration test
+    /// `peer_ack_exchange` which gets the ACK over a real SPTPS.)
+    #[test]
+    fn send_ack_format() {
+        let mut c = mkconn();
+        // Fake `start` 50ms ago. weight = 50. `Instant - Duration`
+        // panics if `now` < boot+50ms; checked_sub is the explicit
+        // form. Tests run > 50ms after boot, so unwrap is safe.
+        let now = Instant::now();
+        c.start = now
+            .checked_sub(std::time::Duration::from_millis(50))
+            .unwrap();
+        c.protocol_minor = 7; // pass the debug_assert
+
+        let nw = send_ack(&mut c, 655, myself_options_default(), now);
+        assert!(nw);
+
+        // C: "4 655 50 700000c\n". %x is lowercase, no padding,
+        // no 0x prefix.
+        let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+        // Weight depends on the actual elapsed time. We faked
+        // start = now - 50ms; saturating_duration_since gives
+        // exactly 50ms. as_millis = 50. (Instant arithmetic is
+        // exact on the monotonic clock; no flake.)
+        assert_eq!(line, "4 655 50 700000c\n");
+        // Side effects.
+        assert_eq!(c.estimated_weight, 50);
+        assert_eq!(c.options, OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
+    }
+
+    /// `parse_ack` round-trip. The peer's send_ack → our parse.
+    #[test]
+    fn parse_ack_roundtrip() {
+        // What a peer sends. PROT_MINOR=7, PMTU+CLAMP set.
+        let line = b"4 655 50 700000c";
+        let parsed = parse_ack(line).unwrap();
+        assert_eq!(parsed.his_udp_port, 655);
+        assert_eq!(parsed.his_weight, 50);
+        assert_eq!(parsed.his_options, 0x0700_000c);
+        // The PMTU/CLAMP bits.
+        assert_eq!(
+            parsed.his_options & 0xff,
+            OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS
+        );
+    }
+
+    /// `parse_ack` malformed cases. C `:960`: `sscanf < 3` → false.
+    #[test]
+    fn parse_ack_malformed() {
+        // Missing options.
+        assert!(matches!(
+            parse_ack(b"4 655 50"),
+            Err(DispatchError::BadAck(_))
+        ));
+        // Non-numeric port. C `%s` would read it; we reject.
+        // STRICTER. The C would later crash in `sockaddr_setport`
+        // (which does `service_to_port` → fail → NULL); we fail
+        // earlier with a typed error.
+        assert!(matches!(
+            parse_ack(b"4 http 50 c"),
+            Err(DispatchError::BadAck(_))
+        ));
+        // Weight: negative is fine (i32, %d). Unlikely but valid.
+        let p = parse_ack(b"4 655 -1 c").unwrap();
+        assert_eq!(p.his_weight, -1);
+        // Options: bad hex.
+        assert!(matches!(
+            parse_ack(b"4 655 50 0xZZ"),
+            Err(DispatchError::BadAck(_))
+        ));
+    }
+
+    /// `record_body` strips trailing `\n` (C `meta.c:155-158`).
+    #[test]
+    fn record_body_strip() {
+        // Normal case: send_request appends \n, we strip.
+        assert_eq!(record_body(b"4 655 50 c\n"), b"4 655 50 c");
+        // No \n: leave alone (the C check is conditional).
+        assert_eq!(record_body(b"4 655 50 c"), b"4 655 50 c");
+        // Empty.
+        assert_eq!(record_body(b""), b"");
+        // Just \n.
+        assert_eq!(record_body(b"\n"), b"");
     }
 }

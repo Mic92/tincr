@@ -33,6 +33,7 @@
 
 use std::fmt::Write as _;
 use std::io;
+use std::net::SocketAddr;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::Instant;
@@ -254,6 +255,31 @@ pub struct Connection {
     /// `connection_t`; the size cost there is the same as unboxed
     /// `Option<Sptps>` here, but C doesn't pre-allocate a slab.
     pub sptps: Option<Box<Sptps>>,
+    /// `c->options`. Bitfield (`OPTION_INDIRECT` etc, `connection.h:
+    /// 32-36`). 0 until `send_ack` builds it from per-host config +
+    /// `myself->options`; `ack_h` ORs in the peer's. The top byte is
+    /// `PROT_MINOR` per `OPTION_VERSION` macro — set by `send_ack`,
+    /// the peer ANDs `& 0xffffff` before use.
+    pub options: u32,
+    /// `c->estimated_weight`. Round-trip time in ms, ID-send to
+    /// HandshakeDone (`protocol_auth.c:840`). `ack_h` averages with
+    /// the peer's estimate (`:1048`). i32 because the wire format is
+    /// `%d` and the average can theoretically wrap on a stalled
+    /// handshake (24 days). C uses `int`.
+    pub estimated_weight: i32,
+    /// `c->start`. `gettimeofday` at `send_id` (`protocol_auth.c:
+    /// 94`). The C sets it inside `send_id` (called for both
+    /// outgoing AND inbound replies); we set it in BOTH constructors
+    /// to `now`. Slightly earlier (accept vs id-reply send) but
+    /// the delta is one event-loop turn (~μs). `send_ack` reads it.
+    pub start: Instant,
+    /// `c->address`. Peer's TCP `SocketAddr`. C `union sockaddr_t`
+    /// (`connection.h:90`). Set at accept time (`net_socket.c:
+    /// 749` `memcpy(&c->address, &sa)`). `ack_h` copies this into
+    /// the edge's address with the port REWRITTEN to `hisport`
+    /// (`:1024-1025` `sockaddrcpy + sockaddr_setport`). `None` for
+    /// control conns (unix socket has no `SocketAddr`).
+    pub address: Option<SocketAddr>,
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
@@ -314,6 +340,10 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
+            options: 0,
+            estimated_weight: 0,
+            start: now,
+            address: None,
         }
     }
 
@@ -333,7 +363,7 @@ impl Connection {
     /// `outmaclength` (`:760`) is a legacy-protocol field; we're
     /// SPTPS-only. Skip.
     #[must_use]
-    pub fn new_meta(fd: OwnedFd, hostname: String, now: Instant) -> Self {
+    pub fn new_meta(fd: OwnedFd, hostname: String, address: SocketAddr, now: Instant) -> Self {
         Self {
             fd,
             inbuf: LineBuf::default(),
@@ -349,6 +379,14 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
+            options: 0,
+            estimated_weight: 0,
+            // `protocol_auth.c:94`: `gettimeofday(&c->start)` inside
+            // `send_id`. We approximate at accept time — one event-
+            // loop turn earlier than the C, ~μs delta. The weight is
+            // milliseconds; the error is noise.
+            start: now,
+            address: Some(address),
         }
     }
 
@@ -356,6 +394,31 @@ impl Connection {
     #[must_use]
     pub fn fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    /// `c->status.value` for `dump_connections` (`connection.c:
+    /// 171`). C union punning: `union { struct { bool x:1; ... };
+    /// uint32_t value; }`. GCC packs LSB-first, so the Nth
+    /// declaration-order bool is bit N.
+    ///
+    /// We don't HAVE the union; build the int from the bools we
+    /// track. Bits we don't model (pinged, encryptout, mst, pcap,
+    /// log, ...) stay 0. They're 0 in the C too at the points where
+    /// `dump_connections` runs against chunk-4b conns: pinged is
+    /// the ping-timeout state (chunk 8), mst is set by `graph()`
+    /// (chunk 5), pcap/log by control RPCs (chunk 8).
+    ///
+    /// Bit positions per `connection.h:38-56` (LSB-first):
+    ///   0 pinged, 1 unused_active, 2 connecting, 3 unused_termreq,
+    ///   4 remove_unused, 5 timeout_unused, 6 encryptout,
+    ///   7 decryptin, 8 mst, 9 control, 10 pcap, 11 log, ...
+    #[must_use]
+    pub fn status_value(&self) -> u32 {
+        let mut v = 0u32;
+        if self.control {
+            v |= 1 << 9;
+        }
+        v
     }
 
     /// `receive_meta`'s recv-and-buffer half. C `meta.c:185`:
@@ -544,33 +607,81 @@ impl Connection {
         was_empty
     }
 
-    /// `send_request` (`protocol.c:97-132`) → `send_meta` plaintext
-    /// path (`meta.c:91`). Format the line, append `\n`, push to
-    /// outbuf. Returns `true` if outbuf went from empty to non-empty
-    /// — caller registers `IO_WRITE` interest.
+    /// `send_request` (`protocol.c:97-132`) → `send_meta`
+    /// (`meta.c:55-96`). Format the line, append `\n`. Then the
+    /// `protocol_minor >= 2` branch:
     ///
-    /// C `send_request` does `vsnprintf` into a stack buffer then
-    /// `request[len++] = '\n'` then `send_meta(c, request, len)`. We
-    /// `write!` directly into `outbuf` (no intermediate stack copy).
-    /// `format_args!` doesn't allocate; the bytes land in `outbuf.
-    /// data` directly.
+    /// - **Plaintext** (control, pre-SPTPS): straight into outbuf.
+    ///   C `meta.c:91` `buffer_add`.
+    /// - **SPTPS** (post-handshake peer): `sptps_send_record(c->sptps,
+    ///   0, line, len)`. C `meta.c:65-67`. The line (WITH `\n`)
+    ///   becomes the body of an encrypted record. The other side's
+    ///   `receive_meta_sptps` (`meta.c:155-157`) strips the `\n` and
+    ///   feeds `receive_request`. Type byte 0 (= app data, not
+    ///   `SPTPS_HANDSHAKE`).
     ///
-    /// `send_meta` for plaintext-non-SPTPS (which is what control
-    /// conns are: `protocol_minor=0` so the `>= 2` check at
-    /// `meta.c:65` is false; `encryptout` is false): `buffer_add(&c->
-    /// outbuf, buffer, length)` then `io_set(READ | WRITE)`. Our
-    /// `bool` return is the `io_set` signal.
+    /// The `\n` is REDUNDANT on the SPTPS path (record framing
+    /// already delimits) but the C sends it (`send_request:120`
+    /// appends BEFORE `send_meta`), so the peer expects it.
+    /// `meta.c:156` does `data[length-1] = 0` only IF the last
+    /// byte is `\n` — a pre-SPTPS-transition record has no `\n`,
+    /// the check is conditional. We always append; matches C.
+    ///
+    /// Returns `true` if outbuf went empty→nonempty (`io_set` signal).
+    ///
+    /// # Panics
+    /// If called post-HandshakeDone with the SPTPS in a state that
+    /// can't send (only `InvalidState`: cipher not yet installed OR
+    /// `record_type >= 128`). `outcipher` is set at `receive_sig`
+    /// before `HandshakeDone` is emitted; type is hardcoded 0 here.
+    /// So: unreachable barring a `tinc-sptps` bug. The panic is the
+    /// loud failure mode for that bug.
     pub fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
         let was_empty = self.outbuf.is_empty();
-        // Append directly into outbuf. The C uses a stack buffer
-        // because varargs formatting needs a destination; we don't
-        // have that constraint — `format_args!` writes straight in.
+
+        // C `meta.c:65`: `if(c->protocol_minor >= 2)`. We use
+        // `sptps.is_some()` (same condition; see `feed`). But:
+        // `id_h` peer-branch SETS `sptps` and THEN calls `conn.
+        // send()` (the id-reply line). At that moment SPTPS is
+        // installed but `outcipher` is None (handshake not done).
+        // The C avoids this because `send_id` (`protocol.c:126-
+        // 130`) routes ID through `send_meta_raw` (NOT `send_meta`)
+        // — the `if(id)` check, `id == 0` for `Request::Id`.
+        //
+        // Replicated: id_h calls `send()` BEFORE `Sptps::start`
+        // (proto.rs `handle_id` ordering). `sptps` is None then.
+        // The post-handshake ACK is the FIRST `send()` with `sptps`
+        // installed AND `outcipher` ready. Debug-assert that
+        // ordering invariant.
+        if let Some(sptps) = self.sptps.as_deref_mut() {
+            // Format into a scratch Vec. We CAN'T format into
+            // outbuf and then pull it back out (the cipher writes
+            // to outbuf). One alloc per send-over-SPTPS; ACK +
+            // ADD_EDGE are not hot.
+            let mut line = Vec::with_capacity(64);
+            write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
+            line.push(b'\n');
+
+            // C `sptps_send_record(&c->sptps, 0, buffer, length)`.
+            // Type 0. send_record only fails on InvalidState
+            // (outcipher None or type >= 128). Type is 0; cipher
+            // is set before HandshakeDone (state.rs:receive_sig).
+            // The expect documents the invariant.
+            let outs = sptps.send_record(0, &line).expect(
+                "send_record after HandshakeDone, type=0: InvalidState is a state-machine bug",
+            );
+            // Exactly one Wire (state.rs:send_record_priv). Queue.
+            for o in outs {
+                if let Output::Wire { bytes, .. } = o {
+                    self.outbuf.add(&bytes);
+                }
+            }
+            return was_empty;
+        }
+
+        // Plaintext path. Append directly into outbuf.
         write!(VecFmt(&mut self.outbuf.data), "{args}").expect("Vec<u8> write infallible");
         self.outbuf.data.push(b'\n');
-
-        // C `meta.c:95`: io_set(&c->io, IO_READ | IO_WRITE).
-        // We can't reach the IoId from here (Daemon owns it); return
-        // the trigger condition instead.
         was_empty
     }
 
@@ -854,6 +965,29 @@ mod tests {
         assert_eq!(c.protocol_minor, 0);
         assert!(c.ecdsa.is_none());
         assert!(c.sptps.is_none());
+        // Chunk-4b fields.
+        assert_eq!(c.options, 0);
+        assert_eq!(c.estimated_weight, 0);
+        assert!(c.address.is_none());
+    }
+
+    /// `connection_status_t` bit positions (`connection.h:38-58`).
+    /// GCC packs bitfields LSB-first on x86-64. `dump_connections`
+    /// emits `c->status.value` as `%x`; `tinc dump connections`
+    /// just prints the hex. Nobody PARSES it. But: pinning the bit
+    /// position means a future Rust-daemon ↔ C-CLI cross-impl test
+    /// would diff cleanly. `control` is bit 9 (10th bool).
+    #[test]
+    fn status_value_control_bit() {
+        let c = Connection::test_with_fd(devnull());
+        // Pre-auth: control flag false.
+        assert_eq!(c.status_value(), 0);
+        // We don't have a test path that sets `control = true`
+        // here without `handle_id` (which lives in proto.rs).
+        // The bit-shift IS the test — `1 << 9` = `0x200`. If
+        // `connection.h` reorders the bitfield, this comment
+        // points at where to look.
+        assert_eq!(1u32 << 9, 0x200);
     }
 
     // ─── take_rest

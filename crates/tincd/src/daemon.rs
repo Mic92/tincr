@@ -15,7 +15,9 @@
 //! Logging: `target: "tincd"` for startup/shutdown, `"tincd::conn"`
 //! for accept/terminate. See lib.rs for the full mapping.
 
+use std::collections::HashMap;
 use std::io;
+use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,7 +36,10 @@ use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
     unmap,
 };
-use crate::proto::{DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id};
+use crate::proto::{
+    DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, myself_options_default,
+    parse_ack, record_body, send_ack,
+};
 
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
@@ -43,6 +48,38 @@ new_key_type! {
     /// that's been reused returns `None` from `conns.get(id)`. The
     /// C uses raw pointers and the io_tree.generation guard.
     pub struct ConnId;
+}
+
+/// Runtime annotation for one peer node. The (b)-path stub from
+/// the chunk-4b plan: `tinc-graph::Node` is name+edges (topology);
+/// this is which-conn-serves-it + the edge-metadata `ack_h` builds.
+///
+/// C `node_t` smushes both into one 200-byte struct. Splitting
+/// means `tinc-graph` stays `#![no_std]`-compatible (no fd, no
+/// `Instant`, no `SocketAddr` in the graph crate).
+///
+/// Chunk 5 cross-refs this to a `tinc_graph::NodeId` once the graph
+/// is wired. For now: `ack_h` populates it, `dump_connections`
+/// doesn't even read it (it walks `conns` not `nodes`). The dup-
+/// conn check (`ack_h:975-990`) is the one consumer.
+#[derive(Debug, Clone)]
+pub struct NodeState {
+    /// `n->connection`. Which meta connection currently serves this
+    /// node. `None` if the node is known but not directly connected
+    /// (transitively reachable, or just disconnected). Generational
+    /// `ConnId`: a stale one returns `None` from `conns.get`.
+    pub conn: Option<ConnId>,
+    /// `c->edge->address`. Peer's TCP-connect-from addr with port
+    /// rewritten to their UDP port (`ack_h:1024-1025`). The "how do
+    /// I send data packets" addr. `None` only for hypothetical
+    /// unix-socket peers (doesn't happen — peers come over TCP).
+    pub edge_addr: Option<SocketAddr>,
+    /// `c->edge->weight`. Average of our RTT estimate and theirs
+    /// (`ack_h:1048`). Milliseconds.
+    pub edge_weight: i32,
+    /// `c->edge->options`. Intersected/unioned bitfield (`ack_h:
+    /// 996-1001`). Top byte is the PEER's `PROT_MINOR`.
+    pub edge_options: u32,
 }
 
 /// `IoWhat` — the daemon's choice of `W` for `EventLoop<W>`.
@@ -259,6 +296,36 @@ pub struct Daemon {
     /// thread it through `IdCtx`. Stored once here, borrowed into
     /// each `IdCtx`.
     pub(crate) confbase: PathBuf,
+
+    /// `myself->options`. Bitfield (`connection.h:32-36` + PROT_MINOR
+    /// in top byte). C builds in `setup_myself_reloadable` (`net_
+    /// setup.c:383-453,800`). Chunk 4b: defaults only. Chunk 9
+    /// reads `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS`.
+    pub(crate) myself_options: u32,
+
+    /// `myport.udp`. C string (`net_setup.c:54,794`); we store the
+    /// resolved u16. Read back from `listeners[0].udp_port()` after
+    /// bind (the C does the same at `:1194` `get_bound_port`). With
+    /// `Port = 0` (tests), TCP and UDP get DIFFERENT kernel-assigned
+    /// ports until `bind_reusing_port` (chunk 10) lands. The ACK
+    /// packet needs the UDP one specifically.
+    pub(crate) my_udp_port: u16,
+
+    /// World model stub (chunk 4b's (b) path). `node_tree` keyed
+    /// by name. C `node.c` is a splay tree on `strcmp(name)`; we
+    /// use the name as the HashMap key.
+    ///
+    /// `tinc-graph::Graph` is the TOPOLOGY (nodes+edges, what
+    /// `sssp`/`mst` walk). `NodeState` is the RUNTIME annotation:
+    /// which connection serves this node, what UDP addr, the per-
+    /// tunnel SPTPS. C `node_t` smushes both into one 200-byte
+    /// struct; we split. The graph lands in chunk 5; for now `ack_h`
+    /// just records "this name maps to this conn".
+    ///
+    /// Why `String` not a `NodeId`: chunk 4b doesn't have the graph
+    /// yet. The C `lookup_node(name)` is a name lookup; we match.
+    /// Chunk 5's graph integration adds the `NodeId` cross-ref.
+    pub(crate) nodes: HashMap<String, NodeState>,
 
     // ─── settings
     /// The config knobs. Reload swaps this.
@@ -511,6 +578,13 @@ impl Daemon {
         // Hard error. The daemon can't function without at least one
         // listener (peers can't connect; we can't receive UDP).
         let listeners = open_listeners(settings.port, settings.addressfamily);
+        // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
+        // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
+        // atoi(myport) == 0`; we always read back — simpler, same
+        // answer when port ≠ 0 (kernel binds the requested port).
+        // `first()` not `[0]`: the empty-check below still wants
+        // its own error message.
+        let my_udp_port = listeners.first().map_or(0, Listener::udp_port);
         if listeners.is_empty() {
             return Err(SetupError::Config(
                 "Unable to create any listening socket!".into(),
@@ -567,6 +641,9 @@ impl Daemon {
             name,
             mykey,
             confbase: confbase.to_path_buf(),
+            myself_options: myself_options_default(),
+            my_udp_port,
+            nodes: HashMap::new(),
             settings,
             ev,
             timers,
@@ -876,8 +953,10 @@ impl Daemon {
         // ─── allocate connection (`:758-776`)
         // C `:762`: `c->hostname = sockaddr2hostname(&sa)`. The
         // "10.0.0.5 port 50123" string. Never changes after this.
+        // C `:749`: `memcpy(&c->address, &sa, salen)`. We pass the
+        // `SocketAddr` (already unmapped) for `ack_h`'s edge build.
         let hostname = fmt_addr(&peer);
-        let conn = Connection::new_meta(fd, hostname, self.timers.now());
+        let conn = Connection::new_meta(fd, hostname, peer, self.timers.now());
         let conn_fd = conn.fd();
 
         let id = self.conns.insert(conn);
@@ -1207,7 +1286,59 @@ impl Daemon {
                         }
                     }
                 }
-                Request::Control => handle_control(conn, &line),
+                Request::Control => {
+                    let (r, nw) = handle_control(conn, &line);
+                    if r == DispatchResult::DumpConnections {
+                        // `dump_connections` (`connection.c:166-175`).
+                        // Walk ALL conns (including the one asking).
+                        // C: `for list_each(connection_t, c, &list)
+                        // send_request(cdump, "%d %d %s %s %x %d %x")`
+                        // then a terminator `"%d %d"`.
+                        //
+                        // Borrow dance: `conn` borrows `self.conns`
+                        // mutably. The walk needs `&self.conns`. Drop
+                        // `conn`, walk into a Vec<String>, re-fetch
+                        // `conn`, send. The Vec is one alloc per
+                        // dump (not hot — control RPC).
+                        let rows: Vec<String> = self
+                            .conns
+                            .values()
+                            .map(|c| {
+                                // `connection.c:168`: `"%d %d %s %s
+                                // %x %d %x"`. `hostname` is the
+                                // FUSED `"host port port"` string
+                                // (one %s); the CLI splits it (`" port "`
+                                // literal, `dump.rs::ConnRow::parse`).
+                                format!(
+                                    "{} {} {} {} {:x} {} {:x}",
+                                    Request::Control as u8,
+                                    crate::proto::REQ_DUMP_CONNECTIONS,
+                                    c.name,
+                                    c.hostname,
+                                    c.options,
+                                    c.fd(),
+                                    c.status_value()
+                                )
+                            })
+                            .collect();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let mut nw2 = false;
+                        for row in rows {
+                            nw2 |= conn.send(format_args!("{row}"));
+                        }
+                        // Terminator: `"%d %d"` (`:173`). The CLI
+                        // detects end-of-dump by a line with no
+                        // body after the subtype int.
+                        nw2 |= conn.send(format_args!(
+                            "{} {}",
+                            Request::Control as u8,
+                            crate::proto::REQ_DUMP_CONNECTIONS
+                        ));
+                        (DispatchResult::Ok, nw2)
+                    } else {
+                        (r, nw)
+                    }
+                }
                 _ => {
                     // Any other request: skeleton doesn't handle.
                     // C would dispatch via the table; we Drop.
@@ -1235,6 +1366,13 @@ impl Daemon {
             }
 
             match result {
+                // DumpConnections was already mapped to Ok above
+                // (the Control arm rewrote it inline). Unreachable
+                // here. Explicit-unreachable rather than `_` so a
+                // new DispatchResult variant fails to compile.
+                DispatchResult::DumpConnections => {
+                    unreachable!("DumpConnections rewritten inline above")
+                }
                 DispatchResult::Ok => {}
                 DispatchResult::Stop => {
                     // `event_exit()`. The reply is queued; we set
@@ -1257,97 +1395,238 @@ impl Daemon {
     /// outputs. Called from BOTH the regular `FeedResult::Sptps`
     /// arm AND the `IdOk::Peer` piggyback re-feed.
     ///
-    /// Returns `true` if any output queued bytes to outbuf (the
-    /// io_set signal). May `terminate(id)` — caller must check
-    /// `conns.contains_key(id)` after.
+    /// Returns `true` if any output queued bytes to outbuf (io_set
+    /// signal). May `terminate(id)` — caller must check `conns.
+    /// contains_key(id)` after.
     ///
-    /// Chunk 4a: `HandshakeDone` → log + terminate. C `meta.c:129
-    /// -135`: `if(type == SPTPS_HANDSHAKE) { if(allow_request ==
-    /// ACK) return send_ack(c); else return true; }`. We don't have
-    /// `send_ack` yet. Terminating proves the handshake REACHED
-    /// done; chunk 4b replaces the terminate with `send_ack`.
-    ///
-    /// `Output::Record` is unreachable in chunk 4a: records only
-    /// flow post-handshake, and we terminate at handshake-done.
-    /// The arm is wired anyway (log + terminate) so a logic bug
-    /// fails LOUD instead of silently dropping.
+    /// Match arms map 1:1 to the C callback's branches:
+    /// - `Wire` → `send_meta_sptps` (`meta.c:50`): outbuf raw.
+    /// - `HandshakeDone` → `meta.c:129-135`: `if(allow == ACK)
+    ///   send_ack(c) else return true`.
+    /// - `Record` → `meta.c:153-161`: strip `\n`, `receive_
+    ///   request(c, data)`. Same `check_gate` + handler match as
+    ///   the cleartext line path; only the FRAMING differs (SPTPS
+    ///   record vs `\n`-terminated line).
     fn dispatch_sptps_outputs(&mut self, id: ConnId, outs: Vec<tinc_sptps::Output>) -> bool {
         use tinc_sptps::Output;
         let mut needs_write = false;
         for o in outs {
-            // Re-fetch conn each iteration: a previous output might
-            // have terminated. (Actually no — only HandshakeDone
-            // terminates, and we return after. But the re-fetch is
-            // cheap and the pattern is already established in the
-            // line-drain loop above.)
             let Some(conn) = self.conns.get_mut(id) else {
                 return needs_write;
             };
             match o {
                 Output::Wire { bytes, .. } => {
-                    // C `send_meta_sptps` (`meta.c:50`): `buffer_
-                    // add(&c->outbuf, buffer, length); io_set(
-                    // READ | WRITE)`.
+                    // C `send_meta_sptps` (`meta.c:50`).
                     needs_write |= conn.send_raw(&bytes);
                 }
                 Output::HandshakeDone => {
-                    // C `meta.c:129-135`: `if(allow_request == ACK)
-                    // return send_ack(c)`. Chunk 4a: we don't have
-                    // send_ack. Log the milestone (the integration
-                    // test asserts on this line) and terminate.
+                    // C `meta.c:129-135`: `if(type == SPTPS_
+                    // HANDSHAKE) { if(c->allow_request == ACK)
+                    // return send_ack(c); else return true; }`.
                     //
-                    // The C `else return true` branch is for
-                    // OUTGOING conns where the initiator has
-                    // already sent its ACK and is waiting for the
-                    // responder's. allow_request is then something
-                    // else. Chunk 4a is responder-only; we always
-                    // hit the `== ACK` arm.
+                    // `else return true`: outgoing conns send their
+                    // ACK from `id_h` (`:453` `if(!c->outgoing) ...
+                    // else send_ack(c)` — wait no, that's not
+                    // right either. The C `:451-453` is `if(!c->
+                    // outgoing) send_id(c)`. The outgoing-side
+                    // send_ack is from the SAME `meta.c:131` arm.
+                    // The `else` is for the initiator's SECOND
+                    // HandshakeDone callback during rekey. Chunk
+                    // 4b is responder-only, no rekey: always ACK.
                     log::info!(target: "tincd::auth",
                                "SPTPS handshake completed with {} ({})",
                                conn.name, conn.hostname);
-                    // Chunk 4a stop point: key auth passed but we
-                    // can't proceed to ack_h. The responder's SIG
-                    // was queued in the PREVIOUS Output::Wire arm
-                    // (SIG and HandshakeDone arrive together); if
-                    // we terminate now it never hits the wire.
-                    // C doesn't terminate here (calls send_ack);
-                    // the terminate is our shortcut.
-                    //
-                    // Sync flush before terminate. Temporary: chunk
-                    // 4b removes both (send_ack queues; regular
-                    // WRITE event flushes). Ok(true) and Err both
-                    // exit; Ok(false) (would-block) loops.
-                    while !conn.outbuf.is_empty() {
-                        match conn.flush() {
-                            // Partial. Loop. Unlikely for a 67-byte
-                            // SIG to localhost.
-                            Ok(false) => {}
-                            // Done OR peer gone. Stop either way.
-                            Ok(true) | Err(_) => break,
-                        }
+                    if conn.allow_request == Some(Request::Ack) {
+                        let now = self.timers.now();
+                        needs_write |= send_ack(conn, self.my_udp_port, self.myself_options, now);
                     }
-                    log::warn!(target: "tincd::auth",
-                               "Dropping {} after handshake (send_ack not implemented — chunk 4b)",
-                               conn.name);
-                    self.terminate(id);
-                    return needs_write;
+                    // No terminate. No sync-flush. The chunk-4a
+                    // shortcut is gone; the connection STAYS UP.
+                    // The ACK is queued in outbuf (encrypted via
+                    // sptps_send_record inside conn.send); the
+                    // regular WRITE event flushes it.
                 }
-                Output::Record { record_type, bytes } => {
-                    // C `meta.c:153-161`: strip `\n`, `receive_
-                    // request(c, data)`. Chunk 4a: unreachable
-                    // (we terminate at HandshakeDone). If we got
-                    // here, the SPTPS state machine sequenced
-                    // wrong (Record before HandshakeDone) OR a
-                    // refactor broke the terminate-at-done. LOUD.
-                    log::error!(target: "tincd::proto",
-                                "SPTPS Record (type {record_type}, {} bytes) from {} — not implemented",
-                                bytes.len(), conn.name);
-                    self.terminate(id);
-                    return needs_write;
+                Output::Record { bytes, .. } => {
+                    // C `meta.c:155-161`. Strip `\n`, dispatch.
+                    // `record_type` is always 0 here (app data;
+                    // SPTPS_HANDSHAKE became `HandshakeDone`).
+                    // The C ignores `type` (`meta.c:153`: only
+                    // checked against SPTPS_HANDSHAKE earlier).
+                    let body = record_body(&bytes);
+
+                    // ─── receive_request: same as cleartext
+                    let req = match check_gate(conn, body) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!(target: "tincd::proto",
+                                        "Bad SPTPS request from {}: {e:?}", conn.name);
+                            self.terminate(id);
+                            return needs_write;
+                        }
+                    };
+
+                    // Handler match. Chunk 4b only handles ACK;
+                    // chunk 5 adds ADD_EDGE/ADD_SUBNET/etc.
+                    if req == Request::Ack {
+                        match self.on_ack(id, body) {
+                            Ok(nw) => needs_write |= nw,
+                            Err(e) => {
+                                log::error!(target: "tincd::proto",
+                                            "ACK from {id:?}: {e:?}");
+                                self.terminate(id);
+                                return needs_write;
+                            }
+                        }
+                    } else {
+                        // Anything other than ACK — chunk 5. The
+                        // gate already passed (allow_request == ACK
+                        // after id_h, == None after on_ack). Post-
+                        // ACK any request reaches here. C dispatches
+                        // via the table; we Drop until handlers land.
+                        //
+                        // EXPECTED in chunk 4b: a real C peer would
+                        // send ADD_EDGE right after ACK. The test-
+                        // process-as-initiator doesn't (nothing to
+                        // advertise).
+                        log::warn!(target: "tincd::proto",
+                                   "SPTPS request {req:?} from {} — chunk 5",
+                                   conn.name);
+                        self.terminate(id);
+                        return needs_write;
+                    }
                 }
             }
         }
         needs_write
+    }
+
+    /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse
+    /// done by `proto::parse_ack`; this does the world-model edits
+    /// (which need `&mut self`).
+    ///
+    /// C path traced:
+    /// - `:965-991` lookup_node / new_node / dup-conn handling
+    /// - `:993-994` `n->connection = c; c->node = n`
+    /// - `:996-999` PMTU intersection (BOTH sides must want it)
+    /// - `:1001` `c->options |= options`
+    /// - `:1003-1019` PMTU/ClampMSS per-host re-read — STUBBED
+    /// - `:1023` `c->allow_request = ALL`
+    /// - `:1028` `send_everything(c)` — walks empty trees, sends 0
+    /// - `:1032-1051` edge_add: address+port, getsockname, weight avg
+    /// - `:1055-1061` `send_add_edge` broadcast — STUBBED (no peers)
+    /// - `:1065` `graph()` — STUBBED (chunk 5)
+    ///
+    /// Returns the io_set signal. (Always `false` in chunk 4b:
+    /// `send_everything` iterates empty trees, `send_add_edge` is
+    /// stubbed. Kept for chunk 5 when both fire.)
+    fn on_ack(&mut self, id: ConnId, body: &[u8]) -> Result<bool, crate::proto::DispatchError> {
+        let parsed = parse_ack(body)?;
+        let conn = self.conns.get_mut(id).expect("caller checked");
+
+        // C `:948-950`: `if(minor == 1) return upgrade_h(c, req)`.
+        // We rejected minor < 2 in id_h. Unreachable.
+
+        // ─── PMTU intersection (`:996-999`)
+        // C: `if(!(c->options & options & PMTU)) { c->options &=
+        // ~PMTU; options &= ~PMTU; }`. PMTU only sticks if BOTH
+        // sides want it (the AND). If either's bit is clear, clear
+        // both. Then OR in the rest.
+        let mut his = parsed.his_options;
+        if conn.options & his & crate::proto::OPTION_PMTU_DISCOVERY == 0 {
+            conn.options &= !crate::proto::OPTION_PMTU_DISCOVERY;
+            his &= !crate::proto::OPTION_PMTU_DISCOVERY;
+        }
+        conn.options |= his;
+
+        // C `:1003-1019`: per-host PMTU/ClampMSS re-read. STUBBED
+        // (config_tree not retained, see id_h doc).
+
+        // C `:1023`: `c->allow_request = ALL`. Our `None`.
+        conn.allow_request = None;
+
+        log::info!(target: "tincd::conn",
+                   "Connection with {} ({}) activated",
+                   conn.name, conn.hostname);
+
+        // ─── lookup_node / node_add (`:965-994`)
+        // C: `n = lookup_node(c->name); if(!n) { n = new_node();
+        // node_add(n); } else if(n->connection) { ... close old }`.
+        //
+        // The dup-conn case (`:975-990`): we already have a live
+        // connection to this node, the new one wins, terminate the
+        // old. The C reasons about `outgoing` ownership (which side
+        // initiated which). Chunk 4b is responder-only — the dup
+        // case is two simultaneous INBOUND conns from the same peer.
+        // Possible (peer reboots, reconnects before we've timed out
+        // the old). Handle it: terminate old, accept new.
+        let name = conn.name.clone();
+        let edge_addr = conn.address.map(|mut a| {
+            // C `:1024-1025`: `sockaddrcpy(&edge->address, &c->
+            // address); sockaddr_setport(&edge->address, hisport)`.
+            // The peer's TCP-connect-from addr, but with the port
+            // REWRITTEN to their UDP port. This is the "how do I
+            // reach you for data packets" addr.
+            a.set_port(parsed.his_udp_port);
+            a
+        });
+        // C `:1048`: `c->edge->weight = (weight + c->estimated_
+        // weight) / 2`. The arithmetic average. C `int /` truncates
+        // toward zero; `i32::midpoint` rounds toward neg-inf. With
+        // both weights non-negative (RTT in ms) they're identical,
+        // but the OVERFLOW behavior differs: `(i32::MAX + i32::MAX)
+        // /2` is UB in C, panics in debug Rust, wraps in release.
+        // `i32::midpoint` doesn't overflow. The C is buggy at 24-
+        // day RTT; we're not. The semantic divergence (rounding) is
+        // unreachable. Take the no-overflow version.
+        let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
+        let edge_options = conn.options;
+
+        // (drop conn borrow before touching self.nodes / terminate)
+        if let Some(old) = self.nodes.get(&name) {
+            if let Some(old_conn) = old.conn {
+                if old_conn != id {
+                    // C `:976-978`: "Established a second connection
+                    // with X, closing old connection".
+                    log::debug!(target: "tincd::conn",
+                                "Established a second connection with {name}, \
+                                 closing old connection");
+                    self.terminate(old_conn);
+                    // C `:989`: `graph()` after terminate. STUBBED.
+                }
+            }
+        }
+
+        // C `:993-994` + `:1032-1051` collapsed: NodeState IS the
+        // (b)-path stub. The C builds an `edge_t`; we record the
+        // fields the edge would carry. Chunk 5's `tinc-graph::
+        // add_edge` consumes these.
+        self.nodes.insert(
+            name,
+            NodeState {
+                conn: Some(id),
+                edge_addr,
+                edge_weight,
+                edge_options,
+            },
+        );
+
+        // C `:1028`: `send_everything(c)`. Walks `node_tree`, for
+        // each node walks `subnet_tree` and `edge_tree`, sends
+        // ADD_SUBNET/ADD_EDGE. With ZERO subnets and ZERO edges
+        // (we don't track either yet — chunk 5), iterates empty
+        // and sends nothing. The `disablebuggypeers` zero-packet
+        // (`:873-881`) is ancient compat; skip.
+
+        // C `:1055-1061`: `send_add_edge(everyone, c->edge)`.
+        // Broadcast to all OTHER active connections. With one
+        // peer (chunk 4b), `everyone` is empty after excluding
+        // self. Chunk 5 wires this when there's >1 peer.
+
+        // C `:1065`: `graph()`. SSSP + MST + reachability diff.
+        // `tinc-graph::sssp` exists; the GLUE (walk result, diff,
+        // fire scripts) is chunk 5.
+
+        Ok(false)
     }
 
     /// `handle_meta_io` WRITE path → `handle_meta_write`
@@ -1378,13 +1657,23 @@ impl Daemon {
     }
 
     /// `terminate_connection` (`net.c:118-170`). Full version sends
-    /// `del_edge`, runs `graph()`, retries outgoing. Skeleton: just
-    /// `connection_del` (`connection.c:162` → `list_delete →
-    /// free_connection`). The slotmap remove + ev.del.
+    /// `del_edge`, runs `graph()`, retries outgoing. Chunk 4b: also
+    /// clears the `NodeState.conn` back-ref (`:128-133` `c->node->
+    /// connection = NULL`).
     fn terminate(&mut self, id: ConnId) {
         if let Some(conn) = self.conns.remove(id) {
             log::info!(target: "tincd::conn",
                        "Closing connection with {}", conn.name);
+            // C `:128-133`: `if(c->node && c->node->connection == c)
+            // c->node->connection = NULL`. The node OUTLIVES the
+            // conn (peer goes down, comes back up → same node,
+            // new conn). Don't remove from `nodes`; just clear the
+            // back-ref so a stale ConnId isn't read.
+            if let Some(ns) = self.nodes.get_mut(&conn.name) {
+                if ns.conn == Some(id) {
+                    ns.conn = None;
+                }
+            }
             // C `free_connection` (`connection.c:119-156`): closes
             // socket, frees buffers, etc. OwnedFd's Drop closes;
             // LineBuf's Drop frees. Nothing to do.
