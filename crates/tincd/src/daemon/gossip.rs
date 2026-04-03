@@ -161,7 +161,7 @@ impl Daemon {
                     // Shouldn't fire from `start()` (one Wire only).
                     // But if SPTPS internals change: route via the
                     // general dispatch (ANS_KEY for handshake).
-                    nw |= self.send_sptps_data(to_nid, &to_name, tinc_sptps::REC_HANDSHAKE, &bytes);
+                    nw |= self.send_sptps_data(to_nid, tinc_sptps::REC_HANDSHAKE, &bytes);
                 }
             }
             // HandshakeDone/Record from start(): unreachable.
@@ -263,7 +263,7 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                                 "Relaying SPTPS_PACKET {} → {} ({} bytes)",
                                 msg.from, msg.to, data.len());
-                let mut nw = self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, Some(&data));
+                let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(&data));
                 nw |= self.try_tx(to_nid, true);
                 return Ok(nw);
             }
@@ -1105,7 +1105,7 @@ impl Daemon {
                     // never `node_udp_tree`. So `update_node_udp`
                     // for us is just "set `tunnel.udp_addr`".
                     let name_owned = name.to_owned();
-                    let addr = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr);
+                    let addr = self.nodes.get(&node).and_then(|ns| ns.edge_addr);
                     if let Some(addr) = addr {
                         let tunnel = self.tunnels.entry(node).or_default();
                         tunnel.udp_addr = Some(addr);
@@ -1159,7 +1159,7 @@ impl Daemon {
                         .tunnels
                         .get(&node)
                         .and_then(|t| t.udp_addr)
-                        .or_else(|| self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr));
+                        .or_else(|| self.nodes.get(&node).and_then(|ns| ns.edge_addr));
 
                     // C `graph.c:273-289`: host-down + hosts/NAME-down.
                     self.run_host_script(false, &name_owned, addr);
@@ -1237,7 +1237,7 @@ impl Daemon {
             // literal.
             let hostname = if nid == self.myself {
                 format!("MYSELF port {}", self.my_udp_port)
-            } else if let Some(ea) = self.nodes.get(name).and_then(|ns| ns.edge_addr.as_ref()) {
+            } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr.as_ref()) {
                 // `fmt_addr` shape: `"%s port %s"`, no v6 brackets
                 // (matches `getnameinfo NI_NUMERICHOST`).
                 fmt_addr(ea)

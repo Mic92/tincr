@@ -187,11 +187,7 @@ impl Daemon {
             let tcponly =
                 (self.myself_options | target_options) & crate::proto::OPTION_TCPONLY != 0;
             if tcponly {
-                let has_direct_conn = self
-                    .graph
-                    .node(target)
-                    .and_then(|n| self.nodes.get(n.name.as_str()))
-                    .is_some_and(|ns| ns.conn.is_some());
+                let has_direct_conn = self.nodes.get(&target).is_some_and(|ns| ns.conn.is_some());
                 if has_direct_conn {
                     return true;
                 }
@@ -464,10 +460,8 @@ impl Daemon {
             .get(to_nid.0 as usize)
             .and_then(Option::as_ref)?
             .nexthop;
-        // Reverse-lookup nexthop's name (graph slot → name string).
-        let nexthop_name = self.graph.node(nexthop)?.name.as_str();
         // `NodeState.conn` for the nexthop.
-        self.nodes.get(nexthop_name)?.conn
+        self.nodes.get(&nexthop)?.conn
     }
 
     /// `Route` lookup with bounds + `Option::as_ref` flatten.
@@ -621,7 +615,7 @@ impl Daemon {
                 // hosts/-only) are not directly connected.
                 let directly_connected = self
                     .nodes
-                    .get(name)
+                    .get(&nid)
                     .and_then(|ns| ns.conn)
                     .and_then(|cid| self.conns.get(cid))
                     .is_some();
@@ -800,12 +794,7 @@ impl Daemon {
         // against the DEREFFED to. Chain terminates here.
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
-        let to_directly_connected = self
-            .graph
-            .node(dereffed)
-            .and_then(|n| self.nodes.get(&n.name))
-            .and_then(|ns| ns.conn)
-            .is_some();
+        let to_directly_connected = self.nodes.get(&dereffed).and_then(|ns| ns.conn).is_some();
         // `to->nexthop->options`: the dereffed-to's nexthop. With
         // direct neighbors, `dereffed.nexthop == dereffed` so
         // these are the same. Read from `last_routes`.
@@ -1008,7 +997,7 @@ impl Daemon {
     ) -> bool {
         let to_is_myself = to_nid == self.myself;
         let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
-        let to_directly_connected = self.nodes.get(to_name).and_then(|ns| ns.conn).is_some();
+        let to_directly_connected = self.nodes.get(&to_nid).and_then(|ns| ns.conn).is_some();
         // `to->nexthop->options`: read via the route.
         let nexthop_options = self
             .route_of(to_nid)
@@ -1109,11 +1098,7 @@ impl Daemon {
         // Build `FromState`. `None` → `lookup_node(from)` failed.
         let from_nid = self.node_ids.get(&parsed.from).copied();
         let from_state = from_nid.map(|nid| {
-            let directly_connected = self
-                .nodes
-                .get(&parsed.from)
-                .and_then(|ns| ns.conn)
-                .is_some();
+            let directly_connected = self.nodes.get(&nid).and_then(|ns| ns.conn).is_some();
             let udp_confirmed = self
                 .tunnels
                 .get(&nid)
@@ -1288,11 +1273,7 @@ impl Daemon {
     /// v6 target from a v4 socket fails `EAFNOSUPPORT`.
     ///
     /// `&mut self` for the cycle counter (C function-static).
-    pub(super) fn choose_udp_address(
-        &mut self,
-        to_nid: NodeId,
-        to_name: &str,
-    ) -> Option<(SocketAddr, u8)> {
+    pub(super) fn choose_udp_address(&mut self, to_nid: NodeId) -> Option<(SocketAddr, u8)> {
         // Build listener_addrs once. ≤8 elements (`net.h` MAXSOCKETS).
         let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
 
@@ -1354,7 +1335,7 @@ impl Daemon {
         // prng-picks; for chunk 10 the direct-neighbor shortcut
         // is the common case (transitives go via relay anyway —
         // `via` recursion in `try_tx`).
-        let addr = self.nodes.get(to_name)?.edge_addr?;
+        let addr = self.nodes.get(&to_nid)?.edge_addr?;
         let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
         Some((addr, sock))
     }

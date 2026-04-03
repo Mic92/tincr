@@ -113,8 +113,16 @@ impl Daemon {
             o.addr_cache.reset();
         }
 
+        // C `:965-991`: `lookup_node` runs BEFORE the dup-conn check
+        // and BEFORE `n->connection = c`. We need the NodeId to key
+        // `self.nodes`. `lookup_or_add_node` is idempotent (the peer
+        // may already be in the graph if a transitive ADD_EDGE arrived
+        // first). The `add_edge` call below uses `peer_id` again —
+        // same idempotent slot.
+        let peer_id = self.lookup_or_add_node(&name);
+
         // (drop conn borrow before touching self.nodes / terminate)
-        if let Some(old) = self.nodes.get(&name)
+        if let Some(old) = self.nodes.get(&peer_id)
             && let Some(old_conn) = old.conn
             && old_conn != id
         {
@@ -136,13 +144,8 @@ impl Daemon {
         // (NodeState insert deferred until we have `fwd_eid` below.)
 
         // C `:1032-1051`: `c->edge = new_edge(); ...; edge_add()`.
-        // The bridge to the graph. `lookup_or_add_node` for the
-        // peer (might already be in the graph if a transitive
-        // ADD_EDGE arrived first — unlikely with chunk-5's single-
-        // peer scope but the C handles it). Then `add_edge(myself
-        // → peer)`.
-        //
-        // C builds a BIDIRECTIONAL pair via `e->reverse` linking
+        // `peer_id` already obtained above (before the dup-conn
+        // check). C builds a BIDIRECTIONAL pair via `e->reverse` linking
         // (`edge.c:59-73`). `Graph::add_edge` auto-links if the
         // twin exists. With ONE direction, sssp's `e->reverse`
         // check (`graph.c:159`) skips it — so the peer won't
@@ -156,7 +159,6 @@ impl Daemon {
         // the peer's `c->edge` (sent via ADD_EDGE) is the other.
         // We synthesize the reverse for the test to prove the
         // diff fires.
-        let peer_id = self.lookup_or_add_node(&name);
         let fwd_eid = self
             .graph
             .add_edge(self.myself, peer_id, edge_weight, edge_options);
@@ -227,7 +229,7 @@ impl Daemon {
         // Now that we have `fwd_eid`, populate `NodeState.edge`.
         // `terminate_connection` (`net.c:126-132`) reads it.
         self.nodes.insert(
-            name.clone(),
+            peer_id,
             NodeState {
                 edge: Some(fwd_eid),
                 conn: Some(id),
@@ -368,6 +370,10 @@ impl Daemon {
                    "Closing connection with {}", conn.name);
         let was_active = conn.active;
         let conn_name = conn.name.clone();
+        // `nodes` is keyed by NodeId. A pre-ACK conn (e.g. control,
+        // probe-fail) has no `node_ids` entry; that's fine — it
+        // also has no `NodeState` (only `on_ack` inserts).
+        let conn_nid = self.node_ids.get(&conn_name).copied();
         // Drop conn now — OwnedFd closes the socket. Further
         // `broadcast_line` calls below will skip this id (it's
         // gone from `conns`).
@@ -381,14 +387,16 @@ impl Daemon {
         // c->node->connection = NULL`. The node OUTLIVES the conn;
         // clear the back-ref so a stale ConnId isn't read. Also
         // grab the edge while we're here.
-        let our_edge = self.nodes.get_mut(&conn_name).and_then(|ns| {
-            if ns.conn == Some(id) {
-                ns.conn = None;
-                ns.edge.take()
-            } else {
-                None
-            }
-        });
+        let our_edge = conn_nid
+            .and_then(|nid| self.nodes.get_mut(&nid))
+            .and_then(|ns| {
+                if ns.conn == Some(id) {
+                    ns.conn = None;
+                    ns.edge.take()
+                } else {
+                    None
+                }
+            });
 
         // C `:126-152`: `if(c->edge)`. The edge cleanup. Only fires
         // for connections that got past ACK (`ack_h:1051` set
@@ -421,14 +429,12 @@ impl Daemon {
             // now unreachable AND has an edge back to us (the
             // synthesized reverse from `on_ack`), delete + broadcast
             // that too. The C `lookup_edge(c->node, myself)`.
-            let peer_unreachable = self
-                .node_ids
-                .get(&conn_name)
-                .and_then(|&nid| self.graph.node(nid))
+            let peer_unreachable = conn_nid
+                .and_then(|nid| self.graph.node(nid))
                 .is_some_and(|n| !n.reachable);
             if was_active
                 && peer_unreachable
-                && let Some(&peer_nid) = self.node_ids.get(&conn_name)
+                && let Some(peer_nid) = conn_nid
                 && let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself)
             {
                 // C `:144-146`: `if(!tunnelserver)
@@ -458,14 +464,14 @@ impl Daemon {
         // (probe failed) is already handled by `on_connecting`→
         // `do_outgoing_connection` directly. Don't double-retry.
         if was_active
-            && let Some(oid) = self.nodes.get(&conn_name).and_then(|_| {
-                // Can't read `conn.outgoing` (conn already
-                // dropped). Look it up by name in `outgoings`.
-                self.outgoings
-                    .iter()
-                    .find(|(_, o)| o.node_name == conn_name)
-                    .map(|(id, _)| id)
-            })
+            && conn_nid.is_some_and(|nid| self.nodes.contains_key(&nid))
+            // Can't read `conn.outgoing` (conn already dropped).
+            // Look it up by name in `outgoings`.
+            && let Some(oid) = self
+                .outgoings
+                .iter()
+                .find(|(_, o)| o.node_name == conn_name)
+                .map(|(id, _)| id)
         {
             // C `ack_h:942`: `c->outgoing->timeout = 0` was
             // already done in `on_ack` — wait, no, we never
@@ -505,7 +511,15 @@ impl Daemon {
         let name = outgoing.node_name.clone();
 
         // C `:674-676`: `if(n->connection)`. Our `NodeState.conn`.
-        if self.nodes.get(&name).and_then(|ns| ns.conn).is_some() {
+        // No `node_ids` entry → never ACK'd → no NodeState → not
+        // connected. The `and_then` chain short-circuits to `None`.
+        if self
+            .node_ids
+            .get(&name)
+            .and_then(|nid| self.nodes.get(nid))
+            .and_then(|ns| ns.conn)
+            .is_some()
+        {
             log::info!(target: "tincd::conn",
                        "Already connected to {name}");
             return;

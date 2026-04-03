@@ -796,7 +796,14 @@ pub struct Daemon {
     /// distinguish (it's one struct for both); we make the split
     /// explicit. The dup-conn check (`ack_h:975-990`) is the one
     /// consumer of `conn`.
-    pub(crate) nodes: HashMap<String, NodeState>,
+    ///
+    /// Keyed by `NodeId` (not `String`). Same monotonic-node
+    /// proof as `node_log_name`: tincd never calls `Graph::
+    /// del_node`, so any `NodeId` from `node_ids` / `id6_table` /
+    /// edge endpoints / `last_routes` is always live. Keying by
+    /// the `Copy` ID kills the `graph.node(nid).name → nodes.
+    /// get(name)` double-lookup at every per-packet site.
+    pub(crate) nodes: IntHashMap<NodeId, NodeState>,
 
     /// Per-edge address annotation. `tinc-graph::Edge` is topology-
     /// only (from/to/weight/options); the WIRE addresses live here.
@@ -1579,7 +1586,7 @@ impl Daemon {
             myself,
             subnets,
             seen: SeenRequests::new(),
-            nodes: HashMap::new(),
+            nodes: IntHashMap::default(),
             edge_addrs: HashMap::new(),
             choose_udp_x: 0,
             tunnels: IntHashMap::default(),

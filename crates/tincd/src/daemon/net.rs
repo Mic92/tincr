@@ -294,11 +294,11 @@ impl Daemon {
                                  sender ({peer:?}): dst={dst_id} src={src_id}");
                     return;
                 }
-                let to_name = self.node_log_name(to_nid).to_owned();
                 log::debug!(target: "tincd::net",
-                            "Relaying UDP packet from {from_name} to {to_name} \
-                             ({} bytes)", ct.len());
-                let mut nw = self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, Some(ct));
+                            "Relaying UDP packet from {from_name} to {} \
+                             ({} bytes)",
+                            self.node_log_name(to_nid), ct.len());
+                let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(ct));
                 nw |= self.try_tx(to_nid, true);
                 if nw {
                     self.maybe_set_write_any();
@@ -804,8 +804,7 @@ impl Daemon {
                 // `nodes[nexthop_name].conn`.
                 let from_conn: Option<ConnId> = from.and_then(|nid| {
                     let route = self.last_routes.get(nid.0 as usize)?.as_ref()?;
-                    let nexthop_name = self.graph.node(route.nexthop)?.name.clone();
-                    self.nodes.get(&nexthop_name)?.conn
+                    self.nodes.get(&route.nexthop)?.conn
                 });
 
                 // Active conns → (ConnId, EdgeId) via NodeState.edge.
@@ -814,7 +813,8 @@ impl Daemon {
                     .iter()
                     .filter(|&(_, c)| c.active)
                     .filter_map(|(cid, c)| {
-                        let eid = self.nodes.get(&c.name)?.edge?;
+                        let nid = self.node_ids.get(&c.name)?;
+                        let eid = self.nodes.get(nid)?.edge?;
                         Some((cid, eid))
                     })
                     .collect();
@@ -856,15 +856,12 @@ impl Daemon {
         // of the SAME buffer is zero-copy-safe.
         let mut nw = false;
         for nid in target_nids {
-            let Some(name) = self.graph.node(nid).map(|n| n.name.clone()) else {
-                continue;
-            };
             let len = data.len();
             let tunnel = self.tunnels.entry(nid).or_default();
             tunnel.out_packets += 1;
             tunnel.out_bytes += len as u64;
             // C `:1586-1590`: `send_sptps_packet; try_tx(n, true)`.
-            nw |= self.send_sptps_packet(nid, &name, data);
+            nw |= self.send_sptps_packet(nid, data);
             nw |= self.try_tx(nid, true);
         }
         nw
@@ -1120,7 +1117,7 @@ impl Daemon {
                 // SPTPS for us (no legacy fork). `try_tx(n, true)`:
                 // the `true` is `mtu` — every forwarded packet drives
                 // the PMTU discovery one step.
-                let mut nw = self.send_sptps_packet(to_nid, &to, data);
+                let mut nw = self.send_sptps_packet(to_nid, data);
                 nw |= self.try_tx(to_nid, true);
                 nw
             }
@@ -1234,7 +1231,15 @@ impl Daemon {
     /// ethernet header before encrypting — the receiver re-
     /// synthesizes it from the IP version nibble (`receive_sptps_
     /// record:1128-1144`). Saves 14 bytes/packet.
-    pub(super) fn send_sptps_packet(&mut self, to_nid: NodeId, to_name: &str, data: &[u8]) -> bool {
+    pub(super) fn send_sptps_packet(&mut self, to_nid: NodeId, data: &[u8]) -> bool {
+        // Nodes are append-only; `to_nid` is from `node_ids` /
+        // route results. Direct graph access (not `node_log_name
+        // (&self)`) so the borrow checker sees it's disjoint from
+        // `tunnels` / `compressor` / `tx_scratch`. Log-only.
+        let to_name = self
+            .graph
+            .node(to_nid)
+            .map_or("<gone>", |n| n.name.as_str());
         // C `:696-700`: `if(routing_mode == RMODE_ROUTER) { offset =
         // 14; } else { type = PKT_MAC; }`. Router strips the 14-byte
         // eth header (receiver re-synths from IP version nibble).
@@ -1271,7 +1276,7 @@ impl Daemon {
         // shrank. Nobody runs that. STRICTER-than-C: gate BEFORE
         // compression, send the original frame, also save the wasted
         // compression work the C does anyway.
-        let direct_conn = self.nodes.get(to_name).and_then(|ns| ns.conn);
+        let direct_conn = self.nodes.get(&to_nid).and_then(|ns| ns.conn);
         if let Some(conn_id) = direct_conn
             && data.len() > usize::from(tunnel.minmtu())
         {
@@ -1405,7 +1410,7 @@ impl Daemon {
                        "seal_data_into for {to_name}: {e:?}");
             return false;
         }
-        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, None)
+        self.send_sptps_data_relay(to_nid, self.myself, record_type, None)
     }
 
     /// `receive_sptps_record` (`net_packet.c:1056-1152`) +
@@ -1433,7 +1438,7 @@ impl Daemon {
                     // `record_type == REC_HANDSHAKE` (128) goes via
                     // the meta connection (ANS_KEY); everything
                     // else goes UDP.
-                    nw |= self.send_sptps_data(peer, peer_name, record_type, &bytes);
+                    nw |= self.send_sptps_data(peer, record_type, &bytes);
                 }
                 Output::HandshakeDone => {
                     // C `receive_sptps_record:1059-1065`: `if(type
@@ -1630,16 +1635,10 @@ impl Daemon {
     /// SPTPS "send_data" callback. Thin wrapper for the common case
     /// (`from = myself`); see [`send_sptps_data_relay`] for the full
     /// relay decision.
-    pub(super) fn send_sptps_data(
-        &mut self,
-        to_nid: NodeId,
-        to_name: &str,
-        record_type: u8,
-        ct: &[u8],
-    ) -> bool {
+    pub(super) fn send_sptps_data(&mut self, to_nid: NodeId, record_type: u8, ct: &[u8]) -> bool {
         // C `send_sptps_data_myself` (`net_packet.c:99-101`):
         // `send_sptps_data(to, myself, type, data, len)`.
-        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, Some(ct))
+        self.send_sptps_data_relay(to_nid, self.myself, record_type, Some(ct))
     }
 
     /// `send_sptps_data` (`net_packet.c:965-1054`). The relay
@@ -1683,7 +1682,6 @@ impl Daemon {
     pub(super) fn send_sptps_data_relay(
         &mut self,
         to_nid: NodeId,
-        to_name: &str,
         from_nid: NodeId,
         record_type: u8,
         ct: Option<&[u8]>,
@@ -1710,7 +1708,8 @@ impl Daemon {
             .and_then(Option::as_ref)
         else {
             log::debug!(target: "tincd::net",
-                        "No route to {to_name}; dropping");
+                        "No route to {}; dropping",
+                        self.node_log_name(to_nid));
             return false;
         };
         let via_nid = route.via;
@@ -1794,9 +1793,18 @@ impl Daemon {
 
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::net",
-                           "No meta connection toward {to_name}");
+                           "No meta connection toward {}",
+                           self.node_log_name(to_nid));
                 return false;
             };
+            // Read graph fields before `conns.get_mut` borrow.
+            // Direct access (not `node_log_name(&self)`) so the
+            // borrow checker sees disjoint fields. Nodes never
+            // deleted; `to_nid` is from route results.
+            let to_name = self
+                .graph
+                .node(to_nid)
+                .map_or("<gone>", |n| n.name.as_str());
             let Some(conn) = self.conns.get_mut(conn_id) else {
                 return false;
             };
@@ -1964,18 +1972,13 @@ impl Daemon {
             (sa, *sock)
         } else {
             // Cold path: pre-confirmation discovery, send_locally
-            // override, edge exploration. `relay_name` is only
-            // needed by `choose_udp_address`'s `nodes.get(name)`
-            // edge-addr lookup and the debug log; alloc it lazily
-            // here, NOT per-packet. Previous code did `to_owned()`
-            // unconditionally — a String alloc per packet, never
-            // read once `udp_confirmed`.
-            // `relay_nid` from `last_routes` (via/nexthop). Nodes
-            // never deleted; sssp result NodeIds stay valid.
-            let relay_name = self.node_log_name(relay_nid).to_owned();
-            let Some((addr, sock)) = self.choose_udp_address(relay_nid, &relay_name) else {
+            // override, edge exploration. `relay_nid` from
+            // `last_routes` (via/nexthop). Nodes never deleted;
+            // sssp result NodeIds stay valid.
+            let Some((addr, sock)) = self.choose_udp_address(relay_nid) else {
                 log::debug!(target: "tincd::net",
-                            "No UDP address known for relay {relay_name}; dropping");
+                            "No UDP address known for relay {}; dropping",
+                            self.node_log_name(relay_nid));
                 return false;
             };
             cold_sockaddr = socket2::SockAddr::from(addr);
