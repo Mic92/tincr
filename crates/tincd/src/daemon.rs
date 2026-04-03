@@ -45,17 +45,18 @@ use crate::outgoing::{
     ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, probe_connecting,
     resolve_config_addrs, try_connect,
 };
+use crate::pmtu::{self, PmtuAction, PmtuState};
 use crate::proto::{
     DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
     myself_options_default, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
     parse_del_subnet, record_body, send_ack,
 };
-use crate::route::{RouteResult, route};
+use crate::route::{self, RouteResult, TtlResult, route};
 use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
-use crate::{compress, icmp, mss};
+use crate::{compress, icmp, mss, neighbor};
 
 // `net.h:106-108`: SPTPS record-type bits for the per-tunnel data
 // channel. Type 0 = plain IP packet (RMODE_ROUTER, no compression).
@@ -230,6 +231,21 @@ pub struct DaemonSettings {
     /// Default 0 (`COMPRESS_NONE`). 1–9 zlib, 12 LZ4; 10–11 LZO
     /// (stubbed, rejected at setup).
     pub compression: u8,
+    /// `decrement_ttl` (`net_setup.c:457`). Default OFF (`route.c:
+    /// 38`: `bool decrement_ttl = false`). When set, `route_packet`
+    /// calls `do_decrement_ttl` AFTER the forward decision (`route.c:
+    /// 664,759,896,1004`). Makes `traceroute` through the mesh show
+    /// each hop. Off by default because it MUTATES forwarded packets
+    /// (TTL field + IPv4 checksum); some payloads (encrypted-with-
+    /// integrity, e.g. ESP) hash the IP header.
+    pub decrement_ttl: bool,
+    /// `udp_discovery_interval` (`net_packet.c:85`). Seconds between
+    /// UDP probe-request sends when `!udp_confirmed`. Default 2.
+    pub udp_discovery_interval: u32,
+    /// `udp_discovery_keepalive_interval` (`net_packet.c:84`). Seconds
+    /// between probe sends when `udp_confirmed`. Default 10. Keeps
+    /// NAT mappings alive.
+    pub udp_discovery_keepalive_interval: u32,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -251,6 +267,12 @@ impl Default for DaemonSettings {
             // C `net_setup.c:1043`: `myself->incompression =
             // COMPRESS_NONE` (the `else` when no Compression config).
             compression: 0,
+            // C `route.c:38`: `bool decrement_ttl = false`.
+            decrement_ttl: false,
+            // C `net_packet.c:85`: `int udp_discovery_interval = 2`.
+            udp_discovery_interval: 2,
+            // C `net_packet.c:84`.
+            udp_discovery_keepalive_interval: 10,
         }
     }
 }
@@ -736,6 +758,13 @@ impl Daemon {
                     }
                     _ => settings.compression = v,
                 }
+            }
+        }
+
+        // DecrementTTL (`net_setup.c:457`). Default false.
+        if let Some(e) = config.lookup("DecrementTTL").next() {
+            if let Ok(v) = e.get_bool() {
+                settings.decrement_ttl = v;
             }
         }
 
@@ -1422,14 +1451,46 @@ impl Daemon {
             }
 
             // C `:250`: `try_tx(c->node, false)`. UDP holepunch
-            // keepalive. STUB(chunk-9).
+            // keepalive. The `false` is `mtu = false`: ping-tick
+            // keeps the UDP path warm but doesn't drive PMTU
+            // (PMTU is per-packet, not per-tick).
+            //
+            // IMPORTANT: only `try_tx` if `validkey` is already
+            // set. The C `try_sptps` would `send_req_key` here,
+            // but for direct neighbors that's WRONG — they're our
+            // META connection, not a data target. The C `try_tx`
+            // is gated on `c->node` actually being a forwarding
+            // target (something tries to send to them); the ping
+            // tick keepalive is a degenerate trigger that fires
+            // for ALL direct neighbors. With `try_sptps`
+            // unconditionally REQ_KEY-ing here, every direct
+            // neighbor gets a per-tunnel handshake even if no data
+            // ever flows to them. That's correct (keeps UDP warm)
+            // but races with gossip during initial mesh formation.
+            // Gate on `validkey` to skip the noisy first phase.
+            // The per-packet `try_tx` (in `route_packet`) does the
+            // initial handshake when data actually flows.
+            let try_nid = self
+                .node_ids
+                .get(&conn.name)
+                .copied()
+                .filter(|nid| self.tunnels.get(nid).is_some_and(|t| t.status.validkey));
+            // Read `pinged` before releasing the `conn` borrow.
+            let pinged = conn.pinged;
+            let conn_name = conn.name.clone();
+            let conn_hostname = conn.hostname.clone();
+            // ─── conn borrow ends here ───
+
+            if let Some(nid) = try_nid {
+                nw |= self.try_tx(nid, false);
+            }
 
             // C `:253-257`: `if(c->status.pinged)`. Sent PING,
             // `pingtimeout` elapsed, no PONG cleared the bit.
-            if conn.pinged {
+            if pinged {
                 log::info!(target: "tincd::conn",
-                           "{} ({}) didn't respond to PING in {} seconds",
-                           conn.name, conn.hostname, stale.as_secs());
+                           "{conn_name} ({conn_hostname}) didn't respond \
+                            to PING in {} seconds", stale.as_secs());
                 self.terminate(id);
                 continue;
             }
@@ -1875,16 +1936,53 @@ impl Daemon {
             .map_or("<gone>", |n| n.name.as_str())
             .to_owned();
 
-        // C `:1741`: `if(from && from->status.sptps && DSTID == nullid)`
-        // — direct-to-us. The non-null DSTID is the relay path.
-        // STUB(chunk-9): relay (`:1817-1821` `if(to != myself)
-        // send_sptps_data(to, from, ...)`). With dst==null, `to ==
-        // myself` always; with dst!=null, `to = lookup_node_id(dst)`.
+        // C `:1786-1821`: `if(!memcmp(dst, nullid)) { direct=true;
+        // from=n; to=myself } else { from=lookup(src); to=lookup(
+        // dst) }`. With `dst==null`, the packet is direct-to-us.
+        // With `dst!=null`: either it's STILL for us (`dst ==
+        // myself` — the sender just didn't set nullid; happens
+        // when they didn't know we're a direct neighbor) OR it's
+        // a relay packet we forward.
         if !dst_id.is_null() {
-            log::debug!(target: "tincd::net",
-                        "Received UDP relay packet (dst={dst_id}); \
-                         relay path is STUB(chunk-9)");
-            return;
+            let Some(to_nid) = self.id6_table.lookup(dst_id) else {
+                log::debug!(target: "tincd::net",
+                            "Received UDP relay packet from {from_name} \
+                             with unknown dst ID {dst_id}");
+                return;
+            };
+            // C `:1800-1803`: `if(!to->status.reachable) return`.
+            // Race: the dst just became unreachable. Drop.
+            if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+                log::debug!(target: "tincd::net",
+                            "Cannot relay UDP packet from {from_name}: \
+                             dst {dst_id} is unreachable");
+                return;
+            }
+            // C `:1817-1821`: `if(to != myself) { send_sptps_data(
+            // to, from, 0, DATA, len); try_tx(to, true); return }`.
+            // The HOT relay path. We pass `from_nid` so the relay
+            // wire prefix carries the ORIGINAL source ID.
+            if to_nid != self.myself {
+                let to_name = self
+                    .graph
+                    .node(to_nid)
+                    .map_or("<gone>", |n| n.name.as_str())
+                    .to_owned();
+                log::debug!(target: "tincd::net",
+                            "Relaying UDP packet from {from_name} to {to_name} \
+                             ({} bytes)", ct.len());
+                let mut nw = self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, ct);
+                nw |= self.try_tx(to_nid, true);
+                if nw {
+                    self.maybe_set_write_any();
+                }
+                return;
+            }
+            // dst == myself but not nullid: fall through to the
+            // direct-receive path. Same as `dst.is_null()`.
+            // STUB(chunk-9c): `:1810-1815` `if(n != from->via &&
+            // to->via == myself) send_udp_info(myself, from)`.
+            // The "help the static relay" UDP-info breadcrumb.
         }
 
         // C `:1825`: `receive_udppacket(from, pkt)`. SPTPS branch
@@ -1922,7 +2020,11 @@ impl Daemon {
         // the rekey-response edge (rare; it's a peer-initiated
         // KEX during established session).
         let result = sptps.receive(ct, &mut OsRng);
-        tunnel.status.udppacket = false;
+        // C `:439`: `n->status.udppacket = false`. The C SPTPS
+        // callback fires RE-ENTRANTLY inside `sptps_receive_data`,
+        // so the bit is set during dispatch then cleared here. Our
+        // SPTPS returns Vec<Output>; dispatch happens AFTER. Defer
+        // the clear until after dispatch (below).
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {
@@ -1963,6 +2065,10 @@ impl Daemon {
         // `Record{type=0, data}` (one IP packet) and/or `Wire`
         // (rekey response, `send_sptps_data` it).
         let nw = self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
+        // C `:439`: now clear udppacket (see comment above).
+        if let Some(t) = self.tunnels.get_mut(&from_nid) {
+            t.status.udppacket = false;
+        }
         if nw {
             self.maybe_set_write_any();
         }
@@ -2033,7 +2139,22 @@ impl Daemon {
     ///
     /// Returns the io_set signal (true if a meta-conn outbuf went
     /// nonempty — `send_req_key` or the TCP-tunneled handshake).
+    #[allow(clippy::too_many_lines)] // C `route()` + `send_packet`
+    // are ~200 LOC together. The match arms are the dispatch table;
+    // splitting them scatters the C line refs.
     fn route_packet(&mut self, data: &mut [u8]) -> bool {
+        // ─── ARP intercept (`route.c:1163`: `case ETH_P_ARP:
+        // route_arp(source, packet)`). ARP isn't IP routing; handle
+        // BEFORE `route()`. The C dispatch puts it in the same
+        // ethertype switch but `route_arp` doesn't touch the subnet
+        // tree the way `route_ipv4` does — it does its OWN lookup
+        // (`route.c:988`). We do it here because `route()` only
+        // returns `Unsupported{"arp"}` for ETH_P_ARP.
+        if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == crate::packet::ETH_P_ARP
+        {
+            return self.handle_arp(data);
+        }
+
         // The reachability oracle for `route()`. C `route.c:655`
         // reads `subnet->owner->status.reachable` directly (it's
         // all one big graph of pointers). We close over `node_ids`
@@ -2115,13 +2236,45 @@ impl Daemon {
                     // Either way: until PMTU runs, MSS clamps to the
                     // 1518 ceiling, which is a no-op for normal
                     // ethernet payloads).
-                    let via_mtu = self.tunnels.get(&to_nid).map_or(MTU, |t| t.mtu);
+                    let via_mtu = self.tunnels.get(&to_nid).map_or(MTU, TunnelState::mtu);
                     let mtu = via_mtu.min(MTU);
                     // `mss::clamp` mutates in place. `data` is `&mut
                     // [u8]` (the TUN read buffer is OURS). Return
                     // value (was-clamped?) ignored — C `:698`
                     // doesn't check it either.
                     let _ = mss::clamp(data, mtu);
+                }
+
+                // C `route.c:664,759`: `if(decrement_ttl &&
+                // source != myself && !do_decrement_ttl(source,
+                // packet)) return`. AFTER the route decision,
+                // BEFORE clamp_mss/send. The `source != myself`
+                // gate: don't decrement on TUN-origin packets (we
+                // ARE the first hop; the kernel already set TTL).
+                // For chunk-9b: `route_packet` is called from BOTH
+                // `on_device_read` (source=myself) AND `receive_
+                // sptps_record` (source=peer). We don't carry the
+                // source through; STUB the gate as always-on. The
+                // config default is OFF so this is dark anyway.
+                // Chunk-9c threads `source` through.
+                if self.settings.decrement_ttl {
+                    match route::decrement_ttl(data) {
+                        TtlResult::Decremented => {}
+                        TtlResult::TooShort | TtlResult::DropSilent => {
+                            return false;
+                        }
+                        TtlResult::SendIcmp {
+                            icmp_type,
+                            icmp_code,
+                        } => {
+                            // Same shape as the Unreachable arm
+                            // below: synthesize ICMP TIME_EXCEEDED,
+                            // write back to the TUN. v4/v6 picked
+                            // by the type (11 vs 3).
+                            self.write_icmp_to_device(data, icmp_type, icmp_code);
+                            return false;
+                        }
+                    }
                 }
 
                 let len = data.len();
@@ -2135,8 +2288,12 @@ impl Daemon {
 
                 // C `:1586-1590`: `if(n->status.sptps) { send_sptps
                 // _packet(n, packet); try_tx(n); return; }`. Always
-                // SPTPS for us (no legacy fork).
-                self.send_sptps_packet(to_nid, &to, data)
+                // SPTPS for us (no legacy fork). `try_tx(n, true)`:
+                // the `true` is `mtu` — every forwarded packet drives
+                // the PMTU discovery one step.
+                let mut nw = self.send_sptps_packet(to_nid, &to, data);
+                nw |= self.try_tx(to_nid, true);
+                nw
             }
             RouteResult::Unreachable {
                 icmp_type,
@@ -2161,7 +2318,7 @@ impl Daemon {
                 // the relay path's `via->mtu`. `route()` only
                 // returns NET_UNKNOWN/NET_UNREACH today; FRAG_NEEDED
                 // is the `:685-696` block which needs `via`.
-                let Some(mut reply) = icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+                let Some(reply) = icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
                 else {
                     // Too short to parse eth+IP. `route()` already
                     // returned `TooShort` for that case; reaching
@@ -2170,28 +2327,16 @@ impl Daemon {
                                 "route: unreachable, ICMP synth failed (short input)");
                     return false;
                 };
-                // C `:217`: `send_packet(source, packet)`. For TUN-
-                // origin packets, source is `myself`; C `send_packet`
-                // for `myself` short-circuits to `devops->write()`
-                // (`net_packet.c:1556-1568`). Write back to the TUN.
-                // The kernel parses the ICMP, matches the quoted
-                // headers to the originating socket, surfaces
-                // `EHOSTUNREACH`/`ENETUNREACH` to ping/connect.
                 log::debug!(target: "tincd::net",
                             "route: unreachable, sending ICMP type={icmp_type} \
                              code={icmp_code} ({} bytes)", reply.len());
-                if let Err(e) = self.device.write(&mut reply) {
-                    log::debug!(target: "tincd::net",
-                                "Error writing ICMP to device: {e}");
-                }
+                self.write_icmp_reply(reply);
                 false
             }
             RouteResult::NeighborSolicit => {
-                // C `route.c:710-713`: `route_neighborsol(source,
-                // packet)`. Synthesises an NDP advert reply.
-                // STUB(chunk-9): `neighbor.rs` leaf. Log + drop.
-                log::debug!(target: "tincd::net",
-                            "route: NDP neighbor solicit (not yet handled)");
+                // C `route.c:710-713` → `route_neighborsol`
+                // (`:793-954`). Synthesise an NDP advert reply.
+                self.handle_ndp(data);
                 false
             }
             RouteResult::Unsupported { reason } => {
@@ -2390,11 +2535,34 @@ impl Daemon {
             return false;
         }
 
-        // C `:1078-1092`: `if(type == PKT_PROBE)`. STUB(chunk-9).
+        // C `:1078-1092`: `if(type == PKT_PROBE)`. PMTU probe.
+        // The probe body is `[type_byte][len_be:2?][padding]`.
+        // type=0: request → echo back. type=1/2: reply → feed
+        // `pmtu.on_probe_reply`. The `udppacket` gate (`:1079-
+        // 1082`): probes only make sense over UDP (they ARE the
+        // PMTU discovery mechanism); a TCP-tunneled probe is a
+        // peer bug.
         if record_type == PKT_PROBE {
-            log::debug!(target: "tincd::net",
-                        "Got SPTPS PROBE from {peer_name}; PMTU is STUB(chunk-9)");
-            return false;
+            let udppacket = self.tunnels.get(&peer).is_some_and(|t| t.status.udppacket);
+            if !udppacket {
+                log::error!(target: "tincd::net",
+                            "Got SPTPS PROBE from {peer_name} via TCP");
+                return false;
+            }
+            // C `:1088-1090`: `if(inpkt.len > maxrecentlen)
+            // maxrecentlen = inpkt.len`. The gratuitous-reply
+            // keepalive (`try_udp:1211-1222`) uses this length.
+            // The PROBE body length IS the wire-level probe size
+            // (the SPTPS overhead was already stripped).
+            #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+            let body_len = body.len() as u16;
+            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
+                if body_len > p.maxrecentlen {
+                    p.maxrecentlen = body_len;
+                }
+            }
+            // C `:1091`: `udp_probe_h(from, &inpkt, len)`.
+            return self.udp_probe_h(peer, peer_name, body);
         }
         // C `:1094-1097`: `if(type & ~(PKT_COMPRESSED | PKT_MAC))`.
         // Unknown type bits.
@@ -2458,8 +2626,21 @@ impl Daemon {
         frame[12..14].copy_from_slice(&ethertype.to_be_bytes());
         frame[OFFSET..].copy_from_slice(body);
 
-        // STUB(chunk-9): `:1148-1150` `if(udppacket && len >
-        // maxrecentlen) maxrecentlen = len`. PMTU bookkeeping.
+        // C `:1148-1150`: `if(udppacket && len > from->maxrecentlen)
+        // from->maxrecentlen = len`. The largest data record we've
+        // received via UDP recently. `try_udp:1213-1221` uses this
+        // for the gratuitous probe-reply size.
+        #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ MTU
+        let frame_len = frame.len() as u16;
+        if let Some(t) = self.tunnels.get_mut(&peer) {
+            if t.status.udppacket {
+                if let Some(p) = t.pmtu.as_mut() {
+                    if frame_len > p.maxrecentlen {
+                        p.maxrecentlen = frame_len;
+                    }
+                }
+            }
+        }
 
         // C `:1152`: `receive_packet(from, &inpkt)` → (`:397-405`)
         // `n->in_packets++; n->in_bytes += len; route(n, packet)`.
@@ -2482,22 +2663,9 @@ impl Daemon {
     }
 
     /// `send_sptps_data` (`net_packet.c:965-1054`). The per-tunnel
-    /// SPTPS "send_data" callback. Two transports:
-    ///
-    /// 1. **Handshake records** (`type == SPTPS_HANDSHAKE`, `:974-
-    ///    996`): b64-encode, wrap in `ANS_KEY`, send via the meta-
-    ///    connection's SPTPS. The handshake of the SECOND SPTPS
-    ///    is transported by the FIRST. (`:992-994`: "We don't want
-    ///    intermediate nodes to switch to UDP to relay these
-    ///    packets"; ANS_KEY also lets us learn the reflexive UDP
-    ///    addr from relays — chunk-9.)
-    ///
-    /// 2. **Data records** (`:1001-1054`): build `[dst_id][src_id]
-    ///    [ciphertext]`, sendto(udp_sock).
-    ///
-    /// `to`/`from` are usually `peer`/`myself` (`send_sptps_data_
-    /// myself`, `:99-101`). The relay path (`:100`: `from != myself
-    /// `) is STUB(chunk-9).
+    /// SPTPS "send_data" callback. Thin wrapper for the common case
+    /// (`from = myself`); see [`send_sptps_data_relay`] for the full
+    /// relay decision.
     fn send_sptps_data(
         &mut self,
         to_nid: NodeId,
@@ -2505,115 +2673,705 @@ impl Daemon {
         record_type: u8,
         ct: &[u8],
     ) -> bool {
-        // C `:967`: `relay = (to->via != myself && ...) ? to->via
-        // : to->nexthop`. The static-relay path. With a 2-node mesh,
-        // `nexthop == via == to`. STUB(chunk-9): the full relay
-        // logic + `relay_supported` check.
+        // C `send_sptps_data_myself` (`net_packet.c:99-101`):
+        // `send_sptps_data(to, myself, type, data, len)`.
+        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, ct)
+    }
 
-        if record_type == tinc_sptps::REC_HANDSHAKE {
-            // ─── TCP transport via ANS_KEY (`:974-996`)
-            // C `:996`: `send_request(to->nexthop->connection,
-            // "%d %s %s %s -1 -1 -1 %d", ANS_KEY, from->name,
-            // to->name, buf, to->incompression)`.
+    /// `send_sptps_data` (`net_packet.c:965-1054`). The relay
+    /// decision: pick TCP vs UDP, pick `via` vs `nexthop`, build
+    /// the `[dst_id6][src_id6]` prefix.
+    ///
+    /// ## The `:967-974` decision tree (read this 3 times)
+    ///
+    /// **`via` vs `nexthop`** (the relay choice, `:967`):
+    /// - `via` is the "static relay" — the last DIRECT node on the
+    ///   SSSP path. Set by `IndirectData = yes` edges. If `via !=
+    ///   myself`, the destination is behind an indirect edge; UDP
+    ///   to it directly won't work.
+    /// - `nexthop` is the FIRST hop — the immediate neighbor whose
+    ///   meta-connection routes toward `to`. Always reachable via
+    ///   TCP (it's a direct neighbor).
+    /// - We PREFER `via` (skip the in-between hops, go straight to
+    ///   the last direct node) BUT only if the packet FITS through
+    ///   `via`'s discovered MTU. Otherwise fall back to `nexthop`
+    ///   (hop-by-hop, each hop's MTU is probably fine).
+    /// - PROBE packets ALWAYS prefer `via`: they're tiny, and the
+    ///   whole point is to discover `via`'s MTU.
+    ///
+    /// **TCP if any of** (`:974`):
+    /// - `type == SPTPS_HANDSHAKE`: use ANS_KEY (`:992-994` —
+    ///   relays shouldn't switch to UDP for these; also lets us
+    ///   learn reflexive UDP addr).
+    /// - `tcponly`: config knob.
+    /// - `!direct && !relay_supported`: relay node is too old
+    ///   (proto minor < 4, doesn't understand the 12-byte prefix).
+    /// - `origlen > relay->minmtu` (and not a PROBE): packet won't
+    ///   fit through the relay's UDP path. TCP fragments fine.
+    ///
+    /// `from_nid`: the ORIGINAL source. Usually `self.myself` (we
+    /// generated this packet). For relay forwarding (`on_udp_recv`
+    /// when `dst != myself`), it's the original sender's NodeId —
+    /// the wire prefix carries THEIR src_id6, not ours.
+    #[allow(clippy::too_many_lines)] // The :967-974 decision tree
+    // is one cohesive block. Splitting it makes the conditions hard
+    // to cross-reference against the C.
+    fn send_sptps_data_relay(
+        &mut self,
+        to_nid: NodeId,
+        to_name: &str,
+        from_nid: NodeId,
+        record_type: u8,
+        ct: &[u8],
+    ) -> bool {
+        // C `:966`: `origlen = len - SPTPS_DATAGRAM_OVERHEAD`.
+        // The PLAINTEXT body length (the relay's MTU is measured
+        // at that layer; the SPTPS overhead is constant).
+        let origlen = ct.len().saturating_sub(tinc_sptps::DATAGRAM_OVERHEAD);
+
+        // ─── :967: relay = via or nexthop ────────────────────────
+        // Read `last_routes[to]`. If `to` is unreachable (no
+        // route), the C would deref NULL; we drop.
+        let Some(route) = self
+            .last_routes
+            .get(to_nid.0 as usize)
+            .and_then(Option::as_ref)
+        else {
+            log::debug!(target: "tincd::net",
+                        "No route to {to_name}; dropping");
+            return false;
+        };
+        let via_nid = route.via;
+        let nexthop_nid = route.nexthop;
+
+        // `to->via != myself`: the destination is behind an
+        // indirect edge. AND: PROBE always prefers via (probes
+        // are tiny + measure via's MTU); data prefers via only if
+        // it FITS. `via->minmtu` reads the relay's discovered MTU
+        // (0 until discovery runs — so until then, all data goes
+        // hop-by-hop via nexthop, which is correct: we don't know
+        // via's MTU yet).
+        let via_minmtu = self.tunnels.get(&via_nid).map_or(0, TunnelState::minmtu);
+        let relay_nid = if via_nid != self.myself
+            && (record_type == PKT_PROBE || origlen <= usize::from(via_minmtu))
+        {
+            via_nid
+        } else {
+            nexthop_nid
+        };
+
+        // ─── :968: direct = from == myself && to == relay ───────
+        // "Direct": we're the origin AND the chosen relay IS the
+        // destination (no intermediate). The wire prefix uses
+        // nullid for dst in this case (`:1013-1015`): the recipient
+        // knows it's not a relay.
+        let from_is_myself = from_nid == self.myself;
+        let direct = from_is_myself && to_nid == relay_nid;
+
+        // ─── :969: relay_supported = (relay->options >> 24) >= 4 ─
+        // Proto minor 4+ understands the 12-byte ID prefix.
+        let relay_options = self
+            .last_routes
+            .get(relay_nid.0 as usize)
+            .and_then(Option::as_ref)
+            .map_or(0, |r| r.options);
+        let relay_supported = (relay_options >> 24) >= 4;
+
+        // ─── :970: tcponly ──────────────────────────────────────
+        // `(myself->options | relay->options) & OPTION_TCPONLY`.
+        // EITHER side requesting tcponly forces TCP.
+        let tcponly = (self.myself_options | relay_options) & crate::proto::OPTION_TCPONLY != 0;
+
+        // ─── :974: the go-TCP decision ──────────────────────────
+        let relay_minmtu = self.tunnels.get(&relay_nid).map_or(0, TunnelState::minmtu);
+        // The `too_big` gate only meaningful once discovery has
+        // run: `minmtu == 0` means "unknown", not "zero". The C
+        // handles this differently — `send_sptps_packet:724-726`
+        // short-circuits to `send_tcppacket` (PACKET type 17, raw
+        // VPN bytes over the meta-conn) for direct neighbors with
+        // `len > minmtu` BEFORE reaching `send_sptps_data`. We
+        // don't have `send_tcppacket` (chunk-9c); go UDP
+        // optimistically until discovery raises `minmtu`. EMSGSIZE
+        // on the first big packet bootstraps discovery.
+        let too_big =
+            record_type != PKT_PROBE && relay_minmtu > 0 && origlen > usize::from(relay_minmtu);
+        let go_tcp = record_type == tinc_sptps::REC_HANDSHAKE
+            || tcponly
+            || (!direct && !relay_supported)
+            || too_big;
+
+        if go_tcp {
+            // ─── :975-996: TCP encapsulation ────────────────────
+            // Two sub-paths: SPTPS_PACKET (raw bytes via the
+            // length-prefixed binary mechanism, `:975-986`) for
+            // proto minor ≥7 nexthops; ANS_KEY/REQ_KEY (b64'd via
+            // the text protocol) otherwise.
             //
-            // `nexthop->connection`: read `last_routes[to]` for
-            // `nexthop`, then `nodes[nexthop_name].conn`. With
-            // direct neighbors, `nexthop == to` so `nodes[to_name]
-            // .conn` directly.
+            // STUB(chunk-9c): `:975-986` SPTPS_PACKET via `send_
+            // sptps_tcppacket`. Our `Connection::send_raw` queues
+            // raw bytes but the meta-conn is SPTPS-stream-framed;
+            // the binary blob would need to go through `sptps_
+            // send_record`. Chunk-9c when the receive side
+            // (`sptps_tcppacket_h`) is also wired. For now: always
+            // use the b64 path (works for any proto minor; just
+            // larger on the wire).
+
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::net",
-                           "No meta connection toward {to_name} for handshake");
+                           "No meta connection toward {to_name}");
                 return false;
             };
             let Some(conn) = self.conns.get_mut(conn_id) else {
                 return false;
             };
-            // C `:989`: `b64encode_tinc(data, buf, len)`.
             let b64 = tinc_crypto::b64::encode(ct);
-            // C `:995-996`: `to->incompression = myself->
-            // incompression; ... "%d", to->incompression`. The last
-            // `%d` is OUR compression level: "please compress
-            // towards me at this level". The peer stores it as
-            // `from->outcompression` (`protocol_key.c:545`) and
-            // honors it on their send path.
-            let my_compression = self.settings.compression;
-            self.tunnels.entry(to_nid).or_default().incompression = my_compression;
+            let from_name = if from_is_myself {
+                self.name.clone()
+            } else {
+                self.graph
+                    .node(from_nid)
+                    .map_or_else(|| "<gone>".to_owned(), |n| n.name.clone())
+            };
 
-            // The C format: `"%d %s %s %s -1 -1 -1 %d"`. The `-1 -1
-            // -1` are cipher/digest/maclength sentinels (the SPTPS
-            // path doesn't read them; `:549` `if(from->status.sptps)`
-            // branch only b64-decodes the `key` field). HOWEVER: the
-            // C `sscanf("%lu", "-1")` is glibc-permissive (wraps to
-            // ULONG_MAX). Our `AnsKey::parse` is strict (`u64::parse`
-            // rejects `-1`). For Rust↔Rust interop, send `0 0 0`
-            // instead. STUB(chunk-9-interop): when interop-testing
-            // with C tincd, loosen `AnsKey::parse` to accept the C's
-            // `-1` (or change `maclen` to `i64`).
+            if record_type == tinc_sptps::REC_HANDSHAKE {
+                // C `:995-996`: ANS_KEY. `to->incompression =
+                // myself->incompression` only when from==myself
+                // (relayed handshakes don't touch our state).
+                let my_compression = self.settings.compression;
+                if from_is_myself {
+                    self.tunnels.entry(to_nid).or_default().incompression = my_compression;
+                }
+                // STUB(chunk-9-interop): C sends `-1 -1 -1`; our
+                // parser is strict. `0 0 0` for Rust↔Rust.
+                return conn.send(format_args!(
+                    "{} {} {} {} 0 0 0 {}",
+                    Request::AnsKey,
+                    from_name,
+                    to_name,
+                    b64,
+                    my_compression,
+                ));
+            }
+            // C `:998`: `"%d %s %s %d %s"` REQ_KEY with reqno=
+            // SPTPS_PACKET. The b64'd ciphertext is the payload.
+            // The receiver's `req_key_ext_h` case SPTPS_PACKET
+            // (`protocol_key.c:149-188`) decodes and feeds it to
+            // `from->sptps` (or relays).
             return conn.send(format_args!(
-                "{} {} {} {} 0 0 0 {}",
-                Request::AnsKey,
-                self.name,
+                "{} {} {} {} {}",
+                Request::ReqKey,
+                from_name,
                 to_name,
+                Request::SptpsPacket as u8,
                 b64,
-                my_compression,
             ));
         }
 
-        // ─── UDP transport (`:1001-1054`)
-        // STUB(chunk-9): `tcponly` (`:970,974`), MTU-too-big
-        // fallback (`:974`: `origlen > relay->minmtu`). Both fall
-        // through to the TCP path (REQ_KEY/SPTPS_PACKET wrapping
-        // at `:998`). Chunk 7 always goes UDP.
-        //
-        // STUB(chunk-9): `send_sptps_tcppacket` (`:976-986`). The
-        // raw-TCP-relay path for nodes whose `connection->options
-        // >> 24 >= 7` (newer protocol minor).
-
-        // C `:1003-1006`: overhead = relay_supported ? 12 : 0. We
-        // ALWAYS prefix (our peers are all ≥1.1, `options >> 24
-        // >= 4`). C `:1012-1016`: direct ⇒ dst = nullid; else dst
-        // = to->id. With 2-node mesh, always direct.
-        // STUB(chunk-9): the non-direct case (`dst = to->id`).
-        let src_id = self.id6_table.id_of(self.myself).unwrap_or(NodeId6::NULL);
+        // ─── :1001-1054: UDP transport ───────────────────────────
+        // C `:1003-1006`: overhead = relay_supported ? 12 : 0.
+        // We always prefix (our peers are ≥1.1). C `:1012-1020`:
+        // direct ⇒ dst=nullid; else dst=to->id.
+        let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
+        let dst_id = if direct {
+            NodeId6::NULL
+        } else {
+            self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL)
+        };
         let mut wire = Vec::with_capacity(12 + ct.len());
-        wire.extend_from_slice(NodeId6::NULL.as_bytes()); // dst: direct
+        wire.extend_from_slice(dst_id.as_bytes());
         wire.extend_from_slice(src_id.as_bytes());
         wire.extend_from_slice(ct);
 
-        // C `:1031-1040`: `choose_udp_address(relay, &sa, &sock)`.
-        // The C tries `n->address` (last confirmed), falls back to
-        // a random edge's address. For chunk 7: use `tunnels[to].
-        // udp_addr` (set by `BecameReachable` or by the first valid
-        // UDP packet from them). If unset, use `nodes[to].edge_addr`
-        // (the meta-conn-derived guess from `on_ack`).
-        // STUB(chunk-9): `choose_local_address` + `send_locally`
+        // C `:1031-1040`: `choose_udp_address(relay, ...)`. NOT
+        // `to`: we send to the RELAY, who forwards to `to`.
+        // STUB(chunk-9c): `choose_local_address` + `send_locally`
         // (`:1034-1036`). The 1-in-3 randomization (`:758-762`).
-        let Some(addr) = self.choose_udp_address(to_nid, to_name) else {
+        let relay_name = self
+            .graph
+            .node(relay_nid)
+            .map_or("<gone>", |n| n.name.as_str())
+            .to_owned();
+        let Some(addr) = self.choose_udp_address(relay_nid, &relay_name) else {
             log::debug!(target: "tincd::net",
-                        "No UDP address known for {to_name}; dropping");
+                        "No UDP address known for relay {relay_name}; dropping");
             return false;
         };
 
-        // C `:1044`: `sendto(listen_socket[sock].udp.fd, buf, ...,
-        // sa, SALEN)`. We use `listeners[0]` always. STUB(chunk-9):
-        // `adapt_socket` (`:784`) picks the listener whose address
-        // family matches `sa`.
+        // C `:1044`: `sendto(listen_socket[sock].udp.fd, ...)`.
+        // STUB(chunk-9c): `adapt_socket` (`:784`) picks the
+        // listener whose addr family matches `sa`. Use `[0]`.
         log::debug!(target: "tincd::net",
-                    "Sending {}-byte UDP packet to {to_name} ({addr})",
+                    "Sending {}-byte UDP packet to {to_name} via {relay_name} ({addr})",
                     wire.len());
         let sockaddr = socket2::SockAddr::from(addr);
         if let Some(l) = self.listeners.first() {
             if let Err(e) = l.udp.send_to(&wire, &sockaddr) {
-                if e.kind() != io::ErrorKind::WouldBlock {
-                    // C `:1046-1051`: `if(sockmsgsize) reduce_mtu
-                    // else log`. STUB(chunk-9): EMSGSIZE →
-                    // reduce_mtu. For now: just log.
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    // Drop. UDP is unreliable anyway.
+                } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+                    // C `:1046-1048`: `if(sockmsgsize(errno))
+                    // reduce_mtu(relay, origlen - 1)`. EMSGSIZE
+                    // means the LOCAL kernel rejected the datagram
+                    // (interface MTU). Shrink `relay`'s maxmtu.
+                    // Don't log: this IS the discovery mechanism.
+                    #[allow(clippy::cast_possible_truncation)]
+                    // origlen ≤ MTU
+                    let at_len = origlen as u16;
+                    if let Some(p) = self
+                        .tunnels
+                        .get_mut(&relay_nid)
+                        .and_then(|t| t.pmtu.as_mut())
+                    {
+                        for a in p.on_emsgsize(at_len) {
+                            Self::log_pmtu_action(&relay_name, &a);
+                        }
+                    }
+                } else {
                     log::warn!(target: "tincd::net",
-                               "Error sending UDP SPTPS packet to {to_name}: {e}");
+                               "Error sending UDP SPTPS packet to \
+                                {relay_name}: {e}");
                 }
             }
         }
         false // UDP send doesn't touch any meta-conn outbuf
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // ARP / NDP neighbor reply synthesis (route.c:793-1035)
+
+    /// `route_arp` (`route.c:956-1023`). Called for `ETH_P_ARP`
+    /// frames from the TUN. Parse, lookup, synthesise reply, write
+    /// back. The kernel caches the fake MAC, traffic flows.
+    fn handle_arp(&mut self, data: &[u8]) -> bool {
+        // `route.c:960,977-984`: parse + validate.
+        let Some(target) = neighbor::parse_arp_req(data) else {
+            // Not a valid Ethernet/IP ARP who-has. C `:984`: `else
+            // { logger(DEBUG_TRAFFIC, ...); return; }`.
+            log::debug!(target: "tincd::net",
+                        "route: dropping ARP packet (not a valid request)");
+            return false;
+        };
+        // `route.c:988-996`: `subnet = lookup_subnet_ipv4(dest);
+        // if(!subnet) return`. Do WE route to this IP? The C uses
+        // `lookup_subnet_ipv4` directly (no reachability check —
+        // ARP just answers "does someone own this", not "are they
+        // up"). We pass `|_| true`.
+        let Some((_, owner)) = self.subnets.lookup_ipv4(&target, |_| true) else {
+            log::debug!(target: "tincd::net",
+                        "route: ARP for unknown {target}");
+            return false;
+        };
+        // `route.c:999`: `if(subnet->owner == myself) return`.
+        // "Silently ignore ARPs for our own subnets" — the kernel
+        // already knows its own address; an ARP for it means
+        // someone misconfigured. Don't reply (a reply would create
+        // an arp-cache entry pointing at the TUN, which is wrong).
+        if owner == self.name {
+            return false;
+        }
+        // `route.c:1011-1022`: build + send.
+        let mut reply = neighbor::build_arp_reply(data);
+        log::debug!(target: "tincd::net",
+                    "route: ARP reply for {target} (owner {owner})");
+        if let Err(e) = self.device.write(&mut reply) {
+            log::debug!(target: "tincd::net",
+                        "Error writing ARP reply to device: {e}");
+        }
+        false
+    }
+
+    /// `route_neighborsol` (`route.c:793-954`). Same shape as ARP
+    /// for v6. `route()` already returned `NeighborSolicit` so the
+    /// ICMPv6-type check has passed; the parser re-validates +
+    /// verifies the checksum.
+    fn handle_ndp(&mut self, data: &[u8]) {
+        let Some(target) = neighbor::parse_ndp_solicit(data) else {
+            log::debug!(target: "tincd::net",
+                        "route: dropping NDP solicit (parse/checksum failed)");
+            return;
+        };
+        // `route.c:865-879`: subnet lookup. Same `|_| true` as ARP.
+        let Some((_, owner)) = self.subnets.lookup_ipv6(&target, |_| true) else {
+            log::debug!(target: "tincd::net",
+                        "route: NDP solicit for unknown {target}");
+            return;
+        };
+        // `route.c:883`: `if(subnet->owner == myself) return`.
+        if owner == self.name {
+            return;
+        }
+        // `route.c:890-948`: build + send.
+        let Some(mut reply) = neighbor::build_ndp_advert(data) else {
+            return;
+        };
+        log::debug!(target: "tincd::net",
+                    "route: NDP advert for {target} (owner {owner})");
+        if let Err(e) = self.device.write(&mut reply) {
+            log::debug!(target: "tincd::net",
+                        "Error writing NDP advert to device: {e}");
+        }
+    }
+
+    /// Shared tail for the `Unreachable` arm and the `decrement_ttl`
+    /// `SendIcmp` outcome. v4/v6 dispatch on `icmp_type` (11=v4
+    /// TIME_EXCEEDED, 3=v6 TIME_EXCEEDED — mutually exclusive).
+    fn write_icmp_to_device(&mut self, data: &[u8], icmp_type: u8, icmp_code: u8) {
+        let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
+        if self.icmp_ratelimit.should_drop(now_sec, 3) {
+            return;
+        }
+        // v4 TIME_EXCEEDED is type 11; v6 is type 3. The Unreachable
+        // arm only emits v4 (type 3 = DEST_UNREACH); decrement_ttl
+        // emits 11 or 3. Dispatch on the v6 marker.
+        let reply =
+            if icmp_type == route::ICMP6_TIME_EXCEEDED || icmp_type == route::ICMP6_DST_UNREACH {
+                icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
+            } else {
+                icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+            };
+        if let Some(reply) = reply {
+            log::debug!(target: "tincd::net",
+                        "route: TTL exceeded, sending ICMP type={icmp_type} \
+                         code={icmp_code} ({} bytes)", reply.len());
+            self.write_icmp_reply(reply);
+        }
+    }
+
+    /// `send_packet(source=myself, ...)` short-circuit (`net_
+    /// packet.c:1556-1568`): write back to the TUN.
+    fn write_icmp_reply(&mut self, mut reply: Vec<u8>) {
+        if let Err(e) = self.device.write(&mut reply) {
+            log::debug!(target: "tincd::net",
+                        "Error writing ICMP to device: {e}");
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // PMTU probe handling + try_tx chain
+
+    /// `udp_probe_h` (`net_packet.c:170-238`). One PROBE record
+    /// arrived. byte[0] == 0 ⇒ request → echo back. byte[0] != 0
+    /// ⇒ reply (type 1 or 2) → feed `pmtu.on_probe_reply`.
+    fn udp_probe_h(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
+        if body.is_empty() {
+            return false;
+        }
+        // C `:172-175`: `if(!DATA[0]) { send_udp_probe_reply;
+        // return; }`. byte[0]==0 marks a REQUEST.
+        if body[0] == 0 {
+            log::debug!(target: "tincd::net",
+                        "Got UDP probe request {} from {peer_name}",
+                        body.len());
+            #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+            return self.send_udp_probe_reply(peer, peer_name, body.len() as u16);
+        }
+
+        // ─── reply (type 1 or 2) ────────────────────────────────
+        // C `:177-182`: type-2 carries the length INSIDE the packet
+        // at bytes [1..3]. Type-2 replies are MIN_PROBE_SIZE bytes
+        // on the wire regardless of the probed length (saves
+        // bandwidth: "yes, your 1400-byte probe arrived" doesn't
+        // need a 1400-byte reply).
+        #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+        let len: u16 = if body[0] == 2 && body.len() >= 3 {
+            u16::from_be_bytes([body[1], body[2]])
+        } else {
+            body.len() as u16
+        };
+        log::debug!(target: "tincd::net",
+                    "Got type {} UDP probe reply {len} from {peer_name}",
+                    body[0]);
+
+        // C `:199-238` is `pmtu.on_probe_reply`. The udp_confirmed
+        // bit lives in BOTH `status` (for `dump_nodes` packing)
+        // and `pmtu` (the authoritative state machine bit). Mirror.
+        let now = self.timers.now();
+        let actions = if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
+            p.on_probe_reply(len, now)
+        } else {
+            // No pmtu state yet (first probe was a request from
+            // them, we replied, they replied to OUR keepalive...).
+            // Seed it now so we have somewhere to record the floor.
+            let tunnel = self.tunnels.entry(peer).or_default();
+            let mut p = PmtuState::new(now, MTU);
+            let actions = p.on_probe_reply(len, now);
+            tunnel.pmtu = Some(p);
+            actions
+        };
+        // Mirror udp_confirmed into status.
+        if let Some(t) = self.tunnels.get_mut(&peer) {
+            t.status.udp_confirmed = true;
+        }
+        for a in &actions {
+            Self::log_pmtu_action(peer_name, a);
+        }
+        // STUB(chunk-9c): `:213-217` UDP-timeout-timer reset
+        // (`timeout_del + timeout_add(udp_ping_timeout)`). The
+        // `UdpPing` timer variant exists but isn't armed yet.
+        false
+    }
+
+    /// `send_udp_probe_reply` (`net_packet.c:140-168`). Echo a
+    /// probe request back. Type-2 reply (proto ≥17.3): the LENGTH
+    /// goes in bytes [1..3]; the wire packet is MIN_PROBE_SIZE.
+    /// We're SPTPS-only so peers are always ≥17.3 (`options >> 24
+    /// >= 3` is the gate; ours is 7).
+    ///
+    /// C `:163-165`: `udp_confirmed = true` temporarily so the
+    /// reply goes back "the same way it came in" (via
+    /// `choose_udp_address` which prefers `udp_addr` when
+    /// confirmed). We already stash `udp_addr` from the receive
+    /// path BEFORE this is called; `choose_udp_address` reads it
+    /// regardless of the bit.
+    fn send_udp_probe_reply(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
+        // C `:148-152`: type-2 = byte[0]=2, bytes[1..3]=htons(len),
+        // packet.len = MIN_PROBE_SIZE.
+        let mut body = vec![0u8; usize::from(pmtu::MIN_PROBE_SIZE)];
+        body[0] = 2;
+        body[1..3].copy_from_slice(&len.to_be_bytes());
+        // bytes[3..14] stay zero; bytes[14..] would be random in C
+        // but with MIN_PROBE_SIZE=18 that's just 4 bytes. Zero is
+        // fine — the recipient only reads [0..3].
+
+        log::debug!(target: "tincd::net",
+                    "Sending type 2 probe reply length {len} to {peer_name}");
+
+        // C `:165`: `send_udppacket(n, packet)`. The C path goes
+        // `send_udppacket` → `send_sptps_packet` (the SPTPS branch
+        // at `:817`) → `:691-694` PKT_PROBE detect (zero-ethertype
+        // marker) → `sptps_send_record(PKT_PROBE)`. We shortcut
+        // straight to the SPTPS send.
+        self.send_probe_record(peer, peer_name, &body)
+    }
+
+    /// `send_udp_probe_packet` (`net_packet.c:1177-1195`). Build
+    /// and send a PROBE request of `len` bytes. byte[0]=0 (request),
+    /// bytes[1..14]=zero, bytes[14..len]=random.
+    fn send_udp_probe(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
+        // C `:1185`: `len = MAX(len, MIN_PROBE_SIZE)`. The pmtu
+        // module already clamps but be defensive.
+        let len = len.max(pmtu::MIN_PROBE_SIZE);
+        let mut body = vec![0u8; usize::from(len)];
+        // C `:1187-1188`: `memset(DATA, 0, 14); randomize(DATA+14,
+        // len-14)`. The first 14 are the synthetic ethernet header
+        // slot (probes go through `send_udppacket` which expects
+        // a full vpn_packet_t). Our `send_probe_record` sends the
+        // body directly; the zero-prefix is just convention.
+        if body.len() > 14 {
+            OsRng.fill_bytes(&mut body[14..]);
+        }
+        // body[0] = 0 (request marker) — already zero from vec init.
+
+        log::debug!(target: "tincd::net",
+                    "Sending UDP probe length {len} to {peer_name}");
+        self.send_probe_record(peer, peer_name, &body)
+    }
+
+    /// `sptps_send_record(&n->sptps, PKT_PROBE, data, len)`. The
+    /// shared SPTPS-send for both probe requests and replies. The
+    /// C `:691-694` zero-ethertype detect is a vestige of the
+    /// `vpn_packet_t` shape; we just send the record directly.
+    fn send_probe_record(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
+        let tunnel = self.tunnels.entry(peer).or_default();
+        if !tunnel.status.validkey {
+            // Can't probe without keys. C `:685` gate.
+            return false;
+        }
+        let Some(sptps) = tunnel.sptps.as_deref_mut() else {
+            return false;
+        };
+        let outs = match sptps.send_record(PKT_PROBE, body) {
+            Ok(outs) => outs,
+            Err(e) => {
+                log::debug!(target: "tincd::net",
+                            "Probe send_record for {peer_name}: {e:?}");
+                return false;
+            }
+        };
+        // Dispatch: one Wire output. Goes via `send_sptps_data`
+        // with `record_type = PKT_PROBE`. The relay decision at
+        // `:967` always prefers `via` for PROBE (the `type ==
+        // PKT_PROBE` term).
+        self.dispatch_tunnel_outputs(peer, peer_name, outs)
+    }
+
+    /// `try_tx_sptps` (`net_packet.c:1473-1513`). The "improve
+    /// the tunnel" tick. Called from TWO places:
+    ///
+    /// 1. `on_ping_tick` (`net.c:250`): once per active conn,
+    ///    `mtu=false`. Keeps UDP alive (NAT timeouts).
+    /// 2. `route_packet` Forward arm (`net_packet.c:1590`): once
+    ///    per forwarded packet, `mtu=true`. Drives PMTU discovery.
+    ///
+    /// Chain: `try_sptps` (REQ_KEY if needed) → via deref →
+    /// `try_udp` (probe send) → `try_mtu` (PMTU tick).
+    ///
+    /// `STUB(chunk-9c)`: the via-recursion (`:1490-1497` `try_tx(
+    /// via, mtu)`). For now: direct path only. The chunk-9b 3-node
+    /// relay test goes via TCP (the `too_big` gate fires until
+    /// PMTU runs); recursion makes UDP-relay work.
+    fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
+        // C `:1477-1479`: `if(n->connection && (myself|n)->options
+        // & OPTION_TCPONLY) return`. STUB(chunk-9c): tcponly gate.
+
+        // ─── try_sptps (`:1483` → `:1156-1173`) ──────────────────
+        // `if(!validkey) { if(!waitingforkey) send_req_key; else
+        // if(last_req_key+10 < now) restart }`. The `send_sptps_
+        // packet` path already does the FIRST send; this catches
+        // the 10-second-timeout restart.
+        let now = self.timers.now();
+        {
+            let tunnel = self.tunnels.entry(target).or_default();
+            if !tunnel.status.validkey {
+                // Can't UDP without keys. Kick the handshake if
+                // needed; nothing more to do.
+                if !tunnel.status.waitingforkey {
+                    return self.send_req_key(target);
+                }
+                // C `:1167-1173`: 10-second debounce.
+                if tunnel
+                    .last_req_key
+                    .is_some_and(|l| now.duration_since(l).as_secs() >= 10)
+                {
+                    log::debug!(target: "tincd::net",
+                                "No key after 10 seconds, restarting SPTPS");
+                    tunnel.sptps = None;
+                    tunnel.status.waitingforkey = false;
+                    return self.send_req_key(target);
+                }
+                return false;
+            }
+        }
+
+        // ─── via deref (`:1487-1498`) ────────────────────────────
+        // `via = (n->via == myself) ? n->nexthop : n->via; if(via
+        // != n) { try_tx(via, mtu); return; }`. The static-relay
+        // recursion. STUB(chunk-9c): with 3+ nodes and indirect
+        // edges, this matters. For chunk-9b's direct-path-only
+        // tests, `via == n` always.
+
+        let target_name = self
+            .graph
+            .node(target)
+            .map_or("<gone>", |n| n.name.as_str())
+            .to_owned();
+
+        // ─── try_udp (`:1502` → `:1200-1246`) ────────────────────
+        let mut nw = self.try_udp(target, &target_name, now);
+
+        // ─── try_mtu (`:1505-1509`) ──────────────────────────────
+        // C `:1358-1364`: `if(udp_discovery && !udp_confirmed) {
+        // reset; return }`. Don't probe MTU until UDP works.
+        // C `:1348-1356`: `if(!(options & OPTION_PMTU_DISCOVERY))`
+        // gate. Default-on (`myself_options_default`).
+        if mtu {
+            let tunnel = self.tunnels.entry(target).or_default();
+            // Seed pmtu state on first call. C `node.c` xzalloc;
+            // our `PmtuState::new` needs `now`.
+            // STUB(chunk-9c): `choose_initial_maxmtu` getsockopt.
+            // Use the `MTU` fallback (the C does too on platforms
+            // without IP_MTU).
+            let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+            if p.udp_confirmed {
+                let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
+                let actions = p.tick(now, pinginterval);
+                for a in &actions {
+                    Self::log_pmtu_action(&target_name, a);
+                }
+                for a in actions {
+                    if let PmtuAction::SendProbe { len } = a {
+                        nw |= self.send_udp_probe(target, &target_name, len);
+                    }
+                }
+            }
+        }
+
+        // STUB(chunk-9c): `:1511-1513` nexthop dynamic-relay
+        // recursion (`if(!udp_confirmed && n != nexthop)
+        // try_tx(nexthop)`). Same as the via recursion above.
+
+        nw
+    }
+
+    /// `try_udp` (`net_packet.c:1200-1246`). Probe-request send
+    /// + gratuitous-reply keepalive. Gated on `udp_ping_sent`
+    ///   elapsed: 2s when not confirmed (aggressive discovery), 10s
+    ///   when confirmed (NAT keepalive).
+    fn try_udp(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
+        // C `:1202`: `if(!udp_discovery) return`. We don't have
+        // the config knob yet; default-on.
+
+        let tunnel = self.tunnels.entry(target).or_default();
+        let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
+
+        // ─── :1207-1223: gratuitous reply keepalive ─────────────
+        // C `:1207`: `if((options >> 24) >= 3 && udp_confirmed)`.
+        // SPTPS-only ⇒ always ≥3. Send a type-2 reply at the
+        // largest recently-seen size; it tells the PEER "your
+        // PMTU is still good" (their `on_probe_reply` rewinds
+        // mtuprobes to -1).
+        let mut nw = false;
+        if udp_confirmed {
+            let keepalive =
+                Duration::from_secs(u64::from(self.settings.udp_discovery_keepalive_interval));
+            let due = tunnel
+                .udp_reply_sent
+                .is_none_or(|last| now.duration_since(last) >= keepalive);
+            if due {
+                tunnel.udp_reply_sent = Some(now);
+                let maxrecentlen = tunnel
+                    .pmtu
+                    .as_mut()
+                    .map_or(0, |p| std::mem::take(&mut p.maxrecentlen));
+                if maxrecentlen > 0 {
+                    nw |= self.send_udp_probe_reply(target, target_name, maxrecentlen);
+                }
+            }
+        }
+
+        // ─── :1227-1245: probe request ───────────────────────────
+        // C `:1231-1233`: `interval = udp_confirmed ? keepalive
+        // : interval`. Seed pmtu if needed (we read `udp_ping_sent`
+        // from it).
+        let tunnel = self.tunnels.entry(target).or_default();
+        let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+        let interval = if p.udp_confirmed {
+            self.settings.udp_discovery_keepalive_interval
+        } else {
+            self.settings.udp_discovery_interval
+        };
+        let elapsed = now.duration_since(p.udp_ping_sent);
+        if elapsed >= Duration::from_secs(u64::from(interval)) {
+            // C `:1236-1238`: `udp_ping_sent = now; ping_sent =
+            // true; send_udp_probe_packet(n, MIN_PROBE_SIZE)`.
+            p.udp_ping_sent = now;
+            p.ping_sent = true;
+            nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
+            // STUB(chunk-9c): `:1240-1245` `if(localdiscovery &&
+            // !udp_confirmed)` send_locally probe.
+        }
+
+        nw
+    }
+
+    /// Dispatch the `Log*` PMTU actions. The `SendProbe` actions
+    /// are dispatched by the caller (they need `&mut self`).
+    fn log_pmtu_action(name: &str, a: &PmtuAction) {
+        match a {
+            PmtuAction::SendProbe { .. } => {} // caller dispatches
+            PmtuAction::LogFixed { mtu, probes } => {
+                log::info!(target: "tincd::net",
+                           "Fixing MTU of {name} to {mtu} after {probes} probes");
+            }
+            PmtuAction::LogReset => {
+                log::info!(target: "tincd::net",
+                           "Decrease in PMTU to {name} detected, restarting discovery");
+            }
+            PmtuAction::LogIncrease => {
+                log::info!(target: "tincd::net",
+                           "Increase in PMTU to {name} detected, restarting discovery");
+            }
+        }
     }
 
     /// `to->nexthop->connection`. The meta connection for routing
@@ -2763,14 +3521,17 @@ impl Daemon {
                     // dispatch terminated (e.g. HandshakeDone in 4a).
                     return;
                 }
+                // `dispatch_sptps_outputs` may have queued to ANY
+                // active conn (`broadcast_line`, `forward_request`,
+                // `conn_for_nexthop` relay). The `needs_write`
+                // signal only tells us SOMETHING was queued; it
+                // doesn't say WHERE. Sweep all conns. (The fast-
+                // path `id`-only set below is now dead but kept
+                // for the "only this conn was touched" common case
+                // — maybe_set_write_any is a no-op for already-set
+                // conns.)
                 if needs_write {
-                    if let Some(&io_id) = self.conn_io.get(id) {
-                        if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
-                            log::error!(target: "tincd::conn",
-                                        "io_set failed for {id:?}: {e}");
-                            self.terminate(id);
-                        }
-                    }
+                    self.maybe_set_write_any();
                 }
                 // Don't fall through to the line-drain loop —
                 // SPTPS mode doesn't touch inbuf.
@@ -3092,15 +3853,13 @@ impl Daemon {
             };
 
             // ─── io_set (meta.c:95)
+            // The handler may have queued to OTHER conns (the
+            // pre-SPTPS phase doesn't broadcast, but the responder-
+            // side `send_id` lands here). Same sweep as the SPTPS
+            // branch above for safety; `maybe_set_write_any` is
+            // cheap (one slotmap pass, ~5 conns).
             if needs_write {
-                if let Some(&io_id) = self.conn_io.get(id) {
-                    if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
-                        log::error!(target: "tincd::conn",
-                                    "io_set failed for {id:?}: {e}");
-                        self.terminate(id);
-                        return;
-                    }
-                }
+                self.maybe_set_write_any();
             }
 
             match result {
@@ -3496,13 +4255,59 @@ impl Daemon {
 
         // C `:310-345`: `if(to == myself)` vs relay.
         if to_nid != self.myself {
-            // C `:327-344`: relay. `send_request(to->nexthop->
-            // connection, "%s", request)` — forward verbatim.
-            // STUB(chunk-9): 2-node mesh has no relay.
+            // C `:326-344`: relay. `if(tunnelserver) return true`
+            // (`:326`); `if(!to->status.reachable)` (`:330-334`);
+            // SPTPS_PACKET takes a special path (`:149-188` decode
+            // + `send_sptps_data` re-encode — "we want to use UDP
+            // if available"). Everything else: `send_request(to->
+            // nexthop->connection, "%s", request)` — forward
+            // verbatim (`:192-194`, `:341`).
+            // STUB(chunk-9c): tunnelserver gate.
+            if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+                log::warn!(target: "tincd::proto",
+                           "Got REQ_KEY from {conn_name} destination {} \
+                            which is not reachable", msg.to);
+                return Ok(false);
+            }
+            // SPTPS_PACKET relay (`protocol_key.c:165-170`): decode,
+            // re-send via `send_sptps_data` (which may go UDP).
+            // `:167`: `if(forwarding_mode == FMODE_INTERNAL)`.
+            // STUB(chunk-9c): forwarding_mode gate (default INTERNAL).
+            if let Some(ext) = &msg.ext {
+                if ext.reqno == Request::SptpsPacket as i32 {
+                    let Some(payload) = ext.payload.as_deref() else {
+                        return Ok(false);
+                    };
+                    let Some(data) = tinc_crypto::b64::decode(payload) else {
+                        log::error!(target: "tincd::proto",
+                                    "Got bad SPTPS_PACKET relay from {}",
+                                    msg.from);
+                        return Ok(false);
+                    };
+                    log::debug!(target: "tincd::proto",
+                                "Relaying SPTPS_PACKET {} → {} ({} bytes)",
+                                msg.from, msg.to, data.len());
+                    let mut nw = self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, &data);
+                    nw |= self.try_tx(to_nid, true);
+                    return Ok(nw);
+                }
+            }
+            // Everything else (REQ_KEY init, REQ_PUBKEY, ANS_
+            // PUBKEY): forward verbatim (`:192-194`, `:341`).
+            let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+                log::warn!(target: "tincd::proto",
+                           "No nexthop connection toward {} for REQ_KEY relay",
+                           msg.to);
+                return Ok(false);
+            };
+            let Some(conn) = self.conns.get_mut(conn_id) else {
+                return Ok(false);
+            };
             log::debug!(target: "tincd::proto",
-                        "REQ_KEY relay {} → {}; STUB(chunk-9)",
-                        msg.from, msg.to);
-            return Ok(false);
+                        "Relaying REQ_KEY {} → {}", msg.from, msg.to);
+            // Forward verbatim. body_str is the full line (already
+            // \n-stripped); `conn.send` re-appends.
+            return Ok(conn.send(format_args!("{body_str}")));
         }
 
         // C `:312-315`: `if(!from->status.reachable) return true`.
@@ -3530,13 +4335,63 @@ impl Daemon {
         // C `req_key_ext_h:139` `switch(reqno)`.
         // `reqno` re-uses `request_t` enum values: REQ_KEY=15 is
         // SPTPS-init, REQ_PUBKEY=19, ANS_PUBKEY=20, SPTPS_PACKET=21.
+        if ext.reqno == Request::SptpsPacket as i32 {
+            // ─── case SPTPS_PACKET (`protocol_key.c:171-188`) ───
+            // TCP-tunneled data record. The `to == myself` was
+            // already checked above. Decode, feed to `from->sptps`.
+            let Some(payload) = ext.payload.as_deref() else {
+                log::error!(target: "tincd::proto",
+                            "Got bad SPTPS_PACKET from {}: no payload",
+                            msg.from);
+                return Ok(false);
+            };
+            let Some(data) = tinc_crypto::b64::decode(payload) else {
+                log::error!(target: "tincd::proto",
+                            "Got bad SPTPS_PACKET from {}: invalid SPTPS data",
+                            msg.from);
+                return Ok(false);
+            };
+            // C `:173`: `sptps_receive_data(&from->sptps, buf, len)`.
+            let Some(sptps) = self
+                .tunnels
+                .get_mut(&from_nid)
+                .and_then(|t| t.sptps.as_deref_mut())
+            else {
+                // C `:177-183`: tunnel-stuck restart logic.
+                log::warn!(target: "tincd::proto",
+                           "Got SPTPS_PACKET from {} but no SPTPS state",
+                           msg.from);
+                return Ok(self.send_req_key(from_nid));
+            };
+            // udppacket = false (came via TCP). Already false
+            // unless something set it; clear defensively.
+            let result = sptps.receive(&data, &mut OsRng);
+            let outs = match result {
+                Ok((_consumed, outs)) => outs,
+                Err(e) => {
+                    log::warn!(target: "tincd::proto",
+                               "Failed to decode SPTPS_PACKET from {}: {e:?}",
+                               msg.from);
+                    let now = self.timers.now();
+                    let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                        t.last_req_key
+                            .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+                    });
+                    if gate_ok {
+                        return Ok(self.send_req_key(from_nid));
+                    }
+                    return Ok(false);
+                }
+            };
+            // STUB(chunk-9c): `:185` `send_mtu_info(myself, from, MTU)`.
+            return Ok(self.dispatch_tunnel_outputs(from_nid, &msg.from, outs));
+        }
         if ext.reqno != Request::ReqKey as i32 {
-            // STUB(chunk-9): REQ_PUBKEY/ANS_PUBKEY (`:196-231`),
-            // SPTPS_PACKET (`:149-188`). The latter is the TCP-
-            // tunnel-data path (when UDP is blocked). C `:270`:
-            // `default: "Unknown extended REQ_KEY" return true`.
+            // STUB(chunk-9c): REQ_PUBKEY/ANS_PUBKEY (`:196-231`).
+            // C `:270`: `default: "Unknown extended REQ_KEY"
+            // return true`.
             log::warn!(target: "tincd::proto",
-                       "Got REQ_KEY ext reqno={} from {} — STUB(chunk-9)",
+                       "Got REQ_KEY ext reqno={} from {} — STUB(chunk-9c)",
                        ext.reqno, msg.from);
             return Ok(false);
         }
@@ -3706,12 +4561,36 @@ impl Daemon {
             return Ok(false);
         };
 
-        // C `:462-484`: `if(to != myself)` relay. STUB(chunk-9).
+        // C `:462-484`: `if(to != myself)` relay.
         if to_nid != self.myself {
+            // STUB(chunk-9c): tunnelserver gate (`:463-465`).
+            if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+                log::warn!(target: "tincd::proto",
+                           "Got ANS_KEY from {conn_name} destination {} \
+                            which is not reachable", msg.to);
+                return Ok(false);
+            }
+            // STUB(chunk-9c): `:473-482` reflexive UDP addr append.
+            // `if(!*address && from->address.sa.sa_family !=
+            // AF_UNSPEC && to->minmtu)`. The relay appends the
+            // observed UDP addr/port; the destination learns its
+            // NAT-public address. Needs the `address`/`port`
+            // optional fields in `AnsKey::parse` (already there)
+            // and the `tunnels[from].udp_addr` formatting.
+            let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+                log::warn!(target: "tincd::proto",
+                           "No nexthop connection toward {} for ANS_KEY relay",
+                           msg.to);
+                return Ok(false);
+            };
+            let Some(conn) = self.conns.get_mut(conn_id) else {
+                return Ok(false);
+            };
             log::debug!(target: "tincd::proto",
-                        "ANS_KEY relay {} → {}; STUB(chunk-9)",
-                        msg.from, msg.to);
-            return Ok(false);
+                        "Relaying ANS_KEY {} → {}", msg.from, msg.to);
+            // C `:484`: `send_request(to->nexthop->connection,
+            // "%s", request)`. Forward verbatim.
+            return Ok(conn.send(format_args!("{body_str}")));
         }
 
         // C `:499-545`: compression-level capability check, then
@@ -4306,11 +5185,13 @@ impl Daemon {
                 nexthop,                      // %s
                 via,                          // %s
                 distance,                     // %d
-                tunnel.map_or(0, |t| t.mtu),  // %d mtu
-                tunnel.map_or(0, |t| t.minmtu), // %d minmtu
-                tunnel.map_or(0, |t| t.maxmtu), // %d maxmtu
+                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.mtu), // %d mtu
+                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.minmtu), // %d minmtu
+                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.maxmtu), // %d maxmtu
                 0,                            // %ld last_state_change
-                -1,                           // %d udp_ping_rtt
+                tunnel
+                    .and_then(|t| t.pmtu.as_ref())
+                    .map_or(-1, |p| p.udp_ping_rtt), // %d
                 tunnel.map_or(0, |t| t.in_packets), // %PRIu64
                 tunnel.map_or(0, |t| t.in_bytes),
                 tunnel.map_or(0, |t| t.out_packets),
@@ -4600,14 +5481,34 @@ impl Daemon {
 
         // C `:134`: `e = lookup_edge(from, to)`.
         if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
-            // C `:136-148`: same weight + options → idempotent.
-            // (The C also compares address/local_address; we don't
-            // store those on the graph edge. The address compare is
-            // for the `update_node_udp` cache invalidation —
-            // chunk-7 territory. For graph topology, weight+options
-            // is what matters.)
+            // C `:144`: idempotent only if weight + options + address
+            // + local_address ALL match. The address compare matters
+            // for two cases the chunk-5 "weight+options is enough"
+            // comment missed:
+            //   - C `update_node_udp` cache invalidation (`net_packet.
+            //     c:639-648`): UDP target changes if address changes.
+            //   - The synthesized reverse edge from `on_ack:5912` has
+            //     NO `edge_addrs` entry. When the peer's real ADD_
+            //     EDGE arrives (same weight/options but with an addr),
+            //     the C `sockaddrcmp(&e->address, &address)` is non-
+            //     zero (zeroed sockaddr vs real); it falls through to
+            //     the update + forward. Our weight-only check early-
+            //     returned, never populated `edge_addrs`, never
+            //     forwarded. Hub-spoke breaks: alice never learns
+            //     bob→mid (`three_daemon_relay` regression).
+            // Fix: also check whether `edge_addrs.get(existing)` is
+            // None (synthesized reverse — always falls through) or
+            // differs from the wire body.
             let e = self.graph.edge(existing).expect("just looked up");
-            if e.weight == edge.weight && e.options == edge.options {
+            let same_addr = self.edge_addrs.get(&existing).is_some_and(|(a, p, _, _)| {
+                // Compare only addr+port. C's `sockaddrcmp` ignores
+                // local_address unless `sa_family` is set AND not
+                // AF_UNKNOWN (`:141-143`); we sidestep by treating
+                // any local-addr change as non-idempotent (stricter
+                // than C, harmless: extra forward, `seen` dedups).
+                a == &edge.addr && p == &edge.port
+            });
+            if e.weight == edge.weight && e.options == edge.options && same_addr {
                 // C `:145-148`: `return true`. No forward, no graph().
                 return Ok(false);
             }
@@ -4943,14 +5844,23 @@ impl Daemon {
         let fwd_eid = self
             .graph
             .add_edge(self.myself, peer_id, edge_weight, edge_options);
-        // The reverse. C: comes from peer's send_add_edge. Chunk
-        // 5 stub: synthesize. Same weight (the average is symmetric
-        // when both sides compute it) but the C peer might have a
-        // different `c->options` (depends on THEIR config). With
-        // identical defaults: same. Real divergence is chunk-6.
-        let rev_eid = self
-            .graph
-            .add_edge(peer_id, self.myself, edge_weight, edge_options);
+        // The reverse: C `ack_h` adds ONLY the forward edge
+        // (`c->edge`, `:1051 edge_add(c->edge)`). The reverse
+        // (`peer→myself`) comes from the PEER's `send_add_edge(
+        // everyone, c->edge)` (their `:1058`) over gossip. SSSP
+        // skips edges without a reverse (`graph.c:159 if(!e->
+        // reverse) continue`); this means our edge is dead until
+        // the peer's gossip arrives — which it does in the same
+        // burst (their on_ack runs symmetrically).
+        //
+        // Chunk-5 originally synthesized the reverse here. WRONG
+        // for 3+ nodes: when the peer's gossip arrives at the
+        // RELAY, `lookup_edge` finds our synthesized reverse →
+        // idempotent early-return → no forward → transitive nodes
+        // never learn the reverse → their SSSP can't reach us. The
+        // C avoids this by NOT synthesizing: the relay's `lookup_
+        // edge` finds nothing, `edge_add` runs, `forward_request`
+        // runs.
 
         // C `:1024-1025`: `c->edge->address = c->address` with port
         // rewritten to `hisport`. C `:1040-1045`: `c->edge->local_
@@ -4997,8 +5907,6 @@ impl Daemon {
             };
             self.edge_addrs.insert(fwd_eid, (addr, port, la, lp));
         }
-        let _ = rev_eid; // entry intentionally absent; see above
-
         // C `:993-994` + `:1051`: `n->connection = c; c->edge = e`.
         // Now that we have `fwd_eid`, populate `NodeState.edge`.
         // `terminate_connection` (`net.c:126-132`) reads it.

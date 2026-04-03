@@ -1238,6 +1238,21 @@ fn peer_ack_exchange() {
             (&stream).write_all(&bytes).expect("send our ACK");
         }
     }
+    // C `ack_h:1058 send_add_edge(everyone, c->edge)`: a real
+    // peer's `on_ack` broadcasts ITS edge (testpeer→testnode).
+    // The daemon's SSSP only follows edges with `e->reverse` set
+    // (`graph.c:159`); without this gossip, the daemon's testnode→
+    // testpeer edge has no twin and `BecameReachable` never fires.
+    // (chunk-9b removed the synthesized reverse from `on_ack` —
+    // it broke 3-node relay forwarding. Tests that drive the
+    // daemon manually now must send what a real peer sends.)
+    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
+    let outs = sptps.send_record(0, our_edge).expect("our edge");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send our ADD_EDGE");
+        }
+    }
 
     // ─── daemon activates: send_everything + send_add_edge ─────
     // C `:1025` log: "Connection with X (Y) activated". Then
@@ -1689,11 +1704,21 @@ fn peer_edge_triggers_reachable() {
     }
 
     // Send our ACK. Daemon activates + adds myself→testpeer edge
-    // + runs graph (testpeer becomes reachable).
+    // + runs graph. Then our ADD_EDGE (testpeer→testnode) gives
+    // the daemon's edge its reverse; THAT graph() fires
+    // BecameReachable. (Real peers' on_ack sends both in one
+    // burst; chunk-9b removed the daemon's synthesized reverse.)
     let outs = sptps.send_record(0, b"4 0 1 700000c\n").expect("ack");
     for o in outs {
         if let Output::Wire { bytes, .. } = o {
             (&stream).write_all(&bytes).expect("send ACK");
+        }
+    }
+    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
+    let outs = sptps.send_record(0, our_edge).expect("our edge");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send our ADD_EDGE");
         }
     }
 
@@ -1989,16 +2014,22 @@ fn peer_edge_triggers_reachable() {
         "forward edge addr (remote=conn.address+hisport, local=getsockname+myudp); row: {fwd}"
     );
 
-    // testpeer→testnode: synthesized reverse, NO `edge_addrs`
-    // entry (chunk-5 STUB — see `on_ack` doc). Both addrs are
-    // `"unknown port unknown"`.
+    // testpeer→testnode: synthesized reverse from `on_ack`.
+    // chunk-5 left this with NO `edge_addrs` entry (rendered
+    // as `"unknown port unknown"`). chunk-9b fixed the
+    // idempotence check in `on_add_edge`: the test's `our_edge`
+    // ADD_EDGE (line ~154) now falls through to update (was
+    // early-returning on weight+options match without checking
+    // address) and populates `edge_addrs` with the wire body's
+    // `127.0.0.1` `655`. The `three_daemon_relay` test depends
+    // on this fall-through for hub-spoke topology.
     let rev = edge_rows
         .iter()
         .find(|r| r.starts_with("18 4 testpeer testnode "))
         .unwrap_or_else(|| panic!("no testpeer→testnode: {edge_rows:?}"));
     assert!(
-        rev.contains(" unknown port unknown unknown port unknown "),
-        "synthesized reverse, no edge_addrs entry; row: {rev}"
+        rev.contains(" 127.0.0.1 port 655 "),
+        "reverse edge addr should be populated by ADD_EDGE; row: {rev}"
     );
 
     // testpeer→faraway: from the ADD_EDGE wire body. Addr tokens

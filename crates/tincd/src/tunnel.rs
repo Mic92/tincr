@@ -39,6 +39,8 @@ use std::time::Instant;
 
 use tinc_sptps::Sptps;
 
+use crate::pmtu::PmtuState;
+
 /// `net.h:36` `#define MTU 1518` (1500 payload + 14 ethernet + 4
 /// VLAN). The non-jumbogram build. C `node_t.maxmtu` initializes
 /// to this and `BecameUnreachable` resets to it (`graph.c:266`).
@@ -51,6 +53,13 @@ pub const MTU: u16 = 1518;
 /// (`protocol_key.c:114-132`), `ans_key_h` SPTPS branch
 /// (`:549-578`), `send_sptps_packet` gate (`net_packet.c:685`),
 /// and `BecameUnreachable` reset (`graph.c:256-297`).
+///
+/// ## Default
+///
+/// C `new_node` (`node.c:43-64`): `xzalloc` everything, then
+/// `n->maxmtu = MTU`. The MTU init lives in `PmtuState::default()`.
+/// Everything else here is zero/None — derive-able.
+#[derive(Default)]
 pub struct TunnelState {
     /// `n->sptps` (`node.h:64`). The per-tunnel SPTPS state
     /// machine. `None` before the first `send_req_key`; `Some`
@@ -87,25 +96,28 @@ pub struct TunnelState {
     /// `None` is the C `0` (epoch — always passes the gate).
     pub last_req_key: Option<Instant>,
 
-    /// `n->mtu` (`node.h:108`). Current PMTU to this node.
-    /// Chunk 9's `try_fix_mtu` writes; chunk 7's `send_sptps_
-    /// packet` fragments on it. Init `MTU`; never reset (the
-    /// learned PMTU survives reconnects in C — only `minmtu`/
-    /// `maxmtu`/`mtuprobes` reset, `graph.c:266-269`).
-    pub mtu: u16,
+    /// `n->{mtu,minmtu,maxmtu,mtuprobes,maxrecentlen,udp_ping_*}`
+    /// (`node.h:108-118`). PMTU discovery state. Chunk-9b embeds
+    /// the full state machine here instead of carrying the four
+    /// raw fields. `pmtu.udp_confirmed` is the AUTHORITATIVE bit;
+    /// `status.udp_confirmed` mirrors it for `dump_nodes` packing.
+    ///
+    /// `pmtu.mtu` is NOT reset on `reset_unreachable` (the learned
+    /// PMTU survives reconnects — `graph.c:266-269` only resets
+    /// `minmtu`/`maxmtu`/`mtuprobes`). The other fields are.
+    ///
+    /// Why `Option`: `PmtuState::new` needs an `Instant`. The
+    /// daemon's `entry().or_default()` idiom can't supply one. The
+    /// state is lazily seeded by `try_tx` on the first call (when
+    /// `validkey` is set and we're about to start probing). `None`
+    /// reads as "mtu=MTU, minmtu=0" for `dump_nodes` and the relay
+    /// gates — same as a fresh `PmtuState`.
+    pub pmtu: Option<PmtuState>,
 
-    /// `n->minmtu` (`node.h:109`). Probed lower bound. Init 0.
-    /// `graph.c:268` resets to 0 on unreachable.
-    pub minmtu: u16,
-
-    /// `n->maxmtu` (`node.h:110`). Probed upper bound. Init `MTU`.
-    /// `graph.c:266` resets to `MTU` on unreachable.
-    pub maxmtu: u16,
-
-    /// `n->mtuprobes` (`node.h:111`). Probe sequence counter.
-    /// Negative values = "fixed, count to next re-probe". Init 0.
-    /// `graph.c:269` resets to 0 on unreachable.
-    pub mtuprobes: i32,
+    /// `n->udp_reply_sent` (`node.h:121`). Gates the gratuitous
+    /// type-2 probe-reply keepalive in `try_udp` (`net_packet.c:
+    /// 1211`). One per `udp_discovery_keepalive_interval`.
+    pub udp_reply_sent: Option<Instant>,
 
     /// `n->outcompression` (`node.h:77`). The compression level the
     /// PEER advertised in their ANS_KEY (`protocol_key.c:545`: `from
@@ -134,33 +146,6 @@ pub struct TunnelState {
     pub out_bytes: u64,
 }
 
-impl Default for TunnelState {
-    fn default() -> Self {
-        // C `new_node` (`node.c:43-64`): `xzalloc` everything,
-        // then `n->maxmtu = MTU`. `n->mtu` STAYS 0 in C — the
-        // first `try_fix_mtu` writes it. We init to `MTU` because
-        // chunk 7 reads `mtu` before chunk 9 lands; matches the
-        // "no PMTU discovery yet" semantics of `net_packet.c:1042`
-        // `if(n->minmtu)` gate (which is false at default).
-        Self {
-            sptps: None,
-            udp_addr: None,
-            status: TunnelStatus::default(),
-            last_req_key: None,
-            mtu: MTU,
-            minmtu: 0,
-            maxmtu: MTU,
-            mtuprobes: 0,
-            outcompression: 0,
-            incompression: 0,
-            in_packets: 0,
-            in_bytes: 0,
-            out_packets: 0,
-            out_bytes: 0,
-        }
-    }
-}
-
 impl TunnelState {
     /// `graph.c:256-297`, `BecameUnreachable` transition.
     ///
@@ -183,10 +168,21 @@ impl TunnelState {
         self.sptps = None;
         // C `:263`: `n->last_req_key = 0`.
         self.last_req_key = None;
-        // C `:266-269`: mtu probe state.
-        self.maxmtu = MTU;
-        self.minmtu = 0;
-        self.mtuprobes = 0;
+        // C `:266-269`: mtu probe state. `pmtu.mtu` survives (the
+        // learned PMTU persists across reconnects); the rest reset.
+        // We keep the `PmtuState` if it exists and reset its fields
+        // in place (so `mtu` is preserved). C: `n->maxmtu = MTU;
+        // n->minmtu = 0; n->mtuprobes = 0; n->maxrecentlen = 0`.
+        if let Some(p) = &mut self.pmtu {
+            p.maxmtu = MTU;
+            p.minmtu = 0;
+            p.mtuprobes = 0;
+            p.maxrecentlen = 0;
+            p.udp_confirmed = false;
+            p.ping_sent = false;
+            p.udp_ping_rtt = -1;
+        }
+        self.udp_reply_sent = None;
         // C `:296`: `update_node_udp(n, NULL)`.
         self.udp_addr = None;
         // C `:297`: `memset(&n->status, 0, sizeof(n->status))`.
@@ -251,6 +247,27 @@ pub struct TunnelStatus {
     /// UDP (vs TCP-tunneled). Ephemeral — flips per packet.
     /// `route.c` reads it for the "send reply same way" logic.
     pub udppacket: bool,
+}
+
+impl TunnelState {
+    /// `n->mtu`. Reads `pmtu.mtu` if seeded; `MTU` otherwise (the
+    /// chunk-7 "no discovery yet" semantics — see `Default` doc).
+    #[must_use]
+    pub fn mtu(&self) -> u16 {
+        self.pmtu.as_ref().map_or(MTU, |p| p.mtu)
+    }
+
+    /// `n->minmtu`. Zero until the first probe reply.
+    #[must_use]
+    pub fn minmtu(&self) -> u16 {
+        self.pmtu.as_ref().map_or(0, |p| p.minmtu)
+    }
+
+    /// `n->maxmtu`. `MTU` until discovery starts.
+    #[must_use]
+    pub fn maxmtu(&self) -> u16 {
+        self.pmtu.as_ref().map_or(MTU, |p| p.maxmtu)
+    }
 }
 
 impl TunnelStatus {
@@ -344,10 +361,11 @@ mod tests {
         // `net.h:36` `#define MTU 1518`. Non-jumbogram build.
         assert_eq!(MTU, 1518);
         let t = TunnelState::default();
-        assert_eq!(t.mtu, 1518);
-        assert_eq!(t.maxmtu, 1518);
-        assert_eq!(t.minmtu, 0);
-        assert_eq!(t.mtuprobes, 0);
+        // Unseeded pmtu: helpers return the C-xzalloc-equivalents.
+        assert_eq!(t.mtu(), 1518);
+        assert_eq!(t.maxmtu(), 1518);
+        assert_eq!(t.minmtu(), 0);
+        assert!(t.pmtu.is_none());
     }
 
     #[test]
@@ -365,10 +383,16 @@ mod tests {
                 udppacket: true,
             },
             last_req_key: Some(Instant::now()),
-            mtu: 1400,
-            minmtu: 1200,
-            maxmtu: 1450,
-            mtuprobes: 7,
+            pmtu: Some({
+                let mut p = PmtuState::new(Instant::now(), MTU);
+                p.mtu = 1400;
+                p.minmtu = 1200;
+                p.maxmtu = 1450;
+                p.mtuprobes = 7;
+                p.udp_confirmed = true;
+                p
+            }),
+            udp_reply_sent: Some(Instant::now()),
             outcompression: 6,
             incompression: 12,
             in_packets: 100,
@@ -385,10 +409,13 @@ mod tests {
         assert!(t.last_req_key.is_none());
         // `graph.c:266-269` mtu probe state. Note `mtu` itself
         // is NOT reset — the learned PMTU survives.
-        assert_eq!(t.mtu, 1400, "mtu survives unreachable");
-        assert_eq!(t.maxmtu, MTU);
-        assert_eq!(t.minmtu, 0);
-        assert_eq!(t.mtuprobes, 0);
+        let p = t.pmtu.as_ref().expect("pmtu state survives");
+        assert_eq!(p.mtu, 1400, "mtu survives unreachable");
+        assert_eq!(p.maxmtu, MTU);
+        assert_eq!(p.minmtu, 0);
+        assert_eq!(p.mtuprobes, 0);
+        assert!(!p.udp_confirmed);
+        assert!(t.udp_reply_sent.is_none());
         // `graph.c:296` `update_node_udp(n, NULL)`.
         assert!(t.udp_addr.is_none());
         // `graph.c:297` `memset(&n->status, 0, ...)`.

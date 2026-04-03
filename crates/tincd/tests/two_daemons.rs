@@ -208,6 +208,73 @@ impl Node {
         tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
     }
 
+    /// Three-node config: write `tinc.conf` with `ConnectTo` for
+    /// each name in `connect_to`, write `hosts/PEER` for each
+    /// `peers` entry (pubkey + maybe Address), write `hosts/SELF`
+    /// with Port + Subnet. `device_fd`: same as `write_config_with`.
+    ///
+    /// Why a separate fn instead of generalizing `write_config_with`:
+    /// the two-node case is the dominant test shape (8 callers);
+    /// keeping it simple preserves readability there.
+    fn write_config_multi(
+        &self,
+        peers: &[&Node],
+        connect_to: &[&str],
+        device_fd: Option<i32>,
+        subnet: Option<&str>,
+    ) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use tinc_crypto::sign::SigningKey;
+
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
+        if let Some(fd) = device_fd {
+            tinc_conf.push_str(&format!("DeviceType = fd\nDevice = {fd}\n"));
+        } else {
+            tinc_conf.push_str("DeviceType = dummy\n");
+        }
+        for ct in connect_to {
+            tinc_conf.push_str(&format!("ConnectTo = {ct}\n"));
+        }
+        tinc_conf.push_str(&self.extra_conf);
+        tinc_conf.push_str("PingTimeout = 1\n");
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        let mut self_cfg = format!("Port = {}\n", self.port);
+        if let Some(s) = subnet {
+            self_cfg.push_str(&format!("Subnet = {s}\n"));
+        }
+        std::fs::write(self.confbase.join("hosts").join(self.name), self_cfg).unwrap();
+
+        for peer in peers {
+            let pk = tinc_crypto::b64::encode(&peer.pubkey());
+            let mut cfg = format!("Ed25519PublicKey = {pk}\n");
+            // Address only for ConnectTo targets.
+            if connect_to.contains(&peer.name) {
+                cfg.push_str(&format!("Address = 127.0.0.1 {}\n", peer.port));
+            }
+            // The peer's Subnet must be in OUR copy of hosts/PEER
+            // so `route()` knows to forward to them. The C reads
+            // it from disk at ADD_SUBNET-gossip time? No — the C
+            // gets it from the wire (ADD_SUBNET). We do too. So
+            // no Subnet line needed here. (The pubkey is the only
+            // host-file dependency for `read_ecdsa_public_key`.)
+            std::fs::write(self.confbase.join("hosts").join(peer.name), cfg).unwrap();
+        }
+
+        let sk = SigningKey::from_seed(&self.seed);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.confbase.join("ed25519_key.priv"))
+            .unwrap();
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    }
+
     fn write_config(&self, other: &Node, connect_to: bool) {
         use std::os::unix::fs::OpenOptionsExt;
         use tinc_crypto::sign::SigningKey;
@@ -1291,4 +1358,256 @@ fn tinc_up_runs() {
 
     let _ = alice_child.kill();
     let _ = alice_child.wait();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+
+/// **THREE DAEMONS, RELAY PATH.** alice ← mid → bob, NO direct
+/// alice↔bob ConnectTo. Alice's packet to bob's subnet routes
+/// `Forward{to: bob}`; `send_sptps_data`'s relay decision sends
+/// it via `mid` (the nexthop). Mid's `on_udp_recv` sees
+/// `dst_id == bob`, calls `send_sptps_data_relay(to=bob, from=
+/// alice)`. Bob receives, decrypts with the alice↔bob per-tunnel
+/// SPTPS, writes to TUN.
+///
+/// Exercises the full chunk-9b chain:
+/// - REQ_KEY/ANS_KEY relay (`on_req_key`/`on_ans_key` `to !=
+///   myself`): alice's REQ_KEY for bob goes via mid's meta-conn.
+/// - `send_sptps_data_relay` `:967` `relay = nexthop` (since
+///   `via == myself` for alice — bob is reachable but indirect
+///   only via the SSSP path through mid).
+/// - UDP relay receive (`on_udp_recv` `dst != null && dst !=
+///   myself`): mid forwards. The packet carries bob's `dst_id6`.
+/// - The `[dst_id6][src_id6]` prefix on the wire (`direct=false`
+///   ⇒ `dst = to->id`, not nullid).
+///
+/// What this DOESN'T test: `via != myself` (the static-relay
+/// path, set by `IndirectData = yes`). With three nodes connected
+/// linearly, SSSP gives `via=bob` for bob (`via` is the LAST
+/// direct node — and bob IS the destination, reached via mid's
+/// edge). So `via_nid == myself` is false... actually no, `via`
+/// for a node is the last NON-indirect hop. With no `IndirectData`,
+/// every edge is direct, so `via == nid` for every node. The relay
+/// here happens because `nexthop != to` (mid is the first hop).
+///
+/// ## TCP-tunneled handshake, possibly TCP-tunneled data
+///
+/// alice↔bob have no direct TCP connection. Their per-tunnel SPTPS
+/// handshake goes via REQ_KEY/ANS_KEY relayed by mid. That's the
+/// `to != myself` arms in `on_req_key`/`on_ans_key`.
+///
+/// The DATA path: until `mid`'s `minmtu` is discovered (which
+/// requires probes from alice→mid), the `too_big` gate would force
+/// TCP. But chunk-9b's gate is `relay_minmtu > 0 && origlen >
+/// minmtu` — `minmtu==0` ⇒ go UDP optimistically. So data goes
+/// UDP. EMSGSIZE would correct if the loopback MTU is small, but
+/// it's 65536 on Linux loopback so no problem.
+#[test]
+fn three_daemon_relay() {
+    let tmp = TmpGuard::new("relay3");
+    let alice = Node::new(tmp.path(), "alice", 0xA3);
+    let mid = Node::new(tmp.path(), "mid", 0xC3);
+    let bob = Node::new(tmp.path(), "bob", 0xB3);
+
+    let alice_pair = sockpair_seqpacket();
+    let bob_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+    for &fd in &bob_pair {
+        set_nonblocking(fd);
+    }
+
+    // mid is the hub: no device (dummy), no subnet, no ConnectTo.
+    // Both alice and bob ConnectTo mid. mid knows everyone's pubkey.
+    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    // alice: ConnectTo=mid, owns 10.0.0.1/32. Knows bob's pubkey
+    // (needed for the per-tunnel SPTPS handshake).
+    alice.write_config_multi(
+        &[&mid, &bob],
+        &["mid"],
+        Some(alice_pair[1]),
+        Some("10.0.0.1/32"),
+    );
+    // bob: ConnectTo=mid, owns 10.0.0.2/32. Knows alice's pubkey.
+    bob.write_config_multi(
+        &[&mid, &alice],
+        &["mid"],
+        Some(bob_pair[1]),
+        Some("10.0.0.2/32"),
+    );
+
+    // ─── spawn: mid first (the hub everyone connects to) ─────────
+    // mid runs at debug-level so we can assert the relay log lines.
+    let mut mid_child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&mid.confbase)
+        .arg("--pidfile")
+        .arg(&mid.pidfile)
+        .arg("--socket")
+        .arg(&mid.socket)
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mid");
+    if !wait_for_file(&mid.socket) {
+        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
+    }
+
+    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    if !wait_for_file(&bob.socket) {
+        let _ = mid_child.kill();
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    unsafe { libc::close(bob_pair[1]) };
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    // ─── wait for full mesh reachability ────────────────────────
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+    let _mid_ctl = Ctl::connect(&mid);
+
+    let node_status = |rows: &[String], name: &str| -> Option<u32> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            u32::from_str_radix(toks.get(10)?, 16).ok()
+        })
+    };
+
+    // alice must see bob as reachable (transitively, via mid).
+    // SSSP: alice—mid edge from alice's ACK; mid—bob edge gossiped
+    // via ADD_EDGE from mid. graph() runs, bob becomes reachable.
+    let mesh_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            // bit 4 = reachable
+            let a_sees_bob = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+            let b_sees_alice = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+            (a_sees_bob && b_sees_alice).then_some(())
+        });
+    }));
+    if mesh_result.is_err() {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        let ms = drain_stderr(mid_child);
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!(
+            "mesh reachability timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}"
+        );
+    }
+
+    // ─── nexthop check: alice's route to bob goes via mid ────────
+    // dump_nodes body tokens 11/12 are nexthop/via. For alice's
+    // bob row: nexthop should be "mid".
+    let node_nexthop = |rows: &[String], name: &str| -> Option<String> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            Some(toks.get(11)?.to_string())
+        })
+    };
+    let a_nodes = alice_ctl.dump(3);
+    let nh = node_nexthop(&a_nodes, "bob");
+    assert_eq!(
+        nh.as_deref(),
+        Some("mid"),
+        "alice's nexthop for bob should be mid; nodes:\n{a_nodes:#?}"
+    );
+
+    // ─── kick the per-tunnel handshake ──────────────────────────
+    // alice's REQ_KEY for bob goes via `nexthop->connection` =
+    // alice's mid-conn. mid's `on_req_key` sees `to != myself`,
+    // forwards verbatim to bob via mid's bob-conn. Bob starts
+    // responder SPTPS, ANS_KEY back via mid.
+    let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
+    write_fd(alice_pair[0], &kick);
+
+    let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            // bit 1 = validkey
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            (a_ok && b_ok).then_some(())
+        });
+    }));
+    if validkey_result.is_err() {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        let ms = drain_stderr(mid_child);
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!("validkey timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}");
+    }
+
+    // ─── THE PACKET ─────────────────────────────────────────────
+    // alice → mid (UDP, dst_id6=bob) → bob. mid's `on_udp_recv`
+    // sees dst != null && dst != myself, calls `send_sptps_data_
+    // relay`. The ciphertext is the alice↔bob SPTPS record; mid
+    // can't decrypt it (and doesn't try — just re-prefixes and
+    // forwards). bob decrypts.
+    let payload = b"relayed via mid";
+    let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
+    write_fd(alice_pair[0], &ip_pkt);
+
+    let recv_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]))
+    }));
+    let recv = match recv_result {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = mid_child.kill();
+            let _ = bob_child.kill();
+            let ms = drain_stderr(mid_child);
+            let bs = drain_stderr(bob_child);
+            let asd = drain_stderr(alice_child);
+            panic!(
+                "packet relay timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}"
+            );
+        }
+    };
+
+    assert_eq!(
+        recv,
+        ip_pkt,
+        "relay round-trip mismatch; sent {} got {}",
+        ip_pkt.len(),
+        recv.len()
+    );
+    assert_eq!(&recv[20..], payload);
+
+    // ─── mid stderr: the relay log ──────────────────────────────
+    drop(alice_ctl);
+    drop(bob_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    unsafe { libc::close(bob_pair[0]) };
+    let _ = mid_child.kill();
+    let _ = bob_child.kill();
+    let mid_stderr = drain_stderr(mid_child);
+    let _bob_stderr = drain_stderr(bob_child);
+    let _alice_stderr = drain_stderr(alice_child);
+    // mid should have logged at least one relay forward. The "via"
+    // log line is from `send_sptps_data_relay`; the "Relaying
+    // REQ_KEY" / "Relaying ANS_KEY" lines are from the meta-relay.
+    assert!(
+        mid_stderr.contains("Relaying"),
+        "mid should log relay activity; stderr:\n{mid_stderr}"
+    );
 }
