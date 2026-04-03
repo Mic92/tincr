@@ -25,7 +25,7 @@
 //!
 //! `n->status.send_locally` flag — daemon's TunnelState. The `try_udp` probe
 //! loop — `daemon/txpath.rs`. Reflexive ANS_KEY append/consume —
-//! `daemon/gossip.rs` `on_ans_key`. All `STUB(chunk-10-local)`.
+//! `daemon/gossip.rs` `on_ans_key`.
 #![forbid(unsafe_code)]
 
 use std::net::{IpAddr, SocketAddr};
@@ -301,5 +301,29 @@ mod tests {
     fn parse_garbage_is_none() {
         assert_eq!(parse_addr_port("not-an-ip", "655"), None);
         assert_eq!(parse_addr_port("127.0.0.1", "not-a-port"), None);
+    }
+
+    /// The reflexive append/consume roundtrip THROUGH the `AnsKey`
+    /// wire format. Relay does `format_addr_port` → `"%s %s %s"`
+    /// concat (`gossip.rs` `on_ans_key`); destination does
+    /// `AnsKey::parse` → `parse_addr_port`. Proves the wire shape
+    /// is right for both v4 and v6.
+    #[test]
+    fn ans_key_reflexive_roundtrip() {
+        use tinc_proto::msg::AnsKey;
+        // Base ANS_KEY (7-field, no addr).
+        let base = "16 alice bob aGVsbG8 0 0 0 0";
+        for sa in [v4("192.168.1.42:655"), v6("[fe80::1]:12345")] {
+            // Relay-side: format + raw concat (the C `"%s %s %s"`).
+            let (a, p) = format_addr_port(&sa);
+            let appended = format!("{base} {a} {p}");
+            // Destination-side: parse + extract.
+            let msg = AnsKey::parse(&appended).expect("parse appended");
+            let (a_s, p_s) = msg.udp_addr.as_ref().expect("udp_addr present");
+            let got = parse_addr_port(a_s.as_str(), p_s.as_str());
+            assert_eq!(got, Some(sa), "roundtrip for {sa}");
+            // And re-format is byte-exact (idempotent relay).
+            assert_eq!(msg.format(), appended);
+        }
     }
 }

@@ -1306,30 +1306,28 @@ impl Daemon {
         wire.extend_from_slice(ct);
 
         // C `:1031-1040`: `choose_udp_address(relay, ...)`. NOT
-        // `to`: we send to the RELAY, who forwards to `to`.
-        // STUB(chunk-10-local): `choose_local_address` +
-        // `send_locally` (`:1034-1036`). The 1-in-3 randomization
-        // (`:758-762`). LAN-direct optimization; packets still
-        // flow via the WAN address without it.
+        // `to`: we send to the RELAY, who forwards to `to`. The
+        // `send_locally` override (`:1034-1036`) and the 1-in-3
+        // cycle (`:758-762`) are folded into `choose_udp_address`.
         let relay_name = self
             .graph
             .node(relay_nid)
             .map_or("<gone>", |n| n.name.as_str())
             .to_owned();
-        let Some(addr) = self.choose_udp_address(relay_nid, &relay_name) else {
+        let Some((addr, sock)) = self.choose_udp_address(relay_nid, &relay_name) else {
             log::debug!(target: "tincd::net",
                         "No UDP address known for relay {relay_name}; dropping");
             return false;
         };
 
         // C `:1044`: `sendto(listen_socket[sock].udp.fd, ...)`.
-        // STUB(chunk-10-local): `adapt_socket` (`:784`) picks the
-        // listener whose addr family matches `sa`. Use `[0]`.
+        // `adapt_socket` (done inside `choose_udp_address`) picked
+        // the listener whose addr family matches `addr`.
         log::debug!(target: "tincd::net",
                     "Sending {}-byte UDP packet to {to_name} via {relay_name} ({addr})",
                     wire.len());
         let sockaddr = socket2::SockAddr::from(addr);
-        if let Some(l) = self.listeners.first() {
+        if let Some(l) = self.listeners.get(usize::from(sock)) {
             if let Err(e) = l.udp.send_to(&wire, &sockaddr) {
                 if e.kind() == io::ErrorKind::WouldBlock {
                     // Drop. UDP is unreliable anyway.

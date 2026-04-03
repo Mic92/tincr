@@ -214,10 +214,10 @@ impl TunnelState {
 /// Rust are bad, and (c) the only place the packed `u32` matters
 /// is `dump_nodes` — `as_u32()` reconstructs it on demand.
 ///
-/// `visited`/`indirect`/`send_locally`/`validkey_in`/`has_
-/// address`/`ping_sent` omitted: graph-algorithm scratch (chunk 5
-/// owns `visited`/`reachable`), chunk-9 PMTU (`ping_sent`), or
-/// not on any chunk-7 read path.
+/// `visited`/`indirect`/`validkey_in`/`has_address`/`ping_sent`
+/// omitted: graph-algorithm scratch (chunk 5 owns `visited`/
+/// `reachable`), chunk-9 PMTU (`ping_sent`), or not on any
+/// chunk-7 read path.
 //
 // `struct_excessive_bools`: the C struct IS a bag of independent
 // bits (`node.h:31-48`). "Refactor into a state machine" is
@@ -256,6 +256,16 @@ pub struct TunnelStatus {
     /// is in the probe-reply handling). Gates: switch from
     /// TCP-tunneled SPTPS to UDP-direct.
     pub udp_confirmed: bool,
+
+    /// `node.h:42`. Bit 8. Transient: set immediately before
+    /// `send_udp_probe_packet`, cleared right after (`net_packet.
+    /// c:1242,1244`). When set, `choose_udp_address` calls
+    /// `choose_local_address` instead. NOT a persistent state —
+    /// it's a side-channel from `try_udp` to `send_sptps_data`
+    /// that bypasses the call stack (probe → `send_record` →
+    /// `dispatch_tunnel_outputs` → `send_sptps_data`, 4 layers;
+    /// threading a bool through is churn).
+    pub send_locally: bool,
 
     /// `node.h:43`. Bit 9. Most-recently-received packet was
     /// UDP (vs TCP-tunneled). Ephemeral — flips per packet.
@@ -299,7 +309,7 @@ impl TunnelStatus {
     /// | 5   | `indirect`       | always 0 ‡    |
     /// | 6   | `sptps`          | self          |
     /// | 7   | `udp_confirmed`  | self          |
-    /// | 8   | `send_locally`   | always 0      |
+    /// | 8   | `send_locally`   | self ††       |
     /// | 9   | `udppacket`      | self          |
     /// | 10  | `validkey_in`    | always 0 §    |
     /// | 11  | `has_address`    | always 0 §    |
@@ -313,6 +323,10 @@ impl TunnelStatus {
     /// human-readable diagnostics.
     ///
     /// § Chunk-9+ fields. Zero until then.
+    ///
+    /// †† Transient (set/probe/clear in `try_udp`). `dump_nodes`
+    /// runs from the control socket BETWEEN event-loop turns, so
+    /// this is always 0 in practice. Included for completeness.
     ///
     /// `reachable` is a parameter because it's owned by chunk-5's
     /// graph (`NodeState`-adjacent), not by `TunnelStatus`.
@@ -333,6 +347,9 @@ impl TunnelStatus {
         }
         if self.udp_confirmed {
             v |= 1 << 7;
+        }
+        if self.send_locally {
+            v |= 1 << 8;
         }
         if self.udppacket {
             v |= 1 << 9;
@@ -409,6 +426,7 @@ mod tests {
                 waitingforkey: true,
                 sptps: true,
                 udp_confirmed: true,
+                send_locally: true,
                 udppacket: true,
             },
             last_req_key: Some(Instant::now()),
@@ -539,19 +557,20 @@ mod tests {
             1 << 9
         );
 
-        // All set. 0b10_1101_0110 = 0x2d6 = 726.
+        // All set. 0b11_1101_0110 = 0x3d6 = 982.
         let all = TunnelStatus {
             validkey: true,
             waitingforkey: true,
             sptps: true,
             udp_confirmed: true,
+            send_locally: true,
             udppacket: true,
         };
         assert_eq!(
             all.as_u32(true),
-            (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 9)
+            (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9)
         );
-        assert_eq!(all.as_u32(true), 0x2d6);
+        assert_eq!(all.as_u32(true), 0x3d6);
 
         // The realistic post-handshake steady state: reachable,
         // sptps, validkey, udp_confirmed. 0b1101_0010 = 0xd2.
@@ -560,6 +579,7 @@ mod tests {
             waitingforkey: false,
             sptps: true,
             udp_confirmed: true,
+            send_locally: false,
             udppacket: false,
         };
         assert_eq!(steady.as_u32(true), 0xd2);

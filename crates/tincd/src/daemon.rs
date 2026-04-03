@@ -61,7 +61,7 @@ use crate::socks;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
 use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
-use crate::{compress, icmp, mss, neighbor};
+use crate::{compress, icmp, local_addr, mss, neighbor};
 
 mod connect;
 mod gossip;
@@ -292,6 +292,14 @@ pub struct DaemonSettings {
     /// (one week, `net_setup.c:567`). Config var `InvitationExpire`.
     /// Seconds; `serve_cookie` checks `mtime + this < now`.
     pub invitation_lifetime: Duration,
+    /// `localdiscovery` (`net_setup.c:404`, `net_packet.c:1241`).
+    /// Default false. When set, `try_udp` sends a SECOND probe to
+    /// the peer's LAN-side address (from `ADD_EDGE.local_address`)
+    /// when `!udp_confirmed`. Faster convergence when both nodes
+    /// are on the same LAN behind the same NAT — the WAN probe
+    /// round-trips through the NAT (or hairpin-fails); the LAN
+    /// probe goes direct.
+    pub local_discovery: bool,
     /// `proxytype`/`proxyhost` (`net_setup.c:263-378`). `None` is the
     /// default (direct connect). `Exec` is socketpair+fork (no
     /// handshake); `Socks4`/`Socks5` connect to the proxy then send
@@ -363,6 +371,8 @@ impl Default for DaemonSettings {
             forwarding_mode: ForwardingMode::Internal,
             // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
             invitation_lifetime: Duration::from_secs(604_800),
+            // C `net_setup.c:404`: default false (no `else` branch).
+            local_discovery: false,
             proxy: None,
             // C `net_setup.c:561`: `else { autoconnect = true; }`.
             autoconnect: true,
@@ -420,6 +430,12 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
     if let Some(e) = config.lookup("TunnelServer").next() {
         if let Ok(v) = e.get_bool() {
             settings.tunnelserver = v;
+        }
+    }
+    // LocalDiscovery (`:404`).
+    if let Some(e) = config.lookup("LocalDiscovery").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.local_discovery = v;
         }
     }
     // DirectOnly (`:403`).
@@ -681,6 +697,13 @@ pub struct Daemon {
     /// del_edge`. RESOLVES the open question at the chunk-5
     /// `send_everything` STUB note.
     pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
+
+    /// `choose_udp_address` static counter (`net_packet.c:758`
+    /// `static int x`). 2-of-3 calls explore an edge address;
+    /// 1-of-3 sticks with `n->address` (the reflexive). NOT
+    /// random — a strict cycle. C function-static (one global
+    /// counter, NOT per-node); we use a daemon field.
+    pub(crate) choose_udp_x: u8,
 
     /// `node_t` data-plane half. C smushes this into the same `node_t`
     /// struct; we keep it separate from `nodes`/`NodeState` because
@@ -1333,6 +1356,7 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: HashMap::new(),
             edge_addrs: HashMap::new(),
+            choose_udp_x: 0,
             tunnels: HashMap::new(),
             id6_table,
             contradicting_add_edge: 0,

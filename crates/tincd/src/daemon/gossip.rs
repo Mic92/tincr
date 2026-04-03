@@ -530,8 +530,9 @@ impl Daemon {
     /// we're SPTPS-only.
     ///
     /// `:462` relay wired (chunk-9b). `:473-482` reflexive-addr
-    /// append (`:473-482`): STUB(chunk-10-local) — part of the
+    /// append (`:473-482`): three-gate, then `"%s %s %s"`. The
     /// LAN-direct workstream. `:578` `send_mtu_info`: wired.
+    #[allow(clippy::too_many_lines)] // direct port of `ans_key_h`
     pub(super) fn on_ans_key(
         &mut self,
         from_conn: ConnId,
@@ -574,14 +575,41 @@ impl Daemon {
                             which is not reachable", msg.to);
                 return Ok(false);
             }
-            // STUB(chunk-10-local): `:473-482` reflexive UDP addr
-            // append.
-            // `if(!*address && from->address.sa.sa_family !=
-            // AF_UNSPEC && to->minmtu)`. The relay appends the
-            // observed UDP addr/port; the destination learns its
-            // NAT-public address. Needs the `address`/`port`
-            // optional fields in `AnsKey::parse` (already there)
-            // and the `tunnels[from].udp_addr` formatting.
+            // C `:473-482`: `if(!*address && from->address.sa.
+            // sa_family != AF_UNSPEC && to->minmtu)`. Three gates:
+            //   - `!*address`: wire didn't already have addr/port
+            //     (we're the FIRST relay; subsequent relays don't
+            //     double-append). Maps: `msg.udp_addr.is_none()`.
+            //   - `from->address ... != AF_UNSPEC`: we have a UDP
+            //     addr for `from` (their probes reached us OR
+            //     they're a direct peer). Maps: `tunnels[from].
+            //     udp_addr.is_some()`.
+            //   - `to->minmtu`: PMTU has converged for `to`. The C
+            //     comment is silent on why; rationale: "to is
+            //     actively using UDP, so the reflexive addr is
+            //     useful to them". TCP-only nodes wouldn't use it.
+            //
+            // On match: `send_request("%s %s %s", request, addr,
+            // port)` — the ORIGINAL request line plus appended
+            // addr/port. We do the C-literal raw concat (cheaper
+            // than rebuilding `AnsKey`; identical wire shape per
+            // `key.rs:273` comment).
+            let appended = if msg.udp_addr.is_none() {
+                let from_udp = self.tunnels.get(&from_nid).and_then(|t| t.udp_addr);
+                let to_minmtu = self.tunnels.get(&to_nid).map_or(0, TunnelState::minmtu);
+                match from_udp {
+                    Some(from_addr) if to_minmtu > 0 => {
+                        log::debug!(target: "tincd::proto",
+                                    "Appending reflexive UDP address to \
+                                     ANS_KEY from {} to {}", msg.from, msg.to);
+                        let (a, p) = local_addr::format_addr_port(&from_addr);
+                        Some(format!("{body_str} {a} {p}"))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::proto",
                            "No nexthop connection toward {} for ANS_KEY relay",
@@ -594,8 +622,11 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Relaying ANS_KEY {} → {}", msg.from, msg.to);
             // C `:484`: `send_request(to->nexthop->connection,
-            // "%s", request)`. Forward verbatim.
-            return Ok(conn.send(format_args!("{body_str}")));
+            // "%s", request)`. Forward verbatim (or with append).
+            return Ok(match appended {
+                Some(a) => conn.send(format_args!("{a}")),
+                None => conn.send(format_args!("{body_str}")),
+            });
         }
 
         // C `:499-545`: compression-level capability check, then
@@ -673,14 +704,38 @@ impl Daemon {
             }
         };
 
-        // STUB(chunk-10-local): `:568-576` `if(validkey &&
-        // *address) update_node_udp(reflexive_addr)`. The relay-
-        // appended addr/port lets us learn our NAT-public address.
-
         // Dispatch. May contain `HandshakeDone` (→ set validkey,
         // log "successful") and/or `Wire` (next handshake step,
         // → ANS_KEY back).
         let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
+
+        // C `:568-576`: `if(from->status.validkey) { if(*address
+        // && *port) { ... update_node_udp(from, &sa); } }`.
+        // Two gates:
+        //   - `validkey`: handshake just completed (set INSIDE
+        //     `dispatch_tunnel_outputs` above on `HandshakeDone`).
+        //     Without it the addr is stale/untrusted (could be a
+        //     replay).
+        //   - `*address && *port`: relay actually appended one.
+        //
+        // `update_node_udp` for us is `tunnel.udp_addr = Some(addr)`
+        // (the `node_udp_tree` re-index is for legacy receive; we
+        // don't have that — see `:1035-1043` comment below).
+        if let Some((addr_s, port_s)) = &msg.udp_addr {
+            let validkey = self
+                .tunnels
+                .get(&from_nid)
+                .is_some_and(|t| t.status.validkey);
+            if validkey {
+                if let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str()) {
+                    log::debug!(target: "tincd::proto",
+                                "Using reflexive UDP address from {}: {addr}",
+                                msg.from);
+                    self.tunnels.entry(from_nid).or_default().udp_addr = Some(addr);
+                }
+            }
+        }
+
         // C `:576`: `send_mtu_info(myself, from, MTU)`. After
         // dispatch — the C order is `sptps_receive_data` then
         // `send_mtu_info`. The hint goes regardless of whether

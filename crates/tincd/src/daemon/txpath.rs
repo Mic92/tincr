@@ -393,8 +393,40 @@ impl Daemon {
             p.udp_ping_sent = now;
             p.ping_sent = true;
             nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
-            // STUB(chunk-10-local): `:1240-1245` `if(localdiscovery
-            // && !udp_confirmed)` send_locally probe.
+            // C `:1241-1245`: `if(localdiscovery && !udp_confirmed
+            // && n->prevedge)`. Three gates:
+            //   - `localdiscovery`: the config knob.
+            //   - `!udp_confirmed`: only useful while UDP is
+            //     unconfirmed. Once confirmed, the working address
+            //     (LAN or WAN) is `n->address`.
+            //   - `n->prevedge`: SSSP has run; node is reachable.
+            //
+            // On match: `send_locally = true; send_udp_probe_
+            // packet(n, MIN_PROBE_SIZE); send_locally = false`.
+            // The bit is a side-channel to `choose_udp_address`
+            // (4 layers down). No `?` early-return between set/
+            // clear (`send_udp_probe` returns `bool`).
+            if self.settings.local_discovery {
+                let confirmed = self
+                    .tunnels
+                    .get(&target)
+                    .is_some_and(|t| t.status.udp_confirmed);
+                let has_prevedge = self
+                    .last_routes
+                    .get(target.0 as usize)
+                    .and_then(Option::as_ref)
+                    .and_then(|r| r.prevedge)
+                    .is_some();
+                if !confirmed && has_prevedge {
+                    if let Some(t) = self.tunnels.get_mut(&target) {
+                        t.status.send_locally = true;
+                    }
+                    nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
+                    if let Some(t) = self.tunnels.get_mut(&target) {
+                        t.status.send_locally = false;
+                    }
+                }
+            }
         }
 
         nw
@@ -1208,23 +1240,91 @@ impl Daemon {
         }
     }
 
-    /// `choose_udp_address` (`net_packet.c:744-800`), abridged.
-    /// Prefer the confirmed address; fall back to the edge address
-    /// from `on_ack` (the meta-conn peer addr with port rewritten
-    /// to their UDP port).
-    pub(super) fn choose_udp_address(&self, to_nid: NodeId, to_name: &str) -> Option<SocketAddr> {
-        // C `:746-751`: `*sa = &n->address; if(udp_confirmed)
-        // return`. Our `udp_addr` is `n->address`.
+    /// `choose_udp_address` (`net_packet.c:744-808`).
+    ///
+    /// Three modes:
+    ///   - `send_locally` set → `choose_local` from `edge_addrs`
+    ///     positions 2/3 (LAN-side addresses).
+    ///   - `udp_confirmed` → return `n->address` (the reflexive).
+    ///   - 1-in-3 cycle (`static int x`): 2 of 3 calls explore an
+    ///     edge address; the 3rd sticks with the reflexive.
+    ///     Ensures eventual probing of both even when `n->address`
+    ///     is set but unconfirmed (NAT hairpin failure case).
+    ///
+    /// Returns `(addr, listener_index)`. `adapt_socket` is folded
+    /// in: dual-stack hosts have v4 AND v6 listeners; sending to a
+    /// v6 target from a v4 socket fails `EAFNOSUPPORT`.
+    ///
+    /// `&mut self` for the cycle counter (C function-static).
+    pub(super) fn choose_udp_address(
+        &mut self,
+        to_nid: NodeId,
+        to_name: &str,
+    ) -> Option<(SocketAddr, u8)> {
+        // Build listener_addrs once. ≤8 elements (`net.h` MAXSOCKETS).
+        let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
+
+        // ─── send_locally override (`:1033-1036`) ──────────────
+        // C `send_sptps_data` checks: `if(n->status.send_locally)
+        // choose_local_address(...)`. Folded in here.
+        let send_locally = self
+            .tunnels
+            .get(&to_nid)
+            .is_some_and(|t| t.status.send_locally);
+        if send_locally {
+            // Collect candidates from edges-of-n. Each edge's
+            // local address (positions 2,3 in edge_addrs).
+            // `parse_addr_port` returns None for `"unspec"` —
+            // `filter_map` skips those.
+            let candidates: Vec<SocketAddr> = self
+                .graph
+                .node_edges(to_nid)
+                .iter()
+                .filter_map(|eid| {
+                    let (_, _, la, lp) = self.edge_addrs.get(eid)?;
+                    local_addr::parse_addr_port(la.as_str(), lp.as_str())
+                })
+                .collect();
+            if let Some((addr, sock)) =
+                local_addr::choose_local(&candidates, &mut OsRng, &listener_addrs)
+            {
+                return Some((addr, sock));
+            }
+            // C falls through if no local address found.
+        }
+
+        // ─── :746-762: the reflexive address (n->address) ───────
+        // Prefer it if udp_confirmed; otherwise the 1-in-3 cycle.
         if let Some(t) = self.tunnels.get(&to_nid) {
             if let Some(addr) = t.udp_addr {
-                return Some(addr);
+                if t.status.udp_confirmed {
+                    let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                    return Some((addr, sock));
+                }
+                // C `:758-762`: `static int x; if(++x >= 3) { x = 0;
+                // return; }`. 1-of-3 calls return EARLY with
+                // n->address; the other 2 fall through to edge
+                // exploration.
+                self.choose_udp_x = self.choose_udp_x.wrapping_add(1);
+                if self.choose_udp_x >= 3 {
+                    self.choose_udp_x = 0;
+                    let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                    return Some((addr, sock));
+                }
+                // Fall through to edge exploration.
             }
         }
-        // C `:765-781`: pick a random edge's `reverse->address`.
-        // For chunk 7: just use `NodeState.edge_addr` (which IS
-        // the same thing for direct neighbors — the addr from the
-        // peer's ACK with port set to their UDP port).
-        self.nodes.get(to_name)?.edge_addr
+
+        // ─── :765-781: pick an edge's reverse->address ─────────
+        // For direct neighbors `NodeState.edge_addr` IS the same
+        // thing (the addr from the peer's ACK with port set to
+        // their UDP port). The C iterates `n->edge_tree` and
+        // prng-picks; for chunk 10 the direct-neighbor shortcut
+        // is the common case (transitives go via relay anyway —
+        // `via` recursion in `try_tx`).
+        let addr = self.nodes.get(to_name)?.edge_addr?;
+        let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+        Some((addr, sock))
     }
 
     /// io_set ReadWrite for ANY connection that has a nonempty
