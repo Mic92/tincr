@@ -24,8 +24,9 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
 use std::fmt;
+
+use crate::inthash::IntHashMap;
 
 use sha2::{Digest, Sha512};
 use tinc_graph::NodeId;
@@ -117,8 +118,14 @@ impl fmt::Debug for NodeId6 {
 /// the operator-visible breadcrumb the C lacks.
 #[derive(Default)]
 pub struct NodeId6Table {
-    by_id: HashMap<NodeId6, NodeId>,
-    by_node: HashMap<NodeId, NodeId6>,
+    // IntHashMap: NodeId6 is 48 bits of SHA-512 output (already
+    // uniform; no DoS-resistant hash needed) and NodeId is a dense
+    // u32 slab index. Per-packet UDP recv path hits `by_id` once
+    // (`handle_incoming_vpn_packet`), send path hits `by_node` twice
+    // (`send_sptps_data_relay` for src+dst id6). At 1.5 Mpps,
+    // SipHash-on-6-bytes was material; see `inthash.rs`.
+    by_id: IntHashMap<NodeId6, NodeId>,
+    by_node: IntHashMap<NodeId, NodeId6>,
 }
 
 impl NodeId6Table {

@@ -261,7 +261,8 @@ impl Daemon {
                     log::debug!(target: "tincd::proto",
                                 "Relaying SPTPS_PACKET {} → {} ({} bytes)",
                                 msg.from, msg.to, data.len());
-                    let mut nw = self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, &data);
+                    let mut nw =
+                        self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, Some(&data));
                     nw |= self.try_tx(to_nid, true);
                     return Ok(nw);
                 }

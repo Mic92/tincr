@@ -1119,7 +1119,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "Relaying SPTPS_PACKET {from_name} → {to_name} \
                              ({} bytes)", ct.len());
-                nw |= self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, ct);
+                nw |= self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, Some(ct));
             }
             nw |= self.try_tx(to_nid, true);
             return nw;

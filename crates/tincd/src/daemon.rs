@@ -16,6 +16,8 @@
 //! for accept/terminate. See lib.rs for the full mapping.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+
+use crate::inthash::IntHashMap;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -837,7 +839,7 @@ pub struct Daemon {
     /// `entry().or_default()` is the C `xzalloc` semantics: a node
     /// learned from `ADD_EDGE` has no tunnel until `send_req_key` /
     /// `req_key_ext_h` (`protocol_key.c:131,263`) starts one.
-    pub(crate) tunnels: HashMap<NodeId, TunnelState>,
+    pub(crate) tunnels: IntHashMap<NodeId, TunnelState>,
 
     /// `node_id_tree` (`node.c:60`). UDP fast-path lookup: every
     /// packet has `[dst_id6][src_id6]` prefix; receiver maps `src_
@@ -885,6 +887,17 @@ pub struct Daemon {
     /// call); kept as a struct so adding persistent z_stream state
     /// (PERF chunk-10) doesn't churn the wire-up sites.
     pub(crate) compressor: compress::Compressor,
+
+    /// Reused send-side scratch for the UDP data path. `seal_data_into`
+    /// writes `[0;12] ‖ SPTPS-datagram` here; `send_sptps_data_relay`
+    /// then overwrites the 12-byte prefix with `[dst_id6 ‖ src_id6]`
+    /// in-place and `sendto`s the whole thing. Cleared (not freed)
+    /// between packets — after the first packet at MTU, capacity is
+    /// `12 + MTU + 21` and stays there. Net: zero allocs on the
+    /// per-packet send path. C `vpn_packet_t` (`net.h:62-87`) does
+    /// the same with a stack arena; we can't VLA in Rust, so a
+    /// daemon-owned Vec is the closest equivalent.
+    pub(crate) tx_scratch: Vec<u8>,
 
     /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
     /// detector at `net.c:189-213`: if `now - this > 2 * udp_
@@ -1556,7 +1569,7 @@ impl Daemon {
             nodes: HashMap::new(),
             edge_addrs: HashMap::new(),
             choose_udp_x: 0,
-            tunnels: HashMap::new(),
+            tunnels: IntHashMap::default(),
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
@@ -1565,6 +1578,9 @@ impl Daemon {
             started_at: timers.now(),
             icmp_ratelimit: icmp::IcmpRateLimit::new(),
             compressor: compress::Compressor::new(),
+            tx_scratch: Vec::with_capacity(
+                12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
+            ),
             // C `net.c:43`: `static struct timeval last_periodic_
             // run_time` zero-init. We seed with now: the first
             // `on_ping_tick` (after `pingtimeout` seconds) sees

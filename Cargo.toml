@@ -18,6 +18,21 @@ edition = "2021"
 license = "GPL-2.0-or-later"
 rust-version = "1.75"
 
+# Thin LTO for cross-crate inlining on the data path. The hot chain
+# is `daemon::net::send_sptps_packet` (tincd) → `Sptps::seal_data_into`
+# (tinc-sptps) → `ChaPoly::seal_into` (tinc-crypto) → `apply_keystream`
+# (chacha20) → the AVX2 backend. With the default 16 codegen-units and
+# no LTO, each crate boundary is a `call`; the inliner can't see
+# across. Thin LTO collapses that chain. codegen-units=1 lets the
+# inliner see the WHOLE tincd crate at once (`send_sptps_packet` →
+# `send_sptps_data_relay` → four IntHashMap lookups, all inline-able
+# into one straight-line block once the relay decision tree's branches
+# are statically dead in the direct case). Full LTO would be marginally
+# better but doubles link time; thin is the 90/10.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 # Centralised version pins. The crypto crates here are load-bearing for wire
 # compatibility — bumping them is a protocol-review event, not a routine update.
 [workspace.dependencies]

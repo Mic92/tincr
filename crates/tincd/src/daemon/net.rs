@@ -243,7 +243,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "Relaying UDP packet from {from_name} to {to_name} \
                              ({} bytes)", ct.len());
-                let mut nw = self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, ct);
+                let mut nw = self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, Some(ct));
                 nw |= self.try_tx(to_nid, true);
                 if nw {
                     self.maybe_set_write_any();
@@ -344,6 +344,13 @@ impl Daemon {
         // have full `update_node_udp` (which also re-indexes
         // `node_udp_tree`); just stash + set the bit.
         if let Some(peer_addr) = peer {
+            // Resolve the listener index ONCE here, on the first
+            // confirmed packet, instead of per-send. `adapt_socket`
+            // scans listeners for a family match; the answer doesn't
+            // change while `udp_addr` doesn't change. ≤8 listeners
+            // (`net.h` MAXSOCKETS) so the borrow-clone is tiny.
+            let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
+            let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
             let tunnel = self.tunnels.entry(from_nid).or_default();
             if !tunnel.status.udp_confirmed {
                 log::debug!(target: "tincd::net",
@@ -351,6 +358,9 @@ impl Daemon {
                 tunnel.status.udp_confirmed = true;
             }
             tunnel.udp_addr = Some(peer_addr);
+            // Pre-convert to sockaddr_storage so sendto doesn't
+            // re-pack v4/v6 every packet (was 0.37% self-time).
+            tunnel.udp_addr_cached = Some((socket2::SockAddr::from(peer_addr), sock));
         }
 
         // Dispatch SPTPS outputs (`receive_sptps_record`, `net_
@@ -1295,20 +1305,28 @@ impl Daemon {
                        "validkey set but no SPTPS for {to_name}?");
             return false;
         };
-        let outs = match sptps.send_record(record_type, body) {
-            Ok(outs) => outs,
-            Err(e) => {
-                // `InvalidState` if `outcipher` is None. Shouldn't
-                // happen: `validkey` was checked above.
-                log::warn!(target: "tincd::net",
-                           "sptps_send_record for {to_name}: {e:?}");
-                return false;
-            }
-        };
-        // The output is exactly one `Wire`. Dispatch via the same
-        // bridge as the handshake outputs (it'll go UDP this time:
-        // record_type=0 < REC_HANDSHAKE).
-        self.dispatch_tunnel_outputs(to_nid, to_name, outs)
+
+        // ALWAYS encrypt into the daemon scratch with 12 bytes of
+        // headroom. The 12 bytes are the C `DEFAULT_PACKET_OFFSET`
+        // for `[dst_id6‖src_id6]`; what happens to the result depends
+        // on `send_sptps_data_relay`'s go-TCP/go-UDP decision below.
+        // Either way: zero per-packet allocs in SPTPS, zero in this
+        // function. Previous shape: `send_record` alloc'd `Vec<
+        // Output>` + the wire `Vec`, then `dispatch_tunnel_outputs`
+        // matched on the variant, then `send_sptps_data_relay`
+        // alloc'd ANOTHER Vec to prepend the 12-byte header. Three
+        // allocs + one body memmove; see `seal_data_into` doc.
+        if let Err(e) = sptps.seal_data_into(record_type, body, &mut self.tx_scratch, 12) {
+            // `InvalidState` if `outcipher` is None. Shouldn't
+            // happen: `validkey` was checked above. Also fires if
+            // SPTPS isn't datagram-framed — per-tunnel SPTPS always
+            // is (`Sptps::start` with `Framing::Datagram` in
+            // `protocol_key.rs`).
+            log::warn!(target: "tincd::net",
+                       "seal_data_into for {to_name}: {e:?}");
+            return false;
+        }
+        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, None)
     }
 
     /// `receive_sptps_record` (`net_packet.c:1056-1152`) +
@@ -1544,7 +1562,7 @@ impl Daemon {
     ) -> bool {
         // C `send_sptps_data_myself` (`net_packet.c:99-101`):
         // `send_sptps_data(to, myself, type, data, len)`.
-        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, ct)
+        self.send_sptps_data_relay(to_nid, to_name, self.myself, record_type, Some(ct))
     }
 
     /// `send_sptps_data` (`net_packet.c:965-1054`). The relay
@@ -1591,12 +1609,20 @@ impl Daemon {
         to_name: &str,
         from_nid: NodeId,
         record_type: u8,
-        ct: &[u8],
+        ct: Option<&[u8]>,
     ) -> bool {
+        // `ct` is `None` on the hot path: the SPTPS frame is at
+        // `self.tx_scratch[12..]`, written there by `seal_data_into`
+        // with 12 bytes of headroom for us to fill below. `Some(ct)`
+        // is the relay/handshake/probe path: we got bytes from
+        // somewhere else (UDP recv for relay forwarding, or the
+        // alloc-y `Vec<Output>` path for handshake records).
+        //
         // C `:966`: `origlen = len - SPTPS_DATAGRAM_OVERHEAD`.
         // The PLAINTEXT body length (the relay's MTU is measured
         // at that layer; the SPTPS overhead is constant).
-        let origlen = ct.len().saturating_sub(tinc_sptps::DATAGRAM_OVERHEAD);
+        let ct_len = ct.map_or_else(|| self.tx_scratch.len() - 12, <[u8]>::len);
+        let origlen = ct_len.saturating_sub(tinc_sptps::DATAGRAM_OVERHEAD);
 
         // ─── :967: relay = via or nexthop ────────────────────────
         // Read `last_routes[to]`. If `to` is unreachable (no
@@ -1675,6 +1701,16 @@ impl Daemon {
             // length-prefixed binary mechanism, `:975-986`) for
             // proto minor ≥7 nexthops; ANS_KEY/REQ_KEY (b64'd via
             // the text protocol) otherwise.
+
+            // TCP fallback: cold path. Materialize `ct` once from
+            // either the caller's slice or `tx_scratch[12..]`. The
+            // `match` (not `unwrap_or`) because `unwrap_or` is
+            // eager: `&self.tx_scratch[12..]` would slice-panic on
+            // an empty scratch even when `ct` is `Some`.
+            let ct = match ct {
+                Some(s) => s,
+                None => &self.tx_scratch[12..],
+            };
 
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::net",
@@ -1801,35 +1837,74 @@ impl Daemon {
         } else {
             self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL)
         };
-        let mut wire = Vec::with_capacity(12 + ct.len());
-        wire.extend_from_slice(dst_id.as_bytes());
-        wire.extend_from_slice(src_id.as_bytes());
-        wire.extend_from_slice(ct);
+        // Hot path: SPTPS bytes are at `tx_scratch[12..]` and we
+        // overwrite the 12-byte headroom in-place. Zero allocs,
+        // zero body copies. The C author's `net_packet.c:1027`
+        // pre-padding TODO; they `alloca + memcpy` instead.
+        //
+        // Relay/handshake path (`Some(ct)`): build into the same
+        // scratch. One body memmove (the `extend_from_slice`); the
+        // alloc is amortized to zero (scratch capacity persists).
+        // The relay path is colder (≤1 hop in a flat mesh) and the
+        // handshake path is once-per-tunnel.
+        if let Some(ct) = ct {
+            self.tx_scratch.clear();
+            self.tx_scratch.extend_from_slice(dst_id.as_bytes());
+            self.tx_scratch.extend_from_slice(src_id.as_bytes());
+            self.tx_scratch.extend_from_slice(ct);
+        } else {
+            self.tx_scratch[0..6].copy_from_slice(dst_id.as_bytes());
+            self.tx_scratch[6..12].copy_from_slice(src_id.as_bytes());
+        }
 
         // C `:1031-1040`: `choose_udp_address(relay, ...)`. NOT
         // `to`: we send to the RELAY, who forwards to `to`. The
         // `send_locally` override (`:1034-1036`) and the 1-in-3
         // cycle (`:758-762`) are folded into `choose_udp_address`.
-        let relay_name = self
-            .graph
-            .node(relay_nid)
-            .map_or("<gone>", |n| n.name.as_str())
-            .to_owned();
-        let Some((addr, sock)) = self.choose_udp_address(relay_nid, &relay_name) else {
-            log::debug!(target: "tincd::net",
-                        "No UDP address known for relay {relay_name}; dropping");
-            return false;
+        //
+        // Fast path: `udp_addr_cached` set when `udp_confirmed`
+        // flips (UDP recv path). Once confirmed, the answer is
+        // deterministic: `(tunnel.udp_addr, adapt_socket(...))`.
+        // The full `choose_udp_address` allocs a `Vec<SocketAddr>`
+        // of listener addrs and scans it — every packet. That was
+        // visible in the profile: `send_sptps_data_relay` 2.18%
+        // self-time, mostly in here.
+        let cached = self
+            .tunnels
+            .get(&relay_nid)
+            .and_then(|t| t.udp_addr_cached.clone());
+        // Cold-path storage when no cache hit. Declared here to
+        // outlive the `&SockAddr` borrow.
+        let cold_sockaddr;
+        let (sockaddr, sock) = if let Some((sa, sock)) = &cached {
+            (sa, *sock)
+        } else {
+            // Cold path: pre-confirmation discovery, send_locally
+            // override, edge exploration. `relay_name` is only
+            // needed by `choose_udp_address`'s `nodes.get(name)`
+            // edge-addr lookup and the debug log; alloc it lazily
+            // here, NOT per-packet. Previous code did `to_owned()`
+            // unconditionally — a String alloc per packet, never
+            // read once `udp_confirmed`.
+            let relay_name = self
+                .graph
+                .node(relay_nid)
+                .map_or("<gone>", |n| n.name.as_str())
+                .to_owned();
+            let Some((addr, sock)) = self.choose_udp_address(relay_nid, &relay_name) else {
+                log::debug!(target: "tincd::net",
+                            "No UDP address known for relay {relay_name}; dropping");
+                return false;
+            };
+            cold_sockaddr = socket2::SockAddr::from(addr);
+            (&cold_sockaddr, sock)
         };
 
         // C `:1044`: `sendto(listen_socket[sock].udp.fd, ...)`.
         // `adapt_socket` (done inside `choose_udp_address`) picked
         // the listener whose addr family matches `addr`.
-        log::debug!(target: "tincd::net",
-                    "Sending {}-byte UDP packet to {to_name} via {relay_name} ({addr})",
-                    wire.len());
-        let sockaddr = socket2::SockAddr::from(addr);
         if let Some(l) = self.listeners.get(usize::from(sock)) {
-            if let Err(e) = l.udp.send_to(&wire, &sockaddr) {
+            if let Err(e) = l.udp.send_to(&self.tx_scratch, sockaddr) {
                 if e.kind() == io::ErrorKind::WouldBlock {
                     // Drop. UDP is unreliable anyway.
                 } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
@@ -1846,11 +1921,22 @@ impl Daemon {
                         .get_mut(&relay_nid)
                         .and_then(|t| t.pmtu.as_mut())
                     {
+                        // `relay_name` only on the EMSGSIZE path
+                        // (rare — PMTU discovery edge). Format
+                        // lazily; the hot path never reaches here.
+                        let relay_name = self
+                            .graph
+                            .node(relay_nid)
+                            .map_or("<gone>", |n| n.name.as_str());
                         for a in p.on_emsgsize(at_len) {
-                            Self::log_pmtu_action(&relay_name, &a);
+                            Self::log_pmtu_action(relay_name, &a);
                         }
                     }
                 } else {
+                    let relay_name = self
+                        .graph
+                        .node(relay_nid)
+                        .map_or("<gone>", |n| n.name.as_str());
                     log::warn!(target: "tincd::net",
                                "Error sending UDP SPTPS packet to \
                                 {relay_name}: {e}");

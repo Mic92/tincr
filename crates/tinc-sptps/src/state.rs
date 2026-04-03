@@ -455,6 +455,69 @@ impl Sptps {
         Ok(out)
     }
 
+    /// Hot-path datagram send. Writes one encrypted SPTPS datagram directly
+    /// into `out`, leaving `headroom` zero bytes at the front for the caller
+    /// to fill afterwards.
+    ///
+    /// On return, `out` is `[0u8; headroom] ‖ seqno:4 ‖ enc(type ‖ body) ‖
+    /// tag:16`. Caller overwrites `out[..headroom]` with whatever wraps the
+    /// SPTPS frame on the wire (the daemon writes `[dst_id6 ‖ src_id6]`
+    /// there, 12 bytes, then `sendto` the whole buffer).
+    ///
+    /// `out` is **cleared** first: pass a daemon-owned `Vec` and reuse it
+    /// across packets. After the first call it has grown to `headroom +
+    /// body.len() + 21`; subsequent same-size calls do zero heap ops.
+    ///
+    /// This is the C author's `net_packet.c:1027` pre-padding TODO. They
+    /// never did it because their `alloca` made the prepend-memcpy cheap
+    /// enough; our heap-Vec equivalent showed up at 1.6% alloc + 1.5%
+    /// memmove in the profile.
+    ///
+    /// vs [`send_record`]: bypasses the `Vec<Output>` push/match (one alloc,
+    /// one move), the wire `Vec` alloc (one alloc), and the daemon-side
+    /// `Vec::with_capacity(12 + ct.len())` + `extend` (one alloc, one body
+    /// copy). Three allocs + one ~1500-byte memmove per packet → zero.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidState` if not [`Framing::Datagram`], if called before
+    /// [`Output::HandshakeDone`], or if `record_type >= 128`. Same gate as
+    /// [`send_record`] plus a datagram-only check (Stream framing has the
+    /// 2-byte length prefix; that path stays on the alloc-y `send_record`
+    /// since it's the cold meta-conn TCP fallback, not the UDP data path).
+    pub fn seal_data_into(
+        &mut self,
+        record_type: u8,
+        body: &[u8],
+        out: &mut Vec<u8>,
+        headroom: usize,
+    ) -> Result<(), SptpsError> {
+        // Same gate as send_record. Datagram-only: Stream is the cold
+        // meta-conn path (PACKET 17 fallback), not worth a fast-path.
+        if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
+            return Err(SptpsError::InvalidState);
+        }
+        let Some(cipher) = self.outcipher.as_ref() else {
+            return Err(SptpsError::InvalidState);
+        };
+
+        let seqno = self.outseqno;
+        self.outseqno = self.outseqno.wrapping_add(1);
+
+        // Clear, don't dealloc. Reused Vec keeps its capacity; after
+        // the first packet this resize is a no-op (len already 0 from
+        // the previous clear, capacity already sufficient).
+        out.clear();
+        out.resize(headroom, 0);
+        out.extend_from_slice(&seqno.to_be_bytes());
+
+        // type+body, encrypted in-place, tag appended. Same span the
+        // C hands to `chacha_poly1305_encrypt`: `buffer + 4` for
+        // `1 + body.len()` bytes (`sptps.c:125`).
+        cipher.seal_into(u64::from(seqno), record_type, body, out, headroom + 4);
+        Ok(())
+    }
+
     /// `send_kex`: emit `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
     ///
     /// Consumes 64 bytes from `rng` (nonce, then seed). The C calls

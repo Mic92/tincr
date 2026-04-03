@@ -84,6 +84,27 @@ pub struct TunnelState {
     /// port)`).
     pub udp_addr: Option<SocketAddr>,
 
+    /// `(sockaddr, listener_index)` cached after `udp_confirmed`.
+    /// `choose_udp_address`'s confirmed branch is `(tunnel.udp_addr,
+    /// adapt_socket(udp_addr, listeners))` — deterministic given
+    /// `udp_addr`. Recomputing that per-packet at line rate (1.5
+    /// Mpps) was 2% self-time: a `Vec<SocketAddr>` collect of
+    /// listener addrs, then `adapt_socket`'s family-match scan,
+    /// every packet, for an answer that doesn't change. Set when
+    /// `udp_confirmed` flips true (UDP recv path); cleared in
+    /// `reset_unreachable` (where `udp_addr` is also cleared). The
+    /// fast send path reads this; misses fall through to the full
+    /// `choose_udp_address` (1-in-3 cycle, edge exploration).
+    ///
+    /// Stores `socket2::SockAddr` (the kernel `sockaddr_storage`
+    /// shape), not std's `SocketAddr` enum: `sendto` wants the
+    /// former, and `SockAddr::from(SocketAddr)` per packet was a
+    /// measurable 0.37% self-time (re-packing v4/v6 every send).
+    /// `SockAddr` is 128 bytes (`sockaddr_storage`) but `Copy`-
+    /// equivalent (POD); the storage cost is fine for the per-
+    /// tunnel struct.
+    pub udp_addr_cached: Option<(socket2::SockAddr, u8)>,
+
     /// `n->status` (`node.h:59`). The chunk-7-relevant bits,
     /// unpacked. The C bitfield is a memory squeeze for splay
     /// nodes; we have a `HashMap` and don't care.
@@ -199,6 +220,7 @@ impl TunnelState {
         self.udp_reply_sent = None;
         // C `:296`: `update_node_udp(n, NULL)`.
         self.udp_addr = None;
+        self.udp_addr_cached = None;
         // C `:297`: `memset(&n->status, 0, sizeof(n->status))`.
         // The per-field `validkey = false` (`:256`), `waitingfor
         // key = false` (`:260`), `udp_confirmed = false` (`:265`)
@@ -421,6 +443,9 @@ mod tests {
             // the `Option` machinery, which is what `reset` does.
             sptps: None,
             udp_addr: Some("10.0.0.1:655".parse().unwrap()),
+            // The cache only feeds `sendto`; tests don't exercise
+            // the UDP send path on this struct.
+            udp_addr_cached: None,
             status: TunnelStatus {
                 validkey: true,
                 waitingforkey: true,
