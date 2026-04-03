@@ -276,6 +276,31 @@ RFC 1929 (SOCKS5 username/password auth) length fields are single bytes; valid r
 
 **Our port** (`socks.rs:163-167`): bound-check, return `BuildError::CredTooLong` at request build time. STRICTER than C. The error surfaces at config load, not at connect time.
 
+### protocol.c:148-161 — HTTP proxy header lines terminate the connection
+
+**Found by**: inspection while scoping `chunk-12-http-proxy` (`af26db41`). Dormant.
+
+```c
+// protocol.c:148-161
+if(c->outgoing && proxytype == PROXY_HTTP && c->allow_request == ID) {
+    if(!request[0] || request[0] == '\r')
+        return true;                                // blank line: skip
+    if(!strncasecmp(request, "HTTP/1.1 ", 9)) {
+        if(!strncmp(request + 9, "200", 3))
+            return true;                            // 200: granted
+        else { logger(...); return false; }         // non-200: rejected
+    }
+    // FALL THROUGH on anything else
+}
+int reqno = atoi(request);                          // header line → 0 → "Bogus data"
+```
+
+The intercept handles exactly two cases: status line and blank line. Anything else — `Via: 1.1 proxy`, `Content-Type: text/html`, `Connection: close` — falls through to `atoi("Via:") = 0`, then `*request='V' != '0'`, then "Bogus data received from" → `terminate_connection`. RFC 7231 §4.3.6 explicitly permits headers in 2xx CONNECT responses; Squid sends `Via:`, nginx sends `Content-Type:`.
+
+**Why nobody noticed**: `test/integration/proxy.py:155` sends exactly `b"HTTP/1.1 200 OK\r\n\r\n"` (status + immediate blank, zero headers). The minimal form is the only form ever tested.
+
+**Our port** (`metaconn.rs`): mirror the C exactly, mark `TODO(chunk-12-http-proxy-lenient)` for skip-any-line-until-blank. The integration test uses the same headerless server. STRICTER on a different axis: we bracket IPv6 in the CONNECT authority (RFC 7230 §2.7.1); the C `getnameinfo(NUMERIC)` doesn't, producing ambiguous `CONNECT ::1:655 HTTP/1.1` — likely never tested with v6 proxy targets.
+
 ---
 
 ## Rust-is-WRONG (found by cross-impl testing against C)
@@ -309,7 +334,19 @@ Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
 
 **Fix**: parse the length, swallow the next record (`STUB(chunk-12-tcp-fallback)` for actually routing it — matters for `TCPOnly`, not for ping-on-loopback). Connection survives long enough for UDP to confirm; C stops sending `PACKET`.
 
-**Latent sibling**: `Request::SptpsPacket` (type 21, the BINARY tcp fallback at `net_packet.c:975-986`) still falls through the same `metaconn.rs:892` `_` arm and terminates. C sends it for proto-minor ≥ 7 (we claim 17.7). The throughput gate dodges it by waiting for `minmtu ≥ 1500` (UDP wins, binary fallback never fires); `crossimpl.rs` doesn't set `TCPOnly`. The leaf prep landed `aa2f72c2` (`tcp_tunnel.rs`); serial wiring will add `c->sptpslen` + the dispatch arm.
+### conn.rs::feed — `sptpslen` set too late (the architectural trap)
+
+**Latent sibling** of the PACKET-17 entry above. `Request::SptpsPacket` (type 21, the binary TCP fallback at `net_packet.c:975-986`) was found-dormant during `aa2f72c2` scoping and **fixed in `300a8e96`**.
+
+The failure mode wasn't the same `_` arm — it was a layer deeper. The C dispatch is INSIDE the `sptps_receive_data` callback chain (`receive_record` → `receive_meta_sptps` → `receive_request` → `sptps_tcppacket_h:148` sets `c->sptpslen`). By the time `sptps_receive_data` returns, `sptpslen` is set. The outer do-while at `meta.c:203-217` checks it BEFORE the next `sptps_receive_data` call. The blob is RAW on the TCP stream, NOT inside an SPTPS record (it's an already-encrypted SPTPS UDP wireframe; double-encrypting would be wasteful).
+
+Our `feed_sptps` collected records, returned, daemon dispatched AFTER. `sptpslen` was set TOO LATE. Same `recv()` chunk has `[SPTPS-framed "21 LEN" | raw blob bytes]` → `feed_sptps` parses the blob bytes as SPTPS framing → `DecryptFailed`.
+
+**Why nothing caught it**: SPTPS_PACKET 21 only fires when `n->connection == NULL` — relay topology. `net_packet.c:725 if(n->connection && origpkt->len > n->minmtu)` short-circuits direct neighbors to PACKET 17 BEFORE reaching `:975`. With `TCPOnly = yes`, `try_tx_sptps:1477` returns early so `minmtu` stays 0 → every packet goes PACKET 17. Our 2-node `crossimpl.rs` never reached the binary path. The throughput gate dodged it by waiting for `minmtu ≥ 1500`. **The orchestrator's prompt suggested a 2-node `TCPOnly` regression test — the agent traced `:725` and corrected the prompt.** That test wouldn't have failed.
+
+**Fix**: `feed()` inlines the do-while; peeks for `"21 "` prefix between `receive()` calls. After each `Ok((consumed, outs))`, check `Output::Record { record_type: 0, bytes }` for `record_body(bytes).starts_with(b"21 ")` → `SptpsPacket::parse` → `self.sptpslen = pkt.len` → `continue 'outer`. One request-ID of meta-layer awareness in `feed()`; `meta.c` has the same coupling.
+
+The unit test (`feed_sptpslen_then_record`) crafts `[SPTPS-framed "21 11\n" | \x00\x09junkjunk! | SPTPS-framed "8\n"]` as one chunk. The blob `\x00\x09junkjunk!` LOOKS like a valid SPTPS record header (length=9). Without the peek, `receive()` tries to chacha-poly1305-decrypt `junkjunk!` → `DecryptFailed` → Dead. Asserts `[Blob(11), Record("8\n")]` — the "21 11" record is consumed, never in the output. Mutation-tested: `sed s/"21 "/"99 "/` → confirmed Dead with explicit panic message.
 
 ### daemon/metaconn.rs — edge-triggered meta-conn read deadlock under load
 
@@ -330,3 +367,21 @@ Why ping (`crossimpl::rust_dials_c`, `netns::real_tun_ping`) passed: 84-byte ICM
 Why Rust↔C measured 12.9 Mbps not zero: the C `receive_meta` is also one-recv-per-callback, but **level-triggered** — the C drains everything alice sends. The 12.9 was the b64-over-TCP-over-SPTPS-stream throughput ceiling (encrypt twice: once for the per-tunnel SPTPS, once for the meta-conn SPTPS).
 
 **Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev (the residual gap is `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv`).
+
+---
+
+## Test-harness bugs (not C, not Rust — the rig)
+
+### TAP devices race REQ_KEY via spontaneous L2 traffic
+
+**Found by**: `chunk-12-switch` agent (`2bbd51b0`), via the test failing not via inspection.
+
+TAP devices emit IPv6 router solicits the moment `ip link set up` runs, even with no address assigned. (Multicast listener reports too, depending on sysctls.) When two daemons' TAPs come up simultaneously — which they do in `NetNs::setup` — both kernels emit at roughly the same time. Both daemons see traffic on their TAP, both hit `route_packet` → `try_tx` → REQ_KEY. The per-tunnel SPTPS handshake doesn't tolerate simultaneous initiator-starts; one side's `Sptps::start` resets the other's in-flight state. Restart loop.
+
+TUN doesn't have this problem: no L2 layer means no router solicits, no MLD reports, no spontaneous frames. The kernel stays quiet until something explicitly writes IP to the device.
+
+The C test suite never hit this because `test/integration/` runs serial; in serial there's enough wall-clock skew between the two `ip link set up` calls for one side's REQ_KEY to win the race naturally. Our nextest runs parallel by default, which doesn't directly cause the issue (each test is its own bwrap netns) but the close-together timing inside a single test does.
+
+**Fix** (test-only): three-phase sequencing in `run_crossimpl_switch`. Phase 1: meta handshake completes with TAP devices DOWN (`NetNs::setup` skips `link set up` for `DevMode::Tap`). Phase 2: `place_devices` brings them up. Phase 3: a directional kick-ping (`ping -c 1 -W 1 10.43.0.2`, expected to fail) triggers alice's kernel to ARP → alice initiates REQ_KEY first. Then poll for `validkey`, then the real ping.
+
+The daemon code is unchanged — it correctly handles whatever the kernel sends. The bug is in test sequencing assuming TAP devices are inert until written to.
