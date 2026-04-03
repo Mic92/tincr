@@ -133,14 +133,41 @@ impl Daemon {
     /// on the send side, `:1741` on the receive side). Relay path
     /// (`dst != nullid && to != myself`) is wired (chunk-9b).
     ///
-    /// Loop drains ALL pending datagrams (edge-triggered epoll).
+    /// **The drain loop is bounded.** Same shape as `on_device_read`
+    /// (bug audit `deef1268`, sibling of EPOLLET #3): under sustained
+    /// UDP ingress (we are the iperf3 receiver), the kernel UDP
+    /// socket buffer refills as fast as we drain. The TUN write-back
+    /// inside `route_packet` runs inline so traffic flows; but
+    /// meta-conn flush, REQ_KEY restarts, and timers starve. At the
+    /// cap, `rearm()` forces an `EPOLL_CTL_MOD` so the next turn()
+    /// fires immediately — after the rest of the event loop has had
+    /// a turn. C `recvmmsg(..., MAX_MSG=64, ...)` is one batch per
+    /// callback (level-triggered); we match that batch size.
     /// STUB(chunk-11-perf): `recvmmsg` batching.
     pub(super) fn on_udp_recv(&mut self, i: u8) {
+        /// C `net_packet.c:1845` `MAX_MSG`. Packets per turn before
+        /// rearming. Tune via the throughput gate.
+        const UDP_DRAIN_CAP: u32 = 64;
+
         // C `MAXSIZE` is `MTU + 4 + cipher overhead`. We use a
         // generous fixed buf; oversize packets truncate (MSG_TRUNC)
         // and we'd reject them anyway (the SPTPS decrypt fails).
         let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 2048];
+        let mut drained = 0u32;
         loop {
+            if drained >= UDP_DRAIN_CAP {
+                // Hit the cap with the fd still readable. Rearm so
+                // the next turn() fires immediately — after outbuf
+                // flush and timers have had their turn.
+                if let Some(&io_id) = self.listener_udp_io.get(usize::from(i)) {
+                    if let Err(e) = self.ev.rearm(io_id) {
+                        log::error!(target: "tincd::net",
+                                    "UDP fd rearm failed: {e}");
+                    }
+                }
+                break;
+            }
+            drained += 1;
             // socket2 `recv_from` into `[MaybeUninit<u8>]`. Returns
             // `(n, SockAddr)`. `as_socket()` for the SocketAddr.
             let (n, sockaddr) = match self.listeners[usize::from(i)].udp.recv_from(&mut buf) {

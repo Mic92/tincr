@@ -705,6 +705,13 @@ pub struct Daemon {
     /// socket_t[8]` zero-init; we just push.
     pub(crate) listeners: Vec<Listener>,
 
+    /// `IoId` for each listener's UDP socket, parallel to
+    /// `listeners`. Stored so `on_udp_recv` can `rearm()` after
+    /// hitting its drain-loop cap (sibling of `device_io`; bug
+    /// audit `deef1268`). The TCP listener fds don't need this:
+    /// `on_tcp_accept` does one accept per edge.
+    pub(crate) listener_udp_io: Vec<IoId>,
+
     /// `check_tarpit` statics + `tarpit()` ring buffer. Seven C
     /// statics packed into one struct. Mutated on every TCP accept.
     pub(crate) tarpit: Tarpit,
@@ -1441,6 +1448,7 @@ impl Daemon {
         // Hard error. The daemon can't function without at least one
         // listener (peers can't connect; we can't receive UDP).
         let listeners = open_listeners(settings.port, settings.addressfamily);
+        let mut listener_udp_io = Vec::with_capacity(listeners.len());
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
         // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
         // atoi(myport) == 0`; we always read back — simpler, same
@@ -1463,8 +1471,10 @@ impl Daemon {
             let i = i as u8;
             ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
                 .map_err(SetupError::Io)?;
-            ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
+            let udp_io = ev
+                .add(udp_fd, Io::Read, IoWhat::Udp(i))
                 .map_err(SetupError::Io)?;
+            listener_udp_io.push(udp_io);
         }
 
         // ─── init_control (net_setup.c:1263, control.c:148-231)
@@ -1551,6 +1561,7 @@ impl Daemon {
             device,
             control,
             listeners,
+            listener_udp_io,
             // Tarpit::new wants a now seed (avoids the C's `static
             // time_t = 0` first-tick bug). Use the cached now.
             tarpit: Tarpit::new(timers.now()),
