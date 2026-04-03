@@ -152,18 +152,25 @@ pub enum LearnAction {
 ///
 /// `(route_result, learn_action)`. Daemon dispatches both.
 ///
+/// `resolve`: maps the looked-up owner name to the caller's `T`.
+/// `None` = treat as not-found (→ `Broadcast`). Daemon passes a
+/// `&str -> Option<NodeId>` that hits `node_ids`; `mac_table` is
+/// gossip-populated so the owner is always in `node_ids`, but the
+/// fallback to `Broadcast` is the safe default for stale entries.
+///
 /// # Panics
 ///
 /// Never. The `try_into` calls are length-checked above; clippy
 /// wants the doc note anyway.
 #[must_use]
-pub fn route_mac<'a, S: std::hash::BuildHasher>(
+pub fn route_mac<T, S: std::hash::BuildHasher>(
     frame: &[u8],
     from_myself: bool,
     source: &str,
     myself: &str,
-    mac_table: &'a HashMap<Mac, String, S>,
-) -> (RouteResult<'a>, LearnAction) {
+    mac_table: &HashMap<Mac, String, S>,
+    resolve: impl FnOnce(&str) -> Option<T>,
+) -> (RouteResult<T>, LearnAction) {
     // `route.c:1132` `checklength(ether_size)` — the C does this
     // at the dispatch level, not inside `route_mac`. We check
     // anyway; `route_mac` is `pub` and the daemon may call it
@@ -220,8 +227,6 @@ pub fn route_mac<'a, S: std::hash::BuildHasher>(
         // ...). The C makes no special case; neither do we.
         return (RouteResult::Broadcast, learn);
     };
-    let owner = owner.as_str();
-
     // `:1047-1050`: `if(subnet->owner == source) { logger(...
     // "Packet looping back to %s"); return; }`. Loop detection:
     // a peer sent us a frame whose dest-MAC routes BACK to that
@@ -233,7 +238,7 @@ pub fn route_mac<'a, S: std::hash::BuildHasher>(
     // `route_ipv4` defers this check to the daemon. We don't:
     // the lookup is one HashMap probe and we have everything we
     // need. Different layering trade-off, same effect.
-    if owner == source {
+    if owner.as_str() == source {
         return (
             RouteResult::Unsupported {
                 reason: "MAC routing loop (owner == source)",
@@ -281,8 +286,14 @@ pub fn route_mac<'a, S: std::hash::BuildHasher>(
 
     // `:1104`: `send_packet(subnet->owner, packet)`. Same collapse
     // as `route_ipv4` — `owner == myself` is `Forward{to:myself}`
-    // and the daemon dispatches to TAP write.
-    (RouteResult::Forward { to: owner }, learn)
+    // and the daemon dispatches to TAP write. `resolve` maps the
+    // owner name to the caller's `T` (NodeId in the daemon). If
+    // `None` (owner not in `node_ids` — stale gossip entry), fall
+    // through to Broadcast: a switch floods unknown destinations.
+    match resolve(owner) {
+        Some(to) => (RouteResult::Forward { to }, learn),
+        None => (RouteResult::Broadcast, learn),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -305,6 +316,14 @@ mod tests {
         f
     }
 
+    /// Test resolver: `T = String`, identity map. The daemon's
+    /// `node_ids` lookup never fails for `mac_table` entries (gossip
+    /// only adds known nodes); model that as always-`Some`.
+    #[allow(clippy::unnecessary_wraps)] // signature must match `resolve`
+    fn id(n: &str) -> Option<String> {
+        Some(n.to_owned())
+    }
+
     /// Three-node table: alice owns `aa:...`, bob owns `bb:...`,
     /// charlie owns `cc:...`. Mirrors the IP-layer test fixtures.
     fn table() -> HashMap<Mac, String> {
@@ -322,9 +341,9 @@ mod tests {
         let t = table();
         let f = frame([0xbb; 6], [0xaa; 6]);
 
-        let (r, learn) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, learn) = route_mac(&f, false, "alice", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
         assert_eq!(learn, LearnAction::NotOurs);
     }
 
@@ -335,7 +354,7 @@ mod tests {
         let t = table();
         let f = frame([0xdd; 6], [0xaa; 6]);
 
-        let (r, learn) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, learn) = route_mac(&f, false, "alice", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
         assert_eq!(learn, LearnAction::NotOurs);
@@ -350,7 +369,7 @@ mod tests {
         // src `ee:...` is NOT in the table.
         let f = frame([0xdd; 6], [0xee; 6]);
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
         assert_eq!(learn, LearnAction::New([0xee; 6]));
@@ -365,9 +384,9 @@ mod tests {
         // src `aa:...` IS in the table (owned by alice).
         let f = frame([0xbb; 6], [0xaa; 6]);
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
         assert_eq!(learn, LearnAction::Refresh([0xaa; 6]));
     }
 
@@ -380,9 +399,9 @@ mod tests {
         // src `ee:...` is unknown — would be `New` if from_myself.
         let f = frame([0xbb; 6], [0xee; 6]);
 
-        let (r, learn) = route_mac(&f, false, "charlie", "myself", &t);
+        let (r, learn) = route_mac(&f, false, "charlie", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
         assert_eq!(learn, LearnAction::NotOurs);
     }
 
@@ -394,7 +413,7 @@ mod tests {
         let t = table();
         let f = vec![0u8; 13];
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
         assert_eq!(
             r,
@@ -416,9 +435,9 @@ mod tests {
         let f = frame([0xbb; 6], [0xaa; 6]);
         assert_eq!(f.len(), ETH_HDR_LEN);
 
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
     }
 
     /// `route.c:1047-1050`: `subnet->owner == source` → loop.
@@ -431,7 +450,7 @@ mod tests {
         // Dest `bb:...` is owned by bob; bob sent this frame.
         let f = frame([0xbb; 6], [0xee; 6]);
 
-        let (r, learn) = route_mac(&f, false, "bob", "myself", &t);
+        let (r, learn) = route_mac(&f, false, "bob", "myself", &t, id);
 
         assert_eq!(
             r,
@@ -450,7 +469,7 @@ mod tests {
         let t = table();
         let f = frame([0xff; 6], [0xaa; 6]);
 
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
     }
@@ -463,7 +482,7 @@ mod tests {
         let t = table();
         let f = frame([0x33, 0x33, 0x00, 0x00, 0x00, 0x01], [0xaa; 6]);
 
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
     }
@@ -475,7 +494,7 @@ mod tests {
         let t = table();
         let f = frame([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01], [0xaa; 6]);
 
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t);
+        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
     }
@@ -491,9 +510,14 @@ mod tests {
 
         let f = frame([0xaa; 6], [0xbb; 6]);
 
-        let (r, _) = route_mac(&f, false, "bob", "myself", &t);
+        let (r, _) = route_mac(&f, false, "bob", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "myself" });
+        assert_eq!(
+            r,
+            RouteResult::Forward {
+                to: "myself".into()
+            }
+        );
     }
 
     /// Learn + route are independent: from_myself with a NEW
@@ -505,9 +529,14 @@ mod tests {
         // src `ee:...` is new; dst `cc:...` is charlie's.
         let f = frame([0xcc; 6], [0xee; 6]);
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
-        assert_eq!(r, RouteResult::Forward { to: "charlie" });
+        assert_eq!(
+            r,
+            RouteResult::Forward {
+                to: "charlie".into()
+            }
+        );
         assert_eq!(learn, LearnAction::New([0xee; 6]));
     }
 
@@ -534,10 +563,15 @@ mod tests {
         t.insert(dst, "destnode".into());
         // src is NOT in the table.
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
         // Dst lookup hit:
-        assert_eq!(r, RouteResult::Forward { to: "destnode" });
+        assert_eq!(
+            r,
+            RouteResult::Forward {
+                to: "destnode".into()
+            }
+        );
         // Src was unknown → New, with the exact src bytes:
         assert_eq!(learn, LearnAction::New(src));
     }
@@ -550,7 +584,7 @@ mod tests {
         let t = HashMap::new();
         let f = frame([0xbb; 6], [0xaa; 6]);
 
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t);
+        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
 
         assert_eq!(r, RouteResult::Broadcast);
         // And we learn our own src:

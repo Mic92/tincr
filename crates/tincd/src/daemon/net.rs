@@ -595,7 +595,7 @@ impl Daemon {
                 // Hub mode = always broadcast. No learning, no
                 // lookup. The decrement_ttl gate is inside
                 // `dispatch_route_result`'s Broadcast arm.
-                return self.dispatch_route_result(&RouteResult::Broadcast, data, from);
+                return self.dispatch_route_result(RouteResult::Broadcast, data, from);
             }
             RoutingMode::Router => {
                 // Fall through to the IP-layer dispatch below.
@@ -614,36 +614,25 @@ impl Daemon {
             return self.handle_arp(data);
         }
 
-        // The reachability oracle for `route()`. C `route.c:655`
-        // reads `subnet->owner->status.reachable` directly (it's
-        // all one big graph of pointers). We close over `node_ids`
-        // + `graph` and look it up.
+        // The resolver for `route()`. C `route.c:655` reads
+        // `subnet->owner->status.reachable` directly (it's all one
+        // big graph of pointers). We close over `node_ids` + `graph`
+        // and resolve name → NodeId, gating on reachability. `None`
+        // = unreachable; `Some(nid)` = forward here. `myself` is
+        // always in `node_ids` and always `reachable` in the graph,
+        // so the C `:655` "only check reachable for REMOTE owners"
+        // distinction falls out without an explicit string compare.
         //
-        // Materialize the result with `'static`/local lifetime: the
-        // `RouteResult<'a>` lifetime ties back to `self.subnets`,
-        // and `dispatch_route_result` is `&mut self` (conflict).
-        // The Forward arm clones `to` anyway; we just hoist that.
-        // Exhaustively rebuild every arm so the output's `'a` is
-        // tied to a local, not `self`.
-        let owned_to;
-        let result: RouteResult<'_> = {
-            let node_ids = &self.node_ids;
-            let graph = &self.graph;
-            let r = route(data, &self.subnets, &self.name, |name| {
-                node_ids
-                    .get(name)
-                    .and_then(|&nid| graph.node(nid))
-                    .is_some_and(|n| n.reachable)
-            });
-            owned_to = if let RouteResult::Forward { to } = r {
-                Some(to.to_owned())
-            } else {
-                None
-            };
-            detach_route_result(&r, owned_to.as_deref())
-        };
+        // `RouteResult<NodeId>` is `Copy` — no borrow into
+        // `self.subnets`, no detach ceremony.
+        let node_ids = &self.node_ids;
+        let graph = &self.graph;
+        let result = route(data, &self.subnets, |name| {
+            let nid = *node_ids.get(name)?;
+            graph.node(nid).filter(|n| n.reachable).map(|_| nid)
+        });
 
-        self.dispatch_route_result(&result, data, from)
+        self.dispatch_route_result(result, data, from)
     }
 
     /// `route_mac` wrapper. The Switch-mode dispatch arm. Calls the
@@ -666,20 +655,20 @@ impl Daemon {
                 .map_or_else(|| "<unknown>".to_owned(), |n| n.name.clone()),
         };
 
-        // Materialize the result with local lifetime (see
-        // `route_packet` for the same hoist — `RouteResult<'a>`
-        // borrows `self.mac_table` here).
-        let owned_to;
-        let (result, learn) = {
-            let (r, l) =
-                route_mac::route_mac(data, from_myself, &source_name, &self.name, &self.mac_table);
-            owned_to = if let RouteResult::Forward { to } = r {
-                Some(to.to_owned())
-            } else {
-                None
-            };
-            (detach_route_result(&r, owned_to.as_deref()), l)
-        };
+        // Resolver: name → NodeId. `mac_table` is gossip-populated
+        // so the owner is always in `node_ids`; `route_mac` falls
+        // through to `Broadcast` for stale entries (`None`).
+        // `RouteResult<NodeId>` is `Copy` — no borrow into
+        // `self.mac_table`.
+        let node_ids = &self.node_ids;
+        let (result, learn) = route_mac::route_mac(
+            data,
+            from_myself,
+            &source_name,
+            &self.name,
+            &self.mac_table,
+            |name| node_ids.get(name).copied(),
+        );
 
         // ─── LearnAction first (C `route.c:1031-1035` is BEFORE the
         // routing decision in source order, but they're independent).
@@ -709,7 +698,7 @@ impl Daemon {
         }
 
         // ─── RouteResult dispatch. Reuse the same arms as Router.
-        nw |= self.dispatch_route_result(&result, data, from);
+        nw |= self.dispatch_route_result(result, data, from);
         nw
     }
 
@@ -895,17 +884,19 @@ impl Daemon {
     /// C: `route_ipv4`/`route_ipv6`/`route_mac` all call
     /// `send_packet`/`route_broadcast`/etc directly. We funnel
     /// through `RouteResult` then dispatch here.
-    #[allow(clippy::too_many_lines)] // C `route()` + `send_packet`
+    #[allow(clippy::too_many_lines)]
+    // C `route()` + `send_packet`
     // are ~200 LOC together. The match arms are the dispatch table;
     // splitting them scatters the C line refs.
+    #[allow(clippy::needless_pass_by_value)] // RouteResult<NodeId>: Copy
     fn dispatch_route_result(
         &mut self,
-        result: &RouteResult<'_>,
+        result: RouteResult<NodeId>,
         data: &mut [u8],
         from: Option<NodeId>,
     ) -> bool {
-        match *result {
-            RouteResult::Forward { to } if to == self.name => {
+        match result {
+            RouteResult::Forward { to } if to == self.myself => {
                 // C `send_packet:1556-1568`: `if(n == myself) {
                 // devops.write(packet); return; }`. The packet is
                 // for US (it came in over the wire and `route()`
@@ -926,15 +917,15 @@ impl Daemon {
                 }
                 false
             }
-            RouteResult::Forward { to } => {
+            RouteResult::Forward { to: to_nid } => {
                 // C `send_packet:1571-1590`. To a remote node.
-                let to = to.to_owned();
-                let Some(&to_nid) = self.node_ids.get(&to) else {
-                    // (see below for the comment block)
-                    log::warn!(target: "tincd::net",
-                               "route() chose unknown node {to}");
-                    return false;
-                };
+                // `to_nid` already resolved by the `route()` closure;
+                // no second `node_ids` lookup. Node name only needed
+                // for logging — read once.
+                let to = self
+                    .graph
+                    .node(to_nid)
+                    .map_or_else(|| "<gone>".to_owned(), |n| n.name.clone());
 
                 // C `route.c:649,745`: `if(subnet->owner == source)
                 // { logger(WARNING, "Packet looping back to %s!");
@@ -2200,36 +2191,4 @@ impl Daemon {
 
     // ───────────────────────────────────────────────────────────────
     // PMTU probe handling + try_tx chain
-}
-
-/// Rebind a `RouteResult<'a>` to a local lifetime. The `Forward`
-/// arm's `&str` borrows the `SubnetTree`/`mac_table`; we need to
-/// drop that borrow before calling `&mut self` methods. The caller
-/// pre-clones the owner string into `owned_to`; this function picks
-/// the right variant. Exhaustive match: any new `RouteResult`
-/// variant trips a compile error here.
-///
-/// Why not make `RouteResult` own a `String`? Because `route()` /
-/// `route_mac()` are pure functions called per-packet; the no-route
-/// (`TooShort`/`Unreachable`/`Broadcast`) cases would alloc-then-
-/// drop. The alloc is cheap but the API contract ("this fn is
-/// pure") is cleaner with a borrow.
-fn detach_route_result<'b>(r: &RouteResult<'_>, owned_to: Option<&'b str>) -> RouteResult<'b> {
-    match *r {
-        RouteResult::Forward { .. } => RouteResult::Forward {
-            // owned_to.is_some() iff r was Forward; caller invariant.
-            to: owned_to.expect("Forward without owned_to"),
-        },
-        RouteResult::Unreachable {
-            icmp_type,
-            icmp_code,
-        } => RouteResult::Unreachable {
-            icmp_type,
-            icmp_code,
-        },
-        RouteResult::Unsupported { reason } => RouteResult::Unsupported { reason },
-        RouteResult::NeighborSolicit => RouteResult::NeighborSolicit,
-        RouteResult::Broadcast => RouteResult::Broadcast,
-        RouteResult::TooShort { need, have } => RouteResult::TooShort { need, have },
-    }
 }

@@ -129,17 +129,19 @@ const IPPROTO_ICMPV6: u8 = 58;
 
 /// What to do with a packet. `route.c`'s side-effect calls, reified.
 ///
-/// The lifetime `'a` ties `Forward::to` back into the `SubnetTree`
-/// — same shape as `lookup_ipv4`'s return. Daemon resolves the name
-/// to a `NodeId` before the next subnet-tree mutation.
+/// `T` is the resolved destination type. The daemon uses `NodeId`
+/// (`Copy`, no borrow); unit tests use `String`. `route()` takes a
+/// `resolve: FnMut(&str) -> Option<T>` closure that maps the
+/// subnet-tree owner name to `T` and gates on reachability
+/// (`None` = unreachable).
 #[derive(Debug, PartialEq, Eq)]
-pub enum RouteResult<'a> {
+pub enum RouteResult<T> {
     /// `route.c:706`: `send_packet(subnet->owner, packet)`.
     ///
     /// `to == myself` is the "destined for us" case — C
     /// `send_packet` special-cases that into `write_packet()` (TUN
     /// write). The daemon does the same on this variant.
-    Forward { to: &'a str },
+    Forward { to: T },
 
     /// `route.c:640,655,660,681,690`: `route_ipv4_unreachable(...)`.
     ///
@@ -182,23 +184,22 @@ pub enum RouteResult<'a> {
 /// Reads the destination address from the IP header at
 /// `data[ETHER_SIZE..]`, looks it up in `subnets`, returns the owner.
 ///
-/// `is_reachable`: the daemon passes a closure that reads
-/// `graph.node(nid).reachable`. This is the same shape as
-/// `SubnetTree::lookup_ipv4`'s callback — and we forward to it
-/// (with `myself` always considered up; a node never marks itself
-/// unreachable).
-///
-/// `myself`: our own node name. C compares `subnet->owner == myself`
-/// by pointer; we compare by string.
+/// `resolve`: maps an owner name to the caller's destination type
+/// `T`. `None` = unreachable (the daemon's closure reads
+/// `graph.node(nid).reachable`); `Some(t)` = reachable, here's the
+/// resolved destination. The daemon passes a `&str -> Option<NodeId>`
+/// that hits `node_ids` then checks `reachable`. `myself` is always
+/// in `node_ids` and always `reachable` in the graph, so the
+/// `myself`-always-up special case (C `route.c:655` only checks
+/// `reachable` for REMOTE owners) falls out naturally.
 ///
 /// What's NOT here from the C: every branch that needs config flags
 /// or `node_t` fields beyond `reachable`. See the `DEFERRED` markers.
-pub fn route_ipv4<'a>(
+pub fn route_ipv4<T>(
     data: &[u8],
-    subnets: &'a SubnetTree,
-    myself: &str,
-    mut is_reachable: impl FnMut(&str) -> bool,
-) -> RouteResult<'a> {
+    subnets: &SubnetTree,
+    mut resolve: impl FnMut(&str) -> Option<T>,
+) -> RouteResult<T> {
     // `route.c:621`: `if(!checklength(source, packet, ether_size +
     // ip_size)) return;`. The C logs the source name; we hand back
     // the lengths and let the daemon (which HAS the source) log.
@@ -226,14 +227,12 @@ pub fn route_ipv4<'a>(
     // `route.c:630`: `subnet = lookup_subnet_ipv4(&dest)`.
     //
     // `lookup_ipv4` walks the tree longest-prefix-first and breaks on
-    // the first owner the closure says is reachable. We treat `myself`
-    // as always reachable here: if WE own the most-specific covering
-    // subnet, that's the answer regardless of what the graph says
-    // about us (`route.c:655` only checks `subnet->owner->status.
-    // reachable` for REMOTE owners; `myself->status.reachable` is
-    // never consulted on this path).
-    let Some((_subnet, owner)) = subnets.lookup_ipv4(&dest, |n| n == myself || is_reachable(n))
-    else {
+    // the first owner the closure says is reachable. The daemon's
+    // `resolve` returns `Some` for `myself` (it's always in
+    // `node_ids` and always `reachable` in the graph), so the
+    // C `route.c:655` "only check reachable for REMOTE owners"
+    // distinction is preserved without an explicit string compare.
+    let Some((_subnet, owner)) = subnets.lookup_ipv4(&dest, |n| resolve(n).is_some()) else {
         // `route.c:632-641`: no covering subnet → ICMP net-unknown.
         // C also logs the dotted-quad at DEBUG_TRAFFIC; daemon's job.
         return RouteResult::Unreachable {
@@ -250,27 +249,24 @@ pub fn route_ipv4<'a>(
     // detection. Daemon-side: `dispatch_route_result`'s Forward arm
     // checks `Some(to_nid) == from` right after node-id resolve.
 
-    // `route.c:706`: `send_packet(subnet->owner, packet)`. C reaches
-    // this for `owner == myself` too — `send_packet` itself branches
-    // on that into `write_packet` (TUN). We collapse: same variant,
-    // daemon checks `to == myself`.
-    if owner == myself {
-        return RouteResult::Forward { to: owner };
-    }
-
     // `route.c:653-656`: `if(!subnet->owner->status.reachable)`.
     //
     // `lookup_ipv4` may return an UNREACHABLE owner: it remembers
     // the last `maskcmp` hit even if the closure never said yes
     // (`subnet_tree.rs:310` "We return Some for that fallback too").
     // C `route_ipv4` then turns that into ICMP net-unreach. So we
-    // must re-check.
-    if !is_reachable(owner) {
+    // must re-check via `resolve`.
+    //
+    // `route.c:706`: `send_packet(subnet->owner, packet)`. C reaches
+    // this for `owner == myself` too — `send_packet` itself branches
+    // on that into `write_packet` (TUN). We collapse: same variant,
+    // daemon checks `to == self.myself` (NodeId compare).
+    let Some(to) = resolve(owner) else {
         return RouteResult::Unreachable {
             icmp_type: ICMP_DEST_UNREACH,
             icmp_code: ICMP_NET_UNREACH,
         };
-    }
+    };
 
     // DEFERRED(chunk-9): `route.c:658-661` `forwarding_mode ==
     // FMODE_OFF && source != myself && owner != myself` → NET_ANO.
@@ -297,7 +293,7 @@ pub fn route_ipv4<'a>(
     // DEFERRED(chunk-9): `route.c:698` `clamp_mss(source, via,
     // packet)`. TCP MSS rewriting for the via-node's MTU.
 
-    RouteResult::Forward { to: owner }
+    RouteResult::Forward { to }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -321,12 +317,11 @@ pub fn route_ipv4<'a>(
 ///
 /// Same `DEFERRED(chunk-9)` markers as `route_ipv4` for the
 /// config-gated branches.
-pub fn route_ipv6<'a>(
+pub fn route_ipv6<T>(
     data: &[u8],
-    subnets: &'a SubnetTree,
-    myself: &str,
-    mut is_reachable: impl FnMut(&str) -> bool,
-) -> RouteResult<'a> {
+    subnets: &SubnetTree,
+    mut resolve: impl FnMut(&str) -> Option<T>,
+) -> RouteResult<T> {
     // `route.c:706`: `if(!checklength(source, packet, ether_size +
     // ip6_size)) return;`.
     let need = ETHER_SIZE + IP6_SIZE;
@@ -362,9 +357,8 @@ pub fn route_ipv6<'a>(
     let dest = Ipv6Addr::from(dest);
 
     // `route.c:720`: `subnet = lookup_subnet_ipv6(&dest)`.
-    // Same `myself`-always-reachable shape as `route_ipv4`.
-    let Some((_subnet, owner)) = subnets.lookup_ipv6(&dest, |n| n == myself || is_reachable(n))
-    else {
+    // Same `resolve`-gates-reachable shape as `route_ipv4`.
+    let Some((_subnet, owner)) = subnets.lookup_ipv6(&dest, |n| resolve(n).is_some()) else {
         // `route.c:722-735`: no covering subnet → ICMPv6
         // dest-unreach / addr. C also logs the colon-hex.
         return RouteResult::Unreachable {
@@ -381,23 +375,17 @@ pub fn route_ipv6<'a>(
     // detection. Daemon-side: `dispatch_route_result`'s Forward arm
     // checks `Some(to_nid) == from` right after node-id resolve.
 
-    // `route.c:789`: same collapse as `route_ipv4` — `owner ==
-    // myself` is `Forward{to:myself}` and the daemon dispatches to
-    // TUN write.
-    if owner == myself {
-        return RouteResult::Forward { to: owner };
-    }
-
     // `route.c:748-751`: `if(!subnet->owner->status.reachable)`.
     // Same fallback-unreachable-owner re-check as `route_ipv4`
     // (`lookup_ipv6` may return an unreachable owner from the
-    // last-hit fallback).
-    if !is_reachable(owner) {
+    // last-hit fallback). `route.c:789`: `owner == myself` is
+    // `Forward{to:myself}` — same collapse as `route_ipv4`.
+    let Some(to) = resolve(owner) else {
         return RouteResult::Unreachable {
             icmp_type: ICMP6_DST_UNREACH,
             icmp_code: ICMP6_DST_UNREACH_NOROUTE,
         };
-    }
+    };
 
     // DEFERRED(chunk-9): `route.c:753-756` `forwarding_mode ==
     // FMODE_OFF && source != myself && owner != myself` →
@@ -426,7 +414,7 @@ pub fn route_ipv6<'a>(
     // DEFERRED(chunk-9): `route.c:786` `clamp_mss(source, via,
     // packet)`. TCP MSS rewriting for the via-node's MTU.
 
-    RouteResult::Forward { to: owner }
+    RouteResult::Forward { to }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -613,12 +601,11 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 /// The TUN device (`tinc-device`) synthesises the ethernet header
 /// for us in router mode, so this works for both TUN-read and
 /// peer-received packets.
-pub fn route<'a>(
+pub fn route<T>(
     data: &[u8],
-    subnets: &'a SubnetTree,
-    myself: &str,
-    is_reachable: impl FnMut(&str) -> bool,
-) -> RouteResult<'a> {
+    subnets: &SubnetTree,
+    resolve: impl FnMut(&str) -> Option<T>,
+) -> RouteResult<T> {
     // DEFERRED(chunk-9): `route.c:1131-1133` `if(pcap) send_pcap()`.
     // Debug tap into the control socket.
 
@@ -646,8 +633,8 @@ pub fn route<'a>(
 
     // `route.c:1148`: `switch(type)`.
     match ethertype {
-        ETH_P_IP => route_ipv4(data, subnets, myself, is_reachable),
-        ETH_P_IPV6 => route_ipv6(data, subnets, myself, is_reachable),
+        ETH_P_IP => route_ipv4(data, subnets, resolve),
+        ETH_P_IPV6 => route_ipv6(data, subnets, resolve),
         ETH_P_ARP => RouteResult::Unsupported {
             reason: "arp: chunk 9",
         },
@@ -694,6 +681,17 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// Test resolver: `T = String`. `Some(name.to_owned())` =
+    /// reachable, `None` = unreachable. Mirrors the daemon's
+    /// `node_ids.get + graph.reachable` closure.
+    #[allow(clippy::unnecessary_wraps)] // signature must match `resolve`
+    fn always(n: &str) -> Option<String> {
+        Some(n.to_owned())
+    }
+    fn never(_: &str) -> Option<String> {
+        None
+    }
+
     /// `route.c:706` happy path: subnet exists, owner is up,
     /// `send_packet(owner, ...)`.
     #[test]
@@ -702,24 +700,25 @@ mod tests {
         t.add(sn("10.0.0.0/24"), "bob".into());
 
         let p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5));
-        let r = route_ipv4(&p, &t, "alice", |_| true);
+        let r = route_ipv4(&p, &t, always);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
     }
 
     /// `route.c:706` with `owner == myself`: still `Forward`, daemon
-    /// special-cases the TUN write. Reachability of self is never
-    /// consulted — pass a closure that says everything is DOWN to
-    /// prove the `myself` short-circuit fires first.
+    /// special-cases the TUN write. The daemon's resolver always
+    /// returns `Some` for `myself` (it's in `node_ids` and always
+    /// `reachable` in the graph); model that here with a resolver
+    /// that ONLY accepts `"alice"`.
     #[test]
     fn route_ipv4_forwards_to_self() {
         let mut t = SubnetTree::new();
         t.add(sn("10.0.0.0/24"), "alice".into());
 
         let p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5));
-        let r = route_ipv4(&p, &t, "alice", |_| false);
+        let r = route_ipv4(&p, &t, |n| (n == "alice").then(|| n.to_owned()));
 
-        assert_eq!(r, RouteResult::Forward { to: "alice" });
+        assert_eq!(r, RouteResult::Forward { to: "alice".into() });
     }
 
     /// `route.c:632-641`: `lookup_subnet_ipv4` returned NULL.
@@ -729,7 +728,7 @@ mod tests {
         let t = SubnetTree::new();
 
         let p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5));
-        let r = route_ipv4(&p, &t, "alice", |_| true);
+        let r = route_ipv4(&p, &t, always);
 
         assert_eq!(
             r,
@@ -749,7 +748,7 @@ mod tests {
         t.add(sn("10.0.0.0/24"), "bob".into());
 
         let p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5));
-        let r = route_ipv4(&p, &t, "alice", |_| false);
+        let r = route_ipv4(&p, &t, never);
 
         assert_eq!(
             r,
@@ -765,7 +764,7 @@ mod tests {
     fn route_too_short() {
         let p = vec![0u8; 30];
         let t = SubnetTree::new();
-        let r = route_ipv4(&p, &t, "alice", |_| true);
+        let r = route_ipv4(&p, &t, always);
 
         assert_eq!(r, RouteResult::TooShort { need: 34, have: 30 });
     }
@@ -783,18 +782,18 @@ mod tests {
             (0x1234, "unknown ethertype"),
         ] {
             p[12..14].copy_from_slice(&et.to_be_bytes());
-            let r = route(&p, &t, "alice", |_| true);
+            let r = route(&p, &t, always);
             assert_eq!(r, RouteResult::Unsupported { reason: want });
         }
 
         // ETH_P_IP / ETH_P_IPV6 actually dispatch into route_ipv4 /
         // route_ipv6 (which then bounce on length: 14 < 34, 14 < 54).
         p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
-        let r = route(&p, &t, "alice", |_| true);
+        let r = route(&p, &t, always);
         assert_eq!(r, RouteResult::TooShort { need: 34, have: 14 });
 
         p[12..14].copy_from_slice(&ETH_P_IPV6.to_be_bytes());
-        let r = route(&p, &t, "alice", |_| true);
+        let r = route(&p, &t, always);
         assert_eq!(r, RouteResult::TooShort { need: 54, have: 14 });
     }
 
@@ -804,7 +803,7 @@ mod tests {
     fn route_too_short_for_ethertype() {
         let p = vec![0u8; 10];
         let t = SubnetTree::new();
-        let r = route(&p, &t, "alice", |_| true);
+        let r = route(&p, &t, always);
 
         assert_eq!(r, RouteResult::TooShort { need: 14, have: 10 });
     }
@@ -831,9 +830,9 @@ mod tests {
         t.add(sn("2001:db8::/32"), "bob".into());
 
         let p = ipv6_packet("2001:db8::5".parse().unwrap());
-        let r = route_ipv6(&p, &t, "alice", |_| true);
+        let r = route_ipv6(&p, &t, always);
 
-        assert_eq!(r, RouteResult::Forward { to: "bob" });
+        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
     }
 
     /// `route.c:722-735`: no covering subnet → type 1 code 3.
@@ -842,7 +841,7 @@ mod tests {
         let t = SubnetTree::new();
 
         let p = ipv6_packet("2001:db8::5".parse().unwrap());
-        let r = route_ipv6(&p, &t, "alice", |_| true);
+        let r = route_ipv6(&p, &t, always);
 
         assert_eq!(
             r,
@@ -861,7 +860,7 @@ mod tests {
         t.add(sn("2001:db8::/32"), "bob".into());
 
         let p = ipv6_packet("2001:db8::5".parse().unwrap());
-        let r = route_ipv6(&p, &t, "alice", |_| false);
+        let r = route_ipv6(&p, &t, never);
 
         assert_eq!(
             r,
@@ -878,7 +877,7 @@ mod tests {
         let mut p = vec![0u8; 50];
         p[12..14].copy_from_slice(&ETH_P_IPV6.to_be_bytes());
         let t = SubnetTree::new();
-        let r = route_ipv6(&p, &t, "alice", |_| true);
+        let r = route_ipv6(&p, &t, always);
 
         assert_eq!(r, RouteResult::TooShort { need: 54, have: 50 });
     }
@@ -894,7 +893,7 @@ mod tests {
         p[54] = ND_NEIGHBOR_SOLICIT; // icmp6_type
 
         let t = SubnetTree::new();
-        let r = route_ipv6(&p, &t, "alice", |_| true);
+        let r = route_ipv6(&p, &t, always);
 
         assert_eq!(r, RouteResult::NeighborSolicit);
 
@@ -903,7 +902,7 @@ mod tests {
         // we fall through to subnet lookup (→ unreachable, empty
         // tree). Proves the length-guard ordering.
         let p = &p[..ETHER_SIZE + IP6_SIZE];
-        let r = route_ipv6(p, &t, "alice", |_| true);
+        let r = route_ipv6(p, &t, always);
         assert!(matches!(r, RouteResult::Unreachable { .. }));
     }
 
