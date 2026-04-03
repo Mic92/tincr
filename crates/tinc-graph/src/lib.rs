@@ -492,6 +492,17 @@ impl Graph {
         })
     }
 
+    /// Outgoing edges of `n`, sorted by destination name. Mirrors
+    /// the C `splay_each(edge_t, e, &n->edge_tree)` walk shape
+    /// (`edge.c:125`). Empty slice for freed slots.
+    #[must_use]
+    pub fn node_edges(&self, n: NodeId) -> &[EdgeId] {
+        self.nodes
+            .get(n.0 as usize)
+            .and_then(Option::as_ref)
+            .map_or(&[], |node| node.edges.as_slice())
+    }
+
     // ────────────────────────────────────────────────────────────────
     // sssp_bfs
 

@@ -113,11 +113,14 @@ pub fn diff_reachability(
 /// then `mst_kruskal()` (`graph.c:341-344`). `mst` reads `reachable`
 /// to pick a starting node, so the diff's write-back must land first.
 #[must_use]
-pub fn run_graph(graph: &mut Graph, myself: NodeId) -> (Vec<Transition>, Vec<EdgeId>) {
+pub fn run_graph(
+    graph: &mut Graph,
+    myself: NodeId,
+) -> (Vec<Transition>, Vec<EdgeId>, Vec<Option<Route>>) {
     let routes = graph.sssp(myself);
     let transitions = diff_reachability(graph, myself, &routes);
     let mst = graph.mst();
-    (transitions, mst)
+    (transitions, mst, routes)
 }
 
 #[cfg(test)]
@@ -222,7 +225,7 @@ mod tests {
         let bc = g.lookup_edge(b, c).unwrap();
         g.del_edge(bc).unwrap();
 
-        let (t, mst) = run_graph(&mut g, a);
+        let (t, mst, _routes) = run_graph(&mut g, a);
 
         // Order is `node_ids()` order (slot order = insertion order
         // here). C order is splay-tree-on-name; both are stable, but
@@ -256,7 +259,7 @@ mod tests {
         for n in [a, b, c, d] {
             g.set_reachable(n, false);
         }
-        let (t, mst) = run_graph(&mut g, a);
+        let (t, mst, _routes) = run_graph(&mut g, a);
         // 3 transitions (b,c,d all came up; a is myself, excluded).
         assert_eq!(t.len(), 3);
         // 3 spanning edges × 2 halves = 6. Only works if mst saw
