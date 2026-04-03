@@ -1006,13 +1006,75 @@ impl Daemon {
                                     },
                                 )
                         }
+                        Request::KeyChanged => {
+                            // `key_changed_h` (`protocol_key.c:63-
+                            // 96`). C: parse name (`:67`), `seen_
+                            // request` (`:73`), lookup_node, `if(!
+                            // sptps) invalidate keys` (`:85` — DEAD
+                            // for us, all peers are sptps), forward
+                            // (`:92`), `return true` (`:95`). C
+                            // peers built WITHOUT `-Dcrypto=nolegacy`
+                            // (i.e. all distro builds) broadcast
+                            // this every `KeyExpire` seconds (default
+                            // 3600). Before this fix, we'd terminate
+                            // every C connection at the one-hour
+                            // mark. Bug audit `deef1268`.
+                            //
+                            // We don't `lookup_node` — the `:85`
+                            // body is dead for SPTPS-only and `:80`
+                            // is just a log line. The forward is the
+                            // only thing that matters.
+                            //
+                            // TODO: cross-impl regression — build
+                            // a `tincd-c-legacy` flake output WITHOUT
+                            // `-Dcrypto=nolegacy` and assert the conn
+                            // survives a KEY_CHANGED. crossimpl runs
+                            // for ~10s; default KeyExpire is 3600s,
+                            // so set `KeyExpire = 5` in the C peer's
+                            // tinc.conf for that test.
+                            if self.seen_request(body) {
+                                Ok(false)
+                            } else if self.settings.tunnelserver {
+                                // C `:92` `if(!tunnelserver)`.
+                                Ok(false)
+                            } else {
+                                Ok(self.forward_request(id, body))
+                            }
+                        }
+                        Request::Status => {
+                            // `status_h` (`protocol_misc.c:32-47`):
+                            // parse `%*d %d %s`, log, `return true`.
+                            // Noop. The body is informational; no C
+                            // node sends this in normal operation.
+                            // Bug audit `deef1268`: previously fell
+                            // through to terminate.
+                            log::info!(target: "tincd::proto",
+                                       "Status from peer: {:?}",
+                                       std::str::from_utf8(body).unwrap_or("<non-utf8>"));
+                            Ok(false)
+                        }
+                        Request::Error | Request::Termreq => {
+                            // `error_h` (`protocol_misc.c:49-58`):
+                            // log, `return false`. `termreq_h`
+                            // (`:60-71`): `return false`. These ARE
+                            // supposed to terminate — the C `return
+                            // false` maps to terminate. Kept in the
+                            // explicit arm so the catch-all below is
+                            // ONLY truly-unhandled types.
+                            log::warn!(target: "tincd::proto",
+                                       "{req:?} from peer: {:?}",
+                                       std::str::from_utf8(body).unwrap_or("<non-utf8>"));
+                            self.terminate(id);
+                            return needs_write;
+                        }
                         _ => {
-                            // KEY_CHANGED, Status, Error, Termreq.
                             // SPTPS_PACKET (21) is consumed inside
                             // feed() (the "21 " peek) and never
                             // reaches here. UDP_INFO/MTU_INFO have
                             // arms above. The gate passed (allow_
-                            // request = None post-ACK).
+                            // request = None post-ACK). Reaching
+                            // here means a `Request` variant exists
+                            // with no handler — a port gap.
                             log::warn!(target: "tincd::proto",
                                        "SPTPS request {req:?} not implemented");
                             self.terminate(id);
