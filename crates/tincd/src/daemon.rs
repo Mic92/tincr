@@ -1,19 +1,8 @@
 //! `Daemon` — the C globals as one struct, plus `main_loop()`.
 //!
-//! Ports `net.c::main_loop` (`:487-527`): `Timers::tick →
-//! EventLoop::turn → match`. `timeout_handler` (`:180-266`)
-//! degenerates to re-arm-self with zero peers. Signal handlers
-//! (`:316-334`) set `running = false` for TERM/INT/QUIT.
-//! `handle_new_unix_connection` (`net_socket.c:781-812`): accept,
-//! allocate, register. `setup_network` (`net_setup.c:1235-1275`):
-//! abridged call chain.
-//!
-//! `IoWhat` is the `W` in `EventLoop<W>` (six variants for six
-//! C io callbacks). `run()` consumes `self`: C `main_loop()` runs
-//! once, teardown is `Drop`.
-//!
-//! Logging: `target: "tincd"` for startup/shutdown, `"tincd::conn"`
-//! for accept/terminate. See lib.rs for the full mapping.
+//! `net.c::main_loop` (`:487-527`): tick → turn → match. `IoWhat`
+//! is the `W` in `EventLoop<W>` (six variants = six C io callbacks).
+//! `run()` consumes `self`; teardown is `Drop`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -83,135 +72,81 @@ const PKT_PROBE: u8 = 4;
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
 new_key_type! {
-    /// `connection_t*`. Generational: a stale `ConnId` for a slot
-    /// that's been reused returns `None` from `conns.get(id)`. The
-    /// C uses raw pointers and the io_tree.generation guard.
+    /// `connection_t*`. Generational: stale id → `conns.get(id) == None`.
+    /// C uses raw pointers + io_tree.generation guard.
     pub struct ConnId;
 }
 
-/// Runtime annotation for one peer node. The (b)-path stub from
-/// the chunk-4b plan: `tinc-graph::Node` is name+edges (topology);
-/// this is which-conn-serves-it + the edge-metadata `ack_h` builds.
-///
-/// C `node_t` smushes both into one 200-byte struct. Splitting
-/// means `tinc-graph` stays `#![no_std]`-compatible (no fd, no
-/// `Instant`, no `SocketAddr` in the graph crate).
-///
-/// Chunk 5 cross-refs this to a `tinc_graph::NodeId` once the graph
-/// is wired. For now: `ack_h` populates it, `dump_connections`
-/// doesn't even read it (it walks `conns` not `nodes`). The dup-
-/// conn check (`ack_h:975-990`) is the one consumer.
+/// Per-peer runtime annotation. C `node_t` smushes topology +
+/// runtime into one 200B struct; we split so `tinc-graph` stays
+/// `#![no_std]`-clean.
 #[derive(Debug, Clone)]
 pub struct NodeState {
-    /// `c->edge`. The forward `EdgeId` from `myself` to this peer,
-    /// added by `on_ack` (`ack_h:1051`). `terminate_connection`
-    /// (`net.c:126-132`) deletes it AND broadcasts `DEL_EDGE` when
-    /// the connection drops. `None` for nodes that don't currently
-    /// have a direct edge from us (peer disconnected, edge gone).
+    /// `c->edge` (`ack_h:1051`). `terminate_connection` (`net.c:126`)
+    /// deletes + broadcasts DEL_EDGE.
     pub edge: Option<EdgeId>,
-    /// `n->connection`. Which meta connection currently serves this
-    /// node. `None` if the node is known but not directly connected
-    /// (transitively reachable, or just disconnected). Generational
-    /// `ConnId`: a stale one returns `None` from `conns.get`.
+    /// `n->connection`. None = known but not directly connected.
     pub conn: Option<ConnId>,
-    /// `c->edge->address`. Peer's TCP-connect-from addr with port
-    /// rewritten to their UDP port (`ack_h:1024-1025`). The "how do
-    /// I send data packets" addr. `None` only for hypothetical
-    /// unix-socket peers (doesn't happen — peers come over TCP).
+    /// `c->edge->address` (`ack_h:1024`). TCP addr, port rewritten to UDP.
     pub edge_addr: Option<SocketAddr>,
-    /// `c->edge->weight`. Average of our RTT estimate and theirs
-    /// (`ack_h:1048`). Milliseconds.
+    /// `c->edge->weight` (`ack_h:1048`). Avg of RTTs, ms.
     pub edge_weight: i32,
-    /// `c->edge->options`. Intersected/unioned bitfield (`ack_h:
-    /// 996-1001`). Top byte is the PEER's `PROT_MINOR`.
+    /// `c->edge->options` (`ack_h:996`). Top byte = peer's PROT_MINOR.
     pub edge_options: u32,
 }
 
-/// `IoWhat` — the daemon's choice of `W` for `EventLoop<W>`.
-///
-/// Six variants for six C `io_add` callbacks. The match body in
-/// `Daemon::run` IS the dispatch table.
-///
-/// `Tcp`/`Udp` are stubs — variants exist (the enum is closed), the
-/// match arms are `todo!()` until chunk 3. Gives the full enum shape
-/// up front; `Daemon::run`'s match doesn't churn when listeners land.
+/// Six variants = six C `io_add` callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoWhat {
-    /// `signalio_handler`. The self-pipe read end.
+    /// `signalio_handler`.
     Signal,
-    /// `handle_new_unix_connection`. The control socket listener.
+    /// `handle_new_unix_connection`.
     UnixListener,
-    /// `handle_device_data`. The TUN/TAP device. `Dummy` has
-    /// `fd() → None` so this is never registered in skeleton.
+    /// `handle_device_data`. `Dummy.fd()` → None → never registered.
     Device,
-    /// `handle_meta_io`. A meta connection (control or peer).
-    /// The ConnId indexes the slotmap.
+    /// `handle_meta_io`.
     Conn(ConnId),
-    /// `handle_new_meta_connection`. TCP listener `i`. Index into
-    /// `listen_socket[MAXSOCKETS]`. u8 because MAXSOCKETS=16.
+    /// `handle_new_meta_connection`. u8: MAXSOCKETS=16.
     Tcp(u8),
-    /// `handle_incoming_vpn_data`. UDP listener `i`. Same indexing.
+    /// `handle_incoming_vpn_data`.
     Udp(u8),
 }
 
-/// Seven variants for seven C `timeout_add` callbacks. Skeleton has
-/// one: `Ping`. Same up-front-shape rationale as `IoWhat`.
+/// Seven C `timeout_add` callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerWhat {
-    /// `timeout_handler` (`net.c:180`). Ping timeout sweep. Re-arms +1s.
+    /// `timeout_handler` (`net.c:180`). +1s.
     Ping,
-    /// `periodic_handler` (`net.c:268`). Contradiction counter check
-    /// + autoconnect. Re-arms +5s. Armed at setup.
+    /// `periodic_handler` (`net.c:268`). +5s.
     Periodic,
-    /// `keyexpire_handler`. Re-arms `+keylifetime`.
     #[allow(dead_code)]
     KeyExpire,
-    /// `age_past_requests` (`protocol.c:213-228`). Evicts seen-
-    /// request cache entries older than `pinginterval`. Re-arms
-    /// +10s (`:228`). Chunk 5: ARMED.
+    /// `age_past_requests` (`protocol.c:213-228`). +10s.
     AgePastRequests,
-    /// `age_subnets` (`route.c:491-521`). Re-arms +10s. Lazy-armed
-    /// on the FIRST `learn_mac` (when `MacLeases::learn` returns
-    /// `true` = table was empty). Dispatched in `run()` →
-    /// `on_age_subnets`.
+    /// `age_subnets` (`route.c:491-521`). +10s. Lazy-armed on first
+    /// `learn_mac` (when `MacLeases::learn` returns true = empty).
     AgeSubnets,
-    /// `retry_outgoing_handler`. Per-outgoing. C `outgoing_t.ev`
-    /// (`net.h:123`) is one timer per outgoing; `retry_outgoing`
-    /// (`net_socket.c:412`) arms it. The `OutgoingId` payload tells
-    /// the dispatch arm which outgoing to retry.
+    /// `retry_outgoing_handler`. C `outgoing_t.ev` (`net.h:123`).
     RetryOutgoing(OutgoingId),
-    /// `udp_probe_timeout_handler`. Per-node.
     #[allow(dead_code)]
     UdpPing,
 }
 
-/// Three variants for the signals. C registers 5 (`net.c:503-507`)
-/// but TERM/QUIT/INT all map to `Exit`.
+/// C registers 5 (`net.c:503-507`); TERM/QUIT/INT all map to Exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalWhat {
-    /// SIGHUP. `sighup_handler`: reopenlogger + reload_configuration.
-    /// Skeleton: log and ignore.
+    /// SIGHUP → `sighup_handler`.
     Reload,
-    /// SIGTERM, SIGINT, SIGQUIT. `sigterm_handler`: `event_exit()`.
+    /// SIGTERM/INT/QUIT → `sigterm_handler`.
     Exit,
-    /// SIGALRM. `sigalrm_handler`: `retry()`. Skeleton: ignore.
+    /// SIGALRM → `sigalrm_handler`.
     Retry,
 }
 
 // DaemonSettings — the config knobs
 
-/// The ~40 daemon-side settings globals from the census. Populated
-/// by `setup_myself_reloadable` (`net_setup.c:252-575`). Skeleton
-/// reads only `pinginterval`/`pingtimeout` and even those are
-/// defaulted.
-///
-/// Separate from `Daemon` so reload can swap a fresh `DaemonSettings`
-/// in without touching the arena. C `reload_configuration` walks and
-/// patches; we'll do the same for the arena, but the SETTINGS are
-/// just a struct swap.
-///
-/// `Default` matches C defaults. Each field documents its
-/// `net_setup.c` source.
+/// `setup_myself_reloadable` (`net_setup.c:252-575`). Separate from
+/// `Daemon` so reload can swap it. `Default` matches C defaults.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // C globals: each bool is
 // one `get_config_bool` knob (`net_setup.c`). Grouping them into

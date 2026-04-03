@@ -1,43 +1,18 @@
 //! ARP/NDP reply synthesis (`route.c:793-1035`).
 //!
-//! Router mode: the daemon strips ethernet headers and routes by
-//! IP. But the kernel doesn't know that — it ARPs (v4) or sends
-//! Neighbor Solicits (v6) for the next-hop MAC before sending. We
-//! answer with a **fake** MAC. The kernel caches it, traffic flows,
-//! we ignore the eth header.
+//! The fake-MAC trick (`route.c:1015-1016`, `:899-900`): answer the
+//! kernel's ARP/NS with its OWN eth-src MAC, last byte XOR `0xFF`.
+//! Kernel caches it, sends to it; daemon reads everything off TUN
+//! regardless of dst MAC. The XOR is cosmetic ("for consistency").
 //!
-//! ## The fake-MAC trick
+//! C inlines subnet-lookup; we split: `parse_*` returns target IP,
+//! daemon looks up, `build_*` synthesizes.
 //!
-//! `route.c:1015-1016` builds the reply's "this is the neighbor's
-//! MAC" answer by taking the **kernel's own MAC** (the eth source
-//! of the request frame, `DATA(packet)+ETH_ALEN`) and XOR'ing the
-//! last byte with `0xFF`. So when the kernel asks "who has
-//! 10.42.0.2?", we answer "10.42.0.2 is at <your-mac-but-last-byte-
-//! flipped>". The kernel happily caches that, sends to it, and the
-//! daemon — which reads everything off the TUN regardless of dst
-//! MAC — sees the traffic. The XOR mangling is purely cosmetic
-//! ("for consistency with route_packet()", `route.c:1016`): it just
-//! makes the source look like Not Us in case anything inspects the
-//! cache. NDP does the same dance at `route.c:899-900`.
-//!
-//! ## Decomposition
-//!
-//! The C inlines subnet-lookup into `route_arp`/`route_neighborsol`.
-//! We split: [`parse_arp_req`] / [`parse_ndp_solicit`] return the
-//! target IP if the packet is a valid request; the daemon does the
-//! subnet lookup; [`build_arp_reply`] / [`build_ndp_advert`]
-//! synthesize given the original frame. Pure functions, no state.
-//!
-//! `NOT-PORTING(overwrite-mac)`: `overwrite_mac` snatching
-//! (`:970-973`, `:830-832`) for `Mode=router DeviceType=tap`. We
-//! don't parse `OverwriteMAC`; if set, it's silently ignored. The
-//! fix is 6 LOC if anyone needs it. `source != myself` (`:964-967`,
-//! `:814-817`) is the same gate.
+//! `NOT-PORTING(overwrite-mac)`: `:970-973`, `:830-832` (Mode=router
+//! DeviceType=tap); `source != myself` `:964-967`, `:814-817`.
 
 #![forbid(unsafe_code)]
-// All `as u32`/`as u16` casts in this module are header-size constants
-// (max NS_SIZE+OPT_SIZE+ETH_ALEN = 32). Never truncate.
-#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_truncation)] // header-size constants, max 32
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -50,40 +25,23 @@ use crate::packet::{
 
 const ETHER_SIZE: usize = 14;
 const ETH_ALEN: usize = 6;
-/// `sizeof(struct ether_arp)` — `route.c:52`.
 const ARP_SIZE: usize = 28;
-/// `sizeof(struct ip6_hdr)` — `route.c:54`.
 const IP6_SIZE: usize = 40;
-/// `sizeof(struct nd_neighbor_solicit)` — `ipv6.h:106`. The struct
-/// is `icmp6_hdr` (8) + `in6_addr nd_ns_target` (16) = 24.
-const NS_SIZE: usize = 24;
-/// `sizeof(struct nd_opt_hdr)` — `ipv6.h:115`. `{type, len}`.
-const OPT_SIZE: usize = 2;
-
+const NS_SIZE: usize = 24; // icmp6_hdr(8) + in6_addr(16). ipv6.h:106
+const OPT_SIZE: usize = 2; // {type, len}. ipv6.h:115
 const IPPROTO_ICMPV6: u8 = 58;
 
 // ── NDP constants (RFC 4861) ───────────────────────────────────────
 
-/// `ND_NEIGHBOR_SOLICIT` (RFC 4861 §4.3). ICMPv6 type 135.
 pub const ND_NEIGHBOR_SOLICIT: u8 = 135;
-/// `ND_NEIGHBOR_ADVERT` (RFC 4861 §4.4). ICMPv6 type 136.
 pub const ND_NEIGHBOR_ADVERT: u8 = 136;
-/// `ND_OPT_SOURCE_LINKADDR` (RFC 4861 §4.6.1). Option type 1.
 pub const ND_OPT_SOURCE_LINKADDR: u8 = 1;
-/// `ND_OPT_TARGET_LINKADDR` (RFC 4861 §4.6.1). Option type 2.
 pub const ND_OPT_TARGET_LINKADDR: u8 = 2;
 
 // ── ARP ────────────────────────────────────────────────────────────
 
-/// Parse + validate an ARP request (`route.c:960,977-984`).
-///
-/// Returns the target IPv4 (`arp_tpa`) if and only if `frame` is a
-/// well-formed Ethernet/IP ARP `who-has`: `arp_hrd == ARPHRD_ETHER`,
-/// `arp_pro == ETH_P_IP`, `arp_hln == 6`, `arp_pln == 4`, `arp_op ==
-/// ARPOP_REQUEST`. Anything else (replies, non-Ethernet HW, wrong
-/// protocol, malformed, short) → `None`.
-///
-/// The caller does the subnet lookup (`route.c:988-1002`).
+/// `route.c:960,977-984`. Returns `arp_tpa` iff `frame` is a valid
+/// Ethernet/IP ARP who-has. Caller does subnet lookup (`:988-1002`).
 #[must_use]
 pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     // route.c:960 checklength
@@ -107,82 +65,47 @@ pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(arp.arp_tpa))
 }
 
-/// Build an ARP reply (`route.c:1011-1022`).
-///
-/// `original` is the request frame; we reuse most of it. The reply's
-/// `arp_sha` (the answer: "the neighbor's MAC is THIS") is the
-/// original frame's eth-source MAC with the last byte XOR `0xFF` —
-/// see the module-level [fake-MAC trick](self) commentary.
+/// `route.c:1011-1022`. `arp_sha` = orig eth-src XOR `0xFF` on last
+/// byte (the fake-MAC trick).
 ///
 /// # Panics
-///
-/// If `original.len() < 42`. The caller MUST have validated
-/// `original` with [`parse_arp_req`]; we don't re-validate.
-///
-/// Returns a fresh `Vec`. `ETHER_SIZE + ARP_SIZE` = 42 bytes; any
-/// trailing padding on `original` is dropped (the C mutates in place
-/// and keeps `packet->len` as-is, but the trailing bytes are junk —
-/// `send_packet` reads only 42 effective bytes from a tap-mode TUN
-/// in router mode).
+/// If `original.len() < 42`. Caller validates with [`parse_arp_req`].
 #[must_use]
 pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
     debug_assert!(original.len() >= ETHER_SIZE + ARP_SIZE);
 
     let mut out = original[..ETHER_SIZE + ARP_SIZE].to_vec();
 
-    // The C does NOT touch the ethernet header here (route.c only
-    // copies the arp struct back at :1022). The eth header still has
-    // dst=broadcast, src=kernel-mac. That's fine: the daemon writes
-    // this back to the TUN; the kernel reads it; eth-dst is ignored
-    // on a tap read.
+    // C does NOT touch the eth header (only :1022 copies arp back).
+    // Eth-dst is ignored on a tap read.
 
     let arp_bytes: &[u8; ARP_SIZE] = original[ETHER_SIZE..ETHER_SIZE + ARP_SIZE]
         .try_into()
         .expect("validated");
     let mut arp = EtherArp::from_bytes(arp_bytes);
 
-    // route.c:1011-1013 — swap protocol addresses.
-    std::mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa);
+    std::mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa); // :1011-1013
+    arp.arp_tha = arp.arp_sha; // :1014
 
-    // route.c:1014 — set target HW addr = original sender HW addr.
-    arp.arp_tha = arp.arp_sha;
-
-    // route.c:1015-1016 — set sender HW addr = original eth-src
-    // with last byte flipped. The fake-MAC trick.
+    // :1015-1016 fake-MAC: orig eth-src, last byte flipped
     let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2]
         .try_into()
         .expect("validated");
     arp.arp_sha = eth_src;
     arp.arp_sha[ETH_ALEN - 1] ^= 0xFF;
 
-    // route.c:1017
-    arp.ea_hdr.set_op(ARPOP_REPLY);
-
-    // route.c:1022
-    out[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].copy_from_slice(&arp.to_bytes());
+    arp.ea_hdr.set_op(ARPOP_REPLY); // :1017
+    out[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].copy_from_slice(&arp.to_bytes()); // :1022
     out
 }
 
 // ── NDP ────────────────────────────────────────────────────────────
 
-/// Parse + validate an NDP Neighbor Solicit (`route.c:808-861`).
-///
-/// Returns `nd_ns_target` if and only if:
-/// - frame is long enough for eth + ip6 + ns (`:808-810`)
-/// - `ip6.ip6_nxt == IPPROTO_ICMPV6`
-/// - `ns.type == ND_NEIGHBOR_SOLICIT` (`:835`)
-/// - if a SOURCE_LLADDR option is present, its type is correct (`:836`)
-/// - the **ICMPv6 checksum verifies** over pseudo-hdr + ns [+ opt
-///   + lladdr] (`:847-861`)
-///
-/// NDP packets carry no signature; the only integrity guarantees
-/// are hop-limit=255 (link-local scoping, RFC 4861 §7.1.1) and the
-/// ICMPv6 checksum. We verify the checksum here; hop-limit is the
-/// kernel's job (it generated this packet).
-///
-/// The C does NOT check `ip6_nxt`; it gets there via the route
-/// dispatch which already branched on next-header. We add the check
-/// because [`parse_ndp_solicit`] is a freestanding parser.
+/// `route.c:808-861`. Returns `nd_ns_target` iff: long enough,
+/// `ip6_nxt == ICMPV6`, type 135, opt-type ok (`:835-836`), and
+/// **ICMPv6 checksum verifies** (`:847-861`). Hop-limit (RFC 4861
+/// §7.1.1) is the kernel's job. We add the `ip6_nxt` check (C gets
+/// it from route dispatch; we're freestanding).
 #[must_use]
 pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     // route.c:808 checklength
@@ -196,8 +119,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     let ip6_bytes: &[u8; IP6_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().ok()?;
     let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
 
-    // Not in C (see doc-comment): the route dispatch already
-    // branched on this. We're freestanding.
+    // Not in C (route dispatch already branched); we're freestanding.
     if ip6.ip6_nxt != IPPROTO_ICMPV6 {
         return None;
     }
@@ -205,8 +127,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     let ns_off = ETHER_SIZE + IP6_SIZE;
     let ns = &frame[ns_off..ns_off + NS_SIZE];
 
-    // route.c:835-838 — type check + opt-type check.
-    // ns[0] = icmp6_type (nd_ns_type via #define).
+    // :835-838
     if ns[0] != ND_NEIGHBOR_SOLICIT {
         return None;
     }
@@ -217,7 +138,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
         }
     }
 
-    // route.c:843-861 — checksum verify.
+    // :843-861 checksum verify
     let icmp_len = if has_opt {
         NS_SIZE + OPT_SIZE + ETH_ALEN
     } else {
@@ -229,41 +150,23 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     pseudo.set_length(icmp_len as u32);
     pseudo.set_next(u32::from(IPPROTO_ICMPV6));
 
-    // The C feeds (pseudo, ns, opt, lladdr) as four separate
-    // inet_checksum calls because they're stack structs. We have
-    // the contiguous wire bytes; one call suffices.
+    // C feeds 4 separate calls (stack structs); we have contiguous bytes.
     let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
     ck = inet_checksum(&frame[ns_off..ns_off + icmp_len], ck);
     if ck != 0 {
         return None;
     }
 
-    // ns[8..24] = nd_ns_target.
     let target: [u8; 16] = ns[8..24].try_into().ok()?;
     Some(Ipv6Addr::from(target))
 }
 
-/// Build an NDP Neighbor Advert (`route.c:890-948`).
+/// `route.c:890-948`. Eth: dst←orig-src, src←orig-src⊕FF (`:899`).
+/// Ip6: dst←orig-src, src←target (hlim untouched; kernel set 255,
+/// RFC 4861 §7.2.2). Icmp6: type←ADVERT, reserved←Solicited (`:910`).
+/// Opt: type←TARGET_LLADDR, lladdr←fake MAC (`:904`).
 ///
-/// The involved one. Rebuilds:
-/// - eth: dst ← orig-src, src ← orig-src ⊕ `0xFF` on last byte
-///   (`:899-900`)
-/// - ip6: dst ← orig-src, src ← `nd_ns_target`, hlim stays as-is
-///   (the C doesn't touch hlim here; the kernel set it to 255 in
-///   the solicit and we mirror it back — RFC 4861 §7.2.2 mandates
-///   255 for adverts)
-/// - icmp6: type ← `ND_NEIGHBOR_ADVERT`, reserved ← Solicited flag
-///   (`htonl(0x40000000)`, `:910`), checksum recomputed
-/// - opt (if present): type ← `ND_OPT_TARGET_LINKADDR`, lladdr ←
-///   the fake MAC (`:904-905`)
-///
-/// `NOT-PORTING(relay-ndp-ttl)`: `decrement_ttl` (`:895`) before
-/// NDP advert. Triple-gate: NDP-from-peer + DecrementTTL=yes +
-/// hop_limit==1.
-///
-/// Returns `None` only if `original` is too short; the caller
-/// SHOULD have validated with [`parse_ndp_solicit`] already so this
-/// is defensive.
+/// `NOT-PORTING(relay-ndp-ttl)`: `:895` decrement_ttl (triple-gate).
 #[must_use]
 pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     if original.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
@@ -280,16 +183,11 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     let mut out = original[..total].to_vec();
 
     // ── Ethernet (route.c:899-900) ───────────────────────────────
-    // memcpy(DATA, DATA+ETH_ALEN, ETH_ALEN): dst ← orig-src.
-    // DATA[ETH_ALEN*2-1] ^= 0xFF: mangle src last byte.
-    // Net effect: eth-dst = orig-eth-src; eth-src = orig-eth-src
-    // with last byte flipped (because the memcpy left both halves
-    // identical, then XOR hits the src half).
+    // memcpy leaves dst=src=orig-src, then XOR hits the src half.
     let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
     out[..ETH_ALEN].copy_from_slice(&eth_src);
     out[ETH_ALEN..ETH_ALEN * 2].copy_from_slice(&eth_src);
     out[ETH_ALEN * 2 - 1] ^= 0xFF;
-    // The same mangled-src is the fake MAC we hand out below.
     let fake_mac: [u8; ETH_ALEN] = out[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
 
     // ── IPv6 (route.c:902-903) ───────────────────────────────────
@@ -305,24 +203,18 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(&ip6.to_bytes());
 
     // ── ICMPv6 / NS (route.c:909-911) ────────────────────────────
-    // We work in `out` directly: it's just byte poking.
-    // ns layout: [type][code][cksum:2][reserved:4][target:16]
-    out[ns_off] = ND_NEIGHBOR_ADVERT; // :910 nd_ns_type
-    // :909 nd_ns_cksum = 0
-    out[ns_off + 2] = 0;
+    // [type][code][cksum:2][reserved:4][target:16]
+    out[ns_off] = ND_NEIGHBOR_ADVERT; // :910
+    out[ns_off + 2] = 0; // :909
     out[ns_off + 3] = 0;
-    // :911 nd_ns_reserved = htonl(0x40000000) — Solicited flag.
-    // (Spec says R|S|O for proxy NA but tinc sets S only; mirror C.)
+    // :911 Solicited flag (spec says R|S|O for proxy; tinc sets S only).
     out[ns_off + 4..ns_off + 8].copy_from_slice(&0x4000_0000u32.to_be_bytes());
-    // target stays as-is (already in `out` from the copy).
 
     // ── Option (route.c:904-907,912) ─────────────────────────────
     if has_opt {
         let opt_off = ns_off + NS_SIZE;
         out[opt_off] = ND_OPT_TARGET_LINKADDR; // :912
-        // opt_len stays (1 = 8 bytes, already correct from solicit).
-        // :905-907: the lladdr field gets our fake MAC.
-        out[opt_off + OPT_SIZE..opt_off + OPT_SIZE + ETH_ALEN].copy_from_slice(&fake_mac);
+        out[opt_off + OPT_SIZE..opt_off + OPT_SIZE + ETH_ALEN].copy_from_slice(&fake_mac); // :905-907
     }
 
     // ── Checksum (route.c:916-936) ───────────────────────────────
@@ -334,8 +226,7 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
 
     let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
     ck = inet_checksum(&out[ns_off..ns_off + icmp_len], ck);
-    // Write back raw — inet_checksum returns ne-order (see packet.rs).
-    out[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes());
+    out[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes()); // ne-order (packet.rs)
 
     Some(out)
 }
@@ -346,16 +237,12 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// Hand-build an Ethernet+ARP request frame: "who has `tpa`?
-    /// tell `spa`". eth-src = `02:00:00:00:00:01` (locally
-    /// administered), eth-dst = broadcast.
+    /// Eth+ARP "who has `tpa`? tell `spa`". eth-src locally administered.
     fn mk_arp_req(spa: [u8; 4], tpa: [u8; 4]) -> Vec<u8> {
         let mut f = Vec::with_capacity(ETHER_SIZE + ARP_SIZE);
-        // eth: dst broadcast, src 02:00:00:00:00:01, ethertype ARP
         f.extend_from_slice(&[0xff; 6]);
         f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
         f.extend_from_slice(&crate::packet::ETH_P_ARP.to_be_bytes());
-        // arp
         let mut a = EtherArp::default();
         a.ea_hdr.set_hrd(ARPHRD_ETHER);
         a.ea_hdr.set_pro(ETH_P_IP);
@@ -379,7 +266,6 @@ mod tests {
     #[test]
     fn parse_arp_reply_is_none() {
         let mut f = mk_arp_req([10, 42, 0, 1], [10, 42, 0, 2]);
-        // arp_op is at ETHER_SIZE + 6..8
         f[ETHER_SIZE + 6..ETHER_SIZE + 8].copy_from_slice(&ARPOP_REPLY.to_be_bytes());
         assert_eq!(parse_arp_req(&f), None);
     }
@@ -387,8 +273,7 @@ mod tests {
     #[test]
     fn parse_arp_non_ethernet_hw() {
         let mut f = mk_arp_req([10, 42, 0, 1], [10, 42, 0, 2]);
-        // arp_hrd at ETHER_SIZE + 0..2: set to ARPHRD_IEEE802 = 6
-        f[ETHER_SIZE..ETHER_SIZE + 2].copy_from_slice(&6u16.to_be_bytes());
+        f[ETHER_SIZE..ETHER_SIZE + 2].copy_from_slice(&6u16.to_be_bytes()); // ARPHRD_IEEE802
         assert_eq!(parse_arp_req(&f), None);
     }
 
@@ -396,7 +281,6 @@ mod tests {
     fn parse_arp_too_short() {
         assert_eq!(parse_arp_req(&[0u8; 20]), None);
         assert_eq!(parse_arp_req(&[]), None);
-        // exactly ETHER_SIZE + ARP_SIZE - 1
         assert_eq!(parse_arp_req(&[0u8; 41]), None);
     }
 
@@ -409,29 +293,20 @@ mod tests {
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
         let arp = EtherArp::from_bytes(arp_bytes);
 
-        // protocol addrs swapped
-        assert_eq!(arp.arp_spa, [10, 42, 0, 2]);
+        assert_eq!(arp.arp_spa, [10, 42, 0, 2]); // swapped
         assert_eq!(arp.arp_tpa, [10, 42, 0, 1]);
-        // op = REPLY
         assert_eq!(arp.ea_hdr.op(), ARPOP_REPLY);
-        // tha = orig sha
-        assert_eq!(arp.arp_tha, [0x02, 0, 0, 0, 0, 0x01]);
-        // sha = orig eth-src with last byte XOR 0xFF
-        assert_eq!(arp.arp_sha, [0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]);
-        // eth header unchanged (C doesn't touch it)
-        assert_eq!(&r[..ETHER_SIZE], &f[..ETHER_SIZE]);
+        assert_eq!(arp.arp_tha, [0x02, 0, 0, 0, 0, 0x01]); // orig sha
+        assert_eq!(arp.arp_sha, [0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]); // fake MAC
+        assert_eq!(&r[..ETHER_SIZE], &f[..ETHER_SIZE]); // eth unchanged
     }
 
     #[test]
     fn arp_roundtrip() {
         let f = mk_arp_req([192, 168, 1, 100], [192, 168, 1, 200]);
-        // Parse the request.
         assert_eq!(parse_arp_req(&f), Some(Ipv4Addr::new(192, 168, 1, 200)));
-        // Build the reply.
         let r = build_arp_reply(&f);
-        // The reply is NOT a request — it should not parse as one.
-        assert_eq!(parse_arp_req(&r), None);
-        // But it IS a well-formed ARP frame.
+        assert_eq!(parse_arp_req(&r), None); // reply, not request
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
         let arp = EtherArp::from_bytes(arp_bytes);
         assert_eq!(arp.ea_hdr.hrd(), ARPHRD_ETHER);
@@ -440,26 +315,19 @@ mod tests {
 
     // ── NDP fixtures ──────────────────────────────────────────────
 
-    /// Build a valid NDP Neighbor Solicit for `target`, with a
-    /// SOURCE_LLADDR option, and a correct ICMPv6 checksum. Mirrors
-    /// what a real Linux kernel emits when ARPing-v6 for a TUN
-    /// next-hop.
+    /// Valid NS with SOURCE_LLADDR opt + correct checksum.
     fn mk_ndp_solicit(target: Ipv6Addr) -> Vec<u8> {
         let eth_src = [0x02, 0, 0, 0, 0, 0x01];
         let ip_src: Ipv6Addr = "fe80::1".parse().unwrap();
-        // RFC 4861: NS goes to solicited-node multicast, but tinc
-        // doesn't check the dst — use the all-nodes for simplicity.
-        let ip_dst: Ipv6Addr = "ff02::1".parse().unwrap();
+        let ip_dst: Ipv6Addr = "ff02::1".parse().unwrap(); // tinc doesn't check dst
 
         let icmp_len = NS_SIZE + OPT_SIZE + ETH_ALEN;
         let mut f = Vec::with_capacity(ETHER_SIZE + IP6_SIZE + icmp_len);
 
-        // eth
-        f.extend_from_slice(&[0x33, 0x33, 0, 0, 0, 0x01]); // multicast
+        f.extend_from_slice(&[0x33, 0x33, 0, 0, 0, 0x01]);
         f.extend_from_slice(&eth_src);
-        f.extend_from_slice(&0x86DDu16.to_be_bytes()); // ETH_P_IPV6
+        f.extend_from_slice(&0x86DDu16.to_be_bytes());
 
-        // ip6
         let mut ip6 = Ipv6Hdr::default();
         ip6.set_flow(0x6000_0000);
         ip6.set_plen(icmp_len as u16);
@@ -469,20 +337,17 @@ mod tests {
         ip6.ip6_dst = ip_dst.octets();
         f.extend_from_slice(&ip6.to_bytes());
 
-        // ns: [type][code][cksum:2][reserved:4][target:16]
         let ns_off = f.len();
         f.push(ND_NEIGHBOR_SOLICIT);
-        f.push(0); // code
-        f.extend_from_slice(&[0, 0]); // cksum placeholder
-        f.extend_from_slice(&[0; 4]); // reserved
+        f.push(0);
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(&[0; 4]);
         f.extend_from_slice(&target.octets());
 
-        // opt: [type][len][lladdr:6]
         f.push(ND_OPT_SOURCE_LINKADDR);
         f.push(1); // len in 8-byte units: 2+6 = 8 → 1
         f.extend_from_slice(&eth_src);
 
-        // checksum
         let mut pseudo = Ipv6Pseudo::default();
         pseudo.ip6_src = ip_src.octets();
         pseudo.ip6_dst = ip_dst.octets();
@@ -506,7 +371,6 @@ mod tests {
     fn parse_ndp_bad_checksum() {
         let target: Ipv6Addr = "fe80::42".parse().unwrap();
         let mut f = mk_ndp_solicit(target);
-        // Flip a byte in the target — checksum no longer matches.
         let last = f.len() - 10;
         f[last] ^= 0x01;
         assert_eq!(parse_ndp_solicit(&f), None);
@@ -516,8 +380,7 @@ mod tests {
     fn parse_ndp_wrong_type() {
         let target: Ipv6Addr = "fe80::42".parse().unwrap();
         let mut f = mk_ndp_solicit(target);
-        // Change type to ADVERT (and don't fix checksum — type
-        // gate fires before checksum verify, route.c:835).
+        // Type gate (:835) fires before checksum verify.
         f[ETHER_SIZE + IP6_SIZE] = ND_NEIGHBOR_ADVERT;
         assert_eq!(parse_ndp_solicit(&f), None);
     }
@@ -532,21 +395,16 @@ mod tests {
     fn parse_ndp_wrong_nexthdr() {
         let target: Ipv6Addr = "fe80::42".parse().unwrap();
         let mut f = mk_ndp_solicit(target);
-        // ip6_nxt at ETHER_SIZE + 6
-        f[ETHER_SIZE + 6] = 6; // TCP
+        f[ETHER_SIZE + 6] = 6; // ip6_nxt = TCP
         assert_eq!(parse_ndp_solicit(&f), None);
     }
 
     #[test]
     fn build_ndp_advert_hlim_255() {
-        // RFC 4861 §7.2.2: NA MUST have hop-limit 255. The C
-        // doesn't explicitly set this — it relies on the solicit
-        // having had hlim=255 (which it must, §7.1.1). Our fixture
-        // sets 255; verify it propagates.
+        // RFC 4861 §7.2.2. C relies on solicit having hlim=255 (§7.1.1).
         let target: Ipv6Addr = "2001:db8::1".parse().unwrap();
         let f = mk_ndp_solicit(target);
         let r = build_ndp_advert(&f).expect("valid");
-        // ip6_hlim at ETHER_SIZE + 7
         assert_eq!(r[ETHER_SIZE + 7], 255);
     }
 
@@ -556,10 +414,7 @@ mod tests {
         let f = mk_ndp_solicit(target);
         let r = build_ndp_advert(&f).expect("valid");
 
-        // Reverify the checksum independently. This is the
-        // strongest test: parse_ndp_solicit can't accept what
-        // build_ndp_advert emits (wrong type) but the checksum
-        // logic is shared.
+        // Reverify independently (parse can't accept ADVERT, but checksum is shared).
         let ip6_bytes: &[u8; IP6_SIZE] = r[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().unwrap();
         let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
         let icmp_len = NS_SIZE + OPT_SIZE + ETH_ALEN;
@@ -579,25 +434,20 @@ mod tests {
         let f = mk_ndp_solicit(target);
         let r = build_ndp_advert(&f).expect("valid");
 
-        // eth: dst = orig-src, src = orig-src with last byte ^0xFF
-        assert_eq!(&r[..6], &[0x02, 0, 0, 0, 0, 0x01]);
-        assert_eq!(&r[6..12], &[0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]);
+        assert_eq!(&r[..6], &[0x02, 0, 0, 0, 0, 0x01]); // dst = orig-src
+        assert_eq!(&r[6..12], &[0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]); // src = fake
 
-        // ip6: src = target, dst = orig-ip6-src
         let ip6_bytes: &[u8; IP6_SIZE] = r[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().unwrap();
         let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
         assert_eq!(ip6.ip6_src, target.octets());
         let orig_src: Ipv6Addr = "fe80::1".parse().unwrap();
         assert_eq!(ip6.ip6_dst, orig_src.octets());
 
-        // icmp: type=ADVERT, reserved=Solicited flag
         let ns_off = ETHER_SIZE + IP6_SIZE;
         assert_eq!(r[ns_off], ND_NEIGHBOR_ADVERT);
         assert_eq!(&r[ns_off + 4..ns_off + 8], &0x4000_0000u32.to_be_bytes());
-        // target unchanged
         assert_eq!(&r[ns_off + 8..ns_off + 24], &target.octets());
 
-        // opt: type=TARGET_LLADDR, lladdr = fake mac
         let opt_off = ns_off + NS_SIZE;
         assert_eq!(r[opt_off], ND_OPT_TARGET_LINKADDR);
         assert_eq!(
@@ -608,9 +458,7 @@ mod tests {
 
     #[test]
     fn build_ndp_advert_no_opt() {
-        // Solicit without SOURCE_LLADDR option (DAD-style, RFC
-        // 4861 §7.2.2: unspecified source → no opt). The C handles
-        // both paths (has_opt branch); so do we.
+        // DAD-style (RFC 4861 §7.2.2: unspec src → no opt). C has_opt branch.
         let target: Ipv6Addr = "fe80::99".parse().unwrap();
         let ip_src: Ipv6Addr = "fe80::1".parse().unwrap();
         let ip_dst: Ipv6Addr = "ff02::1".parse().unwrap();
@@ -633,7 +481,6 @@ mod tests {
         f.extend_from_slice(&[0, 0]);
         f.extend_from_slice(&[0; 4]);
         f.extend_from_slice(&target.octets());
-        // checksum (no opt)
         let mut pseudo = Ipv6Pseudo::default();
         pseudo.ip6_src = ip_src.octets();
         pseudo.ip6_dst = ip_dst.octets();
@@ -643,10 +490,8 @@ mod tests {
         ck = inet_checksum(&f[ns_off..], ck);
         f[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes());
 
-        // Parses.
         assert_eq!(parse_ndp_solicit(&f), Some(target));
 
-        // Builds, with no opt in output, checksum valid.
         let r = build_ndp_advert(&f).expect("valid");
         assert_eq!(r.len(), ETHER_SIZE + IP6_SIZE + NS_SIZE);
         assert_eq!(r[ETHER_SIZE + IP6_SIZE], ND_NEIGHBOR_ADVERT);
