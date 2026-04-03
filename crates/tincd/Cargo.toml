@@ -52,6 +52,20 @@ libc = "0.2"
 # No 'all' feature: V6ONLY/REUSEADDR/NODELAY/BROADCAST are all ungated.
 socket2 = "0.5"
 
+# zlib levels 1-9. miniz backend (no C dep). The C tinc uses real
+# zlib; output bytes differ but cross-decompress fine (deflate is a
+# SPEC, both implement it). KAT in compress.rs proves cross-decode.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# LZ4 level 12. Block format (no frame, no length prefix), matches
+# the C's LZ4_compress_fast_extState wire output. KAT proves it.
+lz4_flex = { version = "0.11", default-features = false }
+
+# STUB(chunk-9-lzo): vendor minilzo.c via cc crate. lzo-sys exists
+# but is bindings-only; rust-lzo/lzo1x are pure-rust ports of unknown
+# quality. LZO is the tinc 1.0 DEFAULT — wire-compat is non-negotiable.
+# Decision deferred; compress::Level::LzoLo/LzoHi return None.
+
 [dev-dependencies]
 # Integration tests: tempdir for confbase, no other deps.
 # Hand-rolled TmpGuard (per the standing rule: NamedTempFile not used).
