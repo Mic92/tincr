@@ -255,3 +255,23 @@ The 2012 commit's hardcoded `data[25]`/`data[46]` were already wrong; `0ee139e9`
 **Our port**: faithfully reproduced (the agent's `CHECK` marker is now resolved). Correctness fix would be `[ethlen+9]`/`[ethlen+IHL*4]`. Upstream patch: TODO submit.
 
 The v6 branch (`route.c:373-374`) has the SAME bug shape: `[ethlen+6]` is correct (`ip6_nxt`) but `[ethlen+40]` reads `icmp6.type` only if there's no extension header — which is the common case, so v6 is mostly-correct by accident.
+
+### proxy.c:201,206 — SOCKS5 auth length size_t→u8 truncation
+
+**Found by**: socks-leaf agent (`d988b79f`).
+
+```c
+// proxy.c:199-206
+size_t userlen = strlen(proxyuser);
+size_t passlen = strlen(proxypass);
+*auth++ = userlen;      // size_t → uint8_t implicit narrow
+memcpy(auth, proxyuser, userlen);
+auth += userlen;
+*auth++ = passlen;      // ditto
+```
+
+RFC 1929 (SOCKS5 username/password auth) length fields are single bytes; valid range is 1..255. The C never bound-checks. A 256-byte username writes `0x00` as the length byte; the proxy server reads zero bytes of username, then tries to parse the actual username bytes as the password length — garbage.
+
+**Impact**: misconfigure-only (256-byte proxy creds are unusual). Silent failure mode — the proxy rejects what looks like a legitimate auth attempt; operator debugs the wrong thing.
+
+**Our port** (`socks.rs:163-167`): bound-check, return `BuildError::CredTooLong` at request build time. STRICTER than C. The error surfaces at config load, not at connect time.
