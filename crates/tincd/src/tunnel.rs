@@ -119,6 +119,20 @@ pub struct TunnelState {
     /// 1211`). One per `udp_discovery_keepalive_interval`.
     pub udp_reply_sent: Option<Instant>,
 
+    /// `n->udp_info_sent` (`node.h:122`). Debounce for `send_
+    /// udp_info` (`protocol_misc.c:183`: `now - to->udp_info_sent
+    /// < udp_info_interval` → skip). Only checked when WE originate
+    /// (`from == myself`); forwarding doesn't debounce. Per-
+    /// destination: keyed on the node we're sending the hint TO.
+    pub udp_info_sent: Option<Instant>,
+
+    /// `n->mtu_info_sent` (`node.h:123`). Same shape, separate
+    /// timestamp from `udp_info_sent` (`protocol_misc.c:291`).
+    /// MTU_INFO landed one release after UDP_INFO; the C kept the
+    /// debounces independent so a UDP_INFO send doesn't suppress
+    /// the next MTU_INFO.
+    pub mtu_info_sent: Option<Instant>,
+
     /// `n->outcompression` (`node.h:77`). The compression level the
     /// PEER advertised in their ANS_KEY (`protocol_key.c:545`: `from
     /// ->outcompression = compression`). We use this when COMPRESSING
@@ -393,6 +407,8 @@ mod tests {
                 p
             }),
             udp_reply_sent: Some(Instant::now()),
+            udp_info_sent: Some(Instant::now()),
+            mtu_info_sent: Some(Instant::now()),
             outcompression: 6,
             incompression: 12,
             in_packets: 100,

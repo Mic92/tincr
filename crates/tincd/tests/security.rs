@@ -523,9 +523,14 @@ fn id_timeout_half_open_survives() {
 ///    machinery; the label-ordering itself is pinned by
 ///    `proto::tests::tcp_label_has_trailing_nul`.
 ///
-/// **Assertion**: `dump nodes` on each daemon shows exactly 1 row
-/// (itself). Neither gained a peer. C `splice.py:85-86`:
-/// `check.nodes(foo, 1); check.nodes(bar, 1)`.
+/// **Assertion**: `dump nodes` on each daemon shows exactly 1
+/// REACHABLE node (itself). Neither gained a peer. C `splice.
+/// py:85-86`: `check.nodes(foo, 1); check.nodes(bar, 1)`.
+///
+/// (`load_all_nodes` adds the OTHER name to the graph at setup
+/// — each daemon has a hosts/ file for the other for the pubkey.
+/// C `net_setup.c:186-189` does the same. The MITM-defense
+/// invariant is reachability: no edge → unreachable.)
 #[test]
 fn splice_mitm_rejected() {
     use std::net::TcpListener;
@@ -750,28 +755,38 @@ fn splice_mitm_rejected() {
     let alice_stderr = drain_stderr(alice_child);
     let bob_stderr = drain_stderr(bob_child);
 
-    // Exactly 1 node each: itself. The splice did NOT add a peer.
+    // Exactly 1 REACHABLE node each: itself. The splice did NOT
+    // add a peer edge. `load_all_nodes` puts the other name in
+    // the graph (each has a hosts/ file for the other's pubkey),
+    // but unreachable. Status bit 4 (`0x10`) = reachable.
+    let reachable = |rows: &[String]| -> Vec<String> {
+        rows.iter()
+            .filter_map(|r| {
+                let body = r.strip_prefix("18 3 ")?;
+                let mut t = body.split_whitespace();
+                let name = t.next()?;
+                // Body tokens: name id host "port" port cipher
+                // digest maclen compression options STATUS …
+                // Status is token 10; after `next()` consumed
+                // name, that's nth(9).
+                let status = u32::from_str_radix(t.nth(9)?, 16).ok()?;
+                (status & 0x10 != 0).then(|| name.to_owned())
+            })
+            .collect()
+    };
+    let alice_reach = reachable(&alice_nodes);
+    let bob_reach = reachable(&bob_nodes);
     assert_eq!(
-        alice_nodes.len(),
-        1,
-        "alice should see only itself; rows: {alice_nodes:?}\n\
+        alice_reach,
+        vec!["alice".to_owned()],
+        "alice should see only herself reachable; all rows: {alice_nodes:?}\n\
          alice stderr:\n{alice_stderr}\nbob stderr:\n{bob_stderr}"
     );
-    assert!(
-        alice_nodes[0].starts_with("18 3 alice "),
-        "alice's only node is alice; row: {:?}",
-        alice_nodes[0]
-    );
     assert_eq!(
-        bob_nodes.len(),
-        1,
-        "bob should see only itself; rows: {bob_nodes:?}\n\
+        bob_reach,
+        vec!["bob".to_owned()],
+        "bob should see only himself reachable; all rows: {bob_nodes:?}\n\
          alice stderr:\n{alice_stderr}\nbob stderr:\n{bob_stderr}"
-    );
-    assert!(
-        bob_nodes[0].starts_with("18 3 bob "),
-        "bob's only node is bob; row: {:?}",
-        bob_nodes[0]
     );
 
     // NEITHER completed. The role-asymmetry deadlock means no SIG

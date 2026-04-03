@@ -1622,11 +1622,14 @@ fn three_daemon_relay() {
 /// edge(c, ...)` not `send_add_edge(everyone, ...)`); mid's
 /// `on_add_subnet`/`on_add_edge` never `forward_request`. So:
 ///
-/// - alice's `dump nodes` shows **2 nodes** (alice, mid). She
+/// - alice's `dump nodes` shows bob as **unreachable**. She
 ///   never received bob's ADD_EDGE because mid didn't forward it.
-/// - bob: same. **2 nodes** (bob, mid).
-/// - mid: **3 nodes**. The hub knows its spokes; spokes don't
-///   know each other.
+///   (bob IS in alice's graph: `load_all_nodes` walks hosts/ at
+///   setup and adds every name — C `net_setup.c:186-189`. But
+///   no edge reaches him.)
+/// - bob: same. alice is unreachable from bob's view.
+/// - mid: 3 nodes, all REACHABLE. Hub knows spokes; spokes don't
+///   know each other's edges.
 /// - A packet from alice to `10.0.0.2` (bob's subnet) → alice's
 ///   `route()` returns `Unreachable` (alice doesn't have bob's
 ///   subnet — mid didn't forward bob's ADD_SUBNET). alice writes
@@ -1741,40 +1744,71 @@ fn three_daemon_tunnelserver() {
             .collect()
     };
 
+    // `load_all_nodes` (C `net_setup.c:186-189`) adds every
+    // hosts/-file name to the graph at setup, so bob IS in
+    // alice's `dump nodes` (alice has hosts/bob for the pubkey).
+    // The tunnelserver assertion is REACHABILITY, not presence:
+    // mid never forwarded bob's ADD_EDGE → no edge to bob →
+    // bob unreachable. Status bit 4 (`0x10`) is `reachable`.
+    let reachable_names = |rows: &[String]| -> Vec<String> {
+        rows.iter()
+            .filter_map(|r| {
+                let body = r.strip_prefix("18 3 ")?;
+                let mut t = body.split_whitespace();
+                let name = t.next()?;
+                // Body tokens: name id host "port" port cipher
+                // digest maclen compression options STATUS …
+                let status = u32::from_str_radix(t.nth(9)?, 16).ok()?;
+                (status & 0x10 != 0).then(|| name.to_owned())
+            })
+            .collect()
+    };
+
     let a_names = node_names(&alice_stable);
+    let a_reachable = reachable_names(&alice_stable);
     assert_eq!(
-        alice_stable.len(),
+        a_reachable.len(),
         2,
-        "alice should see exactly 2 nodes (alice, mid) — mid's \
-         tunnelserver mode never forwarded bob's ADD_EDGE; got: {a_names:?}"
+        "alice should see exactly 2 REACHABLE nodes (alice, mid) — \
+         mid's tunnelserver mode never forwarded bob's ADD_EDGE; \
+         all: {a_names:?}, reachable: {a_reachable:?}"
     );
-    assert!(a_names.contains(&"alice".to_string()), "{a_names:?}");
-    assert!(a_names.contains(&"mid".to_string()), "{a_names:?}");
     assert!(
-        !a_names.contains(&"bob".to_string()),
-        "alice should NOT know bob; got: {a_names:?}"
+        a_reachable.contains(&"alice".to_string()),
+        "{a_reachable:?}"
+    );
+    assert!(a_reachable.contains(&"mid".to_string()), "{a_reachable:?}");
+    assert!(
+        !a_reachable.contains(&"bob".to_string()),
+        "bob should be UNREACHABLE from alice (no edge gossiped); \
+         got reachable: {a_reachable:?}"
     );
 
-    // bob: same. 2 nodes (bob, mid).
+    // bob: same. 2 REACHABLE (bob, mid); alice is in graph but
+    // unreachable.
     let b_nodes = bob_ctl.dump(3);
     let b_names = node_names(&b_nodes);
+    let b_reachable = reachable_names(&b_nodes);
     assert_eq!(
-        b_nodes.len(),
+        b_reachable.len(),
         2,
-        "bob should see exactly 2 nodes (bob, mid); got: {b_names:?}"
+        "bob should see exactly 2 REACHABLE nodes (bob, mid); \
+         all: {b_names:?}, reachable: {b_reachable:?}"
     );
     assert!(
-        !b_names.contains(&"alice".to_string()),
-        "bob should NOT know alice; got: {b_names:?}"
+        !b_reachable.contains(&"alice".to_string()),
+        "alice should be UNREACHABLE from bob; got: {b_reachable:?}"
     );
 
-    // mid: 3 nodes. Hub knows spokes; spokes don't know each other.
+    // mid: 3 REACHABLE. Hub knows both spokes via direct edges.
     let m_nodes = mid_ctl.dump(3);
     let m_names = node_names(&m_nodes);
+    let m_reachable = reachable_names(&m_nodes);
     assert_eq!(
-        m_nodes.len(),
+        m_reachable.len(),
         3,
-        "mid (the hub) should see all 3 nodes; got: {m_names:?}"
+        "mid (the hub) should see all 3 nodes REACHABLE; \
+         all: {m_names:?}, reachable: {m_reachable:?}"
     );
 
     // alice's subnets: she knows her OWN (10.0.0.1/32) and mid's
@@ -2200,5 +2234,297 @@ fn tinc_join_against_real_daemon() {
     assert!(
         alice_stderr.contains("Invitation") || alice_stderr.contains("invitation"),
         "alice should log invitation activity; stderr:\n{alice_stderr}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// autoconnect (chunk-11)
+
+/// `load_all_nodes` populates `has_address` AND adds hosts/-only
+/// names to the graph (`net_setup.c:186-189`). Alice has a `hosts/
+/// carol` file with `Address =` but NO `ConnectTo = carol` and
+/// carol never runs. After spawn, `dump nodes` shows carol as a
+/// row — proves `lookup_or_add_node` ran for hosts/-file-only
+/// names. Carol stays unreachable (status bit 4 clear).
+///
+/// `AutoConnect = no`: don't let the periodic tick try to dial
+/// carol (her port is bogus, the connect would just ECONNREFUSED
+/// and clutter stderr).
+#[test]
+fn load_all_nodes_populates_graph() {
+    let tmp = TmpGuard::new("loadall");
+    let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
+    let bob = Node::new(tmp.path(), "bob", 0xB9);
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, false); // no ConnectTo
+
+    // hosts/carol with Address — NO key, never spawned. Just a
+    // file in alice's hosts/ dir. `load_all_nodes` should add
+    // "carol" to the graph and `has_address`.
+    std::fs::write(
+        alice.confbase.join("hosts").join("carol"),
+        "Address = 127.0.0.1 1\n",
+    )
+    .unwrap();
+
+    // hosts/.swp — editor swap file, NOT a valid `check_id`.
+    // `load_all_nodes` should skip it (no `.swp` row in dump).
+    std::fs::write(alice.confbase.join("hosts").join(".swp"), "garbage\n").unwrap();
+
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        panic!("alice setup failed: {}", drain_stderr(alice_child));
+    }
+
+    let mut ctl = Ctl::connect(&alice);
+    let nodes = ctl.dump(3); // REQ_DUMP_NODES
+
+    // Expect 3 rows: alice (myself), bob (hosts/ file), carol
+    // (hosts/ file with Address). NOT 4 (.swp filtered).
+    let names: Vec<&str> = nodes
+        .iter()
+        .filter_map(|r| r.strip_prefix("18 3 "))
+        .filter_map(|b| b.split_whitespace().next())
+        .collect();
+    assert_eq!(names.len(), 3, "dump nodes: {nodes:?}");
+    assert!(names.contains(&"alice"), "missing alice: {names:?}");
+    assert!(names.contains(&"bob"), "missing bob: {names:?}");
+    assert!(names.contains(&"carol"), "missing carol: {names:?}");
+
+    // carol's status: bit 4 (reachable) CLEAR. She's in the graph
+    // but no edge reaches her. Body token 10 (0-indexed) = status.
+    let carol_row = nodes
+        .iter()
+        .find(|r| {
+            r.strip_prefix("18 3 ")
+                .is_some_and(|b| b.starts_with("carol "))
+        })
+        .expect("carol row");
+    let status = carol_row
+        .strip_prefix("18 3 ")
+        .unwrap()
+        .split_whitespace()
+        .nth(10)
+        .and_then(|s| u32::from_str_radix(s, 16).ok())
+        .expect("status hex");
+    assert_eq!(
+        status & 0x10,
+        0,
+        "carol should be unreachable (no edges); status={status:x}"
+    );
+
+    drop(ctl);
+    let stderr = drain_stderr(alice_child);
+    // No "Autoconnecting" log: AutoConnect = no.
+    assert!(
+        !stderr.contains("Autoconnecting"),
+        "AutoConnect = no should suppress autoconnect; stderr:\n{stderr}"
+    );
+}
+
+/// `do_autoconnect` `<3 → make_new_connection` loop. Alice has
+/// `AutoConnect = yes` (the default) and `hosts/{bob,carol,dave}`
+/// all with `Address =`, but ZERO `ConnectTo =` lines. The periodic
+/// tick (every 5s) runs `decide_autoconnect`; with `nc=0` it picks
+/// one eligible node per tick → `Connect`. Three ticks later (~15s)
+/// alice has 3 active connections.
+///
+/// **Why ~15s and not faster**: `make_new_connection` randomizes
+/// over eligible nodes. With 3 eligibles, the first pick is 1/3
+/// each. Once one connects, `nc=1`, next tick picks from 2. The
+/// `pending_outgoings` check (`autoconnect.c:59-71`) means a
+/// re-roll on the SAME node is `Noop` — doesn't burn a tick. With
+/// the periodic timer at 5s, worst-case is 3 successful picks =
+/// 15s. Add slop for the connect+handshake latency (loopback,
+/// ~100ms each).
+///
+/// **Slow test**: ~15s. The 5s periodic is hardcoded (C `net.c:
+/// 298`: `{ 5, jitter() }`). Nextest's default slow-timeout is
+/// 30s; this fits. The CI profile has 60s.
+#[test]
+fn autoconnect_converges_to_three() {
+    let tmp = TmpGuard::new("autoconnect");
+    // PingTimeout=10 on the peers: an inbound conn arriving at
+    // +15s gets stamped with the cached `timers.now()` from the
+    // previous event-loop turn (up to 5s stale — the periodic
+    // timer is the only thing waking an idle peer). With the
+    // `write_config_multi` default PingTimeout=1, the conn is
+    // born already-stale and reaped before id_h. Same root cause
+    // as `outgoing_retry_after_refused`'s note; bigger window
+    // here because the connect lands much later. PingTimeout=10
+    // > 5s periodic + handshake. (PingTimeout is clamped to
+    // `≤ PingInterval`; default PingInterval=60 leaves room.)
+    let alice = Node::new(tmp.path(), "alice", 0xA0).with_conf("PingTimeout = 10\n");
+    let peer_conf = "PingTimeout = 10\nAutoConnect = no\n";
+    let bob = Node::new(tmp.path(), "bob", 0xB0).with_conf(peer_conf);
+    let carol = Node::new(tmp.path(), "carol", 0xC0).with_conf(peer_conf);
+    let dave = Node::new(tmp.path(), "dave", 0xD0).with_conf(peer_conf);
+
+    // The peers: just listen, no ConnectTo. AutoConnect=no on
+    // them so THEY don't start dialing each other (we only want
+    // alice's autoconnect to fire; cross-dialing would muddy the
+    // "exactly 3 conns from alice" assertion).
+    bob.write_config_multi(&[&alice], &[], None, None);
+    carol.write_config_multi(&[&alice], &[], None, None);
+    dave.write_config_multi(&[&alice], &[], None, None);
+
+    // alice: NO ConnectTo. Her hosts/ files for bob/carol/dave
+    // all need `Address =` so `load_all_nodes` populates
+    // `has_address`. `write_config_multi` only writes Address
+    // for ConnectTo targets; we write hosts/ manually instead.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(alice.confbase.join("hosts")).unwrap();
+        std::fs::write(
+            alice.confbase.join("tinc.conf"),
+            format!(
+                "Name = alice\nDeviceType = dummy\nAddressFamily = ipv4\n{}PingTimeout = 1\n",
+                alice.extra_conf
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            alice.confbase.join("hosts").join("alice"),
+            format!("Port = {}\n", alice.port),
+        )
+        .unwrap();
+        for peer in [&bob, &carol, &dave] {
+            let pk = tinc_crypto::b64::encode(&peer.pubkey());
+            std::fs::write(
+                alice.confbase.join("hosts").join(peer.name),
+                format!(
+                    "Ed25519PublicKey = {pk}\nAddress = 127.0.0.1 {}\n",
+                    peer.port
+                ),
+            )
+            .unwrap();
+        }
+        let sk = tinc_crypto::sign::SigningKey::from_seed(&alice.seed);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(alice.confbase.join("ed25519_key.priv"))
+            .unwrap();
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    }
+
+    // ─── spawn peers first (so alice's connects succeed) ─────────
+    // Stderr → file: this test runs ~15s with 4 daemons cross-
+    // gossiping. Piped stderr (~64K buffer) fills and blocks the
+    // event loop on `write(2)`. /dev/null discards diagnostics; a
+    // tmpfile captures them for the failure dump.
+    let spawn_logged = |n: &Node| {
+        let log = std::fs::File::create(tmp.path().join(format!("{}.stderr", n.name))).unwrap();
+        Command::new(tincd_bin())
+            .arg("-c")
+            .arg(&n.confbase)
+            .arg("--pidfile")
+            .arg(&n.pidfile)
+            .arg("--socket")
+            .arg(&n.socket)
+            .env("RUST_LOG", "tincd=info")
+            .stderr(log)
+            .spawn()
+            .expect("spawn tincd")
+    };
+    let mut bob_child = spawn_logged(&bob);
+    let mut carol_child = spawn_logged(&carol);
+    let mut dave_child = spawn_logged(&dave);
+    for (n, child) in [
+        (&bob, &mut bob_child),
+        (&carol, &mut carol_child),
+        (&dave, &mut dave_child),
+    ] {
+        if !wait_for_file(&n.socket) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{} setup failed", n.name);
+        }
+    }
+
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        let _ = carol_child.kill();
+        let _ = dave_child.kill();
+        panic!("alice setup failed: {}", drain_stderr(alice_child));
+    }
+
+    // ─── poll: alice converges to 3 active peer conns ────────────
+    // First periodic tick at +5s; one Connect per tick. 3 ticks
+    // ≈ 15s to fill all three slots. 25s timeout for CI slop.
+    let mut alice_ctl = Ctl::connect(&alice);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut last_conns;
+    let mut last_count;
+    let converged = loop {
+        let conns = alice_ctl.dump(6);
+        let active_peers: usize = conns
+            .iter()
+            .filter(|r| {
+                r.strip_prefix("18 6 ").is_some_and(|b| {
+                    let mut t = b.split_whitespace();
+                    let name = t.next();
+                    let status = t.last().and_then(|s| u32::from_str_radix(s, 16).ok());
+                    // Active (bit 1) AND not the control conn (bit 9).
+                    matches!(name, Some("bob") | Some("carol") | Some("dave"))
+                        && status.is_some_and(|s| s & 0x2 != 0)
+                })
+            })
+            .count();
+        last_count = active_peers;
+        last_conns = conns;
+        if active_peers == 3 {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // ─── collect stderr (also for failure diagnosis) ────────────
+    drop(alice_ctl);
+    let _ = alice_child.kill();
+    let alice_out = alice_child.wait_with_output().unwrap();
+    let alice_stderr = String::from_utf8_lossy(&alice_out.stderr);
+    let _ = bob_child.kill();
+    let _ = carol_child.kill();
+    let _ = dave_child.kill();
+    let _ = bob_child.wait();
+    let _ = carol_child.wait();
+    let _ = dave_child.wait();
+
+    if !converged {
+        // Dump all peer logs on failure.
+        let mut peer_logs = String::new();
+        for n in [&bob, &carol, &dave] {
+            let path = tmp.path().join(format!("{}.stderr", n.name));
+            let _ = std::fmt::Write::write_fmt(
+                &mut peer_logs,
+                format_args!(
+                    "\n--- {} stderr ---\n{}",
+                    n.name,
+                    std::fs::read_to_string(&path).unwrap_or_default()
+                ),
+            );
+        }
+        panic!(
+            "timed out waiting for 3 active peer conns; \
+             last count={last_count}, last dump conns: {last_conns:?}\n\
+             alice stderr:\n{alice_stderr}{peer_logs}"
+        );
+    }
+
+    // Three Autoconnecting log lines (one per peer).
+    let auto_count = alice_stderr.matches("Autoconnecting to ").count();
+    assert_eq!(
+        auto_count, 3,
+        "expected 3 Autoconnecting logs (one per peer), got {auto_count}; \
+         stderr:\n{alice_stderr}"
     );
 }

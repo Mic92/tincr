@@ -28,10 +28,11 @@ use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
-use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, ReqKey, SubnetMsg};
+use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, SubnetMsg, UdpInfo};
 use tinc_proto::{AddrStr, Request, Subnet};
 use tinc_sptps::{Framing, Role, Sptps};
 
+use crate::autoconnect::{self, AutoAction, NodeSnapshot};
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::graph_glue::{Transition, run_graph};
@@ -58,6 +59,7 @@ use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
+use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
 use crate::{compress, icmp, mss, neighbor};
 
 // `net.h:106-108`: SPTPS record-type bits for the per-tunnel data
@@ -199,6 +201,9 @@ pub enum SignalWhat {
 /// `Default` matches C defaults. Each field documents its
 /// `net_setup.c` source.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // C globals: each bool is
+// one `get_config_bool` knob (`net_setup.c`). Grouping them into
+// state-machine enums would obscure the 1:1 C-variable mapping.
 pub struct DaemonSettings {
     /// `pinginterval`. C default 60 (`net_setup.c:1243`). Seconds
     /// between pings.
@@ -283,6 +288,18 @@ pub struct DaemonSettings {
     /// default (direct connect). Only `Exec` is wired; SOCKS/HTTP
     /// need a connect-state machine (`STUB(chunk-11-proxy)`).
     pub proxy: Option<ProxyConfig>,
+    /// `autoconnect` (`net_setup.c:560-562`). Default **true** (the C
+    /// `else` branch sets it). When set, `periodic_handler` runs
+    /// `do_autoconnect` every 5s: converge to ~3 direct connections.
+    /// Tests that don't want surprise connections (most of them) set
+    /// `AutoConnect = no`.
+    pub autoconnect: bool,
+    /// `udp_info_interval` (`protocol_misc.c:35`). Seconds. Debounce
+    /// for `send_udp_info` (only when WE originate). Default 5.
+    pub udp_info_interval: u32,
+    /// `mtu_info_interval` (`protocol_misc.c:34`). Seconds. Separate
+    /// debounce from UDP_INFO. Default 5.
+    pub mtu_info_interval: u32,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -335,6 +352,12 @@ impl Default for DaemonSettings {
             // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
             invitation_lifetime: Duration::from_secs(604_800),
             proxy: None,
+            // C `net_setup.c:561`: `else { autoconnect = true; }`.
+            autoconnect: true,
+            // C `protocol_misc.c:35`: `int udp_info_interval = 5`.
+            udp_info_interval: 5,
+            // C `protocol_misc.c:34`: `int mtu_info_interval = 5`.
+            mtu_info_interval: 5,
         }
     }
 }
@@ -391,6 +414,28 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
     if let Some(e) = config.lookup("DirectOnly").next() {
         if let Ok(v) = e.get_bool() {
             settings.directonly = v;
+        }
+    }
+    // AutoConnect (`:560-562`). Default true — keep the default if
+    // the parse fails (C `get_config_bool` only writes on success).
+    if let Some(e) = config.lookup("AutoConnect").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.autoconnect = v;
+        }
+    }
+    // UDPInfoInterval / MTUInfoInterval (`:400-401`).
+    if let Some(e) = config.lookup("UDPInfoInterval").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u32::try_from(v) {
+                settings.udp_info_interval = v;
+            }
+        }
+    }
+    if let Some(e) = config.lookup("MTUInfoInterval").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u32::try_from(v) {
+                settings.mtu_info_interval = v;
+            }
         }
     }
     // InvitationExpire (`:566-568`).
@@ -725,6 +770,22 @@ pub struct Daemon {
     /// fd. Keyed by `ConnId` (the connection slot is allocated at
     /// `do_outgoing_connection` time, fd-less; this map fills it).
     pub(crate) connecting_socks: slotmap::SecondaryMap<ConnId, socket2::Socket>,
+
+    /// `n->status.has_address` (`net_setup.c:211`). Names of nodes
+    /// whose `hosts/NAME` file has an `Address =` line. Populated by
+    /// `load_all_nodes` at setup + reload. Read by `autoconnect::
+    /// decide` (the eligible-to-dial gate — `autoconnect.c:34`).
+    ///
+    /// **Why a `HashSet`, not a `NodeState` field**: `NodeState` is
+    /// direct-peers-only (allocated in `on_ack`). `has_address`
+    /// applies to ANY node we have a hosts/ file for, including ones
+    /// we've never connected to and only know from disk. The C `node_
+    /// t` smushes both lifecycles into one struct; we keep them
+    /// separate. `load_all_nodes` does add every hosts/-file name to
+    /// the GRAPH (matching C `:186-189`) so `node_ids` is the
+    /// authoritative "nodes I know exist" set; this is just the
+    /// `has_address` annotation on top.
+    pub(crate) has_address: HashSet<String>,
 
     /// Last `sssp` result. C `node_t` stores `nexthop`/`via`/
     /// `distance` directly on the node (written by `graph.c:188-196`);
@@ -1269,6 +1330,7 @@ impl Daemon {
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),
+            has_address: HashSet::new(),
             last_routes: Vec::new(),
             settings,
             invitation_key,
@@ -1320,6 +1382,15 @@ impl Daemon {
         // The mark-sweep (`:870-883`, terminate connections whose
         // ConnectTo was removed) is now in `reload_configuration`.
         // setup() never has stale outgoings (it's first boot).
+
+        // ─── load_all_nodes (`net_setup.c:161-217`, called `:1057`)
+        // C does this AFTER `graph()` (which only knows myself at
+        // this point) and BEFORE device open. We do it after the
+        // ConnectTo loop so the lookup_or_add_node above doesn't
+        // race the directory walk — both add to the same graph,
+        // order doesn't matter for correctness, but doing it last
+        // keeps the "load every name from disk" step in one place.
+        daemon.load_all_nodes();
 
         // ─── tinc-up (net_setup.c:745-762, `device_enable`)
         // C calls this AFTER device open succeeds, BEFORE `Ready`.
@@ -1738,7 +1809,13 @@ impl Daemon {
         self.contradicting_del_edge = 0;
 
         // C `:294-296`: `if(autoconnect && node_tree.count > 1)
-        // do_autoconnect()`. STUB(chunk-11): autoconnect.
+        // do_autoconnect()`. `node_tree.count` is the total number
+        // of NodeIds (incl. myself); `> 1` means "we know of at
+        // least one other node". `node_ids.len()` is exactly that.
+        if self.settings.autoconnect && self.node_ids.len() > 1 {
+            let action = self.decide_autoconnect();
+            self.execute_auto_action(action);
+        }
 
         // C `:298-300`: `timeout_set(data, { 5, jitter() })`.
         self.timers.set(self.periodictimer, Duration::from_secs(5));
@@ -2126,6 +2203,14 @@ impl Daemon {
             }
         }
 
+        // C `net.c:370`: `load_all_nodes()`. Re-walk hosts/ — a
+        // newly-added file with `Address =` becomes eligible for
+        // autoconnect on the next periodic tick. C does this AFTER
+        // `setup_myself_reloadable` and BEFORE `try_outgoing_
+        // connections`; we already did the ConnectTo diff above
+        // (it doesn't read `has_address`), so order is harmless.
+        self.load_all_nodes();
+
         // C `:455`: `last_config_check = now.tv_sec`.
         self.last_config_check = SystemTime::now();
 
@@ -2310,6 +2395,9 @@ impl Daemon {
     /// (`:1754`). Goes straight to the source-ID lookup at `:1736`.
     /// The C does udp-addr-first because legacy-crypto packets have
     /// no ID prefix; we don't have legacy.
+    #[allow(clippy::too_many_lines)] // C `:1718-1842` is 124 LOC.
+    // The relay/receive branches share the prefix-parse + lookup
+    // prelude; splitting would duplicate or thread 5 locals through.
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
         // C `:1736`: `pkt->offset = 2 * sizeof(node_id_t)`. The
         // 12-byte [dst][src] prefix. Too-short packet: drop.
@@ -2385,9 +2473,31 @@ impl Daemon {
             }
             // dst == myself but not nullid: fall through to the
             // direct-receive path. Same as `dst.is_null()`.
-            // STUB(chunk-10-local): `:1810-1815` `if(n != from->via
-            // && to->via == myself) send_udp_info(myself, from)`.
-            // The "help the static relay" UDP-info breadcrumb.
+            // C `:1810-1815`: `if(n != from->via && to->via ==
+            // myself) send_udp_info(myself, from)`. The packet
+            // arrived via a dynamic relay (`n` is the immediate UDP
+            // sender; `from->via` is the static relay). If WE'RE
+            // the static relay (`to->via == myself`), tell `from`
+            // where they're reachable so the next packet can skip
+            // the dynamic relay. Gated to static-relay-only to
+            // avoid every hop in a chain emitting its own hint.
+            let from_via = self
+                .last_routes
+                .get(from_nid.0 as usize)
+                .and_then(Option::as_ref)
+                .map(|r| r.via);
+            // `n` (the immediate sender) is whoever owns `recv_
+            // from` — we don't track that NodeId here, but the C
+            // condition `n != from->via` is equivalent to "the
+            // packet was relayed at all" when the dst_id6 prefix
+            // is non-null (which is THIS branch). The non-null
+            // prefix means SOMEONE relayed; if that someone is
+            // `from` itself, the prefix would be null. So `n !=
+            // from->via` is implicitly satisfied here. Just check
+            // the second half.
+            if from_via == Some(self.myself) && self.send_udp_info(from_nid, &from_name, true) {
+                self.maybe_set_write_any();
+            }
         }
 
         // C `:1825`: `receive_udppacket(from, pkt)`. SPTPS branch
@@ -3543,9 +3653,11 @@ impl Daemon {
         for a in &actions {
             Self::log_pmtu_action(peer_name, a);
         }
-        // STUB(chunk-10-local): `:213-217` UDP-timeout-timer reset
-        // (`timeout_del + timeout_add(udp_ping_timeout)`). The
-        // `UdpPing` timer variant exists but isn't armed yet.
+        // C `:213-217` `timeout_del + timeout_add(udp_ping_
+        // timeout)`: the per-node UDP-timeout timer. We don't arm
+        // it (PMTU is driven inline by `try_tx`/`pmtu.tick()`, not
+        // a separate timer); see the BecameUnreachable comment.
+        // Nothing to reset.
         false
     }
 
@@ -3917,6 +4029,763 @@ impl Daemon {
         let nexthop_name = self.graph.node(nexthop)?.name.as_str();
         // `NodeState.conn` for the nexthop.
         self.nodes.get(nexthop_name)?.conn
+    }
+
+    /// `Route` lookup with bounds + `Option::as_ref` flatten.
+    /// `None` for unreachable / never-routed. Reads the cached
+    /// `last_routes` (NOT a fresh sssp).
+    fn route_of(&self, nid: NodeId) -> Option<&Route> {
+        self.last_routes.get(nid.0 as usize)?.as_ref()
+    }
+
+    /// `n->{min,max}mtu` snapshot for `udp_info::adjust_mtu_for_
+    /// send`. `None` if no PMTU state seeded yet.
+    fn pmtu_snapshot(&self, nid: NodeId) -> Option<PmtuSnapshot> {
+        self.tunnels.get(&nid)?.pmtu.as_ref().map(|p| PmtuSnapshot {
+            minmtu: p.minmtu,
+            maxmtu: p.maxmtu,
+        })
+    }
+
+    // ─── load_all_nodes (`net_setup.c:161-217`) ─────────────────
+
+    /// Walk `confbase/hosts/`, add every valid-named file to the
+    /// graph, populate `has_address` for files with `Address =`.
+    /// C `net_setup.c:161-217`. Called from `setup()` (`:1057`) and
+    /// `reload_configuration()` (`net.c:370`).
+    ///
+    /// **The `lookup_or_add_node` decision** (`:186-189`): the C
+    /// adds EVERY hosts/-file name to `node_tree`, even ones with
+    /// no edge to us. We match: a node with `has_address && !
+    /// reachable` is exactly autoconnect's eligible-to-dial set
+    /// (`autoconnect.c:34`). Without the graph add, the node would
+    /// be invisible to `decide()` (which walks `node_ids`, not
+    /// `has_address`). The cost is graph entries that stay
+    /// `reachable=false` until SOMETHING connects them — harmless,
+    /// `dump nodes` shows them as unreachable which is correct.
+    ///
+    /// `strictsubnets` branch (`:192-208`): STUB(chunk-12-switch).
+    /// Reads each file's `Subnet =` lines into the subnet tree.
+    /// We don't have strictsubnets yet.
+    fn load_all_nodes(&mut self) {
+        let hosts_dir = self.confbase.join("hosts");
+        let dir = match std::fs::read_dir(&hosts_dir) {
+            Ok(d) => d,
+            Err(e) => {
+                // C `:170-172`: `"Could not open %s: %s"`. Non-fatal.
+                log::error!(target: "tincd",
+                            "Could not open {}: {e}", hosts_dir.display());
+                return;
+            }
+        };
+
+        // Reload re-walks; clear so removed-Address files lose the
+        // bit. The C doesn't clear (it only sets, `:211`), so a
+        // file that HAD `Address` and then had it removed keeps
+        // the bit until restart. We diverge: clearing is the
+        // less-surprising behavior on SIGHUP, and there's no
+        // observable C contract for the stale-bit case (nothing
+        // reads has_address EXCEPT autoconnect, and autoconnect
+        // dialing a node with no Address just hits the addr-cache-
+        // empty path → retry_outgoing → harmless backoff).
+        self.has_address.clear();
+
+        for ent in dir.flatten() {
+            let Some(fname) = ent.file_name().to_str().map(str::to_owned) else {
+                continue; // non-UTF-8 filename — can't be a node name
+            };
+            // C `:176`: `if(!check_id(ent->d_name)) continue`.
+            // Filters `.` `..` and editor swap files for free.
+            if !tinc_proto::check_id(&fname) {
+                continue;
+            }
+
+            // C `:186-189`: `n = lookup_node; if(!n) { new_node;
+            // node_add; }`. Our fused helper.
+            self.lookup_or_add_node(&fname);
+
+            // C `:183-184`: `read_config_options(..., d_name);
+            // read_host_config(..., d_name)`. The C reads BOTH the
+            // tinc.conf-tagged options for this node AND its hosts/
+            // file. We only need the latter (the only thing read
+            // is `Address`, which is HOST-tagged).
+            let Ok(entries) = tinc_conf::parse_file(ent.path()) else {
+                continue; // unreadable file — skip silently (C does too)
+            };
+            let mut cfg = tinc_conf::Config::default();
+            cfg.merge(entries);
+
+            // C `:210-212`: `if(lookup_config("Address")) n->
+            // status.has_address = true`.
+            if cfg.lookup("Address").next().is_some() {
+                self.has_address.insert(fname);
+            }
+        }
+    }
+
+    // ─── autoconnect (`autoconnect.c`) ──────────────────────────
+
+    /// Build the snapshot, call `autoconnect::decide`. Three-phase
+    /// borrow: read `&self` to build snapshots, call `decide` (no
+    /// borrow), caller does `&mut self` to execute.
+    ///
+    /// `nodes` ordering: sorted by name. C walks `node_tree` (splay,
+    /// strcmp-ordered). `connect_to_unreachable` indexes by position
+    /// (`autoconnect.c:86`: `prng(count)` then walk to that index);
+    /// matching the C's iteration order makes the per-tick random
+    /// pick reproducible against C with the same RNG seed. Our RNG
+    /// is OsRng so this doesn't matter for production, but it's the
+    /// least-surprising shape.
+    fn decide_autoconnect(&self) -> AutoAction {
+        // Sort node names so iteration order matches the C splay
+        // (strcmp). `node_ids` HashMap iteration is random.
+        let mut names: Vec<&str> = self.node_ids.keys().map(String::as_str).collect();
+        names.sort_unstable();
+
+        let nodes: Vec<NodeSnapshot> = names
+            .iter()
+            .filter_map(|&name| {
+                let &nid = self.node_ids.get(name)?;
+                let gnode = self.graph.node(nid)?;
+                // C `n->edge_tree.count`: outgoing edges only (each
+                // direction is a separate `edge_t`). `node_edges()`
+                // returns the outgoing-edge slice.
+                let edge_count = self.graph.node_edges(nid).len();
+                // C `n->connection != NULL`: directly connected via
+                // ANY meta conn (in or out). `NodeState.conn` is
+                // exactly that — set in `on_ack`, cleared in
+                // `terminate`. Nodes without a NodeState (transitive,
+                // hosts/-only) are not directly connected.
+                let directly_connected = self
+                    .nodes
+                    .get(name)
+                    .and_then(|ns| ns.conn)
+                    .and_then(|cid| self.conns.get(cid))
+                    .is_some();
+                Some(NodeSnapshot {
+                    name: name.to_owned(),
+                    reachable: gnode.reachable,
+                    has_address: self.has_address.contains(name),
+                    directly_connected,
+                    edge_count,
+                })
+            })
+            .collect();
+
+        // C `:121-122`: `c->edge && c->outgoing`. Past-ACK
+        // (`active`) AND we initiated. Names of nodes, not ConnIds:
+        // `decide` matches by name.
+        let active_outgoing_conns: Vec<String> = self
+            .conns
+            .values()
+            .filter(|c| c.active && c.outgoing.is_some())
+            .map(|c| c.name.clone())
+            .collect();
+
+        // C `:152-163`: walk `outgoing_list`, skip ones with a
+        // matching `c->outgoing` (i.e. ones with a live conn). The
+        // pending set is "Outgoing slot exists, no conn serves it
+        // — the retry timer is waiting". Match by `c.outgoing` →
+        // `OutgoingId`. A conn that's STILL connecting (pre-ACK,
+        // not active yet) DOES count as serving the outgoing — the
+        // C `:155` check is just `c->outgoing == outgoing`, no
+        // `c->edge` gate.
+        let served: HashSet<OutgoingId> = self
+            .conns
+            .values()
+            .filter_map(|c| c.outgoing.map(OutgoingId::from))
+            .collect();
+        let pending_outgoings: Vec<String> = self
+            .outgoings
+            .iter()
+            .filter(|(oid, _)| !served.contains(oid))
+            .map(|(_, o)| o.node_name.clone())
+            .collect();
+
+        autoconnect::decide(
+            &self.name,
+            &nodes,
+            &active_outgoing_conns,
+            &pending_outgoings,
+            &mut OsRng,
+        )
+    }
+
+    /// Execute one `AutoAction`. The daemon-side I/O for `decide()`'s
+    /// pure decision. C `autoconnect.c`: each branch's tail.
+    fn execute_auto_action(&mut self, action: AutoAction) {
+        match action {
+            AutoAction::Noop => {}
+            AutoAction::Connect { name } => {
+                // C `autoconnect.c:67-71` (and `:106-110`): build
+                // `outgoing_t`, `setup_outgoing_connection`. Same
+                // path as setup()'s ConnectTo loop and reload's
+                // to_add loop. Copy-paste because the field set is
+                // small (3 lines) and factoring would obscure the
+                // C correspondence at each site.
+                log::info!(target: "tincd",
+                           "Autoconnecting to {name}");
+                self.lookup_or_add_node(&name);
+                let config_addrs = resolve_config_addrs(&self.confbase, &name);
+                let addr_cache =
+                    crate::addrcache::AddressCache::open(&self.confbase, &name, config_addrs);
+                let oid = self.outgoings.insert(Outgoing {
+                    node_name: name,
+                    timeout: 0,
+                    addr_cache,
+                });
+                let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
+                self.outgoing_timers.insert(oid, tid);
+                self.setup_outgoing_connection(oid);
+            }
+            AutoAction::Disconnect { name } => {
+                // C `:143-146`: `list_delete(&outgoing_list,
+                // c->outgoing); c->outgoing = NULL; terminate_
+                // connection(c, c->edge)`. Order matters: clear
+                // `c->outgoing` BEFORE terminate so terminate's
+                // retry-on-disconnect path doesn't fire (we're
+                // CHOOSING to drop this; don't reconnect).
+                log::info!(target: "tincd",
+                           "Autodisconnecting from {name}");
+                // Find ConnId by name (active + outgoing).
+                let cid = self
+                    .conns
+                    .iter()
+                    .find(|(_, c)| c.active && c.outgoing.is_some() && c.name == name)
+                    .map(|(id, _)| id);
+                if let Some(cid) = cid {
+                    let oid = self
+                        .conns
+                        .get_mut(cid)
+                        .and_then(|c| c.outgoing.take())
+                        .map(OutgoingId::from);
+                    // C `:143`: `list_delete`. Drop slot + timer.
+                    if let Some(oid) = oid {
+                        if let Some(tid) = self.outgoing_timers.remove(oid) {
+                            self.timers.del(tid);
+                        }
+                        self.outgoings.remove(oid);
+                    }
+                    self.terminate(cid);
+                }
+            }
+            AutoAction::CancelPending { name } => {
+                // C `:165-166`: `list_delete(&outgoing_list,
+                // outgoing)`. Just drop the slot; no conn to kill
+                // (that's the definition of "pending").
+                log::info!(target: "tincd",
+                           "Cancelled outgoing connection to {name}");
+                let oid = self
+                    .outgoings
+                    .iter()
+                    .find(|(_, o)| o.node_name == name)
+                    .map(|(id, _)| id);
+                if let Some(oid) = oid {
+                    if let Some(tid) = self.outgoing_timers.remove(oid) {
+                        self.timers.del(tid);
+                    }
+                    self.outgoings.remove(oid);
+                }
+            }
+        }
+    }
+
+    // ─── UDP_INFO / MTU_INFO send (`protocol_misc.c:155-330`) ───
+
+    /// `send_udp_info(myself, to)` (`protocol_misc.c:155-215`). The
+    /// gates live in `udp_info::should_send_udp_info`; this gathers
+    /// the daemon state, calls the gate, builds the wire message,
+    /// queues it on `to->nexthop->connection`.
+    ///
+    /// `from_is_myself`: ALWAYS true for the daemon's call sites
+    /// (every C `send_udp_info` call is `(myself, ...)`). The
+    /// forwarding case (`from != myself`) is handled by
+    /// `on_udp_info` re-calling this with the parsed `from`/`to`.
+    /// We pass it explicitly so the forward path can share the
+    /// gate logic.
+    ///
+    /// Returns the io_set signal (queued bytes on a meta conn).
+    fn send_udp_info(&mut self, to_nid: NodeId, to_name: &str, from_is_myself: bool) -> bool {
+        // C `:158`: `to = (to->via == myself) ? to->nexthop :
+        // to->via`. Static-relay deref: UDP_INFO terminates at
+        // the static relay (it's the last node that sees `from`'s
+        // UDP traffic directly). `should_send_udp_info` doesn't
+        // do this deref (it's pure); we do it here. The ORIGINAL
+        // `to`'s options feed `to_options`; the DEREFFED `to`'s
+        // route feeds `nexthop_options` and `to_is_myself`.
+        let Some(orig_route) = self.route_of(to_nid) else {
+            // C `:160-163`: `if(to == NULL)`. Can happen if `to`
+            // is unreachable (no route). C logs ERR and returns
+            // false (terminates conn); we just skip — the call
+            // sites are all opportunistic hints, not protocol-
+            // mandatory sends.
+            return false;
+        };
+        let to_options_orig = orig_route.options;
+        let dereffed = if orig_route.via == self.myself {
+            orig_route.nexthop
+        } else {
+            orig_route.via
+        };
+
+        // C `:170`: `if(to == myself) return true`. Now checked
+        // against the DEREFFED to. Chain terminates here.
+        let to_is_myself = dereffed == self.myself;
+        let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
+        let to_directly_connected = self
+            .graph
+            .node(dereffed)
+            .and_then(|n| self.nodes.get(&n.name))
+            .and_then(|ns| ns.conn)
+            .is_some();
+        // `to->nexthop->options`: the dereffed-to's nexthop. With
+        // direct neighbors, `dereffed.nexthop == dereffed` so
+        // these are the same. Read from `last_routes`.
+        let nexthop_options = self
+            .route_of(dereffed)
+            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+
+        // `from`'s options: when `from == myself`, it's our own.
+        // When forwarding, the `from` node's route options.
+        let from_options = if from_is_myself {
+            self.myself_options
+        } else {
+            self.route_of(to_nid).map_or(0, |r| r.options)
+        };
+
+        let now = self.timers.now();
+        let last_sent = self.tunnels.get(&dereffed).and_then(|t| t.udp_info_sent);
+        let interval = Duration::from_secs(u64::from(self.settings.udp_info_interval));
+
+        if !udp_info::should_send_udp_info(
+            to_is_myself,
+            to_reachable,
+            to_directly_connected,
+            from_is_myself,
+            from_options,
+            to_options_orig,
+            self.myself_options,
+            nexthop_options,
+            last_sent,
+            now,
+            interval,
+        ) {
+            return false;
+        }
+
+        // C `:199-204`: build the address. When `from == myself`,
+        // the C uses `to->nexthop->connection->edge->local_address`
+        // — "our local address as seen by the next hop". The first
+        // hop IGNORES this (the address is replaced with what THEY
+        // observe), so the C comment says "the address we use is
+        // irrelevant". We send `unspec`: simpler, same semantics.
+        // When forwarding, we send `to`'s currently-known addr
+        // (`tunnel.udp_addr`) — that's the relay's observation.
+        let (addr, port) = if from_is_myself {
+            (
+                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+            )
+        } else {
+            // Forward case: `from->address` (the C `:203`
+            // `&from->address`). Our `tunnel.udp_addr` for the
+            // FROM node (NOT `to`!). The caller (`on_udp_info`)
+            // passes the from-nid via `to_nid` … wait, no. The
+            // forward case calls `send_udp_info_forward` below.
+            // THIS function's non-myself case is dead — keep it
+            // unspec for safety, the forward path is separate.
+            (
+                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+            )
+        };
+
+        // C `:206`: `send_request(to->nexthop->connection, ...)`.
+        let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+        let from_name: &str = if from_is_myself { &self.name } else { to_name };
+        let msg = UdpInfo {
+            from: from_name.to_owned(),
+            to: self
+                .graph
+                .node(dereffed)
+                .map_or_else(|| to_name.to_owned(), |n| n.name.clone()),
+            addr,
+            port,
+        };
+        let nw = conn.send(format_args!("{}", msg.format()));
+
+        // C `:211`: `if(from == myself) to->udp_info_sent = now`.
+        if from_is_myself {
+            self.tunnels.entry(dereffed).or_default().udp_info_sent = Some(now);
+        }
+        nw
+    }
+
+    /// `send_udp_info(from, to)` forward path. Called from
+    /// `on_udp_info` after the action decision. Unlike the originate
+    /// path, this carries `from`'s OBSERVED address (which may have
+    /// just been updated by `UpdateAndForward`).
+    fn send_udp_info_forward(&mut self, from_nid: NodeId, to_nid: NodeId) -> bool {
+        let Some(from_name) = self.graph.node(from_nid).map(|n| n.name.clone()) else {
+            return false;
+        };
+        let Some(to_name) = self.graph.node(to_nid).map(|n| n.name.clone()) else {
+            return false;
+        };
+
+        // Same `:158` deref as the originate path.
+        let Some(orig_route) = self.route_of(to_nid) else {
+            return false;
+        };
+        let to_options_orig = orig_route.options;
+        let dereffed = if orig_route.via == self.myself {
+            orig_route.nexthop
+        } else {
+            orig_route.via
+        };
+
+        let to_is_myself = dereffed == self.myself;
+        let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
+        // `:179` `to->connection` check is gated on `from ==
+        // myself`. Forwarding skips it. Pass false (irrelevant).
+        let from_options = self.route_of(from_nid).map_or(0, |r| r.options);
+        let nexthop_options = self
+            .route_of(dereffed)
+            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+
+        if !udp_info::should_send_udp_info(
+            to_is_myself,
+            to_reachable,
+            false, // to_directly_connected — only checked when from==myself
+            false, // from_is_myself
+            from_options,
+            to_options_orig,
+            self.myself_options,
+            nexthop_options,
+            None, // last_sent — only checked when from==myself
+            self.timers.now(),
+            Duration::ZERO,
+        ) {
+            return false;
+        }
+
+        // C `:203`: `&from->address`. Our observation of `from`'s
+        // UDP address. If we don't have one, send unspec (same as
+        // C `AF_UNSPEC` → `sockaddr2str` → `"unspec"`).
+        let (addr, port) = self
+            .tunnels
+            .get(&from_nid)
+            .and_then(|t| t.udp_addr)
+            .map_or_else(
+                || {
+                    (
+                        AddrStr::new(AddrStr::UNSPEC).expect("const"),
+                        AddrStr::new(AddrStr::UNSPEC).expect("const"),
+                    )
+                },
+                |a| {
+                    (
+                        AddrStr::new(a.ip().to_string()).expect("ip is valid token"),
+                        AddrStr::new(a.port().to_string()).expect("port is valid token"),
+                    )
+                },
+            );
+
+        let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+        let msg = UdpInfo {
+            from: from_name,
+            to: to_name,
+            addr,
+            port,
+        };
+        conn.send(format_args!("{}", msg.format()))
+    }
+
+    /// `send_mtu_info(from, to, mtu)` (`protocol_misc.c:272-330`).
+    /// Gates → adjust_mtu_for_send → queue on nexthop conn.
+    ///
+    /// Unlike UDP_INFO, there's no `:158` static-relay deref — `to`
+    /// is `to`. The nexthop is `to->nexthop` directly.
+    fn send_mtu_info(
+        &mut self,
+        to_nid: NodeId,
+        to_name: &str,
+        mtu: i32,
+        from_is_myself: bool,
+    ) -> bool {
+        self.send_mtu_info_from(self.myself, to_nid, to_name, mtu, from_is_myself)
+    }
+
+    /// `send_mtu_info` with explicit `from` for the forward path.
+    /// `from_is_myself` is still passed separately because the gate
+    /// logic keys on it independently of `from_nid` (debounce +
+    /// directly-connected checks).
+    fn send_mtu_info_from(
+        &mut self,
+        from_nid: NodeId,
+        to_nid: NodeId,
+        to_name: &str,
+        mtu: i32,
+        from_is_myself: bool,
+    ) -> bool {
+        let to_is_myself = to_nid == self.myself;
+        let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
+        let to_directly_connected = self.nodes.get(to_name).and_then(|ns| ns.conn).is_some();
+        // `to->nexthop->options`: read via the route.
+        let nexthop_options = self
+            .route_of(to_nid)
+            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+
+        let now = self.timers.now();
+        let last_sent = self.tunnels.get(&to_nid).and_then(|t| t.mtu_info_sent);
+        let interval = Duration::from_secs(u64::from(self.settings.mtu_info_interval));
+
+        if !udp_info::should_send_mtu_info(
+            to_is_myself,
+            to_reachable,
+            to_directly_connected,
+            from_is_myself,
+            last_sent,
+            now,
+            interval,
+            nexthop_options,
+        ) {
+            return false;
+        }
+
+        // C `:305-320`: adjust the MTU based on what we know about
+        // the path to `from`. `from->via == myself`: route to
+        // `from` has no static relay (we ARE direct or there's only
+        // dynamic relays). `via`: the C derefs `(from->via ==
+        // myself) ? from->nexthop : from->via` at `:305`.
+        let from_route = self.route_of(from_nid);
+        let from_via_is_myself = from_route.is_some_and(|r| r.via == self.myself);
+        let via_nid = from_route.map(|r| {
+            if r.via == self.myself {
+                r.nexthop
+            } else {
+                r.via
+            }
+        });
+        let via_nexthop_nid = via_nid.and_then(|v| self.route_of(v).map(|r| r.nexthop));
+
+        let mtu = udp_info::adjust_mtu_for_send(
+            mtu,
+            from_via_is_myself,
+            self.pmtu_snapshot(from_nid),
+            via_nid.and_then(|v| self.pmtu_snapshot(v)),
+            via_nexthop_nid.and_then(|v| self.pmtu_snapshot(v)),
+        );
+
+        // C `:323`: `if(from == myself) to->mtu_info_sent = now`.
+        if from_is_myself {
+            self.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
+        }
+
+        // C `:328`: `send_request(to->nexthop->connection, ...)`.
+        let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+        let from_name = self
+            .graph
+            .node(from_nid)
+            .map_or_else(|| self.name.clone(), |n| n.name.clone());
+        let msg = MtuInfo {
+            from: from_name,
+            to: to_name.to_owned(),
+            mtu,
+        };
+        conn.send(format_args!("{}", msg.format()))
+    }
+
+    // ─── UDP_INFO / MTU_INFO receive (`protocol_misc.c:217-376`) ─
+
+    /// `udp_info_h` (`protocol_misc.c:217-268`). Parse, build the
+    /// `FromState` snapshot, call `udp_info::on_receive_udp_info`,
+    /// dispatch the action.
+    ///
+    /// Returns `Err` only on parse failure (C `:226` `return false`
+    /// → conn teardown). All semantic drops (`UnknownNode`,
+    /// `DroppedPastRelay`) are `Ok(false)` (C `return true`).
+    fn on_udp_info(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let body_str = std::str::from_utf8(body)
+            .map_err(|_| DispatchError::BadKey("non-UTF-8 UDP_INFO".into()))?;
+        let parsed = UdpInfo::parse(body_str)
+            .map_err(|_| DispatchError::BadKey("UDP_INFO parse failed".into()))?;
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // Build `FromState`. `None` → `lookup_node(from)` failed.
+        let from_nid = self.node_ids.get(&parsed.from).copied();
+        let from_state = from_nid.map(|nid| {
+            let directly_connected = self
+                .nodes
+                .get(&parsed.from)
+                .and_then(|ns| ns.conn)
+                .is_some();
+            let udp_confirmed = self
+                .tunnels
+                .get(&nid)
+                .is_some_and(|t| t.status.udp_confirmed);
+            // `from->via == from`: route to `from` has `via ==
+            // from`. With direct routes, `via == from` always. The
+            // "wandered past static relay" case has `via !=` from.
+            let via_is_self = self.route_of(nid).is_some_and(|r| r.via == nid);
+            FromState {
+                directly_connected,
+                udp_confirmed,
+                via_is_self,
+            }
+        });
+        let to_nid = self.node_ids.get(&parsed.to).copied();
+        let current_from_addr =
+            from_nid.and_then(|nid| self.tunnels.get(&nid).and_then(|t| t.udp_addr));
+
+        match udp_info::on_receive_udp_info(
+            &parsed,
+            from_state,
+            to_nid.is_some(),
+            current_from_addr,
+        ) {
+            UdpInfoAction::UnknownNode => {
+                // C `:238-240` / `:261-263`: log, return true.
+                log::error!(target: "tincd::proto",
+                            "Got UDP_INFO from {conn_name} for unknown node \
+                             {} → {}", parsed.from, parsed.to);
+                Ok(false)
+            }
+            UdpInfoAction::DroppedPastRelay => {
+                // C `:247-249`: warning, return true.
+                log::warn!(target: "tincd::proto",
+                           "Got UDP_INFO from {conn_name} for {} which we \
+                            can't reach directly", parsed.from);
+                Ok(false)
+            }
+            UdpInfoAction::UpdateAndForward { new_addr } => {
+                // C `:255`: `update_node_udp(from, &from_addr)`.
+                // For us that's just `tunnel.udp_addr = Some(addr)`
+                // — see the BecameReachable comment for why we
+                // don't have `node_udp_tree`.
+                let from_nid = from_nid.expect("UpdateAndForward implies from exists");
+                log::debug!(target: "tincd::proto",
+                            "UDP_INFO from {conn_name}: learned {} at {new_addr}",
+                            parsed.from);
+                self.tunnels.entry(from_nid).or_default().udp_addr = Some(new_addr);
+                // C `:265`: `return send_udp_info(from, to)`.
+                let to_nid = to_nid.expect("UpdateAndForward implies to exists");
+                Ok(self.send_udp_info_forward(from_nid, to_nid))
+            }
+            UdpInfoAction::Forward => {
+                // C `:265` without `:255`. No update; just forward.
+                let from_nid = from_nid.expect("Forward implies from exists");
+                let to_nid = to_nid.expect("Forward implies to exists");
+                Ok(self.send_udp_info_forward(from_nid, to_nid))
+            }
+        }
+    }
+
+    /// `mtu_info_h` (`protocol_misc.c:332-376`). Parse, snapshot,
+    /// `udp_info::on_receive_mtu_info`, dispatch.
+    ///
+    /// `Malformed` (`:345` `mtu < 512`) returns `Err` → conn
+    /// teardown. Everything else is `Ok`.
+    fn on_mtu_info(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let body_str = std::str::from_utf8(body)
+            .map_err(|_| DispatchError::BadKey("non-UTF-8 MTU_INFO".into()))?;
+        let parsed = MtuInfo::parse(body_str)
+            .map_err(|_| DispatchError::BadKey("MTU_INFO parse failed".into()))?;
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        let from_nid = self.node_ids.get(&parsed.from).copied();
+        let from_mtu = from_nid.map(|nid| {
+            // `None` if no tunnel — the C reads `from->mtu` etc.
+            // which are xzalloc'd to 0. Our helpers return the
+            // same defaults; supply them.
+            let t = self.tunnels.get(&nid);
+            FromMtuState {
+                mtu: t.map_or(0, TunnelState::mtu),
+                minmtu: t.map_or(0, TunnelState::minmtu),
+                maxmtu: t.map_or(MTU, TunnelState::maxmtu),
+            }
+        });
+        let to_nid = self.node_ids.get(&parsed.to).copied();
+
+        match udp_info::on_receive_mtu_info(&parsed, from_mtu, to_nid.is_some()) {
+            MtuInfoAction::Malformed => {
+                // C `:345-348`: `return false`. Conn-fatal.
+                Err(DispatchError::BadKey(format!(
+                    "MTU_INFO from {conn_name}: invalid MTU {}",
+                    parsed.mtu
+                )))
+            }
+            MtuInfoAction::UnknownNode => {
+                log::error!(target: "tincd::proto",
+                            "Got MTU_INFO from {conn_name} for unknown node \
+                             {} → {}", parsed.from, parsed.to);
+                Ok(false)
+            }
+            MtuInfoAction::ClampAndForward { new_mtu } => {
+                // C `:369`: `from->mtu = mtu`. Set the PROVISIONAL
+                // mtu (the discovered one will overwrite when
+                // probing converges). Write to `pmtu.mtu` if
+                // seeded; otherwise the helper-default (`MTU`) is
+                // what `dump_nodes` reads, and the next `try_tx`
+                // seed will start from `MTU` regardless. We write
+                // it anyway for the seeded case.
+                let from_nid = from_nid.expect("ClampAndForward implies from exists");
+                log::debug!(target: "tincd::proto",
+                            "Using provisional MTU {new_mtu} for {}", parsed.from);
+                if let Some(p) = self
+                    .tunnels
+                    .get_mut(&from_nid)
+                    .and_then(|t| t.pmtu.as_mut())
+                {
+                    p.mtu = new_mtu;
+                }
+                // C `:375`: `return send_mtu_info(from, to, mtu)`.
+                let to_nid = to_nid.expect("ClampAndForward implies to exists");
+                Ok(
+                    self.send_mtu_info_from(
+                        from_nid,
+                        to_nid,
+                        &parsed.to,
+                        i32::from(new_mtu),
+                        false,
+                    ),
+                )
+            }
+            MtuInfoAction::Forward => {
+                let from_nid = from_nid.expect("Forward implies from exists");
+                let to_nid = to_nid.expect("Forward implies to exists");
+                // Forward with the (clamped) received mtu. The
+                // `adjust_mtu_for_send` in `send_mtu_info_from`
+                // may tighten it further based on OUR knowledge.
+                let mtu = parsed.mtu.min(udp_info::MTU_MAX);
+                Ok(self.send_mtu_info_from(from_nid, to_nid, &parsed.to, mtu, false))
+            }
+        }
     }
 
     /// `choose_udp_address` (`net_packet.c:744-800`), abridged.
@@ -4591,6 +5460,8 @@ impl Daemon {
                         Request::DelEdge => self.on_del_edge(id, body),
                         Request::ReqKey => self.on_req_key(id, body),
                         Request::AnsKey => self.on_ans_key(id, body),
+                        Request::UdpInfo => self.on_udp_info(id, body),
+                        Request::MtuInfo => self.on_mtu_info(id, body),
                         Request::Ping => {
                             // `ping_h` (`protocol_misc.c:54-57`):
                             // `return send_pong(c)`. That's it.
@@ -5109,8 +5980,8 @@ impl Daemon {
     /// SIG back via `send_sptps_data` (→ ANS_KEY).
     ///
     /// REQ_PUBKEY/ANS_PUBKEY (`:196-231`): hard-error (operator
-    /// provisions keys by hand). `send_udp_info`/`send_mtu_info`:
-    /// STUB(chunk-10-mtu-hint).
+    /// provisions keys by hand). `send_udp_info`/`send_mtu_info`
+    /// (`:146`/`:184`/`:266`): wired.
     #[allow(clippy::too_many_lines)] // C `req_key_h`+`req_key_ext_h`
     // are 207 LOC together; the SPTPS-init branch alone is 36 LOC of
     // dense state-machine. Splitting would scatter the C line refs.
@@ -5282,10 +6153,21 @@ impl Daemon {
                     return Ok(false);
                 }
             };
-            // STUB(chunk-10-mtu-hint): `:185` `send_mtu_info(
-            // myself, from, MTU)`. Hint message ("I think your MTU
-            // to X is Y"); PMTU works without it.
-            return Ok(self.dispatch_tunnel_outputs(from_nid, &msg.from, outs));
+            // C `:184`: `send_mtu_info(myself, from, MTU)`. We just
+            // received an SPTPS_PACKET (TCP-tunneled data) from
+            // `from`; tell upstream relays our MTU floor so they
+            // can switch to UDP if it fits.
+            let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
+            nw |= self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
+            // C `:146`: `if((reqno == REQ_KEY || reqno == SPTPS_
+            // PACKET) && to->via == myself) send_udp_info(myself,
+            // from)`. Same gate as the UDP receive path: only the
+            // static relay (or destination, since `to == myself`
+            // here) emits the breadcrumb. `to->via == myself` is
+            // trivially true when `to == myself` (sssp seeds
+            // `myself.via = myself`).
+            nw |= self.send_udp_info(from_nid, &msg.from, true);
+            return Ok(nw);
         }
         if ext.reqno != Request::ReqKey as i32 {
             // REQ_PUBKEY/ANS_PUBKEY (`:196-231`): hard-error. The
@@ -5386,8 +6268,12 @@ impl Daemon {
         tunnel.status.sptps = true;
         tunnel.last_req_key = Some(now);
 
-        // STUB(chunk-10-mtu-hint): `:267` `send_mtu_info(myself,
-        // from, MTU)`.
+        // C `:266`: `send_mtu_info(myself, from, MTU)`.
+        // C `:146`: `send_udp_info(myself, from)` (the `reqno ==
+        // REQ_KEY` branch of the same gate). We're the destination
+        // (`to == myself`), so `to->via == myself` holds.
+        let mut hint_nw = self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
+        hint_nw |= self.send_udp_info(from_nid, &msg.from, true);
 
         // Dispatch: init_outs (responder's `start()` KEX, but
         // datagram-mode responder ALSO emits a KEX from `start()`
@@ -5415,7 +6301,8 @@ impl Daemon {
         //   [initiator receive() → sends SIG via ANS_KEY]
         //   responder receive(init's SIG) → send own SIG +
         //     HandshakeDone (`receive_sig:684-695` responder branch)
-        let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, init_outs);
+        let mut nw = hint_nw;
+        nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, init_outs);
         match recv_result {
             Ok((_consumed, recv_outs)) => {
                 nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs);
@@ -5439,8 +6326,8 @@ impl Daemon {
     /// we're SPTPS-only.
     ///
     /// `:462` relay wired (chunk-9b). `:473-482` reflexive-addr
-    /// append: STUB(chunk-10-local). `:578` `send_mtu_info`:
-    /// STUB(chunk-10-mtu-hint).
+    /// append (`:473-482`): STUB(chunk-10-local) — part of the
+    /// LAN-direct workstream. `:578` `send_mtu_info`: wired.
     fn on_ans_key(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
         let body_str = std::str::from_utf8(body)
             .map_err(|_| DispatchError::BadKey("non-UTF-8 ANS_KEY".into()))?;
@@ -5581,12 +6468,17 @@ impl Daemon {
         // STUB(chunk-10-local): `:568-576` `if(validkey &&
         // *address) update_node_udp(reflexive_addr)`. The relay-
         // appended addr/port lets us learn our NAT-public address.
-        // STUB(chunk-10-mtu-hint): `:578` `send_mtu_info`.
 
         // Dispatch. May contain `HandshakeDone` (→ set validkey,
         // log "successful") and/or `Wire` (next handshake step,
         // → ANS_KEY back).
-        Ok(self.dispatch_tunnel_outputs(from_nid, &msg.from, outs))
+        let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
+        // C `:576`: `send_mtu_info(myself, from, MTU)`. After
+        // dispatch — the C order is `sptps_receive_data` then
+        // `send_mtu_info`. The hint goes regardless of whether
+        // the handshake completed.
+        nw |= self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
+        Ok(nw)
     }
 
     /// Dedup gate for flooded messages. `seen_request` (`protocol.
@@ -5925,9 +6817,15 @@ impl Daemon {
                     // already port-rewritten to UDP). With direct
                     // neighbors, that's the right answer; transitives
                     // would need the prevedge-walk (chunk 9).
-                    // STUB(chunk-10-local): full `update_node_udp`
-                    // (also re-indexes `node_udp_tree` for the addr-
-                    // based lookup at `net_packet.c:1728`).
+                    //
+                    // The C `update_node_udp` (`net_packet.c:
+                    // 1708-1745`) ALSO re-indexes `node_udp_tree`
+                    // (addr → node lookup for the legacy receive
+                    // path at `:1728`). We don't have that tree:
+                    // incoming UDP keys on the `[dst_id6][src_id6]`
+                    // prefix (the SPTPS-only path, `:1779-1825`),
+                    // never `node_udp_tree`. So `update_node_udp`
+                    // for us is just "set `tunnel.udp_addr`".
                     let name_owned = name.to_owned();
                     let addr = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr);
                     if let Some(addr) = addr {
@@ -6001,9 +6899,14 @@ impl Daemon {
                     // C `graph.c:256-297`: sptps_stop, reset mtu
                     // probe state, clear status bits, clear UDP
                     // addr. `TunnelState::reset_unreachable` IS
-                    // that whole block. STUB(chunk-10-local): mtu
-                    // timer kill (`timeout_del(&n->udp_ping_
-                    // timeout)`, `:270`) — the timer doesn't exist.
+                    // that whole block.
+                    //
+                    // C `:270`: `timeout_del(&n->udp_ping_timeout)`.
+                    // The `TimerWhat::UdpPing` variant exists but
+                    // is never armed (PMTU is driven by `try_tx`
+                    // calling `pmtu.tick()` inline, not a separate
+                    // timer). Nothing to del. If a per-node UDP
+                    // timer ever lands, it gets killed here.
                     if let Some(tunnel) = self.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
@@ -7659,6 +8562,11 @@ mod tests {
         assert!(!s.tunnelserver); // C `:879` default false
         assert!(!s.directonly); // C `route.c:41`
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
+        // C `net_setup.c:561`: `else { autoconnect = true; }`.
+        assert!(s.autoconnect);
+        // C `protocol_misc.c:34-35`.
+        assert_eq!(s.udp_info_interval, 5);
+        assert_eq!(s.mtu_info_interval, 5);
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max
