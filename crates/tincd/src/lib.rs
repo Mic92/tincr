@@ -43,6 +43,7 @@ pub mod outgoing;
 pub mod packet;
 pub mod pmtu;
 pub mod proto;
+pub mod reload;
 pub mod route;
 pub mod script;
 pub mod seen;
