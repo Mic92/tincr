@@ -392,7 +392,7 @@ Why ping (`crossimpl::rust_dials_c`, `netns::real_tun_ping`) passed: 84-byte ICM
 
 Why Rust↔C measured 12.9 Mbps not zero: the C `receive_meta` is also one-recv-per-callback, but **level-triggered** — the C drains everything alice sends. The 12.9 was the b64-over-TCP-over-SPTPS-stream throughput ceiling (encrypt twice: once for the per-tunnel SPTPS, once for the meta-conn SPTPS).
 
-**Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev (the residual gap is `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv`).
+**Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev. The residual gap was `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv` — closed by `8b6c3b09` (`seal_into`, three body-sized copies → one, in-place encrypt matching C `sptps.c:125`). 69.5%→76.6% of C; the rest is `net.rs:1718`'s UDP-header wrap (the C author's own TODO at `net_packet.c:1027`) + receive-side `chapoly::open`.
 
 ---
 
