@@ -39,6 +39,7 @@ pub mod icmp;
 pub mod invitation_serve;
 pub mod keys;
 pub mod listen;
+pub mod local_addr;
 pub mod mac_lease;
 pub mod mss;
 pub mod neighbor;
