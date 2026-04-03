@@ -43,6 +43,8 @@ use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
 use tinc_sptps::{Output, Sptps, SptpsError};
 
+use crate::invitation_serve::InvitePhase;
+
 /// `fmt::Write` adapter for `Vec<u8>`. `Vec<u8>` impls `io::Write`
 /// but not `fmt::Write`; `format_args!` wants `fmt::Write`. The
 /// bridge is one impl. Module-private because it's an implementation
@@ -233,6 +235,13 @@ pub struct Connection {
     pub allow_request: Option<Request>,
     /// `c->status.control`. `true` after `id_h` sees `^<cookie>`.
     pub control: bool,
+    /// `c->status.invitation` + `c->status.invitation_used` + (after
+    /// cookie) `c->name`. Set by the daemon's `IdOk::Invitation` arm.
+    /// `None` for control + peer conns. When `Some`, the SPTPS bridge
+    /// dispatches via `dispatch_invitation_outputs`, NOT `check_gate`
+    /// — records are raw bytes (file chunks, b64 pubkey), not
+    /// newline-terminated request lines.
+    pub invite: Option<InvitePhase>,
     /// `c->name`. `"<unknown>"` until `id_h`, then peer node name or
     /// `"<control>"`. Appears in log lines.
     pub name: String,
@@ -363,6 +372,7 @@ impl Connection {
             // violation.
             allow_request: Some(Request::Id),
             control: false,
+            invite: None,
             // `:800`: `c->name = xstrdup("<control>")`. The C does
             // this BEFORE id_h — a small lie (id_h hasn't proven the
             // cookie yet). id_h overwrites: `^` branch → "<control>"
@@ -411,6 +421,7 @@ impl Connection {
             // first line is always ID, regardless of transport.
             allow_request: Some(Request::Id),
             control: false,
+            invite: None,
             // `:759`: `c->name = xstrdup("<unknown>")`.
             name: "<unknown>".to_string(),
             hostname,
@@ -459,6 +470,7 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            invite: None,
             name,
             hostname,
             last_ping_time: now,
@@ -717,6 +729,41 @@ impl Connection {
     pub fn send_raw(&mut self, bytes: &[u8]) -> bool {
         let was_empty = self.outbuf.is_empty();
         self.outbuf.add(bytes);
+        was_empty
+    }
+
+    /// `sptps_send_record(&c->sptps, type, data, len)` for arbitrary
+    /// type and binary body. `send()` is type-0-only and appends
+    /// `\n`; the invitation file chunks are BINARY (the file may
+    /// contain `\n` mid-chunk that aren't record terminators) and
+    /// the empty type-1/type-2 markers must be empty, no `\n`.
+    ///
+    /// `protocol_auth.c:296,303,181`: `sptps_send_record(&c->sptps,
+    /// 0, buf, result)` (file chunks), `(&c->sptps, 1, buf, 0)`
+    /// (file-done), `(&c->sptps, 2, data, 0)` (ack).
+    ///
+    /// Returns the io_set signal. Same expect as `send()` (cipher
+    /// installed at `HandshakeDone`, type < 128).
+    ///
+    /// # Panics
+    /// `InvalidState` from `Sptps::send_record`: only fires when the
+    /// outcipher is None (handshake not done) or `record_type >= 128`.
+    /// Callers send only AFTER `HandshakeDone` arrived; types are 0/1/2.
+    /// A panic here is a state-machine bug, not an I/O error.
+    pub fn send_sptps_record(&mut self, record_type: u8, body: &[u8]) -> bool {
+        let was_empty = self.outbuf.is_empty();
+        let sptps = self
+            .sptps
+            .as_deref_mut()
+            .expect("send_sptps_record called without sptps installed");
+        let outs = sptps
+            .send_record(record_type, body)
+            .expect("send_record post-HandshakeDone, type<128: InvalidState is a bug");
+        for o in outs {
+            if let Output::Wire { bytes, .. } = o {
+                self.outbuf.add(&bytes);
+            }
+        }
         was_empty
     }
 

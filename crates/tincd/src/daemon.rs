@@ -15,12 +15,12 @@
 //! Logging: `target: "tincd"` for startup/shutdown, `"tincd::conn"`
 //! for accept/terminate. See lib.rs for the full mapping.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rand_core::{OsRng, RngCore};
 use slotmap::{SlotMap, new_key_type};
@@ -35,6 +35,7 @@ use tinc_sptps::{Framing, Role, Sptps};
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::graph_glue::{Transition, run_graph};
+use crate::invitation_serve::{self, InvitePhase};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
@@ -42,8 +43,8 @@ use crate::listen::{
 };
 use crate::node_id::{NodeId6, NodeId6Table};
 use crate::outgoing::{
-    ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, probe_connecting,
-    resolve_config_addrs, try_connect,
+    ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, ProxyConfig, parse_proxy_config,
+    probe_connecting, resolve_config_addrs, try_connect,
 };
 use crate::pmtu::{self, PmtuAction, PmtuState};
 use crate::proto::{
@@ -51,6 +52,7 @@ use crate::proto::{
     myself_options_default, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
     parse_del_subnet, record_body, send_ack,
 };
+use crate::reload;
 use crate::route::{self, RouteResult, TtlResult, route};
 use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
@@ -273,6 +275,14 @@ pub struct DaemonSettings {
     /// `Kernel` is `STUB(chunk-12-switch)` (it changes the whole
     /// route-dispatch shape).
     pub forwarding_mode: ForwardingMode,
+    /// `invitation_lifetime` (`protocol_auth.c:55`). C default 604800
+    /// (one week, `net_setup.c:567`). Config var `InvitationExpire`.
+    /// Seconds; `serve_cookie` checks `mtime + this < now`.
+    pub invitation_lifetime: Duration,
+    /// `proxytype`/`proxyhost` (`net_setup.c:263-345`). `None` is the
+    /// default (direct connect). Only `Exec` is wired; SOCKS/HTTP
+    /// need a connect-state machine (`STUB(chunk-11-proxy)`).
+    pub proxy: Option<ProxyConfig>,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -322,8 +332,118 @@ impl Default for DaemonSettings {
             directonly: false,
             // C `route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`.
             forwarding_mode: ForwardingMode::Internal,
+            // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
+            invitation_lifetime: Duration::from_secs(604_800),
+            proxy: None,
         }
     }
+}
+
+/// Parse the reloadable subset of settings from `config`. Called
+/// from `setup()` AND `reload_configuration()`. The non-reloadable
+/// settings (Port, AddressFamily, DeviceType) are NOT here — they
+/// need re-bind / re-open which `setup()` does inline.
+///
+/// `net_setup.c:391-575` `setup_myself_reloadable`. We re-read the
+/// settings we already parse; the C has ~40 more we don't yet.
+fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
+    // PingInterval (`:1241-1243`).
+    if let Some(e) = config.lookup("PingInterval").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u32::try_from(v) {
+                if v >= 1 {
+                    settings.pinginterval = v;
+                }
+            }
+        }
+    }
+    // PingTimeout (`:1247-1253`). Clamped to [1, pinginterval].
+    if let Some(e) = config.lookup("PingTimeout").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u32::try_from(v) {
+                settings.pingtimeout = v.clamp(1, settings.pinginterval);
+            }
+        }
+    }
+    // MaxTimeout (`:527-533`).
+    if let Some(e) = config.lookup("MaxTimeout").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u32::try_from(v) {
+                if v >= 1 {
+                    settings.maxtimeout = v;
+                }
+            }
+        }
+    }
+    // DecrementTTL (`:457`).
+    if let Some(e) = config.lookup("DecrementTTL").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.decrement_ttl = v;
+        }
+    }
+    // TunnelServer (`:879`).
+    if let Some(e) = config.lookup("TunnelServer").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.tunnelserver = v;
+        }
+    }
+    // DirectOnly (`:403`).
+    if let Some(e) = config.lookup("DirectOnly").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.directonly = v;
+        }
+    }
+    // InvitationExpire (`:566-568`).
+    if let Some(e) = config.lookup("InvitationExpire").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u64::try_from(v) {
+                settings.invitation_lifetime = Duration::from_secs(v);
+            }
+        }
+    }
+}
+
+/// Parse `Subnet =` lines for `myname` from `config`. Factored from
+/// `setup()` so `reload_configuration()` can call the same parser.
+/// `net_setup.c:860-870` (the `for(cfg = lookup_config("Subnet"))`
+/// loop) → `HashSet`.
+fn parse_subnets_from_config(config: &tinc_conf::Config, myname: &str) -> HashSet<Subnet> {
+    let mut subnets = HashSet::new();
+    for e in config.lookup("Subnet") {
+        match e.get_str().parse::<Subnet>() {
+            Ok(s) => {
+                subnets.insert(s);
+            }
+            Err(_) => {
+                log::error!(target: "tincd",
+                            "Invalid Subnet = {} in hosts/{myname}",
+                            e.get_str());
+            }
+        }
+    }
+    subnets
+}
+
+/// Parse `ConnectTo =` names from `config`. `try_outgoing_connections`
+/// (`net_socket.c:815-884`). Filters invalid names and self-reference.
+fn parse_connect_to_from_config(config: &tinc_conf::Config, myname: &str) -> Vec<String> {
+    config
+        .lookup("ConnectTo")
+        .map(|e| e.get_str().to_owned())
+        .filter(|n| {
+            if !tinc_proto::check_id(n) {
+                log::error!(target: "tincd",
+                            "Invalid name for outgoing connection: {n}");
+                return false;
+            }
+            if n == myname {
+                log::warn!(target: "tincd",
+                            "ConnectTo = {n} is ourselves; skipping");
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 // Daemon — the C globals + the loop
@@ -643,6 +763,20 @@ pub struct Daemon {
     /// `periodictimer` (`net.c:45`). Re-arms +5s.
     pub(crate) periodictimer: TimerId,
 
+    /// `invitation_key` (`protocol_auth.c:56`). Loaded from
+    /// `confbase/invitations/ed25519_key.priv` by `read_invitation_
+    /// key`. `None` when no invitations have been issued (the file
+    /// doesn't exist) — the `?` greeting is then rejected at id_h.
+    /// Re-loaded on SIGHUP (`net_setup.c:570`: `read_invitation_key()`
+    /// is inside `setup_myself_reloadable`).
+    pub(crate) invitation_key: Option<SigningKey>,
+
+    /// `last_config_check` (`net.c:43`). The mtime threshold for
+    /// `conns_to_terminate` (`net.c:438-455`). Initialized to
+    /// daemon-start time at the end of `setup()` (`net.c:458`: set
+    /// at the END of reload, so first SIGHUP compares against start).
+    pub(crate) last_config_check: SystemTime,
+
     /// `running` (`event.c:18`). The loop condition. C `event_exit()`
     /// sets `running = false`; `event_loop()` checks before each
     /// iteration. Same here.
@@ -773,16 +907,19 @@ impl Daemon {
             }
         }
 
-        // PingInterval (`:1241-1243`). For tests: `PingInterval = 1`
-        // makes the keepalive observable in a 5-second test.
-        if let Some(e) = config.lookup("PingInterval").next() {
-            if let Ok(v) = e.get_int() {
-                if let Ok(v) = u32::try_from(v) {
-                    if v >= 1 {
-                        settings.pinginterval = v;
-                    }
-                }
-            }
+        // Reloadable settings (`net_setup.c:391-575`). Factored
+        // into a helper so reload_configuration can call it too.
+        // Reads PingInterval, PingTimeout, MaxTimeout, the bool
+        // gates, InvitationExpire. NOT Port/AddressFamily (those
+        // need re-bind, setup-only).
+        apply_reloadable_settings(&config, &mut settings);
+
+        // Proxy (`net_setup.c:263-345`). Only `exec` is wired.
+        // Non-reloadable (the C reads it inside setup_myself_
+        // reloadable but our outgoing-connection path reads it at
+        // dial time; reload would need to re-dial existing conns).
+        if let Some(e) = config.lookup("Proxy").next() {
+            settings.proxy = parse_proxy_config(e.get_str()).map_err(SetupError::Config)?;
         }
 
         // Compression (`net_setup.c:991-1043`). HOST-tagged. The
@@ -810,29 +947,6 @@ impl Daemon {
             }
         }
 
-        // DecrementTTL (`net_setup.c:457`). Default false.
-        if let Some(e) = config.lookup("DecrementTTL").next() {
-            if let Ok(v) = e.get_bool() {
-                settings.decrement_ttl = v;
-            }
-        }
-
-        // TunnelServer (`net_setup.c:879`). Default false. The
-        // `:880` `strictsubnets |= tunnelserver` is stubbed (no
-        // strictsubnets yet).
-        if let Some(e) = config.lookup("TunnelServer").next() {
-            if let Ok(v) = e.get_bool() {
-                settings.tunnelserver = v;
-            }
-        }
-
-        // DirectOnly (`net_setup.c:403`). Default false.
-        if let Some(e) = config.lookup("DirectOnly").next() {
-            if let Ok(v) = e.get_bool() {
-                settings.directonly = v;
-            }
-        }
-
         // Forwarding (`net_setup.c:426-443`). Default Internal.
         // C errors on unknown; we accept `kernel` with a warn (it
         // does the right thing for everything except already-
@@ -851,20 +965,6 @@ impl Daemon {
                     return Err(SetupError::Config(format!(
                         "Forwarding = {v}: invalid forwarding mode"
                     )));
-                }
-            }
-        }
-
-        // PingTimeout (`:1247-1253`). For tests: `PingTimeout = 1`
-        // makes the 6-second integration test run in 2 seconds. Read
-        // it now; the clamp (`:1251`: `[1, pinginterval]`) too.
-        if let Some(e) = config.lookup("PingTimeout").next() {
-            if let Ok(v) = e.get_int() {
-                // C clamps `< 1 || > pinginterval` → default.
-                // Match the clamp; reject negative (get_int returns
-                // i32; u32::try_from rejects negative).
-                if let Ok(v) = u32::try_from(v) {
-                    settings.pingtimeout = v.clamp(1, settings.pinginterval);
                 }
             }
         }
@@ -1098,15 +1198,8 @@ impl Daemon {
         // We're slightly looser: log and skip the bad one. The
         // daemon stays up; the bad subnet just isn't routable.
         let mut subnets = SubnetTree::new();
-        for e in config.lookup("Subnet") {
-            match e.get_str().parse::<Subnet>() {
-                Ok(s) => subnets.add(s, name.clone()),
-                Err(_) => {
-                    log::error!(target: "tincd",
-                                "Invalid Subnet = {} in hosts/{name}",
-                                e.get_str());
-                }
-            }
+        for s in parse_subnets_from_config(&config, &name) {
+            subnets.add(s, name.clone());
         }
 
         // ─── ConnectTo (try_outgoing_connections, net_socket.c:815-884)
@@ -1120,23 +1213,17 @@ impl Daemon {
         // C `:828`: `if(!check_id(name)) continue` — skip invalid.
         // C `:836`: `if(!strcmp(name, myself->name)) continue` —
         // skip self.
-        let connect_to: Vec<String> = config
-            .lookup("ConnectTo")
-            .map(|e| e.get_str().to_owned())
-            .filter(|n| {
-                if !tinc_proto::check_id(n) {
-                    log::error!(target: "tincd",
-                                "Invalid name for outgoing connection: {n}");
-                    return false;
-                }
-                if *n == name {
-                    log::warn!(target: "tincd",
-                                "ConnectTo = {n} is ourselves; skipping");
-                    return false;
-                }
-                true
-            })
-            .collect();
+        let connect_to = parse_connect_to_from_config(&config, &name);
+
+        // ─── invitation key (net_setup.c:570 → keys.c:116-138)
+        // `read_invitation_key`. `Ok(None)` if the file doesn't
+        // exist — not an error, just no invites issued yet. The
+        // `?` greeting is rejected at id_h. `Err` for corrupt PEM.
+        let invitation_key = invitation_serve::read_invitation_key(confbase)
+            .map_err(|e| SetupError::Config(format!("{e}")))?;
+        if invitation_key.is_some() {
+            log::info!(target: "tincd", "Invitation key loaded");
+        }
 
         log::info!(target: "tincd", "Ready");
 
@@ -1184,6 +1271,13 @@ impl Daemon {
             connecting_socks: slotmap::SecondaryMap::new(),
             last_routes: Vec::new(),
             settings,
+            invitation_key,
+            // C `net.c:458`: `last_config_check = now.tv_sec` at the
+            // END of reload. setup() does the same at the end (after
+            // the daemon struct is built); first SIGHUP compares
+            // against this. We set it here at construct time — the
+            // delta to "end of setup" is one event-loop turn (~ms).
+            last_config_check: SystemTime::now(),
             ev,
             timers,
             signals,
@@ -1223,11 +1317,9 @@ impl Daemon {
             daemon.setup_outgoing_connection(oid);
         }
 
-        // STUB(chunk-10): mark-sweep (`:870-883`). Terminate
-        // connections whose ConnectTo was removed; only matters on
-        // SIGHUP-reload. The reload path itself (`net.c:336-458`
-        // `reload_configuration`) doesn't exist yet — SIGHUP is
-        // logged-and-ignored. Re-chunked from 8 → 10.
+        // The mark-sweep (`:870-883`, terminate connections whose
+        // ConnectTo was removed) is now in `reload_configuration`.
+        // setup() never has stale outgoings (it's first boot).
 
         // ─── tinc-up (net_setup.c:745-762, `device_enable`)
         // C calls this AFTER device open succeeds, BEFORE `Ready`.
@@ -1805,10 +1897,17 @@ impl Daemon {
                 self.running = false;
             }
             SignalWhat::Reload => {
-                // C: reopenlogger + reload_configuration. Skeleton:
-                // log and ignore. reload needs the config tree walk,
-                // the expire-mark sweep, all of `net.c:336-458`.
-                log::info!(target: "tincd", "Got SIGHUP, reload not implemented");
+                // C `net.c:321-328`: `reopenlogger(); reload_
+                // configuration()`. We don't have a log file to
+                // reopen (env_logger writes stderr); just reload.
+                // C `:325` checks the return value but only logs
+                // (`if(reload_configuration()) ERR`); the daemon
+                // continues either way.
+                log::info!(target: "tincd", "Got SIGHUP, reloading");
+                if !self.reload_configuration() {
+                    log::error!(target: "tincd",
+                                "Unable to reload configuration");
+                }
             }
             SignalWhat::Retry => {
                 // C: retry() (`net.c:460-485`). Walks outgoing_list,
@@ -1817,6 +1916,224 @@ impl Daemon {
                 log::info!(target: "tincd", "Got SIGALRM, retry not implemented");
             }
         }
+    }
+
+    /// `reload_configuration` (`net.c:336-458`). Re-read tinc.conf +
+    /// hosts/NAME, re-apply reloadable settings, diff subnets +
+    /// ConnectTo, terminate conns whose hosts/ file changed.
+    ///
+    /// Returns `true` on success, `false` if `read_server_config`
+    /// failed (`net.c:343`: `return EINVAL`). Either way the daemon
+    /// continues — the SIGHUP handler logs and moves on.
+    ///
+    /// What's reloadable vs not (`net_setup.c:391-575`):
+    /// - YES: pinginterval, pingtimeout, maxtimeout, the bool gates
+    ///   (decrement_ttl, tunnelserver, directonly), invitation_
+    ///   lifetime, invitation_key.
+    /// - NO: Port, AddressFamily, DeviceType. These need re-bind /
+    ///   re-open. The C doesn't reload them either.
+    /// - NO (yet): Compression, Forwarding. STUB(chunk-12-switch).
+    #[allow(clippy::too_many_lines)] // C reload_configuration is
+    // 122 lines. The diff/broadcast/script sequence shares too
+    // much state to split cleanly.
+    fn reload_configuration(&mut self) -> bool {
+        // ─── re-read config (C `:340-354`)
+        let config = match tinc_conf::read_server_config(&self.confbase) {
+            Ok(c) => c,
+            Err(e) => {
+                // C `:343-345`: `return EINVAL`. The CALLER logs;
+                // we log here too (the SIGHUP path doesn't see the
+                // error, only the false return).
+                log::error!(target: "tincd",
+                            "Unable to reread configuration file: {e}");
+                return false;
+            }
+        };
+        // C `:350-351`: read_host_config. Same two-liner as setup().
+        let mut config = config;
+        let host_file = self.confbase.join("hosts").join(&self.name);
+        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+            config.merge(entries);
+        }
+
+        // ─── setup_myself_reloadable (C `:355`)
+        apply_reloadable_settings(&config, &mut self.settings);
+
+        // ─── read_invitation_key (C `net_setup.c:570`, inside
+        // setup_myself_reloadable). The operator may have run
+        // `tinc invite` since boot, creating the key.
+        match invitation_serve::read_invitation_key(&self.confbase) {
+            Ok(k) => {
+                if k.is_some() && self.invitation_key.is_none() {
+                    log::info!(target: "tincd", "Invitation key loaded");
+                }
+                self.invitation_key = k;
+            }
+            Err(e) => {
+                // Corrupt key file. Log, leave the old key in place.
+                log::warn!(target: "tincd",
+                            "Failed to read invitation key: {e}");
+            }
+        }
+
+        // ─── subnet diff (C `:396-428`, the non-strictsubnets
+        // branch — our `diff_subnets`).
+        // Current: every subnet we own (filtered by owner == us).
+        // From config: re-parse `Subnet =` lines.
+        let current_subnets: HashSet<Subnet> = self
+            .subnets
+            .iter()
+            .filter(|(_, owner)| *owner == self.name)
+            .map(|(s, _)| *s)
+            .collect();
+        let new_subnets = parse_subnets_from_config(&config, &self.name);
+        let diff = reload::diff_subnets(&current_subnets, &new_subnets);
+
+        // C `:423-427`: removed → send DEL, fire subnet-down, del.
+        // Clone our name once (used in 4 places below; the borrow
+        // checker doesn't like &self.name across &mut self calls).
+        let myname = self.name.clone();
+        for s in diff.removed {
+            // C `:423`: `send_del_subnet(everyone, subnet)`.
+            let line = SubnetMsg {
+                owner: myname.clone(),
+                subnet: s,
+            }
+            .format(Request::DelSubnet, Self::nonce());
+            self.broadcast_line(&line);
+            // C `:425`: `subnet_update(myself, subnet, false)`.
+            self.run_subnet_script(false, &myname, &s);
+            // C `:427`: `subnet_del(myself, subnet)`.
+            self.subnets.del(&s, &myname);
+        }
+        // C `:415-419`: added → add, send ADD, fire subnet-up.
+        // (C order is add-send-update; we match.)
+        for s in diff.added {
+            // C `:415`: `subnet_add(myself, subnet)`.
+            self.subnets.add(s, myname.clone());
+            // C `:417`: `send_add_subnet(everyone, subnet)`.
+            let line = SubnetMsg {
+                owner: myname.clone(),
+                subnet: s,
+            }
+            .format(Request::AddSubnet, Self::nonce());
+            self.broadcast_line(&line);
+            // C `:419`: `subnet_update(myself, subnet, true)`.
+            self.run_subnet_script(true, &myname, &s);
+        }
+
+        // ─── ConnectTo diff (C `:432`: try_outgoing_connections).
+        // The C re-runs the WHOLE walk (which mark-sweeps via the
+        // `outgoing->aip = NULL` trick). Our diff is explicit.
+        let current_ct: BTreeSet<String> = self
+            .outgoings
+            .iter()
+            .map(|(_, o)| o.node_name.clone())
+            .collect();
+        let new_ct: BTreeSet<String> = parse_connect_to_from_config(&config, &myname)
+            .into_iter()
+            .collect();
+        let (to_add, to_remove) = reload::diff_connect_to(&current_ct, &new_ct);
+
+        // Remove: find the Outgoing slot, terminate its conn (if
+        // any), drop the slot + timer. C `net_socket.c:870-883`
+        // mark-sweep does the same.
+        for name in to_remove {
+            // Find the OutgoingId by name (linear scan; outgoings
+            // are few — single digits).
+            let oid = self
+                .outgoings
+                .iter()
+                .find(|(_, o)| o.node_name == name)
+                .map(|(id, _)| id);
+            if let Some(oid) = oid {
+                // Terminate the conn serving this outgoing (if
+                // connected). C: `terminate_connection(c, c->edge)`.
+                let to_terminate: Vec<ConnId> = self
+                    .conns
+                    .iter()
+                    .filter(|(_, c)| c.outgoing.map(OutgoingId::from) == Some(oid))
+                    .map(|(id, _)| id)
+                    .collect();
+                for cid in to_terminate {
+                    // Clear `outgoing` first so terminate's retry
+                    // path doesn't fire (the slot is going away).
+                    if let Some(c) = self.conns.get_mut(cid) {
+                        c.outgoing = None;
+                    }
+                    self.terminate(cid);
+                }
+                // Drop the slot + its timer.
+                if let Some(tid) = self.outgoing_timers.remove(oid) {
+                    self.timers.del(tid);
+                }
+                self.outgoings.remove(oid);
+                log::info!(target: "tincd",
+                            "Removed outgoing connection to {name}");
+            }
+        }
+        // Add: same path as setup() — lookup_or_add_node,
+        // build Outgoing, setup_outgoing_connection.
+        for peer in to_add {
+            self.lookup_or_add_node(&peer);
+            let config_addrs = resolve_config_addrs(&self.confbase, &peer);
+            let addr_cache =
+                crate::addrcache::AddressCache::open(&self.confbase, &peer, config_addrs);
+            let oid = self.outgoings.insert(Outgoing {
+                node_name: peer,
+                timeout: 0,
+                addr_cache,
+            });
+            let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
+            self.outgoing_timers.insert(oid, tid);
+            self.setup_outgoing_connection(oid);
+        }
+
+        // ─── mtime check (C `:438-455`).
+        // Conn names: every non-control conn. Daemon does the
+        // stat() (I/O); reload module decides.
+        let conn_names: Vec<String> = self
+            .conns
+            .values()
+            .filter(|c| !c.control)
+            .map(|c| c.name.clone())
+            .collect();
+        let host_mtimes: Vec<(String, SystemTime)> = conn_names
+            .iter()
+            .filter_map(|name| {
+                let path = self.confbase.join("hosts").join(name);
+                std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|mt| (name.clone(), mt))
+            })
+            .collect();
+        let to_terminate =
+            reload::conns_to_terminate(&conn_names, &host_mtimes, self.last_config_check);
+        for name in to_terminate {
+            // C `:450`: `"Host config file of %s has been changed"`.
+            log::info!(target: "tincd::conn",
+                        "Host config file of {name} has been changed");
+            // Find ConnId by name. Same linear scan; conns are few.
+            let to_term: Vec<ConnId> = self
+                .conns
+                .iter()
+                .filter(|(_, c)| !c.control && c.name == name)
+                .map(|(id, _)| id)
+                .collect();
+            for cid in to_term {
+                self.terminate(cid);
+            }
+        }
+
+        // C `:455`: `last_config_check = now.tv_sec`.
+        self.last_config_check = SystemTime::now();
+
+        // The broadcast_line calls above queued to active conns.
+        // Sweep IO_WRITE.
+        self.maybe_set_write_any();
+
+        true
     }
 
     // ─── io handlers
@@ -1953,7 +2270,7 @@ impl Daemon {
     /// (`dst != nullid && to != myself`) is wired (chunk-9b).
     ///
     /// Loop drains ALL pending datagrams (edge-triggered epoll).
-    /// STUB(chunk-10): `recvmmsg` batching.
+    /// STUB(chunk-11-perf): `recvmmsg` batching.
     fn on_udp_recv(&mut self, i: u8) {
         // C `MAXSIZE` is `MTU + 4 + cipher overhead`. We use a
         // generous fixed buf; oversize packets truncate (MSG_TRUNC)
@@ -2545,7 +2862,7 @@ impl Daemon {
             payload
         };
 
-        // STUB(chunk-10): `if(n->connection && origpkt->len >
+        // STUB(chunk-11-perf): `if(n->connection && origpkt->len >
         // n->minmtu) send_tcppacket()` (`:724-726`). The TCP
         // fallback when the packet is too big for the discovered
         // MTU. We always go via SPTPS-UDP for now (`send_sptps_
@@ -2920,7 +3237,7 @@ impl Daemon {
             // proto minor ≥7 nexthops; ANS_KEY/REQ_KEY (b64'd via
             // the text protocol) otherwise.
             //
-            // STUB(chunk-10): `:975-986` SPTPS_PACKET via `send_
+            // STUB(chunk-11-perf): `:975-986` SPTPS_PACKET via `send_
             // sptps_tcppacket`. Our `Connection::send_raw` queues
             // raw bytes but the meta-conn is SPTPS-stream-framed;
             // the binary blob would need to go through `sptps_
@@ -3620,7 +3937,7 @@ impl Daemon {
     /// records on a meta-conn but don't have a `ConnId` in scope
     /// to set io_set on. Sweep all conns. Per-packet hot path…
     /// but `conns.len()` is tiny (one per direct peer + control).
-    /// STUB(chunk-10): track which ConnIds were touched, set those.
+    /// STUB(chunk-11-perf): track which ConnIds were touched, set those.
     fn maybe_set_write_any(&mut self) {
         let dirty: Vec<ConnId> = self
             .conns
@@ -3809,6 +4126,7 @@ impl Daemon {
                         my_name: &my_name,
                         mykey: &self.mykey,
                         confbase: &confbase,
+                        invitation_key: self.invitation_key.as_ref(),
                     };
                     let now = self.timers.now();
                     match handle_id(conn, &line, &ctx, now, &mut OsRng) {
@@ -3904,6 +4222,63 @@ impl Daemon {
                             // dispatch_sptps_outputs may have
                             // terminated (HandshakeDone in 4a).
                             // Check.
+                            if !self.conns.contains_key(id) {
+                                return;
+                            }
+
+                            (DispatchResult::Ok, nw)
+                        }
+                        Ok(IdOk::Invitation { needs_write, init }) => {
+                            // C `protocol_auth.c:340-373`. Two
+                            // plaintext lines (id reply + ACK with
+                            // inv pubkey) already in outbuf. SPTPS
+                            // installed. Same dispatch shape as
+                            // Peer: queue init Wire, take_rest
+                            // re-feed. The KEY difference: set
+                            // `conn.invite` so dispatch_sptps_outputs
+                            // early-branches to invitation handling.
+                            //
+                            // C `:353`: `c->status.invitation = true`.
+                            conn.invite = Some(InvitePhase::WaitingCookie);
+
+                            let mut nw = needs_write;
+                            for o in init {
+                                if let tinc_sptps::Output::Wire { bytes, .. } = o {
+                                    nw |= conn.send_raw(&bytes);
+                                }
+                            }
+
+                            // take_rest + re-feed. Same as Peer.
+                            // The joiner's KEX might piggyback the
+                            // greeting line.
+                            let leftover = conn.inbuf.take_rest();
+                            let outs = if leftover.is_empty() {
+                                Vec::new()
+                            } else {
+                                let sptps = conn
+                                    .sptps
+                                    .as_deref_mut()
+                                    .expect("handle_id Invitation just installed it");
+                                match Connection::feed_sptps(
+                                    sptps, &leftover, &conn.name, &mut OsRng,
+                                ) {
+                                    FeedResult::Sptps(outs) => outs,
+                                    FeedResult::Dead => {
+                                        log::error!(
+                                            target: "tincd::proto",
+                                            "SPTPS error in invitation piggyback from {}",
+                                            conn.hostname
+                                        );
+                                        self.terminate(id);
+                                        return;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            };
+
+                            if self.dispatch_sptps_outputs(id, outs) {
+                                nw = true;
+                            }
                             if !self.conns.contains_key(id) {
                                 return;
                             }
@@ -4038,6 +4413,22 @@ impl Daemon {
                             crate::proto::REQ_DUMP_CONNECTIONS
                         ));
                         (DispatchResult::Ok, nw2)
+                    } else if r == DispatchResult::Reload {
+                        // C `control.c:56-57`: `int result = reload_
+                        // configuration(); return control_return(c,
+                        // type, result)`. Result: 0 success, nonzero
+                        // failure (C uses EINVAL, we use 1).
+                        // C `control_return`: 0 = success, nonzero =
+                        // failure (C uses EINVAL=22; we use 1 — the
+                        // CLI only checks zero vs nonzero).
+                        let result = i32::from(!self.reload_configuration());
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send(format_args!(
+                            "{} {} {result}",
+                            Request::Control as u8,
+                            crate::proto::REQ_RELOAD
+                        ));
+                        (DispatchResult::Ok, nw2)
                     } else {
                         (r, nw)
                     }
@@ -4074,8 +4465,9 @@ impl Daemon {
                 DispatchResult::DumpConnections
                 | DispatchResult::DumpSubnets
                 | DispatchResult::DumpNodes
-                | DispatchResult::DumpEdges => {
-                    unreachable!("Dump variants rewritten inline above")
+                | DispatchResult::DumpEdges
+                | DispatchResult::Reload => {
+                    unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}
                 DispatchResult::Stop => {
@@ -4113,6 +4505,17 @@ impl Daemon {
     ///   record vs `\n`-terminated line).
     fn dispatch_sptps_outputs(&mut self, id: ConnId, outs: Vec<tinc_sptps::Output>) -> bool {
         use tinc_sptps::Output;
+
+        // ─── invitation early-branch
+        // C: the SPTPS receive callback is `receive_invitation_sptps`
+        // (NOT `receive_meta_sptps`) for invitation conns — set at
+        // `protocol_auth.c:372`. Our `Sptps` is callback-free (returns
+        // `Vec<Output>`), so we branch HERE on `conn.invite`.
+        // Records dispatch via `InvitePhase`, not `check_gate`.
+        if self.conns.get(id).is_some_and(|c| c.invite.is_some()) {
+            return self.dispatch_invitation_outputs(id, outs);
+        }
+
         let mut needs_write = false;
         for o in outs {
             let Some(conn) = self.conns.get_mut(id) else {
@@ -4248,6 +4651,280 @@ impl Daemon {
             }
         }
         needs_write
+    }
+
+    /// `receive_invitation_sptps` (`protocol_auth.c:185-310`).
+    /// SPTPS record dispatch for invitation conns. Called from
+    /// `dispatch_sptps_outputs` early-branch when `conn.invite.
+    /// is_some()`. Records dispatch by `(type, InvitePhase)`, NOT
+    /// `check_gate` — the bytes are file chunks and b64 pubkey
+    /// strings, not newline-terminated request lines.
+    ///
+    /// State machine (`c->status.invitation_used` in C):
+    /// - `Wire` → outbuf raw (same as Peer).
+    /// - `HandshakeDone` (type 128 in C) → swallow (`:188`). Don't
+    ///   send_ack — invitations don't ACK.
+    /// - `Record { 0, len=18 }` + `WaitingCookie` → serve_cookie,
+    ///   chunk file, send type-0 chunks + empty type-1, transition
+    ///   to WaitingPubkey. C `:196-310`.
+    /// - `Record { 1, _ }` + `WaitingPubkey` → finalize, run
+    ///   invitation-accepted script, send empty type-2, unlink
+    ///   .used, terminate. C `:119-183`.
+    /// - Anything else → terminate (`:196`).
+    ///
+    /// Returns the io_set signal. May terminate.
+    #[allow(clippy::too_many_lines)] // C receive_invitation_sptps
+    // is 125 lines; the cookie→file→chunk→send sequence shares
+    // too much state to split cleanly.
+    fn dispatch_invitation_outputs(&mut self, id: ConnId, outs: Vec<tinc_sptps::Output>) -> bool {
+        use tinc_sptps::Output;
+        let mut needs_write = false;
+
+        for o in outs {
+            let Some(conn) = self.conns.get_mut(id) else {
+                return needs_write;
+            };
+            match o {
+                Output::Wire { bytes, .. } => {
+                    // Same as Peer: framed SPTPS bytes → outbuf.
+                    needs_write |= conn.send_raw(&bytes);
+                }
+                Output::HandshakeDone => {
+                    // C `:188`: `if(type == 128) return true`.
+                    // Swallow. The handshake completing is the
+                    // signal that the joiner can now send the
+                    // cookie (type-0 record); we just wait.
+                    log::debug!(target: "tincd::auth",
+                                "Invitation SPTPS handshake done with {}",
+                                conn.hostname);
+                }
+                Output::Record { record_type, bytes } => {
+                    // Read what we need from conn, drop borrow, then
+                    // re-fetch for sends. Same two-phase as everywhere.
+                    let phase = conn.invite.take();
+                    let hostname = conn.hostname.clone();
+                    let conn_addr = conn.address;
+
+                    match (record_type, phase) {
+                        // ─── type-0, len-18, WaitingCookie ───
+                        // C `:196`: `if(type != 0 || len != 18 ||
+                        // c->status.invitation_used) return false`.
+                        (0, Some(InvitePhase::WaitingCookie))
+                            if bytes.len() == invitation_serve::COOKIE_LEN =>
+                        {
+                            let mut cookie = [0u8; invitation_serve::COOKIE_LEN];
+                            cookie.copy_from_slice(&bytes);
+
+                            // C `:341`: `if(!invitation_key)` was
+                            // already checked at id_h. The key is
+                            // Some here (id_h would have rejected).
+                            let Some(inv_key) = self.invitation_key.as_ref() else {
+                                log::error!(target: "tincd::auth",
+                                            "invitation key vanished mid-handshake");
+                                self.terminate(id);
+                                return needs_write;
+                            };
+
+                            // C `:201-277`: serve_cookie does the
+                            // rename + stat + read + name-parse.
+                            let result = invitation_serve::serve_cookie(
+                                &self.confbase,
+                                inv_key,
+                                &cookie,
+                                &self.name,
+                                self.settings.invitation_lifetime,
+                                SystemTime::now(),
+                            );
+                            let (contents, invited_name, used_path) = match result {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    log::error!(target: "tincd::auth",
+                                                "Invitation from {hostname}: {e}");
+                                    self.terminate(id);
+                                    return needs_write;
+                                }
+                            };
+
+                            // C `:285`: `c->name = xstrdup(name)`.
+                            // Re-fetch conn (we dropped the borrow
+                            // for the serve_cookie call which only
+                            // needed &self fields, but the inv_key
+                            // borrow above also conflicts).
+                            let Some(conn) = self.conns.get_mut(id) else {
+                                return needs_write;
+                            };
+                            conn.name.clone_from(&invited_name);
+
+                            // C `:294-303`: chunk file, send each
+                            // chunk as type-0, then empty type-1.
+                            // `chunk_file` returns slices into
+                            // `contents`; we copy each via
+                            // send_sptps_record. The CHUNK_SIZE
+                            // (1024) matches the C's `char buf[1024]`.
+                            for chunk in invitation_serve::chunk_file(
+                                &contents,
+                                invitation_serve::CHUNK_SIZE,
+                            ) {
+                                needs_write |= conn.send_sptps_record(0, chunk);
+                            }
+                            // C `:303`: `sptps_send_record(&c->sptps, 1, buf, 0)`.
+                            needs_write |= conn.send_sptps_record(1, &[]);
+
+                            // C `:305`: `unlink(usedname)`. The C
+                            // does this BEFORE the type-1 reply
+                            // arrives (right after sending the
+                            // file). The .used file's purpose
+                            // (single-use enforcement via rename)
+                            // is already served.
+                            if let Err(e) = std::fs::remove_file(&used_path) {
+                                log::warn!(target: "tincd::auth",
+                                            "Failed to unlink {}: {e}",
+                                            used_path.display());
+                            }
+
+                            // C `:307`: `c->status.invitation_used = true`.
+                            conn.invite = Some(InvitePhase::WaitingPubkey {
+                                name: invited_name.clone(),
+                                used_path,
+                            });
+
+                            log::info!(target: "tincd::auth",
+                                        "Invitation successfully sent to {invited_name} ({hostname})");
+                        }
+
+                        // ─── type-1, WaitingPubkey ───
+                        // C `:192-193`: `if(type == 1 && c->status.
+                        // invitation_used) return finalize_
+                        // invitation(c, data, len)`.
+                        (1, Some(InvitePhase::WaitingPubkey { name, .. })) => {
+                            // bytes is the joiner's pubkey, b64,
+                            // no newline. C `:122`: `if(strchr(data,
+                            // '\n'))` — finalize() checks this.
+                            let Ok(pubkey_b64) = std::str::from_utf8(&bytes) else {
+                                log::error!(target: "tincd::auth",
+                                            "Invalid pubkey from {name} ({hostname}): non-UTF-8");
+                                self.terminate(id);
+                                return needs_write;
+                            };
+
+                            // C `:128-144`: write hosts/{name}.
+                            match invitation_serve::finalize(&self.confbase, &name, pubkey_b64) {
+                                Ok(host_path) => {
+                                    log::info!(target: "tincd::auth",
+                                                "Key successfully received from {name} ({hostname}), \
+                                                 wrote {}",
+                                                host_path.display());
+                                }
+                                Err(e) => {
+                                    log::error!(target: "tincd::auth",
+                                                "Finalize invitation for {name} ({hostname}): {e}");
+                                    self.terminate(id);
+                                    return needs_write;
+                                }
+                            }
+
+                            // C `:148-161`: lookup_or_add_node +
+                            // open_address_cache + add_recent_
+                            // address. The invited node is now a
+                            // real peer; future outgoing connects
+                            // can find them at this address.
+                            //
+                            // Our addrcache is per-Outgoing (not
+                            // per-Node), so there's no slot to
+                            // write to (the invited node isn't a
+                            // ConnectTo target — THEY connect to
+                            // US). The C writes anyway (the cache
+                            // file lives in confbase/cache/); a
+                            // future ConnectTo for this node would
+                            // open_address_cache and find it.
+                            // We do the same: write the cache file
+                            // directly.
+                            if let Some(addr) = conn_addr {
+                                let mut cache = crate::addrcache::AddressCache::open(
+                                    &self.confbase,
+                                    &name,
+                                    Vec::new(),
+                                );
+                                cache.add_recent(addr);
+                                if let Err(e) = cache.save() {
+                                    log::warn!(target: "tincd::auth",
+                                                "Failed to save address cache for {name}: {e}");
+                                }
+                            }
+
+                            // C `:164-179`: invitation-accepted script.
+                            // Env: NODE, REMOTEADDRESS, REMOTEPORT, NAME.
+                            self.run_invitation_accepted_script(&name, conn_addr);
+
+                            // C `:181`: `sptps_send_record(&c->sptps, 2, data, 0)`.
+                            // The empty type-2 is the ACK; joiner
+                            // closes after reading it. Re-fetch conn.
+                            let Some(conn) = self.conns.get_mut(id) else {
+                                return needs_write;
+                            };
+                            needs_write |= conn.send_sptps_record(2, &[]);
+
+                            // C `:182`: `return true`. The conn
+                            // stays open; the joiner closes from
+                            // their end after reading type-2. We
+                            // get EOF and terminate normally.
+                            // Don't terminate here — the type-2
+                            // bytes are still in outbuf, need to
+                            // flush first.
+                            //
+                            // BUT: don't restore `invite` either.
+                            // Any further records are an error;
+                            // leave invite as None so a stray
+                            // record falls through to the meta
+                            // dispatch and dies on check_gate.
+                            // Actually that's wrong — the conn
+                            // would then be in the meta dispatch
+                            // with no allow_request and gibberish
+                            // SPTPS state. Set a phase that
+                            // terminates on any further record.
+                            // Simpler: set invite back to a phase
+                            // that rejects everything.
+                            conn.invite = Some(InvitePhase::WaitingCookie);
+                            // (WaitingCookie rejects type-1 and
+                            // wrong-len type-0; no further records
+                            // should arrive anyway since the joiner
+                            // closes after type-2.)
+                        }
+
+                        // ─── anything else ───
+                        // C `:196`: `return false`. Bad type, bad
+                        // length, or wrong phase.
+                        (rt, ph) => {
+                            log::error!(target: "tincd::auth",
+                                        "Unexpected invitation record type={rt} \
+                                         len={} phase={ph:?} from {hostname}",
+                                        bytes.len());
+                            self.terminate(id);
+                            return needs_write;
+                        }
+                    }
+                }
+            }
+        }
+        needs_write
+    }
+
+    /// `protocol_auth.c:164-179`: the invitation-accepted script.
+    /// Env: `NODE` (invited node's name), `REMOTEADDRESS`/
+    /// `REMOTEPORT` (the conn's TCP address), plus the base env.
+    fn run_invitation_accepted_script(&self, node: &str, addr: Option<SocketAddr>) {
+        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        // C `:170`: `"NODE=%s", c->name`.
+        env.add("NODE", node.to_owned());
+        // C `:171-173`: `sockaddr2str(&c->address, &address, &port)`.
+        if let Some(a) = addr {
+            env.add("REMOTEADDRESS", a.ip().to_string());
+            env.add("REMOTEPORT", a.port().to_string());
+        }
+        Self::log_script(
+            "invitation-accepted",
+            script::execute(&self.confbase, "invitation-accepted", &env, None),
+        );
     }
 
     /// `lookup_node` + `new_node`/`node_add` fused (`node.c:74,96`).
@@ -6557,12 +7234,113 @@ impl Daemon {
     /// begin` loop: walk the addr cache, try each addr, register
     /// the first one that doesn't fail synchronously. Exhausted →
     /// arm the retry-backoff timer.
+    ///
+    /// `PROXY_EXEC` (`:588`, `:631`): instead of socket+connect,
+    /// `do_outgoing_pipe` does socketpair+fork. The fd is already
+    /// "connected" — skip the async-connect probe, send_id directly.
+    /// SOCKS/HTTP proxy: `STUB(chunk-11-proxy)` (needs the tcplen
+    /// state machine in conn.rs).
+    #[allow(clippy::too_many_lines)] // PROXY_EXEC adds a parallel
+    // code path (socketpair vs socket+connect). Factoring would
+    // thread oid/name/now/self through a helper for both arms.
+    // C `do_outgoing_connection` is 98 lines; we're 119 with the
+    // proxy branch. Same shape, two sockets-paths.
     fn do_outgoing_connection(&mut self, oid: OutgoingId) {
         loop {
             let Some(outgoing) = self.outgoings.get_mut(oid) else {
                 return;
             };
             let name = outgoing.node_name.clone();
+
+            // ─── PROXY_EXEC (C `:588-590`, `:631`)
+            // Walk the addr cache for the env vars (the proxy
+            // script reads REMOTEADDRESS/REMOTEPORT). The fd is a
+            // socketpair half — already "connected", no probe.
+            if let Some(ProxyConfig::Exec { cmd }) = self.settings.proxy.clone() {
+                let Some(addr) = outgoing.addr_cache.next_addr() else {
+                    // C `:572-575`: addr cache exhausted. Same as
+                    // the non-proxy path.
+                    log::error!(target: "tincd::conn",
+                                "Could not set up a meta connection to {name}");
+                    self.retry_outgoing(oid);
+                    return;
+                };
+                log::info!(target: "tincd::conn",
+                            "Trying to connect to {name} ({addr}) via proxy exec");
+                let fd = match crate::outgoing::do_outgoing_pipe(&cmd, addr, &name, &self.name) {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        log::error!(target: "tincd::conn",
+                                    "Proxy exec failed for {name}: {e}");
+                        // C `:605-608`: "Creating socket failed"
+                        // → goto begin. Try next addr.
+                        continue;
+                    }
+                };
+                // Set non-blocking on the parent fd. The child end
+                // is already gone (closed in parent post-fork).
+                // SAFETY: fd is valid (just from socketpair).
+                #[allow(unsafe_code)]
+                unsafe {
+                    let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+                    libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+                // C `:631`: `result = 0` for PROXY_EXEC. No async
+                // connect; the conn is ready NOW. Build it with
+                // connecting=false (new_outgoing sets it true; we
+                // clear it after).
+                let now = self.timers.now();
+                let raw_fd = fd.as_raw_fd();
+                let mut conn = Connection::new_outgoing(
+                    fd,
+                    name.clone(),
+                    fmt_addr(&addr),
+                    addr,
+                    slotmap::Key::data(&oid),
+                    now,
+                );
+                conn.connecting = false;
+                let id = self.conns.insert(conn);
+                // Register Read only — no probe. Same as a finished
+                // async connect.
+                match self.ev.add(raw_fd, Io::Read, IoWhat::Conn(id)) {
+                    Ok(io_id) => {
+                        self.conn_io.insert(id, io_id);
+                    }
+                    Err(e) => {
+                        log::error!(target: "tincd::conn",
+                                    "io_add failed: {e}");
+                        self.conns.remove(id);
+                        continue;
+                    }
+                }
+                // C `:425`: `send_id(c)`. The proxy is the
+                // transport; the peer on the other side of the
+                // proxy expects our ID line.
+                if let Some(conn) = self.conns.get_mut(id) {
+                    log::info!(target: "tincd::conn",
+                                "Connected to {} ({}) via proxy exec",
+                                conn.name, conn.hostname);
+                    let needs_write = conn.send(format_args!(
+                        "{} {} {}.{}",
+                        Request::Id as u8,
+                        self.name,
+                        tinc_proto::request::PROT_MAJOR,
+                        tinc_proto::request::PROT_MINOR
+                    ));
+                    if needs_write {
+                        if let Some(&io_id) = self.conn_io.get(id) {
+                            if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
+                                log::error!(target: "tincd::conn",
+                                            "io_set failed: {e}");
+                                self.terminate(id);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
             match try_connect(&mut outgoing.addr_cache, &name) {
                 ConnectAttempt::Started { sock, addr } => {
                     // C `:649-658`: `c->status.connecting = true;

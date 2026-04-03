@@ -76,3 +76,8 @@ lz4_flex = { version = "0.11", default-features = false }
 tinc-conf = { path = "../tinc-conf" }
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-sptps = { path = "../tinc-sptps" }
+# tinc-tools for the `tinc_join_against_real_daemon` integration test:
+# the REAL `cmd::join::join()` runs in-process against the spawned
+# daemon. Stronger than the in-process pump test in join.rs (real
+# TCP, real epoll, real daemon's `?` branch).
+tinc-tools = { path = "../tinc-tools" }

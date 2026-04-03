@@ -1833,3 +1833,372 @@ fn three_daemon_tunnelserver() {
         "mid should log tunnelserver-mode send_everything; stderr:\n{mid_stderr}"
     );
 }
+
+// ═══ chunk-10: SIGHUP reload, invitation server ═════════════════════
+
+/// Check if `dump subnets` rows contain a given subnet owned by a
+/// given owner. Row format: `"18 5 SUBNET OWNER"`.
+fn has_subnet(rows: &[String], subnet: &str, owner: &str) -> bool {
+    rows.iter().any(|r| {
+        let Some(body) = r.strip_prefix("18 5 ") else {
+            return false;
+        };
+        let mut t = body.split_whitespace();
+        t.next() == Some(subnet) && t.next() == Some(owner)
+    })
+}
+
+/// SIGHUP reload: alice changes her own Subnets, sends SIGHUP, bob
+/// sees the diff via ADD_SUBNET / DEL_SUBNET.
+///
+/// ## What's proven (per step)
+///
+/// 1. **Reload reads config**: alice's `read_server_config` re-runs
+///    on SIGHUP. The diff sees `10.1.0.0/24` as new.
+/// 2. **`diff_subnets` + broadcast**: alice's `reload_configuration`
+///    sends `ADD_SUBNET` for the new subnet. Bob's `on_add_subnet`
+///    fires; `dump subnets` shows it.
+/// 3. **DEL half**: removing the subnet + SIGHUP → bob sees it gone.
+///
+/// This is the strongest reload test — it exercises the full chain:
+/// signal → self-pipe wake → reload_configuration → diff → broadcast
+/// → peer's on_add_subnet → SubnetTree.
+#[test]
+fn sighup_reload_subnets() {
+    let tmp = TmpGuard::new("reload");
+    let alice = Node::new(tmp.path(), "alice", 0xAA);
+    let bob = Node::new(tmp.path(), "bob", 0xBB);
+
+    // alice has ONE subnet initially.
+    alice.write_config_with(&bob, false, None, Some("10.0.0.0/24"));
+    bob.write_config_with(&alice, true, None, None);
+
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        panic!("alice setup failed: {}", drain_stderr(alice_child));
+    }
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        let _ = alice_child.kill();
+        panic!("bob setup failed: {}", drain_stderr(bob_child));
+    }
+
+    // Wait for the connection.
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+    poll_until(Duration::from_secs(10), || {
+        if has_active_peer(&bob_ctl.dump(6), "alice") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    // ─── baseline: bob sees alice's 10.0.0.0/24 ──────────────
+    poll_until(Duration::from_secs(5), || {
+        if has_subnet(&bob_ctl.dump(5), "10.0.0.0/24", "alice") {
+            Some(())
+        } else {
+            None
+        }
+    });
+    let baseline = bob_ctl.dump(5);
+    assert!(
+        !has_subnet(&baseline, "10.1.0.0/24", "alice"),
+        "baseline should NOT have 10.1.0.0/24 yet: {baseline:?}"
+    );
+
+    // ─── step 1: ADD a subnet ───────────────────────────────
+    // Rewrite alice's hosts/alice with BOTH subnets. Port stays.
+    // Sleep 1.1s before write: `conns_to_terminate` uses
+    // `mtime > last_config_check` (strict, second-granularity);
+    // a write in the same wall-clock second as boot would have
+    // `mtime == last_config_check` and not trigger. Our test
+    // doesn't WANT it to trigger (we're rewriting alice's OWN
+    // hosts file, not a peer's), but the safety margin avoids
+    // flakiness if mtime semantics differ across filesystems.
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(
+        alice.confbase.join("hosts").join("alice"),
+        format!(
+            "Port = {}\nSubnet = 10.0.0.0/24\nSubnet = 10.1.0.0/24\n",
+            alice.port
+        ),
+    )
+    .unwrap();
+
+    // SIGHUP alice. Read pid from pidfile (first token).
+    let alice_pid: i32 = std::fs::read_to_string(&alice.pidfile)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGHUP) }, 0);
+
+    // Poll bob until 10.1.0.0/24 appears. This proves: alice
+    // re-read config, diff_subnets found the new one, sent
+    // ADD_SUBNET, bob received and added.
+    poll_until(Duration::from_secs(10), || {
+        let s = bob_ctl.dump(5);
+        if has_subnet(&s, "10.1.0.0/24", "alice") && has_subnet(&s, "10.0.0.0/24", "alice") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    // alice's own dump: also shows both (proves SubnetTree.add).
+    let a_subnets = alice_ctl.dump(5);
+    assert!(
+        has_subnet(&a_subnets, "10.1.0.0/24", "alice"),
+        "alice should have new subnet locally: {a_subnets:?}"
+    );
+
+    // ─── step 2: REMOVE a subnet ────────────────────────────
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(
+        alice.confbase.join("hosts").join("alice"),
+        format!("Port = {}\nSubnet = 10.0.0.0/24\n", alice.port),
+    )
+    .unwrap();
+    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGHUP) }, 0);
+
+    // Poll until 10.1.0.0/24 is GONE. Proves DEL_SUBNET path.
+    poll_until(Duration::from_secs(10), || {
+        let s = bob_ctl.dump(5);
+        if !has_subnet(&s, "10.1.0.0/24", "alice") && has_subnet(&s, "10.0.0.0/24", "alice") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    // ─── cleanup ───────────────────────────────────────────────
+    drop(alice_ctl);
+    drop(bob_ctl);
+    let _ = bob_child.kill();
+    let alice_stderr = drain_stderr(alice_child);
+    let _ = drain_stderr(bob_child);
+    // alice should have logged the reload.
+    assert!(
+        alice_stderr.contains("SIGHUP") || alice_stderr.contains("reload"),
+        "alice should log reload; stderr:\n{alice_stderr}"
+    );
+}
+
+/// `tinc join` against a real daemon. The strongest invitation test:
+/// real TCP, real epoll, real `tinc-tools::cmd::join::join()`.
+///
+/// ## Setup chain
+///
+/// 1. Alice's confbase: tinc.conf + hosts/alice + ed25519_key.priv
+///    + invitations/ed25519_key.priv (the per-mesh invitation key).
+/// 2. The invitation FILE: `invitations/<cookie_filename>` with
+///    `Name = bob\n#-----#\n<alice's host file>\n`.
+/// 3. The URL: `127.0.0.1:<alice-port>/<slug>` where slug =
+///    `b64(key_hash(inv_pubkey)) || b64(cookie)`.
+///
+/// ## What's proven (full chain)
+///
+/// - daemon's id_h `?` branch: throwaway-key parse, invitation_key
+///   present, plaintext greeting (line1+line2), SPTPS start with
+///   the 15-byte no-NUL label.
+/// - SPTPS handshake: joiner Initiator, daemon Responder. Label
+///   match (both sides use 15 bytes).
+/// - dispatch_invitation_outputs: cookie record → serve_cookie →
+///   chunk_file → type-0 records + type-1 marker.
+/// - join's finalize: receives file, writes bob's tinc.conf +
+///   hosts/alice, generates bob's identity key, sends it as type-1.
+/// - daemon's finalize: writes hosts/bob, sends type-2.
+/// - Single-use: second join with same cookie fails (the rename to
+///   .used + unlink left no file behind).
+#[test]
+fn tinc_join_against_real_daemon() {
+    use tinc_crypto::invite::{build_slug, cookie_filename};
+    use tinc_crypto::sign::SigningKey;
+
+    let tmp = TmpGuard::new("join");
+    let alice = Node::new(tmp.path(), "alice", 0xAA);
+
+    // ─── alice's basic config (no peer; she just listens) ──────
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(alice.confbase.join("hosts")).unwrap();
+        std::fs::write(
+            alice.confbase.join("tinc.conf"),
+            format!(
+                "Name = {}\nDeviceType = dummy\nAddressFamily = ipv4\nPingTimeout = 1\n",
+                alice.name
+            ),
+        )
+        .unwrap();
+        // hosts/alice: Port + Address (the invitation file copies
+        // this section so bob knows where to connect).
+        std::fs::write(
+            alice.confbase.join("hosts").join("alice"),
+            format!(
+                "Port = {}\nAddress = 127.0.0.1 {}\n",
+                alice.port, alice.port
+            ),
+        )
+        .unwrap();
+        // alice's identity key.
+        let sk = SigningKey::from_seed(&alice.seed);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(alice.confbase.join("ed25519_key.priv"))
+            .unwrap();
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    }
+
+    // ─── invitation key + invitation file ───────────────────────
+    let inv_dir = alice.confbase.join("invitations");
+    std::fs::create_dir_all(&inv_dir).unwrap();
+    let inv_key = SigningKey::from_seed(&[0x11; 32]);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(inv_dir.join("ed25519_key.priv"))
+            .unwrap();
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &inv_key.to_blob()).unwrap();
+    }
+
+    // Cookie: deterministic for the test.
+    let cookie: [u8; 18] = *b"test-cookie-18bxxx";
+    let inv_filename = cookie_filename(&cookie, inv_key.public_key());
+
+    // Invitation file body. Format (`invitation.c:536-558`):
+    //   Name = <invited>\n
+    //   <some-config>\n
+    //   #---#\n
+    //   <copy of inviter's hosts/NAME>\n
+    // The joiner's `finalize_join` parses this; the `#---#` line
+    // separates joiner-config from inviter-host-file.
+    let alice_pub_b64 = tinc_crypto::b64::encode(&alice.pubkey());
+    let inv_body = format!(
+        "Name = bob\n\
+         ConnectTo = alice\n\
+         #---------------------------------------------------------------#\n\
+         Name = alice\n\
+         Ed25519PublicKey = {alice_pub_b64}\n\
+         Address = 127.0.0.1 {}\n",
+        alice.port
+    );
+    std::fs::write(inv_dir.join(&inv_filename), &inv_body).unwrap();
+
+    // ─── spawn alice ────────────────────────────────────────────
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        panic!("alice setup failed: {}", drain_stderr(alice_child));
+    }
+
+    // ─── build URL + run join ──────────────────────────────────
+    // URL = `host:port/slug`. slug = b64(key_hash) || b64(cookie).
+    let slug = build_slug(inv_key.public_key(), &cookie);
+    let url = format!("127.0.0.1:{}/{slug}", alice.port);
+
+    // bob's confbase (where join() writes). `for_cli` with explicit
+    // confbase: confdir stays None (we passed --config explicitly).
+    let bob_confbase = tmp.path().join("bob");
+    let bob_paths = tinc_tools::names::Paths::for_cli(&tinc_tools::names::PathsInput {
+        confbase: Some(bob_confbase.clone()),
+        ..Default::default()
+    });
+
+    // The actual join. In-process — the test IS the joiner client.
+    let result = tinc_tools::cmd::join::join(&url, &bob_paths, false);
+    if let Err(e) = &result {
+        let stderr = drain_stderr(alice_child);
+        panic!("join failed: {e:?}\nalice stderr:\n{stderr}");
+    }
+
+    // ─── verify join() wrote bob's config ──────────────────────
+    let bob_tinc_conf = std::fs::read_to_string(bob_confbase.join("tinc.conf"))
+        .expect("join should write bob/tinc.conf");
+    assert!(
+        bob_tinc_conf.contains("Name = bob"),
+        "bob/tinc.conf should have Name = bob: {bob_tinc_conf}"
+    );
+    assert!(
+        bob_tinc_conf.contains("ConnectTo = alice"),
+        "bob/tinc.conf should have ConnectTo = alice: {bob_tinc_conf}"
+    );
+
+    // bob/hosts/alice from the invitation file's second section.
+    let bob_hosts_alice = std::fs::read_to_string(bob_confbase.join("hosts").join("alice"))
+        .expect("join should write bob/hosts/alice");
+    assert!(
+        bob_hosts_alice.contains("Ed25519PublicKey"),
+        "bob/hosts/alice should have alice's pubkey: {bob_hosts_alice}"
+    );
+
+    // bob's own identity key was generated.
+    assert!(
+        bob_confbase.join("ed25519_key.priv").exists(),
+        "join should generate bob's identity key"
+    );
+
+    // ─── verify daemon wrote alice/hosts/bob ───────────────────
+    // The type-1 record carried bob's pubkey; finalize() wrote it.
+    // Poll: the daemon's epoll loop processes records on the next
+    // turn; might lag by a few ms after join() returns.
+    let alice_hosts_bob = alice.confbase.join("hosts").join("bob");
+    poll_until(Duration::from_secs(5), || {
+        if alice_hosts_bob.exists() {
+            Some(())
+        } else {
+            None
+        }
+    });
+    let hosts_bob_content = std::fs::read_to_string(&alice_hosts_bob).unwrap();
+    assert!(
+        hosts_bob_content.starts_with("Ed25519PublicKey = "),
+        "alice/hosts/bob: {hosts_bob_content}"
+    );
+
+    // ─── verify .used file was unlinked ────────────────────────
+    // The original invitation file was renamed to .used by
+    // serve_cookie, then unlinked by dispatch_invitation_outputs
+    // after the file chunks were sent. Neither should exist.
+    assert!(
+        !inv_dir.join(&inv_filename).exists(),
+        "original invitation file should be gone (renamed)"
+    );
+    assert!(
+        !inv_dir.join(format!("{inv_filename}.used")).exists(),
+        ".used file should be unlinked after serving"
+    );
+
+    // ─── single-use: second join fails ─────────────────────────
+    // Same cookie, fresh confbase. serve_cookie's rename hits
+    // ENOENT → NonExisting → daemon terminates the conn → join
+    // gets EOF mid-handshake.
+    let bob2_confbase = tmp.path().join("bob2");
+    let bob2_paths = tinc_tools::names::Paths::for_cli(&tinc_tools::names::PathsInput {
+        confbase: Some(bob2_confbase),
+        ..Default::default()
+    });
+    let result2 = tinc_tools::cmd::join::join(&url, &bob2_paths, false);
+    assert!(
+        result2.is_err(),
+        "second join with same cookie should fail (single-use); got: {result2:?}"
+    );
+
+    // ─── cleanup ───────────────────────────────────────────────
+    let alice_stderr = drain_stderr(alice_child);
+    assert!(
+        alice_stderr.contains("Invitation") || alice_stderr.contains("invitation"),
+        "alice should log invitation activity; stderr:\n{alice_stderr}"
+    );
+}

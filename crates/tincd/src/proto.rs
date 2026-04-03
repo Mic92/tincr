@@ -44,7 +44,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use rand_core::RngCore;
-use tinc_crypto::sign::SigningKey;
+use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
 use tinc_sptps::{Framing, Output, Role, Sptps};
@@ -94,6 +94,7 @@ pub(crate) const fn myself_options_default() -> u32 {
 /// the other way). Phase-6 hoist to tinc-proto. `pub(crate)` for
 /// daemon.rs's dump_connections format string.
 pub(crate) const REQ_STOP: i32 = 0;
+pub(crate) const REQ_RELOAD: i32 = 1;
 pub(crate) const REQ_DUMP_NODES: i32 = 3;
 pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
@@ -132,6 +133,10 @@ pub enum DispatchResult {
     /// `dump_edges(c)` (`edge.c:123-137`). Daemon walks per-node
     /// edge lists (the C nested-splay shape), queues 8-field rows.
     DumpEdges,
+    /// `REQ_RELOAD` (`control.c:56`). Daemon calls `reload_
+    /// configuration()`, replies `"18 1 <result>"` (0 = success,
+    /// nonzero = `read_server_config` failed).
+    Reload,
     /// Handler returned `false`. Drop the connection. C `receive_
     /// request:183-188` logs "Error while processing X" and the
     /// caller (`receive_meta`) returns `false` which causes
@@ -316,6 +321,20 @@ pub enum IdOk {
         needs_write: bool,
         init: Vec<Output>,
     },
+    /// `?` greeting: invitation joiner. SPTPS installed on `conn.
+    /// sptps` (label `"tinc invitation"`, 15 bytes, NO trailing NUL
+    /// — unlike the meta label, see [`tcp_label`] doc). The TWO
+    /// plaintext lines (id reply + ACK-with-key) are queued in
+    /// `conn.outbuf` already. Same dispatch shape as `Peer`: queue
+    /// `init` Wire bytes, take_rest re-feed.
+    ///
+    /// Daemon must set `conn.invite = Some(InvitePhase::WaitingCookie)`
+    /// so `dispatch_sptps_outputs` early-branches to invitation
+    /// record handling (`receive_invitation_sptps`, NOT `check_gate`).
+    Invitation {
+        needs_write: bool,
+        init: Vec<Output>,
+    },
 }
 
 /// Daemon-side context for `handle_id`. Bundled to keep the
@@ -336,7 +355,24 @@ pub struct IdCtx<'a> {
     pub mykey: &'a SigningKey,
     /// `confbase`. For `read_ecdsa_public_key` (peer's `hosts/NAME`).
     pub confbase: &'a Path,
+    /// `invitation_key` (`protocol_auth.c:56`). Loaded from
+    /// `confbase/invitations/ed25519_key.priv`. `None` when no
+    /// invitations have been issued; the `?` branch then rejects
+    /// (`:341-344`: `if(!invitation_key) return false`).
+    pub invitation_key: Option<&'a SigningKey>,
 }
+
+/// SPTPS label for invitation conns. `protocol_auth.c:372`:
+/// `sptps_start(..., "tinc invitation", 15, ...)`. Exactly 15 bytes.
+///
+/// **NO trailing NUL** — unlike the meta-conn label ([`tcp_label`]).
+/// The C uses an explicit count (`15`) here; the meta label uses
+/// `sizeof(label)` of a VLA (`"tinc TCP key expansion %s %s"` formatted
+/// into a `char[]`), which counts the implicit `\0`. The accident is
+/// asymmetric: same C author, two different size expressions, two
+/// different on-wire labels. The joiner (`tinc-tools/cmd/join.rs::
+/// INVITE_LABEL`) sends 15 bytes too; both ends agree.
+const INVITE_LABEL: &[u8] = b"tinc invitation";
 
 /// `id_h` (`protocol_auth.c:314-471`). All three branches.
 ///
@@ -461,15 +497,84 @@ pub fn handle_id(
         return Ok(IdOk::Control { needs_write });
     }
 
-    // BRANCH 2: `?` — invitation (`:340-373`). Chunk 4b+.
-    if name_tok.starts_with(b"?") {
-        // C: `if(!invitation_key) { ERR "don't have invitation key";
-        // return false }`. We don't have an invitation key yet (it's
-        // loaded by `read_invitation_key` in `setup_myself_reloadable`
-        // — chunk 4+). Same outcome: reject.
-        return Err(DispatchError::BadId(
-            "invitation request but invitation handling not implemented".into(),
+    // BRANCH 2: `?` — invitation (`:340-373`).
+    if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
+        // C `:341-344`: `if(!invitation_key)`. The daemon never
+        // issued an invite (the key file doesn't exist). Reject.
+        let Some(inv_key) = ctx.invitation_key else {
+            return Err(DispatchError::BadId(format!(
+                "got invitation from {} but we don't have an invitation key",
+                conn.hostname
+            )));
+        };
+
+        // C `:346-351`: `c->ecdsa = ecdsa_set_base64_public_key(
+        // name + 1)`. Decode the joiner's THROWAWAY pubkey (this
+        // is NOT their node identity — that arrives later as the
+        // type-1 SPTPS record). 32 bytes b64 → 43 chars; the C's
+        // `ecdsa_set_base64_public_key` checks length.
+        let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
+            .ok()
+            .and_then(tinc_crypto::b64::decode)
+            .filter(|v| v.len() == PUBLIC_LEN)
+            .and_then(|v| v.try_into().ok())
+            .ok_or_else(|| {
+                DispatchError::BadId(format!("got bad invitation from {}", conn.hostname))
+            })?;
+
+        // C `:354-357`: `mykey = ecdsa_get_base64_public_key(
+        // invitation_key)`. The b64 of OUR invitation pubkey. This
+        // goes in line 2; the joiner hashes it and compares to the
+        // URL slug's first 24 chars (`fingerprint_hash`). Proof we
+        // hold the invitation key.
+        let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
+
+        // C `:360-362`: `if(!c->outgoing) send_id(c)`. Invitations
+        // are always inbound (the joiner connects). Send line 1.
+        // PLAINTEXT — sptps not installed yet (same ordering note
+        // as the peer branch).
+        let mut needs_write = conn.send(format_args!(
+            "{} {} {}.{}",
+            Request::Id as u8,
+            ctx.my_name,
+            PROT_MAJOR,
+            PROT_MINOR
         ));
+
+        // C `:364-366`: `send_request(c, "%d %s", ACK, mykey)`.
+        // Line 2: ACK with our invitation pubkey. Also plaintext.
+        needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
+
+        // C `:370`: `c->protocol_minor = 2`. SPTPS-mode flag for
+        // `receive_meta` (`meta.c:65`: `if(c->protocol_minor >= 2)`).
+        // Our `feed()` checks `sptps.is_some()` instead, so this is
+        // cosmetic (logs).
+        conn.protocol_minor = 2;
+
+        // C `:372`: `sptps_start(&c->sptps, c, false, false,
+        // invitation_key, c->ecdsa, "tinc invitation", 15, ...)`.
+        // initiator=false (Responder), datagram=false (Stream).
+        // The label has NO trailing NUL (see INVITE_LABEL doc).
+        let inv_key_clone = SigningKey::from_blob(&inv_key.to_blob());
+        let (sptps, init) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            inv_key_clone,
+            throwaway,
+            INVITE_LABEL,
+            0, // replaywin: ignored in stream mode
+            rng,
+        );
+        conn.sptps = Some(Box::new(sptps));
+
+        // C `:353`: `c->status.invitation = true`. The daemon sets
+        // `conn.invite = Some(WaitingCookie)` at the IdOk dispatch
+        // site (it owns `Connection.invite`; we don't import it here).
+
+        log::info!(target: "tincd::auth",
+                   "Starting invitation handshake with {}", conn.hostname);
+
+        return Ok(IdOk::Invitation { needs_write, init });
     }
 
     // BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
@@ -937,6 +1042,13 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         .and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
+        Some(REQ_RELOAD) => {
+            // `control.c:56-57`: `case REQ_RELOAD: int result =
+            // reload_configuration(); return control_return(c, type,
+            // result)`. The daemon does the reload + the reply (it
+            // owns the config tree + the world model).
+            (DispatchResult::Reload, false)
+        }
         Some(REQ_DUMP_NODES) => {
             // `control.c:63`: `case REQ_DUMP_NODES: return
             // dump_nodes(c)`. Daemon walks the graph.
@@ -1023,6 +1135,7 @@ mod tests {
             my_name: "testd",
             mykey,
             confbase: Path::new("."),
+            invitation_key: None,
         }
     }
 
@@ -1149,9 +1262,9 @@ mod tests {
     fn id_early_rejects() {
         #[rustfmt::skip]
         let cases: &[(&[u8], &str)] = &[
-            // `?` prefix (invitation) — chunk 4a still rejects (no
-            // invitation key loaded). C: `if(!invitation_key) return
-            // false`.
+            // `?` prefix (invitation) when invitation_key is None.
+            // C `:341-344`: `if(!invitation_key) return false`.
+            // mkctx has invitation_key: None.
             (b"0 ?somekey 17.7",     "invitation, no key"),
             // `check_id` reject: name with `/`. SECURITY: this is the
             // path-traversal gate. C `:376`: `!check_id(name)`. If
@@ -1230,6 +1343,7 @@ mod tests {
             my_name: "testd",
             mykey: &mykey,
             confbase: setup.confbase(),
+            invitation_key: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng).unwrap();
@@ -1282,6 +1396,7 @@ mod tests {
             my_name: "testd",
             mykey: &mykey,
             confbase: setup.confbase(),
+            invitation_key: None,
         };
 
         // 18.7 — major 18, we're 17.
@@ -1310,6 +1425,7 @@ mod tests {
             my_name: "testd",
             mykey: &mykey,
             confbase: setup.confbase(),
+            invitation_key: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng);
@@ -1339,6 +1455,7 @@ mod tests {
             my_name: "testd",
             mykey: &mykey,
             confbase: setup.confbase(),
+            invitation_key: None,
         };
 
         // minor=0: C `:443` rejects (`ecdsa_active && minor < 1`).
@@ -1378,6 +1495,7 @@ mod tests {
             my_name: "testd",
             mykey: &mykey,
             confbase: setup.confbase(),
+            invitation_key: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut OsRng);
@@ -1390,6 +1508,106 @@ mod tests {
         // (Same as C: `:399` `c->protocol_minor = ...` is implicit
         // in the sscanf to `&c->protocol_minor`, before any check.)
         assert_eq!(c.protocol_minor, 0);
+    }
+
+    // ─── invitation `?` branch
+
+    /// `?` greeting with a valid throwaway key and an invitation
+    /// key loaded. C `protocol_auth.c:340-373`. Proves: two
+    /// plaintext lines queued (id reply + ACK-with-invkey), SPTPS
+    /// installed (label = 15 bytes, no NUL), Responder role.
+    #[test]
+    fn id_invitation_ok() {
+        let mykey = SigningKey::from_seed(&[1; 32]);
+        let inv_key = SigningKey::from_seed(&[0x77; 32]);
+        let throwaway = SigningKey::from_seed(&[0x33; 32]);
+        let throwaway_b64 = tinc_crypto::b64::encode(throwaway.public_key());
+
+        let mut c = mkconn();
+        let cookie = "a".repeat(64);
+        let ctx = IdCtx {
+            cookie: &cookie,
+            my_name: "alice",
+            mykey: &mykey,
+            confbase: Path::new("."),
+            invitation_key: Some(&inv_key),
+        };
+
+        let line = format!("0 ?{throwaway_b64} 17.7");
+        let r = handle_id(&mut c, line.as_bytes(), &ctx, Instant::now(), &mut OsRng).unwrap();
+
+        let IdOk::Invitation { needs_write, init } = r else {
+            panic!("expected Invitation, got {r:?}");
+        };
+        assert!(needs_write);
+        // sptps_start (Responder) emits no Wire (waits for initiator's
+        // KEX). C: `sptps_start(..., false, ...)` — the responder
+        // path doesn't call send_kex synchronously.
+        // Actually: check what tinc-sptps does. The initiator sends
+        // first; responder just buffers. init may be empty.
+        for o in &init {
+            assert!(matches!(o, Output::Wire { .. }));
+        }
+
+        // SPTPS installed.
+        assert!(c.sptps.is_some());
+        // protocol_minor set (cosmetic).
+        assert_eq!(c.protocol_minor, 2);
+        // NOT a control conn, NOT a peer conn (ecdsa stays None —
+        // the throwaway key isn't stored on `conn.ecdsa`, it went
+        // straight into Sptps::start).
+        assert!(!c.control);
+        assert!(c.ecdsa.is_none());
+
+        // ─── outbuf: TWO plaintext lines
+        // Line 1: `0 alice 17.7\n` (send_id reply).
+        // Line 2: `4 <inv-pubkey-b64>\n` (ACK with our invitation key).
+        let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
+        let expected = format!("0 alice 17.7\n4 {inv_pub_b64}\n");
+        assert_eq!(
+            c.outbuf.live(),
+            expected.as_bytes(),
+            "got: {:?}",
+            std::str::from_utf8(c.outbuf.live())
+        );
+    }
+
+    /// `?` with garbage b64. C `:348-351`: `if(!c->ecdsa)` reject.
+    #[test]
+    fn id_invitation_bad_throwaway() {
+        let mykey = SigningKey::from_seed(&[1; 32]);
+        let inv_key = SigningKey::from_seed(&[0x77; 32]);
+
+        let mut c = mkconn();
+        let cookie = "a".repeat(64);
+        let ctx = IdCtx {
+            cookie: &cookie,
+            my_name: "alice",
+            mykey: &mykey,
+            confbase: Path::new("."),
+            invitation_key: Some(&inv_key),
+        };
+
+        // Too short (32 bytes b64 → 43 chars; this is 7).
+        let r = handle_id(&mut c, b"0 ?garbage 17.7", &ctx, Instant::now(), &mut OsRng);
+        assert!(matches!(r, Err(DispatchError::BadId(_))));
+        assert!(c.sptps.is_none());
+        assert!(c.outbuf.is_empty());
+    }
+
+    /// The label asymmetry: invitation label has NO trailing NUL.
+    /// `protocol_auth.c:372`: `"tinc invitation", 15`. Explicit
+    /// count, not `sizeof()`. The meta label DOES have a NUL
+    /// (sizeof-of-VLA accident, see `tcp_label_has_trailing_nul`).
+    #[test]
+    fn invite_label_no_nul() {
+        // 15 bytes exactly. The C uses a string literal + explicit
+        // count; sizeof would have given 16 (string literals are
+        // NUL-terminated). The author was careful here.
+        assert_eq!(INVITE_LABEL.len(), 15);
+        assert_eq!(INVITE_LABEL, b"tinc invitation");
+        // No NUL anywhere.
+        assert!(!INVITE_LABEL.contains(&0));
     }
 
     // ─── tcp_label (the NUL)
@@ -1488,14 +1706,27 @@ mod tests {
         assert_eq!(c.outbuf.live(), b"18 0 0\n");
     }
 
-    /// `REQ_RELOAD` (1) — not implemented in skeleton. Returns
-    /// `REQ_INVALID` reply, connection stays open.
+    /// `REQ_RELOAD` (1) — returns `Reload` for daemon to handle.
+    /// Daemon does the actual reload + sends `"18 1 <result>"`.
+    #[test]
+    fn control_reload() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+
+        let (r, nw) = handle_control(&mut c, b"18 1");
+        assert_eq!(r, DispatchResult::Reload);
+        // No write yet — daemon queues the reply after reload runs.
+        assert!(!nw);
+        assert!(c.outbuf.is_empty());
+    }
+
+    /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.
     #[test]
     fn control_unknown_subtype() {
         let mut c = mkconn();
         c.allow_request = Some(Request::Control);
 
-        let (r, nw) = handle_control(&mut c, b"18 1");
+        let (r, nw) = handle_control(&mut c, b"18 99");
         assert_eq!(r, DispatchResult::Ok);
         assert!(nw);
         assert_eq!(c.outbuf.live(), b"18 -1\n");

@@ -931,6 +931,7 @@ dependencies = [
  "tinc-graph",
  "tinc-proto",
  "tinc-sptps",
+ "tinc-tools",
 ]
 
 [[package]]

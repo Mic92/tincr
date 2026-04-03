@@ -31,21 +31,38 @@
 //! used methods are ungated. The `Socket` is consumed into `OwnedFd`
 //! after the connect probe succeeds — same as `configure_tcp`.
 //!
+//! ## PROXY_EXEC (`do_outgoing_pipe`, `:428-483`)
+//!
+//! `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's its end
+//! to stdin/stdout, exec's `/bin/sh -c <cmd>`. Parent treats its end
+//! as the TCP fd — the child IS the proxy. No byte-format handshake
+//! (that's SOCKS4/5, `STUB(chunk-11-proxy)`).
+//!
+//! The ONE `unsafe` block in this module: `fork()`. Post-fork in a
+//! multi-threaded program is hairy (only the calling thread survives;
+//! held locks deadlock), so the child does **libc-only** until exec.
+//! No `std`, no `format!`, no allocator. The C does the same dance.
+//!
 //! ## Deferred
 //!
-//! - Proxy modes (`PROXY_EXEC`/`SOCKS4/5`/`HTTP`): ~100 LOC of
-//!   socketpair+fork (`:588-598,601,631-639`). STUB(chunk-10).
+//! - SOCKS4/5/HTTP proxy: needs a connect-state machine in `conn.rs`
+//!   (read `tcplen` bytes BEFORE the id_h dispatch). `socks.rs` has
+//!   the byte format; the wiring is `STUB(chunk-11-proxy)`.
 //! - `bind_to_interface`/`bind_to_address` (`:624-625`): the
-//!   `BindToAddress` config knob. Chunk 10.
+//!   `BindToAddress` config knob. `STUB(chunk-11-proxy)`.
 //! - DNS at connect time: `addrcache.rs` doc says we take pre-
 //!   resolved `SocketAddr` only. `try_outgoing_connections` resolves
 //!   `Address = host port` lines via `to_socket_addrs()` at OPEN
 //!   time (blocking DNS in setup, fine).
 
-#![forbid(unsafe_code)]
+// No `forbid(unsafe)`: do_outgoing_pipe needs fork(). The unsafe is
+// scoped to one block; the rest of the module is still allocation-
+// only. lib.rs has `deny(unsafe_code)`; the block has #[allow].
 
+use std::ffi::CString;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 
 use slotmap::new_key_type;
@@ -173,8 +190,8 @@ pub fn try_connect(addr_cache: &mut AddressCache, node_name: &str) -> ConnectAtt
         let _ = sock.set_only_v6(true);
     }
 
-    // STUB(chunk-10): bind_to_interface/bind_to_address (`:624-625`).
-    // The `BindToAddress` config knob. Niche.
+    // STUB(chunk-11-proxy): bind_to_interface/bind_to_address
+    // (`:624-625`). The `BindToAddress` config knob. Niche.
 
     // C `:630`: `connect(c->socket, &c->address.sa, salen)`.
     // socket2 wraps this. Nonblocking → returns EINPROGRESS for
@@ -257,6 +274,192 @@ pub fn probe_connecting(sock: &Socket) -> io::Result<bool> {
                 e
             };
             Err(cause)
+        }
+    }
+}
+
+/// `proxytype_t` (`net.h:148-155`). Only `Exec` is wired; the rest
+/// need a connect-time state machine (read N bytes before id_h —
+/// `c->tcplen`). `socks.rs` has the byte formats.
+#[derive(Debug, Clone)]
+pub enum ProxyConfig {
+    /// `PROXY_EXEC` (`net_socket.c:588`). `socketpair` + `fork` +
+    /// `/bin/sh -c <cmd>`. The simple mode: no handshake bytes.
+    Exec { cmd: String },
+    // STUB(chunk-11-proxy): Socks4 { host, port, user },
+    // Socks5 { host, port, user, pass }, Http { host, port }.
+}
+
+/// Parse `Proxy = type [args...]` (`net_setup.c:263-345`). Returns
+/// `Ok(None)` for `Proxy = none` and missing config; `Err` for
+/// unknown types and types we don't support yet (SOCKS/HTTP).
+///
+/// # Errors
+/// String describing why the config is invalid (unknown type, missing
+/// arg, or unsupported type). The caller (`setup()`) wraps this in
+/// `SetupError::Config`.
+pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
+    // C `:266-271`: `space = strchr(proxy, ' '); if(space) *space++=0`.
+    // First word is the type, rest is args.
+    let mut parts = value.splitn(2, ' ');
+    let kind = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("");
+
+    match kind.to_ascii_lowercase().as_str() {
+        "none" | "" => Ok(None),
+        "exec" => {
+            // C `:313-318`: `if(!space || !*space) ERR "Argument
+            // expected"`.
+            if args.is_empty() {
+                return Err("Argument expected for Proxy = exec".into());
+            }
+            Ok(Some(ProxyConfig::Exec {
+                cmd: args.to_owned(),
+            }))
+        }
+        // STUB(chunk-11-proxy): socks4/socks4a/socks5/http need the
+        // tcplen state machine in conn.rs (read N bytes before id_h).
+        "socks4" | "socks4a" | "socks5" | "http" => Err(format!(
+            "Proxy = {kind} not yet supported (only 'exec' is wired)"
+        )),
+        other => Err(format!("Unknown proxy type: {other}")),
+    }
+}
+
+/// `do_outgoing_pipe` (`net_socket.c:428-483`). `socketpair(AF_UNIX,
+/// SOCK_STREAM)` + `fork`. Child dup2's `sock[1]` to fds 0 and 1,
+/// runs `/bin/sh -c <cmd>`. Parent gets `sock[0]` as an `OwnedFd`
+/// that acts like a connected TCP socket.
+///
+/// `addr`/`node_name`/`my_name`: for the child's environment
+/// (`REMOTEADDRESS`, `REMOTEPORT`, `NODE`, `NAME`). C `:455-465`.
+/// The proxy script reads these to know where to connect.
+///
+/// ## Why `unsafe`
+///
+/// `fork()` in a multi-threaded program is dangerous: only the
+/// calling thread survives in the child; if any other thread held a
+/// lock at fork time (allocator, log buffer, anything), the child
+/// inherits the locked state and deadlocks on first touch. The
+/// standard mitigation is `exec()` immediately, before touching
+/// any std/allocator state. The child here does exactly that:
+/// libc-only (`close`, `dup2`, `setsid`, `setenv`, `execvp`,
+/// `_exit`). The `CString` allocations happen in the PARENT before
+/// the fork; the child only borrows their `.as_ptr()`.
+///
+/// The C `do_outgoing_pipe` doesn't have this problem (tincd is
+/// single-threaded), but our test harness might be multi-threaded
+/// (cargo-nextest spawns threads). We're paranoid for free.
+///
+/// # Errors
+/// `socketpair` or `fork` syscall failure. The child's `exec`
+/// failure is signaled via `_exit(1)` → the parent's read returns
+/// EOF → normal terminate path.
+///
+/// # Panics
+/// If `cmd`, `my_name`, or `node_name` contain interior NUL bytes
+/// (`CString::new` panics). They're config-derived strings; NUL
+/// would have been rejected by `tinc_conf` parsing already.
+pub fn do_outgoing_pipe(
+    cmd: &str,
+    addr: SocketAddr,
+    node_name: &str,
+    my_name: &str,
+) -> io::Result<OwnedFd> {
+    // Pre-allocate ALL strings the child needs, BEFORE fork. The
+    // child only does libc:: pointer ops. CString panics on interior
+    // NUL; cmd is user config, node_name is `check_id`-validated,
+    // my_name is `Name = ` from tinc.conf (also `check_id`).
+    let sh = CString::new("/bin/sh").unwrap();
+    let dash_c = CString::new("-c").unwrap();
+    let cmd_c = CString::new(cmd).expect("proxy cmd has interior NUL");
+    let argv = [
+        sh.as_ptr(),
+        dash_c.as_ptr(),
+        cmd_c.as_ptr(),
+        core::ptr::null(),
+    ];
+
+    // C `:455-460`: setenv("REMOTEADDRESS", host); setenv("REMOTEPORT",
+    // port); etc. The child does these post-fork (it has its own env
+    // copy). We pre-format the strings; child setenv's the pointers.
+    let remote_addr = CString::new(addr.ip().to_string()).unwrap();
+    let remote_port = CString::new(addr.port().to_string()).unwrap();
+    let name_env = CString::new(my_name).expect("my_name has interior NUL");
+    let node_env = CString::new(node_name).expect("node_name has interior NUL");
+    let k_remote_addr = CString::new("REMOTEADDRESS").unwrap();
+    let k_remote_port = CString::new("REMOTEPORT").unwrap();
+    let k_name = CString::new("NAME").unwrap();
+    let k_node = CString::new("NODE").unwrap();
+
+    // SAFETY: see fn doc. The child does libc-only until exec.
+    // Everything that allocates was done above, in the parent.
+    #[allow(unsafe_code)]
+    unsafe {
+        // C `:432`: `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`.
+        let mut fds = [-1i32; 2];
+        if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (parent_fd, child_fd) = (fds[0], fds[1]);
+
+        // C `:437-442`: `if(fork()) { ... parent ... return; }`.
+        // The C doesn't check for fork failure (`-1`); we do.
+        match libc::fork() {
+            -1 => {
+                let e = io::Error::last_os_error();
+                libc::close(parent_fd);
+                libc::close(child_fd);
+                Err(e)
+            }
+            0 => {
+                // ────── CHILD ──────
+                // libc-only until exec. NO std (locks could be held).
+
+                // C `:444-449`: close(0), close(1), close(fd[0]),
+                // dup2(fd[1], 0), dup2(fd[1], 1), close(fd[1]).
+                libc::close(0);
+                libc::close(1);
+                libc::close(parent_fd);
+                libc::dup2(child_fd, 0);
+                libc::dup2(child_fd, 1);
+                libc::close(child_fd);
+
+                // C `:451`: `setsid()`. Detach from controlling tty.
+                // The proxy script shouldn't get our SIGINT.
+                libc::setsid();
+
+                // C `:455-465`: setenv. NETNAME omitted (not threaded
+                // through the daemon yet; same as run_script).
+                libc::setenv(k_remote_addr.as_ptr(), remote_addr.as_ptr(), 1);
+                libc::setenv(k_remote_port.as_ptr(), remote_port.as_ptr(), 1);
+                libc::setenv(k_name.as_ptr(), name_env.as_ptr(), 1);
+                libc::setenv(k_node.as_ptr(), node_env.as_ptr(), 1);
+
+                // C `:469`: `system(command)` then `:477` `exit(result)`.
+                // We use execvp (replaces the process image entirely;
+                // no double-fork from system()'s internal fork).
+                // `/bin/sh -c <cmd>` is what system() does anyway.
+                libc::execvp(sh.as_ptr(), argv.as_ptr());
+
+                // execvp returned → failed. _exit (NOT exit — exit()
+                // runs atexit handlers, which might allocate).
+                libc::_exit(1);
+            }
+            _pid => {
+                // ────── PARENT ──────
+                // C `:438-441`: `c->socket = fd[0]; close(fd[1]);
+                // return`. Don't waitpid — the child is detached.
+                // If it dies, parent's read returns EOF and the
+                // normal terminate path fires. The zombie reaper:
+                // SIGCHLD is SIG_DFL; init eventually reaps after
+                // we exit. Same as the C (which also doesn't wait).
+                libc::close(child_fd);
+                // SAFETY: parent_fd is a valid fd from socketpair,
+                // ownership not aliased (child_fd closed, child
+                // process has its own copies via dup2).
+                Ok(OwnedFd::from_raw_fd(parent_fd))
+            }
         }
     }
 }
@@ -426,6 +629,109 @@ mod tests {
             Ok(true) => {}
             other => panic!("expected Ok(true), got {other:?}"),
         }
+    }
+
+    /// `Proxy = exec <cmd>` parses; `Proxy = socks5 ...` rejects
+    /// (not yet wired); `Proxy = none` is `Ok(None)`.
+    #[test]
+    fn proxy_config_parse() {
+        // exec with cmd.
+        let r = parse_proxy_config("exec /usr/bin/foo --bar").unwrap();
+        let Some(ProxyConfig::Exec { cmd }) = r else {
+            panic!("expected Exec")
+        };
+        assert_eq!(cmd, "/usr/bin/foo --bar");
+
+        // exec without cmd → error.
+        assert!(parse_proxy_config("exec").is_err());
+        assert!(parse_proxy_config("exec ").is_err()); // splitn gives ""
+
+        // none / empty → None.
+        assert!(parse_proxy_config("none").unwrap().is_none());
+        assert!(parse_proxy_config("").unwrap().is_none());
+
+        // case-insensitive.
+        assert!(matches!(
+            parse_proxy_config("EXEC cat").unwrap(),
+            Some(ProxyConfig::Exec { .. })
+        ));
+
+        // unsupported (yet).
+        assert!(parse_proxy_config("socks4 localhost 1080").is_err());
+        assert!(parse_proxy_config("socks5 localhost 1080").is_err());
+        assert!(parse_proxy_config("http localhost 8080").is_err());
+
+        // unknown.
+        assert!(parse_proxy_config("carrier-pigeon").is_err());
+    }
+
+    /// `do_outgoing_pipe("cat")`: write bytes, read them back.
+    /// Proves the socketpair + fork + dup2 + exec chain. cat reads
+    /// stdin (= sock[1]) and writes stdout (= sock[1]); the parent
+    /// sees both directions on sock[0].
+    #[test]
+    fn proxy_exec_roundtrip() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+
+        let fd = do_outgoing_pipe("cat", "127.0.0.1:655".parse().unwrap(), "bob", "alice")
+            .expect("do_outgoing_pipe");
+
+        // Wrap in a UnixStream for ergonomic read/write. SAFETY:
+        // fd is a valid AF_UNIX SOCK_STREAM; UnixStream is the
+        // right wrapper. The OwnedFd is consumed (no double-close).
+        let raw = fd.as_raw_fd();
+        std::mem::forget(fd); // UnixStream takes ownership of raw
+        // SAFETY: raw is a valid AF_UNIX stream socket fd, just
+        // returned from do_outgoing_pipe; ownership transferred
+        // (fd was forgotten above so no double-close).
+        #[allow(unsafe_code)]
+        let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+
+        // Write → cat echoes → read back. Set a timeout so a hung
+        // child (exec failed, fd half-open) doesn't wedge the test.
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+
+        let payload = b"hello proxy exec\n";
+        stream.write_all(payload).expect("write");
+
+        let mut buf = vec![0u8; payload.len()];
+        stream.read_exact(&mut buf).expect("read");
+        assert_eq!(&buf, payload);
+
+        // Second roundtrip: proves the pipe stays open.
+        stream.write_all(b"again\n").unwrap();
+        let mut buf2 = [0u8; 6];
+        stream.read_exact(&mut buf2).unwrap();
+        assert_eq!(&buf2, b"again\n");
+    }
+
+    /// Env vars are set in the child. The cmd is a shell snippet
+    /// that echoes them; we read them back through the pipe.
+    #[test]
+    fn proxy_exec_env() {
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::AsRawFd;
+
+        let fd = do_outgoing_pipe(
+            "echo \"$NAME $NODE $REMOTEADDRESS $REMOTEPORT\"",
+            "10.0.0.1:12345".parse().unwrap(),
+            "bob",
+            "alice",
+        )
+        .expect("do_outgoing_pipe");
+
+        let raw = fd.as_raw_fd();
+        std::mem::forget(fd);
+        // SAFETY: same as proxy_exec_roundtrip.
+        #[allow(unsafe_code)]
+        let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+        let mut r = BufReader::new(stream);
+        let mut line = String::new();
+        r.read_line(&mut line).expect("read env line");
+        assert_eq!(line.trim_end(), "alice bob 10.0.0.1 12345");
     }
 
     /// `probe_connecting` on a refused connection returns `Err`. The

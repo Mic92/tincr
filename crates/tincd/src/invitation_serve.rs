@@ -53,7 +53,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use tinc_conf::read_pem;
-use tinc_crypto::invite::{COOKIE_LEN, cookie_filename};
+use tinc_crypto::invite::cookie_filename;
+
+/// Re-exported for `daemon::dispatch_invitation_outputs`. The 18-byte
+/// cookie length — `protocol_auth.c:196`: `if(len != 18)`.
+pub use tinc_crypto::invite::COOKIE_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::check_id;
 
