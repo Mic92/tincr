@@ -782,3 +782,105 @@ fn real_tun_ping() {
 
     drop(netns);
 }
+
+/// Ping a destination NO daemon owns. The kernel route gets it INTO
+/// tinc0 (it's in 10.42.0.0/24); alice's `route()` finds no subnet
+/// → `RouteResult::Unreachable{ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN}`
+/// → `icmp::build_v4_unreachable` synthesizes the ICMP error →
+/// `device.write` puts it BACK into tinc0 → kernel parses it,
+/// matches the quoted IP header to ping's socket → ping prints
+/// "Destination Net Unknown" (or similar; the exact string varies
+/// by ping implementation — iputils vs busybox).
+///
+/// **THIS PROVES THE WIRE IS CORRECT.** The kernel's ICMP receive
+/// path is strict: bad checksum → silently dropped, wrong quoted
+/// header → no socket match → ping just times out. Ping printing
+/// the error means our `inet_checksum` is right, our ip header is
+/// right, our quoted-original is right, our MAC swap is right.
+///
+/// Single daemon (alice only): the unreachable path doesn't need a
+/// peer. The ICMP synth fires BEFORE `send_sptps_packet`. No SPTPS
+/// handshake, no validkey wait — just route() → Unreachable →
+/// device.write. Faster + less moving parts than `real_tun_ping`.
+#[test]
+fn real_tun_unreachable() {
+    let Some(netns) = enter_netns("real_tun_unreachable") else {
+        return;
+    };
+
+    let tmp = TmpGuard::new("unreach");
+    let alice = Node::new(tmp.path(), "alice", 0xA9, "tinc0", "10.42.0.1/32");
+    // Bob's TUN exists (NetNs::setup precreated it) but no daemon
+    // attaches. We need `bob` only for `write_config`'s pubkey/
+    // hosts cross-registration; alice's id_h reads `hosts/bob` if
+    // bob ever connects (it won't here).
+    let bob = Node::new(tmp.path(), "bob", 0xB9, "tinc1", "10.42.0.2/32");
+
+    // alice has NO ConnectTo. She just listens. The unreachable
+    // path is local: TUN read → route() → Unreachable → TUN write.
+    alice.write_config(&bob, false);
+
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    assert!(
+        wait_for_carrier("tinc0", Duration::from_secs(2)),
+        "alice TUNSETIFF didn't bring carrier up; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
+
+    // ─── configure tinc0 only (no bob, no child netns move) ────
+    // /24 on the device → kernel route for 10.42.0.0/24 via tinc0.
+    // 10.42.0.99 is in that /24 but NOT in any daemon Subnet.
+    run_ip(&["addr", "add", "10.42.0.1/24", "dev", "tinc0"]);
+    run_ip(&["link", "set", "tinc0", "up"]);
+
+    // ─── THE PING ────────────────────────────────────────────────
+    // `-c 2`: send 2 echoes. Stay under the 3/sec rate limit
+    // (`route.c:130` `ratelimit(3)`); a 4th would silently time
+    // out instead of getting ICMP back.
+    // `-W 2`: 2s per-packet timeout. The ICMP error is synchronous
+    // (TUN write → kernel ICMP rcv is in-process); 2s is just CI
+    // slack. WITHOUT our synth, ping would block for the full 2s
+    // and exit with NO ICMP message — just "packet loss". WITH it,
+    // ping immediately prints the error (and still exits non-zero;
+    // unreachable is a failure to ping(1)).
+    let ping = Command::new("ping")
+        .args(["-c", "2", "-W", "2", "10.42.0.99"])
+        .output()
+        .expect("spawn ping");
+
+    let stdout = String::from_utf8_lossy(&ping.stdout);
+    let stderr = String::from_utf8_lossy(&ping.stderr);
+    eprintln!("ping stdout:\n{stdout}\nping stderr:\n{stderr}");
+
+    // Ping exits non-zero (no replies). That's expected.
+    assert!(
+        !ping.status.success(),
+        "ping should fail (no route to 10.42.0.99); stdout: {stdout}"
+    );
+
+    // The ICMP error surfaces in ping's output. iputils-ping
+    // prints "Destination Net Unknown" for ICMP type=3 code=6;
+    // busybox ping prints "No route to host" (it lumps codes).
+    // Match the common substring. WITHOUT the synth, neither
+    // appears — ping just says "100% packet loss".
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("Unreachable")
+            || combined.contains("Unknown")
+            || combined.contains("No route"),
+        "ping should surface the synthesized ICMP error; got:\n{combined}"
+    );
+
+    // ─── daemon stderr: the synth log ────────────────────────────
+    let alice_stderr = drain_stderr(alice_child);
+    assert!(
+        alice_stderr.contains("unreachable, sending ICMP"),
+        "alice should log the ICMP synth; stderr:\n{alice_stderr}"
+    );
+
+    drop(netns);
+}

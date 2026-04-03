@@ -107,6 +107,24 @@ pub struct TunnelState {
     /// `graph.c:269` resets to 0 on unreachable.
     pub mtuprobes: i32,
 
+    /// `n->outcompression` (`node.h:77`). The compression level the
+    /// PEER advertised in their ANS_KEY (`protocol_key.c:545`: `from
+    /// ->outcompression = compression`). We use this when COMPRESSING
+    /// packets we send TO them (`net_packet.c:708`). Symmetry: each
+    /// side advertises "compress towards me at this level"; we honor
+    /// their wish. Default 0 (`COMPRESS_NONE`) — `xzalloc`.
+    pub outcompression: u8,
+
+    /// `n->incompression` (`node.h:76`). OUR `Compression` config
+    /// knob, copied here per-tunnel at handshake time (`net_packet.c:
+    /// 995`: `to->incompression = myself->incompression`). We use this
+    /// to DECOMPRESS what they send us (`:1111`): they compressed at
+    /// the level we asked for. Stored per-tunnel (not just read from
+    /// settings) to survive a SIGHUP-reload changing `Compression`
+    /// mid-session — the C does the same (the per-node copy is what
+    /// the receive path reads).
+    pub incompression: u8,
+
     /// `n->in_packets`, `n->in_bytes`, `n->out_packets`,
     /// `n->out_bytes` (`node.h:113-116`). `dump_nodes` columns.
     /// `uint64_t` in C.
@@ -133,6 +151,8 @@ impl Default for TunnelState {
             minmtu: 0,
             maxmtu: MTU,
             mtuprobes: 0,
+            outcompression: 0,
+            incompression: 0,
             in_packets: 0,
             in_bytes: 0,
             out_packets: 0,
@@ -349,6 +369,8 @@ mod tests {
             minmtu: 1200,
             maxmtu: 1450,
             mtuprobes: 7,
+            outcompression: 6,
+            incompression: 12,
             in_packets: 100,
             in_bytes: 50000,
             out_packets: 80,

@@ -174,6 +174,9 @@ impl Node {
         if connect_to {
             tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
         }
+        // `extra_conf` (e.g. `Compression = N`) before the default
+        // PingTimeout: first-occurrence-wins in tinc-conf lookup.
+        tinc_conf.push_str(&self.extra_conf);
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
@@ -967,6 +970,171 @@ fn mk_ipv4_pkt(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
     p.extend_from_slice(&dst);
     p.extend_from_slice(payload);
     p
+}
+
+// ═══════════════════════════════════════════════════════════════════
+
+/// Per-tunnel compression negotiation. alice asks for zlib-6, bob
+/// for LZ4. Each advertises its level in ANS_KEY (`net_packet.c:
+/// 996`); the peer stores it as `outcompression` (`protocol_key.c:
+/// 545`) and compresses TOWARDS them at that level. The compressed
+/// SPTPS record carries `PKT_COMPRESSED`; receiver decompresses at
+/// `incompression` (its OWN level, copied at handshake).
+///
+/// Asymmetry is the point: alice→bob traffic is LZ4-compressed (bob
+/// asked for 12); bob→alice is zlib-6 (alice asked for 6). Proves
+/// the per-tunnel level is read from the right field on each path.
+///
+/// Compressible payload: 200 bytes of zeros. Both zlib and LZ4
+/// crush this; `compressed.len() < payload.len()` triggers and
+/// `PKT_COMPRESSED` is set. With an incompressible payload (random
+/// bytes), compression backs off to raw and the bit stays clear —
+/// also valid, but doesn't exercise the decompress path. The KAT in
+/// `compress.rs` proves codec correctness; THIS proves negotiation
+/// + bit handling + per-tunnel level dispatch.
+#[test]
+fn compression_roundtrip() {
+    let tmp = TmpGuard::new("compress");
+    // Compression is HOST-tagged but our `setup` reads from the
+    // merged config tree (host file is merged into tinc.conf at
+    // setup). Put it in tinc.conf via `with_conf`.
+    let alice = Node::new(tmp.path(), "alice", 0xAC).with_conf("Compression = 6\n");
+    let bob = Node::new(tmp.path(), "bob", 0xBC).with_conf("Compression = 12\n");
+
+    let alice_pair = sockpair_seqpacket();
+    let bob_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+    for &fd in &bob_pair {
+        set_nonblocking(fd);
+    }
+
+    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+
+    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    unsafe { libc::close(bob_pair[1]) };
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    // ─── reachable + validkey, same dance as first_packet ────────
+    let node_status = |rows: &[String], name: &str| -> Option<u32> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            u32::from_str_radix(toks.get(10)?, 16).ok()
+        })
+    };
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        let b = bob_ctl.dump(3);
+        let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+        let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+        if a_ok && b_ok { Some(()) } else { None }
+    });
+
+    let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
+    write_fd(alice_pair[0], &kick_pkt);
+
+    let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(5), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if validkey_result.is_err() {
+        let _ = bob_child.kill();
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── negotiated levels in dump_nodes ──────────────────────────
+    // The `compression` column (body token 8) is `n->outcompression`
+    // — the level the PEER asked for. alice's row for bob = 12 (LZ4,
+    // bob's `Compression = 12`); bob's row for alice = 6 (zlib).
+    let node_compression = |rows: &[String], name: &str| -> Option<u8> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            // Body tokens: name id host "port" port cipher digest
+            // maclen compression(idx 8) options status ...
+            toks.get(8)?.parse().ok()
+        })
+    };
+    let a_nodes = alice_ctl.dump(3);
+    let b_nodes = bob_ctl.dump(3);
+    assert_eq!(
+        node_compression(&a_nodes, "bob"),
+        Some(12),
+        "alice should compress towards bob at LZ4 (bob's ask); rows:\n{a_nodes:#?}"
+    );
+    assert_eq!(
+        node_compression(&b_nodes, "alice"),
+        Some(6),
+        "bob should compress towards alice at zlib-6; rows:\n{b_nodes:#?}"
+    );
+
+    // ─── alice → bob: LZ4-compressed on the wire ──────────────────
+    // 200 zeros: LZ4 crushes to ~20 bytes. `compressed.len() <
+    // origlen` triggers; PKT_COMPRESSED is set; bob decompresses
+    // at incompression=12.
+    let payload = vec![0u8; 200];
+    let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], &payload);
+    write_fd(alice_pair[0], &ip_pkt);
+
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    assert_eq!(
+        recv,
+        ip_pkt,
+        "LZ4 round-trip mismatch; sent {} bytes, got {} bytes",
+        ip_pkt.len(),
+        recv.len()
+    );
+
+    // ─── bob → alice: zlib-6 compressed on the wire ───────────────
+    // The reverse direction. Bob compresses at 6 (alice's ask);
+    // alice decompresses at incompression=6.
+    let ip_pkt2 = mk_ipv4_pkt([10, 0, 0, 2], [10, 0, 0, 1], &payload);
+    write_fd(bob_pair[0], &ip_pkt2);
+
+    let recv2 = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    assert_eq!(
+        recv2,
+        ip_pkt2,
+        "zlib round-trip mismatch; sent {} bytes, got {} bytes",
+        ip_pkt2.len(),
+        recv2.len()
+    );
+
+    drop(alice_ctl);
+    drop(bob_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    unsafe { libc::close(bob_pair[0]) };
+    let _ = bob_child.kill();
+    let _ = drain_stderr(bob_child);
+    let _ = drain_stderr(alice_child);
 }
 
 // ═══════════════════════════════════════════════════════════════════

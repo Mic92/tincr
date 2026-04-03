@@ -54,7 +54,8 @@ use crate::route::{RouteResult, route};
 use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
-use crate::tunnel::{TunnelState, make_udp_label};
+use crate::tunnel::{MTU, TunnelState, make_udp_label};
+use crate::{compress, icmp, mss};
 
 // `net.h:106-108`: SPTPS record-type bits for the per-tunnel data
 // channel. Type 0 = plain IP packet (RMODE_ROUTER, no compression).
@@ -223,6 +224,12 @@ pub struct DaemonSettings {
     /// asleep, every peer has given up on us, force-close all conns
     /// to avoid sending into stale SPTPS contexts. Default 30.
     pub udp_discovery_timeout: u32,
+    /// `myself->incompression` (`net_setup.c:991-1043`). The
+    /// `Compression = N` config knob. We advertise this in ANS_KEY
+    /// (`net_packet.c:996`); peers compress TOWARDS us at this level.
+    /// Default 0 (`COMPRESS_NONE`). 1–9 zlib, 12 LZ4; 10–11 LZO
+    /// (stubbed, rejected at setup).
+    pub compression: u8,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -241,6 +248,9 @@ impl Default for DaemonSettings {
             maxtimeout: MAX_TIMEOUT_DEFAULT,
             // C `net_packet.c:86`: `int udp_discovery_timeout = 30`.
             udp_discovery_timeout: 30,
+            // C `net_setup.c:1043`: `myself->incompression =
+            // COMPRESS_NONE` (the `else` when no Compression config).
+            compression: 0,
         }
     }
 }
@@ -462,6 +472,26 @@ pub struct Daemon {
     /// u32 here, capped explicitly.
     pub(crate) sleeptime: u32,
 
+    /// `now.tv_sec` proxy. The C reads wall-clock seconds for the
+    /// ICMP rate limiter (`route.c:130`: `ratelimit(3)` keys on
+    /// `now.tv_sec`). The limiter only compares for SAME-SECOND;
+    /// any monotonic-integer source works. We use daemon-uptime
+    /// seconds: `timers.now().duration_since(started_at).as_secs()`.
+    /// Set at setup; never reset.
+    pub(crate) started_at: Instant,
+
+    /// `route.c:85-100` static rate-limit state for ICMP error
+    /// synthesis. C uses `static time_t lasttime; static int count`;
+    /// we put it in a struct the daemon owns. Max 3/sec across ALL
+    /// unreachable destinations (the C's static is global).
+    pub(crate) icmp_ratelimit: icmp::IcmpRateLimit,
+
+    /// Per-daemon compression workspace (`net_packet.c:240-400`).
+    /// Currently a ZST (lz4_flex is stateless, zlib one-shot per
+    /// call); kept as a struct so adding persistent z_stream state
+    /// (PERF chunk-10) doesn't churn the wire-up sites.
+    pub(crate) compressor: compress::Compressor,
+
     /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
     /// detector at `net.c:189-213`: if `now - this > 2 * udp_
     /// discovery_timeout`, the daemon was asleep — force-close
@@ -680,6 +710,31 @@ impl Daemon {
                     if v >= 1 {
                         settings.pinginterval = v;
                     }
+                }
+            }
+        }
+
+        // Compression (`net_setup.c:991-1043`). HOST-tagged. The
+        // level WE want peers to compress towards us at. The C
+        // `switch` validates against built-in backends; we reject
+        // LZO (stubbed) and >12 (unknown). Default 0 (`:1043`).
+        if let Some(e) = config.lookup("Compression").next() {
+            if let Ok(v) = e.get_int() {
+                let v = u8::try_from(v).unwrap_or(255);
+                match compress::Level::from_wire(v) {
+                    compress::Level::LzoLo | compress::Level::LzoHi => {
+                        return Err(SetupError::Config(format!(
+                            "Compression = {v}: LZO compression is \
+                             unavailable on this node"
+                        )));
+                    }
+                    compress::Level::None if v != 0 => {
+                        // `from_wire` mapped >12 → None. Reject.
+                        return Err(SetupError::Config(format!(
+                            "Compression = {v} is unrecognized by this node"
+                        )));
+                    }
+                    _ => settings.compression = v,
                 }
             }
         }
@@ -998,6 +1053,9 @@ impl Daemon {
             contradicting_del_edge: 0,
             // C `net.c:42`: `static int sleeptime = 10`.
             sleeptime: 10,
+            started_at: timers.now(),
+            icmp_ratelimit: icmp::IcmpRateLimit::new(),
+            compressor: compress::Compressor::new(),
             // C `net.c:43`: `static struct timeval last_periodic_
             // run_time` zero-init. We seed with now: the first
             // `on_ping_tick` (after `pingtimeout` seconds) sees
@@ -2014,16 +2072,58 @@ impl Daemon {
                 // C `send_packet:1571-1590`. To a remote node.
                 let to = to.to_owned();
                 let Some(&to_nid) = self.node_ids.get(&to) else {
-                    // `route()` returned a name from `subnets`; if
-                    // it's not in `node_ids`, the subnet was added
-                    // for a node we don't know. C couldn't get here
-                    // (subnet->owner is a `node_t*`). For us: warn
-                    // + drop. Would mean a `subnets.add` without a
-                    // matching `lookup_or_add_node` — a daemon bug.
+                    // (see below for the comment block)
                     log::warn!(target: "tincd::net",
                                "route() chose unknown node {to}");
                     return false;
                 };
+
+                // C `route.c:698`: `clamp_mss(source, via, packet)`.
+                // BEFORE `send_packet`, AFTER the routing decision.
+                // C `:390`: `if(!(via->options & OPTION_CLAMP_MSS))
+                // return`. C `:394-398`: `mtu = source->mtu; if(via
+                // != myself && via->mtu < mtu) mtu = via->mtu`.
+                //
+                // For TUN-origin packets, source is `myself` (whose
+                // `mtu` is `MTU`=1518, never probed). The `via` for
+                // direct connections is the destination itself
+                // (`route.c:673`: `via = (owner->via == myself) ?
+                // owner->nexthop : owner->via` — with a 2-node mesh,
+                // both are `to`). STUB(chunk-9b): the relay path's
+                // `via != to` resolution. For chunk-9a: use the
+                // destination's tunnel directly. CORRECT for direct
+                // connections.
+                //
+                // The OPTION_CLAMP_MSS check: `via->options` comes
+                // from the SSSP result (`graph.c:192`: `e->to->
+                // options = e->options`). `last_routes[to_nid].
+                // options` carries it. Default-on (bit 3 in
+                // `myself_options_default()`).
+                let route = self
+                    .last_routes
+                    .get(to_nid.0 as usize)
+                    .and_then(Option::as_ref);
+                let via_options = route.map_or(0, |r| r.options);
+                if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
+                    // `via->mtu`: read from `tunnels[to_nid]` (direct
+                    // case). `MTU` if no tunnel yet (matches C's
+                    // xzalloc → 0 → the C `< mtu` check fails →
+                    // uses source->mtu — wait, C's `n->mtu` starts
+                    // 0, but `route.c:396` is `via->mtu < mtu` so a
+                    // 0 mtu would WIN. Our `TunnelState::default()`
+                    // inits to `MTU` instead — see tunnel.rs:128.
+                    // Either way: until PMTU runs, MSS clamps to the
+                    // 1518 ceiling, which is a no-op for normal
+                    // ethernet payloads).
+                    let via_mtu = self.tunnels.get(&to_nid).map_or(MTU, |t| t.mtu);
+                    let mtu = via_mtu.min(MTU);
+                    // `mss::clamp` mutates in place. `data` is `&mut
+                    // [u8]` (the TUN read buffer is OURS). Return
+                    // value (was-clamped?) ignored — C `:698`
+                    // doesn't check it either.
+                    let _ = mss::clamp(data, mtu);
+                }
+
                 let len = data.len();
                 log::debug!(target: "tincd::net",
                             "Sending packet of {len} bytes to {to}");
@@ -2042,11 +2142,48 @@ impl Daemon {
                 icmp_type,
                 icmp_code,
             } => {
-                // C `route_ipv4_unreachable` (`route.c:121-215`):
-                // synthesizes an ICMP error and writes it BACK to
-                // the source. STUB(chunk-9). For now: log + drop.
+                // C `route_ipv4_unreachable` (`route.c:121-215`).
+                // Synthesize an ICMP error and write it BACK to the
+                // source (the TUN — the packet came FROM us).
+                //
+                // C `:130-132`: `if(ratelimit(3)) return`. Max 3/sec.
+                // The limiter keys on `now.tv_sec` (wall clock) but
+                // only compares for same-second; daemon-uptime works.
+                let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
+                if self.icmp_ratelimit.should_drop(now_sec, 3) {
+                    log::debug!(target: "tincd::net",
+                                "route: unreachable (type={icmp_type} \
+                                 code={icmp_code}), rate-limited");
+                    return false;
+                }
+                // `data` is the full eth frame from the TUN.
+                // STUB(chunk-9b): `frag_mtu` for FRAG_NEEDED — needs
+                // the relay path's `via->mtu`. `route()` only
+                // returns NET_UNKNOWN/NET_UNREACH today; FRAG_NEEDED
+                // is the `:685-696` block which needs `via`.
+                let Some(mut reply) = icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+                else {
+                    // Too short to parse eth+IP. `route()` already
+                    // returned `TooShort` for that case; reaching
+                    // here means a route variant we don't expect.
+                    log::debug!(target: "tincd::net",
+                                "route: unreachable, ICMP synth failed (short input)");
+                    return false;
+                };
+                // C `:217`: `send_packet(source, packet)`. For TUN-
+                // origin packets, source is `myself`; C `send_packet`
+                // for `myself` short-circuits to `devops->write()`
+                // (`net_packet.c:1556-1568`). Write back to the TUN.
+                // The kernel parses the ICMP, matches the quoted
+                // headers to the originating socket, surfaces
+                // `EHOSTUNREACH`/`ENETUNREACH` to ping/connect.
                 log::debug!(target: "tincd::net",
-                            "route: unreachable (type={icmp_type} code={icmp_code})");
+                            "route: unreachable, sending ICMP type={icmp_type} \
+                             code={icmp_code} ({} bytes)", reply.len());
+                if let Err(e) = self.device.write(&mut reply) {
+                    log::debug!(target: "tincd::net",
+                                "Error writing ICMP to device: {e}");
+                }
                 false
             }
             RouteResult::NeighborSolicit => {
@@ -2116,9 +2253,39 @@ impl Daemon {
             return false; // C `:702`: `if(origpkt->len < offset) return`.
         }
 
-        // STUB(chunk-9): compression (`:708-718` `if(outcompression
-        // != COMPRESS_NONE) compress_packet(...)`). Type stays 0
-        // (no PKT_COMPRESSED bit).
+        // C `:708-718`: `if(n->outcompression != COMPRESS_NONE) {
+        // len = compress_packet(...); if(len && len < origlen) {
+        // origpkt = &outpkt; type |= PKT_COMPRESSED; } }`. Only set
+        // the bit if compression actually HELPED. The peer asked for
+        // this level in their ANS_KEY (`tunnel.outcompression`).
+        //
+        // PERF(chunk-10): one alloc per forwarded packet when the
+        // peer asked for compression. The C uses a stack `vpn_
+        // packet_t outpkt`. Measure with iperf3 before optimizing.
+        let payload = &data[OFFSET..];
+        let level = compress::Level::from_wire(tunnel.outcompression);
+        let mut record_type = PKT_NORMAL;
+        let compressed;
+        let body: &[u8] = if level == compress::Level::None {
+            payload
+        } else if let Some(c) = self.compressor.compress(payload, level) {
+            if c.len() < payload.len() {
+                record_type |= PKT_COMPRESSED;
+                compressed = c;
+                &compressed
+            } else {
+                // C `:714`: `else if(len < origlen) ... else: fall
+                // back to raw`. Compression didn't help. The C
+                // doesn't log; we don't either.
+                payload
+            }
+        } else {
+            // C `:712-713`: `if(!len) logger(..."Error while
+            // compressing"...)`. LZO stub or backend error.
+            log::debug!(target: "tincd::net",
+                        "Error while compressing packet to {to_name}");
+            payload
+        };
 
         // STUB(chunk-9): `if(n->connection && origpkt->len >
         // n->minmtu) send_tcppacket()` (`:724-726`). The TCP
@@ -2126,7 +2293,7 @@ impl Daemon {
         // MTU. We always go via SPTPS-UDP for now.
 
         // C `:728`: `sptps_send_record(&n->sptps, type, DATA +
-        // offset, len - offset)`. Type 0 = plain IP packet.
+        // offset, len - offset)`.
         let Some(sptps) = tunnel.sptps.as_deref_mut() else {
             // `validkey` is true but `sptps` is `None`? Shouldn't
             // happen (the bit is set BY `HandshakeDone` which only
@@ -2135,7 +2302,7 @@ impl Daemon {
                        "validkey set but no SPTPS for {to_name}?");
             return false;
         };
-        let outs = match sptps.send_record(PKT_NORMAL, &data[OFFSET..]) {
+        let outs = match sptps.send_record(record_type, body) {
             Ok(outs) => outs,
             Err(e) => {
                 // `InvalidState` if `outcipher` is None. Shouldn't
@@ -2246,13 +2413,28 @@ impl Daemon {
                         (peer in switch mode?); STUB(chunk-9)");
             return false;
         }
-        // STUB(chunk-9): PKT_COMPRESSED (`:1109-1121`).
-        if record_type & PKT_COMPRESSED != 0 {
-            log::warn!(target: "tincd::net",
-                       "Received compressed packet from {peer_name}; \
-                        compression is STUB(chunk-9)");
-            return false;
-        }
+        // C `:1109-1121`: `if(type & PKT_COMPRESSED) { ulen =
+        // uncompress_packet(..., from->incompression); if(!ulen)
+        // return false; }`. Decompress at the level WE asked for
+        // (`tunnel.incompression` was copied from `settings.
+        // compression` when we sent ANS_KEY).
+        let decompressed;
+        let body: &[u8] = if record_type & PKT_COMPRESSED != 0 {
+            let incomp = self.tunnels.get(&peer).map_or(0, |t| t.incompression);
+            let level = compress::Level::from_wire(incomp);
+            if let Some(d) = self.compressor.decompress(body, level, MTU as usize) {
+                decompressed = d;
+                &decompressed
+            } else {
+                // C `:1113-1115`: `if(!ulen) return false`.
+                // Corrupt stream OR LZO stub.
+                log::warn!(target: "tincd::net",
+                           "Error while decompressing packet from {peer_name}");
+                return false;
+            }
+        } else {
+            body
+        };
 
         // C `:1123`: `memcpy(DATA + offset, data, len)`. C `:1128-
         // 1144`: synthesize the ethertype from the IP version nibble.
@@ -2348,10 +2530,15 @@ impl Daemon {
             };
             // C `:989`: `b64encode_tinc(data, buf, len)`.
             let b64 = tinc_crypto::b64::encode(ct);
-            // C `:995`: `to->incompression = myself->incompression`.
-            // We don't do compression; 0.
-            // STUB(chunk-9): compression (`from->incompression`).
-            //
+            // C `:995-996`: `to->incompression = myself->
+            // incompression; ... "%d", to->incompression`. The last
+            // `%d` is OUR compression level: "please compress
+            // towards me at this level". The peer stores it as
+            // `from->outcompression` (`protocol_key.c:545`) and
+            // honors it on their send path.
+            let my_compression = self.settings.compression;
+            self.tunnels.entry(to_nid).or_default().incompression = my_compression;
+
             // The C format: `"%d %s %s %s -1 -1 -1 %d"`. The `-1 -1
             // -1` are cipher/digest/maclength sentinels (the SPTPS
             // path doesn't read them; `:549` `if(from->status.sptps)`
@@ -2363,11 +2550,12 @@ impl Daemon {
             // with C tincd, loosen `AnsKey::parse` to accept the C's
             // `-1` (or change `maclen` to `i64`).
             return conn.send(format_args!(
-                "{} {} {} {} 0 0 0 0",
+                "{} {} {} {} 0 0 0 {}",
                 Request::AnsKey,
                 self.name,
                 to_name,
                 b64,
+                my_compression,
             ));
         }
 
@@ -3526,8 +3714,32 @@ impl Daemon {
             return Ok(false);
         }
 
-        // STUB(chunk-9): `:499-545` compression-level check. We
-        // don't compress; ignore the field.
+        // C `:499-545`: compression-level capability check, then
+        // `:545`: `from->outcompression = compression`. We compress
+        // TOWARDS them at the level they asked for. The C `switch`
+        // rejects levels we don't support (LZO without HAVE_LZO);
+        // `Level::from_wire` maps unknown→None which compresses to
+        // a no-op — same outcome (we send raw, they decompress raw
+        // at level None which is memcpy). LZO 10/11 are stubbed:
+        // `compress()` returns None, fallback to raw, peer's
+        // decompress at LZO level fails. Reject explicitly here so
+        // the peer's misconfig surfaces in OUR logs, not as silent
+        // packet loss on THEIR side.
+        // C uses signed `%d`; clamp negative→0 (± cast safety).
+        let their_compression = u8::try_from(msg.compression).unwrap_or(0);
+        match compress::Level::from_wire(their_compression) {
+            compress::Level::LzoLo | compress::Level::LzoHi => {
+                log::error!(target: "tincd::proto",
+                            "Node {} uses bogus compression level {}: \
+                             LZO compression is unavailable on this node",
+                            msg.from, their_compression);
+                // C `:517`: `return true` (don't terminate the META
+                // conn). Just ignore this ANS_KEY.
+                return Ok(false);
+            }
+            _ => {}
+        }
+        self.tunnels.entry(from_nid).or_default().outcompression = their_compression;
 
         // C `:549`: `if(from->status.sptps)`. Always true for us
         // (no legacy). The `key` field is the b64'd SPTPS
@@ -4088,7 +4300,7 @@ impl Daemon {
                 0,                            // %d cipher (DISABLE_LEGACY)
                 0,                            // %d digest
                 0,                            // %lu maclength
-                0,                            // %d compression
+                tunnel.map_or(0, |t| t.outcompression), // %d compression
                 options,                      // %x
                 status,                       // %x
                 nexthop,                      // %s
@@ -5383,6 +5595,25 @@ mod tests {
         assert_eq!(s.port, 655);
         assert_eq!(s.addressfamily, AddrFamily::Any);
         assert_eq!(s.udp_discovery_timeout, 30);
+        assert_eq!(s.compression, 0); // C `:1043` COMPRESS_NONE
+    }
+
+    /// `route.c:130-132` rate limit on the Unreachable arm. Max
+    /// 3/sec. Can't construct a full `Daemon` (SelfPipe singleton);
+    /// test the `IcmpRateLimit` directly with the same `freq=3`
+    /// the daemon uses. The wiring (daemon-uptime-secs as the key)
+    /// is exercised by the `real_tun_unreachable` netns test.
+    #[test]
+    fn ratelimit_drops_after_3() {
+        let mut rl = icmp::IcmpRateLimit::new();
+        // Same second: first 3 pass, 4th drops. C `:90-92`: `>=`.
+        assert!(!rl.should_drop(42, 3));
+        assert!(!rl.should_drop(42, 3));
+        assert!(!rl.should_drop(42, 3));
+        assert!(rl.should_drop(42, 3), "4th call same-sec must drop");
+        assert!(rl.should_drop(42, 3), "5th call same-sec still drops");
+        // Next second: counter resets. C `:94-96`.
+        assert!(!rl.should_drop(43, 3));
     }
 
     /// `periodic_handler` backoff arithmetic (`net.c:274-291`).
