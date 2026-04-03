@@ -59,7 +59,6 @@ __pycache__
 
 # Rust
 /target
-/Cargo.lock
 /kat/gen_kat
 !/kat/Makefile
 /result
