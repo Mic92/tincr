@@ -992,14 +992,31 @@ impl Daemon {
                             continue;
                         }
                         // C `net_socket.c:517-555`: connecting check
-                        // FIRST. The async-connect probe.
+                        // FIRST. The async-connect probe. C `:553`
+                        // clears `connecting` then FALLS THROUGH to
+                        // the `:556` write/read dispatch — the WRITE
+                        // edge (which woke us) is the SAME edge that
+                        // would let us flush the ID line. mio is
+                        // EDGE-triggered (`EPOLLET`); if we `continue`
+                        // here, the next WRITE wake never comes (the
+                        // socket was already writable when we queued
+                        // the ID). The probe-spurious and probe-fail
+                        // paths DO return (`:534`, `:550`); the
+                        // probe-success path falls through.
                         if self.conns[id].connecting {
-                            self.on_connecting(id);
-                            // Probe might have terminated. Re-check
-                            // before falling through. C `:550 return`
-                            // (the probe always returns; the `:556`
-                            // read/write dispatch is the NEXT wake).
-                            continue;
+                            if !self.on_connecting(id) {
+                                // Spurious / failed. C `:534`/`:550`
+                                // `return`.
+                                continue;
+                            }
+                            // Success: fall through. The ID line is
+                            // queued; flush it now (outbuf nonempty
+                            // → `on_conn_writable`). The conn might
+                            // have been terminated by an io_set
+                            // failure inside finish_connecting.
+                            if !self.conns.contains_key(id) {
+                                continue;
+                            }
                         }
                         // `net_socket.c:556-561`: write before read.
                         // tinc-event already orders WRITE-before-READ
@@ -3257,15 +3274,21 @@ impl Daemon {
                     // when the kernel finishes (or fails) the
                     // async connect.
                     let now = self.timers.now();
-                    let fd = sock.as_raw_fd();
                     // The probe needs `&Socket` (for `take_error`);
                     // `Connection.fd` is `OwnedFd`. Same fd, two
                     // owners would double-close. dup the fd: the
-                    // probe sock drops after `finish_connecting`;
-                    // the dup lives on. One extra fd for ~1 RTT.
-                    // The C doesn't have this split (its `getsockopt`
-                    // takes a raw `int`); it's the cost of
-                    // type-safe ownership.
+                    // dup goes on `Connection` (the LONG-lived
+                    // handle, the one we register with epoll); the
+                    // original sock drops after `finish_connecting`.
+                    // One extra fd for ~1 RTT. The C doesn't have
+                    // this split (its `getsockopt` takes raw `int`);
+                    // it's the cost of type-safe ownership.
+                    //
+                    // Register the DUP's fd, NOT the original. The
+                    // dup outlives the probe; the original closes
+                    // when `connecting_socks` removes it. Registering
+                    // the original would leave the event-loop slot
+                    // stale post-probe (epoll on a closed fd).
                     let dup = match sock.try_clone() {
                         Ok(d) => OwnedFd::from(d),
                         Err(e) => {
@@ -3275,6 +3298,7 @@ impl Daemon {
                             continue;
                         }
                     };
+                    let fd = dup.as_raw_fd();
                     let conn = Connection::new_outgoing(
                         dup,
                         name,
@@ -3348,24 +3372,34 @@ impl Daemon {
     /// `handle_meta_io` connecting branch (`net_socket.c:517-555`).
     /// Probe the async connect. Success → `finish_connecting`. Fail
     /// → terminate (which retries the outgoing).
-    fn on_connecting(&mut self, id: ConnId) {
+    ///
+    /// Returns `true` if the caller should fall through to the
+    /// write/read dispatch (probe succeeded; C `:553` falls through).
+    /// `false` for spurious wake or failure (C `:534`/`:550` `return`).
+    /// The fall-through matters: mio is edge-triggered; the WRITE
+    /// edge that woke us is the same one that would let us flush the
+    /// ID line. Consuming it for the probe and not flushing means
+    /// the next WRITE wake never comes.
+    fn on_connecting(&mut self, id: ConnId) -> bool {
         let Some(sock) = self.connecting_socks.get(id) else {
             // Shouldn't happen (we always insert when conn.
             // connecting=true). Defensive.
             log::warn!(target: "tincd::conn",
                        "on_connecting: no socket for {id:?}");
             self.terminate(id);
-            return;
+            return false;
         };
         match probe_connecting(sock) {
             Ok(true) => {
                 // C `:553-554`: `c->status.connecting = false;
-                // finish_connecting(c)`.
+                // finish_connecting(c)`. Fall through after.
                 self.finish_connecting(id);
+                true
             }
             Ok(false) => {
                 // Spurious wakeup. Stay registered for WRITE.
                 // C `:534`: `return`.
+                false
             }
             Err(e) => {
                 // C `:546-547`: log DEBUG "Error while connecting
@@ -3396,6 +3430,7 @@ impl Daemon {
                 if let Some(oid) = oid {
                     self.do_outgoing_connection(oid);
                 }
+                false
             }
         }
     }
