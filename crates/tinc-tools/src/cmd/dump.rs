@@ -1224,80 +1224,65 @@ mod tests {
         v.iter().map(|&x| x.to_owned()).collect()
     }
 
+    /// `parse_kind` Ok-path table. C uses `strcasecmp` throughout
+    /// (`tincctl.c:1185` et al). The `reachable nodes` shift: C does
+    /// argv++/argc-- so the rest of cmd_dump sees `nodes` as argv[1].
     #[test]
-    fn kind_basic() {
-        assert_eq!(parse_kind(&s(&["nodes"])).unwrap(), Kind::Nodes);
-        assert_eq!(parse_kind(&s(&["edges"])).unwrap(), Kind::Edges);
-        assert_eq!(parse_kind(&s(&["subnets"])).unwrap(), Kind::Subnets);
-        assert_eq!(parse_kind(&s(&["connections"])).unwrap(), Kind::Connections);
-        assert_eq!(parse_kind(&s(&["graph"])).unwrap(), Kind::Graph);
-        assert_eq!(parse_kind(&s(&["digraph"])).unwrap(), Kind::Digraph);
-        assert_eq!(parse_kind(&s(&["invitations"])).unwrap(), Kind::Invitations);
+    fn kind_ok() {
+        #[rustfmt::skip]
+        let cases: &[(&[&str], Kind)] = &[
+            // ─── basic ───
+            (&["nodes"],            Kind::Nodes),
+            (&["edges"],            Kind::Edges),
+            (&["subnets"],          Kind::Subnets),
+            (&["connections"],      Kind::Connections),
+            (&["graph"],            Kind::Graph),
+            (&["digraph"],          Kind::Digraph),
+            (&["invitations"],      Kind::Invitations),
+            // ─── strcasecmp: nobody types it this way, but C accepts ───
+            (&["NODES"],            Kind::Nodes),
+            (&["Digraph"],          Kind::Digraph),
+            // ─── reachable shift (C argv++/argc--) ───
+            (&["reachable", "nodes"], Kind::ReachableNodes),
+            // strcasecmp on `reachable` too — `tincctl.c:1185`
+            (&["REACHABLE", "nodes"], Kind::ReachableNodes),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_kind(&s(input)).unwrap(),
+                *expected,
+                "input: {input:?}"
+            );
+        }
     }
 
-    /// `strcasecmp` — `tinc dump NODES`, `tinc dump Nodes` work.
-    /// (Nobody types it that way, but the C accepts it.)
+    /// `parse_kind` Err-path table. All `CmdError::BadInput`;
+    /// message text is user-facing (C printf format strings).
     #[test]
-    fn kind_case_insensitive() {
-        assert_eq!(parse_kind(&s(&["NODES"])).unwrap(), Kind::Nodes);
-        assert_eq!(parse_kind(&s(&["Digraph"])).unwrap(), Kind::Digraph);
-        // `reachable` too — C `tincctl.c:1185` is strcasecmp.
-        assert_eq!(
-            parse_kind(&s(&["REACHABLE", "nodes"])).unwrap(),
-            Kind::ReachableNodes
-        );
-    }
-
-    /// The shift: `reachable nodes` becomes Nodes-with-bool. The C
-    /// argv++/argc-- means the rest of cmd_dump sees `nodes` as
-    /// argv[1], same as if you'd typed `dump nodes`.
-    #[test]
-    fn kind_reachable_shift() {
-        assert_eq!(
-            parse_kind(&s(&["reachable", "nodes"])).unwrap(),
-            Kind::ReachableNodes
-        );
-    }
-
-    /// `reachable` followed by anything but `nodes` → error.
-    /// C `tincctl.c:1187`.
-    #[test]
-    fn kind_reachable_only_nodes() {
-        let err = parse_kind(&s(&["reachable", "edges"])).unwrap_err();
-        assert!(matches!(err, CmdError::BadInput(m) if m.contains("only supported for nodes")));
-        // The 90s GNU backtick-apostrophe.
-        let err = parse_kind(&s(&["reachable", "graph"])).unwrap_err();
-        assert!(matches!(err, CmdError::BadInput(m) if m.contains("`reachable'")));
-    }
-
-    /// `reachable` alone → arity error. C `tincctl.c:1185`: the
-    /// `argc > 2` check fails first (1 arg after `dump`), so the
-    /// strcasecmp never runs, falls to `argc != 2` check (still 1).
-    /// Our match: rest.first() is None → arity message.
-    #[test]
-    fn kind_reachable_alone() {
-        let err = parse_kind(&s(&["reachable"])).unwrap_err();
-        assert!(matches!(err, CmdError::BadInput(m) if m.contains("Invalid number")));
-    }
-
-    /// Zero args → arity. C `argc != 2` after no shift.
-    #[test]
-    fn kind_no_args() {
-        let err = parse_kind(&s(&[])).unwrap_err();
-        assert!(matches!(err, CmdError::BadInput(m) if m.contains("Invalid number")));
-    }
-
-    /// Two args without `reachable` → arity. `dump nodes edges`.
-    #[test]
-    fn kind_too_many_args() {
-        let err = parse_kind(&s(&["nodes", "edges"])).unwrap_err();
-        assert!(matches!(err, CmdError::BadInput(m) if m.contains("Invalid number")));
-    }
-
-    /// Unknown type. C `tincctl.c:1230`: `"Unknown dump type '%s'."`.
-    /// The single-quote and trailing period are in the C.
-    #[test]
-    fn kind_unknown() {
+    fn kind_err() {
+        #[rustfmt::skip]
+        let cases: &[(&[&str], &str)] = &[
+            // `reachable X` for X != nodes. C `tincctl.c:1187`.
+            (&["reachable", "edges"], "only supported for nodes"),
+            // The 90s GNU backtick-apostrophe.
+            (&["reachable", "graph"], "`reachable'"),
+            // `reachable` alone: C `argc > 2` fails first, falls to `argc != 2`.
+            // Our match: rest.first() is None → arity message.
+            (&["reachable"],          "Invalid number"),
+            // Zero args → arity. C `argc != 2` after no shift.
+            (&[],                     "Invalid number"),
+            // Two args without `reachable` → arity. `dump nodes edges`.
+            (&["nodes", "edges"],     "Invalid number"),
+        ];
+        for (input, msg) in cases {
+            let err = parse_kind(&s(input)).unwrap_err();
+            assert!(
+                matches!(err, CmdError::BadInput(m) if m.contains(msg)),
+                "input: {input:?}"
+            );
+        }
+        // Unknown type: exact match. C `tincctl.c:1230`:
+        // `"Unknown dump type '%s'."` — single-quote + trailing period.
         let err = parse_kind(&s(&["lasers"])).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(m) if m == "Unknown dump type 'lasers'."));
     }
@@ -1472,100 +1457,51 @@ mod tests {
         assert!(r.fmt_plain().contains("status 0000 "));
     }
 
-    // ─── DOT format
+    // ─── DOT format: color cascade
 
-    /// MYSELF → green, filled. C `tincctl.c:1291,1303`.
+    /// `fmt_dot` color cascade. C `tincctl.c:1290-1303`, an
+    /// if-else-if chain in this order:
+    ///   1. MYSELF → green + filled
+    ///   2. !reachable → red
+    ///   3. via != name (indirect, UDP relayed) → orange
+    ///   4. !validkey → black
+    ///   5. minmtu > 0 (UDP works) → green
+    ///   6. fall-through (TCP only) → black
+    ///
+    /// Order matters: MYSELF wins over !reachable (cascade row 7).
     #[test]
-    fn node_dot_myself() {
-        let body = "me 0 MYSELF port 655 0 0 0 0 0 1f - me 0 1500 1500 1500 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"green\""));
-        assert!(dot.contains("style = \"filled\""));
-        // The label = name redundancy.
-        assert!(dot.contains("\"me\" [label = \"me\""));
-    }
-
-    /// Unreachable → red. Second branch in cascade.
-    #[test]
-    fn node_dot_unreachable() {
-        // status 0 → bit 4 clear → !reachable.
-        let body = "dead 0 unknown port unknown 0 0 0 0 0 0 - - 0 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(!r.reachable());
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"red\""));
-        // No filled (not myself).
-        assert!(!dot.contains("filled"));
-    }
-
-    /// Indirect (`via != name`) → orange. Third branch.
-    /// Reachable (so we get past red), but UDP relayed.
-    #[test]
-    fn node_dot_indirect() {
-        // via = "bob", name = "alice" → via != name.
-        // status = 0x12 (reachable + validkey).
-        let body = "alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob bob 1 1500 1400 1500 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.reachable());
-        assert!(r.validkey());
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"orange\""));
-    }
-
-    /// Reachable, direct (`via == name`), but no validkey → black.
-    /// Fourth branch. status 0x10: bit 4 only.
-    #[test]
-    fn node_dot_no_key() {
-        let body = "alice 0 1.1.1.1 port 1 0 0 0 0 0 10 bob alice 1 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.reachable());
-        assert!(!r.validkey());
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"black\""));
-    }
-
-    /// Reachable, direct, validkey, minmtu > 0 → green (UDP works).
-    /// Fifth branch.
-    #[test]
-    fn node_dot_udp_ok() {
-        // status 0x12, via == name, minmtu = 1400.
-        let body = "alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 1500 1400 1500 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"green\""));
-        // No filled (not MYSELF; this green is "udp ok" green).
-        assert!(!dot.contains("filled"));
-    }
-
-    /// Reachable, direct, validkey, minmtu = 0 → black (TCP only).
-    /// Fall-through branch. PMTU discovery hasn't found a working
-    /// UDP MTU yet.
-    #[test]
-    fn node_dot_tcp_only() {
-        let body = "alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 0 0 1500 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.reachable());
-        assert!(r.validkey());
-        assert_eq!(r.minmtu, 0);
-        let dot = r.fmt_dot();
-        assert!(dot.contains("color = \"black\""));
-    }
-
-    /// Cascade ORDER: MYSELF wins over reachable=false. The C if-
-    /// else-if ordering (`tincctl.c:1290-1301`). A self-node that's
-    /// somehow unreachable (status bit 4 clear) is still green.
-    /// Unlikely in practice (myself is always reachable to myself)
-    /// but the cascade order admits it.
-    #[test]
-    fn node_dot_cascade_order() {
-        // host = MYSELF but status = 0 (not reachable). Green wins.
-        let body = "me 0 MYSELF port 655 0 0 0 0 0 0 - me 0 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(!r.reachable()); // confirm the conflict
-        let dot = r.fmt_dot();
-        // MYSELF check is FIRST → green, not red.
-        assert!(dot.contains("color = \"green\""));
+    fn node_dot_color_cascade() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, bool)] = &[
+            //          (body,                                                                          color,   filled)
+            // 1. MYSELF → green, filled. status 0x1f = bits 0-4 all set.
+            ("me 0 MYSELF port 655 0 0 0 0 0 1f - me 0 1500 1500 1500 0 -1 0 0 0 0",         "green",  true),
+            // 2. Unreachable → red. status 0 → bit 4 clear.
+            ("dead 0 unknown port unknown 0 0 0 0 0 0 - - 0 0 0 0 0 -1 0 0 0 0",              "red",    false),
+            // 3. Indirect: via="bob" != name="alice", status 0x12 (reachable+validkey) → orange.
+            ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob bob 1 1500 1400 1500 0 -1 0 0 0 0",     "orange", false),
+            // 4. Reachable, direct (via==name), no validkey (status 0x10: bit 4 only) → black.
+            ("alice 0 1.1.1.1 port 1 0 0 0 0 0 10 bob alice 1 0 0 0 0 -1 0 0 0 0",            "black",  false),
+            // 5. Reachable, direct, validkey (0x12), minmtu=1400 > 0 → green (UDP ok). NOT filled.
+            ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 1500 1400 1500 0 -1 0 0 0 0",   "green",  false),
+            // 6. Reachable, direct, validkey, minmtu=0 → black (TCP only, PMTU not converged).
+            ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 0 0 1500 0 -1 0 0 0 0",         "black",  false),
+            // 7. CASCADE ORDER: host=MYSELF but status=0 (not reachable). MYSELF check is FIRST
+            //    → green, not red. Unlikely in practice but the cascade admits it.
+            ("me 0 MYSELF port 655 0 0 0 0 0 0 - me 0 0 0 0 0 -1 0 0 0 0",                    "green",  true),
+        ];
+        for (body, color, filled) in cases {
+            let r = NodeRow::parse(body).unwrap();
+            let dot = r.fmt_dot();
+            assert!(
+                dot.contains(&format!("color = \"{color}\"")),
+                "body: {body:?}\ndot: {dot}"
+            );
+            assert_eq!(dot.contains("filled"), *filled, "body: {body:?}");
+        }
+        // The label = name redundancy (only need to check once).
+        let r = NodeRow::parse(cases[0].0).unwrap();
+        assert!(r.fmt_dot().contains("\"me\" [label = \"me\""));
     }
 
     // ─── EdgeRow
@@ -1692,31 +1628,32 @@ mod tests {
         assert_eq!(r.fmt_plain(), "10.0.0.0/24 owner alice");
     }
 
-    /// `strip_weight`: `#10` only. C `info.c:41-49`.
+    /// `strip_weight`: `#10` only. C `info.c:41-49`. Includes
+    /// corner cases from C's `len >= 3` check.
     #[test]
-    fn strip_weight_only_ten() {
-        assert_eq!(strip_weight("10.0.0.0/24#10"), "10.0.0.0/24");
-        // Other weights survive.
-        assert_eq!(strip_weight("10.0.0.0/24#5"), "10.0.0.0/24#5");
-        assert_eq!(strip_weight("10.0.0.0/24#100"), "10.0.0.0/24#100");
-        // No suffix → unchanged.
-        assert_eq!(strip_weight("10.0.0.0/24"), "10.0.0.0/24");
-    }
-
-    /// `strip_weight` corner cases from C's `len >= 3` check.
-    /// `"#10"` (3 chars) → `""`. Never happens (not a valid subnet)
-    /// but it's what the C does (`!strcmp(netstr + 0, "#10")` matches).
-    #[test]
-    fn strip_weight_edge_cases() {
-        assert_eq!(strip_weight("#10"), "");
-        //        // 2 chars → no match (len < 3). C `len >= 3` fails first.
-        assert_eq!(strip_weight("10"), "10");
-        // `#100` is 4 chars, doesn't end in `#10` (wait, `100` ends
-        // in... no, "#100" ends in "100", not "#10"). Correct.
-        assert_eq!(strip_weight("a#100"), "a#100");
-        // What about `#10#10`? Ends in `#10` → strip once. C does
-        // one pass; `strip_suffix` is one pass.
-        assert_eq!(strip_weight("#10#10"), "#10");
+    fn strip_weight_table() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str)] = &[
+            // ─── only `#10` is stripped ───
+            ("10.0.0.0/24#10",  "10.0.0.0/24"),
+            ("10.0.0.0/24#5",   "10.0.0.0/24#5"),    // other weights survive
+            ("10.0.0.0/24#100", "10.0.0.0/24#100"),  // #100 ≠ #10
+            ("10.0.0.0/24",     "10.0.0.0/24"),      // no suffix → unchanged
+            // ─── C `len >= 3` corner cases ───
+            // `"#10"` (3 chars) → `""`. Never a valid subnet but it's
+            // what C does (`!strcmp(netstr + 0, "#10")` matches).
+            ("#10",    ""),
+            // 2 chars → no match. C `len >= 3` fails first.
+            ("10",     "10"),
+            // "#100" ends in "100", not "#10" → no match.
+            ("a#100",  "a#100"),
+            // `#10#10`: ends in `#10` → strip once. C does one pass;
+            // `strip_suffix` is one pass.
+            ("#10#10", "#10"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(strip_weight(input), *expected, "input: {input:?}");
+        }
     }
 
     /// `strip_weight` literal must track `tinc_proto::DEFAULT_WEIGHT`.
@@ -1859,23 +1796,6 @@ mod tests {
         assert_eq!(rows[0].invitee, "bob");
     }
 
-    /// `Name=bob` (no spaces) → SKIP. C `strncmp(buf, "Name = ", 7)`
-    /// is exact-prefix; the general config tokenizer would accept
-    /// `Name=bob` but this isn't using it. The format `cmd_invite`
-    /// writes (`invitation.c:557`: `"Name = %s\n"`) is the format
-    /// dump reads.
-    #[test]
-    fn inv_strict_name_format() {
-        let (d, paths) = setup_inv();
-        let name = mk_filename(0);
-        // No spaces around `=` — invalid for dump.
-        fs::write(d.path().join("vpn/invitations").join(&name), "Name=bob\n").unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        // Skipped — found nothing valid.
-        assert!(rows.is_empty());
-    }
-
     /// rstrip: trailing `\r\n`, ` \t\n` etc. C `strchr("\t \r\n",
     /// *--eol)` loop strips all of them.
     #[test]
@@ -1896,72 +1816,47 @@ mod tests {
         assert_eq!(rows[0].invitee, "bob");
     }
 
-    /// Wrong-length filename → skip. The 24-char filter.
-    /// `ed25519_key.priv` is in the same dir (the per-invitation key);
-    /// it must NOT show up as an invitation.
+    /// Skip table: each entry is a (filename, content) pair that
+    /// `dump_invitations` must silently skip. The C silently skips
+    /// bad ones (with stderr warnings; we don't warn from lib code).
     #[test]
-    fn inv_wrong_length_skipped() {
-        let (d, paths) = setup_inv();
-        // The actual key file `cmd_invite` creates.
-        fs::write(
-            d.path().join("vpn/invitations/ed25519_key.priv"),
-            "key blob",
-        )
-        .unwrap();
-        // 23 chars, valid b64.
-        fs::write(
-            d.path().join("vpn/invitations").join("A".repeat(23)),
-            "Name = nope\n",
-        )
-        .unwrap();
-        // 25 chars. The C `b64decode_tinc(..., 24)` would read first
-        // 24 and pass; we tighten to exact.
-        fs::write(
-            d.path().join("vpn/invitations").join("A".repeat(25)),
-            "Name = nope\n",
-        )
-        .unwrap();
+    fn inv_skipped() {
+        // Filenames with non-static lifetimes built up front.
+        let valid_name = mk_filename(0);
+        let short = "A".repeat(23);
+        let long = "A".repeat(25);
+        let bad_b64 = "*".repeat(24);
 
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty(), "wrong-length names not filtered");
-    }
-
-    /// 24 chars, NOT valid b64 → skip. C `b64decode_tinc` returns 0.
-    /// `*` is not in either alphabet.
-    #[test]
-    fn inv_bad_b64_skipped() {
-        let (d, paths) = setup_inv();
-        let bad = "*".repeat(24);
-        fs::write(d.path().join("vpn/invitations").join(&bad), "Name = bob\n").unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty());
-    }
-
-    /// `check_id` failure → skip. Name with a hyphen.
-    #[test]
-    fn inv_bad_invitee_name() {
-        let (d, paths) = setup_inv();
-        let name = mk_filename(0);
-        fs::write(
-            d.path().join("vpn/invitations").join(&name),
-            "Name = bad-name\n",
-        )
-        .unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty());
-    }
-
-    /// Empty file (`fgets` returns NULL) → skip. C `tincctl.c:1152`.
-    #[test]
-    fn inv_empty_file() {
-        let (d, paths) = setup_inv();
-        let name = mk_filename(0);
-        fs::write(d.path().join("vpn/invitations").join(&name), "").unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty());
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            //          (filename,              content,           why)
+            // ─── wrong-length filename: the 24-char filter ───
+            // `ed25519_key.priv` is in the same dir (per-invitation key);
+            // must NOT show up as an invitation.
+            ("ed25519_key.priv",     "key blob",         "key file (wrong length)"),
+            // 23 chars, valid b64.
+            (&short,                 "Name = nope\n",    "23-char name"),
+            // 25 chars. C `b64decode_tinc(..., 24)` would read first 24
+            // and pass; we tighten to exact.
+            (&long,                  "Name = nope\n",    "25-char name"),
+            // ─── 24 chars, NOT valid b64. C `b64decode_tinc` returns 0. ───
+            (&bad_b64,               "Name = bob\n",     "bad b64 (`*` not in alphabet)"),
+            // ─── valid filename, bad content ───
+            // `Name=bob` (no spaces): C `strncmp(buf, "Name = ", 7)` is
+            // exact-prefix. The format `cmd_invite` writes
+            // (`invitation.c:557`: `"Name = %s\n"`) is the format dump reads.
+            (&valid_name,            "Name=bob\n",       "strict `Name = ` prefix"),
+            // `check_id` failure: name with hyphen.
+            (&valid_name,            "Name = bad-name\n", "bad invitee name"),
+            // Empty file: `fgets` returns NULL. C `tincctl.c:1152`.
+            (&valid_name,            "",                 "empty file"),
+        ];
+        for (fname, content, why) in cases {
+            let (d, paths) = setup_inv();
+            fs::write(d.path().join("vpn/invitations").join(fname), content).unwrap();
+            let rows = dump_invitations(&paths).unwrap();
+            assert!(rows.is_empty(), "{why}: not skipped");
+        }
     }
 
     /// Multiple invites: collect all. Order is readdir order
