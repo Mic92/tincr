@@ -131,6 +131,42 @@ impl ChaPoly {
         out
     }
 
+    /// In-place variant of [`seal`]. The hot-path encrypt for SPTPS data
+    /// records.
+    ///
+    /// `out` MUST already contain `[..encrypt_from]` bytes that are NOT
+    /// encrypted (e.g. the seqno header for datagram framing, or the length
+    /// prefix for stream framing). This function:
+    /// 1. Pushes `type_byte` at `out[encrypt_from]`.
+    /// 2. Extends `out` with `body` at `encrypt_from + 1`.
+    /// 3. Encrypts `out[encrypt_from..]` in-place (ChaCha20 XOR).
+    /// 4. Computes Poly1305 over those same encrypted bytes, appends the
+    ///    16-byte tag.
+    ///
+    /// Net: ONE copy of `body` (the `extend_from_slice`), zero scratch
+    /// allocs. Replaces [`seal`]'s alloc-out + extend-plaintext + return-Vec
+    /// with append-to-caller's-buffer + encrypt-in-place. The C reference
+    /// does the same shape: `chacha_poly1305_encrypt(.., buffer+4, ..,
+    /// buffer+4, ..)` over an `alloca`'d span (`sptps.c:125`).
+    ///
+    /// `encrypt_from` lets the caller pre-write headers that stay plaintext.
+    pub fn seal_into(
+        &self,
+        seqno: u64,
+        type_byte: u8,
+        body: &[u8],
+        out: &mut Vec<u8>,
+        encrypt_from: usize,
+    ) {
+        debug_assert_eq!(out.len(), encrypt_from);
+        out.push(type_byte);
+        out.extend_from_slice(body);
+        let (poly, mut cipher) = self.record_state(seqno);
+        cipher.apply_keystream(&mut out[encrypt_from..]);
+        let tag = poly.compute_unpadded(&out[encrypt_from..]);
+        out.extend_from_slice(tag.as_slice());
+    }
+
     /// Verify the trailing tag and decrypt.
     ///
     /// # Errors

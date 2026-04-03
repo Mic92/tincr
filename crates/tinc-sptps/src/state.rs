@@ -385,62 +385,58 @@ impl Sptps {
     /// `send_record_priv` + `send_record_priv_datagram`.
     ///
     /// One function does both framings; the C splits them for `alloca`
-    /// hygiene that doesn't apply to `Vec`. The `outseqno++` happens here
-    /// unconditionally — yes, even during plaintext handshake records.
-    /// That's load-bearing for the differential test: C ticks the seqno on
-    /// every send, encrypted or not. The first encrypted record's seqno is
-    /// therefore 2 (after KEX=0 and SIG=1), not 0.
+    /// hygiene. The `outseqno++` happens here unconditionally — yes, even
+    /// during plaintext handshake records. That's load-bearing for the
+    /// differential test: C ticks the seqno on every send, encrypted or not.
+    /// The first encrypted record's seqno is therefore 2 (after KEX=0 and
+    /// SIG=1), not 0.
+    ///
+    /// Hot-path note: this is the ONE per-packet allocation on the SPTPS
+    /// send side. The C does it with `alloca` + ONE `memcpy` of `body` +
+    /// in-place encrypt over `buffer+4` (`sptps.c:108-130`). We match that
+    /// shape: one right-sized `Vec`, one `extend_from_slice(body)` inside
+    /// `seal_into`, encrypt-in-place. Previous version built a `pt` scratch
+    /// Vec, called `seal()` (which alloc'd a fresh output and copied `pt`
+    /// into it), then copied THAT into `wire` — 3 allocs, 3 copies of body.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
         let seqno = self.outseqno;
         self.outseqno = self.outseqno.wrapping_add(1);
 
-        let bytes = match self.framing {
+        // Compute final length so the ONE alloc is right-sized.
+        // Stream:   2 (len)   + 1 (type) + body + [16 (tag) if encrypted]
+        // Datagram: 4 (seqno) + 1 (type) + body + [16 (tag) if encrypted]
+        let header_len = match self.framing {
+            Framing::Stream => 2,
+            Framing::Datagram => 4,
+        };
+        let tag_len = if self.outcipher.is_some() { TAG_LEN } else { 0 };
+        let mut wire = Vec::with_capacity(header_len + 1 + body.len() + tag_len);
+
+        // Plaintext header. The type byte lives INSIDE the AEAD span; the
+        // len/seqno header is the only thing that survives encryption.
+        match self.framing {
             Framing::Stream => {
-                // Layout: len[2] ‖ type[1] ‖ body[len] (‖ tag[16] if encrypted).
-                // `len` is the BODY length, not the wire length. It's the
-                // only header byte that survives encryption (the type byte
-                // is inside the AEAD span, the len is outside).
                 let len: u16 = body.len().try_into().expect("body fits in u16");
-                let mut wire = Vec::with_capacity(crate::STREAM_OVERHEAD + body.len());
                 wire.extend_from_slice(&len.to_be_bytes());
-                if let Some(cipher) = &self.outcipher {
-                    // Encrypt type+body together. C does this by building
-                    // `[len][type][body]` then chacha_poly1305_encrypt over
-                    // `buffer + 2` for `len + 1` bytes. Same span here.
-                    let mut pt = Vec::with_capacity(1 + body.len());
-                    pt.push(ty);
-                    pt.extend_from_slice(body);
-                    let sealed = cipher.seal(u64::from(seqno), &pt);
-                    pt.zeroize();
-                    wire.extend_from_slice(&sealed);
-                } else {
-                    wire.push(ty);
-                    wire.extend_from_slice(body);
-                }
-                wire
             }
             Framing::Datagram => {
-                // Layout: seqno[4] ‖ type[1] ‖ body (‖ tag[16] if encrypted).
-                // Same encrypt-span: type byte is inside the AEAD.
-                let mut wire = Vec::with_capacity(crate::DATAGRAM_OVERHEAD + body.len());
                 wire.extend_from_slice(&seqno.to_be_bytes());
-                if let Some(cipher) = &self.outcipher {
-                    let mut pt = Vec::with_capacity(1 + body.len());
-                    pt.push(ty);
-                    pt.extend_from_slice(body);
-                    let sealed = cipher.seal(u64::from(seqno), &pt);
-                    pt.zeroize();
-                    wire.extend_from_slice(&sealed);
-                } else {
-                    wire.push(ty);
-                    wire.extend_from_slice(body);
-                }
-                wire
             }
-        };
+        }
+
+        // type+body, encrypted in-place if cipher is up. Same span the C
+        // hands to `chacha_poly1305_encrypt`: `buffer + header_len` for
+        // `1 + body.len()` bytes.
+        if let Some(cipher) = &self.outcipher {
+            cipher.seal_into(u64::from(seqno), ty, body, &mut wire, header_len);
+        } else {
+            wire.push(ty);
+            wire.extend_from_slice(body);
+        }
+
         out.push(Output::Wire {
             record_type: ty,
-            bytes,
+            bytes: wire,
         });
     }
 
