@@ -1777,7 +1777,7 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got ADD_SUBNET from {} for ourself ({subnet})",
                        conn.map_or("<gone>", |c| c.name.as_str()));
-            // STUB(chunk-5b): send_del_subnet(c, &s) (`:102`).
+            // STUB(chunk-6): send_del_subnet(c, &s) (`:102`).
             // Needs the broadcast send machinery. Log + return Ok.
             return Ok(false);
         }
@@ -1793,7 +1793,7 @@ impl Daemon {
         // STUB(chunk-8): if owner reachable, subnet_update(..., true)
         // (`:130-132`). Script firing.
 
-        // STUB(chunk-5b): forward_request(c, request) (`:136-138`).
+        // STUB(chunk-6): forward_request(c, request) (`:136-138`).
         // One peer in chunk 5; nobody to forward to. The integration
         // test doesn't see the difference.
         log::debug!(target: "tincd::proto",
@@ -1846,11 +1846,11 @@ impl Daemon {
         if owner == self.myself {
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
-            // STUB(chunk-5b): send_add_subnet(c, find) (`:234`).
+            // STUB(chunk-6): send_add_subnet(c, find) (`:234`).
             return Ok(false);
         }
 
-        // STUB(chunk-5b): forward_request (`:244`).
+        // STUB(chunk-6): forward_request (`:244`).
         log::debug!(target: "tincd::proto",
                     "would forward DEL_SUBNET (one peer, no-op)");
 
@@ -1932,7 +1932,7 @@ impl Daemon {
                 log::warn!(target: "tincd::proto",
                            "Got ADD_EDGE from {conn_name} for ourself \
                             which does not match existing entry");
-                // STUB(chunk-5b): send_add_edge(c, e) (`:153`).
+                // STUB(chunk-6): send_add_edge(c, e) (`:153`).
                 // Send back what WE think the edge is.
                 return Ok(false);
             }
@@ -1958,8 +1958,8 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got ADD_EDGE from {conn_name} for ourself \
                         which does not exist");
-            // STUB(chunk-5b): contradicting_add_edge++ (`:187`).
-            // STUB(chunk-5b): send_del_edge(c, e) (`:192`).
+            // STUB(chunk-6): contradicting_add_edge++ (`:187`).
+            // STUB(chunk-6): send_del_edge(c, e) (`:192`).
             return Ok(false);
         } else {
             // C `:197-205`: `edge_add`. The fresh-edge case.
@@ -1967,7 +1967,7 @@ impl Daemon {
                 .add_edge(from_id, to_id, edge.weight, edge.options);
         }
 
-        // STUB(chunk-5b): forward_request(c, request) (`:209-211`).
+        // STUB(chunk-6): forward_request(c, request) (`:209-211`).
         log::debug!(target: "tincd::proto",
                     "would forward ADD_EDGE (one peer, no-op)");
 
@@ -2034,12 +2034,12 @@ impl Daemon {
         if from_id == self.myself {
             log::warn!(target: "tincd::proto",
                        "Got DEL_EDGE from {conn_name} for ourself");
-            // STUB(chunk-5b): contradicting_del_edge++ (`:288`).
-            // STUB(chunk-5b): send_add_edge(c, e) (`:289`).
+            // STUB(chunk-6): contradicting_del_edge++ (`:288`).
+            // STUB(chunk-6): send_add_edge(c, e) (`:289`).
             return Ok(false);
         }
 
-        // STUB(chunk-5b): forward_request (`:295-297`).
+        // STUB(chunk-6): forward_request (`:295-297`).
         log::debug!(target: "tincd::proto",
                     "would forward DEL_EDGE (one peer, no-op)");
 
@@ -2204,7 +2204,7 @@ impl Daemon {
         // each node walks `subnet_tree` and `edge_tree`, sends
         // ADD_SUBNET/ADD_EDGE for everything we know.
         //
-        // STUB(chunk-5b): the actual sending. `send_add_edge` needs
+        // STUB(chunk-6): the actual sending. `send_add_edge` needs
         // the edge address (`protocol_edge.c:42`: sockaddr2str on
         // `e->address`). tinc-graph::Edge doesn't store it;
         // NodeState.edge_addr does. Either parallel HashMap<EdgeId,
@@ -2220,7 +2220,7 @@ impl Daemon {
                     "send_everything: would send {n_subnets} subnets, \
                      ~2 edges (STUB chunk-5b)");
 
-        // STUB(chunk-5b): C `:1055-1061` send_add_edge(everyone,
+        // STUB(chunk-6): C `:1055-1061` send_add_edge(everyone,
         // c->edge). Broadcast to all OTHER active conns. One peer
         // → `everyone` is empty after excluding self.
 
