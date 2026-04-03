@@ -66,11 +66,6 @@
 //! does validate the prefix). Dropped; same observable behavior.
 
 #![allow(clippy::doc_markdown)]
-// `run()` is long because fsck IS long — four independent checks
-// stitched in sequence. Splitting it would mean four functions that
-// each take `&mut Vec<Finding>` and return `bool`, called once each
-// in fixed order. That's the C's structure, and it's not better.
-#![allow(clippy::too_many_lines)]
 
 use std::fmt;
 use std::fs;
@@ -284,6 +279,7 @@ impl Finding {
 /// The C messages. Phrasing preserved for the same reason as
 /// `CmdError::Display` — users grep error strings, forum posts
 /// reference them. Minor deviations noted inline.
+#[allow(clippy::too_many_lines)] // exhaustive match over many-variant enum
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Finding as F;
@@ -2033,6 +2029,7 @@ mod tests {
     /// it. This tests that no variant `panic!`s in formatting, and
     /// that the messages contain the expected user-greppable bits.)
     #[test]
+    #[allow(clippy::too_many_lines)] // one assertion per Finding variant
     fn display_exhaustive() {
         use Finding as F;
         let p = PathBuf::from("/x/y");

@@ -468,11 +468,6 @@ impl Stats {
 /// no NaN. `unwrap_or(Equal)` on the partial_cmp is the C's
 /// `cmpfloat` returning 0 on `else` (`top.c:144`), which would
 /// also be the NaN case if you fed it one.
-#[allow(clippy::too_many_lines)] // 7-arm match, each arm 2-way on cumulative.
-// The C is 70 lines (`top.c:165-227`). Factoring
-// out the per-field-pair extraction adds
-// indirection without reducing the irreducible
-// 7×2 fanout.
 fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> std::cmp::Ordering {
     use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
     use std::cmp::Ordering::Equal;
@@ -939,8 +934,6 @@ fn fetch<S: io::Read + io::Write>(ctl: &mut CtlSocket<S>) -> Result<Vec<TrafficR
 ///
 /// `out` is where the prompt gets written. stdout in real use;
 /// `Vec<u8>` in tests.
-#[allow(clippy::too_many_lines)] // 13 single-line match arms + the 's' case.
-// `top.c:296-370` is 75 lines. Same fanout.
 fn handle_key(
     key: u8,
     stats: &mut Stats,

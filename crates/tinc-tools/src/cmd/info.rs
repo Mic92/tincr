@@ -368,7 +368,6 @@ impl NodeInfo {
     /// `clippy::too_many_lines`: the C is ~100 lines of printf for
     /// the same span. Splitting would mean passing `out` around.
     /// One function, one output.
-    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn format(&self, name: &str) -> String {
         let row = &self.row;
@@ -1170,7 +1169,6 @@ mod tests {
     /// `clippy::too_many_lines`: this is one golden vector. The
     /// width-count comments make it longer. Allowed.
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn nodeinfo_format_golden() {
         // alice: reachable, validkey, sptps, udp. minmtu>0 → DirectUdp.
         // options = INDIRECT|PMTU = 0x0001|0x0004 = 0x0005, plus

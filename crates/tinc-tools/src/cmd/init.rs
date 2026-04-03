@@ -89,8 +89,6 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 /// chmod) — the path tells you which.
 ///
 /// Doesn't roll back on partial failure. See module doc.
-#[allow(clippy::too_many_lines)] // it's a recipe — N steps in sequence,
-// breaking it up just hides the order
 pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // ─── Guard: already initialized?
     // C: `if(!access(tinc_conf, F_OK))` — `access(F_OK)` is "exists?",

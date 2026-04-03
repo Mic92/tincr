@@ -771,9 +771,6 @@ pub fn strip_weight(s: &str) -> &str {
 /// "Connections" are the live meta-connections (the TCP sockets to
 /// peers), as opposed to "edges" (the graph edges, which include
 /// transitive ones). Connections ⊆ edges, roughly.
-///
-/// `clippy::similar_names`: `host`/`port` aren't similar, but if it
-/// fires we allow.
 #[derive(Debug, Clone)]
 pub struct ConnRow {
     pub name: String,
@@ -1017,7 +1014,6 @@ pub enum DumpOutput {
 /// against same-version daemon — if it does, the format strings
 /// drifted, file a bug. The C `tincctl.c:1285`: `"Unable to parse
 /// node dump from tincd: %s"` (it includes the line; we do too).
-#[allow(clippy::too_many_lines)]
 #[cfg(unix)]
 pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");

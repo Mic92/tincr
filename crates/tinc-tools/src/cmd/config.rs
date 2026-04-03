@@ -256,11 +256,6 @@ fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> 
 /// a validated value format that the CLI checks. (The daemon
 /// validates everything via `read_config_file`, but `cmd_config`
 /// writes blindly otherwise.)
-// Too many lines: this function is the C's big lookup-loop body
-// plus all surrounding policy. Splitting it would mean threading
-// six locals (action, node, found, var, warn, force) through
-// helpers. The C is 110 lines for the same span; we're at par.
-#[allow(clippy::too_many_lines)]
 pub fn build_intent(
     paths: &Paths,
     raw_action: Action,
@@ -611,12 +606,9 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<GetResult, CmdE
 ///
 /// The `Set` and `Add` cases never fail at the walk stage — if no
 /// match exists, they append. C `tincctl.c:2088`.
-// The C is ~140 lines for this span; we're at ~100. Structural
-// fidelity (one walk, four arm-branches inside) is more readable
-// than helper-per-action with a shared walk-iterator passed in.
-// missing_panics_doc: see # Panics above; the unwrap is provably
-// safe behind is_some_and but clippy can't see across statements.
-#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
+// missing_panics_doc: the unwrap is provably safe behind is_some_and
+// but clippy can't see across statements.
+#[allow(clippy::missing_panics_doc)]
 pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 

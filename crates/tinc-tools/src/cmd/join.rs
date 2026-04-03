@@ -269,15 +269,10 @@ pub struct JoinResult {
 /// # Panics
 /// Only via `keypair::generate`'s `OsRng::fill_bytes` if the OS
 /// entropy source is broken.
-#[allow(
-    // The function is long because the C finalize_join is long
-    // (400 lines). It's a sequence of distinct steps that share
-    // local state (open file handles, the line iterator). The C
-    // does it with goto. Splitting into helpers would mean either
-    // threading 8 args through each one or building a struct.
-    // The line count is mostly comments mapping to C lines.
-    clippy::too_many_lines,
-)]
+// Sequence of distinct steps sharing local state (open file handles,
+// the line iterator). C `finalize_join` is 400 lines for the same
+// reason; it does it with goto.
+#[allow(clippy::too_many_lines)]
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
     // ─── Validate blob is text
     // The C treats `data` as a NUL-terminated C string
@@ -456,10 +451,9 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
 
         // C: `fprintf((variables[i].type & VAR_HOST) ? fh : f,
         // "%s = %s\n", l, value);`. HOST vars → hosts/NAME, SERVER
-        // vars → tinc.conf. The dual-tagged ones (SERVER|HOST) go
-        // to hosts/NAME — `& VAR_HOST` is the test, and dual-tagged
-        // matches. (Hmm — that means `Subnet` from the inviter goes
-        // to *our* host file, which is correct: it's *our* subnet.)
+        // vars → tinc.conf. Dual-tagged (SERVER|HOST) go to
+        // hosts/NAME since `& VAR_HOST` matches — e.g. `Subnet` from
+        // the inviter goes to our host file (it's our subnet).
         //
         // We write `var.name` (canonical case from the table), not
         // `key` (what the inviter wrote). C writes `l`, which after
@@ -787,7 +781,10 @@ pub(crate) fn server_receive_cookie(
 ///
 /// # Panics
 /// Only via `keypair::generate`'s entropy source.
-#[allow(clippy::too_many_lines)] // see finalize_join's allow rationale
+// Sequence of distinct steps sharing local state (sockets, SPTPS
+// pump, accumulated blob). C `cmd_join` is one function for the
+// same reason — the steps share too much state to split cleanly.
+#[allow(clippy::too_many_lines)]
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // ─── Parse URL
     let parsed =

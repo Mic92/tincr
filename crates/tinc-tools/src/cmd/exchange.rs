@@ -375,11 +375,6 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 /// construction (set together, cleared together). The `.unwrap()`s
 /// document this invariant.
 //
-// `clippy::too_many_lines`: this is a state machine with five states
-// worth of context. Splitting it would mean threading `out`/`count`/
-// `firstline`/`current_path` through helper functions, which is more
-// code and less clear. The C is 80 lines; this is similar. Allow.
-#[allow(clippy::too_many_lines)]
 pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, CmdError> {
     let mut out: Option<BufWriter<fs::File>> = None;
     // For error messages. C: `char filename[PATH_MAX]`, set when out is.
@@ -613,13 +608,8 @@ mod tests {
         let mut out = Vec::new();
         export_all(&paths, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
-        // Only alice (check_id). README passes check_id! All-caps
-        // alpha is alnum. So actually... README *is* a valid node
-        // name. The C would export it too. Hmm.
-        //
-        // Reconsidering: the C check is `check_id`, period. README is
-        // `[A-Za-z]+` which passes. So the C exports it. We do too.
-        // Adjust assertion.
+        // The C check is `check_id`, period. README is `[A-Za-z]+`
+        // which passes — so it's a valid node name and C exports it.
         assert!(s.contains("Name = alice"));
         assert!(s.contains("Name = README")); // ← yes, really
         assert!(!s.contains("with-dash"));

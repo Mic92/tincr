@@ -130,9 +130,6 @@ pub struct Winsize {
 /// the heavy lifting (the `ioctl_read_bad!` macro IS the safe-
 /// usage pattern), the unsafe is the FFI calling convention not
 /// the logic.
-///
-/// `clippy::missing_panics_doc`: doesn't panic. `unwrap_or` on
-/// the fallback. Allowed at item.
 #[allow(unsafe_code)]
 #[must_use]
 pub fn winsize() -> Winsize {
@@ -406,16 +403,10 @@ impl Drop for RawMode {
 /// returns `ERR` on EOF too — the loop spins. Our behavior is
 /// better.
 ///
-/// `clippy::missing_panics_doc`: doesn't panic. The `read_exact`
-/// is into a 1-byte slice from a fd that poll said is readable;
-/// the only failure is EOF (handled) or EINTR (poll already
-/// soaked it via `nix`'s retry... actually no, nix's poll DOESN'T
-/// retry EINTR. Hmm. SIGWINCH would hit it. → handle EINTR as
-/// timeout — one missed tick on resize, the loop redraws).
-///
 /// # Errors
 /// I/O errors on stdin (fd closed under us, etc.). EINTR is NOT
-/// an error — mapped to `None` (treated as timeout, harmless).
+/// an error — mapped to `None` (treated as timeout; one missed
+/// tick on SIGWINCH, the loop redraws).
 pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     let stdin = io::stdin();
     let fd = stdin.as_fd();

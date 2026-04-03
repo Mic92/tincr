@@ -315,11 +315,8 @@ fn udp_accept(addr: SocketAddr) -> io::Result<Sock> {
 // tool.
 
 // The poll loop is one function for the same reason C `run_test()` is:
-// the two arms (sock readable, stdin readable) share six pieces of
-// mutable state (`sock`, `s`, `buf`, `established`, `readonly`,
-// `stdout`). Factoring them out means passing all six by `&mut`, which
-// is more lines and less clear, not fewer and clearer. The body is one
-// `loop` with two `if`s; you can read it top to bottom.
+// Two arms (sock readable, stdin readable) share six pieces of
+// mutable state. The body is one `loop` with two `if`s.
 #[allow(clippy::too_many_lines)]
 fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};

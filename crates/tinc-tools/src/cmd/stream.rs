@@ -815,9 +815,6 @@ mod tests {
     /// for writing.
     ///
     /// `Duplex` is a tiny adapter: Read from one, Write to other.
-    /// `clippy::similar_names` would flag `rd`/`wr` as too close;
-    /// the longer `read_side`/`write_side` are noisier but clearer
-    /// (and the struct is local anyway).
     struct Duplex {
         read_side: Cursor<Vec<u8>>,
         write_side: Vec<u8>,
