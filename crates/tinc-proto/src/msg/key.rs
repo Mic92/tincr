@@ -356,6 +356,28 @@ mod tests {
     }
 
     #[test]
+    fn ans_key_sptps_placeholder_fields() {
+        // The exact wire shape a C SPTPS peer sends. net_packet.c:996:
+        // `send_request("%d %s %s %s -1 -1 -1 %d", ANS_KEY, ...)`.
+        // The `-1` tokens are LITERAL STRING, not a `%d` arg. cipher/
+        // digest are `%d` → i32 (parses -1 fine). maclen is `%lu` →
+        // glibc-permissive wrapping cast, see `Tok::lu`. Before the
+        // strtoul-compat fix this line was rejected and the cross-impl
+        // handshake died right after SPTPS record exchange.
+        let line = "16 alice bob aGVsbG8 -1 -1 -1 0";
+        let m = AnsKey::parse(line).unwrap();
+        assert_eq!(m.cipher, -1);
+        assert_eq!(m.digest, -1);
+        assert_eq!(m.maclen, u64::MAX);
+        assert_eq!(m.compression, 0);
+        // Round-trips: u64::MAX formats as a big positive decimal,
+        // NOT as "-1". That's fine — the C `%lu` printf would do the
+        // same. We only need to PARSE "-1", not emit it via format()
+        // (the daemon emits it as a literal in the format_args!).
+        assert!(m.format().contains("18446744073709551615"));
+    }
+
+    #[test]
     fn ans_key_eight_fields_rejected() {
         // C is in UB-ish territory here (uses port without checking it
         // was set). We reject.

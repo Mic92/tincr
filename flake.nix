@@ -168,6 +168,61 @@
             '';
           };
 
+          # The C tincd daemon, nolegacy mode. Target for the cross-
+          # impl tests in crates/tincd/tests/crossimpl.rs (set
+          # TINC_C_TINCD=$out/bin/tincd). Unlike sptps_test/keypair,
+          # `exe_tincd` is `install: true` in src/meson.build — we
+          # don't have to ask for it explicitly, the default `ninja`
+          # builds it and `meson install` puts it in $out/sbin.
+          #
+          # nolegacy means no RSA, no OpenSSL/gcrypt linkage. Same
+          # crypto subset as the Rust daemon (ed25519+chacha20-poly1305
+          # only). A C tincd built WITH legacy would still talk to us
+          # (it negotiates SPTPS-only when the peer's hosts/ file has
+          # only Ed25519PublicKey), but the build is heavier and the
+          # extra surface is irrelevant to interop testing.
+          packages.tincd-c = pkgs.stdenv.mkDerivation {
+            pname = "tinc-tincd-c";
+            version = "1.1pre18";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./meson.build
+                ./meson_options.txt
+                ./src
+                # Same as sptps-test-c: subdir() opens the meson.build
+                # before checking the gate, so they have to exist even
+                # though docs/tests/systemd are all -Ddisabled.
+                ./bash_completion.d
+                ./doc/meson.build
+                ./systemd/meson.build
+              ];
+            };
+            nativeBuildInputs = with pkgs; [
+              meson
+              ninja
+              pkg-config
+            ];
+            mesonFlags = [
+              "-Dcrypto=nolegacy"
+              "-Dminiupnpc=disabled"
+              "-Dcurses=disabled"
+              "-Dreadline=disabled"
+              "-Dzlib=disabled"
+              "-Dlzo=disabled"
+              "-Dlz4=disabled"
+              "-Dvde=disabled"
+              "-Ddocs=disabled"
+              "-Dtests=disabled"
+              "-Dsystemd=disabled"
+            ];
+            # Default mesonInstallPhase. tincd lands in $out/sbin
+            # (meson.build sets install_dir: dir_sbin); also installs
+            # tinc(ctl) and the bash completion. We only care about
+            # tincd but the extras are harmless and overriding is
+            # more lines than not.
+          };
+
           # KAT JSON for tinc-graph: real splay_tree.c + list.c, copies of
           # mst_kruskal/sssp_bfs from graph.c. Separate derivation from
           # kat-vectors because the file set is disjoint and we don't want

@@ -98,8 +98,33 @@ impl<'a> Tok<'a> {
     /// `%lu`. Only `ANS_KEY` uses it, for `digest_length` (a `size_t`
     /// cast to `unsigned long`). Realistically always tiny, but the
     /// printf width is `%lu` so we honor that.
+    ///
+    /// **glibc-permissive**: `sscanf("%lu", "-1")` succeeds and writes
+    /// `ULONG_MAX`. C99 7.20.1.4/5: `strtoul` on a string with a leading
+    /// `-` parses the digits, then "the value resulting from the
+    /// conversion is negated (in the return type)" — i.e. negated as
+    /// unsigned. `-1` → `0u64.wrapping_sub(1)` = `u64::MAX`.
+    ///
+    /// `net_packet.c:996` exploits this: in SPTPS-handshake-via-ANS_KEY
+    /// mode it sends the literal string `"-1 -1 -1"` for cipher/digest/
+    /// maclen (the values are placeholders — SPTPS doesn't use legacy
+    /// crypto, so `ans_key_h` never reads them). The first two are `%d`
+    /// (i32, fine). The third is `%lu`. A strict `u64::parse` would
+    /// reject the line and drop the connection. Match glibc.
+    #[allow(clippy::cast_sign_loss)] // intentional: strtoul "negate as unsigned"
     pub fn lu(&mut self) -> Result<u64, ParseError> {
-        self.s()?.parse().map_err(|_| ParseError)
+        let s = self.s()?;
+        // Fast path: positive. The only on-wire negative is the SPTPS
+        // ANS_KEY sentinel; everything else is a real (small) maclen.
+        if let Ok(v) = s.parse::<u64>() {
+            return Ok(v);
+        }
+        // glibc strtoul "negate as unsigned": parse signed, wrapping-
+        // cast. `-1` → `u64::MAX`, `-2` → `u64::MAX - 1`. The C never
+        // actually sends anything but `-1` here, but matching strtoul
+        // semantics (rather than special-casing the literal `"-1"`) is
+        // the principled fix — future C might send `-7` for all we know.
+        s.parse::<i64>().map(|i| i as u64).map_err(|_| ParseError)
     }
 
     /// `%hd`. `tcppacket_h`/`sptps_tcppacket_h` parse a length as
@@ -211,6 +236,20 @@ mod tests {
         assert_eq!(t.x().unwrap(), 0xdead_beef);
         assert_eq!(t.d().unwrap(), -5);
         assert_eq!(t.lu().unwrap(), 999_999_999_999);
+    }
+
+    #[test]
+    fn lu_accepts_negative_glibc_style() {
+        // net_packet.c:996 sends literal "-1" for the SPTPS ANS_KEY
+        // placeholder maclen. sscanf("%lu", "-1") = ULONG_MAX. We must
+        // accept it or the cross-impl handshake dies right after SPTPS
+        // record exchange.
+        assert_eq!(Tok::new("-1").lu().unwrap(), u64::MAX);
+        // strtoul semantics, not just the literal "-1":
+        assert_eq!(Tok::new("-2").lu().unwrap(), u64::MAX - 1);
+        // Still rejects non-numeric garbage.
+        assert!(Tok::new("-").lu().is_err());
+        assert!(Tok::new("-x").lu().is_err());
     }
 
     #[test]

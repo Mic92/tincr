@@ -3271,10 +3271,16 @@ impl Daemon {
                 if from_is_myself {
                     self.tunnels.entry(to_nid).or_default().incompression = my_compression;
                 }
-                // STUB(chunk-9-interop): C sends `-1 -1 -1`; our
-                // parser is strict. `0 0 0` for Rust↔Rust.
+                // C `net_packet.c:996`: `"%d %s %s %s -1 -1 -1 %d"`.
+                // The `-1 -1 -1` are LITERAL string, not `%d` args —
+                // cipher/digest/maclen placeholders for SPTPS mode
+                // (never read by `ans_key_h` when SPTPS is on). We
+                // emit byte-identical wire so Phase-6 pcap-compare
+                // doesn't flag a spurious diff. The `Tok::lu` parser
+                // was loosened to accept `-1` (glibc strtoul "negate
+                // as unsigned" → `u64::MAX`); see `tok.rs::lu`.
                 return conn.send(format_args!(
-                    "{} {} {} {} 0 0 0 {}",
+                    "{} {} {} {} -1 -1 -1 {}",
                     Request::AnsKey,
                     from_name,
                     to_name,
