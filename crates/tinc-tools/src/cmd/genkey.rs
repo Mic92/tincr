@@ -32,57 +32,32 @@
 //!
 //! ## What we drop vs C
 //!
-//! - The `what` parameter. C does `strstr(what, "Ed25519")` to decide
-//!   whether to look for ED25519 vs RSA blocks. We never disable RSA
-//!   (`DISABLE_LEGACY` is permanently on). One key type, no parameter.
-//! - The interactive filename prompt (`ask_and_open`'s `ask` half).
-//!   Same deviation as `init` — see `cmd/init.rs` module doc.
-//! - The relative-path absolutization. `ask_and_open` does `getcwd` +
-//!   join if the path doesn't start with `/`. Ours always does
-//!   (`Paths` resolves to absolute), so it's dead code.
-//! - The `fopenmask` umask dance. C does `umask(0); umask(~perms);
-//!   fopen; umask(old)` — three syscalls to make `fopen` use a
-//!   specific mode without `O_CREAT`-style explicit perms. We have
-//!   `OpenOptions::mode()`. The dance is a workaround for `fopen`
-//!   not exposing `open(2)`'s third argument; we don't have `fopen`.
+//! - The `what` parameter (RSA vs Ed25519). `DISABLE_LEGACY` is on.
+//! - The interactive filename prompt (`ask_and_open`). See `cmd/init.rs`.
+//! - Relative-path absolutization. `Paths` always resolves to absolute.
+//! - The `fopenmask` umask dance. We have `OpenOptions::mode()`.
 //!
 //! ## Mode preservation
 //!
-//! C does `fstat(fileno(r), &st)` then `fopenmask(tmpfile, "w",
-//! st.st_mode)`. The point: if the user `chmod 0400` their private
-//! key (read-only, even owner can't write — paranoid but legal), the
-//! tmpfile should also be 0400. We preserve via `Metadata::permissions`
-//! on the source → `set_permissions` on the destination after write.
-//! Slight ordering difference (C sets at create, we set after write)
-//! but the window is the tmpfile, which we're about to rename or
-//! unlink. Doesn't matter.
+//! C `fstat` + `fopenmask` preserves source mode (e.g. user-set 0400)
+//! to the tmpfile at create. We `set_permissions` after write — the
+//! window is a tmpfile we're about to rename or unlink, so the
+//! ordering difference doesn't matter.
 //!
 //! ## The two output files
 //!
-//! Same asymmetry as `init` (see `cmd/init.rs`): private key is PEM
-//! at `ed25519_key.priv`, public key is a config line in `hosts/NAME`.
-//! Genkey runs `disable_old_keys` on *both* before append: the private
-//! key file gets `#-----BEGIN ED25519 PRIVATE KEY-----` etc., the host
-//! file gets `#Ed25519PublicKey = oldb64`.
-//!
-//! C edge: if `name` is unknown (no `tinc.conf` or it has no `Name`),
-//! the public key goes to `ed25519_key.pub` as a *PEM file* (not a
-//! config line). This is `cmd_generate_ed25519_keys` running before
-//! `init` — unusual (why generate keys for a node that has no
-//! identity?), but the C supports it (`tincctl.c:386-390`). We don't.
-//! `get_my_name` errors on no-conf and we propagate. The only
-//! workflow that hits this is "I want to inspect a keypair before
-//! committing to a name", and `sptps_keypair` already does that
-//! better (it writes a PEM *pair*).
+//! Same asymmetry as `init`: private PEM at `ed25519_key.priv`, public
+//! config line in `hosts/NAME`. `disable_old_keys` runs on both before
+//! append. We don't support genkey-before-init (`tincctl.c:386-390`
+//! falls back to PEM at `ed25519_key.pub`); `sptps_keypair` covers
+//! that workflow better.
 //!
 //! ## Append, not excl
 //!
-//! `init` opens `O_EXCL` — clobbering an existing key is catastrophic.
-//! `genkey` opens `O_APPEND` — the file is *expected* to exist, and
-//! `disable_old_keys` already neutralized the old contents. This is
-//! the load-bearing pairing: comment-out + append = rotation history.
-//! `tinc fsck` reads the same file and warns on `#-----BEGIN`, so
-//! you have a paper trail.
+//! `init` opens `O_EXCL`; `genkey` opens `O_APPEND` after
+//! `disable_old_keys` neutralized old contents. Comment-out + append
+//! = rotation history. `tinc fsck` warns on `#-----BEGIN` for the
+//! paper trail.
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};

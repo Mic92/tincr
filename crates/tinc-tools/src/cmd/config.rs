@@ -40,35 +40,14 @@
 //!    other Subnet line. You probably wanted `add`. Warning, not
 //!    error — sometimes you do want a single subnet.
 //!
-//! ## What we drop
+//! ## What we drop / tighten
 //!
-//! - **`read_actual_port` for `get Port`**: kept but as best-effort.
-//!   Reads the pidfile if it exists, falls back to config-file scan
-//!   if not. The C exits early on success without scanning
-//!   (`tincctl.c:1850`). Same behavior.
-//! - **The `connect_tincd(false)` reload at the end**: kept,
-//!   best-effort. Now one line: `let _ = ctl_simple::reload(paths)`.
-//!   The 5b channel exists.
-//! - **Windows `remove(filename)` before `rename`**: dropped. Unix-only.
-//!
-//! ## What we tighten
-//!
-//! - **`.config.tmp` cleanup on error paths**. The C leaves the tmpfile
-//!   lying around on most error returns (e.g. `tincctl.c:2046`: write
-//!   fails, `return 1`, tmpfile stays). `TmpGuard` ensures it goes.
-//!   Same RAII pattern as `genkey.rs`; redeclared here (private to
-//!   each module — see "Re-declare module-private constants" rule).
-//! - **No 4096-byte line truncation**. C `fgets(buf1, sizeof(buf1))`
-//!   silently truncates lines longer than 4095 chars and the truncated
-//!   tail becomes a *new line* on the next iteration. We use
-//!   `read_to_string` + `split_inclusive` — no length limit, no
-//!   line-splitting bugs. A 5000-char `Subnet` line is nonsense
-//!   either way, but at least it round-trips.
-//! - **`ADD` doesn't false-positive on substring values**. The C
-//!   does `!strcasecmp(bvalue, value)` — a *full* string compare,
-//!   so this is already correct. Just noting that we keep the
-//!   case-insensitive compare for the dedup check (`tinc add
-//!   ConnectTo Alice` after `ConnectTo = alice` is a no-op).
+//! - Windows `remove(filename)` before `rename`: dropped. Unix-only.
+//! - `.config.tmp` cleanup on error paths. C leaves it on most error
+//!   returns (e.g. `tincctl.c:2046`). `TmpGuard` ensures it goes.
+//! - No 4096-byte line truncation. C `fgets` silently truncates and
+//!   the tail becomes a new line. We use `read_to_string` +
+//!   `split_inclusive`.
 //!
 //! ## Why this isn't `tinc_conf::Config`
 //!

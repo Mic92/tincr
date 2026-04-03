@@ -18,47 +18,13 @@
 //! | `scanw("%f")` | Read a float in cooked mode | [`RawMode::with_cooked`] |
 //! | clip to `LINES` | Don't write past height | [`winsize`] |
 //!
-//! ## Why not ratatui
+//! ratatui is a widget framework with ~35 transitive deps; we need
+//! 7 escape sequences and `tcsetattr`. `nix` has what we need.
 //!
-//! That table IS the curses surface. Seven SGR codes (string
-//! constants), one CSI cursor-position, `tcsetattr` for raw mode,
-//! `poll(stdin, ms)` for getch-with-timeout. ~150 LOC. `nix`
-//! already has `termios` and `poll` and `ioctl_read_bad`.
-//!
-//! `ratatui` is a widget framework: layout engine, diffing render,
-//! `Buffer` cells, ~35 transitive deps via `crossterm`. For one
-//! fixed screen layout. Same overestimate-the-abstraction error
-//! as the other five reversals — "full-screen TUI" pattern-matched
-//! to "TUI framework", reading `top.c` it's `printf` with cursor
-//! moves.
-//!
-//! ## What we lose vs curses
-//!
-//! 1. **Terminfo.** We emit ANSI X3.64 unconditionally; curses
-//!    reads `$TERM` and emits whatever that terminal speaks. In
-//!    2026 every terminal IS xterm-compatible. `htop`, `btop`,
-//!    `procs` all emit raw ANSI. The last holdout was the linux
-//!    console, which has spoken ANSI since the 90s.
-//! 2. **Row clipping.** `mvprintw(5000, 0, ...)` is a curses no-op
-//!    when LINES=50. The C `top.c:269` writes past the screen and
-//!    curses silently clips. We `if row >= ws.rows { break }` in
-//!    the data-row loop — explicit, not magic.
-//! 3. **`KEY_BREAK`** (`top.c:386`) — Ctrl-Break, a Windows console
-//!    thing curses normalizes. We're `#[cfg(unix)]`; the only
-//!    quit key is `q`.
-//!
-//! ## Layout
-//!
-//!  - Escape constants            — `CLEAR`, `BOLD`, etc.
-//!  - `goto(row, col)`            — the one parameterized escape
-//!  - `winsize()`                 — `TIOCGWINSZ`
-//!  - `RawMode`                   — RAII termios restore (Drop = endwin)
-//!  - `getch_timeout(ms)`         — `poll` + `read(0, &c, 1)`
-//!
-//! The only `top`-specific bit is which escapes we picked. Everything
-//! else is "the minimum terminal control any full-screen Unix program
-//! needs". If a second TUI command appears (it won't), this is the
-//! shared substrate.
+//! What we lose vs curses: terminfo (we emit ANSI X3.64 directly —
+//! every terminal since VT100 speaks it), implicit row clipping
+//! (caller checks `winsize()` instead, `top.c:269`), and `KEY_BREAK`
+//! (`top.c:386` — Windows-only, we're `#[cfg(unix)]`).
 
 #![allow(clippy::doc_markdown)]
 #![cfg(unix)]

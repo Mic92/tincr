@@ -27,26 +27,11 @@
 //! the file bytes (`tincctl.c:2837`), then signed. The trailer is
 //! **not** in the output — only in the signature input.
 //!
-//! Why the trailer at all? Without it, you sign `file_contents` and
-//! the header carries `name`+`t` as unsigned metadata. Anyone can
-//! rewrite the header to say a different signer/time. With the
-//! trailer, name+time are *inside* the signed message; rewriting the
-//! header without the private key invalidates the sig.
-//!
-//! Why the leading space? Separator. If the file ends `...alice` and
-//! name is `bob`, the trailer-less concatenation is `...alicebob 123`.
-//! `verify` parses `name=alicebob`, looks up `hosts/alicebob`, fails
-//! confusingly. The space makes it `...alice bob 123`, which parses
-//! as `name=bob`. (Except `verify` doesn't *parse* the trailer — it
-//! reconstructs it from the header. The space is defense in depth
-//! against a hypothetical attack where you find a file that, when
-//! concatenated with `<evilname> <t>`, has a known signature. With
-//! the space, you'd need `<space><evilname>` and then the header's
-//! `name` field doesn't match. Honestly the threat model is murky.
-//! The C has the space; we replicate it.)
-//!
-//! No trailing newline on the trailer. `xasprintf(" %s %ld", ...)`
-//! doesn't add one. `tincctl.c:2833` confirmed.
+//! The trailer binds name+time inside the signed message; without it
+//! they'd be unsigned header metadata, freely rewritable. The leading
+//! space is a separator between file contents and trailer — the C
+//! has it (`tincctl.c:2833`), we replicate. No trailing newline on
+//! the trailer (`xasprintf(" %s %ld", ...)` doesn't add one).
 //!
 //! ## `verify`'s signer argument
 //!
@@ -65,52 +50,25 @@
 //!
 //! ## `get_pubkey` — the fourth tokenizer
 //!
-//! `tincctl.c:1647-1678` is yet another hand-rolled config-line
-//! tokenizer (the strcspn/strspn/optional-`=` dance — same shape as
-//! `conf.c`'s, copy-pasted). It walks the host file looking for
-//! `Ed25519PublicKey = <b64>`. We use `tinc-conf::parse_file` instead,
-//! same as `get_my_name` already does. The `get_pubkey` C falls back
-//! to `ecdsa_read_pem_public_key` (`tincctl.c:2972`) — host file might
-//! have a PEM block instead of a config line (unusual; init writes the
-//! config line, but a hand-edited host file might have either). We
-//! replicate the fallback.
+//! `tincctl.c:1647-1678` is another hand-rolled config-line tokenizer.
+//! We use `tinc-conf::parse_file` instead. The C falls back to
+//! `ecdsa_read_pem_public_key` (`tincctl.c:2972`) for host files with
+//! a PEM block instead of a config line; we replicate the fallback.
 //!
 //! ## Time parameterized for tests
 //!
-//! C uses `time(NULL)`. Non-deterministic output makes the
-//! sign-then-verify roundtrip test fragile (the time in the header
-//! must match the time in the trailer; if they're computed in
-//! different test runs the roundtrip is fine, but a golden-output
-//! test isn't). We take time as a parameter; the binary wrapper
-//! supplies `SystemTime::now()`. Tests supply a fixed value.
+//! C uses `time(NULL)`. We take time as a parameter for deterministic
+//! golden-output tests; the binary wrapper supplies `SystemTime::now()`.
 //!
-//! ## Input from file or stdin
+//! ## Replicated quirks
 //!
-//! Both `sign` and `verify` take an optional file argument; absent,
-//! they read stdin. C: `if(argc == 2) fopen(argv[1]) else stdin`
-//! (`tincctl.c:2805-2813`). Same. The file is slurped whole
-//! (`readfile` — `tincctl.c:2743` — `realloc` doubling, no size
-//! limit; we use `read_to_end`, also no limit). For a 10 GB file
-//! both implementations OOM. Don't sign 10 GB files.
-//!
-//! ## What we don't replicate
-//!
-//! - The C `fwrite(data, len, 1, stdout)` writes the file body in one
-//!   shot (`tincctl.c:2853`). We do the same. No streaming —
-//!   signature is over the whole thing anyway.
-//! - C `verify` doesn't write *anything* on failure (no body output).
-//!   `tincctl.c:2991` only fwrites on success. Same.
-//! - The `MAX_STRING_SIZE - 1 = 2048` cap on the header line length
-//!   (`tincctl.c:2918`). We enforce it. It's the C's `sscanf` buffer
-//!   size — without the cap a 100 KB header line would overflow
-//!   `char signer[MAX_STRING_SIZE]`. Ours is heap so no overflow,
-//!   but the cap is a sanity check (a 100 KB header is malformed).
-//! - The `!t` check in `sscanf` validation (`tincctl.c:2930`). Time
-//!   zero (1970-01-01) is rejected. Probably guarding against
-//!   `sscanf` returning 3 but with `t` unparsed-left-at-init (which
-//!   can't happen with `%ld` but defensive). We replicate. `sign`
-//!   never emits `t=0` (you'd need `time(NULL)==0`, which... no), so
-//!   the check is unreachable on the happy path.
+//! - File slurped whole (`read_to_end`, no size limit; `tincctl.c:2743`
+//!   does `realloc` doubling). Don't sign 10 GB files.
+//! - `verify` writes nothing on failure (`tincctl.c:2991`).
+//! - `MAX_STRING_SIZE - 1 = 2048` cap on header line (`tincctl.c:2918`).
+//!   No overflow risk for us but it's a malformed-input sanity check.
+//! - `!t` check rejects time zero (`tincctl.c:2930`). Defensive;
+//!   unreachable on the happy path.
 
 use std::io::{Read, Write};
 use std::path::Path;

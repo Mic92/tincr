@@ -27,54 +27,27 @@
 //!
 //! ## The C's stable-sort emulation, NOT ported
 //!
-//! `top.c:251-259`: `sorted[i]->i = i; qsort(sorted, ...)`. The `i`
-//! field is set to PREVIOUS-frame display position, then `sortfunc`
-//! falls back to `na->i - nb->i` on equal primary key (`top.c:231`).
-//! Because `sorted[]` is `static` (line 248), `i` carries across
-//! frames. Net effect: nodes with equal sort key (e.g. both at 0.0
-//! bytes/s rate, common) stay in the same relative order frame-to-
-//! frame instead of `qsort`'s arbitrary whim.
-//!
-//! That's a stable-sort emulation. `qsort` isn't stable (C standard
-//! says so, glibc's introsort definitely isn't). Rust's `slice::
-//! sort_by` IS stable (the std guarantee, since 1.2). So we don't
-//! port the `i` trick. The ONLY thing we need is to sort the SAME
-//! Vec in-place each frame, not rebuild from BTreeMap iteration
-//! (which would name-sort, undoing the previous frame's stability).
-//!
-//! `Stats::display_order` is that Vec. It's append-only on new nodes
-//! (the `changed` rebuild, `top.c:243-250`, is replaced by direct
-//! push); we sort it in place; stability for free.
+//! `top.c:251-259` sets `sorted[i]->i = i` before `qsort`, then
+//! `sortfunc` falls back to `na->i - nb->i` on ties (`top.c:231`).
+//! It's a stable-sort emulation for non-stable `qsort`. Rust's
+//! `slice::sort_by` IS stable, so we just sort `Stats::display_order`
+//! in place each frame (append-only on new nodes; not rebuilt from
+//! BTreeMap which would name-sort and undo prior stability).
 //!
 //! ## Daemon restart wraps to 18 quintillion, ported faithfully
 //!
-//! `top.c:125`: `in_packets - found->in_packets`. Both `uint64_t`.
-//! Daemon restarts → counters reset to zero → next tick's `in_packets`
-//! is small, `found->in_packets` is huge from before the restart →
-//! `0 - 50000` wraps to `18446744073709501616`. The rate spikes for
-//! one tick, then on tick+1 the small new value is stored and tick+2
-//! computes a sane delta.
-//!
-//! C unsigned subtraction is well-defined modular wrap. Rust panics
-//! in debug, wraps in release. `wrapping_sub` makes it explicit.
-//! Porting the C's behavior, not "fixing" it: the spike is visible
-//! (one frame of nonsense), self-correcting (next frame is fine),
-//! and a saturating/clamped delta would HIDE the daemon-restart
-//! event entirely. The spike IS the user-visible signal.
+//! `top.c:125`: `in_packets - found->in_packets`, both `uint64_t`.
+//! Daemon restarts → counters reset → `0 - huge` wraps. Self-corrects
+//! next tick. We use `wrapping_sub` to match: a saturating delta
+//! would hide the daemon-restart event; the spike IS the signal.
 //!
 //! ## First-tick rates are nonsense, ported faithfully
 //!
-//! `top.c:62`: `static struct timeval prev` — zero-initialized. So
-//! on tick 1, `interval = cur - prev = cur - {0,0} ≈ epoch seconds
-//! ≈ 1.7 billion`. And `found` is fresh-zeroed too. So tick-1 rate
-//! is `current_counter / 1.7 billion`, basically zero, displayed as
-//! `0` by `%10.0f`. Nobody noticed because tick 2 redraws in 1s.
-//!
-//! We port it. `Stats::prev_instant` is `Option<Instant>`; on `None`
-//! the interval is the same epoch-seconds nonsense (we use
-//! `SystemTime::now().duration_since(UNIX_EPOCH)`, byte-exact match
-//! to what `gettimeofday()` returns when subtracted from `{0,0}`).
-//! Tested as `first_tick_rate_is_near_zero`.
+//! `top.c:62`: `static struct timeval prev` is zero-initialized, so
+//! tick-1 interval ≈ epoch seconds ≈ 1.7 billion, and rate ≈ 0.
+//! `Stats::prev_instant` is `Option<Instant>`; on `None` we use
+//! `SystemTime::now().duration_since(UNIX_EPOCH)` for byte-exact
+//! match. Tested as `first_tick_rate_is_near_zero`.
 //!
 //! ## Row clipping is explicit
 //!

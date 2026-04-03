@@ -14,18 +14,10 @@
 //!
 //! ## Dump format is a cross-impl seam
 //!
-//! The plan said "format depends on daemon's Node/Edge structs, lands
-//! with daemon" — wrong. The format is pinned by `node.c:210`,
-//! `edge.c:128`, `subnet.c:403`, `connection.c:168`, all of which are
-//! the C daemon's `dump_*` functions. We can read what THEY write
-//! today. That's a useful cross-impl test: Rust `tinc dump nodes` ←→
-//! C `tincd`, asserting identical-to-C-CLI output. The daemon-side
-//! port writes the same format later (and a unit test pins it).
-//!
-//! Four-for-four on "read the C before scoping". The plan estimate
-//! was "infrastructure now, parse with daemon" — but the parse is
-//! 60 lines, the format strings are right there, and shipping the
-//! parse NOW gets us a test harness against the C daemon for free.
+//! Format is pinned by the C daemon's `dump_*` functions: `node.c:210`,
+//! `edge.c:128`, `subnet.c:403`, `connection.c:168`. Rust `tinc dump`
+//! ←→ C `tincd` is a useful cross-impl test asserting identical-to-C
+//! output.
 //!
 //! ## The `" port "` literal — wire vs printf-conversion mismatch
 //!
@@ -42,41 +34,22 @@
 //! | connections | 5 | 6 | 1 |
 //! | subnets | 2 | 2 | 0 |
 //!
-//! The fused form is `sockaddr2hostname`'s output (used in log
-//! messages everywhere). The split form `sockaddr2str` (two separate
-//! out-params) is what the *message* protocol uses — `protocol_edge.c
-//! :send_add_edge` formats addr/port separately. Dump uses the human-
-//! readable fused form because it WAS the log-message form before it
-//! became a CLI format. Archaeological accident; we replicate.
-//!
-//! `Tok::lit("port")` skips the literal. See `tinc-proto/src/tok.rs`
-//! module doc.
+//! Dump uses the fused `sockaddr2hostname` form (the log-message form);
+//! the message protocol uses split `sockaddr2str`. `Tok::lit("port")`
+//! skips the literal.
 //!
 //! ## `node_status_t` is a bitfield — bit positions matter
 //!
 //! `node.h:32-49`: `union { struct { bool x:1; ... }; uint32_t value; }`.
-//! Bit positions are compiler-defined (C standard says so) but in
-//! practice GCC on x86-64 packs LSB-first, same as Clang. The C CLI
-//! reads `status.value` as a hex u32 then checks `status.reachable`
-//! (bit 4, since it's the 5th 1-bit field).
-//!
-//! We don't replicate the bitfield. We just need bit 4 (reachable,
-//! for the filter and graph color) and bit 1 (validkey, for graph
-//! color). Named constants, not a struct.
+//! GCC/Clang on x86-64 pack LSB-first. We only need bit 4 (reachable)
+//! and bit 1 (validkey) — named constants, not a struct.
 //!
 //! ## `strip_weight` — display sugar
 //!
-//! `info.c:41`: `"10.0.0.0/24#10"` → `"10.0.0.0/24"`. Only when the
-//! weight is exactly `#10` (the default). The daemon's `net2str`
-//! (`subnet_parse.c:370`) already omits `#10` for the default — but
-//! only for subnets where weight EQUALS default. A subnet that was
-//! *parsed* from a config that explicitly said `Subnet = 10.0.0.0/24
-//! #10`? `str2net` reads `#10`, stores 10, `net2str` sees `weight ==
-//! DEFAULT_WEIGHT`, omits. So the daemon never SENDS `#10`.
-//!
-//! Then why does `strip_weight` exist? Belt-and-suspenders against
-//! older daemons? Against the case where DEFAULT_WEIGHT changes? Port
-//! it anyway; it's 3 lines and the C does it.
+//! `info.c:41`: `"10.0.0.0/24#10"` → `"10.0.0.0/24"` (default weight).
+//! The daemon's `net2str` (`subnet_parse.c:370`) already omits `#10`
+//! so this is belt-and-suspenders against older daemons. 3 lines;
+//! the C does it.
 //!
 //! ## What we tighten
 //!
@@ -97,20 +70,6 @@
 //!   wants. (It doesn't, and neither does the C `tinc set` path,
 //!   so the inconsistency is also C's.)
 //!
-//! ## Layout
-//!
-//! - `Kind` — the 7 dump sub-verbs
-//! - `parse_kind` — argv → `Kind` (the only_reachable shift dance)
-//! - 4× row structs + parsers (`NodeRow`/`EdgeRow`/...)
-//! - 4× formatters (the print side; testable separate from socket)
-//! - `strip_weight` — 3 lines
-//! - `dump_invitations` — pure readdir, no daemon
-//! - `dump` — connect, send, recv-loop, format
-//!
-//! Tests cover: row parse with golden vectors (transcribed from
-//! `node.c:210` etc.), `Kind` parsing, `strip_weight`, the
-//! invitations readdir, and a fake-daemon integration test in
-//! `tinc_cli.rs` for the whole pipeline.
 
 #![allow(clippy::doc_markdown)]
 

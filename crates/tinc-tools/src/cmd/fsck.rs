@@ -17,95 +17,53 @@
 //!   in `fsck.c` are exactly the deletions; we just take the `#ifdef`
 //!   branch unconditionally.
 //!
-//! - **The interactive prompt** — `ask_fix()`'s `tty` branch reads
-//!   `y/n` from stdin (`fsck.c:38-65`). Same deviation as `init`/
-//!   `genkey`: we never prompt. `ask_fix()` collapses to `force`.
-//!   Under `cargo test` stdin is the test harness's pipe; an `fgets`
-//!   would block. The C avoids this with `tty = isatty(0) &&
-//!   isatty(1)` (`tincctl.c:3336`), which is false under a test
-//!   harness — so the C *also* never prompts under test. Our `force`
-//!   is the same observable behavior, minus the prompt code.
+//! - **The interactive prompt** — `ask_fix()` (`fsck.c:38-65`) reads
+//!   `y/n` from stdin. Same deviation as `init`/`genkey`: we never
+//!   prompt; `ask_fix()` collapses to `force`. The C gates on
+//!   `isatty(0) && isatty(1)` (`tincctl.c:3336`) so it also never
+//!   prompts under a test harness — same observable behavior.
 //!
-//! - **`ecdsa_get_base64_public_key` failure path** — C checks
-//!   `if(!b64_priv_pub)` (`fsck.c:384`), but `ecdsa_get_base64_public_
-//!   key` is `xmalloc(44)` + `b64encode_tinc(ecdsa->public, ...)`
-//!   (`ed25519/ecdsa.c:62`) — it *cannot* fail. The `xmalloc` aborts
-//!   on OOM, `b64encode_tinc` has no error path. The check is dead
-//!   code. Our `b64::encode` similarly cannot fail (it allocates a
-//!   `String`, which panics on OOM same as `xmalloc` aborts). Drop
-//!   the check.
+//! - **`ecdsa_get_base64_public_key` failure path** (`fsck.c:384`) —
+//!   the C function is `xmalloc` + `b64encode_tinc` and cannot fail;
+//!   the check is dead code. Dropped.
 //!
 //! - **`exe_name`/`print_tinc_cmd` reconstruction** — C reconstructs
-//!   the invocation (`tinc -c /etc/tinc/foo` vs `tinc -n foo`) for
-//!   suggestion messages by reading `confbasegiven`/`netname` globals.
-//!   We take an opaque `cmd_prefix: &str` that the binary constructs
-//!   once. fsck doesn't need to *understand* it, just print it. The
-//!   binary already knows how it was invoked.
+//!   the invocation from globals. We take an opaque `cmd_prefix: &str`
+//!   the binary constructs once.
 //!
 //! ## The testable seam: `Finding` + `Report`
 //!
-//! C interleaves `fprintf(stderr, ...)` with `chmod`/append. To assert
-//! "fsck found X" without parsing stderr, we collect findings into a
-//! `Vec`. Fixes still apply during the scan (with `force`) because
-//! they change filesystem state that later checks might read — but
-//! their *application* is also recorded as a `Finding`. Tests can
-//! then assert "found UnsafeKeyMode, applied FixedMode" as two
-//! entries.
-//!
-//! `Finding` is **not** `PartialEq` — `PathBuf` makes equality fragile
-//! (absolute vs relative, trailing slash). Tests use `matches!` on the
-//! variant + `path.ends_with(...)`. Slightly more verbose; vastly less
-//! flaky than `assert_eq!(findings, vec![...])`.
+//! C interleaves `fprintf(stderr, ...)` with `chmod`/append. We collect
+//! findings into a `Vec` so tests can assert without parsing stderr.
+//! Fixes still apply during the scan (later checks may read the
+//! changed state) and are also recorded as `Finding`s. `Finding` is
+//! NOT `PartialEq` (`PathBuf` equality is fragile); tests `matches!`
+//! on variant + `path.ends_with(...)`.
 //!
 //! ## `success = success & check_scripts_and_configs()`
 //!
-//! Note `&` not `&&` (`fsck.c:672`). The comment above it: "this check
-//! does not require working configuration, so run it always". Even if
-//! keypair check failed, we still scan scripts and config vars — more
-//! diagnostics on the first run. We replicate: `Report::ok` is the
-//! AND of all check-level results, but we don't short-circuit
-//! collection.
-//!
-//! ## Why `check_conffile` doesn't warn on unknown vars
-//!
-//! `var_type == 0 → continue` (`fsck.c:164`). A typo'd key like
-//! `Prot = 655` produces no warning. The vars.rs doc notes this is
-//! intentional in C (typo is inert — `Config::lookup("Port")` finds
-//! nothing, daemon uses its default). Surfacing it would be a feature
-//! request, not a port. We have a TODO comment at the line.
+//! Note `&` not `&&` (`fsck.c:672`): all checks run regardless of
+//! earlier failures. `Report::ok` is the AND of all results.
 //!
 //! ## fsck's pubkey fix writes PEM, not config-line
 //!
-//! `ask_fix_ec_public_key` (`fsck.c:269`) does `disable_old_keys` then
-//! `ecdsa_write_pem_public_key` — appends a `-----BEGIN ED25519 PUBLIC
-//! KEY-----` block. `init`/`genkey` write `Ed25519PublicKey = <b64>`
-//! (config line). Both are valid (`read_ecdsa_public_key` checks
-//! config-line first, falls back to PEM at `keys.c:179-199`). The
-//! visual distinction is actually useful: PEM block in `hosts/NAME`
-//! means "this was repaired by fsck", config line means "init/genkey
-//! wrote this". We preserve.
+//! `ask_fix_ec_public_key` (`fsck.c:269`) appends a PEM block, while
+//! `init`/`genkey` write `Ed25519PublicKey = <b64>`. Both are valid
+//! (`keys.c:179-199` falls back to PEM). Preserved — the visual
+//! distinction ("repaired by fsck" vs "init wrote this") is useful.
 //!
 //! ## `Ed25519PrivateKeyFile` config respect
 //!
-//! `read_ecdsa_private_key` (`keys.c:108`) checks `Ed25519PrivateKey
-//! File` config before defaulting to `<confbase>/ed25519_key.priv`.
-//! fsck reads the merged config tree, so it sees this. Our existing
-//! genkey/sign use `paths.ed25519_private()` directly — they *don't*
-//! respect the config. That's correct for genkey (it's creating the
-//! default-location key) but **a sign bug** if someone has set
-//! `Ed25519PrivateKeyFile`. Noted; not fixing here (sign would need
-//! the config tree, which it currently doesn't read). fsck *does*
-//! respect it because it has the config tree anyway.
+//! `read_ecdsa_private_key` (`keys.c:108`) checks this config var.
+//! fsck reads the merged config tree, so it respects it. genkey/sign
+//! use `paths.ed25519_private()` directly and don't — correct for
+//! genkey (creates default location), a sign bug noted elsewhere.
 //!
 //! ## The hosts/ script suffix-strip-then-ignore (`fsck.c:511-518`)
 //!
-//! `check_script_hostdir` does `strncpy(fname, ent->d_name); strrchr;
-//! *dash = 0` to strip the suffix... and then never reads `fname`
-//! again before overwriting it with the full path. It's dead code —
-//! presumably a copy-paste from `check_script_confdir` (which *does*
-//! use the prefix to validate against `tinc`/`host`/`subnet`). We
-//! drop it. Any `*-up`/`*-down` in `hosts/` is checked for
-//! executability, no prefix validation. Same observable behavior.
+//! `check_script_hostdir` strips the suffix into `fname` then never
+//! reads it. Dead code (copy-paste from `check_script_confdir` which
+//! does validate the prefix). Dropped; same observable behavior.
 
 #![allow(clippy::doc_markdown)]
 // `run()` is long because fsck IS long — four independent checks

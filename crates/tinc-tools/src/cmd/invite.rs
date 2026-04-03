@@ -33,37 +33,19 @@
 //! ## What we drop from the C
 //!
 //! - `connect_tincd(false)` name-uniqueness check (`invitation.c:366-389`):
-//!   "if daemon is running, ask it whether this name is already a node."
-//!   Best-effort in C (`false` arg = "don't error if daemon's down"),
-//!   degrades to no-op when daemon isn't running. We're not running. The
-//!   `hosts/NAME` exists check (which we keep) covers the disk case;
-//!   the daemon check covered "node X is in the live graph but its
-//!   host file got deleted" which is operator error already.
-//!
-//! - `connect_tincd(true)` reload (`invitation.c:480-484`): tells the
-//!   daemon to reload after a fresh invitation key is written. C falls
-//!   through to a "please restart manually" warning. We always print
-//!   the warning. **TODO(5b)**: when control protocol lands, this is a
-//!   one-line `ctl.send(CtlRequest::Reload)`. Left as comment, not code.
-//!
-//! - `get_my_hostname` HTTP probe (`invitation.c:140-203`): if no
-//!   `Address` in config, the C makes a raw TCP connection to
-//!   `tinc-vpn.org:80`, sends a hand-crafted `GET /host.cgi HTTP/1.0`,
-//!   reads the response, parses the last line as your IP. This is...
-//!   creative. We require `Address` to be set (which it should be for
-//!   any node accepting connections anyway). The check happens early,
-//!   so failure is "set Address" not "mysterious URL with no host part".
-//!
-//! - `get_my_hostname` tty prompt (`invitation.c:211-243`): if HTTP
-//!   probe failed and stdin is a tty, prompt for hostname. Same "no
-//!   interactive prompts" deviation as init/genkey/fsck. Under `cargo
-//!   test` stdin is a pipe; the C `tty` check makes the prompt no-op
-//!   in that case anyway. Same observable behavior, minus the prompt.
-//!
+//!   best-effort in C, degrades to no-op when daemon's down. The
+//!   `hosts/NAME` exists check (kept) covers the disk case.
+//! - `connect_tincd(true)` reload (`invitation.c:480-484`): we always
+//!   print the "please restart" warning. **TODO(5b)**: one-line
+//!   `ctl.send(CtlRequest::Reload)` when control protocol lands.
+//! - `get_my_hostname` HTTP probe (`invitation.c:140-203`): hand-crafted
+//!   `GET /host.cgi` to `tinc-vpn.org:80` to discover our IP. We require
+//!   `Address` to be set instead.
+//! - `get_my_hostname` tty prompt (`invitation.c:211-243`): same "no
+//!   prompts" deviation as init/genkey/fsck.
 //! - `execute_script("invitation-created")` (`invitation.c:598-604`):
-//!   user hook. C ignores the return code. **TODO**: lifts to
-//!   `tinc-tools::script` when the daemon needs `execute_script` for
-//!   `tinc-up`. The hook isn't load-bearing for the invitation flow.
+//!   user hook, C ignores return code. **TODO**: lifts to
+//!   `tinc-tools::script` with daemon's `execute_script`.
 //!
 //! ## What we tighten
 //!

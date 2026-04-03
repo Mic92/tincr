@@ -8,17 +8,10 @@
 //! goes to Bob's `hosts/alice`, and vice versa. This is the
 //! out-of-band step before any wire bytes flow.
 //!
-//! `export` reads `hosts/$(our name)` and writes a self-describing
-//! blob to stdout. `import` reads that blob from stdin and writes
-//! `hosts/NAME`. The blob format is just the host file contents,
-//! prefixed with `Name = X` — the same line that's the *first* thing
-//! `import` looks for.
-//!
-//! `export-all` does every file in `hosts/`, with a separator line
-//! between (so you can ship a whole VPN's host files at once).
-//! `exchange` is `export | something | import` — typically the
-//! "something" is netcat or ssh to a peer running its own `exchange`.
-//! Full duplex: each side exports, each side imports.
+//! `export` reads `hosts/$(our name)`, prepends `Name = X`, writes to
+//! stdout. `import` reads that blob and writes `hosts/NAME`.
+//! `export-all` does every host with a separator. `exchange` is
+//! `export | (netcat/ssh) | import`, full duplex.
 //!
 //! ## The blob format
 //!
@@ -58,19 +51,9 @@
 //!   concern (it's for *config lookup*, where you want
 //!   `Ed25519PublicKey =` and not the armor body as a key=value).
 //!
-//! - **The blank line before the separator** (`\n#---..#\n` is what
-//!   export writes between hosts) is consumed by import as part of
-//!   the *previous* host's content, then a trailing blank ends up in
-//!   the file. The C does this too. It's harmless — the config parser
-//!   skips blank lines — but worth noting because a "fix" here would
-//!   break round-trip.
-//!
-//! ## I/O is parameterized
-//!
-//! The C functions write to `stdout`/read from `stdin` directly. We
-//! take `impl Write`/`impl BufRead`. Same reason as everywhere else:
-//! testability. The test passes `Vec<u8>`/`Cursor<&[u8]>`; the binary
-//! passes `stdout().lock()`/`stdin().lock()`. Zero runtime cost.
+//! - **The blank line before the separator** (`\n#---..#\n`) is
+//!   consumed by import as part of the previous host's content. C
+//!   does this too; harmless but a "fix" would break round-trip.
 
 #![allow(clippy::doc_markdown)]
 

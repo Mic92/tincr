@@ -3,15 +3,10 @@
 //!
 //! C: `tincctl.c:2399-2472`.
 //!
-//! ──────────── The path-resolution lattice ──────────────────────────
+//! ## The path-resolution lattice (`tincctl.c:2418-2440`)
 //!
-//! `cmd_edit`'s input is a SHORTHAND, not a path. The C resolves it
-//! against `confbase` or `hosts_dir` depending on what kind of
-//! shorthand it is. There's no "edit an arbitrary path" mode — the
-//! point is `tinc edit tinc.conf` instead of `vi /etc/tinc/foo/
-//! tinc.conf`.
-//!
-//! The lattice (`tincctl.c:2418-2440`, comments mine):
+//! `cmd_edit`'s input is a SHORTHAND, not a path — the point is
+//! `tinc edit tinc.conf` instead of `vi /etc/tinc/foo/tinc.conf`.
 //!
 //! ```text
 //!   conffiles[] = {"tinc.conf", "tinc-up", ..., NULL};
@@ -39,58 +34,21 @@
 //! | `"alice"`        | `hosts_dir/alice`      | NONE (no dash)          |
 //! | `"alice-up"`     | `hosts_dir/alice-up`   | suffix + check_id       |
 //!
-//! The "NONE" cases are the worry. `tinc edit ../../etc/passwd`
-//! resolves to `hosts_dir/../../etc/passwd` and the C HAPPILY runs
-//! the editor on it. The user already has shell; this is "the user
-//! tricks themselves" not "attacker tricks user." But silently
-//! editing /etc/passwd because you typo'd is bad.
+//! The "NONE" cases let `tinc edit ../../etc/passwd` resolve to
+//! `hosts_dir/../../etc/passwd`. We add two checks the C lacks:
+//! reject `/` anywhere in the input (after the `hosts/` strip), and
+//! reject `..` as a path component. Neither changes valid inputs.
 //!
-//! We add two checks the C lacks:
-//!   - reject `/` anywhere in the input (after the `hosts/` strip)
-//!   - reject `..` as a path component
+//! ## system() vs Command — shell-injection FIXED
 //!
-//! Neither changes valid inputs. Both are observable for invalid
-//! inputs. STRICTER, in the same vein as `tinc log abc` erroring.
+//! C `tincctl.c:2455` builds `"$EDITOR" "$FILENAME"` and passes it
+//! to `system()` — the double-quote escaping is wrong for `"`/`$`
+//! in either expansion. We match git (`editor.c` in git.git): spawn
+//! `sh -c 'exec $TINC_EDITOR "$@"' -- "$file"`. The shell tokenizes
+//! `$TINC_EDITOR` (so `EDITOR="emacsclient -nw"` works), but `$file`
+//! is `$@` so it's NOT re-expanded (filenames with `$` stay literal).
 //!
-//! The `"hosts/alice"` case after strip is just `"alice"` — same
-//! as the bare case. The C doesn't validate THAT either. With
-//! the `/`-reject we DO: `hosts/../../etc/passwd` after strip is
-//! `../../etc/passwd`, which contains `/` → reject.
-//!
-//! ──────────── system() vs Command — shell-injection FIXED ──────────
-//!
-//! C `tincctl.c:2455`: `xasprintf(&command, "\"%s\" \"%s\"", editor,
-//! filename)` then `system(command)`. The double-quotes are shell-
-//! quoting. WRONGLY: `EDITOR='vim"; rm -rf /; echo "'` would expand
-//! to `"vim"; rm -rf /; echo "" "filename"` and run all three.
-//! Same for filenames with `"` or `$` (expansion!).
-//!
-//! `Command::new(editor).arg(filename).status()` doesn't go through
-//! a shell. The args are passed to `execvp` directly. `EDITOR` with
-//! spaces (`"subl -w"`) works in C (shell tokenizes); BREAKS for us
-//! (Command::new looks for an executable named `subl -w`).
-//!
-//! Tradeoff: we break `EDITOR="emacsclient -nw"` (which the C
-//! supports via shell tokenization), but we fix `EDITOR=$(malicious)`
-//! and filenames with `$`. The break is worse for everyday use; the
-//! fix is better for not-shooting-yourself.
-//!
-//! Compromise: `EDITOR` containing a space → split on first space,
-//! treat first token as the binary and the rest as one arg. NOT
-//! shell-tokenization (no quote handling) but covers `emacsclient
-//! -nw` and `subl -w`. Doesn't cover `EDITOR='code --wait
-//! --new-window'` (would need shell-style splitting), but neither
-//! is COMMON. The user with a complex EDITOR can write a wrapper
-//! script.
-//!
-//! Actually: SIMPLER. The convention IS shell-tokenization. Git
-//! does `sh -c "$EDITOR \"$file\""` (`editor.c` in git.git). Let's
-//! match git: spawn `sh -c '"$EDITOR" "$@"' -- "$file"` —
-//! shell-tokenizes `$EDITOR`, but `$file` is `$@` so it's NOT
-//! re-expanded. Best of both: `EDITOR="emacsclient -nw"` works,
-//! filenames with `$` stay literal.
-//!
-//! ──────────── The silent reload — best-effort ──────────────────────
+//! ## The silent reload — best-effort
 //!
 //! `tincctl.c:2465-2467`:
 //!

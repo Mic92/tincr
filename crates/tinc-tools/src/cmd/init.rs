@@ -23,33 +23,17 @@
 //!
 //! ### No interactive name prompt
 //!
-//! C `cmd_init` prompts on stdin if `argc < 2 && isatty(stdin)`.
-//! We don't. Rationale:
-//!
-//! 1. The prompt is the **only** interactive thing in `tinc init`.
-//!    Everything else is non-interactive. Adding a tty check + readline
-//!    + the strip-newline dance is ~30 lines for one prompt.
-//! 2. Scripts call `tinc init NAME` directly. Nobody types `tinc init`
-//!    bare and waits for a prompt. The C path exists because the
-//!    interactive `tinc> ` shell mode reuses `cmd_init`, and *there*
-//!    the prompt makes sense. We don't have shell mode yet (5b).
-//! 3. "Required positional argument" is a clearer contract than
-//!    "required positional argument unless you're a tty".
-//!
-//! When/if we add shell mode in 5b, the prompt comes back as a
-//! shell-layer concern: shell prompts → calls `init::run("alice")`.
-//! The command itself stays prompt-free.
+//! C `cmd_init` prompts on stdin if `argc < 2 && isatty(stdin)`. The
+//! prompt only exists for the interactive `tinc> ` shell mode, which
+//! we don't have yet. When shell mode lands the prompt becomes a
+//! shell-layer concern; the command itself stays prompt-free.
 //!
 //! ### No `check_port`
 //!
 //! C tries to bind 655; if busy, picks a random high port and writes
-//! `Port = N` to the host file. Best-effort QoL — init succeeds
-//! regardless. Dropped for now because (a) it pulls in socket code we
-//! don't otherwise need in this command, (b) the random-port pick is
-//! often *wrong* (your firewall doesn't allow it; your NAT doesn't
-//! forward it). Better to fail loudly at first daemon start ("could
-//! not bind to 655: address in use") than silently pick port 7423 the
-//! user doesn't know about. Can revisit.
+//! `Port = N`. Dropped: (a) pulls in socket code, (b) the random pick
+//! is often wrong (firewall/NAT doesn't allow it). Better to fail
+//! loudly at first daemon start than silently pick an unknown port.
 //!
 //! ### No RSA keygen
 //!
@@ -59,47 +43,20 @@
 //!
 //! ## File mode subtlety
 //!
-//! `fopenmask` in C does a umask dance: read current umask, set umask
-//! to `~perms & 0777`, fopen (creates with `0666 & ~umask`), then
-//! `fchmod` to `perms` if any read bit is set, restore umask. The
-//! point of this elaborate dance:
-//!
-//! - Private key (0600): even if umask is 0002 (group-write), the key
-//!   stays 0600. **Security**: don't let a permissive umask leak the
-//!   key to group-readable.
-//! - tinc-up (0777 → 0755 after umask 022): the executable bit
-//!   survives. `fopen("w")` would give 0644 — `fchmod` is what makes
-//!   it executable.
-//!
-//! We don't replicate the dance. We use `OpenOptions::mode()` (sets
-//! the create-mode directly, kernel applies umask) plus an explicit
-//! `set_permissions` for executables. Simpler, same outcome:
-//!
-//! - Private key: `mode(0o600)`, kernel umask doesn't widen it (umask
-//!   only *clears* bits). Same security guarantee.
-//! - tinc-up: `set_permissions(0o755)` after write. Same +x outcome.
-//!
-//! What we *lose*: if the user's umask is **more** restrictive than
-//! 022 (say 077), the C `fopenmask` would honor it (key becomes 0600
-//! either way, but tinc-up becomes 0700 instead of 0755). Our
-//! `set_permissions(0o755)` ignores umask. This is fine — a user with
-//! umask 077 who wants their tinc-up group-unreadable can `chmod`. The
-//! security-relevant file (the key) is unaffected.
+//! C's `fopenmask` does a umask dance to ensure the private key stays
+//! 0600 regardless of a permissive umask, and the executable bit on
+//! tinc-up survives. We use `OpenOptions::mode(0o600)` for the key
+//! (umask only clears bits, never widens) plus `set_permissions(0o755)`
+//! for tinc-up. Simpler, same security guarantee. We lose: with umask
+//! 077, C's tinc-up would be 0700 but ours is 0755 — the security-
+//! relevant file (the key) is unaffected.
 //!
 //! ## Idempotency: NO
 //!
-//! `tinc init` on an existing confbase **fails** (`tinc.conf already
-//! exists`). C: `if(!access(tinc_conf, F_OK)) { fprintf; return 1; }`.
-//! This is correct — re-init would overwrite the private key, which is
-//! a footgun. You want a fresh net? `rm -rf /etc/tinc/NAME` first,
-//! deliberately.
-//!
-//! Partial-state-on-error: if `mkdir hosts/` succeeds and key writing
-//! fails, you get a half-created confbase. C does the same (no
-//! cleanup, no rollback). The next `tinc init` will fail because
-//! `tinc.conf` was written. The user has to `rm` and retry. Not great,
-//! but matches upstream and the failure mode is rare (disk full, perm
-//! flip mid-init).
+//! `tinc init` on an existing confbase fails (`tinc.conf already
+//! exists`). Re-init would overwrite the private key. No rollback on
+//! partial failure, matching C — the failure mode (disk full, perm
+//! flip mid-init) is rare.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

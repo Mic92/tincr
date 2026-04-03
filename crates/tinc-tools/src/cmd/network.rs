@@ -2,27 +2,16 @@
 //!
 //! C: `tincctl.c:2690-2730` + `switch_network` (`:2658-2688`).
 //!
-//! ──────────── Two modes; we port one ───────────────────────────────
+//! ## Two modes; we port one
 //!
-//! `tinc network`          (argless) → LIST: scan `confdir`
-//!                                     for subdirs with `tinc.conf`.
-//! `tinc network NAME`     → SWITCH: mutate `netname`/`confbase`/
-//!                                   `prompt` globals, return.
+//! `tinc network` (argless) → LIST: scan `confdir` for subdirs with
+//! `tinc.conf`. `tinc network NAME` → SWITCH: mutate `netname`/
+//! `confbase`/`prompt` globals. SWITCH only matters in the C's
+//! readline loop (`tincctl.c:3195-3264`); we have no readline loop,
+//! so it'd mutate globals and EXIT. **Deliberate C-behavior-drop #2.**
+//! The error message says "use `-n NAME` instead."
 //!
-//! The SWITCH mode only matters if the process KEEPS RUNNING. The
-//! C has a readline loop (`tincctl.c:3195-3264`): `tinc<ret>` drops
-//! you into a `tinc> ` prompt, you type `network foo`, the prompt
-//! becomes `tinc.foo> `, subsequent commands act on `/etc/tinc/foo`.
-//!
-//! We have no readline loop. `tinc network foo` would mutate
-//! globals and EXIT. The mutation goes to /dev/null. The user
-//! should `tinc -n foo dump nodes` instead.
-//!
-//! **Deliberate C-behavior-drop #2** (after the SIGINT handler in
-//! `cmd::stream`). The drop is "switch is no-op without readline,"
-//! not "switch is hard." The error message says what to do instead.
-//!
-//! ──────────── The LIST mode ────────────────────────────────────────
+//! ## The LIST mode
 //!
 //! `tincctl.c:2700-2727`:
 //!
@@ -38,20 +27,12 @@
 //!         print name
 //! ```
 //!
-//! The `.` sentinel (`:2714-2717`): when `confdir == confbase`
-//! (no `-n`, no `-c`), `tinc.conf` lives DIRECTLY in `/etc/tinc`.
-//! That's the "anonymous" network. The C prints `.` for it. The
-//! corresponding switch-target is `tinc network .` → `netname =
-//! NULL` (`:2676`: `strcmp(name, ".") ? xstrdup(name) : NULL`).
+//! The `.` sentinel (`:2714-2717`): when `confdir == confbase` (no
+//! `-n`/`-c`), `tinc.conf` lives directly in `/etc/tinc` — the
+//! "anonymous" network. C prints `.` (switch-target `:2676`:
+//! `netname = NULL`). For us `.` is just a label.
 //!
-//! For us `.` is just a label. The user reads `.` and knows
-//! "there's a no-netname config." `tinc -n . ...` doesn't work
-//! (would look for `/etc/tinc/.` which IS `/etc/tinc` so might
-//! actually work, but by accident). The right invocation is bare
-//! `tinc dump nodes` (no `-n`). The label survives, the meaning
-//! is documentation.
-//!
-//! ──────────── confdir resolution ───────────────────────────────────
+//! ## confdir resolution
 //!
 //! The C `confdir` is ALWAYS set (`names.c:86`: `confdir = xstrdup(
 //! CONFDIR "/tinc")` unconditional, even with `-c`). Our `Paths::
@@ -64,18 +45,11 @@
 //! of confbases. The list is "all networks the system knows about,"
 //! orthogonal to which one this invocation is configured for.
 //!
-//! ──────────── Ordering — readdir doesn't sort ──────────────────────
+//! ## Ordering
 //!
-//! `readdir(3)` returns entries in WHATEVER order the filesystem
-//! stores them. `read_dir` is the same (iterates `getdents` or
-//! similar). The C doesn't sort; output order is undefined. We
-//! match: don't sort. (Sorting would be NICER but it's a behavior
-//! change. The user can pipe to `sort`.)
-//!
-//! Actually — sort. The C's output order is undefined, so any
-//! order is C-compatible. Sorted is C-compatible AND deterministic.
-//! Tests don't depend on filesystem readdir order. The `.` floats
-//! to the top (ASCII `.` < letters). Sort.
+//! C uses `readdir` order (undefined). We sort: any order is
+//! C-compatible since C's is undefined, and sorted is deterministic
+//! for tests. `.` floats to top (ASCII `.` < letters).
 
 #![allow(clippy::doc_markdown)]
 

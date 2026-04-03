@@ -11,19 +11,12 @@
 //!                     ... repeats until client disconnects
 //! ```
 //!
-//! ───────────────── Why these are different from dump ─────────────────
+//! Unlike `dump`, these are PUSHES with no terminator. The daemon
+//! sets `c->status.log = true` (`control.c:137`); every `logger()`
+//! call thereafter `send_request`s to subscribers (`logger.c:213`).
+//! The CLI loops until daemon EOF or Ctrl-C.
 //!
-//! `dump nodes` etc. send a finite sequence and a terminator (`"18 N
-//! \n"`, no body). The daemon's done. The CLI exits.
-//!
-//! `log`/`pcap` are PUSHES. The daemon's `connection_t` gets `c->
-//! status.log = true` (`control.c:137`); from then on every `logger
-//! ()` call walks the connection list and `send_request`s to
-//! subscribers (`logger.c:213`). The daemon NEVER sends a terminator.
-//! The CLI loops until the daemon dies (read returns 0) or the user
-//! Ctrl-Cs.
-//!
-//! ─────────────── The wire shape (recvdata vs recvline) ──────────────
+//! ## The wire shape (recvdata vs recvline)
 //!
 //! Daemon-side:
 //!
@@ -49,74 +42,23 @@
 //! `ctl.rs`'s `CtlSocket` doc-comment for why `BufReader` is that
 //! shared buffer.
 //!
-//! ────────────────── The SIGINT handler — NOT ported ─────────────────
+//! ## The SIGINT handler — NOT ported
 //!
-//! C `tincctl.c:1533-1541`, `1556-1558`:
+//! C `tincctl.c:1533-1541` installs a SIGINT handler that
+//! `shutdown(fd, SHUT_RDWR)`s so the loop exits cleanly with code 0
+//! instead of 130. NOT ported: the daemon doesn't care (kernel
+//! closes the socket either way, connection-reaper handles it),
+//! `tinc log` is interactive so nobody checks `$?`, and the static-fd
+//! signal-handler dance has hairy failure modes. Exit codes for
+//! streaming commands aren't a contract.
 //!
-//! ```text
-//!   signal(SIGINT, sigint_handler);    // before the loop
-//!   ...
-//!   signal(SIGINT, SIG_DFL);           // after
-//! ```
+//! ## pcap headers: native-endian
 //!
-//! `sigint_handler` calls `shutdown(fd, SHUT_RDWR)`. Then the next
-//! `recvline` returns false, the loop exits, `cmd_log` returns 0.
-//!
-//! What this buys: exit code 0 instead of 130. The default SIGINT
-//! kills the process (exit 130 = 128+SIGINT). The handler turns
-//! that into a clean return.
-//!
-//! What it COSTS: signal handlers can't capture closures. The C
-//! cheats with the global `fd`. We'd need a `static AtomicI32` for
-//! the socket fd, set before the loop, cleared after. The handler
-//! would `nix::sys::socket::shutdown(fd.load(), Both)`. Doable.
-//!
-//! NOT done. Reasons:
-//!
-//!   1. The DAEMON doesn't care. Ctrl-C kills the CLI; the kernel
-//!      closes the socket; `send_request` on a dead connection
-//!      returns false (`net_packet.c::send_tcppacket → meta.c::
-//!      send_meta → write fails`); the connection-reaper removes
-//!      it on the next pass. Clean teardown either way.
-//!
-//!   2. `tinc log` is interactive. Nobody pipes it to a script
-//!      that checks `$?`. (`tinc log | grep` exits 130 on Ctrl-C
-//!      but so does `dmesg -w | grep` — expected.)
-//!
-//!   3. The cost of adding the static fd is a `static AtomicI32 =
-//!      AtomicI32::new(-1)` PLUS the signal-handling crate (the
-//!      `nix::sys::signal::sigaction` dance). The `nix` `signal`
-//!      feature is already enabled (for `kill(0)` in pidfile
-//!      checks), so it's not a new feature. But it IS code that
-//!      can break in weird ways (signal handler races, the same
-//!      static used by parallel `tinc log` invocations from a
-//!      future TUI, etc).
-//!
-//! Shipped without. The C-compat-argument doesn't apply: control
-//! protocol is our own, exit codes for streaming commands aren't
-//! a contract.
-//!
-//! ──────────────────── pcap headers: native-endian ───────────────────
-//!
-//! `tincctl.c:594-616`: the pcap global header and per-packet
-//! header are written via `fwrite(&struct, sizeof(struct), 1, out)`.
-//! That's NATIVE-endian struct layout — whatever the host CPU does.
-//!
-//! This is by design. The libpcap file format's magic number
-//! `0xa1b2c3d4` is the endianness marker: a reader sees either
-//! `a1 b2 c3 d4` (writer was big-endian) or `d4 c3 b2 a1` (writer
-//! was little-endian) and swaps accordingly. Wireshark handles
-//! both. The C's `fwrite(&uint32_t)` works because the format
-//! ACCOMMODATES native-endian writers.
-//!
-//! We `to_ne_bytes()` per-field. Not `to_le_bytes()` (would change
-//! behavior on a hypothetical big-endian build), not `to_be_bytes()`
-//! (would change behavior on x86). `_ne_` is "native-endian" —
-//! same as `fwrite(&u32)`.
-//!
-//! Struct padding: the C structs are packed implicitly (all-u32
-//! global header has no padding; the {u32 u32 u32 u32} packet header
-//! likewise). We write field-by-field, so no padding question.
+//! `tincctl.c:594-616` writes pcap headers via `fwrite(&struct)` —
+//! native-endian. This is by design: libpcap's magic `0xa1b2c3d4`
+//! is the endianness marker, readers byte-swap as needed. We use
+//! `to_ne_bytes()` per-field to match. The C structs are all-u32
+//! (no padding); we write field-by-field so no padding question.
 
 #![allow(clippy::doc_markdown)]
 

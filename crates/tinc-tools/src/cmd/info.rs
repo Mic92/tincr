@@ -9,11 +9,8 @@
 //! ## Dispatch by argument shape
 //!
 //! `info.c:348-356`: `check_id()` → node name. Contains `.` or `:` →
-//! subnet/address. Else "not a node name, subnet or address". Lossy:
-//! `info ff` is a valid node name AND a valid v6 address (`::ff`?
-//! no, `ff` alone isn't), AND would be a MAC-prefix if MACs had
-//! prefixes... but `check_id("ff")` is true (it's `[A-Za-z0-9_]+`),
-//! so node-mode wins. The C order is the spec.
+//! subnet/address. Else error. `check_id("ff")` is true so node-mode
+//! wins for ambiguous inputs; the C order is the spec.
 //!
 //! ## The dead third arg
 //!
@@ -27,17 +24,11 @@
 //!
 //! ## Three sequential dumps
 //!
-//! `info_node` does NODES → match-one-then-drain → EDGES → match
-//! → SUBNETS → match. Three round-trips. The drain (`info.c:102-
-//! 106`) is necessary because the daemon doesn't stop sending nodes
-//! when we `break` — we found alice on row 3 of 50, the other 47
-//! plus terminator are still coming. The C reads-and-discards.
-//!
-//! Why not pipeline (send all three, then read three terminators)?
-//! Because the C doesn't, and the second/third sends only happen
-//! after the first matched (`if(!found) return 1` at `info.c:97`).
-//! The error-on-unknown-node short-circuits before EDGES/SUBNETS.
-//! We follow.
+//! `info_node` does NODES → match-one-then-drain → EDGES → SUBNETS.
+//! The drain (`info.c:102-106`) reads-and-discards the rest of the
+//! dump after we matched. Not pipelined because C short-circuits on
+//! unknown-node (`if(!found) return 1` at `info.c:97`) before
+//! sending EDGES/SUBNETS.
 //!
 //! ## Partial parses for edges/subnets
 //!
@@ -62,18 +53,6 @@
 //! tradeoff. The shim is `#[cfg(unix)]`; the whole module is too
 //! (info needs the daemon).
 //!
-//! ## Layout
-//!
-//!  - `fmt_localtime`      — the libc shim (15 LOC, one unsafe)
-//!  - `Reachability`       — the 7-way cascade enum
-//!  - `NodeInfo`           — formatter struct, takes `NodeRow` + lists
-//!  - `find_node`          — recv-loop-match-drain (the I/O)
-//!  - `info_node`          — orchestrates the three dumps
-//!  - `info_subnet`        — recv-loop, match via `Subnet::matches`
-//!  - `info`               — the dispatch
-//!
-//! Tests: format pieces are pure (golden output strings); the recv
-//! loops get fake-daemon integration tests in `tinc_cli.rs`.
 
 #![allow(clippy::doc_markdown)]
 #![cfg(unix)]

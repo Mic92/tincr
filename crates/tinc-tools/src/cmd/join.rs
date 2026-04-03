@@ -37,66 +37,36 @@
 //!
 //! ## Layering for testability
 //!
-//! Three pieces, decreasing purity:
-//!
 //! | Piece | Input | Output | I/O |
 //! |---|---|---|---|
 //! | `parse_url` | `&str` | `ParsedUrl` | none |
 //! | `finalize_join` | `&[u8]`, `&Paths`, `force` | `JoinResult` (incl. pubkey-to-send) | filesystem only |
 //! | `join` | `&str`, `&Paths`, `force` | `()` | TCP + filesystem |
 //!
-//! `finalize_join` is the testable seam. It's also the *daemon's*
-//! consumer of the same blob — `protocol_auth.c::receive_invitation_sptps`
-//! reads the file `cmd_invite` wrote, sends it; `finalize_join` reads
-//! what it sends. The blob format is the contract. The contract test
-//! goes: `invite()` → in-process server stub ↔ SPTPS ping-pong →
-//! `finalize_join()` writes a confbase that `read_private` accepts.
-//! No subprocess, no real socket.
+//! `finalize_join` is the testable seam. The contract test:
+//! `invite()` → in-process server stub ↔ SPTPS → `finalize_join()`
+//! writes a confbase that `read_private` accepts. No subprocess.
 //!
 //! ## What we drop from the C
 //!
-//! - **Netname re-derivation loop** (`invitation.c:751-781`): if no
-//!   `-c` was given AND tinc.conf already exists at the netname-derived
-//!   confbase, generate a random netname (`join_DEADBEEF`), retry.
-//!   We require `-c` (or empty confbase). The random-netname dance
-//!   is for `tinc -n vpn join` where `vpn` is already populated.
-//!   Useful for "I run two meshes both called vpn"; rare.
-//!
+//! - **Netname re-derivation loop** (`invitation.c:751-781`): random
+//!   `join_DEADBEEF` netname if `-n vpn` is already populated. We
+//!   require `-c` or empty confbase.
 //! - **`ifconfig.c` script generation** (`invitation.c:882-906`):
-//!   `Ifconfig` and `Route` keywords in chunk 1 generate shell
-//!   commands in `tinc-up.invitation`. -300 LOC of per-platform
-//!   `ip`/`ifconfig`/`netsh` syntax. We write a placeholder. The
-//!   keywords are *recognized* (not "unknown variable" warnings),
-//!   just not acted on.
-//!
-//! - **`ask_netname` tty prompt** (`invitation.c:1031-1061`): if the
-//!   random-netname dance fired, prompt to rename. Same "no prompts"
-//!   deviation as init/genkey/fsck.
-//!
-//! - **`tinc-up` review/edit prompt** (`invitation.c:1068-1112`):
-//!   `[y]es/[n]o/[e]dit?` with `$EDITOR` spawn. The `--force` branch
-//!   (`if(force) rename`) is what we always do for the placeholder.
-//!
-//! - **RSA key generation** (`invitation.c:1009-1024`): `#ifndef
-//!   DISABLE_LEGACY`. We're nolegacy.
-//!
-//! - **`check_port`** (`invitation.c:1026`): probes for a free port,
-//!   writes `Port = X` to the host file. Nice-to-have for "first
-//!   start of daemon doesn't conflict with whatever's on 655". Stub.
+//!   per-platform `ip`/`ifconfig`/`netsh` synthesis (~300 LOC). We
+//!   write a placeholder; `Ifconfig`/`Route` keywords are recognized
+//!   but not acted on.
+//! - **tty prompts** (`invitation.c:1031-1061`, `:1068-1112`): same
+//!   "no prompts" deviation as init/genkey/fsck.
+//! - **RSA keygen** (`invitation.c:1009-1024`): `DISABLE_LEGACY`.
+//! - **`check_port`** (`invitation.c:1026`): stub.
 //!
 //! ## What we tighten
 //!
-//! - **Data accumulation cap.** C `xrealloc` grows unbounded; a
-//!   malicious server could send gigabytes of type-0 records before
-//!   the type-1 terminator. We cap at 1 MiB (an invitation file with
-//!   every host config from a 1000-node mesh is ~50 KiB).
-//!
-//! - **Variable filter is exact, not prefix.** C `get_line` +
-//!   `strcspn` tokenizer. We use `tinc-conf::vars::lookup` directly.
-//!   Same `VAR_SAFE` table, same case-insensitive match — but the
-//!   `Ed25519PublicKeyBackup` style 16+delim quirk doesn't apply
-//!   here (that was `disable_old_keys`; this is `lookup_var`, which
-//!   is exact-name).
+//! - **Data accumulation cap.** C `xrealloc` grows unbounded. We cap
+//!   at 1 MiB (a 1000-node mesh's invitation is ~50 KiB).
+//! - **Variable filter is exact, not prefix.** We use
+//!   `tinc-conf::vars::lookup` directly. Same `VAR_SAFE` table.
 
 use std::fs;
 use std::io::{Read, Write};

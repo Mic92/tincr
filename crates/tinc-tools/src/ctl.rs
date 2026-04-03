@@ -31,47 +31,22 @@
 //!
 //! ## The compat-freedom lever
 //!
-//! Per the rewrite plan: **CLI and daemon ship together**. Nobody
-//! expects `tinc-rust dump nodes` to work against a C daemon. The
-//! 22-field positional sscanf format is **not** wire-locked — it's a
-//! private channel between two halves of one release.
-//!
-//! What that buys us: when our daemon's `Node` struct exists, its
-//! `dump_nodes` can emit whatever fields it has, in whatever order,
-//! and `cmd_dump` parses to match. We're not held to `cipher digest
-//! maclength compression options` from a `node_t` we don't have. The
-//! `CtlRequest` enum and the framing stay; line *bodies* are ours.
-//!
-//! What that doesn't change: the *cookie* mechanism is right
-//! (capability auth via fs perms on the pidfile), the unix-socket
-//! transport is right (no TCP fallback to maintain), the line-based
-//! framing is right (`nc -U /var/run/tinc.socket` debuggability).
-//! We keep the architecture, drop the format obligations.
+//! CLI and daemon ship together. The 22-field positional sscanf format
+//! is NOT wire-locked — it's a private channel between two halves of
+//! one release. The `CtlRequest` enum and framing stay; line bodies
+//! are ours. The cookie mechanism (capability auth via fs perms),
+//! unix-socket transport, and line-based framing are all kept.
 //!
 //! ## Why `Read + Write` not `UnixStream`
 //!
-//! Tests pass a `UnixStream::pair()` half. Same in-process pattern
-//! as `cmd::join`'s SPTPS pump, but simpler: no SPTPS, just lines.
-//! The fake daemon does the greeting dance, serves canned responses,
-//! drops. Tests don't need root, don't need a pidfile, don't race
-//! with parallel runs.
+//! Tests pass a `UnixStream::pair()` half. `connect()` does the OS
+//! bits and delegates to `handshake()`; the split is the testable seam.
 //!
-//! `connect()` does the OS bits (read pidfile, connect socket) and
-//! delegates to `handshake()`. The split is the testable seam.
+//! ## Not here
 //!
-//! ## What's NOT here
-//!
-//! `recvdata` (`tincctl.c:536`): raw byte reads for `pcap`. Only
-//! consumer is `cmd_pcap`, which streams forever. When that lands,
-//! `recv_exact(&mut self, n)` reading from `leftover` first.
-//!
-//! Windows TCP fallback (`tincctl.c:817-869`): we're Unix-only for
-//! the daemon path. The fallback exists because Windows doesn't have
-//! AF_UNIX in C tinc's vintage. `#[cfg(windows)]` stub when needed.
-//!
-//! Reconnect-on-dead (`tincctl.c:748-760`): the C reuses `fd` across
-//! commands in the readline shell. We're one command per process; no
-//! reuse, no need to detect dead `fd`.
+//! Windows TCP fallback (`tincctl.c:817-869`): Unix-only for now.
+//! Reconnect-on-dead (`tincctl.c:748-760`): C readline shell reuses
+//! `fd`; we're one command per process.
 
 #![allow(clippy::doc_markdown)]
 
