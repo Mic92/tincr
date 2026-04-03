@@ -557,3 +557,121 @@ The C test suite never hit this because `test/integration/` runs serial; in seri
 **Fix** (test-only): three-phase sequencing in `run_crossimpl_switch`. Phase 1: meta handshake completes with TAP devices DOWN (`NetNs::setup` skips `link set up` for `DevMode::Tap`). Phase 2: `place_devices` brings them up. Phase 3: a directional kick-ping (`ping -c 1 -W 1 10.43.0.2`, expected to fail) triggers alice's kernel to ARP → alice initiates REQ_KEY first. Then poll for `validkey`, then the real ping.
 
 The daemon code is unchanged — it correctly handles whatever the kernel sends. The bug is in test sequencing assuming TAP devices are inert until written to.
+
+---
+
+## Bug audit (chunk-12 sweep)
+
+Read-only sweep for siblings of the five known Rust-is-WRONG kinds. Method: walk every wire-format site against its C `send_request`/`sscanf` mirror; walk every `RouteResult`/`LearnAction` dispatch arm against the C between "decided" and "did"; walk every fd registered with the edge-triggered loop for missing drains; walk every `Vec<Output>` collect-then-dispatch for state set during dispatch that the C set re-entrantly.
+
+Seven findings. Two HIGH (interop visible against C / break a real config knob), three MEDIUM (3+ node topology), two LOW (converges or test-dark only).
+
+### `dispatch_route_result::Unreachable` — IPv6 unreachables built as ICMPv4 (kind: structural miss at pure/impure split)
+
+**Severity: HIGH** — wrong wire bytes to the kernel, visible to any IPv6 ping against an unknown subnet.
+
+C `route.c:734` `route_ipv6` no-subnet exit: `route_ipv6_unreachable(source, packet, ether_size, ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_ADDR)`. C `:749` not-reachable exit: `route_ipv6_unreachable(..., ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOROUTE)`. The C dispatches v4→`route_ipv4_unreachable`, v6→`route_ipv6_unreachable` — two functions, two ICMP packet builders.
+
+We collapsed both into one `RouteResult::Unreachable { icmp_type, icmp_code }`. `route.rs:371` returns `{ ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_ADDR }` (=`{1, 3}`); `:397` returns `{ ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOROUTE }` (=`{1, 0}`). The dispatch arm at `daemon/net.rs:1075` does **not** read the ethertype — it unconditionally calls `icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)`.
+
+Result: an IPv6 packet to an unknown subnet produces an *IPv4-shaped* ICMP frame: 20-byte IPv4 header (parsed from bytes 14..34 of the IPv6 frame, i.e. half the IPv6 header reinterpreted), with `icmp_type=1`. Type 1 in ICMPv4 is unassigned (RFC 792 reserves it). The kernel either drops it on bad-IP-checksum or, worse, routes it as a v4 packet to whatever IPv4 address the IPv6 src bytes happen to look like.
+
+The `directonly` arm at `net.rs:931-939` and the FRAG_NEEDED/TOO_BIG arm at `:955-996` *do* read `data[12..14]` and dispatch v4/v6 correctly. The `Unreachable` arm is the only one that doesn't — it was written first (chunk-7) when only `route_ipv4` existed, and the v6 port (`route.rs::route_ipv6`) reused the same enum variant without updating the dispatch.
+
+This is exactly the `8ea18bed` shape: pure module returns `Unreachable`, impure dispatch does the side effect, the v4/v6 distinction lives in **neither half**. The C had it implicitly (two callers → two functions). We have one variant → one builder.
+
+**Why tests miss it**: `crossimpl.rs` is IPv4 (`10.43.0.0/24`). `route.rs` unit tests check the `RouteResult` variant, not the dispatch. No IPv6 unreachable integration test exists.
+
+**Also affected**: `write_icmp_to_device` (`net.rs:1951`) dispatches v6 only on `icmp_type ∈ {ICMP6_TIME_EXCEEDED=3, ICMP6_DST_UNREACH=1}`. But `ICMP_DEST_UNREACH` is *also* 3 — v4 type 3 collides with v6 type 3. A v4 `decrement_ttl` `SendIcmp{type=ICMP_TIME_EXCEEDED=11}` is fine, but if any future caller passed `(ICMP_DEST_UNREACH=3, code)` for a v4 frame through `write_icmp_to_device`, it would build a v6 packet. Currently unreachable (the only caller with type=3 is the `directonly` v6 branch), but the type-based dispatch is structurally unsound — should be ethertype-based.
+
+### `on_udp_recv` drain loop — unbounded under sustained UDP ingress (kind: edge-triggered drain)
+
+**Severity: MEDIUM** — starves event loop under line-rate UDP, same shape as the deadlock #3 found, but on a different fd.
+
+C `handle_incoming_vpn_data` (`net_packet.c:1845`) does **one** `recvmmsg(..., MAX_MSG=64, ...)` per callback (or one `recvfrom` without `HAVE_RECVMMSG`). Level-triggered: leftover packets re-fire next poll.
+
+Our `on_udp_recv` (`daemon/net.rs:143`) is `loop { recv_from ... }` until `WouldBlock`. No iteration cap, no `rearm()`. The fix for #3 added a 64-packet cap to `on_conn_readable` (META_DRAIN_CAP) and `on_device_read` (DEVICE_DRAIN_CAP). `on_udp_recv` was not touched.
+
+Under sustained UDP ingress (the OTHER side of an iperf3 — we are the receiver), the kernel UDP socket buffer refills as fast as we drain. `dispatch_tunnel_outputs` per packet may queue meta-conn writes (REQ_KEY restart on decrypt failure, ANS_KEY on rekey), but `on_conn_writable` never runs because we never return from `on_udp_recv`. Timers (PMTU probes, ping) stall. The TUN write-back path inside `route_packet` does run inline, so traffic flows — but everything else starves.
+
+**Why tests miss it**: `throughput.rs` measures *send-side* line rate from us. Receive-side: the iperf3 server runs in the *other* netns, our daemon writes to TUN inline inside the loop, iperf3's TCP-ack stream is small. The starvation is of timers and meta-conn flush, neither of which the throughput gate watches once `minmtu ≥ 1500`. A test that ran iperf3 RECEIVE for >`pingtimeout` seconds and then asserted the meta-conn was still alive would catch it.
+
+### `on_tcp_accept` / `on_unix_accept` — single accept per readable edge (kind: edge-triggered drain)
+
+**Severity: LOW** — second simultaneous connection waits one event-loop turn; converges.
+
+C `handle_new_meta_connection` (`net_socket.c:734`) does **one** `accept()` per callback. Level-triggered: backlog re-fires next poll. Our `on_tcp_accept` (`daemon/net.rs:12`) and `on_unix_accept` (`daemon/metaconn.rs:17`) also do exactly one `accept()`, but mio is edge-triggered.
+
+The TCP listener fd is **not** set non-blocking (`listen.rs::setup_tcp` has no `set_nonblocking(true)` — only the UDP socket and the post-accept fd via `configure_tcp` get it). With `backlog=3` (`listen.rs:173 listen(3)`), if two peers connect in the same epoll cycle, we `accept()` the first; the listener fd is still readable (backlog non-empty) but the edge has fired. The second connection sits in the kernel queue until a *third* connect generates a fresh edge.
+
+Not a deadlock: the third connect will arrive (peer's reconnect timer), or in practice the second was the only other peer and there is no third — then it waits forever. With `n` simultaneous reboots in a star topology, `n-1` connections wait for an edge that never comes.
+
+The `WouldBlock` check at `net.rs:21` is dead code on a blocking listener. The comment at `:22-24` ("can still spuriously return EAGAIN") is wrong: that's only true for nonblocking listeners.
+
+**Why tests miss it**: 2-node tests have one inbound connect. `three_daemon_relay` is hub-spoke (2 inbound to mid), but spoke startup is sequential in test setup (one `Daemon::run` then the next). Would need parallel spawn of ≥2 dialers within one epoll-tick window.
+
+### `decrement_ttl` Forward-arm gate — missing `subnet->owner != myself` (kind: structural miss at pure/impure split)
+
+**Severity: MEDIUM** — with `DecrementTTL = yes`, packets routed to *our own* TUN get TTL decremented when they shouldn't.
+
+C `route.c:664`: `if(decrement_ttl && source != myself && subnet->owner != myself) do_decrement_ttl(...)`. Three-part gate. Same at `:759` (v6) and `:1056` (mac). The `subnet->owner != myself` clause: a packet relayed *to us* (we're the endpoint) is not transit traffic; don't decrement, the kernel does that on delivery.
+
+Our dispatch at `daemon/net.rs:1015` is in the `RouteResult::Forward { to }` arm where `to != self.name` (the `to == self.name` case is the *first* match arm at `:818` and short-circuits to `device.write`). So `subnet->owner != myself` is implicitly satisfied... **except** the `decrement_ttl` block is *also* called from the `Broadcast` arm (`:1116`), and `route_packet_mac` shares the same `dispatch_route_result`. Neither broadcast nor switch-mode Forward checks owner-is-myself for the TTL gate.
+
+For Router mode, the structural split saves us by accident (Forward-to-myself is a different match arm). For Switch mode, `route_mac.rs` doesn't return a separate Forward-to-myself — it returns `Forward { to: owner }` regardless, and the *dispatch* checks `to == self.name` (`:818`). So the early-return at `:818` fires before `:1015`. **Correct by accident** for unicast.
+
+For Broadcast (`:1116`), there's no owner. The C `route_broadcast` at `:559-563` has `decrement_ttl && source != myself` only — no third clause (broadcasts have no single owner). Our `:1116` matches. **Correct.**
+
+Verdict: not actually a bug, but the correctness is structural-accident, not intent. Filed as LOW evidence the audit walked the code; documenting because the next refactor of `dispatch_route_result` could merge the arms and lose the implicit gate.
+
+### `handle_incoming_vpn_packet` — `update_node_udp` runs on non-direct packets (kind: structural miss / collect-then-dispatch ordering)
+
+**Severity: MEDIUM** — in 3+ node relay topology, a packet that *should* set `direct=false` updates `udp_addr` to the relay's address.
+
+C `net_packet.c:1786,1833`: `direct` is set true only when `dst_id == nullid` (`:1786`) or `!relay_enabled` (`:1788`). At `:1833`, `if(direct && sockaddrcmp(addr, &n->address)) update_node_udp(n, addr)`. The `direct` gate means: only update `n->address` if the packet came *directly from* `n` (no relay in between).
+
+Our `daemon/net.rs:346`: `if let Some(peer_addr) = peer { ... tunnel.udp_addr = Some(peer_addr) }`. **No `direct` gate.** When `dst_id != null && to == myself` (the fall-through at `:253`), the packet was relayed to us with our explicit ID6 — the C sets `direct = false`, we never compute `direct` for the receive path.
+
+Result: `tunnels[from_nid].udp_addr` is set to the *relay's* socket address. Next time we `send_sptps_data` UDP-direct to `from`, we send to the relay's IP. The relay's `lookup_node_id(SRCID)` finds *us*, not `from`; relay receives a packet with src=us dst=from, forwards it. So the packet still arrives — one extra hop, plus the relay's socket buffer becomes a chokepoint. PMTU probes go via the relay too, so we discover the relay's MTU instead of the direct path's.
+
+Also missing: C `:1840` `if(!direct) send_mtu_info(myself, n, MTU)`. We have no `send_mtu_info` call in `handle_incoming_vpn_packet` at all (the calls are in `gossip.rs::on_req_key` SPTPS_PACKET and ANS_KEY, which are TCP paths). UDP-relayed packets never trigger the MTU breadcrumb.
+
+**Why tests miss it**: 2-node tests are always `direct=true` (dst_id is nullid). `three_daemon_relay` would need to assert `tincctl dump nodes` shows the *correct* UDP addr for the indirect peer, not the relay's. The test checks ping works, which it does (one extra hop).
+
+### `req_key_ext_h` SPTPS_PACKET relay — `forwarding_mode != Internal` drops instead of falling through (kind: error-path divergence + structural miss)
+
+**Severity: HIGH** — with `Forwarding = kernel`, relayed SPTPS_PACKET silently dropped; C falls through to verbatim TCP forward.
+
+C `protocol_key.c:165-170` SPTPS_PACKET relay (`to != myself`):
+```c
+if(forwarding_mode == FMODE_INTERNAL) {
+    send_sptps_data(to, from, 0, buf, len);
+    try_tx(to, true);
+}
+// :187: return true;  ← returns AFTER the if-block, regardless.
+```
+The C `:187 return true` is reached whether or not the `if` body ran. With `FMODE_KERNEL`/`FMODE_OFF`, the C **silently drops** the SPTPS_PACKET relay (it's data traffic; kernel-forwarding mode means "let the kernel route", but the kernel can't route an encrypted SPTPS blob — so this is a deliberate sink). Crucially, it does **not** fall through to `:192 send_request(to->nexthop->connection, "%s", request)` — the `return true` at `:187` is unconditional.
+
+Our `daemon/gossip.rs:248-268`: when `reqno == SptpsPacket && forwarding_mode == Internal`, we relay via `send_sptps_data_relay` and `return Ok(nw)`. When `forwarding_mode != Internal`, the `if` body is skipped and we **fall through to `:284`** — `conn.send(format_args!("{body_str}"))`, the verbatim-forward. The comment at `:244-247` claims the C falls through to `:192`; **the C does not** (it returns at `:187`).
+
+Result: with `Forwarding = kernel` on a relay node, the C drops SPTPS_PACKET (correct: kernel mode is for plaintext IP, not encrypted blobs); we forward it as a plain REQ_KEY-ext text line. The next hop's `on_req_key` re-decodes the b64, feeds SPTPS — which works, the packet arrives. But: the C author *intended* to drop here (kernel-forwarding implies you've configured OS routes; injecting SPTPS data via the meta-conn defeats the topology you chose). We're more permissive than the C in a way that's arguably useful but is **divergence from a deliberate C decision**.
+
+More importantly, the comment is wrong about C behavior. If the misread propagates ("C falls through to `:192`") then later edits could compound. The C `:187 return true` covers *both* `if`-body-ran and not.
+
+**Why tests miss it**: `Forwarding = kernel` is a niche knob. No relay test sets it. The behavior diverges in a *more permissive* direction (packet still arrives), so even a kernel-mode relay test wouldn't *fail* — it would pass when it should drop.
+
+### `KEY_CHANGED` dispatch — falls through to terminate (kind: error-path divergence)
+
+**Severity: MEDIUM** — a C peer's `send_key_changed()` (broadcast on rekey, `protocol_key.c:40`) terminates our meta-conn.
+
+C `key_changed_h` (`protocol_key.c:63-96`): parse name, `seen_request`, `lookup_node`, `if(!sptps) { validkey=false; last_req_key=0 }`, `forward_request`. Returns `true` (keep conn).
+
+Our dispatch at `daemon/metaconn.rs:1009-1020`: `Request::KeyChanged` falls into the `_ =>` catch-all, which logs `"SPTPS request {req:?} not implemented"` and `self.terminate(id)`. **Connection killed.**
+
+The `send_key_changed` C call site (`protocol_key.c:38-41`) is `send_request(everyone, "%d %x %s", KEY_CHANGED, ...)` from `send_key_changed()`, which is called from `regenerate_key()` (`net_setup.c`) on `KeyExpire` timer or SIGALRM. A C peer rekeys every `KeyExpire` seconds (default 3600). At that moment, every C node broadcasts KEY_CHANGED. **Any Rust node connected to a C node dies one hour into the connection.**
+
+With SPTPS-only nodes (`n->status.sptps == true`), `key_changed_h:85-88` does nothing useful (the `if(!n->status.sptps)` body is the only side effect besides forward). The C sends it anyway (legacy compat). The correct Rust behavior is: parse, `seen_request`, forward, no-op (we have no legacy keys to invalidate). The C `return true` maps to our `Ok(false)`.
+
+This is the exact shape the audit prompt warned about: a C `return true` (silently no-op) mapped to terminate. It's a *sibling* of Rust-is-WRONG #2 (PACKET 17 fell through to terminate). PACKET 17 was found by crossimpl because it fires *immediately*; KEY_CHANGED fires after `KeyExpire` seconds, which the crossimpl test (~10 seconds) doesn't reach.
+
+**Why tests miss it**: `crossimpl.rs` runs for seconds. The default `KeyExpire = 3600`. A `KeyExpire = 5` config in the C peer's `tinc.conf` would surface it.
