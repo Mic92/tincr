@@ -45,7 +45,7 @@ use crate::listen::{
 use crate::node_id::{NodeId6, NodeId6Table};
 use crate::outgoing::{
     ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, ProxyConfig, parse_proxy_config,
-    probe_connecting, resolve_config_addrs, try_connect,
+    probe_connecting, resolve_config_addrs, try_connect, try_connect_via_proxy,
 };
 use crate::pmtu::{self, PmtuAction, PmtuState};
 use crate::proto::{
@@ -57,6 +57,7 @@ use crate::reload;
 use crate::route::{self, RouteResult, TtlResult, route};
 use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
+use crate::socks;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
 use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
@@ -284,9 +285,13 @@ pub struct DaemonSettings {
     /// (one week, `net_setup.c:567`). Config var `InvitationExpire`.
     /// Seconds; `serve_cookie` checks `mtime + this < now`.
     pub invitation_lifetime: Duration,
-    /// `proxytype`/`proxyhost` (`net_setup.c:263-345`). `None` is the
-    /// default (direct connect). Only `Exec` is wired; SOCKS/HTTP
-    /// need a connect-state machine (`STUB(chunk-11-proxy)`).
+    /// `proxytype`/`proxyhost` (`net_setup.c:263-378`). `None` is the
+    /// default (direct connect). `Exec` is socketpair+fork (no
+    /// handshake); `Socks4`/`Socks5` connect to the proxy then send
+    /// `socks::build_request` bytes BEFORE the ID line and read the
+    /// fixed-length reply via `conn.tcplen` (`meta.c:275-298`).
+    /// `Http` is `STUB(chunk-12-http-proxy)` (line-based response,
+    /// needs a `proxy_passed` flag we don't have).
     pub proxy: Option<ProxyConfig>,
     /// `autoconnect` (`net_setup.c:560-562`). Default **true** (the C
     /// `else` branch sets it). When set, `periodic_handler` runs
@@ -4918,7 +4923,96 @@ impl Daemon {
                 self.terminate(id);
                 return;
             }
-            FeedResult::Data => {}
+            FeedResult::Data => {
+                // ─── pre-SPTPS tcplen consume (SOCKS proxy reply) ────────
+                // C `meta.c:275-298`: same `c->tcplen` field as the
+                // SPTPS PACKET-blob path (consumed inside `Output::
+                // Record` at the dispatch_sptps_outputs site), but
+                // consumed HERE (raw `read_n`, not SPTPS record). The
+                // two consume sites are MUTUALLY EXCLUSIVE: this arm
+                // is `FeedResult::Data` (no `conn.sptps`); the other
+                // is `FeedResult::Sptps`. A SOCKS proxy reply arrives
+                // BEFORE id_h, so before SPTPS-start.
+                //
+                // C dispatch key: `!c->node` (`:282`). Ours: `tcplen
+                // != 0` AND we're in the Data arm AND outgoing AND
+                // allow_request==Id (the C's `c->outgoing && c->allow_
+                // request == ID` at `:283`). The C abort()s on
+                // tcplen-set-but-not-proxy-state (`:288`); we just
+                // wouldn't enter the if (no SOCKS proxy configured →
+                // tcplen never set in finish_connecting).
+                let conn = self.conns.get_mut(id).expect("just fed");
+                if conn.tcplen != 0
+                    && conn.outgoing.is_some()
+                    && conn.allow_request == Some(Request::Id)
+                {
+                    let n = usize::from(conn.tcplen);
+                    let Some(range) = conn.inbuf.read_n(n) else {
+                        // C `:278-280`: `if(!tcpbuffer) break`.
+                        // Partial — the proxy's reply spans more
+                        // than one TCP segment. Wait for next wake.
+                        // CRITICAL: do NOT enter the read_line loop;
+                        // it would parse SOCKS bytes as a request
+                        // line (garbage — SOCKS5 starts with 0x05,
+                        // which atoi parses as 5 = METAKEY, fails
+                        // gate, terminates).
+                        return;
+                    };
+                    let buf: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
+                    conn.tcplen = 0;
+
+                    // The proxy type/creds come from settings (proxy
+                    // is a single global config, not per-conn). We
+                    // know it's SOCKS (only SOCKS sets tcplen in
+                    // finish_connecting); unwrap is safe.
+                    let Some(proxy) = &self.settings.proxy else {
+                        // tcplen set but no proxy — the C's abort
+                        // case. Shouldn't happen (only finish_
+                        // connecting's SOCKS arm sets tcplen pre-
+                        // SPTPS). Log + drop.
+                        log::error!(target: "tincd::conn",
+                            "tcplen set but no proxy configured for {}",
+                            conn.name);
+                        self.terminate(id);
+                        return;
+                    };
+                    let Some(socks_type) = proxy.socks_type() else {
+                        log::error!(target: "tincd::conn",
+                            "tcplen set but proxy is not SOCKS for {}",
+                            conn.name);
+                        self.terminate(id);
+                        return;
+                    };
+                    let creds = proxy.socks_creds();
+                    match socks::check_response(socks_type, creds.as_ref(), &buf) {
+                        socks::SocksResponse::Granted => {
+                            // C `proxy.c:56`: `log_proxy_grant(
+                            // true)`. Tunnel established. Fall
+                            // through to read_line — the peer's ID
+                            // reply may already be in inbuf (the
+                            // proxy forwarded it right after its
+                            // own reply; same TCP segment is
+                            // possible).
+                            log::debug!(target: "tincd::conn",
+                                "Proxy request granted for {} ({n} reply bytes)",
+                                conn.name);
+                        }
+                        socks::SocksResponse::Rejected => {
+                            log::error!(target: "tincd::conn",
+                                "Proxy request rejected for {}", conn.name);
+                            self.terminate(id);
+                            return;
+                        }
+                        socks::SocksResponse::Malformed(why) => {
+                            log::error!(target: "tincd::conn",
+                                "Malformed proxy response for {}: {why}",
+                                conn.name);
+                            self.terminate(id);
+                            return;
+                        }
+                    }
+                }
+            }
             FeedResult::Sptps(outs) => {
                 // SPTPS-mode connection. Dispatch outputs.
                 let needs_write = self.dispatch_sptps_outputs(id, outs);
@@ -8215,8 +8309,13 @@ impl Daemon {
     /// `PROXY_EXEC` (`:588`, `:631`): instead of socket+connect,
     /// `do_outgoing_pipe` does socketpair+fork. The fd is already
     /// "connected" — skip the async-connect probe, send_id directly.
-    /// SOCKS/HTTP proxy: `STUB(chunk-11-proxy)` (needs the tcplen
-    /// state machine in conn.rs).
+    ///
+    /// `PROXY_SOCKS4`/`SOCKS5`/`HTTP` (`:590-601`, `:637`): connect
+    /// to the PROXY's address (`try_connect_via_proxy`). The peer
+    /// addr is still walked from the addr cache (it's the SOCKS
+    /// CONNECT target). The async-connect probe runs same as direct;
+    /// `finish_connecting` queues the SOCKS handshake bytes BEFORE
+    /// the ID line and sets `conn.tcplen` for the response read.
     #[allow(clippy::too_many_lines)] // PROXY_EXEC adds a parallel
     // code path (socketpair vs socket+connect). Factoring would
     // thread oid/name/now/self through a helper for both arms.
@@ -8318,7 +8417,28 @@ impl Daemon {
                 return;
             }
 
-            match try_connect(&mut outgoing.addr_cache, &name) {
+            // ─── SOCKS/HTTP proxy: connect to PROXY addr (`:590-601`)
+            // The addr cache still walks PEER addrs (the SOCKS
+            // target varies per attempt). C `:580`: `c->address`
+            // is the peer addr regardless of proxy.
+            let proxy_hp = self
+                .settings
+                .proxy
+                .as_ref()
+                .and_then(ProxyConfig::proxy_addr);
+            let attempt = if let Some((phost, pport)) = proxy_hp {
+                let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
+                    log::error!(target: "tincd::conn",
+                                "Could not set up a meta connection to {name}");
+                    self.retry_outgoing(oid);
+                    return;
+                };
+                try_connect_via_proxy(phost, pport, peer_addr, &name)
+            } else {
+                try_connect(&mut outgoing.addr_cache, &name)
+            };
+
+            match attempt {
                 ConnectAttempt::Started { sock, addr } => {
                     // C `:649-658`: `c->status.connecting = true;
                     // c->name = name; connection_add(c); io_add(
@@ -8516,10 +8636,104 @@ impl Daemon {
         // C `:424`: `c->status.connecting = false`.
         conn.connecting = false;
 
+        // ─── send_proxyrequest (C `protocol_auth.c:111-114`) ────────
+        // `if(proxytype && c->outgoing) send_proxyrequest(c)` BEFORE
+        // `send_request(ID)`. Both queue into outbuf; both flush in
+        // one `send()`. The proxy server reads the SOCKS bytes,
+        // replies (we read that as `tcplen`-exact in `on_conn_
+        // readable`), then forwards the ID line transparently to
+        // the peer. The pipelining is intentional: TCP is a stream;
+        // the proxy buffers the ID line while it processes our
+        // greeting.
+        //
+        // `conn.outgoing.is_some()` is always true here (this IS
+        // `finish_connecting`, only called for outgoing conns), but
+        // check anyway to match the C's gate shape.
+        let mut needs_write = false;
+        if let (true, Some(proxy)) = (conn.outgoing.is_some(), &self.settings.proxy) {
+            match proxy {
+                ProxyConfig::Exec { .. } => {
+                    // C `protocol_auth.c:84`: `case PROXY_EXEC:
+                    // return true`. The pipe IS the connection;
+                    // nothing to queue. We never reach here anyway
+                    // (Exec skips finish_connecting in do_outgoing_
+                    // connection), but the arm makes the match
+                    // exhaustive.
+                }
+                ProxyConfig::Http { .. } => {
+                    // C `protocol_auth.c:60-68`: `send_request(c,
+                    // "CONNECT %s:%s HTTP/1.1\r\n\r")`. The `\r` at
+                    // end + `send_request`'s `\n` makes `\r\n\r\n`.
+                    // Response is line-based (`protocol.c:148-161`
+                    // special-cases `HTTP/1.1 ` before dispatch).
+                    // STUB(chunk-12-http-proxy): we don't have the
+                    // `proxy_passed` flag for the response gate.
+                    // The config parse accepts `Proxy = http ...`
+                    // (so reload doesn't error), but the connect
+                    // path bails here. Log + terminate.
+                    log::error!(target: "tincd::conn",
+                        "Proxy = http not yet wired (STUB chunk-12-http-proxy); \
+                         dropping connection to {}", conn.name);
+                    self.terminate(id);
+                    return;
+                }
+                ProxyConfig::Socks4 { .. } | ProxyConfig::Socks5 { .. } => {
+                    // C `protocol_auth.c:71-77`: `c->tcplen =
+                    // create_socks_req(...); send_meta(c, req,
+                    // reqlen)`. Target is `c->address` — the PEER
+                    // addr (the proxy is just transport). `send_
+                    // meta` is raw bytes, no `\n`.
+                    let Some(target) = conn.address else {
+                        // Shouldn't happen: new_outgoing always sets
+                        // address. Defensive.
+                        log::error!(target: "tincd::conn",
+                            "SOCKS proxy: no peer address on {}", conn.name);
+                        self.terminate(id);
+                        return;
+                    };
+                    let socks_type = proxy.socks_type().expect("Socks4/5 arm");
+                    let creds = proxy.socks_creds();
+                    match socks::build_request(socks_type, target, creds.as_ref()) {
+                        Ok((bytes, resp_len)) => {
+                            // C `:75`: `c->tcplen = create_socks_
+                            // req(...)`. The return value is the
+                            // expected response length. `:76`:
+                            // `send_meta(c, req, reqlen)` — raw,
+                            // no `\n`. Our `send_raw` matches.
+                            needs_write |= conn.send_raw(&bytes);
+                            // resp_len fits u16: SOCKS5 max is
+                            // 2+2+4+18 = 26 bytes. SOCKS4 is 8.
+                            #[allow(clippy::cast_possible_truncation)]
+                            {
+                                conn.tcplen = resp_len as u16;
+                            }
+                            log::debug!(target: "tincd::conn",
+                                "Queued {} SOCKS bytes for {}, expecting {} reply bytes",
+                                bytes.len(), conn.name, resp_len);
+                        }
+                        Err(e) => {
+                            // SOCKS4 + IPv6, or 256-byte cred
+                            // (C-is-WRONG #9). Config-level error
+                            // really, but we only know `target` at
+                            // connect time.
+                            log::error!(target: "tincd::conn",
+                                "SOCKS request build failed for {}: {e:?}",
+                                conn.name);
+                            self.terminate(id);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         // C `:425`: `send_id(c)`. WE go first (initiator). The
         // peer's `id_h:451` `if(!c->outgoing) send_id(c)` replies.
         // Same line as our responder-side `handle_id` sends.
-        let needs_write = conn.send(format_args!(
+        // Re-get conn: terminate above may have removed it. Actually
+        // — we returned in those branches. Still valid.
+        let conn = self.conns.get_mut(id).expect("not terminated");
+        needs_write |= conn.send(format_args!(
             "{} {} {}.{}",
             Request::Id as u8,
             self.name,

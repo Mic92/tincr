@@ -134,6 +134,31 @@ impl LineBuf {
         Some(start..end)
     }
 
+    /// `buffer_read(buffer, n)` (`buffer.c:88-94`). Exact-N read from
+    /// the live region. If `< n` available, `None` (partial — need
+    /// more `recv()`). If `>= n`, advance offset by `n`, return the
+    /// range.
+    ///
+    /// `meta.c:276`: `tcpbuffer = buffer_read(&c->inbuf, c->tcplen)`.
+    /// The C returns `NULL` on short, pointer otherwise. Same shape.
+    ///
+    /// Used for the pre-SPTPS proxy-response read (the SOCKS reply is
+    /// binary, fixed-length, NOT line-terminated). The post-SPTPS
+    /// PACKET-blob path goes through `Output::Record` (SPTPS records
+    /// are exact-framed already), so this is proxy-only in practice.
+    ///
+    /// Same range-validity contract as `read_line`: stays valid until
+    /// the next `add` / `consume` / `read_line` / `read_n`. NO reset
+    /// here (returned range would dangle); compact lives in `add`.
+    pub fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
+        if self.live_len() < n {
+            return None;
+        }
+        let start = self.offset;
+        self.offset += n;
+        Some(start..start + n)
+    }
+
     /// Live region length. C: `buffer->len - buffer->offset`.
     /// Used for the `MAXBUFSIZE` check in `feed`.
     #[must_use]
@@ -1030,6 +1055,60 @@ mod tests {
         // by this point. The slice MUST still work.
         assert!(b.is_empty());
         assert_eq!(&b.bytes_raw()[r], b"only");
+    }
+
+    /// `read_n` exact: buffer has 10, ask 10, get full range.
+    /// C `buffer_read`: `if(len-offset >= n) { offset+=n; return ptr }`.
+    #[test]
+    fn linebuf_read_n_exact() {
+        let mut b = LineBuf::default();
+        b.add(b"0123456789");
+        let r = b.read_n(10).unwrap();
+        assert_eq!(&b.bytes_raw()[r], b"0123456789");
+        assert!(b.is_empty());
+    }
+
+    /// `read_n` partial: ask for more than available, get None,
+    /// offset UNCHANGED. C: returns NULL, doesn't advance.
+    #[test]
+    fn linebuf_read_n_partial() {
+        let mut b = LineBuf::default();
+        b.add(b"01234");
+        assert!(b.read_n(10).is_none());
+        // Offset unchanged — next add can complete it.
+        assert_eq!(b.live_len(), 5);
+        b.add(b"56789");
+        let r = b.read_n(10).unwrap();
+        assert_eq!(&b.bytes_raw()[r], b"0123456789");
+    }
+
+    /// `read_n(0)` — degenerate. C `buffer_read(buf, 0)` returns
+    /// the current pointer and advances by 0. Same here: empty range.
+    #[test]
+    fn linebuf_read_n_zero() {
+        let mut b = LineBuf::default();
+        b.add(b"data");
+        let r = b.read_n(0).unwrap();
+        assert_eq!(r.len(), 0);
+        assert_eq!(b.live_len(), 4); // unchanged
+    }
+
+    /// `read_n` after `read_line`: offset state is shared. The proxy
+    /// flow doesn't actually interleave (proxy reply is FIRST, then
+    /// lines), but `meta.c`'s `while(inbuf.len)` loop can do tcplen-
+    /// then-line in one drain. Prove the cursor stays coherent.
+    #[test]
+    fn linebuf_read_n_after_read_line() {
+        let mut b = LineBuf::default();
+        // SOCKS4 reply (8 bytes) + ID line. Same buffer — the proxy
+        // forwards the peer's bytes right after its own reply.
+        b.add(&[0x00, 0x5A, 0, 0, 0, 0, 0, 0]);
+        b.add(b"0 bob 17.7\n");
+        let r1 = b.read_n(8).unwrap();
+        assert_eq!(&b.bytes_raw()[r1.clone()], &[0x00, 0x5A, 0, 0, 0, 0, 0, 0]);
+        let r2 = b.read_line().unwrap();
+        assert_eq!(&b.bytes_raw()[r2], b"0 bob 17.7");
+        assert!(b.is_empty());
     }
 
     /// `consume` — the partial-send case. Queue 10 bytes, kernel

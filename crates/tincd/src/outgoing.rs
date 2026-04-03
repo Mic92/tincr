@@ -36,7 +36,8 @@
 //! `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's its end
 //! to stdin/stdout, exec's `/bin/sh -c <cmd>`. Parent treats its end
 //! as the TCP fd — the child IS the proxy. No byte-format handshake
-//! (that's SOCKS4/5, `STUB(chunk-11-proxy)`).
+//! (that's SOCKS4/5: see `socks.rs` and the `tcplen` consume in
+//! `daemon.rs::on_conn_readable`).
 //!
 //! The ONE `unsafe` block in this module: `fork()`. Post-fork in a
 //! multi-threaded program is hairy (only the calling thread survives;
@@ -45,11 +46,8 @@
 //!
 //! ## Deferred
 //!
-//! - SOCKS4/5/HTTP proxy: needs a connect-state machine in `conn.rs`
-//!   (read `tcplen` bytes BEFORE the id_h dispatch). `socks.rs` has
-//!   the byte format; the wiring is `STUB(chunk-11-proxy)`.
 //! - `bind_to_interface`/`bind_to_address` (`:624-625`): the
-//!   `BindToAddress` config knob. `STUB(chunk-11-proxy)`.
+//!   `BindToAddress` config knob. `STUB(chunk-12-bind)`.
 //! - DNS at connect time: `addrcache.rs` doc says we take pre-
 //!   resolved `SocketAddr` only. `try_outgoing_connections` resolves
 //!   `Address = host port` lines via `to_socket_addrs()` at OPEN
@@ -190,8 +188,10 @@ pub fn try_connect(addr_cache: &mut AddressCache, node_name: &str) -> ConnectAtt
         let _ = sock.set_only_v6(true);
     }
 
-    // STUB(chunk-11-proxy): bind_to_interface/bind_to_address
-    // (`:624-625`). The `BindToAddress` config knob. Niche.
+    // STUB(chunk-12-bind): bind_to_interface/bind_to_address
+    // (`:624-625`). The `BindToAddress` config knob. Niche — just
+    // `setsockopt(SO_BINDTODEVICE)` + `bind()` before `connect()`.
+    // Not proxy-related; re-chunked from chunk-11-proxy.
 
     // C `:630`: `connect(c->socket, &c->address.sa, salen)`.
     // socket2 wraps this. Nonblocking → returns EINPROGRESS for
@@ -221,6 +221,97 @@ pub fn try_connect(addr_cache: &mut AddressCache, node_name: &str) -> ConnectAtt
     // does the registration (it owns the EventLoop). We hand back
     // the socket + addr.
     ConnectAttempt::Started { sock, addr }
+}
+
+/// `do_outgoing_connection` proxy branch (`net_socket.c:590-601,
+/// 633-639`). Connects to the PROXY's address, not the peer's. The
+/// peer addr goes into the SOCKS/HTTP CONNECT request later (in
+/// `finish_connecting`).
+///
+/// Same socket-create+nonblocking+connect shape as `try_connect`,
+/// but: (a) the connect target is the proxy host:port resolved here,
+/// (b) no addr-cache walk (the proxy is a single global config; if
+/// it doesn't resolve or refuses, that's `Exhausted` immediately —
+/// the C does the same: `:593` `if(!proxyai) goto begin`, but begin
+/// just walks the next PEER addr through the SAME unreachable proxy,
+/// so it's effectively exhausted).
+///
+/// `peer_addr` is the addr-cache pick — we still walk the cache so
+/// `conn.address` (the SOCKS target) varies per attempt. C: same
+/// (`c->address` is the peer addr, the proxy connect uses `proxyai`).
+///
+/// `Retry` is never returned (no per-addr fallback for the proxy);
+/// callers should treat `Exhausted` as the loop terminator.
+#[must_use]
+pub fn try_connect_via_proxy(
+    proxy_host: &str,
+    proxy_port: u16,
+    peer_addr: SocketAddr,
+    node_name: &str,
+) -> ConnectAttempt {
+    // C `:591`: `proxyai = str2addrinfo(proxyhost, proxyport, ...)`.
+    // We resolve here. Blocking DNS (same as the C — `getaddrinfo`
+    // inside the connect loop). Take the first addr; the C uses
+    // `proxyai->ai_addr` (also first).
+    let resolved = (proxy_host, proxy_port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next());
+    let Some(proxy_addr) = resolved else {
+        log::error!(target: "tincd::conn",
+                    "Could not resolve proxy {proxy_host}:{proxy_port} for {node_name}");
+        return ConnectAttempt::Exhausted;
+    };
+
+    // C `:598`: `"Using proxy at %s port %s"`.
+    log::info!(target: "tincd::conn",
+               "Using proxy at {proxy_addr} for {node_name} ({peer_addr})");
+
+    // C `:600`: `socket(proxyai->ai_family, SOCK_STREAM, IPPROTO_TCP)`.
+    let domain = match proxy_addr {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!(target: "tincd::conn",
+                        "Creating socket for proxy {proxy_addr} failed: {e}");
+            return ConnectAttempt::Exhausted;
+        }
+    };
+    if let Err(e) = sock.set_nonblocking(true) {
+        log::error!(target: "tincd::conn",
+                    "set_nonblocking failed for proxy {proxy_addr}: {e}");
+        return ConnectAttempt::Exhausted;
+    }
+    if let Err(e) = sock.set_nodelay(true) {
+        log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
+    }
+    if matches!(proxy_addr, SocketAddr::V6(_)) {
+        let _ = sock.set_only_v6(true);
+    }
+
+    // C `:637`: `connect(c->socket, proxyai->ai_addr, ...)`.
+    let sock_addr = SockAddr::from(proxy_addr);
+    match sock.connect(&sock_addr) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(e) => {
+            log::error!(target: "tincd::conn",
+                        "Could not connect to proxy {proxy_addr} for {node_name}: {e}");
+            return ConnectAttempt::Exhausted;
+        }
+    }
+
+    // The `addr` returned is the PEER addr, not the proxy addr.
+    // `Connection.address` stores it (it's what `c->address` is in C
+    // — `:580` memcpy from `sa`, which is `get_recent_address`, the
+    // peer). The SOCKS CONNECT target is built from `conn.address`.
+    ConnectAttempt::Started {
+        sock,
+        addr: peer_addr,
+    }
 }
 
 /// `handle_meta_io` connecting branch (`net_socket.c:517-555`). Probe
@@ -278,16 +369,86 @@ pub fn probe_connecting(sock: &Socket) -> io::Result<bool> {
     }
 }
 
-/// `proxytype_t` (`net.h:148-155`). Only `Exec` is wired; the rest
-/// need a connect-time state machine (read N bytes before id_h —
-/// `c->tcplen`). `socks.rs` has the byte formats.
+/// `proxytype_t` (`net.h:148-155`). C has six (`NONE`/`SOCKS4`/
+/// `SOCKS4A`/`SOCKS5`/`HTTP`/`EXEC`); we have four. `NONE` is
+/// `Option::None` at the `DaemonSettings.proxy` level. `SOCKS4A` is
+/// faithfully unimplemented (`proxy.c:80`: "not implemented yet").
 #[derive(Debug, Clone)]
 pub enum ProxyConfig {
     /// `PROXY_EXEC` (`net_socket.c:588`). `socketpair` + `fork` +
     /// `/bin/sh -c <cmd>`. The simple mode: no handshake bytes.
     Exec { cmd: String },
-    // STUB(chunk-11-proxy): Socks4 { host, port, user },
-    // Socks5 { host, port, user, pass }, Http { host, port }.
+    /// `PROXY_SOCKS4`. Connect to `{host}:{port}`, then send a
+    /// SOCKS4 CONNECT request (`socks::build_request`) with the PEER
+    /// addr as target. `user` is the SOCKS4 "userid" string
+    /// (optional, no password — SOCKS4 has no real auth).
+    Socks4 {
+        host: String,
+        port: u16,
+        user: Option<String>,
+    },
+    /// `PROXY_SOCKS5`. RFC 1928. Same connect-to-proxy-addr shape.
+    /// `user`+`pass` are RFC 1929 password auth; both `None` →
+    /// anonymous (`socks::build_request` handles the method choice).
+    Socks5 {
+        host: String,
+        port: u16,
+        user: Option<String>,
+        pass: Option<String>,
+    },
+    /// `PROXY_HTTP`. `CONNECT host:port HTTP/1.1\r\n\r\n`. Response
+    /// is line-based (NOT `tcplen`-exact like SOCKS): `protocol.c:
+    /// 148-161` special-cases the `HTTP/1.1 ` prefix in `receive_
+    /// request` BEFORE the normal dispatch. `STUB(chunk-12-http-
+    /// proxy)`: the line-based response handling needs a per-conn
+    /// flag (`c->status.proxy_passed`) we don't have yet.
+    Http { host: String, port: u16 },
+}
+
+impl ProxyConfig {
+    /// The proxy server's address, for `try_connect_via_proxy`. C
+    /// `net_socket.c:591`: `str2addrinfo(proxyhost, proxyport, ...)`.
+    /// `Exec` has no proxy addr (the pipe IS the connection).
+    #[must_use]
+    pub fn proxy_addr(&self) -> Option<(&str, u16)> {
+        match self {
+            Self::Exec { .. } => None,
+            Self::Socks4 { host, port, .. }
+            | Self::Socks5 { host, port, .. }
+            | Self::Http { host, port } => Some((host.as_str(), *port)),
+        }
+    }
+
+    /// Map to `socks::ProxyType` for `build_request`/`check_response`.
+    /// `None` for non-SOCKS variants (Exec has no handshake; HTTP is
+    /// line-based).
+    #[must_use]
+    pub fn socks_type(&self) -> Option<crate::socks::ProxyType> {
+        match self {
+            Self::Socks4 { .. } => Some(crate::socks::ProxyType::Socks4),
+            Self::Socks5 { .. } => Some(crate::socks::ProxyType::Socks5),
+            Self::Exec { .. } | Self::Http { .. } => None,
+        }
+    }
+
+    /// `socks::Creds` for `build_request`. SOCKS4 uses only `user`
+    /// (the userid string). SOCKS5 uses both for password auth; if
+    /// either is missing, anonymous (`socks.rs:192` matches the C's
+    /// `proxyuser && proxypass` check).
+    #[must_use]
+    pub fn socks_creds(&self) -> Option<crate::socks::Creds> {
+        match self {
+            Self::Socks4 { user, .. } => user.clone().map(|u| crate::socks::Creds {
+                user: u,
+                pass: None,
+            }),
+            Self::Socks5 { user, pass, .. } => user.clone().map(|u| crate::socks::Creds {
+                user: u,
+                pass: pass.clone(),
+            }),
+            Self::Exec { .. } | Self::Http { .. } => None,
+        }
+    }
 }
 
 /// Parse `Proxy = type [args...]` (`net_setup.c:263-345`). Returns
@@ -317,11 +478,41 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
                 cmd: args.to_owned(),
             }))
         }
-        // STUB(chunk-11-proxy): socks4/socks4a/socks5/http need the
-        // tcplen state machine in conn.rs (read N bytes before id_h).
-        "socks4" | "socks4a" | "socks5" | "http" => Err(format!(
-            "Proxy = {kind} not yet supported (only 'exec' is wired)"
-        )),
+        // C `:326-378`: SOCKS4/4A/5/HTTP all share the same parse
+        // shape: `space`-walk through `host port [user [pass]]`.
+        // `socks4a`: C `proxy.c:80` "not implemented yet". Reject.
+        "socks4a" => Err("Proxy type socks4a not implemented (the C tinc doesn't either)".into()),
+        "socks4" | "socks5" | "http" => {
+            // C `:330-345`: walk space-separated tokens. The C does
+            // it with strchr+NUL-stomp; we split_whitespace (handles
+            // multiple spaces, same effect for valid input).
+            let mut toks = args.split_whitespace();
+            let host = toks.next().filter(|s| !s.is_empty());
+            let port = toks.next().and_then(|s| s.parse::<u16>().ok());
+            let (Some(host), Some(port)) = (host, port) else {
+                // C `:339-343`: "Host and port argument expected".
+                return Err(format!(
+                    "Host and port argument expected for Proxy = {kind}"
+                ));
+            };
+            // C `:348-360`: user/pass optional. Empty string → None
+            // (C `:367-369`: `if(proxyuser && *proxyuser)` — the
+            // pointer-nonnull AND deref-nonNUL idiom).
+            let user = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
+            let pass = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
+            let host = host.to_owned();
+            match kind.to_ascii_lowercase().as_str() {
+                "socks4" => Ok(Some(ProxyConfig::Socks4 { host, port, user })),
+                "socks5" => Ok(Some(ProxyConfig::Socks5 {
+                    host,
+                    port,
+                    user,
+                    pass,
+                })),
+                "http" => Ok(Some(ProxyConfig::Http { host, port })),
+                _ => unreachable!(),
+            }
+        }
         other => Err(format!("Unknown proxy type: {other}")),
     }
 }
@@ -656,10 +847,63 @@ mod tests {
             Some(ProxyConfig::Exec { .. })
         ));
 
-        // unsupported (yet).
-        assert!(parse_proxy_config("socks4 localhost 1080").is_err());
-        assert!(parse_proxy_config("socks5 localhost 1080").is_err());
-        assert!(parse_proxy_config("http localhost 8080").is_err());
+        // SOCKS4: host port [user]. C `net_setup.c:326-378`.
+        match parse_proxy_config("socks4 10.0.0.1 1080").unwrap() {
+            Some(ProxyConfig::Socks4 { host, port, user }) => {
+                assert_eq!(host, "10.0.0.1");
+                assert_eq!(port, 1080);
+                assert!(user.is_none());
+            }
+            other => panic!("expected Socks4, got {other:?}"),
+        }
+        match parse_proxy_config("socks4 10.0.0.1 1080 alice").unwrap() {
+            Some(ProxyConfig::Socks4 { user, .. }) => {
+                assert_eq!(user.as_deref(), Some("alice"));
+            }
+            other => panic!("expected Socks4, got {other:?}"),
+        }
+
+        // SOCKS5: host port [user [pass]].
+        match parse_proxy_config("socks5 proxy.example 1080 bob s3cret").unwrap() {
+            Some(ProxyConfig::Socks5 {
+                host,
+                port,
+                user,
+                pass,
+            }) => {
+                assert_eq!(host, "proxy.example");
+                assert_eq!(port, 1080);
+                assert_eq!(user.as_deref(), Some("bob"));
+                assert_eq!(pass.as_deref(), Some("s3cret"));
+            }
+            other => panic!("expected Socks5, got {other:?}"),
+        }
+        // Anonymous SOCKS5.
+        match parse_proxy_config("socks5 127.0.0.1 1080").unwrap() {
+            Some(ProxyConfig::Socks5 { user, pass, .. }) => {
+                assert!(user.is_none());
+                assert!(pass.is_none());
+            }
+            other => panic!("expected Socks5, got {other:?}"),
+        }
+
+        // HTTP: host port.
+        match parse_proxy_config("http 10.0.0.1 8080").unwrap() {
+            Some(ProxyConfig::Http { host, port }) => {
+                assert_eq!(host, "10.0.0.1");
+                assert_eq!(port, 8080);
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+
+        // Missing host/port → error. C `:339-343`.
+        assert!(parse_proxy_config("socks4").is_err());
+        assert!(parse_proxy_config("socks5 localhost").is_err());
+        assert!(parse_proxy_config("socks5 localhost notaport").is_err());
+        assert!(parse_proxy_config("http localhost").is_err());
+
+        // socks4a: faithfully unimplemented. C `proxy.c:80`.
+        assert!(parse_proxy_config("socks4a localhost 1080").is_err());
 
         // unknown.
         assert!(parse_proxy_config("carrier-pigeon").is_err());
