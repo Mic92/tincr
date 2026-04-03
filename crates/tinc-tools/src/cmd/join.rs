@@ -1226,35 +1226,28 @@ mod tests {
 
     // parse_url
 
+    /// `parse_url` Ok-path table: `(prefix, expected_host, expected_port)`.
+    /// The slug is appended; we only test host/port extraction here.
     #[test]
-    fn url_basic() {
+    fn url_ok() {
         let slug = "a".repeat(SLUG_LEN);
-        let p = parse_url(&format!("host.example:1234/{slug}")).unwrap();
-        assert_eq!(p.host, "host.example");
-        assert_eq!(p.port, "1234");
-    }
-
-    #[test]
-    fn url_default_port() {
-        let slug = "a".repeat(SLUG_LEN);
-        let p = parse_url(&format!("host.example/{slug}")).unwrap();
-        assert_eq!(p.port, "655");
-    }
-
-    #[test]
-    fn url_ipv6_brackets() {
-        let slug = "a".repeat(SLUG_LEN);
-        let p = parse_url(&format!("[::1]:655/{slug}")).unwrap();
-        assert_eq!(p.host, "::1"); // brackets stripped
-        assert_eq!(p.port, "655");
-    }
-
-    #[test]
-    fn url_ipv6_no_port() {
-        let slug = "a".repeat(SLUG_LEN);
-        let p = parse_url(&format!("[fe80::1]/{slug}")).unwrap();
-        assert_eq!(p.host, "fe80::1");
-        assert_eq!(p.port, "655");
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            //          (prefix,               host,           port)
+            ("host.example:1234/",  "host.example", "1234"),
+            // default port
+            ("host.example/",       "host.example", "655"),
+            // IPv6 with brackets → brackets stripped
+            ("[::1]:655/",          "::1",          "655"),
+            // IPv6 no port
+            ("[fe80::1]/",          "fe80::1",      "655"),
+        ];
+        for (prefix, host, port) in cases {
+            let url = format!("{prefix}{slug}");
+            let p = parse_url(&url).unwrap();
+            assert_eq!(p.host, *host, "url: {url:?}");
+            assert_eq!(p.port, *port, "url: {url:?}");
+        }
     }
 
     #[test]
@@ -1286,22 +1279,21 @@ mod tests {
     }
 
     #[test]
-    fn url_bad_slug_length() {
-        assert!(parse_url("host/short").is_none());
+    fn url_err() {
         let long = "a".repeat(SLUG_LEN + 1);
-        assert!(parse_url(&format!("host/{long}")).is_none());
-    }
-
-    #[test]
-    fn url_no_slash() {
-        assert!(parse_url("host:655").is_none());
-    }
-
-    #[test]
-    fn url_bad_b64() {
-        // 48 chars but not valid b64-url. `!` isn't in either alphabet.
-        let slug = "!".repeat(SLUG_LEN);
-        assert!(parse_url(&format!("host/{slug}")).is_none());
+        let bad_b64 = "!".repeat(SLUG_LEN); // `!` not in either b64 alphabet
+        for url in [
+            // bad slug length: short
+            "host/short".to_owned(),
+            // bad slug length: long
+            format!("host/{long}"),
+            // no slash at all
+            "host:655".to_owned(),
+            // 48 chars but not valid b64-url
+            format!("host/{bad_b64}"),
+        ] {
+            assert!(parse_url(&url).is_none(), "url: {url:?}");
+        }
     }
 
     // split_var — the C tokenizer
