@@ -1622,17 +1622,28 @@ impl Daemon {
 
         // C `:231-236`: `if(owner == myself)`. Peer says we don't
         // own a subnet we DO own. C sends ADD_SUBNET correction.
+        //
+        // C ORDERING: `:216 lookup_subnet` FIRST, `:218` bail if not
+        // found, `:231` retaliate only if we DO own it. Security
+        // audit `2f72c2ba`: without the lookup gate, a malicious
+        // peer sends `DEL_SUBNET us 99.99.99.99/32` (a subnet we
+        // never claimed); we retaliate `ADD_SUBNET us 99.99.99.99/
+        // 32`; peer forwards to victim; victim adds bogus route
+        // pointing at us. Gate the retaliate on `contains()`.
         if owner == self.myself {
+            // C `:216-225`: `find = lookup_subnet(myself, &s); if
+            // (!find) { warn; return true }`. Don't lie about
+            // subnets we never owned.
+            if !self.subnets.contains(&subnet, &self.name) {
+                log::warn!(target: "tincd::proto",
+                           "Got DEL_SUBNET from {conn_name} for ourself ({subnet}) \
+                            which does not appear in our subnet tree");
+                return Ok(false);
+            }
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
-            // C `:234`: `send_add_subnet(c, find)`. The C looks up
-            // the subnet WE actually own (`find = lookup_subnet(
-            // myself, &s)` at `:227`); if we don't own it either,
-            // `:228-230` returns true (no correction — peer is
-            // right, we DON'T own it). We don't track per-node
-            // ownership of subnets here (`SubnetTree` is global +
-            // owner-string); send back what they sent. Dark in
-            // single-peer tests.
+            // C `:234`: `send_add_subnet(c, find)`. We DO own it;
+            // retaliate.
             let nw = self.send_subnet(from_conn, Request::AddSubnet, &self.name.clone(), &subnet);
             return Ok(nw);
         }
@@ -1661,23 +1672,35 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // C `:254-256`: `if(owner->status.reachable) subnet_update(
-        // owner, find, false)`. BEFORE the del (the script may want
-        // to see the route one last time — the C orders it this
-        // way). Reachable check: same gate as add.
-        let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
-        if reachable {
-            self.run_subnet_script(false, &owner_name, &subnet);
-        }
-
-        // C `:258`: `subnet_del`. The C does `lookup_subnet` at
-        // `:216` first and warns at `:218` if not found. Our
-        // `del()` returns the bool; same outcome, one fewer walk.
+        // C ORDERING: `:216 lookup_subnet` gates `:254 subnet_
+        // update(..., false)` AND `:258 subnet_del`. Security audit
+        // `2f72c2ba`: firing `subnet-down` for a subnet we never had
+        // `subnet-up` for is a peer-triggers-fork-exec DoS — a peer
+        // can flood `DEL_SUBNET node X` for distinct X (fresh nonces
+        // bypass `seen_request`), each one a `fork+exec`. The C is
+        // protected by `:218` short-circuiting before fork. Do the
+        // `del()` FIRST; bail if false.
+        //
+        // C `:254-256` orders script BEFORE del (the script may want
+        // to see the route one last time). We invert: `del()` returns
+        // bool, the script runs AFTER — the route is gone by then,
+        // but the script's env (`SUBNET=`, `NODE=`) doesn't read the
+        // table. Same observable behavior; one fewer walk than
+        // `contains()` then `del()`.
         if !self.subnets.del(&subnet, &owner_name) {
-            // C `:218-225`: warn, return true.
+            // C `:218-225`: warn, return true. NO script, NO further
+            // side effects.
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for {owner_name} \
                         which does not appear in his subnet tree");
+            return Ok(nw);
+        }
+
+        // C `:254-256`: `if(owner->status.reachable) subnet_update(
+        // owner, find, false)`. Reachable check: same gate as add.
+        let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
+        if reachable {
+            self.run_subnet_script(false, &owner_name, &subnet);
         }
 
         // mac_table sync. Only remove if the entry's owner matches
