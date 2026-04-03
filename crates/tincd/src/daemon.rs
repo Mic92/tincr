@@ -1421,6 +1421,22 @@ impl Daemon {
         // up` on the TUN. Base env only (no NODE/SUBNET).
         daemon.run_script("tinc-up");
 
+        // C `net_setup.c:1273`: `subnet_update(myself, NULL, true)`
+        // — fire subnet-up for our OWN configured subnets. AFTER
+        // tinc-up: that script typically does `ip addr add` /
+        // `ip link set up`; subnet-up scripts (which add routes)
+        // assume the iface is configured. Same loop shape as the
+        // BecameReachable arm at gossip.rs:1061-1069.
+        let owned: Vec<Subnet> = daemon
+            .subnets
+            .iter()
+            .filter(|(_, o)| *o == daemon.name)
+            .map(|(s, _)| *s)
+            .collect();
+        for s in &owned {
+            daemon.run_subnet_script(true, &daemon.name, s);
+        }
+
         Ok(daemon)
     }
 
@@ -1608,6 +1624,20 @@ impl Drop for Daemon {
     /// `ControlSocket::drop` already unlinks the socket. We do the
     /// pidfile.
     fn drop(&mut self) {
+        // C `net_setup.c:1298`: `subnet_update(myself, NULL,
+        // false)` BEFORE `device_disable`. Mirror of the setup-
+        // time subnet-up loop. Subnet-down first (may `ip route
+        // del`), THEN tinc-down (brings the iface down).
+        let owned: Vec<Subnet> = self
+            .subnets
+            .iter()
+            .filter(|(_, o)| *o == self.name)
+            .map(|(s, _)| *s)
+            .collect();
+        for s in &owned {
+            self.run_subnet_script(false, &self.name, s);
+        }
+
         // C `net_setup.c:756-762` (`device_disable`): tinc-down
         // BEFORE device close. The script typically does `ip link
         // set down` / `ip addr del`. C calls it from `close_
