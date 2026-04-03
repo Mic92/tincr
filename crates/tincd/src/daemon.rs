@@ -1201,7 +1201,9 @@ impl Daemon {
     /// `too_many_lines`: the C `receive_meta` + `receive_request`
     /// dispatch inlined (`meta.c:164-320` is 156 lines). Splitting
     /// would thread `id`/`conn`/`self` borrows through helpers.
-    // TODO(chunk-4b): too_many_lines goes away with send_ack.
+    /// chunk-4b's send_ack didn't shrink this — it GREW it (the
+    /// SPTPS-mode dispatch + ACK handling moved IN, not out). The
+    /// allow stays; the borrow-threading cost is real.
     #[allow(clippy::too_many_lines)]
     fn on_conn_readable(&mut self, id: ConnId) {
         // ─── feed (one recv)
@@ -1757,21 +1759,25 @@ impl Daemon {
         self.seen.check(s, self.timers.now())
     }
 
-    /// `graph()` (`graph.c:327-346`): sssp + diff + mst. Logs each
+    /// `graph()` (`graph.c:322-327`): sssp + diff + mst. Logs each
     /// transition. The script-spawn / sptps_stop / mtu-reset are
     /// chunk-7/8 deferrals; the LOG proves the diff fired.
     ///
-    /// C `graph.c:261`: `"Node %s (%s) became reachable"` at INFO.
-    /// We don't have the hostname (no `NodeState` for transitive
-    /// nodes); log the name from the graph.
+    /// C `graph.c:227`: `"Node %s (%s) became reachable"` at
+    /// `DEBUG_TRAFFIC`. We don't have the hostname (no `NodeState`
+    /// for transitive nodes); log the name from the graph.
     fn run_graph_and_log(&mut self) {
         let (transitions, _mst, routes) = run_graph(&mut self.graph, self.myself);
         // Stash for `dump_nodes` (`node.c:218`: nexthop/via/distance
         // are read straight off `node_t`, which the C `graph.c:188-
         // 196` writes into). We keep the side table.
         self.last_routes = routes;
-        // STUB(chunk-6): _mst feeds connection_t.status.mst (the
-        // broadcast tree). One peer in chunk 5; mst is trivial.
+        // STUB(chunk-9): _mst feeds connection_t.status.mst, read
+        // ONLY by broadcast_packet (`net_packet.c:1635`). The
+        // broadcast tree is route.c-rest territory.
+        // STUB(chunk-9): subnet_cache_flush_tables (`graph.c:323`).
+        // The hash cache (`subnet.c:53-130`) isn't ported; nothing
+        // to flush. Lands when the cache does.
         for t in transitions {
             match t {
                 Transition::BecameReachable { node, via } => {
@@ -1789,9 +1795,10 @@ impl Daemon {
                     log::info!(target: "tincd::graph",
                                "Node {name} became reachable (via {via_name})");
                     // STUB(chunk-8): execute_script("host-up")
-                    // (`graph.c:265-270`).
-                    // STUB(chunk-7): update_node_udp (`graph.c:
-                    // 291-320`).
+                    // (`graph.c:284-287`).
+                    // STUB(chunk-7): update_node_udp — the SET
+                    // path is sssp itself (`graph.c:201`); the
+                    // CLEAR path is `:297` on unreachable.
                 }
                 Transition::BecameUnreachable { node } => {
                     let name = self
@@ -1801,10 +1808,11 @@ impl Daemon {
                     log::info!(target: "tincd::graph",
                                "Node {name} became unreachable");
                     // STUB(chunk-8): execute_script("host-down")
-                    // (`graph.c:273`).
+                    // (`graph.c:284-287`).
                     // STUB(chunk-7): sptps_stop(&n->sptps), reset
                     // mtuprobes/minmtu/maxmtu, kill mtu timer
-                    // (`graph.c:275-289`).
+                    // (`graph.c:259-271`). update_node_udp(NULL)
+                    // (`graph.c:297`).
                 }
             }
         }
@@ -2048,8 +2056,15 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got ADD_SUBNET from {} for ourself ({subnet})",
                        conn.map_or("<gone>", |c| c.name.as_str()));
-            // STUB(chunk-6): send_del_subnet(c, &s) (`:102`).
+            // STUB(chunk-6): send_del_subnet(c, &s) (`:103`).
             // Needs the broadcast send machinery. Log + return Ok.
+            debug_assert!(
+                false,
+                "STUB hit: ADD_SUBNET-for-ourself retaliate path \
+                 (protocol_subnet.c:103). Dark in chunk-5 tests \
+                 (peer never sends our name as owner); chunk 6's \
+                 multi-peer mesh can hit it via stale gossip."
+            );
             return Ok(false);
         }
 
@@ -2070,8 +2085,9 @@ impl Daemon {
         log::debug!(target: "tincd::proto",
                     "would forward ADD_SUBNET (one peer, no-op)");
 
-        // STUB(chunk-7): MAC fast-handoff (`:142-148`). No TAP
-        // mode yet.
+        // STUB(chunk-9): MAC fast-handoff (`:142-148`). No TAP/
+        // RMODE_SWITCH yet; SUBNET_MAC subnets only exist in switch
+        // mode (route.c-rest territory).
 
         Ok(false)
     }
@@ -2085,6 +2101,7 @@ impl Daemon {
     ///   unknown owner is a warn-and-drop (`:206-210`)
     /// - `:216` `lookup_subnet` — same: DEL for unknown subnet is
     ///   warn-and-drop (`:218-225`). Our `del()` returns `bool`.
+    /// - `:199-204` `tunnelserver` filter — STUBBED (deferred niche)
     /// - `:231-236` `if(owner == myself)` retaliate ADD — STUBBED
     /// - `:244` `forward_request` — STUBBED
     /// - `:254-256` `subnet_update(..., false)` — STUBBED (chunk 8)
@@ -2102,6 +2119,8 @@ impl Daemon {
             .map_or("<gone>", |c| c.name.as_str())
             .to_owned();
 
+        // STUB(chunk-9): tunnelserver mode (`:199-204`).
+
         // C `:197,206-210`: `lookup_node`. NOT lookup_or_add — a
         // DEL for a node we've never heard of is wrong. Warn,
         // return true (don't drop conn).
@@ -2118,6 +2137,11 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
             // STUB(chunk-6): send_add_subnet(c, find) (`:234`).
+            debug_assert!(
+                false,
+                "STUB hit: DEL_SUBNET-for-ourself retaliate path \
+                 (protocol_subnet.c:234). Dark in chunk-5 tests."
+            );
             return Ok(false);
         }
 
@@ -2172,7 +2196,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        // STUB(chunk-9): tunnelserver mode (`:102-111`).
+        // STUB(chunk-9): tunnelserver mode (`:103-111`).
 
         let from_id = self.lookup_or_add_node(&edge.from);
         let to_id = self.lookup_or_add_node(&edge.to);
@@ -2205,6 +2229,12 @@ impl Daemon {
                             which does not match existing entry");
                 // STUB(chunk-6): send_add_edge(c, e) (`:153`).
                 // Send back what WE think the edge is.
+                debug_assert!(
+                    false,
+                    "STUB hit: ADD_EDGE-for-ourself-mismatch retaliate \
+                     (protocol_edge.c:153). Dark in chunk-5 tests \
+                     (test never gossips our own edges back at us)."
+                );
                 return Ok(false);
             }
 
@@ -2237,8 +2267,13 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got ADD_EDGE from {conn_name} for ourself \
                         which does not exist");
-            // STUB(chunk-6): contradicting_add_edge++ (`:187`).
-            // STUB(chunk-6): send_del_edge(c, e) (`:192`).
+            // STUB(chunk-6): contradicting_add_edge++ (`:186`).
+            // STUB(chunk-6): send_del_edge(c, e) (`:190`).
+            debug_assert!(
+                false,
+                "STUB hit: ADD_EDGE-for-ourself-nonexistent contradict \
+                 (protocol_edge.c:186-190). Dark in chunk-5 tests."
+            );
             return Ok(false);
         } else {
             // C `:197-205`: `edge_add`. The fresh-edge case.
@@ -2275,6 +2310,7 @@ impl Daemon {
     /// - `:250-251` `lookup_node` (NOT lookup_or_add)
     /// - `:263-273` `from`/`to` not found → warn + return true
     /// - `:277-283` `lookup_edge` not found → warn + return true
+    /// - `:253-261` `tunnelserver` filter — STUBBED (deferred niche)
     /// - `:285-291` `from == myself` → retaliate ADD — STUBBED
     /// - `:295-297` `forward_request` — STUBBED
     /// - `:301` `edge_del`
@@ -2288,6 +2324,8 @@ impl Daemon {
         if self.seen_request(body) {
             return Ok(false);
         }
+
+        // STUB(chunk-9): tunnelserver mode (`:253-261`).
 
         let conn_name = self
             .conns
@@ -2326,6 +2364,11 @@ impl Daemon {
                        "Got DEL_EDGE from {conn_name} for ourself");
             // STUB(chunk-6): contradicting_del_edge++ (`:288`).
             // STUB(chunk-6): send_add_edge(c, e) (`:289`).
+            debug_assert!(
+                false,
+                "STUB hit: DEL_EDGE-for-ourself contradict \
+                 (protocol_edge.c:288-289). Dark in chunk-5 tests."
+            );
             return Ok(false);
         }
 
@@ -2362,8 +2405,8 @@ impl Daemon {
     /// - `:1023` `c->allow_request = ALL`
     /// - `:1028` `send_everything(c)` — walks empty trees, sends 0
     /// - `:1032-1051` edge_add: address+port, getsockname, weight avg
-    /// - `:1055-1061` `send_add_edge` broadcast — STUBBED (no peers)
-    /// - `:1065` `graph()` — STUBBED (chunk 5)
+    /// - `:1055-1059` `send_add_edge` broadcast — STUBBED (no peers)
+    /// - `:1063` `graph()` — ✅ `run_graph_and_log()`
     ///
     /// Returns the io_set signal. (Always `false` in chunk 4b:
     /// `send_everything` iterates empty trees, `send_add_edge` is
@@ -2440,7 +2483,9 @@ impl Daemon {
                                 "Established a second connection with {name}, \
                                  closing old connection");
                     self.terminate(old_conn);
-                    // C `:989`: `graph()` after terminate. STUBBED.
+                    // C `:989`: `graph()` after terminate. The
+                    // unconditional `run_graph_and_log()` below
+                    // covers it (extra graph() is idempotent).
                 }
             }
         }
@@ -2537,9 +2582,9 @@ impl Daemon {
         // accessor.
         log::debug!(target: "tincd::proto",
                     "send_everything: would send {n_subnets} subnets, \
-                     ~2 edges (STUB chunk-5b)");
+                     ~2 edges (STUB chunk-6)");
 
-        // STUB(chunk-6): C `:1055-1061` send_add_edge(everyone,
+        // STUB(chunk-6): C `:1055-1059` send_add_edge(everyone,
         // c->edge). Broadcast to all OTHER active conns. One peer
         // → `everyone` is empty after excluding self.
 

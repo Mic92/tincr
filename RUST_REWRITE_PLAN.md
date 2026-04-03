@@ -793,3 +793,149 @@ Aggressively shed scope:
 4. **`tincd` Rust with legacy protocol** — ~24 weeks in
 
 Total: roughly **7 months** for one experienced engineer. The extra month over a naïve estimate is the bespoke-crypto tax: each of ChaPoly/ECDH/PRF/key-format is two days to implement and two weeks to be *certain*. The Phase 0 KAT vectors are the highest-leverage investment in the whole plan — they turn "is the crypto right?" from a debugging nightmare into a `cargo test` boolean.
+
+---
+
+## Appendix: Stub audit (post-chunk-5)
+
+`83de6651` claimed "STUB renumber 5b→6"; this audit walked all 66
+markers exhaustively, checked C line refs against `src/` HEAD, and
+verified chunk attribution against the chunk table above.
+
+### Method
+
+```sh
+rg -n 'STUB|TODO|FIXME|DEFERRED|XXX|HACK' crates/ --type rust
+# per marker: sed -n '<line>p' src/<file> + chunk-table cross-ref
+ctags -x --c-kinds=f src/{subnet,protocol*,node,edge,graph,meta,connection,address_cache}.c
+# reverse audit: C funcs with no Rust port AND no STUB
+```
+
+### Inventory (by file)
+
+#### `crates/tincd/src/daemon.rs` (48 → 55 markers, 5 dark stubs hardened)
+
+| Marker | Line | Chunk | C ref | Status |
+|---|---|---|---|---|
+| `TODO(chunk-4b): too_many_lines` | 1169 | 4b | meta.c:164 | ⚠ stale — chunk 4b LANDED; fn GREW to 351 LOC (SPTPS dispatch moved IN). TODO removed; allow stays with corrected rationale. |
+| `STUB(chunk-6): _mst feeds status.mst` | 1695 | ~~6~~→9 | graph.c:103 → net_packet.c:1635 | ⚠ re-chunk — `status.mst` only consumer is `broadcast_packet`, route.c-rest territory. Chunk 6 has no broadcast. |
+| `STUB(chunk-8): execute_script("host-up")` | 1713 | 8 | ~~graph.c:265-270~~→284-287 | ⚠ wrong C ref — `execute_script` is at `:284,287`; `:265` is `udp_confirmed=false`. Ref fixed. |
+| `STUB(chunk-7): update_node_udp` | 1715 | 7 | ~~graph.c:291-320~~→201,297 | ⚠ wrong C ref — set path is sssp `:201`, clear path is `:297`. `:291-320` is the env-var/script-spawn block. Ref fixed. |
+| `STUB(chunk-8): execute_script("host-down")` | 1725 | 8 | ~~graph.c:273~~→284-287 | ⚠ wrong C ref — `:273` is `char *name;`. Ref fixed. |
+| `STUB(chunk-7): sptps_stop + mtu reset` | 1727 | 7 | ~~graph.c:275-289~~→259-271 | ⚠ wrong C ref — `sptps_stop` is `:259`, `mtuprobes` is `:269`, `timeout_del` is `:271`. Ref fixed. |
+| `STUB(chunk-9): tunnelserver` (add_subnet) | 1768 | 9 | protocol_subnet.c:79-84 | ✅ correct — `tunnelserver`/`strictsubnets` are config-mode niches; chunk 9 (`net_setup.c reloadable`) is the right home. Not in plan's chunk table explicitly but module-mapping says "deferred". |
+| `STUB(chunk-6): send_del_subnet` (retaliate) | 1780 | 6 | ~~:102~~→:103 | ⚠ wrong C ref (off-by-one). **DARK** — `peer_ack_exchange` never sends ADD_SUBNET with our name. `debug_assert!(false, ...)` added. |
+| `STUB(chunk-9): strictsubnets` | 1785 | 9 | protocol_subnet.c:116-122 | ✅ correct, dark (mode never enabled) |
+| `STUB(chunk-8): subnet_update(..., true)` | 1793 | 8 | protocol_subnet.c:130-132 | ✅ correct — script firing |
+| `STUB(chunk-6): forward_request` (add_subnet) | 1796 | 6 | protocol_subnet.c:136-138 | ✅ correct — exercised by `peer_ack_exchange` ADD_SUBNET (logs "would forward", verified silent on wire) |
+| `STUB(chunk-7): MAC fast-handoff` | 1802 | ~~7~~→9 | protocol_subnet.c:142-148 | ⚠ re-chunk — `SUBNET_MAC` only exists in `RMODE_SWITCH` (route.c-rest). Chunk 7 is `route_ipv4` only. |
+| `STUB(chunk-6): send_add_subnet` (retaliate) | 1849 | 6 | protocol_subnet.c:234 | ✅ correct, **DARK** — `debug_assert!` added |
+| `STUB(chunk-6): forward_request` (del_subnet) | 1853 | 6 | protocol_subnet.c:244-246 | ✅ correct — exercised by `peer_ack_exchange` DEL_SUBNET |
+| `STUB(chunk-8): subnet_update(..., false)` | 1857 | 8 | protocol_subnet.c:254-256 | ✅ correct |
+| `STUB(chunk-9): tunnelserver` (add_edge) | 1904 | 9 | ~~:102-111~~→103-111 | ⚠ off-by-one (`:102` is blank). Fixed. |
+| `STUB(chunk-6): send_add_edge` (retaliate) | 1935 | 6 | protocol_edge.c:153 | ✅ correct, **DARK** — `debug_assert!` added |
+| `STUB(chunk-6): contradicting_add_edge++` | 1961 | 6 | ~~:187~~→:186 | ⚠ off-by-one. Fixed. |
+| `STUB(chunk-6): send_del_edge` (contradict) | 1962 | 6 | ~~:192~~→:190 | ⚠ wrong C ref — `:192` is `sockaddrfree`. **DARK** — `debug_assert!` added. |
+| `STUB(chunk-6): forward_request` (add_edge) | 1970 | 6 | protocol_edge.c:209-211 | ✅ correct — exercised by `peer_edge_triggers_reachable` |
+| `STUB(chunk-6): contradicting_del_edge++` | 2037 | 6 | protocol_edge.c:288 | ✅ correct, **DARK** |
+| `STUB(chunk-6): send_add_edge` (del retaliate) | 2038 | 6 | protocol_edge.c:289 | ✅ correct, **DARK** — `debug_assert!` added |
+| `STUB(chunk-6): forward_request` (del_edge) | 2042 | 6 | protocol_edge.c:295-297 | ✅ correct, dark (no DEL_EDGE in tests) |
+| `STUB(chunk-6): reverse-edge cleanup` | 2052 | 6 | protocol_edge.c:309-320 | ✅ correct, dark — comment says why (`on_ack` adds bidi) |
+| `:1003-1019 PMTU/ClampMSS STUBBED` | 2070,2099 | (9) | protocol_auth.c:1003-1019 | ✅ correct ref. Untagged with chunk number — intentional: tied to "config_tree retained" decision, lands when needed. Module-mapping says "chunk 9" (`send_ack` per-host config). |
+| `:1065 graph() STUBBED (chunk 5)` | 2075 | 5 | ~~:1065~~→:1063 | ⚠ stale — chunk 5 LANDED, `run_graph_and_log()` IS called. Doc fixed. (Also `:1065` is `return true`; `graph()` is `:1063`.) |
+| `:989 graph() STUBBED` | 2152 | — | protocol_auth.c:989 | ⚠ stale — the unconditional `run_graph_and_log()` 80 lines down covers it (extra `graph()` in C is idempotent w.r.t. state diff). Comment fixed. |
+| `STUB(chunk-6): send_everything actual sending` | 2207 | 6 | protocol_auth.c:870-900 | ✅ correct — `peer_ack_exchange` asserts WouldBlock post-ACK (proves stub doesn't leak bytes) |
+| `STUB chunk-5b` (log msg) | 2221 | ~~5b~~→6 | — | ⚠ stale — survived the `83de6651` renumber sweep. Fixed. |
+| `STUB(chunk-6): send_add_edge(everyone)` | 2223 | 6 | ~~:1055-1061~~→:1055-1059 | ⚠ wrong C ref — `:1061` is `/* Run MST... */`. Fixed. |
+
+#### `crates/tincd/src/proto.rs` (2 markers)
+
+| Marker | Line | Chunk | C ref | Status |
+|---|---|---|---|---|
+| `:844-865 per-host config STUBBED` | 695 | (9) | protocol_auth.c:844-865 | ✅ correct ref (`:844` IndirectData, `:863` Weight). Same untagged/config-tree caveat as daemon.rs:2099. |
+| `:863-865 Weight STUBBED` | 708 | (9) | protocol_auth.c:863-865 | ✅ correct |
+
+#### `crates/tincd/src/addrcache.rs` (1 → 2 markers)
+
+| Marker | Line | Chunk | C ref | Status |
+|---|---|---|---|---|
+| `TODO(chunk6): lazy getaddrinfo` | 33 | 6 | ~~:151-199~~→:157-199 | ⚠ wrong C ref — `:151` is `if(!cache->config_tree)`; the `str2addrinfo` call is `:177`; the `Address` config walk starts `:157`. Fixed. |
+| 🔴 **unmarked gap**: `get_known_addresses` | — | 6 | address_cache.c:31-65, :126-148 | C `get_recent_address` has THREE phases: cached → **edge-derived** (`e->reverse->address`) → config+DNS. We collapsed to two (cached + config). The middle phase walks `n->edge_tree` for "where the graph last saw this peer" — useful when a peer roams. New `TODO(chunk-6)` added; same chunk as DNS resolve (both feed `do_outgoing_connection`). |
+
+#### `crates/tinc-tools/src/bin/tinc.rs` + `cmd/invite.rs` (4 markers)
+
+| Marker | Line | Chunk | C ref | Status |
+|---|---|---|---|---|
+| `TODO(5b): when control protocol lands` | tinc.rs:565 | ~~5b~~→8 | invitation.c:480-484 | ⚠ re-chunk — Phase 5b LANDED (CLI-side `CtlSocket::send(Reload)` works, used by `cmd_reload`/`cmd_edit`). But `invite` is `needs_daemon: false` — `resolve_runtime()` never runs, `paths.pidfile()` panics. AND daemon-side REQ_RELOAD is chunk 8 (currently returns REQ_INVALID per `proto.rs:1436` test). The C `connect_tincd` resolves runtime paths inline; our split gates it. Re-chunked → 8 (lands when daemon handler does). |
+| `TODO(5b)` (module doc) | invite.rs:39 | ~~5b~~→8 | invitation.c:480-484 | ⚠ re-chunk — same |
+| `TODO(5b)` (key-is-new flag) | invite.rs:228 | 5b | invitation.c:480 | ⚠ stale — prose only; comment fixed (binary wrapper handles the reload attempt or lack thereof) |
+| `TODO when script.rs lands` | invite.rs:269 | — | invitation.c:598 | ⚠ re-chunk → `TODO(chunk-8)` (scripts is chunk 8's `process.c`/`execute_script`) |
+
+#### `crates/tinc-tools/src/cmd/{join,fsck,invite}.rs`, `tinc-device/bsd.rs` — non-chunk markers
+
+| Marker | Line | Status |
+|---|---|---|
+| `join.rs:328` `join_XXXXXXXX` | prose word ("XXXXXXXX") | ✅ not a marker — describes C random-netname temp dir |
+| `join.rs:427` `TODO(ifconfig.c port)` | — | ✅ correct — `ifconfig.c` is in plan's chunk-10 table. Untagged with number; OK (it's the CLI side, daemon-side is chunk 10). |
+| `fsck.rs:1156,1923,1940` `TODO(feature)` | — | ✅ correct — explicitly NOT a port ("not a port; a feature"). Stays. |
+| `genkey.rs:369` `tmp.XXXXXX` | — | ✅ not a marker — mkstemp(3) template syntax in prose |
+| `invite.rs:423` `TODO: port check_netname` | utils.c:229 | ✅ correct — `names.rs` consolidation, lands "when more callers need it" |
+| `bsd.rs:467` "stubs aren't TODO comments" | — | ✅ not a marker — prose explaining the BSD `open()` worklist comments are actionable, not deferred |
+| `tinc_cli.rs:1201` "are TODO" | — | ✅ not a marker — prose noting Phase-6 cross-impl real-socket join test |
+| `stop.rs:1263` "send_everything STUBBED" | — | ✅ not a marker — test comment explaining why post-ACK reads `WouldBlock` |
+
+### Reverse audit: unmarked gaps
+
+C functions in chunk-5-touched files with no Rust port AND no STUB
+marker. `init_*`/`exit_*`/`free_*`/`new_*` lifecycle and comparator
+fns excluded (Drop/ctor/BTreeMap-key cover them).
+
+| C function | File:Line | Ported? | Status |
+|---|---|---|---|
+| `subnet_cache_flush_tables` | subnet.c:159, called graph.c:323 | ❌ | 🔴 unmarked gap — `graph()` calls this FIRST (`:323`). The hash cache (`subnet.c:53-130`) isn't ported; nothing to flush. New `STUB(chunk-9)` added in `run_graph_and_log` (cache is a perf opt, lands with `route.c` if profiling cares). |
+| `get_known_addresses` | address_cache.c:31 | ❌ | 🔴 unmarked gap — see addrcache.rs row above. New TODO added. |
+| `tunnelserver` filter (del_subnet) | protocol_subnet.c:199-204 | ❌ | 🔴 unmarked gap — `on_add_subnet` has the marker, `on_del_subnet` doesn't. Symmetry hole. `STUB(chunk-9)` added. |
+| `tunnelserver` filter (del_edge) | protocol_edge.c:253-261 | ❌ | 🔴 unmarked gap — same symmetry hole. `STUB(chunk-9)` added. |
+| `broadcast_meta` | meta.c:113 | ❌ | ✅ intentional — `forward_request`'s sibling. The chunk-6 plan row explicitly mentions `forward_request`; `broadcast_meta` is a helper of it. Covered by the existing `STUB(chunk-6): forward_request` markers transitively. |
+| `dump_edges` / `dump_nodes` / `dump_traffic` | edge.c:123, node.c:201,226 | ❌ | ✅ module-mapping says chunk 8 (REQ_DUMP_* daemon-side). CLI parser side already done. |
+| `lookup_node_id` / `lookup_node_udp` / `update_node_udp` | node.c:157,162,167 | ❌ | ✅ module-mapping says chunk 7 (UDP data plane). `update_node_udp` has explicit STUB marker in daemon.rs. |
+| `send_add_edge` / `send_del_edge` / `send_add_subnet` / `send_del_subnet` | protocol_edge.c:37,219; protocol_subnet.c:33,153 | ❌ | ✅ covered by 9× explicit `STUB(chunk-6)` markers in daemon.rs |
+| `send_everything` | protocol_auth.c:870 | ❌ | ✅ explicit `STUB(chunk-6)` in daemon.rs:2207 |
+| `forward_request` | protocol.c:135 | ❌ | ✅ explicit `STUB(chunk-6)` ×4 in daemon.rs |
+
+### Dark-stub hardening
+
+5 retaliate paths (`owner == myself` / `from == myself`) gained
+`debug_assert!(false, "STUB hit: ...")`. Why `debug_assert!` not
+`unreachable!()`: these ARE reachable in a real mesh (stale gossip
+about us from a third peer); the C handles them. They're dark only
+because chunk-5 tests are responder-only with one well-behaved peer.
+A `debug_assert!` in test profile = loud panic when chunk-6's
+multi-daemon test first hits one; no-op in release (the `return
+Ok(false)` drop-but-don't-terminate is correct chunk-5 behavior).
+
+| Path | C ref | Why dark in chunk-5 |
+|---|---|---|
+| ADD_SUBNET-for-ourself | protocol_subnet.c:103 | Test never sends `ADD_SUBNET ... testnode ...` (our name as owner) |
+| DEL_SUBNET-for-ourself | protocol_subnet.c:234 | Same |
+| ADD_EDGE-for-ourself-mismatch | protocol_edge.c:153 | Test never gossips our edge back at us with different params |
+| ADD_EDGE-for-ourself-nonexistent | protocol_edge.c:186-190 | Test never sends `ADD_EDGE testnode X` for an edge we don't have |
+| DEL_EDGE-for-ourself | protocol_edge.c:288-289 | Test never sends `DEL_EDGE testnode X` |
+
+### Summary
+
+| Category | Count | Action |
+|---|---|---|
+| ✅ correct | 28 | none |
+| ⚠ wrong C ref | 9 | fixed |
+| ⚠ re-chunk | 5 | `_mst` 6→9; MAC fast-handoff 7→9; `invitation-created` →8; 2× invite-reload 5b→8 |
+| ⚠ stale (landed) | 4 | `TODO(chunk-4b)`; `graph()` chunk-5; `:989 graph()`; `STUB chunk-5b` log msg |
+| 🔴 unmarked gap | 4 | new STUB/TODO markers added |
+| dark stubs hardened | 5 | `debug_assert!(false, ...)` |
+| not-a-marker (prose) | 5 | none |
+
+Net marker delta: 66 → 70 (-6 stale removed/fixed, +4 unmarked gaps,
++5 debug_assert messages, +1 split-ref). The chunk-6 worklist's
+"15 grep-able `STUB(chunk-6)` markers" claim from the chunk-5 commit
+was undercounted — actual is 17 after this audit (+ the 2 retaliate
+paths previously missing line refs).

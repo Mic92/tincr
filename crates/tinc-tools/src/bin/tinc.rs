@@ -556,14 +556,20 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     )?;
 
     if r.key_is_new {
-        // C `invitation.c:483`: `"Could not signal the tinc daemon.
-        // Please restart or reload it manually."`. We always emit
-        // this (no daemon to signal yet). Phrasing matches the C
+        // C `invitation.c:480-484`: `if(connect_tincd(true)) reload;
+        // else fprintf("Could not signal...")`. Phrasing matches C
         // exactly so users grepping stack overflow find the right
         // post.
         //
-        // TODO(5b): when control protocol lands, replace with
-        // `if ctl.reload().is_err() { eprintln!(...) }`.
+        // `invite` is `needs_daemon: false` — `resolve_runtime()`
+        // wasn't called, `paths.pidfile()` would panic. The C
+        // `connect_tincd` does its own runtime resolution inline;
+        // our split puts that behind the `needs_daemon` gate. We
+        // could resolve here, but daemon-side REQ_RELOAD is chunk
+        // 8 anyway (would get nonzero ack). Warn unconditionally
+        // until then.
+        // TODO(chunk-8): inline resolve_runtime + best-effort
+        // ctl.send(Reload) once daemon-side handler exists.
         eprintln!(
             "Could not signal the tinc daemon. \
              Please restart or reload it manually."

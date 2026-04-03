@@ -25,12 +25,19 @@
 //!
 //! ## Deferred: lazy hostname resolve
 //!
-//! C `get_recent_address` (`:151-199`) calls `str2addrinfo` (which
+//! C `get_recent_address` (`:157-199`) calls `str2addrinfo` (which
 //! calls `getaddrinfo`) for each `Address = bob.example.com 655`
 //! line as the cursor reaches it — DNS at connect time, not config
 //! load time. We take pre-resolved `SocketAddr`s only. Chunk 6's
 //! `do_outgoing_connection` integration owns DNS.
-// TODO(chunk6): lazy getaddrinfo for hostname `Address` lines (`:151-199`).
+//!
+//! C `get_recent_address` (`:126-148`) ALSO walks `get_known_addresses`
+//! (`:31-65`): edge-derived addresses (`e->reverse->address` for each
+//! edge in `n->edge_tree`). The graph already knows where the peer was
+//! last seen — try those before DNS. We don't (graph edge addresses
+//! aren't surfaced here yet). Same chunk-6 deferral.
+// TODO(chunk-6): lazy getaddrinfo for hostname `Address` lines (`:157-199`).
+// TODO(chunk-6): get_known_addresses edge-walk (`:31-65`, `:126-148`).
 
 #![forbid(unsafe_code)]
 

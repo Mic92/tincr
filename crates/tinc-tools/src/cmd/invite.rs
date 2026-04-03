@@ -36,8 +36,10 @@
 //!   best-effort in C, degrades to no-op when daemon's down. The
 //!   `hosts/NAME` exists check (kept) covers the disk case.
 //! - `connect_tincd(true)` reload (`invitation.c:480-484`): we always
-//!   print the "please restart" warning. **TODO(5b)**: one-line
-//!   `ctl.send(CtlRequest::Reload)` when control protocol lands.
+//!   print the "please restart" warning. `invite` is `needs_daemon:
+//!   false` (no `resolve_runtime()`), and daemon-side REQ_RELOAD is
+//!   chunk 8. **TODO(chunk-8)**: wire best-effort reload once both
+//!   land.
 //! - `get_my_hostname` HTTP probe (`invitation.c:140-203`): hand-crafted
 //!   `GET /host.cgi` to `tinc-vpn.org:80` to discover our IP. We require
 //!   `Address` to be set instead.
@@ -224,8 +226,8 @@ pub fn invite(
         let sk = keypair::generate();
         write_invitation_key(&key_path, &sk)?;
         // C `invitation.c:480`: `if(connect_tincd(true)) reload;
-        // else fprintf("please restart")`. We always set the
-        // flag; binary always prints the warning. TODO(5b).
+        // else fprintf("please restart")`. We set the flag; the
+        // binary wrapper attempts the reload (best-effort).
         (sk, true)
     };
 
@@ -266,7 +268,8 @@ pub fn invite(
     let url = Zeroizing::new(format!("{address}/{}", *slug));
 
     // C `invitation.c:598`: execute_script("invitation-created").
-    // Dropped — see module doc. TODO when script.rs lands.
+    // Dropped — see module doc. TODO(chunk-8): lifts to shared
+    // script.rs with daemon's execute_script.
 
     Ok(InviteResult { url, key_is_new })
 }
