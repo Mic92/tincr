@@ -1672,6 +1672,30 @@ fn three_daemon_tunnelserver() {
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
     // spokes' pubkeys (for the meta-SPTPS auth).
     mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    // mid: append `Subnet =` to hosts/{alice,bob}. With
+    // `:880 strictsubnets|=tunnelserver`, mid's `load_all_nodes`
+    // preloads these; bob's gossip'd ADD_SUBNET hits the `:93`
+    // lookup-first noop. Without preload, mid hits `:109` ("we
+    // should already know all allowed subnets") and DROPS bob's
+    // subnet — mid can't route to bob. The C requires this preload
+    // for tunnelserver hubs; our pre-strictsubnets code accepted
+    // gossip without it (the `:109` gate didn't exist), so the
+    // test predates the requirement. `write_config_multi` only
+    // writes pubkey to hosts/PEER, so append.
+    let mid_hosts = mid.confbase.join("hosts");
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(mid_hosts.join("alice"))
+            .unwrap();
+        writeln!(f, "Subnet = 10.0.0.1/32").unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(mid_hosts.join("bob"))
+            .unwrap();
+        writeln!(f, "Subnet = 10.0.0.2/32").unwrap();
+    }
     // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device. Knows
     // bob's pubkey (irrelevant here — she'll never start a tunnel
     // to bob because she never learns he exists).

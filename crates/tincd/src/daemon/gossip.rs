@@ -1480,24 +1480,23 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // C `:109-112`: `if(tunnelserver)` second gate. Reached
-        // when owner IS the direct peer but the subnet wasn't in
-        // our hosts/ file ("unauthorized"). The C `:880`
-        // `strictsubnets |= tunnelserver` makes the `:116` check
-        // below fire on the SAME predicate, so this gate is DEAD
-        // CODE in practice. The C keeps both for clarity (they
-        // ARE conceptually distinct: `:109` is "hub doesn't trust
-        // direct peers' arbitrary claims", `:116` is "operator's
-        // hosts/ is authority"). Match the C: keep both, in C order.
+        // C `:109-113`: `if(tunnelserver)` second gate. Reached
+        // when owner IS the direct peer but the subnet wasn't
+        // preloaded from our hosts/ file ("unauthorized"). The C
+        // `:107` comment says "we should already know all allowed
+        // subnets" — with `:880 strictsubnets|=tunnelserver`,
+        // `load_all_nodes` preloaded the hosts/-file subnets;
+        // `:93` lookup-first noops on those. Reaching here means
+        // the subnet ISN'T on disk. Log + drop. NO forward (C
+        // `:113` is just `return true` — only `:116` strictsubnets
+        // forwards). The `:116` gate below is unreachable when
+        // tunnelserver is set (this one fires first); both kept
+        // for C-parity.
         if self.settings.tunnelserver {
-            // Same gate body as `:116` below; the C's `:109` does
-            // `forward_request(c)` then `return true`. The implication
-            // makes this unreachable, but keep it for C-parity.
             log::warn!(target: "tincd::proto",
                        "Ignoring unauthorized ADD_SUBNET for {owner_name} \
                         ({subnet}) (tunnelserver)");
-            let nw = self.forward_request(from_conn, body);
-            return Ok(nw);
+            return Ok(false);
         }
 
         // C `:116-122`: `if(strictsubnets) { forward_request;
