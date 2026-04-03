@@ -682,7 +682,30 @@ impl Daemon {
                     .map_err(SetupError::Io)?;
                 Box::new(tun)
             }
-            // Chunk 8+: Some("tun") → Tun::open, etc.
+            #[cfg(target_os = "linux")]
+            Some("tun") => {
+                // C `:1061`: `devops = os_devops` (the default). Real
+                // kernel TUN via `/dev/net/tun` + TUNSETIFF. Needs
+                // `CAP_NET_ADMIN`; the netns harness (tests/netns.rs)
+                // grants it inside an unprivileged userns via bwrap.
+                //
+                // `Interface = NAME` → attach to a precreated
+                // persistent device (`ip tuntap add`); unset → kernel
+                // picks `tun0`/`tun1`/... (`tun_set_iff` find-first-
+                // free). The netns test precreates so it can move the
+                // device into a child netns AFTER the daemon attaches
+                // (the fd→device binding survives `ip link set netns`).
+                let cfg = tinc_device::DeviceConfig {
+                    iface: config
+                        .lookup("Interface")
+                        .next()
+                        .map(|e| e.get_str().to_owned()),
+                    ..Default::default()
+                };
+                let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+                Box::new(tun)
+            }
+            // Chunk 8+: Some("tap") → Mode::Tap, etc.
             Some(other) => {
                 return Err(SetupError::Config(format!(
                     "DeviceType={other} not supported yet; use dummy or fd"

@@ -43,6 +43,14 @@
               meson
               ninja
               pkg-config
+              # netns integration tests (crates/tincd/tests/netns.rs).
+              # bwrap re-execs the test binary inside an unprivileged
+              # user+net namespace; ip/unshare/mount build a child
+              # netns for one TUN device so ping doesn't shortcut.
+              bubblewrap
+              iproute2
+              iputils # ping
+              util-linux # unshare(1), mount(8)
             ];
           };
 
