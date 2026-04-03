@@ -1,0 +1,8 @@
+# treefmt-nix's rustfmt module passes `--edition 2024` (its default).
+# `cargo fmt` reads `edition = "2021"` from Cargo.toml. The two
+# disagree on import sort order (style_edition 2024 made the sort
+# case-insensitive; 2021 sorts capitals-first).
+#
+# Pin style_edition here so both tools agree. The actual language
+# edition stays 2021 (Cargo.toml).
+style_edition = "2024"
