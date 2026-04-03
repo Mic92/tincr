@@ -1573,12 +1573,31 @@ fn three_daemon_relay() {
     // relay`. The ciphertext is the alice↔bob SPTPS record; mid
     // can't decrypt it (and doesn't try — just re-prefixes and
     // forwards). bob decrypts.
+    //
+    // Security audit `2f72c2ba` relay gate: mid drops UDP relay
+    // packets from senders it hasn't UDP-confirmed (C `net_packet.
+    // c:1758`). validkey (alice↔bob tunnel) and udp_confirmed
+    // (alice@mid) race — the kick above drove `try_tx(bob)` → PMTU
+    // probe to mid, but the probe-reply may not have landed yet.
+    // Resend the data packet on each poll: each send drives `try_
+    // tx` again, and once mid confirms alice (via the probe), the
+    // next packet relays. The first ones drop at mid's gate.
     let payload = b"relayed via mid";
     let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
-    write_fd(alice_pair[0], &ip_pkt);
 
     let recv_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]))
+        poll_until(Duration::from_secs(5), || {
+            // Resend on each poll; drains bob's TUN until match.
+            write_fd(alice_pair[0], &ip_pkt);
+            // May drain stale frames (kick, prior sends). Only
+            // accept exact match.
+            while let Some(r) = read_fd_nb(bob_pair[0]) {
+                if r == ip_pkt {
+                    return Some(r);
+                }
+            }
+            None
+        })
     }));
     let recv = match recv_result {
         Ok(r) => r,
@@ -3097,4 +3116,422 @@ fn http_proxy_roundtrip() {
     while !proxy_handle.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+// ═══ audit regressions (security 2f72c2ba, bug deef1268) ══════════
+
+/// Find a daemon's UDP listen port by parsing `dump nodes`: the
+/// `myself` row has hostname `"MYSELF port <udp_port>"` (`gossip.rs::
+/// dump_nodes_rows`). Row format: `18 3 NAME ID6 HOST port PORT ...`.
+fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
+    let rows = ctl.dump(3);
+    for r in &rows {
+        let Some(body) = r.strip_prefix("18 3 ") else {
+            continue;
+        };
+        let toks: Vec<&str> = body.split_whitespace().collect();
+        if toks.first() == Some(&name) && toks.get(2) == Some(&"MYSELF") {
+            // tok[2]="MYSELF" tok[3]="port" tok[4]=port
+            return toks[4].parse().expect("udp port");
+        }
+    }
+    panic!("no MYSELF row for {name}; rows: {rows:#?}");
+}
+
+/// Security audit `2f72c2ba` regression: `handle_incoming_vpn_packet`
+/// must NOT relay a packet from an unauthenticated UDP sender.
+///
+/// Three-node mesh, mid is the relay hub. After alice/bob both reach
+/// validkey via mid, an unauthenticated socket sends a crafted UDP
+/// packet to mid's port: `[dst_id6=sha512("bob")[:6]][src_id6=
+/// sha512("alice")[:6]][garbage]`. The C `net_packet.c:1758` gate
+/// (`if(!n) return`) drops this; before the fix, our relay branch
+/// trusted the SRCID and forwarded the garbage to bob (whose SPTPS
+/// rejects it, kicking the REQ_KEY restart timer).
+///
+/// **Assertions**: mid's stderr has "unauthenticated UDP sender";
+/// bob's `in_packets` for alice does NOT bump from the garbage
+/// (compared before/after the spoofed send).
+#[test]
+fn udp_relay_gate_unauthenticated_sender() {
+    let tmp = TmpGuard::new("relay-gate");
+    let alice = Node::new(tmp.path(), "alice", 0xA4);
+    let mid = Node::new(tmp.path(), "mid", 0xC4);
+    let bob = Node::new(tmp.path(), "bob", 0xB4);
+
+    // mid is the hub (no device, no subnet, no ConnectTo).
+    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    alice.write_config_multi(&[&mid, &bob], &["mid"], None, Some("10.0.0.1/32"));
+    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+
+    // mid runs at debug-level so we can assert the gate log line.
+    let mut mid_child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&mid.confbase)
+        .arg("--pidfile")
+        .arg(&mid.pidfile)
+        .arg("--socket")
+        .arg(&mid.socket)
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mid");
+    if !wait_for_file(&mid.socket) {
+        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
+    }
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        let _ = mid_child.kill();
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    // Wait for full mesh reachability (mid knows both, both know
+    // each other transitively).
+    let _alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+    let mut mid_ctl = Ctl::connect(&mid);
+
+    let node_status = |rows: &[String], name: &str| -> Option<u32> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            u32::from_str_radix(toks.get(10)?, 16).ok()
+        })
+    };
+
+    poll_until(Duration::from_secs(10), || {
+        let m = mid_ctl.dump(3);
+        // bit 4 = reachable. mid must see both spokes.
+        let m_a = node_status(&m, "alice").is_some_and(|s| s & 0x10 != 0);
+        let m_b = node_status(&m, "bob").is_some_and(|s| s & 0x10 != 0);
+        (m_a && m_b).then_some(())
+    });
+
+    // mid's UDP listen port. The crafted packet goes here.
+    let mid_udp_port = read_udp_port(&mut mid_ctl, "mid");
+
+    // Snapshot bob's in-packet counter for alice BEFORE the spoof.
+    // dump_nodes row tail: `... in_p in_b out_p out_b`.
+    let node_in_packets = |rows: &[String], name: &str| -> u64 {
+        rows.iter()
+            .find_map(|r| {
+                let body = r.strip_prefix("18 3 ")?;
+                let toks: Vec<&str> = body.split_whitespace().collect();
+                if toks.first() != Some(&name) {
+                    return None;
+                }
+                let n = toks.len();
+                toks[n - 4].parse().ok()
+            })
+            .unwrap_or(0)
+    };
+    let b_nodes_before = bob_ctl.dump(3);
+    let bob_in_before = node_in_packets(&b_nodes_before, "alice");
+
+    // ─── craft the spoofed packet ───────────────────────────────
+    // [dst_id6][src_id6][garbage]. dst=bob (relay target), src=alice
+    // (a name mid knows from gossip). The 12-byte prefix is what
+    // `handle_incoming_vpn_packet` parses. NodeId6 = sha512(name)[:6].
+    let dst_id = tincd::node_id::NodeId6::from_name("bob");
+    let src_id = tincd::node_id::NodeId6::from_name("alice");
+    let mut spoof = Vec::with_capacity(12 + 100);
+    spoof.extend_from_slice(dst_id.as_bytes());
+    spoof.extend_from_slice(src_id.as_bytes());
+    spoof.extend_from_slice(&[0xAA; 100]); // garbage ciphertext
+
+    // Send from a fresh UDP socket — NOT one mid has confirmed.
+    // mid's `n` scan (the `lookup_node_udp` equivalent) won't match.
+    let attacker = std::net::UdpSocket::bind("127.0.0.1:0").expect("attacker bind");
+    attacker
+        .send_to(&spoof, ("127.0.0.1", mid_udp_port))
+        .expect("spoof send");
+
+    // Give mid a turn to process.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // ─── assert: bob's in-packets did NOT bump ──────────────────
+    // Before fix: mid relays the garbage; bob's `on_udp_recv` runs,
+    // SPTPS decrypt fails, but `in_packets` bumps in `dispatch_
+    // tunnel_outputs`? No — `in_packets` bumps only on successful
+    // SPTPS Record. BUT: bob's stderr would have "Failed to decode
+    // UDP packet from alice" AND mid's stderr would have "Relaying
+    // UDP packet from alice to bob" instead of the gate line. The
+    // counter check is belt-and-braces; the stderr check is the
+    // primary assertion.
+    let b_nodes_after = bob_ctl.dump(3);
+    let bob_in_after = node_in_packets(&b_nodes_after, "alice");
+    assert_eq!(
+        bob_in_after, bob_in_before,
+        "bob's in-packet count for alice bumped from a spoofed packet; \
+         mid relayed unauthenticated traffic"
+    );
+
+    // ─── assert: mid logged the gate ────────────────────────────
+    drop(_alice_ctl);
+    drop(bob_ctl);
+    drop(mid_ctl);
+    let _ = mid_child.kill();
+    let _ = bob_child.kill();
+    let mid_stderr = drain_stderr(mid_child);
+    let _bob_stderr = drain_stderr(bob_child);
+    let _alice_stderr = drain_stderr(alice_child);
+    assert!(
+        mid_stderr.contains("unauthenticated UDP sender"),
+        "mid should drop the spoofed relay at the gate; stderr:\n{mid_stderr}"
+    );
+    // Negative assertion: mid did NOT log a relay forward for the
+    // spoof. The `three_daemon_relay` test proves legitimate relay
+    // STILL works (the gate doesn't break the happy path).
+    // Count "Relaying UDP packet from alice to bob" lines: a
+    // legitimate test wouldn't trigger this (alice never sends data
+    // here — no device, no kick). Any such line is the spoof.
+    assert!(
+        !mid_stderr.contains("Relaying UDP packet from alice to bob"),
+        "mid relayed the spoofed packet; gate failed; stderr:\n{mid_stderr}"
+    );
+}
+
+/// Bug audit `deef1268` regression: `RouteResult::Unreachable` for
+/// an IPv6 destination must build an ICMPv6 packet, not ICMPv4.
+///
+/// Single-daemon test: alice with NO IPv6 subnet, send an IPv6
+/// packet to her TUN, read back the ICMP unreachable. Before fix:
+/// `dispatch_route_result::Unreachable` unconditionally called
+/// `build_v4_unreachable`, producing an ICMPv4-shaped frame with
+/// type=1 (unassigned in v4) and bytes from the IPv6 header
+/// reinterpreted as IPv4. After fix: ethertype-dispatched, gets
+/// proper ICMPv6 (next-header=58, type=1 DST_UNREACH).
+#[test]
+fn ipv6_unreachable_builds_icmpv6() {
+    let tmp = TmpGuard::new("v6-unreach");
+    let alice = Node::new(tmp.path(), "alice", 0xA5);
+    let bob = Node::new(tmp.path(), "bob", 0xB5);
+
+    let alice_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+
+    // alice has NO IPv6 subnet — any IPv6 dst routes Unreachable.
+    // bob is just here so alice has a peer (config requires it).
+    bob.write_config_with(&alice, false, None, None);
+    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    // ─── craft a minimal IPv6 packet ───────────────────────────
+    // FdTun reads RAW IP bytes (no ether, no tun_pi); it synthesizes
+    // the ether header from byte 0's version nibble. So we send a
+    // 40-byte IPv6 header + payload.
+    //
+    // route_ipv6 (route.rs:324) reads dst at IP6 hdr offset 24..40.
+    // No subnet for `fd00::99` → Unreachable{ICMP6_DST_UNREACH=1,
+    // ICMP6_DST_UNREACH_ADDR=3}.
+    let mut ipv6 = Vec::with_capacity(40 + 8);
+    ipv6.push(0x60); // version=6, traffic class hi nibble=0
+    ipv6.extend_from_slice(&[0, 0, 0]); // tc lo + flow label
+    ipv6.extend_from_slice(&8u16.to_be_bytes()); // payload len
+    ipv6.push(17); // next header = UDP (arbitrary)
+    ipv6.push(64); // hop limit
+    // src: fd00::1
+    ipv6.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // dst: fd00::99 (no owner)
+    ipv6.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99]);
+    ipv6.extend_from_slice(&[0; 8]); // payload
+
+    write_fd(alice_pair[0], &ipv6);
+
+    // ─── read back the ICMP reply ──────────────────────────────
+    // FdTun::write strips the 14-byte ether header. We get raw IP.
+    let reply = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+
+    // ─── assert: it's ICMPv6 ───────────────────────────────────
+    // IPv6 header: byte 0 = 0x6?, byte 6 = next-header.
+    // ICMPv6 next-header = 58 (RFC 4443).
+    // ICMPv6 message starts at byte 40: type, code, checksum.
+    assert!(
+        reply.len() >= 48,
+        "reply too short for IPv6 + ICMPv6: {} bytes",
+        reply.len()
+    );
+    assert_eq!(
+        reply[0] >> 4,
+        6,
+        "reply is not IPv6; got version nibble {} (full: {:02x?})",
+        reply[0] >> 4,
+        &reply[..reply.len().min(16)]
+    );
+    assert_eq!(
+        reply[6], 58,
+        "reply next-header is not ICMPv6 (58); got {} \
+         (before fix: ICMPv4-shaped garbage)",
+        reply[6]
+    );
+    // ICMPv6 type 1 = DST_UNREACH (RFC 4443).
+    assert_eq!(
+        reply[40], 1,
+        "ICMPv6 type should be DST_UNREACH (1); got {}",
+        reply[40]
+    );
+    // ICMPv6 code 3 = ADDR (no subnet found).
+    assert_eq!(
+        reply[41], 3,
+        "ICMPv6 code should be DST_UNREACH_ADDR (3); got {}",
+        reply[41]
+    );
+    // The reply's dst should be the original src (fd00::1).
+    assert_eq!(
+        &reply[24..40],
+        &[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        "reply dst should be original src"
+    );
+
+    unsafe { libc::close(alice_pair[0]) };
+    let _ = bob_child.kill();
+    let _ = bob_child.wait();
+    let _alice_stderr = drain_stderr(alice_child);
+}
+
+/// Security audit `2f72c2ba` regression: `on_del_subnet` must NOT
+/// retaliate ADD_SUBNET for a subnet we never claimed.
+///
+/// alice connects to bob. alice owns `10.0.0.1/32`. bob (acting
+/// malicious) hand-crafts a `DEL_SUBNET alice 99.99.99.99/32` over
+/// the meta-conn. C `protocol_subnet.c:216-225`: lookup_subnet
+/// fails, warn, return true. Before fix: alice's `owner == myself`
+/// fired BEFORE lookup, retaliated `ADD_SUBNET alice 99.99.99.99/32`
+/// — lying about a subnet she never claimed.
+///
+/// We can't easily inject raw meta-conn lines into bob's daemon. So
+/// instead: a stripped-down test where bob is replaced with a raw TCP
+/// + SPTPS client driven by the test would be needed. That's heavy.
+///
+/// **Simpler proof**: assert via `dump subnets` that alice's subnet
+/// table never contains `99.99.99.99/32` after a normal handshake.
+/// The retaliate path doesn't ADD to the local table (it only sends
+/// the wire message), so this is INSUFFICIENT as a direct regression.
+///
+/// **What we do**: assert the warning log line. Before fix, alice
+/// logs "Got DEL_SUBNET from bob for ourself (99.99.99.99/32)" and
+/// queues the retaliate. After fix, alice logs "...does not appear
+/// in our subnet tree" and queues nothing. We trigger the DEL via
+/// a SIGHUP-based config swap on bob's side that ADDs 99.99.99.99/32
+/// to alice's hosts/ file (so bob gossips ADD), then DELs it — but
+/// that doesn't trigger the `owner == myself` branch on alice (the
+/// owner is bob, not alice).
+///
+/// **Actual approach**: this needs a raw-SPTPS injector. Deferred to
+/// a future cross-impl test rig. For NOW: a unit-level test in
+/// `gossip.rs` would be ideal, but `on_del_subnet` needs full daemon
+/// state. Covered indirectly: `three_daemon_strictsubnets` exercises
+/// DEL_SUBNET dispatch end-to-end (proves the handler still works);
+/// the fix is a one-liner gate (`subnets.contains()` check) reviewed
+/// against C `:216-225`. The `udp_relay_gate` test above is the
+/// security-critical regression of this batch.
+///
+/// Same applies to fix #5 (subnet-down for unknown subnets): the
+/// del-first reorder is structurally identical; `scripts.rs::host_
+/// down_then_subnet_down` exercises the legitimate path.
+///
+/// This stub asserts the legitimate DEL still works (mutation gate).
+#[test]
+fn del_subnet_legitimate_still_works() {
+    // Reuse the SIGHUP-reload mechanism: alice adds, then removes
+    // a subnet; bob sees both via gossip. Proves `on_del_subnet`'s
+    // happy path survived the lookup-gate reorder.
+    let tmp = TmpGuard::new("del-subnet-gate");
+    let alice = Node::new(tmp.path(), "alice", 0xA6);
+    let bob = Node::new(tmp.path(), "bob", 0xB6);
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
+
+    // alice's hosts/alice with TWO subnets initially.
+    std::fs::write(
+        alice.confbase.join("hosts").join("alice"),
+        format!(
+            "Port = {}\nSubnet = 10.0.0.1/32\nSubnet = 10.0.0.2/32\n",
+            alice.port
+        ),
+    )
+    .unwrap();
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    // Wait for bob to learn both subnets via ADD_SUBNET gossip.
+    // Subnet Display omits `/32` (default v4 prefix).
+    poll_until(Duration::from_secs(10), || {
+        let s = bob_ctl.dump(5);
+        (has_subnet(&s, "10.0.0.1", "alice") && has_subnet(&s, "10.0.0.2", "alice")).then_some(())
+    });
+
+    // Remove 10.0.0.2/32 from alice's hosts file, SIGHUP. Sleep
+    // 1.1s first: `last_config_check` mtime gate is second-
+    // granularity strict (`mtime > last`); a same-second write
+    // wouldn't trigger reload.
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(
+        alice.confbase.join("hosts").join("alice"),
+        format!("Port = {}\nSubnet = 10.0.0.1/32\n", alice.port),
+    )
+    .unwrap();
+    // SIGHUP alice. `reload_configuration` diffs and sends DEL_SUBNET.
+    let alice_pid: i32 = std::fs::read_to_string(&alice.pidfile)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    unsafe { libc::kill(alice_pid, libc::SIGHUP) };
+
+    // bob should DEL it. Proves `on_del_subnet`'s `subnets.del()` runs
+    // (lookup-gate didn't break the legitimate path).
+    poll_until(Duration::from_secs(10), || {
+        let s = bob_ctl.dump(5);
+        (!has_subnet(&s, "10.0.0.2", "alice")).then_some(())
+    });
+    // 10.0.0.1/32 should still be there.
+    let final_subnets = bob_ctl.dump(5);
+    assert!(
+        has_subnet(&final_subnets, "10.0.0.1", "alice"),
+        "surviving subnet gone; subnets: {final_subnets:#?}"
+    );
+
+    drop(bob_ctl);
+    let _ = alice_child.kill();
+    let _ = alice_child.wait();
+    let _ = bob_child.kill();
+    let _ = bob_child.wait();
 }
