@@ -583,8 +583,8 @@ impl Drop for TunnelHandle {
 
 /// Build a tunnel with the given (alice, bob) implementations.
 /// Returns once both sides have `validkey | udp_confirmed` set —
-/// i.e. UDP data path is hot, no TCP-fallback packets that the
-/// Rust daemon would drop (`STUB(chunk-12-tcp-fallback)`).
+/// i.e. UDP data path is hot, no TCP-fallback packets in flight
+/// (PACKET 17 routes now, but iperf3 wants the UDP path measured).
 fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
     // ─── fresh persistent TUN devices ──────────────────────────
     run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT0"]);

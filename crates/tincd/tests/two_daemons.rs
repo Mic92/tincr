@@ -844,8 +844,11 @@ fn first_packet_across_tunnel() {
 
     // ─── kick the per-tunnel handshake ──────────────────────────
     // Send one packet to alice's TUN. `route()` says Forward{to:
-    // bob}; `send_sptps_packet` sees `!validkey` and kicks
-    // `send_req_key`. The packet is DROPPED (C `:686`).
+    // bob}; `send_sptps_packet`'s PACKET 17 short-circuit fires
+    // (direct conn, minmtu=0) so the kick is DELIVERED, not dropped.
+    // The C `:684` was `!validkey && !connection`; with a direct
+    // conn validkey doesn't matter. The follow-up `try_tx` kicks
+    // `send_req_key` for the UDP path.
     //
     // Packet shape for FdTun: RAW IPv4 bytes (no ether header,
     // no tun_pi). `FdTun::read` writes them at `+14` and sets
@@ -877,6 +880,11 @@ fn first_packet_across_tunnel() {
         let asd = drain_stderr(alice_child);
         panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
+
+    // Drain the kick: PACKET 17 delivered it (direct conn bypasses
+    // validkey). Don't let it shadow THE PACKET assert below.
+    let kicked = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    assert_eq!(kicked, kick_pkt, "kick packet went via PACKET 17");
 
     // ─── THE PACKET ─────────────────────────────────────────────
     // Now validkey is set. Send a packet; it crosses.
@@ -936,14 +944,12 @@ fn first_packet_across_tunnel() {
         "bob in counters: {b_in_p}/{b_in_b}; nodes: {b_nodes:?}"
     );
 
-    // ─── udp_confirmed: bob received a valid UDP packet from
-    // alice; status bit 7 should be set. (Alice's bit might not
-    // be: bob hasn't sent anything BACK over UDP yet.)
-    let b_status = node_status(&b_nodes, "alice").unwrap();
-    assert!(
-        b_status & 0x80 != 0,
-        "bob's udp_confirmed for alice; status={b_status:x}"
-    );
+    // udp_confirmed (bit 7) is NOT asserted: with the C `:725`
+    // gate now wired, `data.len() > minmtu(=0)` → PACKET 17 over
+    // the meta-conn, not UDP. minmtu only goes nonzero after PMTU
+    // converges (separate from validkey). The C would do the same.
+    // The previous assert relied on the PACKET 17 send path being
+    // stubbed (every pre-PMTU packet went UDP-SPTPS instead).
 
     // ─── stderr: the SPTPS-key-exchange-successful log ──────────
     drop(alice_ctl);
@@ -1117,6 +1123,10 @@ fn compression_roundtrip() {
 
     let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
     write_fd(alice_pair[0], &kick_pkt);
+    // The kick goes via PACKET 17 (direct conn, minmtu=0). Drain it
+    // so it doesn't shadow the round-trip read below. Compression
+    // doesn't apply on PACKET 17 (raw frame, no PKT_COMPRESSED bit).
+    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
 
     let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(5), || {

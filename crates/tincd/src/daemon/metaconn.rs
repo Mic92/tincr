@@ -848,7 +848,7 @@ impl Daemon {
                     // sptps_send_record inside conn.send); the
                     // regular WRITE event flushes it.
                 }
-                Output::Record { bytes, .. } => {
+                Output::Record { mut bytes, .. } => {
                     // ─── `c->tcplen` short-circuit ───────────────────────────
                     // C `meta.c:143-151`: a `PACKET 17 <len>` line
                     // sets `c->tcplen`; the NEXT record is a raw VPN
@@ -856,18 +856,16 @@ impl Daemon {
                     // `receive_tcppacket` to route it through the
                     // normal VPN-packet path.
                     //
-                    // We DROP it. The blobs we see in practice are
-                    // MTU probes (`send_udp_probe_packet` falls
-                    // through to TCP-PACKET while `udp_confirmed` is
-                    // false). We don't run TCP probes ourselves; once
-                    // UDP confirms (it does, on loopback) the C stops
-                    // sending these. Routing them (`STUB(chunk-12-tcp
-                    // -fallback)`) is needed for `TCPOnly` mode and
-                    // for MTU-probe replies; neither matters for the
-                    // cross-impl ping. WIRE BUG found by crossimpl.rs:
-                    // before this branch the request landed in the
-                    // `_ => terminate` arm and we dropped the
-                    // connection on every probe.
+                    // The blob is single-encrypted (meta-SPTPS only;
+                    // C `net_packet.c:720-724`: "we don't really
+                    // care about end-to-end security since we're not
+                    // sending the message through any intermediate
+                    // nodes"). PACKET 17 only fires for DIRECT
+                    // neighbors (`:725 n->connection`), so the meta-
+                    // SPTPS layer IS the end-to-end. WIRE BUG found
+                    // by crossimpl.rs: before this branch the
+                    // request landed in the `_ => terminate` arm and
+                    // we dropped the connection on every probe.
                     if conn.tcplen != 0 {
                         // C `:144`: `if(length != c->tcplen) return
                         // false`. SPTPS records are exact; mismatch
@@ -881,12 +879,39 @@ impl Daemon {
                             return needs_write;
                         }
                         // C `:148-150`: `receive_tcppacket(...);
-                        // c->tcplen = 0; return true`.
-                        log::debug!(target: "tincd::proto",
-                            "Dropping TCP-tunnelled packet ({} bytes) \
-                             from {} — STUB(chunk-12-tcp-fallback)",
-                            conn.tcplen, conn.name);
+                        // c->tcplen = 0; return true`. Body of
+                        // `receive_tcppacket` (`net_packet.c:595-
+                        // 614`) inlined: MTU check → receive_packet.
                         conn.tcplen = 0;
+                        // C `:599-601`: `if(len > sizeof(data) -
+                        // offset) return`. Void return = drop the
+                        // packet, KEEP the conn.
+                        if bytes.len() > usize::from(crate::tunnel::MTU) {
+                            log::warn!(target: "tincd::proto",
+                                "Oversized PACKET 17 from {} ({} > MTU {})",
+                                conn.name, bytes.len(), crate::tunnel::MTU);
+                            continue;
+                        }
+                        // Copy out before borrowing self.node_ids:
+                        // `conn` is `self.conns.get_mut(id)`.
+                        let conn_name = conn.name.clone();
+                        // C `:613 receive_packet(c->node, ...)`.
+                        // `c->node` is set at `ack_h`; PACKET 17
+                        // before ACK is a peer bug.
+                        let Some(from_nid) = self.node_ids.get(&conn_name).copied() else {
+                            log::warn!(target: "tincd::proto",
+                                "PACKET 17 from {conn_name} before ACK — dropping");
+                            continue;
+                        };
+                        // C `receive_packet:397-405`: `n->in_
+                        // packets++; n->in_bytes += len; route(n,
+                        // packet)`. Same counters as the SPTPS path
+                        // at `net.rs:1371-1374`.
+                        let len = bytes.len() as u64;
+                        let tunnel = self.tunnels.entry(from_nid).or_default();
+                        tunnel.in_packets += 1;
+                        tunnel.in_bytes += len;
+                        needs_write |= self.route_packet(&mut bytes, Some(from_nid));
                         continue;
                     }
 

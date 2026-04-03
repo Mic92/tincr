@@ -1067,6 +1067,67 @@ impl Daemon {
         };
         let tunnel = self.tunnels.entry(to_nid).or_default();
 
+        // ─── PACKET 17 short-circuit (`net_packet.c:725`) ────────────
+        // C: `if(n->connection && origpkt->len > n->minmtu) send_
+        // tcppacket(n->connection, origpkt)`. Direct meta-conn AND
+        // packet doesn't fit discovered MTU → single-encrypt via
+        // meta-SPTPS, skip per-tunnel SPTPS entirely.
+        //
+        // Gated BEFORE the validkey check: C `:684 if(!validkey &&
+        // !n->connection) return` — with a direct conn, validkey
+        // doesn't matter (PACKET 17 doesn't touch per-tunnel SPTPS).
+        // With `TCPOnly = yes`, `try_tx_sptps:1477` returns early so
+        // SPTPS never starts → validkey stays false forever; this
+        // gate is the ONLY way to send.
+        //
+        // C-IS-WRONG #11: the C `:725` gates AFTER compression at
+        // `:708-718`. When compression HELPS, `:716 origpkt = &outpkt`
+        // reassigns to a stack `vpn_packet_t` whose `data[0..offset]`
+        // is uninitialized (`:710` writes only at `+offset`). `:726`
+        // then sends 14 garbage bytes + compressed body. The receiver
+        // (`route.c:1144`) reads `data[12..14]` for ethertype →
+        // garbage → "unknown type" → drop. PACKET 17 carries no
+        // PKT_COMPRESSED bit (raw frame, not SPTPS record); receiver
+        // can't know to decompress. Triple-gate dormancy: TCPOnly +
+        // direct neighbor + Compression > 0 + the packet actually
+        // shrank. Nobody runs that. STRICTER-than-C: gate BEFORE
+        // compression, send the original frame, also save the wasted
+        // compression work the C does anyway.
+        let direct_conn = self.nodes.get(to_name).and_then(|ns| ns.conn);
+        if let Some(conn_id) = direct_conn {
+            if data.len() > usize::from(tunnel.minmtu()) {
+                let Some(conn) = self.conns.get_mut(conn_id) else {
+                    // NodeState.conn stale (race with terminate).
+                    // Fall through to SPTPS.
+                    return false;
+                };
+                // C `protocol_misc.c:90-103 send_tcppacket`.
+                // RED first (`:94`). STUB(chunk-12): maxoutbufsize
+                // knob; same usize::MAX as `:1565` until wired.
+                if crate::tcp_tunnel::random_early_drop(
+                    conn.outbuf.live_len(),
+                    usize::MAX,
+                    &mut OsRng,
+                ) {
+                    return true; // C `:95 return true` — fake success
+                }
+                // C `:98 send_request("%d %d", PACKET, len)`. Goes
+                // via `send_meta` → `sptps_send_record(type=0)`.
+                // `len` fits u16: MTU is 1518 < i16::MAX.
+                #[allow(clippy::cast_possible_truncation)]
+                let req = tinc_proto::msg::TcpPacket {
+                    len: data.len() as u16,
+                };
+                let mut nw = conn.send(format_args!("{}", req.format()));
+                // C `:102 send_meta(DATA(packet), len)` →
+                // `meta.c:65 sptps_send_record(type=0, blob)`. The
+                // FULL eth frame, NOT stripped, NOT compressed (see
+                // C-IS-WRONG #11 above). Receiver routes it as-is.
+                nw |= conn.send_sptps_record(0, data);
+                return nw;
+            }
+        }
+
         if !tunnel.status.validkey {
             // C `try_sptps` (`net_packet.c:1157-1180`): `"No valid
             // key known yet for %s"` then `if(!waitingforkey) send_
@@ -1129,12 +1190,9 @@ impl Daemon {
             payload
         };
 
-        // STUB(chunk-11-perf): `if(n->connection && origpkt->len >
-        // n->minmtu) send_tcppacket()` (`:724-726`). The TCP
-        // fallback when the packet is too big for the discovered
-        // MTU. We always go via SPTPS-UDP for now (`send_sptps_
-        // data`'s `too_big` gate falls through to the b64-REQ_KEY
-        // path which works; this is the OPTIMIZED binary encap).
+        // C `:725` PACKET 17 gate already handled above (BEFORE
+        // validkey + compression — STRICTER-than-C, see C-IS-WRONG
+        // #11). Fall-through here is the SPTPS-UDP path.
 
         // C `:728`: `sptps_send_record(&n->sptps, type, DATA +
         // offset, len - offset)`.

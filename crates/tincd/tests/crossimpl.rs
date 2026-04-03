@@ -121,6 +121,10 @@ enum DevMode {
     Tun,
     /// `mode tap`, devices `tincS0/tincS1`, netns `xbobside_s`.
     Tap,
+    /// `mode tun`, devices `tincY0/tincY1`, netns `xbobside_y`.
+    /// `TCPOnly = yes` config; no UDP path so PACKET 17 is the only
+    /// data-plane transport.
+    TunTcpOnly,
 }
 
 impl DevMode {
@@ -128,23 +132,26 @@ impl DevMode {
         match self {
             DevMode::Tun => "tincX0",
             DevMode::Tap => "tincS0",
+            DevMode::TunTcpOnly => "tincY0",
         }
     }
     fn dev1(self) -> &'static str {
         match self {
             DevMode::Tun => "tincX1",
             DevMode::Tap => "tincS1",
+            DevMode::TunTcpOnly => "tincY1",
         }
     }
     fn ns(self) -> &'static str {
         match self {
             DevMode::Tun => "xbobside",
             DevMode::Tap => "xbobside_s",
+            DevMode::TunTcpOnly => "xbobside_y",
         }
     }
     fn tuntap_mode(self) -> &'static str {
         match self {
-            DevMode::Tun => "tun",
+            DevMode::Tun | DevMode::TunTcpOnly => "tun",
             DevMode::Tap => "tap",
         }
     }
@@ -260,7 +267,7 @@ impl NetNs {
         //
         // TUN: harmless either way; bring up early so the existing
         // carrier wait works unchanged.
-        if matches!(mode, DevMode::Tun) {
+        if matches!(mode, DevMode::Tun | DevMode::TunTcpOnly) {
             run_ip(&["link", "set", mode.dev0(), "up"]);
             run_ip(&["link", "set", mode.dev1(), "up"]);
         }
@@ -488,6 +495,48 @@ impl Node {
 
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
+        if connect_to {
+            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+        }
+        std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
+
+        self.write_privkey();
+    }
+
+    /// `TCPOnly = yes` variant. Same on-disk shape as `write_config`
+    /// (router mode, TUN, /32 subnets) plus the TCPOnly knob in BOTH
+    /// `tinc.conf` AND `hosts/OTHER`.
+    ///
+    /// Why both: the C `net_setup.c:598` reads `TCPOnly` from the
+    /// per-host config and OR's it into `n->options`. Our setup
+    /// reads from `tinc.conf` for the local override AND `hosts/
+    /// OTHER` for what we believe about the peer. Setting both
+    /// makes the test deterministic regardless of which side picks
+    /// the option from where.
+    fn write_config_tcponly(&self, other: &Node, connect_to: bool) {
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        let mut tinc_conf = format!(
+            "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\nTCPOnly = yes\n",
+            self.name, self.iface
+        );
+        if connect_to {
+            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+        }
+        tinc_conf.push_str("PingTimeout = 1\n");
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        std::fs::write(
+            self.confbase.join("hosts").join(self.name),
+            format!(
+                "Port = {}\nSubnet = {}\nTCPOnly = yes\n",
+                self.port, self.subnet
+            ),
+        )
+        .unwrap();
+
+        let other_pub = tinc_crypto::b64::encode(&other.pubkey());
+        let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\nTCPOnly = yes\n");
         if connect_to {
             other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
         }
@@ -761,13 +810,11 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     // ─── validkey ───────────────────────────────────────────────
     // PROVES: REQ_KEY ext (SPTPS init), ANS_KEY parse (THE -1 fix),
     // per-tunnel SPTPS handshake. Status bit 1 = validkey, bit 7 =
-    // udp_confirmed (`node.h:41`). The C falls back to TCP-tunnelled
-    // `PACKET 17 <len>` for VPN traffic until udp_confirmed flips
-    // (`net_packet.c::send_sptps_data`); we DROP those (`STUB(chunk-
-    // 12-tcp-fallback)`). Polling for validkey alone races: bob's
-    // ICMP echo-reply goes via TCP, alice drops it. Wait for both
-    // sides to confirm UDP — the probe round-trip on loopback is
-    // ~1ms once validkey is set.
+    // udp_confirmed (`node.h:41`). Polling for validkey alone races:
+    // bob's ICMP echo-reply goes via PACKET 17 (now routed correctly,
+    // but the validkey-only race remains for the FIRST few packets
+    // while UDP is still discovering). Wait for udp_confirmed for
+    // stability — this test is exercising the UDP path.
     const VALIDKEY: u32 = 0x02;
     const UDP_CONFIRMED: u32 = 0x80;
     let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -841,6 +888,146 @@ fn c_dials_rust() {
         return;
     };
     run_crossimpl("cdr", Impl::C, Impl::Rust, netns);
+}
+
+// ═══════════════════════ TCPOnly cross-impl ════════════════════════════
+// `PACKET 17` data-plane wire-compat. `net_packet.c:725`: with a
+// direct meta-conn AND `origpkt->len > minmtu` the C short-circuits
+// to `send_tcppacket` BEFORE per-tunnel SPTPS. With `TCPOnly = yes`,
+// `try_tx_sptps:1477` returns early so PMTU never runs → minmtu
+// stays 0 → every packet > 0 → always PACKET 17, never UDP.
+//
+// What this proves over `rust_dials_c`:
+//
+// - **Receive PACKET 17** (`metaconn.rs` `tcplen != 0` block): the
+//   blob is a RAW VPN frame inside a meta-SPTPS record (single-
+//   encrypted, the C `:720-724` comment is explicit — "we don't
+//   really care about end-to-end security since we're not sending
+//   the message through any intermediate nodes"). Route it.
+// - **Send PACKET 17** (`net.rs::send_sptps_packet` `n->connection`
+//   gate): without per-tunnel SPTPS validkey, the ONLY way to reply
+//   is PACKET 17 back. `300a8e96` (SPTPS_PACKET 21) does NOT cover
+//   this — 21 is for relays (no direct conn).
+//
+// SIMPLER than the router-mode tests: no validkey poll (per-tunnel
+// SPTPS never starts), no kick-ping (nothing to kick), no place_
+// devices three-phase (TUN, no spontaneous L2 traffic). Just:
+// reachable → ping → 3/3.
+
+fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
+    let tmp = TmpGuard::new(tag);
+    let alice = Node::new(
+        tmp.path(),
+        "alice",
+        0xAA,
+        "tincY0",
+        "10.43.0.1/32",
+        alice_impl,
+    );
+    let bob = Node::new(tmp.path(), "bob", 0xBB, "tincY1", "10.43.0.2/32", bob_impl);
+
+    bob.write_config_tcponly(&alice, false);
+    alice.write_config_tcponly(&bob, true);
+
+    let bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
+    }
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "alice setup failed; stderr:\n{}\n=== bob ===\n{bs}",
+            alice_child.kill_and_log()
+        );
+    }
+
+    if !wait_for_carrier("tincY0", Duration::from_secs(2)) {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("alice TUNSETIFF;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+    assert!(
+        wait_for_carrier("tincY1", Duration::from_secs(2)),
+        "bob TUNSETIFF"
+    );
+
+    netns.place_devices();
+
+    // ─── meta handshake (only readiness gate) ─────────────────────
+    // Status bit 4 = reachable. With TCPOnly + direct neighbor the
+    // C `try_tx_sptps:1477` returns early; per-tunnel SPTPS NEVER
+    // starts. validkey stays 0 forever. The data plane is PACKET 17
+    // exclusively, riding the meta-SPTPS — reachable IS the gate.
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if meta.is_err() {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("meta handshake timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── THE PING ───────────────────────────────────────────────
+    // PROVES: PACKET 17 receive → route_packet → TUN write →
+    // kernel ICMP reply → PACKET 17 send back. Both directions of
+    // the `n->connection` short-circuit. Any silent drop → timeout.
+    let ping = Command::new("ping")
+        .args(["-c", "3", "-W", "2", "10.43.0.2"])
+        .output()
+        .expect("spawn ping");
+
+    if !ping.status.success() {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "TCPOnly cross-impl ping failed: {:?}\nstdout: {}\nstderr: {}\n\
+             === alice ===\n{asd}\n=== bob ===\n{bs}",
+            ping.status,
+            String::from_utf8_lossy(&ping.stdout),
+            String::from_utf8_lossy(&ping.stderr),
+        );
+    }
+
+    eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
+
+    drop(alice_ctl);
+    drop(bob_ctl);
+    let _ = alice_child.kill_and_log();
+    let _ = bob_child.kill_and_log();
+    drop(netns);
+}
+
+/// Rust dials, C listens, `TCPOnly = yes`. Tests our PACKET 17
+/// SEND path: alice (Rust) originates the ICMP echo-req, no
+/// validkey, must hit the `n->connection` gate before bailing.
+#[test]
+fn rust_dials_c_tcponly() {
+    let Some(netns) = enter_netns_with("rust_dials_c_tcponly", DevMode::TunTcpOnly) else {
+        return;
+    };
+    run_crossimpl_tcponly("rdct", Impl::Rust, Impl::C, netns);
+}
+
+/// C dials, Rust listens, `TCPOnly = yes`. Tests our PACKET 17
+/// RECEIVE path: bob (Rust) gets the C's `PACKET 17 <len>` + raw
+/// frame inside the next meta-SPTPS record. THE regression test
+/// for the silent drop at `metaconn.rs::tcplen != 0`.
+#[test]
+fn c_dials_rust_tcponly() {
+    let Some(netns) = enter_netns_with("c_dials_rust_tcponly", DevMode::TunTcpOnly) else {
+        return;
+    };
+    run_crossimpl_tcponly("cdrt", Impl::C, Impl::Rust, netns);
 }
 
 // ────────────────────────────────────────────────────────────────────
