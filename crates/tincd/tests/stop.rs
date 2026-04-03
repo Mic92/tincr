@@ -72,23 +72,33 @@ fn tincd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
 }
 
-/// Write a minimal config: `tinc.conf` (Name, DeviceType, AddressFamily)
-/// plus `hosts/testnode` (Port = 0).
+/// Write a minimal config: `tinc.conf`, `hosts/testnode`, AND
+/// `ed25519_key.priv`.
 ///
 /// `Port = 0` is critical: the daemon binds TCP+UDP listeners now.
-/// Port 655 would clash between parallel test threads (and might be
-/// taken by something else on the build host). Port 0 = kernel picks.
-/// Each test gets its own port. The pidfile contains the assigned
-/// port, so tests that need TCP can read it from there.
+/// Port 655 would clash between parallel test threads. Port 0 =
+/// kernel picks. Each test gets its own port.
 ///
 /// `AddressFamily = ipv4` reduces to one listener. v6 might be
-/// disabled in the build sandbox; v4 is universal. Tests that
-/// specifically want dual-stack can override.
+/// disabled in the build sandbox.
 ///
 /// `Port` is HOST-tagged (per `tincctl.c:1751`). Goes in `hosts/
-/// testnode`, not tinc.conf. The daemon's `read_host_config` step
-/// merges it into the same lookup tree.
-fn write_config(confbase: &std::path::Path) {
+/// testnode`. The daemon's `read_host_config` merges it.
+///
+/// `ed25519_key.priv` is required since chunk 4a (`net_setup.c:803`
+/// loads it; we forbid the legacy fallback). The key is deterministic
+/// (seeded from a constant) so tests are reproducible. Mode 0600 to
+/// avoid the perm warning. The daemon never USES this key in tests
+/// that don't peer-connect, but setup() loads it unconditionally
+/// (the C does too — you can't run tincd without a key).
+///
+/// Returns the daemon's PUBLIC key. Tests that don't peer-connect
+/// ignore it; `peer_handshake_reaches_done` needs it for the SPTPS
+/// initiator side.
+fn write_config(confbase: &std::path::Path) -> [u8; 32] {
+    use std::os::unix::fs::OpenOptionsExt;
+    use tinc_crypto::sign::SigningKey;
+
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
@@ -96,6 +106,21 @@ fn write_config(confbase: &std::path::Path) {
     )
     .unwrap();
     std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
+
+    // Daemon's private key. Seed `[0x42; 32]` — distinct from any
+    // test-helper seeds (keys.rs uses 1..11, conn.rs uses 1/2/10/20).
+    let sk = SigningKey::from_seed(&[0x42; 32]);
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(confbase.join("ed25519_key.priv"))
+        .unwrap();
+    let mut w = std::io::BufWriter::new(f);
+    tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+
+    *sk.public_key()
 }
 
 /// Poll for a file to appear. The daemon writes the pidfile in
@@ -699,14 +724,33 @@ fn missing_hosts_file_ok() {
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
 
-    // tinc.conf ONLY. No hosts/ dir at all. Port goes here — see doc.
+    // tinc.conf + private key, but NO hosts/ dir. Port goes in
+    // tinc.conf (HOST-tagged, but lookup doesn't care which file —
+    // see doc). The key IS required (chunk 4a); hosts/ is the
+    // optional one being tested.
+    //
+    // Can't use write_config() here — it creates hosts/. Inline
+    // the same key-write step.
+    use std::os::unix::fs::OpenOptionsExt;
+    use tinc_crypto::sign::SigningKey;
     std::fs::create_dir_all(&confbase).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
         "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nPort = 0\n",
     )
     .unwrap();
-    // Precondition: hosts/ doesn't exist.
+    let sk = SigningKey::from_seed(&[0x42; 32]);
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(confbase.join("ed25519_key.priv"))
+        .unwrap();
+    let mut w = std::io::BufWriter::new(f);
+    tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    drop(w);
+    // Precondition: hosts/ doesn't exist. THIS is what's tested.
     assert!(!confbase.join("hosts").exists());
 
     let mut child = Command::new(tincd_bin())
@@ -887,4 +931,490 @@ fn udp_stray_packet_drained() {
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SPTPS peer handshake (chunk 4a)
+//
+// THE TEST IS THE INITIATOR. We don't have outgoing connections
+// (`do_outgoing_connection` is chunk 5+). So: we drive the
+// initiator side from the test process using `tinc-sptps::Sptps`
+// directly. Same shape as `tinc-tools/cmd/join.rs`'s pump loop.
+//
+// What this proves:
+//   - id_h peer branch fires (vs being routed to BadId)
+//   - read_ecdsa_public_key loads the peer's pubkey
+//   - Sptps::start as RESPONDER with the right label (incl NUL!)
+//   - feed() routes to feed_sptps after sptps install
+//   - The do-while loop in feed_sptps consumes multi-record reads
+//   - dispatch_sptps_outputs queues Wire bytes correctly
+//   - HandshakeDone is reached (the daemon log line)
+//
+// What the LABEL-NUL specifically proves: if proto.rs's `tcp_label`
+// forgot the trailing NUL, the SIG transcripts would diverge —
+// daemon hashes 33 bytes (with NUL), test hashes 33 bytes (with
+// NUL), they'd MATCH. Wait no — we use the SAME construction here.
+// The test would pass with a wrong label. The unit test
+// `proto::tests::tcp_label_has_trailing_nul` is the real NUL proof.
+// This integration test proves the END-TO-END handshake works,
+// which transitively proves the labels match — but it can't
+// distinguish "both wrong" from "both right". The cross-impl test
+// (Phase 2, `tinc-sptps/tests/vs_c.rs`) would catch "both wrong"
+// IF it used this label. It doesn't (it uses `b"byte-identity"`).
+//
+// THE REAL CROSS-IMPL FOR THE NUL: a future test that handshakes
+// against a real C tincd. Phase 6. For now: the unit test pins the
+// gcc-verified bytes. Good enough.
+
+/// SPTPS handshake reaches `HandshakeDone` on both sides.
+///
+/// Daemon as RESPONDER (we accepted the TCP connection). Test as
+/// INITIATOR (we send `"0 testpeer 17.7\n"`). The `tcp_label`
+/// argument order is therefore `(testpeer, testnode)` — initiator,
+/// responder. SAME as the daemon's `tcp_label(name, my_name)` when
+/// `name = "testpeer"` and `my_name = "testnode"`.
+#[test]
+fn peer_handshake_reaches_done() {
+    use rand_core::OsRng;
+    use std::io::Read;
+    use std::net::TcpStream;
+    use tinc_crypto::sign::SigningKey;
+    use tinc_sptps::{Framing, Output, Role, Sptps};
+
+    let tmp = TmpGuard::new("peer-handshake");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    // ─── setup: daemon's config + OUR (testpeer) hosts entry ───
+    // The daemon needs `hosts/testpeer` with our pubkey.
+    let daemon_pub = write_config(&confbase);
+    let our_key = SigningKey::from_seed(&[0x77; 32]);
+    let our_pub = *our_key.public_key();
+    let b64 = tinc_crypto::b64::encode(&our_pub);
+    std::fs::write(
+        confbase.join("hosts").join("testpeer"),
+        format!("Ed25519PublicKey = {b64}\n"),
+    )
+    .unwrap();
+
+    // ─── spawn daemon ────────────────────────────────────────────
+    let mut child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        // INFO captures the "SPTPS handshake completed" line.
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    let tcp_addr = read_tcp_addr(&pidfile);
+
+    // ─── TCP connect + send ID line ────────────────────────────────
+    // C `protocol_auth.c:116`: `"%d %s %d.%d"`. We are testpeer,
+    // version 17.7. The daemon's id_h fires, peer branch.
+    //
+    // `TcpStream` impls Read AND Write for `&TcpStream` (the
+    // shared-ref impl) — the kernel handles the duplex; Rust's
+    // borrow checker just needs the type-level workaround. We
+    // bind `let stream` (no `mut`) and use `(&stream).read()` /
+    // `(&stream).write_all()`. Same trick as `tcp_connect_stop`
+    // but here we INTERLEAVE reads and writes (the handshake
+    // pump), so the trick is load-bearing.
+    let stream = TcpStream::connect(tcp_addr).expect("TCP connect to tincd");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(&stream, "0 testpeer 17.7").unwrap();
+
+    // ─── recv daemon's ID line ────────────────────────────────────
+    // The daemon's `send_id` reply: `"0 testnode 17.7\n"`. THEN
+    // the responder's KEX bytes (binary, no newline). We CAN'T use
+    // BufReader.read_line for the ID — it'll buffer MORE than the
+    // line and we lose the KEX bytes into BufReader's internal
+    // buffer. Read raw, find the `\n` ourselves.
+    let mut buf = Vec::with_capacity(256);
+    let mut tmp_buf = [0u8; 256];
+    let id_end = loop {
+        let n = (&stream).read(&mut tmp_buf).expect("recv from daemon");
+        if n == 0 {
+            panic!("daemon closed before sending ID line; buf so far: {buf:?}");
+        }
+        buf.extend_from_slice(&tmp_buf[..n]);
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            break pos;
+        }
+    };
+    let id_line = std::str::from_utf8(&buf[..id_end]).expect("ID line ASCII");
+    assert_eq!(id_line, "0 testnode 17.7", "daemon ID reply");
+
+    // ─── SPTPS start: WE are the initiator ───────────────────────
+    // C `id_h:460-462`: outgoing → `"tinc TCP key expansion %s %s",
+    // myself, c->name`. We're outgoing (we connected). myself=
+    // testpeer, c->name=testnode. Label: `(testpeer, testnode)`.
+    //
+    // SAME bytes as the daemon's `tcp_label("testpeer", "testnode")`.
+    // Including the NUL. We construct via the same fn (proto::
+    // tcp_label is pub(crate), not reachable from here — inline).
+    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
+    label.push(0);
+    // Sanity: matches the C `25 + strlen + strlen`.
+    assert_eq!(label.len(), 25 + 8 + 8);
+
+    let (mut sptps, init) = Sptps::start(
+        Role::Initiator,
+        Framing::Stream,
+        our_key,
+        daemon_pub,
+        label,
+        0,
+        &mut OsRng,
+    );
+
+    // Send our KEX. `init` has one Wire (initiator's KEX from
+    // sptps_start's send_kex).
+    for o in init {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send KEX");
+        }
+    }
+
+    // ─── the pump: feed daemon's bytes to sptps until done ────────
+    // The daemon sends: KEX (already in buf past id_end+1), then
+    // (after we send our SIG) SIG. We feed everything we receive,
+    // send everything sptps emits, stop on HandshakeDone.
+    //
+    // The pump is borrowed from `tinc-tools/cmd/join.rs:980` but
+    // simpler — we only care about reaching HandshakeDone, not
+    // post-handshake records. Same NoRng idiom (initiator's
+    // receive() doesn't trigger send_kex during the initial
+    // handshake).
+    struct NoRng;
+    impl rand_core::RngCore for NoRng {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!("rng touched")
+        }
+        fn next_u64(&mut self) -> u64 {
+            unreachable!("rng touched")
+        }
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unreachable!("rng touched")
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+            unreachable!("rng touched")
+        }
+    }
+
+    // Seed the pump with bytes already in `buf` past the ID line.
+    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
+    let mut handshake_done = false;
+    let pump_deadline = Instant::now() + Duration::from_secs(5);
+
+    'pump: loop {
+        if Instant::now() > pump_deadline {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "handshake didn't complete in 5s; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // Feed pending bytes to sptps. The do-while: receive()
+        // processes one record at a time.
+        //
+        // (Match not unwrap_or_else: the closure would capture
+        // `child` by move once, making it unusable for the later
+        // panic-with-stderr arms. The borrow checker can't see
+        // that the closure body diverges. Match is explicit.)
+        let mut off = 0;
+        while off < pending.len() {
+            let (n, outs) = match sptps.receive(&pending[off..], &mut NoRng) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = child.kill();
+                    let out = child.wait_with_output().unwrap();
+                    panic!(
+                        "SPTPS receive failed: {e:?}; stderr:\n{}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            };
+            off += n;
+            for o in outs {
+                match o {
+                    Output::Wire { bytes, .. } => {
+                        // Our SIG (initiator sends SIG after
+                        // receiving responder's KEX).
+                        (&stream).write_all(&bytes).expect("send Wire");
+                    }
+                    Output::HandshakeDone => {
+                        handshake_done = true;
+                    }
+                    Output::Record { .. } => {
+                        // Chunk 4a: daemon terminates at
+                        // HandshakeDone, never sends app records.
+                        // Reaching here means the daemon sent
+                        // something post-handshake. UNEXPECTED.
+                        panic!("got Record from daemon (chunk 4a doesn't send records)");
+                    }
+                }
+            }
+            // Stream-mode receive() can return 0 only on empty
+            // input. We checked `off < pending.len()`. If it
+            // returns 0 anyway, that's a tinc-sptps bug — break
+            // to avoid spin.
+            if n == 0 {
+                break;
+            }
+        }
+        pending.clear();
+
+        if handshake_done {
+            break 'pump;
+        }
+
+        // Read more from the daemon. read_timeout is set; this
+        // returns WouldBlock after 5s if the daemon stalls.
+        let n = match (&stream).read(&mut tmp_buf) {
+            Ok(0) => {
+                // EOF before HandshakeDone. The daemon dropped us.
+                // Probably: id_h reject (bad name, version, no
+                // pubkey). The stderr will say why.
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "daemon EOF before HandshakeDone; stderr:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Ok(n) => n,
+            Err(e) => {
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "read error: {e}; stderr:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        };
+        pending.extend_from_slice(&tmp_buf[..n]);
+    }
+
+    // ─── OUR side is done. Prove the DAEMON's side too. ──────────
+    // The daemon logs "SPTPS handshake completed with testpeer"
+    // at INFO when it gets HandshakeDone. Then "Dropping testpeer
+    // after handshake" at WARN (the chunk-4a placeholder for
+    // send_ack). Then it terminates the connection — we see EOF.
+    //
+    // Read until EOF (daemon terminates the connection). The 5s
+    // timeout still applies.
+    loop {
+        match (&stream).read(&mut tmp_buf) {
+            Ok(0) => break, // EOF — daemon terminated us
+            Ok(_) => {}     // shouldn't get more bytes, but drain
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Daemon is slow to terminate. Wait one more.
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("read error after handshake: {e}"),
+        }
+    }
+
+    // ─── daemon is still alive (terminating ONE conn != exit) ────
+    // The connection closed but the daemon keeps running (waiting
+    // for more peers, control conns, etc). C: same —
+    // `terminate_connection` doesn't `event_exit`.
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "daemon shouldn't exit on one peer disconnect"
+    );
+
+    // ─── stderr: prove the daemon REACHED HandshakeDone ────────────
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The exact substring from `dispatch_sptps_outputs`. If the
+    // log message changes, this breaks — intentional. It's the
+    // observable signal.
+    assert!(
+        stderr.contains("SPTPS handshake completed with testpeer"),
+        "daemon didn't log handshake completion; stderr:\n{stderr}"
+    );
+    // And the chunk-4a placeholder warning.
+    assert!(
+        stderr.contains("Dropping testpeer after handshake"),
+        "daemon didn't log the send_ack-NYI drop; stderr:\n{stderr}"
+    );
+    // The id_h peer branch logged the start.
+    assert!(
+        stderr.contains("Starting SPTPS handshake with testpeer"),
+        "daemon didn't log handshake start; stderr:\n{stderr}"
+    );
+}
+
+/// Wrong key: the daemon has a DIFFERENT pubkey on file for us.
+/// SIG verify fails → daemon drops the connection. Proves the
+/// SPTPS auth actually authenticates (it's not just key exchange).
+///
+/// Same setup as `peer_handshake_reaches_done` but we register a
+/// FAKE pubkey for ourselves in `hosts/testpeer`. The daemon's
+/// SPTPS receive_sig step computes the transcript with that fake
+/// pubkey, our SIG was made with the real one → BadSig.
+#[test]
+fn peer_wrong_key_fails_sig() {
+    use rand_core::OsRng;
+    use std::io::Read;
+    use std::net::TcpStream;
+    use tinc_crypto::sign::SigningKey;
+    use tinc_sptps::{Framing, Output, Role, Sptps};
+
+    let tmp = TmpGuard::new("peer-wrong-key");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    let daemon_pub = write_config(&confbase);
+    // OUR real key (we sign with this).
+    let our_key = SigningKey::from_seed(&[0x77; 32]);
+    // FAKE pubkey we register at the daemon. Daemon will try to
+    // verify our SIG with THIS → fail.
+    let fake_pub = *SigningKey::from_seed(&[0x88; 32]).public_key();
+    let b64 = tinc_crypto::b64::encode(&fake_pub);
+    std::fs::write(
+        confbase.join("hosts").join("testpeer"),
+        format!("Ed25519PublicKey = {b64}\n"),
+    )
+    .unwrap();
+
+    let mut child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket));
+    let tcp_addr = read_tcp_addr(&pidfile);
+
+    let stream = TcpStream::connect(tcp_addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(&stream, "0 testpeer 17.7").unwrap();
+
+    // Read past ID line, find KEX bytes.
+    let mut buf = Vec::with_capacity(256);
+    let mut tmp_buf = [0u8; 256];
+    let id_end = loop {
+        let n = (&stream).read(&mut tmp_buf).unwrap();
+        if n == 0 {
+            panic!("daemon closed early");
+        }
+        buf.extend_from_slice(&tmp_buf[..n]);
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            break pos;
+        }
+    };
+
+    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
+    label.push(0);
+    let (mut sptps, init) = Sptps::start(
+        Role::Initiator,
+        Framing::Stream,
+        our_key,
+        daemon_pub,
+        label,
+        0,
+        &mut OsRng,
+    );
+    for o in init {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).unwrap();
+        }
+    }
+
+    // Feed daemon's KEX, send our SIG. The daemon's SIG verify
+    // FAILS (wrong pubkey). Daemon terminates the connection.
+    // We see EOF (or possibly OUR receive fails first if the
+    // daemon's SIG also doesn't verify on our side — we have the
+    // RIGHT daemon_pub so OUR side should be fine; the failure is
+    // unidirectional).
+    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let saw_eof = loop {
+        if Instant::now() > deadline {
+            break false;
+        }
+        let mut off = 0;
+        while off < pending.len() {
+            // OUR receive might also fail — the daemon's SIG was
+            // made with the daemon's real private key, and we have
+            // the matching daemon_pub, so OUR receive should
+            // succeed. The failure is on the DAEMON's side.
+            // But if it does fail: that's also a stop condition
+            // (and the stderr check below disambiguates).
+            match sptps.receive(&pending[off..], &mut OsRng) {
+                Ok((0, _)) => break,
+                Ok((n, outs)) => {
+                    off += n;
+                    for o in outs {
+                        if let Output::Wire { bytes, .. } = o {
+                            // Might fail if daemon already RST'd
+                            // — ignore. The point is to send our
+                            // SIG so the daemon's verify fires.
+                            let _ = (&stream).write_all(&bytes);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        pending.clear();
+
+        // Read more (or detect EOF).
+        match (&stream).read(&mut tmp_buf) {
+            Ok(0) => break true, // EOF — daemon dropped us. EXPECTED.
+            Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+            Err(_) => break false,
+        }
+    };
+
+    // ─── the daemon's stderr says BadSig ─────────────────────────
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Either saw_eof (daemon closed) OR the test loop timed out
+    // (less likely). Either way: stderr is the proof.
+    assert!(
+        saw_eof,
+        "expected daemon to close connection on bad SIG; stderr:\n{stderr}"
+    );
+    // The exact error variant from `feed_sptps`'s log line.
+    // `SptpsError::BadSig` debug-formatted.
+    assert!(
+        stderr.contains("BadSig"),
+        "expected BadSig in daemon stderr; stderr:\n{stderr}"
+    );
+    // And NOT the success line.
+    assert!(
+        !stderr.contains("SPTPS handshake completed"),
+        "daemon should NOT have completed; stderr:\n{stderr}"
+    );
 }

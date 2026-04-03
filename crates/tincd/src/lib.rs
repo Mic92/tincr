@@ -96,6 +96,7 @@
 pub mod conn;
 pub mod control;
 pub mod daemon;
+pub mod keys;
 pub mod listen;
 pub mod proto;
 

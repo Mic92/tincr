@@ -18,9 +18,11 @@ path = "src/main.rs"
 
 [dependencies]
 tinc-conf = { path = "../tinc-conf" }
+tinc-crypto = { path = "../tinc-crypto" }
 tinc-device = { path = "../tinc-device" }
 tinc-event = { path = "../tinc-event" }
 tinc-proto = { path = "../tinc-proto" }
+tinc-sptps = { path = "../tinc-sptps" }
 
 # slotmap for ConnId. Generational keys: a stale ConnId can't dangle
 # into a slot reused by a different connection. The C uses raw
@@ -48,3 +50,10 @@ socket2 = "0.5"
 [dev-dependencies]
 # Integration tests: tempdir for confbase, no other deps.
 # Hand-rolled TmpGuard (per the standing rule: NamedTempFile not used).
+# tinc-conf/-crypto/-sptps for test helpers (write_pem, SigningKey,
+# Sptps::start — the integration test IS the SPTPS initiator side).
+# These are also in [dependencies] but listing here documents the
+# test-side usage (write keys, drive SPTPS).
+tinc-conf = { path = "../tinc-conf" }
+tinc-crypto = { path = "../tinc-crypto" }
+tinc-sptps = { path = "../tinc-sptps" }

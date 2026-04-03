@@ -16,9 +16,42 @@
 //! | `last_ping_time` | `Instant` | timeout sweep |
 //! | `io` | `IoId` | held by daemon, NOT here |
 //!
-//! The peer fields (`node`, `edge`, `sptps`, `protocol_minor`,
-//! `tcplen`, `sptpslen`) come in chunk 4 when the meta connection
-//! state machine lands. The struct grows then.
+//! Chunk 4a adds: `protocol_minor`, `ecdsa`, `sptps`. The peer
+//! id_h branch needs them. `node`/`edge` (`ack_h`) and `tcplen`/
+//! `sptpslen` (TCP-tunneled VPN packets) come in 4b/4c.
+//!
+//! ## SPTPS bridge ownership
+//!
+//! C: `connection_t.sptps` is a value (not a pointer). The C
+//! callback signature is `bool fn(void *handle, ...)` where `handle`
+//! IS the `connection_t*` — the callback reaches back into `c->
+//! outbuf`, the global `node_tree`, etc. `sptps_receive_data` fires
+//! callbacks SYNCHRONOUSLY inside its loop.
+//!
+//! We can't have `Sptps::receive` reach back into `Connection` (it'd
+//! need `&mut Connection` while `&mut self.sptps` is borrowed). The
+//! `Output` enum was the unblocking design: `receive()` returns
+//! `Vec<Output>`, the caller (Daemon) dispatches AFTER the borrow
+//! ends. `feed()` here drives the SPTPS receive loop and returns
+//! `FeedResult::Sptps(outs)`; daemon owns the dispatch.
+//!
+//! This loses one C semantic: in the C, an `Output::Wire` from the
+//! Nth record is queued BEFORE the (N+1)th record is processed.
+//! For SPTPS-stream-mode handshake (KEX→SIG→DONE) this doesn't
+//! matter — the responder gets KEX and emits nothing, gets SIG and
+//! emits SIG+DONE at the END. There's no interleaving. The case
+//! where it COULD matter is post-handshake `Output::Record` causing
+//! a `send_request` reply that wants to be queued before the next
+//! record fires — e.g. a `PING` followed by `KEY_CHANGED` in one
+//! TCP segment. Both are now dispatched AFTER the segment is fully
+//! consumed. The wire output IS still in order (Vec preserves push
+//! order); the only difference is timing inside one `recv()`. Not
+//! observable from the peer.
+//!
+//! Box: `Sptps` is ~1KB (cipher contexts, replay window, KEX state).
+//! Most `Connection`s are control conns (no SPTPS). Unboxed `Option<
+//! Sptps>` puts ~1KB into every slot the slotmap pre-allocates. Box
+//! makes the None case 1 pointer.
 //!
 //! ## `LineBuf` vs C `buffer_t`
 //!
@@ -56,7 +89,10 @@ use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::Instant;
 
+use rand_core::RngCore;
+use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
+use tinc_sptps::{Output, Sptps, SptpsError};
 
 /// `fmt::Write` adapter for `Vec<u8>`. `Vec<u8>` impls `io::Write`
 /// but not `fmt::Write`; `format_args!` wants `fmt::Write`. The
@@ -187,6 +223,46 @@ impl LineBuf {
             self.offset = 0;
         }
     }
+
+    /// Take ownership of the live bytes, leaving the buffer empty.
+    ///
+    /// For the SPTPS-transition: when `id_h` peer-branch fires (a
+    /// plaintext line drained from `inbuf`), it installs `conn.sptps`.
+    /// But the SAME `recv()` that delivered the ID line might've also
+    /// delivered the first SPTPS bytes (initiator's KEX, batched in
+    /// one `write()` after the ID). Those bytes are now sitting in
+    /// `inbuf` past the line. `read_line` won't find them (no `\n`).
+    /// Next `feed()` will go SPTPS-mode and read NEW bytes from the
+    /// socket — the buffered KEX is stranded.
+    ///
+    /// C handles this by processing the stack buffer iteratively
+    /// inside `receive_meta`'s do-while: after `receive_request`
+    /// fires `id_h` (which sets `protocol_minor=2`), the NEXT loop
+    /// iteration's `if(c->protocol_minor>=2)` is true, and the
+    /// remaining stack-buffer bytes go to `sptps_receive_data`. The
+    /// stack buffer ISN'T `c->inbuf` — it's local. The mode switch
+    /// happens mid-read.
+    ///
+    /// We split feed/dispatch differently (read whole buffer to
+    /// inbuf, THEN drain), so we need an explicit handoff. The
+    /// daemon calls this after `id_h` peer-branch, feeds the result
+    /// to `sptps.receive()`, dispatches those outputs too.
+    ///
+    /// In practice: the initiator usually `write()`s ID, waits for
+    /// our `send_id` reply, THEN starts SPTPS. Separate writes →
+    /// likely separate reads. The piggyback case is rare (Nagle
+    /// coalescing on a slow link) but real. `cmd_join` (which also
+    /// has this transition) handles it the same way — see
+    /// `tinc-tools/cmd/join.rs:"may have leftover bytes"`.
+    pub fn take_rest(&mut self) -> Vec<u8> {
+        // No `Vec::split_off(offset)` then drop the prefix — that's
+        // two moves. `data[offset..].to_vec()` copies once, then
+        // we clear. Simpler, same effect for the small slack here.
+        let rest = self.data[self.offset..].to_vec();
+        self.data.clear();
+        self.offset = 0;
+        rest
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -233,21 +309,50 @@ pub struct Connection {
     /// Control conns get a 1-hour bump (`protocol_auth.c:328`) so
     /// they're effectively exempt.
     pub last_ping_time: Instant,
+    /// `c->protocol_minor`. Starts 0 (`xzalloc`). `id_h` parses it
+    /// from `"%d.%d"`. For us: `>= 2` means SPTPS, `< 2` means
+    /// legacy (which we reject — the rollback check at `protocol_
+    /// auth.c:443-447` drops). Control conns don't send `".X"` so
+    /// this stays 0 for them.
+    pub protocol_minor: u8,
+    /// `c->ecdsa`. THIS PEER's public key. Loaded by `id_h` peer
+    /// branch from `hosts/NAME` (or inline config var). `None` until
+    /// then. C `ecdsa_t*` (heap pointer); we hold the 32 bytes.
+    /// Control conns: stays None.
+    pub ecdsa: Option<[u8; PUBLIC_LEN]>,
+    /// `c->sptps`. The SPTPS state machine. `None` until `id_h`
+    /// peer-branch installs it. `Box`: see module doc "SPTPS bridge
+    /// ownership". C `sptps_t` is a value (not pointer) inside
+    /// `connection_t`; the size cost there is the same as unboxed
+    /// `Option<Sptps>` here, but C doesn't pre-allocate a slab.
+    pub sptps: Option<Box<Sptps>>,
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
-/// disambiguate `false` into "would block" vs "drop me".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// disambiguate `false` into "would block" vs "drop me", and grow a
+/// fourth arm for the SPTPS-mode output.
+#[derive(Debug)]
 pub enum FeedResult {
-    /// Data buffered; caller should drain `read_line`.
+    /// Plaintext data buffered; caller should drain `read_line`.
+    /// (Pre-SPTPS only — control conns and the initial ID line.)
     Data,
     /// `recv()` returned `EWOULDBLOCK` — spurious wakeup. Level-
     /// triggered epoll can do this. C `meta.c:192`: `return true`.
     /// Caller does nothing; next turn re-fires if still readable.
     WouldBlock,
-    /// `recv()` returned 0 (EOF) or a real error. Connection is
-    /// dead. Caller calls `terminate`.
+    /// `recv()` returned 0 (EOF) or a real error, OR `sptps_
+    /// receive_data` returned 0 (decrypt fail, bad seqno, etc).
+    /// Connection is dead. Caller calls `terminate`.
     Dead,
+    /// SPTPS-mode: decoded outputs. C: the `receive_record`
+    /// callback fires for each. We return them for the daemon to
+    /// dispatch (`Output::Wire` → outbuf, `Output::Record` →
+    /// `receive_request`, `Output::HandshakeDone` → `send_ack`).
+    ///
+    /// The Vec can be empty: a partial SPTPS record arrived (length
+    /// header + half the body) — buffered inside `Sptps::stream`,
+    /// nothing decoded yet. C: same, callback doesn't fire.
+    Sptps(Vec<Output>),
 }
 
 impl Connection {
@@ -278,6 +383,9 @@ impl Connection {
             // `:802`: `c->hostname = xstrdup("localhost port unix")`.
             hostname: "localhost port unix".to_string(),
             last_ping_time: now,
+            protocol_minor: 0,
+            ecdsa: None,
+            sptps: None,
         }
     }
 
@@ -310,6 +418,9 @@ impl Connection {
             name: "<unknown>".to_string(),
             hostname,
             last_ping_time: now,
+            protocol_minor: 0,
+            ecdsa: None,
+            sptps: None,
         }
     }
 
@@ -329,22 +440,40 @@ impl Connection {
     /// The MAXBUFSIZE check (`meta.c:180-183`) — if `inbuf` is
     /// already at cap before `recv`, something is wrong (a single
     /// line longer than 2KB is a protocol violation; control lines
-    /// are 80 chars at most). C: `return false`.
-    pub fn feed(&mut self) -> FeedResult {
-        if self.inbuf.live_len() >= MAXBUFSIZE {
-            log::error!(target: "tincd::meta",
-                        "Input buffer full for {} — protocol violation", self.name);
-            return FeedResult::Dead;
-        }
-
-        // Stack buffer same as C `char inbuf[MAXBUFSIZE]`. The cap
-        // on read size is `MAXBUFSIZE - inbuf.len` so we never
-        // overrun the limit on a single feed. C does the same
-        // (`sizeof inbuf - c->inbuf.len`).
+    /// are 80 chars at most). C: `return false`. SPTPS mode doesn't
+    /// hit this check — SPTPS bytes go to `Sptps::stream`, not
+    /// `inbuf`. The cap there is `u16` reclen = 64K, internally
+    /// enforced.
+    ///
+    /// `rng`: only touched if SPTPS mode AND a HANDSHAKE record
+    /// arrives that triggers a `send_kex` (rekey). The initial
+    /// handshake (KEX→SIG→DONE on the responder side) doesn't
+    /// touch rng inside `receive`. But we can't statically know
+    /// that; pass `OsRng`. Plaintext mode never touches it.
+    pub fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
+        // Stack buffer same as C `char inbuf[MAXBUFSIZE]`.
         let mut stack = [0u8; MAXBUFSIZE];
-        let cap = MAXBUFSIZE - self.inbuf.live_len();
+
+        // ─── Cap ─────────────────────────────────────────────
+        // C: `sizeof inbuf - c->inbuf.len` — cap shrinks as the line
+        // buffer fills. SPTPS mode: full MAXBUFSIZE (we don't touch
+        // c->inbuf). The C does the SAME: the `protocol_minor>=2`
+        // path at `meta.c:224` doesn't `buffer_add(&c->inbuf)`, so
+        // `c->inbuf.len` stays 0 once SPTPS is up, and cap stays full.
+        let cap = if self.sptps.is_some() {
+            MAXBUFSIZE
+        } else {
+            // The MAXBUFSIZE pre-check.
+            if self.inbuf.live_len() >= MAXBUFSIZE {
+                log::error!(target: "tincd::meta",
+                            "Input buffer full for {} — protocol violation", self.name);
+                return FeedResult::Dead;
+            }
+            MAXBUFSIZE - self.inbuf.live_len()
+        };
         let buf = &mut stack[..cap];
 
+        // ─── recv ────────────────────────────────────────────
         // SAFETY: `read(2)` on a valid fd. fd is owned by self,
         // non-blocking. buf is stack-allocated. read returns the
         // number of bytes written into buf, or -1 with errno.
@@ -380,11 +509,111 @@ impl Connection {
                        "Connection closed by {}", self.name);
             return FeedResult::Dead;
         }
-
-        // n > 0: that many bytes are now in `buf`. Append to inbuf.
         #[allow(clippy::cast_sign_loss)] // n > 0 checked
-        self.inbuf.add(&buf[..n as usize]);
+        let chunk = &buf[..n as usize];
+
+        // ─── SPTPS branch (`meta.c:224-233`) ───────────────────
+        // C: `if(c->protocol_minor >= 2)` — we use `sptps.is_some()`
+        // because the mode-switch IS "sptps got installed by id_h".
+        // (`protocol_minor >= 2` is the C's proxy for the same
+        // condition. id_h:455 sets minor>=2 ⇔ sptps_start succeeded.)
+        if let Some(sptps) = self.sptps.as_deref_mut() {
+            // The do-while `meta.c:200-313`: `len = sptps_receive_
+            // data(bufp, inlen); bufp += len; inlen -= len;` until
+            // `inlen == 0`. `sptps_receive_data` (= our `receive`)
+            // processes ONE record per call in stream mode; if the
+            // chunk has 2 records, we loop.
+            return Self::feed_sptps(sptps, chunk, &self.name, rng);
+        }
+
+        // ─── Plaintext branch ─────────────────────────────────
+        // n > 0: that many bytes are now in `buf`. Append to inbuf.
+        self.inbuf.add(chunk);
         FeedResult::Data
+    }
+
+    /// SPTPS receive-loop. The C do-while at `meta.c:200-313`,
+    /// `protocol_minor >= 2` arm only. Factored out so the
+    /// `take_rest` re-feed (post-id_h mode-switch) can call it too.
+    ///
+    /// Stops at `consumed == chunk.len()` OR `consumed == 0` (the
+    /// latter is defensive — stream-mode `receive()` returns 0 only
+    /// for empty input, and we check `chunk.is_empty()` first —
+    /// but a future bug returning 0 mid-loop would spin forever).
+    ///
+    /// `name` is for the log line (cheap `&str` borrow, separate
+    /// from `&mut sptps`). C `meta.c:230` doesn't log on `len==0`
+    /// (the SPTPS internals log themselves via `sptps_log`); we add
+    /// the connection-name context.
+    pub(crate) fn feed_sptps(
+        sptps: &mut Sptps,
+        chunk: &[u8],
+        name: &str,
+        rng: &mut impl RngCore,
+    ) -> FeedResult {
+        if chunk.is_empty() {
+            // The take_rest re-feed often hits this: the ID line was
+            // ALL of the recv. No SPTPS leftover. Don't bother
+            // calling receive() with an empty slice.
+            return FeedResult::Sptps(Vec::new());
+        }
+        let mut outputs = Vec::new();
+        let mut off = 0;
+        while off < chunk.len() {
+            match sptps.receive(&chunk[off..], rng) {
+                Ok((0, _)) => {
+                    // Unreachable in stream mode for nonempty input
+                    // (phase 1 always consumes ≥1 byte). Defensive.
+                    log::warn!(target: "tincd::meta",
+                               "SPTPS receive returned 0 consumed for {name}");
+                    break;
+                }
+                Ok((consumed, outs)) => {
+                    outputs.extend(outs);
+                    off += consumed;
+                }
+                Err(e) => {
+                    // C `meta.c:227`: `if(!len) return false`. The
+                    // `sptps_log` inside the C SPTPS already logged
+                    // the specific failure; the daemon log just
+                    // says "metadata error". We have the typed
+                    // error — use it.
+                    let level = match e {
+                        // Decrypt failures: peer key mismatch or
+                        // active tampering. ERR.
+                        SptpsError::DecryptFailed | SptpsError::BadSig => log::Level::Error,
+                        // Everything else (BadSeqno, BadRecord,
+                        // UnexpectedHandshake, ...) is more likely
+                        // version skew or a misbehaving peer than
+                        // an attack. INFO.
+                        _ => log::Level::Info,
+                    };
+                    log::log!(target: "tincd::meta", level,
+                              "SPTPS error from {name}: {e:?}");
+                    return FeedResult::Dead;
+                }
+            }
+        }
+        FeedResult::Sptps(outputs)
+    }
+
+    /// `send_meta_sptps` (`meta.c:41-54`). Queue raw bytes (already
+    /// SPTPS-framed by `Sptps::*` — length header, encrypted body,
+    /// auth tag). NO `\n` — SPTPS framing is binary.
+    ///
+    /// C: `buffer_add(&c->outbuf, buffer, length)` then `io_set(READ
+    /// | WRITE)`. Our `bool` return is the io_set signal, same as
+    /// `send()`.
+    ///
+    /// The `(void)type` in the C is for the callback signature —
+    /// `send_data_t` has a `type` param so `sptps_send_record` can
+    /// pass it through, but `send_meta_sptps` ignores it (it's
+    /// already inside the framed bytes). `Output::Wire::record_type`
+    /// is the same: advisory, ignored here.
+    pub fn send_raw(&mut self, bytes: &[u8]) -> bool {
+        let was_empty = self.outbuf.is_empty();
+        self.outbuf.add(bytes);
+        was_empty
     }
 
     /// `send_request` (`protocol.c:97-132`) → `send_meta` plaintext
@@ -498,6 +727,7 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_core::OsRng;
 
     // ─── LineBuf ──────────────────────────────────────────────
 
@@ -698,5 +928,303 @@ mod tests {
         assert_eq!(c.allow_request, Some(Request::Id));
         assert!(!c.control);
         assert_eq!(c.name, "<control>");
+        // Chunk-4a fields. Inert for control conns.
+        assert_eq!(c.protocol_minor, 0);
+        assert!(c.ecdsa.is_none());
+        assert!(c.sptps.is_none());
+    }
+
+    // ─── take_rest ────────────────────────────────────────────
+
+    /// The piggyback case: ID line + SPTPS bytes in one buffer.
+    /// `read_line` returns the line; `take_rest` returns the
+    /// SPTPS bytes that follow. THE SCENARIO from the doc comment.
+    #[test]
+    fn take_rest_after_read_line() {
+        let mut b = LineBuf::default();
+        // What a coalesced TCP segment looks like: peer's ID line,
+        // then the first SPTPS framed bytes (here, fake — just
+        // arbitrary bytes for the test).
+        b.add(b"0 alice 17.7\n\x00\x42garbage");
+
+        let r = b.read_line().unwrap();
+        assert_eq!(&b.bytes_raw()[r], b"0 alice 17.7");
+
+        // Now: offset is past the \n. The SPTPS bytes are live.
+        // `take_rest` extracts them, empties the buffer.
+        let rest = b.take_rest();
+        assert_eq!(rest, b"\x00\x42garbage");
+        assert!(b.is_empty());
+        assert_eq!(b.live_len(), 0);
+        // The cleared state is reusable. (Not strictly needed —
+        // post-transition, inbuf is never touched again. But we
+        // pin the no-surprises behavior.)
+        b.add(b"x\n");
+        let r = b.read_line().unwrap();
+        assert_eq!(&b.bytes_raw()[r], b"x");
+    }
+
+    /// The common case: ID line was the WHOLE recv. `take_rest`
+    /// returns empty. The daemon's re-feed gets `feed_sptps([])`
+    /// → `Sptps(Vec::new())`. No-op.
+    #[test]
+    fn take_rest_empty_after_full_line() {
+        let mut b = LineBuf::default();
+        b.add(b"0 alice 17.7\n");
+        let r = b.read_line().unwrap();
+        assert_eq!(&b.bytes_raw()[r], b"0 alice 17.7");
+        // is_empty() is true (offset == len) but bytes_raw still
+        // has the line (no compact yet). take_rest sees offset
+        // caught len → empty rest.
+        assert!(b.is_empty());
+        assert!(b.take_rest().is_empty());
+    }
+
+    /// Degenerate: take_rest on a fresh buffer. Empty.
+    #[test]
+    fn take_rest_on_fresh_is_empty() {
+        let mut b = LineBuf::default();
+        assert!(b.take_rest().is_empty());
+    }
+
+    // ─── feed_sptps (the do-while loop) ────────────────────────
+    //
+    // Can't easily test feed() itself — it reads a real fd. But
+    // feed_sptps is the pure SPTPS-loop, factored out exactly so
+    // it's testable.
+
+    /// Dummy RNG that panics if touched. The receive() path during
+    /// the initial handshake (responder receiving initiator's KEX,
+    /// then SIG) doesn't trigger send_kex, so rng stays cold.
+    /// Same idiom as `tinc-sptps/tests/vs_c.rs::NoRng`.
+    struct NoRng;
+    impl rand_core::RngCore for NoRng {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!("rng touched in receive-only path")
+        }
+        fn next_u64(&mut self) -> u64 {
+            unreachable!("rng touched in receive-only path")
+        }
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unreachable!("rng touched in receive-only path")
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+            unreachable!("rng touched in receive-only path")
+        }
+    }
+
+    /// `feed_sptps([])` → `Sptps(Vec::new())`. The take_rest no-op.
+    /// Doesn't even need a real Sptps — the empty-chunk early-
+    /// return is hit before sptps is touched. We pass a real one
+    /// anyway (the function signature wants &mut Sptps, not
+    /// Option) to verify it's untouched.
+    #[test]
+    fn feed_sptps_empty_chunk() {
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Role};
+
+        // Two throwaway keys — doesn't matter, we never receive.
+        let mykey = SigningKey::from_seed(&[1; 32]);
+        let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
+        let (mut sptps, _) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            mykey,
+            hispub,
+            b"test".to_vec(),
+            0,
+            &mut OsRng,
+        );
+
+        let r = Connection::feed_sptps(&mut sptps, &[], "test", &mut NoRng);
+        match r {
+            FeedResult::Sptps(outs) => assert!(outs.is_empty()),
+            _ => panic!("expected Sptps(empty), got {r:?}"),
+        }
+        // NoRng didn't panic → sptps.receive was not called.
+    }
+
+    /// THE LOOP: two records arrive in one chunk → both processed.
+    /// C `meta.c:200-313`: `do { ... } while(inlen > 0)`. If we
+    /// only called `receive()` once, only the first record would
+    /// decode and the second would be stranded.
+    ///
+    /// Setup: full handshake (so we can send TWO encrypted records
+    /// from the peer side, glue them together, feed as one chunk).
+    /// THE TWO `Output::Record`s prove the loop iterated.
+    #[test]
+    fn feed_sptps_two_records_one_chunk() {
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Output, Role};
+
+        // ─── Handshake: alice (initiator) ↔ bob (responder) ───
+        // Same dance as vs_c.rs but Rust↔Rust. Use OsRng for the
+        // KEX nonces (NoRng would panic in start's send_kex).
+        let alice_k = SigningKey::from_seed(&[10; 32]);
+        let bob_k = SigningKey::from_seed(&[20; 32]);
+        let alice_pub = *alice_k.public_key();
+        let bob_pub = *bob_k.public_key();
+
+        let (mut alice, a_init) = Sptps::start(
+            Role::Initiator,
+            Framing::Stream,
+            alice_k,
+            bob_pub,
+            b"loop-test".to_vec(),
+            0,
+            &mut OsRng,
+        );
+        let (mut bob, b_init) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            bob_k,
+            alice_pub,
+            b"loop-test".to_vec(),
+            0,
+            &mut OsRng,
+        );
+
+        // Helper: extract the one Wire from a Vec<Output>.
+        let wire = |outs: Vec<Output>| -> Vec<u8> {
+            outs.into_iter()
+                .find_map(|o| match o {
+                    Output::Wire { bytes, .. } => Some(bytes),
+                    _ => None,
+                })
+                .expect("one Wire output")
+        };
+
+        let a_kex = wire(a_init);
+        let b_kex = wire(b_init);
+
+        // alice gets bob's KEX → SIG out.
+        let (n, outs) = alice.receive(&b_kex, &mut NoRng).unwrap();
+        assert_eq!(n, b_kex.len());
+        let a_sig = wire(outs);
+
+        // bob gets alice's KEX → nothing (responder waits for SIG).
+        let (n, outs) = bob.receive(&a_kex, &mut NoRng).unwrap();
+        assert_eq!(n, a_kex.len());
+        assert!(outs.is_empty());
+
+        // bob gets alice's SIG → SIG out + HandshakeDone.
+        let (n, outs) = bob.receive(&a_sig, &mut NoRng).unwrap();
+        assert_eq!(n, a_sig.len());
+        assert_eq!(outs.len(), 2);
+        let b_sig = match &outs[0] {
+            Output::Wire { bytes, .. } => bytes.clone(),
+            _ => panic!(),
+        };
+        assert!(matches!(outs[1], Output::HandshakeDone));
+
+        // alice gets bob's SIG → HandshakeDone.
+        let (n, outs) = alice.receive(&b_sig, &mut NoRng).unwrap();
+        assert_eq!(n, b_sig.len());
+        assert!(matches!(outs[0], Output::HandshakeDone));
+
+        // ─── NOW: both done. Alice sends TWO records. ──────────
+        let rec1 = wire(alice.send_record(0, b"first").unwrap());
+        let rec2 = wire(alice.send_record(0, b"second").unwrap());
+
+        // Glue them. THIS is the "coalesced TCP segment" that
+        // exercises the do-while.
+        let mut chunk = rec1;
+        chunk.extend_from_slice(&rec2);
+
+        // ─── feed_sptps: bob receives both in one call ─────────
+        let r = Connection::feed_sptps(&mut bob, &chunk, "alice", &mut NoRng);
+        match r {
+            FeedResult::Sptps(outs) => {
+                // BOTH records decoded. If the loop only ran once,
+                // we'd see one. The second would be eaten by the
+                // next call to receive() — but there IS no next
+                // call (this is one feed_sptps invocation).
+                assert_eq!(outs.len(), 2, "loop must process both records");
+                match (&outs[0], &outs[1]) {
+                    (Output::Record { bytes: b0, .. }, Output::Record { bytes: b1, .. }) => {
+                        assert_eq!(b0, b"first");
+                        assert_eq!(b1, b"second");
+                    }
+                    _ => panic!("expected two Records, got {outs:?}"),
+                }
+            }
+            _ => panic!("expected Sptps(..), got {r:?}"),
+        }
+    }
+
+    /// Partial record: only the length header arrives. `receive()`
+    /// buffers it, returns `(2, [])`. feed_sptps loop terminates
+    /// (consumed everything). `Sptps(Vec::new())`.
+    ///
+    /// This pins: feed_sptps doesn't spin when receive() returns
+    /// nonzero-but-no-output. The C `do { ... } while(inlen > 0)`
+    /// also terminates here (inlen reaches 0).
+    #[test]
+    fn feed_sptps_partial_record() {
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Role};
+
+        let mykey = SigningKey::from_seed(&[1; 32]);
+        let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
+        let (mut sptps, _) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            mykey,
+            hispub,
+            b"partial".to_vec(),
+            0,
+            &mut OsRng,
+        );
+
+        // Just 2 bytes (a length header, says "body of 5 bytes
+        // follows"). receive() buffers, returns (2, []).
+        // The do-while sees off==2==chunk.len() → done.
+        let r = Connection::feed_sptps(&mut sptps, &[0x00, 0x05], "test", &mut NoRng);
+        match r {
+            FeedResult::Sptps(outs) => assert!(outs.is_empty()),
+            _ => panic!("expected Sptps(empty), got {r:?}"),
+        }
+    }
+
+    /// Decrypt failure (bad bytes post-handshake) → Dead. C
+    /// `meta.c:227`: `if(!len) return false`.
+    #[test]
+    fn feed_sptps_decrypt_fail_is_dead() {
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Role};
+
+        let mykey = SigningKey::from_seed(&[1; 32]);
+        let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
+        let (mut sptps, _) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            mykey,
+            hispub,
+            b"fail".to_vec(),
+            0,
+            &mut OsRng,
+        );
+
+        // Garbage that's not a valid plaintext-phase record. The
+        // length header says "5 bytes", but the type byte (3rd)
+        // is 0 (an app record) and we're pre-handshake — receive()
+        // returns Err(BadRecord). The state machine isn't expecting
+        // app data before the handshake.
+        let bad = [0x00, 0x05, 0x00, b'x', b'x', b'x', b'x', b'x'];
+        let r = Connection::feed_sptps(&mut sptps, &bad, "test", &mut NoRng);
+        assert!(matches!(r, FeedResult::Dead), "expected Dead, got {r:?}");
+    }
+
+    /// `send_raw`: no `\n` appended. SPTPS framing is binary; the
+    /// length header IS the frame delimiter.
+    #[test]
+    fn send_raw_no_newline() {
+        let mut c = Connection::test_with_fd(devnull());
+        // Some framed-looking bytes. Contains 0x0a (== '\n') in
+        // the middle to prove we don't try to interpret it.
+        let bytes = &[0x00, 0x05, 0x0a, 0xde, 0xad, 0xbe, 0xef];
+        let signal = c.send_raw(bytes);
+        assert!(signal); // outbuf went empty→nonempty
+        assert_eq!(c.outbuf.live(), bytes); // exact, no \n added
     }
 }

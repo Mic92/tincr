@@ -52,18 +52,21 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rand_core::OsRng;
 use slotmap::{SlotMap, new_key_type};
+use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_proto::Request;
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
+use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
     unmap,
 };
-use crate::proto::{DispatchResult, check_gate, handle_control, handle_id};
+use crate::proto::{DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id};
 
 // ═══════════════════════════════════════════════════════════════════
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
@@ -277,6 +280,21 @@ pub struct Daemon {
     /// Appears in the `send_id` greeting and in dump output.
     pub(crate) name: String,
 
+    /// `myself->connection->ecdsa` (`net_setup.c:803`). Our Ed25519
+    /// private key. Loaded once at startup from `confbase/ed25519_
+    /// key.priv` (or `Ed25519PrivateKeyFile`). Used for SPTPS auth:
+    /// every peer handshake clones this via `to_blob`/`from_blob`
+    /// (`SigningKey` deliberately isn't `Clone` — the roundtrip
+    /// makes copies VISIBLE). Never reloaded (a key change is a
+    /// daemon restart, not a SIGHUP — the C is the same).
+    pub(crate) mykey: SigningKey,
+
+    /// `confbase`. Kept so `id_h` peer-branch can resolve `hosts/
+    /// NAME` paths. The C has it as a global (`names.c:24`); we
+    /// thread it through `IdCtx`. Stored once here, borrowed into
+    /// each `IdCtx`.
+    pub(crate) confbase: PathBuf,
+
     // ─── settings ────────────────────────────────────────────────
     /// The config knobs. Reload swaps this.
     ///
@@ -376,6 +394,32 @@ impl Daemon {
                            "hosts/{name} not read: {e}; using defaults");
             }
         }
+
+        // ─── read_ecdsa_private_key (net_setup.c:803-828) ─────────
+        // C: `myself->connection->ecdsa = read_ecdsa_private_key(
+        // &config_tree, NULL); experimental = ecdsa != NULL;`.
+        //
+        // The C has THREE attempts at `:803/814/822` interleaved with
+        // `disable_old_keys` (a `tinc init` migration helper that
+        // detects old-format keys and asks to convert). We forbid
+        // legacy — the migration is meaningless. One attempt.
+        //
+        // Missing key is FATAL for us. C falls back to `myself->
+        // connection->legacy = init_legacy_ctx(read_rsa_private_key
+        // (...))` at `:831-842`. We don't. The error message includes
+        // the gen-keys hint (C `keys.c:123-125`) so the user knows
+        // what to do.
+        let mykey = read_ecdsa_private_key(&config, confbase).map_err(|e| {
+            // C `:123-125` prints the hint at INFO. We embed it in
+            // the error — setup() callers (main.rs) print the error
+            // to stderr and exit, so it's visible.
+            let hint = if matches!(e, PrivKeyError::Missing(_)) {
+                "\n  (Create a key pair with `tinc generate-ed25519-keys`)"
+            } else {
+                ""
+            };
+            SetupError::Config(format!("{e}{hint}"))
+        })?;
 
         // ─── settings (net_setup.c:788, 538, 1239-1257) ─────────
         let mut settings = DaemonSettings::default();
@@ -557,6 +601,8 @@ impl Daemon {
             cookie,
             pidfile: pidfile.to_path_buf(),
             name,
+            mykey,
+            confbase: confbase.to_path_buf(),
             settings,
             ev,
             timers,
@@ -980,17 +1026,51 @@ impl Daemon {
     /// `handle_meta_connection_data` → `receive_meta`).
     ///
     /// feed → loop read_line → check_gate → handler.
+    ///
+    /// `too_many_lines` allowed: this is the C `receive_meta` +
+    /// `receive_request` dispatch table inlined. The C version is
+    /// also long (`meta.c:164-320` is 156 lines). The id_h Peer
+    /// branch alone is 70 lines (the SPTPS-transition piggyback
+    /// re-feed). Splitting would mean threading `id`/`conn`/`self`
+    /// borrows through helpers — the borrow gymnastics outweigh
+    /// the linecount win. Chunk 4b's send_ack will SHRINK this
+    /// (the Peer arm's terminate-after-handshake block goes away).
+    #[allow(clippy::too_many_lines)]
     fn on_conn_readable(&mut self, id: ConnId) {
         // ─── feed (one recv) ─────────────────────────────────────
         // C `meta.c:185`: `inlen = recv(...)`.
+        // `OsRng`: feed() needs an rng for the SPTPS-mode receive
+        // path. Only touched on rekey (HANDSHAKE record post-
+        // initial-handshake). `OsRng` is zero-sized; passing `&mut`
+        // is free.
         let conn = self.conns.get_mut(id).expect("checked contains_key");
-        match conn.feed() {
+        match conn.feed(&mut OsRng) {
             FeedResult::WouldBlock => return,
             FeedResult::Dead => {
                 self.terminate(id);
                 return;
             }
             FeedResult::Data => {}
+            FeedResult::Sptps(outs) => {
+                // SPTPS-mode connection. Dispatch outputs.
+                let needs_write = self.dispatch_sptps_outputs(id, outs);
+                if !self.conns.contains_key(id) {
+                    // dispatch terminated (e.g. HandshakeDone in 4a).
+                    return;
+                }
+                if needs_write {
+                    if let Some(&io_id) = self.conn_io.get(id) {
+                        if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
+                            log::error!(target: "tincd::conn",
+                                        "io_set failed for {id:?}: {e}");
+                            self.terminate(id);
+                        }
+                    }
+                }
+                // Don't fall through to the line-drain loop —
+                // SPTPS mode doesn't touch inbuf.
+                return;
+            }
         }
 
         // ─── drain inbuf (loop readline + dispatch) ──────────────
@@ -1028,15 +1108,138 @@ impl Daemon {
             // arms are the request_entries[] table.
             let (result, needs_write) = match req {
                 Request::Id => {
-                    // `id_h`. The cookie + name come from `&self` —
-                    // we can't pass `&self.cookie` while holding
-                    // `&mut conn` (both borrow `self`). Clone the
-                    // cookie. (64 bytes, once per connection. Fine.)
+                    // `id_h`. The ctx fields come from `&self` — we
+                    // can't borrow `&self.cookie` while holding `&mut
+                    // conn` (both borrow `self`). The cookie+name are
+                    // small — clone. mykey is borrowed (the BLOB-clone
+                    // for sptps_start happens INSIDE handle_id, only
+                    // on the peer branch). confbase: borrow into a
+                    // PathBuf clone (same shape as the others).
+                    //
+                    // Hold on — `&self.mykey` while `&mut conn` is
+                    // borrowed from `&mut self.conns`? Disjoint
+                    // fields. The borrow checker allows
+                    // `&self.mykey` and `&mut self.conns[id]`
+                    // simultaneously. The `.get_mut(id)` borrow IS
+                    // through `&mut self.conns` not `&mut self`.
+                    //
+                    // Except: `conn` was bound at the top of the
+                    // loop body via `self.conns.get_mut`. That's
+                    // `&mut self.conns`. `&self.mykey` is fine
+                    // (different field). `&self.cookie` is fine.
+                    // The clones aren't NEEDED for borrow reasons —
+                    // they were a habit from earlier chunks. KEEP
+                    // them for now (clones are cheap, refactor later
+                    // if profiling says so).
                     let cookie = self.cookie.clone();
                     let my_name = self.name.clone();
+                    let confbase = self.confbase.clone();
+                    let ctx = IdCtx {
+                        cookie: &cookie,
+                        my_name: &my_name,
+                        mykey: &self.mykey,
+                        confbase: &confbase,
+                    };
                     let now = self.timers.now();
-                    match handle_id(conn, &line, &cookie, &my_name, now) {
-                        Ok(nw) => (DispatchResult::Ok, nw),
+                    match handle_id(conn, &line, &ctx, now, &mut OsRng) {
+                        Ok(IdOk::Control { needs_write }) => (DispatchResult::Ok, needs_write),
+                        Ok(IdOk::Peer { needs_write, init }) => {
+                            // ─── SPTPS-start dispatch ─────────────
+                            // 1. Queue init Wire bytes (responder's KEX).
+                            //    C `send_meta_sptps`: buffer_add to
+                            //    outbuf. Our `send_raw`.
+                            // 2. take_rest from inbuf, re-feed via
+                            //    feed_sptps. The id-line piggyback.
+                            // 3. Dispatch THOSE outputs too.
+                            //
+                            // For chunk 4a, step 3 (and the regular
+                            // FeedResult::Sptps arm above) terminate
+                            // on HandshakeDone — we don't have
+                            // send_ack yet. The integration test
+                            // proves the handshake completes; chunk
+                            // 4b adds the ack.
+                            let mut nw = needs_write;
+                            for o in init {
+                                if let tinc_sptps::Output::Wire { bytes, .. } = o {
+                                    nw |= conn.send_raw(&bytes);
+                                }
+                                // Output::Record / HandshakeDone:
+                                // unreachable from sptps_start (it
+                                // only emits Wire). The match isn't
+                                // exhaustive; we let other variants
+                                // fall through silently. They're
+                                // unreachable, and panicking would
+                                // be noise.
+                            }
+
+                            // take_rest + re-feed. Factor as a
+                            // method so the regular Sptps arm can
+                            // call the same dispatch.
+                            let leftover = conn.inbuf.take_rest();
+                            // Self::feed_sptps borrows ONLY sptps,
+                            // not conn. We can borrow sptps then
+                            // dispatch the outputs (which need
+                            // &mut conn.outbuf). Disjoint fields
+                            // inside Connection — except: feed_sptps
+                            // takes &mut Sptps via conn.sptps.
+                            // as_deref_mut(), and send_raw is
+                            // &mut self (Connection). Conflict.
+                            //
+                            // Same borrow problem as feed(). Same
+                            // fix: feed_sptps is an associated fn
+                            // taking &mut Sptps directly. We pull
+                            // the deref out here.
+                            let outs = if leftover.is_empty() {
+                                // Fast path: no piggyback. Common.
+                                Vec::new()
+                            } else {
+                                let sptps = conn
+                                    .sptps
+                                    .as_deref_mut()
+                                    .expect("handle_id_peer just installed it");
+                                match Connection::feed_sptps(
+                                    sptps, &leftover, &conn.name, &mut OsRng,
+                                ) {
+                                    FeedResult::Sptps(outs) => outs,
+                                    FeedResult::Dead => {
+                                        // Piggybacked bytes were
+                                        // garbage. Unusual (a real
+                                        // peer's KEX is well-formed)
+                                        // but possible (fuzzer).
+                                        log::error!(
+                                            target: "tincd::proto",
+                                            "SPTPS error in piggyback from {}",
+                                            conn.name
+                                        );
+                                        self.terminate(id);
+                                        return;
+                                    }
+                                    // feed_sptps only returns
+                                    // Sptps or Dead.
+                                    _ => unreachable!(),
+                                }
+                            };
+
+                            // Dispatch piggyback outputs. Same
+                            // shape as the regular Sptps arm. For
+                            // chunk 4a: terminate on HandshakeDone.
+                            // (Reaching HandshakeDone in the
+                            // PIGGYBACK is unlikely — needs the
+                            // initiator's KEX AND SIG in the same
+                            // segment as the ID line. Three writes
+                            // coalesced. Possible on a slow link.)
+                            if self.dispatch_sptps_outputs(id, outs) {
+                                nw = true;
+                            }
+                            // dispatch_sptps_outputs may have
+                            // terminated (HandshakeDone in 4a).
+                            // Check.
+                            if !self.conns.contains_key(id) {
+                                return;
+                            }
+
+                            (DispatchResult::Ok, nw)
+                        }
                         Err(e) => {
                             log::error!(target: "tincd::proto",
                                         "ID rejected from {}: {e:?}", conn.name);
@@ -1088,6 +1291,126 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// `receive_meta_sptps` (`meta.c:120-162`). Dispatch SPTPS
+    /// outputs. Called from BOTH the regular `FeedResult::Sptps`
+    /// arm AND the `IdOk::Peer` piggyback re-feed.
+    ///
+    /// Returns `true` if any output queued bytes to outbuf (the
+    /// io_set signal). May `terminate(id)` — caller must check
+    /// `conns.contains_key(id)` after.
+    ///
+    /// Chunk 4a: `HandshakeDone` → log + terminate. C `meta.c:129
+    /// -135`: `if(type == SPTPS_HANDSHAKE) { if(allow_request ==
+    /// ACK) return send_ack(c); else return true; }`. We don't have
+    /// `send_ack` yet. Terminating proves the handshake REACHED
+    /// done; chunk 4b replaces the terminate with `send_ack`.
+    ///
+    /// `Output::Record` is unreachable in chunk 4a: records only
+    /// flow post-handshake, and we terminate at handshake-done.
+    /// The arm is wired anyway (log + terminate) so a logic bug
+    /// fails LOUD instead of silently dropping.
+    fn dispatch_sptps_outputs(&mut self, id: ConnId, outs: Vec<tinc_sptps::Output>) -> bool {
+        use tinc_sptps::Output;
+        let mut needs_write = false;
+        for o in outs {
+            // Re-fetch conn each iteration: a previous output might
+            // have terminated. (Actually no — only HandshakeDone
+            // terminates, and we return after. But the re-fetch is
+            // cheap and the pattern is already established in the
+            // line-drain loop above.)
+            let Some(conn) = self.conns.get_mut(id) else {
+                return needs_write;
+            };
+            match o {
+                Output::Wire { bytes, .. } => {
+                    // C `send_meta_sptps` (`meta.c:50`): `buffer_
+                    // add(&c->outbuf, buffer, length); io_set(
+                    // READ | WRITE)`.
+                    needs_write |= conn.send_raw(&bytes);
+                }
+                Output::HandshakeDone => {
+                    // C `meta.c:129-135`: `if(allow_request == ACK)
+                    // return send_ack(c)`. Chunk 4a: we don't have
+                    // send_ack. Log the milestone (the integration
+                    // test asserts on this line) and terminate.
+                    //
+                    // The C `else return true` branch is for
+                    // OUTGOING conns where the initiator has
+                    // already sent its ACK and is waiting for the
+                    // responder's. allow_request is then something
+                    // else. Chunk 4a is responder-only; we always
+                    // hit the `== ACK` arm.
+                    log::info!(target: "tincd::auth",
+                               "SPTPS handshake completed with {} ({})",
+                               conn.name, conn.hostname);
+                    // Chunk 4a stop point. The connection has
+                    // proven itself (key auth passed) but we can't
+                    // proceed to ack_h. Terminate cleanly.
+                    //
+                    // BUT: the responder's SIG was queued in the
+                    // PREVIOUS Output::Wire arm (SIG and Handshake-
+                    // Done arrive together — `Sptps::receive_
+                    // handshake` pushes both in the Sig→!was_rekey
+                    // path). If we terminate now, the SIG stays in
+                    // outbuf and never hits the wire. The peer's
+                    // SIG verify never fires; they sit waiting.
+                    //
+                    // The C never has this problem: it doesn't
+                    // terminate on HandshakeDone (it calls send_ack
+                    // and continues). The terminate is OUR shortcut.
+                    //
+                    // Fix: synchronous flush before terminate. In
+                    // production this would be wrong (a slow peer
+                    // could stall us in the flush). But the
+                    // chunk-4a terminate is itself temporary —
+                    // chunk 4b removes it AND the flush (send_ack
+                    // queues, the regular WRITE event flushes
+                    // later, no terminate). The sync-flush lifetime
+                    // is one chunk.
+                    //
+                    // `flush()` returns Ok(true) when outbuf
+                    // empties, Ok(false) for partial (would-block),
+                    // Err for socket errors. We loop until empty
+                    // or error. The localhost peer in the
+                    // integration test always accepts immediately;
+                    // the loop runs once.
+                    // Ok(true) and Err(_) both exit; Ok(false)
+                    // (partial, would-block) loops. The merge isn't
+                    // accidental — "done flushing" and "peer gone,
+                    // give up" both mean "stop trying".
+                    while !conn.outbuf.is_empty() {
+                        match conn.flush() {
+                            // Partial. Loop. Unlikely for a 67-byte
+                            // SIG to localhost.
+                            Ok(false) => {}
+                            // Done OR peer gone. Stop either way.
+                            Ok(true) | Err(_) => break,
+                        }
+                    }
+                    log::warn!(target: "tincd::auth",
+                               "Dropping {} after handshake (send_ack not implemented — chunk 4b)",
+                               conn.name);
+                    self.terminate(id);
+                    return needs_write;
+                }
+                Output::Record { record_type, bytes } => {
+                    // C `meta.c:153-161`: strip `\n`, `receive_
+                    // request(c, data)`. Chunk 4a: unreachable
+                    // (we terminate at HandshakeDone). If we got
+                    // here, the SPTPS state machine sequenced
+                    // wrong (Record before HandshakeDone) OR a
+                    // refactor broke the terminate-at-done. LOUD.
+                    log::error!(target: "tincd::proto",
+                                "SPTPS Record (type {record_type}, {} bytes) from {} — not implemented",
+                                bytes.len(), conn.name);
+                    self.terminate(id);
+                    return needs_write;
+                }
+            }
+        }
+        needs_write
     }
 
     /// `handle_meta_io` WRITE path → `handle_meta_write`
