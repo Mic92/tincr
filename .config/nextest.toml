@@ -14,3 +14,13 @@ retries = 1
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# throughput gate: 3× (setup ~3s + iperf3 5s + teardown) ≈ 30s
+# wall-clock inside the bwrap inner. Outer wraps it; budget 2min.
+[[profile.default.overrides]]
+filter = 'test(rust_vs_c_throughput)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'test(rust_vs_c_throughput)'
+slow-timeout = { period = "180s", terminate-after = 2 }

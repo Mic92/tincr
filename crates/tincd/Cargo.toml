@@ -88,3 +88,6 @@ tinc-tools = { path = "../tinc-tools" }
 # autoconnect.rs tests: deterministic RNG. rand_chacha is already in the
 # lockfile (transitively via rand 0.8). rand_core 0.6 trait compat.
 rand_chacha = "0.3"
+# throughput.rs: parse iperf3 --json. Both already in workspace lock.
+serde = { workspace = true }
+serde_json = { workspace = true }
