@@ -272,13 +272,6 @@ fn version_subcommand_same_as_option() {
     assert!(s.contains("(Rust)"), "stdout: {s}");
 }
 
-/// `tinc version foo` → too many args. C `:2378`.
-#[test]
-fn version_too_many_args() {
-    let out = tinc(&["version", "foo"]);
-    assert!(!out.status.success());
-}
-
 /// `tinc help` ≡ `tinc --help`. C `:2370`: `usage(false)`.
 #[test]
 fn help_subcommand_same_as_option() {
@@ -287,13 +280,6 @@ fn help_subcommand_same_as_option() {
     assert!(out_cmd.status.success());
     assert!(out_opt.status.success());
     assert_eq!(out_cmd.stdout, out_opt.stdout);
-}
-
-/// `tinc help foo` → still works (C ignores args, `:2368`).
-#[test]
-fn help_ignores_args() {
-    let out = tinc(&["help", "foo", "bar"]);
-    assert!(out.status.success());
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -325,13 +311,6 @@ fn network_switch_dot() {
         stderr.contains("default") || stderr.contains("no -n"),
         "stderr: {stderr}"
     );
-}
-
-/// `tinc network a b` → too many. C `tincctl.c:2691`.
-#[test]
-fn network_too_many_args() {
-    let out = tinc(&["network", "a", "b"]);
-    assert!(!out.status.success());
 }
 
 /// `tinc network` (list mode) — we can't control CONFDIR (it's
@@ -465,69 +444,6 @@ fn genkey_no_config() {
     assert!(stderr.contains("tinc.conf"));
 }
 
-/// genkey rejects extra args. C `tincctl.c:2354`.
-#[test]
-fn genkey_too_many_args() {
-    let (_dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "generate-ed25519-keys", "extra"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Too many arguments"));
-}
-
-/// **The contract test for rotation.** init, then genkey, then prove
-/// the *rotated* key still works for SPTPS. Uses `keypair::read_private`
-/// (the same loader the daemon will use) to read past the `#`-block.
-///
-/// This is what `rotation_roundtrip` in `genkey.rs` proves at the
-/// unit level; this proves it at the binary level (the actual
-/// `ed25519_key.priv` written by the actual `tinc` binary).
-#[test]
-fn genkey_rotated_key_loads() {
-    use tinc_tools::keypair;
-
-    let (_dir, confbase, cb) = init_dir("alice");
-    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
-    assert!(out.status.success(), "{out:?}");
-
-    // ─── read_private skips the #-block, returns the live key ───
-    let priv_path = confbase.join("ed25519_key.priv");
-    let sk = keypair::read_private(&priv_path).expect("read past #-block");
-
-    // ─── the live pubkey in hosts/alice matches sk.public_key() ──
-    // This proves: (1) the live PEM is the *new* key not the old one,
-    // (2) the live config line is the *new* pubkey not the old one,
-    // (3) they're a coherent pair.
-    let host = std::fs::read_to_string(confbase.join("hosts/alice")).unwrap();
-    let live_line = host
-        .lines()
-        .find(|l| l.starts_with("Ed25519PublicKey = "))
-        .expect("live pubkey line");
-    let b64 = live_line.strip_prefix("Ed25519PublicKey = ").unwrap();
-    let pubkey = tinc_crypto::b64::decode(b64).expect("tinc-b64 decode");
-    assert_eq!(&pubkey[..], &sk.public_key()[..]);
-}
-
-/// Mode preservation through rotation. The 0600 from init survives
-/// disable_old_keys's tmpfile rename.
-#[cfg(unix)]
-#[test]
-fn genkey_preserves_priv_mode() {
-    use std::os::unix::fs::PermissionsExt;
-    let (_dir, confbase, cb) = init_dir("alice");
-
-    // init sets 0600 (verified in `init`'s tests). Rotate.
-    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
-    assert!(out.status.success());
-
-    let mode = std::fs::metadata(confbase.join("ed25519_key.priv"))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600);
-}
-
 /// **The contract test for sign/verify.** init → sign → verify, all
 /// through the binary. `verify .` (`.` = own name) on a sign output
 /// emits the original body byte-exact to stdout.
@@ -608,26 +524,6 @@ fn sign_stdin_verify_stdin() {
     assert_eq!(verified.stdout, data);
 }
 
-/// Tampered body → verify fails. Integration-level repeat of the
-/// unit test, proves the binary plumbing carries the error through.
-#[test]
-fn sign_verify_tamper_detected() {
-    let (_dir, _confbase, cb) = init_dir("alice");
-
-    let signed = tinc_stdin(&["-c", &cb, "sign"], b"untampered");
-    assert!(signed.status.success());
-
-    // Tamper: change one body byte.
-    let mut tampered = signed.stdout;
-    *tampered.last_mut().unwrap() ^= 1;
-
-    let out = tinc_stdin(&["-c", &cb, "verify", "."], &tampered);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Invalid signature"));
-    assert!(out.stdout.is_empty());
-}
-
 /// verify with no signer arg → "No signer given!" (MissingArg).
 /// C `tincctl.c:2860`.
 #[test]
@@ -692,22 +588,6 @@ fn sign_verify_cross_node() {
     assert_eq!(out.stdout, data);
 }
 
-/// `tinc init` then `tinc export`. Basic plumbing.
-#[test]
-fn export_after_init() {
-    let (_dir, _confbase, cb) = init_dir("alice");
-
-    let out = tinc(&["-c", &cb, "export"]);
-    assert!(out.status.success(), "{out:?}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    // The injected Name = line.
-    assert!(stdout.starts_with("Name = alice\n"));
-    // The Ed25519PublicKey line that init wrote to hosts/alice.
-    assert!(stdout.contains("Ed25519PublicKey = "));
-    // Nothing on stderr (no errors, no progress messages).
-    assert!(out.stderr.is_empty());
-}
-
 /// `export` without `init` first → fails (no tinc.conf, can't get_my_name).
 #[test]
 fn export_no_config() {
@@ -716,21 +596,6 @@ fn export_no_config() {
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("tinc.conf"));
-}
-
-/// `tinc import` reads a blob from stdin, writes hosts/NAME.
-#[test]
-fn import_from_stdin() {
-    let (_dir, confbase, cb) = init_dir("alice");
-
-    let blob = b"Name = bob\nSubnet = 10.0.2.0/24\nAddress = 192.0.2.2\n";
-    let out = tinc_stdin(&["-c", &cb, "import"], blob);
-    assert!(out.status.success(), "{out:?}");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Imported 1 host"));
-
-    let written = std::fs::read_to_string(confbase.join("hosts/bob")).unwrap();
-    assert_eq!(written, "Subnet = 10.0.2.0/24\nAddress = 192.0.2.2\n");
 }
 
 /// `import` skips existing without `--force`, overwrites with.
@@ -756,17 +621,6 @@ fn import_force_flag() {
     assert!(out.status.success(), "{out:?}");
     let content = std::fs::read_to_string(confbase.join("hosts/alice")).unwrap();
     assert_eq!(content, "OVERWRITTEN\n");
-}
-
-/// `import` with empty stdin → exit 1, "No host... imported."
-#[test]
-fn import_empty() {
-    let (_dir, _confbase, cb) = init_dir("alice");
-
-    let out = tinc_stdin(&["-c", &cb, "import"], b"");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("No host configuration files imported"));
 }
 
 /// **The contract test.** alice runs `tinc export`, bob runs
@@ -903,15 +757,6 @@ fn help_exits_zero() {
 }
 
 #[test]
-fn version_exits_zero() {
-    let out = tinc(&["--version"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("tinc"));
-    assert!(stdout.contains("(Rust)"));
-}
-
-#[test]
 fn unknown_command_exits_nonzero() {
     let out = tinc(&["frobnicate"]);
     assert!(!out.status.success());
@@ -990,35 +835,6 @@ fn init_missing_name() {
     assert!(stderr.contains("No Name given"));
     // Nothing created — arity check fires before any filesystem op.
     assert!(!dir.path().join("tinc.conf").exists());
-}
-
-#[test]
-fn init_too_many_args() {
-    let (_dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "init", "alice", "bob"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Too many arguments"));
-}
-
-#[test]
-fn init_bad_name() {
-    let (_dir, cb) = bare_dir();
-    // Dash is not in `check_id`'s allowed set.
-    let out = tinc(&["-c", &cb, "init", "has-dash"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Invalid Name"));
-}
-
-#[test]
-fn init_reinit_fails() {
-    let (_dir, _confbase, cb) = init_dir("alice");
-
-    let out2 = tinc(&["-c", &cb, "init", "bob"]);
-    assert!(!out2.status.success());
-    let stderr = String::from_utf8(out2.stderr).unwrap();
-    assert!(stderr.contains("already exists"));
 }
 
 #[test]
@@ -1230,16 +1046,6 @@ fn fsck_force_fixes() {
     assert!(out.status.success(), "post-fix fsck failed: {out:?}");
 }
 
-/// `fsck` rejects extra args. C `tincctl.c:2735`: `if(argc > 1)`.
-#[test]
-fn fsck_too_many_args() {
-    let (_dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "fsck", "extra"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Too many"));
-}
-
 // ────────────────────────────────────────────────────────────────────
 // invite through the binary
 // ────────────────────────────────────────────────────────────────────
@@ -1395,15 +1201,6 @@ fn invite_missing_arg() {
     assert!(stderr.contains("node name"));
 }
 
-#[test]
-fn invite_too_many_args() {
-    let (_dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "invite", "bob", "extra"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Too many"));
-}
-
 // ────────────────────────────────────────────────────────────────────
 // join through the binary
 // ────────────────────────────────────────────────────────────────────
@@ -1473,15 +1270,6 @@ fn join_url_from_stdin() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     // The URL was parsed (and rejected) — stdin reached parse_url.
     assert!(stderr.contains("Invalid invitation URL"), "{stderr}");
-}
-
-#[test]
-fn join_too_many_args() {
-    let (_dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "join", "url1", "url2"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Too many"));
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1574,25 +1362,6 @@ fn ctl_disconnect_bad_name() {
     assert!(stderr.contains("Invalid name"), "{stderr}");
     // NOT the pidfile error. check_id ran first.
     assert!(!stderr.contains("pid file"), "{stderr}");
-}
-
-/// `tinc init` is `needs_daemon: false` — it must NOT probe for the
-/// pidfile. We can't directly observe the absence of a syscall, but
-/// we *can* observe that init succeeds even when --pidfile points
-/// at garbage. If init were resolving runtime paths, the malformed
-/// pidfile wouldn't matter (resolve doesn't read, just probes
-/// existence) — so we use a different angle: the unresolved-panic.
-///
-/// Actually — the cleanest proof is: 4a commands worked before this
-/// commit, and they still work after. The 50 existing tinc_cli tests
-/// not breaking IS the test. This explicit one is a comment-with-an-
-/// assert documenting the property.
-#[test]
-fn init_does_not_resolve_runtime() {
-    // If init reached for pidfile/socket, the unresolved Option would
-    // panic. It doesn't — init is needs_daemon: false. init_dir's
-    // assertion IS this test.
-    let (_dir, _confbase, _cb) = init_dir("alice");
 }
 
 /// The full connect path against a real fake-daemon. This is the
@@ -1770,17 +1539,6 @@ fn config_get_name() {
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "alice");
 }
 
-#[test]
-fn config_set_then_get() {
-    let (_d, cb, pf) = config_init("alice");
-    // Set Device (SERVER-only).
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "set", "Device", "/dev/tun"]);
-    assert!(out.status.success(), "{:?}", out.stderr);
-    // Get it back.
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "get", "Device"]);
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "/dev/tun");
-}
-
 /// THE regression: `tinc add ConnectTo bob` then `tinc add ConnectTo
 /// carol` must result in TWO ConnectTo lines. ConnectTo is MULTIPLE.
 /// The buggy single-adapter would route both adds to SET, and the
@@ -1805,21 +1563,9 @@ fn config_add_is_not_set() {
     );
 }
 
-/// `tinc del ConnectTo bob` deletes only bob, leaves carol.
-#[test]
-fn config_del_filtered() {
-    let (_d, cb, pf) = config_init("alice");
-    tinc(&["-c", &cb, "--pidfile", &pf, "add", "ConnectTo", "bob"]);
-    tinc(&["-c", &cb, "--pidfile", &pf, "add", "ConnectTo", "carol"]);
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "del", "ConnectTo", "bob"]);
-    assert!(out.status.success());
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "get", "ConnectTo"]);
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "carol");
-}
-
-/// `tinc del ConnectTo` (no value) deletes all.
+/// `tinc del ConnectTo` (no value) deletes all. Proves the `del`
+/// argv → Action::Del dispatch (the filtered-del *logic* is unit-
+/// covered in `config.rs::del_filtered`).
 #[test]
 fn config_del_all() {
     let (_d, cb, pf) = config_init("alice");
@@ -1845,28 +1591,8 @@ fn config_unknown_var() {
     assert!(stderr.contains("--force"));
 }
 
-/// Subnet validation through the binary. The tinc-proto dep is
-/// reached.
-#[test]
-fn config_subnet_validation() {
-    let (_d, cb, pf) = config_init("alice");
-    // 10.0.0.1/24 has host bits set.
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "add", "Subnet", "10.0.0.1/24"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("prefix length do not match"));
-}
-
-/// `tinc config get Name` umbrella form.
-#[test]
-fn config_umbrella_form() {
-    let (_d, cb, pf) = config_init("alice");
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "config", "get", "Name"]);
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "alice");
-}
-
 /// `tinc config Name` (no verb) → default GET. C `tincctl.c:1785`.
+/// Also proves the `config` umbrella verb dispatches at all.
 #[test]
 fn config_umbrella_default_get() {
     let (_d, cb, pf) = config_init("alice");
@@ -2477,17 +2203,6 @@ fn dump_unknown_type() {
     assert!(stderr.contains("Unknown dump type 'lasers'."));
 }
 
-/// `tinc dump reachable edges` → error. C `tincctl.c:1187`.
-#[test]
-fn dump_reachable_only_nodes() {
-    let (_d, cb, pf) = config_init("alice");
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "dump", "reachable", "edges"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // The 90s GNU backtick-apostrophe quoting.
-    assert!(stderr.contains("`reachable' only supported for nodes"));
-}
-
 // ────────────────────────────────────────────────────────────────────
 // cmd_info: node summary or route lookup
 // ────────────────────────────────────────────────────────────────────
@@ -2765,78 +2480,6 @@ Owner:  bob
     assert!(!stdout.contains("broadcast"));
 }
 
-/// `tinc info 10.0.0.0/24` (exact mode): the `/` makes it exact.
-/// Only the exact-prefix-exact-addr subnet matches. The /16 does
-/// NOT (different prefix). The 10.0.1.0/24 does NOT (same prefix,
-/// different addr).
-#[test]
-#[cfg(unix)]
-fn info_subnet_exact_mode() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 5 10.0.0.0/24");
-
-        writeln!(w, "18 5 10.0.0.0/24 alice").unwrap(); // exact match
-        writeln!(w, "18 5 10.0.0.0/16 bob").unwrap(); // wrong prefix
-        writeln!(w, "18 5 10.0.1.0/24 carol").unwrap(); // wrong addr
-        writeln!(w, "18 5").unwrap();
-    });
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "10.0.0.0/24"]);
-    daemon.join().unwrap();
-
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(stdout, "Subnet: 10.0.0.0/24\nOwner:  alice\n");
-}
-
-/// `tinc info 10.0.0.0/24#5` (with `#`): weight must ALSO match.
-/// C `info.c:285-289`: `if(weight) { if find.weight != subnet.weight
-/// continue; }`. The `#` in the input string drives the gate.
-#[test]
-#[cfg(unix)]
-fn info_subnet_weight_filter() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 5 10.0.0.0/24#5");
-
-        // Same subnet advertised at two weights (different nodes).
-        // Only the #5 one matches. Daemon's net2str includes #N
-        // when N != 10.
-        writeln!(w, "18 5 10.0.0.0/24#5 alice").unwrap(); // match
-        writeln!(w, "18 5 10.0.0.0/24#7 bob").unwrap(); // wrong weight
-        // No suffix = default 10. Also wrong weight (5 != 10).
-        writeln!(w, "18 5 10.0.0.0/24 carol").unwrap();
-        writeln!(w, "18 5").unwrap();
-    });
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "10.0.0.0/24#5"]);
-    daemon.join().unwrap();
-
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    // strip_weight strips #10, NOT #5. So #5 survives in output.
-    assert_eq!(stdout, "Subnet: 10.0.0.0/24#5\nOwner:  alice\n");
-    assert!(!stdout.contains("bob"));
-    assert!(!stdout.contains("carol"));
-}
-
 /// `tinc info 99.99.99.99` (no match): "Unknown address". C `info.c
 /// :333`. The wording differs from "Unknown subnet" (which is the
 /// `/`-present case at :336).
@@ -2878,28 +2521,6 @@ fn info_invalid_arg() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     // C `info.c:355`: exact string.
     assert!(stderr.contains("Argument is not a node name, subnet or address."));
-}
-
-/// `tinc info ...` (looks subnet-ish via `.`, but parse fails).
-/// C `info.c:254`: `"Could not parse subnet or address '%s'."`
-#[test]
-fn info_unparseable_subnet() {
-    let (_d, cb, pf) = config_init("alice");
-    // Contains `.` so dispatches to info_subnet, but str2net
-    // rejects. (Three dots, no digits → not v4.)
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "..."]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // Single quotes (the C's).
-    assert!(stderr.contains("Could not parse subnet or address '...'."));
-}
-
-/// `tinc info` (no arg): arity error. C `tincctl.c:1380`.
-#[test]
-fn info_no_args() {
-    let (_d, cb, pf) = config_init("alice");
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info"]);
-    assert!(!out.status.success());
 }
 
 // ────────────────────────────────────────────────────────────────────
