@@ -301,6 +301,32 @@ The intercept handles exactly two cases: status line and blank line. Anything el
 
 **Our port** (`metaconn.rs`): mirror the C exactly, mark `TODO(chunk-12-http-proxy-lenient)` for skip-any-line-until-blank. The integration test uses the same headerless server. STRICTER on a different axis: we bracket IPv6 in the CONNECT authority (RFC 7230 §2.7.1); the C `getnameinfo(NUMERIC)` doesn't, producing ambiguous `CONNECT ::1:655 HTTP/1.1` — likely never tested with v6 proxy targets.
 
+### net_packet.c:708-726 — PACKET 17 sends uninitialized header bytes when compression helps
+
+**Found by**: PACKET 17 wiring (`bc62b722`). Dormant.
+
+```c
+// net_packet.c:708-726 (send_sptps_packet, the n->connection short-circuit)
+if((len = compress_packet(outpkt.data + offset, ..., origpkt->data + offset, ...))) {
+    //                     ^^^^^^^^^^^^^^^^^^^^ :710 — writes ONLY at +offset (+14 router)
+    ...
+} else if(len < origpkt->len - offset) {     // :714 — compression HELPED
+    outpkt.len = len + offset;
+    origpkt = &outpkt;                       // :716 — reassign to STACK vpn_packet_t
+    type = PKT_COMPRESSED;                   //        whose data[0..14] is uninit
+}
+...
+if(n->connection && ...) {                   // :725 — direct neighbor, TCPOnly path
+    return send_tcppacket(n->connection, origpkt);  // :726 — PACKET 17, raw frame
+}
+```
+
+`:726` sends `origpkt->data[0..origpkt->len]` as a PACKET 17 body. When `:716` fired, that's 14 bytes of stack garbage followed by the compressed payload. PACKET 17 is a raw VPN frame inside the meta-SPTPS record — no `PKT_COMPRESSED` flag travels with it. The receiver (`route.c:1144`) reads `data[12..14]` as the ethertype, gets garbage, logs `"Cannot route packet: unknown type %hx"`, drops it. Even if the prefix happened to look like a real ethertype, the body is undecompressed.
+
+**Why nobody noticed**: triple-gated. `TCPOnly = yes` AND a direct meta-connection to the destination (`:725 n->connection` non-NULL — no relay) AND `Compression > 0` AND the packet actually got smaller (`:714` is `else if`, so incompressible payloads take the `:712` raw branch). `test/integration/` has no test that sets both TCPOnly and Compression. In practice nobody runs that combination — TCPOnly is for restrictive firewalls, Compression for slow links; the overlap is empty.
+
+**Our port** (`daemon/net.rs`): gate on `n->connection` BEFORE compression — if we're going via PACKET 17, send the original frame and skip the compressor entirely. STRICTER (we never send garbage) and cheaper (no wasted compression work on a path that can't carry the result anyway).
+
 ---
 
 ## Rust-is-WRONG (found by cross-impl testing against C)
