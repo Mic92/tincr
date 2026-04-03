@@ -689,74 +689,59 @@ mod tests {
 
     // ─── check_gate
 
-    #[test]
-    fn gate_allows_expected() {
-        let c = mkconn();
-        // new_control sets allow_request = Some(Id).
-        assert_eq!(check_gate(&c, b"0 ^abc 0").unwrap(), Request::Id);
+    /// Named outcome for the gate table below. We can't use
+    /// `DispatchError` directly: it's not `PartialEq` (the `BadId(
+    /// String)` variant). The gate only ever produces these three.
+    #[derive(Debug, PartialEq)]
+    enum GateExpect {
+        Ok(Request),
+        Unauthorized,
+        UnknownRequest,
     }
 
+    /// `check_gate(allow, line) -> GateResult`. Full allow/deny
+    /// matrix + malformed inputs. Covers C `:receive_request`'s
+    /// `atoi`, `*request == '0'`, range check, and `allow_request`
+    /// gate.
     #[test]
-    fn gate_blocks_unexpected() {
-        let c = mkconn();
-        // Fresh conn allows only ID (0). CONTROL (18) is gated.
-        assert!(matches!(
-            check_gate(&c, b"18 0"),
-            Err(DispatchError::Unauthorized)
-        ));
-    }
-
-    #[test]
-    fn gate_none_allows_all() {
-        let mut c = mkconn();
-        c.allow_request = None; // ALL
-        assert_eq!(check_gate(&c, b"18 0").unwrap(), Request::Control);
-        assert_eq!(check_gate(&c, b"0 foo 17.7").unwrap(), Request::Id);
-        assert_eq!(check_gate(&c, b"8").unwrap(), Request::Ping);
-    }
-
-    /// `atoi("")` → 0 in C, but the `*request == '0'` check fails.
-    /// We reject too: empty first token.
-    #[test]
-    fn gate_empty_line() {
-        let c = mkconn();
-        assert!(matches!(
-            check_gate(&c, b""),
-            Err(DispatchError::UnknownRequest)
-        ));
-        // Leading whitespace, then nothing — same.
-        assert!(matches!(
-            check_gate(&c, b"  "),
-            Err(DispatchError::UnknownRequest)
-        ));
-    }
-
-    /// Out of range. `Request::from_id(99)` → None.
-    #[test]
-    fn gate_out_of_range() {
-        let mut c = mkconn();
-        c.allow_request = None;
-        assert!(matches!(
-            check_gate(&c, b"99 foo"),
-            Err(DispatchError::UnknownRequest)
-        ));
-        assert!(matches!(
-            check_gate(&c, b"-1 foo"),
-            Err(DispatchError::UnknownRequest)
-        ));
-    }
-
-    /// STRICTER than C `atoi`: `"18foo"` → reject. C would parse 18.
-    /// The C never sends this (always `"%d "`); a peer that does
-    /// is broken.
-    #[test]
-    fn gate_stricter_than_atoi() {
-        let mut c = mkconn();
-        c.allow_request = None;
-        assert!(matches!(
-            check_gate(&c, b"18foo bar"),
-            Err(DispatchError::UnknownRequest)
-        ));
+    fn gate_cases() {
+        use GateExpect::{Ok, Unauthorized, UnknownRequest};
+        #[rustfmt::skip]
+        let cases: &[(Option<Request>, &[u8], GateExpect)] = &[
+            // ─── allows expected
+            // new_control sets allow_request = Some(Id).
+            (Some(Request::Id), b"0 ^abc 0",   Ok(Request::Id)),
+            // ─── blocks unexpected
+            // Fresh conn allows only ID (0). CONTROL (18) is gated.
+            (Some(Request::Id), b"18 0",       Unauthorized),
+            // ─── None = ALL
+            (None,              b"18 0",       Ok(Request::Control)),
+            (None,              b"0 foo 17.7", Ok(Request::Id)),
+            (None,              b"8",          Ok(Request::Ping)),
+            // ─── empty: `atoi("")` → 0 in C, but the `*request ==
+            // '0'` check fails. We reject too: empty first token.
+            (Some(Request::Id), b"",           UnknownRequest),
+            // Leading whitespace, then nothing — same.
+            (Some(Request::Id), b"  ",         UnknownRequest),
+            // ─── out of range. `Request::from_id(99)` → None.
+            (None,              b"99 foo",     UnknownRequest),
+            (None,              b"-1 foo",     UnknownRequest),
+            // ─── STRICTER than C `atoi`: `"18foo"` → reject. C would
+            // parse 18. The C never sends this (always `"%d "`); a
+            // peer that does is broken.
+            (None,              b"18foo bar",  UnknownRequest),
+        ];
+        for (i, (allow, line, expected)) in cases.iter().enumerate() {
+            let mut c = mkconn();
+            c.allow_request = *allow;
+            let got = match check_gate(&c, line) {
+                Result::Ok(r) => Ok(r),
+                Err(DispatchError::Unauthorized) => Unauthorized,
+                Err(DispatchError::UnknownRequest) => UnknownRequest,
+                Err(e) => panic!("case {i}: {line:?}: unexpected error: {e:?}"),
+            };
+            assert_eq!(got, *expected, "case {i}: {line:?}");
+        }
     }
 
     // ─── handle_id
@@ -813,19 +798,48 @@ mod tests {
         assert!(c.outbuf.is_empty());
     }
 
-    /// `?` prefix (invitation) — chunk 4a still rejects (no
-    /// invitation key loaded). C: `if(!invitation_key) return false`.
+    /// Early-reject paths in `handle_id`: all branches that bail
+    /// BEFORE the pubkey load. They share the property that
+    /// `mkctx("x")` (dummy cookie, confbase=".") suffices — if any
+    /// of these reached the filesystem, they'd error on missing
+    /// `./hosts/NAME` instead of the intended error. The Err proves
+    /// we didn't get that far.
     #[test]
-    fn id_invitation_rejected_no_key() {
-        let mut c = mkconn();
-        let r = handle_id(
-            &mut c,
-            b"0 ?somekey 17.7",
-            &mkctx("x"),
-            Instant::now(),
-            &mut OsRng,
-        );
-        assert!(matches!(r, Err(DispatchError::BadId(_))));
+    fn id_early_rejects() {
+        #[rustfmt::skip]
+        let cases: &[(&[u8], &str)] = &[
+            // `?` prefix (invitation) — chunk 4a still rejects (no
+            // invitation key loaded). C: `if(!invitation_key) return
+            // false`.
+            (b"0 ?somekey 17.7",     "invitation, no key"),
+            // `check_id` reject: name with `/`. SECURITY: this is the
+            // path-traversal gate. C `:376`: `!check_id(name)`. If
+            // check_id failed and we still tried to load, we'd open
+            // `./hosts/../etc/passwd` — traversal.
+            (b"0 ../etc/passwd 17.7", "path traversal"),
+            // Peer claims to be us. C `:376`: `|| !strcmp(name,
+            // myself->name)`. Infinite-edge-loop prevention.
+            // (mkctx my_name == "testd".)
+            (b"0 testd 17.7",        "peer is self"),
+            // Malformed: no second token. C `sscanf` returns 0
+            // (`< 2` check fails), logs "Got bad ID", returns false.
+            (b"0",                   "no name token"),
+            // Malformed: no version token. C `sscanf` returns 1
+            // (`< 2` fails).
+            (b"0 alice",             "no version token"),
+        ];
+        for (i, (line, label)) in cases.iter().enumerate() {
+            let mut c = mkconn();
+            let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut OsRng);
+            assert!(
+                matches!(r, Err(DispatchError::BadId(_))),
+                "case {i} ({label}): {line:?} → {r:?}"
+            );
+            // No state mutation on early reject.
+            assert!(c.sptps.is_none(), "case {i} ({label}): sptps installed");
+            assert_eq!(c.name, "<control>", "case {i} ({label}): name set");
+            assert!(c.outbuf.is_empty(), "case {i} ({label}): outbuf written");
+        }
     }
 
     // ─── id_h peer branch
@@ -910,45 +924,6 @@ mod tests {
         // ownership of the dispatch lives in the daemon (consistent
         // with feed_sptps's outputs).
         assert_eq!(c.outbuf.live(), b"0 testd 17.7\n");
-    }
-
-    /// `check_id` reject: name with `/`. SECURITY: this is the
-    /// path-traversal gate. C `:376`: `!check_id(name)`.
-    #[test]
-    fn id_peer_name_traversal_rejected() {
-        let mut c = mkconn();
-        let r = handle_id(
-            &mut c,
-            b"0 ../etc/passwd 17.7",
-            &mkctx("x"),
-            Instant::now(),
-            &mut OsRng,
-        );
-        // BadId, AND we never touched the filesystem. (PeerSetup
-        // wasn't created — confbase points at ".", which doesn't
-        // have hosts/. If check_id failed and we still tried to
-        // load, we'd open `./hosts/../etc/passwd` — traversal.
-        // The Err proves we didn't get that far.)
-        assert!(matches!(r, Err(DispatchError::BadId(_))));
-        // No state mutation.
-        assert!(c.sptps.is_none());
-        assert_eq!(c.name, "<control>"); // mkconn's default
-    }
-
-    /// Peer claims to be us. C `:376`: `|| !strcmp(name, myself->
-    /// name)`. Infinite-edge-loop prevention.
-    #[test]
-    fn id_peer_is_self_rejected() {
-        let mut c = mkconn();
-        // my_name == peer name == "testd".
-        let r = handle_id(
-            &mut c,
-            b"0 testd 17.7",
-            &mkctx("x"),
-            Instant::now(),
-            &mut OsRng,
-        );
-        assert!(matches!(r, Err(DispatchError::BadId(_))));
     }
 
     /// Major mismatch. C `:398-401`: hard reject. major bumps are
@@ -1138,23 +1113,6 @@ mod tests {
         assert!(!check_id(""));
         // The `^` prefix (control sigil) — not a valid PEER name.
         assert!(!check_id("^abc"));
-    }
-
-    /// Malformed: no second token. The C `sscanf` returns 0 (`< 2`
-    /// check fails), logs "Got bad ID", returns false.
-    #[test]
-    fn id_malformed_no_name() {
-        let mut c = mkconn();
-        let r = handle_id(&mut c, b"0", &mkctx("x"), Instant::now(), &mut OsRng);
-        assert!(matches!(r, Err(DispatchError::BadId(_))));
-    }
-
-    /// Malformed: no version token. C `sscanf` returns 1 (`< 2` fails).
-    #[test]
-    fn id_malformed_no_version() {
-        let mut c = mkconn();
-        let r = handle_id(&mut c, b"0 alice", &mkctx("x"), Instant::now(), &mut OsRng);
-        assert!(matches!(r, Err(DispatchError::BadId(_))));
     }
 
     /// `protocol_auth.c:328`: `c->last_ping_time = now.tv_sec + 3600`.
