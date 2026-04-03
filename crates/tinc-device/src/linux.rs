@@ -666,40 +666,37 @@ mod tests {
 
     // pack_ifr_name — the testable seam
 
-    /// `None` → all zeros → kernel picks. The C `if(iface)`
-    /// guard skips the strncpy.
-    #[test]
-    fn pack_ifr_name_none() {
-        let buf = pack_ifr_name(None).unwrap();
-        assert!(buf.iter().all(|&b| b == 0));
-    }
-
-    /// Short name → packed, NUL-padded. C `strncpy` does the
-    /// same (zero-fills the rest).
+    /// Ok-path: `None` → all zeros (C `if(iface)` guard skips the
+    /// strncpy; kernel picks). `Some` → packed, NUL-padded (C
+    /// `strncpy` zero-fills the rest). The boundary: `< IFNAMSIZ`
+    /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
+    /// c_char signedness; values are ASCII either way.
     #[test]
     #[allow(clippy::cast_sign_loss)]
-    fn pack_ifr_name_short() {
-        let buf = pack_ifr_name(Some("tun0")).unwrap();
-        // First 4 bytes are "tun0". `as u8` for x86_64-vs-
-        // aarch64 c_char signedness; values are ASCII either way.
-        assert_eq!(buf[0] as u8, b't');
-        assert_eq!(buf[1] as u8, b'u');
-        assert_eq!(buf[2] as u8, b'n');
-        assert_eq!(buf[3] as u8, b'0');
-        // Rest is zero (NUL terminator + padding).
-        assert!(buf[4..].iter().all(|&b| b == 0));
-    }
-
-    /// Exactly 15 bytes → OK, last byte is NUL. The boundary:
-    /// `< IFNAMSIZ` accepts 15, rejects 16.
-    #[test]
-    #[allow(clippy::cast_sign_loss)]
-    fn pack_ifr_name_exactly_15() {
-        let name = "fifteen_chars_!"; // 15 bytes
-        assert_eq!(name.len(), 15);
-        let buf = pack_ifr_name(Some(name)).unwrap();
-        assert_eq!(buf[14] as u8, b'!');
-        assert_eq!(buf[15], 0); // NUL
+    fn pack_ifr_name_ok() {
+        #[rustfmt::skip]
+        let cases: &[(Option<&str>, &[u8])] = &[
+            // None → all zeros → kernel picks.
+            (None,                    b""),
+            // Short → packed.
+            (Some("tun0"),            b"tun0"),
+            // Exactly 15: the boundary. Last byte is NUL.
+            (Some("fifteen_chars_!"), b"fifteen_chars_!"),
+        ];
+        for (i, (input, prefix)) in cases.iter().enumerate() {
+            let buf = pack_ifr_name(*input).unwrap();
+            // First `prefix.len()` bytes match the input.
+            for (j, &b) in prefix.iter().enumerate() {
+                assert_eq!(buf[j] as u8, b, "case {i}: byte {j}");
+            }
+            // Rest (NUL terminator + padding) is zero.
+            assert!(
+                buf[prefix.len()..].iter().all(|&b| b == 0),
+                "case {i}: tail not zeroed"
+            );
+        }
+        // Explicit: the boundary case keeps byte 15 NUL.
+        assert_eq!("fifteen_chars_!".len(), 15);
     }
 
     /// Exactly 16 bytes → Err. STRICTER than C (which truncates
