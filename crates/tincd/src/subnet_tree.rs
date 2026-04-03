@@ -284,6 +284,37 @@ impl SubnetTree {
         }
     }
 
+    /// `lookup_subnet`. C `subnet.c:219-227`. Exact-match lookup
+    /// (NOT prefix-match — that's `lookup_ipv4`/`lookup_ipv6`).
+    ///
+    /// Used by `add_subnet_h` (`protocol_subnet.c:93`) for the
+    /// strictsubnets lookup-first idempotency check: if the gossiped
+    /// subnet is already in the tree (preloaded by `load_all_nodes`
+    /// from the operator's hosts/ files), the strictsubnets gate is
+    /// silently bypassed. The gate fires only on UNAUTHORIZED subnets
+    /// (not in tree → fall through to `:116`).
+    ///
+    /// Allocates a `String` for the lookup key (same shape as
+    /// `del()`). ADD_SUBNET is control-path-rare; the alloc is fine.
+    #[must_use]
+    pub fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
+        let owner = owner.to_owned();
+        match *subnet {
+            Subnet::V4 { .. } => self.ipv4.contains(&Ipv4Key {
+                subnet: *subnet,
+                owner,
+            }),
+            Subnet::V6 { .. } => self.ipv6.contains(&Ipv6Key {
+                subnet: *subnet,
+                owner,
+            }),
+            Subnet::Mac { .. } => self.mac.contains(&MacKey {
+                subnet: *subnet,
+                owner,
+            }),
+        }
+    }
+
     /// `lookup_subnet_ipv4`. C `subnet.c:256-290`.
     ///
     /// Linear scan in tree order. Tree order has `/32` before `/24`

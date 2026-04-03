@@ -162,9 +162,9 @@ impl Compressor {
             }
 
             Level::LzoHi => {
-                // STUB(chunk-9-lzo-hi): minilzo doesn't include
+                // NOT-PORTING(lzo-999): minilzo doesn't include
                 // lzo1x_999_compress. The full lzo2 library has it;
-                // vendor that later if anyone cares. Decompress works
+                // nobody cares. Decompress works
                 // (same _safe fn, same wire format) so we can receive
                 // level-11 from a C peer; we just can't send it.
                 // Returning None mirrors C built without HAVE_LZO:

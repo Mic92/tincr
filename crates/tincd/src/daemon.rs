@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -272,12 +272,23 @@ pub struct DaemonSettings {
     /// and not forwarded. The hub knows only its spokes; spokes
     /// know only the hub.
     ///
-    /// `:880`: `strictsubnets |= tunnelserver`. We don't have
-    /// strictsubnets yet (it predates tunnelserver — checks gossip'd
-    /// subnets against on-disk hosts/ files).
-    /// STUB(chunk-12-strictsubnets): the implication is one line
-    /// when strictsubnets lands.
+    /// `:880`: `strictsubnets |= tunnelserver`. The implication is
+    /// applied in `apply_reloadable_settings` after both are parsed.
+    /// A tunnelserver hub doesn't gossip indirect topology AND
+    /// doesn't trust direct peers to claim arbitrary subnets — they
+    /// get exactly what's in their hosts/ file.
     pub tunnelserver: bool,
+    /// `strictsubnets` (`net_setup.c:878`). Default false. The
+    /// operator's `hosts/NAME` files become the AUTHORITY for which
+    /// subnets each node owns. ADD_SUBNET gossip for subnets not in
+    /// the file is ignored (forwarded, not added locally).
+    /// DEL_SUBNET for subnets that ARE in the file is ignored.
+    ///
+    /// Predates `tunnelserver` and is implied by it (`:880`).
+    /// `load_all_nodes` preloads the authorized subnets at startup;
+    /// the `protocol_subnet.c:93` lookup-first means authorized
+    /// gossip passes through silently (already-have-it noop).
+    pub strictsubnets: bool,
     /// `directonly` (`net_setup.c:403`, `route.c:41`). Default
     /// false. Route-time gate: if `owner != via` (would relay),
     /// send ICMP `NET_ANO` instead. The relay path EXISTS and
@@ -318,6 +329,13 @@ pub struct DaemonSettings {
     /// round-trips through the NAT (or hairpin-fails); the LAN
     /// probe goes direct.
     pub local_discovery: bool,
+    /// `BindToAddress` (`net_socket.c:624`). Default `None` (no
+    /// bind — kernel picks the source addr from the route table).
+    /// When set, outgoing meta-connections `bind()` to this local
+    /// address before `connect()`. Useful for multi-homed hosts
+    /// where the default route doesn't go via the desired interface.
+    /// Config: `BindToAddress = HOST PORT` (port 0 = any).
+    pub bind_to_address: Option<SocketAddr>,
     /// `proxytype`/`proxyhost` (`net_setup.c:263-378`). `None` is the
     /// default (direct connect). `Exec` is socketpair+fork (no
     /// handshake); `Socks4`/`Socks5` connect to the proxy then send
@@ -413,6 +431,8 @@ impl Default for DaemonSettings {
             udp_discovery_keepalive_interval: 10,
             // C `net_setup.c:879`: default false (no `else { = true }`).
             tunnelserver: false,
+            // C `net_setup.c:878`: default false.
+            strictsubnets: false,
             // C `route.c:41`: `bool directonly = false`.
             directonly: false,
             // C `route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`.
@@ -427,6 +447,8 @@ impl Default for DaemonSettings {
             invitation_lifetime: Duration::from_secs(604_800),
             // C `net_setup.c:404`: default false (no `else` branch).
             local_discovery: false,
+            // C `net_socket.c:624`: only set if config present.
+            bind_to_address: None,
             proxy: None,
             // C `net_setup.c:561`: `else { autoconnect = true; }`.
             autoconnect: true,
@@ -486,6 +508,14 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
             settings.tunnelserver = v;
         }
     }
+    // StrictSubnets (`:878`).
+    if let Some(e) = config.lookup("StrictSubnets").next() {
+        if let Ok(v) = e.get_bool() {
+            settings.strictsubnets = v;
+        }
+    }
+    // C `:880`: `strictsubnets |= tunnelserver`. After BOTH parsed.
+    settings.strictsubnets |= settings.tunnelserver;
     // LocalDiscovery (`:404`).
     if let Some(e) = config.lookup("LocalDiscovery").next() {
         if let Ok(v) = e.get_bool() {
@@ -1118,6 +1148,28 @@ impl Daemon {
         // gates, InvitationExpire. NOT Port/AddressFamily (those
         // need re-bind, setup-only).
         apply_reloadable_settings(&config, &mut settings);
+
+        // BindToAddress (`net_socket.c:624`). Non-reloadable
+        // (existing connections keep their source addr; new ones
+        // pick it up at dial time, but that's a half-state). Same
+        // `host port` shape as `Address` (`resolve_config_addrs`).
+        // Port may be `0` (or absent) — bind-to-iface-only-port-any.
+        if let Some(e) = config.lookup("BindToAddress").next() {
+            let s = e.get_str();
+            let mut parts = s.splitn(2, ' ');
+            let host = parts.next().unwrap_or("");
+            let port: u16 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            // `to_socket_addrs()` for hostname → IP. The C uses
+            // `str2addrinfo` (`netutl.c:87`); same getaddrinfo call.
+            // Take the first result (the C does too — `*ai = ai[0]`).
+            match (host, port).to_socket_addrs() {
+                Ok(mut iter) => settings.bind_to_address = iter.next(),
+                Err(e) => {
+                    log::warn!(target: "tincd",
+                               "BindToAddress = {s}: {e}; not binding");
+                }
+            }
+        }
 
         // Proxy (`net_setup.c:263-345`). Only `exec` is wired.
         // Non-reloadable (the C reads it inside setup_myself_
@@ -1879,6 +1931,8 @@ mod tests {
         assert_eq!(s.udp_discovery_timeout, 30);
         assert_eq!(s.compression, 0); // C `:1043` COMPRESS_NONE
         assert!(!s.tunnelserver); // C `:879` default false
+        assert!(!s.strictsubnets); // C `:878` default false
+        assert!(s.bind_to_address.is_none()); // C `:624` no default
         assert!(!s.directonly); // C `route.c:41`
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
         // C `net_setup.c:561`: `else { autoconnect = true; }`.

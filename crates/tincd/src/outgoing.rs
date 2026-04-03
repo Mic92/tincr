@@ -46,8 +46,10 @@
 //!
 //! ## Deferred
 //!
-//! - `bind_to_interface`/`bind_to_address` (`:624-625`): the
-//!   `BindToAddress` config knob. `STUB(chunk-12-bind)`.
+//! - `bind_to_address` (`:624`): wired. `try_connect` takes
+//!   `Option<SocketAddr>` and binds before `connect()`.
+//! - `bind_to_interface` (`:625`): `SO_BINDTODEVICE`. Linux-only,
+//!   root-only-for-non-root-sockets. `TODO(chunk-12-bind-iface)`.
 //! - DNS at connect time: `addrcache.rs` doc says we take pre-
 //!   resolved `SocketAddr` only. `try_outgoing_connections` resolves
 //!   `Address = host port` lines via `to_socket_addrs()` at OPEN
@@ -137,7 +139,11 @@ pub enum ConnectAttempt {
 ///
 /// C `:564-662`, `proxytype == NONE` path only. Proxy modes are
 /// chunk 10.
-pub fn try_connect(addr_cache: &mut AddressCache, node_name: &str) -> ConnectAttempt {
+pub fn try_connect(
+    addr_cache: &mut AddressCache,
+    node_name: &str,
+    bind_to: Option<SocketAddr>,
+) -> ConnectAttempt {
     // C `:570`: `sa = get_recent_address(outgoing->node->address_cache)`.
     let Some(addr) = addr_cache.next_addr() else {
         // C `:572-575`: "Could not set up a meta connection".
@@ -188,10 +194,23 @@ pub fn try_connect(addr_cache: &mut AddressCache, node_name: &str) -> ConnectAtt
         let _ = sock.set_only_v6(true);
     }
 
-    // STUB(chunk-12-bind): bind_to_interface/bind_to_address
-    // (`:624-625`). The `BindToAddress` config knob. Niche — just
-    // `setsockopt(SO_BINDTODEVICE)` + `bind()` before `connect()`.
-    // Not proxy-related; re-chunked from chunk-11-proxy.
+    // C `:624`: `bind_to_addr(c->socket)`. Forces the source addr
+    // for outgoing connections. Niche (multi-homed hosts where the
+    // default route doesn't go via the desired interface). `None`
+    // → no bind → kernel picks from the route table (the default).
+    // BEFORE `connect()`: bind sets the local addr; connect sets
+    // the remote.
+    if let Some(local) = bind_to {
+        if let Err(e) = sock.bind(&SockAddr::from(local)) {
+            // C `:129-131` (in `bind_to_addr`): warn, continue.
+            // The connect may still work via a different source.
+            log::warn!(target: "tincd::conn",
+                        "Can't bind to {local}: {e}");
+        }
+    }
+    // TODO(chunk-12-bind-iface): `bind_to_interface` (`:625`).
+    // `setsockopt(SO_BINDTODEVICE)`. Linux-only, root-only-for-
+    // non-root-sockets. The `BindToInterface` config knob.
 
     // C `:630`: `connect(c->socket, &c->address.sa, salen)`.
     // socket2 wraps this. Nonblocking → returns EINPROGRESS for
@@ -399,9 +418,10 @@ pub enum ProxyConfig {
     /// `PROXY_HTTP`. `CONNECT host:port HTTP/1.1\r\n\r\n`. Response
     /// is line-based (NOT `tcplen`-exact like SOCKS): `protocol.c:
     /// 148-161` special-cases the `HTTP/1.1 ` prefix in `receive_
-    /// request` BEFORE the normal dispatch. `STUB(chunk-12-http-
-    /// proxy)`: the line-based response handling needs a per-conn
-    /// flag (`c->status.proxy_passed`) we don't have yet.
+    /// request` BEFORE the normal dispatch. See `metaconn.rs::
+    /// on_conn_readable` HTTP intercept: gating on `allow_request
+    /// == Id` is sufficient (the gate closes naturally when `id_h`
+    /// runs); no separate `proxy_passed` flag needed.
     Http { host: String, port: u16 },
 }
 

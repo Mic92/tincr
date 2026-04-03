@@ -287,10 +287,13 @@ impl Daemon {
             let tunnel = self.tunnels.entry(target).or_default();
             // Seed pmtu state on first call. C `node.c` xzalloc;
             // our `PmtuState::new` needs `now`.
-            // STUB(chunk-9c): `choose_initial_maxmtu` getsockopt.
-            // The `MTU` fallback works (the C does too on platforms
-            // without `IP_MTU`); getsockopt is an optimization
-            // (skips the first few too-big probes).
+            // NOT-PORTING: `choose_initial_maxmtu` getsockopt(IP_MTU)
+            // (`net_packet.c:1249-1340`). The `MTU` fallback works
+            // (the C does too on platforms without `IP_MTU`, `#ifndef
+            // IP_MTU` at `:1249`); getsockopt is an optimization
+            // (skips the first few too-big probes). PMTU discovery
+            // converges from `MTU=1518` regardless. See PLAN.md
+            // `net_packet.c` row.
             let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
             if p.udp_confirmed {
                 let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
@@ -503,9 +506,19 @@ impl Daemon {
     /// `reachable=false` until SOMETHING connects them — harmless,
     /// `dump nodes` shows them as unreachable which is correct.
     ///
-    /// `strictsubnets` branch (`:192-208`): STUB(chunk-12-strictsubnets).
-    /// Reads each file's `Subnet =` lines into the subnet tree.
-    /// We don't have strictsubnets yet.
+    /// `strictsubnets` branch (`:192-208`): preload each file's
+    /// `Subnet =` lines into the subnet tree. The `protocol_subnet.c
+    /// :93` lookup-first means later ADD_SUBNET gossip for these
+    /// preloaded entries is a silent noop (already-have-it); only
+    /// UNAUTHORIZED subnets fall through to the `:116` gate.
+    ///
+    /// **Reload semantics**: the C uses an `expires` tristate
+    /// (`:195` `s2->expires = -1`) for mark-sweep on SIGHUP. We
+    /// don't have per-subnet `expires`; the cold-start preload here
+    /// is sufficient for the integration test.
+    /// `TODO(chunk-12-strictsubnets-reload)`: diff old/new
+    /// authorized sets per `net.c:372-396`, broadcast ADD/DEL for
+    /// the deltas. Same shape as `reload.rs::diff_subnets`.
     pub(super) fn load_all_nodes(&mut self) {
         let hosts_dir = self.confbase.join("hosts");
         let dir = match std::fs::read_dir(&hosts_dir) {
@@ -557,7 +570,21 @@ impl Daemon {
             // C `:210-212`: `if(lookup_config("Address")) n->
             // status.has_address = true`.
             if cfg.lookup("Address").next().is_some() {
-                self.has_address.insert(fname);
+                self.has_address.insert(fname.clone());
+            }
+
+            // C `:192-208`: `if(strictsubnets) for(cfg = lookup_
+            // config("Subnet")) { ... subnet_add(n, s) }`. Preload
+            // the operator-authorized subnets so the `:93` lookup-
+            // first gate finds them. Skip our own name: `setup()`
+            // already added our subnets (and the C `:192` walks all
+            // names but the `expires=-1` marker handles dups; our
+            // `add` is BTreeSet-idempotent, so re-adding is fine,
+            // but skipping is one less parse).
+            if self.settings.strictsubnets && fname != self.name {
+                for s in parse_subnets_from_config(&cfg, &fname) {
+                    self.subnets.add(s, fname.clone());
+                }
             }
         }
     }

@@ -22,7 +22,16 @@
 //! - `try_outgoing_connections` (`:432`) — daemon already has this;
 //!   it's `setup_outgoing_connection` per `oid`.
 //! - `terminate_connection` (`:450`) — daemon already has.
-//! - `strictsubnets` branch (`:359-395`) — `STUB(chunk-12-strictsubnets)`.
+//! - `strictsubnets` reload branch (`:359-395`) —
+//!   `TODO(chunk-12-strictsubnets-reload)`. The C uses an `expires`
+//!   tristate mark-sweep: 1=stale, -1=re-authorized, 0=new. Walk:
+//!   `expires==1` → DEL+broadcast; `==-1` → reset; `==0` →
+//!   ADD+broadcast. We don't have per-subnet `expires`; the same
+//!   shape is two `BTreeSet<(Subnet,String)>` snapshots diffed (see
+//!   `diff_subnets` below). Needs `SubnetTree` to expose a snapshot.
+//!   Scope: diff old/new authorized sets per `net.c:372-396`,
+//!   broadcast ADD/DEL for the deltas. Cold-start preload in
+//!   `load_all_nodes` is sufficient for the integration test.
 //!
 //! What IS here: the three diffs (subnets, ConnectTo, conn-mtime) as
 //! pure functions.

@@ -648,7 +648,11 @@ impl Daemon {
                 };
                 try_connect_via_proxy(phost, pport, peer_addr, &name)
             } else {
-                try_connect(&mut outgoing.addr_cache, &name)
+                try_connect(
+                    &mut outgoing.addr_cache,
+                    &name,
+                    self.settings.bind_to_address,
+                )
             };
 
             match attempt {

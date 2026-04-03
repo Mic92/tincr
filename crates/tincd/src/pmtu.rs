@@ -91,9 +91,11 @@ impl PmtuState {
     /// `initial_maxmtu` — the daemon may pre-seed this with the
     /// kernel's PMTU cache (`choose_initial_maxmtu`,
     /// `net_packet.c:1249-1340` — `getsockopt(IP_MTU)` minus
-    /// IP/UDP/SPTPS overhead). `STUB(chunk-9b)` for the syscall;
-    /// for now pass `MTU`, the C fallback. Discovery still
-    /// converges, just from scratch.
+    /// IP/UDP/SPTPS overhead). NOT-PORTING: the syscall is an
+    /// optimization (skips the first few too-big probes); the C
+    /// falls back to `MTU` on platforms without `IP_MTU` (`#ifndef
+    /// IP_MTU` at `net_packet.c:1249`). Pass `MTU`; discovery
+    /// converges from scratch. See PLAN.md `net_packet.c` row.
     #[must_use]
     pub fn new(now: Instant, initial_maxmtu: u16) -> Self {
         Self {

@@ -1878,6 +1878,224 @@ fn three_daemon_tunnelserver() {
     );
 }
 
+/// `StrictSubnets = yes`: alice's `hosts/bob` is the AUTHORITY for
+/// which subnets bob may claim. bob owns `10.0.0.2/32` in his own
+/// config; he gossips ADD_SUBNET for it via mid → alice. alice's
+/// `hosts/bob` does NOT have `Subnet = 10.0.0.2/32`. The gate at
+/// `protocol_subnet.c:116-122` fires: alice forwards the gossip
+/// (to nobody, no other peers) but does NOT add it locally.
+///
+/// Unlike `tunnelserver`, `strictsubnets` does NOT filter topology:
+/// alice still learns bob exists (mid forwards bob's ADD_EDGE). She
+/// just won't route to subnets she didn't pre-authorize on disk.
+///
+/// ## Shape
+///
+/// - alice: `StrictSubnets = yes`, `ConnectTo = mid`, owns
+///   `10.0.0.1/32`. Her `hosts/bob` has the pubkey ONLY — no
+///   `Subnet` line.
+/// - mid: dumb relay (NOT strictsubnets). `ConnectTo` neither.
+///   Forwards gossip both ways.
+/// - bob: `ConnectTo = mid`, owns `10.0.0.2/32`. His ADD_SUBNET
+///   reaches alice via mid's `forward_request`.
+///
+/// ## Assertions
+///
+/// 1. alice `dump nodes` shows 3 reachable (topology unfiltered).
+/// 2. alice `dump subnets` does NOT have `10.0.0.2` (the gate).
+/// 3. mid `dump subnets` DOES have `10.0.0.2` (mid isn't strict).
+/// 4. ping `10.0.0.2` from alice → ICMP NET_UNKNOWN (no route).
+/// 5. Append `Subnet = 10.0.0.2/32` to alice's `hosts/bob`, restart
+///    alice → `load_all_nodes` preloads it → ADD_SUBNET gossip
+///    arrives, `subnets.contains` finds it (the `:93` lookup-first),
+///    silent noop → `dump subnets` now shows it. (Restart not
+///    SIGHUP; reload diff is `TODO(chunk-12-strictsubnets-reload)`.)
+///
+/// Regression-first: before the gate exists, step 2 fails (alice
+/// wrongly accepts the gossip).
+#[test]
+fn three_daemon_strictsubnets() {
+    let tmp = TmpGuard::new("strictsubnets3");
+    // alice: StrictSubnets = yes. The RECEIVER of gossip.
+    let alice = Node::new(tmp.path(), "alice", 0xA5).with_conf("StrictSubnets = yes\n");
+    // mid: plain relay. NOT strict (so we can prove it accepts).
+    let mid = Node::new(tmp.path(), "mid", 0xC5);
+    let bob = Node::new(tmp.path(), "bob", 0xB5);
+
+    let alice_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+
+    // mid: hub. dummy device, no subnet, no ConnectTo. Knows both.
+    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device. Knows
+    // bob's pubkey. CRITICALLY: alice's hosts/bob (written by
+    // write_config_multi) has NO `Subnet =` line — see the
+    // "no Subnet line needed here" comment in that fn. That's
+    // exactly what we want: bob's subnet is unauthorized.
+    alice.write_config_multi(
+        &[&mid, &bob],
+        &["mid"],
+        Some(alice_pair[1]),
+        Some("10.0.0.1/32"),
+    );
+    // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device.
+    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+
+    // ─── spawn: mid first ────────────────────────────────────────
+    let mut mid_child = mid.spawn();
+    if !wait_for_file(&mid.socket) {
+        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
+    }
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        let _ = mid_child.kill();
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut mid_ctl = Ctl::connect(&mid);
+
+    // ─── wait: mid sees both spokes active ───────────────────────
+    poll_until(Duration::from_secs(10), || {
+        let m = mid_ctl.dump(6);
+        (has_active_peer(&m, "alice") && has_active_peer(&m, "bob")).then_some(())
+    });
+    // mid forwards bob's ADD_EDGE to alice. Wait for alice to see
+    // 3 reachable nodes (proves topology is NOT filtered by
+    // strictsubnets — that's tunnelserver's job).
+    let alice_nodes = poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        let reachable = a
+            .iter()
+            .filter(|r| {
+                r.strip_prefix("18 3 ")
+                    .and_then(|b| b.split_whitespace().nth(10))
+                    .and_then(|s| u32::from_str_radix(s, 16).ok())
+                    .is_some_and(|s| s & 0x10 != 0)
+            })
+            .count();
+        (reachable == 3).then_some(a)
+    });
+    assert_eq!(
+        alice_nodes.iter().filter(|r| r.contains(" bob ")).count(),
+        1,
+        "alice should see bob in node list (topology unfiltered): {alice_nodes:?}"
+    );
+
+    // ─── the gate: alice does NOT have bob's subnet ──────────────
+    // mid DOES (proves the gossip propagated; alice's gate is
+    // alice-local). Wait for mid to receive it first.
+    poll_until(Duration::from_secs(5), || {
+        let m = mid_ctl.dump(5);
+        // `Subnet::Display` omits `/32` (max prefix). `net2str`.
+        has_subnet(&m, "10.0.0.2", "bob").then_some(())
+    });
+    // Stabilize: alice has had time to receive the same gossip.
+    // Two consecutive reads agree, neither has 10.0.0.2.
+    let a_subnets = poll_until(Duration::from_secs(5), || {
+        let a1 = alice_ctl.dump(5);
+        std::thread::sleep(Duration::from_millis(50));
+        let a2 = alice_ctl.dump(5);
+        (a1 == a2).then_some(a1)
+    });
+    assert!(
+        !has_subnet(&a_subnets, "10.0.0.2", "bob"),
+        "alice's StrictSubnets gate should reject bob's gossiped \
+         10.0.0.2/32 (not in her hosts/bob); got: {a_subnets:?}"
+    );
+    assert!(
+        has_subnet(&a_subnets, "10.0.0.1", "alice"),
+        "alice's own subnet should still be there: {a_subnets:?}"
+    );
+
+    // ─── data plane: ICMP NET_UNKNOWN ────────────────────────────
+    // Same shape as tunnelserver: no route → synth ICMP unreachable.
+    let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"nowhere");
+    write_fd(alice_pair[0], &probe);
+    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    assert!(icmp.len() >= 22, "ICMP reply too short: {icmp:02x?}");
+    assert_eq!(icmp[9], 1, "IP proto should be ICMP: {icmp:02x?}");
+    assert_eq!(icmp[20], 3, "ICMP type DEST_UNREACH: {icmp:02x?}");
+    assert_eq!(icmp[21], 6, "ICMP code NET_UNKNOWN: {icmp:02x?}");
+
+    // ─── restart with authorized hosts/bob ────────────────────────
+    // Append `Subnet = 10.0.0.2/32` to alice's hosts/bob. Restart
+    // alice. `load_all_nodes` preloads it; the ADD_SUBNET gossip
+    // hits the `:93` lookup-first → already-have-it → noop. The
+    // subnet appears.
+    drop(alice_ctl);
+    let alice_stderr1 = drain_stderr(alice_child);
+    assert!(
+        alice_stderr1.contains("Ignoring unauthorized"),
+        "alice should have logged the strictsubnets gate firing; stderr:\n{alice_stderr1}"
+    );
+    unsafe { libc::close(alice_pair[0]) };
+
+    let bob_hosts = alice.confbase.join("hosts").join("bob");
+    let mut bob_cfg = std::fs::read_to_string(&bob_hosts).unwrap();
+    bob_cfg.push_str("Subnet = 10.0.0.2/32\n");
+    std::fs::write(&bob_hosts, bob_cfg).unwrap();
+
+    // Fresh socketpair for the new alice.
+    let alice_pair2 = sockpair_seqpacket();
+    for &fd in &alice_pair2 {
+        set_nonblocking(fd);
+    }
+    // Re-write tinc.conf with the new fd (DeviceType=fd / Device=N).
+    // hosts/ files persist (we just appended to hosts/bob above).
+    alice.write_config_multi(
+        &[&mid, &bob],
+        &["mid"],
+        Some(alice_pair2[1]),
+        Some("10.0.0.1/32"),
+    );
+    // write_config_multi re-truncates hosts/bob. Re-append.
+    let mut bob_cfg = std::fs::read_to_string(&bob_hosts).unwrap();
+    bob_cfg.push_str("Subnet = 10.0.0.2/32\n");
+    std::fs::write(&bob_hosts, bob_cfg).unwrap();
+
+    std::fs::remove_file(&alice.socket).ok();
+    let alice_child2 = alice.spawn_with_fd(alice_pair2[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!(
+            "alice respawn failed; stderr:\n{}",
+            drain_stderr(alice_child2)
+        );
+    }
+    unsafe { libc::close(alice_pair2[1]) };
+
+    let mut alice_ctl2 = Ctl::connect(&alice);
+    // Wait for alice↔mid handshake; bob's gossip via mid follows.
+    // The preloaded subnet is there from cold-start regardless,
+    // but wait for full mesh to prove the gossip path doesn't
+    // accidentally DELETE it.
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl2.dump(5);
+        has_subnet(&a, "10.0.0.2", "bob").then_some(())
+    });
+
+    // ─── cleanup ─────────────────────────────────────────────────
+    drop(alice_ctl2);
+    drop(mid_ctl);
+    unsafe { libc::close(alice_pair2[0]) };
+    let _ = mid_child.kill();
+    let _ = bob_child.kill();
+    let _ = drain_stderr(mid_child);
+    let _ = drain_stderr(bob_child);
+    let _ = drain_stderr(alice_child2);
+}
+
 // ═══ chunk-10: SIGHUP reload, invitation server ═════════════════════
 
 /// Check if `dump subnets` rows contain a given subnet owned by a

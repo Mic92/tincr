@@ -1443,6 +1443,20 @@ impl Daemon {
             }
         }
 
+        // C `:93`: `if(lookup_subnet(owner, &s)) return true`.
+        // Lookup-first idempotency. With `strictsubnets`, this is
+        // what lets AUTHORIZED subnets through silently:
+        // `load_all_nodes` preloaded them; gossip arrives, lookup
+        // finds it, return. UNAUTHORIZED subnets fall through to
+        // the `:116` gate below. Without strictsubnets this is
+        // belt-and-braces over `seen_request` (our `subnets.add`
+        // is BTreeSet-idempotent, but checking here saves the
+        // `lookup_or_add_node` call AND the script run — the C's
+        // intent at `:93`).
+        if self.subnets.contains(&subnet, &owner_name) {
+            return Ok(false);
+        }
+
         // C `:77,86-89`: lookup_node + conditional new_node.
         let owner = self.lookup_or_add_node(&owner_name);
 
@@ -1469,16 +1483,35 @@ impl Daemon {
         // C `:109-112`: `if(tunnelserver)` second gate. Reached
         // when owner IS the direct peer but the subnet wasn't in
         // our hosts/ file ("unauthorized"). The C `:880`
-        // `strictsubnets |= tunnelserver` makes the `:116`
-        // strictsubnets check fire instead. STUB(chunk-12-strictsubnets):
-        // both predicates need on-disk hosts/ subnet parsing.
-        // Without it, accept the peer's own subnets (otherwise
-        // tunnelserver mode can't route AT ALL — `three_daemon_
-        // tunnelserver` proves we accept these).
+        // `strictsubnets |= tunnelserver` makes the `:116` check
+        // below fire on the SAME predicate, so this gate is DEAD
+        // CODE in practice. The C keeps both for clarity (they
+        // ARE conceptually distinct: `:109` is "hub doesn't trust
+        // direct peers' arbitrary claims", `:116` is "operator's
+        // hosts/ is authority"). Match the C: keep both, in C order.
+        if self.settings.tunnelserver {
+            // Same gate body as `:116` below; the C's `:109` does
+            // `forward_request(c)` then `return true`. The implication
+            // makes this unreachable, but keep it for C-parity.
+            log::warn!(target: "tincd::proto",
+                       "Ignoring unauthorized ADD_SUBNET for {owner_name} \
+                        ({subnet}) (tunnelserver)");
+            let nw = self.forward_request(from_conn, body);
+            return Ok(nw);
+        }
 
-        // STUB(chunk-12-strictsubnets): strictsubnets (`:116-122`).
-        // Predates tunnelserver; checks gossip'd subnets against
-        // on-disk hosts/ files.
+        // C `:116-122`: `if(strictsubnets) { forward_request;
+        // return true }`. The on-disk hosts/ file is authority;
+        // gossip can't add what's not there. Forward (the peer's
+        // worldview is wrong but propagate the gossip to others
+        // who may not be strict) but don't `subnet_add` locally.
+        if self.settings.strictsubnets {
+            log::warn!(target: "tincd::proto",
+                       "Ignoring unauthorized ADD_SUBNET for {owner_name} \
+                        ({subnet}) (strictsubnets)");
+            let nw = self.forward_request(from_conn, body);
+            return Ok(nw);
+        }
 
         // C `:126`: `subnet_add(owner, new)`. Idempotent on dup
         // (the C `:93` `if(lookup_subnet) return true` is
@@ -1614,6 +1647,19 @@ impl Daemon {
 
         // C `:244`: `if(!tunnelserver) forward_request(c, req)`.
         let nw = self.forward_request(from_conn, body);
+
+        // C `:247-249`: `if(strictsubnets) return true`. AFTER
+        // forward, BEFORE the actual del. The hosts/ file is
+        // authoritative; gossip can't delete authorized subnets.
+        // (The C's `:220-225` `if(!find && strictsubnets) {
+        // forward; return }` not-found case is folded into the
+        // `del()`-returns-false branch below — with strictsubnets,
+        // del-of-preloaded → found → we hit THIS gate first; del-
+        // of-unauthorized → not found → we forwarded above + warn
+        // below. Same observable behavior as C: forward, no del.)
+        if self.settings.strictsubnets {
+            return Ok(nw);
+        }
 
         // C `:254-256`: `if(owner->status.reachable) subnet_update(
         // owner, find, false)`. BEFORE the del (the script may want
