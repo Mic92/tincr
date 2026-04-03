@@ -1259,11 +1259,11 @@ fn peer_ack_exchange() {
             );
         }
         Ok(n) => {
-            // Daemon sent something post-ACK. Chunk 4b's `send_
-            // everything` walks empty trees — sends nothing. If
-            // we got bytes here, that's chunk-5 territory. NOT
-            // an error per se but unexpected for 4b.
-            panic!("daemon sent {n} bytes post-ACK (send_everything should be empty)");
+            // Daemon sent something post-ACK. Chunk 5's
+            // `send_everything` is still STUBBED (logs count,
+            // doesn't actually send). If bytes show up here,
+            // that stub leaked.
+            panic!("daemon sent {n} bytes post-ACK (send_everything still stubbed)");
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
             // EXPECTED. Connection up, daemon idle.
@@ -1325,6 +1325,122 @@ fn peer_ack_exchange() {
     // idempotent. `c->options` = `0x0700000c`. Hex unpadded.
     assert!(peer_row.contains(" 700000c "), "peer row: {peer_row}");
 
+    // ─── chunk 5: ADD_SUBNET / dump subnets / dedup / DEL ──────
+    // C `add_subnet_h` (`protocol_subnet.c:43-140`). Send an
+    // ADD_SUBNET via SPTPS record, daemon parses + inserts into
+    // SubnetTree, `dump subnets` over the control socket shows it.
+    //
+    // Record body format: `"10 <nonce-hex> <owner> <netstr>\n"`
+    // (`protocol_subnet.c:40`: `"%d %x %s %s"`). The `\n` is
+    // appended by `send_request:120`; daemon's `record_body`
+    // strips it (`meta.c:156`).
+    //
+    // `192.168.99.0/24#10`: weight 10 is the default —
+    // `Subnet::Display` omits `#10`, so the dump row reads
+    // `192.168.99.0/24`. Match the dump format, not the wire.
+    let add_subnet = b"10 deadbeef testpeer 192.168.99.0/24#10\n";
+    let outs = sptps.send_record(0, add_subnet).expect("post-handshake");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send ADD_SUBNET");
+        }
+    }
+
+    // Daemon doesn't reply to ADD_SUBNET (it FORWARDS — stubbed in
+    // chunk 5). 100ms WouldBlock = success.
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed after ADD_SUBNET; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => panic!("daemon replied {n} bytes to ADD_SUBNET (should forward, not reply)"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error after ADD_SUBNET: {e}"),
+    }
+
+    // `dump subnets` (`subnet.c:395-410`). REQ_DUMP_SUBNETS = 5.
+    // Format: `"18 5 <netstr> <owner>"` per row, terminator `"18 5"`.
+    // C `:404`: `"%d %d %s %s"`. With one subnet: one row.
+    //
+    // Helper closure: send REQ_DUMP_SUBNETS, collect rows. Called
+    // three times below (after ADD, after dup-ADD, after DEL).
+    let dump_subnets = |ctl_r: &mut BufReader<&UnixStream>, ctl_w: &mut &UnixStream| {
+        writeln!(ctl_w, "18 5").unwrap();
+        let mut rows = Vec::new();
+        loop {
+            let mut line = String::new();
+            ctl_r.read_line(&mut line).expect("dump subnet row");
+            let line = line.trim_end().to_owned();
+            if line == "18 5" {
+                break;
+            }
+            rows.push(line);
+        }
+        rows
+    };
+
+    let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
+    assert_eq!(rows.len(), 1, "dump subnets after ADD: {rows:?}");
+    // C `subnet.c:404`: `netstr owner`. `net2str` omits `#10`
+    // (default weight). `Subnet::Display` matches.
+    assert_eq!(
+        rows[0], "18 5 192.168.99.0/24 testpeer",
+        "subnet row: {rows:?}"
+    );
+
+    // Send the SAME ADD_SUBNET again. `seen.check` dup-drops it
+    // (`protocol.c:234-249`). The full body string (incl nonce)
+    // is the cache key — same nonce → same key → hit.
+    let outs = sptps.send_record(0, add_subnet).expect("dup send");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send dup ADD_SUBNET");
+        }
+    }
+    // No reply (dup-dropped silently).
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => panic!("daemon closed after dup ADD_SUBNET"),
+        Ok(n) => panic!("daemon replied {n} bytes to dup ADD_SUBNET"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error after dup: {e}"),
+    }
+    // Still ONE row — dedup proved.
+    let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
+    assert_eq!(rows.len(), 1, "dump after dup ADD (seen.check): {rows:?}");
+
+    // DEL_SUBNET. `protocol_subnet.c:163-261`. Same wire shape,
+    // reqno 11. DIFFERENT nonce (the dup ADD_SUBNET above already
+    // primed `seen` with `deadbeef` — but on a different reqno
+    // string, so it wouldn't collide. Distinct nonce anyway for
+    // realism: each flood is fresh `prng()` output).
+    let del_subnet = b"11 cafef00d testpeer 192.168.99.0/24#10\n";
+    let outs = sptps.send_record(0, del_subnet).expect("del send");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send DEL_SUBNET");
+        }
+    }
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed after DEL_SUBNET; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => panic!("daemon replied {n} bytes to DEL_SUBNET"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error after DEL: {e}"),
+    }
+    // Zero rows — deleted.
+    let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
+    assert_eq!(rows.len(), 0, "dump after DEL_SUBNET: {rows:?}");
+
     // ─── stderr: prove the daemon's path ─────────────────────────
     // Hold `stream` until here — dropping it would let the daemon's
     // ping-timeout sweep close the conn before we dump.
@@ -1344,6 +1460,290 @@ fn peer_ack_exchange() {
     assert!(
         !stderr.contains("send_ack not implemented"),
         "chunk-4a placeholder leaked; stderr:\n{stderr}"
+    );
+    // Chunk 5: on_ack → graph.add_edge → run_graph → BecameReachable.
+    // C `graph.c:261`: `"Node %s became reachable"`. Our log says
+    // `"Node testpeer became reachable"`. THIS is the proof that
+    // graph_glue::run_graph fired and the diff produced a transition.
+    assert!(
+        stderr.contains("Node testpeer became reachable"),
+        "on_ack graph bridge didn't fire BecameReachable; stderr:\n{stderr}"
+    );
+}
+
+/// ADD_EDGE for a transitive node triggers `BecameReachable` for
+/// that node. Proves `on_add_edge` → `graph.add_edge` → `run_graph`
+/// → `Transition::BecameReachable` → log.
+///
+/// Same setup as `peer_ack_exchange` (handshake + ACK), then send
+/// `ADD_EDGE testpeer faraway` plus the reverse `faraway testpeer`.
+/// `sssp` only follows bidi edges (`graph.c:159`: `if(!e->reverse)
+/// continue`); both directions are needed for the transition to
+/// fire. The C peer would send both (each side's `ack_h` adds its
+/// `c->edge`, then broadcasts).
+///
+/// `dump connections` STILL shows one row (testpeer): faraway has
+/// no direct connection — graph-only.
+#[test]
+fn peer_edge_triggers_reachable() {
+    use rand_core::OsRng;
+    use std::io::Read;
+    use std::net::TcpStream;
+    use tinc_crypto::sign::SigningKey;
+    use tinc_sptps::{Framing, Output, Role, Sptps};
+
+    let tmp = TmpGuard::new("peer-edge");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    let daemon_pub = write_config(&confbase);
+    let our_key = SigningKey::from_seed(&[0x77; 32]);
+    let our_pub = *our_key.public_key();
+    let b64 = tinc_crypto::b64::encode(&our_pub);
+    std::fs::write(
+        confbase.join("hosts").join("testpeer"),
+        format!("Ed25519PublicKey = {b64}\n"),
+    )
+    .unwrap();
+
+    let mut child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        // INFO captures the "became reachable" line. graph_glue
+        // logs at `tincd::graph` target.
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    let tcp_addr = read_tcp_addr(&pidfile);
+    let stream = TcpStream::connect(tcp_addr).expect("TCP connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(&stream, "0 testpeer 17.7").unwrap();
+
+    // ─── ID line + SPTPS pump (same as peer_ack_exchange) ────────
+    let mut buf = Vec::with_capacity(256);
+    let mut tmp_buf = [0u8; 256];
+    let id_end = loop {
+        let n = (&stream).read(&mut tmp_buf).expect("recv");
+        if n == 0 {
+            panic!("daemon closed before ID");
+        }
+        buf.extend_from_slice(&tmp_buf[..n]);
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            break pos;
+        }
+    };
+    assert_eq!(&buf[..id_end], b"0 testnode 17.7");
+
+    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
+    label.push(0);
+    let (mut sptps, init) = Sptps::start(
+        Role::Initiator,
+        Framing::Stream,
+        our_key,
+        daemon_pub,
+        label,
+        0,
+        &mut OsRng,
+    );
+    for o in init {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send KEX");
+        }
+    }
+
+    // Minimal pump: feed until HandshakeDone + daemon's ACK record.
+    // Same NoRng idiom as peer_ack_exchange.
+    struct NoRng;
+    impl rand_core::RngCore for NoRng {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!()
+        }
+        fn next_u64(&mut self) -> u64 {
+            unreachable!()
+        }
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unreachable!()
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+            unreachable!()
+        }
+    }
+
+    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
+    let mut handshake_done = false;
+    let mut got_ack = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(handshake_done && got_ack) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("handshake timeout");
+        }
+        let mut off = 0;
+        while off < pending.len() {
+            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
+            off += n;
+            for o in outs {
+                match o {
+                    Output::Wire { bytes, .. } => {
+                        (&stream).write_all(&bytes).expect("send");
+                    }
+                    Output::HandshakeDone => handshake_done = true,
+                    Output::Record { .. } => got_ack = true,
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        pending.clear();
+        if handshake_done && got_ack {
+            break;
+        }
+        let n = (&stream).read(&mut tmp_buf).expect("read");
+        if n == 0 {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon EOF before handshake; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        pending.extend_from_slice(&tmp_buf[..n]);
+    }
+
+    // Send our ACK. Daemon activates + adds myself→testpeer edge
+    // + runs graph (testpeer becomes reachable).
+    let outs = sptps.send_record(0, b"4 0 1 700000c\n").expect("ack");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send ACK");
+        }
+    }
+
+    // Short read: WouldBlock (daemon idle post-ACK).
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed post-ACK; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => panic!("daemon sent {n} bytes post-ACK"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error: {e}"),
+    }
+
+    // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
+    // C `protocol_edge.c:29-62`: `"%d %x %s %s %s %s %x %d"`.
+    // `12 <nonce> <from> <to> <addr> <port> <opts> <weight>`.
+    // No local-addr suffix (6-token form, pre-1.0.24 compat).
+    //
+    // `sssp` follows edges only if `e->reverse` is set (`graph.c:
+    // 159`). `Graph::add_edge` auto-links the reverse if it exists.
+    // So: send BOTH directions. The C peer would do the same (each
+    // side's `ack_h` adds its `c->edge` and broadcasts; testpeer
+    // sends `testpeer→faraway`, faraway sends `faraway→testpeer`).
+    //
+    // Different nonces — each is a separate `prng()` in C.
+    // Addresses are arbitrary tokens (Phase-1 finding: `AddrStr`
+    // is opaque, `str2sockaddr` accepts anything).
+    let fwd = b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n";
+    let rev = b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n";
+    for body in [fwd.as_slice(), rev.as_slice()] {
+        let outs = sptps.send_record(0, body).expect("add_edge");
+        for o in outs {
+            if let Output::Wire { bytes, .. } = o {
+                (&stream).write_all(&bytes).expect("send ADD_EDGE");
+            }
+        }
+    }
+
+    // Daemon doesn't reply (forward stubbed). WouldBlock.
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed after ADD_EDGE; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => panic!("daemon replied {n} bytes to ADD_EDGE"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error: {e}"),
+    }
+
+    // ─── dump connections: STILL one peer row ───────────────────
+    // faraway is graph-only (no NodeState, no Connection).
+    // `dump_connections` walks `conns`, not `node_ids`.
+    let cookie = read_cookie(&pidfile);
+    let ctl = UnixStream::connect(&socket).expect("ctl connect");
+    let mut ctl_r = BufReader::new(&ctl);
+    let mut ctl_w = &ctl;
+    writeln!(ctl_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    ctl_r.read_line(&mut greet).unwrap();
+    let mut ack = String::new();
+    ctl_r.read_line(&mut ack).unwrap();
+
+    writeln!(ctl_w, "18 6").unwrap();
+    let mut rows = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump row");
+        let line = line.trim_end().to_owned();
+        if line == "18 6" {
+            break;
+        }
+        rows.push(line);
+    }
+    // testpeer + <control>. NOT faraway.
+    assert_eq!(rows.len(), 2, "dump connections: {rows:?}");
+    assert!(
+        rows.iter().any(|r| r.contains("testpeer")),
+        "no testpeer: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("faraway")),
+        "faraway shouldn't have a connection: {rows:?}"
+    );
+
+    // ─── stderr: BecameReachable fired for faraway ──────────────
+    drop(stream);
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The on_ack graph bridge fires testpeer-reachable first.
+    assert!(
+        stderr.contains("Node testpeer became reachable"),
+        "on_ack reachable; stderr:\n{stderr}"
+    );
+    // THE PROOF: on_add_edge → run_graph → BecameReachable for the
+    // TRANSITIVE node. C `graph.c:261`: `"Node %s became reachable"`.
+    assert!(
+        stderr.contains("Node faraway became reachable"),
+        "on_add_edge didn't fire BecameReachable for transitive node; \
+         stderr:\n{stderr}"
     );
 }
 

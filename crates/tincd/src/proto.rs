@@ -94,6 +94,7 @@ pub(crate) const fn myself_options_default() -> u32 {
 /// the other way). Phase-6 hoist to tinc-proto. `pub(crate)` for
 /// daemon.rs's dump_connections format string.
 pub(crate) const REQ_STOP: i32 = 0;
+pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
 /// `control_common.h`: `REQ_INVALID = -1`. The "unknown subtype" reply.
 const REQ_INVALID: i32 = -1;
@@ -119,6 +120,9 @@ pub enum DispatchResult {
     /// `dump_connections(c)`. The daemon walks `conns` and queues
     /// rows. Can't do it here (don't have the slotmap).
     DumpConnections,
+    /// `dump_subnets(c)` (`subnet.c:395-410`). Same shape as
+    /// DumpConnections: daemon walks `subnets`, queues rows.
+    DumpSubnets,
     /// Handler returned `false`. Drop the connection. C `receive_
     /// request:183-188` logs "Error while processing X" and the
     /// caller (`receive_meta`) returns `false` which causes
@@ -145,6 +149,14 @@ pub enum DispatchError {
     /// `ack_h`: sscanf returned `< 3` (`protocol_auth.c:960-963`).
     /// C: `"Got bad ACK from %s (%s)"`.
     BadAck(String),
+    /// `add_subnet_h`/`del_subnet_h`: sscanf < 2, bad name, or bad
+    /// subnet string (`protocol_subnet.c:49-68`). C: `"Got bad %s
+    /// from %s (%s)"`.
+    BadSubnet(String),
+    /// `add_edge_h`/`del_edge_h`: sscanf wrong count, bad name,
+    /// or `from == to` (`protocol_edge.c:80-92`). C: `"Got bad %s
+    /// from %s (%s)"`.
+    BadEdge(String),
     /// `control_h`: unknown subtype. C `control.c:144` sends
     /// `REQ_INVALID` and returns `true` (connection stays). We do
     /// the same — this is NOT a `Drop`, see `handle_control`.
@@ -773,6 +785,73 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
     })
 }
 
+// ───────────────────────────────────────────────────────────────────
+// chunk-5 handler parse fns
+//
+// Same parse/mutate split as parse_ack/on_ack. The parse fns take
+// the SPTPS record body (`\n` already stripped by `record_body`),
+// convert &[u8] → &str, delegate to tinc-proto's parsers (which
+// already do `check_id` + `from != to`), wrap errors in our
+// `DispatchError`.
+//
+// All four are thin wrappers. The C `sscanf` + `check_id` + name-
+// equality is one block (`protocol_edge.c:77-92`, `protocol_subnet.
+// c:49-68`); tinc-proto already does that block. We just glue.
+
+/// `add_subnet_h` parse step (`protocol_subnet.c:49-68`). Returns
+/// `(owner_name, subnet)`. `check_id` already enforced by
+/// `SubnetMsg::parse`. The C also calls `subnetcheck` (`conf_net.c:
+/// 17`, host bits must be zero) but `add_subnet_h` itself doesn't —
+/// it relies on `str2net` accepting and the LATER `lookup_subnet`
+/// just not finding `10.0.0.1/24` if `10.0.0.0/24` is what's stored.
+/// We match: no `is_canonical` check here.
+///
+/// # Errors
+/// `BadSubnet` if not UTF-8 (impossible from a real C peer; sscanf
+/// `%s` reads bytes but node names are `check_id`-gated to ASCII)
+/// or if `SubnetMsg::parse` fails (sscanf < 2, bad name, bad net).
+pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
+    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
+    let m = tinc_proto::msg::SubnetMsg::parse(s)
+        .map_err(|_| DispatchError::BadSubnet("parse failed".into()))?;
+    Ok((m.owner, m.subnet))
+}
+
+/// `del_subnet_h` parse step (`protocol_subnet.c:163-188`). Same
+/// wire shape as ADD. Same parser.
+///
+/// # Errors
+/// See [`parse_add_subnet`].
+pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
+    // Identical to add. The C `sscanf` is the same format string.
+    // Separate fn for the daemon's match-arm clarity (and the error
+    // message).
+    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
+    let m = tinc_proto::msg::SubnetMsg::parse(s)
+        .map_err(|_| DispatchError::BadSubnet("parse failed".into()))?;
+    Ok((m.owner, m.subnet))
+}
+
+/// `add_edge_h` parse step (`protocol_edge.c:77-92`). `AddEdge::
+/// parse` already does the 6-or-8 token check, `check_id` on both
+/// names, and `from != to`.
+///
+/// # Errors
+/// `BadEdge` if not UTF-8 or `AddEdge::parse` fails.
+pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
+    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
+    tinc_proto::msg::AddEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
+}
+
+/// `del_edge_h` parse step (`protocol_edge.c:230-241`).
+///
+/// # Errors
+/// `BadEdge` if not UTF-8 or `DelEdge::parse` fails.
+pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
+    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
+    tinc_proto::msg::DelEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
+}
+
 /// `meta.c:155-158`: strip the trailing `\n` from an SPTPS record
 /// body before dispatching to `receive_request`.
 ///
@@ -813,6 +892,11 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         .and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
+        Some(REQ_DUMP_SUBNETS) => {
+            // `control.c:69`: `case REQ_DUMP_SUBNETS: return
+            // dump_subnets(c)`. Daemon walks SubnetTree.
+            (DispatchResult::DumpSubnets, false)
+        }
         Some(REQ_DUMP_CONNECTIONS) => {
             // `control.c:80`: `case REQ_DUMP_CONNECTIONS: return
             // dump_connections(c)`. The walk-and-format is in

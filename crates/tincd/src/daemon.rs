@@ -27,19 +27,24 @@ use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
+use tinc_graph::{Graph, NodeId};
 use tinc_proto::Request;
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
+use crate::graph_glue::{Transition, run_graph};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
     unmap,
 };
 use crate::proto::{
-    DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, myself_options_default,
-    parse_ack, record_body, send_ack,
+    DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
+    myself_options_default, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
+    parse_del_subnet, record_body, send_ack,
 };
+use crate::seen::SeenRequests;
+use crate::subnet_tree::SubnetTree;
 
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
@@ -123,8 +128,9 @@ pub enum TimerWhat {
     /// `keyexpire_handler`. Re-arms `+keylifetime`.
     #[allow(dead_code)]
     KeyExpire,
-    /// `age_past_requests`. Re-arms +10s.
-    #[allow(dead_code)]
+    /// `age_past_requests` (`protocol.c:213-228`). Evicts seen-
+    /// request cache entries older than `pinginterval`. Re-arms
+    /// +10s (`:228`). Chunk 5: ARMED.
     AgePastRequests,
     /// `age_subnets`. Re-arms +10s.
     #[allow(dead_code)]
@@ -311,20 +317,56 @@ pub struct Daemon {
     /// packet needs the UDP one specifically.
     pub(crate) my_udp_port: u16,
 
-    /// World model stub (chunk 4b's (b) path). `node_tree` keyed
-    /// by name. C `node.c` is a splay tree on `strcmp(name)`; we
-    /// use the name as the HashMap key.
+    /// `node_tree` topology half. Nodes + directed edges. What
+    /// `sssp`/`mst` walk. The C `node_t` smushes topology AND
+    /// runtime annotation (200-byte struct); we split — see
+    /// `NodeState` doc.
     ///
-    /// `tinc-graph::Graph` is the TOPOLOGY (nodes+edges, what
-    /// `sssp`/`mst` walk). `NodeState` is the RUNTIME annotation:
-    /// which connection serves this node, what UDP addr, the per-
-    /// tunnel SPTPS. C `node_t` smushes both into one 200-byte
-    /// struct; we split. The graph lands in chunk 5; for now `ack_h`
-    /// just records "this name maps to this conn".
+    /// `myself` is added at setup (`net_setup.c:783`). Transitively-
+    /// known nodes are added by `lookup_or_add_node` from ADD_EDGE/
+    /// ADD_SUBNET handlers. The graph crate has no name→id reverse
+    /// lookup — that's `node_ids` below.
+    pub(crate) graph: Graph,
+
+    /// name → `NodeId`. The reverse lookup `tinc-graph` doesn't
+    /// have. C `lookup_node(name)` is a splay search on `node_tree`
+    /// keyed by `strcmp(name)`; this IS that. Populated alongside
+    /// `graph.add_node()` in `lookup_or_add_node`.
     ///
-    /// Why `String` not a `NodeId`: chunk 4b doesn't have the graph
-    /// yet. The C `lookup_node(name)` is a name lookup; we match.
-    /// Chunk 5's graph integration adds the `NodeId` cross-ref.
+    /// Invariant: every entry's `NodeId` is a live slot in `graph`.
+    /// Chunk 5 never deletes nodes (the C only does on `purge`);
+    /// when del lands, it removes from here too.
+    pub(crate) node_ids: HashMap<String, NodeId>,
+
+    /// `myself` (`net_setup.c:783`: `myself = new_node()`). Our own
+    /// `NodeId` in `graph`. The `from == myself` checks in the edge/
+    /// subnet handlers (`protocol_edge.c:183`, `protocol_subnet.c:
+    /// 98`) compare against this.
+    pub(crate) myself: NodeId,
+
+    /// `subnet_tree` (`subnet.c:32`). The routing table. ADD_SUBNET
+    /// inserts, DEL_SUBNET removes, `route_ipv4` (chunk 7) reads.
+    /// `dump subnets` walks.
+    pub(crate) subnets: SubnetTree,
+
+    /// `past_request_tree` (`protocol.c:89`). Anti-loop dedup for
+    /// flooded ADD/DEL messages. Handlers call `seen.check(body)`
+    /// before processing; `true` → dup, drop silently.
+    /// `AgePastRequests` timer evicts old entries.
+    pub(crate) seen: SeenRequests,
+
+    /// Chunk-4b's runtime annotation. KEPT — graph topology vs
+    /// runtime state are different things. `tinc-graph::Node` is
+    /// name + edges; this is which-conn-serves-it + the edge
+    /// metadata `ack_h` builds (the address, which `tinc-graph::
+    /// Edge` doesn't carry).
+    ///
+    /// Only DIRECTLY-connected peers get a `NodeState` (via
+    /// `on_ack`). Transitively-known nodes (learned from forwarded
+    /// ADD_EDGE) are graph-only — no `NodeState`. C `node_t` doesn't
+    /// distinguish (it's one struct for both); we make the split
+    /// explicit. The dup-conn check (`ack_h:975-990`) is the one
+    /// consumer of `conn`.
     pub(crate) nodes: HashMap<String, NodeState>,
 
     // ─── settings
@@ -348,6 +390,8 @@ pub struct Daemon {
     pub(crate) signals: SelfPipe<SignalWhat>,
     /// `pingtimer` (`net.c:44`). Kept so the match arm can re-arm.
     pub(crate) pingtimer: TimerId,
+    /// `past_request_timeout` (`protocol.c:92`). Re-arms +10s.
+    pub(crate) age_timer: TimerId,
 
     /// `running` (`event.c:18`). The loop condition. C `event_exit()`
     /// sets `running = false`; `event_loop()` checks before each
@@ -569,6 +613,14 @@ impl Daemon {
             Duration::from_secs(u64::from(settings.pingtimeout)),
         );
 
+        // ─── age_past_requests timer (protocol.c:228)
+        // C: `timeout_set(&past_request_timeout, &(struct timeval)
+        // { 10, jitter() })`. Re-arms +10s. The eviction window is
+        // `pinginterval` (the cache key TTL); the timer's 10s is
+        // just the sweep frequency.
+        let age_timer = timers.add(TimerWhat::AgePastRequests);
+        timers.set(age_timer, Duration::from_secs(10));
+
         // ─── listeners (net_setup.c:1152-1183)
         // C: walk BindToAddress configs, then ListenAddress configs,
         // else `add_listen_address(NULL, NULL)` for the no-config
@@ -625,6 +677,20 @@ impl Daemon {
         ev.add(control.fd(), Io::Read, IoWhat::UnixListener)
             .map_err(SetupError::Io)?;
 
+        // ─── graph: add myself (net_setup.c:783)
+        // C: `myself = new_node(name)`. The C `xzalloc` zeroes
+        // `n->status.reachable`; `:1050` then sets `reachable =
+        // true`. `Graph::add_node` defaults `reachable = true`
+        // (steady state) so we get the same one-step.
+        //
+        // `node_ids` insert: the name→id reverse map. C `node_add`
+        // (`node.c:96`) inserts into `node_tree` keyed on name; the
+        // splay search IS the lookup. Our HashMap IS that.
+        let mut graph = Graph::new();
+        let myself = graph.add_node(&name);
+        let mut node_ids = HashMap::new();
+        node_ids.insert(name.clone(), myself);
+
         log::info!(target: "tincd", "Ready");
 
         Ok(Self {
@@ -643,12 +709,18 @@ impl Daemon {
             confbase: confbase.to_path_buf(),
             myself_options: myself_options_default(),
             my_udp_port,
+            graph,
+            node_ids,
+            myself,
+            subnets: SubnetTree::new(),
+            seen: SeenRequests::new(),
             nodes: HashMap::new(),
             settings,
             ev,
             timers,
             signals,
             pingtimer,
+            age_timer,
             running: true,
         })
     }
@@ -707,9 +779,9 @@ impl Daemon {
             for &t in &fired_timers {
                 match t {
                     TimerWhat::Ping => self.on_ping_tick(),
+                    TimerWhat::AgePastRequests => self.on_age_past_requests(),
                     TimerWhat::Periodic
                     | TimerWhat::KeyExpire
-                    | TimerWhat::AgePastRequests
                     | TimerWhat::AgeSubnets
                     | TimerWhat::RetryOutgoing
                     | TimerWhat::UdpPing => {
@@ -829,6 +901,27 @@ impl Daemon {
         self.timers.set(self.pingtimer, Duration::from_secs(1));
 
         // The actual sweep would go here. Chunk 3+.
+    }
+
+    /// `age_past_requests` (`protocol.c:213-228`). Evict seen-
+    /// request entries older than `pinginterval` seconds, log the
+    /// counts at DEBUG, re-arm +10s.
+    ///
+    /// C `:219` condition: `p->firstseen + pinginterval <=
+    /// now.tv_sec`. The `<=` boundary is preserved by `seen.age`.
+    /// C `:226` log: `"Aging past requests: deleted %d, left %d"`
+    /// only when `left || deleted` (don't log 0/0 every 10s).
+    fn on_age_past_requests(&mut self) {
+        let now = self.timers.now();
+        let max_age = Duration::from_secs(u64::from(self.settings.pinginterval));
+        let (deleted, left) = self.seen.age(now, max_age);
+        // C `:225-227`: gate the log on non-empty.
+        if deleted > 0 || left > 0 {
+            log::debug!(target: "tincd::proto",
+                        "Aging past requests: deleted {deleted}, left {left}");
+        }
+        // C `:228`: `timeout_set(..., {10, jitter()})`. Re-arm.
+        self.timers.set(self.age_timer, Duration::from_secs(10));
     }
 
     // ─── signal handlers
@@ -1288,7 +1381,43 @@ impl Daemon {
                 }
                 Request::Control => {
                     let (r, nw) = handle_control(conn, &line);
-                    if r == DispatchResult::DumpConnections {
+                    if r == DispatchResult::DumpSubnets {
+                        // `dump_subnets` (`subnet.c:395-410`). Same
+                        // borrow dance as DumpConnections: drop
+                        // `conn`, walk the tree into a Vec, re-fetch.
+                        // C: `"%d %d %s %s"` per row, terminator
+                        // `"%d %d"`. `netstr` is `net2str` output
+                        // (= `Subnet::Display`). Owner is the name
+                        // or `"(broadcast)"` for ownerless (`subnet.
+                        // c:406`: `subnet->owner ? ->name : "(
+                        // broadcast)"` — we don't have ownerless
+                        // subnets yet; chunk 8's broadcast subnets).
+                        let rows: Vec<String> = self
+                            .subnets
+                            .iter()
+                            .map(|(subnet, owner)| {
+                                format!(
+                                    "{} {} {} {}",
+                                    Request::Control as u8,
+                                    crate::proto::REQ_DUMP_SUBNETS,
+                                    subnet,
+                                    owner
+                                )
+                            })
+                            .collect();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let mut nw2 = false;
+                        for row in rows {
+                            nw2 |= conn.send(format_args!("{row}"));
+                        }
+                        // Terminator.
+                        nw2 |= conn.send(format_args!(
+                            "{} {}",
+                            Request::Control as u8,
+                            crate::proto::REQ_DUMP_SUBNETS
+                        ));
+                        (DispatchResult::Ok, nw2)
+                    } else if r == DispatchResult::DumpConnections {
                         // `dump_connections` (`connection.c:166-175`).
                         // Walk ALL conns (including the one asking).
                         // C: `for list_each(connection_t, c, &list)
@@ -1366,12 +1495,12 @@ impl Daemon {
             }
 
             match result {
-                // DumpConnections was already mapped to Ok above
-                // (the Control arm rewrote it inline). Unreachable
+                // Dump variants were already mapped to Ok above
+                // (the Control arm rewrote them inline). Unreachable
                 // here. Explicit-unreachable rather than `_` so a
                 // new DispatchResult variant fails to compile.
-                DispatchResult::DumpConnections => {
-                    unreachable!("DumpConnections rewritten inline above")
+                DispatchResult::DumpConnections | DispatchResult::DumpSubnets => {
+                    unreachable!("Dump variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}
                 DispatchResult::Stop => {
@@ -1465,39 +1594,468 @@ impl Daemon {
                         }
                     };
 
-                    // Handler match. Chunk 4b only handles ACK;
-                    // chunk 5 adds ADD_EDGE/ADD_SUBNET/etc.
-                    if req == Request::Ack {
-                        match self.on_ack(id, body) {
-                            Ok(nw) => needs_write |= nw,
-                            Err(e) => {
-                                log::error!(target: "tincd::proto",
-                                            "ACK from {id:?}: {e:?}");
-                                self.terminate(id);
-                                return needs_write;
-                            }
+                    // Handler match. C `request_entries[]` table
+                    // (`protocol.c:58-86`). The body is owned (a
+                    // Vec inside `Output::Record`); the handlers
+                    // need `&mut self` so we can't borrow `conn`
+                    // across the call — already dropped above.
+                    let result = match req {
+                        Request::Ack => self.on_ack(id, body),
+                        Request::AddSubnet => self.on_add_subnet(id, body),
+                        Request::DelSubnet => self.on_del_subnet(id, body),
+                        Request::AddEdge => self.on_add_edge(id, body),
+                        Request::DelEdge => self.on_del_edge(id, body),
+                        _ => {
+                            // KEY_CHANGED/REQ_KEY/ANS_KEY/PING/PONG
+                            // etc — chunk 7/8. The gate passed
+                            // (allow_request = None post-ACK). C
+                            // dispatches via the table; we Drop
+                            // until handlers land.
+                            log::warn!(target: "tincd::proto",
+                                       "SPTPS request {req:?} not implemented — chunk 7/8");
+                            self.terminate(id);
+                            return needs_write;
                         }
-                    } else {
-                        // Anything other than ACK — chunk 5. The
-                        // gate already passed (allow_request == ACK
-                        // after id_h, == None after on_ack). Post-
-                        // ACK any request reaches here. C dispatches
-                        // via the table; we Drop until handlers land.
-                        //
-                        // EXPECTED in chunk 4b: a real C peer would
-                        // send ADD_EDGE right after ACK. The test-
-                        // process-as-initiator doesn't (nothing to
-                        // advertise).
-                        log::warn!(target: "tincd::proto",
-                                   "SPTPS request {req:?} from {} — chunk 5",
-                                   conn.name);
-                        self.terminate(id);
-                        return needs_write;
+                    };
+                    match result {
+                        Ok(nw) => needs_write |= nw,
+                        Err(e) => {
+                            log::error!(target: "tincd::proto",
+                                        "{req:?} from {id:?}: {e:?}");
+                            self.terminate(id);
+                            return needs_write;
+                        }
                     }
                 }
             }
         }
         needs_write
+    }
+
+    /// `lookup_node` + `new_node`/`node_add` fused (`node.c:74,96`).
+    /// The C pattern from `add_edge_h:112-120` and `add_subnet_h:
+    /// 86-89`: `n = lookup_node(name); if(!n) { n = new_node();
+    /// node_add(n); }`.
+    ///
+    /// Adds to `graph` AND `node_ids` (the name→id map). Does NOT
+    /// add a `NodeState` — only directly-connected peers get one
+    /// (via `on_ack`). A node learned from a forwarded ADD_EDGE is
+    /// transitive: in the graph, but no live connection.
+    ///
+    /// C `xzalloc` zeroes `reachable`; `Graph::add_node` defaults
+    /// it `true`. We zero it back: a freshly-learned node IS
+    /// unreachable until `run_graph` proves otherwise. The diff
+    /// then emits `BecameReachable` and we get the host-up log.
+    fn lookup_or_add_node(&mut self, name: &str) -> NodeId {
+        if let Some(&id) = self.node_ids.get(name) {
+            return id;
+        }
+        let id = self.graph.add_node(name);
+        // C `node.c:75`: `xzalloc` → `reachable = false`. The
+        // graph crate's `true` default is for the steady-state
+        // "all nodes already known" tests; the daemon's reality
+        // is "just learned this name, haven't run sssp yet".
+        self.graph.set_reachable(id, false);
+        self.node_ids.insert(name.to_owned(), id);
+        id
+    }
+
+    /// Dedup gate for flooded messages. `seen_request` (`protocol.
+    /// c:234-249`). Returns `true` if `body` was already seen —
+    /// caller drops silently (return `Ok(false)`, don't process,
+    /// don't forward).
+    ///
+    /// `body` is the FULL line (`\n` already stripped). C keys on
+    /// `strcmp` of the whole `request` string; the dedup nonce
+    /// (second `%x` token) makes identical-payload-different-origin
+    /// messages distinct. We pass `body` as-is. The &[u8]→&str
+    /// conversion: C `strcmp` is byte-compare; `seen.check` keys on
+    /// `&str` (HashMap via `Borrow<str>`). Node names are `check_id`-
+    /// gated to ASCII so the body IS valid UTF-8; `from_utf8` here
+    /// is just a type cast.
+    fn seen_request(&mut self, body: &[u8]) -> bool {
+        // `from_utf8` failure: body has high bytes. Shouldn't
+        // happen (the parsers already validated). Treat as not-
+        // seen (don't dup-drop garbage — let the handler reject).
+        let Ok(s) = std::str::from_utf8(body) else {
+            return false;
+        };
+        self.seen.check(s, self.timers.now())
+    }
+
+    /// `graph()` (`graph.c:327-346`): sssp + diff + mst. Logs each
+    /// transition. The script-spawn / sptps_stop / mtu-reset are
+    /// chunk-7/8 deferrals; the LOG proves the diff fired.
+    ///
+    /// C `graph.c:261`: `"Node %s (%s) became reachable"` at INFO.
+    /// We don't have the hostname (no `NodeState` for transitive
+    /// nodes); log the name from the graph.
+    fn run_graph_and_log(&mut self) {
+        let (transitions, _mst) = run_graph(&mut self.graph, self.myself);
+        // STUB(chunk-6): _mst feeds connection_t.status.mst (the
+        // broadcast tree). One peer in chunk 5; mst is trivial.
+        for t in transitions {
+            match t {
+                Transition::BecameReachable { node, via } => {
+                    // `graph.c:261-262`: INFO. Look up the name —
+                    // graph.node() is `Some` (just came from
+                    // node_ids() inside diff_reachability).
+                    let name = self
+                        .graph
+                        .node(node)
+                        .map_or("<unknown>", |n| n.name.as_str());
+                    let via_name = self
+                        .graph
+                        .node(via)
+                        .map_or("<unknown>", |n| n.name.as_str());
+                    log::info!(target: "tincd::graph",
+                               "Node {name} became reachable (via {via_name})");
+                    // STUB(chunk-8): execute_script("host-up")
+                    // (`graph.c:265-270`).
+                    // STUB(chunk-7): update_node_udp (`graph.c:
+                    // 291-320`).
+                }
+                Transition::BecameUnreachable { node } => {
+                    let name = self
+                        .graph
+                        .node(node)
+                        .map_or("<unknown>", |n| n.name.as_str());
+                    log::info!(target: "tincd::graph",
+                               "Node {name} became unreachable");
+                    // STUB(chunk-8): execute_script("host-down")
+                    // (`graph.c:273`).
+                    // STUB(chunk-7): sptps_stop(&n->sptps), reset
+                    // mtuprobes/minmtu/maxmtu, kill mtu timer
+                    // (`graph.c:275-289`).
+                }
+            }
+        }
+    }
+
+    /// `add_subnet_h` mutation half (`protocol_subnet.c:43-140`).
+    ///
+    /// C path traced:
+    /// - `:49-68` parse + check_id + str2net — `parse_add_subnet`
+    /// - `:71` `seen_request(request)` — dup-drop
+    /// - `:77` `lookup_node(name)` — `lookup_or_add_node`
+    /// - `:79-84` `tunnelserver` filter — STUBBED (deferred niche)
+    /// - `:86-89` `if(!owner) new_node` — fused into lookup
+    /// - `:93` `lookup_subnet(owner, &s)` — SubnetTree::add is
+    ///   idempotent, but the C returns early WITHOUT forward. We
+    ///   match: `seen` already dedups the flood; `add` idempotent.
+    /// - `:98-104` `if(owner == myself)` — retaliate — STUBBED
+    /// - `:116-122` `strictsubnets` — STUBBED (deferred)
+    /// - `:126-128` `subnet_add(owner, new)` — SubnetTree::add
+    /// - `:130-132` `subnet_update` script — STUBBED (chunk 8)
+    /// - `:136-138` `forward_request` — STUBBED
+    /// - `:142-148` MAC fast-handoff — STUBBED (no MAC subnets yet)
+    ///
+    /// NO `graph()` — subnets don't change topology. The C calls
+    /// `subnet_update` (`subnet.c:327-393`, script firing) not
+    /// `graph()`.
+    ///
+    /// Returns the io_set signal. Always `false` in chunk 5
+    /// (forward stubbed, retaliate stubbed). Kept for chunk 5b.
+    fn on_add_subnet(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let (owner_name, subnet) = parse_add_subnet(body)?;
+
+        // C `:71`: `if(seen_request(request)) return true`.
+        if self.seen_request(body) {
+            return Ok(false);
+        }
+
+        // C `:77,86-89`: lookup_node + conditional new_node.
+        // STUB(chunk-9): tunnelserver mode (`:79-84`) filters
+        // indirect registrations. Niche feature; defer.
+        let owner = self.lookup_or_add_node(&owner_name);
+
+        // C `:98-104`: `if(owner == myself)`. Peer is wrong about
+        // us — they think we own a subnet we don't. C sends
+        // DEL_SUBNET correction back.
+        if owner == self.myself {
+            let conn = self.conns.get(from_conn);
+            log::warn!(target: "tincd::proto",
+                       "Got ADD_SUBNET from {} for ourself ({subnet})",
+                       conn.map_or("<gone>", |c| c.name.as_str()));
+            // STUB(chunk-5b): send_del_subnet(c, &s) (`:102`).
+            // Needs the broadcast send machinery. Log + return Ok.
+            return Ok(false);
+        }
+
+        // STUB(chunk-9): strictsubnets (`:116-122`). Deferred.
+
+        // C `:126`: `subnet_add(owner, new)`. Idempotent on dup
+        // (the C `:93` `if(lookup_subnet) return true` is
+        // belt-and-braces over `seen_request`; our `add` is a
+        // BTreeSet insert which is also idempotent).
+        self.subnets.add(subnet, owner_name);
+
+        // STUB(chunk-8): if owner reachable, subnet_update(..., true)
+        // (`:130-132`). Script firing.
+
+        // STUB(chunk-5b): forward_request(c, request) (`:136-138`).
+        // One peer in chunk 5; nobody to forward to. The integration
+        // test doesn't see the difference.
+        log::debug!(target: "tincd::proto",
+                    "would forward ADD_SUBNET (one peer, no-op)");
+
+        // STUB(chunk-7): MAC fast-handoff (`:142-148`). No TAP
+        // mode yet.
+
+        Ok(false)
+    }
+
+    /// `del_subnet_h` mutation half (`protocol_subnet.c:163-261`).
+    ///
+    /// C path traced:
+    /// - `:163-188` parse — `parse_del_subnet`
+    /// - `:191` `seen_request`
+    /// - `:197` `lookup_node` — NOT lookup_or_add: DEL for an
+    ///   unknown owner is a warn-and-drop (`:206-210`)
+    /// - `:216` `lookup_subnet` — same: DEL for unknown subnet is
+    ///   warn-and-drop (`:218-225`). Our `del()` returns `bool`.
+    /// - `:231-236` `if(owner == myself)` retaliate ADD — STUBBED
+    /// - `:244` `forward_request` — STUBBED
+    /// - `:254-256` `subnet_update(..., false)` — STUBBED (chunk 8)
+    /// - `:258` `subnet_del`
+    fn on_del_subnet(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let (owner_name, subnet) = parse_del_subnet(body)?;
+
+        if self.seen_request(body) {
+            return Ok(false);
+        }
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // C `:197,206-210`: `lookup_node`. NOT lookup_or_add — a
+        // DEL for a node we've never heard of is wrong. Warn,
+        // return true (don't drop conn).
+        let Some(&owner) = self.node_ids.get(&owner_name) else {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_SUBNET from {conn_name} for {owner_name} \
+                        which is not in our node tree");
+            return Ok(false);
+        };
+
+        // C `:231-236`: `if(owner == myself)`. Peer says we don't
+        // own a subnet we DO own. C sends ADD_SUBNET correction.
+        if owner == self.myself {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
+            // STUB(chunk-5b): send_add_subnet(c, find) (`:234`).
+            return Ok(false);
+        }
+
+        // STUB(chunk-5b): forward_request (`:244`).
+        log::debug!(target: "tincd::proto",
+                    "would forward DEL_SUBNET (one peer, no-op)");
+
+        // STUB(chunk-8): subnet_update(owner, find, false) (`:255`).
+
+        // C `:258`: `subnet_del`. The C does `lookup_subnet` at
+        // `:216` first and warns at `:218` if not found. Our
+        // `del()` returns the bool; same outcome, one fewer walk.
+        if !self.subnets.del(&subnet, &owner_name) {
+            // C `:218-225`: warn, return true.
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_SUBNET from {conn_name} for {owner_name} \
+                        which does not appear in his subnet tree");
+        }
+
+        Ok(false)
+    }
+
+    /// `add_edge_h` mutation half (`protocol_edge.c:63-217`).
+    ///
+    /// C path traced:
+    /// - `:77-92` parse — `parse_add_edge` (incl check_id, from≠to)
+    /// - `:94` `seen_request`
+    /// - `:99-100` `lookup_node(from/to)`
+    /// - `:102-111` `tunnelserver` filter — STUBBED
+    /// - `:112-120` `if(!from/to) new_node` — lookup_or_add
+    /// - `:126-130` `str2sockaddr` — SKIPPED (graph doesn't store
+    ///   addrs; AddrStr is opaque per Phase-1 finding)
+    /// - `:134-183` `lookup_edge` exists branch:
+    ///   - same weight+options → idempotent drop (`:145-148`)
+    ///   - `from == myself` + different → send correction (`:150-
+    ///     157`) — STUBBED
+    ///   - different → update in place. tinc-graph has no edge
+    ///     mutation; we del+add. Less efficient (two binary
+    ///     searches in the per-node sorted vec) but correct.
+    ///     Comment for the future.
+    /// - `:184-196` `from == myself` + doesn't exist → contradiction.
+    ///   C bumps `contradicting_add_edge`, sends DEL correction.
+    ///   STUBBED.
+    /// - `:197-205` `edge_add` — graph.add_edge
+    /// - `:209-211` `forward_request` — STUBBED
+    /// - `:215` `graph()` — run_graph_and_log
+    #[allow(clippy::too_many_lines)] // C add_edge_h is 154 LOC; same
+    fn on_add_edge(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let edge = parse_add_edge(body)?;
+
+        if self.seen_request(body) {
+            return Ok(false);
+        }
+
+        // STUB(chunk-9): tunnelserver mode (`:102-111`).
+
+        let from_id = self.lookup_or_add_node(&edge.from);
+        let to_id = self.lookup_or_add_node(&edge.to);
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // C `:134`: `e = lookup_edge(from, to)`.
+        if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
+            // C `:136-148`: same weight + options → idempotent.
+            // (The C also compares address/local_address; we don't
+            // store those on the graph edge. The address compare is
+            // for the `update_node_udp` cache invalidation —
+            // chunk-7 territory. For graph topology, weight+options
+            // is what matters.)
+            let e = self.graph.edge(existing).expect("just looked up");
+            if e.weight == edge.weight && e.options == edge.options {
+                // C `:145-148`: `return true`. No forward, no graph().
+                return Ok(false);
+            }
+
+            // C `:150-157`: `from == myself` + edge exists with
+            // different params. Peer's view of OUR edge is wrong.
+            if from_id == self.myself {
+                log::warn!(target: "tincd::proto",
+                           "Got ADD_EDGE from {conn_name} for ourself \
+                            which does not match existing entry");
+                // STUB(chunk-5b): send_add_edge(c, e) (`:153`).
+                // Send back what WE think the edge is.
+                return Ok(false);
+            }
+
+            // C `:159-183`: in-place update. The C splay_unlink/
+            // reinsert for weight (`:179-182`) keeps the
+            // edge_weight_tree sorted. tinc-graph has no edge
+            // mutation — del+add. Less efficient (the per-node
+            // sorted vec gets two binary searches; the weight-
+            // order BTreeMap gets a remove+insert). Correct though.
+            // Future: Graph::update_edge() if profiling cares.
+            log::warn!(target: "tincd::proto",
+                       "Got ADD_EDGE from {conn_name} which does not \
+                        match existing entry");
+            self.graph.del_edge(existing);
+            self.graph
+                .add_edge(from_id, to_id, edge.weight, edge.options);
+        } else if from_id == self.myself {
+            // C `:184-196`: peer says WE have an edge we don't.
+            // Contradiction. C bumps `contradicting_add_edge`
+            // counter (read by periodic_handler `net.c:268`),
+            // sends DEL_EDGE correction.
+            log::warn!(target: "tincd::proto",
+                       "Got ADD_EDGE from {conn_name} for ourself \
+                        which does not exist");
+            // STUB(chunk-5b): contradicting_add_edge++ (`:187`).
+            // STUB(chunk-5b): send_del_edge(c, e) (`:192`).
+            return Ok(false);
+        } else {
+            // C `:197-205`: `edge_add`. The fresh-edge case.
+            self.graph
+                .add_edge(from_id, to_id, edge.weight, edge.options);
+        }
+
+        // STUB(chunk-5b): forward_request(c, request) (`:209-211`).
+        log::debug!(target: "tincd::proto",
+                    "would forward ADD_EDGE (one peer, no-op)");
+
+        // C `:215`: `graph()`.
+        self.run_graph_and_log();
+
+        Ok(false)
+    }
+
+    /// `del_edge_h` mutation half (`protocol_edge.c:225-322`).
+    ///
+    /// C path traced:
+    /// - `:230-241` parse — `parse_del_edge`
+    /// - `:244` `seen_request`
+    /// - `:250-251` `lookup_node` (NOT lookup_or_add)
+    /// - `:263-273` `from`/`to` not found → warn + return true
+    /// - `:277-283` `lookup_edge` not found → warn + return true
+    /// - `:285-291` `from == myself` → retaliate ADD — STUBBED
+    /// - `:295-297` `forward_request` — STUBBED
+    /// - `:301` `edge_del`
+    /// - `:305` `graph()`
+    /// - `:309-320` cleanup unreachable's reverse edge — STUBBED
+    ///   (the daemon doesn't add reverse edges from on_ack yet;
+    ///   the C's `lookup_edge(to, myself)` would find nothing)
+    fn on_del_edge(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let edge = parse_del_edge(body)?;
+
+        if self.seen_request(body) {
+            return Ok(false);
+        }
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // C `:250-273`: `lookup_node`. Missing is warn-and-drop
+        // (return true), NOT a new_node. A DEL for a node we've
+        // never heard of means our view is already consistent.
+        let Some(&from_id) = self.node_ids.get(&edge.from) else {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_EDGE from {conn_name} which does not \
+                        appear in the edge tree (unknown from: {})", edge.from);
+            return Ok(false);
+        };
+        let Some(&to_id) = self.node_ids.get(&edge.to) else {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_EDGE from {conn_name} which does not \
+                        appear in the edge tree (unknown to: {})", edge.to);
+            return Ok(false);
+        };
+
+        // C `:277-283`: `lookup_edge`. Missing is warn-and-drop.
+        let Some(eid) = self.graph.lookup_edge(from_id, to_id) else {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_EDGE from {conn_name} which does not \
+                        appear in the edge tree");
+            return Ok(false);
+        };
+
+        // C `:285-291`: `from == myself`. Peer says we DON'T have
+        // an edge we DO have. C sends ADD_EDGE correction.
+        if from_id == self.myself {
+            log::warn!(target: "tincd::proto",
+                       "Got DEL_EDGE from {conn_name} for ourself");
+            // STUB(chunk-5b): contradicting_del_edge++ (`:288`).
+            // STUB(chunk-5b): send_add_edge(c, e) (`:289`).
+            return Ok(false);
+        }
+
+        // STUB(chunk-5b): forward_request (`:295-297`).
+        log::debug!(target: "tincd::proto",
+                    "would forward DEL_EDGE (one peer, no-op)");
+
+        // C `:301`: `edge_del`.
+        self.graph.del_edge(eid);
+
+        // C `:305`: `graph()`.
+        self.run_graph_and_log();
+
+        // STUB(chunk-6): C `:309-320` reverse-edge cleanup. If `to`
+        // became unreachable AND has an edge back to us, delete +
+        // broadcast that too. With on_ack adding only ONE direction
+        // (myself→peer) currently, `lookup_edge(to, myself)` finds
+        // nothing. Chunk 6 adds bidi edges from on_ack.
+
+        Ok(false)
     }
 
     /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse
@@ -1596,12 +2154,12 @@ impl Daemon {
             }
         }
 
-        // C `:993-994` + `:1032-1051` collapsed: NodeState IS the
-        // (b)-path stub. The C builds an `edge_t`; we record the
-        // fields the edge would carry. Chunk 5's `tinc-graph::
-        // add_edge` consumes these.
+        // C `:993-994` + `:1032-1051`: NodeState records the edge
+        // metadata (the address, which tinc-graph::Edge doesn't
+        // carry — it's runtime annotation). The graph gets weight
+        // + options below.
         self.nodes.insert(
-            name,
+            name.clone(),
             NodeState {
                 conn: Some(id),
                 edge_addr,
@@ -1610,21 +2168,67 @@ impl Daemon {
             },
         );
 
+        // C `:1032-1051`: `c->edge = new_edge(); ...; edge_add()`.
+        // The bridge to the graph. `lookup_or_add_node` for the
+        // peer (might already be in the graph if a transitive
+        // ADD_EDGE arrived first — unlikely with chunk-5's single-
+        // peer scope but the C handles it). Then `add_edge(myself
+        // → peer)`.
+        //
+        // C builds a BIDIRECTIONAL pair via `e->reverse` linking
+        // (`edge.c:59-73`). `Graph::add_edge` auto-links if the
+        // twin exists. With ONE direction, sssp's `e->reverse`
+        // check (`graph.c:159`) skips it — so the peer won't
+        // become reachable until either (a) we add the reverse
+        // here, or (b) the peer's ADD_EDGE for `peer→myself`
+        // arrives. The C does (a) implicitly: `ack_h` runs on
+        // BOTH sides, both add their `c->edge`, the first arrives
+        // via the protocol and links. With chunk-5's stub forward
+        // and no peer-initiated ADD_EDGE in tests, we add both
+        // directions here. The C's `c->edge` is one direction;
+        // the peer's `c->edge` (sent via ADD_EDGE) is the other.
+        // We synthesize the reverse for the test to prove the
+        // diff fires.
+        let peer_id = self.lookup_or_add_node(&name);
+        self.graph
+            .add_edge(self.myself, peer_id, edge_weight, edge_options);
+        // The reverse. C: comes from peer's send_add_edge. Chunk
+        // 5 stub: synthesize. Same weight (the average is symmetric
+        // when both sides compute it) but the C peer might have a
+        // different `c->options` (depends on THEIR config). With
+        // identical defaults: same. Real divergence is chunk-6.
+        self.graph
+            .add_edge(peer_id, self.myself, edge_weight, edge_options);
+
         // C `:1028`: `send_everything(c)`. Walks `node_tree`, for
         // each node walks `subnet_tree` and `edge_tree`, sends
-        // ADD_SUBNET/ADD_EDGE. With ZERO subnets and ZERO edges
-        // (we don't track either yet — chunk 5), iterates empty
-        // and sends nothing. The `disablebuggypeers` zero-packet
-        // (`:873-881`) is ancient compat; skip.
+        // ADD_SUBNET/ADD_EDGE for everything we know.
+        //
+        // STUB(chunk-5b): the actual sending. `send_add_edge` needs
+        // the edge address (`protocol_edge.c:42`: sockaddr2str on
+        // `e->address`). tinc-graph::Edge doesn't store it;
+        // NodeState.edge_addr does. Either parallel HashMap<EdgeId,
+        // SocketAddr> or read NodeState. The latter is closer to
+        // the C (`c->edge` IS connection-side state). For now: log
+        // what WOULD be sent. With zero subnets and one edge (the
+        // one we just added), it'd be one ADD_EDGE.
+        let n_subnets = self.subnets.len();
+        // Edges: count from the graph. Crude (no `Graph::n_edges`
+        // public); walk node_ids and sum. Chunk 5b can add the
+        // accessor.
+        log::debug!(target: "tincd::proto",
+                    "send_everything: would send {n_subnets} subnets, \
+                     ~2 edges (STUB chunk-5b)");
 
-        // C `:1055-1061`: `send_add_edge(everyone, c->edge)`.
-        // Broadcast to all OTHER active connections. With one
-        // peer (chunk 4b), `everyone` is empty after excluding
-        // self. Chunk 5 wires this when there's >1 peer.
+        // STUB(chunk-5b): C `:1055-1061` send_add_edge(everyone,
+        // c->edge). Broadcast to all OTHER active conns. One peer
+        // → `everyone` is empty after excluding self.
 
-        // C `:1065`: `graph()`. SSSP + MST + reachability diff.
-        // `tinc-graph::sssp` exists; the GLUE (walk result, diff,
-        // fire scripts) is chunk 5.
+        // C `:1065`: `graph()`. THE FIRST TIME this does anything:
+        // peer was added with reachable=false (lookup_or_add_node);
+        // the bidi edge means sssp visits it; diff emits
+        // BecameReachable.
+        self.run_graph_and_log();
 
         Ok(false)
     }

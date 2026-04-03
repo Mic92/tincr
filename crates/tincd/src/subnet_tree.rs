@@ -396,6 +396,22 @@ impl SubnetTree {
         last_hit
     }
 
+    /// `for splay_each(subnet_t, subnet, &subnet_tree)` (`subnet.c:
+    /// 396`). All families, in C-splay-order: v4 first (descending
+    /// prefix), then v6, then MAC. The C has ONE tree interleaved
+    /// by `subnet_compare`'s `a->type - b->type` first key (`subnet_
+    /// parse.c:185-192`); we have three trees and chain. Same
+    /// ordering: type discriminant ascending (V4=1, V6=2, MAC=0 in
+    /// the C enum — wait, the C enum is `MAC=0, V4=1, V6=2`, so
+    /// MAC sorts FIRST). Match: mac, v4, v6.
+    pub fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
+        self.mac
+            .iter()
+            .map(|k| (&k.subnet, k.owner.as_str()))
+            .chain(self.ipv4.iter().map(|k| (&k.subnet, k.owner.as_str())))
+            .chain(self.ipv6.iter().map(|k| (&k.subnet, k.owner.as_str())))
+    }
+
     /// Total entry count across all three families. For `dump
     /// subnets` and tests.
     #[must_use]
@@ -719,6 +735,25 @@ mod tests {
         t.add(sn("10.0.0.0/24"), "n".into());
         t.add(sn("10.0.0.0/24"), "n".into());
         assert_eq!(t.len(), 1);
+    }
+
+    /// `iter()` walks in C-splay-order: type discriminant first
+    /// (MAC=0, V4=1, V6=2 in `subnet.h:39-43`), then per-family
+    /// comparator. `dump_subnets` (`subnet.c:395-410`) walks this
+    /// way. The CLI doesn't depend on order but matching C makes
+    /// diffing dump output easy.
+    #[test]
+    fn iter_order_matches_c_splay() {
+        let mut t = SubnetTree::new();
+        t.add(sn("10.0.0.0/8"), "broad".into());
+        t.add(sn("10.1.0.0/16"), "narrow".into());
+        t.add(sn("2001:db8::/32"), "v6".into());
+        t.add(sn("aa:bb:cc:dd:ee:ff"), "mac".into());
+
+        let owners: Vec<&str> = t.iter().map(|(_, o)| o).collect();
+        // MAC first (type=0), then V4 by descending prefix (/16
+        // before /8), then V6.
+        assert_eq!(owners, vec!["mac", "narrow", "broad", "v6"]);
     }
 
     /// Three families, three trees, no crosstalk.
