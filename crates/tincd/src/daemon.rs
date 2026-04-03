@@ -1046,6 +1046,18 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Node name for logging. tincd never calls `Graph::del_node`
+    /// (only `del_edge`; nodes accumulate monotonically), so any
+    /// `NodeId` obtained from `node_ids`, `id6_table`, `last_routes`,
+    /// or an `Edge`'s endpoints is always live. The `<gone>`
+    /// fallback never fires — it exists because `Graph::node`
+    /// returns `Option` (the graph crate doesn't know tincd's
+    /// monotonic-node usage). Helper consolidates 11 callsites that
+    /// previously open-coded the `map_or`.
+    pub(super) fn node_log_name(&self, nid: NodeId) -> &str {
+        self.graph.node(nid).map_or("<gone>", |n| n.name.as_str())
+    }
+
     /// `setup_network` (`net_setup.c:1235-1275`) + `init_control` +
     /// the parts of `setup_myself` we need (`net_setup.c:770-1100`).
     /// Heavily abridged: no listen sockets, no graph, no node tree.

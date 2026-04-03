@@ -1132,19 +1132,13 @@ impl Daemon {
                        "Got SPTPS_PACKET for {dst_id} from unknown src {src_id}");
             return false;
         };
-        let from_name = self
-            .graph
-            .node(from_nid)
-            .map_or("<gone>", |n| n.name.as_str())
-            .to_owned();
+        // `from_nid` from id6_table THIS turn; nodes never deleted.
+        let from_name = self.node_log_name(from_nid).to_owned();
 
         // ─── :640-644: reachable check ───────────────────────────
         // Race vs DEL_EDGE. C `:644 return true`.
         if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
-            let to_name = self
-                .graph
-                .node(to_nid)
-                .map_or("<gone>", |n| n.name.as_str());
+            let to_name = self.node_log_name(to_nid);
             log::warn!(target: "tincd::net",
                        "Got SPTPS_PACKET from {from_name} for {to_name} \
                         which is unreachable");
@@ -1170,11 +1164,7 @@ impl Daemon {
         // through a tunnel that hasn't keyed yet (would just buffer
         // and stall). C `:659`: `try_tx(to, true)` always.
         if to_nid != self.myself {
-            let to_name = self
-                .graph
-                .node(to_nid)
-                .map_or("<gone>", |n| n.name.as_str())
-                .to_owned();
+            let to_name = self.node_log_name(to_nid).to_owned();
             let validkey = self.tunnels.get(&to_nid).is_some_and(|t| t.status.validkey);
             if validkey {
                 log::debug!(target: "tincd::net",

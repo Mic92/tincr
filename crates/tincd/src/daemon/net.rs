@@ -251,11 +251,8 @@ impl Daemon {
                         "Received UDP packet from unknown source ID {src_id} ({peer:?})");
             return;
         };
-        let from_name = self
-            .graph
-            .node(from_nid)
-            .map_or("<gone>", |n| n.name.as_str())
-            .to_owned();
+        // `from_nid` from id6_table THIS turn; nodes never deleted.
+        let from_name = self.node_log_name(from_nid).to_owned();
 
         // C `:1786-1821`: `if(!memcmp(dst, nullid)) { direct=true;
         // from=n; to=myself } else { from=lookup(src); to=lookup(
@@ -297,11 +294,7 @@ impl Daemon {
                                  sender ({peer:?}): dst={dst_id} src={src_id}");
                     return;
                 }
-                let to_name = self
-                    .graph
-                    .node(to_nid)
-                    .map_or("<gone>", |n| n.name.as_str())
-                    .to_owned();
+                let to_name = self.node_log_name(to_nid).to_owned();
                 log::debug!(target: "tincd::net",
                             "Relaying UDP packet from {from_name} to {to_name} \
                              ({} bytes)", ct.len());
@@ -1866,12 +1859,16 @@ impl Daemon {
             }
 
             let b64 = tinc_crypto::b64::encode(ct);
+            // `from_nid` passed by caller; nodes never deleted.
+            // Direct graph access (not `node_log_name`) because
+            // `conn` holds `&mut self.conns` across this block.
             let from_name = if from_is_myself {
                 self.name.clone()
             } else {
                 self.graph
                     .node(from_nid)
-                    .map_or_else(|| "<gone>".to_owned(), |n| n.name.clone())
+                    .map_or("<gone>", |n| n.name.as_str())
+                    .to_owned()
             };
 
             if record_type == tinc_sptps::REC_HANDSHAKE {
@@ -1973,11 +1970,9 @@ impl Daemon {
             // here, NOT per-packet. Previous code did `to_owned()`
             // unconditionally — a String alloc per packet, never
             // read once `udp_confirmed`.
-            let relay_name = self
-                .graph
-                .node(relay_nid)
-                .map_or("<gone>", |n| n.name.as_str())
-                .to_owned();
+            // `relay_nid` from `last_routes` (via/nexthop). Nodes
+            // never deleted; sssp result NodeIds stay valid.
+            let relay_name = self.node_log_name(relay_nid).to_owned();
             let Some((addr, sock)) = self.choose_udp_address(relay_nid, &relay_name) else {
                 log::debug!(target: "tincd::net",
                             "No UDP address known for relay {relay_name}; dropping");
@@ -2012,6 +2007,8 @@ impl Daemon {
                     // `relay_name` only on the EMSGSIZE path
                     // (rare — PMTU discovery edge). Format
                     // lazily; the hot path never reaches here.
+                    // Direct graph access: `p` holds `&mut
+                    // self.tunnels` across the loop.
                     let relay_name = self
                         .graph
                         .node(relay_nid)
@@ -2021,10 +2018,7 @@ impl Daemon {
                     }
                 }
             } else {
-                let relay_name = self
-                    .graph
-                    .node(relay_nid)
-                    .map_or("<gone>", |n| n.name.as_str());
+                let relay_name = self.node_log_name(relay_nid);
                 log::warn!(target: "tincd::net",
                                "Error sending UDP SPTPS packet to \
                                 {relay_name}: {e}");

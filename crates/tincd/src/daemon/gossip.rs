@@ -195,11 +195,13 @@ impl Daemon {
         let msg = ReqKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // C `:293-299`: `from = lookup_node(from_name)`. NOT
         // lookup_or_add: a REQ_KEY from an unknown node is an error
@@ -542,11 +544,13 @@ impl Daemon {
         let msg = AnsKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // C `:444-460`: `from = lookup_node`; `to = lookup_node`.
         let Some(&from_nid) = self.node_ids.get(&msg.from) else {
@@ -1352,11 +1356,10 @@ impl Daemon {
         // unordered set and sorts client-side. See `edge_iter()`
         // doc comment.
         for (eid, e) in self.graph.edge_iter() {
-            let from = self
-                .graph
-                .node(e.from)
-                .map_or("<gone>", |n| n.name.as_str());
-            let to = self.graph.node(e.to).map_or("<gone>", |n| n.name.as_str());
+            // Edge endpoints: live (tincd never del_node's; edges
+            // never point at freed slots).
+            let from = self.node_log_name(e.from);
+            let to = self.node_log_name(e.to);
 
             // C `:126-127`: `sockaddr2hostname(&e->address)` /
             // `sockaddr2hostname(&e->local_address)`. Our
@@ -1437,10 +1440,13 @@ impl Daemon {
         // filter (`:79`). Even if we're going to drop, mark it seen
         // so a dup from another conn doesn't get re-processed.
         if self.settings.tunnelserver {
+            // `from_conn` came from dispatch THIS turn; live.
             let conn_name = self
                 .conns
                 .get(from_conn)
-                .map_or("<gone>", |c| c.name.as_str());
+                .expect("dispatched from live conn")
+                .name
+                .as_str();
             if owner_name != self.name && owner_name != conn_name {
                 log::warn!(target: "tincd::proto",
                            "Ignoring indirect ADD_SUBNET from {conn_name} \
@@ -1470,11 +1476,13 @@ impl Daemon {
         // us — they think we own a subnet we don't. C sends
         // DEL_SUBNET correction back.
         if owner == self.myself {
+            // `from_conn` came from dispatch THIS turn; live.
             let conn_name = self
                 .conns
                 .get(from_conn)
-                .map_or("<gone>", |c| c.name.as_str())
-                .to_owned();
+                .expect("dispatched from live conn")
+                .name
+                .clone();
             log::warn!(target: "tincd::proto",
                        "Got ADD_SUBNET from {conn_name} for ourself ({subnet})");
             // C `:103`: `send_del_subnet(c, &s)`. Retaliate: tell
@@ -1599,11 +1607,13 @@ impl Daemon {
             return Ok(false);
         }
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // C `:199-204`: tunnelserver indirect filter. Drop if owner
         // is neither us nor the direct peer. ORDER: seen_request
@@ -1756,11 +1766,13 @@ impl Daemon {
             return Ok(false);
         }
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // C `protocol_edge.c:103-111`: tunnelserver indirect filter.
         // Drop only if NEITHER endpoint is us-or-direct-peer. If
@@ -1926,11 +1938,13 @@ impl Daemon {
             return Ok(false);
         }
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // C `protocol_edge.c:253-261`: tunnelserver indirect filter.
         // Same dual-endpoint shape as ADD_EDGE. BEFORE lookup (which

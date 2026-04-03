@@ -269,11 +269,8 @@ impl Daemon {
             }
         }
 
-        let target_name = self
-            .graph
-            .node(target)
-            .map_or("<gone>", |n| n.name.as_str())
-            .to_owned();
+        // `target` from caller; nodes never deleted in tincd.
+        let target_name = self.node_log_name(target).to_owned();
 
         // ─── try_udp (`:1502` → `:1200-1246`) ────────────────────
         let mut nw = self.try_udp(target, &target_name, now);
@@ -1101,11 +1098,13 @@ impl Daemon {
         let parsed = UdpInfo::parse(body_str)
             .map_err(|_| DispatchError::BadKey("UDP_INFO parse failed".into()))?;
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         // Build `FromState`. `None` → `lookup_node(from)` failed.
         let from_nid = self.node_ids.get(&parsed.from).copied();
@@ -1195,11 +1194,13 @@ impl Daemon {
         let parsed = MtuInfo::parse(body_str)
             .map_err(|_| DispatchError::BadKey("MTU_INFO parse failed".into()))?;
 
+        // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self
             .conns
             .get(from_conn)
-            .map_or("<gone>", |c| c.name.as_str())
-            .to_owned();
+            .expect("dispatched from live conn")
+            .name
+            .clone();
 
         let from_nid = self.node_ids.get(&parsed.from).copied();
         let from_mtu = from_nid.map(|nid| {
