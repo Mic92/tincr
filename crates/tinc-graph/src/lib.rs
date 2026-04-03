@@ -386,6 +386,45 @@ impl Graph {
         Some(())
     }
 
+    /// `protocol_edge.c:162-182`: in-place edge update. The C mutates
+    /// `e->options` directly and re-links `edge_weight_tree` only if
+    /// weight changed (weight is the sort key there). It does *not*
+    /// touch `from->edge_tree` — `edge_compare` (`edge.c:53-55`) keys
+    /// on `to->name` alone, so a weight change doesn't break the
+    /// per-node index. We do the same: mutate the slot, re-key
+    /// `weight_order` if weight moved, leave `from.edges` untouched.
+    ///
+    /// Returns `None` if the slot is freed (stale `EdgeId`).
+    ///
+    /// **Why this exists** when del+add already works (`daemon.rs:1946`):
+    /// `EdgeId` stability. del+add recycles the slot — same index, but
+    /// any parallel table keyed on `EdgeId` (e.g. the floated
+    /// `HashMap<EdgeId, EdgeAddr>` for `e->address`, `daemon.rs:2210`)
+    /// would see a delete+insert. `update_edge` is one slot write; the
+    /// ID is the same handle before and after.
+    ///
+    /// # Panics
+    /// If the edge is live but its `from` node is freed, or its
+    /// `weight_order` entry is missing. Arena invariants.
+    pub fn update_edge(&mut self, e: EdgeId, weight: i32, options: u32) -> Option<()> {
+        let edge = self.edges[e.0 as usize].as_mut()?;
+        edge.options = options;
+        if edge.weight == weight {
+            return Some(());
+        }
+        // Weight changed: re-key `weight_order`. Same shape as the C's
+        // `splay_unlink`/`splay_insert_node` pair (protocol_edge.c:179-181).
+        let old_weight = edge.weight;
+        edge.weight = weight;
+        let to_name = edge.to_name.clone();
+        let from_name = slot!(self.nodes, edge.from).name.clone();
+        self.weight_order
+            .remove(&(old_weight, from_name.clone(), to_name.clone()))
+            .expect("edge in weight_order");
+        self.weight_order.insert((weight, from_name, to_name), e);
+        Some(())
+    }
+
     /// `edge.c:114-121` `lookup_edge`. Find the edge `from → to` if
     /// it exists. The C searches `from->edge_tree` keyed on `to->name`.
     #[must_use]
@@ -430,6 +469,27 @@ impl Graph {
         (0..u32::try_from(self.nodes.len()).unwrap())
             .filter(|&i| self.nodes[i as usize].is_some())
             .map(NodeId)
+    }
+
+    /// `edge.c:123-137` `dump_edges`. The C does a nested walk —
+    /// `splay_each(node_tree)` outer (alphabetical by node name),
+    /// `splay_each(edge_tree)` inner (alphabetical by `to->name`). We
+    /// have a flat slab; this yields slot order (insertion-then-recycle).
+    ///
+    /// **Order divergence is intentional**: `tincctl.c` reads dump rows
+    /// into an unordered set and the CLI sorts client-side before
+    /// display. The wire format is one edge per line, no inter-row
+    /// dependency. Slab order is one pass over `Vec<Option<Edge>>`,
+    /// no per-node indirection.
+    ///
+    /// Each direction is its own `Edge` (the C has separate `edge_t`s
+    /// for `a→b` and `b→a`), so a bidi link yields two items here —
+    /// matches `dump_edges`' per-direction `send_request`.
+    pub fn edge_iter(&self) -> impl Iterator<Item = (EdgeId, &Edge)> + '_ {
+        self.edges.iter().enumerate().filter_map(|(i, slot)| {
+            #[allow(clippy::cast_possible_truncation)] // slab is u32-bounded
+            slot.as_ref().map(|e| (EdgeId(i as u32), e))
+        })
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -882,6 +942,92 @@ mod tests {
         g.del_node(b).unwrap();
         let live: Vec<_> = g.node_ids().collect();
         assert_eq!(live, vec![a, c]);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // edge_iter + update_edge
+
+    #[test]
+    fn edge_iter_skips_freed_slots() {
+        let (mut g, _, [_, _, bc, ..]) = triangle();
+        assert_eq!(g.edge_iter().count(), 6);
+        g.del_edge(bc).unwrap();
+        let live: Vec<_> = g.edge_iter().map(|(id, _)| id).collect();
+        assert_eq!(live.len(), 5);
+        assert!(!live.contains(&bc));
+    }
+
+    #[test]
+    fn edge_iter_yields_recycled_slot() {
+        // Slot order, not insertion order: a recycled slot reappears
+        // at its original index, not at the end.
+        let (mut g, [a, _, c], [_, _, bc, ..]) = triangle();
+        g.del_edge(bc).unwrap();
+        assert_eq!(g.edge_iter().count(), 5);
+        let new = g.add_edge(c, a, 99, 0); // recycles bc's slot
+        assert_eq!(new, bc);
+        let ids: Vec<_> = g.edge_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids.len(), 6);
+        // Slot 2 is back, with the new payload.
+        let (_, e) = g.edge_iter().find(|&(id, _)| id == bc).unwrap();
+        assert_eq!(e.weight, 99);
+    }
+
+    #[test]
+    fn update_edge_preserves_id() {
+        // The whole point: same EdgeId handle before and after.
+        // Contrast with del+add which recycles (same index, but
+        // semantically a delete-then-insert).
+        let (mut g, [a, b, _], [ab, ..]) = triangle();
+        assert_eq!(g.lookup_edge(a, b), Some(ab));
+        g.update_edge(ab, 999, OPTION_INDIRECT).unwrap();
+        // Same ID still resolves via the per-node index (which is
+        // keyed on to_name, not weight — edge.c:53-55).
+        assert_eq!(g.lookup_edge(a, b), Some(ab));
+        let e = g.edge(ab).unwrap();
+        assert_eq!(e.weight, 999);
+        assert_eq!(e.options, OPTION_INDIRECT);
+    }
+
+    #[test]
+    fn update_edge_on_deleted_is_none() {
+        let (mut g, _, [ab, ..]) = triangle();
+        g.del_edge(ab).unwrap();
+        assert_eq!(g.update_edge(ab, 1, 0), None);
+    }
+
+    #[test]
+    fn update_edge_same_weight_is_noop_on_weight_order() {
+        // protocol_edge.c:178: the splay unlink/reinsert is gated on
+        // `e->weight != weight`. Options-only update mustn't churn
+        // weight_order. Observable via mst (which walks weight_order).
+        let (mut g, _, [ab, ..]) = triangle();
+        let before = g.mst();
+        g.update_edge(ab, 10, OPTION_INDIRECT).unwrap(); // same weight
+        assert_eq!(g.edge(ab).unwrap().options, OPTION_INDIRECT);
+        assert_eq!(g.mst(), before);
+    }
+
+    #[test]
+    fn update_edge_changes_mst_result() {
+        // Triangle: ab=10, bc=20, ac=30. MST = {ab, bc} (cheapest two).
+        // Bump ab to 100 → now ab is the most expensive. MST flips to
+        // {bc, ac}. This proves weight_order was re-keyed, not just
+        // the slot mutated.
+        let (mut g, _, [ab, ba, bc, cb, ac, ca]) = triangle();
+
+        let mst: Vec<_> = g.mst();
+        assert!(mst.contains(&ab) && mst.contains(&ba));
+        assert!(mst.contains(&bc) && mst.contains(&cb));
+        assert!(!mst.contains(&ac));
+
+        g.update_edge(ab, 100, 0).unwrap();
+        g.update_edge(ba, 100, 0).unwrap();
+
+        let mst: Vec<_> = g.mst();
+        assert!(mst.contains(&bc) && mst.contains(&cb));
+        assert!(mst.contains(&ac) && mst.contains(&ca));
+        assert!(!mst.contains(&ab));
     }
 
     #[test]
