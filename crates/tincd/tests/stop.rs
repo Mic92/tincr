@@ -1868,22 +1868,44 @@ fn peer_edge_triggers_reachable() {
     let far_row = find_row("faraway");
 
     // status field is the 11th body field (`%x`), right after
-    // options (`%x`). Bit 4 = reachable = 0x10. With chunk-5's
-    // status (only `reachable` is real): exactly `"10"` if
-    // reachable, `"0"` if not. Substring-check ` 10 ` (space-
-    // delimited — hex unpadded, can't accidentally match e.g.
-    // `100` because next field is nexthop, an alphabetic name).
+    // options (`%x`). Bit 4 = reachable = 0x10. Chunk-7 also sets
+    // bit 6 (`sptps`) for nodes that became reachable (`graph.c:
+    // 192-195` reads `e->options >> 24 >= 2` from the prevedge;
+    // we set it unconditionally in `BecameReachable` since the
+    // Rust port is SPTPS-only).
+    //
+    // myself: never transitions BecameReachable (set reachable at
+    // setup) → status = 0x10 (reachable only).
+    // testpeer/faraway: 0x50 = reachable | sptps.
+    //
+    // Parse the status hex from the row (token at index 10 of the
+    // body) and check bit 4.
+    let parse_status = |row: &str| -> u32 {
+        row.strip_prefix("18 3 ")
+            .and_then(|b| b.split_whitespace().nth(10))
+            .and_then(|s| u32::from_str_radix(s, 16).ok())
+            .unwrap_or_else(|| panic!("can't parse status from row: {row}"))
+    };
     for (name, row) in [
         ("testnode", myself_row),
         ("testpeer", peer_row),
         ("faraway", far_row),
     ] {
-        // Status is `%x`, unpadded. Reachable-only → `10`.
+        let status = parse_status(row);
         assert!(
-            row.contains(" 10 "),
-            "{name} not reachable (no ' 10 ' status); row: {row}"
+            status & 0x10 != 0,
+            "{name} not reachable (status={status:x}); row: {row}"
         );
     }
+    // testpeer/faraway: sptps bit set (chunk-7's BecameReachable).
+    assert!(
+        parse_status(peer_row) & 0x40 != 0,
+        "testpeer sptps bit; row: {peer_row}"
+    );
+    assert!(
+        parse_status(far_row) & 0x40 != 0,
+        "faraway sptps bit; row: {far_row}"
+    );
 
     // myself: hostname is `"MYSELF port <udp>"` (`net_setup.c:
     // 1199`). nexthop/via are itself (sssp seeds `myself` with
@@ -1954,15 +1976,17 @@ fn peer_edge_triggers_reachable() {
 
     // testnode→testpeer: `on_ack` populated `edge_addrs` from
     // `conn.address` (127.0.0.1) + `his_udp_port` (0). Local addr
-    // is `"unspec port unspec"` (STUB — the C `getsockname` call
-    // at `ack_h:1040` is chunk-6).
+    // is the `getsockname` result with port rewritten to `myport.
+    // udp` (`ack_h:1040-1045`). The TCP socket's local addr is
+    // `127.0.0.1` (we connected to a 127.0.0.1 listener); the
+    // port is the daemon's UDP port (kernel-assigned, varies).
     let fwd = edge_rows
         .iter()
         .find(|r| r.starts_with("18 4 testnode testpeer "))
         .unwrap_or_else(|| panic!("no testnode→testpeer: {edge_rows:?}"));
     assert!(
-        fwd.contains(" 127.0.0.1 port 0 unspec port unspec "),
-        "forward edge addr (from conn.address+hisport, local=unspec); row: {fwd}"
+        fwd.contains(" 127.0.0.1 port 0 127.0.0.1 port "),
+        "forward edge addr (remote=conn.address+hisport, local=getsockname+myudp); row: {fwd}"
     );
 
     // testpeer→testnode: synthesized reverse, NO `edge_addrs`

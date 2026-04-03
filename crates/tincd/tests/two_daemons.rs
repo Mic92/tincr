@@ -120,6 +120,63 @@ impl Node {
     /// Write `tinc.conf` + `hosts/NAME` + `ed25519_key.priv` +
     /// `hosts/OTHER`. `connect_to` adds `ConnectTo = other` to
     /// tinc.conf and `Address = 127.0.0.1 OTHER_PORT` to hosts/OTHER.
+    /// `device_fd` adds `DeviceType = fd` and `Device = N` (the test
+    /// process's socketpair end, inherited via `Command::pre_exec`-
+    /// less fd inheritance — we just don't set CLOEXEC). `subnet`
+    /// adds `Subnet = X` to hosts/SELF.
+    fn write_config_with(
+        &self,
+        other: &Node,
+        connect_to: bool,
+        device_fd: Option<i32>,
+        subnet: Option<&str>,
+    ) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use tinc_crypto::sign::SigningKey;
+
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        // tinc.conf
+        let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
+        if let Some(fd) = device_fd {
+            tinc_conf.push_str(&format!("DeviceType = fd\nDevice = {fd}\n"));
+        } else {
+            tinc_conf.push_str("DeviceType = dummy\n");
+        }
+        if connect_to {
+            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+        }
+        tinc_conf.push_str("PingTimeout = 1\n");
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        // hosts/SELF — Port + maybe Subnet.
+        let mut self_cfg = format!("Port = {}\n", self.port);
+        if let Some(s) = subnet {
+            self_cfg.push_str(&format!("Subnet = {s}\n"));
+        }
+        std::fs::write(self.confbase.join("hosts").join(self.name), self_cfg).unwrap();
+
+        // hosts/OTHER — pubkey + maybe Address.
+        let other_pub = tinc_crypto::b64::encode(&other.pubkey());
+        let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
+        if connect_to {
+            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+        }
+        std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
+
+        // Private key.
+        let sk = SigningKey::from_seed(&self.seed);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.confbase.join("ed25519_key.priv"))
+            .unwrap();
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    }
+
     fn write_config(&self, other: &Node, connect_to: bool) {
         use std::os::unix::fs::OpenOptionsExt;
         use tinc_crypto::sign::SigningKey;
@@ -168,6 +225,34 @@ impl Node {
             .unwrap();
         let mut w = std::io::BufWriter::new(f);
         tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    }
+
+    /// Spawn with an inherited fd. Clears CLOEXEC on `fd` so the
+    /// child sees it; the child's `FdTun::open(Inherited(fd))`
+    /// wraps it. The TEST process keeps the other socketpair end.
+    fn spawn_with_fd(&self, fd: i32) -> Child {
+        // Clear CLOEXEC so the fd survives `exec()`. Rust's `Command::
+        // spawn` doesn't close inherited fds (only stdin/out/err are
+        // managed). C tincd's `Device = N` mode (`fd_device.c:163`)
+        // assumes the parent did this.
+        // SAFETY: `fcntl(F_SETFD, 0)` clears the CLOEXEC bit. The fd
+        // is valid (just from socketpair).
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            assert!(flags >= 0, "fcntl GETFD");
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC), 0);
+        }
+        Command::new(tincd_bin())
+            .arg("-c")
+            .arg(&self.confbase)
+            .arg("--pidfile")
+            .arg(&self.pidfile)
+            .arg("--socket")
+            .arg(&self.socket)
+            .env("RUST_LOG", "tincd=debug")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd")
     }
 
     fn spawn(&self) -> Child {
@@ -556,4 +641,308 @@ fn outgoing_retry_after_refused() {
         alice_stderr.contains("Connection with bob") && alice_stderr.contains("activated"),
         "alice's on_ack activation; stderr:\n{alice_stderr}"
     );
+}
+
+/// **THE FIRST PACKET.** End-to-end: alice's TUN → bob's TUN.
+///
+/// Full chain: `IoWhat::Device` → `route()` → `Forward{to: bob}`
+/// → `send_sptps_packet` → (no validkey yet) `send_req_key` →
+/// REQ_KEY over the meta-conn SPTPS → bob's `on_req_key` →
+/// responder `Sptps::start` → ANS_KEY back → alice's `on_ans_key`
+/// → `HandshakeDone` → validkey set. Then alice's NEXT TUN read →
+/// `send_sptps_packet` → `sptps.send_record(0, ip_bytes)` →
+/// `Output::Wire` → `send_sptps_data` UDP branch → `[nullid][src]
+/// [ct]` → `sendto(bob_udp)`. Bob's `on_udp_recv` → strip prefix →
+/// `lookup_node_id(src)` = alice → `sptps.receive(ct)` → `Output::
+/// Record{type=0, ip_bytes}` → `receive_sptps_record` → re-prepend
+/// ethertype → `route()` → `Forward{to: myself}` → `device.write`.
+///
+/// ## The device rig
+///
+/// `socketpair(AF_UNIX, SOCK_SEQPACKET)` for each daemon. SEQPACKET
+/// gives datagram semantics (one `read()` = one packet, like a real
+/// TUN fd) over a connection-oriented unix socket. The test holds
+/// one end; the daemon's `FdTun` wraps the other. `FdTun::read()`
+/// does the `+14` ethernet-header synthesis from the IP version
+/// nibble, so we write RAW IP bytes and the daemon's `route()` sees
+/// a proper ethernet frame.
+///
+/// `O_NONBLOCK` on the daemon's end: `FdTun` doesn't set it; the
+/// daemon's `on_device_read` loops until `WouldBlock`, so blocking
+/// fds would hang the loop. We set it in the test before passing the
+/// fd in. (C tincd's `linux/device.c:63` does `O_NONBLOCK` via the
+/// `ioctl` flow; `fd_device.c` doesn't — the Java parent is supposed
+/// to. We're the Java parent.)
+///
+/// ## The first packet is dropped
+///
+/// `send_sptps_packet:684` (`if(!validkey) return`). The C buffers
+/// nothing; the first packet kicks `send_req_key` and is dropped. We
+/// wait for `validkey` (poll `dump nodes` for status bit 1), THEN
+/// send the packet that actually crosses.
+#[test]
+fn first_packet_across_tunnel() {
+    let tmp = TmpGuard::new("first-pkt");
+    let alice = Node::new(tmp.path(), "alice", 0xA7);
+    let bob = Node::new(tmp.path(), "bob", 0xB7);
+
+    // ─── socketpairs: one per daemon ────────────────────────────
+    // [0] = test end (we read/write IP packets), [1] = daemon end
+    // (FdTun wraps it). SOCK_SEQPACKET for datagram boundaries.
+    let alice_pair = sockpair_seqpacket();
+    let bob_pair = sockpair_seqpacket();
+
+    // Daemon ends need O_NONBLOCK (on_device_read loops to EAGAIN).
+    // Test ends too (read_fd_nb polls).
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+    for &fd in &bob_pair {
+        set_nonblocking(fd);
+    }
+
+    // ─── configs: subnets pin route() decisions ────────────────
+    // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
+    // 10.0.0.2 routes Forward{to: bob} on alice's side, then
+    // Forward{to: myself} on bob's side.
+    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+
+    // ─── spawn ──────────────────────────────────────────────────
+    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    // Close OUR copy of bob's daemon-end fd. The child has its own
+    // (dup'd by fork). If we keep ours open, bob's read() never
+    // sees EOF and the test process leaks an fd. Same for alice.
+    unsafe { libc::close(bob_pair[1]) };
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    // ─── wait for meta-conn handshake (chunk-6 milestone) ────────
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    // Status bit 4 (reachable) = both daemons completed ACK +
+    // graph(). `dump nodes` row format: status is body token 10.
+    let node_status = |rows: &[String], name: &str| -> Option<u32> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            u32::from_str_radix(toks.get(10)?, 16).ok()
+        })
+    };
+
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        let b = bob_ctl.dump(3);
+        let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+        let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+        if a_ok && b_ok { Some(()) } else { None }
+    });
+
+    // ─── kick the per-tunnel handshake ──────────────────────────
+    // Send one packet to alice's TUN. `route()` says Forward{to:
+    // bob}; `send_sptps_packet` sees `!validkey` and kicks
+    // `send_req_key`. The packet is DROPPED (C `:686`).
+    //
+    // Packet shape for FdTun: RAW IPv4 bytes (no ether header,
+    // no tun_pi). `FdTun::read` writes them at `+14` and sets
+    // ethertype from byte-0 nibble. dst at IP header offset 16.
+    let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
+    write_fd(alice_pair[0], &kick_pkt);
+
+    // ─── wait for validkey ──────────────────────────────────────
+    // Status bit 1 (validkey) = per-tunnel SPTPS handshake done.
+    // BOTH sides need it (bob is responder; his `HandshakeDone`
+    // fires when he gets alice's SIG via ANS_KEY). The handshake
+    // is 3 round-trips over the meta-conn SPTPS; loopback is
+    // sub-millisecond per RTT.
+    // catch_unwind: on timeout, dump BOTH daemons' stderr. Without
+    // this, the test panics with "poll timed out" and the captured
+    // stderr is lost (Child::stderr is piped, never read).
+    let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(5), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if validkey_result.is_err() {
+        let _ = bob_child.kill();
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── THE PACKET ─────────────────────────────────────────────
+    // Now validkey is set. Send a packet; it crosses.
+    let payload = b"hello from alice";
+    let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
+    write_fd(alice_pair[0], &ip_pkt);
+
+    // Read from bob's TUN. `FdTun::write` strips the 14-byte
+    // ether header (writes `data[14..]`); we get RAW IP bytes.
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+
+    // The IP packet round-trips byte-exact (the 14-byte ether
+    // header is added by alice's FdTun::read, stripped by
+    // alice's `send_sptps_packet`, re-added by bob's `receive_
+    // sptps_record`, stripped by bob's `FdTun::write`).
+    assert_eq!(
+        recv,
+        ip_pkt,
+        "packet body mismatch; sent {} bytes, got {} bytes",
+        ip_pkt.len(),
+        recv.len()
+    );
+    // The payload is at the IP-header offset (20 bytes).
+    assert_eq!(&recv[20..], payload);
+
+    // ─── traffic counters bumped ────────────────────────────────
+    // alice: out_packets/out_bytes for bob ≥ 1. bob: in_packets/
+    // in_bytes for alice ≥ 1. The kick packet also counts (it was
+    // counted at `send_packet:1582` BEFORE the validkey gate at
+    // `send_sptps_packet:684`). Row tail: `... in_p in_b out_p out_b`.
+    let node_traffic = |rows: &[String], name: &str| -> Option<(u64, u64, u64, u64)> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 3 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.first() != Some(&name) {
+                return None;
+            }
+            let n = toks.len();
+            Some((
+                toks[n - 4].parse().ok()?,
+                toks[n - 3].parse().ok()?,
+                toks[n - 2].parse().ok()?,
+                toks[n - 1].parse().ok()?,
+            ))
+        })
+    };
+    let a_nodes = alice_ctl.dump(3);
+    let b_nodes = bob_ctl.dump(3);
+    let (_, _, a_out_p, a_out_b) = node_traffic(&a_nodes, "bob").expect("alice's bob row");
+    let (b_in_p, b_in_b, _, _) = node_traffic(&b_nodes, "alice").expect("bob's alice row");
+    assert!(
+        a_out_p >= 1 && a_out_b >= ip_pkt.len() as u64,
+        "alice out counters: {a_out_p}/{a_out_b}; nodes: {a_nodes:?}"
+    );
+    assert!(
+        b_in_p >= 1 && b_in_b >= ip_pkt.len() as u64,
+        "bob in counters: {b_in_p}/{b_in_b}; nodes: {b_nodes:?}"
+    );
+
+    // ─── udp_confirmed: bob received a valid UDP packet from
+    // alice; status bit 7 should be set. (Alice's bit might not
+    // be: bob hasn't sent anything BACK over UDP yet.)
+    let b_status = node_status(&b_nodes, "alice").unwrap();
+    assert!(
+        b_status & 0x80 != 0,
+        "bob's udp_confirmed for alice; status={b_status:x}"
+    );
+
+    // ─── stderr: the SPTPS-key-exchange-successful log ──────────
+    drop(alice_ctl);
+    drop(bob_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    unsafe { libc::close(bob_pair[0]) };
+    let _ = bob_child.kill();
+    let bob_stderr = drain_stderr(bob_child);
+    let alice_stderr = drain_stderr(alice_child);
+    assert!(
+        alice_stderr.contains("SPTPS key exchange with bob successful"),
+        "alice's per-tunnel HandshakeDone; stderr:\n{alice_stderr}"
+    );
+    assert!(
+        bob_stderr.contains("SPTPS key exchange with alice successful"),
+        "bob's per-tunnel HandshakeDone; stderr:\n{bob_stderr}"
+    );
+}
+
+// ─── first_packet test plumbing ────────────────────────────────────────────────────────────
+
+/// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. SEQPACKET = datagram
+/// boundaries (one read = one packet) on a connection-oriented unix
+/// socket. Exactly the semantics a real TUN fd has.
+fn sockpair_seqpacket() -> [i32; 2] {
+    let mut fds = [0i32; 2];
+    // SAFETY: `socketpair` writes 2 ints. AF_UNIX/SOCK_SEQPACKET is
+    // standard on Linux.
+    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
+    assert_eq!(ret, 0, "socketpair: {}", std::io::Error::last_os_error());
+    fds
+}
+
+fn set_nonblocking(fd: i32) {
+    // SAFETY: fcntl on a valid fd.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        assert!(flags >= 0);
+        assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+    }
+}
+
+fn write_fd(fd: i32, buf: &[u8]) {
+    // SAFETY: write(2) on a valid fd. SEQPACKET is one-shot (no
+    // short writes for in-flight datagrams).
+    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+    assert_eq!(
+        ret as usize,
+        buf.len(),
+        "write fd={fd}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Non-blocking read; `None` on EAGAIN. The poll loop wraps this.
+fn read_fd_nb(fd: i32) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 2048];
+    // SAFETY: read(2) on a valid fd into our buffer.
+    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if ret < 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            return None;
+        }
+        panic!("read fd={fd}: {e}");
+    }
+    if ret == 0 {
+        panic!("read fd={fd}: EOF (peer closed)");
+    }
+    buf.truncate(ret as usize);
+    Some(buf)
+}
+
+/// Minimal IPv4 packet: 20-byte header + payload. Only the fields
+/// `route_ipv4` reads (version nibble for FdTun's ethertype synth,
+/// dst addr for the subnet lookup). Checksum/len are filled but
+/// nothing checks them (`route_ipv4` doesn't, and the packet never
+/// hits a kernel IP stack).
+fn mk_ipv4_pkt(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
+    let total_len = (20 + payload.len()) as u16;
+    let mut p = Vec::with_capacity(20 + payload.len());
+    p.push(0x45); // version=4, IHL=5
+    p.push(0); // DSCP/ECN
+    p.extend_from_slice(&total_len.to_be_bytes());
+    p.extend_from_slice(&[0, 0]); // ident
+    p.extend_from_slice(&[0, 0]); // flags+fragoff
+    p.push(64); // TTL
+    p.push(17); // proto (UDP, arbitrary)
+    p.extend_from_slice(&[0, 0]); // checksum (don't care)
+    p.extend_from_slice(&src);
+    p.extend_from_slice(&dst);
+    p.extend_from_slice(payload);
+    p
 }
