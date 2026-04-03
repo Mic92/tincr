@@ -185,16 +185,11 @@ mod edit_integration {
     /// `argv = [echo, arg, <path>]` → stdout `"arg <path>"`.
     ///
     /// THE proof that `sh -c '$TINC_EDITOR "$@"'` word-splits the
-    /// editor. The C `system("\"%s\" ...")` ALSO does this (the
-    /// double-quote in the C is around the WHOLE editor string,
-    /// `"echo arg"`, which the shell THEN — wait no, double-quoted
-    /// is NOT split in shell. The C does `"echo arg" "filename"`,
-    /// shell parses `"echo arg"` as ONE token, exec("echo arg")
-    /// fails ENOENT. So the C DOESN'T support spacey EDITOR! Only
-    /// `system()` without the wrapping quotes would.
-    ///
-    /// We DO support it (via unquoted `$TINC_EDITOR`). BETTER
-    /// than C. The test pins it.
+    /// editor. The C `system("\"%s\" ...")` does NOT: it builds
+    /// `"echo arg" "filename"`, the shell parses `"echo arg"` as ONE
+    /// token (double-quoted = no word splitting), and `exec("echo arg")`
+    /// fails ENOENT. We support it via unquoted `$TINC_EDITOR` —
+    /// stricter-better than C.
     #[test]
     fn edit_spacey_editor_tokenized() {
         let (confbase, out) = run_edit("echo extraarg", "alice");
@@ -910,17 +905,11 @@ fn netname_flag_reaches_paths() {
 
 #[test]
 fn netname_dot_is_noop() {
-    // `NETNAME=.` means "no netname" — `tincctl.c:267-270`. With `-c`
-    // also given, the netname resolution doesn't matter (confbase
-    // wins), but we shouldn't get the "Both netname and config given"
-    // warning either, because `.` was normalized to None *before* the
-    // both-given check... wait, no. The C does the both-given check
-    // in `make_names`, the `.` normalization in `parse_options`.
-    // `parse_options` runs first. So `NETNAME=. tinc -c /tmp/x init`
-    // sees netname=None confbase=/tmp/x → no warning.
-    //
-    // Our `for_cli` does the both-check; our `parse_global_options`
-    // does the `.` normalization. Same order. Confirm: no warning.
+    // `NETNAME=.` means "no netname" — `tincctl.c:267-270`. The `.`
+    // is normalized to None in `parse_options` BEFORE `make_names`
+    // does the both-given check. So `NETNAME=. tinc -c /tmp/x init`
+    // sees netname=None confbase=/tmp/x → no warning. Our
+    // `parse_global_options` and `for_cli` preserve the same order.
     let dir = tempfile::tempdir().unwrap();
     let confbase = dir.path().join("vpn");
     let out = tinc_with_env(
@@ -1149,14 +1138,10 @@ fn invite_no_address() {
 fn invite_netname_threads_through() {
     let dir = tempfile::tempdir().unwrap();
     // -n NETNAME → confbase = CONFDIR/tinc/NETNAME, but we override
-    // with -c. So netname is set BUT confbase comes from -c. This
-    // is exactly the "both given" warning case — confbase wins for
-    // path resolution, but netname is still threaded to invite.
-    //
-    // Actually, wait: "-c overrides -n" for confbase, but does the C
-    // still write NetName? Reading invitation.c:559: `if(check_netname
-    // (netname, true))` — yes, the netname global is still set even
-    // when confbasegiven is true. Our Globals.netname mirrors that.
+    // with -c. The "both given" warning fires; confbase wins for path
+    // resolution. The netname global is STILL set even when
+    // confbasegiven is true (C `invitation.c:559` reads it
+    // unconditionally), so it threads through to the NetName= line.
     let cb = dir.path().join("vpn");
     let cb_s = cb.to_str().unwrap();
 
@@ -3051,15 +3036,10 @@ fn pcap_negative_snaplen_rejected() {
     let out = tinc(&["pcap", "-5"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // EITHER "Invalid snaplen" (our parse) OR "Unknown option -5"
-    // (if argv parser eats -5 as a flag). Check it's not silent
-    // success.
-    //
-    // Actually: `-5` IS a flag-shaped arg. Our argv parser might
-    // see it as `-5` short flag. Hmm. Let me check what happens
-    // with a non-flag-shaped negative... but there isn't one.
-    // `parse::<u32>()` on "garbage" is the same path. Check that:
-    // either way, NOT success and NOT silent.
+    // `-5` is flag-shaped: the argv parser may eat it as a short
+    // flag ("Unknown option") before pcap sees it ("Invalid
+    // snaplen"). Either rejection is correct — the C's silent
+    // wraparound is what we forbid.
     assert!(
         stderr.contains("Invalid") || stderr.contains("Unknown"),
         "stderr: {stderr}"
