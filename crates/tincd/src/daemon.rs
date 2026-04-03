@@ -2049,6 +2049,14 @@ impl Daemon {
                             "route: unreachable (type={icmp_type} code={icmp_code})");
                 false
             }
+            RouteResult::NeighborSolicit => {
+                // C `route.c:710-713`: `route_neighborsol(source,
+                // packet)`. Synthesises an NDP advert reply.
+                // STUB(chunk-9): `neighbor.rs` leaf. Log + drop.
+                log::debug!(target: "tincd::net",
+                            "route: NDP neighbor solicit (not yet handled)");
+                false
+            }
             RouteResult::Unsupported { reason } => {
                 log::debug!(target: "tincd::net",
                             "route: dropping packet ({reason})");
