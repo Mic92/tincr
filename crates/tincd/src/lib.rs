@@ -27,6 +27,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::doc_markdown)]
 
+pub mod addrcache;
 pub mod conn;
 pub mod control;
 pub mod daemon;
