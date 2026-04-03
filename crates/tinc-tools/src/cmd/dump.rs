@@ -184,20 +184,10 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
             // C: must have a second arg, and it must be "nodes".
             // The `argc > 2` check means rest is nonempty.
             let Some(second) = rest.first() else {
-                // `dump reachable` with nothing after. C's
-                // `argc > 2` fails before strcasecmp, falling
-                // through to "Invalid number of arguments." We do
-                // the same: don't match the reachable arm at all.
-                // Achieved by NOT matching here — let the arity
-                // check below fire. So: return early as not-
-                // reachable, args unchanged.
-                //
-                // Wait, no: if we don't shift, "reachable" alone
-                // hits the `argc != 2` check (1 arg) → "Invalid
-                // number". If we DID shift, args becomes empty,
-                // also `argc != 2`. Both paths converge. But the
-                // C explicitly does `argc > 2` first, so it does
-                // NOT shift. Match that: bail without shifting.
+                // `dump reachable` with nothing after. C checks
+                // `argc > 2` before strcasecmp, so it does NOT
+                // shift — falls through to "Invalid number of
+                // arguments." Match that: bail without shifting.
                 return Err(CmdError::BadInput("Invalid number of arguments.".into()));
             };
             if !second.eq_ignore_ascii_case("nodes") {
@@ -735,10 +725,9 @@ impl EdgeRow {
         // ─── DOT line
         // C: `" \"%s\" %s \"%s\" [w = %f, weight = %f];\n"`. The
         // `%f` is C printf default float format: 6 decimal places.
-        // Rust `{}` for f32 picks shortest-repr (1.0 → "1"). To
-        // match C exactly: `{:.6}` is C's `%f`. But wait — does
-        // anyone parse this? `dot` itself reads `weight = N` and
-        // doesn't care about decimals. Match C anyway: scripts.
+        // Rust `{}` for f32 picks shortest-repr (1.0 → "1"). Use
+        // `{:.6}` to match C exactly — `dot` itself doesn't care
+        // about decimals but downstream scripts might.
         //
         // Why TWO weight attributes (`w` and `weight`)? `weight` is
         // graphviz's edge weight (layout hint). `w` is... not a

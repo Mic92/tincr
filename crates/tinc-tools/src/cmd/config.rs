@@ -318,14 +318,11 @@ pub fn build_intent(
     let found = vars::lookup(var);
 
     // ─── Subnet special case: validate value early
-    // C `tincctl.c:1866-1878`. The check is *inside* the table-scan
-    // loop body (after `found = true`), so it only fires if the
-    // var is known AND named Subnet. `tinc set --force subnet bogus`
-    // where the user typo'd it: C wouldn't validate because
-    // `strcasecmp("subnet", "Subnet") == 0` matches — wait no, that
-    // *does* match. OK so the C validates regardless of casing.
-    // We get that for free: `lookup` is case-insensitive, and we
-    // check `found.name == "Subnet"` (canonical from the table).
+    // C `tincctl.c:1866-1878`. The check is inside the table-scan
+    // loop body (after `found = true`), so it only fires if the var
+    // is known AND named Subnet. The C `strcasecmp` is case-insensitive
+    // so it validates regardless of user casing; we get the same via
+    // `lookup` (case-insensitive) + checking the canonical table name.
     if let Some(v) = found {
         if v.name == "Subnet" && !value.is_empty() {
             validate_subnet(value)?;
@@ -928,14 +925,10 @@ pub fn run(
     // ─── Port-from-pidfile special case
     // C `tincctl.c:1850`. Condition: GET, var is Port (case-insens),
     // no explicit node (the C checks before any node resolution).
-    // We additionally check `value.is_empty()` — `tinc get Port 655`
-    // becomes a SET via the coercion, and shouldn't take this path.
-    // The C does the coercion AFTER this check (`tincctl.c:1846` is
-    // before 1850 — wait no, 1846 is before 1850, so the C does the
-    // coercion FIRST). Re-read: line 1846 `if(action==GET && *value)
-    // action=SET`, line 1850 `if(action==GET && ...)`. So the C
-    // already coerced; checking `value.is_empty()` is redundant but
-    // harmless. Keeping it for clarity.
+    // We additionally check `value.is_empty()`. C order: line 1846
+    // coerces GET→SET when value is present, line 1850 checks GET.
+    // So the C already coerced before this point; the `is_empty()`
+    // check here is redundant but kept for clarity.
     if raw_action == Action::Get
         && value.is_empty()
         && explicit_node.is_none()

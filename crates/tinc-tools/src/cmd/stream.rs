@@ -1006,10 +1006,8 @@ mod tests {
 
         log_loop(&mut ctl, &mut out, None, false).unwrap();
 
-        // Passed through + our \n. THREE \n total: the embedded
-        // one (data byte 5), the added one (after byte 11), and
-        // — wait, that's two. "Line1\nLine2" + "\n" = "Line1\n
-        // Line2\n". Two newlines.
+        // Passed through + our trailing \n. Two newlines total:
+        // the embedded one (data byte 5) and the appended one.
         assert_eq!(out, b"Line1\nLine2\n");
     }
 

@@ -506,46 +506,12 @@ fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> st
 
     match mode {
         // `top.c:226`: `default: result = strcmp(na->name, nb->name)`.
-        // Ascending. The ONLY mode not negated. We don't have the
-        // name here (it's the BTreeMap key); but the only caller
-        // sorts a `Vec<String>` of names, which can compare
-        // directly. So Name returns Equal, and the caller adds a
-        // name fallback.
-        //
-        // ...except that doesn't compose — the OTHER modes also
-        // need a tiebreak that ISN'T name (it's `i`, the stable-
-        // sort thing, which we get free). So Name is special: it's
-        // the one mode where "Equal from this fn" means "actually
-        // equal" (same name), not "primary key tied, fall through
-        // to stability". The caller's comparator handles it:
-        //
-        //   compare(...).then(a.cmp(b))
-        //
-        // For Name: Equal.then(a.cmp(b)) == a.cmp(b). Correct.
-        // For others: NonEqual.then(...) == NonEqual. Correct.
-        // For others, tied: Equal.then(a.cmp(b)) == name compare.
-        //
-        // Hmm. That last one is WRONG — the C's tied-non-name case
-        // falls through to `i`, which is stability, NOT name. With
-        // `.then(a.cmp(b))` we'd get name-order on ties, which is
-        // a SPECIFIC order, not "previous frame's order".
-        //
-        // But: stable sort + Equal IS "previous frame's order".
-        // So the right thing is NOT `.then(a.cmp(b))`. The right
-        // thing is:
-        //   - Name mode: a.cmp(b), don't even call compare()
-        //   - other modes: compare(), Equal means "tied, stability
-        //     wins", which sort_by handles
-        //
-        // This means `compare()` should NOT have a Name arm. The
-        // caller branches on mode FIRST:
-        //
-        //   if mode == Name { display_order.sort() }  // ascending
-        //   else { display_order.sort_by(|a,b| compare(...)) }
-        //
-        // ...which is what we'll do. This arm returns Equal as a
-        // placeholder so the match is exhaustive; `Stats::sort`
-        // never reaches it.
+        // We don't have the name here (it's the BTreeMap key). The
+        // caller (`Stats::sort`) branches on mode FIRST: Name mode
+        // sorts the key Vec directly, other modes call `compare()`
+        // and rely on stable-sort for ties (matching C's `i` fallback,
+        // `top.c:228`). This arm is unreachable; Equal keeps the
+        // match exhaustive.
         Name => Equal,
 
         // `top.c:166-172`. `case 1`. Descending (heavier first):

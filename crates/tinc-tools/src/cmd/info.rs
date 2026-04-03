@@ -521,13 +521,8 @@ impl NodeInfo {
             out.push(' ');
             out.push_str(subnet);
         }
-        // C `info.c:243`: `printf("\n")`. The last newline. We DON'T
-        // add it (caller's `println!` does) — keep the contract
-        // simple, no trailing newline. Except wait: every other line
-        // above DOES have `\n`. The asymmetry would mean the last
-        // line is the odd one out. Better: include it, caller uses
-        // `print!` not `println!`. Decision: include all newlines,
-        // caller `print!`s.
+        // C `info.c:243`: `printf("\n")`. All lines above include
+        // their `\n`; this one too. Caller uses `print!` not `println!`.
         out.push('\n');
 
         out

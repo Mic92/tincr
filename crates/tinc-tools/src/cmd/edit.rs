@@ -392,11 +392,8 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
     //
     // `exec` so the shell doesn't fork-and-wait — the editor IS
     // the process. One fewer pid; the wait below waits for the
-    // editor directly. (Git doesn't `exec`; minor optimization.)
-    //
-    // — wait, `exec $TINC_EDITOR` with word-split: `exec vim -f
-    // file` works (exec accepts multiple args). `exec` with the
-    // FIRST arg as the program. Yes, fine.
+    // editor directly. `exec` accepts multiple args after word-split
+    // (`exec vim -f file` works), so $TINC_EDITOR with flags is fine.
     const SCRIPT: &str = r#"exec $TINC_EDITOR "$@""#;
 
     Command::new("sh")

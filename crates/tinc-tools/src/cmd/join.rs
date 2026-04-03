@@ -1194,14 +1194,10 @@ fn parse_greeting_line1(line: &str) -> Result<(), CmdError> {
     if !check_id(his_name) {
         return Err(bad());
     }
-    // `hismajor` must equal PROT_MAJOR. Minor is don't-care (`< 3`
-    // in the C sscanf means "at least 3 fields parsed", so minor
-    // is optional — but `%d.%d` would fail on "17" alone... actually
-    // sscanf returns 3 on "17" too because the `.` doesn't match.
-    // Wait no: `%d.%d` on "17\0" parses one int, the `.` doesn't
-    // match `\0`, sscanf returns 3 anyway because the format
-    // mismatch happens after 3 conversions. So minor is optional.
-    // We replicate: parse `MAJOR` or `MAJOR.MINOR`.)
+    // `hismajor` must equal PROT_MAJOR. Minor is don't-care: the C
+    // sscanf `%d.%d` on "17\0" stops at the `.` mismatch but still
+    // returns 3 (the mismatch is after 3 conversions). So minor is
+    // optional. We replicate: parse `MAJOR` or `MAJOR.MINOR`.
     let ver = tok.next().ok_or_else(bad)?;
     let major: u32 = ver
         .split('.')
