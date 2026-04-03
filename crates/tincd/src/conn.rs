@@ -289,6 +289,18 @@ pub struct Connection {
     /// sets it, the `c->edge` pointer-as-bool IS the active check.
     /// Set in `on_ack`, cleared in `terminate`.
     pub active: bool,
+    /// `c->status.connecting` (`connection.h:41`, bit 2). True while
+    /// the async-connect is in flight (`net_socket.c:652` sets,
+    /// `:553` clears in `handle_meta_io`). The `IoWhat::Conn` arm
+    /// checks this FIRST and runs the EINPROGRESS probe instead of
+    /// the read/write dispatch.
+    pub connecting: bool,
+    /// `c->outgoing`. Which `Outgoing` slot this connection serves
+    /// (if any). C `outgoing_t*` (`connection.h:92`). `terminate_
+    /// connection` (`net.c:155-161`) reads it to retry. Inbound
+    /// conns: `None`. The `OutgoingId` type is daemon-side; we use
+    /// the slotmap's `KeyData` to avoid a `tincd::daemon` dep here.
+    pub outgoing: Option<slotmap::KeyData>,
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
@@ -354,6 +366,8 @@ impl Connection {
             start: now,
             address: None,
             active: false,
+            connecting: false,
+            outgoing: None,
         }
     }
 
@@ -398,6 +412,56 @@ impl Connection {
             start: now,
             address: Some(address),
             active: false,
+            connecting: false,
+            outgoing: None,
+        }
+    }
+
+    /// `new_connection()` + the field init from `do_outgoing_
+    /// connection` (`net_socket.c:578-655`). The fd just came from
+    /// nonblocking `connect()` (might be EINPROGRESS).
+    ///
+    /// `name` is the peer's name (the `ConnectTo = bob` value) — NOT
+    /// `"<unknown>"` like inbound. C `:653`: `c->name = xstrdup(
+    /// outgoing->node->name)`. `id_h:385-391` later checks the peer
+    /// sent the SAME name (`if(strcmp(c->name, name)) ERR`).
+    ///
+    /// `connecting = true` (`:652`). `outgoing` set so `terminate`
+    /// knows to retry.
+    #[must_use]
+    pub fn new_outgoing(
+        fd: OwnedFd,
+        name: String,
+        hostname: String,
+        address: SocketAddr,
+        outgoing: slotmap::KeyData,
+        now: Instant,
+    ) -> Self {
+        Self {
+            fd,
+            inbuf: LineBuf::default(),
+            outbuf: LineBuf::default(),
+            allow_request: Some(Request::Id),
+            control: false,
+            name,
+            hostname,
+            last_ping_time: now,
+            protocol_minor: 0,
+            ecdsa: None,
+            sptps: None,
+            options: 0,
+            estimated_weight: 0,
+            // C `protocol_auth.c:94`: `gettimeofday(&c->start)` is
+            // inside `send_id`. We approximate at construct time;
+            // for outgoing, `send_id` happens right after the probe
+            // succeeds (~one event-loop turn later). Same μs delta
+            // as `new_meta`.
+            start: now,
+            address: Some(address),
+            active: false,
+            // C `:652`: `c->status.connecting = true`.
+            connecting: true,
+            outgoing: Some(outgoing),
         }
     }
 
@@ -432,6 +496,9 @@ impl Connection {
             // `dump connections` so the two-daemon test can poll
             // "past ACK" without depending on log scraping.
             v |= 1 << 1;
+        }
+        if self.connecting {
+            v |= 1 << 2;
         }
         if self.control {
             v |= 1 << 9;

@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -38,6 +38,10 @@ use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
     unmap,
+};
+use crate::outgoing::{
+    ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, probe_connecting,
+    resolve_config_addrs, try_connect,
 };
 use crate::proto::{
     DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
@@ -142,10 +146,11 @@ pub enum TimerWhat {
     /// `age_subnets`. Re-arms +10s.
     #[allow(dead_code)]
     AgeSubnets,
-    /// `retry_outgoing_handler`. Per-outgoing. The `OutgoingId` is a
-    /// future slotmap key (chunk 3+).
-    #[allow(dead_code)]
-    RetryOutgoing,
+    /// `retry_outgoing_handler`. Per-outgoing. C `outgoing_t.ev`
+    /// (`net.h:123`) is one timer per outgoing; `retry_outgoing`
+    /// (`net_socket.c:412`) arms it. The `OutgoingId` payload tells
+    /// the dispatch arm which outgoing to retry.
+    RetryOutgoing(OutgoingId),
     /// `udp_probe_timeout_handler`. Per-node.
     #[allow(dead_code)]
     UdpPing,
@@ -197,7 +202,11 @@ pub struct DaemonSettings {
     /// Filters which families `open_listeners` tries. Default
     /// `Any` (`AF_UNSPEC`) means dual-stack.
     pub addressfamily: AddrFamily,
-    // Chunk 4+: ~33 more fields.
+    /// `maxtimeout` (`net_setup.c:527-533`). Retry-backoff cap in
+    /// seconds. Default 900 (15 min). `retry_outgoing` (`net_socket.
+    /// c:408-410`) caps `outgoing->timeout` here.
+    pub maxtimeout: u32,
+    // Chunk 4+: ~32 more fields.
 }
 
 impl Default for DaemonSettings {
@@ -211,6 +220,8 @@ impl Default for DaemonSettings {
             port: 655,
             // C `net_socket.c:38`: `int addressfamily = AF_UNSPEC`.
             addressfamily: AddrFamily::Any,
+            // C `net_setup.c:533`: `maxtimeout = 900`.
+            maxtimeout: MAX_TIMEOUT_DEFAULT,
         }
     }
 }
@@ -409,6 +420,28 @@ pub struct Daemon {
     /// (`protocol_edge.c:288`): peer says we DON'T have an edge
     /// we DO have.
     pub(crate) contradicting_del_edge: u32,
+
+    /// `outgoing_list` (`net_socket.c:54`). One slot per `ConnectTo`
+    /// in `tinc.conf`. C uses a `list_t` of `outgoing_t*`; we slot.
+    /// Populated by `try_outgoing_connections` at setup. Never
+    /// shrunk in chunk 6 (the C mark-sweep at `:870-883` only fires
+    /// on SIGHUP-reload, chunk 8).
+    pub(crate) outgoings: SlotMap<OutgoingId, Outgoing>,
+
+    /// Per-outgoing retry timer. C `outgoing_t.ev` (`net.h:123`);
+    /// kept parallel for the same layering reason as `conn_io`.
+    /// `setup_outgoing_connection` (`net_socket.c:666`) does
+    /// `timeout_del(&outgoing->ev)` first thing.
+    pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerId>,
+
+    /// In-flight outgoing connect: socket NOT YET in `Connection`.
+    /// The async-connect dance (`net_socket.c:517-555`) keeps the
+    /// `socket2::Socket` for the `send(NULL,0,0)` probe and `take_
+    /// error()` (which need the wrapper, not the raw fd). Once the
+    /// probe succeeds, the `Socket` is consumed into the `Connection`
+    /// fd. Keyed by `ConnId` (the connection slot is allocated at
+    /// `do_outgoing_connection` time, fd-less; this map fills it).
+    pub(crate) connecting_socks: slotmap::SecondaryMap<ConnId, socket2::Socket>,
 
     /// Last `sssp` result. C `node_t` stores `nexthop`/`via`/
     /// `distance` directly on the node (written by `graph.c:188-196`);
@@ -743,9 +776,38 @@ impl Daemon {
         let mut node_ids = HashMap::new();
         node_ids.insert(name.clone(), myself);
 
+        // ─── ConnectTo (try_outgoing_connections, net_socket.c:815-884)
+        // C: walk `ConnectTo` configs, `lookup_or_add_node`, build
+        // `outgoing_t`, call `setup_outgoing_connection`. The actual
+        // connect is done by `run()` (it owns the EventLoop); we
+        // collect the names here. The mark-sweep at `:870-883`
+        // (terminate connections whose ConnectTo was removed) only
+        // matters on SIGHUP-reload — chunk 8.
+        //
+        // C `:828`: `if(!check_id(name)) continue` — skip invalid.
+        // C `:836`: `if(!strcmp(name, myself->name)) continue` —
+        // skip self.
+        let connect_to: Vec<String> = config
+            .lookup("ConnectTo")
+            .map(|e| e.get_str().to_owned())
+            .filter(|n| {
+                if !tinc_proto::check_id(n) {
+                    log::error!(target: "tincd",
+                                "Invalid name for outgoing connection: {n}");
+                    return false;
+                }
+                if *n == name {
+                    log::warn!(target: "tincd",
+                                "ConnectTo = {n} is ourselves; skipping");
+                    return false;
+                }
+                true
+            })
+            .collect();
+
         log::info!(target: "tincd", "Ready");
 
-        Ok(Self {
+        let mut daemon = Self {
             conns: SlotMap::with_key(),
             conn_io: slotmap::SecondaryMap::new(),
             device,
@@ -770,6 +832,9 @@ impl Daemon {
             edge_addrs: HashMap::new(),
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
+            outgoings: SlotMap::with_key(),
+            outgoing_timers: slotmap::SecondaryMap::new(),
+            connecting_socks: slotmap::SecondaryMap::new(),
             last_routes: Vec::new(),
             settings,
             ev,
@@ -778,7 +843,43 @@ impl Daemon {
             pingtimer,
             age_timer,
             running: true,
-        })
+        };
+
+        // ─── try_outgoing_connections — the actual setup
+        // C `net_socket.c:852-863`: per ConnectTo, build outgoing_t,
+        // lookup_or_add_node, setup_outgoing_connection. Done HERE
+        // (not above) because it needs `&mut self` for the slotmap +
+        // graph + EventLoop.
+        for peer in connect_to {
+            // C `:853-858`: `n = lookup_node(name); if(!n) { n =
+            // new_node(name); node_add(n); }`. The node goes into
+            // the graph BEFORE we connect; an ADD_EDGE arriving via
+            // some OTHER path can find it.
+            daemon.lookup_or_add_node(&peer);
+            // C `:860-861`: `outgoing = xzalloc; outgoing->node = n`.
+            // Addr cache: open with config `Address` lines resolved.
+            let config_addrs = resolve_config_addrs(&daemon.confbase, &peer);
+            let addr_cache =
+                crate::addrcache::AddressCache::open(&daemon.confbase, &peer, config_addrs);
+            let oid = daemon.outgoings.insert(Outgoing {
+                node_name: peer,
+                timeout: 0,
+                addr_cache,
+            });
+            // Per-outgoing retry timer slot. Disarmed; `retry_
+            // outgoing` arms it. C `outgoing_t.ev` is xzalloc'd
+            // (= disarmed timer).
+            let tid = daemon.timers.add(TimerWhat::RetryOutgoing(oid));
+            daemon.outgoing_timers.insert(oid, tid);
+            // C `:862`: `setup_outgoing_connection(outgoing, true)`.
+            daemon.setup_outgoing_connection(oid);
+        }
+
+        // STUB(chunk-8): mark-sweep (`:870-883`). Terminate
+        // connections whose ConnectTo was removed; only matters on
+        // SIGHUP-reload.
+
+        Ok(daemon)
     }
 
     /// `main_loop()` (`net.c:487-527`) — the `while(running)` loop.
@@ -836,10 +937,14 @@ impl Daemon {
                 match t {
                     TimerWhat::Ping => self.on_ping_tick(),
                     TimerWhat::AgePastRequests => self.on_age_past_requests(),
+                    TimerWhat::RetryOutgoing(oid) => {
+                        // C `retry_outgoing_handler` → `setup_
+                        // outgoing_connection` (`net_socket.c:664`).
+                        self.setup_outgoing_connection(oid);
+                    }
                     TimerWhat::Periodic
                     | TimerWhat::KeyExpire
                     | TimerWhat::AgeSubnets
-                    | TimerWhat::RetryOutgoing
                     | TimerWhat::UdpPing => {
                         // Not armed in skeleton. Unreachable.
                         unreachable!("timer {t:?} not armed in skeleton")
@@ -884,6 +989,16 @@ impl Daemon {
                         // it). slotmap returns None for stale keys —
                         // this is the generation guard.
                         if !self.conns.contains_key(id) {
+                            continue;
+                        }
+                        // C `net_socket.c:517-555`: connecting check
+                        // FIRST. The async-connect probe.
+                        if self.conns[id].connecting {
+                            self.on_connecting(id);
+                            // Probe might have terminated. Re-check
+                            // before falling through. C `:550 return`
+                            // (the probe always returns; the `:556`
+                            // read/write dispatch is the NEXT wake).
                             continue;
                         }
                         // `net_socket.c:556-561`: write before read.
@@ -2719,6 +2834,8 @@ impl Daemon {
         // Possible (peer reboots, reconnects before we've timed out
         // the old). Handle it: terminate old, accept new.
         let name = conn.name.clone();
+        let conn_outgoing = conn.outgoing.map(OutgoingId::from);
+        let conn_addr = conn.address;
         let edge_addr = conn.address.map(|mut a| {
             // C `:1024-1025`: `sockaddrcpy(&edge->address, &c->
             // address); sockaddr_setport(&edge->address, hisport)`.
@@ -2739,6 +2856,24 @@ impl Daemon {
         // unreachable. Take the no-overflow version.
         let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
         let edge_options = conn.options;
+
+        // C `protocol_auth.c:939-945`: `if(c->outgoing) { c->
+        // outgoing->timeout = 0; add_recent_address(...) }`. The
+        // connection got all the way to ACK — the address WORKED.
+        // Reset the backoff for next time; move the addr to front
+        // of the cache.
+        if let Some(oid) = conn_outgoing {
+            if let Some(o) = self.outgoings.get_mut(oid) {
+                o.timeout = 0;
+                if let Some(a) = conn_addr {
+                    o.addr_cache.add_recent(a);
+                }
+                // C `address_cache.c:251`: `reset_address_cache`.
+                // Next retry walks from the top (which is now the
+                // working addr).
+                o.addr_cache.reset();
+            }
+        }
 
         // (drop conn borrow before touching self.nodes / terminate)
         if let Some(old) = self.nodes.get(&name) {
@@ -3035,10 +3170,288 @@ impl Daemon {
             }
         }
 
-        // STUB(chunk-6 commit-2): `c->outgoing` retry (`net.c:
-        // 155-161`). When an outgoing connection drops, immediately
-        // retry `do_outgoing_connection`. Needs `Connection.
-        // outgoing: Option<OutgoingId>`.
+        // C `net.c:155-161`: `c->outgoing` retry. When an outgoing
+        // connection drops, immediately try again. C `:161`:
+        // `do_outgoing_connection(outgoing)`. The conn was already
+        // removed; the addr cache cursor moves to the next addr.
+        // If THAT also fails, `retry_outgoing` arms the backoff.
+        //
+        // The `was_active` gate is intentional: `:161` runs
+        // unconditionally in C, but for us a NON-active outgoing
+        // (probe failed) is already handled by `on_connecting`→
+        // `do_outgoing_connection` directly. Don't double-retry.
+        if was_active {
+            if let Some(oid) = self.nodes.get(&conn_name).and_then(|_| {
+                // Can't read `conn.outgoing` (conn already
+                // dropped). Look it up by name in `outgoings`.
+                self.outgoings
+                    .iter()
+                    .find(|(_, o)| o.node_name == conn_name)
+                    .map(|(id, _)| id)
+            }) {
+                // C `ack_h:942`: `c->outgoing->timeout = 0` was
+                // already done in `on_ack` — wait, no, we never
+                // ported that. Do it here: a connection that GOT
+                // to ACK had a working address; reset the backoff.
+                if let Some(o) = self.outgoings.get_mut(oid) {
+                    o.timeout = 0;
+                }
+                self.do_outgoing_connection(oid);
+            }
+        }
+    }
+
+    // ─── outgoing connections (`net_socket.c:405-681`)
+
+    /// `setup_outgoing_connection` (`net_socket.c:664-681`). Disarm
+    /// the retry timer, check if we're already connected, else dial.
+    ///
+    /// C `:666`: `timeout_del(&outgoing->ev)` — cancel any pending
+    /// retry. We're about to TRY, so the backoff timer is moot.
+    /// C `:674`: `if(n->connection) { log "Already connected";
+    /// return }`. Don't dial out if we already have a conn (either
+    /// they connected to US, or a previous outgoing succeeded).
+    fn setup_outgoing_connection(&mut self, oid: OutgoingId) {
+        // C `:666`: `timeout_del(&outgoing->ev)`. Our `set` would
+        // re-arm anyway, but explicitly disarming matches the C
+        // and prevents the timer from firing while a connect is
+        // in flight (which would start a SECOND connect).
+        // tinc-event's `del` frees the slot; we want to KEEP the
+        // slot, just disarm. There's no `unset`. Workaround: don't
+        // del; the next `retry_outgoing` `set` overwrites. The
+        // timer can't fire mid-connect because we won't return to
+        // `run()` until this function exits.
+
+        let Some(outgoing) = self.outgoings.get(oid) else {
+            return; // gone (chunk 8's mark-sweep)
+        };
+        let name = outgoing.node_name.clone();
+
+        // C `:674-676`: `if(n->connection)`. Our `NodeState.conn`.
+        if self.nodes.get(&name).and_then(|ns| ns.conn).is_some() {
+            log::info!(target: "tincd::conn",
+                       "Already connected to {name}");
+            return;
+        }
+
+        // C `:678`: `do_outgoing_connection(outgoing)`.
+        self.do_outgoing_connection(oid);
+    }
+
+    /// `do_outgoing_connection` (`net_socket.c:564-662`). The `goto
+    /// begin` loop: walk the addr cache, try each addr, register
+    /// the first one that doesn't fail synchronously. Exhausted →
+    /// arm the retry-backoff timer.
+    fn do_outgoing_connection(&mut self, oid: OutgoingId) {
+        loop {
+            let Some(outgoing) = self.outgoings.get_mut(oid) else {
+                return;
+            };
+            let name = outgoing.node_name.clone();
+            match try_connect(&mut outgoing.addr_cache, &name) {
+                ConnectAttempt::Started { sock, addr } => {
+                    // C `:649-658`: `c->status.connecting = true;
+                    // c->name = name; connection_add(c); io_add(
+                    // ..., IO_READ | IO_WRITE)`. The WRITE
+                    // registration is what triggers `on_connecting`
+                    // when the kernel finishes (or fails) the
+                    // async connect.
+                    let now = self.timers.now();
+                    let fd = sock.as_raw_fd();
+                    // The probe needs `&Socket` (for `take_error`);
+                    // `Connection.fd` is `OwnedFd`. Same fd, two
+                    // owners would double-close. dup the fd: the
+                    // probe sock drops after `finish_connecting`;
+                    // the dup lives on. One extra fd for ~1 RTT.
+                    // The C doesn't have this split (its `getsockopt`
+                    // takes a raw `int`); it's the cost of
+                    // type-safe ownership.
+                    let dup = match sock.try_clone() {
+                        Ok(d) => OwnedFd::from(d),
+                        Err(e) => {
+                            log::error!(target: "tincd::conn",
+                                        "dup failed for {addr}: {e}");
+                            // sock drops; retry next addr.
+                            continue;
+                        }
+                    };
+                    let conn = Connection::new_outgoing(
+                        dup,
+                        name,
+                        fmt_addr(&addr),
+                        addr,
+                        slotmap::Key::data(&oid),
+                        now,
+                    );
+                    let id = self.conns.insert(conn);
+                    self.connecting_socks.insert(id, sock);
+                    // C `:658`: `io_add(..., IO_READ | IO_WRITE)`.
+                    // ReadWrite: the WRITE wake is the probe trigger
+                    // (epoll EPOLLOUT fires when connect completes
+                    // OR fails). READ is registered too (the C does
+                    // it; loopback connect+immediate-data is possible).
+                    match self.ev.add(fd, Io::ReadWrite, IoWhat::Conn(id)) {
+                        Ok(io_id) => {
+                            self.conn_io.insert(id, io_id);
+                        }
+                        Err(e) => {
+                            log::error!(target: "tincd::conn",
+                                        "io_add failed: {e}");
+                            self.conns.remove(id);
+                            self.connecting_socks.remove(id);
+                            continue; // try next addr
+                        }
+                    }
+                    return; // C `:660`: `return true`.
+                }
+                ConnectAttempt::Retry => {
+                    // C `goto begin`. Next iteration tries the next
+                    // addr from the cache.
+                }
+                ConnectAttempt::Exhausted => {
+                    // C `:572-575`: `retry_outgoing(outgoing);
+                    // return false`.
+                    self.retry_outgoing(oid);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `retry_outgoing` (`net_socket.c:405-417`). Bump the backoff
+    /// (`timeout += 5`, cap at maxtimeout), arm the timer. The
+    /// `RetryOutgoing(oid)` dispatch arm calls `setup_outgoing_
+    /// connection` when it fires.
+    ///
+    /// C `:414` jitter: `+ jitter()` (≤ 1s random ms). Not ported
+    /// (see lib.rs jitter doc — the loop's tick rate already
+    /// desyncs identical-config daemons).
+    fn retry_outgoing(&mut self, oid: OutgoingId) {
+        let Some(outgoing) = self.outgoings.get_mut(oid) else {
+            return;
+        };
+        let timeout = outgoing.bump_timeout(self.settings.maxtimeout);
+        // C `:413`: also resets the addr cache cursor for next time.
+        // Wait — it doesn't. The C `reset_address_cache` is called
+        // from `setup_outgoing_connection` (`:670`), not here. We
+        // didn't port that line either. Reset HERE so the next
+        // retry walks from the top.
+        outgoing.addr_cache.reset();
+        log::info!(target: "tincd::conn",
+                   "Trying to re-establish outgoing connection in {timeout} seconds");
+        if let Some(&tid) = self.outgoing_timers.get(oid) {
+            self.timers
+                .set(tid, Duration::from_secs(u64::from(timeout)));
+        }
+    }
+
+    /// `handle_meta_io` connecting branch (`net_socket.c:517-555`).
+    /// Probe the async connect. Success → `finish_connecting`. Fail
+    /// → terminate (which retries the outgoing).
+    fn on_connecting(&mut self, id: ConnId) {
+        let Some(sock) = self.connecting_socks.get(id) else {
+            // Shouldn't happen (we always insert when conn.
+            // connecting=true). Defensive.
+            log::warn!(target: "tincd::conn",
+                       "on_connecting: no socket for {id:?}");
+            self.terminate(id);
+            return;
+        };
+        match probe_connecting(sock) {
+            Ok(true) => {
+                // C `:553-554`: `c->status.connecting = false;
+                // finish_connecting(c)`.
+                self.finish_connecting(id);
+            }
+            Ok(false) => {
+                // Spurious wakeup. Stay registered for WRITE.
+                // C `:534`: `return`.
+            }
+            Err(e) => {
+                // C `:546-547`: log DEBUG "Error while connecting
+                // to %s (%s): %s"; terminate. The C uses
+                // `terminate_connection(c, false)` — the `false`
+                // is `report = false` (don't broadcast DEL_EDGE,
+                // there IS no edge yet). Our `terminate` keys on
+                // `was_active` which is also false here.
+                let (name, hostname) = self
+                    .conns
+                    .get(id)
+                    .map(|c| (c.name.clone(), c.hostname.clone()))
+                    .unwrap_or_default();
+                log::debug!(target: "tincd::conn",
+                            "Error while connecting to {name} ({hostname}): {e}");
+                // Stash the OutgoingId BEFORE terminate (which
+                // drops the conn). The probe-fail path (NOT
+                // `was_active`) doesn't trigger terminate's retry,
+                // so we drive `do_outgoing_connection` directly
+                // — try the NEXT addr from the cache.
+                let oid = self
+                    .conns
+                    .get(id)
+                    .and_then(|c| c.outgoing)
+                    .map(OutgoingId::from);
+                self.connecting_socks.remove(id);
+                self.terminate(id);
+                if let Some(oid) = oid {
+                    self.do_outgoing_connection(oid);
+                }
+            }
+        }
+    }
+
+    /// `finish_connecting` (`net_socket.c:419-426`). The async
+    /// connect succeeded. Clear the connecting flag, switch
+    /// interest to READ-only, send our ID line. The peer's `id_h`
+    /// then fires; OUR `id_h` fires on their reply.
+    ///
+    /// `addrcache.add_recent`: the address WORKED; move it to
+    /// front. C does this in `ack_h` (`protocol_auth.c:939-943`
+    /// `add_recent_address(c->outgoing->node->address_cache, ...)`)
+    /// not here — the C waits until ACK to be sure. We do too:
+    /// move the `add_recent` to `on_ack`. Connecting through ACK
+    /// is the full proof; the right port alone doesn't mean tinc.
+    fn finish_connecting(&mut self, id: ConnId) {
+        // Drop the probe socket. The dup'd `OwnedFd` on the
+        // Connection is the live handle from here on.
+        self.connecting_socks.remove(id);
+
+        let Some(conn) = self.conns.get_mut(id) else {
+            return;
+        };
+        // C `:421`: `"Connected to %s (%s)"`.
+        log::info!(target: "tincd::conn",
+                   "Connected to {} ({})", conn.name, conn.hostname);
+        // C `:423`: `c->last_ping_time = now.tv_sec`. The pingtimer
+        // sweep (chunk 8) keys on this.
+        conn.last_ping_time = self.timers.now();
+        // C `:424`: `c->status.connecting = false`.
+        conn.connecting = false;
+
+        // C `:425`: `send_id(c)`. WE go first (initiator). The
+        // peer's `id_h:451` `if(!c->outgoing) send_id(c)` replies.
+        // Same line as our responder-side `handle_id` sends.
+        let needs_write = conn.send(format_args!(
+            "{} {} {}.{}",
+            Request::Id as u8,
+            self.name,
+            tinc_proto::request::PROT_MAJOR,
+            tinc_proto::request::PROT_MINOR
+        ));
+
+        // Re-register: we were ReadWrite (for the WRITE-probe wake);
+        // now we want READ (for the peer's ID reply). If we just
+        // queued data, ReadWrite (let it flush). C `:658` registers
+        // READ|WRITE always; `handle_meta_write` (`:509`) drops
+        // WRITE when outbuf empties. Same.
+        if let Some(&io_id) = self.conn_io.get(id) {
+            let interest = if needs_write { Io::ReadWrite } else { Io::Read };
+            if let Err(e) = self.ev.set(io_id, interest) {
+                log::error!(target: "tincd::conn",
+                            "io_set failed for {id:?}: {e}");
+                self.terminate(id);
+            }
+        }
     }
 }
 

@@ -34,6 +34,7 @@ pub mod daemon;
 pub mod graph_glue;
 pub mod keys;
 pub mod listen;
+pub mod outgoing;
 pub mod packet;
 pub mod proto;
 pub mod seen;

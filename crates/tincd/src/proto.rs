@@ -496,9 +496,23 @@ pub fn handle_id(
     }
 
     // C `:383-393`: outgoing? check c->name == name. Else: c->name
-    // = name. Chunk 4a is responder-only (we accepted, c->outgoing
-    // = NULL). So: just set the name.
-    conn.name = name.to_string();
+    // = name. For outgoing, `do_outgoing_connection` (`net_socket.
+    // c:653`) already set `c->name` to the `ConnectTo` value; the
+    // peer must confirm. C `:386-390`: mismatch → "is X instead
+    // of Y" → false. Prevents connecting to the WRONG node when
+    // an `Address` line points at someone else (DNS hijack, stale
+    // config, NAT confusion).
+    if conn.outgoing.is_some() {
+        if conn.name != name {
+            return Err(DispatchError::BadId(format!(
+                "peer {} is {} instead of {}",
+                conn.hostname, name, conn.name
+            )));
+        }
+        // Name matches; nothing to do (already set).
+    } else {
+        conn.name = name.to_string();
+    }
 
     // ─── Version check (`:398-401`)
     // C: `c->protocol_major != myself->connection->protocol_major`.
@@ -599,10 +613,10 @@ pub fn handle_id(
     conn.allow_request = Some(Request::Ack);
 
     // ─── send_id reply (`:451-453`)
-    // C: `if(!c->outgoing) send_id(c)`. We accepted (responder),
-    // so: send. SAME line as the control branch sends — the peer
-    // sees our id reply, fires their `id_h`, version-checks us,
-    // proceeds to their SPTPS initiator side.
+    // C: `if(!c->outgoing) send_id(c)`. Responder sends; the
+    // initiator already sent in `finish_connecting`. SAME line as
+    // the control branch sends — the peer sees our id reply, fires
+    // their `id_h`, version-checks us, proceeds.
     //
     // ORDER MATTERS: this line goes BEFORE the SPTPS KEX bytes.
     // The peer's `receive_meta` reads our `"0 myname 17.7\n"`,
@@ -610,13 +624,19 @@ pub fn handle_id(
     // is SPTPS mode, gets our KEX. If we sent KEX first, the peer
     // would try to readline() it and fail (no `\n` in framed bytes,
     // or worse, find a stray `\n` mid-ciphertext and parse garbage).
-    let needs_write = conn.send(format_args!(
-        "{} {} {}.{}",
-        Request::Id as u8,
-        ctx.my_name,
-        PROT_MAJOR,
-        PROT_MINOR
-    ));
+    let needs_write = if conn.outgoing.is_some() {
+        // Initiator already sent ID in `finish_connecting`. Don't
+        // double-send. The C `:451` `if(!c->outgoing)` guard.
+        false
+    } else {
+        conn.send(format_args!(
+            "{} {} {}.{}",
+            Request::Id as u8,
+            ctx.my_name,
+            PROT_MAJOR,
+            PROT_MINOR
+        ))
+    };
 
     // ─── sptps_start (`:455-468`)
     // C: `sptps_start(&c->sptps, c, c->outgoing, false, mykey,
@@ -627,17 +647,30 @@ pub fn handle_id(
     // mode ignores it; `sptps.c:720` `s->replaywin = sptps_replaywin`
     // (= 16) but stream mode never reads it).
     //
-    // Label: see `tcp_label` doc. Chunk 4a is responder-only →
-    // initiator is the peer (`name`), responder is us (`my_name`).
-    let label = tcp_label(name, ctx.my_name);
+    // Label: see `tcp_label` doc. C `:461-465`: outgoing
+    // → `(myself, c->name)`; inbound → `(c->name, myself)`.
+    // The arg order is always (initiator, responder). For
+    // outgoing, WE are the initiator.
+    let label = if conn.outgoing.is_some() {
+        tcp_label(ctx.my_name, name)
+    } else {
+        tcp_label(name, ctx.my_name)
+    };
 
     // mykey clone via blob roundtrip. See `tinc-tools/cmd/join.rs:
     // 1787` for the precedent. SigningKey deliberately isn't Clone;
     // the roundtrip makes the copy VISIBLE.
     let mykey_clone = SigningKey::from_blob(&ctx.mykey.to_blob());
 
+    // C `:467`: `sptps_start(..., c->outgoing, ...)`. The third
+    // arg is `bool initiator`. Maps to our `Role`.
+    let role = if conn.outgoing.is_some() {
+        Role::Initiator
+    } else {
+        Role::Responder
+    };
     let (sptps, init) = Sptps::start(
-        Role::Responder,
+        role,
         Framing::Stream,
         mykey_clone,
         ecdsa,
