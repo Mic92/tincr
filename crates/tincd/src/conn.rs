@@ -210,6 +210,14 @@ impl LineBuf {
 /// `id_h` overwrites `name` (`"<control>"` for `^` branch, peer
 /// node name for the bare-name branch). `hostname` never changes
 /// (it's the immutable accept-time fact).
+// `struct_excessive_bools`: this IS a state machine, but the C
+// `connection_status_t` is a 32-bit packed bitfield (`connection.h:
+// 38-56`). We model the bits we touch as bools (the rest stay
+// untracked = 0). A state-enum would NOT capture the C semantics:
+// `pinged` and `active` are independent (a conn can be active AND
+// pinged — that's the steady-state keepalive). The bools mirror the
+// C bits; `status_value()` packs them back for `dump connections`.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Connection {
     /// `c->socket`. C uses raw `int`; we own it. Drop closes.
     fd: OwnedFd,
@@ -289,6 +297,12 @@ pub struct Connection {
     /// sets it, the `c->edge` pointer-as-bool IS the active check.
     /// Set in `on_ack`, cleared in `terminate`.
     pub active: bool,
+    /// `c->status.pinged` (`connection.h:38`, bit 0). Set by
+    /// `send_ping` (`protocol_misc.c:48`); cleared by `pong_h`
+    /// (`:65`). The ping sweep (`net.c:250-257`) checks: if `pinged`
+    /// AND `last_ping_time + pingtimeout` elapsed → dead, terminate.
+    /// A PONG within `pingtimeout` clears the bit → conn survives.
+    pub pinged: bool,
     /// `c->status.connecting` (`connection.h:41`, bit 2). True while
     /// the async-connect is in flight (`net_socket.c:652` sets,
     /// `:553` clears in `handle_meta_io`). The `IoWhat::Conn` arm
@@ -366,6 +380,7 @@ impl Connection {
             start: now,
             address: None,
             active: false,
+            pinged: false,
             connecting: false,
             outgoing: None,
         }
@@ -412,6 +427,7 @@ impl Connection {
             start: now,
             address: Some(address),
             active: false,
+            pinged: false,
             connecting: false,
             outgoing: None,
         }
@@ -459,6 +475,7 @@ impl Connection {
             start: now,
             address: Some(address),
             active: false,
+            pinged: false,
             // C `:652`: `c->status.connecting = true`.
             connecting: true,
             outgoing: Some(outgoing),
@@ -485,11 +502,9 @@ impl Connection {
     /// declaration-order bool is bit N.
     ///
     /// We don't HAVE the union; build the int from the bools we
-    /// track. Bits we don't model (pinged, encryptout, mst, pcap,
-    /// log, ...) stay 0. They're 0 in the C too at the points where
-    /// `dump_connections` runs against chunk-4b conns: pinged is
-    /// the ping-timeout state (chunk 8), mst is set by `graph()`
-    /// (chunk 5), pcap/log by control RPCs (chunk 8).
+    /// track. Bits we don't model (encryptout, mst, pcap, log, ...)
+    /// stay 0. mst is set by `graph()` (chunk 9); pcap/log by
+    /// control RPCs (chunk 10).
     ///
     /// Bit positions per `connection.h:38-56` (LSB-first):
     ///   0 pinged, 1 unused_active, 2 connecting, 3 unused_termreq,
@@ -498,6 +513,11 @@ impl Connection {
     #[must_use]
     pub fn status_value(&self) -> u32 {
         let mut v = 0u32;
+        if self.pinged {
+            // Bit 0: `pinged`. Set by `send_ping`, cleared by
+            // `pong_h`. The C sets it (`protocol_misc.c:48`).
+            v |= 1 << 0;
+        }
         if self.active {
             // Bit 1: `unused_active`. The C never sets this bit
             // (`c->edge` is the runtime check). We expose it for

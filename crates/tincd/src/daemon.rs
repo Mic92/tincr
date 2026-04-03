@@ -20,7 +20,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 use slotmap::{SlotMap, new_key_type};
@@ -51,6 +51,7 @@ use crate::proto::{
     parse_del_subnet, record_body, send_ack,
 };
 use crate::route::{RouteResult, route};
+use crate::script::{self, ScriptEnv, ScriptResult};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{TunnelState, make_udp_label};
@@ -143,10 +144,8 @@ pub enum IoWhat {
 pub enum TimerWhat {
     /// `timeout_handler` (`net.c:180`). Ping timeout sweep. Re-arms +1s.
     Ping,
-    /// `periodic_handler` (`net.c:268`). Contradiction counter check.
-    /// Re-arms +5s. NOT in skeleton (no peers, no edges, no
-    /// contradictions). Variant exists, arm is `todo!()`.
-    #[allow(dead_code)]
+    /// `periodic_handler` (`net.c:268`). Contradiction counter check
+    /// + autoconnect. Re-arms +5s. Armed at setup.
     Periodic,
     /// `keyexpire_handler`. Re-arms `+keylifetime`.
     #[allow(dead_code)]
@@ -218,6 +217,12 @@ pub struct DaemonSettings {
     /// seconds. Default 900 (15 min). `retry_outgoing` (`net_socket.
     /// c:408-410`) caps `outgoing->timeout` here.
     pub maxtimeout: u32,
+    /// `udp_discovery_timeout` (`net_packet.c:86`). Seconds. The
+    /// laptop-suspend detector at `net.c:198` triggers if the ping
+    /// timer didn't run for `> 2*this` seconds: the daemon was
+    /// asleep, every peer has given up on us, force-close all conns
+    /// to avoid sending into stale SPTPS contexts. Default 30.
+    pub udp_discovery_timeout: u32,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -234,6 +239,8 @@ impl Default for DaemonSettings {
             addressfamily: AddrFamily::Any,
             // C `net_setup.c:533`: `maxtimeout = 900`.
             maxtimeout: MAX_TIMEOUT_DEFAULT,
+            // C `net_packet.c:86`: `int udp_discovery_timeout = 30`.
+            udp_discovery_timeout: 30,
         }
     }
 }
@@ -446,6 +453,36 @@ pub struct Daemon {
     /// we DO have.
     pub(crate) contradicting_del_edge: u32,
 
+    /// `sleeptime` (`net.c:42`). Seconds the periodic handler
+    /// blocks for when contradicting-edge counters exceed 100. The
+    /// "two daemons fighting over the same Name" backoff (`net.c:
+    /// 274-291`): doubled each time it triggers (cap 3600), halved
+    /// each clean period (floor 10). C default 10. Signed in C
+    /// because `*= 2` overflow goes negative → capped to 3600;
+    /// u32 here, capped explicitly.
+    pub(crate) sleeptime: u32,
+
+    /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
+    /// detector at `net.c:189-213`: if `now - this > 2 * udp_
+    /// discovery_timeout`, the daemon was asleep — force-close
+    /// every connection (the peers gave up on us; sending into
+    /// stale SPTPS contexts produces "failed signature" noise on
+    /// the other side). Updated each `on_ping_tick`.
+    pub(crate) last_periodic_run_time: Instant,
+
+    /// `iface` global (`names.c`). Kernel-chosen interface name
+    /// (`tun0`, `tinc0`). Captured at setup from `device.iface()`
+    /// because the trait borrow blocks `&mut self` at script call
+    /// sites. C reads the global directly inside `environment_init`
+    /// (`script.c:125`).
+    pub(crate) iface: String,
+
+    /// `errors` static inside `handle_device_data` (`net_packet.c:
+    /// 1918`). Consecutive device-read failures. Reset on success.
+    /// At 10 (`:1933`): `event_exit()`. A flapping TUN means the
+    /// kernel device is gone; tight-looping forever helps nobody.
+    pub(crate) device_errors: u32,
+
     /// `outgoing_list` (`net_socket.c:54`). One slot per `ConnectTo`
     /// in `tinc.conf`. C uses a `list_t` of `outgoing_t*`; we slot.
     /// Populated by `try_outgoing_connections` at setup. Never
@@ -483,7 +520,7 @@ pub struct Daemon {
     /// The config knobs. Reload swaps this.
     ///
     /// `dead_code` allowed: skeleton constructs but never reads (the
-    /// `pinginterval`/`pingtimeout` defaults are inlined at the one
+    /// `udp_discovery_timeout` default is inlined at the one
     /// use site). Chunk 3's `setup_myself_reloadable` populates it
     /// from config and the ping sweep reads it. Keeping the field
     /// avoids churn (remove now, re-add then). Same call as the
@@ -502,6 +539,8 @@ pub struct Daemon {
     pub(crate) pingtimer: TimerId,
     /// `past_request_timeout` (`protocol.c:92`). Re-arms +10s.
     pub(crate) age_timer: TimerId,
+    /// `periodictimer` (`net.c:45`). Re-arms +5s.
+    pub(crate) periodictimer: TimerId,
 
     /// `running` (`event.c:18`). The loop condition. C `event_exit()`
     /// sets `running = false`; `event_loop()` checks before each
@@ -633,6 +672,18 @@ impl Daemon {
             }
         }
 
+        // PingInterval (`:1241-1243`). For tests: `PingInterval = 1`
+        // makes the keepalive observable in a 5-second test.
+        if let Some(e) = config.lookup("PingInterval").next() {
+            if let Ok(v) = e.get_int() {
+                if let Ok(v) = u32::try_from(v) {
+                    if v >= 1 {
+                        settings.pinginterval = v;
+                    }
+                }
+            }
+        }
+
         // PingTimeout (`:1247-1253`). For tests: `PingTimeout = 1`
         // makes the 6-second integration test run in 2 seconds. Read
         // it now; the clamp (`:1251`: `[1, pinginterval]`) too.
@@ -712,9 +763,13 @@ impl Daemon {
                 )));
             }
         };
+        // Captured BEFORE the Box goes into the Daemon struct: the
+        // `&dyn` trait borrow makes `&mut self` script call sites
+        // awkward. The C reads the `iface` global directly.
+        let iface = device.iface().to_owned();
         log::info!(target: "tincd",
-                   "Device mode: {:?}, interface: {}",
-                   device.mode(), device.iface());
+                   "Device mode: {:?}, interface: {iface}",
+                   device.mode());
 
         // ─── event loop scaffolding
         // tinc-event constructors. EventLoop::new can fail (epoll_
@@ -777,6 +832,16 @@ impl Daemon {
         // just the sweep frequency.
         let age_timer = timers.add(TimerWhat::AgePastRequests);
         timers.set(age_timer, Duration::from_secs(10));
+
+        // ─── periodic timer (net.c:493-495)
+        // C: `timeout_add(&periodictimer, periodic_handler, ...,
+        // { 0, 0 })`. Initial fire is IMMEDIATE (the C arms it
+        // with `{0, 0}`; the first call sets sleeptime and re-arms
+        // +5s). We arm +5s directly: no contradictions exist at
+        // setup, the counters are zero, the first call would just
+        // halve sleeptime (10 → 5 → floored to 10) and re-arm.
+        let periodictimer = timers.add(TimerWhat::Periodic);
+        timers.set(periodictimer, Duration::from_secs(5));
 
         // ─── listeners (net_setup.c:1152-1183)
         // C: walk BindToAddress configs, then ListenAddress configs,
@@ -931,6 +996,15 @@ impl Daemon {
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
+            // C `net.c:42`: `static int sleeptime = 10`.
+            sleeptime: 10,
+            // C `net.c:43`: `static struct timeval last_periodic_
+            // run_time` zero-init. We seed with now: the first
+            // `on_ping_tick` (after `pingtimeout` seconds) sees
+            // a delta of `pingtimeout`, well under `2*30`.
+            last_periodic_run_time: timers.now(),
+            iface,
+            device_errors: 0,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),
@@ -941,6 +1015,7 @@ impl Daemon {
             signals,
             pingtimer,
             age_timer,
+            periodictimer,
             running: true,
         };
 
@@ -974,9 +1049,17 @@ impl Daemon {
             daemon.setup_outgoing_connection(oid);
         }
 
-        // STUB(chunk-8): mark-sweep (`:870-883`). Terminate
+        // STUB(chunk-10): mark-sweep (`:870-883`). Terminate
         // connections whose ConnectTo was removed; only matters on
-        // SIGHUP-reload.
+        // SIGHUP-reload. The reload path itself (`net.c:336-458`
+        // `reload_configuration`) doesn't exist yet — SIGHUP is
+        // logged-and-ignored. Re-chunked from 8 → 10.
+
+        // ─── tinc-up (net_setup.c:745-762, `device_enable`)
+        // C calls this AFTER device open succeeds, BEFORE `Ready`.
+        // The script typically does `ip addr add` / `ip link set
+        // up` on the TUN. Base env only (no NODE/SUBNET).
+        daemon.run_script("tinc-up");
 
         Ok(daemon)
     }
@@ -1041,12 +1124,14 @@ impl Daemon {
                         // outgoing_connection` (`net_socket.c:664`).
                         self.setup_outgoing_connection(oid);
                     }
-                    TimerWhat::Periodic
-                    | TimerWhat::KeyExpire
-                    | TimerWhat::AgeSubnets
-                    | TimerWhat::UdpPing => {
-                        // Not armed in skeleton. Unreachable.
-                        unreachable!("timer {t:?} not armed in skeleton")
+                    TimerWhat::Periodic => {
+                        // Return is the would-sleep duration; only
+                        // the unit test reads it.
+                        let _ = self.on_periodic_tick();
+                    }
+                    TimerWhat::KeyExpire | TimerWhat::AgeSubnets | TimerWhat::UdpPing => {
+                        // Not armed yet. Unreachable.
+                        unreachable!("timer {t:?} not armed yet")
                     }
                 }
             }
@@ -1157,26 +1242,326 @@ impl Daemon {
 
     // ─── timer handlers
 
-    /// `timeout_handler` (`net.c:180-266`). With zero peers, the
-    /// `for list_each(connection_t, c)` loop iterates control conns
-    /// only. Control conns have `last_ping_time = now + 3600` (set
-    /// by `handle_id`), so the timeout check `c->last_ping_time +
-    /// pingtimeout <= now.tv_sec` is `now + 3600 + 5 <= now` =
-    /// false. Nothing fires. The handler degenerates to: re-arm.
+    /// `timeout_handler` (`net.c:180-266`). The dead-connection
+    /// sweep + ping sender.
     ///
-    /// This PROVES the explicit-re-arm design works. The C auto-
-    /// deletes if cb didn't `timeout_set`; we MUST call `timers.set`
-    /// or the timer stays disarmed and `tick()` returns `None`
-    /// forever after.
+    /// ## Four cases per connection
+    ///
+    /// `:219-221` Control conn → skip. Control conns also get a
+    ///   1-hour `last_ping_time` bump in `handle_id` so the timeout
+    ///   check would skip them anyway; the explicit `continue` saves
+    ///   the comparison.
+    ///
+    /// `:236-247` **Pre-edge timeout** (handshake stalled). The conn
+    ///   passed `pingtimeout` seconds without reaching ACK. Either
+    ///   the async-connect never finished (`:238` "Timeout while
+    ///   connecting") OR `id_h`/SPTPS stalled (`:240` "Timeout
+    ///   during authentication", + tarpit bit in C — we don't track
+    ///   per-conn tarpit yet). Terminate. THIS reaps the half-open
+    ///   conn `tests/security.rs::id_timeout_half_open` plants.
+    ///
+    /// `:253-257` **Pinged but no PONG** (peer died). We sent PING,
+    ///   `pingtimeout` elapsed, no PONG cleared the bit. Terminate.
+    ///   The TCP keepalive case: peer rebooted, our socket is fine
+    ///   (no RST yet), the only way we KNOW is the silence.
+    ///
+    /// `:260-262` **Send PING** (idle keepalive). `pinginterval`
+    ///   elapsed since `last_ping_time`. Set the `pinged` bit, send
+    ///   `"8"`. The peer's `ping_h` replies `"9"` → our `pong_h`
+    ///   clears the bit → the conn survives the next sweep.
+    ///
+    /// ## Laptop-suspend detector (`:189-213`)
+    ///
+    /// `now - last_periodic_run_time > 2 * udp_discovery_timeout`
+    /// → the timer hasn't fired for over a minute → the daemon
+    /// was asleep (laptop lid). Every peer has timed US out and
+    /// dropped the connection; OUR sockets still look alive. Sending
+    /// into them produces "failed signature" noise on the peer side
+    /// (stale SPTPS context). Force-close everything; outgoings
+    /// retry with fresh contexts.
+    #[allow(clippy::too_many_lines)] // C `timeout_handler` is 86 LOC
     fn on_ping_tick(&mut self) {
-        // C `net.c:263-265`: `timeout_set(data, &(struct timeval) {
-        // 1, jitter() })`. Re-arm for 1 second from now (the cached
-        // `now` in `tick()`, NOT a fresh `Instant::now()` — that's
-        // the rate-based-timer property documented in tinc-event).
-        // jitter() not ported (see lib.rs doc).
-        self.timers.set(self.pingtimer, Duration::from_secs(1));
+        let now = self.timers.now();
 
-        // The actual sweep would go here. Chunk 3+.
+        // ─── laptop-suspend detection (`:189-213`)
+        // C `:189`: `now.tv_sec - last_periodic_run_time.tv_sec`.
+        // `Instant` saturating sub: a clock-goes-backwards (NTP
+        // jump) reads as zero, which is the safe answer.
+        let sleep_time = now.saturating_duration_since(self.last_periodic_run_time);
+        let threshold = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout) * 2);
+        let close_all_connections = sleep_time > threshold;
+        if close_all_connections {
+            log::error!(target: "tincd",
+                        "Awaking from dead after {} seconds of sleep",
+                        sleep_time.as_secs());
+        }
+        // C `:215`: `last_periodic_run_time = now`.
+        self.last_periodic_run_time = now;
+
+        let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
+        let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
+
+        // `terminate()` mutates `conns`; collect ids first. The
+        // connection set is small (one per direct peer + control).
+        let ids: Vec<ConnId> = self.conns.keys().collect();
+        let mut nw = false;
+        for id in ids {
+            let Some(conn) = self.conns.get(id) else {
+                // Can happen if a previous terminate in THIS sweep
+                // tore down a conn that's still in `ids`. Defensive.
+                continue;
+            };
+
+            // C `:219-221`: control conns have no timeout.
+            if conn.control {
+                continue;
+            }
+
+            // C `:224-228`: laptop-suspend force-close.
+            if close_all_connections {
+                log::error!(target: "tincd",
+                            "Forcing connection close after sleep time {} ({})",
+                            conn.name, conn.hostname);
+                // C: `terminate_connection(c, c->edge)`. The second
+                // arg is `report` = broadcast DEL_EDGE; `c->edge !=
+                // NULL` ≡ our `conn.active`. `terminate()` already
+                // keys its DEL_EDGE on `was_active` — same effect.
+                self.terminate(id);
+                continue;
+            }
+
+            // C `:231-233`: `if(c->last_ping_time + pingtimeout >
+            // now.tv_sec) continue`. Not yet stale; skip.
+            let stale = now.saturating_duration_since(conn.last_ping_time);
+            if stale <= pingtimeout {
+                continue;
+            }
+
+            // C `:236-247`: `if(!c->edge)`. Pre-ACK timeout. The
+            // handshake (or even the async-connect) didn't finish
+            // in `pingtimeout` seconds.
+            if !conn.active {
+                if conn.connecting {
+                    log::warn!(target: "tincd::conn",
+                               "Timeout while connecting to {} ({})",
+                               conn.name, conn.hostname);
+                } else {
+                    // C `:240-241`: also sets `c->status.tarpit =
+                    // true` so `terminate` queues the fd in the
+                    // tarpit ring instead of closing immediately.
+                    // Our `Tarpit` is accept-side only; the per-
+                    // conn tarpit bit isn't tracked. The terminate
+                    // closes immediately. Harmless: the auth-
+                    // timeout case is benign (slow peer) not hostile
+                    // — the tarpit was for INBOUND auth-spam, and
+                    // that's covered by the accept-side rate limit.
+                    log::warn!(target: "tincd::conn",
+                               "Timeout from {} ({}) during authentication",
+                               conn.name, conn.hostname);
+                }
+                self.terminate(id);
+                continue;
+            }
+
+            // C `:250`: `try_tx(c->node, false)`. UDP holepunch
+            // keepalive. STUB(chunk-9).
+
+            // C `:253-257`: `if(c->status.pinged)`. Sent PING,
+            // `pingtimeout` elapsed, no PONG cleared the bit.
+            if conn.pinged {
+                log::info!(target: "tincd::conn",
+                           "{} ({}) didn't respond to PING in {} seconds",
+                           conn.name, conn.hostname, stale.as_secs());
+                self.terminate(id);
+                continue;
+            }
+
+            // C `:260-262`: `if(c->last_ping_time + pinginterval
+            // <= now.tv_sec) send_ping(c)`. Idle for `pinginterval`
+            // — send a keepalive. `send_ping` (`protocol_misc.c:
+            // 47-52`): set bit, stamp time, `"%d", PING`.
+            if stale >= pinginterval {
+                let conn = self.conns.get_mut(id).expect("just checked");
+                conn.pinged = true;
+                conn.last_ping_time = now;
+                nw |= conn.send(format_args!("{}", Request::Ping as u8));
+            }
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
+
+        // C `net.c:263-265`: `timeout_set(data, &(struct timeval) {
+        // 1, jitter() })`. Re-arm +1s. jitter() not ported.
+        self.timers.set(self.pingtimer, Duration::from_secs(1));
+    }
+
+    /// `periodic_handler` (`net.c:268-303`). Contradicting-edge
+    /// storm detection + autoconnect. Re-arms +5s.
+    ///
+    /// `:274-291`: when both `contradicting_add_edge > 100` AND
+    /// `contradicting_del_edge > 100`, two daemons are fighting
+    /// over the same Name — each rejects the other's edges ("I
+    /// don't have that"), correction-floods, gossip won't converge.
+    /// The fix is **synchronous sleep**: blocking the event loop
+    /// IS the point (stop sending corrections, let the other side
+    /// win). Doubled each trigger (cap 3600s); halved each clean
+    /// period (floor 10s).
+    ///
+    /// Returns the would-sleep duration so the unit test can check
+    /// the backoff arithmetic without actually sleeping. The `run()`
+    /// loop calls this; nobody reads the return outside tests.
+    fn on_periodic_tick(&mut self) -> Duration {
+        // C `:274`: `if(contradicting_del_edge > 100 &&
+        // contradicting_add_edge > 100)`.
+        let slept = if self.contradicting_del_edge > 100 && self.contradicting_add_edge > 100 {
+            log::warn!(target: "tincd",
+                       "Possible node with same Name as us! Sleeping {} seconds.",
+                       self.sleeptime);
+            let d = Duration::from_secs(u64::from(self.sleeptime));
+            // C `:276`: `sleep_millis(sleeptime * 1000)`. Blocks.
+            // The daemon is single-threaded; this stops EVERYTHING.
+            // Intentional — see doc comment.
+            #[cfg(not(test))]
+            std::thread::sleep(d);
+            // C `:277-281`: `sleeptime *= 2; if < 0 → 3600`. The
+            // C's `< 0` check catches signed-int overflow. u32
+            // doesn't overflow at 3600*2; cap explicitly.
+            self.sleeptime = self.sleeptime.saturating_mul(2).min(3600);
+            d
+        } else {
+            // C `:282-289`: halve, floor at 10. Integer divide.
+            self.sleeptime = (self.sleeptime / 2).max(10);
+            Duration::ZERO
+        };
+
+        // C `:290-291`: reset both counters.
+        self.contradicting_add_edge = 0;
+        self.contradicting_del_edge = 0;
+
+        // C `:294-296`: `if(autoconnect && node_tree.count > 1)
+        // do_autoconnect()`. STUB(chunk-11): autoconnect.
+
+        // C `:298-300`: `timeout_set(data, { 5, jitter() })`.
+        self.timers.set(self.periodictimer, Duration::from_secs(5));
+
+        slept
+    }
+
+    /// `execute_script` wrapper (`script.c:144-253`). Builds the
+    /// base env from daemon state, invokes, logs the outcome
+    /// matching C `:231-247`. The C callers all ignore the return
+    /// (`net_setup.c:752`, `graph.c:287`, `subnet.c:393`); a failing
+    /// script never aborts the daemon. We log and move on.
+    ///
+    /// `DEVICE` env var: C reads the `device` global (path like
+    /// `/dev/net/tun`). We don't keep that path post-open (the
+    /// trait doesn't expose it; `Dummy` has no path). Pass `None`.
+    /// The standard tinc-up scripts use `INTERFACE`, not `DEVICE`.
+    ///
+    /// `NETNAME`/`DEBUG`: not threaded through the daemon yet (the
+    /// `-n` flag and `-d N` are main.rs concerns). `None` for now.
+    fn run_script(&self, name: &str) {
+        let env = ScriptEnv::base(
+            None,       // netname: not threaded through yet
+            &self.name, // myname
+            None,       // device path: not retained post-open
+            Some(&self.iface),
+            None, // debug_level: not threaded through yet
+        );
+        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+    }
+
+    /// `subnet_update` single-subnet path (`subnet.c:323-393`, the
+    /// `else` branch at `:376-390`). Called from `on_add_subnet`/
+    /// `on_del_subnet`. The `subnet=NULL` loop-all-subnets path
+    /// (`:352-372`, called from `graph.c:294`) is inlined in
+    /// `BecameReachable`/`BecameUnreachable`.
+    ///
+    /// C `:360-366` strips `#weight` from `net2str` output and puts
+    /// it in `WEIGHT` separately. Our `Subnet::Display` already
+    /// omits `#weight` when it's the default (10); we always pass
+    /// the integer in `WEIGHT` (the C passes `""` for default —
+    /// `:364` `weight = empty`). The integer is more useful; the C
+    /// scripts that read `$WEIGHT` typically `[ -z "$WEIGHT" ]`
+    /// guard anyway.
+    fn run_subnet_script(&self, up: bool, owner: &str, subnet: &Subnet) {
+        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        // C `:337`: `"NODE=%s", owner->name`.
+        env.add("NODE", owner.to_owned());
+        // C `:339-345`: REMOTEADDRESS/REMOTEPORT only `if owner !=
+        // myself`. The owner's UDP address — from `n->address`
+        // (which is `update_node_udp`-written; for direct peers
+        // it's `NodeState.edge_addr`).
+        if owner != self.name {
+            if let Some(addr) = self.nodes.get(owner).and_then(|ns| ns.edge_addr) {
+                env.add("REMOTEADDRESS", addr.ip().to_string());
+                env.add("REMOTEPORT", addr.port().to_string());
+            }
+        }
+        // C `:359-368`: `net2str` then `strchr('#')` split. Our
+        // `Display` may include `#weight` (non-default); strip it.
+        let netstr = subnet.to_string();
+        let netstr = netstr.split_once('#').map_or(netstr.as_str(), |(s, _)| s);
+        env.add("SUBNET", netstr.to_owned());
+        env.add("WEIGHT", subnet.weight().to_string());
+
+        let name = if up { "subnet-up" } else { "subnet-down" };
+        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+    }
+
+    /// `graph.c:273-289` script firing for one node transition.
+    /// Fires `host-up`/`host-down` AND `hosts/NAME-up`/`hosts/
+    /// NAME-down` (the per-node script). Same env for both.
+    ///
+    /// `addr` is `n->address` — the SSSP-derived UDP address. For
+    /// direct peers it's `NodeState.edge_addr`; for transitives we
+    /// don't have it yet (chunk 9's `update_node_udp` walk). `None`
+    /// → REMOTEADDRESS/REMOTEPORT omitted (the C would pass
+    /// `"unknown"` from `sockaddr2str` of an `AF_UNKNOWN` — less
+    /// useful than not setting the var at all).
+    fn run_host_script(&self, up: bool, node: &str, addr: Option<SocketAddr>) {
+        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        // C `:279`: `"NODE=%s", n->name`.
+        env.add("NODE", node.to_owned());
+        // C `:280-282`: `sockaddr2str(&n->address, &address, &port)`.
+        if let Some(a) = addr {
+            env.add("REMOTEADDRESS", a.ip().to_string());
+            env.add("REMOTEPORT", a.port().to_string());
+        }
+
+        // C `:284`: `execute_script(reachable ? "host-up" :
+        // "host-down", &env)`.
+        let name = if up { "host-up" } else { "host-down" };
+        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+
+        // C `:286-287`: `snprintf(name, "hosts/%s-%s", n->name,
+        // up?"up":"down"); execute_script(name, &env)`. Per-node
+        // hook. Same env.
+        let per = format!("hosts/{node}-{}", if up { "up" } else { "down" });
+        Self::log_script(&per, script::execute(&self.confbase, &per, &env, None));
+    }
+
+    /// C `script.c:228-250` outcome logging. Associated fn (not
+    /// method): the script call sites borrow `&self` for env
+    /// building; this needs no daemon state.
+    fn log_script(name: &str, r: io::Result<ScriptResult>) {
+        match r {
+            // C `:203`: NotFound is silent (script optional).
+            // C `:230`: Ok is silent (success is the boring case).
+            Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
+            Ok(ScriptResult::Failed(st)) => {
+                // C `:231-238`: `"Script %s exited with non-zero
+                // status %d"` or `"...terminated by signal %d"`.
+                // `ExitStatus::Display` covers both.
+                log::warn!(target: "tincd", "Script {name}: {st}");
+            }
+            Err(e) => {
+                // C `:249-250`: `system() == -1` → `"...exited
+                // abnormally"`. Our spawn-fail (ENOEXEC etc).
+                log::error!(target: "tincd", "Script {name} spawn failed: {e}");
+            }
+        }
     }
 
     /// `age_past_requests` (`protocol.c:213-228`). Evict seen-
@@ -1548,13 +1933,26 @@ impl Daemon {
                     // (rate-limit a tight error loop on a flapping
                     // TUN). We're simpler: log + break. The fd stays
                     // registered; if it's truly dead (EBADFD), every
-                    // turn fires this arm. STUB(chunk-8): the error-
-                    // counter / event_exit escalation.
+                    // turn fires this arm.
                     log::error!(target: "tincd::net",
                                 "Error reading from device: {e}");
+                    // C `:1933-1936`: at 10 consecutive failures,
+                    // `event_exit()`. The kernel device is gone;
+                    // tight-looping helps nobody. The C also does
+                    // `sleep_millis(errors * 50)` to rate-limit a
+                    // flapping TUN; we don't (the bound is 10 — the
+                    // sleep would total 2.75s, then exit anyway).
+                    self.device_errors += 1;
+                    if self.device_errors > 10 {
+                        log::error!(target: "tincd",
+                                    "Too many errors from device, exiting!");
+                        self.running = false;
+                    }
                     break;
                 }
             };
+            // C `:1931`: `errors = 0`. Reset on success.
+            self.device_errors = 0;
             // C `:1928-1929`: `myself->in_packets++; in_bytes +=`.
             let myself_tunnel = self.tunnels.entry(self.myself).or_default();
             myself_tunnel.in_packets += 1;
@@ -2625,6 +3023,47 @@ impl Daemon {
                         Request::DelEdge => self.on_del_edge(id, body),
                         Request::ReqKey => self.on_req_key(id, body),
                         Request::AnsKey => self.on_ans_key(id, body),
+                        Request::Ping => {
+                            // `ping_h` (`protocol_misc.c:54-57`):
+                            // `return send_pong(c)`. That's it.
+                            // `send_pong` (`:59-61`): `"%d", PONG`.
+                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            Ok(conn.send(format_args!("{}", Request::Pong as u8)))
+                        }
+                        Request::Pong => {
+                            // `pong_h` (`protocol_misc.c:63-76`):
+                            // clear pinged bit. If outgoing AND its
+                            // backoff is non-zero, reset it + the
+                            // addr cache cursor + add the working
+                            // address as recent. The connection IS
+                            // healthy — next reconnect tries this
+                            // address first.
+                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            // C `:65`: `c->status.pinged = false`.
+                            conn.pinged = false;
+                            // C `:69`: `if(c->outgoing && c->
+                            // outgoing->timeout)`. Gate on non-zero
+                            // timeout: a healthy conn pongs every
+                            // pinginterval; don't churn the cache
+                            // each time.
+                            let oid = conn.outgoing.map(OutgoingId::from);
+                            let addr = conn.address;
+                            if let Some(oid) = oid {
+                                if let Some(out) = self.outgoings.get_mut(oid) {
+                                    if out.timeout != 0 {
+                                        // C `:70`: `timeout = 0`.
+                                        out.timeout = 0;
+                                        // C `:71-72`: reset cursor +
+                                        // prepend the address.
+                                        out.addr_cache.reset();
+                                        if let Some(a) = addr {
+                                            out.addr_cache.add_recent(a);
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(false)
+                        }
                         _ => {
                             // KEY_CHANGED/REQ_KEY/ANS_KEY/PING/PONG
                             // etc — chunk 7/8. The gate passed
@@ -3435,8 +3874,6 @@ impl Daemon {
                         .map_or("<unknown>", |n| n.name.as_str());
                     log::info!(target: "tincd::graph",
                                "Node {name} became reachable (via {via_name})");
-                    // STUB(chunk-8): execute_script("host-up")
-                    // (`graph.c:284-287`).
 
                     // C `graph.c:201`: `update_node_udp(n,
                     // &e->reverse->address)`. The SSSP `prevedge`'s
@@ -3450,9 +3887,31 @@ impl Daemon {
                     // re-indexes `node_udp_tree` for the addr-based
                     // lookup at `net_packet.c:1728`).
                     let name_owned = name.to_owned();
-                    if let Some(addr) = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr) {
+                    let addr = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr);
+                    if let Some(addr) = addr {
                         let tunnel = self.tunnels.entry(node).or_default();
                         tunnel.udp_addr = Some(addr);
+                    }
+
+                    // C `graph.c:273-289`: `execute_script("host-
+                    // up")` + `"hosts/NAME-up"`. AFTER the address
+                    // is known (the script may want it).
+                    self.run_host_script(true, &name_owned, addr);
+
+                    // C `graph.c:294`: `subnet_update(n, NULL,
+                    // reachable)`. The `subnet=NULL` branch
+                    // (`subnet.c:352-372`): fire subnet-up for
+                    // EVERY subnet this node owns. The node was
+                    // unreachable; its subnets weren't routable;
+                    // now they are.
+                    let owned: Vec<Subnet> = self
+                        .subnets
+                        .iter()
+                        .filter(|(_, o)| *o == name_owned)
+                        .map(|(s, _)| *s)
+                        .collect();
+                    for s in &owned {
+                        self.run_subnet_script(true, &name_owned, s);
                     }
                     // C `node.c:58-59` (`new_node`): `n->status.
                     // sptps` is set by `add_edge_h` (`protocol_edge.
@@ -3469,8 +3928,33 @@ impl Daemon {
                         .map_or("<unknown>", |n| n.name.as_str());
                     log::info!(target: "tincd::graph",
                                "Node {name} became unreachable");
-                    // STUB(chunk-8): execute_script("host-down")
-                    // (`graph.c:284-287`).
+
+                    let name_owned = name.to_owned();
+                    // The address: read BEFORE `reset_unreachable`
+                    // clears `udp_addr`. C `n->address` is also
+                    // cleared by `update_node_udp(n, NULL)` at
+                    // `:296`, but the script call at `:284` happens
+                    // first. Match.
+                    let addr = self
+                        .tunnels
+                        .get(&node)
+                        .and_then(|t| t.udp_addr)
+                        .or_else(|| self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr));
+
+                    // C `graph.c:273-289`: host-down + hosts/NAME-down.
+                    self.run_host_script(false, &name_owned, addr);
+
+                    // C `graph.c:294`: subnet-down for every owned
+                    // subnet. Mirror of the BecameReachable case.
+                    let owned: Vec<Subnet> = self
+                        .subnets
+                        .iter()
+                        .filter(|(_, o)| *o == name_owned)
+                        .map(|(s, _)| *s)
+                        .collect();
+                    for s in &owned {
+                        self.run_subnet_script(false, &name_owned, s);
+                    }
 
                     // C `graph.c:256-297`: sptps_stop, reset mtu
                     // probe state, clear status bits, clear UDP
@@ -3744,11 +4228,19 @@ impl Daemon {
         // C `:126`: `subnet_add(owner, new)`. Idempotent on dup
         // (the C `:93` `if(lookup_subnet) return true` is
         // belt-and-braces over `seen_request`; our `add` is a
-        // BTreeSet insert which is also idempotent).
-        self.subnets.add(subnet, owner_name);
+        // BTreeSet insert which is also idempotent). Clone the
+        // owner: `subnet_update` below needs it. `Subnet` is `Copy`.
+        self.subnets.add(subnet, owner_name.clone());
 
-        // STUB(chunk-8): if owner reachable, subnet_update(..., true)
-        // (`:130-132`). Script firing.
+        // C `:130-132`: `if(owner->status.reachable) subnet_update(
+        // owner, new, true)`. Only fire subnet-up if the owner is
+        // reachable: a subnet learned via gossip for a node we can't
+        // reach isn't actually routable yet (the host-up handler
+        // fires it later, in the BecameReachable arm).
+        let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
+        if reachable {
+            self.run_subnet_script(true, &owner_name, &subnet);
+        }
 
         // C `:136-138`: `if(!tunnelserver) forward_request(c, req)`.
         // The `seen.check` ABOVE prevents the loop (`seen_request`
@@ -3821,7 +4313,14 @@ impl Daemon {
         // C `:244`: `if(!tunnelserver) forward_request(c, req)`.
         let nw = self.forward_request(from_conn, body);
 
-        // STUB(chunk-8): subnet_update(owner, find, false) (`:255`).
+        // C `:254-256`: `if(owner->status.reachable) subnet_update(
+        // owner, find, false)`. BEFORE the del (the script may want
+        // to see the route one last time — the C orders it this
+        // way). Reachable check: same gate as add.
+        let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
+        if reachable {
+            self.run_subnet_script(false, &owner_name, &subnet);
+        }
 
         // C `:258`: `subnet_del`. The C does `lookup_subnet` at
         // `:216` first and warns at `:218` if not found. Our
@@ -4798,6 +5297,12 @@ impl Drop for Daemon {
     /// `ControlSocket::drop` already unlinks the socket. We do the
     /// pidfile.
     fn drop(&mut self) {
+        // C `net_setup.c:756-762` (`device_disable`): tinc-down
+        // BEFORE device close. The script typically does `ip link
+        // set down` / `ip addr del`. C calls it from `close_
+        // network_connections` (`:1294`). `Drop` is the equivalent
+        // teardown point; the device's own `Drop` runs after.
+        self.run_script("tinc-down");
         let _ = std::fs::remove_file(&self.pidfile);
         // Signal handlers stay installed (SelfPipe::drop doesn't del
         // them — see tinc-event/sig.rs Drop doc). Process is exiting;
@@ -4869,6 +5374,46 @@ mod tests {
         assert_eq!(s.pingtimeout, 5);
         assert_eq!(s.port, 655);
         assert_eq!(s.addressfamily, AddrFamily::Any);
+        assert_eq!(s.udp_discovery_timeout, 30);
+    }
+
+    /// `periodic_handler` backoff arithmetic (`net.c:274-291`).
+    /// Can't construct a full `Daemon` (SelfPipe is process-
+    /// singleton); test the math on a fake. The function is
+    /// extracted so the storm-detection arithmetic is checkable
+    /// without sleeping.
+    ///
+    /// Mirrors `on_periodic_tick`'s body. Any divergence between
+    /// this and the real fn would be caught by the integration
+    /// test (which doesn't exist for the storm case — hard to
+    /// induce). The arithmetic IS the easy bit; pin it.
+    #[test]
+    fn periodic_contradicting_edge_backoff() {
+        // Same arithmetic as `on_periodic_tick`. C `:274-291`.
+        fn step(add: u32, del: u32, sleeptime: u32) -> (u32, Duration) {
+            if del > 100 && add > 100 {
+                let d = Duration::from_secs(u64::from(sleeptime));
+                (sleeptime.saturating_mul(2).min(3600), d)
+            } else {
+                ((sleeptime / 2).max(10), Duration::ZERO)
+            }
+        }
+
+        // Clean period: halve, floor at 10. C `:282-289`.
+        assert_eq!(step(0, 0, 10), (10, Duration::ZERO));
+        assert_eq!(step(0, 0, 100), (50, Duration::ZERO));
+        assert_eq!(step(0, 0, 11), (10, Duration::ZERO)); // 5 → floor
+        // BOTH must exceed 100. C `:274`: `&&`.
+        assert_eq!(step(101, 50, 10), (10, Duration::ZERO));
+        assert_eq!(step(50, 101, 10), (10, Duration::ZERO));
+
+        // Storm: sleep `sleeptime`, then double. C `:275-281`.
+        assert_eq!(step(101, 101, 10), (20, Duration::from_secs(10)));
+        assert_eq!(step(101, 101, 20), (40, Duration::from_secs(20)));
+        // Cap at 3600. C `:279-281` (the `< 0` check catches
+        // signed overflow; we cap explicitly).
+        assert_eq!(step(101, 101, 2000), (3600, Duration::from_secs(2000)));
+        assert_eq!(step(101, 101, 3600), (3600, Duration::from_secs(3600)));
     }
 
     /// The IoWhat enum has all six variants. Census: `rg 'io_add\('

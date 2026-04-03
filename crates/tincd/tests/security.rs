@@ -382,23 +382,16 @@ fn legacy_minor_rejected() {
 }
 
 /// `security.py::test_id_timeout`. Python: send `"0 bar 17.7"` then
-/// SLEEP 3s (1.5× `PingTimeout=2`). Daemon should drop us via the
-/// timeout sweep.
-///
-/// **STATUS: PARTIAL.** `daemon.rs::on_ping_tick` is stubbed
-/// (`// The actual sweep would go here. Chunk 3+.`). The timer
-/// fires and re-arms but doesn't sweep half-open conns. The test
-/// asserts the WEAKER property: "daemon doesn't crash on a half-
-/// open conn left dangling for >PingTimeout, and remains
-/// responsive". When chunk 8 wires the sweep, flip the assertion
-/// to "TcpStream reads EOF after PingTimeout+slop".
+/// SLEEP 3s (1.5× `PingTimeout=2`). Daemon drops us via the
+/// timeout sweep (`net.c:236-247` pre-edge timeout).
 ///
 /// We send a name that PASSES `id_h` (so the daemon enters the
 /// post-ID-waiting-for-KEX state — the realistic half-open). For
 /// that we need `hosts/bar` with a pubkey. With `17.7` and a known
 /// pubkey, `handle_id` succeeds, daemon sends its ID reply + KEX,
 /// then waits forever for OUR KEX. THIS is the conn the sweep
-/// should reap.
+/// reaps: `!conn.active` (no ACK yet) AND `last_ping_time +
+/// pingtimeout` elapsed → "Timeout during authentication".
 #[test]
 fn id_timeout_half_open_survives() {
     let tmp = TmpGuard::new("id-timeout");
@@ -442,17 +435,12 @@ fn id_timeout_half_open_survives() {
     loop {
         match (&stream).read(&mut buf) {
             Ok(0) => {
-                // EOF — daemon dropped us. If the sweep IS wired
-                // (chunk 8 landed early), this is the SUCCESS
-                // condition. Log it and pass.
-                eprintln!(
-                    "id_timeout: daemon closed half-open conn (sweep wired?); \
-                     got {} bytes before EOF",
-                    got.len()
-                );
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
+                // EOF before we even got the ID reply — the sweep
+                // shouldn't be THIS fast (PingTimeout=1, sweep ticks
+                // at +1s). The 500ms read timeout above bounds the
+                // first-batch latency. If this fires, the daemon
+                // dropped us at id_h instead (config bug).
+                panic!("daemon closed before ID reply; got {} bytes", got.len());
             }
             Ok(n) => got.extend_from_slice(&buf[..n]),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -467,38 +455,36 @@ fn id_timeout_half_open_survives() {
         String::from_utf8_lossy(&got[..got.len().min(40)])
     );
 
-    // ─── sleep across >PingTimeout ─────────────────────────────
-    // PingTimeout=1; sleep 2s. The Ping timer ticks twice.
-    std::thread::sleep(Duration::from_secs(2));
+    // ─── wait for the sweep to reap us ─────────────────────────
+    // PingTimeout=1; the sweep ticks every 1s. The pre-edge
+    // timeout fires when `now - last_ping_time > pingtimeout`.
+    // `last_ping_time` was set at accept time. After ~1s the conn
+    // becomes stale; the next 1s tick reaps it. Generous timeout
+    // for CI: 5s.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let eof = match (&stream).read(&mut buf) {
+        Ok(0) => true,
+        Ok(n) => panic!("expected EOF, got {n} bytes"),
+        Err(e) => panic!("expected EOF, got error: {e}"),
+    };
+    assert!(eof, "sweep should have reaped the half-open conn");
 
-    // ─── check: daemon still alive + responsive ────────────────
-    // The half-open conn is leaked (sweep stubbed). But the
-    // daemon's epoll loop must keep turning — control socket works.
+    // ─── daemon still alive + responsive after the reap ────────
+    // The terminate path itself mustn't wedge the loop.
     assert!(
         child.try_wait().unwrap().is_none(),
-        "daemon died with half-open conn; stderr: {}",
+        "daemon died after reaping conn; stderr: {}",
         drain_stderr(child)
     );
-
-    // Control socket roundtrip proves epoll didn't wedge.
     let cookie = read_cookie(&pidfile);
     let ctl = UnixStream::connect(&socket).expect("daemon still responsive");
     let mut r = BufReader::new(&ctl);
     writeln!(&ctl, "0 ^{cookie} 0").unwrap();
     let mut line = String::new();
     r.read_line(&mut line).unwrap();
-    assert_eq!(line, "0 testnode 17.7\n", "daemon responsive after timeout");
-
-    // ─── chunk-8 forward-compat: check if sweep DID fire ───────
-    // Read the half-open stream once more. If the sweep wired
-    // itself in, we'd see EOF here. Either way is a pass; log
-    // which behavior we observed.
-    match (&stream).read(&mut buf) {
-        Ok(0) => eprintln!("id_timeout: sweep fired (chunk-8 landed)"),
-        Ok(_) | Err(_) => {
-            eprintln!("id_timeout: sweep not yet wired (expected pre-chunk-8)");
-        }
-    }
+    assert_eq!(line, "0 testnode 17.7\n", "daemon responsive after reap");
 
     let _ = child.kill();
     let _ = child.wait();

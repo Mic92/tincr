@@ -88,6 +88,24 @@ fn alloc_port() -> u16 {
 
 /// One daemon's config bundle. Seeds are distinct per node so the
 /// keys differ.
+/// Row format (`connection.c:168`): `"18 6 NAME HOST port P
+/// OPTS_HEX FD STATUS_HEX"`. Status bit 1 (`0x2`) is `active`
+/// (past ACK — `c->edge != NULL` in C). Control conn has bit 9
+/// (`0x200`). Filter rows by name AND active bit.
+fn has_active_peer(rows: &[String], peer_name: &str) -> bool {
+    rows.iter().any(|r| {
+        let Some(body) = r.strip_prefix("18 6 ") else {
+            return false;
+        };
+        let mut t = body.split_whitespace();
+        if t.next() != Some(peer_name) {
+            return false;
+        }
+        let status = t.last().and_then(|s| u32::from_str_radix(s, 16).ok());
+        status.is_some_and(|s| s & 0x2 != 0)
+    })
+}
+
 struct Node {
     name: &'static str,
     seed: [u8; 32],
@@ -97,9 +115,18 @@ struct Node {
     /// Pre-allocated TCP port. Written into THIS node's `hosts/NAME`
     /// `Port = N` AND the OTHER node's `hosts/NAME` `Address = 127.0.0.1 N`.
     port: u16,
+    /// Extra lines appended to `tinc.conf`. `with_conf()` populates.
+    extra_conf: String,
 }
 
 impl Node {
+    /// Extra lines appended to `tinc.conf`. Empty by default.
+    /// `ping_pong_keepalive` sets `PingInterval = 1` here.
+    fn with_conf(mut self, extra: &str) -> Self {
+        self.extra_conf.push_str(extra);
+        self
+    }
+
     fn new(tmp: &std::path::Path, name: &'static str, seed_byte: u8) -> Self {
         Self {
             name,
@@ -108,6 +135,7 @@ impl Node {
             pidfile: tmp.join(format!("{name}.pid")),
             socket: tmp.join(format!("{name}.socket")),
             port: alloc_port(),
+            extra_conf: String::new(),
         }
     }
 
@@ -191,8 +219,13 @@ impl Node {
         if connect_to {
             tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
         }
+        // `extra_conf` FIRST: tinc-conf's `lookup().next()` is
+        // first-occurrence-wins; tests that set PingTimeout via
+        // `with_conf()` need to shadow the default below.
+        tinc_conf.push_str(&self.extra_conf);
         // PingTimeout = 1 keeps the test fast (terminate-on-EOF is
-        // immediate but the ping sweep also runs).
+        // immediate but the ping sweep also runs). Shadowed by
+        // `extra_conf` if present.
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
@@ -393,26 +426,6 @@ fn two_daemons_connect_and_reach() {
     // row (bob) with status bit 1 set (`active`, our `c->edge` proxy
     // — `0x2`). Same for bob. The control conn is also a row; it
     // has status `0x200` (bit 9). Filter on bit 1.
-    //
-    // Row format (`connection.c:168`): `"18 6 NAME HOST port P
-    // OPTS_HEX FD STATUS_HEX"`. STATUS_HEX is the LAST field.
-    let has_active_peer = |rows: &[String], peer_name: &str| -> bool {
-        rows.iter().any(|r| {
-            // Body after "18 6 ".
-            let Some(body) = r.strip_prefix("18 6 ") else {
-                return false;
-            };
-            // Name is first body token.
-            let mut t = body.split_whitespace();
-            if t.next() != Some(peer_name) {
-                return false;
-            }
-            // Status is the LAST hex field.
-            let status = t.last().and_then(|s| u32::from_str_radix(s, 16).ok());
-            status.is_some_and(|s| s & 0x2 != 0)
-        })
-    };
-
     let mut alice_ctl = Ctl::connect(&alice);
     let mut bob_ctl = Ctl::connect(&bob);
 
@@ -567,8 +580,17 @@ fn two_daemons_connect_and_reach() {
 #[test]
 fn outgoing_retry_after_refused() {
     let tmp = TmpGuard::new("retry");
-    let alice = Node::new(tmp.path(), "alice", 0xA1);
-    let bob = Node::new(tmp.path(), "bob", 0xB1);
+    // PingTimeout=3 (not the default `write_config` PingTimeout=1):
+    // alice's connect arrives mid-`turn()` on bob's side, so bob's
+    // `Connection::new_meta` stamps `last_ping_time` from the
+    // CACHED `timers.now()` — up to ~1s stale (the sweep ticks at
+    // 1s). With PingTimeout=1 the conn is born already-stale and
+    // the next sweep reaps it before `id_h` even runs. The C has
+    // the same race (`net_socket.c:764` uses the cached global
+    // `now`); PingTimeout=1 is just an unrealistic config. 3s
+    // gives the handshake room.
+    let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingTimeout = 3\n");
+    let bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingTimeout = 3\n");
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
@@ -945,4 +967,160 @@ fn mk_ipv4_pkt(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
     p.extend_from_slice(&dst);
     p.extend_from_slice(payload);
     p
+}
+
+// ═══════════════════════════════════════════════════════════════════
+
+/// PING/PONG keepalive. `PingInterval=1` so the sweep sends PING
+/// every second; the peer's `ping_h` replies PONG; `pong_h` clears
+/// the bit; the conn survives `PingTimeout`.
+///
+/// Then SIGSTOP one daemon. The other side's PING goes unanswered
+/// (the stopped process doesn't `recv()`). After `PingTimeout`, the
+/// `pinged` bit is still set → "didn't respond to PING" → terminate
+/// (`net.c:253-257`). SIGCONT → the stopped daemon wakes, sees EOF
+/// on its socket (the OTHER side closed it), terminates, and its
+/// outgoing retry kicks in. `PingTimeout=3` gives the stopped
+/// daemon room to NOT trigger its OWN sweep on wake (it was asleep
+/// for ~5s but `last_periodic_run_time` updates on the first tick
+/// post-wake — wait, no, the suspend detector triggers if the GAP
+/// is >60s. SIGSTOP for 5s doesn't trigger it).
+///
+/// Exercises `protocol_misc.c:47-76` (PING/PONG) and the `:253-
+/// 257` pinged-but-no-pong terminate path.
+#[test]
+fn ping_pong_keepalive() {
+    let tmp = TmpGuard::new("pingpong");
+    // PingInterval=1 makes PING observable in a 5s window.
+    // PingTimeout=3 gives the SIGSTOP phase room: the stopped
+    // daemon is paused for ~5s, the OTHER daemon's sweep needs
+    // pingtimeout (3s) to elapse after the unanswered PING.
+    let alice =
+        Node::new(tmp.path(), "alice", 0xA8).with_conf("PingInterval = 1\nPingTimeout = 3\n");
+    let bob = Node::new(tmp.path(), "bob", 0xB8).with_conf("PingInterval = 1\nPingTimeout = 3\n");
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    // ─── wait for ACK on both sides ─────────────────────────────
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(6);
+        let b = bob_ctl.dump(6);
+        (has_active_peer(&a, "bob") && has_active_peer(&b, "alice")).then_some(())
+    });
+
+    // ─── keepalive phase: hold for 5s, conn must survive ──────
+    // PingInterval=1, PingTimeout=3. Five 1s ticks. Each tick
+    // sends PING; the PONG arrives <100ms later (loopback); the
+    // bit clears before the next sweep checks it. If PONG handling
+    // is broken, the conn dies at ~tick 3.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let b = bob_ctl.dump(6);
+        assert!(
+            has_active_peer(&b, "alice"),
+            "conn died during keepalive; PONG not clearing pinged bit?"
+        );
+    }
+
+    // ─── SIGSTOP alice; bob's PING goes unanswered ─────────────
+    // Bob sends PING, alice doesn't `recv()`, `pingtimeout` (3s)
+    // elapses with `pinged` still set → "didn't respond to PING"
+    // → terminate. The TCP socket stays open (kernel buffers the
+    // PING bytes until alice wakes); only the application-layer
+    // timeout fires.
+    // SAFETY: kill() with SIGSTOP on a valid pid. The child is
+    // alive (we just polled it).
+    let alice_pid = alice_child.id() as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGSTOP) }, 0);
+
+    // PingTimeout=3 + 2s slop. Bob's sweep needs: one tick to
+    // notice idle (>pinginterval since last_ping_time) and send
+    // PING, then >pingtimeout for the stale check to fire.
+    poll_until(Duration::from_secs(10), || {
+        let b = bob_ctl.dump(6);
+        (!has_active_peer(&b, "alice")).then_some(())
+    });
+
+    // ─── SIGCONT alice; she sees EOF, retries, reconnects ──────
+    // Alice wakes. Bob already closed his side; alice's next read
+    // sees EOF → terminate → outgoing retry (`net.c:155-161`).
+    // The retry connects; the handshake runs; ACK; both active
+    // again. The retry is immediate (`timeout = 0` after a conn
+    // that reached ACK).
+    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGCONT) }, 0);
+
+    poll_until(Duration::from_secs(10), || {
+        let b = bob_ctl.dump(6);
+        has_active_peer(&b, "alice").then_some(())
+    });
+
+    let _ = alice_child.kill();
+    let _ = alice_child.wait();
+    let _ = bob_child.kill();
+    let _ = bob_child.wait();
+}
+
+/// `tinc-up` runs at setup. Write a script that touches a marker;
+/// spawn the daemon; assert the marker exists. Also covers the
+/// `INTERFACE` env var (`script.c:125`): the script reads it and
+/// echoes into the marker.
+///
+/// Shebang required: `Command::status` is direct `execve()`, not
+/// `sh -c`. A shebang-less script fails `ENOEXEC`. Doc'd in
+/// `script.rs` module comment.
+#[test]
+fn tinc_up_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TmpGuard::new("tincup");
+    let alice = Node::new(tmp.path(), "alice", 0xA9);
+    let bob = Node::new(tmp.path(), "bob", 0xB9);
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, false);
+
+    let marker = tmp.path().join("tinc-up-ran");
+    // `#!/bin/sh` shebang. The C uses `system()` (= `sh -c`) which
+    // would also work without; we don't (see script.rs doc).
+    // `INTERFACE` for `DeviceType=dummy` is `"dummy"` (`tinc-
+    // device::Dummy::iface`).
+    let script = format!(
+        "#!/bin/sh\necho \"iface=$INTERFACE name=$NAME\" > '{}'\n",
+        marker.display()
+    );
+    let script_path = alice.confbase.join("tinc-up");
+    std::fs::write(&script_path, script).unwrap();
+    let mut perm = std::fs::metadata(&script_path).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perm).unwrap();
+
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    // tinc-up runs synchronously inside `setup()`, BEFORE the
+    // socket is created. `wait_for_file` already proved setup
+    // returned; the marker must exist by now.
+    assert!(marker.exists(), "tinc-up didn't run");
+    let got = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(got.trim(), "iface=dummy name=alice");
+
+    let _ = alice_child.kill();
+    let _ = alice_child.wait();
 }
