@@ -357,7 +357,7 @@ mod tests {
     }
 
     macro_rules! ctx {
-        ($f:expr) => {{
+        ($f:expr_2021) => {{
             let lookup = |id: NodeId6| $f.names.get(&id).copied();
             let reachable = |n: &str| *$f.reachable.get(n).unwrap_or(&false);
             let via_is_self = |n: &str| *$f.via_self.get(n).unwrap_or(&false);

@@ -1,7 +1,7 @@
 [package]
 name = "tincd"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 # Phase 5: tincd daemon. Currently: walking-skeleton + TCP/UDP
 # listeners. Boots, opens dummy device, binds TCP+UDP+unix, accepts

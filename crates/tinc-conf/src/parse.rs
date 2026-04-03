@@ -427,7 +427,7 @@ impl Config {
     /// Linear scan. Config files are tens of entries; `O(n)` here is
     /// dwarfed by the `fopen` syscall that produced them. If we ever
     /// hit a thousand-entry config we'll add `partition_point`.
-    pub fn lookup(&self, key: &str) -> impl Iterator<Item = &Entry> {
+    pub fn lookup(&self, key: &str) -> impl Iterator<Item = &Entry> + use<'_> {
         let folded = ascii_fold(key);
         self.entries.iter().filter(move |e| e.key_folded == folded)
     }

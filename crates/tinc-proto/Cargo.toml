@@ -1,7 +1,7 @@
 [package]
 name = "tinc-proto"
 version = "0.0.0"
-edition = "2021"
+edition.workspace = true
 publish = false
 description = "Wire-protocol parse/format — Rust port of protocol_*.c sscanf/printf bodies"
 

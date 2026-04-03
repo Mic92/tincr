@@ -1,7 +1,7 @@
 [package]
 name = "tinc-event"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 # Ports event.c (137 LOC) + linux/event.c (169 LOC) + signal.c (90 LOC).
 # bsd/event.c and event_select.c are not ported — mio abstracts the

@@ -210,10 +210,10 @@ pub struct Graph {
 /// noise. Live-slot expectation is documented at each call site by
 /// the surrounding logic (e.g. "just got this ID off the BFS queue").
 macro_rules! slot {
-    ($slab:expr, $id:expr) => {
+    ($slab:expr_2021, $id:expr_2021) => {
         $slab[$id.0 as usize].as_ref().expect("live slot")
     };
-    (mut $slab:expr, $id:expr) => {
+    (mut $slab:expr_2021, $id:expr_2021) => {
         $slab[$id.0 as usize].as_mut().expect("live slot")
     };
 }

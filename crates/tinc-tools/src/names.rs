@@ -531,22 +531,31 @@ pub fn check_id(name: &str) -> bool {
 /// - Result fails `check_id` (empty after squashing)
 #[cfg(unix)]
 pub fn replace_name(raw: &str) -> Result<String, String> {
+    replace_name_with(raw, |k| std::env::var(k).ok())
+}
+
+/// Core of `replace_name`, parameterized over env lookup so tests don't
+/// have to mutate process-global env (`set_var` is `unsafe` in edition
+/// 2024 — racy under multithreaded test runners). Production calls go
+/// through the wrapper above with the real `std::env::var`.
+#[cfg(unix)]
+fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     let resolved = if let Some(var_name) = raw.strip_prefix('$') {
         // C: `if(name[0] == '$')`. The whole tail is the var name —
         // no `${FOO}` syntax, no `$FOO_suffix` parsing. `$HOST` means
         // env var `HOST`, full stop.
-        match std::env::var(var_name) {
-            Ok(v) => v,
+        match env(var_name) {
+            Some(v) => v,
             // C distinguishes "not $HOST" (hard error) from "$HOST and
             // unset" (fall through to gethostname). The `strcmp(name+1,
             // "HOST")` is exact — `$host` doesn't get the fallback.
-            // `var()` returning `NotUnicode` we treat as not-found:
-            // a non-UTF-8 hostname would fail the alnum-squash anyway
-            // (every byte ≥0x80 → `_`, then likely empty or all-`_`
-            // after the leading bytes), and the C's behavior on a
-            // non-UTF-8 `getenv` result is to feed it to isalnum which
-            // returns 0 for everything ≥0x80, same outcome.
-            Err(_) if var_name == "HOST" => {
+            // `var()` returning `NotUnicode` is folded into `None` by
+            // the wrapper: a non-UTF-8 hostname would fail the
+            // alnum-squash anyway (every byte ≥0x80 → `_`), and the
+            // C's behavior on a non-UTF-8 `getenv` result is to feed
+            // it to isalnum which returns 0 for everything ≥0x80,
+            // same outcome.
+            None if var_name == "HOST" => {
                 // C: `gethostname(hostname, HOST_NAME_MAX+1)`. nix's
                 // wrapper allocates the buffer and returns `OsString`.
                 // Same cast-to-String concern as above: non-UTF-8
@@ -557,7 +566,7 @@ pub fn replace_name(raw: &str) -> Result<String, String> {
                     .to_string_lossy()
                     .into_owned()
             }
-            Err(_) => {
+            None => {
                 return Err(format!(
                     "Invalid Name: environment variable {var_name} does not exist"
                 ));
@@ -664,21 +673,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn replace_name_envvar_squashes() {
-        // `set_var` is process-global and tests run multithreaded.
-        // The race would be two threads touching the *same* var name;
-        // we use a sufficiently weird name that no other test touches.
-        // In edition 2024 `set_var` becomes `unsafe` for exactly this
-        // reason — when we bump editions, this test moves to the
-        // integration suite (separate binary, own unsafe policy) or
-        // `replace_name` grows an env-lookup-closure parameter. Until
-        // then, edition 2021's safe `set_var` is fine.
-        std::env::set_var("TINC_TEST_REPLACE_NAME_X1", "my-host.example");
         // Hostname-ish input gets squashed: dash and dot → underscore.
-        assert_eq!(
-            replace_name("$TINC_TEST_REPLACE_NAME_X1").unwrap(),
-            "my_host_example"
-        );
-        std::env::remove_var("TINC_TEST_REPLACE_NAME_X1");
+        // Uses the parameterized core so we don't touch process env
+        // (`set_var` is `unsafe` in edition 2024 — racy under nextest).
+        let env = |k: &str| (k == "X1").then(|| "my-host.example".to_owned());
+        assert_eq!(replace_name_with("$X1", env).unwrap(), "my_host_example");
     }
 
     #[cfg(unix)]
@@ -696,12 +695,9 @@ mod tests {
         // `$HOST` with no `HOST` env var → gethostname. We can't
         // assert *what* it returns (depends on the test machine), but
         // we can assert it doesn't error and the result passes check_id.
-        //
-        // First, make sure HOST is actually unset. CI runners sometimes
-        // set it. (We don't restore it — tests shouldn't depend on
-        // ambient HOST.)
-        std::env::remove_var("HOST");
-        let name = replace_name("$HOST").unwrap();
+        // Inject an always-empty env so the test is hermetic regardless
+        // of whether the CI runner has `HOST` set.
+        let name = replace_name_with("$HOST", |_| None).unwrap();
         assert!(check_id(&name), "gethostname → squash → {name:?}");
     }
 

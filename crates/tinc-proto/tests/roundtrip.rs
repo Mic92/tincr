@@ -177,7 +177,7 @@ proptest! {
 /// not part of the struct (parse skips it with `%*x`), so it doesn't
 /// affect the round-trip.
 macro_rules! roundtrip {
-    ($name:ident, $ty:ty, $strategy:expr, $fmt:expr) => {
+    ($name:ident, $ty:ty, $strategy:expr_2021, $fmt:expr_2021) => {
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(1000))]
             #[test]

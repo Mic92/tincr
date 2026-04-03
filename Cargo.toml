@@ -14,9 +14,9 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "GPL-2.0-or-later"
-rust-version = "1.75"
+rust-version = "1.85"
 
 # Thin LTO for cross-crate inlining on the data path. The hot chain
 # is `daemon::net::send_sptps_packet` (tincd) → `Sptps::seal_data_into`

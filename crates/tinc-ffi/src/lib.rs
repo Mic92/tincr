@@ -59,7 +59,7 @@ pub fn serial_guard() -> MutexGuard<'static, ()> {
 // Raw FFI surface. Hand-declared — see build.rs for why no bindgen.
 
 #[link(name = "tinc_sptps_ffi", kind = "static")]
-extern "C" {
+unsafe extern "C" {
     fn ffi_seed_rng(key32: *const u8);
 
     fn ffi_ecdsa_from_blob(blob: *const u8) -> *mut c_void;

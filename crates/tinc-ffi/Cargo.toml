@@ -1,7 +1,7 @@
 [package]
 name = "tinc-ffi"
 version = "0.0.0"
-edition = "2021"
+edition.workspace = true
 publish = false
 description = "Test-only FFI wrapper around tinc's C SPTPS state machine"
 

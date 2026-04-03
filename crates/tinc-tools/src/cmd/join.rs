@@ -943,7 +943,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // record body that needs to go back (the pubkey), if any.
     // Factored as a closure so the state variables are in scope.
     macro_rules! drain {
-        ($outputs:expr) => {{
+        ($outputs:expr_2021) => {{
             for o in $outputs {
                 match o {
                     Output::Wire { bytes, .. } => {
