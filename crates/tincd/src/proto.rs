@@ -1,44 +1,9 @@
-//! Protocol dispatch for the daemon side. Ports `protocol.c::receive_
-//! request` (49 LOC), `protocol_auth.c::id_h` `^` branch (14 LOC),
-//! and `control.c::control_h` `REQ_STOP` only (~20 LOC).
+//! Protocol dispatch. Ports `protocol.c::receive_request` (`:147-195`),
+//! `protocol_auth.c::id_h` (`:314-471`), `control.c::control_h` (`:45-145`).
 //!
-//! ## Why this is separate from `conn.rs`
-//!
-//! `Connection` is the byte-level transport (recv into inbuf, send
-//! from outbuf). This module is the line-level protocol: dispatching
-//! a complete line out of `inbuf` to its handler.
-//!
-//! The split mirrors the C: `meta.c` does the byte/line work,
-//! `protocol.c::receive_request` dispatches the line to a handler,
-//! `protocol_*.c` files have the handlers. We collapse `protocol_
-//! auth.c` and `control.c` into this module since the skeleton only
-//! handles two request types.
-//!
-//! ## The dispatch shape
-//!
-//! C `receive_request` (`protocol.c:147-195`):
-//!
-//! 1. `atoi(request)` → `reqno`. The first whitespace-delimited
-//!    token is the request type integer. (`atoi` stops at the first
-//!    non-digit, so `"18 0"` → `18`.)
-//! 2. `is_valid_request` + handler-is-non-NULL check.
-//! 3. `allow_request` gate: if `c->allow_request != ALL && c->allow_
-//!    request != reqno`, "Unauthorized request", drop.
-//! 4. Call handler. Handler returns `bool`; `false` → drop conn.
-//!
-//! `dispatch()` does 1-3. The handler match (4) lives in `Daemon`
-//! because handlers need `&mut Daemon` (to set `running = false`,
-//! to walk `node_tree` for dumps, etc).
-//!
-//! ## `id_h` for control (`protocol_auth.c:314-338`)
-//!
-//! Three branches on `name[0]`: `^` control (cookie check, ACK),
-//! `?` invitation, else peer. We handle `^` and reject the rest.
-//!
-//! ## `control_h` for STOP (`control.c:45-145`)
-//!
-//! `case REQ_STOP: event_exit(); return control_ok(c, REQ_STOP)`
-//! sends `"18 0 0"`. We return `DispatchResult::Stop`.
+//! `conn.rs` is byte-level transport; this is line-level dispatch (the
+//! C's `meta.c`/`protocol.c` split). Handler step 4 lives in `Daemon`
+//! (handlers need `&mut Daemon`).
 
 use std::path::Path;
 use std::time::Instant;
@@ -52,185 +17,107 @@ use tinc_sptps::{Framing, Output, Role, Sptps};
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
 
-// OPTION_* (`connection.h:32-36`)
-//
-// `tinc-graph` already exports `OPTION_INDIRECT` (the one bit BFS
-// reads). We don't dep on tinc-graph yet (chunk 5). Same dup-don't-
-// factor call as `check_id`: 4 lines, the right home is somewhere
-// crate-shared (probably tinc-proto — they're WIRE bits, the ACK
-// packet's `%x` field carries them), Phase-6 hoist.
-//
-// The C masks `& 0xffffff` before sending (`protocol_auth.c:867`)
-// because the top byte carries `PROT_MINOR` (`OPTION_VERSION` macro,
-// `connection.h:36`). The four flags fit in the low 4 bits with 20
-// to spare; the mask is future-proofing.
+// OPTION_* (`connection.h:32-36`). Wire bits (ACK `%x` field). Top byte
+// carries `PROT_MINOR` (`OPTION_VERSION` macro, `:36`); C masks
+// `& 0xffffff` before send (`protocol_auth.c:867`).
 
-/// `OPTION_INDIRECT`. Set if `IndirectData = yes` or `TCPOnly = yes`.
-/// Means: don't UDP-probe me directly, go through a relay.
+/// `OPTION_INDIRECT`: don't UDP-probe me directly, relay.
 pub const OPTION_INDIRECT: u32 = 0x0001;
-/// `OPTION_TCPONLY`. Set if `TCPOnly = yes`. Implies INDIRECT.
+/// `OPTION_TCPONLY`: implies INDIRECT.
 pub const OPTION_TCPONLY: u32 = 0x0002;
-/// `OPTION_PMTU_DISCOVERY`. Default on (`net_setup.c:442-446`: on
-/// unless `TCPOnly` or `PMTUDiscovery = no`).
+/// `OPTION_PMTU_DISCOVERY`: default on (`net_setup.c:442-446`).
 pub const OPTION_PMTU_DISCOVERY: u32 = 0x0004;
-/// `OPTION_CLAMP_MSS`. Default on (`net_setup.c:449-453`).
+/// `OPTION_CLAMP_MSS`: default on (`net_setup.c:449-453`).
 pub const OPTION_CLAMP_MSS: u32 = 0x0008;
 
-/// `myself->options` defaults: PMTU + CLAMP_MSS, plus PROT_MINOR in
-/// the top byte (`net_setup.c:800`). The C builds this from config
-/// in `setup_myself_reloadable` (`:383-453`); we hardcode the
-/// defaults until that lands (chunk 9). `IndirectData`/`TCPOnly`/
-/// `PMTUDiscovery`/`ClampMSS` are NOT read yet — the per-host
-/// overrides in `send_ack` are also stubbed (the `c->config_tree`
-/// is not retained, see `handle_id` doc).
+/// `myself->options` defaults (`net_setup.c:800`): PMTU + CLAMP_MSS +
+/// PROT_MINOR<<24. STUB: per-host config (`:383-453`) not read yet.
 #[must_use]
 pub(crate) const fn myself_options_default() -> u32 {
-    // C: `OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | (PROT_MINOR << 24)`.
     OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | ((PROT_MINOR as u32) << 24)
 }
 
-/// `control_common.h`. Same enum as `tinc-tools::ctl::CtlRequest`
-/// but daemon doesn't dep on tinc-tools (CLI pulls daemon, not
-/// the other way). Phase-6 hoist to tinc-proto. `pub(crate)` for
-/// daemon.rs's dump_connections format string.
+/// `control_common.h`. Dup of `tinc-tools::ctl::CtlRequest` (daemon
+/// doesn't dep on tinc-tools). TODO: hoist to tinc-proto.
 pub(crate) const REQ_STOP: i32 = 0;
 pub(crate) const REQ_RELOAD: i32 = 1;
 pub(crate) const REQ_DUMP_NODES: i32 = 3;
 pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
-/// `control_common.h`: `REQ_INVALID = -1`. The "unknown subtype" reply.
+/// `control_common.h`: `REQ_INVALID = -1`.
 const REQ_INVALID: i32 = -1;
 
-/// `TINC_CTL_VERSION_CURRENT` from `control_common.h:46`. Hasn't
-/// changed since 2007. The CLI sends `0` in its ID line; we echo
-/// `0` in the ACK. tinc-tools/ctl.rs checks for this.
+/// `TINC_CTL_VERSION_CURRENT` (`control_common.h:46`). Unchanged since 2007.
 const CTL_VERSION: u8 = 0;
 
-/// Result of dispatching one line. The C handlers return `bool`
-/// where `false` means "drop the connection". We disambiguate:
-/// `false` is `Err`, but `true` has multiple flavors (sometimes
-/// the handler also flipped a daemon-wide flag).
+/// Result of dispatching one line. C handlers return `bool` (`false` =
+/// drop); we disambiguate the `true` flavors that flip daemon state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchResult {
-    /// Handler succeeded. Connection stays open.
     Ok,
-    /// `event_exit()` was called. C `running = false`. The loop
-    /// finishes this turn (drains the rest of the io events queued)
-    /// then exits. The connection stays open until then — the
-    /// `"18 0 0"` reply was queued before this returned.
+    /// `event_exit()`. Loop finishes this turn then exits.
     Stop,
-    /// `dump_connections(c)`. The daemon walks `conns` and queues
-    /// rows. Can't do it here (don't have the slotmap).
+    /// `dump_connections(c)`. Daemon walks `conns` (we don't have the slotmap).
     DumpConnections,
-    /// `dump_subnets(c)` (`subnet.c:395-410`). Same shape as
-    /// DumpConnections: daemon walks `subnets`, queues rows.
+    /// `dump_subnets(c)` (`subnet.c:395-410`).
     DumpSubnets,
-    /// `dump_nodes(c)` (`node.c:201-223`). Daemon walks `node_ids`
-    /// (the graph) + `last_routes` for nexthop/via/distance, queues
-    /// 23-field rows.
+    /// `dump_nodes(c)` (`node.c:201-223`).
     DumpNodes,
-    /// `dump_edges(c)` (`edge.c:123-137`). Daemon walks per-node
-    /// edge lists (the C nested-splay shape), queues 8-field rows.
+    /// `dump_edges(c)` (`edge.c:123-137`).
     DumpEdges,
-    /// `REQ_RELOAD` (`control.c:56`). Daemon calls `reload_
-    /// configuration()`, replies `"18 1 <result>"` (0 = success,
-    /// nonzero = `read_server_config` failed).
+    /// `REQ_RELOAD` (`control.c:56`). Daemon reloads + replies `"18 1 <r>"`.
     Reload,
-    /// Handler returned `false`. Drop the connection. C `receive_
-    /// request:183-188` logs "Error while processing X" and the
-    /// caller (`receive_meta`) returns `false` which causes
-    /// `terminate_connection`.
+    /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
 
-/// Why dispatch returned `Drop`. Mostly for logging — the caller's
-/// action is the same regardless.
+/// Why dispatch returned `Drop`. For logging; caller action is the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchError {
-    /// `atoi()` failed or returned a number outside 0..LAST. C: log
-    /// at DEBUG_META "Unknown request from X: Y".
+    /// `atoi()` failed or out of range.
     UnknownRequest,
-    /// `c->allow_request != ALL && != reqno`. C: log at DEBUG_ALWAYS
-    /// "Unauthorized request from X". This is the gate that keeps
-    /// peers from sending CONTROL, and keeps fresh connections from
-    /// sending anything but ID.
+    /// `c->allow_request != ALL && != reqno`. The gate keeping peers
+    /// from sending CONTROL and fresh conns from sending anything but ID.
     Unauthorized,
-    /// `id_h`: name doesn't start with `^` or cookie mismatch.
-    /// (Skeleton: also covers `?` and peer names — we don't handle
-    /// those yet.)
+    /// `id_h`: cookie mismatch / bad name / version reject.
     BadId(String),
-    /// `ack_h`: sscanf returned `< 3` (`protocol_auth.c:960-963`).
-    /// C: `"Got bad ACK from %s (%s)"`.
+    /// `ack_h`: sscanf `< 3` (`protocol_auth.c:960-963`).
     BadAck(String),
-    /// `add_subnet_h`/`del_subnet_h`: sscanf < 2, bad name, or bad
-    /// subnet string (`protocol_subnet.c:49-68`). C: `"Got bad %s
-    /// from %s (%s)"`.
+    /// `add/del_subnet_h`: parse failed (`protocol_subnet.c:49-68`).
     BadSubnet(String),
-    /// `add_edge_h`/`del_edge_h`: sscanf wrong count, bad name,
-    /// or `from == to` (`protocol_edge.c:80-92`). C: `"Got bad %s
-    /// from %s (%s)"`.
+    /// `add/del_edge_h`: parse failed (`protocol_edge.c:80-92`).
     BadEdge(String),
-    /// `req_key_h`/`ans_key_h`: parse failed (`protocol_key.c:
-    /// 282-287`, `:431-435`). C: `"Got bad %s from %s (%s)"`.
+    /// `req/ans_key_h`: parse failed (`protocol_key.c:282-287`, `:431-435`).
     BadKey(String),
-    /// `control_h`: unknown subtype. C `control.c:144` sends
-    /// `REQ_INVALID` and returns `true` (connection stays). We do
-    /// the same — this is NOT a `Drop`, see `handle_control`.
-    /// Variant exists for testing the inner match.
+    /// `control_h`: unknown subtype. NOT a `Drop` (C `control.c:144`
+    /// returns `true`). Test-only variant.
     #[cfg(test)]
     UnknownControl,
 }
 
-/// `receive_request` step 1-3. Parse reqno, validate, check the
-/// `allow_request` gate. Returns the parsed `Request` for the
-/// caller's match (step 4).
-///
-/// `line` is one line WITHOUT the `\n` (LineBuf::read_line strips it).
-///
-/// C `protocol.c:164-178`.
+/// `receive_request` step 1-3 (`protocol.c:164-178`): parse reqno,
+/// bounds check, `allow_request` gate. Handler match (step 4) is the
+/// caller's. `line` has no trailing `\n`.
 ///
 /// # Errors
-/// `UnknownRequest` for bad/out-of-range reqno.
-/// `Unauthorized` if the gate blocks.
+/// `UnknownRequest` for bad/out-of-range reqno; `Unauthorized` if gated.
 pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchError> {
-    // C `int reqno = atoi(request)`. `atoi` reads decimal digits,
-    // stops at the first non-digit, returns 0 on no-digits. The C
-    // then does `if(reqno || *request == '0')` — so `0` is valid
-    // (it's `Request::Id`), empty string / non-digit-first is not.
-    //
-    // We split on whitespace and parse the first token. STRICTER
-    // than `atoi`: `atoi("18foo")` returns 18; `"18foo".parse()`
-    // fails. The C never sends `"18foo"` — `send_request` always
-    // uses `"%d "` with a trailing space. The strictness rejects
-    // malformed peers, which is fine.
-    //
-    // STRICTER-than-C check: the line must be ASCII (control
-    // protocol always is). If a peer sends non-UTF-8 in the first
-    // token, that's nonsense; reject. The full line might have
-    // non-ASCII later (node names with high bytes? no, `check_id`
-    // forbids that). For the first token: digits only.
+    // C `atoi(request)` then `if(reqno || *request == '0')`. STRICTER:
+    // `atoi("18foo")` → 18 in C; we reject. C never sends that
+    // (`send_request` always `"%d "`).
     let first = line
         .split(|&b| b.is_ascii_whitespace())
         .next()
         .filter(|t| !t.is_empty())
         .ok_or(DispatchError::UnknownRequest)?;
-    // ASCII digits → parse as i32. `from_utf8` is free here (digits
-    // are ASCII); the `.parse()` does the actual work.
     let s = std::str::from_utf8(first).map_err(|_| DispatchError::UnknownRequest)?;
     let reqno: i32 = s.parse().map_err(|_| DispatchError::UnknownRequest)?;
 
-    // C `is_valid_request(reqno)` — bounds check. `Request::from_id`
-    // does this. Also checks the handler-non-NULL implicitly
-    // (variants without handlers — STATUS, ERROR, REQ_PUBKEY,
-    // ANS_PUBKEY — exist in the enum; the daemon match in chunk 4+
-    // returns Drop for them. C does the same: `!get_request_entry(
-    // reqno)->handler` at protocol.c:167).
+    // C `is_valid_request` + handler-non-NULL (`protocol.c:167`).
     let req = Request::from_id(reqno).ok_or(DispatchError::UnknownRequest)?;
 
-    // C `protocol.c:175-178`: the gate.
-    // `c->allow_request != ALL && c->allow_request != reqno` → reject.
-    // `ALL = -1` in C (`protocol.h:42`). Our `None` is `ALL`.
+    // C `:175-178`: `allow_request != ALL && != reqno`. `None` = `ALL`.
     if let Some(allowed) = conn.allow_request
         && allowed != req
     {
@@ -240,171 +127,87 @@ pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchErr
     Ok(req)
 }
 
-// Label construction (the trailing-NUL wire-compat finding)
-
 /// `protocol_auth.c:458-465` SPTPS label for the TCP meta connection.
 ///
-/// **THE TRAILING NUL IS WIRE-FORMAT-COMPAT.** Born in `65d6f023`
-/// (2012): `sizeof` of the C VLA `char label[25 + strlen(a) +
-/// strlen(b)]` is one more than the snprintf'd content. gcc-verified
-/// `labellen = 33` for alice/bob; hex ends `...626f6200`. The NUL
-/// feeds the SIG transcript (`sptps.c:206`) and PRF seed; missing
-/// it → `BadSig`. The invitation label at `:372` does NOT have it
-/// (string literal + count, not VLA): historical accident, not policy.
+/// **TRAILING NUL IS WIRE-COMPAT.** C `sizeof` of VLA `char label[25 +
+/// strlen(a) + strlen(b)]` is one more than the snprintf'd content. The
+/// NUL feeds SIG transcript (`sptps.c:206`) + PRF seed; missing it →
+/// `BadSig`. The invitation label (`:372`) does NOT have it (explicit
+/// count, not VLA): historical accident, not policy.
 ///
-/// Argument order: always initiator, responder (C `:460-465`).
-///
-/// `pub(crate)` for unit tests and `tests/stop.rs`.
+/// Argument order: always (initiator, responder) (`:460-465`).
 #[must_use]
 pub(crate) fn tcp_label(initiator: &str, responder: &str) -> Vec<u8> {
-    // `format!` doesn't include NUL. We push it explicitly. This
-    // makes the NUL VISIBLE — a `format!("...\0")` would work too
-    // but the trailing `\0` is easy to miss reading the source.
+    // Explicit push so the NUL is visible in source.
     let mut label = format!("tinc TCP key expansion {initiator} {responder}").into_bytes();
     label.push(0);
-    // Postcondition: matches the C `25 + strlen(a) + strlen(b)`.
-    debug_assert_eq!(label.len(), 25 + initiator.len() + responder.len());
+    debug_assert_eq!(label.len(), 25 + initiator.len() + responder.len()); // C `25 + a + b`
     label
 }
 
 /// `check_id` (`utils.c:216-226`): node names must be `[A-Za-z0-9_]+`.
 ///
-/// Dup'd from `tinc-tools/names.rs:495`. Same dup-don't-factor call
-/// as `read_fd`/`write_fd`: 2-line fn, depending on `tinc-tools` for
-/// it would pull the whole CLI command tree. The right home is
-/// `tinc-proto` (it's wire-format-adjacent: names go in the protocol's
-/// space-separated tokens) but that's a Phase-6 cleanup.
-///
-/// SECURITY: this is load-bearing. The peer name goes into a
-/// filesystem path (`hosts/NAME`). A name with `/` would be path
-/// traversal. `check_id` is the gate. C `protocol_auth.c:376` calls
-/// it before `:424 read_host_config(..., c->name)`.
+/// SECURITY: load-bearing path-traversal gate. Peer name goes into
+/// `hosts/NAME`. C `protocol_auth.c:376` calls before `:424 read_host_config`.
 #[must_use]
 fn check_id(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-// id_h
-
-/// What `handle_id` did. Replaces the old `Result<bool, ...>` — the
-/// peer branch needs to hand back the SPTPS init outputs (the
-/// responder's KEX bytes, generated synchronously by `Sptps::start`).
+/// What `handle_id` did. Peer/Invitation branches hand back the SPTPS
+/// init outputs (`Sptps::start` emits KEX synchronously).
 #[derive(Debug)]
 pub enum IdOk {
-    /// `^cookie` matched. Control connection authenticated. Same
-    /// state as the old `Ok(true)` — outbuf went empty→nonempty
-    /// (id reply + ACK queued).
-    ///
-    /// `needs_write` is always `true` here in practice (outbuf was
-    /// empty before — it's the first send on a fresh connection).
-    /// Kept as a field for symmetry with `Peer`.
+    /// `^cookie` matched. id reply + ACK queued.
     Control { needs_write: bool },
-    /// Peer ID accepted. SPTPS installed on `conn.sptps`. `init`
-    /// has the responder's KEX wire bytes (`Sptps::start` always
-    /// emits one `Output::Wire` — the C `sptps_start` calls
-    /// `send_kex` synchronously).
-    ///
-    /// The caller (daemon) must:
-    /// 1. Queue `init` outputs to `conn.outbuf` (→ `send_raw`).
-    /// 2. `conn.inbuf.take_rest()` and re-feed via `feed_sptps`.
-    ///    The same TCP segment that delivered the ID line might've
-    ///    delivered the initiator's KEX too. See `LineBuf::take_rest`
-    ///    doc.
-    /// 3. Queue THOSE outputs too.
-    /// 4. Register IO_WRITE if `needs_write`.
-    ///
-    /// `needs_write` reflects ONLY the `send_id` line. The init
-    /// `Output::Wire` queued by step 1 doesn't change it (outbuf
-    /// is already non-empty after `send_id`). Daemon should OR it
-    /// with the result of step 1's `send_raw`.
+    /// Peer ID accepted, SPTPS installed. Daemon must: queue `init` to
+    /// outbuf, `inbuf.take_rest()` + re-feed (same TCP segment may carry
+    /// initiator's KEX), then IO_WRITE. `needs_write` reflects ONLY the
+    /// `send_id` line; OR with `send_raw`'s result.
     Peer {
         needs_write: bool,
         init: Vec<Output>,
     },
-    /// `?` greeting: invitation joiner. SPTPS installed on `conn.
-    /// sptps` (label `"tinc invitation"`, 15 bytes, NO trailing NUL
-    /// — unlike the meta label, see [`tcp_label`] doc). The TWO
-    /// plaintext lines (id reply + ACK-with-key) are queued in
-    /// `conn.outbuf` already. Same dispatch shape as `Peer`: queue
-    /// `init` Wire bytes, take_rest re-feed.
-    ///
-    /// Daemon must set `conn.invite = Some(InvitePhase::WaitingCookie)`
-    /// so `dispatch_sptps_outputs` early-branches to invitation
-    /// record handling (`receive_invitation_sptps`, NOT `check_gate`).
+    /// `?` invitation. SPTPS installed (15-byte label, no NUL). Two
+    /// plaintext lines queued. Same dispatch as `Peer`. Daemon must set
+    /// `conn.invite = Some(WaitingCookie)`.
     Invitation {
         needs_write: bool,
         init: Vec<Output>,
     },
 }
 
-/// Daemon-side context for `handle_id`. Bundled to keep the
-/// signature width sane (was 5 params, peer branch wants 4 more).
-///
-/// Fields are borrowed from `Daemon` — the daemon clones `cookie` and
-/// `name` already (to escape the slotmap borrow); `mykey` and
-/// `confbase` are added the same way. `mykey` is `&` not `clone()`
-/// because the blob-roundtrip clone is INSIDE `handle_id_peer` (it
-/// only happens on the peer branch, not for control conns).
+/// Daemon-side context for `handle_id`. Borrowed from `Daemon` to escape
+/// the slotmap borrow. `mykey` is `&` not cloned: blob-roundtrip clone
+/// happens inside the peer branch only.
 pub struct IdCtx<'a> {
-    /// `controlcookie`. 64 hex chars.
-    pub cookie: &'a str,
-    /// `myself->name`. The daemon's node name.
-    pub my_name: &'a str,
-    /// `myself->connection->ecdsa`. The daemon's private key. Only
-    /// touched on the peer branch (`Sptps::start` clones via blob).
-    pub mykey: &'a SigningKey,
-    /// `confbase`. For `read_ecdsa_public_key` (peer's `hosts/NAME`).
-    pub confbase: &'a Path,
-    /// `invitation_key` (`protocol_auth.c:56`). Loaded from
-    /// `confbase/invitations/ed25519_key.priv`. `None` when no
-    /// invitations have been issued; the `?` branch then rejects
-    /// (`:341-344`: `if(!invitation_key) return false`).
+    pub cookie: &'a str,       // `controlcookie`, 64 hex chars
+    pub my_name: &'a str,      // `myself->name`
+    pub mykey: &'a SigningKey, // `myself->connection->ecdsa`
+    pub confbase: &'a Path,    // for `read_ecdsa_public_key`
+    /// `invitation_key` (`protocol_auth.c:56`). `None` → `?` branch
+    /// rejects (`:341-344`).
     pub invitation_key: Option<&'a SigningKey>,
 }
 
-/// SPTPS label for invitation conns. `protocol_auth.c:372`:
-/// `sptps_start(..., "tinc invitation", 15, ...)`. Exactly 15 bytes.
-///
-/// **NO trailing NUL** — unlike the meta-conn label ([`tcp_label`]).
-/// The C uses an explicit count (`15`) here; the meta label uses
-/// `sizeof(label)` of a VLA (`"tinc TCP key expansion %s %s"` formatted
-/// into a `char[]`), which counts the implicit `\0`. The accident is
-/// asymmetric: same C author, two different size expressions, two
-/// different on-wire labels. The joiner (`tinc-tools/cmd/join.rs::
-/// INVITE_LABEL`) sends 15 bytes too; both ends agree.
+/// `protocol_auth.c:372`: `sptps_start(..., "tinc invitation", 15, ...)`.
+/// **NO trailing NUL** — explicit count `15`, not `sizeof(VLA)`. See
+/// [`tcp_label`] for the asymmetry.
 const INVITE_LABEL: &[u8] = b"tinc invitation";
 
 /// `id_h` (`protocol_auth.c:314-471`). All three branches.
 ///
-/// Line format: `"0 <name> <major>.<minor>"`. The C `sscanf("%*d "
-/// MAX_STRING " %2d.%3d", name, &major, &minor)` skips the reqno,
-/// reads `name`, then `major.minor`. `< 2` matches means `name` AND
-/// `major` are required; `minor` is optional (the `.` won't match
-/// if there's no minor, sscanf returns 2 not 3). Control conns send
-/// `"0 ^<cookie> 0"` — no `.`, minor stays 0.
-///
-/// Dispatch:
-/// - **`^cookie`** → control conn (`:325-338`). Cookie check, set
-///   control flags, queue id+ACK.
-/// - **`?b64key`** → invitation (`:340-373`). Chunk 4b+. We reject.
-/// - **bare name** → peer (`:375-471`). check_id, version check,
-///   load pubkey, start SPTPS as responder.
-///
-/// `rng`: only touched on peer branch (`Sptps::start`'s `send_kex`).
+/// C `sscanf("%*d " MAX_STRING " %2d.%3d", name, &major, &minor)`.
+/// `< 2` → fail; `minor` optional (no `.` → sscanf returns 2, minor
+/// stays 0). Dispatch on `name[0]`: `^`→control (`:325-338`),
+/// `?`→invitation (`:340-373`), else peer (`:375-471`).
 ///
 /// # Errors
-/// `BadId` for: malformed line, cookie mismatch, `?` (NYI), invalid
-/// peer name, peer == ourselves, version mismatch, no pubkey,
-/// rollback attempt.
+/// `BadId`: malformed, cookie mismatch, bad name, peer==self, version
+/// mismatch, no pubkey, rollback.
 ///
-/// `too_many_lines` allowed: `id_h` in C is one 158-line function.
-/// The three branches are distinct state machines; splitting into
-/// `handle_id_control` / `handle_id_peer` was tried, but the version-
-/// parse and `send_id` reply are SHARED between branches (control
-/// and peer both queue the same `"0 myname 17.7\n"`). Factoring
-/// those out left a 4-function group with awkward returns. One
-/// function with explicit `// ─── branch ───` markers reads
-/// cleaner. The C is one function for the same reason.
+/// `too_many_lines`: C `id_h` is one 158-line function; version-parse
+/// and `send_id` are shared between branches. Splitting was worse.
 #[allow(clippy::too_many_lines)]
 pub fn handle_id(
     conn: &mut Connection,
@@ -413,10 +216,7 @@ pub fn handle_id(
     now: Instant,
     rng: &mut impl RngCore,
 ) -> Result<IdOk, DispatchError> {
-    // ─── sscanf (`:317`)
-    // C: `sscanf("%*d %s %d.%d", name, &major, &minor)`. We split
-    // tokens. `%s` reads non-whitespace (the whole `^abc...` or
-    // `alice` or `?def...`). `%d.%d` reads decimal, `.`, decimal.
+    // C `:317`: `sscanf("%*d %s %d.%d", name, &major, &minor)`.
     let mut toks = line
         .split(|&b| b.is_ascii_whitespace())
         .filter(|t| !t.is_empty());
@@ -424,61 +224,36 @@ pub fn handle_id(
     let name_tok = toks
         .next()
         .ok_or_else(|| DispatchError::BadId("no name token".into()))?;
-    // major.minor parse. C `:317` `< 2` means major is REQUIRED.
-    // If the third token is missing or unparseable, C `id_h` returns
-    // false. We match — `"0 alice"` (no version) is BadId.
-    //
-    // Wait — the control branch (`"0 ^cookie 0"`) has `"0"` not
-    // `"0.7"`. The C sscanf `%2d.%3d` reads major=0, the `.` fails
-    // to match (next char is `\0` end-of-line), sscanf returns 2.
-    // So major IS read (as 0), minor stays at xzalloc'd 0. The
-    // `< 2` check passes (2 >= 2). FINE.
-    //
-    // For us: third token can be `"0"` or `"17.7"`. Split on `.`.
+    // C `:317` `< 2` → major required. Control sends `"0"` (no dot):
+    // sscanf reads major=0, `.` fails, returns 2, minor stays 0.
     let (major, minor): (u8, u8) = {
         let ver = toks
             .next()
             .and_then(|t| std::str::from_utf8(t).ok())
             .ok_or_else(|| DispatchError::BadId("no version token".into()))?;
-        // `"17.7"` → (17, 7). `"0"` → (0, 0). `".7"` → BadId
-        // (sscanf `%d` would fail on leading `.`). `"17."` →
-        // C: minor unparsed, stays 0. We: (17, 0).
         let mut parts = ver.splitn(2, '.');
         let major = parts
             .next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| DispatchError::BadId(format!("bad major in {ver:?}")))?;
-        // Minor optional. C `:317` returns 2 if `.` doesn't match;
-        // `c->protocol_minor` stays xzalloc'd 0.
         let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         (major, minor)
     };
 
-    // BRANCH 1: `^cookie` — control connection (`:325-338`)
+    // ─── BRANCH 1: `^cookie` — control connection (`:325-338`)
     if let Some(rest) = name_tok.strip_prefix(b"^") {
-        // C `!strcmp(name + 1, controlcookie)`. Not constant-time;
-        // doesn't need to be (cookie is mode-0600 secret + unix
-        // socket already authenticated by fs perms).
+        // Not constant-time; mode-0600 secret + unix socket fs perms.
         if rest != ctx.cookie.as_bytes() {
-            // C: condition is false, falls through to `check_id` at
-            // `:376` which fails (`^` isn't alnum). Same outcome.
             return Err(DispatchError::BadId("cookie mismatch".into()));
         }
 
-        // `c->status.control = true; c->allow_request = CONTROL;`
         conn.control = true;
         conn.allow_request = Some(Request::Control);
-        // `c->last_ping_time = now.tv_sec + 3600`. Exempt from ping
-        // timeout for an hour. Practically: forever.
+        // `:328`: `last_ping_time = now + 3600` — exempt from ping sweep.
         conn.last_ping_time = now + std::time::Duration::from_secs(3600);
-        // `c->name = "<control>"`. Idempotent (new_control set it).
-        // The C does it here because TCP-accepted control conns
-        // (chunk 3) start as `<unknown>` (new_meta).
         conn.name = "<control>".to_string();
 
-        // `if(!c->outgoing) send_id(c)`. For accepted conns: send
-        // our greeting. `send_id`: `"%d %s %d.%d", ID, myname, 17, 7`.
-        // `:99-100`: `experimental` is true → `minor = PROT_MINOR`.
+        // `if(!c->outgoing) send_id(c)`: `"%d %s %d.%d"`.
         let needs_write = conn.send(format_args!(
             "{} {} {}.{}",
             Request::Id as u8,
@@ -486,7 +261,7 @@ pub fn handle_id(
             PROT_MAJOR,
             PROT_MINOR
         ));
-        // `return send_request(c, "%d %d %d", ACK, CTL_VER, getpid())`.
+        // `"%d %d %d", ACK, CTL_VER, getpid()`.
         conn.send(format_args!(
             "{} {} {}",
             Request::Ack as u8,
@@ -497,10 +272,9 @@ pub fn handle_id(
         return Ok(IdOk::Control { needs_write });
     }
 
-    // BRANCH 2: `?` — invitation (`:340-373`).
+    // ─── BRANCH 2: `?` — invitation (`:340-373`).
     if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
-        // C `:341-344`: `if(!invitation_key)`. The daemon never
-        // issued an invite (the key file doesn't exist). Reject.
+        // C `:341-344`: `if(!invitation_key)` → reject.
         let Some(inv_key) = ctx.invitation_key else {
             return Err(DispatchError::BadId(format!(
                 "got invitation from {} but we don't have an invitation key",
@@ -508,11 +282,8 @@ pub fn handle_id(
             )));
         };
 
-        // C `:346-351`: `c->ecdsa = ecdsa_set_base64_public_key(
-        // name + 1)`. Decode the joiner's THROWAWAY pubkey (this
-        // is NOT their node identity — that arrives later as the
-        // type-1 SPTPS record). 32 bytes b64 → 43 chars; the C's
-        // `ecdsa_set_base64_public_key` checks length.
+        // C `:346-351`: decode joiner's THROWAWAY pubkey (NOT their node
+        // identity — that's the later type-1 record).
         let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
             .ok()
             .and_then(tinc_crypto::b64::decode)
@@ -522,17 +293,11 @@ pub fn handle_id(
                 DispatchError::BadId(format!("got bad invitation from {}", conn.hostname))
             })?;
 
-        // C `:354-357`: `mykey = ecdsa_get_base64_public_key(
-        // invitation_key)`. The b64 of OUR invitation pubkey. This
-        // goes in line 2; the joiner hashes it and compares to the
-        // URL slug's first 24 chars (`fingerprint_hash`). Proof we
-        // hold the invitation key.
+        // C `:354-357`: b64 of OUR invitation pubkey → line 2. Joiner
+        // hashes + compares to URL slug (`fingerprint_hash`).
         let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
 
-        // C `:360-362`: `if(!c->outgoing) send_id(c)`. Invitations
-        // are always inbound (the joiner connects). Send line 1.
-        // PLAINTEXT — sptps not installed yet (same ordering note
-        // as the peer branch).
+        // C `:360-362`: line 1. PLAINTEXT (sptps not installed yet).
         let mut needs_write = conn.send(format_args!(
             "{} {} {}.{}",
             Request::Id as u8,
@@ -541,20 +306,13 @@ pub fn handle_id(
             PROT_MINOR
         ));
 
-        // C `:364-366`: `send_request(c, "%d %s", ACK, mykey)`.
-        // Line 2: ACK with our invitation pubkey. Also plaintext.
+        // C `:364-366`: line 2, ACK with our invitation pubkey. Plaintext.
         needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
 
-        // C `:370`: `c->protocol_minor = 2`. SPTPS-mode flag for
-        // `receive_meta` (`meta.c:65`: `if(c->protocol_minor >= 2)`).
-        // Our `feed()` checks `sptps.is_some()` instead, so this is
-        // cosmetic (logs).
+        // C `:370`: cosmetic for us (`feed()` checks `sptps.is_some()`).
         conn.protocol_minor = 2;
 
-        // C `:372`: `sptps_start(&c->sptps, c, false, false,
-        // invitation_key, c->ecdsa, "tinc invitation", 15, ...)`.
-        // initiator=false (Responder), datagram=false (Stream).
-        // The label has NO trailing NUL (see INVITE_LABEL doc).
+        // C `:372`: `sptps_start(..., false, false, ..., "tinc invitation", 15, ...)`.
         let inv_key_clone = SigningKey::from_blob(&inv_key.to_blob());
         let (sptps, init) = Sptps::start(
             Role::Responder,
@@ -567,9 +325,8 @@ pub fn handle_id(
         );
         conn.sptps = Some(Box::new(sptps));
 
-        // C `:353`: `c->status.invitation = true`. The daemon sets
-        // `conn.invite = Some(WaitingCookie)` at the IdOk dispatch
-        // site (it owns `Connection.invite`; we don't import it here).
+        // C `:353`: `c->status.invitation = true`. Daemon sets
+        // `conn.invite` at the IdOk dispatch site.
 
         log::info!(target: "tincd::auth",
                    "Starting invitation handshake with {}", conn.hostname);
@@ -577,39 +334,28 @@ pub fn handle_id(
         return Ok(IdOk::Invitation { needs_write, init });
     }
 
-    // BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
-    // `name_tok` should be ASCII (check_id enforces alnum + `_`).
-    // from_utf8 is the cheapest "bytes → &str" given we're about
-    // to call check_id anyway.
+    // ─── BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
     let name = std::str::from_utf8(name_tok)
         .ok()
         .filter(|s| check_id(s))
         .ok_or_else(|| {
-            // C `:376`: `if(!check_id(name) || ...) { ERR "invalid
-            // name"; return false }`. Same.
+            // C `:376`: `if(!check_id(name) || ...)`.
             DispatchError::BadId(format!(
                 "invalid peer name {:?}",
                 String::from_utf8_lossy(name_tok)
             ))
         })?;
 
-    // C `:376`: `... || !strcmp(name, myself->name)`. Talking to
-    // ourselves — the meta-graph cycle this would create is
-    // infinite (we'd see our own ADD_EDGE come back via this
-    // peer, re-broadcast, ...). C rejects early.
+    // C `:376`: `|| !strcmp(name, myself->name)`. Self-edge → infinite
+    // gossip loop.
     if name == ctx.my_name {
         return Err(DispatchError::BadId(format!(
             "peer claims to be us ({name})"
         )));
     }
 
-    // C `:383-393`: outgoing? check c->name == name. Else: c->name
-    // = name. For outgoing, `do_outgoing_connection` (`net_socket.
-    // c:653`) already set `c->name` to the `ConnectTo` value; the
-    // peer must confirm. C `:386-390`: mismatch → "is X instead
-    // of Y" → false. Prevents connecting to the WRONG node when
-    // an `Address` line points at someone else (DNS hijack, stale
-    // config, NAT confusion).
+    // C `:383-393`: outgoing? `c->name` already set by `ConnectTo`;
+    // peer must confirm (DNS hijack / stale config / NAT confusion).
     if conn.outgoing.is_some() {
         if conn.name != name {
             return Err(DispatchError::BadId(format!(
@@ -617,16 +363,11 @@ pub fn handle_id(
                 conn.hostname, name, conn.name
             )));
         }
-        // Name matches; nothing to do (already set).
     } else {
         conn.name = name.to_string();
     }
 
-    // ─── Version check (`:398-401`)
-    // C: `c->protocol_major != myself->connection->protocol_major`.
-    // `myself`'s major is PROT_MAJOR (set at startup). Mismatch →
-    // "incompatible version". This is a HARD reject — major bumps
-    // are wire-breaking by definition.
+    // C `:398-401`: major mismatch → hard reject (wire-breaking).
     if major != PROT_MAJOR {
         return Err(DispatchError::BadId(format!(
             "peer {} ({}) uses incompatible version {major}.{minor}",
@@ -635,60 +376,28 @@ pub fn handle_id(
     }
     conn.protocol_minor = minor;
 
-    // C `:404-419`: bypass_security, !experimental — SKIPPED. We
-    // forbid both. (`bypass_security` is a debug knob; `experimental`
-    // is true ⇔ we have an ecdsa key, which we always do.)
+    // C `:404-419`: bypass_security, !experimental — SKIPPED (forbid both).
 
-    // ─── Load peer's public key (`:421-435`)
-    // C: `if(!c->config_tree) { config_tree = create();
-    // read_host_config(tree, c->name); ... ecdsa = read_ecdsa_
-    // public_key(&tree, c->name) }`. The config tree is per-
-    // connection state; we don't keep it (we only need the pubkey,
-    // and chunk 4b's `send_ack` re-reads `Weight`/`PMTU`/`ClampMSS`
-    // — it can re-read the file then). YAGNI on caching `Config`.
-    //
-    // C `:428`: `read_host_config` failure logs "unknown identity"
-    // and returns false. We collapse that with the pubkey-load
-    // (read_ecdsa_public_key reads the file itself when source 3
-    // fires). The log message differs: C says "unknown identity"
-    // when the FILE is missing, we say "no public key known". The
-    // C's distinction (file-missing vs file-has-no-key) isn't
-    // actionable — either way you `tinc import` the peer's host
-    // file. Collapse.
-    //
-    // BUT: source 1 (inline `Ed25519PublicKey` var) needs the
-    // PARSED config. So we do parse hosts/NAME first — just don't
-    // store the result on `conn`. The parse cost is one `read_to_
-    // string` + line-split — microseconds. Once per peer
-    // connection (which happens once per daemon lifetime per peer).
+    // C `:421-435`: load pubkey. We don't retain `c->config_tree`
+    // (only need the pubkey; `send_ack` re-reads). C distinguishes
+    // file-missing (`:428` "unknown identity") from file-has-no-key;
+    // we collapse — either way you `tinc import`.
     let host_config = {
         let host_file = ctx.confbase.join("hosts").join(name);
         let mut cfg = tinc_conf::Config::default();
         if let Ok(entries) = tinc_conf::parse_file(&host_file) {
             cfg.merge(entries);
         }
-        // Parse failure: same as the C's `:428` log-and-return-false.
-        // But: read_ecdsa_public_key falls through to source 3 (open
-        // the file as raw PEM) on an empty config. So a parse failure
-        // here doesn't immediately doom us — the pubkey load below
-        // gets a chance. The MORE likely case is "file doesn't exist"
-        // and that DOES doom us (source 3 also fails). Either way:
-        // the pubkey-load below is the gate.
+        // Parse failure doesn't doom us yet — read_ecdsa_public_key
+        // source 3 (raw PEM) gets a chance below.
         cfg
     };
 
     let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
     conn.ecdsa = ecdsa;
 
-    // ─── Minor downgrade + rollback check (`:437-447`)
-    // C `:437-439`: `if(minor && !ecdsa) minor = 1`. If peer
-    // claims SPTPS-capable (minor>=2) but we don't have their
-    // pubkey, downgrade to legacy (minor=1, the upgrade-to-SPTPS
-    // mode). C `:469` would then `send_metakey` (RSA legacy).
-    //
-    // We forbid legacy. So: no pubkey → reject. The C's downgrade
-    // path is dead for us. The error message matches what `:428`
-    // would log if `read_host_config` had failed.
+    // C `:437-439`: `if(minor && !ecdsa) minor = 1` — downgrade to
+    // legacy. We forbid legacy: no pubkey → reject outright.
     let Some(ecdsa) = ecdsa else {
         return Err(DispatchError::BadId(format!(
             "peer {} ({}) had unknown identity (no Ed25519 public key)",
@@ -696,18 +405,9 @@ pub fn handle_id(
         )));
     };
 
-    // C `:443-447`: rollback check. `if(ecdsa_active && minor < 1)`.
-    // We have their pubkey (proved capable of SPTPS) but they claim
-    // ancient minor=0. Suspicious — might be a downgrade attack
-    // (force us into weaker legacy crypto). C rejects.
-    //
-    // We're stricter: minor < 2 is reject (we forbid legacy at any
-    // minor < 2). minor==1 in C means "legacy + upgrade negotiation"
-    // (`send_upgrade`/`upgrade_h`). We don't do that either. The
-    // STRICTER policy is intentional: a tinc 1.1 peer for whom we
-    // have a pubkey will ALWAYS send minor>=2. minor<2 from such
-    // a peer is either a downgrade attack or a config bug; either
-    // way, refuse.
+    // C `:443-447`: `if(ecdsa_active && minor < 1)` — downgrade-attack
+    // reject. STRICTER: we reject `< 2` (forbid legacy). A 1.1 peer for
+    // whom we have a pubkey ALWAYS sends `>= 2`.
     if minor < 2 {
         return Err(DispatchError::BadId(format!(
             "peer {} ({}) tries to roll back protocol version to {major}.{minor}",
@@ -715,27 +415,16 @@ pub fn handle_id(
         )));
     }
 
-    // C `:449`: `c->allow_request = METAKEY`. Then `:456` sets
-    // `= ACK` for the SPTPS path. We skip METAKEY (legacy-only).
-    // C: METAKEY then ACK in two assignments. We: just ACK.
+    // C `:449,456`: `allow_request = METAKEY` then `= ACK`. We skip
+    // METAKEY (legacy-only).
     conn.allow_request = Some(Request::Ack);
 
-    // ─── send_id reply (`:451-453`)
-    // C: `if(!c->outgoing) send_id(c)`. Responder sends; the
-    // initiator already sent in `finish_connecting`. SAME line as
-    // the control branch sends — the peer sees our id reply, fires
-    // their `id_h`, version-checks us, proceeds.
-    //
-    // ORDER MATTERS: this line goes BEFORE the SPTPS KEX bytes.
-    // The peer's `receive_meta` reads our `"0 myname 17.7\n"`,
-    // fires id_h, sets `protocol_minor=7` (>= 2), next iteration
-    // is SPTPS mode, gets our KEX. If we sent KEX first, the peer
-    // would try to readline() it and fail (no `\n` in framed bytes,
-    // or worse, find a stray `\n` mid-ciphertext and parse garbage).
+    // C `:451-453`: `if(!c->outgoing) send_id(c)`. ORDER: this line
+    // goes BEFORE SPTPS KEX bytes — peer's `receive_meta` reads our ID,
+    // fires id_h, sets minor>=2, THEN reads KEX. KEX-first → readline
+    // would parse ciphertext.
     let needs_write = if conn.outgoing.is_some() {
-        // Initiator already sent ID in `finish_connecting`. Don't
-        // double-send. The C `:451` `if(!c->outgoing)` guard.
-        false
+        false // initiator already sent in `finish_connecting`
     } else {
         conn.send(format_args!(
             "{} {} {}.{}",
@@ -746,32 +435,17 @@ pub fn handle_id(
         ))
     };
 
-    // ─── sptps_start (`:455-468`)
-    // C: `sptps_start(&c->sptps, c, c->outgoing, false, mykey,
-    // c->ecdsa, label, labellen, send_meta_sptps, receive_meta_sptps)`.
-    //
-    // `c->outgoing` = false → Role::Responder. `false` (4th arg) =
-    // `datagram` = false → Framing::Stream. `replaywin = 0` (stream
-    // mode ignores it; `sptps.c:720` `s->replaywin = sptps_replaywin`
-    // (= 16) but stream mode never reads it).
-    //
-    // Label: see `tcp_label` doc. C `:461-465`: outgoing
-    // → `(myself, c->name)`; inbound → `(c->name, myself)`.
-    // The arg order is always (initiator, responder). For
-    // outgoing, WE are the initiator.
+    // C `:455-468`: `sptps_start(&c->sptps, c, c->outgoing, false, ...)`.
+    // Label `:461-465`: always (initiator, responder).
     let label = if conn.outgoing.is_some() {
         tcp_label(ctx.my_name, name)
     } else {
         tcp_label(name, ctx.my_name)
     };
 
-    // mykey clone via blob roundtrip. See `tinc-tools/cmd/join.rs:
-    // 1787` for the precedent. SigningKey deliberately isn't Clone;
-    // the roundtrip makes the copy VISIBLE.
+    // SigningKey deliberately isn't Clone; blob roundtrip makes copy visible.
     let mykey_clone = SigningKey::from_blob(&ctx.mykey.to_blob());
 
-    // C `:467`: `sptps_start(..., c->outgoing, ...)`. The third
-    // arg is `bool initiator`. Maps to our `Role`.
     let role = if conn.outgoing.is_some() {
         Role::Initiator
     } else {
@@ -787,7 +461,6 @@ pub fn handle_id(
         rng,
     );
 
-    // Install. `Box`: see conn.rs module doc.
     conn.sptps = Some(Box::new(sptps));
 
     log::info!(target: "tincd::auth",
@@ -797,71 +470,36 @@ pub fn handle_id(
     Ok(IdOk::Peer { needs_write, init })
 }
 
-// send_ack / ack_h (`protocol_auth.c:826-868, 948-1066`)
-
-/// `send_ack` (`protocol_auth.c:826-868`). Called when SPTPS
-/// `HandshakeDone` arrives and `allow_request == ACK` (`meta.c:
-/// 130-131`). Queues `"%d %s %d %x"` = `ACK myport.udp weight
-/// (options&0xffffff)|(PROT_MINOR<<24)` over the SPTPS-encrypted
-/// path (this is the FIRST line that goes through `sptps_send_
-/// record`, not `buffer_add` — `conn.send()` routes by `sptps.
-/// is_some()`).
+/// `send_ack` (`protocol_auth.c:826-868`). Called on SPTPS `HandshakeDone`
+/// when `allow_request == ACK` (`meta.c:130-131`). Queues
+/// `"%d %s %d %x"` = `ACK myport.udp weight options`. First line through
+/// `sptps_send_record` (encrypted).
 ///
-/// Weight is the RTT in ms since `c->start` (`send_id`). C: `(now
-/// - c->start)` in microseconds / 1000. We use `Duration::as_millis`
-/// (same arithmetic, no overflow until 24 days). The cast to i32
-/// matches C `(int)` — wraps on absurd RTT, fine, the C also wraps.
+/// STUB: per-host options (`:844-865`) not read; uses daemon defaults.
 ///
-/// `myself_options`: see `myself_options_default`. The C builds it
-/// per-host (`:844-865` reads `IndirectData`/`TCPOnly`/`PMTU`/
-/// `ClampMSS`/`Weight` from `c->config_tree`). We stubbed that
-/// (config_tree not retained); pass the daemon-wide defaults. The
-/// per-host overrides land with chunk 9's reloadable settings.
-///
-/// Returns the io_set signal (outbuf went empty→nonempty).
-///
-/// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight`
-/// (`ack_h` reads `c->options` for the PMTU intersection at
-/// `:996-999` and `c->estimated_weight` for the average at `:1048`).
+/// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight` (read
+/// by `ack_h` at `:996-999`, `:1048`).
 pub fn send_ack(
     conn: &mut Connection,
     my_udp_port: u16,
     myself_options: u32,
     now: Instant,
 ) -> bool {
-    // C `:827-829`: `if(protocol_minor == 1) return send_upgrade(c)`.
-    // Legacy upgrade path. We forbid; minor < 2 was rejected in
-    // id_h. Debug-assert.
+    // C `:827-829`: legacy upgrade. Forbidden; id_h already rejected.
     debug_assert!(conn.protocol_minor >= 2);
 
-    // C `:838-840`: weight = (now - c->start) in milliseconds. The
-    // C does `(tv_sec - tv_sec)*1000 + (tv_usec - tv_usec)/1000`.
-    // `as_millis` is the same. `as i32` cast: C `(int)` wraps;
-    // RTT > 24 days is nonsense anyway.
+    // C `:838-840`: RTT ms. `as i32`: C `(int)` also wraps.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
     conn.estimated_weight = weight;
 
-    // C `:844-865`: per-host config OR myself->options. STUBBED.
-    // The per-host overrides need `c->config_tree` (deferred per
-    // handle_id doc). Just take myself's. The four `if` blocks all
-    // OR INTO `c->options`; with no per-host overrides they reduce
-    // to `c->options = myself->options & 0x0f`.
-    //
-    // But: PMTU is `myself & PMTU && !(c & TCPONLY)` — the PMTU
-    // bit doesn't stick if THIS connection is TCP-only. With
-    // `c->options` starting at 0 (no per-host TCPOnly), the AND
-    // is true. So: just inherit.
+    // C `:844-865`: per-host config OR myself->options. STUBBED — just
+    // inherit (no per-host TCPOnly → PMTU bit sticks).
     conn.options = myself_options
         & (OPTION_INDIRECT | OPTION_TCPONLY | OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
 
-    // C `:863-865`: per-host Weight override. STUBBED (same).
-
-    // C `:867`: `"%d %s %d %x", ACK, myport.udp, weight, (options &
-    // 0xffffff) | (experimental ? PROT_MINOR << 24 : 0)`.
-    // `experimental` is always true for us. `myport.udp` is a
-    // STRING in C (it goes through getaddrinfo); we have it as u16.
-    // `%s` of a numeric string == `%d` of the int. Same wire bytes.
+    // C `:867`: `"%d %s %d %x"`. `myport.udp` is a STRING in C; same
+    // wire bytes either way.
     let wire_options = (conn.options & 0x00ff_ffff) | (u32::from(PROT_MINOR) << 24);
     conn.send(format_args!(
         "{} {} {} {:x}",
@@ -872,41 +510,23 @@ pub fn send_ack(
     ))
 }
 
-/// What `ack_h` parsed. Returned to the daemon for the world-model
-/// mutation (`node_add`, `edge_add`, `graph()`). The C does the
-/// mutation INSIDE `ack_h` (it has the globals); we don't (the
-/// daemon owns the slotmap).
+/// What `ack_h` parsed. Mutation half (`node_add`/`edge_add`/`graph()`)
+/// lives in the daemon (it owns the slotmap; C has globals).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AckParsed {
-    /// `hisport`. Peer's UDP port (`%s` in C — string — because
-    /// `myport.udp` is a string. Everyone sends decimal; parse u16.)
-    pub his_udp_port: u16,
-    /// Peer's RTT estimate. Averaged with ours for the edge weight.
-    pub his_weight: i32,
-    /// Peer's options bitfield (with their PROT_MINOR in top byte).
-    pub his_options: u32,
+    pub his_udp_port: u16, // `%s` in C (string); everyone sends decimal
+    pub his_weight: i32,   // averaged with ours for edge weight
+    pub his_options: u32,  // PROT_MINOR in top byte
 }
 
-/// `ack_h` parse half (`protocol_auth.c:948-962`). The MUTATION
-/// half (`:965-1064`: node lookup, dup-conn handling, edge_add,
-/// graph()) lives in the daemon — it touches `self.conns` and the
-/// world model.
-///
-/// Line format: `"4 <port> <weight> <options-hex>"`. C `sscanf(
-/// "%*d %s %d %x")` (`:960`). `%s` for the port (it's a string in
-/// C, see `send_ack`); we parse u16.
-///
-/// `line` is the SPTPS record body, `\n` already stripped by
-/// `record_body` (the C `meta.c:156` strips it).
+/// `ack_h` parse half (`protocol_auth.c:948-962`). C `sscanf("%*d %s
+/// %d %x")` (`:960`). Mutation half (`:965-1064`) lives in daemon.
 ///
 /// # Errors
-/// `BadAck` if the sscanf would have returned `< 3` (`:960-963`).
+/// `BadAck` if sscanf would return `< 3`.
 pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
-    // STRICTER than C: `%s` for port reads any non-whitespace; we
-    // want u16. The C never sends non-numeric (it formats `myport.
-    // udp` which `:846-858` ensures is decimal). A peer sending
-    // "http" here would crash our `sockaddr_setport` later anyway;
-    // reject up front.
+    // STRICTER: C `%s` reads any non-whitespace; we want u16. C never
+    // sends non-numeric.
     let mut toks = line
         .split(|&b| b.is_ascii_whitespace())
         .filter(|t| !t.is_empty());
@@ -921,8 +541,7 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
         .and_then(|t| std::str::from_utf8(t).ok())
         .and_then(|s| s.parse::<i32>().ok())
         .ok_or_else(|| DispatchError::BadAck("bad weight".into()))?;
-    // `%x` — hex without `0x` prefix.
-    let options = toks
+    let options = toks // `%x`
         .next()
         .and_then(|t| std::str::from_utf8(t).ok())
         .and_then(|s| u32::from_str_radix(s, 16).ok())
@@ -935,31 +554,15 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
     })
 }
 
-// ───────────────────────────────────────────────────────────────────
-// chunk-5 handler parse fns
-//
-// Same parse/mutate split as parse_ack/on_ack. The parse fns take
-// the SPTPS record body (`\n` already stripped by `record_body`),
-// convert &[u8] → &str, delegate to tinc-proto's parsers (which
-// already do `check_id` + `from != to`), wrap errors in our
-// `DispatchError`.
-//
-// All four are thin wrappers. The C `sscanf` + `check_id` + name-
-// equality is one block (`protocol_edge.c:77-92`, `protocol_subnet.
-// c:49-68`); tinc-proto already does that block. We just glue.
+// Thin parse wrappers. Same parse/mutate split as parse_ack. Body has
+// `\n` stripped; tinc-proto parsers do `check_id` + `from != to`.
 
-/// `add_subnet_h` parse step (`protocol_subnet.c:49-68`). Returns
-/// `(owner_name, subnet)`. `check_id` already enforced by
-/// `SubnetMsg::parse`. The C also calls `subnetcheck` (`conf_net.c:
-/// 17`, host bits must be zero) but `add_subnet_h` itself doesn't —
-/// it relies on `str2net` accepting and the LATER `lookup_subnet`
-/// just not finding `10.0.0.1/24` if `10.0.0.0/24` is what's stored.
-/// We match: no `is_canonical` check here.
+/// `add_subnet_h` parse (`protocol_subnet.c:49-68`). NB: C `add_subnet_h`
+/// does NOT `subnetcheck` (host bits zero) — relies on `lookup_subnet`
+/// not finding non-canonical nets. We match.
 ///
 /// # Errors
-/// `BadSubnet` if not UTF-8 (impossible from a real C peer; sscanf
-/// `%s` reads bytes but node names are `check_id`-gated to ASCII)
-/// or if `SubnetMsg::parse` fails (sscanf < 2, bad name, bad net).
+/// `BadSubnet`: not UTF-8 or `SubnetMsg::parse` failed.
 pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
     let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
     let m = tinc_proto::msg::SubnetMsg::parse(s)
@@ -967,74 +570,49 @@ pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
     Ok((m.owner, m.subnet))
 }
 
-/// `del_subnet_h` parse step (`protocol_subnet.c:163-188`). Same
-/// wire shape as ADD. Same parser.
+/// `del_subnet_h` parse (`protocol_subnet.c:163-188`). Same format as ADD.
 ///
 /// # Errors
 /// See [`parse_add_subnet`].
 pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
-    // Identical to add. The C `sscanf` is the same format string.
-    // Separate fn for the daemon's match-arm clarity (and the error
-    // message).
     let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
     let m = tinc_proto::msg::SubnetMsg::parse(s)
         .map_err(|_| DispatchError::BadSubnet("parse failed".into()))?;
     Ok((m.owner, m.subnet))
 }
 
-/// `add_edge_h` parse step (`protocol_edge.c:77-92`). `AddEdge::
-/// parse` already does the 6-or-8 token check, `check_id` on both
-/// names, and `from != to`.
+/// `add_edge_h` parse (`protocol_edge.c:77-92`).
 ///
 /// # Errors
-/// `BadEdge` if not UTF-8 or `AddEdge::parse` fails.
+/// `BadEdge`: not UTF-8 or `AddEdge::parse` failed.
 pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
     let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
     tinc_proto::msg::AddEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
 }
 
-/// `del_edge_h` parse step (`protocol_edge.c:230-241`).
+/// `del_edge_h` parse (`protocol_edge.c:230-241`).
 ///
 /// # Errors
-/// `BadEdge` if not UTF-8 or `DelEdge::parse` fails.
+/// `BadEdge`: not UTF-8 or `DelEdge::parse` failed.
 pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
     let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
     tinc_proto::msg::DelEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
 }
 
-/// `meta.c:155-158`: strip the trailing `\n` from an SPTPS record
-/// body before dispatching to `receive_request`.
-///
-/// C: `if(data[length-1] == '\n') data[length-1] = 0`. The check
-/// is conditional because pre-transition records (the PRF-derived
-/// random bytes during early SPTPS development?) might not have
-/// `\n`. In practice, `send_request` always appends one. We strip
-/// if present, leave alone if not. Same.
+/// `meta.c:155-158`: strip trailing `\n` from SPTPS record body.
+/// C check is conditional; in practice `send_request` always appends.
 #[must_use]
 pub fn record_body(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
 
-/// `control_h` (`control.c:45-145`). Second token is the subtype
-/// (`REQ_STOP=0` etc). Skeleton handles STOP only; everything else
-/// gets `REQ_INVALID` reply (C `control.c:144`).
+/// `control_h` (`control.c:45-145`). Line: `"18 <subtype> [args...]"`.
+/// Never `Drop` — C `control_h` always returns `true`; CLI closes its end.
 ///
-/// Line format: `"18 <subtype> [args...]"`.
-///
-/// Returns `(result, needs_write)`. `needs_write` for the io_set;
-/// `result` is `Stop` for REQ_STOP, `Ok` for REQ_INVALID-reply.
-/// Never `Drop` — `control_h` always returns `true` in C; the
-/// connection stays open. The CLI reads the reply then closes
-/// from its end.
-///
-/// `single_match_else` allowed: this match is the C `switch` from
-/// `control.c:58-144`. It WILL grow arms (REQ_RELOAD, REQ_DUMP_*,
-/// REQ_DEBUG, ...). Rewriting as `if let` now means rewriting back
-/// to `match` in chunk 3. The C is a switch; the Rust is a match.
+/// `single_match_else`: this is the C `switch` (`:58-144`); it grows arms.
 #[allow(clippy::single_match_else)]
 pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
-    // C `control.c:50`: `sscanf(request, "%*d %d", &type)`.
-    // Second token, parse as int.
+    // C `:50`: `sscanf("%*d %d", &type)`.
     let subtype = line
         .split(|&b| b.is_ascii_whitespace())
         .nth(1)
@@ -1042,50 +620,23 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         .and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
-        Some(REQ_RELOAD) => {
-            // `control.c:56-57`: `case REQ_RELOAD: int result =
-            // reload_configuration(); return control_return(c, type,
-            // result)`. The daemon does the reload + the reply (it
-            // owns the config tree + the world model).
-            (DispatchResult::Reload, false)
-        }
-        Some(REQ_DUMP_NODES) => {
-            // `control.c:63`: `case REQ_DUMP_NODES: return
-            // dump_nodes(c)`. Daemon walks the graph.
-            (DispatchResult::DumpNodes, false)
-        }
-        Some(REQ_DUMP_EDGES) => {
-            // `control.c:66`: `case REQ_DUMP_EDGES: return
-            // dump_edges(c)`. Daemon walks per-node edge lists.
-            (DispatchResult::DumpEdges, false)
-        }
-        Some(REQ_DUMP_SUBNETS) => {
-            // `control.c:69`: `case REQ_DUMP_SUBNETS: return
-            // dump_subnets(c)`. Daemon walks SubnetTree.
-            (DispatchResult::DumpSubnets, false)
-        }
-        Some(REQ_DUMP_CONNECTIONS) => {
-            // `control.c:80`: `case REQ_DUMP_CONNECTIONS: return
-            // dump_connections(c)`. The walk-and-format is in
-            // the daemon (it has the slotmap). Signal that.
-            (DispatchResult::DumpConnections, false)
-        }
+        // C `:56-80`. Daemon does the walk/reload (it has the slotmap).
+        Some(REQ_RELOAD) => (DispatchResult::Reload, false),
+        Some(REQ_DUMP_NODES) => (DispatchResult::DumpNodes, false),
+        Some(REQ_DUMP_EDGES) => (DispatchResult::DumpEdges, false),
+        Some(REQ_DUMP_SUBNETS) => (DispatchResult::DumpSubnets, false),
+        Some(REQ_DUMP_CONNECTIONS) => (DispatchResult::DumpConnections, false),
         Some(REQ_STOP) => {
-            // C `control.c:59-61`: `event_exit(); return control_ok(
-            // c, REQ_STOP)`. `control_ok` is `control_return(c, type,
-            // 0)` which is `send_request(c, "%d %d %d", CONTROL, type,
-            // error)`. So: `"18 0 0"`.
+            // C `:59-61`: `event_exit(); return control_ok(c, REQ_STOP)`
+            // → `"18 0 0"`.
             log::info!(target: "tincd", "Got REQ_STOP, shutting down");
             let needs_write = conn.send(format_args!("{} {} 0", Request::Control as u8, REQ_STOP));
             (DispatchResult::Stop, needs_write)
         }
         _ => {
-            // C `control.c:143-144`: `default: return send_request(c,
-            // "%d %d", CONTROL, REQ_INVALID)`. Connection stays open.
-            // The `subtype = None` case (malformed) hits this too —
-            // C: `sscanf` returns 1 (matched the `%*d` only), `type`
-            // is uninitialized garbage, switch falls through to
-            // default. We get the same outcome more deliberately.
+            // C `:143-144`: default → `"%d %d", CONTROL, REQ_INVALID`.
+            // Malformed (`subtype = None`) lands here too — same as C
+            // (uninit `type` falls through to default).
             log::debug!(target: "tincd::proto",
                         "Unknown CONTROL subtype {subtype:?} from {}", conn.name);
             let needs_write = conn.send(format_args!("{} {}", Request::Control as u8, REQ_INVALID));
@@ -1099,9 +650,7 @@ mod tests {
     use super::*;
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    /// `/dev/null` as an OwnedFd. The proto handlers don't read
-    /// from the fd (only `feed`/`flush` do); they just need a valid
-    /// Connection.
+    /// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
     fn nullfd() -> OwnedFd {
         let f = std::fs::File::open("/dev/null").unwrap();
         let fd = std::os::fd::IntoRawFd::into_raw_fd(f);
@@ -1116,17 +665,9 @@ mod tests {
         Connection::test_with_fd(nullfd())
     }
 
-    /// IdCtx for tests where the peer branch ISN'T the focus. The
-    /// dummy key has a static lifetime (`OnceLock`) so we can return
-    /// `IdCtx<'static>` — otherwise the key dies before the ctx and
-    /// every test grows a `let mykey = ...` line. Same pattern as
-    /// `mkconn` for the same reason.
-    ///
-    /// `confbase = "."` means peer-branch tests with `mkctx` will
-    /// fail at the pubkey load (no `./hosts/NAME`). That's fine —
-    /// tests that REACH the pubkey load use `PeerSetup` + a real ctx.
-    /// `mkctx` is for tests that stop earlier (control branch,
-    /// invitation reject, check_id reject, ...).
+    /// IdCtx for tests not reaching the peer pubkey load. `OnceLock`
+    /// for `'static` lifetime. `confbase="."` → pubkey load fails;
+    /// tests reaching it use `PeerSetup`.
     fn mkctx(cookie: &str) -> IdCtx<'_> {
         static DUMMY_KEY: std::sync::OnceLock<SigningKey> = std::sync::OnceLock::new();
         let mykey = DUMMY_KEY.get_or_init(|| SigningKey::from_seed(&[0x99; 32]));
@@ -1143,9 +684,7 @@ mod tests {
 
     // ─── check_gate
 
-    /// Named outcome for the gate table below. We can't use
-    /// `DispatchError` directly: it's not `PartialEq` (the `BadId(
-    /// String)` variant). The gate only ever produces these three.
+    /// `DispatchError` isn't `PartialEq`-friendly; gate only yields these.
     #[derive(Debug, PartialEq)]
     enum GateExpect {
         Ok(Request),
@@ -1153,10 +692,8 @@ mod tests {
         UnknownRequest,
     }
 
-    /// `check_gate(allow, line) -> GateResult`. Full allow/deny
-    /// matrix + malformed inputs. Covers C `:receive_request`'s
-    /// `atoi`, `*request == '0'`, range check, and `allow_request`
-    /// gate.
+    /// Full allow/deny matrix + malformed. Covers C `atoi`, `*request
+    /// == '0'`, range check, gate.
     #[test]
     fn gate_cases() {
         use GateExpect::{Ok, Unauthorized, UnknownRequest};
@@ -1175,14 +712,11 @@ mod tests {
             // ─── empty: `atoi("")` → 0 in C, but the `*request ==
             // '0'` check fails. We reject too: empty first token.
             (Some(Request::Id), b"",           UnknownRequest),
-            // Leading whitespace, then nothing — same.
             (Some(Request::Id), b"  ",         UnknownRequest),
-            // ─── out of range. `Request::from_id(99)` → None.
+            // ─── out of range
             (None,              b"99 foo",     UnknownRequest),
             (None,              b"-1 foo",     UnknownRequest),
-            // ─── STRICTER than C `atoi`: `"18foo"` → reject. C would
-            // parse 18. The C never sends this (always `"%d "`); a
-            // peer that does is broken.
+            // ─── STRICTER: `"18foo"` rejected; C `atoi` would parse 18
             (None,              b"18foo bar",  UnknownRequest),
         ];
         for (i, (allow, line, expected)) in cases.iter().enumerate() {
@@ -1200,11 +734,8 @@ mod tests {
 
     // ─── handle_id
     //
-    // Happy-path control auth (`"0 ^<cookie> 0"` → two-line reply)
-    // is covered by `tests/stop.rs::spawn_connect_stop`: it sends
-    // the exact line, asserts both reply lines (greeting + ACK with
-    // PID), then proves `c.control` was set by sending `"18 0"`
-    // and observing the daemon exit. Only rejection paths below.
+    // Happy-path control auth covered by `tests/stop.rs::spawn_connect_stop`.
+    // Rejection paths only
 
     #[test]
     fn id_cookie_mismatch() {
@@ -1227,34 +758,20 @@ mod tests {
         assert!(c.outbuf.is_empty());
     }
 
-    /// Early-reject paths in `handle_id`: all branches that bail
-    /// BEFORE the pubkey load. They share the property that
-    /// `mkctx("x")` (dummy cookie, confbase=".") suffices — if any
-    /// of these reached the filesystem, they'd error on missing
-    /// `./hosts/NAME` instead of the intended error. The Err proves
-    /// we didn't get that far.
+    /// Early-reject paths: all bail BEFORE the pubkey load. `mkctx`
+    /// (confbase=".") suffices; the Err proves we never hit the fs.
     #[test]
     fn id_early_rejects() {
         #[rustfmt::skip]
         let cases: &[(&[u8], &str)] = &[
-            // `?` prefix (invitation) when invitation_key is None.
-            // C `:341-344`: `if(!invitation_key) return false`.
-            // mkctx has invitation_key: None.
+            // C `:341-344`: `if(!invitation_key)` (mkctx has None)
             (b"0 ?somekey 17.7",     "invitation, no key"),
-            // `check_id` reject: name with `/`. SECURITY: this is the
-            // path-traversal gate. C `:376`: `!check_id(name)`. If
-            // check_id failed and we still tried to load, we'd open
-            // `./hosts/../etc/passwd` — traversal.
+            // C `:376`: `!check_id(name)`. Path-traversal gate.
             (b"0 ../etc/passwd 17.7", "path traversal"),
-            // Peer claims to be us. C `:376`: `|| !strcmp(name,
-            // myself->name)`. Infinite-edge-loop prevention.
-            // (mkctx my_name == "testd".)
+            // C `:376`: `|| !strcmp(name, myself->name)`
             (b"0 testd 17.7",        "peer is self"),
-            // Malformed: no second token. C `sscanf` returns 0
-            // (`< 2` check fails), logs "Got bad ID", returns false.
+            // C `sscanf` returns 0/1 (`< 2` fails)
             (b"0",                   "no name token"),
-            // Malformed: no version token. C `sscanf` returns 1
-            // (`< 2` fails).
             (b"0 alice",             "no version token"),
         ];
         for (i, (line, label)) in cases.iter().enumerate() {
@@ -1273,8 +790,7 @@ mod tests {
 
     // ─── id_h peer branch
 
-    /// Tempdir + hosts/ layout for peer-branch tests. Same idiom as
-    /// `keys.rs::tests::TmpDir`.
+    /// Tempdir + hosts/ layout for peer-branch tests.
     struct PeerSetup {
         tmp: std::path::PathBuf,
     }
@@ -1283,8 +799,7 @@ mod tests {
             let tid = std::thread::current().id();
             let tmp = std::env::temp_dir().join(format!("tincd-proto-{tag}-{tid:?}"));
             std::fs::create_dir_all(tmp.join("hosts")).unwrap();
-            // Write the peer's pubkey as inline b64 (source 1 in
-            // read_ecdsa_public_key — simplest).
+            // Inline b64 (read_ecdsa_public_key source 1).
             let b64 = tinc_crypto::b64::encode(peer_pub);
             std::fs::write(
                 tmp.join("hosts").join(peer_name),
@@ -1303,17 +818,10 @@ mod tests {
         }
     }
 
-    // Happy-path peer ID (`"0 alice 17.7"` → sptps installed,
-    // pubkey loaded, name set, ID reply queued) is covered by
-    // `tests/stop.rs::peer_ack_exchange`: it sends `"0 testpeer
-    // 17.7"`, asserts the daemon's `"0 testnode 17.7"` reply, then
-    // completes the FULL SPTPS handshake — which proves sptps was
-    // installed, the right pubkey was loaded (else BadSig), and
-    // allow_request advanced to Ack (else the daemon's ACK record
-    // would be gated). Only rejection paths below.
+    // Happy-path peer ID covered by `tests/stop.rs::peer_ack_exchange`
+    // (full SPTPS handshake proves sptps installed + right pubkey).
 
-    /// Major mismatch. C `:398-401`: hard reject. major bumps are
-    /// wire-breaking.
+    /// Major mismatch. C `:398-401`.
     #[test]
     fn id_peer_major_mismatch() {
         let mykey = SigningKey::from_seed(&[1; 32]);
@@ -1333,16 +841,12 @@ mod tests {
         // 18.7 — major 18, we're 17.
         let r = handle_id(&mut c, b"0 alice 18.7", &ctx, Instant::now(), &mut OsRng);
         assert!(matches!(r, Err(DispatchError::BadId(_))));
-        // The name DID get set (mutation before the version check).
-        // C also does this — `:389` is before `:398`. Harmless;
-        // the connection is dropped right after.
+        // Name set before version check (C `:389` before `:398`).
         assert_eq!(c.name, "alice");
-        // SPTPS NOT installed.
         assert!(c.sptps.is_none());
     }
 
-    /// Unknown identity: no `hosts/alice` file. The C's `:428`
-    /// "unknown identity" + our "no pubkey" collapse.
+    /// Unknown identity: no `hosts/alice` file. C `:428` collapse.
     #[test]
     fn id_peer_unknown_identity() {
         let mykey = SigningKey::from_seed(&[1; 32]);
@@ -1363,16 +867,13 @@ mod tests {
         let Err(DispatchError::BadId(msg)) = r else {
             panic!("expected BadId, got {r:?}");
         };
-        // Error message mentions the name + "unknown identity"
-        // (matching the spirit of C `:428`).
         assert!(msg.contains("alice"), "msg: {msg}");
         assert!(msg.contains("unknown identity"), "msg: {msg}");
         assert!(c.sptps.is_none());
     }
 
-    /// Rollback attempt: known peer (have their pubkey) sends
-    /// minor=0. C `:443-447`: reject. We're STRICTER: minor=1
-    /// also rejected (we forbid legacy at any minor < 2).
+    /// Rollback: known peer sends minor=0. C `:443-447`. STRICTER:
+    /// minor=1 also rejected (no legacy).
     #[test]
     fn id_peer_rollback_rejected() {
         let mykey = SigningKey::from_seed(&[1; 32]);
@@ -1389,30 +890,20 @@ mod tests {
             invitation_key: None,
         };
 
-        // minor=0: C `:443` rejects (`ecdsa_active && minor < 1`).
         let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut OsRng);
         let Err(DispatchError::BadId(msg)) = r else {
             panic!("expected BadId, got {r:?}");
         };
         assert!(msg.contains("roll back"), "msg: {msg}");
 
-        // minor=1: C would `send_metakey` (legacy). We reject.
-        // STRICTER. The error message is the same (we don't
-        // distinguish 0 from 1; both are < 2).
+        // minor=1: C would `send_metakey`. STRICTER reject.
         let mut c = mkconn();
         let r = handle_id(&mut c, b"0 alice 17.1", &ctx, Instant::now(), &mut OsRng);
         assert!(matches!(r, Err(DispatchError::BadId(_))));
     }
 
-    /// Minor parse: `"17"` (no dot) → minor=0. C sscanf `%d.%d`
-    /// reads major, `.` fails, returns 2, minor stays xzalloc'd 0.
-    /// Then minor=0 < 2 → rollback reject (we have the key).
-    ///
-    /// This pins the parse: `"17"` is NOT a parse error. It's a
-    /// successful parse with minor=0, then a SEMANTIC reject. The
-    /// distinction matters: a peer that genuinely sends `"0 alice
-    /// 17"` (no minor) gets a "roll back" error, not a "malformed"
-    /// error — same as C.
+    /// `"17"` (no dot) → minor=0: parse SUCCEEDS, then SEMANTIC reject.
+    /// Pins: "roll back" error, not "malformed" — same as C.
     #[test]
     fn id_peer_no_dot_minor_zero() {
         let mykey = SigningKey::from_seed(&[1; 32]);
@@ -1433,24 +924,14 @@ mod tests {
         let Err(DispatchError::BadId(msg)) = r else {
             panic!("expected BadId, got {r:?}");
         };
-        // "roll back" not "malformed" — the parse SUCCEEDED.
         assert!(msg.contains("roll back"), "msg: {msg}");
-        // protocol_minor was set to the parsed 0 BEFORE the reject.
-        // (Same as C: `:399` `c->protocol_minor = ...` is implicit
-        // in the sscanf to `&c->protocol_minor`, before any check.)
+        // protocol_minor set BEFORE the reject (C `:399`).
         assert_eq!(c.protocol_minor, 0);
     }
 
     // ─── invitation `?` branch
-
-    // Happy-path `?` invitation greeting (two plaintext lines
-    // queued, SPTPS Responder with 15-byte label) is covered by
-    // `tests/two_daemons.rs::tinc_join_against_real_daemon`: a
-    // real `tinc join` client connects with `"0 ?<throwaway> 17.7"`,
-    // receives both plaintext lines (else join's greeting parse
-    // fails), completes SPTPS with the 15-byte label (else BadSig),
-    // and runs the full cookie→file→finalize chain. Only the
-    // rejection path below.
+    //
+    // Happy path covered by `tests/two_daemons.rs::tinc_join_against_real_daemon`.
 
     /// `?` with garbage b64. C `:348-351`: `if(!c->ecdsa)` reject.
     #[test]
@@ -1475,90 +956,58 @@ mod tests {
         assert!(c.outbuf.is_empty());
     }
 
-    /// The label asymmetry: invitation label has NO trailing NUL.
-    /// `protocol_auth.c:372`: `"tinc invitation", 15`. Explicit
-    /// count, not `sizeof()`. The meta label DOES have a NUL
-    /// (sizeof-of-VLA accident, see `tcp_label_has_trailing_nul`).
+    /// `protocol_auth.c:372`: `"tinc invitation", 15` — explicit count,
+    /// NOT `sizeof()`. NO trailing NUL (cf `tcp_label_has_trailing_nul`).
     #[test]
     fn invite_label_no_nul() {
-        // 15 bytes exactly. The C uses a string literal + explicit
-        // count; sizeof would have given 16 (string literals are
-        // NUL-terminated). The author was careful here.
         assert_eq!(INVITE_LABEL.len(), 15);
         assert_eq!(INVITE_LABEL, b"tinc invitation");
-        // No NUL anywhere.
         assert!(!INVITE_LABEL.contains(&0));
     }
 
     // ─── tcp_label (the NUL)
 
-    /// THE WIRE-COMPAT TEST. The label includes a trailing NUL.
-    /// gcc-verified C output for `("alice", "bob")`:
-    ///   labellen = 33, strlen = 32, byte 32 = 0x00
-    /// Hex: `74696e63...626f6200`.
-    ///
-    /// If this test fails, the SPTPS handshake against a real C
-    /// tincd will fail at SIG verify (`SptpsError::BadSig`). The
-    /// integration test (`stop.rs::peer_handshake`) catches the
-    /// SAME failure but takes 100ms+ to run; this is the fast
-    /// fail.
+    /// WIRE-COMPAT. gcc-verified: `labellen=33`, byte 32 = 0x00. Miss
+    /// the NUL → `BadSig` against C tincd. Fast fail vs 100ms+
+    /// `stop.rs::peer_handshake`.
     #[test]
     fn tcp_label_has_trailing_nul() {
         let label = tcp_label("alice", "bob");
-        // The C `25 + strlen("alice") + strlen("bob")`.
-        assert_eq!(label.len(), 25 + 5 + 3);
+        assert_eq!(label.len(), 25 + 5 + 3); // C `25 + strlen(a) + strlen(b)`
         assert_eq!(label.len(), 33);
-        // Last byte is NUL.
         assert_eq!(label[32], 0);
-        // Penultimate byte is `b'b'` (last char of "bob").
         assert_eq!(label[31], b'b');
-        // The exact bytes (gcc output, hex-decoded).
         assert_eq!(&label[..], b"tinc TCP key expansion alice bob\0");
     }
 
-    /// Label argument order: ALWAYS initiator, responder. C `:460-
-    /// 465`: outgoing→(myself, peer), inbound→(peer, myself).
-    /// The two calls produce DIFFERENT labels (and thus different
-    /// keys). If we get the order wrong, the SIG transcripts won't
-    /// match (initiator hashes one label, responder hashes the
-    /// other → BadSig).
+    /// C `:460-465`: always (initiator, responder). Swap → BadSig.
     #[test]
     fn tcp_label_order_matters() {
         let a = tcp_label("alice", "bob");
         let b = tcp_label("bob", "alice");
         assert_ne!(a, b);
-        // Both have the prefix.
         assert!(a.starts_with(b"tinc TCP key expansion alice "));
         assert!(b.starts_with(b"tinc TCP key expansion bob "));
     }
 
-    /// `check_id` is the path-traversal gate. Same fn as
-    /// `tinc-tools/names.rs:495`. Pin the security-relevant cases.
+    /// Path-traversal gate. Pin security-relevant cases.
     #[test]
     fn check_id_security() {
-        // Valid names.
         assert!(check_id("alice"));
         assert!(check_id("node_01"));
-        assert!(check_id("A")); // single char
-
-        // Traversal attempts. ALL must fail.
-        assert!(!check_id("../etc")); // contains `/` AND `.`
+        assert!(check_id("A"));
+        // Traversal: all must fail.
+        assert!(!check_id("../etc"));
         assert!(!check_id("a/b"));
-        assert!(!check_id(".")); // `.` isn't alnum
+        assert!(!check_id("."));
         assert!(!check_id(".."));
-        // Space (would break wire-protocol token splitting).
-        assert!(!check_id("a b"));
-        // Empty.
+        assert!(!check_id("a b")); // would break token split
         assert!(!check_id(""));
-        // The `^` prefix (control sigil) — not a valid PEER name.
-        assert!(!check_id("^abc"));
+        assert!(!check_id("^abc")); // control sigil
     }
 
-    /// `protocol_auth.c:328`: `c->last_ping_time = now.tv_sec + 3600`.
-    /// Control conns are exempt from the ping timeout sweep for an
-    /// hour. The sweep checks `last_ping_time + pingtimeout <= now`;
-    /// pushing last_ping_time AHEAD by 3600 means `now + 3600 + 5
-    /// <= now` is never true.
+    /// `protocol_auth.c:328`: `last_ping_time = now + 3600` exempts
+    /// control conns from ping sweep.
     #[test]
     fn id_bumps_ping_time() {
         let mut c = mkconn();
@@ -1568,21 +1017,13 @@ mod tests {
 
         handle_id(&mut c, line.as_bytes(), &mkctx(&cookie), now, &mut OsRng).unwrap();
 
-        // last_ping_time is now + 3600s. We can't compare Instants
-        // directly with literals, but: it's > now + 3000s for sure.
         assert!(c.last_ping_time > now + std::time::Duration::from_secs(3000));
     }
 
     // ─── handle_control
     //
-    // `"18 0"` → `DispatchResult::Stop` is covered by
-    // `tests/stop.rs::spawn_connect_stop`: it sends `"18 0"` and
-    // the daemon process EXITS (try_wait → status 0). The ack
-    // bytes are best-effort (queued but may not flush before
-    // event_loop exits); EOF is the contract.
+    // `"18 0"` → Stop covered by `tests/stop.rs::spawn_connect_stop`.
 
-    /// `REQ_RELOAD` (1) — returns `Reload` for daemon to handle.
-    /// Daemon does the actual reload + sends `"18 1 <result>"`.
     #[test]
     fn control_reload() {
         let mut c = mkconn();
@@ -1618,11 +1059,7 @@ mod tests {
         assert_eq!(c.outbuf.live(), b"18 -1\n");
     }
 
-    /// `PROT_MAJOR/PROT_MINOR` pin. tinc-proto already pins these
-    /// against `protocol.h`; this is a redundant assertion that
-    /// the greeting format would change if they did. Belt-and-
-    /// braces: if PROT_MINOR bumps to 8, this test fails AND
-    /// `id_control_auth_ok`'s `expected` string fails.
+    /// Belt-and-braces over tinc-proto's `protocol.h` pin.
     #[test]
     fn proto_version_pin() {
         assert_eq!(PROT_MAJOR, 17);
@@ -1632,82 +1069,59 @@ mod tests {
 
     // ─── send_ack / parse_ack
 
-    /// `myself->options` default. C `net_setup.c:442-453,800`. PMTU
-    /// on (no TCPOnly), ClampMSS on, PROT_MINOR=7 in top byte.
-    /// `0x0700000c`.
+    /// C `net_setup.c:442-453,800`: `0x0700000c`.
     #[test]
     fn myself_options_default_value() {
         let opts = myself_options_default();
-        // Low byte: PMTU(4) | CLAMP(8) = 0xc.
-        assert_eq!(opts & 0xff, 0x0c);
-        // Top byte: PROT_MINOR.
+        assert_eq!(opts & 0xff, 0x0c); // PMTU(4) | CLAMP(8)
         assert_eq!(opts >> 24, u32::from(PROT_MINOR));
-        // The other 16 bits are 0.
         assert_eq!(opts & 0x00ff_ff00, 0);
-        // Full value (pins the literal; if PROT_MINOR bumps, fail).
         assert_eq!(opts, 0x0700_000c);
     }
 
-    // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad)
-    // is covered by `tests/stop.rs::peer_ack_exchange`: it receives
-    // the daemon's ACK over real SPTPS and parses every field —
-    // reqno=4, udp_port (u16), weight (i32 in 0..5000), and
-    // crucially `from_str_radix(opts, 16) == 0x0700_000c`. If the
-    // format were uppercase, padded, or `0x`-prefixed, that parse
-    // fails. The roundtrip parse below pins the inverse.
+    // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad) covered
+    // by `tests/stop.rs::peer_ack_exchange`.
 
-    /// `parse_ack` round-trip. The peer's send_ack → our parse.
     #[test]
     fn parse_ack_roundtrip() {
-        // What a peer sends. PROT_MINOR=7, PMTU+CLAMP set.
         let line = b"4 655 50 700000c";
         let parsed = parse_ack(line).unwrap();
         assert_eq!(parsed.his_udp_port, 655);
         assert_eq!(parsed.his_weight, 50);
         assert_eq!(parsed.his_options, 0x0700_000c);
-        // The PMTU/CLAMP bits.
         assert_eq!(
             parsed.his_options & 0xff,
             OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS
         );
     }
 
-    /// `parse_ack` malformed cases. C `:960`: `sscanf < 3` → false.
+    /// C `:960`: `sscanf < 3` → false.
     #[test]
     fn parse_ack_malformed() {
-        // Missing options.
         assert!(matches!(
             parse_ack(b"4 655 50"),
             Err(DispatchError::BadAck(_))
         ));
-        // Non-numeric port. C `%s` would read it; we reject.
-        // STRICTER. The C would later crash in `sockaddr_setport`
-        // (which does `service_to_port` → fail → NULL); we fail
-        // earlier with a typed error.
+        // STRICTER: C `%s` would read "http"; we reject up front.
         assert!(matches!(
             parse_ack(b"4 http 50 c"),
             Err(DispatchError::BadAck(_))
         ));
-        // Weight: negative is fine (i32, %d). Unlikely but valid.
+        // Negative weight: valid (i32, %d).
         let p = parse_ack(b"4 655 -1 c").unwrap();
         assert_eq!(p.his_weight, -1);
-        // Options: bad hex.
         assert!(matches!(
             parse_ack(b"4 655 50 0xZZ"),
             Err(DispatchError::BadAck(_))
         ));
     }
 
-    /// `record_body` strips trailing `\n` (C `meta.c:155-158`).
+    /// C `meta.c:155-158`.
     #[test]
     fn record_body_strip() {
-        // Normal case: send_request appends \n, we strip.
         assert_eq!(record_body(b"4 655 50 c\n"), b"4 655 50 c");
-        // No \n: leave alone (the C check is conditional).
-        assert_eq!(record_body(b"4 655 50 c"), b"4 655 50 c");
-        // Empty.
+        assert_eq!(record_body(b"4 655 50 c"), b"4 655 50 c"); // no \n: unchanged
         assert_eq!(record_body(b""), b"");
-        // Just \n.
         assert_eq!(record_body(b"\n"), b"");
     }
 }
