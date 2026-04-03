@@ -972,147 +972,92 @@ mod tests {
 
     // Stage 1: parse_var_expr — pure string munging, no fs
 
+    /// Ok-path table for `parse_var_expr`. The C `strcspn` stop set
+    /// is `\t =`, and `strchr(key, '.')` runs only on the key slice
+    /// (after `line[len] = '\0'`).
     #[test]
-    fn parse_basic_var() {
-        assert_eq!(parse_var_expr("Port").unwrap(), (None, "Port", ""));
+    fn parse_var_expr_ok() {
+        #[allow(clippy::type_complexity)]
+        #[rustfmt::skip]
+        let cases: &[(&str, (Option<&str>, &str, &str))] = &[
+            // ─── bare var, no value ───
+            ("Port",                    (None, "Port", "")),
+            // ─── separator variants: C `strcspn` stop set is `\t =` ───
+            ("Port = 655",              (None, "Port", "655")),
+            ("Port=655",                (None, "Port", "655")),  // no-space-around-=
+            ("Port\t655",               (None, "Port", "655")),  // tab separator
+            ("Port 655",                (None, "Port", "655")),  // argv-join: `tinc set Port 655` → "Port 655"
+            // ─── multi-word value: only FIRST `\t /=` is key boundary ───
+            // `tinc set Name $HOST` → `"Name = my host name"`. C `strncat`
+            // loop preserves spaces; `args.join(" ")` does too.
+            ("Name = host with spaces", (None, "Name", "host with spaces")),
+            // ─── node prefix ───
+            ("alice.Port",              (Some("alice"), "Port", "")),
+            ("alice.Port = 655",        (Some("alice"), "Port", "655")),
+            ("alice.Port=655",          (Some("alice"), "Port", "655")),  // no-space + node prefix
+            // ─── value with embedded `=`: C splits on FIRST `=`/ws ───
+            ("Device = /dev/tun=x",     (None, "Device", "/dev/tun=x")),
+            // ─── dots in value, not key: `strchr(line, '.')` scans key only ───
+            ("Address = 10.0.0.1",      (None, "Address", "10.0.0.1")),
+            // No separator + dots → whole thing is key → `node=10, var=0.0.1`.
+            // Weird but it's what the C does (`0.0.1` fails `vars::lookup` later).
+            ("10.0.0.1",                (Some("10"), "0.0.1", "")),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_var_expr(input).unwrap(),
+                *expected,
+                "input: {input:?}"
+            );
+        }
     }
 
+    /// Err-path table. Both produce empty-var via different routes.
     #[test]
-    fn parse_var_with_value() {
-        assert_eq!(parse_var_expr("Port = 655").unwrap(), (None, "Port", "655"));
-        // No-space-around-= is what the C accepts. `strcspn`
-        // stop set includes `=`.
-        assert_eq!(parse_var_expr("Port=655").unwrap(), (None, "Port", "655"));
-        // Tab separator.
-        assert_eq!(parse_var_expr("Port\t655").unwrap(), (None, "Port", "655"));
-        // The argv-join produces space-joined — `tinc set Port 655`
-        // → `"Port 655"`. No `=` in the joined string. The
-        // tokenizer handles it: key ends at first space, val is
-        // the rest after trimming.
-        assert_eq!(parse_var_expr("Port 655").unwrap(), (None, "Port", "655"));
-    }
-
-    /// Multi-word value. `tinc set Name $HOST` shell-expanded to
-    /// `tinc set Name = my host name` would join to `"Name = my host
-    /// name"`. The C `strncat` loop preserves the spaces; `args.join(" ")`
-    /// in the binary adapter does too.
-    #[test]
-    fn parse_multiword_value() {
-        // Only the FIRST `\t /=` is the key boundary. Everything
-        // after the val-start is value, spaces and all.
-        assert_eq!(
-            parse_var_expr("Name = host with spaces").unwrap(),
-            (None, "Name", "host with spaces")
-        );
-    }
-
-    #[test]
-    fn parse_node_dot_var() {
-        assert_eq!(
-            parse_var_expr("alice.Port").unwrap(),
-            (Some("alice"), "Port", "")
-        );
-        assert_eq!(
-            parse_var_expr("alice.Port = 655").unwrap(),
-            (Some("alice"), "Port", "655")
-        );
-        // No space around = AND a node prefix.
-        assert_eq!(
-            parse_var_expr("alice.Port=655").unwrap(),
-            (Some("alice"), "Port", "655")
-        );
-    }
-
-    /// `alice.` → empty var → error. C `if(!*variable)`.
-    #[test]
-    fn parse_empty_var_after_dot() {
-        let e = parse_var_expr("alice.").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(m) if m == "No variable given."));
-    }
-
-    /// `=655` → empty var. The `=` is in the stop set, so key_end=0.
-    #[test]
-    fn parse_empty_var_leading_equals() {
-        let e = parse_var_expr("=655").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(_)));
-    }
-
-    /// Value with embedded `=`. `tinc set Device = /dev/net/tun=weird`.
-    /// The C splits on the FIRST `=`/ws — same here.
-    #[test]
-    fn parse_value_with_equals() {
-        assert_eq!(
-            parse_var_expr("Device = /dev/tun=x").unwrap(),
-            (None, "Device", "/dev/tun=x")
-        );
-    }
-
-    /// Dots in the value, not the key. `tinc set Address 10.0.0.1`.
-    /// The `strchr(line, '.')` only scans the *key portion* (because
-    /// `line[len] = '\0'` happens before the strchr). Our slice does
-    /// the same — `key.find('.')`.
-    #[test]
-    fn parse_dots_in_value_not_node() {
-        assert_eq!(
-            parse_var_expr("Address = 10.0.0.1").unwrap(),
-            (None, "Address", "10.0.0.1")
-        );
-        // But if there's no separator and the whole thing is the
-        // key... `10.0.0.1` is treated as `node=10, var=0.0.1`.
-        // Weird but it's what the C does (and `0.0.1` will fail
-        // `vars::lookup` later).
-        assert_eq!(
-            parse_var_expr("10.0.0.1").unwrap(),
-            (Some("10"), "0.0.1", "")
-        );
+    fn parse_var_expr_err() {
+        for input in [
+            // `alice.` → empty var after dot. C `if(!*variable)`.
+            "alice.", // `=655` → `=` in stop set, key_end=0 → empty var.
+            "=655",
+        ] {
+            let e = parse_var_expr(input).unwrap_err();
+            assert!(
+                matches!(e, CmdError::BadInput(m) if m == "No variable given."),
+                "input: {input:?}"
+            );
+        }
     }
 
     // split_line — file-line tokenizer (instance #7)
 
+    /// `split_line` table. rstrip set is `\t\r\n `. The C
+    /// `cmd_config` does NOT have `#` comment awareness — `#` is
+    /// just a character (`conf.c::parse_config_line` does, but
+    /// `cmd_config` doesn't share that code; intentional — `tinc
+    /// set` operates on files-as-text, not files-as-config).
     #[test]
-    fn split_line_basic() {
-        assert_eq!(split_line("Port = 655\n"), Some(("Port", "655")));
-        assert_eq!(split_line("Port=655\n"), Some(("Port", "655")));
-        assert_eq!(split_line("Port\t655\n"), Some(("Port", "655")));
-    }
-
-    /// rstrip set is `\t\r\n `. CRLF files (Windows-edited) have
-    /// `\r\n` at line ends; the `\r` shouldn't end up in the value.
-    #[test]
-    fn split_line_crlf() {
-        assert_eq!(split_line("Port = 655\r\n"), Some(("Port", "655")));
-    }
-
-    /// Trailing whitespace before the newline. C `rstrip` handles
-    /// this; trim_end_matches with the same set does too.
-    #[test]
-    fn split_line_trailing_space() {
-        assert_eq!(split_line("Port = 655   \n"), Some(("Port", "655")));
-        assert_eq!(split_line("Port = 655\t\n"), Some(("Port", "655")));
-    }
-
-    /// Blank line → None. C: empty key → strcasecmp fails → falls
-    /// through to copy-verbatim. We're explicit.
-    #[test]
-    fn split_line_blank() {
-        assert_eq!(split_line("\n"), None);
-        assert_eq!(split_line(""), None);
-        assert_eq!(split_line("   \n"), None);
-    }
-
-    /// `#` comment lines. The C `cmd_config` does NOT have comment
-    /// awareness — `#` is just a character. `# Port = 655` parses
-    /// as `key = "#"`, `val = "Port = 655"`. The `#` won't match
-    /// any variable, so it falls through to copy. Same behavior
-    /// here.
-    ///
-    /// (`conf.c::parse_config_line` DOES have `#` handling, but
-    /// `cmd_config` doesn't share that code. Intentional — `tinc
-    /// set` operates on files-as-text, not files-as-config.)
-    #[test]
-    fn split_line_comment_passthrough() {
-        // Tokenizes weirdly, but doesn't match anything → preserved.
-        assert_eq!(split_line("# Port = 655\n"), Some(("#", "Port = 655")));
+    fn split_line_table() {
+        #[rustfmt::skip]
+        let cases: &[(&str, Option<(&str, &str)>)] = &[
+            // ─── separator variants ───
+            ("Port = 655\n",   Some(("Port", "655"))),
+            ("Port=655\n",     Some(("Port", "655"))),
+            ("Port\t655\n",    Some(("Port", "655"))),
+            // ─── CRLF (Windows-edited): `\r` mustn't end up in value ───
+            ("Port = 655\r\n", Some(("Port", "655"))),
+            // ─── trailing ws before newline: C `rstrip` handles ───
+            ("Port = 655   \n", Some(("Port", "655"))),
+            ("Port = 655\t\n", Some(("Port", "655"))),
+            // ─── blank → None: empty key → strcasecmp fails → copy-verbatim ───
+            ("\n",    None),
+            ("",      None),
+            ("   \n", None),
+            // ─── `#` comment: tokenizes as key="#", doesn't match any var → preserved ───
+            ("# Port = 655\n", Some(("#", "Port = 655"))),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(split_line(input), *expected, "input: {input:?}");
+        }
     }
 
     /// PEM line: `-----BEGIN PUBLIC KEY-----`. Tokenizes as
@@ -1144,41 +1089,30 @@ mod tests {
         (dir, paths)
     }
 
+    /// Routing + canonicalization table: which file does this var go to?
+    /// SERVER → tinc.conf (node=None); HOST-only → hosts/$me via
+    /// get_my_name; explicit node prefix wins. C `tincctl.c:1864,1904,1909`.
     #[test]
-    fn intent_server_var_goes_to_tinc_conf() {
+    fn intent_routing() {
         let (_d, paths) = setup("alice");
-        // Device is SERVER-only.
-        let (intent, _) =
-            build_intent(&paths, Action::Set, None, "Device", "/dev/tun", false).unwrap();
-        assert_eq!(intent.node, None); // → tinc.conf
-        assert_eq!(intent.variable, "Device"); // canonical (was already)
-        assert_eq!(intent.action, Action::Set);
-    }
-
-    #[test]
-    fn intent_host_var_goes_to_my_host_file() {
-        let (_d, paths) = setup("alice");
-        // Subnet is HOST-only (and MULTIPLE, but that's a different test).
-        let (intent, _) =
-            build_intent(&paths, Action::Add, None, "Subnet", "10.0.0.0/24", false).unwrap();
-        // Resolved via get_my_name → "alice".
-        assert_eq!(intent.node.as_deref(), Some("alice"));
-    }
-
-    /// Explicit `alice.Subnet` overrides the get_my_name resolution.
-    #[test]
-    fn intent_explicit_node_wins() {
-        let (_d, paths) = setup("alice");
-        let (intent, _) = build_intent(
-            &paths,
-            Action::Add,
-            Some("bob"),
-            "Subnet",
-            "10.0.0.0/24",
-            false,
-        )
-        .unwrap();
-        assert_eq!(intent.node.as_deref(), Some("bob"));
+        #[allow(clippy::type_complexity)]
+        #[rustfmt::skip]
+        let cases: &[(Action, Option<&str>, &str, &str, Option<&str>, &str)] = &[
+            //          (action,      explicit_node, var,      value,          expect_node,   expect_canonical_var)
+            // Device is SERVER-only → tinc.conf.
+            (Action::Set, None,        "Device", "/dev/tun",     None,          "Device"),
+            // Subnet is HOST-only → resolved via get_my_name → "alice".
+            (Action::Add, None,        "Subnet", "10.0.0.0/24",  Some("alice"), "Subnet"),
+            // Explicit `bob.Subnet` overrides get_my_name.
+            (Action::Add, Some("bob"), "Subnet", "10.0.0.0/24",  Some("bob"),   "Subnet"),
+            // Canonicalization: `port` → `Port`. C `tincctl.c:1864`.
+            (Action::Set, None,        "port",   "655",          Some("alice"), "Port"),
+        ];
+        for &(action, explicit, var, val, expect_node, expect_var) in cases {
+            let (intent, _) = build_intent(&paths, action, explicit, var, val, false).unwrap();
+            assert_eq!(intent.node.as_deref(), expect_node, "var: {var:?}");
+            assert_eq!(intent.variable, expect_var, "var: {var:?}");
+        }
     }
 
     /// Port is dual-tagged (SERVER | HOST). The C condition
@@ -1220,67 +1154,68 @@ mod tests {
         assert_eq!(intent.node.as_deref(), Some("alice"));
     }
 
-    /// Canonicalization: `port` → `Port`. C `tincctl.c:1864`.
+    /// Action coercion table. The MULTIPLE flag and the action
+    /// interact: `add` on non-MULTIPLE downgrades to `set` (you can't
+    /// have two Ports), `set` on MULTIPLE warns (you might be wiping
+    /// a list). C `tincctl.c:1846,1918,1921`.
     #[test]
-    fn intent_canonicalizes_var_name() {
+    fn intent_action_coercion() {
         let (_d, paths) = setup("alice");
-        let (intent, _) = build_intent(&paths, Action::Set, None, "port", "655", false).unwrap();
-        assert_eq!(intent.variable, "Port");
-    }
-
-    /// `add` on non-MULTIPLE → `set` + warnonremove. `tincctl.c:1918`.
-    #[test]
-    fn intent_add_on_single_becomes_set() {
-        let (_d, paths) = setup("alice");
-        // Port is not MULTIPLE.
-        let (intent, _) = build_intent(&paths, Action::Add, None, "Port", "655", false).unwrap();
-        assert_eq!(intent.action, Action::Set);
-        assert!(intent.warn_on_remove);
-    }
-
-    /// `set` on MULTIPLE → still `set`, but warnonremove. `tincctl.c:1921`.
-    #[test]
-    fn intent_set_on_multiple_warns() {
-        let (_d, paths) = setup("alice");
-        // ConnectTo is SERVER | MULTIPLE.
-        let (intent, _) =
-            build_intent(&paths, Action::Set, None, "ConnectTo", "bob", false).unwrap();
-        assert_eq!(intent.action, Action::Set); // unchanged
-        assert!(intent.warn_on_remove);
-    }
-
-    /// `add` on MULTIPLE stays `add`. The intended use case.
-    #[test]
-    fn intent_add_on_multiple_stays_add() {
-        let (_d, paths) = setup("alice");
-        let (intent, _) =
-            build_intent(&paths, Action::Add, None, "ConnectTo", "bob", false).unwrap();
-        assert_eq!(intent.action, Action::Add);
-        assert!(!intent.warn_on_remove);
-    }
-
-    /// `get` with a value → `set`. C `tincctl.c:1846`.
-    #[test]
-    fn intent_get_with_value_becomes_set() {
-        let (_d, paths) = setup("alice");
+        #[rustfmt::skip]
+        let cases: &[(Action, &str, &str, Action, bool)] = &[
+            //          (in_action,  var,         value, out_action,  warn_on_remove)
+            // `add` on non-MULTIPLE → `set` + warn. Port is not MULTIPLE.
+            (Action::Add, "Port",      "655", Action::Set, true),
+            // `set` on MULTIPLE → still `set`, but warn. ConnectTo is SERVER|MULTIPLE.
+            (Action::Set, "ConnectTo", "bob", Action::Set, true),
+            // `add` on MULTIPLE stays `add`. The intended use case.
+            (Action::Add, "ConnectTo", "bob", Action::Add, false),
+        ];
+        for &(in_action, var, val, out_action, warn) in cases {
+            let (intent, _) = build_intent(&paths, in_action, None, var, val, false).unwrap();
+            assert_eq!(intent.action, out_action, "{in_action:?} {var}");
+            assert_eq!(intent.warn_on_remove, warn, "{in_action:?} {var}");
+        }
+        // `get` with a value → `set`. C `tincctl.c:1846`. (Separate
+        // because the original didn't pin warn_on_remove; preserving.)
         let (intent, _) = build_intent(&paths, Action::Get, None, "Port", "655", false).unwrap();
         assert_eq!(intent.action, Action::Set);
     }
 
+    /// Err-path table for `build_intent`. All produce
+    /// `CmdError::BadInput`; we check the message text since these
+    /// are user-facing strings (C printf format strings, exact match
+    /// or substring).
     #[test]
-    fn intent_set_without_value_fails() {
+    fn intent_errors() {
         let (_d, paths) = setup("alice");
-        let e = build_intent(&paths, Action::Set, None, "Port", "", false).unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(m) if m == "No value for variable given."));
-    }
-
-    /// Unknown var without force → error. C `tincctl.c:1935`.
-    #[test]
-    fn intent_unknown_var_fails() {
-        let (_d, paths) = setup("alice");
+        #[allow(clippy::type_complexity)]
+        #[rustfmt::skip]
+        let cases: &[(Action, Option<&str>, &str, &str, &str)] = &[
+            //          (action,      explicit_node,    var,      value,          msg_contains)
+            // `set` without value. C `tincctl.c`.
+            (Action::Set, None,             "Port",     "",            "No value for variable given."),
+            // Unknown var without force. C `tincctl.c:1935`.
+            (Action::Set, None,             "NoSuchVar", "x",          "not a known configuration variable"),
+            // `node.SERVER_VAR` without force. Device is SERVER-only. C `tincctl.c:1893`.
+            (Action::Set, Some("bob"),      "Device",   "/dev/tun",    "not a host configuration variable"),
+            // Explicit node fails check_id. C `tincctl.c:1925`.
+            (Action::Get, Some("bad/name"), "Port",     "",            "Invalid name for node."),
+            // Subnet validation: malformed. C `tincctl.c:1870`.
+            (Action::Add, None,             "Subnet",   "not-a-subnet", "Malformed subnet definition"),
+            // Subnet: host bits set. 10.0.0.1/24: .1 is in host portion. C `tincctl.c:1874` `subnetcheck`.
+            (Action::Add, None,             "Subnet",   "10.0.0.1/24", "Network address and prefix length do not match"),
+        ];
+        for &(action, explicit, var, val, msg) in cases {
+            let e = build_intent(&paths, action, explicit, var, val, false).unwrap_err();
+            let CmdError::BadInput(m) = e else {
+                panic!("expected BadInput for {var:?}={val:?}")
+            };
+            assert!(m.contains(msg), "var={var:?} val={val:?}: got {m:?}");
+        }
+        // The unknown-var error also mentions --force (the escape hatch).
         let e = build_intent(&paths, Action::Set, None, "NoSuchVar", "x", false).unwrap_err();
         let CmdError::BadInput(m) = e else { panic!() };
-        assert!(m.contains("not a known configuration variable"));
         assert!(m.contains("--force"));
     }
 
@@ -1338,98 +1273,33 @@ mod tests {
         assert!(!warns.iter().any(|w| matches!(w, Warning::Obsolete(_))));
     }
 
-    /// `node.SERVER_VAR` without force → error. C `tincctl.c:1893`.
-    #[test]
-    fn intent_server_var_in_hostfile_fails() {
-        let (_d, paths) = setup("alice");
-        // Device is SERVER-only.
-        let e = build_intent(
-            &paths,
-            Action::Set,
-            Some("bob"),
-            "Device",
-            "/dev/tun",
-            false,
-        )
-        .unwrap_err();
-        let CmdError::BadInput(m) = e else { panic!() };
-        assert!(m.contains("not a host configuration variable"));
-    }
-
-    /// Explicit node fails check_id. C `tincctl.c:1925`.
-    #[test]
-    fn intent_bad_node_name() {
-        let (_d, paths) = setup("alice");
-        let e = build_intent(&paths, Action::Get, Some("bad/name"), "Port", "", false).unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(m) if m == "Invalid name for node."));
-    }
-
-    /// Subnet validation: malformed value rejected. C `tincctl.c:1870`.
-    #[test]
-    fn intent_subnet_malformed() {
-        let (_d, paths) = setup("alice");
-        let e =
-            build_intent(&paths, Action::Add, None, "Subnet", "not-a-subnet", false).unwrap_err();
-        let CmdError::BadInput(m) = e else { panic!() };
-        assert!(m.contains("Malformed subnet definition"));
-    }
-
-    /// Subnet validation: non-canonical (host bits set). C
-    /// `tincctl.c:1874`: `subnetcheck`.
-    #[test]
-    fn intent_subnet_non_canonical() {
-        let (_d, paths) = setup("alice");
-        // 10.0.0.1/24: the .1 is a host bit. Prefix says /24,
-        // first 3 octets are network, .1 is in the host portion.
-        let e =
-            build_intent(&paths, Action::Add, None, "Subnet", "10.0.0.1/24", false).unwrap_err();
-        let CmdError::BadInput(m) = e else { panic!() };
-        assert!(m.contains("Network address and prefix length do not match"));
-    }
-
-    #[test]
-    fn intent_subnet_valid() {
-        let (_d, paths) = setup("alice");
-        let (intent, _) =
-            build_intent(&paths, Action::Add, None, "Subnet", "10.0.0.0/24", false).unwrap();
-        assert_eq!(intent.value, "10.0.0.0/24");
-    }
-
     // Stage 3: run_get — read-only file walk
 
+    /// `run_get` table. Match is case-insensitive (C
+    /// `!strcasecmp(buf2, variable)`); no-match → empty vec
+    /// (the "no match → error" is in run(), not run_get()).
     #[test]
-    fn get_single_value() {
+    fn get_table() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("tinc.conf");
-        fs::write(&f, "Name = alice\nPort = 655\n").unwrap();
-        assert_eq!(run_get(&f, "Port").unwrap(), vec!["655"]);
-    }
-
-    #[test]
-    fn get_multiple_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("tinc.conf");
-        fs::write(&f, "ConnectTo = bob\nConnectTo = carol\n").unwrap();
-        assert_eq!(run_get(&f, "ConnectTo").unwrap(), vec!["bob", "carol"]);
-    }
-
-    /// Case-insensitive match. `port` in the file matches `Port`
-    /// query. C `!strcasecmp(buf2, variable)`.
-    #[test]
-    fn get_case_insensitive() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("tinc.conf");
-        fs::write(&f, "port = 655\n").unwrap();
-        assert_eq!(run_get(&f, "Port").unwrap(), vec!["655"]);
-    }
-
-    #[test]
-    fn get_no_match_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("tinc.conf");
-        fs::write(&f, "Name = alice\n").unwrap();
-        assert!(run_get(&f, "Port").unwrap().is_empty());
-        // The "no match → error" is in run(), not run_get().
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &[&str])] = &[
+            //          (file_content,                            query,       expected)
+            ("Name = alice\nPort = 655\n",             "Port",      &["655"]),
+            ("ConnectTo = bob\nConnectTo = carol\n",   "ConnectTo", &["bob", "carol"]),
+            // case-insensitive: `port` in file matches `Port` query
+            ("port = 655\n",                           "Port",      &["655"]),
+            // no match → empty
+            ("Name = alice\n",                         "Port",      &[]),
+        ];
+        for (content, var, expected) in cases {
+            fs::write(&f, content).unwrap();
+            assert_eq!(
+                run_get(&f, var).unwrap(),
+                *expected,
+                "var={var:?} content={content:?}"
+            );
+        }
     }
 
     #[test]
