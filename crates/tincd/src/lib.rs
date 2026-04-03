@@ -34,6 +34,7 @@ pub mod control;
 pub mod daemon;
 pub mod graph_glue;
 pub mod icmp;
+pub mod invitation_serve;
 pub mod keys;
 pub mod listen;
 pub mod mss;
