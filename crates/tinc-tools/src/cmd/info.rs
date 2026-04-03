@@ -992,112 +992,55 @@ mod tests {
         }
     }
 
-    /// `host == "MYSELF"` → Myself. The first arm; everything else
-    /// is don't-care.
+    /// `Reachability::from_row` cascade table. C `info.c:177-195`,
+    /// an if-else-if chain. ORDER matters: a row satisfying multiple
+    /// arms picks the FIRST. Five-for-five on read-the-C-before-
+    /// coding: the first cut had `Unreachable` before `Myself`
+    /// ("self is reachable by definition, so order doesn't matter")
+    /// — wrong. C does MYSELF first (`info.c:177`), the strcmp fires
+    /// before the bit-read.
     #[test]
-    fn cascade_myself() {
-        // Even if status says unreachable. MYSELF check is first.
-        let r = cascade_row("MYSELF", 0, "-", 0, "-", -1);
-        assert_eq!(Reachability::from_row(&r, "alice"), Reachability::Myself);
-    }
-
-    /// `!reachable` → Unreachable. Second arm.
-    #[test]
-    fn cascade_unreachable() {
-        // status=0 → bit 4 clear. host != MYSELF.
-        let r = cascade_row("1.1.1.1", 0, "alice", 0, "-", -1);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::Unreachable
-        );
-    }
-
-    /// `via != name` → Indirect. Third arm. Reachable, but routed.
-    #[test]
-    fn cascade_indirect() {
-        // reachable bit set, via=bob != alice.
-        let r = cascade_row("1.1.1.1", StatusBit::REACHABLE.0, "bob", 0, "-", -1);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::Indirect { via: "bob".into() }
-        );
-    }
-
-    /// `!validkey` → Unknown. Fourth arm. Reachable, direct, but
-    /// handshake hasn't finished.
-    #[test]
-    fn cascade_unknown() {
-        // reachable, via=alice (direct), validkey CLEAR.
-        let r = cascade_row("1.1.1.1", StatusBit::REACHABLE.0, "alice", 0, "alice", -1);
-        assert_eq!(Reachability::from_row(&r, "alice"), Reachability::Unknown);
-    }
-
-    /// `minmtu > 0` → DirectUdp. Fifth arm. The good case.
-    #[test]
-    fn cascade_direct_udp() {
-        let s = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
-        let r = cascade_row("1.1.1.1", s, "alice", 1400, "alice", 1500);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::DirectUdp {
-                pmtu: 1518,
-                rtt_us: Some(1500)
-            }
-        );
-        // rtt = -1 → no RTT line.
-        let r = cascade_row("1.1.1.1", s, "alice", 1400, "alice", -1);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::DirectUdp {
-                pmtu: 1518,
-                rtt_us: None
-            }
-        );
-    }
-
-    /// `nexthop == name` → DirectTcp. Sixth arm.
-    #[test]
-    fn cascade_direct_tcp() {
-        let s = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
-        // minmtu=0 (no UDP), nexthop=alice (we have a meta conn).
-        let r = cascade_row("1.1.1.1", s, "alice", 0, "alice", -1);
-        assert_eq!(Reachability::from_row(&r, "alice"), Reachability::DirectTcp);
-    }
-
-    /// Else → Forwarded. The catch-all.
-    #[test]
-    fn cascade_forwarded() {
-        let s = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
-        // minmtu=0, nexthop=bob (NOT alice).
-        let r = cascade_row("1.1.1.1", s, "alice", 0, "bob", -1);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::Forwarded {
-                nexthop: "bob".into()
-            }
-        );
-    }
-
-    /// THE order test: a row that satisfies MULTIPLE arms picks the
-    /// FIRST. Same role as `dump::node_dot_cascade_order`. Five-
-    /// for-five on read-the-C-before-coding: the first cut had
-    /// `Unreachable` before `Myself` (because "self is reachable
-    /// by definition, so the order doesn't matter") — wrong. C does
-    /// MYSELF first (`info.c:177` is the first `if`), the strcmp
-    /// fires before the bit-read. A self-node WITH the unreachable
-    /// bit set (which the daemon should never produce, but) is
-    /// MYSELF.
-    #[test]
-    fn cascade_order_myself_beats_unreachable() {
-        // MYSELF + unreachable → still Myself. The C order.
-        let r = cascade_row("MYSELF", 0, "alice", 0, "-", -1);
-        assert_eq!(Reachability::from_row(&r, "alice"), Reachability::Myself);
-        // Unreachable + indirect → still Unreachable.
-        let r = cascade_row("1.1.1.1", 0, "bob", 0, "-", -1);
-        assert_eq!(
-            Reachability::from_row(&r, "alice"),
-            Reachability::Unreachable
-        );
+    fn cascade_table() {
+        let rv = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
+        #[rustfmt::skip]
+        let cases: &[(NodeRow, Reachability)] = &[
+            //          (cascade_row(host,     status,                 via,     minmtu, nexthop, rtt),   expected)
+            // 1. host=="MYSELF" → Myself. First arm; everything else don't-care.
+            //    Even if status says unreachable — MYSELF check is first.
+            (cascade_row("MYSELF",   0,                       "-",     0,      "-",     -1),   Reachability::Myself),
+            // 2. !reachable → Unreachable. status=0, bit 4 clear, host != MYSELF.
+            (cascade_row("1.1.1.1",  0,                       "alice", 0,      "-",     -1),   Reachability::Unreachable),
+            // 3. via != name → Indirect. Reachable, but routed (via=bob != alice).
+            (cascade_row("1.1.1.1",  StatusBit::REACHABLE.0,  "bob",   0,      "-",     -1),   Reachability::Indirect { via: "bob".into() }),
+            // 4. !validkey → Unknown. Reachable, direct (via=alice), validkey CLEAR.
+            (cascade_row("1.1.1.1",  StatusBit::REACHABLE.0,  "alice", 0,      "alice", -1),   Reachability::Unknown),
+            // 5. minmtu > 0 → DirectUdp. The good case. rtt=1500 → Some(1500).
+            (cascade_row("1.1.1.1",  rv,                      "alice", 1400,   "alice", 1500), Reachability::DirectUdp { pmtu: 1518, rtt_us: Some(1500) }),
+            //    rtt = -1 → no RTT line.
+            (cascade_row("1.1.1.1",  rv,                      "alice", 1400,   "alice", -1),   Reachability::DirectUdp { pmtu: 1518, rtt_us: None }),
+            // 6. nexthop == name → DirectTcp. minmtu=0 (no UDP), nexthop=alice (meta conn).
+            (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "alice", -1),   Reachability::DirectTcp),
+            // 7. else → Forwarded. minmtu=0, nexthop=bob (NOT alice).
+            (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "bob",   -1),   Reachability::Forwarded { nexthop: "bob".into() }),
+            // ─── ORDER tests: row satisfies multiple arms, FIRST wins ───
+            // MYSELF + unreachable → still Myself. The C order. (Daemon should
+            // never produce this, but the cascade admits it.)
+            (cascade_row("MYSELF",   0,                       "alice", 0,      "-",     -1),   Reachability::Myself),
+            // Unreachable + indirect (via=bob) → still Unreachable.
+            (cascade_row("1.1.1.1",  0,                       "bob",   0,      "-",     -1),   Reachability::Unreachable),
+        ];
+        for (row, expected) in cases {
+            assert_eq!(
+                Reachability::from_row(row, "alice"),
+                *expected,
+                "host={:?} status={:#x} via={:?} minmtu={} nexthop={:?}",
+                row.host,
+                row.status,
+                row.via,
+                row.minmtu,
+                row.nexthop,
+            );
+        }
     }
 
     // ─── Reachability Display
