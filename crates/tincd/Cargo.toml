@@ -34,6 +34,10 @@ slotmap = "1"
 # rand_core 0.6 (NOT 0.9) — same as tinc-tools, keeps lock unified.
 rand_core = { version = "0.6", features = ["getrandom"] }
 
+# sha2 for NodeId6 (node.c:126-128: sha512(name, strlen, buf), keep
+# first 6). Already in the lockfile via tinc-crypto / ed25519-dalek.
+sha2.workspace = true
+
 log = "0.4"
 # Minimal env_logger: no anstream/anstyle/jiff/regex. RUST_LOG=tincd
 # substring filtering works without regex; that's enough.

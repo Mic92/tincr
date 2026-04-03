@@ -207,6 +207,32 @@
                 ./gen > $out
               '';
 
+          # node.c:125-128: sha512(name, strlen(name), buf), keep first 6
+          # bytes. The 6-byte node ID prefixes every UDP packet (SRCID/
+          # DSTID, net.h:92-93). Links the actual src/ed25519/sha512.c
+          # (LibTomCrypt) so the vectors are ground truth, not a second
+          # SHA-512 implementation we hope agrees. Vectors inlined in
+          # crates/tincd/src/node_id.rs::tests::from_name_kat.
+          packages.kat-node-id =
+            pkgs.runCommandCC "tinc-kat-node-id"
+              {
+                src = pkgs.lib.fileset.toSource {
+                  root = ./.;
+                  fileset = pkgs.lib.fileset.unions [
+                    ./kat/gen_node_id.c
+                    ./src/ed25519/sha512.c
+                    ./src/ed25519/sha512.h
+                    ./src/ed25519/fixedint.h
+                  ];
+                };
+                hardeningDisable = [ "fortify" ];
+              }
+              ''
+                $CC -std=c11 -O1 -Wall -Werror \
+                  $src/kat/gen_node_id.c $src/src/ed25519/sha512.c -o gen
+                ./gen > $out
+              '';
+
           # TODO: hermetic `checks.cross-impl` derivation. Needs
           # `rustPlatform.buildRustPackage` to vendor deps; a naive
           # `runCommand` + `cargo test --offline` dies in the sandbox
