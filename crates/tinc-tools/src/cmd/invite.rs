@@ -729,74 +729,46 @@ mod tests {
 
     // copy_host_replacing_port — the C tokenizer port
 
-    /// Port line replaced, everything else byte-preserved.
+    /// `copy_host_replacing_port` table. Helper closure does the
+    /// tempdir+write+call dance once per row.
     #[test]
-    fn copy_host_replaces_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("h");
-        fs::write(&f, "Address = 1.2.3.4\nPort = 0\nEd25519PublicKey = abc\n").unwrap();
-        let mut out = String::new();
-        copy_host_replacing_port(&f, "12345", &mut out).unwrap();
-        assert_eq!(
-            out,
-            "Address = 1.2.3.4\nPort = 12345\nEd25519PublicKey = abc\n"
+    fn copy_host_table() {
+        let case = |input: &str, port: &str, expected: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let f = dir.path().join("h");
+            fs::write(&f, input).unwrap();
+            let mut out = String::new();
+            copy_host_replacing_port(&f, port, &mut out).unwrap();
+            assert_eq!(out, expected, "input: {input:?} port: {port:?}");
+        };
+
+        // Port line replaced, everything else byte-preserved.
+        case(
+            "Address = 1.2.3.4\nPort = 0\nEd25519PublicKey = abc\n",
+            "12345",
+            "Address = 1.2.3.4\nPort = 12345\nEd25519PublicKey = abc\n",
         );
-    }
-
-    /// `Port=655` (no space before `=`) does NOT match. The C
-    /// tokenizer's `strcspn("\t ")` stops at whitespace, not `=`, so
-    /// the token is `Port=655` (8 chars), not `Port` (4 chars). This
-    /// is the behavior; whether it's *intended* is debatable, but
-    /// byte-compat is byte-compat.
-    #[test]
-    fn copy_host_no_space_port_passes_through() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("h");
-        fs::write(&f, "Port=0\n").unwrap();
-        let mut out = String::new();
-        copy_host_replacing_port(&f, "12345", &mut out).unwrap();
-        // Unchanged. The C would also pass this through.
-        assert_eq!(out, "Port=0\n");
-    }
-
-    /// PEM block preserved byte-exact. This is why we DON'T use
-    /// `parse_file` for the host copy — it would silently drop the
-    /// PEM block (and comments, and blank lines).
-    #[test]
-    fn copy_host_preserves_pem() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("h");
+        // `Port=655` (no space before `=`) does NOT match. The C
+        // tokenizer's `strcspn("\t ")` stops at whitespace, not `=`,
+        // so the token is `Port=655` (8 chars), not `Port` (4 chars).
+        // Byte-compat is byte-compat.
+        case("Port=0\n", "12345", "Port=0\n");
+        // No trailing newline on last line: preserved. `fgets` and
+        // `split_inclusive` agree on this.
+        case("Subnet = 10.0.0.0/24", "655", "Subnet = 10.0.0.0/24");
+        // Case-insensitive match (C `strncasecmp`). Both replaced;
+        // C copies every matching line.
+        case("PORT = 0\nport = 1\n", "x", "Port = x\nPort = x\n");
+        // PEM block preserved byte-exact. This is why we DON'T use
+        // `parse_file` for the host copy — it would silently drop the
+        // PEM block (and comments, and blank lines).
         let pem =
             "-----BEGIN ED25519 PUBLIC KEY-----\nbase64here\n-----END ED25519 PUBLIC KEY-----\n";
-        fs::write(&f, format!("Port = 1\n{pem}")).unwrap();
-        let mut out = String::new();
-        copy_host_replacing_port(&f, "655", &mut out).unwrap();
-        assert!(out.contains(pem), "PEM mangled: {out}");
-        assert!(out.starts_with("Port = 655\n"));
-    }
-
-    /// No trailing newline on the last line: preserved. `fgets` and
-    /// `split_inclusive` agree on this.
-    #[test]
-    fn copy_host_no_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("h");
-        fs::write(&f, "Subnet = 10.0.0.0/24").unwrap(); // no \n
-        let mut out = String::new();
-        copy_host_replacing_port(&f, "655", &mut out).unwrap();
-        assert_eq!(out, "Subnet = 10.0.0.0/24"); // still no \n
-    }
-
-    /// Case-insensitive match. C `strncasecmp`.
-    #[test]
-    fn copy_host_port_case_insensitive() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("h");
-        fs::write(&f, "PORT = 0\nport = 1\n").unwrap();
-        let mut out = String::new();
-        copy_host_replacing_port(&f, "x", &mut out).unwrap();
-        // Both replaced. C copies every matching line.
-        assert_eq!(out, "Port = x\nPort = x\n");
+        case(
+            &format!("Port = 1\n{pem}"),
+            "655",
+            &format!("Port = 655\n{pem}"),
+        );
     }
 
     // get_my_address
