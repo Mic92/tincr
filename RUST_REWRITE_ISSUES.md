@@ -404,6 +404,8 @@ Four findings, one borderline-severe (the UDP relay one). The rest are mild goss
 
 ### daemon/net.rs:200-251 — UDP relay path trusts SRCID without authentication
 
+**Fixed in `316a9a95`.** O(nodes) scan over `tunnels` for `udp_confirmed && udp_addr == peer` (no `node_udp_tree`; relay is the rare branch). Relay branch gated on `n.is_some()`. Regression: `two_daemons.rs::udp_relay_gate_unauthenticated_sender`.
+
 **Severity**: amplification / src-spoofing (adversary 1: network attacker, no key).
 
 The C entry to `handle_incoming_vpn_packet` (`net_packet.c:1718-1842`) authenticates the *immediate UDP sender* before deciding whether to relay. Three layers of gate:
@@ -449,6 +451,8 @@ This one wants fixing. Options: (a) port `sptps_verify_datagram` and the `dst==n
 
 ### daemon/gossip.rs:1624-1636 — DEL_SUBNET retaliate-ADD ping-pong
 
+**Fixed in `918c2892`.** Retaliate gated on `subnets.contains(&subnet, &self.name)` per C `:216-225`.
+
 **Severity**: DoS / amplification (adversary 2: malicious peer with key, two-conn topology).
 
 C `del_subnet_h` ordering (`protocol_subnet.c:216-235`):
@@ -480,6 +484,8 @@ This is a peer-forces-us-to-lie attack. Each cycle is one `DEL_SUBNET` in → on
 **Fix sketch**: gate the retaliate on `self.subnets.contains(&subnet, &self.name)`. One line.
 
 ### daemon/gossip.rs:1669 — DEL_SUBNET fires subnet-down for unknown subnets
+
+**Fixed in `918c2892`.** `subnets.del()` reordered before `run_subnet_script`; bail if false.
 
 **Severity**: minor DoS (adversary 2, peer-triggers-script-exec).
 
@@ -568,6 +574,8 @@ Seven findings. Two HIGH (interop visible against C / break a real config knob),
 
 ### `dispatch_route_result::Unreachable` — IPv6 unreachables built as ICMPv4 (kind: structural miss at pure/impure split)
 
+**Fixed in `03b27d18`.** Ethertype dispatch in both `Unreachable` arm and `write_icmp_to_device`. Regression: `two_daemons.rs::ipv6_unreachable_builds_icmpv6`.
+
 **Severity: HIGH** — wrong wire bytes to the kernel, visible to any IPv6 ping against an unknown subnet.
 
 C `route.c:734` `route_ipv6` no-subnet exit: `route_ipv6_unreachable(source, packet, ether_size, ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_ADDR)`. C `:749` not-reachable exit: `route_ipv6_unreachable(..., ICMP6_DST_UNREACH, ICMP6_DST_UNREACH_NOROUTE)`. The C dispatches v4→`route_ipv4_unreachable`, v6→`route_ipv6_unreachable` — two functions, two ICMP packet builders.
@@ -585,6 +593,8 @@ This is exactly the `8ea18bed` shape: pure module returns `Unreachable`, impure 
 **Also affected**: `write_icmp_to_device` (`net.rs:1951`) dispatches v6 only on `icmp_type ∈ {ICMP6_TIME_EXCEEDED=3, ICMP6_DST_UNREACH=1}`. But `ICMP_DEST_UNREACH` is *also* 3 — v4 type 3 collides with v6 type 3. A v4 `decrement_ttl` `SendIcmp{type=ICMP_TIME_EXCEEDED=11}` is fine, but if any future caller passed `(ICMP_DEST_UNREACH=3, code)` for a v4 frame through `write_icmp_to_device`, it would build a v6 packet. Currently unreachable (the only caller with type=3 is the `directonly` v6 branch), but the type-based dispatch is structurally unsound — should be ethertype-based.
 
 ### `on_udp_recv` drain loop — unbounded under sustained UDP ingress (kind: edge-triggered drain)
+
+**Fixed in `d642592b`.** `UDP_DRAIN_CAP=64` + `rearm()` via `listener_udp_io: Vec<IoId>`. Same shape as `on_device_read`.
 
 **Severity: MEDIUM** — starves event loop under line-rate UDP, same shape as the deadlock #3 found, but on a different fd.
 
@@ -626,6 +636,8 @@ Verdict: not actually a bug, but the correctness is structural-accident, not int
 
 ### `handle_incoming_vpn_packet` — `update_node_udp` runs on non-direct packets (kind: structural miss / collect-then-dispatch ordering)
 
+**Fixed in `316a9a95`.** `udp_addr` update gated on `dst_id.is_null()`; `send_mtu_info` added on `!direct`. Same commit also invalidates the perf-arch `udp_addr_cached` at the cold-path `udp_addr` write sites (ANS_KEY reflexive, BecameReachable, UDP_INFO).
+
 **Severity: MEDIUM** — in 3+ node relay topology, a packet that *should* set `direct=false` updates `udp_addr` to the relay's address.
 
 C `net_packet.c:1786,1833`: `direct` is set true only when `dst_id == nullid` (`:1786`) or `!relay_enabled` (`:1788`). At `:1833`, `if(direct && sockaddrcmp(addr, &n->address)) update_node_udp(n, addr)`. The `direct` gate means: only update `n->address` if the packet came *directly from* `n` (no relay in between).
@@ -661,6 +673,8 @@ More importantly, the comment is wrong about C behavior. If the misread propagat
 **Why tests miss it**: `Forwarding = kernel` is a niche knob. No relay test sets it. The behavior diverges in a *more permissive* direction (packet still arrives), so even a kernel-mode relay test wouldn't *fail* — it would pass when it should drop.
 
 ### `KEY_CHANGED` dispatch — falls through to terminate (kind: error-path divergence)
+
+**Fixed in `b43e30c1`.** Explicit arm: parse + `seen_request` + `forward_request` + noop. Also handles `Status` (noop), `Error`/`Termreq` (terminate, correct).
 
 **Severity: MEDIUM** — a C peer's `send_key_changed()` (broadcast on rekey, `protocol_key.c:40`) terminates our meta-conn.
 
