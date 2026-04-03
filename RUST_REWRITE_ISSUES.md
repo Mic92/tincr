@@ -226,3 +226,32 @@ Each of the crypto-compat items (1, 2, 3, 4) is a "two days to implement, two we
 | 8 | Full `tinc-ffi` | SPTPS-only FFI; rest via corpus |
 
 **The most dangerous sentence in the original plan was "Delete: vendored `src/ed25519/` and `src/chacha-poly1305/`."** Those directories *are* the protocol spec. Delete them only after KATs are extracted and the Rust replacements pass.
+
+---
+
+## Upstream C bugs found during the port
+
+### route.c:344 — TTL storm-guard reads wrong byte offsets
+
+**Found by**: route-ipv6 leaf agent (`57b2feeb` commit-msg `CHECK` marker), traced to root.
+
+`f1d5eae6` (2012-02-25, "Don't send ICMP Time Exceeded for other Time Exceeded — That would be silly") added a guard: skip the bounce if this packet IS already a Time-Exceeded ICMP.
+
+```c
+// route.c:344, current
+if(DATA(packet)[ethlen + 11] != IPPROTO_ICMP ||
+   DATA(packet)[ethlen + 32] != ICMP_TIME_EXCEEDED)
+```
+
+| Reads | Value | Correct offset | Correct value |
+|---|---|---|---|
+| `[ethlen+11]` | `ip_sum` low byte | `[ethlen+9]` | `ip_p` (protocol) |
+| `[ethlen+32]` | quoted-original `ip_len` high | `[ethlen+20]` | `icmp_type` (assuming IHL=5) |
+
+The 2012 commit's hardcoded `data[25]`/`data[46]` were already wrong; `0ee139e9` (2012-11) mechanically converted `25 → ethlen+11` (25-14=11) and `46 → ethlen+32` without noticing.
+
+**Impact**: storm-guard never matches as intended. The bug it meant to fix is unfixed. **Benign in practice** — TIME_EXCEEDED packets are synthesized with TTL=255 by the bouncing router (RFC 1812 §4.2.2.9); 254+ hops to re-expire doesn't happen.
+
+**Our port**: faithfully reproduced (the agent's `CHECK` marker is now resolved). Correctness fix would be `[ethlen+9]`/`[ethlen+IHL*4]`. Upstream patch: TODO submit.
+
+The v6 branch (`route.c:373-374`) has the SAME bug shape: `[ethlen+6]` is correct (`ip6_nxt`) but `[ethlen+40]` reads `icmp6.type` only if there's no extension header — which is the common case, so v6 is mostly-correct by accident.
