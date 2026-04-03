@@ -1966,47 +1966,45 @@ impl Daemon {
     fn dump_edges_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         // C `:124-125`: `for splay_each(node) for splay_each(edge,
-        // &n->edge_tree)`. `node_edges()` is sorted by `to_name`
-        // (matches splay-tree iteration order).
-        for nid in self.graph.node_ids() {
-            for &eid in self.graph.node_edges(nid) {
-                let Some(e) = self.graph.edge(eid) else {
-                    continue;
-                };
-                let from = self
-                    .graph
-                    .node(e.from)
-                    .map_or("<gone>", |n| n.name.as_str());
-                let to = self.graph.node(e.to).map_or("<gone>", |n| n.name.as_str());
+        // &n->edge_tree)`. `edge_iter()` is one slab pass, no per-
+        // node hops. Order diverges from C (slab vs nested-splay);
+        // intentional — `tincctl.c` reads dump rows into an
+        // unordered set and sorts client-side. See `edge_iter()`
+        // doc comment.
+        for (eid, e) in self.graph.edge_iter() {
+            let from = self
+                .graph
+                .node(e.from)
+                .map_or("<gone>", |n| n.name.as_str());
+            let to = self.graph.node(e.to).map_or("<gone>", |n| n.name.as_str());
 
-                // C `:126-127`: `sockaddr2hostname(&e->address)` /
-                // `sockaddr2hostname(&e->local_address)`. Our
-                // `edge_addrs` stores the wire `AddrStr` pairs
-                // verbatim; format as `"%s port %s"` (the
-                // `AF_UNKNOWN` branch, `netutl.c:163`).
-                let (addr, local) = match self.edge_addrs.get(&eid) {
-                    Some((a, p, la, lp)) => (format!("{a} port {p}"), format!("{la} port {lp}")),
-                    // Synthesized-reverse case (chunk-5 STUB; see
-                    // `on_ack`). The C never has addr-less edges.
-                    None => (
-                        "unknown port unknown".to_string(),
-                        "unknown port unknown".to_string(),
-                    ),
-                };
+            // C `:126-127`: `sockaddr2hostname(&e->address)` /
+            // `sockaddr2hostname(&e->local_address)`. Our
+            // `edge_addrs` stores the wire `AddrStr` pairs
+            // verbatim; format as `"%s port %s"` (the
+            // `AF_UNKNOWN` branch, `netutl.c:163`).
+            let (addr, local) = match self.edge_addrs.get(&eid) {
+                Some((a, p, la, lp)) => (format!("{a} port {p}"), format!("{la} port {lp}")),
+                // Synthesized-reverse case (chunk-5 STUB; see
+                // `on_ack`). The C never has addr-less edges.
+                None => (
+                    "unknown port unknown".to_string(),
+                    "unknown port unknown".to_string(),
+                ),
+            };
 
-                // C `:128`: `"%d %d %s %s %s %s %x %d"`.
-                rows.push(format!(
-                    "{} {} {} {} {} {} {:x} {}",
-                    Request::Control as u8,
-                    crate::proto::REQ_DUMP_EDGES,
-                    from,
-                    to,
-                    addr,
-                    local,
-                    e.options,
-                    e.weight,
-                ));
-            }
+            // C `:128`: `"%d %d %s %s %s %s %x %d"`.
+            rows.push(format!(
+                "{} {} {} {} {} {} {:x} {}",
+                Request::Control as u8,
+                crate::proto::REQ_DUMP_EDGES,
+                from,
+                to,
+                addr,
+                local,
+                e.options,
+                e.weight,
+            ));
         }
         rows
     }
@@ -2178,10 +2176,10 @@ impl Daemon {
     ///   - same weight+options → idempotent drop (`:145-148`)
     ///   - `from == myself` + different → send correction (`:150-
     ///     157`) — STUBBED
-    ///   - different → update in place. tinc-graph has no edge
-    ///     mutation; we del+add. Less efficient (two binary
-    ///     searches in the per-node sorted vec) but correct.
-    ///     Comment for the future.
+    ///   - different → update in place. `Graph::update_edge`
+    ///     keeps the `EdgeId` slot stable (`edge_addrs` is keyed
+    ///     on it; del+add only worked because the slab freelist is
+    ///     LIFO — same slot back, by accident not contract).
     /// - `:184-196` `from == myself` + doesn't exist → contradiction.
     ///   C bumps `contradicting_add_edge`, sends DEL correction.
     ///   STUBBED.
@@ -2238,27 +2236,29 @@ impl Daemon {
                 return Ok(false);
             }
 
-            // C `:159-183`: in-place update. The C splay_unlink/
-            // reinsert for weight (`:179-182`) keeps the
-            // edge_weight_tree sorted. tinc-graph has no edge
-            // mutation — del+add. Less efficient (the per-node
-            // sorted vec gets two binary searches; the weight-
-            // order BTreeMap gets a remove+insert). Correct though.
-            // Future: Graph::update_edge() if profiling cares.
+            // C `:159-183`: in-place update. C `splay_unlink`/
+            // `splay_insert_node` (`:179-182`) re-keys edge_weight_
+            // tree; `update_edge` does the same for `weight_order`.
+            //
+            // Why not del+add: `edge_addrs` is keyed on `EdgeId`.
+            // del+add happens to recycle the same slot (LIFO
+            // freelist), so `eid == existing` and the re-insert
+            // keys to the same slot — correct by accident, not by
+            // contract. One unrelated alloc between del and add and
+            // the keys are stale. `update_edge` makes the slot
+            // stability explicit; `edge_addrs.insert(existing, ...)`
+            // is a plain overwrite of the same key.
             log::warn!(target: "tincd::proto",
                        "Got ADD_EDGE from {conn_name} which does not \
                         match existing entry");
-            self.graph.del_edge(existing);
-            self.edge_addrs.remove(&existing);
-            let eid = self
-                .graph
-                .add_edge(from_id, to_id, edge.weight, edge.options);
-            // C `:159-183` in-place update writes the new address
-            // too (`:173`: `e->address = address`).
+            self.graph
+                .update_edge(existing, edge.weight, edge.options)
+                .expect("lookup_edge just returned this EdgeId; no await, no free");
+            // C `:173`: `e->address = address`. Same key, overwrite.
             let unspec = || AddrStr::new(AddrStr::UNSPEC).expect("literal");
             let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
             self.edge_addrs
-                .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));
+                .insert(existing, (edge.addr.clone(), edge.port.clone(), la, lp));
         } else if from_id == self.myself {
             // C `:184-196`: peer says WE have an edge we don't.
             // Contradiction. C bumps `contradicting_add_edge`

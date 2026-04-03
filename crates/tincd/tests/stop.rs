@@ -1903,6 +1903,67 @@ fn peer_edge_triggers_reachable() {
         "transitive reverse: AddrStr round-trip"
     );
 
+    // ─── update_edge: same edge, different weight ────────────
+    // C `protocol_edge.c:159-183` in-place update path. Send the
+    // SAME `testpeer→faraway` edge with weight 99 (was 50). Same
+    // addr tokens — the addr in the dump row must stay identical
+    // (proves `edge_addrs` key stability: `update_edge` keeps the
+    // EdgeId slot, the HashMap entry was overwritten in place).
+    //
+    // Different nonce: `seen_request` would dedup an exact resend.
+    let upd = b"12 33333333 testpeer faraway 10.99.0.2 655 0 99\n";
+    let outs = sptps.send_record(0, upd).expect("add_edge update");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send ADD_EDGE update");
+        }
+    }
+    // No reply (forward stubbed). WouldBlock.
+    match (&stream).read(&mut tmp_buf) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon closed after ADD_EDGE update; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(n) => panic!("daemon replied {n} bytes to ADD_EDGE update"),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(e) => panic!("read error: {e}"),
+    }
+
+    // dump edges again: still 4 rows, testpeer→faraway has weight
+    // 99, addr UNCHANGED.
+    writeln!(ctl_w, "18 4").unwrap();
+    let mut edge_rows2 = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump edge row 2");
+        let line = line.trim_end().to_owned();
+        if line == "18 4" {
+            break;
+        }
+        edge_rows2.push(line);
+    }
+    assert_eq!(
+        edge_rows2.len(),
+        4,
+        "dump edges post-update: {edge_rows2:?}"
+    );
+    let tf2 = edge_rows2
+        .iter()
+        .find(|r| r.starts_with("18 4 testpeer faraway "))
+        .unwrap_or_else(|| panic!("no testpeer→faraway post-update: {edge_rows2:?}"));
+    // (a) new weight; (b) addr identical to first dump. The addr
+    // column proves `edge_addrs[existing]` was overwritten, not
+    // re-keyed: del+add with a slot drift would lose the entry
+    // and dump would show `"unknown port unknown"`.
+    assert_eq!(
+        tf2, "18 4 testpeer faraway 10.99.0.2 port 655 unspec port unspec 0 99",
+        "update_edge: weight changed, addr preserved (EdgeId stable)"
+    );
+
     // ─── stderr: BecameReachable fired for faraway ──────────────
     drop(stream);
     let _ = child.kill();
