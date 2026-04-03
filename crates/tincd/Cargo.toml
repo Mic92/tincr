@@ -38,6 +38,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # first 6). Already in the lockfile via tinc-crypto / ed25519-dalek.
 sha2.workspace = true
 
+thiserror.workspace = true
+
 log = "0.4"
 # Minimal env_logger: no anstream/anstyle/jiff/regex. RUST_LOG=tincd
 # substring filtering works without regex; that's enough.

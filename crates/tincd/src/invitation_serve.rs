@@ -86,45 +86,38 @@ pub enum InvitePhase {
     WaitingPubkey { name: String, used_path: PathBuf },
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ServeError {
     /// `protocol_auth.c:217-223`. Cookie didn't match any file.
     /// Single-use: an already-used cookie also lands here — the
     /// `.used` rename makes the original ENOENT.
+    #[error("non-existing or already-used invitation")]
     NonExisting,
     /// `protocol_auth.c:230-237`. `mtime + lifetime < now`.
+    #[error("expired invitation")]
     Expired,
     /// `protocol_auth.c:277`. First line isn't `Name = <valid-id>`,
     /// or name equals myself.
+    #[error("invalid invitation file: {0}")]
     BadInvitationFile(String),
     /// `protocol_auth.c:125`. Joiner pubkey has newline. Config-
     /// injection attempt: `"evil\nPort = 0"` would become two lines
     /// in `hosts/{name}`, the second a real config var.
+    #[error("invalid public key from invited node")]
     BadPubkey,
     /// `protocol_auth.c:131`. `hosts/{name}` exists. Don't overwrite:
     /// if a previous join half-completed or an attacker pre-populated
     /// `hosts/`, we'd replace a known key with the attacker's.
+    #[error("host config file {} already exists", .0.display())]
     HostFileExists(PathBuf),
     /// fs failures (open, read, write, stat).
-    Io { path: PathBuf, err: std::io::Error },
+    #[error("I/O error on {}: {err}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        err: std::io::Error,
+    },
 }
-
-impl std::fmt::Display for ServeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NonExisting => write!(f, "non-existing or already-used invitation"),
-            Self::Expired => write!(f, "expired invitation"),
-            Self::BadInvitationFile(s) => write!(f, "invalid invitation file: {s}"),
-            Self::BadPubkey => write!(f, "invalid public key from invited node"),
-            Self::HostFileExists(p) => {
-                write!(f, "host config file {} already exists", p.display())
-            }
-            Self::Io { path, err } => write!(f, "I/O error on {}: {err}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for ServeError {}
 
 fn io_err(path: &Path) -> impl Fn(std::io::Error) -> ServeError + '_ {
     move |err| ServeError::Io {

@@ -1911,24 +1911,15 @@ impl Drop for Daemon {
 }
 
 /// Why `Daemon::setup` failed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SetupError {
     /// Config read/parse error, or required field missing.
+    #[error("{0}")]
     Config(String),
     /// OS resource: socket, file, epoll.
-    Io(std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[source] std::io::Error),
 }
-
-impl std::fmt::Display for SetupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Config(s) => write!(f, "{s}"),
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SetupError {}
 
 // tests
 //

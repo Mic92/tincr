@@ -261,19 +261,26 @@ impl Pidfile {
 /// message, the *caller* decides whether to print (`cmd_reload`
 /// prints, `cmd_invite`'s opportunistic reload swallows). Matches
 /// the call-site control without a `verbose` arg threading through.
-#[derive(Debug)]
+// C phrasing where it exists. The daemon's down — these go to stderr
+// in `cmd_reload` etc., users grep for them.
+#[derive(Debug, thiserror::Error)]
 pub enum CtlError {
     /// `read_pidfile` returned NULL (ENOENT or EACCES). The daemon
     /// isn't running, or never wrote a pidfile, or you can't read
     /// it. C: `"Could not open pid file %s: %s\n"` (`tincctl.c:767`).
+    #[error("Could not open pid file {}: {err}", path.display())]
     PidfileMissing {
         path: std::path::PathBuf,
+        #[source]
         err: std::io::Error,
     },
     /// Pidfile exists but doesn't parse. Daemon crashed mid-write,
     /// or it's a stale pidfile from a different tinc version. C:
     /// `read_pidfile` returns NULL on parse failure too, undifferentiated;
     /// we distinguish for the test that hand-crafts bad pidfiles.
+    /// C doesn't have this message (it conflates with missing).
+    /// Ours is new but follows the pattern.
+    #[error("Could not parse pid file")]
     PidfileMalformed,
     /// `kill(pid, 0)` returned ESRCH. Daemon was running, isn't now,
     /// pidfile is stale. C: `"Could not find tincd running at pid %d"`.
@@ -282,50 +289,28 @@ pub enum CtlError {
     /// — that's a side effect across the `Paths` boundary, and the
     /// daemon's next start overwrites the pidfile anyway. If we add
     /// it, it's a separate `cleanup_stale` fn the caller invokes.
+    #[error("Could not find tincd running at pid {pid}")]
     DaemonDead { pid: u32 },
     /// `connect(AF_UNIX)` failed. Socket file gone, or daemon not
     /// listening. C: `"Cannot connect to UNIX socket %s: %s\n"`.
+    #[error("Cannot connect to UNIX socket {}: {err}", path.display())]
     SocketConnect {
         path: std::path::PathBuf,
+        #[source]
         err: std::io::Error,
     },
     /// Greeting exchange failed. Wrong cookie, daemon spoke wrong
     /// protocol, EOF mid-greeting. C: `"Cannot read greeting from
     /// control socket"` or `"Could not fully establish control
     /// socket connection"`. Both messages, depending on which line.
+    #[error("{0}")]
     Greeting(String),
     /// Socket I/O after greeting. Daemon closed, write failed.
     /// The C doesn't distinguish — `recvline` returns false, caller
     /// prints "could not X". We name it for the test.
-    Io(std::io::Error),
+    #[error("Connection to tincd lost: {0}")]
+    Io(#[source] std::io::Error),
 }
-
-impl std::fmt::Display for CtlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // C phrasing where it exists. The daemon's down — these go
-        // to stderr in `cmd_reload` etc., users grep for them.
-        match self {
-            CtlError::PidfileMissing { path, err } => {
-                write!(f, "Could not open pid file {}: {err}", path.display())
-            }
-            CtlError::PidfileMalformed => {
-                // C doesn't have this message (it conflates with
-                // missing). Ours is new but follows the pattern.
-                write!(f, "Could not parse pid file")
-            }
-            CtlError::DaemonDead { pid } => {
-                write!(f, "Could not find tincd running at pid {pid}")
-            }
-            CtlError::SocketConnect { path, err } => {
-                write!(f, "Cannot connect to UNIX socket {}: {err}", path.display())
-            }
-            CtlError::Greeting(msg) => write!(f, "{msg}"),
-            CtlError::Io(e) => write!(f, "Connection to tincd lost: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for CtlError {}
 
 /// The connected control socket. `int fd` + `buffer`/`blen` from
 /// `tincctl.c`, plus the daemon's pid (set by greeting line 2).

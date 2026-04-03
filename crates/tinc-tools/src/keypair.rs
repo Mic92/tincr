@@ -117,38 +117,20 @@ pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
 /// Key file load failure. Wraps the inner errors with the path because
 /// the C `logger()` calls all include `argv[n]` and we want the same
 /// quality of diagnostic.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LoadError {
+    #[error("Could not open {}: {err}", path.display())]
     Io {
         path: std::path::PathBuf,
+        #[source]
         err: std::io::Error,
     },
+    #[error("Could not read key from {}: {err}", path.display())]
     Pem {
         path: std::path::PathBuf,
+        #[source]
         err: PemError,
     },
-}
-
-impl std::fmt::Display for LoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoadError::Io { path, err } => {
-                write!(f, "Could not open {}: {err}", path.display())
-            }
-            LoadError::Pem { path, err } => {
-                write!(f, "Could not read key from {}: {err}", path.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for LoadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            LoadError::Io { err, .. } => Some(err),
-            LoadError::Pem { err, .. } => Some(err),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -269,32 +269,18 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
 }
 
 /// File-level read error.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReadError {
     /// `fopen` or `fgets` failure.
-    Io { path: PathBuf, err: std::io::Error },
+    #[error("cannot open config file {}: {err}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        err: std::io::Error,
+    },
     /// `parse_config_line` returned NULL.
-    Parse(ParseError),
-}
-
-impl fmt::Display for ReadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReadError::Io { path, err } => {
-                write!(f, "cannot open config file {}: {err}", path.display())
-            }
-            ReadError::Parse(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for ReadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ReadError::Io { err, .. } => Some(err),
-            ReadError::Parse(e) => Some(e),
-        }
-    }
+    #[error("{0}")]
+    Parse(#[source] ParseError),
 }
 
 // ────────────────────────────────────────────────────────────────────

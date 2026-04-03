@@ -139,24 +139,15 @@ pub struct ControlSocket {
 /// proven (via the connect-probe) that nothing is listening. If
 /// bind STILL fails with EADDRINUSE after the unlink, something
 /// raced us — another tincd starting in parallel.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BindError {
     /// Connect-probe succeeded — a live daemon is on the socket.
+    #[error("control socket already in use")]
     AlreadyRunning,
     /// `socket()`/`bind()`/`listen()` failed.
-    Io(io::Error),
+    #[error("control socket bind failed: {0}")]
+    Io(#[source] io::Error),
 }
-
-impl std::fmt::Display for BindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyRunning => write!(f, "control socket already in use"),
-            Self::Io(e) => write!(f, "control socket bind failed: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for BindError {}
 
 impl ControlSocket {
     /// `init_control` lines 186-227.

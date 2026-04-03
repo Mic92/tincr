@@ -74,36 +74,19 @@ fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
 /// → can't peer). The C `net_setup.c:803-828` has a fallback to RSA
 /// (legacy) when this fails, but we forbid legacy, so all variants
 /// are fatal for us.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PrivKeyError {
     /// `ENOENT`. C `keys.c:123-125` prints the gen-keys hint at
     /// INFO level. We carry the path for that message.
+    #[error("Error reading Ed25519 private key file `{}': No such file or directory", .0.display())]
     Missing(PathBuf),
     /// Any other I/O error on `fopen`. C `:121`.
-    Io(PathBuf, std::io::Error),
+    #[error("Error reading Ed25519 private key file `{}': {}", .0.display(), .1)]
+    Io(PathBuf, #[source] std::io::Error),
     /// `read_pem` failed: bad armor, wrong type string, wrong size.
     /// C `:152-154` logs "X PEM key not found in Y".
-    Pem(PathBuf, tinc_conf::PemError),
-}
-
-impl std::fmt::Display for PrivKeyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Missing(p) => write!(
-                f,
-                "Error reading Ed25519 private key file `{}': No such file or directory",
-                p.display()
-            ),
-            Self::Io(p, e) => write!(
-                f,
-                "Error reading Ed25519 private key file `{}': {e}",
-                p.display()
-            ),
-            Self::Pem(p, e) => {
-                write!(f, "Ed25519 private key in `{}' malformed: {e}", p.display())
-            }
-        }
-    }
+    #[error("Ed25519 private key in `{}' malformed: {}", .0.display(), .1)]
+    Pem(PathBuf, #[source] tinc_conf::PemError),
 }
 
 /// `read_ecdsa_private_key` (`keys.c:108-161`).

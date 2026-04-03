@@ -34,43 +34,25 @@ use zeroize::Zeroizing;
 /// malformed" because callers (`read_ecdsa_public_key` in
 /// `net_setup.c`) check `errno == ENOENT` to fall through to the
 /// `Ed25519PublicKey =` config-variable path.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PemError {
     /// `-----BEGIN <type>-----` never found. C: `errno = ENOENT`.
+    #[error("PEM block not found")]
     NotFound,
     /// Found the block but `b64decode_tinc` rejected a line.
     /// C: `"Invalid base64 data in PEM file"`, `errno = EINVAL`.
+    #[error("invalid base64 data in PEM file")]
     BadBase64,
     /// Decoded total ≠ expected. C distinguishes "too much" (line
     /// overflows remaining `size`) from "too little" (`size != 0` at
     /// END). We collapse — both mean the file is corrupt.
+    #[error("PEM body decodes to {got} bytes, expected {want}")]
     Size { got: usize, want: usize },
     /// `fgets` failure mid-read. C silently breaks the loop on this
     /// (it doesn't distinguish EOF from error after the fgets — it
     /// just falls through to the `if(size)` check). We surface it.
-    Io(io::Error),
-}
-
-impl std::fmt::Display for PemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PemError::NotFound => write!(f, "PEM block not found"),
-            PemError::BadBase64 => write!(f, "invalid base64 data in PEM file"),
-            PemError::Size { got, want } => {
-                write!(f, "PEM body decodes to {got} bytes, expected {want}")
-            }
-            PemError::Io(e) => write!(f, "I/O error reading PEM: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for PemError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PemError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
+    #[error("I/O error reading PEM: {0}")]
+    Io(#[source] io::Error),
 }
 
 /// `read_pem`. Finds the first `-----BEGIN <type>-----` block, decodes

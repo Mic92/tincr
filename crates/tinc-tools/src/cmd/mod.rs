@@ -13,7 +13,6 @@
 //! actually helps here: `cmd/init.rs` is self-contained, you can read
 //! it without paging through `cmd_dump`.
 
-use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
@@ -38,60 +37,41 @@ pub mod top;
 /// preserves the message for the binary to print, plus a structured
 /// kind for tests to match on.
 ///
-/// Not `thiserror` — we have one error enum, no need for the proc
-/// macro. Same dependency-minimalism as the hand-rolled arg parser.
-#[derive(Debug)]
+/// Phrasing matches the C `fprintf` strings — not because they're
+/// API (they aren't; nothing parses them), but because users grep
+/// for error messages, and matching the C means existing forum posts
+/// / stack overflow answers still apply.
+#[derive(Debug, thiserror::Error)]
 pub enum CmdError {
     /// File/dir already exists when we wanted to create it. `cmd_init`:
     /// `tinc.conf` already there → bail. C: `if(!access(tinc_conf, F_OK))`.
+    #[error("Configuration file {} already exists!", .0.display())]
     Exists(PathBuf),
 
     /// Filesystem operation failed. `mkdir`, `open`, `write`, `chmod`.
     /// The path is what we were operating on; `io::Error` carries
     /// errno. C: `fprintf(stderr, "Could not X %s: %s", path, strerror(errno))`.
-    Io { path: PathBuf, err: io::Error },
+    #[error("Could not access {}: {err}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        err: io::Error,
+    },
 
     /// User input failed validation. `check_id` returned false, name
     /// was empty, etc. C: `fprintf(stderr, "Invalid X!\n")`.
+    #[error("{0}")]
     BadInput(String),
 
     /// Required positional argument missing. C: `if(argc < 2)` →
     /// prompt-on-tty or fail-on-pipe. We always fail (no interactive
     /// prompts — see `init.rs` doc for why).
+    #[error("No {0} given!")]
     MissingArg(&'static str),
 
     /// Too many positional arguments. C: `if(argc > 2)`.
+    #[error("Too many arguments!")]
     TooManyArgs,
-}
-
-impl fmt::Display for CmdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            // Phrasing matches the C `fprintf` strings — not because
-            // they're API (they aren't; nothing parses them), but
-            // because users grep for error messages, and matching the
-            // C means existing forum posts / stack overflow answers
-            // still apply.
-            CmdError::Exists(p) => {
-                write!(f, "Configuration file {} already exists!", p.display())
-            }
-            CmdError::Io { path, err } => {
-                write!(f, "Could not access {}: {err}", path.display())
-            }
-            CmdError::BadInput(msg) => write!(f, "{msg}"),
-            CmdError::MissingArg(what) => write!(f, "No {what} given!"),
-            CmdError::TooManyArgs => write!(f, "Too many arguments!"),
-        }
-    }
-}
-
-impl std::error::Error for CmdError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CmdError::Io { err, .. } => Some(err),
-            _ => None,
-        }
-    }
 }
 
 /// Shorthand for the `?` boilerplate. The C does this inline with
