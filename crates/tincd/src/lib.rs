@@ -33,5 +33,6 @@ pub mod daemon;
 pub mod keys;
 pub mod listen;
 pub mod proto;
+pub mod seen;
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
