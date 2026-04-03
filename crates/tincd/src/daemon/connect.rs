@@ -1,6 +1,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
 impl Daemon {
     /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse
     /// done by `proto::parse_ack`; this does the world-model edits
@@ -567,12 +569,10 @@ impl Daemon {
                 };
                 // Set non-blocking on the parent fd. The child end
                 // is already gone (closed in parent post-fork).
-                // SAFETY: fd is valid (just from socketpair).
-                #[allow(unsafe_code)]
-                unsafe {
-                    let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-                    libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
-                }
+                let flags = OFlag::from_bits_truncate(
+                    fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0),
+                );
+                let _ = fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // C `:631`: `result = 0` for PROXY_EXEC. No async
                 // connect; the conn is ready NOW. Build it with
                 // connecting=false (new_outgoing sets it true; we

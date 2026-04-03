@@ -42,6 +42,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
+use nix::sys::stat::{Mode, umask};
 use rand_core::{OsRng, RngCore};
 
 /// 32 random bytes → 64 hex chars. C `controlcookie[65]` (the +1 is
@@ -193,19 +194,12 @@ impl ControlSocket {
         // these three lines) doesn't apply — daemon is single-
         // threaded, this runs at boot before the event loop.
         //
-        // SAFETY: `umask(2)` is the documented way to set the
-        // process umask. The wrapper is in `libc::umask`, not nix
-        // (nix has it under `sys::stat::umask` actually but with
-        // a Mode type — same call, different ergonomics; we're
-        // already linking libc directly for read/send).
-        #[allow(unsafe_code)]
-        let old_mask = unsafe { libc::umask(0o077) };
+        // `nix::sys::stat::umask` wraps `umask(2)`. Returns the
+        // previous mask typed; restore-on-guard pattern stays.
+        let old_mask = umask(Mode::from_bits_truncate(0o077));
         let bind_result = UnixListener::bind(path);
         // Restore unconditionally, even if bind failed.
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::umask(old_mask);
-        }
+        umask(old_mask);
 
         let listener = bind_result.map_err(BindError::Io)?;
 

@@ -38,6 +38,10 @@ use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::Instant;
 
+use nix::errno::Errno;
+use nix::sys::socket::{MsgFlags, send};
+use nix::unistd::read;
+
 use rand_core::RngCore;
 use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
@@ -680,43 +684,37 @@ impl Connection {
         let buf = &mut stack[..cap];
 
         // ─── recv
-        // SAFETY: `read(2)` on a valid fd. fd is owned by self,
-        // non-blocking. buf is stack-allocated. read returns the
-        // number of bytes written into buf, or -1 with errno.
-        //
-        // Why raw `libc::read` not `std::io::Read`: control conns
-        // are unix stream sockets; `OwnedFd` doesn't impl Read (it's
-        // just an fd, not a stream — could be a regular file). We
-        // could `UnixStream::from(fd)` but then UnixStream owns
-        // the fd and Drop double-closes. `ManuallyDrop` works around
-        // that but the dance is more code than one libc call. Same
-        // shim shape as `read_fd`/`write_fd` in tinc-device.
-        #[allow(unsafe_code)]
-        let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-
-        if n < 0 {
-            let err = io::Error::last_os_error();
+        // Why not `std::io::Read`: control conns are unix stream
+        // sockets; `OwnedFd` doesn't impl Read (it's just an fd,
+        // not a stream — could be a regular file). We could
+        // `UnixStream::from(fd)` but then UnixStream owns the fd
+        // and Drop double-closes. `nix::unistd::read` takes a
+        // RawFd and a slice, returns usize or Errno — no unsafe,
+        // no ownership dance. Same shim shape as `read_fd`/
+        // `write_fd` in tinc-device.
+        let n = match read(self.fd.as_raw_fd(), buf) {
+            Ok(0) => {
+                // EOF. Client closed. C `meta.c:188-190`:
+                // `if(!inlen || !sockerrno)` log NOTICE
+                // "Connection closed by".
+                log::info!(target: "tincd::conn",
+                           "Connection closed by {}", self.name);
+                return FeedResult::Dead;
+            }
+            Ok(n) => n,
             // C `sockwouldblock`: EWOULDBLOCK || EINTR. EINTR
             // shouldn't happen (SA_RESTART) but defensive.
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) {
+            Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
                 return FeedResult::WouldBlock;
             }
-            log::error!(target: "tincd::meta",
-                        "Metadata socket read error for {}: {}", self.name, err);
-            return FeedResult::Dead;
-        }
-        if n == 0 {
-            // EOF. Client closed. C `meta.c:188-190`: `if(!inlen ||
-            // !sockerrno)` log NOTICE "Connection closed by".
-            log::info!(target: "tincd::conn",
-                       "Connection closed by {}", self.name);
-            return FeedResult::Dead;
-        }
-        #[allow(clippy::cast_sign_loss)] // n > 0 checked
-        let chunk = &buf[..n as usize];
+            Err(e) => {
+                log::error!(target: "tincd::meta",
+                            "Metadata socket read error for {}: {}",
+                            self.name, io::Error::from(e));
+                return FeedResult::Dead;
+            }
+        };
+        let chunk = &buf[..n];
 
         // ─── SPTPS branch (`meta.c:224-233`)
         // C: `if(c->protocol_minor >= 2)` — we use `sptps.is_some()`
@@ -1051,37 +1049,30 @@ impl Connection {
         }
 
         let live = self.outbuf.live();
-        // SAFETY: `send(2)` on a valid fd. live is the live region
-        // of outbuf. flags=0. Same shim shape as `read_fd`/`write_fd`.
-        // We use `send` not `write` because the C does (`net_socket.c
-        // :491`) — for stream sockets they're the same when flags=0,
-        // but `send` returns ENOTSOCK if the fd isn't a socket,
-        // which is a useful sanity check.
-        #[allow(unsafe_code)]
-        let n = unsafe { libc::send(self.fd.as_raw_fd(), live.as_ptr().cast(), live.len(), 0) };
-
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) {
+        // `send(2)` not `write(2)` because the C does
+        // (`net_socket.c:491`) — for stream sockets they're the
+        // same when flags=0, but `send` returns ENOTSOCK if the
+        // fd isn't a socket, which is a useful sanity check.
+        let n = match send(self.fd.as_raw_fd(), live, MsgFlags::empty()) {
+            Ok(n) => n,
+            Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
                 // C `net_socket.c:494-496`: log DEBUG, do nothing.
                 // Not actually empty, still want IO_WRITE.
                 return Ok(false);
             }
-            // EPIPE, ECONNRESET, etc. C logs at different levels
-            // (`net_socket.c:497-501`); we let the caller log on
-            // terminate.
-            return Err(err);
-        }
+            Err(e) => {
+                // EPIPE, ECONNRESET, etc. C logs at different
+                // levels (`net_socket.c:497-501`); we let the
+                // caller log on terminate.
+                return Err(e.into());
+            }
+        };
 
-        // n >= 0. n == 0 shouldn't happen for stream sockets with a
-        // non-zero send; treat it as no progress. (C's sockwouldblock
-        // check is buggy here — errno 0 falls through to the error
-        // log; we don't follow that.)
-        #[allow(clippy::cast_sign_loss)] // n >= 0
-        self.outbuf.consume(n as usize);
+        // n == 0 shouldn't happen for stream sockets with a
+        // non-zero send; treat it as no progress. (C's
+        // sockwouldblock check is buggy here — errno 0 falls
+        // through to the error log; we don't follow that.)
+        self.outbuf.consume(n);
 
         Ok(self.outbuf.is_empty())
     }
@@ -1101,6 +1092,8 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+    use nix::unistd::write;
     use rand_core::OsRng;
 
     // ─── LineBuf
@@ -1317,15 +1310,7 @@ mod tests {
     // formatting) — testable here.
 
     fn devnull() -> OwnedFd {
-        use std::os::fd::IntoRawFd;
-        let f = std::fs::File::open("/dev/null").unwrap();
-        let fd = f.into_raw_fd();
-        // SAFETY: fd is valid, just from File. We give ownership
-        // to OwnedFd; File no longer owns it (into_raw_fd).
-        #[allow(unsafe_code)]
-        unsafe {
-            std::os::fd::FromRawFd::from_raw_fd(fd)
-        }
+        std::fs::File::open("/dev/null").unwrap().into()
     }
 
     /// `send_request(c, "%d %s %d.%d", ID, name, major, minor)`.
@@ -1683,7 +1668,6 @@ mod tests {
     /// as feed_sptps_two_records_one_chunk; factored out so the
     /// sptpslen tests don't repeat 60 lines each.
     fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
-        use std::os::fd::FromRawFd;
         use tinc_crypto::sign::SigningKey;
         use tinc_sptps::{Framing, Output, Role};
 
@@ -1733,14 +1717,15 @@ mod tests {
         let (_, _) = alice.receive(&b_sig, &mut NoRng).unwrap();
         // Both done.
 
-        // socketpair(AF_UNIX, SOCK_STREAM). feed() uses libc::read,
+        // socketpair(AF_UNIX, SOCK_STREAM). feed() uses read(2),
         // which works on unix stream sockets.
-        let mut fds = [0i32; 2];
-        #[allow(unsafe_code)]
-        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-        assert_eq!(r, 0, "socketpair");
-        #[allow(unsafe_code)]
-        let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let (rd, wr) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .expect("socketpair");
 
         let mut conn = Connection::test_with_fd(rd);
         conn.sptps = Some(Box::new(bob));
@@ -1748,15 +1733,10 @@ mod tests {
     }
 
     fn write_all(fd: &OwnedFd, mut buf: &[u8]) {
-        use std::os::fd::AsRawFd;
         while !buf.is_empty() {
-            #[allow(unsafe_code)]
-            let n = unsafe { libc::write(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
-            assert!(n > 0, "write: {}", io::Error::last_os_error());
-            #[allow(clippy::cast_sign_loss)]
-            {
-                buf = &buf[n as usize..];
-            }
+            let n = write(fd, buf).expect("write");
+            assert!(n > 0, "write: short");
+            buf = &buf[n..];
         }
     }
 

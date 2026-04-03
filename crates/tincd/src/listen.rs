@@ -671,6 +671,7 @@ pub fn fmt_addr(sa: &SocketAddr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
     use std::net::{SocketAddrV4, SocketAddrV6};
 
     /// Reduce stutter. `addr("10.0.0.5", 0)` for v4, `addr("::1", 0)` for v6.
@@ -1122,12 +1123,11 @@ mod tests {
 
         // F_GETFD bit 0 = FD_CLOEXEC.
         for &fd in &[tcp_fd, udp_fd] {
-            // SAFETY: fcntl(F_GETFD) on a valid fd. listeners owns
-            // the fd; it's open until listeners drops at end of test.
-            #[allow(unsafe_code)]
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            assert!(flags >= 0, "fcntl failed");
-            assert!(flags & libc::FD_CLOEXEC != 0, "fd {fd} missing CLOEXEC");
+            let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap());
+            assert!(
+                flags.contains(FdFlag::FD_CLOEXEC),
+                "fd {fd} missing CLOEXEC"
+            );
         }
     }
 
@@ -1152,10 +1152,8 @@ mod tests {
     fn open_udp_nonblocking() {
         let listeners = open_listeners(0, AddrFamily::Ipv4);
         let (_, udp_fd) = listeners[0].fds();
-        // SAFETY: fcntl(F_GETFL) on owned fd.
-        #[allow(unsafe_code)]
-        let flags = unsafe { libc::fcntl(udp_fd, libc::F_GETFL) };
-        assert!(flags & libc::O_NONBLOCK != 0);
+        let flags = OFlag::from_bits_truncate(fcntl(udp_fd, FcntlArg::F_GETFL).unwrap());
+        assert!(flags.contains(OFlag::O_NONBLOCK));
     }
 
     /// Second listener pair on the same port: TCP bind fails (REUSEADDR
