@@ -1253,46 +1253,38 @@ mod tests {
 
     /// `node.c:228`: `"%d %d %s %"PRIu64" %"PRIu64" %"PRIu64"
     /// %"PRIu64`. After `recv_row` strips `"18 13 "`, we see
-    /// `"NAME N N N N"`. Straightforward.
+    /// `"NAME N N N N"`.
     #[test]
-    fn parse_basic() {
+    fn parse_traffic_row() {
+        // Basic.
         let r = TrafficRow::parse("alice 100 50000 200 100000").unwrap();
         assert_eq!(r.name, "alice");
         assert_eq!(r.in_packets, 100);
         assert_eq!(r.in_bytes, 50000);
         assert_eq!(r.out_packets, 200);
         assert_eq!(r.out_bytes, 100_000);
-    }
 
-    /// `top.c:96` `%"PRIu64"`. Max value. The daemon won't send
-    /// this (you'd need 18 exabytes of traffic) but the format
-    /// supports it.
-    #[test]
-    fn parse_u64_max() {
+        // `top.c:96` `%"PRIu64"`: max value. Daemon won't send this
+        // (18 exabytes of traffic) but the format supports it.
         let r = TrafficRow::parse("bob 18446744073709551615 0 0 0").unwrap();
         assert_eq!(r.in_packets, u64::MAX);
-    }
 
-    /// `top.c:102`: `if(n != 7) return false`. Short row.
-    #[test]
-    fn parse_short_fails() {
-        assert!(TrafficRow::parse("alice 100 50000 200").is_err());
-    }
-
-    /// `Tok` doesn't enforce end-of-string. `top.c:96`'s sscanf
-    /// doesn't either (counts conversions, not consumption). A
-    /// future daemon adding fields wouldn't break us.
-    #[test]
-    fn parse_ignores_trailing() {
+        // `Tok` doesn't enforce end-of-string. `top.c:96`'s sscanf
+        // doesn't either (counts conversions, not consumption). A
+        // future daemon adding fields wouldn't break us.
         let r = TrafficRow::parse("alice 1 2 3 4 future_field 999").unwrap();
         assert_eq!(r.out_bytes, 4);
-    }
 
-    /// Non-numeric in a numeric slot. `top.c:96`'s sscanf would
-    /// stop at the bad token, return n<7, fail. We fail too.
-    #[test]
-    fn parse_non_numeric_fails() {
-        assert!(TrafficRow::parse("alice 100 fifty_thousand 200 100000").is_err());
+        // Err cases. `top.c:102`: `if(n != 7) return false`.
+        for input in [
+            // Short row.
+            "alice 100 50000 200",
+            // Non-numeric in numeric slot. C sscanf stops at bad
+            // token, returns n<7, fails. We fail too.
+            "alice 100 fifty_thousand 200 100000",
+        ] {
+            assert!(TrafficRow::parse(input).is_err(), "input: {input:?}");
+        }
     }
 
     // Stats::update — the merge + rate machine
@@ -1474,146 +1466,36 @@ mod tests {
         }
     }
 
-    /// `top.c:166-172` `case 1`. Descending — heavy first. The C's
-    /// `result = -cmpu64(a, b)`: negative-of-compare flips order.
-    /// `b.cmp(&a)` (args swapped) is the same.
+    /// `compare` table: the 7-way comparator. C `top.c:166-208`.
+    /// Descending — heavy first. The C's `result = -cmpu64(a, b)`
+    /// (negative-of-compare flips order); `b.cmp(&a)` is the same.
     #[test]
-    fn compare_in_packets_cumulative_descending() {
-        use std::cmp::Ordering;
-        let heavy = ns(1000, 0, 0, 0);
-        let light = ns(100, 0, 0, 0);
-        // Heavy comes BEFORE light → Less.
-        assert_eq!(
-            compare(&heavy, &light, SortMode::InPackets, true),
-            Ordering::Less
-        );
-        assert_eq!(
-            compare(&light, &heavy, SortMode::InPackets, true),
-            Ordering::Greater
-        );
-    }
-
-    /// Same mode, `cumulative=false` → use rate not counter.
-    /// `top.c:170`: `-cmpfloat(a.rate, b.rate)`.
-    #[test]
-    fn compare_in_packets_rate_descending() {
-        use std::cmp::Ordering;
-        let fast = ns_rate(100.0, 0.0, 0.0, 0.0);
-        let slow = ns_rate(10.0, 0.0, 0.0, 0.0);
-        assert_eq!(
-            compare(&fast, &slow, SortMode::InPackets, false),
-            Ordering::Less
-        );
-    }
-
-    /// `top.c:202-208` `case 5`: total = in + out. Sum then
-    /// compare. The wrapping_add path is unreachable in practice
-    /// (18 quintillion packets) but the modes are independent so
-    /// we test the SUM logic.
-    #[test]
-    fn compare_total_packets_sums() {
-        use std::cmp::Ordering;
-        // a: 100 in + 50 out = 150 total.
-        // b: 80 in + 80 out = 160 total. Heavier.
-        let a = ns(100, 0, 50, 0);
-        let b = ns(80, 0, 80, 0);
-        assert_eq!(
-            compare(&a, &b, SortMode::TotalPackets, true),
-            Ordering::Greater // a is lighter, sorts after
-        );
-    }
-
-    /// Equal primary key → Equal. The C's `na->i - nb->i` tiebreak
-    /// is what `sort_by`'s stability gives us; `compare()` returns
-    /// Equal and the stable sort preserves prior position.
-    #[test]
-    fn compare_equal_is_equal() {
-        use std::cmp::Ordering;
-        let a = ns(100, 0, 0, 0);
-        let b = ns(100, 0, 0, 0);
-        assert_eq!(compare(&a, &b, SortMode::InPackets, true), Ordering::Equal);
-    }
-
-    /// `Name` arm returns Equal — `Stats::sort` special-cases it.
-    /// The arm exists for exhaustiveness.
-    #[test]
-    fn compare_name_is_equal_placeholder() {
-        use std::cmp::Ordering;
-        let a = ns(1, 2, 3, 4);
-        let b = ns(5, 6, 7, 8);
-        assert_eq!(compare(&a, &b, SortMode::Name, true), Ordering::Equal);
-        assert_eq!(compare(&a, &b, SortMode::Name, false), Ordering::Equal);
-    }
-
-    /// THE stability test. Equal-key nodes stay in previous-frame
-    /// order across re-sort. The C's `i` trick.
-    ///
-    /// Setup: alice, bob, carol all at rate 0.0 (tied). Sort by
-    /// `InBytes` (rate, descending). Initial display_order is
-    /// arrival order. Re-sort → unchanged (Equal everywhere,
-    /// stable sort = identity). Shuffle display_order, re-sort
-    /// → unchanged from the SHUFFLE (stable sort with all-Equal
-    /// is identity, the shuffle persists). That's the property:
-    /// the prior order IS the tiebreak.
-    #[test]
-    fn sort_stability_preserves_prior_order() {
-        let mut s = Stats::default();
-        let base = t0();
-        s.update(
-            &[
-                row("alice", 0, 0, 0, 0),
-                row("bob", 0, 0, 0, 0),
-                row("carol", 0, 0, 0, 0),
-            ],
-            base,
-        );
-        s.sort_mode = SortMode::InBytes;
-        s.cumulative = false; // rate mode
-
-        // All rates are ~0 (first tick, epoch-seconds interval),
-        // and equal (all from counter 0). Tied.
-        // Arrival order: alice, bob, carol.
-        s.sort();
-        assert_eq!(s.display_order, vec!["alice", "bob", "carol"]);
-
-        // Manually permute. (Simulating "carol was heaviest last
-        // frame, sorted to top, then traffic stopped, all tied
-        // again".)
-        s.display_order = vec!["carol".into(), "alice".into(), "bob".into()];
-        s.sort();
-        // Stable sort + all Equal → identity.
-        assert_eq!(s.display_order, vec!["carol", "alice", "bob"]);
-    }
-
-    /// One node breaks the tie. Heavier sorts first; the rest stay
-    /// in prior relative order. The realistic case.
-    #[test]
-    fn sort_stability_with_one_tiebreak() {
-        let mut s = Stats::default();
-        let base = t0();
-        s.update(
-            &[
-                row("alice", 0, 0, 0, 0),
-                row("bob", 0, 0, 0, 0),
-                row("carol", 0, 0, 0, 0),
-            ],
-            base,
-        );
-        // Tick 2: bob gets traffic.
-        s.update(
-            &[
-                row("alice", 0, 0, 0, 0),
-                row("bob", 0, 5000, 0, 0),
-                row("carol", 0, 0, 0, 0),
-            ],
-            base + Duration::from_secs(1),
-        );
-        s.sort_mode = SortMode::InBytes;
-        s.cumulative = false;
-        s.sort();
-        // bob heaviest → first. alice/carol tied → arrival order
-        // (alice before carol) preserved.
-        assert_eq!(s.display_order, vec!["bob", "alice", "carol"]);
+    fn compare_table() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        #[rustfmt::skip]
+        let cases: &[(NodeStats, NodeStats, SortMode, bool, std::cmp::Ordering)] = &[
+            //          (a,                       b,                       mode,                   cumul, expected)
+            // ─── InPackets cumulative: heavy comes BEFORE light → Less. `top.c:166-172` case 1. ───
+            (ns(1000,0,0,0),          ns(100,0,0,0),           SortMode::InPackets,    true,  Less),
+            (ns(100,0,0,0),           ns(1000,0,0,0),          SortMode::InPackets,    true,  Greater),
+            // ─── InPackets rate (cumulative=false): use rate not counter. `top.c:170`. ───
+            (ns_rate(100.,0.,0.,0.),  ns_rate(10.,0.,0.,0.),   SortMode::InPackets,    false, Less),
+            // ─── TotalPackets: sum in+out. a=100+50=150, b=80+80=160 (heavier). `top.c:202-208` case 5. ───
+            (ns(100,0,50,0),          ns(80,0,80,0),           SortMode::TotalPackets, true,  Greater),
+            // ─── Equal primary key → Equal. C's `na->i - nb->i` tiebreak is
+            //     `sort_by`'s stability; compare() returns Equal, stable sort preserves position. ───
+            (ns(100,0,0,0),           ns(100,0,0,0),           SortMode::InPackets,    true,  Equal),
+            // ─── Name arm → Equal placeholder. `Stats::sort` special-cases it. Arm exists for exhaustiveness. ───
+            (ns(1,2,3,4),             ns(5,6,7,8),             SortMode::Name,         true,  Equal),
+            (ns(1,2,3,4),             ns(5,6,7,8),             SortMode::Name,         false, Equal),
+        ];
+        for (a, b, mode, cumul, expected) in cases {
+            assert_eq!(
+                compare(a, b, *mode, *cumul),
+                *expected,
+                "mode={mode:?} cumul={cumul}"
+            );
+        }
     }
 
     /// `Stats::sort` Name mode is a SEPARATE code path (not via
