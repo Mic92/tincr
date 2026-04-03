@@ -518,6 +518,85 @@ impl Sptps {
         Ok(())
     }
 
+    /// Hot-path datagram receive. Mirror of [`seal_data_into`]. Decrypts
+    /// one SPTPS data record directly into `out`, leaving `headroom` zero
+    /// bytes at the front for the caller to fill afterwards.
+    ///
+    /// On `Ok` return: `out` is `[0u8; headroom] ‖ body`, return value is
+    /// the `record_type` byte. Caller (daemon) overwrites the headroom
+    /// with whatever wraps the body before delivery (the daemon writes a
+    /// synthetic 14-byte ethernet header at `out[..14]` before
+    /// `route_packet(&mut out)`).
+    ///
+    /// `out` is **cleared** first: pass a daemon-owned `Vec` and reuse it
+    /// across packets. After the first call it has grown to `headroom +
+    /// body.len()`; subsequent same-size calls do zero heap ops.
+    ///
+    /// vs [`receive`]: bypasses `cipher.open()`'s `ct.to_vec()` (alloc +
+    /// body copy), `Output::Record { bytes: body.to_vec() }` (alloc + body
+    /// copy), and the `Vec<Output>` push (alloc). Three allocs and two
+    /// ~1500-byte memcpys per packet → one body memcpy (the ct extend in
+    /// `open_into`; unavoidable, can't XOR an immutable slice).
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidState`: not [`Framing::Datagram`], or no `incipher` yet
+    ///   (handshake not complete). Caller falls back to [`receive`].
+    /// - `BadSeqno`: packet shorter than `4+1+TAG_LEN` (21 bytes minimum
+    ///   encrypted datagram), or replayed/out-of-window.
+    /// - `DecryptFailed`: tag mismatch.
+    /// - `BadRecord`: decrypted `record_type >= REC_HANDSHAKE`. The fast
+    ///   path is data-records-only. The replay window is **not** advanced
+    ///   in this case, so caller can fall back to [`receive`] which sees
+    ///   the same seqno fresh and handles the handshake/KEX-renegotiate
+    ///   properly. Slightly wasteful (decrypt twice) but handshake records
+    ///   are once-per-connection.
+    pub fn open_data_into(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        headroom: usize,
+    ) -> Result<u8, SptpsError> {
+        if self.framing != Framing::Datagram {
+            return Err(SptpsError::InvalidState);
+        }
+        let Some(cipher) = self.incipher.as_ref() else {
+            return Err(SptpsError::InvalidState);
+        };
+        // 4 (seqno) + 1 (type) + 16 (tag) = 21 minimum encrypted datagram.
+        if data.len() < 21 {
+            return Err(SptpsError::BadSeqno);
+        }
+        let seqno = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+        // Clear, don't dealloc. Reused Vec keeps its capacity.
+        out.clear();
+        out.resize(headroom, 0);
+
+        // Decrypt-then-replay-check, same order as receive_datagram: a
+        // packet that fails decrypt shouldn't advance the window. The
+        // type byte lands at out[headroom], body at out[headroom+1..].
+        cipher
+            .open_into(u64::from(seqno), &data[4..], out, headroom)
+            .map_err(|_| SptpsError::DecryptFailed)?;
+
+        let ty = out[headroom];
+        if ty >= REC_HANDSHAKE {
+            // Don't advance replay. Caller falls back to receive() which
+            // re-decrypts and handles the handshake. Restore out to its
+            // pre-call shape so the next packet's clear/resize is cheap.
+            out.truncate(headroom);
+            return Err(SptpsError::BadRecord);
+        }
+
+        self.replay.check(seqno, true)?;
+
+        // Strip the type byte: shift body left by one. Small memmove.
+        out.copy_within(headroom + 1.., headroom);
+        out.truncate(out.len() - 1);
+        Ok(ty)
+    }
+
     /// `send_kex`: emit `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
     ///
     /// Consumes 64 bytes from `rng` (nonce, then seed). The C calls

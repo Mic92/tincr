@@ -262,6 +262,80 @@ impl Daemon {
         // after the re-entrant callback returns; ours returns
         // Vec<Output> so dispatch is AFTER — defer the clear below.
         tunnel.status.udppacket = true;
+
+        // Fast path: decrypt directly into rx_scratch with 14 bytes
+        // headroom (ETH_HLEN, for the synthetic header). Mirror of
+        // seal_data_into→tx_scratch. Falls through to the slow
+        // Vec<Output> path on:
+        //   - InvalidState: no incipher yet (pre-handshake UDP)
+        //   - BadRecord: REC_HANDSHAKE/KEX-renegotiate (rare; replay
+        //     window NOT advanced, receive() sees the seqno fresh)
+        match sptps.open_data_into(ct, &mut self.rx_scratch, 14) {
+            Ok(record_type) => {
+                // C `:1833-1835`: only direct (dst == nullid) confirms
+                // udp_addr; relayed-to-us would cache the relay's addr.
+                // Once confirmed at the same address this is a no-op:
+                // skip the listener Vec alloc + adapt_socket scan.
+                let direct = dst_id.is_null();
+                if let Some(peer_addr) = peer.filter(|_| direct)
+                    && tunnel.udp_addr != Some(peer_addr)
+                {
+                    let listener_addrs: Vec<SocketAddr> =
+                        self.listeners.iter().map(|l| l.local).collect();
+                    let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
+                    if !tunnel.status.udp_confirmed {
+                        log::debug!(target: "tincd::net",
+                                    "UDP address of {from_name} confirmed: {peer_addr}");
+                        tunnel.status.udp_confirmed = true;
+                    }
+                    tunnel.udp_addr = Some(peer_addr);
+                    tunnel.udp_addr_cached = Some((socket2::SockAddr::from(peer_addr), sock));
+                }
+                // C `:439`: clear udppacket. Do it here so the borrow
+                // of `tunnel` ends before receive_sptps_record_fast
+                // takes &mut self.
+                tunnel.status.udppacket = false;
+
+                // C `:1840`: send_mtu_info if relayed-to-us.
+                let mut nw = false;
+                if !direct {
+                    nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
+                }
+                nw |= self.receive_sptps_record_fast(from_nid, &from_name, record_type);
+                if nw {
+                    self.maybe_set_write_any();
+                }
+                return;
+            }
+            Err(tinc_sptps::SptpsError::InvalidState | tinc_sptps::SptpsError::BadRecord) => {
+                // Fall through to slow path below.
+            }
+            Err(e) => {
+                // DecryptFailed / BadSeqno: real error. Same handling
+                // as the existing receive() Err arm (10s req_key gate).
+                tunnel.status.udppacket = false;
+                log::debug!(target: "tincd::net",
+                            "Failed to decode UDP packet from {from_name}: {e:?}");
+                let now = self.timers.now();
+                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                    t.last_req_key
+                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+                });
+                if gate_ok {
+                    let _ = self.send_req_key(from_nid);
+                }
+                return;
+            }
+        }
+
+        // Slow path stays exactly as-is.
+        let Some(sptps) = self
+            .tunnels
+            .get_mut(&from_nid)
+            .and_then(|t| t.sptps.as_deref_mut())
+        else {
+            return;
+        };
         let result = sptps.receive(ct, &mut OsRng);
         let outs = match result {
             Ok((_consumed, outs)) => outs,
@@ -1129,6 +1203,193 @@ impl Daemon {
         tunnel.in_bytes += len;
 
         self.route_packet(&mut frame, Some(peer))
+    }
+
+    /// Fast-path version of [`receive_sptps_record`]. Reads the body
+    /// from `self.rx_scratch[14..]` instead of a borrowed slice. Avoids
+    /// the `frame: Vec<u8>` allocation by building the ethernet frame
+    /// in-place in `rx_scratch` (the headroom was pre-reserved by
+    /// `open_data_into`).
+    ///
+    /// LOGIC IS IDENTICAL to `receive_sptps_record`; only the byte
+    /// storage changed. The slow-path version is still called from
+    /// `dispatch_tunnel_outputs` (handshake fallback) and the
+    /// TCP-tunneled path in `gossip.rs`.
+    #[allow(clippy::too_many_lines)] // mirrors receive_sptps_record (C `:1071-1152`)
+    fn receive_sptps_record_fast(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        record_type: u8,
+    ) -> bool {
+        let body_len = self.rx_scratch.len() - 14;
+
+        // C `:1068-1070`
+        if body_len > usize::from(crate::tunnel::MTU) {
+            log::error!(target: "tincd::net",
+                        "Packet from {peer_name} larger than MTU ({} > {})",
+                        body_len, crate::tunnel::MTU);
+            return false;
+        }
+
+        // C `:1078-1092`: PMTU probe. Probes are tiny and rare; just
+        // hand the slice to the existing handler. udppacket gate: this
+        // path is only reached from handle_incoming_vpn_packet (UDP),
+        // but the bit was already cleared above. Probes via UDP are
+        // valid by construction here — skip the gate.
+        if record_type == PKT_PROBE {
+            #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+            let body_len_u16 = body_len as u16;
+            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+                && body_len_u16 > p.maxrecentlen
+            {
+                p.maxrecentlen = body_len_u16;
+            }
+            // udp_probe_h takes &[u8] and does its own copy for the
+            // reply; safe to slice rx_scratch here (it borrows self
+            // but udp_probe_h is &mut self... mem::take dance).
+            let scratch = std::mem::take(&mut self.rx_scratch);
+            let nw = self.udp_probe_h(peer, peer_name, &scratch[14..]);
+            self.rx_scratch = scratch;
+            return nw;
+        }
+        // C `:1094-1097`
+        if record_type & !(PKT_COMPRESSED | PKT_MAC) != 0 {
+            log::error!(target: "tincd::net",
+                        "Unexpected SPTPS record type {record_type} from {peer_name}");
+            return false;
+        }
+        // C `:1101-1105`
+        let has_mac = record_type & PKT_MAC != 0;
+        match (self.settings.routing_mode, has_mac) {
+            (RoutingMode::Switch | RoutingMode::Hub, false) => {
+                log::error!(target: "tincd::net",
+                    "Received packet from {peer_name} without MAC header \
+                     (maybe Mode is not set correctly)");
+                return false;
+            }
+            (RoutingMode::Router, true) => {
+                log::warn!(target: "tincd::net",
+                    "Received packet from {peer_name} with MAC header \
+                     (maybe Mode is not set correctly)");
+            }
+            _ => {}
+        }
+
+        // C `:1108`
+        let offset: usize = if has_mac { 0 } else { 14 };
+
+        // C `:1109-1121`: decompression. Compressed packets are RARE
+        // (compression=0 is default); fall back to a local Vec for
+        // the decompressed output. The compressor already returns
+        // Vec; don't fight it.
+        let decompressed: Option<Vec<u8>>;
+        if record_type & PKT_COMPRESSED != 0 {
+            let incomp = self.tunnels.get(&peer).map_or(0, |t| t.incompression);
+            let level = compress::Level::from_wire(incomp);
+            // mem::take so we can borrow rx_scratch immutably while
+            // calling &mut self.compressor.
+            let scratch = std::mem::take(&mut self.rx_scratch);
+            let d = self
+                .compressor
+                .decompress(&scratch[14..], level, MTU as usize);
+            self.rx_scratch = scratch;
+            if let Some(d) = d {
+                decompressed = Some(d);
+            } else {
+                log::warn!(target: "tincd::net",
+                           "Error while decompressing packet from {peer_name}");
+                return false;
+            }
+        } else {
+            decompressed = None;
+        }
+
+        // Build the frame. Three cases:
+        //  1. compressed: body lives in `decompressed`, build a fresh
+        //     frame Vec (one alloc, but rare).
+        //  2. has_mac (Switch): body IS the eth frame, lives at
+        //     rx_scratch[14..]. Route that slice directly. Zero alloc.
+        //  3. !has_mac (Router, the iperf hot path): body is at
+        //     rx_scratch[14..], headroom [0..14] is zeros. Write the
+        //     ethertype at [12..14], route rx_scratch in full. Zero alloc.
+        //
+        // route_packet takes &mut self + &mut [u8], so we mem::take
+        // rx_scratch out of self for the call and put it back after.
+        // The take leaves an empty Vec (no alloc); the restore brings
+        // back the capacity-carrying one.
+        let mut frame_vec: Vec<u8>;
+        let mut scratch = std::mem::take(&mut self.rx_scratch);
+        let frame: &mut [u8] = if let Some(body) = &decompressed {
+            // Compressed: synth a frame Vec the slow way.
+            if offset == 0 {
+                frame_vec = body.clone();
+            } else {
+                if body.is_empty() {
+                    self.rx_scratch = scratch;
+                    return false;
+                }
+                let ethertype: u16 = match body[0] >> 4 {
+                    4 => crate::packet::ETH_P_IP,
+                    6 => 0x86DD,
+                    v => {
+                        log::debug!(target: "tincd::net",
+                                    "Unknown IP version {v} in packet from {peer_name}");
+                        self.rx_scratch = scratch;
+                        return false;
+                    }
+                };
+                frame_vec = vec![0u8; offset + body.len()];
+                frame_vec[12..14].copy_from_slice(&ethertype.to_be_bytes());
+                frame_vec[offset..].copy_from_slice(body);
+            }
+            &mut frame_vec
+        } else if offset == 0 {
+            // Switch mode: body at scratch[14..] IS the frame.
+            &mut scratch[14..]
+        } else {
+            // Router mode (THE HOT PATH). C `:1128-1144`.
+            if body_len == 0 {
+                self.rx_scratch = scratch;
+                return false;
+            }
+            let ethertype: u16 = match scratch[14] >> 4 {
+                4 => crate::packet::ETH_P_IP,
+                6 => 0x86DD,
+                v => {
+                    log::debug!(target: "tincd::net",
+                                "Unknown IP version {v} in packet from {peer_name}");
+                    self.rx_scratch = scratch;
+                    return false;
+                }
+            };
+            // Headroom [0..14] is already zero (open_data_into wrote
+            // it). Just stamp the ethertype.
+            scratch[12..14].copy_from_slice(&ethertype.to_be_bytes());
+            &mut scratch
+        };
+
+        // C `:1148-1150`: maxrecentlen. udppacket was already cleared
+        // by the caller, but this path is by-construction UDP-only,
+        // so update unconditionally (matches what the C effectively
+        // does: the bit is set during the entire receive callback).
+        #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ 14+MTU
+        let frame_len = frame.len() as u16;
+        if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+            && frame_len > p.maxrecentlen
+        {
+            p.maxrecentlen = frame_len;
+        }
+
+        // C `:1152` → `receive_packet` (`:397-405`).
+        let len = frame.len() as u64;
+        let tunnel = self.tunnels.entry(peer).or_default();
+        tunnel.in_packets += 1;
+        tunnel.in_bytes += len;
+
+        let nw = self.route_packet(frame, Some(peer));
+        self.rx_scratch = scratch;
+        nw
     }
 
     /// `send_sptps_data_myself` (`net_packet.c:99-101`).

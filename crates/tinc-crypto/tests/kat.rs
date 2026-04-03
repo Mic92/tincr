@@ -138,6 +138,22 @@ fn chapoly_seal_matches_c() {
         // sides) — the KAT above wouldn't.
         let reopened = cp.open(seqno, &got).expect("round-trip open");
         assert_eq!(reopened, pt, "chapoly[{i}] round-trip");
+
+        // Same round-trip via the _into variants. Mirrors how the daemon
+        // hot path uses them: seal_into with a header prefix, open_into
+        // with headroom. The plaintext should land at out[decrypt_at..].
+        let mut sealed = vec![0u8; 4]; // pretend seqno header
+        // seal_into expects to write the type byte itself; the KAT pt
+        // already includes it, so split.
+        if !pt.is_empty() {
+            cp.seal_into(seqno, pt[0], &pt[1..], &mut sealed, 4);
+            assert_eq!(&sealed[4..], &got[..], "chapoly[{i}] seal_into");
+        }
+        let mut opened = vec![0u8; 7]; // arbitrary headroom
+        cp.open_into(seqno, &got, &mut opened, 7)
+            .expect("round-trip open_into");
+        assert_eq!(&opened[..7], &[0u8; 7], "chapoly[{i}] headroom untouched");
+        assert_eq!(&opened[7..], &pt[..], "chapoly[{i}] open_into round-trip");
     }
 }
 

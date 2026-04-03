@@ -838,6 +838,15 @@ pub struct Daemon {
     /// daemon-owned Vec is the closest equivalent.
     pub(crate) tx_scratch: Vec<u8>,
 
+    /// Reused recv-side scratch for the UDP data path. Mirror of
+    /// `tx_scratch`. `open_data_into` writes `[0;14] ‖ decrypted-body`
+    /// here; `receive_sptps_record_fast` then overwrites `[12..14]` with
+    /// the synthesized ethertype in-place and routes the whole slice.
+    /// Cleared (not freed) between packets — after the first packet at
+    /// MTU, capacity is `14 + MTU` and stays there. Net: zero allocs on
+    /// the per-packet receive path.
+    pub(crate) rx_scratch: Vec<u8>,
+
     /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
     /// detector at `net.c:189-213`: if `now - this > 2 * udp_
     /// discovery_timeout`, the daemon was asleep — force-close
@@ -1536,6 +1545,7 @@ impl Daemon {
             tx_scratch: Vec::with_capacity(
                 12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
             ),
+            rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
             // C `net.c:43`: `static struct timeval last_periodic_
             // run_time` zero-init. We seed with now: the first
             // `on_ping_tick` (after `pingtimeout` seconds) sees

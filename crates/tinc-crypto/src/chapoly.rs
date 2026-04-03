@@ -199,4 +199,50 @@ impl ChaPoly {
         cipher.apply_keystream(&mut out);
         Ok(out)
     }
+
+    /// In-place variant of [`open`]. The hot-path decrypt for SPTPS data
+    /// records. Mirror of [`seal_into`].
+    ///
+    /// `out` MUST already contain `[..decrypt_at]` bytes that the caller
+    /// pre-reserved (e.g. headroom for an ethernet header). This function:
+    /// 1. Verifies the trailing tag (constant-time, MAC-then-decrypt).
+    /// 2. Extends `out` with the ciphertext (one `extend_from_slice` body
+    ///    copy — unavoidable; can't XOR an immutable input slice in place).
+    /// 3. Decrypts `out[decrypt_at..]` in-place (ChaCha20 XOR).
+    ///
+    /// Net: ONE copy of the ciphertext body, zero scratch allocs.
+    /// Replaces [`open`]'s `ct.to_vec()` + return-Vec with append-to-
+    /// caller's-buffer + decrypt-in-place. The C reference does the same
+    /// shape: `chacha_poly1305_decrypt(.., buffer+4, .., buffer+4, ..)`
+    /// over an `alloca`'d span (`sptps.c:199`).
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError`] if `sealed` is shorter than [`TAG_LEN`] or the tag
+    /// does not verify. On error, `out` is unchanged (the extend happens
+    /// only after the tag check passes).
+    pub fn open_into(
+        &self,
+        seqno: u64,
+        sealed: &[u8],
+        out: &mut Vec<u8>,
+        decrypt_at: usize,
+    ) -> Result<(), OpenError> {
+        let ct_len = sealed.len().checked_sub(TAG_LEN).ok_or(OpenError)?;
+        let (ct, tag) = sealed.split_at(ct_len);
+
+        let (poly, mut cipher) = self.record_state(seqno);
+
+        // MAC-then-decrypt, matching the C order. Tag check BEFORE the
+        // extend so a forged packet doesn't dirty the caller's buffer.
+        let expected = poly.compute_unpadded(ct);
+        if expected.as_slice().ct_eq(tag).unwrap_u8() != 1 {
+            return Err(OpenError);
+        }
+
+        debug_assert_eq!(out.len(), decrypt_at);
+        out.extend_from_slice(ct);
+        cipher.apply_keystream(&mut out[decrypt_at..]);
+        Ok(())
+    }
 }
