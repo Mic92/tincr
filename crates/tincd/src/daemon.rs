@@ -27,8 +27,8 @@ use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
-use tinc_graph::{Graph, NodeId};
-use tinc_proto::Request;
+use tinc_graph::{EdgeId, Graph, NodeId, Route};
+use tinc_proto::{AddrStr, Request};
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
@@ -368,6 +368,39 @@ pub struct Daemon {
     /// explicit. The dup-conn check (`ack_h:975-990`) is the one
     /// consumer of `conn`.
     pub(crate) nodes: HashMap<String, NodeState>,
+
+    /// Per-edge address annotation. `tinc-graph::Edge` is topology-
+    /// only (from/to/weight/options); the WIRE addresses live here.
+    /// Keyed by `EdgeId` from `graph.add_edge`.
+    ///
+    /// C `edge_t` carries `address` + `local_address` (`edge.h:32-33`)
+    /// inline. We split: graph crate stays `#![no_std]`-clean,
+    /// addresses (which are `AddrStr` — OPAQUE wire tokens, possibly
+    /// hostnames, per the chunk-4b finding) live daemon-side.
+    ///
+    /// Stored as `(addr, port, local_addr, local_port)` raw `AddrStr`
+    /// pairs (NOT parsed `SocketAddr`): `dump_edges` round-trips
+    /// what arrived on the wire, byte-exact (`netutl.c:163` `AF_
+    /// UNKNOWN` branch — `sockaddr2hostname` of an unparsed addr is
+    /// just `"%s port %s"` of the stored strings).
+    ///
+    /// Populated by `on_ack` (our direct edges, addr from `conn.
+    /// address` + `parsed.his_udp_port`) and `on_add_edge` (transitive,
+    /// addr from the parsed wire body). Cleaned up alongside `graph.
+    /// del_edge`. RESOLVES the open question at the chunk-5
+    /// `send_everything` STUB note.
+    pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
+
+    /// Last `sssp` result. C `node_t` stores `nexthop`/`via`/
+    /// `distance` directly on the node (written by `graph.c:188-196`);
+    /// we keep it as a side table indexed by `NodeId.0` (same
+    /// indexing as `sssp`'s output). `dump_nodes` reads this for the
+    /// `nexthop`/`via`/`distance` columns (`node.c:218`).
+    ///
+    /// Updated by `run_graph_and_log` (every `graph()` call site).
+    /// Starts empty; `dump_nodes` before the first `graph()` call
+    /// reads `None` for everything (only `myself` exists then anyway).
+    pub(crate) last_routes: Vec<Option<Route>>,
 
     // ─── settings
     /// The config knobs. Reload swaps this.
@@ -715,6 +748,8 @@ impl Daemon {
             subnets: SubnetTree::new(),
             seen: SeenRequests::new(),
             nodes: HashMap::new(),
+            edge_addrs: HashMap::new(),
+            last_routes: Vec::new(),
             settings,
             ev,
             timers,
@@ -1417,6 +1452,42 @@ impl Daemon {
                             crate::proto::REQ_DUMP_SUBNETS
                         ));
                         (DispatchResult::Ok, nw2)
+                    } else if r == DispatchResult::DumpNodes {
+                        // `dump_nodes` (`node.c:201-223`). The 23-
+                        // field beast. CLI parser: `tinc-tools::cmd::
+                        // dump::NodeRow::parse` (22 sscanf fields —
+                        // hostname is ONE %s = three tokens).
+                        let rows = self.dump_nodes_rows();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let mut nw2 = false;
+                        for row in rows {
+                            nw2 |= conn.send(format_args!("{row}"));
+                        }
+                        // Terminator (`node.c:223`).
+                        nw2 |= conn.send(format_args!(
+                            "{} {}",
+                            Request::Control as u8,
+                            crate::proto::REQ_DUMP_NODES
+                        ));
+                        (DispatchResult::Ok, nw2)
+                    } else if r == DispatchResult::DumpEdges {
+                        // `dump_edges` (`edge.c:123-137`). Nested
+                        // walk: nodes × per-node edges. CLI parser:
+                        // `tinc-tools::cmd::dump::EdgeRow::parse`
+                        // (8 fields, 2 `" port "` literals).
+                        let rows = self.dump_edges_rows();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let mut nw2 = false;
+                        for row in rows {
+                            nw2 |= conn.send(format_args!("{row}"));
+                        }
+                        // Terminator (`edge.c:137`).
+                        nw2 |= conn.send(format_args!(
+                            "{} {}",
+                            Request::Control as u8,
+                            crate::proto::REQ_DUMP_EDGES
+                        ));
+                        (DispatchResult::Ok, nw2)
                     } else if r == DispatchResult::DumpConnections {
                         // `dump_connections` (`connection.c:166-175`).
                         // Walk ALL conns (including the one asking).
@@ -1499,7 +1570,10 @@ impl Daemon {
                 // (the Control arm rewrote them inline). Unreachable
                 // here. Explicit-unreachable rather than `_` so a
                 // new DispatchResult variant fails to compile.
-                DispatchResult::DumpConnections | DispatchResult::DumpSubnets => {
+                DispatchResult::DumpConnections
+                | DispatchResult::DumpSubnets
+                | DispatchResult::DumpNodes
+                | DispatchResult::DumpEdges => {
                     unreachable!("Dump variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}
@@ -1691,7 +1765,11 @@ impl Daemon {
     /// We don't have the hostname (no `NodeState` for transitive
     /// nodes); log the name from the graph.
     fn run_graph_and_log(&mut self) {
-        let (transitions, _mst) = run_graph(&mut self.graph, self.myself);
+        let (transitions, _mst, routes) = run_graph(&mut self.graph, self.myself);
+        // Stash for `dump_nodes` (`node.c:218`: nexthop/via/distance
+        // are read straight off `node_t`, which the C `graph.c:188-
+        // 196` writes into). We keep the side table.
+        self.last_routes = routes;
         // STUB(chunk-6): _mst feeds connection_t.status.mst (the
         // broadcast tree). One peer in chunk 5; mst is trivial.
         for t in transitions {
@@ -1730,6 +1808,199 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// `dump_nodes` row builder (`node.c:201-223`). Walks the graph
+    /// (every known node, not just `nodes` — transitives included).
+    ///
+    /// C format string (`:210`): `"%d %d %s %s %s %d %d %lu %d %x
+    /// %x %s %s %d %d %d %d %ld %d %"PRIu64×4`. Twenty-one printf
+    /// conversions; the CLI's sscanf has 22 (`" port "` re-splits
+    /// the fused hostname — see `tinc-tools::cmd::dump` doc).
+    ///
+    /// Chunk-5 placeholders for daemon state we don't track yet:
+    /// - `id` (`node_id_t` 6-byte hash, `node.c:204-208`): chunk 7
+    ///   (UDP) computes it. Zero-hex.
+    /// - `cipher/digest/maclength`: `0 0 0` (DISABLE_LEGACY path,
+    ///   `node.c:213`).
+    /// - `compression`: `0` (`n->outcompression` defaults zero).
+    /// - `mtu/minmtu/maxmtu`: `0 0 0` (chunk 9, PMTU discovery).
+    /// - `last_state_change`: `0` (would need an `Instant` stash
+    ///   per-node at transition time; deferred).
+    /// - `udp_ping_rtt`: `-1` (the C init value, `node.c:58`).
+    /// - traffic counters: `0` (chunk 7, per-tunnel stats).
+    ///
+    /// `status` bitfield (`node.h:32-48`, GCC LSB-first packing):
+    /// only bit 4 (`reachable`) is real — read from `graph.node().
+    /// reachable` (written by `run_graph_and_log`'s diff). The CLI's
+    /// `dump reachable nodes` filter (`tincctl.c:1306`) keys on it.
+    fn dump_nodes_rows(&self) -> Vec<String> {
+        /// `node.h:38`: `bool reachable: 1;` is field 4 (after
+        /// `unused_active`, `validkey`, `waitingforkey`, `visited`).
+        /// GCC/Clang on the targets we care about pack LSB-first.
+        const STATUS_REACHABLE: u32 = 1 << 4;
+
+        let mut rows = Vec::new();
+        for nid in self.graph.node_ids() {
+            let Some(node) = self.graph.node(nid) else {
+                continue; // freed slot (concurrent del; defensive)
+            };
+            let name = node.name.as_str();
+
+            // C `:211`: `n->hostname ? n->hostname : "unknown port
+            // unknown"`. C `net_setup.c:1199`: `myself->hostname =
+            // "MYSELF port <tcp>"`. Directly-connected peers get a
+            // hostname from `c->address` rewritten to UDP port
+            // (`ack_h:1024-1025`, our `NodeState.edge_addr`).
+            // Transitives have no hostname (the C learns it from
+            // `update_node_udp`, chunk-7 UDP territory) → the
+            // literal.
+            let hostname = if nid == self.myself {
+                format!("MYSELF port {}", self.my_udp_port)
+            } else if let Some(ea) = self.nodes.get(name).and_then(|ns| ns.edge_addr.as_ref()) {
+                // `fmt_addr` shape: `"%s port %s"`, no v6 brackets
+                // (matches `getnameinfo NI_NUMERICHOST`).
+                fmt_addr(ea)
+            } else {
+                "unknown port unknown".to_string()
+            };
+
+            // C `:217`: `n->options`. The C `graph.c:192` writes
+            // `e->to->options = e->options` during sssp — i.e. the
+            // INCOMING edge's options. `last_routes` carries that.
+            // For `myself`, sssp seeds `options=0` (`graph.c:144`
+            // never writes it; `sssp` here mirrors that). For
+            // unreachable nodes (no route), C reads stale; we read
+            // 0.
+            let route = self
+                .last_routes
+                .get(nid.0 as usize)
+                .and_then(Option::as_ref);
+            let options = route.map_or(0, |r| r.options);
+
+            // C `:217`: `n->status.value`. Only `reachable` is real
+            // for now. C also has `visited` set after sssp (it's
+            // never cleared between calls, `graph.c:131` clears at
+            // the START of the next sssp); chunk-5 doesn't bother.
+            let status = if node.reachable { STATUS_REACHABLE } else { 0 };
+
+            // C `:218`: `n->nexthop ? n->nexthop->name : "-"`. Read
+            // from `last_routes`. Unreachable → `"-"` (C: `nexthop`
+            // is whatever stale pointer `xzalloc` left, but the C
+            // `node.c:218` does NULL-check; freshly-created nodes
+            // have NULL nexthop).
+            let (nexthop, via, distance) = match route {
+                Some(r) => {
+                    let nh = self.graph.node(r.nexthop).map_or("-", |n| n.name.as_str());
+                    let via = self.graph.node(r.via).map_or("-", |n| n.name.as_str());
+                    (nh, via, r.distance)
+                }
+                // C: unreachable nodes keep stale `distance` (last
+                // sssp that DID reach them). `xzalloc` fresh nodes
+                // have `distance=0`. We don't track stale; emit 0.
+                None => ("-", "-", 0),
+            };
+
+            // C `:210` format. The %lu (maclength) and %ld (last_
+            // state_change) are `0` literals; %"PRIu64" ×4 are `0`.
+            // udp_ping_rtt is `-1` (C `node.c:58`: `n->udp_ping_rtt
+            // = -1`).
+            rows.push(format!(
+                "{} {} {} {} {} {} {} {} {} {:x} {:x} {} {} {} {} {} {} {} {} {} {} {} {}",
+                Request::Control as u8,       // %d CONTROL
+                crate::proto::REQ_DUMP_NODES, // %d
+                name,                         // %s
+                "000000000000",               // %s id (chunk-7 STUB)
+                hostname,                     // %s ("HOST port PORT")
+                0,                            // %d cipher (DISABLE_LEGACY)
+                0,                            // %d digest
+                0,                            // %lu maclength
+                0,                            // %d compression
+                options,                      // %x
+                status,                       // %x
+                nexthop,                      // %s
+                via,                          // %s
+                distance,                     // %d
+                0,                            // %d mtu (chunk-9)
+                0,                            // %d minmtu
+                0,                            // %d maxmtu
+                0,                            // %ld last_state_change
+                -1,                           // %d udp_ping_rtt
+                0,                            // %PRIu64 in_packets
+                0,                            // in_bytes
+                0,                            // out_packets
+                0,                            // out_bytes
+            ));
+        }
+        rows
+    }
+
+    /// `dump_edges` row builder (`edge.c:123-137`). Nested walk:
+    /// per node, per outgoing edge — the C `splay_each(node) splay_
+    /// each(edge)` shape. Edges are directional; both halves of a
+    /// bidi pair appear as separate rows.
+    ///
+    /// C format (`:128`): `"%d %d %s %s %s %s %x %d"`. Six body
+    /// conversions; CLI sscanf has 8 (TWO `" port "` re-splits —
+    /// addr AND local_addr are `sockaddr2hostname` output).
+    ///
+    /// `e->address` formatting: C `sockaddr2hostname` (`netutl.c:
+    /// 153-175`). For `AF_UNKNOWN` addrs (the unparsed-string case,
+    /// what `str2sockaddr` builds when the addr token isn't a
+    /// numeric IP), it's `"%s port %s"` of the stored strings
+    /// (`netutl.c:163`). That's what we stored in `edge_addrs` —
+    /// raw `AddrStr` tokens, round-tripped verbatim.
+    ///
+    /// Edges with no `edge_addrs` entry (the synthesized reverse
+    /// from `on_ack`, see the STUB note there): `"unknown port
+    /// unknown"`. The C wouldn't have such edges (the peer's
+    /// `send_add_edge` would've populated them); chunk-5 specific.
+    fn dump_edges_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        // C `:124-125`: `for splay_each(node) for splay_each(edge,
+        // &n->edge_tree)`. `node_edges()` is sorted by `to_name`
+        // (matches splay-tree iteration order).
+        for nid in self.graph.node_ids() {
+            for &eid in self.graph.node_edges(nid) {
+                let Some(e) = self.graph.edge(eid) else {
+                    continue;
+                };
+                let from = self
+                    .graph
+                    .node(e.from)
+                    .map_or("<gone>", |n| n.name.as_str());
+                let to = self.graph.node(e.to).map_or("<gone>", |n| n.name.as_str());
+
+                // C `:126-127`: `sockaddr2hostname(&e->address)` /
+                // `sockaddr2hostname(&e->local_address)`. Our
+                // `edge_addrs` stores the wire `AddrStr` pairs
+                // verbatim; format as `"%s port %s"` (the
+                // `AF_UNKNOWN` branch, `netutl.c:163`).
+                let (addr, local) = match self.edge_addrs.get(&eid) {
+                    Some((a, p, la, lp)) => (format!("{a} port {p}"), format!("{la} port {lp}")),
+                    // Synthesized-reverse case (chunk-5 STUB; see
+                    // `on_ack`). The C never has addr-less edges.
+                    None => (
+                        "unknown port unknown".to_string(),
+                        "unknown port unknown".to_string(),
+                    ),
+                };
+
+                // C `:128`: `"%d %d %s %s %s %s %x %d"`.
+                rows.push(format!(
+                    "{} {} {} {} {} {} {:x} {}",
+                    Request::Control as u8,
+                    crate::proto::REQ_DUMP_EDGES,
+                    from,
+                    to,
+                    addr,
+                    local,
+                    e.options,
+                    e.weight,
+                ));
+            }
+        }
+        rows
     }
 
     /// `add_subnet_h` mutation half (`protocol_subnet.c:43-140`).
@@ -1948,8 +2219,16 @@ impl Daemon {
                        "Got ADD_EDGE from {conn_name} which does not \
                         match existing entry");
             self.graph.del_edge(existing);
-            self.graph
+            self.edge_addrs.remove(&existing);
+            let eid = self
+                .graph
                 .add_edge(from_id, to_id, edge.weight, edge.options);
+            // C `:159-183` in-place update writes the new address
+            // too (`:173`: `e->address = address`).
+            let unspec = || AddrStr::new(AddrStr::UNSPEC).expect("literal");
+            let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
+            self.edge_addrs
+                .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));
         } else if from_id == self.myself {
             // C `:184-196`: peer says WE have an edge we don't.
             // Contradiction. C bumps `contradicting_add_edge`
@@ -1963,8 +2242,19 @@ impl Daemon {
             return Ok(false);
         } else {
             // C `:197-205`: `edge_add`. The fresh-edge case.
-            self.graph
+            let eid = self
+                .graph
                 .add_edge(from_id, to_id, edge.weight, edge.options);
+            // C `:199-204`: `e->address = address; e->local_address
+            // = local_address`. The wire tokens, verbatim. `local`
+            // is optional (pre-1.0.24 6-token form) — C leaves
+            // `local_address` zeroed (`AF_UNSPEC`) which `sockaddr2
+            // hostname` formats as `"unspec port unspec"` (`netutl.
+            // c:159-160`).
+            let unspec = || AddrStr::new(AddrStr::UNSPEC).expect("literal");
+            let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
+            self.edge_addrs
+                .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));
         }
 
         // STUB(chunk-6): forward_request(c, request) (`:209-211`).
@@ -2045,6 +2335,7 @@ impl Daemon {
 
         // C `:301`: `edge_del`.
         self.graph.del_edge(eid);
+        self.edge_addrs.remove(&eid);
 
         // C `:305`: `graph()`.
         self.run_graph_and_log();
@@ -2190,15 +2481,45 @@ impl Daemon {
         // We synthesize the reverse for the test to prove the
         // diff fires.
         let peer_id = self.lookup_or_add_node(&name);
-        self.graph
+        let fwd_eid = self
+            .graph
             .add_edge(self.myself, peer_id, edge_weight, edge_options);
         // The reverse. C: comes from peer's send_add_edge. Chunk
         // 5 stub: synthesize. Same weight (the average is symmetric
         // when both sides compute it) but the C peer might have a
         // different `c->options` (depends on THEIR config). With
         // identical defaults: same. Real divergence is chunk-6.
-        self.graph
+        let rev_eid = self
+            .graph
             .add_edge(peer_id, self.myself, edge_weight, edge_options);
+
+        // C `:1024-1025`: `c->edge->address = c->address` with port
+        // rewritten to `hisport`. C `:1040-1045`: `c->edge->local_
+        // address = getsockname()` with port rewritten to `myport.
+        // udp`. We have the FORWARD edge's addr in `edge_addr`
+        // (already port-rewritten above). Stash as wire-format
+        // `AddrStr` tokens (numeric IP + numeric port — `getnameinfo
+        // NI_NUMERICHOST` shape, what `sockaddr2str` would emit).
+        //
+        // The reverse edge is the one the PEER would `edge_add`
+        // from THEIR `ack_h`. Its `address` would be OUR address
+        // as seen from their side (which we don't know without
+        // STUN-style probing). The C learns it from the peer's
+        // `send_add_edge` broadcast. Chunk-5 synthesizes: leave the
+        // reverse without an `edge_addrs` entry; `dump_edges`
+        // formats missing entries as `"unknown port unknown"`
+        // (the C default for `n->hostname == NULL`, `node.c:211`).
+        // STUB(chunk-6): the real `getsockname` call (`ack_h:1040`).
+        if let Some(ea) = edge_addr {
+            let unspec = AddrStr::new(AddrStr::UNSPEC).expect("literal");
+            // `Ipv6Addr::Display` doesn't bracket (matches
+            // `getnameinfo NI_NUMERICHOST`); same as `fmt_addr`.
+            let addr = AddrStr::new(ea.ip().to_string()).expect("numeric IP is whitespace-free");
+            let port = AddrStr::new(ea.port().to_string()).expect("numeric");
+            self.edge_addrs
+                .insert(fwd_eid, (addr, port, unspec.clone(), unspec));
+        }
+        let _ = rev_eid; // entry intentionally absent; see above
 
         // C `:1028`: `send_everything(c)`. Walks `node_tree`, for
         // each node walks `subnet_tree` and `edge_tree`, sends
@@ -2206,10 +2527,8 @@ impl Daemon {
         //
         // STUB(chunk-6): the actual sending. `send_add_edge` needs
         // the edge address (`protocol_edge.c:42`: sockaddr2str on
-        // `e->address`). tinc-graph::Edge doesn't store it;
-        // NodeState.edge_addr does. Either parallel HashMap<EdgeId,
-        // SocketAddr> or read NodeState. The latter is closer to
-        // the C (`c->edge` IS connection-side state). For now: log
+        // `e->address`). RESOLVED: `edge_addrs` (the parallel
+        // HashMap<EdgeId, (AddrStr,…)>) has them now. For now: log
         // what WOULD be sent. With zero subnets and one edge (the
         // one we just added), it'd be one ADD_EDGE.
         let n_subnets = self.subnets.len();

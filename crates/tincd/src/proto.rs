@@ -94,6 +94,8 @@ pub(crate) const fn myself_options_default() -> u32 {
 /// the other way). Phase-6 hoist to tinc-proto. `pub(crate)` for
 /// daemon.rs's dump_connections format string.
 pub(crate) const REQ_STOP: i32 = 0;
+pub(crate) const REQ_DUMP_NODES: i32 = 3;
+pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
 /// `control_common.h`: `REQ_INVALID = -1`. The "unknown subtype" reply.
@@ -123,6 +125,13 @@ pub enum DispatchResult {
     /// `dump_subnets(c)` (`subnet.c:395-410`). Same shape as
     /// DumpConnections: daemon walks `subnets`, queues rows.
     DumpSubnets,
+    /// `dump_nodes(c)` (`node.c:201-223`). Daemon walks `node_ids`
+    /// (the graph) + `last_routes` for nexthop/via/distance, queues
+    /// 23-field rows.
+    DumpNodes,
+    /// `dump_edges(c)` (`edge.c:123-137`). Daemon walks per-node
+    /// edge lists (the C nested-splay shape), queues 8-field rows.
+    DumpEdges,
     /// Handler returned `false`. Drop the connection. C `receive_
     /// request:183-188` logs "Error while processing X" and the
     /// caller (`receive_meta`) returns `false` which causes
@@ -892,6 +901,16 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         .and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
+        Some(REQ_DUMP_NODES) => {
+            // `control.c:63`: `case REQ_DUMP_NODES: return
+            // dump_nodes(c)`. Daemon walks the graph.
+            (DispatchResult::DumpNodes, false)
+        }
+        Some(REQ_DUMP_EDGES) => {
+            // `control.c:66`: `case REQ_DUMP_EDGES: return
+            // dump_edges(c)`. Daemon walks per-node edge lists.
+            (DispatchResult::DumpEdges, false)
+        }
         Some(REQ_DUMP_SUBNETS) => {
             // `control.c:69`: `case REQ_DUMP_SUBNETS: return
             // dump_subnets(c)`. Daemon walks SubnetTree.

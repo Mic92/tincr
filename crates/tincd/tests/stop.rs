@@ -1728,6 +1728,181 @@ fn peer_edge_triggers_reachable() {
         "faraway shouldn't have a connection: {rows:?}"
     );
 
+    // ─── dump nodes: 3 rows, all reachable ─────────────────────
+    // C `node.c:201-223`. Walks the graph (NOT `nodes`/`conns`).
+    // After ACK + bidi ADD_EDGE: testnode (myself), testpeer
+    // (direct), faraway (transitive). All reachable (status bit
+    // 4 set; `node.h:38` field 4, GCC LSB-first → 0x10).
+    //
+    // REQ_DUMP_NODES = 3. Format: `"18 3 <name> <id> <host> port
+    // <port> <cipher> <digest> <maclen> <comp> <opts:x> <stat:x>
+    // <nexthop> <via> <dist> <mtu> <minmtu> <maxmtu> <ts> <rtt>
+    // <in_p> <in_b> <out_p> <out_b>"`. CLI parser: `tinc-tools::
+    // cmd::dump::NodeRow::parse`.
+    writeln!(ctl_w, "18 3").unwrap();
+    let mut node_rows = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump node row");
+        let line = line.trim_end().to_owned();
+        if line == "18 3" {
+            break;
+        }
+        node_rows.push(line);
+    }
+    assert_eq!(node_rows.len(), 3, "dump nodes: {node_rows:?}");
+
+    // Find each node's row. Body starts after `"18 3 "`; first
+    // token is the name. Don't pin slot order (graph slot order
+    // = insertion order, but be robust).
+    let find_row = |name: &str| -> &str {
+        node_rows
+            .iter()
+            .find(|r| {
+                r.strip_prefix("18 3 ")
+                    .and_then(|b| b.split(' ').next())
+                    .is_some_and(|n| n == name)
+            })
+            .unwrap_or_else(|| panic!("no {name} row in: {node_rows:?}"))
+    };
+    let myself_row = find_row("testnode");
+    let peer_row = find_row("testpeer");
+    let far_row = find_row("faraway");
+
+    // status field is the 11th body field (`%x`), right after
+    // options (`%x`). Bit 4 = reachable = 0x10. With chunk-5's
+    // status (only `reachable` is real): exactly `"10"` if
+    // reachable, `"0"` if not. Substring-check ` 10 ` (space-
+    // delimited — hex unpadded, can't accidentally match e.g.
+    // `100` because next field is nexthop, an alphabetic name).
+    for (name, row) in [
+        ("testnode", myself_row),
+        ("testpeer", peer_row),
+        ("faraway", far_row),
+    ] {
+        // Status is `%x`, unpadded. Reachable-only → `10`.
+        assert!(
+            row.contains(" 10 "),
+            "{name} not reachable (no ' 10 ' status); row: {row}"
+        );
+    }
+
+    // myself: hostname is `"MYSELF port <udp>"` (`net_setup.c:
+    // 1199`). nexthop/via are itself (sssp seeds `myself` with
+    // `nexthop=myself, via=myself`, `graph.c:138-145`).
+    // distance=0.
+    assert!(
+        myself_row.contains(" MYSELF port "),
+        "myself hostname; row: {myself_row}"
+    );
+    assert!(
+        myself_row.contains(" testnode testnode 0 "),
+        "myself nexthop/via/dist; row: {myself_row}"
+    );
+
+    // testpeer: directly connected. hostname is the rewritten
+    // `c->address` with `his_udp_port=0` (we sent `"4 0 1 ..."`
+    // — first field is hisport=0). nexthop=testpeer, via=
+    // testpeer, distance=1 (one hop).
+    assert!(
+        peer_row.contains(" 127.0.0.1 port 0 "),
+        "testpeer hostname (edge_addr, port=his_udp_port=0); row: {peer_row}"
+    );
+    assert!(
+        peer_row.contains(" testpeer testpeer 1 "),
+        "testpeer nexthop/via/dist; row: {peer_row}"
+    );
+
+    // faraway: transitive (no NodeState). hostname is the
+    // literal `"unknown port unknown"` (`node.c:211`). nexthop
+    // =testpeer (first hop), via=faraway (direct — no INDIRECT
+    // option set), distance=2.
+    assert!(
+        far_row.contains(" unknown port unknown "),
+        "faraway hostname (transitive, no NodeState); row: {far_row}"
+    );
+    assert!(
+        far_row.contains(" testpeer faraway 2 "),
+        "faraway nexthop/via/dist; row: {far_row}"
+    );
+    // udp_ping_rtt = -1 (init value), traffic counters = 0.
+    assert!(
+        far_row.ends_with(" -1 0 0 0 0"),
+        "faraway tail (rtt=-1, counters=0); row: {far_row}"
+    );
+
+    // ─── dump edges: 4 rows (2 bidi pairs) ─────────────────────
+    // C `edge.c:123-137`. Nested per-node walk. After ACK + the
+    // two ADD_EDGE bodies: testnode↔testpeer (from `on_ack`, both
+    // halves) + testpeer↔faraway (from the wire, both halves).
+    //
+    // REQ_DUMP_EDGES = 4. Format: `"18 4 <from> <to> <addr> port
+    // <p> <local> port <lp> <opts:x> <weight>"`. CLI: `EdgeRow::
+    // parse` (8 fields, two `" port "` re-splits).
+    writeln!(ctl_w, "18 4").unwrap();
+    let mut edge_rows = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump edge row");
+        let line = line.trim_end().to_owned();
+        if line == "18 4" {
+            break;
+        }
+        edge_rows.push(line);
+    }
+    // 4 directed edges. Order: per-node (slot order), then per-
+    // edge (sorted by to-name). Don't pin global order.
+    assert_eq!(edge_rows.len(), 4, "dump edges: {edge_rows:?}");
+
+    // testnode→testpeer: `on_ack` populated `edge_addrs` from
+    // `conn.address` (127.0.0.1) + `his_udp_port` (0). Local addr
+    // is `"unspec port unspec"` (STUB — the C `getsockname` call
+    // at `ack_h:1040` is chunk-6).
+    let fwd = edge_rows
+        .iter()
+        .find(|r| r.starts_with("18 4 testnode testpeer "))
+        .unwrap_or_else(|| panic!("no testnode→testpeer: {edge_rows:?}"));
+    assert!(
+        fwd.contains(" 127.0.0.1 port 0 unspec port unspec "),
+        "forward edge addr (from conn.address+hisport, local=unspec); row: {fwd}"
+    );
+
+    // testpeer→testnode: synthesized reverse, NO `edge_addrs`
+    // entry (chunk-5 STUB — see `on_ack` doc). Both addrs are
+    // `"unknown port unknown"`.
+    let rev = edge_rows
+        .iter()
+        .find(|r| r.starts_with("18 4 testpeer testnode "))
+        .unwrap_or_else(|| panic!("no testpeer→testnode: {edge_rows:?}"));
+    assert!(
+        rev.contains(" unknown port unknown unknown port unknown "),
+        "synthesized reverse, no edge_addrs entry; row: {rev}"
+    );
+
+    // testpeer→faraway: from the ADD_EDGE wire body. Addr tokens
+    // round-tripped verbatim (`10.99.0.2` `655` from the `fwd`
+    // body above). 6-token form (no local-addr suffix) → local
+    // is `"unspec port unspec"` (`netutl.c:159-160`: `AF_UNSPEC`
+    // case of `sockaddr2hostname`). options=0, weight=50.
+    let tf = edge_rows
+        .iter()
+        .find(|r| r.starts_with("18 4 testpeer faraway "))
+        .unwrap_or_else(|| panic!("no testpeer→faraway: {edge_rows:?}"));
+    assert_eq!(
+        tf, "18 4 testpeer faraway 10.99.0.2 port 655 unspec port unspec 0 50",
+        "transitive edge: AddrStr round-trip from ADD_EDGE wire body"
+    );
+
+    // faraway→testpeer: same shape, addr from the `rev` body.
+    let ft = edge_rows
+        .iter()
+        .find(|r| r.starts_with("18 4 faraway testpeer "))
+        .unwrap_or_else(|| panic!("no faraway→testpeer: {edge_rows:?}"));
+    assert_eq!(
+        ft, "18 4 faraway testpeer 10.99.0.1 port 655 unspec port unspec 0 50",
+        "transitive reverse: AddrStr round-trip"
+    );
+
     // ─── stderr: BecameReachable fired for faraway ──────────────
     drop(stream);
     let _ = child.kill();
