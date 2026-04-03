@@ -621,89 +621,46 @@ mod tests {
 
     // parse_header
 
-    /// Golden parse: `"18 15 7"` for log. `tincctl.c:656`.
+    /// `parse_header` table. C `tincctl.c:629,656,658`. The two
+    /// golden rows are wire-format pins; the rest are the C's
+    /// `sscanf %d %d %d` failure modes + bounds checks.
     #[test]
-    fn parse_header_log_golden() {
-        assert_eq!(parse_header("18 15 7", CtlRequest::Log, 1024), Some(7));
-    }
-
-    /// Golden parse: `"18 14 1500"` for pcap. `tincctl.c:629`.
-    #[test]
-    fn parse_header_pcap_golden() {
-        assert_eq!(
-            parse_header("18 14 1500", CtlRequest::Pcap, 9018),
-            Some(1500)
-        );
-    }
-
-    /// Wrong code: `"17 15 7"`. `tincctl.c:658`: `code != CONTROL`.
-    #[test]
-    fn parse_header_wrong_code() {
-        assert_eq!(parse_header("17 15 7", CtlRequest::Log, 1024), None);
-    }
-
-    /// Wrong request type: log subscriber gets pcap header. The
-    /// daemon mux bug case. `req != REQ_LOG`.
-    #[test]
-    fn parse_header_wrong_req() {
-        assert_eq!(parse_header("18 14 7", CtlRequest::Log, 1024), None);
-        assert_eq!(parse_header("18 15 7", CtlRequest::Pcap, 9018), None);
-    }
-
-    /// Too large. `tincctl.c:658`: `len > sizeof(data)`. Exact
-    /// boundary: `max` is OK, `max+1` is not.
-    #[test]
-    fn parse_header_len_boundary() {
-        assert_eq!(
-            parse_header("18 15 1024", CtlRequest::Log, 1024),
-            Some(1024)
-        );
-        assert_eq!(parse_header("18 15 1025", CtlRequest::Log, 1024), None);
-        // Pcap boundary.
-        assert_eq!(
-            parse_header("18 14 9018", CtlRequest::Pcap, 9018),
-            Some(9018)
-        );
-        assert_eq!(parse_header("18 14 9019", CtlRequest::Pcap, 9018), None);
-    }
-
-    /// Negative length: `"18 15 -1"`. `tincctl.c:658`: `len < 0`.
-    /// Our `parse::<usize>()` rejects negative.
-    #[test]
-    fn parse_header_negative_len() {
-        assert_eq!(parse_header("18 15 -1", CtlRequest::Log, 1024), None);
-    }
-
-    /// Short line: `"18 15"`. `n != 3`.
-    #[test]
-    fn parse_header_short() {
-        assert_eq!(parse_header("18 15", CtlRequest::Log, 1024), None);
-        assert_eq!(parse_header("18", CtlRequest::Log, 1024), None);
-        assert_eq!(parse_header("", CtlRequest::Log, 1024), None);
-    }
-
-    /// Non-numeric len: `"18 15 abc"`. `sscanf %d` fails on it.
-    #[test]
-    fn parse_header_non_numeric() {
-        assert_eq!(parse_header("18 15 abc", CtlRequest::Log, 1024), None);
-    }
-
-    /// Trailing garbage: `"18 15 7 extra"`. `sscanf("%d %d %d")`
-    /// stops after the third int and ignores. We do too.
-    #[test]
-    fn parse_header_trailing_ignored() {
-        assert_eq!(
-            parse_header("18 15 7 extra stuff", CtlRequest::Log, 1024),
-            Some(7)
-        );
-    }
-
-    /// Len zero: `"18 15 0"`. Valid! Zero-byte log line. The daemon
-    /// won't send it (`logger.c` always has `pretty` non-empty),
-    /// but the wire allows it.
-    #[test]
-    fn parse_header_zero_len() {
-        assert_eq!(parse_header("18 15 0", CtlRequest::Log, 1024), Some(0));
+    fn parse_header_table() {
+        use CtlRequest::{Log, Pcap};
+        #[rustfmt::skip]
+        let cases: &[(&str, CtlRequest, usize, Option<usize>)] = &[
+            //          (input,                req,   max,   expected)
+            // ─── GOLDEN: `"18 15 7"` for log. `tincctl.c:656`. ───
+            ("18 15 7",                Log,   1024,  Some(7)),
+            // ─── GOLDEN: `"18 14 1500"` for pcap. `tincctl.c:629`. ───
+            ("18 14 1500",             Pcap,  9018,  Some(1500)),
+            // ─── wrong code: `code != CONTROL`. `tincctl.c:658`. ───
+            ("17 15 7",                Log,   1024,  None),
+            // ─── wrong req: log subscriber gets pcap header (daemon mux bug case) ───
+            ("18 14 7",                Log,   1024,  None),
+            ("18 15 7",                Pcap,  9018,  None),
+            // ─── len boundary: `len > sizeof(data)`. max is OK, max+1 is not. ───
+            ("18 15 1024",             Log,   1024,  Some(1024)),
+            ("18 15 1025",             Log,   1024,  None),
+            ("18 14 9018",             Pcap,  9018,  Some(9018)),
+            ("18 14 9019",             Pcap,  9018,  None),
+            // ─── negative len: `len < 0`. `parse::<usize>()` rejects. ───
+            ("18 15 -1",               Log,   1024,  None),
+            // ─── short line: `n != 3` ───
+            ("18 15",                  Log,   1024,  None),
+            ("18",                     Log,   1024,  None),
+            ("",                       Log,   1024,  None),
+            // ─── non-numeric len: `sscanf %d` fails ───
+            ("18 15 abc",              Log,   1024,  None),
+            // ─── trailing garbage: `sscanf("%d %d %d")` stops after 3rd int, ignores ───
+            ("18 15 7 extra stuff",    Log,   1024,  Some(7)),
+            // ─── len zero: valid! Zero-byte log line. Daemon won't send it
+            //     (`logger.c` always has `pretty` non-empty), but wire allows. ───
+            ("18 15 0",                Log,   1024,  Some(0)),
+        ];
+        for &(input, req, max, expected) in cases {
+            assert_eq!(parse_header(input, req, max), expected, "input: {input:?}");
+        }
     }
 
     // pcap headers — byte-exact, sed-verifiable
