@@ -39,6 +39,10 @@ pub struct Timers<W> {
     /// `tick` to the same offset (and `BTreeMap::insert` overwrites,
     /// silently dropping the earlier — that's the bug `event.c:99`'s
     /// `abort()` was guarding against).
+    ///
+    /// `BTreeMap` not `BinaryHeap`: every timer in tinc is re-armable,
+    /// and re-arm on a heap means push-new + tombstone-old. The map's
+    /// remove-mutate-reinsert is O(log n) — same as the C splay.
     by_deadline: BTreeMap<(Instant, u64), usize>,
 
     /// Slot storage. Freed slots stay allocated (`what` is stale,
