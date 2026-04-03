@@ -82,6 +82,30 @@ fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
     cmd.output().expect("spawn tinc")
 }
 
+/// Create a tempdir, run `tinc -c <tempdir>/vpn init NAME`. Returns the
+/// dir guard, the confbase path, and the confbase as a String for argv.
+/// Replaces the `tempdir → join("vpn") → init` boilerplate at ~20 sites.
+fn init_dir(name: &str) -> (tempfile::TempDir, PathBuf, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let cb = confbase.to_str().unwrap().to_owned();
+    let out = tinc(&["-c", &cb, "init", name]);
+    assert!(
+        out.status.success(),
+        "init {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (dir, confbase, cb)
+}
+
+/// `tinc -c <bare tempdir>` for failure-mode tests where init was never
+/// run. Returns the dir guard and the confbase string.
+fn bare_dir() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let cb = dir.path().to_str().unwrap().to_owned();
+    (dir, cb)
+}
+
 /// `tinc edit` integration. Doesn't spawn a real editor; we set
 /// `EDITOR` to `/bin/true` (always exits 0) or `/bin/false`
 /// (always exits 1) and assert the exit-code path.
@@ -90,31 +114,34 @@ fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
 /// What it DOES cover: the path resolution, the editor spawn, the
 /// exit-code mapping.
 mod edit_integration {
-    use super::tinc;
+    use super::{init_dir, tinc};
+    use std::path::PathBuf;
+
+    /// Init a confbase, then run `tinc -c <cb> edit TARGET` with
+    /// `EDITOR` set and `VISUAL` stripped. Returns confbase + Output.
+    ///
+    /// `env_remove("VISUAL")` is essential: `pick_editor()` checks
+    /// VISUAL FIRST; the parent env might have it set.
+    fn run_edit(editor: &str, target: &str) -> (PathBuf, std::process::Output) {
+        let (dir, confbase, cb) = init_dir("node1");
+        let out = std::process::Command::new(super::bin("tinc"))
+            .args(["-c", &cb, "edit", target])
+            .env_remove("NETNAME")
+            .env_remove("VISUAL")
+            .env("EDITOR", editor)
+            .output()
+            .unwrap();
+        // Leak the tempdir guard — the test only inspects Output and
+        // confbase string. (Only ~6 calls per test run.)
+        std::mem::forget(dir);
+        (confbase, out)
+    }
 
     /// `EDITOR=true tinc edit alice` → exits 0. `true` exits 0,
     /// no reload (no daemon), `Ok(())` → exit 0.
-    ///
-    /// `env_remove("VISUAL")` is essential: `pick_editor()`
-    /// checks VISUAL FIRST. The parent env might have it set;
-    /// `tinc_with_env` only adds, doesn't remove. Inline.
     #[test]
     fn edit_true_exits_zero() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        // Remove BOTH first (parent env might have either), then
-        // set EDITOR. `Command::env_remove` is the way.
-        let out = std::process::Command::new(super::bin("tinc"))
-            .args(["-c", cb, "edit", "alice"])
-            .env_remove("NETNAME")
-            .env_remove("VISUAL")
-            .env("EDITOR", "true")
-            .output()
-            .unwrap();
-
+        let (_, out) = run_edit("true", "alice");
         assert!(
             out.status.success(),
             "stderr: {}",
@@ -126,19 +153,7 @@ mod edit_integration {
     /// `tincctl.c:2461`: `if(result) return result`.
     #[test]
     fn edit_false_exits_nonzero() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        let out = std::process::Command::new(super::bin("tinc"))
-            .args(["-c", cb, "edit", "alice"])
-            .env_remove("NETNAME")
-            .env_remove("VISUAL")
-            .env("EDITOR", "false")
-            .output()
-            .unwrap();
-
+        let (_, out) = run_edit("false", "alice");
         assert!(!out.status.success());
         let stderr = String::from_utf8_lossy(&out.stderr);
         // Our error message includes the editor name and the
@@ -155,22 +170,9 @@ mod edit_integration {
     /// "$@"'`. The path on stdout is the one `"$@"` expanded to.
     #[test]
     fn edit_echo_shows_resolved_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        let out = std::process::Command::new(super::bin("tinc"))
-            .args(["-c", cb, "edit", "alice"])
-            .env_remove("NETNAME")
-            .env_remove("VISUAL")
-            .env("EDITOR", "echo")
-            .output()
-            .unwrap();
-
+        let (confbase, out) = run_edit("echo", "alice");
         assert!(out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // The path: confbase/hosts/alice. echo adds a newline.
         let expected = confbase.join("hosts").join("alice");
         assert_eq!(
             stdout.trim_end(),
@@ -195,20 +197,7 @@ mod edit_integration {
     /// than C. The test pins it.
     #[test]
     fn edit_spacey_editor_tokenized() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        let out = std::process::Command::new(super::bin("tinc"))
-            .args(["-c", cb, "edit", "alice"])
-            .env_remove("NETNAME")
-            .env_remove("VISUAL")
-            // Editor with an arg. The shell splits.
-            .env("EDITOR", "echo extraarg")
-            .output()
-            .unwrap();
-
+        let (confbase, out) = run_edit("echo extraarg", "alice");
         assert!(out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
         let path = confbase.join("hosts").join("alice");
@@ -220,27 +209,14 @@ mod edit_integration {
     /// THE shell-safety proof: `"$@"` quotes the arg.
     ///
     /// The C `system("\"echo\" \"$HOME\"")` would expand `$HOME`
-    /// (it's inside double-quotes IN THE SHELL). We don't.
-    ///
-    /// `tinc edit '$HOME'` with sh-reachable input: our argv
-    /// parser gets it literal (`$HOME` as a string). resolve()
-    /// sees `"$HOME"`, no slash, no dash, no `..` — `hosts_dir/
-    /// $HOME`. The `"$@"` keeps the `$` literal.
-    ///
-    /// Can't test the C case (we don't run the C binary). We test
-    /// our case: `$` stays literal in stdout.
+    /// (it's inside double-quotes IN THE SHELL). We don't: `$`
+    /// stays literal in stdout.
     #[test]
     fn edit_dollar_in_filename_not_expanded() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        // Set HOME to something recognizable so if it DOES expand
-        // we see it.
+        let (_dir, _confbase, cb) = init_dir("node1");
+        // Set HOME to something recognizable so expansion is visible.
         let out = std::process::Command::new(super::bin("tinc"))
-            // `$HOME` literal (cargo passes argv verbatim).
-            .args(["-c", cb, "edit", "$HOME"])
+            .args(["-c", &cb, "edit", "$HOME"])
             .env_remove("NETNAME")
             .env_remove("VISUAL")
             .env("EDITOR", "echo")
@@ -250,7 +226,6 @@ mod edit_integration {
 
         assert!(out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
-        // `$HOME` LITERAL in the path. NOT `/tmp/WRONG`.
         assert!(stdout.contains("$HOME"), "stdout: {stdout}");
         assert!(!stdout.contains("/tmp/WRONG"), "stdout: {stdout}");
     }
@@ -271,19 +246,7 @@ mod edit_integration {
     /// would resolve to `hosts_dir/../etc/passwd` and run vi.
     #[test]
     fn edit_reject_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        let cb = confbase.to_str().unwrap();
-        assert!(tinc(&["-c", cb, "init", "node1"]).status.success());
-
-        let out = std::process::Command::new(super::bin("tinc"))
-            .args(["-c", cb, "edit", "../etc/passwd"])
-            .env_remove("NETNAME")
-            .env_remove("VISUAL")
-            .env("EDITOR", "echo")
-            .output()
-            .unwrap();
-
+        let (_, out) = run_edit("echo", "../etc/passwd");
         assert!(!out.status.success());
         // echo NEVER ran. Stdout is empty.
         assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
@@ -438,12 +401,7 @@ fn tinc_stdin(args: &[&str], stdin: &[u8]) -> std::process::Output {
 /// the new key is live, the old one is `#`-commented in both files.
 #[test]
 fn genkey_after_init() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // Snapshot pre-rotation.
     let priv_before = std::fs::read_to_string(confbase.join("ed25519_key.priv")).unwrap();
@@ -452,7 +410,7 @@ fn genkey_after_init() {
     assert!(!host_before.contains('#'));
 
     // Rotate.
-    let out = tinc(&["-c", cb, "generate-ed25519-keys"]);
+    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Generating Ed25519 key pair"));
@@ -500,8 +458,8 @@ fn genkey_after_init() {
 /// See `cmd/genkey.rs` module doc.
 #[test]
 fn genkey_no_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "generate-ed25519-keys"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("tinc.conf"));
@@ -510,13 +468,8 @@ fn genkey_no_config() {
 /// genkey rejects extra args. C `tincctl.c:2354`.
 #[test]
 fn genkey_too_many_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&[
-        "-c",
-        dir.path().to_str().unwrap(),
-        "generate-ed25519-keys",
-        "extra",
-    ]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "generate-ed25519-keys", "extra"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Too many arguments"));
@@ -533,13 +486,8 @@ fn genkey_too_many_args() {
 fn genkey_rotated_key_loads() {
     use tinc_tools::keypair;
 
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
-    let out = tinc(&["-c", cb, "generate-ed25519-keys"]);
+    let (_dir, confbase, cb) = init_dir("alice");
+    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
     assert!(out.status.success(), "{out:?}");
 
     // ─── read_private skips the #-block, returns the live key ───
@@ -566,15 +514,10 @@ fn genkey_rotated_key_loads() {
 #[test]
 fn genkey_preserves_priv_mode() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // init sets 0600 (verified in `init`'s tests). Rotate.
-    let out = tinc(&["-c", cb, "generate-ed25519-keys"]);
+    let out = tinc(&["-c", &cb, "generate-ed25519-keys"]);
     assert!(out.status.success());
 
     let mode = std::fs::metadata(confbase.join("ed25519_key.priv"))
@@ -590,19 +533,14 @@ fn genkey_preserves_priv_mode() {
 /// emits the original body byte-exact to stdout.
 #[test]
 fn sign_verify_roundtrip_binary() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (dir, _confbase, cb) = init_dir("alice");
 
     let payload = dir.path().join("payload");
     let data = b"hello world\nbinary: \x00\xff\n";
     std::fs::write(&payload, data).unwrap();
 
     // ─── sign ───────────────────────────────────────────────────────
-    let out = tinc(&["-c", cb, "sign", payload.to_str().unwrap()]);
+    let out = tinc(&["-c", &cb, "sign", payload.to_str().unwrap()]);
     assert!(out.status.success(), "{out:?}");
     let signed = out.stdout;
 
@@ -626,28 +564,28 @@ fn sign_verify_roundtrip_binary() {
     // ─── verify (file arg) ──────────────────────────────────────────
     let signed_path = dir.path().join("signed");
     std::fs::write(&signed_path, &signed).unwrap();
-    let out = tinc(&["-c", cb, "verify", ".", signed_path.to_str().unwrap()]);
+    let out = tinc(&["-c", &cb, "verify", ".", signed_path.to_str().unwrap()]);
     assert!(out.status.success(), "{out:?}");
     // stdout is the body, byte-exact.
     assert_eq!(out.stdout, data);
 
     // ─── verify (stdin) ─────────────────────────────────────────────
-    let out = tinc_stdin(&["-c", cb, "verify", "."], &signed);
+    let out = tinc_stdin(&["-c", &cb, "verify", "."], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
     // ─── verify with `*` (any signer) ───────────────────────────────
-    let out = tinc_stdin(&["-c", cb, "verify", "*"], &signed);
+    let out = tinc_stdin(&["-c", &cb, "verify", "*"], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
     // ─── verify with explicit name ──────────────────────────────────
-    let out = tinc_stdin(&["-c", cb, "verify", "alice"], &signed);
+    let out = tinc_stdin(&["-c", &cb, "verify", "alice"], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
     // ─── verify with WRONG name → fail ─────────────────────────────
-    let out = tinc_stdin(&["-c", cb, "verify", "bob"], &signed);
+    let out = tinc_stdin(&["-c", &cb, "verify", "bob"], &signed);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Signature is not made by bob"));
@@ -659,18 +597,13 @@ fn sign_verify_roundtrip_binary() {
 /// `tinc sign | tinc verify .` is the canonical pipeline.
 #[test]
 fn sign_stdin_verify_stdin() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, _confbase, cb) = init_dir("alice");
 
     let data = b"stdin data\n";
-    let signed = tinc_stdin(&["-c", cb, "sign"], data);
+    let signed = tinc_stdin(&["-c", &cb, "sign"], data);
     assert!(signed.status.success(), "{signed:?}");
 
-    let verified = tinc_stdin(&["-c", cb, "verify", "."], &signed.stdout);
+    let verified = tinc_stdin(&["-c", &cb, "verify", "."], &signed.stdout);
     assert!(verified.status.success(), "{verified:?}");
     assert_eq!(verified.stdout, data);
 }
@@ -679,21 +612,16 @@ fn sign_stdin_verify_stdin() {
 /// unit test, proves the binary plumbing carries the error through.
 #[test]
 fn sign_verify_tamper_detected() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
+    let (_dir, _confbase, cb) = init_dir("alice");
 
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
-
-    let signed = tinc_stdin(&["-c", cb, "sign"], b"untampered");
+    let signed = tinc_stdin(&["-c", &cb, "sign"], b"untampered");
     assert!(signed.status.success());
 
     // Tamper: change one body byte.
     let mut tampered = signed.stdout;
     *tampered.last_mut().unwrap() ^= 1;
 
-    let out = tinc_stdin(&["-c", cb, "verify", "."], &tampered);
+    let out = tinc_stdin(&["-c", &cb, "verify", "."], &tampered);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Invalid signature"));
@@ -704,8 +632,8 @@ fn sign_verify_tamper_detected() {
 /// C `tincctl.c:2860`.
 #[test]
 fn verify_no_signer_arg() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "verify"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "verify"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No signer given"));
@@ -714,8 +642,8 @@ fn verify_no_signer_arg() {
 /// sign without init → fails (no tinc.conf).
 #[test]
 fn sign_no_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "sign"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "sign"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("tinc.conf"));
@@ -767,14 +695,9 @@ fn sign_verify_cross_node() {
 /// `tinc init` then `tinc export`. Basic plumbing.
 #[test]
 fn export_after_init() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
+    let (_dir, _confbase, cb) = init_dir("alice");
 
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
-
-    let out = tinc(&["-c", cb, "export"]);
+    let out = tinc(&["-c", &cb, "export"]);
     assert!(out.status.success(), "{out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     // The injected Name = line.
@@ -788,8 +711,8 @@ fn export_after_init() {
 /// `export` without `init` first → fails (no tinc.conf, can't get_my_name).
 #[test]
 fn export_no_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "export"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "export"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("tinc.conf"));
@@ -798,16 +721,10 @@ fn export_no_config() {
 /// `tinc import` reads a blob from stdin, writes hosts/NAME.
 #[test]
 fn import_from_stdin() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    // init first — import needs hosts_dir to exist.
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     let blob = b"Name = bob\nSubnet = 10.0.2.0/24\nAddress = 192.0.2.2\n";
-    let out = tinc_stdin(&["-c", cb, "import"], blob);
+    let out = tinc_stdin(&["-c", &cb, "import"], blob);
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Imported 1 host"));
@@ -819,18 +736,13 @@ fn import_from_stdin() {
 /// `import` skips existing without `--force`, overwrites with.
 #[test]
 fn import_force_flag() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // alice's hosts file exists (init wrote it). Import a new alice.
     let blob = b"Name = alice\nOVERWRITTEN\n";
 
     // Without --force: skip, exit 1 (count==0).
-    let out = tinc_stdin(&["-c", cb, "import"], blob);
+    let out = tinc_stdin(&["-c", &cb, "import"], blob);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("already exists"));
@@ -840,7 +752,7 @@ fn import_force_flag() {
     assert!(content.contains("Ed25519PublicKey"));
 
     // With --force: overwrite.
-    let out = tinc_stdin(&["--force", "-c", cb, "import"], blob);
+    let out = tinc_stdin(&["--force", "-c", &cb, "import"], blob);
     assert!(out.status.success(), "{out:?}");
     let content = std::fs::read_to_string(confbase.join("hosts/alice")).unwrap();
     assert_eq!(content, "OVERWRITTEN\n");
@@ -849,13 +761,9 @@ fn import_force_flag() {
 /// `import` with empty stdin → exit 1, "No host... imported."
 #[test]
 fn import_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
-    let out = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, _confbase, cb) = init_dir("alice");
 
-    let out = tinc_stdin(&["-c", cb, "import"], b"");
+    let out = tinc_stdin(&["-c", &cb, "import"], b"");
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No host configuration files imported"));
@@ -964,14 +872,9 @@ fn export_all_import_workflow() {
 /// pickiness expects.
 #[test]
 fn export_format_matches_c_sscanf() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
+    let (_dir, _confbase, cb) = init_dir("node1");
 
-    let out = tinc(&["-c", cb, "init", "node1"]);
-    assert!(out.status.success());
-
-    let out = tinc(&["-c", cb, "export"]);
+    let out = tinc(&["-c", &cb, "export"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
 
@@ -1080,8 +983,8 @@ fn init_via_glued_config() {
 
 #[test]
 fn init_missing_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init"]);
+    let (dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "init"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No Name given"));
@@ -1091,8 +994,8 @@ fn init_missing_name() {
 
 #[test]
 fn init_too_many_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init", "alice", "bob"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "init", "alice", "bob"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Too many arguments"));
@@ -1100,9 +1003,9 @@ fn init_too_many_args() {
 
 #[test]
 fn init_bad_name() {
-    let dir = tempfile::tempdir().unwrap();
+    let (_dir, cb) = bare_dir();
     // Dash is not in `check_id`'s allowed set.
-    let out = tinc(&["-c", dir.path().to_str().unwrap(), "init", "has-dash"]);
+    let out = tinc(&["-c", &cb, "init", "has-dash"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Invalid Name"));
@@ -1110,14 +1013,9 @@ fn init_bad_name() {
 
 #[test]
 fn init_reinit_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let cb = confbase.to_str().unwrap();
+    let (_dir, _confbase, cb) = init_dir("alice");
 
-    let out1 = tinc(&["-c", cb, "init", "alice"]);
-    assert!(out1.status.success());
-
-    let out2 = tinc(&["-c", cb, "init", "bob"]);
+    let out2 = tinc(&["-c", &cb, "init", "bob"]);
     assert!(!out2.status.success());
     let stderr = String::from_utf8(out2.stderr).unwrap();
     assert!(stderr.contains("already exists"));
@@ -1242,14 +1140,9 @@ fn netname_traversal_rejected() {
 /// proves "empty Report → exit 0, silent".
 #[test]
 fn fsck_clean() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
+    let (_dir, _confbase, cb) = init_dir("alice");
 
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
-
-    let out = tinc(&["-c", cb_s, "fsck"]);
+    let out = tinc(&["-c", &cb, "fsck"]);
     assert!(out.status.success(), "fsck failed on clean init: {out:?}");
     // Silent on success. The C is too — fsck's `fprintf`s are all
     // diagnostic, no "everything OK" message. Unix philosophy.
@@ -1281,22 +1174,17 @@ fn fsck_no_config() {
 /// `success`.
 #[test]
 fn fsck_warning_exits_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
-
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // Append a host-only var to tinc.conf. Triggers `HostVarInServer`.
     let mut tc = std::fs::OpenOptions::new()
         .append(true)
-        .open(cb.join("tinc.conf"))
+        .open(confbase.join("tinc.conf"))
         .unwrap();
     writeln!(tc, "Port = 655").unwrap();
     drop(tc);
 
-    let out = tinc(&["-c", cb_s, "fsck"]);
+    let out = tinc(&["-c", &cb, "fsck"]);
     // Warning, not error → exit 0.
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -1310,28 +1198,23 @@ fn fsck_warning_exits_zero() {
 /// idempotent.
 #[test]
 fn fsck_force_fixes() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
-
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // Clobber hosts/alice with no pubkey. (Can't use a *wrong*
     // pubkey easily — we'd need a valid-b64-but-different value,
     // and generating one in a shell test is fiddly. "No key" hits
     // the same fix path: `fix_public_key`.)
-    std::fs::write(cb.join("hosts/alice"), "Subnet = 10.0.0.0/24\n").unwrap();
+    std::fs::write(confbase.join("hosts/alice"), "Subnet = 10.0.0.0/24\n").unwrap();
 
     // Without --force: fail.
-    let out = tinc(&["-c", cb_s, "fsck"]);
+    let out = tinc(&["-c", &cb, "fsck"]);
     assert!(!out.status.success(), "expected failure: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("WARNING:"), "stderr was: {stderr}");
     assert!(stderr.contains("public Ed25519"), "stderr was: {stderr}");
 
     // With --force: succeed, fix message printed.
-    let out = tinc(&["--force", "-c", cb_s, "fsck"]);
+    let out = tinc(&["--force", "-c", &cb, "fsck"]);
     assert!(out.status.success(), "--force should fix: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     // The Info-severity fix message (no prefix in the format, but
@@ -1339,20 +1222,19 @@ fn fsck_force_fixes() {
     assert!(stderr.contains("Wrote Ed25519"), "stderr was: {stderr}");
 
     // Verify the file was actually fixed: PEM block now present.
-    let host = std::fs::read_to_string(cb.join("hosts/alice")).unwrap();
+    let host = std::fs::read_to_string(confbase.join("hosts/alice")).unwrap();
     assert!(host.contains("-----BEGIN ED25519 PUBLIC KEY-----"));
 
     // And fsck without --force is now clean.
-    let out = tinc(&["-c", cb_s, "fsck"]);
+    let out = tinc(&["-c", &cb, "fsck"]);
     assert!(out.status.success(), "post-fix fsck failed: {out:?}");
 }
 
 /// `fsck` rejects extra args. C `tincctl.c:2735`: `if(argc > 1)`.
 #[test]
 fn fsck_too_many_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
-    let out = tinc(&["-c", cb, "fsck", "extra"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "fsck", "extra"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Too many"));
@@ -1377,22 +1259,17 @@ fn fsck_too_many_args() {
 /// would catch it.
 #[test]
 fn invite_prints_url() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
-
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
 
     // Add Address (init doesn't write it; invite needs it).
     let mut h = std::fs::OpenOptions::new()
         .append(true)
-        .open(cb.join("hosts/alice"))
+        .open(confbase.join("hosts/alice"))
         .unwrap();
     writeln!(h, "Address = invite-test.example").unwrap();
     drop(h);
 
-    let out = tinc(&["-c", cb_s, "invite", "bob"]);
+    let out = tinc(&["-c", &cb, "invite", "bob"]);
     assert!(out.status.success(), "invite failed: {out:?}");
 
     // URL on stdout, exactly one line, no other noise.
@@ -1427,7 +1304,7 @@ fn invite_prints_url() {
     // fsck only checks the node's OWN key (ed25519_key.priv at
     // confbase root), not invitation keys. If fsck's path glob
     // got too broad, this fires.
-    let out = tinc(&["-c", cb_s, "fsck"]);
+    let out = tinc(&["-c", &cb, "fsck"]);
     assert!(
         out.status.success(),
         "fsck should pass after invite: {out:?}"
@@ -1442,15 +1319,10 @@ fn invite_prints_url() {
 /// invite without Address → exit 1, clear message, no files left.
 #[test]
 fn invite_no_address() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
-
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, confbase, cb) = init_dir("alice");
     // Don't add Address.
 
-    let out = tinc(&["-c", cb_s, "invite", "bob"]);
+    let out = tinc(&["-c", &cb, "invite", "bob"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No Address"), "{stderr}");
@@ -1459,7 +1331,7 @@ fn invite_no_address() {
     // No invitations/ dir created. Our reorder vs C: we check
     // Address BEFORE makedirs. C checks late and leaves debris.
     assert!(
-        !cb.join("invitations").exists(),
+        !confbase.join("invitations").exists(),
         "no-Address failure should leave no trace"
     );
 }
@@ -1516,9 +1388,8 @@ fn invite_netname_threads_through() {
 
 #[test]
 fn invite_missing_arg() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
-    let out = tinc(&["-c", cb, "invite"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "invite"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("node name"));
@@ -1526,9 +1397,8 @@ fn invite_missing_arg() {
 
 #[test]
 fn invite_too_many_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
-    let out = tinc(&["-c", cb, "invite", "bob", "extra"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "invite", "bob", "extra"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Too many"));
@@ -1554,9 +1424,8 @@ fn invite_too_many_args() {
 /// it means existing docs/forum posts apply.
 #[test]
 fn join_bad_url() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
-    let out = tinc(&["-c", cb, "join", "not-a-url"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "join", "not-a-url"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Invalid invitation URL"), "{stderr}");
@@ -1572,19 +1441,13 @@ fn join_bad_url() {
 /// the *preflight* error, not the connect error.
 #[test]
 fn join_existing_config_fails_early() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
-
-    // init creates tinc.conf.
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success());
+    let (_dir, _confbase, cb) = init_dir("alice");
 
     // Valid-shape URL pointing nowhere. 48 'a's decode to valid b64.
     let slug = "a".repeat(tinc_crypto::invite::SLUG_LEN);
     let url = format!("127.0.0.1:1/{slug}");
 
-    let out = tinc(&["-c", cb_s, "join", &url]);
+    let out = tinc(&["-c", &cb, "join", &url]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     // "already exists", NOT "connection refused". Preflight fired.
@@ -1602,11 +1465,10 @@ fn join_existing_config_fails_early() {
 /// `fgets(line, ..., stdin)`.
 #[test]
 fn join_url_from_stdin() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
+    let (_dir, cb) = bare_dir();
     // Feed a bad URL via stdin to prove the stdin path is wired.
     // (We can't feed a *good* URL without a server.)
-    let out = tinc_stdin(&["-c", cb, "join"], b"garbage-url\n");
+    let out = tinc_stdin(&["-c", &cb, "join"], b"garbage-url\n");
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     // The URL was parsed (and rejected) — stdin reached parse_url.
@@ -1615,9 +1477,8 @@ fn join_url_from_stdin() {
 
 #[test]
 fn join_too_many_args() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
-    let out = tinc(&["-c", cb, "join", "url1", "url2"]);
+    let (_dir, cb) = bare_dir();
+    let out = tinc(&["-c", &cb, "join", "url1", "url2"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("Too many"));
@@ -1684,10 +1545,9 @@ fn ctl_pidfile_malformed() {
 /// BEFORE connect (it's in the binary adapter). No socket touched.
 #[test]
 fn ctl_disconnect_missing_arg() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
+    let (_dir, cb) = bare_dir();
     // Don't bother with --pidfile; arity fails before resolve.
-    let out = tinc(&["-c", cb, "disconnect"]);
+    let out = tinc(&["-c", &cb, "disconnect"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No node name given"), "{stderr}");
@@ -1697,14 +1557,13 @@ fn ctl_disconnect_missing_arg() {
 /// Same preflight property as join's tinc.conf-exists check.
 #[test]
 fn ctl_disconnect_bad_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().to_str().unwrap();
+    let (_dir, cb) = bare_dir();
     // Point pidfile somewhere it'll fail to read — if we *reach*
     // it, the test fails with "could not open pid file" instead of
     // "invalid name", proving check_id didn't run first.
     let out = tinc(&[
         "-c",
-        cb,
+        &cb,
         "--pidfile",
         "/nonexistent/pid",
         "disconnect",
@@ -1730,13 +1589,10 @@ fn ctl_disconnect_bad_name() {
 /// assert documenting the property.
 #[test]
 fn init_does_not_resolve_runtime() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap();
     // If init reached for pidfile/socket, the unresolved Option would
-    // panic. It doesn't — init is needs_daemon: false.
-    let out = tinc(&["-c", cb_s, "init", "alice"]);
-    assert!(out.status.success(), "{:?}", out.stderr);
+    // panic. It doesn't — init is needs_daemon: false. init_dir's
+    // assertion IS this test.
+    let (_dir, _confbase, _cb) = init_dir("alice");
 }
 
 /// The full connect path against a real fake-daemon. This is the
