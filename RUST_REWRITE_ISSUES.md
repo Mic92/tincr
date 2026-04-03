@@ -275,3 +275,36 @@ RFC 1929 (SOCKS5 username/password auth) length fields are single bytes; valid r
 **Impact**: misconfigure-only (256-byte proxy creds are unusual). Silent failure mode — the proxy rejects what looks like a legitimate auth attempt; operator debugs the wrong thing.
 
 **Our port** (`socks.rs:163-167`): bound-check, return `BuildError::CredTooLong` at request build time. STRICTER than C. The error surfaces at config load, not at connect time.
+
+---
+
+## Rust-is-WRONG (found by cross-impl testing against C)
+
+Bugs invisible to Rust↔Rust testing because both sides agreed on the wrong answer. Found in `463b9987`, the first time `crossimpl.rs` ran for real against `.#tincd-c` instead of SKIP. Both predate cross-impl by ~90 commits.
+
+### tunnel.rs::make_udp_label — missing trailing NUL in HKDF input
+
+```c
+// protocol_key.c:122-131
+const size_t labellen = 25 + strlen(myself->name) + strlen(to->name);
+char *label = alloca(labellen);
+snprintf(label, labellen, "tinc UDP key expansion %s %s", myself->name, to->name);
+//                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 24 chars + 2 "%s"
+sptps_start(..., label, labellen, ...);  // labellen, NOT strlen(label)
+```
+
+24 fixed chars, two `%s` substitutions, so the formatted string is `24 + strlen(a) + strlen(b)` characters. `labellen` is `25 + ...` — one more than the string length. That extra byte is the NUL `snprintf` wrote. `sptps.c:206,258` `memcpy(..., label, labellen)` copies it into the SIG message and the HKDF seed.
+
+We had `make_udp_label` build a `Vec<u8>` from `format!(...).into_bytes()` — no trailing zero. The HKDF derived a different key. The SIG verified against a different transcript. **`BadSig` on every per-tunnel handshake against a C peer.** Rust↔Rust tests passed because both sides omitted the NUL identically.
+
+The TCP label (`conn.rs::tcp_label`, ported from `protocol_auth.c:458`) has the same `+1` arithmetic and **was already correct** — it was scrutinized as a NUL question early because the `sizeof`-of-a-VLA shape made it obvious. The UDP label uses `25 + strlen + strlen` (explicit count, no `sizeof`), which made the NUL look like a C-ism rather than a wire byte. Same bug, different surface, only one got caught at port time.
+
+**Fix**: `make_udp_label` pushes a `0u8` after the formatted bytes. KAT test `udp_label_kat_len` pins `25 + a.len() + b.len()` exactly.
+
+### daemon.rs — PACKET (type 17) terminates the connection
+
+Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
+
+`net_packet.c::send_sptps_data` falls back to TCP-tunnelled `PACKET` while `udp_confirmed` is false (`:1034-1040`). At first contact `udp_confirmed` is always false, so a C peer floods `PACKET`-carrying-MTU-probes immediately after the meta handshake. We had no `Request::Packet` arm and no `c->tcplen` next-record-is-a-blob state (`meta.c:143-151`); the request fell through to `unimplemented` → terminate → reconnect loop. The Rust daemon never sends pre-UDP-confirm probes (we wait for `validkey` before starting PMTU), so Rust↔Rust never hit this.
+
+**Fix**: parse the length, swallow the next record (`STUB(chunk-12-tcp-fallback)` for actually routing it — matters for `TCPOnly`, not for ping-on-loopback). Connection survives long enough for UDP to confirm; C stops sending `PACKET`.
