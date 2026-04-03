@@ -5378,6 +5378,7 @@ impl Daemon {
     ///   request(c, data)`. Same `check_gate` + handler match as
     ///   the cleartext line path; only the FRAMING differs (SPTPS
     ///   record vs `\n`-terminated line).
+    #[allow(clippy::too_many_lines)] // C `receive_meta_sptps` is one function; the request-dispatch table is half of it
     fn dispatch_sptps_outputs(&mut self, id: ConnId, outs: Vec<tinc_sptps::Output>) -> bool {
         use tinc_sptps::Output;
 
@@ -5429,6 +5430,47 @@ impl Daemon {
                     // regular WRITE event flushes it.
                 }
                 Output::Record { bytes, .. } => {
+                    // ─── `c->tcplen` short-circuit ───────────────────────────
+                    // C `meta.c:143-151`: a `PACKET 17 <len>` line
+                    // sets `c->tcplen`; the NEXT record is a raw VPN
+                    // packet blob, not a request line. C calls
+                    // `receive_tcppacket` to route it through the
+                    // normal VPN-packet path.
+                    //
+                    // We DROP it. The blobs we see in practice are
+                    // MTU probes (`send_udp_probe_packet` falls
+                    // through to TCP-PACKET while `udp_confirmed` is
+                    // false). We don't run TCP probes ourselves; once
+                    // UDP confirms (it does, on loopback) the C stops
+                    // sending these. Routing them (`STUB(chunk-12-tcp
+                    // -fallback)`) is needed for `TCPOnly` mode and
+                    // for MTU-probe replies; neither matters for the
+                    // cross-impl ping. WIRE BUG found by crossimpl.rs:
+                    // before this branch the request landed in the
+                    // `_ => terminate` arm and we dropped the
+                    // connection on every probe.
+                    if conn.tcplen != 0 {
+                        // C `:144`: `if(length != c->tcplen) return
+                        // false`. SPTPS records are exact; mismatch
+                        // is a framing bug, not a partial read.
+                        if bytes.len() != usize::from(conn.tcplen) {
+                            log::error!(target: "tincd::proto",
+                                "TCP packet length mismatch from {}: \
+                                 record {} != tcplen {}",
+                                conn.name, bytes.len(), conn.tcplen);
+                            self.terminate(id);
+                            return needs_write;
+                        }
+                        // C `:148-150`: `receive_tcppacket(...);
+                        // c->tcplen = 0; return true`.
+                        log::debug!(target: "tincd::proto",
+                            "Dropping TCP-tunnelled packet ({} bytes) \
+                             from {} — STUB(chunk-12-tcp-fallback)",
+                            conn.tcplen, conn.name);
+                        conn.tcplen = 0;
+                        continue;
+                    }
+
                     // C `meta.c:155-161`. Strip `\n`, dispatch.
                     // `record_type` is always 0 here (app data;
                     // SPTPS_HANDSHAKE became `HandshakeDone`).
@@ -5503,12 +5545,29 @@ impl Daemon {
                             }
                             Ok(false)
                         }
+                        Request::Packet => {
+                            // `tcppacket_h` (`protocol_misc.c:105-
+                            // 119`): parse `len`, set `c->tcplen`,
+                            // return true. The NEXT record is the
+                            // blob — see `Output::Record` arm above.
+                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            std::str::from_utf8(body)
+                                .ok()
+                                .and_then(|s| tinc_proto::msg::TcpPacket::parse(s).ok())
+                                .map_or_else(
+                                    || Err(DispatchError::BadKey("PACKET parse".into())),
+                                    |pkt| {
+                                        conn.tcplen = pkt.len;
+                                        Ok(false)
+                                    },
+                                )
+                        }
                         _ => {
-                            // KEY_CHANGED/REQ_KEY/ANS_KEY/PING/PONG
-                            // etc — chunk 7/8. The gate passed
-                            // (allow_request = None post-ACK). C
-                            // dispatches via the table; we Drop
-                            // until handlers land.
+                            // KEY_CHANGED, SPTPS_PACKET, UDP_INFO,
+                            // MTU_INFO. The gate passed (allow_
+                            // request = None post-ACK). C dispatches
+                            // via the table; we Drop until handlers
+                            // land.
                             log::warn!(target: "tincd::proto",
                                        "SPTPS request {req:?} not implemented — chunk 7/8");
                             self.terminate(id);

@@ -357,13 +357,28 @@ impl TunnelStatus {
 /// newtype wrapper needed.
 #[must_use]
 pub fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
-    // C: `snprintf(label, labellen, "tinc UDP key expansion %s
-    // %s", ...)`. `labellen = 25 + strlen(a) + strlen(b)`. The
-    // `25` is `strlen("tinc UDP key expansion  ") + 1` for the
-    // NUL — but `snprintf` doesn't write past `labellen-1`, so
-    // the label passed to `sptps_start` is the bytes WITHOUT the
-    // trailing NUL. We match: no NUL.
-    format!("tinc UDP key expansion {initiator} {responder}").into_bytes()
+    // C `protocol_key.c:122-131`: `labellen = 25 + strlen(a) +
+    // strlen(b)`; `snprintf(label, labellen, "tinc UDP key
+    // expansion %s %s", a, b)`; `sptps_start(..., label,
+    // labellen, ...)`. The format string is 24 fixed chars
+    // (`"tinc UDP key expansion "` = 23, plus the inter-name
+    // space) so the formatted output is `24 + a + b` chars. The
+    // buffer is `25 + a + b`: the +1 is `snprintf`'s NUL. The C
+    // passes `labellen` (NOT `strlen(label)`) to `sptps_start`,
+    // which `memcpy`s it verbatim into the SIG message and HKDF
+    // seed (`sptps.c:206,258`). The NUL byte is part of the
+    // signed material.
+    //
+    // EXACTLY the same as the TCP label (`proto.rs::tcp_label`):
+    // `protocol_auth.c:458` uses the SAME `25 + a + b` arithmetic
+    // for `"tinc TCP key expansion %s %s"` (also 24 fixed chars).
+    // The previous code here OMITTED the NUL based on a misread
+    // of `snprintf` semantics; it didn't fail until the cross-
+    // impl tests ran for real (Rust↔Rust agreed with itself on
+    // the wrong label).
+    let mut label = format!("tinc UDP key expansion {initiator} {responder}").into_bytes();
+    label.push(0);
+    label
 }
 
 #[cfg(test)]
@@ -445,19 +460,21 @@ mod tests {
 
     #[test]
     fn make_udp_label_format() {
-        // `protocol_key.c:124`. No trailing NUL (`snprintf`
-        // writes one but `labellen` excludes it from the
-        // `sptps_start` view).
+        // `protocol_key.c:122-131`: `labellen = 25 + a + b`,
+        // passed verbatim to `sptps_start` (NOT `strlen(label)`).
+        // The format string is 24 fixed chars; the +1 is the NUL
+        // `snprintf` writes. The NUL IS part of the signed/HKDF
+        // material (`sptps.c:206,258`). Same as the TCP label.
         assert_eq!(
             make_udp_label("alice", "bob"),
-            b"tinc UDP key expansion alice bob"
+            b"tinc UDP key expansion alice bob\0"
         );
         // `protocol_key.c:259` responder side: `from->name,
         // myself->name` — same format string, args swapped at
         // call site. The function doesn't swap; caller does.
         assert_eq!(
             make_udp_label("bob", "alice"),
-            b"tinc UDP key expansion bob alice"
+            b"tinc UDP key expansion bob alice\0"
         );
     }
 

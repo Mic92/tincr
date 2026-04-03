@@ -324,6 +324,21 @@ pub struct Connection {
     /// conns: `None`. The `OutgoingId` type is daemon-side; we use
     /// the slotmap's `KeyData` to avoid a `tincd::daemon` dep here.
     pub outgoing: Option<slotmap::KeyData>,
+    /// `c->tcplen` (`connection.h:87`). `tcppacket_h` sets this from
+    /// the `PACKET 17 <len>` line; `receive_meta_sptps` (`meta.c:143-
+    /// 151`) treats the NEXT record as a raw VPN-packet blob of this
+    /// length, NOT a request line. The C calls `receive_tcppacket` to
+    /// route it through the normal VPN-packet path (`net_packet.c:595`).
+    ///
+    /// The C uses TCP-tunnelled `PACKET` while UDP is unconfirmed: the
+    /// MTU-probe path (`send_udp_probe_packet`) falls through to TCP
+    /// when `udp_confirmed` is false, which it is at first contact.
+    /// We don't send TCP probes (we wait for UDP), but a C peer DOES —
+    /// found by the cross-impl tests the very first time they ran for
+    /// real (they had only ever been SKIPs). Without this state, the
+    /// `PACKET` line falls through to the unimplemented-request arm
+    /// and we drop the connection on a probe.
+    pub tcplen: u16,
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
@@ -393,6 +408,7 @@ impl Connection {
             pinged: false,
             connecting: false,
             outgoing: None,
+            tcplen: 0,
         }
     }
 
@@ -441,6 +457,7 @@ impl Connection {
             pinged: false,
             connecting: false,
             outgoing: None,
+            tcplen: 0,
         }
     }
 
@@ -491,6 +508,7 @@ impl Connection {
             // C `:652`: `c->status.connecting = true`.
             connecting: true,
             outgoing: Some(outgoing),
+            tcplen: 0,
         }
     }
 
