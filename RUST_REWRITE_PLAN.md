@@ -183,20 +183,15 @@ What landed:
 
 The six tests are also the *spec* for Phase 2: the same test bodies will run with one peer swapped for `tinc-sptps`, asserting identical event sequences.
 
-### 0c. Wire-traffic corpus
-The integration tests already spin up multi-node meshes. Add a capture shim:
+### ~~0c. Wire-traffic corpus~~ — superseded by S4
 
-- [ ] `LD_PRELOAD` hook on `send_request`/`receive_request` (or just patch `protocol.c` to `tee` to a file when `TINC_CAPTURE` env is set)
-- [ ] Run `test/integration/*.py`, collect `corpus/meta/*.txt` — every meta-protocol line ever sent
-- [ ] Same for control socket: `corpus/control/*.txt`
-
-The 20 `sscanf` format strings in `protocol_*.c` are the spec; the corpus is the conformance suite.
-
-### 0d. CI baseline
-- [ ] `meson test` unchanged — the bar to clear
-- ~~Parameterize `test/integration/testlib/` to launch `${TINCD_BIN:-tincd}` so a future Rust binary slots in~~ **Dropped.** The python testlib has too many CLI-surface assumptions; porting test BODIES to the three-stratum Rust harness is less work than shimming testlib. See "§ Testing Strategy Summary → port matrix".
-
-**Deliverable:** `cargo test -p tinc-ffi` runs a C↔C SPTPS handshake. ~~KAT JSON files committed.~~ ✅
+Never built. The plan was `LD_PRELOAD`-hook `send_request` and replay
+the capture against the Rust parser. That tests Rust-reads-C-writes
+— half the surface. `tests/crossimpl.rs` (chunk 11) tests
+Rust↔C-live, both directions, and found two wire bugs the corpus
+couldn't have (UDP-label NUL is HKDF input, never crosses
+`send_request`). The 20 `sscanf` format strings ARE pinned: every
+KAT in `tinc-proto` is a captured C output line.
 
 ---
 
@@ -501,23 +496,17 @@ pub trait Device: Send {
 
 C `setup`/`close` are constructor + `Drop`, not trait methods.
 
-### `tinc-net` (sockets only, not the event loop yet)
-| C source | Rust |
-|---|---|
-| `net_socket.c` | TCP/UDP listener setup, `SO_REUSEADDR`, dual-stack, bind-to-interface (`socket2`) |
-| `proxy.c` | SOCKS4/5, HTTP CONNECT — hand-roll, it's ~200 LOC and synchronous |
-| `address_cache.c` | LRU of recently-seen peer addresses |
-| `upnp.c` | `igd-next` crate (NOT `igd` — dead since 2021). 0.17.0 / 2026-03 / 8.6M dl. Pure-Rust SSDP+SOAP, no miniupnpc, blocking API matches the C's pthread-with-sleeps shape. Feature-gated `[features] upnp = ["dep:igd-next"]`. See chunk 11. |
-| `autoconnect.c` | No new dep. Reservoir-ish two-pass random pick (the C's count-then-reroll, `:31-55`). See chunk 11. |
+### ~~`tinc-net` separate crate~~ — didn't happen
 
-### Packet synthesis (`route.c` write-path)
-`route.c` doesn't just parse — it **builds** ICMP Unreachable, ICMPv6 Packet Too Big, ARP replies, and NDP Neighbor Advertisements in-place, with hand-computed checksums. `etherparse` is read-only. Hand-roll:
+Socket setup, proxy, addrcache, autoconnect all landed as `tincd`
+modules (`listen.rs`, `socks.rs`, `addrcache.rs`, `autoconnect.rs`).
+No seam justified a crate boundary. The `upnp.c` `igd-next` plan
+stands for chunk 12+ if anyone asks.
 
-- `#[repr(C, packed)]` structs for `iphdr`, `ip6_hdr`, `icmphdr`, `icmp6_hdr`, `ether_arp`, `nd_neighbor_advert` (lift from `src/ipv4.h`, `src/ipv6.h`, `src/ethernet.h`)
-- `inet_checksum()` — standard one's-complement, ~15 LOC
-- One builder fn per response type, ~50 LOC each
-
-~300 LOC total. Use `etherparse` for the *parse* path only.
+`etherparse` for packet parse: evaluated, dropped. `packet.rs` is
+`#[repr(C, packed)]` structs for build AND parse — the synth path
+needs field-level write access etherparse doesn't give, and once
+you've hand-rolled the structs the parse path is `transmute` away.
 
 ---
 
@@ -688,14 +677,12 @@ re-arm explicit. Every match arm decides.
 | `control.c` | 241 | ~25% | REQ_STOP + REQ_DUMP_CONNECTIONS + REQ_DUMP_SUBNETS. 11/14 `REQ_*` left (chunk 8). CLI client side already speaks the protocol; daemon side is `match` arms that walk trees and `writeln!`. `init_control` landed in chunk 2. |
 | `pidfile.c` | tiny | ✅ | `Pidfile::read` (CLI side) + write (daemon, chunk 2). |
 | `net_socket.c` | 884 | ~65% | `tincd::listen` (listeners + tarpit) + `tincd::outgoing` (`do_outgoing_connection`, `try_outgoing_connections`, `retry_outgoing`, `finish_connecting`, the `handle_meta_io` connecting probe). Left: proxy modes (`PROXY_EXEC/SOCKS/HTTP`, ~100 LOC, chunk 10); chunk-3 listener worklist (`bind_reusing_port` etc, chunk 10). |
-| `meta.c` | 322 | ~25% | `broadcast_meta` (5 LOC, the `c->edge` filter — our `is_active()`). `send_meta`/`send_meta_sptps` shape lives in `conn::send`. Left: `receive_meta` framing edge cases (chunk 7, the `tcplen` packet-in-metadata path). |
-| `net.c` | 527 | ~10% | `terminate_connection` partial. Left: `periodic_handler` (timeout sweep), `try_tx`, `purge`. |
-| `net_setup.c` | 1336 | ~10% | Skeleton `setup_myself`. Left: `setup_myself_reloadable` (~500), `load_all_nodes` (~100), device enable/disable script hooks. |
-| `tincd.c` | 735 | ~40% | `main.rs` argv + signal install. Left: `--mlock`, `--chroot`, `--user`, the `daemon()` call, SIGHUP→reload. |
-| `node.c` | 232 | ~30% | Three-way: `Graph` (topology), `node_ids: HashMap<String, NodeId>` (the C `lookup_node`), `nodes: HashMap<String, NodeState>` (runtime). `lookup_or_add_node` is the C's `n = lookup_node(name); if(!n) node_add(n)` idiom. Left: node_id_t for UDP, per-tunnel SPTPS, `dump_nodes` (chunk 7/8). |
-| `edge.c` | 138 | ~50% | `tinc-graph::add_edge`/`del_edge`/`lookup_edge` (free-list slab, `8dc93535`) + `on_ack`'s edge-build. Left: `dump_edges`; the per-edge address store (`e->address`, currently in `NodeState.edge_addr`). |
-| `subnet.c` | 409 | ~70% | `SubnetTree` (the lookup tree, descending-prefixlen Ord). `add`/`del`/`lookup_ipv4`/`lookup_ipv6`/`lookup_mac`/`iter`. `dump_subnets` daemon-side. Left: hash cache (`:33`), `subnet_update` script firing (chunk 8). |
-| `protocol_edge.c` + `protocol_subnet.c` | 583 | ~85% | All four `*_h` handlers + `forward_request` + `contradicting_*` counters (chunk 8). The chunk-9b idempotence-addr-compare fix (`:144`) lives here. Left: `tunnelserver`/`strictsubnets` filter gates (chunk 9c). |
+| `net_setup.c` | 1336 | ~50% | `setup_myself` skeleton + `setup_myself_reloadable` (chunk 10), `load_all_nodes` (chunk 11). Left: device enable/disable script hooks, the per-host config re-read. |
+| `tincd.c` | 735 | ~50% | `main.rs` argv + signal install + SIGHUP→reload (chunk 10). Left: `--mlock`, `--chroot`, `--user`, the `daemon()` call. |
+| `node.c` | 232 | ~85% | Three-way model (chunk 5), `NodeId6` UDP id (chunk 7), per-tunnel SPTPS (chunk 7), `dump_nodes` (`22a5ff82`). Left: nothing structural; legacy bits. |
+| `edge.c` | 138 | ✅ | `tinc-graph::add_edge`/`del_edge`/`lookup_edge` (free-list slab) + `on_ack`'s edge-build + `dump_edges` (`22a5ff82`). |
+| `subnet.c` | 409 | ~85% | `SubnetTree` + `dump_subnets` + `subnet_update` script firing (chunk 8). Left: hash cache (we don't have one to flush — deleted not deferred). |
+| `protocol_edge.c` + `protocol_subnet.c` | 583 | ✅ | All handlers + `forward_request` + `contradicting_*` + tunnelserver/strictsubnets gates (chunk 9c). The chunk-9b idempotence-addr-compare fix (`:144`). |
 | `graph.c` | 327 | ✅ | `tinc-graph::sssp`/`mst` + `graph_glue::diff_reachability`/`run_graph`. The sssp→diff→mst order pinned. host-up/down + subnet-up/down script firing (chunk 8). |
 | `script.c` | 253 | ✅ | `script.rs` (`984bdfdc`). `Command::envs` not `putenv`; ENOEXEC behavior diff doc'd. |
 | `protocol_key.c` | 648 | ~60% | `send_req_key`/`req_key_ext_h`/`ans_key_h` SPTPS + compression-level negotiation (chunk 9a). UDP relay receive (chunk 9b). Left: `REQ_PUBKEY`/`ANS_PUBKEY` (chunk 9c — we require `hosts/NAME` instead), `SPTPS_PACKET` TCP-tunneled, reflexive-UDP-addr, legacy (chunk-never). |
@@ -713,9 +700,14 @@ re-arm explicit. Every match arm decides.
 | `getopt*.c` | ~1k | drop | clap. |
 
 ### Hot-path concerns (`net_packet.c`)
-- Preallocated packet buffers — no per-packet `Vec` alloc. Use `bytes::BytesMut` pool or fixed `[u8; MAXSIZE]` on stack.
-- Zero-copy where the C code does `memcpy` only because of API shape, not necessity.
-- Benchmark: `iperf3` over a 2-node localhost mesh, C vs Rust. Regression budget: ≤5%.
+
+The iperf3 gate (`throughput.rs`, chunk 11+) measures 850 Mbps vs C's
+1020. The 18% gap is per-packet `Vec` allocs in `Sptps::send_record`
+(7% in the profile) + the `Output::Wire` collect. The C uses arena
+buffers (`vpn_packet_t` stack, `meta.c::send_buffer`). `STUB(chunk-
+11-perf)`. The ≤5% budget is the bar; meeting it means buffer reuse,
+not `bytes::BytesMut` (the API shape — SPTPS in/out is `&[u8]` —
+doesn't need refcounted slices).
 
 ---
 
@@ -830,28 +822,35 @@ Residual ~18% gap is per-packet `Vec` allocations: `Sptps::send_record_priv` at 
 | Compression | `flate2` (zlib), `lz4_flex` | |
 | LZO (feature-gated, legacy) | vendor `minilzo.c` via `cc` | `lzo-sys` is unmaintained; LZO is the *default* compression in tinc 1.0 deployments |
 | Net | `mio`, `socket2`, `nix` (Unix), `windows-sys` (Win) |
-| TUN | `tun` (Linux/macOS), `wintun` (Windows) — evaluate vs hand-rolling |
-| CLI | `clap`, ~~`ratatui` (for `tinc top`)~~ hand-rolled ANSI shim, `rustyline` |
-| Logging | `tracing`, `tracing-subscriber` |
+| TUN | hand-rolled (`tinc-device::linux`). The `tun` crate doesn't expose `IFF_NO_PI` at the granularity the +10/+14 trick needs. |
+| CLI | hand-rolled `match argv[1]` (clap is 10× deps for ~15 subcommands; same call as `sptps_test`) |
+| Logging | `log` + `env_logger` |
 | Config | hand-rolled (format is trivial, `serde` is overkill) |
-| Testing | `proptest`, `cargo-fuzz`, `criterion` |
+| Testing | `proptest` (tinc-conf, tinc-proto roundtrips). No benchmark crate — `throughput.rs` IS the perf gate. |
 | Arena | `slotmap` |
 
 ---
 
 ## Risk Register
 
+Four rows fired and are no longer risks. Kept for the record:
+
+| Risk | Fired? | Outcome |
+|---|---|---|
+| Bespoke crypto primitive mismatch | ✅ 4× in Phase 0a | KAT-locked. ChaPoly nonce layout, ECDH unvalidated Edwards→Montgomery, PRF label arithmetic, on-disk key format. None made it past Phase 0. |
+| SPTPS state-machine subtle incompatibility | ✅ 2× | Phase 2 caught sig-verify ordering. S4 cross-impl caught UDP-label NUL (`463b9987`) — NOT catchable in-process, both sides agree on the wrong answer. |
+| `net_packet.c` perf regression | ✅ spectacularly | 0.0 Mbps. Not a packet-path bug — EPOLLET drain semantics (`2b5dda45`). 850 Mbps post-fix. The throughput gate did its job on first run. |
+| `route.c` packet-parsing edge cases | ✅ as C-is-WRONG #8 | `route.c:344` reads wrong offsets. 14yo. Benign. Ported faithfully, doc'd. Not a Rust risk — a C bug we now know about. |
+
+Live risks:
+
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Bespoke crypto primitive mismatch (ChaPoly, ECDH, PRF) | **Certain** without KATs | Phase 0a KAT extraction is mandatory, not optional. No `tinc-crypto` code merges without passing them. |
-| SPTPS state-machine subtle incompatibility | High | Phase 2's in-process Rust↔C cross-test catches this before any socket is opened |
-| Legacy protocol RSA padding mismatch | High | Keep using OpenSSL via FFI for legacy auth indefinitely |
 | `chacha20` crate drops `ChaCha20Legacy` | Low | No feature flag involved (unconditional export in 0.9). Pin `=0.9` and check on bumps. Fallback: vendor DJB ChaCha (~200 LOC). |
-| `curve25519-dalek` exposes `FieldElement` | Would let us delete the vendored `fe` module | Monitor; the dalek maintainers have discussed it. Until then, the ~180 LOC stays. |
-| `net_packet.c` perf regression | Medium | Benchmark gate in CI; the C code isn't heavily optimized so matching it is realistic |
-| Windows TUN driver churn | Medium | Switch to wintun (WireGuard's); it's better-maintained than TAP-Windows anyway |
-| `route.c` packet-parsing edge cases (IPv6 ext headers, ARP, NDP) | Medium | Corpus capture from real traffic + fuzz. Consider `etherparse` crate for the parsing. |
-| Scope creep into "let's redesign the protocol" | High | **Hard rule:** Phase 1–5 is byte-compatible port only. Protocol v18 ideas go in a separate doc. |
+| `curve25519-dalek` exposes `FieldElement` | Would let us delete the vendored `fe` module | Monitor. Until then, the ~180 LOC stays. |
+| Legacy protocol RSA padding mismatch | High (if ever ported) | Keep using OpenSSL via FFI for legacy auth indefinitely. Currently `STUB(chunk-never)`. |
+| Windows TUN driver churn | Medium | Switch to wintun (WireGuard's); better-maintained than TAP-Windows. Not yet started. |
+| Scope creep into "let's redesign the protocol" | High | **Hard rule:** byte-compatible port only. Protocol v18 ideas go in a separate doc. |
 
 ---
 
