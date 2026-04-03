@@ -61,10 +61,14 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # the C's LZ4_compress_fast_extState wire output. KAT proves it.
 lz4_flex = { version = "0.11", default-features = false }
 
-# STUB(chunk-9-lzo): vendor minilzo.c via cc crate. lzo-sys exists
-# but is bindings-only; rust-lzo/lzo1x are pure-rust ports of unknown
-# quality. LZO is the tinc 1.0 DEFAULT — wire-compat is non-negotiable.
-# Decision deferred; compress::Level::LzoLo/LzoHi return None.
+# LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
+# cc crate. lzo-sys is bindings-only (still needs system liblzo2);
+# rust-lzo/lzo1x are pure-rust ports of unknown quality. LZO is the
+# tinc 1.0 DEFAULT — wire-compat is non-negotiable, so we call THE
+# SAME C code C tinc calls. minilzo lacks lzo1x_999_compress (level
+# 11 compress); see minilzo/README.
+[build-dependencies]
+cc = "1.0"
 
 [dev-dependencies]
 # Integration tests: tempdir for confbase, no other deps.

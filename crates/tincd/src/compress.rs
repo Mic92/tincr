@@ -10,8 +10,8 @@
 //! |-------|---------|--------|------|
 //! | 0 | none | `memcpy` | `Vec::from` |
 //! | 1–9 | zlib | `compress2(..., level)` | `flate2::Compress` (miniz) |
-//! | 10 | LZO low | `lzo1x_1_compress` | **STUB(chunk-9-lzo)** |
-//! | 11 | LZO hi | `lzo1x_999_compress` | **STUB(chunk-9-lzo)** |
+//! | 10 | LZO low | `lzo1x_1_compress` | vendored `minilzo.c` (FFI) |
+//! | 11 | LZO hi | `lzo1x_999_compress` | compress stubbed (minilzo lacks `_999`); decompress works |
 //! | 12 | LZ4 | `LZ4_compress_fast_extState` | `lz4_flex::block` |
 //!
 //! Wire-level int is the `compression_level_t` enum verbatim.
@@ -25,8 +25,25 @@
 //! block format — no frame header, no length prefix. `lz4_flex::
 //! block::compress` matches. Do NOT use `compress_prepend_size`; that
 //! prepends a u32 the C side won't expect.
+//!
+//! **LZO via vendored minilzo**: not pure Rust. We compile
+//! `minilzo/minilzo.c` (`build.rs` + `cc` crate) and call it through
+//! FFI. The pure-Rust LZO ports are of unknown provenance and LZO is
+//! the tinc 1.0 DEFAULT — wire-compat is non-negotiable, so we link
+//! the exact same C the C tinc links. minilzo only ships
+//! `lzo1x_1_compress` (level 10), not `lzo1x_999_compress` (level
+//! 11); the latter stays stubbed. Decompress uses the shared
+//! `lzo1x_decompress_safe` for both — same wire format — so we can
+//! RECEIVE level-11 packets, just not SEND them. Asymmetric is fine:
+//! we advertise our compression in `ANS_KEY`; if we want LzoLo, peer
+//! sends LzoLo.
 
-#![forbid(unsafe_code)]
+// Not `forbid`: the lzo module needs `unsafe` for FFI to vendored C.
+// All other code in this file remains safe; the unsafe is scoped to
+// the `extern "C"` calls inside `mod lzo`, behind safe wrappers that
+// maintain the invariants (non-null pointers, valid lengths,
+// init-once).
+#![deny(unsafe_code)]
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
@@ -93,17 +110,26 @@ impl Level {
 
 /// Per-daemon compression workspace.
 ///
-/// Currently a ZST: `lz4_flex::block` is stateless, and we use
-/// `flate2` one-shot per call. The C's static `z_stream` reuse is a
-/// micro-opt we defer. Kept as a struct so the wire-up site doesn't
-/// change when state arrives.
+/// `lz4_flex::block` is stateless, `flate2` is one-shot per call. LZO
+/// needs `LZO1X_1_MEM_COMPRESS` bytes of scratch (~128KB on 64-bit);
+/// we lazy-allocate on first LZO compress so daemons that never
+/// negotiate LZO pay nothing. The C's static `z_stream` reuse is a
+/// micro-opt we defer.
 #[derive(Debug, Default)]
-pub struct Compressor {}
+pub struct Compressor {
+    /// `lzo_wrkmem` (`tincd.c`: static `lzo_align_t lzo_wrkmem[...]`).
+    /// Lazy: `None` until first LzoLo compress. Boxed because 128KB
+    /// on the stack is too much. `lzo_align_t` is a max-align union
+    /// in C; Vec's heap allocation is sufficiently aligned (the
+    /// global allocator returns at least `align_of::<usize>()`, and
+    /// minilzo only stores pointer-sized dict entries).
+    lzo_wrkmem: Option<Vec<u8>>,
+}
 
 impl Compressor {
     #[must_use]
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
     /// `compress_packet` (`net_packet.c:291-322`).
@@ -115,7 +141,6 @@ impl Compressor {
     /// so this CAN return `Some(v)` with `v.len() > src.len()` for
     /// incompressible input.
     #[must_use]
-    #[allow(clippy::unused_self)] // becomes &mut when state lands
     pub fn compress(&mut self, src: &[u8], level: Level) -> Option<Vec<u8>> {
         match level {
             Level::None => Some(src.to_vec()),
@@ -128,10 +153,22 @@ impl Compressor {
                 Some(lz4_flex::block::compress(src))
             }
 
-            Level::LzoLo | Level::LzoHi => {
-                // STUB(chunk-9-lzo): vendor minilzo.c. Returning None
-                // mirrors C built without HAVE_LZO: dispatch falls
-                // through to `return 0`, caller logs and sends raw.
+            Level::LzoLo => {
+                lzo::ensure_init();
+                let wrkmem = self
+                    .lzo_wrkmem
+                    .get_or_insert_with(|| vec![0u8; lzo::LZO1X_1_MEM_COMPRESS]);
+                lzo::compress_1(src, wrkmem)
+            }
+
+            Level::LzoHi => {
+                // STUB(chunk-9-lzo-hi): minilzo doesn't include
+                // lzo1x_999_compress. The full lzo2 library has it;
+                // vendor that later if anyone cares. Decompress works
+                // (same _safe fn, same wire format) so we can receive
+                // level-11 from a C peer; we just can't send it.
+                // Returning None mirrors C built without HAVE_LZO:
+                // caller logs "compression failed" and sends raw.
                 None
             }
 
@@ -173,8 +210,11 @@ impl Compressor {
             }
 
             Level::LzoLo | Level::LzoHi => {
-                // STUB(chunk-9-lzo)
-                None
+                // Same _safe decompressor for both: lzo1x_1 and
+                // lzo1x_999 share a wire format. C `net_packet.c:359`
+                // does the same — one `lzo1x_decompress_safe` call.
+                lzo::ensure_init();
+                lzo::decompress_safe(src, max_len)
             }
 
             _ => {
@@ -216,6 +256,165 @@ fn decompress_zlib(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
         // or oversize. C's `inflate(..., Z_FINISH) == Z_STREAM_END`
         // is the same gate.
         _ => None,
+    }
+}
+
+/// FFI to vendored `minilzo/minilzo.c` (built via `build.rs`).
+///
+/// `lzo_uint` is defined in `lzoconf.h` to match `size_t` on every
+/// supported platform (LLP64 → u64, LP64 → unsigned long → u64,
+/// ILP32 → unsigned long → u32). Rust `usize` is exactly that.
+/// `__lzo_init_v2` runtime-checks these sizeof assumptions and
+/// returns non-zero on mismatch; `ensure_init` asserts on it.
+#[allow(unsafe_code)]
+mod lzo {
+    use std::ffi::{c_int, c_long, c_short, c_uint};
+    use std::mem::size_of;
+    use std::sync::Once;
+
+    /// `minilzo.h:76`: `16384L * lzo_sizeof_dict_t` where
+    /// `lzo_sizeof_dict_t = sizeof(lzo_bytep) = sizeof(char*)`.
+    pub const LZO1X_1_MEM_COMPRESS: usize = 16384 * size_of::<*const u8>();
+
+    const LZO_E_OK: c_int = 0;
+    /// `lzoconf.h:32`: 2.10.
+    const LZO_VERSION: c_uint = 0x20a0;
+
+    unsafe extern "C" {
+        fn lzo1x_1_compress(
+            src: *const u8,
+            src_len: usize,
+            dst: *mut u8,
+            dst_len: *mut usize,
+            wrkmem: *mut u8,
+        ) -> c_int;
+
+        fn lzo1x_decompress_safe(
+            src: *const u8,
+            src_len: usize,
+            dst: *mut u8,
+            dst_len: *mut usize,
+            wrkmem: *mut u8, // unused, may be null
+        ) -> c_int;
+
+        /// `lzo_init()` is a macro wrapping this. First arg is
+        /// `LZO_VERSION` (unsigned), the rest are `(int)sizeof(...)`
+        /// for short, int, long, lzo_uint32_t, lzo_uint, dict_t,
+        /// char*, void*, lzo_callback_t — runtime ABI check.
+        fn __lzo_init_v2(
+            v: c_uint,
+            s_short: c_int,
+            s_int: c_int,
+            s_long: c_int,
+            s_u32: c_int,
+            s_lzo_uint: c_int,
+            s_dict: c_int,
+            s_charp: c_int,
+            s_voidp: c_int,
+            s_callback: c_int,
+        ) -> c_int;
+    }
+
+    /// `lzoconf.h:284`: `struct lzo_callback_t` is 3 function
+    /// pointers + 1 `lzo_voidp` + 2 `lzo_xint` (= `lzo_uint` since
+    /// `LZO_SIZEOF_LZO_INT >= 4` on every platform we target). All
+    /// six fields are pointer-sized. We never construct one — only
+    /// `sizeof` matters for the init check.
+    #[repr(C)]
+    struct LzoCallback {
+        nalloc: *const u8,
+        nfree: *const u8,
+        nprogress: *const u8,
+        user1: *const u8,
+        user2: usize,
+        user3: usize,
+    }
+
+    static INIT: Once = Once::new();
+
+    /// `lzo_init()` macro (`lzoconf.h:336-339`) expanded. Must be
+    /// called once before any other LZO function. Panics on ABI
+    /// mismatch — that's a build/porting bug, not a runtime
+    /// condition.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    pub fn ensure_init() {
+        INIT.call_once(|| {
+            // SAFETY: pure function, no preconditions. The whole
+            // point is to verify the sizeof constants we pass match
+            // what minilzo.c was compiled with.
+            let r = unsafe {
+                __lzo_init_v2(
+                    LZO_VERSION,
+                    size_of::<c_short>() as c_int,
+                    size_of::<c_int>() as c_int,
+                    size_of::<c_long>() as c_int,
+                    size_of::<u32>() as c_int,       // lzo_uint32_t
+                    size_of::<usize>() as c_int,     // lzo_uint == size_t
+                    size_of::<*const u8>() as c_int, // lzo_sizeof_dict_t
+                    size_of::<*const u8>() as c_int, // char *
+                    size_of::<*const ()>() as c_int, // lzo_voidp
+                    size_of::<LzoCallback>() as c_int,
+                )
+            };
+            assert_eq!(r, LZO_E_OK, "lzo_init failed (ABI mismatch): {r}");
+        });
+    }
+
+    /// `lzo1x_1_compress` (`net_packet.c:264`). Worst-case output is
+    /// `src_len + src_len/16 + 64 + 3` (LZO docs). Never fails when
+    /// the dest buffer is sized to that bound — but we still gate on
+    /// `LZO_E_OK` for paranoia.
+    pub fn compress_1(src: &[u8], wrkmem: &mut [u8]) -> Option<Vec<u8>> {
+        debug_assert!(wrkmem.len() >= LZO1X_1_MEM_COMPRESS);
+        let bound = src.len() + src.len() / 16 + 64 + 3;
+        let mut out = vec![0u8; bound];
+        let mut out_len: usize = bound;
+        // SAFETY: src/out/wrkmem are valid for their stated lengths
+        // (slice → ptr+len). out_len is initialized to the dest
+        // capacity. wrkmem is at least LZO1X_1_MEM_COMPRESS bytes.
+        // ensure_init() has been called by the caller.
+        let r = unsafe {
+            lzo1x_1_compress(
+                src.as_ptr(),
+                src.len(),
+                out.as_mut_ptr(),
+                &raw mut out_len,
+                wrkmem.as_mut_ptr(),
+            )
+        };
+        if r == LZO_E_OK && out_len <= bound {
+            out.truncate(out_len);
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// `lzo1x_decompress_safe` (`net_packet.c:359`). The `_safe`
+    /// variant bounds-checks; the non-safe one trusts input lengths.
+    /// Ours come from the wire — MUST use `_safe`.
+    pub fn decompress_safe(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
+        let mut out = vec![0u8; max_len];
+        let mut out_len: usize = max_len;
+        // SAFETY: src/out are valid for their stated lengths.
+        // out_len is the dest capacity on entry, written length on
+        // exit. wrkmem is documented "NOT USED" — null is fine.
+        // ensure_init() has been called by the caller.
+        let r = unsafe {
+            lzo1x_decompress_safe(
+                src.as_ptr(),
+                src.len(),
+                out.as_mut_ptr(),
+                &raw mut out_len,
+                std::ptr::null_mut(),
+            )
+        };
+        if r == LZO_E_OK && out_len <= max_len {
+            out.truncate(out_len);
+            Some(out)
+        } else {
+            None
+        }
     }
 }
 
@@ -309,15 +508,84 @@ mod tests {
     }
 
     #[test]
-    fn lzo_is_stub() {
-        // STUB(chunk-9-lzo): both compress and decompress return
-        // None. Mirrors C built without HAVE_LZO.
+    fn lzo_lo_roundtrip() {
         let mut c = Compressor::new();
-        let src = b"hello";
-        assert!(c.compress(src, Level::LzoLo).is_none());
+        let src = b"Hello, world! Hello, world! Hello, world!";
+        let comp = c.compress(src, Level::LzoLo).unwrap();
+        let dec = c.decompress(&comp, Level::LzoLo, 100).unwrap();
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn lzo_lo_compresses() {
+        // Repeating pattern: must shrink. lzo1x is fast but not
+        // dense; a 20-byte pattern repeated 50× should still
+        // compress to a fraction.
+        let mut c = Compressor::new();
+        let src: Vec<u8> = b"the quick brown fox "
+            .iter()
+            .copied()
+            .cycle()
+            .take(1024)
+            .collect();
+        let comp = c.compress(&src, Level::LzoLo).unwrap();
+        assert!(
+            comp.len() < src.len(),
+            "LZO didn't compress 1KB of repeats: {} bytes",
+            comp.len()
+        );
+        let dec = c.decompress(&comp, Level::LzoLo, 2048).unwrap();
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn lzo_lo_random_roundtrip() {
+        // Incompressible input: output may grow (lzo1x adds a few
+        // bytes of overhead for literals) but MUST roundtrip.
+        let mut c = Compressor::new();
+        let src = pseudo_random(1024, 0xfee1_dead);
+        let comp = c.compress(&src, Level::LzoLo).unwrap();
+        let dec = c.decompress(&comp, Level::LzoLo, 2048).unwrap();
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn lzo_hi_compress_stub_decompress_works() {
+        // Asymmetric: minilzo lacks lzo1x_999_compress so LzoHi
+        // compress is stubbed (None), but decompress uses the SAME
+        // lzo1x_decompress_safe as LzoLo (shared wire format). We
+        // can RECEIVE level-11 from a C peer; we just can't SEND it.
+        // This is fine — compression level is per-direction: we
+        // advertise OUR level in ANS_KEY, peer compresses outbound
+        // to us with whatever THEY choose. We must decompress
+        // anything; we may compress with anything we have.
+        let mut c = Compressor::new();
+        let src = b"Hello, world! Hello, world! Hello, world!";
         assert!(c.compress(src, Level::LzoHi).is_none());
-        assert!(c.decompress(src, Level::LzoLo, 100).is_none());
-        assert!(c.decompress(src, Level::LzoHi, 100).is_none());
+        // lzo1x_1 output is valid lzo1x — decompresses under either
+        // level label.
+        let comp = c.compress(src, Level::LzoLo).unwrap();
+        let dec = c.decompress(&comp, Level::LzoHi, 100).unwrap();
+        assert_eq!(dec, src);
+    }
+
+    #[test]
+    fn lzo_decompress_garbage_is_none() {
+        // _safe variant must reject corrupt input, not crash.
+        let mut c = Compressor::new();
+        let garbage = [0xffu8; 100];
+        assert!(c.decompress(&garbage, Level::LzoLo, 1000).is_none());
+        assert!(c.decompress(&[], Level::LzoLo, 1000).is_none());
+    }
+
+    #[test]
+    fn lzo_compress_empty() {
+        // Edge: zero-length input. lzo1x_1 produces a tiny
+        // end-of-stream marker.
+        let mut c = Compressor::new();
+        let comp = c.compress(&[], Level::LzoLo).unwrap();
+        let dec = c.decompress(&comp, Level::LzoLo, 10).unwrap();
+        assert_eq!(dec, Vec::<u8>::new());
     }
 
     #[test]
