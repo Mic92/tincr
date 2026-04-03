@@ -226,12 +226,27 @@ impl Daemon {
                     }
                 }
             }
-            FeedResult::Sptps(outs) => {
-                // SPTPS-mode connection. Dispatch outputs.
-                let needs_write = self.dispatch_sptps_outputs(id, outs);
-                if !self.conns.contains_key(id) {
-                    // dispatch terminated (e.g. HandshakeDone in 4a).
-                    return FeedDrain::Done;
+            FeedResult::Sptps(events) => {
+                // SPTPS-mode connection. Dispatch ordered events.
+                // `Record` → dispatch_sptps_outputs (one at a time;
+                // it loops internally but vec![o] is fine — this is
+                // the meta-conn, not hot). `Blob` → on_sptps_blob.
+                // Order matters: an ADD_EDGE record before a blob can
+                // change reachability that the blob's route reads.
+                let mut needs_write = false;
+                for ev in events {
+                    match ev {
+                        SptpsEvent::Record(o) => {
+                            needs_write |= self.dispatch_sptps_outputs(id, vec![o]);
+                        }
+                        SptpsEvent::Blob(blob) => {
+                            needs_write |= self.on_sptps_blob(id, &blob);
+                        }
+                    }
+                    if !self.conns.contains_key(id) {
+                        // dispatch terminated.
+                        return FeedDrain::Done;
+                    }
                 }
                 // `dispatch_sptps_outputs` may have queued to ANY
                 // active conn (`broadcast_line`, `forward_request`,
@@ -381,7 +396,21 @@ impl Daemon {
                                 match Connection::feed_sptps(
                                     sptps, &leftover, &conn.name, &mut OsRng,
                                 ) {
-                                    FeedResult::Sptps(outs) => outs,
+                                    FeedResult::Sptps(evs) => evs
+                                        .into_iter()
+                                        .map(|ev| match ev {
+                                            SptpsEvent::Record(o) => o,
+                                            // feed_sptps doesn't peek
+                                            // for "21 "; it can only
+                                            // emit Record. The
+                                            // piggyback is right
+                                            // after id_h — sptpslen
+                                            // can't be set anyway.
+                                            SptpsEvent::Blob(_) => {
+                                                unreachable!("feed_sptps emits Record only")
+                                            }
+                                        })
+                                        .collect(),
                                     FeedResult::Dead => {
                                         // Piggybacked bytes were
                                         // garbage. Unusual (a real
@@ -455,7 +484,15 @@ impl Daemon {
                                 match Connection::feed_sptps(
                                     sptps, &leftover, &conn.name, &mut OsRng,
                                 ) {
-                                    FeedResult::Sptps(outs) => outs,
+                                    FeedResult::Sptps(evs) => evs
+                                        .into_iter()
+                                        .map(|ev| match ev {
+                                            SptpsEvent::Record(o) => o,
+                                            SptpsEvent::Blob(_) => {
+                                                unreachable!("feed_sptps emits Record only")
+                                            }
+                                        })
+                                        .collect(),
                                     FeedResult::Dead => {
                                         log::error!(
                                             target: "tincd::proto",
@@ -890,13 +927,14 @@ impl Daemon {
                                 )
                         }
                         _ => {
-                            // KEY_CHANGED, SPTPS_PACKET, UDP_INFO,
-                            // MTU_INFO. The gate passed (allow_
-                            // request = None post-ACK). C dispatches
-                            // via the table; we Drop until handlers
-                            // land.
+                            // KEY_CHANGED, Status, Error, Termreq.
+                            // SPTPS_PACKET (21) is consumed inside
+                            // feed() (the "21 " peek) and never
+                            // reaches here. UDP_INFO/MTU_INFO have
+                            // arms above. The gate passed (allow_
+                            // request = None post-ACK).
                             log::warn!(target: "tincd::proto",
-                                       "SPTPS request {req:?} not implemented — chunk 7/8");
+                                       "SPTPS request {req:?} not implemented");
                             self.terminate(id);
                             return needs_write;
                         }
@@ -914,6 +952,143 @@ impl Daemon {
             }
         }
         needs_write
+    }
+
+    /// `receive_tcppacket_sptps` (`net_packet.c:616-680`). The blob is
+    /// an already-encrypted SPTPS UDP wireframe (`dst[6]‖src[6]‖ct`).
+    /// Route it.
+    ///
+    /// `tcp_tunnel::route()` is the spec (line-by-line C diff). We
+    /// inline the ladder here instead of calling it: `route()` deals in
+    /// `&str` names (for testability) but the daemon already has
+    /// `NodeId`s from `id6_table.lookup()` and using NodeIds directly
+    /// avoids the name→NodeId reverse lookup. Same shape as
+    /// `handle_incoming_vpn_packet` (`net.rs`); the C `:616-680` and
+    /// `:1736-1840` are nearly identical too (TCP vs UDP arrival).
+    ///
+    /// `id` only used for `terminate` on `TooShort` (the C `:617
+    /// return false` — hard error).
+    pub(super) fn on_sptps_blob(&mut self, id: ConnId, blob: &[u8]) -> bool {
+        // ─── :617: parse_frame, len < 12 → hard error ────────────
+        let Some((dst_id, src_id, ct)) = crate::tcp_tunnel::parse_frame(blob) else {
+            log::error!(target: "tincd::net",
+                        "Got too short SPTPS_PACKET ({} bytes)", blob.len());
+            self.terminate(id);
+            return false;
+        };
+
+        // ─── :622-628: to = lookup_node_id(dst) ─────────────────
+        // C `:627 return true` — keep conn, log, drop packet.
+        let Some(to_nid) = self.id6_table.lookup(dst_id) else {
+            log::warn!(target: "tincd::net",
+                       "Got SPTPS_PACKET for unknown dest {dst_id}");
+            return false;
+        };
+
+        // ─── :631-637: from = lookup_node_id(src) ────────────────
+        let Some(from_nid) = self.id6_table.lookup(src_id) else {
+            log::warn!(target: "tincd::net",
+                       "Got SPTPS_PACKET for {dst_id} from unknown src {src_id}");
+            return false;
+        };
+        let from_name = self
+            .graph
+            .node(from_nid)
+            .map_or("<gone>", |n| n.name.as_str())
+            .to_owned();
+
+        // ─── :640-644: reachable check ───────────────────────────
+        // Race vs DEL_EDGE. C `:644 return true`.
+        if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+            let to_name = self
+                .graph
+                .node(to_nid)
+                .map_or("<gone>", |n| n.name.as_str());
+            log::warn!(target: "tincd::net",
+                       "Got SPTPS_PACKET from {from_name} for {to_name} \
+                        which is unreachable");
+            return false;
+        }
+
+        // ─── :649-651: send_udp_info(myself, from) ────────────────
+        // Gate: `to->via == myself`. The static-relay check. When `to
+        // == myself`, `to->via == myself` is the sssp seed invariant.
+        let to_via = self
+            .last_routes
+            .get(to_nid.0 as usize)
+            .and_then(Option::as_ref)
+            .map(|r| r.via);
+        let mut nw = false;
+        if to_via == Some(self.myself) {
+            nw |= self.send_udp_info(from_nid, &from_name, true);
+        }
+
+        // ─── :654-659: relay if to != myself ──────────────────────
+        // C `:656`: `if(to->status.validkey) send_sptps_data(to,
+        // from, 0, data, len)`. The validkey gate skips sending
+        // through a tunnel that hasn't keyed yet (would just buffer
+        // and stall). C `:659`: `try_tx(to, true)` always.
+        if to_nid != self.myself {
+            let to_name = self
+                .graph
+                .node(to_nid)
+                .map_or("<gone>", |n| n.name.as_str())
+                .to_owned();
+            let validkey = self.tunnels.get(&to_nid).is_some_and(|t| t.status.validkey);
+            if validkey {
+                log::debug!(target: "tincd::net",
+                            "Relaying SPTPS_PACKET {from_name} → {to_name} \
+                             ({} bytes)", ct.len());
+                nw |= self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, ct);
+            }
+            nw |= self.try_tx(to_nid, true);
+            return nw;
+        }
+
+        // ─── :664-680: deliver local ─────────────────────────────
+        // `to == myself`. Feed `ct` to `from`'s tunnel SPTPS. Same
+        // shape as `handle_incoming_vpn_packet`'s direct-receive arm
+        // and `gossip.rs`'s b64 SPTPS_PACKET arm. The udppacket bit
+        // stays false (came via TCP).
+        let Some(sptps) = self
+            .tunnels
+            .get_mut(&from_nid)
+            .and_then(|t| t.sptps.as_deref_mut())
+        else {
+            // C `:664-667`: `if(!from->status.validkey)`. We use the
+            // sptps presence (it's installed at the same time validkey
+            // would be flipped). The C kicks send_req_key here.
+            log::debug!(target: "tincd::net",
+                        "Got SPTPS_PACKET from {from_name} but no \
+                         tunnel SPTPS state");
+            nw |= self.send_req_key(from_nid);
+            return nw;
+        };
+        let result = sptps.receive(ct, &mut OsRng);
+        let outs = match result {
+            Ok((_consumed, outs)) => outs,
+            Err(e) => {
+                // C `:674-679`: tunnel-stuck restart. Gate on
+                // `last_req_key + 10 < now`.
+                log::debug!(target: "tincd::net",
+                            "Failed to decode SPTPS_PACKET from \
+                             {from_name}: {e:?}");
+                let now = self.timers.now();
+                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                    t.last_req_key
+                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+                });
+                if gate_ok {
+                    nw |= self.send_req_key(from_nid);
+                }
+                return nw;
+            }
+        };
+        nw |= self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
+        // C `:680`: `send_mtu_info(myself, from, MTU)`. Tell upstream
+        // relays our MTU floor so they can switch to UDP.
+        nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
+        nw
     }
 
     /// `receive_invitation_sptps` (`protocol_auth.c:185-310`).

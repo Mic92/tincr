@@ -726,6 +726,31 @@ fn c_dials_rust() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// TODO(chunk-12-tcp-fallback): SPTPS_PACKET 21 cross-impl wire test
+//
+// Can't be done in 2-node form. The C `net_packet.c:725` `if(n->
+// connection && origpkt->len > n->minmtu) send_tcppacket()` short-
+// circuits to `PACKET 17` for direct neighbors before reaching
+// `sptps_send_record` → `send_sptps_data` → `:975` binary path.
+// With `TCPOnly = yes`, `try_tx_sptps:1477` also returns early so
+// `minmtu` stays 0 — every packet > 0, always PACKET 17.
+//
+// `SPTPS_PACKET 21` only fires when `n->connection == NULL` (no
+// direct meta-conn), i.e. 3-node alice → mid → bob with bob (C)
+// routing to alice through mid. Then bob's `:725` is false, bob's
+// `sptps_send_record` runs, the Wire callback hits `send_sptps_data`,
+// `:974` go_tcp (minmtu=0 or tcponly), `:975` binary path. Mid (Rust)
+// receives `21 LEN` + raw blob — the `feed()` do-while.
+//
+// The architectural fix (peek for "21 " inside `feed()`, eat raw blob
+// before next `sptps.receive()`) is unit-tested in `conn.rs::
+// feed_sptpslen_then_record` — the same chunk has [SPTPS-framed
+// "21 11\n" | 11 raw bytes | SPTPS-framed PING], asserts events =
+// [Blob(11), Record(PING)] without Dead. The wire-compat proof needs
+// the 3-node scaffold; same shape as `two_daemons.rs::three_daemon_
+// relay` but with C bob.
+
+// ────────────────────────────────────────────────────────────────────
 // TODO(chunk-12-switch): RMODE_SWITCH cross-impl ping
 //
 // `route_mac.rs` is a leaf with no daemon wire-up yet. The C side

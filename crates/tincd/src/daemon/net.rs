@@ -1171,15 +1171,6 @@ impl Daemon {
             // length-prefixed binary mechanism, `:975-986`) for
             // proto minor ≥7 nexthops; ANS_KEY/REQ_KEY (b64'd via
             // the text protocol) otherwise.
-            //
-            // STUB(chunk-11-perf): `:975-986` SPTPS_PACKET via `send_
-            // sptps_tcppacket`. Our `Connection::send_raw` queues
-            // raw bytes but the meta-conn is SPTPS-stream-framed;
-            // the binary blob would need to go through `sptps_
-            // send_record`. For now: always use the b64 path (works
-            // for any proto minor; just larger on the wire). UDP
-            // relay works (`three_daemon_relay` proves it); TCP
-            // encap is the fallback when UDP relay can't reach.
 
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::net",
@@ -1189,6 +1180,67 @@ impl Daemon {
             let Some(conn) = self.conns.get_mut(conn_id) else {
                 return false;
             };
+
+            // ─── :975-986: SPTPS_PACKET (binary path) ───────────
+            // `type != SPTPS_HANDSHAKE && (to->nexthop->connection
+            // ->options >> 24) >= 7`. The handshake check: ANS_KEY
+            // also propagates the reflexive UDP address (`:993`
+            // doc); binary doesn't. Handshakes stay on b64. The
+            // minor check: SPTPS_PACKET introduced in proto minor 7
+            // (commit 9e3ca7d, 2013). Older nexthops don't parse
+            // `21 LEN`; b64 is the universal fallback.
+            //
+            // `conn.options` is `c->options` post-`ack_h`; ORs the
+            // peer's `PROT_MINOR << 24` from the wire ACK
+            // (`protocol_auth.c:1001`). C uses `to->nexthop->
+            // connection->options` — our `conn` IS that (we looked
+            // it up via `conn_for_nexthop`).
+            //
+            // The OLD STUB COMMENT WAS WRONG ("the binary blob
+            // would need to go through sptps_send_record"). C
+            // `send_meta_raw` (`meta.c:99-112`) is `buffer_add(
+            // &c->outbuf, ...)` directly — NO SPTPS framing. The
+            // blob is ALREADY per-tunnel-SPTPS-encrypted; double-
+            // encrypting would be wasteful. Our `conn.send_raw()`
+            // is exactly that.
+            if record_type != tinc_sptps::REC_HANDSHAKE && (conn.options >> 24) >= 7 {
+                // C `protocol_misc.c:125-135`. Random Early Drop
+                // FIRST. STUB(chunk-12): the `maxoutbufsize` config
+                // knob (C `net_setup.c:437`, default `10 * MTU`).
+                // Pass usize::MAX for now — RED degenerates to
+                // never-drop, which is the safe default until the
+                // knob is wired.
+                if crate::tcp_tunnel::random_early_drop(
+                    conn.outbuf.live_len(),
+                    usize::MAX,
+                    &mut OsRng,
+                ) {
+                    // C `:126 return true` — silently drop, fake
+                    // success. Unreachable with usize::MAX.
+                    return true;
+                }
+                // Same id6 lookups as the UDP path below. C `:976-
+                // 984`: `memcpy(packet, &to->id, 6); memcpy(packet+
+                // 6, &from->id, 6); memcpy(packet+12, data, len)`.
+                // The `direct ⇒ nullid` for dst is UDP-only (`:1013
+                // -1015`); the binary TCP path always uses the real
+                // dst id (the C `:976` is unconditional).
+                let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
+                let dst_id = self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL);
+                let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
+                // `:129`: `send_request("%d %lu", SPTPS_PACKET,
+                // len)`. `send` goes via SPTPS (encrypted record).
+                let mut nw = conn.send(format_args!(
+                    "{} {}",
+                    Request::SptpsPacket as u8,
+                    frame.len()
+                ));
+                // `:133`: `send_meta_raw(packet, len)`. RAW to
+                // outbuf, no SPTPS.
+                nw |= conn.send_raw(&frame);
+                return nw;
+            }
+
             let b64 = tinc_crypto::b64::encode(ct);
             let from_name = if from_is_myself {
                 self.name.clone()

@@ -364,6 +364,43 @@ pub struct Connection {
     /// `PACKET` line falls through to the unimplemented-request arm
     /// and we drop the connection on a probe.
     pub tcplen: u16,
+    /// `c->sptpslen` (`connection.h:88`). Same role as `tcplen` but for
+    /// `SPTPS_PACKET` (request 21): the next `sptpslen` RAW BYTES on the
+    /// TCP stream are an already-encrypted SPTPS UDP wireframe (NOT inside
+    /// an SPTPS record — `send_meta_raw` bypasses framing). Set by
+    /// `feed()` when it sees a `"21 LEN"` record body. Consumed by the
+    /// `feed()` do-while before `sptps.receive()`.
+    ///
+    /// Twin of `tcplen`. NOT mutually exclusive: in theory both could be
+    /// set (C can send `PACKET` and `SPTPS_PACKET` interleaved). In
+    /// practice C sends only `SPTPS_PACKET` for proto-minor ≥ 7 nexthops
+    /// (`net_packet.c:975`). C `meta.c:203-217` checks `sptpslen` FIRST
+    /// (it's the outer loop, `tcplen` is inside the SPTPS callback).
+    pub sptpslen: u16,
+    /// Accumulator for the `sptpslen` blob. C uses `c->inbuf`
+    /// (`meta.c:205-207 buffer_add` then `buffer_read`); our `inbuf` is
+    /// dormant in SPTPS mode anyway, but a separate Vec keeps the
+    /// invariant "inbuf is plaintext-only". Cleared on full blob.
+    pub sptps_buf: Vec<u8>,
+}
+
+/// Events from one `feed()` of an SPTPS-mode connection. Ordered;
+/// daemon dispatches sequentially. Mix of normal SPTPS records and
+/// raw blobs (the `SPTPS_PACKET` mechanism, `meta.c:203-217`).
+///
+/// Why ORDERED matters: an `ADD_EDGE` record before a blob can change
+/// reachability that the blob's `route()` reads. The C dispatches each
+/// inside `sptps_receive_data`'s callback before the next `recv()`
+/// chunk byte; we batch but preserve order.
+#[derive(Debug)]
+pub enum SptpsEvent {
+    /// A decrypted SPTPS record. `Output::HandshakeDone`, `Output::
+    /// Record { record_type, bytes }`, or `Output::Wire(..)` (rekey).
+    Record(Output),
+    /// A complete `SPTPS_PACKET` blob. Already-encrypted SPTPS UDP
+    /// wireframe (`dst[6]‖src[6]‖ct`); daemon hands to `tcp_tunnel`.
+    /// C: `receive_tcppacket_sptps` (`net_packet.c:616-680`).
+    Blob(Vec<u8>),
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
@@ -382,15 +419,17 @@ pub enum FeedResult {
     /// receive_data` returned 0 (decrypt fail, bad seqno, etc).
     /// Connection is dead. Caller calls `terminate`.
     Dead,
-    /// SPTPS-mode: decoded outputs. C: the `receive_record`
-    /// callback fires for each. We return them for the daemon to
-    /// dispatch (`Output::Wire` → outbuf, `Output::Record` →
-    /// `receive_request`, `Output::HandshakeDone` → `send_ack`).
+    /// SPTPS-mode: ordered events from this `feed()` call. C: the
+    /// `receive_record` callback fires for each record; the `meta.c:
+    /// 203-217` outer-loop sptpslen check eats raw blobs. We return
+    /// both for the daemon to dispatch (`Record(Wire)` → outbuf,
+    /// `Record(Record)` → `receive_request`, `Record(HandshakeDone)`
+    /// → `send_ack`, `Blob` → `receive_tcppacket_sptps`).
     ///
     /// The Vec can be empty: a partial SPTPS record arrived (length
     /// header + half the body) — buffered inside `Sptps::stream`,
     /// nothing decoded yet. C: same, callback doesn't fire.
-    Sptps(Vec<Output>),
+    Sptps(Vec<SptpsEvent>),
 }
 
 impl Connection {
@@ -434,6 +473,8 @@ impl Connection {
             connecting: false,
             outgoing: None,
             tcplen: 0,
+            sptpslen: 0,
+            sptps_buf: Vec::new(),
         }
     }
 
@@ -483,6 +524,8 @@ impl Connection {
             connecting: false,
             outgoing: None,
             tcplen: 0,
+            sptpslen: 0,
+            sptps_buf: Vec::new(),
         }
     }
 
@@ -534,6 +577,8 @@ impl Connection {
             connecting: true,
             outgoing: Some(outgoing),
             tcplen: 0,
+            sptpslen: 0,
+            sptps_buf: Vec::new(),
         }
     }
 
@@ -609,6 +654,8 @@ impl Connection {
     /// handshake (KEX→SIG→DONE on the responder side) doesn't
     /// touch rng inside `receive`. But we can't statically know
     /// that; pass `OsRng`. Plaintext mode never touches it.
+    #[allow(clippy::missing_panics_doc)] // .expect on take() after
+    // is_some check; not a real panic surface.
     pub fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
         // Stack buffer same as C `char inbuf[MAXBUFSIZE]`.
         let mut stack = [0u8; MAXBUFSIZE];
@@ -676,13 +723,105 @@ impl Connection {
         // because the mode-switch IS "sptps got installed by id_h".
         // (`protocol_minor >= 2` is the C's proxy for the same
         // condition. id_h:455 sets minor>=2 ⇔ sptps_start succeeded.)
-        if let Some(sptps) = self.sptps.as_deref_mut() {
-            // The do-while `meta.c:200-313`: `len = sptps_receive_
-            // data(bufp, inlen); bufp += len; inlen -= len;` until
-            // `inlen == 0`. `sptps_receive_data` (= our `receive`)
-            // processes ONE record per call in stream mode; if the
-            // chunk has 2 records, we loop.
-            return Self::feed_sptps(sptps, chunk, &self.name, rng);
+        if self.sptps.is_some() {
+            // The C do-while at meta.c:200-231. Inlined here (NOT
+            // delegated to feed_sptps) because we need to interleave
+            // the sptpslen check with one-record-at-a-time receive().
+            // The architectural trap: feed_sptps would eat the WHOLE
+            // chunk before daemon dispatch could set sptpslen — but
+            // the same chunk has [SPTPS-framed "21 LEN" | raw blob].
+            // The C dispatches INSIDE receive() (callback chain →
+            // sptps_tcppacket_h:148 sets c->sptpslen → outer do-while
+            // sees it next iteration); we don't, so we peek the
+            // record body for "21 " here. One request id of meta-
+            // layer awareness; meta.c has the same (the sptpslen
+            // check IS request-21-specific).
+            //
+            // Can't take &mut sptps and &mut self.sptpslen through
+            // the as_deref_mut() borrow simultaneously — take() the
+            // Box out, run the loop, put it back.
+            let mut sptps = self.sptps.take().expect("checked is_some");
+            let mut events = Vec::new();
+            let mut off = 0;
+            'outer: while off < chunk.len() {
+                // ─── C meta.c:203-217: sptpslen check FIRST ─────
+                if self.sptpslen > 0 {
+                    let want = usize::from(self.sptpslen) - self.sptps_buf.len();
+                    let take = want.min(chunk.len() - off);
+                    self.sptps_buf.extend_from_slice(&chunk[off..off + take]);
+                    off += take;
+                    if self.sptps_buf.len() < usize::from(self.sptpslen) {
+                        // C `:209-211`: `if(!sptpspacket) return
+                        // true`. Blob spans more than one recv.
+                        // Next feed() continues filling.
+                        break;
+                    }
+                    // C `:213-217`: full blob → emit, clear, continue.
+                    events.push(SptpsEvent::Blob(std::mem::take(&mut self.sptps_buf)));
+                    self.sptpslen = 0;
+                    continue;
+                }
+                // ─── C meta.c:225-231: one record ───────────────
+                match sptps.receive(&chunk[off..], rng) {
+                    Ok((0, _)) => {
+                        // Unreachable in stream mode for nonempty
+                        // input. Defensive.
+                        log::warn!(target: "tincd::meta",
+                                   "SPTPS receive returned 0 for {}", self.name);
+                        break;
+                    }
+                    Ok((consumed, outs)) => {
+                        off += consumed;
+                        for o in outs {
+                            // ─── The "21 LEN" peek ────────────
+                            // C dispatch happens via callback chain
+                            // INSIDE sptps_receive_data → receive_
+                            // record → receive_meta_sptps →
+                            // receive_request → sptps_tcppacket_h:
+                            // 148. We peek at the record body here
+                            // instead. record_body strips the
+                            // trailing \n; the body IS the "21 LEN"
+                            // line. Shallow check first (3 bytes);
+                            // SptpsPacket::parse confirms.
+                            if let Output::Record {
+                                record_type: 0,
+                                ref bytes,
+                            } = o
+                            {
+                                let body = crate::proto::record_body(bytes);
+                                if body.starts_with(b"21 ") {
+                                    if let Some(pkt) = std::str::from_utf8(body)
+                                        .ok()
+                                        .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
+                                    {
+                                        // C protocol_misc.c:148.
+                                        // Don't push the record —
+                                        // it's been consumed.
+                                        self.sptpslen = pkt.len;
+                                        continue 'outer;
+                                    }
+                                    // Parse failed: malformed "21 ".
+                                    // Fall through; gate rejects.
+                                }
+                            }
+                            events.push(SptpsEvent::Record(o));
+                        }
+                    }
+                    Err(e) => {
+                        // Same as feed_sptps error handling.
+                        let level = match e {
+                            SptpsError::DecryptFailed | SptpsError::BadSig => log::Level::Error,
+                            _ => log::Level::Info,
+                        };
+                        log::log!(target: "tincd::meta", level,
+                                  "SPTPS error from {}: {e:?}", self.name);
+                        self.sptps = Some(sptps);
+                        return FeedResult::Dead;
+                    }
+                }
+            }
+            self.sptps = Some(sptps);
+            return FeedResult::Sptps(events);
         }
 
         // ─── Plaintext branch
@@ -716,7 +855,7 @@ impl Connection {
             // calling receive() with an empty slice.
             return FeedResult::Sptps(Vec::new());
         }
-        let mut outputs = Vec::new();
+        let mut events = Vec::new();
         let mut off = 0;
         while off < chunk.len() {
             match sptps.receive(&chunk[off..], rng) {
@@ -728,7 +867,7 @@ impl Connection {
                     break;
                 }
                 Ok((consumed, outs)) => {
-                    outputs.extend(outs);
+                    events.extend(outs.into_iter().map(SptpsEvent::Record));
                     off += consumed;
                 }
                 Err(e) => {
@@ -753,7 +892,7 @@ impl Connection {
                 }
             }
         }
-        FeedResult::Sptps(outputs)
+        FeedResult::Sptps(events)
     }
 
     /// `send_meta_sptps` (`meta.c:41-54`). Queue raw bytes (already
@@ -1351,7 +1490,7 @@ mod tests {
 
         let r = Connection::feed_sptps(&mut sptps, &[], "test", &mut NoRng);
         match r {
-            FeedResult::Sptps(outs) => assert!(outs.is_empty()),
+            FeedResult::Sptps(evs) => assert!(evs.is_empty()),
             _ => panic!("expected Sptps(empty), got {r:?}"),
         }
         // NoRng didn't panic → sptps.receive was not called.
@@ -1447,18 +1586,21 @@ mod tests {
         // ─── feed_sptps: bob receives both in one call
         let r = Connection::feed_sptps(&mut bob, &chunk, "alice", &mut NoRng);
         match r {
-            FeedResult::Sptps(outs) => {
+            FeedResult::Sptps(evs) => {
                 // BOTH records decoded. If the loop only ran once,
                 // we'd see one. The second would be eaten by the
                 // next call to receive() — but there IS no next
                 // call (this is one feed_sptps invocation).
-                assert_eq!(outs.len(), 2, "loop must process both records");
-                match (&outs[0], &outs[1]) {
-                    (Output::Record { bytes: b0, .. }, Output::Record { bytes: b1, .. }) => {
+                assert_eq!(evs.len(), 2, "loop must process both records");
+                match (&evs[0], &evs[1]) {
+                    (
+                        SptpsEvent::Record(Output::Record { bytes: b0, .. }),
+                        SptpsEvent::Record(Output::Record { bytes: b1, .. }),
+                    ) => {
                         assert_eq!(b0, b"first");
                         assert_eq!(b1, b"second");
                     }
-                    _ => panic!("expected two Records, got {outs:?}"),
+                    _ => panic!("expected two Records, got {evs:?}"),
                 }
             }
             _ => panic!("expected Sptps(..), got {r:?}"),
@@ -1494,7 +1636,7 @@ mod tests {
         // The do-while sees off==2==chunk.len() → done.
         let r = Connection::feed_sptps(&mut sptps, &[0x00, 0x05], "test", &mut NoRng);
         match r {
-            FeedResult::Sptps(outs) => assert!(outs.is_empty()),
+            FeedResult::Sptps(evs) => assert!(evs.is_empty()),
             _ => panic!("expected Sptps(empty), got {r:?}"),
         }
     }
@@ -1526,6 +1668,217 @@ mod tests {
         let bad = [0x00, 0x05, 0x00, b'x', b'x', b'x', b'x', b'x'];
         let r = Connection::feed_sptps(&mut sptps, &bad, "test", &mut NoRng);
         assert!(matches!(r, FeedResult::Dead), "expected Dead, got {r:?}");
+    }
+
+    // ─── feed() sptpslen mechanism (the meta.c:203-217 do-while)
+    //
+    // feed() reads a real fd; we can't unit-test it directly. But the
+    // "21 LEN" peek + sptpslen blob accumulation is the regression-
+    // critical path (the architectural trap from the chunk-12 brief).
+    // Test the inlined do-while via a Connection with a socketpair fd:
+    // write the chunk to one end, feed() reads from the other.
+
+    /// Handshaked alice/bob pair with bob installed as a Connection's
+    /// sptps. Returns (conn, alice, write_fd). conn.feed() reads from
+    /// the socketpair; tests write to write_fd. Same handshake dance
+    /// as feed_sptps_two_records_one_chunk; factored out so the
+    /// sptpslen tests don't repeat 60 lines each.
+    fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
+        use std::os::fd::FromRawFd;
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Output, Role};
+
+        let alice_k = SigningKey::from_seed(&[10; 32]);
+        let bob_k = SigningKey::from_seed(&[20; 32]);
+        let alice_pub = *alice_k.public_key();
+        let bob_pub = *bob_k.public_key();
+
+        let (mut alice, a_init) = Sptps::start(
+            Role::Initiator,
+            Framing::Stream,
+            alice_k,
+            bob_pub,
+            b"slen".to_vec(),
+            0,
+            &mut OsRng,
+        );
+        let (mut bob, b_init) = Sptps::start(
+            Role::Responder,
+            Framing::Stream,
+            bob_k,
+            alice_pub,
+            b"slen".to_vec(),
+            0,
+            &mut OsRng,
+        );
+
+        let wire = |outs: Vec<Output>| -> Vec<u8> {
+            outs.into_iter()
+                .find_map(|o| match o {
+                    Output::Wire { bytes, .. } => Some(bytes),
+                    _ => None,
+                })
+                .expect("one Wire")
+        };
+        let a_kex = wire(a_init);
+        let b_kex = wire(b_init);
+        let (_, outs) = alice.receive(&b_kex, &mut NoRng).unwrap();
+        let a_sig = wire(outs);
+        let (_, outs) = bob.receive(&a_kex, &mut NoRng).unwrap();
+        assert!(outs.is_empty());
+        let (_, outs) = bob.receive(&a_sig, &mut NoRng).unwrap();
+        let b_sig = match &outs[0] {
+            Output::Wire { bytes, .. } => bytes.clone(),
+            _ => panic!(),
+        };
+        let (_, _) = alice.receive(&b_sig, &mut NoRng).unwrap();
+        // Both done.
+
+        // socketpair(AF_UNIX, SOCK_STREAM). feed() uses libc::read,
+        // which works on unix stream sockets.
+        let mut fds = [0i32; 2];
+        #[allow(unsafe_code)]
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        #[allow(unsafe_code)]
+        let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+
+        let mut conn = Connection::test_with_fd(rd);
+        conn.sptps = Some(Box::new(bob));
+        (conn, alice, wr)
+    }
+
+    fn write_all(fd: &OwnedFd, mut buf: &[u8]) {
+        use std::os::fd::AsRawFd;
+        while !buf.is_empty() {
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::write(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
+            assert!(n > 0, "write: {}", io::Error::last_os_error());
+            #[allow(clippy::cast_sign_loss)]
+            {
+                buf = &buf[n as usize..];
+            }
+        }
+    }
+
+    /// `sptpslen` set in advance, blob arrives in one chunk. Simplest
+    /// case: pretend a previous feed() saw the "21 12" record and set
+    /// sptpslen. This feed() just eats the blob bytes.
+    #[test]
+    fn feed_sptpslen_single_chunk() {
+        let (mut conn, _alice, wr) = sptps_conn_pair();
+        conn.sptpslen = 12;
+        let blob = b"abcdefghijkl"; // 12 bytes, NOT SPTPS-framed
+        write_all(&wr, blob);
+        let r = conn.feed(&mut NoRng);
+        match r {
+            FeedResult::Sptps(evs) => {
+                assert_eq!(evs.len(), 1);
+                match &evs[0] {
+                    SptpsEvent::Blob(b) => assert_eq!(b, blob),
+                    SptpsEvent::Record(_) => panic!("expected Blob, got {evs:?}"),
+                }
+            }
+            _ => panic!("expected Sptps, got {r:?}"),
+        }
+        assert_eq!(conn.sptpslen, 0);
+        assert!(conn.sptps_buf.is_empty());
+    }
+
+    /// Blob spans two recv()s. C `meta.c:209-211`: `if(!sptpspacket)
+    /// return true`. First feed() buffers a partial; second completes.
+    #[test]
+    fn feed_sptpslen_straddle() {
+        let (mut conn, _alice, wr) = sptps_conn_pair();
+        conn.sptpslen = 12;
+        write_all(&wr, b"abcde"); // 5 of 12
+        match conn.feed(&mut NoRng) {
+            FeedResult::Sptps(evs) => assert!(evs.is_empty(), "partial: no event yet"),
+            r => panic!("expected Sptps(empty), got {r:?}"),
+        }
+        assert_eq!(conn.sptpslen, 12);
+        assert_eq!(conn.sptps_buf.len(), 5);
+
+        write_all(&wr, b"fghijkl"); // 7 more
+        match conn.feed(&mut NoRng) {
+            FeedResult::Sptps(evs) => {
+                assert_eq!(evs.len(), 1);
+                match &evs[0] {
+                    SptpsEvent::Blob(b) => assert_eq!(b, b"abcdefghijkl"),
+                    SptpsEvent::Record(_) => panic!("expected Blob"),
+                }
+            }
+            r => panic!("expected Sptps, got {r:?}"),
+        }
+        assert_eq!(conn.sptpslen, 0);
+        assert!(conn.sptps_buf.is_empty());
+    }
+
+    /// THE TRAP. `[SPTPS-framed "21 12\n" record | 12 raw bytes |
+    /// SPTPS-framed PING record]` as one chunk. Before the fix:
+    /// `feed_sptps` would call `receive()` again on the 12 raw bytes,
+    /// trying to parse them as SPTPS framing → garbage → DecryptFailed
+    /// → Dead. After: feed() peeks the "21 " prefix, sets sptpslen,
+    /// next iteration eats the blob, then receive() processes PING.
+    ///
+    /// Events MUST be `[Blob(12), Record(PING)]` — the "21 12" record
+    /// is NOT in the output (consumed by feed). Order proves the
+    /// do-while interleaving is correct.
+    #[test]
+    fn feed_sptpslen_then_record() {
+        use tinc_sptps::Output;
+        let (mut conn, mut alice, wr) = sptps_conn_pair();
+
+        let wire = |outs: Vec<Output>| -> Vec<u8> {
+            outs.into_iter()
+                .find_map(|o| match o {
+                    Output::Wire { bytes, .. } => Some(bytes),
+                    _ => None,
+                })
+                .expect("one Wire")
+        };
+
+        // The blob: NOT SPTPS-framed. Crafted to look like a
+        // complete encrypted record if mis-parsed: len=9 header +
+        // 9 garbage body bytes. Post-handshake, receive() would
+        // try chacha20-poly1305 decrypt on "junkjunk!" →
+        // DecryptFailed. THAT'S the trap signature.
+        let blob = b"\x00\x09junkjunk!"; // 2-byte len + 9 body = 11
+        assert_eq!(blob.len(), 11);
+        // Alice sends "21 11\n" as a normal SPTPS record (this is
+        // what conn.send() does — send_request → sptps_send_record).
+        let req_rec = wire(alice.send_record(0, b"21 11\n").unwrap());
+        // PING record after the blob.
+        let ping_rec = wire(alice.send_record(0, b"8\n").unwrap());
+
+        let mut chunk = req_rec;
+        chunk.extend_from_slice(blob);
+        chunk.extend_from_slice(&ping_rec);
+        write_all(&wr, &chunk);
+
+        let r = conn.feed(&mut NoRng);
+        match r {
+            FeedResult::Sptps(evs) => {
+                // [Blob(11), Record("8\n")]. The "21 11\n" record
+                // is CONSUMED — not in events.
+                assert_eq!(evs.len(), 2, "got {evs:?}");
+                match (&evs[0], &evs[1]) {
+                    (SptpsEvent::Blob(b), SptpsEvent::Record(Output::Record { bytes, .. })) => {
+                        assert_eq!(b.as_slice(), blob);
+                        assert_eq!(bytes, b"8\n");
+                    }
+                    _ => panic!("expected [Blob, Record(PING)], got {evs:?}"),
+                }
+            }
+            FeedResult::Dead => {
+                panic!(
+                    "Dead = the trap fired: blob bytes were parsed \
+                     as SPTPS framing instead of being eaten as a \
+                     raw blob. The do-while peek didn't work."
+                )
+            }
+            _ => panic!("expected Sptps, got {r:?}"),
+        }
     }
 
     /// `send_raw`: no `\n` appended. SPTPS framing is binary; the

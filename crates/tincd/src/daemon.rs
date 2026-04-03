@@ -33,7 +33,7 @@ use tinc_proto::{AddrStr, Request, Subnet};
 use tinc_sptps::{Framing, Role, Sptps};
 
 use crate::autoconnect::{self, AutoAction, NodeSnapshot};
-use crate::conn::{Connection, FeedResult};
+use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::graph_glue::{Transition, run_graph};
 use crate::invitation_serve::{self, InvitePhase};
