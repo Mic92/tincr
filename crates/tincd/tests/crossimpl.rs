@@ -724,3 +724,101 @@ fn c_dials_rust() {
     };
     run_crossimpl("cdr", Impl::C, Impl::Rust, netns);
 }
+
+// ────────────────────────────────────────────────────────────────────
+// TODO(chunk-12-switch): RMODE_SWITCH cross-impl ping
+//
+// `route_mac.rs` is a leaf with no daemon wire-up yet. The C side
+// already works: `route.c:1159 case RMODE_SWITCH: route_mac(...)`
+// is the reference. When chunk-12 lands, this is the wire-compat
+// proof.
+//
+// What it proves over `rust_dials_c`:
+//
+// - **MAC learning gossip**: alice's kernel ARPs for 10.43.0.2 over
+//   the TAP. Our `route_mac` sees `from_myself=true`, returns
+//   `LearnAction::New(alice's-tap-mac)`. Daemon sends `ADD_SUBNET`
+//   with `Subnet::Mac{addr: ..., weight: 10}` (`route.c:538`). Bob
+//   (C) parses it (`subnet_add.c:add_subnet_h`), routes the ARP
+//   reply back to alice by MAC. Same in reverse for bob's MAC.
+//   Without correct `Subnet::Mac` wire format → ARP times out, no
+//   ping.
+// - **`Broadcast` dispatch**: the very FIRST ARP request has an
+//   unknown dst-MAC (ff:ff:ff:ff:ff:ff). `route_mac` returns
+//   `RouteResult::Broadcast`. Daemon must `broadcast_packet` it
+//   to bob. The C `route_broadcast` (`route.c:559`) is the
+//   reference; we wire-match.
+// - **TAP device path**: `tinc-device` opened with `IFF_TAP` not
+//   `IFF_TUN`. Full eth header preserved. Our `route()` reads
+//   ethertype at `[12..14]` and DOESN'T dispatch by it — in
+//   switch mode it goes straight to `route_mac` regardless
+//   (`route.c:1159` is unconditional inside `RMODE_SWITCH`).
+// - **`age_subnets`**: NOT exercised by a single ping. Would need
+//   a 10min idle wait (`macexpire` default 600s) or a `MACExpire =
+//   3` config knob + a sleep + a second ping that should re-ARP.
+//   Separate test.
+//
+// Prerequisites (all chunk-12-switch daemon work):
+//
+// 1. `tinc.conf` `Mode = switch` parse → `routing_mode` config field.
+//    `tinc-conf` may already parse it; check. If yes, daemon needs
+//    to read it.
+// 2. `route()` dispatch: `match routing_mode { RMODE_SWITCH =>
+//    route_mac(...), RMODE_ROUTER => /* current ethertype
+//    dispatch */, RMODE_HUB => Broadcast }`.
+// 3. Daemon builds `HashMap<Mac, String>` from the gossip subnet
+//    set. Every `ADD_SUBNET` with `Subnet::Mac{..}` populates it;
+//    every `DEL_SUBNET` removes. Same lifecycle as the IPv4/v6
+//    `SubnetTree` updates.
+// 4. `LearnAction::New` → daemon allocates `Subnet::Mac{addr,
+//    weight: 10}`, adds to own subnet set, sends `ADD_SUBNET` on
+//    every meta-conn (`route.c:543-547`), arms `age_subnets` timer.
+// 5. `LearnAction::Refresh` → daemon bumps the lease in its
+//    learned-MAC-expiry table. No gossip.
+// 6. `RouteResult::Broadcast` → `broadcast_packet` (`net_packet.c:
+//    1438`): send to every reachable peer except `source`. The
+//    daemon stub currently log-and-drops.
+// 7. `tinc-device` opened `IFF_TAP` when `Mode = switch`. Might
+//    already be config-driven; check `crates/tinc-device`.
+//
+// Test mechanics (delta from `run_crossimpl`):
+//
+// - `ip tuntap add mode tap name tincS0/tincS1` (NOT `tun`).
+// - `Node::write_config`: append `Mode = switch\n` to `tinc.conf`.
+//   NO `Subnet =` line in `hosts/NAME` — switch mode learns
+//   subnets, doesn't pre-declare them. (The C accepts both; pre-
+//   declared MAC subnets are static and never expire, `route.c:
+//   552 if(subnet->expires)`. We test the learning path.)
+// - Same `10.43.0.1/2` IPs on the TAPs. Kernel does ARP
+//   resolution; we route the ARP frames as opaque eth.
+// - The `node_status` poll for reachable+validkey is unchanged —
+//   meta-conn / SPTPS handshake is mode-agnostic.
+// - Add a poll: `dump subnets` (control subtype 4, `control.c:
+//   137`) should eventually show `Subnet::Mac` entries from BOTH
+//   sides. That's the ADD_SUBNET-gossip-propagated proof, before
+//   we even ping.
+// - Ping. Same `ping -c 3 -W 2 10.43.0.2`. Kernel ARPs; ARP rides
+//   the tunnel as a broadcast frame; reply rides back as a
+//   forwarded unicast. ICMP follows.
+//
+// Both directions (`rust_dials_c_switch` + `c_dials_rust_switch`)
+// because the LEARNING is asymmetric: the dialer's first packet
+// (the ARP request) is what triggers the responder's `route_mac`
+// to broadcast it, and the responder's reply is what triggers the
+// dialer's first MAC learn. Either side's bug → one-way silence.
+//
+// #[test]
+// fn rust_dials_c_switch() {
+//     let Some(netns) = enter_netns_tap("rust_dials_c_switch") else {
+//         return;
+//     };
+//     run_crossimpl_switch("rds", Impl::Rust, Impl::C, netns);
+// }
+//
+// #[test]
+// fn c_dials_rust_switch() {
+//     let Some(netns) = enter_netns_tap("c_dials_rust_switch") else {
+//         return;
+//     };
+//     run_crossimpl_switch("cds", Impl::C, Impl::Rust, netns);
+// }
