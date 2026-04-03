@@ -52,5 +52,6 @@ pub mod seen;
 pub mod socks;
 pub mod subnet_tree;
 pub mod tunnel;
+pub mod udp_info;
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
