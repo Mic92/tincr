@@ -89,8 +89,12 @@ impl Daemon {
         let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
         let edge_options = conn.options;
 
-        // C `protocol_auth.c:939-945`: `if(c->outgoing) { c->
-        // outgoing->timeout = 0; add_recent_address(...) }`. The
+        // C `protocol_misc.c:69-73` (`pong_h`, gated on retry) and
+        // `graph.c:238` (BecameReachable): `if(c->outgoing) { c->
+        // outgoing->timeout = 0; add_recent_address(...) }`. We do
+        // it here in `on_ack`, ungated — slightly earlier than C,
+        // harmless (idempotent dedup), pinned by tests/addrcache.rs.
+        // The
         // connection got all the way to ACK — the address WORKED.
         // Reset the backoff for next time; move the addr to front
         // of the cache.
