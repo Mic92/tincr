@@ -309,6 +309,8 @@ Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
 
 **Fix**: parse the length, swallow the next record (`STUB(chunk-12-tcp-fallback)` for actually routing it — matters for `TCPOnly`, not for ping-on-loopback). Connection survives long enough for UDP to confirm; C stops sending `PACKET`.
 
+**Latent sibling**: `Request::SptpsPacket` (type 21, the BINARY tcp fallback at `net_packet.c:975-986`) still falls through the same `metaconn.rs:892` `_` arm and terminates. C sends it for proto-minor ≥ 7 (we claim 17.7). The throughput gate dodges it by waiting for `minmtu ≥ 1500` (UDP wins, binary fallback never fires); `crossimpl.rs` doesn't set `TCPOnly`. The leaf prep landed `aa2f72c2` (`tcp_tunnel.rs`); serial wiring will add `c->sptpslen` + the dispatch arm.
+
 ### daemon/metaconn.rs — edge-triggered meta-conn read deadlock under load
 
 Not a wire bug, not a port-transcription bug. A semantic mismatch between the C's level-triggered event loop and mio's edge-triggered epoll, invisible until line-rate traffic.
