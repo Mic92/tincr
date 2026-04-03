@@ -667,62 +667,66 @@ mod tests {
 
     // ─── unmap
 
-    /// `::ffff:10.0.0.5` → `10.0.0.5`. C `IN6_IS_ADDR_V4MAPPED`.
+    /// C `IN6_IS_ADDR_V4MAPPED`. `unmap(SocketAddr) -> SocketAddr` is
+    /// ~5 lines; pin its full domain in one table.
     #[test]
-    fn unmap_v4mapped() {
-        let mapped: SocketAddr = "[::ffff:10.0.0.5]:655".parse().unwrap();
-        let result = unmap(mapped);
-        assert_eq!(result, addr("10.0.0.5", 655));
-        assert!(result.is_ipv4());
-    }
-
-    /// `::1` is NOT v4-mapped. Passes through unchanged.
-    #[test]
-    fn unmap_plain_v6_unchanged() {
-        let plain = addr("::1", 655);
-        assert_eq!(unmap(plain), plain);
-        // 2001:db8::1 — non-loopback, also unchanged.
-        let routable = addr("2001:db8::1", 655);
-        assert_eq!(unmap(routable), routable);
-    }
-
-    /// v4 already plain.
-    #[test]
-    fn unmap_v4_noop() {
-        let v4 = addr("10.0.0.5", 655);
-        assert_eq!(unmap(v4), v4);
-    }
-
-    /// `::ffff:0.0.0.0` IS a valid mapped addr (the v4 wildcard).
-    /// to_ipv4_mapped returns Some(0.0.0.0).
-    #[test]
-    fn unmap_mapped_unspec() {
-        let mapped: SocketAddr = "[::ffff:0.0.0.0]:655".parse().unwrap();
-        assert_eq!(unmap(mapped), addr("0.0.0.0", 655));
+    fn unmap_cases() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str)] = &[
+            // v4-mapped → v4. THE conversion.
+            ("[::ffff:10.0.0.5]:655", "10.0.0.5:655"),
+            // `::ffff:0.0.0.0` IS a valid mapped addr (the v4 wildcard).
+            // to_ipv4_mapped returns Some(0.0.0.0).
+            ("[::ffff:0.0.0.0]:655",  "0.0.0.0:655"),
+            // `::1` is NOT v4-mapped. Passes through unchanged.
+            ("[::1]:655",             "[::1]:655"),
+            // 2001:db8::1 — non-loopback, also unchanged.
+            ("[2001:db8::1]:655",     "[2001:db8::1]:655"),
+            // v4 already plain.
+            ("10.0.0.5:655",          "10.0.0.5:655"),
+        ];
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            let sa: SocketAddr = input.parse().unwrap();
+            let want: SocketAddr = expected.parse().unwrap();
+            assert_eq!(unmap(sa), want, "case {i}: {input}");
+        }
+        // The first row's IS-v4 property (the conversion happened):
+        assert!(unmap("[::ffff:10.0.0.5]:655".parse().unwrap()).is_ipv4());
     }
 
     // ─── is_local
 
-    /// 127.0.0.0/8. C `:308`: `ntohl(...) >> 24 == 127`. Any addr in
-    /// the /8, not just .0.0.1.
+    /// v4: 127.0.0.0/8 (C `:308`: `ntohl(...) >> 24 == 127`). Any
+    /// addr in the /8, not just .0.0.1.
+    /// v6: `::1` ONLY (C `IN6_IS_ADDR_LOOPBACK`), not the whole `::/8`.
     #[test]
-    fn is_local_v4_loopback_range() {
-        assert!(is_local(&addr("127.0.0.1", 655)));
-        assert!(is_local(&addr("127.255.255.255", 655)));
-        assert!(is_local(&addr("127.42.42.42", 0)));
-        // Port doesn't matter.
+    fn is_local_cases() {
+        #[rustfmt::skip]
+        let cases: &[(&str, bool)] = &[
+            // ─── v4: the whole /8 (port doesn't matter)
+            ("127.0.0.1",         true),
+            ("127.255.255.255",   true),
+            ("127.42.42.42",      true),
+            // ─── v6: exactly ::1
+            ("::1",               true),
+            ("::2",               false),
+            // ::ffff:127.0.0.1 — v4-mapped loopback. NOT a v6 loopback.
+            // C `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
+            // should `unmap()` first; if they don't, this is `false`.
+            ("::ffff:127.0.0.1",  false),
+            // ─── nonlocal
+            ("10.0.0.5",          false),
+            ("192.168.1.1",       false),
+            ("2001:db8::1",       false),
+            // Unspecified isn't loopback.
+            ("0.0.0.0",           false),
+            ("::",                false),
+        ];
+        for (i, (ip, expected)) in cases.iter().enumerate() {
+            assert_eq!(is_local(&addr(ip, 655)), *expected, "case {i}: {ip}");
+        }
+        // Port doesn't matter (re-check one row at port 0).
         assert!(is_local(&addr("127.0.0.1", 0)));
-    }
-
-    /// `::1` ONLY. Not the whole `::/8`. C `IN6_IS_ADDR_LOOPBACK`.
-    #[test]
-    fn is_local_v6_exactly_one() {
-        assert!(is_local(&addr("::1", 655)));
-        assert!(!is_local(&addr("::2", 655)));
-        // ::ffff:127.0.0.1 — v4-mapped loopback. NOT a v6 loopback.
-        // C `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
-        // should `unmap()` first; if they don't, this is `false`.
-        assert!(!is_local(&addr("::ffff:127.0.0.1", 655)));
     }
 
     /// The `unmap → is_local` composition is the actual call shape
@@ -733,32 +737,23 @@ mod tests {
         assert!(is_local(&unmap(mapped)));
     }
 
-    /// Not loopback.
-    #[test]
-    fn is_local_nonlocal() {
-        assert!(!is_local(&addr("10.0.0.5", 655)));
-        assert!(!is_local(&addr("192.168.1.1", 655)));
-        assert!(!is_local(&addr("2001:db8::1", 655)));
-        // Unspecified isn't loopback.
-        assert!(!is_local(&addr("0.0.0.0", 655)));
-        assert!(!is_local(&addr("::", 655)));
-    }
-
     // ─── fmt_addr / pidfile_addr
 
     /// `sockaddr2hostname` format. The CLI's `Tok::lit(" port ")`
-    /// parser expects exactly this.
+    /// parser expects exactly this. v6: NO brackets — C
+    /// `getnameinfo NI_NUMERICHOST` doesn't bracket; std
+    /// `Ipv6Addr::Display` doesn't either.
     #[test]
-    fn fmt_addr_v4() {
-        assert_eq!(fmt_addr(&addr("10.0.0.5", 655)), "10.0.0.5 port 655");
-    }
-
-    /// v6: NO brackets. C `getnameinfo NI_NUMERICHOST` doesn't
-    /// bracket; std `Ipv6Addr::Display` doesn't either.
-    #[test]
-    fn fmt_addr_v6_no_brackets() {
-        assert_eq!(fmt_addr(&addr("::1", 655)), "::1 port 655");
-        assert_eq!(fmt_addr(&addr("2001:db8::1", 655)), "2001:db8::1 port 655");
+    fn fmt_addr_cases() {
+        #[rustfmt::skip]
+        let cases: &[(&str, u16, &str)] = &[
+            ("10.0.0.5",     655, "10.0.0.5 port 655"),
+            ("::1",          655, "::1 port 655"),         // no brackets
+            ("2001:db8::1",  655, "2001:db8::1 port 655"), // no brackets
+        ];
+        for (i, (ip, port, expected)) in cases.iter().enumerate() {
+            assert_eq!(fmt_addr(&addr(ip, *port)), *expected, "case {i}: {ip}");
+        }
     }
 
     /// `pidfile_addr` does the unspec→loopback mapping. We can't
