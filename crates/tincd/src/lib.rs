@@ -46,6 +46,7 @@ pub mod proto;
 pub mod route;
 pub mod script;
 pub mod seen;
+pub mod socks;
 pub mod subnet_tree;
 pub mod tunnel;
 
