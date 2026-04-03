@@ -184,7 +184,6 @@ pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchErr
     Ok(req)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Label construction (the trailing-NUL wire-compat finding)
 
 /// `protocol_auth.c:458-465` SPTPS label for the TCP meta connection.
@@ -255,7 +254,6 @@ fn check_id(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // id_h
 
 /// What `handle_id` did. Replaces the old `Result<bool, ...>` — the
@@ -354,7 +352,7 @@ pub fn handle_id(
     now: Instant,
     rng: &mut impl RngCore,
 ) -> Result<IdOk, DispatchError> {
-    // ─── sscanf (`:317`) ────────────────────────────────────────
+    // ─── sscanf (`:317`)
     // C: `sscanf("%*d %s %d.%d", name, &major, &minor)`. We split
     // tokens. `%s` reads non-whitespace (the whole `^abc...` or
     // `alice` or `?def...`). `%d.%d` reads decimal, `.`, decimal.
@@ -395,9 +393,7 @@ pub fn handle_id(
         (major, minor)
     };
 
-    // ────────────────────────────────────────────────────────────────
     // BRANCH 1: `^cookie` — control connection (`:325-338`)
-    // ────────────────────────────────────────────────────────────────
     if let Some(rest) = name_tok.strip_prefix(b"^") {
         // C `!strcmp(name + 1, controlcookie)`. Not constant-time;
         // doesn't need to be (cookie is mode-0600 secret + unix
@@ -440,9 +436,7 @@ pub fn handle_id(
         return Ok(IdOk::Control { needs_write });
     }
 
-    // ────────────────────────────────────────────────────────────────
     // BRANCH 2: `?` — invitation (`:340-373`). Chunk 4b+.
-    // ────────────────────────────────────────────────────────────────
     if name_tok.starts_with(b"?") {
         // C: `if(!invitation_key) { ERR "don't have invitation key";
         // return false }`. We don't have an invitation key yet (it's
@@ -453,9 +447,7 @@ pub fn handle_id(
         ));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
-    // ────────────────────────────────────────────────────────────────
     // `name_tok` should be ASCII (check_id enforces alnum + `_`).
     // from_utf8 is the cheapest "bytes → &str" given we're about
     // to call check_id anyway.
@@ -486,7 +478,7 @@ pub fn handle_id(
     // = NULL). So: just set the name.
     conn.name = name.to_string();
 
-    // ─── Version check (`:398-401`) ──────────────────────────────
+    // ─── Version check (`:398-401`)
     // C: `c->protocol_major != myself->connection->protocol_major`.
     // `myself`'s major is PROT_MAJOR (set at startup). Mismatch →
     // "incompatible version". This is a HARD reject — major bumps
@@ -503,7 +495,7 @@ pub fn handle_id(
     // forbid both. (`bypass_security` is a debug knob; `experimental`
     // is true ⇔ we have an ecdsa key, which we always do.)
 
-    // ─── Load peer's public key (`:421-435`) ─────────────────────
+    // ─── Load peer's public key (`:421-435`)
     // C: `if(!c->config_tree) { config_tree = create();
     // read_host_config(tree, c->name); ... ecdsa = read_ecdsa_
     // public_key(&tree, c->name) }`. The config tree is per-
@@ -544,7 +536,7 @@ pub fn handle_id(
     let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
     conn.ecdsa = ecdsa;
 
-    // ─── Minor downgrade + rollback check (`:437-447`) ────────────
+    // ─── Minor downgrade + rollback check (`:437-447`)
     // C `:437-439`: `if(minor && !ecdsa) minor = 1`. If peer
     // claims SPTPS-capable (minor>=2) but we don't have their
     // pubkey, downgrade to legacy (minor=1, the upgrade-to-SPTPS
@@ -584,7 +576,7 @@ pub fn handle_id(
     // C: METAKEY then ACK in two assignments. We: just ACK.
     conn.allow_request = Some(Request::Ack);
 
-    // ─── send_id reply (`:451-453`) ────────────────────────────────
+    // ─── send_id reply (`:451-453`)
     // C: `if(!c->outgoing) send_id(c)`. We accepted (responder),
     // so: send. SAME line as the control branch sends — the peer
     // sees our id reply, fires their `id_h`, version-checks us,
@@ -604,7 +596,7 @@ pub fn handle_id(
         PROT_MINOR
     ));
 
-    // ─── sptps_start (`:455-468`) ──────────────────────────────────
+    // ─── sptps_start (`:455-468`)
     // C: `sptps_start(&c->sptps, c, c->outgoing, false, mykey,
     // c->ecdsa, label, labellen, send_meta_sptps, receive_meta_sptps)`.
     //
@@ -739,7 +731,7 @@ mod tests {
 
     use rand_core::OsRng;
 
-    // ─── check_gate ───────────────────────────────────────────────
+    // ─── check_gate
 
     #[test]
     fn gate_allows_expected() {
@@ -811,7 +803,7 @@ mod tests {
         ));
     }
 
-    // ─── handle_id ────────────────────────────────────────────────
+    // ─── handle_id
 
     /// The happy path. `tinc-tools/ctl.rs:491` sends `"0 ^<cookie> 0"`.
     /// We set the control fields and queue two reply lines.
@@ -880,7 +872,7 @@ mod tests {
         assert!(matches!(r, Err(DispatchError::BadId(_))));
     }
 
-    // ─── id_h peer branch ─────────────────────────────────────
+    // ─── id_h peer branch
 
     /// Tempdir + hosts/ layout for peer-branch tests. Same idiom as
     /// `keys.rs::tests::TmpDir`.
@@ -942,7 +934,7 @@ mod tests {
         assert_eq!(init.len(), 1);
         assert!(matches!(init[0], Output::Wire { .. }));
 
-        // ─── conn state ─────────────────────────────────────────
+        // ─── conn state
         // C `:389`: `c->name = name`.
         assert_eq!(c.name, "alice");
         // C `:455` then `:456`: `allow_request = ACK`.
@@ -956,7 +948,7 @@ mod tests {
         // NOT a control conn.
         assert!(!c.control);
 
-        // ─── outbuf: ONLY the send_id line, NOT the KEX bytes ───
+        // ─── outbuf: ONLY the send_id line, NOT the KEX bytes
         // The init Wire bytes are RETURNED for the daemon to queue
         // via send_raw. handle_id doesn't queue them itself —
         // ownership of the dispatch lives in the daemon (consistent
@@ -1128,7 +1120,7 @@ mod tests {
         assert_eq!(c.protocol_minor, 0);
     }
 
-    // ─── tcp_label (the NUL) ──────────────────────────────────
+    // ─── tcp_label (the NUL)
 
     /// THE WIRE-COMPAT TEST. The label includes a trailing NUL.
     /// gcc-verified C output for `("alice", "bob")`:
@@ -1228,7 +1220,7 @@ mod tests {
         assert!(c.last_ping_time > now + std::time::Duration::from_secs(3000));
     }
 
-    // ─── handle_control ───────────────────────────────────────────
+    // ─── handle_control
 
     #[test]
     fn control_stop() {

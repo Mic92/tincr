@@ -116,7 +116,6 @@ impl std::fmt::Write for VecFmt<'_> {
 /// `9163 + 128 = 9291`. Recompute then.)
 pub const MAXBUFSIZE: usize = 2176;
 
-// ═══════════════════════════════════════════════════════════════════
 // LineBuf
 
 /// `buffer_t`. `Vec<u8>` with a consume cursor. Ports `buffer.c` (110
@@ -265,7 +264,6 @@ impl LineBuf {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Connection
 
 /// `connection_t`. The control-connection slice + peer-accept fields.
@@ -454,7 +452,7 @@ impl Connection {
         // Stack buffer same as C `char inbuf[MAXBUFSIZE]`.
         let mut stack = [0u8; MAXBUFSIZE];
 
-        // ─── Cap ─────────────────────────────────────────────
+        // ─── Cap
         // C: `sizeof inbuf - c->inbuf.len` — cap shrinks as the line
         // buffer fills. SPTPS mode: full MAXBUFSIZE (we don't touch
         // c->inbuf). The C does the SAME: the `protocol_minor>=2`
@@ -473,7 +471,7 @@ impl Connection {
         };
         let buf = &mut stack[..cap];
 
-        // ─── recv ────────────────────────────────────────────
+        // ─── recv
         // SAFETY: `read(2)` on a valid fd. fd is owned by self,
         // non-blocking. buf is stack-allocated. read returns the
         // number of bytes written into buf, or -1 with errno.
@@ -512,7 +510,7 @@ impl Connection {
         #[allow(clippy::cast_sign_loss)] // n > 0 checked
         let chunk = &buf[..n as usize];
 
-        // ─── SPTPS branch (`meta.c:224-233`) ───────────────────
+        // ─── SPTPS branch (`meta.c:224-233`)
         // C: `if(c->protocol_minor >= 2)` — we use `sptps.is_some()`
         // because the mode-switch IS "sptps got installed by id_h".
         // (`protocol_minor >= 2` is the C's proxy for the same
@@ -526,7 +524,7 @@ impl Connection {
             return Self::feed_sptps(sptps, chunk, &self.name, rng);
         }
 
-        // ─── Plaintext branch ─────────────────────────────────
+        // ─── Plaintext branch
         // n > 0: that many bytes are now in `buf`. Append to inbuf.
         self.inbuf.add(chunk);
         FeedResult::Data
@@ -721,7 +719,6 @@ impl Connection {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // tests
 
 #[cfg(test)]
@@ -729,7 +726,7 @@ mod tests {
     use super::*;
     use rand_core::OsRng;
 
-    // ─── LineBuf ──────────────────────────────────────────────
+    // ─── LineBuf
 
     #[test]
     fn linebuf_one_full_line() {
@@ -883,7 +880,7 @@ mod tests {
         assert_eq!(MAXBUFSIZE, expected);
     }
 
-    // ─── Connection::send ─────────────────────────────────────
+    // ─── Connection::send
     // feed/flush need a real fd (read/send syscalls); tested via
     // socketpair in daemon.rs tests. send() is pure (just outbuf
     // formatting) — testable here.
@@ -934,7 +931,7 @@ mod tests {
         assert!(c.sptps.is_none());
     }
 
-    // ─── take_rest ────────────────────────────────────────────
+    // ─── take_rest
 
     /// The piggyback case: ID line + SPTPS bytes in one buffer.
     /// `read_line` returns the line; `take_rest` returns the
@@ -987,7 +984,7 @@ mod tests {
         assert!(b.take_rest().is_empty());
     }
 
-    // ─── feed_sptps (the do-while loop) ────────────────────────
+    // ─── feed_sptps (the do-while loop)
     //
     // Can't easily test feed() itself — it reads a real fd. But
     // feed_sptps is the pure SPTPS-loop, factored out exactly so
@@ -1057,7 +1054,7 @@ mod tests {
         use tinc_crypto::sign::SigningKey;
         use tinc_sptps::{Framing, Output, Role};
 
-        // ─── Handshake: alice (initiator) ↔ bob (responder) ───
+        // ─── Handshake: alice (initiator) ↔ bob (responder)
         // Same dance as vs_c.rs but Rust↔Rust. Use OsRng for the
         // KEX nonces (NoRng would panic in start's send_kex).
         let alice_k = SigningKey::from_seed(&[10; 32]);
@@ -1122,7 +1119,7 @@ mod tests {
         assert_eq!(n, b_sig.len());
         assert!(matches!(outs[0], Output::HandshakeDone));
 
-        // ─── NOW: both done. Alice sends TWO records. ──────────
+        // ─── NOW: both done. Alice sends TWO records.
         let rec1 = wire(alice.send_record(0, b"first").unwrap());
         let rec2 = wire(alice.send_record(0, b"second").unwrap());
 
@@ -1131,7 +1128,7 @@ mod tests {
         let mut chunk = rec1;
         chunk.extend_from_slice(&rec2);
 
-        // ─── feed_sptps: bob receives both in one call ─────────
+        // ─── feed_sptps: bob receives both in one call
         let r = Connection::feed_sptps(&mut bob, &chunk, "alice", &mut NoRng);
         match r {
             FeedResult::Sptps(outs) => {

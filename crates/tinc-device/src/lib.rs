@@ -115,9 +115,7 @@
 
 use std::io;
 
-// ═══════════════════════════════════════════════════════════════════
 // Types
-// ═══════════════════════════════════════════════════════════════════
 
 /// `MTU` — `net.h:36` (the non-jumbo branch). 1500 payload + 14
 /// ethernet header + 4 VLAN tag.
@@ -135,9 +133,7 @@ pub const MTU: usize = 1518;
 /// `MTU` for the jumbo build. The daemon picks; we accept either.
 pub const MTU_JUMBO: usize = 9018;
 
-// ═══════════════════════════════════════════════════════════════════
 // ether — RFC 894 / IANA constants + header synthesis
-// ═══════════════════════════════════════════════════════════════════
 //
 // NOT `cfg`-gated: these are wire constants (IEEE 802.3, IANA
 // EtherType registry), not platform ABI. The same `0x0800` on
@@ -255,9 +251,7 @@ impl Default for Mode {
 /// not modeled here.)
 const _: () = ();
 
-// ═══════════════════════════════════════════════════════════════════
 // Trait
-// ═══════════════════════════════════════════════════════════════════
 
 /// `devops_t` — the read/write vtable. `device.h:32-40`.
 ///
@@ -359,9 +353,7 @@ pub trait Device: Send {
     fn fd(&self) -> Option<std::os::unix::io::RawFd>;
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Dummy — `dummy_device.c` (58 LOC)
-// ═══════════════════════════════════════════════════════════════════
 
 /// `dummy_devops` (`dummy_device.c:53-58`). Read fails, write
 /// succeeds. The daemon's poll loop never calls `read` (no fd to
@@ -439,18 +431,14 @@ impl Device for Dummy {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Linux TUN/TAP — `linux/device.c` (225 LOC)
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::Tun;
 
-// ═══════════════════════════════════════════════════════════════════
 // fd — `fd_device.c` (247 LOC, the Android backend)
-// ═══════════════════════════════════════════════════════════════════
 //
 // Linux-only: the `@abstract` socket namespace (`SocketAddrExt::
 // from_abstract_name`, `std::os::linux::net`) and `MSG_ERRQUEUE`
@@ -468,9 +456,7 @@ mod fd;
 #[cfg(target_os = "linux")]
 pub use fd::{FdSource, FdTun};
 
-// ═══════════════════════════════════════════════════════════════════
 // raw — `raw_socket_device.c` (145 LOC, the PF_PACKET backend)
-// ═══════════════════════════════════════════════════════════════════
 //
 // Linux-only: `PF_PACKET` IS Linux-only. The C `#ifdef PF_
 // PACKET && ETH_P_ALL && AF_PACKET && SIOCGIFINDEX` (`:33`)
@@ -483,9 +469,7 @@ mod raw;
 #[cfg(target_os = "linux")]
 pub use raw::RawSocket;
 
-// ═══════════════════════════════════════════════════════════════════
 // bsd — `bsd/device.c` (592 LOC, three backends in one file)
-// ═══════════════════════════════════════════════════════════════════
 //
 // `cfg(unix)` NOT `cfg(any(freebsd, macos, ...))`. The Device
 // impl compiles on Linux — the variant-dispatched read/write
@@ -508,9 +492,7 @@ mod bsd;
 #[cfg(unix)]
 pub use bsd::{BsdTun, BsdVariant};
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests — Dummy only (Tun needs CAP_NET_ADMIN, separate integration)
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {

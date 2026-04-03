@@ -68,7 +68,6 @@ use crate::listen::{
 };
 use crate::proto::{DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id};
 
-// ═══════════════════════════════════════════════════════════════════
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
 new_key_type! {
@@ -147,7 +146,6 @@ pub enum SignalWhat {
     Retry,
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // DaemonSettings — the config knobs
 
 /// The ~40 daemon-side settings globals from the census. Populated
@@ -199,7 +197,6 @@ impl Default for DaemonSettings {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Daemon — the C globals + the loop
 
 /// What `run()` returns. C `main_loop` returns `int` (0 or 1).
@@ -221,7 +218,7 @@ pub enum RunOutcome {
 /// (no two handlers run concurrently — but they couldn't in the C
 /// either, single-threaded loop. The gain is the COMPILER knows.).
 pub struct Daemon {
-    // ─── arena ────────────────────────────────────────────────────
+    // ─── arena
     /// `connection_list`. Slotmap not `Vec<Option>` — generational
     /// keys. A `ConnId` from a closed connection is a different key
     /// than the next connection allocated in the same slot. The C's
@@ -240,7 +237,7 @@ pub struct Daemon {
     /// maps, asserts on coherence in debug. Revisit if it bites.)
     pub(crate) conn_io: slotmap::SecondaryMap<ConnId, IoId>,
 
-    // ─── substrate ───────────────────────────────────────────────
+    // ─── substrate
     /// `devops` + `device_fd` + `iface`. The TUN/TAP. `Box<dyn>` —
     /// the variant (`Dummy`/`Tun`/`Fd`/`Raw`/`Bsd`) is chosen at
     /// setup time by the `DeviceType` config knob.
@@ -295,7 +292,7 @@ pub struct Daemon {
     /// each `IdCtx`.
     pub(crate) confbase: PathBuf,
 
-    // ─── settings ────────────────────────────────────────────────
+    // ─── settings
     /// The config knobs. Reload swaps this.
     ///
     /// `dead_code` allowed: skeleton constructs but never reads (the
@@ -307,7 +304,7 @@ pub struct Daemon {
     #[allow(dead_code)]
     pub(crate) settings: DaemonSettings,
 
-    // ─── event loop machinery ────────────────────────────────────
+    // ─── event loop machinery
     /// `mio::Poll` + slot table. Generic over `IoWhat`.
     pub(crate) ev: EventLoop<IoWhat>,
     /// Timer wheel. Generic over `TimerWhat`.
@@ -349,11 +346,11 @@ impl Daemon {
     // sequence in C too. Splitting it scatters the boot order.
     #[allow(clippy::missing_panics_doc)] // doc'd in body comments
     pub fn setup(confbase: &Path, pidfile: &Path, socket: &Path) -> Result<Self, SetupError> {
-        // ─── read tinc.conf (tincd.c:590) ────────────────────────
+        // ─── read tinc.conf (tincd.c:590)
         let config = tinc_conf::read_server_config(confbase)
             .map_err(|e| SetupError::Config(format!("{e}")))?;
 
-        // ─── Name (net_setup.c:775-779) ──────────────────────────
+        // ─── Name (net_setup.c:775-779)
         // C: `name = get_name(); if(!name) { ERR }`.
         // `get_name()` does `lookup_config("Name")` + `check_id`.
         // Skeleton: just lookup. `check_id` (alphanumeric + `_`)
@@ -368,7 +365,7 @@ impl Daemon {
             .ok_or(SetupError::Config("Name for tinc daemon required!".into()))?;
         log::info!(target: "tincd", "tincd starting, name={name}");
 
-        // ─── read_host_config (net_setup.c:786) ──────────────────
+        // ─── read_host_config (net_setup.c:786)
         // C: `read_host_config(&config_tree, name, true)`. Merges
         // hosts/NAME into the same tree as tinc.conf. The HOST-tagged
         // vars (Port, Subnet, PublicKey, etc) live there.
@@ -395,7 +392,7 @@ impl Daemon {
             }
         }
 
-        // ─── read_ecdsa_private_key (net_setup.c:803-828) ─────────
+        // ─── read_ecdsa_private_key (net_setup.c:803-828)
         // C: `myself->connection->ecdsa = read_ecdsa_private_key(
         // &config_tree, NULL); experimental = ecdsa != NULL;`.
         //
@@ -421,7 +418,7 @@ impl Daemon {
             SetupError::Config(format!("{e}{hint}"))
         })?;
 
-        // ─── settings (net_setup.c:788, 538, 1239-1257) ─────────
+        // ─── settings (net_setup.c:788, 538, 1239-1257)
         let mut settings = DaemonSettings::default();
 
         // Port (`:788-794`). HOST-tagged. C stores as a string
@@ -462,7 +459,7 @@ impl Daemon {
             }
         }
 
-        // ─── device (net_setup.c:1061-1100) ──────────────────────
+        // ─── device (net_setup.c:1061-1100)
         // C: `devops = os_devops; if DeviceType=dummy → dummy_devops;
         // ...; devops.setup()`.
         // We Box<dyn>. Skeleton: `dummy` always; chunk 3 reads the
@@ -484,14 +481,14 @@ impl Daemon {
                    "Device mode: {:?}, interface: {}",
                    device.mode(), device.iface());
 
-        // ─── event loop scaffolding ──────────────────────────────
+        // ─── event loop scaffolding
         // tinc-event constructors. EventLoop::new can fail (epoll_
         // create); the others can't (BTreeMap, pipe).
         let mut ev = EventLoop::new().map_err(SetupError::Io)?;
         let mut timers = Timers::new();
         let mut signals = SelfPipe::new().map_err(SetupError::Io)?;
 
-        // ─── signals (net.c:497-507) ─────────────────────────────
+        // ─── signals (net.c:497-507)
         // C: signal_add for HUP/TERM/QUIT/INT/ALRM. We map TERM/
         // QUIT/INT all to Exit (same handler in C: `sigterm_handler`).
         // HUP → Reload, ALRM → Retry.
@@ -516,7 +513,7 @@ impl Daemon {
         ev.add(signals.read_fd(), Io::Read, IoWhat::Signal)
             .map_err(SetupError::Io)?;
 
-        // ─── device fd (net_setup.c:1100) ────────────────────────
+        // ─── device fd (net_setup.c:1100)
         // C: `if(device_fd >= 0) io_add(&device_io, ...)`.
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
         if let Some(fd) = device.fd() {
@@ -524,7 +521,7 @@ impl Daemon {
                 .map_err(SetupError::Io)?;
         }
 
-        // ─── ping timer (net.c:489-491) ──────────────────────────
+        // ─── ping timer (net.c:489-491)
         // C: `timeout_add(&pingtimer, timeout_handler, ..., {
         // pingtimeout, jitter() })`. Initial fire is `pingtimeout`
         // seconds from now. The HANDLER re-arms at +1s (`net.c:264`
@@ -538,7 +535,7 @@ impl Daemon {
             Duration::from_secs(u64::from(settings.pingtimeout)),
         );
 
-        // ─── listeners (net_setup.c:1152-1183) ───────────────────
+        // ─── listeners (net_setup.c:1152-1183)
         // C: walk BindToAddress configs, then ListenAddress configs,
         // else `add_listen_address(NULL, NULL)` for the no-config
         // default. We only do the no-config default for now.
@@ -566,7 +563,7 @@ impl Daemon {
                 .map_err(SetupError::Io)?;
         }
 
-        // ─── init_control (net_setup.c:1263, control.c:148-231) ───
+        // ─── init_control (net_setup.c:1263, control.c:148-231)
         let cookie = generate_cookie();
 
         // C `control.c:155-176`: get listeners[0]'s bound addr, map
@@ -657,7 +654,7 @@ impl Daemon {
 
         // C `linux/event.c:115`: `while(running)`.
         while self.running {
-            // ─── timers (event.c:112-130) ────────────────────────
+            // ─── timers (event.c:112-130)
             // tick() does: cache `now`, drain expired, return next
             // deadline. The C does the SAME order (`timeout_execute`
             // at `event.c:112` is called from `event_loop` BEFORE
@@ -678,7 +675,7 @@ impl Daemon {
                 }
             }
 
-            // ─── poll (linux/event.c:121-130) ────────────────────
+            // ─── poll (linux/event.c:121-130)
             // C: `epoll_wait(fd, events, MAX_EVENTS, timeout_ms)`.
             // mio same. `timeout = None` → block forever (C-is-WRONG
             // #5: C derefs NULL here. mio handles None.).
@@ -689,7 +686,7 @@ impl Daemon {
                 return RunOutcome::PollError;
             }
 
-            // ─── io dispatch (linux/event.c:131-159) ─────────────
+            // ─── io dispatch (linux/event.c:131-159)
             for &(what, ready) in &fired_io {
                 match what {
                     IoWhat::Signal => {
@@ -766,7 +763,7 @@ impl Daemon {
         RunOutcome::Clean
     }
 
-    // ─── timer handlers ──────────────────────────────────────────
+    // ─── timer handlers
 
     /// `timeout_handler` (`net.c:180-266`). With zero peers, the
     /// `for list_each(connection_t, c)` loop iterates control conns
@@ -790,7 +787,7 @@ impl Daemon {
         // The actual sweep would go here. Chunk 3+.
     }
 
-    // ─── signal handlers ─────────────────────────────────────────
+    // ─── signal handlers
 
     /// `sigterm_handler` (`net.c:316-319`) for `Exit`;
     /// `sighup_handler` (`:321-328`) for `Reload`;
@@ -818,7 +815,7 @@ impl Daemon {
         }
     }
 
-    // ─── io handlers ─────────────────────────────────────────────
+    // ─── io handlers
 
     /// `handle_new_meta_connection` (`net_socket.c:734-779`).
     /// accept on TCP listener `i`, tarpit-check, configure, allocate
@@ -850,7 +847,7 @@ impl Daemon {
             }
         };
 
-        // ─── sockaddrunmap (`:751`) ───────────────────────────────
+        // ─── sockaddrunmap (`:751`)
         // V6ONLY is set so we shouldn't see mapped addrs in practice.
         // Canonicalize anyway: `fmt_addr` and the tarpit's prev-addr
         // compare want plain v4.
@@ -870,7 +867,7 @@ impl Daemon {
             (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
-        // ─── tarpit check (`:753`) ───────────────────────────────
+        // ─── tarpit check (`:753`)
         // C: `if(!is_local_connection(&sa) && check_tarpit(&sa, fd))
         //   return`. The `&&` short-circuits: local conns never tick
         // the buckets. The pidfile address is loopback; `tinc start`
@@ -893,7 +890,7 @@ impl Daemon {
             }
         }
 
-        // ─── configure_tcp (`:773`) ──────────────────────────────
+        // ─── configure_tcp (`:773`)
         // C ordering: new_connection (`:758`) BEFORE configure_tcp
         // (`:773`). We flip: configure first, THEN allocate. If
         // configure fails (set_nonblocking error), we don't have a
@@ -909,7 +906,7 @@ impl Daemon {
             }
         };
 
-        // ─── allocate connection (`:758-776`) ────────────────────
+        // ─── allocate connection (`:758-776`)
         // C `:762`: `c->hostname = sockaddr2hostname(&sa)`. The
         // "10.0.0.5 port 50123" string. Never changes after this.
         let hostname = fmt_addr(&peer);
@@ -990,7 +987,7 @@ impl Daemon {
             }
         };
 
-        // ─── allocate connection ─────────────────────────────────
+        // ─── allocate connection
         // C `:798-811`: `c = new_connection(); c->name = "<control>";
         // ...; io_add(); connection_add(c); c->allow_request = ID`.
         // Our `Connection::new_control` sets the same defaults.
@@ -1037,7 +1034,7 @@ impl Daemon {
     /// (the Peer arm's terminate-after-handshake block goes away).
     #[allow(clippy::too_many_lines)]
     fn on_conn_readable(&mut self, id: ConnId) {
-        // ─── feed (one recv) ─────────────────────────────────────
+        // ─── feed (one recv)
         // C `meta.c:185`: `inlen = recv(...)`.
         // `OsRng`: feed() needs an rng for the SPTPS-mode receive
         // path. Only touched on rekey (HANDSHAKE record post-
@@ -1073,7 +1070,7 @@ impl Daemon {
             }
         }
 
-        // ─── drain inbuf (loop readline + dispatch) ──────────────
+        // ─── drain inbuf (loop readline + dispatch)
         // C `meta.c:303-315`: `while(c->inbuf.len) { ... }`.
         // We loop until `read_line` returns None (incomplete).
         loop {
@@ -1092,7 +1089,7 @@ impl Daemon {
             // (which has 1500-byte frames and IS hot).
             let line: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
 
-            // ─── check_gate (protocol.c:164-178) ─────────────────
+            // ─── check_gate (protocol.c:164-178)
             let req = match check_gate(conn, &line) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1103,7 +1100,7 @@ impl Daemon {
                 }
             };
 
-            // ─── handler dispatch (protocol.c:180) ───────────────
+            // ─── handler dispatch (protocol.c:180)
             // C: `entry->handler(c, request)`. We match. The match
             // arms are the request_entries[] table.
             let (result, needs_write) = match req {
@@ -1144,7 +1141,7 @@ impl Daemon {
                     match handle_id(conn, &line, &ctx, now, &mut OsRng) {
                         Ok(IdOk::Control { needs_write }) => (DispatchResult::Ok, needs_write),
                         Ok(IdOk::Peer { needs_write, init }) => {
-                            // ─── SPTPS-start dispatch ─────────────
+                            // ─── SPTPS-start dispatch
                             // 1. Queue init Wire bytes (responder's KEX).
                             //    C `send_meta_sptps`: buffer_add to
                             //    outbuf. Our `send_raw`.
@@ -1262,7 +1259,7 @@ impl Daemon {
                 }
             };
 
-            // ─── io_set (meta.c:95) ──────────────────────────────
+            // ─── io_set (meta.c:95)
             if needs_write {
                 if let Some(&io_id) = self.conn_io.get(id) {
                     if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
@@ -1492,7 +1489,6 @@ impl std::fmt::Display for SetupError {
 
 impl std::error::Error for SetupError {}
 
-// ═══════════════════════════════════════════════════════════════════
 // tests
 //
 // `setup()` and `run()` are NOT unit-testable: SelfPipe is a process

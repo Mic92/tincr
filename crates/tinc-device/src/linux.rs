@@ -114,7 +114,7 @@ impl Tun {
 
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
-        // ─── ifr_name pack — BEFORE open ────────────────────────────
+        // ─── ifr_name pack — BEFORE open
         // Validate iface name BEFORE opening /dev/net/tun. Why
         // before: testability. The validation is pure (string
         // length check); the open needs CAP_NET_ADMIN. Validation-
@@ -124,7 +124,7 @@ impl Tun {
         // any validate-before-expensive-op pattern.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
-        // ─── open ───────────────────────────────────────────────────
+        // ─── open
         // C `device.c:56`: `open(device, O_RDWR | O_NONBLOCK)`.
         // C `:63`: `fcntl(device_fd, F_SETFD, FD_CLOEXEC)` — race
         // window between open and fcntl. We close the window with
@@ -137,7 +137,7 @@ impl Tun {
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(device)?;
 
-        // ─── ifr_flags ──────────────────────────────────────────────
+        // ─── ifr_flags
         // C `device.c:77-89`: derive flags from type + routing_mode.
         // We get the resolved `Mode`; the derivation is the daemon's
         // job (`net_setup.c`).
@@ -162,7 +162,7 @@ impl Tun {
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
         } as i16;
 
-        // ─── ifr_name ───────────────────────────────────────────────
+        // ─── ifr_name
         // C `device.c:103-105`: `strncpy(ifr.ifr_name, iface,
         // IFNAMSIZ); ifr.ifr_name[IFNAMSIZ-1] = 0`.
         //
@@ -171,7 +171,7 @@ impl Tun {
         //
         // (ifr_name packed above, before open)
 
-        // ─── TUNSETIFF ──────────────────────────────────────────────
+        // ─── TUNSETIFF
         // The ioctl. See module doc for why direct `libc::ioctl`
         // not `nix::ioctl_write_ptr_bad!` (the encoding is _IOW
         // but the kernel writes ifr_name back; the macro generates
@@ -181,7 +181,7 @@ impl Tun {
         // ioctl (`device.c:108-111`).
         let iface = tunsetiff(fd.as_raw_fd(), flags, ifr_name)?;
 
-        // ─── SIOCGIFHWADDR (TAP only) ───────────────────────────────
+        // ─── SIOCGIFHWADDR (TAP only)
         // C `device.c:119-127`: `if(ifr.ifr_flags & IFF_TAP)` then
         // `ioctl(SIOCGIFHWADDR)` into a fresh `ifreq`, `memcpy` 6
         // bytes from `ifr_hwaddr.sa_data`.
@@ -208,9 +208,7 @@ impl Tun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // ifr_name packing — the testable seam
-// ═══════════════════════════════════════════════════════════════════
 
 /// `[c_char; IFNAMSIZ]` from `Option<&str>`. The testable seam:
 /// `Tun::open` calls this BEFORE `open(/dev/net/tun)`, so the
@@ -261,9 +259,7 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
     Ok(buf)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // ioctls — the third-instance unsafe shims
-// ═══════════════════════════════════════════════════════════════════
 
 /// `TUNSETIFF` — instantiate a TUN/TAP device. Kernel reads `ifr_
 /// flags` and `ifr_name` (may be empty), writes `ifr_name` back
@@ -335,7 +331,7 @@ fn tunsetiff(
         return Err(io::Error::last_os_error());
     }
 
-    // ─── Read back ifr_name ────────────────────────────────────────
+    // ─── Read back ifr_name
     // C `device.c:108-110`: `strncpy(ifrname, ifr.ifr_name,
     // IFNAMSIZ); ifrname[IFNAMSIZ-1] = 0; iface = xstrdup(ifrname)`.
     //
@@ -430,9 +426,7 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     Ok(mac)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Device trait — read/write with the offset trick
-// ═══════════════════════════════════════════════════════════════════
 
 impl Device for Tun {
     /// `read_packet` (`linux/device.c:144-183`). The +10 offset
@@ -443,7 +437,7 @@ impl Device for Tun {
     #[allow(clippy::missing_errors_doc)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
-            // ─── TUN ────────────────────────────────────────────────
+            // ─── TUN
             // C `:146-165`. Read at +10, memset 0..12, return +10.
             Mode::Tun => {
                 // `MTU - 10` is the C's `read(fd, buf+10, MTU-10)`.
@@ -515,7 +509,7 @@ impl Device for Tun {
                 Ok(n + 10)
             }
 
-            // ─── TAP ────────────────────────────────────────────────
+            // ─── TAP
             // C `:167-179`. Direct read, no offset, no memset.
             // `IFF_NO_PI` means no `tun_pi` prefix; the kernel
             // hands us raw ethernet.
@@ -545,7 +539,7 @@ impl Device for Tun {
     #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
-            // ─── TUN ────────────────────────────────────────────────
+            // ─── TUN
             // C `:188-196`. Zero `buf[10..12]` (`tun_pi.flags`),
             // write `buf[10..]`.
             Mode::Tun => {
@@ -584,7 +578,7 @@ impl Device for Tun {
                 Ok(n)
             }
 
-            // ─── TAP ────────────────────────────────────────────────
+            // ─── TAP
             // C `:198-204`. Direct write.
             Mode::Tap => write_fd(self.fd.as_raw_fd(), buf),
         }
@@ -607,9 +601,7 @@ impl Device for Tun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // read/write — direct syscalls, not File::read
-// ═══════════════════════════════════════════════════════════════════
 
 // Why not `File::read`/`File::write`? Two reasons.
 //
@@ -684,9 +676,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     Ok(ret as usize)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests — what we CAN test without CAP_NET_ADMIN
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -773,9 +763,7 @@ mod tests {
         assert_eq!(flags_for(Mode::Tap), 0x1002);
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // pack_ifr_name — the testable seam
-    // ─────────────────────────────────────────────────────────────────
 
     /// `None` → all zeros → kernel picks. The C `if(iface)`
     /// guard skips the strncpy.
@@ -870,9 +858,7 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // The +10 offset trick — testable without a TUN device
-    // ─────────────────────────────────────────────────────────────────
 
     /// The TUN-mode "+10" offset. `14 (ethernet header) - 4 (tun_
     /// pi)`. The arithmetic is the documentation; pin it.

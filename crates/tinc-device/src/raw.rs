@@ -102,9 +102,7 @@ use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
 use crate::{Device, MTU, Mac, Mode};
 
-// ═══════════════════════════════════════════════════════════════════
 // Constants — kernel ABI, sed-verified
-// ═══════════════════════════════════════════════════════════════════
 
 /// `ETH_P_ALL` — `<linux/if_ether.h>`. "All protocols." Passing
 /// this as the socket protocol means "give me every frame on this
@@ -115,9 +113,7 @@ use crate::{Device, MTU, Mac, Mode};
 /// `sll_protocol` we do it ourselves.
 const ETH_P_ALL: u16 = 0x0003;
 
-// ═══════════════════════════════════════════════════════════════════
 // RawSocket — the Device impl
-// ═══════════════════════════════════════════════════════════════════
 
 /// `raw_socket_devops` (`raw_socket_device.c:112-117`). The
 /// `PF_PACKET` backend. TAP-only.
@@ -189,7 +185,7 @@ impl RawSocket {
     pub fn open(iface: &str) -> io::Result<Self> {
         use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
-        // ─── socket ─────────────────────────────────────────────────
+        // ─── socket
         // C `:45`: `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`.
         //
         // nix's `socket()` returns `OwnedFd` (the right type;
@@ -214,7 +210,7 @@ impl RawSocket {
             SockProtocol::EthAll,
         )?;
 
-        // ─── ifindex ────────────────────────────────────────────────
+        // ─── ifindex
         // C `:60-68`: SIOCGIFINDEX ioctl. We use `if_nametoindex`
         // instead — the POSIX function, same resolution.
         //
@@ -246,7 +242,7 @@ impl RawSocket {
         // `NixPath` trait accepts `&str` directly.
         let ifindex = nix::net::if_::if_nametoindex(iface)?;
 
-        // ─── bind ───────────────────────────────────────────────────
+        // ─── bind
         // C `:66-73`: build `sockaddr_ll`, bind. nix's `LinkAddr`
         // is GETTERS ONLY (no constructor). Raw `libc::bind`.
         // The sixth shim, but trivial (8 lines, one syscall).
@@ -262,9 +258,7 @@ impl RawSocket {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // bind_packet — shim #6, hand-rolled, trivial
-// ═══════════════════════════════════════════════════════════════════
 
 /// `:66-73`. Build `sockaddr_ll`, bind the `PF_PACKET` socket to
 /// the interface.
@@ -349,9 +343,7 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Device impl — the +0 read/write
-// ═══════════════════════════════════════════════════════════════════
 
 impl Device for RawSocket {
     /// `read_packet` (`raw_socket_device.c:88-100`). The +0 read.
@@ -436,9 +428,7 @@ impl Device for RawSocket {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // read/write — module-private duplicates
-// ═══════════════════════════════════════════════════════════════════
 //
 // THIRD instance of read_fd/write_fd. The "two is not a pattern"
 // rule from `fd.rs` was about TWO instances. Three IS a pattern.
@@ -488,9 +478,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     Ok(ret as usize)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests — constants + open-gate + +0 via socketpair
-// ═══════════════════════════════════════════════════════════════════
 //
 // The "fakeable boundary" prediction holds: PF_PACKET writes raw
 // ethernet (no kernel-side structure added). A `socketpair(AF_
@@ -509,9 +497,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    // ─────────────────────────────────────────────────────────────────
     // Constants — gcc-verified
-    // ─────────────────────────────────────────────────────────────────
 
     /// `ETH_P_ALL = 0x0003` per `<linux/if_ether.h>`. gcc-
     /// verified.
@@ -572,9 +558,7 @@ mod tests {
         assert_eq!(SockProtocol::EthAll as i32, want);
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // open() gate — error path coverage without CAP_NET_RAW
-    // ─────────────────────────────────────────────────────────────────
 
     /// `open()` on a nonexistent interface: either EPERM
     /// (socket() failed, no CAP_NET_RAW) or ENODEV (socket()
@@ -621,9 +605,7 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // bind_packet — sockaddr_ll layout
-    // ─────────────────────────────────────────────────────────────────
 
     /// The `sockaddr_ll` we'd pass to bind: zeroed except
     /// family/protocol/ifindex. Verify the layout matches what
@@ -657,9 +639,7 @@ mod tests {
         assert_eq!(sa.sll_addr, [0; 8]);
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // +0 read/write — socketpair end-to-end
-    // ─────────────────────────────────────────────────────────────────
     //
     // The fakeable boundary holds. PF_PACKET writes raw
     // ethernet; a socketpair(AF_UNIX, SOCK_DGRAM) writes

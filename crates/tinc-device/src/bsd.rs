@@ -145,9 +145,7 @@ use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode};
 
-// ═══════════════════════════════════════════════════════════════════
 // Constants — the +10 prefix length
-// ═══════════════════════════════════════════════════════════════════
 
 /// The 4-byte AF prefix the BSD kernel writes for utun/tunifhead.
 /// `bsd/device.c` doesn't name this — it uses literal `10` (e.g.
@@ -163,9 +161,7 @@ use crate::{Device, MTU, Mac, Mode};
 /// ignore the contents on read anyway.
 const AF_PREFIX_LEN: usize = 4;
 
-// ═══════════════════════════════════════════════════════════════════
 // BsdVariant — the offset dispatch
-// ═══════════════════════════════════════════════════════════════════
 
 /// `device_type_t` (`bsd/device.c:52-63`). The C has six values
 /// (`TUN`, `TUNIFHEAD`, `TAP`, `TUNEMU`, `VMNET`, `UTUN`); we
@@ -255,9 +251,7 @@ impl BsdVariant {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // to_af_prefix — the inverse map (write side, Utun only)
-// ═══════════════════════════════════════════════════════════════════
 
 /// Ethertype → 4-byte AF prefix. `bsd/device.c:520-539`. The
 /// dual of `from_ip_nibble`.
@@ -312,9 +306,7 @@ pub(crate) fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     Some((af as u32).to_be_bytes())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // BsdTun — the Device impl
-// ═══════════════════════════════════════════════════════════════════
 
 /// `os_devops` (`bsd/device.c:587-592`). The variant-dispatched
 /// BSD backend.
@@ -356,9 +348,7 @@ pub struct BsdTun {
 // `open()` constructors are `cfg`-gated below. The Device impl
 // compiles everywhere; the constructors don't.
 
-// ═══════════════════════════════════════════════════════════════════
 // Device impl — variant-dispatched read/write
-// ═══════════════════════════════════════════════════════════════════
 
 impl Device for BsdTun {
     /// `read_packet` (`bsd/device.c:404-500`). Three switch arms
@@ -401,7 +391,7 @@ impl Device for BsdTun {
         }
 
         match self.variant {
-            // ─── TUN: +14, synthesize ───────────────────────────
+            // ─── TUN: +14, synthesize
             // C `:427-446`. Byte-identical to `fd_device.c
             // :211-230` save for symbolic vs literal constants
             // (BSD uses `0x08`/`0x00`, Android C uses `ETH_P_IP
@@ -431,7 +421,7 @@ impl Device for BsdTun {
                 Ok(n + ETH_HLEN)
             }
 
-            // ─── UTUN: +10, IGNORE prefix, synthesize ───────────
+            // ─── UTUN: +10, IGNORE prefix, synthesize
             // C `:457-476`. The prediction's surprise: this arm
             // is the SAME as the TUN arm. The kernel wrote
             // `htonl(AF_*)` at `[10..14]`; we don't read those
@@ -476,7 +466,7 @@ impl Device for BsdTun {
                 Ok(n + offset)
             }
 
-            // ─── TAP: +0, nothing to do ─────────────────────────
+            // ─── TAP: +0, nothing to do
             // C `:485-491`. Kernel wrote ethernet; route.c
             // wants ethernet. `raw.rs` body verbatim.
             BsdVariant::Tap => {
@@ -492,13 +482,13 @@ impl Device for BsdTun {
     #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.variant {
-            // ─── TUN: write at +14, strip ether ─────────────────
+            // ─── TUN: write at +14, strip ether
             // C `:510`: `write(fd, DATA + 14, len - 14)`. The
             // daemon wrote a full ether header (route.c always
             // does); we strip it. Byte-identical to `fd.rs`.
             BsdVariant::Tun => write_fd(self.fd.as_raw_fd(), &buf[ETH_HLEN..]),
 
-            // ─── UTUN: synthesize prefix, write at +10 ──────────
+            // ─── UTUN: synthesize prefix, write at +10
             // C `:518-541`. The novel arm. Read ethertype from
             // `[12..14]`, map to AF, write 4-byte prefix at
             // `[10..14]` (CLOBBERING ethertype — fine, kernel
@@ -538,7 +528,7 @@ impl Device for BsdTun {
                 write_fd(self.fd.as_raw_fd(), &buf[offset..])
             }
 
-            // ─── TAP: +0, write all ─────────────────────────────
+            // ─── TAP: +0, write all
             // C `:551`: `write(fd, DATA, len)`. `raw.rs`
             // verbatim.
             BsdVariant::Tap => write_fd(self.fd.as_raw_fd(), buf),
@@ -568,9 +558,7 @@ impl Device for BsdTun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // open() — stubbed, cfg-gated
-// ═══════════════════════════════════════════════════════════════════
 //
 // THREE constructors, all `cfg`-gated to BSD targets. The Linux
 // build doesn't see them. Tests construct `BsdTun { fd, variant,
@@ -631,9 +619,7 @@ impl BsdTun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // read/write — module-private, the FOURTH instance
-// ═══════════════════════════════════════════════════════════════════
 //
 // Fourth `read_fd`/`write_fd`. `linux.rs`, `fd.rs`, `raw.rs` are
 // `cfg(linux)`; this is `cfg(unix)` (compiles on Linux for tests
@@ -683,9 +669,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     Ok(ret as usize)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests — three offsets, on Linux
-// ═══════════════════════════════════════════════════════════════════
 //
 // All three variants tested via fakes. Tun/Utun via `pipe()`
 // (stream-ish is fine; we feed one packet at a time). Tap via
@@ -702,7 +686,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    // ─── Constants ───────────────────────────────────────────────────
+    // ─── Constants
 
     /// `AF_PREFIX_LEN = 4`. The arithmetic that gives offset 10.
     /// C uses literal `10` everywhere; we name the prefix length.
@@ -734,7 +718,7 @@ mod tests {
         assert_eq!(BsdVariant::Tap.mode(), Mode::Tap);
     }
 
-    // ─── to_af_prefix — the inverse map ──────────────────────────────
+    // ─── to_af_prefix — the inverse map
 
     /// `0x0800` → `htonl(AF_INET)`. `AF_INET = 2` everywhere
     /// (4.2BSD legacy). Bytes are `[0, 0, 0, 2]` ON ALL
@@ -817,7 +801,7 @@ mod tests {
         assert_eq!(prefix[3], af6_low);
     }
 
-    // ─── Fixtures ────────────────────────────────────────────────────
+    // ─── Fixtures
 
     /// Construct a `BsdTun` directly. Can't use `open()` (cfg-
     /// gated to BSD targets). Module-private fields.
@@ -871,7 +855,7 @@ mod tests {
         out
     }
 
-    // ─── Tun: +14 (= fd.rs) ──────────────────────────────────────────
+    // ─── Tun: +14 (= fd.rs)
 
     /// Tun read: feed an IPv4 packet to the pipe; the device
     /// reads at +14, synthesizes the ether header. Byte-
@@ -927,7 +911,7 @@ mod tests {
         assert_eq!(&got, &[0x45, 0x00, 0xDE, 0xAD]);
     }
 
-    // ─── Utun: +10, IGNORE prefix (read), SYNTHESIZE (write) ────────
+    // ─── Utun: +10, IGNORE prefix (read), SYNTHESIZE (write)
 
     /// Utun read: feed `[garbage prefix ×4][IPv4]`. The device
     /// reads at +10, IGNORES the prefix, synthesizes ether from
@@ -1098,7 +1082,7 @@ mod tests {
         assert_eq!(&frame[10..14], &[0, 0, 0x08, 0x06]);
     }
 
-    // ─── Tap: +0 (= raw.rs) ──────────────────────────────────────────
+    // ─── Tap: +0 (= raw.rs)
 
     /// Tap read: ethernet in, ethernet out. `raw.rs` verbatim.
     #[test]
@@ -1146,7 +1130,7 @@ mod tests {
         assert_eq!(frame[10], 0x0B); // shost[4], untouched
     }
 
-    // ─── EOF + error paths ───────────────────────────────────────────
+    // ─── EOF + error paths
 
     /// EOF on any variant → UnexpectedEof. Seqpacket gives
     /// EOF on close; pipe also gives EOF on close (read
@@ -1202,7 +1186,7 @@ mod tests {
         assert!(msg.contains("0x7"), "msg: {msg}");
     }
 
-    // ─── Device trait surface ────────────────────────────────────────
+    // ─── Device trait surface
 
     /// `mac()` always None (open() stub doesn't read it).
     /// `fd()` always Some. Surface accessors don't panic.

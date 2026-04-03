@@ -82,9 +82,7 @@ use crate::{Device, MTU, Mac, Mode};
 // rationale: RFC constants don't vary; the `cfg`-boundary rule
 // doesn't apply because there's no `cfg`.)
 
-// ═══════════════════════════════════════════════════════════════════
 // FdSource — the union type the C string dispatch implies
-// ═══════════════════════════════════════════════════════════════════
 
 /// The two ways the fd reaches us. C `setup_device` (`:163-166`)
 /// dispatches on `sscanf(device, "%d") == 1`: integer-parsable →
@@ -123,9 +121,7 @@ pub enum FdSource {
     UnixSocket(std::path::PathBuf),
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // FdTun — the Device impl
-// ═══════════════════════════════════════════════════════════════════
 
 /// `fd_devops` (`fd_device.c:244-249`). The Android backend.
 ///
@@ -187,7 +183,7 @@ impl FdTun {
     ///     checks `:80-88` and we match).
     pub fn open(source: FdSource) -> io::Result<Self> {
         let (fd, device_label) = match source {
-            // ─── Inherited ──────────────────────────────────────────
+            // ─── Inherited
             // C `:163`: `sscanf(device, "%d", &device_fd) == 1`.
             // The daemon already parsed the integer; we get it
             // directly.
@@ -225,7 +221,7 @@ impl FdTun {
                 (file, format!("fd/{fd}"))
             }
 
-            // ─── UnixSocket ─────────────────────────────────────────
+            // ─── UnixSocket
             // C `:164-166`: connect, recvmsg with SCM_RIGHTS,
             // wrap. The ~100 LOC of cmsghdr boilerplate
             // collapses into `recv_scm_rights`.
@@ -252,9 +248,7 @@ impl FdTun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // SCM_RIGHTS — the fourth unsafe shim, the first to USE nix
-// ═══════════════════════════════════════════════════════════════════
 
 /// `read_fd` + `receive_fd` (`fd_device.c:39-120`). Connect to the
 /// Unix socket, receive one fd via `SCM_RIGHTS`.
@@ -298,7 +292,7 @@ impl FdTun {
 fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 
-    // ─── Connect ────────────────────────────────────────────────────
+    // ─── Connect
     // C `parse_socket_addr` (`:122-149`) + `receive_fd:100-108`.
     //
     // `@` prefix → abstract namespace (`:137-140`): C zeroes
@@ -318,7 +312,7 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
     // We don't pre-check; std's error propagates.
     let stream = connect_unix(path)?;
 
-    // ─── recvmsg ────────────────────────────────────────────────────
+    // ─── recvmsg
     // C `read_fd` (`:39-93`). The cmsghdr dance.
     //
     // The C reads ONE BYTE of regular data (`:47-48`: `iov_len =
@@ -358,7 +352,7 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
         MsgFlags::empty(),
     )?;
 
-    // ─── Check flags ────────────────────────────────────────────────
+    // ─── Check flags
     // C `:63-69`: `if(msg.msg_flags & (MSG_CTRUNC | MSG_OOB |
     // MSG_ERRQUEUE))`. The `IP_RECVERR` ifdef gates `MSG_
     // ERRQUEUE` (Linux-only). We're Linux-only here (the whole
@@ -395,7 +389,7 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
         ));
     }
 
-    // ─── Extract the fd ─────────────────────────────────────────────
+    // ─── Extract the fd
     // C `:72-92`. Walk the cmsg, check level/type/len, extract.
     //
     // **The C has a NULL-deref bug here.** `:72`: `cmsgptr =
@@ -492,7 +486,7 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     // (ASCII bytes are verbatim) holds.
     let bytes = path.as_os_str().as_encoded_bytes();
     if let Some(b'@') = bytes.first() {
-        // ─── Abstract namespace ────────────────────────────────────
+        // ─── Abstract namespace
         // C `:139`: `socket_addr.sun_path[0] = '\0'`. The kernel
         // distinguishes abstract from filesystem by the first
         // byte: NUL → abstract, non-NUL → filesystem. The C
@@ -521,7 +515,7 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
         let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
         UnixStream::connect_addr(&addr)
     } else {
-        // ─── Filesystem path ───────────────────────────────────────
+        // ─── Filesystem path
         // C `:143`: `path_length = strlen(path) + 1` — include
         // the NUL. Filesystem `sun_path` is NUL-terminated.
         // std `connect()` handles this.
@@ -532,9 +526,7 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
 // (`from_ip_nibble` + `set_etherheader` hoisted to `crate::ether`
 // when BSD became the second consumer. The fns themselves are
 // pure; the move preserves byte-identical behavior.)
-// ═══════════════════════════════════════════════════════════════════
 // Device impl — the +14 read/write
-// ═══════════════════════════════════════════════════════════════════
 
 impl Device for FdTun {
     /// `read_packet` (`fd_device.c:210-230`). The +14 read +
@@ -659,9 +651,7 @@ impl Device for FdTun {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // read/write — same as linux.rs, but module-private
-// ═══════════════════════════════════════════════════════════════════
 //
 // These are duplicates of `linux.rs::{read_fd, write_fd}`. NOT
 // shared. The "re-declare module-private constants when modules
@@ -700,9 +690,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     Ok(ret as usize)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests — pure fns + pipe-based integration
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -711,9 +699,7 @@ mod tests {
     // (Ethernet constant tests + nibble tests + set_etherheader
     // tests hoisted to `crate::ether::tests` with their subjects.
     // Same assertions; the diff is location.)
-    // ─────────────────────────────────────────────────────────────────
     // FdSource::Inherited — the negative-fd check
-    // ─────────────────────────────────────────────────────────────────
 
     /// C `:168`: `if(device_fd < 0)`. Negative fds don't exist;
     /// reject early. The C logs `strerror(errno)` which is
@@ -728,9 +714,7 @@ mod tests {
         assert!(msg.contains("-1"), "msg: {msg}");
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // pipe-based integration — the win over linux.rs
-    // ─────────────────────────────────────────────────────────────────
     //
     // `linux.rs` couldn't test the +10 offset trick: the kernel
     // TUN driver lays out `tun_pi`; can't fake that without the
@@ -913,9 +897,7 @@ mod tests {
         assert!(tun.fd().is_some());
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // SCM_RIGHTS — round-trip with a real socketpair
-    // ─────────────────────────────────────────────────────────────────
     //
     // Can't easily test the abstract-namespace connect (would
     // need a real listener). But the recvmsg/SCM_RIGHTS itself
@@ -1036,9 +1018,7 @@ mod tests {
         // it and `received_w` close on drop.
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // Test plumbing — pipe helpers
-    // ─────────────────────────────────────────────────────────────────
 
     /// Newtype around the pipe fd for the tests. Owns; drop
     /// closes. `into_raw` releases ownership for passing to

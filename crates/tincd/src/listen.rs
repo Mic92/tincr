@@ -172,9 +172,7 @@ impl Listener {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // setup_listen_socket (TCP)
-// ────────────────────────────────────────────────────────────────────
 
 /// `setup_listen_socket` (`net_socket.c:191-262`). One TCP listener.
 ///
@@ -226,9 +224,7 @@ fn setup_tcp(addr: &SockAddr) -> io::Result<Socket> {
     Ok(s)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // setup_vpn_in_socket (UDP)
-// ────────────────────────────────────────────────────────────────────
 
 /// `setup_vpn_in_socket` (`net_socket.c:292-399`). One UDP socket.
 ///
@@ -279,9 +275,7 @@ fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
     Ok(s)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // add_listen_address
-// ────────────────────────────────────────────────────────────────────
 
 /// `add_listen_address(NULL, false)` — the no-config default
 /// (`net_setup.c:1173`: `if(!cfgs) add_listen_address(address, NULL)`
@@ -378,9 +372,7 @@ fn open_one(addr: SocketAddr) -> Option<Listener> {
     Some(Listener { tcp, udp, local })
 }
 
-// ────────────────────────────────────────────────────────────────────
 // configure_tcp (per-connection, post-accept)
-// ────────────────────────────────────────────────────────────────────
 
 /// `configure_tcp` (`net_socket.c:68-108`). Set the accepted fd's
 /// options: NONBLOCK + NODELAY. The C also does TOS/TCLASS/MARK
@@ -414,9 +406,7 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
     Ok(s.into())
 }
 
-// ────────────────────────────────────────────────────────────────────
 // sockaddrunmap + is_local_connection
-// ────────────────────────────────────────────────────────────────────
 
 /// `sockaddrunmap` (`netutl.c:272-277`). v4-mapped v6 addr → plain v4.
 ///
@@ -462,9 +452,7 @@ pub fn is_local(sa: &SocketAddr) -> bool {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // pidfile_addr — init_control's address-mapping
-// ────────────────────────────────────────────────────────────────────
 
 /// `init_control` lines :155-176: build the pidfile address string.
 ///
@@ -510,9 +498,7 @@ pub fn pidfile_addr(listeners: &[Listener]) -> String {
     format!("{} port {}", mapped.ip(), mapped.port())
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tarpit
-// ────────────────────────────────────────────────────────────────────
 
 /// `max_connection_burst` (`net_socket.c:45`). Leaky bucket capacity.
 const MAX_BURST: u32 = 10;
@@ -606,7 +592,7 @@ impl Tarpit {
     /// `now` from `Timers::now()`. The drain is `(now - last).as_
     /// secs()` — second granularity to match C's `time_t`.
     pub fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
-        // ─── same-host bucket ────────────────────────────────────
+        // ─── same-host bucket
         // C `:686`: `if(!sockaddrcmp_noport(sa, &prev_sa))`. The `!`
         // is because `sockaddrcmp` is memcmp-style: 0 means equal.
         // Compare on .ip() — the caller's port-strip is just for
@@ -645,7 +631,7 @@ impl Tarpit {
         // bucket (it's "different from prev"); SECOND connection does.
         self.prev_addr = Some(addr);
 
-        // ─── all-host bucket ─────────────────────────────────────
+        // ─── all-host bucket
         // Same arithmetic, different bucket.
         let elapsed = now.saturating_duration_since(self.allhost_time).as_secs();
         #[allow(clippy::cast_possible_truncation)] // see above
@@ -707,9 +693,7 @@ impl Tarpit {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // sockaddr2hostname (the printable-address part)
-// ────────────────────────────────────────────────────────────────────
 
 /// `sockaddr2hostname` (`netutl.c:183-203`) — a subset. The C does
 /// `getnameinfo` with `NI_NUMERICHOST | NI_NUMERICSERV`, which is
@@ -732,9 +716,7 @@ pub fn fmt_addr(sa: &SocketAddr) -> String {
     format!("{} port {}", sa.ip(), sa.port())
 }
 
-// ════════════════════════════════════════════════════════════════════
 // TESTS
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -746,7 +728,7 @@ mod tests {
         SocketAddr::new(s.parse().unwrap(), port)
     }
 
-    // ─── unmap ───────────────────────────────────────────────────────
+    // ─── unmap
 
     /// `::ffff:10.0.0.5` → `10.0.0.5`. C `IN6_IS_ADDR_V4MAPPED`.
     #[test]
@@ -782,7 +764,7 @@ mod tests {
         assert_eq!(unmap(mapped), addr("0.0.0.0", 655));
     }
 
-    // ─── is_local ────────────────────────────────────────────────────
+    // ─── is_local
 
     /// 127.0.0.0/8. C `:308`: `ntohl(...) >> 24 == 127`. Any addr in
     /// the /8, not just .0.0.1.
@@ -825,7 +807,7 @@ mod tests {
         assert!(!is_local(&addr("::", 655)));
     }
 
-    // ─── fmt_addr / pidfile_addr ─────────────────────────────────────
+    // ─── fmt_addr / pidfile_addr
 
     /// `sockaddr2hostname` format. The CLI's `Tok::lit(" port ")`
     /// parser expects exactly this.
@@ -855,7 +837,7 @@ mod tests {
         assert_eq!(pidfile_addr(&[]), "127.0.0.1 port 0");
     }
 
-    // ─── AddrFamily ──────────────────────────────────────────────────
+    // ─── AddrFamily
 
     /// C `net_setup.c:538-548`. strcasecmp.
     #[test]
@@ -879,7 +861,7 @@ mod tests {
         assert!(AddrFamily::Ipv6.try_v6());
     }
 
-    // ─── Tarpit: leaky bucket arithmetic ─────────────────────────────
+    // ─── Tarpit: leaky bucket arithmetic
     //
     // Seeded `now` lets us control time. The pit-ring is tested
     // separately with real fds (devnull); the bucket math is pure.
@@ -995,7 +977,7 @@ mod tests {
         assert_eq!(sh, 14, "sh keeps ticking");
         assert_eq!(ah, 10, "ah STILL frozen — the early-return proof");
 
-        // ─── the part that's actually OBSERVABLE: prev_addr frozen ──
+        // ─── the part that's actually OBSERVABLE: prev_addr frozen
         // prev_addr is still `attacker` (last update was conn 11,
         // before same-host took over). A different host at t=2:
         // doesn't match prev (good), ah leaks from t=0 (allhost_time
@@ -1120,7 +1102,7 @@ mod tests {
         assert!(tp.check(addr("2001:db8::ffff", 0), t0));
     }
 
-    // ─── Tarpit: pit ring buffer ─────────────────────────────────────
+    // ─── Tarpit: pit ring buffer
 
     /// /dev/null fd. Dup'd because we want distinct OwnedFd's that
     /// each genuinely close on drop. `OwnedFd::try_clone` returns a
@@ -1167,7 +1149,7 @@ mod tests {
         // No panic. OwnedFd dropped 5 fds.
     }
 
-    // ─── open_listeners ──────────────────────────────────────────────
+    // ─── open_listeners
     //
     // These bind real sockets. Port 0 (kernel-assigned) avoids clashes
     // between parallel test threads. The actual bind path is what the

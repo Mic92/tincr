@@ -57,9 +57,7 @@
 
 #![allow(clippy::doc_markdown)]
 
-// ═══════════════════════════════════════════════════════════════════
 // Ethernet header constants — `ethernet.h`, RFC 894, IEEE 802.3
-// ═══════════════════════════════════════════════════════════════════
 
 /// `ETH_HLEN` — `ethernet.h:31` (and `<linux/if_ether.h>`, and
 /// every BSD `<net/ethernet.h>`). dhost(6) + shost(6) + type(2).
@@ -95,9 +93,7 @@ pub(crate) const ETH_P_IP: u16 = 0x0800;
 /// registered 1995 (RFC 1883).
 pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 
-// ═══════════════════════════════════════════════════════════════════
 // from_ip_nibble — version → ethertype
-// ═══════════════════════════════════════════════════════════════════
 
 /// IP version nibble → ethertype. `fd_device.c:192-202` AND
 /// `bsd/device.c:427-443` (which is the same logic with literal
@@ -136,9 +132,7 @@ pub(crate) fn from_ip_nibble(ip0: u8) -> Option<u16> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // set_etherheader — zero MACs + write ethertype
-// ═══════════════════════════════════════════════════════════════════
 
 /// `set_etherheader` (`fd_device.c:204-208`); `bsd/device.c
 /// :429-445` does the same thing inline. Write the synthetic
@@ -169,9 +163,7 @@ pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
     buf[ETH_HLEN - ETHER_TYPE_LEN..ETH_HLEN].copy_from_slice(&ethertype.to_be_bytes());
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 //
 // These were in `fd.rs::tests`. Moved with their subjects. Same
 // tests, same assertions, same comments. The MOVE preserves test
@@ -181,7 +173,7 @@ pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
 mod tests {
     use super::*;
 
-    // ─── Constants — gcc/sed-verified ────────────────────────────────
+    // ─── Constants — gcc/sed-verified
 
     /// `ETH_HLEN = 14` per `ethernet.h:31`. The arithmetic that
     /// every offset trick orbits. gcc-verified: `printf("%d",
@@ -209,7 +201,7 @@ mod tests {
         assert_eq!(ETH_P_IPV6, 0x86DD);
     }
 
-    // ─── from_ip_nibble ──────────────────────────────────────────────
+    // ─── from_ip_nibble
 
     /// IPv4 byte 0: version=4 in high nibble, IHL in low.
     /// `0x45` is the canonical IPv4 first byte (IHL=5 words =
@@ -245,7 +237,7 @@ mod tests {
         assert_eq!(from_ip_nibble(0xFF), None);
     }
 
-    // ─── set_etherheader ─────────────────────────────────────────────
+    // ─── set_etherheader
 
     /// Zero MACs, write ethertype big-endian. `fd_device.c
     /// :204-208`; `bsd/device.c:429-445` inline.

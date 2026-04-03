@@ -183,7 +183,7 @@ impl ControlSocket {
     /// `AlreadyRunning` if the connect-probe succeeds (second daemon).
     /// `Io` for socket/bind/listen failures.
     pub fn bind(path: &Path) -> Result<Self, BindError> {
-        // ─── connect-probe (control.c:205-208) ──────────────────
+        // ─── connect-probe (control.c:205-208)
         // C: socket(); strncpy sun_path; if(connect() >= 0) ERROR.
         // We `UnixStream::connect`. If it succeeds, something's
         // there. If `ECONNREFUSED` (or `ENOENT` — no socket file
@@ -195,13 +195,13 @@ impl ControlSocket {
         // error — ECONNREFUSED, ENOENT, EACCES all mean "nothing
         // is healthily listening there", which is what we want.
 
-        // ─── unlink stale (control.c:210) ────────────────────────
+        // ─── unlink stale (control.c:210)
         // C: `unlink(unixsocketname)`. Errors ignored (`ENOENT` is
         // expected on first run; if it's something else, bind will
         // fail and we'll see why).
         let _ = std::fs::remove_file(path);
 
-        // ─── bind with umask 077 (control.c:212-214) ─────────────
+        // ─── bind with umask 077 (control.c:212-214)
         // C: `mask = umask(0); umask(mask | 077); bind(); umask(mask)`.
         // The socket file's perms come from `0o777 & ~umask`. With
         // `umask | 077`, group/other bits are stripped → `0o700`.
@@ -228,13 +228,13 @@ impl ControlSocket {
 
         let listener = bind_result.map_err(BindError::Io)?;
 
-        // ─── listen(3) (control.c:222) ───────────────────────────
+        // ─── listen(3) (control.c:222)
         // `UnixListener::bind` already calls `listen()` internally
         // with backlog 128 (std's default). C uses backlog 3. The
         // backlog is "max pending accept() queue length"; 128 is
         // fine, control connections are rare.
 
-        // ─── nonblocking ─────────────────────────────────────────
+        // ─── nonblocking
         // mio is level-triggered; the listener fd needs O_NONBLOCK
         // so accept() returns EWOULDBLOCK when the queue is empty
         // instead of blocking the loop. C doesn't set this — it

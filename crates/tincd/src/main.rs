@@ -118,7 +118,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() -> ExitCode {
-    // ─── logger init ─────────────────────────────────────────────
+    // ─── logger init
     // env_logger reads RUST_LOG. `RUST_LOG=tincd` for everything;
     // `RUST_LOG=tincd::meta=debug` for the C `-d4` equivalent.
     // Default level Info (matches C `DEBUG_NOTHING` which still
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("tincd=info"))
         .init();
 
-    // ─── argv ────────────────────────────────────────────────────
+    // ─── argv
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -136,7 +136,7 @@ fn main() -> ExitCode {
         }
     };
 
-    // ─── setup ───────────────────────────────────────────────────
+    // ─── setup
     // C `tincd.c:665` `setup_network()`. Daemon::setup is the bulk
     // of it (the heavily-abridged version).
     let daemon = match Daemon::setup(&args.confbase, &args.pidfile, &args.socket) {
@@ -147,7 +147,7 @@ fn main() -> ExitCode {
         }
     };
 
-    // ─── run ─────────────────────────────────────────────────────
+    // ─── run
     // C `tincd.c:717` `status = main_loop()`. The loop runs until
     // `running = false` (REQ_STOP, SIGTERM, etc).
     //

@@ -43,7 +43,6 @@ use tinc_conf::{Config, read_pem};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
-// ════════════════════════════════════════════════════════════════════
 // PEM type strings + blob length
 
 /// `ecdsa.c:29-30`. Same constants as `tinc-tools/keypair.rs`. Upstream's
@@ -55,7 +54,6 @@ const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 /// sign::SigningKey::from_blob` takes this.
 const PRIVATE_BLOB_LEN: usize = 96;
 
-// ════════════════════════════════════════════════════════════════════
 // Public-key b64 (`ecdsa.c:42-60`)
 
 /// `ecdsa_set_base64_public_key`. Decode 43 b64 chars → 32 bytes.
@@ -88,7 +86,6 @@ fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
     })
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Private key (`keys.c:108-161`)
 
 /// Why `read_ecdsa_private_key` failed. The C just returns NULL and
@@ -151,13 +148,13 @@ pub fn read_ecdsa_private_key(
     config: &Config,
     confbase: &Path,
 ) -> Result<SigningKey, PrivKeyError> {
-    // ─── path resolution (`:114-116`) ───────────────────────────────
+    // ─── path resolution (`:114-116`)
     let path = config.lookup("Ed25519PrivateKeyFile").next().map_or_else(
         || confbase.join("ed25519_key.priv"),
         |e| PathBuf::from(e.get_str()),
     );
 
-    // ─── open + perm check (`:118-144`) ─────────────────────────────
+    // ─── open + perm check (`:118-144`)
     let f = File::open(&path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             PrivKeyError::Missing(path.clone())
@@ -192,7 +189,7 @@ pub fn read_ecdsa_private_key(
         }
     }
 
-    // ─── parse (`:147-159`) ─────────────────────────────────────────
+    // ─── parse (`:147-159`)
     // `read_pem` returns exactly 96 bytes or errors. C `ecdsa_read_
     // pem_private_key`.
     let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN).map_err(|e| PrivKeyError::Pem(path, e))?;
@@ -202,7 +199,6 @@ pub fn read_ecdsa_private_key(
     Ok(SigningKey::from_blob(&arr))
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Peer public key (`keys.c:165-213`)
 
 /// `read_ecdsa_public_key` (`keys.c:165-213`).
@@ -249,7 +245,7 @@ pub fn read_ecdsa_public_key(
     confbase: &Path,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    // ─── Source 1: inline b64 config var (`:179-184`) ───────────────
+    // ─── Source 1: inline b64 config var (`:179-184`)
     if let Some(e) = host_config.lookup("Ed25519PublicKey").next() {
         // C: `ecdsa = ecdsa_set_base64_public_key(p); free(p); return
         // ecdsa;` — returns NULL if the b64 is bad. NO fallthrough to
@@ -260,7 +256,7 @@ pub fn read_ecdsa_public_key(
         return pubkey_from_b64(e.get_str());
     }
 
-    // ─── Source 2/3: file (`:186-189`) ──────────────────────────────
+    // ─── Source 2/3: file (`:186-189`)
     // `Ed25519PublicKeyFile` if set, else `hosts/NAME`. The default
     // is "the same file we already parsed as config" — `read_pem`
     // skips lines until BEGIN.
@@ -272,7 +268,7 @@ pub fn read_ecdsa_public_key(
             |e| PathBuf::from(e.get_str()),
         );
 
-    // ─── Open + parse (`:191-211`) ──────────────────────────────────
+    // ─── Open + parse (`:191-211`)
     // C logs ERR on `fopen` fail (`:196-199`). We match. `:204` logs
     // ERR on parse fail too (unless `errno == ENOENT`, which means
     // `read_pem` got EOF before BEGIN — `pem.c:57` sets it).
@@ -311,7 +307,6 @@ pub fn read_ecdsa_public_key(
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
 
 #[cfg(test)]
@@ -358,7 +353,6 @@ mod tests {
         tinc_conf::write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).unwrap();
     }
 
-    // ────────────────────────────────────────────────────────────────
     // pubkey_from_b64
 
     #[test]
@@ -392,7 +386,6 @@ mod tests {
         assert!(pubkey_from_b64(&bad).is_none());
     }
 
-    // ────────────────────────────────────────────────────────────────
     // read_ecdsa_private_key
 
     #[test]
@@ -486,7 +479,7 @@ mod tests {
         // 0o100400 — owner r only. Safe.
         assert_eq!(0o100_400 & !0o100_700, 0);
 
-        // ─── False positives (C-bug, ported) ────────────────────────
+        // ─── False positives (C-bug, ported)
         // 0o102600 — setgid + 600. NOT actually insecure (setgid on
         // a non-executable does nothing exploitable for a key file).
         // C warns anyway. We match.
@@ -528,7 +521,6 @@ mod tests {
         assert!(matches!(err, PrivKeyError::Pem(_, _)), "got {err:?}");
     }
 
-    // ────────────────────────────────────────────────────────────────
     // read_ecdsa_public_key
 
     /// Source 1: inline b64 config var. Most common (`tinc init`
