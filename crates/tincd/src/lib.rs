@@ -28,6 +28,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod addrcache;
+pub mod autoconnect;
 pub mod compress;
 pub mod conn;
 pub mod control;

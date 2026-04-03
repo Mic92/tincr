@@ -81,3 +81,6 @@ tinc-sptps = { path = "../tinc-sptps" }
 # daemon. Stronger than the in-process pump test in join.rs (real
 # TCP, real epoll, real daemon's `?` branch).
 tinc-tools = { path = "../tinc-tools" }
+# autoconnect.rs tests: deterministic RNG. rand_chacha is already in the
+# lockfile (transitively via rand 0.8). rand_core 0.6 trait compat.
+rand_chacha = "0.3"
