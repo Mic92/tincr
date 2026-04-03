@@ -396,6 +396,152 @@ Why Rust↔C measured 12.9 Mbps not zero: the C `receive_meta` is also one-recv-
 
 ---
 
+## Security findings (port audit)
+
+Read-only audit against the four-adversary threat model. Method: every `*_h` in `src/protocol_{edge,subnet,key}.c` lined up against `parse_*` (`proto.rs`) + `on_*` (`gossip.rs`); every `unwrap()`/`expect()` in daemon/SPTPS traced to its gate; UDP relay entry compared against `net_packet.c:1718-1842`; pre-auth `feed()` traced with `allow_request == Some(Id)`.
+
+Four findings, one borderline-severe (the UDP relay one). The rest are mild gossip-layer divergences — same shape as the existing pure/impure-seam losses (`8ea18bed`, `66bea146`).
+
+### daemon/net.rs:200-251 — UDP relay path trusts SRCID without authentication
+
+**Severity**: amplification / src-spoofing (adversary 1: network attacker, no key).
+
+The C entry to `handle_incoming_vpn_packet` (`net_packet.c:1718-1842`) authenticates the *immediate UDP sender* before deciding whether to relay. Three layers of gate:
+
+1. `:1728` `n = lookup_node_udp(addr)` — IP→node lookup
+2. `:1730-1732` `if(n && !n->status.udp_confirmed) n = NULL` — only believe a confirmed UDP address
+3. `:1741-1745` if no addr-match: only accept SRCID-based identity when `dst_id == nullid` AND `sptps_verify_datagram` passes (cryptographic check against `from->sptps`). Packets with `dst_id != nullid` from an unconfirmed sender go to `try_harder` (per-node MAC trial), and `try_harder` skips nodes without `validkey_in`/`instate`.
+
+Only *after* `n` is established does the C re-read `SRCID`/`DSTID` at `:1789-1791` and enter the relay branch at `:1817-1821`. The relayer **knows who handed it the packet**.
+
+Our port (`net.rs:200-251`) does this:
+
+```rust
+let src_id = NodeId6::from_bytes(pkt[6..12].try_into().unwrap());
+let Some(from_nid) = self.id6_table.lookup(src_id) else { return; };
+// ...
+if !dst_id.is_null() {
+    let Some(to_nid) = self.id6_table.lookup(dst_id) else { return; };
+    if !self.graph.node(to_nid).is_some_and(|n| n.reachable) { return; }
+    if to_nid != self.myself {
+        // C :1817-1821
+        self.send_sptps_data_relay(to_nid, &to_name, from_nid, 0, ct);
+```
+
+No `lookup_node_udp`. No `udp_confirmed` gate. No `sptps_verify_datagram`. The justification at `:173-176` ("SPTPS-only: skips `lookup_node_udp` and `try_harder` ... legacy-crypto packets have no ID prefix; we don't have legacy") is correct for the **direct-receive** path — `ct` is fed to `from->sptps` at `:305` and the AEAD tag check provides end-to-end auth. It is **wrong for the relay path**: at `:246` we pass `ct` straight to `send_sptps_data_relay` *without ever decrypting it*. The relay never validates anything.
+
+**Attack** (adversary 1, no key, knows our UDP listen address — it's in `hosts/us`):
+
+1. Attacker collects mesh node names via traffic analysis or just guessing common names. `NodeId6::from_name` is `sha512(name)[..6]`, public derivation.
+2. Crafts UDP datagram: `[dst_id6=sha512("victim")][src_id6=sha512("any-known-node")][garbage]`.
+3. Sends 1 packet to our `:655`. We look up `src_id` → found (we know `any-known-node` from gossip). Look up `dst_id` → found, reachable. `to_nid != self.myself`. **Relay.**
+4. `send_sptps_data_relay` runs the full `:967-1054` decision tree. With `relay_minmtu == 0` (unconfirmed), `too_big` is false; with proto-minor≥4 (any 1.1 peer), goes UDP. We send a 12+garbage UDP packet to `victim`'s `udp_addr` (or, if unconfirmed, to a random edge address from `victim`'s edge_tree — `choose_udp_address:1331-1360`). 1:1 amplification.
+5. Worse: with `relay_minmtu == 0` AND `tcponly` OR proto-minor<7, falls back to b64-over-REQ_KEY at `:1784-1791`. **No `random_early_drop` on this path** (RED only gates the binary SPTPS_PACKET branch at `:1714` and the PACKET 17 branch at `:1198`). A flood of crafted UDP relay packets becomes a flood of b64'd REQ_KEY lines on the `nexthop` meta-conn; `conn.send` queues unboundedly. The REQ_KEY relay at `protocol_key.c:165-170` *would* be the C's defense, but the C never reaches the relay branch for an unauthenticated sender in the first place.
+6. The attacker can also set `src_id6 = sha512(our_name)`. `id6_table` contains `myself` (`daemon.rs:1494`), so `from_nid = self.myself`. `send_sptps_data_relay` now computes `direct = (from == myself && to == relay)` and may write `dst_id = NULL` (`:1799-1802`) — the destination receives a packet that claims to be direct-from-its-neighbor, with a body the destination's SPTPS will reject (`DecryptFailed`) which kicks the **10-second-gated** `send_req_key` restart logic (`net.rs:320-331`). One spoofed packet per 10s tears down a victim's tunnel.
+
+The C's `n` (the immediate, *authenticated* sender) and `from` (the SRCID-claimed origin) are deliberately distinct; `:1817 send_sptps_data(to, from, ...)` passes `from` so the *next* hop sees the right SRCID, but the *gate* to reach `:1817` is on `n`. We collapsed the two into one `from_nid` and lost the gate.
+
+**C reference**: `net_packet.c:1728-1745` (the auth chain), `:1770-1791` (the re-lookup is *after* `n` is established), `:1817` (relay only inside the `n->status.sptps` block).
+
+**Repro sketch**: bind a raw UDP socket in a netns, send `bytes(sha512(b"bob")[:6] + sha512(b"alice")[:6] + b"X"*100)` to the daemon's listen port where `alice` and `bob` are both in `hosts/`. tcpdump on the daemon's outgoing interface should show a 112-byte packet leave toward `bob`. Against C tincd: nothing leaves (`n == NULL` after `:1745`, log line "Received UDP packet from unknown source").
+
+This one wants fixing. Options: (a) port `sptps_verify_datagram` and the `dst==null && verify` gate from `:1741-1745` for the no-udp_confirmed case; (b) don't relay at all unless `tunnels[from_nid].status.udp_confirmed && peer == tunnels[from_nid].udp_addr` — stricter than C (rejects dynamic-relay senders) but cheap and correct for the common topology.
+
+### daemon/gossip.rs:1624-1636 — DEL_SUBNET retaliate-ADD ping-pong
+
+**Severity**: DoS / amplification (adversary 2: malicious peer with key, two-conn topology).
+
+C `del_subnet_h` ordering (`protocol_subnet.c:216-235`):
+
+```c
+find = lookup_subnet(owner, &s);   // :216 — lookup FIRST
+if(!find) { ...; return true; }    // :218-225 — don't have it → noop
+if(owner == myself) {              // :231 — we DO have it AND owner is us
+    send_add_subnet(c, find);      // :233 — retaliate with what we OWN
+    return true;
+}
+```
+
+The `:216` lookup gates `:231`. If a peer sends `DEL_SUBNET <us> 1.2.3.4/32` and we don't actually own `1.2.3.4/32`, the C bails at `:218` ("does not appear in his subnet tree") and **never** reaches the retaliate.
+
+Our port (`gossip.rs:1624-1636`) reordered: `owner == self.myself` check **before** any lookup, and `send_subnet(..., AddSubnet, ..., &subnet)` sends back **the wire-body subnet**, not a looked-up one. The comment at `:1628-1633` explicitly notes the divergence ("C `:228-230` returns true ... we don't track per-node ownership ... send back what they sent"). It's wrong about the consequence:
+
+1. Malicious peer `mallory` connects to us *and* to `victim` (3-node mesh, both meta-conns active).
+2. `mallory` sends us `DEL_SUBNET <our_name> 99.99.99.99/32` — a subnet we never claimed.
+3. C: `lookup_subnet(myself, 99.99.99.99/32)` → NULL → warn-and-drop at `:218`. Done.
+4. Us: `owner == self.myself` at `:1624` → `send_subnet(mallory, AddSubnet, our_name, 99.99.99.99/32)` at `:1635`. We just **emitted gossip claiming a subnet we don't own**, with a fresh nonce.
+5. `mallory` does nothing with our reply. But `mallory` *also* sent the same `DEL_SUBNET` to `victim` (or just lets gossip carry it). `victim` runs the same Rust code, also retaliates. Now `mallory` holds an `ADD_SUBNET our_name 99.99.99.99/32` from each of us, with our names on it.
+6. `mallory` forwards our retaliate-ADD to `victim`. `victim`'s `on_add_subnet:1456` `subnets.contains` is false (nobody's heard of `99.99.99.99/32`); `victim` adds it, **runs `subnet-up` script** (`:1558-1561`), forwards. The route table now points `99.99.99.99/32 → us`; we don't have a TUN interface for it, packets blackhole.
+
+This is a peer-forces-us-to-lie attack. Each cycle is one `DEL_SUBNET` in → one `ADD_SUBNET` out, 1:1 packet ratio, but the *state* corruption persists until the next `seen_request` age cycle and propagates mesh-wide. Pre-auth surface is fine (this is post-SPTPS-auth); the attacker is a keyed peer.
+
+**C reference**: `protocol_subnet.c:216-235` (lookup gates retaliate), our `gossip.rs:1624-1636`.
+
+**Fix sketch**: gate the retaliate on `self.subnets.contains(&subnet, &self.name)`. One line.
+
+### daemon/gossip.rs:1669 — DEL_SUBNET fires subnet-down for unknown subnets
+
+**Severity**: minor DoS (adversary 2, peer-triggers-script-exec).
+
+Same ordering inversion as the previous finding, different consequence. The C `:216 lookup_subnet` gates `:254 subnet_update(..., false)`:
+
+```c
+find = lookup_subnet(owner, &s);
+if(!find) { ...; return true; }   // bail BEFORE script
+...
+if(owner->status.reachable) subnet_update(owner, find, false);  // script
+subnet_del(owner, find);
+```
+
+Our `gossip.rs:1667-1680`:
+
+```rust
+let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
+if reachable {
+    self.run_subnet_script(false, &owner_name, &subnet);  // :1669 — ALWAYS fires
+}
+if !self.subnets.del(&subnet, &owner_name) {              // :1675 — lookup is here
+    log::warn!(...);  // "does not appear" — too late
+}
+```
+
+A peer sends `DEL_SUBNET reachable_node 8.8.8.8/32` (any subnet not in our table). C: lookup misses at `:218`, warn, return. Us: `run_subnet_script(false, "reachable_node", 8.8.8.8/32)` fires `subnet-down` with `SUBNET=8.8.8.8/32` in the environment, *then* `del()` returns false, *then* we warn. The script ran for a subnet we never had `subnet-up` for.
+
+Most `subnet-down` scripts call `ip route del $SUBNET` and ignore failures. But: a malicious peer can flood us with `DEL_SUBNET node X` for distinct X, each one a `fork+exec`. The `seen_request` dedupe (`:1592`) is keyed on the full line including the random `%x` nonce — `mallory` can't replay our *own* gossip back at us, but can mint fresh nonces all day. The C is protected by `:218` short-circuiting before `fork`.
+
+**C reference**: `protocol_subnet.c:216-225` (lookup-first), `:254-256` (script after lookup-passed).
+
+**Fix sketch**: move the `del()` (or a `contains()`) before `run_subnet_script`. The comment at `:1674` claims "same outcome, one fewer walk" — that's true for the table state, false for the script side effect.
+
+### daemon/net.rs:1784-1791 — b64 REQ_KEY/SPTPS_PACKET fallback path has no random_early_drop
+
+**Severity**: DoS via outbuf growth (adversary 2; reachable from adversary 1 via the relay finding above).
+
+`protocol_misc.c:78-85` `random_early_drop` gates both `send_tcppacket` (`:94`) and `send_sptps_tcppacket` (`:125`). The C `send_sptps_data` TCP-fallback at `net_packet.c:975-998` calls `send_sptps_tcppacket` for the binary path (RED-gated) and `send_request` for the b64 ANS_KEY/REQ_KEY paths. The b64 paths in C are *also* RED-gated indirectly: `send_request` → `send_meta` → ... no, actually the C `send_request` (`protocol.c:73-98`) does **not** call `random_early_drop`. The C is also unprotected here.
+
+Rechecking: the C reaches the b64 `:998` REQ_KEY path only when `(nexthop->options >> 24) < 7`. Against modern peers (≥7 since 2013) the C always takes the RED-gated binary path at `:975-986`. The b64 fallback is legacy-nexthop-only. We do the same (`net.rs:1710` checks `>= 7`). So this is **C-parity, not a port regression**: both implementations have the unbounded-queue issue against pre-2013 nexthops, neither implementation expects to talk to one.
+
+The outbuf growth from the relay finding above is the real concern, but the fix lives there (don't relay unauthenticated input), not here.
+
+**Downgraded to non-finding**; included for the audit trail because this path was traced.
+
+### Clean surfaces
+
+Things checked that passed:
+
+- **SPTPS state.rs unwrap()s** (`:599,601,646,664,699,701,808,828,875`): every one is gated. `:646` `body.try_into().unwrap()` is post-`body.len() != SIG_LEN` at `:643`. `:664` `hiskex[1+NONCE_LEN..].try_into()` is on a fixed-size `[u8; KEX_LEN]` slice — `1+32..65` is exactly 32 bytes, compile-time-determined. `:808` `data[..4].try_into()` is post-`data.len() < min` at `:804` where `min ≥ 5`. `:828` `incipher.as_ref().unwrap()` is in the `else` of `if self.incipher.is_none()` at `:810`. `:875` is post-`buf.len() < 2` at `:870`. The prompt's worry ("a short SIG record that passes the length check at one site") doesn't materialize: each `try_into` is paired with its own gate in the same function. **The pre-auth datagram entry** (`receive_datagram:810-825`): `incipher == None` requires `seqno == replay.inseqno` (strict counter) AND `ty == REC_HANDSHAKE`; there is no path to `incipher.unwrap()` while `None`. Clean.
+- **Stream reclen attacker-controlled** (`state.rs:875`): `u16` caps at 64KB. The comment at `:873-877` ("don't pre-allocate — reclen is attacker-controlled") is correct; the buffer grows lazily via `extend_from_slice`. A flood of 2-byte `[0xff,0xff]` records doesn't pre-reserve. Clean.
+- **conn.rs feed() pre-auth**: `MAXBUFSIZE = 2176` matches C `net.h:45`. Plaintext mode (pre-SPTPS, `allow_request == Some(Id)`) `:673-679` checks `inbuf.live_len() >= MAXBUFSIZE` → `Dead`. A 3KB single line without `\n` accumulates over two `feed()` calls; the second one trips the gate. Same as C `meta.c:180-183`. Clean.
+- **Invitation `?` greeting** (`proto.rs:500-577`, `invitation_serve.rs`): throwaway pubkey b64-decode is length-checked (`.filter(|v| v.len() == PUBLIC_LEN)` at `proto.rs:519`). `serve_cookie` rename is `fs::rename` (atomic on POSIX). Expiry uses `checked_sub` (`:266`). `finalize` uses `OpenOptions::create_new` (`O_EXCL`, `:332`) — STRICTER than C's `access`+`fopen("w")` TOCTOU at `protocol_auth.c:128-131`. The `BadPubkey` newline gate (`:322`) matches C `:122`. Clean.
+- **`from == to` self-loop edge** (prompt's "C `protocol_edge.c:62-66`" concern): the C check is at `:89` (`!strcmp(from_name, to_name)`), not `:62-66` (which is the sscanf). Our `tinc-proto/src/msg/edge.rs:69` `from == to → ParseError`. Present. Clean.
+- **`from == myself` edge correction** (`protocol_edge.c:150,183,285`): all three present at `gossip.rs:1792-1801` (existing-edge mismatch), `:1827-1840` (nonexistent-edge contradiction), `:1960-1970` (DEL of our edge). Clean.
+- **`Tok::lu` glibc-permissive `-1→u64::MAX`**: only callsite on the network path is `key.rs:229` `maclen` in ANS_KEY parse. `maclen` is unused in SPTPS mode (the C `:487-545` cipher/digest setup is `#ifndef DISABLE_LEGACY`; we never read it). The `-1` value is *what we ourselves emit* for SPTPS ANS_KEY (`net.rs:1770`, the `"-1 -1 -1"` literal). No alloc-on-u64::MAX path. Clean.
+- **b64 decode unbounded** (`tinc-crypto/src/b64.rs:78`): output is `≤ input.len() * 3/4 + 2`. Input is `Tok::s()` capped at `MAX_STRING = 2048` (`tok.rs:70`). Max decode ≈ 1538 bytes. The `Vec::with_capacity(src.len() / 4 * 3 + 2)` at `:79` is bounded by the input cap. Clean.
+- **BufReader::into_inner mid-stream**: `rg BufReader|into_inner` finds only `tinc-tools/src/ctl.rs` (control socket client, `read_exact` on the BufReader itself — the `:739` comment explicitly addresses this) and `genkey.rs` (one-direction read, no mode switch). Clean.
+- **`outgoing.rs:586` `CString::new(cmd).expect("proxy cmd has interior NUL")`**: `cmd` is the `Proxy = exec ...` config value (adversary 3: local config write). Panic-on-NUL is a self-DoS for the operator who put a NUL in their own config file. The C `system()` would also misbehave (NUL truncates the command). Not a port regression. Non-finding.
+
+---
+
 ## Test-harness bugs (not C, not Rust — the rig)
 
 ### TAP devices race REQ_KEY via spontaneous L2 traffic
