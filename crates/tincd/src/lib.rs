@@ -37,6 +37,7 @@ pub mod icmp;
 pub mod keys;
 pub mod listen;
 pub mod mss;
+pub mod neighbor;
 pub mod node_id;
 pub mod outgoing;
 pub mod packet;
