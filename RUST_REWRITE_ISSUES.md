@@ -308,3 +308,23 @@ Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
 `net_packet.c::send_sptps_data` falls back to TCP-tunnelled `PACKET` while `udp_confirmed` is false (`:1034-1040`). At first contact `udp_confirmed` is always false, so a C peer floods `PACKET`-carrying-MTU-probes immediately after the meta handshake. We had no `Request::Packet` arm and no `c->tcplen` next-record-is-a-blob state (`meta.c:143-151`); the request fell through to `unimplemented` → terminate → reconnect loop. The Rust daemon never sends pre-UDP-confirm probes (we wait for `validkey` before starting PMTU), so Rust↔Rust never hit this.
 
 **Fix**: parse the length, swallow the next record (`STUB(chunk-12-tcp-fallback)` for actually routing it — matters for `TCPOnly`, not for ping-on-loopback). Connection survives long enough for UDP to confirm; C stops sending `PACKET`.
+
+### daemon.rs — edge-triggered meta-conn read deadlock under load
+
+Not a wire bug, not a port-transcription bug. A semantic mismatch between the C's level-triggered event loop and mio's edge-triggered epoll, invisible until line-rate traffic.
+
+The C `receive_meta` (`meta.c:185`) does **one** `recv()` per io-callback. With level-triggered `select()`/`epoll`, leftover bytes re-fire on the next poll. mio always uses `EPOLLET`: the kernel delivers exactly one event per readiness *edge*, and a partial read silently drops the rest of the queue on the floor. Our `on_conn_readable` mirrored the C — one `feed()` per call — because the SPTPS stream-reassembly handles partial reads correctly, and every functional test sent meta-conn traffic small enough to fit in one `MAXBUFSIZE`=2176 read.
+
+The throughput gate (`throughput.rs::rust_vs_c_throughput`) found it as Rust↔Rust **0.0 Mbps**:
+
+1. PMTU discovery hadn't yet converged to `minmtu ≥ 1500`. The `origlen > relay->minmtu` gate in `send_sptps_data` (`net_packet.c:974`, ours `:3400`) sent full-MSS packets via TCP-tunnelled SPTPS_PACKET (b64'd over the meta-conn).
+2. b64'd 1521-byte ciphertext + REQ_KEY framing ≈ 2050 chars; SPTPS-stream-framed ≈ 2070 bytes. **One `recv()` of 2176 bytes ≈ one message.**
+3. Under iperf3 line-rate, alice queued hundreds of these to bob's TCP socket. Bob `recv()`d once. The edge had fired. `epoll_wait` never returned the meta-conn fd again.
+4. Bob's kernel TCP receive buffer filled → advertised window=0 → alice's `send()` got `EAGAIN` forever → alice's outbuf grew unboundedly.
+5. Bob's `on_udp_recv` did process the few PMTU probes that made it through, advancing `minmtu` to ~1434 over 333ms intervals — but the probe replies *also* had to traverse the deadlocked meta-conn (handshake records go via ANS_KEY). Full PMTU convergence stalled.
+
+Why ping (`crossimpl::rust_dials_c`, `netns::real_tun_ping`) passed: 84-byte ICMP → ~100-byte SPTPS records → ~150-byte b64'd SPTPS_PACKET. A handful of those plus the entire meta-handshake fit comfortably in one `recv()`.
+
+Why Rust↔C measured 12.9 Mbps not zero: the C `receive_meta` is also one-recv-per-callback, but **level-triggered** — the C drains everything alice sends. The 12.9 was the b64-over-TCP-over-SPTPS-stream throughput ceiling (encrypt twice: once for the per-tunnel SPTPS, once for the meta-conn SPTPS).
+
+**Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev (the residual gap is `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv`).

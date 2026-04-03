@@ -205,6 +205,37 @@ impl<W: Copy> EventLoop<W> {
         Ok(())
     }
 
+    /// Force-rearm an fd at its current interest. Edge-triggered
+    /// epoll (`EPOLLET`, which mio always uses) only fires once per
+    /// readiness edge: if a drain loop returns before reading to
+    /// `EAGAIN` (to bound iterations under sustained load), the next
+    /// `turn()` won't re-fire even though the fd is still readable.
+    /// `EPOLL_CTL_MOD` re-evaluates readiness against current fd
+    /// state and fires on the next `epoll_wait` if still ready.
+    ///
+    /// Unlike [`set`](Self::set), this does NOT short-circuit when
+    /// the interest is unchanged — the `MOD` syscall IS the point.
+    ///
+    /// # Errors
+    /// `epoll_ctl(MOD)` failures (`EBADF` if the fd was closed under
+    /// us). The slot is left as-is on error.
+    ///
+    /// # Panics
+    /// If `id` is dangling (slot freed via `del`).
+    pub fn rearm(&mut self, id: IoId) -> io::Result<()> {
+        let slot = self.slots[id.0].as_ref().expect("dangling IoId");
+        let Some(interest) = slot.interest else {
+            // Never registered; nothing to rearm. Unreachable in the
+            // current API (del frees the slot, expect above would
+            // fire), but mirrors the unreachable arm in `set`.
+            return Ok(());
+        };
+        let fd = slot.fd;
+        self.poll
+            .registry()
+            .reregister(&mut SourceFd(&fd), Token(id.0), interest.to_mio())
+    }
+
     /// Ports `io_del` (`linux/event.c:105-109`). Deregisters from
     /// epoll AND frees the slot.
     ///

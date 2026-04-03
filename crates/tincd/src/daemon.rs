@@ -754,6 +754,12 @@ pub struct Daemon {
     /// kernel device is gone; tight-looping forever helps nobody.
     pub(crate) device_errors: u32,
 
+    /// The device fd's `IoId`. `None` for `Dummy` (no fd, never
+    /// registered). Stored so `on_device_read` can `rearm()` after
+    /// hitting its drain-loop iteration cap — see the bounded-drain
+    /// comment in that fn for why this matters under sustained load.
+    pub(crate) device_io: Option<IoId>,
+
     /// `outgoing_list` (`net_socket.c:54`). One slot per `ConnectTo`
     /// in `tinc.conf`. C uses a `list_t` of `outgoing_t*`; we slot.
     /// Populated by `try_outgoing_connections` at setup. Never
@@ -1143,10 +1149,14 @@ impl Daemon {
         // ─── device fd (net_setup.c:1100)
         // C: `if(device_fd >= 0) io_add(&device_io, ...)`.
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
-        if let Some(fd) = device.fd() {
-            ev.add(fd, Io::Read, IoWhat::Device)
-                .map_err(SetupError::Io)?;
-        }
+        let device_io = if let Some(fd) = device.fd() {
+            Some(
+                ev.add(fd, Io::Read, IoWhat::Device)
+                    .map_err(SetupError::Io)?,
+            )
+        } else {
+            None
+        };
 
         // ─── ping timer (net.c:489-491)
         // C: `timeout_add(&pingtimer, timeout_handler, ..., {
@@ -1332,6 +1342,7 @@ impl Daemon {
             last_periodic_run_time: timers.now(),
             iface,
             device_errors: 0,
+            device_io,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),
@@ -2597,17 +2608,54 @@ impl Daemon {
     /// `handle_device_data` (`net_packet.c:1916-1938`).
     ///
     /// TUN read → `route()` → `send_packet`. The C reads ONE packet
-    /// per io callback; we drain until EAGAIN (edge-triggered epoll).
+    /// per io callback (level-triggered `select()`/`epoll`); we drain
+    /// in a loop because mio is edge-triggered (`EPOLLET`): returning
+    /// before `EAGAIN` would miss the rest of the queue forever.
     /// C `DEFAULT_PACKET_OFFSET = 12` reserves room for the
     /// `[dst][src]` prefix; we don't need that pre-padding (our
     /// `send_sptps_data` builds the prefix into a fresh Vec).
+    ///
+    /// **The drain loop is bounded.** Under sustained line-rate
+    /// ingress (iperf3 saturating the TUN), the kernel queue may
+    /// refill faster than we drain it: an unbounded loop would never
+    /// return to the event loop, starving meta-conn flush, UDP recv,
+    /// PMTU probes, and timers. At the cap, `rearm()` forces an
+    /// `EPOLL_CTL_MOD` which re-evaluates readiness and fires on the
+    /// next turn. Idle links hit `EAGAIN` after a few packets and
+    /// skip the rearm — the syscall cost only applies under load.
     fn on_device_read(&mut self) {
+        /// Packets per `on_device_read` call. The C reads one
+        /// (level-triggered); we batch to amortize the `epoll_wait`
+        /// return. 64 is heuristic: enough to amortize, small enough
+        /// that one batch's UDP sendto burst doesn't overflow the
+        /// peer's receive buffer before they get a turn to drain.
+        /// Tune via the throughput gate.
+        const DEVICE_DRAIN_CAP: u32 = 64;
+
         // `MTU = 1518`. The device's `read()` writes up to that.
         // FdTun reads at `+14` and synthesizes the ethernet header
         // into `[0..14]`; the buffer must be ≥ MTU.
         let mut buf = vec![0u8; crate::tunnel::MTU as usize];
         let mut nw = false;
+        let mut drained = 0u32;
         loop {
+            if drained >= DEVICE_DRAIN_CAP {
+                // Hit the cap with the fd still readable. Rearm so
+                // the next turn() fires immediately — after outbuf
+                // flush, UDP recv, and timers have had their turn.
+                if let Some(io_id) = self.device_io {
+                    if let Err(e) = self.ev.rearm(io_id) {
+                        // Shouldn't happen (the fd is open, we just
+                        // read from it). Worst case: one stalled
+                        // turn until the kernel queues more (which
+                        // generates a fresh edge).
+                        log::error!(target: "tincd::net",
+                                    "device fd rearm failed: {e}");
+                    }
+                }
+                break;
+            }
+            drained += 1;
             let n = match self.device.read(&mut buf) {
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -4896,11 +4944,67 @@ impl Daemon {
             }
         }
     }
+}
 
+/// `on_conn_readable_once` outcome. `Again`: `feed()` produced data
+/// (kernel may have more queued; caller loops). `Done`: `WouldBlock`
+/// or terminal (`Dead`, `terminate()` called).
+enum FeedDrain {
+    Again,
+    Done,
+}
+
+impl Daemon {
     /// `handle_meta_io` READ path (`net_socket.c:559-561` →
     /// `handle_meta_connection_data` → `receive_meta`).
     ///
-    /// feed → loop read_line → check_gate → handler.
+    /// Edge-triggered drain wrapper. The C `receive_meta` does ONE
+    /// `recv()` per callback (`meta.c:185`) because the C event loop
+    /// is level-triggered (`select()`/`epoll` without `EPOLLET`): if
+    /// data remains, the next poll fires immediately. mio is
+    /// edge-triggered: returning before `EAGAIN` loses the wake
+    /// forever. Found by `throughput.rs::rust_vs_c_throughput`
+    /// (Rust↔Rust 0.0 Mbps): when PMTU was still converging and big
+    /// packets fell back to TCP-tunnelled SPTPS_PACKET (~2KB each
+    /// after b64), one `recv()` of `MAXBUFSIZE`=2176 read about one
+    /// message; the rest stayed in the kernel's TCP receive buffer;
+    /// the edge had already fired; the receiver never read again;
+    /// the sender's TCP send buffer filled; the tunnel deadlocked.
+    ///
+    /// The drain is bounded: under sustained meta-conn flooding,
+    /// returning lets the rest of the event loop (UDP, TUN, timers)
+    /// run. At the cap, `rearm()` forces an `EPOLL_CTL_MOD` so the
+    /// next `epoll_wait` fires if still readable. `feed()` reads
+    /// `MAXBUFSIZE`=2176 per call; 64 iterations ≈ 136KB/turn.
+    fn on_conn_readable(&mut self, id: ConnId) {
+        const META_DRAIN_CAP: u32 = 64;
+        for _ in 0..META_DRAIN_CAP {
+            // The conn may have been terminated by the previous
+            // iteration's dispatch (e.g. bad-request → terminate).
+            // The slotmap generation check catches stale `id`s.
+            if !self.conns.contains_key(id) {
+                return;
+            }
+            match self.on_conn_readable_once(id) {
+                FeedDrain::Again => {}
+                FeedDrain::Done => return,
+            }
+        }
+        // Hit the cap with the socket still readable. Rearm so the
+        // next turn() fires immediately.
+        if let Some(&io_id) = self.conn_io.get(id) {
+            if let Err(e) = self.ev.rearm(io_id) {
+                log::error!(target: "tincd::conn",
+                            "conn fd rearm failed for {id:?}: {e}");
+                self.terminate(id);
+            }
+        }
+    }
+
+    /// One `recv()` + dispatch. feed → loop read_line → check_gate
+    /// → handler. Returns `Again` if `feed()` produced data (might
+    /// be more queued; caller should loop), `Done` for `WouldBlock`
+    /// or terminal states (`Dead`, fall-through after inbuf drain).
     ///
     /// `too_many_lines`: the C `receive_meta` + `receive_request`
     /// dispatch inlined (`meta.c:164-320` is 156 lines). Splitting
@@ -4909,7 +5013,7 @@ impl Daemon {
     /// SPTPS-mode dispatch + ACK handling moved IN, not out). The
     /// allow stays; the borrow-threading cost is real.
     #[allow(clippy::too_many_lines)]
-    fn on_conn_readable(&mut self, id: ConnId) {
+    fn on_conn_readable_once(&mut self, id: ConnId) -> FeedDrain {
         // ─── feed (one recv)
         // C `meta.c:185`: `inlen = recv(...)`.
         // `OsRng`: feed() needs an rng for the SPTPS-mode receive
@@ -4918,10 +5022,10 @@ impl Daemon {
         // is free.
         let conn = self.conns.get_mut(id).expect("checked contains_key");
         match conn.feed(&mut OsRng) {
-            FeedResult::WouldBlock => return,
+            FeedResult::WouldBlock => return FeedDrain::Done,
             FeedResult::Dead => {
                 self.terminate(id);
-                return;
+                return FeedDrain::Done;
             }
             FeedResult::Data => {
                 // ─── pre-SPTPS tcplen consume (SOCKS proxy reply) ────────
@@ -4956,7 +5060,7 @@ impl Daemon {
                         // line (garbage — SOCKS5 starts with 0x05,
                         // which atoi parses as 5 = METAKEY, fails
                         // gate, terminates).
-                        return;
+                        return FeedDrain::Done;
                     };
                     let buf: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
                     conn.tcplen = 0;
@@ -4974,14 +5078,14 @@ impl Daemon {
                             "tcplen set but no proxy configured for {}",
                             conn.name);
                         self.terminate(id);
-                        return;
+                        return FeedDrain::Done;
                     };
                     let Some(socks_type) = proxy.socks_type() else {
                         log::error!(target: "tincd::conn",
                             "tcplen set but proxy is not SOCKS for {}",
                             conn.name);
                         self.terminate(id);
-                        return;
+                        return FeedDrain::Done;
                     };
                     let creds = proxy.socks_creds();
                     match socks::check_response(socks_type, creds.as_ref(), &buf) {
@@ -5001,14 +5105,14 @@ impl Daemon {
                             log::error!(target: "tincd::conn",
                                 "Proxy request rejected for {}", conn.name);
                             self.terminate(id);
-                            return;
+                            return FeedDrain::Done;
                         }
                         socks::SocksResponse::Malformed(why) => {
                             log::error!(target: "tincd::conn",
                                 "Malformed proxy response for {}: {why}",
                                 conn.name);
                             self.terminate(id);
-                            return;
+                            return FeedDrain::Done;
                         }
                     }
                 }
@@ -5018,7 +5122,7 @@ impl Daemon {
                 let needs_write = self.dispatch_sptps_outputs(id, outs);
                 if !self.conns.contains_key(id) {
                     // dispatch terminated (e.g. HandshakeDone in 4a).
-                    return;
+                    return FeedDrain::Done;
                 }
                 // `dispatch_sptps_outputs` may have queued to ANY
                 // active conn (`broadcast_line`, `forward_request`,
@@ -5033,8 +5137,10 @@ impl Daemon {
                     self.maybe_set_write_any();
                 }
                 // Don't fall through to the line-drain loop —
-                // SPTPS mode doesn't touch inbuf.
-                return;
+                // SPTPS mode doesn't touch inbuf. DO loop back to
+                // `feed()`: the kernel may have more bytes queued
+                // (edge-triggered, must drain to EAGAIN).
+                return FeedDrain::Again;
             }
         }
 
@@ -5064,7 +5170,7 @@ impl Daemon {
                     log::error!(target: "tincd::proto",
                                 "Bad request from {}: {e:?}", conn.name);
                     self.terminate(id);
-                    return;
+                    return FeedDrain::Done;
                 }
             };
 
@@ -5178,7 +5284,7 @@ impl Daemon {
                                             conn.name
                                         );
                                         self.terminate(id);
-                                        return;
+                                        return FeedDrain::Done;
                                     }
                                     // feed_sptps only returns
                                     // Sptps or Dead.
@@ -5201,7 +5307,7 @@ impl Daemon {
                             // terminated (HandshakeDone in 4a).
                             // Check.
                             if !self.conns.contains_key(id) {
-                                return;
+                                return FeedDrain::Done;
                             }
 
                             (DispatchResult::Ok, nw)
@@ -5248,7 +5354,7 @@ impl Daemon {
                                             conn.hostname
                                         );
                                         self.terminate(id);
-                                        return;
+                                        return FeedDrain::Done;
                                     }
                                     _ => unreachable!(),
                                 }
@@ -5258,7 +5364,7 @@ impl Daemon {
                                 nw = true;
                             }
                             if !self.conns.contains_key(id) {
-                                return;
+                                return FeedDrain::Done;
                             }
 
                             (DispatchResult::Ok, nw)
@@ -5459,10 +5565,15 @@ impl Daemon {
                 }
                 DispatchResult::Drop => {
                     self.terminate(id);
-                    return;
+                    return FeedDrain::Done;
                 }
             }
         }
+        // inbuf drained (read_line returned None). The plaintext
+        // path's `feed()` already buffered all bytes from this
+        // `recv()`; the line-drain loop above consumed them. More
+        // bytes might be waiting in the kernel — loop back.
+        FeedDrain::Again
     }
 
     /// `receive_meta_sptps` (`meta.c:120-162`). Dispatch SPTPS
