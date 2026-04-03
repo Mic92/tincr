@@ -264,18 +264,13 @@ mod tests {
         assert_eq!(buf[99], 0x42);
     }
 
-    /// `dummy_device.c:31`: `iface = "dummy"`. The daemon's tinc-
-    /// up script gets `INTERFACE=dummy`.
+    /// `dummy_device.c:31`: `iface = "dummy"`. The daemon's tinc-up
+    /// script gets `INTERFACE=dummy`. C leaves `device_fd = -1`,
+    /// `mymac = {0}`; we model as `None` for both.
     #[test]
-    fn dummy_iface_string() {
-        assert_eq!(Dummy.iface(), "dummy");
-    }
-
-    /// No fd, no MAC. The C leaves `device_fd = -1`, `mymac =
-    /// {0}`. We model as `None` for both.
-    #[test]
-    fn dummy_no_fd_no_mac() {
+    fn dummy_surface() {
         let d = Dummy;
+        assert_eq!(d.iface(), "dummy");
         assert!(d.fd().is_none());
         assert!(d.mac().is_none());
     }
