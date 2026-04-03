@@ -2965,7 +2965,7 @@ impl Daemon {
         // reverse without an `edge_addrs` entry; `dump_edges`
         // formats missing entries as `"unknown port unknown"`
         // (the C default for `n->hostname == NULL`, `node.c:211`).
-        // STUB(chunk-6): the real `getsockname` call (`ack_h:1040`).
+        // STUB(chunk-7): getsockname for local_address (`ack_h:1040-1045`). Connection has fd: OwnedFd; need a local_addr() accessor or socket2 conversion. Five lines, lands with the per-tunnel SPTPS bootstrap (which also touches the conn socket layer).
         if let Some(ea) = edge_addr {
             let unspec = AddrStr::new(AddrStr::UNSPEC).expect("literal");
             // `Ipv6Addr::Display` doesn't bracket (matches
