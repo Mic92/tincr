@@ -11,8 +11,7 @@ impl Daemon {
         if body.is_empty() {
             return false;
         }
-        // C `:172-175`: `if(!DATA[0]) { send_udp_probe_reply;
-        // return; }`. byte[0]==0 marks a REQUEST.
+        // C `:172-175`: byte[0]==0 marks a REQUEST.
         if body[0] == 0 {
             log::debug!(target: "tincd::net",
                         "Got UDP probe request {} from {peer_name}",
@@ -22,11 +21,8 @@ impl Daemon {
         }
 
         // ─── reply (type 1 or 2) ────────────────────────────────
-        // C `:177-182`: type-2 carries the length INSIDE the packet
-        // at bytes [1..3]. Type-2 replies are MIN_PROBE_SIZE bytes
-        // on the wire regardless of the probed length (saves
-        // bandwidth: "yes, your 1400-byte probe arrived" doesn't
-        // need a 1400-byte reply).
+        // C `:177-182`: type-2 carries probed length in bytes [1..3]
+        // (reply itself is MIN_PROBE_SIZE on wire — saves bandwidth).
         #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
         let len: u16 = if body[0] == 2 && body.len() >= 3 {
             u16::from_be_bytes([body[1], body[2]])
@@ -37,16 +33,13 @@ impl Daemon {
                     "Got type {} UDP probe reply {len} from {peer_name}",
                     body[0]);
 
-        // C `:199-238` is `pmtu.on_probe_reply`. The udp_confirmed
-        // bit lives in BOTH `status` (for `dump_nodes` packing)
-        // and `pmtu` (the authoritative state machine bit). Mirror.
+        // C `:199-238` → `pmtu.on_probe_reply`. udp_confirmed lives in
+        // BOTH `status` (dump_nodes packing) and `pmtu` (authoritative).
         let now = self.timers.now();
         let actions = if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
             p.on_probe_reply(len, now)
         } else {
-            // No pmtu state yet (first probe was a request from
-            // them, we replied, they replied to OUR keepalive...).
-            // Seed it now so we have somewhere to record the floor.
+            // No pmtu state yet — seed now to record the floor.
             let tunnel = self.tunnels.entry(peer).or_default();
             let mut p = PmtuState::new(now, MTU);
             let actions = p.on_probe_reply(len, now);
@@ -60,44 +53,28 @@ impl Daemon {
         for a in &actions {
             Self::log_pmtu_action(peer_name, a);
         }
-        // C `:213-217` `timeout_del + timeout_add(udp_ping_
-        // timeout)`: the per-node UDP-timeout timer. We don't arm
-        // it (PMTU is driven inline by `try_tx`/`pmtu.tick()`, not
-        // a separate timer); see the BecameUnreachable comment.
-        // Nothing to reset.
+        // C `:213-217` resets the per-node UDP-timeout timer; we don't
+        // arm one (PMTU is driven inline by try_tx/pmtu.tick()).
         false
     }
 
-    /// `send_udp_probe_reply` (`net_packet.c:140-168`). Echo a
-    /// probe request back. Type-2 reply (proto ≥17.3): the LENGTH
-    /// goes in bytes [1..3]; the wire packet is MIN_PROBE_SIZE.
-    /// We're SPTPS-only so peers are always ≥17.3 (`options >> 24
-    /// >= 3` is the gate; ours is 7).
-    ///
-    /// C `:163-165`: `udp_confirmed = true` temporarily so the
-    /// reply goes back "the same way it came in" (via
-    /// `choose_udp_address` which prefers `udp_addr` when
-    /// confirmed). We already stash `udp_addr` from the receive
-    /// path BEFORE this is called; `choose_udp_address` reads it
-    /// regardless of the bit.
+    /// `send_udp_probe_reply` (`net_packet.c:140-168`). Type-2 reply
+    /// (SPTPS-only ⇒ always ≥17.3): length in bytes [1..3], wire
+    /// packet is MIN_PROBE_SIZE. C `:163-165` flips udp_confirmed so
+    /// the reply goes back the way it came; we don't need to — receive
+    /// path stashed udp_addr already, choose_udp_address reads it.
     pub(super) fn send_udp_probe_reply(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
-        // C `:148-152`: type-2 = byte[0]=2, bytes[1..3]=htons(len),
-        // packet.len = MIN_PROBE_SIZE.
+        // C `:148-152`
         let mut body = vec![0u8; usize::from(pmtu::MIN_PROBE_SIZE)];
         body[0] = 2;
         body[1..3].copy_from_slice(&len.to_be_bytes());
-        // bytes[3..14] stay zero; bytes[14..] would be random in C
-        // but with MIN_PROBE_SIZE=18 that's just 4 bytes. Zero is
-        // fine — the recipient only reads [0..3].
+        // C randomizes [14..]; recipient only reads [0..3], zero is fine.
 
         log::debug!(target: "tincd::net",
                     "Sending type 2 probe reply length {len} to {peer_name}");
 
-        // C `:165`: `send_udppacket(n, packet)`. The C path goes
-        // `send_udppacket` → `send_sptps_packet` (the SPTPS branch
-        // at `:817`) → `:691-694` PKT_PROBE detect (zero-ethertype
-        // marker) → `sptps_send_record(PKT_PROBE)`. We shortcut
-        // straight to the SPTPS send.
+        // C `:165` → send_udppacket → :817 → :691-694 →
+        // sptps_send_record(PKT_PROBE). We shortcut.
         self.send_probe_record(peer, peer_name, &body)
     }
 
@@ -105,34 +82,26 @@ impl Daemon {
     /// and send a PROBE request of `len` bytes. byte[0]=0 (request),
     /// bytes[1..14]=zero, bytes[14..len]=random.
     pub(super) fn send_udp_probe(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
-        // C `:1185`: `len = MAX(len, MIN_PROBE_SIZE)`. The pmtu
-        // module already clamps but be defensive.
-        let len = len.max(pmtu::MIN_PROBE_SIZE);
+        let len = len.max(pmtu::MIN_PROBE_SIZE); // C :1185
         let mut body = vec![0u8; usize::from(len)];
-        // C `:1187-1188`: `memset(DATA, 0, 14); randomize(DATA+14,
-        // len-14)`. The first 14 are the synthetic ethernet header
-        // slot (probes go through `send_udppacket` which expects
-        // a full vpn_packet_t). Our `send_probe_record` sends the
-        // body directly; the zero-prefix is just convention.
+        // C `:1187-1188`: zero[0..14], random[14..]. The 14-byte
+        // zero prefix is C's vpn_packet_t header slot; convention only.
         if body.len() > 14 {
             OsRng.fill_bytes(&mut body[14..]);
         }
-        // body[0] = 0 (request marker) — already zero from vec init.
+        // body[0] = 0 (request marker) from vec init.
 
         log::debug!(target: "tincd::net",
                     "Sending UDP probe length {len} to {peer_name}");
         self.send_probe_record(peer, peer_name, &body)
     }
 
-    /// `sptps_send_record(&n->sptps, PKT_PROBE, data, len)`. The
-    /// shared SPTPS-send for both probe requests and replies. The
-    /// C `:691-694` zero-ethertype detect is a vestige of the
-    /// `vpn_packet_t` shape; we just send the record directly.
+    /// `sptps_send_record(&n->sptps, PKT_PROBE, data, len)`. Shared
+    /// path for probe requests and replies. C `:691-694`.
     pub(super) fn send_probe_record(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
         let tunnel = self.tunnels.entry(peer).or_default();
         if !tunnel.status.validkey {
-            // Can't probe without keys. C `:685` gate.
-            return false;
+            return false; // C :685
         }
         let Some(sptps) = tunnel.sptps.as_deref_mut() else {
             return false;
@@ -145,10 +114,7 @@ impl Daemon {
                 return false;
             }
         };
-        // Dispatch: one Wire output. Goes via `send_sptps_data`
-        // with `record_type = PKT_PROBE`. The relay decision at
-        // `:967` always prefers `via` for PROBE (the `type ==
-        // PKT_PROBE` term).
+        // C `:967`: relay decision always prefers `via` for PKT_PROBE.
         self.dispatch_tunnel_outputs(peer, peer_name, outs)
     }
 
@@ -163,21 +129,14 @@ impl Daemon {
     /// Chain: `try_sptps` (REQ_KEY if needed) → via deref →
     /// `try_udp` (probe send) → `try_mtu` (PMTU tick).
     ///
-    /// Via-recursion (`:1490-1497`): if `via != target`, recurse on
-    /// the relay instead. Finite: graph is acyclic in the via-chain
-    /// sense (sssp tree); max depth = graph diameter (≤5 in
-    /// practice).
-    #[allow(clippy::too_many_lines)] // C `try_tx_sptps` is 41 LOC
-    // but inlines via try_sptps/try_udp/try_mtu callbacks; we
-    // unfold them. The match arms are the C call chain.
+    /// Via-recursion (`:1490-1497`): recurse on relay if `via !=
+    /// target`. Finite: via-chain is the sssp tree (acyclic).
+    #[allow(clippy::too_many_lines)] // C is 41 LOC but inlines via
+    // try_sptps/try_udp/try_mtu callbacks; we unfold them.
     pub(super) fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
-        // C `:1477-1479`: `if(n->connection && (myself|n)->options
-        // & OPTION_TCPONLY) return`. The `n->connection` check
-        // means "we have a DIRECT meta connection to this node"
-        // (not just graph-reachable). Map: `nodes[name].conn` is
-        // Some. The options-OR is the same shape as `send_sptps_
-        // data`'s tcponly check. Early-return true: TCP is fine,
-        // don't bother trying UDP.
+        // C `:1477-1479`: TCPONLY + direct meta conn ⇒ skip UDP.
+        // `n->connection` ≡ nodes[nid].conn.is_some() (direct, not
+        // just graph-reachable).
         {
             let target_options = self
                 .last_routes
@@ -195,20 +154,16 @@ impl Daemon {
         }
 
         // ─── try_sptps (`:1483` → `:1156-1173`) ──────────────────
-        // `if(!validkey) { if(!waitingforkey) send_req_key; else
-        // if(last_req_key+10 < now) restart }`. The `send_sptps_
-        // packet` path already does the FIRST send; this catches
-        // the 10-second-timeout restart.
+        // send_sptps_packet does the FIRST REQ_KEY; this catches the
+        // 10-second restart.
         let now = self.timers.now();
         {
             let tunnel = self.tunnels.entry(target).or_default();
             if !tunnel.status.validkey {
-                // Can't UDP without keys. Kick the handshake if
-                // needed; nothing more to do.
                 if !tunnel.status.waitingforkey {
                     return self.send_req_key(target);
                 }
-                // C `:1167-1173`: 10-second debounce.
+                // C `:1167-1173`: 10s debounce.
                 if tunnel
                     .last_req_key
                     .is_some_and(|l| now.duration_since(l).as_secs() >= 10)
@@ -224,20 +179,14 @@ impl Daemon {
         }
 
         // ─── via deref (`:1487-1498`) ────────────────────────────
-        // `via = (n->via == myself) ? n->nexthop : n->via; if(via
-        // != n) { try_tx(via, mtu); return; }`. The static-relay
-        // recursion. Read `last_routes`, copy out the NodeId, drop
-        // the borrow, THEN recurse (same two-phase as `forward_
-        // request`). Invariant: `last_routes` is current for any
-        // reachable target (sssp populates it; we only call try_tx
-        // on reachable nodes).
+        // Static-relay recursion. Two-phase borrow: copy NodeId,
+        // drop, recurse.
         {
             let route = self
                 .last_routes
                 .get(target.0 as usize)
                 .and_then(Option::as_ref);
-            // Unreachable target: pretend direct (no recursion).
-            // The C would deref a NULL `n->via`; we're safer.
+            // Unreachable: pretend direct (C would NULL-deref n->via).
             let via_nid = route.map_or(target, |r| {
                 if r.via == self.myself {
                     r.nexthop
@@ -246,12 +195,8 @@ impl Daemon {
                 }
             });
             if via_nid != target {
-                // C `:1491-1497`: `if((via->options >> 24) < 4)
-                // return; try_tx(via, mtu); return`. The `< 4`
-                // gate: protocol minor 4 introduced relay support.
-                // Our `myself_options_default` is `7 << 24` so
-                // Rust↔Rust is always ≥4; gate matters for old-C-
-                // tincd interop.
+                // C `:1491-1497`: minor <4 lacks relay support. Our
+                // default is 7<<24; gate matters for old-C interop.
                 let via_options = self
                     .last_routes
                     .get(via_nid.0 as usize)
@@ -260,7 +205,6 @@ impl Daemon {
                 if (via_options >> 24) < 4 {
                     return false;
                 }
-                // RECURSE. Finite: sssp tree (via-chain is acyclic).
                 return self.try_tx(via_nid, mtu);
             }
         }
@@ -272,21 +216,13 @@ impl Daemon {
         let mut nw = self.try_udp(target, &target_name, now);
 
         // ─── try_mtu (`:1505-1509`) ──────────────────────────────
-        // C `:1358-1364`: `if(udp_discovery && !udp_confirmed) {
-        // reset; return }`. Don't probe MTU until UDP works.
-        // C `:1348-1356`: `if(!(options & OPTION_PMTU_DISCOVERY))`
-        // gate. Default-on (`myself_options_default`).
+        // C `:1358-1364`: don't probe MTU until UDP confirmed.
+        // C `:1348-1356`: OPTION_PMTU_DISCOVERY gate (default-on).
         if mtu {
             let tunnel = self.tunnels.entry(target).or_default();
-            // Seed pmtu state on first call. C `node.c` xzalloc;
-            // our `PmtuState::new` needs `now`.
-            // NOT-PORTING: `choose_initial_maxmtu` getsockopt(IP_MTU)
-            // (`net_packet.c:1249-1340`). The `MTU` fallback works
-            // (the C does too on platforms without `IP_MTU`, `#ifndef
-            // IP_MTU` at `:1249`); getsockopt is an optimization
-            // (skips the first few too-big probes). PMTU discovery
-            // converges from `MTU=1518` regardless. See PLAN.md
-            // `net_packet.c` row.
+            // NOT-PORTING: choose_initial_maxmtu getsockopt(IP_MTU)
+            // (`net_packet.c:1249-1340`). C falls back to MTU on
+            // `#ifndef IP_MTU` anyway; PMTU converges regardless.
             let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
             if p.udp_confirmed {
                 let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
@@ -302,11 +238,9 @@ impl Daemon {
             }
         }
 
-        // C `:1511-1513`: nexthop dynamic-relay recursion. `if(
-        // !udp_confirmed && n != nexthop && (nexthop->options >> 24)
-        // >= 4) try_tx(nexthop, mtu)`. While we try direct UDP, also
-        // warm the relay's tunnel so the b64-TCP fallback in
-        // `send_sptps_data` can reach. Same two-phase borrow shape.
+        // C `:1511-1513`: nexthop dynamic-relay recursion. Warm the
+        // relay's tunnel while trying direct UDP, so send_sptps_data's
+        // b64-TCP fallback can reach.
         let udp_confirmed = self
             .tunnels
             .get(&target)
@@ -340,18 +274,15 @@ impl Daemon {
     ///   elapsed: 2s when not confirmed (aggressive discovery), 10s
     ///   when confirmed (NAT keepalive).
     pub(super) fn try_udp(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
-        // C `:1202`: `if(!udp_discovery) return`. We don't have
-        // the config knob yet; default-on.
+        // C `:1202` udp_discovery gate: knob not ported, default-on.
 
         let tunnel = self.tunnels.entry(target).or_default();
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
 
         // ─── :1207-1223: gratuitous reply keepalive ─────────────
-        // C `:1207`: `if((options >> 24) >= 3 && udp_confirmed)`.
-        // SPTPS-only ⇒ always ≥3. Send a type-2 reply at the
-        // largest recently-seen size; it tells the PEER "your
-        // PMTU is still good" (their `on_probe_reply` rewinds
-        // mtuprobes to -1).
+        // C `:1207`: SPTPS-only ⇒ always ≥3. Type-2 reply at largest
+        // recently-seen size tells PEER their PMTU is still good
+        // (their on_probe_reply rewinds mtuprobes to -1).
         let mut nw = false;
         if udp_confirmed {
             let keepalive =
@@ -372,9 +303,7 @@ impl Daemon {
         }
 
         // ─── :1227-1245: probe request ───────────────────────────
-        // C `:1231-1233`: `interval = udp_confirmed ? keepalive
-        // : interval`. Seed pmtu if needed (we read `udp_ping_sent`
-        // from it).
+        // C `:1231-1233`. Seed pmtu if needed (we read udp_ping_sent).
         let tunnel = self.tunnels.entry(target).or_default();
         let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
         let interval = if p.udp_confirmed {
@@ -384,24 +313,13 @@ impl Daemon {
         };
         let elapsed = now.duration_since(p.udp_ping_sent);
         if elapsed >= Duration::from_secs(u64::from(interval)) {
-            // C `:1236-1238`: `udp_ping_sent = now; ping_sent =
-            // true; send_udp_probe_packet(n, MIN_PROBE_SIZE)`.
+            // C `:1236-1238`
             p.udp_ping_sent = now;
             p.ping_sent = true;
             nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
-            // C `:1241-1245`: `if(localdiscovery && !udp_confirmed
-            // && n->prevedge)`. Three gates:
-            //   - `localdiscovery`: the config knob.
-            //   - `!udp_confirmed`: only useful while UDP is
-            //     unconfirmed. Once confirmed, the working address
-            //     (LAN or WAN) is `n->address`.
-            //   - `n->prevedge`: SSSP has run; node is reachable.
-            //
-            // On match: `send_locally = true; send_udp_probe_
-            // packet(n, MIN_PROBE_SIZE); send_locally = false`.
-            // The bit is a side-channel to `choose_udp_address`
-            // (4 layers down). No `?` early-return between set/
-            // clear (`send_udp_probe` returns `bool`).
+            // C `:1241-1245`: localdiscovery && !udp_confirmed &&
+            // n->prevedge. send_locally is a side-channel to
+            // choose_udp_address; no early-return between set/clear.
             if self.settings.local_discovery {
                 let confirmed = self
                     .tunnels
@@ -448,31 +366,22 @@ impl Daemon {
         }
     }
 
-    /// `to->nexthop->connection`. The meta connection for routing
-    /// REQ_KEY/ANS_KEY toward `to`. With direct neighbors, `nexthop
-    /// == to` so it's just `nodes[to_name].conn`. Transitives go
-    /// via the first hop's connection.
+    /// `to->nexthop->connection`. Meta conn for routing toward `to`.
     pub(super) fn conn_for_nexthop(&self, to_nid: NodeId) -> Option<ConnId> {
-        // `last_routes[to_nid]` has `nexthop`. If unreachable
-        // (`None`), no path.
         let nexthop = self
             .last_routes
             .get(to_nid.0 as usize)
             .and_then(Option::as_ref)?
             .nexthop;
-        // `NodeState.conn` for the nexthop.
         self.nodes.get(&nexthop)?.conn
     }
 
-    /// `Route` lookup with bounds + `Option::as_ref` flatten.
-    /// `None` for unreachable / never-routed. Reads the cached
-    /// `last_routes` (NOT a fresh sssp).
+    /// `Route` lookup. Reads cached `last_routes` (not a fresh sssp).
     pub(super) fn route_of(&self, nid: NodeId) -> Option<&Route> {
         self.last_routes.get(nid.0 as usize)?.as_ref()
     }
 
-    /// `n->{min,max}mtu` snapshot for `udp_info::adjust_mtu_for_
-    /// send`. `None` if no PMTU state seeded yet.
+    /// `n->{min,max}mtu` snapshot for `adjust_mtu_for_send`.
     pub(super) fn pmtu_snapshot(&self, nid: NodeId) -> Option<PmtuSnapshot> {
         self.tunnels.get(&nid)?.pmtu.as_ref().map(|p| PmtuSnapshot {
             minmtu: p.minmtu,
@@ -482,96 +391,66 @@ impl Daemon {
 
     // ─── load_all_nodes (`net_setup.c:161-217`) ─────────────────
 
-    /// Walk `confbase/hosts/`, add every valid-named file to the
-    /// graph, populate `has_address` for files with `Address =`.
-    /// C `net_setup.c:161-217`. Called from `setup()` (`:1057`) and
-    /// `reload_configuration()` (`net.c:370`).
+    /// C `net_setup.c:161-217`. Walk `confbase/hosts/`, add every
+    /// valid-named file to the graph, populate `has_address`.
     ///
-    /// **The `lookup_or_add_node` decision** (`:186-189`): the C
-    /// adds EVERY hosts/-file name to `node_tree`, even ones with
-    /// no edge to us. We match: a node with `has_address && !
-    /// reachable` is exactly autoconnect's eligible-to-dial set
-    /// (`autoconnect.c:34`). Without the graph add, the node would
-    /// be invisible to `decide()` (which walks `node_ids`, not
-    /// `has_address`). The cost is graph entries that stay
-    /// `reachable=false` until SOMETHING connects them — harmless,
-    /// `dump nodes` shows them as unreachable which is correct.
+    /// `:186-189`: C adds EVERY hosts/-file name to node_tree even
+    /// with no edge to us — a `has_address && !reachable` node is
+    /// exactly autoconnect's eligible-to-dial set (`autoconnect.c:34`).
+    /// Without the graph add it'd be invisible to decide().
     ///
-    /// `strictsubnets` branch (`:192-208`): preload each file's
-    /// `Subnet =` lines into the subnet tree. The `protocol_subnet.c
-    /// :93` lookup-first means later ADD_SUBNET gossip for these
-    /// preloaded entries is a silent noop (already-have-it); only
-    /// UNAUTHORIZED subnets fall through to the `:116` gate.
+    /// `:192-208` strictsubnets: preload Subnet= lines so the
+    /// `protocol_subnet.c:93` lookup-first gate finds them; only
+    /// unauthorized subnets fall through to :116.
     ///
-    /// **Reload semantics**: the C uses an `expires` tristate
-    /// (`:195` `s2->expires = -1`) for mark-sweep on SIGHUP. We
-    /// don't have per-subnet `expires`; the cold-start preload here
-    /// is sufficient for the integration test.
-    /// `TODO(chunk-12-strictsubnets-reload)`: diff old/new
-    /// authorized sets per `net.c:372-396`, broadcast ADD/DEL for
-    /// the deltas. Same shape as `reload.rs::diff_subnets`.
+    /// `TODO(strictsubnets-reload)`: C uses `expires=-1` mark-sweep
+    /// on SIGHUP (`:195`, `net.c:372-396`); we only do cold-start
+    /// preload here. Diff old/new authorized sets, broadcast deltas.
     pub(super) fn load_all_nodes(&mut self) {
         let hosts_dir = self.confbase.join("hosts");
         let dir = match std::fs::read_dir(&hosts_dir) {
             Ok(d) => d,
             Err(e) => {
-                // C `:170-172`: `"Could not open %s: %s"`. Non-fatal.
+                // C `:170-172`: non-fatal.
                 log::error!(target: "tincd",
                             "Could not open {}: {e}", hosts_dir.display());
                 return;
             }
         };
 
-        // Reload re-walks; clear so removed-Address files lose the
-        // bit. The C doesn't clear (it only sets, `:211`), so a
-        // file that HAD `Address` and then had it removed keeps
-        // the bit until restart. We diverge: clearing is the
-        // less-surprising behavior on SIGHUP, and there's no
-        // observable C contract for the stale-bit case (nothing
-        // reads has_address EXCEPT autoconnect, and autoconnect
-        // dialing a node with no Address just hits the addr-cache-
-        // empty path → retry_outgoing → harmless backoff).
+        // DIVERGE from C `:211`: C only sets, never clears, so a
+        // removed Address= keeps the stale bit until restart. We
+        // clear on reload — only autoconnect reads it, and dialing
+        // a no-Address node is harmless (addr-cache-empty → backoff).
         self.has_address.clear();
 
         for ent in dir.flatten() {
             let Some(fname) = ent.file_name().to_str().map(str::to_owned) else {
                 continue; // non-UTF-8 filename — can't be a node name
             };
-            // C `:176`: `if(!check_id(ent->d_name)) continue`.
-            // Filters `.` `..` and editor swap files for free.
+            // C `:176`: also filters `.` `..` and swap files.
             if !tinc_proto::check_id(&fname) {
                 continue;
             }
 
-            // C `:186-189`: `n = lookup_node; if(!n) { new_node;
-            // node_add; }`. Our fused helper.
-            self.lookup_or_add_node(&fname);
+            self.lookup_or_add_node(&fname); // C :186-189
 
-            // C `:183-184`: `read_config_options(..., d_name);
-            // read_host_config(..., d_name)`. The C reads BOTH the
-            // tinc.conf-tagged options for this node AND its hosts/
-            // file. We only need the latter (the only thing read
-            // is `Address`, which is HOST-tagged).
+            // C `:183-184` reads tinc.conf-tagged opts too; we only
+            // need the hosts/ file (Address is HOST-tagged).
             let Ok(entries) = tinc_conf::parse_file(ent.path()) else {
                 continue; // unreadable file — skip silently (C does too)
             };
             let mut cfg = tinc_conf::Config::default();
             cfg.merge(entries);
 
-            // C `:210-212`: `if(lookup_config("Address")) n->
-            // status.has_address = true`.
+            // C `:210-212`
             if cfg.lookup("Address").next().is_some() {
                 self.has_address.insert(fname.clone());
             }
 
-            // C `:192-208`: `if(strictsubnets) for(cfg = lookup_
-            // config("Subnet")) { ... subnet_add(n, s) }`. Preload
-            // the operator-authorized subnets so the `:93` lookup-
-            // first gate finds them. Skip our own name: `setup()`
-            // already added our subnets (and the C `:192` walks all
-            // names but the `expires=-1` marker handles dups; our
-            // `add` is BTreeSet-idempotent, so re-adding is fine,
-            // but skipping is one less parse).
+            // C `:192-208`: preload authorized subnets. Skip our own
+            // name (setup() already added them; add is idempotent
+            // but skipping saves a parse).
             if self.settings.strictsubnets && fname != self.name {
                 for s in parse_subnets_from_config(&cfg, &fname) {
                     self.subnets.add(s, fname.clone());
@@ -582,20 +461,10 @@ impl Daemon {
 
     // ─── autoconnect (`autoconnect.c`) ──────────────────────────
 
-    /// Build the snapshot, call `autoconnect::decide`. Three-phase
-    /// borrow: read `&self` to build snapshots, call `decide` (no
-    /// borrow), caller does `&mut self` to execute.
-    ///
-    /// `nodes` ordering: sorted by name. C walks `node_tree` (splay,
-    /// strcmp-ordered). `connect_to_unreachable` indexes by position
-    /// (`autoconnect.c:86`: `prng(count)` then walk to that index);
-    /// matching the C's iteration order makes the per-tick random
-    /// pick reproducible against C with the same RNG seed. Our RNG
-    /// is OsRng so this doesn't matter for production, but it's the
-    /// least-surprising shape.
+    /// Build snapshot, call `autoconnect::decide`. Nodes sorted by
+    /// name to match C's strcmp-ordered splay walk: `autoconnect.c:86`
+    /// indexes by position (`prng(count)` then walk-to-index).
     pub(super) fn decide_autoconnect(&self) -> AutoAction {
-        // Sort node names so iteration order matches the C splay
-        // (strcmp). `node_ids` HashMap iteration is random.
         let mut names: Vec<&str> = self.node_ids.keys().map(String::as_str).collect();
         names.sort_unstable();
 
@@ -604,15 +473,10 @@ impl Daemon {
             .filter_map(|&name| {
                 let &nid = self.node_ids.get(name)?;
                 let gnode = self.graph.node(nid)?;
-                // C `n->edge_tree.count`: outgoing edges only (each
-                // direction is a separate `edge_t`). `node_edges()`
-                // returns the outgoing-edge slice.
+                // C `n->edge_tree.count` (outgoing only).
                 let edge_count = self.graph.node_edges(nid).len();
-                // C `n->connection != NULL`: directly connected via
-                // ANY meta conn (in or out). `NodeState.conn` is
-                // exactly that — set in `on_ack`, cleared in
-                // `terminate`. Nodes without a NodeState (transitive,
-                // hosts/-only) are not directly connected.
+                // C `n->connection != NULL` ≡ NodeState.conn (set in
+                // on_ack, cleared in terminate).
                 let directly_connected = self
                     .nodes
                     .get(&nid)
@@ -629,9 +493,7 @@ impl Daemon {
             })
             .collect();
 
-        // C `:121-122`: `c->edge && c->outgoing`. Past-ACK
-        // (`active`) AND we initiated. Names of nodes, not ConnIds:
-        // `decide` matches by name.
+        // C `:121-122`: c->edge && c->outgoing. Past-ACK + initiated.
         let active_outgoing_conns: Vec<String> = self
             .conns
             .values()
@@ -639,14 +501,9 @@ impl Daemon {
             .map(|c| c.name.clone())
             .collect();
 
-        // C `:152-163`: walk `outgoing_list`, skip ones with a
-        // matching `c->outgoing` (i.e. ones with a live conn). The
-        // pending set is "Outgoing slot exists, no conn serves it
-        // — the retry timer is waiting". Match by `c.outgoing` →
-        // `OutgoingId`. A conn that's STILL connecting (pre-ACK,
-        // not active yet) DOES count as serving the outgoing — the
-        // C `:155` check is just `c->outgoing == outgoing`, no
-        // `c->edge` gate.
+        // C `:152-163`: pending = Outgoing slots with no live conn.
+        // Pre-ACK conns DO count as serving (C `:155` has no c->edge
+        // gate, just `c->outgoing == outgoing`).
         let served: HashSet<OutgoingId> = self
             .conns
             .values()
@@ -674,12 +531,8 @@ impl Daemon {
         match action {
             AutoAction::Noop => {}
             AutoAction::Connect { name } => {
-                // C `autoconnect.c:67-71` (and `:106-110`): build
-                // `outgoing_t`, `setup_outgoing_connection`. Same
-                // path as setup()'s ConnectTo loop and reload's
-                // to_add loop. Copy-paste because the field set is
-                // small (3 lines) and factoring would obscure the
-                // C correspondence at each site.
+                // C `autoconnect.c:67-71` / `:106-110`. Same path as
+                // setup()'s ConnectTo loop.
                 log::info!(target: "tincd",
                            "Autoconnecting to {name}");
                 self.lookup_or_add_node(&name);
@@ -696,12 +549,9 @@ impl Daemon {
                 self.setup_outgoing_connection(oid);
             }
             AutoAction::Disconnect { name } => {
-                // C `:143-146`: `list_delete(&outgoing_list,
-                // c->outgoing); c->outgoing = NULL; terminate_
-                // connection(c, c->edge)`. Order matters: clear
-                // `c->outgoing` BEFORE terminate so terminate's
-                // retry-on-disconnect path doesn't fire (we're
-                // CHOOSING to drop this; don't reconnect).
+                // C `:143-146`. Order matters: clear c->outgoing
+                // BEFORE terminate so its retry path doesn't fire
+                // (we're CHOOSING to drop this).
                 log::info!(target: "tincd",
                            "Autodisconnecting from {name}");
                 // Find ConnId by name (active + outgoing).
@@ -716,7 +566,7 @@ impl Daemon {
                         .get_mut(cid)
                         .and_then(|c| c.outgoing.take())
                         .map(OutgoingId::from);
-                    // C `:143`: `list_delete`. Drop slot + timer.
+                    // C `:143`
                     if let Some(oid) = oid {
                         if let Some(tid) = self.outgoing_timers.remove(oid) {
                             self.timers.del(tid);
@@ -727,9 +577,7 @@ impl Daemon {
                 }
             }
             AutoAction::CancelPending { name } => {
-                // C `:165-166`: `list_delete(&outgoing_list,
-                // outgoing)`. Just drop the slot; no conn to kill
-                // (that's the definition of "pending").
+                // C `:165-166`: drop slot, no conn to kill.
                 log::info!(target: "tincd",
                            "Cancelled outgoing connection to {name}");
                 let oid = self
@@ -749,38 +597,23 @@ impl Daemon {
 
     // ─── UDP_INFO / MTU_INFO send (`protocol_misc.c:155-330`) ───
 
-    /// `send_udp_info(myself, to)` (`protocol_misc.c:155-215`). The
-    /// gates live in `udp_info::should_send_udp_info`; this gathers
-    /// the daemon state, calls the gate, builds the wire message,
-    /// queues it on `to->nexthop->connection`.
-    ///
-    /// `from_is_myself`: ALWAYS true for the daemon's call sites
-    /// (every C `send_udp_info` call is `(myself, ...)`). The
-    /// forwarding case (`from != myself`) is handled by
-    /// `on_udp_info` re-calling this with the parsed `from`/`to`.
-    /// We pass it explicitly so the forward path can share the
-    /// gate logic.
-    ///
-    /// Returns the io_set signal (queued bytes on a meta conn).
+    /// `send_udp_info(myself, to)` (`protocol_misc.c:155-215`).
+    /// Gates in `udp_info::should_send_udp_info`; this gathers state,
+    /// builds wire, queues on nexthop conn. `from_is_myself` is true
+    /// at all daemon call sites; forwarding goes via
+    /// `send_udp_info_forward`.
     pub(super) fn send_udp_info(
         &mut self,
         to_nid: NodeId,
         to_name: &str,
         from_is_myself: bool,
     ) -> bool {
-        // C `:158`: `to = (to->via == myself) ? to->nexthop :
-        // to->via`. Static-relay deref: UDP_INFO terminates at
-        // the static relay (it's the last node that sees `from`'s
-        // UDP traffic directly). `should_send_udp_info` doesn't
-        // do this deref (it's pure); we do it here. The ORIGINAL
-        // `to`'s options feed `to_options`; the DEREFFED `to`'s
-        // route feeds `nexthop_options` and `to_is_myself`.
+        // C `:158`: static-relay deref. UDP_INFO terminates at the
+        // relay (last node seeing from's UDP directly). Original to's
+        // options feed to_options; dereffed to's route feeds the rest.
         let Some(orig_route) = self.route_of(to_nid) else {
-            // C `:160-163`: `if(to == NULL)`. Can happen if `to`
-            // is unreachable (no route). C logs ERR and returns
-            // false (terminates conn); we just skip — the call
-            // sites are all opportunistic hints, not protocol-
-            // mandatory sends.
+            // C `:160-163` logs ERR + terminates; our callers are
+            // opportunistic hints, just skip.
             return false;
         };
         let to_options_orig = orig_route.options;
@@ -790,20 +623,14 @@ impl Daemon {
             orig_route.via
         };
 
-        // C `:170`: `if(to == myself) return true`. Now checked
-        // against the DEREFFED to. Chain terminates here.
+        // C `:170`: checked against DEREFFED to.
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&dereffed).and_then(|ns| ns.conn).is_some();
-        // `to->nexthop->options`: the dereffed-to's nexthop. With
-        // direct neighbors, `dereffed.nexthop == dereffed` so
-        // these are the same. Read from `last_routes`.
         let nexthop_options = self
             .route_of(dereffed)
             .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
 
-        // `from`'s options: when `from == myself`, it's our own.
-        // When forwarding, the `from` node's route options.
         let from_options = if from_is_myself {
             self.myself_options
         } else {
@@ -830,34 +657,16 @@ impl Daemon {
             return false;
         }
 
-        // C `:199-204`: build the address. When `from == myself`,
-        // the C uses `to->nexthop->connection->edge->local_address`
-        // — "our local address as seen by the next hop". The first
-        // hop IGNORES this (the address is replaced with what THEY
-        // observe), so the C comment says "the address we use is
-        // irrelevant". We send `unspec`: simpler, same semantics.
-        // When forwarding, we send `to`'s currently-known addr
-        // (`tunnel.udp_addr`) — that's the relay's observation.
-        let (addr, port) = if from_is_myself {
-            (
-                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-            )
-        } else {
-            // Forward case: `from->address` (the C `:203`
-            // `&from->address`). Our `tunnel.udp_addr` for the
-            // FROM node (NOT `to`!). The caller (`on_udp_info`)
-            // passes the from-nid via `to_nid` … wait, no. The
-            // forward case calls `send_udp_info_forward` below.
-            // THIS function's non-myself case is dead — keep it
-            // unspec for safety, the forward path is separate.
-            (
-                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-                AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-            )
-        };
+        // C `:199-204`: when from==myself, C sends edge->local_address
+        // but the first hop IGNORES it (replaces with what they
+        // observe). We send unspec: same semantics. The from!=myself
+        // case goes via send_udp_info_forward.
+        let (addr, port) = (
+            AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+            AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
+        );
 
-        // C `:206`: `send_request(to->nexthop->connection, ...)`.
+        // C `:206`
         let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
             return false;
         };
@@ -876,7 +685,7 @@ impl Daemon {
         };
         let nw = conn.send(format_args!("{}", msg.format()));
 
-        // C `:211`: `if(from == myself) to->udp_info_sent = now`.
+        // C `:211`
         if from_is_myself {
             self.tunnels.entry(dereffed).or_default().udp_info_sent = Some(now);
         }
@@ -908,8 +717,7 @@ impl Daemon {
 
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
-        // `:179` `to->connection` check is gated on `from ==
-        // myself`. Forwarding skips it. Pass false (irrelevant).
+        // `:179` to->connection check only fires when from==myself.
         let from_options = self.route_of(from_nid).map_or(0, |r| r.options);
         let nexthop_options = self
             .route_of(dereffed)
@@ -931,9 +739,7 @@ impl Daemon {
             return false;
         }
 
-        // C `:203`: `&from->address`. Our observation of `from`'s
-        // UDP address. If we don't have one, send unspec (same as
-        // C `AF_UNSPEC` → `sockaddr2str` → `"unspec"`).
+        // C `:203`: our observation of from's UDP address (or unspec).
         let (addr, port) = self
             .tunnels
             .get(&from_nid)
@@ -969,10 +775,7 @@ impl Daemon {
     }
 
     /// `send_mtu_info(from, to, mtu)` (`protocol_misc.c:272-330`).
-    /// Gates → adjust_mtu_for_send → queue on nexthop conn.
-    ///
-    /// Unlike UDP_INFO, there's no `:158` static-relay deref — `to`
-    /// is `to`. The nexthop is `to->nexthop` directly.
+    /// No `:158` static-relay deref unlike UDP_INFO.
     pub(super) fn send_mtu_info(
         &mut self,
         to_nid: NodeId,
@@ -983,10 +786,8 @@ impl Daemon {
         self.send_mtu_info_from(self.myself, to_nid, to_name, mtu, from_is_myself)
     }
 
-    /// `send_mtu_info` with explicit `from` for the forward path.
-    /// `from_is_myself` is still passed separately because the gate
-    /// logic keys on it independently of `from_nid` (debounce +
-    /// directly-connected checks).
+    /// `send_mtu_info` with explicit `from`. `from_is_myself` separate
+    /// from `from_nid`: gate logic keys on it independently (debounce).
     pub(super) fn send_mtu_info_from(
         &mut self,
         from_nid: NodeId,
@@ -998,7 +799,6 @@ impl Daemon {
         let to_is_myself = to_nid == self.myself;
         let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&to_nid).and_then(|ns| ns.conn).is_some();
-        // `to->nexthop->options`: read via the route.
         let nexthop_options = self
             .route_of(to_nid)
             .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
@@ -1020,11 +820,8 @@ impl Daemon {
             return false;
         }
 
-        // C `:305-320`: adjust the MTU based on what we know about
-        // the path to `from`. `from->via == myself`: route to
-        // `from` has no static relay (we ARE direct or there's only
-        // dynamic relays). `via`: the C derefs `(from->via ==
-        // myself) ? from->nexthop : from->via` at `:305`.
+        // C `:305-320`: adjust MTU based on our knowledge of the path
+        // to `from`. `:305` derefs (from->via==myself) ? nexthop : via.
         let from_route = self.route_of(from_nid);
         let from_via_is_myself = from_route.is_some_and(|r| r.via == self.myself);
         let via_nid = from_route.map(|r| {
@@ -1044,12 +841,12 @@ impl Daemon {
             via_nexthop_nid.and_then(|v| self.pmtu_snapshot(v)),
         );
 
-        // C `:323`: `if(from == myself) to->mtu_info_sent = now`.
+        // C `:323`
         if from_is_myself {
             self.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
         }
 
-        // C `:328`: `send_request(to->nexthop->connection, ...)`.
+        // C `:328`
         let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
             return false;
         };
@@ -1070,13 +867,8 @@ impl Daemon {
 
     // ─── UDP_INFO / MTU_INFO receive (`protocol_misc.c:217-376`) ─
 
-    /// `udp_info_h` (`protocol_misc.c:217-268`). Parse, build the
-    /// `FromState` snapshot, call `udp_info::on_receive_udp_info`,
-    /// dispatch the action.
-    ///
-    /// Returns `Err` only on parse failure (C `:226` `return false`
-    /// → conn teardown). All semantic drops (`UnknownNode`,
-    /// `DroppedPastRelay`) are `Ok(false)` (C `return true`).
+    /// `udp_info_h` (`protocol_misc.c:217-268`). Err only on parse
+    /// failure (C `:226` → teardown); semantic drops are Ok(false).
     pub(super) fn on_udp_info(
         &mut self,
         from_conn: ConnId,
@@ -1095,7 +887,6 @@ impl Daemon {
             .name
             .clone();
 
-        // Build `FromState`. `None` → `lookup_node(from)` failed.
         let from_nid = self.node_ids.get(&parsed.from).copied();
         let from_state = from_nid.map(|nid| {
             let directly_connected = self.nodes.get(&nid).and_then(|ns| ns.conn).is_some();
@@ -1103,9 +894,7 @@ impl Daemon {
                 .tunnels
                 .get(&nid)
                 .is_some_and(|t| t.status.udp_confirmed);
-            // `from->via == from`: route to `from` has `via ==
-            // from`. With direct routes, `via == from` always. The
-            // "wandered past static relay" case has `via !=` from.
+            // `from->via == from`: false means "wandered past static relay".
             let via_is_self = self.route_of(nid).is_some_and(|r| r.via == nid);
             FromState {
                 directly_connected,
@@ -1124,39 +913,35 @@ impl Daemon {
             current_from_addr,
         ) {
             UdpInfoAction::UnknownNode => {
-                // C `:238-240` / `:261-263`: log, return true.
+                // C `:238-240` / `:261-263`
                 log::error!(target: "tincd::proto",
                             "Got UDP_INFO from {conn_name} for unknown node \
                              {} → {}", parsed.from, parsed.to);
                 Ok(false)
             }
             UdpInfoAction::DroppedPastRelay => {
-                // C `:247-249`: warning, return true.
+                // C `:247-249`
                 log::warn!(target: "tincd::proto",
                            "Got UDP_INFO from {conn_name} for {} which we \
                             can't reach directly", parsed.from);
                 Ok(false)
             }
             UdpInfoAction::UpdateAndForward { new_addr } => {
-                // C `:255`: `update_node_udp(from, &from_addr)`.
-                // For us that's just `tunnel.udp_addr = Some(addr)`
-                // — see the BecameReachable comment for why we
-                // don't have `node_udp_tree`.
+                // C `:255` update_node_udp — we have no node_udp_tree,
+                // just tunnel.udp_addr.
                 let from_nid = from_nid.expect("UpdateAndForward implies from exists");
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
                 let t = self.tunnels.entry(from_nid).or_default();
                 t.udp_addr = Some(new_addr);
-                // perf-arch `e455a1c2` cache: stale after UDP_INFO
-                // taught us a new address.
-                t.udp_addr_cached = None;
-                // C `:265`: `return send_udp_info(from, to)`.
+                t.udp_addr_cached = None; // perf-arch e455a1c2: stale
+                // C `:265`
                 let to_nid = to_nid.expect("UpdateAndForward implies to exists");
                 Ok(self.send_udp_info_forward(from_nid, to_nid))
             }
             UdpInfoAction::Forward => {
-                // C `:265` without `:255`. No update; just forward.
+                // C `:265` without `:255`.
                 let from_nid = from_nid.expect("Forward implies from exists");
                 let to_nid = to_nid.expect("Forward implies to exists");
                 Ok(self.send_udp_info_forward(from_nid, to_nid))
@@ -1164,11 +949,8 @@ impl Daemon {
         }
     }
 
-    /// `mtu_info_h` (`protocol_misc.c:332-376`). Parse, snapshot,
-    /// `udp_info::on_receive_mtu_info`, dispatch.
-    ///
-    /// `Malformed` (`:345` `mtu < 512`) returns `Err` → conn
-    /// teardown. Everything else is `Ok`.
+    /// `mtu_info_h` (`protocol_misc.c:332-376`). Malformed (`:345`
+    /// mtu<512) is Err → teardown; everything else Ok.
     pub(super) fn on_mtu_info(
         &mut self,
         from_conn: ConnId,
@@ -1189,9 +971,7 @@ impl Daemon {
 
         let from_nid = self.node_ids.get(&parsed.from).copied();
         let from_mtu = from_nid.map(|nid| {
-            // `None` if no tunnel — the C reads `from->mtu` etc.
-            // which are xzalloc'd to 0. Our helpers return the
-            // same defaults; supply them.
+            // C reads xzalloc'd fields ⇒ 0; supply same defaults.
             let t = self.tunnels.get(&nid);
             FromMtuState {
                 mtu: t.map_or(0, TunnelState::mtu),
@@ -1203,7 +983,7 @@ impl Daemon {
 
         match udp_info::on_receive_mtu_info(&parsed, from_mtu, to_nid.is_some()) {
             MtuInfoAction::Malformed => {
-                // C `:345-348`: `return false`. Conn-fatal.
+                // C `:345-348`: conn-fatal.
                 Err(DispatchError::BadKey(format!(
                     "MTU_INFO from {conn_name}: invalid MTU {}",
                     parsed.mtu
@@ -1216,13 +996,8 @@ impl Daemon {
                 Ok(false)
             }
             MtuInfoAction::ClampAndForward { new_mtu } => {
-                // C `:369`: `from->mtu = mtu`. Set the PROVISIONAL
-                // mtu (the discovered one will overwrite when
-                // probing converges). Write to `pmtu.mtu` if
-                // seeded; otherwise the helper-default (`MTU`) is
-                // what `dump_nodes` reads, and the next `try_tx`
-                // seed will start from `MTU` regardless. We write
-                // it anyway for the seeded case.
+                // C `:369`: provisional mtu (probing will overwrite).
+                // Only matters if pmtu seeded; unseeded reads MTU anyway.
                 let from_nid = from_nid.expect("ClampAndForward implies from exists");
                 log::debug!(target: "tincd::proto",
                             "Using provisional MTU {new_mtu} for {}", parsed.from);
@@ -1233,7 +1008,7 @@ impl Daemon {
                 {
                     p.mtu = new_mtu;
                 }
-                // C `:375`: `return send_mtu_info(from, to, mtu)`.
+                // C `:375`
                 let to_nid = to_nid.expect("ClampAndForward implies to exists");
                 Ok(
                     self.send_mtu_info_from(
@@ -1248,47 +1023,31 @@ impl Daemon {
             MtuInfoAction::Forward => {
                 let from_nid = from_nid.expect("Forward implies from exists");
                 let to_nid = to_nid.expect("Forward implies to exists");
-                // Forward with the (clamped) received mtu. The
-                // `adjust_mtu_for_send` in `send_mtu_info_from`
-                // may tighten it further based on OUR knowledge.
+                // adjust_mtu_for_send may tighten further with our knowledge.
                 let mtu = parsed.mtu.min(udp_info::MTU_MAX);
                 Ok(self.send_mtu_info_from(from_nid, to_nid, &parsed.to, mtu, false))
             }
         }
     }
 
-    /// `choose_udp_address` (`net_packet.c:744-808`).
+    /// `choose_udp_address` (`net_packet.c:744-808`). Three modes:
+    /// send_locally → choose_local from edge_addrs[2,3]; udp_confirmed
+    /// → n->address; otherwise 1-in-3 cycle (`static int x`): 2 of 3
+    /// calls explore an edge addr, 3rd uses reflexive — probes both
+    /// even when n->address is set but unconfirmed (NAT hairpin).
     ///
-    /// Three modes:
-    ///   - `send_locally` set → `choose_local` from `edge_addrs`
-    ///     positions 2/3 (LAN-side addresses).
-    ///   - `udp_confirmed` → return `n->address` (the reflexive).
-    ///   - 1-in-3 cycle (`static int x`): 2 of 3 calls explore an
-    ///     edge address; the 3rd sticks with the reflexive.
-    ///     Ensures eventual probing of both even when `n->address`
-    ///     is set but unconfirmed (NAT hairpin failure case).
-    ///
-    /// Returns `(addr, listener_index)`. `adapt_socket` is folded
-    /// in: dual-stack hosts have v4 AND v6 listeners; sending to a
-    /// v6 target from a v4 socket fails `EAFNOSUPPORT`.
-    ///
+    /// adapt_socket folded in (dual-stack: v6 target needs v6 socket).
     /// `&mut self` for the cycle counter (C function-static).
     pub(super) fn choose_udp_address(&mut self, to_nid: NodeId) -> Option<(SocketAddr, u8)> {
-        // Build listener_addrs once. ≤8 elements (`net.h` MAXSOCKETS).
         let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
 
-        // ─── send_locally override (`:1033-1036`) ──────────────
-        // C `send_sptps_data` checks: `if(n->status.send_locally)
-        // choose_local_address(...)`. Folded in here.
+        // ─── send_locally override (C `:1033-1036`, folded in) ───
         let send_locally = self
             .tunnels
             .get(&to_nid)
             .is_some_and(|t| t.status.send_locally);
         if send_locally {
-            // Collect candidates from edges-of-n. Each edge's
-            // local address (positions 2,3 in edge_addrs).
-            // `parse_addr_port` returns None for `"unspec"` —
-            // `filter_map` skips those.
+            // Edge local addrs (positions 2,3); filter_map skips "unspec".
             let candidates: Vec<SocketAddr> = self
                 .graph
                 .node_edges(to_nid)
@@ -1306,8 +1065,7 @@ impl Daemon {
             // C falls through if no local address found.
         }
 
-        // ─── :746-762: the reflexive address (n->address) ───────
-        // Prefer it if udp_confirmed; otherwise the 1-in-3 cycle.
+        // ─── :746-762: reflexive (n->address) ───────────────────
         if let Some(t) = self.tunnels.get(&to_nid)
             && let Some(addr) = t.udp_addr
         {
@@ -1315,37 +1073,28 @@ impl Daemon {
                 let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
                 return Some((addr, sock));
             }
-            // C `:758-762`: `static int x; if(++x >= 3) { x = 0;
-            // return; }`. 1-of-3 calls return EARLY with
-            // n->address; the other 2 fall through to edge
-            // exploration.
+            // C `:758-762`: 1-of-3 returns early with n->address;
+            // other 2 fall through to edge exploration.
             self.choose_udp_x = self.choose_udp_x.wrapping_add(1);
             if self.choose_udp_x >= 3 {
                 self.choose_udp_x = 0;
                 let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
                 return Some((addr, sock));
             }
-            // Fall through to edge exploration.
         }
 
-        // ─── :765-781: pick an edge's reverse->address ─────────
-        // For direct neighbors `NodeState.edge_addr` IS the same
-        // thing (the addr from the peer's ACK with port set to
-        // their UDP port). The C iterates `n->edge_tree` and
-        // prng-picks; for chunk 10 the direct-neighbor shortcut
-        // is the common case (transitives go via relay anyway —
-        // `via` recursion in `try_tx`).
+        // ─── :765-781: edge's reverse->address ──────────────────
+        // C iterates n->edge_tree + prng-pick. Direct-neighbor
+        // shortcut: NodeState.edge_addr is the peer-ACK addr.
+        // Transitives go via relay (try_tx via-recursion) anyway.
         let addr = self.nodes.get(&to_nid)?.edge_addr?;
         let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
         Some((addr, sock))
     }
 
-    /// io_set ReadWrite for ANY connection that has a nonempty
-    /// outbuf. Device-read / udp-recv paths can queue handshake
-    /// records on a meta-conn but don't have a `ConnId` in scope
-    /// to set io_set on. Sweep all conns. Per-packet hot path…
-    /// but `conns.len()` is tiny (one per direct peer + control).
-    /// STUB(chunk-11-perf): track which ConnIds were touched, set those.
+    /// io_set ReadWrite for any conn with nonempty outbuf. Device-read
+    /// / udp-recv paths queue on meta-conns without a ConnId in scope.
+    /// STUB(chunk-11-perf): track touched ConnIds instead of sweeping.
     pub(super) fn maybe_set_write_any(&mut self) {
         let dirty: Vec<ConnId> = self
             .conns
