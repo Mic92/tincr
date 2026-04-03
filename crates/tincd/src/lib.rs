@@ -32,6 +32,7 @@ pub mod conn;
 pub mod control;
 pub mod daemon;
 pub mod graph_glue;
+pub mod icmp;
 pub mod keys;
 pub mod listen;
 pub mod node_id;
