@@ -41,6 +41,7 @@ pub mod neighbor;
 pub mod node_id;
 pub mod outgoing;
 pub mod packet;
+pub mod pmtu;
 pub mod proto;
 pub mod route;
 pub mod script;
