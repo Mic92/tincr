@@ -13,14 +13,21 @@
 //! build a fresh `Vec`: this fires at most 3×/sec ([`IcmpRateLimit`],
 //! `route.c:85-100`), alloc doesn't matter.
 //!
-//! ## TTL-exceeded source-address dance (STUBBED)
+//! ## TTL-exceeded source-address dance (NOT-PORTING)
 //!
 //! `route.c:148-169` does a `socket()/connect()/getsockname()` trick
 //! to discover which local IP the kernel would use to reach the
 //! original sender — that becomes the ICMP source. Only matters when
 //! we're a HOP in the middle (DecrementTTL hit 0), not the endpoint.
 //! We skip it: use original-dst-as-src, which is correct for the
-//! daemon-is-endpoint case. `STUB(chunk-9-relay)`.
+//! daemon-is-endpoint case.
+//!
+//! `NOT-PORTING(relay-ttl-src)`: `:148-169` getsockname() to find
+//! our local IP facing the original sender. Only for
+//! `ICMP_TIME_EXCEEDED` (`DecrementTTL=yes` + TTL hit zero at our
+//! relay hop). Current behavior uses original-dst as the ICMP
+//! source — wrong for traceroute, harmless for everything else.
+//! The override would be an `Option<Ipv4Addr>` 5th param.
 
 #![forbid(unsafe_code)]
 
@@ -72,8 +79,8 @@ pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 /// Returns `None` if `original` is too short to contain an eth +
 /// IPv4 header (`route.c` guards with `checklength` upstream).
 ///
-/// **Stubbed**: the TTL-exceeded `getsockname` source-discovery
-/// (`route.c:148-169`). See module doc. `STUB(chunk-9-relay)`.
+/// `NOT-PORTING(relay-ttl-src)`: the TTL-exceeded `getsockname`
+/// source-discovery (`route.c:148-169`). See module doc.
 #[must_use]
 pub fn build_v4_unreachable(
     original: &[u8],
@@ -100,8 +107,8 @@ pub fn build_v4_unreachable(
     // `:144-145`: remember original src/dst.
     let ip_src = orig_ip.ip_src;
     let ip_dst = orig_ip.ip_dst;
-    // STUB(chunk-9-relay): `:148-169` would overwrite ip_dst here
-    // for ICMP_TIME_EXCEEDED via getsockname().
+    // NOT-PORTING(relay-ttl-src): `:148-169` would overwrite ip_dst
+    // here for ICMP_TIME_EXCEEDED via getsockname(). See module doc.
 
     // ─── Quote length (`:170,176-178`).
     // `oldlen = packet->len - ether_size`: the whole original IP
@@ -174,8 +181,8 @@ pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 ///
 /// Returns `None` if `original` is too short for eth + IPv6 hdr.
 ///
-/// **Stubbed**: TTL-exceeded `getsockname` (`route.c:254-275`).
-/// `STUB(chunk-9-relay)`.
+/// `NOT-PORTING(relay-ttl-src)`: TTL-exceeded `getsockname`
+/// (`route.c:254-275`). See module doc.
 #[must_use]
 pub fn build_v6_unreachable(
     original: &[u8],
@@ -202,7 +209,8 @@ pub fn build_v6_unreachable(
 
     // `:248-249`: remember swapped. The C stores them directly in
     // `pseudo.ip6_src/dst` and reuses that struct; we keep locals.
-    // STUB(chunk-9-relay): `:254-275` would overwrite new_src here.
+    // NOT-PORTING(relay-ttl-src): `:254-275` would overwrite
+    // new_src here. See module doc.
     let new_src = orig_ip6.ip6_dst;
     let new_dst = orig_ip6.ip6_src;
 

@@ -820,11 +820,12 @@ impl Daemon {
                 // devops.write(packet); return; }`. The packet is
                 // for US (it came in over the wire and `route()`
                 // matched one of our subnets). Write it to the TUN.
-                // STUB(chunk-12-overwrite-mac): `overwrite_mac`
-                // (`:1557-1562`) — TAP-mode source-MAC rewriting.
-                // RMODE_ROUTER doesn't need it; Switch mode doesn't
-                // either (it preserves the real eth header). Only
-                // matters for router-mode-on-TAP (rare config).
+                // NOT-PORTING(overwrite-mac): `overwrite_mac`
+                // (`:1557-1562`) for `Mode=router DeviceType=tap`.
+                // We don't parse `OverwriteMAC`; if set, it's
+                // silently ignored. The fix is 6 LOC (memcpy mymac
+                // into `data[0..6]`, XOR `data[11]`) if anyone
+                // needs it.
                 let len = data.len() as u64;
                 let myself_tunnel = self.tunnels.entry(self.myself).or_default();
                 myself_tunnel.out_packets += 1;
@@ -844,6 +845,21 @@ impl Daemon {
                                "route() chose unknown node {to}");
                     return false;
                 };
+
+                // C `route.c:649,745`: `if(subnet->owner == source)
+                // { logger(WARNING, "Packet looping back to %s!");
+                // return; }`. The packet's destination subnet is
+                // OWNED by who sent it — they sent us a packet for
+                // themselves. Overlapping subnets, misconfiguration.
+                // C `:649` is right after `lookup_subnet`, before
+                // the reachable check; we slot it right after
+                // node-id resolve (same effect — both are early-out
+                // before any routing-state reads).
+                if Some(to_nid) == from {
+                    log::warn!(target: "tincd::net",
+                               "Packet looping back to {to}");
+                    return false;
+                }
 
                 // C `route.c:698`: `clamp_mss(source, via, packet)`.
                 // BEFORE `send_packet`, AFTER the routing decision.
@@ -879,6 +895,34 @@ impl Daemon {
                     }
                 });
 
+                // C `route.c:675,770`: `if(via == source) { logger(
+                // ERR, "Routing loop for packet from %s!"); return;
+                // }`. The next hop IS who sent it to us — bounce
+                // loop. Can fire when graph routing data is stale
+                // (DEL_EDGE arrived but `run_graph` hasn't yet
+                // recomputed `via`). C `:677 return` is silent drop.
+                if Some(via_nid) == from {
+                    let from_name = from
+                        .and_then(|nid| self.graph.node(nid))
+                        .map_or("?", |n| n.name.as_str());
+                    log::error!(target: "tincd::net",
+                                "Routing loop for packet from {from_name}");
+                    return false;
+                }
+
+                // C `route.c:685`: `via->mtu`. Read once, used by
+                // both the FRAG_NEEDED gate (unconditional) and the
+                // CLAMP_MSS block (option-gated). Hoisted out of the
+                // CLAMP_MSS scope — the C reads it at `:685`
+                // regardless. `MTU` if no tunnel yet (matches C's
+                // xzalloc → 0 → the C `< mtu` check fails →
+                // uses source->mtu — wait, C's `n->mtu` starts 0,
+                // but `route.c:396` is `via->mtu < mtu` so a 0 mtu
+                // would WIN. Our `TunnelState::default()` inits to
+                // `MTU` instead — see tunnel.rs:128. Either way:
+                // until PMTU runs, this is the 1518 ceiling).
+                let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
+
                 // C `route.c:679-682`: `if(directonly && owner !=
                 // via) route_ipv4_unreachable(..., NET_ANO);
                 // return`. The relay path EXISTS (chunk-9b proves
@@ -894,18 +938,64 @@ impl Daemon {
                     self.write_icmp_to_device(data, t, c);
                     return false;
                 }
+                // C `route.c:685-696,779-784`. Packet too big for
+                // next hop's discovered PMTU. `via_nid != myself`:
+                // only when relaying — we don't FRAG_NEEDED for our
+                // OWN endpoint (`clamp_mss` and the kernel's PMTU
+                // handle our outbound). Floors: 590 = 576 (RFC 791
+                // IPv4 minimum) + 14 eth; 1294 = 1280 (RFC 8200
+                // IPv6 minimum) + 14. The `MAX(via->mtu, FLOOR)`
+                // means: even if PMTU discovery hasn't run
+                // (via->mtu small/0), don't send a FRAG_NEEDED
+                // claiming MTU < 576 — that'd be RFC-violating
+                // nonsense. The C `:690 packet->len = MAX(...)`
+                // truncation is for the ICMP quote; our
+                // `build_v4_unreachable` already caps internally
+                // (`icmp.rs::V4_QUOTE_CAP`), so we skip it.
+                if via_nid != self.myself {
+                    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                    let floor: u16 = if ethertype == crate::packet::ETH_P_IP {
+                        590
+                    } else {
+                        1294
+                    };
+                    let limit = via_mtu.max(floor);
+                    if data.len() > usize::from(limit) {
+                        if ethertype == crate::packet::ETH_P_IP {
+                            // C `:688`: DF flag at IP-hdr byte 6 =
+                            // frame byte 20. `data.len() > 590`
+                            // guarantees `[20]` is in bounds.
+                            let df_set = data[20] & 0x40 != 0;
+                            if df_set {
+                                // `limit - 14`: IP-layer MTU (no
+                                // eth). C `:690` truncates `packet
+                                // ->len` then `:174 icmp.icmp_
+                                // nextmtu = htons(packet->len -
+                                // ether_size)`. We thread it
+                                // directly. `limit >= 590` so the
+                                // sub never wraps.
+                                self.write_icmp_frag_needed(data, limit - 14);
+                            }
+                            // else: C calls `fragment_ipv4_packet`
+                            // (`:614-681`).
+                            // NOT-PORTING(ipv4-fragment): in-transit
+                            // IPv4 frag. The C does it (~70 LOC of
+                            // pointer arithmetic for RFC 791 header
+                            // copy + offset/MF flag manipulation).
+                            // Modern OS sets DF on TCP (PMTUD); UDP
+                            // without DF through a narrow-MTU relay
+                            // drops here. Niche. See
+                            // RUST_REWRITE_PLAN.md `route.c` row.
+                        } else {
+                            // v6: always ICMP6_PACKET_TOO_BIG (no
+                            // in-transit frag, RFC 8200 §5).
+                            self.write_icmp_pkt_too_big(data, u32::from(limit - 14));
+                        }
+                        return false;
+                    }
+                }
+
                 if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
-                    // `via->mtu`: read from `tunnels[to_nid]` (direct
-                    // case). `MTU` if no tunnel yet (matches C's
-                    // xzalloc → 0 → the C `< mtu` check fails →
-                    // uses source->mtu — wait, C's `n->mtu` starts
-                    // 0, but `route.c:396` is `via->mtu < mtu` so a
-                    // 0 mtu would WIN. Our `TunnelState::default()`
-                    // inits to `MTU` instead — see tunnel.rs:128.
-                    // Either way: until PMTU runs, MSS clamps to the
-                    // 1518 ceiling, which is a no-op for normal
-                    // ethernet payloads).
-                    let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
                     let mtu = via_mtu.min(MTU);
                     // `mss::clamp` mutates in place. `data` is `&mut
                     // [u8]` (the TUN read buffer is OURS). Return
@@ -979,10 +1069,9 @@ impl Daemon {
                     return false;
                 }
                 // `data` is the full eth frame from the TUN.
-                // STUB(chunk-9b): `frag_mtu` for FRAG_NEEDED — needs
-                // the relay path's `via->mtu`. `route()` only
-                // returns NET_UNKNOWN/NET_UNREACH today; FRAG_NEEDED
-                // is the `:685-696` block which needs `via`.
+                // `route()` only returns NET_UNKNOWN/NET_UNREACH
+                // here; FRAG_NEEDED is in the Forward arm (`:685`)
+                // where `via_mtu` is in scope. `frag_mtu = None`.
                 let Some(reply) = icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
                 else {
                     // Too short to parse eth+IP. `route()` already
@@ -1102,11 +1191,13 @@ impl Daemon {
                     return false;
                 };
                 // C `protocol_misc.c:90-103 send_tcppacket`.
-                // RED first (`:94`). STUB(chunk-12): maxoutbufsize
-                // knob; same usize::MAX as `:1565` until wired.
+                // RED first (`:94`). `maxoutbufsize` (`net_setup.c
+                // :1255-1257`, default 10*MTU = 15180). RED kicks
+                // in when the meta-conn outbuf exceeds threshold —
+                // under load this prevents unbounded growth.
                 if crate::tcp_tunnel::random_early_drop(
                     conn.outbuf.live_len(),
-                    usize::MAX,
+                    self.settings.maxoutbufsize,
                     &mut OsRng,
                 ) {
                     return true; // C `:95 return true` — fake success
@@ -1434,11 +1525,9 @@ impl Daemon {
         // route() → `Forward{to: myself}` (we're the endpoint) →
         // device.write. If route() says forward-to-someone-else,
         // we're a relay — `route_packet`'s Forward arm recurses
-        // into `send_sptps_packet` for THEM (chunk-9b).
-        // DEFERRED(chunk-7-daemon): `route.c:648` source-loop check
-        // (`if(subnet->owner == source) drop`). With 2 nodes and
-        // /32 subnets, the destination subnet is never owned by
-        // the sender. The check matters for overlapping subnets.
+        // into `send_sptps_packet` for THEM (chunk-9b). The
+        // `route.c:649` source-loop check (`if(subnet->owner ==
+        // source) drop`) is in the Forward arm.
         self.route_packet(&mut frame, Some(peer))
     }
 
@@ -1620,18 +1709,15 @@ impl Daemon {
             // is exactly that.
             if record_type != tinc_sptps::REC_HANDSHAKE && (conn.options >> 24) >= 7 {
                 // C `protocol_misc.c:125-135`. Random Early Drop
-                // FIRST. STUB(chunk-12): the `maxoutbufsize` config
-                // knob (C `net_setup.c:437`, default `10 * MTU`).
-                // Pass usize::MAX for now — RED degenerates to
-                // never-drop, which is the safe default until the
-                // knob is wired.
+                // FIRST. `maxoutbufsize` (`net_setup.c:1255-1257`,
+                // default `10 * MTU`).
                 if crate::tcp_tunnel::random_early_drop(
                     conn.outbuf.live_len(),
-                    usize::MAX,
+                    self.settings.maxoutbufsize,
                     &mut OsRng,
                 ) {
                     // C `:126 return true` — silently drop, fake
-                    // success. Unreachable with usize::MAX.
+                    // success.
                     return true;
                 }
                 // Same id6 lookups as the UDP path below. C `:976-
@@ -1871,6 +1957,47 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "route: TTL exceeded, sending ICMP type={icmp_type} \
                          code={icmp_code} ({} bytes)", reply.len());
+            self.write_icmp_reply(reply);
+        }
+    }
+
+    /// `route.c:690` v4 FRAG_NEEDED specialization. Passes `frag_mtu`
+    /// through to `build_v4_unreachable` so `icmp.icmp_nextmtu` gets
+    /// the right value (`:174 icmp.icmp_nextmtu = htons(packet->len -
+    /// ether_size)`). Separate helper because [`write_icmp_to_device`]
+    /// dispatches v4/v6 by type and always passes `None`.
+    pub(super) fn write_icmp_frag_needed(&mut self, data: &[u8], frag_mtu: u16) {
+        let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
+        if self.icmp_ratelimit.should_drop(now_sec, 3) {
+            return;
+        }
+        if let Some(reply) = icmp::build_v4_unreachable(
+            data,
+            route::ICMP_DEST_UNREACH,
+            route::ICMP_FRAG_NEEDED,
+            Some(frag_mtu),
+        ) {
+            log::debug!(target: "tincd::net",
+                        "route: FRAG_NEEDED, mtu={frag_mtu} ({} bytes)",
+                        reply.len());
+            self.write_icmp_reply(reply);
+        }
+    }
+
+    /// `route.c:781` v6 PACKET_TOO_BIG specialization. Passes
+    /// `pkt_too_big_mtu` through to `build_v6_unreachable` so
+    /// `icmp6.icmp6_mtu` gets filled (`:278-280`).
+    pub(super) fn write_icmp_pkt_too_big(&mut self, data: &[u8], mtu: u32) {
+        let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
+        if self.icmp_ratelimit.should_drop(now_sec, 3) {
+            return;
+        }
+        if let Some(reply) =
+            icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu))
+        {
+            log::debug!(target: "tincd::net",
+                        "route: PACKET_TOO_BIG, mtu={mtu} ({} bytes)",
+                        reply.len());
             self.write_icmp_reply(reply);
         }
     }

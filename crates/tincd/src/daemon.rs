@@ -317,6 +317,12 @@ pub struct DaemonSettings {
     /// for learned MACs. The `age_subnets` 10s timer is the SWEEP
     /// frequency; this is the LEASE duration.
     pub macexpire: u64,
+    /// `maxoutbufsize` (`net_setup.c:1255-1257`). Bytes. Default
+    /// `10 * MTU` (=15180). The Random Early Drop threshold for the
+    /// meta-connection TCP outbuf — under load, RED keeps the
+    /// buffer from growing unbounded by probabilistically dropping
+    /// data packets queued behind a slow TCP send.
+    pub maxoutbufsize: usize,
     /// `invitation_lifetime` (`protocol_auth.c:55`). C default 604800
     /// (one week, `net_setup.c:567`). Config var `InvitationExpire`.
     /// Seconds; `serve_cookie` checks `mtime + this < now`.
@@ -443,6 +449,8 @@ impl Default for DaemonSettings {
             broadcast_mode: broadcast::BroadcastMode::Mst,
             // C `route.c:43`: `int macexpire = 600`.
             macexpire: mac_lease::DEFAULT_EXPIRE_SECS,
+            // C `net_setup.c:1257`: `maxoutbufsize = 10 * MTU`.
+            maxoutbufsize: 10 * MTU as usize,
             // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
             invitation_lifetime: Duration::from_secs(604_800),
             // C `net_setup.c:404`: default false (no `else` branch).
@@ -467,6 +475,7 @@ impl Default for DaemonSettings {
 ///
 /// `net_setup.c:391-575` `setup_myself_reloadable`. We re-read the
 /// settings we already parse; the C has ~40 more we don't yet.
+#[allow(clippy::too_many_lines)] // straight-line config-var parse
 fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     // PingInterval (`:1241-1243`).
     if let Some(e) = config.lookup("PingInterval").next() {
@@ -569,6 +578,14 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         if let Ok(v) = e.get_int() {
             if let Ok(v) = u64::try_from(v) {
                 settings.macexpire = v;
+            }
+        }
+    }
+    // MaxOutputBufferSize (`net_setup.c:1255-1257`).
+    if let Some(e) = config.lookup("MaxOutputBufferSize").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = usize::try_from(v) {
+                settings.maxoutbufsize = v;
             }
         }
     }
@@ -1940,6 +1957,8 @@ mod tests {
         // C `protocol_misc.c:34-35`.
         assert_eq!(s.udp_info_interval, 5);
         assert_eq!(s.mtu_info_interval, 5);
+        // C `net_setup.c:1257`: `maxoutbufsize = 10 * MTU`.
+        assert_eq!(s.maxoutbufsize, 10 * MTU as usize);
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max

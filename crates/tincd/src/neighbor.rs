@@ -28,9 +28,11 @@
 //! subnet lookup; [`build_arp_reply`] / [`build_ndp_advert`]
 //! synthesize given the original frame. Pure functions, no state.
 //!
-//! `STUB(chunk-12-overwrite-mac)`: `overwrite_mac` snatching (`:970-973`,
-//! `:830-832`) and `source != myself` (`:964-967`, `:814-817`) are
-//! switch-mode concerns; default-off / router-mode-only here.
+//! `NOT-PORTING(overwrite-mac)`: `overwrite_mac` snatching
+//! (`:970-973`, `:830-832`) for `Mode=router DeviceType=tap`. We
+//! don't parse `OverwriteMAC`; if set, it's silently ignored. The
+//! fix is 6 LOC if anyone needs it. `source != myself` (`:964-967`,
+//! `:814-817`) is the same gate.
 
 #![forbid(unsafe_code)]
 // All `as u32`/`as u16` casts in this module are header-size constants
@@ -255,7 +257,9 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// - opt (if present): type ← `ND_OPT_TARGET_LINKADDR`, lladdr ←
 ///   the fake MAC (`:904-905`)
 ///
-/// `STUB(chunk-9-relay)`: `decrement_ttl` (`:895`) is daemon-side.
+/// `NOT-PORTING(relay-ndp-ttl)`: `decrement_ttl` (`:895`) before
+/// NDP advert. Triple-gate: NDP-from-peer + DecrementTTL=yes +
+/// hop_limit==1.
 ///
 /// Returns `None` only if `original` is too short; the caller
 /// SHOULD have validated with [`parse_ndp_solicit`] already so this

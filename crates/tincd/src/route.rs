@@ -81,6 +81,9 @@ pub const ICMP_NET_ANO: u8 = 9;
 /// `ICMP_NET_UNREACH` — `ipv4.h:55`. RFC 792 code 0: route exists,
 /// next hop is down.
 pub const ICMP_NET_UNREACH: u8 = 0;
+/// `ICMP_FRAG_NEEDED` — `ipv4.h:47`. RFC 792 code 4: DF set but
+/// packet exceeds next-hop MTU. `route.c:690`.
+pub const ICMP_FRAG_NEEDED: u8 = 4;
 /// `ICMP_TIME_EXCEEDED` — `ipv4.h:59`. RFC 792 type 11.
 pub const ICMP_TIME_EXCEEDED: u8 = 11;
 /// `ICMP_EXC_TTL` — `ipv4.h:63`. RFC 792 code 0: TTL went to zero
@@ -243,10 +246,9 @@ pub fn route_ipv4<'a>(
     // ownerless subnets are broadcast. `SubnetTree` doesn't model
     // ownerless entries yet (every `add()` takes a `String` owner).
 
-    // DEFERRED(chunk-7-daemon): `route.c:648-651` `if(subnet->owner
-    // == source)` — loop detection. Needs `source`, which is daemon
-    // state (which connection did this packet arrive on?). The
-    // daemon checks before calling us.
+    // `route.c:648-651` `if(subnet->owner == source)` — loop
+    // detection. Daemon-side: `dispatch_route_result`'s Forward arm
+    // checks `Some(to_nid) == from` right after node-id resolve.
 
     // `route.c:706`: `send_packet(subnet->owner, packet)`. C reaches
     // this for `owner == myself` too — `send_packet` itself branches
@@ -281,10 +283,9 @@ pub fn route_ipv4<'a>(
     // DEFERRED(chunk-9): `route.c:668-670` `priorityinheritance` —
     // copies the IP TOS byte into `packet->priority`. Config-gated.
 
-    // DEFERRED(chunk-7-daemon): `route.c:672` `via = (owner->via ==
-    // myself) ? owner->nexthop : owner->via`. The indirect/relay
-    // path. Needs `nodes` access (graph state, not subnet tree).
-    // `route.c:674-677` then re-checks `via == source` for loops.
+    // `route.c:672` `via = (owner->via == myself) ? owner->nexthop
+    // : owner->via`. Daemon-side (`dispatch_route_result` Forward
+    // arm). `:674-677` `via == source` loop-check is there too.
 
     // DEFERRED(chunk-9): `route.c:679-682` `directonly && owner !=
     // via` → NET_ANO. Config-gated.
@@ -376,10 +377,9 @@ pub fn route_ipv6<'a>(
     // ownerless subnets are broadcast. `SubnetTree` doesn't model
     // ownerless entries yet (every `add()` takes a `String` owner).
 
-    // DEFERRED(chunk-7-daemon): `route.c:743-746` `if(subnet->owner
-    // == source)` — loop detection. Needs `source`, which is daemon
-    // state (which connection did this packet arrive on?). The
-    // daemon checks before calling us.
+    // `route.c:743-746` `if(subnet->owner == source)` — loop
+    // detection. Daemon-side: `dispatch_route_result`'s Forward arm
+    // checks `Some(to_nid) == from` right after node-id resolve.
 
     // `route.c:789`: same collapse as `route_ipv4` — `owner ==
     // myself` is `Forward{to:myself}` and the daemon dispatches to
@@ -411,10 +411,9 @@ pub fn route_ipv6<'a>(
     // copies the v6 traffic-class nibble pair `((data[14] & 0x0f)
     // << 4) | (data[15] >> 4)` into `packet->priority`. Config-gated.
 
-    // DEFERRED(chunk-7-daemon): `route.c:767` `via = (owner->via ==
-    // myself) ? owner->nexthop : owner->via`. The indirect/relay
-    // path. Needs `nodes` access (graph state, not subnet tree).
-    // `route.c:769-772` then re-checks `via == source` for loops.
+    // `route.c:767` `via = (owner->via == myself) ? owner->nexthop
+    // : owner->via`. Daemon-side (`dispatch_route_result` Forward
+    // arm). `:769-772` `via == source` loop-check is there too.
 
     // DEFERRED(chunk-9): `route.c:774-777` `directonly && owner !=
     // via` → DST_UNREACH_ADMIN. Config-gated.
