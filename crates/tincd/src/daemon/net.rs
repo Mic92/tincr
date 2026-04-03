@@ -1109,8 +1109,23 @@ impl Daemon {
                 // `route()` only returns NET_UNKNOWN/NET_UNREACH
                 // here; FRAG_NEEDED is in the Forward arm (`:685`)
                 // where `via_mtu` is in scope. `frag_mtu = None`.
-                let Some(reply) = icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
-                else {
+                //
+                // C `route.c:734` `route_ipv6` no-subnet exit calls
+                // `route_ipv6_unreachable`; `:608` v4 exit calls
+                // `route_ipv4_unreachable`. We collapsed both into
+                // one `Unreachable` variant; the v4/v6 distinction
+                // lives in NEITHER the pure half NOR (until now) the
+                // dispatch — bug audit `deef1268`. `data.len() >= 14`
+                // is guaranteed: route() returns `TooShort` for
+                // shorter; Unreachable means it parsed a full IP hdr.
+                let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                let reply = if ethertype == 0x86DD {
+                    // ETH_P_IPV6
+                    icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
+                } else {
+                    icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+                };
+                let Some(reply) = reply else {
                     // Too short to parse eth+IP. `route()` already
                     // returned `TooShort` for that case; reaching
                     // here means a route variant we don't expect.
@@ -2050,22 +2065,27 @@ impl Daemon {
     }
 
     /// Shared tail for the `Unreachable` arm and the `decrement_ttl`
-    /// `SendIcmp` outcome. v4/v6 dispatch on `icmp_type` (11=v4
-    /// TIME_EXCEEDED, 3=v6 TIME_EXCEEDED — mutually exclusive).
+    /// `SendIcmp` outcome. v4/v6 dispatch on **ethertype**, not
+    /// `icmp_type`: `ICMP_DEST_UNREACH=3` collides with
+    /// `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`). The previous
+    /// type-based dispatch was structurally unsound — currently
+    /// dark (no v4 type-3 caller via this path) but the next caller
+    /// to pass `(ICMP_DEST_UNREACH, code)` for a v4 frame would have
+    /// gotten ICMPv6. `data.len() >= 14` holds: every caller is
+    /// post-route() (which gates on `TooShort`) or post-decrement_ttl
+    /// (which gates on `len < ETHER_SIZE+IP_SIZE`).
     pub(super) fn write_icmp_to_device(&mut self, data: &[u8], icmp_type: u8, icmp_code: u8) {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return;
         }
-        // v4 TIME_EXCEEDED is type 11; v6 is type 3. The Unreachable
-        // arm only emits v4 (type 3 = DEST_UNREACH); decrement_ttl
-        // emits 11 or 3. Dispatch on the v6 marker.
-        let reply =
-            if icmp_type == route::ICMP6_TIME_EXCEEDED || icmp_type == route::ICMP6_DST_UNREACH {
-                icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
-            } else {
-                icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
-            };
+        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+        let reply = if ethertype == 0x86DD {
+            // ETH_P_IPV6
+            icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
+        } else {
+            icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+        };
         if let Some(reply) = reply {
             log::debug!(target: "tincd::net",
                         "route: TTL exceeded, sending ICMP type={icmp_type} \
