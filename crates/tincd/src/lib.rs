@@ -41,5 +41,6 @@ pub mod proto;
 pub mod route;
 pub mod seen;
 pub mod subnet_tree;
+pub mod tunnel;
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
