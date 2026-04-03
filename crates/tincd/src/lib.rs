@@ -96,6 +96,7 @@
 pub mod conn;
 pub mod control;
 pub mod daemon;
+pub mod listen;
 pub mod proto;
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};

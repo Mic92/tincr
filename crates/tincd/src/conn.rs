@@ -192,9 +192,19 @@ impl LineBuf {
 // ═══════════════════════════════════════════════════════════════════
 // Connection
 
-/// `connection_t`. The control-connection slice; peer fields come
-/// later. C `connection.c::new_connection` is `xzalloc(sizeof)` —
-/// our `accept_control` builds one inline.
+/// `connection_t`. The control-connection slice + peer-accept fields.
+/// C `connection.c::new_connection` is `xzalloc(sizeof)` — our
+/// constructors build one inline.
+///
+/// Two constructors:
+/// - `new_control`: from `handle_new_unix_connection`. `name =
+///   "<control>"`, `hostname = "localhost port unix"`.
+/// - `new_meta`: from `handle_new_meta_connection`. `name =
+///   "<unknown>"`, `hostname = "10.0.0.5 port 50123"`.
+///
+/// `id_h` overwrites `name` (`"<control>"` for `^` branch, peer
+/// node name for the bare-name branch). `hostname` never changes
+/// (it's the immutable accept-time fact).
 pub struct Connection {
     /// `c->socket`. C uses raw `int`; we own it. Drop closes.
     fd: OwnedFd,
@@ -203,16 +213,21 @@ pub struct Connection {
     /// `c->outbuf`. Bytes queued for `send()`.
     pub outbuf: LineBuf,
     /// `c->allow_request`. The state-machine gate. Starts at `Some(
-    /// Id)` (`net_socket.c:811` `c->allow_request = ID`); `id_h` sets
+    /// Id)` (`net_socket.c:776` `c->allow_request = ID`); `id_h` sets
     /// it to `Some(Control)` for control conns. `None` means `ALL`
     /// (any request accepted) — peers reach this after the auth
     /// handshake. Control conns never do.
     pub allow_request: Option<Request>,
     /// `c->status.control`. `true` after `id_h` sees `^<cookie>`.
     pub control: bool,
-    /// `c->name`. `"<control>"` literal for control conns. Appears
-    /// in log lines.
+    /// `c->name`. `"<unknown>"` until `id_h`, then peer node name or
+    /// `"<control>"`. Appears in log lines.
     pub name: String,
+    /// `c->hostname`. `sockaddr2hostname` of the peer's socket addr,
+    /// set at accept time and never touched again. `"10.0.0.5 port
+    /// 50123"` shape. C uses this in EVERY log line about the
+    /// connection (`"%s (%s)", c->name, c->hostname`).
+    pub hostname: String,
     /// `c->last_ping_time`. C uses `time_t` (seconds); we use
     /// `Instant`. The pingtimer sweep checks `now - last_ping > timeout`.
     /// Control conns get a 1-hour bump (`protocol_auth.c:328`) so
@@ -238,7 +253,11 @@ pub enum FeedResult {
 impl Connection {
     /// `new_connection()` + the field init from `handle_new_unix_
     /// connection` (`net_socket.c:798-811`). The fd just came from
-    /// `accept()`.
+    /// `accept()` on the unix socket.
+    ///
+    /// The C sets `name = "<control>"` and `hostname = "localhost
+    /// port unix"` (`:801,802`) — hardcoded literals because unix
+    /// sockets don't have addresses we'd bother showing.
     #[must_use]
     pub fn new_control(fd: OwnedFd, now: Instant) -> Self {
         Self {
@@ -250,10 +269,46 @@ impl Connection {
             // violation.
             allow_request: Some(Request::Id),
             control: false,
-            // `c->name = xstrdup("<control>")`. Placeholder until
-            // we know who they are. id_h overwrites it for peers
-            // (with their actual node name); for control it stays.
+            // `:800`: `c->name = xstrdup("<control>")`. The C does
+            // this BEFORE id_h — a small lie (id_h hasn't proven the
+            // cookie yet). id_h overwrites: `^` branch → "<control>"
+            // (idempotent). The lie is harmless; the post-id_h state
+            // is identical.
             name: "<control>".to_string(),
+            // `:802`: `c->hostname = xstrdup("localhost port unix")`.
+            hostname: "localhost port unix".to_string(),
+            last_ping_time: now,
+        }
+    }
+
+    /// `new_connection()` + the field init from `handle_new_meta_
+    /// connection` (`net_socket.c:758-776`). The fd just came from
+    /// `accept()` on a TCP listener.
+    ///
+    /// `hostname` is `sockaddr2hostname(peer_addr)` — the caller
+    /// computes it (`listen::fmt_addr`). C `:762`: `c->hostname =
+    /// sockaddr2hostname(&sa)`.
+    ///
+    /// `name = "<unknown>"` (`:759`). Stays `<unknown>` until `id_h`
+    /// overwrites. The C log line `:767` (`"Connection from %s",
+    /// c->hostname`) only uses `hostname`; `name` doesn't appear
+    /// until later log lines, by which time `id_h` has set it.
+    ///
+    /// `outmaclength` (`:760`) is a legacy-protocol field; we're
+    /// SPTPS-only. Skip.
+    #[must_use]
+    pub fn new_meta(fd: OwnedFd, hostname: String, now: Instant) -> Self {
+        Self {
+            fd,
+            inbuf: LineBuf::default(),
+            outbuf: LineBuf::default(),
+            // `:776`: `c->allow_request = ID`. Same as unix — the
+            // first line is always ID, regardless of transport.
+            allow_request: Some(Request::Id),
+            control: false,
+            // `:759`: `c->name = xstrdup("<unknown>")`.
+            name: "<unknown>".to_string(),
+            hostname,
             last_ping_time: now,
         }
     }

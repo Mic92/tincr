@@ -47,6 +47,7 @@
 //! module is `target: "tincd"` for the always-level startup/shutdown
 //! lines, `"tincd::conn"` for accept/terminate.
 
+use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -58,6 +59,10 @@ use tinc_proto::Request;
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
+use crate::listen::{
+    AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
+    unmap,
+};
 use crate::proto::{DispatchResult, check_gate, handle_control, handle_id};
 
 // ═══════════════════════════════════════════════════════════════════
@@ -163,7 +168,17 @@ pub struct DaemonSettings {
     /// to wait for PONG before assuming peer dead. Clamped to
     /// `[1, pinginterval]` (`:1251-1253`).
     pub pingtimeout: u32,
-    // Chunk 3+: ~35 more fields.
+    /// `myport.tcp` (`net_setup.c:788`). The Port config (HOST-tagged,
+    /// from `hosts/NAME` not tinc.conf). C stores as a STRING (it goes
+    /// through getaddrinfo which wants a service name); we convert to
+    /// u16 here. Default 655 (`:789`). 0 means "kernel picks" — valid
+    /// for tests; the actual port is read back from `listeners[0]`.
+    pub port: u16,
+    /// `addressfamily` (`net_socket.c:38`, set at `net_setup.c:538`).
+    /// Filters which families `open_listeners` tries. Default
+    /// `Any` (`AF_UNSPEC`) means dual-stack.
+    pub addressfamily: AddrFamily,
+    // Chunk 4+: ~33 more fields.
 }
 
 impl Default for DaemonSettings {
@@ -173,6 +188,10 @@ impl Default for DaemonSettings {
             pinginterval: 60,
             // C `net_setup.c:1248`: `pingtimeout = 5`.
             pingtimeout: 5,
+            // C `net_setup.c:789`: `myport.tcp = xstrdup("655")`.
+            port: 655,
+            // C `net_socket.c:38`: `int addressfamily = AF_UNSPEC`.
+            addressfamily: AddrFamily::Any,
         }
     }
 }
@@ -233,6 +252,19 @@ pub struct Daemon {
 
     /// `unix_socket` (`control.c:29`). The control listener.
     pub(crate) control: ControlSocket,
+
+    /// `listen_socket[MAXSOCKETS]` (`net_socket.c:48`). TCP+UDP
+    /// pairs. `IoWhat::Tcp(i)` indexes here. Max 8 (we only fill 2
+    /// in chunk 3: one v4, one v6).
+    ///
+    /// `Vec` not array because `Listener` doesn't impl `Default`
+    /// (sockets aren't defaultable). The C uses `static listen_
+    /// socket_t[8]` zero-init; we just push.
+    pub(crate) listeners: Vec<Listener>,
+
+    /// `check_tarpit` statics + `tarpit()` ring buffer. Seven C
+    /// statics packed into one struct. Mutated on every TCP accept.
+    pub(crate) tarpit: Tarpit,
 
     /// `controlcookie` (`control.c:35`). 64 hex chars. Compared in
     /// `handle_id`.
@@ -318,10 +350,73 @@ impl Daemon {
             .ok_or(SetupError::Config("Name for tinc daemon required!".into()))?;
         log::info!(target: "tincd", "tincd starting, name={name}");
 
-        // ─── settings (net_setup.c:1239-1257) ────────────────────
-        // PingInterval, PingTimeout. Defaulted; we don't even read
-        // them in skeleton (ping sweep is a noop with no peers).
-        let settings = DaemonSettings::default();
+        // ─── read_host_config (net_setup.c:786) ──────────────────
+        // C: `read_host_config(&config_tree, name, true)`. Merges
+        // hosts/NAME into the same tree as tinc.conf. The HOST-tagged
+        // vars (Port, Subnet, PublicKey, etc) live there.
+        //
+        // C DOESN'T check the return value (`:786` is a bare call).
+        // Missing hosts/NAME is not fatal at this stage; the only
+        // var we read from it is Port, which has a default. The hard
+        // failures (no key, no subnets) come later. We match: log
+        // and continue. The daemon starts on port 655.
+        //
+        // Per tinc-conf/parse.rs:523: read_host_config is intentionally
+        // not a function. It's two lines.
+        let mut config = config;
+        let host_file = confbase.join("hosts").join(&name);
+        match tinc_conf::parse_file(&host_file) {
+            Ok(entries) => config.merge(entries),
+            Err(e) => {
+                // C `read_config_file` would `fopen` fail and return
+                // false. The caller ignores. Warn-level because it
+                // MIGHT be intentional (a freshly-init'd daemon has
+                // no hosts/ yet) but more likely is a typo in Name.
+                log::warn!(target: "tincd",
+                           "hosts/{name} not read: {e}; using defaults");
+            }
+        }
+
+        // ─── settings (net_setup.c:788, 538, 1239-1257) ─────────
+        let mut settings = DaemonSettings::default();
+
+        // Port (`:788-794`). HOST-tagged. C stores as a string
+        // (goes through getaddrinfo); we parse to u16 here.
+        // `Port = 0` is valid: kernel picks (tests use this).
+        // Non-numeric Port (`:846-858`: service name resolution
+        // via `service_to_port`): deferred. Reject for now.
+        if let Some(e) = config.lookup("Port").next() {
+            settings.port = e.get_str().parse().map_err(|_| {
+                SetupError::Config(format!("Port = {} is not a valid port number", e.get_str()))
+            })?;
+        }
+
+        // AddressFamily (`:538-548`). SERVER-tagged (in tinc.conf).
+        // C silently ignores unknown values (no `else { ERR }`);
+        // `addressfamily` stays at default. We match.
+        if let Some(e) = config.lookup("AddressFamily").next() {
+            if let Some(af) = AddrFamily::from_config(e.get_str()) {
+                settings.addressfamily = af;
+            } else {
+                log::warn!(target: "tincd",
+                           "Unknown AddressFamily = {}, using default",
+                           e.get_str());
+            }
+        }
+
+        // PingTimeout (`:1247-1253`). For tests: `PingTimeout = 1`
+        // makes the 6-second integration test run in 2 seconds. Read
+        // it now; the clamp (`:1251`: `[1, pinginterval]`) too.
+        if let Some(e) = config.lookup("PingTimeout").next() {
+            if let Ok(v) = e.get_int() {
+                // C clamps `< 1 || > pinginterval` → default.
+                // Match the clamp; reject negative (get_int returns
+                // i32; u32::try_from rejects negative).
+                if let Ok(v) = u32::try_from(v) {
+                    settings.pingtimeout = v.clamp(1, settings.pinginterval);
+                }
+            }
+        }
 
         // ─── device (net_setup.c:1061-1100) ──────────────────────
         // C: `devops = os_devops; if DeviceType=dummy → dummy_devops;
@@ -399,14 +494,44 @@ impl Daemon {
             Duration::from_secs(u64::from(settings.pingtimeout)),
         );
 
-        // ─── init_control (net_setup.c:1263) ─────────────────────
+        // ─── listeners (net_setup.c:1152-1183) ───────────────────
+        // C: walk BindToAddress configs, then ListenAddress configs,
+        // else `add_listen_address(NULL, NULL)` for the no-config
+        // default. We only do the no-config default for now.
+        //
+        // C `:1180`: `if(!listen_sockets) { ERR; return false }`.
+        // Hard error. The daemon can't function without at least one
+        // listener (peers can't connect; we can't receive UDP).
+        let listeners = open_listeners(settings.port, settings.addressfamily);
+        if listeners.is_empty() {
+            return Err(SetupError::Config(
+                "Unable to create any listening socket!".into(),
+            ));
+        }
+        // Register each pair. C `:723-724`: `io_add(&sock->tcp, ...)`.
+        // The index `i` becomes `IoWhat::Tcp(i)` so the dispatch arm
+        // can index back into `listeners[i]` for the accept.
+        for (i, l) in listeners.iter().enumerate() {
+            let (tcp_fd, udp_fd) = l.fds();
+            // u8 cast: MAXSOCKETS=8 fits trivially. The C uses int.
+            #[allow(clippy::cast_possible_truncation)]
+            let i = i as u8;
+            ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
+                .map_err(SetupError::Io)?;
+            ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
+                .map_err(SetupError::Io)?;
+        }
+
+        // ─── init_control (net_setup.c:1263, control.c:148-231) ───
         let cookie = generate_cookie();
 
-        // C `init_control` step 2 (get listen_socket[0]'s address)
-        // is skipped — no listeners. Placeholder. The CLI never
-        // connects to this address (uses the unix socket).
-        let address = "127.0.0.1 port 0";
-        write_pidfile(pidfile, &cookie, address).map_err(SetupError::Io)?;
+        // C `control.c:155-176`: get listeners[0]'s bound addr, map
+        // 0.0.0.0→127.0.0.1, format `"HOST port PORT"`. The CLI on
+        // Windows (no unix socket) actually CONNECTS to this addr.
+        // On Unix the CLI uses the unix socket and ignores the addr,
+        // but the pidfile format is fixed.
+        let address = pidfile_addr(&listeners);
+        write_pidfile(pidfile, &cookie, &address).map_err(SetupError::Io)?;
 
         let control = ControlSocket::bind(socket).map_err(|e| match e {
             crate::control::BindError::AlreadyRunning => SetupError::Config(format!(
@@ -425,6 +550,10 @@ impl Daemon {
             conn_io: slotmap::SecondaryMap::new(),
             device,
             control,
+            listeners,
+            // Tarpit::new wants a now seed (avoids the C's `static
+            // time_t = 0` first-tick bug). Use the cached now.
+            tarpit: Tarpit::new(timers.now()),
             cookie,
             pidfile: pidfile.to_path_buf(),
             name,
@@ -559,8 +688,29 @@ impl Daemon {
                         unreachable!("device fd not registered in skeleton")
                     }
 
-                    IoWhat::Tcp(_) | IoWhat::Udp(_) => {
-                        unreachable!("listeners not bound in skeleton")
+                    IoWhat::Tcp(i) => {
+                        // `handle_new_meta_connection`.
+                        self.on_tcp_accept(i);
+                    }
+
+                    IoWhat::Udp(i) => {
+                        // `handle_incoming_vpn_data`. The socket IS
+                        // bound (UDP listener); a peer COULD send to
+                        // it. But: no `node_tree` yet, no key state,
+                        // no route. The packet is undecryptable
+                        // garbage from our point of view. C
+                        // `net_packet.c:1802` would `lookup_node_udp`,
+                        // get NULL, `try_harder`, give up.
+                        //
+                        // We DON'T `unreachable!()` (the fd IS
+                        // registered now). We don't read either:
+                        // level-triggered means the socket stays
+                        // readable, this arm fires every turn,
+                        // burning CPU. Drain the socket and discard.
+                        //
+                        // Chunk 4+ replaces this with the real
+                        // recv_from + decrypt + route.
+                        self.on_udp_drain(i);
                     }
                 }
             }
@@ -624,13 +774,163 @@ impl Daemon {
 
     // ─── io handlers ─────────────────────────────────────────────
 
+    /// `handle_new_meta_connection` (`net_socket.c:734-779`).
+    /// accept on TCP listener `i`, tarpit-check, configure, allocate
+    /// Connection, register with event loop.
+    ///
+    /// Same shape as `on_unix_accept` plus: `sockaddrunmap` (v4-mapped
+    /// v6 → plain v4), `is_local`+tarpit (rate-limit non-loopback),
+    /// `configure_tcp` (NONBLOCK + NODELAY).
+    fn on_tcp_accept(&mut self, i: u8) {
+        let listener = &self.listeners[usize::from(i)];
+
+        // C `:745`: `fd = accept(l->tcp.fd, &sa.sa, &len)`.
+        // socket2 uses accept4(SOCK_CLOEXEC) on Linux/BSD — the C
+        // doesn't set CLOEXEC on accepted fds (small leak into
+        // script.c children, fixed for free).
+        let (sock, peer_sockaddr) = match listener.tcp.accept() {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // The listener fd is NOT non-blocking but accept can
+                // still spuriously return EAGAIN if a peer connect+
+                // RST'd between epoll wake and our accept (TOCTOU).
+                return;
+            }
+            Err(e) => {
+                // C `:748`: `logger(ERR); return`. Nothing to clean.
+                log::error!(target: "tincd::conn",
+                            "Accepting a new connection failed: {e}");
+                return;
+            }
+        };
+
+        // ─── sockaddrunmap (`:751`) ───────────────────────────────
+        // V6ONLY is set so we shouldn't see mapped addrs in practice.
+        // Canonicalize anyway: `fmt_addr` and the tarpit's prev-addr
+        // compare want plain v4.
+        //
+        // `as_socket()` returns None for AF_UNIX (impossible here —
+        // TCP accept returns AF_INET/AF_INET6). The `else` branch is
+        // a kernel-bug-guard: log + dummy. `expect()` would crash
+        // the whole daemon for one bizarre accept; not proportionate.
+        // The dummy 0.0.0.0:0 won't match prev_addr (no false
+        // tarpit), won't be is_local (no false exemption either).
+        let peer = if let Some(sa) = peer_sockaddr.as_socket() {
+            unmap(sa)
+        } else {
+            log::error!(target: "tincd::conn",
+                        "accept returned non-IP family {:?}",
+                        peer_sockaddr.family());
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        };
+
+        // ─── tarpit check (`:753`) ───────────────────────────────
+        // C: `if(!is_local_connection(&sa) && check_tarpit(&sa, fd))
+        //   return`. The `&&` short-circuits: local conns never tick
+        // the buckets. The pidfile address is loopback; `tinc start`
+        // followed by 100 `tinc info` queries doesn't get tarpitted.
+        if !is_local(&peer) {
+            let now = self.timers.now();
+            if self.tarpit.check(peer, now) {
+                // C: `tarpit(fd); return true` from check → caller
+                // returns. We do the pit() here; the C splits
+                // check/pit because `check_tarpit` is `static bool`
+                // and `tarpit` is `void`. Our struct fuses both.
+                //
+                // `sock.into()`: Socket → OwnedFd. The fd is NOT
+                // configured (no NONBLOCK, no NODELAY) — we never
+                // touch it again. The peer's reads block forever.
+                self.tarpit.pit(sock.into());
+                log::info!(target: "tincd::conn",
+                           "Tarpitting connection from {peer}");
+                return;
+            }
+        }
+
+        // ─── configure_tcp (`:773`) ──────────────────────────────
+        // C ordering: new_connection (`:758`) BEFORE configure_tcp
+        // (`:773`). We flip: configure first, THEN allocate. If
+        // configure fails (set_nonblocking error), we don't have a
+        // half-registered Connection to clean up. The C ordering
+        // works because C errors don't unwind — `:73-75` just logs
+        // and continues with a blocking fd. We're stricter.
+        let fd = match configure_tcp(sock) {
+            Ok(fd) => fd,
+            Err(e) => {
+                log::error!(target: "tincd::conn",
+                            "configure_tcp failed for {peer}: {e}");
+                return; // sock dropped (fd closed)
+            }
+        };
+
+        // ─── allocate connection (`:758-776`) ────────────────────
+        // C `:762`: `c->hostname = sockaddr2hostname(&sa)`. The
+        // "10.0.0.5 port 50123" string. Never changes after this.
+        let hostname = fmt_addr(&peer);
+        let conn = Connection::new_meta(fd, hostname, self.timers.now());
+        let conn_fd = conn.fd();
+
+        let id = self.conns.insert(conn);
+        // C `:771`: `io_add(&c->io, handle_meta_io, c, c->socket,
+        // IO_READ)`. Read-only initially. Same registration as unix.
+        match self.ev.add(conn_fd, Io::Read, IoWhat::Conn(id)) {
+            Ok(io_id) => {
+                self.conn_io.insert(id, io_id);
+                // C `:767`: `"Connection from %s", c->hostname`.
+                log::info!(target: "tincd::conn",
+                           "Connection from {peer}");
+            }
+            Err(e) => {
+                // ev.add failed (out of fds?). Roll back.
+                self.conns.remove(id);
+                log::error!(target: "tincd::conn",
+                            "Failed to register connection: {e}");
+            }
+        }
+    }
+
+    /// Stub `handle_incoming_vpn_data`. Just drain the UDP socket so
+    /// it doesn't stay readable and burn the event loop. Chunk 4+
+    /// replaces this with the real `recvfrom` + decrypt + route.
+    ///
+    /// We use socket2's `recv_from` (not `libc::recvfrom`) here
+    /// because we already have the wrapper. NO new unsafe. The
+    /// `MaybeUninit` API is awkward but the data is discarded so we
+    /// don't actually need to assume_init it.
+    fn on_udp_drain(&mut self, i: u8) {
+        let listener = &self.listeners[usize::from(i)];
+        // 1500 bytes is enough — anything bigger gets truncated
+        // (MSG_TRUNC), still drains. We're not keeping the data.
+        let mut buf = [std::mem::MaybeUninit::uninit(); 1500];
+        // Loop: drain ALL pending datagrams. Level-triggered means
+        // one datagram drained leaves the rest still ready, fires
+        // again next turn. Draining the lot now reduces wake-churn.
+        loop {
+            match listener.udp.recv_from(&mut buf) {
+                Ok((n, addr)) => {
+                    // Log at DEBUG — this is noise in production
+                    // (every probe, every wrong-port packet).
+                    log::debug!(target: "tincd::net",
+                                "Dropping {n}-byte UDP packet from {addr:?} \
+                                 (no route table yet)");
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    log::warn!(target: "tincd::net",
+                               "UDP recv error on listener {i}: {e}");
+                    break;
+                }
+            }
+        }
+    }
+
     /// `handle_new_unix_connection` (`net_socket.c:781-812`).
     /// accept, allocate Connection, register with event loop.
     fn on_unix_accept(&mut self) {
         // C `:789`: `fd = accept(io->fd, &sa.sa, &len)`.
         let stream = match self.control.accept() {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Spurious wakeup. Level-triggered: re-fires next
                 // turn if still readable.
                 return;
@@ -661,8 +961,11 @@ impl Daemon {
         match self.ev.add(conn_fd, Io::Read, IoWhat::Conn(id)) {
             Ok(io_id) => {
                 self.conn_io.insert(id, io_id);
+                // C `:808`: `"Connection from %s", c->hostname`.
+                // hostname is the literal `"localhost port unix"`.
                 log::info!(target: "tincd::conn",
-                           "Connection from localhost (control)");
+                           "Connection from {} (control)",
+                           self.conns[id].hostname);
             }
             Err(e) => {
                 // ev.add failed (out of fds?). Roll back.
@@ -901,12 +1204,16 @@ mod tests {
     }
 
     /// `DaemonSettings::default()` matches C defaults. `net_setup.c:
-    /// 1243` (`pinginterval = 60`) and `:1248` (`pingtimeout = 5`).
+    /// 1243` (`pinginterval = 60`), `:1248` (`pingtimeout = 5`),
+    /// `:789` (`myport = "655"`), `net_socket.c:38` (`addressfamily
+    /// = AF_UNSPEC`).
     #[test]
     fn settings_defaults_match_c() {
         let s = DaemonSettings::default();
         assert_eq!(s.pinginterval, 60);
         assert_eq!(s.pingtimeout, 5);
+        assert_eq!(s.port, 655);
+        assert_eq!(s.addressfamily, AddrFamily::Any);
     }
 
     /// The IoWhat enum has all six variants. Census: `rg 'io_add\('
