@@ -301,7 +301,7 @@ The TCP label (`conn.rs::tcp_label`, ported from `protocol_auth.c:458`) has the 
 
 **Fix**: `make_udp_label` pushes a `0u8` after the formatted bytes. KAT test `udp_label_kat_len` pins `25 + a.len() + b.len()` exactly.
 
-### daemon.rs — PACKET (type 17) terminates the connection
+### daemon/metaconn.rs — PACKET (type 17) terminates the connection
 
 Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
 
@@ -309,7 +309,7 @@ Not a wire-format bug, an unimplemented-dispatch bug that only fires against C.
 
 **Fix**: parse the length, swallow the next record (`STUB(chunk-12-tcp-fallback)` for actually routing it — matters for `TCPOnly`, not for ping-on-loopback). Connection survives long enough for UDP to confirm; C stops sending `PACKET`.
 
-### daemon.rs — edge-triggered meta-conn read deadlock under load
+### daemon/metaconn.rs — edge-triggered meta-conn read deadlock under load
 
 Not a wire bug, not a port-transcription bug. A semantic mismatch between the C's level-triggered event loop and mio's edge-triggered epoll, invisible until line-rate traffic.
 

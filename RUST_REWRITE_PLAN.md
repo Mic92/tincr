@@ -872,7 +872,15 @@ Total: roughly **7 months** for one experienced engineer. The extra month over a
 
 ---
 
-## Appendix: Stub audit (post-chunk-5)
+## Appendix: Stub audit (post-chunk-5, FROZEN)
+
+> **⚠ Historical record at `83de6651`.** Do not chase these `:NNNN`
+> refs. `daemon.rs` was 9043 LOC at `abb2d2bd`, then split into
+> `daemon.rs` + `daemon/{periodic,net,txpath,metaconn,gossip,connect}.rs`.
+> The protocol handlers live in `daemon/gossip.rs` and `daemon/connect.rs`
+> now. The `rg snippet` column still finds them; the file-heading
+> below doesn't. Kept for the C-line-ref verification (column 4) and
+> the dark-stub annotations — those are timeless.
 
 `83de6651` claimed "STUB renumber 5b→6"; this audit walked all 66
 markers exhaustively, checked C line refs against `src/` HEAD, and
@@ -880,7 +888,7 @@ verified chunk attribution against the chunk table above.
 
 **Locator note**: column 2 was Rust line numbers grepped at
 `83de6651`. `22a5ff82` (REQ_DUMP_NODES/EDGES, ~300 LOC) shifted
-everything in `daemon.rs` mid-file. Converted to `rg`-able marker
+everything mid-file. Converted to `rg`-able marker
 excerpts — line numbers will keep drifting; the marker text won't.
 For `proto.rs`/`addrcache.rs`/`tinc-tools` the original numbers are
 close enough (small diffs); kept as-is.
