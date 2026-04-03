@@ -732,7 +732,12 @@ impl Daemon {
                     log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                    self.tunnels.entry(from_nid).or_default().udp_addr = Some(addr);
+                    let t = self.tunnels.entry(from_nid).or_default();
+                    t.udp_addr = Some(addr);
+                    // perf-arch `e455a1c2` populates `udp_addr_
+                    // cached` on the UDP recv path; that cache is
+                    // now stale (the reflexive addr supersedes it).
+                    t.udp_addr_cached = None;
                 }
             }
         }
@@ -1102,6 +1107,8 @@ impl Daemon {
                     if let Some(addr) = addr {
                         let tunnel = self.tunnels.entry(node).or_default();
                         tunnel.udp_addr = Some(addr);
+                        // perf-arch cache: stale after addr change.
+                        tunnel.udp_addr_cached = None;
                     }
 
                     // C `graph.c:273-289`: `execute_script("host-

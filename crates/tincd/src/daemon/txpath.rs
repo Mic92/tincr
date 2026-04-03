@@ -1162,7 +1162,11 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
-                self.tunnels.entry(from_nid).or_default().udp_addr = Some(new_addr);
+                let t = self.tunnels.entry(from_nid).or_default();
+                t.udp_addr = Some(new_addr);
+                // perf-arch `e455a1c2` cache: stale after UDP_INFO
+                // taught us a new address.
+                t.udp_addr_cached = None;
                 // C `:265`: `return send_udp_info(from, to)`.
                 let to_nid = to_nid.expect("UpdateAndForward implies to exists");
                 Ok(self.send_udp_info_forward(from_nid, to_nid))

@@ -197,10 +197,19 @@ impl Daemon {
     /// `handle_incoming_vpn_packet` (`net_packet.c:1718-1842`).
     /// One UDP datagram → ID-prefix lookup → SPTPS receive → route.
     ///
-    /// SPTPS-only: skips `lookup_node_udp` (`:1728`) and `try_harder`
-    /// (`:1754`). Goes straight to the source-ID lookup at `:1736`.
-    /// The C does udp-addr-first because legacy-crypto packets have
-    /// no ID prefix; we don't have legacy.
+    /// **Authentication of the immediate sender** (`n` in the C):
+    /// the C `:1728-1758` chain authenticates the *UDP source
+    /// address* before reaching the relay branch at `:1817`. The
+    /// SRCID-fallback at `:1741` only fires when `dst==nullid` — a
+    /// relay packet (`dst!=null`) cannot bootstrap auth via SRCID;
+    /// it must come from a known-confirmed UDP address. For the
+    /// **direct** receive path, SRCID alone is fine: the AEAD tag
+    /// on `from`'s SPTPS validates end-to-end. For the **relay**
+    /// path we never decrypt, so the C's `n` gate is the only thing
+    /// stopping anyone who knows two node names from using us as a
+    /// 1:1 UDP reflector (security audit `2f72c2ba`). We don't have
+    /// `node_udp_tree`; an O(nodes) scan is fine — relay is the
+    /// rare branch (3+ node topologies, dst!=nullid).
     #[allow(clippy::too_many_lines)] // C `:1718-1842` is 124 LOC.
     // The relay/receive branches share the prefix-parse + lookup
     // prelude; splitting would duplicate or thread 5 locals through.
@@ -218,6 +227,19 @@ impl Daemon {
         let dst_id = NodeId6::from_bytes(pkt[0..6].try_into().unwrap());
         let src_id = NodeId6::from_bytes(pkt[6..12].try_into().unwrap());
         let ct = &pkt[12..];
+
+        // C `:1728-1745`: authenticate the immediate UDP sender. The
+        // relay branch (`:1817`) is only reachable for an authenticated
+        // `n`; the SRCID-fallback at `:1741` ONLY fires when
+        // `dst==nullid` (so it cannot bootstrap a relay attack). We
+        // don't have `node_udp_tree`; O(nodes) scan is fine — relay
+        // is the rare branch. `n.is_some()` ≡ "this UDP source addr
+        // belongs to a node that has *confirmed* UDP with us".
+        let n: Option<NodeId> = peer.and_then(|peer_addr| {
+            self.tunnels.iter().find_map(|(&nid, t)| {
+                (t.status.udp_confirmed && t.udp_addr == Some(peer_addr)).then_some(nid)
+            })
+        });
 
         // C `:1739`: `from = lookup_node_id(SRCID(pkt))`. The fast
         // path. STUB(chunk-never): `try_harder` fallback (decrypt-
@@ -262,6 +284,19 @@ impl Daemon {
             // The HOT relay path. We pass `from_nid` so the relay
             // wire prefix carries the ORIGINAL source ID.
             if to_nid != self.myself {
+                // C `:1758`: an unauthenticated sender cannot relay.
+                // The SRCID fallback at `:1741` only authenticates
+                // direct (dst==null) senders. Without this gate,
+                // anyone who knows two node names can use us as a
+                // 1:1 UDP reflector and spoof src_id6=us to trip
+                // the destination's REQ_KEY restart logic. Security
+                // audit `2f72c2ba`.
+                if n.is_none() {
+                    log::debug!(target: "tincd::net",
+                                "Dropping relay request from unauthenticated UDP \
+                                 sender ({peer:?}): dst={dst_id} src={src_id}");
+                    return;
+                }
                 let to_name = self
                     .graph
                     .node(to_nid)
@@ -366,11 +401,18 @@ impl Daemon {
         };
 
         // C `:1833-1835`: `if(direct && sockaddrcmp(addr,
-        // &n->address)) update_node_udp(n, addr)`. The FIRST valid
-        // UDP packet from this peer confirms the address. We don't
-        // have full `update_node_udp` (which also re-indexes
-        // `node_udp_tree`); just stash + set the bit.
-        if let Some(peer_addr) = peer {
+        // &n->address)) update_node_udp(n, addr)`. C `:1786,1833`:
+        // `direct` is set true ONLY when `dst_id == nullid`. When
+        // `dst != null && to == myself` (relayed-to-us), `peer_addr`
+        // is the RELAY's address, not `from`'s; caching it would
+        // route the next direct send to the relay (one extra hop
+        // forever, plus PMTU discovers the relay's MTU). Bug audit
+        // `deef1268`. The `n.is_none()` short-circuit also avoids
+        // double-work when `n` already matched (the address didn't
+        // change — but the C `sockaddrcmp` re-checks anyway, so we
+        // do too for the unconfirmed→confirmed flip).
+        let direct = dst_id.is_null();
+        if let Some(peer_addr) = peer.filter(|_| direct) {
             // Resolve the listener index ONCE here, on the first
             // confirmed packet, instead of per-send. `adapt_socket`
             // scans listeners for a family match; the answer doesn't
@@ -388,6 +430,17 @@ impl Daemon {
             // Pre-convert to sockaddr_storage so sendto doesn't
             // re-pack v4/v6 every packet (was 0.37% self-time).
             tunnel.udp_addr_cached = Some((socket2::SockAddr::from(peer_addr), sock));
+        }
+        // C `:1840`: `if(!direct) send_mtu_info(myself, n, MTU)`.
+        // We just received a packet relayed-to-us; tell `from`
+        // (via the relay chain) our MTU floor so they can switch
+        // to direct UDP if it fits. Bug audit `deef1268`: this
+        // call was missing entirely on the UDP receive path.
+        if !direct {
+            let nw = self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
+            if nw {
+                self.maybe_set_write_any();
+            }
         }
 
         // Dispatch SPTPS outputs (`receive_sptps_record`, `net_
@@ -1723,13 +1776,16 @@ impl Daemon {
         let relay_minmtu = self.tunnels.get(&relay_nid).map_or(0, TunnelState::minmtu);
         // The `too_big` gate only meaningful once discovery has
         // run: `minmtu == 0` means "unknown", not "zero". The C
-        // handles this differently — `send_sptps_packet:724-726`
-        // short-circuits to `send_tcppacket` (PACKET type 17, raw
-        // VPN bytes over the meta-conn) for direct neighbors with
-        // `len > minmtu` BEFORE reaching `send_sptps_data`. We
-        // don't have `send_tcppacket` (chunk-9c); go UDP
-        // optimistically until discovery raises `minmtu`. EMSGSIZE
-        // on the first big packet bootstraps discovery.
+        // `:974` is `origlen > relay->minmtu` (with minmtu=0 →
+        // always TCP); we go UDP optimistically until PMTU runs.
+        // Stricter-than-C: the C's TCP-first means the FIRST data
+        // packet over a fresh relay goes via SPTPS_PACKET-TCP →
+        // mid's `on_sptps_blob` validkey gate → dropped (mid hasn't
+        // keyed with `to` yet). Our UDP-first with the relay gate
+        // (`handle_incoming_vpn_packet`) drops at `n.is_none()`
+        // until the SENDER is UDP-confirmed at the relay. Either
+        // way: first packet needs the dance to settle. EMSGSIZE on
+        // the first big packet bootstraps discovery.
         let too_big =
             record_type != PKT_PROBE && relay_minmtu > 0 && origlen > usize::from(relay_minmtu);
         let go_tcp = record_type == tinc_sptps::REC_HANDSHAKE
