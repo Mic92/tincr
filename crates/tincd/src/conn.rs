@@ -694,15 +694,10 @@ impl Connection {
             return Err(err);
         }
 
-        // n >= 0. n == 0 "shouldn't happen" for stream sockets with
-        // non-zero send; C treats it as would-block (`outlen == 0`
-        // hits the `outlen <= 0 && (sockwouldblock || ...)` check
-        // since `sockerrno` is whatever it was before, probably 0,
-        // and `!sockerrno` is true on the first arm — wait, no, C
-        // checks `outlen == 0` but then `sockwouldblock(sockerrno)`
-        // — if errno is 0, that's `EWOULDBLOCK==0? no` so it falls
-        // through to the error log. Mismatch with the comment.
-        // ANYWAY: we treat n==0 as "made no progress, try again".)
+        // n >= 0. n == 0 shouldn't happen for stream sockets with a
+        // non-zero send; treat it as no progress. (C's sockwouldblock
+        // check is buggy here — errno 0 falls through to the error
+        // log; we don't follow that.)
         #[allow(clippy::cast_sign_loss)] // n >= 0
         self.outbuf.consume(n as usize);
 

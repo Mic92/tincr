@@ -24,12 +24,8 @@
 //! ──────────── `libc::ifreq` layout ─────────────────────────────────
 //!
 //! Smoke-verified `sizeof(struct ifreq) == 40` on x86_64 glibc, and
-//! `libc::ifreq` matches (smoke crate ran, output `40`). The struct
-//! is `{ ifr_name: [c_char; 16], ifr_ifru: union }` where the union
-//! is 24 bytes (largest member is `sockaddr`, 16 bytes — wait, that's
-//! 32 not 40). Re-checked: `__c_anonymous_ifr_ifru` has `ifru_map`
-//! at 16 bytes and `ifru_slave: [c_char; 16]`. Largest is the
-//! sockaddr fields at 16 each, padding rounds to 24. 16 + 24 = 40.
+//! `libc::ifreq` matches. Layout: `ifr_name: [c_char; 16]` + 24-byte
+//! `ifr_ifru` union (largest members are 16 bytes, padded to 24).
 //!
 //! `ifr_flags` is `ifr_ifru.ifru_flags: c_short` (2 bytes at offset
 //! 16). The C uses `ifr.ifr_flags` (a `#define` alias into the
@@ -40,9 +36,8 @@
 //! C `device.c:63`: `fcntl(device_fd, F_SETFD, FD_CLOEXEC)`. The
 //! daemon spawns `tinc-up`, `tinc-down`, `host-NAME-up` scripts
 //! (`script.c`). Without CLOEXEC, the script inherits the TUN fd.
-//! Script exits → fd closed in child → does the device go away?
-//! No (refcounted; daemon's fd holds it open). But the script COULD
-//! write garbage to the TUN. CLOEXEC: defense.
+//! The device survives a child closing its inherited fd (refcounted),
+//! but the script could write garbage to the TUN. CLOEXEC: defense.
 //!
 //! We use `OpenOptions::custom_flags(O_CLOEXEC)` — atomic at open,
 //! one syscall instead of open+fcntl, no race window where a fork
@@ -342,12 +337,8 @@ fn tunsetiff(
     // 16 bytes), we error out — STRICTER than C (which would
     // produce a 15-byte string of garbage).
     //
-    // `i8 → u8` cast for the slice: `c_char` signedness varies
-    // by arch, but the BYTES are the same. `transmute` of the
-    // whole array would work but `cast_slice` is the safe spelling
-    // — actually, neither needed: read bytes via pointer cast.
-    //
-    // Simpler still: `CStr::from_ptr` on `ifr_name.as_ptr()`.
+    // `CStr::from_ptr` on `ifr_name.as_ptr()` sidesteps the
+    // arch-variable `c_char` signedness entirely.
     // SAFETY: kernel wrote a NUL-terminated string into the
     // buffer; reading until NUL is sound. The buffer is 16 bytes;
     // the kernel never writes past 15 (IFNAMSIZ-1) + NUL.

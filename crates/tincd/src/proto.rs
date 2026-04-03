@@ -5,8 +5,8 @@
 //! ## Why this is separate from `conn.rs`
 //!
 //! `Connection` is the byte-level transport (recv into inbuf, send
-//! from outbuf). This module is the line-level protocol: a complete
-//! line came out of `inbuf`, what now?
+//! from outbuf). This module is the line-level protocol: dispatching
+//! a complete line out of `inbuf` to its handler.
 //!
 //! The split mirrors the C: `meta.c` does the byte/line work,
 //! `protocol.c::receive_request` dispatches the line to a handler,
@@ -221,10 +221,8 @@ pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchErr
 /// initiator is whoever called `connect()`. Chunk 4a is responder-
 /// only (we accepted), so the caller passes `(peer, me)`.
 ///
-/// `pub(crate)` for the `daemon.rs` re-feed step (it constructs the
-/// label too — wait, no it doesn't, `handle_id_peer` does. This is
-/// `pub(crate)` for the unit test in this module's tests + the
-/// integration test in `tests/stop.rs`).
+/// `pub(crate)` for the unit tests in this module and the
+/// integration test in `tests/stop.rs`.
 #[must_use]
 pub(crate) fn tcp_label(initiator: &str, responder: &str) -> Vec<u8> {
     // `format!` doesn't include NUL. We push it explicitly. This

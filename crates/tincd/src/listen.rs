@@ -430,8 +430,7 @@ pub fn unmap(sa: SocketAddr) -> SocketAddr {
     sa
 }
 
-/// `is_local_connection` (`netutl.c:304-319`). Is this a loopback
-/// peer?
+/// `is_local_connection` (`netutl.c:304-319`): loopback peer check.
 ///
 /// `handle_new_meta_connection` (`:751`) skips tarpit for local
 /// connections — the tarpit defends against external scan/DoS, and
@@ -919,27 +918,12 @@ mod tests {
     /// - conn 14 (B) at t=2: prev=A, no match. sh stays 12. ah: 10-2=8,
     ///   refill to 9. PASSES.
     ///
-    /// Without the early return, conn 13 (A) would have ticked ah to
-    /// 11→10; conn 14 (B) at t=2 would be ah=10-2+1=9, also passes.
-    /// So in THIS trace the outcome is the same. Where it differs: a
-    /// MUCH longer burst from A. Say 100 conns at t=0. With early
-    /// return, ah stops at 10 (frozen at conn 11). Without, ah would
-    /// be ticked 90 more times (clamped each time, but the timestamp
-    /// would update). Conn 101 (B) at t=1: with-early-return ah leaks
-    /// from t=0 (allhost_time wasn't updated by conns 12..100). Without:
-    /// ah leaks from t=0 too (last update was conn 100 at t=0). Hmm,
-    /// same.
-    ///
-    /// The OBSERVABLE difference is just `prev_addr` not updating.
-    /// And `allhost_time` not updating. After a same-host pit, the
-    /// next DIFFERENT host's leak measures from the LAST PRE-PIT
-    /// allhost timestamp. Which gives them MORE leak.
-    ///
-    /// I'm not sure the C author intended any of this. The off-by-one
-    /// (`>` vs `>=`) and the early-return placement smell like "got it
-    /// working, didn't think harder." Port faithfully; the SHAPE of
-    /// the test (early-return skips the all-host update) is what pins
-    /// the C behavior.
+    /// Observable difference vs no-early-return: `prev_addr` and
+    /// `allhost_time` freeze. A subsequent DIFFERENT host's leak
+    /// measures from the last pre-pit allhost timestamp, giving it
+    /// MORE leak. Whether the C author intended this is unclear (the
+    /// `>` vs `>=` and early-return placement look incidental). Port
+    /// faithfully; this test pins the early-return-skips-allhost shape.
     #[test]
     fn tarpit_samehost_early_return() {
         let t0 = Instant::now();
