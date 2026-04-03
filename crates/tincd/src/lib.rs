@@ -29,6 +29,7 @@
 
 pub mod addrcache;
 pub mod autoconnect;
+pub mod broadcast;
 pub mod compress;
 pub mod conn;
 pub mod control;
@@ -38,6 +39,7 @@ pub mod icmp;
 pub mod invitation_serve;
 pub mod keys;
 pub mod listen;
+pub mod mac_lease;
 pub mod mss;
 pub mod neighbor;
 pub mod node_id;
