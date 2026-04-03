@@ -874,21 +874,39 @@ impl Daemon {
                     // exhaustive.
                 }
                 ProxyConfig::Http { .. } => {
-                    // C `protocol_auth.c:60-68`: `send_request(c,
-                    // "CONNECT %s:%s HTTP/1.1\r\n\r")`. The `\r` at
-                    // end + `send_request`'s `\n` makes `\r\n\r\n`.
-                    // Response is line-based (`protocol.c:148-161`
-                    // special-cases `HTTP/1.1 ` before dispatch).
-                    // STUB(chunk-12-http-proxy): we don't have the
-                    // `proxy_passed` flag for the response gate.
-                    // The config parse accepts `Proxy = http ...`
-                    // (so reload doesn't error), but the connect
-                    // path bails here. Log + terminate.
-                    log::error!(target: "tincd::conn",
-                        "Proxy = http not yet wired (STUB chunk-12-http-proxy); \
-                         dropping connection to {}", conn.name);
-                    self.terminate(id);
-                    return;
+                    // C `protocol_auth.c:60-68`: `sockaddr2str(&c->
+                    // address, &host, &port); send_request(c,
+                    // "CONNECT %s:%s HTTP/1.1\r\n\r", host, port)`.
+                    // `send_request` appends `\n` → wire is
+                    // `CONNECT h:p HTTP/1.1\r\n\r\n` (the blank
+                    // line terminates the HTTP request — no Host:
+                    // header, technically RFC 7230 §5.4 violation
+                    // but proxies accept it).
+                    //
+                    // `c->address` is the PEER addr (proxy is just
+                    // transport; we connect to the proxy IP:port at
+                    // the socket layer, then tell the proxy where
+                    // to connect onward via CONNECT).
+                    let Some(target) = conn.address else {
+                        log::error!(target: "tincd::conn",
+                            "HTTP proxy: no peer address on {}", conn.name);
+                        self.terminate(id);
+                        return;
+                    };
+                    // STRICTER-than-C: bracket IPv6 in the authority
+                    // (RFC 7230 §2.7.1). The C `sockaddr2str` is
+                    // `getnameinfo(NUMERIC)` which does NOT bracket,
+                    // so `CONNECT ::1:655 HTTP/1.1` — ambiguous
+                    // (which `:` is the port separator?). The C is
+                    // probably never tested with IPv6 proxy targets.
+                    // We use `SocketAddr::Display` (brackets v6).
+                    let line = format!("CONNECT {target} HTTP/1.1\r\n\r\n");
+                    needs_write |= conn.send_raw(line.as_bytes());
+                    log::debug!(target: "tincd::conn",
+                        "Queued HTTP CONNECT for {} → {target}", conn.name);
+                    // No tcplen — response is line-based, handled
+                    // by the intercept in metaconn.rs BEFORE
+                    // check_gate (`protocol.c:148-161`).
                 }
                 ProxyConfig::Socks4 { .. } | ProxyConfig::Socks5 { .. } => {
                     // C `protocol_auth.c:71-77`: `c->tcplen =

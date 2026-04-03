@@ -2688,3 +2688,161 @@ fn socks5_proxy_roundtrip() {
     // io::copy if shutdown ordering raced. The test already proved
     // what it needs to (active conns through the proxy).
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// HTTP CONNECT proxy roundtrip (chunk-12-http-proxy)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Minimal HTTP CONNECT proxy. Reads until `\r\n\r\n`, parses the
+/// CONNECT line, dials upstream, sends 200, bidirectional relay.
+///
+/// Mirrors `test/integration/proxy.py:127-158`. Sends NO headers
+/// (just status + blank line) — same as the python, which is what
+/// the C `protocol.c:148-161` works with. A header-sending proxy
+/// would terminate the C tinc connection (C-is-WRONG #10).
+///
+/// One-shot: handles ONE connection then exits.
+fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{Shutdown, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("http proxy bind");
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (client, _) = listener.accept().expect("http proxy accept");
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+
+        // ─── Read CONNECT line ──────────────────────────────────────
+        // `CONNECT 127.0.0.1:PORT HTTP/1.1\r\n`
+        let mut connect_line = String::new();
+        reader.read_line(&mut connect_line).expect("read CONNECT");
+        let connect_line = connect_line.trim_end();
+        assert!(
+            connect_line.starts_with("CONNECT "),
+            "expected CONNECT, got {connect_line:?}"
+        );
+        let target = connect_line
+            .strip_prefix("CONNECT ")
+            .and_then(|s| s.strip_suffix(" HTTP/1.1"))
+            .expect("CONNECT format");
+        let target: std::net::SocketAddr = target
+            .parse()
+            .unwrap_or_else(|e| panic!("parse {target:?}: {e}"));
+
+        // ─── Read until blank line (just `\r\n`) ────────────────────
+        // tinc sends `CONNECT ... HTTP/1.1\r\n\r\n` — one CONNECT
+        // line + immediate blank. No intermediate headers.
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read blank");
+        assert_eq!(line, "\r\n", "expected blank line, got {line:?}");
+
+        // ─── Dial upstream ──────────────────────────────────────────
+        let upstream = TcpStream::connect(target).expect("upstream connect");
+
+        // ─── Reply: status + blank line, NO headers ─────────────────
+        // Same as proxy.py:155. The C only works with this minimal
+        // form (C-is-WRONG #10).
+        //
+        // tinc queues CONNECT + ID in the same flush (`connect.rs`:
+        // `send_raw(CONNECT)` then `conn.send(Id)` before any read),
+        // so `BufReader` may have buffered the ID line. Drain it
+        // before `into_inner()` and forward upstream.
+        let leftover = reader.buffer().to_vec();
+        let mut client = reader.into_inner();
+        client
+            .write_all(b"HTTP/1.1 200 OK\r\n\r\n")
+            .expect("write 200");
+        if !leftover.is_empty() {
+            (&upstream).write_all(&leftover).expect("forward leftover");
+        }
+
+        // ─── Bidirectional relay ────────────────────────────────────
+        // Same as fake_socks5_server.
+        let mut c_r = client.try_clone().unwrap();
+        let mut u_w = upstream.try_clone().unwrap();
+        let t1 = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut c_r, &mut u_w);
+            let _ = u_w.shutdown(Shutdown::Write);
+        });
+        let mut u_r = upstream;
+        let mut c_w = client;
+        let _ = std::io::copy(&mut u_r, &mut c_w);
+        let _ = c_w.shutdown(Shutdown::Write);
+        let _ = t1.join();
+    });
+    (addr, handle)
+}
+
+/// Two daemons through an HTTP CONNECT proxy. Alice has `Proxy =
+/// http 127.0.0.1 PORT` and `ConnectTo = bob`. The fake proxy
+/// validates the CONNECT line on the wire, relays to bob, both
+/// reach ACK.
+///
+/// ## What's proven
+///
+/// 1. **`finish_connecting` HTTP arm**: `CONNECT host:port
+///    HTTP/1.1\r\n\r\n` queued via `send_raw`. The proxy asserts
+///    on the exact line format.
+/// 2. **`metaconn` HTTP intercept**: alice reads `HTTP/1.1 200
+///    OK\r\n\r\n` BEFORE `check_gate`. Status line → skip; blank
+///    line → skip. Then bob's ID line hits `check_gate` normally.
+///    Without the intercept, `atoi("HTTP/1.1")=0` → BadRequest.
+/// 3. **Gate closes naturally**: no `proxy_passed` flag. Once
+///    `id_h` changes `allow_request`, the intercept condition
+///    `allow_request==Id` is false — subsequent lines go straight
+///    to `check_gate`.
+/// 4. **Full handshake through the relay**: ID + SPTPS + ACK.
+#[test]
+fn http_proxy_roundtrip() {
+    let tmp = TmpGuard::new("httpproxy");
+    let alice = Node::new(tmp.path(), "alice", 0xA6);
+    let bob = Node::new(tmp.path(), "bob", 0xB6);
+
+    // Spawn the fake HTTP CONNECT proxy first.
+    let (proxy_addr, proxy_handle) = fake_http_proxy();
+
+    // Bob: plain config, no proxy.
+    bob.write_config(&alice, false);
+    // Alice: ConnectTo bob, Proxy = http <fake>.
+    let alice = alice.with_conf(&format!(
+        "Proxy = http {} {}\n",
+        proxy_addr.ip(),
+        proxy_addr.port()
+    ));
+    alice.write_config(&bob, true);
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    let mut alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    // Poll for active peer conns on both sides.
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(6);
+        let b = bob_ctl.dump(6);
+        if has_active_peer(&a, "bob") && has_active_peer(&b, "alice") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    // Clean up.
+    drop(alice_ctl);
+    drop(bob_ctl);
+    let _ = alice_child.kill();
+    let _ = alice_child.wait();
+    let _ = bob_child.kill();
+    let _ = bob_child.wait();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !proxy_handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

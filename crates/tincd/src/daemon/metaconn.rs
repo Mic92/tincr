@@ -287,6 +287,61 @@ impl Daemon {
             // (which has 1500-byte frames and IS hot).
             let line: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
 
+            // ─── HTTP proxy response intercept (`protocol.c:148-161`)
+            // Gate: outgoing && proxy==HTTP && allow_request==Id.
+            // The gate closes naturally when id_h changes
+            // allow_request — no proxy_passed state needed (the C
+            // doesn't have one either).
+            //
+            // `read_line` excludes `\n`, includes `\r`. So:
+            //   "HTTP/1.1 200 OK\r\n" → b"HTTP/1.1 200 OK\r"
+            //   "\r\n" (blank line)   → b"\r"
+            //
+            // Three cases:
+            //   - blank/empty → skip (continue loop)
+            //   - "HTTP/1.1 200" prefix → granted, skip
+            //   - "HTTP/1.1 " non-200 → rejected, terminate
+            //   - anything else → FALL THROUGH to check_gate
+            //
+            // C-is-WRONG #10 (dormant): the fall-through means
+            // header lines (Via:, Content-Type:) go to atoi → 0 →
+            // "Bogus data" → terminate. RFC 7231 §4.3.6 permits
+            // headers in 2xx CONNECT. proxy.py:155 sends none, so
+            // the C never triggers. Real proxies (Squid, nginx) DO
+            // send them. We mirror the C exactly.
+            // TODO(chunk-12-http-proxy-lenient): skip ANY line
+            // until blank — would handle header-sending proxies.
+            if conn.outgoing.is_some()
+                && conn.allow_request == Some(Request::Id)
+                && matches!(self.settings.proxy, Some(ProxyConfig::Http { .. }))
+            {
+                if line.is_empty() || line[0] == b'\r' {
+                    // C `:149`: `if(!request[0] || request[0] ==
+                    // '\r') return true`. Blank line.
+                    continue;
+                }
+                // C `:153`: `strncasecmp(request, "HTTP/1.1 ", 9)`.
+                // Case-insensitive (RFC 7230). `len >= 12` guards
+                // the `[9..12]` slice against short status lines.
+                if line.len() >= 12 && line[..9].eq_ignore_ascii_case(b"HTTP/1.1 ") {
+                    // C `:154`: `strncmp(request + 9, "200", 3)`.
+                    // Case-sensitive (status codes are numeric).
+                    if &line[9..12] == b"200" {
+                        log::debug!(target: "tincd::conn",
+                            "HTTP proxy request granted for {}", conn.name);
+                        continue;
+                    }
+                    let status = String::from_utf8_lossy(&line[9..]);
+                    log::error!(target: "tincd::conn",
+                        "HTTP proxy request rejected for {}: {}",
+                        conn.name, status.trim_end_matches('\r'));
+                    self.terminate(id);
+                    return FeedDrain::Done;
+                }
+                // Fall through — the C bug. Header line goes to
+                // check_gate → BadRequest → terminate. We mirror.
+            }
+
             // ─── check_gate (protocol.c:164-178)
             let req = match check_gate(conn, &line) {
                 Ok(r) => r,
