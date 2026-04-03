@@ -878,6 +878,7 @@ dependencies = [
  "tinc-crypto",
  "tinc-device",
  "tinc-event",
+ "tinc-graph",
  "tinc-proto",
  "tinc-sptps",
 ]

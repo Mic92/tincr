@@ -21,6 +21,7 @@ tinc-conf = { path = "../tinc-conf" }
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-device = { path = "../tinc-device" }
 tinc-event = { path = "../tinc-event" }
+tinc-graph = { path = "../tinc-graph" }
 tinc-proto = { path = "../tinc-proto" }
 tinc-sptps = { path = "../tinc-sptps" }
 
