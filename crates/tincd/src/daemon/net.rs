@@ -453,8 +453,9 @@ impl Daemon {
             myself_tunnel.in_packets += 1;
             myself_tunnel.in_bytes += n as u64;
 
-            // C `:1930`: `route(myself, &packet)`.
-            nw |= self.route_packet(&mut buf[..n]);
+            // C `:1930`: `route(myself, &packet)`. `from = None`
+            // means source is myself (device read).
+            nw |= self.route_packet(&mut buf[..n], None);
         }
         if nw {
             self.maybe_set_write_any();
@@ -468,19 +469,56 @@ impl Daemon {
     /// `&mut` because `device.write()` mutates (the TUN write-path
     /// zeroes `tun_pi.flags`; FdTun doesn't, but the trait is `&mut`).
     ///
+    /// `from`: `None` = device read (source = myself). `Some(nid)` =
+    /// from a peer (`receive_sptps_record`). The C `route()` takes
+    /// `node_t *source` for the same distinction.
+    ///
     /// Returns the io_set signal (true if a meta-conn outbuf went
     /// nonempty — `send_req_key` or the TCP-tunneled handshake).
-    #[allow(clippy::too_many_lines)] // C `route()` + `send_packet`
-    // are ~200 LOC together. The match arms are the dispatch table;
-    // splitting them scatters the C line refs.
-    pub(super) fn route_packet(&mut self, data: &mut [u8]) -> bool {
-        // ─── ARP intercept (`route.c:1163`: `case ETH_P_ARP:
-        // route_arp(source, packet)`). ARP isn't IP routing; handle
-        // BEFORE `route()`. The C dispatch puts it in the same
-        // ethertype switch but `route_arp` doesn't touch the subnet
-        // tree the way `route_ipv4` does — it does its OWN lookup
-        // (`route.c:988`). We do it here because `route()` only
-        // returns `Unsupported{"arp"}` for ETH_P_ARP.
+    pub(super) fn route_packet(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
+        // C `route.c:1135-1138`: `if(forwarding_mode == FMODE_KERNEL
+        // && source != myself) { send_packet(myself, ...); return; }`.
+        // Kernel mode shortcut: anything from a peer goes straight
+        // to the TUN; let the OS forwarding table decide. Packets
+        // from OUR device still go through routing (we're the
+        // originator). BEFORE the length check — matches C order;
+        // device.write rejects undersized anyway.
+        if self.settings.forwarding_mode == ForwardingMode::Kernel && from.is_some() {
+            let len = data.len() as u64;
+            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+            myself_tunnel.out_packets += 1;
+            myself_tunnel.out_bytes += len;
+            if let Err(e) = self.device.write(data) {
+                log::debug!(target: "tincd::net", "Error writing to device: {e}");
+            }
+            return false;
+        }
+
+        // C `route.c:1146`: `switch(routing_mode)`. The dispatch.
+        match self.settings.routing_mode {
+            RoutingMode::Switch => {
+                // `route.c:1159`: `route_mac(source, packet)`.
+                return self.route_packet_mac(data, from);
+            }
+            RoutingMode::Hub => {
+                // `route.c:1163`: `route_broadcast(source, packet)`.
+                // Hub mode = always broadcast. No learning, no
+                // lookup. The decrement_ttl gate is inside
+                // `dispatch_route_result`'s Broadcast arm.
+                return self.dispatch_route_result(&RouteResult::Broadcast, data, from);
+            }
+            RoutingMode::Router => {
+                // Fall through to the IP-layer dispatch below.
+            }
+        }
+
+        // ─── ARP intercept (`route.c:1149` `case ETH_P_ARP`).
+        // ROUTER-ONLY. Switch mode treats ARP as opaque eth and
+        // already returned above. The C dispatch puts ARP in the
+        // same ethertype switch as IPv4/IPv6, but `route_arp` does
+        // its OWN subnet lookup (`route.c:988`) so we handle it
+        // here before `route()` (which just returns
+        // `Unsupported{"arp"}`).
         if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == crate::packet::ETH_P_ARP
         {
             return self.handle_arp(data);
@@ -490,26 +528,303 @@ impl Daemon {
         // reads `subnet->owner->status.reachable` directly (it's
         // all one big graph of pointers). We close over `node_ids`
         // + `graph` and look it up.
-        let result = {
+        //
+        // Materialize the result with `'static`/local lifetime: the
+        // `RouteResult<'a>` lifetime ties back to `self.subnets`,
+        // and `dispatch_route_result` is `&mut self` (conflict).
+        // The Forward arm clones `to` anyway; we just hoist that.
+        // Exhaustively rebuild every arm so the output's `'a` is
+        // tied to a local, not `self`.
+        let owned_to;
+        let result: RouteResult<'_> = {
             let node_ids = &self.node_ids;
             let graph = &self.graph;
-            route(data, &self.subnets, &self.name, |name| {
+            let r = route(data, &self.subnets, &self.name, |name| {
                 node_ids
                     .get(name)
                     .and_then(|&nid| graph.node(nid))
                     .is_some_and(|n| n.reachable)
-            })
+            });
+            owned_to = if let RouteResult::Forward { to } = r {
+                Some(to.to_owned())
+            } else {
+                None
+            };
+            detach_route_result(&r, owned_to.as_deref())
         };
 
-        match result {
+        self.dispatch_route_result(&result, data, from)
+    }
+
+    /// `route_mac` wrapper. The Switch-mode dispatch arm. Calls the
+    /// pure `route_mac::route_mac`, then acts on the
+    /// `(RouteResult, LearnAction)` two-channel return.
+    ///
+    /// `route_mac.rs` takes a `&HashMap<Mac, String>` snapshot. We
+    /// pass `self.mac_table` directly. The borrow is `&` only (the
+    /// function is pure); no conflict with the `&mut self` calls
+    /// below.
+    fn route_packet_mac(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
+        let from_myself = from.is_none();
+        // C `route.c:1031`: `if(source == myself)`. The source name
+        // for the loop check (`:1047 owner == source`).
+        let source_name = match from {
+            None => self.name.clone(),
+            Some(nid) => self
+                .graph
+                .node(nid)
+                .map_or_else(|| "<unknown>".to_owned(), |n| n.name.clone()),
+        };
+
+        // Materialize the result with local lifetime (see
+        // `route_packet` for the same hoist — `RouteResult<'a>`
+        // borrows `self.mac_table` here).
+        let owned_to;
+        let (result, learn) = {
+            let (r, l) =
+                route_mac::route_mac(data, from_myself, &source_name, &self.name, &self.mac_table);
+            owned_to = if let RouteResult::Forward { to } = r {
+                Some(to.to_owned())
+            } else {
+                None
+            };
+            (detach_route_result(&r, owned_to.as_deref()), l)
+        };
+
+        // ─── LearnAction first (C `route.c:1031-1035` is BEFORE the
+        // routing decision in source order, but they're independent).
+        let mut nw = false;
+        match learn {
+            route_mac::LearnAction::NotOurs => {}
+            route_mac::LearnAction::New(mac) => {
+                // C `route.c:528-551` `learn_mac`: `subnet_add` +
+                // broadcast ADD_SUBNET + timer arm.
+                nw |= self.learn_mac(mac);
+            }
+            route_mac::LearnAction::Refresh(mac) => {
+                // C `route.c:551-555 else`: `subnet->expires = now +
+                // macexpire`. BUT: route_mac's snapshot doesn't scope
+                // to myself (see `LearnAction::Refresh` doc). The C
+                // `lookup_subnet_mac(myself, &src)` at `:525` is
+                // myself-scoped. Check ownership:
+                if self.mac_table.get(&mac).map(String::as_str) == Some(self.name.as_str()) {
+                    let now = self.timers.now();
+                    self.mac_leases.refresh(mac, now, self.settings.macexpire);
+                } else {
+                    // Remotely owned. The C myself-scoped lookup
+                    // would fail → branch to New. VM migrated to us.
+                    nw |= self.learn_mac(mac);
+                }
+            }
+        }
+
+        // ─── RouteResult dispatch. Reuse the same arms as Router.
+        nw |= self.dispatch_route_result(&result, data, from);
+        nw
+    }
+
+    /// `learn_mac` (`route.c:524-556`). We saw a new source MAC on
+    /// our TAP. Record it as a transient `Subnet::Mac`, broadcast
+    /// ADD_SUBNET so peers route replies back to us, arm the
+    /// `age_subnets` timer.
+    ///
+    /// Returns the io_set signal (the broadcast ADD_SUBNET sends
+    /// queue to meta-conn outbufs).
+    fn learn_mac(&mut self, mac: route_mac::Mac) -> bool {
+        log::info!(target: "tincd::net",
+                   "Learned new MAC address \
+                    {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+        // C `:534-541`: `new_subnet; type=MAC; expires=now+macexpire;
+        // weight=10; subnet_add(myself, ..); subnet_update(..)`.
+        let subnet = Subnet::Mac {
+            addr: mac,
+            weight: 10,
+        };
+        let myname = self.name.clone();
+        self.subnets.add(subnet, myname.clone());
+        self.mac_table.insert(mac, myname.clone());
+        // C `:540` `subnet_update(myself, subnet, true)` →
+        // subnet-up script. Our subnets are always reachable (we
+        // ARE myself).
+        self.run_subnet_script(true, &myname, &subnet);
+
+        // C `:536`: `subnet->expires = now + macexpire`. mac_lease
+        // tracks this. `learn()` returns true if the table was
+        // empty (= first lease, arm the timer).
+        let now = self.timers.now();
+        let arm_timer = self.mac_leases.learn(mac, now, self.settings.macexpire);
+
+        // C `:544-548`: broadcast ADD_SUBNET. `for(c) if(c->edge)
+        // send_add_subnet(c, subnet)`. Our `broadcast_targets(None)`
+        // gives active conns (C's `c->edge` = our `c.active`).
+        let mut nw = false;
+        let targets = self.broadcast_targets(None);
+        for cid in targets {
+            nw |= self.send_subnet(cid, Request::AddSubnet, &myname, &subnet);
+        }
+
+        // C `:549-551`: `timeout_add(&age_subnets_timeout, ...,
+        // {10, jitter()})`. C `timeout_add` is idempotent (only
+        // adds if not already in heap). We arm only when `learn()`
+        // says "table was empty" AND we don't already have a slot
+        // (defensive — `arm_timer` should imply `is_none()`, but
+        // see the `on_age_subnets` clear below).
+        if arm_timer && self.age_subnets_timer.is_none() {
+            let tid = self.timers.add(TimerWhat::AgeSubnets);
+            self.timers.set(tid, Duration::from_secs(10));
+            self.age_subnets_timer = Some(tid);
+        }
+
+        nw
+    }
+
+    /// `broadcast_packet` (`net_packet.c:1612-1660`). Send a frame
+    /// to "everyone" per `broadcast_mode`.
+    ///
+    /// `from`: `None` = we originated (device read). `Some(nid)` =
+    /// from a peer (we're forwarding their broadcast).
+    ///
+    /// Returns the io_set signal.
+    fn broadcast_packet(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
+        // C `:1616-1618`: `if(from != myself) send_packet(myself,
+        // packet)`. Echo to local kernel — a broadcast we're
+        // FORWARDING is also for US.
+        if from.is_some() {
+            let len = data.len() as u64;
+            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+            myself_tunnel.out_packets += 1;
+            myself_tunnel.out_bytes += len;
+            if let Err(e) = self.device.write(data) {
+                log::debug!(target: "tincd::net",
+                            "Error writing to device: {e}");
+            }
+        }
+
+        // C `:1624-1626`: `if(tunnelserver || BMODE_NONE) return`.
+        // Tunnelserver: MST might be invalid (filtered ADD_EDGE) →
+        // loops. BMODE_NONE: operator opted out.
+        if self.settings.tunnelserver
+            || self.settings.broadcast_mode == broadcast::BroadcastMode::None
+        {
+            return false;
+        }
+
+        let from_is_self = from.is_none();
+        log::debug!(target: "tincd::net",
+                    "Broadcasting packet of {} bytes from {}",
+                    data.len(),
+                    if from_is_self { "MYSELF" } else { "peer" });
+
+        // ─── Compute targets per broadcast_mode ──────────────────
+        // C `:1633-1652`. Our `broadcast.rs` leaf does the
+        // filtering; we provide the iterators.
+        let target_nids: Vec<NodeId> = match self.settings.broadcast_mode {
+            broadcast::BroadcastMode::None => unreachable!("checked above"),
+            broadcast::BroadcastMode::Mst => {
+                // C `:1635`: `c->edge && c->status.mst && c !=
+                // from->nexthop->connection`.
+                //
+                // `from_conn`: which conn did the broadcast arrive
+                // on? C uses `from->nexthop->connection`. If `from`
+                // is set, find `last_routes[from].nexthop`, then
+                // `nodes[nexthop_name].conn`.
+                let from_conn: Option<ConnId> = from.and_then(|nid| {
+                    let route = self.last_routes.get(nid.0 as usize)?.as_ref()?;
+                    let nexthop_name = self.graph.node(route.nexthop)?.name.clone();
+                    self.nodes.get(&nexthop_name)?.conn
+                });
+
+                // Active conns → (ConnId, EdgeId) via NodeState.edge.
+                let active: Vec<(ConnId, EdgeId)> = self
+                    .conns
+                    .iter()
+                    .filter(|&(_, c)| c.active)
+                    .filter_map(|(cid, c)| {
+                        let eid = self.nodes.get(&c.name)?.edge?;
+                        Some((cid, eid))
+                    })
+                    .collect();
+
+                let target_conns =
+                    broadcast::mst_targets(active.into_iter(), &self.last_mst, from_conn);
+
+                // Conns → NodeIds via `node_ids[c.name]`.
+                target_conns
+                    .into_iter()
+                    .filter_map(|cid| {
+                        let cname = &self.conns.get(cid)?.name;
+                        self.node_ids.get(cname).copied()
+                    })
+                    .collect()
+            }
+            broadcast::BroadcastMode::Direct => {
+                // C `:1648-1652`: walk reachable nodes, filter to
+                // one-hop. `direct_targets` wants `(NodeId,
+                // Option<via>, Option<nexthop>)`. Feed all
+                // `node_ids`; `last_routes[nid]` is `None` for
+                // unreachable, which we skip.
+                let nodes_iter = self.node_ids.values().filter_map(|&nid| {
+                    let r = self.last_routes.get(nid.0 as usize)?.as_ref()?;
+                    Some((nid, Some(r.via), Some(r.nexthop)))
+                });
+                broadcast::direct_targets(nodes_iter, self.myself, from_is_self)
+            }
+        };
+
+        // ─── Send to each target ──────────────────────────────────
+        // C `:1636,1651`: `send_packet(target, packet)`. Same body
+        // as `send_packet`: counters + send_sptps_packet + try_tx.
+        // No clamp_mss/directonly/decrement_ttl — those are
+        // route()-level concerns; broadcast bypasses route().
+        //
+        // `send_sptps_packet` takes `data: &[u8]` (immutable slice;
+        // it copies into a fresh SPTPS record), so iterating sends
+        // of the SAME buffer is zero-copy-safe.
+        let mut nw = false;
+        for nid in target_nids {
+            let Some(name) = self.graph.node(nid).map(|n| n.name.clone()) else {
+                continue;
+            };
+            let len = data.len();
+            let tunnel = self.tunnels.entry(nid).or_default();
+            tunnel.out_packets += 1;
+            tunnel.out_bytes += len as u64;
+            // C `:1586-1590`: `send_sptps_packet; try_tx(n, true)`.
+            nw |= self.send_sptps_packet(nid, &name, data);
+            nw |= self.try_tx(nid, true);
+        }
+        nw
+    }
+
+    /// The `match RouteResult { ... }` dispatch. Factored out so
+    /// BOTH the Router-mode path (`route()` result) and the
+    /// Switch-mode path (`route_mac()` result) call the same arms.
+    ///
+    /// C: `route_ipv4`/`route_ipv6`/`route_mac` all call
+    /// `send_packet`/`route_broadcast`/etc directly. We funnel
+    /// through `RouteResult` then dispatch here.
+    #[allow(clippy::too_many_lines)] // C `route()` + `send_packet`
+    // are ~200 LOC together. The match arms are the dispatch table;
+    // splitting them scatters the C line refs.
+    fn dispatch_route_result(
+        &mut self,
+        result: &RouteResult<'_>,
+        data: &mut [u8],
+        from: Option<NodeId>,
+    ) -> bool {
+        match *result {
             RouteResult::Forward { to } if to == self.name => {
                 // C `send_packet:1556-1568`: `if(n == myself) {
                 // devops.write(packet); return; }`. The packet is
                 // for US (it came in over the wire and `route()`
                 // matched one of our subnets). Write it to the TUN.
-                // STUB(chunk-12-switch): `overwrite_mac` (`:1557-
-                // 1562`) — TAP-mode source-MAC rewriting. RMODE_
-                // ROUTER doesn't need it.
+                // STUB(chunk-12-overwrite-mac): `overwrite_mac`
+                // (`:1557-1562`) — TAP-mode source-MAC rewriting.
+                // RMODE_ROUTER doesn't need it; Switch mode doesn't
+                // either (it preserves the real eth header). Only
+                // matters for router-mode-on-TAP (rare config).
                 let len = data.len() as u64;
                 let myself_tunnel = self.tunnels.entry(self.myself).or_default();
                 myself_tunnel.out_packets += 1;
@@ -605,13 +920,9 @@ impl Daemon {
                 // BEFORE clamp_mss/send. The `source != myself`
                 // gate: don't decrement on TUN-origin packets (we
                 // ARE the first hop; the kernel already set TTL).
-                // For chunk-9b: `route_packet` is called from BOTH
-                // `on_device_read` (source=myself) AND `receive_
-                // sptps_record` (source=peer). We don't carry the
-                // source through; STUB the gate as always-on. The
-                // config default is OFF so this is dark anyway.
-                // Chunk-9c threads `source` through.
-                if self.settings.decrement_ttl {
+                // `from.is_some()` is exactly the C `source !=
+                // myself` predicate.
+                if self.settings.decrement_ttl && from.is_some() {
                     match route::decrement_ttl(data) {
                         TtlResult::Decremented => {}
                         TtlResult::TooShort | TtlResult::DropSilent => {
@@ -699,13 +1010,28 @@ impl Daemon {
                 false
             }
             RouteResult::Broadcast => {
-                // STUB(chunk-12-switch): `route.c:1042-1045` →
-                // `route_broadcast` → `broadcast_packet`. Only
-                // reachable from `route_mac` (RMODE_SWITCH); the
-                // IP-layer dispatch above never produces this.
-                log::debug!(target: "tincd::net",
-                            "route: broadcast (RMODE_SWITCH stub, dropping)");
-                false
+                // C `route.c:1042-1045` → `route_broadcast` →
+                // `broadcast_packet`. Reachable from `route_mac`
+                // (RMODE_SWITCH unknown-dst) and Hub mode.
+                //
+                // C `route_broadcast:559-563`: `if(decrement_ttl &&
+                // source != myself) if(!do_decrement_ttl(..))
+                // return`. The C `do_decrement_ttl` is eth-aware
+                // (`:327` returns true for non-IP frames like ARP
+                // — too short to have an IP TTL). Match: gate, but
+                // `decrement_ttl()` will pass on ARP via TooShort.
+                if self.settings.decrement_ttl && from.is_some() {
+                    match route::decrement_ttl(data) {
+                        TtlResult::Decremented | TtlResult::TooShort => {}
+                        TtlResult::DropSilent | TtlResult::SendIcmp { .. } => {
+                            // C `route_broadcast` doesn't synth
+                            // ICMP on TTL expiry — `:563` just
+                            // `return`s. Match.
+                            return false;
+                        }
+                    }
+                }
+                self.broadcast_packet(data, from)
             }
             RouteResult::TooShort { need, have } => {
                 // C `route.c:103-108`: `"Got too short packet from
@@ -731,10 +1057,14 @@ impl Daemon {
     /// synthesizes it from the IP version nibble (`receive_sptps_
     /// record:1128-1144`). Saves 14 bytes/packet.
     pub(super) fn send_sptps_packet(&mut self, to_nid: NodeId, to_name: &str, data: &[u8]) -> bool {
-        // C `:696-698`: RMODE_ROUTER strips the 14-byte ether hdr.
-        // STUB(chunk-12-switch): RMODE_SWITCH (`type = PKT_MAC`,
-        // no strip).
-        const OFFSET: usize = 14;
+        // C `:696-700`: `if(routing_mode == RMODE_ROUTER) { offset =
+        // 14; } else { type = PKT_MAC; }`. Router strips the 14-byte
+        // eth header (receiver re-synths from IP version nibble).
+        // Switch/Hub: full eth frame on the wire, mark `PKT_MAC`.
+        let (offset, base_type) = match self.settings.routing_mode {
+            RoutingMode::Router => (14, PKT_NORMAL),
+            RoutingMode::Switch | RoutingMode::Hub => (0, PKT_MAC),
+        };
         let tunnel = self.tunnels.entry(to_nid).or_default();
 
         if !tunnel.status.validkey {
@@ -759,8 +1089,10 @@ impl Daemon {
         // The MTU-probe path (zero-ethertype is the probe marker).
         // (PMTU probes go via `try_tx`/`send_udp_probe`, not here.)
 
-        if data.len() < OFFSET {
-            return false; // C `:702`: `if(origpkt->len < offset) return`.
+        // C `:702`: `if(origpkt->len < offset) return`. Only matters
+        // for Router (Switch offset=0 always passes).
+        if data.len() < offset {
+            return false;
         }
 
         // C `:708-718`: `if(n->outcompression != COMPRESS_NONE) {
@@ -772,9 +1104,9 @@ impl Daemon {
         // PERF(chunk-10): one alloc per forwarded packet when the
         // peer asked for compression. The C uses a stack `vpn_
         // packet_t outpkt`. Measure with iperf3 before optimizing.
-        let payload = &data[OFFSET..];
+        let payload = &data[offset..];
         let level = compress::Level::from_wire(tunnel.outcompression);
-        let mut record_type = PKT_NORMAL;
+        let mut record_type = base_type;
         let compressed;
         let body: &[u8] = if level == compress::Level::None {
             payload
@@ -891,9 +1223,6 @@ impl Daemon {
         record_type: u8,
         body: &[u8],
     ) -> bool {
-        // C `:1108`: `int offset = (type & PKT_MAC) ? 0 : 14`.
-        // RMODE_ROUTER: peer stripped the ether header; we re-prepend.
-        const OFFSET: usize = 14;
         // C `:1068-1070`: `if(len > MTU) return false`. Oversize.
         if body.len() > usize::from(crate::tunnel::MTU) {
             log::error!(target: "tincd::net",
@@ -938,16 +1267,36 @@ impl Daemon {
                         "Unexpected SPTPS record type {record_type} from {peer_name}");
             return false;
         }
-        // C `:1100-1105`: RMODE check vs PKT_MAC. We're RMODE_
-        // ROUTER; PKT_MAC means the peer is in switch mode and
-        // sent a full ethernet frame (no offset). We don't handle
-        // that. STUB(chunk-12-switch): switch mode.
-        if record_type & PKT_MAC != 0 {
-            log::warn!(target: "tincd::net",
-                       "Received packet from {peer_name} with MAC header \
-                        (peer in switch mode?)");
-            return false;
+        // C `:1101-1105`: cross-mode warnings.
+        //   `routing_mode != RMODE_ROUTER && !(type & PKT_MAC)` →
+        //     ERROR (we're switch, peer is router; peer stripped
+        //     the eth header, we can't route_mac without it).
+        //   `routing_mode == RMODE_ROUTER && (type & PKT_MAC)` →
+        //     WARN (peer is switch, we're router; we'll re-synth
+        //     the eth header anyway. Lenient — matches C.)
+        let has_mac = record_type & PKT_MAC != 0;
+        match (self.settings.routing_mode, has_mac) {
+            (RoutingMode::Switch | RoutingMode::Hub, false) => {
+                log::error!(target: "tincd::net",
+                    "Received packet from {peer_name} without MAC header \
+                     (maybe Mode is not set correctly)");
+                return false;
+            }
+            (RoutingMode::Router, true) => {
+                log::warn!(target: "tincd::net",
+                    "Received packet from {peer_name} with MAC header \
+                     (maybe Mode is not set correctly)");
+                // Continue — lenient. Discard their eth header,
+                // re-synth from IP version nibble.
+            }
+            _ => {}
         }
+
+        // C `:1108`: `int offset = (type & PKT_MAC) ? 0 : 14`.
+        // TYPE-driven, not mode-driven: a switch-mode node receiving
+        // from a misconfigured router-mode peer (warning case above)
+        // still parses correctly using offset=14.
+        let offset: usize = if has_mac { 0 } else { 14 };
         // C `:1109-1121`: `if(type & PKT_COMPRESSED) { ulen =
         // uncompress_packet(..., from->incompression); if(!ulen)
         // return false; }`. Decompress at the level WE asked for
@@ -972,26 +1321,34 @@ impl Daemon {
         };
 
         // C `:1123`: `memcpy(DATA + offset, data, len)`. C `:1128-
-        // 1144`: synthesize the ethertype from the IP version nibble.
-        if body.is_empty() {
-            return false; // need byte 0 for the version nibble
-        }
-        let ethertype: u16 = match body[0] >> 4 {
-            4 => crate::packet::ETH_P_IP,
-            6 => 0x86DD, // ETH_P_IPV6
-            v => {
-                // C `:1141-1144`: `"Unknown IP version %d"`.
-                log::debug!(target: "tincd::net",
-                            "Unknown IP version {v} in packet from {peer_name}");
-                return false;
+        // 1144`: synthesize the ethertype from the IP version nibble
+        // — ROUTER ONLY (Switch: body IS the full eth frame).
+        let mut frame: Vec<u8>;
+        if offset == 0 {
+            // Switch: body is already a full eth frame. Just clone
+            // (we need ownership for `route_packet(&mut frame)`).
+            frame = body.to_vec();
+        } else {
+            // Router: re-prepend the eth header. Zero MACs (C
+            // `:1128` doesn't touch them — they're already zero
+            // from `vpn_packet_t` zero-init).
+            if body.is_empty() {
+                return false; // need byte 0 for the version nibble
             }
-        };
-        let mut frame = vec![0u8; OFFSET + body.len()];
-        // MACs stay zero (`set_etherheader` in `tinc-device` does
-        // the same; C `:1128` doesn't touch them — they're already
-        // zero from the `vpn_packet_t` zero-init).
-        frame[12..14].copy_from_slice(&ethertype.to_be_bytes());
-        frame[OFFSET..].copy_from_slice(body);
+            let ethertype: u16 = match body[0] >> 4 {
+                4 => crate::packet::ETH_P_IP,
+                6 => 0x86DD, // ETH_P_IPV6
+                v => {
+                    // C `:1141-1144`: `"Unknown IP version %d"`.
+                    log::debug!(target: "tincd::net",
+                                "Unknown IP version {v} in packet from {peer_name}");
+                    return false;
+                }
+            };
+            frame = vec![0u8; offset + body.len()];
+            frame[12..14].copy_from_slice(&ethertype.to_be_bytes());
+            frame[offset..].copy_from_slice(body);
+        }
 
         // C `:1148-1150`: `if(udppacket && len > from->maxrecentlen)
         // from->maxrecentlen = len`. The largest data record we've
@@ -1024,7 +1381,7 @@ impl Daemon {
         // (`if(subnet->owner == source) drop`). With 2 nodes and
         // /32 subnets, the destination subnet is never owned by
         // the sender. The check matters for overlapping subnets.
-        self.route_packet(&mut frame)
+        self.route_packet(&mut frame, Some(peer))
     }
 
     /// `send_sptps_data` (`net_packet.c:965-1054`). The per-tunnel
@@ -1471,4 +1828,36 @@ impl Daemon {
 
     // ───────────────────────────────────────────────────────────────
     // PMTU probe handling + try_tx chain
+}
+
+/// Rebind a `RouteResult<'a>` to a local lifetime. The `Forward`
+/// arm's `&str` borrows the `SubnetTree`/`mac_table`; we need to
+/// drop that borrow before calling `&mut self` methods. The caller
+/// pre-clones the owner string into `owned_to`; this function picks
+/// the right variant. Exhaustive match: any new `RouteResult`
+/// variant trips a compile error here.
+///
+/// Why not make `RouteResult` own a `String`? Because `route()` /
+/// `route_mac()` are pure functions called per-packet; the no-route
+/// (`TooShort`/`Unreachable`/`Broadcast`) cases would alloc-then-
+/// drop. The alloc is cheap but the API contract ("this fn is
+/// pure") is cleaner with a borrow.
+fn detach_route_result<'b>(r: &RouteResult<'_>, owned_to: Option<&'b str>) -> RouteResult<'b> {
+    match *r {
+        RouteResult::Forward { .. } => RouteResult::Forward {
+            // owned_to.is_some() iff r was Forward; caller invariant.
+            to: owned_to.expect("Forward without owned_to"),
+        },
+        RouteResult::Unreachable {
+            icmp_type,
+            icmp_code,
+        } => RouteResult::Unreachable {
+            icmp_type,
+            icmp_code,
+        },
+        RouteResult::Unsupported { reason } => RouteResult::Unsupported { reason },
+        RouteResult::NeighborSolicit => RouteResult::NeighborSolicit,
+        RouteResult::Broadcast => RouteResult::Broadcast,
+        RouteResult::TooShort { need, have } => RouteResult::TooShort { need, have },
+    }
 }

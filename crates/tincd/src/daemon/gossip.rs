@@ -1046,14 +1046,15 @@ impl Daemon {
     /// `DEBUG_TRAFFIC`. We don't have the hostname (no `NodeState`
     /// for transitive nodes); log the name from the graph.
     pub(super) fn run_graph_and_log(&mut self) {
-        let (transitions, _mst, routes) = run_graph(&mut self.graph, self.myself);
+        let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself);
         // Stash for `dump_nodes` (`node.c:218`: nexthop/via/distance
         // are read straight off `node_t`, which the C `graph.c:188-
         // 196` writes into). We keep the side table.
         self.last_routes = routes;
-        // STUB(chunk-10-broadcast): `_mst` feeds `connection_t.
-        // status.mst`, read ONLY by `broadcast_packet` (`net_
-        // packet.c:1635`). Broadcast is its own feature.
+        // C `graph.c:103,107` sets each MST-edge's connection's
+        // `status.mst` bit; we keep the edge IDs and map at
+        // broadcast time (`broadcast_packet` in `net.rs`).
+        self.last_mst = mst;
         //
         // C `graph.c:323` calls `subnet_cache_flush_tables`. We
         // don't HAVE a cache (`subnet_tree.rs:31` says so). The C
@@ -1469,13 +1470,13 @@ impl Daemon {
         // when owner IS the direct peer but the subnet wasn't in
         // our hosts/ file ("unauthorized"). The C `:880`
         // `strictsubnets |= tunnelserver` makes the `:116`
-        // strictsubnets check fire instead. STUB(chunk-12-switch):
+        // strictsubnets check fire instead. STUB(chunk-12-strictsubnets):
         // both predicates need on-disk hosts/ subnet parsing.
         // Without it, accept the peer's own subnets (otherwise
         // tunnelserver mode can't route AT ALL — `three_daemon_
         // tunnelserver` proves we accept these).
 
-        // STUB(chunk-12-switch): strictsubnets (`:116-122`).
+        // STUB(chunk-12-strictsubnets): strictsubnets (`:116-122`).
         // Predates tunnelserver; checks gossip'd subnets against
         // on-disk hosts/ files.
 
@@ -1485,6 +1486,33 @@ impl Daemon {
         // BTreeSet insert which is also idempotent). Clone the
         // owner: `subnet_update` below needs it. `Subnet` is `Copy`.
         self.subnets.add(subnet, owner_name.clone());
+
+        // mac_table sync: every Subnet::Mac add/del also updates the
+        // flat lookup table that `route_mac.rs` reads.
+        if let Subnet::Mac { addr, .. } = subnet {
+            self.mac_table.insert(addr, owner_name.clone());
+
+            // C `protocol_subnet.c:142-148`: fast handoff. A peer
+            // learned a MAC that WE also have leased (a VM migrated
+            // to behind them). Set our lease's expiry to now so the
+            // next age_subnets pass DELs it (and they win).
+            //
+            // C: `lookup_subnet(myself, &s)` + `if(old && old->
+            // expires) old->expires = 1`. Our `mac_leases` ONLY
+            // holds myself's leases, so `refresh()` returning
+            // `true` IS the `lookup_subnet(myself,..)` check.
+            // `refresh(addr, now, 0)` sets `expires = now`; with
+            // `age()`'s strict-less compare it expires next tick.
+            // Same net effect as the C's `expires = 1`.
+            if owner != self.myself {
+                let now = self.timers.now();
+                if self.mac_leases.refresh(addr, now, 0) {
+                    log::debug!(target: "tincd::proto",
+                        "Fast handoff: peer {owner_name} learned our \
+                         leased MAC {addr:02x?}; expiring ours");
+                }
+            }
+        }
 
         // C `:130-132`: `if(owner->status.reachable) subnet_update(
         // owner, new, true)`. Only fire subnet-up if the owner is
@@ -1504,10 +1532,6 @@ impl Daemon {
         } else {
             self.forward_request(from_conn, body)
         };
-
-        // STUB(chunk-12-switch): MAC fast-handoff (`:142-148`). No
-        // TAP/RMODE_SWITCH yet; SUBNET_MAC subnets only exist in
-        // switch mode.
 
         Ok(nw)
     }
@@ -1608,6 +1632,15 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for {owner_name} \
                         which does not appear in his subnet tree");
+        }
+
+        // mac_table sync. Only remove if the entry's owner matches
+        // (don't wipe a different owner's entry on a stale DEL —
+        // shouldn't happen since MAC is exact-match, but defensively).
+        if let Subnet::Mac { addr, .. } = subnet {
+            if self.mac_table.get(&addr).map(String::as_str) == Some(owner_name.as_str()) {
+                self.mac_table.remove(&addr);
+            }
         }
 
         Ok(nw)

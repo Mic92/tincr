@@ -61,7 +61,7 @@ use crate::socks;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
 use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
-use crate::{compress, icmp, local_addr, mss, neighbor};
+use crate::{broadcast, compress, icmp, local_addr, mac_lease, mss, neighbor, route_mac};
 
 mod connect;
 mod gossip;
@@ -168,8 +168,10 @@ pub enum TimerWhat {
     /// request cache entries older than `pinginterval`. Re-arms
     /// +10s (`:228`). Chunk 5: ARMED.
     AgePastRequests,
-    /// `age_subnets`. Re-arms +10s.
-    #[allow(dead_code)]
+    /// `age_subnets` (`route.c:491-521`). Re-arms +10s. Lazy-armed
+    /// on the FIRST `learn_mac` (when `MacLeases::learn` returns
+    /// `true` = table was empty). Dispatched in `run()` →
+    /// `on_age_subnets`.
     AgeSubnets,
     /// `retry_outgoing_handler`. Per-outgoing. C `outgoing_t.ev`
     /// (`net.h:123`) is one timer per outgoing; `retry_outgoing`
@@ -272,8 +274,9 @@ pub struct DaemonSettings {
     ///
     /// `:880`: `strictsubnets |= tunnelserver`. We don't have
     /// strictsubnets yet (it predates tunnelserver — checks gossip'd
-    /// subnets against on-disk hosts/ files). STUB(chunk-12-switch):
-    /// the implication is one line when strictsubnets lands.
+    /// subnets against on-disk hosts/ files).
+    /// STUB(chunk-12-strictsubnets): the implication is one line
+    /// when strictsubnets lands.
     pub tunnelserver: bool,
     /// `directonly` (`net_setup.c:403`, `route.c:41`). Default
     /// false. Route-time gate: if `owner != via` (would relay),
@@ -283,11 +286,26 @@ pub struct DaemonSettings {
     /// `forwarding_mode` (`net_setup.c:426-443`). Default `Internal`
     /// (`route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`).
     /// `Off` drops packets not addressed to us (leaf-only mode).
-    /// `Kernel` writes everything to TUN, lets the OS routing table
-    /// decide. We only check `== Internal` at the relay sites;
-    /// `Kernel` is `STUB(chunk-12-switch)` (it changes the whole
-    /// route-dispatch shape).
+    /// `Kernel` writes everything from a peer straight to TUN, lets
+    /// the OS routing table decide (`route.c:1135-1138`). Checked
+    /// at the top of `route_packet`.
     pub forwarding_mode: ForwardingMode,
+    /// `routing_mode` (`net_setup.c:406-424`). The dispatch shape:
+    /// `Router` → ethertype switch (current); `Switch` →
+    /// `route_mac`; `Hub` → always broadcast. NOT in
+    /// `apply_reloadable_settings` — changing tun↔tap mid-run means
+    /// re-opening the device, which the C doesn't do.
+    pub routing_mode: RoutingMode,
+    /// `broadcast_mode` (`net_setup.c:461-472`). Default `Mst`. The
+    /// `RouteResult::Broadcast` arm dispatches on this. `None` drops
+    /// all broadcasts; `Direct` only sends to one-hop neighbors (and
+    /// only when WE originated, `net_packet.c:1644-1646`).
+    pub broadcast_mode: broadcast::BroadcastMode,
+    /// `macexpire` (`net_setup.c:523-524`, `route.c:43`). Seconds.
+    /// Default 600 (= `mac_lease::DEFAULT_EXPIRE_SECS`). Lease TTL
+    /// for learned MACs. The `age_subnets` 10s timer is the SWEEP
+    /// frequency; this is the LEASE duration.
+    pub macexpire: u64,
     /// `invitation_lifetime` (`protocol_auth.c:55`). C default 604800
     /// (one week, `net_setup.c:567`). Config var `InvitationExpire`.
     /// Seconds; `serve_cookie` checks `mtime + this < now`.
@@ -305,8 +323,10 @@ pub struct DaemonSettings {
     /// handshake); `Socks4`/`Socks5` connect to the proxy then send
     /// `socks::build_request` bytes BEFORE the ID line and read the
     /// fixed-length reply via `conn.tcplen` (`meta.c:275-298`).
-    /// `Http` is `STUB(chunk-12-http-proxy)` (line-based response,
-    /// needs a `proxy_passed` flag we don't have).
+    /// `Http` (`protocol_auth.c:60-68`) sends `CONNECT host:port`
+    /// then intercepts the line-based response in `metaconn.rs`
+    /// BEFORE `check_gate` while `allow_request==Id`
+    /// (`protocol.c:148-161`).
     pub proxy: Option<ProxyConfig>,
     /// `autoconnect` (`net_setup.c:560-562`). Default **true** (the C
     /// `else` branch sets it). When set, `periodic_handler` runs
@@ -323,9 +343,10 @@ pub struct DaemonSettings {
     // Chunk 4+: ~32 more fields.
 }
 
-/// `fmode_t` (`route.h:31-35`). Three-way knob; only `Internal`
-/// matters today (`== INTERNAL` gates the SPTPS_PACKET relay at
-/// `protocol_key.c:167`). `Kernel` is `STUB(chunk-12-switch)`.
+/// `fmode_t` (`route.h:31-35`). Three-way knob. `== INTERNAL` gates
+/// the SPTPS_PACKET relay at `protocol_key.c:167`. `Kernel` is
+/// checked at the top of `route_packet` (`route.c:1135-1138`):
+/// anything from a peer goes straight to the TUN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ForwardingMode {
     /// `FMODE_OFF`. Drop packets not addressed to us.
@@ -334,9 +355,36 @@ pub enum ForwardingMode {
     /// `route()` does the forwarding decision.
     #[default]
     Internal,
-    /// `FMODE_KERNEL`. Write everything to TUN, let the OS decide.
-    /// `STUB(chunk-12-switch)`: changes the route-dispatch shape.
+    /// `FMODE_KERNEL`. Write everything from a peer to TUN; let the
+    /// OS routing table decide. Packets from OUR device still go
+    /// through `route()` (we're the originator).
     Kernel,
+}
+
+/// `routing_mode` (`route.h:32`, `net_setup.c:406-424`). C default
+/// `RMODE_ROUTER` (`route.c:39`). Read once at setup, NOT
+/// reloadable (changing it mid-run would mean re-opening the device
+/// tun→tap, which the C doesn't do).
+///
+/// | Variant | C | Device | Dispatch |
+/// |---|---|---|---|
+/// | `Router` | `RMODE_ROUTER` | TUN | `route()` ethertype switch |
+/// | `Switch` | `RMODE_SWITCH` | TAP | `route_mac()` (`route.c:1159`) |
+/// | `Hub` | `RMODE_HUB` | TAP | always `Broadcast` (`route.c:1163`) |
+///
+/// Hub mode broadcasts EVERYTHING. No MAC learning, no subnet
+/// table — pure flood. Niche (legacy compat); we wire it but
+/// don't test it (the C doesn't either — `test/integration/` has
+/// no hub test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoutingMode {
+    /// `RMODE_ROUTER`. The default. IP-layer routing.
+    #[default]
+    Router,
+    /// `RMODE_SWITCH`. MAC-layer routing with learning.
+    Switch,
+    /// `RMODE_HUB`. Always broadcast. No learning.
+    Hub,
 }
 
 impl Default for DaemonSettings {
@@ -369,6 +417,12 @@ impl Default for DaemonSettings {
             directonly: false,
             // C `route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`.
             forwarding_mode: ForwardingMode::Internal,
+            // C `route.c:39`: `routing_mode = RMODE_ROUTER`.
+            routing_mode: RoutingMode::Router,
+            // C `net_setup.c:883`: `bcast_mode = BMODE_MST`.
+            broadcast_mode: broadcast::BroadcastMode::Mst,
+            // C `route.c:43`: `int macexpire = 600`.
+            macexpire: mac_lease::DEFAULT_EXPIRE_SECS,
             // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
             invitation_lifetime: Duration::from_secs(604_800),
             // C `net_setup.c:404`: default false (no `else` branch).
@@ -463,6 +517,28 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         if let Ok(v) = e.get_int() {
             if let Ok(v) = u32::try_from(v) {
                 settings.mtu_info_interval = v;
+            }
+        }
+    }
+    // Broadcast (`:461-472`). C errors on unknown; we log + keep
+    // default (less harsh on reload typo).
+    if let Some(e) = config.lookup("Broadcast").next() {
+        settings.broadcast_mode = match e.get_str().to_ascii_lowercase().as_str() {
+            "no" => broadcast::BroadcastMode::None,
+            "yes" | "mst" => broadcast::BroadcastMode::Mst,
+            "direct" => broadcast::BroadcastMode::Direct,
+            v => {
+                log::error!(target: "tincd",
+                            "Broadcast = {v}: invalid (no|yes|mst|direct)");
+                settings.broadcast_mode
+            }
+        };
+    }
+    // MACExpire (`:523-524`).
+    if let Some(e) = config.lookup("MACExpire").next() {
+        if let Ok(v) = e.get_int() {
+            if let Ok(v) = u64::try_from(v) {
+                settings.macexpire = v;
             }
         }
     }
@@ -839,6 +915,33 @@ pub struct Daemon {
     /// reads `None` for everything (only `myself` exists then anyway).
     pub(crate) last_routes: Vec<Option<Route>>,
 
+    /// `c->status.mst` mapped. C `graph.c:103,107` sets each edge's
+    /// connection's `status.mst`; we store the edge IDs and map at
+    /// broadcast time (`NodeState.edge` is the conn→edge link).
+    /// Populated by `run_graph()`; previously discarded.
+    pub(crate) last_mst: Vec<EdgeId>,
+
+    /// `route_mac`'s lookup table. `HashMap<Mac, owner-name>`.
+    /// Maintained alongside `subnets`: every `Subnet::Mac` add/del
+    /// also updates this. `SubnetTree::lookup_mac` exists but
+    /// `route_mac.rs` takes the flat map directly (testability —
+    /// see `route_mac.rs` doc). Five sync sites: `learn_mac`,
+    /// `on_age_subnets`, `on_add_subnet`, `on_del_subnet`, reload.
+    pub(crate) mac_table: HashMap<route_mac::Mac, String>,
+
+    /// Expiry tracker for OUR learned MACs (those owned by
+    /// `myself`). NOT all MAC subnets — peers' learned MACs are in
+    /// `mac_table` (via gossip ADD_SUBNET) but not here. The C
+    /// stores `expires` on `subnet_t` directly (`subnet.h:53`); we
+    /// keep lifecycles separate (see `mac_lease.rs` doc).
+    pub(crate) mac_leases: mac_lease::MacLeases,
+
+    /// Lazy-created on the first `learn()` (when `learn()` returns
+    /// `true` = "table was empty"). C `timeout_add` at `route.c:
+    /// 549-551` is idempotent (checks if already in heap); we use
+    /// `Option` to skip the check.
+    pub(crate) age_subnets_timer: Option<TimerId>,
+
     // ─── settings
     /// The config knobs. Reload swaps this.
     ///
@@ -1049,20 +1152,29 @@ impl Daemon {
             }
         }
 
+        // Mode (`net_setup.c:406-424`). routing_mode. C errors on
+        // unknown. NOT in apply_reloadable_settings (device re-open).
+        // Parsed BEFORE Forwarding to match C source order.
+        if let Some(e) = config.lookup("Mode").next() {
+            settings.routing_mode = match e.get_str().to_ascii_lowercase().as_str() {
+                "router" => RoutingMode::Router,
+                "switch" => RoutingMode::Switch,
+                "hub" => RoutingMode::Hub,
+                v => {
+                    return Err(SetupError::Config(format!(
+                        "Mode = {v}: invalid routing mode (router|switch|hub)"
+                    )));
+                }
+            };
+        }
+
         // Forwarding (`net_setup.c:426-443`). Default Internal.
-        // C errors on unknown; we accept `kernel` with a warn (it
-        // does the right thing for everything except already-
-        // forwarded packets, which we don't generate yet).
+        // C errors on unknown.
         if let Some(e) = config.lookup("Forwarding").next() {
             match e.get_str().to_ascii_lowercase().as_str() {
                 "off" => settings.forwarding_mode = ForwardingMode::Off,
                 "internal" => settings.forwarding_mode = ForwardingMode::Internal,
-                "kernel" => {
-                    log::warn!(target: "tincd",
-                               "Forwarding = kernel is not yet supported; \
-                                using internal");
-                    // Fall through to default. STUB(chunk-12-switch).
-                }
+                "kernel" => settings.forwarding_mode = ForwardingMode::Kernel,
                 v => {
                     return Err(SetupError::Config(format!(
                         "Forwarding = {v}: invalid forwarding mode"
@@ -1129,7 +1241,25 @@ impl Daemon {
                 let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
                 Box::new(tun)
             }
-            // Chunk 8+: Some("tap") → Mode::Tap, etc.
+            #[cfg(target_os = "linux")]
+            Some("tap") => {
+                // C `linux/device.c:81-87`: `DeviceType = tap` OR
+                // (`routing_mode != RMODE_ROUTER && !DeviceType`).
+                // We only handle the explicit form here; the
+                // auto-derive (Mode→device when DeviceType unset) is
+                // a follow-up. The cross-impl test sets
+                // `DeviceType = tap` explicitly.
+                let cfg = tinc_device::DeviceConfig {
+                    iface: config
+                        .lookup("Interface")
+                        .next()
+                        .map(|e| e.get_str().to_owned()),
+                    mode: tinc_device::Mode::Tap,
+                    ..Default::default()
+                };
+                let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+                Box::new(tun)
+            }
             Some(other) => {
                 return Err(SetupError::Config(format!(
                     "DeviceType={other} not supported yet; use dummy or fd"
@@ -1379,6 +1509,10 @@ impl Daemon {
             connecting_socks: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
             last_routes: Vec::new(),
+            last_mst: Vec::new(),
+            mac_table: HashMap::new(),
+            mac_leases: mac_lease::MacLeases::default(),
+            age_subnets_timer: None,
             settings,
             invitation_key,
             // C `net.c:458`: `last_config_check = now.tv_sec` at the
@@ -1529,7 +1663,10 @@ impl Daemon {
                         // the unit test reads it.
                         let _ = self.on_periodic_tick();
                     }
-                    TimerWhat::KeyExpire | TimerWhat::AgeSubnets | TimerWhat::UdpPing => {
+                    TimerWhat::AgeSubnets => {
+                        self.on_age_subnets();
+                    }
+                    TimerWhat::KeyExpire | TimerWhat::UdpPing => {
                         // Not armed yet. Unreachable.
                         unreachable!("timer {t:?} not armed yet")
                     }

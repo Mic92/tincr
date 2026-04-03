@@ -161,10 +161,8 @@ pub enum RouteResult<'a> {
     /// any node's subnet table. RMODE_SWITCH only — the IP-layer
     /// router never returns this (unknown IP → `Unreachable` with
     /// an ICMP code instead). Daemon dispatches to `broadcast_
-    /// packet` (`net_packet.c:1438`): flood to every reachable peer.
-    ///
-    /// `STUB(chunk-12-switch)`: daemon match arm is a no-op log
-    /// until the broadcast wire-up lands.
+    /// packet` (`net_packet.c:1612-1660`): flood per `BroadcastMode`
+    /// (MST walk by default).
     Broadcast,
 
     /// `route.c:103-108`: `checklength` failed. Packet truncated

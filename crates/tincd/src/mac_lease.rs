@@ -16,7 +16,7 @@
 //! - The actual `Subnet::Mac` add/del + ADD/DEL_SUBNET gossip — daemon,
 //!   on `learn`/`age` return.
 //! - The `route_mac::LearnAction → mac_lease` plumbing — daemon's
-//!   `route_packet` RMODE_SWITCH arm. `STUB(chunk-12-switch)`.
+//!   `route_packet_mac` (`daemon/net.rs`).
 //! - The `if(subnet->expires)` skip-configured-subnets guard
 //!   (`route.c:553`): we ONLY hold learned MACs. The daemon's
 //!   SubnetTree holds both; only learned ones are mirrored here. The

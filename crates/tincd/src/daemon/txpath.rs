@@ -503,7 +503,7 @@ impl Daemon {
     /// `reachable=false` until SOMETHING connects them — harmless,
     /// `dump nodes` shows them as unreachable which is correct.
     ///
-    /// `strictsubnets` branch (`:192-208`): STUB(chunk-12-switch).
+    /// `strictsubnets` branch (`:192-208`): STUB(chunk-12-strictsubnets).
     /// Reads each file's `Subnet =` lines into the subnet tree.
     /// We don't have strictsubnets yet.
     pub(super) fn load_all_nodes(&mut self) {

@@ -385,6 +385,56 @@ impl Daemon {
         self.timers.set(self.age_timer, Duration::from_secs(10));
     }
 
+    /// `age_subnets` (`route.c:491-521`). Timer handler. Walk our
+    /// learned-MAC leases, expire the dead ones (broadcast
+    /// DEL_SUBNET for each), re-arm if any remain.
+    ///
+    /// Only fires in switch mode (lazy-armed by `learn_mac`). The
+    /// 10s interval is the SWEEP frequency; `settings.macexpire`
+    /// (default 600s) is the LEASE duration.
+    pub(super) fn on_age_subnets(&mut self) {
+        let now = self.timers.now();
+        let (expired, any_left) = self.mac_leases.age(now);
+
+        let myname = self.name.clone();
+        for mac in &expired {
+            // C `learn_mac:538`: `weight = 10`. We always learn at
+            // weight 10, so the matching del key is also weight 10
+            // (SubnetTree::del compares the full Subnet incl weight).
+            let subnet = Subnet::Mac {
+                addr: *mac,
+                weight: 10,
+            };
+            log::info!(target: "tincd::net", "Subnet {subnet} expired");
+
+            // C `:506-509`: `for(c) if(c->edge) send_del_subnet(c, s)`.
+            let targets = self.broadcast_targets(None);
+            for cid in targets {
+                let _ = self.send_subnet(cid, Request::DelSubnet, &myname, &subnet);
+            }
+
+            // C `:511`: `subnet_del(myself, s)`. The C does NOT
+            // fire `subnet_update(.., false)` here — the
+            // originator's expiry doesn't run subnet-down (only
+            // the receiving side's `del_subnet_h` does). Match.
+            self.subnets.del(&subnet, &myname);
+            self.mac_table.remove(mac);
+        }
+
+        // C `:518-521`: `if(left) timeout_set(..., {10, jitter()})`.
+        // Re-arm only if leases remain. Otherwise let the timer
+        // lapse and clear the slot so the next `learn_mac` re-
+        // creates it (`mac_leases.learn()` returns true when the
+        // table is empty, which it will be after this).
+        if any_left {
+            if let Some(tid) = self.age_subnets_timer {
+                self.timers.set(tid, Duration::from_secs(10));
+            }
+        } else if let Some(tid) = self.age_subnets_timer.take() {
+            self.timers.del(tid);
+        }
+    }
+
     // ─── signal handlers
 
     /// `sigterm_handler` (`net.c:316-319`) for `Exit`;
@@ -434,7 +484,9 @@ impl Daemon {
     ///   lifetime, invitation_key.
     /// - NO: Port, AddressFamily, DeviceType. These need re-bind /
     ///   re-open. The C doesn't reload them either.
-    /// - NO (yet): Compression, Forwarding. STUB(chunk-12-switch).
+    /// - NO (yet): Compression, Forwarding. The C re-applies them
+    ///   in `setup_myself_reloadable`; we don't yet (cosmetic — a
+    ///   restart picks them up).
     #[allow(clippy::too_many_lines)] // C reload_configuration is
     // 122 lines. The diff/broadcast/script sequence shares too
     // much state to split cleanly.
@@ -507,6 +559,12 @@ impl Daemon {
             self.run_subnet_script(false, &myname, &s);
             // C `:427`: `subnet_del(myself, subnet)`.
             self.subnets.del(&s, &myname);
+            // mac_table sync. In practice never fires (own-subnets
+            // from hosts/NAME are IP in router mode; switch learns
+            // dynamically). Completeness + matches C semantics.
+            if let Subnet::Mac { addr, .. } = s {
+                self.mac_table.remove(&addr);
+            }
         }
         // C `:415-419`: added → add, send ADD, fire subnet-up.
         // (C order is add-send-update; we match.)
@@ -522,6 +580,10 @@ impl Daemon {
             self.broadcast_line(&line);
             // C `:419`: `subnet_update(myself, subnet, true)`.
             self.run_subnet_script(true, &myname, &s);
+            // mac_table sync (see removed-loop note).
+            if let Subnet::Mac { addr, .. } = s {
+                self.mac_table.insert(addr, myname.clone());
+            }
         }
 
         // ─── ConnectTo diff (C `:432`: try_outgoing_connections).

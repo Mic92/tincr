@@ -28,7 +28,7 @@
 //! subnet lookup; [`build_arp_reply`] / [`build_ndp_advert`]
 //! synthesize given the original frame. Pure functions, no state.
 //!
-//! `STUB(chunk-9-switch)`: `overwrite_mac` snatching (`:970-973`,
+//! `STUB(chunk-12-overwrite-mac)`: `overwrite_mac` snatching (`:970-973`,
 //! `:830-832`) and `source != myself` (`:964-967`, `:814-817`) are
 //! switch-mode concerns; default-off / router-mode-only here.
 

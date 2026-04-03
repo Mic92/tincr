@@ -30,10 +30,9 @@
 //!
 //! ## What's NOT here
 //!
-//! - `age_subnets` (`route.c:556-576`): the 10s timer that prunes
+//! - `age_subnets` (`route.c:491-521`): the 10s timer that prunes
 //!   expired MAC entries and broadcasts `DEL_SUBNET` for each.
-//!   Daemon-owned (it needs `timers` + `connection_list`).
-//!   `STUB(chunk-12-switch)` in `daemon.rs`.
+//!   Daemon-owned (`on_age_subnets` in `daemon/periodic.rs`).
 //! - `route_broadcast` (`route.c:559-565`): we return
 //!   [`RouteResult::Broadcast`]; the daemon dispatches to
 //!   `broadcast_packet` (`net_packet.c:1438`).

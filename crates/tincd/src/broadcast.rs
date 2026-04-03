@@ -20,12 +20,10 @@
 //! ## What's NOT here
 //!
 //! - `c->status.mst` — daemon stores `Vec<EdgeId>` from `run_graph`
-//!   (currently discarded). `STUB(chunk-10-broadcast)` at
-//!   `gossip.rs:994`.
+//!   in `last_mst` (gossip.rs `run_graph_and_log`).
 //! - The actual `send_packet` calls — daemon iterates the targets we
-//!   return. `STUB(chunk-12-switch)`.
-//! - `RouteResult::Broadcast` match arm — daemon `route_packet`.
-//!   Currently `unreachable!()`-ish.
+//!   return in `broadcast_packet` (`daemon/net.rs`).
+//! - `RouteResult::Broadcast` match arm — `dispatch_route_result`.
 #![forbid(unsafe_code)]
 
 use std::collections::HashSet;

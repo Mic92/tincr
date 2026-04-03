@@ -111,9 +111,52 @@ fn c_tincd_bin() -> Option<PathBuf> {
 // parallel (they each get their own bwrap → own netns → own /run,
 // so it'd be fine anyway, but defense in depth).
 
+/// Device type for the test's two TUN/TAP interfaces. Each bwrap
+/// re-exec is its own netns, so device-name collisions across
+/// parallel tests don't happen — but we still namespace by suffix
+/// to make `ip link` output readable in debug.
+#[derive(Clone, Copy)]
+enum DevMode {
+    /// `mode tun`, devices `tincX0/tincX1`, netns `xbobside`.
+    Tun,
+    /// `mode tap`, devices `tincS0/tincS1`, netns `xbobside_s`.
+    Tap,
+}
+
+impl DevMode {
+    fn dev0(self) -> &'static str {
+        match self {
+            DevMode::Tun => "tincX0",
+            DevMode::Tap => "tincS0",
+        }
+    }
+    fn dev1(self) -> &'static str {
+        match self {
+            DevMode::Tun => "tincX1",
+            DevMode::Tap => "tincS1",
+        }
+    }
+    fn ns(self) -> &'static str {
+        match self {
+            DevMode::Tun => "xbobside",
+            DevMode::Tap => "xbobside_s",
+        }
+    }
+    fn tuntap_mode(self) -> &'static str {
+        match self {
+            DevMode::Tun => "tun",
+            DevMode::Tap => "tap",
+        }
+    }
+}
+
 fn enter_netns(test_name: &str) -> Option<NetNs> {
+    enter_netns_with(test_name, DevMode::Tun)
+}
+
+fn enter_netns_with(test_name: &str, mode: DevMode) -> Option<NetNs> {
     if std::env::var_os("BWRAP_INNER").is_some() {
-        return Some(NetNs::setup());
+        return Some(NetNs::setup(mode));
     }
 
     // Gate the env var BEFORE the bwrap probe. No point probing
@@ -181,16 +224,46 @@ fn enter_netns(test_name: &str) -> Option<NetNs> {
 
 struct NetNs {
     sleeper: Child,
+    mode: DevMode,
 }
 
 impl NetNs {
-    fn setup() -> Self {
+    fn setup(mode: DevMode) -> Self {
         run_ip(&["link", "set", "lo", "up"]);
         // Different device names from netns.rs — see module doc.
-        run_ip(&["tuntap", "add", "mode", "tun", "name", "tincX0"]);
-        run_ip(&["tuntap", "add", "mode", "tun", "name", "tincX1"]);
-        run_ip(&["link", "set", "tincX0", "up"]);
-        run_ip(&["link", "set", "tincX1", "up"]);
+        run_ip(&[
+            "tuntap",
+            "add",
+            "mode",
+            mode.tuntap_mode(),
+            "name",
+            mode.dev0(),
+        ]);
+        run_ip(&[
+            "tuntap",
+            "add",
+            "mode",
+            mode.tuntap_mode(),
+            "name",
+            mode.dev1(),
+        ]);
+        // TAP: DO NOT bring up here. TAP devices emit spontaneous
+        // traffic (IPv6 router solicits, mDNS) the moment they go
+        // up, even with no address assigned. If both sides' kernels
+        // emit simultaneously while the per-tunnel SPTPS handshake
+        // is in flight, both daemons fire REQ_KEY at the same time
+        // and the handshake restarts in a loop. TUN doesn't have
+        // this problem (no L2 → no spontaneous frames). The TAP
+        // tests bring devices up in `place_devices()` AFTER the
+        // meta handshake completes; the directional kick-ping then
+        // ensures one side initiates REQ_KEY first.
+        //
+        // TUN: harmless either way; bring up early so the existing
+        // carrier wait works unchanged.
+        if matches!(mode, DevMode::Tun) {
+            run_ip(&["link", "set", mode.dev0(), "up"]);
+            run_ip(&["link", "set", mode.dev1(), "up"]);
+        }
 
         std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
         let sleeper = Command::new("unshare")
@@ -198,37 +271,37 @@ impl NetNs {
             .spawn()
             .expect("spawn unshare sleeper");
         std::thread::sleep(Duration::from_millis(100));
-        std::fs::write("/run/netns/xbobside", b"").expect("touch nsfd target");
+        let ns_path = format!("/run/netns/{}", mode.ns());
+        std::fs::write(&ns_path, b"").expect("touch nsfd target");
         let status = Command::new("mount")
             .args(["--bind"])
             .arg(format!("/proc/{}/ns/net", sleeper.id()))
-            .arg("/run/netns/xbobside")
+            .arg(&ns_path)
             .status()
             .expect("spawn mount");
         assert!(status.success(), "mount --bind nsfd: {status:?}");
-        run_ip(&["netns", "exec", "xbobside", "ip", "link", "set", "lo", "up"]);
+        run_ip(&["netns", "exec", mode.ns(), "ip", "link", "set", "lo", "up"]);
 
-        Self { sleeper }
+        Self { sleeper, mode }
     }
 
     fn place_devices(&self) {
-        run_ip(&["link", "set", "tincX1", "netns", "xbobside"]);
-        run_ip(&["addr", "add", "10.43.0.1/24", "dev", "tincX0"]);
-        run_ip(&["link", "set", "tincX0", "up"]);
+        let m = self.mode;
+        run_ip(&["link", "set", m.dev1(), "netns", m.ns()]);
+        run_ip(&["addr", "add", "10.43.0.1/24", "dev", m.dev0()]);
+        run_ip(&["link", "set", m.dev0(), "up"]);
         run_ip(&[
             "netns",
             "exec",
-            "xbobside",
+            m.ns(),
             "ip",
             "addr",
             "add",
             "10.43.0.2/24",
             "dev",
-            "tincX1",
+            m.dev1(),
         ]);
-        run_ip(&[
-            "netns", "exec", "xbobside", "ip", "link", "set", "tincX1", "up",
-        ]);
+        run_ip(&["netns", "exec", m.ns(), "ip", "link", "set", m.dev1(), "up"]);
     }
 }
 
@@ -353,9 +426,6 @@ impl Node {
     /// `SigningKey::to_blob()`. The C's `linux/device.c` honors
     /// `Interface = ...` for TUNSETIFF the same way ours does.
     fn write_config(&self, other: &Node, connect_to: bool) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!(
@@ -381,6 +451,54 @@ impl Node {
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
+        self.write_privkey();
+    }
+
+    /// Switch-mode variant of `write_config`. Differences from the
+    /// router-mode form above:
+    ///
+    /// - `Mode = switch` in `tinc.conf` (→ `RoutingMode::Switch`).
+    /// - `DeviceType = tap` (full eth frames; the C
+    ///   `linux/device.c:76-91` would derive this from
+    ///   `Mode = switch` when DeviceType is unset, but our Rust
+    ///   currently requires it explicit).
+    /// - NO `Subnet =` line in `hosts/SELF`. Switch mode learns MAC
+    ///   subnets dynamically (`route.c:524-556 learn_mac`); pre-
+    ///   declared MAC subnets would never expire (`:553`) and we
+    ///   want to test the learning path.
+    fn write_config_switch(&self, other: &Node, connect_to: bool) {
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        let mut tinc_conf = format!(
+            "Name = {}\nDeviceType = tap\nMode = switch\nInterface = {}\nAddressFamily = ipv4\n",
+            self.name, self.iface
+        );
+        if connect_to {
+            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+        }
+        tinc_conf.push_str("PingTimeout = 1\n");
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        // hosts/SELF: just Port. No Subnet — learned dynamically.
+        std::fs::write(
+            self.confbase.join("hosts").join(self.name),
+            format!("Port = {}\n", self.port),
+        )
+        .unwrap();
+
+        let other_pub = tinc_crypto::b64::encode(&other.pubkey());
+        let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
+        if connect_to {
+            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+        }
+        std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
+
+        self.write_privkey();
+    }
+
+    fn write_privkey(&self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use tinc_crypto::sign::SigningKey;
         let sk = SigningKey::from_seed(&self.seed);
         let f = std::fs::OpenOptions::new()
             .write(true)
@@ -750,13 +868,10 @@ fn c_dials_rust() {
 // the 3-node scaffold; same shape as `two_daemons.rs::three_daemon_
 // relay` but with C bob.
 
-// ────────────────────────────────────────────────────────────────────
-// TODO(chunk-12-switch): RMODE_SWITCH cross-impl ping
-//
-// `route_mac.rs` is a leaf with no daemon wire-up yet. The C side
+// ═══════════════════════ RMODE_SWITCH cross-impl ════════════════════════
+// `route_mac.rs` daemon wire-up. The C side
 // already works: `route.c:1159 case RMODE_SWITCH: route_mac(...)`
-// is the reference. When chunk-12 lands, this is the wire-compat
-// proof.
+// is the reference. This is the wire-compat proof.
 //
 // What it proves over `rust_dials_c`:
 //
@@ -765,85 +880,179 @@ fn c_dials_rust() {
 //   `LearnAction::New(alice's-tap-mac)`. Daemon sends `ADD_SUBNET`
 //   with `Subnet::Mac{addr: ..., weight: 10}` (`route.c:538`). Bob
 //   (C) parses it (`subnet_add.c:add_subnet_h`), routes the ARP
-//   reply back to alice by MAC. Same in reverse for bob's MAC.
-//   Without correct `Subnet::Mac` wire format → ARP times out, no
-//   ping.
-// - **`Broadcast` dispatch**: the very FIRST ARP request has an
-//   unknown dst-MAC (ff:ff:ff:ff:ff:ff). `route_mac` returns
-//   `RouteResult::Broadcast`. Daemon must `broadcast_packet` it
-//   to bob. The C `route_broadcast` (`route.c:559`) is the
-//   reference; we wire-match.
-// - **TAP device path**: `tinc-device` opened with `IFF_TAP` not
-//   `IFF_TUN`. Full eth header preserved. Our `route()` reads
-//   ethertype at `[12..14]` and DOESN'T dispatch by it — in
-//   switch mode it goes straight to `route_mac` regardless
-//   (`route.c:1159` is unconditional inside `RMODE_SWITCH`).
-// - **`age_subnets`**: NOT exercised by a single ping. Would need
-//   a 10min idle wait (`macexpire` default 600s) or a `MACExpire =
-//   3` config knob + a sleep + a second ping that should re-ARP.
-//   Separate test.
+//   reply back to alice by MAC. Without correct `Subnet::Mac` wire
+//   format → ARP times out, no ping.
+// - **`Broadcast` dispatch**: the FIRST ARP request has dst-MAC
+//   ff:ff:ff:ff:ff:ff. `route_mac` returns `RouteResult::Broadcast`.
+//   Daemon `broadcast_packet`s it to bob.
+// - **TAP device path**: `tinc-device` opened `IFF_TAP`. Full eth
+//   header preserved. Switch mode goes straight to `route_mac`
+//   (`route.c:1159`); no ARP/NDP intercept.
 //
-// Prerequisites (all chunk-12-switch daemon work):
-//
-// 1. `tinc.conf` `Mode = switch` parse → `routing_mode` config field.
-//    `tinc-conf` may already parse it; check. If yes, daemon needs
-//    to read it.
-// 2. `route()` dispatch: `match routing_mode { RMODE_SWITCH =>
-//    route_mac(...), RMODE_ROUTER => /* current ethertype
-//    dispatch */, RMODE_HUB => Broadcast }`.
-// 3. Daemon builds `HashMap<Mac, String>` from the gossip subnet
-//    set. Every `ADD_SUBNET` with `Subnet::Mac{..}` populates it;
-//    every `DEL_SUBNET` removes. Same lifecycle as the IPv4/v6
-//    `SubnetTree` updates.
-// 4. `LearnAction::New` → daemon allocates `Subnet::Mac{addr,
-//    weight: 10}`, adds to own subnet set, sends `ADD_SUBNET` on
-//    every meta-conn (`route.c:543-547`), arms `age_subnets` timer.
-// 5. `LearnAction::Refresh` → daemon bumps the lease in its
-//    learned-MAC-expiry table. No gossip.
-// 6. `RouteResult::Broadcast` → `broadcast_packet` (`net_packet.c:
-//    1438`): send to every reachable peer except `source`. The
-//    daemon stub currently log-and-drops.
-// 7. `tinc-device` opened `IFF_TAP` when `Mode = switch`. Might
-//    already be config-driven; check `crates/tinc-device`.
-//
-// Test mechanics (delta from `run_crossimpl`):
-//
-// - `ip tuntap add mode tap name tincS0/tincS1` (NOT `tun`).
-// - `Node::write_config`: append `Mode = switch\n` to `tinc.conf`.
-//   NO `Subnet =` line in `hosts/NAME` — switch mode learns
-//   subnets, doesn't pre-declare them. (The C accepts both; pre-
-//   declared MAC subnets are static and never expire, `route.c:
-//   552 if(subnet->expires)`. We test the learning path.)
-// - Same `10.43.0.1/2` IPs on the TAPs. Kernel does ARP
-//   resolution; we route the ARP frames as opaque eth.
-// - The `node_status` poll for reachable+validkey is unchanged —
-//   meta-conn / SPTPS handshake is mode-agnostic.
-// - Add a poll: `dump subnets` (control subtype 4, `control.c:
-//   137`) should eventually show `Subnet::Mac` entries from BOTH
-//   sides. That's the ADD_SUBNET-gossip-propagated proof, before
-//   we even ping.
-// - Ping. Same `ping -c 3 -W 2 10.43.0.2`. Kernel ARPs; ARP rides
-//   the tunnel as a broadcast frame; reply rides back as a
-//   forwarded unicast. ICMP follows.
-//
-// Both directions (`rust_dials_c_switch` + `c_dials_rust_switch`)
-// because the LEARNING is asymmetric: the dialer's first packet
-// (the ARP request) is what triggers the responder's `route_mac`
-// to broadcast it, and the responder's reply is what triggers the
-// dialer's first MAC learn. Either side's bug → one-way silence.
-//
-// #[test]
-// fn rust_dials_c_switch() {
-//     let Some(netns) = enter_netns_tap("rust_dials_c_switch") else {
-//         return;
-//     };
-//     run_crossimpl_switch("rds", Impl::Rust, Impl::C, netns);
-// }
-//
-// #[test]
-// fn c_dials_rust_switch() {
-//     let Some(netns) = enter_netns_tap("c_dials_rust_switch") else {
-//         return;
-//     };
-//     run_crossimpl_switch("cds", Impl::C, Impl::Rust, netns);
-// }
+// Both directions: the LEARNING is asymmetric. The dialer's first
+// packet (ARP request) triggers the responder's broadcast; the
+// responder's reply triggers the dialer's first MAC learn. Either
+// side's bug → one-way silence.
+
+fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
+    let tmp = TmpGuard::new(tag);
+    // No subnet — switch mode learns. iface = tincS0/tincS1.
+    let alice = Node::new(tmp.path(), "alice", 0xAA, "tincS0", "", alice_impl);
+    let bob = Node::new(tmp.path(), "bob", 0xBB, "tincS1", "", bob_impl);
+
+    bob.write_config_switch(&alice, false);
+    alice.write_config_switch(&bob, true);
+
+    let bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
+    }
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "alice setup failed; stderr:\n{}\n=== bob ===\n{bs}",
+            alice_child.kill_and_log()
+        );
+    }
+
+    // ─── meta handshake (mode-agnostic) ──────────────────────────
+    // BEFORE place_devices: TAP devices are still down (see
+    // NetNs::setup), so neither kernel is emitting spontaneous
+    // traffic. The meta handshake (TCP, ID/SPTPS/ACK/ADD_EDGE)
+    // completes in peace.
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+
+    let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if meta.is_err() {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("meta handshake timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // NOW bring devices up. TUNSETIFF already fired (daemon attached
+    // at startup); carrier should flip immediately. place_devices
+    // also moves tincS1 into bob's netns and assigns addresses.
+    netns.place_devices();
+    if !wait_for_carrier("tincS0", Duration::from_secs(2)) {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("alice carrier;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── kick the per-tunnel handshake ──────────────────────────
+    // alice's kernel ARPs for 10.43.0.2 → ARP frame to tincS0 →
+    // route_packet → route_mac → Broadcast → try_tx → REQ_KEY.
+    // Only alice originates here (bob's TAP just came up in its
+    // netns and may emit a router solicit, but the directional
+    // ping ensures alice's REQ_KEY wins the race more often than
+    // not). The ping itself fails (no key yet); that's fine.
+    let _ = Command::new("ping")
+        .args(["-c", "1", "-W", "1", "10.43.0.2"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    // ─── validkey + udp_confirmed (mode-agnostic) ───────────────
+    const VALIDKEY: u32 = 0x02;
+    const UDP_CONFIRMED: u32 = 0x80;
+    let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let want = VALIDKEY | UDP_CONFIRMED;
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & want == want);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & want == want);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if validkey.is_err() {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!("validkey/udp_confirmed timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── THE PING ───────────────────────────────────────────────
+    // Kernel ARPs (TAP) → route_mac sees ff:ff:ff:ff:ff:ff →
+    // Broadcast → bob's kernel replies → ADD_SUBNET gossip →
+    // ICMP unicast routes by MAC. Any Subnet::Mac wire mismatch →
+    // ARP times out → ping fails.
+    let ping = Command::new("ping")
+        .args(["-c", "3", "-W", "2", "10.43.0.2"])
+        .output()
+        .expect("spawn ping");
+
+    if !ping.status.success() {
+        // Dump subnets (subtype 5) from alice for diagnosis: empty →
+        // learn_mac never fired; alice's MAC only → broadcast
+        // worked one-way.
+        let alice_subs = alice_ctl.dump(5);
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "switch-mode cross-impl ping failed: {:?}\nstdout: {}\nstderr: {}\n\
+             alice subnets (dump 4): {alice_subs:?}\n\
+             === alice ===\n{asd}\n=== bob ===\n{bs}",
+            ping.status,
+            String::from_utf8_lossy(&ping.stdout),
+            String::from_utf8_lossy(&ping.stderr),
+        );
+    }
+
+    eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
+
+    // ─── Prove learn_mac fired ──────────────────────────────────
+    // Ctl dump 5 = subnets (`REQ_DUMP_SUBNETS`, `control.c:137`).
+    // MAC subnets format with single colons (xx:xx:xx:xx:xx:xx);
+    // IPv6 has double-colons. Filter for `:` without `::`. After a
+    // successful ping there should be at least one MAC subnet
+    // (alice's TAP MAC, learned when the kernel sent the first
+    // outbound frame).
+    let alice_subs = alice_ctl.dump(5);
+    let mac_subs: Vec<&String> = alice_subs
+        .iter()
+        .filter(|s| s.contains(':') && !s.contains("::"))
+        .collect();
+    assert!(
+        !mac_subs.is_empty(),
+        "No MAC subnets after ping (learn_mac didn't fire?): {alice_subs:?}"
+    );
+
+    drop(alice_ctl);
+    drop(bob_ctl);
+    let _ = alice_child.kill_and_log();
+    let _ = bob_child.kill_and_log();
+    drop(netns);
+}
+
+/// Rust dials, C listens. Switch mode. Tests our INITIATOR-side
+/// MAC learning + ADD_SUBNET wire format + broadcast against the
+/// reference.
+#[test]
+fn rust_dials_c_switch() {
+    let Some(netns) = enter_netns_with("rust_dials_c_switch", DevMode::Tap) else {
+        return;
+    };
+    run_crossimpl_switch("rds", Impl::Rust, Impl::C, netns);
+}
+
+/// C dials, Rust listens. Switch mode. Tests our RESPONDER-side
+/// route_mac broadcast (the C's first ARP arrives over the wire;
+/// our `route_packet` with `from = Some(peer)` must echo to TAP
+/// AND forward to the MST — which is just back to C in 2-node).
+#[test]
+fn c_dials_rust_switch() {
+    let Some(netns) = enter_netns_with("c_dials_rust_switch", DevMode::Tap) else {
+        return;
+    };
+    run_crossimpl_switch("cds", Impl::C, Impl::Rust, netns);
+}
