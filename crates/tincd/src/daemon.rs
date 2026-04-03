@@ -28,8 +28,9 @@ use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
-use tinc_proto::msg::{AddEdge, DelEdge, SubnetMsg};
+use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, ReqKey, SubnetMsg};
 use tinc_proto::{AddrStr, Request, Subnet};
+use tinc_sptps::{Framing, Role, Sptps};
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
@@ -39,6 +40,7 @@ use crate::listen::{
     AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
     unmap,
 };
+use crate::node_id::{NodeId6, NodeId6Table};
 use crate::outgoing::{
     ConnectAttempt, MAX_TIMEOUT_DEFAULT, Outgoing, OutgoingId, probe_connecting,
     resolve_config_addrs, try_connect,
@@ -48,8 +50,18 @@ use crate::proto::{
     myself_options_default, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
     parse_del_subnet, record_body, send_ack,
 };
+use crate::route::{RouteResult, route};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
+use crate::tunnel::{TunnelState, make_udp_label};
+
+// `net.h:106-108`: SPTPS record-type bits for the per-tunnel data
+// channel. Type 0 = plain IP packet (RMODE_ROUTER, no compression).
+// Bits OR together.
+const PKT_NORMAL: u8 = 0;
+const PKT_COMPRESSED: u8 = 1;
+const PKT_MAC: u8 = 2;
+const PKT_PROBE: u8 = 4;
 
 // dispatch enums — the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
@@ -271,12 +283,8 @@ pub struct Daemon {
     /// the variant (`Dummy`/`Tun`/`Fd`/`Raw`/`Bsd`) is chosen at
     /// setup time by the `DeviceType` config knob.
     ///
-    /// `dead_code` allowed: skeleton never reads `device` (Dummy has
-    /// `fd() → None`, never registered, `IoWhat::Device` never fires).
-    /// But: KEEPING it in the struct keeps it ALIVE. For Tun/Fd/Raw,
-    /// dropping the Device closes the fd. The struct field IS the
-    /// usage. Chunk 3's `IoWhat::Device` arm reads it.
-    #[allow(dead_code)]
+    /// Chunk 7's `IoWhat::Device` arm reads it; `route_packet` writes
+    /// to it for `Forward{to: myself}`.
     pub(crate) device: Box<dyn Device>,
 
     /// `unix_socket` (`control.c:29`). The control listener.
@@ -408,6 +416,23 @@ pub struct Daemon {
     /// del_edge`. RESOLVES the open question at the chunk-5
     /// `send_everything` STUB note.
     pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
+
+    /// `node_t` data-plane half. C smushes this into the same `node_t`
+    /// struct; we keep it separate from `nodes`/`NodeState` because
+    /// the lifecycles differ — `TunnelState` exists for ANY reachable
+    /// node (we send UDP to nodes we have no TCP connection to,
+    /// forwarding the handshake via `nexthop->connection`).
+    ///
+    /// `entry().or_default()` is the C `xzalloc` semantics: a node
+    /// learned from `ADD_EDGE` has no tunnel until `send_req_key` /
+    /// `req_key_ext_h` (`protocol_key.c:131,263`) starts one.
+    pub(crate) tunnels: HashMap<NodeId, TunnelState>,
+
+    /// `node_id_tree` (`node.c:60`). UDP fast-path lookup: every
+    /// packet has `[dst_id6][src_id6]` prefix; receiver maps `src_
+    /// id6` → `NodeId` to find which SPTPS state to feed. Populated
+    /// alongside `node_ids` in `lookup_or_add_node`.
+    pub(crate) id6_table: NodeId6Table,
 
     /// `contradicting_add_edge` (`net.c:40`). Incremented when a
     /// peer claims WE have an edge we don't (`protocol_edge.c:186`).
@@ -633,10 +658,34 @@ impl Daemon {
             .map(|e| e.get_str().to_ascii_lowercase());
         let device: Box<dyn Device> = match device_type.as_deref() {
             None | Some("dummy") => Box::new(tinc_device::Dummy),
-            // Chunk 3: Some("tun") → Tun::open, Some("fd") → FdTun, etc.
+            #[cfg(target_os = "linux")]
+            Some("fd") => {
+                // C `:1068-1078`: `devops = fd_devops`. The fd comes
+                // from the `Device = N` config (inherited fd) or
+                // `--device-fd N` cmdline. For chunk-7 testing: the
+                // integration test creates a socketpair, writes one
+                // end's fd into `Device = N`, and pumps IP packets
+                // through it. `FdTun` reads at `+14` (raw IP, no
+                // tun_pi prefix) and synthesizes the ethertype —
+                // exactly the framing `route()` expects.
+                let dev_str = config
+                    .lookup("Device")
+                    .next()
+                    .map(tinc_conf::Entry::get_str)
+                    .ok_or_else(|| {
+                        SetupError::Config("DeviceType=fd requires Device = <fd>".into())
+                    })?;
+                let fd: std::os::unix::io::RawFd = dev_str.parse().map_err(|_| {
+                    SetupError::Config(format!("Device = {dev_str} is not a valid fd"))
+                })?;
+                let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
+                    .map_err(SetupError::Io)?;
+                Box::new(tun)
+            }
+            // Chunk 8+: Some("tun") → Tun::open, etc.
             Some(other) => {
                 return Err(SetupError::Config(format!(
-                    "DeviceType={other} not supported in skeleton; use dummy"
+                    "DeviceType={other} not supported yet; use dummy or fd"
                 )));
             }
         };
@@ -775,6 +824,31 @@ impl Daemon {
         let myself = graph.add_node(&name);
         let mut node_ids = HashMap::new();
         node_ids.insert(name.clone(), myself);
+        // C `node.c:126-128`: `node_add` computes `n->id` and inserts
+        // into `node_id_tree`. Our `NodeId6Table` is that tree.
+        let mut id6_table = NodeId6Table::new();
+        id6_table.add(&name, myself);
+
+        // ─── Subnet (net_setup.c:860-870)
+        // C: `for(cfg = lookup_config("Subnet"); cfg; cfg = next)
+        // { get_config_subnet(cfg, &subnet); subnet_add(myself,
+        // subnet); }`. Read OUR subnets from `hosts/NAME` (HOST-
+        // tagged). Chunk 7's `route()` needs these to recognize
+        // packets destined for us (the `Forward{to: myself}` case).
+        // C `:865`: parse failure is `return false` (hard error).
+        // We're slightly looser: log and skip the bad one. The
+        // daemon stays up; the bad subnet just isn't routable.
+        let mut subnets = SubnetTree::new();
+        for e in config.lookup("Subnet") {
+            match e.get_str().parse::<Subnet>() {
+                Ok(s) => subnets.add(s, name.clone()),
+                Err(_) => {
+                    log::error!(target: "tincd",
+                                "Invalid Subnet = {} in hosts/{name}",
+                                e.get_str());
+                }
+            }
+        }
 
         // ─── ConnectTo (try_outgoing_connections, net_socket.c:815-884)
         // C: walk `ConnectTo` configs, `lookup_or_add_node`, build
@@ -826,10 +900,12 @@ impl Daemon {
             graph,
             node_ids,
             myself,
-            subnets: SubnetTree::new(),
+            subnets,
             seen: SeenRequests::new(),
             nodes: HashMap::new(),
             edge_addrs: HashMap::new(),
+            tunnels: HashMap::new(),
+            id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
             outgoings: SlotMap::with_key(),
@@ -1030,9 +1106,11 @@ impl Daemon {
                     }
 
                     IoWhat::Device => {
-                        // `handle_device_data`. Dummy never registers,
-                        // so unreachable in skeleton. Chunk 3.
-                        unreachable!("device fd not registered in skeleton")
+                        // `handle_device_data` (`net_packet.c:1916-
+                        // 1938`). Dummy returns `fd() → None` and
+                        // never registers; FdTun (chunk-7 test rig)
+                        // does. Edge-triggered: drain until EAGAIN.
+                        self.on_device_read();
                     }
 
                     IoWhat::Tcp(i) => {
@@ -1041,23 +1119,10 @@ impl Daemon {
                     }
 
                     IoWhat::Udp(i) => {
-                        // `handle_incoming_vpn_data`. The socket IS
-                        // bound (UDP listener); a peer COULD send to
-                        // it. But: no `node_tree` yet, no key state,
-                        // no route. The packet is undecryptable
-                        // garbage from our point of view. C
-                        // `net_packet.c:1802` would `lookup_node_udp`,
-                        // get NULL, `try_harder`, give up.
-                        //
-                        // We DON'T `unreachable!()` (the fd IS
-                        // registered now). We don't read either:
-                        // level-triggered means the socket stays
-                        // readable, this arm fires every turn,
-                        // burning CPU. Drain the socket and discard.
-                        //
-                        // Chunk 4+ replaces this with the real
-                        // recv_from + decrypt + route.
-                        self.on_udp_drain(i);
+                        // `handle_incoming_vpn_data` (`net_packet.c:
+                        // 1845-1913`). recvfrom, strip [dst][src],
+                        // lookup_node_id, feed SPTPS, route.
+                        self.on_udp_recv(i);
                     }
                 }
             }
@@ -1259,36 +1324,737 @@ impl Daemon {
         }
     }
 
-    /// Stub `handle_incoming_vpn_data`. Just drain the UDP socket so
-    /// it doesn't stay readable and burn the event loop. Chunk 4+
-    /// replaces this with the real `recvfrom` + decrypt + route.
+    /// `handle_incoming_vpn_data` (`net_packet.c:1845-1913`) +
+    /// `handle_incoming_vpn_packet` (`:1718-1842`) +
+    /// `receive_udppacket` SPTPS branch (`:424-455`).
     ///
-    /// We use socket2's `recv_from` (not `libc::recvfrom`) here
-    /// because we already have the wrapper. NO new unsafe. The
-    /// `MaybeUninit` API is awkward but the data is discarded so we
-    /// don't actually need to assume_init it.
-    fn on_udp_drain(&mut self, i: u8) {
-        let listener = &self.listeners[usize::from(i)];
-        // 1500 bytes is enough — anything bigger gets truncated
-        // (MSG_TRUNC), still drains. We're not keeping the data.
-        let mut buf = [std::mem::MaybeUninit::uninit(); 1500];
-        // Loop: drain ALL pending datagrams. Level-triggered means
-        // one datagram drained leaves the rest still ready, fires
-        // again next turn. Draining the lot now reduces wake-churn.
+    /// Wire layout for a 1.1-SPTPS direct packet (`net.h:92-93`):
+    /// `[dst_id:6][src_id:6][seqno:4][type:1][body][tag:16]`. The
+    /// 12-byte ID prefix is OUTSIDE the SPTPS framing (C `DEFAULT_
+    /// PACKET_OFFSET = 12`); the receiver strips it then feeds the
+    /// rest to `sptps_receive_data`.
+    ///
+    /// `dst == nullid` means "direct to you" (`net_packet.c:1013`
+    /// on the send side, `:1741` on the receive side). Relay path
+    /// (`dst != nullid && to != myself`) is STUB(chunk-9).
+    ///
+    /// Loop drains ALL pending datagrams (edge-triggered epoll).
+    /// STUB(chunk-10): `recvmmsg` batching.
+    fn on_udp_recv(&mut self, i: u8) {
+        // C `MAXSIZE` is `MTU + 4 + cipher overhead`. We use a
+        // generous fixed buf; oversize packets truncate (MSG_TRUNC)
+        // and we'd reject them anyway (the SPTPS decrypt fails).
+        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 2048];
         loop {
-            match listener.udp.recv_from(&mut buf) {
-                Ok((n, addr)) => {
-                    // Log at DEBUG — this is noise in production
-                    // (every probe, every wrong-port packet).
-                    log::debug!(target: "tincd::net",
-                                "Dropping {n}-byte UDP packet from {addr:?} \
-                                 (no route table yet)");
-                }
+            // socket2 `recv_from` into `[MaybeUninit<u8>]`. Returns
+            // `(n, SockAddr)`. `as_socket()` for the SocketAddr.
+            let (n, sockaddr) = match self.listeners[usize::from(i)].udp.recv_from(&mut buf) {
+                Ok(pair) => pair,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
-                    log::warn!(target: "tincd::net",
-                               "UDP recv error on listener {i}: {e}");
+                    // C `:1878`: `"Receiving packet failed: %s"`.
+                    log::error!(target: "tincd::net",
+                                "Receiving packet failed: {e}");
                     break;
+                }
+            };
+            // SAFETY: `recv_from` returned `n` bytes written. The
+            // first `n` slots are initialized. Transmute the
+            // `MaybeUninit<u8>` slice to `u8` for those bytes.
+            // (`MaybeUninit::slice_assume_init_ref` is unstable;
+            // the manual cast is the stable equivalent.)
+            #[allow(unsafe_code)]
+            let pkt: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+            // C `:1724`: `sockaddrunmap(addr)`. v4-mapped → v4.
+            let peer = sockaddr.as_socket().map(unmap);
+
+            self.handle_incoming_vpn_packet(pkt, peer);
+        }
+    }
+
+    /// `handle_incoming_vpn_packet` (`net_packet.c:1718-1842`).
+    /// One UDP datagram → ID-prefix lookup → SPTPS receive → route.
+    ///
+    /// SPTPS-only: skips `lookup_node_udp` (`:1728`) and `try_harder`
+    /// (`:1754`). Goes straight to the source-ID lookup at `:1736`.
+    /// The C does udp-addr-first because legacy-crypto packets have
+    /// no ID prefix; we don't have legacy.
+    fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
+        // C `:1736`: `pkt->offset = 2 * sizeof(node_id_t)`. The
+        // 12-byte [dst][src] prefix. Too-short packet: drop.
+        if pkt.len() < 12 {
+            log::debug!(target: "tincd::net",
+                        "Dropping {}-byte UDP packet (too short for ID prefix)",
+                        pkt.len());
+            return;
+        }
+        // `net.h:92-93`: `DSTID(x) = data + offset - 12` (i.e. byte
+        // 0 with offset=12), `SRCID(x) = data + offset - 6` (byte 6).
+        let dst_id = NodeId6::from_bytes(pkt[0..6].try_into().unwrap());
+        let src_id = NodeId6::from_bytes(pkt[6..12].try_into().unwrap());
+        let ct = &pkt[12..];
+
+        // C `:1739`: `from = lookup_node_id(SRCID(pkt))`. The fast
+        // path. STUB(chunk-9): `try_harder` fallback (decrypt-by-
+        // trial when the lookup misses — happens for ID collisions
+        // or pre-1.1 packets, neither of which we support).
+        let Some(from_nid) = self.id6_table.lookup(src_id) else {
+            log::debug!(target: "tincd::net",
+                        "Received UDP packet from unknown source ID {src_id} ({peer:?})");
+            return;
+        };
+        let from_name = self
+            .graph
+            .node(from_nid)
+            .map_or("<gone>", |n| n.name.as_str())
+            .to_owned();
+
+        // C `:1741`: `if(from && from->status.sptps && DSTID == nullid)`
+        // — direct-to-us. The non-null DSTID is the relay path.
+        // STUB(chunk-9): relay (`:1817-1821` `if(to != myself)
+        // send_sptps_data(to, from, ...)`). With dst==null, `to ==
+        // myself` always; with dst!=null, `to = lookup_node_id(dst)`.
+        if !dst_id.is_null() {
+            log::debug!(target: "tincd::net",
+                        "Received UDP relay packet (dst={dst_id}); \
+                         relay path is STUB(chunk-9)");
+            return;
+        }
+
+        // C `:1825`: `receive_udppacket(from, pkt)`. SPTPS branch
+        // (`net_packet.c:424-455`).
+        let tunnel = self.tunnels.entry(from_nid).or_default();
+        let Some(sptps) = tunnel.sptps.as_deref_mut() else {
+            // C `:426-433`: `if(!n->sptps.state)`. We got a UDP
+            // packet before the per-tunnel handshake started. The C
+            // kicks `send_req_key` here; we do too (it's harmless
+            // — if a handshake is already in flight, the responder
+            // side restarts it).
+            if tunnel.status.waitingforkey {
+                log::debug!(target: "tincd::net",
+                            "Got packet from {from_name} but they haven't \
+                             got our key yet");
+            } else {
+                log::debug!(target: "tincd::net",
+                            "Got packet from {from_name} but we haven't \
+                             exchanged keys yet");
+                let _ = self.send_req_key(from_nid);
+            }
+            return;
+        };
+
+        // C `:437`: `n->status.udppacket = true`. Tells `receive_
+        // sptps_record` (the callback) that THIS record came via UDP
+        // (vs TCP-tunneled). The C resets it to false at `:439`
+        // after `sptps_receive_data` returns; we do the same
+        // (the bit is ephemeral, `route.c` reads it for "reply
+        // same way" logic in chunk 9).
+        tunnel.status.udppacket = true;
+
+        // C `:438`: `sptps_receive_data(&n->sptps, DATA, len)`.
+        // Datagram framing: one whole record per call. `OsRng` for
+        // the rekey-response edge (rare; it's a peer-initiated
+        // KEX during established session).
+        let result = sptps.receive(ct, &mut OsRng);
+        tunnel.status.udppacket = false;
+        let outs = match result {
+            Ok((_consumed, outs)) => outs,
+            Err(e) => {
+                // C `:441-450`: "tunnel stuck" restart logic. Gate
+                // on `last_req_key + 10 < now` to prevent storms.
+                log::debug!(target: "tincd::net",
+                            "Failed to decode UDP packet from {from_name}: {e:?}");
+                let now = self.timers.now();
+                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                    t.last_req_key
+                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+                });
+                if gate_ok {
+                    let _ = self.send_req_key(from_nid);
+                }
+                return;
+            }
+        };
+
+        // C `:1833-1835`: `if(direct && sockaddrcmp(addr,
+        // &n->address)) update_node_udp(n, addr)`. The FIRST valid
+        // UDP packet from this peer confirms the address. We don't
+        // have full `update_node_udp` (which also re-indexes
+        // `node_udp_tree`); just stash + set the bit.
+        if let Some(peer_addr) = peer {
+            let tunnel = self.tunnels.entry(from_nid).or_default();
+            if !tunnel.status.udp_confirmed {
+                log::debug!(target: "tincd::net",
+                            "UDP address of {from_name} confirmed: {peer_addr}");
+                tunnel.status.udp_confirmed = true;
+            }
+            tunnel.udp_addr = Some(peer_addr);
+        }
+
+        // Dispatch SPTPS outputs (`receive_sptps_record`, `net_
+        // packet.c:1056-1152`). May produce `HandshakeDone`
+        // (handshake completed mid-stream after a rekey) and/or
+        // `Record{type=0, data}` (one IP packet) and/or `Wire`
+        // (rekey response, `send_sptps_data` it).
+        let nw = self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
+        if nw {
+            self.maybe_set_write_any();
+        }
+    }
+
+    /// `handle_device_data` (`net_packet.c:1916-1938`).
+    ///
+    /// TUN read → `route()` → `send_packet`. The C reads ONE packet
+    /// per io callback; we drain until EAGAIN (edge-triggered epoll).
+    /// C `DEFAULT_PACKET_OFFSET = 12` reserves room for the
+    /// `[dst][src]` prefix; we don't need that pre-padding (our
+    /// `send_sptps_data` builds the prefix into a fresh Vec).
+    fn on_device_read(&mut self) {
+        // `MTU = 1518`. The device's `read()` writes up to that.
+        // FdTun reads at `+14` and synthesizes the ethernet header
+        // into `[0..14]`; the buffer must be ≥ MTU.
+        let mut buf = vec![0u8; crate::tunnel::MTU as usize];
+        let mut nw = false;
+        loop {
+            let n = match self.device.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    // C `:1933-1936`: `errors++; if > 10 event_
+                    // exit()`. The C also `sleep_millis(errors*50)`
+                    // (rate-limit a tight error loop on a flapping
+                    // TUN). We're simpler: log + break. The fd stays
+                    // registered; if it's truly dead (EBADFD), every
+                    // turn fires this arm. STUB(chunk-8): the error-
+                    // counter / event_exit escalation.
+                    log::error!(target: "tincd::net",
+                                "Error reading from device: {e}");
+                    break;
+                }
+            };
+            // C `:1928-1929`: `myself->in_packets++; in_bytes +=`.
+            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+            myself_tunnel.in_packets += 1;
+            myself_tunnel.in_bytes += n as u64;
+
+            // C `:1930`: `route(myself, &packet)`.
+            nw |= self.route_packet(&mut buf[..n]);
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
+    }
+
+    /// `route()` (`route.c:1130`) → `send_packet` (`net_packet.c:
+    /// 1553-1617`). The forwarding decision plus the dispatch.
+    ///
+    /// `data` is the full ethernet frame (14-byte header + payload).
+    /// `&mut` because `device.write()` mutates (the TUN write-path
+    /// zeroes `tun_pi.flags`; FdTun doesn't, but the trait is `&mut`).
+    ///
+    /// Returns the io_set signal (true if a meta-conn outbuf went
+    /// nonempty — `send_req_key` or the TCP-tunneled handshake).
+    fn route_packet(&mut self, data: &mut [u8]) -> bool {
+        // The reachability oracle for `route()`. C `route.c:655`
+        // reads `subnet->owner->status.reachable` directly (it's
+        // all one big graph of pointers). We close over `node_ids`
+        // + `graph` and look it up.
+        let result = {
+            let node_ids = &self.node_ids;
+            let graph = &self.graph;
+            route(data, &self.subnets, &self.name, |name| {
+                node_ids
+                    .get(name)
+                    .and_then(|&nid| graph.node(nid))
+                    .is_some_and(|n| n.reachable)
+            })
+        };
+
+        match result {
+            RouteResult::Forward { to } if to == self.name => {
+                // C `send_packet:1556-1568`: `if(n == myself) {
+                // devops.write(packet); return; }`. The packet is
+                // for US (it came in over the wire and `route()`
+                // matched one of our subnets). Write it to the TUN.
+                // STUB(chunk-9): `overwrite_mac` (`:1557-1562`) —
+                // TAP-mode source-MAC rewriting. RMODE_ROUTER
+                // doesn't need it.
+                let len = data.len() as u64;
+                let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                myself_tunnel.out_packets += 1;
+                myself_tunnel.out_bytes += len;
+                if let Err(e) = self.device.write(data) {
+                    log::debug!(target: "tincd::net",
+                                "Error writing to device: {e}");
+                }
+                false
+            }
+            RouteResult::Forward { to } => {
+                // C `send_packet:1571-1590`. To a remote node.
+                let to = to.to_owned();
+                let Some(&to_nid) = self.node_ids.get(&to) else {
+                    // `route()` returned a name from `subnets`; if
+                    // it's not in `node_ids`, the subnet was added
+                    // for a node we don't know. C couldn't get here
+                    // (subnet->owner is a `node_t*`). For us: warn
+                    // + drop. Would mean a `subnets.add` without a
+                    // matching `lookup_or_add_node` — a daemon bug.
+                    log::warn!(target: "tincd::net",
+                               "route() chose unknown node {to}");
+                    return false;
+                };
+                let len = data.len();
+                log::debug!(target: "tincd::net",
+                            "Sending packet of {len} bytes to {to}");
+                // C `:1582-1583`: traffic counters BEFORE the send
+                // (the C counts attempts, not deliveries).
+                let tunnel = self.tunnels.entry(to_nid).or_default();
+                tunnel.out_packets += 1;
+                tunnel.out_bytes += len as u64;
+
+                // C `:1586-1590`: `if(n->status.sptps) { send_sptps
+                // _packet(n, packet); try_tx(n); return; }`. Always
+                // SPTPS for us (no legacy fork).
+                self.send_sptps_packet(to_nid, &to, data)
+            }
+            RouteResult::Unreachable {
+                icmp_type,
+                icmp_code,
+            } => {
+                // C `route_ipv4_unreachable` (`route.c:121-215`):
+                // synthesizes an ICMP error and writes it BACK to
+                // the source. STUB(chunk-9). For now: log + drop.
+                log::debug!(target: "tincd::net",
+                            "route: unreachable (type={icmp_type} code={icmp_code})");
+                false
+            }
+            RouteResult::Unsupported { reason } => {
+                log::debug!(target: "tincd::net",
+                            "route: dropping packet ({reason})");
+                false
+            }
+            RouteResult::TooShort { need, have } => {
+                // C `route.c:103-108`: `"Got too short packet from
+                // %s"` at DEBUG_TRAFFIC.
+                log::debug!(target: "tincd::net",
+                            "route: too short (need {need}, have {have})");
+                false
+            }
+        }
+    }
+
+    /// `send_sptps_packet` (`net_packet.c:683-730`). Wrap an IP
+    /// packet in an SPTPS record and ship it.
+    ///
+    /// C `:684-686`: `if(!validkey && !n->connection) return`. The
+    /// gate. If we don't have a session key AND no direct meta-conn
+    /// to fall back to (the `send_tcppacket` path at `:725`), drop.
+    /// We don't have `send_tcppacket` (chunk-9, the PACKET request
+    /// type); the gate is just `!validkey`.
+    ///
+    /// C `:696-698`: `if(RMODE_ROUTER) offset = 14`. Strips the
+    /// ethernet header before encrypting — the receiver re-
+    /// synthesizes it from the IP version nibble (`receive_sptps_
+    /// record:1128-1144`). Saves 14 bytes/packet.
+    fn send_sptps_packet(&mut self, to_nid: NodeId, to_name: &str, data: &[u8]) -> bool {
+        // C `:696-698`: RMODE_ROUTER strips the 14-byte ether hdr.
+        // STUB(chunk-9): RMODE_SWITCH (`type = PKT_MAC`, no strip).
+        const OFFSET: usize = 14;
+        let tunnel = self.tunnels.entry(to_nid).or_default();
+
+        if !tunnel.status.validkey {
+            // C `try_sptps` (`net_packet.c:1157-1180`): `"No valid
+            // key known yet for %s"` then `if(!waitingforkey) send_
+            // req_key(n)`. The packet is dropped; the next one (a
+            // few hundred ms later) finds the handshake done.
+            log::debug!(target: "tincd::net",
+                        "No valid key known yet for {to_name}");
+            if !tunnel.status.waitingforkey {
+                return self.send_req_key(to_nid);
+            }
+            // C `:1167-1173`: the 10-second debounce. If we sent a
+            // REQ_KEY recently and got no answer, the peer might
+            // have dropped it (TCP queue full during a flood). Re-
+            // send. STUB(chunk-9): not on the first-packet hot path.
+            return false;
+        }
+
+        // C `:691-694`: `if(ethertype == 0 && outstate) PKT_PROBE`.
+        // The MTU-probe path (zero-ethertype is the probe marker).
+        // STUB(chunk-9): PMTU discovery.
+
+        if data.len() < OFFSET {
+            return false; // C `:702`: `if(origpkt->len < offset) return`.
+        }
+
+        // STUB(chunk-9): compression (`:708-718` `if(outcompression
+        // != COMPRESS_NONE) compress_packet(...)`). Type stays 0
+        // (no PKT_COMPRESSED bit).
+
+        // STUB(chunk-9): `if(n->connection && origpkt->len >
+        // n->minmtu) send_tcppacket()` (`:724-726`). The TCP
+        // fallback when the packet is too big for the discovered
+        // MTU. We always go via SPTPS-UDP for now.
+
+        // C `:728`: `sptps_send_record(&n->sptps, type, DATA +
+        // offset, len - offset)`. Type 0 = plain IP packet.
+        let Some(sptps) = tunnel.sptps.as_deref_mut() else {
+            // `validkey` is true but `sptps` is `None`? Shouldn't
+            // happen (the bit is set BY `HandshakeDone` which only
+            // fires after `Sptps::start`). Defensive: log + drop.
+            log::warn!(target: "tincd::net",
+                       "validkey set but no SPTPS for {to_name}?");
+            return false;
+        };
+        let outs = match sptps.send_record(PKT_NORMAL, &data[OFFSET..]) {
+            Ok(outs) => outs,
+            Err(e) => {
+                // `InvalidState` if `outcipher` is None. Shouldn't
+                // happen: `validkey` was checked above.
+                log::warn!(target: "tincd::net",
+                           "sptps_send_record for {to_name}: {e:?}");
+                return false;
+            }
+        };
+        // The output is exactly one `Wire`. Dispatch via the same
+        // bridge as the handshake outputs (it'll go UDP this time:
+        // record_type=0 < REC_HANDSHAKE).
+        self.dispatch_tunnel_outputs(to_nid, to_name, outs)
+    }
+
+    /// `receive_sptps_record` (`net_packet.c:1056-1152`) +
+    /// `send_sptps_data` (`:965-1054`) callback bridge.
+    ///
+    /// The C registers TWO callbacks with `sptps_start`: `receive_
+    /// sptps_record` (for `Output::Record`/`HandshakeDone`) and
+    /// `send_sptps_data` (for `Output::Wire`). Our SPTPS returns a
+    /// `Vec<Output>`; this function IS both callbacks.
+    ///
+    /// Returns the io_set signal (TCP-tunneled handshake records
+    /// queue to a meta-conn outbuf).
+    fn dispatch_tunnel_outputs(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        outs: Vec<tinc_sptps::Output>,
+    ) -> bool {
+        use tinc_sptps::Output;
+        let mut nw = false;
+        for o in outs {
+            match o {
+                Output::Wire { record_type, bytes } => {
+                    // `send_sptps_data` (`net_packet.c:965-1054`).
+                    // `record_type == REC_HANDSHAKE` (128) goes via
+                    // the meta connection (ANS_KEY); everything
+                    // else goes UDP.
+                    nw |= self.send_sptps_data(peer, peer_name, record_type, &bytes);
+                }
+                Output::HandshakeDone => {
+                    // C `receive_sptps_record:1059-1065`: `if(type
+                    // == SPTPS_HANDSHAKE) { validkey = true; waiting
+                    // forkey = false; "SPTPS key exchange with %s
+                    // successful" }`. The per-tunnel handshake just
+                    // completed.
+                    let tunnel = self.tunnels.entry(peer).or_default();
+                    if !tunnel.status.validkey {
+                        tunnel.status.validkey = true;
+                        tunnel.status.waitingforkey = false;
+                        log::info!(target: "tincd::net",
+                                   "SPTPS key exchange with {peer_name} successful");
+                    }
+                }
+                Output::Record { record_type, bytes } => {
+                    // `receive_sptps_record` data branch
+                    // (`:1071-1152`). One decrypted packet.
+                    nw |= self.receive_sptps_record(peer, peer_name, record_type, &bytes);
+                }
+            }
+        }
+        nw
+    }
+
+    /// `receive_sptps_record` data branch (`net_packet.c:1071-1152`).
+    /// One decrypted IP packet from a peer — re-synthesize the
+    /// ethernet header and route it.
+    fn receive_sptps_record(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        record_type: u8,
+        body: &[u8],
+    ) -> bool {
+        // C `:1108`: `int offset = (type & PKT_MAC) ? 0 : 14`.
+        // RMODE_ROUTER: peer stripped the ether header; we re-prepend.
+        const OFFSET: usize = 14;
+        // C `:1068-1070`: `if(len > MTU) return false`. Oversize.
+        if body.len() > usize::from(crate::tunnel::MTU) {
+            log::error!(target: "tincd::net",
+                        "Packet from {peer_name} larger than MTU ({} > {})",
+                        body.len(), crate::tunnel::MTU);
+            return false;
+        }
+
+        // C `:1078-1092`: `if(type == PKT_PROBE)`. STUB(chunk-9).
+        if record_type == PKT_PROBE {
+            log::debug!(target: "tincd::net",
+                        "Got SPTPS PROBE from {peer_name}; PMTU is STUB(chunk-9)");
+            return false;
+        }
+        // C `:1094-1097`: `if(type & ~(PKT_COMPRESSED | PKT_MAC))`.
+        // Unknown type bits.
+        if record_type & !(PKT_COMPRESSED | PKT_MAC) != 0 {
+            log::error!(target: "tincd::net",
+                        "Unexpected SPTPS record type {record_type} from {peer_name}");
+            return false;
+        }
+        // C `:1100-1105`: RMODE check vs PKT_MAC. We're RMODE_
+        // ROUTER; PKT_MAC means the peer is in switch mode and
+        // sent a full ethernet frame (no offset). We don't handle
+        // that. STUB(chunk-9): switch mode.
+        if record_type & PKT_MAC != 0 {
+            log::warn!(target: "tincd::net",
+                       "Received packet from {peer_name} with MAC header \
+                        (peer in switch mode?); STUB(chunk-9)");
+            return false;
+        }
+        // STUB(chunk-9): PKT_COMPRESSED (`:1109-1121`).
+        if record_type & PKT_COMPRESSED != 0 {
+            log::warn!(target: "tincd::net",
+                       "Received compressed packet from {peer_name}; \
+                        compression is STUB(chunk-9)");
+            return false;
+        }
+
+        // C `:1123`: `memcpy(DATA + offset, data, len)`. C `:1128-
+        // 1144`: synthesize the ethertype from the IP version nibble.
+        if body.is_empty() {
+            return false; // need byte 0 for the version nibble
+        }
+        let ethertype: u16 = match body[0] >> 4 {
+            4 => crate::packet::ETH_P_IP,
+            6 => 0x86DD, // ETH_P_IPV6
+            v => {
+                // C `:1141-1144`: `"Unknown IP version %d"`.
+                log::debug!(target: "tincd::net",
+                            "Unknown IP version {v} in packet from {peer_name}");
+                return false;
+            }
+        };
+        let mut frame = vec![0u8; OFFSET + body.len()];
+        // MACs stay zero (`set_etherheader` in `tinc-device` does
+        // the same; C `:1128` doesn't touch them — they're already
+        // zero from the `vpn_packet_t` zero-init).
+        frame[12..14].copy_from_slice(&ethertype.to_be_bytes());
+        frame[OFFSET..].copy_from_slice(body);
+
+        // STUB(chunk-9): `:1148-1150` `if(udppacket && len >
+        // maxrecentlen) maxrecentlen = len`. PMTU bookkeeping.
+
+        // C `:1152`: `receive_packet(from, &inpkt)` → (`:397-405`)
+        // `n->in_packets++; n->in_bytes += len; route(n, packet)`.
+        let len = frame.len() as u64;
+        let tunnel = self.tunnels.entry(peer).or_default();
+        tunnel.in_packets += 1;
+        tunnel.in_bytes += len;
+
+        // route() → `Forward{to: myself}` (we're the endpoint) →
+        // device.write. If route() says forward-to-someone-else,
+        // we're a relay — STUB(chunk-9): the C `route()` would
+        // call `send_packet(subnet->owner)` and we'd recurse into
+        // `send_sptps_packet` for THEM. The chunk-7 two-node mesh
+        // never hits that.
+        // DEFERRED(chunk-7-daemon): `route.c:648` source-loop check
+        // (`if(subnet->owner == source) drop`). With 2 nodes and
+        // /32 subnets, the destination subnet is never owned by
+        // the sender. The check matters for overlapping subnets.
+        self.route_packet(&mut frame)
+    }
+
+    /// `send_sptps_data` (`net_packet.c:965-1054`). The per-tunnel
+    /// SPTPS "send_data" callback. Two transports:
+    ///
+    /// 1. **Handshake records** (`type == SPTPS_HANDSHAKE`, `:974-
+    ///    996`): b64-encode, wrap in `ANS_KEY`, send via the meta-
+    ///    connection's SPTPS. The handshake of the SECOND SPTPS
+    ///    is transported by the FIRST. (`:992-994`: "We don't want
+    ///    intermediate nodes to switch to UDP to relay these
+    ///    packets"; ANS_KEY also lets us learn the reflexive UDP
+    ///    addr from relays — chunk-9.)
+    ///
+    /// 2. **Data records** (`:1001-1054`): build `[dst_id][src_id]
+    ///    [ciphertext]`, sendto(udp_sock).
+    ///
+    /// `to`/`from` are usually `peer`/`myself` (`send_sptps_data_
+    /// myself`, `:99-101`). The relay path (`:100`: `from != myself
+    /// `) is STUB(chunk-9).
+    fn send_sptps_data(
+        &mut self,
+        to_nid: NodeId,
+        to_name: &str,
+        record_type: u8,
+        ct: &[u8],
+    ) -> bool {
+        // C `:967`: `relay = (to->via != myself && ...) ? to->via
+        // : to->nexthop`. The static-relay path. With a 2-node mesh,
+        // `nexthop == via == to`. STUB(chunk-9): the full relay
+        // logic + `relay_supported` check.
+
+        if record_type == tinc_sptps::REC_HANDSHAKE {
+            // ─── TCP transport via ANS_KEY (`:974-996`)
+            // C `:996`: `send_request(to->nexthop->connection,
+            // "%d %s %s %s -1 -1 -1 %d", ANS_KEY, from->name,
+            // to->name, buf, to->incompression)`.
+            //
+            // `nexthop->connection`: read `last_routes[to]` for
+            // `nexthop`, then `nodes[nexthop_name].conn`. With
+            // direct neighbors, `nexthop == to` so `nodes[to_name]
+            // .conn` directly.
+            let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+                log::warn!(target: "tincd::net",
+                           "No meta connection toward {to_name} for handshake");
+                return false;
+            };
+            let Some(conn) = self.conns.get_mut(conn_id) else {
+                return false;
+            };
+            // C `:989`: `b64encode_tinc(data, buf, len)`.
+            let b64 = tinc_crypto::b64::encode(ct);
+            // C `:995`: `to->incompression = myself->incompression`.
+            // We don't do compression; 0.
+            // STUB(chunk-9): compression (`from->incompression`).
+            //
+            // The C format: `"%d %s %s %s -1 -1 -1 %d"`. The `-1 -1
+            // -1` are cipher/digest/maclength sentinels (the SPTPS
+            // path doesn't read them; `:549` `if(from->status.sptps)`
+            // branch only b64-decodes the `key` field). HOWEVER: the
+            // C `sscanf("%lu", "-1")` is glibc-permissive (wraps to
+            // ULONG_MAX). Our `AnsKey::parse` is strict (`u64::parse`
+            // rejects `-1`). For Rust↔Rust interop, send `0 0 0`
+            // instead. STUB(chunk-9-interop): when interop-testing
+            // with C tincd, loosen `AnsKey::parse` to accept the C's
+            // `-1` (or change `maclen` to `i64`).
+            return conn.send(format_args!(
+                "{} {} {} {} 0 0 0 0",
+                Request::AnsKey,
+                self.name,
+                to_name,
+                b64,
+            ));
+        }
+
+        // ─── UDP transport (`:1001-1054`)
+        // STUB(chunk-9): `tcponly` (`:970,974`), MTU-too-big
+        // fallback (`:974`: `origlen > relay->minmtu`). Both fall
+        // through to the TCP path (REQ_KEY/SPTPS_PACKET wrapping
+        // at `:998`). Chunk 7 always goes UDP.
+        //
+        // STUB(chunk-9): `send_sptps_tcppacket` (`:976-986`). The
+        // raw-TCP-relay path for nodes whose `connection->options
+        // >> 24 >= 7` (newer protocol minor).
+
+        // C `:1003-1006`: overhead = relay_supported ? 12 : 0. We
+        // ALWAYS prefix (our peers are all ≥1.1, `options >> 24
+        // >= 4`). C `:1012-1016`: direct ⇒ dst = nullid; else dst
+        // = to->id. With 2-node mesh, always direct.
+        // STUB(chunk-9): the non-direct case (`dst = to->id`).
+        let src_id = self.id6_table.id_of(self.myself).unwrap_or(NodeId6::NULL);
+        let mut wire = Vec::with_capacity(12 + ct.len());
+        wire.extend_from_slice(NodeId6::NULL.as_bytes()); // dst: direct
+        wire.extend_from_slice(src_id.as_bytes());
+        wire.extend_from_slice(ct);
+
+        // C `:1031-1040`: `choose_udp_address(relay, &sa, &sock)`.
+        // The C tries `n->address` (last confirmed), falls back to
+        // a random edge's address. For chunk 7: use `tunnels[to].
+        // udp_addr` (set by `BecameReachable` or by the first valid
+        // UDP packet from them). If unset, use `nodes[to].edge_addr`
+        // (the meta-conn-derived guess from `on_ack`).
+        // STUB(chunk-9): `choose_local_address` + `send_locally`
+        // (`:1034-1036`). The 1-in-3 randomization (`:758-762`).
+        let Some(addr) = self.choose_udp_address(to_nid, to_name) else {
+            log::debug!(target: "tincd::net",
+                        "No UDP address known for {to_name}; dropping");
+            return false;
+        };
+
+        // C `:1044`: `sendto(listen_socket[sock].udp.fd, buf, ...,
+        // sa, SALEN)`. We use `listeners[0]` always. STUB(chunk-9):
+        // `adapt_socket` (`:784`) picks the listener whose address
+        // family matches `sa`.
+        log::debug!(target: "tincd::net",
+                    "Sending {}-byte UDP packet to {to_name} ({addr})",
+                    wire.len());
+        let sockaddr = socket2::SockAddr::from(addr);
+        if let Some(l) = self.listeners.first() {
+            if let Err(e) = l.udp.send_to(&wire, &sockaddr) {
+                if e.kind() != io::ErrorKind::WouldBlock {
+                    // C `:1046-1051`: `if(sockmsgsize) reduce_mtu
+                    // else log`. STUB(chunk-9): EMSGSIZE →
+                    // reduce_mtu. For now: just log.
+                    log::warn!(target: "tincd::net",
+                               "Error sending UDP SPTPS packet to {to_name}: {e}");
+                }
+            }
+        }
+        false // UDP send doesn't touch any meta-conn outbuf
+    }
+
+    /// `to->nexthop->connection`. The meta connection for routing
+    /// REQ_KEY/ANS_KEY toward `to`. With direct neighbors, `nexthop
+    /// == to` so it's just `nodes[to_name].conn`. Transitives go
+    /// via the first hop's connection.
+    fn conn_for_nexthop(&self, to_nid: NodeId) -> Option<ConnId> {
+        // `last_routes[to_nid]` has `nexthop`. If unreachable
+        // (`None`), no path.
+        let nexthop = self
+            .last_routes
+            .get(to_nid.0 as usize)
+            .and_then(Option::as_ref)?
+            .nexthop;
+        // Reverse-lookup nexthop's name (graph slot → name string).
+        let nexthop_name = self.graph.node(nexthop)?.name.as_str();
+        // `NodeState.conn` for the nexthop.
+        self.nodes.get(nexthop_name)?.conn
+    }
+
+    /// `choose_udp_address` (`net_packet.c:744-800`), abridged.
+    /// Prefer the confirmed address; fall back to the edge address
+    /// from `on_ack` (the meta-conn peer addr with port rewritten
+    /// to their UDP port).
+    fn choose_udp_address(&self, to_nid: NodeId, to_name: &str) -> Option<SocketAddr> {
+        // C `:746-751`: `*sa = &n->address; if(udp_confirmed)
+        // return`. Our `udp_addr` is `n->address`.
+        if let Some(t) = self.tunnels.get(&to_nid) {
+            if let Some(addr) = t.udp_addr {
+                return Some(addr);
+            }
+        }
+        // C `:765-781`: pick a random edge's `reverse->address`.
+        // For chunk 7: just use `NodeState.edge_addr` (which IS
+        // the same thing for direct neighbors — the addr from the
+        // peer's ACK with port set to their UDP port).
+        self.nodes.get(to_name)?.edge_addr
+    }
+
+    /// io_set ReadWrite for ANY connection that has a nonempty
+    /// outbuf. Device-read / udp-recv paths can queue handshake
+    /// records on a meta-conn but don't have a `ConnId` in scope
+    /// to set io_set on. Sweep all conns. Per-packet hot path…
+    /// but `conns.len()` is tiny (one per direct peer + control).
+    /// STUB(chunk-10): track which ConnIds were touched, set those.
+    fn maybe_set_write_any(&mut self) {
+        let dirty: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| !c.outbuf.is_empty())
+            .map(|(id, _)| id)
+            .collect();
+        for id in dirty {
+            if let Some(&io_id) = self.conn_io.get(id) {
+                if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
+                    log::error!(target: "tincd::conn",
+                                "io_set failed for {id:?}: {e}");
+                    self.terminate(id);
                 }
             }
         }
@@ -1834,6 +2600,8 @@ impl Daemon {
                         Request::DelSubnet => self.on_del_subnet(id, body),
                         Request::AddEdge => self.on_add_edge(id, body),
                         Request::DelEdge => self.on_del_edge(id, body),
+                        Request::ReqKey => self.on_req_key(id, body),
+                        Request::AnsKey => self.on_ans_key(id, body),
                         _ => {
                             // KEY_CHANGED/REQ_KEY/ANS_KEY/PING/PONG
                             // etc — chunk 7/8. The gate passed
@@ -1886,7 +2654,468 @@ impl Daemon {
         // is "just learned this name, haven't run sssp yet".
         self.graph.set_reachable(id, false);
         self.node_ids.insert(name.to_owned(), id);
+        // C `node.c:126-131`: `node_add` computes the SHA-512
+        // prefix and indexes `node_id_tree`. UDP fast-path lookup.
+        self.id6_table.add(name, id);
         id
+    }
+
+    /// `send_req_key` (`protocol_key.c:114-135`) + `send_initial_
+    /// sptps_data` (`:103-112`). Start the per-tunnel SPTPS as
+    /// initiator and send the first handshake record (the KEX) via
+    /// REQ_KEY on the meta connection.
+    ///
+    /// The C splits this into two functions because of the callback
+    /// dance: `sptps_start` takes `send_initial_sptps_data` as the
+    /// callback, which gets fired re-entrantly with the KEX bytes.
+    /// Our `Sptps::start` returns `Vec<Output>` instead; we dispatch
+    /// the FIRST `Wire` here (it's the KEX, goes via REQ_KEY) and
+    /// any subsequent ones via `send_sptps_data` (they'd go via
+    /// ANS_KEY — but `start()` only emits one Wire so this is moot).
+    ///
+    /// C `:116-120`: `if(!node_read_ecdsa_public_key(to)) send REQ_
+    /// PUBKEY`. We REQUIRE the key in `hosts/{to}` (no on-the-fly
+    /// fetch); STUB(chunk-9).
+    ///
+    /// Returns the io_set signal (the REQ_KEY queued on a meta-conn).
+    fn send_req_key(&mut self, to_nid: NodeId) -> bool {
+        let Some(to_name) = self.graph.node(to_nid).map(|n| n.name.clone()) else {
+            return false;
+        };
+
+        // C `:116-120`: `node_read_ecdsa_public_key(to)`. Load from
+        // `hosts/{to_name}`. Same loader as `id_h` (`proto.rs:572`).
+        // Re-reads on every `send_req_key` (C does too; `node_t.
+        // ecdsa` is set lazily by `node_read_ecdsa_public_key` and
+        // `:116` checks it first — we don't cache, so we read every
+        // time. The 10-second debounce gates it; not hot).
+        let host_config = {
+            let host_file = self.confbase.join("hosts").join(&to_name);
+            let mut cfg = tinc_conf::Config::default();
+            if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+                cfg.merge(entries);
+            }
+            cfg
+        };
+        let Some(hiskey) =
+            crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &to_name)
+        else {
+            // C `:117-119`: `"No Ed25519 key known for %s"` then
+            // `send REQ_PUBKEY`. STUB(chunk-9): on-the-fly key fetch
+            // via REQ_PUBKEY/ANS_PUBKEY (`protocol_key.c:196-231`).
+            // For chunk 7: `hosts/{to}` MUST have the key.
+            log::warn!(target: "tincd::net",
+                       "No Ed25519 key known for {to_name}; cannot start tunnel");
+            return false;
+        };
+
+        // C `:122-124`: `snprintf(label, ..., "tinc UDP key
+        // expansion %s %s", myself->name, to->name)`. Initiator
+        // name first.
+        let label = make_udp_label(&self.name, &to_name);
+
+        // C `:126-131`: `sptps_stop; validkey=false; waitingforkey=
+        // true; last_req_key=now; sptps_start(..., true, true, ...)`.
+        // The two `true`s are `initiator` and `datagram`.
+        // `mykey` clone: `Sptps::start` consumes `SigningKey`; same
+        // blob-roundtrip as `handle_id_peer` (`proto.rs:663`).
+        let mykey = SigningKey::from_blob(&self.mykey.to_blob());
+        let (sptps, outs) = Sptps::start(
+            Role::Initiator,
+            Framing::Datagram,
+            mykey,
+            hiskey,
+            label,
+            16, // C `sptps_replaywin` default
+            &mut OsRng,
+        );
+        let now = self.timers.now();
+        let tunnel = self.tunnels.entry(to_nid).or_default();
+        tunnel.sptps = Some(Box::new(sptps));
+        tunnel.status.validkey = false;
+        tunnel.status.waitingforkey = true;
+        tunnel.status.sptps = true;
+        tunnel.last_req_key = Some(now);
+
+        // C `send_initial_sptps_data` (`:103-112`): the FIRST Wire
+        // from `start()` is the KEX. Goes via REQ_KEY (NOT ANS_KEY —
+        // C `:111`: `send_request(..., "%d %s %s %d %s", REQ_KEY,
+        // myself->name, to->name, REQ_KEY, buf)`). The DOUBLE
+        // `REQ_KEY` is intentional: outer is the request type,
+        // inner (the `reqno` extension) tells `req_key_ext_h` this
+        // is an SPTPS-init payload.
+        //
+        // After the first send, the C swaps the callback to `send_
+        // sptps_data_myself` (`:106`: `to->sptps.send_data = ...`)
+        // so subsequent Wires go via `send_sptps_data` (ANS_KEY for
+        // handshake, UDP for data). `start()` only emits ONE Wire
+        // (the initiator KEX), so for chunk 7 the loop has one
+        // iteration. The general dispatch handles subsequent
+        // outputs from `receive()`.
+        let mut nw = false;
+        let mut first = true;
+        for o in outs {
+            if let tinc_sptps::Output::Wire { bytes, .. } = o {
+                if first {
+                    first = false;
+                    let b64 = tinc_crypto::b64::encode(&bytes);
+                    let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+                        log::warn!(target: "tincd::net",
+                                   "No meta connection toward {to_name} for REQ_KEY");
+                        return false;
+                    };
+                    let Some(conn) = self.conns.get_mut(conn_id) else {
+                        return false;
+                    };
+                    // C `:111`: `"%d %s %s %d %s"`. ReqKeyExt::reqno
+                    // = REQ_KEY (15). The doubled-request-type is
+                    // `req_key_ext_h`'s SPTPS-init dispatch key.
+                    nw |= conn.send(format_args!(
+                        "{} {} {} {} {}",
+                        Request::ReqKey,
+                        self.name,
+                        to_name,
+                        Request::ReqKey as u8,
+                        b64,
+                    ));
+                } else {
+                    // Shouldn't fire from `start()` (one Wire only).
+                    // But if SPTPS internals change: route via the
+                    // general dispatch (ANS_KEY for handshake).
+                    nw |= self.send_sptps_data(to_nid, &to_name, tinc_sptps::REC_HANDSHAKE, &bytes);
+                }
+            }
+            // HandshakeDone/Record from start(): unreachable.
+        }
+        nw
+    }
+
+    /// `req_key_h` (`protocol_key.c:276-345`) + `req_key_ext_h`
+    /// `case REQ_KEY` (`:234-269`). The per-tunnel SPTPS responder
+    /// side.
+    ///
+    /// REQ_KEY is heavily overloaded (see `tinc-proto::msg::key`
+    /// doc). The chunk-7 path: `to == myself` AND `ext.reqno ==
+    /// REQ_KEY` ⇒ peer is initiating per-tunnel SPTPS. We start
+    /// ours as RESPONDER, feed their KEX into it, send our KEX +
+    /// SIG back via `send_sptps_data` (→ ANS_KEY).
+    ///
+    /// STUB(chunk-9):
+    /// - `to != myself` relay (`:320-344`).
+    /// - `REQ_PUBKEY`/`ANS_PUBKEY` (`:196-231`).
+    /// - `SPTPS_PACKET` (`:149-188`, TCP-tunneled data records).
+    /// - `send_udp_info`/`send_mtu_info` (`:144-146,267`).
+    #[allow(clippy::too_many_lines)] // C `req_key_h`+`req_key_ext_h`
+    // are 207 LOC together; the SPTPS-init branch alone is 36 LOC of
+    // dense state-machine. Splitting would scatter the C line refs.
+    fn on_req_key(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let body_str = std::str::from_utf8(body)
+            .map_err(|_| DispatchError::BadKey("non-UTF-8 REQ_KEY".into()))?;
+        let msg = ReqKey::parse(body_str)
+            .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // C `:293-299`: `from = lookup_node(from_name)`. NOT
+        // lookup_or_add: a REQ_KEY from an unknown node is an error
+        // (the meta-conn should have ADD_EDGE'd them first).
+        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
+            log::error!(target: "tincd::proto",
+                        "Got REQ_KEY from {conn_name} origin {} which is unknown",
+                        msg.from);
+            return Ok(false);
+        };
+        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
+            log::error!(target: "tincd::proto",
+                        "Got REQ_KEY from {conn_name} destination {} which is unknown",
+                        msg.to);
+            return Ok(false);
+        };
+
+        // C `:310-345`: `if(to == myself)` vs relay.
+        if to_nid != self.myself {
+            // C `:327-344`: relay. `send_request(to->nexthop->
+            // connection, "%s", request)` — forward verbatim.
+            // STUB(chunk-9): 2-node mesh has no relay.
+            log::debug!(target: "tincd::proto",
+                        "REQ_KEY relay {} → {}; STUB(chunk-9)",
+                        msg.from, msg.to);
+            return Ok(false);
+        }
+
+        // C `:312-315`: `if(!from->status.reachable) return true`.
+        if !self.graph.node(from_nid).is_some_and(|n| n.reachable) {
+            log::error!(target: "tincd::proto",
+                        "Got REQ_KEY from {conn_name} origin {} which is unreachable",
+                        msg.from);
+            return Ok(false);
+        }
+
+        // C `:318-320`: `if(experimental && reqno) req_key_ext_h()`.
+        // We're always-experimental (SPTPS-only). `ext` is the
+        // parsed `reqno [payload]` tail.
+        let Some(ext) = &msg.ext else {
+            // C `:323`: `send_ans_key(from)`. The legacy 3-token
+            // `"%d %s %s"` form (no extension). The legacy peer
+            // wants our session key in plaintext-hex. We don't do
+            // legacy. STUB(chunk-never).
+            log::error!(target: "tincd::proto",
+                        "Got legacy REQ_KEY from {} (no SPTPS extension)",
+                        msg.from);
+            return Ok(false);
+        };
+
+        // C `req_key_ext_h:139` `switch(reqno)`.
+        // `reqno` re-uses `request_t` enum values: REQ_KEY=15 is
+        // SPTPS-init, REQ_PUBKEY=19, ANS_PUBKEY=20, SPTPS_PACKET=21.
+        if ext.reqno != Request::ReqKey as i32 {
+            // STUB(chunk-9): REQ_PUBKEY/ANS_PUBKEY (`:196-231`),
+            // SPTPS_PACKET (`:149-188`). The latter is the TCP-
+            // tunnel-data path (when UDP is blocked). C `:270`:
+            // `default: "Unknown extended REQ_KEY" return true`.
+            log::warn!(target: "tincd::proto",
+                       "Got REQ_KEY ext reqno={} from {} — STUB(chunk-9)",
+                       ext.reqno, msg.from);
+            return Ok(false);
+        }
+
+        // ─── case REQ_KEY (`:234-269`): SPTPS responder start.
+        // C `:235-239`: `if(!node_read_ecdsa_public_key(from))
+        // send REQ_PUBKEY`. Same loader as send_req_key.
+        let host_config = {
+            let host_file = self.confbase.join("hosts").join(&msg.from);
+            let mut cfg = tinc_conf::Config::default();
+            if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+                cfg.merge(entries);
+            }
+            cfg
+        };
+        let Some(hiskey) =
+            crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &msg.from)
+        else {
+            // STUB(chunk-9): `:236-238` `send REQ_PUBKEY`.
+            log::warn!(target: "tincd::proto",
+                       "No Ed25519 key known for {}; cannot start tunnel",
+                       msg.from);
+            return Ok(false);
+        };
+
+        // C `:241-243`: `if(from->sptps.label) "Got REQ_KEY while
+        // we already started a SPTPS session!"`. The peer is re-
+        // initiating (their previous attempt timed out, or they
+        // restarted). C just logs and continues (`sptps_stop` at
+        // `:261` resets); we match.
+        if self
+            .tunnels
+            .get(&from_nid)
+            .is_some_and(|t| t.sptps.is_some())
+        {
+            log::debug!(target: "tincd::proto",
+                        "Got REQ_KEY from {} while SPTPS already started; restarting",
+                        msg.from);
+        }
+
+        // C `:245-254`: b64decode the payload.
+        let Some(payload) = ext.payload.as_deref() else {
+            log::error!(target: "tincd::proto",
+                        "Got bad REQ_SPTPS_START from {}: no payload", msg.from);
+            return Ok(false);
+        };
+        let Some(kex_bytes) = tinc_crypto::b64::decode(payload) else {
+            log::error!(target: "tincd::proto",
+                        "Got bad REQ_SPTPS_START from {}: invalid SPTPS data",
+                        msg.from);
+            return Ok(false);
+        };
+
+        // C `:256-263`: `snprintf(label, ..., from->name, myself->
+        // name)` then `sptps_stop; validkey=false; waitingforkey=
+        // true; sptps_start(..., false, true, ...)`. Note arg order:
+        // INITIATOR's name first — same label both sides. `false,
+        // true` = responder, datagram.
+        let label = make_udp_label(&msg.from, &self.name);
+        let mykey = SigningKey::from_blob(&self.mykey.to_blob());
+        let (mut sptps, init_outs) = Sptps::start(
+            Role::Responder,
+            Framing::Datagram,
+            mykey,
+            hiskey,
+            label,
+            16,
+            &mut OsRng,
+        );
+
+        // C `:264`: `sptps_receive_data(&from->sptps, buf, len)`.
+        // Feed their KEX. This produces our KEX + SIG (responder
+        // sends both after receiving initiator's KEX) — those go
+        // via `send_sptps_data` → ANS_KEY.
+        let recv_result = sptps.receive(&kex_bytes, &mut OsRng);
+
+        // Stash the SPTPS BEFORE dispatching the outputs (the
+        // dispatch may call `send_sptps_data` which doesn't read
+        // it, but be safe).
+        let now = self.timers.now();
+        let tunnel = self.tunnels.entry(from_nid).or_default();
+        tunnel.sptps = Some(Box::new(sptps));
+        tunnel.status.validkey = false;
+        tunnel.status.waitingforkey = true;
+        tunnel.status.sptps = true;
+        tunnel.last_req_key = Some(now);
+
+        // STUB(chunk-9): `:267` `send_mtu_info(myself, from, MTU)`.
+
+        // Dispatch: init_outs (responder's `start()` KEX, but
+        // datagram-mode responder ALSO emits a KEX from `start()`
+        // — wait, no: re-read state.rs. `start()` always sends KEX
+        // (`send_kex` at `:378`). For datagram-responder that goes
+        // via `send_sptps_data` (ANS_KEY). C does this too: `sptps_
+        // start(..., send_sptps_data_myself, ...)` at `:263` means
+        // the responder's KEX immediately fires the callback.
+        // BUT C also has the initiator's `send_initial_sptps_data`
+        // special-case for the FIRST Wire — the responder doesn't
+        // (`:263` uses `send_sptps_data_myself` not the init one).
+        // So responder KEX goes via ANS_KEY straight away.)
+        //
+        // recv_outs has the responder's SIG (from `receive_kex` →
+        // `send_sig`, but only initiator-side... no, re-read:
+        // `receive_kex` only sends SIG `if(is_initiator)`. So
+        // responder's SIG comes later, from `receive_sig`. The
+        // recv here is the initiator's KEX; responder stashes it
+        // and that's all. recv_outs is empty.)
+        //
+        // ACTUAL flow:
+        //   responder start() → KEX → ANS_KEY (init_outs)
+        //   responder receive(init's KEX) → stash, no output
+        //   [initiator gets responder's KEX via ans_key_h]
+        //   [initiator receive() → sends SIG via ANS_KEY]
+        //   responder receive(init's SIG) → send own SIG +
+        //     HandshakeDone (`receive_sig:684-695` responder branch)
+        let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, init_outs);
+        match recv_result {
+            Ok((_consumed, recv_outs)) => {
+                nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs);
+            }
+            Err(e) => {
+                log::error!(target: "tincd::proto",
+                            "Failed to decode REQ_KEY SPTPS data from {}: {e:?}",
+                            msg.from);
+                // C `:249`: returns true (don't drop conn). We match.
+            }
+        }
+        Ok(nw)
+    }
+
+    /// `ans_key_h` (`protocol_key.c:420-648`), SPTPS branch only
+    /// (`:549-581`). The other end of the per-tunnel handshake:
+    /// b64-decode the key field, feed it to `tunnels[from].sptps`.
+    ///
+    /// The legacy branch (`!from->status.sptps`, `:585-648`) is
+    /// the OpenSSL cipher/digest negotiation. STUB(chunk-never):
+    /// we're SPTPS-only.
+    ///
+    /// STUB(chunk-9):
+    /// - `to != myself` relay + reflexive-addr append (`:462-482`).
+    /// - compression-level check (`:499-545`).
+    /// - `if(validkey) update_node_udp(reflexive)` (`:568-576`).
+    /// - `send_mtu_info` (`:578`).
+    fn on_ans_key(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
+        let body_str = std::str::from_utf8(body)
+            .map_err(|_| DispatchError::BadKey("non-UTF-8 ANS_KEY".into()))?;
+        let msg = AnsKey::parse(body_str)
+            .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
+
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .map_or("<gone>", |c| c.name.as_str())
+            .to_owned();
+
+        // C `:444-460`: `from = lookup_node`; `to = lookup_node`.
+        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
+            log::error!(target: "tincd::proto",
+                        "Got ANS_KEY from {conn_name} origin {} which is unknown",
+                        msg.from);
+            return Ok(false);
+        };
+        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
+            log::error!(target: "tincd::proto",
+                        "Got ANS_KEY from {conn_name} destination {} which is unknown",
+                        msg.to);
+            return Ok(false);
+        };
+
+        // C `:462-484`: `if(to != myself)` relay. STUB(chunk-9).
+        if to_nid != self.myself {
+            log::debug!(target: "tincd::proto",
+                        "ANS_KEY relay {} → {}; STUB(chunk-9)",
+                        msg.from, msg.to);
+            return Ok(false);
+        }
+
+        // STUB(chunk-9): `:499-545` compression-level check. We
+        // don't compress; ignore the field.
+
+        // C `:549`: `if(from->status.sptps)`. Always true for us
+        // (no legacy). The `key` field is the b64'd SPTPS
+        // handshake record.
+        let Some(hs_bytes) = tinc_crypto::b64::decode(&msg.key) else {
+            log::error!(target: "tincd::proto",
+                        "Got bad ANS_KEY from {}: invalid SPTPS data", msg.from);
+            return Ok(false);
+        };
+
+        // C `:553`: `sptps_receive_data(&from->sptps, buf, len)`.
+        // The SPTPS state machine MUST already exist (we sent
+        // REQ_KEY first; `send_req_key` set `tunnel.sptps`).
+        let Some(sptps) = self
+            .tunnels
+            .get_mut(&from_nid)
+            .and_then(|t| t.sptps.as_deref_mut())
+        else {
+            // C `:553` would deref a NULL `from->sptps.state`.
+            // The C reaches `sptps_receive_data` with a zeroed
+            // struct → returns false → hits the restart logic
+            // at `:556-563`. We're safer: log + restart.
+            log::warn!(target: "tincd::proto",
+                       "Got ANS_KEY from {} but no SPTPS state; restarting",
+                       msg.from);
+            return Ok(self.send_req_key(from_nid));
+        };
+
+        let result = sptps.receive(&hs_bytes, &mut OsRng);
+        let outs = match result {
+            Ok((_consumed, outs)) => outs,
+            Err(e) => {
+                // C `:555-563`: "tunnel stuck" restart logic. Gate
+                // on `last_req_key + 10 < now`.
+                log::warn!(target: "tincd::proto",
+                           "Failed to decode ANS_KEY SPTPS data from {}: {e:?}; restarting",
+                           msg.from);
+                let now = self.timers.now();
+                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                    t.last_req_key
+                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+                });
+                if gate_ok {
+                    return Ok(self.send_req_key(from_nid));
+                }
+                return Ok(false);
+            }
+        };
+
+        // STUB(chunk-9): `:568-576` `if(validkey && *address)
+        // update_node_udp(reflexive_addr)`. The relay-appended
+        // addr/port lets us learn our NAT-public address.
+        // STUB(chunk-9): `:578` `send_mtu_info`.
+
+        // Dispatch. May contain `HandshakeDone` (→ set validkey,
+        // log "successful") and/or `Wire` (next handshake step,
+        // → ANS_KEY back).
+        Ok(self.dispatch_tunnel_outputs(from_nid, &msg.from, outs))
     }
 
     /// Dedup gate for flooded messages. `seen_request` (`protocol.
@@ -2169,7 +3398,7 @@ impl Daemon {
         // to flush. Lands when the cache does.
         for t in transitions {
             match t {
-                Transition::BecameReachable { node, via } => {
+                Transition::BecameReachable { node, via: via_nid } => {
                     // `graph.c:261-262`: INFO. Look up the name —
                     // graph.node() is `Some` (just came from
                     // node_ids() inside diff_reachability).
@@ -2179,15 +3408,36 @@ impl Daemon {
                         .map_or("<unknown>", |n| n.name.as_str());
                     let via_name = self
                         .graph
-                        .node(via)
+                        .node(via_nid)
                         .map_or("<unknown>", |n| n.name.as_str());
                     log::info!(target: "tincd::graph",
                                "Node {name} became reachable (via {via_name})");
                     // STUB(chunk-8): execute_script("host-up")
                     // (`graph.c:284-287`).
-                    // STUB(chunk-7): update_node_udp — the SET
-                    // path is sssp itself (`graph.c:201`); the
-                    // CLEAR path is `:297` on unreachable.
+
+                    // C `graph.c:201`: `update_node_udp(n,
+                    // &e->reverse->address)`. The SSSP `prevedge`'s
+                    // reverse address is the "how to reach this
+                    // node via UDP" guess. For chunk 7: use the
+                    // edge addr from `on_ack` (`NodeState.edge_addr`,
+                    // already port-rewritten to UDP). With direct
+                    // neighbors, that's the right answer; transitives
+                    // would need the prevedge-walk (chunk 9).
+                    // STUB(chunk-9): full `update_node_udp` (also
+                    // re-indexes `node_udp_tree` for the addr-based
+                    // lookup at `net_packet.c:1728`).
+                    let name_owned = name.to_owned();
+                    if let Some(addr) = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr) {
+                        let tunnel = self.tunnels.entry(node).or_default();
+                        tunnel.udp_addr = Some(addr);
+                    }
+                    // C `node.c:58-59` (`new_node`): `n->status.
+                    // sptps` is set by `add_edge_h` (`protocol_edge.
+                    // c:163-165`: `if(edge->options >> 24 >= 2)
+                    // status.sptps = true`). For chunk 7: always
+                    // true (no legacy peers). Set it here so `dump
+                    // nodes` shows bit 6.
+                    self.tunnels.entry(node).or_default().status.sptps = true;
                 }
                 Transition::BecameUnreachable { node } => {
                     let name = self
@@ -2198,10 +3448,16 @@ impl Daemon {
                                "Node {name} became unreachable");
                     // STUB(chunk-8): execute_script("host-down")
                     // (`graph.c:284-287`).
-                    // STUB(chunk-7): sptps_stop(&n->sptps), reset
-                    // mtuprobes/minmtu/maxmtu, kill mtu timer
-                    // (`graph.c:259-271`). update_node_udp(NULL)
-                    // (`graph.c:297`).
+
+                    // C `graph.c:256-297`: sptps_stop, reset mtu
+                    // probe state, clear status bits, clear UDP
+                    // addr. `TunnelState::reset_unreachable` IS
+                    // that whole block. STUB(chunk-9): mtu timer
+                    // kill (`timeout_del(&n->udp_ping_timeout)`,
+                    // `:270`) — the timer doesn't exist yet.
+                    if let Some(tunnel) = self.tunnels.get_mut(&node) {
+                        tunnel.reset_unreachable();
+                    }
                 }
             }
         }
@@ -2232,11 +3488,6 @@ impl Daemon {
     /// reachable` (written by `run_graph_and_log`'s diff). The CLI's
     /// `dump reachable nodes` filter (`tincctl.c:1306`) keys on it.
     fn dump_nodes_rows(&self) -> Vec<String> {
-        /// `node.h:38`: `bool reachable: 1;` is field 4 (after
-        /// `unused_active`, `validkey`, `waitingforkey`, `visited`).
-        /// GCC/Clang on the targets we care about pack LSB-first.
-        const STATUS_REACHABLE: u32 = 1 << 4;
-
         let mut rows = Vec::new();
         for nid in self.graph.node_ids() {
             let Some(node) = self.graph.node(nid) else {
@@ -2275,11 +3526,21 @@ impl Daemon {
                 .and_then(Option::as_ref);
             let options = route.map_or(0, |r| r.options);
 
-            // C `:217`: `n->status.value`. Only `reachable` is real
-            // for now. C also has `visited` set after sssp (it's
-            // never cleared between calls, `graph.c:131` clears at
-            // the START of the next sssp); chunk-5 doesn't bother.
-            let status = if node.reachable { STATUS_REACHABLE } else { 0 };
+            // C `:217`: `n->status.value`. `TunnelStatus::as_u32`
+            // packs the bits we track (validkey, waitingforkey,
+            // sptps, udp_confirmed, udppacket); `reachable` is the
+            // param. `myself`'s status: just `reachable` (we don't
+            // tunnel to ourselves). C `:217` reads `n->status.value`
+            // which for `myself` is whatever `xzalloc` left; the C
+            // `setup_myself:1050` sets `reachable=true` and that's
+            // it.
+            let tunnel = self.tunnels.get(&nid);
+            let status = tunnel.map_or_else(
+                || {
+                    if node.reachable { 1 << 4 } else { 0 }
+                },
+                |t| t.status.as_u32(node.reachable),
+            );
 
             // C `:218`: `n->nexthop ? n->nexthop->name : "-"`. Read
             // from `last_routes`. Unreachable → `"-"` (C: `nexthop`
@@ -2307,7 +3568,7 @@ impl Daemon {
                 Request::Control as u8,       // %d CONTROL
                 crate::proto::REQ_DUMP_NODES, // %d
                 name,                         // %s
-                "000000000000",               // %s id (chunk-7 STUB)
+                self.id6_table.id_of(nid).unwrap_or(NodeId6::NULL), // %s id
                 hostname,                     // %s ("HOST port PORT")
                 0,                            // %d cipher (DISABLE_LEGACY)
                 0,                            // %d digest
@@ -2318,15 +3579,15 @@ impl Daemon {
                 nexthop,                      // %s
                 via,                          // %s
                 distance,                     // %d
-                0,                            // %d mtu (chunk-9)
-                0,                            // %d minmtu
-                0,                            // %d maxmtu
+                tunnel.map_or(0, |t| t.mtu),  // %d mtu
+                tunnel.map_or(0, |t| t.minmtu), // %d minmtu
+                tunnel.map_or(0, |t| t.maxmtu), // %d maxmtu
                 0,                            // %ld last_state_change
                 -1,                           // %d udp_ping_rtt
-                0,                            // %PRIu64 in_packets
-                0,                            // in_bytes
-                0,                            // out_packets
-                0,                            // out_bytes
+                tunnel.map_or(0, |t| t.in_packets), // %PRIu64
+                tunnel.map_or(0, |t| t.in_bytes),
+                tunnel.map_or(0, |t| t.out_packets),
+                tunnel.map_or(0, |t| t.out_bytes),
             ));
         }
         rows
@@ -2965,15 +4226,34 @@ impl Daemon {
         // reverse without an `edge_addrs` entry; `dump_edges`
         // formats missing entries as `"unknown port unknown"`
         // (the C default for `n->hostname == NULL`, `node.c:211`).
-        // STUB(chunk-7): getsockname for local_address (`ack_h:1040-1045`). Connection has fd: OwnedFd; need a local_addr() accessor or socket2 conversion. Five lines, lands with the per-tunnel SPTPS bootstrap (which also touches the conn socket layer).
+        // C `ack_h:1040-1045`: `getsockname` → `local_address`
+        // with port rewritten to `myport.udp`. The `Connection.fd`
+        // is an `OwnedFd`; `socket2::SockRef::from(&OwnedFd)` is
+        // the non-owning wrapper for the `local_addr()` call.
+        let local_addr = self.conns.get(id).and_then(|c| {
+            let sockref = socket2::SockRef::from(c.owned_fd());
+            sockref.local_addr().ok().and_then(|sa| sa.as_socket())
+        });
         if let Some(ea) = edge_addr {
-            let unspec = AddrStr::new(AddrStr::UNSPEC).expect("literal");
             // `Ipv6Addr::Display` doesn't bracket (matches
             // `getnameinfo NI_NUMERICHOST`); same as `fmt_addr`.
             let addr = AddrStr::new(ea.ip().to_string()).expect("numeric IP is whitespace-free");
             let port = AddrStr::new(ea.port().to_string()).expect("numeric");
-            self.edge_addrs
-                .insert(fwd_eid, (addr, port, unspec.clone(), unspec));
+            // C `:1042-1045`: `sockaddr_setport(&local, myport.udp)`.
+            // The local addr is the OS-assigned source-addr of the
+            // TCP socket; rewrite the port to OUR udp port (the peer
+            // sends UDP back to that port, not the ephemeral TCP one).
+            let (la, lp) = if let Some(mut local) = local_addr {
+                local.set_port(self.my_udp_port);
+                (
+                    AddrStr::new(local.ip().to_string()).expect("numeric"),
+                    AddrStr::new(local.port().to_string()).expect("numeric"),
+                )
+            } else {
+                let unspec = AddrStr::new(AddrStr::UNSPEC).expect("literal");
+                (unspec.clone(), unspec)
+            };
+            self.edge_addrs.insert(fwd_eid, (addr, port, la, lp));
         }
         let _ = rev_eid; // entry intentionally absent; see above
 

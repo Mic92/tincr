@@ -471,6 +471,14 @@ impl Connection {
         self.fd.as_raw_fd()
     }
 
+    /// Borrowed `OwnedFd` for `socket2::SockRef::from`. The
+    /// `getsockname` call in `on_ack` (`ack_h:1040-1045`) needs a
+    /// type that impls `AsFd`; `&OwnedFd` does.
+    #[must_use]
+    pub fn owned_fd(&self) -> &OwnedFd {
+        &self.fd
+    }
+
     /// `c->status.value` for `dump_connections` (`connection.c:
     /// 171`). C union punning: `union { struct { bool x:1; ... };
     /// uint32_t value; }`. GCC packs LSB-first, so the Nth

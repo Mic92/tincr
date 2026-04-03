@@ -166,6 +166,9 @@ pub enum DispatchError {
     /// or `from == to` (`protocol_edge.c:80-92`). C: `"Got bad %s
     /// from %s (%s)"`.
     BadEdge(String),
+    /// `req_key_h`/`ans_key_h`: parse failed (`protocol_key.c:
+    /// 282-287`, `:431-435`). C: `"Got bad %s from %s (%s)"`.
+    BadKey(String),
     /// `control_h`: unknown subtype. C `control.c:144` sends
     /// `REQ_INVALID` and returns `true` (connection stays). We do
     /// the same — this is NOT a `Drop`, see `handle_control`.
