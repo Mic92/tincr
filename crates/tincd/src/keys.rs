@@ -1,39 +1,19 @@
 //! `keys.c:108-213` — load Ed25519 keys.
 //!
-//! ## Why this file exists (the dup-don't-factor decision)
+//! `read_ecdsa_private_key`: resolves path from config, warns on
+//! insecure perms, hints "run `tinc generate-ed25519-keys`" on
+//! ENOENT. `read_ecdsa_public_key`: tries three sources (inline
+//! b64, file path, `hosts/NAME` PEM block).
 //!
-//! `tinc-tools/keypair.rs` already has `read_private`/`read_public` —
-//! they're the bare PEM-load. But `keys.c` does MORE:
+//! The bare 12-line PEM-read is duplicated from `tinc-tools/
+//! keypair.rs`. Same dup-don't-factor call as `read_fd`/`write_fd`:
+//! avoids depending on the whole CLI crate. Factor trigger is "a
+//! third crate needs this" → `tinc-conf`.
 //!
-//! - **`read_ecdsa_private_key`**: resolves the path from config
-//!   (`Ed25519PrivateKeyFile`, default `confbase/ed25519_key.priv`),
-//!   warns on insecure permissions (mode bits set outside `0100700`),
-//!   and on `ENOENT` prints the helpful "run `tinc generate-ed25519-
-//!   keys`" hint.
-//!
-//! - **`read_ecdsa_public_key`**: tries THREE sources in order:
-//!   `Ed25519PublicKey` config var (b64 inline), `Ed25519PublicKeyFile`
-//!   path, `hosts/NAME` PEM block. The first two come from `hosts/NAME`'s
-//!   parsed config, the third re-reads the SAME file as raw PEM.
-//!
-//! The path-resolution and source-selection are tincd-specific logic
-//! that doesn't belong in `tinc-tools`. The bare 12-line PEM-read is
-//! duplicated here. Same call as the six `read_fd`/`write_fd` instances:
-//! the dup buys us not depending on `tinc-tools` (which has the whole
-//! CLI command tree) just for one short function. The trigger to factor
-//! is "a third crate needs this" — at that point it goes in `tinc-conf`
-//! next to `read_pem`.
-//!
-//! ## C-is-WRONG #7: insecure-perms check is `& ~0100700`
-//!
-//! `keys.c:141`: `if(s.st_mode & ~0100700u)` — flags ANY bit outside
-//! `S_IFREG | S_IRWXU`. This means a *symlink* (`S_IFLNK = 0120000`)
-//! to a 600 file warns. So does a setuid bit (which would be weird,
-//! but not actually insecure for a private key file). The intent is
-//! "no group/other read", which is `& 0o077`. The C is overcautious
-//! to the point of false positives. We port the bug — the warning is
-//! cosmetic, and a 1.1 user grepping logs for the C message expects
-//! the same trigger.
+//! C-is-WRONG #7: `keys.c:141` checks `& ~0100700u`, flagging
+//! symlinks and setuid bits. Intent is `& 0o077` (no group/other
+//! read). We port the bug; the warning is cosmetic and 1.1 users
+//! grep for the C message.
 
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
@@ -201,44 +181,20 @@ pub fn read_ecdsa_private_key(
 
 // Peer public key (`keys.c:165-213`)
 
-/// `read_ecdsa_public_key` (`keys.c:165-213`).
+/// `read_ecdsa_public_key` (`keys.c:165-213`). Three sources in order:
 ///
-/// THREE sources tried in order:
+/// 1. `Ed25519PublicKey` inline b64 (C `:179-184`, `tinc init` writes)
+/// 2. `Ed25519PublicKeyFile` explicit path (C `:186-189`)
+/// 3. `hosts/NAME` PEM block (C `:189`, `cmd_exchange` writes)
 ///
-/// 1. **`Ed25519PublicKey = <43 b64 chars>`** in `host_config` —
-///    inline. C `:179-184`. The simplest case: the user pasted the
-///    key as a config var. `tinc init` writes this.
+/// `host_config` is the peer's; caller already loaded it (C `:170-
+/// 177` loads conditionally; `id_h:424` already did). Returns `None`
+/// on failure: `id_h:437-439` treats it as "downgrade to legacy"
+/// (then rejected at `:443-447`).
 ///
-/// 2. **`Ed25519PublicKeyFile = /path/to/key.pub`** — explicit file.
-///    C `:186-189` falls through to the default if not set.
-///
-/// 3. **`hosts/NAME`** — PEM block at the end of the host config
-///    file. C `:189` default path. The `tinc-tools::cmd_exchange`
-///    output puts it here: parseable config lines followed by a
-///    `-----BEGIN ED25519 PUBLIC KEY-----` block. `read_pem` skips
-///    everything until it finds the BEGIN line.
-///
-/// `host_config` is the *peer's* config (already loaded by the
-/// caller, who did `read_host_config(peer_name)`). C `:170-177` does
-/// the load itself if the tree is empty — `id_h:424` already loaded
-/// it, so we take it as a parameter.
-///
-/// Returns `None` on any failure. C returns NULL and logs at ERR;
-/// we log too. `id_h` doesn't error on this — `:437-439` treats
-/// missing key as "downgrade to legacy" (which we then reject at
-/// `:443-447`). So `None` here ultimately drops the connection, but
-/// via the rollback check, not a direct error.
-///
-/// # The source-order subtlety
-///
-/// Source 1 is the b64 config var. Source 3 reads the SAME FILE as
-/// raw PEM. If `hosts/NAME` has BOTH (a `Ed25519PublicKey = ...`
-/// line AND a `-----BEGIN-----` block — `tinc set` adds the var,
-/// `tinc import` adds the block), source 1 wins. The C is explicit:
-/// `:179-184` returns early on var hit. The PEM block goes unread.
-/// If the two disagree (paste error), the var wins silently. There's
-/// no consistency check. Ported faithfully — adding one would change
-/// behavior for configs that currently work.
+/// Source-order subtlety: if `hosts/NAME` has BOTH the var and a
+/// PEM block, the var wins silently (C `:179-184` returns early).
+/// No consistency check; ported faithfully.
 #[must_use]
 pub fn read_ecdsa_public_key(
     host_config: &Config,

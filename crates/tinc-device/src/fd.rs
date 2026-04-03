@@ -1,70 +1,28 @@
 //! `fd_device.c` (247 LOC) — the Android tun fd backend.
 //!
-//! ──────────── Why this exists ──────────────────────────────────────
+//! Android's `VpnService` opens the tun fd in the Java process and
+//! hands it over. Two transports: fd inheritance (2017, `7a54fe5e`,
+//! `Device = 5`) and SCM_RIGHTS over AF_UNIX (2020, `f5223937`,
+//! `Device = /path` or `@abstract`). C dispatches on `sscanf("%d")`;
+//! we make the union explicit as `FdSource`.
 //!
-//! Android's `VpnService` opens the tun fd inside the Java process
-//! (with the right permissions), then hands it to the native daemon.
-//! Two transport mechanisms, two eras of Android security policy:
-//!
-//!   2017 (commit `7a54fe5e`): leak the fd via `dup()` + `exec()`
-//!   inheritance. `Device = 5` config string IS the fd number.
-//!
-//!   2020 (commit `f5223937`): "New restrictions on the Android OS
-//!   forbid direct leaking of file descriptors." The Java side
-//!   sends the fd over a pre-agreed AF_UNIX socket using SCM_
-//!   RIGHTS. `Device = /path/to/socket` or `Device = @abstract`.
-//!
-//! The C dispatches on `sscanf("%d") == 1` — if the config string
-//! parses as an integer, it IS the integer; otherwise it's a path.
-//! The string is the union type. We make the union explicit:
-//! `FdSource::{Inherited, UnixSocket}`. The daemon parses the
-//! config string into one or the other; this crate doesn't see
-//! strings.
-//!
-//! ──────────── The +14 trick — the +10's cousin ─────────────────────
-//!
-//! `linux/device.c` reads at +10 because the kernel writes a 4-
-//! byte `tun_pi` prefix. `fd_device.c` reads at +14 (`ETH_HLEN`)
-//! because Android's `VpnService` writes RAW IP packets — no
-//! prefix at all. Same goal (route.c expects ethernet at offset
-//! 0), different gap.
+//! ## The +14 offset (`offset = ETH_HLEN − 0`)
 //!
 //! ```text
-//!   what kernel TUN writes:  tun_pi(4) + IP packet
-//!   what VpnService writes:             IP packet
-//!
 //!   linux:  read at +10, tun_pi.proto lands at +12 (ethertype slot)
 //!   fd:     read at +14, IP packet starts at +14 (after ether header)
 //! ```
 //!
-//! `linux` gets ethertype FOR FREE (the kernel fills `tun_pi.
-//! proto`). `fd` has to SYNTHESIZE it: `(ip[0] >> 4)` is the IP
-//! version nibble — `4` → `ETH_P_IP`, `6` → `ETH_P_IPV6`. Then
-//! write the synthesized ethertype to bytes 12-13. The `set_
-//! etherheader` fn (`fd_device.c:204-208`) is the synthesis.
+//! `VpnService` writes raw IP with no prefix, so we synthesize the
+//! ethertype from the IP version nibble (`set_etherheader`). Testable
+//! with `pipe()` — no kernel driver layout to fake.
 //!
-//! Unlike linux, this is TESTABLE: a `pipe()` can feed raw IP
-//! bytes; no kernel driver layout to fake. The `from_ip_nibble`
-//! tests below cover the version dispatch.
+//! ## nix earns its dep here
 //!
-//! ──────────── nix earns its dep here ───────────────────────────────
-//!
-//! `linux.rs` BYPASSED `nix::ioctl_write_ptr_bad!` because the
-//! TUNSETIFF encoding lies. THIS file USES `nix::sys::socket::
-//! recvmsg` because the C does ~40 LOC of `cmsghdr`/`CMSG_FIRST-
-//! HDR`/`CMSG_DATA` boilerplate (`fd_device.c:39-93`) AND has a
-//! NULL-deref bug at line 73 (`CMSG_FIRSTHDR` can return NULL;
-//! the C dereferences `cmsgptr->cmsg_level` without checking).
-//! nix's `ControlMessageOwned::ScmRights(Vec<RawFd>)` iterator
-//! handles both correctly.
-//!
-//! The unsafe-shim count goes to four — but the per-shim "use the
-//! macro?" decision DIVERGES. #3 (TUNSETIFF) bypassed; #4 (SCM_
-//! RIGHTS) uses. The decision criterion: does the wrapper match
-//! the kernel's actual contract? TUNSETIFF: no (encoding lies).
-//! recvmsg+SCM_RIGHTS: yes (POSIX-standard, no encoding lies, nix
-//! tested). The plan's "don't pattern-match on tui.rs" warning
-//! generalizes: don't pattern-match on linux.rs either.
+//! Uses `nix::sys::socket::recvmsg` for SCM_RIGHTS: the C does ~40
+//! LOC of `cmsghdr` boilerplate and has a NULL-deref bug at
+//! `fd_device.c:73`. Shim #4 uses the wrapper (POSIX-clean, no
+//! encoding lies), unlike #3 TUNSETIFF which bypassed it.
 
 #![allow(clippy::doc_markdown)]
 
@@ -77,26 +35,11 @@ use std::path::Path;
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode};
 
-// (Ethernet constants hoisted to `crate::ether` when BSD became
-// the second consumer. See `ether.rs` doc for the factoring
-// rationale: RFC constants don't vary; the `cfg`-boundary rule
-// doesn't apply because there's no `cfg`.)
-
 // FdSource — the union type the C string dispatch implies
 
 /// The two ways the fd reaches us. C `setup_device` (`:163-166`)
-/// dispatches on `sscanf(device, "%d") == 1`: integer-parsable →
-/// inherited fd, else → AF_UNIX path.
-///
-/// The string-to-variant parse is the DAEMON's job (config layer).
-/// This crate gets the resolved variant. The C couldn't separate
-/// (it has one `device` string global); we can.
-///
-/// Why a separate type, not `Option<PathBuf>` with `None` meaning
-/// inherited? Because `FdSource::Inherited(5)` carries WHICH fd.
-/// `Option<PathBuf> = None` would mean "inherited, but you have
-/// to look up the number elsewhere." Carrying it here keeps the
-/// open() signature self-contained.
+/// dispatches on `sscanf(device, "%d") == 1`. The daemon parses
+/// the config string; we get the resolved variant.
 #[derive(Debug)]
 pub enum FdSource {
     /// `Device = 5` mode (2017). The Java parent process did
@@ -108,79 +51,37 @@ pub enum FdSource {
     /// inheritance across exec for tun fds.
     Inherited(RawFd),
 
-    /// `Device = /path` mode (2020). The Java side listens on
-    /// the socket; we connect; it `sendmsg`s the fd via
-    /// SCM_RIGHTS; we `recvmsg`. The kernel atomically dups
-    /// the fd into our process (our fd number is OURS, the
-    /// Java side's number is theirs).
-    ///
-    /// `@` prefix → abstract namespace (Linux-only; the path
-    /// doesn't exist on disk; survives chroot; cleaned up
-    /// when the last socket closes). Android uses abstract
-    /// sockets to avoid filesystem-permission hassles.
+    /// `Device = /path` mode (2020). Java side listens; we connect;
+    /// fd arrives via SCM_RIGHTS. `@` prefix → abstract namespace.
     UnixSocket(std::path::PathBuf),
 }
 
 // FdTun — the Device impl
 
-/// `fd_devops` (`fd_device.c:244-249`). The Android backend.
-///
-/// TUN-only: `setup_device` (`:152-155`) errors on `routing_mode
-/// == RMODE_SWITCH`. Android's `VpnService` only does L3. So:
-/// no `mode` field — `mode()` returns `Mode::Tun` unconditionally.
-///
-/// No `iface` field either: the C never reads it for `fd_device`
-/// (no `TUNSETIFF`, no kernel-chosen name). The Java side knows
-/// the iface name; the daemon doesn't need it. `iface()` returns
-/// a placeholder (the C `iface` global stays NULL → `tinc-up`
-/// gets `INTERFACE=` empty; we say `"fd"` instead, marginally
-/// more useful for the script).
-///
-/// `device_label`: what `Device =` was set to. For error messages.
-/// The C logs `"fd/%d"` (`:231`); we keep the same shape.
+/// `fd_devops` (`fd_device.c:244-249`). TUN-only (`:152-155`
+/// errors on `RMODE_SWITCH`; Android's `VpnService` only does L3).
+/// No `iface`: C `iface` global stays NULL; we say `"fd"`.
 #[derive(Debug)]
 pub struct FdTun {
-    /// The tun fd. Either inherited or received via SCM_RIGHTS.
-    /// In both cases it's a RAW IP channel — no `tun_pi`, no
-    /// ethernet, no prefix at all. Android's `VpnService`
-    /// strips all that.
-    ///
-    /// `File` not `RawFd`: ownership. `File::drop` closes.
-    /// `from_raw_fd` is the wrap (asserts ownership; the
-    /// previous owner — Java process via inheritance, or kernel
-    /// via SCM_RIGHTS dup — gave it up).
+    /// The tun fd. Raw IP channel — no `tun_pi`, no prefix.
+    /// `File` for ownership; `from_raw_fd` asserts the previous
+    /// owner (Java process or kernel SCM_RIGHTS dup) gave it up.
     fd: File,
 
-    /// `"fd/5"` or `"fd:/path"` — for error messages. C logs
-    /// `"fd/%d"` (`:231`). The path variant is our addition (C
-    /// only logs the number even for socket-received fds; we
-    /// know the path, might as well show it).
+    /// `"fd/5"` or `"fd:/path"` for error messages. C logs
+    /// `"fd/%d"` (`:231`); path variant is our addition.
     device_label: String,
 }
 
 impl FdTun {
-    /// `setup_device` (`fd_device.c:151-176`). Obtain the fd
-    /// (inherit or receive), wrap as `File`.
-    ///
-    /// The C also does `routing_mode == RMODE_SWITCH` rejection
-    /// (`:152-155`). NOT here: that's a daemon-level config
-    /// validation, same class as "TAP needs RMODE_SWITCH" in
-    /// `linux/device.c`. The daemon checks before calling us.
-    /// Our `mode()` returning `Tun` unconditionally is the
-    /// CONTRACT, not the CHECK.
+    /// `setup_device` (`fd_device.c:151-176`). The `RMODE_SWITCH`
+    /// rejection (`:152-155`) is the daemon's job; `mode() → Tun`
+    /// is the contract, not the check.
     ///
     /// # Errors
-    /// `io::Error`:
-    ///   - `Inherited(fd)`: `InvalidInput` if `fd < 0`. The C
-    ///     `:168-171` checks `device_fd < 0` post-sscanf. (The
-    ///     fd might be valid-but-wrong — pointing at stdout,
-    ///     say — but we can't detect that. The first read/
-    ///     write fails.)
-    ///   - `UnixSocket(path)`: connect failures (ENOENT,
-    ///     ECONNREFUSED), recvmsg failures, "got cmsg but
-    ///     wrong type" (the Java side sent something other
-    ///     than SCM_RIGHTS — shouldn't happen, but the C
-    ///     checks `:80-88` and we match).
+    /// - `Inherited(fd)`: `InvalidInput` if `fd < 0` (C `:168-171`).
+    /// - `UnixSocket(path)`: connect failures, recvmsg failures,
+    ///   wrong cmsg type (C `:80-88`).
     pub fn open(source: FdSource) -> io::Result<Self> {
         let (fd, device_label) = match source {
             // ─── Inherited
@@ -253,63 +154,21 @@ impl FdTun {
 /// `read_fd` + `receive_fd` (`fd_device.c:39-120`). Connect to the
 /// Unix socket, receive one fd via `SCM_RIGHTS`.
 ///
-/// The C splits this into three fns:
-///   `parse_socket_addr` (`:122-149`): build `sockaddr_un`,
-///     handle the `@abstract` → leading-NUL conversion.
-///   `receive_fd` (`:95-120`): connect, call `read_fd`, close.
-///   `read_fd` (`:39-93`): the cmsghdr dance.
-///
-/// We collapse to one fn. `std::os::unix::net::UnixStream` does
-/// `parse_socket_addr` + `receive_fd`; `nix::sys::socket::recvmsg`
-/// does `read_fd`. The C's three-fn split was forced by C's lack
-/// of RAII (the `goto end; close(socketfd)` pattern at `:112-
-/// 119`); we don't need it.
-///
-/// Returns the bare `RawFd`. The caller wraps in `File`. Why
-/// not return `File`? Because the SAFETY argument for `from_raw_
-/// fd` belongs at the call site, where the source (kernel-dup'd
-/// vs inherited) is known. Returning `RawFd` is the C-shaped
-/// boundary; the caller decides ownership semantics.
+/// C splits into three fns (`parse_socket_addr`/`receive_fd`/`read_fd`)
+/// for `goto end; close()` RAII. `UnixStream` + `nix::recvmsg` collapse
+/// it. Returns bare `RawFd`; the SAFETY argument for `from_raw_fd`
+/// belongs at the call site where the source is known.
 ///
 /// # Errors
-/// - `connect` failures: `NotFound` (ENOENT, path doesn't
-///   exist), `ConnectionRefused` (no listener), `Permission-
-///   Denied` (path mode bits)
-/// - `recvmsg` failures: rare, the socket just connected
-/// - `InvalidData`: control message wasn't SCM_RIGHTS (Java
-///   side sent wrong cmsg type — shouldn't happen but C checks
-///   `:80-88` and we match), or contained ≠1 fd (C only handles
-///   exactly one, `:86`: `cmsg_len != CMSG_LEN(sizeof(int))`)
-/// - `InvalidData`: `MSG_CTRUNC` flag set (control buffer too
-///   small — shouldn't happen, we sized it for one fd, but C
-///   checks `:63` and we match)
-///
-/// `clippy::missing_panics_doc`: doesn't panic. The `unwrap`s
-/// below are on infallible-in-context operations (cmsg_space
-/// for one int doesn't overflow; socket addr from path checked
-/// before).
-#[allow(clippy::missing_panics_doc)]
+/// - `connect`: `NotFound`, `ConnectionRefused`, `PermissionDenied`
+/// - `InvalidData`: cmsg wasn't SCM_RIGHTS (C `:80-88`), ≠1 fd
+///   (C `:86`), or `MSG_CTRUNC` set (C `:63`)
 fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 
-    // ─── Connect
-    // C `parse_socket_addr` (`:122-149`) + `receive_fd:100-108`.
-    //
-    // `@` prefix → abstract namespace (`:137-140`): C zeroes
-    // `sun_path[0]` and computes `path_length = strlen(path)`
-    // (NOT including a NUL — abstract addresses are length-
-    // delimited, not NUL-terminated).
-    //
-    // std `SocketAddr::from_abstract_name` (1.70+) does the
-    // leading-NUL + length-not-NUL bookkeeping. `connect_addr`
-    // takes the resulting `SocketAddr`. The two cases (filesystem
-    // path vs abstract) split on the first byte.
-    //
-    // The C also length-checks `>= sizeof(sun_path)` (`:128`).
-    // std does the same internally (`from_abstract_name` errors
-    // "abstract socket name must be shorter than SUN_LEN");
-    // `UnixStream::connect` errors for too-long filesystem paths.
-    // We don't pre-check; std's error propagates.
+    // ─── Connect (C `parse_socket_addr` `:122-149` + `:100-108`)
+    // `@` prefix → abstract namespace; std handles the leading-NUL
+    // + length bookkeeping. C's length-check (`:128`) is std's job.
     let stream = connect_unix(path)?;
 
     // ─── recvmsg
@@ -389,36 +248,14 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
         ));
     }
 
-    // ─── Extract the fd
-    // C `:72-92`. Walk the cmsg, check level/type/len, extract.
+    // ─── Extract the fd (C `:72-92`)
+    // C has a NULL-deref bug at `:72-74`: `CMSG_FIRSTHDR` returns
+    // NULL on empty buffer; C dereferences without checking. nix's
+    // iterator returns `None` → error, not segfault.
     //
-    // **The C has a NULL-deref bug here.** `:72`: `cmsgptr =
-    // CMSG_FIRSTHDR(&msg)` — returns NULL if the control buffer
-    // is empty (`msg_controllen` too small for even one header).
-    // `:74`: `if(cmsgptr->cmsg_level != ...)` — dereferences
-    // NULL. The bug is masked because the Java sender always
-    // sends a cmsg, but it's there.
-    //
-    // nix's `msg.cmsgs()` is an iterator. Empty control buffer
-    // → empty iterator → our `find_map` returns `None` → error,
-    // not segfault. The bug is fixed for free.
-    //
-    // We accept EXACTLY ONE fd. C `:86`: `cmsg_len != CMSG_LEN(
-    // sizeof(int))` — exactly one int's worth of cmsg data. nix
-    // gives us a `Vec<RawFd>`; we check `len() == 1`. STRICTER
-    // than C in one way (C would silently accept 2 fds and read
-    // the first; we error), MATCHING in another (both reject 0).
-    //
-    // The cmsgs iterator yields `ControlMessageOwned`. We want
-    // the first (and only) `ScmRights`. `find_map` extracts.
-    // Any non-ScmRights cmsg (the Java side sent SCM_CREDS by
-    // mistake?) → `None` from the match arm → error. Same as
-    // C `:80-84` (level/type checks).
-    //
-    // `?` on `cmsgs()`: nix made this fallible (decode errors).
-    // C doesn't check (CMSG_FIRSTHDR/NXTHDR don't fail). We
-    // propagate; if nix found a malformed cmsg, that's
-    // InvalidData by another name.
+    // Accept exactly one fd (C `:86`). STRICTER: C silently reads
+    // the first of 2+ fds; we error. Non-ScmRights cmsg → error
+    // (C `:80-84`). `?` on `cmsgs()` propagates nix decode errors.
     let fds = msg
         .cmsgs()?
         .find_map(|cm| match cm {
@@ -486,30 +323,10 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     // (ASCII bytes are verbatim) holds.
     let bytes = path.as_os_str().as_encoded_bytes();
     if let Some(b'@') = bytes.first() {
-        // ─── Abstract namespace
-        // C `:139`: `socket_addr.sun_path[0] = '\0'`. The kernel
-        // distinguishes abstract from filesystem by the first
-        // byte: NUL → abstract, non-NUL → filesystem. The C
-        // overwrites `@` with NUL.
-        //
-        // C `:140`: `path_length = strlen(path)` — INCLUDES the
-        // `@` in the length count (then sets `sun_path[0]=0`,
-        // so the kernel sees `\0foo` for input `@foo`). The
-        // kernel matches abstract addresses by `(sun_path,
-        // addrlen - offsetof(sun_path))` — length-delimited.
-        // The leading NUL is the marker; the rest is the name.
-        //
-        // std `SocketAddr::from_abstract_name` takes the name
-        // WITHOUT the leading marker (it adds the NUL itself).
-        // So we strip the `@`.
-        //
-        // `&bytes[1..]`: the name after `@`. `from_abstract_
-        // name` accepts `[u8]` (abstract addresses are byte
-        // sequences, not paths, not necessarily UTF-8).
-        //
-        // `connect_addr` (1.70+) takes the resulting addr. The
-        // filesystem-path `connect()` won't do (it interprets
-        // the leading byte as a path char).
+        // ─── Abstract namespace (C `:139-140`)
+        // C overwrites `@` with NUL; kernel distinguishes by first
+        // byte. std `from_abstract_name` adds the NUL itself, so
+        // strip the `@`. Abstract addrs are length-delimited bytes.
         use std::os::linux::net::SocketAddrExt;
         use std::os::unix::net::SocketAddr;
         let addr = SocketAddr::from_abstract_name(&bytes[1..])?;

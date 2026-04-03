@@ -1,99 +1,32 @@
 //! `raw_socket_device.c` (145 LOC) — the `PF_PACKET` backend.
 //!
-//! ──────────── Why this exists ──────────────────────────────────────
-//!
-//! Bridge tinc onto a REAL ethernet segment without TAP. The kernel
-//! TAP backend creates a virtual interface; the daemon writes
-//! ethernet frames in, they appear on the virtual NIC. THIS backend
-//! attaches to an EXISTING physical interface: `Interface = eth0`,
-//! daemon reads/writes raw ethernet frames straight off the wire.
-//!
-//! Use case: tinc as a layer-2 bridge between sites. The daemon
-//! sniffs all traffic on `eth0`, encrypts it, ships it to peers,
-//! who write it onto THEIR `eth0`. Transparent ethernet extension.
-//! Niche (most setups use TAP + bridge utils), but the C supports
-//! it since 2002.
-//!
-//! ──────────── The +0 trick — there ISN'T one ───────────────────────
-//!
-//! `linux.rs` reads at +10 (kernel writes `tun_pi`). `fd.rs`
-//! reads at +14 (Android writes raw IP). THIS reads at +0 (kernel
-//! writes raw ethernet — `SOCK_RAW` on `AF_PACKET` means "give me
-//! the link-layer header"). `route.c` wants ethernet at offset 0;
-//! the kernel writes ethernet at offset 0. No synthesis. No offset
-//! arithmetic. The simplest backend.
+//! Bridges tinc onto an existing physical interface (`Interface =
+//! eth0`). TAP-only; reads at `+0` since `SOCK_RAW` on `AF_PACKET`
+//! delivers the link-layer header directly.
 //!
 //! ```text
 //!   linux:  read at +10, kernel wrote tun_pi(4)+IP, synthesize ether
 //!   fd:     read at +14, Android wrote raw IP,      synthesize ether
-//!   raw:    read at +0,  kernel wrote raw ethernet, NOTHING TO DO
+//!   raw:    read at +0,  kernel wrote raw ethernet, nothing to do
 //! ```
 //!
-//! Consequence: TAP-only. C `:45` doesn't check `routing_mode` (it
-//! SHOULD — using raw_socket with `Mode = router` is nonsense, you
-//! get IP packets that route.c misinterprets as ethernet). Our
-//! `mode()` returns `Mode::Tap` unconditionally. **C-is-WRONG
-//! finding (mild): the C should reject `routing_mode != RMODE_
-//! SWITCH` like `fd_device.c` does. We don't check either (daemon's
-//! job) but we DOCUMENT it via the `Tap`-only return.**
+//! C `:45` doesn't reject `routing_mode != RMODE_SWITCH` (it should,
+//! like `fd_device.c` does). We document via `mode() → Tap`.
 //!
-//! ──────────── Shim #5 SUBSTITUTES the syscall ──────────────────────
+//! ## Unsafe-shim matrix
 //!
-//! New row class for the unsafe-shim matrix.
+//! ```text
+//!   #2 TIOCGWINSZ:   same syscall, nix macro, encoding honest → use
+//!   #3 TUNSETIFF:    same syscall, nix macro, encoding lies   → bypass
+//!   #4 SCM_RIGHTS:   same syscall, nix safe API, POSIX-clean  → use
+//!   #5 SIOCGIFINDEX: different syscall same job, POSIX std    → substitute
+//! ```
 //!
-//! C does `SIOCGIFINDEX` ioctl (`:60-68`): take an iface name,
-//! get back the kernel's interface index (the integer that
-//! `sockaddr_ll.sll_ifindex` wants for bind). The ioctl works.
-//! BUT: `if_nametoindex(3)` is the POSIX function (since 2001,
-//! IEEE 1003.1) that does the SAME RESOLUTION. The C uses the
-//! ioctl because it's 2002 code — `if_nametoindex` was brand-new
-//! at the time, glibc support was spotty. By 2026 it's everywhere.
-//!
-//! `nix::net::if_::if_nametoindex` wraps it. We use the wrapper.
-//!
-//! This is a DIFFERENT shim decision than #2-4. The matrix so far:
-//!
-//!   #2 TIOCGWINSZ:  same syscall, nix macro,     encoding honest → use
-//!   #3 TUNSETIFF:   same syscall, nix macro,     encoding lies   → bypass
-//!   #4 SCM_RIGHTS:  same syscall, nix safe API,  POSIX-clean     → use
-//!   #5 SIOCGIFINDEX: DIFFERENT syscall does same job, POSIX std  → substitute
-//!
-//! "Does the wrapper match the kernel's actual contract?" was the
-//! decision criterion for #2-4. For #5 the criterion is broader:
-//! "is there a HIGHER-LEVEL primitive that does the same job?"
-//! `if_nametoindex` IS that primitive. The C's choice was
-//! historical; the kernel doesn't care which path you take to get
-//! the ifindex.
-//!
-//! **STRICTER than C**: `if_nametoindex` takes the string as-is
-//! and errors `ENODEV` if not found. The C truncates (`strncpy +
-//! [IFNAMSIZ-1]=0`, lines 60-61, same as `linux/device.c`) THEN
-//! ioctls — `Interface = sixteenchars_long` becomes `sixteenchars
-//! _lo`, ioctl finds nothing OR finds the WRONG interface if the
-//! truncated name happens to match something. Our path: error
-//! immediately. Same fix class as `linux.rs::pack_ifr_name`.
-//!
-//! ──────────── nix HALF-works for the rest ──────────────────────────
-//!
-//! `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))` (`:45`): nix's
-//! `socket()` takes `AddressFamily::Packet`, `SockType::Raw`,
-//! `SockProtocol::EthAll`. The `EthAll` enum value IS `(ETH_P_ALL
-//! as u16).to_be() as i32` — nix did the htons for us. AND:
-//! `SockFlag::SOCK_CLOEXEC` sets CLOEXEC atomically. C does open-
-//! then-fcntl (`:53-55`), the race we documented in `linux.rs`.
-//! nix gives us the better primitive for free.
-//!
-//! `bind(sockaddr_ll)` (`:70`): nix has `LinkAddr` BUT it's
-//! getters-only (designed for `recvfrom` outputs, not `bind`
-//! inputs). No constructor that takes `(ifindex, protocol)`. We'd
-//! need `unsafe { transmute }` or `from_raw` shenanigans. Raw
-//! `libc::bind` with `sockaddr_ll` is cleaner. Shim #6, hand-
-//! rolled — but trivial (zeroed struct, three field writes, one
-//! syscall, eight lines).
-//!
-//! So this file is the FIRST hybrid: nix for socket creation +
-//! ifindex (the parts where nix is GOOD), libc for bind (the part
-//! where nix is half-baked). Three deps, three decisions.
+//! Shim #5: `if_nametoindex(3)` (POSIX 2001) replaces the C's
+//! `SIOCGIFINDEX` ioctl. STRICTER: errors on overlong names where
+//! C truncates (`:60-61`). nix `socket()` handles creation and
+//! atomic CLOEXEC; `bind(sockaddr_ll)` is hand-rolled (shim #6)
+//! since nix's `LinkAddr` is getters-only.
 
 #![allow(clippy::doc_markdown)]
 
@@ -104,57 +37,27 @@ use crate::{Device, MTU, Mac, Mode};
 
 // Constants — kernel ABI, sed-verified
 
-/// `ETH_P_ALL` — `<linux/if_ether.h>`. "All protocols." Passing
-/// this as the socket protocol means "give me every frame on this
-/// interface, regardless of ethertype." gcc-verified: `printf("%d",
-/// ETH_P_ALL)` → `3` (`0x0003`). Used as `htons(ETH_P_ALL)` in the
-/// socket call (C `:45`) AND in `sll_protocol` (C `:67`). nix's
-/// `SockProtocol::EthAll` does the htons for the socket call; for
-/// `sll_protocol` we do it ourselves.
+/// `ETH_P_ALL` — `<linux/if_ether.h>`. gcc-verified `0x0003`.
+/// nix's `SockProtocol::EthAll` does the htons for `socket()`;
+/// we do it ourselves for `sll_protocol`.
 const ETH_P_ALL: u16 = 0x0003;
 
 // RawSocket — the Device impl
 
-/// `raw_socket_devops` (`raw_socket_device.c:112-117`). The
-/// `PF_PACKET` backend. TAP-only.
+/// `raw_socket_devops` (`raw_socket_device.c:112-117`). TAP-only.
 ///
-/// `iface`: the interface name as RESOLVED. The C reads it from
-/// `Interface =` config (default `"eth0"`, `:40-42`). The daemon
-/// does the config read; we get the resolved name. `Interface`
-/// is mandatory for this backend (unlike `linux.rs` where the
-/// kernel picks `tun0` if you don't say); `eth0` default is the
-/// daemon's job.
-///
-/// No `mac` field: the C doesn't query SIOCGIFHWADDR for raw_
-/// socket. The route.c ARP-reply path needs `mymac` for TAP, but
-/// raw_socket is bridging — the daemon doesn't ORIGINATE arp
-/// replies on a real ethernet segment (the real hosts do). The
-/// `mymac` global stays `{0}` in C. We return `None`. Same as
-/// `FdTun`.
-///
-/// (Is `None` correct for a TAP-mode backend? `linux.rs::Tun`
-/// in TAP mode returns `Some(mac)`. The difference: TAP creates
-/// a NEW interface — the daemon IS the host on that interface,
-/// so it needs a MAC. raw_socket attaches to an EXISTING
-/// interface — the daemon is sniffing, not hosting. The route.c
-/// path that uses `mymac` checks `routing_mode` first; in switch
-/// mode (which is what raw_socket implies) the path that needs
-/// `mymac` doesn't fire. So `None` is correct. The `linux::Tap`
-/// vs `raw::RawSocket` MAC difference is a real semantic
-/// distinction, not an inconsistency.)
+/// No `mac` field: C doesn't query `SIOCGIFHWADDR` here. raw_socket
+/// attaches to an EXISTING interface (sniffing, not hosting); the
+/// daemon doesn't originate ARP replies on a real segment.
+/// `mac() → None` is correct despite TAP mode — `linux::Tun` in TAP
+/// creates a NEW interface and IS the host, hence the difference.
 #[derive(Debug)]
 pub struct RawSocket {
-    /// `PF_PACKET` socket, `SOCK_RAW`, bound to `iface`.
-    /// `OwnedFd` not `File`: this is a SOCKET, not a file. Same
-    /// `Drop` semantics (close on drop), but `OwnedFd` is the
-    /// honest type. `linux.rs` uses `File` because `/dev/net/tun`
-    /// IS a device file you `open()`. `socket()` returns a
-    /// socket; `OwnedFd` (Rust 1.63+) is the generic owner.
+    /// `PF_PACKET` socket, `SOCK_RAW`, bound to `iface`. `OwnedFd`
+    /// not `File`: this came from `socket()`, not `open()`.
     fd: OwnedFd,
 
-    /// The interface name. For `iface()` and error messages.
-    /// Stored as resolved by the daemon — already validated
-    /// (`if_nametoindex` succeeded with it).
+    /// Interface name (validated: `if_nametoindex` succeeded).
     iface: String,
 }
 

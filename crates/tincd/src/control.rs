@@ -26,34 +26,15 @@
 //!
 //! ## The umask dance
 //!
-//! Three places in C tinc use `umask(0); umask(mask | 077)` to
-//! atomically create a mode-0600 file:
+//! C uses `umask(0); umask(mask | 077)` for mode-0600 creation.
+//! For files: `OpenOptions::mode(0o600)` is sufficient — umask only
+//! removes bits, never adds, and `0o600 & ~umask` has no overlap
+//! with sane umasks. The C dance defended against `fopen()`'s
+//! `0o666` default; we don't need it.
 //!
-//! - `pidfile.c:28` — the pidfile (this is the auth boundary; whoever
-//!   can read the cookie can control the daemon)
-//! - `control.c:213` — the unix socket (same reason)
-//! - `keys.c` — private key files
-//!
-//! `OpenOptions::mode(0o600)` sets the mode at create, BUT it's still
-//! ANDed with the inverse of umask. If umask is `022`, `mode(0o600)`
-//! gives `0o600 & ~0o022 = 0o600` — fine. If umask is `0o077`, same.
-//! But if umask is `0o000`, `mode(0o600)` gives `0o600` — also fine.
-//! Wait, `0o600 & ~umask` for any `umask` ≤ `0o077` gives `0o600`.
-//! And umasks > `0o077` (like `0o177`) are unusual but would give
-//! `0o400` — owner can't write back.
-//!
-//! ACTUALLY: `mode()` sets the requested bits; umask removes bits.
-//! `0o600 & ~0o022 = 0o600` (no overlap). The umask dance in C is
-//! to ensure group/other bits are STRIPPED even if `fopen()` would
-//! default to `0o666`. We're setting `0o600` explicitly, so as long
-//! as umask doesn't ADD bits (it can't, it only removes), we're
-//! safe. `OpenOptions::mode(0o600)` is sufficient. The C dance is
-//! belt-and-braces.
-//!
-//! For the **unix socket**: `bind()` honors umask (the socket file's
-//! perms are `0o777 & ~umask`). std `UnixListener::bind` doesn't
-//! expose mode. So for the socket we DO need the umask dance. One
-//! `umask` call, scoped.
+//! For the unix socket: `bind()` honors umask and `UnixListener::
+//! bind` doesn't expose mode. We DO need the dance there — one
+//! scoped `umask` call.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};

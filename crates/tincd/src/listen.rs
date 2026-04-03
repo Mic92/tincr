@@ -5,93 +5,31 @@
 //!
 //! ## socket2, not hand-rolled setsockopt
 //!
-//! std's `TcpListener::bind` is `socket() → bind()` atomic. There's
-//! no seam to insert `setsockopt(IPV6_V6ONLY)` between them. The C
-//! does `socket()`, `setsockopt`, `bind()`, `listen()` as four
-//! separate calls (`net_socket.c:196,210,214,254`). socket2 gives us
-//! the same four-step shape.
+//! std's `TcpListener::bind` is atomic; no seam for `IPV6_V6ONLY`.
+//! socket2 gives the C's four-step shape (`net_socket.c:196,210,
+//! 214,254`). Not a shim-matrix row — it's "std with seams".
 //!
-//! Why this isn't a new shim-matrix row: it's not a per-syscall shim
-//! decision. socket2 is "std wrapped too tightly, here's std with
-//! seams" — same quadrant as `slotmap` instead of hand-rolling a
-//! generational slab. Its only dep is libc (already linked).
+//! Used (all ungated): `Socket::new` (auto-`SOCK_CLOEXEC`),
+//! `set_reuse_address` (`:210`), `set_only_v6` (`:214` — load-
+//! bearing for separate v4+v6 listeners), `set_nodelay`
+//! (`configure_tcp:89`), `set_nonblocking`, `set_broadcast`
+//! (`:332`), `accept` (uses `accept4(SOCK_CLOEXEC)` — closes a
+//! small fd leak the C has), `SockAddr` (= C `sockaddr_t` union).
 //!
-//! What we use, all NOT gated on `feature = "all"`:
-//!
-//! - `Socket::new` — auto-CLOEXEC via `SOCK_CLOEXEC` (the C does
-//!   separate `fcntl(F_SETFD, FD_CLOEXEC)` at `:203`; we improve)
-//! - `set_reuse_address` — C `:210`
-//! - `set_only_v6` — C `:214`. Load-bearing: separate v4+v6 listeners
-//!   on the same port. Without it, the v6 socket grabs both via
-//!   v4-mapped addresses, and the v4 bind gets `EADDRINUSE`.
-//! - `set_nodelay` — C `configure_tcp:89`. The meta protocol is
-//!   line-oriented; Nagle bunches our 80-byte lines into 200ms
-//!   coalesce windows.
-//! - `set_nonblocking` — C `configure_tcp:71-76`
-//! - `set_broadcast` — C UDP `:332`. For LocalDiscovery; not used
-//!   yet but doesn't hurt to set.
-//! - `accept` — uses `accept4(SOCK_CLOEXEC)` on Linux/BSD. The C
-//!   does plain `accept` and DOESN'T set CLOEXEC on the child fd.
-//!   We close a small leak the C has (accepted peer fd inherited
-//!   into `script.c` children).
-//! - `SockAddr` — IS the C `sockaddr_t` union (`net.h:78`).
-//!   `as_socket()` returns `Option<SocketAddr>` (None for AF_UNIX),
-//!   `family()` for the dispatch.
-//!
-//! ## Deferred sockopts (chunk 4+ worklist)
-//!
-//! TCP listener:
-//!   - `SO_MARK` (fwmark) — `:225`. Linux-only routing marks.
-//!     socket2 has it but gated on `all`. Hand-roll when we get there.
-//!   - `SO_BINDTODEVICE` (BindToInterface) — `:231-247`. Same gating.
-//!
-//! UDP listener:
-//!   - `SO_RCVBUF`/`SO_SNDBUF` — `:334-335`. Perf tuning; C defaults
-//!     1MB each. socket2 has both ungated. Just defer until we're
-//!     actually receiving UDP.
-//!   - `IP_MTU_DISCOVER`/`IP_PMTUDISC_DO` — `:349-364`. PMTU. socket2
-//!     doesn't wrap; hand-roll. Gated on `myself->options &
-//!     OPTION_PMTU_DISCOVERY` which we don't compute yet.
-//!   - `SO_MARK`, `SO_BINDTODEVICE` — same as TCP.
-//!
-//! Per-connection (`configure_tcp`):
-//!   - `IP_TOS = IPTOS_LOWDELAY` — `:93-100`. Kernel hint; default is 0.
-//!     socket2 has `set_tos`. Defer because it's a no-op on most
-//!     networks (DSCP is rarely respected) and adding it now means
-//!     an `if` on the address family that just clutters.
-//!   - `IPV6_TCLASS = IPTOS_LOWDELAY` — `:93-100`, v6 equivalent.
-//!     socket2 doesn't wrap the SETTER (only `recv_tclass`). Hand-roll
-//!     when IP_TOS lands.
-//!   - `SO_MARK` — same as listener.
+//! Deferred sockopts: `SO_MARK`/`SO_BINDTODEVICE` (`:225-247`, gated
+//! on `all`), `SO_RCVBUF`/`SO_SNDBUF` (`:334-335`), `IP_MTU_DISCOVER`
+//! (`:349-364`), `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
 //!
 //! ## getaddrinfo: skip it
 //!
-//! C `add_listen_address(NULL, NULL)` does `getaddrinfo(NULL, port,
-//! AI_PASSIVE | AF_UNSPEC)`. gcc-verified: returns `0.0.0.0` then
-//! `::`. Then loops `aip->ai_next`, binds each. C `:705-707`: bind
-//! failure is `continue`, not abort.
+//! C `add_listen_address(NULL, NULL)` uses getaddrinfo as a per-
+//! family probe (`0.0.0.0` then `::`, gcc-verified). We probe by
+//! trying both binds; `Socket::new(Domain::IPV6, ...)` failing is
+//! the same outcome. Bind failure is `continue` (C `:705-707`).
+//! `BindToAddress` deferred (DOES need name resolution).
 //!
-//! The getaddrinfo is the "give me one address per family this system
-//! supports" probe. We do the same probe by *trying both binds*. Bind
-//! `0.0.0.0:port`; bind `[::]:port`; collect successes. If a family
-//! is unsupported, `Socket::new(Domain::IPV6, ...)` fails — same
-//! outcome as getaddrinfo not returning a v6 entry.
-//!
-//! `BindToAddress`/`ListenAddress` deferred: those DO need name
-//! resolution. `to_socket_addrs` works for that case (no AI_PASSIVE
-//! when address is explicit).
-//!
-//! ## `bind_reusing_port` — deferred but the comment is here
-//!
-//! C `net_setup.c:613-632`: when `Port = 0`, the kernel picks a port
-//! for the FIRST socket. Then `bind_reusing_port` does `getsockname`
-//! on that fd, reads the kernel-assigned port, patches it into the
-//! sockaddr for SUBSEQUENT binds. Result: all listeners share one
-//! port, but it's still kernel-chosen.
-//!
-//! We defer because chunk 3 only opens one v4 and one v6 listener,
-//! and tests that need a known port read it from the pidfile. The
-//! port-share matters when you have multiple `BindToAddress` entries.
+//! `bind_reusing_port` (`net_setup.c:613-632`) deferred: only
+//! matters with multiple `BindToAddress` entries.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};

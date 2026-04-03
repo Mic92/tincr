@@ -1,11 +1,7 @@
 //! `bsd/device.c` (592 LOC) — the BSD/macOS backend.
 //!
-//! ──────────── THREE backends in one file ───────────────────────────
-//!
-//! The post-chunk-3 reading: `bsd/device.c` is `linux/device.c`,
-//! `fd_device.c`, and `raw_socket_device.c` rolled into one and
-//! dispatched by `device_type_t`. The three offsets the formula
-//! predicts (`offset = ETH_HLEN − len(prefix)`) all show up:
+//! Three backends dispatched by `device_type_t` (`offset = ETH_HLEN
+//! − len(prefix)`):
 //!
 //! ```text
 //!   TUN/TUNEMU:      +14, raw IP, no prefix       (= fd.rs)
@@ -13,85 +9,20 @@
 //!   TAP/VMNET:       +0,  raw ethernet            (= raw.rs)
 //! ```
 //!
-//! The C `read_packet` (`:412-499`) is one big switch on
-//! `device_type`; same for `write_packet` (`:504-586`). The
-//! switch arms are MOSTLY the same code with different offsets.
-//! The TUN and UTUN read arms are sed-diff-identical save for the
-//! final `packet->len = inlen + {14,10}` line.
+//! ## Read ignores the AF prefix
 //!
-//! Port shape: a `BsdVariant` enum, dispatching the offset and
-//! the prefix-handling. The `Device` impl matches on variant;
-//! the per-arm bodies call `crate::ether` for synthesis. Three
-//! backends; one struct; ~80% reuse of `ether::from_ip_nibble`
-//! and `ether::set_etherheader`.
+//! `bsd/device.c:457` synthesizes ethertype from the IP nibble at
+//! `[14]`, ignoring the AF prefix at `[10..14]`. The synthesis is
+//! a copy of the `:427-445` TUN arm. We match C: decode would be a
+//! behavior change (C trusts the nibble if they ever disagree).
 //!
-//! ──────────── The IGNORED prefix ───────────────────────────────────
+//! ## Write synthesizes the AF prefix (`:518-541`)
 //!
-//! The chunk-3 PREDICTION said BSD utun's 4-byte AF prefix
-//! "doesn't give the ethertype-lands-at-12 free lunch." Reading
-//! the C found something stranger: **the prefix IS there, the C
-//! IGNORES it.** `bsd/device.c:457`: `switch(DATA[14] >> 4)` —
-//! reads the IP version nibble at offset 14, PAST where the
-//! prefix sits at `[10..14]`.
+//! Read ethertype from `[12..14]`, map to `htonl(AF_*)`, overwrite
+//! `[10..14]`, write at `+10`. `to_af_prefix` is the dual of
+//! `from_ip_nibble`.
 //!
-//! The prefix carries `htonl(AF_INET)` (= `00 00 00 02`) or
-//! `htonl(AF_INET6)`. The C COULD decode it:
-//!
-//! ```c
-//!   uint32_t af; memcpy(&af, DATA+10, 4); af = ntohl(af);
-//!   ethertype = (af == AF_INET) ? 0x0800 : 0x86DD;
-//! ```
-//!
-//! Doesn't. Synthesizes from the IP nibble. WHY: the synthesis
-//! code at `:457-475` is a COPY of the `:427-445` TUN code (which
-//! has no prefix to read). The C author copy-pasted the working
-//! synthesis and changed the offset. The lunch is on the table;
-//! the C declines it.
-//!
-//! We MATCH C: synthesize from the nibble. The READ side never
-//! looks at the prefix bytes. They're scratch (overwritten by
-//! `set_etherheader`'s zeroing of `[..12]`, which covers
-//! `[10..12]` of the prefix; `[12..14]` gets the ethertype write,
-//! also clobbering prefix bytes). The prefix is wasted I/O.
-//!
-//! (There's a wire-compat argument hiding: if the BSD kernel ever
-//! sent a prefix that DISAGREES with the IP nibble — corrupted
-//! frame, kernel bug, who knows — the C trusts the IP nibble. So
-//! do we. Decoding the prefix would be a behavior change. A weak
-//! argument — both should always agree — but the matching-C
-//! discipline says ignore.)
-//!
-//! ──────────── The WRITE side IS NOVEL ──────────────────────────────
-//!
-//! Read ignores the prefix; WRITE synthesizes it. `bsd/device.c
-//! :518-541` (UTUN/TUNIFHEAD write):
-//!
-//! ```c
-//!   int af = (DATA[12] << 8) + DATA[13];   // read ethertype BE
-//!   uint32_t type;
-//!   switch(af) {
-//!     case 0x0800: type = htonl(AF_INET);  break;
-//!     case 0x86DD: type = htonl(AF_INET6); break;
-//!     default:     return false;  // error, NOT silent drop
-//!   }
-//!   memcpy(DATA + 10, &type, sizeof(type));
-//!   write(fd, DATA + 10, len - 10);
-//! ```
-//!
-//! `route.c` filled in a real ethertype at `[12..14]` (we're TUN
-//! mode but the daemon's packet builder always writes the full
-//! 14-byte ether header). We READ the ethertype, MAP it to an AF
-//! number, OVERWRITE bytes `[10..14]` with the 4-byte AF prefix
-//! (CLOBBERING the ethertype slot — the kernel will reconstruct
-//! ethertype from AF on its end), then write at +10.
-//!
-//! THIS is the one new pure fn: `to_af_prefix(ethertype) ->
-//! Option<[u8; 4]>`. The exact dual of `from_ip_nibble`.
-//!
-//! ──────────── AF_INET6 is platform-varying ─────────────────────────
-//!
-//! THE LANDMINE found checking what `htonl(AF_INET6)` actually
-//! produces:
+//! ## `AF_INET6` is platform-varying
 //!
 //! ```text
 //!   Linux:    AF_INET6 = 10  →  prefix bytes 00 00 00 0a
@@ -99,43 +30,15 @@
 //!   macOS:    AF_INET6 = 30  →  prefix bytes 00 00 00 1e
 //! ```
 //!
-//! `AF_INET = 2` everywhere (4.2BSD legacy, never moved). But
-//! `AF_INET6` was added per-platform when IPv6 landed; nobody
-//! coordinated. The C uses `htonl(AF_INET6)` — expands to the
-//! RIGHT value on whichever platform you compile on. The kernel
-//! reading the prefix is the SAME platform; they agree.
+//! `AF_INET = 2` everywhere. We use `libc::AF_INET6`; tests pin
+//! `(libc::AF_INET6 as u32).to_be_bytes()` (structure, not bytes).
+//! `0x86DD` is wire-format truth; `AF_INET6` is local convention.
 //!
-//! WE use `libc::AF_INET6`. CAN'T pin golden bytes for this in
-//! tests — `[0, 0, 0, 0x1e]` is right on macOS, wrong on FreeBSD.
-//! The test pins `(libc::AF_INET6 as u32).to_be_bytes()` instead:
-//! the STRUCTURE (it's a big-endian u32 of the libc constant) is
-//! testable; the BYTES are not.
+//! ## Compile-on-Linux
 //!
-//! This is the `AF_INET6` ≠ `0x86DD` distinction made flesh:
-//! `0x86DD` is wire-format truth (IANA registry, same on every
-//! Ethernet wire). `AF_INET6` is local convention (kernel ABI,
-//! per-platform). `crate::ether` holds the former; this file
-//! references the latter via `libc`.
-//!
-//! ──────────── Compile-on-Linux, open-stubbed ───────────────────────
-//!
-//! The `Device` impl compiles on Linux. The variant-dispatched
-//! read/write logic is fd-agnostic — `pipe()` and `seqpacket`
-//! fakes work (the `+14` and `+0` paths are LITERALLY `fd.rs` and
-//! `raw.rs` respectively). The `+10` path is testable too: the
-//! prefix bytes are inert on read; a `pipe()` can feed `[garbage
-//! ×4][IP packet]`.
-//!
-//! `open()` is `cfg`-gated and STUBBED. The actual constructors
-//! (`/dev/tun*` device node, utun `PF_SYSTEM` socket, `TUNSIFHEAD`
-//! ioctl) need a BSD box. The stub is `#[cfg(any(target_os =
-//! "freebsd", target_os = "macos", ...))]` → not compiled on
-//! Linux at all. The Linux build verifies the read/write LOGIC.
-//! The open path lands when CI gets a BSD runner.
-//!
-//! TUNEMU and VMNET dropped: external library deps (`libpcap`-
-//! based PPP shim and Apple's `vmnet.framework` respectively).
-//! Niche; deferred.
+//! Read/write logic is fd-agnostic; tested via `pipe()`/seqpacket
+//! fakes. `open()` constructors are BSD-gated stubs. TUNEMU/VMNET
+//! dropped (external library deps).
 
 #![allow(clippy::doc_markdown)]
 
@@ -147,42 +50,18 @@ use crate::{Device, MTU, Mac, Mode};
 
 // Constants — the +10 prefix length
 
-/// The 4-byte AF prefix the BSD kernel writes for utun/tunifhead.
-/// `bsd/device.c` doesn't name this — it uses literal `10` (e.g.
-/// `:451`: `DATA + 10`). We name it. `ETH_HLEN - AF_PREFIX_LEN
-/// = 10` is the read offset (room for the 14-byte ether header
-/// MINUS the 4 bytes the kernel already wrote).
-///
-/// The prefix contents: `htonl(AF_INET)` or `htonl(AF_INET6)`.
-/// A big-endian u32. AF_INET=2 everywhere; AF_INET6 varies (see
-/// crate doc). NOT the same as `tun_pi` (Linux's prefix is
-/// `{u16 flags, be16 proto}`; BSD's is `{be32 af}`). Same SIZE
-/// (4 bytes), same OFFSET (10), DIFFERENT contents — and we
-/// ignore the contents on read anyway.
+/// 4-byte AF prefix for utun/tunifhead. C uses literal `10`
+/// (`:451`); `ETH_HLEN - AF_PREFIX_LEN = 10` is the read offset.
+/// Contents: `htonl(AF_*)` — same SIZE/OFFSET as Linux `tun_pi`
+/// but different contents (and ignored on read anyway).
 const AF_PREFIX_LEN: usize = 4;
 
 // BsdVariant — the offset dispatch
 
-/// `device_type_t` (`bsd/device.c:52-63`). The C has six values
-/// (`TUN`, `TUNIFHEAD`, `TAP`, `TUNEMU`, `VMNET`, `UTUN`); we
-/// have three. The collapse:
-///
-///   `TUN`+`TUNEMU` → `Tun`: same offset (+14), same synthesis;
-///     only the open() path differs (`/dev/tun*` vs `tunemu_
-///     open()`). TUNEMU dropped (libpcap dep).
-///   `UTUN`+`TUNIFHEAD` → `Utun`: same offset (+10), same prefix
-///     handling (`:518` and `:519` are the SAME case clause:
-///     `case DEVICE_TYPE_UTUN: case DEVICE_TYPE_TUNIFHEAD:`).
-///     Only open() differs (`PF_SYSTEM` socket vs `TUNSIFHEAD`
-///     ioctl on `/dev/tun*`).
-///   `TAP`+`VMNET` → `Tap`: same offset (+0). VMNET dropped
-///     (Apple framework dep).
-///
-/// The C's six-way enum is FOUR open paths × THREE offset
-/// behaviors. We carry the three offset behaviors. The open
-/// paths land per-variant when stubs become real.
-///
-/// `Copy`: it's just a discriminant. Three values.
+/// `device_type_t` (`bsd/device.c:52-63`). C has six values
+/// (four open paths × three offset behaviors); we carry the
+/// three offset behaviors. `TUNEMU`/`VMNET` dropped (lib deps);
+/// `UTUN`/`TUNIFHEAD` share the same case clause at `:518-519`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BsdVariant {
     /// `+14`, raw IP, no prefix. C `TUN`/`TUNEMU`. Reads at

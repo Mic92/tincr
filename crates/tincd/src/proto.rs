@@ -30,33 +30,15 @@
 //! because handlers need `&mut Daemon` (to set `running = false`,
 //! to walk `node_tree` for dumps, etc).
 //!
-//! ## What `id_h` does for control
+//! ## `id_h` for control (`protocol_auth.c:314-338`)
 //!
-//! `protocol_auth.c:314-338` — the FIRST thing any connection sends.
-//! Three branches on `name[0]`:
+//! Three branches on `name[0]`: `^` control (cookie check, ACK),
+//! `?` invitation, else peer. We handle `^` and reject the rest.
 //!
-//! - `^` (`:325`): control. Check cookie, set `status.control = true`,
-//!   `allow_request = CONTROL`, send back `send_id` + ACK.
-//! - `?` (`:340`): invitation. Not in skeleton.
-//! - else (`:380`): peer. Check `check_id`, look up node, etc.
-//!   Not in skeleton.
+//! ## `control_h` for STOP (`control.c:45-145`)
 //!
-//! We handle `^` and reject the rest with a log line.
-//!
-//! ## What `control_h` does for STOP
-//!
-//! `control.c:45-145` — second token is the `CtlRequest` discriminant
-//! (REQ_STOP=0, REQ_RELOAD=1, etc). For STOP:
-//!
-//! ```c
-//! case REQ_STOP:
-//!     event_exit();
-//!     return control_ok(c, REQ_STOP);  // sends "18 0 0"
-//! ```
-//!
-//! `event_exit` sets `running = false`; the loop exits after
-//! finishing this turn. We return a `DispatchResult::Stop` to signal
-//! the same.
+//! `case REQ_STOP: event_exit(); return control_ok(c, REQ_STOP)`
+//! sends `"18 0 0"`. We return `DispatchResult::Stop`.
 
 use std::path::Path;
 use std::time::Instant;
@@ -188,41 +170,17 @@ pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchErr
 
 /// `protocol_auth.c:458-465` SPTPS label for the TCP meta connection.
 ///
-/// **THE TRAILING NUL IS WIRE-FORMAT-COMPAT.** Born in commit
-/// `65d6f023` (2012-02-25, "Use SPTPS"): `char label[25 + strlen(a)
-/// + strlen(b)]` is a VLA whose `sizeof` is the bracket expression.
-/// `"tinc TCP key expansion "` is 23 chars; with `a`, `" "`, `b`
-/// appended that's `24 + strlen(a) + strlen(b)` chars. The VLA
-/// size is `25 + ...` = one byte more. `snprintf` writes a NUL
-/// at `[labellen - 1]`. That NUL goes into `sptps_start` via
-/// `(label, sizeof(label))`.
+/// **THE TRAILING NUL IS WIRE-FORMAT-COMPAT.** Born in `65d6f023`
+/// (2012): `sizeof` of the C VLA `char label[25 + strlen(a) +
+/// strlen(b)]` is one more than the snprintf'd content. gcc-verified
+/// `labellen = 33` for alice/bob; hex ends `...626f6200`. The NUL
+/// feeds the SIG transcript (`sptps.c:206`) and PRF seed; missing
+/// it → `BadSig`. The invitation label at `:372` does NOT have it
+/// (string literal + count, not VLA): historical accident, not policy.
 ///
-/// gcc-verified (`"alice"`, `"bob"`): `labellen = 33`, `strlen(label)
-/// = 32`, `label[32] = 0x00`. Hex dump ends `...626f6200`.
+/// Argument order: always initiator, responder (C `:460-465`).
 ///
-/// The NUL feeds into the SIG transcript (`sptps.c:206`: `memcpy(msg,
-/// s->label, s->labellen)`) and the PRF seed (`:258`). Both sides
-/// must agree on `labellen` byte-for-byte or the SIG verify fails.
-/// Missing the NUL → `SptpsError::BadSig` at handshake time.
-///
-/// The pre-`65d6f023` code (`8132be8f`, 2011) used `xasprintf` +
-/// `strlen(seed)` — NO NUL. The switch to VLA+sizeof was for
-/// stack allocation, not crypto; the NUL was a side effect. tinc
-/// 1.1pre1 (2012-06) onwards has it.
-///
-/// Contrast: the invitation label `("tinc invitation", 15)` at
-/// `protocol_auth.c:372` does NOT have the NUL — `strlen("tinc
-/// invitation") == 15`. String literal + explicit count instead of
-/// VLA + sizeof. So this is NOT a deliberate "NUL is part of every
-/// label" policy. It's a historical accident at one call site.
-///
-/// Argument order: ALWAYS initiator-name, responder-name. C `:460-
-/// 465`: `if(outgoing) myself, c->name; else c->name, myself`. The
-/// initiator is whoever called `connect()`. Chunk 4a is responder-
-/// only (we accepted), so the caller passes `(peer, me)`.
-///
-/// `pub(crate)` for the unit tests in this module and the
-/// integration test in `tests/stop.rs`.
+/// `pub(crate)` for unit tests and `tests/stop.rs`.
 #[must_use]
 pub(crate) fn tcp_label(initiator: &str, responder: &str) -> Vec<u8> {
     // `format!` doesn't include NUL. We push it explicitly. This

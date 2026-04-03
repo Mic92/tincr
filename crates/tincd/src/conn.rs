@@ -1,87 +1,35 @@
 //! `connection_t` (`connection.h:86-127`) + `buffer_t` (`buffer.c`).
 //!
-//! ## What `Connection` is in this chunk
-//!
-//! C `connection_t` has 25 fields. For control connections (`status.
-//! control = true`), most are dead: no `node`, no `edge`, no SPTPS,
-//! no legacy crypto. The active fields are:
-//!
-//! | C field | Rust | Why |
-//! |---|---|---|
-//! | `socket` | `OwnedFd` | the unix stream fd |
-//! | `inbuf` / `outbuf` | `LineBuf` ×2 | line buffering |
-//! | `allow_request` | `Option<Request>` | gate (ID → CONTROL → ALL) |
-//! | `status.control` | `bool` | control vs peer |
-//! | `name` | `String` | "<control>" placeholder, for logs |
-//! | `last_ping_time` | `Instant` | timeout sweep |
-//! | `io` | `IoId` | held by daemon, NOT here |
-//!
-//! Chunk 4a adds: `protocol_minor`, `ecdsa`, `sptps`. The peer
-//! id_h branch needs them. `node`/`edge` (`ack_h`) and `tcplen`/
-//! `sptpslen` (TCP-tunneled VPN packets) come in 4b/4c.
-//!
 //! ## SPTPS bridge ownership
 //!
-//! C: `connection_t.sptps` is a value (not a pointer). The C
-//! callback signature is `bool fn(void *handle, ...)` where `handle`
-//! IS the `connection_t*` — the callback reaches back into `c->
-//! outbuf`, the global `node_tree`, etc. `sptps_receive_data` fires
-//! callbacks SYNCHRONOUSLY inside its loop.
+//! C `connection_t.sptps` is a value; the callback's `void *handle`
+//! IS the `connection_t*` and reaches back into `c->outbuf`. We
+//! can't borrow `&mut Connection` while `&mut self.sptps` is held.
+//! `receive()` returns `Vec<Output>` instead; daemon dispatches
+//! after the borrow ends.
 //!
-//! We can't have `Sptps::receive` reach back into `Connection` (it'd
-//! need `&mut Connection` while `&mut self.sptps` is borrowed). The
-//! `Output` enum was the unblocking design: `receive()` returns
-//! `Vec<Output>`, the caller (Daemon) dispatches AFTER the borrow
-//! ends. `feed()` here drives the SPTPS receive loop and returns
-//! `FeedResult::Sptps(outs)`; daemon owns the dispatch.
+//! This loses one C semantic: `Output::Wire` from record N is now
+//! queued AFTER record N+1 is processed, not before. For the SPTPS
+//! handshake there's no interleaving anyway. Post-handshake (e.g.
+//! `PING` + `KEY_CHANGED` in one segment) both dispatch after the
+//! segment is consumed; wire output is still in order. Not peer-
+//! observable.
 //!
-//! This loses one C semantic: in the C, an `Output::Wire` from the
-//! Nth record is queued BEFORE the (N+1)th record is processed.
-//! For SPTPS-stream-mode handshake (KEX→SIG→DONE) this doesn't
-//! matter — the responder gets KEX and emits nothing, gets SIG and
-//! emits SIG+DONE at the END. There's no interleaving. The case
-//! where it COULD matter is post-handshake `Output::Record` causing
-//! a `send_request` reply that wants to be queued before the next
-//! record fires — e.g. a `PING` followed by `KEY_CHANGED` in one
-//! TCP segment. Both are now dispatched AFTER the segment is fully
-//! consumed. The wire output IS still in order (Vec preserves push
-//! order); the only difference is timing inside one `recv()`. Not
-//! observable from the peer.
-//!
-//! Box: `Sptps` is ~1KB (cipher contexts, replay window, KEX state).
-//! Most `Connection`s are control conns (no SPTPS). Unboxed `Option<
-//! Sptps>` puts ~1KB into every slot the slotmap pre-allocates. Box
-//! makes the None case 1 pointer.
+//! `Sptps` is boxed (~1KB; most conns are control with `None`).
 //!
 //! ## `LineBuf` vs C `buffer_t`
 //!
-//! `buffer.c` is a `Vec<u8>` with a consume cursor (`offset`). The
-//! 87.5%-consumed compact heuristic (`offset/7 > len/8`) is the
-//! amortized memmove. The Rust `Vec` already amortizes — but only on
-//! growth. We still need the cursor (consuming from the front of a
-//! `Vec` is O(n)).
+//! `buffer.c` is `Vec<u8>` + consume cursor; 87.5%-consumed compact
+//! heuristic. `read_line` returns `Range<usize>` not `&str`: the C
+//! `buffer_readline` returns a `char*` invalidated by the next
+//! `buffer_add`; the borrow checker rejects the equivalent.
 //!
-//! The C `buffer_readline` returns `char*` into the buffer's storage,
-//! NUL-terminated in place. That's a borrow that's invalidated by the
-//! next `buffer_add`. We can't return `&str` from `&mut self` then
-//! call `feed` again; the borrow checker says no. So `read_line`
-//! returns `Range<usize>` indices; caller slices `inbuf.bytes()` with
-//! it. Same data, owned-reference-shaped.
+//! ## `feed` / `flush` split
 //!
-//! ## The `feed` / `flush` split
-//!
-//! C `receive_meta` (`meta.c:164`) does: recv → buffer_add → loop
-//! readline → dispatch. We split: `feed` does recv + buffer_add,
-//! caller loops `read_line` + dispatch. The split is the testable
-//! seam — `feed` reads a real fd, `read_line` is pure, dispatch is
-//! pure.
-//!
-//! C `send_meta` + `handle_meta_write`: write to outbuf, register
-//! IO_WRITE; on writable, `send()`, advance cursor; when empty, drop
-//! IO_WRITE. We do the same. `queue` writes to outbuf and returns
-//! whether outbuf is now non-empty (caller registers IO_WRITE).
-//! `flush` does the `send()` and returns whether outbuf is now empty
-//! (caller drops IO_WRITE).
+//! C `receive_meta` (`meta.c:164`): recv → buffer_add → loop
+//! readline → dispatch. We split at the testable seam: `feed`
+//! reads a real fd; `read_line` and dispatch are pure. `queue`/
+//! `flush` mirror C `send_meta`/`handle_meta_write`.
 
 use std::fmt::Write as _;
 use std::io;
@@ -225,34 +173,16 @@ impl LineBuf {
 
     /// Take ownership of the live bytes, leaving the buffer empty.
     ///
-    /// For the SPTPS-transition: when `id_h` peer-branch fires (a
-    /// plaintext line drained from `inbuf`), it installs `conn.sptps`.
-    /// But the SAME `recv()` that delivered the ID line might've also
-    /// delivered the first SPTPS bytes (initiator's KEX, batched in
-    /// one `write()` after the ID). Those bytes are now sitting in
-    /// `inbuf` past the line. `read_line` won't find them (no `\n`).
-    /// Next `feed()` will go SPTPS-mode and read NEW bytes from the
-    /// socket — the buffered KEX is stranded.
+    /// SPTPS-transition handoff: the same `recv()` delivering the ID
+    /// line may also carry the first SPTPS bytes (initiator's KEX,
+    /// Nagle-coalesced). `read_line` won't find them (no `\n`); next
+    /// `feed()` reads NEW bytes and strands them.
     ///
-    /// C handles this by processing the stack buffer iteratively
-    /// inside `receive_meta`'s do-while: after `receive_request`
-    /// fires `id_h` (which sets `protocol_minor=2`), the NEXT loop
-    /// iteration's `if(c->protocol_minor>=2)` is true, and the
-    /// remaining stack-buffer bytes go to `sptps_receive_data`. The
-    /// stack buffer ISN'T `c->inbuf` — it's local. The mode switch
-    /// happens mid-read.
-    ///
-    /// We split feed/dispatch differently (read whole buffer to
-    /// inbuf, THEN drain), so we need an explicit handoff. The
-    /// daemon calls this after `id_h` peer-branch, feeds the result
-    /// to `sptps.receive()`, dispatches those outputs too.
-    ///
-    /// In practice: the initiator usually `write()`s ID, waits for
-    /// our `send_id` reply, THEN starts SPTPS. Separate writes →
-    /// likely separate reads. The piggyback case is rare (Nagle
-    /// coalescing on a slow link) but real. `cmd_join` (which also
-    /// has this transition) handles it the same way — see
-    /// `tinc-tools/cmd/join.rs:"may have leftover bytes"`.
+    /// C handles this mid-read inside `receive_meta`'s do-while: the
+    /// stack buffer is local, and `protocol_minor=2` flips the next
+    /// iteration to `sptps_receive_data`. We split feed/drain, so
+    /// the daemon calls this after `id_h` peer-branch and re-feeds
+    /// to `sptps.receive()`. Same as `tinc-tools/cmd/join.rs`.
     pub fn take_rest(&mut self) -> Vec<u8> {
         // No `Vec::split_off(offset)` then drop the prefix — that's
         // two moves. `data[offset..].to_vec()` copies once, then

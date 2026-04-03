@@ -1,86 +1,28 @@
 //! Ethernet header constants + synthesis. RFC 894 / IEEE 802.3
 //! / IANA registry. NOT platform-specific.
 //!
-//! ──────────── Why this is its own module ───────────────────────────
+//! Hoisted from `fd.rs` when BSD became a second consumer. The
+//! `read_fd`/`write_fd` don't-factor rule is about platform-varying
+//! syscalls; RFC constants don't vary across `cfg`. `pub(crate)`:
+//! header synthesis is a backend concern; the daemon only reads.
 //!
-//! These started life in `fd.rs` (chunk 2) — that was the first
-//! backend that needed to SYNTHESIZE an ethernet header. (`linux.
-//! rs` gets its ethertype from `tun_pi.proto` for free; `raw.rs`
-//! gets the WHOLE header for free; only `fd.rs` had to fake it.)
-//!
-//! Then `bsd/device.c` reading happened (post-chunk-3). The BSD
-//! `TUN`/`TUNEMU` path at `:419-446` is byte-identical to `fd_
-//! device.c` synthesis save for symbolic vs literal constants.
-//! The BSD `UTUN`/`TUNIFHEAD` path at `:451-476` is the same
-//! synthesis at +10. Second consumer.
-//!
-//! The "re-declare module-private when modules are independent"
-//! rule (from `fd.rs`'s `read_fd`/`write_fd` duplication) said
-//! DON'T factor. But that rule was about SYSCALLS — `read_fd` is
-//! `cfg(linux)` because the SAFETY argument is Linux-specific (TUN
-//! fd is datagram, kernel writes once). These four constants are
-//! RFC values: `0x0800` is IPv4's ethertype on every machine that
-//! has ever spoken Ethernet, since 1980. `from_ip_nibble` is
-//! `match (b >> 4) { 4 => ... }` — there is no platform on which
-//! IPv4's version field is something other than 4. The `cfg`-
-//! boundary rule doesn't apply because there IS no `cfg` here.
-//!
-//! Refined rule: **don't factor PLATFORM-VARYING things across
-//! `cfg`. RFC constants don't vary.** They lived in `fd.rs` purely
-//! because that was their first consumer. Second consumer (BSD)
-//! arrives → hoist. THIS is the factoring criterion the chunk-3
-//! prediction was groping for: not "fourth instance," not "shared
-//! state," but **"second consumer of a platform-invariant thing."**
-//!
-//! `pub(crate)`, not `pub`: the daemon doesn't synthesize ether
-//! headers. `route.c` READS them. The synthesis is purely a
-//! device-backend concern (faking the header that the kernel
-//! would write if we'd asked for TAP). Crate-internal.
-//!
-//! ──────────── What's NOT here ──────────────────────────────────────
-//!
-//! `ETH_P_ALL` (raw.rs): NOT a wire ethertype. It's a kernel
-//! socket-option value meaning "give me all protocols." `<linux/
-//! if_ether.h>` defines it next to the real ethertypes for
-//! convenience but it's a Linux PF_PACKET API constant, not an
-//! RFC value. Stays in `raw.rs`.
-//!
-//! `AF_INET` / `AF_INET6` (BSD utun prefix): NOT wire constants.
-//! `AF_INET6` is `10` on Linux, `28` on FreeBSD, `30` on macOS —
-//! the value the BSD kernel writes into the utun prefix is
-//! whatever THAT platform's `AF_INET6` is. The C uses `htonl(AF_
-//! INET6)` which expands per-platform; the kernel reads it on the
-//! same platform. Those go in `bsd.rs` as `libc::AF_INET6` so
-//! they're correct on whichever BSD we're compiling for. **The
-//! distinction MATTERS: `0x86DD` is wire-format truth; `AF_INET6`
-//! is local convention.**
+//! NOT here: `ETH_P_ALL` (Linux PF_PACKET API value, not a wire
+//! ethertype — stays in `raw.rs`); `AF_INET6` (per-platform kernel
+//! ABI: 10/Linux, 28/FreeBSD, 30/macOS — stays in `bsd.rs` via
+//! `libc`). `0x86DD` is wire-format truth; `AF_INET6` is local
+//! convention.
 
 #![allow(clippy::doc_markdown)]
 
 // Ethernet header constants — `ethernet.h`, RFC 894, IEEE 802.3
 
-/// `ETH_HLEN` — `ethernet.h:31` (and `<linux/if_ether.h>`, and
-/// every BSD `<net/ethernet.h>`). dhost(6) + shost(6) + type(2).
-/// The 14-byte header that's been on every Ethernet wire since
-/// 1980. `fd.rs` reads at `+ETH_HLEN`; `bsd.rs` TUN reads at
-/// `+ETH_HLEN`; everybody's offset arithmetic uses this.
-///
-/// gcc-verified vs `<linux/if_ether.h>`; the value is the same
-/// on BSD (it's the ACTUAL header, defined by the medium, not by
-/// any kernel).
+/// `ETH_HLEN` — `ethernet.h:31`. dhost(6) + shost(6) + type(2).
+/// gcc-verified vs `<linux/if_ether.h>`.
 pub(crate) const ETH_HLEN: usize = 14;
 
-/// `ETHER_TYPE_LEN` — `ethernet.h:35`. The big-endian u16 at
-/// offset 12. `ETH_HLEN - ETHER_TYPE_LEN = 12` is where ethertype
-/// lives. Used as the `set_etherheader` slice bound: zero `[..12]`
-/// (the MACs), write `[12..14]` (the type).
-///
-/// Module-private (NOT `pub(crate)`): only `set_etherheader`
-/// reads it. `bsd.rs` will call `set_etherheader()`, not name
-/// the constant (the C uses literal `12` at `bsd/device.c:445`;
-/// our backends use the fn). The `ethertype_at_12` test pins the
-/// arithmetic; that's the only other reader and it's in this
-/// module.
+/// `ETHER_TYPE_LEN` — `ethernet.h:35`. `ETH_HLEN - ETHER_TYPE_LEN
+/// = 12` is the ethertype offset. Module-private: only
+/// `set_etherheader` and the `ethertype_at_12` test read it.
 const ETHER_TYPE_LEN: usize = 2;
 
 /// `ETH_P_IP` — `ethernet.h:44`. IPv4's IANA-registered ethertype.
@@ -95,34 +37,14 @@ pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 
 // from_ip_nibble — version → ethertype
 
-/// IP version nibble → ethertype. `fd_device.c:192-202` AND
-/// `bsd/device.c:427-443` (which is the same logic with literal
-/// constants instead of symbolic ones — `0x08` then `0x00`
-/// instead of `ETH_P_IP >> 8` then `& 0xFF`).
+/// IP version nibble → ethertype. `fd_device.c:192-202` and
+/// `bsd/device.c:427-443` (same logic, literal vs symbolic
+/// constants). IPv4 and IPv6 both put the version in the high
+/// nibble of byte 0; `>> 4` extracts it. The first IP byte is
+/// always at `buf[ETH_HLEN]` regardless of read offset.
 ///
-/// IPv4 and IPv6 BOTH put the protocol version in the high 4
-/// bits of byte 0:
-///
-/// ```text
-///   IPv4:  byte 0 = 0x4? (version=4, IHL in low nibble)
-///   IPv6:  byte 0 = 0x6? (version=6, traffic class high nibble in low)
-/// ```
-///
-/// `byte0 >> 4` extracts the version. The byte being inspected
-/// is the FIRST byte of the IP packet — `buf[ETH_HLEN]` after a
-/// `+14` read, `buf[ETH_HLEN]` after a `+10` read too (the BSD
-/// utun case: kernel wrote 4-byte AF prefix at `[10..14]`, then
-/// IP at `[14..]`; first IP byte is STILL at `ETH_HLEN`).
-///
-/// `None` for unknown version. C `fd_device.c:201` returns
-/// `ETH_P_MAX` (0xFFFF) sentinel; C `bsd/device.c:438-443`
-/// errors directly inside the switch. Either way the caller
-/// treats it as "garbage from the other side, drop." We use
-/// `Option`; the caller decides the error.
-///
-/// Pure function. The testable seam. Four call sites coming:
-/// `fd.rs` (Android), `bsd.rs` TUN, `bsd.rs` UTUN, eventually
-/// any future raw-IP backend.
+/// `None` for unknown: C uses an `ETH_P_MAX` sentinel or errors
+/// inline; both mean "drop". Caller decides the error.
 #[must_use]
 pub(crate) fn from_ip_nibble(ip0: u8) -> Option<u16> {
     match ip0 >> 4 {
@@ -134,28 +56,11 @@ pub(crate) fn from_ip_nibble(ip0: u8) -> Option<u16> {
 
 // set_etherheader — zero MACs + write ethertype
 
-/// `set_etherheader` (`fd_device.c:204-208`); `bsd/device.c
-/// :429-445` does the same thing inline. Write the synthetic
-/// ethernet header: zero MACs, set ethertype.
-///
-/// C does it in two steps: `memset(DATA, 0, 12)` then byte-by-
-/// byte ethertype. `bsd/device.c` does the SAME memset (`:445`:
-/// `memset(DATA, 0, 12)` — literal `12`, not `ETH_HLEN -
-/// ETHER_TYPE_LEN`, but same number). The BSD code does the
-/// ethertype write FIRST then the memset (`:429-430` then `:445`);
-/// `fd_device.c` does memset first. ORDER DOESN'T MATTER —
-/// they touch disjoint bytes (`[0..12]` vs `[12..14]`). We do
-/// memset first; both C sources produce identical bytes.
-///
-/// `to_be_bytes()`: ethertype on the wire is big-endian. C
-/// `fd_device.c:207-208` does `(ethertype >> 8) & 0xFF` then
-/// `& 0xFF` — manual big-endian split. `bsd/device.c:429-430`
-/// does the same with literal hex (`0x08` then `0x00`). We use
-/// std. Same bytes, three ways to spell them.
-///
-/// `buf[..ETH_HLEN]`: caller guarantees ≥14 bytes. Both call
-/// sites (`fd.rs` and future `bsd.rs`) have `MTU`-sized buffers;
-/// `debug_assert` in their `read()` covers.
+/// `set_etherheader` (`fd_device.c:204-208`, `bsd/device.c
+/// :429-445` inline). Zero MACs, write big-endian ethertype.
+/// The two C sources order memset-then-type vs type-then-memset;
+/// they touch disjoint bytes (`[0..12]` vs `[12..14]`) so the
+/// result is identical. Caller guarantees `buf.len() ≥ 14`.
 pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
     // Zero MACs. 12 bytes. NOT 14 — leave ethertype slot alone.
     buf[..ETH_HLEN - ETHER_TYPE_LEN].fill(0);

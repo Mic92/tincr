@@ -1,51 +1,19 @@
 //! `Daemon` — the C globals as one struct, plus `main_loop()`.
 //!
-//! ## What's here
+//! Ports `net.c::main_loop` (`:487-527`): `Timers::tick →
+//! EventLoop::turn → match`. `timeout_handler` (`:180-266`)
+//! degenerates to re-arm-self with zero peers. Signal handlers
+//! (`:316-334`) set `running = false` for TERM/INT/QUIT.
+//! `handle_new_unix_connection` (`net_socket.c:781-812`): accept,
+//! allocate, register. `setup_network` (`net_setup.c:1235-1275`):
+//! abridged call chain.
 //!
-//! Ports `net.c::main_loop` (`net.c:487-527`, 41 LOC) — the
-//! `while(running)` body that `tinc-event` deliberately didn't port.
-//! It's the stitch: `Timers::tick → EventLoop::turn → match`.
+//! `IoWhat` is the `W` in `EventLoop<W>` (six variants for six
+//! C io callbacks). `run()` consumes `self`: C `main_loop()` runs
+//! once, teardown is `Drop`.
 //!
-//! `net.c::timeout_handler` (`net.c:180-266`): with zero peers, the
-//! `for list_each(connection_t, c)` loop iterates control conns only,
-//! and control conns have `last_ping_time = now + 3600` so the timeout
-//! check never fires. The handler degenerates to: re-arm self for +1s.
-//! That's all we port. PROOF that timer re-arm works (the deliberate
-//! semantic difference from C — explicit re-arm vs auto-delete).
-//!
-//! `net.c::sigterm_handler` etc (`net.c:316-334`): three handlers,
-//! all set `running = false` (TERM/INT/QUIT) or do nothing yet (HUP/
-//! ALRM — reload and retry need peers).
-//!
-//! `net_socket.c::handle_new_unix_connection` (`net_socket.c:781-812`):
-//! accept, allocate Connection, register with event loop.
-//!
-//! `net_setup.c::setup_network` (`net_setup.c:1235-1275`): the call
-//! chain that builds the daemon. Heavily abridged.
-//!
-//! ## The dispatch enum
-//!
-//! `IoWhat` is the `W` in `EventLoop<W>`. Six variants for six C
-//! io callbacks (per the census in `tinc-event` lib doc). The match
-//! body in `run()` is the C dispatch table made explicit.
-//!
-//! `TimerWhat` is the timer equivalent. One variant in skeleton
-//! (`Ping`). The other six come with the modules they belong to.
-//!
-//! ## Why `run()` consumes `self`
-//!
-//! C `main_loop()` runs once, returns int (exit code). After it
-//! returns, `close_network_connections()` tears everything down.
-//! Our `run()` consumes `self`; teardown is `Drop`. The lifecycle
-//! is: `Daemon::setup() → run()`. No `&mut self` because there's
-//! nothing to do with a `Daemon` after `run()` returns except drop
-//! it.
-//!
-//! ## Logging targets
-//!
-//! See lib.rs doc for the C-debug-level → log-target mapping. This
-//! module is `target: "tincd"` for the always-level startup/shutdown
-//! lines, `"tincd::conn"` for accept/terminate.
+//! Logging: `target: "tincd"` for startup/shutdown, `"tincd::conn"`
+//! for accept/terminate. See lib.rs for the full mapping.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -1342,41 +1310,18 @@ impl Daemon {
                     log::info!(target: "tincd::auth",
                                "SPTPS handshake completed with {} ({})",
                                conn.name, conn.hostname);
-                    // Chunk 4a stop point. The connection has
-                    // proven itself (key auth passed) but we can't
-                    // proceed to ack_h. Terminate cleanly.
+                    // Chunk 4a stop point: key auth passed but we
+                    // can't proceed to ack_h. The responder's SIG
+                    // was queued in the PREVIOUS Output::Wire arm
+                    // (SIG and HandshakeDone arrive together); if
+                    // we terminate now it never hits the wire.
+                    // C doesn't terminate here (calls send_ack);
+                    // the terminate is our shortcut.
                     //
-                    // BUT: the responder's SIG was queued in the
-                    // PREVIOUS Output::Wire arm (SIG and Handshake-
-                    // Done arrive together — `Sptps::receive_
-                    // handshake` pushes both in the Sig→!was_rekey
-                    // path). If we terminate now, the SIG stays in
-                    // outbuf and never hits the wire. The peer's
-                    // SIG verify never fires; they sit waiting.
-                    //
-                    // The C never has this problem: it doesn't
-                    // terminate on HandshakeDone (it calls send_ack
-                    // and continues). The terminate is OUR shortcut.
-                    //
-                    // Fix: synchronous flush before terminate. In
-                    // production this would be wrong (a slow peer
-                    // could stall us in the flush). But the
-                    // chunk-4a terminate is itself temporary —
-                    // chunk 4b removes it AND the flush (send_ack
-                    // queues, the regular WRITE event flushes
-                    // later, no terminate). The sync-flush lifetime
-                    // is one chunk.
-                    //
-                    // `flush()` returns Ok(true) when outbuf
-                    // empties, Ok(false) for partial (would-block),
-                    // Err for socket errors. We loop until empty
-                    // or error. The localhost peer in the
-                    // integration test always accepts immediately;
-                    // the loop runs once.
-                    // Ok(true) and Err(_) both exit; Ok(false)
-                    // (partial, would-block) loops. The merge isn't
-                    // accidental — "done flushing" and "peer gone,
-                    // give up" both mean "stop trying".
+                    // Sync flush before terminate. Temporary: chunk
+                    // 4b removes both (send_ack queues; regular
+                    // WRITE event flushes). Ok(true) and Err both
+                    // exit; Ok(false) (would-block) loops.
                     while !conn.outbuf.is_empty() {
                         match conn.flush() {
                             // Partial. Loop. Unlikely for a 67-byte

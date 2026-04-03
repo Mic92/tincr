@@ -110,13 +110,8 @@ impl Tun {
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
         // ─── ifr_name pack — BEFORE open
-        // Validate iface name BEFORE opening /dev/net/tun. Why
-        // before: testability. The validation is pure (string
-        // length check); the open needs CAP_NET_ADMIN. Validation-
-        // first means tests can hit the error path without root.
-        // Runtime cost: a 16-byte buffer that's wasted if open
-        // fails. Negligible. Same wasted-early-work tradeoff as
-        // any validate-before-expensive-op pattern.
+        // Validation is pure; open needs CAP_NET_ADMIN. Validate
+        // first so tests can hit the error path without root.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
         // ─── open
@@ -132,25 +127,11 @@ impl Tun {
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(device)?;
 
-        // ─── ifr_flags
-        // C `device.c:77-89`: derive flags from type + routing_mode.
-        // We get the resolved `Mode`; the derivation is the daemon's
-        // job (`net_setup.c`).
-        //
-        // `IFF_NO_PI` only on TAP. TUN keeps the `tun_pi` prefix
-        // (we WANT `proto` for the ethertype-slot trick). C does
-        // the same: `:78` (TUN) is `IFF_TUN` alone; `:86` (TAP) is
-        // `IFF_TAP | IFF_NO_PI`.
-        //
-        // `as i16`: `libc::IFF_TUN` etc are `c_int`; `ifr_flags`
-        // is `c_short`. The constants are 1, 2, 0x1000 — fit in
-        // i16. The cast is value-preserving.
-        //
-        // `IFF_ONE_QUEUE` NOT set. Kernel commit `5d09710` (2.6.27,
-        // 2008) made it a no-op (consumed but ignored — the kernel
-        // always uses one queue now). C `device.c:93-98` still
-        // reads `IffOneQueue` and sets the flag; we don't. Third
-        // C-behavior-drop, "no-op anyway" class.
+        // ─── ifr_flags (C `device.c:77-89`)
+        // `IFF_NO_PI` only on TAP; TUN keeps `tun_pi` for the
+        // ethertype-slot trick. `as i16`: constants fit (1, 2,
+        // 0x1000). `IFF_ONE_QUEUE` NOT set: no-op since kernel
+        // `5d09710` (2.6.27); C `:93-98` still sets it, we don't.
         #[allow(clippy::cast_possible_truncation)]
         let flags = match cfg.mode {
             Mode::Tun => libc::IFF_TUN,
@@ -205,23 +186,15 @@ impl Tun {
 
 // ifr_name packing — the testable seam
 
-/// `[c_char; IFNAMSIZ]` from `Option<&str>`. The testable seam:
-/// `Tun::open` calls this BEFORE `open(/dev/net/tun)`, so the
-/// length validation fires without needing CAP_NET_ADMIN.
+/// `[c_char; IFNAMSIZ]` from `Option<&str>`. Called BEFORE
+/// `open(/dev/net/tun)` so length validation fires without
+/// CAP_NET_ADMIN.
 ///
-/// `None` → all zeros → kernel picks the name (`tun0`, `tap0`,
-/// first free). C `device.c:103`: `if(iface)` guard.
-///
-/// `Some(name)` with `len >= 16` → `Err`. C truncates (`strncpy`
-/// then `[15]=0`); we reject. STRICTER. The truncation failure
-/// mode: `tinc.conf` says `Interface = sixteenchars_long`,
-/// kernel sees `sixteenchars_lo`, `tinc-up` script gets
-/// `INTERFACE=sixteenchars_lo`, user's `ip addr add ... dev
-/// sixteenchars_long` fails ENODEV three steps later. Reject at
-/// the source.
-///
-/// `c_char` is `i8` on x86_64, `u8` on aarch64. We cast each
-/// byte; the wrap is sound (kernel reads bytes, not signed ints).
+/// `None` → zeros → kernel picks (C `:103` `if(iface)`).
+/// `len >= 16` → `Err`. STRICTER than C's `strncpy + [15]=0`
+/// truncation (which fails three steps later as `ENODEV` in the
+/// user's `ip addr add`). `c_char` sign varies by arch; cast is
+/// sound (kernel reads bytes).
 ///
 /// # Errors
 /// `InvalidInput` for too-long name. The error message includes
@@ -476,21 +449,11 @@ impl Device for Tun {
                     ));
                 }
 
-                // C `:162`: `memset(DATA(packet), 0, 12)`. Zeroes
-                // the synthetic ethernet header: dst MAC (6) +
-                // src MAC (6). The src-MAC zeroing OVERWRITES
-                // `tun_pi.flags` (bytes 10-11 from our perspective,
-                // bytes 22-23 from the daemon's `data` perspective).
-                // `tun_pi.flags` was always 0 from the kernel rx
-                // path anyway (`TUN_PKT_STRIP` is the only flag,
-                // set on tx not rx); the memset is idempotent on
-                // those bytes.
-                //
-                // BUT it also zeroes bytes 0-9, which we never
-                // touched. Those are the dst-MAC + first 4 of
-                // src-MAC. Uninitialized? No — the daemon's
-                // `vpn_packet_t` is reused across reads; previous
-                // packet's bytes are there. The memset matters.
+                // C `:162`: `memset(DATA, 0, 12)`. Src-MAC zeroing
+                // overwrites `tun_pi.flags` at [10..12] (always 0
+                // on rx anyway). Bytes [0..10] hold the previous
+                // packet's data (`vpn_packet_t` reused); memset
+                // matters.
                 buf[..12].fill(0);
 
                 // C `:163`: `packet->len = inlen + 10`. The 10 is
@@ -534,38 +497,19 @@ impl Device for Tun {
             // C `:188-196`. Zero `buf[10..12]` (`tun_pi.flags`),
             // write `buf[10..]`.
             Mode::Tun => {
-                // C `:188`: `DATA(packet)[10] = DATA(packet)[11]
-                // = 0`. The two bytes at offset 10-11 from `DATA`
-                // (= from our `buf`) are `tun_pi.flags` from the
-                // kernel's perspective. Zero them. The ethertype
-                // at `[12..14]` is left alone — `route.c` set it.
-                //
-                // Idempotent for read-then-write packets (already
-                // zero from the read's memset). Matters for
-                // synthesized packets (`route.c`'s ICMP/ARP
-                // builders) where those bytes might be nonzero.
-                //
-                // The mutation is why `&mut [u8]` not `&[u8]`. C
-                // mutates `vpn_packet_t *` in place too.
+                // C `:188`: zero `tun_pi.flags` at [10..12].
+                // Ethertype at [12..14] left alone (`route.c` set
+                // it). Idempotent for read-then-write; matters for
+                // synthesized ICMP/ARP. Hence `&mut [u8]`.
                 debug_assert!(buf.len() > 12, "TUN write buf too short");
                 buf[10] = 0;
                 buf[11] = 0;
 
-                // C `:190`: `write(device_fd, DATA+10, packet->
-                // len - 10)`. The write strips the synthetic
-                // ethernet header (well, the first 10 of 14 bytes
-                // — the ethertype goes through as `tun_pi.proto`).
+                // C `:190`: write at +10; ethertype passes through
+                // as `tun_pi.proto`. TUN write is datagram-atomic.
+                // Returned count is kernel write count, NOT `+10`
+                // (stats want "bytes to kernel").
                 let n = write_fd(self.fd.as_raw_fd(), &buf[10..])?;
-                // The C returns `false` on write error, doesn't
-                // check short writes. TUN write is atomic per-
-                // packet (datagram semantics); short write
-                // shouldn't happen. We return what `write()` gave
-                // us; daemon can check if it cares.
-                //
-                // The returned count is the kernel write count,
-                // NOT `+10`. The daemon's stats counters want
-                // "bytes that went to the kernel"; the synthetic
-                // header didn't go anywhere.
                 Ok(n)
             }
 
@@ -594,24 +538,10 @@ impl Device for Tun {
 
 // read/write — direct syscalls, not File::read
 
-// Why not `File::read`/`File::write`? Two reasons.
-//
-// (1) `File::read` goes through `io::Read::read` which is fine
-//     for files but TUN is a datagram device — one read = one
-//     packet. `File::read` is correct here (it's a thin `read(2)`
-//     wrapper) but it doesn't DOCUMENT the datagram semantics.
-//     Direct `libc::read` makes it explicit: we're reading the
-//     fd, one packet, no buffering, no retry on short read.
-//
-// (2) `File::read` takes `&self` (the fd is shareable). We have
-//     `&mut self` from the trait. Using `&self.fd` from inside
-//     `&mut self` is fine (reborrow), but `&mut self → as_raw_fd
-//     → libc::read` is one fewer borrow indirection. Minor.
-//
-// Mostly it's (1): the syscall IS the documentation. `read(2)`
-// on a TUN fd is well-specified; `File::read` on a TUN fd is
-// "whatever Rust's `File` does, hopefully thin." It is thin. But
-// "hopefully" is the wrong word in the daemon's hot path.
+// Direct `libc::read`/`write` instead of `File::read`: TUN is a
+// datagram device (one read = one packet, no retry on short read).
+// `File::read` is correct (thin `read(2)` wrapper) but doesn't
+// document the datagram semantics. The syscall IS the documentation.
 
 /// `read(2)` on the TUN fd. Datagram semantics: one read = one
 /// packet, atomic. Kernel-side `tun_chr_read_iter` dequeues one
