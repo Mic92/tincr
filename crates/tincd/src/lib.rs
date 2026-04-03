@@ -34,5 +34,6 @@ pub mod keys;
 pub mod listen;
 pub mod proto;
 pub mod seen;
+pub mod subnet_tree;
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
