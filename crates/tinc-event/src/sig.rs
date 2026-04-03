@@ -145,6 +145,9 @@ impl<W: Copy> SelfPipe<W> {
     /// `pipe_init` checks `pipefd[0] == -1` at the call site
     /// (`signal.c:72-74`) — same protection. Multiple self-pipes
     /// don't make sense (one global handler per signal).
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if `pipe2(O_CLOEXEC)` fails.
     pub fn new() -> io::Result<Self> {
         // C signal.c:58 `pipe(pipefd)`. We add O_CLOEXEC (the C
         // doesn't, which means the pipe leaks into `script.c`'s
@@ -186,6 +189,9 @@ impl<W: Copy> SelfPipe<W> {
     /// `sigaction()` not `signal()` — see module doc. `SA_RESTART`
     /// so syscalls auto-retry on EINTR (the C gets this implicitly
     /// from glibc/BSD `signal()` semantics).
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if `sigaction` fails.
     ///
     /// # Panics
     /// If `signum >= 32` (real-time signals; tincd doesn't use them).

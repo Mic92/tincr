@@ -57,8 +57,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-// `as` casts on file/line numbers — small, monotone, never wrapping.
-#![allow(clippy::cast_possible_truncation)]
 
 pub mod parse;
 pub mod pem;

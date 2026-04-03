@@ -83,7 +83,6 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![allow(clippy::doc_markdown)]
-#![allow(clippy::missing_errors_doc)]
 
 mod io;
 mod timer;

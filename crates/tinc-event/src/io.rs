@@ -101,6 +101,9 @@ pub struct EventLoop<W> {
 impl<W: Copy> EventLoop<W> {
     /// Ports the `epoll_create` at `linux/event.c:37` + `Events`
     /// allocation.
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if epoll/kqueue creation fails.
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             poll: Poll::new()?,
@@ -122,6 +125,10 @@ impl<W: Copy> EventLoop<W> {
     /// The fd is registered with the kernel (via `SourceFd`) here.
     /// `EventLoop` stores it for later reregister/deregister; does
     /// NOT close it on drop or `del`.
+    ///
+    /// # Errors
+    /// Propagates `epoll_ctl(ADD)` failures — `EEXIST` if the fd is
+    /// already registered, `EBADF`/`ENOMEM` from the kernel.
     pub fn add(&mut self, fd: RawFd, interest: Io, what: W) -> io::Result<IoId> {
         let idx = self.free.pop().unwrap_or_else(|| {
             self.slots.push(None);
@@ -162,6 +169,9 @@ impl<W: Copy> EventLoop<W> {
     /// is `MOD` directly (epoll on Linux, `EV_ADD` on kqueue which
     /// upserts). We don't have the `flags == 0` case (see `Io` docs),
     /// so reregister is right.
+    ///
+    /// # Errors
+    /// Propagates `epoll_ctl(MOD)` failures from `reregister`.
     ///
     /// # Panics
     /// If `id` is dangling. C dereferences caller-owned `io_t*` —
@@ -259,6 +269,11 @@ impl<W: Copy> EventLoop<W> {
     /// that just changed. C's generation bail handles that. We check
     /// `interest.wants` between WRITE and READ dispatch for the same
     /// slot. Same effect.
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error from `epoll_wait` / `kqueue`.
+    /// `EINTR` is *not* an error — it returns `Ok(())` with `out`
+    /// empty so the caller's `while running` loop re-checks its flag.
     pub fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
         out.clear();
 

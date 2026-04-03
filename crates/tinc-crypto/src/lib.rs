@@ -20,11 +20,6 @@
     // code (function names, types, file paths) and trust the reader to know
     // what ChaCha is.
     clippy::doc_markdown,
-    // We deliberately use .unwrap()/.expect() at points where the failure is
-    // structurally impossible (slice-of-known-length → array, HMAC key length)
-    // and document why at each site. Forcing # Panics sections for those would
-    // make the doc-comments lie about reachability.
-    clippy::missing_panics_doc,
 )]
 
 pub mod b64;
