@@ -116,7 +116,7 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 /// for any filesystem failure. `Exists` is *not* possible — we append,
 /// not excl.
 pub fn run(paths: &Paths) -> Result<(), CmdError> {
-    // ─── Get our name ───────────────────────────────────────────────
+    // ─── Get our name
     // C `tincctl.c:2360`: `if(!name) name = get_my_name(false)`. The
     // `false` means don't print an error if missing — C falls through
     // to writing `ed25519_key.pub` as a PEM file in that case
@@ -129,7 +129,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     let priv_path = paths.ed25519_private();
     let host_path = paths.host_file(&name);
 
-    // ─── disable_old_keys on both files ─────────────────────────────
+    // ─── disable_old_keys on both files
     // C `tincctl.c:338` runs it via `ask_and_open` for each of the two
     // opens. We run both up front, then both writes. Same effect (each
     // disable+write pair is independent of the other), and "do all the
@@ -142,13 +142,13 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     disable_old_keys(&priv_path)?;
     disable_old_keys(&host_path)?;
 
-    // ─── Generate ───────────────────────────────────────────────────
+    // ─── Generate
     // Same progress chatter as `init`. C `tincctl.c:362-370`.
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
 
-    // ─── Append private (PEM) ───────────────────────────────────────
+    // ─── Append private (PEM)
     // C: `ask_and_open(fname, "...", "a", ask, 0600)`. Mode `"a"` is
     // `O_WRONLY | O_CREAT | O_APPEND`. The 0600 is the *create* mode;
     // if the file exists (the rotation case), the existing mode wins,
@@ -162,7 +162,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
         w.flush().map_err(io_err(&priv_path))?;
     }
 
-    // ─── Append public (config line) ────────────────────────────────
+    // ─── Append public (config line)
     // C: `ask_and_open(..., 0666)` then `fprintf(f, "Ed25519PublicKey
     // = %s\n", ...)`. Same LSB-first b64 as init. Same
     // highest-stakes-line caveat.
@@ -195,7 +195,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// Does NOT error on file-not-found — that's `Ok(false)`.
 pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
-    // ─── Open source ────────────────────────────────────────────────
+    // ─── Open source
     // C: `FILE *r = fopen(filename, "r"); if(!r) return false;`
     // ENOENT is silent-false. EACCES is also silent-false in C (it
     // doesn't check errno). We follow: any open failure on the source
@@ -205,7 +205,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         return Ok(false);
     };
 
-    // ─── Preserve mode ──────────────────────────────────────────────
+    // ─── Preserve mode
     // C: `struct stat st = {.st_mode = 0600}; fstat(fileno(r), &st);`
     // The `= 0600` initializer is the fallback if fstat fails (which
     // it won't on a just-opened fd, but defensiveness). We `metadata()`
@@ -222,7 +222,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         .map(|m| m.permissions())
         .map_err(io_err(path))?;
 
-    // ─── Open tmpfile ───────────────────────────────────────────────
+    // ─── Open tmpfile
     // C: `snprintf(tmpfile, ..., "%s.tmp", filename)`. Just `.tmp`
     // suffix, no mkstemp randomness. There's a race here (concurrent
     // `disable_old_keys` on the same path stomp each other's tmpfile)
@@ -251,7 +251,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     // unlink(tmpfile)` in each error branch; we do it once.
     let mut tmp_guard = TmpGuard(Some(tmp_path.clone()));
 
-    // ─── Copy with #-prefixing ──────────────────────────────────────
+    // ─── Copy with #-prefixing
     let mut r = BufReader::new(r);
     let mut w = BufWriter::new(w);
     let mut disabled = false;
@@ -284,7 +284,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         // `buf[16] = '\n'`, and `'\n'` is not in `" \t="`. Correct.
         // A line `Ed25519PublicKey=x\n` has `buf[16] = '='`. Match.
 
-        // ─── PEM block detection ────────────────────────────────────
+        // ─── PEM block detection
         // C `keys.c:33`: `if(!block && !strncmp(buf, "-----BEGIN ", 11))`
         // The `!block` means a BEGIN inside a block is ignored (treated
         // as block content). Shouldn't happen in well-formed PEM but
@@ -300,7 +300,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
             in_block = true;
         }
 
-        // ─── Config-line detection ──────────────────────────────────
+        // ─── Config-line detection
         // C `keys.c:40`: `!strncasecmp(buf, "Ed25519PublicKey", 16)
         // && strchr(" \t=", buf[16])`. Prefix-16-case-insensitive
         // then delim-at-16.
@@ -328,7 +328,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
             disabled = true;
         }
 
-        // ─── Write (with # if disabled) ─────────────────────────────
+        // ─── Write (with # if disabled)
         // C `keys.c:46-54`: `if(block || ed25519pubkey) fputc('#', w);
         // fputs(buf, w);`. The # goes before the whole line including
         // its newline, so `#-----BEGIN ...\n`. Exactly one byte
@@ -338,7 +338,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         }
         w.write_all(line.as_bytes()).map_err(io_err(&tmp_path))?;
 
-        // ─── PEM block end detection ────────────────────────────────
+        // ─── PEM block end detection
         // C `keys.c:57`: AFTER the write. `if(block && !strncmp(buf,
         // "-----END ", 9))`. The END line itself gets the `#` (we
         // already wrote it above), and NEXT iteration `in_block` is
@@ -354,7 +354,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     w.flush().map_err(io_err(&tmp_path))?;
     drop(w); // close the fd before rename — not required on Unix, but clean
 
-    // ─── If nothing was disabled, leave the original alone ──────────
+    // ─── If nothing was disabled, leave the original alone
     // C `keys.c:71-101`: the whole rename dance is inside
     // `if(disabled)`. The `else` branch (`keys.c:103`) just unlinks
     // the tmpfile. (We wrote a perfect copy, but rename-ing a copy
@@ -367,7 +367,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         return Ok(false);
     }
 
-    // ─── Preserve mode, then atomic rename ──────────────────────────
+    // ─── Preserve mode, then atomic rename
     // C does mode-at-create via `fopenmask`. We do it now, just before
     // rename. See module doc "Mode preservation" for why the timing
     // difference doesn't matter.
@@ -433,9 +433,7 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
     opts.open(path).map_err(io_err(path))
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

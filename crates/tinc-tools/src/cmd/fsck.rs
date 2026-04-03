@@ -139,7 +139,6 @@ use tinc_crypto::sign::PUBLIC_LEN;
 /// for `TY_PRIVATE`.
 const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
-// ────────────────────────────────────────────────────────────────────
 // Finding — one diagnostic or fix-result.
 //
 // Variants map roughly to C `fprintf(stderr, ...)` call sites. The
@@ -152,13 +151,12 @@ const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 // strings. Why not full structure (every field of every message):
 // 30 variants for 18 message shapes, half of which are tested once.
 // Middle ground: variant per *kind*, strings/paths as payload.
-// ────────────────────────────────────────────────────────────────────
 
 /// A single fsck diagnostic. Produced during the scan; the binary
 /// formats them to stderr. Tests `matches!` on the variant.
 #[derive(Debug)]
 pub enum Finding {
-    // ─── Fatal: no point continuing keypair check ───────────────────
+    // ─── Fatal: no point continuing keypair check
     /// `tinc.conf` doesn't exist. `fsck.c:237` ENOENT branch.
     TincConfMissing,
     /// `tinc.conf` exists but `access(R_OK)` failed. `fsck.c:243`
@@ -180,7 +178,7 @@ pub enum Finding {
     /// level (both are "no private key found"); neither do we.
     NoPrivateKey { path: PathBuf },
 
-    // ─── Keypair coherence ──────────────────────────────────────────
+    // ─── Keypair coherence
     /// `hosts/NAME` has neither `Ed25519PublicKey =` nor a PEM block.
     /// C: `fsck.c:423` "No (usable) public Ed25519 key found." Fixable.
     NoPublicKey { host_file: PathBuf },
@@ -194,7 +192,7 @@ pub enum Finding {
     /// `Ed25519PublicKeyFile` pointing elsewhere, theoretically).
     HostFileUnreadable { host_file: PathBuf },
 
-    // ─── File modes (Unix only) ─────────────────────────────────────
+    // ─── File modes (Unix only)
     /// Private key file has mode `& 077 != 0` — group/other readable.
     /// `fsck.c:214`. Fixable iff `uid_match` (you can't chmod a file
     /// you don't own without root).
@@ -204,7 +202,7 @@ pub enum Finding {
         uid_match: bool,
     },
 
-    // ─── Scripts ────────────────────────────────────────────────────
+    // ─── Scripts
     /// `*-up`/`*-down` in confbase that isn't `tinc-`/`host-`/
     /// `subnet-`. `fsck.c:474`. Not fixable — fsck doesn't know what
     /// you intended. The C prints an explanation once (the `static
@@ -225,7 +223,7 @@ pub enum Finding {
     /// can't run. Contributes to `!ok` (`return false` in C).
     DirUnreadable { path: PathBuf, err: String },
 
-    // ─── Per-variable validity ──────────────────────────────────────
+    // ─── Per-variable validity
     /// `VAR_OBSOLETE` flag set. `fsck.c:170`. The four known: `Graph
     /// DumpFile`, `PrivateKey`, `PublicKey`, `PublicKeyFile`. Not
     /// fixable — fsck doesn't delete config lines.
@@ -248,7 +246,7 @@ pub enum Finding {
     /// number to print.
     DuplicateVar { name: String, where_: String },
 
-    // ─── Fix results ────────────────────────────────────────────────
+    // ─── Fix results
     /// `chmod` succeeded. C: `fsck.c:223`, `fsck.c:441`.
     FixedMode { path: PathBuf },
     /// `disable_old_keys` + append-PEM-pubkey succeeded. `fsck.c:289`.
@@ -482,9 +480,7 @@ impl fmt::Display for Finding {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Report
-// ────────────────────────────────────────────────────────────────────
 
 /// Everything fsck found, plus the bottom-line exit code.
 #[derive(Debug)]
@@ -501,9 +497,7 @@ pub struct Report {
     pub ok: bool,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The scan
-// ────────────────────────────────────────────────────────────────────
 
 /// `fsck()` — `fsck.c:640-679`.
 ///
@@ -528,7 +522,7 @@ pub struct Report {
 pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     let mut findings = Vec::new();
 
-    // ─── Phase 0: tinc.conf existence + Name ────────────────────────
+    // ─── Phase 0: tinc.conf existence + Name
     // C: `read_node_name()` (`fsck.c:230`). The `access(R_OK)` check
     // distinguishes ENOENT (suggest `tinc init`) from EACCES (suggest
     // `sudo`). We check via metadata — `access(2)` checks effective
@@ -565,7 +559,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
         });
     };
 
-    // ─── Phase 1: read full config tree ─────────────────────────────
+    // ─── Phase 1: read full config tree
     // C `fsck.c:660-661`: `read_server_config(&config) &&
     // read_host_config(&config, name, true)`. The `&&` short-circuits
     // — if server config fails, host isn't read. We do the same.
@@ -582,7 +576,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     // Track keypair-phase success separately. C: `bool success`.
     let keypair_ok = match &config_result {
         Ok(cfg) => {
-            // ─── Phase 2: keypair check ─────────────────────────────
+            // ─── Phase 2: keypair check
             // C `fsck.c:666`: `if(success) success = check_keypairs`.
             check_keypairs(paths, cfg, &host_file, force, &mut findings)
         }
@@ -592,7 +586,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
         }
     };
 
-    // ─── Phase 3+4: scripts + variables ─────────────────────────────
+    // ─── Phase 3+4: scripts + variables
     // C `fsck.c:672`: `success = success & check_scripts_and_configs()`.
     // **Bitwise `&`, not `&&`** — the comment at `fsck.c:670` says
     // "this check does not require working configuration, so run it
@@ -619,9 +613,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     })
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Phase 2: Keypair coherence
-// ────────────────────────────────────────────────────────────────────
 
 /// `check_keypairs` (`fsck.c:563`) + `check_public_keys` (`fsck.c:
 /// 530`) + `check_ec_pubkey` (`fsck.c:410`) + `test_ec_keypair`
@@ -639,7 +631,7 @@ fn check_keypairs(
     force: bool,
     findings: &mut Vec<Finding>,
 ) -> bool {
-    // ─── Load private key ───────────────────────────────────────────
+    // ─── Load private key
     // C `keys.c:108`: check `Ed25519PrivateKeyFile` config first,
     // fall back to `<confbase>/ed25519_key.priv`. fsck respects this;
     // genkey/sign currently don't (see module doc).
@@ -662,7 +654,7 @@ fn check_keypairs(
         return false;
     };
 
-    // ─── Check private key file mode ────────────────────────────────
+    // ─── Check private key file mode
     // C `fsck.c:568`: `if(priv_keyfile) check_key_file_mode`. The
     // `if` is because `read_ecdsa_private_key`'s out-param can be
     // NULL on failure — but we already returned above on failure, so
@@ -671,7 +663,7 @@ fn check_keypairs(
     #[cfg(unix)]
     check_key_mode(&priv_path, force, findings);
 
-    // ─── Host file readability ──────────────────────────────────────
+    // ─── Host file readability
     // C `fsck.c:541`: `if(access(host_file, R_OK))` — warn but
     // continue. The pubkey load below might still succeed via
     // `Ed25519PublicKeyFile` (different path) or might fail more
@@ -688,14 +680,14 @@ fn check_keypairs(
         // kept for C parity.
     }
 
-    // ─── Load public key from config tree + host file ───────────────
+    // ─── Load public key from config tree + host file
     // C `keys.c:165` `read_ecdsa_public_key`. Three-step lookup:
     //   1. `Ed25519PublicKey = <b64>` config entry
     //   2. `Ed25519PublicKeyFile = <path>` → PEM-read that path
     //   3. PEM-read `hosts/NAME` directly (default for #2)
     let pubkey = load_ec_pubkey(cfg, host_file);
 
-    // ─── Coherence check ────────────────────────────────────────────
+    // ─── Coherence check
     // C `fsck.c:410-425` `check_ec_pubkey`. Four-way matrix on
     // (priv?, pub?). priv=None already returned above. Remaining:
     //
@@ -773,7 +765,7 @@ fn check_keypairs(
 /// `VAR_HOST`-only (per the table) so it'll only ever come from the
 /// host file in practice, but the lookup doesn't care.
 fn load_ec_pubkey(cfg: &Config, default_host_file: &Path) -> Option<[u8; PUBLIC_LEN]> {
-    // ─── Step 1: Ed25519PublicKey = <b64> ───────────────────────────
+    // ─── Step 1: Ed25519PublicKey = <b64>
     // C `keys.c:179`: `if(get_config_string(lookup_config(...)))`.
     // The b64 decode + length check is `ecdsa_set_base64_public_key`
     // (`ed25519/ecdsa.c:42`); on bad b64 it returns NULL and the C
@@ -786,7 +778,7 @@ fn load_ec_pubkey(cfg: &Config, default_host_file: &Path) -> Option<[u8; PUBLIC_
         return raw.try_into().ok();
     }
 
-    // ─── Step 2+3: Ed25519PublicKeyFile or default → PEM read ───────
+    // ─── Step 2+3: Ed25519PublicKeyFile or default → PEM read
     // C `keys.c:187-199`. The default (when `Ed25519PublicKeyFile`
     // unset) is `hosts/NAME`, which is *also* the file we'd parse for
     // the config-line form. So step 1 and step 3 read the same file.
@@ -816,7 +808,7 @@ fn fix_public_key(
     pubkey: &[u8; PUBLIC_LEN],
     findings: &mut Vec<Finding>,
 ) -> bool {
-    // ─── disable_old_keys ───────────────────────────────────────────
+    // ─── disable_old_keys
     // C `fsck.c:274`: `if(!disable_old_keys(fname, "public Ed25519
     // key")) return false`. Our `disable_old_keys` is `Result<bool>`
     // — `Err` is the C `false` (write/rename failed), both `Ok(true)`
@@ -831,7 +823,7 @@ fn fix_public_key(
         return false;
     }
 
-    // ─── Append PEM block ───────────────────────────────────────────
+    // ─── Append PEM block
     // C `fsck.c:278-294`: `fopen("a")` + `ecdsa_write_pem_public_key`.
     // The C uses `fopen` directly (not `fopenmask`) — append mode,
     // existing perms preserved, no chmod. We use `OpenOptions::
@@ -867,9 +859,7 @@ fn fix_public_key(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Phase 3: Key file mode
-// ────────────────────────────────────────────────────────────────────
 
 /// `check_key_file_mode` (`fsck.c:205`). Unix-only — the C has a
 /// no-op stub for Windows.
@@ -934,9 +924,7 @@ fn check_key_mode(path: &Path, force: bool, findings: &mut Vec<Finding>) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Phase 4: Scripts
-// ────────────────────────────────────────────────────────────────────
 
 /// `check_scripts_and_configs` (`fsck.c:624`) minus the
 /// `check_config_variables` half (that's `check_variables` below).
@@ -1021,7 +1009,7 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
 
         let full_path = dir.join(fname);
 
-        // ─── Prefix validation (confbase only) ──────────────────────
+        // ─── Prefix validation (confbase only)
         // C `fsck.c:474-485`. hosts/ skips this — `check_script_host
         // dir` does the suffix-strip-then-ignore dance (see module
         // doc), accepting any prefix as a node name.
@@ -1032,7 +1020,7 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
             continue;
         }
 
-        // ─── Executability check ────────────────────────────────────
+        // ─── Executability check
         // C `fsck.c:428` `check_config_mode`: `access(fname, R_OK |
         // X_OK)`. We don't have `access(2)` directly without the
         // `nix` `unistd` feature, but we can check via metadata
@@ -1115,9 +1103,7 @@ fn check_script_exec(path: &Path, force: bool, findings: &mut Vec<Finding>) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Phase 5: Variables
-// ────────────────────────────────────────────────────────────────────
 
 /// `check_config_variables` (`fsck.c:607`). Scan server config + each
 /// `hosts/*` for obsolete/wrong-file/duplicate vars. Warnings only;
@@ -1130,7 +1116,7 @@ fn check_script_exec(path: &Path, force: bool, findings: &mut Vec<Finding>) {
 /// to get that back. We do the same. The waste is one extra pass over
 /// ~100 lines of config; not worth a refactor.
 fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
-    // ─── Server config ──────────────────────────────────────────────
+    // ─── Server config
     // C `fsck.c:608`: `check_conffile(NULL, true)`. NULL nodename →
     // server.
     if let Ok(cfg) = read_server_config(&paths.confbase) {
@@ -1146,7 +1132,7 @@ fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
     // let Ok` already does it). A `ConfigReadFailed` was already
     // pushed in Phase 1 if this is the case.
 
-    // ─── Each host file ─────────────────────────────────────────────
+    // ─── Each host file
     // C `fsck.c:612-618`: `opendir(hosts); for each ent: if check_id
     // (d_name) check_conffile(d_name, false)`. The `check_id` filter
     // skips `.`, `..`, and any `hosts/*` that isn't a valid node
@@ -1191,7 +1177,7 @@ fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
 /// `where_`: the C `nodename ? nodename : "tinc.conf"` string — what
 /// to print in the duplicate message. NOT a path.
 fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Finding>) {
-    // ─── Per-entry pass: obsolete + wrong-file ──────────────────────
+    // ─── Per-entry pass: obsolete + wrong-file
     // C `fsck.c:154-183`. The `count[i]` array is `alloca`'d in C;
     // we use a `Vec` of the same length. Index = position in `VARS`
     // (which we preserved from C — see `vars.rs` module doc).
@@ -1252,7 +1238,7 @@ fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Fi
         }
     }
 
-    // ─── Duplicate pass ─────────────────────────────────────────────
+    // ─── Duplicate pass
     // C `fsck.c:185-190`. Second loop over `count[]`. Separate pass
     // because the duplicate warning is per-variable-NAME, not
     // per-entry — it doesn't have a single line number.
@@ -1269,9 +1255,7 @@ fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Fi
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Platform helpers
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(unix)]
 fn is_root() -> bool {
@@ -1293,9 +1277,7 @@ fn is_root() -> bool {
 #[allow(unused_imports)]
 use lookup_var as _;
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1327,9 +1309,7 @@ mod tests {
         report.findings.iter().filter(|x| f(x)).count()
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Phase 0: tinc.conf existence
-    // ────────────────────────────────────────────────────────────────
 
     /// Clean `tinc init` → fsck passes, zero findings. The contract
     /// test: `init` and `fsck` must agree on what "clean" means. If
@@ -1381,9 +1361,7 @@ mod tests {
         assert_eq!(count(&r, |f| matches!(f, Finding::NoName)), 1);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Phase 2: Keypair
-    // ────────────────────────────────────────────────────────────────
 
     /// `ed25519_key.priv` deleted → `NoPrivateKey`, fail. The
     /// suggestion mentions `generate-ed25519-keys`.
@@ -1634,9 +1612,7 @@ mod tests {
         assert!(r.ok, "PEM-form pubkey should pass: {:?}", r.findings);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Phase 3: Key file mode
-    // ────────────────────────────────────────────────────────────────
 
     /// 0640 priv key → `UnsafeKeyMode` warning. Doesn't fail fsck
     /// (it's a warning, and the keypair check still passes).
@@ -1696,9 +1672,7 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Phase 4: Scripts
-    // ────────────────────────────────────────────────────────────────
 
     /// `tinc-up` made non-executable → `ScriptNotExecutable`.
     #[cfg(unix)]
@@ -1851,9 +1825,7 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Phase 5: Variables
-    // ────────────────────────────────────────────────────────────────
 
     /// `GraphDumpFile` in tinc.conf → `ObsoleteVar`.
     #[test]
@@ -2096,9 +2068,7 @@ mod tests {
         assert!(path.ends_with("10-net.conf"));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Display formatting smoke tests
-    // ────────────────────────────────────────────────────────────────
 
     /// Every variant has a `Display` impl. Exhaustiveness check.
     /// (The match in `Display` is already exhaustive — Rust enforces

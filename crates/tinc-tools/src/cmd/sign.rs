@@ -210,7 +210,7 @@ fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
 /// (`ed25519/sign.c` — the actual crypto can't fail), and our
 /// `SigningKey::sign` returns `[u8; 64]` directly.
 pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Result<(), CmdError> {
-    // ─── Load name + private key ────────────────────────────────────
+    // ─── Load name + private key
     // C `tincctl.c:2776-2801`: `get_my_name(true)` then read PEM. The
     // `true` is `verbose` — it controls whether `get_my_name` prints
     // an error itself. Ours always returns the error (caller prints).
@@ -223,10 +223,10 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     // can't `match` on Io-vs-Pem) but this is leaf-level — the caller
     // is the binary, which prints + exits.
 
-    // ─── Slurp input ────────────────────────────────────────────────
+    // ─── Slurp input
     let data = slurp(input)?;
 
-    // ─── Build signed message + sign ────────────────────────────────
+    // ─── Build signed message + sign
     // C `tincctl.c:2831-2847`. The `b64encode_tinc(sig, sig, 64)`
     // (`:2849`) encodes in-place into a `char sig[87]` — the 87 is
     // 86 b64 chars + NUL. Our encode returns a fresh `String`.
@@ -239,7 +239,7 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     // problem is in `tinc-crypto::b64`, not here.
     debug_assert_eq!(sig_b64.len(), SIG_B64_LEN);
 
-    // ─── Emit ───────────────────────────────────────────────────────
+    // ─── Emit
     // C `tincctl.c:2852-2853`: `fprintf(stdout, "Signature = %s %ld
     // %s\n", name, t, sig)` then `fwrite(data, len, 1, stdout)`.
     //
@@ -337,7 +337,7 @@ pub struct Verified {
 /// (Distinct from `Io` — the file opened fine, the contents are
 /// wrong.)
 pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verified, CmdError> {
-    // ─── Find the header line ───────────────────────────────────────
+    // ─── Find the header line
     // C `tincctl.c:2916-2924`: `memchr(data, '\n', len)`. If no
     // newline, OR header longer than `MAX_STRING_SIZE - 1`, fail. The
     // C then `*newline++ = '\0'` to NUL-terminate for `sscanf`; we
@@ -354,7 +354,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     let header = &blob[..nl];
     let body = &blob[nl + 1..];
 
-    // ─── Parse header ───────────────────────────────────────────────
+    // ─── Parse header
     // C `tincctl.c:2930`: `sscanf(data, "Signature = %s %ld %s",
     // signer, &t, sig) != 3 || strlen(sig) != 86 || !t || !check_id`.
     //
@@ -424,7 +424,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // ─── Match signer ───────────────────────────────────────────────
+    // ─── Match signer
     // C `tincctl.c:2935-2943`: `if(node && strcmp(node, signer))`
     // (where `node = NULL` is the `*` case).
     let resolved_signer = match signer {
@@ -440,14 +440,14 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         }
     };
 
-    // ─── Load public key ────────────────────────────────────────────
+    // ─── Load public key
     // C `tincctl.c:2960-2982`: `fopen(hosts/NAME)`, `get_pubkey`,
     // fall back to `ecdsa_read_pem_public_key` if `get_pubkey`
     // returned NULL.
     let host_path = paths.host_file(resolved_signer);
     let pubkey = load_host_pubkey(&host_path)?;
 
-    // ─── Decode sig + reconstruct trailer + verify ──────────────────
+    // ─── Decode sig + reconstruct trailer + verify
     // C `tincctl.c:2984`: `b64decode_tinc(sig, sig, 86) != 64 ||
     // !ecdsa_verify(...)`. Both failures map to "Invalid signature".
     let sig_raw =
@@ -508,7 +508,7 @@ pub fn verify_cmd(
 /// `tinc-conf::parse_file` replaces the strcspn/strspn tokenizer (the
 /// fourth — see module doc).
 fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
-    // ─── Try config-line form ───────────────────────────────────────
+    // ─── Try config-line form
     // `parse_file` errors on file-not-found. That's the right error
     // here (verify fails if you don't have `hosts/SIGNER`). The
     // `ReadError` Display includes the path.
@@ -541,7 +541,7 @@ fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
         return Ok(pk);
     }
 
-    // ─── Fall back to PEM block ─────────────────────────────────────
+    // ─── Fall back to PEM block
     // `keypair::read_public` does the open + read_pem + length check.
     // It errors `LoadError::Pem(NotFound)` if there's no PEM block.
     // That's our "neither form found" terminal error.
@@ -557,9 +557,7 @@ fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
     })
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -611,7 +609,7 @@ mod tests {
         let mut signed = Vec::new();
         sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
-        // ─── Shape check on the output ──────────────────────────────
+        // ─── Shape check on the output
         // First line is the header, rest is the body byte-exact.
         let nl = signed.iter().position(|&b| b == b'\n').unwrap();
         let header = std::str::from_utf8(&signed[..nl]).unwrap();
@@ -622,7 +620,7 @@ mod tests {
         // Body is the original data, byte-exact.
         assert_eq!(&signed[nl + 1..], data);
 
-        // ─── Verify ─────────────────────────────────────────────────
+        // ─── Verify
         let v = verify_blob(&paths, &Signer::Named("alice".into()), &signed).unwrap();
         assert_eq!(v.signer, "alice");
         assert_eq!(v.body, data);
@@ -1008,7 +1006,7 @@ hello there\n";
         // Expected body (header stripped).
         const BODY: &[u8] = b"fake testing data\nhello there\n";
 
-        // ─── Set up confbase exactly as the Python does ────────────
+        // ─── Set up confbase exactly as the Python does
         let dir = tempfile::tempdir().unwrap();
         let confbase = dir.path().join("foo");
         fs::create_dir_all(confbase.join("hosts")).unwrap();
@@ -1021,7 +1019,7 @@ hello there\n";
             ..Default::default()
         });
 
-        // ─── Verify the C-signed blob ───────────────────────────────
+        // ─── Verify the C-signed blob
         // The Python tests `.` and `foo` and `*` (line 78-83). We do
         // all three. If ANY of them fails, format compat is broken.
         for signer in [
@@ -1036,7 +1034,7 @@ hello there\n";
             assert_eq!(v.body, BODY);
         }
 
-        // ─── Re-sign and confirm round-trip ─────────────────────────
+        // ─── Re-sign and confirm round-trip
         // We can't compare our signed output to SIGNED directly —
         // Ed25519 is deterministic given the key+message, so actually
         // we CAN. The signature is a pure function of (private key,

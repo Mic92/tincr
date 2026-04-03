@@ -160,7 +160,7 @@ pub fn invite(
     invitee: &str,
     now: SystemTime,
 ) -> Result<InviteResult, CmdError> {
-    // ─── Validate name ──────────────────────────────────────────────
+    // ─── Validate name
     // C `invitation.c:344`: `if(!check_id(argv[1]))`.
     if !check_id(invitee) {
         return Err(CmdError::BadInput(format!(
@@ -185,7 +185,7 @@ pub fn invite(
     // C `invitation.c:366-389`: connect_tincd name-uniqueness check.
     // Dropped — see module doc. The hosts/ check above covers disk.
 
-    // ─── Get our address (for the URL host part) ────────────────────
+    // ─── Get our address (for the URL host part)
     // C `invitation.c:541`: `get_my_hostname(&address, &port)`.
     // Done early so failure happens BEFORE we create files. The C
     // does it late (after the invitation file is already opened),
@@ -196,13 +196,13 @@ pub fn invite(
     // sits in invitations/ until expiry. Ordering it here is cleaner.
     let address = get_my_address(paths, &myname)?;
 
-    // ─── makedirs(DIR_INVITATIONS) ──────────────────────────────────
+    // ─── makedirs(DIR_INVITATIONS)
     // C `invitation.c:391`: `makedirs(DIR_INVITATIONS)`.
     // Mode 0700 — `fs.c:42`. Only readable by the daemon's user.
     let inv_dir = paths.invitations_dir();
     makedir(&inv_dir, 0o700)?;
 
-    // ─── Sweep expired invitations, count live ones ─────────────────
+    // ─── Sweep expired invitations, count live ones
     // C `invitation.c:396-438`. Walk invitations/, for each file with
     // a 24-char name (the b64-of-18-byte hash format), if mtime is
     // older than a week, unlink it. Count the survivors.
@@ -213,7 +213,7 @@ pub fn invite(
     // old URL's key_hash won't verify.
     let live_count = sweep_expired(&inv_dir, now)?;
 
-    // ─── Load or generate invitation key ────────────────────────────
+    // ─── Load or generate invitation key
     // C `invitation.c:440-496`.
     let key_path = paths.invitation_key();
 
@@ -247,7 +247,7 @@ pub fn invite(
         (sk, true)
     };
 
-    // ─── The crypto kernel ──────────────────────────────────────────
+    // ─── The crypto kernel
     // C `invitation.c:499-522`. KAT-tested in tinc-crypto.
 
     // Cookie: 18 fresh random bytes. C `randomize(cookie, 18)`.
@@ -264,7 +264,7 @@ pub fn invite(
     let inv_filename = cookie_filename(&cookie, pubkey);
     let inv_path = inv_dir.join(&inv_filename);
 
-    // ─── Write the invitation file ──────────────────────────────────
+    // ─── Write the invitation file
     // C `invitation.c:525-595`.
     // O_RDWR | O_CREAT | O_EXCL, 0600. EXCL: cookie collision is
     // cryptographically impossible (18 bytes from OsRng), so EEXIST
@@ -277,7 +277,7 @@ pub fn invite(
     let body = build_invitation_file(paths, netname, invitee, &myname, &address)?;
     write_invitation_file(&inv_path, &body)?;
 
-    // ─── Build the URL ──────────────────────────────────────────────
+    // ─── Build the URL
     // C `invitation.c:551`: `xasprintf(&url, "%s/%s%s", address, hash, cookie);`
     // The address already has [:port] formatting from get_my_address.
     let slug = Zeroizing::new(build_slug(pubkey, &cookie));
@@ -289,9 +289,7 @@ pub fn invite(
     Ok(InviteResult { url, key_is_new })
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Helpers
-// ════════════════════════════════════════════════════════════════════
 
 /// Expiry sweep + live count. `invitation.c:396-438`.
 ///
@@ -423,7 +421,7 @@ fn build_invitation_file(
 ) -> Result<String, CmdError> {
     let mut out = String::new();
 
-    // ─── Chunk 1: invitee's bootstrap config ────────────────────────
+    // ─── Chunk 1: invitee's bootstrap config
     // C `invitation.c:557`: `fprintf(f, "Name = %s\n", argv[1]);`
     // This is the FIRST line, and `finalize_join`'s `get_value(data,
     // "Name")` (`invitation.c:724`) reads it to know what node it's
@@ -467,12 +465,12 @@ fn build_invitation_file(
     // get_pubkey, fsck's check_conffile, now this.)
     copy_mesh_vars(paths, &mut out)?;
 
-    // ─── Separator ──────────────────────────────────────────────────
+    // ─── Separator
     // C `invitation.c:586`: hardcoded inline `fprintf(f, "#---...---#\n")`.
     out.push_str(SEPARATOR);
     out.push('\n');
 
-    // ─── Chunk 2: our host config ───────────────────────────────────
+    // ─── Chunk 2: our host config
     // C `invitation.c:587-591`: `Name = myname` then
     // `append_host_config(f, myname, port)` which is
     // `copy_config_replacing_port(f, hosts/myname, port)`.
@@ -714,9 +712,7 @@ impl std::fmt::Display for AddressPort {
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -749,9 +745,7 @@ mod tests {
         writeln!(f, "Address = {addr}").unwrap();
     }
 
-    // ────────────────────────────────────────────────────────────────
     // copy_host_replacing_port — the C tokenizer port
-    // ────────────────────────────────────────────────────────────────
 
     /// Port line replaced, everything else byte-preserved.
     #[test]
@@ -823,9 +817,7 @@ mod tests {
         assert_eq!(out, "Port = x\nPort = x\n");
     }
 
-    // ────────────────────────────────────────────────────────────────
     // get_my_address
-    // ────────────────────────────────────────────────────────────────
 
     #[test]
     fn address_basic() {
@@ -905,9 +897,7 @@ mod tests {
         assert!(msg.contains("No Address"), "{msg}");
     }
 
-    // ────────────────────────────────────────────────────────────────
     // sweep_expired
-    // ────────────────────────────────────────────────────────────────
 
     /// 24-char filename → counted. Other lengths → ignored. The
     /// `ed25519_key.priv` (16 chars) and `.` `..` filter.
@@ -973,9 +963,7 @@ mod tests {
         assert!(!dead.exists(), "dead should be deleted");
     }
 
-    // ────────────────────────────────────────────────────────────────
     // invite() — the contract test
-    // ────────────────────────────────────────────────────────────────
 
     /// Full invite on a clean init: creates invitations/, key, file,
     /// returns a 48-char-slug URL. **The contract test.**

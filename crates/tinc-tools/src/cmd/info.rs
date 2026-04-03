@@ -87,9 +87,7 @@ use crate::cmd::dump::{NodeRow, StatusBit, SubnetRow, strip_weight};
 use crate::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
 
-// ═══════════════════════════════════════════════════════════════════
 // fmt_localtime — the one unsafe block in tinc-tools
-// ═══════════════════════════════════════════════════════════════════
 
 /// Format a Unix timestamp as `"%Y-%m-%d %H:%M:%S"` in local time.
 /// `info.c:116`: `strftime(timestr, sizeof(timestr), "...",
@@ -174,9 +172,7 @@ fn fmt_localtime(t: i64) -> String {
     )
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Options bits — connection.h:32-36
-// ═══════════════════════════════════════════════════════════════════
 //
 // Same shape as StatusBit but semantically different: options are
 // per-edge config (set in hosts/* files), status is per-node runtime.
@@ -205,9 +201,7 @@ const fn option_version(options: u32) -> u32 {
     options >> 24
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Reachability — the 7-way cascade
-// ═══════════════════════════════════════════════════════════════════
 
 /// `info.c:176-195`: how can we reach this node? Seven mutually
 /// exclusive cases, checked in order (first-match-wins, same as
@@ -329,9 +323,7 @@ impl fmt::Display for Reachability {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // NodeRow extensions — status bit reads
-// ═══════════════════════════════════════════════════════════════════
 
 /// `info` reads more status bits than `dump`. Extension trait would
 /// be the Java answer; an inherent method on a `dump::` struct from
@@ -353,9 +345,7 @@ impl NodeRow {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // NodeInfo — the human-readable formatter
-// ═══════════════════════════════════════════════════════════════════
 
 /// One `tinc info NODE` output. Everything `info_node` collects,
 /// formatted as `info.c:108-247` would.
@@ -405,13 +395,13 @@ impl NodeInfo {
         let row = &self.row;
         let mut out = String::with_capacity(512);
 
-        // ─── Top: name, ID, address ────────────────────────────────
+        // ─── Top: name, ID, address
         // C `info.c:108-110`. `item` not `node` (same here).
         let _ = writeln!(out, "Node:         {name}");
         let _ = writeln!(out, "Node ID:      {}", row.id);
         let _ = writeln!(out, "Address:      {} port {}", row.host, row.port);
 
-        // ─── Timestamp ─────────────────────────────────────────────
+        // ─── Timestamp
         // C `info.c:112-125`. `Online since:` if reachable, else
         // `Last seen:`. Label widths differ — 13+1 vs 10+4 — but
         // both end up with values at column 14 (C uses `%-12s`-ish
@@ -423,7 +413,7 @@ impl NodeInfo {
             let _ = writeln!(out, "Last seen:    {timestr}");
         }
 
-        // ─── Status flags ──────────────────────────────────────────
+        // ─── Status flags
         // C `info.c:127-154`. Six bits, printed in C-declaration
         // order (which is bit-position order). Each prefixed with a
         // space so the line is `Status:       validkey visited ...`.
@@ -450,7 +440,7 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Options flags ─────────────────────────────────────────
+        // ─── Options flags
         // C `info.c:156-172`. Same shape, 4 OPTION_* bits.
         out.push_str("Options:     ");
         for (bit, label) in [
@@ -465,7 +455,7 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Protocol version ──────────────────────────────────────
+        // ─── Protocol version
         // C `info.c:173`: `PROT_MAJOR.OPTION_VERSION(options)`.
         // The minor lives in the top 8 bits of `options` (so a node
         // running 17.7 has `options & 0xff000000 == 0x07000000`).
@@ -492,12 +482,12 @@ impl NodeInfo {
             option_version(row.options)
         );
 
-        // ─── Reachability cascade ──────────────────────────────────
+        // ─── Reachability cascade
         // C `info.c:175-195`. Multi-line for DirectUdp.
         let reach = Reachability::from_row(row, name);
         let _ = writeln!(out, "Reachability: {reach}");
 
-        // ─── Traffic counters ──────────────────────────────────────
+        // ─── Traffic counters
         // C `info.c:197-198`. Double-space between count and unit
         // (`%"PRIu64" packets  %"PRIu64" bytes` — two spaces).
         // The C has TWO spaces. Replicate. (`diff` would notice.)
@@ -512,7 +502,7 @@ impl NodeInfo {
             row.out_packets, row.out_bytes
         );
 
-        // ─── Edges ─────────────────────────────────────────────────
+        // ─── Edges
         // C `info.c:201-219`. `Edges:        node1 node2 ...`. The
         // label is `"Edges:       "` (12+1) — same one-short-because-
         // values-have-leading-space trick as Status.
@@ -523,7 +513,7 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Subnets ───────────────────────────────────────────────
+        // ─── Subnets
         // C `info.c:223-241`. Same shape. `strip_weight` already
         // applied during collect.
         out.push_str("Subnets:     ");
@@ -544,9 +534,7 @@ impl NodeInfo {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // I/O: the three dump-recv loops
-// ═══════════════════════════════════════════════════════════════════
 
 /// Adapter, same as `dump::daemon_err`. Re-declared (modules
 /// independent).
@@ -589,7 +577,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
     ctl.send_str(CtlRequest::DumpNodes, name)
         .map_err(daemon_err)?;
 
-    // ─── Match loop ────────────────────────────────────────────────
+    // ─── Match loop
     // C `info.c:79-95`: `while(recvline) { if n==2 break; if n!=24
     // err; if !strcmp break; }`.
     //
@@ -621,7 +609,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
         }
     };
 
-    // ─── Drain ─────────────────────────────────────────────────────
+    // ─── Drain
     // C `info.c:102-106`: `while(recvline) { if sscanf == 2 break }`.
     // Found alice on row 3 of 50; daemon's still sending. Read and
     // discard until terminator.
@@ -732,19 +720,19 @@ fn collect_subnets<S: std::io::Read + std::io::Write>(
 fn info_node(paths: &Paths, name: &str) -> Result<String, CmdError> {
     let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
 
-    // ─── 1. Find the node ──────────────────────────────────────────
+    // ─── 1. Find the node
     let Some(row) = find_node(&mut ctl, name)? else {
         // C `info.c:98`: `"Unknown node %s.\n"`.
         return Err(CmdError::BadInput(format!("Unknown node {name}.")));
     };
 
-    // ─── 2+3. Edges and subnets ────────────────────────────────────
+    // ─── 2+3. Edges and subnets
     // C does these AFTER the not-found check, sequentially. We do
     // too. The socket stays open across all three (one connect).
     let edges_to = collect_edges(&mut ctl, name)?;
     let subnets = collect_subnets(&mut ctl, name)?;
 
-    // ─── Format ────────────────────────────────────────────────────
+    // ─── Format
     Ok(NodeInfo {
         row,
         edges_to,
@@ -753,9 +741,7 @@ fn info_node(paths: &Paths, name: &str) -> Result<String, CmdError> {
     .format(name))
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // info_subnet — route lookup or exact match
-// ═══════════════════════════════════════════════════════════════════
 
 /// One `Subnet: ... / Owner: ...` block.
 #[derive(Debug, PartialEq, Eq)]
@@ -784,7 +770,7 @@ pub struct SubnetMatch {
 /// # Errors
 /// Parse failure on `item` (str2net rejected it), or daemon I/O.
 fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> {
-    // ─── Parse the query ───────────────────────────────────────────
+    // ─── Parse the query
     // C `info.c:252-255`: `if(!str2net(&find, item))`. The error
     // message has single-quotes: `"Could not parse subnet or
     // address '%s'.\n"`.
@@ -802,7 +788,7 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
     let as_address = !item.contains('/');
     let with_weight = item.contains('#');
 
-    // ─── Dump and filter ───────────────────────────────────────────
+    // ─── Dump and filter
     let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
     // C `info.c:267` sends `item` as third arg. Dead, daemon ignores.
     ctl.send_str(CtlRequest::DumpSubnets, item)
@@ -820,7 +806,7 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
                 // never sends garbage, so this is corruption.
                 let subnet: Subnet = row.subnet.parse().map_err(|_| parse_err("subnet", &body))?;
 
-                // ─── Filters ──────────────────────────────────────
+                // ─── Filters
                 // C `info.c:281`: type mismatch → skip. Handled
                 // inside `matches()` (returns false).
                 //
@@ -858,9 +844,7 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
     Ok(matches)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Dispatch — info.c:347-356
-// ═══════════════════════════════════════════════════════════════════
 
 /// Result: `info` is bimodal — node info (one big block) or subnet
 /// matches (zero-to-many blocks). The binary formats differently.
@@ -921,15 +905,13 @@ pub fn info(paths: &Paths, item: &str) -> Result<InfoOutput, CmdError> {
     ))
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ─── fmt_localtime ─────────────────────────────────────────────
+    // ─── fmt_localtime
 
     /// `0` → `"never"`. C `info.c:112-113,118`: the buffer is
     /// initialized to `"never"`, the `if(last_state_change)` skips
@@ -982,7 +964,7 @@ mod tests {
         assert_eq!(&s[..7], "1970-01");
     }
 
-    // ─── option_version ────────────────────────────────────────────
+    // ─── option_version
 
     /// `connection.h:36`: top 8 bits. sed-verifiable.
     #[test]
@@ -995,7 +977,7 @@ mod tests {
         assert_eq!(option_version(0x0000_000c), 0);
     }
 
-    // ─── Reachability::from_row ────────────────────────────────────
+    // ─── Reachability::from_row
     //
     // Golden-input tests on hand-built NodeRows. The cascade order
     // is what's pinned: a row that's MYSELF + unreachable = MYSELF
@@ -1145,7 +1127,7 @@ mod tests {
         );
     }
 
-    // ─── Reachability Display ──────────────────────────────────────
+    // ─── Reachability Display
 
     /// `DirectUdp` is multi-line. The `\n` is INSIDE the `{}`
     /// expansion. C `info.c:186` puts the `\n` in the format string
@@ -1201,7 +1183,7 @@ mod tests {
         assert!(r.to_string().contains("RTT:          0.000"));
     }
 
-    // ─── NodeInfo::format — the full golden ────────────────────────
+    // ─── NodeInfo::format — the full golden
 
     /// Build a known NodeRow, assert byte-exact output. This is the
     /// `diff <(tinc-c info bob) <(tinc-rs info bob)` test, in unit
@@ -1402,7 +1384,7 @@ Edges:       \nSubnets:     \n";
         assert!(!out.contains("packets   1024")); // not triple
     }
 
-    // ─── StatusBit::REACHABLE etc — sed-verify against node.h ──────
+    // ─── StatusBit::REACHABLE etc — sed-verify against node.h
 
     /// The bit positions are GCC's LSB-first packing of `node.h:33-
     /// 46`. sed-transcribed; this test pins the assignment so a

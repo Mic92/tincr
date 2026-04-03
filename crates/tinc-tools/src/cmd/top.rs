@@ -95,9 +95,7 @@ use crate::tui;
 
 use tinc_proto::{ParseError, Tok};
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 1: wire parse
-// ═══════════════════════════════════════════════════════════════════
 
 /// One row of `DUMP_TRAFFIC`. `node.c:228`: `"%d %d %s %"PRIu64"
 /// %"PRIu64" %"PRIu64" %"PRIu64`. That's `code req name in_packets
@@ -146,9 +144,7 @@ impl TrafficRow {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 2: state machine — `update()` + `sortfunc()`
-// ═══════════════════════════════════════════════════════════════════
 
 /// Per-node accumulator. `top.c:34-46` `nodestats_t`, MINUS the
 /// `name` (it's the BTreeMap key) and MINUS the `i` (stable-sort
@@ -323,7 +319,7 @@ impl Stats {
     pub fn update(&mut self, rows: &[TrafficRow], now: Instant) -> bool {
         use std::collections::btree_map::Entry;
 
-        // ─── Timekeeping ──────────────────────────────────────────
+        // ─── Timekeeping
         // `top.c:75-79`: `gettimeofday(&cur); timersub(&cur, &prev,
         // &diff); prev = cur; interval = diff.tv_sec + diff.tv_usec
         // * 1e-6`.
@@ -360,7 +356,7 @@ impl Stats {
         };
         self.prev_instant = Some(now);
 
-        // ─── Clear known ──────────────────────────────────────────
+        // ─── Clear known
         // `top.c:90-92`: `for list_each(ns, &node_list) ns->known =
         // false`. Survivors get marked true in the loop below; the
         // rest stay false → DIM.
@@ -370,7 +366,7 @@ impl Stats {
 
         let mut changed = false;
 
-        // ─── Merge ────────────────────────────────────────────────
+        // ─── Merge
         // `top.c:107-132`. The C does sorted-list linear search +
         // insert-before. We `entry()` for the upsert (O(log n);
         // the C's amortized O(1) only because daemon iteration is
@@ -435,7 +431,7 @@ impl Stats {
     /// the C's `i` tiebreak emulates this (see module doc). We
     /// just call sort.
     pub fn sort(&mut self) {
-        // ─── Name mode is special ─────────────────────────────────
+        // ─── Name mode is special
         // `top.c:226`: `default: result = strcmp(...)`. Ascending,
         // NOT negated. The other modes return Equal on tie and rely
         // on stability to preserve frame-to-frame position; Name
@@ -638,9 +634,7 @@ fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> st
 // (Can't put this prose in `Stats::sort`'s doc — it's already
 // written. The fix is in the body.)
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 3: render — `redraw()` minus the curses
-// ═══════════════════════════════════════════════════════════════════
 //
 // `top.c:237-280` `redraw()`. The C calls `mvprintw`, `attrset`,
 // `chgat`. We `format!` strings with ANSI codes inline. The
@@ -694,7 +688,7 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
 
     let mut s = String::with_capacity(256);
 
-    // ─── Row 0: status line ───────────────────────────────────────
+    // ─── Row 0: status line
     // `top.c:240`. `goto(0,0)` is `mvprintw(0, 0, ...)`. The `\x1b
     // [K` (`CLEAR_EOL`) replaces `erase()` — we clear-per-line
     // instead of clear-whole-screen. Less flicker. The C's `erase()`
@@ -712,7 +706,7 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     )
     .unwrap(); // String Write is infallible
 
-    // ─── Row 1: blank, cursor parks here ─────────────────────────
+    // ─── Row 1: blank, cursor parks here
     // `top.c:279`: `move(1, 0)`. The C does this AT THE END of
     // redraw, so the cursor blinks on row 1 between ticks. We're
     // hiding the cursor (`CURSOR_HIDE` in `RawMode::enter`) so the
@@ -722,7 +716,7 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     // when nothing's prompting.
     write!(s, "{}{}", tui::goto(1, 0), tui::CLEAR_EOL).unwrap();
 
-    // ─── Row 2: column headers, REVERSEd ─────────────────────────
+    // ─── Row 2: column headers, REVERSEd
     // `top.c:241-242`: `attrset(A_REVERSE); mvprintw(2,0,"Node ...")
     // ; chgat(-1, A_REVERSE, 0, NULL)`. The `chgat(-1, ...)` means
     // "from cursor to end of line, change attribute to REVERSE".
@@ -803,7 +797,7 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
 // The cast is in the C; the precision loss is the
 // C's. Display-only.
 fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
-    // ─── Attribute ────────────────────────────────────────────────
+    // ─── Attribute
     // `top.c:264-269`. The C's nested `if` is awkward to read
     // (`if known if rate BOLD else NORMAL else DIM`); the table
     // form is clearer.
@@ -824,7 +818,7 @@ fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
         ""
     };
 
-    // ─── Numbers ──────────────────────────────────────────────────
+    // ─── Numbers
     // `top.c:271-277`. `%10.0f` × 4. Order is `in_pkts, in_bytes,
     // out_pkts, out_bytes` — same in both branches.
     //
@@ -885,7 +879,7 @@ fn render(netname: Option<&str>, stats: &Stats, max_rows: u16) -> String {
     // Rows 0, 1, 2.
     s.push_str(&render_header(netname, stats));
 
-    // ─── Body: rows 3.. ───────────────────────────────────────────
+    // ─── Body: rows 3..
     // `top.c:261-278`. The clip is the only thing curses gave us
     // for free.
     for (i, name) in stats.display_order.iter().enumerate() {
@@ -908,7 +902,7 @@ fn render(netname: Option<&str>, stats: &Stats, max_rows: u16) -> String {
         s.push_str(&render_row(name, &entry, stats, row));
     }
 
-    // ─── Clear rows past current body ─────────────────────────────
+    // ─── Clear rows past current body
     // The C's `erase()` clears the whole screen up front. We do
     // per-line `CLEAR_EOL` instead (no flicker). But: if last frame
     // had 10 nodes and this frame has 8, rows 11-12 still have the
@@ -933,9 +927,7 @@ fn render(netname: Option<&str>, stats: &Stats, max_rows: u16) -> String {
     s
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 4: I/O — fetch one dump
-// ═══════════════════════════════════════════════════════════════════
 
 /// `update()` first half: `top.c:71-73` (sendline) + `top.c:94-132`
 /// (recvline loop), MINUS the merge (which is `Stats::update`).
@@ -989,9 +981,7 @@ fn fetch<S: io::Read + io::Write>(ctl: &mut CtlSocket<S>) -> Result<Vec<TrafficR
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 5: keys — `top.c:296-370` switch
-// ═══════════════════════════════════════════════════════════════════
 
 /// `top.c:296-370`. Mutates `stats` per the key. Returns `false`
 /// for `'q'` (the `running = false` case, `top.c:364`).
@@ -1019,7 +1009,7 @@ fn handle_key(
     out: &mut impl Write,
 ) -> io::Result<bool> {
     match key {
-        // ─── 's': change delay ────────────────────────────────────
+        // ─── 's': change delay
         // `top.c:301-313`. The one INTERACTIVE key. `timeout(-1)`
         // (block forever) → prompt → `scanw("%f")` → clamp →
         // `timeout(delay)`. We don't have `scanw`; `with_cooked`
@@ -1090,14 +1080,14 @@ fn handle_key(
             Ok(true)
         }
 
-        // ─── 'c': toggle cumulative ───────────────────────────────
+        // ─── 'c': toggle cumulative
         // `top.c:316`.
         b'c' => {
             stats.cumulative = !stats.cumulative;
             Ok(true)
         }
 
-        // ─── Sort mode keys ───────────────────────────────────────
+        // ─── Sort mode keys
         // `top.c:308-332`. lowercase → bytes (the heavier metric);
         // uppercase → packets.
         b'n' => {
@@ -1129,7 +1119,7 @@ fn handle_key(
             Ok(true)
         }
 
-        // ─── Unit/scale keys ──────────────────────────────────────
+        // ─── Unit/scale keys
         // `top.c:336-360`. Four presets. `b`/`k` keep packets at
         // 1×, only `M`/`G` scale packets too. The header strings
         // are 4-5 chars: `pkts`/`kpkt`/`Mpkt`, `bytes`/`kbyte`/
@@ -1164,12 +1154,12 @@ fn handle_key(
             Ok(true)
         }
 
-        // ─── 'q': quit ────────────────────────────────────────────
+        // ─── 'q': quit
         // `top.c:363-364`. `KEY_BREAK` is curses' Windows-console
         // Ctrl-Break thing; we're cfg(unix), don't have it.
         b'q' => Ok(false),
 
-        // ─── default: ignore ──────────────────────────────────────
+        // ─── default: ignore
         // `top.c:368`. Unknown key, including arrow-key escape
         // sequences (we'd see `\x1b` then `[` then `A` etc as
         // separate ticks — the loop is fast enough that the user
@@ -1181,9 +1171,7 @@ fn handle_key(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Layer 6: the loop — `top()` itself
-// ═══════════════════════════════════════════════════════════════════
 
 /// `top.c:283-372`. The whole thing. Connect, enter raw, loop,
 /// exit cleanly.
@@ -1196,13 +1184,13 @@ fn handle_key(
 /// a terminal, so it's a usage error.
 #[cfg(unix)]
 pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
-    // ─── Connect ──────────────────────────────────────────────────
+    // ─── Connect
     // `tincctl.c:1506`: `if(!connect_tincd(true)) return 1`.
     // BEFORE entering raw mode — if connect fails the error
     // message goes to a sane terminal.
     let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
 
-    // ─── Raw mode ─────────────────────────────────────────────────
+    // ─── Raw mode
     // `top.c:284`: `initscr()`. RawMode's Drop is `endwin()`
     // (`top.c:372`). The Drop fires on panic too, which curses'
     // `endwin()` doesn't (the C panics → terminal stays raw).
@@ -1216,7 +1204,7 @@ pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
     let mut stats = Stats::default();
     let mut stdout = io::stdout().lock();
 
-    // ─── Loop ─────────────────────────────────────────────────────
+    // ─── Loop
     // `top.c:288-370`: `while(running) { update; redraw; switch
     // (getch()) }`.
     //
@@ -1291,9 +1279,7 @@ fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 //
 // Four layers of tests, matching the module structure:
 //
@@ -1314,9 +1300,7 @@ fn daemon_err(e: CtlError) -> CmdError {
 mod tests {
     use super::*;
 
-    // ═══════════════════════════════════════════════════════════════
     // SORTNAME table — sed-verifiable vs `top.c:48-56`
-    // ═══════════════════════════════════════════════════════════════
     //
     // `sed -n '48,56p' src/top.c | grep '"'` extracts the string
     // literals. Hand-verify at commit time. The test pins the
@@ -1333,9 +1317,7 @@ mod tests {
         assert_eq!(SORTNAME[SortMode::TotalBytes as usize], "tot bytes");
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // TrafficRow::parse — the wire seam
-    // ═══════════════════════════════════════════════════════════════
 
     /// `node.c:228`: `"%d %d %s %"PRIu64" %"PRIu64" %"PRIu64"
     /// %"PRIu64`. After `recv_row` strips `"18 13 "`, we see
@@ -1381,9 +1363,7 @@ mod tests {
         assert!(TrafficRow::parse("alice 100 fifty_thousand 200 100000").is_err());
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // Stats::update — the merge + rate machine
-    // ═══════════════════════════════════════════════════════════════
 
     /// `Instant` doesn't have a constructor for "epoch + N seconds";
     /// the only way to make one is `Instant::now()`. Tests need
@@ -1540,9 +1520,7 @@ mod tests {
         assert_eq!(s.display_order, vec!["alice", "bob"]);
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // compare — the 7-way comparator
-    // ═══════════════════════════════════════════════════════════════
 
     fn ns(ip: u64, ib: u64, op: u64, ob: u64) -> NodeStats {
         NodeStats {
@@ -1725,9 +1703,7 @@ mod tests {
         assert_eq!(s.display_order, vec!["alice", "bob", "carol"]);
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // render_* — golden ANSI strings
-    // ═══════════════════════════════════════════════════════════════
     //
     // We assert WITH the escape codes inline. Stripping them would
     // miss the attribute logic (BOLD/DIM/NORMAL). The codes are
@@ -1791,7 +1767,7 @@ mod tests {
     fn render_row_attribute_logic() {
         let stats = Stats::default();
 
-        // ─── Gone: known=false → DIM ──────────────────────────────
+        // ─── Gone: known=false → DIM
         let gone = NodeStats {
             known: false,
             ..Default::default()
@@ -1800,7 +1776,7 @@ mod tests {
         assert!(r.contains("\x1b[2m")); // DIM
         assert!(!r.contains("\x1b[1m")); // not BOLD
 
-        // ─── Idle: known=true, rate=0 → no SGR (NORMAL) ───────────
+        // ─── Idle: known=true, rate=0 → no SGR (NORMAL)
         let idle = NodeStats {
             known: true,
             ..Default::default()
@@ -1809,7 +1785,7 @@ mod tests {
         assert!(!r.contains("\x1b[2m")); // not DIM
         assert!(!r.contains("\x1b[1m")); // not BOLD
 
-        // ─── Active: known=true, in_packets_rate > 0 → BOLD ───────
+        // ─── Active: known=true, in_packets_rate > 0 → BOLD
         let active = NodeStats {
             known: true,
             in_packets_rate: 100.0,
@@ -1818,7 +1794,7 @@ mod tests {
         let r = render_row("carol", &active, &stats, 3);
         assert!(r.contains("\x1b[1m")); // BOLD
 
-        // ─── Out only: known=true, out_packets_rate > 0 → BOLD ────
+        // ─── Out only: known=true, out_packets_rate > 0 → BOLD
         // `top.c:265`: `||` of in OR out.
         let out_only = NodeStats {
             known: true,
@@ -1828,7 +1804,7 @@ mod tests {
         let r = render_row("dave", &out_only, &stats, 3);
         assert!(r.contains("\x1b[1m")); // BOLD
 
-        // ─── Bytes-only nonzero → NORMAL ──────────────────────────
+        // ─── Bytes-only nonzero → NORMAL
         // `top.c:265` checks PACKETS rate, not bytes. The C
         // probably figured "nonzero bytes implies nonzero packets"
         // (true for real traffic). But synthetic stats can have
@@ -1931,9 +1907,7 @@ mod tests {
         assert!(!frame.contains("node09"));
     }
 
-    // ═══════════════════════════════════════════════════════════════
     // handle_key — the trivial state-mutation arms
-    // ═══════════════════════════════════════════════════════════════
     //
     // The 's' key needs `RawMode` (real tty); skip. All others are
     // pure mutation. We test them as a TABLE: `(key, expected_

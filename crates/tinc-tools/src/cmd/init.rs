@@ -135,7 +135,7 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 #[allow(clippy::too_many_lines)] // it's a recipe — N steps in sequence,
 // breaking it up just hides the order
 pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
-    // ─── Guard: already initialized? ────────────────────────────────
+    // ─── Guard: already initialized?
     // C: `if(!access(tinc_conf, F_OK))` — `access(F_OK)` is "exists?",
     // returns 0 (success) if it does. The `!` flips it. We use
     // `try_exists` not `exists` because `exists` swallows EACCES
@@ -148,7 +148,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         Err(e) => return Err(io_err(&tinc_conf)(e)),
     }
 
-    // ─── Guard: valid node name? ────────────────────────────────────
+    // ─── Guard: valid node name?
     // C: `if(!check_id(name))`. Doing this *after* the exists check
     // matches the C order (`tincctl.c:2249` is after `:2210`). Both
     // are pure checks so order is academic, but fidelity is free.
@@ -158,7 +158,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         ));
     }
 
-    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CONFDIR | DIR_CACHE) ──
+    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CONFDIR | DIR_CACHE)
     // C `fs.c:23-64`. The order matters: confdir before confbase
     // (parent before child), confbase before hosts/cache (children).
     // C `makedir` does `mkdir; if EEXIST chmod` — i.e. it forces the
@@ -174,7 +174,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     makedir(&paths.hosts_dir(), 0o755)?;
     makedir(&paths.cache_dir(), 0o755)?;
 
-    // ─── Write tinc.conf ────────────────────────────────────────────
+    // ─── Write tinc.conf
     // C: `fprintf(f, "Name = %s\n", name)`. That's the entire file.
     // Mode is whatever `fopen("w")` gives — 0666 & ~umask, typically
     // 0644. We use `File::create` (same semantics).
@@ -188,7 +188,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
     }
 
-    // ─── Generate Ed25519 keypair ───────────────────────────────────
+    // ─── Generate Ed25519 keypair
     // C `ed25519_keygen(false)`: generate, write private as PEM to
     // `ed25519_key.priv` (mode 0600), write public as a config *line*
     // to `hosts/NAME` (NOT a PEM file — `Ed25519PublicKey = <b64>`).
@@ -242,7 +242,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
 
-    // ─── tinc-up stub ───────────────────────────────────────────────
+    // ─── tinc-up stub
     // Unix-only (C: `#ifndef HAVE_WINDOWS`). A shell script that yells
     // at you to configure it. Mode 0777 in C, becomes 0755 after umask.
     //

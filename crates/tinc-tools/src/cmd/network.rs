@@ -86,9 +86,7 @@ use crate::names::Paths;
 
 use super::CmdError;
 
-// ═══════════════════════════════════════════════════════════════════
 // List
-// ═══════════════════════════════════════════════════════════════════
 
 /// `tincctl.c:2700-2727` — scan `confdir`, emit network names.
 ///
@@ -122,7 +120,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
     // negligible.
     let mut found: Vec<String> = Vec::new();
 
-    // ─── readdir loop ───────────────────────────────────────────────
+    // ─── readdir loop
     // `tincctl.c:2709-2726`. The C `while((ent = readdir(dir)))`.
     // `read_dir` returns `io::Result<ReadDir>`; `ReadDir` is an
     // iterator over `io::Result<DirEntry>`.
@@ -213,7 +211,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
         // (`:2722` is the only `printf`; non-match is no-op).
     }
 
-    // ─── Sort & emit ────────────────────────────────────────────────
+    // ─── Sort & emit
     // NOT in C. C readdir-order is undefined; sorted is in the set
     // of valid C outputs. Deterministic for tests.
     //
@@ -235,9 +233,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
     Ok(found.len())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // CLI entry
-// ═══════════════════════════════════════════════════════════════════
 
 /// `tinc network [NAME]`. List mode or error-with-advice.
 ///
@@ -250,7 +246,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
 /// for `read_dir` failures.
 pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     if let Some(name) = arg {
-        // ─── SWITCH mode — deliberate C-behavior-drop #2 ───────────
+        // ─── SWITCH mode — deliberate C-behavior-drop #2
         // C `tincctl.c:2697`: `return switch_network(argv[1])`.
         // `switch_network` (`:2658-2688`) closes the daemon socket,
         // frees+reallocs `netname`/`confbase`/`prompt`, returns 0.
@@ -280,7 +276,7 @@ pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── LIST mode ──────────────────────────────────────────────────
+    // ─── LIST mode
     // `confdir_always()` materializes the C's "always set" — falls
     // back to `/etc/tinc` even when `-c` was given. See module doc.
     let confdir = paths.confdir_always();
@@ -290,9 +286,7 @@ pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -320,9 +314,7 @@ mod tests {
         std::fs::write(d.join("tinc.conf"), "").unwrap();
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // list — the readdir scan
-    // ─────────────────────────────────────────────────────────────────
 
     /// Empty `confdir` → empty output, count 0. The `read_dir`
     /// loop body never enters.
@@ -476,9 +468,7 @@ mod tests {
         assert!(matches!(e, CmdError::Io { .. }));
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // run — the switch-mode rejection
-    // ─────────────────────────────────────────────────────────────────
 
     /// `tinc network NAME` → error with `-n` advice. Deliberate
     /// C-behavior-drop #2.

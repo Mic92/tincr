@@ -120,9 +120,7 @@ use crate::names::{Paths, check_id};
 
 use super::CmdError;
 
-// ═══════════════════════════════════════════════════════════════════
 // conffiles[] — the "edit a top-level config file" shortlist
-// ═══════════════════════════════════════════════════════════════════
 
 /// `tincctl.c:2399-2408`. The files that live DIRECTLY in `confbase`
 /// (not under `hosts/`). `tinc edit tinc.conf` resolves to `confbase/
@@ -148,9 +146,7 @@ const CONFFILES: &[&str] = &[
     "host-down",
 ];
 
-// ═══════════════════════════════════════════════════════════════════
 // Path resolution — the lattice
-// ═══════════════════════════════════════════════════════════════════
 
 /// What `cmd_edit` resolved an input to. The PATH plus whether
 /// we should mkdir-p the parent (host files: yes, the `hosts/` dir
@@ -189,7 +185,7 @@ pub(crate) struct Resolved {
 pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> {
     let bad = || CmdError::BadInput("Invalid configuration filename.".into());
 
-    // ─── Step 1: strip "hosts/" prefix if present ───────────────────
+    // ─── Step 1: strip "hosts/" prefix if present
     // `tincctl.c:2418`: `if(strncmp(argv[1], "hosts" SLASH, 6))`.
     // The `strncmp != 0` means "DOESN'T start with" — so the
     // conffiles check runs when there's NO prefix, and the strip
@@ -206,7 +202,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
         None => (input, false),
     };
 
-    // ─── Step 2 (NOT in C): reject path-traversal ───────────────────
+    // ─── Step 2 (NOT in C): reject path-traversal
     // `/` in the (post-strip) input means they're trying to reach
     // outside `hosts_dir`. `..` likewise. The C doesn't check;
     // `tinc edit ../../etc/passwd` works there. We reject.
@@ -223,7 +219,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
         return Err(bad());
     }
 
-    // ─── Step 3: conffiles check (skipped if we stripped) ──────────
+    // ─── Step 3: conffiles check (skipped if we stripped)
     // `tincctl.c:2419-2424`: only inside the `!strncmp` branch.
     // If the user said `"hosts/tinc.conf"` they MEANT the host
     // file named `tinc.conf` (weird but valid: a node named
@@ -244,7 +240,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
         }
     }
 
-    // ─── Step 4: it's a host file — validate the dash form ─────────
+    // ─── Step 4: it's a host file — validate the dash form
     // `tincctl.c:2429-2440`. The path is `hosts_dir/input`
     // UNCONDITIONALLY (the snprintf at :2430 happens before the
     // dash check). The dash check only VALIDATES; it doesn't
@@ -302,9 +298,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
     })
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Editor spawn — sh -c, the git way
-// ═══════════════════════════════════════════════════════════════════
 
 /// Pick the editor. `tincctl.c:2444-2453` (Unix branch):
 ///
@@ -422,9 +416,7 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
         .status()
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // CLI entry
-// ═══════════════════════════════════════════════════════════════════
 
 /// `tinc edit FILE`. `tincctl.c:2410-2472`.
 ///
@@ -455,10 +447,10 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
 /// `recvline` the ack). The edit happened; that's success.
 #[cfg(unix)]
 pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
-    // ─── Resolve ────────────────────────────────────────────────────
+    // ─── Resolve
     let resolved = resolve(paths, input)?;
 
-    // ─── Edit ───────────────────────────────────────────────────────
+    // ─── Edit
     let editor = pick_editor();
     let status = spawn_editor(&editor, &resolved.path).map_err(|e| {
         // `sh` not found, or some exec-level failure. Not "editor
@@ -496,7 +488,7 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── Silent reload ──────────────────────────────────────────────
+    // ─── Silent reload
     // `tincctl.c:2465-2467`: `if(connect_tincd(false)) sendline(
     // ..., REQ_RELOAD)`. The `false` is "don't fprintf stderr on
     // connect failure." We swallow the Err. NO `recv_ack` — the C
@@ -517,9 +509,7 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -533,9 +523,7 @@ mod tests {
         })
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // CONFFILES — sed-verified vs C
-    // ─────────────────────────────────────────────────────────────────
 
     /// `tincctl.c:2399-2408`. sed-verifiable:
     ///   sed -n '2400,2406p' src/tincctl.c | sed 's/.*"\(.*\)".*/\1/'
@@ -556,9 +544,7 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // resolve — the lattice
-    // ─────────────────────────────────────────────────────────────────
 
     /// `"tinc.conf"` → conffiles match → `confbase/tinc.conf`.
     /// `tincctl.c:2422`.
@@ -698,9 +684,7 @@ mod tests {
         assert_eq!(r.path, p.confbase.join("tinc-up"));
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // Our STRICTER checks — not in C
-    // ─────────────────────────────────────────────────────────────────
 
     /// Slash anywhere (after `hosts/` strip) → reject. The C
     /// would resolve `hosts_dir/a/b` (path traversal into a
@@ -754,18 +738,14 @@ mod tests {
         assert_eq!(r.path, p.hosts_dir().join("."));
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // pick_editor — env precedence
-    // ─────────────────────────────────────────────────────────────────
     //
     // CAN'T test in-process: `set_var` is process-wide, parallel
     // tests race. (And in 2024+ Rust, `set_var` is unsafe-in-
     // edition-2024 anyway.) Tested by inspection (3 lines) +
     // integration test in `tinc_cli.rs` (subprocess with `.env()`).
 
-    // ─────────────────────────────────────────────────────────────────
     // spawn_editor — the sh -c construction
-    // ─────────────────────────────────────────────────────────────────
     //
     // Unit-testing `spawn_editor` would mean spawning sh. Do-able
     // but the integration test (set EDITOR=true, run `tinc edit`)

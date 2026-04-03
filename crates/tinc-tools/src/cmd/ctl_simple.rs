@@ -246,9 +246,7 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
-// ════════════════════════════════════════════════════════════════════
 //
 // These test the *command logic* — that each function sends the right
 // request and interprets the ack correctly. The transport (`CtlSocket`)

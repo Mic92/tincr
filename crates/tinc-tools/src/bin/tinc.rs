@@ -182,7 +182,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_join,
         help: "join INVITATION        Join a VPN using an invitation.",
     },
-    // ─── 5b: daemon RPC ───────────────────────────────────────────────
+    // ─── 5b: daemon RPC
     // The simple ones. Each is `connect → send → ack → check`.
     // `dump`/`top`/`log`/`pcap` are the complex ones — streaming or
     // multi-row — they land separately. `start`/`restart` need the
@@ -229,7 +229,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_disconnect,
         help: "disconnect NODE        Close meta connection with NODE.",
     },
-    // ─── cmd_config: get/set/add/del + the `config` umbrella ──────
+    // ─── cmd_config: get/set/add/del + the `config` umbrella
     // C `tincctl.c:3020-3024`. Five entries route to one function.
     // The C does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
     // — if you typed `tinc add Foo bar`, shift argv back so
@@ -278,7 +278,7 @@ const COMMANDS: &[CmdEntry] = &[
         // types. The aliases are the user-facing names.
         help: "",
     },
-    // ─── dump: nodes/edges/subnets/connections/graph/invitations ─
+    // ─── dump: nodes/edges/subnets/connections/graph/invitations
     // C `tincctl.c:3009-3010`: `dump` and `list` both → cmd_dump.
     //
     // `needs_daemon: true` even though `dump invitations` is pure
@@ -315,7 +315,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_dump,
         help: "",
     },
-    // ─── info: node summary or route lookup ──────────────────────────
+    // ─── info: node summary or route lookup
     // C `tincctl.c:3011`: `{"info", cmd_info, true}`. Unlike
     // `dump`'s `ctl=false`, info has `ctl=true` — it ALWAYS hits
     // the daemon (no readdir-only path). So `needs_daemon: true`
@@ -326,7 +326,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_info,
         help: "info NODE|SUBNET|ADDRESS    Give information about a particular NODE, SUBNET or ADDRESS.",
     },
-    // ─── top: real-time per-node traffic ──────────────────────────────
+    // ─── top: real-time per-node traffic
     // C `tincctl.c:3016`: `{"top", cmd_top, false}`. The `false` is
     // the `ctl` field meaning "don't pre-connect_tincd" — cmd_top
     // calls connect itself (`tincctl.c:1506`). Same here:
@@ -343,7 +343,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_top,
         help: "top                         Show real-time statistics",
     },
-    // ─── log: stream daemon's logger() output ────────────────────────
+    // ─── log: stream daemon's logger() output
     // C `tincctl.c:3018`: `{"log", cmd_log, false}`. The `false` is
     // "don't pre-connect" (cmd_log connects itself, line 1550).
     // Same as `top`: `needs_daemon: true` resolves the pidfile path
@@ -356,7 +356,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_log,
         help: "log [level]                 Dump log output [up to the specified level]",
     },
-    // ─── pcap: stream packet capture ─────────────────────────────────
+    // ─── pcap: stream packet capture
     // C `tincctl.c:3017`: `{"pcap", cmd_pcap, false}`. Same
     // self-connect pattern. `tinc pcap | wireshark -k -i -` is the
     // use case.
@@ -366,7 +366,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_pcap,
         help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
     },
-    // ─── edit: spawn $EDITOR on a config file, then reload ────────
+    // ─── edit: spawn $EDITOR on a config file, then reload
     // C `tincctl.c:3034`: `{"edit", cmd_edit, false}`. The `false`
     // means "doesn't need pre-connect" — the reload AFTER edit is
     // best-effort. We set `needs_daemon: true` anyway so the
@@ -382,7 +382,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_edit,
         help: "edit FILE                   Edit a config file with $VISUAL/$EDITOR/vi",
     },
-    // ─── version, help: trivial dispatchers ────────────────────────
+    // ─── version, help: trivial dispatchers
     // C `tincctl.c:3031-3032`. `tinc help` ≡ `tinc --help`, `tinc
     // version` ≡ `tinc --version`. The C `cmd_help` calls `usage(
     // false)` (`:2370`); `cmd_version` calls `version()` (`:2383`).
@@ -407,7 +407,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_help,
         help: "",
     },
-    // ─── network: list networks under confdir ────────────────────
+    // ─── network: list networks under confdir
     // C `tincctl.c:3042`: `{"network", cmd_network, false}`. The
     // C has TWO modes (list / switch); we only have list. The
     // switch is C-behavior-drop #2 — only useful in the readline
@@ -575,9 +575,7 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     Ok(())
 }
 
-// ────────────────────────────────────────────────────────────────────
 // 5b adapters — the simple control commands
-// ────────────────────────────────────────────────────────────────────
 //
 // Each is: arity check → `cmd::ctl_simple::*`. The arity check is
 // the only thing the adapter adds; everything else (connect, send,
@@ -664,14 +662,14 @@ fn cmd_config_with_action(
     action: cmd::config::Action,
     args: &[String],
 ) -> Result<(), CmdError> {
-    // ─── Arity ────────────────────────────────────────────────────────
+    // ─── Arity
     // C `tincctl.c:1797`: `if(argc < 2)` after the verb peel.
     // "2" because argv includes argv[0]; ours doesn't, so "1".
     if args.is_empty() {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     }
 
-    // ─── Join the rest ───────────────────────────────────────────────
+    // ─── Join the rest
     // C `tincctl.c:1805-1809`: `strncat` loop with single space.
     // `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
     // val="foo bar". The space-join recreates the user's intent
@@ -679,7 +677,7 @@ fn cmd_config_with_action(
     // C has the same loss).
     let joined = args.join(" ");
 
-    // ─── Run ───────────────────────────────────────────────────────────
+    // ─── Run
     let (out, warnings) = cmd::config::run(paths, action, &joined, g.force)?;
     config_output(paths, out, &warnings);
     Ok(())
@@ -690,13 +688,13 @@ fn cmd_config_with_action(
 fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd::config::Warning]) {
     use cmd::config::ConfigOutput;
 
-    // ─── Print warnings to stderr ─────────────────────────────────────
+    // ─── Print warnings to stderr
     // C `fprintf(stderr, ...)` inline. We collect-then-print.
     for w in warnings {
         eprintln!("{w}");
     }
 
-    // ─── Handle output ────────────────────────────────────────────────
+    // ─── Handle output
     match out {
         ConfigOutput::Got(values) => {
             // C `tincctl.c:2025`: `printf("%s\n", bvalue)`.
@@ -721,7 +719,7 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
     }
 }
 
-// ─── The four toplevel adapters ────────────────────────────────────────
+// ─── The four toplevel adapters
 // C uses ONE function and an `argv--` shift to re-read the command
 // name. We can't see argv[0] (dispatch ate it), so each toplevel
 // name passes its action explicitly. Four 1-line wrappers; the
@@ -803,12 +801,12 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
 fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::dump::{DumpOutput, Kind, dump, dump_invitations, parse_kind};
 
-    // ─── argv → Kind ──────────────────────────────────────────────
+    // ─── argv → Kind
     // The arity errors and `Unknown dump type` live in here. The C
     // does the same checks inline at `tincctl.c:1185-1232`.
     let kind = parse_kind(args)?;
 
-    // ─── Invitations: pure readdir, no daemon ─────────────────────
+    // ─── Invitations: pure readdir, no daemon
     // C `tincctl.c:1203-1205`: BEFORE `connect_tincd`. Works
     // daemon-down. (We did pay one `access(2)` for `resolve_runtime`
     // — see the table-entry comment.)
@@ -829,7 +827,7 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         return Ok(());
     }
 
-    // ─── Daemon-backed: connect, send, recv, format ──────────────
+    // ─── Daemon-backed: connect, send, recv, format
     let DumpOutput::Lines(lines) = dump(paths, kind)?;
     for line in lines {
         println!("{line}");
@@ -1129,8 +1127,6 @@ fn cmd_exchange_all(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), C
     cmd_import(paths, g, args)
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 /// `parse_options` + the env-var fallback. C: `tincctl.c:207-278`.
 ///
 /// Returns the resolved `PathsInput` and the leftover argv (the
@@ -1232,7 +1228,7 @@ fn parse_global_options(
         }
     }
 
-    // ─── NETNAME env fallback ───────────────────────────────────────
+    // ─── NETNAME env fallback
     // C: `tincctl.c:258-263`. Only if -n wasn't given. Standard
     // env-under-flag precedence.
     if input.netname.is_none() {
@@ -1241,7 +1237,7 @@ fn parse_global_options(
         }
     }
 
-    // ─── netname "." → None ─────────────────────────────────────────
+    // ─── netname "." → None
     // C: `tincctl.c:267-270`. "." is the "top-level" sentinel — it
     // means "no netname, use confdir as confbase". Allows `NETNAME=.`
     // in your env to explicitly say "I want /etc/tinc not
@@ -1251,7 +1247,7 @@ fn parse_global_options(
         input.netname = None;
     }
 
-    // ─── netname path-traversal guard ───────────────────────────────
+    // ─── netname path-traversal guard
     // C: `tincctl.c:272-276` `strpbrk(netname, "\\/") || *netname == '.'`.
     // Netname becomes a path component; slashes would escape confdir.
     // Leading dot rejects `..` (`strpbrk` doesn't catch `..` but `*=='.'`
@@ -1345,7 +1341,7 @@ fn main() -> ExitCode {
     let cmd_name = &rest[0];
     let cmd_args = &rest[1..];
 
-    // ─── Dispatch ───────────────────────────────────────────────────
+    // ─── Dispatch
     // C: linear scan of `commands[]` with `strcasecmp`. We use
     // `eq_ignore_ascii_case` (same as strcasecmp on ASCII; we already
     // pinned everything to ASCII in tinc-conf for the same reason).

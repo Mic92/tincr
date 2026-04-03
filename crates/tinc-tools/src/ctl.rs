@@ -479,7 +479,7 @@ impl<S: Read + Write> CtlSocket<S> {
         let mut reader = BufReader::new(ReadHalf(Rc::clone(&shared)));
         let mut writer = WriteHalf(shared);
 
-        // ─── Send ID ────────────────────────────────────────────────
+        // ─── Send ID
         // C: `sendline(fd, "%d ^%s %d", ID, controlcookie,
         //     TINC_CTL_VERSION_CURRENT)`.
         // The `^` prefix is what routes this to the control path in
@@ -490,7 +490,7 @@ impl<S: Read + Write> CtlSocket<S> {
         // Doesn't matter: the `^` is the intent.).
         writeln!(writer, "{ID} ^{cookie} {CTL_VERSION}").map_err(CtlError::Io)?;
 
-        // ─── Recv line 1: daemon's send_id() ────────────────────────
+        // ─── Recv line 1: daemon's send_id()
         // C: `recvline(); sscanf("%d %4095s %d") == 3 && code == 0`.
         // We get `"0 <daemon-name> <maj>.<min>"`. The daemon sends
         // this *after* our ID arrives (`if(!c->outgoing) send_id(c)`
@@ -514,7 +514,7 @@ impl<S: Read + Write> CtlSocket<S> {
         // but never reads `data` or `version` afterward. We don't
         // even consume — the next line is where the action is.
 
-        // ─── Recv line 2: ACK with control-ver and pid ──────────────
+        // ─── Recv line 2: ACK with control-ver and pid
         // C: `recvline(); sscanf("%d %d %d") == 3 && code == 4 &&
         //     version == TINC_CTL_VERSION_CURRENT`.
         // Shape: `"4 0 <pid>"`. The `4` is ACK; `0` is control-ver
@@ -700,7 +700,7 @@ impl<S: Read + Write> CtlSocket<S> {
             // is the error. EOF mid-dump = daemon crashed.
             .ok_or_else(|| CtlError::Greeting("Error receiving dump.".to_owned()))?;
 
-        // ─── Prefix: `18 N` ───────────────────────────────────────
+        // ─── Prefix: `18 N`
         // `sscanf("%d %d %s %s")` reads code, req, and OPTIONALLY
         // tries for two more. The two-ints-only case is `n == 2`
         // (`tincctl.c:1245`). We split prefix from body manually
@@ -722,7 +722,7 @@ impl<S: Read + Write> CtlSocket<S> {
             return Err(bad());
         }
 
-        // ─── Request type, then body or terminator ─────────────────
+        // ─── Request type, then body or terminator
         // `split_once` again for the SECOND space. None → no body
         // → terminator. Some("") would mean trailing space, which
         // `printf` doesn't emit; treat as terminator anyway.
@@ -849,11 +849,11 @@ impl CtlSocket<UnixStream> {
     /// # Errors
     /// See `CtlError` variants. Each failure mode has its own.
     pub fn connect(paths: &Paths) -> Result<Self, CtlError> {
-        // ─── Read pidfile ───────────────────────────────────────────
+        // ─── Read pidfile
         let pidfile_path = paths.pidfile();
         let pf = Pidfile::read(pidfile_path)?;
 
-        // ─── kill(pid, 0) liveness check ────────────────────────────
+        // ─── kill(pid, 0) liveness check
         // C: `if((pid == 0) || (kill(pid, 0) && errno == ESRCH))`.
         // The `pid == 0` check: `kill(0, 0)` would signal our own
         // process group, which is a non-error and would mask "no
@@ -885,7 +885,7 @@ impl CtlSocket<UnixStream> {
             return Err(CtlError::DaemonDead { pid: pf.pid });
         }
 
-        // ─── Connect socket ─────────────────────────────────────────
+        // ─── Connect socket
         // C: socket(AF_UNIX), connect. UnixStream::connect does both.
         // The C also checks `strlen(unixsocketname) >= sun_path` —
         // path-too-long for the sockaddr. UnixStream::connect surfaces
@@ -897,7 +897,7 @@ impl CtlSocket<UnixStream> {
             err: e,
         })?;
 
-        // ─── SO_NOSIGPIPE (best-effort, macOS only) ─────────────────
+        // ─── SO_NOSIGPIPE (best-effort, macOS only)
         // C: `setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, ...)`.
         // Linux doesn't have it (uses MSG_NOSIGNAL per-send). The C
         // also passes MSG_NOSIGNAL to send() (`tincctl.c:576`); we
@@ -912,14 +912,12 @@ impl CtlSocket<UnixStream> {
         // need it later (shell mode lands), `signal(SIGPIPE,
         // SIG_IGN)` at binary startup. Not here.
 
-        // ─── Greeting ───────────────────────────────────────────────
+        // ─── Greeting
         Self::handshake(stream, &pf.cookie)
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -1059,7 +1057,6 @@ mod tests {
         assert!(err.to_string().contains("Could not open pid file"));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // The fake daemon. A thread doing the greeting dance + canned
     // responses on a UnixStream::pair() half.
     //
@@ -1072,7 +1069,6 @@ mod tests {
     // Why this is fine: UnixStream::pair() is in-process (no socket
     // file, no port, no race with parallel tests). The thread is
     // joined before the test returns (no leak).
-    // ────────────────────────────────────────────────────────────────
 
     /// Spawn a fake daemon on `theirs`. Reads the ID line (asserts
     /// the cookie), sends greeting line 1 + 2, then runs `serve` to
@@ -1103,7 +1099,7 @@ mod tests {
             let mut write = &theirs;
             let mut br = BufReader::new(read);
 
-            // ─── Recv ID, check cookie ──────────────────────────────
+            // ─── Recv ID, check cookie
             // C `id_h:325`: `if(name[0] == '^' && !strcmp(name+1,
             // controlcookie))`. The whole `^cookie` is in the `%s`
             // field after `ID`.
@@ -1117,7 +1113,7 @@ mod tests {
             assert_eq!(parts[1], format!("^{expected_cookie}"));
             assert_eq!(parts[2], "0");
 
-            // ─── Send greeting line 1 (send_id) ─────────────────────
+            // ─── Send greeting line 1 (send_id)
             // C `protocol_auth.c::send_id`: `"%d %s %d.%d", ID,
             // myself->name, PROT_MAJOR, PROT_MINOR` (modulo the
             // experimental `^` prefix on minor, which doesn't matter
@@ -1126,12 +1122,12 @@ mod tests {
             // version.
             writeln!(write, "0 fakedaemon 17.7").unwrap();
 
-            // ─── Send greeting line 2 (ACK + ctl-ver + pid) ─────────
+            // ─── Send greeting line 2 (ACK + ctl-ver + pid)
             // C `id_h:337`: `send_request(c, "%d %d %d", ACK,
             // TINC_CTL_VERSION_CURRENT, getpid())`.
             writeln!(write, "4 0 {daemon_pid}").unwrap();
 
-            // ─── Hand off to test-specific serving ──────────────────
+            // ─── Hand off to test-specific serving
             serve(&mut br, &mut write);
             // Drop closes.
         })
@@ -1404,7 +1400,7 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    // ─── recv_row: the dump prefix-strip + terminator detect ─────
+    // ─── recv_row: the dump prefix-strip + terminator detect
     //
     // Same harness as `recv_lines_until_eof`, but using the typed
     // `recv_row` instead of hand-tokenizing. The parse step (body →
@@ -1627,7 +1623,7 @@ mod tests {
             pid: 0,
         };
 
-        // ─── Record 1 ──────────────────────────────────────────────
+        // ─── Record 1
         // `recv_line` reads through '\n'. BufReader's first read
         // pulls EVERYTHING (Cursor returns it all). 'LOGDATA' is
         // now in BufReader's buffer.
@@ -1640,7 +1636,7 @@ mod tests {
         ctl.recv_data(&mut data).unwrap();
         assert_eq!(&data, b"LOGDATA");
 
-        // ─── Record 2 ──────────────────────────────────────────────
+        // ─── Record 2
         // STILL in BufReader's buffer (Cursor returned everything
         // on the first read).
         let line = ctl.recv_line().unwrap().unwrap();
@@ -1650,7 +1646,7 @@ mod tests {
         ctl.recv_data(&mut data2).unwrap();
         assert_eq!(&data2, b"HELLO");
 
-        // ─── EOF ───────────────────────────────────────────────────
+        // ─── EOF
         let line = ctl.recv_line().unwrap();
         assert_eq!(line, None);
     }

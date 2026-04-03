@@ -50,7 +50,6 @@ use rand_core::OsRng;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 use tinc_tools::keypair;
 
-// ────────────────────────────────────────────────────────────────────
 // Args. Hand-rolled — `clap` would be ~10× the dependency footprint
 // for what is six bool flags and four positionals. The C uses
 // `getopt_long`; we mimic the short-flag subset that `sptps_basic.py`
@@ -164,7 +163,6 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Socket setup. The C does this with `getaddrinfo` + raw `socket()`/
 // `bind()`/`connect()`. std's `TcpListener::bind` etc. handle the
 // happy path; we just need the AF filter and the UDP-listener trick.
@@ -310,7 +308,6 @@ fn udp_accept(addr: SocketAddr) -> io::Result<Sock> {
     Ok(Sock::Udp(s))
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The poll loop. C uses `select()`. We use `nix::poll` — same shape
 // (block until fd readable), better ergonomics, doesn't have the
 // 1024-fd limit (which doesn't matter here, but no reason to inherit
@@ -424,7 +421,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             continue;
         }
 
-        // ── Socket readable ────────────────────────────────────────
+        // ─── Socket readable
         // Check sock first, stdin second — matches C order (the
         // FD_ISSET checks are in this order). Doesn't matter for
         // correctness but keeps verbose-mode output traces aligned
@@ -497,7 +494,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             }
         }
 
-        // ── Stdin readable ─────────────────────────────────────────
+        // ─── Stdin readable
         if stdin_ready {
             // C: `read(in, buf, datagram ? 1460 : sizeof buf)`. The
             // 1460 is an MTU-ish chunk size so each stdin read becomes
@@ -559,8 +556,6 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
-
-// ────────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
     let args = match parse_args() {

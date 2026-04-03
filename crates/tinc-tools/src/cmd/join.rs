@@ -146,9 +146,7 @@ const MAX_DATA: usize = 1 << 20;
 /// `select`s with `tv_sec = 5`. We use the same.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-// ════════════════════════════════════════════════════════════════════
 // URL parsing
-// ════════════════════════════════════════════════════════════════════
 
 /// `host[:port]/slug`, parsed. `invitation.c:1267-1310`.
 ///
@@ -245,9 +243,7 @@ pub fn parse_url(url: &str) -> Option<ParsedUrl> {
     })
 }
 
-// ════════════════════════════════════════════════════════════════════
 // finalize_join — the testable seam
-// ════════════════════════════════════════════════════════════════════
 
 /// Result of consuming an invitation blob. The pubkey goes back over
 /// SPTPS (type-1 record); the rest is informational.
@@ -313,7 +309,7 @@ pub struct JoinResult {
     clippy::too_many_lines,
 )]
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
-    // ─── Validate blob is text ──────────────────────────────────────
+    // ─── Validate blob is text
     // The C treats `data` as a NUL-terminated C string
     // (`strchr(*data, '\n')`, `strlen(*data)`). Embedded NUL would
     // truncate the C parser silently. We accept any UTF-8 (which
@@ -326,7 +322,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     let data = std::str::from_utf8(data)
         .map_err(|_| CmdError::BadInput("Invitation data is not valid UTF-8".into()))?;
 
-    // ─── Parse first chunk's first line: must be `Name = OURNAME` ───
+    // ─── Parse first chunk's first line: must be `Name = OURNAME`
     // C `invitation.c:724`: `name = get_value(data, "Name");`
     // `get_value` parses the *first* line and checks if it's the
     // requested key. Not a search — first-line-only. So the
@@ -348,7 +344,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     }
     let name = name.to_owned();
 
-    // ─── NetName: ignored ───────────────────────────────────────────
+    // ─── NetName: ignored
     // C `invitation.c:735-749`: if no `-n` was given, grep blob for
     // `NetName`, set the global, then re-derive paths. We don't do
     // dynamic path re-derivation (Paths is immutable, by design).
@@ -362,7 +358,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     // variable") and dropped, same as C `else if(!strcasecmp(l,
     // "NetName")) continue;` (`invitation.c:870`).
 
-    // ─── Check tinc.conf doesn't exist ──────────────────────────────
+    // ─── Check tinc.conf doesn't exist
     // C `invitation.c:767`: `if(!access(tinc_conf, F_OK))`. The
     // join_XXXXXXXX random-netname dance is here in C; we just bail.
     let tinc_conf = paths.tinc_conf();
@@ -373,7 +369,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         )));
     }
 
-    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CACHE) ─────────────
+    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CACHE)
     // C `invitation.c:781`. Same mode 0755 as init.
     if let Some(confdir) = &paths.confdir {
         makedir(confdir, 0o755)?;
@@ -382,7 +378,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     makedir(&paths.hosts_dir(), 0o755)?;
     makedir(&paths.cache_dir(), 0o755)?;
 
-    // ─── Open three output files ────────────────────────────────────
+    // ─── Open three output files
     // C `invitation.c:785-830`. tinc.conf, hosts/NAME, invitation-data
     // (raw blob for debugging). The C also opens `tinc-up.invitation`
     // for `ifconfig_*`; we write a placeholder later, no streaming
@@ -406,7 +402,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     let inv_data_path = paths.confbase.join("invitation-data");
     fs::write(&inv_data_path, data).map_err(io_err(&inv_data_path))?;
 
-    // ─── Chunk 1: filter through variables[] ────────────────────────
+    // ─── Chunk 1: filter through variables[]
     // C `invitation.c:841-922`. The hand-rolled tokenizer again
     // (sixth instance). We use `vars::lookup`.
     //
@@ -512,7 +508,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     // tinc.conf done. Close before the chunk-2 loop opens more files.
     drop(f);
 
-    // ─── Chunk 2+: host files, unfiltered ───────────────────────────
+    // ─── Chunk 2+: host files, unfiltered
     // C `invitation.c:928-972`. Each chunk is `Name = X\n` then
     // verbatim lines until the next `Name = X` or EOF. The separator
     // `#--...--#` is recognized and dropped (`strcmp(l, SEPARATOR)`).
@@ -587,7 +583,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         }
     }
 
-    // ─── Generate our real node key ─────────────────────────────────
+    // ─── Generate our real node key
     // C `invitation.c:975-1005`. Same as `init`: PEM private key at
     // 0600, b64 pubkey as config line in hosts/NAME. The pubkey goes
     // back over SPTPS so the daemon writes our hosts entry on its end.
@@ -617,7 +613,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     writeln!(fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_file))?;
     drop(fh);
 
-    // ─── Write tinc-up placeholder ──────────────────────────────────
+    // ─── Write tinc-up placeholder
     // C `invitation.c:1112-1126` (the no-ifconfig branch):
     // `rename(tinc-up.invitation, tinc-up); chmod(tinc-up, 0755)`.
     // We write directly. Same content as `init`'s placeholder
@@ -705,9 +701,7 @@ fn split_var(line: &str) -> Option<(&str, &str)> {
     Some((key, val))
 }
 
-// ════════════════════════════════════════════════════════════════════
 // In-process server stub (test seam + daemon seed)
-// ════════════════════════════════════════════════════════════════════
 
 /// What the daemon's `receive_invitation_sptps` does, minus daemon
 /// state. C `protocol_auth.c:185-310`.
@@ -805,9 +799,7 @@ pub(crate) fn server_receive_cookie(
     Ok((contents, chunk_name, used_path))
 }
 
-// ════════════════════════════════════════════════════════════════════
 // cmd_join — the TCP+SPTPS shell
-// ════════════════════════════════════════════════════════════════════
 
 /// `tinc join URL`. `invitation.c:1218`.
 ///
@@ -827,11 +819,11 @@ pub(crate) fn server_receive_cookie(
 /// Only via `keypair::generate`'s entropy source.
 #[allow(clippy::too_many_lines)] // see finalize_join's allow rationale
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
-    // ─── Parse URL ──────────────────────────────────────────────────
+    // ─── Parse URL
     let parsed =
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
 
-    // ─── Preflight: confbase must be fresh ──────────────────────────
+    // ─── Preflight: confbase must be fresh
     // C `invitation.c:1227-1243`. Do this BEFORE connecting — the
     // cookie is single-use on the daemon side (rename to .used). If
     // we connect, send cookie, daemon renames, then WE fail on
@@ -853,14 +845,14 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── Generate throwaway key ─────────────────────────────────────
+    // ─── Generate throwaway key
     // C `invitation.c:1315`. This key is ONLY for the SPTPS handshake;
     // it's not the node's identity. The daemon doesn't store it.
     // (The real node key is generated inside `finalize_join`.)
     let throwaway = keypair::generate();
     let throwaway_b64 = b64::encode(throwaway.public_key());
 
-    // ─── Connect ────────────────────────────────────────────────────
+    // ─── Connect
     // C `invitation.c:1323-1360`: getaddrinfo loop, try each addr.
     // `TcpStream::connect((host, port))` does the same loop
     // internally (resolves all addrs, tries each). We lose the
@@ -882,7 +874,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         .map_err(io_err("set_read_timeout"))?;
     eprintln!("Connected to {} port {}...", parsed.host, parsed.port);
 
-    // ─── Meta-greeting exchange ─────────────────────────────────────
+    // ─── Meta-greeting exchange
     // C `invitation.c:1368-1398`. Two lines out, two lines in.
     //
     // OUT: "0 ?<throwaway-pubkey-b64> 17.1\n"
@@ -920,7 +912,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // `"4 "` (one digit, one space). We slice the same way.
     let fingerprint = parse_greeting_line2(&line2)?;
 
-    // ─── Verify key_hash ────────────────────────────────────────────
+    // ─── Verify key_hash
     // C `invitation.c:1400-1410`. The whole point of the URL's first
     // 24 chars: prove the daemon holds the invitation key.
     //
@@ -946,7 +938,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         })
         .ok_or_else(|| CmdError::BadInput("Invalid pubkey from peer".into()))?;
 
-    // ─── Start SPTPS ────────────────────────────────────────────────
+    // ─── Start SPTPS
     // C `invitation.c:1424`: `sptps_start(&sptps, NULL, true, false,
     // key, hiskey, "tinc invitation", 15, invitation_send,
     // invitation_receive)`.
@@ -963,7 +955,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         &mut OsRng,
     );
 
-    // ─── SPTPS pump ─────────────────────────────────────────────────
+    // ─── SPTPS pump
     // The C structure is callback-based: `invitation_send` writes
     // to sock, `invitation_receive` accumulates type-0, calls
     // `finalize_join` on type-1, sets `success=true` on type-2.
@@ -1249,9 +1241,7 @@ fn parse_greeting_line2(line: &str) -> Result<&str, CmdError> {
     Ok(rest)
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -1271,9 +1261,7 @@ mod tests {
         })
     }
 
-    // ────────────────────────────────────────────────────────────────
     // parse_url
-    // ────────────────────────────────────────────────────────────────
 
     #[test]
     fn url_basic() {
@@ -1353,9 +1341,7 @@ mod tests {
         assert!(parse_url(&format!("host/{slug}")).is_none());
     }
 
-    // ────────────────────────────────────────────────────────────────
     // split_var — the C tokenizer
-    // ────────────────────────────────────────────────────────────────
 
     #[test]
     fn split_var_forms() {
@@ -1368,9 +1354,7 @@ mod tests {
         assert_eq!(split_var("=655"), None); // empty key (= at pos 0)
     }
 
-    // ────────────────────────────────────────────────────────────────
     // greeting parsers
-    // ────────────────────────────────────────────────────────────────
 
     #[test]
     fn greeting_line1() {
@@ -1390,9 +1374,7 @@ mod tests {
         assert!(parse_greeting_line2("4").is_err()); // no space
     }
 
-    // ────────────────────────────────────────────────────────────────
     // finalize_join — the testable seam
-    // ────────────────────────────────────────────────────────────────
 
     /// Minimal valid blob: chunk 1 with Name only, no chunk 2.
     /// Shouldn't happen in practice (invite always emits chunk 2)
@@ -1625,9 +1607,7 @@ Ed25519PublicKey = EVIL
         assert!(!p.host_file("bob").exists());
     }
 
-    // ────────────────────────────────────────────────────────────────
     // server_receive_cookie — the daemon stub
-    // ────────────────────────────────────────────────────────────────
 
     /// Full server-side flow on a real invitation file from invite().
     #[test]
@@ -1691,9 +1671,7 @@ Ed25519PublicKey = EVIL
         assert!(msg.contains("non-existing"));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // The CONTRACT TEST: full invite ↔ join roundtrip, in-process
-    // ────────────────────────────────────────────────────────────────
 
     /// **The contract.** invite() writes a file → server stub reads
     /// it → SPTPS ping-pong → finalize_join writes a confbase →
@@ -1734,7 +1712,7 @@ Ed25519PublicKey = EVIL
     fn invite_join_roundtrip_in_process() {
         let dir = tempfile::tempdir().unwrap();
 
-        // ─── Inviter side: alice invites bob ────────────────────────
+        // ─── Inviter side: alice invites bob
         let inviter = paths_at(&dir.path().join("inviter"));
         init::run(&inviter, "alice").unwrap();
         {
@@ -1762,12 +1740,12 @@ Ed25519PublicKey = EVIL
         let inv_key = keypair::read_private(&inviter.invitation_key()).unwrap();
         let inv_pub = *inv_key.public_key();
 
-        // ─── Joiner setup ───────────────────────────────────────────
+        // ─── Joiner setup
         let joiner_paths = paths_at(&dir.path().join("joiner"));
         let throwaway = keypair::generate();
         let throwaway_pub = *throwaway.public_key();
 
-        // ─── Start both SPTPS sessions ──────────────────────────────
+        // ─── Start both SPTPS sessions
         // Joiner = initiator. Server = responder. Stream framing.
         // Same label, same as the C wire bytes.
         let (mut joiner, j_init) = Sptps::start(
@@ -1793,7 +1771,7 @@ Ed25519PublicKey = EVIL
             &mut OsRng,
         );
 
-        // ─── The pump ───────────────────────────────────────────────
+        // ─── The pump
         // Two unidirectional byte queues. `Output::Wire` from one
         // side → enqueue → `receive()` on the other. Loop until both
         // queues are empty AND no new wire bytes were produced
@@ -1853,7 +1831,7 @@ Ed25519PublicKey = EVIL
                 break;
             }
 
-            // ─── Server processes its inbox ─────────────────────────
+            // ─── Server processes its inbox
             if !to_server.is_empty() {
                 let inp = std::mem::take(&mut to_server);
                 let mut off = 0;
@@ -1949,7 +1927,7 @@ Ed25519PublicKey = EVIL
                 }
             }
 
-            // ─── Joiner processes its inbox ─────────────────────────
+            // ─── Joiner processes its inbox
             // This is `cmd_join`'s SPTPS loop, transcribed for in-
             // process testing. Same structure: type-0 accumulate,
             // type-1 finalize, type-2 success.
@@ -2005,7 +1983,7 @@ Ed25519PublicKey = EVIL
             }
         }
 
-        // ─── Asserts ────────────────────────────────────────────
+        // ─── Asserts
         assert!(success, "type-2 never arrived; pump stalled");
         assert_eq!(server_phase, ServerPhase::Done);
         let r = join_result.unwrap();

@@ -162,9 +162,7 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Export
-// ────────────────────────────────────────────────────────────────────
 
 /// `export` (the inner helper, not `cmd_export`). Write one host file
 /// to `out`, prefixed with `Name = X`, with any `Name =` lines from
@@ -341,9 +339,7 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Import
-// ────────────────────────────────────────────────────────────────────
 
 /// `cmd_import`. Read the export-blob format from `inp`, write
 /// `hosts/NAME` for each `Name = NAME` section.
@@ -420,7 +416,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
     for line in inp.lines() {
         let line = line.map_err(io_err("<stdin>"))?;
 
-        // ─── "Name = X" → switch files ──────────────────────────────
+        // ─── "Name = X" → switch files
         // C: `if(sscanf(buf, "Name = %4095s", name) == 1)`. See the
         // doc comment above for what this matches. We replicate:
         // exact prefix `"Name = "`, then take the first whitespace-
@@ -480,7 +476,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             continue;
         }
 
-        // ─── Junk before first Name → warn once ─────────────────────
+        // ─── Junk before first Name → warn once
         if firstline {
             eprintln!("Junk at the beginning of the input, ignoring.");
             firstline = false;
@@ -490,7 +486,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             // before any Name is junk anyway), but fidelity.
         }
 
-        // ─── Separator → skip ───────────────────────────────────────
+        // ─── Separator → skip
         // C: `if(!strcmp(buf, "#--...--#\n"))`. The C buf includes
         // the fgets newline. Our `line` doesn't (lines() strips).
         // So we compare against SEPARATOR sans newline.
@@ -507,7 +503,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             continue;
         }
 
-        // ─── Content → write to current file ────────────────────────
+        // ─── Content → write to current file
         // C: `if(out) fputs(buf, out)`. Silently dropped if out==NULL.
         if let Some(f) = out.as_mut() {
             // C `buf` has the newline; we add it back.
@@ -522,8 +518,6 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
 
     Ok(count)
 }
-
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -822,12 +816,12 @@ mod tests {
                         Subnet = fd00::/64\n\
                         Ed25519PublicKey = Pg2fEkaQ9lLAnEDV+ZOfu8I0il9rmrQaY+WYDOzeavK\n";
 
-        // ─── Export side ────────────────────────────────────────────
+        // ─── Export side
         let (_export_dir, export_paths) = setup("alice", original);
         let mut blob = Vec::new();
         export(&export_paths, &mut blob).unwrap();
 
-        // ─── Import side (different confbase) ───────────────────────
+        // ─── Import side (different confbase)
         let import_dir = tempfile::tempdir().unwrap();
         let import_base = import_dir.path().join("peer");
         fs::create_dir_all(import_base.join("hosts")).unwrap();
@@ -839,7 +833,7 @@ mod tests {
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 1);
 
-        // ─── The proof ──────────────────────────────────────────────
+        // ─── The proof
         let imported = fs::read_to_string(import_paths.host_file("alice")).unwrap();
         assert_eq!(imported, original);
     }

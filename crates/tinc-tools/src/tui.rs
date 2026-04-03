@@ -70,9 +70,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::termios::{self, LocalFlags, SetArg, SpecialCharacterIndices, Termios};
 use nix::unistd;
 
-// ═══════════════════════════════════════════════════════════════════
 // Escape sequences — ANSI X3.64 / ECMA-48
-// ═══════════════════════════════════════════════════════════════════
 //
 // CSI is `ESC [`, written `\x1b[`. SGR (Select Graphic Rendition)
 // is `CSI Ps m` where Ps is the parameter. The five SGR codes here
@@ -141,9 +139,7 @@ pub fn goto(row: u16, col: u16) -> String {
     format!("\x1b[{};{}H", row + 1, col + 1)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // winsize — TIOCGWINSZ
-// ═══════════════════════════════════════════════════════════════════
 
 /// Terminal dimensions. `top.c` doesn't query these (curses' `LINES`
 /// /`COLS` globals do it), but we need them to clip the data-row
@@ -226,9 +222,7 @@ pub fn winsize() -> Winsize {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // RawMode — RAII termios restore
-// ═══════════════════════════════════════════════════════════════════
 
 /// `initscr()` + `endwin()` as a Drop guard. The point of RAII
 /// here is **panic safety**: if `top`'s loop panics (parse error,
@@ -308,7 +302,7 @@ impl RawMode {
         // possible if something weird closed the fd between calls.
         let original = termios::tcgetattr(fd)?;
 
-        // ─── Mutate ───────────────────────────────────────────────
+        // ─── Mutate
         let mut raw = original.clone();
         raw.local_flags &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         // `VMIN=1, VTIME=0`: `read()` blocks until 1 byte. We don't
@@ -331,7 +325,7 @@ impl RawMode {
         // output to flush — we haven't written anything yet.)
         termios::tcsetattr(fd, SetArg::TCSANOW, &raw)?;
 
-        // ─── Alt screen + cursor ──────────────────────────────────
+        // ─── Alt screen + cursor
         // AFTER tcsetattr succeeds: if it had failed, we'd return
         // without an alt-screen-enter to undo. Ordering matters for
         // partial-failure cleanliness.
@@ -372,19 +366,19 @@ impl RawMode {
         let stdin = io::stdin();
         let fd = stdin.as_fd();
 
-        // ─── Restore cooked ───────────────────────────────────────
+        // ─── Restore cooked
         // Show cursor BEFORE tcsetattr: if the user starts typing
         // immediately, ECHO is back on and they see their input.
         print!("{CURSOR_SHOW}");
         io::stdout().flush()?;
         termios::tcsetattr(fd, SetArg::TCSANOW, &self.original)?;
 
-        // ─── Call ─────────────────────────────────────────────────
+        // ─── Call
         // `stdin.lock()` for BufRead. The lock is held for `f`'s
         // duration only — released before we re-raw.
         let result = f(&mut stdin.lock());
 
-        // ─── Re-raw ───────────────────────────────────────────────
+        // ─── Re-raw
         // Best-effort. Same flags as `enter()`. We DON'T re-snapshot
         // `original` (it's still the original-original; nothing
         // changed it). If this fails, Drop will try the same thing.
@@ -419,9 +413,7 @@ impl Drop for RawMode {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // getch_timeout — poll + read
-// ═══════════════════════════════════════════════════════════════════
 
 /// `top.c:298,308`: `timeout(delay)` then `getch()`. Curses'
 /// `timeout(ms)` sets a per-`getch()` deadline; `getch()` then
@@ -465,7 +457,7 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     // `PollFd` borrows the fd for the duration. `POLLIN`: readable.
     let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
 
-    // ─── poll ──────────────────────────────────────────────────────
+    // ─── poll
     // `PollTimeout::from(ms)` — nix wraps the `int timeout` arg.
     // 0 means "don't block" (immediate); -1 means "forever" (we
     // never want that — `top`'s minimum delay is 100ms per `top.c
@@ -487,7 +479,7 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
 
         // ≥1 ready → readable. Go read.
         Ok(_) => {
-            // ─── read ──────────────────────────────────────────────
+            // ─── read
             // poll said POLLIN; read won't block. ICANON is off
             // (raw mode); read returns per-byte. 1-byte buffer.
             //
@@ -536,9 +528,7 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 //
 // What's testable here: the escape STRINGS (typo-catch). What
 // isn't: anything touching the tty (RawMode, getch_timeout,

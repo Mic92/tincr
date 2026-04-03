@@ -128,9 +128,7 @@ use crate::names::Paths;
 
 use super::CmdError;
 
-// ═══════════════════════════════════════════════════════════════════
 // Shared header parse + size limits
-// ═══════════════════════════════════════════════════════════════════
 
 /// Max log line. `tincctl.c:651`: `char data[1024]`. Daemon-side
 /// `pretty[1024]` in `logger.c` (the format buffer). Log lines that
@@ -205,9 +203,7 @@ fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     Some(len)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // `tinc log [LEVEL]` — stream daemon's logger() output
-// ═══════════════════════════════════════════════════════════════════
 //
 // `tincctl.c:649-669`. Subscribe with `(level, use_color)`, then
 // loop: header, data, write data + `\n` to stdout.
@@ -308,7 +304,7 @@ where
     S: Read + Write,
     W: Write,
 {
-    // ─── Subscribe ──────────────────────────────────────────────────
+    // ─── Subscribe
     // `tincctl.c:649`: `sendline(fd, "%d %d %d %d", CONTROL, REQ_
     // LOG, level, use_color)`. Daemon's `control.c:135` `sscanf
     // (%*d %*d %d %d)` reads both. The bool prints as 0/1; the
@@ -321,7 +317,7 @@ where
         i32::from(use_color),
     )?;
 
-    // ─── Receive loop ───────────────────────────────────────────────
+    // ─── Receive loop
     // `tincctl.c:653-669`. Reused buffer; `clear` + `resize`
     // per-iteration. The C uses a stack `char[1024]`; we heap
     // (resize doesn't shrink capacity, so after the first message
@@ -412,9 +408,7 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     log_loop(&mut ctl, &mut out, level, use_color).map_err(|e| CmdError::BadInput(e.to_string()))
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // `tinc pcap [SNAPLEN]` — stream packet capture in libpcap format
-// ═══════════════════════════════════════════════════════════════════
 //
 // `tincctl.c:590-645`. Subscribe with `snaplen`, write the libpcap
 // global header, then loop: tinc header, data, libpcap packet
@@ -591,7 +585,7 @@ where
     W: Write,
     Clock: FnMut() -> SystemTime,
 {
-    // ─── Subscribe ──────────────────────────────────────────────────
+    // ─── Subscribe
     // `tincctl.c:591`: `sendline(fd, "%d %d %d", CONTROL, REQ_PCAP,
     // snaplen)`. Daemon's `control.c:128`: `sscanf("%*d %*d %d",
     // &c->outmaclength)`. The cast: `snaplen` is `u32`, `send_int`
@@ -603,7 +597,7 @@ where
     #[allow(clippy::cast_possible_wrap)] // snaplen is small; matches %d wire
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
-    // ─── Global header ──────────────────────────────────────────────
+    // ─── Global header
     // `tincctl.c:618-619`: `fwrite(&header, ...); fflush(out);`.
     // ONCE, before the loop. Wireshark reads this to know the
     // link-type and endianness.
@@ -611,7 +605,7 @@ where
         .map_err(CtlError::Io)?;
     out.flush().map_err(CtlError::Io)?;
 
-    // ─── Receive loop ───────────────────────────────────────────────
+    // ─── Receive loop
     // Same buffer-reuse as `log_loop`. Packets are bigger (up to
     // 9018), so the upfront capacity matters more.
     let mut buf: Vec<u8> = Vec::with_capacity(PCAP_DATA_MAX);
@@ -673,9 +667,7 @@ pub fn run_pcap(paths: &Paths, snaplen: u32) -> Result<(), CmdError> {
         .map_err(|e| CmdError::BadInput(e.to_string()))
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -685,9 +677,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    // ─────────────────────────────────────────────────────────────────
     // parse_header
-    // ─────────────────────────────────────────────────────────────────
 
     /// Golden parse: `"18 15 7"` for log. `tincctl.c:656`.
     #[test]
@@ -774,9 +764,7 @@ mod tests {
         assert_eq!(parse_header("18 15 0", CtlRequest::Log, 1024), Some(0));
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // pcap headers — byte-exact, sed-verifiable
-    // ─────────────────────────────────────────────────────────────────
 
     /// Global header bytes on little-endian (x86_64). `tincctl.c
     /// :596-608`. Field-by-field. The `cfg(target_endian)` is
@@ -862,9 +850,7 @@ mod tests {
         assert_eq!(u32::from_ne_bytes([h[8], h[9], h[10], h[11]]), 100);
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // log_loop / pcap_loop — fake socket, captured output
-    // ─────────────────────────────────────────────────────────────────
     //
     // The CtlSocket constructor needs the Rc<RefCell> dance.
     // Crate-internal: reach into ctl's internals. A test-only
@@ -950,11 +936,11 @@ mod tests {
 
         log_loop(&mut ctl, &mut out, None, false).unwrap();
 
-        // ─── Subscription wire ──────────────────────────────────────
+        // ─── Subscription wire
         // `tincctl.c:649`. level=DEBUG_UNSET (-1), color=0.
         assert_eq!(shared.borrow().write_side, b"18 15 -1 0\n");
 
-        // ─── Output ─────────────────────────────────────────────────
+        // ─── Output
         // `tincctl.c:666-668`: data + '\n'. The flushes are
         // invisible in a Vec.
         assert_eq!(out, b"Hello\nWorld\n");
@@ -1045,11 +1031,11 @@ mod tests {
         let fixed_time = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         pcap_loop(&mut ctl, &mut out, 96, || fixed_time).unwrap();
 
-        // ─── Subscription wire ──────────────────────────────────────
+        // ─── Subscription wire
         // `tincctl.c:591`: `"%d %d %d"`, snaplen=96.
         assert_eq!(shared.borrow().write_side, b"18 14 96\n");
 
-        // ─── Output ─────────────────────────────────────────────────
+        // ─── Output
         // 24 + 16 + 4 = 44 bytes.
         assert_eq!(out.len(), 44);
 
@@ -1126,9 +1112,7 @@ mod tests {
         assert_eq!(out[57], b'B');
     }
 
-    // ─────────────────────────────────────────────────────────────────
     // use_ansi_escapes_stdout — tested by inspection
-    // ─────────────────────────────────────────────────────────────────
     //
     // Can't unit-test `is_terminal()` without a PTY (cargo test's
     // stdout is a pipe). The TERM check IS testable but only if
@@ -1138,9 +1122,7 @@ mod tests {
     // daemon) cover it implicitly: stdout is a pipe → no color
     // → daemon receives `use_color=0` → log lines are unescaped.
 
-    // ─────────────────────────────────────────────────────────────────
     // Consts pinned against C
-    // ─────────────────────────────────────────────────────────────────
 
     /// `tincctl.c:592`: `char data[9018]`. `tincctl.c:651`: `char
     /// data[1024]`. sed-verifiable:
