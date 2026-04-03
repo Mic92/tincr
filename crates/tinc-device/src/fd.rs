@@ -312,9 +312,6 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
 /// Separate fn for testability: connect-to-abstract is testable
 /// without the full SCM_RIGHTS flow (a test can listen on an
 /// abstract addr, this fn connects, both sides agree).
-///
-/// `clippy::missing_errors_doc`: documented in `recv_scm_rights`.
-#[allow(clippy::missing_errors_doc)]
 fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     // C `:137`: `if(path[0] == '@')`. We check the first byte
     // of the path's OsStr encoding. `as_encoded_bytes()[0]` is
@@ -348,9 +345,6 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
 impl Device for FdTun {
     /// `read_packet` (`fd_device.c:210-230`). The +14 read +
     /// ethertype synthesis.
-    ///
-    /// `clippy::missing_errors_doc`: documented in trait.
-    #[allow(clippy::missing_errors_doc)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() >= MTU,
@@ -425,9 +419,6 @@ impl Device for FdTun {
     /// (the daemon calls through `dyn Device`, doesn't know which
     /// impl), but THIS impl doesn't mutate. The shared signature
     /// is the constraint.
-    ///
-    /// `clippy::missing_errors_doc`: documented in trait.
-    #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() > ETH_HLEN,
@@ -553,10 +544,8 @@ mod tests {
     /// reads at +14, synthesizes 0x0800 ethertype at +12,
     /// returns len+14.
     ///
-    /// `clippy::similar_names`: `r`/`w` for pipe ends. The
     /// idiom.
     #[test]
-    #[allow(clippy::similar_names)]
     fn read_ipv4_via_pipe() {
         // Minimal IPv4-ish packet. Only byte 0 matters (the
         // version nibble); the rest is payload from our
@@ -604,7 +593,6 @@ mod tests {
 
     /// Same but IPv6. Byte 0 = 0x60. Ethertype = 0x86DD.
     #[test]
-    #[allow(clippy::similar_names)]
     fn read_ipv6_via_pipe() {
         // Minimal IPv6-ish prefix. 40-byte header, but we only
         // need the first byte to be 0x6?. Send a stub.
@@ -634,7 +622,6 @@ mod tests {
 
     /// Unknown IP version → InvalidData. C `:221-224`.
     #[test]
-    #[allow(clippy::similar_names)]
     fn read_unknown_version_via_pipe() {
         let garbage = [0x50u8; 20]; // version=5 (ST-II, dead)
 
@@ -655,7 +642,6 @@ mod tests {
     /// EOF → UnexpectedEof. The Java VpnService stopped. C
     /// `:213` errors on `lenin <= 0`.
     #[test]
-    #[allow(clippy::similar_names)]
     fn read_eof_via_pipe() {
         let (r, w) = pipe();
         // Close the write end immediately. Next read returns 0.
@@ -674,7 +660,6 @@ mod tests {
     /// The write flow: hand FdTun a 14+20 byte buffer (ether +
     /// IP), it strips the 14, writes the 20.
     #[test]
-    #[allow(clippy::similar_names)]
     fn write_strips_ether_via_pipe() {
         let (r, w) = pipe();
 

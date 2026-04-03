@@ -26,12 +26,6 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![allow(clippy::doc_markdown)]
-// 14 bools in DaemonSettings is the C globals census, not a smell.
-// Same for the daemon struct itself.
-#![allow(clippy::struct_excessive_bools)]
-// std::env::set_var is safe in edition 2021. Integration test sets
-// RUST_LOG; nothing else here uses set_var, but the standing rule
-// applies workspace-wide.
 
 pub mod conn;
 pub mod control;

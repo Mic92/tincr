@@ -233,13 +233,12 @@ impl Device for BsdTun {
     /// `read_packet` (`bsd/device.c:404-500`). Three switch arms
     /// folded into one match.
     ///
-    /// `clippy::missing_errors_doc`: documented in trait.
     /// `clippy::too_many_lines`: this matches the C's three-arm
     /// switch in one fn. Splitting would obscure the parallel
     /// structure (the three arms are MEANT to look similar;
     /// that's the point — they're the SAME logic at three
     /// offsets). The C is 96 lines; we're shorter.
-    #[allow(clippy::missing_errors_doc, clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() >= MTU,
@@ -356,9 +355,6 @@ impl Device for BsdTun {
     }
 
     /// `write_packet` (`bsd/device.c:504-585`). Three arms.
-    ///
-    /// `clippy::missing_errors_doc`: documented in trait.
-    #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.variant {
             // ─── TUN: write at +14, strip ether

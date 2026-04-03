@@ -312,7 +312,6 @@ impl Daemon {
     /// subprocess.
     #[allow(clippy::too_many_lines)] // setup_myself is one long
     // sequence in C too. Splitting it scatters the boot order.
-    #[allow(clippy::missing_panics_doc)] // doc'd in body comments
     pub fn setup(confbase: &Path, pidfile: &Path, socket: &Path) -> Result<Self, SetupError> {
         // ─── read tinc.conf (tincd.c:590)
         let config = tinc_conf::read_server_config(confbase)
@@ -992,14 +991,10 @@ impl Daemon {
     ///
     /// feed → loop read_line → check_gate → handler.
     ///
-    /// `too_many_lines` allowed: this is the C `receive_meta` +
-    /// `receive_request` dispatch table inlined. The C version is
-    /// also long (`meta.c:164-320` is 156 lines). The id_h Peer
-    /// branch alone is 70 lines (the SPTPS-transition piggyback
-    /// re-feed). Splitting would mean threading `id`/`conn`/`self`
-    /// borrows through helpers — the borrow gymnastics outweigh
-    /// the linecount win. Chunk 4b's send_ack will SHRINK this
-    /// (the Peer arm's terminate-after-handshake block goes away).
+    /// `too_many_lines`: the C `receive_meta` + `receive_request`
+    /// dispatch inlined (`meta.c:164-320` is 156 lines). Splitting
+    /// would thread `id`/`conn`/`self` borrows through helpers.
+    // TODO(chunk-4b): too_many_lines goes away with send_ack.
     #[allow(clippy::too_many_lines)]
     fn on_conn_readable(&mut self, id: ConnId) {
         // ─── feed (one recv)

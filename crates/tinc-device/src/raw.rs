@@ -252,9 +252,6 @@ impl Device for RawSocket {
     /// `read_packet` (`raw_socket_device.c:88-100`). The +0 read.
     /// Kernel writes ethernet at offset 0; we read at offset 0.
     /// No offset arithmetic. The simplest backend.
-    ///
-    /// `clippy::missing_errors_doc`: documented in trait.
-    #[allow(clippy::missing_errors_doc)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() >= MTU,
@@ -295,9 +292,6 @@ impl Device for RawSocket {
     /// THIS impl doesn't mutate `buf`. Same as `FdTun::write`.
     /// The trait's `&mut [u8]` is for `linux.rs` (which zeroes
     /// `buf[10..12]`); we just slice.
-    ///
-    /// `clippy::missing_errors_doc`: documented in trait.
-    #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // C `:106`: `write(device_fd, DATA, packet->len)`. The
         // whole thing. No header strip.
@@ -469,8 +463,6 @@ mod tests {
     /// not panic. The "no truncation" path is implicit — the
     /// 23-char name passed straight to if_nametoindex which
     /// errors on the FULL name.
-    ///
-    /// `clippy::similar_names`: `e`/`ek` is fine.
     #[test]
     fn open_nonexistent_iface_errors() {
         // 23 chars. C would truncate to 15. We don't.

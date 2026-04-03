@@ -103,7 +103,6 @@ impl Tun {
     ///   - `AlreadyExists` (EBUSY) on TUNSETIFF: interface name
     ///     taken by another process. C commit `a7e906d2` (since
     ///     reverted by ethertap-drop, but the EBUSY case is real).
-    ///
     pub fn open(cfg: &DeviceConfig) -> io::Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
 
@@ -241,9 +240,6 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 /// Returns the assigned interface name as a `String`. The kernel
 /// always NUL-terminates within `IFNAMSIZ` (it `strscpy`s); we
 /// `CStr::from_bytes_until_nul` and convert.
-///
-/// `clippy::missing_errors_doc`: documented in `Tun::open`.
-#[allow(clippy::missing_errors_doc)]
 #[allow(unsafe_code)]
 fn tunsetiff(
     fd: RawFd,
@@ -329,10 +325,6 @@ fn tunsetiff(
 ///
 /// Uses `ifr_ifru.ifru_hwaddr: sockaddr`. The MAC is in `sa_data
 /// [0..6]` (the rest of `sockaddr` is unused/garbage for hwaddr).
-///
-/// `clippy::missing_errors_doc`: caller documents (`Tun::open`'s
-/// "warning-not-error" comment).
-#[allow(clippy::missing_errors_doc)]
 #[allow(unsafe_code)]
 fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     // C `:120`: `struct ifreq ifr_mac = {0}`. The kernel reads
@@ -396,9 +388,6 @@ impl Device for Tun {
     /// `read_packet` (`linux/device.c:144-183`). The +10 offset
     /// trick for TUN. See lib.rs module doc for the full layout
     /// explanation.
-    ///
-    /// `clippy::missing_errors_doc`: documented in the trait.
-    #[allow(clippy::missing_errors_doc)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
             // ─── TUN
@@ -488,9 +477,6 @@ impl Device for Tun {
 
     /// `write_packet` (`linux/device.c:185-211`). The inverse of
     /// the +10 trick for TUN.
-    ///
-    /// `clippy::missing_errors_doc`: documented in the trait.
-    #[allow(clippy::missing_errors_doc)]
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
             // ─── TUN
@@ -548,9 +534,6 @@ impl Device for Tun {
 /// `skb`, copies, returns. Never short except on truncation
 /// (packet > buf, then `len` returned but only `buf.len()` copied
 /// — that's `MSG_TRUNC` semantics without the flag).
-///
-/// `clippy::missing_errors_doc`: caller documents.
-#[allow(clippy::missing_errors_doc)]
 #[allow(unsafe_code)]
 fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY:
@@ -580,9 +563,6 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 /// Kernel `tun_chr_write_iter` allocs an `skb`, copies, queues.
 /// Atomic; never short (`EFAULT` on bad pointer, `EINVAL` on too-
 /// large; whole-packet or error).
-///
-/// `clippy::missing_errors_doc`: caller documents.
-#[allow(clippy::missing_errors_doc)]
 #[allow(unsafe_code)]
 fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     // SAFETY: same as `read_fd`, but the kernel READS from us.
