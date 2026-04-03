@@ -1,0 +1,34 @@
+# Static target-feature enablement for the crypto hot path.
+#
+# WHY: poly1305 0.8.0's AVX2 backend (and the chacha20 0.9 autodetect path)
+# call core::arch::x86_64::_mm256_* intrinsics from inside trait impls and
+# helper functions that are NOT themselves marked #[target_feature(enable=
+# "avx2")]. With the default x86_64-unknown-linux-gnu feature set (sse2
+# only), rustc cannot inline a #[target_feature(enable="avx2")] callee into
+# a caller that lacks the feature — so EVERY single-instruction intrinsic
+# (vpaddd, vpmuludq, vpand, vpermd, ...) compiles to an out-of-line `call`
+# with stack spills and a callee that does one instruction then `ret`.
+#
+# `objdump -d target/release/tincd | grep -c 'call.*_mm256'` showed 90 such
+# call sites in the per-packet Poly1305 path. Profile: `_mm256_add_epi32`
+# alone was 1.35% self-time as a *function*, `_mm256_permutevar8x32_epi32`
+# 2.21%, `poly1305::backend::avx2::State::new` 3.19% (per-packet setup
+# blowing up because internal helpers don't inline). Net Rust crypto cost
+# was ~2.6× C's per packet — C uses scalar poly1305-donna with zero call
+# overhead.
+#
+# Enabling avx2 at the crate-compile level lets the inliner collapse those
+# 90 call sites into the SIMD instructions they wrap. x86-64-v3 (Haswell+,
+# 2013+) is the conventional cut for distros shipping AVX2-only binaries
+# and matches the practical floor for any machine where tincd throughput
+# matters. The C tincd we benchmark against is built with whatever the
+# system gcc default is; it doesn't NEED AVX2 because its crypto is scalar.
+#
+# `chacha20_force_avx2` additionally tells the chacha20 crate to skip its
+# cpufeatures runtime dispatch (one indirect call per apply_keystream)
+# and inline the AVX2 backend directly.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=x86-64-v3",
+    "--cfg", "chacha20_force_avx2",
+]
