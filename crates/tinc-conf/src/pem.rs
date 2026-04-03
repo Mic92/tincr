@@ -121,10 +121,10 @@ pub fn read_pem(
             // C: `strncmp(line, "-----BEGIN ", 11)` then
             //    `strncmp(line + 11, type, typelen)`.
             // The second is *prefix*, not exact — see fn doc.
-            if let Some(rest) = trimmed.strip_prefix("-----BEGIN ") {
-                if rest.starts_with(ty) {
-                    in_block = true;
-                }
+            if let Some(rest) = trimmed.strip_prefix("-----BEGIN ")
+                && rest.starts_with(ty)
+            {
+                in_block = true;
             }
             continue;
         }

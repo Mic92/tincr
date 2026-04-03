@@ -98,34 +98,33 @@ impl Daemon {
         // connection got all the way to ACK — the address WORKED.
         // Reset the backoff for next time; move the addr to front
         // of the cache.
-        if let Some(oid) = conn_outgoing {
-            if let Some(o) = self.outgoings.get_mut(oid) {
-                o.timeout = 0;
-                if let Some(a) = conn_addr {
-                    o.addr_cache.add_recent(a);
-                }
-                // C `address_cache.c:251`: `reset_address_cache`.
-                // Next retry walks from the top (which is now the
-                // working addr).
-                o.addr_cache.reset();
+        if let Some(oid) = conn_outgoing
+            && let Some(o) = self.outgoings.get_mut(oid)
+        {
+            o.timeout = 0;
+            if let Some(a) = conn_addr {
+                o.addr_cache.add_recent(a);
             }
+            // C `address_cache.c:251`: `reset_address_cache`.
+            // Next retry walks from the top (which is now the
+            // working addr).
+            o.addr_cache.reset();
         }
 
         // (drop conn borrow before touching self.nodes / terminate)
-        if let Some(old) = self.nodes.get(&name) {
-            if let Some(old_conn) = old.conn {
-                if old_conn != id {
-                    // C `:976-978`: "Established a second connection
-                    // with X, closing old connection".
-                    log::debug!(target: "tincd::conn",
+        if let Some(old) = self.nodes.get(&name)
+            && let Some(old_conn) = old.conn
+            && old_conn != id
+        {
+            // C `:976-978`: "Established a second connection
+            // with X, closing old connection".
+            log::debug!(target: "tincd::conn",
                                 "Established a second connection with {name}, \
                                  closing old connection");
-                    self.terminate(old_conn);
-                    // C `:989`: `graph()` after terminate. The
-                    // unconditional `run_graph_and_log()` below
-                    // covers it (extra graph() is idempotent).
-                }
-            }
+            self.terminate(old_conn);
+            // C `:989`: `graph()` after terminate. The
+            // unconditional `run_graph_and_log()` below
+            // covers it (extra graph() is idempotent).
         }
 
         // C `:993-994` + `:1032-1051`: NodeState records the edge
@@ -324,12 +323,12 @@ impl Daemon {
         match conn.flush() {
             Ok(true) => {
                 // outbuf empty. C `:509-511`: `io_set(&c->io, IO_READ)`.
-                if let Some(&io_id) = self.conn_io.get(id) {
-                    if let Err(e) = self.ev.set(io_id, Io::Read) {
-                        log::error!(target: "tincd::conn",
+                if let Some(&io_id) = self.conn_io.get(id)
+                    && let Err(e) = self.ev.set(io_id, Io::Read)
+                {
+                    log::error!(target: "tincd::conn",
                                     "io_set failed for {id:?}: {e}");
-                        self.terminate(id);
-                    }
+                    self.terminate(id);
                 }
             }
             Ok(false) => {
@@ -425,24 +424,24 @@ impl Daemon {
                 .get(&conn_name)
                 .and_then(|&nid| self.graph.node(nid))
                 .is_some_and(|n| !n.reachable);
-            if was_active && peer_unreachable {
-                if let Some(&peer_nid) = self.node_ids.get(&conn_name) {
-                    if let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself) {
-                        // C `:144-146`: `if(!tunnelserver)
-                        // send_del_edge(everyone, e)`.
-                        if !self.settings.tunnelserver {
-                            let line = DelEdge {
-                                from: conn_name.clone(),
-                                to: self.name.clone(),
-                            }
-                            .format(Self::nonce());
-                            self.broadcast_line(&line);
-                        }
-                        // C `:149`: `edge_del(e)`.
-                        self.graph.del_edge(rev);
-                        self.edge_addrs.remove(&rev);
+            if was_active
+                && peer_unreachable
+                && let Some(&peer_nid) = self.node_ids.get(&conn_name)
+                && let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself)
+            {
+                // C `:144-146`: `if(!tunnelserver)
+                // send_del_edge(everyone, e)`.
+                if !self.settings.tunnelserver {
+                    let line = DelEdge {
+                        from: conn_name.clone(),
+                        to: self.name.clone(),
                     }
+                    .format(Self::nonce());
+                    self.broadcast_line(&line);
                 }
+                // C `:149`: `edge_del(e)`.
+                self.graph.del_edge(rev);
+                self.edge_addrs.remove(&rev);
             }
         }
 
@@ -456,24 +455,24 @@ impl Daemon {
         // unconditionally in C, but for us a NON-active outgoing
         // (probe failed) is already handled by `on_connecting`→
         // `do_outgoing_connection` directly. Don't double-retry.
-        if was_active {
-            if let Some(oid) = self.nodes.get(&conn_name).and_then(|_| {
+        if was_active
+            && let Some(oid) = self.nodes.get(&conn_name).and_then(|_| {
                 // Can't read `conn.outgoing` (conn already
                 // dropped). Look it up by name in `outgoings`.
                 self.outgoings
                     .iter()
                     .find(|(_, o)| o.node_name == conn_name)
                     .map(|(id, _)| id)
-            }) {
-                // C `ack_h:942`: `c->outgoing->timeout = 0` was
-                // already done in `on_ack` — wait, no, we never
-                // ported that. Do it here: a connection that GOT
-                // to ACK had a working address; reset the backoff.
-                if let Some(o) = self.outgoings.get_mut(oid) {
-                    o.timeout = 0;
-                }
-                self.do_outgoing_connection(oid);
+            })
+        {
+            // C `ack_h:942`: `c->outgoing->timeout = 0` was
+            // already done in `on_ack` — wait, no, we never
+            // ported that. Do it here: a connection that GOT
+            // to ACK had a working address; reset the backoff.
+            if let Some(o) = self.outgoings.get_mut(oid) {
+                o.timeout = 0;
             }
+            self.do_outgoing_connection(oid);
         }
     }
 
@@ -617,14 +616,13 @@ impl Daemon {
                         tinc_proto::request::PROT_MAJOR,
                         tinc_proto::request::PROT_MINOR
                     ));
-                    if needs_write {
-                        if let Some(&io_id) = self.conn_io.get(id) {
-                            if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
-                                log::error!(target: "tincd::conn",
+                    if needs_write
+                        && let Some(&io_id) = self.conn_io.get(id)
+                        && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
+                    {
+                        log::error!(target: "tincd::conn",
                                             "io_set failed: {e}");
-                                self.terminate(id);
-                            }
-                        }
+                        self.terminate(id);
                     }
                 }
                 return;

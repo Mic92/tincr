@@ -325,16 +325,16 @@ impl Daemon {
                 .get(target.0 as usize)
                 .and_then(Option::as_ref)
                 .map(|r| r.nexthop);
-            if let Some(nh) = nexthop {
-                if nh != target {
-                    let nh_options = self
-                        .last_routes
-                        .get(nh.0 as usize)
-                        .and_then(Option::as_ref)
-                        .map_or(0, |r| r.options);
-                    if (nh_options >> 24) >= 4 {
-                        nw |= self.try_tx(nh, mtu);
-                    }
+            if let Some(nh) = nexthop
+                && nh != target
+            {
+                let nh_options = self
+                    .last_routes
+                    .get(nh.0 as usize)
+                    .and_then(Option::as_ref)
+                    .map_or(0, |r| r.options);
+                if (nh_options >> 24) >= 4 {
+                    nw |= self.try_tx(nh, mtu);
                 }
             }
         }
@@ -1326,24 +1326,24 @@ impl Daemon {
 
         // ─── :746-762: the reflexive address (n->address) ───────
         // Prefer it if udp_confirmed; otherwise the 1-in-3 cycle.
-        if let Some(t) = self.tunnels.get(&to_nid) {
-            if let Some(addr) = t.udp_addr {
-                if t.status.udp_confirmed {
-                    let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
-                    return Some((addr, sock));
-                }
-                // C `:758-762`: `static int x; if(++x >= 3) { x = 0;
-                // return; }`. 1-of-3 calls return EARLY with
-                // n->address; the other 2 fall through to edge
-                // exploration.
-                self.choose_udp_x = self.choose_udp_x.wrapping_add(1);
-                if self.choose_udp_x >= 3 {
-                    self.choose_udp_x = 0;
-                    let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
-                    return Some((addr, sock));
-                }
-                // Fall through to edge exploration.
+        if let Some(t) = self.tunnels.get(&to_nid)
+            && let Some(addr) = t.udp_addr
+        {
+            if t.status.udp_confirmed {
+                let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                return Some((addr, sock));
             }
+            // C `:758-762`: `static int x; if(++x >= 3) { x = 0;
+            // return; }`. 1-of-3 calls return EARLY with
+            // n->address; the other 2 fall through to edge
+            // exploration.
+            self.choose_udp_x = self.choose_udp_x.wrapping_add(1);
+            if self.choose_udp_x >= 3 {
+                self.choose_udp_x = 0;
+                let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                return Some((addr, sock));
+            }
+            // Fall through to edge exploration.
         }
 
         // ─── :765-781: pick an edge's reverse->address ─────────
@@ -1372,12 +1372,12 @@ impl Daemon {
             .map(|(id, _)| id)
             .collect();
         for id in dirty {
-            if let Some(&io_id) = self.conn_io.get(id) {
-                if let Err(e) = self.ev.set(io_id, Io::ReadWrite) {
-                    log::error!(target: "tincd::conn",
+            if let Some(&io_id) = self.conn_io.get(id)
+                && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
+            {
+                log::error!(target: "tincd::conn",
                                 "io_set failed for {id:?}: {e}");
-                    self.terminate(id);
-                }
+                self.terminate(id);
             }
         }
     }

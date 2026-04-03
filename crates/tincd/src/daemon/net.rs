@@ -159,11 +159,11 @@ impl Daemon {
                 // Hit the cap with the fd still readable. Rearm so
                 // the next turn() fires immediately — after outbuf
                 // flush and timers have had their turn.
-                if let Some(&io_id) = self.listener_udp_io.get(usize::from(i)) {
-                    if let Err(e) = self.ev.rearm(io_id) {
-                        log::error!(target: "tincd::net",
+                if let Some(&io_id) = self.listener_udp_io.get(usize::from(i))
+                    && let Err(e) = self.ev.rearm(io_id)
+                {
+                    log::error!(target: "tincd::net",
                                     "UDP fd rearm failed: {e}");
-                    }
                 }
                 break;
             }
@@ -496,15 +496,15 @@ impl Daemon {
                 // Hit the cap with the fd still readable. Rearm so
                 // the next turn() fires immediately — after outbuf
                 // flush, UDP recv, and timers have had their turn.
-                if let Some(io_id) = self.device_io {
-                    if let Err(e) = self.ev.rearm(io_id) {
-                        // Shouldn't happen (the fd is open, we just
-                        // read from it). Worst case: one stalled
-                        // turn until the kernel queues more (which
-                        // generates a fresh edge).
-                        log::error!(target: "tincd::net",
+                if let Some(io_id) = self.device_io
+                    && let Err(e) = self.ev.rearm(io_id)
+                {
+                    // Shouldn't happen (the fd is open, we just
+                    // read from it). Worst case: one stalled
+                    // turn until the kernel queues more (which
+                    // generates a fresh edge).
+                    log::error!(target: "tincd::net",
                                     "device fd rearm failed: {e}");
-                    }
                 }
                 break;
             }
@@ -1288,40 +1288,40 @@ impl Daemon {
         // compression, send the original frame, also save the wasted
         // compression work the C does anyway.
         let direct_conn = self.nodes.get(to_name).and_then(|ns| ns.conn);
-        if let Some(conn_id) = direct_conn {
-            if data.len() > usize::from(tunnel.minmtu()) {
-                let Some(conn) = self.conns.get_mut(conn_id) else {
-                    // NodeState.conn stale (race with terminate).
-                    // Fall through to SPTPS.
-                    return false;
-                };
-                // C `protocol_misc.c:90-103 send_tcppacket`.
-                // RED first (`:94`). `maxoutbufsize` (`net_setup.c
-                // :1255-1257`, default 10*MTU = 15180). RED kicks
-                // in when the meta-conn outbuf exceeds threshold —
-                // under load this prevents unbounded growth.
-                if crate::tcp_tunnel::random_early_drop(
-                    conn.outbuf.live_len(),
-                    self.settings.maxoutbufsize,
-                    &mut OsRng,
-                ) {
-                    return true; // C `:95 return true` — fake success
-                }
-                // C `:98 send_request("%d %d", PACKET, len)`. Goes
-                // via `send_meta` → `sptps_send_record(type=0)`.
-                // `len` fits u16: MTU is 1518 < i16::MAX.
-                #[allow(clippy::cast_possible_truncation)]
-                let req = tinc_proto::msg::TcpPacket {
-                    len: data.len() as u16,
-                };
-                let mut nw = conn.send(format_args!("{}", req.format()));
-                // C `:102 send_meta(DATA(packet), len)` →
-                // `meta.c:65 sptps_send_record(type=0, blob)`. The
-                // FULL eth frame, NOT stripped, NOT compressed (see
-                // C-IS-WRONG #11 above). Receiver routes it as-is.
-                nw |= conn.send_sptps_record(0, data);
-                return nw;
+        if let Some(conn_id) = direct_conn
+            && data.len() > usize::from(tunnel.minmtu())
+        {
+            let Some(conn) = self.conns.get_mut(conn_id) else {
+                // NodeState.conn stale (race with terminate).
+                // Fall through to SPTPS.
+                return false;
+            };
+            // C `protocol_misc.c:90-103 send_tcppacket`.
+            // RED first (`:94`). `maxoutbufsize` (`net_setup.c
+            // :1255-1257`, default 10*MTU = 15180). RED kicks
+            // in when the meta-conn outbuf exceeds threshold —
+            // under load this prevents unbounded growth.
+            if crate::tcp_tunnel::random_early_drop(
+                conn.outbuf.live_len(),
+                self.settings.maxoutbufsize,
+                &mut OsRng,
+            ) {
+                return true; // C `:95 return true` — fake success
             }
+            // C `:98 send_request("%d %d", PACKET, len)`. Goes
+            // via `send_meta` → `sptps_send_record(type=0)`.
+            // `len` fits u16: MTU is 1518 < i16::MAX.
+            #[allow(clippy::cast_possible_truncation)]
+            let req = tinc_proto::msg::TcpPacket {
+                len: data.len() as u16,
+            };
+            let mut nw = conn.send(format_args!("{}", req.format()));
+            // C `:102 send_meta(DATA(packet), len)` →
+            // `meta.c:65 sptps_send_record(type=0, blob)`. The
+            // FULL eth frame, NOT stripped, NOT compressed (see
+            // C-IS-WRONG #11 above). Receiver routes it as-is.
+            nw |= conn.send_sptps_record(0, data);
+            return nw;
         }
 
         if !tunnel.status.validkey {
@@ -1514,10 +1514,10 @@ impl Daemon {
             // (the SPTPS overhead was already stripped).
             #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
             let body_len = body.len() as u16;
-            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
-                if body_len > p.maxrecentlen {
-                    p.maxrecentlen = body_len;
-                }
+            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+                && body_len > p.maxrecentlen
+            {
+                p.maxrecentlen = body_len;
             }
             // C `:1091`: `udp_probe_h(from, &inpkt, len)`.
             return self.udp_probe_h(peer, peer_name, body);
@@ -1618,14 +1618,12 @@ impl Daemon {
         // for the gratuitous probe-reply size.
         #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ MTU
         let frame_len = frame.len() as u16;
-        if let Some(t) = self.tunnels.get_mut(&peer) {
-            if t.status.udppacket {
-                if let Some(p) = t.pmtu.as_mut() {
-                    if frame_len > p.maxrecentlen {
-                        p.maxrecentlen = frame_len;
-                    }
-                }
-            }
+        if let Some(t) = self.tunnels.get_mut(&peer)
+            && t.status.udppacket
+            && let Some(p) = t.pmtu.as_mut()
+            && frame_len > p.maxrecentlen
+        {
+            p.maxrecentlen = frame_len;
         }
 
         // C `:1152`: `receive_packet(from, &inpkt)` → (`:397-405`)
@@ -2001,44 +1999,44 @@ impl Daemon {
         // C `:1044`: `sendto(listen_socket[sock].udp.fd, ...)`.
         // `adapt_socket` (done inside `choose_udp_address`) picked
         // the listener whose addr family matches `addr`.
-        if let Some(l) = self.listeners.get(usize::from(sock)) {
-            if let Err(e) = l.udp.send_to(&self.tx_scratch, sockaddr) {
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    // Drop. UDP is unreliable anyway.
-                } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
-                    // C `:1046-1048`: `if(sockmsgsize(errno))
-                    // reduce_mtu(relay, origlen - 1)`. EMSGSIZE
-                    // means the LOCAL kernel rejected the datagram
-                    // (interface MTU). Shrink `relay`'s maxmtu.
-                    // Don't log: this IS the discovery mechanism.
-                    #[allow(clippy::cast_possible_truncation)]
-                    // origlen ≤ MTU
-                    let at_len = origlen as u16;
-                    if let Some(p) = self
-                        .tunnels
-                        .get_mut(&relay_nid)
-                        .and_then(|t| t.pmtu.as_mut())
-                    {
-                        // `relay_name` only on the EMSGSIZE path
-                        // (rare — PMTU discovery edge). Format
-                        // lazily; the hot path never reaches here.
-                        let relay_name = self
-                            .graph
-                            .node(relay_nid)
-                            .map_or("<gone>", |n| n.name.as_str());
-                        for a in p.on_emsgsize(at_len) {
-                            Self::log_pmtu_action(relay_name, &a);
-                        }
-                    }
-                } else {
+        if let Some(l) = self.listeners.get(usize::from(sock))
+            && let Err(e) = l.udp.send_to(&self.tx_scratch, sockaddr)
+        {
+            if e.kind() == io::ErrorKind::WouldBlock {
+                // Drop. UDP is unreliable anyway.
+            } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+                // C `:1046-1048`: `if(sockmsgsize(errno))
+                // reduce_mtu(relay, origlen - 1)`. EMSGSIZE
+                // means the LOCAL kernel rejected the datagram
+                // (interface MTU). Shrink `relay`'s maxmtu.
+                // Don't log: this IS the discovery mechanism.
+                #[allow(clippy::cast_possible_truncation)]
+                // origlen ≤ MTU
+                let at_len = origlen as u16;
+                if let Some(p) = self
+                    .tunnels
+                    .get_mut(&relay_nid)
+                    .and_then(|t| t.pmtu.as_mut())
+                {
+                    // `relay_name` only on the EMSGSIZE path
+                    // (rare — PMTU discovery edge). Format
+                    // lazily; the hot path never reaches here.
                     let relay_name = self
                         .graph
                         .node(relay_nid)
                         .map_or("<gone>", |n| n.name.as_str());
-                    log::warn!(target: "tincd::net",
+                    for a in p.on_emsgsize(at_len) {
+                        Self::log_pmtu_action(relay_name, &a);
+                    }
+                }
+            } else {
+                let relay_name = self
+                    .graph
+                    .node(relay_nid)
+                    .map_or("<gone>", |n| n.name.as_str());
+                log::warn!(target: "tincd::net",
                                "Error sending UDP SPTPS packet to \
                                 {relay_name}: {e}");
-                }
             }
         }
         false // UDP send doesn't touch any meta-conn outbuf

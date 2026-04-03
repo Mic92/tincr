@@ -789,20 +789,19 @@ impl Connection {
                             } = o
                             {
                                 let body = crate::proto::record_body(bytes);
-                                if body.starts_with(b"21 ") {
-                                    if let Some(pkt) = std::str::from_utf8(body)
+                                if body.starts_with(b"21 ")
+                                    && let Some(pkt) = std::str::from_utf8(body)
                                         .ok()
                                         .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
-                                    {
-                                        // C protocol_misc.c:148.
-                                        // Don't push the record —
-                                        // it's been consumed.
-                                        self.sptpslen = pkt.len;
-                                        continue 'outer;
-                                    }
-                                    // Parse failed: malformed "21 ".
-                                    // Fall through; gate rejects.
+                                {
+                                    // C protocol_misc.c:148.
+                                    // Don't push the record —
+                                    // it's been consumed.
+                                    self.sptpslen = pkt.len;
+                                    continue 'outer;
                                 }
+                                // Not a "21 " record, or malformed:
+                                // fall through; gate rejects.
                             }
                             events.push(SptpsEvent::Record(o));
                         }

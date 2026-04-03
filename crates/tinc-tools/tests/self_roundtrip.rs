@@ -162,10 +162,10 @@ fn wait_for_port(stderr: &mut impl Read) -> u16 {
         let n = reader.read_line(&mut line).expect("read stderr");
         assert!(n != 0, "server stderr closed without Listening line");
         // C: `fprintf(stderr, "Listening on %d...\n", port);`
-        if let Some(rest) = line.trim().strip_prefix("Listening on ") {
-            if let Some(num) = rest.strip_suffix("...") {
-                return num.parse().expect("port number");
-            }
+        if let Some(rest) = line.trim().strip_prefix("Listening on ")
+            && let Some(num) = rest.strip_suffix("...")
+        {
+            return num.parse().expect("port number");
         }
         assert!(
             Instant::now() < deadline,

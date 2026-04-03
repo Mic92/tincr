@@ -480,86 +480,79 @@ impl Default for DaemonSettings {
 #[allow(clippy::too_many_lines)] // straight-line config-var parse
 fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     // PingInterval (`:1241-1243`).
-    if let Some(e) = config.lookup("PingInterval").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u32::try_from(v) {
-                if v >= 1 {
-                    settings.pinginterval = v;
-                }
-            }
-        }
+    if let Some(e) = config.lookup("PingInterval").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+        && v >= 1
+    {
+        settings.pinginterval = v;
     }
     // PingTimeout (`:1247-1253`). Clamped to [1, pinginterval].
-    if let Some(e) = config.lookup("PingTimeout").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u32::try_from(v) {
-                settings.pingtimeout = v.clamp(1, settings.pinginterval);
-            }
-        }
+    if let Some(e) = config.lookup("PingTimeout").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.pingtimeout = v.clamp(1, settings.pinginterval);
     }
     // MaxTimeout (`:527-533`).
-    if let Some(e) = config.lookup("MaxTimeout").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u32::try_from(v) {
-                if v >= 1 {
-                    settings.maxtimeout = v;
-                }
-            }
-        }
+    if let Some(e) = config.lookup("MaxTimeout").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+        && v >= 1
+    {
+        settings.maxtimeout = v;
     }
     // DecrementTTL (`:457`).
-    if let Some(e) = config.lookup("DecrementTTL").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.decrement_ttl = v;
-        }
+    if let Some(e) = config.lookup("DecrementTTL").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.decrement_ttl = v;
     }
     // TunnelServer (`:879`).
-    if let Some(e) = config.lookup("TunnelServer").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.tunnelserver = v;
-        }
+    if let Some(e) = config.lookup("TunnelServer").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.tunnelserver = v;
     }
     // StrictSubnets (`:878`).
-    if let Some(e) = config.lookup("StrictSubnets").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.strictsubnets = v;
-        }
+    if let Some(e) = config.lookup("StrictSubnets").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.strictsubnets = v;
     }
     // C `:880`: `strictsubnets |= tunnelserver`. After BOTH parsed.
     settings.strictsubnets |= settings.tunnelserver;
     // LocalDiscovery (`:404`).
-    if let Some(e) = config.lookup("LocalDiscovery").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.local_discovery = v;
-        }
+    if let Some(e) = config.lookup("LocalDiscovery").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.local_discovery = v;
     }
     // DirectOnly (`:403`).
-    if let Some(e) = config.lookup("DirectOnly").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.directonly = v;
-        }
+    if let Some(e) = config.lookup("DirectOnly").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.directonly = v;
     }
     // AutoConnect (`:560-562`). Default true — keep the default if
     // the parse fails (C `get_config_bool` only writes on success).
-    if let Some(e) = config.lookup("AutoConnect").next() {
-        if let Ok(v) = e.get_bool() {
-            settings.autoconnect = v;
-        }
+    if let Some(e) = config.lookup("AutoConnect").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.autoconnect = v;
     }
     // UDPInfoInterval / MTUInfoInterval (`:400-401`).
-    if let Some(e) = config.lookup("UDPInfoInterval").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u32::try_from(v) {
-                settings.udp_info_interval = v;
-            }
-        }
+    if let Some(e) = config.lookup("UDPInfoInterval").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.udp_info_interval = v;
     }
-    if let Some(e) = config.lookup("MTUInfoInterval").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u32::try_from(v) {
-                settings.mtu_info_interval = v;
-            }
-        }
+    if let Some(e) = config.lookup("MTUInfoInterval").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.mtu_info_interval = v;
     }
     // Broadcast (`:461-472`). C errors on unknown; we log + keep
     // default (less harsh on reload typo).
@@ -576,28 +569,25 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         };
     }
     // MACExpire (`:523-524`).
-    if let Some(e) = config.lookup("MACExpire").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u64::try_from(v) {
-                settings.macexpire = v;
-            }
-        }
+    if let Some(e) = config.lookup("MACExpire").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u64::try_from(v)
+    {
+        settings.macexpire = v;
     }
     // MaxOutputBufferSize (`net_setup.c:1255-1257`).
-    if let Some(e) = config.lookup("MaxOutputBufferSize").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = usize::try_from(v) {
-                settings.maxoutbufsize = v;
-            }
-        }
+    if let Some(e) = config.lookup("MaxOutputBufferSize").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = usize::try_from(v)
+    {
+        settings.maxoutbufsize = v;
     }
     // InvitationExpire (`:566-568`).
-    if let Some(e) = config.lookup("InvitationExpire").next() {
-        if let Ok(v) = e.get_int() {
-            if let Ok(v) = u64::try_from(v) {
-                settings.invitation_lifetime = Duration::from_secs(v);
-            }
-        }
+    if let Some(e) = config.lookup("InvitationExpire").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u64::try_from(v)
+    {
+        settings.invitation_lifetime = Duration::from_secs(v);
     }
 }
 
@@ -1220,24 +1210,24 @@ impl Daemon {
         // level WE want peers to compress towards us at. The C
         // `switch` validates against built-in backends; we reject
         // LZO (stubbed) and >12 (unknown). Default 0 (`:1043`).
-        if let Some(e) = config.lookup("Compression").next() {
-            if let Ok(v) = e.get_int() {
-                let v = u8::try_from(v).unwrap_or(255);
-                match compress::Level::from_wire(v) {
-                    compress::Level::LzoLo | compress::Level::LzoHi => {
-                        return Err(SetupError::Config(format!(
-                            "Compression = {v}: LZO compression is \
+        if let Some(e) = config.lookup("Compression").next()
+            && let Ok(v) = e.get_int()
+        {
+            let v = u8::try_from(v).unwrap_or(255);
+            match compress::Level::from_wire(v) {
+                compress::Level::LzoLo | compress::Level::LzoHi => {
+                    return Err(SetupError::Config(format!(
+                        "Compression = {v}: LZO compression is \
                              unavailable on this node"
-                        )));
-                    }
-                    compress::Level::None if v != 0 => {
-                        // `from_wire` mapped >12 → None. Reject.
-                        return Err(SetupError::Config(format!(
-                            "Compression = {v} is unrecognized by this node"
-                        )));
-                    }
-                    _ => settings.compression = v,
+                    )));
                 }
+                compress::Level::None if v != 0 => {
+                    // `from_wire` mapped >12 → None. Reject.
+                    return Err(SetupError::Config(format!(
+                        "Compression = {v} is unrecognized by this node"
+                    )));
+                }
+                _ => settings.compression = v,
             }
         }
 

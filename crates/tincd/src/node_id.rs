@@ -156,13 +156,13 @@ impl NodeId6Table {
     /// without finding a SHA-512 collision). The daemon never calls
     /// this — `add` is the only entry point in production.
     pub(crate) fn insert_raw(&mut self, id6: NodeId6, node: NodeId, name: &str) {
-        if let Some(&prev) = self.by_id.get(&id6) {
-            if prev != node {
-                log::warn!(
-                    target: "tincd",
-                    "node_id collision: {name} → {id6} already maps to {prev:?}, overwriting"
-                );
-            }
+        if let Some(&prev) = self.by_id.get(&id6)
+            && prev != node
+        {
+            log::warn!(
+                target: "tincd",
+                "node_id collision: {name} → {id6} already maps to {prev:?}, overwriting"
+            );
         }
         self.by_id.insert(id6, node);
         self.by_node.insert(node, id6);

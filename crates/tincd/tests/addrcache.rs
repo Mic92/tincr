@@ -106,10 +106,10 @@ fn wait_for_file(path: &Path, timeout: Duration) -> bool {
 fn wait_for_line(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() > 0 {
-                return true;
-            }
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > 0
+        {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(20));
     }

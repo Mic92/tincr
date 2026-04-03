@@ -160,10 +160,10 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
     // userlen is size_t. Implicit narrowing to u8. A 256-byte username
     // becomes a length byte of 0x00 and the proxy reads 0 bytes —
     // garbage follows. RFC 1929 says 1..255. We check.
-    if let Some((user, pass)) = password_auth {
-        if user.len() > 255 || pass.len() > 255 {
-            return Err(BuildError::CredTooLong);
-        }
+    if let Some((user, pass)) = password_auth
+        && (user.len() > 255 || pass.len() > 255)
+    {
+        return Err(BuildError::CredTooLong);
     }
 
     let mut buf = Vec::new();

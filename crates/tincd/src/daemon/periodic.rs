@@ -293,11 +293,11 @@ impl Daemon {
         // myself`. The owner's UDP address — from `n->address`
         // (which is `update_node_udp`-written; for direct peers
         // it's `NodeState.edge_addr`).
-        if owner != self.name {
-            if let Some(addr) = self.nodes.get(owner).and_then(|ns| ns.edge_addr) {
-                env.add("REMOTEADDRESS", addr.ip().to_string());
-                env.add("REMOTEPORT", addr.port().to_string());
-            }
+        if owner != self.name
+            && let Some(addr) = self.nodes.get(owner).and_then(|ns| ns.edge_addr)
+        {
+            env.add("REMOTEADDRESS", addr.ip().to_string());
+            env.add("REMOTEPORT", addr.port().to_string());
         }
         // C `:359-368`: `net2str` then `strchr('#')` split. Our
         // `Display` may include `#weight` (non-default); strip it.

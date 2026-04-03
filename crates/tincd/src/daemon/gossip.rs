@@ -245,27 +245,25 @@ impl Daemon {
             // when INTERNAL; otherwise it falls through to the
             // verbatim-forward (`:192`). Match: gate the optimized
             // path on `== Internal`.
-            if let Some(ext) = &msg.ext {
-                if ext.reqno == Request::SptpsPacket as i32
-                    && self.settings.forwarding_mode == ForwardingMode::Internal
-                {
-                    let Some(payload) = ext.payload.as_deref() else {
-                        return Ok(false);
-                    };
-                    let Some(data) = tinc_crypto::b64::decode(payload) else {
-                        log::error!(target: "tincd::proto",
+            if let Some(ext) = &msg.ext
+                && ext.reqno == Request::SptpsPacket as i32
+                && self.settings.forwarding_mode == ForwardingMode::Internal
+            {
+                let Some(payload) = ext.payload.as_deref() else {
+                    return Ok(false);
+                };
+                let Some(data) = tinc_crypto::b64::decode(payload) else {
+                    log::error!(target: "tincd::proto",
                                     "Got bad SPTPS_PACKET relay from {}",
                                     msg.from);
-                        return Ok(false);
-                    };
-                    log::debug!(target: "tincd::proto",
+                    return Ok(false);
+                };
+                log::debug!(target: "tincd::proto",
                                 "Relaying SPTPS_PACKET {} → {} ({} bytes)",
                                 msg.from, msg.to, data.len());
-                    let mut nw =
-                        self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, Some(&data));
-                    nw |= self.try_tx(to_nid, true);
-                    return Ok(nw);
-                }
+                let mut nw = self.send_sptps_data_relay(to_nid, &msg.to, from_nid, 0, Some(&data));
+                nw |= self.try_tx(to_nid, true);
+                return Ok(nw);
             }
             // Everything else (REQ_KEY init, REQ_PUBKEY, ANS_
             // PUBKEY): forward verbatim (`:192-194`, `:341`).
@@ -727,18 +725,18 @@ impl Daemon {
                 .tunnels
                 .get(&from_nid)
                 .is_some_and(|t| t.status.validkey);
-            if validkey {
-                if let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str()) {
-                    log::debug!(target: "tincd::proto",
+            if validkey
+                && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
+            {
+                log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                    let t = self.tunnels.entry(from_nid).or_default();
-                    t.udp_addr = Some(addr);
-                    // perf-arch `e455a1c2` populates `udp_addr_
-                    // cached` on the UDP recv path; that cache is
-                    // now stale (the reflexive addr supersedes it).
-                    t.udp_addr_cached = None;
-                }
+                let t = self.tunnels.entry(from_nid).or_default();
+                t.udp_addr = Some(addr);
+                // perf-arch `e455a1c2` populates `udp_addr_
+                // cached` on the UDP recv path; that cache is
+                // now stale (the reflexive addr supersedes it).
+                t.udp_addr_cached = None;
             }
         }
 
@@ -1713,10 +1711,10 @@ impl Daemon {
         // mac_table sync. Only remove if the entry's owner matches
         // (don't wipe a different owner's entry on a stale DEL —
         // shouldn't happen since MAC is exact-match, but defensively).
-        if let Subnet::Mac { addr, .. } = subnet {
-            if self.mac_table.get(&addr).map(String::as_str) == Some(owner_name.as_str()) {
-                self.mac_table.remove(&addr);
-            }
+        if let Subnet::Mac { addr, .. } = subnet
+            && self.mac_table.get(&addr).map(String::as_str) == Some(owner_name.as_str())
+        {
+            self.mac_table.remove(&addr);
         }
 
         Ok(nw)
@@ -2006,24 +2004,24 @@ impl Daemon {
         // broadcast that too. The C `lookup_edge(to, myself)` is
         // the synthesized reverse from `ack_h`. We DO add both
         // halves in `on_ack`; check.
-        if !self.graph.node(to_id).is_some_and(|n| n.reachable) {
-            if let Some(rev) = self.graph.lookup_edge(to_id, self.myself) {
-                // C `:313-315`: `if(!tunnelserver) send_del_edge(
-                // everyone, e)`. The hub never broadcasts.
-                if !self.settings.tunnelserver {
-                    let to_name = edge.to.clone();
-                    let my_name = self.name.clone();
-                    let line = DelEdge {
-                        from: to_name,
-                        to: my_name,
-                    }
-                    .format(Self::nonce());
-                    self.broadcast_line(&line);
+        if !self.graph.node(to_id).is_some_and(|n| n.reachable)
+            && let Some(rev) = self.graph.lookup_edge(to_id, self.myself)
+        {
+            // C `:313-315`: `if(!tunnelserver) send_del_edge(
+            // everyone, e)`. The hub never broadcasts.
+            if !self.settings.tunnelserver {
+                let to_name = edge.to.clone();
+                let my_name = self.name.clone();
+                let line = DelEdge {
+                    from: to_name,
+                    to: my_name,
                 }
-                // C `:318`: `edge_del(e)`.
-                self.graph.del_edge(rev);
-                self.edge_addrs.remove(&rev);
+                .format(Self::nonce());
+                self.broadcast_line(&line);
             }
+            // C `:318`: `edge_del(e)`.
+            self.graph.del_edge(rev);
+            self.edge_addrs.remove(&rev);
         }
 
         Ok(nw)

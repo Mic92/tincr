@@ -1237,10 +1237,10 @@ fn parse_global_options(
     // ─── NETNAME env fallback
     // C: `tincctl.c:258-263`. Only if -n wasn't given. Standard
     // env-under-flag precedence.
-    if input.netname.is_none() {
-        if let Ok(env_net) = env::var("NETNAME") {
-            input.netname = Some(env_net);
-        }
+    if input.netname.is_none()
+        && let Ok(env_net) = env::var("NETNAME")
+    {
+        input.netname = Some(env_net);
     }
 
     // ─── netname "." → None
@@ -1263,10 +1263,10 @@ fn parse_global_options(
     // This is a *weaker* check than `check_id` — netname allows `-`,
     // for instance. The C is permissive here on purpose; netname is a
     // local filesystem thing, not a wire protocol token.
-    if let Some(net) = &input.netname {
-        if net.starts_with('.') || net.contains('/') || net.contains('\\') {
-            return Err("Invalid character in netname!".into());
-        }
+    if let Some(net) = &input.netname
+        && (net.starts_with('.') || net.contains('/') || net.contains('\\'))
+    {
+        return Err("Invalid character in netname!".into());
     }
 
     Ok((input, globals, rest))

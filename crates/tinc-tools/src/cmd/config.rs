@@ -297,10 +297,11 @@ pub fn build_intent(
     // is known AND named Subnet. The C `strcasecmp` is case-insensitive
     // so it validates regardless of user casing; we get the same via
     // `lookup` (case-insensitive) + checking the canonical table name.
-    if let Some(v) = found {
-        if v.name == "Subnet" && !value.is_empty() {
-            validate_subnet(value)?;
-        }
+    if let Some(v) = found
+        && v.name == "Subnet"
+        && !value.is_empty()
+    {
+        validate_subnet(value)?;
     }
 
     // ─── Canonical name from the table
@@ -313,15 +314,16 @@ pub fn build_intent(
     // C `tincctl.c:1883-1890`. Only fires for set/add — `get`
     // and `del` on an obsolete var are fine (you might be cleaning
     // up an old config).
-    if let Some(v) = found {
-        if v.flags.contains(VarFlags::OBSOLETE) && matches!(action, Action::Set | Action::Add) {
-            if force {
-                warnings.push(Warning::Obsolete(canonical.clone()));
-            } else {
-                return Err(CmdError::BadInput(format!(
-                    "{canonical} is an obsolete variable! Use --force to use it anyway."
-                )));
-            }
+    if let Some(v) = found
+        && v.flags.contains(VarFlags::OBSOLETE)
+        && matches!(action, Action::Set | Action::Add)
+    {
+        if force {
+            warnings.push(Warning::Obsolete(canonical.clone()));
+        } else {
+            return Err(CmdError::BadInput(format!(
+                "{canonical} is an obsolete variable! Use --force to use it anyway."
+            )));
         }
     }
 
@@ -332,15 +334,16 @@ pub fn build_intent(
     // Again only set/add — reading or deleting one is fine (might be
     // cleaning up after a previous --force).
     let mut node: Option<String> = explicit_node.map(str::to_owned);
-    if let (Some(_), Some(v)) = (&node, found) {
-        if !v.flags.contains(VarFlags::HOST) && matches!(action, Action::Set | Action::Add) {
-            if force {
-                warnings.push(Warning::NotHostVar(canonical.clone()));
-            } else {
-                return Err(CmdError::BadInput(format!(
-                    "{canonical} is not a host configuration variable! Use --force to use it anyway."
-                )));
-            }
+    if let (Some(_), Some(v)) = (&node, found)
+        && !v.flags.contains(VarFlags::HOST)
+        && matches!(action, Action::Set | Action::Add)
+    {
+        if force {
+            warnings.push(Warning::NotHostVar(canonical.clone()));
+        } else {
+            return Err(CmdError::BadInput(format!(
+                "{canonical} is not a host configuration variable! Use --force to use it anyway."
+            )));
         }
     }
 
@@ -354,19 +357,18 @@ pub fn build_intent(
     // it's NOT `type & VAR_HOST`. The dual-tagged vars (e.g.
     // `Port`, both SERVER and HOST) take the SERVER path here →
     // they go in tinc.conf. Single-HOST-only goes in hosts/$me.
-    if node.is_none() {
-        if let Some(v) = found {
-            if !v.flags.contains(VarFlags::SERVER) {
-                // get_my_name's error already says "Name not found
-                // in tinc.conf"; we don't wrap.
-                node = Some(exchange::get_my_name(paths)?);
-            }
-        }
-        // If not found AND no explicit node: tinc.conf. The C falls
-        // through to `else { snprintf(filename, "%s", tinc_conf); }`
-        // (`tincctl.c:1963`). Unknown vars go in the server config
-        // unless you say otherwise.
+    if node.is_none()
+        && let Some(v) = found
+        && !v.flags.contains(VarFlags::SERVER)
+    {
+        // get_my_name's error already says "Name not found
+        // in tinc.conf"; we don't wrap.
+        node = Some(exchange::get_my_name(paths)?);
     }
+    // If not found AND no explicit node: tinc.conf. The C falls
+    // through to `else { snprintf(filename, "%s", tinc_conf); }`
+    // (`tincctl.c:1963`). Unknown vars go in the server config
+    // unless you say otherwise.
 
     // ─── Action coercion: add on non-MULTIPLE → set
     // C `tincctl.c:1917-1922`. The two `warnonremove` cases.
@@ -391,10 +393,10 @@ pub fn build_intent(
     // is C lifetime juggling — node is either a pointer into `line`
     // (the explicit `alice.` case) or a `strdup` from `get_my_name`.
     // We don't have that problem; just check.
-    if let Some(n) = &node {
-        if !names::check_id(n) {
-            return Err(CmdError::BadInput("Invalid name for node.".into()));
-        }
+    if let Some(n) = &node
+        && !names::check_id(n)
+    {
+        return Err(CmdError::BadInput("Invalid name for node.".into()));
     }
 
     // ─── Unknown var

@@ -157,10 +157,10 @@ fn setup_tcp(addr: &SockAddr) -> io::Result<Socket> {
     // `:214`: `if(family == AF_INET6) setsockopt(IPV6_V6ONLY, 1)`.
     // Load-bearing: without this, the v6 socket grabs v4 traffic via
     // mapped addresses, and the v4 bind sees the port as taken.
-    if domain == Domain::IPV6 {
-        if let Err(e) = s.set_only_v6(true) {
-            log::warn!(target: "tincd::net", "IPV6_V6ONLY: {e}");
-        }
+    if domain == Domain::IPV6
+        && let Err(e) = s.set_only_v6(true)
+    {
+        log::warn!(target: "tincd::net", "IPV6_V6ONLY: {e}");
     }
 
     // Deferred: SO_MARK (fwmark), SO_BINDTODEVICE (BindToInterface).
@@ -212,10 +212,10 @@ fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
     }
 
     // `:341`: IPV6_V6ONLY. Same rationale as TCP.
-    if domain == Domain::IPV6 {
-        if let Err(e) = s.set_only_v6(true) {
-            log::warn!(target: "tincd::net", "IPV6_V6ONLY (udp): {e}");
-        }
+    if domain == Domain::IPV6
+        && let Err(e) = s.set_only_v6(true)
+    {
+        log::warn!(target: "tincd::net", "IPV6_V6ONLY (udp): {e}");
     }
 
     // Deferred: SO_RCVBUF/SO_SNDBUF (1MB each), IP_MTU_DISCOVER (PMTU),
@@ -373,10 +373,10 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 /// `sin_addr` and changes `sa_family` — net effect: a SocketAddrV4.
 #[must_use]
 pub fn unmap(sa: SocketAddr) -> SocketAddr {
-    if let SocketAddr::V6(v6) = sa {
-        if let Some(v4) = v6.ip().to_ipv4_mapped() {
-            return (v4, v6.port()).into();
-        }
+    if let SocketAddr::V6(v6) = sa
+        && let Some(v4) = v6.ip().to_ipv4_mapped()
+    {
+        return (v4, v6.port()).into();
     }
     sa
 }

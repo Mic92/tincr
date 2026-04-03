@@ -200,13 +200,13 @@ pub fn try_connect(
     // → no bind → kernel picks from the route table (the default).
     // BEFORE `connect()`: bind sets the local addr; connect sets
     // the remote.
-    if let Some(local) = bind_to {
-        if let Err(e) = sock.bind(&SockAddr::from(local)) {
-            // C `:129-131` (in `bind_to_addr`): warn, continue.
-            // The connect may still work via a different source.
-            log::warn!(target: "tincd::conn",
+    if let Some(local) = bind_to
+        && let Err(e) = sock.bind(&SockAddr::from(local))
+    {
+        // C `:129-131` (in `bind_to_addr`): warn, continue.
+        // The connect may still work via a different source.
+        log::warn!(target: "tincd::conn",
                         "Can't bind to {local}: {e}");
-        }
     }
     // TODO(chunk-12-bind-iface): `bind_to_interface` (`:625`).
     // `setsockopt(SO_BINDTODEVICE)`. Linux-only, root-only-for-

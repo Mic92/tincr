@@ -196,10 +196,10 @@ pub fn should_send_udp_info(
         // `:183-187` — debounce. C compares `tv_sec < interval`, i.e.
         // truncated seconds. We use full Duration precision; the
         // worst case is we send fractionally earlier than C would.
-        if let Some(last) = last_sent {
-            if now.saturating_duration_since(last) < interval {
-                return false;
-            }
+        if let Some(last) = last_sent
+            && now.saturating_duration_since(last) < interval
+        {
+            return false;
         }
     }
     // `:190` — three-way TCPONLY OR.
@@ -385,10 +385,10 @@ pub fn should_send_mtu_info(
         if to_directly_connected {
             return false;
         }
-        if let Some(last) = last_sent {
-            if now.saturating_duration_since(last) < interval {
-                return false;
-            }
+        if let Some(last) = last_sent
+            && now.saturating_duration_since(last) < interval
+        {
+            return false;
         }
     }
     // `:299` — minor 6. MTU_INFO came after UDP_INFO.
@@ -441,24 +441,23 @@ pub fn adjust_mtu_for_send(
 ) -> i32 {
     // `:308` — direct converged measurement. Override entirely. This
     // is the only branch that can *increase* mtu.
-    if from_via_is_myself {
-        if let Some(f) = from_pmtu {
-            if f.converged() {
-                return i32::from(f.minmtu);
-            }
-        }
+    if from_via_is_myself
+        && let Some(f) = from_pmtu
+        && f.converged()
+    {
+        return i32::from(f.minmtu);
     }
     // `:314` — static relay converged. Clamp.
-    if let Some(v) = via_pmtu {
-        if v.converged() {
-            return mtu.min(i32::from(v.minmtu));
-        }
+    if let Some(v) = via_pmtu
+        && v.converged()
+    {
+        return mtu.min(i32::from(v.minmtu));
     }
     // `:318` — dynamic relay's nexthop converged. Clamp.
-    if let Some(n) = via_nexthop_pmtu {
-        if n.converged() {
-            return mtu.min(i32::from(n.minmtu));
-        }
+    if let Some(n) = via_nexthop_pmtu
+        && n.converged()
+    {
+        return mtu.min(i32::from(n.minmtu));
     }
     // `:326` — no measurement. Pass through.
     mtu

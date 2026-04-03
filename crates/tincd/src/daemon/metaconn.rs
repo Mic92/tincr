@@ -101,12 +101,12 @@ impl Daemon {
         }
         // Hit the cap with the socket still readable. Rearm so the
         // next turn() fires immediately.
-        if let Some(&io_id) = self.conn_io.get(id) {
-            if let Err(e) = self.ev.rearm(io_id) {
-                log::error!(target: "tincd::conn",
+        if let Some(&io_id) = self.conn_io.get(id)
+            && let Err(e) = self.ev.rearm(io_id)
+        {
+            log::error!(target: "tincd::conn",
                             "conn fd rearm failed for {id:?}: {e}");
-                self.terminate(id);
-            }
+            self.terminate(id);
         }
     }
 
@@ -973,18 +973,17 @@ impl Daemon {
                             // each time.
                             let oid = conn.outgoing.map(OutgoingId::from);
                             let addr = conn.address;
-                            if let Some(oid) = oid {
-                                if let Some(out) = self.outgoings.get_mut(oid) {
-                                    if out.timeout != 0 {
-                                        // C `:70`: `timeout = 0`.
-                                        out.timeout = 0;
-                                        // C `:71-72`: reset cursor +
-                                        // prepend the address.
-                                        out.addr_cache.reset();
-                                        if let Some(a) = addr {
-                                            out.addr_cache.add_recent(a);
-                                        }
-                                    }
+                            if let Some(oid) = oid
+                                && let Some(out) = self.outgoings.get_mut(oid)
+                                && out.timeout != 0
+                            {
+                                // C `:70`: `timeout = 0`.
+                                out.timeout = 0;
+                                // C `:71-72`: reset cursor +
+                                // prepend the address.
+                                out.addr_cache.reset();
+                                if let Some(a) = addr {
+                                    out.addr_cache.add_recent(a);
                                 }
                             }
                             Ok(false)

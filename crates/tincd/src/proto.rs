@@ -231,10 +231,10 @@ pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchErr
     // C `protocol.c:175-178`: the gate.
     // `c->allow_request != ALL && c->allow_request != reqno` → reject.
     // `ALL = -1` in C (`protocol.h:42`). Our `None` is `ALL`.
-    if let Some(allowed) = conn.allow_request {
-        if allowed != req {
-            return Err(DispatchError::Unauthorized);
-        }
+    if let Some(allowed) = conn.allow_request
+        && allowed != req
+    {
+        return Err(DispatchError::Unauthorized);
     }
 
     Ok(req)

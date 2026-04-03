@@ -189,13 +189,11 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
     // `"tinc.conf"` → SKIP conffiles check → `hosts_dir/
     // tinc.conf`. Different files. The C does this by the branch
     // structure (conffiles loop is inside the `!prefix` arm).
-    if !stripped {
-        if let Some(&conf) = CONFFILES.iter().find(|&&f| f == input) {
-            // `tincctl.c:2422`: `confbase SLASH argv[1]`.
-            return Ok(Resolved {
-                path: paths.confbase.join(conf),
-            });
-        }
+    if !stripped && let Some(&conf) = CONFFILES.iter().find(|&&f| f == input) {
+        // `tincctl.c:2422`: `confbase SLASH argv[1]`.
+        return Ok(Resolved {
+            path: paths.confbase.join(conf),
+        });
     }
 
     // ─── Step 4: it's a host file — validate the dash form

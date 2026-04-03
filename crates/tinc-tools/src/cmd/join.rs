@@ -531,11 +531,11 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
             // chars before any of those). For `Name = X` and
             // `Name=X`: both tokenizers produce key="Name". Good
             // enough — `cmd_invite` writes the canonical form.
-            if let Some((k, v)) = split_var(line) {
-                if k.eq_ignore_ascii_case("Name") {
-                    boundary = Some((k, v));
-                    break;
-                }
+            if let Some((k, v)) = split_var(line)
+                && k.eq_ignore_ascii_case("Name")
+            {
+                boundary = Some((k, v));
+                break;
             }
 
             // C: `fputs(l, f); fputc('\n', f);`. The C `get_line`
