@@ -2882,6 +2882,15 @@ impl Daemon {
                             "route: dropping packet ({reason})");
                 false
             }
+            RouteResult::Broadcast => {
+                // STUB(chunk-12-switch): `route.c:1042-1045` →
+                // `route_broadcast` → `broadcast_packet`. Only
+                // reachable from `route_mac` (RMODE_SWITCH); the
+                // IP-layer dispatch above never produces this.
+                log::debug!(target: "tincd::net",
+                            "route: broadcast (RMODE_SWITCH stub, dropping)");
+                false
+            }
             RouteResult::TooShort { need, have } => {
                 // C `route.c:103-108`: `"Got too short packet from
                 // %s"` at DEBUG_TRAFFIC.
