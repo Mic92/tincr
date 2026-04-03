@@ -64,6 +64,39 @@
     "mst": [0,1,2,3]
   },
   {
+    "name": "chain5_del_mid",
+    "nodes": ["n0","n1","n2","n3","n4"],
+    "edges": [{"from":0,"to":1,"weight":10,"opts":0,"reverse":1},{"from":1,"to":0,"weight":10,"opts":0,"reverse":0},{"from":1,"to":2,"weight":10,"opts":0,"reverse":3},{"from":2,"to":1,"weight":10,"opts":0,"reverse":2},{"from":2,"to":3,"weight":10,"opts":0,"reverse":5},{"from":3,"to":2,"weight":10,"opts":0,"reverse":4},{"from":3,"to":4,"weight":10,"opts":0,"reverse":7},{"from":4,"to":3,"weight":10,"opts":0,"reverse":6}],
+    "myself": 0,
+    "sssp": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":10,"nexthop":1,"via":1,"prevedge":0,"options":0},{"reachable":true,"indirect":false,"distance":2,"weighted_distance":20,"nexthop":1,"via":2,"prevedge":2,"options":0},{"reachable":true,"indirect":false,"distance":3,"weighted_distance":30,"nexthop":1,"via":3,"prevedge":4,"options":0},{"reachable":true,"indirect":false,"distance":4,"weighted_distance":40,"nexthop":1,"via":4,"prevedge":6,"options":0}],
+    "mst": [0,1,2,3,4,5,6,7],
+    "del_edges": [4,5],
+    "sssp_after": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":10,"nexthop":1,"via":1,"prevedge":0,"options":0},{"reachable":true,"indirect":false,"distance":2,"weighted_distance":20,"nexthop":1,"via":2,"prevedge":2,"options":0},{"reachable":false,"indirect":false,"distance":-1,"weighted_distance":-1,"nexthop":-1,"via":-1,"prevedge":-1,"options":0},{"reachable":false,"indirect":false,"distance":-1,"weighted_distance":-1,"nexthop":-1,"via":-1,"prevedge":-1,"options":0}],
+    "mst_after": [0,1,2,3]
+  },
+  {
+    "name": "diamond_del_cheap",
+    "nodes": ["n0","n1","n2","n3"],
+    "edges": [{"from":0,"to":1,"weight":5,"opts":0,"reverse":1},{"from":1,"to":0,"weight":5,"opts":0,"reverse":0},{"from":0,"to":2,"weight":50,"opts":0,"reverse":3},{"from":2,"to":0,"weight":50,"opts":0,"reverse":2},{"from":1,"to":3,"weight":10,"opts":0,"reverse":5},{"from":3,"to":1,"weight":10,"opts":0,"reverse":4},{"from":2,"to":3,"weight":10,"opts":0,"reverse":7},{"from":3,"to":2,"weight":10,"opts":0,"reverse":6}],
+    "myself": 0,
+    "sssp": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":5,"nexthop":1,"via":1,"prevedge":0,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":50,"nexthop":2,"via":2,"prevedge":2,"options":0},{"reachable":true,"indirect":false,"distance":2,"weighted_distance":15,"nexthop":1,"via":3,"prevedge":4,"options":0}],
+    "mst": [0,1,4,5,6,7],
+    "del_edges": [0,1],
+    "sssp_after": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":3,"weighted_distance":70,"nexthop":2,"via":1,"prevedge":5,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":50,"nexthop":2,"via":2,"prevedge":2,"options":0},{"reachable":true,"indirect":false,"distance":2,"weighted_distance":60,"nexthop":2,"via":3,"prevedge":6,"options":0}],
+    "mst_after": [2,3,4,5,6,7]
+  },
+  {
+    "name": "del_half_reverseless",
+    "nodes": ["n0","n1","n2"],
+    "edges": [{"from":0,"to":1,"weight":10,"opts":0,"reverse":1},{"from":1,"to":0,"weight":10,"opts":0,"reverse":0},{"from":1,"to":2,"weight":10,"opts":0,"reverse":3},{"from":2,"to":1,"weight":10,"opts":0,"reverse":2}],
+    "myself": 0,
+    "sssp": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":10,"nexthop":1,"via":1,"prevedge":0,"options":0},{"reachable":true,"indirect":false,"distance":2,"weighted_distance":20,"nexthop":1,"via":2,"prevedge":2,"options":0}],
+    "mst": [0,1,2,3],
+    "del_edges": [2],
+    "sssp_after": [{"reachable":true,"indirect":false,"distance":0,"weighted_distance":0,"nexthop":0,"via":0,"prevedge":-1,"options":0},{"reachable":true,"indirect":false,"distance":1,"weighted_distance":10,"nexthop":1,"via":1,"prevedge":0,"options":0},{"reachable":false,"indirect":false,"distance":-1,"weighted_distance":-1,"nexthop":-1,"via":-1,"prevedge":-1,"options":0}],
+    "mst_after": [0,1]
+  },
+  {
     "name": "random_1",
     "nodes": ["n0","n1","n2","n3","n4","n5","n6","n7","n8","n9","n10","n11","n12","n13","n14","n15","n16","n17","n18","n19"],
     "edges": [{"from":0,"to":1,"weight":94,"opts":0,"reverse":1},{"from":1,"to":0,"weight":94,"opts":0,"reverse":0},{"from":0,"to":2,"weight":91,"opts":0,"reverse":3},{"from":2,"to":0,"weight":91,"opts":0,"reverse":2},{"from":0,"to":3,"weight":79,"opts":0,"reverse":5},{"from":3,"to":0,"weight":79,"opts":0,"reverse":4},{"from":2,"to":4,"weight":5,"opts":0,"reverse":7},{"from":4,"to":2,"weight":5,"opts":0,"reverse":6},{"from":0,"to":5,"weight":69,"opts":0,"reverse":9},{"from":5,"to":0,"weight":69,"opts":0,"reverse":8},{"from":2,"to":6,"weight":92,"opts":0,"reverse":11},{"from":6,"to":2,"weight":92,"opts":0,"reverse":10},{"from":2,"to":7,"weight":56,"opts":0,"reverse":13},{"from":7,"to":2,"weight":56,"opts":0,"reverse":12},{"from":4,"to":8,"weight":22,"opts":0,"reverse":15},{"from":8,"to":4,"weight":22,"opts":0,"reverse":14},{"from":5,"to":9,"weight":10,"opts":0,"reverse":17},{"from":9,"to":5,"weight":10,"opts":0,"reverse":16},{"from":3,"to":10,"weight":38,"opts":0,"reverse":19},{"from":10,"to":3,"weight":38,"opts":0,"reverse":18},{"from":2,"to":11,"weight":17,"opts":0,"reverse":21},{"from":11,"to":2,"weight":17,"opts":0,"reverse":20},{"from":5,"to":12,"weight":66,"opts":0,"reverse":23},{"from":12,"to":5,"weight":66,"opts":0,"reverse":22},{"from":9,"to":13,"weight":34,"opts":0,"reverse":25},{"from":13,"to":9,"weight":34,"opts":0,"reverse":24},{"from":5,"to":14,"weight":45,"opts":0,"reverse":27},{"from":14,"to":5,"weight":45,"opts":0,"reverse":26},{"from":6,"to":15,"weight":23,"opts":0,"reverse":29},{"from":15,"to":6,"weight":23,"opts":0,"reverse":28},{"from":8,"to":16,"weight":3,"opts":0,"reverse":31},{"from":16,"to":8,"weight":3,"opts":0,"reverse":30},{"from":14,"to":17,"weight":45,"opts":0,"reverse":33},{"from":17,"to":14,"weight":45,"opts":0,"reverse":32},{"from":16,"to":18,"weight":90,"opts":0,"reverse":35},{"from":18,"to":16,"weight":90,"opts":0,"reverse":34},{"from":4,"to":19,"weight":38,"opts":0,"reverse":37},{"from":19,"to":4,"weight":38,"opts":0,"reverse":36},{"from":1,"to":6,"weight":25,"opts":1,"reverse":39},{"from":6,"to":1,"weight":25,"opts":1,"reverse":38},{"from":3,"to":2,"weight":12,"opts":0,"reverse":41},{"from":2,"to":3,"weight":12,"opts":0,"reverse":40},{"from":2,"to":19,"weight":17,"opts":0,"reverse":43},{"from":19,"to":2,"weight":17,"opts":0,"reverse":42},{"from":9,"to":10,"weight":52,"opts":0,"reverse":45},{"from":10,"to":9,"weight":52,"opts":0,"reverse":44},{"from":14,"to":19,"weight":57,"opts":0,"reverse":47},{"from":19,"to":14,"weight":57,"opts":0,"reverse":46},{"from":14,"to":1,"weight":63,"opts":1,"reverse":49},{"from":1,"to":14,"weight":63,"opts":1,"reverse":48},{"from":4,"to":5,"weight":17,"opts":0,"reverse":51},{"from":5,"to":4,"weight":17,"opts":0,"reverse":50},{"from":9,"to":19,"weight":78,"opts":0,"reverse":53},{"from":19,"to":9,"weight":78,"opts":0,"reverse":52},{"from":8,"to":19,"weight":81,"opts":0,"reverse":55},{"from":19,"to":8,"weight":81,"opts":0,"reverse":54},{"from":8,"to":0,"weight":73,"opts":0,"reverse":57},{"from":0,"to":8,"weight":73,"opts":0,"reverse":56},{"from":7,"to":12,"weight":99,"opts":0,"reverse":59},{"from":12,"to":7,"weight":99,"opts":0,"reverse":58}],

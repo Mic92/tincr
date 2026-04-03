@@ -1,4 +1,5 @@
-//! `graph.c`: Kruskal's MST + BFS-based SSSP.
+//! `graph.c`: Kruskal's MST + BFS-based SSSP. `edge.c`/`node.c`: the
+//! arena and its delete operations.
 //!
 //! ## What's here, what's not
 //!
@@ -51,6 +52,35 @@
 //! Subtle but load-bearing for UDP hole-punching: `via` (the last
 //! direct relay) must be correct, and it's set from the path. A short
 //! indirect path gives a wrong `via`.
+//!
+//! ## Deletion: free-list, not slotmap
+//!
+//! `del_edge` is hot — every TCP reconnect tears down and rebuilds
+//! both halves. The slab is `Vec<Option<Edge>>` with a LIFO free-list:
+//! delete writes `None` and pushes the index; add pops the free-list
+//! before growing. O(1) both ways, and crucially: **existing
+//! `EdgeId`s stay valid**. A stale ID just reads `None`.
+//!
+//! Why not `slotmap`? It's the right tool, but:
+//!
+//! - Generational keys are a non-goal here. The C protocol layer
+//!   already prevents use-after-free at a higher level (`del_edge_h`
+//!   looks up by name pair, not by stored ID). We don't need the ABA
+//!   protection.
+//! - The KAT JSON encodes sequential `u32` indices. With `slotmap`
+//!   we'd need an insertion-order side-map for translation. Free-list
+//!   keeps `EdgeId(u32)` as-is.
+//! - `sssp`/`mst` already skip `None`-ish edges (`!e->reverse`).
+//!   One more `None` check is the same shape, no new pattern.
+//!
+//! `del_node` is the same shape but rarer (peer leaves the mesh
+//! entirely vs. edge churn on every reconnect). It cascades: deletes
+//! all the node's outgoing edges first, like `node.c:141-143`. It
+//! does *not* hunt down incoming edges — the C doesn't either; the
+//! protocol layer (`del_edge_h`) deletes both halves of a pair before
+//! `node_del` runs. An incoming half-edge with a dangling `to` is the
+//! caller's bug, and it's harmless here (sssp skips reverseless edges
+//! and the cascade nulled the reverse).
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -155,15 +185,37 @@ pub struct Route {
 // The graph
 
 /// Node + edge slabs, plus the weight-ordered edge index Kruskal walks.
+///
+/// Slabs are `Vec<Option<_>>` with free-lists — see module doc,
+/// "Deletion".
 #[derive(Debug, Default)]
 pub struct Graph {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
+    nodes: Vec<Option<Node>>,
+    edges: Vec<Option<Edge>>,
+    /// LIFO recycle stack: indices of `None` slots in `nodes`.
+    node_free: Vec<u32>,
+    /// LIFO recycle stack: indices of `None` slots in `edges`.
+    edge_free: Vec<u32>,
     /// `edge_weight_tree`: `(weight, from_name, to_name) → EdgeId`.
     /// `BTreeMap` for sorted iteration + `O(log n)` remove. Names
     /// cloned into the key — cheap (a few hundred bytes for typical
     /// meshes), avoids borrowing `nodes` while iterating `weight_order`.
     weight_order: BTreeMap<(i32, String, String), EdgeId>,
+}
+
+/// Index into the slabs. Slot may be `None` (freed) — hence the
+/// `Option` indirection. Macro because we'd otherwise repeat
+/// `self.edges[e.0 as usize].as_ref().unwrap()` two dozen times, and
+/// half the time it's `as_mut`, and `.expect("live")` everywhere is
+/// noise. Live-slot expectation is documented at each call site by
+/// the surrounding logic (e.g. "just got this ID off the BFS queue").
+macro_rules! slot {
+    ($slab:expr, $id:expr) => {
+        $slab[$id.0 as usize].as_ref().expect("live slot")
+    };
+    (mut $slab:expr, $id:expr) => {
+        $slab[$id.0 as usize].as_mut().expect("live slot")
+    };
 }
 
 impl Graph {
@@ -173,18 +225,26 @@ impl Graph {
     }
 
     /// `node_tree.insert`. `reachable` defaults true (steady state).
+    /// Recycles a freed slot if one exists (LIFO).
     ///
     /// # Panics
     /// On more than `u32::MAX` nodes — not a realistic limit; tinc
     /// meshes are tens to hundreds.
     pub fn add_node(&mut self, name: impl Into<String>) -> NodeId {
-        let id = NodeId(u32::try_from(self.nodes.len()).expect("u32 nodes"));
-        self.nodes.push(Node {
+        let n = Node {
             name: name.into(),
             edges: Vec::new(),
             reachable: true,
-        });
-        id
+        };
+        if let Some(idx) = self.node_free.pop() {
+            debug_assert!(self.nodes[idx as usize].is_none());
+            self.nodes[idx as usize] = Some(n);
+            NodeId(idx)
+        } else {
+            let id = NodeId(u32::try_from(self.nodes.len()).expect("u32 nodes"));
+            self.nodes.push(Some(n));
+            id
+        }
     }
 
     /// `edge_add`: insert into `from.edge_tree` and `edge_weight_tree`,
@@ -194,23 +254,30 @@ impl Graph {
     /// On more than `u32::MAX` edges. Not a realistic concern; tinc
     /// meshes are tens to hundreds of nodes.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, weight: i32, options: u32) -> EdgeId {
-        let id = EdgeId(u32::try_from(self.edges.len()).expect("u32 edges"));
+        let id = if let Some(idx) = self.edge_free.pop() {
+            debug_assert!(self.edges[idx as usize].is_none());
+            EdgeId(idx)
+        } else {
+            let id = EdgeId(u32::try_from(self.edges.len()).expect("u32 edges"));
+            self.edges.push(None);
+            id
+        };
 
         // Find reverse: an edge from `to` whose destination is `from`.
         // C does `lookup_edge(to, from)` via `to.edge_tree`.
-        let reverse = self.nodes[to.0 as usize]
+        let reverse = slot!(self.nodes, to)
             .edges
             .iter()
             .copied()
-            .find(|&eid| self.edges[eid.0 as usize].to == from);
+            .find(|&eid| slot!(self.edges, eid).to == from);
         if let Some(r) = reverse {
-            self.edges[r.0 as usize].reverse = Some(id);
+            slot!(mut self.edges, r).reverse = Some(id);
         }
 
-        let to_name = self.nodes[to.0 as usize].name.clone();
-        let from_name = self.nodes[from.0 as usize].name.clone();
+        let to_name = slot!(self.nodes, to).name.clone();
+        let from_name = slot!(self.nodes, from).name.clone();
 
-        self.edges.push(Edge {
+        self.edges[id.0 as usize] = Some(Edge {
             from,
             to,
             weight,
@@ -221,9 +288,9 @@ impl Graph {
 
         // Per-node edge list, sorted by `to_name`. The cache in `Edge`
         // is what makes this comparator work without borrowing `nodes`.
-        let from_edges = &mut self.nodes[from.0 as usize].edges;
         let edges = &self.edges;
-        let pos = from_edges.partition_point(|&eid| edges[eid.0 as usize].to_name < to_name);
+        let from_edges = &mut slot!(mut self.nodes, from).edges;
+        let pos = from_edges.partition_point(|&eid| slot!(edges, eid).to_name < to_name);
         from_edges.insert(pos, id);
 
         // Global weight-ordered index.
@@ -232,26 +299,137 @@ impl Graph {
         id
     }
 
+    /// `edge.c:105-112` `edge_del`. Unlinks the twin's `reverse`,
+    /// removes from the per-node sorted list and `weight_order`, frees
+    /// the slot.
+    ///
+    /// Returns `None` if the slot was already freed. The C would
+    /// dereference a dangling pointer (UB); we no-op. Chosen over
+    /// panic because daemon teardown can hit double-delete races
+    /// (connection close + `del_edge_h` arriving close together) and
+    /// a no-op is the conservative choice. Callers that care can
+    /// check the return.
+    ///
+    /// # Panics
+    /// If the edge is live but its `from` node is freed, or its
+    /// per-node-list / `weight_order` entry is missing. Both are arena
+    /// invariants this module maintains; a panic means a bug here, not
+    /// in the caller.
+    pub fn del_edge(&mut self, e: EdgeId) -> Option<()> {
+        // Read what we need *before* mutating the slab. The per-node
+        // edge list still contains `e` itself; the binary-search
+        // comparator below will deref `e`'s slot, so it must stay live
+        // until after the list-remove. `take()` comes last.
+        let (from, to_name, weight, reverse) = {
+            let edge = self.edges[e.0 as usize].as_ref()?;
+            (edge.from, edge.to_name.clone(), edge.weight, edge.reverse)
+        };
+
+        // C: `if(e->reverse) e->reverse->reverse = NULL;`
+        if let Some(r) = reverse {
+            slot!(mut self.edges, r).reverse = None;
+        }
+
+        // C: `splay_delete(&e->from->edge_tree, e)`.
+        // Per-node list is sorted by `to_name`; binary-search the slot
+        // out. The `from` node must be live — deleting an edge whose
+        // origin is gone is a caller bug (and the C would crash too).
+        let edges = &self.edges;
+        let from_edges = &mut slot!(mut self.nodes, from).edges;
+        let pos = from_edges
+            .binary_search_by(|&eid| slot!(edges, eid).to_name.as_str().cmp(&to_name))
+            .expect("edge in from's list");
+        from_edges.remove(pos);
+
+        // C: `splay_delete(&edge_weight_tree, e)`.
+        // Recompute the key. `from_name` we don't cache (only `to_name`
+        // is needed for the sort comparator); look it up. Cheaper than
+        // a third name clone on every edge.
+        let from_name = slot!(self.nodes, from).name.clone();
+        self.weight_order.remove(&(weight, from_name, to_name));
+
+        self.edges[e.0 as usize] = None;
+        self.edge_free.push(e.0);
+        Some(())
+    }
+
+    /// `node.c:134-147` `node_del`. Cascades: deletes all the node's
+    /// outgoing edges first (their twins become reverseless), then
+    /// frees the slot.
+    ///
+    /// Does **not** hunt down *incoming* edges. The C doesn't either:
+    /// `node_del` walks `n->edge_tree` only. Any edge with `to ==`
+    /// this node becomes a dangling reference; the protocol layer
+    /// (`del_edge_h`) is responsible for deleting both halves of a
+    /// pair before the node itself is purged. That said, the cascade
+    /// nulls the twin's `reverse`, and `sssp`/`mst` skip reverseless
+    /// edges — so a dangling `to` is invisible to the algorithms.
+    ///
+    /// Returns `None` if already freed (same rationale as
+    /// [`Self::del_edge`]).
+    ///
+    /// Subnet cascade (`node.c:137-139`) is not here — subnets are
+    /// daemon-side, not in this crate.
+    pub fn del_node(&mut self, n: NodeId) -> Option<()> {
+        // Can't `take` yet — `del_edge` needs the node live to look
+        // up `from_name` and edit `from_edges`. Check liveness, drain
+        // edges, *then* take.
+        // C `splay_each` reads `next` before the body so
+        // `splay_delete` mid-iteration is safe; we drain a snapshot.
+        let outgoing: Vec<EdgeId> = self.nodes[n.0 as usize].as_ref()?.edges.clone();
+        for e in outgoing {
+            self.del_edge(e);
+        }
+
+        self.nodes[n.0 as usize] = None;
+        self.node_free.push(n.0);
+        Some(())
+    }
+
+    /// `edge.c:114-121` `lookup_edge`. Find the edge `from → to` if
+    /// it exists. The C searches `from->edge_tree` keyed on `to->name`.
+    #[must_use]
+    pub fn lookup_edge(&self, from: NodeId, to: NodeId) -> Option<EdgeId> {
+        let to_name = self.nodes[to.0 as usize].as_ref()?.name.as_str();
+        let from_edges = &self.nodes[from.0 as usize].as_ref()?.edges;
+        let edges = &self.edges;
+        from_edges
+            .binary_search_by(|&eid| slot!(edges, eid).to_name.as_str().cmp(to_name))
+            .ok()
+            .map(|i| from_edges[i])
+    }
+
     /// `n->status.reachable = r`. Daemon calls after diffing SSSP results.
+    ///
+    /// # Panics
+    /// If `n` is a freed slot. The daemon walks `sssp` results indexed
+    /// by live `NodeId`; a freed ID here is a bug.
     pub fn set_reachable(&mut self, n: NodeId, r: bool) {
-        self.nodes[n.0 as usize].reachable = r;
+        slot!(mut self.nodes, n).reachable = r;
     }
 
+    /// `None` if the slot was freed (stale `NodeId`).
     #[must_use]
-    pub fn node(&self, n: NodeId) -> &Node {
-        &self.nodes[n.0 as usize]
+    pub fn node(&self, n: NodeId) -> Option<&Node> {
+        self.nodes.get(n.0 as usize)?.as_ref()
     }
 
+    /// `None` if the slot was freed (stale `EdgeId`).
     #[must_use]
-    pub fn edge(&self, e: EdgeId) -> &Edge {
-        &self.edges[e.0 as usize]
+    pub fn edge(&self, e: EdgeId) -> Option<&Edge> {
+        self.edges.get(e.0 as usize)?.as_ref()
     }
 
-    /// All node IDs, stable (insertion) order. Safe by construction —
-    /// [`Self::add_node`] enforces the `u32` bound.
-    #[allow(clippy::missing_panics_doc)]
-    pub fn node_ids(&self) -> impl ExactSizeIterator<Item = NodeId> + '_ {
-        (0..u32::try_from(self.nodes.len()).unwrap()).map(NodeId)
+    /// Live node IDs, slot order. **Not** `ExactSizeIterator`: with a
+    /// free-list, `nodes.len()` counts holes too. The daemon's `sssp`
+    /// result vector is still `nodes.len()` long (indexed by raw slot,
+    /// dead slots get `None` routes); use `.len()` on that if you need
+    /// a count.
+    #[allow(clippy::missing_panics_doc)] // u32::try_from on a u32-bounded len
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (0..u32::try_from(self.nodes.len()).unwrap())
+            .filter(|&i| self.nodes[i as usize].is_some())
+            .map(NodeId)
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -278,6 +456,9 @@ impl Graph {
     #[must_use]
     #[allow(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp(&self, myself: NodeId) -> Vec<Option<Route>> {
+        // Result is indexed by raw slot number, including freed slots
+        // (they stay `None`). The daemon zips this against `node_ids()`
+        // and never reads dead slots.
         let n_nodes = self.nodes.len();
         let mut route: Vec<Option<Route>> = vec![None; n_nodes];
 
@@ -314,8 +495,8 @@ impl Graph {
                 )
             };
 
-            for &eid in &self.nodes[n.0 as usize].edges {
-                let e = &self.edges[eid.0 as usize];
+            for &eid in &slot!(self.nodes, n).edges {
+                let e = slot!(self.edges, eid);
 
                 // C line 159: `if(!e->reverse || e->to == myself) continue;`
                 if e.reverse.is_none() || e.to == myself {
@@ -429,9 +610,11 @@ impl Graph {
         let mut mst_edges = Vec::new();
 
         // C: walk edge_weight_tree, find first reachable `from`, mark.
+        // `weight_order` only holds live edges (`del_edge` removes),
+        // so `slot!` is safe here.
         for &eid in self.weight_order.values() {
-            let from = self.edges[eid.0 as usize].from;
-            if self.nodes[from.0 as usize].reachable {
+            let from = slot!(self.edges, eid).from;
+            if slot!(self.nodes, from).reachable {
                 visited[from.0 as usize] = true;
                 break;
             }
@@ -451,7 +634,7 @@ impl Graph {
 
         while i < order.len() {
             let eid = order[i];
-            let e = &self.edges[eid.0 as usize];
+            let e = slot!(self.edges, eid);
 
             let v_from = visited[e.from.0 as usize];
             let v_to = visited[e.to.0 as usize];
@@ -487,6 +670,7 @@ impl Graph {
 // tests/kat.rs.
 
 #[cfg(test)]
+#[allow(clippy::many_single_char_names)] // graph node labels: a/b/c is clearest
 mod tests {
     use super::*;
 
@@ -499,10 +683,12 @@ mod tests {
         // Insert out of name order; verify the per-node edge list is sorted.
         g.add_edge(a, NodeId(1), 0, 0); // a→z
         g.add_edge(a, NodeId(2), 0, 0); // a→b
-        let names: Vec<_> = g.nodes[0]
+        let names: Vec<_> = g
+            .node(a)
+            .unwrap()
             .edges
             .iter()
-            .map(|&e| g.edges[e.0 as usize].to_name.as_str())
+            .map(|&e| g.edge(e).unwrap().to_name.as_str())
             .collect();
         assert_eq!(names, ["b", "z"]);
     }
@@ -513,10 +699,10 @@ mod tests {
         let a = g.add_node("a");
         let b = g.add_node("b");
         let e1 = g.add_edge(a, b, 1, 0);
-        assert!(g.edge(e1).reverse.is_none()); // twin not yet present
+        assert!(g.edge(e1).unwrap().reverse.is_none()); // twin not yet present
         let e2 = g.add_edge(b, a, 1, 0);
-        assert_eq!(g.edge(e2).reverse, Some(e1));
-        assert_eq!(g.edge(e1).reverse, Some(e2)); // back-linked
+        assert_eq!(g.edge(e2).unwrap().reverse, Some(e1));
+        assert_eq!(g.edge(e1).unwrap().reverse, Some(e2)); // back-linked
     }
 
     #[test]
@@ -541,5 +727,172 @@ mod tests {
         g.add_edge(a, b, 1, 0); // one-way, no reverse
         let r = g.sssp(a);
         assert!(r[1].is_none()); // b unreachable
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Deletion
+
+    /// Triangle a-b-c, all bidi. Handy for delete tests.
+    fn triangle() -> (Graph, [NodeId; 3], [EdgeId; 6]) {
+        let mut g = Graph::new();
+        let a = g.add_node("a");
+        let b = g.add_node("b");
+        let c = g.add_node("c");
+        let ab = g.add_edge(a, b, 10, 0);
+        let ba = g.add_edge(b, a, 10, 0);
+        let bc = g.add_edge(b, c, 20, 0);
+        let cb = g.add_edge(c, b, 20, 0);
+        let ac = g.add_edge(a, c, 30, 0);
+        let ca = g.add_edge(c, a, 30, 0);
+        (g, [a, b, c], [ab, ba, bc, cb, ac, ca])
+    }
+
+    #[test]
+    fn del_edge_unlinks_reverse() {
+        // edge.c:106-108: `if(e->reverse) e->reverse->reverse = NULL;`
+        let (mut g, _, [ab, ba, ..]) = triangle();
+        assert_eq!(g.edge(ba).unwrap().reverse, Some(ab));
+        g.del_edge(ab).unwrap();
+        assert!(g.edge(ab).is_none()); // slot freed
+        assert_eq!(g.edge(ba).unwrap().reverse, None); // twin orphaned
+    }
+
+    #[test]
+    fn del_edge_recycles_slot() {
+        // Free-list LIFO: deleted slot is the next one handed out.
+        let (mut g, [a, _, c], [ab, ..]) = triangle();
+        g.del_edge(ab).unwrap();
+        // New edge (any pair) should reuse ab's slot index.
+        let new = g.add_edge(c, a, 99, 0);
+        assert_eq!(new, ab, "freed slot recycled");
+        assert_eq!(g.edge(new).unwrap().weight, 99);
+    }
+
+    #[test]
+    fn del_edge_removes_from_weight_order() {
+        // edge.c:110: `splay_delete(&edge_weight_tree, e)`.
+        // After deleting both halves of a-c, MST should be the a-b-c
+        // path (4 edges) and never see weight=30.
+        let (mut g, _, [_, _, _, _, ac, ca]) = triangle();
+        g.del_edge(ac).unwrap();
+        g.del_edge(ca).unwrap();
+        let mst = g.mst();
+        assert_eq!(mst.len(), 4); // ab+ba+bc+cb
+        for e in &mst {
+            assert_ne!(g.edge(*e).unwrap().weight, 30);
+        }
+    }
+
+    #[test]
+    fn del_edge_removes_from_node_list() {
+        // edge.c:111: `splay_delete(&e->from->edge_tree, e)`.
+        let (mut g, [a, b, c], [ab, ..]) = triangle();
+        // a has edges to b and c. Delete a→b.
+        g.del_edge(ab).unwrap();
+        assert_eq!(g.lookup_edge(a, b), None);
+        assert!(g.lookup_edge(a, c).is_some()); // still there
+        // The list stays sorted (only c left).
+        assert_eq!(g.node(a).unwrap().edges.len(), 1);
+    }
+
+    #[test]
+    fn sssp_after_del_unreachable() {
+        // Chain a-b-c. Cut b-c. c becomes unreachable from a.
+        let mut g = Graph::new();
+        let a = g.add_node("a");
+        let b = g.add_node("b");
+        let c = g.add_node("c");
+        g.add_edge(a, b, 1, 0);
+        g.add_edge(b, a, 1, 0);
+        let bc = g.add_edge(b, c, 1, 0);
+        g.add_edge(c, b, 1, 0);
+
+        let before = g.sssp(a);
+        assert!(before[c.0 as usize].is_some());
+
+        // Delete one half: b→c. c→b is now reverseless → sssp skips.
+        g.del_edge(bc).unwrap();
+        let after = g.sssp(a);
+        assert!(after[b.0 as usize].is_some()); // b still reachable
+        assert!(after[c.0 as usize].is_none()); // c isn't
+    }
+
+    #[test]
+    fn del_edge_on_freed_slot_is_noop() {
+        // The C would deref a dangling pointer here. We return None.
+        // Rationale in `del_edge` doc: teardown races make panic
+        // unhelpful.
+        let (mut g, _, [ab, ..]) = triangle();
+        assert_eq!(g.del_edge(ab), Some(()));
+        assert_eq!(g.del_edge(ab), None); // double-delete: no-op
+    }
+
+    #[test]
+    fn del_both_halves_either_order() {
+        // Deleting a→b then b→a: second delete sees `reverse = None`
+        // (first delete unlinked it) so the back-unlink is a no-op,
+        // not a freed-slot deref.
+        let (mut g, _, [ab, ba, ..]) = triangle();
+        g.del_edge(ab).unwrap();
+        // ba.reverse is now None — the unlink branch shouldn't try to
+        // touch ab's freed slot.
+        g.del_edge(ba).unwrap();
+        assert!(g.edge(ab).is_none());
+        assert!(g.edge(ba).is_none());
+    }
+
+    #[test]
+    fn del_node_cascades_outgoing() {
+        // node.c:141-143: `for splay_each(edge_t, e, &n->edge_tree)
+        // edge_del(e)`. Only outgoing; incoming become reverseless.
+        let (mut g, [a, b, c], [ab, ba, bc, cb, ac, ca]) = triangle();
+        g.del_node(b).unwrap();
+
+        assert!(g.node(b).is_none());
+        // b's outgoing edges (ba, bc) are gone:
+        assert!(g.edge(ba).is_none());
+        assert!(g.edge(bc).is_none());
+        // Incoming edges (ab, cb) still exist but reverseless:
+        assert_eq!(g.edge(ab).unwrap().reverse, None);
+        assert_eq!(g.edge(cb).unwrap().reverse, None);
+        // Unrelated edges untouched:
+        assert_eq!(g.edge(ac).unwrap().reverse, Some(ca));
+
+        // sssp from a: c reachable via a-c (the surviving bidi link),
+        // b's slot is dead → None route. The dangling ab edge with
+        // `to = b` (freed) is skipped because reverseless.
+        let r = g.sssp(a);
+        assert!(r[b.0 as usize].is_none());
+        assert!(r[c.0 as usize].is_some());
+    }
+
+    #[test]
+    fn del_node_recycles_slot() {
+        let (mut g, [_, b, _], _) = triangle();
+        g.del_node(b).unwrap();
+        let d = g.add_node("d");
+        assert_eq!(d, b, "freed node slot recycled");
+        assert_eq!(g.node(d).unwrap().name, "d");
+        assert!(g.node(d).unwrap().edges.is_empty()); // fresh, not stale
+    }
+
+    #[test]
+    fn node_ids_skips_freed() {
+        let (mut g, [a, b, c], _) = triangle();
+        g.del_node(b).unwrap();
+        let live: Vec<_> = g.node_ids().collect();
+        assert_eq!(live, vec![a, c]);
+    }
+
+    #[test]
+    fn lookup_edge_finds_by_names() {
+        // edge.c:114-121: `splay_search(&from->edge_tree, &v)`.
+        let (g, [a, b, c], [ab, _, _, _, ac, _]) = triangle();
+        assert_eq!(g.lookup_edge(a, b), Some(ab));
+        assert_eq!(g.lookup_edge(a, c), Some(ac));
+        assert_eq!(
+            g.lookup_edge(b, c).map(|e| g.edge(e).unwrap().weight),
+            Some(20)
+        );
     }
 }

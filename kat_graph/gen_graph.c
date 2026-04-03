@@ -335,20 +335,69 @@ static int nodeidx(node_t *n) {
 	return n ? (int)(n - nodes) : -1;
 }
 
+// edge.c:105-112 verbatim semantics: unlink reverse, remove from
+// per-node tree + global weight tree. The slab slot stays (we keep
+// addressing edges by index) but mark `from = NULL` so emission can
+// skip it. The Rust side's free-list slot is similarly None.
+static void del_edge(int idx) {
+	edge_t *e = &edges[idx];
+	assert(e->from && "double delete");
+	if (e->reverse) e->reverse->reverse = NULL;
+	splay_delete(&edge_weight_tree, e);
+	splay_delete(&e->from->edge_tree, e);
+	// Clear the connection's mst bit — emit_case reads conns[] linearly
+	// and doesn't know this edge is dead. The real tinc removes from
+	// connection_list; we just zero the bit we read.
+	conns[idx].status.mst = false;
+	e->from = NULL; // tombstone
+}
+
 // ────────────────────────────────────────────────────────────────────
 // JSON emission. One object per case.
 
-static void emit_case(const char *name, FILE *out) {
-	// Snapshot SSSP outputs before kruskal trashes `visited`.
+// Emit one sssp+mst snapshot under the given JSON keys. Runs
+// mst_kruskal in-place (trashes `visited`); sssp must already have
+// run. Factored out so delete-cases can emit "before" and "after".
+static void emit_snapshot(FILE *out, const char *sssp_key, const char *mst_key) {
 	bool sssp_visited[MAX_NODES];
 	for (int i = 0; i < n_nodes; i++)
 		sssp_visited[i] = nodes[i].status.visited;
 
-	// Now MST. Uses status.reachable for start point.
 	for (int i = 0; i < n_nodes; i++)
 		nodes[i].status.reachable = sssp_visited[i];
 	mst_kruskal();
 
+	fprintf(out, "    \"%s\": [", sssp_key);
+	for (int i = 0; i < n_nodes; i++) {
+		node_t *n = &nodes[i];
+		bool r = sssp_visited[i];
+		fprintf(out, "%s{\"reachable\":%s,\"indirect\":%s,"
+			"\"distance\":%d,\"weighted_distance\":%d,"
+			"\"nexthop\":%d,\"via\":%d,\"prevedge\":%d,\"options\":%u}",
+			i ? "," : "",
+			r ? "true" : "false",
+			r && n->status.indirect ? "true" : "false",
+			r ? n->distance : -1,
+			r ? n->weighted_distance : -1,
+			r ? nodeidx(n->nexthop) : -1,
+			r ? nodeidx(n->via) : -1,
+			r && n->prevedge ? (int)(n->prevedge - edges) : -1,
+			r ? n->options : 0);
+	}
+	fprintf(out, "],\n");
+
+	fprintf(out, "    \"%s\": [", mst_key);
+	int first = 1;
+	for (int i = 0; i < n_edges; i++) {
+		if (conns[i].status.mst) {
+			fprintf(out, "%s%d", first ? "" : ",", i);
+			first = 0;
+		}
+	}
+	fprintf(out, "]");
+}
+
+static void emit_case(const char *name, FILE *out) {
 	fprintf(out, "  {\n    \"name\": \"%s\",\n", name);
 
 	// Input: nodes (just names — index = position), edges, myself.
@@ -369,36 +418,52 @@ static void emit_case(const char *name, FILE *out) {
 
 	fprintf(out, "    \"myself\": %d,\n", nodeidx(myself));
 
-	// SSSP output, per node. -1 sentinels for unreachable.
-	fprintf(out, "    \"sssp\": [");
-	for (int i = 0; i < n_nodes; i++) {
-		node_t *n = &nodes[i];
-		bool r = sssp_visited[i];
-		fprintf(out, "%s{\"reachable\":%s,\"indirect\":%s,"
-			"\"distance\":%d,\"weighted_distance\":%d,"
-			"\"nexthop\":%d,\"via\":%d,\"prevedge\":%d,\"options\":%u}",
+	emit_snapshot(out, "sssp", "mst");
+	fprintf(out, "\n  }");
+}
+
+// Delete-phase variant: emit the pre-delete snapshot, then delete the
+// listed edges (real splay_delete via del_edge), re-run sssp, emit the
+// post-delete snapshot. The Rust KAT test deletes the same indices and
+// diffs the second snapshot.
+static void emit_case_del(const char *name, const int *del, int n_del, FILE *out) {
+	fprintf(out, "  {\n    \"name\": \"%s\",\n", name);
+
+	fprintf(out, "    \"nodes\": [");
+	for (int i = 0; i < n_nodes; i++)
+		fprintf(out, "%s\"%s\"", i ? "," : "", nodes[i].name);
+	fprintf(out, "],\n");
+
+	fprintf(out, "    \"edges\": [");
+	for (int i = 0; i < n_edges; i++) {
+		fprintf(out, "%s{\"from\":%d,\"to\":%d,\"weight\":%d,\"opts\":%u,\"reverse\":%d}",
 			i ? "," : "",
-			r ? "true" : "false",
-			r && n->status.indirect ? "true" : "false",
-			r ? n->distance : -1,
-			r ? n->weighted_distance : -1,
-			r ? nodeidx(n->nexthop) : -1,
-			r ? nodeidx(n->via) : -1,
-			r && n->prevedge ? (int)(n->prevedge - edges) : -1,
-			r ? n->options : 0);
+			nodeidx(edges[i].from), nodeidx(edges[i].to),
+			edges[i].weight, edges[i].options,
+			edges[i].reverse ? (int)(edges[i].reverse - edges) : -1);
 	}
 	fprintf(out, "],\n");
 
-	// MST output: which edges have status.mst set on their connection.
-	fprintf(out, "    \"mst\": [");
-	int first = 1;
-	for (int i = 0; i < n_edges; i++) {
-		if (conns[i].status.mst) {
-			fprintf(out, "%s%d", first ? "" : ",", i);
-			first = 0;
-		}
-	}
-	fprintf(out, "]\n  }");
+	fprintf(out, "    \"myself\": %d,\n", nodeidx(myself));
+
+	emit_snapshot(out, "sssp", "mst");
+	fprintf(out, ",\n");
+
+	fprintf(out, "    \"del_edges\": [");
+	for (int i = 0; i < n_del; i++)
+		fprintf(out, "%s%d", i ? "," : "", del[i]);
+	fprintf(out, "],\n");
+
+	for (int i = 0; i < n_del; i++) del_edge(del[i]);
+
+	// Re-seed reachable for the suppress-update_node_udp gate —
+	// del_edge can disconnect nodes, the second sssp will visit
+	// fewer, but the gate reads the *previous* reachable (now stale).
+	// Set everyone reachable=true again (same seeding as add_node).
+	for (int i = 0; i < n_nodes; i++) nodes[i].status.reachable = true;
+	sssp_bfs();
+	emit_snapshot(out, "sssp_after", "mst_after");
+	fprintf(out, "\n  }");
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -523,6 +588,53 @@ static void case_disconnected(FILE *out) {
 	emit_case("disconnected", out);
 }
 
+// chain5, then cut the middle. Tests del_edge: n3/n4 become
+// unreachable, MST shrinks to n0-n1-n2 only. Deletes both halves
+// (the daemon's del_edge_h does too) so the post-state is clean.
+static void case_chain_del(FILE *out) {
+	reset();
+	for (int i = 0; i < 5; i++) add_node(NM[i]);
+	for (int i = 0; i < 4; i++) link_pair(&nodes[i], &nodes[i+1], 10, 10, 0, 0);
+	myself = &nodes[0];
+	sssp_bfs();
+	// Edges 4,5 are the n2↔n3 pair (third link_pair call).
+	int del[] = {4, 5};
+	emit_case_del("chain5_del_mid", del, 2, out);
+}
+
+// Diamond: cut the cheap path. n3's nexthop must flip to n2.
+// Tests that del_edge correctly removes from the per-node tree (so
+// sssp doesn't see the dead edge) AND from edge_weight_tree (so MST
+// doesn't pick it).
+static void case_diamond_del(FILE *out) {
+	reset();
+	for (int i = 0; i < 4; i++) add_node(NM[i]);
+	link_pair(&nodes[0], &nodes[1], 5, 5, 0, 0);   // 0,1: cheap
+	link_pair(&nodes[0], &nodes[2], 50, 50, 0, 0); // 2,3: expensive
+	link_pair(&nodes[1], &nodes[3], 10, 10, 0, 0); // 4,5
+	link_pair(&nodes[2], &nodes[3], 10, 10, 0, 0); // 6,7
+	myself = &nodes[0];
+	sssp_bfs();
+	// Kill 0↔1. n3 now reachable only via n2 (heavier).
+	int del[] = {0, 1};
+	emit_case_del("diamond_del_cheap", del, 2, out);
+}
+
+// Delete one half only. The twin is still in the trees but reverseless;
+// sssp's `!e->reverse` check skips it. This is the transient state
+// between the two DEL_EDGE messages arriving.
+static void case_del_half(FILE *out) {
+	reset();
+	for (int i = 0; i < 3; i++) add_node(NM[i]);
+	link_pair(&nodes[0], &nodes[1], 10, 10, 0, 0); // 0,1
+	link_pair(&nodes[1], &nodes[2], 10, 10, 0, 0); // 2,3
+	myself = &nodes[0];
+	sssp_bfs();
+	// Delete only 1→2 (edge 2). 2→1 (edge 3) survives reverseless.
+	int del[] = {2};
+	emit_case_del("del_half_reverseless", del, 1, out);
+}
+
 // Asymmetric weights. a→b weight 10, b→a weight 100. sssp_bfs uses the
 // *outgoing* edge weight from each node; the reverse edge's weight is
 // irrelevant to traversal (it's a separate edge). Tests that we
@@ -587,6 +699,9 @@ int main(void) {
 	case_mst_rewind(out);   fprintf(out, ",\n");
 	case_disconnected(out); fprintf(out, ",\n");
 	case_asym_weight(out);  fprintf(out, ",\n");
+	case_chain_del(out);    fprintf(out, ",\n");
+	case_diamond_del(out);  fprintf(out, ",\n");
+	case_del_half(out);     fprintf(out, ",\n");
 
 	for (int s = 1; s <= 10; s++) {
 		case_random(s, out);

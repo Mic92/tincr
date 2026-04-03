@@ -24,6 +24,16 @@ struct Kat {
     myself: u32,
     sssp: Vec<KatRoute>,
     mst: Vec<u32>,
+    /// Edges to delete after the first sssp/mst snapshot. Tests
+    /// `del_edge` against the C `edge_del`: same deletes on both
+    /// sides, then re-run sssp+mst, diff again. Absent in append-only
+    /// cases (everything before `chain5_del`).
+    #[serde(default)]
+    del_edges: Vec<u32>,
+    #[serde(default)]
+    sssp_after: Vec<KatRoute>,
+    #[serde(default)]
+    mst_after: Vec<u32>,
 }
 
 #[derive(Deserialize)]
@@ -60,7 +70,7 @@ fn build(k: &Kat) -> Graph {
         assert_eq!(id.0, u32::try_from(i).unwrap(), "edge id sequential");
     }
     for (i, e) in k.edges.iter().enumerate() {
-        let got = g.edge(EdgeId(u32::try_from(i).unwrap())).reverse;
+        let got = g.edge(EdgeId(u32::try_from(i).unwrap())).unwrap().reverse;
         let want = (e.reverse >= 0).then(|| EdgeId(u32::try_from(e.reverse).unwrap()));
         assert_eq!(
             got, want,
@@ -71,6 +81,49 @@ fn build(k: &Kat) -> Graph {
     g
 }
 
+fn check_sssp(k: &Kat, want: &[KatRoute], routes: &[Option<tinc_graph::Route>], phase: &str) {
+    for (i, want) in want.iter().enumerate() {
+        let got = &routes[i];
+        let ctx = format!("{}{phase}: node {} ({})", k.name, i, k.nodes[i]);
+
+        if !want.reachable {
+            assert!(got.is_none(), "{ctx}: should be unreachable, got {got:?}");
+            continue;
+        }
+        let got = got
+            .as_ref()
+            .unwrap_or_else(|| panic!("{ctx}: should be reachable"));
+
+        // Field-by-field for legible failures. The order here is
+        // roughly "cause → effect": indirect determines via;
+        // distance + weighted_distance determine nexthop; prevedge
+        // is the trace.
+        assert_eq!(got.indirect, want.indirect, "{ctx}: indirect");
+        assert_eq!(got.distance, want.distance, "{ctx}: distance");
+        assert_eq!(
+            got.weighted_distance, want.weighted_distance,
+            "{ctx}: weighted_distance"
+        );
+        assert_eq!(
+            got.nexthop.0,
+            u32::try_from(want.nexthop).unwrap(),
+            "{ctx}: nexthop"
+        );
+        assert_eq!(got.via.0, u32::try_from(want.via).unwrap(), "{ctx}: via");
+        assert_eq!(got.options, want.options, "{ctx}: options");
+
+        // prevedge: -1 means None (only for myself).
+        match want.prevedge {
+            -1 => assert!(got.prevedge.is_none(), "{ctx}: prevedge"),
+            e => assert_eq!(
+                got.prevedge,
+                Some(EdgeId(u32::try_from(e).unwrap())),
+                "{ctx}: prevedge"
+            ),
+        }
+    }
+}
+
 #[test]
 fn sssp_kat() {
     let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
@@ -79,47 +132,7 @@ fn sssp_kat() {
     for k in &cases {
         let g = build(k);
         let routes = g.sssp(NodeId(k.myself));
-
-        for (i, want) in k.sssp.iter().enumerate() {
-            let got = &routes[i];
-            let ctx = format!("{}: node {} ({})", k.name, i, k.nodes[i]);
-
-            if !want.reachable {
-                assert!(got.is_none(), "{ctx}: should be unreachable, got {got:?}");
-                continue;
-            }
-            let got = got
-                .as_ref()
-                .unwrap_or_else(|| panic!("{ctx}: should be reachable"));
-
-            // Field-by-field for legible failures. The order here is
-            // roughly "cause → effect": indirect determines via;
-            // distance + weighted_distance determine nexthop; prevedge
-            // is the trace.
-            assert_eq!(got.indirect, want.indirect, "{ctx}: indirect");
-            assert_eq!(got.distance, want.distance, "{ctx}: distance");
-            assert_eq!(
-                got.weighted_distance, want.weighted_distance,
-                "{ctx}: weighted_distance"
-            );
-            assert_eq!(
-                got.nexthop.0,
-                u32::try_from(want.nexthop).unwrap(),
-                "{ctx}: nexthop"
-            );
-            assert_eq!(got.via.0, u32::try_from(want.via).unwrap(), "{ctx}: via");
-            assert_eq!(got.options, want.options, "{ctx}: options");
-
-            // prevedge: -1 means None (only for myself).
-            match want.prevedge {
-                -1 => assert!(got.prevedge.is_none(), "{ctx}: prevedge"),
-                e => assert_eq!(
-                    got.prevedge,
-                    Some(EdgeId(u32::try_from(e).unwrap())),
-                    "{ctx}: prevedge"
-                ),
-            }
-        }
+        check_sssp(k, &k.sssp, &routes, "");
     }
 }
 
@@ -145,6 +158,45 @@ fn mst_kat() {
         // reverse, C sets bits on connections we read in edge order).
         // Compare as sets.
         assert_eq!(got, want, "{}: mst edges", k.name);
+    }
+}
+
+/// Delete-phase KAT: build, delete the listed edges (matching the C
+/// `edge_del` on the same indices), re-run sssp+mst, diff against the
+/// C's second snapshot. Regression-tests `del_edge` against the real
+/// `splay_delete` semantics.
+#[test]
+fn del_kat() {
+    let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
+    let del_cases: Vec<_> = cases.iter().filter(|k| !k.del_edges.is_empty()).collect();
+    assert!(
+        del_cases.len() >= 3,
+        "expected ≥3 delete KAT cases, got {} — regenerate with `nix build .#kat-graph`?",
+        del_cases.len()
+    );
+
+    for k in del_cases {
+        let mut g = build(k);
+
+        for &eid in &k.del_edges {
+            g.del_edge(EdgeId(eid))
+                .unwrap_or_else(|| panic!("{}: del_edge({eid}) on freed slot", k.name));
+        }
+
+        let routes = g.sssp(NodeId(k.myself));
+        check_sssp(k, &k.sssp_after, &routes, " (after del)");
+
+        // MST: mirror the C generator's reachable := visited dance.
+        for (i, r) in routes.iter().enumerate() {
+            // Dead node slots not possible here (del KATs delete edges
+            // only); guard anyway in case node-del KATs land later.
+            if g.node(NodeId(u32::try_from(i).unwrap())).is_some() {
+                g.set_reachable(NodeId(u32::try_from(i).unwrap()), r.is_some());
+            }
+        }
+        let got: HashSet<u32> = g.mst().iter().map(|e| e.0).collect();
+        let want: HashSet<u32> = k.mst_after.iter().copied().collect();
+        assert_eq!(got, want, "{}: mst after del", k.name);
     }
 }
 
