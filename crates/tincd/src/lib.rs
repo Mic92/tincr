@@ -38,6 +38,7 @@ pub mod node_id;
 pub mod outgoing;
 pub mod packet;
 pub mod proto;
+pub mod route;
 pub mod seen;
 pub mod subnet_tree;
 
