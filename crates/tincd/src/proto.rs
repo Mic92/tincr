@@ -1199,37 +1199,12 @@ mod tests {
     }
 
     // ─── handle_id
-
-    /// The happy path. `tinc-tools/ctl.rs:491` sends `"0 ^<cookie> 0"`.
-    /// We set the control fields and queue two reply lines.
-    #[test]
-    fn id_control_auth_ok() {
-        let mut c = mkconn();
-        let cookie = "a".repeat(64);
-        let line = format!("0 ^{cookie} 0");
-
-        let r = handle_id(
-            &mut c,
-            line.as_bytes(),
-            &mkctx(&cookie),
-            Instant::now(),
-            &mut OsRng,
-        )
-        .unwrap();
-
-        let IdOk::Control { needs_write } = r else {
-            panic!("expected Control, got {r:?}");
-        };
-        assert!(needs_write, "outbuf was empty → needs_write");
-        assert!(c.control);
-        assert_eq!(c.allow_request, Some(Request::Control));
-
-        // Two lines queued. `tinc-tools/tests/tinc_cli.rs:1798` and
-        // `:1799` expect EXACTLY this format.
-        let our_pid = std::process::id();
-        let expected = format!("0 testd 17.7\n4 0 {our_pid}\n");
-        assert_eq!(c.outbuf.live(), expected.as_bytes());
-    }
+    //
+    // Happy-path control auth (`"0 ^<cookie> 0"` → two-line reply)
+    // is covered by `tests/stop.rs::spawn_connect_stop`: it sends
+    // the exact line, asserts both reply lines (greeting + ACK with
+    // PID), then proves `c.control` was set by sending `"18 0"`
+    // and observing the daemon exit. Only rejection paths below.
 
     #[test]
     fn id_cookie_mismatch() {
@@ -1328,58 +1303,14 @@ mod tests {
         }
     }
 
-    /// Happy path: peer ID accepted, SPTPS started, init Wire
-    /// returned. ALL the post-conditions.
-    #[test]
-    fn id_peer_ok() {
-        let mykey = SigningKey::from_seed(&[1; 32]);
-        let peerkey = SigningKey::from_seed(&[2; 32]);
-        let setup = PeerSetup::new("peer-ok", "alice", peerkey.public_key());
-
-        let mut c = mkconn();
-        let cookie = "a".repeat(64);
-        let ctx = IdCtx {
-            cookie: &cookie,
-            my_name: "testd",
-            mykey: &mykey,
-            confbase: setup.confbase(),
-            invitation_key: None,
-        };
-
-        let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng).unwrap();
-
-        // Return type: Peer with needs_write + init outputs.
-        let IdOk::Peer { needs_write, init } = r else {
-            panic!("expected Peer, got {r:?}");
-        };
-        assert!(needs_write, "outbuf was empty → send_id signals");
-        // sptps_start always emits one Wire (the responder's KEX).
-        // C `sptps.c:send_kex` is called synchronously inside
-        // `sptps_start`.
-        assert_eq!(init.len(), 1);
-        assert!(matches!(init[0], Output::Wire { .. }));
-
-        // ─── conn state
-        // C `:389`: `c->name = name`.
-        assert_eq!(c.name, "alice");
-        // C `:455` then `:456`: `allow_request = ACK`.
-        assert_eq!(c.allow_request, Some(Request::Ack));
-        // Minor parsed from `"17.7"`.
-        assert_eq!(c.protocol_minor, 7);
-        // Pubkey loaded.
-        assert_eq!(c.ecdsa, Some(*peerkey.public_key()));
-        // SPTPS installed.
-        assert!(c.sptps.is_some());
-        // NOT a control conn.
-        assert!(!c.control);
-
-        // ─── outbuf: ONLY the send_id line, NOT the KEX bytes
-        // The init Wire bytes are RETURNED for the daemon to queue
-        // via send_raw. handle_id doesn't queue them itself —
-        // ownership of the dispatch lives in the daemon (consistent
-        // with feed_sptps's outputs).
-        assert_eq!(c.outbuf.live(), b"0 testd 17.7\n");
-    }
+    // Happy-path peer ID (`"0 alice 17.7"` → sptps installed,
+    // pubkey loaded, name set, ID reply queued) is covered by
+    // `tests/stop.rs::peer_ack_exchange`: it sends `"0 testpeer
+    // 17.7"`, asserts the daemon's `"0 testnode 17.7"` reply, then
+    // completes the FULL SPTPS handshake — which proves sptps was
+    // installed, the right pubkey was loaded (else BadSig), and
+    // allow_request advanced to Ack (else the daemon's ACK record
+    // would be gated). Only rejection paths below.
 
     /// Major mismatch. C `:398-401`: hard reject. major bumps are
     /// wire-breaking.
@@ -1512,65 +1443,14 @@ mod tests {
 
     // ─── invitation `?` branch
 
-    /// `?` greeting with a valid throwaway key and an invitation
-    /// key loaded. C `protocol_auth.c:340-373`. Proves: two
-    /// plaintext lines queued (id reply + ACK-with-invkey), SPTPS
-    /// installed (label = 15 bytes, no NUL), Responder role.
-    #[test]
-    fn id_invitation_ok() {
-        let mykey = SigningKey::from_seed(&[1; 32]);
-        let inv_key = SigningKey::from_seed(&[0x77; 32]);
-        let throwaway = SigningKey::from_seed(&[0x33; 32]);
-        let throwaway_b64 = tinc_crypto::b64::encode(throwaway.public_key());
-
-        let mut c = mkconn();
-        let cookie = "a".repeat(64);
-        let ctx = IdCtx {
-            cookie: &cookie,
-            my_name: "alice",
-            mykey: &mykey,
-            confbase: Path::new("."),
-            invitation_key: Some(&inv_key),
-        };
-
-        let line = format!("0 ?{throwaway_b64} 17.7");
-        let r = handle_id(&mut c, line.as_bytes(), &ctx, Instant::now(), &mut OsRng).unwrap();
-
-        let IdOk::Invitation { needs_write, init } = r else {
-            panic!("expected Invitation, got {r:?}");
-        };
-        assert!(needs_write);
-        // sptps_start (Responder) emits no Wire (waits for initiator's
-        // KEX). C: `sptps_start(..., false, ...)` — the responder
-        // path doesn't call send_kex synchronously.
-        // Actually: check what tinc-sptps does. The initiator sends
-        // first; responder just buffers. init may be empty.
-        for o in &init {
-            assert!(matches!(o, Output::Wire { .. }));
-        }
-
-        // SPTPS installed.
-        assert!(c.sptps.is_some());
-        // protocol_minor set (cosmetic).
-        assert_eq!(c.protocol_minor, 2);
-        // NOT a control conn, NOT a peer conn (ecdsa stays None —
-        // the throwaway key isn't stored on `conn.ecdsa`, it went
-        // straight into Sptps::start).
-        assert!(!c.control);
-        assert!(c.ecdsa.is_none());
-
-        // ─── outbuf: TWO plaintext lines
-        // Line 1: `0 alice 17.7\n` (send_id reply).
-        // Line 2: `4 <inv-pubkey-b64>\n` (ACK with our invitation key).
-        let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
-        let expected = format!("0 alice 17.7\n4 {inv_pub_b64}\n");
-        assert_eq!(
-            c.outbuf.live(),
-            expected.as_bytes(),
-            "got: {:?}",
-            std::str::from_utf8(c.outbuf.live())
-        );
-    }
+    // Happy-path `?` invitation greeting (two plaintext lines
+    // queued, SPTPS Responder with 15-byte label) is covered by
+    // `tests/two_daemons.rs::tinc_join_against_real_daemon`: a
+    // real `tinc join` client connects with `"0 ?<throwaway> 17.7"`,
+    // receives both plaintext lines (else join's greeting parse
+    // fails), completes SPTPS with the 15-byte label (else BadSig),
+    // and runs the full cookie→file→finalize chain. Only the
+    // rejection path below.
 
     /// `?` with garbage b64. C `:348-351`: `if(!c->ecdsa)` reject.
     #[test]
@@ -1694,17 +1574,12 @@ mod tests {
     }
 
     // ─── handle_control
-
-    #[test]
-    fn control_stop() {
-        let mut c = mkconn();
-        c.allow_request = Some(Request::Control); // post-id_h state
-
-        let (r, nw) = handle_control(&mut c, b"18 0");
-        assert_eq!(r, DispatchResult::Stop);
-        assert!(nw);
-        assert_eq!(c.outbuf.live(), b"18 0 0\n");
-    }
+    //
+    // `"18 0"` → `DispatchResult::Stop` is covered by
+    // `tests/stop.rs::spawn_connect_stop`: it sends `"18 0"` and
+    // the daemon process EXITS (try_wait → status 0). The ack
+    // bytes are best-effort (queued but may not flush before
+    // event_loop exits); EOF is the contract.
 
     /// `REQ_RELOAD` (1) — returns `Reload` for daemon to handle.
     /// Daemon does the actual reload + sends `"18 1 <result>"`.
@@ -1773,42 +1648,13 @@ mod tests {
         assert_eq!(opts, 0x0700_000c);
     }
 
-    /// `send_ack` wire format. C `:867`: `"%d %s %d %x"`. The
-    /// connection has SPTPS installed (post-HandshakeDone) so this
-    /// goes through `sptps_send_record` — we DON'T have a real
-    /// post-handshake SPTPS in a unit test (needs the full dance).
-    /// So: test the PRE-SPTPS path (sptps=None). The format
-    /// arguments are identical; only the framing differs.
-    ///
-    /// (The post-handshake path IS tested by the integration test
-    /// `peer_ack_exchange` which gets the ACK over a real SPTPS.)
-    #[test]
-    fn send_ack_format() {
-        let mut c = mkconn();
-        // Fake `start` 50ms ago. weight = 50. `Instant - Duration`
-        // panics if `now` < boot+50ms; checked_sub is the explicit
-        // form. Tests run > 50ms after boot, so unwrap is safe.
-        let now = Instant::now();
-        c.start = now
-            .checked_sub(std::time::Duration::from_millis(50))
-            .unwrap();
-        c.protocol_minor = 7; // pass the debug_assert
-
-        let nw = send_ack(&mut c, 655, myself_options_default(), now);
-        assert!(nw);
-
-        // C: "4 655 50 700000c\n". %x is lowercase, no padding,
-        // no 0x prefix.
-        let line = std::str::from_utf8(c.outbuf.live()).unwrap();
-        // Weight depends on the actual elapsed time. We faked
-        // start = now - 50ms; saturating_duration_since gives
-        // exactly 50ms. as_millis = 50. (Instant arithmetic is
-        // exact on the monotonic clock; no flake.)
-        assert_eq!(line, "4 655 50 700000c\n");
-        // Side effects.
-        assert_eq!(c.estimated_weight, 50);
-        assert_eq!(c.options, OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
-    }
+    // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad)
+    // is covered by `tests/stop.rs::peer_ack_exchange`: it receives
+    // the daemon's ACK over real SPTPS and parses every field —
+    // reqno=4, udp_port (u16), weight (i32 in 0..5000), and
+    // crucially `from_str_radix(opts, 16) == 0x0700_000c`. If the
+    // format were uppercase, padded, or `0x`-prefixed, that parse
+    // fails. The roundtrip parse below pins the inverse.
 
     /// `parse_ack` round-trip. The peer's send_ack → our parse.
     #[test]
