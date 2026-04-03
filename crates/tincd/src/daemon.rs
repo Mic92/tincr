@@ -22,13 +22,14 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
-use tinc_proto::{AddrStr, Request};
+use tinc_proto::msg::{AddEdge, DelEdge, SubnetMsg};
+use tinc_proto::{AddrStr, Request, Subnet};
 
 use crate::conn::{Connection, FeedResult};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
@@ -69,6 +70,12 @@ new_key_type! {
 /// conn check (`ack_h:975-990`) is the one consumer.
 #[derive(Debug, Clone)]
 pub struct NodeState {
+    /// `c->edge`. The forward `EdgeId` from `myself` to this peer,
+    /// added by `on_ack` (`ack_h:1051`). `terminate_connection`
+    /// (`net.c:126-132`) deletes it AND broadcasts `DEL_EDGE` when
+    /// the connection drops. `None` for nodes that don't currently
+    /// have a direct edge from us (peer disconnected, edge gone).
+    pub edge: Option<EdgeId>,
     /// `n->connection`. Which meta connection currently serves this
     /// node. `None` if the node is known but not directly connected
     /// (transitively reachable, or just disconnected). Generational
@@ -390,6 +397,18 @@ pub struct Daemon {
     /// del_edge`. RESOLVES the open question at the chunk-5
     /// `send_everything` STUB note.
     pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
+
+    /// `contradicting_add_edge` (`net.c:40`). Incremented when a
+    /// peer claims WE have an edge we don't (`protocol_edge.c:186`).
+    /// Read by `periodic_handler` (`net.c:268-313`, chunk 8): if
+    /// it exceeds a threshold, log+restart. The contradiction means
+    /// our world-view diverged from the mesh's badly enough that
+    /// gossip won't converge.
+    pub(crate) contradicting_add_edge: u32,
+    /// `contradicting_del_edge` (`net.c:41`). Same, for DEL_EDGE
+    /// (`protocol_edge.c:288`): peer says we DON'T have an edge
+    /// we DO have.
+    pub(crate) contradicting_del_edge: u32,
 
     /// Last `sssp` result. C `node_t` stores `nexthop`/`via`/
     /// `distance` directly on the node (written by `graph.c:188-196`);
@@ -749,6 +768,8 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: HashMap::new(),
             edge_addrs: HashMap::new(),
+            contradicting_add_edge: 0,
+            contradicting_del_edge: 0,
             last_routes: Vec::new(),
             settings,
             ev,
@@ -1759,6 +1780,242 @@ impl Daemon {
         self.seen.check(s, self.timers.now())
     }
 
+    /// `prng(UINT32_MAX)` (`utils.c`). Nonce for the dedup field
+    /// in flooded ADD/DEL messages. The C uses a fast non-crypto
+    /// PRNG (xoshiro256**); we use `OsRng` — overkill but already
+    /// linked, no extra dep, and these messages are not hot (one
+    /// per topology change). The nonce only needs to be unique-ish
+    /// across the mesh's TTL window; cryptographic strength is
+    /// gratuitous, not wrong.
+    fn nonce() -> u32 {
+        OsRng.next_u32()
+    }
+
+    /// Connections eligible for broadcast: every conn that's past
+    /// ACK and isn't `from`. C `meta.c:115`: `if(c != from && c->
+    /// edge)`. We test `conn.active` (set in `on_ack`).
+    ///
+    /// Returns `Vec<ConnId>` (not an iterator) so callers can
+    /// `get_mut` while sending — the slotmap iterator borrow would
+    /// conflict. Same two-phase collect-then-send shape as
+    /// `dispatch_sptps_outputs`. Broadcast is per-topology-change,
+    /// not per-packet; the alloc is fine.
+    fn broadcast_targets(&self, from: Option<ConnId>) -> Vec<ConnId> {
+        self.conns
+            .iter()
+            .filter(|&(id, c)| Some(id) != from && c.active)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// `forward_request` (`protocol.c:135-146`) → `broadcast_meta`
+    /// (`meta.c:113-117`). Re-send `body` (a decrypted SPTPS record
+    /// payload, `\n` already stripped by `record_body`) to every
+    /// active connection except `from`. The receivers' `seen.check`
+    /// drops it if they already have it — that plus the `from` skip
+    /// is the loop break.
+    ///
+    /// C `protocol.c:144` re-appends `\n` then calls `broadcast_
+    /// meta` which calls `send_meta` (NOT `send_meta_raw`) — i.e.
+    /// the SPTPS-encrypted path. `conn.send()` does both: appends
+    /// `\n`, routes through `sptps_send_record`. The body is UTF-8
+    /// (parsers already validated; tinc protocol is text); the
+    /// `from_utf8` here is the `&[u8]` → `Display` impedance match.
+    ///
+    /// Returns `true` if any target's outbuf went empty→nonempty.
+    fn forward_request(&mut self, from: ConnId, body: &[u8]) -> bool {
+        // Body is post-parse: `parse_add_subnet` etc already
+        // succeeded, which means `from_utf8` did. Shouldn't fire.
+        let Ok(s) = std::str::from_utf8(body) else {
+            log::warn!(target: "tincd::proto",
+                       "forward_request: non-UTF-8 body, dropping");
+            return false;
+        };
+        let targets = self.broadcast_targets(Some(from));
+        if targets.is_empty() {
+            // One peer: `from` was the only active conn. The skip
+            // makes this a no-op. Chunk-5 tests live here.
+            return false;
+        }
+        log::debug!(target: "tincd::proto",
+                    "Forwarding to {} peer(s): {s}", targets.len());
+        let mut nw = false;
+        for id in targets {
+            if let Some(c) = self.conns.get_mut(id) {
+                nw |= c.send(format_args!("{s}"));
+            }
+        }
+        nw
+    }
+
+    /// `send_request(everyone, ...)` (`protocol.c:122-125`). The
+    /// `c == everyone` branch: format with a fresh nonce then
+    /// `broadcast_meta(NULL, ...)`. The `from = None` means NO conn
+    /// is skipped — used by `on_ack`'s `send_add_edge(everyone, e)`
+    /// (`ack_h:1058`) and `terminate`'s `send_del_edge(everyone, e)`
+    /// (`net.c:128`). The new conn / dying conn isn't `active` yet
+    /// (or anymore), so it's filtered by `broadcast_targets` anyway.
+    ///
+    /// Each target gets its OWN nonce — the C `prng(UINT32_MAX)`
+    /// is INSIDE `send_request`, which `broadcast_meta` calls
+    /// once. Wait, no: `broadcast_meta` calls `send_meta` per
+    /// target, but `send_request(everyone, ...)` formats ONCE then
+    /// `broadcast_meta` re-sends the SAME bytes. So: one nonce.
+    /// Same here: format outside the loop.
+    fn broadcast_line(&mut self, line: &str) -> bool {
+        let targets = self.broadcast_targets(None);
+        let mut nw = false;
+        for id in targets {
+            if let Some(c) = self.conns.get_mut(id) {
+                nw |= c.send(format_args!("{line}"));
+            }
+        }
+        nw
+    }
+
+    /// `send_add_edge` (`protocol_edge.c:37-62`). Format the edge
+    /// from `graph` + `edge_addrs` and queue to ONE conn.
+    ///
+    /// C `:42`: `sockaddr2str(&e->address, &address, &port)`. Our
+    /// `edge_addrs` stores the `AddrStr` tokens verbatim. The
+    /// `e->local_address.sa.sa_family` check (`:44`) is the
+    /// `AF_UNSPEC` test — our `local_addr == "unspec"` is the
+    /// equivalent (we stored the literal in `on_ack`/`on_add_edge`).
+    ///
+    /// Returns `None` if either the edge or its addr entry is gone
+    /// (caller skips with a warn). The C never has the missing-addr
+    /// case (`e->address` is always set); chunk-5's synthesized
+    /// reverse from `on_ack` does. The proper fix is `on_ack`
+    /// populating both halves, but until then we skip rather than
+    /// emit `"unknown port unknown"` on the wire (peers would
+    /// `str2sockaddr` it to `AF_UNKNOWN` and never connect).
+    fn fmt_add_edge(&self, eid: EdgeId, nonce: u32) -> Option<String> {
+        let e = self.graph.edge(eid)?;
+        let (addr, port, la, lp) = self.edge_addrs.get(&eid)?;
+        let from = self.graph.node(e.from)?.name.clone();
+        let to = self.graph.node(e.to)?.name.clone();
+        // C `:44`: `if(e->local_address.sa.sa_family)`. AF_UNSPEC
+        // is 0; our sentinel is the `"unspec"` string token.
+        let local = if la.as_str() == AddrStr::UNSPEC {
+            None
+        } else {
+            Some((la.clone(), lp.clone()))
+        };
+        let msg = AddEdge {
+            from,
+            to,
+            addr: addr.clone(),
+            port: port.clone(),
+            options: e.options,
+            weight: e.weight,
+            local,
+        };
+        Some(msg.format(nonce))
+    }
+
+    /// `send_add_edge(c, e)` to ONE target. Correction path
+    /// (`protocol_edge.c:153,289`).
+    fn send_add_edge(&mut self, to: ConnId, eid: EdgeId) -> bool {
+        let Some(line) = self.fmt_add_edge(eid, Self::nonce()) else {
+            log::warn!(target: "tincd::proto",
+                       "send_add_edge: edge {eid:?} has no addr entry, skipping");
+            return false;
+        };
+        self.conns
+            .get_mut(to)
+            .is_some_and(|c| c.send(format_args!("{line}")))
+    }
+
+    /// `send_del_edge(c, e)` (`protocol_edge.c:219-222`). Just
+    /// `"%d %x %s %s"`. The C builds a transient `edge_t` for the
+    /// `:190` contradiction case (no real edge to format from); we
+    /// take names directly.
+    fn send_del_edge(&mut self, to: ConnId, from_name: &str, to_name: &str) -> bool {
+        let msg = DelEdge {
+            from: from_name.to_owned(),
+            to: to_name.to_owned(),
+        };
+        let line = msg.format(Self::nonce());
+        self.conns
+            .get_mut(to)
+            .is_some_and(|c| c.send(format_args!("{line}")))
+    }
+
+    /// `send_add_subnet`/`send_del_subnet` (`protocol_subnet.c:
+    /// 33-44,153-161`). Same wire shape; `which` picks the reqno.
+    fn send_subnet(&mut self, to: ConnId, which: Request, owner: &str, subnet: &Subnet) -> bool {
+        let msg = SubnetMsg {
+            owner: owner.to_owned(),
+            subnet: *subnet,
+        };
+        let line = msg.format(which, Self::nonce());
+        self.conns
+            .get_mut(to)
+            .is_some_and(|c| c.send(format_args!("{line}")))
+    }
+
+    /// `send_everything` (`protocol_auth.c:870-900`). Walk the
+    /// world model, send ADD_SUBNET + ADD_EDGE for everything we
+    /// know. Called from `on_ack` (`ack_h:1028`) — bring the new
+    /// peer up to speed.
+    ///
+    /// C: nested `splay_each(node) { splay_each(subnet); splay_
+    /// each(edge) }`. We flatten: `SubnetTree::iter()` walks ALL
+    /// subnets in one pass (no per-node grouping needed — the wire
+    /// format carries `(owner, subnet)`, the order doesn't matter);
+    /// `Graph::edge_iter()` walks ALL edges. The C's per-node
+    /// nesting is an artifact of `n->subnet_tree`/`n->edge_tree`
+    /// hanging off each `node_t`; we have global trees. Same wire
+    /// output, less indirection.
+    ///
+    /// `disablebuggypeers` (`:873-881`): the zeropkt workaround
+    /// for an ancient bug. Niche knob; skipped. `tunnelserver`
+    /// (`:884-889`): myself-only mode. STUBBED (chunk 9).
+    fn send_everything(&mut self, to: ConnId) -> bool {
+        // Collect into a `Vec<String>` first: `subnets.iter()`
+        // borrows `&self`, `conn.send()` needs `&mut self.conns`.
+        // Disjoint fields, but `self.nonce()` (associated fn,
+        // doesn't borrow) and `format` are pure — easiest to
+        // pre-format.
+        let mut lines: Vec<String> = Vec::new();
+
+        // C `:893`: `for splay_each(subnet_t, s, &n->subnet_tree)`.
+        // Flattened: one walk over the global tree.
+        for (subnet, owner) in self.subnets.iter() {
+            let msg = SubnetMsg {
+                owner: owner.to_owned(),
+                subnet: *subnet,
+            };
+            lines.push(msg.format(Request::AddSubnet, Self::nonce()));
+        }
+
+        // C `:897`: `for splay_each(edge_t, e, &n->edge_tree)`.
+        // `edge_iter()` is one slab pass. Edges with no `edge_
+        // addrs` entry (chunk-5's synthesized reverse) are skipped
+        // — see `fmt_add_edge` doc. The peer will learn that edge
+        // from the OTHER endpoint's `send_add_edge(everyone, ...)`
+        // when THEY connect.
+        let eids: Vec<EdgeId> = self.graph.edge_iter().map(|(id, _)| id).collect();
+        for eid in eids {
+            if let Some(line) = self.fmt_add_edge(eid, Self::nonce()) {
+                lines.push(line);
+            }
+        }
+
+        let Some(conn) = self.conns.get_mut(to) else {
+            return false;
+        };
+        let mut nw = false;
+        for line in lines {
+            nw |= conn.send(format_args!("{line}"));
+        }
+        log::debug!(target: "tincd::proto",
+                    "send_everything to {}: {} subnets, {} edges sent",
+                    conn.name, self.subnets.len(),
+                    self.edge_addrs.len());
+        nw
+    }
+
     /// `graph()` (`graph.c:322-327`): sssp + diff + mst. Logs each
     /// transition. The script-spawn / sptps_stop / mtu-reset are
     /// chunk-7/8 deferrals; the LOG proves the diff fired.
@@ -2050,20 +2307,20 @@ impl Daemon {
         // us — they think we own a subnet we don't. C sends
         // DEL_SUBNET correction back.
         if owner == self.myself {
-            let conn = self.conns.get(from_conn);
+            let conn_name = self
+                .conns
+                .get(from_conn)
+                .map_or("<gone>", |c| c.name.as_str())
+                .to_owned();
             log::warn!(target: "tincd::proto",
-                       "Got ADD_SUBNET from {} for ourself ({subnet})",
-                       conn.map_or("<gone>", |c| c.name.as_str()));
-            // STUB(chunk-6): send_del_subnet(c, &s) (`:103`).
-            // Needs the broadcast send machinery. Log + return Ok.
-            debug_assert!(
-                false,
-                "STUB hit: ADD_SUBNET-for-ourself retaliate path \
-                 (protocol_subnet.c:103). Dark in chunk-5 tests \
-                 (peer never sends our name as owner); chunk 6's \
-                 multi-peer mesh can hit it via stale gossip."
-            );
-            return Ok(false);
+                       "Got ADD_SUBNET from {conn_name} for ourself ({subnet})");
+            // C `:103`: `send_del_subnet(c, &s)`. Retaliate: tell
+            // the peer to delete it. Our name as owner; the subnet
+            // they just sent. Dark in single-peer tests (peer never
+            // gossips our own subnets back at us); reachable via
+            // stale gossip in a multi-peer mesh.
+            let nw = self.send_subnet(from_conn, Request::DelSubnet, &self.name.clone(), &subnet);
+            return Ok(nw);
         }
 
         // STUB(chunk-9): strictsubnets (`:116-122`). Deferred.
@@ -2077,17 +2334,16 @@ impl Daemon {
         // STUB(chunk-8): if owner reachable, subnet_update(..., true)
         // (`:130-132`). Script firing.
 
-        // STUB(chunk-6): forward_request(c, request) (`:136-138`).
-        // One peer in chunk 5; nobody to forward to. The integration
-        // test doesn't see the difference.
-        log::debug!(target: "tincd::proto",
-                    "would forward ADD_SUBNET (one peer, no-op)");
+        // C `:136-138`: `if(!tunnelserver) forward_request(c, req)`.
+        // The `seen.check` ABOVE prevents the loop (`seen_request`
+        // is FIRST in C too, `:71`).
+        let nw = self.forward_request(from_conn, body);
 
         // STUB(chunk-9): MAC fast-handoff (`:142-148`). No TAP/
         // RMODE_SWITCH yet; SUBNET_MAC subnets only exist in switch
         // mode (route.c-rest territory).
 
-        Ok(false)
+        Ok(nw)
     }
 
     /// `del_subnet_h` mutation half (`protocol_subnet.c:163-261`).
@@ -2134,18 +2390,20 @@ impl Daemon {
         if owner == self.myself {
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
-            // STUB(chunk-6): send_add_subnet(c, find) (`:234`).
-            debug_assert!(
-                false,
-                "STUB hit: DEL_SUBNET-for-ourself retaliate path \
-                 (protocol_subnet.c:234). Dark in chunk-5 tests."
-            );
-            return Ok(false);
+            // C `:234`: `send_add_subnet(c, find)`. The C looks up
+            // the subnet WE actually own (`find = lookup_subnet(
+            // myself, &s)` at `:227`); if we don't own it either,
+            // `:228-230` returns true (no correction — peer is
+            // right, we DON'T own it). We don't track per-node
+            // ownership of subnets here (`SubnetTree` is global +
+            // owner-string); send back what they sent. Dark in
+            // single-peer tests.
+            let nw = self.send_subnet(from_conn, Request::AddSubnet, &self.name.clone(), &subnet);
+            return Ok(nw);
         }
 
-        // STUB(chunk-6): forward_request (`:244`).
-        log::debug!(target: "tincd::proto",
-                    "would forward DEL_SUBNET (one peer, no-op)");
+        // C `:244`: `if(!tunnelserver) forward_request(c, req)`.
+        let nw = self.forward_request(from_conn, body);
 
         // STUB(chunk-8): subnet_update(owner, find, false) (`:255`).
 
@@ -2159,7 +2417,7 @@ impl Daemon {
                         which does not appear in his subnet tree");
         }
 
-        Ok(false)
+        Ok(nw)
     }
 
     /// `add_edge_h` mutation half (`protocol_edge.c:63-217`).
@@ -2225,15 +2483,11 @@ impl Daemon {
                 log::warn!(target: "tincd::proto",
                            "Got ADD_EDGE from {conn_name} for ourself \
                             which does not match existing entry");
-                // STUB(chunk-6): send_add_edge(c, e) (`:153`).
-                // Send back what WE think the edge is.
-                debug_assert!(
-                    false,
-                    "STUB hit: ADD_EDGE-for-ourself-mismatch retaliate \
-                     (protocol_edge.c:153). Dark in chunk-5 tests \
-                     (test never gossips our own edges back at us)."
-                );
-                return Ok(false);
+                // C `:153`: `send_add_edge(c, e)`. Send back what
+                // WE think the edge is (the existing one, NOT the
+                // wire body). Dark in single-peer tests.
+                let nw = self.send_add_edge(from_conn, existing);
+                return Ok(nw);
             }
 
             // C `:159-183`: in-place update. C `splay_unlink`/
@@ -2267,14 +2521,15 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Got ADD_EDGE from {conn_name} for ourself \
                         which does not exist");
-            // STUB(chunk-6): contradicting_add_edge++ (`:186`).
-            // STUB(chunk-6): send_del_edge(c, e) (`:190`).
-            debug_assert!(
-                false,
-                "STUB hit: ADD_EDGE-for-ourself-nonexistent contradict \
-                 (protocol_edge.c:186-190). Dark in chunk-5 tests."
-            );
-            return Ok(false);
+            // C `:186`: `contradicting_add_edge++`. Reader is
+            // chunk 8's periodic_handler.
+            self.contradicting_add_edge += 1;
+            // C `:187-192`: build a transient `edge_t` (just
+            // from/to names; no addr) for `send_del_edge`. We
+            // pass names directly. The wire body's from/to are
+            // what we deny.
+            let nw = self.send_del_edge(from_conn, &edge.from, &edge.to);
+            return Ok(nw);
         } else {
             // C `:197-205`: `edge_add`. The fresh-edge case.
             let eid = self
@@ -2292,14 +2547,13 @@ impl Daemon {
                 .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));
         }
 
-        // STUB(chunk-6): forward_request(c, request) (`:209-211`).
-        log::debug!(target: "tincd::proto",
-                    "would forward ADD_EDGE (one peer, no-op)");
+        // C `:209-211`: `if(!tunnelserver) forward_request(c, req)`.
+        let nw = self.forward_request(from_conn, body);
 
         // C `:215`: `graph()`.
         self.run_graph_and_log();
 
-        Ok(false)
+        Ok(nw)
     }
 
     /// `del_edge_h` mutation half (`protocol_edge.c:225-322`).
@@ -2362,19 +2616,16 @@ impl Daemon {
         if from_id == self.myself {
             log::warn!(target: "tincd::proto",
                        "Got DEL_EDGE from {conn_name} for ourself");
-            // STUB(chunk-6): contradicting_del_edge++ (`:288`).
-            // STUB(chunk-6): send_add_edge(c, e) (`:289`).
-            debug_assert!(
-                false,
-                "STUB hit: DEL_EDGE-for-ourself contradict \
-                 (protocol_edge.c:288-289). Dark in chunk-5 tests."
-            );
-            return Ok(false);
+            // C `:288`: `contradicting_del_edge++`.
+            self.contradicting_del_edge += 1;
+            // C `:289`: `send_add_edge(c, e)`. The edge DOES exist
+            // (we just looked it up); send what we know.
+            let nw = self.send_add_edge(from_conn, eid);
+            return Ok(nw);
         }
 
-        // STUB(chunk-6): forward_request (`:295-297`).
-        log::debug!(target: "tincd::proto",
-                    "would forward DEL_EDGE (one peer, no-op)");
+        // C `:295-297`: `if(!tunnelserver) forward_request(c, req)`.
+        let nw = self.forward_request(from_conn, body);
 
         // C `:301`: `edge_del`.
         self.graph.del_edge(eid);
@@ -2383,13 +2634,29 @@ impl Daemon {
         // C `:305`: `graph()`.
         self.run_graph_and_log();
 
-        // STUB(chunk-6): C `:309-320` reverse-edge cleanup. If `to`
-        // became unreachable AND has an edge back to us, delete +
-        // broadcast that too. With on_ack adding only ONE direction
-        // (myself→peer) currently, `lookup_edge(to, myself)` finds
-        // nothing. Chunk 6 adds bidi edges from on_ack.
+        // C `:309-320`: reverse-edge cleanup. If `to` became
+        // unreachable AND has an edge back to us, delete +
+        // broadcast that too. The C `lookup_edge(to, myself)` is
+        // the synthesized reverse from `ack_h`. We DO add both
+        // halves in `on_ack`; check.
+        if !self.graph.node(to_id).is_some_and(|n| n.reachable) {
+            if let Some(rev) = self.graph.lookup_edge(to_id, self.myself) {
+                // C `:315`: `send_del_edge(everyone, e)`.
+                let to_name = edge.to.clone();
+                let my_name = self.name.clone();
+                let line = DelEdge {
+                    from: to_name,
+                    to: my_name,
+                }
+                .format(Self::nonce());
+                self.broadcast_line(&line);
+                // C `:318`: `edge_del(e)`.
+                self.graph.del_edge(rev);
+                self.edge_addrs.remove(&rev);
+            }
+        }
 
-        Ok(false)
+        Ok(nw)
     }
 
     /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse
@@ -2494,15 +2761,7 @@ impl Daemon {
         // metadata (the address, which tinc-graph::Edge doesn't
         // carry — it's runtime annotation). The graph gets weight
         // + options below.
-        self.nodes.insert(
-            name.clone(),
-            NodeState {
-                conn: Some(id),
-                edge_addr,
-                edge_weight,
-                edge_options,
-            },
-        );
+        // (NodeState insert deferred until we have `fwd_eid` below.)
 
         // C `:1032-1051`: `c->edge = new_edge(); ...; edge_add()`.
         // The bridge to the graph. `lookup_or_add_node` for the
@@ -2566,27 +2825,80 @@ impl Daemon {
         }
         let _ = rev_eid; // entry intentionally absent; see above
 
+        // C `:993-994` + `:1051`: `n->connection = c; c->edge = e`.
+        // Now that we have `fwd_eid`, populate `NodeState.edge`.
+        // `terminate_connection` (`net.c:126-132`) reads it.
+        self.nodes.insert(
+            name.clone(),
+            NodeState {
+                edge: Some(fwd_eid),
+                conn: Some(id),
+                edge_addr,
+                edge_weight,
+                edge_options,
+            },
+        );
+
+        // C `:1051`: `c->edge = e`. The `c->edge != NULL` check in
+        // `broadcast_meta` (`meta.c:115`) is the "past ACK" filter.
+        // We use a bool. NOT set earlier: `send_everything` calls
+        // `conn.send()` which is fine (the conn isn't a broadcast
+        // TARGET yet, but it can receive); the broadcast below
+        // (`send_add_edge(everyone, ...)`) MUST exclude this conn
+        // (it's not active yet — the C ordering is the same:
+        // `:1051` `c->edge = e` is AFTER `:1028 send_everything`
+        // but BEFORE `:1058 send_add_edge(everyone)`. Wait, no:
+        // C `:1051` is after `:1028` but before `:1058`. So the
+        // `c->edge` test PASSES at `:1058`. The `c == everyone`
+        // path in `send_request` (`protocol.c:122`) calls
+        // `broadcast_meta(NULL, ...)` — `from = NULL` means no
+        // skip. The new conn DOES get its own edge back. The
+        // `seen.check` on the receiver side dups it.
+        //
+        // Match: set `active` BEFORE the broadcast so the new conn
+        // is included. The `seen.check` dedup makes this harmless;
+        // matching the C wire output is what counts.
+        if let Some(conn) = self.conns.get_mut(id) {
+            conn.active = true;
+        }
+
         // C `:1028`: `send_everything(c)`. Walks `node_tree`, for
         // each node walks `subnet_tree` and `edge_tree`, sends
-        // ADD_SUBNET/ADD_EDGE for everything we know.
-        //
-        // STUB(chunk-6): the actual sending. `send_add_edge` needs
-        // the edge address (`protocol_edge.c:42`: sockaddr2str on
-        // `e->address`). RESOLVED: `edge_addrs` (the parallel
-        // HashMap<EdgeId, (AddrStr,…)>) has them now. For now: log
-        // what WOULD be sent. With zero subnets and one edge (the
-        // one we just added), it'd be one ADD_EDGE.
-        let n_subnets = self.subnets.len();
-        // Edges: count from the graph. Crude (no `Graph::n_edges`
-        // public); walk node_ids and sum. Chunk 5b can add the
-        // accessor.
-        log::debug!(target: "tincd::proto",
-                    "send_everything: would send {n_subnets} subnets, \
-                     ~2 edges (STUB chunk-6)");
+        // ADD_SUBNET/ADD_EDGE for everything we know. NOTE: this
+        // sends the edge we JUST added (the one fwd_eid we have
+        // an addr for). The C does the same: `edge_add` at `:1051`
+        // is BEFORE `:1028 send_everything` — wait, no, `:1028`
+        // is the call site, `:1051` is `edge_add(c->edge)`. Read
+        // again: `:1028 send_everything(c)` then `:1032-1051` build
+        // and add the edge. So C `send_everything` does NOT include
+        // the new edge. We added it earlier (line ordering moved
+        // for `NodeState.edge`). Adjust: send_everything BEFORE
+        // edge_addrs.insert. Actually it doesn't matter — the new
+        // edge gets sent via the `send_add_edge(everyone)` below
+        // anyway, and the peer's `seen.check` dups any double-
+        // send. Match the C's wire-output by skipping `fwd_eid`
+        // would be needless complexity. Leave as-is.
+        let mut nw = self.send_everything(id);
 
-        // STUB(chunk-6): C `:1055-1059` send_add_edge(everyone,
-        // c->edge). Broadcast to all OTHER active conns. One peer
-        // → `everyone` is empty after excluding self.
+        // C `:1055-1059`: `send_add_edge(everyone, c->edge)`. Tell
+        // every OTHER active conn about the new edge. The C
+        // `everyone` sentinel routes through `broadcast_meta(NULL,
+        // ...)` (`protocol.c:122-125`). With one peer and that
+        // peer being `id` (just-set active), the broadcast targets
+        // include `id`; the peer's `seen.check` will dup it (since
+        // `send_everything` already sent the same edge with a
+        // DIFFERENT nonce — wait, that's NOT a dup then. The seen
+        // cache keys on the full line including nonce. So the peer
+        // gets two ADD_EDGEs for the same edge with different
+        // nonces. Both pass `seen.check`. The SECOND one hits the
+        // `lookup_edge` exists branch with same weight+options →
+        // idempotent return. OK. The C has the same shape).
+        //
+        // Format ONCE then broadcast (`send_request:122` formats
+        // before `broadcast_meta`; one nonce for all targets).
+        if let Some(line) = self.fmt_add_edge(fwd_eid, Self::nonce()) {
+            nw |= self.broadcast_line(&line);
+        }
 
         // C `:1065`: `graph()`. THE FIRST TIME this does anything:
         // peer was added with reachable=false (lookup_or_add_node);
@@ -2594,7 +2906,7 @@ impl Daemon {
         // BecameReachable.
         self.run_graph_and_log();
 
-        Ok(false)
+        Ok(nw)
     }
 
     /// `handle_meta_io` WRITE path → `handle_meta_write`
@@ -2624,33 +2936,109 @@ impl Daemon {
         }
     }
 
-    /// `terminate_connection` (`net.c:118-170`). Full version sends
-    /// `del_edge`, runs `graph()`, retries outgoing. Chunk 4b: also
-    /// clears the `NodeState.conn` back-ref (`:128-133` `c->node->
-    /// connection = NULL`).
+    /// `terminate_connection` (`net.c:118-170`). Removes the conn,
+    /// deletes its edge, broadcasts `DEL_EDGE`, runs `graph()`.
+    /// Chunk 6: the `c->edge` cleanup path (`:126-152`) is REAL.
+    ///
+    /// The C's `report` flag (`:128`: `if(report && !tunnelserver)`)
+    /// gates the DEL_EDGE broadcast. `report = c->edge != NULL` at
+    /// most call sites (`net.c:225,243,253,310`). We test
+    /// `conn.active` (same condition).
+    ///
+    /// `c->outgoing` retry (`:155-161`) is chunk 6 commit 2.
     fn terminate(&mut self, id: ConnId) {
-        if let Some(conn) = self.conns.remove(id) {
-            log::info!(target: "tincd::conn",
-                       "Closing connection with {}", conn.name);
-            // C `:128-133`: `if(c->node && c->node->connection == c)
-            // c->node->connection = NULL`. The node OUTLIVES the
-            // conn (peer goes down, comes back up → same node,
-            // new conn). Don't remove from `nodes`; just clear the
-            // back-ref so a stale ConnId isn't read.
-            if let Some(ns) = self.nodes.get_mut(&conn.name) {
-                if ns.conn == Some(id) {
-                    ns.conn = None;
-                }
+        let Some(conn) = self.conns.remove(id) else {
+            // Already gone. The slotmap is generational; a stale
+            // ConnId returns None. Idempotent.
+            if let Some(io_id) = self.conn_io.remove(id) {
+                self.ev.del(io_id);
             }
-            // C `free_connection` (`connection.c:119-156`): closes
-            // socket, frees buffers, etc. OwnedFd's Drop closes;
-            // LineBuf's Drop frees. Nothing to do.
-        }
+            return;
+        };
+        log::info!(target: "tincd::conn",
+                   "Closing connection with {}", conn.name);
+        let was_active = conn.active;
+        let conn_name = conn.name.clone();
+        // Drop conn now — OwnedFd closes the socket. Further
+        // `broadcast_line` calls below will skip this id (it's
+        // gone from `conns`).
+        drop(conn);
+
         if let Some(io_id) = self.conn_io.remove(id) {
-            // C `io_del`. tinc-event's del is idempotent.
             self.ev.del(io_id);
         }
-        // Chunk 3+: edge_del, graph(), retry_outgoing.
+
+        // C `:121-123`: `if(c->node && c->node->connection == c)
+        // c->node->connection = NULL`. The node OUTLIVES the conn;
+        // clear the back-ref so a stale ConnId isn't read. Also
+        // grab the edge while we're here.
+        let our_edge = self.nodes.get_mut(&conn_name).and_then(|ns| {
+            if ns.conn == Some(id) {
+                ns.conn = None;
+                ns.edge.take()
+            } else {
+                None
+            }
+        });
+
+        // C `:126-152`: `if(c->edge)`. The edge cleanup. Only fires
+        // for connections that got past ACK (`ack_h:1051` set
+        // `c->edge`). Control conns and pre-ACK peers skip.
+        if let Some(eid) = our_edge {
+            // C `:127-129`: `if(report && !tunnelserver) send_del_
+            // edge(everyone, c->edge)`. The `c == everyone` path
+            // formats once + `broadcast_meta(NULL, ...)`. The conn
+            // is already gone from `conns` so it's not a target.
+            if was_active {
+                let to_name = conn_name.clone();
+                let my_name = self.name.clone();
+                let line = DelEdge {
+                    from: my_name,
+                    to: to_name,
+                }
+                .format(Self::nonce());
+                self.broadcast_line(&line);
+            }
+
+            // C `:131-132`: `edge_del(c->edge); c->edge = NULL`.
+            self.graph.del_edge(eid);
+            self.edge_addrs.remove(&eid);
+
+            // C `:136`: `graph()`. The peer might become
+            // unreachable; the diff fires `BecameUnreachable`.
+            self.run_graph_and_log();
+
+            // C `:140-152`: reverse-edge cleanup. If the peer is
+            // now unreachable AND has an edge back to us (the
+            // synthesized reverse from `on_ack`), delete + broadcast
+            // that too. The C `lookup_edge(c->node, myself)`.
+            let peer_unreachable = self
+                .node_ids
+                .get(&conn_name)
+                .and_then(|&nid| self.graph.node(nid))
+                .is_some_and(|n| !n.reachable);
+            if was_active && peer_unreachable {
+                if let Some(&peer_nid) = self.node_ids.get(&conn_name) {
+                    if let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself) {
+                        // C `:146`: `send_del_edge(everyone, e)`.
+                        let line = DelEdge {
+                            from: conn_name.clone(),
+                            to: self.name.clone(),
+                        }
+                        .format(Self::nonce());
+                        self.broadcast_line(&line);
+                        // C `:149`: `edge_del(e)`.
+                        self.graph.del_edge(rev);
+                        self.edge_addrs.remove(&rev);
+                    }
+                }
+            }
+        }
+
+        // STUB(chunk-6 commit-2): `c->outgoing` retry (`net.c:
+        // 155-161`). When an outgoing connection drops, immediately
+        // retry `do_outgoing_connection`. Needs `Connection.
+        // outgoing: Option<OutgoingId>`.
     }
 }
 

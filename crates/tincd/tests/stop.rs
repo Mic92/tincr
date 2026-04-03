@@ -1239,37 +1239,98 @@ fn peer_ack_exchange() {
         }
     }
 
-    // ─── daemon activates the connection (NO terminate) ──────────
-    // C `:1025` log: "Connection with X (Y) activated". After ACK,
-    // the connection stays up (allow_request = ALL). The chunk-4a
-    // sync-flush + terminate are GONE.
+    // ─── daemon activates: send_everything + send_add_edge ─────
+    // C `:1025` log: "Connection with X (Y) activated". Then
+    // `:1028 send_everything(c)` walks the world model. With zero
+    // subnets and ONE edge (testnode→testpeer, just added with an
+    // addr entry), we get 1 ADD_EDGE record. Then `:1058 send_add_
+    // edge(everyone, c->edge)` broadcasts the same edge — we ARE
+    // the only active conn, so we get a SECOND ADD_EDGE for the
+    // same edge with a DIFFERENT nonce. Both pass `seen.check`;
+    // the second hits `lookup_edge`-exists-same-weight → idempotent.
     //
-    // Prove the conn stays up by reading: should NOT get EOF. The
-    // 100ms timeout returning WouldBlock is the success signal.
+    // The synthesized reverse (testpeer→testnode) has NO `edge_
+    // addrs` entry (chunk-5 STUB), so `fmt_add_edge` skips it.
+    //
+    // Receive both records. Parse the first; assert it's `ADD_EDGE
+    // testnode testpeer`. Then drain until WouldBlock — proves the
+    // skip-from logic for `forward_request` (we ARE `from` for any
+    // ADD_SUBNET we send below; broadcast skips us).
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut post_ack_records: Vec<Vec<u8>> = Vec::new();
+    pending.clear();
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    'drain: loop {
+        if Instant::now() > drain_deadline {
+            panic!("send_everything drain timeout");
+        }
+        let mut off = 0;
+        while off < pending.len() {
+            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
+            if n == 0 {
+                break;
+            }
+            off += n;
+            for o in outs {
+                if let Output::Record { bytes, .. } = o {
+                    post_ack_records.push(bytes);
+                }
+            }
+        }
+        pending.drain(..off);
+        match (&stream).read(&mut tmp_buf) {
+            Ok(0) => {
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "daemon closed post-ACK; stderr:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Nothing more. If we got at least one record we're done.
+                if !post_ack_records.is_empty() {
+                    break 'drain;
+                }
+                // Else: keep waiting (daemon might not have flushed yet).
+            }
+            Err(e) => panic!("read error post-ACK: {e}"),
+        }
+    }
+    // At least 1 ADD_EDGE (send_everything). Possibly 2 (the
+    // `send_add_edge(everyone)` broadcast).
+    assert!(
+        !post_ack_records.is_empty(),
+        "expected ADD_EDGE from send_everything"
+    );
+    // Parse first: `"12 <nonce> testnode testpeer 127.0.0.1 <port> <opts> <weight>"`.
+    let first = std::str::from_utf8(&post_ack_records[0])
+        .unwrap()
+        .trim_end();
+    let mut t = first.split_whitespace();
+    assert_eq!(t.next(), Some("12"), "ADD_EDGE reqno: {first:?}");
+    let _nonce = t.next().unwrap();
+    assert_eq!(t.next(), Some("testnode"), "from: {first:?}");
+    assert_eq!(t.next(), Some("testpeer"), "to: {first:?}");
+    assert_eq!(t.next(), Some("127.0.0.1"), "addr: {first:?}");
+    // port: his_udp_port from our ACK = 0. options + weight follow.
+    assert_eq!(t.next(), Some("0"), "port (his_udp_port=0): {first:?}");
+    // All records are ADD_EDGE for testnode→testpeer (the only
+    // edge with an addr entry).
+    for rec in &post_ack_records {
+        let s = std::str::from_utf8(rec).unwrap();
+        assert!(
+            s.starts_with("12 ") && s.contains(" testnode testpeer "),
+            "unexpected post-ACK record: {s:?}"
+        );
+    }
+    // Short timeout for subsequent no-reply checks.
     stream
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
-    match (&stream).read(&mut tmp_buf) {
-        Ok(0) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon closed connection after ACK (should stay up); stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Ok(n) => {
-            // Daemon sent something post-ACK. Chunk 5's
-            // `send_everything` is still STUBBED (logs count,
-            // doesn't actually send). If bytes show up here,
-            // that stub leaked.
-            panic!("daemon sent {n} bytes post-ACK (send_everything still stubbed)");
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            // EXPECTED. Connection up, daemon idle.
-        }
-        Err(e) => panic!("read error post-ACK: {e}"),
-    }
 
     // ─── dump connections over control socket ────────────────────
     // `connection.c:166-175`: walk connection_list, format `"%d %d
@@ -1346,8 +1407,9 @@ fn peer_ack_exchange() {
         }
     }
 
-    // Daemon doesn't reply to ADD_SUBNET (it FORWARDS — stubbed in
-    // chunk 5). 100ms WouldBlock = success.
+    // Daemon doesn't reply to ADD_SUBNET. `forward_request` skips
+    // `from` (us) and there are no OTHER active conns. The skip-
+    // from logic is the loop break; this WouldBlock proves it.
     match (&stream).read(&mut tmp_buf) {
         Ok(0) => {
             let _ = child.kill();
@@ -1635,23 +1697,66 @@ fn peer_edge_triggers_reachable() {
         }
     }
 
-    // Short read: WouldBlock (daemon idle post-ACK).
+    // Chunk 6: daemon's `on_ack` now calls `send_everything` +
+    // `send_add_edge(everyone)`. We get 1-2 ADD_EDGE records for
+    // testnode→testpeer. Drain them. Helper closure: pump records
+    // out of `pending` + socket until WouldBlock with no partial.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let drain_records =
+        |sptps: &mut Sptps, stream: &TcpStream, pending: &mut Vec<u8>| -> Vec<Vec<u8>> {
+            let mut recs = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut tmp_buf = [0u8; 256];
+            loop {
+                if Instant::now() > deadline {
+                    panic!("drain timeout");
+                }
+                let mut off = 0;
+                while off < pending.len() {
+                    let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
+                    if n == 0 {
+                        break;
+                    }
+                    off += n;
+                    for o in outs {
+                        if let Output::Record { bytes, .. } = o {
+                            recs.push(bytes);
+                        }
+                    }
+                }
+                pending.drain(..off);
+                match (&*stream).read(&mut tmp_buf) {
+                    Ok(0) => panic!("daemon EOF mid-drain"),
+                    Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No more bytes AND no partial buffered.
+                        if pending.is_empty() {
+                            return recs;
+                        }
+                    }
+                    Err(e) => panic!("read error: {e}"),
+                }
+            }
+        };
+    pending.clear();
+    let post_ack = drain_records(&mut sptps, &stream, &mut pending);
+    // 1-2 ADD_EDGE records for testnode→testpeer.
+    assert!(
+        !post_ack.is_empty(),
+        "expected ADD_EDGE from send_everything"
+    );
+    for rec in &post_ack {
+        let s = std::str::from_utf8(rec).unwrap();
+        assert!(
+            s.starts_with("12 ") && s.contains(" testnode testpeer "),
+            "unexpected post-ACK record: {s:?}"
+        );
+    }
     stream
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
-    match (&stream).read(&mut tmp_buf) {
-        Ok(0) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon closed post-ACK; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Ok(n) => panic!("daemon sent {n} bytes post-ACK"),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("read error: {e}"),
-    }
 
     // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
     // C `protocol_edge.c:29-62`: `"%d %x %s %s %s %s %x %d"`.
@@ -1678,20 +1783,13 @@ fn peer_edge_triggers_reachable() {
         }
     }
 
-    // Daemon doesn't reply (forward stubbed). WouldBlock.
-    match (&stream).read(&mut tmp_buf) {
-        Ok(0) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon closed after ADD_EDGE; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Ok(n) => panic!("daemon replied {n} bytes to ADD_EDGE"),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("read error: {e}"),
-    }
+    // Daemon's `forward_request` skips `from` (us). No other active
+    // conns. Drain: should be empty (proves the from-skip).
+    let after_edge = drain_records(&mut sptps, &stream, &mut pending);
+    assert!(
+        after_edge.is_empty(),
+        "forward_request should skip from-conn; got: {after_edge:?}"
+    );
 
     // ─── dump connections: STILL one peer row ───────────────────
     // faraway is graph-only (no NodeState, no Connection).
@@ -1918,20 +2016,12 @@ fn peer_edge_triggers_reachable() {
             (&stream).write_all(&bytes).expect("send ADD_EDGE update");
         }
     }
-    // No reply (forward stubbed). WouldBlock.
-    match (&stream).read(&mut tmp_buf) {
-        Ok(0) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon closed after ADD_EDGE update; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Ok(n) => panic!("daemon replied {n} bytes to ADD_EDGE update"),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("read error: {e}"),
-    }
+    // No reply: forward_request skips us. Drain empty.
+    let after_upd = drain_records(&mut sptps, &stream, &mut pending);
+    assert!(
+        after_upd.is_empty(),
+        "forward_request should skip from-conn; got: {after_upd:?}"
+    );
 
     // dump edges again: still 4 rows, testpeer→faraway has weight
     // 99, addr UNCHANGED.

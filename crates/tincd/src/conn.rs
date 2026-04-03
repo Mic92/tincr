@@ -280,6 +280,15 @@ pub struct Connection {
     /// (`:1024-1025` `sockaddrcpy + sockaddr_setport`). `None` for
     /// control conns (unix socket has no `SocketAddr`).
     pub address: Option<SocketAddr>,
+    /// `c->edge != NULL`. The C `ack_h:1051` writes `c->edge = e`
+    /// after `edge_add` — that's the "past ACK" mark `broadcast_
+    /// meta` keys on (`meta.c:115`: `if(c != from && c->edge)`).
+    /// We don't store the `EdgeId` on `Connection` (it lives on
+    /// `NodeState`); a bool is enough for the broadcast filter.
+    /// `connection.h:40` calls bit 1 `unused_active` — the C never
+    /// sets it, the `c->edge` pointer-as-bool IS the active check.
+    /// Set in `on_ack`, cleared in `terminate`.
+    pub active: bool,
 }
 
 /// Result of `feed()`. C `receive_meta` returns `bool`; we
@@ -344,6 +353,7 @@ impl Connection {
             estimated_weight: 0,
             start: now,
             address: None,
+            active: false,
         }
     }
 
@@ -387,6 +397,7 @@ impl Connection {
             // milliseconds; the error is noise.
             start: now,
             address: Some(address),
+            active: false,
         }
     }
 
@@ -415,6 +426,13 @@ impl Connection {
     #[must_use]
     pub fn status_value(&self) -> u32 {
         let mut v = 0u32;
+        if self.active {
+            // Bit 1: `unused_active`. The C never sets this bit
+            // (`c->edge` is the runtime check). We expose it for
+            // `dump connections` so the two-daemon test can poll
+            // "past ACK" without depending on log scraping.
+            v |= 1 << 1;
+        }
         if self.control {
             v |= 1 << 9;
         }
