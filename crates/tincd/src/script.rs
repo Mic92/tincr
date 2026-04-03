@@ -1,0 +1,331 @@
+//! `script.c` (253 LOC) — env-var building + `system()` caller for
+//! tinc-up/tinc-down/host-up/host-down/subnet-up/subnet-down hooks.
+//!
+//! ## What we DON'T port
+//!
+//! C uses `putenv()` (`script.c:211-213`) to mutate the *process*
+//! env before `system()`, then `unputenv()` (`:32-67`) to undo it.
+//! That leaks: between the putenv loop and the unputenv loop, every
+//! `getenv()` in the daemon sees script vars. And `unputenv()` is a
+//! 35-line workaround for `putenv()` not owning its string. We use
+//! [`std::process::Command::envs`] — per-spawn env, no process
+//! mutation, no cleanup. The whole `unputenv` dance evaporates.
+//!
+//! `environment_exit` (`:137-142`) — free the `char**` arena. Drop.
+//!
+//! `environment_update` (`:100-106`) — overwrite a slot by index.
+//! Only caller is `subnet.c:371-372` which mutates `SUBNET=` and
+//! `WEIGHT=` inside a loop. The Rust call site builds a fresh
+//! `ScriptEnv` per iteration instead (chunk-8 wiring). Not ported.
+//!
+//! Windows `PATHEXT` search (`:156-199`). `#[cfg(windows)]` stubbed.
+//!
+//! ## Behavior differences vs C tincd
+//!
+//! **Shebang-less scripts fail.** C `execute_script` builds a quoted
+//! command string (`:215-219`) and passes it to `system()` (`:221`),
+//! which is `sh -c '"/etc/tinc/foo/host-up"'`. The shell reads the
+//! shebang OR — if there is none — runs the file as a sh script. We
+//! call [`Command::status`] which is straight `execve()`: a script
+//! without `#!` fails `ENOEXEC`. We do NOT wrap in `sh -c` ourselves
+//! because that reintroduces the shell-metacharacter risk for
+//! `confbase` (the C is only safe because tinc.conf path validation
+//! happens upstream). Workaround: set `ScriptInterpreter = /bin/sh`
+//! in tinc.conf (passed here as `interpreter`), which runs
+//! `<interpreter> <script>` — same effect, no shell parse of the
+//! path.
+//!
+//! **Non-zero exit / signal don't return `false`.** C `:231-247`
+//! returns `false` on non-zero exit, signal, or `system() == -1`.
+//! Callers ignore the return (`net_setup.c:752`, `graph.c:287`,
+//! `subnet.c:393`) — a failing script never aborts the daemon. We
+//! return [`ScriptResult::Failed`] carrying the [`ExitStatus`] so
+//! the caller can log `WEXITSTATUS`/`WTERMSIG` (matching `:231-238`)
+//! but the type makes "failed script ≠ daemon error" explicit.
+
+#![forbid(unsafe_code)]
+
+use std::io;
+use std::path::Path;
+use std::process::{Command, ExitStatus};
+
+/// One script invocation's environment. C `environment_t`
+/// (`script.h`, built by `script.c:73-135`): a growing `char**`
+/// arena of `"KEY=value"` strings, fed to `putenv()`. We use a
+/// `Vec` of pairs because [`Command::envs`] takes
+/// `IntoIterator<Item = (K, V)>`.
+///
+/// Keys are `&'static str` because every key in the C is a literal
+/// (`"NETNAME="`, `"NODE="`, etc). Values are owned `String` because
+/// they're formatted (`"%s"`, `"%d"`).
+pub struct ScriptEnv {
+    vars: Vec<(&'static str, String)>,
+}
+
+impl ScriptEnv {
+    /// `environment_init` (`script.c:108-135`). Base vars every
+    /// script gets. The C reads from globals (`netname`, `myname`,
+    /// `device`, `iface`, `debug_level`); we take them as args.
+    ///
+    /// `NETNAME` / `DEVICE` / `INTERFACE` are conditional in C
+    /// (`:113,121,125` — `if(netname)` etc). `Option<&str>` here.
+    /// `NAME` is `if(myname)` in C but `myname` is always set by
+    /// the time scripts run (`net_setup.c:565` sets it from
+    /// `Name=`); required `&str` here.
+    ///
+    /// `DEBUG` is `if(debug_level >= 0)` (`:129`). `debug_level`
+    /// is signed in C; `-1` means "don't set". We take `Option<i32>`
+    /// and the caller passes `None` for that case.
+    #[must_use]
+    pub fn base(
+        netname: Option<&str>,
+        myname: &str,
+        device: Option<&str>,
+        iface: Option<&str>,
+        debug: Option<i32>,
+    ) -> Self {
+        // C `min_env_size = 10` (`:71`). We know the base count
+        // (≤5) plus typical caller adds (NODE, REMOTEADDRESS,
+        // REMOTEPORT, SUBNET, WEIGHT — `subnet.c:323-393`). 10 is
+        // right.
+        let mut vars = Vec::with_capacity(10);
+        if let Some(n) = netname {
+            vars.push(("NETNAME", n.to_owned()));
+        }
+        vars.push(("NAME", myname.to_owned()));
+        if let Some(d) = device {
+            vars.push(("DEVICE", d.to_owned()));
+        }
+        if let Some(i) = iface {
+            vars.push(("INTERFACE", i.to_owned()));
+        }
+        if let Some(level) = debug {
+            vars.push(("DEBUG", level.to_string()));
+        }
+        ScriptEnv { vars }
+    }
+
+    /// `environment_add` (`script.c:73-98`) for one var. The C is
+    /// printf-style (`"NODE=%s"`); we take key + formatted value.
+    /// Call sites: `graph.c:279-287` (NODE, REMOTEADDRESS,
+    /// REMOTEPORT), `subnet.c:323-393` (+ SUBNET, WEIGHT).
+    pub fn add(&mut self, key: &'static str, value: String) {
+        self.vars.push((key, value));
+    }
+}
+
+/// `execute_script` outcome. C returns `bool` (`script.c:144`) but
+/// callers ignore it; we return an enum so the caller can log the
+/// `:231-238` warning without conflating "no script" with "script
+/// failed".
+#[derive(Debug)]
+pub enum ScriptResult {
+    /// `access(scriptname, F_OK)` failed (`script.c:201-203`). The
+    /// script doesn't exist. Normal — most hooks are optional. C
+    /// returns `true` (success) here.
+    NotFound,
+    /// Ran, exit 0. C `:230` `if(WIFEXITED && !WEXITSTATUS)`.
+    Ok,
+    /// Ran, exit non-zero or killed by signal (`:231-247`). C logs
+    /// `LOG_ERR` and returns `false`; callers ignore the `false`.
+    /// Carries [`ExitStatus`] so the daemon can format
+    /// `WEXITSTATUS` / `WTERMSIG` to match the C log message.
+    Failed(ExitStatus),
+}
+
+/// `execute_script` (`script.c:144-253`).
+///
+/// Builds `<confbase>/<name>` (`:152`, e.g. `/etc/tinc/foo/host-up`).
+/// If it doesn't exist (`:201-203` `access(F_OK)`): returns
+/// [`ScriptResult::NotFound`] — NOT an error. If it runs and exits
+/// non-zero (`:231-238`): [`ScriptResult::Failed`] — daemon logs a
+/// warning, doesn't abort.
+///
+/// # Errors
+///
+/// Spawn failures only: ENOENT-after-stat-race, EACCES, ENOEXEC
+/// (shebang-less script with no `interpreter` — see module doc).
+/// C `:249-250` `system() == -1` path.
+///
+/// **Blocks.** C uses `system()` (`:221`). The daemon calls this on
+/// the epoll thread; a slow tinc-up stalls the whole daemon. Same
+/// in C. (Upstream wants async script spawn — out of scope.)
+///
+/// `interpreter` is the `ScriptInterpreter` setting (`:215-219`):
+/// if `Some`, run `<interpreter> <script>`; else run `<script>`
+/// directly. See module doc for the shebang caveat.
+///
+/// `scriptextension` (`:152`) is empty on Unix (`names.c`). Not a
+/// parameter.
+pub fn execute(
+    confbase: &Path,
+    name: &str,
+    env: &ScriptEnv,
+    interpreter: Option<&str>,
+) -> io::Result<ScriptResult> {
+    #[cfg(windows)]
+    compile_error!("script.c:156-199 PATHEXT search not ported");
+
+    // `:152` snprintf("%s/%s%s", confbase, name, scriptextension)
+    let scriptname = confbase.join(name);
+
+    // `:201-203` access(F_OK). C uses access(); we use try_exists
+    // (stat). Same observable behavior for "is there a file here".
+    // `try_exists` propagates EACCES on the parent dir (C's access
+    // would return -1/EACCES too, which `if(access(...))` treats as
+    // "doesn't exist" → return true). We match: any error here is
+    // "not found".
+    if !scriptname.try_exists().unwrap_or(false) {
+        return Ok(ScriptResult::NotFound);
+    }
+
+    log::info!("Executing script {name}");
+
+    // `:215-221`. C builds a quoted string for system(); we build a
+    // Command. The interpreter case is `<interp> <script>` — two
+    // argv entries, no shell.
+    let mut cmd = match interpreter {
+        Some(interp) => {
+            let mut c = Command::new(interp);
+            c.arg(&scriptname);
+            c
+        }
+        None => Command::new(&scriptname),
+    };
+
+    // `:211-213` putenv loop. Per-spawn, doesn't touch process env.
+    cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
+
+    // `:221` system(). status() is fork+exec+waitpid. Blocks.
+    let status = cmd.status()?;
+
+    // `:228-247`. WIFEXITED+WEXITSTATUS==0 → Ok, else Failed.
+    // ExitStatus::success() is exactly that check on Unix.
+    if status.success() {
+        Ok(ScriptResult::Ok)
+    } else {
+        Ok(ScriptResult::Failed(status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Unique tempdir per test. Workspace convention: thread id in
+    /// name, no `tempfile` dep. Cleanup is best-effort.
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tincd-script-{tag}-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_script(dir: &Path, name: &str, body: &str) {
+        let p = dir.join(name);
+        fs::write(&p, body).unwrap();
+        let mut perm = fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&p, perm).unwrap();
+    }
+
+    #[test]
+    fn not_found_is_ok() {
+        // `script.c:201-203`: access(F_OK) fails → return true.
+        // Most hooks are optional; absence is not an error.
+        let dir = tmpdir("notfound");
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+        let r = execute(&dir, "tinc-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::NotFound));
+    }
+
+    #[test]
+    fn runs_and_succeeds() {
+        let dir = tmpdir("ok");
+        write_script(&dir, "tinc-up", "#!/bin/sh\nexit 0\n");
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+        let r = execute(&dir, "tinc-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::Ok));
+    }
+
+    #[test]
+    fn runs_and_fails() {
+        // `script.c:231-234`: WIFEXITED && WEXITSTATUS != 0 → log
+        // + return false. We carry the status for the log.
+        let dir = tmpdir("fail");
+        write_script(&dir, "tinc-up", "#!/bin/sh\nexit 7\n");
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+        match execute(&dir, "tinc-up", &env, None).unwrap() {
+            ScriptResult::Failed(st) => assert_eq!(st.code(), Some(7)),
+            r => panic!("expected Failed, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn env_vars_passed() {
+        // Verify `Command::envs` actually delivers our vars to the
+        // child. The C `putenv` loop (`:211-213`) is the thing
+        // we're replacing; this proves the replacement works.
+        let dir = tmpdir("env");
+        let out = dir.join("out");
+        write_script(
+            &dir,
+            "host-up",
+            &format!("#!/bin/sh\necho \"$NAME $NODE\" > '{}'\n", out.display()),
+        );
+        let mut env = ScriptEnv::base(None, "alpha", None, None, None);
+        env.add("NODE", "beta".to_owned());
+        let r = execute(&dir, "host-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::Ok));
+        let got = fs::read_to_string(&out).unwrap();
+        assert_eq!(got.trim(), "alpha beta");
+    }
+
+    #[test]
+    fn base_env_has_expected_keys() {
+        // `script.c:108-135`: the conditional adds. NETNAME only if
+        // netname global is set; same for DEVICE, INTERFACE. NAME
+        // and DEBUG always (in practice).
+        let env = ScriptEnv::base(
+            Some("vpn"),
+            "alpha",
+            Some("/dev/net/tun"),
+            Some("tun0"),
+            Some(2),
+        );
+        let keys: Vec<_> = env.vars.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["NETNAME", "NAME", "DEVICE", "INTERFACE", "DEBUG"]);
+        assert_eq!(env.vars[4].1, "2");
+
+        // None branches: only NAME survives.
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+        let keys: Vec<_> = env.vars.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["NAME"]);
+    }
+
+    #[test]
+    fn interpreter_used() {
+        // Pin the behavior-change doc: shebang-less script + no
+        // interpreter → ENOEXEC. Same script + `/bin/sh` → works.
+        // C `system()` would run both (sh -c falls back to sh-
+        // script mode); we don't.
+        let dir = tmpdir("interp");
+        // No shebang. Valid sh, invalid execve target.
+        write_script(&dir, "tinc-up", "exit 0\n");
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+
+        // Without interpreter: spawn fails. Typically ENOEXEC, but
+        // the exact errno isn't the contract — only that it errs.
+        assert!(execute(&dir, "tinc-up", &env, None).is_err());
+
+        // With interpreter: works. `script.c:216` path.
+        let r = execute(&dir, "tinc-up", &env, Some("/bin/sh")).unwrap();
+        assert!(matches!(r, ScriptResult::Ok));
+    }
+}
