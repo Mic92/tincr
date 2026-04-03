@@ -246,7 +246,50 @@ pub struct DaemonSettings {
     /// between probe sends when `udp_confirmed`. Default 10. Keeps
     /// NAT mappings alive.
     pub udp_discovery_keepalive_interval: u32,
+    /// `tunnelserver` (`net_setup.c:879`). Default false.
+    ///
+    /// Hub-mode: don't gossip indirect topology. Our direct peers
+    /// learn each other only by us telling them; they can't learn
+    /// each other's far-side neighbors. ADD/DEL_EDGE/SUBNET are
+    /// filtered (drop if neither endpoint is us or a direct peer)
+    /// and not forwarded. The hub knows only its spokes; spokes
+    /// know only the hub.
+    ///
+    /// `:880`: `strictsubnets |= tunnelserver`. We don't have
+    /// strictsubnets yet (it predates tunnelserver — checks gossip'd
+    /// subnets against on-disk hosts/ files). STUB(chunk-12-switch):
+    /// the implication is one line when strictsubnets lands.
+    pub tunnelserver: bool,
+    /// `directonly` (`net_setup.c:403`, `route.c:41`). Default
+    /// false. Route-time gate: if `owner != via` (would relay),
+    /// send ICMP `NET_ANO` instead. The relay path EXISTS and
+    /// works; this knob lets the operator say "don't use it".
+    pub directonly: bool,
+    /// `forwarding_mode` (`net_setup.c:426-443`). Default `Internal`
+    /// (`route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`).
+    /// `Off` drops packets not addressed to us (leaf-only mode).
+    /// `Kernel` writes everything to TUN, lets the OS routing table
+    /// decide. We only check `== Internal` at the relay sites;
+    /// `Kernel` is `STUB(chunk-12-switch)` (it changes the whole
+    /// route-dispatch shape).
+    pub forwarding_mode: ForwardingMode,
     // Chunk 4+: ~32 more fields.
+}
+
+/// `fmode_t` (`route.h:31-35`). Three-way knob; only `Internal`
+/// matters today (`== INTERNAL` gates the SPTPS_PACKET relay at
+/// `protocol_key.c:167`). `Kernel` is `STUB(chunk-12-switch)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ForwardingMode {
+    /// `FMODE_OFF`. Drop packets not addressed to us.
+    Off,
+    /// `FMODE_INTERNAL`. C default (`route.c:37`). The daemon's
+    /// `route()` does the forwarding decision.
+    #[default]
+    Internal,
+    /// `FMODE_KERNEL`. Write everything to TUN, let the OS decide.
+    /// `STUB(chunk-12-switch)`: changes the route-dispatch shape.
+    Kernel,
 }
 
 impl Default for DaemonSettings {
@@ -273,6 +316,12 @@ impl Default for DaemonSettings {
             udp_discovery_interval: 2,
             // C `net_packet.c:84`.
             udp_discovery_keepalive_interval: 10,
+            // C `net_setup.c:879`: default false (no `else { = true }`).
+            tunnelserver: false,
+            // C `route.c:41`: `bool directonly = false`.
+            directonly: false,
+            // C `route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`.
+            forwarding_mode: ForwardingMode::Internal,
         }
     }
 }
@@ -765,6 +814,44 @@ impl Daemon {
         if let Some(e) = config.lookup("DecrementTTL").next() {
             if let Ok(v) = e.get_bool() {
                 settings.decrement_ttl = v;
+            }
+        }
+
+        // TunnelServer (`net_setup.c:879`). Default false. The
+        // `:880` `strictsubnets |= tunnelserver` is stubbed (no
+        // strictsubnets yet).
+        if let Some(e) = config.lookup("TunnelServer").next() {
+            if let Ok(v) = e.get_bool() {
+                settings.tunnelserver = v;
+            }
+        }
+
+        // DirectOnly (`net_setup.c:403`). Default false.
+        if let Some(e) = config.lookup("DirectOnly").next() {
+            if let Ok(v) = e.get_bool() {
+                settings.directonly = v;
+            }
+        }
+
+        // Forwarding (`net_setup.c:426-443`). Default Internal.
+        // C errors on unknown; we accept `kernel` with a warn (it
+        // does the right thing for everything except already-
+        // forwarded packets, which we don't generate yet).
+        if let Some(e) = config.lookup("Forwarding").next() {
+            match e.get_str().to_ascii_lowercase().as_str() {
+                "off" => settings.forwarding_mode = ForwardingMode::Off,
+                "internal" => settings.forwarding_mode = ForwardingMode::Internal,
+                "kernel" => {
+                    log::warn!(target: "tincd",
+                               "Forwarding = kernel is not yet supported; \
+                                using internal");
+                    // Fall through to default. STUB(chunk-12-switch).
+                }
+                v => {
+                    return Err(SetupError::Config(format!(
+                        "Forwarding = {v}: invalid forwarding mode"
+                    )));
+                }
             }
         }
 
@@ -1863,7 +1950,7 @@ impl Daemon {
     ///
     /// `dst == nullid` means "direct to you" (`net_packet.c:1013`
     /// on the send side, `:1741` on the receive side). Relay path
-    /// (`dst != nullid && to != myself`) is STUB(chunk-9).
+    /// (`dst != nullid && to != myself`) is wired (chunk-9b).
     ///
     /// Loop drains ALL pending datagrams (edge-triggered epoll).
     /// STUB(chunk-10): `recvmmsg` batching.
@@ -1922,9 +2009,10 @@ impl Daemon {
         let ct = &pkt[12..];
 
         // C `:1739`: `from = lookup_node_id(SRCID(pkt))`. The fast
-        // path. STUB(chunk-9): `try_harder` fallback (decrypt-by-
-        // trial when the lookup misses — happens for ID collisions
-        // or pre-1.1 packets, neither of which we support).
+        // path. STUB(chunk-never): `try_harder` fallback (decrypt-
+        // by-trial when the lookup misses — happens for ID
+        // collisions or pre-1.1 packets, neither of which we
+        // support; only fires on protocol downgrade or misconfig).
         let Some(from_nid) = self.id6_table.lookup(src_id) else {
             log::debug!(target: "tincd::net",
                         "Received UDP packet from unknown source ID {src_id} ({peer:?})");
@@ -1980,8 +2068,8 @@ impl Daemon {
             }
             // dst == myself but not nullid: fall through to the
             // direct-receive path. Same as `dst.is_null()`.
-            // STUB(chunk-9c): `:1810-1815` `if(n != from->via &&
-            // to->via == myself) send_udp_info(myself, from)`.
+            // STUB(chunk-10-local): `:1810-1815` `if(n != from->via
+            // && to->via == myself) send_udp_info(myself, from)`.
             // The "help the static relay" UDP-info breadcrumb.
         }
 
@@ -2176,9 +2264,9 @@ impl Daemon {
                 // devops.write(packet); return; }`. The packet is
                 // for US (it came in over the wire and `route()`
                 // matched one of our subnets). Write it to the TUN.
-                // STUB(chunk-9): `overwrite_mac` (`:1557-1562`) —
-                // TAP-mode source-MAC rewriting. RMODE_ROUTER
-                // doesn't need it.
+                // STUB(chunk-12-switch): `overwrite_mac` (`:1557-
+                // 1562`) — TAP-mode source-MAC rewriting. RMODE_
+                // ROUTER doesn't need it.
                 let len = data.len() as u64;
                 let myself_tunnel = self.tunnels.entry(self.myself).or_default();
                 myself_tunnel.out_packets += 1;
@@ -2206,25 +2294,48 @@ impl Daemon {
                 // != myself && via->mtu < mtu) mtu = via->mtu`.
                 //
                 // For TUN-origin packets, source is `myself` (whose
-                // `mtu` is `MTU`=1518, never probed). The `via` for
-                // direct connections is the destination itself
-                // (`route.c:673`: `via = (owner->via == myself) ?
-                // owner->nexthop : owner->via` — with a 2-node mesh,
-                // both are `to`). STUB(chunk-9b): the relay path's
-                // `via != to` resolution. For chunk-9a: use the
-                // destination's tunnel directly. CORRECT for direct
-                // connections.
+                // `mtu` is `MTU`=1518, never probed). The
+                // OPTION_CLAMP_MSS check: `via->options` comes from
+                // the SSSP result (`graph.c:192`: `e->to->options =
+                // e->options`). `last_routes[to_nid].options`
+                // carries it. Default-on (bit 3 in `myself_options_
+                // default()`).
                 //
-                // The OPTION_CLAMP_MSS check: `via->options` comes
-                // from the SSSP result (`graph.c:192`: `e->to->
-                // options = e->options`). `last_routes[to_nid].
-                // options` carries it. Default-on (bit 3 in
-                // `myself_options_default()`).
+                // C `route.c:672`: `via = (owner->via == myself) ?
+                // owner->nexthop : owner->via`. Read once, copy out
+                // (NodeId is Copy), drop the borrow before calling
+                // `&mut self` methods below. Invariant: `last_
+                // routes` is current for any `Forward` target
+                // (`route()` only returns Forward for reachable
+                // owners; sssp populates `last_routes` for those).
                 let route = self
                     .last_routes
                     .get(to_nid.0 as usize)
                     .and_then(Option::as_ref);
                 let via_options = route.map_or(0, |r| r.options);
+                let via_nid = route.map_or(to_nid, |r| {
+                    if r.via == self.myself {
+                        r.nexthop
+                    } else {
+                        r.via
+                    }
+                });
+
+                // C `route.c:679-682`: `if(directonly && owner !=
+                // via) route_ipv4_unreachable(..., NET_ANO);
+                // return`. The relay path EXISTS (chunk-9b proves
+                // it); this knob lets the operator opt out. v6:
+                // ICMP6_DST_UNREACH_ADMIN (`route.c:774`).
+                if self.settings.directonly && to_nid != via_nid {
+                    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                    let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+                        (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+                    } else {
+                        (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+                    };
+                    self.write_icmp_to_device(data, t, c);
+                    return false;
+                }
                 if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
                     // `via->mtu`: read from `tunnels[to_nid]` (direct
                     // case). `MTU` if no tunnel yet (matches C's
@@ -2236,7 +2347,7 @@ impl Daemon {
                     // Either way: until PMTU runs, MSS clamps to the
                     // 1518 ceiling, which is a no-op for normal
                     // ethernet payloads).
-                    let via_mtu = self.tunnels.get(&to_nid).map_or(MTU, TunnelState::mtu);
+                    let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
                     let mtu = via_mtu.min(MTU);
                     // `mss::clamp` mutates in place. `data` is `&mut
                     // [u8]` (the TUN read buffer is OURS). Return
@@ -2369,7 +2480,8 @@ impl Daemon {
     /// record:1128-1144`). Saves 14 bytes/packet.
     fn send_sptps_packet(&mut self, to_nid: NodeId, to_name: &str, data: &[u8]) -> bool {
         // C `:696-698`: RMODE_ROUTER strips the 14-byte ether hdr.
-        // STUB(chunk-9): RMODE_SWITCH (`type = PKT_MAC`, no strip).
+        // STUB(chunk-12-switch): RMODE_SWITCH (`type = PKT_MAC`,
+        // no strip).
         const OFFSET: usize = 14;
         let tunnel = self.tunnels.entry(to_nid).or_default();
 
@@ -2386,13 +2498,14 @@ impl Daemon {
             // C `:1167-1173`: the 10-second debounce. If we sent a
             // REQ_KEY recently and got no answer, the peer might
             // have dropped it (TCP queue full during a flood). Re-
-            // send. STUB(chunk-9): not on the first-packet hot path.
+            // send. Not on the first-packet hot path; `try_tx`
+            // handles the 10-second restart.
             return false;
         }
 
         // C `:691-694`: `if(ethertype == 0 && outstate) PKT_PROBE`.
         // The MTU-probe path (zero-ethertype is the probe marker).
-        // STUB(chunk-9): PMTU discovery.
+        // (PMTU probes go via `try_tx`/`send_udp_probe`, not here.)
 
         if data.len() < OFFSET {
             return false; // C `:702`: `if(origpkt->len < offset) return`.
@@ -2432,10 +2545,12 @@ impl Daemon {
             payload
         };
 
-        // STUB(chunk-9): `if(n->connection && origpkt->len >
+        // STUB(chunk-10): `if(n->connection && origpkt->len >
         // n->minmtu) send_tcppacket()` (`:724-726`). The TCP
         // fallback when the packet is too big for the discovered
-        // MTU. We always go via SPTPS-UDP for now.
+        // MTU. We always go via SPTPS-UDP for now (`send_sptps_
+        // data`'s `too_big` gate falls through to the b64-REQ_KEY
+        // path which works; this is the OPTIMIZED binary encap).
 
         // C `:728`: `sptps_send_record(&n->sptps, type, DATA +
         // offset, len - offset)`.
@@ -2574,11 +2689,11 @@ impl Daemon {
         // C `:1100-1105`: RMODE check vs PKT_MAC. We're RMODE_
         // ROUTER; PKT_MAC means the peer is in switch mode and
         // sent a full ethernet frame (no offset). We don't handle
-        // that. STUB(chunk-9): switch mode.
+        // that. STUB(chunk-12-switch): switch mode.
         if record_type & PKT_MAC != 0 {
             log::warn!(target: "tincd::net",
                        "Received packet from {peer_name} with MAC header \
-                        (peer in switch mode?); STUB(chunk-9)");
+                        (peer in switch mode?)");
             return false;
         }
         // C `:1109-1121`: `if(type & PKT_COMPRESSED) { ulen =
@@ -2651,10 +2766,8 @@ impl Daemon {
 
         // route() → `Forward{to: myself}` (we're the endpoint) →
         // device.write. If route() says forward-to-someone-else,
-        // we're a relay — STUB(chunk-9): the C `route()` would
-        // call `send_packet(subnet->owner)` and we'd recurse into
-        // `send_sptps_packet` for THEM. The chunk-7 two-node mesh
-        // never hits that.
+        // we're a relay — `route_packet`'s Forward arm recurses
+        // into `send_sptps_packet` for THEM (chunk-9b).
         // DEFERRED(chunk-7-daemon): `route.c:648` source-loop check
         // (`if(subnet->owner == source) drop`). With 2 nodes and
         // /32 subnets, the destination subnet is never owned by
@@ -2807,14 +2920,14 @@ impl Daemon {
             // proto minor ≥7 nexthops; ANS_KEY/REQ_KEY (b64'd via
             // the text protocol) otherwise.
             //
-            // STUB(chunk-9c): `:975-986` SPTPS_PACKET via `send_
+            // STUB(chunk-10): `:975-986` SPTPS_PACKET via `send_
             // sptps_tcppacket`. Our `Connection::send_raw` queues
             // raw bytes but the meta-conn is SPTPS-stream-framed;
             // the binary blob would need to go through `sptps_
-            // send_record`. Chunk-9c when the receive side
-            // (`sptps_tcppacket_h`) is also wired. For now: always
-            // use the b64 path (works for any proto minor; just
-            // larger on the wire).
+            // send_record`. For now: always use the b64 path (works
+            // for any proto minor; just larger on the wire). UDP
+            // relay works (`three_daemon_relay` proves it); TCP
+            // encap is the fallback when UDP relay can't reach.
 
             let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
                 log::warn!(target: "tincd::net",
@@ -2884,8 +2997,10 @@ impl Daemon {
 
         // C `:1031-1040`: `choose_udp_address(relay, ...)`. NOT
         // `to`: we send to the RELAY, who forwards to `to`.
-        // STUB(chunk-9c): `choose_local_address` + `send_locally`
-        // (`:1034-1036`). The 1-in-3 randomization (`:758-762`).
+        // STUB(chunk-10-local): `choose_local_address` +
+        // `send_locally` (`:1034-1036`). The 1-in-3 randomization
+        // (`:758-762`). LAN-direct optimization; packets still
+        // flow via the WAN address without it.
         let relay_name = self
             .graph
             .node(relay_nid)
@@ -2898,7 +3013,7 @@ impl Daemon {
         };
 
         // C `:1044`: `sendto(listen_socket[sock].udp.fd, ...)`.
-        // STUB(chunk-9c): `adapt_socket` (`:784`) picks the
+        // STUB(chunk-10-local): `adapt_socket` (`:784`) picks the
         // listener whose addr family matches `sa`. Use `[0]`.
         log::debug!(target: "tincd::net",
                     "Sending {}-byte UDP packet to {to_name} via {relay_name} ({addr})",
@@ -3105,7 +3220,7 @@ impl Daemon {
         for a in &actions {
             Self::log_pmtu_action(peer_name, a);
         }
-        // STUB(chunk-9c): `:213-217` UDP-timeout-timer reset
+        // STUB(chunk-10-local): `:213-217` UDP-timeout-timer reset
         // (`timeout_del + timeout_add(udp_ping_timeout)`). The
         // `UdpPing` timer variant exists but isn't armed yet.
         false
@@ -3206,13 +3321,40 @@ impl Daemon {
     /// Chain: `try_sptps` (REQ_KEY if needed) → via deref →
     /// `try_udp` (probe send) → `try_mtu` (PMTU tick).
     ///
-    /// `STUB(chunk-9c)`: the via-recursion (`:1490-1497` `try_tx(
-    /// via, mtu)`). For now: direct path only. The chunk-9b 3-node
-    /// relay test goes via TCP (the `too_big` gate fires until
-    /// PMTU runs); recursion makes UDP-relay work.
+    /// Via-recursion (`:1490-1497`): if `via != target`, recurse on
+    /// the relay instead. Finite: graph is acyclic in the via-chain
+    /// sense (sssp tree); max depth = graph diameter (≤5 in
+    /// practice).
+    #[allow(clippy::too_many_lines)] // C `try_tx_sptps` is 41 LOC
+    // but inlines via try_sptps/try_udp/try_mtu callbacks; we
+    // unfold them. The match arms are the C call chain.
     fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
         // C `:1477-1479`: `if(n->connection && (myself|n)->options
-        // & OPTION_TCPONLY) return`. STUB(chunk-9c): tcponly gate.
+        // & OPTION_TCPONLY) return`. The `n->connection` check
+        // means "we have a DIRECT meta connection to this node"
+        // (not just graph-reachable). Map: `nodes[name].conn` is
+        // Some. The options-OR is the same shape as `send_sptps_
+        // data`'s tcponly check. Early-return true: TCP is fine,
+        // don't bother trying UDP.
+        {
+            let target_options = self
+                .last_routes
+                .get(target.0 as usize)
+                .and_then(Option::as_ref)
+                .map_or(0, |r| r.options);
+            let tcponly =
+                (self.myself_options | target_options) & crate::proto::OPTION_TCPONLY != 0;
+            if tcponly {
+                let has_direct_conn = self
+                    .graph
+                    .node(target)
+                    .and_then(|n| self.nodes.get(n.name.as_str()))
+                    .is_some_and(|ns| ns.conn.is_some());
+                if has_direct_conn {
+                    return true;
+                }
+            }
+        }
 
         // ─── try_sptps (`:1483` → `:1156-1173`) ──────────────────
         // `if(!validkey) { if(!waitingforkey) send_req_key; else
@@ -3246,9 +3388,44 @@ impl Daemon {
         // ─── via deref (`:1487-1498`) ────────────────────────────
         // `via = (n->via == myself) ? n->nexthop : n->via; if(via
         // != n) { try_tx(via, mtu); return; }`. The static-relay
-        // recursion. STUB(chunk-9c): with 3+ nodes and indirect
-        // edges, this matters. For chunk-9b's direct-path-only
-        // tests, `via == n` always.
+        // recursion. Read `last_routes`, copy out the NodeId, drop
+        // the borrow, THEN recurse (same two-phase as `forward_
+        // request`). Invariant: `last_routes` is current for any
+        // reachable target (sssp populates it; we only call try_tx
+        // on reachable nodes).
+        {
+            let route = self
+                .last_routes
+                .get(target.0 as usize)
+                .and_then(Option::as_ref);
+            // Unreachable target: pretend direct (no recursion).
+            // The C would deref a NULL `n->via`; we're safer.
+            let via_nid = route.map_or(target, |r| {
+                if r.via == self.myself {
+                    r.nexthop
+                } else {
+                    r.via
+                }
+            });
+            if via_nid != target {
+                // C `:1491-1497`: `if((via->options >> 24) < 4)
+                // return; try_tx(via, mtu); return`. The `< 4`
+                // gate: protocol minor 4 introduced relay support.
+                // Our `myself_options_default` is `7 << 24` so
+                // Rust↔Rust is always ≥4; gate matters for old-C-
+                // tincd interop.
+                let via_options = self
+                    .last_routes
+                    .get(via_nid.0 as usize)
+                    .and_then(Option::as_ref)
+                    .map_or(0, |r| r.options);
+                if (via_options >> 24) < 4 {
+                    return false;
+                }
+                // RECURSE. Finite: sssp tree (via-chain is acyclic).
+                return self.try_tx(via_nid, mtu);
+            }
+        }
 
         let target_name = self
             .graph
@@ -3269,8 +3446,9 @@ impl Daemon {
             // Seed pmtu state on first call. C `node.c` xzalloc;
             // our `PmtuState::new` needs `now`.
             // STUB(chunk-9c): `choose_initial_maxmtu` getsockopt.
-            // Use the `MTU` fallback (the C does too on platforms
-            // without IP_MTU).
+            // The `MTU` fallback works (the C does too on platforms
+            // without `IP_MTU`); getsockopt is an optimization
+            // (skips the first few too-big probes).
             let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
             if p.udp_confirmed {
                 let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
@@ -3286,9 +3464,35 @@ impl Daemon {
             }
         }
 
-        // STUB(chunk-9c): `:1511-1513` nexthop dynamic-relay
-        // recursion (`if(!udp_confirmed && n != nexthop)
-        // try_tx(nexthop)`). Same as the via recursion above.
+        // C `:1511-1513`: nexthop dynamic-relay recursion. `if(
+        // !udp_confirmed && n != nexthop && (nexthop->options >> 24)
+        // >= 4) try_tx(nexthop, mtu)`. While we try direct UDP, also
+        // warm the relay's tunnel so the b64-TCP fallback in
+        // `send_sptps_data` can reach. Same two-phase borrow shape.
+        let udp_confirmed = self
+            .tunnels
+            .get(&target)
+            .and_then(|t| t.pmtu.as_ref())
+            .is_some_and(|p| p.udp_confirmed);
+        if !udp_confirmed {
+            let nexthop = self
+                .last_routes
+                .get(target.0 as usize)
+                .and_then(Option::as_ref)
+                .map(|r| r.nexthop);
+            if let Some(nh) = nexthop {
+                if nh != target {
+                    let nh_options = self
+                        .last_routes
+                        .get(nh.0 as usize)
+                        .and_then(Option::as_ref)
+                        .map_or(0, |r| r.options);
+                    if (nh_options >> 24) >= 4 {
+                        nw |= self.try_tx(nh, mtu);
+                    }
+                }
+            }
+        }
 
         nw
     }
@@ -3347,8 +3551,8 @@ impl Daemon {
             p.udp_ping_sent = now;
             p.ping_sent = true;
             nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
-            // STUB(chunk-9c): `:1240-1245` `if(localdiscovery &&
-            // !udp_confirmed)` send_locally probe.
+            // STUB(chunk-10-local): `:1240-1245` `if(localdiscovery
+            // && !udp_confirmed)` send_locally probe.
         }
 
         nw
@@ -4092,7 +4296,9 @@ impl Daemon {
     ///
     /// C `:116-120`: `if(!node_read_ecdsa_public_key(to)) send REQ_
     /// PUBKEY`. We REQUIRE the key in `hosts/{to}` (no on-the-fly
-    /// fetch); STUB(chunk-9).
+    /// fetch). REQ_PUBKEY is hard-errored (operator must provision
+    /// `hosts/{to}` with `Ed25519PublicKey`; better than silently
+    /// never sending data).
     ///
     /// Returns the io_set signal (the REQ_KEY queued on a meta-conn).
     fn send_req_key(&mut self, to_nid: NodeId) -> bool {
@@ -4118,9 +4324,11 @@ impl Daemon {
             crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &to_name)
         else {
             // C `:117-119`: `"No Ed25519 key known for %s"` then
-            // `send REQ_PUBKEY`. STUB(chunk-9): on-the-fly key fetch
-            // via REQ_PUBKEY/ANS_PUBKEY (`protocol_key.c:196-231`).
-            // For chunk 7: `hosts/{to}` MUST have the key.
+            // `send REQ_PUBKEY`. We don't do on-the-fly key fetch
+            // (REQ_PUBKEY/ANS_PUBKEY, `protocol_key.c:196-231`).
+            // The C feature exists for auto-provisioning trusted-
+            // mesh setups; the operator can do it by hand. Hard-
+            // error so it surfaces in logs, not as silent drops.
             log::warn!(target: "tincd::net",
                        "No Ed25519 key known for {to_name}; cannot start tunnel");
             return false;
@@ -4217,11 +4425,9 @@ impl Daemon {
     /// ours as RESPONDER, feed their KEX into it, send our KEX +
     /// SIG back via `send_sptps_data` (→ ANS_KEY).
     ///
-    /// STUB(chunk-9):
-    /// - `to != myself` relay (`:320-344`).
-    /// - `REQ_PUBKEY`/`ANS_PUBKEY` (`:196-231`).
-    /// - `SPTPS_PACKET` (`:149-188`, TCP-tunneled data records).
-    /// - `send_udp_info`/`send_mtu_info` (`:144-146,267`).
+    /// REQ_PUBKEY/ANS_PUBKEY (`:196-231`): hard-error (operator
+    /// provisions keys by hand). `send_udp_info`/`send_mtu_info`:
+    /// STUB(chunk-10-mtu-hint).
     #[allow(clippy::too_many_lines)] // C `req_key_h`+`req_key_ext_h`
     // are 207 LOC together; the SPTPS-init branch alone is 36 LOC of
     // dense state-machine. Splitting would scatter the C line refs.
@@ -4262,7 +4468,12 @@ impl Daemon {
             // if available"). Everything else: `send_request(to->
             // nexthop->connection, "%s", request)` — forward
             // verbatim (`:192-194`, `:341`).
-            // STUB(chunk-9c): tunnelserver gate.
+            // C `:326`: `if(tunnelserver) return true`. The hub
+            // doesn't relay key requests for indirect peers (it
+            // never told them about each other in the first place).
+            if self.settings.tunnelserver {
+                return Ok(false);
+            }
             if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
                 log::warn!(target: "tincd::proto",
                            "Got REQ_KEY from {conn_name} destination {} \
@@ -4271,10 +4482,15 @@ impl Daemon {
             }
             // SPTPS_PACKET relay (`protocol_key.c:165-170`): decode,
             // re-send via `send_sptps_data` (which may go UDP).
-            // `:167`: `if(forwarding_mode == FMODE_INTERNAL)`.
-            // STUB(chunk-9c): forwarding_mode gate (default INTERNAL).
+            // `:167`: `if(forwarding_mode == FMODE_INTERNAL)`. The
+            // C only takes the OPTIMIZED `send_sptps_data` path
+            // when INTERNAL; otherwise it falls through to the
+            // verbatim-forward (`:192`). Match: gate the optimized
+            // path on `== Internal`.
             if let Some(ext) = &msg.ext {
-                if ext.reqno == Request::SptpsPacket as i32 {
+                if ext.reqno == Request::SptpsPacket as i32
+                    && self.settings.forwarding_mode == ForwardingMode::Internal
+                {
                     let Some(payload) = ext.payload.as_deref() else {
                         return Ok(false);
                     };
@@ -4383,16 +4599,22 @@ impl Daemon {
                     return Ok(false);
                 }
             };
-            // STUB(chunk-9c): `:185` `send_mtu_info(myself, from, MTU)`.
+            // STUB(chunk-10-mtu-hint): `:185` `send_mtu_info(
+            // myself, from, MTU)`. Hint message ("I think your MTU
+            // to X is Y"); PMTU works without it.
             return Ok(self.dispatch_tunnel_outputs(from_nid, &msg.from, outs));
         }
         if ext.reqno != Request::ReqKey as i32 {
-            // STUB(chunk-9c): REQ_PUBKEY/ANS_PUBKEY (`:196-231`).
-            // C `:270`: `default: "Unknown extended REQ_KEY"
-            // return true`.
-            log::warn!(target: "tincd::proto",
-                       "Got REQ_KEY ext reqno={} from {} — STUB(chunk-9c)",
-                       ext.reqno, msg.from);
+            // REQ_PUBKEY/ANS_PUBKEY (`:196-231`): hard-error. The
+            // C feature exists for auto-provisioning trusted-mesh
+            // setups; the operator can do it by hand. Better than
+            // silently never sending data. C `:270`: `default:
+            // "Unknown extended REQ_KEY" return true`.
+            log::error!(target: "tincd::proto",
+                       "Got REQ_KEY ext reqno={} from {}: REQ_PUBKEY/\
+                        ANS_PUBKEY unsupported — provision hosts/{} with \
+                        Ed25519PublicKey",
+                       ext.reqno, msg.from, msg.from);
             return Ok(false);
         }
 
@@ -4410,10 +4632,12 @@ impl Daemon {
         let Some(hiskey) =
             crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &msg.from)
         else {
-            // STUB(chunk-9): `:236-238` `send REQ_PUBKEY`.
-            log::warn!(target: "tincd::proto",
-                       "No Ed25519 key known for {}; cannot start tunnel",
-                       msg.from);
+            // C `:236-238`: `send REQ_PUBKEY`. Hard-error (see
+            // `send_req_key` for rationale).
+            log::error!(target: "tincd::proto",
+                       "No Ed25519 key known for {}; cannot start tunnel \
+                        — provision hosts/{} with Ed25519PublicKey",
+                       msg.from, msg.from);
             return Ok(false);
         };
 
@@ -4479,7 +4703,8 @@ impl Daemon {
         tunnel.status.sptps = true;
         tunnel.last_req_key = Some(now);
 
-        // STUB(chunk-9): `:267` `send_mtu_info(myself, from, MTU)`.
+        // STUB(chunk-10-mtu-hint): `:267` `send_mtu_info(myself,
+        // from, MTU)`.
 
         // Dispatch: init_outs (responder's `start()` KEX, but
         // datagram-mode responder ALSO emits a KEX from `start()`
@@ -4530,11 +4755,9 @@ impl Daemon {
     /// the OpenSSL cipher/digest negotiation. STUB(chunk-never):
     /// we're SPTPS-only.
     ///
-    /// STUB(chunk-9):
-    /// - `to != myself` relay + reflexive-addr append (`:462-482`).
-    /// - compression-level check (`:499-545`).
-    /// - `if(validkey) update_node_udp(reflexive)` (`:568-576`).
-    /// - `send_mtu_info` (`:578`).
+    /// `:462` relay wired (chunk-9b). `:473-482` reflexive-addr
+    /// append: STUB(chunk-10-local). `:578` `send_mtu_info`:
+    /// STUB(chunk-10-mtu-hint).
     fn on_ans_key(&mut self, from_conn: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
         let body_str = std::str::from_utf8(body)
             .map_err(|_| DispatchError::BadKey("non-UTF-8 ANS_KEY".into()))?;
@@ -4563,14 +4786,18 @@ impl Daemon {
 
         // C `:462-484`: `if(to != myself)` relay.
         if to_nid != self.myself {
-            // STUB(chunk-9c): tunnelserver gate (`:463-465`).
+            // C `:463-465`: `if(tunnelserver) return true`.
+            if self.settings.tunnelserver {
+                return Ok(false);
+            }
             if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
                 log::warn!(target: "tincd::proto",
                            "Got ANS_KEY from {conn_name} destination {} \
                             which is not reachable", msg.to);
                 return Ok(false);
             }
-            // STUB(chunk-9c): `:473-482` reflexive UDP addr append.
+            // STUB(chunk-10-local): `:473-482` reflexive UDP addr
+            // append.
             // `if(!*address && from->address.sa.sa_family !=
             // AF_UNSPEC && to->minmtu)`. The relay appends the
             // observed UDP addr/port; the destination learns its
@@ -4668,10 +4895,10 @@ impl Daemon {
             }
         };
 
-        // STUB(chunk-9): `:568-576` `if(validkey && *address)
-        // update_node_udp(reflexive_addr)`. The relay-appended
-        // addr/port lets us learn our NAT-public address.
-        // STUB(chunk-9): `:578` `send_mtu_info`.
+        // STUB(chunk-10-local): `:568-576` `if(validkey &&
+        // *address) update_node_udp(reflexive_addr)`. The relay-
+        // appended addr/port lets us learn our NAT-public address.
+        // STUB(chunk-10-mtu-hint): `:578` `send_mtu_info`.
 
         // Dispatch. May contain `HandshakeDone` (→ set validkey,
         // log "successful") and/or `Wire` (next handshake step,
@@ -4892,8 +5119,37 @@ impl Daemon {
     ///
     /// `disablebuggypeers` (`:873-881`): the zeropkt workaround
     /// for an ancient bug. Niche knob; skipped. `tunnelserver`
-    /// (`:884-889`): myself-only mode. STUBBED (chunk 9).
+    /// (`:884-889`): myself-only mode — the hub doesn't gossip the
+    /// whole graph; it sends only ITS OWN subnets. NO edges.
     fn send_everything(&mut self, to: ConnId) -> bool {
+        if self.settings.tunnelserver {
+            // C `protocol_auth.c:884-889`: tunnelserver mode sends
+            // ONLY `myself`'s subnets, NO edges. The peer doesn't
+            // get to learn the rest of the graph from us. The
+            // peer's edge to us comes from `on_ack`'s `send_add_
+            // edge(c, c->edge)` (NOT `everyone` — see `on_ack`).
+            let mut lines: Vec<String> = Vec::new();
+            for (subnet, owner) in self.subnets.iter() {
+                if owner == self.name.as_str() {
+                    let msg = SubnetMsg {
+                        owner: owner.to_owned(),
+                        subnet: *subnet,
+                    };
+                    lines.push(msg.format(Request::AddSubnet, Self::nonce()));
+                }
+            }
+            let Some(conn) = self.conns.get_mut(to) else {
+                return false;
+            };
+            let mut nw = false;
+            for line in lines {
+                nw |= conn.send(format_args!("{line}"));
+            }
+            log::debug!(target: "tincd::proto",
+                        "send_everything (tunnelserver) to {}: own subnets only",
+                        conn.name);
+            return nw;
+        }
         // Collect into a `Vec<String>` first: `subnets.iter()`
         // borrows `&self`, `conn.send()` needs `&mut self.conns`.
         // Disjoint fields, but `self.nonce()` (associated fn,
@@ -4951,12 +5207,16 @@ impl Daemon {
         // are read straight off `node_t`, which the C `graph.c:188-
         // 196` writes into). We keep the side table.
         self.last_routes = routes;
-        // STUB(chunk-9): _mst feeds connection_t.status.mst, read
-        // ONLY by broadcast_packet (`net_packet.c:1635`). The
-        // broadcast tree is route.c-rest territory.
-        // STUB(chunk-9): subnet_cache_flush_tables (`graph.c:323`).
-        // The hash cache (`subnet.c:53-130`) isn't ported; nothing
-        // to flush. Lands when the cache does.
+        // STUB(chunk-10-broadcast): `_mst` feeds `connection_t.
+        // status.mst`, read ONLY by `broadcast_packet` (`net_
+        // packet.c:1635`). Broadcast is its own feature.
+        //
+        // C `graph.c:323` calls `subnet_cache_flush_tables`. We
+        // don't HAVE a cache (`subnet_tree.rs:31` says so). The C
+        // cache is a hot-path memo over the trie walk; ours walks
+        // every time. If profiling shows the trie is hot, add a
+        // cache; THEN add a flush. No stub for a flush of a cache
+        // that doesn't exist.
         for t in transitions {
             match t {
                 Transition::BecameReachable { node, via: via_nid } => {
@@ -4982,9 +5242,9 @@ impl Daemon {
                     // already port-rewritten to UDP). With direct
                     // neighbors, that's the right answer; transitives
                     // would need the prevedge-walk (chunk 9).
-                    // STUB(chunk-9): full `update_node_udp` (also
-                    // re-indexes `node_udp_tree` for the addr-based
-                    // lookup at `net_packet.c:1728`).
+                    // STUB(chunk-10-local): full `update_node_udp`
+                    // (also re-indexes `node_udp_tree` for the addr-
+                    // based lookup at `net_packet.c:1728`).
                     let name_owned = name.to_owned();
                     let addr = self.nodes.get(&name_owned).and_then(|ns| ns.edge_addr);
                     if let Some(addr) = addr {
@@ -5058,9 +5318,9 @@ impl Daemon {
                     // C `graph.c:256-297`: sptps_stop, reset mtu
                     // probe state, clear status bits, clear UDP
                     // addr. `TunnelState::reset_unreachable` IS
-                    // that whole block. STUB(chunk-9): mtu timer
-                    // kill (`timeout_del(&n->udp_ping_timeout)`,
-                    // `:270`) — the timer doesn't exist yet.
+                    // that whole block. STUB(chunk-10-local): mtu
+                    // timer kill (`timeout_del(&n->udp_ping_
+                    // timeout)`, `:270`) — the timer doesn't exist.
                     if let Some(tunnel) = self.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
@@ -5299,9 +5559,31 @@ impl Daemon {
             return Ok(false);
         }
 
+        // C `:79-84`: tunnelserver indirect filter. Drop if owner
+        // is neither us nor the directly-connected peer who sent
+        // this. The check goes BEFORE `lookup_or_add_node` — the
+        // whole point is to NOT learn indirect names. C does it
+        // after lookup but before `new_node` (because their lookup
+        // is just lookup; ours is lookup-or-add). String-compare
+        // before to avoid polluting the graph.
+        //
+        // ORDER: `seen_request` FIRST (`:71`), THEN tunnelserver
+        // filter (`:79`). Even if we're going to drop, mark it seen
+        // so a dup from another conn doesn't get re-processed.
+        if self.settings.tunnelserver {
+            let conn_name = self
+                .conns
+                .get(from_conn)
+                .map_or("<gone>", |c| c.name.as_str());
+            if owner_name != self.name && owner_name != conn_name {
+                log::warn!(target: "tincd::proto",
+                           "Ignoring indirect ADD_SUBNET from {conn_name} \
+                            for {owner_name} ({subnet})");
+                return Ok(false);
+            }
+        }
+
         // C `:77,86-89`: lookup_node + conditional new_node.
-        // STUB(chunk-9): tunnelserver mode (`:79-84`) filters
-        // indirect registrations. Niche feature; defer.
         let owner = self.lookup_or_add_node(&owner_name);
 
         // C `:98-104`: `if(owner == myself)`. Peer is wrong about
@@ -5324,7 +5606,19 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // STUB(chunk-9): strictsubnets (`:116-122`). Deferred.
+        // C `:109-112`: `if(tunnelserver)` second gate. Reached
+        // when owner IS the direct peer but the subnet wasn't in
+        // our hosts/ file ("unauthorized"). The C `:880`
+        // `strictsubnets |= tunnelserver` makes the `:116`
+        // strictsubnets check fire instead. STUB(chunk-12-switch):
+        // both predicates need on-disk hosts/ subnet parsing.
+        // Without it, accept the peer's own subnets (otherwise
+        // tunnelserver mode can't route AT ALL — `three_daemon_
+        // tunnelserver` proves we accept these).
+
+        // STUB(chunk-12-switch): strictsubnets (`:116-122`).
+        // Predates tunnelserver; checks gossip'd subnets against
+        // on-disk hosts/ files.
 
         // C `:126`: `subnet_add(owner, new)`. Idempotent on dup
         // (the C `:93` `if(lookup_subnet) return true` is
@@ -5346,11 +5640,15 @@ impl Daemon {
         // C `:136-138`: `if(!tunnelserver) forward_request(c, req)`.
         // The `seen.check` ABOVE prevents the loop (`seen_request`
         // is FIRST in C too, `:71`).
-        let nw = self.forward_request(from_conn, body);
+        let nw = if self.settings.tunnelserver {
+            false
+        } else {
+            self.forward_request(from_conn, body)
+        };
 
-        // STUB(chunk-9): MAC fast-handoff (`:142-148`). No TAP/
-        // RMODE_SWITCH yet; SUBNET_MAC subnets only exist in switch
-        // mode (route.c-rest territory).
+        // STUB(chunk-12-switch): MAC fast-handoff (`:142-148`). No
+        // TAP/RMODE_SWITCH yet; SUBNET_MAC subnets only exist in
+        // switch mode.
 
         Ok(nw)
     }
@@ -5382,7 +5680,15 @@ impl Daemon {
             .map_or("<gone>", |c| c.name.as_str())
             .to_owned();
 
-        // STUB(chunk-9): tunnelserver mode (`:199-204`).
+        // C `:199-204`: tunnelserver indirect filter. Drop if owner
+        // is neither us nor the direct peer. ORDER: seen_request
+        // (`:191`) first, THEN this. `conn_name` already computed.
+        if self.settings.tunnelserver && owner_name != self.name && owner_name != conn_name {
+            log::warn!(target: "tincd::proto",
+                       "Ignoring indirect DEL_SUBNET from {conn_name} \
+                        for {owner_name} ({subnet})");
+            return Ok(false);
+        }
 
         // C `:197,206-210`: `lookup_node`. NOT lookup_or_add — a
         // DEL for a node we've never heard of is wrong. Warn,
@@ -5409,6 +5715,14 @@ impl Daemon {
             // single-peer tests.
             let nw = self.send_subnet(from_conn, Request::AddSubnet, &self.name.clone(), &subnet);
             return Ok(nw);
+        }
+
+        // C `:238-240`: `if(tunnelserver) return true`. AFTER the
+        // owner==myself retaliate, BEFORE forward+del. The hub
+        // never propagates DEL for direct-peer subnets (no one
+        // else knows about them anyway).
+        if self.settings.tunnelserver {
+            return Ok(false);
         }
 
         // C `:244`: `if(!tunnelserver) forward_request(c, req)`.
@@ -5468,16 +5782,31 @@ impl Daemon {
             return Ok(false);
         }
 
-        // STUB(chunk-9): tunnelserver mode (`:103-111`).
-
-        let from_id = self.lookup_or_add_node(&edge.from);
-        let to_id = self.lookup_or_add_node(&edge.to);
-
         let conn_name = self
             .conns
             .get(from_conn)
             .map_or("<gone>", |c| c.name.as_str())
             .to_owned();
+
+        // C `protocol_edge.c:103-111`: tunnelserver indirect filter.
+        // Drop only if NEITHER endpoint is us-or-direct-peer. If
+        // `alice→mid` and we're mid, `from == c->node`; keep it.
+        // BEFORE `lookup_or_add_node` — don't pollute the graph
+        // with indirect names. ORDER: seen_request (`:94`) first.
+        if self.settings.tunnelserver
+            && edge.from != self.name
+            && edge.from != conn_name
+            && edge.to != self.name
+            && edge.to != conn_name
+        {
+            log::warn!(target: "tincd::proto",
+                       "Ignoring indirect ADD_EDGE from {conn_name} \
+                        ({} → {})", edge.from, edge.to);
+            return Ok(false);
+        }
+
+        let from_id = self.lookup_or_add_node(&edge.from);
+        let to_id = self.lookup_or_add_node(&edge.to);
 
         // C `:134`: `e = lookup_edge(from, to)`.
         if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
@@ -5584,7 +5913,11 @@ impl Daemon {
         }
 
         // C `:209-211`: `if(!tunnelserver) forward_request(c, req)`.
-        let nw = self.forward_request(from_conn, body);
+        let nw = if self.settings.tunnelserver {
+            false
+        } else {
+            self.forward_request(from_conn, body)
+        };
 
         // C `:215`: `graph()`.
         self.run_graph_and_log();
@@ -5615,13 +5948,27 @@ impl Daemon {
             return Ok(false);
         }
 
-        // STUB(chunk-9): tunnelserver mode (`:253-261`).
-
         let conn_name = self
             .conns
             .get(from_conn)
             .map_or("<gone>", |c| c.name.as_str())
             .to_owned();
+
+        // C `protocol_edge.c:253-261`: tunnelserver indirect filter.
+        // Same dual-endpoint shape as ADD_EDGE. BEFORE lookup (which
+        // is just lookup here, not lookup_or_add — but consistency).
+        // ORDER: seen_request (`:244`) first.
+        if self.settings.tunnelserver
+            && edge.from != self.name
+            && edge.from != conn_name
+            && edge.to != self.name
+            && edge.to != conn_name
+        {
+            log::warn!(target: "tincd::proto",
+                       "Ignoring indirect DEL_EDGE from {conn_name} \
+                        ({} → {})", edge.from, edge.to);
+            return Ok(false);
+        }
 
         // C `:250-273`: `lookup_node`. Missing is warn-and-drop
         // (return true), NOT a new_node. A DEL for a node we've
@@ -5661,7 +6008,11 @@ impl Daemon {
         }
 
         // C `:295-297`: `if(!tunnelserver) forward_request(c, req)`.
-        let nw = self.forward_request(from_conn, body);
+        let nw = if self.settings.tunnelserver {
+            false
+        } else {
+            self.forward_request(from_conn, body)
+        };
 
         // C `:301`: `edge_del`.
         self.graph.del_edge(eid);
@@ -5677,15 +6028,18 @@ impl Daemon {
         // halves in `on_ack`; check.
         if !self.graph.node(to_id).is_some_and(|n| n.reachable) {
             if let Some(rev) = self.graph.lookup_edge(to_id, self.myself) {
-                // C `:315`: `send_del_edge(everyone, e)`.
-                let to_name = edge.to.clone();
-                let my_name = self.name.clone();
-                let line = DelEdge {
-                    from: to_name,
-                    to: my_name,
+                // C `:313-315`: `if(!tunnelserver) send_del_edge(
+                // everyone, e)`. The hub never broadcasts.
+                if !self.settings.tunnelserver {
+                    let to_name = edge.to.clone();
+                    let my_name = self.name.clone();
+                    let line = DelEdge {
+                        from: to_name,
+                        to: my_name,
+                    }
+                    .format(Self::nonce());
+                    self.broadcast_line(&line);
                 }
-                .format(Self::nonce());
-                self.broadcast_line(&line);
                 // C `:318`: `edge_del(e)`.
                 self.graph.del_edge(rev);
                 self.edge_addrs.remove(&rev);
@@ -5976,10 +6330,21 @@ impl Daemon {
         // `lookup_edge` exists branch with same weight+options →
         // idempotent return. OK. The C has the same shape).
         //
+        // C `:1055-1059`: tunnelserver gate. Hub mode: send the
+        // edge ONLY to the new peer (`send_add_edge(c, c->edge)`),
+        // not broadcast. The other spokes never learn about each
+        // other.
+        //
         // Format ONCE then broadcast (`send_request:122` formats
         // before `broadcast_meta`; one nonce for all targets).
         if let Some(line) = self.fmt_add_edge(fwd_eid, Self::nonce()) {
-            nw |= self.broadcast_line(&line);
+            if self.settings.tunnelserver {
+                if let Some(c) = self.conns.get_mut(id) {
+                    nw |= c.send(format_args!("{line}"));
+                }
+            } else {
+                nw |= self.broadcast_line(&line);
+            }
         }
 
         // C `:1065`: `graph()`. THE FIRST TIME this does anything:
@@ -6071,7 +6436,7 @@ impl Daemon {
             // edge(everyone, c->edge)`. The `c == everyone` path
             // formats once + `broadcast_meta(NULL, ...)`. The conn
             // is already gone from `conns` so it's not a target.
-            if was_active {
+            if was_active && !self.settings.tunnelserver {
                 let to_name = conn_name.clone();
                 let my_name = self.name.clone();
                 let line = DelEdge {
@@ -6102,13 +6467,16 @@ impl Daemon {
             if was_active && peer_unreachable {
                 if let Some(&peer_nid) = self.node_ids.get(&conn_name) {
                     if let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself) {
-                        // C `:146`: `send_del_edge(everyone, e)`.
-                        let line = DelEdge {
-                            from: conn_name.clone(),
-                            to: self.name.clone(),
+                        // C `:144-146`: `if(!tunnelserver)
+                        // send_del_edge(everyone, e)`.
+                        if !self.settings.tunnelserver {
+                            let line = DelEdge {
+                                from: conn_name.clone(),
+                                to: self.name.clone(),
+                            }
+                            .format(Self::nonce());
+                            self.broadcast_line(&line);
                         }
-                        .format(Self::nonce());
-                        self.broadcast_line(&line);
                         // C `:149`: `edge_del(e)`.
                         self.graph.del_edge(rev);
                         self.edge_addrs.remove(&rev);
@@ -6504,6 +6872,9 @@ mod tests {
         assert_eq!(s.addressfamily, AddrFamily::Any);
         assert_eq!(s.udp_discovery_timeout, 30);
         assert_eq!(s.compression, 0); // C `:1043` COMPRESS_NONE
+        assert!(!s.tunnelserver); // C `:879` default false
+        assert!(!s.directonly); // C `route.c:41`
+        assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max

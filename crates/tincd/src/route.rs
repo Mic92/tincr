@@ -73,6 +73,11 @@ const ETH_P_8021Q: u16 = 0x8100;
 pub const ICMP_DEST_UNREACH: u8 = 3;
 /// `ICMP_NET_UNKNOWN` — `ipv4.h:43`. RFC 1122 code 6: no route.
 pub const ICMP_NET_UNKNOWN: u8 = 6;
+/// `ICMP_NET_ANO` — `ipv4.h:59`. RFC 1122 code 9: "communication
+/// with destination network administratively prohibited". The C
+/// uses this for `directonly` (`route.c:680`) and `FMODE_OFF`
+/// (`route.c:660`): the route EXISTS but we choose not to forward.
+pub const ICMP_NET_ANO: u8 = 9;
 /// `ICMP_NET_UNREACH` — `ipv4.h:55`. RFC 792 code 0: route exists,
 /// next hop is down.
 pub const ICMP_NET_UNREACH: u8 = 0;

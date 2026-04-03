@@ -1611,3 +1611,225 @@ fn three_daemon_relay() {
         "mid should log relay activity; stderr:\n{mid_stderr}"
     );
 }
+
+/// Three daemons, hub-and-spoke, with `TunnelServer = yes` on the
+/// hub. Same physical setup as `three_daemon_relay` (alice and bob
+/// both `ConnectTo = mid`, no direct alice↔bob meta connection).
+///
+/// The DIFFERENCE: tunnelserver makes mid a router-only hub. mid's
+/// `send_everything` sends only its OWN subnets (none here); mid's
+/// `on_ack` sends the new edge to the new peer ONLY (`send_add_
+/// edge(c, ...)` not `send_add_edge(everyone, ...)`); mid's
+/// `on_add_subnet`/`on_add_edge` never `forward_request`. So:
+///
+/// - alice's `dump nodes` shows **2 nodes** (alice, mid). She
+///   never received bob's ADD_EDGE because mid didn't forward it.
+/// - bob: same. **2 nodes** (bob, mid).
+/// - mid: **3 nodes**. The hub knows its spokes; spokes don't
+///   know each other.
+/// - A packet from alice to `10.0.0.2` (bob's subnet) → alice's
+///   `route()` returns `Unreachable` (alice doesn't have bob's
+///   subnet — mid didn't forward bob's ADD_SUBNET). alice writes
+///   ICMP DEST_UNREACH back to her own TUN. **This is the
+///   operator-visible behavior**: tunnelserver makes mid a router-
+///   only hub; alice can't reach bob through it without explicit
+///   config.
+///
+/// `net.py::test_tunnel_server` checks the dump only; asserting
+/// the ICMP is BETTER (proves the data-plane consequence, not just
+/// the control-plane state).
+///
+/// Timing: poll until alice sees 2 nodes STABILIZE (poll, sleep
+/// 50ms, poll again, same answer) — otherwise we might catch the
+/// moment before mid's edge arrives at alice and get a false pass
+/// on "only 2 nodes".
+#[test]
+fn three_daemon_tunnelserver() {
+    let tmp = TmpGuard::new("tunnelserver3");
+    let alice = Node::new(tmp.path(), "alice", 0xA4);
+    // mid: TunnelServer = yes. The whole point.
+    let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
+    let bob = Node::new(tmp.path(), "bob", 0xB4);
+
+    let alice_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+
+    // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
+    // spokes' pubkeys (for the meta-SPTPS auth).
+    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device. Knows
+    // bob's pubkey (irrelevant here — she'll never start a tunnel
+    // to bob because she never learns he exists).
+    alice.write_config_multi(
+        &[&mid, &bob],
+        &["mid"],
+        Some(alice_pair[1]),
+        Some("10.0.0.1/32"),
+    );
+    // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device (we only
+    // assert from alice's side).
+    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+
+    // ─── spawn: mid first (the hub) ──────────────────────────────
+    let mut mid_child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&mid.confbase)
+        .arg("--pidfile")
+        .arg(&mid.pidfile)
+        .arg("--socket")
+        .arg(&mid.socket)
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mid");
+    if !wait_for_file(&mid.socket) {
+        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
+    }
+
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        let _ = mid_child.kill();
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    let mut alice_ctl = Ctl::connect(&alice);
+    let mut bob_ctl = Ctl::connect(&bob);
+    let mut mid_ctl = Ctl::connect(&mid);
+
+    // ─── wait for alice↔mid and bob↔mid to settle ────────────────
+    // mid sees both spokes as active connections. Once that's
+    // true, all the gossip that's going to happen HAS happened
+    // (each ACK fires `send_everything` + `send_add_edge`; with
+    // tunnelserver, mid's send_everything is empty and the
+    // add_edge goes only to that peer).
+    poll_until(Duration::from_secs(10), || {
+        let m = mid_ctl.dump(6);
+        let a_ok = has_active_peer(&m, "alice");
+        let b_ok = has_active_peer(&m, "bob");
+        (a_ok && b_ok).then_some(())
+    });
+
+    // ─── the count assertions, with stabilization ──────────────
+    // alice should see EXACTLY 2 nodes. NOT 3. Poll until stable
+    // (two consecutive reads agree) to rule out catching the
+    // pre-mid-edge moment.
+    let alice_stable = poll_until(Duration::from_secs(5), || {
+        let a1 = alice_ctl.dump(3);
+        std::thread::sleep(Duration::from_millis(50));
+        let a2 = alice_ctl.dump(3);
+        (a1.len() == a2.len() && a1.len() >= 2).then_some(a1)
+    });
+
+    let node_names = |rows: &[String]| -> Vec<String> {
+        rows.iter()
+            .filter_map(|r| {
+                r.strip_prefix("18 3 ")?
+                    .split_whitespace()
+                    .next()
+                    .map(String::from)
+            })
+            .collect()
+    };
+
+    let a_names = node_names(&alice_stable);
+    assert_eq!(
+        alice_stable.len(),
+        2,
+        "alice should see exactly 2 nodes (alice, mid) — mid's \
+         tunnelserver mode never forwarded bob's ADD_EDGE; got: {a_names:?}"
+    );
+    assert!(a_names.contains(&"alice".to_string()), "{a_names:?}");
+    assert!(a_names.contains(&"mid".to_string()), "{a_names:?}");
+    assert!(
+        !a_names.contains(&"bob".to_string()),
+        "alice should NOT know bob; got: {a_names:?}"
+    );
+
+    // bob: same. 2 nodes (bob, mid).
+    let b_nodes = bob_ctl.dump(3);
+    let b_names = node_names(&b_nodes);
+    assert_eq!(
+        b_nodes.len(),
+        2,
+        "bob should see exactly 2 nodes (bob, mid); got: {b_names:?}"
+    );
+    assert!(
+        !b_names.contains(&"alice".to_string()),
+        "bob should NOT know alice; got: {b_names:?}"
+    );
+
+    // mid: 3 nodes. Hub knows spokes; spokes don't know each other.
+    let m_nodes = mid_ctl.dump(3);
+    let m_names = node_names(&m_nodes);
+    assert_eq!(
+        m_nodes.len(),
+        3,
+        "mid (the hub) should see all 3 nodes; got: {m_names:?}"
+    );
+
+    // alice's subnets: she knows her OWN (10.0.0.1/32) and mid's
+    // (none). NOT bob's. So `dump subnets` (subtype 5) shows 1.
+    let a_subnets = alice_ctl.dump(5);
+    assert_eq!(
+        a_subnets.len(),
+        1,
+        "alice should have exactly 1 subnet (her own); mid's \
+         tunnelserver send_everything sends only OWN subnets (none) \
+         and on_add_subnet doesn't forward bob's; got: {a_subnets:?}"
+    );
+
+    // ─── the data-plane consequence: ICMP unreachable ──────────
+    // A packet from alice to 10.0.0.2 (bob's subnet) hits alice's
+    // `route()` → NO subnet match (alice doesn't have bob's
+    // subnet) → `Unreachable{ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN}`
+    // → ICMP synth → written BACK to alice's TUN. The TEST end of
+    // the socketpair reads it.
+    //
+    // ICMP layout (FdTun strips/adds ether so we see raw IP):
+    // bytes [0..20] = IPv4 header (proto=1 ICMP at byte 9),
+    // byte [20] = ICMP type (3 = DEST_UNREACH),
+    // byte [21] = ICMP code (6 = NET_UNKNOWN).
+    let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"nowhere");
+    write_fd(alice_pair[0], &probe);
+
+    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    assert!(
+        icmp.len() >= 22,
+        "expected ICMP reply, got {} bytes: {icmp:02x?}",
+        icmp.len()
+    );
+    assert_eq!(icmp[9], 1, "IP proto should be ICMP; got: {icmp:02x?}");
+    assert_eq!(
+        icmp[20], 3,
+        "ICMP type should be DEST_UNREACH (3); got: {icmp:02x?}"
+    );
+    assert_eq!(
+        icmp[21], 6,
+        "ICMP code should be NET_UNKNOWN (6); got: {icmp:02x?}"
+    );
+
+    // ─── mid stderr: tunnelserver send_everything log ──────────
+    drop(alice_ctl);
+    drop(bob_ctl);
+    drop(mid_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    let _ = mid_child.kill();
+    let _ = bob_child.kill();
+    let mid_stderr = drain_stderr(mid_child);
+    let _ = drain_stderr(bob_child);
+    let _ = drain_stderr(alice_child);
+    assert!(
+        mid_stderr.contains("tunnelserver"),
+        "mid should log tunnelserver-mode send_everything; stderr:\n{mid_stderr}"
+    );
+}
