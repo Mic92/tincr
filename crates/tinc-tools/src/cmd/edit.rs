@@ -501,196 +501,100 @@ mod tests {
 
     // resolve — the lattice
 
-    /// `"tinc.conf"` → conffiles match → `confbase/tinc.conf`.
-    /// `tincctl.c:2422`.
+    /// `resolve` Ok-path table. The lattice is `tincctl.c:2419-2440`:
+    /// conffiles check FIRST (`:2419`, returns early), then `hosts/`
+    /// strip (`:2425`), then dash-split for validation only (`:2431`).
+    ///
+    /// The `Dir` enum lets us check the resolved path against either
+    /// `confbase` or `hosts_dir` without hardcoding the test confbase.
     #[test]
-    fn resolve_conffile() {
+    fn resolve_ok() {
+        enum Dir {
+            Conf,
+            Hosts,
+        }
         let p = paths();
-        let r = resolve(&p, "tinc.conf").unwrap();
-        assert_eq!(r.path, PathBuf::from("/etc/tinc/test/tinc.conf"));
-    }
-
-    /// All seven conffiles resolve to confbase/X.
-    #[test]
-    fn resolve_all_conffiles() {
-        let p = paths();
+        #[rustfmt::skip]
+        let cases: &[(&str, Dir, &str)] = &[
+            //          (input,             dir,        joined)
+            // ─── conffile match → confbase/X. `tincctl.c:2422`. ───
+            ("tinc.conf",        Dir::Conf,  "tinc.conf"),
+            // ─── bare name (no dash) → hosts_dir/X. NO validation.
+            //     `tincctl.c:2430` without entering `if(dash)` (`:2433`). ───
+            ("alice",            Dir::Hosts, "alice"),
+            // ─── `hosts/` prefix strip. `tincctl.c:2426`: `argv[1] += 6`. ───
+            ("hosts/alice",      Dir::Hosts, "alice"),
+            // ─── `hosts/tinc.conf` → hosts_dir/tinc.conf, NOT confbase.
+            //     THE non-obvious case. Strip happens FIRST (`:2425`);
+            //     conffiles check runs only WITHOUT the prefix. Pins branch order. ───
+            ("hosts/tinc.conf",  Dir::Hosts, "tinc.conf"),
+            // ─── dash-split for validation. `tincctl.c:2431-2440`.
+            //     Path keeps the dash; split is validation-only. ───
+            ("alice-up",         Dir::Hosts, "alice-up"),
+            ("alice-down",       Dir::Hosts, "alice-down"),
+            // ─── `tinc-up` matches CONFFILES → confbase. NOT dash-split.
+            //     Pins the order: conffiles BEFORE dash-split. Would otherwise
+            //     split to ("tinc","up") — both valid → hosts_dir/tinc-up. WRONG. ───
+            ("tinc-up",          Dir::Conf,  "tinc-up"),
+            // ─── `"."`: weird (vi hosts_dir/.) but C accepts (no dash, no slash).
+            //     NOT in our reject list. The `..` reject is the security one;
+            //     `.` is just odd. Port C behavior. ───
+            (".",                Dir::Hosts, "."),
+        ];
+        for (input, dir, joined) in cases {
+            let r = resolve(&p, input).unwrap();
+            let expected = match dir {
+                Dir::Conf => p.confbase.join(joined),
+                Dir::Hosts => p.hosts_dir().join(joined),
+            };
+            assert_eq!(r.path, expected, "input: {input:?}");
+        }
+        // All seven conffiles resolve to confbase/X.
         for &f in CONFFILES {
             let r = resolve(&p, f).unwrap();
             assert_eq!(r.path, p.confbase.join(f), "conffile: {f}");
         }
     }
 
-    /// `"alice"` (bare name, no dash) → `hosts_dir/alice`. NO
-    /// validation. `tincctl.c:2430` (snprintf) without entering
-    /// the `if(dash)` block (`:2433`).
+    /// `resolve` Err-path table. C `tincctl.c:2437` validation +
+    /// our STRICTER checks (slash/dotdot/empty rejection — not in C).
     #[test]
-    fn resolve_bare_hostname() {
+    fn resolve_err() {
         let p = paths();
-        let r = resolve(&p, "alice").unwrap();
-        assert_eq!(r.path, p.hosts_dir().join("alice"));
-    }
-
-    /// `"hosts/alice"` → strip → same as `"alice"`. `tincctl.c
-    /// :2426`: `argv[1] += 6`. The strip is the ONLY effect.
-    #[test]
-    fn resolve_hosts_prefix() {
-        let p = paths();
-        let r = resolve(&p, "hosts/alice").unwrap();
-        assert_eq!(r.path, p.hosts_dir().join("alice"));
-        // Same as bare.
-        assert_eq!(r, resolve(&p, "alice").unwrap());
-    }
-
-    /// `"hosts/tinc.conf"` (prefix + conffile name) → `hosts_dir/
-    /// tinc.conf`, NOT `confbase/tinc.conf`. The strip happens
-    /// FIRST (`:2425`); the conffiles check runs only WITHOUT
-    /// the prefix (`:2419` is inside the `!strncmp` branch).
-    ///
-    /// THE non-obvious case. Pins the branch order.
-    #[test]
-    fn resolve_hosts_prefix_shadows_conffile() {
-        let p = paths();
-        let r = resolve(&p, "hosts/tinc.conf").unwrap();
-        // hosts_dir, not confbase. A node named "tinc.conf" gets
-        // its host file.
-        assert_eq!(r.path, p.hosts_dir().join("tinc.conf"));
-        // Different from bare.
-        assert_ne!(r, resolve(&p, "tinc.conf").unwrap());
-    }
-
-    /// `"alice-up"` → dash split → validate → `hosts_dir/
-    /// alice-up`. `tincctl.c:2431-2440`. The path keeps the dash;
-    /// the split is for validation only.
-    #[test]
-    fn resolve_host_script_up() {
-        let p = paths();
-        let r = resolve(&p, "alice-up").unwrap();
-        // Full input, with dash. The split was validation-only.
-        assert_eq!(r.path, p.hosts_dir().join("alice-up"));
-    }
-
-    /// `"alice-down"` — the OTHER valid suffix.
-    #[test]
-    fn resolve_host_script_down() {
-        let p = paths();
-        let r = resolve(&p, "alice-down").unwrap();
-        assert_eq!(r.path, p.hosts_dir().join("alice-down"));
-    }
-
-    /// `"alice-garbage"` → suffix isn't `up`/`down` → error.
-    /// `tincctl.c:2437`: `strcmp(dash, "up") && strcmp(dash,
-    /// "down")` — both nonzero.
-    #[test]
-    fn resolve_host_script_bad_suffix() {
-        let p = paths();
-        let e = resolve(&p, "alice-garbage").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(_)));
-    }
-
-    /// `"bad name-up"` → suffix ok but `check_id("bad name")`
-    /// fails (space isn't valid). `tincctl.c:2437`: `||
-    /// !check_id(argv[1])`.
-    #[test]
-    fn resolve_host_script_bad_name() {
-        let p = paths();
-        // Space isn't a valid name char (`check_id`: alnum + `_`).
-        let e = resolve(&p, "bad name-up").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(_)));
-    }
-
-    /// `"-up"` → split at FIRST dash → name `""`, suffix `"up"`.
-    /// `check_id("")` fails (empty name). The C: `argv[1]` becomes
-    /// `""` after `*dash = 0`, `check_id("")` returns false
-    /// (`tincctl.c:108`: `if(!*name) return false`).
-    #[test]
-    fn resolve_host_script_empty_name() {
-        let p = paths();
-        let e = resolve(&p, "-up").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(_)));
-    }
-
-    /// `"a-b-up"` → split at FIRST dash → name `"a"`, suffix
-    /// `"b-up"`. `"b-up"` ≠ `"up"` → error. The C `strchr` finds
-    /// the FIRST dash; `strcmp(dash, "up")` compares the WHOLE
-    /// suffix including subsequent dashes. Same as `split_once`.
-    ///
-    /// (Dash isn't a valid name char anyway, so `"a-b"` would
-    /// fail `check_id`. But the suffix check fails FIRST in the
-    /// C's `||` short-circuit. We test the suffix path.)
-    #[test]
-    fn resolve_host_script_multi_dash() {
-        let p = paths();
-        let e = resolve(&p, "a-b-up").unwrap_err();
-        assert!(matches!(e, CmdError::BadInput(_)));
-    }
-
-    /// `"tinc-up"` matches CONFFILES → `confbase/tinc-up`. NOT
-    /// dash-split. The conffiles check (`:2419`) returns early.
-    ///
-    /// Pins the order: conffiles BEFORE dash-split. `"tinc-up"`
-    /// would otherwise split to `("tinc", "up")` — `"tinc"` IS
-    /// a valid name, `"up"` IS a valid suffix → `hosts_dir/tinc-
-    /// up`. WRONG; it's the network script, not a host script.
-    #[test]
-    fn resolve_conffile_with_dash_not_split() {
-        let p = paths();
-        let r = resolve(&p, "tinc-up").unwrap();
-        // confbase, not hosts_dir. The conffiles check won.
-        assert_eq!(r.path, p.confbase.join("tinc-up"));
-    }
-
-    // Our STRICTER checks — not in C
-
-    /// Slash anywhere (after `hosts/` strip) → reject. The C
-    /// would resolve `hosts_dir/a/b` (path traversal into a
-    /// subdirectory of hosts/, which doesn't exist, but vi
-    /// would try). We reject.
-    #[test]
-    fn resolve_reject_slash() {
-        let p = paths();
-        assert!(resolve(&p, "a/b").is_err());
-        assert!(resolve(&p, "../etc/passwd").is_err());
-    }
-
-    /// `"hosts/../etc/passwd"` — strip → `"../etc/passwd"` → has
-    /// slash → reject. THE traversal case. C would `vi /etc/tinc/
-    /// test/hosts/../etc/passwd` = `/etc/tinc/test/etc/passwd`.
-    /// (Not /etc/passwd — only one `..`. But the principle.)
-    #[test]
-    fn resolve_reject_traversal_after_strip() {
-        let p = paths();
-        assert!(resolve(&p, "hosts/../etc/passwd").is_err());
-    }
-
-    /// `".."` alone → reject. `hosts_dir/..` = `confbase`. The C
-    /// would `vi confbase` (a directory). Weird; reject.
-    #[test]
-    fn resolve_reject_dotdot() {
-        let p = paths();
-        assert!(resolve(&p, "..").is_err());
-        // After strip too.
-        assert!(resolve(&p, "hosts/..").is_err());
-    }
-
-    /// Empty string → reject. C would `vi hosts_dir/` (the
-    /// directory). Our `is_empty` catches it.
-    #[test]
-    fn resolve_reject_empty() {
-        let p = paths();
-        assert!(resolve(&p, "").is_err());
-        // `"hosts/"` strips to `""`. Same rejection.
-        assert!(resolve(&p, "hosts/").is_err());
-    }
-
-    /// `"."` is fine. Weird (vi on `hosts_dir/.` = `hosts_dir`)
-    /// but the C accepts it (no dash, no slash). NOT in our
-    /// reject list. Port C behavior here; the `..` reject is
-    /// the security one, `.` is just odd.
-    #[test]
-    fn resolve_dot_accepted() {
-        let p = paths();
-        let r = resolve(&p, ".").unwrap();
-        assert_eq!(r.path, p.hosts_dir().join("."));
+        for input in [
+            // ─── dash-split validation: `tincctl.c:2437` ───
+            // suffix isn't `up`/`down`. `strcmp(dash, "up") && strcmp(dash, "down")`.
+            "alice-garbage",
+            // suffix ok but `check_id("bad name")` fails (space). `|| !check_id(argv[1])`.
+            "bad name-up",
+            // split at FIRST dash → name="", suffix="up". `check_id("")` fails.
+            // C: `argv[1]` becomes "" after `*dash = 0`.
+            "-up",
+            // split at FIRST dash → name="a", suffix="b-up". `"b-up"` ≠ `"up"`.
+            // C `strchr` finds FIRST dash; `strcmp(dash, "up")` compares WHOLE
+            // suffix including subsequent dashes. Same as `split_once`.
+            "a-b-up",
+            // ─── our STRICTER checks (not in C) ───
+            // slash anywhere (after `hosts/` strip). C would resolve
+            // `hosts_dir/a/b` (path traversal); we reject.
+            "a/b",
+            "../etc/passwd",
+            // `hosts/../etc/passwd` strips to `../etc/passwd` → has slash.
+            // THE traversal case. C would `vi confbase/hosts/../etc/passwd`.
+            "hosts/../etc/passwd",
+            // `..` alone → hosts_dir/.. = confbase. C would `vi confbase` (a dir).
+            "..",
+            "hosts/..",
+            // empty → C would `vi hosts_dir/`. Our `is_empty` catches it.
+            "",
+            // `hosts/` strips to "". Same rejection.
+            "hosts/",
+        ] {
+            assert!(
+                matches!(resolve(&p, input), Err(CmdError::BadInput(_))),
+                "input: {input:?}"
+            );
+        }
     }
 
     // pick_editor — env precedence
