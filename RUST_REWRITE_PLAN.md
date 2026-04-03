@@ -778,6 +778,354 @@ Aggressively shed scope:
 
 ---
 
+## LOC accounting
+
+The naive number is alarming: `crates/**/*.rs` is 68k raw lines vs
+`src/**/*.c` at 36k — nearly 2×. Every individual count below is
+`tokei` code-only (comments and blanks stripped) unless stated
+otherwise. The punchline is at the bottom: **at the actual
+logic-vs-logic level we are at 1.20×**, not 2×. The other 0.8× is
+tests the C never had, doc-comments at 4× the C density, and an
+abstraction tax we pay deliberately.
+
+Method: a small awk pass strips `#[cfg(test)] mod { … }` blocks from
+every `crates/*/src/*.rs`, the result goes through `tokei`, and the C
+baseline is `tokei src/` minus the directories listed under
+[What to Drop](#what-to-drop) minus `#ifndef DISABLE_LEGACY` bodies.
+
+### Top-line
+
+| Slice | Files | Code | Comments | Notes |
+|---|---:|---:|---:|---|
+| **C `src/**/*.c` total** | 107 | 25,493 | 3,373 | tokei, all of `src/` |
+| − crypto subdirs (chacha-poly1305, ed25519, openssl, gcrypt, nolegacy) | 30 | −4,890 | −695 | replaced by `chacha20poly1305` / `ed25519-dalek` crates |
+| − vendored libc/utils (getopt×2, splay_tree, list, dropin) | 5 | −1,598 | | replaced by std / clap-is-avoided-anyway |
+| − unported device backends (solaris, windows, vde, multicast) | 4 | −≈577 | | per [What to Drop](#what-to-drop) |
+| − `#ifndef DISABLE_LEGACY` bodies (RSA/AES, scattered) | — | −806 | | 14 files; balanced-preprocessor count |
+| **C effective port surface** | | **≈17,770** | **≈2,550** | what we actually had to rewrite |
+| | | | | |
+| **Rust `crates/**/*.rs` total** | 117 | 44,684 | 16,467 | tokei (`///` doc-lines counted as comments) |
+| − `crates/*/tests/*.rs` (integration) | 18 | −10,362 | −2,767 | S1–S5 strata |
+| − in-file `#[cfg(test)] mod tests` | 72 blocks | −12,871 | −2,514 | 19,437 raw → brace-balanced strip → tokei |
+| **Rust production code** | 99 | **21,393** | **11,158** | code-vs-code: **1.20× the C** |
+
+C's comment density on the effective surface is ≈13% (2,550 / 20,320
+non-blank). Ours is **34%** (11,158 / 32,551). That's deliberate —
+the `// C \`file.c:NNN\`` cross-refs are how the audits found 11
+bugs — but it's also where the casual reader's "why is this so big"
+impression comes from.
+
+### Per-crate vs. C subsystem
+
+| Rust crate | Prod code | C subsystem | C code | Ratio | Notes |
+|---|---:|---|---:|---:|---|
+| `tincd` | 10,559 | `net*.c`, `protocol*.c`, `route.c`, `meta.c`, `connection.c`, `node.c`, `edge.c`, `subnet*.c`, `address_cache.c`, `autoconnect.c`, `control.c`, `tincd.c`, `process.c`, `script.c`, `names.c` | 9,068 | 1.16× | minus ≈450 LOC of LEGACY ifdefs in `protocol_auth.c`/`net_setup.c` → **1.23×** |
+| `tinc-tools` | 6,728 | `tincctl.c`, `fsck.c`, `info.c`, `invitation.c`, `top.c` | 4,714 | 1.43× | minus 285 LOC LEGACY (RSA fsck/genkey, RSA join) → **1.52×** — the worst crate, see §6 |
+| `tinc-device` | 703 | `linux/device.c`, `bsd/device.c`, `fd_device.c`, `raw_socket_device.c`, `dummy_device.c` | ≈690 | ≈1.0× | comment density 52% (!) — every ioctl annotated |
+| `tinc-sptps` | 520 | `sptps.c` | 492 | 1.06× | the cleanest port; state-machine maps 1:1 |
+| `tinc-conf` | 501 | `conf.c`, `conf_net.c` | 335 | 1.50× | §6 — `ReadError` enum is +60, `vars.rs` table is +80 |
+| `tinc-graph` | 530 | `graph.c` | 186 | 2.85× | misleading — see below |
+| `tinc-proto` | 808 | (parsers split out from `protocol_*.c`; double-counted in `tincd` row) | — | — | wire-format only; no C analogue |
+| `tinc-event` | 357 | `linux/event.c`, `bsd/event.c` | ≈280 | 1.27× | mio-on-top-of-epoll wrapper |
+| `tinc-crypto` | 518 | (b64/hex/HKDF wrappers; C uses OpenSSL inline) | — | — | thin shims over `chacha20poly1305`/`hkdf` |
+| `tinc-ffi` | 169 | (test-only differential bridge) | — | — | not shipped |
+
+**`tinc-graph` 2.85× is misleading.** C `graph.c` does the BFS and the
+MST and **nothing else** — node/edge storage is `splay_tree.c` (which
+we excluded as "replaced by std"), and add/del/lookup live in
+`node.c`+`edge.c` (counted under `tincd`'s C row). `tinc-graph` is
+`Graph` struct + slab storage + accessors + `sssp` + `mst` in one
+file. The honest comparison is `graph.c`+`node.c`+`edge.c` add/lookup
+paths ≈ 350 LOC → 1.5×, in line with everything else.
+
+### 1. Tests we wrote that the C never had
+
+**23,233 code lines.** Intentional. Largest single bucket by far.
+
+| Slice | Code | Raw |
+|---|---:|---:|
+| `crates/*/tests/*.rs` integration | 10,362 | 14,632 |
+| `#[cfg(test)] mod tests` in 72 src files | 12,871 | 19,437 |
+| **Total Rust test code** | **23,233** | **34,069** |
+| C `test/integration/*.py` | — | 6,061 |
+| C `test/unit/*.c` | — | 2,118 |
+
+The C suite is 8.2k raw lines and shells out to a built binary; ours
+is 34k raw lines and runs in-process. We have 4.2× the test surface
+for a daemon that's ≈1.2× the size. The cross-impl harness
+(`tests/crossimpl.rs`, 1,245 lines) alone caught the UDP-label NUL
+byte and the PACKET dispatch bug — neither visible Rust↔Rust.
+
+**Redundancy check (route.rs unit vs. two_daemons integration):** Not
+redundant. `route.rs`'s 25 unit tests (`route_too_short`,
+`route_ipv6_unknown_is_unreachable_addr`, `decrement_ttl_v4_at_1_
+sends_icmp`, …) are edge-case probes against a pure function with
+hand-built byte slices. `two_daemons.rs`'s 18 tests are happy-path
+(`first_packet_across_tunnel`, `three_daemon_relay`). A regression in
+`route()` for malformed packets would be caught by the unit test in
+<1ms; `two_daemons` would never send a malformed packet. The other
+direction — routing works in isolation but the dispatch glue is wrong
+— is exactly what the chunk-5 idempotence-addr-compare bug was, and
+only `two_daemons` caught that. **Both layers are load-bearing.**
+
+**Possible redundancy:** `proto.rs` has `#[cfg(test)]` starting at
+line 1097 (≈770 raw lines of unit tests for `parse_add_edge` /
+`parse_add_subnet` / `handle_id` / etc). `tests/stop.rs` (S1, 2,285
+lines) sends those same wire-lines to a real daemon. The unit tests
+prove the parser; `stop.rs` proves parser + handler + state mutation.
+A parser-level regression would trip both. **Candidate for thinning:**
+the `proto.rs` unit tests that only assert successful parsing of
+well-formed lines (≈8 of ≈20) — `stop.rs` covers those. Keep the
+ones asserting *rejection* of malformed lines (`stop.rs` doesn't
+fabricate garbage). **Maybe −200 lines.**
+
+### 2. Doc-comments with C source references
+
+**1,762 lines** of `// C \`file.c:NNN\`` cross-references. Intentional
+and load-bearing — audits matched Rust against C line-by-line.
+Subset of the 11,158 prod-comment total (≈16%).
+
+Distribution: top 5 files hold 30% of all refs.
+
+| File | C-refs | Referenced C files |
+|---|---:|---|
+| `daemon/net.rs` | 141 | `net_packet.c`, `net_socket.c`, `route.c` |
+| `daemon/gossip.rs` | 139 | 8 files (see §6) — it's the protocol nexus |
+| `daemon.rs` | 98 | `tincd.c`, `net_setup.c`, `net.c` |
+| `cmd/config.rs` | 82 | `tincctl.c` |
+| `cmd/fsck.rs` | 80 | `fsck.c` |
+
+**Stale-ref check:** of 789 unique `file.c:NNN` pairs, only 13 point
+past EOF and all 13 are subdirectory references written without the
+dir prefix (`device.c` for `linux/device.c`, `ecdsa.c` for
+`ed25519/ecdsa.c`, `pem.c` which doesn't exist — likely meant
+`ed25519/ecdsa.c`'s PEM block). **Not actually stale**, just missing
+path qualifiers. Could be normalized to `linux/device.c:NNN` style.
+**Removable: 0.** Normalizable: 13.
+
+**Repetitive-ref check:** only 1 single-line match arm carries an
+inline `=> … // C \`:NNN\``. The rest are full-line standalone
+comments above the code they annotate. No `// C :NNN` carpet-bombing.
+
+The **other 9,400 prod-comment lines** are doc-comments explaining
+*why*. Representative example: `top.rs:1-80` is an 80-line module
+header explaining the C's qsort stable-sort emulation, why we don't
+port it (Rust's `sort` is already stable), and the 3-layer
+testability split. The C `top.c` has zero comparable header. This is
+**the largest single contributor to the raw-LOC delta** (11.2k vs
+2.5k) but also the cheapest to maintain (no compiler, no tests).
+
+### 3. Pure-module + impure-dispatch split
+
+**≈1,170 code lines.** Intentional. The seam that made the
+structural-miss bugs visible.
+
+The C `route_ipv4()` does lookup + TTL decrement + `send_packet()` in
+one function. We have `route.rs::route()` returning a `RouteResult`
+enum, then `daemon/net.rs::dispatch_route_result()` matching on it
+and performing I/O. The enum + the match are LOC the C doesn't pay.
+
+| Pure-leaf result enum | LOC | Dispatch site | LOC |
+|---|---:|---|---:|
+| `RouteResult<T>` (`route.rs:138`) | 40 | `dispatch_route_result` (`net.rs:885-1222`) | 337 |
+| `DispatchResult` (`proto.rs:115`) | 31 | `dispatch_sptps_outputs` (`metaconn.rs:797-1096`) | ≈300 |
+| `FeedResult` (`conn.rs:414`) | 24 | inline in `metaconn.rs` event loop | ≈40 |
+| `TcpRouteDecision<'a>` (`tcp_tunnel.rs:149`) | 35 | `dispatch_tunnel_outputs` (`net.rs:1421-1460`) | 39 |
+| `LearnAction` (`route_mac.rs:92`) | 25 | inline in TAP path | ≈20 |
+| `UdpInfoAction` (`udp_info.rs:227`) | 23 | `dispatch_invitation_outputs` indirectly | — |
+| `MtuInfoAction` (`udp_info.rs:472`) | 18 | inline | ≈15 |
+| `AutoAction` (`autoconnect.rs:68`) | 18 | `periodic.rs` timer | ≈25 |
+| `PmtuAction` (`pmtu.rs:69`) | 17 | inline | ≈15 |
+| `TtlResult` (`route.rs:427`) | 17 | sub-dispatch inside `dispatch_route_result` | — |
+| `ScriptResult` (`script.rs:122`) | 13 | inline | ≈10 |
+| **Total enum defs** | **261** | **Total dispatch matches** | **≈910** |
+
+The ≈910 dispatch lines are not pure overhead: they're where the C's
+logic *moved*. C `route_ipv4` is 818 raw / 619 code; our
+`route.rs::route()` is 452 code (0.73×!) — because the I/O moved into
+`dispatch_route_result`'s 337 lines. Net is roughly the same. The
+**enum definitions** (261 lines) are the actual tax. **Intentional** —
+that enum is what `route.rs`'s 25 unit tests assert against. Removing
+it means losing the in-process test surface and going back to
+integration-test-only coverage for routing.
+
+### 4. Borrow-checker tax
+
+**≈50–70 lines today. Was higher.** Partially removable.
+
+`dcc9ac9c` already deleted `detach_route_result()` (≈30 LOC of
+variant-by-variant rebuilding) plus two `to_owned()` wrappers, by
+making `RouteResult<T>` generic and instantiating at `T = NodeId`
+(which is `Copy`) instead of `T = &str`. Net −41 lines on `net.rs`.
+
+**Remaining siblings:** the dominant pattern is `.name.clone()` to
+escape a `&self.graph` borrow before mutating `self.nodes`:
+
+| File | `.name.clone()` | All `.clone()` | Representative |
+|---|---:|---:|---|
+| `daemon/gossip.rs` | 6 | 22 | `let from = self.graph.node(e.from)?.name.clone();` then `self.send_subnet(…, &from, …)` which takes `&mut self` |
+| `daemon/connect.rs` | 5 | 13 | same pattern resolving nexthop name |
+| `daemon/net.rs` | 7 | 10 | `source_name = self.name.clone()` for the loop-detection log line |
+| `daemon/txpath.rs` | 5 | 10 | nexthop resolution before `&mut self.conns` |
+| `daemon/periodic.rs` | 4 | 11 | timer-triggered gossip |
+| `daemon/metaconn.rs` | 2 | 6 | |
+
+Most of these clone a `String` (node name, ≈20 bytes). Not a perf
+issue. They're a LOC issue because each is typically 3–5 lines
+(`let x = { borrow scope }; mutate(self, x)` instead of C's
+`mutate(node->name)`).
+
+**What would remove it:** `nodes: HashMap<String, NodeState>` →
+`HashMap<NodeId, NodeState>` (or a `SlotMap`). Then graph traversal
+returns `NodeId` (Copy), no clone needed, and the daemon does one
+name-lookup at the boundary. This is the same shape `dcc9ac9c`
+applied to `RouteResult`. **Estimated savings: ≈40–60 lines** across
+the six files. Not trivial to do (touches ≈30 sites). **Removable.**
+
+The other clones (`addr.clone()`, `port.clone()` in `gossip.rs:edge_
+addrs`) are `String` clones of canonical wire forms we keep around
+for ADD_EDGE re-gossip. Could be `Arc<str>` but that's churn for ≈6
+lines. **Not worth it.**
+
+### 5. Error type definitions
+
+**≈1,200 lines.** Intentional. C `return false` is 0 lines.
+
+| Component | LOC |
+|---|---:|
+| 12 × `pub enum *Error` definitions | 550 |
+| 12 × `impl Display for *Error` | 460 |
+| `impl From<…> for *Error` chains | 194 |
+| **Total** | **≈1,204** |
+
+Largest: `SetupError` (`daemon.rs:1915`, daemon boot failures —
+confbase missing, key load failed, bind refused, …) and `CmdError`
+(`cmd/mod.rs:44`, every CLI failure mode).
+
+C equivalent: `bool` return + an inline `logger(LOG_ERR, "…")` at
+each failure site. The C *also* pays for the error-message string —
+it's just adjacent to the failure instead of centralized. The honest
+tax is: **enum variant** (1 line) + **From impl** (≈3 lines/variant on
+average) + **Display match arm above and beyond what the inline
+printf would be** (≈1–2 lines/variant for the `Variant => write!(…)`
+ceremony). For ≈60 total variants across 12 enums: **≈300–400 net
+overhead lines.** The other ≈800 are the error messages themselves,
+which C also has, just inline.
+
+**Removable?** Could collapse with `thiserror` derive (−≈200 lines of
+`impl Display`/`impl From` boilerplate). Adds a proc-macro dep. We've
+avoided proc-macro deps so far (no `clap`, no `serde_derive` outside
+test deps). **Tax we chose to pay.**
+
+### 6. tinc-tools at 1.52× — the worst crate
+
+Three compounding causes. None is "ported wrong."
+
+**6a. The Finding-enum-then-Display pattern (≈+320 lines in `fsck.rs`
+alone).** C `fsck.c` has 52 inline `fprintf(stderr, "…")` calls
+scattered through the check logic. We have:
+
+| `fsck.rs` region | Raw | What it is |
+|---|---:|---|
+| 1–110 | 110 | imports + module doc |
+| `enum Finding` (111–211) | 101 | 23 variants, each with a doc-comment naming the C site |
+| `impl Finding::severity()` (227–282) | 56 | C has no severity — it just exits or continues |
+| `impl Display for Finding` (283–440) | 158 | the 52 fprintf strings, but each is a match arm |
+| `Report` + check fns (441–1235) | 795 | the actual checks — maps to C 412 effective LOC |
+| `#[cfg(test)]` (1236–2175) | 940 | C `fsck.c` has zero tests |
+
+`fsck.rs` production at tokei: **527 code, 370 comments**. C `fsck.c`
+minus its 85 RSA-LEGACY lines: **412 code**. Ratio at the logic level:
+**1.28×**, not the 2.4× the raw counts suggest. The 1.28× breaks down:
+
+- `enum Finding` adds 23 variant-declaration lines C doesn't have
+  (C's "variant" is the fprintf call site itself).
+- `severity()` (≈30 code lines after stripping doc) is **genuinely
+  new logic** — C `fsck.c` has no `--quiet`-filterable severity,
+  just "fatal: exit" vs "warning: print and continue." We're
+  **stricter** (machine-readable `Report`).
+- `Display` match arms add ≈2 lines of `Variant { … } =>
+  write!(…)` ceremony per case over an inline fprintf. ×23 ≈ +50.
+
+**6b. `tui.rs` is 136 code lines that C doesn't pay because C links
+libncurses.** `top.c` is `#ifdef HAVE_CURSES` and calls `mvprintw()` /
+`getch()`. We hand-roll termios raw mode + ANSI escape rendering
+(`tui::goto(row, col)`, `tui::poll_key()`). 136 code lines vs 0.
+**Intentional** — no ncurses-sys, no FFI, the renderers are
+testable as `String`-producing functions. **Not removable** without
+adding a TUI dep.
+
+**6c. No clap, but no setup-duplication either.** The `tincctl.c`
+monolith (3,380 raw / 2,577 code) split into 16 `cmd/*.rs` files
+*could* have duplicated `Paths::resolve()` + `read_tinc_conf()` 16
+times. **It doesn't:** `bin/tinc.rs` does argv → `Paths` once and
+hands `&Paths` to every `cmd::*::run()`. The most-common-import
+check shows 9/16 files importing `crate::names::Paths`, 0 of them
+re-resolving it. The 80-line hand-rolled getopt in `bin/tinc.rs`
+replaces 1,049 raw lines of vendored `getopt.c` — **net −969 lines.**
+No clap (would be +≈40 transitive deps).
+
+**6d. `gossip.rs` references 8 C files** (`graph.c`, `meta.c`,
+`net_setup.c`, `node.c`, `protocol_auth.c`, `protocol.c`,
+`protocol_edge.c`, `protocol_subnet.c` — sum 2,796 C code lines).
+Its 1,030 prod-code lines aren't 4.7× `protocol_edge.c`, they're
+0.37× the C surface they actually cover. The earlier 4.7× was a
+denominator error (only counted `protocol_edge.c`).
+
+### 7. C `#ifdef`'d-out code we did NOT port
+
+**−806 C lines we correctly skipped.** Verified clean.
+
+14 C files carry `#ifndef DISABLE_LEGACY`. Balanced-preprocessor walk
+counts 806 lines inside those guards (largest: `protocol_auth.c` 312,
+`keys.c` 105, `tincctl.c` 100, `fsck.c` 85). Spot-check of Rust for
+`legacy|RSA|metakey`: every hit is either a comment explaining what
+we DON'T do (`bin/tinc.rs:152`: "dropped under DISABLE_LEGACY"), or
+a wire-format field that exists for *parsing* legacy peers' messages
+without *speaking* legacy (`proto/msg/key.rs:100`:
+`Option<ReqKeyExt>`, `None` for the 3-token legacy form). No legacy
+crypto, no RSA, no metakey handshake. **Nothing accidentally
+ported.** The 6 `STUB(chunk-never)` markers in `gossip.rs` /
+`net.rs` are the documented "legacy peer sent us X, we drop it"
+paths.
+
+### 8. Dead code
+
+**≈0 lines.** 3 `#[allow(dead_code)]` annotations in `tincd`, all on
+timer-variant enum arms (`TimerWhat::KeyExpire`, `TimerWhat::UdpPing`)
+that are scaffolded for chunk-11 but currently `unreachable!()`. One
+in `tinc-crypto/tests/kat.rs` on a serde-skipped field. `cargo-udeps`
+not in the dev shell; `cargo clippy -D warnings` is, and it's clean,
+so no unused-function-level dead code. **Nothing to remove.**
+
+### Summary
+
+Of the **+42,671 raw-line delta** (Rust 68,164 − C 25,493):
+
+| Bucket | Lines | % | Disposition |
+|---|---:|---:|---|
+| Tests (integration `tests/*.rs` + in-file `#[cfg(test)]`) | +34,069 raw / +23,233 code | 80% | **Intentional.** Found 11 bugs. Maybe −200 redundant proto.rs happy-path unit tests. |
+| Doc-comments above C density (11,158 vs C-equivalent ≈2,550) | +8,608 | 20% | **Intentional.** 1,762 of these are C-ref cross-links (load-bearing). 13 need path qualifiers. |
+| C code we deliberately don't port (crypto subdirs, getopt, splay, solaris, LEGACY) | −7,871 code | −18% | **Intentional.** Per [What to Drop](#what-to-drop). |
+| Typed-error machinery (enum + Display + From) | +≈300–400 net | 1% | **Tax we chose.** `thiserror` would cut ≈200. Proc-macro dep avoided. |
+| Pure-module result enums (the dispatch seam) | +261 | <1% | **Intentional.** This IS the unit-test surface. |
+| Borrow-checker name-clones | +≈50–70 | <1% | **Removable.** `HashMap<String,_>` → `HashMap<NodeId,_>` (≈30 sites). |
+| `tui.rs` (ANSI instead of libncurses) | +136 | <1% | **Intentional.** No FFI, testable renderers. |
+| `Finding`-enum-then-Display (fsck/info/config testable-output pattern) | +≈200 net over inline-fprintf | <1% | **Intentional.** `fsck::Report` is machine-readable; C's isn't. |
+| Dead code | ≈0 | 0% | clippy-clean. 2 timer variants scaffolded for chunk-11. |
+
+**Logic-vs-logic: 21,393 Rust prod code vs ≈17,770 effective C →
+1.20×.** Of that 20%: roughly half is the dispatch-seam +
+typed-error tax (intentional, buys testability), a few percent is
+borrow-checker workarounds (removable, low-value), and the rest is
+idiom (`match Some(x)` is 3 lines where C `if(x)` is 1; `let Ok(y) =
+… else { return }` is 3 where C `if(!y) return` is 1). No bucket
+shows "ported wrong" — the audits would have caught that, and the
+`gossip.rs` 4.7× / `graph.rs` 2.85× outliers were both denominator
+errors (wrong C baseline).
+
+---
+
 ## Testing Strategy Summary
 
 | Layer | Technique |
