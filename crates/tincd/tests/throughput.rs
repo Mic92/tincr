@@ -655,6 +655,10 @@ fn measure(handle: &mut TunnelHandle) -> f64 {
     // enough for ChaCha20 to warm caches and TCP to ramp up. If
     // variance is too high on a loaded CI box, bump to `-t 10` or
     // median-of-3; the 95% gate has slop for now.
+    // -Z (sendfile zero-copy) tested at HEAD 7d47fdd1: no measurable
+    // delta. iperf3 isn't the wall — bob's decrypt is. Leaving -Z
+    // out keeps the test closer to the realistic case (apps that
+    // tunnel through tinc do write(), not sendfile).
     let client = Command::new("iperf3")
         .args(["-c", "10.44.0.2", "-t", "5", "--json"])
         .output()

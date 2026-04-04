@@ -568,6 +568,17 @@ impl Daemon {
         // for the non-vnet path.
         let mut iters = 0usize;
         let mut hit_cap = false;
+        // tx_batch armed ACROSS outer-loop iterations. The Phase-1
+        // batch-then-ship logic was designed for one drain returning
+        // N frames; the vnet path returns 1 frame per drain but
+        // multiple drains per epoll wake. The burst is in `iters`,
+        // not `count`. Arm here, ship after the loop.
+        //
+        // The non-vnet path is unchanged: it hits the loop once with
+        // count>1, the Frames arm flushes inline (so the sendmsg
+        // happens before this fn returns either way), and the
+        // post-loop flush is a no-op on an already-empty batch.
+        let mut batch_armed = false;
         while iters < DEVICE_DRAIN_CAP {
             iters += 1;
             // mem::take: `route_packet` borrows `&mut self`; the
@@ -631,20 +642,25 @@ impl Daemon {
                     // first time a device read fires. A tunnelserver
                     // (no local TUN) never gets here.
                     //
-                    // Gate on `count > 1`: with one frame per drain,
-                    // staging is pure overhead (one extra ~1.5KB memcpy
-                    // tx_scratch → batch.buf, then a count=1 send that's
-                    // identical to immediate-send). The TUN under iperf3
-                    // saturation backlogs and `drain` reads many; an
-                    // idle ping fires epoll per-frame and hits count=1.
-                    // Don't tax the latter for the former. The send
-                    // site sees `tx_batch.is_none()` and falls through
-                    // to the Phase-0 immediate path.
-                    if count > 1 && self.tx_batch.is_none() {
-                        self.tx_batch = Some(crate::egress::TxBatch::new(
-                            DEVICE_DRAIN_CAP
-                                * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                        ));
+                    // Arm tx_batch when there's a burst to coalesce.
+                    // "Burst" = either count>1 (default drain batched
+                    // multiple frames) OR iters>1 (vnet drain returned
+                    // Frames{1} multiple times this epoll wake — bob's
+                    // ACK-burst case). An idle ping fires epoll per-
+                    // frame, hits count==1 && iters==1, falls through
+                    // to Phase-0 immediate send (no memcpy tax).
+                    //
+                    // Once armed, stays armed across outer iterations:
+                    // the vnet's Frames{1}-then-Frames{1}-then-Super
+                    // sequence accumulates into one sendmsg.
+                    if !batch_armed && (count > 1 || iters > 1) {
+                        if self.tx_batch.is_none() {
+                            self.tx_batch = Some(crate::egress::TxBatch::new(
+                                DEVICE_DRAIN_CAP
+                                    * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                            ));
+                        }
+                        batch_armed = true;
                     }
                     for i in 0..count {
                         let n = arena.lens()[i];
@@ -661,22 +677,13 @@ impl Daemon {
                         // for the cold path (no `udp_addr_cached`).
                         nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
                     }
-                    // Ship whatever's left in the batch. The common
-                    // case (iperf3 TCP burst to one peer): one run,
-                    // `count` frames, one sendmsg.
-                    self.flush_tx_batch();
-                    // Re-disarm: the send site outside this loop
-                    // (UDP-recv→forward, meta-conn→relay, probes) goes
-                    // back to immediate-send. The batch only makes
-                    // sense when we KNOW there's a burst to coalesce,
-                    // which is exactly the device-drain case.
-                    self.tx_batch = None;
-                    // Hit cap exactly: there may be more in the device.
-                    // Re-arm so the next epoll wake fires immediately
-                    // (edge-triggered: without this, we'd lose the
-                    // wake until the kernel writes ANOTHER packet).
-                    // The `0f120b11` invariant: yield after `cap` so
-                    // TX/timers/recv aren't starved.
+                    // count>1: default drain already drained to
+                    // EAGAIN (or hit cap). Ship now. The vnet
+                    // count==1 case ships AFTER the outer loop
+                    // (accumulating across iterations).
+                    if count > 1 {
+                        self.flush_tx_batch();
+                    }
                     self.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
                         hit_cap = true;
@@ -779,8 +786,9 @@ impl Daemon {
                                 let off = i * tinc_device::DeviceArena::STRIDE;
                                 nw |= self.route_packet(&mut scratch[off..off + n], None);
                             }
+                            // Ship the super's segments. The post-loop
+                            // flush below is a no-op on empty.
                             self.flush_tx_batch();
-                            self.tx_batch = None;
                         }
                         Err(e) => {
                             // Kernel-contract violation (vnet_hdr describes
@@ -810,6 +818,15 @@ impl Daemon {
             } // match result
         } // while iters
 
+        // Ship anything accumulated across vnet Frames{1} iterations.
+        // No-op for the non-vnet path (count>1 arm flushed already)
+        // and for the iters==1 idle-ping case (batch never armed).
+        // Disarm so UDP-recv→forward / meta-conn→relay / probes go
+        // back to Phase-0 immediate-send outside this fn.
+        if batch_armed {
+            self.flush_tx_batch();
+            self.tx_batch = None;
+        }
         // Hit cap (or Super): there MAY be more queued. Rearm so
         // the next epoll cycle checks. With EPOLLET, the rearm
         // (epoll_ctl MOD) doesn't generate a synthetic wake, but
