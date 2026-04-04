@@ -444,10 +444,20 @@ impl Sptps {
     ///
     /// # Errors
     ///
-    /// `InvalidState` if called before [`Output::HandshakeDone`], or if
-    /// `record_type >= 128` (those are reserved for handshake records).
+    /// `InvalidState` if called before [`Output::HandshakeDone`], if
+    /// `record_type >= 128` (those are reserved for handshake records),
+    /// or if `body.len() > 65535` in stream mode (the wire framing has
+    /// a `u16` length header — the C silently truncates with a
+    /// `uint16_t` cast and the receiver desyncs; we'd rather refuse).
     pub fn send_record(&mut self, record_type: u8, body: &[u8]) -> Result<Vec<Output>, SptpsError> {
         if self.outcipher.is_none() || record_type >= REC_HANDSHAKE {
+            return Err(SptpsError::InvalidState);
+        }
+        // Stream framing's `len:u16be` header can't carry more than this.
+        // Gated here, not in `send_record_priv`: handshake records
+        // (KEX=65, SIG=64, ACK=0) are fixed-size, so the `expect` in
+        // priv stays a true invariant for those callers.
+        if self.framing == Framing::Stream && body.len() > usize::from(u16::MAX) {
             return Err(SptpsError::InvalidState);
         }
         let mut out = Vec::new();
@@ -589,7 +599,16 @@ impl Sptps {
             return Err(SptpsError::BadRecord);
         }
 
-        self.replay.check(seqno, true)?;
+        // Check replay BEFORE leaving plaintext in `out`. On reject,
+        // truncate — same Err contract as the BadRecord arm above:
+        // `out == [0u8; headroom]` on every Err return. Decrypt first
+        // is still required (forged seqnos must not advance the
+        // window) but check-before-shift means the memmove below only
+        // runs on the Ok path.
+        if let Err(e) = self.replay.check(seqno, true) {
+            out.truncate(headroom);
+            return Err(e);
+        }
 
         // Strip the type byte: shift body left by one. Small memmove.
         out.copy_within(headroom + 1.., headroom);
@@ -918,8 +937,11 @@ impl Sptps {
     ///
     /// # Errors
     ///
-    /// All variants are reachable. `Err` means this call failed and consumed
-    /// nothing; the C returns `0` in the same cases.
+    /// All variants are reachable. **`Err` is terminal in stream mode**:
+    /// `inseqno` ticks before decrypt (`sptps.c:676`), so a decrypt
+    /// failure poisons every later record. The daemon closes the
+    /// connection on stream `Err`; don't retry. Datagram `Err` is
+    /// per-packet and safe to ignore (next packet may succeed).
     pub fn receive(
         &mut self,
         data: &[u8],
