@@ -49,6 +49,12 @@ pub const MTU_JUMBO: usize = 9018;
 // pub(crate): backends synthesize headers; the daemon doesn't.
 mod ether;
 
+// Slot arena + DrainResult for the 10G datapath. Not cfg-gated:
+// the arena is portable (it's just memory layout), and the default
+// `drain()` is the BSD/macOS path — they inherit it for free.
+mod arena;
+pub use arena::{DeviceArena, DrainResult, GsoType};
+
 /// L2 vs L3 device. C `device_type_t` (`linux/device.c:33-36`).
 /// The daemon resolves `DeviceType` config + `routing_mode` into
 /// this; we get the resolved value.
@@ -148,6 +154,47 @@ pub trait Device: Send {
     /// Raw fd for `mio::Poll::register`. C `device_fd` global
     /// (`:39`). `Dummy` returns `None`; daemon skips the register.
     fn fd(&self) -> Option<std::os::unix::io::RawFd>;
+
+    /// Drain available frames into the arena. The 10G ingest seam
+    /// (`RUST_REWRITE_10G.md` Phase 0).
+    ///
+    /// Default: loop `self.read()` into arena slots until EAGAIN or
+    /// `cap`. Never returns `Super` — that's a Phase-2 vnet_hdr device
+    /// override. The default IS the BSD/macOS/mock path: their
+    /// existing byte-pipe `read()` is the building block. Zero changes
+    /// to `bsd.rs`/`linux.rs` for Phase 0.
+    ///
+    /// `cap` clamps to `arena.cap()`. Typically `DEVICE_DRAIN_CAP=64`
+    /// (`net.rs:528` — over-draining starves TUN of TX time, see
+    /// commit `0f120b11`).
+    ///
+    /// EAGAIN on the first read → `Empty`. EAGAIN after ≥1 read →
+    /// `Frames{count}`. Any other error propagates (the daemon's
+    /// 10-consecutive-failures → `event_exit` is its policy, not ours).
+    ///
+    /// # Errors
+    /// `io::Error` from the underlying `read(2)`. EAGAIN is consumed
+    /// (it's the loop terminator, not an error). EBADFD etc. surface
+    /// to the daemon.
+    fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
+        let cap = cap.min(arena.cap());
+        let mut n = 0;
+        while n < cap {
+            match self.read(arena.slot_mut(n)) {
+                Ok(len) => {
+                    arena.set_len(n, len);
+                    n += 1;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(if n == 0 {
+            DrainResult::Empty
+        } else {
+            DrainResult::Frames { count: n }
+        })
+    }
 }
 
 // Dummy — `dummy_device.c` (58 LOC)
@@ -232,7 +279,9 @@ mod bsd;
 #[cfg(unix)]
 pub use bsd::{BsdTun, BsdVariant};
 
-// Tests — Dummy only (Tun needs CAP_NET_ADMIN, separate integration)
+// Tests — Dummy only (Tun needs CAP_NET_ADMIN, separate integration).
+// drain() default-impl tests use a closure-backed mock so we test the
+// trait body without platform devices.
 
 #[cfg(test)]
 mod tests {
@@ -299,5 +348,149 @@ mod tests {
         assert_eq!(MTU, 1500 + 14 + 4);
         assert_eq!(MTU_JUMBO, 9018);
         assert_eq!(MTU_JUMBO, 9000 + 14 + 4);
+    }
+
+    // ─── default drain()
+    //
+    // The default impl is the BSD/macOS path (`RUST_REWRITE_10G.md`
+    // Phase 0: "zero changes to bsd.rs"). Test it with a mock that
+    // returns a scripted sequence of read() outcomes; the trait body
+    // does the rest. This is the seam — if the default is right,
+    // every byte-pipe backend is right.
+
+    /// Mock device: returns scripted read() outcomes. Each `Ok(bytes)`
+    /// writes the byte pattern at `buf[0..]` and returns its length;
+    /// `Err(kind)` returns the error. Exhausted → `WouldBlock`.
+    struct ScriptedDev {
+        script: std::vec::IntoIter<Result<Vec<u8>, io::ErrorKind>>,
+    }
+    impl ScriptedDev {
+        fn new(s: Vec<Result<Vec<u8>, io::ErrorKind>>) -> Self {
+            Self {
+                script: s.into_iter(),
+            }
+        }
+    }
+    impl Device for ScriptedDev {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.script.next() {
+                Some(Ok(bytes)) => {
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(k)) => Err(k.into()),
+                None => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        }
+        fn write(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            unimplemented!()
+        }
+        fn mode(&self) -> Mode {
+            Mode::Tun
+        }
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn iface(&self) -> &str {
+            "mock"
+        }
+        fn mac(&self) -> Option<Mac> {
+            None
+        }
+        fn fd(&self) -> Option<std::os::unix::io::RawFd> {
+            None
+        }
+    }
+
+    /// Dummy::read returns WouldBlock → drain returns Empty. The
+    /// daemon's `IoWhat::Device` arm never fires for Dummy (no fd),
+    /// but if it did, this is the right answer.
+    #[test]
+    fn drain_dummy_is_empty() {
+        let mut d = Dummy;
+        let mut a = DeviceArena::new(8);
+        assert_eq!(d.drain(&mut a, 8).unwrap(), DrainResult::Empty);
+    }
+
+    /// Three frames then EAGAIN → Frames{3}. The bytes land in
+    /// slots 0..3 in order; slot lengths match. This is the common
+    /// case under normal load (less than DEVICE_DRAIN_CAP available).
+    #[test]
+    fn drain_frames_until_eagain() {
+        let mut d = ScriptedDev::new(vec![
+            Ok(b"first".to_vec()),
+            Ok(b"second one".to_vec()),
+            Ok(b"3rd".to_vec()),
+            // implicit EAGAIN after exhaustion
+        ]);
+        let mut a = DeviceArena::new(8);
+        assert_eq!(
+            d.drain(&mut a, 8).unwrap(),
+            DrainResult::Frames { count: 3 }
+        );
+        assert_eq!(a.slot(0), b"first");
+        assert_eq!(a.slot(1), b"second one");
+        assert_eq!(a.slot(2), b"3rd");
+        assert_eq!(&a.lens()[..3], &[5, 10, 3]);
+    }
+
+    /// More frames available than `cap` → stop at `cap`. The
+    /// `0f120b11` invariant: over-draining starves TX. The daemon
+    /// re-arms and comes back next epoll wake.
+    #[test]
+    fn drain_respects_cap() {
+        let mut d = ScriptedDev::new(vec![
+            Ok(vec![0xaa; 100]),
+            Ok(vec![0xbb; 100]),
+            Ok(vec![0xcc; 100]), // never read — cap=2
+        ]);
+        let mut a = DeviceArena::new(8);
+        assert_eq!(
+            d.drain(&mut a, 2).unwrap(),
+            DrainResult::Frames { count: 2 }
+        );
+        assert_eq!(a.slot(0)[0], 0xaa);
+        assert_eq!(a.slot(1)[0], 0xbb);
+        // The third frame is still in the device; next drain gets it.
+        assert_eq!(
+            d.drain(&mut a, 2).unwrap(),
+            DrainResult::Frames { count: 1 }
+        );
+        assert_eq!(a.slot(0)[0], 0xcc);
+    }
+
+    /// EAGAIN on the FIRST read → Empty (not Frames{0}). Distinct
+    /// because the daemon's response differs: Empty re-arms and
+    /// returns; Frames{0} would walk a zero-length loop (harmless
+    /// but wrong semantics — there was nothing to drain).
+    #[test]
+    fn drain_immediate_eagain_is_empty() {
+        let mut d = ScriptedDev::new(vec![Err(io::ErrorKind::WouldBlock)]);
+        let mut a = DeviceArena::new(8);
+        assert_eq!(d.drain(&mut a, 8).unwrap(), DrainResult::Empty);
+    }
+
+    /// Non-EAGAIN error mid-batch propagates. The daemon counts
+    /// consecutive failures (`net.rs:556`) and exits after 10. We
+    /// don't swallow it; the partial batch is lost (the C does the
+    /// same — `device.c:149` returns false, daemon breaks the loop).
+    #[test]
+    fn drain_propagates_real_error() {
+        let mut d = ScriptedDev::new(vec![Ok(b"ok".to_vec()), Err(io::ErrorKind::BrokenPipe)]);
+        let mut a = DeviceArena::new(8);
+        let e = d.drain(&mut a, 8).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    /// `cap` is clamped to `arena.cap()`. Passing a too-large cap
+    /// is a daemon bug, but writing past the arena is UB. Clamp
+    /// silently — the panic would be a denial-of-service vector if
+    /// `cap` ever became data-dependent.
+    #[test]
+    fn drain_clamps_cap_to_arena() {
+        let mut d = ScriptedDev::new((0..10).map(|i| Ok(vec![i; 50])).collect());
+        let mut a = DeviceArena::new(4); // arena smaller than script
+        assert_eq!(
+            d.drain(&mut a, 64).unwrap(),
+            DrainResult::Frames { count: 4 }
+        );
     }
 }

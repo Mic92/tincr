@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rand_core::{OsRng, RngCore};
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
-use tinc_device::Device;
+use tinc_device::{Device, DeviceArena};
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, SubnetMsg, UdpInfo};
@@ -26,6 +26,7 @@ use tinc_sptps::{Framing, Role, Sptps};
 use crate::autoconnect::{self, AutoAction, NodeSnapshot};
 use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
+use crate::egress::{Portable, UdpEgress};
 use crate::graph_glue::{Transition, run_graph};
 use crate::invitation_serve::{self, InvitePhase};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
@@ -922,6 +923,15 @@ pub(crate) struct ListenerSlot {
     pub(crate) listener: Listener,
     pub(crate) udp_io: IoId,
     pub(crate) last_tos: u8,
+    /// `UdpEgress` for this listener's UDP socket. Phase 0
+    /// (`RUST_REWRITE_10G.md`): always `Portable` (count × sendto,
+    /// same wire output as the direct `udp.send_to` it replaced).
+    /// Phase 1 swaps `linux::Fast` (UDP_SEGMENT cmsg) on Linux.
+    /// `Box<dyn>`: vtable indirect per-BATCH (~20k/s @ 10G × 2ns
+    /// ≈ nothing). Lives here, not in a parallel `Vec`, because
+    /// the `sock` index already picks the slot — one fewer
+    /// coherence invariant to maintain.
+    pub(crate) egress: Box<dyn UdpEgress>,
 }
 
 /// The daemon. C globals as fields; `run()` is `main_loop()`.
@@ -1245,6 +1255,19 @@ pub struct Daemon {
     /// hitting its drain-loop iteration cap — see the bounded-drain
     /// comment in that fn for why this matters under sustained load.
     pub(crate) device_io: Option<IoId>,
+
+    /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md` Phase
+    /// 0). Replaces `on_device_read`'s 1.5KB stack buf: drain reads
+    /// frames into slots, the loop body walks them. Phase 1 widens:
+    /// encrypt into slots, hand the contiguous run to `egress`.
+    /// Phase 0 only uses it on the read side; `tx_scratch` stays
+    /// for the encrypt path until Phase 1 unifies them (separate
+    /// buffers, no overlap).
+    ///
+    /// `Option` for the same `mem::take` dance as `udp_rx_batch`:
+    /// `route_packet` borrows `&mut self`; the arena slot borrow
+    /// conflicts. Take, walk, put back.
+    pub(crate) device_arena: Option<DeviceArena>,
 
     /// `outgoing_list` (`net_socket.c:54`). One slot per `ConnectTo`
     /// in `tinc.conf`. C uses a `list_t` of `outgoing_t*`; we slot.
@@ -1935,10 +1958,16 @@ impl Daemon {
             let udp_io = ev
                 .add(udp_fd, Io::Read, IoWhat::Udp(i))
                 .map_err(SetupError::Io)?;
+            // Phase 0: dup the UDP fd into `Portable`. The listener
+            // keeps its copy for `recvmmsg`; the egress sends on the
+            // dup. Same file description → same bound addr, same TOS.
+            let egress: Box<dyn UdpEgress> =
+                Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
             listener_slots.push(ListenerSlot {
                 listener: l,
                 udp_io,
                 last_tos: 0,
+                egress,
             });
         }
 
@@ -2094,6 +2123,7 @@ impl Daemon {
             mymac,
             device_errors: 0,
             device_io,
+            device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),

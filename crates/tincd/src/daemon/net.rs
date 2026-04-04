@@ -12,6 +12,12 @@ use nix::sys::socket::{
 
 /// C `net_packet.c:1845`: `#define MAX_MSG 64`.
 const UDP_RX_BATCH: usize = 64;
+
+/// Device drain cap. `pub(super)` so `daemon::setup` can size the
+/// arena. The 64-per-turn-then-yield is load-bearing (`0f120b11`:
+/// over-draining starves the TUN reader of TX time — iperf3
+/// saturating the device must not block UDP recv/meta-conn flush).
+pub(super) const DEVICE_DRAIN_CAP: usize = 64;
 /// C `vpn_packet_t` is ~1700; we use 2KB (oversize truncates and
 /// the SPTPS decrypt fails — same outcome as the old stack buf).
 const UDP_RX_BUFSZ: usize = 2048;
@@ -524,52 +530,97 @@ impl Daemon {
     /// because mio is edge-triggered — returning before EAGAIN loses
     /// the wake forever. Bounded so iperf3 saturating the TUN doesn't
     /// starve meta-conn flush/UDP recv/timers.
+    ///
+    /// Phase 0 (`RUST_REWRITE_10G.md`): same loop body, but the
+    /// per-read `device.read(&mut stack_buf)` becomes one
+    /// `device.drain(&mut arena, cap)` returning N frames in arena
+    /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
+    /// byte the same syscall sequence on bsd/linux/fd backends. The
+    /// seam is in place for Phase 2 (vnet_hdr device returns `Super`).
     pub(super) fn on_device_read(&mut self) {
-        const DEVICE_DRAIN_CAP: u32 = 64;
+        // mem::take: `route_packet` borrows `&mut self`; the arena
+        // slot borrow conflicts. Same dance as `udp_rx_batch`. The
+        // arena is `Some` between calls (set in `setup`, never
+        // taken elsewhere); the `expect` documents the invariant.
+        let mut arena = self
+            .device_arena
+            .take()
+            .expect("device_arena is Some between on_device_read calls");
 
-        // Stack buf (was `vec![0u8; MTU]` — one alloc per epoll wake
-        // for no reason; recvmmsg work flushed it out).
-        let mut buf = [0u8; crate::tunnel::MTU as usize];
+        let result = match self.device.drain(&mut arena, DEVICE_DRAIN_CAP) {
+            Ok(r) => r,
+            Err(e) => {
+                // C `:1933-1936`: 10 consecutive failures →
+                // event_exit(). C also sleep_millis(errors*50)
+                // for a flapping TUN; we don't (bound is 10,
+                // sleep would total 2.75s then exit anyway).
+                log::error!(target: "tincd::net",
+                            "Error reading from device: {e}");
+                self.device_errors += 1;
+                if self.device_errors > 10 {
+                    log::error!(target: "tincd",
+                                "Too many errors from device, exiting!");
+                    self.running = false;
+                }
+                self.device_arena = Some(arena);
+                return;
+            }
+        };
+
         let mut nw = false;
-        let mut drained = 0u32;
-        loop {
-            if drained >= DEVICE_DRAIN_CAP {
-                if let Some(io_id) = self.device_io
+        match result {
+            tinc_device::DrainResult::Empty => {
+                // EAGAIN on first read. Edge-triggered: nothing
+                // more to do, the next packet wakes us.
+            }
+            tinc_device::DrainResult::Frames { count } => {
+                self.device_errors = 0; // C `:1931`
+                // EXACTLY today's per-frame loop body. The arena
+                // slot is what the stack `buf[..n]` was. Phase 1
+                // will batch the encrypt+send across slots; Phase
+                // 0 walks them one at a time, semantically
+                // identical to the old loop.
+                for i in 0..count {
+                    let n = arena.lens()[i];
+                    // C `:1928-1929`
+                    let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                    myself_tunnel.in_packets += 1;
+                    myself_tunnel.in_bytes += n as u64;
+
+                    // C `:1930`. `slot_mut` because route_packet
+                    // mutates (overwrite_mac, fragment in-place).
+                    nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
+                }
+                // Hit cap exactly: there may be more in the device.
+                // Re-arm so the next epoll wake fires immediately
+                // (edge-triggered: without this, we'd lose the
+                // wake until the kernel writes ANOTHER packet).
+                // The `0f120b11` invariant: yield after `cap` so
+                // TX/timers/recv aren't starved.
+                if count == DEVICE_DRAIN_CAP
+                    && let Some(io_id) = self.device_io
                     && let Err(e) = self.ev.rearm(io_id)
                 {
                     log::error!(target: "tincd::net",
-                                    "device fd rearm failed: {e}");
+                                "device fd rearm failed: {e}");
                 }
-                break;
             }
-            drained += 1;
-            let n = match self.device.read(&mut buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => {
-                    // C `:1933-1936`: 10 consecutive failures →
-                    // event_exit(). C also sleep_millis(errors*50)
-                    // for a flapping TUN; we don't (bound is 10,
-                    // sleep would total 2.75s then exit anyway).
-                    log::error!(target: "tincd::net",
-                                "Error reading from device: {e}");
-                    self.device_errors += 1;
-                    if self.device_errors > 10 {
-                        log::error!(target: "tincd",
-                                    "Too many errors from device, exiting!");
-                        self.running = false;
-                    }
-                    break;
-                }
-            };
-            self.device_errors = 0; // C `:1931`
-            // C `:1928-1929`
-            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
-            myself_tunnel.in_packets += 1;
-            myself_tunnel.in_bytes += n as u64;
-
-            nw |= self.route_packet(&mut buf[..n], None); // C `:1930`
+            tinc_device::DrainResult::Super { .. } => {
+                // Phase 2 (`RUST_REWRITE_10G.md`): vnet_hdr device
+                // returns a 64KB TCP super-segment, daemon does
+                // userspace TSO-split (TCP seqno arithmetic, csum
+                // recompute). NOT YET. No device impl returns this;
+                // the default `drain()` never can. If this fires,
+                // someone wired a Phase-2 device without the
+                // Phase-2 daemon code.
+                unreachable!(
+                    "DrainResult::Super is RUST_REWRITE_10G.md Phase 2; \
+                     no device impl returns it yet"
+                );
+            }
         }
+
+        self.device_arena = Some(arena);
         if nw {
             self.maybe_set_write_any();
         }
@@ -1925,9 +1976,25 @@ impl Daemon {
             }
         }
 
-        // C `:1044`
-        if let Some(slot) = self.listeners.get(usize::from(sock))
-            && let Err(e) = slot.listener.udp.send_to(&self.tx_scratch, sockaddr)
+        // C `:1044`. Phase 0 (`RUST_REWRITE_10G.md`): the direct
+        // `udp.send_to` becomes `egress.send_batch` with `count=1`.
+        // `Portable::send_batch` with `count=1` IS one `sendto` —
+        // same syscall, same fd (dup'd at setup), same wire bytes.
+        // The seam is in place for Phase 1 to swap `linux::Fast`.
+        //
+        // `tx_scratch` stays as the encrypt buffer (Phase 1 unifies
+        // it with the arena). `count=1` means `stride == last_len`;
+        // the loop in `Portable::send_batch` runs once.
+        #[allow(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
+        let len = self.tx_scratch.len() as u16;
+        if let Some(slot) = self.listeners.get_mut(usize::from(sock))
+            && let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
+                dst: sockaddr,
+                frames: &self.tx_scratch,
+                stride: len,
+                count: 1,
+                last_len: len,
+            })
         {
             if e.kind() == io::ErrorKind::WouldBlock {
                 // Drop; UDP is unreliable.
