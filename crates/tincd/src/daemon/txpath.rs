@@ -3,6 +3,69 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use nix::sys::socket::{
+    AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
+};
+
+/// `choose_initial_maxmtu` (`net_packet.c:1249-1340`). Ask the kernel
+/// for its PMTU cache entry to this peer; subtract our encapsulation
+/// overhead to get the tinc-layer MTU. Makes PMTU converge in 1 RTT
+/// instead of ~10 probes × 333ms — the very first probe is sent at
+/// the (likely correct) maxmtu, the reply confirms it, `try_fix_mtu`
+/// fires immediately.
+///
+/// Without this the ~3.3s convergence window leaves `via->mtu == 0`,
+/// during which `route.c:685`'s frag-needed check fires at MTU 576
+/// (`MAX(0,590)-14`). The kernel caches that per-dst for 10 minutes;
+/// any TCP flow that starts in that window is stuck at MSS 536. C has
+/// the same `via->mtu==0` window but it's so short nobody noticed.
+///
+/// C falls back to `MTU` on every error (`#ifndef IP_MTU`, socket()
+/// fails, connect() fails, getsockopt() fails, absurd value). Same.
+fn choose_initial_maxmtu(peer: SocketAddr) -> u16 {
+    // C `:1263`: ephemeral DGRAM socket, only for the kernel's
+    // route+PMTU lookup. Never sends.
+    let af = match peer {
+        SocketAddr::V4(_) => AddressFamily::Inet,
+        SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let Ok(sock) = socket(af, SockType::Datagram, SockFlag::SOCK_CLOEXEC, None) else {
+        return MTU;
+    };
+    // C `:1270`: connect() makes the kernel resolve the route. UDP
+    // connect is just a route lookup + dst association — no packets.
+    let ss = SockaddrStorage::from(peer);
+    if connect(sock.as_raw_fd(), &ss).is_err() {
+        return MTU;
+    }
+    // C `:1278`: IP_MTU is the kernel's PMTU cache for this route.
+    // On lo it's 65536 (clamped below). On real interfaces it's the
+    // link MTU minus any cached PMTUD reductions.
+    let Ok(ip_mtu) = getsockopt(&sock, sockopt::IpMtu) else {
+        return MTU;
+    };
+    // C `:1286-1289`: sanity floor. Kernel returns i32; <0 is
+    // impossible from a successful getsockopt but the type allows it.
+    if ip_mtu < i32::from(pmtu::MINMTU) {
+        return MTU;
+    }
+    // On lo IP_MTU is 65536 — doesn't fit u16. We're going to clamp
+    // to MTU=1518 anyway so saturate at u16::MAX; the min() catches it.
+    let ip_mtu = u16::try_from(ip_mtu).unwrap_or(u16::MAX);
+    // C `:1293-1303`: peel off encapsulation layers. We're SPTPS-
+    // only, protocol minor ≥4 always (`PROT_MINOR=7`, the legacy
+    // `n->status.sptps` and `(options>>24)>=4` checks are static).
+    //   IP header: 20 (v4) or 40 (v6)
+    //   UDP header: 8
+    //   [dst_id6][src_id6]: 12 (`net.h:92-93`)
+    //   SPTPS datagram overhead: 21 (seqno+type+tag, `sptps.h`)
+    let ip_hdr: u16 = if peer.is_ipv6() { 40 } else { 20 };
+    debug_assert_eq!(tinc_sptps::DATAGRAM_OVERHEAD, 21);
+    let tinc_mtu = ip_mtu.saturating_sub(ip_hdr + 8 + 12 + 21);
+    // C `:1327`: clamp to compile-time max.
+    tinc_mtu.min(MTU)
+}
+
 impl Daemon {
     /// `udp_probe_h` (`net_packet.c:170-238`). One PROBE record
     /// arrived. byte[0] == 0 ⇒ request → echo back. byte[0] != 0
@@ -219,11 +282,34 @@ impl Daemon {
         // C `:1358-1364`: don't probe MTU until UDP confirmed.
         // C `:1348-1356`: OPTION_PMTU_DISCOVERY gate (default-on).
         if mtu {
+            // C `:1408-1410`: re-seed maxmtu just before discovery
+            // starts (`mtuprobes==0`). The peer addr lookup goes
+            // through `choose_udp_address` (the same path the actual
+            // probe send will use). If there's no UDP addr yet the
+            // probe wouldn't go anywhere either — fall back to MTU
+            // and let the next try_tx pick it up.
+            let needs_seed = self
+                .tunnels
+                .get(&target)
+                .and_then(|t| t.pmtu.as_ref())
+                .is_none_or(|p| p.mtuprobes == 0);
+            let initial_maxmtu = if needs_seed {
+                self.choose_udp_address(target)
+                    .map_or(MTU, |(addr, _)| choose_initial_maxmtu(addr))
+            } else {
+                MTU
+            };
+
             let tunnel = self.tunnels.entry(target).or_default();
-            // NOT-PORTING: choose_initial_maxmtu getsockopt(IP_MTU)
-            // (`net_packet.c:1249-1340`). C falls back to MTU on
-            // `#ifndef IP_MTU` anyway; PMTU converges regardless.
-            let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+            let p = tunnel
+                .pmtu
+                .get_or_insert_with(|| PmtuState::new(now, initial_maxmtu));
+            // C `:1409` re-seeds even if pmtu state already exists
+            // (UDP timeout reset mtuprobes to 0). Our get_or_insert
+            // only seeds on first construction; mirror C's re-seed.
+            if p.mtuprobes == 0 {
+                p.maxmtu = initial_maxmtu;
+            }
             if p.udp_confirmed {
                 let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
                 let actions = p.tick(now, pinginterval);

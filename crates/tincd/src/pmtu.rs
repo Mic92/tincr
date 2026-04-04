@@ -81,9 +81,15 @@ pub enum PmtuAction {
 impl PmtuState {
     /// C `node.c` zeros struct, sets `maxmtu = MTU`, `udp_ping_rtt = -1`.
     ///
-    /// `initial_maxmtu`: NOT-PORTING `choose_initial_maxmtu`
-    /// (`net_packet.c:1249-1340`, `getsockopt(IP_MTU)`). It's an
-    /// optimization; C falls back to `MTU` without `IP_MTU`. Pass `MTU`.
+    /// `initial_maxmtu`: from `choose_initial_maxmtu` (`txpath.rs`,
+    /// ports `net_packet.c:1249-1340` `getsockopt(IP_MTU)`). With it,
+    /// PMTU converges in ~1 RTT. Without it (kernel lacks `IP_MTU`,
+    /// or socket()/connect() fails), pass `MTU` and convergence takes
+    /// ~10 probes (~3.3s at 333ms cadence) — `dispatch_route_result`
+    /// gates the `route.c:685` frag-needed check on `via_mtu != 0`
+    /// during that window so we don't send bogus ICMP claiming MTU 576.
+    /// (That ICMP poisoned the kernel's per-dst PMTU cache for 10
+    /// minutes)
     #[must_use]
     pub fn new(now: Instant, initial_maxmtu: u16) -> Self {
         Self {

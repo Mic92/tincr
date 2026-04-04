@@ -897,7 +897,22 @@ impl Daemon {
                 // don't claim MTU < 576 even if discovery hasn't run.
                 // C `:690` truncation is for the ICMP quote; our
                 // build_v4_unreachable caps internally.
-                if via_nid != self.myself {
+                //
+                // `via_mtu != 0`: don't claim a path MTU before
+                // discovery has measured one. `try_fix_mtu`
+                // (`pmtu.rs:251`) only sets `mtu` once `minmtu >=
+                // maxmtu`; until then it's 0, `MAX(0,590)` claims
+                // 576, and the kernel caches that per-dst for 10
+                // minutes — any TCP flow in that window is stuck at
+                // MSS 536 forever. 3× packets/crypto/syscalls for
+                // the same bytes.
+                //
+                // C `:685` has the same `via->mtu==0` window but
+                // `choose_initial_maxmtu` (`:1249`, getsockopt
+                // IP_MTU → probe at exact value) makes it ~1 RTT.
+                // We walk the ~10-probe ladder (333ms each, ~3.3s).
+                // C with `#undef IP_MTU` would have the same bug.
+                if via_nid != self.myself && via_mtu != 0 {
                     let ethertype = u16::from_be_bytes([data[12], data[13]]);
                     let floor: u16 = if ethertype == crate::packet::ETH_P_IP {
                         590
