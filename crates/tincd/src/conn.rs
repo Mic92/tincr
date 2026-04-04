@@ -633,7 +633,7 @@ impl Connection {
 
         let live = self.outbuf.live();
         // `send(2)` (C `net_socket.c:491`): ENOTSOCK is a useful sanity check.
-        let n = match send(self.fd.as_raw_fd(), live, MsgFlags::empty()) {
+        let n = match send(self.fd.as_raw_fd(), live, MsgFlags::MSG_NOSIGNAL) {
             Ok(n) => n,
             Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
                 return Ok(false); // C :494-496
