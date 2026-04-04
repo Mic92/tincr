@@ -86,20 +86,6 @@ pub struct Tun {
     /// TAP only: kernel-assigned MAC. Read via `SIOCGIFHWADDR`
     /// post-TUNSETIFF (`device.c:121-126`). For TUN: `None`.
     mac: Option<Mac>,
-
-    /// `IFF_VNET_HDR + TUNSETOFFLOAD` succeeded — the kernel
-    /// prepends a 10-byte `virtio_net_hdr` to every read and
-    /// hands us ≤64KB TCP super-segments. The `drain()` override
-    /// branches on this. Set ONCE at open; never changes.
-    ///
-    /// `RUST_REWRITE_10G.md` Phase 2a. Feature-gated by
-    /// `DeviceConfig::vnet_hdr` (`-o ExperimentalGSO=yes`). The
-    /// sha256-of-stream gate (`netns::tso_ingest_stream_integrity`)
-    /// is green; the gate stays until 2a + 2b ship together and
-    /// we re-profile against the recalibrated Phase 3 ceiling.
-    /// Flipping default-on changes the device's wire shape (no
-    /// tun_pi, vnet_hdr on writes) — do it once, not piecemeal.
-    vnet_hdr: bool,
 }
 
 impl Tun {
@@ -143,27 +129,27 @@ impl Tun {
             .open(device)?;
 
         // ─── ifr_flags (C `device.c:77-89`)
-        // `IFF_NO_PI` only on TAP; TUN keeps `tun_pi` for the
-        // ethertype-slot trick. `as i16`: constants fit (1, 2,
-        // 0x1000). `IFF_ONE_QUEUE` NOT set: no-op since kernel
-        // `5d09710` (2.6.27); C `:93-98` still sets it, we don't.
+        // `as i16`: constants fit (1, 2, 0x1000, 0x4000).
+        // `IFF_ONE_QUEUE` NOT set: no-op since kernel `5d09710`
+        // (2.6.27); C `:93-98` still sets it, we don't.
         //
-        // `cfg.vnet_hdr` (`ExperimentalGSO=on`): add `IFF_VNET_HDR
-        // | IFF_NO_PI`. The vnet_hdr path drops the +10 tun_pi
-        // trick — reads are `[vnet_hdr(10)][raw IP]`, the eth
-        // header is synthesized in `drain()` (or by `tso_split` for
-        // super-packets). Same approach as wg-go (`tun_linux.go:
-        // 566`: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`).
+        // TUN: `IFF_VNET_HDR | IFF_NO_PI` (Phase 2a). Reads are
+        // `[vnet_hdr(10)][raw IP]`; eth header synthesized in
+        // `drain()` or by `tso_split`. Same approach as wg-go
+        // (`tun_linux.go:566`). The C's +10 tun_pi trick is gone
+        // — it was a workaround for not having vnet_hdr.
         //
-        // Set on the FIRST TUNSETIFF. The kernel's flag-update
+        // TAP: `IFF_NO_PI` only. vnet_hdr would need `tso_split`
+        // to preserve the real eth header instead of synthesizing
+        // one. Widen when switch-mode throughput matters.
+        //
+        // Set on the FIRST TUNSETIFF: the kernel's flag-update
         // path on a second TUNSETIFF (`tun.c:2744`) requires
         // re-attach (`:2729`) which fails on an already-attached
         // fd — there's no "change flags only" ioctl.
-        let want_vnet = cfg.vnet_hdr && cfg.mode == Mode::Tun;
         #[allow(clippy::cast_possible_truncation)]
         let flags = match cfg.mode {
-            Mode::Tun if want_vnet => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
-            Mode::Tun => libc::IFF_TUN,
+            Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
         } as i16;
 
@@ -204,23 +190,16 @@ impl Tun {
             Mode::Tun => None,
         };
 
-        // ─── TUNSETOFFLOAD (Phase 2a) ──────────────────────────
-        // Only on TUN (router mode). TAP would work too (kernel
-        // supports it) but `tso_split` synthesizes an eth header,
-        // which is wrong for TAP (real eth already there). Widen
-        // when switch mode matters — it doesn't today (the gate is
-        // iperf3 over routed v4).
-        //
+        // ─── TUNSETOFFLOAD (Phase 2a, TUN only) ────────────────
         // Feature-detect: `TUNSETOFFLOAD` returns `EINVAL` for
         // unknown flags (`tun.c:2886` "gives the user a way to test
-        // for new features"). `TUN_F_TSO4/6` is kernel 2.6.27, so
-        // this never fails in practice on the kernels we support —
-        // but if it does (custom kernel without `CONFIG_TUN`
-        // offload), the kernel still prepends a 10-byte all-zero
-        // vnet_hdr (IFF_VNET_HDR is set) but never GSOs. The
-        // drain() override handles this: gso_type=NONE → strip
-        // header, single frame. Degrades gracefully.
-        let vnet_hdr = if want_vnet {
+        // for new features"). `TUN_F_TSO4/6` is kernel 2.6.27 —
+        // never fails in practice. If it did (custom kernel without
+        // `CONFIG_TUN` offload), IFF_VNET_HDR is already set so
+        // reads HAVE the 10-byte prefix, just always gso_type=NONE.
+        // drain() handles that: strip header, single frame. Degrades
+        // gracefully.
+        if cfg.mode == Mode::Tun {
             match tunsetoffload(fd.as_raw_fd()) {
                 Ok(()) => {
                     log::info!(target: "tinc_device",
@@ -232,21 +211,13 @@ impl Tun {
                                 vnet_hdr active but no TSO");
                 }
             }
-            // `vnet_hdr` is true regardless of TUNSETOFFLOAD result:
-            // IFF_VNET_HDR is already set on the device (the first
-            // TUNSETIFF above), so reads HAVE the 10-byte prefix.
-            // The drain() override must run.
-            true
-        } else {
-            false
-        };
+        }
 
         Ok(Tun {
             fd,
             iface,
             mode: cfg.mode,
             mac,
-            vnet_hdr,
         })
     }
 }
@@ -493,101 +464,47 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
 // Device trait — read/write with the offset trick
 
 impl Device for Tun {
-    /// `read_packet` (`linux/device.c:144-183`). The +10 offset
-    /// trick for TUN. See lib.rs module doc for the full layout
-    /// explanation.
+    /// `read_packet` (`linux/device.c:144-183`). TAP only.
+    ///
+    /// TUN doesn't go through here: `drain()` is overridden and
+    /// reads directly via `read_fd` (vnet_hdr layout). The trait
+    /// default `drain` calls `self.read()`, but our override
+    /// doesn't. The C `:146-165` +10 tun_pi trick is gone (no
+    /// tun_pi with `IFF_NO_PI`); see git history at `1da3d1d7^`
+    /// for the archaeology.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.mode {
-            // ─── TUN
-            // C `:146-165`. Read at +10, memset 0..12, return +10.
-            Mode::Tun => {
-                // `MTU - 10` is the C's `read(fd, buf+10, MTU-10)`.
-                // We slice `buf[10..]` and let `read()` fill what
-                // it fills. The slice MUST be at least `MTU` long
-                // for the C-compat read length cap. Daemon's
-                // `data[MAXSIZE]` is 1673; `1673 - 12 (offset) =
-                // 1661 > 1518`. Fine.
-                //
-                // `debug_assert` not `assert`: the daemon owns the
-                // buffer; this is a contract violation if it's too
-                // short, not a runtime error. Debug catches it.
-                debug_assert!(
-                    buf.len() >= MTU,
-                    "buf too small for TUN read: {} < {MTU}",
-                    buf.len()
-                );
+        // TUN: dead path since Phase 2a (vnet drain bypasses).
+        // If this fires, drain() got de-overridden.
+        debug_assert_eq!(
+            self.mode,
+            Mode::Tap,
+            "Tun::read on Mode::Tun; vnet drain() should read \
+             directly. Is drain() still overridden?"
+        );
 
-                // `min(MTU - 10)` caps the read. The kernel's TUN
-                // driver returns one packet per read (datagram
-                // semantics — it's `read` not `recv` but TUN
-                // behaves like a datagram socket). A packet larger
-                // than the read buffer is TRUNCATED by the kernel
-                // (`tun_put_user` clips). C reads `MTU-10` so
-                // packets > MTU-10+4 (the tun_pi header counts)
-                // truncate. We match.
-                //
-                // `..MTU` upper bound on the slice — the read
-                // can't write past `buf[MTU-1]`. Same cap.
-                let dst = &mut buf[10..MTU];
-                let n = read_fd(self.fd.as_raw_fd(), dst)?;
-
-                // C `:149`: `if(inlen <= 0)`. `read_fd` already
-                // converted `<0` to Err. `0` is EOF — TUN never
-                // EOFs (the device is always there until close,
-                // and we'd have closed it ourselves). C errors on
-                // `==0` too (the `<=0` test); we match. STRICTER
-                // would be a distinct error message ("unexpected
-                // EOF"); C just `strerror(errno)` which is
-                // "Success" for `inlen==0`, ugly. We say so.
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "TUN device returned EOF (this shouldn't happen)",
-                    ));
-                }
-
-                // C `:162`: `memset(DATA, 0, 12)`. Src-MAC zeroing
-                // overwrites `tun_pi.flags` at [10..12] (always 0
-                // on rx anyway). Bytes [0..10] hold the previous
-                // packet's data (`vpn_packet_t` reused); memset
-                // matters.
-                buf[..12].fill(0);
-
-                // C `:163`: `packet->len = inlen + 10`. The 10 is
-                // the synthetic-header bytes (well, 14, but the
-                // ethertype 2 bytes were inside `inlen` as
-                // `tun_pi.proto`). 10 = 14 (ether) - 4 (tun_pi).
-                Ok(n + 10)
-            }
-
-            // ─── TAP
-            // C `:167-179`. Direct read, no offset, no memset.
-            // `IFF_NO_PI` means no `tun_pi` prefix; the kernel
-            // hands us raw ethernet.
-            Mode::Tap => {
-                debug_assert!(
-                    buf.len() >= MTU,
-                    "buf too small for TAP read: {} < {MTU}",
-                    buf.len()
-                );
-                let dst = &mut buf[..MTU];
-                let n = read_fd(self.fd.as_raw_fd(), dst)?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "TAP device returned EOF",
-                    ));
-                }
-                Ok(n)
-            }
+        // ─── TAP ───────────────────────────────────────────────
+        // C `:167-179`. `IFF_NO_PI` → no `tun_pi` prefix; raw
+        // ethernet. Direct read, no offset, no memset.
+        debug_assert!(
+            buf.len() >= MTU,
+            "buf too small for TAP read: {} < {MTU}",
+            buf.len()
+        );
+        let dst = &mut buf[..MTU];
+        let n = read_fd(self.fd.as_raw_fd(), dst)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "TAP device returned EOF",
+            ));
         }
+        Ok(n)
     }
 
-    /// `write_packet` (`linux/device.c:185-211`). The inverse of
-    /// the +10 trick for TUN.
+    /// `write_packet` (`linux/device.c:185-211`).
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
-            // ─── TUN with vnet_hdr (Phase 2a) ──────────────────
+            // ─── TUN (vnet_hdr) ────────────────────────────────
             // `IFF_NO_PI | IFF_VNET_HDR`: kernel expects
             // `[vnet_hdr(10)][raw IP]` on write (`tun_get_user`
             // at `tun.c:1731`). The daemon's `buf` is
@@ -607,7 +524,10 @@ impl Device for Tun {
             //
             // Phase 2b (GRO TUN write) will fill in a real vnet_hdr
             // here for coalesced ACK bursts. For now: zeros.
-            Mode::Tun if self.vnet_hdr => {
+            //
+            // The C `:188-196` +10 tun_pi write is gone: with
+            // IFF_NO_PI there's no tun_pi prefix to construct.
+            Mode::Tun => {
                 debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
                 // Ethertype → 0. Bytes [4..12] are already 0
                 // (synth MACs); [12..14] is ethertype.
@@ -616,25 +536,6 @@ impl Device for Tun {
                 // `4 = ETH_HLEN - VNET_HDR_LEN`. Write from there:
                 // 10 zero bytes (vnet_hdr) + IP packet.
                 write_fd(self.fd.as_raw_fd(), &buf[ETH_HLEN - VNET_HDR_LEN..])
-            }
-            // ─── TUN
-            // C `:188-196`. Zero `buf[10..12]` (`tun_pi.flags`),
-            // write `buf[10..]`.
-            Mode::Tun => {
-                // C `:188`: zero `tun_pi.flags` at [10..12].
-                // Ethertype at [12..14] left alone (`route.c` set
-                // it). Idempotent for read-then-write; matters for
-                // synthesized ICMP/ARP. Hence `&mut [u8]`.
-                debug_assert!(buf.len() > 12, "TUN write buf too short");
-                buf[10] = 0;
-                buf[11] = 0;
-
-                // C `:190`: write at +10; ethertype passes through
-                // as `tun_pi.proto`. TUN write is datagram-atomic.
-                // Returned count is kernel write count, NOT `+10`
-                // (stats want "bytes to kernel").
-                let n = write_fd(self.fd.as_raw_fd(), &buf[10..])?;
-                Ok(n)
             }
 
             // ─── TAP
@@ -676,13 +577,12 @@ impl Device for Tun {
     /// `gso_type==TCPV4/6`: strip vnet_hdr, return `Super{..}`.
     /// The daemon calls `tso_split` on the contiguous buffer.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
-        if !self.vnet_hdr {
-            // Non-vnet path: the default `read()`-in-a-loop. The
-            // explicit body (instead of calling some `default_drain`
-            // helper) is intentional: the trait default IS the
-            // shared code, but we can't call it from an override.
-            // This is the same loop, copied. Low-risk: it's been
-            // exercised by every test since Phase 0.
+        if self.mode == Mode::Tap {
+            // TAP: no vnet_hdr (see `flags` in `Tun::open`). The
+            // trait default's `read()`-in-a-loop is the right
+            // shape, but we can't call the trait default from an
+            // override. Inline it. Same loop the BSD/mock paths
+            // inherit for free.
             let cap = cap.min(arena.cap());
             let mut n = 0;
             while n < cap {
@@ -702,7 +602,7 @@ impl Device for Tun {
             });
         }
 
-        // ─── vnet_hdr path ───────────────────────────────────
+        // ─── TUN: vnet_hdr path ──────────────────────────────
         // ONE read into the contiguous arena. A super-packet can be
         // 65535 + 10 bytes; `as_contiguous_mut` is `cap*STRIDE` =
         // 64*1600 = 102400 bytes. Fits.
@@ -921,22 +821,23 @@ mod tests {
     /// IFF_TUN`. JUST IFF_TUN, no IFF_NO_PI — we want the tun_pi
     /// prefix for the ethertype-slot trick.
     ///
-    /// Tap mode flags match `:86`: `IFF_TAP | IFF_NO_PI`. Don't
-    /// want tun_pi, do want raw ethernet.
+    /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (Phase 2a;
+    /// wg-go `tun_linux.go:566` does the same). TAP flags match
+    /// C `:86`: `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
+    /// `Tun::open`'s flag computation gets caught.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
-    fn mode_flags_match_c() {
-        // The flags computation from `Tun::open`, factored as a
-        // local fn for testability. (The actual `open` inlines
-        // it; this is the test seam.)
-        // `match` as expression: parens for the `as` cast.
+    fn mode_flags() {
+        // Mirrors `Tun::open`. The actual open inlines it; this
+        // is the test seam.
         let flags_for = |mode: Mode| -> i16 {
             (match mode {
-                Mode::Tun => libc::IFF_TUN,
+                Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
                 Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
             }) as i16
         };
-        assert_eq!(flags_for(Mode::Tun), 0x1);
+        // 0x0001 | 0x1000 | 0x4000 = 0x5001.
+        assert_eq!(flags_for(Mode::Tun), 0x5001);
         assert_eq!(flags_for(Mode::Tap), 0x1002);
     }
 
@@ -1055,36 +956,21 @@ mod tests {
         );
     }
 
-    // The +10 offset trick — testable without a TUN device
+    // The vnet write-path layout trick — testable without a TUN
 
-    /// The TUN-mode "+10" offset. `14 (ethernet header) - 4 (tun_
-    /// pi)`. The arithmetic is the documentation; pin it.
-    ///
-    /// `tun_pi { u16 flags; be16 proto }` = 4 bytes.
-    /// `ether_header { u8 dhost[6]; u8 shost[6]; u16 type }` = 14.
-    /// Reading at +10 puts `tun_pi.proto` at byte 12, which is
-    /// `ether_header.type` from byte 0. Same field, different
-    /// name.
+    /// The vnet write-path arithmetic. The daemon's buf is
+    /// `[synth eth(14)][IP]`. The kernel wants `[vnet_hdr(10)]
+    /// [IP]`. Writing from `buf[ETH_HLEN - VNET_HDR_LEN..]` after
+    /// zeroing the ethertype gives `[10 zero bytes][IP]` because
+    /// the synth eth header's bytes [4..12] are already zero (the
+    /// fake src MAC). This pins that the offset is 4, not 0 or 10.
     #[test]
-    fn tun_offset_arithmetic() {
-        const TUN_PI: usize = 4;
-        const ETHER_HEADER: usize = 14;
-        const ETHERTYPE_OFFSET: usize = 12; // dhost(6) + shost(6)
-        assert_eq!(ETHER_HEADER - TUN_PI, 10);
-        // Reading at +10 means byte 0 of read is byte 10 of buf.
-        // tun_pi.proto is at byte 2 of read (after flags).
-        // 10 + 2 = 12 = ethertype slot.
-        assert_eq!(10 + 2, ETHERTYPE_OFFSET);
-    }
-
-    /// The TUN-mode memset bound. `memset(DATA, 0, 12)` zeroes
-    /// dhost(6) + shost(6) but NOT ethertype(2). The C wants to
-    /// keep ethertype (it's the kernel-provided `tun_pi.proto`).
-    /// Zeroing 12, not 14, is the keep.
-    #[test]
-    fn tun_memset_bound() {
-        // Dhost + shost, NOT ethertype.
-        assert_eq!(12, 6 + 6);
-        // If it were 14, we'd zero ethertype too. Bad.
+    fn vnet_write_offset_arithmetic() {
+        assert_eq!(ETH_HLEN - VNET_HDR_LEN, 4);
+        // The 10 bytes at buf[4..14] become the vnet_hdr:
+        //   [4..6]   was synth dst MAC bytes 4-5: 0
+        //   [6..12]  was synth src MAC: 0
+        //   [12..14] was ethertype: stomped to 0 in write()
+        // All zero → valid `gso_type=NONE` vnet_hdr.
     }
 }

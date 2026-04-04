@@ -286,16 +286,6 @@ impl Node {
             1
         };
         tinc_conf.push_str(&format!("PingTimeout = {pingtimeout}\n"));
-        // Phase 2a TSO ingest. Only on Rust alice (the iperf3
-        // sender; she's the one reading super-segments). The C
-        // tincd doesn't know this option (silently ignored). Gated
-        // on TINCD_GSO=1 so the gate can be run with/without to
-        // measure the delta. Both alice (sender, reads supers) AND
-        // bob (receiver, writes decrypted segments through vnet) —
-        // exercising both halves of the vnet path under load.
-        if std::env::var_os("TINCD_GSO").is_some() && matches!(self.which, Impl::Rust) {
-            tinc_conf.push_str("ExperimentalGSO = yes\n");
-        }
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         std::fs::write(

@@ -2,20 +2,14 @@
 //! vtable of fn pointers; here it's a trait, daemon stores
 //! `Box<dyn Device>`. C `setup`/`close` become constructor + `Drop`.
 //!
-//! ## The TUN-mode offset trick (`linux/device.c:148-167`)
+//! ## Linux TUN: vnet_hdr (Phase 2a)
 //!
-//! Read at `+10` so `tun_pi.proto` lands on the ethertype slot,
-//! then memset the MACs. `+10 = 14 (ether header) − 4 (tun_pi)`.
+//! `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`. Reads are `[virtio_net_
+//! hdr(10)][raw IP]`; the eth header is synthesized by `drain()` or
+//! `tso_split`. The C's `+10` `tun_pi` trick (`linux/device.c:
+//! 148-167`) is gone — it was a workaround for not having vnet_hdr.
 //!
-//! ```text
-//!   12-17  dst MAC    = 00:00:00:00:00:00  (memset)
-//!   18-23  src MAC    = 00:00:00:00:00:00  (memset, overwrites tun_pi.flags)
-//!   24-25  ethertype  = tun_pi.proto       (kernel wrote, we kept)
-//!   26..   payload    = IP packet
-//! ```
-//!
-//! TAP mode reads at `+0` (`IFF_NO_PI`, real frames). Write path is
-//! the inverse: TUN zeroes `tun_pi.flags` then writes from `+10`.
+//! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No vnet_hdr.
 //!
 //! ## Not ported
 //!
@@ -96,14 +90,6 @@ pub struct DeviceConfig {
     /// Resolved mode (`device.c:77-89`). NOT `Option`: an unset
     /// `ifr_flags` is `EINVAL` on `TUNSETIFF`.
     pub mode: Mode,
-
-    /// `IFF_VNET_HDR + TUNSETOFFLOAD` — the Phase 2a TSO ingest
-    /// path. `RUST_REWRITE_10G.md`. Feature-gated: get TCP seqno
-    /// wrong in `tso_split` and the inner stream silently corrupts.
-    /// Default OFF; set by `-o ExperimentalGSO=on`. Only honored
-    /// for `Mode::Tun` (TAP would need `tso_split` to preserve the
-    /// real eth header instead of synthesizing one).
-    pub vnet_hdr: bool,
 }
 
 impl Default for Mode {

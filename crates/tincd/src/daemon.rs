@@ -1832,23 +1832,11 @@ impl Daemon {
                 // free). The netns test precreates so it can move the
                 // device into a child netns AFTER the daemon attaches
                 // (the fd→device binding survives `ip link set netns`).
-                // `ExperimentalGSO = on` → IFF_VNET_HDR + TUNSETOFFLOAD.
-                // `RUST_REWRITE_10G.md` Phase 2a: kernel TCP stops
-                // segmenting, hands us ≤64KB super-segments, daemon does
-                // userspace TSO-split. Feature-gated: get TCP seqno wrong
-                // and the inner stream silently corrupts. Default OFF.
-                // Gate test: `tests/netns.rs::tso_ingest_stream_integrity`.
-                let vnet_hdr = config
-                    .lookup("ExperimentalGSO")
-                    .next()
-                    .and_then(|e| e.get_bool().ok())
-                    .unwrap_or(false);
                 let cfg = tinc_device::DeviceConfig {
                     iface: config
                         .lookup("Interface")
                         .next()
                         .map(|e| e.get_str().to_owned()),
-                    vnet_hdr,
                     ..Default::default()
                 };
                 let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
@@ -2222,8 +2210,8 @@ impl Daemon {
             device_io,
             device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
             // Lazy: only allocated on first `DrainResult::Super`.
-            // The non-vnet path (default; ExperimentalGSO=off) never
-            // reaches that arm and never spends the 100KB.
+            // TAP and non-Linux backends never produce Super,
+            // never spend the 100KB.
             tso_scratch: None,
             tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
             // None: the send site only stages when inside

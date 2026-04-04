@@ -392,18 +392,10 @@ impl Node {
             tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
         }
         tinc_conf.push_str("PingTimeout = 1\n");
-        // Phase 2a TSO ingest gate (`tso_ingest_stream_integrity`).
-        // Only on the SENDER (alice): she's the one reading super-
-        // segments from her TUN. Bob (receiver) writes decrypted
-        // segments back into his TUN — those are MTU-sized already
-        // (alice's tso_split produced them); no need for vnet_hdr
-        // on bob's side. Keeping bob on the non-vnet path also
-        // isolates the test: a failure means alice's tso_split is
-        // wrong, not bob's vnet_hdr write path.
-        if std::env::var_os("TINCD_TEST_GSO").is_some() && self.name == "alice" {
-            // `get_bool` accepts only `yes`/`no` (C `strcasecmp`).
-            tinc_conf.push_str("ExperimentalGSO = yes\n");
-        }
+        // Linux TUN unconditionally uses IFF_VNET_HDR (Phase 2a).
+        // `real_tun_ping`/`real_tun_unreachable` exercise the
+        // GSO_NONE path (ICMP → gso_none_checksum + eth synth);
+        // `tso_ingest_stream_integrity` exercises the Super arm.
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         // hosts/SELF — Port + Subnet.
@@ -809,13 +801,6 @@ fn real_tun_unreachable() {
 /// One process either side, no JSON parsing, deterministic.
 #[test]
 fn tso_ingest_stream_integrity() {
-    // Set BEFORE enter_netns so the inner re-exec inherits it.
-    // SAFETY: single-threaded at this point (before bwrap re-exec
-    // and before any daemon spawn). The libtest harness runs each
-    // test on its own thread, but no other thread reads the env
-    // until we spawn() below.
-    unsafe { std::env::set_var("TINCD_TEST_GSO", "1") };
-
     let Some(netns) = enter_netns("tso_ingest_stream_integrity") else {
         return;
     };
