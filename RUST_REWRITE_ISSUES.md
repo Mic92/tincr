@@ -327,6 +327,22 @@ if(n->connection && ...) {                   // :725 — direct neighbor, TCPOnl
 
 **Our port** (`daemon/net.rs`): gate on `n->connection` BEFORE compression — if we're going via PACKET 17, send the original frame and skip the compressor entirely. STRICTER (we never send garbage) and cheaper (no wasted compression work on a path that can't carry the result anyway).
 
+### `-Dcrypto=nolegacy` silently disables documented features (KeyExpire, PriorityInheritance)
+
+**Found by**: gap-audit `bcc5c3e3` (KeyExpire); `tos-inherit` agent (`81c27237`, PriorityInheritance). Both during the same gap-closing pass; same root cause.
+
+Two independent config keys parse correctly, validate correctly, and silently no-op when tinc is built `-Dcrypto=nolegacy`. The docs (`doc/tinc.conf.5`) describe both with no mention of a build-time gate.
+
+**KeyExpire** (`net_setup.c:929-989`): the entire block — `Cipher`/`Digest` config-read, `timeout_add(&keyexpire_timeout, ...)` at `:954`, MAC length parse — is wrapped `#ifndef DISABLE_LEGACY`. The `regenerate_key()` body at `:152-159` is NOT gated, but the only thing that calls it is the timer handler at `:144-149`, which IS. So the daemon parses `KeyExpire = 3600`, stores it in `keylifetime`, and never reads it again. The SPTPS layer's `outseqno` (`sptps.c:116,141`) is the ChaCha20 nonce; it's a `u32` that increments per record and wraps with no check. At ~1.5 Gbps that's ~9 hours to nonce reuse on the same key — which is exactly what `KeyExpire` is meant to bound.
+
+**PriorityInheritance** (`net_packet.c:810-946`): not an `#ifdef` this time but a control-flow short-circuit. `send_udppacket` reads `origpkt->priority` at `:831`, does the `IP_TOS`/`IPV6_TCLASS` setsockopt at `:920-946`. But `:816-819` checks `n->status.sptps` and dispatches to `send_sptps_packet` — which `return`s immediately, never reaching `:831`. `send_sptps_data` (`:965`) has no equivalent. The `route.c:669,765,1063` reads of inner TOS into `packet->priority` are correct; nobody on the SPTPS path consumes that field. The config knob is parsed (`net_setup.c:424`); the route-side read fires; the value dies between route and send.
+
+**Why nobody noticed**: `-Dcrypto=nolegacy` is the recommended build for new deployments (no OpenSSL dep); KeyExpire's failure mode is invisible until you sustain >1 Gbps for >9 hours; PriorityInheritance's failure mode is invisible without per-hop DSCP inspection on the WAN path. Both look like "QoS is hard to debug" rather than "this knob is dead".
+
+**Our port**: both fixed. KeyExpire (`63146c64`): `TimerWhat::KeyExpire` → walk tunnels with validkey, `force_kex`, re-arm. The SPTPS sessions DO support re-KEX (`sptps.c:292-305` `sptps_force_kex` is NOT gated; only the timer-that-calls-it is); we just call it. PriorityInheritance (`81c27237`): TOS read in route, threaded via `Daemon.tx_priority` to the sendto site, setsockopt with per-socket cache. The C's mechanism transplanted to where the C's code path doesn't reach.
+
+**Upstream fix shape**: KeyExpire is move-the-timer-out-of-the-ifdef (~5 lines moved). PriorityInheritance is a `setsockopt` block in `send_sptps_data` reading `((vpn_packet_t*)data)->priority` — except `data` is `const void*` there and may not BE a `vpn_packet_t` (the relay path passes raw SPTPS bytes). The C would need the same threading-via-side-channel we used.
+
 ---
 
 ## Rust-is-WRONG (found by cross-impl testing against C)
