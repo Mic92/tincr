@@ -2580,6 +2580,129 @@ fn dash_l_mlock_wired() {
     }
 }
 
+/// REQ_LOG: live log streaming over the ctl socket. C `control.c:
+/// 133-140` arms the conn; `logger.c:192-218` walks log conns on each
+/// `logger()` call. Our tap pushes to a thread-local buffer drained
+/// once per event-loop turn.
+///
+/// Test shape: connect ctl#1, send REQ_LOG. Connect ctl#2 — the
+/// daemon's `on_unix_accept` logs "Connection from ... (control)"
+/// at Info level. ctl#1 receives that line as `"18 15 <len>\n"` +
+/// `<len>` raw bytes (no trailing `\n`, `send_meta`).
+#[test]
+fn req_log_streams() {
+    use std::io::Read;
+
+    let tmp = tmp("req-log");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
+    // the stderr filter. The "Connection from" log is Info; stderr
+    // won't print it but the tap MUST capture it (set_active bumps
+    // max_level to Trace).
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env("RUST_LOG", "warn")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket), "tincd didn't start; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    let cookie = read_cookie(&pidfile);
+
+    // ─── ctl#1: greeting + REQ_LOG ────────────────────────────────
+    let log_stream = UnixStream::connect(&socket).unwrap();
+    log_stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut log_r = BufReader::new(&log_stream);
+    let mut log_w = &log_stream;
+    writeln!(log_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    log_r.read_line(&mut greet).unwrap();
+    assert_eq!(greet, "0 testnode 17.7\n");
+    let mut ack = String::new();
+    log_r.read_line(&mut ack).unwrap();
+    assert!(ack.starts_with("4 0 "));
+
+    // `tincctl.c:649`: `"18 15 <level> <use_color>"`. level=0 maps
+    // to Info on the daemon side; the "Connection from" log we'll
+    // trigger is Info. use_color=0 (ignored anyway).
+    writeln!(log_w, "18 15 0 0").unwrap();
+    // No reply (C `control.c:140`: `return true` without control_ok).
+
+    // ─── ctl#2: trigger an Info-level log inside the daemon ────
+    // `on_unix_accept` logs "Connection from localhost port unix
+    // (control)" at Info. That happens INSIDE the event loop turn
+    // that processes the accept; flush_log_tap drains it at the
+    // bottom of the same turn.
+    let trigger = UnixStream::connect(&socket).unwrap();
+    let mut trig_r = BufReader::new(&trigger);
+    let mut trig_w = &trigger;
+    writeln!(trig_w, "0 ^{cookie} 0").unwrap();
+    // Drain the greeting so this conn is fully established (the
+    // daemon's accept is async; reading proves the round trip).
+    let mut t1 = String::new();
+    trig_r.read_line(&mut t1).unwrap();
+    let mut t2 = String::new();
+    trig_r.read_line(&mut t2).unwrap();
+
+    // ─── read on ctl#1: framed log line ────────────────────────────
+    // Format: `"18 15 <len>\n"` then `<len>` raw bytes. There may
+    // be MULTIPLE log lines (the REQ_LOG arm itself doesn't log,
+    // but the trigger conn's accept + greeting may produce >1).
+    // Read until we find the "Connection from" message.
+    let mut found = false;
+    for _ in 0..10 {
+        let mut header = String::new();
+        let n = log_r.read_line(&mut header).expect("log header read");
+        assert_ne!(n, 0, "EOF before log line; header: {header:?}");
+        let header = header.trim_end();
+        let mut parts = header.split_whitespace();
+        assert_eq!(parts.next(), Some("18"), "CONTROL: {header:?}");
+        assert_eq!(parts.next(), Some("15"), "REQ_LOG: {header:?}");
+        let len: usize = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("len field: {header:?}"));
+
+        // Body: `len` raw bytes, NO newline (`send_meta`).
+        let mut body = vec![0u8; len];
+        log_r.read_exact(&mut body).expect("log body read");
+        let msg = String::from_utf8_lossy(&body);
+
+        // The bare `args()` from the log macro — no env_logger
+        // timestamp/level prefix (log_tap pushes `r.args().to_string()`).
+        if msg.contains("Connection from") && msg.contains("(control)") {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "never received 'Connection from ... (control)' log line"
+    );
+
+    // ─── cleanup ─────────────────────────────────────────────────
+    drop(trigger);
+    drop(log_stream);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// `ProcessPriority = bogus` → error logged, daemon CONTINUES.
 /// C `tincd.c:690-693`: `goto end` on bad priority. We diverge: log
 /// and continue (apply_process_priority is best-effort). The C

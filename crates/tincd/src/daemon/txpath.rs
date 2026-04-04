@@ -1185,4 +1185,63 @@ impl Daemon {
             }
         }
     }
+
+    /// `logger.c:192-218`: walk conns with `status.log`, send each
+    /// log line. C does this INSIDE `logger()` (synchronously); we
+    /// drain the thread-local tap buffer once per event-loop turn.
+    ///
+    /// C `:213-214`: `send_request(c, "%d %d %lu", CONTROL, REQ_LOG,
+    /// msglen)` then `send_meta(c, message, msglen)`. The first is a
+    /// newline-terminated header; the second is RAW bytes (no `\n`).
+    /// CLI `tincctl.c:658`: `recvline()` for the header, `recvdata()`
+    /// for `len` bytes.
+    ///
+    /// C `:205`: per-conn level filter. `level > c->log_level` →
+    /// skip. Our `log::Level` ordering is INVERTED (Error=1 < Trace=5
+    /// in the enum, but Error is "higher" priority). `<=` is "this
+    /// level or more important": `Level::Info <= Level::Debug` is
+    /// true (Info passes a Debug-level filter).
+    pub(super) fn flush_log_tap(&mut self) {
+        let drained = crate::log_tap::drain();
+        if drained.is_empty() {
+            return;
+        }
+        // Snapshot log-conn ids: send() borrows `&mut conn`.
+        let log_conns: Vec<_> = self
+            .conns
+            .iter()
+            .filter_map(|(id, c)| c.log_level.map(|lv| (id, lv)))
+            .collect();
+        if log_conns.is_empty() {
+            // Gate is open but no log conns (race: REQ_LOG arrived
+            // and the conn died in the same turn). Drop on the floor.
+            return;
+        }
+        let mut nw = false;
+        for (level, msg) in &drained {
+            for &(id, conn_level) in &log_conns {
+                // C `:205`. `Level` ordering: Error < Warn < Info <
+                // Debug < Trace. `*level <= conn_level` = "at least
+                // as important as the conn wants".
+                if *level > conn_level {
+                    continue;
+                }
+                let Some(conn) = self.conns.get_mut(id) else {
+                    continue;
+                };
+                // C `:213`: header line `"18 15 <len>"`. send()
+                // appends `\n`. C `:214`: raw body, no newline.
+                nw |= conn.send(format_args!(
+                    "{} {} {}",
+                    tinc_proto::Request::Control as u8,
+                    crate::proto::REQ_LOG,
+                    msg.len()
+                ));
+                nw |= conn.send_raw(msg.as_bytes());
+            }
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
+    }
 }

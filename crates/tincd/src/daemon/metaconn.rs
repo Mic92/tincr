@@ -497,6 +497,31 @@ impl Daemon {
                         let conn = self.conns.get_mut(id).expect("not terminated");
                         let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_TRAFFIC);
                         (DispatchResult::Ok, nw2)
+                    } else if let DispatchResult::Log(level) = r {
+                        // C `control.c:133-140`: `c->status.log = true`,
+                        // `c->log_level = CLAMP(level, ...)`, `logcontrol
+                        // = true`. No reply (C `:140`: `return true`
+                        // without `control_ok`). The conn now passively
+                        // receives log records via `flush_log_tap`.
+                        //
+                        // C-level → `log::Level`. C debug levels
+                        // (`logger.h:26-38`): -1=UNSET, 0=ALWAYS,
+                        // 1=CONNECTIONS, ..., 5=TRAFFIC, ..., 10=SCARY.
+                        // Map roughly: 0→Info, 1-2→Debug, 3+→Trace.
+                        // Same shape as `main.rs::debug_level_to_filter`.
+                        // -1 (UNSET) = "use daemon's level"; we use
+                        // Trace (everything the tap captures — the
+                        // daemon's stderr filter already applied).
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        conn.log_level = Some(match level {
+                            i32::MIN..=-1 => log::Level::Trace,
+                            0 => log::Level::Info,
+                            1 | 2 => log::Level::Debug,
+                            _ => log::Level::Trace,
+                        });
+                        // C `:139`: `logcontrol = true`. Our gate.
+                        crate::log_tap::set_active(true);
+                        (DispatchResult::Ok, false)
                     } else {
                         (r, nw)
                     }
@@ -526,7 +551,8 @@ impl Daemon {
                 | DispatchResult::Retry
                 | DispatchResult::Purge
                 | DispatchResult::Disconnect(_)
-                | DispatchResult::DumpTraffic => {
+                | DispatchResult::DumpTraffic
+                | DispatchResult::Log(_) => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

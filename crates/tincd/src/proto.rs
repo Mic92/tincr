@@ -145,6 +145,8 @@ pub(crate) const REQ_PURGE: i32 = 8;
 pub(crate) const REQ_RETRY: i32 = 10;
 pub(crate) const REQ_DISCONNECT: i32 = 12;
 pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
+/// `control_common.h:43`. `tincctl.c:649`: `level, use_color`.
+pub(crate) const REQ_LOG: i32 = 15;
 /// `control_common.h`: `REQ_INVALID = -1`.
 const REQ_INVALID: i32 = -1;
 
@@ -181,6 +183,11 @@ pub enum DispatchResult {
     /// `dump_traffic(c)` (`node.c:226-231`). Walk nodes, emit
     /// `"18 13 NAME in_packets in_bytes out_packets out_bytes"`.
     DumpTraffic,
+    /// `REQ_LOG` (`control.c:133-140`). `c->status.log = true`,
+    /// `c->log_level = level`. C parses `level, colorize`; we parse
+    /// the level and ignore colorize (no ANSI in the tap). `i32` is
+    /// the C debug level (`-1..=10`); daemon maps to `log::Level`.
+    Log(i32),
     /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
@@ -812,6 +819,24 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             (DispatchResult::Disconnect(name), false)
         }
         Some(REQ_DUMP_TRAFFIC) => (DispatchResult::DumpTraffic, false),
+        Some(REQ_LOG) => {
+            // C `:134-135`: `int level = 0, colorize = 0;
+            // sscanf("%*d %*d %d %d", &level, &colorize)`.
+            // Default 0 if missing (C's local-init). Third token.
+            // Colorize (4th) ignored: we send bare `args()` from
+            // log_tap, no ANSI. C `:136`: `CLAMP(level, DEBUG_UNSET,
+            // DEBUG_SCARY_THINGS)` = `[-1, 10]`. The daemon arm
+            // maps to `log::Level`; clamp happens implicitly (the
+            // C-to-Level table has a `_` arm).
+            let level = line
+                .split(|&b| b.is_ascii_whitespace())
+                .filter(|t| !t.is_empty())
+                .nth(2)
+                .and_then(|t| std::str::from_utf8(t).ok())
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            (DispatchResult::Log(level), false)
+        }
         Some(REQ_STOP) => {
             // C `:59-61`: `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
@@ -1270,6 +1295,30 @@ mod tests {
         let (r, nw) = handle_control(&mut c, b"18 13");
         assert_eq!(r, DispatchResult::DumpTraffic);
         assert!(!nw);
+    }
+
+    /// REQ_LOG: parse level. C `control.c:133-140`.
+    #[test]
+    fn control_log() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        // `tincctl.c:649`: `"18 15 <level> <use_color>"`. Level 5.
+        let (r, nw) = handle_control(&mut c, b"18 15 5 0");
+        assert_eq!(r, DispatchResult::Log(5));
+        assert!(!nw);
+
+        // Missing level: C's local-init defaults to 0.
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 15");
+        assert_eq!(r, DispatchResult::Log(0));
+
+        // -1 = DEBUG_UNSET ("use the daemon's level"). The CLI
+        // sends this when no -d given (`tincctl.c:649`).
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 15 -1 1");
+        assert_eq!(r, DispatchResult::Log(-1));
     }
 
     /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.

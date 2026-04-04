@@ -2356,6 +2356,16 @@ impl Daemon {
                     }
                 }
             }
+
+            // ─── log tap drain (logger.c:192-218)
+            // C does this INSIDE `logger()` (synchronously, walking
+            // the conn list per call). We can't — the `log::Log` impl
+            // is `'static` and can't reach `&mut self.conns`. Instead
+            // the impl pushes to a thread-local buffer; drain it here.
+            // Once-per-turn batching is FINE: the C does the same
+            // effective thing (log lines accumulate in outbuf until
+            // the next WRITE event anyway).
+            self.flush_log_tap();
         }
 
         log::info!(target: "tincd", "Terminating");

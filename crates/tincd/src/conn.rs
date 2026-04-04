@@ -209,6 +209,13 @@ pub struct Connection {
     pub host_weight: Option<i32>,
     /// `hosts/NAME` `PMTU` (`protocol_auth.c:1003`).
     pub host_pmtu: Option<u16>,
+    /// `c->status.log` + `c->log_level` (`connection.h:51,112`). When
+    /// `Some`, this conn receives REQ_LOG records for messages at or
+    /// above the level. C uses C debug-level ints (`-1..=10`); we map
+    /// to `log::Level` at the REQ_LOG arm. `c->status.log_color` is
+    /// not stored: we don't ANSI-format (env_logger does, but we
+    /// send the bare `args()` — see `log_tap.rs`).
+    pub log_level: Option<log::Level>,
 }
 
 /// Events from one `feed()`. Order matters: an `ADD_EDGE` before a
@@ -268,6 +275,7 @@ impl Connection {
             host_clamp_mss: None,
             host_weight: None,
             host_pmtu: None,
+            log_level: None,
         }
     }
 
@@ -303,6 +311,7 @@ impl Connection {
             host_clamp_mss: None,
             host_weight: None,
             host_pmtu: None,
+            log_level: None,
         }
     }
 
@@ -346,6 +355,7 @@ impl Connection {
             host_clamp_mss: None,
             host_weight: None,
             host_pmtu: None,
+            log_level: None,
         }
     }
 
@@ -379,6 +389,10 @@ impl Connection {
         }
         if self.control {
             v |= 1 << 9;
+        }
+        // Bit 11: `status.log` (`connection.h:51`).
+        if self.log_level.is_some() {
+            v |= 1 << 11;
         }
         v
     }

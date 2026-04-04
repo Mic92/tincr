@@ -639,7 +639,12 @@ fn init_logging(args: &Args) {
         );
     }
 
-    builder.init();
+    // Not `builder.init()`: the tap wraps the env_logger to forward
+    // log lines to REQ_LOG control conns. `build()` then `log_tap::
+    // init` does the same `set_boxed_logger` + `set_max_level` that
+    // `init()` would, with our wrapper around it.
+    let inner = builder.build();
+    tincd::log_tap::init(inner);
 }
 
 fn main() -> ExitCode {

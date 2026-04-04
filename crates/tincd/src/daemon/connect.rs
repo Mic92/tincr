@@ -239,6 +239,7 @@ impl Daemon {
         log::info!(target: "tincd::conn",
                    "Closing connection with {}", conn.name);
         let was_active = conn.active;
+        let was_log = conn.log_level.is_some();
         let conn_name = conn.name.clone();
         // Pre-ACK conns have no node_ids entry (only on_ack inserts).
         let conn_nid = self.node_ids.get(&conn_name).copied();
@@ -247,6 +248,15 @@ impl Daemon {
 
         if let Some(io_id) = self.conn_io.remove(id) {
             self.ev.del(io_id);
+        }
+
+        // C `logger.c:195,203`: `logcontrol = false; ... logcontrol
+        // = true` recompute-during-walk. If this was a log conn,
+        // re-check whether any remain and close the gate if not.
+        // Doing this in `terminate` (not just on EOF) covers all
+        // teardown paths (REQ_DISCONNECT, ping timeout, error).
+        if was_log && !self.conns.values().any(|c| c.log_level.is_some()) {
+            crate::log_tap::set_active(false);
         }
 
         // C `:121-123`: clear the back-ref (node outlives conn).
