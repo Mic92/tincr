@@ -371,6 +371,20 @@ pub struct DaemonSettings {
     /// laptops that don't want a configured-but-unconnected tun0
     /// hanging around. Non-reloadable.
     pub device_standby: bool,
+
+    /// `DhtDiscovery` (Rust extension). BEP 42 port-probe for our public
+    /// v4 + BEP 44 publish keyed by our Ed25519 pubkey. Off by default:
+    /// publishing hands pubkey + candidate addrs to ~8 random DHT nodes
+    /// in cleartext, and the keepalive holds a NAT hole open. For cold-
+    /// start when you don't have one static `Address=`. Non-reloadable.
+    pub dht_discovery: bool,
+
+    /// `DhtBootstrap` (Rust extension). `host:port` seeds. Empty ⇒
+    /// mainline's defaults. Replace, not augment: BEP 42 has no quorum
+    /// threshold, so a single attacker-controlled bootstrap that wins
+    /// the routing-table population race also fakes the port-probe echo
+    /// (⇒ fakes the published `v4=`). NOT SAFE for invitations.
+    pub dht_bootstrap: Vec<String>,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -496,6 +510,8 @@ impl Default for DaemonSettings {
             global_weight: None,
             // C `net_setup.c:57`: `bool device_standby = false`.
             device_standby: false,
+            dht_discovery: false,
+            dht_bootstrap: Vec::new(),
         }
     }
 }
@@ -1514,6 +1530,20 @@ pub struct Daemon {
     /// subscribers and clears the flag) — `terminate()` doesn't need
     /// to know about pcap. The C does the same.
     pub(crate) any_pcap: bool,
+
+    /// DHT actor. `Some` iff `dht_discovery` set and spawn succeeded.
+    /// Polled from `on_periodic_tick`; drop joins the thread.
+    pub(crate) discovery: Option<crate::discovery::Discovery>,
+
+    /// DHT-resolved addrs by node name. Separate map, not stuffed into
+    /// `addr_cache.known`: the edge-walk replaces `known` wholesale on
+    /// every retry; we merge at read time in `setup_outgoing_connection`.
+    pub(crate) dht_hints: HashMap<String, Vec<SocketAddr>>,
+
+    /// Port-probe demux gate (≤3 entries). Cleared/repopulated each
+    /// round so stale targets don't latch a late reply. Why source addr,
+    /// not packet shape: see `handle_incoming_vpn_packet`.
+    pub(crate) dht_probe_sent: HashSet<SocketAddr>,
 }
 
 impl Daemon {
@@ -1808,6 +1838,17 @@ impl Daemon {
         {
             settings.device_standby = v;
         }
+
+        // Rust extension. Non-reloadable.
+        if let Some(e) = config.lookup("DhtDiscovery").next()
+            && let Ok(v) = e.get_bool()
+        {
+            settings.dht_discovery = v;
+        }
+        settings.dht_bootstrap = config
+            .lookup("DhtBootstrap")
+            .map(|e| e.get_str().to_owned())
+            .collect();
 
         // Forwarding (`net_setup.c:426-443`). Default Internal.
         // C errors on unknown.
@@ -2355,6 +2396,9 @@ impl Daemon {
             keyexpire_timer,
             running: true,
             any_pcap: false,
+            discovery: None,
+            dht_hints: HashMap::new(),
+            dht_probe_sent: HashSet::new(),
         };
 
         // ─── try_outgoing_connections — the actual setup
@@ -2399,6 +2443,35 @@ impl Daemon {
         // order doesn't matter for correctness, but doing it last
         // keeps the "load every name from disk" step in one place.
         daemon.load_all_nodes();
+
+        // ─── DHT discovery spawn (Rust extension). After listeners
+        // (need `my_udp_port` resolved). Spawn failure is non-fatal.
+        if daemon.settings.dht_discovery {
+            // SigningKey doesn't impl Clone by design.
+            let key = SigningKey::from_blob(&daemon.mykey.to_blob());
+            let bootstrap = if daemon.settings.dht_bootstrap.is_empty() {
+                None
+            } else {
+                Some(daemon.settings.dht_bootstrap.as_slice())
+            };
+            match crate::discovery::Discovery::spawn(key, daemon.my_udp_port, bootstrap) {
+                Ok(d) => {
+                    log::info!(target: "tincd::discovery",
+                    "DHT discovery enabled (port {}, bootstrap: {})",
+                    daemon.my_udp_port,
+                    bootstrap.map_or(
+                        "mainline".to_owned(),
+                        |b| b.join(", ")
+                    ));
+                    daemon.discovery = Some(d);
+                }
+                Err(e) => {
+                    log::warn!(target: "tincd::discovery",
+                               "DHT actor spawn failed (continuing \
+                                without): {e}");
+                }
+            }
+        }
 
         // ─── tinc-up (net_setup.c:745-762, `device_enable`)
         // C calls this AFTER device open succeeds, BEFORE `Ready`.

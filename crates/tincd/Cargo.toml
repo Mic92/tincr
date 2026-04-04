@@ -21,6 +21,14 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 name = "tincd"
 path = "src/main.rs"
 
+# Standalone DHT seed for sealed-network tests. Own bin (not a tincd flag)
+# because it's a different process shape: server-mode mainline node, no
+# config, no TUN, parks forever. The NixOS DHT test runs ten of these
+# on the relay to make a swarm large enough for K-closest convergence.
+[[bin]]
+name = "tinc-dht-seed"
+path = "src/bin/tinc-dht-seed.rs"
+
 [dependencies]
 tinc-conf = { path = "../tinc-conf" }
 tinc-crypto = { path = "../tinc-crypto" }
@@ -68,6 +76,19 @@ nix = { version = "0.29", default-features = false, features = ["fs", "socket", 
 # NotEnforced at runtime (warn at normal, hard-fail at high).
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+
+# discovery.rs: BitTorrent Mainline DHT for BEP 42 reflexive address voting
+# ("what's my public IP") + BEP 44 publish ("where am I", keyed by Ed25519
+# pubkey). Runs on its own std::thread; polled from on_periodic_tick. The
+# in-band reflexive path (ADD_EDGE/ANS_KEY append) needs a relay with a
+# static Address=; this gives an estimate *before* first contact.
+mainline.workspace = true
+# Background DHT-resolve thread ↔ daemon. Same channel crate mainline
+# uses internally (already in tree as a transitive dep). Non-tokio.
+flume = { version = "0.11", default-features = false }
+# discovery.rs: getifaddrs() for v6 candidate enumeration. The DHT is
+# v4-only; v6 doesn't NAT so the kernel already knows the reachable address.
+if-addrs.workspace = true
 
 # socket2 for the four-step socket→setsockopt→bind→listen sequence.
 # std's TcpListener::bind is atomic, no seam for IPV6_V6ONLY. socket2

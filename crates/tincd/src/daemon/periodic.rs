@@ -162,6 +162,60 @@ impl Daemon {
             self.execute_auto_action(action);
         }
 
+        // ─── DHT discovery poll (Rust extension). tick() may block on
+        // put_mutable (~hundreds of ms); same blocking-is-fine precedent
+        // as the contradicting-edge sleep above.
+        if self.settings.dht_discovery
+            && let Some(d) = self.discovery.as_mut()
+        {
+            for (name, addrs) in d.drain_resolved() {
+                if addrs.is_empty() {
+                    log::debug!(target: "tincd::discovery",
+                                "DHT resolve {name}: no record");
+                } else {
+                    log::info!(target: "tincd::discovery",
+                               "DHT resolved {name}: {addrs:?}");
+                    self.dht_hints.insert(name, addrs);
+                }
+            }
+
+            let r = d.tick(self.timers.now());
+            for ev in r.events {
+                match ev {
+                    crate::discovery::DiscoveryEvent::PublicV4 { ip, firewalled } => {
+                        log::info!(target: "tincd::discovery",
+                                   "DHT voted public v4: {ip} \
+                                    (firewalled={firewalled})");
+                    }
+                    crate::discovery::DiscoveryEvent::Published { seq, value } => {
+                        log::debug!(target: "tincd::discovery",
+                                    "published seq={seq}: {value}");
+                    }
+                }
+            }
+
+            // Port-probe from tincd's *own* socket so the BEP 42 echo
+            // carries the NAT mapping for the correct port. Doubles as
+            // a keepalive (25s cadence vs 30–180s conntrack timeouts).
+            // mainline is v4-only → first v4 listener; no v4 → skip.
+            if r.wants_port_probe
+                && let targets = d.probe_targets()
+                && !targets.is_empty()
+                && let Some(slot) = self.listeners.iter().find(|s| s.listener.local.is_ipv4())
+            {
+                self.dht_probe_sent.clear();
+                for tgt in &targets {
+                    let dst = socket2::SockAddr::from(SocketAddr::V4(*tgt));
+                    let _ = slot
+                        .listener
+                        .udp
+                        .send_to(crate::discovery::PORT_PROBE_PING, &dst);
+                    self.dht_probe_sent.insert(SocketAddr::V4(*tgt));
+                }
+                d.probe_sent(self.timers.now());
+            }
+        }
+
         // :298-300
         self.timers.set(self.periodictimer, Duration::from_secs(5));
 

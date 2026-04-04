@@ -34,6 +34,7 @@ pub mod compress;
 pub mod conn;
 pub mod control;
 pub mod daemon;
+pub mod discovery;
 pub mod dns;
 pub mod egress;
 pub mod fragment;

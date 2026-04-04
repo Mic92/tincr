@@ -401,6 +401,11 @@ impl Daemon {
                 let (addr, port, _, _) = self.edge_addrs.get(&rev)?;
                 local_addr::parse_addr_port(addr.as_str(), port.as_str())
             })
+            // DHT hints chained AFTER edge-walk: edge addrs are
+            // observed-live, DHT addrs are self-report (≤5min stale).
+            // Empty unless `retry_outgoing` fired → degrades to C
+            // edge-walk. `add_known_addresses` dedups.
+            .chain(self.dht_hints.get(&name).into_iter().flatten().copied())
             .collect();
         // get_mut after the read-only walk (split borrow).
         if let Some(o) = self.outgoings.get_mut(oid) {
@@ -585,11 +590,32 @@ impl Daemon {
         // C resets in `setup_outgoing_connection:670`, not here. We
         // didn't port that line; reset HERE so next retry walks from top.
         outgoing.addr_cache.reset();
+        let name = outgoing.node_name.clone();
         log::info!(target: "tincd::conn",
                    "Trying to re-establish outgoing connection in {timeout} seconds");
         if let Some(&tid) = self.outgoing_timers.get(oid) {
             self.timers
                 .set(tid, Duration::from_secs(u64::from(timeout)));
+        }
+
+        // Addr cache exhausted (every `retry_outgoing` call site is
+        // reached via `next_addr()==None`). Fire-and-forget resolve;
+        // result lands in `dht_hints` via `on_periodic_tick`, next
+        // retry reads it. Clear stale hints (a previous resolve gave
+        // addrs, connect still failed ⇒ record outdated). Dedup is
+        // inside `request_resolve` — can't storm.
+        if let Some(d) = self.discovery.as_mut() {
+            self.dht_hints.remove(&name);
+            // Same pubkey-read as `gossip.rs::on_req_key`. No key →
+            // no resolve (couldn't verify SPTPS anyway).
+            let host_file = self.confbase.join("hosts").join(&name);
+            if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+                let mut cfg = tinc_conf::Config::default();
+                cfg.merge(entries);
+                if let Some(key) = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name) {
+                    d.request_resolve(&name, key);
+                }
+            }
         }
     }
 

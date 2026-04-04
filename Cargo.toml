@@ -77,6 +77,22 @@ ed25519-dalek = { version = "3.0.0-pre.6", features = ["hazmat", "digest"] }
 sha2 = "0.11"
 hmac = "0.13"
 subtle = "2.5"
+
+# Discovery (Tier 2a): BitTorrent Mainline DHT for BEP 42 reflexive address
+# voting + BEP 44 mutable item publish. `node` feature only — no `async`, no
+# `futures-lite`. The Dht actor runs on its own std::thread; we poll info()
+# from the periodic timer. tincd's epoll loop never blocks on it.
+#
+# 6.0.x specifically, NOT 6.1: 6.1.1 has `digest = "=0.11.0-rc.10"` which
+# fights cargo's resolver against our digest 0.11 (final release). 6.0.1's
+# `^0.11.0-pre` is compatible with both prerelease and final. Re-check on
+# mainline 7.
+mainline = { version = "6.0", default-features = false, features = ["node"] }
+# Local interface enumeration for v6 candidate addresses. The DHT is a v4
+# island (BEP 32 dual-stack was wontfix'd upstream); v6 doesn't NAT, so the
+# kernel's getifaddrs() already knows the reachable address. libc-only dep.
+if-addrs = "0.15"
+
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

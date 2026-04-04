@@ -296,11 +296,36 @@ pub static VARS: &[Var] = &[
     v("Subnet", H.union(M).union(F)),
     v("TCPOnly", S.union(H).union(F)),
     v("Weight", H.union(F)),
+    // ─── End of C transcription. Rust-side extensions below. ───
+    // Appended, not interleaved: indices [0, 74) match the C array
+    // exactly (the spot_check test asserts the alpha-break boundary at
+    // [48]). Interleaving would shift those. fsck doesn't compare
+    // count[i] across implementations so the index stability is more
+    // documentation than mechanism, but "first 74 entries == C's 74
+    // entries" is the invariant the tripwire enforces.
+    //
+    // DhtBootstrap: SERVER+MULTIPLE (bootstrap nodes are a list, like
+    // ConnectTo). NOT SAFE — an invitation that sets DhtBootstrap routes
+    // every publish + every port-probe to an attacker's seed: they get
+    // the pubkey in cleartext from the BEP 44 put, and they control the
+    // BEP 42 ip echo (can fake the reflexive address we publish). The
+    // threat model resembles ConnectTo (which IS safe) but the DHT is
+    // sideband, not the mesh's authenticated channel. Conservative.
+    v("DhtBootstrap", S.union(M)),
+    // DhtDiscovery: SERVER only, NOT SAFE — turning on DHT publish via
+    // invitation hands a passive observer this node's online/offline
+    // pattern + every published v4/v6 candidate, and opens a NAT hole
+    // (the port-probe keepalive) on a port the operator may not have
+    // intended to expose. Opt-in must be deliberate.
+    v("DhtDiscovery", S),
 ];
 
 /// Transcription tripwire. C has 74 entries (`grep '{"' | wc -l` on
-/// `tincctl.c:1681-1758`). If this fires, count again.
-const _: () = assert!(VARS.len() == 74);
+/// `tincctl.c:1681-1758`). +2 Rust-side keys (DhtDiscovery, DhtBootstrap)
+/// that the C never reads. The C-count check is the one that matters —
+/// drift here means a config key was added/removed upstream and our table
+/// is stale. The +2 is fixed (this crate owns those keys).
+const _: () = assert!(VARS.len() == 74 + 2);
 
 /// Look up by name, case-insensitive. C does this inline everywhere
 /// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We

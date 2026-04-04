@@ -31,4 +31,16 @@
     '';
     ed25519Public = "4Rki6fj1BxpyDLQKOkv+BO9gFA2rptNJyKEIUZa6qTM";
   };
+  # Tier-2b cold-start node (nix/nixos-test-dht.nix). carol's hosts/relay
+  # has the pubkey but NO Address= — she can only reach relay if the
+  # DHT tells her where it is.
+  delta = {
+    ed25519Private = ''
+      -----BEGIN ED25519 PRIVATE KEY-----
+      wVO2JOA/dKa8iqZ/3ySLQUlGnilMeDT+fHU2gfITzc2ATRXOf2Tak2ov7CeOML4G
+      bI7DWHnvEXRy49JpMgRftp7Bfmoz6U/a+M37azWDiEc5HXL1huyQj90qbafyaOOb
+      -----END ED25519 PRIVATE KEY-----
+    '';
+    ed25519Public = "6ewnJ6sO1vmPz9u2s1gIBX+x1SdorM0YPt6m2nsmjzG";
+  };
 }

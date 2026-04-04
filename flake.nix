@@ -253,6 +253,19 @@
             nixos-tinc-nat = pkgs.callPackage ./nix/nixos-test-nat.nix {
               inherit (self'.packages) tincd;
             };
+
+            # Tier-2a/2b DHT discovery: 6 VMs (relay + 10-node DHT
+            # swarm + 2 NAT'd leaves + 1 cold-start node). Asserts
+            # the port-probe learns the NAT mapping for tincd's
+            # socket through real iptables MASQUERADE, the BEP 44
+            # publish carries it, and a node with `ConnectTo=relay`
+            # but no `Address=relay` can connect via DHT resolve.
+            # Slowest VM test (~65s); the unit-test Testnet covers
+            # the same wire format much faster, this proves the
+            # config plumbing + NAT path.
+            nixos-tinc-dht = pkgs.callPackage ./nix/nixos-test-dht.nix {
+              inherit (self'.packages) tincd;
+            };
           };
 
           # The C tincd daemon. Target for crates/tincd/tests/

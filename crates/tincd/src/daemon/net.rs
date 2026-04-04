@@ -306,6 +306,23 @@ impl Daemon {
     /// UDP reflector attack (security audit `2f72c2ba`).
     #[allow(clippy::too_many_lines)] // C `:1718-1842` is 124 LOC
     pub(super) fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
+        // ─── DHT port-probe demux (Rust extension). Gate is source
+        // addr, NOT `pkt[0]==b'd'`: SPTPS's first byte is dst_id6[0] =
+        // sha512(name)[:6][0], uniformly random; ~1/256 of legitimate
+        // traffic starts with 'd'. Spoofing a known target's source addr
+        // is the same threat model as ADD_EDGE's unauthenticated addr.
+        if let Some(peer) = peer
+            && self.dht_probe_sent.contains(&peer)
+            && let Some(reflexive) = crate::discovery::parse_port_probe_reply(pkt)
+            && let Some(d) = self.discovery.as_mut()
+        {
+            if d.set_reflexive_v4(reflexive) {
+                log::info!(target: "tincd::discovery",
+                           "port probe: tincd reflexive v4 = {reflexive}");
+            }
+            return;
+        }
+
         // C `:1736`: 12-byte [dst][src] prefix.
         if pkt.len() < 12 {
             log::debug!(target: "tincd::net",
