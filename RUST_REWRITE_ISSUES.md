@@ -231,7 +231,145 @@ Each of the crypto-compat items (1, 2, 3, 4) is a "two days to implement, two we
 
 ## Upstream C bugs found during the port
 
-### route.c:344 — TTL storm-guard reads wrong byte offsets
+> **Numbering**: the `C-is-WRONG #N` tags in source comments and PLAN.md
+> start at #5. #1–#4 were never assigned. Numbering began with
+> `aeabcaa6` (`tinc-event`, the first daemon-substrate port); earlier
+> findings in `tinc-tools`/`tinc-device` were unnumbered "table grows"
+> entries in commit messages. The unnumbered entries below predate #5
+> chronologically.
+
+### linux/event.c:119 / bsd/event.c:126 — NULL deref when timer tree empties (#5)
+
+**Found by**: tinc-event port (`aeabcaa6`).
+
+```c
+// event.c:116-136
+struct timeval *timeout_execute(struct timeval *diff) {
+    ...
+    struct timeval *tv = NULL;
+    while(timeout_tree.head) { ... tv = diff; break; }
+    return tv;                              // NULL if tree empty
+}
+
+// linux/event.c:116-119
+struct timeval *tv = timeout_execute(&diff);
+...
+long timeout = (tv->tv_sec * 1000) + (tv->tv_usec / 1000);   // ← deref
+
+// bsd/event.c:122-127 — same shape
+struct timeval *tv = timeout_execute(&diff);
+...
+const struct timespec ts = { .tv_sec = tv->tv_sec, ... };    // ← deref
+```
+
+`event_select.c:98` is correct: it passes `tv` straight to `select()`, where NULL means "block forever". The epoll and kqueue backends both deref unconditionally.
+
+**Impact**: SIGSEGV if the daemon ever reaches `event_loop()` with no armed timers. **Masked entirely**: `net.c:489-492` arms `pingtimer` and `periodictimer` before `event_loop()` runs, and both re-arm in their handlers, so `timeout_tree` is never empty in practice. The daemon's well-behaved startup sequence is load-bearing for not crashing.
+
+**Our port** (`tinc-event::tick`): returns `Option<Duration>`; `mio::Poll::poll(None)` blocks forever. The empty-tree case is the type system. `daemon.rs:1939` test comment proves the skeleton exercises both arms. Fixed for free.
+
+### signal.c:76,58 — `signal()` portability + self-pipe leaks into children (#6)
+
+**Found by**: tinc-event port (`aeabcaa6`). Mild; two distinct issues at the same call site.
+
+```c
+// signal.c:57-59
+static void pipe_init(void) {
+    if(!pipe(pipefd)) {                     // no O_CLOEXEC
+        io_add(&signalio, signalio_handler, NULL, pipefd[0], IO_READ);
+    }
+}
+// signal.c:76
+signal(signum, signal_handler);             // not sigaction()
+```
+
+POSIX `signal()` semantics are implementation-defined: SysV resets the disposition to `SIG_DFL` after delivery (one-shot); BSD does not. `man 2 signal` on Linux: "the only portable use of signal() is to set a signal's disposition to SIG_DFL or SIG_IGN". glibc on Linux gives BSD semantics, so SIGHUP keeps working after the first reload — but only by accident of the libc.
+
+The `pipe()` at `:58` doesn't set `O_CLOEXEC`; both ends inherit into `script.c`'s children (`tinc-up`, `host-up`, etc.). The children have a writable fd to the daemon's signal-dispatch self-pipe.
+
+**Impact**: portability hazard (would break on a strict-SysV libc, none of which tinc targets). The fd leak is cosmetic — the children don't write to it, they just have an extra fd in their table. Neither has ever fired.
+
+**Our port** (`tinc-event::sig`): `sigaction()` with `SA_RESTART` explicit; `pipe2(O_CLOEXEC)`. STRICTER on both axes.
+
+### keys.c:141,272 — perm-check mask flags setgid/sticky/dir bits, not just g/o-read (#7)
+
+**Found by**: id_h port (`e27e62b4`).
+
+```c
+// keys.c:141 (also :272 for the RSA path)
+if(s.st_mode & ~0100700u) {
+    logger(..., "Warning: insecure file permissions for ... private key file ...");
+}
+```
+
+`~0100700` masks off `S_IFREG | S_IRWXU` and warns if anything else is set. Intent (per the message) is "warn if group/other can read this" — i.e. `& 0o077`. The actual mask also catches:
+
+| `st_mode` | Warns? | Should warn? |
+|---|---|---|
+| `0100600` (regular file, `-rw-------`) | no | no — correct |
+| `0100640` (`-rw-r-----`) | yes | yes — correct |
+| `0102600` (`S_ISGID`, `-rw---S---`) | **yes** | no — setgid on a file with no group-exec is harmless |
+| `0101600` (sticky, `-rw-----T`) | **yes** | no — sticky bit on a regular file is ignored |
+| symlink-to-`0100600` | **yes** | no — `fstat` follows the link, but `S_IFLNK` would trip if `lstat` were used |
+
+**Impact**: false-positive warnings only; the daemon proceeds. Nobody noticed because nobody sets setgid/sticky on a private key file.
+
+**Our port** (`tincd::keys`): the mask is reproduced byte-for-byte. Cosmetic warning; 1.1 users grep for the C message string. `priv_perm_condition` test pins the boundary cases.
+
+### fd_device.c:72-74 — `CMSG_FIRSTHDR` NULL deref when sender omits ancillary data
+
+**Found by**: fd-backend port (`ffd64613`). Unnumbered (predates #5).
+
+```c
+// fd_device.c:72-74
+cmsgptr = CMSG_FIRSTHDR(&msg);
+if(cmsgptr->cmsg_level != SOL_SOCKET) {     // ← no NULL check
+```
+
+Per `cmsg(3)`: `CMSG_FIRSTHDR()` "returns NULL if there isn't enough space for a `cmsghdr` in the buffer". After `recvmsg`, the kernel updates `msg_controllen` to the size of received control data; if the sender wrote a normal byte with no `SCM_RIGHTS` cmsg, `msg_controllen` is 0 and `CMSG_FIRSTHDR` returns NULL. The C dereferences immediately.
+
+**Impact**: SIGSEGV if the Unix-socket peer sends a byte without an fd attached. **Masked entirely**: the only sender is Android `VpnService`'s Java side (`f5223937`, 2020), which always attaches exactly one fd. Same masked-by-well-behaved-sender class as #5.
+
+**Our port** (`tinc-device::fd`): nix's `RecvMsg::cmsgs()` is an iterator; the empty case is just "no items". Fixed for free.
+
+### fd_device.c:86-90 — multi-fd cmsg leaks the kernel-dup'd extras
+
+**Found by**: fd-backend port (`ffd64613`). Unnumbered (predates #5). Sibling of the NULL-deref above; same masking.
+
+```c
+// fd_device.c:86-90
+if(cmsgptr->cmsg_len != CMSG_LEN(sizeof(device_fd))) {
+    logger(..., "Wrong CMSG data length: %lu, expected %lu!", ...);
+    return -1;                              // fds already in our table
+}
+```
+
+The length check correctly rejects a cmsg carrying 2+ fds. But by the time userspace sees `cmsg_len`, the kernel has already installed all of those fds in the receiver's descriptor table during `recvmsg()` — that's what `SCM_RIGHTS` does. The `return -1` walks away without closing them.
+
+**Impact**: fd leak, one per extra fd, once per daemon lifetime (the receive happens once at startup). **Masked**: Java sends exactly one. An adversarial sender on the Unix socket could exhaust the fd table, but if you have that, you have worse problems.
+
+**Our port**: nix hands back a `Vec<RawFd>`; we close every fd before returning the error. STRICTER.
+
+### tincctl.c:2455-2459 — `cmd_edit` `system()` quoting defeats itself
+
+**Found by**: cmd_edit port (`fee3c7c7`). Unnumbered (predates #5).
+
+```c
+// tincctl.c:2455,2459
+xasprintf(&command, "\"%s\" \"%s\"", editor, filename);
+int result = system(command);
+```
+
+Wrong on two axes simultaneously:
+
+1. **`$EDITOR` with arguments doesn't work.** `EDITOR="vim -f"` produces `system("\"vim -f\" \"...\"")`; the shell sees `"vim -f"` as one word (no field-splitting inside double quotes); `execvp("vim -f", ...)` → ENOENT. The wrapping quotes defeat the very tokenization `system()` would otherwise do. The C never supported spacey `$EDITOR`.
+2. **Filename with `$`/`` ` `` expands.** Double-quotes suppress glob/field-split but NOT parameter expansion or command substitution. `tinc edit '$HOME'` opens the editor on `confbase/hosts/$HOME-expanded`, not the literal.
+
+**Impact**: (1) is the realistic one — `EDITOR="emacsclient -nw"` is common and silently breaks. (2) is trick-yourself (you already have a shell), but a typo'd silent edit of the wrong file is still bad.
+
+**Our port** (`tinc_tools::cmd::edit`): `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` with `TINC_EDITOR` in the child env — the git `editor.c` construction. `$TINC_EDITOR` unquoted (field-splits, so `"vim -f"` works); `"$@"` quoted (filename stays literal). `edit_dollar_in_filename_not_expanded` and `edit_spacey_editor_tokenized` pin both halves. STRICTER.
+
+### route.c:344 — TTL storm-guard reads wrong byte offsets (#8)
 
 **Found by**: route-ipv6 leaf agent (`57b2feeb` commit-msg `CHECK` marker), traced to root.
 
@@ -256,7 +394,7 @@ The 2012 commit's hardcoded `data[25]`/`data[46]` were already wrong; `0ee139e9`
 
 The v6 branch (`route.c:373-374`) has the SAME bug shape: `[ethlen+6]` is correct (`ip6_nxt`) but `[ethlen+40]` reads `icmp6.type` only if there's no extension header — which is the common case, so v6 is mostly-correct by accident.
 
-### proxy.c:201,206 — SOCKS5 auth length size_t→u8 truncation
+### proxy.c:201,206 — SOCKS5 auth length size_t→u8 truncation (#9)
 
 **Found by**: socks-leaf agent (`d988b79f`).
 
@@ -276,7 +414,7 @@ RFC 1929 (SOCKS5 username/password auth) length fields are single bytes; valid r
 
 **Our port** (`socks.rs:163-167`): bound-check, return `BuildError::CredTooLong` at request build time. STRICTER than C. The error surfaces at config load, not at connect time.
 
-### protocol.c:148-161 — HTTP proxy header lines terminate the connection
+### protocol.c:148-161 — HTTP proxy header lines terminate the connection (#10)
 
 **Found by**: inspection while scoping `chunk-12-http-proxy` (`af26db41`). Dormant.
 
@@ -301,7 +439,7 @@ The intercept handles exactly two cases: status line and blank line. Anything el
 
 **Our port** (`metaconn.rs`): mirror the C exactly, mark `TODO(chunk-12-http-proxy-lenient)` for skip-any-line-until-blank. The integration test uses the same headerless server. STRICTER on a different axis: we bracket IPv6 in the CONNECT authority (RFC 7230 §2.7.1); the C `getnameinfo(NUMERIC)` doesn't, producing ambiguous `CONNECT ::1:655 HTTP/1.1` — likely never tested with v6 proxy targets.
 
-### net_packet.c:708-726 — PACKET 17 sends uninitialized header bytes when compression helps
+### net_packet.c:708-726 — PACKET 17 sends uninitialized header bytes when compression helps (#11)
 
 **Found by**: PACKET 17 wiring (`bc62b722`). Dormant.
 
