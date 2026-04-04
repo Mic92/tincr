@@ -404,9 +404,20 @@ impl Daemon {
                 // udp_addr; relayed-to-us would cache the relay's addr.
                 // Once confirmed at the same address this is a no-op:
                 // skip the listener Vec alloc + adapt_socket scan.
+                //
+                // Gate on `cached.is_none() OR addr changed`, NOT just
+                // addr changed. `gossip.rs:803` (BecameReachable) and
+                // `txpath.rs:1027` (UDP_INFO) seed `udp_addr` from
+                // edge_addr while clearing `udp_addr_cached`. If the
+                // peer then sends from that same addr (common: edge
+                // addr IS the source addr in a direct setup), the old
+                // `udp_addr != Some(peer_addr)` gate was false and the
+                // cache stayed None forever — every send fell through
+                // to `choose_udp_address` (the "2.18% self-time" cold
+                // path this cache was built to avoid).
                 let direct = dst_id.is_null();
                 if let Some(peer_addr) = peer.filter(|_| direct)
-                    && tunnel.udp_addr != Some(peer_addr)
+                    && (tunnel.udp_addr_cached.is_none() || tunnel.udp_addr != Some(peer_addr))
                 {
                     let listener_addrs: Vec<SocketAddr> =
                         self.listeners.iter().map(|s| s.listener.local).collect();
@@ -575,11 +586,40 @@ impl Daemon {
             }
             tinc_device::DrainResult::Frames { count } => {
                 self.device_errors = 0; // C `:1931`
-                // EXACTLY today's per-frame loop body. The arena
-                // slot is what the stack `buf[..n]` was. Phase 1
-                // will batch the encrypt+send across slots; Phase
-                // 0 walks them one at a time, semantically
-                // identical to the old loop.
+                // Phase 1 (`RUST_REWRITE_10G.md`): same per-frame
+                // route+encrypt loop, but the SEND is deferred.
+                // `tx_batch` being `Some` signals the send site
+                // (`send_sptps_data_relay` UDP path) to stage
+                // instead of `sendto`. After the loop, ship the
+                // accumulated run in one `EgressBatch` (one
+                // `sendmsg` with `UDP_SEGMENT` cmsg on Linux).
+                //
+                // The encrypt still goes into `tx_scratch` per-
+                // frame (Phase 0 unchanged); the batch COPIES from
+                // there. One extra ~1.5KB memcpy per frame vs
+                // 43× fewer syscalls. Phase 3 (par-encrypt) will
+                // encrypt directly into batch slots; for now the
+                // memcpy is the price of not restructuring
+                // `seal_data_into`'s Vec-based API.
+                //
+                // Lazy init: the ~100KB buffer only allocates the
+                // first time a device read fires. A tunnelserver
+                // (no local TUN) never gets here.
+                //
+                // Gate on `count > 1`: with one frame per drain,
+                // staging is pure overhead (one extra ~1.5KB memcpy
+                // tx_scratch → batch.buf, then a count=1 send that's
+                // identical to immediate-send). The TUN under iperf3
+                // saturation backlogs and `drain` reads many; an
+                // idle ping fires epoll per-frame and hits count=1.
+                // Don't tax the latter for the former. The send
+                // site sees `tx_batch.is_none()` and falls through
+                // to the Phase-0 immediate path.
+                if count > 1 && self.tx_batch.is_none() {
+                    self.tx_batch = Some(crate::egress::TxBatch::new(
+                        DEVICE_DRAIN_CAP * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                    ));
+                }
                 for i in 0..count {
                     let n = arena.lens()[i];
                     // C `:1928-1929`
@@ -589,8 +629,22 @@ impl Daemon {
 
                     // C `:1930`. `slot_mut` because route_packet
                     // mutates (overwrite_mac, fragment in-place).
+                    // The send site sees `tx_batch.is_some()` and
+                    // stages; or flushes-then-stages on dst/size
+                    // mismatch; or falls through to immediate send
+                    // for the cold path (no `udp_addr_cached`).
                     nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
                 }
+                // Ship whatever's left in the batch. The common
+                // case (iperf3 TCP burst to one peer): one run,
+                // `count` frames, one sendmsg.
+                self.flush_tx_batch();
+                // Re-disarm: the send site outside this loop
+                // (UDP-recv→forward, meta-conn→relay, probes) goes
+                // back to immediate-send. The batch only makes
+                // sense when we KNOW there's a burst to coalesce,
+                // which is exactly the device-drain case.
+                self.tx_batch = None;
                 // Hit cap exactly: there may be more in the device.
                 // Re-arm so the next epoll wake fires immediately
                 // (edge-triggered: without this, we'd lose the
@@ -623,6 +677,77 @@ impl Daemon {
         self.device_arena = Some(arena);
         if nw {
             self.maybe_set_write_any();
+        }
+    }
+
+    /// Ship the staged TX batch (Phase 1). Called at the end of
+    /// `on_device_read`'s drain loop and on dst/size mismatch
+    /// mid-loop. No-op on empty.
+    fn flush_tx_batch(&mut self) {
+        if let Some(mut b) = self.tx_batch.take() {
+            Self::ship_tx_batch(&mut b, &mut self.listeners, &mut self.tunnels, &self.graph);
+            self.tx_batch = Some(b);
+        }
+    }
+
+    /// Ship one batch run. Static + explicit field borrows so the
+    /// mid-loop flush (in `send_sptps_data_relay`, while
+    /// `tx_scratch` is also borrowed) doesn't fight `&mut self`.
+    /// Same `EMSGSIZE`/`WouldBlock` dispatch as the immediate-send
+    /// path (`net.rs:2040-2070`); the wire result is identical to
+    /// `count` immediate sends, so the error handling is too.
+    fn ship_tx_batch(
+        batch: &mut crate::egress::TxBatch,
+        listeners: &mut [super::ListenerSlot],
+        tunnels: &mut crate::inthash::IntHashMap<NodeId, TunnelState>,
+        graph: &tinc_graph::Graph,
+    ) {
+        let Some((b, sock, relay_nid, origlen)) = batch.take() else {
+            return;
+        };
+        // Ship, then let `b` (which borrows `batch.buf`/`batch.dst`)
+        // fall out of scope before `reset` mutates `batch`.
+        let result = {
+            let r = listeners
+                .get_mut(usize::from(sock))
+                .map(|slot| slot.egress.send_batch(&b));
+            let _ = b;
+            r
+        };
+        batch.reset();
+
+        let Some(result) = result else {
+            // Listener gone (reload mid-batch). Same as the
+            // immediate path's `listeners.get_mut` returning None:
+            // silently drop. UDP is unreliable.
+            return;
+        };
+        if let Err(e) = result {
+            if e.kind() == io::ErrorKind::WouldBlock {
+                // sndbuf full. Drop the whole run — same outcome
+                // as the per-frame path dropping each one. The
+                // kernel's UDP sndbuf doesn't partial-accept a
+                // GSO send (`udp_send_skb` is all-or-nothing).
+            } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+                // `udp.c:1145`: `gso_size + iphdr + udphdr > PMTU`.
+                // PMTU shrank under us. Shrink the relay's maxmtu
+                // so the NEXT batch's stride is smaller. The frames
+                // in THIS batch are lost (the kernel rejected the
+                // whole sendmsg) — same as the per-frame path losing
+                // one frame, just `count×` at once. Inner-TCP
+                // retransmits.
+                if let Some(p) = tunnels.get_mut(&relay_nid).and_then(|t| t.pmtu.as_mut()) {
+                    let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
+                    for a in p.on_emsgsize(origlen) {
+                        Self::log_pmtu_action(relay_name, &a);
+                    }
+                }
+            } else {
+                let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
+                log::warn!(target: "tincd::net",
+                           "Error sending UDP SPTPS batch to \
+                            {relay_name}: {e}");
+            }
         }
     }
 
@@ -1976,15 +2101,55 @@ impl Daemon {
             }
         }
 
-        // C `:1044`. Phase 0 (`RUST_REWRITE_10G.md`): the direct
-        // `udp.send_to` becomes `egress.send_batch` with `count=1`.
-        // `Portable::send_batch` with `count=1` IS one `sendto` —
-        // same syscall, same fd (dup'd at setup), same wire bytes.
-        // The seam is in place for Phase 1 to swap `linux::Fast`.
+        // C `:1044`. Phase 1 (`RUST_REWRITE_10G.md`): if we're
+        // inside `on_device_read`'s drain loop AND on the cached-
+        // addr fast path, STAGE into `tx_batch` instead of sending.
+        // The drain loop ships the whole run in one `sendmsg` with
+        // `UDP_SEGMENT` cmsg after walking all slots.
         //
-        // `tx_scratch` stays as the encrypt buffer (Phase 1 unifies
-        // it with the arena). `count=1` means `stride == last_len`;
-        // the loop in `Portable::send_batch` runs once.
+        // Gates for staging:
+        //   - `tx_batch.is_some()`: only set during the drain loop.
+        //     UDP-recv→forward, meta-conn→relay, probes hit `None`
+        //     and fall through to immediate send (Phase 0 path).
+        //   - `cached.is_some()`: the cold path's `cold_sockaddr`
+        //     is a stack local that dies at function return; can't
+        //     stash a reference to it. Cold path is pre-PMTU-
+        //     discovery anyway (rare, ~1 per peer per session).
+        //   - `ct.is_none()`: hot path (encrypt-into-tx_scratch).
+        //     `Some(ct)` is relay/handshake — they ALSO hit the
+        //     cached path but the relay case rebuilds tx_scratch
+        //     (`:1930-1933`); staging that is correct but rare
+        //     enough to not bother. Keep the fast path simple.
+        //
+        // On dst/size mismatch (`!can_coalesce`): flush the
+        // current run, start a new one. Never worse than per-frame.
+        if ct.is_none()
+            && cached.is_some()
+            && let Some(batch) = self.tx_batch.as_mut()
+        {
+            // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
+            // the immediate-send path uses (`:2006`).
+            #[allow(clippy::cast_possible_truncation)] // ≤ MTU
+            let at_len = origlen as u16;
+            if !batch.can_coalesce(sockaddr, sock, self.tx_scratch.len()) {
+                // Take the batch out, flush, put back. Can't call
+                // `flush_tx_batch` (borrows &mut self while batch
+                // is borrowed). Same `mem::take` dance as the
+                // arena.
+                let mut b = self.tx_batch.take().expect("checked Some above");
+                Self::ship_tx_batch(&mut b, &mut self.listeners, &mut self.tunnels, &self.graph);
+                self.tx_batch = Some(b);
+            }
+            // Reborrow after the possible take/restore.
+            let batch = self.tx_batch.as_mut().expect("restored above");
+            batch.stage(sockaddr, sock, relay_nid, at_len, &self.tx_scratch);
+            return false; // staged; UDP send doesn't touch outbuf
+        }
+
+        // Immediate-send path (Phase 0). Hit when: outside the
+        // drain loop, OR cold path (no cached addr), OR relay/
+        // handshake (`ct.is_some()`). `count=1` means `stride ==
+        // last_len`; both `Portable` and `linux::Fast` skip GSO.
         #[allow(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
         let len = self.tx_scratch.len() as u16;
         if let Some(slot) = self.listeners.get_mut(usize::from(sock))

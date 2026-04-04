@@ -26,7 +26,9 @@ use tinc_sptps::{Framing, Role, Sptps};
 use crate::autoconnect::{self, AutoAction, NodeSnapshot};
 use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
-use crate::egress::{Portable, UdpEgress};
+#[cfg(not(target_os = "linux"))]
+use crate::egress::Portable;
+use crate::egress::{TxBatch, UdpEgress};
 use crate::graph_glue::{Transition, run_graph};
 use crate::invitation_serve::{self, InvitePhase};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
@@ -1269,6 +1271,20 @@ pub struct Daemon {
     /// conflicts. Take, walk, put back.
     pub(crate) device_arena: Option<DeviceArena>,
 
+    /// TX batch accumulator (`RUST_REWRITE_10G.md` Phase 1). The
+    /// `on_device_read` drain loop stages encrypted frames here
+    /// instead of `sendto`-per-frame; one `EgressBatch` ships the
+    /// run after the loop. `None` outside the drain loop — the send
+    /// site (`send_sptps_data_relay`) checks: `Some` ⇒ stage,
+    /// `None` ⇒ immediate send (the Phase-0 path; still hit by
+    /// UDP-recv → forward, meta-conn → relay, probe sends).
+    ///
+    /// `Option` not for `mem::take` (it's never borrowed across a
+    /// `&mut self` call) but as the in-batch-loop signal. The drain
+    /// loop sets `Some` before walking slots, ships + sets `None`
+    /// after.
+    pub(crate) tx_batch: Option<TxBatch>,
+
     /// `outgoing_list` (`net_socket.c:54`). One slot per `ConnectTo`
     /// in `tinc.conf`. C uses a `list_t` of `outgoing_t*`; we slot.
     /// Populated by `try_outgoing_connections` at setup. Never
@@ -1958,9 +1974,21 @@ impl Daemon {
             let udp_io = ev
                 .add(udp_fd, Io::Read, IoWhat::Udp(i))
                 .map_err(SetupError::Io)?;
-            // Phase 0: dup the UDP fd into `Portable`. The listener
-            // keeps its copy for `recvmmsg`; the egress sends on the
-            // dup. Same file description → same bound addr, same TOS.
+            // Phase 1 (`RUST_REWRITE_10G.md`): on Linux, dup into
+            // `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per
+            // batch). No probe: kernel ≥4.18 floor; ENOPROTOOPT at
+            // first batch → panic with a clear message (see
+            // `egress/linux.rs::map_errno`). Non-Linux stays
+            // `Portable` (count × sendto).
+            //
+            // The listener keeps its copy for `recvmmsg`; the egress
+            // sends on the dup. Same file description → same bound
+            // addr, same TOS (the daemon's `set_udp_tos` sets it on
+            // the listener fd).
+            #[cfg(target_os = "linux")]
+            let egress: Box<dyn UdpEgress> =
+                Box::new(crate::egress::linux::Fast::new(&l.udp).map_err(SetupError::Io)?);
+            #[cfg(not(target_os = "linux"))]
             let egress: Box<dyn UdpEgress> =
                 Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
             listener_slots.push(ListenerSlot {
@@ -2124,6 +2152,11 @@ impl Daemon {
             device_errors: 0,
             device_io,
             device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
+            // None: the send site only stages when inside
+            // `on_device_read`'s drain loop. The TxBatch itself
+            // is built lazily on first drain (no point allocating
+            // ~100KB on a tunnelserver that never sees device reads).
+            tx_batch: None,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),

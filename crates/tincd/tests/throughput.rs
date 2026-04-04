@@ -1030,15 +1030,24 @@ fn rust_vs_c_throughput() {
         rust / 1e6
     );
 
-    // Mixed-mode sanity. If Rust↔C << Rust↔Rust there's a wire-
-    // format inefficiency (extra round-trips, padding mismatch).
-    let mixed_ratio = mixed / rust;
+    // Mixed-mode sanity. If Rust↔C << min(Rust↔Rust, C↔C) there's
+    // a wire-format inefficiency (extra round-trips, padding
+    // mismatch). Compare against the SLOWER endpoint, not Rust↔Rust:
+    // a mixed pair is bottlenecked by whichever side lacks the
+    // optimization. Phase-1 GSO (`2f127052`+) made Rust↔Rust pull
+    // ahead of C↔C; comparing mixed against Rust↔Rust then measures
+    // "how slow is C", not "is interop broken". The original 0.90
+    // gate against Rust↔Rust was already failing at HEAD (87.9%)
+    // before this commit — it only ever passed when Rust≈C.
+    let slower = rust.min(baseline);
+    let mixed_ratio = mixed / slower;
     assert!(
         mixed_ratio >= 0.90,
-        "Rust↔C is {:.1}% of Rust↔Rust — interop overhead. \
-         Rust↔Rust {:.1} Mbps, Rust↔C {:.1} Mbps.",
+        "Rust↔C is {:.1}% of slower endpoint — interop overhead. \
+         Rust↔Rust {:.1} Mbps, C↔C {:.1} Mbps, Rust↔C {:.1} Mbps.",
         mixed_ratio * 100.0,
         rust / 1e6,
+        baseline / 1e6,
         mixed / 1e6
     );
 

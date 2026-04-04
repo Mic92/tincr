@@ -29,11 +29,39 @@
 //! puzzle, no self-referential daemon struct. The kernel doesn't
 //! care which fd `sendto` lands on.
 
-#![forbid(unsafe_code)]
+// Not `forbid`: the `linux` submodule needs one `unsafe` block for
+// `libc::sendmsg` + cmsg pointer writes (nix::sendmsg allocs a Vec
+// per call, ~5% throughput loss on the hot path). The `Portable`
+// impl and `TxBatch` below are still pure-safe; the `deny` makes
+// any new unsafe a compile error unless `#[allow]`'d at the site.
+#![deny(unsafe_code)]
 
 use std::io;
 
 use socket2::{SockAddr, Socket};
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+/// `UDP_MAX_SEGMENTS` (`include/linux/udp.h:124`). The kernel rejects
+/// `UDP_SEGMENT` sends with more segments than this (`EINVAL`,
+/// `udp.c:1149`). The daemon's `DEVICE_DRAIN_CAP=64` is well under;
+/// this is here for the `can_coalesce` check so a future cap bump
+/// doesn't silently overflow the kernel limit.
+pub const UDP_MAX_SEGMENTS: u16 = 128;
+
+/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE`
+/// (`udp.c:1292`) BEFORE the GSO branch even runs — this is the UDP
+/// datagram-length field cap, not a path-MTU thing. The cmsg parse
+/// happens AFTER, so the kernel never learns we wanted GSO; it just
+/// sees a too-big plain send. The daemon's `EMSGSIZE` handler then
+/// shrinks PMTU thinking it's a path-MTU failure → death spiral.
+/// `can_coalesce` must cap below this. Conservative: leave headroom
+/// for the outer UDP+IP headers (28 bytes IPv4, 48 IPv6) the kernel
+/// adds to `len` before the comparison. (Willem's UDP_SEGMENT design
+/// expects ~64 KB super-packets; the practical cap is here, not the
+/// 128-segment one.)
+const BATCH_MAX_BYTES: usize = 0xFFFF - 48;
 
 /// A run of encrypted frames to one destination. Daemon builds these
 /// from par-encrypt output (Phase 3) or one-at-a-time today.
@@ -91,6 +119,204 @@ pub trait UdpEgress: Send {
     /// impl never errs.
     fn poll_completions(&mut self) -> io::Result<usize> {
         Ok(0)
+    }
+}
+
+/// TX batch accumulator. Phase 1: the daemon stages encrypted frames
+/// here during the `on_device_read` drain loop, then ships the run
+/// in one `EgressBatch` after the loop. The "no TX batch exists
+/// today" problem from `mt-crypto-findings.md` Finding 1 — this is
+/// CREATING the batch.
+///
+/// ## Dense packing, not arena slots
+///
+/// Frames are appended at `[count*stride .. count*stride + len]`,
+/// NOT at fixed STRIDE-sized slots. `UDP_SEGMENT` splits at
+/// `gso_size` boundaries (`udp_offload.c:480`); a gap between frames
+/// would land in the previous datagram's tail. The buffer IS the
+/// wire layout.
+///
+/// `stride` is the encrypted-frame size of the FIRST frame in the
+/// run. Subsequent frames must match (`can_coalesce` checks). The
+/// SPTPS overhead is fixed (+33: `mt-kernel-findings.md`), so a TCP
+/// burst at one MSS produces same-size encrypted frames.
+///
+/// ## One run at a time
+///
+/// Tailscale's `coalesceMessages` builds a `Vec<run>`; we keep ONE
+/// run and flush on mismatch. Simpler, and the common case (iperf3
+/// TCP burst to one peer) is one run anyway. Multi-peer interleave
+/// degrades to per-change flushes — still fewer syscalls than per-
+/// frame, never worse than Phase 0.
+pub struct TxBatch {
+    /// Dense-packed encrypted frames. Capacity sized for one drain
+    /// pass at MTU+overhead; never reallocs after warmup.
+    buf: Vec<u8>,
+    /// Encrypted-frame size for THIS run. All frames except possibly
+    /// the last are exactly this size. Set on first stage; checked
+    /// on subsequent stages.
+    stride: u16,
+    /// Length of the most-recently-staged frame. ≤ `stride`. The
+    /// kernel allows a short tail; we allow a short tail to be
+    /// followed by a flush (a same-stride frame after a short one
+    /// can't coalesce — it would land mid-stride).
+    last_len: u16,
+    /// Frames in `buf`. ≤ `UDP_MAX_SEGMENTS`.
+    count: u16,
+    /// Destination of this run. `None` when empty. `SockAddr` is
+    /// `Clone` (`derive`, socket2 `sockaddr.rs:20`); cloning the
+    /// tunnel's `udp_addr_cached` once per RUN (not per frame) is
+    /// fine. We can't borrow it: the daemon mutates `tunnels`
+    /// between stage calls.
+    dst: Option<SockAddr>,
+    /// Listener index (`ListenerSlot`). Paired with `dst`: same
+    /// destination on a different listener (different bound addr)
+    /// is a different run.
+    sock: u8,
+    /// The relay node whose `pmtu` shrinks on `EMSGSIZE`. Stored
+    /// per-run so `flush` can call `on_emsgsize` without re-
+    /// resolving the route. `tinc_graph::NodeId` is `Copy`.
+    relay: tinc_graph::NodeId,
+    /// Plaintext body length of the LARGEST frame in the run.
+    /// `on_emsgsize` shrinks `maxmtu` to this (the kernel rejected
+    /// at the OUTER size, but PMTU is tracked at the inner-body
+    /// layer). All same-stride frames have the same body length
+    /// (stride = body+33, fixed overhead) so this is just the
+    /// first frame's body.
+    origlen: u16,
+}
+
+impl TxBatch {
+    /// New, empty. `cap_bytes` should be `DEVICE_DRAIN_CAP ×
+    /// (MTU + overhead)` so the buffer never reallocs after the
+    /// first batch.
+    #[must_use]
+    pub fn new(cap_bytes: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap_bytes),
+            stride: 0,
+            last_len: 0,
+            count: 0,
+            dst: None,
+            sock: 0,
+            relay: tinc_graph::NodeId(0),
+            origlen: 0,
+        }
+    }
+
+    /// True if `frame` (encrypted, with the 12-byte ID prefix) can
+    /// extend the current run. Same dst, same sock, same stride,
+    /// previous frame was full-stride (a short tail ends the run —
+    /// the kernel's split-at-stride math expects only the LAST
+    /// segment short), and under the kernel cap.
+    #[must_use]
+    pub fn can_coalesce(&self, dst: &SockAddr, sock: u8, frame_len: usize) -> bool {
+        // Empty run coalesces with anything (it BECOMES the run).
+        if self.count == 0 {
+            return true;
+        }
+        // u16: frame_len ≤ MTU+33 < 65535. Checked by caller.
+        let Ok(frame_len) = u16::try_from(frame_len) else {
+            return false; // > 64KB can't be a single UDP datagram
+        };
+        self.sock == sock
+            && self.count < UDP_MAX_SEGMENTS
+            // Total bytes after this stage ≤ the UDP datagram cap.
+            // `udp_sendmsg` (`udp.c:1292`) rejects `len > 0xFFFF`
+            // BEFORE the GSO cmsg parse — it sees the whole iovec as
+            // one too-big plain send. At MTU≈1500 + 33 overhead this
+            // caps batches at ~43 frames; the "43 same-MSS segments"
+            // from `mt-kernel-findings.md` fit exactly (not a
+            // coincidence: 64KB / MSS ≈ 43 is HOW the inner-TCP
+            // burst was sized in the first place).
+            && self.buf.len() + usize::from(frame_len) <= BATCH_MAX_BYTES
+            // Short tail already staged: run is closed. The kernel
+            // splits at stride; a short frame followed by a full
+            // one would put the full one's head in the short one's
+            // datagram.
+            && self.last_len == self.stride
+            // Same encrypted size OR smaller (becomes the new tail).
+            // Larger can't coalesce: it would span two stride slots.
+            && frame_len <= self.stride
+            // SockAddr PartialEq compares storage bytes (socket2
+            // `sockaddr.rs:379`). Same peer, same family, same port
+            // → same bytes.
+            && self.dst.as_ref() == Some(dst)
+    }
+
+    /// Append `frame` to the run. Caller MUST have checked
+    /// `can_coalesce` (or this is the first frame). Stores the
+    /// per-run metadata (`dst`/`sock`/`relay`/`origlen`) on first
+    /// stage; subsequent stages only append.
+    ///
+    /// # Panics
+    /// Debug-asserts the `can_coalesce` precondition.
+    pub fn stage(
+        &mut self,
+        dst: &SockAddr,
+        sock: u8,
+        relay: tinc_graph::NodeId,
+        origlen: u16,
+        frame: &[u8],
+    ) {
+        debug_assert!(self.can_coalesce(dst, sock, frame.len()));
+        #[allow(clippy::cast_possible_truncation)] // ≤ MTU+33
+        let frame_len = frame.len() as u16;
+        if self.count == 0 {
+            // First frame defines the run.
+            self.buf.clear();
+            self.stride = frame_len;
+            self.dst = Some(dst.clone());
+            self.sock = sock;
+            self.relay = relay;
+            self.origlen = origlen;
+        }
+        self.buf.extend_from_slice(frame);
+        self.last_len = frame_len;
+        self.count += 1;
+    }
+
+    /// Consume the run as an `EgressBatch`. `None` if empty.
+    /// Resets to empty (next `stage` starts a fresh run).
+    ///
+    /// Returns `(batch, sock, relay, origlen)` — the egress sends
+    /// `batch`; the daemon's error handler needs the rest for
+    /// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
+    #[must_use]
+    pub fn take(&mut self) -> Option<(EgressBatch<'_>, u8, tinc_graph::NodeId, u16)> {
+        if self.count == 0 {
+            return None;
+        }
+        let dst = self.dst.as_ref()?; // Some by construction
+        let batch = EgressBatch {
+            dst,
+            frames: &self.buf,
+            stride: self.stride,
+            count: self.count,
+            last_len: self.last_len,
+        };
+        let sock = self.sock;
+        let relay = self.relay;
+        let origlen = self.origlen;
+        // Reset BEFORE returning the borrow would conflict; but the
+        // batch borrows `self.buf` and `self.dst`. So: caller drops
+        // the batch, THEN calls `reset`. Two-step.
+        Some((batch, sock, relay, origlen))
+    }
+
+    /// Reset to empty. Call after `take()`'s borrow is dropped.
+    /// Keeps `buf` capacity (the whole point: warm reuse).
+    pub fn reset(&mut self) {
+        self.count = 0;
+        self.dst = None;
+        // buf cleared on next stage's count==0 branch; no need here.
+    }
+
+    /// Count of staged frames. For the daemon's "did anything
+    /// stage?" check.
+    #[must_use]
+    pub fn count(&self) -> u16 {
+        self.count
     }
 }
 
@@ -256,5 +482,132 @@ mod tests {
         let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
         let mut p = Portable::new(&tx).unwrap();
         assert_eq!(p.poll_completions().unwrap(), 0);
+    }
+
+    /// `TxBatch::can_coalesce`: empty batch accepts anything;
+    /// same-dst-same-stride extends; mismatch on any of dst/sock/
+    /// stride/short-tail closes the run. This is the grouping
+    /// invariant the GSO send depends on — if `can_coalesce` says
+    /// yes when it shouldn't, the kernel splits at the wrong
+    /// boundary and the wire is garbage.
+    #[test]
+    fn txbatch_coalesce_gates() {
+        use tinc_graph::NodeId;
+        let dst1 = SockAddr::from("127.0.0.1:1111".parse::<SocketAddr>().unwrap());
+        let dst2 = SockAddr::from("127.0.0.1:2222".parse::<SocketAddr>().unwrap());
+        let mut b = TxBatch::new(4096);
+
+        // Empty: accepts anything.
+        assert!(b.can_coalesce(&dst1, 0, 100));
+        assert!(b.can_coalesce(&dst2, 7, 9999));
+
+        // Stage one frame at stride=100.
+        b.stage(&dst1, 0, NodeId(1), 67, &[0xAA; 100]);
+        assert_eq!(b.count(), 1);
+
+        // Same dst, same sock, same size: extends.
+        assert!(b.can_coalesce(&dst1, 0, 100));
+        // Different dst: closes.
+        assert!(!b.can_coalesce(&dst2, 0, 100));
+        // Different sock: closes.
+        assert!(!b.can_coalesce(&dst1, 1, 100));
+        // Larger frame: closes (would span two stride slots).
+        assert!(!b.can_coalesce(&dst1, 0, 101));
+        // Smaller frame: extends as the short tail.
+        assert!(b.can_coalesce(&dst1, 0, 50));
+
+        // Stage the short tail.
+        b.stage(&dst1, 0, NodeId(1), 17, &[0xBB; 50]);
+        assert_eq!(b.count(), 2);
+        // After a short tail, NOTHING coalesces — even same-stride.
+        // The kernel's split-at-stride math expects only the LAST
+        // segment short.
+        assert!(!b.can_coalesce(&dst1, 0, 100));
+        assert!(!b.can_coalesce(&dst1, 0, 50));
+    }
+
+    /// `TxBatch::take` produces a dense-packed `EgressBatch`. The
+    /// `frames` slice is exactly `(count-1)*stride + last_len` bytes,
+    /// no gaps. Ship it through `Portable` to a real listener; the
+    /// datagrams that arrive are byte-identical to what staged. This
+    /// is the end-to-end "batch construction → wire" check.
+    #[test]
+    fn txbatch_dense_packing_roundtrip() {
+        use tinc_graph::NodeId;
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dst = SockAddr::from(rx.local_addr().unwrap());
+        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
+        let mut p = Portable::new(&tx).unwrap();
+
+        let mut b = TxBatch::new(4096);
+        // 3 frames: two at stride=12, one short at 5. Distinct
+        // bytes per-frame so we can match them on the rx side.
+        b.stage(&dst, 0, NodeId(1), 0, b"frame_one_12");
+        b.stage(&dst, 0, NodeId(1), 0, b"frame_two_12");
+        b.stage(&dst, 0, NodeId(1), 0, b"short");
+
+        let (batch, sock, relay, _origlen) = b.take().unwrap();
+        assert_eq!(sock, 0);
+        assert_eq!(relay, NodeId(1));
+        assert_eq!(batch.count, 3);
+        assert_eq!(batch.stride, 12);
+        assert_eq!(batch.last_len, 5);
+        // Dense: 12 + 12 + 5 = 29, NOT 3×12.
+        assert_eq!(batch.frames.len(), 29);
+
+        p.send_batch(&batch).unwrap();
+        // batch borrows b.buf; let it fall out of scope before reset.
+        let _ = batch;
+        b.reset();
+        assert_eq!(b.count(), 0);
+
+        let mut buf = [0u8; 64];
+        let (n, _) = rx.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"frame_one_12");
+        let (n, _) = rx.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"frame_two_12");
+        let (n, _) = rx.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"short");
+    }
+
+    /// `BATCH_MAX_BYTES` cap: a 44th frame at stride=1519 (MTU+33,
+    /// the SPTPS on-wire size for a full-MSS inner-TCP segment) does
+    /// NOT coalesce — 43×1519 = 65317 fits the UDP datagram cap
+    /// (`udp.c:1292`), 44×1519 = 66836 doesn't. The kernel rejects
+    /// the latter with `EMSGSIZE` BEFORE the GSO cmsg parse, the
+    /// daemon's PMTU machinery shrinks `maxmtu` thinking it's a
+    /// path-MTU failure, and the next batch goes TCP. Regression
+    /// test for the death-spiral the throughput gate caught.
+    #[test]
+    fn txbatch_caps_at_udp_datagram_limit() {
+        use tinc_graph::NodeId;
+        let dst = SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
+        let mut b = TxBatch::new(70_000);
+        let frame = [0u8; 1519]; // body+33 for body=1486 (MSS-ish)
+
+        // 43 fit (65317 ≤ 65487).
+        for _ in 0..43 {
+            assert!(b.can_coalesce(&dst, 0, frame.len()));
+            b.stage(&dst, 0, NodeId(1), 1486, &frame);
+        }
+        assert_eq!(b.count(), 43);
+        // 44th doesn't (66836 > 65487).
+        assert!(!b.can_coalesce(&dst, 0, frame.len()));
+
+        // The batch as built fits the cap.
+        let (batch, ..) = b.take().unwrap();
+        assert!(batch.frames.len() <= BATCH_MAX_BYTES);
+    }
+
+    /// `take` on empty returns None; `reset` is idempotent. The
+    /// drain loop's final `flush_tx_batch` may see an empty batch
+    /// (every frame went TCP, or got dropped pre-encrypt).
+    #[test]
+    fn txbatch_empty_take_is_none() {
+        let mut b = TxBatch::new(64);
+        assert!(b.take().is_none());
+        b.reset();
+        assert!(b.take().is_none());
+        assert_eq!(b.count(), 0);
     }
 }
