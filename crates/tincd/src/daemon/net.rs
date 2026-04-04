@@ -290,8 +290,10 @@ impl Daemon {
             })
         });
 
-        // C `:1739`. STUB(chunk-never): `try_harder` fallback
-        // (decrypt-by-trial for ID collisions / pre-1.1 packets).
+        // C `:1739` `try_harder`: decrypt-by-trial for tinc 1.0
+        // packets (no NodeId6 prefix) and the ~never NodeId6
+        // collision case (sha512(name)[:6], birthday on 48 bits).
+        // SPTPS-only build — log + drop.
         let Some(from_nid) = self.id6_table.lookup(src_id) else {
             log::debug!(target: "tincd::net",
                         "Received UDP packet from unknown source ID {src_id} ({peer:?})");

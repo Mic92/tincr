@@ -211,7 +211,8 @@ impl Daemon {
 
         // C `:318-320`: `if(experimental && reqno)`. Always-experimental.
         let Some(ext) = &msg.ext else {
-            // C `:323`: legacy 3-token form. STUB(chunk-never): SPTPS-only.
+            // C `:323`: legacy 3-token form (cleartext-hex session
+            // key exchange). SPTPS-only build — log + reject.
             log::error!(target: "tincd::proto",
                         "Got legacy REQ_KEY from {} (no SPTPS extension)",
                         msg.from);
@@ -379,7 +380,7 @@ impl Daemon {
 
     /// `ans_key_h` (`protocol_key.c:420-648`), SPTPS branch only
     /// (`:549-581`). b64-decode key field, feed to `tunnels[from].sptps`.
-    /// Legacy branch (`:585-648`) STUB(chunk-never): SPTPS-only.
+    /// Legacy branch (`:585-648`) not present: SPTPS-only build.
     #[allow(clippy::too_many_lines)] // direct port of `ans_key_h`
     pub(super) fn on_ans_key(
         &mut self,
