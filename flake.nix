@@ -21,7 +21,13 @@
       ];
 
       perSystem =
-        { pkgs, self', ... }:
+        {
+          pkgs,
+          self',
+          lib,
+          system,
+          ...
+        }:
         {
           # Dev shell: enough to run `make -f kat/Makefile && cargo test`.
           # The C toolchain is needed for KAT regeneration, not for the
@@ -189,19 +195,55 @@
             '';
           };
 
-          # The C tincd daemon, nolegacy mode. Target for the cross-
-          # impl tests in crates/tincd/tests/crossimpl.rs (set
-          # TINC_C_TINCD=$out/bin/tincd). Unlike sptps_test/keypair,
-          # `exe_tincd` is `install: true` in src/meson.build — we
-          # don't have to ask for it explicitly, the default `ninja`
-          # builds it and `meson install` puts it in $out/sbin.
-          #
-          # nolegacy means no RSA, no OpenSSL/gcrypt linkage. Same
-          # crypto subset as the Rust daemon (ed25519+chacha20-poly1305
-          # only). A C tincd built WITH legacy would still talk to us
-          # (it negotiates SPTPS-only when the peer's hosts/ file has
-          # only Ed25519PublicKey), but the build is heavier and the
-          # extra surface is irrelevant to interop testing.
+          # The Rust daemon + CLI. The NixOS module points `package =`
+          # here; its ExecStart hard-codes ${pkg}/bin/tincd, which is
+          # where buildRustPackage puts it. doCheck=false: netns tests
+          # need bwrap+userns the sandbox lacks. The dev shell runs the
+          # full suite; this is the deployment artifact.
+          packages.tincd = pkgs.rustPlatform.buildRustPackage {
+            pname = "tincd";
+            version = "0.1.0";
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./.cargo # x86-64-v3 + AVX2 flags; see config.toml
+                ./crates
+              ];
+            };
+            cargoLock.lockFile = ./Cargo.lock;
+            # Just the bin crates; --workspace would pull tinc-ffi's cc.
+            cargoBuildFlags = [
+              "-p"
+              "tincd"
+              "-p"
+              "tinc-tools"
+            ];
+            doCheck = false;
+            meta.mainProgram = "tincd";
+          };
+
+          # VM tests. Linux-only (runNixOSTest boots qemu).
+          checks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Rust↔Rust: argv/config-layout compat with the module.
+            nixos-tinc = pkgs.callPackage ./nix/nixos-test.nix {
+              inherit (self'.packages) tincd;
+            };
+
+            # Rust↔C: deployment-level wire compat.
+            nixos-tinc-crossimpl = pkgs.callPackage ./nix/nixos-test.nix {
+              inherit (self'.packages) tincd tincd-c;
+            };
+          };
+
+          # The C tincd daemon. Target for crates/tincd/tests/
+          # crossimpl.rs (TINC_C_TINCD=$out/bin/tincd) and the
+          # nixos-tinc-crossimpl VM test. OpenSSL not nolegacy: the
+          # NixOS module's preStart calls `tinc generate-rsa-keys`,
+          # which nolegacy tincctl rejects at the dispatch table.
+          # Legacy C still negotiates SPTPS-only against us (no RSA
+          # pubkey in hosts/ → no legacy offered).
           packages.tincd-c = pkgs.stdenv.mkDerivation {
             pname = "tinc-tincd-c";
             version = "1.1pre18";
@@ -224,8 +266,13 @@
               ninja
               pkg-config
             ];
+            buildInputs = [ pkgs.openssl ];
+            # Meson defaults sysconfdir to $out/etc; the NixOS module
+            # calls `tinc -n NET ...` without -c and expects /etc.
             mesonFlags = [
-              "-Dcrypto=nolegacy"
+              "--sysconfdir=/etc"
+              "--localstatedir=/var"
+              "-Dcrypto=openssl" # default; explicit vs. sptps-test-c
               "-Dminiupnpc=disabled"
               "-Dcurses=disabled"
               "-Dreadline=disabled"

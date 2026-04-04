@@ -148,10 +148,21 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_genkey,
         help: "generate-ed25519-keys  Generate a new Ed25519 key pair.",
     },
-    // C also has `generate-keys` (→ RSA + Ed25519) but RSA is
-    // dropped under DISABLE_LEGACY. Could alias `generate-keys` →
-    // `generate-ed25519-keys`; the C does *not* (it's a distinct
-    // function that calls both keygens). Skip.
+    // `generate-rsa-keys`/`generate-keys`: warn-and-succeed RSA stub.
+    // The NixOS module's preStart calls `tinc generate-rsa-keys 4096`
+    // unconditionally; rejecting it would break every deployment.
+    CmdEntry {
+        name: "generate-rsa-keys",
+        needs_daemon: false,
+        run: cmd_genkey_rsa_stub,
+        help: "generate-rsa-keys      (no-op: this build is Ed25519-only)",
+    },
+    CmdEntry {
+        name: "generate-keys",
+        needs_daemon: false,
+        run: cmd_genkey, // Ed25519 half only
+        help: "generate-keys          Generate new keys (Ed25519 only).",
+    },
     CmdEntry {
         name: "sign",
         needs_daemon: false,
@@ -456,6 +467,19 @@ fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         [name] => cmd::init::run(paths, name),
         [_, _, ..] => Err(CmdError::TooManyArgs),
     }
+}
+
+/// `cmd_generate_rsa_keys` under `DISABLE_LEGACY`: warn, succeed.
+/// Accepts the optional `[bits]` arg (NixOS module passes `4096`).
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_genkey_rsa_stub(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    if args.len() > 1 {
+        return Err(CmdError::TooManyArgs);
+    }
+    eprintln!(
+        "Warning: this tinc was built without legacy protocol support; skipping RSA key generation."
+    );
+    Ok(())
 }
 
 /// `cmd_generate_ed25519_keys`: zero args. C `tincctl.c:2351`.

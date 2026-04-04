@@ -148,7 +148,7 @@ fn parse_args() -> Result<Args, String> {
     let mut logfile = None;
     let mut use_syslog = false;
 
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os().skip(1).peekable();
     while let Some(arg) = args.next() {
         let Some(arg) = arg.to_str() else {
             return Err(format!("non-UTF-8 argument: {arg:?}"));
@@ -206,7 +206,21 @@ fn parse_args() -> Result<Args, String> {
                 // common cases (`-d`, `-d5`); the edge case `-d -d`
                 // gives 2 instead of 1, which is the same LevelFilter
                 // bucket anyway.
-                debug_level = Some(debug_level.unwrap_or(0) + 1);
+                //
+                // BUT: `-d N` separated also exists. C `tincd.c:211-
+                // 215` peeks `argv[optind]`, atoi's it iff not `-`-
+                // prefixed. The NixOS module emits `-d 0` as two argv
+                // entries; without this the `0` is "unknown argument".
+                if let Some(next) = args.peek()
+                    && let Some(s) = next.to_str()
+                    && !s.starts_with('-')
+                {
+                    let n: u32 = s.parse().unwrap_or(0);
+                    args.next(); // consume it
+                    debug_level = Some(n);
+                } else {
+                    debug_level = Some(debug_level.unwrap_or(0) + 1);
+                }
             }
             // `-dN` glued. getopt's `d::` (optional arg) lets `-d5`
             // through. We pattern-match the prefix.
@@ -370,10 +384,25 @@ fn parse_args() -> Result<Args, String> {
         p
     });
 
+    let pidfile = pidfile.ok_or("missing --pidfile <path>")?;
+    // ─── derive unixsocketname from pidfilename (names.c:152-160).
+    // Strip `.pid` → `.socket`, else append. The NixOS module passes
+    // only --pidfile; without this the unit dies "missing --socket".
+    // `tinc -n NET` derives the same path on the CLI side.
+    let socket = socket.unwrap_or_else(|| {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let p = pidfile.as_os_str().as_bytes();
+        let stem = p.strip_suffix(b".pid").unwrap_or(p);
+        let mut s = Vec::with_capacity(stem.len() + 7);
+        s.extend_from_slice(stem);
+        s.extend_from_slice(b".socket");
+        PathBuf::from(std::ffi::OsString::from_vec(s))
+    });
+
     Ok(Args {
         confbase,
-        pidfile: pidfile.ok_or("missing --pidfile <path>")?,
-        socket: socket.ok_or("missing --socket <path>")?,
+        pidfile,
+        socket,
         cmdline_conf,
         do_detach,
         do_mlock,
