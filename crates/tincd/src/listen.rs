@@ -739,6 +739,9 @@ pub fn pidfile_addr(listeners: &[Listener]) -> String {
 // Tarpit
 
 /// `max_connection_burst` (`net_socket.c:45`). Leaky bucket capacity.
+/// C default; the runtime value comes from `MaxConnectionBurst` config
+/// via `Tarpit::new`. Tests use this to seed the default behaviour.
+#[cfg(test)]
 const MAX_BURST: u32 = 10;
 
 /// `pits` array length (`net.c:97`). Ring buffer of tarpitted fds.
@@ -786,6 +789,11 @@ pub struct Tarpit {
     /// `connection_burst_time` (`:710`).
     allhost_time: Instant,
 
+    /// `max_connection_burst` (`net_socket.c:45`). Per-instance
+    /// from config (`MaxConnectionBurst`); the C is a global. The
+    /// `>` vs `>=` off-by-one (see struct doc) is preserved.
+    max_burst: u32,
+
     /// `pits[10]` (`net.c:97`). Tarpitted fds. Ring buffer.
     /// Option because the slot is empty until first eviction.
     /// OwnedFd because Drop closes — the C does `closesocket(pits[
@@ -803,13 +811,14 @@ impl Tarpit {
     /// happen here if we used `Duration::ZERO`. We don't, because
     /// `Instant` doesn't have a zero).
     #[must_use]
-    pub fn new(now: Instant) -> Self {
+    pub fn new(now: Instant, max_burst: u32) -> Self {
         Self {
             prev_addr: None,
             samehost_burst: 0,
             samehost_time: now,
             allhost_burst: 0,
             allhost_time: now,
+            max_burst,
             pits: Default::default(),
             next_pit: 0,
         }
@@ -859,7 +868,7 @@ impl Tarpit {
 
             // `:699`: `if(samehost_burst > max_connection_burst)`.
             // STRICTLY greater. Triggers at 11.
-            if self.samehost_burst > MAX_BURST {
+            if self.samehost_burst > self.max_burst {
                 return true;
             }
         }
@@ -892,8 +901,8 @@ impl Tarpit {
         // the off-by-one is accidental. Port faithfully — it's been
         // this way since 2013 (commit `efa42d92`) and nobody's
         // noticed.
-        if self.allhost_burst >= MAX_BURST {
-            self.allhost_burst = MAX_BURST;
+        if self.allhost_burst >= self.max_burst {
+            self.allhost_burst = self.max_burst;
             return true;
         }
 
@@ -1117,7 +1126,7 @@ mod tests {
     #[test]
     fn tarpit_allhost_triggers_at_ten() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
 
         // 9 different /24 hosts, no time elapsed.
         for i in 1..=9u8 {
@@ -1168,7 +1177,7 @@ mod tests {
     #[test]
     fn tarpit_samehost_early_return() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
         let attacker = addr("10.0.0.5", 0);
 
         // conn 1: prev=None, sh stays 0, ah=1.
@@ -1224,7 +1233,7 @@ mod tests {
     #[test]
     fn tarpit_alternating_hosts_only_allhost() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
         let host_a = addr("10.0.0.1", 0);
         let host_b = addr("10.0.0.2", 0);
 
@@ -1249,7 +1258,7 @@ mod tests {
     #[test]
     fn tarpit_drain() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
         let host_a = addr("10.0.0.1", 0);
 
         // Fill to 5 (different hosts to avoid samehost interaction).
@@ -1275,7 +1284,7 @@ mod tests {
     #[test]
     fn tarpit_prev_updates_on_pit() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
 
         // Fill all-host to threshold.
         for i in 1..=9u8 {
@@ -1299,7 +1308,7 @@ mod tests {
     #[test]
     fn tarpit_ignores_port() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
 
         // Seed prev.
         assert!(!tp.check(addr("10.0.0.5", 1000), t0));
@@ -1312,7 +1321,7 @@ mod tests {
     #[test]
     fn tarpit_v6() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
 
         // 10 different v6 hosts.
         for i in 1..=9u16 {
@@ -1343,7 +1352,7 @@ mod tests {
     #[test]
     fn pit_ring_wrap() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
 
         // Fill all 10 slots.
         for _ in 0..PIT_SIZE {
@@ -1366,7 +1375,7 @@ mod tests {
     #[test]
     fn pit_drop_is_clean() {
         let t0 = Instant::now();
-        let mut tp = Tarpit::new(t0);
+        let mut tp = Tarpit::new(t0, MAX_BURST);
         for _ in 0..5 {
             tp.pit(nullfd());
         }

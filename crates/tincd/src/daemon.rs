@@ -327,6 +327,39 @@ pub struct DaemonSettings {
     /// `fwmark` is also used by the outgoing-connect path
     /// (`net_socket.c:383` — separate site, not yet wired).
     pub sockopts: SockOpts,
+    /// `scriptinterpreter` (`script.c:31`, set at `net_setup.c:237`
+    /// via `ScriptsInterpreter`). When `Some`, scripts are run as
+    /// `<interp> <script>` instead of `<script>` directly. Unix
+    /// shebang makes this redundant; useful for shebang-less hooks
+    /// or Windows (where shebang doesn't work). Default `None`.
+    pub scripts_interpreter: Option<String>,
+    /// `sptps_replaywin` (`sptps.c:33`, set at `net_setup.c:919`
+    /// via `ReplayWindow`). Datagram-mode anti-replay window size
+    /// in packets. C default 32 (`sptps.c:33`); the C `net_setup.c:
+    /// 925-926` writes both `replaywin` (legacy) and `sptps_replaywin`
+    /// from the one config key. Passed to every `Sptps::start`
+    /// for UDP tunnels.
+    pub replaywin: usize,
+    /// `max_connection_burst` (`net_socket.c:45`, set at `:882`
+    /// via `MaxConnectionBurst`). Tarpit leaky-bucket capacity.
+    /// Same-host triggers at `> this`; all-host at `>= this`.
+    /// C default 10. Non-reloadable: the tarpit is constructed
+    /// once at setup.
+    pub max_connection_burst: u32,
+    /// `udp_discovery` (`net_packet.c:83`, set at `:395` via
+    /// `UDPDiscovery`). Master switch for the UDP probe machinery.
+    /// C default true. When false, `try_udp` is a no-op (`:1201`)
+    /// and `try_mtu` skips the not-confirmed reset (`:1351`); the
+    /// daemon falls back to TCP-only forwarding.
+    pub udp_discovery: bool,
+    /// `device_standby` (`net_setup.c:57`, set at `:1093` via
+    /// `DeviceStandby`). Default false. When set, `tinc-up` is NOT
+    /// fired at setup (`:1267`): the script defers until the FIRST
+    /// peer becomes reachable (`graph.c:316`). Mirror for tinc-down:
+    /// fired when the LAST peer becomes unreachable (`:314`). For
+    /// laptops that don't want a configured-but-unconnected tun0
+    /// hanging around. Non-reloadable.
+    pub device_standby: bool,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -433,6 +466,17 @@ impl Default for DaemonSettings {
             keylifetime: 3600,
             // C `net_socket.c:41-46`: globals with initializers.
             sockopts: SockOpts::default(),
+            // C `script.c:31`: `char *scriptinterpreter = NULL`.
+            scripts_interpreter: None,
+            // C `sptps.c:33`: `unsigned int sptps_replaywin = 32`.
+            // (Our gossip.rs hardcoded 16 — a bug; C is 32.)
+            replaywin: 32,
+            // C `net_socket.c:45`: `int max_connection_burst = 10`.
+            max_connection_burst: 10,
+            // C `net_packet.c:83`: `bool udp_discovery = true`.
+            udp_discovery: true,
+            // C `net_setup.c:57`: `bool device_standby = false`.
+            device_standby: false,
         }
     }
 }
@@ -513,6 +557,58 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         && let Ok(v) = e.get_bool()
     {
         settings.autoconnect = v;
+    }
+    // ScriptsInterpreter (`net_setup.c:237`). C `read_interpreter`
+    // also has a sandbox-guard (`:239-243`: don't change interp
+    // mid-run if sandboxed); we don't sandbox, so just read it.
+    // ScriptsExtension (`:257`) is NOT parsed: on Unix the C
+    // default is "" (`names.c`) and `script.rs::execute` doesn't
+    // append a suffix. Windows-only knob; we'd compile_error there.
+    settings.scripts_interpreter = config
+        .lookup("ScriptsInterpreter")
+        .next()
+        .map(|e| e.get_str().to_owned());
+    // UDPDiscovery* (`net_setup.c:395-398`). bool + 3 intervals.
+    if let Some(e) = config.lookup("UDPDiscovery").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.udp_discovery = v;
+    }
+    if let Some(e) = config.lookup("UDPDiscoveryKeepaliveInterval").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.udp_discovery_keepalive_interval = v;
+    }
+    if let Some(e) = config.lookup("UDPDiscoveryInterval").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.udp_discovery_interval = v;
+    }
+    if let Some(e) = config.lookup("UDPDiscoveryTimeout").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.udp_discovery_timeout = v;
+    }
+    // MaxConnectionBurst (`net_setup.c:882-886`). C errors on <=0;
+    // we silently keep default (less harsh on reload typo).
+    if let Some(e) = config.lookup("MaxConnectionBurst").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+        && v >= 1
+    {
+        settings.max_connection_burst = v;
+    }
+    // ReplayWindow (`net_setup.c:919-926`). C errors on <0; the
+    // unsigned try_from rejects that. C also writes legacy
+    // `replaywin`; we're SPTPS-only so just `sptps_replaywin`.
+    if let Some(e) = config.lookup("ReplayWindow").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = usize::try_from(v)
+    {
+        settings.replaywin = v;
     }
     // UDPInfoInterval / MTUInfoInterval (`:400-401`).
     if let Some(e) = config.lookup("UDPInfoInterval").next()
@@ -1236,6 +1332,15 @@ pub struct Daemon {
     #[allow(dead_code)]
     pub(crate) settings: DaemonSettings,
 
+    /// Tracks whether `device_enable()` (tinc-up) has fired.
+    /// `graph.c:313-319`: when `device_standby`, tinc-up fires on
+    /// first reachable peer, tinc-down on last unreachable. This
+    /// bool prevents double-fire (C doesn't have it; the C guard
+    /// is the `reachable_count == became_reachable_count` arithmetic
+    /// at `:316` which is exact, but we're processing transitions
+    /// one-by-one not in a batch — simpler to track explicitly).
+    pub(crate) device_enabled: bool,
+
     // ─── event loop machinery
     /// `mio::Poll` + slot table. Generic over `IoWhat`.
     pub(crate) ev: EventLoop<IoWhat>,
@@ -1554,6 +1659,14 @@ impl Daemon {
                     )));
                 }
             };
+        }
+
+        // DeviceStandby (`net_setup.c:1093`). Non-reloadable: it
+        // decides whether tinc-up fires at setup vs first-peer.
+        if let Some(e) = config.lookup("DeviceStandby").next()
+            && let Ok(v) = e.get_bool()
+        {
+            settings.device_standby = v;
         }
 
         // Forwarding (`net_setup.c:426-443`). Default Internal.
@@ -1928,7 +2041,7 @@ impl Daemon {
             listeners: listener_slots,
             // Tarpit::new wants a now seed (avoids the C's `static
             // time_t = 0` first-tick bug). Use the cached now.
-            tarpit: Tarpit::new(timers.now()),
+            tarpit: Tarpit::new(timers.now(), settings.max_connection_burst),
             cookie,
             pidfile: pidfile.to_path_buf(),
             name,
@@ -1979,6 +2092,10 @@ impl Daemon {
             mac_leases: mac_lease::MacLeases::default(),
             age_subnets_timer: None,
             settings,
+            // Set true by `device_enable()` after this struct is
+            // built (when `!device_standby`); else false until the
+            // first BecameReachable.
+            device_enabled: false,
             invitation_key,
             // C `net.c:458`: `last_config_check = now.tv_sec` at the
             // END of reload. setup() does the same at the end (after
@@ -2043,7 +2160,12 @@ impl Daemon {
         // C calls this AFTER device open succeeds, BEFORE `Ready`.
         // The script typically does `ip addr add` / `ip link set
         // up` on the TUN. Base env only (no NODE/SUBNET).
-        daemon.run_script("tinc-up");
+        // C `:1267`: `if(!device_standby) device_enable()`. When
+        // standby, the FIRST BecameReachable in `run_graph_and_log`
+        // fires it instead (`graph.c:316`).
+        if !daemon.settings.device_standby {
+            daemon.device_enable();
+        }
 
         // C `net_setup.c:1273`: `subnet_update(myself, NULL, true)`
         // — fire subnet-up for our OWN configured subnets. AFTER
@@ -2261,7 +2383,14 @@ impl Drop for Daemon {
         // set down` / `ip addr del`. C calls it from `close_
         // network_connections` (`:1294`). `Drop` is the equivalent
         // teardown point; the device's own `Drop` runs after.
-        self.run_script("tinc-down");
+        // C `:1315` gates on `!device_standby`; we gate on whether
+        // tinc-up actually fired (more correct — if standby and a
+        // peer was reachable at shutdown, C's gate skips tinc-down
+        // and relies on graph teardown to fire it; we don't run
+        // graph in Drop, so check the actual state).
+        if self.device_enabled {
+            self.run_script("tinc-down");
+        }
         let _ = std::fs::remove_file(&self.pidfile);
         // Signal handlers stay installed (SelfPipe::drop doesn't del
         // them — see tinc-event/sig.rs Drop doc). Process is exiting;
@@ -2444,6 +2573,15 @@ mod tests {
         assert_eq!(s.sockopts.udp_rcvbuf, 1024 * 1024);
         assert_eq!(s.sockopts.udp_sndbuf, 1024 * 1024);
         assert_eq!(s.sockopts.fwmark, 0);
+        // C `sptps.c:33`: `unsigned int sptps_replaywin = 32`.
+        assert_eq!(s.replaywin, 32);
+        // C `net_socket.c:45`: `int max_connection_burst = 10`.
+        assert_eq!(s.max_connection_burst, 10);
+        // C `net_packet.c:83`: `bool udp_discovery = true`.
+        assert!(s.udp_discovery);
+        // C `net_setup.c:57`: `bool device_standby = false`.
+        assert!(!s.device_standby);
+        assert!(s.scripts_interpreter.is_none());
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max

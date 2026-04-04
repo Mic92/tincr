@@ -65,7 +65,7 @@ impl Daemon {
             mykey,
             hiskey,
             label,
-            16, // C `sptps_replaywin` default
+            self.settings.replaywin,
             &mut OsRng,
         );
         let now = self.timers.now();
@@ -768,6 +768,16 @@ impl Daemon {
         for t in transitions {
             match t {
                 Transition::BecameReachable { node, via: via_nid } => {
+                    // C `graph.c:316`: `reachable_count > 0 &&
+                    // reachable_count == became_reachable_count` —
+                    // i.e. went from zero to nonzero this run. Our
+                    // `device_enable` is idempotent so we just call
+                    // on every BecameReachable; the flag inside
+                    // dedups. Gated on standby: when !standby,
+                    // setup() already fired tinc-up.
+                    if self.settings.device_standby {
+                        self.device_enable();
+                    }
                     // C `graph.c:261-262`
                     let name = self
                         .graph
@@ -838,6 +848,20 @@ impl Daemon {
                         tunnel.reset_unreachable();
                     }
                 }
+            }
+        }
+        // C `graph.c:313-315`: `if(device_standby && reachable_count
+        // == 0 && became_unreachable_count > 0) device_disable()`.
+        // Processed AFTER the loop because the C counts in the loop
+        // and acts after. We check post-loop reachable count.
+        if self.settings.device_standby && self.device_enabled {
+            let any_reachable = self
+                .graph
+                .node_ids()
+                .filter(|&n| n != self.myself)
+                .any(|n| self.graph.node(n).is_some_and(|n| n.reachable));
+            if !any_reachable {
+                self.device_disable();
             }
         }
     }

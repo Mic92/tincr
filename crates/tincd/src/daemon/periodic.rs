@@ -173,7 +173,35 @@ impl Daemon {
     /// `DEVICE`/`NETNAME`/`DEBUG`: not threaded through yet (None).
     pub(super) fn run_script(&self, name: &str) {
         let env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
-        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+        let interp = self.settings.scripts_interpreter.as_deref();
+        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
+    }
+
+    /// `device_enable` (`net_setup.c:743-754`). Fires `tinc-up`.
+    /// Idempotent via `device_enabled`: `graph.c:316` calls this on
+    /// every graph run where reachable_count went 0→>0; the C guard
+    /// is exact arithmetic, ours is this flag.
+    ///
+    /// C also calls `devops.enable()` (`:744-746`) — a no-op on
+    /// every backend except Windows (`mingw/device.c:231` arms an
+    /// I/O completion). Our device trait has no `enable`; skip.
+    pub(super) fn device_enable(&mut self) {
+        if self.device_enabled {
+            return;
+        }
+        self.device_enabled = true;
+        self.run_script("tinc-up");
+    }
+
+    /// `device_disable` (`net_setup.c:756-765`). Fires `tinc-down`.
+    /// Mirror of `device_enable`. Called from `graph.c:314` when
+    /// the last peer becomes unreachable (DeviceStandby mode).
+    pub(super) fn device_disable(&mut self) {
+        if !self.device_enabled {
+            return;
+        }
+        self.device_enabled = false;
+        self.run_script("tinc-down");
     }
 
     /// `subnet_update` single-subnet (`subnet.c:376-390`). The
@@ -202,7 +230,8 @@ impl Daemon {
         env.add("WEIGHT", subnet.weight().to_string());
 
         let name = if up { "subnet-up" } else { "subnet-down" };
-        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+        let interp = self.settings.scripts_interpreter.as_deref();
+        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
     }
 
     /// `graph.c:273-289`: host-up/down AND hosts/NAME-up/down.
@@ -217,11 +246,12 @@ impl Daemon {
 
         // :284
         let name = if up { "host-up" } else { "host-down" };
-        Self::log_script(name, script::execute(&self.confbase, name, &env, None));
+        let interp = self.settings.scripts_interpreter.as_deref();
+        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
 
         // :286-287 per-node hook, same env
         let per = format!("hosts/{node}-{}", if up { "up" } else { "down" });
-        Self::log_script(&per, script::execute(&self.confbase, &per, &env, None));
+        Self::log_script(&per, script::execute(&self.confbase, &per, &env, interp));
     }
 
     /// `script.c:228-250` outcome logging.

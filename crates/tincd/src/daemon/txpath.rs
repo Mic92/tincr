@@ -362,7 +362,10 @@ impl Daemon {
     ///   elapsed: 2s when not confirmed (aggressive discovery), 10s
     ///   when confirmed (NAT keepalive).
     pub(super) fn try_udp(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
-        // C `:1202` udp_discovery gate: knob not ported, default-on.
+        // C `:1202` `if(!udp_discovery) return`.
+        if !self.settings.udp_discovery {
+            return false;
+        }
 
         let tunnel = self.tunnels.entry(target).or_default();
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
