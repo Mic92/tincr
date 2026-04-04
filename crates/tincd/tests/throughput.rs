@@ -322,7 +322,15 @@ impl Node {
         if connect_to {
             tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
         }
-        tinc_conf.push_str("PingTimeout = 1\n");
+        // Tight ping for fast detection of a hung daemon, but bumped
+        // when profiling bob: two perf samplers + saturated receiver
+        // can lose a ping under load.
+        let pingtimeout = if std::env::var_os("TINCD_PERF_BOB").is_some() {
+            5
+        } else {
+            1
+        };
+        tinc_conf.push_str(&format!("PingTimeout = {pingtimeout}\n"));
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         std::fs::write(
@@ -540,6 +548,10 @@ struct TunnelHandle {
     /// 90%. The Rust↔C config DOES distinguish: alice is always
     /// the Rust side there, so we always profile Rust.
     alice_pid: u32,
+    /// Bob's daemon PID. Bob is the iperf3 SERVER side: recvfrom,
+    /// decrypt, route, write to TUN. Send-side and recv-side
+    /// optimizations show up on opposite ends; profile both.
+    bob_pid: u32,
 }
 
 impl TunnelHandle {
@@ -608,6 +620,7 @@ fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
 
     // ─── spawn ──────────────────────────────────────────────────
     let bob_child = bob.spawn();
+    let bob_pid = bob_child.pid();
     if !wait_for_file(&bob.socket) {
         panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
     }
@@ -628,6 +641,7 @@ fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
         alice: Some(alice_child),
         bob: Some(bob_child),
         alice_pid,
+        bob_pid,
     };
 
     // ─── carrier, move, addresses ───────────────────────────────
@@ -987,9 +1001,16 @@ fn rust_vs_c_throughput() {
     // ─── 1. C↔C baseline ───────────────────────────────────────
     eprintln!("--- C↔C baseline ---");
     let mut cc = setup_tunnel("cc", Impl::C(c_bin.clone()), Impl::C(c_bin.clone()));
+    // TINCD_PERF profiles alice (sender). TINCD_PERF_BOB additionally
+    // profiles bob (receiver) — opt-in because two `perf -F 999`
+    // samplers + PingTimeout=1 + a saturated receiver is enough
+    // overhead to flap the meta-conn on slow hosts. Set both envs.
+    let perf_bob = std::env::var_os("TINCD_PERF_BOB").is_some();
     let c_perf_path = perf_out.join("c-alice.perf.data");
+    let c_bob_perf_path = perf_out.join("c-bob.perf.data");
     let baseline = {
-        let _perf = PerfRecord::start(cc.alice_pid, &c_perf_path);
+        let _perf_a = PerfRecord::start(cc.alice_pid, &c_perf_path);
+        let _perf_b = perf_bob.then(|| PerfRecord::start(cc.bob_pid, &c_bob_perf_path));
         measure(&mut cc)
         // _perf drops here → SIGINT → perf flushes + exits
     };
@@ -1000,8 +1021,10 @@ fn rust_vs_c_throughput() {
     eprintln!("--- Rust↔Rust ---");
     let mut rr = setup_tunnel("rr", Impl::Rust, Impl::Rust);
     let r_perf_path = perf_out.join("rust-alice.perf.data");
+    let r_bob_perf_path = perf_out.join("rust-bob.perf.data");
     let rust = {
-        let _perf = PerfRecord::start(rr.alice_pid, &r_perf_path);
+        let _perf_a = PerfRecord::start(rr.alice_pid, &r_perf_path);
+        let _perf_b = perf_bob.then(|| PerfRecord::start(rr.bob_pid, &r_bob_perf_path));
         measure(&mut rr)
     };
     drop(rr);
@@ -1028,7 +1051,13 @@ fn rust_vs_c_throughput() {
     // existence too, but skip the noise entirely when off.
     if perf_on {
         report_hot_symbols(&r_perf_path);
+        if perf_bob {
+            report_hot_symbols(&r_bob_perf_path);
+        }
         report_hot_symbols(&c_perf_path);
+        if perf_bob {
+            report_hot_symbols(&c_bob_perf_path);
+        }
         eprintln!("perf data: {}", perf_out.display());
     }
 
