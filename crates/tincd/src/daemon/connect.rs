@@ -148,7 +148,7 @@ impl Daemon {
                     AddrStr::new(local.port().to_string()).expect("numeric"),
                 )
             } else {
-                let unspec = AddrStr::new(AddrStr::UNSPEC).expect("literal");
+                let unspec = AddrStr::unspec();
                 (unspec.clone(), unspec)
             };
             self.edge_addrs.insert(fwd_eid, (addr, port, la, lp));

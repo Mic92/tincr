@@ -1297,7 +1297,7 @@ impl Daemon {
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
             // C `:173`
-            let unspec = || AddrStr::new(AddrStr::UNSPEC).expect("literal");
+            let unspec = AddrStr::unspec;
             let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
             self.edge_addrs
                 .insert(existing, (edge.addr.clone(), edge.port.clone(), la, lp));
@@ -1318,7 +1318,7 @@ impl Daemon {
                 .add_edge(from_id, to_id, edge.weight, edge.options);
             // C `:199-204`. local optional (pre-1.0.24); C leaves zeroed
             // (AF_UNSPEC → "unspec port unspec", `netutl.c:159-160`).
-            let unspec = || AddrStr::new(AddrStr::UNSPEC).expect("literal");
+            let unspec = AddrStr::unspec;
             let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
             self.edge_addrs
                 .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));

@@ -751,10 +751,7 @@ impl Daemon {
         // but the first hop IGNORES it (replaces with what they
         // observe). We send unspec: same semantics. The from!=myself
         // case goes via send_udp_info_forward.
-        let (addr, port) = (
-            AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-            AddrStr::new(AddrStr::UNSPEC).expect("unspec is valid"),
-        );
+        let (addr, port) = (AddrStr::unspec(), AddrStr::unspec());
 
         // C `:206`
         let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
@@ -835,12 +832,7 @@ impl Daemon {
             .get(&from_nid)
             .and_then(|t| t.udp_addr)
             .map_or_else(
-                || {
-                    (
-                        AddrStr::new(AddrStr::UNSPEC).expect("const"),
-                        AddrStr::new(AddrStr::UNSPEC).expect("const"),
-                    )
-                },
+                || (AddrStr::unspec(), AddrStr::unspec()),
                 |a| {
                     (
                         AddrStr::new(a.ip().to_string()).expect("ip is valid token"),

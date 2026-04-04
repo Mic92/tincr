@@ -45,6 +45,15 @@ impl AddrStr {
     /// in `ADD_EDGE` for the local-address field on the relay path.
     pub const UNSPEC: &'static str = "unspec";
 
+    /// The `AF_UNSPEC` sentinel as a constructed `AddrStr`. Infallible
+    /// shorthand for `AddrStr::new(AddrStr::UNSPEC).unwrap()` — the
+    /// literal trivially satisfies the invariant, no point making
+    /// callers `.expect()` on a constant.
+    #[must_use]
+    pub fn unspec() -> Self {
+        Self(Self::UNSPEC.to_owned())
+    }
+
     /// Construct, enforcing the `%s`-round-trip invariant: no whitespace,
     /// non-empty, fits in `MAX_STRING`.
     ///
