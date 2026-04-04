@@ -419,7 +419,7 @@ impl Daemon {
                                     crate::proto::REQ_DUMP_CONNECTIONS,
                                     c.name,
                                     c.hostname,
-                                    c.options,
+                                    c.options.bits(),
                                     c.fd(),
                                     c.status_value()
                                 )

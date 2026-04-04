@@ -947,6 +947,7 @@ dependencies = [
 name = "tincd"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "cc",
  "env_logger",
  "flate2",

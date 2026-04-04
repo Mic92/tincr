@@ -69,6 +69,9 @@ socket2 = "0.5"
 # transmute. Already in lockfile via dependencies.
 zerocopy = { version = "0.8", features = ["derive"] }
 
+# ConnOptions bitfield (proto.rs). Already in lockfile via deps.
+bitflags = "2"
+
 # zlib levels 1-9. miniz backend (no C dep). The C tinc uses real
 # zlib; output bytes differ but cross-decompress fine (deflate is a
 # SPEC, both implement it). KAT in compress.rs proves cross-decode.

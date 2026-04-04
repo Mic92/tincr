@@ -1679,7 +1679,10 @@ impl Daemon {
         let relay_supported = (relay_options >> 24) >= 4;
 
         // C `:970`: EITHER side requesting tcponly forces TCP.
-        let tcponly = (self.myself_options | relay_options) & crate::proto::OPTION_TCPONLY != 0;
+        // TODO(bitflags-opts): relay_options is u32 from tinc-graph Route;
+        // .bits() shim until tinc-graph migrates / udp-info-carry lands.
+        let tcponly =
+            (self.myself_options.bits() | relay_options) & crate::proto::OPTION_TCPONLY != 0;
 
         // C `:974`. minmtu==0 means "unknown" not "zero"; C's
         // `origlen > relay->minmtu` with minmtu=0 → always TCP. We
@@ -1726,7 +1729,7 @@ impl Daemon {
             // b64 is the universal fallback. C `send_meta_raw`
             // (`meta.c:99-112`) is buffer_add directly — NO SPTPS
             // framing (blob is already per-tunnel-encrypted).
-            if record_type != tinc_sptps::REC_HANDSHAKE && (conn.options >> 24) >= 7 {
+            if record_type != tinc_sptps::REC_HANDSHAKE && conn.options.prot_minor() >= 7 {
                 // C `protocol_misc.c:125-135`. RED first.
                 if crate::tcp_tunnel::random_early_drop(
                     conn.outbuf.live_len(),

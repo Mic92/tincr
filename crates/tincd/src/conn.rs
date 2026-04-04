@@ -164,7 +164,7 @@ pub struct Connection {
     /// `c->sptps`. Boxed: ~1KB, most conns are control with `None`.
     pub sptps: Option<Box<Sptps>>,
     /// `c->options` (`connection.h:32-36`). Top byte is `PROT_MINOR`.
-    pub options: u32,
+    pub options: crate::proto::ConnOptions,
     /// `c->estimated_weight`. RTT ms (`protocol_auth.c:840`). i32: wire `%d`.
     pub estimated_weight: i32,
     /// `c->start` (`protocol_auth.c:94`). Set at construct (~μs earlier
@@ -252,7 +252,7 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
-            options: 0,
+            options: crate::proto::ConnOptions::empty(),
             estimated_weight: 0,
             start: now,
             address: None,
@@ -287,7 +287,7 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
-            options: 0,
+            options: crate::proto::ConnOptions::empty(),
             estimated_weight: 0,
             start: now,
             address: Some(address),
@@ -330,7 +330,7 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
-            options: 0,
+            options: crate::proto::ConnOptions::empty(),
             estimated_weight: 0,
             start: now,
             address: Some(address),
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(c.protocol_minor, 0);
         assert!(c.ecdsa.is_none());
         assert!(c.sptps.is_none());
-        assert_eq!(c.options, 0);
+        assert_eq!(c.options, crate::proto::ConnOptions::empty());
         assert_eq!(c.estimated_weight, 0);
         assert!(c.address.is_none());
     }

@@ -93,7 +93,7 @@ pub struct NodeState {
     /// `c->edge->weight` (`ack_h:1048`). Avg of RTTs, ms.
     pub edge_weight: i32,
     /// `c->edge->options` (`ack_h:996`). Top byte = peer's PROT_MINOR.
-    pub edge_options: u32,
+    pub edge_options: crate::proto::ConnOptions,
 }
 
 /// Six variants = six C `io_add` callbacks.
@@ -911,7 +911,7 @@ pub struct Daemon {
     /// in top byte). C builds in `setup_myself_reloadable` (`net_
     /// setup.c:383-453,800`). Built from global `IndirectData`/
     /// `TCPOnly`/`PMTUDiscovery`/`ClampMSS` at `setup()`.
-    pub(crate) myself_options: u32,
+    pub(crate) myself_options: crate::proto::ConnOptions,
 
     /// `myport.udp`. C string (`net_setup.c:54,794`); we store the
     /// resolved u16. Read back from `listeners[0].udp_port()` after

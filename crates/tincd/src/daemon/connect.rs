@@ -3,6 +3,8 @@ use super::*;
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
+use crate::proto::ConnOptions;
+
 impl Daemon {
     /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse done
     /// by `proto::parse_ack`; this does the world-model edits.
@@ -19,9 +21,9 @@ impl Daemon {
 
         // C `:996-999`: PMTU only sticks if BOTH sides set it.
         let mut his = parsed.his_options;
-        if conn.options & his & crate::proto::OPTION_PMTU_DISCOVERY == 0 {
-            conn.options &= !crate::proto::OPTION_PMTU_DISCOVERY;
-            his &= !crate::proto::OPTION_PMTU_DISCOVERY;
+        if !(conn.options & his).contains(ConnOptions::PMTU_DISCOVERY) {
+            conn.options.remove(ConnOptions::PMTU_DISCOVERY);
+            his.remove(ConnOptions::PMTU_DISCOVERY);
         }
         conn.options |= his;
 
@@ -30,9 +32,9 @@ impl Daemon {
         // hosts/NAME says no → we win (local config trumps wire).
         if let Some(clamp) = conn.host_clamp_mss {
             if clamp {
-                conn.options |= crate::proto::OPTION_CLAMP_MSS;
+                conn.options.insert(ConnOptions::CLAMP_MSS);
             } else {
-                conn.options &= !crate::proto::OPTION_CLAMP_MSS;
+                conn.options.remove(ConnOptions::CLAMP_MSS);
             }
         }
 
@@ -125,7 +127,7 @@ impl Daemon {
         // and transitive nodes never learn the reverse.
         let fwd_eid = self
             .graph
-            .add_edge(self.myself, peer_id, edge_weight, edge_options);
+            .add_edge(self.myself, peer_id, edge_weight, edge_options.bits());
 
         // C `:1040-1045`: getsockname → local_address, port rewritten
         // to myport.udp. SockRef is the non-owning wrapper.

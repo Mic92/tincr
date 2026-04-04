@@ -207,7 +207,9 @@ impl Daemon {
                 .and_then(Option::as_ref)
                 .map_or(0, |r| r.options);
             let tcponly =
-                (self.myself_options | target_options) & crate::proto::OPTION_TCPONLY != 0;
+                // TODO(bitflags-opts): target_options is u32 from tinc-graph
+                // Route. .bits() shim until udp-info-carry agent lands.
+                (self.myself_options.bits() | target_options) & crate::proto::OPTION_TCPONLY != 0;
             if tcponly {
                 let has_direct_conn = self.nodes.get(&target).is_some_and(|ns| ns.conn.is_some());
                 if has_direct_conn {
@@ -717,8 +719,10 @@ impl Daemon {
             .route_of(dereffed)
             .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
 
+        // TODO(bitflags-opts): u32 boundary into udp_info::should_send_
+        // udp_info (owned by udp-info-carry agent). .bits() shim.
         let from_options = if from_is_myself {
-            self.myself_options
+            self.myself_options.bits()
         } else {
             self.route_of(to_nid).map_or(0, |r| r.options)
         };
@@ -734,7 +738,7 @@ impl Daemon {
             from_is_myself,
             from_options,
             to_options_orig,
-            self.myself_options,
+            self.myself_options.bits(),
             nexthop_options,
             last_sent,
             now,
@@ -816,7 +820,7 @@ impl Daemon {
             false, // from_is_myself
             from_options,
             to_options_orig,
-            self.myself_options,
+            self.myself_options.bits(),
             nexthop_options,
             None, // last_sent — only checked when from==myself
             self.timers.now(),

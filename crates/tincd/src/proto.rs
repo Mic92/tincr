@@ -17,26 +17,60 @@ use tinc_sptps::{Framing, Output, Role, Sptps};
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
 
-// OPTION_* (`connection.h:32-36`). Wire bits (ACK `%x` field). Top byte
-// carries `PROT_MINOR` (`OPTION_VERSION` macro, `:36`); C masks
-// `& 0xffffff` before send (`protocol_auth.c:867`).
+bitflags::bitflags! {
+    /// `OPTION_*` (`connection.h:32-36`). Wire bits (ACK `%x` field).
+    /// Top byte carries `PROT_MINOR` (`OPTION_VERSION` macro, `:36`);
+    /// C masks `& 0xffffff` before send (`protocol_auth.c:867`).
+    ///
+    /// `from_bits_retain` everywhere — C accepts unknown bits, wire
+    /// compat. The top byte is NOT a flag; use [`ConnOptions::prot_minor`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ConnOptions: u32 {
+        /// `OPTION_INDIRECT`: don't UDP-probe me directly, relay.
+        const INDIRECT       = 0x0001;
+        /// `OPTION_TCPONLY`: implies INDIRECT.
+        const TCPONLY        = 0x0002;
+        /// `OPTION_PMTU_DISCOVERY`: default on (`net_setup.c:442-446`).
+        const PMTU_DISCOVERY = 0x0004;
+        /// `OPTION_CLAMP_MSS`: default on (`net_setup.c:449-453`).
+        const CLAMP_MSS      = 0x0008;
+    }
+}
 
-/// `OPTION_INDIRECT`: don't UDP-probe me directly, relay.
-pub const OPTION_INDIRECT: u32 = 0x0001;
-/// `OPTION_TCPONLY`: implies INDIRECT.
-pub const OPTION_TCPONLY: u32 = 0x0002;
-/// `OPTION_PMTU_DISCOVERY`: default on (`net_setup.c:442-446`).
-pub const OPTION_PMTU_DISCOVERY: u32 = 0x0004;
-/// `OPTION_CLAMP_MSS`: default on (`net_setup.c:449-453`).
-pub const OPTION_CLAMP_MSS: u32 = 0x0008;
+impl ConnOptions {
+    /// `OPTION_VERSION(x)` (`connection.h:36`). Top byte = `PROT_MINOR`.
+    #[must_use]
+    pub fn prot_minor(self) -> u8 {
+        (self.bits() >> 24) as u8
+    }
+    /// `connection.h:36` inverse: stamp `PROT_MINOR` into top byte.
+    /// Preserves all flag bits + unknown low bits.
+    #[must_use]
+    pub fn with_minor(self, m: u8) -> Self {
+        Self::from_bits_retain((self.bits() & 0x00FF_FFFF) | (u32::from(m) << 24))
+    }
+}
+
+// Transitional `u32` aliases. `tinc-graph` (`Edge.options`, `Route
+// .options`) and `tinc-proto` (`AddEdge.options`) stay `u32` (separate
+// crates, separate change). The gate sites in `txpath.rs`/`udp_info.rs`/
+// `net.rs` reading those `u32`s use these consts. The three storage
+// sites (`Connection.options`, `Daemon.myself_options`, `NodeState
+// .edge_options`) are `ConnOptions`; calls into the `u32` boundary go
+// through `.bits()` / `from_bits_retain`. A follow-up cleans the gates
+// after the udp-info-carry agent lands.
+pub const OPTION_INDIRECT: u32 = ConnOptions::INDIRECT.bits();
+pub const OPTION_TCPONLY: u32 = ConnOptions::TCPONLY.bits();
+pub const OPTION_PMTU_DISCOVERY: u32 = ConnOptions::PMTU_DISCOVERY.bits();
+pub const OPTION_CLAMP_MSS: u32 = ConnOptions::CLAMP_MSS.bits();
 
 /// `myself->options` with all-defaults (no `IndirectData`/`TCPOnly`/etc
 /// in tinc.conf). `net_setup.c:800` after `:383-453` falls through every
 /// `get_config_bool`: PMTU + CLAMP_MSS + PROT_MINOR<<24. Daemon `setup()`
 /// uses [`myself_options_from_config`]; this const is a test fixture.
 #[cfg(test)]
-const fn myself_options_default() -> u32 {
-    OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | ((PROT_MINOR as u32) << 24)
+fn myself_options_default() -> ConnOptions {
+    (ConnOptions::PMTU_DISCOVERY | ConnOptions::CLAMP_MSS).with_minor(PROT_MINOR)
 }
 
 /// Build `myself->options` from global config (`net_setup.c:383-393,
@@ -52,8 +86,8 @@ const fn myself_options_default() -> u32 {
 /// `.ok()` matches C `get_config_bool`: parse-fail = absent (returns
 /// `false`, doesn't write `*result`).
 #[must_use]
-pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> u32 {
-    let mut opts = u32::from(PROT_MINOR) << 24;
+pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOptions {
+    let mut opts = ConnOptions::empty().with_minor(PROT_MINOR);
 
     // C `:383-385`: `if(get_config_bool(...) && choice)`.
     if config
@@ -62,7 +96,7 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> u32 {
         .and_then(|e| e.get_bool().ok())
         == Some(true)
     {
-        opts |= OPTION_INDIRECT;
+        opts |= ConnOptions::INDIRECT;
     }
     // C `:387-389` + `:391-393` `if(TCPONLY) options |= INDIRECT`.
     if config
@@ -71,19 +105,19 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> u32 {
         .and_then(|e| e.get_bool().ok())
         == Some(true)
     {
-        opts |= OPTION_TCPONLY | OPTION_INDIRECT;
+        opts |= ConnOptions::TCPONLY | ConnOptions::INDIRECT;
     }
     // C `:442-447`: `choice = !(options & TCPONLY); get_config_bool(
     // "PMTUDiscovery", &choice); if(choice) options |= PMTU_DISCOVERY`.
     // The default is on UNLESS TCPOnly already set it to off.
-    let pmtu_default = opts & OPTION_TCPONLY == 0;
+    let pmtu_default = !opts.contains(ConnOptions::TCPONLY);
     if config
         .lookup("PMTUDiscovery")
         .next()
         .and_then(|e| e.get_bool().ok())
         .unwrap_or(pmtu_default)
     {
-        opts |= OPTION_PMTU_DISCOVERY;
+        opts |= ConnOptions::PMTU_DISCOVERY;
     }
     // C `:449-453`: `choice = true; get_config_bool("ClampMSS", &choice);
     // if(choice) options |= CLAMP_MSS`. Default on.
@@ -93,7 +127,7 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> u32 {
         .and_then(|e| e.get_bool().ok())
         .unwrap_or(true)
     {
-        opts |= OPTION_CLAMP_MSS;
+        opts |= ConnOptions::CLAMP_MSS;
     }
 
     opts
@@ -587,7 +621,7 @@ pub fn handle_id(
 pub fn send_ack(
     conn: &mut Connection,
     my_udp_port: u16,
-    myself_options: u32,
+    myself_options: ConnOptions,
     now: Instant,
 ) -> bool {
     // C `:827-829`: legacy upgrade. Forbidden; id_h already rejected.
@@ -600,30 +634,31 @@ pub fn send_ack(
     // bit-by-bit; the per-host fields were extracted at id_h. Global
     // `Weight` fallback (`:864`) deferred (separate gap, net_setup.c
     // global config plumbing).
-    let mut opts: u32 = 0;
+    let mut opts = ConnOptions::empty();
     // C `:844-846`: IndirectData per-host (yes only) OR global.
-    if conn.host_indirect == Some(true) || myself_options & OPTION_INDIRECT != 0 {
-        opts |= OPTION_INDIRECT;
+    if conn.host_indirect == Some(true) || myself_options.contains(ConnOptions::INDIRECT) {
+        opts |= ConnOptions::INDIRECT;
     }
     // C `:848-850`: TCPOnly implies INDIRECT.
-    if conn.host_tcponly == Some(true) || myself_options & OPTION_TCPONLY != 0 {
-        opts |= OPTION_TCPONLY | OPTION_INDIRECT;
+    if conn.host_tcponly == Some(true) || myself_options.contains(ConnOptions::TCPONLY) {
+        opts |= ConnOptions::TCPONLY | ConnOptions::INDIRECT;
     }
     // C `:852-854`: PMTU only if global says so AND we're not TCP-only
     // — this is the load-bearing bit. Without it, per-host TCPOnly
     // still left PMTU set, peer wastes udp_discovery_timeout probing
     // a path the user already told us is broken.
-    if myself_options & OPTION_PMTU_DISCOVERY != 0 && opts & OPTION_TCPONLY == 0 {
-        opts |= OPTION_PMTU_DISCOVERY;
+    if myself_options.contains(ConnOptions::PMTU_DISCOVERY) && !opts.contains(ConnOptions::TCPONLY)
+    {
+        opts |= ConnOptions::PMTU_DISCOVERY;
     }
     // C `:856-861`: per-host ClampMSS OVERRIDES global (not OR'd).
     // `get_config_bool` writes through only on success, so absent =
     // global default sticks.
     if conn
         .host_clamp_mss
-        .unwrap_or(myself_options & OPTION_CLAMP_MSS != 0)
+        .unwrap_or(myself_options.contains(ConnOptions::CLAMP_MSS))
     {
-        opts |= OPTION_CLAMP_MSS;
+        opts |= ConnOptions::CLAMP_MSS;
     }
     conn.options = opts;
 
@@ -634,7 +669,7 @@ pub fn send_ack(
 
     // C `:867`: `"%d %s %d %x"`. `myport.udp` is a STRING in C; same
     // wire bytes either way.
-    let wire_options = (conn.options & 0x00ff_ffff) | (u32::from(PROT_MINOR) << 24);
+    let wire_options = conn.options.with_minor(PROT_MINOR).bits();
     conn.send(format_args!(
         "{} {} {} {:x}",
         Request::Ack as u8,
@@ -648,9 +683,9 @@ pub fn send_ack(
 /// lives in the daemon (it owns the slotmap; C has globals).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AckParsed {
-    pub his_udp_port: u16, // `%s` in C (string); everyone sends decimal
-    pub his_weight: i32,   // averaged with ours for edge weight
-    pub his_options: u32,  // PROT_MINOR in top byte
+    pub his_udp_port: u16,        // `%s` in C (string); everyone sends decimal
+    pub his_weight: i32,          // averaged with ours for edge weight
+    pub his_options: ConnOptions, // PROT_MINOR in top byte
 }
 
 /// `ack_h` parse half (`protocol_auth.c:948-962`). C `sscanf("%*d %s
@@ -684,7 +719,7 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
     Ok(AckParsed {
         his_udp_port: port,
         his_weight: weight,
-        his_options: options,
+        his_options: ConnOptions::from_bits_retain(options),
     })
 }
 
@@ -1274,10 +1309,10 @@ mod tests {
     #[test]
     fn myself_options_default_value() {
         let opts = myself_options_default();
-        assert_eq!(opts & 0xff, 0x0c); // PMTU(4) | CLAMP(8)
-        assert_eq!(opts >> 24, u32::from(PROT_MINOR));
-        assert_eq!(opts & 0x00ff_ff00, 0);
-        assert_eq!(opts, 0x0700_000c);
+        assert_eq!(opts.bits() & 0xff, 0x0c); // PMTU(4) | CLAMP(8)
+        assert_eq!(opts.prot_minor(), PROT_MINOR);
+        assert_eq!(opts.bits() & 0x00ff_ff00, 0);
+        assert_eq!(opts.bits(), 0x0700_000c);
     }
 
     fn cfg(lines: &[&str]) -> tinc_conf::Config {
@@ -1310,12 +1345,12 @@ mod tests {
     #[test]
     fn myself_options_tcponly_implies_indirect_clears_pmtu() {
         let opts = myself_options_from_config(&cfg(&["TCPOnly = yes"]));
-        assert_eq!(opts & OPTION_TCPONLY, OPTION_TCPONLY);
-        assert_eq!(opts & OPTION_INDIRECT, OPTION_INDIRECT);
-        assert_eq!(opts & OPTION_PMTU_DISCOVERY, 0);
-        assert_eq!(opts & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+        assert!(opts.contains(ConnOptions::TCPONLY));
+        assert!(opts.contains(ConnOptions::INDIRECT));
+        assert!(!opts.contains(ConnOptions::PMTU_DISCOVERY));
+        assert!(opts.contains(ConnOptions::CLAMP_MSS));
         // 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, top byte PROT_MINOR.
-        assert_eq!(opts, 0x0700_000b);
+        assert_eq!(opts.bits(), 0x0700_000b);
     }
 
     /// `net_setup.c:383-385` standalone: only INDIRECT, defaults
@@ -1324,10 +1359,10 @@ mod tests {
     #[test]
     fn myself_options_indirect_only() {
         let opts = myself_options_from_config(&cfg(&["IndirectData = yes"]));
-        assert_eq!(opts & OPTION_INDIRECT, OPTION_INDIRECT);
-        assert_eq!(opts & OPTION_TCPONLY, 0);
-        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
-        assert_eq!(opts & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+        assert!(opts.contains(ConnOptions::INDIRECT));
+        assert!(!opts.contains(ConnOptions::TCPONLY));
+        assert!(opts.contains(ConnOptions::PMTU_DISCOVERY));
+        assert!(opts.contains(ConnOptions::CLAMP_MSS));
     }
 
     /// `net_setup.c:443`: explicit `PMTUDiscovery = yes` overrides
@@ -1336,17 +1371,17 @@ mod tests {
     #[test]
     fn myself_options_tcponly_but_pmtu_forced_on() {
         let opts = myself_options_from_config(&cfg(&["TCPOnly = yes", "PMTUDiscovery = yes"]));
-        assert_eq!(opts & OPTION_TCPONLY, OPTION_TCPONLY);
-        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+        assert!(opts.contains(ConnOptions::TCPONLY));
+        assert!(opts.contains(ConnOptions::PMTU_DISCOVERY));
     }
 
     /// `net_setup.c:449-453`: `ClampMSS = no` clears the bit.
     #[test]
     fn myself_options_clamp_mss_off() {
         let opts = myself_options_from_config(&cfg(&["ClampMSS = no"]));
-        assert_eq!(opts & OPTION_CLAMP_MSS, 0);
+        assert!(!opts.contains(ConnOptions::CLAMP_MSS));
         // PMTU still default-on.
-        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+        assert!(opts.contains(ConnOptions::PMTU_DISCOVERY));
     }
 
     // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad) covered
@@ -1364,11 +1399,11 @@ mod tests {
         c.host_tcponly = Some(true);
         let now = Instant::now();
         send_ack(&mut c, 655, myself_options_default(), now);
-        assert_eq!(c.options & OPTION_TCPONLY, OPTION_TCPONLY);
-        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
-        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, 0);
+        assert!(c.options.contains(ConnOptions::TCPONLY));
+        assert!(c.options.contains(ConnOptions::INDIRECT));
+        assert!(!c.options.contains(ConnOptions::PMTU_DISCOVERY));
         // ClampMSS unaffected (default on).
-        assert_eq!(c.options & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+        assert!(c.options.contains(ConnOptions::CLAMP_MSS));
         // Wire bits: 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, NOT 0x0c.
         let line = std::str::from_utf8(c.outbuf.live()).unwrap();
         assert!(line.ends_with(" 700000b\n"), "got {line:?}");
@@ -1383,8 +1418,8 @@ mod tests {
         c.protocol_minor = 2;
         c.host_clamp_mss = Some(false);
         send_ack(&mut c, 655, myself_options_default(), Instant::now());
-        assert_eq!(c.options & OPTION_CLAMP_MSS, 0);
-        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+        assert!(!c.options.contains(ConnOptions::CLAMP_MSS));
+        assert!(c.options.contains(ConnOptions::PMTU_DISCOVERY));
     }
 
     /// `protocol_auth.c:844-846`: `IndirectData = yes` per-host. C's
@@ -1396,10 +1431,10 @@ mod tests {
         c.protocol_minor = 2;
         c.host_indirect = Some(true);
         send_ack(&mut c, 655, myself_options_default(), Instant::now());
-        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
-        assert_eq!(c.options & OPTION_TCPONLY, 0);
+        assert!(c.options.contains(ConnOptions::INDIRECT));
+        assert!(!c.options.contains(ConnOptions::TCPONLY));
         // PMTU stays on (only TCPONLY suppresses it).
-        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+        assert!(c.options.contains(ConnOptions::PMTU_DISCOVERY));
 
         // `IndirectData = no` per-host doesn't clear global INDIRECT.
         let mut c = mkconn();
@@ -1408,10 +1443,10 @@ mod tests {
         send_ack(
             &mut c,
             655,
-            OPTION_INDIRECT | OPTION_CLAMP_MSS,
+            ConnOptions::INDIRECT | ConnOptions::CLAMP_MSS,
             Instant::now(),
         );
-        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
+        assert!(c.options.contains(ConnOptions::INDIRECT));
     }
 
     /// `protocol_auth.c:863-865`: per-host Weight overrides RTT.
@@ -1436,7 +1471,10 @@ mod tests {
         let mut c = mkconn();
         c.protocol_minor = 2;
         send_ack(&mut c, 655, myself_options_default(), Instant::now());
-        assert_eq!(c.options, OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
+        assert_eq!(
+            c.options,
+            ConnOptions::PMTU_DISCOVERY | ConnOptions::CLAMP_MSS
+        );
     }
 
     #[test]
@@ -1445,11 +1483,10 @@ mod tests {
         let parsed = parse_ack(line).unwrap();
         assert_eq!(parsed.his_udp_port, 655);
         assert_eq!(parsed.his_weight, 50);
-        assert_eq!(parsed.his_options, 0x0700_000c);
-        assert_eq!(
-            parsed.his_options & 0xff,
-            OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS
-        );
+        assert_eq!(parsed.his_options.bits(), 0x0700_000c);
+        assert_eq!(parsed.his_options.prot_minor(), 7);
+        assert!(parsed.his_options.contains(ConnOptions::PMTU_DISCOVERY));
+        assert!(parsed.his_options.contains(ConnOptions::CLAMP_MSS));
     }
 
     /// C `:960`: `sscanf < 3` → false.
