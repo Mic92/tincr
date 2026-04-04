@@ -346,7 +346,7 @@ legacy`, keep OpenSSL-via-FFI permanently for RSA — reimplementing
 | `protocol.c` | 245 | ✅ | `check_gate` (dispatch) + `seen_request` cache + `age_past_requests` timer + `forward_request` (collect-then-send, slotmap borrow). |
 | `protocol_auth.c` | 1066 | ~80% | `id_h` peer+control+invitation (chunk 4a, 4b, 10), `send_ack`/`ack_h`, `send_everything` + tunnelserver gates (chunk 5, 9c). `?` branch (`:340-373`): `IdOk::Invitation` variant + `dispatch_invitation_outputs` (chunk 10). `receive_invitation_sptps`/`finalize_invitation` (`:119-310`): `invitation_serve.rs` hoist. Per-host `IndirectData`/`TCPOnly`/`ClampMSS`/`Weight`/`PMTU` in ACK (`:844-865`, `5ceb8011`) + global defaults (`170e8f4a`) — the myself->options chain is complete. Left: legacy (~400, chunk-never). |
 | `keys.c` | 334 | ✅ | `tincd::keys`. The `& ~0100700u` perm-check bug ported as C-is-WRONG #7. |
-| `control.c` | 241 | ~50% | 6/12 `REQ_*` arms (STOP, RELOAD, DUMP_{NODES,EDGES,SUBNETS,CONNECTIONS}). CLI client side speaks the full protocol; daemon side is `match` arms. `init_control` landed in chunk 2. Missing arms fall through to `REQ_INVALID` (matches C's default). |
+| `control.c` | 241 | ~65% | 8/12 `REQ_*` arms (STOP, RELOAD, DUMP_{NODES,EDGES,SUBNETS,CONNECTIONS}, RETRY+DISCONNECT — `14cf3ce4`). CLI client side speaks the full protocol; daemon side is `match` arms. `init_control` landed in chunk 2. Missing arms fall through to `REQ_INVALID` (matches C's default). Left: PURGE, DUMP_TRAFFIC, PCAP, LOG. |
 | `pidfile.c` | tiny | ✅ | `Pidfile::read` (CLI side) + write (daemon, chunk 2). |
 | `net_socket.c` | 884 | ~85% | `tincd::listen` (listeners + tarpit) + `tincd::outgoing` (`do_outgoing_connection`, `try_outgoing_connections`, `retry_outgoing`, `finish_connecting`, the `handle_meta_io` connecting probe). All proxy modes wired (`daemon.rs:1191` comment is stale). `IP_MTU_DISCOVER` (`f58ebde4` — kernel never populated the PMTU cache that `05ba1f82` reads). `MSG_NOSIGNAL` on `conn.rs` send (`26a513d4` — defense-in-depth; Rust runtime SIG_IGNs SIGPIPE pre-main). Left: `SO_RCVBUF`, `SO_BINDTODEVICE`, `SO_MARK`, `bind_reusing_port`. |
 | `net_setup.c` | 1336 | ~65% | `setup_myself` skeleton + `setup_myself_reloadable` (chunk 10), `load_all_nodes` (chunk 11), `device_enable`/`device_disable` script hooks (`daemon.rs:1667,1893`). KeyExpire timer armed (`63146c64`). Global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS` parsed (`170e8f4a`). `DEFAULT_BROADCAST_SUBNETS` inserted at setup (`727febdb`). Left: `bind_reusing_port`, `add_listen_address` config-walk, remaining misc config keys. |
@@ -361,7 +361,7 @@ legacy`, keep OpenSSL-via-FFI permanently for RSA — reimplementing
 | `protocol_misc.c` | 376 | ~95% | PING/PONG (chunk 8). UDP_INFO/MTU_INFO gates+handlers wired (`udp_info.rs`, chunk 11). The 7 send-gates as `should_send_* → bool`, receive as `→ enum Action`. PACKET parse-and-swallow (`463b9987` — cross-impl found we crashed on it). PACKET 17 routing (`bc62b722`). Left: nothing structural. |
 | `net_packet.c` | 1938 | ~92% | **The hot path.** Chunk 7: send/recv core. Chunk 9: PMTU/compression/`try_tx` chain. `send_sptps_data` relay decision tree (`:965-1056`). All three chunk-12 leaves WIRED: `choose_local_address`/`adapt_socket` (`67e0dc22`), `broadcast_packet` target selection (`2bbd51b0`), `receive_tcppacket_sptps` ladder (`300a8e96` — the architectural-trap fix). Send/receive offset switch-aware (`:696-700`, `:1108`). PACKET 17 send+recv (`bc62b722` — the `:684` `n->connection` gate, **C-is-WRONG #11** at `:708-726`). `choose_initial_maxmtu` (`:1249-1340`, `05ba1f82` — was THE throughput bug). `recvmmsg` batching (`:1845-1895`, `0f120b11`). `overwrite_mac` (`:1557-1562`, `31ea5c79`). Left: `try_harder` (chunk-never), legacy crypto (`:800-960`, chunk-never). |
 | `route.c` | 1176 | ~100% | Chunk 7: `route_ipv4`. Chunk 9: v6/ICMP/MSS/ARP/NDP/TTL. **C-is-WRONG #8** (`:344`). `route_mac` (`52f6f348`) + `learn_mac`/`age_subnets` (`bc9f223b`) WIRED in `2bbd51b0`. Full RMODE_SWITCH dispatch (`:1159`). `route_broadcast` (`:559-565`). FMODE_KERNEL (`:1135-1138`). FRAG_NEEDED v4/v6 + the two routing-loop guards (`:649,675`/`:745,770`) wired (`8ea18bed`). All three former NOT-PORTINGs ported: `fragment_ipv4_packet` (`:614-681`, `8b29ca5b`), TIME_EXCEEDED `getsockname` (`:148-169`, `b5ef3f86`), `overwrite_mac` snatching (`:830,972`, `31ea5c79`). FMODE_OFF gate (`e3513e52` — was parsed-but-ignored). Ownerless-broadcast match (`727febdb` — mDNS/DHCP/NDP packets now hit `route_broadcast` not ICMP-unreachable). |
-| `net.c` | 527 | ~85% | `timeout_handler` ping sweep + laptop-suspend (chunk 8), `periodic_handler` storm-detect (chunk 8), `reload_configuration` SIGHUP mark-sweep (chunk 10 — `reload.rs::diff_subnets/conns_to_terminate`). Left: `purge`/`retry` control-socket commands. The mark-sweep is `BTreeSet::difference`; the C's `expires=1` flag is a splay-tree workaround. |
+| `net.c` | 527 | ~90% | `timeout_handler` ping sweep + laptop-suspend (chunk 8), `periodic_handler` storm-detect (chunk 8), `reload_configuration` SIGHUP mark-sweep (chunk 10 — `reload.rs::diff_subnets/conns_to_terminate`). `retry()` (`14cf3ce4` — SIGALRM zeros backoff + kicks ping sweep; `Instant` has no zero so `checked_sub(pingtimeout+1)` for the same effect). The mark-sweep is `BTreeSet::difference`; the C's `expires=1` flag is a splay-tree workaround. Left: `purge`. |
 | `address_cache.c` | 284 | ~92% | `addrcache.rs`. Text-format (`SocketAddr::Display`) not C struct dump. next_addr/reset/add_recent/save. Integrated with `Outgoing` (per-outgoing not per-node — the C hangs it on `node_t` but only outgoings read it). Edge-walk tier-2 (`ea98247d` — gossip-learned addresses now in the dial fallback chain). Left: lazy hostname resolve at next_addr time (`:170` `str2addrinfo`); current `try_outgoing_connections` does blocking `to_socket_addrs()` at setup. |
 | `route.c` `inet_checksum` + headers | ~100 | ✅ | `packet.rs`. `#[repr(C, packed)]` Ipv4Hdr/Ip6Hdr/IcmpHdr/Icmp6Hdr/EtherArp + KAT-locked checksum (native-endian `memcpy` load, RFC 1071 §2(B)). Ready for chunk-9 builders. |
 | `process.c` | 243 | 0 | chunk 8. `daemon()`, setuid, scripts. Ship-#1's SIGPIPE-from-dropped-stderr finding applies to script spawn. |
@@ -404,45 +404,24 @@ bottleneck.
 
 Function-by-function audit of every C file against `// C file.c:NNN`
 ref tags + STUB/TODO/DEFERRED markers. Full 718-line analysis at
-`bcc5c3e3`; this section is the index. **31 NOT-PORTED items: 4
-HIGH, 16 MEDIUM, 11 LOW.** Nine landed since (4/4 HIGH, 4 MED, 1
-LOW); ~22 remain. The %'s in the module-mapping table above are
-current.
-
-### HIGH gaps — closed (porting record)
-
-The audit applied the IP_MTU lesson ("does absence cause wrong
-behavior elsewhere?") and found four more cases. All four are
-fixed; this is the record — kept because the IP_MTU one was a
-load-bearing mistake and these are the same class.
-
-| Gap | C ref | Why HIGH | Ported in |
-|---|---|---|---|
-| `IP_MTU_DISCOVER` not set on UDP socket | `net_socket.c:349-378` | Probes fragment at L3, arrive, `minmtu` walks to 1518, first real >MTU packet fragments instead of `EMSGSIZE`. The inverse of `05ba1f82`: that taught us to *read* the kernel PMTU cache; without `IP_PMTUDISC_DO` the kernel never *populates* it. | `f58ebde4` |
-| `DEFAULT_BROADCAST_SUBNETS` structurally absent | `net_setup.c:485-505` + `route.c:644-646,738-741` | mDNS/DHCP/NDP from kernel → `lookup_ipv4` miss → ICMP-unreachable back to own kernel. Silent (mDNS doesn't surface ICMP). `SubnetEntry.owner: String` couldn't model `owner=NULL`. | `727febdb` (sentinel-`""`) |
-| `Forwarding = off` parsed-but-ignored | `route.c:658-660,753-755,1052-1054` | The "I'm an endpoint not a relay" knob silently no-ops; operator gets transit traffic. **Simple 3-node relay doesn't hit the gate** — needed StrictSubnets to force decrypt-at-relay. | `e3513e52` |
-| `KeyExpire` timer never armed | `net_setup.c:144-160` → `protocol_key.c:38-62` | SPTPS sessions live forever on one key; nonce-reuse at ~9h sustained throughput. **C-nolegacy has the same bug.** Receive side already handled inbound `KEY_CHANGED`; we just never initiated. | `63146c64` |
-
-### MEDIUM / LOW — table
-
-Four landed (✅); the rest is the open TODO list.
+`bcc5c3e3`. **31 NOT-PORTED items found**: 4 HIGH (all fixed:
+`f58ebde4` IP_MTU_DISCOVER, `63146c64` KeyExpire, `727febdb`
+broadcast subnets, `e3513e52` Forwarding=off), 5 MED + 1 LOW
+fixed. ~20 remain. The %'s in the module-mapping table above are
+current; Status row "coverage-gap fixes" has the per-commit
+findings.
 
 | Item | C source | What we do | Effort | Pri |
 |---|---|---|---|---|
 | `detach()` | `process.c:200-243` | foreground only | ~40 LOC, or doc "systemd Type=simple" | M |
 | `drop_privs` (`-U`/`-R`) | `tincd.c:373-428` | unknown-arg error (loud) | ~60 LOC | M |
-| ~~argv flags (`-o`, `-n`)~~ — `-d`, `-L`, `-s`, `--logfile` left | `tincd.c:174-331` | 5/11 flags parsed | ✅ `764674b8` (`-o`+`-n`); rest L | M / L |
+| argv flags `-d`, `-L`, `-s`, `--logfile` (`-o`/`-n` landed `764674b8`) | `tincd.c:174-331` | 7/11 flags parsed | ~10 LOC each | L |
 | `umbilical` ready-signal | `tincd.c:549-568,702-709` | `tinc start` would block forever | ~25 LOC | M |
-| `REQ_{PURGE,RETRY,DISCONNECT,DUMP_TRAFFIC,PCAP,LOG}` | `control.c:45-148` | fall through to `REQ_INVALID` (matches C default) | ~60+15+40+50 LOC | M (`DUMP_TRAFFIC`, `DISCONNECT`) / L |
+| `REQ_{PURGE,DUMP_TRAFFIC,PCAP,LOG}` (`RETRY`+`DISCONNECT` landed `14cf3ce4`) | `control.c:45-148` | fall through to `REQ_INVALID` (matches C default) | ~60+50 LOC | M (`DUMP_TRAFFIC`) / L |
 | `purge` (node GC) | `net.c:50-93` | nodes accumulate; `O(nodes ever seen)` | ~40 LOC | M |
-| `retry` (zero backoffs NOW) | `net.c:460-484` | SIGALRM handler is no-op; wait out 900s backoff | ~20 LOC | M |
-| ~~`get_known_addresses` edge-walk~~ | `address_cache.c:31-65,126-148` | cache→config only; skip gossip-learned tier | ✅ `ea98247d` | M |
 | Lazy `getaddrinfo` + blocking-DNS | `address_cache.c:157-199` | `to_socket_addrs()` once at OPEN; **blocks event loop** | ~50 LOC; blocking is harder | M / L |
-| ~~Per-host `IndirectData`/`TCPOnly`/`Weight` in `send_ack`~~ | `protocol_auth.c:844-865` | STUBBED; inherit globals | ✅ `5ceb8011` | M |
-| ~~Global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS`~~ | `net_setup.c:383-400` | hardcoded C defaults; `lookup` never called | ✅ `170e8f4a` | M |
 | `bind_reusing_port` (`Port=0` → same TCP/UDP port) | `net_setup.c:577-635` | TCP/UDP get different kernel ports | ~20 LOC | M |
 | `add_listen_address` config-walk (`BindToAddress`) | `net_setup.c:637-741` | one listener pair on `0.0.0.0` | ~50 LOC | M |
-| ~~SIGPIPE / `MSG_NOSIGNAL`~~ | `process.c:204` / `conn.rs:607` | **Rust runtime sets SIG_IGN before main()**; defense-in-depth only | ✅ `26a513d4` | L |
 | `priorityinheritance` (`IP_TOS` copy) | `route.c:668,763,1063` + `net_packet.c:920-946` | DEFERRED; outer packets get default TOS | ~40 LOC | L |
 | `dump_traffic` (feeds `tinc top`) | `node.c:226-231` | counters don't exist on `TunnelState` | ~30 LOC | L |
 | `send_pcap` (`tinc pcap` backend) | `route.c:1109-1128` | DEFERRED; no `pcap` status bit | ~30 LOC | L |
