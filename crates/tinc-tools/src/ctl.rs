@@ -75,9 +75,11 @@ use crate::names::Paths;
 /// the discriminant sequence (2→3, 7→8) would be more surprising
 /// than the dead variants.
 ///
-/// `REQ_CONNECT` similarly: enum value exists, no `cmd_connect` in
-/// the C, no case in `control_h`. The asymmetry with `REQ_DISCONNECT`
-/// suggests it was planned and never finished. Same treatment.
+/// `REQ_CONNECT`: C `tincctl.c:1446` has `cmd_connect`, but
+/// `control.c` has no `REQ_CONNECT` case — falls through to
+/// `default: REQ_INVALID`. The CLI sends a request the daemon
+/// doesn't handle. Effectively dead-on-arrival in C; we don't
+/// bother sending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CtlRequest {
@@ -94,7 +96,8 @@ pub enum CtlRequest {
     Purge = 8,
     SetDebug = 9,
     Retry = 10,
-    /// Dead in C. No `cmd_connect`, no daemon handler.
+    /// Dead-on-arrival in C. `tincctl.c:1446` sends it; `control.c`
+    /// has no case — daemon replies REQ_INVALID.
     Connect = 11,
     Disconnect = 12,
     DumpTraffic = 13,

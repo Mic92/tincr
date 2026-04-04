@@ -454,8 +454,10 @@ impl Default for DaemonSettings {
             maxoutbufsize: 10 * MTU as usize,
             // C `net_setup.c:567`: `invitation_lifetime = 604800` (1 week).
             invitation_lifetime: Duration::from_secs(604_800),
-            // C `net_setup.c:404`: default false (no `else` branch).
-            local_discovery: false,
+            // C `net_packet.c:82`: `bool localdiscovery = true`. The
+            // `get_config_bool` at `net_setup.c:404` has no `else` branch,
+            // but absent-key leaves the global at its initializer (true).
+            local_discovery: true,
             // C `net_socket.c:624`: only set if config present.
             bind_to_address: None,
             proxy: None,
@@ -471,8 +473,10 @@ impl Default for DaemonSettings {
             sockopts: SockOpts::default(),
             // C `script.c:31`: `char *scriptinterpreter = NULL`.
             scripts_interpreter: None,
-            // C `sptps.c:33`: `unsigned int sptps_replaywin = 32`.
-            // (Our gossip.rs hardcoded 16 — a bug; C is 32.)
+            // C `sptps.c:31`: `sptps_replaywin = 16`. We use 32 (the
+            // legacy `replaywin` default at `net_packet.c:81`); 32 is
+            // strictly more tolerant of reordering. C `net_setup.c:926`
+            // sets both from the same config key.
             replaywin: 32,
             // C `net_socket.c:45`: `int max_connection_burst = 10`.
             max_connection_burst: 10,
@@ -2645,6 +2649,8 @@ mod tests {
         assert!(!s.tunnelserver); // C `:879` default false
         assert!(!s.strictsubnets); // C `:878` default false
         assert!(s.bind_to_address.is_none()); // C `:624` no default
+        // C `net_packet.c:82`: `bool localdiscovery = true`.
+        assert!(s.local_discovery);
         assert!(!s.directonly); // C `route.c:41`
         assert!(!s.priorityinheritance); // C `route.c:42`
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
@@ -2659,7 +2665,8 @@ mod tests {
         assert_eq!(s.sockopts.udp_rcvbuf, 1024 * 1024);
         assert_eq!(s.sockopts.udp_sndbuf, 1024 * 1024);
         assert_eq!(s.sockopts.fwmark, 0);
-        // C `sptps.c:33`: `unsigned int sptps_replaywin = 32`.
+        // C `sptps.c:31`: `sptps_replaywin = 16`; we use 32 (legacy
+        // `replaywin` default, `net_packet.c:81`) — strictly safer.
         assert_eq!(s.replaywin, 32);
         // C `net_socket.c:45`: `int max_connection_burst = 10`.
         assert_eq!(s.max_connection_burst, 10);

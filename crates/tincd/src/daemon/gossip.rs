@@ -339,7 +339,7 @@ impl Daemon {
             mykey,
             hiskey,
             label,
-            16,
+            self.settings.replaywin,
             &mut OsRng,
         );
 
