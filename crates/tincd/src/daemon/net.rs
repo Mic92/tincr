@@ -1,6 +1,59 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+use std::io::IoSliceMut;
+use std::net::{SocketAddrV4, SocketAddrV6};
+
+use nix::errno::Errno;
+use nix::sys::socket::{MsgFlags, MultiHeaders, SockaddrStorage, recvmmsg};
+
+/// C `net_packet.c:1845`: `#define MAX_MSG 64`.
+const UDP_RX_BATCH: usize = 64;
+/// C `vpn_packet_t` is ~1700; we use 2KB (oversize truncates and
+/// the SPTPS decrypt fails — same outcome as the old stack buf).
+const UDP_RX_BUFSZ: usize = 2048;
+
+/// Persistent recvmmsg state. C `net_packet.c:1853-1857` uses
+/// `static` arrays (`pkt[64]`, `addr[64]`, `msg[64]`, `iov[64]`).
+/// Heap-once, reuse-forever.
+pub(crate) struct UdpRxBatch {
+    /// 64 × 2KB packet buffers (`static vpn_packet_t pkt[MAX_MSG]`).
+    /// Boxed so `Option<UdpRxBatch>` is `mem::take`-cheap (one ptr,
+    /// not 128KB).
+    bufs: Box<[[u8; UDP_RX_BUFSZ]; UDP_RX_BATCH]>,
+    /// nix's `mmsghdr` + `sockaddr_storage` arrays (`static struct
+    /// mmsghdr msg[64]` + `static sockaddr_t addr[64]`).
+    headers: MultiHeaders<SockaddrStorage>,
+}
+
+impl UdpRxBatch {
+    pub(crate) fn new() -> Self {
+        // `Box::new([[0u8; 2048]; 64])` would build 128KB on the
+        // stack first then move — overflow risk. vec→boxed→array
+        // goes straight to the heap.
+        let bufs: Box<[[u8; UDP_RX_BUFSZ]]> =
+            vec![[0u8; UDP_RX_BUFSZ]; UDP_RX_BATCH].into_boxed_slice();
+        let bufs: Box<[[u8; UDP_RX_BUFSZ]; UDP_RX_BATCH]> = bufs
+            .try_into()
+            .expect("vec![_; 64].into_boxed_slice() has length 64");
+        Self {
+            bufs,
+            headers: MultiHeaders::preallocate(UDP_RX_BATCH, None),
+        }
+    }
+}
+
+/// nix `SockaddrStorage` → std `SocketAddr`. nix has `From` impls
+/// for the v4/v6 views but not the union; do it by hand.
+fn ss_to_std(ss: &SockaddrStorage) -> Option<SocketAddr> {
+    if let Some(v4) = ss.as_sockaddr_in() {
+        Some(SocketAddr::V4(SocketAddrV4::from(*v4)))
+    } else {
+        ss.as_sockaddr_in6()
+            .map(|v6| SocketAddr::V6(SocketAddrV6::from(*v6)))
+    }
+}
+
 impl Daemon {
     /// `handle_new_meta_connection` (`net_socket.c:734-779`).
     /// accept → tarpit-check → configure_tcp → allocate → register.
@@ -93,49 +146,113 @@ impl Daemon {
     /// The 12-byte ID prefix is OUTSIDE SPTPS framing; `dst == nullid`
     /// means "direct to you" (`:1013` send / `:1741` recv).
     ///
-    /// Drain loop is bounded (bug audit `deef1268`): under sustained
-    /// UDP ingress the kernel buffer refills as fast as we drain;
-    /// without a cap, meta-conn flush and timers starve. C `recvmmsg(
-    /// MAX_MSG=64)` is one batch per callback (level-triggered).
-    /// STUB(chunk-11-perf): `recvmmsg` batching.
+    /// C `recvmmsg(MAX_MSG=64)` is one batch per callback (level-
+    /// triggered: kernel re-fires if more queued). We're EPOLLET, so
+    /// a full batch (64 returned) means "maybe more" → rearm so the
+    /// next turn() picks them up after the rest of the event loop
+    /// runs. Same drain semantics as the old `recv_from` loop's
+    /// `UDP_DRAIN_CAP=64` (bug audit `deef1268`): 64 packets per
+    /// turn, then yield to TUN-read/meta-conn/timers. iperf3 is
+    /// TCP-over-tunnel — alice MUST get back to TUN reads or the
+    /// send window fills and the whole thing stalls.
     pub(super) fn on_udp_recv(&mut self, i: u8) {
-        const UDP_DRAIN_CAP: u32 = 64; // C `net_packet.c:1845` MAX_MSG
+        // Take the batch out so we can borrow bufs immutably while
+        // calling `&mut self.handle_incoming_vpn_packet`. Same
+        // pattern as `rx_scratch` (`e49b5af6`). `expect` is fine —
+        // this is the only `take` site, no re-entrancy (epoll is
+        // single-threaded), and we always put it back below.
+        let mut batch = self
+            .udp_rx_batch
+            .take()
+            .expect("udp_rx_batch is Some between on_udp_recv calls");
 
-        // Generous fixed buf; oversize truncates (MSG_TRUNC) and the
-        // SPTPS decrypt would fail anyway.
-        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 2048];
-        let mut drained = 0u32;
-        loop {
-            if drained >= UDP_DRAIN_CAP {
-                // Rearm: next turn() fires after the rest of the
-                // event loop runs.
-                if let Some(&io_id) = self.listener_udp_io.get(usize::from(i))
-                    && let Err(e) = self.ev.rearm(io_id)
-                {
-                    log::error!(target: "tincd::net",
-                                    "UDP fd rearm failed: {e}");
+        let count = self.recvmmsg_batch(i, &mut batch);
+
+        self.udp_rx_batch = Some(batch);
+
+        // EPOLLET: kernel had ≥64 queued → there may be more.
+        // Rearm; next turn() drains the rest after meta-conn/timers
+        // get a slice. C is level-triggered so it just returns and
+        // gets called again — same effect, no rearm syscall.
+        if count == UDP_RX_BATCH
+            && let Some(&io_id) = self.listener_udp_io.get(usize::from(i))
+            && let Err(e) = self.ev.rearm(io_id)
+        {
+            log::error!(target: "tincd::net", "UDP fd rearm failed: {e}");
+        }
+    }
+
+    /// One `recvmmsg(64)` + dispatch. Returns the number of
+    /// messages the kernel gave us (0..=64). Separate fn so the
+    /// `batch` borrow doesn't overlap `&mut self` at the call site.
+    fn recvmmsg_batch(&mut self, i: u8, batch: &mut UdpRxBatch) -> usize {
+        let fd = self.listeners[usize::from(i)].udp.as_raw_fd();
+
+        // ─── Phase 1: syscall + extract (len, peer) per message.
+        //
+        // C `:1858-1872` re-wires the iov array every call too.
+        // The IoSliceMut borrows `batch.bufs` for `'a`; nix's
+        // `recvmmsg` ties `MultiResults<'a>` to that same lifetime
+        // (it borrows `MultiHeaders`). We can't hold MultiResults
+        // alive across `&mut self` calls anyway (it borrows
+        // `batch.headers`), so collect what we need into a stack
+        // array first, drop the iterator, then dispatch from `bufs`.
+        //
+        // The inner block scopes the iov borrows so phase 2 can
+        // re-read `batch.bufs`.
+        let mut meta: [(u16, Option<SocketAddr>); UDP_RX_BATCH] = [(0u16, None); UDP_RX_BATCH];
+        let count = {
+            // 64 × 1-element [IoSliceMut]. Array of arrays (not
+            // array of IoSliceMut) because nix wants `I: AsMut<
+            // [IoSliceMut]>` — each msg gets a SLICE of iovs.
+            let mut iovs: [[IoSliceMut<'_>; 1]; UDP_RX_BATCH] =
+                batch.bufs.each_mut().map(|b| [IoSliceMut::new(&mut b[..])]);
+
+            match recvmmsg(
+                fd,
+                &mut batch.headers,
+                iovs.iter_mut(),
+                MsgFlags::MSG_DONTWAIT,
+                None,
+            ) {
+                Ok(msgs) => {
+                    let mut k = 0usize;
+                    for (idx, msg) in msgs.enumerate() {
+                        k = idx + 1;
+                        // C `:1884`: `pkt[i].len = msg[i].msg_len`.
+                        // u16 cast: UDP_RX_BUFSZ=2048 fits.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let n = msg.bytes.min(UDP_RX_BUFSZ) as u16;
+                        // C `:1724` sockaddrunmap.
+                        let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
+                        meta[idx] = (n, peer);
+                    }
+                    k
                 }
-                break;
-            }
-            drained += 1;
-            let (n, sockaddr) = match self.listeners[usize::from(i)].udp.recv_from(&mut buf) {
-                Ok(pair) => pair,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                // EAGAIN ≡ EWOULDBLOCK on Linux (alias in nix).
+                // C `:1878`: `if(!sockwouldblock) logger(...)`.
+                Err(Errno::EAGAIN) => 0,
                 Err(e) => {
-                    // C `:1878`
                     log::error!(target: "tincd::net",
                                 "Receiving packet failed: {e}");
-                    break;
+                    0
                 }
-            };
-            // SAFETY: `recv_from` initialized the first `n` slots.
-            // (`MaybeUninit::slice_assume_init_ref` is unstable.)
-            #[allow(unsafe_code)]
-            let pkt: &[u8] = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-            let peer = sockaddr.as_socket().map(unmap); // C `:1724` sockaddrunmap
+            }
+        };
 
+        // ─── Phase 2: dispatch. iov borrows are dead; `batch.bufs`
+        // is now free to read while we hold `&mut self`.
+        for (idx, &(n, peer)) in meta.iter().enumerate().take(count) {
+            let n = usize::from(n);
+            // C `:1887`: `if(len <= 0 || len > MAXSIZE) continue`.
+            if n == 0 {
+                continue;
+            }
+            let pkt = &batch.bufs[idx][..n];
             self.handle_incoming_vpn_packet(pkt, peer);
         }
+
+        count
     }
 
     /// `handle_incoming_vpn_packet` (`net_packet.c:1718-1842`).
@@ -404,7 +521,9 @@ impl Daemon {
     pub(super) fn on_device_read(&mut self) {
         const DEVICE_DRAIN_CAP: u32 = 64;
 
-        let mut buf = vec![0u8; crate::tunnel::MTU as usize];
+        // Stack buf (was `vec![0u8; MTU]` — one alloc per epoll wake
+        // for no reason; recvmmsg work flushed it out).
+        let mut buf = [0u8; crate::tunnel::MTU as usize];
         let mut nw = false;
         let mut drained = 0u32;
         loop {

@@ -51,7 +51,7 @@ libc = "0.2"
 # tinc-device. fs: umask + fcntl OFlag/FdFlag. socket: send/socketpair.
 # Drops 9 #[allow(unsafe_code)] sites — the unsafe was just ceremony
 # around the libc call boundary.
-nix = { version = "0.29", default-features = false, features = ["fs", "socket"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "socket", "net"] }
 
 # socket2 for the four-step socket→setsockopt→bind→listen sequence.
 # std's TcpListener::bind is atomic, no seam for IPV6_V6ONLY. socket2

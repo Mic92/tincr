@@ -847,6 +847,14 @@ pub struct Daemon {
     /// the per-packet receive path.
     pub(crate) rx_scratch: Vec<u8>,
 
+    /// recvmmsg batch state (`net_packet.c:1845-1895`). C uses
+    /// `static vpn_packet_t pkt[64]` + `static struct mmsghdr msg[64]`
+    /// (~108KB, program lifetime). We heap-allocate once at setup.
+    /// `Option` so `on_udp_recv` can `mem::take` it (the bufs borrow
+    /// fights `&mut self` for `handle_incoming_vpn_packet`; same
+    /// dance as `rx_scratch` in `e49b5af6`).
+    pub(crate) udp_rx_batch: Option<net::UdpRxBatch>,
+
     /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
     /// detector at `net.c:189-213`: if `now - this > 2 * udp_
     /// discovery_timeout`, the daemon was asleep — force-close
@@ -1546,6 +1554,7 @@ impl Daemon {
                 12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
             ),
             rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
+            udp_rx_batch: Some(net::UdpRxBatch::new()),
             // C `net.c:43`: `static struct timeval last_periodic_
             // run_time` zero-init. We seed with now: the first
             // `on_ping_tick` (after `pingtimeout` seconds) sees
