@@ -232,6 +232,13 @@ pub struct DaemonSettings {
     /// send ICMP `NET_ANO` instead. The relay path EXISTS and
     /// works; this knob lets the operator say "don't use it".
     pub directonly: bool,
+    /// `priorityinheritance` (`net_setup.c:458`, `route.c:42`).
+    /// Default false. Copy the inner packet's TOS/TC byte to the
+    /// outer UDP socket via `IP_TOS`/`IPV6_TCLASS` before send.
+    /// Without it, all encrypted traffic gets default DSCP
+    /// regardless of inner QoS marking. C `route.c:669,765,1063`
+    /// reads the byte; `net_packet.c:920-946` setsockopts.
+    pub priorityinheritance: bool,
     /// `forwarding_mode` (`net_setup.c:426-443`). Default `Internal`
     /// (`route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`).
     /// `Off` drops packets not addressed to us (leaf-only mode).
@@ -396,6 +403,8 @@ impl Default for DaemonSettings {
             strictsubnets: false,
             // C `route.c:41`: `bool directonly = false`.
             directonly: false,
+            // C `route.c:42`: `bool priorityinheritance = false`.
+            priorityinheritance: false,
             // C `route.c:37`: `fmode_t forwarding_mode = FMODE_INTERNAL`.
             forwarding_mode: ForwardingMode::Internal,
             // C `route.c:39`: `routing_mode = RMODE_ROUTER`.
@@ -490,6 +499,12 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         && let Ok(v) = e.get_bool()
     {
         settings.directonly = v;
+    }
+    // PriorityInheritance (`:458`).
+    if let Some(e) = config.lookup("PriorityInheritance").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.priorityinheritance = v;
     }
     // AutoConnect (`:560-562`). Default true — keep the default if
     // the parse fails (C `get_config_bool` only writes on success).
@@ -719,6 +734,12 @@ pub struct Daemon {
     /// `on_tcp_accept` does one accept per edge.
     pub(crate) listener_udp_io: Vec<IoId>,
 
+    /// `listen_socket[sock].priority` (`net_packet.c:921`). Last
+    /// `IP_TOS`/`IPV6_TCLASS` set on each UDP socket; only setsockopt
+    /// when changed. Parallel to `listeners`. Kept here, not on
+    /// `Listener`, to avoid touching `listen.rs` (sockopts agent).
+    pub(crate) listener_tos: Vec<u8>,
+
     /// `check_tarpit` statics + `tarpit()` ring buffer. Seven C
     /// statics packed into one struct. Mutated on every TCP accept.
     pub(crate) tarpit: Tarpit,
@@ -919,6 +940,14 @@ pub struct Daemon {
     /// the same with a stack arena; we can't VLA in Rust, so a
     /// daemon-owned Vec is the closest equivalent.
     pub(crate) tx_scratch: Vec<u8>,
+
+    /// `vpn_packet_t.priority` (`net.h:84`). Inner-packet TOS set
+    /// by `route_packet` (`route.c:669,765,1063`), read by the UDP
+    /// send path (`net_packet.c:831,920`). C threads it via the
+    /// packet struct; we don't have one, but the daemon is single-
+    /// threaded so a field works. Reset to 0 at the top of each
+    /// `route_packet` (matches C `:1921,1076,1190`).
+    pub(crate) tx_priority: u8,
 
     /// Reused recv-side scratch for the UDP data path. Mirror of
     /// `tx_scratch`. `open_data_into` writes `[0;14] ‖ decrypted-body`
@@ -1605,6 +1634,7 @@ impl Daemon {
         // listener (peers can't connect; we can't receive UDP).
         let listeners = open_listeners(settings.port, settings.addressfamily, &settings.sockopts);
         let mut listener_udp_io = Vec::with_capacity(listeners.len());
+        let listener_tos = vec![0u8; listeners.len()];
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
         // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
         // atoi(myport) == 0`; we always read back — simpler, same
@@ -1750,6 +1780,7 @@ impl Daemon {
             control,
             listeners,
             listener_udp_io,
+            listener_tos,
             // Tarpit::new wants a now seed (avoids the C's `static
             // time_t = 0` first-tick bug). Use the cached now.
             tarpit: Tarpit::new(timers.now()),
@@ -1777,6 +1808,7 @@ impl Daemon {
             started_at: timers.now(),
             icmp_ratelimit: icmp::IcmpRateLimit::new(),
             compressor: compress::Compressor::new(),
+            tx_priority: 0,
             tx_scratch: Vec::with_capacity(
                 12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
             ),
@@ -2153,6 +2185,7 @@ mod tests {
         assert!(!s.strictsubnets); // C `:878` default false
         assert!(s.bind_to_address.is_none()); // C `:624` no default
         assert!(!s.directonly); // C `route.c:41`
+        assert!(!s.priorityinheritance); // C `route.c:42`
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
         // C `net_setup.c:561`: `else { autoconnect = true; }`.
         assert!(s.autoconnect);

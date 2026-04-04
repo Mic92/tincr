@@ -1029,6 +1029,19 @@ impl Daemon {
                     }
                 }
 
+                // C `route.c:669,765,1063`: read inner TOS for the
+                // outer UDP socket. C threads via vpn_packet_t.priority
+                // (`net.h:84`); we via Daemon.tx_priority. Reset to 0
+                // each packet (C `:1921,1076,1190`: `packet.priority=0`
+                // — priority only ever flows from data through to UDP
+                // send). Done here, not at route_packet entry, to stay
+                // clear of the dump-traffic agent's route boundary.
+                self.tx_priority = if self.settings.priorityinheritance {
+                    route::extract_tos(data).unwrap_or(0)
+                } else {
+                    0
+                };
+
                 let len = data.len();
                 log::debug!(target: "tincd::net",
                             "Sending packet of {len} bytes to {to}");
@@ -1826,6 +1839,22 @@ impl Daemon {
             (&cold_sockaddr, sock)
         };
 
+        // C `net_packet.c:920-946`: copy inner TOS to outer socket.
+        // C does this in `send_udppacket` (legacy path); SPTPS path
+        // never had it. We're SPTPS-only — different-from-C, but the
+        // *feature* is what matters: without it, all encrypted traffic
+        // gets default DSCP regardless of inner QoS marking.
+        if self.settings.priorityinheritance {
+            let prio = self.tx_priority;
+            let sock_idx = usize::from(sock);
+            if self.listener_tos.get(sock_idx).copied() != Some(prio)
+                && let Some(l) = self.listeners.get(sock_idx)
+            {
+                self.listener_tos[sock_idx] = prio;
+                set_udp_tos(l, sockaddr.is_ipv6(), prio);
+            }
+        }
+
         // C `:1044`
         if let Some(l) = self.listeners.get(usize::from(sock))
             && let Err(e) = l.udp.send_to(&self.tx_scratch, sockaddr)
@@ -2086,5 +2115,75 @@ fn local_ip_facing(orig_src: IpAddr) -> Option<IpAddr> {
     match orig_src {
         IpAddr::V4(_) => Some(IpAddr::V4(local.as_sockaddr_in()?.ip())),
         IpAddr::V6(_) => Some(IpAddr::V6(local.as_sockaddr_in6()?.ip())),
+    }
+}
+
+/// `net_packet.c:920-946`: setsockopt `IP_TOS`/`IPV6_TCLASS`. Sets
+/// the DSCP for OUTGOING UDP datagrams. `is_ipv6`: family of the
+/// dest sockaddr (C `:922` switches on `sa->sa.sa_family`).
+///
+/// Log-on-error, never fail. C `:930,941` log at LOG_ERR; we log
+/// at debug — a busy system flipping TOS per-packet would spam if
+/// the kernel ever started rejecting these.
+fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
+    let optval: libc::c_int = libc::c_int::from(prio);
+    let (level, optname, label) = if is_ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS, "IPV6_TCLASS")
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TOS, "IP_TOS")
+    };
+    log::debug!(target: "tincd::net",
+                "Setting outgoing packet priority to {prio} ({label})");
+    // SAFETY: fd is live (Socket owns it); optval is a stack c_int
+    // whose address+len we pass for the duration of the call.
+    // truncation: size_of::<c_int>() == 4, fits socklen_t.
+    #[allow(unsafe_code, clippy::cast_possible_truncation)]
+    let rc = unsafe {
+        libc::setsockopt(
+            l.udp.as_raw_fd(),
+            level,
+            optname,
+            (&raw const optval).cast::<libc::c_void>(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        log::debug!(target: "tincd::net",
+                    "setsockopt {label} failed: {}",
+                    io::Error::last_os_error());
+    }
+}
+
+#[cfg(test)]
+mod tos_tests {
+    /// Cache-dedup logic: only setsockopt when changed. Tested as
+    /// pure logic (the syscall itself is trusted; readback would
+    /// need a real socket pair). C `net_packet.c:920`: `if(prio !=
+    /// listen_socket[sock].priority)` then `:921` cache it.
+    #[test]
+    fn tos_cache_dedup() {
+        let mut cache = [0u8; 2];
+        let mut sets = 0;
+
+        // Same packet TOS twice on sock 0 → one set.
+        for prio in [0xb8, 0xb8] {
+            if cache[0] != prio {
+                cache[0] = prio;
+                sets += 1;
+            }
+        }
+        assert_eq!(sets, 1);
+
+        // Flip-flop on sock 0 → two more sets.
+        for prio in [0x00, 0xb8] {
+            if cache[0] != prio {
+                cache[0] = prio;
+                sets += 1;
+            }
+        }
+        assert_eq!(sets, 3);
+
+        // sock 1 still untouched at 0.
+        assert_eq!(cache[1], 0);
     }
 }

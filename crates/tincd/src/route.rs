@@ -3,7 +3,7 @@
 //! C `route_ipv4`/`route_ipv6` call `send_packet()`/`route_..._
 //! unreachable()` directly. We return [`RouteResult`] and the daemon
 //! dispatches — pure function of `(bytes, subnets, resolve)`.
-//! Config-gated branches (MTU/TTL/MSS) are `DEFERRED(chunk-9)`.
+//! Config-gated post-route mutations live daemon-side.
 
 #![forbid(unsafe_code)]
 
@@ -140,10 +140,9 @@ pub fn route_ipv4<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:663 decrement_ttl; :668
-    // priorityinheritance; :679 directonly → NET_ANO; :684-696
-    // MTU/fragment; :698 clamp_mss.
-    // route.c:672 via= and :674 via==source: daemon-side.
+    // route.c:663-698 (decrement_ttl, priorityinheritance, via=,
+    // directonly, MTU/fragment, clamp_mss): all daemon-side, in
+    // dispatch_route_result. They need tunnels/last_routes/settings.
 
     RouteResult::Forward { to }
 }
@@ -209,10 +208,8 @@ pub fn route_ipv6<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:758 decrement_ttl; :763
-    // priorityinheritance; :774 directonly → ADMIN; :779-784 MTU
-    // → PACKET_TOO_BIG (1294 = 1280+14); :786 clamp_mss.
-    // route.c:767 via=: daemon-side.
+    // route.c:758-786 (decrement_ttl, priorityinheritance, via=,
+    // directonly, MTU → PACKET_TOO_BIG, clamp_mss): daemon-side.
 
     RouteResult::Forward { to }
 }
@@ -320,6 +317,39 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 
         // :386: unknown ethertype — no TTL, forward as-is.
         _ => TtlResult::Decremented,
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// extract_tos
+
+/// Read the inner packet's TOS/TC byte for `PriorityInheritance`.
+/// `route.c:669,765,1063-1068`.
+///
+/// v4: `DATA[15]` — 14 (eth) + 1 (ver/ihl) = byte 15 is the TOS
+/// field (RFC 791 §3.1). v6: traffic class straddles bytes 14/15:
+/// `(DATA[14] & 0x0f) << 4 | DATA[15] >> 4` (RFC 8200 §3, the
+/// 4-bit version field eats the high nibble of byte 14).
+///
+/// `None` for non-IP ethertype or short frame — caller leaves
+/// priority at 0. Matches C `route.c:1063-1068` MAC-mode shape:
+/// only set `packet->priority` when ethertype+length both pass.
+#[must_use]
+pub fn extract_tos(data: &[u8]) -> Option<u8> {
+    if data.len() < ETHER_SIZE {
+        return None;
+    }
+    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+    match ethertype {
+        ETH_P_IP if data.len() >= ETHER_SIZE + IP_SIZE => {
+            // route.c:669,1064
+            Some(data[15])
+        }
+        ETH_P_IPV6 if data.len() >= ETHER_SIZE + IP6_SIZE => {
+            // route.c:765,1066
+            Some((data[14] & 0x0f) << 4 | data[15] >> 4)
+        }
+        _ => None,
     }
 }
 
@@ -740,5 +770,41 @@ mod tests {
         let r = decrement_ttl(&mut p);
         assert_eq!(r, TtlResult::Decremented);
         assert_eq!(p[ETHER_SIZE + 4 + 8], 63);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // extract_tos
+
+    /// route.c:669: v4 TOS at byte 15.
+    #[test]
+    fn extract_tos_v4() {
+        let mut p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 1));
+        p[15] = 0xb8; // DSCP EF (Expedited Forwarding), RFC 3246
+        assert_eq!(extract_tos(&p), Some(0xb8));
+    }
+
+    /// route.c:765: v6 TC straddles bytes 14/15.
+    /// `0x6b` `0x80` → ver=6, TC = (0xb<<4)|(0x8) = 0xb8.
+    #[test]
+    fn extract_tos_v6() {
+        let mut p = ipv6_packet("2001:db8::1".parse().unwrap());
+        p[14] = 0x6b; // ver=6, TC high nibble = 0xb
+        p[15] = 0x80; // TC low nibble = 0x8, flow label high = 0
+        assert_eq!(extract_tos(&p), Some(0xb8));
+    }
+
+    /// route.c:1063-1068: short / non-IP → None (priority stays 0).
+    #[test]
+    fn extract_tos_gates() {
+        // Too short for ethertype.
+        assert_eq!(extract_tos(&[0u8; 10]), None);
+        // ARP: non-IP.
+        let mut p = vec![0u8; ETHER_SIZE];
+        p[12..14].copy_from_slice(&ETH_P_ARP.to_be_bytes());
+        assert_eq!(extract_tos(&p), None);
+        // v4 ethertype but short body (<34): MAC mode could see this.
+        let mut p = vec![0u8; ETHER_SIZE + 10];
+        p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
+        assert_eq!(extract_tos(&p), None);
     }
 }

@@ -5,8 +5,7 @@
 //! daemon does the subnet-add + ADD_SUBNET broadcast.
 //!
 //! Daemon-side: `age_subnets` (`:491-521`), `route_broadcast`
-//! (`:559`). DEFERRED(chunk-9): `do_decrement_ttl` (`:1056`),
-//! `priorityinheritance` (`:1063`), PMTU clamp (`:1073-1100`).
+//! (`:559`), and the post-route mutations (`:1052-1102`).
 
 #![forbid(unsafe_code)]
 
@@ -106,11 +105,10 @@ pub fn route_mac<T, S: std::hash::BuildHasher>(
         );
     }
 
-    // DEFERRED(chunk-9): :1052 FMODE_OFF (pure transit only); :1056
-    // decrement_ttl (do_decrement_ttl is eth-aware, route.c:327);
-    // :1063 priorityinheritance; :1073 via=; :1075 directonly;
-    // :1079-1100 PMTU clamp; :1102 clamp_mss.
-    let _ = myself; // :1052 owner != myself goes here
+    // :1052-1102 (FMODE_OFF, decrement_ttl, priorityinheritance,
+    // via=, directonly, PMTU clamp, clamp_mss): all daemon-side in
+    // dispatch_route_result — they need tunnels/last_routes/settings.
+    let _ = myself;
 
     // :1104 send_packet. resolve None (stale gossip) → Broadcast.
     match resolve(owner) {
