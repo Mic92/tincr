@@ -339,16 +339,45 @@ impl Daemon {
         let name = outgoing.node_name.clone();
 
         // C `:674-676`: `if(n->connection)`. No node_ids entry = never ACK'd.
-        if self
-            .node_ids
-            .get(&name)
-            .and_then(|nid| self.nodes.get(nid))
+        let nid = self.node_ids.get(&name).copied();
+        if nid
+            .and_then(|nid| self.nodes.get(&nid))
             .and_then(|ns| ns.conn)
             .is_some()
         {
             log::info!(target: "tincd::conn",
                        "Already connected to {name}");
             return;
+        }
+
+        // `get_known_addresses` (`address_cache.c:31-65`) edge-walk.
+        // C does this lazily inside `get_recent_address:128-129` after
+        // tier 1 is exhausted; we walk eagerly here (still per-retry:
+        // `RetryOutgoing` timer → this fn → fresh graph snapshot). C
+        // `reset_address_cache:261-263` frees `cache->ai` so each
+        // retry re-walks too — same churn-tolerance, different timing.
+        //
+        // C walks `n->edge_tree` (bob's OUTgoing edges) and reads
+        // `e->reverse->address`. The reverse of bob→alice is alice→
+        // bob, whose address field is what alice's `ADD_EDGE` reported
+        // for bob ("I see bob at 10.0.0.5:655"). C `:36-37` skips
+        // reverseless edges (gossip half-arrived).
+        //
+        // We don't have an `n->edge_tree` for unknown nodes — if bob
+        // was never gossiped (no `node_ids` entry), `nid` is `None`
+        // and tier 2 stays empty. Same as C: no node, no edges.
+        let known: Vec<SocketAddr> = nid
+            .into_iter()
+            .flat_map(|n| self.graph.node_edges(n).iter().copied())
+            .filter_map(|eid| self.graph.edge(eid)?.reverse)
+            .filter_map(|rev| {
+                let (addr, port, _, _) = self.edge_addrs.get(&rev)?;
+                local_addr::parse_addr_port(addr.as_str(), port.as_str())
+            })
+            .collect();
+        // get_mut after the read-only walk (split borrow).
+        if let Some(o) = self.outgoings.get_mut(oid) {
+            o.addr_cache.add_known_addresses(known);
         }
 
         self.do_outgoing_connection(oid); // C `:678`

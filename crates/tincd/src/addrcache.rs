@@ -31,13 +31,23 @@
 //! load time. We take pre-resolved `SocketAddr`s only. Chunk 6's
 //! `do_outgoing_connection` integration owns DNS.
 //!
-//! C `get_recent_address` (`:126-148`) ALSO walks `get_known_addresses`
-//! (`:31-65`): edge-derived addresses (`e->reverse->address` for each
-//! edge in `n->edge_tree`). The graph already knows where the peer was
-//! last seen — try those before DNS. We don't (graph edge addresses
-//! aren't surfaced here yet). Same chunk-6 deferral.
+//! ## Tier structure: three vecs, not one
+//!
+//! C `get_recent_address` (`:119-215`) walks three sources in order:
+//! cached (`:121`), edge-known (`:126-148` via `get_known_addresses`
+//! `:31-65`), config (`:151-199`). C `reset_address_cache` (`:256-263`)
+//! FREES `cache->ai` (the edge-known list) so the next dial re-walks
+//! the graph — the topology may have changed between retries. We mirror
+//! that: `known` is a separate vec that `add_known_addresses` replaces
+//! wholesale; the daemon calls it on every `setup_outgoing_connection`
+//! tick with a fresh edge-walk.
+//!
+//! `e->reverse->address` is what the FAR END reported in its `ADD_EDGE`:
+//! if alice gossiped "bob→alice, addr=10.0.0.5:655", then walking bob's
+//! edges gives `bob→alice` whose reverse is `alice→bob`, whose `address`
+//! is 10.0.0.5 — where alice last saw bob. The graph already knows;
+//! try those before DNS.
 // TODO(chunk-6): lazy getaddrinfo for hostname `Address` lines (`:157-199`).
-// TODO(chunk-6): get_known_addresses edge-walk (`:31-65`, `:126-148`).
 
 #![forbid(unsafe_code)]
 
@@ -54,13 +64,23 @@ const MAX_CACHED_ADDRESSES: usize = 8;
 
 /// `address_cache_t` (`address_cache.h:29-42`). The C struct holds a
 /// fixed-size `sockaddr_t[8]` plus the `addrinfo*` chain plus
-/// `config_tree*` for lazy walk. We flatten: one `Vec`, one cursor.
+/// `config_tree*` for lazy walk. We split into the same three tiers
+/// the C walks: `cached` → `known` → `config`. One cursor over the
+/// concatenation.
 pub struct AddressCache {
-    /// Addresses to try, in order. Recently-successful first
-    /// (prepended by `add_recent`); config `Address` lines after.
-    addrs: Vec<SocketAddr>,
-    /// Index of next addr to return. `reset()` zeroes. C: `tried`
-    /// (`:122`, `:243`).
+    /// Tier 1 (`:121-123`): on-disk recent cache + `add_recent`
+    /// prepends. Only this tier is persisted (`:108-116`).
+    cached: Vec<SocketAddr>,
+    /// Tier 2 (`:126-148`, `get_known_addresses` `:31-65`): edge-
+    /// derived. Volatile — C frees on reset (`:261-263`) so the next
+    /// dial re-walks `n->edge_tree`. We replace via
+    /// [`add_known_addresses`](Self::add_known_addresses).
+    known: Vec<SocketAddr>,
+    /// Tier 3 (`:151-199`): `Address =` config lines, pre-resolved.
+    /// Static after `open()`.
+    config: Vec<SocketAddr>,
+    /// Index into the logical `cached ‖ known ‖ config` concatenation.
+    /// `reset()` zeroes. C: `tried` (`:122`, `:243`).
     cursor: usize,
     /// `confbase/cache/NODE`. `None` = in-memory only (tests).
     cache_file: Option<PathBuf>,
@@ -76,35 +96,71 @@ impl AddressCache {
     #[must_use]
     pub fn open(confbase: &Path, node_name: &str, config_addrs: Vec<SocketAddr>) -> Self {
         let cache_file = confbase.join("cache").join(node_name);
-        let mut addrs = Self::load(&cache_file);
+        let cached = Self::load(&cache_file);
 
         // Config addrs go AFTER cached-recent addrs (C: cached
         // tried first `:121`, config tried last `:151-199`).
         // Dedup: don't list a config addr that's already in the
         // recent cache. C handles this implicitly via `find_cached`
-        // skip on the edge-addr path (`:137-139`).
+        // skip on the edge-addr path (`:137-139`); the config tier
+        // (`:151-`) has no such skip but we dedup anyway — harmless,
+        // saves a doomed connect attempt.
+        let mut config = Vec::new();
         for a in config_addrs {
-            if !addrs.contains(&a) {
-                addrs.push(a);
+            if !cached.contains(&a) && !config.contains(&a) {
+                config.push(a);
             }
         }
 
         Self {
-            addrs,
+            cached,
+            known: Vec::new(),
+            config,
             cursor: 0,
             cache_file: Some(cache_file),
         }
     }
 
     /// In-memory only. Tests; also useful if you have addrs from
-    /// some other source and don't want disk I/O.
+    /// some other source and don't want disk I/O. The single-vec
+    /// constructor predates the tier split: everything goes in
+    /// `cached` (so `add_recent` and `save` work as before).
     #[must_use]
     pub fn new(addrs: Vec<SocketAddr>) -> Self {
         Self {
-            addrs,
+            cached: addrs,
+            known: Vec::new(),
+            config: Vec::new(),
             cursor: 0,
             cache_file: None,
         }
+    }
+
+    /// `get_known_addresses` injection point (`:31-65`, `:126-148`).
+    /// Replaces tier 2 wholesale with a fresh edge-walk.
+    ///
+    /// **REPLACES**, not appends: C `reset_address_cache:261-263`
+    /// frees `cache->ai` so the next `get_recent_address` calls
+    /// `get_known_addresses(cache->node)` from scratch (`:128-129`).
+    /// The graph may have churned between retries; stale gossip is
+    /// worse than none. Caller (`setup_outgoing_connection`) walks
+    /// the live graph each tick.
+    ///
+    /// Dedup vs tier 1 (`:137-139`: `if(find_cached(...) != NOT_
+    /// CACHED) continue`). The C also dedups within the edge-walk
+    /// itself (`:40-50`, the `bool found` loop).
+    ///
+    /// Cursor reset: tier 2's length changed, so any live cursor is
+    /// stale. C calls this from `reset_address_cache` which already
+    /// zeroed `tried`; do the same.
+    pub fn add_known_addresses(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
+        self.known.clear();
+        for a in addrs {
+            if !self.cached.contains(&a) && !self.known.contains(&a) {
+                self.known.push(a);
+            }
+        }
+        self.cursor = 0;
     }
 
     /// Best-effort read. Missing file, unparseable line → empty.
@@ -129,10 +185,20 @@ impl AddressCache {
     /// `get_recent_address` (`:119-215`). Returns next addr; `None`
     /// when exhausted. The C does a complicated three-phase walk
     /// (cached → edge-known → config-with-getaddrinfo) with `tried`
-    /// tracking which phase. We flattened at `open()` time so this
-    /// is just an index bump.
+    /// tracking which phase. We pre-built each tier so this is just
+    /// an index into the logical concatenation.
     pub fn next_addr(&mut self) -> Option<SocketAddr> {
-        let a = self.addrs.get(self.cursor).copied();
+        let i = self.cursor;
+        let c = self.cached.len();
+        let k = c + self.known.len();
+        let a = if i < c {
+            self.cached.get(i)
+        } else if i < k {
+            self.known.get(i - c)
+        } else {
+            self.config.get(i - k)
+        }
+        .copied();
         if a.is_some() {
             self.cursor += 1;
         }
@@ -154,8 +220,11 @@ impl AddressCache {
     /// (C survives a crash mid-session with partial learning; we
     /// don't); fine for a cache.
     pub fn add_recent(&mut self, addr: SocketAddr) {
-        self.addrs.retain(|a| *a != addr);
-        self.addrs.insert(0, addr);
+        // C `:86-89` `find_cached` walks `data.address[]` only (the
+        // on-disk cache). We tier-split now so this matches exactly:
+        // dedup within tier 1, don't touch tiers 2/3.
+        self.cached.retain(|a| *a != addr);
+        self.cached.insert(0, addr);
         // Cursor is now stale. The C doesn't reset `tried` here
         // either (`:84-116` touches `data` only, not `tried`); the
         // call site in `finish_connecting` (`net_socket.c`) doesn't
@@ -187,7 +256,9 @@ impl AddressCache {
             fs::create_dir_all(dir)?;
         }
         let mut buf = Vec::new();
-        for a in self.addrs.iter().take(MAX_CACHED_ADDRESSES) {
+        // Only tier 1 persists (C `data.address[]`). Tiers 2/3 are
+        // regenerated from graph/config at next `open`.
+        for a in self.cached.iter().take(MAX_CACHED_ADDRESSES) {
             writeln!(buf, "{a}")?;
         }
         fs::write(path, buf)
@@ -268,7 +339,7 @@ mod tests {
         c.add_recent(sa("10.0.0.9:655"));
         c.add_recent(sa("10.0.0.9:655"));
         // Two adds of the same addr: list grows by one, not two.
-        assert_eq!(c.addrs.len(), 2);
+        assert_eq!(c.cached.len(), 2);
         c.reset();
         assert_eq!(c.next_addr(), Some(sa("10.0.0.9:655")));
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
@@ -285,7 +356,7 @@ mod tests {
             sa("10.0.0.3:655"),
         ]);
         c.add_recent(sa("10.0.0.3:655")); // was at position 2
-        assert_eq!(c.addrs.len(), 3); // same length
+        assert_eq!(c.cached.len(), 3); // same length
         c.reset();
         assert_eq!(c.next_addr(), Some(sa("10.0.0.3:655")));
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
@@ -321,7 +392,7 @@ mod tests {
                 // add_recent prepends, so final order is 9,8,7,...,0.
                 c.add_recent(sa(&format!("10.0.0.{i}:655")));
             }
-            assert_eq!(c.addrs.len(), 10); // in-memory: all 10
+            assert_eq!(c.cached.len(), 10); // in-memory: all 10
             c.save().unwrap();
         }
         let body = fs::read_to_string(&path).unwrap();
@@ -339,6 +410,72 @@ mod tests {
         let mut c = AddressCache::open(&tmp, "alice", vec![sa("10.0.0.1:655")]);
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
         assert_eq!(c.next_addr(), None);
+    }
+
+    /// `get_known_addresses` (`:31-65`, `:126-148`): tier 2 sits
+    /// between cached and config. Replaces wholesale each call (C
+    /// frees on reset, `:261-263`).
+    #[test]
+    fn known_addresses_tier_order() {
+        let tmp = tmpdir("known-tier");
+        // Seed disk cache (tier 1).
+        {
+            let mut c = AddressCache::open(&tmp, "bob", vec![]);
+            c.add_recent(sa("10.0.0.1:655"));
+        }
+        // Reopen with config (tier 3); inject edge-known (tier 2).
+        let mut c = AddressCache::open(&tmp, "bob", vec![sa("10.0.0.3:655")]);
+        c.add_known_addresses([sa("10.0.0.2:655")]);
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655"))); // cached
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.2:655"))); // known
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.3:655"))); // config
+        assert_eq!(c.next_addr(), None);
+    }
+
+    /// C `:40-50` (intra-walk dedup) and `:137-139` (`find_cached`
+    /// skip): edge-known addrs dedup vs themselves and vs tier 1.
+    #[test]
+    fn known_addresses_dedup() {
+        let mut c = AddressCache::new(vec![sa("10.0.0.1:655")]);
+        c.add_known_addresses([
+            sa("10.0.0.2:655"),
+            sa("10.0.0.1:655"), // dup vs cached — skipped (`:137-139`)
+            sa("10.0.0.2:655"), // dup vs self — skipped (`:40-50`)
+            sa("10.0.0.3:655"),
+        ]);
+        assert_eq!(c.known, vec![sa("10.0.0.2:655"), sa("10.0.0.3:655")]);
+    }
+
+    /// `reset_address_cache:261-263`: `if(cache->ai) free_known_
+    /// addresses(cache->ai)`. Next dial re-walks the graph; topology
+    /// may have churned. Second call REPLACES, doesn't append.
+    #[test]
+    fn known_addresses_replaces() {
+        let mut c = AddressCache::new(vec![]);
+        c.add_known_addresses([sa("10.0.0.1:655"), sa("10.0.0.2:655")]);
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
+        // Graph churned: alice left, dave gossiped a new addr.
+        c.add_known_addresses([sa("10.0.0.9:655")]);
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.9:655")));
+        assert_eq!(c.next_addr(), None);
+        // Empty walk (node has no edges) clears tier 2 entirely.
+        c.add_known_addresses(std::iter::empty());
+        assert_eq!(c.next_addr(), None);
+    }
+
+    /// C `:108-116` only writes `data.address[]`. Edge-known addrs
+    /// are volatile (the graph regenerates them); don't persist.
+    #[test]
+    fn known_addresses_not_persisted() {
+        let tmp = tmpdir("known-nopersist");
+        let path = tmp.join("cache").join("bob");
+        {
+            let mut c = AddressCache::open(&tmp, "bob", vec![]);
+            c.add_known_addresses([sa("10.0.0.99:655")]);
+            c.add_recent(sa("10.0.0.1:655"));
+        }
+        let body = fs::read_to_string(&path).unwrap();
+        assert_eq!(body.trim(), "10.0.0.1:655");
     }
 
     #[test]
