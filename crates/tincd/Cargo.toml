@@ -61,6 +61,14 @@ libc = "0.2"
 # mman: mlockall (-L).
 nix = { version = "0.29", default-features = false, features = ["fs", "socket", "net", "user", "process", "mman"] }
 
+# Landlock path allowlist for Sandbox=normal|high (sandbox.rs).
+# Linux only: the target.cfg means non-Linux builds don't even try
+# to compile the crate. sandbox.rs cfg-gates enter_impl on the same
+# predicate. Kernel ≥5.13; older kernels get RulesetStatus::
+# NotEnforced at runtime (warn at normal, hard-fail at high).
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 # socket2 for the four-step socket→setsockopt→bind→listen sequence.
 # std's TcpListener::bind is atomic, no seam for IPV6_V6ONLY. socket2
 # is std-with-seams; only dep is libc (already linked). NOT a new shim-

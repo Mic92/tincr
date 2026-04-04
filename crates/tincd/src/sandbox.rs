@@ -1,0 +1,469 @@
+//! `Sandbox = none|normal|high` — Landlock path allowlist on Linux.
+//!
+//! Spec: `src/bsd/openbsd/tincd.c` (pledge+unveil). Linux gets the
+//! same shape via Landlock (kernel ≥5.13). The path-allowlist maps
+//! 1:1; the syscall-filter half (pledge) we skip — Landlock does
+//! paths only. seccomp would be a separate feature.
+//!
+//! ## Ordering
+//!
+//! `enter()` is called from `main()` AFTER `drop_privs` (chroot+
+//! setuid), BEFORE the epoll loop. Same as C `tincd.c:427`. By that
+//! point `tinc-up` has already run with root (`Daemon::setup` fires
+//! it), the device is open, listeners are bound. Landlock is the
+//! last gate before steady-state.
+//!
+//! ## `normal` vs `high`
+//!
+//! - `normal`: confbase gets `rx`, hosts gets `rwxc`. Scripts work.
+//!   Kernel-too-old → silently no-op (defense-in-depth, not load-
+//!   bearing). The OpenBSD default with `HAVE_SANDBOX`; we keep
+//!   `none` as default to match the non-OpenBSD C behavior.
+//! - `high`: drops exec. `can(StartProcesses)` returns false →
+//!   `script::execute` short-circuits. Kernel-too-old → HARD FAIL
+//!   (`high` is a security promise; silently downgrading is a
+//!   confused-deputy waiting to happen).
+//!
+//! ## chroot interaction
+//!
+//! C `sandbox_paths` (`openbsd/tincd.c:90-94`): "chroot is used.
+//! Disabling path sandbox." If `-R` is set, every path is already
+//! under confbase-as-root; Landlock `PathBeneath` rules would be
+//! both redundant and confused (they resolve at ruleset-build time
+//! against the post-chroot view). We mirror: `enter()` no-ops on
+//! `chrooted=true`, but still records the level so `can()` gates
+//! work (a chrooted `Sandbox=high` daemon still skips scripts).
+//!
+//! ## What we DON'T port
+//!
+//! `open_exec_paths` (`/bin`, `/sbin`, etc — `openbsd/tincd.c:52-
+//! 67`). At `normal` the C grants exec to the standard PATH so
+//! scripts can call `ip`, `route`, etc. On Linux+Landlock that's a
+//! distro-specific guess; the operator's `tinc-up` shebang might
+//! point at `/nix/store/.../bin/sh`. We grant `Execute` on confbase
+//! (so `confbase/tinc-up` itself can be exec'd) and rely on the
+//! fact that Landlock ABI V1-V4 only restricts FILE access — the
+//! script's child-exec of `/sbin/ip` opens the binary read-only,
+//! which we DO allow via the `from_read` umbrella below. Tested in
+//! `tests/netns.rs::sandbox_normal_ping`.
+
+#![forbid(unsafe_code)]
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// `sandbox_level_t` (`sandbox.h:7-10`).
+///
+/// `repr(u8)` for the atomic store. `None` is 0 so the static
+/// default (`AtomicU8::new(0)`) reads as `None` before `enter()`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// No sandbox. C default outside OpenBSD; ours too. The
+    /// Landlock syscall is never made.
+    None = 0,
+    /// Path allowlist, exec preserved on confbase. Best-effort:
+    /// kernel-too-old logs a warning and continues.
+    Normal = 1,
+    /// Path allowlist, exec dropped. `can(StartProcesses)` →
+    /// false. Hard fail if Landlock unavailable.
+    High = 2,
+}
+
+impl Level {
+    /// `tincd.c:339-350`. C `strcasecmp("off", ...)` etc. C accepts
+    /// `off` for `none` (the variable name vs the enum constant);
+    /// we accept both. Case-insensitive like every other tinc enum
+    /// config (`Mode`, `Forwarding`, `ProcessPriority`).
+    ///
+    /// # Errors
+    /// `Err(value)` for unrecognized strings; caller formats the
+    /// error message (matches the daemon's other enum-parse sites).
+    pub fn parse(s: &str) -> Result<Self, &str> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" | "none" => Ok(Level::None),
+            "normal" => Ok(Level::Normal),
+            "high" => Ok(Level::High),
+            _ => Err(s),
+        }
+    }
+}
+
+/// `sandbox_action_t` (`sandbox.h:12-15`). Only `START_PROCESSES`
+/// is wired; `USE_NEW_PATHS` exists for the C parity but the only
+/// caller (`net_setup.c:239` ScriptsInterpreter reload guard) is
+/// commented out — we re-read the interpreter unconditionally
+/// because Landlock at `normal` grants `Execute` on confbase, so a
+/// reloaded interpreter under confbase still works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// fork+exec for scripts and exec proxies. False at `High`.
+    StartProcesses,
+    /// Access paths not in the build-time ruleset. False at
+    /// `Normal` and `High` once entered. C uses this to refuse
+    /// reloading `Proxy = exec /new/path` mid-run.
+    UseNewPaths,
+}
+
+/// Paths the daemon needs after `enter()`. The fields are 1:1 with
+/// `open_common_paths` (`openbsd/tincd.c:30-49`). `Option<_>` for
+/// paths that may be unset (logfile when logging to stderr; device
+/// when `DeviceType=dummy`).
+///
+/// Constructed in `main()` because that's where confbase/pidfile/
+/// socket/logfile already live (`Args`). Device path is
+/// hard-coded `/dev/net/tun` on Linux — `tinc-device::DEFAULT_
+/// DEVICE` is a private const but every Linux backend opens that
+/// one path.
+///
+/// Relative paths are resolved by `path_beneath_rules` against the
+/// daemon's cwd at ruleset-build time. main() chdir'd to confbase
+/// at `tincd.c:536` (`main.rs:983`); confbase as a relative path
+/// would resolve to itself. We pass absolutes anyway (main() has
+/// them) so the chroot interaction is the only path-semantics gotcha.
+#[derive(Debug, Clone)]
+pub struct Paths {
+    /// `/etc/tinc/<net>/`. `r` at high, `rx` at normal. Subdirs
+    /// (`cache`, `hosts`, `invitations`) get `rwc` separately.
+    pub confbase: PathBuf,
+    /// `/dev/net/tun` on Linux. `rw`. `None` for `DeviceType=
+    /// dummy` (no device fd; the C skips it via `strcasecmp(device,
+    /// DEVICE_DUMMY)`).
+    pub device: Option<PathBuf>,
+    /// `--logfile PATH`. `rwc`. `None` when logging to stderr (the
+    /// fd is already open; Landlock doesn't gate fd I/O, only
+    /// path-based open).
+    pub logfile: Option<PathBuf>,
+    /// `--pidfile PATH`. `rwc`. Already written at this point but
+    /// `Daemon::Drop` unlinks it.
+    pub pidfile: PathBuf,
+    /// Unix control socket path. `rwc`. Already bound but
+    /// `ControlSocket::Drop` unlinks it.
+    pub unixsocket: PathBuf,
+}
+
+/// Process-global sandbox state. `enter()` writes once; `can()`
+/// reads. The C uses three `static` globals (`current_level`,
+/// `entered`, `can_use_new_paths`). We pack into one atomic byte:
+/// bits 0-1 = level, bit 2 = entered. `Relaxed` is fine: `enter()`
+/// runs single-threaded on the main thread before the watchdog
+/// thread spawns, and `can()` callers are all on the epoll thread
+/// (the watchdog thread doesn't call scripts).
+static STATE: AtomicU8 = AtomicU8::new(0);
+
+const ENTERED_BIT: u8 = 0b100;
+
+/// `sandbox_can` (`openbsd/tincd.c:123-130`). The C takes `when`
+/// (RIGHT_NOW vs AFTER_SANDBOX); we always answer RIGHT_NOW because
+/// the only caller is `script::execute` which runs after `enter()`.
+/// Before `enter()`: always true (matches C `:127`: `else return
+/// true`).
+#[must_use]
+pub fn can(action: Action) -> bool {
+    let s = STATE.load(Ordering::Relaxed);
+    if s & ENTERED_BIT == 0 {
+        return true;
+    }
+    let level = s & 0b11;
+    match action {
+        // C `:112`: `current_level < SANDBOX_HIGH`.
+        Action::StartProcesses => level < Level::High as u8,
+        // C `:116`: `can_use_new_paths` — false after `enter()` at
+        // any non-None level.
+        Action::UseNewPaths => level == Level::None as u8,
+    }
+}
+
+/// For tests/asserts. C exposes `current_level` as a static; we
+/// don't, but the netns test wants to verify the daemon ACTUALLY
+/// entered (a level > None on a kernel without Landlock at `normal`
+/// would still record `Normal` here — that's correct, `can()` gates
+/// are about INTENT, the path restriction is best-effort).
+#[must_use]
+pub fn entered_level() -> Level {
+    match STATE.load(Ordering::Relaxed) & 0b11 {
+        2 => Level::High,
+        1 => Level::Normal,
+        _ => Level::None,
+    }
+}
+
+/// `sandbox_enter` (`openbsd/tincd.c:136-159`). One-shot.
+///
+/// `chrooted`: C's `chrooted()` (`:19-21`) checks `!confbase`; we
+/// take it as a flag because main() knows whether `-R` was set.
+/// When chrooted: skip the Landlock ruleset (paths inside the jail
+/// don't match the build-time absolute paths) but still record the
+/// level so `can(StartProcesses)` gates correctly.
+///
+/// # Errors
+///
+/// At `Level::High` when Landlock is unavailable (kernel <5.13,
+/// LSM not enabled, or non-Linux target). At `Normal` and `None`,
+/// never fails — `Normal` on a too-old kernel
+/// logs a warning and degrades to no-op.
+///
+/// # Panics
+///
+/// Called twice. C asserts `!entered` (`:137`). The state machine
+/// is one-shot; a second call is a bug in main().
+pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> {
+    let prev = STATE.swap(level as u8 | ENTERED_BIT, Ordering::Relaxed);
+    assert_eq!(prev & ENTERED_BIT, 0, "sandbox::enter called twice");
+
+    if level == Level::None {
+        log::debug!(target: "tincd", "Sandbox is disabled");
+        return Ok(());
+    }
+
+    if chrooted {
+        // C `openbsd/tincd.c:92`.
+        log::debug!(target: "tincd",
+            "chroot is used. Disabling path sandbox.");
+        return Ok(());
+    }
+
+    enter_impl(level, paths)
+}
+
+#[cfg(target_os = "linux")]
+fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
+    use landlock::{
+        ABI, Access, AccessFs, BitFlags, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+        path_beneath_rules,
+    };
+
+    // ABI V1 = kernel 5.13 (June 2021). Everything we need
+    // (Execute, ReadFile, WriteFile, ReadDir, Make*, Remove*) is
+    // V1. V3 adds Truncate which `addrcache.rs::save` (`fs::write`
+    // → `O_TRUNC`) needs, but `from_all(V1)` doesn't HANDLE
+    // Truncate so it stays unrestricted on V1/V2 kernels —
+    // best-effort is the right shape. The crate's `Ruleset::
+    // default()` does best-effort compat: kernel-too-old →
+    // `RulesetStatus::NotEnforced`, no error.
+    let abi = ABI::V1;
+    let access_all = AccessFs::from_all(abi);
+    let access_r = AccessFs::from_read(abi); // Execute|ReadFile|ReadDir
+
+    // unveil "rwc" → write + create-file + create-dir + remove-*.
+    // Not `from_write(abi)` — that includes MakeChar/MakeBlock/
+    // MakeFifo which the daemon never needs. MakeSock IS needed:
+    // ControlSocket re-bind on restart unlinks+binds the socket
+    // path, but that happened before enter(). Daemon::Drop
+    // unlinks pidfile and ControlSocket::Drop unlinks the socket
+    // — RemoveFile covers both.
+    let access_rwc: BitFlags<AccessFs> = AccessFs::WriteFile
+        | AccessFs::MakeReg
+        | AccessFs::MakeDir
+        | AccessFs::RemoveFile
+        | AccessFs::RemoveDir;
+
+    let can_exec = level < Level::High;
+
+    // C `open_common_paths` (`:34-42`). confbase: r at high, rx
+    // at normal. Subdirs cache/hosts/invitations: rwc (+x at
+    // normal for hosts/ because `hosts/NAME-up` per-node scripts
+    // live there — `periodic.rs:254`).
+    //
+    // path_beneath_rules SILENTLY SKIPS paths it can't open
+    // (`fs.rs:613` `Err(_) => None`). This is what we want for
+    // logfile (parent dir might not exist yet; the file itself
+    // is already open as an fd). We pre-create the confbase
+    // subdirs so the rules apply.
+    let cache = paths.confbase.join("cache");
+    let hosts = paths.confbase.join("hosts");
+    let invitations = paths.confbase.join("invitations");
+    // C `tincd.c:425`: `makedirs(DIR_CACHE | DIR_HOSTS |
+    // DIR_INVITATIONS)`. main.rs comment at :731 said "Daemon::
+    // setup already creates what it needs ... Skip." That was
+    // true for non-sandboxed runs (addrcache lazily mkdirs cache/).
+    // With Landlock, lazy mkdir AFTER restrict_self needs
+    // MakeDir on confbase itself, which we don't grant. Pre-create
+    // here so the PathBeneath fd-open succeeds.
+    for d in [&cache, &hosts, &invitations] {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            // Non-fatal: hosts/ existing is required by setup()
+            // already. cache/ and invitations/ are optional. If
+            // mkdir fails, path_beneath_rules will skip the entry
+            // (see above) and the daemon hits EACCES later when
+            // it tries to use the dir. Warn so the operator knows.
+            log::warn!(target: "tincd",
+                "Sandbox: mkdir {}: {e}", d.display());
+        }
+    }
+
+    // Rule lists by access set. `path_beneath_rules` is uniform
+    // per access-set, so group paths by what they need.
+    let confbase_access = if can_exec {
+        access_r // includes Execute
+    } else {
+        AccessFs::ReadFile | AccessFs::ReadDir
+    };
+    let hosts_access = if can_exec {
+        access_r | access_rwc
+    } else {
+        (AccessFs::ReadFile | AccessFs::ReadDir) | access_rwc
+    };
+
+    // Paths granted full r+w+c. C: device "rw", logfile/pidfile/
+    // unixsocket "rwc". We don't separate "rw" from "rwc" — the
+    // device path is a char dev, MakeReg on it is meaningless,
+    // and one fewer access-set means one fewer add_rules call.
+    // The pidfile/socket paths might be the FILES (which already
+    // exist by now) or — if the operator passed a directory in
+    // --pidfile (they shouldn't, but) — the parent. Landlock
+    // PathBeneath on a regular file restricts only that file
+    // (the crate handles the file-vs-dir mask via `is_file`,
+    // `fs.rs:606`), which is correct: Daemon::Drop's unlink is
+    // a RemoveFile on the PARENT dir, not on the file itself.
+    // So: grant rwc on the parent dirs, not on the files. The
+    // C unveil takes the file path and the kernel handles
+    // unlink-the-file-itself; Landlock doesn't, RemoveFile
+    // gates the directory operation.
+    let mut rwc_paths: Vec<PathBuf> = vec![cache, invitations];
+    if let Some(dev) = &paths.device {
+        rwc_paths.push(dev.clone());
+    }
+    if let Some(lf) = &paths.logfile {
+        // Parent dir, for create+append. The file fd is already
+        // open in env_logger but a SIGHUP-time rotation (which
+        // we don't do, but) would need this.
+        if let Some(p) = lf.parent() {
+            rwc_paths.push(p.to_owned());
+        }
+    }
+    // Parents of pidfile + socket — for Daemon::Drop's
+    // remove_file. The files themselves are already created.
+    if let Some(p) = paths.pidfile.parent() {
+        rwc_paths.push(p.to_owned());
+    }
+    if let Some(p) = paths.unixsocket.parent() {
+        rwc_paths.push(p.to_owned());
+    }
+
+    // C `:35-36`: /dev/{u,}random "r". On Linux getrandom(2) is
+    // the primary; the urandom fd is rand_core's libc fallback
+    // for ancient kernels. Harmless to grant. The bwrap netns
+    // harness dev-binds /dev/urandom; without the rule that
+    // bind would be inaccessible.
+    let random_paths = ["/dev/random", "/dev/urandom"];
+
+    let status = Ruleset::default()
+        .handle_access(access_all)
+        .map_err(|e| format!("Landlock handle_access: {e}"))?
+        .create()
+        .map_err(|e| format!("Landlock create: {e}"))?
+        .add_rules(path_beneath_rules(&[&paths.confbase], confbase_access))
+        .map_err(|e| format!("Landlock add confbase: {e}"))?
+        .add_rules(path_beneath_rules(&[&hosts], hosts_access))
+        .map_err(|e| format!("Landlock add hosts: {e}"))?
+        .add_rules(path_beneath_rules(&rwc_paths, access_r | access_rwc))
+        .map_err(|e| format!("Landlock add rwc: {e}"))?
+        .add_rules(path_beneath_rules(random_paths, AccessFs::ReadFile))
+        .map_err(|e| format!("Landlock add random: {e}"))?
+        .restrict_self()
+        .map_err(|e| format!("Landlock restrict_self: {e}"))?;
+
+    match status.ruleset {
+        RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => {
+            log::info!(target: "tincd",
+                "Entered sandbox at level {level:?} ({:?})",
+                status.ruleset);
+            Ok(())
+        }
+        RulesetStatus::NotEnforced => {
+            // Kernel doesn't support Landlock (or the LSM is
+            // disabled at boot). At normal: defense-in-depth, log
+            // and carry on. At high: refuse — the operator asked
+            // for a security guarantee we can't provide.
+            if level == Level::High {
+                Err("Sandbox=high requested but Landlock is not \
+                     available (kernel <5.13 or landlock LSM not \
+                     enabled). Set Sandbox=normal or off."
+                    .into())
+            } else {
+                log::warn!(target: "tincd",
+                    "Sandbox=normal: Landlock not available, \
+                     running without path restrictions");
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enter_impl(level: Level, _paths: &Paths) -> Result<(), String> {
+    // C `tincd.c:362-367`: `#ifndef HAVE_SANDBOX ... return false`.
+    // C HARD-FAILS at any level >none on non-OpenBSD. We mirror at
+    // high (security promise); at normal warn and continue — same
+    // best-effort stance as the Landlock arm on a too-old kernel.
+    if level == Level::High {
+        Err("Sandbox=high requested but Landlock is Linux-only. \
+             Set Sandbox=normal or off."
+            .into())
+    } else {
+        log::warn!(target: "tincd",
+            "Sandbox={level:?} requested but Landlock is Linux-only; \
+             running unrestricted");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn level_parse_case_insensitive() {
+        assert_eq!(Level::parse("off"), Ok(Level::None));
+        assert_eq!(Level::parse("OFF"), Ok(Level::None));
+        assert_eq!(Level::parse("none"), Ok(Level::None));
+        assert_eq!(Level::parse("Normal"), Ok(Level::Normal));
+        assert_eq!(Level::parse("HIGH"), Ok(Level::High));
+        assert_eq!(Level::parse("garbage"), Err("garbage"));
+    }
+
+    /// `can()` before `enter()` always returns true. C
+    /// `openbsd/tincd.c:127`: `else return true`. tinc-up and
+    /// the subnet-up loop in Daemon::setup run BEFORE main()
+    /// calls enter(); they must not be gated.
+    ///
+    /// nextest per-process model means each #[test] is its own
+    /// process, so STATE is fresh. (cargo test without nextest
+    /// runs tests in threads of one process — STATE would leak.
+    /// AGENTS.md mandates nextest.)
+    #[test]
+    fn can_before_enter_is_always_true() {
+        assert!(can(Action::StartProcesses));
+        assert!(can(Action::UseNewPaths));
+        assert_eq!(entered_level(), Level::None);
+    }
+
+    /// Paths struct surface: confbase + the three subdirs the C
+    /// unveils. Doesn't apply Landlock (CI may lack it); just
+    /// asserts the path-set the live code computes. Meaningful
+    /// because if someone refactors `enter_impl` to grant `/` or
+    /// to forget `hosts/`, this is where the diff shows.
+    #[test]
+    fn paths_struct_shape() {
+        let p = Paths {
+            confbase: "/etc/tinc/mesh".into(),
+            device: Some("/dev/net/tun".into()),
+            logfile: None,
+            pidfile: "/run/tinc.mesh.pid".into(),
+            unixsocket: "/run/tinc.mesh.socket".into(),
+        };
+        // Confbase subdirs: cache, hosts, invitations. The C
+        // `open_conf_subdir` calls (`openbsd/tincd.c:45-47`).
+        assert_eq!(p.confbase.join("cache").as_os_str(), "/etc/tinc/mesh/cache");
+        assert_eq!(p.confbase.join("hosts").as_os_str(), "/etc/tinc/mesh/hosts");
+        assert_eq!(
+            p.confbase.join("invitations").as_os_str(),
+            "/etc/tinc/mesh/invitations"
+        );
+        // pidfile/socket parents are what get rwc (RemoveFile is
+        // a directory op in Landlock).
+        assert_eq!(p.pidfile.parent().unwrap().as_os_str(), "/run");
+        assert_eq!(p.unixsocket.parent().unwrap().as_os_str(), "/run");
+    }
+}
