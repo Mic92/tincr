@@ -30,8 +30,8 @@ use crate::graph_glue::{Transition, run_graph};
 use crate::invitation_serve::{self, InvitePhase};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
-    AddrFamily, Listener, SockOpts, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners,
-    pidfile_addr, unmap,
+    AddrFamily, Listener, MAXSOCKETS, SockOpts, Tarpit, configure_tcp, fmt_addr, is_local,
+    open_listener_pair, open_listeners, pidfile_addr, unmap,
 };
 use crate::node_id::{NodeId6, NodeId6Table};
 use crate::outgoing::{
@@ -613,6 +613,143 @@ fn parse_connect_to_from_config(config: &tinc_conf::Config, myname: &str) -> Vec
         .collect()
 }
 
+/// Parse `BindToAddress` / `ListenAddress` value: `"HOST [PORT]"`.
+/// C `add_listen_address:639-649`: split on first space; port half
+/// is optional (defaults to global `Port`). C `:649`: `"*"` means
+/// the wildcard (any address) — maps to an empty host so
+/// `to_socket_addrs` sees `("", port)` → fails → caller falls back
+/// to `open_listeners` (the wildcard path). We instead translate
+/// `*` to the literal wildcard IP per the requested family in
+/// `build_listeners` (simpler than threading the empty-host case).
+fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
+    let mut parts = s.splitn(2, ' ');
+    let host = parts.next().unwrap_or("");
+    // C uses string `port`; getaddrinfo resolves service names.
+    // We only accept numeric (matching `Port` parsing above).
+    let port = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(default_port);
+    (host, port)
+}
+
+/// `add_listen_address` walk (`net_setup.c:1155-1177`). For each
+/// `BindToAddress` line then each `ListenAddress` line, resolve and
+/// create listener pair(s). If neither key is present, fall through
+/// to the wildcard default (`open_listeners`).
+///
+/// Port reuse (`net_setup.c:700,710`): the first listener picks an
+/// ephemeral with `Port=0`; every subsequent bind tries to reuse it
+/// so the daemon advertises ONE port to peers regardless of how many
+/// addresses it's listening on.
+///
+/// `bindto` distinguishes the two config keys (`:1160` vs `:1169`):
+/// `BindToAddress` listeners are also used as outgoing-connect source
+/// addresses; `ListenAddress` listeners are listen-only.
+fn build_listeners(
+    config: &tinc_conf::Config,
+    port: u16,
+    family: AddrFamily,
+    opts: &SockOpts,
+) -> Vec<Listener> {
+    let mut listeners: Vec<Listener> = Vec::new();
+    // C `:700`: `from_fd = listen_socket[0].tcp.fd`. We carry the
+    // port directly. None until the first successful bind.
+    let mut reuse_port: Option<u16> = if port == 0 { None } else { Some(port) };
+    // C `:1154`: `int cfgs = 0` — did we see ANY config line?
+    let mut cfgs = 0usize;
+    // C `:686-693` dedups against `listen_socket[i].sa` which holds
+    // the REQUESTED `aip->ai_addr` (port 0 and all — `:734` memcpy
+    // happens before any port readback). We can't compare against
+    // `l.local` (that's post-bind, ephemeral filled in); track the
+    // pre-bind resolved addrs separately.
+    let mut requested: Vec<SocketAddr> = Vec::new();
+
+    // Inner per-address bind. Mirrors the body of the C
+    // `for(aip = ai; aip; aip = aip->ai_next)` loop at `:679-736`.
+    let mut try_addr = |addr: SocketAddr, bindto: bool| {
+        // C `:686-693`: skip duplicates. memcmp on the addrinfo
+        // sockaddr, BEFORE bind_reusing_port runs.
+        if requested.contains(&addr) {
+            return;
+        }
+        requested.push(addr);
+        // C `:695-699`: MAXSOCKETS cap. Warn-and-stop, not error.
+        if listeners.len() >= MAXSOCKETS {
+            log::error!(target: "tincd::net", "Too many listening sockets");
+            return;
+        }
+        if let Some(l) = open_listener_pair(addr, opts, reuse_port, bindto) {
+            // C `:710`: first successful bind seeds the reuse port.
+            // Only meaningful when `Port=0` (otherwise reuse_port
+            // was already Some(port)).
+            if reuse_port.is_none() {
+                reuse_port = Some(l.local.port());
+            }
+            listeners.push(l);
+        }
+    };
+
+    // C `:1156-1162`: `for(cfg = lookup("BindToAddress"); ...)`.
+    // `bindto = true`.
+    for (key, bindto) in [("BindToAddress", true), ("ListenAddress", false)] {
+        for e in config.lookup(key) {
+            cfgs += 1;
+            let s = e.get_str();
+            let (host, p) = parse_bind_addr(s, port);
+            // C `:649`: `"*"` → NULL → getaddrinfo wildcard. We
+            // synthesize the wildcard addrs directly (same outcome,
+            // skips the resolver).
+            if host == "*" {
+                if family.try_v4() {
+                    try_addr((std::net::Ipv4Addr::UNSPECIFIED, p).into(), bindto);
+                }
+                if family.try_v6() {
+                    try_addr((std::net::Ipv6Addr::UNSPECIFIED, p).into(), bindto);
+                }
+                continue;
+            }
+            // C `:669`: `getaddrinfo(host, port, AI_PASSIVE)`.
+            // `to_socket_addrs` is the same syscall. A hostname may
+            // resolve to multiple addrs (v4+v6); bind each.
+            match (host, p).to_socket_addrs() {
+                Ok(iter) => {
+                    for addr in iter {
+                        // C `:657`: `hint.ai_family = addressfamily`.
+                        // getaddrinfo would filter; to_socket_addrs
+                        // doesn't take a family hint, so filter here.
+                        let ok = match family {
+                            AddrFamily::Any => true,
+                            AddrFamily::Ipv4 => addr.is_ipv4(),
+                            AddrFamily::Ipv6 => addr.is_ipv6(),
+                        };
+                        if ok {
+                            try_addr(addr, bindto);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // C `:673-677`: getaddrinfo error → log + return
+                    // false (which `setup_network` propagates as
+                    // fatal). We're more lenient: skip this entry,
+                    // try the rest. If ALL fail, the empty-listeners
+                    // check below catches it.
+                    log::error!(target: "tincd::net",
+                                "{key} = {s}: {e}");
+                }
+            }
+        }
+    }
+
+    // C `:1173`: `if(!cfgs) add_listen_address(NULL, NULL)` — the
+    // no-config wildcard default.
+    if cfgs == 0 {
+        return open_listeners(port, family, opts);
+    }
+
+    listeners
+}
+
 /// `get_name()` $-expansion (`net_setup.c:220-233`).
 ///
 /// `Name = $FOO` reads env var `FOO`. `Name = $HOST` falls back to
@@ -778,10 +915,9 @@ pub struct Daemon {
 
     /// `myport.udp`. C string (`net_setup.c:54,794`); we store the
     /// resolved u16. Read back from `listeners[0].udp_port()` after
-    /// bind (the C does the same at `:1194` `get_bound_port`). With
-    /// `Port = 0` (tests), TCP and UDP get DIFFERENT kernel-assigned
-    /// ports until `bind_reusing_port` (chunk 10) lands. The ACK
-    /// packet needs the UDP one specifically.
+    /// bind (the C does the same at `:1194` `get_bound_port`).
+    /// `bind_reusing_port` makes UDP follow TCP's ephemeral with
+    /// `Port = 0`, so this equals `listeners[0].local.port()`.
     pub(crate) my_udp_port: u16,
 
     /// `node_tree` topology half. Nodes + directed edges. What
@@ -1296,16 +1432,18 @@ impl Daemon {
         // need re-bind, setup-only).
         apply_reloadable_settings(&config, &mut settings);
 
-        // BindToAddress (`net_socket.c:624`). Non-reloadable
-        // (existing connections keep their source addr; new ones
-        // pick it up at dial time, but that's a half-state). Same
-        // `host port` shape as `Address` (`resolve_config_addrs`).
-        // Port may be `0` (or absent) — bind-to-iface-only-port-any.
+        // BindToAddress (`net_socket.c:624` for outgoing source-
+        // addr selection). Non-reloadable. Same `host port` shape
+        // as `Address`. We only stash the FIRST entry here for the
+        // outgoing-connect bind — the C uses listener[].sa filtered
+        // by `bindto` for that, but our outgoing path predates the
+        // listener walk and takes a single Option<SocketAddr>.
+        // The FULL set of BindToAddress entries is re-read below
+        // in the listener-creation block (the config tree is still
+        // alive).
         if let Some(e) = config.lookup("BindToAddress").next() {
             let s = e.get_str();
-            let mut parts = s.splitn(2, ' ');
-            let host = parts.next().unwrap_or("");
-            let port: u16 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+            let (host, port) = parse_bind_addr(s, 0);
             // `to_socket_addrs()` for hostname → IP. The C uses
             // `str2addrinfo` (`netutl.c:87`); same getaddrinfo call.
             // Take the first result (the C does too — `*ai = ai[0]`).
@@ -1627,12 +1765,18 @@ impl Daemon {
         // ─── listeners (net_setup.c:1152-1183)
         // C: walk BindToAddress configs, then ListenAddress configs,
         // else `add_listen_address(NULL, NULL)` for the no-config
-        // default. We only do the no-config default for now.
+        // default. Each `add_listen_address` resolves a hostname and
+        // creates one TCP+UDP pair per resolved address.
         //
         // C `:1180`: `if(!listen_sockets) { ERR; return false }`.
         // Hard error. The daemon can't function without at least one
         // listener (peers can't connect; we can't receive UDP).
-        let listeners = open_listeners(settings.port, settings.addressfamily, &settings.sockopts);
+        let listeners = build_listeners(
+            &config,
+            settings.port,
+            settings.addressfamily,
+            &settings.sockopts,
+        );
         let mut listener_udp_io = Vec::with_capacity(listeners.len());
         let listener_tos = vec![0u8; listeners.len()];
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
@@ -2166,6 +2310,107 @@ mod tests {
     fn connid_is_copy() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<ConnId>();
+    }
+
+    /// `parse_bind_addr`: `"HOST [PORT]"`. Port optional, defaults
+    /// to global. C `add_listen_address:639-649`.
+    #[test]
+    fn parse_bind_addr_cases() {
+        // Both fields.
+        assert_eq!(parse_bind_addr("10.0.0.1 5000", 655), ("10.0.0.1", 5000));
+        // Port omitted → default.
+        assert_eq!(parse_bind_addr("10.0.0.1", 655), ("10.0.0.1", 655));
+        // Port 0 explicit (kernel picks).
+        assert_eq!(parse_bind_addr("10.0.0.1 0", 655), ("10.0.0.1", 0));
+        // Wildcard host. `*` handled by caller (build_listeners).
+        assert_eq!(parse_bind_addr("* 5000", 655), ("*", 5000));
+        // Unparseable port → default. C would feed it to getaddrinfo
+        // (service-name resolution); we don't support that, fall back.
+        assert_eq!(parse_bind_addr("10.0.0.1 http", 655), ("10.0.0.1", 655));
+    }
+
+    /// Construct a Config from `key = value` lines. Test-only.
+    fn cfg_from(lines: &[&str]) -> tinc_conf::Config {
+        let mut c = tinc_conf::Config::new();
+        let entries: Vec<_> = lines
+            .iter()
+            .filter_map(|l| tinc_conf::parse_line(l, tinc_conf::Source::Cmdline { line: 0 }))
+            .map(Result::unwrap)
+            .collect();
+        c.merge(entries);
+        c
+    }
+
+    /// `build_listeners` no-config default = `open_listeners`.
+    /// C `:1173`: `if(!cfgs) add_listen_address(NULL, NULL)`.
+    #[test]
+    fn build_listeners_no_config_is_wildcard() {
+        let cfg = cfg_from(&[]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        assert_eq!(ls.len(), 1);
+        assert!(ls[0].local.ip().is_unspecified());
+        assert!(!ls[0].bindto, "wildcard default is bindto=false");
+    }
+
+    /// Two `BindToAddress` lines → two listener pairs. Port reuse:
+    /// with `Port=0`, the second pair gets the first pair's port.
+    /// C `net_setup.c:700`: `from_fd = listen_socket[0].tcp.fd`.
+    #[test]
+    fn build_listeners_two_bindto_shares_port() {
+        // Two distinct loopback addrs. Linux routes the whole
+        // 127.0.0.0/8 to lo; binding 127.42.x.x works without
+        // setup. Avoid 127.0.0.x — the integration tests'
+        // `alloc_port()` does bind-read-drop-rebind on 127.0.0.1
+        // and we'd race for the same ephemeral.
+        let cfg = cfg_from(&["BindToAddress = 127.42.0.1", "BindToAddress = 127.42.0.2"]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        assert_eq!(ls.len(), 2, "two BindToAddress → two pairs");
+        assert!(ls[0].bindto && ls[1].bindto);
+        assert_eq!(ls[0].local.ip().to_string(), "127.42.0.1");
+        assert_eq!(ls[1].local.ip().to_string(), "127.42.0.2");
+
+        let p = ls[0].local.port();
+        assert_ne!(p, 0, "kernel assigned ephemeral");
+        // The whole point of bind_reusing_port: every socket
+        // converges on the first listener's port.
+        assert_eq!(ls[0].udp_port(), p, "pair 0 UDP reused TCP");
+        assert_eq!(ls[1].local.port(), p, "pair 1 TCP reused pair 0");
+        assert_eq!(ls[1].udp_port(), p, "pair 1 UDP too");
+    }
+
+    /// `BindToAddress` vs `ListenAddress`: same plumbing, different
+    /// `bindto` flag. C `:1160` (true) vs `:1169` (false).
+    #[test]
+    fn build_listeners_bindto_vs_listen() {
+        let cfg = cfg_from(&["BindToAddress = 127.42.1.1", "ListenAddress = 127.42.1.2"]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        assert_eq!(ls.len(), 2);
+        // BindToAddress walked first (C `:1156` before `:1164`).
+        assert!(ls[0].bindto, "BindToAddress → bindto=true");
+        assert!(!ls[1].bindto, "ListenAddress → bindto=false");
+    }
+
+    /// `BindToAddress = *` → wildcard. C `:649`: `"*"` → NULL host.
+    #[test]
+    fn build_listeners_wildcard_host() {
+        let cfg = cfg_from(&["BindToAddress = *"]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        assert_eq!(ls.len(), 1);
+        assert!(ls[0].local.ip().is_unspecified());
+        // `*` via BindToAddress still gets bindto=true (vs the
+        // no-config default which is false).
+        assert!(ls[0].bindto);
+    }
+
+    /// Duplicate addresses skipped. C `:686-693` memcmp check.
+    #[test]
+    fn build_listeners_dedups() {
+        let cfg = cfg_from(&[
+            "BindToAddress = 127.42.2.1",
+            "BindToAddress = 127.42.2.1", // duplicate
+        ]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        assert_eq!(ls.len(), 1, "duplicate skipped");
     }
 
     /// `DaemonSettings::default()` matches C defaults. `net_setup.c:

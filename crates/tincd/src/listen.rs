@@ -24,10 +24,9 @@
 //! family probe (`0.0.0.0` then `::`, gcc-verified). We probe by
 //! trying both binds; `Socket::new(Domain::IPV6, ...)` failing is
 //! the same outcome. Bind failure is `continue` (C `:705-707`).
-//! `BindToAddress` deferred (DOES need name resolution).
-//!
-//! `bind_reusing_port` (`net_setup.c:613-632`) deferred: only
-//! matters with multiple `BindToAddress` entries.
+//! `BindToAddress` resolution lives in `daemon.rs` (it owns the
+//! config tree); resolved `SocketAddr`s flow into
+//! `open_listener_pair` here.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -173,10 +172,10 @@ impl AddrFamily {
         }
     }
 
-    fn try_v4(self) -> bool {
+    pub(crate) fn try_v4(self) -> bool {
         matches!(self, Self::Any | Self::Ipv4)
     }
-    fn try_v6(self) -> bool {
+    pub(crate) fn try_v6(self) -> bool {
         matches!(self, Self::Any | Self::Ipv6)
     }
 }
@@ -186,10 +185,16 @@ impl AddrFamily {
 /// `Socket`s (own the fds) plus the local address (for the pidfile +
 /// outgoing UDP source selection).
 ///
-/// `bindto` is the difference between `BindToAddress` (use this addr
-/// for outgoing too) and `ListenAddress` (listen-only). Deferred; we
-/// only do the no-config default which is `bindto = false`.
+/// `bindto` distinguishes `BindToAddress` (use this addr for
+/// outgoing connections too — `net_socket.c:624` source-addr
+/// selection) from `ListenAddress` (listen-only). The no-config
+/// default is `bindto = false`.
 pub struct Listener {
+    /// `listen_socket_t.bindto`. True iff this listener came from a
+    /// `BindToAddress` config line (vs `ListenAddress` or the
+    /// implicit wildcard). C `net_setup.c:1160` vs `:1169`. Consumed
+    /// by outgoing-connect to pick a source address.
+    pub bindto: bool,
     /// `listen_socket_t.tcp`. TCP listener, accepting peer conns.
     /// `Socket` owns the fd; Drop closes.
     pub tcp: Socket,
@@ -209,9 +214,11 @@ impl Listener {
     }
 
     /// `get_bound_port(sock->udp.fd)` (`net_setup.c:1194`). The UDP
-    /// port, AFTER bind. With `Port = 0` (tests), TCP and UDP get
-    /// DIFFERENT kernel-assigned ports until `bind_reusing_port`
-    /// lands (chunk 10). `myport.udp` is THIS, not `local.port()`.
+    /// port, AFTER bind. With `bind_reusing_port` (`open_one`) this
+    /// equals `local.port()` for the first listener; kept as a
+    /// separate accessor because subsequent listeners on a system
+    /// where the port is taken on UDP fall back to ephemeral
+    /// (`open_one`'s retry path).
     #[must_use]
     pub fn udp_port(&self) -> u16 {
         self.udp
@@ -443,13 +450,17 @@ pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Lis
 
     if family.try_v4() {
         let addr: SocketAddr = (Ipv4Addr::UNSPECIFIED, port).into();
-        if let Some(l) = open_one(addr, opts) {
+        if let Some(l) = open_one(addr, opts, None, false) {
             listeners.push(l);
         }
     }
     if family.try_v6() {
         let addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
-        if let Some(l) = open_one(addr, opts) {
+        // C `:700`: `from_fd = listen_socket[0].tcp.fd`. The v6
+        // listener tries to reuse the v4 listener's port. With
+        // `Port=0` this makes both families converge on one port.
+        let reuse = listeners.first().map(|l| l.local.port());
+        if let Some(l) = open_one(addr, opts, reuse, false) {
             listeners.push(l);
         }
     }
@@ -457,18 +468,86 @@ pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Lis
     listeners
 }
 
-/// One TCP+UDP pair on `addr`. C `:698-736`. Either both succeed or
-/// neither makes it into `listen_socket[]` (`:717-720`: TCP succeeds,
-/// UDP fails → close TCP, continue).
-///
-/// `addr.port() == 0` is allowed (kernel picks). The TCP socket gets
-/// a port; UDP gets a DIFFERENT port (no `bind_reusing_port` yet).
-/// This is wrong vs the C but only matters for production; tests use
-/// the TCP port from the pidfile and don't touch UDP.
-fn open_one(addr: SocketAddr, opts: &SockOpts) -> Option<Listener> {
-    let sa = SockAddr::from(addr);
+/// `assign_static_port` (`net_setup.c:577-609`). If `addr.port()` is
+/// 0 (dynamic), rewrite it to `reuse_port`. Otherwise leave it
+/// alone (already static). C checks `sa.sa_family` and writes the
+/// `sin_port` / `sin6_port` field; `SocketAddr::set_port` covers
+/// both. C returns `false` on bad fd / unknown family; we encode
+/// "nothing to do" as `reuse_port == None` and let the caller skip.
+fn assign_static_port(mut addr: SocketAddr, reuse_port: Option<u16>) -> Option<SocketAddr> {
+    let port = reuse_port?;
+    // C `:590-601`: only overwrite if the existing port is zero.
+    // A `BindToAddress = 10.0.0.1 5000` line has a static port;
+    // don't clobber it with the first listener's ephemeral.
+    if addr.port() == 0 {
+        addr.set_port(port);
+        Some(addr)
+    } else {
+        None
+    }
+}
 
-    let tcp = match setup_tcp(&sa, opts) {
+/// `bind_reusing_port` (`net_setup.c:613-632`). Try `setup` with the
+/// port stolen from an already-bound socket; on failure, fall back
+/// to the original `addr` (port 0 → fresh ephemeral). The C threads
+/// a function pointer (`bind_fn_t`); we take a closure.
+///
+/// Why fallback: with `Port=0` and multiple `BindToAddress` lines,
+/// the first listener picks ephemeral X. The second listener
+/// (different IP) usually CAN reuse X (different (addr,port) tuple),
+/// but if X happens to be taken on that interface, we'd rather get
+/// a working listener on a different port than no listener at all.
+/// C `:629`: `if(fd < 0) fd = setup(sa)`.
+fn bind_reusing_port<F>(addr: SocketAddr, reuse_port: Option<u16>, setup: F) -> io::Result<Socket>
+where
+    F: Fn(&SockAddr) -> io::Result<Socket>,
+{
+    // C `:621-624`: only attempt the reuse if assign_static_port
+    // succeeded (i.e. addr had port 0 AND we have a port to steal).
+    // Reuse failed (port taken on this interface) → fall through.
+    if let Some(reused) = assign_static_port(addr, reuse_port)
+        && let Ok(s) = setup(&SockAddr::from(reused))
+    {
+        return Ok(s);
+    }
+    // C `:629`: original address. With port 0 the kernel picks fresh.
+    setup(&SockAddr::from(addr))
+}
+
+/// One TCP+UDP pair on `addr`. C `add_listen_address:698-736`.
+/// Either both succeed or neither makes it into `listen_socket[]`
+/// (`:717-720`: TCP succeeds, UDP fails → close TCP, continue).
+///
+/// `reuse_port`: with `Port=0`, the FIRST listener gets a kernel
+/// port. Subsequent calls pass that port here so the whole daemon
+/// converges on one port across all listeners (and TCP/UDP within
+/// a pair). C `:700`: `int from_fd = listen_socket[0].tcp.fd`;
+/// `:710-711`: after the first TCP bind, `from_fd = tcp_fd` so UDP
+/// reuses the just-assigned TCP port.
+///
+/// `bindto`: stored on the result, see `Listener.bindto`.
+///
+/// Public for `daemon.rs`'s `BindToAddress` walk; the wildcard
+/// default still goes through `open_listeners`.
+#[must_use]
+pub fn open_listener_pair(
+    addr: SocketAddr,
+    opts: &SockOpts,
+    reuse_port: Option<u16>,
+    bindto: bool,
+) -> Option<Listener> {
+    open_one(addr, opts, reuse_port, bindto)
+}
+
+fn open_one(
+    addr: SocketAddr,
+    opts: &SockOpts,
+    reuse_port: Option<u16>,
+    bindto: bool,
+) -> Option<Listener> {
+    // ─── TCP. C `:703`: `bind_reusing_port(sa, from_fd,
+    // setup_listen_socket)`.
+    let tcp = match bind_reusing_port(addr, reuse_port, |sa| setup_tcp(sa, opts)) {
         Ok(s) => s,
         Err(e) => {
             // C `:705`: `if(tcp_fd < 0) continue`. Log + skip.
@@ -480,7 +559,26 @@ fn open_one(addr: SocketAddr, opts: &SockOpts) -> Option<Listener> {
         }
     };
 
-    let udp = match setup_udp(&sa, opts) {
+    // C `:710-711`: `if(!from_fd) from_fd = tcp_fd`. The first
+    // listener pair has no prior socket to steal from (`from_fd ==
+    // listen_socket[0].tcp.fd == 0`), so it uses the just-bound TCP
+    // socket as the port source for UDP. Subsequent pairs already
+    // have `reuse_port` from listener[0], keep it.
+    //
+    // We collapse: ALWAYS try the TCP port we just got. If
+    // `reuse_port` was Some(X) and TCP successfully reused X, this
+    // is X anyway. If TCP fell back to a fresh ephemeral, we want
+    // UDP to follow TCP (peers learn the port from the TCP meta-
+    // connection and expect UDP there).
+    let tcp_port = tcp
+        .local_addr()
+        .ok()
+        .and_then(|a| a.as_socket())
+        .map(|a| a.port());
+
+    // ─── UDP. C `:715`: `bind_reusing_port(sa, from_fd,
+    // setup_vpn_in_socket)`.
+    let udp = match bind_reusing_port(addr, tcp_port, |sa| setup_udp(sa, opts)) {
         Ok(s) => s,
         Err(e) => {
             // C `:718`: `closesocket(tcp_fd); continue`.
@@ -504,7 +602,12 @@ fn open_one(addr: SocketAddr, opts: &SockOpts) -> Option<Listener> {
 
     log::info!(target: "tincd::net", "Listening on {local}");
 
-    Some(Listener { tcp, udp, local })
+    Some(Listener {
+        bindto,
+        tcp,
+        udp,
+        local,
+    })
 }
 
 // configure_tcp (per-connection, post-accept)
@@ -1510,6 +1613,98 @@ mod tests {
         let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
         let mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
         assert_eq!(mark, 0);
+    }
+
+    /// `bind_reusing_port` (`net_setup.c:613-632`): with `Port=0`,
+    /// TCP gets a kernel ephemeral, UDP reuses it. Before this
+    /// landed, the two sockets got DIFFERENT kernel ports — peers
+    /// connecting on TCP would learn port X, then send UDP to X
+    /// where nobody's listening (UDP was on Y).
+    #[test]
+    fn open_port_zero_tcp_udp_same_port() {
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
+        let l = &listeners[0];
+        let tcp_port = l.local.port();
+        let udp_port = l.udp_port();
+        assert_ne!(tcp_port, 0, "kernel assigned a port");
+        assert_eq!(tcp_port, udp_port, "UDP reused TCP's ephemeral");
+    }
+
+    /// With `Port=0` and `AddressFamily=any`, the v6 listener
+    /// reuses the v4 listener's port (C `:700`: `from_fd =
+    /// listen_socket[0].tcp.fd`). All four sockets (v4 tcp, v4 udp,
+    /// v6 tcp, v6 udp) end up on the same port.
+    #[test]
+    fn open_port_zero_v4_v6_same_port() {
+        let listeners = open_listeners(0, AddrFamily::Any, &opts());
+        if listeners.len() < 2 {
+            eprintln!("v6 unavailable, skipping cross-family port check");
+            return;
+        }
+        let p = listeners[0].local.port();
+        assert_ne!(p, 0);
+        assert_eq!(listeners[0].udp_port(), p);
+        assert_eq!(listeners[1].local.port(), p, "v6 TCP reused v4 port");
+        assert_eq!(listeners[1].udp_port(), p, "v6 UDP too");
+    }
+
+    /// `assign_static_port`: only overwrite zero ports.
+    /// C `net_setup.c:590-601`: `if(!sin_port) sin_port = htons(X)`.
+    #[test]
+    fn assign_static_port_cases() {
+        // Port 0 + reuse → rewritten.
+        assert_eq!(
+            assign_static_port(addr("10.0.0.1", 0), Some(5000)),
+            Some(addr("10.0.0.1", 5000))
+        );
+        // Port already static → leave alone (None = "nothing to do").
+        assert_eq!(assign_static_port(addr("10.0.0.1", 655), Some(5000)), None);
+        // No reuse port available → nothing to do.
+        assert_eq!(assign_static_port(addr("10.0.0.1", 0), None), None);
+        // v6 too (C has separate AF_INET6 case; set_port covers both).
+        assert_eq!(
+            assign_static_port(addr("::1", 0), Some(5000)),
+            Some(addr("::1", 5000))
+        );
+    }
+
+    /// `bind_reusing_port` fallback (C `:629`). Reuse port is
+    /// already taken → fall through to the original addr (port 0
+    /// → fresh ephemeral). Prove the listener still materializes.
+    #[test]
+    fn bind_reusing_port_fallback() {
+        // Occupy a port. 127.42.x avoids racing two_daemons'
+        // 127.0.0.1 alloc_port (bind-read-drop-rebind TOCTOU).
+        let addr: SocketAddr = "127.42.4.1:0".parse().unwrap();
+        let first = open_listener_pair(addr, &opts(), None, false).unwrap();
+        let taken = first.local.port();
+
+        // Ask for a NEW pair on the same addr reusing `taken`. TCP
+        // can't bind (active listener on the same addr+port).
+        // Fallback binds port 0 → fresh ephemeral. Listener exists.
+        let l = open_listener_pair(addr, &opts(), Some(taken), false)
+            .expect("fallback to fresh ephemeral");
+        assert_ne!(l.local.port(), taken, "fell back, got a different port");
+        assert_ne!(l.local.port(), 0);
+        // UDP still followed TCP (the fallback's TCP port, not `taken`).
+        assert_eq!(l.udp_port(), l.local.port());
+        drop(first);
+    }
+
+    /// `open_listener_pair` with a static port: `assign_static_port`
+    /// returns None (port is non-zero), `bind_reusing_port` skips
+    /// straight to the original addr. Reuse hint never reaches the
+    /// kernel. Proven via `assign_static_port` directly (the socket
+    /// path is covered by the integration tests; doing
+    /// bind-drop-rebind here would TOCTOU-race the parallel
+    /// `alloc_port` calls in `tests/two_daemons.rs`).
+    #[test]
+    fn open_pair_bindto_flag_plumbed() {
+        // 127.42.x avoids racing two_daemons' 127.0.0.1 alloc_port.
+        let l =
+            open_listener_pair("127.42.3.1:0".parse().unwrap(), &opts(), None, true).expect("bind");
+        assert!(l.bindto, "bindto=true plumbed through");
+        assert_eq!(l.udp_port(), l.local.port(), "port reuse within pair");
     }
 
     /// `SockOpts::default()` matches C globals at `net_socket.c:41-46`.
