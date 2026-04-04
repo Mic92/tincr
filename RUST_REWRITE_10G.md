@@ -1,39 +1,48 @@
 # 10G architecture — reaching 10 Gbps single-flow
 
-**Target**: 10 Gbps single-flow over loopback netns. Current: 1282 Mbps
-(HEAD `28dad75f`, release+debuginfo, AVX2). **7.8× to go.**
+**Target**: 10 Gbps single-flow over loopback netns. Phase 0+1 LANDED:
+**1391 Mbps** (HEAD `26f9c5ac`, n=4 median, profiling profile, AVX2).
+**7.2× to go.**
 
 **Budget**: 10 Gbps ÷ 8 ÷ 1453 B/pkt = 860,000 pkt/s = **1.16 µs/pkt**.
-Current: 9.07 µs/pkt = 4.34 crypto + 3.75 kernel + 0.97 other.
+Measured: **8.36 µs/pkt** = 4.66 crypto + 2.76 kernel + 0.94 other.
 
-**TL;DR**: GSO/TSO + par-enc(8) + MSG_ZEROCOPY = **12.4 Gbps predicted**
-(24% margin, 8 cores). Without ZC: 9.3 Gbps (need 16 cores). The
-ctrl/data split is *not* required for single-flow 10G.
+**TL;DR (recalibrated)**: GSO/TSO + par-enc(8) + ZC ≈ **7.6 Gbps**
+(8 cores) / **~9.1 Gbps** (16 cores). The original 12.4G@8c was 1.6×
+optimistic — the model **zeroed out the RX path** (TUN write for inner-
+TCP ACKs is 1.12 µs/pkt, 41% of remaining kernel time). 10G@8c needs
+the ACK-side TUN write batched (GRO coalesce, wg-go `handleGRO`); add
+that to Phase 2's scope. 10G@16c is reachable as planned. See
+[Model accuracy](#model-accuracy-phase-01-postmortem) below.
 
 ---
 
 ## The math
 
-| Stack (single-flow, sender side) | µs/pkt | Mbps | Cores | 10G |
-|---|---|---|---|---|
-| **Current (HEAD `28dad75f`)** | **9.07** | **1282** | 1 | — |
-| Phase 1: UDP_SEGMENT alone | ~7.2 | ~1600 | 1 | ❌ |
-| Phase 2: + IFF_VNET_HDR/TSO | 4.86 | 2391 | 1 | ❌ |
-| Phase 3a: + par-enc(4) | 1.79 | 6495 | 4 | ❌ |
-| Phase 3b: + par-enc(8) | 1.25 | 9321 | 8 | ❌ (96%) |
-| Phase 3c: + par-enc(16) | 0.98 | 11912 | 16 | ✅ |
-| **Phase 4: + MSG_ZEROCOPY (8-core)** | **0.93** | **12448** | **8** | **✅ +24%** |
-| Phase 4: + MSG_ZEROCOPY (16-core) | 0.66 | 17544 | 16 | ✅ +75% |
+| Stack (single-flow, sender side) | µs/pkt pred | µs/pkt **meas** | Mbps pred | Mbps **meas/recalib** | Cores | 10G |
+|---|---|---|---|---|---|---|
+| Baseline (`28dad75f`) | 9.07 | 9.07 | 1282 | 1282 | 1 | — |
+| **Phase 0+1: UDP_SEGMENT (`26f9c5ac`)** | ~7.2 | **8.36** | ~1600 | **1391** | 1 | ❌ |
+| Phase 2a: + TSO ingest (orig scope) | 4.86 | — | 2391 | ~1680 | 1 | ❌ |
+| Phase 2b: + GRO TUN write (NEW) | — | — | — | ~1970 | 1 | ❌ |
+| Phase 3a: + par-enc(4) | 1.79 | — | 6495 | ~4190 | 4 | ❌ |
+| Phase 3b: + par-enc(8) + par-dec(4) | 1.25 | — | 9321 | ~6190 | 8 | ❌ |
+| Phase 3c: + par-enc(16) | 0.98 | — | 11912 | ~5830 | 16 | ❌ |
+| **Phase 4: + MSG_ZEROCOPY (8-core)** | 0.93 | — | **12448** | **~7600** | 8 | ❌ |
+| Phase 4: + MSG_ZEROCOPY (16-core) | 0.66 | — | 17544 | **~9100** | 16 | ~ |
 
-**ZC is the difference between needing 8 cores vs 16.** At 10G, the
-one 63KB `copy_from_iter` per super-packet is **31.5% of wall time**
-(20k sends/s × 16µs at 4GB/s memcpy). The kernel-audit flagged this
-("re-profile to confirm copy_from_iter is the next wall") — at 10G
-it IS the wall. ZC kills it: 1.46×.
+**Predictions recomputed from measured Phase-1 baseline.** Original
+right-column overshot ~1.6×: the napkin treated alice (sender) as
+TX-only, but iperf3 sender also receives ~0.5 ACK/data-pkt and writes
+each to the TUN. That's **1.12 µs/pkt of RX kernel** the model put at
+zero. Phase 2 needs to batch this side too — see Phase 2b below.
 
-The model: kernel decomposes as 0.36µs copy + 3.39µs entry/skb/stack.
-GSO amortizes entry/skb 43:1; ZC eliminates copy. Combined kernel
-cost → ~0.13 µs/pkt (page-pin overhead).
+**ZC's leverage shrank.** sendmsg is already amortized to 0.43µs/pkt
+(GSO did its job). ZC removes the `copy_from_iter` slice of *that*,
+worth ~0.2µs. Still positive ROI but no longer the 1.46× kingmaker;
+at the recalibrated Phase-3 endpoint the dominant residuals are
+crypto-tail (0.58µs @8c) and `other` (route_packet, hash, the dense-
+pack staging memmove).
 
 ---
 
@@ -56,12 +65,40 @@ batch. Feature-detect with `getsockopt(IPPROTO_UDP, UDP_SEGMENT)`.
 Kernel ≥4.18 (2018). Fall back to `sendmmsg` if `ENOPROTOOPT`.
 Receiver sees identical datagrams either way.
 
-**The arena**: page-aligned `Box<[u8; 128 * MAX_FRAME]>` ≈ 200 KB.
-Slots at fixed stride. This is the SAME arena Phase 3 (par-enc) and
-Phase 4 (ZC) use. Build it once, here.
+**LANDED (`37bbf165`/`44cb5580`). Measured: 1391 Mbps (+18% over
+Phase-0 worktree run, vs +12% predicted).** Findings the model
+didn't have:
+
+- **Dense-pack TxBatch, NOT arena slots.** `DeviceArena::STRIDE` is
+  1600 (cacheline-round) but the encrypted frame is body+33 ≈ 1519.
+  UDP_SEGMENT splits at `gso_size`; an 81-byte gap between fixed
+  arena slots would land in the previous datagram's tail. **The
+  buffer IS the wire layout.** TxBatch stages at `[count*stride ..
+  count*stride+len]` in its own dense Vec. The arena stays
+  plaintext-ingest-side (Phase 2 fills it).
+
+- **65535-byte cap, ~43 frames max.** `udp_sendmsg` (`udp.c:1292`)
+  rejects `len > 0xFFFF` with `EMSGSIZE` *before* parsing the cmsg —
+  the kernel never learns this was a GSO send. Daemon's `EMSGSIZE`
+  handler then misinterprets it as path-MTU failure → TCP fallback
+  death spiral (gate caught it at 17 Mbps). At MTU+33=1519 the cap
+  is ~43 frames. **Observed effective batch: 30:1** (read/sendmsg
+  trace ratio) — inner-TCP bursts don't always fill 43.
+
+- **`udp_addr_cached` was never repopulating** (latent ~2% bug). The
+  cache write was gated on `udp_addr != Some(peer_addr)`; when gossip
+  set `udp_addr = Some(edge_addr)` and the peer then sent from that
+  same addr (the common case), the gate was false forever. Every send
+  fell to `choose_udp_address` (the 2.18% Vec-alloc cold path). Fix
+  bundled in Phase 1. ~5-6pp of the +18% is this, not GSO.
+
+- **Raw libc sendmsg, not nix.** `nix::sendmsg` does `vec![0u8; cap]`
+  per call. The cmsg here is a fixed 24-byte `{SOL_UDP, UDP_SEGMENT,
+  u16}` — pre-built once, 2-byte gso_size patched per send.
 
 **Errors**: `EMSGSIZE` (`udp.c:1145`) = gso_size > PMTU → retry at
 peer's `minmtu`. `EINVAL` (`:1149`) = >128 segs → cap batch.
+`EMSGSIZE` from `udp.c:1292` (>65535 total) → cap `BATCH_MAX_BYTES`.
 
 **Ref**: `tailscale:net/batching/conn_linux.go:122` `coalesceMessages`;
 Willem's `bec1f6f69736` (876→2139 MB/s, 17× call reduction).
@@ -85,8 +122,21 @@ Mitigate: feature-gate (`-o ExperimentalGSO=on`), default off until
 `tests/netns.rs` runs iperf3 + sha256-of-stream end-to-end.
 
 **Win beyond syscalls**: `route_packet` runs **once** per super-
-packet (one IP dst, one trie lookup) instead of 43×. The 0.97µs
-"other" → 0.02µs.
+packet (one IP dst, one trie lookup) instead of ~30×. The 0.94µs
+"other" → ~0.56µs (route_packet is ~40% of it; the rest is per-
+packet dispatch, hash_one, the dense-pack staging memmove that
+doesn't amortize).
+
+**Phase 2b (NEW, scope expansion): GRO TUN write.** Phase-1 profiling
+found TUN *write* is 41% of remaining kernel time — alice writes ~0.5
+ACKs per data packet to the TUN (delayed-ACK ratio). At 1391 Mbps
+that's 168k write()/5s = 1.12µs/data-pkt. Unbatched. wireguard-go
+`handleGRO` (`receive.go`) coalesces same-flow inbound packets into
+a vnet_hdr super-segment before TUN write — same `virtio_net_hdr`
+shape as the ingest side, just outbound. ACKs are 52B same-flow; ~15
+coalesce per recvmmsg batch → 1 TUN write. **+50 LOC on top of
+`tso_split`, ~1.0 µs/pkt saved.** Without this, Phase 3+4 cap at
+~7G @ 8c.
 
 ### Phase 3: par-encrypt — ~150 LOC
 
@@ -99,13 +149,25 @@ Split:
 let base = tunnel.sptps.outseqno;
 tunnel.sptps.outseqno = base.wrapping_add(n_chunks);
 let cipher: &ChaPoly = &tunnel.sptps.outcipher;
+let stride = body_len + 33;  // dense, NOT DeviceArena::STRIDE
 
 // rayon::scope, embarrassingly parallel:
 chunks.par_iter().enumerate().for_each(|(i, body)| {
     let seqno = base.wrapping_add(i as u32);
-    cipher.seal_with_seqno(seqno, body, &mut arena[i * STRIDE..]);
+    cipher.seal_with_seqno(seqno, body, &mut tx_batch[i * stride..]);
 });
 ```
+
+**Phase-1 reality check: workers write into the dense `TxBatch`, NOT
+arena slots.** TxBatch stride is `body+33` (variable, computed per
+batch from `gso_size`); arena STRIDE is 1600 (fixed). This is HARDER
+than the original sketch: workers can't blindly index `[i*1600..]`.
+Either (a) precompute the offset slice and `split_at_mut` it N ways
+before the rayon scope, or (b) workers compute `i*stride` themselves
+(stride is uniform within a batch, so this is fine — the trap is
+mixed-MSS batches, which TSO doesn't produce). Option (b) is simpler;
+the `&mut tx_batch[..]` aliasing across workers needs `split_at_mut`
+regardless.
 
 **API surgery**: `tinc-sptps`: add `Sptps::alloc_seqnos(n) -> u32`
 (returns base, bumps internal) + `seal_with_seqno(&self, seqno, ...)`
@@ -134,11 +196,13 @@ ID, `ee_info` = lowest. Buffer reusable when ID is ack'd.
 puts it at ~10KB/send. With UDP_SEGMENT we're at ~63KB/send. **6×
 over break-even.**
 
-**Buffer lifecycle**: the Phase-1 arena becomes a *ring*. 4-8
-slots. Slot N in-flight until errqueue acks ID N. Par-enc workers
-write directly into the slot they're handed; no post-encrypt
-memcpy. **Buffer must stay alive until kernel says so** — bugs
-here are silent corruption (kernel reads freed memory).
+**Buffer lifecycle**: the Phase-1 **dense TxBatch** becomes a *ring*
+of 4-8 dense buffers. Buffer N in-flight until errqueue acks ID N.
+Par-enc workers write directly into the buffer they're handed at
+computed `i*stride` offsets; no post-encrypt memcpy. **Buffer must
+stay alive until kernel says so** — bugs here are silent corruption
+(kernel reads freed memory). The DeviceArena (ingest side) is
+separate and doesn't need ZC plumbing — TUN read isn't ZC-able.
 
 **Errqueue plumbing**: new fd in epoll set, `EPOLLIN` on errqueue.
 `recvmsg(MSG_ERRQUEUE)` per fire. ~50 LOC of the 150.
@@ -178,10 +242,11 @@ TSO4/6 first; USO when someone runs QUIC over the tunnel.
 
 | Phase | Success metric | Hardware needed |
 |---|---|---|
-| 1 | `TINCD_TRACE=1` sendto count drops ~40× | none (sw GSO works without NIC USO, kernel `10154dbded6d`) |
-| 2 | `read()` count drops ~40×; iperf3 + sha256-of-stream end-to-end clean | none |
-| 3 | `perf` shows chacha across N cores; gate >6 Gbps @ n=4 | 4+ cores |
-| 4 | `perf` shows `copy_from_iter` <1%; gate >10 Gbps | 8+ cores |
+| 1 ✓ | `TINCD_TRACE=1` sendmsg/read ratio ~30:1 | none (sw GSO works without NIC USO, kernel `10154dbded6d`) |
+| 2a | `read()` count drops ~30×; iperf3 + sha256-of-stream end-to-end clean | none |
+| 2b | `write()` count drops ~15× (ACK coalesce) | none |
+| 3 | `perf` shows chacha across N cores; gate >5 Gbps @ n=4 | 8+ cores |
+| 4 | `perf` shows `copy_from_iter` <1%; gate >7 Gbps @ 8c | 8+ cores |
 
 ---
 
@@ -195,29 +260,99 @@ TSO4/6 first; USO when someone runs QUIC over the tunnel.
 | 3 | rayon dispatch overhead at small N | Threshold: skip rayon below 8 chunks. The overhead is ~5µs; 8 chunks of crypto is ~35µs. |
 | 4 | Buffer lifetime bug → kernel reads freed mem | Ring with explicit slot states. ASAN run in CI. Ack-before-reuse invariant. |
 | 4 | Errqueue under-polled → ring fills | Poll on every epoll wake. Fallback to non-ZC sendmsg when ring full (graceful degradation). |
-| All | Model error in the µs/pkt decomposition | **Profile after every phase.** The 4.34/3.75/0.97 split is one machine, one workload. |
+| All | Model error in the µs/pkt decomposition | **Profile after every phase.** Phase-1 already found a 1.12µs term the model zeroed. |
 
 ---
 
 ## Summary
 
-| Phase | LOC | Predicted Mbps | Σ cores | Risk | Key artifact |
-|---|---|---|---|---|---|
-| 1 UDP_SEGMENT | ~120 | ~1600 | 1 | LOW | The page-aligned arena |
-| 2 IFF_VNET_HDR/TSO | ~250 | ~2400 | 1 | MED | `gsoSplit` port |
-| 3 par-enc + par-dec | ~200 | ~6500 | 4 | LOW | `seal_with_seqno(&self)` |
-| 4 MSG_ZEROCOPY | ~150 | **~12400** | **8** | MED | errqueue OR io_uring |
-| **Total** | **~720** | **10G+** | **8** | | |
+| Phase | LOC | Pred Mbps | **Recalib Mbps** | Σ cores | Risk | Key artifact |
+|---|---|---|---|---|---|---|
+| 0 seams (drain, UdpEgress) | ~280 | — | LANDED (~1240) | 1 | LOW | DeviceArena (ingest-side) |
+| 1 UDP_SEGMENT | ~120 | ~1600 | **LANDED 1391** | 1 | LOW | Dense TxBatch (egress-side) |
+| 2a TSO ingest | ~250 | ~2400 | ~1680 | 1 | MED | `gsoSplit` port |
+| 2b GRO TUN write (NEW) | ~50 | — | ~1970 | 1 | LOW | `handleGRO` port |
+| 3 par-enc + par-dec | ~200 | ~6500 | ~6190 | 8 | LOW | `seal_with_seqno(&self)` |
+| 4 MSG_ZEROCOPY | ~150 | ~12400 | **~7600** | 8 | MED | errqueue OR io_uring |
+| 4 MSG_ZEROCOPY | | ~17500 | **~9100** | 16 | | |
+| **Total** | **~770** | | **~9–10G** | **16** | | |
 
-The arena from Phase 1 is the spine — UDP_SEGMENT writes to it,
-par-enc workers fill its slots, ZC pins it. One allocation, three
-uses. Get its layout right in Phase 1.
+**The spine is two buffers, not one.** Phase 1 found that
+UDP_SEGMENT can't use arena slots (gso_size IS the wire layout;
+fixed-STRIDE gaps would corrupt). The `DeviceArena` stays as the
+**plaintext ingest side** (drain fills it; Phase 2 TSO super-packets
+land in slot 0; Phase 4 ZC pins it for the device-read direction).
+The **dense `TxBatch`** is the egress side (Phase-1 GSO writes wire
+bytes into it; Phase-3 par-enc workers seal directly into computed
+offsets; Phase-4 ZC pins it for the sendmsg direction). Two
+allocations, two uses each. The page-alignment requirement holds for
+both.
 
 References: full kernel-side analysis at
 `/home/joerg/.claude/outputs/mt-kernel-findings.md`; threading
 math at `/home/joerg/.claude/outputs/mt-napkin-results.md`;
 shared-state inventory at
 `/home/joerg/.claude/outputs/mt-shared-findings.md`.
+
+---
+
+## Model accuracy (Phase 0+1 postmortem)
+
+Measured at HEAD `26f9c5ac`, n=4, `--cargo-profile profiling`:
+
+| | n=4 | vs model |
+|---|---|---|
+| Rust↔Rust | 1391 Mbps (σ=56, median) | model said 1600, **−13%** |
+| Rust/C ratio | 138.7% | napkin baseline 119.1% → **+20pp** ✓ |
+| crypto% | 55.8% (4.66µs) | model 47.9% (4.34µs) — fraction up because kernel shrank ✓ |
+| kernel% | 33.0% (2.76µs) | model 41.4% (3.75µs), **−0.99µs GSO win** ✓ |
+| GSO batch ratio | 30.4:1 (trace read/sendmsg) | model assumed 43:1 |
+| sendmsg µs/pkt | 0.43 | — |
+| TUN read µs/pkt | 1.11 | — |
+| **TUN write µs/pkt** | **1.12** | **model: 0. UNMODELED.** |
+
+**Where the model was right.** Kernel shrank ~1µs as predicted (GSO
+amortized the sendto entry/skb/stack cost). Crypto absolute cost
+stayed flat (~4.5µs) and fraction grew — textbook Amdahl. The +20pp
+ratio gain decomposes cleanly: ~7pp Phase-0 drain-loop, ~6pp the
+`udp_addr_cached` fix bundled in Phase 1, ~7pp GSO proper.
+
+**Where it was wrong.**
+
+1. **RX path was zeroed out.** The napkin profiled alice as TX-only,
+   but the iperf3 sender receives an ACK every ~2 data packets and
+   writes each one to the TUN. trace shows 168k `write()` against
+   330k `read()` — 0.51 ACK/data-pkt at 4.7µs/call (trace-loaded;
+   ~2.6µs clean). That's **1.12 µs/data-pkt** the model put at zero.
+   At 10G that's 96% of the 1.16µs budget. **This is why the
+   original Phase-4 endpoint overshot 1.6×.** Fix: Phase 2b batches
+   the write side too (GRO coalesce → vnet_hdr super-segment → one
+   TUN write per ACK burst).
+
+2. **Effective batch is 30:1, not 43:1.** The 65535-byte cap allows
+   43 frames at MTU+33, but inner-TCP bursts arrive in clumps that
+   don't always fill 43. trace: 330k reads / 10.9k sendmsg = 30.4.
+   Amortization math used 43; reality is 30. Minor (≈0.05µs).
+
+3. **`other` doesn't fully amortize.** Model said 0.97→01.0µs→0.02µs
+   after Phase 2 (route_packet once per batch). But `other` includes
+   hash_one (0.58%), send_sptps_data_relay framing (1.83%), the
+   dense-pack staging memmove (1.65%) — those are per-packet.
+   Recalibrated: 0.94µs → ~0.56µs. **0.5µs of irreducible userspace
+   per packet** is the new floor term.
+
+4. **ZC's payoff shrank.** Original: ZC removes `copy_from_iter` =
+   31.5% of wall @ 10G. But that was computed against the *pre-GSO*
+   model where sendmsg copy was a big slice. Measured post-GSO:
+   sendmsg total is 0.43µs/pkt; copy is ~60% of that ≈ 0.26µs. ZC
+   trades it for ~0.05µs page-pin. Net **≈0.2µs saved**, not 0.32µs.
+   Still positive; not the 1.46× kingmaker.
+
+**Calibration discipline.** Re-profile after Phase 2 lands. The
+recalibrated Phase 3+4 numbers above assume the Phase-2 kernel split
+behaves as modeled (TUN read → 1/30, TUN write → 1/15). If GRO
+coalescing is worse than 15:1 (ACKs are tiny and may not always be
+adjacent in the recvmmsg batch), Phase 3's ceiling drops further.
 
 # OS portability
 
