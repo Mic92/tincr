@@ -1192,10 +1192,14 @@ fn tinc_up_runs() {
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
 
-    // tinc-up runs synchronously inside `setup()`, BEFORE the
-    // socket is created. `wait_for_file` already proved setup
-    // returned; the marker must exist by now.
-    assert!(marker.exists(), "tinc-up didn't run");
+    // `ControlSocket::bind` runs ~220 lines BEFORE `run_script("tinc-up")`
+    // in `Daemon::setup`. `wait_for_file(socket)` proves the daemon is
+    // past the bind, NOT past the script. Under parallel load the gap is
+    // observable. Poll for the marker (same shape as every other
+    // event-wait in this file).
+    if !wait_for_file(&marker) {
+        panic!("tinc-up didn't run; stderr:\n{}", drain_stderr(alice_child));
+    }
     let got = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(got.trim(), "iface=dummy name=alice");
 
