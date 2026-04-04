@@ -20,5 +20,5 @@ tinc-ffi = { path = "../tinc-ffi" }
 # chacha20 directly: BridgeRng in tests/vs_c.rs needs ChaCha20Legacy to
 # produce the same keystream as csrc/shim.c's randomize(). rand_chacha
 # uses a different (IETF-layout) construction and won't match.
-chacha20 = "0.9"
+chacha20.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }

@@ -24,7 +24,7 @@
 //! That's why we mirror the same buffer layout below — it's the simplest way
 //! to be certain we match.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
 
 type HmacSha512 = Hmac<Sha512>;
