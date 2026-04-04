@@ -223,20 +223,28 @@ pub fn should_send_udp_info(
 /// "and then forward up the chain" — `:265` calls `send_udp_info`
 /// unconditionally after the address-learning block. The daemon
 /// re-runs `should_send_udp_info(from, to)` on Forward / Update.
+///
+/// `N` is the caller's node-id type. The forwarding variants carry
+/// `from`/`to` so the caller doesn't have to re-unwrap `Option`s
+/// whose `Some`-ness this function already proved.
 #[derive(Debug, PartialEq, Eq)]
-pub enum UdpInfoAction {
+pub enum UdpInfoAction<N> {
     /// `:251-257`. `from` is not directly connected, not UDP-
     /// confirmed, and the message's address differs from what we
     /// have. Daemon calls `update_node_udp(from, new_addr)` then
     /// forwards. **The payoff case**: a relay told us where `from`
     /// is reachable.
-    UpdateAndForward { new_addr: SocketAddr },
+    UpdateAndForward {
+        from: N,
+        to: N,
+        new_addr: SocketAddr,
+    },
     /// `:265` without `:255`. Forward without learning: we're
     /// directly connected (`:251`), or UDP-confirmed (`:251`), or
     /// the addr matches what we already have (`:254`), or the addr
     /// didn't parse (C `str2sockaddr` would yield AF_UNKNOWN, which
     /// fails `sockaddrcmp` and skips `update_node_udp` the same way).
-    Forward,
+    Forward { from: N, to: N },
     /// `:247` `from != from->via`. Message wandered past a static
     /// relay. Log warning, drop. C returns `true` (don't tear down
     /// the connection — it's a routing weirdness, not a protocol
@@ -252,20 +260,21 @@ pub enum UdpInfoAction {
 /// already happened (`UdpInfo::parse`); we get the parsed message and
 /// the `from`-node snapshot.
 ///
-/// `from_state`: `None` ⇔ `lookup_node(from_name) == NULL` (`:238`).
-/// `to_exists`: `lookup_node(to_name) != NULL` (`:261`).
+/// `from`: `None` ⇔ `lookup_node(from_name) == NULL` (`:238`). The
+///   `N` rides along so the caller gets it back in the action.
+/// `to`: `None` ⇔ `lookup_node(to_name) == NULL` (`:261`).
 /// `current_from_addr`: what `from->address` currently holds. `None`
 ///   = `AF_UNSPEC` (never learned). `:254` `sockaddrcmp` only fires
 ///   `update_node_udp` if the addresses differ.
 #[must_use]
-pub fn on_receive_udp_info(
+pub fn on_receive_udp_info<N>(
     parsed: &UdpInfo,
-    from_state: Option<FromState>,
-    to_exists: bool,
+    from: Option<(N, FromState)>,
+    to: Option<N>,
     current_from_addr: Option<SocketAddr>,
-) -> UdpInfoAction {
+) -> UdpInfoAction<N> {
     // `:238` — `from` lookup.
-    let Some(from) = from_state else {
+    let Some((from_nid, from)) = from else {
         return UdpInfoAction::UnknownNode;
     };
 
@@ -315,13 +324,20 @@ pub fn on_receive_udp_info(
     // address-learning was opportunistic anyway; losing one relay
     // observation when our graph is inconsistent (we know `from` but
     // not `to`?!) is fine.
-    if !to_exists {
+    let Some(to_nid) = to else {
         return UdpInfoAction::UnknownNode;
-    }
+    };
 
     match learned {
-        Some(new_addr) => UdpInfoAction::UpdateAndForward { new_addr },
-        None => UdpInfoAction::Forward,
+        Some(new_addr) => UdpInfoAction::UpdateAndForward {
+            from: from_nid,
+            to: to_nid,
+            new_addr,
+        },
+        None => UdpInfoAction::Forward {
+            from: from_nid,
+            to: to_nid,
+        },
     }
 }
 
@@ -468,17 +484,20 @@ pub fn adjust_mtu_for_send(
 
 /// What to do with a received MTU_INFO. `mtu_info_h`
 /// (`protocol_misc.c:332-376`).
+///
+/// `N` is the caller's node-id type; forwarding variants carry
+/// `from`/`to` so the caller doesn't re-unwrap.
 #[derive(Debug, PartialEq, Eq)]
-pub enum MtuInfoAction {
+pub enum MtuInfoAction<N> {
     /// `:365-370` `if(from->mtu != mtu && from->minmtu != from->
     /// maxmtu) from->mtu = mtu`. Set the *provisional* MTU (we
     /// haven't converged ourselves; trust the relay's number until
     /// we do). Then forward (`:375`). `new_mtu` is already clamped
     /// to `[MTU_MIN, MTU_MAX]`.
-    ClampAndForward { new_mtu: u16 },
+    ClampAndForward { from: N, to: N, new_mtu: u16 },
     /// `:375` without `:369`. Forward without clamping: we already
     /// converged (`minmtu == maxmtu`), or our `mtu` already matches.
-    Forward,
+    Forward { from: N, to: N },
     /// `:345` `if(mtu < 512) return false`. Malformed message —
     /// connection-fatal in C (`return false` from a `_h` handler
     /// tears down the connection). 512 is the IPv4 minimum
@@ -490,18 +509,19 @@ pub enum MtuInfoAction {
 
 /// `mtu_info_h` decision (`protocol_misc.c:345-375`).
 ///
-/// `from_mtu`: `None` ⇔ `lookup_node(from)` failed (`:357`).
-/// `to_exists`: `lookup_node(to)` succeeded (`:371`).
+/// `from`: `None` ⇔ `lookup_node(from)` failed (`:357`). `N` rides
+///   along so the caller gets it back in the action.
+/// `to`: `None` ⇔ `lookup_node(to)` failed (`:371`).
 ///
 /// The `mtu < 512` check happens first (`:345`), before name lookups.
 /// That's the only `Malformed` (connection-fatal) outcome; everything
 /// else is drop-and-continue.
 #[must_use]
-pub fn on_receive_mtu_info(
+pub fn on_receive_mtu_info<N>(
     parsed: &MtuInfo,
-    from_mtu: Option<FromMtuState>,
-    to_exists: bool,
-) -> MtuInfoAction {
+    from: Option<(N, FromMtuState)>,
+    to: Option<N>,
+) -> MtuInfoAction<N> {
     // `:345` — mtu < 512 is connection-fatal. Checked BEFORE node
     // lookups in C, so we mirror.
     if parsed.mtu < MTU_MIN {
@@ -516,7 +536,7 @@ pub fn on_receive_mtu_info(
     let mtu = mtu as u16;
 
     // `:357` — from lookup.
-    let Some(from) = from_mtu else {
+    let Some((from_nid, from)) = from else {
         return MtuInfoAction::UnknownNode;
     };
 
@@ -531,14 +551,21 @@ pub fn on_receive_mtu_info(
     // We DON'T mirror that here — same reasoning as `on_receive_
     // udp_info`: dropping one provisional hint when graph is
     // inconsistent is fine.
-    if !to_exists {
+    let Some(to_nid) = to else {
         return MtuInfoAction::UnknownNode;
-    }
+    };
 
     if learned {
-        MtuInfoAction::ClampAndForward { new_mtu: mtu }
+        MtuInfoAction::ClampAndForward {
+            from: from_nid,
+            to: to_nid,
+            new_mtu: mtu,
+        }
     } else {
-        MtuInfoAction::Forward
+        MtuInfoAction::Forward {
+            from: from_nid,
+            to: to_nid,
+        }
     }
 }
 
@@ -669,32 +696,37 @@ mod tests {
     #[rustfmt::skip]
     fn udp_recv_table() {
         use UdpInfoAction::*;
+        // N = (): tests only care about which variant fires, not the
+        // node-id payload (the daemon's NodeId is just plumbed through).
         type Row = (&'static str, &'static str, &'static str,
-                    Option<FromState>, bool, Option<SocketAddr>, UdpInfoAction);
+                    Option<FromState>, bool, Option<SocketAddr>, UdpInfoAction<()>);
         let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
         let ok = from_ok();
         let direct = FromState { directly_connected: true,  ..ok };
         let confm  = FromState { udp_confirmed:      true,  ..ok };
         let novia  = FromState { via_is_self:        false, ..ok };
         let v4 = sa("192.168.1.5:50123");
+        let fwd = || Forward { from: (), to: () };
 
         let cases: &[Row] = &[
             // (label,                       addr,          port,    from_state,  to_ok, cur_addr,           expected)
             (":238 unknown from",            "192.168.1.5", "50123", None,        true,  None,               UnknownNode),
             (":261 unknown to",              "192.168.1.5", "50123", Some(ok),    false, None,               UnknownNode),
             (":247 past static relay",       "192.168.1.5", "50123", Some(novia), true,  None,               DroppedPastRelay),
-            (":251 directly_connected",      "192.168.1.5", "50123", Some(direct),true,  None,               Forward),
-            (":251 udp_confirmed",           "192.168.1.5", "50123", Some(confm),  true,  None,               Forward),
-            (":254 same addr no-op",         "192.168.1.5", "50123", Some(ok),    true,  Some(v4),           Forward),
-            (":255 payoff: addr differs",    "192.168.1.5", "50123", Some(ok),    true,  Some(sa("10.0.0.1:655")), UpdateAndForward { new_addr: v4 }),
-            (":255 payoff: cur=None",        "192.168.1.5", "50123", Some(ok),    true,  None,               UpdateAndForward { new_addr: v4 }),
-            ("ipv6 parses",                  "fe80::1",     "655",   Some(ok),    true,  None,               UpdateAndForward { new_addr: sa("[fe80::1]:655") }),
-            ("unspec → Forward (diverge)",   "unspec",      "0",     Some(ok),    true,  None,               Forward),
-            ("non-ip → Forward (diverge)",   "not-an-ip",   "655",   Some(ok),    true,  None,               Forward),
+            (":251 directly_connected",      "192.168.1.5", "50123", Some(direct),true,  None,               fwd()),
+            (":251 udp_confirmed",           "192.168.1.5", "50123", Some(confm),  true,  None,               fwd()),
+            (":254 same addr no-op",         "192.168.1.5", "50123", Some(ok),    true,  Some(v4),           fwd()),
+            (":255 payoff: addr differs",    "192.168.1.5", "50123", Some(ok),    true,  Some(sa("10.0.0.1:655")), UpdateAndForward { from: (), to: (), new_addr: v4 }),
+            (":255 payoff: cur=None",        "192.168.1.5", "50123", Some(ok),    true,  None,               UpdateAndForward { from: (), to: (), new_addr: v4 }),
+            ("ipv6 parses",                  "fe80::1",     "655",   Some(ok),    true,  None,               UpdateAndForward { from: (), to: (), new_addr: sa("[fe80::1]:655") }),
+            ("unspec → Forward (diverge)",   "unspec",      "0",     Some(ok),    true,  None,               fwd()),
+            ("non-ip → Forward (diverge)",   "not-an-ip",   "655",   Some(ok),    true,  None,               fwd()),
         ];
         for (label, addr, port, from, to_ok, cur, want) in cases {
             let m = mkudp(addr, port);
-            assert_eq!(on_receive_udp_info(&m, *from, *to_ok, *cur), *want, "{label}");
+            let from = from.map(|s| ((), s));
+            let to = to_ok.then_some(());
+            assert_eq!(on_receive_udp_info(&m, from, to, *cur), *want, "{label}");
         }
     }
 
@@ -760,6 +792,13 @@ mod tests {
     #[test]
     fn mtu_recv_table() {
         use MtuInfoAction::*;
+        type Row = (
+            &'static str,
+            i32,
+            Option<FromMtuState>,
+            bool,
+            MtuInfoAction<()>,
+        );
         let unconv = FromMtuState {
             mtu: 1500,
             minmtu: 1000,
@@ -771,28 +810,27 @@ mod tests {
             maxmtu: 1500,
         };
         let max_u16 = u16::try_from(MTU_MAX).unwrap();
+        let fwd = || Forward { from: (), to: () };
 
         #[rustfmt::skip]
-        let cases: &[(&str, i32, Option<FromMtuState>, bool, MtuInfoAction)] = &[
+        let cases: &[Row] = &[
             // (label,                        mtu,   from,         to_ok, expected)
             (":345 mtu<512 → Malformed",      400,   Some(unconv), true,  Malformed),
-            (":365 unconverged → clamp",      1400,  Some(unconv), true,  ClampAndForward { new_mtu: 1400 }),
-            ("converged → Forward",           1400,  Some(conv),   true,  Forward),
-            ("same mtu → Forward",            1500,  Some(unconv), true,  Forward),
-            (":349 clamp to MTU_MAX",         12000, Some(unconv), true,  ClampAndForward { new_mtu: max_u16 }),
+            (":365 unconverged → clamp",      1400,  Some(unconv), true,  ClampAndForward { from: (), to: (), new_mtu: 1400 }),
+            ("converged → Forward",           1400,  Some(conv),   true,  fwd()),
+            ("same mtu → Forward",            1500,  Some(unconv), true,  fwd()),
+            (":349 clamp to MTU_MAX",         12000, Some(unconv), true,  ClampAndForward { from: (), to: (), new_mtu: max_u16 }),
             (":357 unknown from",             1400,  None,         true,  UnknownNode),
             (":371 unknown to",               1400,  Some(unconv), false, UnknownNode),
         ];
         for &(label, mtu, from, to_ok, ref want) in cases {
-            assert_eq!(
-                on_receive_mtu_info(&mkmtu(mtu), from, to_ok),
-                *want,
-                "{label}"
-            );
+            let from = from.map(|s| ((), s));
+            let to = to_ok.then_some(());
+            assert_eq!(on_receive_mtu_info(&mkmtu(mtu), from, to), *want, "{label}");
         }
         // boundary: exactly 512 is NOT Malformed (assert_ne! preserved)
         assert_ne!(
-            on_receive_mtu_info(&mkmtu(512), Some(unconv), true),
+            on_receive_mtu_info(&mkmtu(512), Some(((), unconv)), Some(())),
             Malformed,
             ":345 boundary: mtu==512 is fine"
         );

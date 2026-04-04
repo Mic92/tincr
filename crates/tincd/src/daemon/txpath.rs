@@ -973,8 +973,7 @@ impl Daemon {
             .name
             .clone();
 
-        let from_nid = self.node_ids.get(&parsed.from).copied();
-        let from_state = from_nid.map(|nid| {
+        let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             let directly_connected = self.nodes.get(&nid).and_then(|ns| ns.conn).is_some();
             let udp_confirmed = self
                 .tunnels
@@ -982,22 +981,20 @@ impl Daemon {
                 .is_some_and(|t| t.status.udp_confirmed);
             // `from->via == from`: false means "wandered past static relay".
             let via_is_self = self.route_of(nid).is_some_and(|r| r.via == nid);
-            FromState {
-                directly_connected,
-                udp_confirmed,
-                via_is_self,
-            }
+            (
+                nid,
+                FromState {
+                    directly_connected,
+                    udp_confirmed,
+                    via_is_self,
+                },
+            )
         });
-        let to_nid = self.node_ids.get(&parsed.to).copied();
+        let to = self.node_ids.get(&parsed.to).copied();
         let current_from_addr =
-            from_nid.and_then(|nid| self.tunnels.get(&nid).and_then(|t| t.udp_addr));
+            from.and_then(|(nid, _)| self.tunnels.get(&nid).and_then(|t| t.udp_addr));
 
-        match udp_info::on_receive_udp_info(
-            &parsed,
-            from_state,
-            to_nid.is_some(),
-            current_from_addr,
-        ) {
+        match udp_info::on_receive_udp_info(&parsed, from, to, current_from_addr) {
             UdpInfoAction::UnknownNode => {
                 // C `:238-240` / `:261-263`
                 log::error!(target: "tincd::proto",
@@ -1012,25 +1009,21 @@ impl Daemon {
                             can't reach directly", parsed.from);
                 Ok(false)
             }
-            UdpInfoAction::UpdateAndForward { new_addr } => {
+            UdpInfoAction::UpdateAndForward { from, to, new_addr } => {
                 // C `:255` update_node_udp — we have no node_udp_tree,
                 // just tunnel.udp_addr.
-                let from_nid = from_nid.expect("UpdateAndForward implies from exists");
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
-                let t = self.tunnels.entry(from_nid).or_default();
+                let t = self.tunnels.entry(from).or_default();
                 t.udp_addr = Some(new_addr);
                 t.udp_addr_cached = None; // perf-arch e455a1c2: stale
                 // C `:265`
-                let to_nid = to_nid.expect("UpdateAndForward implies to exists");
-                Ok(self.send_udp_info_forward(from_nid, to_nid))
+                Ok(self.send_udp_info_forward(from, to))
             }
-            UdpInfoAction::Forward => {
+            UdpInfoAction::Forward { from, to } => {
                 // C `:265` without `:255`.
-                let from_nid = from_nid.expect("Forward implies from exists");
-                let to_nid = to_nid.expect("Forward implies to exists");
-                Ok(self.send_udp_info_forward(from_nid, to_nid))
+                Ok(self.send_udp_info_forward(from, to))
             }
         }
     }
@@ -1055,19 +1048,21 @@ impl Daemon {
             .name
             .clone();
 
-        let from_nid = self.node_ids.get(&parsed.from).copied();
-        let from_mtu = from_nid.map(|nid| {
+        let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             // C reads xzalloc'd fields ⇒ 0; supply same defaults.
             let t = self.tunnels.get(&nid);
-            FromMtuState {
-                mtu: t.map_or(0, TunnelState::mtu),
-                minmtu: t.map_or(0, TunnelState::minmtu),
-                maxmtu: t.map_or(MTU, TunnelState::maxmtu),
-            }
+            (
+                nid,
+                FromMtuState {
+                    mtu: t.map_or(0, TunnelState::mtu),
+                    minmtu: t.map_or(0, TunnelState::minmtu),
+                    maxmtu: t.map_or(MTU, TunnelState::maxmtu),
+                },
+            )
         });
-        let to_nid = self.node_ids.get(&parsed.to).copied();
+        let to = self.node_ids.get(&parsed.to).copied();
 
-        match udp_info::on_receive_mtu_info(&parsed, from_mtu, to_nid.is_some()) {
+        match udp_info::on_receive_mtu_info(&parsed, from, to) {
             MtuInfoAction::Malformed => {
                 // C `:345-348`: conn-fatal.
                 Err(DispatchError::BadKey(format!(
@@ -1081,37 +1076,21 @@ impl Daemon {
                              {} → {}", parsed.from, parsed.to);
                 Ok(false)
             }
-            MtuInfoAction::ClampAndForward { new_mtu } => {
+            MtuInfoAction::ClampAndForward { from, to, new_mtu } => {
                 // C `:369`: provisional mtu (probing will overwrite).
                 // Only matters if pmtu seeded; unseeded reads MTU anyway.
-                let from_nid = from_nid.expect("ClampAndForward implies from exists");
                 log::debug!(target: "tincd::proto",
                             "Using provisional MTU {new_mtu} for {}", parsed.from);
-                if let Some(p) = self
-                    .tunnels
-                    .get_mut(&from_nid)
-                    .and_then(|t| t.pmtu.as_mut())
-                {
+                if let Some(p) = self.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
                     p.mtu = new_mtu;
                 }
                 // C `:375`
-                let to_nid = to_nid.expect("ClampAndForward implies to exists");
-                Ok(
-                    self.send_mtu_info_from(
-                        from_nid,
-                        to_nid,
-                        &parsed.to,
-                        i32::from(new_mtu),
-                        false,
-                    ),
-                )
+                Ok(self.send_mtu_info_from(from, to, &parsed.to, i32::from(new_mtu), false))
             }
-            MtuInfoAction::Forward => {
-                let from_nid = from_nid.expect("Forward implies from exists");
-                let to_nid = to_nid.expect("Forward implies to exists");
+            MtuInfoAction::Forward { from, to } => {
                 // adjust_mtu_for_send may tighten further with our knowledge.
                 let mtu = parsed.mtu.min(udp_info::MTU_MAX);
-                Ok(self.send_mtu_info_from(from_nid, to_nid, &parsed.to, mtu, false))
+                Ok(self.send_mtu_info_from(from, to, &parsed.to, mtu, false))
             }
         }
     }
