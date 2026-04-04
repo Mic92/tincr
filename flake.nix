@@ -74,11 +74,12 @@
               iproute2
               iputils # ping
               util-linux # unshare(1), mount(8)
-              # throughput gate (crates/tincd/tests/throughput.rs).
+              # throughput gate (crates/tincd/benches/throughput.rs).
+              # `cargo bench --bench throughput --profile profiling`.
               # iperf3 measures the tunnel; perf records the daemon
               # during the 5s window. perf is best-effort: if
               # `kernel.perf_event_paranoid >= 2` (Debian default)
-              # the test still measures throughput, just no profile.
+              # the bench still measures throughput, just no profile.
               iperf3
               perf
             ];

@@ -800,7 +800,7 @@ by fidelity-vs-convenience. Each catches a class of bugs the others miss.
 | **S2: two-real-daemons, fake TUN** | `tests/two_daemons.rs` (10) + `tests/scripts.rs` (4) | `socketpair(SEQPACKET)` via `DeviceType=fd` or `DeviceType=dummy` | No | <200ms (7s for backoff/keepalive tests) | **Epoll wake-chain bugs.** The mio EPOLLET fall-through (chunk 6). The chunk-5 idempotence-addr-compare bug (chunk 9b) — both invisible to S1. `three_daemon_relay`/`three_daemon_tunnelserver` are 3-node. `tinc_join_against_real_daemon`: REAL `cmd::join` over real TCP. `sighup_reload_subnets`: `kill -HUP` mid-run. `scripts.rs`: shell-appender mechanism found `setup()` skipping `net_setup.c:1273` own-subnet-up. |
 | **S3: bwrap netns, real TUN** | `tests/netns.rs` (2) | `/dev/net/tun` via `DeviceType=tun` | Yes | ~3s | `TUNSETIFF`, `IFF_NO_PI`, kernel-generated checksums. `real_tun_unreachable` proves `icmp.rs` byte-for-byte (kernel parses our packet). The `--tmpfs /dev` trick makes this no-root. |
 | **S4: cross-impl** | `tests/crossimpl.rs` (2) | real TUN + real C tincd | Yes | ~5s | **Wire bugs invisible to Rust↔Rust.** S1–S3 prove self-consistency; this proves we speak the C dialect. UDP-label NUL byte, PACKET dispatch — both `463b9987`, both ~90 commits old, neither catchable until this ran. devShell sets `TINC_C_TINCD` automatically (`.#tincd-c` fileset is `src/`-only → Rust edits don't invalidate). |
-| **S5: throughput** | `tests/throughput.rs` (1, `#[ignore]`) | real TUN + iperf3 + perf | Yes | ~25s | **Load-only bugs.** The EPOLLET drain deadlock (`2b5dda45`): every test fit meta-conn traffic in one 2176-byte read. Ping is 150 bytes b64'd. Only line-rate flushes the queue past one recv. 0.0 → 850 Mbps. `#[ignore]` — runs pre-tag. |
+| **S5: throughput** | `benches/throughput.rs` (`cargo bench`) | real TUN + iperf3 + perf | Yes | ~25s | **Load-only bugs.** The EPOLLET drain deadlock (`2b5dda45`): every test fit meta-conn traffic in one 2176-byte read. Ping is 150 bytes b64'd. Only line-rate flushes the queue past one recv. 0.0 → 850 Mbps. `harness=false` — runs pre-tag. |
 
 **Dispatch rule for new tests**: protocol-handler logic (parse, gate, mutate-world) → S1. Timing/ordering/reconnect → S2. Anything touching `tinc-device::linux` or asserting on packets the daemon WRITES (ICMP synth, ARP reply) → S3. Anything where the failure mode is "both sides agree on the wrong answer" → S4.
 
@@ -839,16 +839,26 @@ The upstream C suite is 35 python files, ~4.8k LOC. The original Phase-0d plan w
 
 **`three_daemon_relay` landed** (`18fa47b0`, S2). foo→mid←bar with no direct ConnectTo; packet from alice's TUN routes via mid to bob's TUN. Found a chunk-5 bug en route (the addr-compare in `on_add_edge` idempotence). The harness was 318 LOC of test code, mostly pubkey distribution (each node needs all three's `Ed25519PublicKey =`). The SPTPS_PACKET-over-TCP encapsulation (`send_sptps_tcppacket`, `:975-986`) is `STUB(chunk-9c)` — the test passes via UDP relay; TCP encap is the `tcponly`/PMTU-too-small fallback.
 
-### iperf3 throughput gate (S3+S4, `#[ignore]`)
+### iperf3 throughput gate (S3+S4, `cargo bench`)
 
-`tests/throughput.rs`. Three configs (C↔C / R↔R / R↔C) in one bwrap;
+`benches/throughput.rs`, `harness = false`. Three pairings (C↔C /
+R↔R / R↔C) in one bwrap, individually filterable:
+
+```sh
+cargo bench --bench throughput --profile profiling   # all + ratio summary
+cargo bench --bench throughput -- rust_rust          # iterate, skip C↔C
+cargo bench --bench throughput -- rust_c             # crossimpl only
+```
+
 `perf record -g` gated on `TINCD_PERF=1`, `perf trace -s` gated on
-`TINCD_TRACE=1`. **Gate passes at ~115% of C** (Phase-6 row). The
-gate found two of its own bugs en route: the EPOLLET drain deadlock
-(0.0 Mbps on first run, `2b5dda45`) and the IP_MTU NOT-PORTING (52%,
-`05ba1f82`) — both detailed in ISSUES.md Rust-is-WRONG #4 / #5. The
-dev-profile measures ~17 Mbps (chacha20 debug-assert overhead, ~50×);
-gate is profile-aware (95% release / 1% dev).
+`TINCD_TRACE=1`. **Measures ~135% of C** (was ~115% at Phase-6;
+GSO since). The bench found two bugs en route: the EPOLLET drain
+deadlock (0.0 Mbps on first run, `2b5dda45`) and the IP_MTU
+NOT-PORTING (52%, `05ba1f82`) — both detailed in ISSUES.md
+Rust-is-WRONG #4 / #5. `cargo bench` defaults to release;
+`--profile profiling` adds debuginfo + frame pointers for
+`TINCD_PERF=1` runs. Ratio summary only prints when both `c_c` and
+`rust_rust` ran; compare across commits by eye.
 
 ---
 
@@ -870,7 +880,7 @@ gate is profile-aware (95% release / 1% dev).
 | CLI | hand-rolled `match argv[1]` (clap is 10× deps for ~15 subcommands; same call as `sptps_test`) |
 | Logging | `log` + `env_logger` |
 | Config | hand-rolled (format is trivial, `serde` is overkill) |
-| Testing | `proptest` (tinc-conf, tinc-proto roundtrips). No benchmark crate — `throughput.rs` IS the perf gate. |
+| Testing | `proptest` (tinc-conf, tinc-proto roundtrips). No criterion/divan — `benches/throughput.rs` is `harness=false`, the iperf3 setup IS the bench. |
 | Arena | `slotmap` |
 
 ---

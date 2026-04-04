@@ -49,6 +49,23 @@ in `.config/nextest.toml` rather than raising the global default.
   Build those with `meson setup build && ninja -C build` from the repo
   root (the dev shell has meson/ninja).
 
+## Benchmarks
+
+`crates/tincd/benches/throughput.rs` is a `harness = false` bench, not
+a nextest target. Same bwrap/userns/TUN requirements as `netns.rs`,
+plus `iperf3` and `TINC_C_TINCD` (the dev shell provides both).
+
+```sh
+cargo bench --bench throughput --profile profiling   # all + ratios
+cargo bench --bench throughput -- rust_rust          # one pairing
+```
+
+Filter args after `--` are substring matches against pairing names
+(`c_c`, `rust_rust`, `rust_c`). Ratio summary only prints when both
+`c_c` and `rust_rust` ran. `--profile profiling` adds debuginfo so
+`TINCD_PERF=1` can unwind; plain `cargo bench` (release) is fine
+otherwise. Slow — wrap in pueue.
+
 ## Lint & format
 
 ```sh
