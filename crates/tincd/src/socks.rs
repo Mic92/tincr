@@ -428,148 +428,63 @@ mod tests {
         assert_eq!(err, BuildError::CredTooLong);
     }
 
-    // ── SOCKS4 check ───────────────────────────────────────────────
+    // ── SOCKS4 check (proxy.c:45-58) ───────────────────────────────
 
     #[test]
-    fn check_socks4_granted() {
-        let buf = [0x00, 0x5a, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks4, None, &buf),
-            SocksResponse::Granted
-        );
-    }
-
-    #[test]
-    fn check_socks4_rejected() {
-        let buf = [0x00, 0x5b, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks4, None, &buf),
-            SocksResponse::Rejected
-        );
-    }
-
-    #[test]
-    fn check_socks4_wrong_version() {
-        let buf = [0x01, 0x5a, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks4, None, &buf),
-            SocksResponse::Malformed("Bad response from SOCKS4 proxy")
-        );
-    }
-
-    #[test]
-    fn check_socks4_short() {
-        let buf = [0x00, 0x5a, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks4, None, &buf),
-            SocksResponse::Malformed("Received short response from proxy")
-        );
-    }
-
-    // ── SOCKS5 check ───────────────────────────────────────────────
-
-    #[test]
-    fn check_socks5_anon_granted() {
-        let buf = [0x05, 0x00, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Granted
-        );
-    }
-
-    #[test]
-    fn check_socks5_password_granted() {
-        let creds = Creds {
-            user: "x".into(),
-            pass: Some("y".into()),
-        };
-        let buf = [
-            0x05, 0x02, 0x01, 0x00, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0,
+    fn check_socks4_table() {
+        use SocksResponse::*;
+        #[rustfmt::skip]
+        let cases: &[(&str, &[u8], SocksResponse)] = &[
+            ("granted",       &[0x00, 0x5a, 0, 0, 0, 0, 0, 0], Granted),
+            ("rejected",      &[0x00, 0x5b, 0, 0, 0, 0, 0, 0], Rejected),
+            ("wrong version", &[0x01, 0x5a, 0, 0, 0, 0, 0, 0], Malformed("Bad response from SOCKS4 proxy")),
+            ("short",         &[0x00, 0x5a, 0, 0],             Malformed("Received short response from proxy")),
         ];
-        assert_eq!(
-            check_response(ProxyType::Socks5, Some(&creds), &buf),
-            SocksResponse::Granted
-        );
+        for (label, buf, want) in cases {
+            assert_eq!(
+                check_response(ProxyType::Socks4, None, buf),
+                *want,
+                "{label}"
+            );
+        }
     }
 
+    // ── SOCKS5 check (proxy.c:92-144) ──────────────────────────────
+    // `_creds` param unused (dispatch on server's choice byte), so all
+    // rows pass `None`. The v6 row's 24B layout is asserted inline.
+
     #[test]
-    fn check_socks5_auth_rejected() {
-        // Auth fail is VALID → Rejected, not Malformed.
-        let buf = [
-            0x05, 0x02, 0x01, 0x01, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0,
+    fn check_socks5_table() {
+        use SocksResponse::*;
+        #[rustfmt::skip]
+        let v6_granted: &[u8] = &[
+            0x05, 0x00, 0x05, 0x00, 0x00, 0x04, // choice + conn ok, atyp=ipv6
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // ipv6 addr+port (ignored)
         ];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Rejected
-        );
-    }
+        assert_eq!(v6_granted.len(), 24, "v6 resp layout");
 
-    #[test]
-    fn check_socks5_auth_method_ff() {
-        let buf = [0x05, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Rejected
-        );
-    }
-
-    #[test]
-    fn check_socks5_conn_rejected() {
-        let buf = [0x05, 0x00, 0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Rejected
-        );
-    }
-
-    #[test]
-    fn check_socks5_wrong_choice_version() {
-        let buf = [0x04, 0x00, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Malformed("Invalid response from proxy server")
-        );
-    }
-
-    #[test]
-    fn check_socks5_wrong_auth_version() {
-        let buf = [
-            0x05, 0x02, 0x02, 0x00, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0,
+        #[rustfmt::skip]
+        let cases: &[(&str, &[u8], SocksResponse)] = &[
+            ("anon granted",         &[0x05, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0],             Granted),
+            ("password granted",     &[0x05, 0x02, 0x01, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0], Granted),
+            ("v6 addr in response",  v6_granted,                                                     Granted),
+            // Auth fail is VALID → Rejected, not Malformed (proxy.c:127-130).
+            ("auth rejected",        &[0x05, 0x02, 0x01, 0x01, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0], Rejected),
+            ("auth method 0xff",     &[0x05, 0xff, 0,0,0,0,0,0,0,0,0,0],                             Rejected),
+            ("conn rejected",        &[0x05, 0x00, 0x05, 0x01, 0x00, 0x01, 0,0,0,0,0,0],             Rejected),
+            ("wrong choice version", &[0x04, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0],             Malformed("Invalid response from proxy server")),
+            ("wrong auth version",   &[0x05, 0x02, 0x02, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0], Malformed("Invalid proxy authentication protocol version")),
+            // atyp=3 (domain) — tinc never asks for it.
+            ("unsupported addr type",&[0x05, 0x00, 0x05, 0x00, 0x00, 0x03, 0,0,0,0,0,0],             Malformed("Unsupported address type from proxy server")),
+            ("unknown auth method",  &[0x05, 0x03, 0,0,0,0,0,0,0,0,0,0],                             Malformed("Unsupported authentication method")),
         ];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Malformed("Invalid proxy authentication protocol version")
-        );
-    }
-
-    #[test]
-    fn check_socks5_unsupported_addr_type() {
-        // atyp=3 (domain) — tinc never asks for it.
-        let buf = [0x05, 0x00, 0x05, 0x00, 0x00, 0x03, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Malformed("Unsupported address type from proxy server")
-        );
-    }
-
-    #[test]
-    fn check_socks5_unknown_auth_method() {
-        let buf = [0x05, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Malformed("Unsupported authentication method")
-        );
-    }
-
-    #[test]
-    fn check_socks5_v6_addr_in_response() {
-        let mut buf = vec![0x05, 0x00, 0x05, 0x00, 0x00, 0x04];
-        buf.extend_from_slice(&[0u8; 18]); // ipv6 addr+port (ignored)
-        assert_eq!(buf.len(), 24);
-        assert_eq!(
-            check_response(ProxyType::Socks5, None, &buf),
-            SocksResponse::Granted
-        );
+        for (label, buf, want) in cases {
+            assert_eq!(
+                check_response(ProxyType::Socks5, None, buf),
+                *want,
+                "{label}"
+            );
+        }
     }
 
     // ── Roundtrip: prove the resplen math ──────────────────────────
