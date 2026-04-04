@@ -128,6 +128,11 @@ impl VirtioNetHdr {
     /// the full header). Caller drops the frame.
     #[must_use]
     pub fn decode(raw: &[u8]) -> Option<Self> {
+        Self::decode_at(raw)
+    }
+
+    #[inline]
+    fn decode_at(raw: &[u8]) -> Option<Self> {
         if raw.len() < VNET_HDR_LEN {
             return None;
         }
@@ -139,6 +144,25 @@ impl VirtioNetHdr {
             csum_start: u16::from_le_bytes([raw[6], raw[7]]),
             csum_offset: u16::from_le_bytes([raw[8], raw[9]]),
         })
+    }
+
+    /// Encode into a 10-byte buffer. wg-go `encode` (`:45`): an
+    /// `unsafe.Slice` memcpy. We write fields explicitly so the LE
+    /// encoding is documented at the boundary, mirroring [`decode`].
+    /// Phase 2b GRO write path: this fills the slot that `1da3d1d7`
+    /// left zeroed.
+    ///
+    /// # Panics
+    /// Debug-asserts `buf.len() >= 10`. Callers slice the GRO
+    /// scratch at a known offset; a short slice is a bug.
+    pub fn encode(&self, buf: &mut [u8]) {
+        debug_assert!(buf.len() >= VNET_HDR_LEN);
+        buf[0] = self.flags;
+        buf[1] = self.gso_type;
+        buf[2..4].copy_from_slice(&self.hdr_len.to_le_bytes());
+        buf[4..6].copy_from_slice(&self.gso_size.to_le_bytes());
+        buf[6..8].copy_from_slice(&self.csum_start.to_le_bytes());
+        buf[8..10].copy_from_slice(&self.csum_offset.to_le_bytes());
     }
 
     /// `gso_type` → our enum. `None` for unknown types (we only
@@ -250,11 +274,11 @@ const IPV6_SRCADDR_OFF: usize = 8; // src+dst = 32 bytes
 const TCP_SEQ_OFF: usize = 4;
 const TCP_DATAOFF_OFF: usize = 12; // high nibble × 4 = header length
 const TCP_FLAGS_OFF: usize = 13;
-#[cfg(test)]
 const TCP_CSUM_OFF: usize = 16;
 
 const TCP_FLAG_FIN: u8 = 0x01;
 const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
 
 const IPPROTO_TCP: u8 = 6;
 
@@ -546,6 +570,414 @@ pub fn tso_split(
     Ok(i)
 }
 
+// ── GRO coalesce (Phase 2b) ────────────────────────────────────────
+
+/// Max coalesced IP packet size. The kernel's `tun_get_user` accepts
+/// up to `IP_MAX_MTU` (65535) for `gso_type != NONE` skbs. We cap
+/// just under so the `u16` totlen never overflows.
+const GRO_MAX_IP_LEN: usize = 65535;
+
+/// Outcome of [`GroBucket::offer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroVerdict {
+    /// Packet merged into the bucket. Caller must NOT write it
+    /// individually — it's absorbed.
+    Coalesced,
+    /// Packet is a valid GRO candidate but doesn't fit the current
+    /// bucket (different flow, non-adjacent seq, post-PSH). Caller
+    /// should `flush()` then `offer()` again — it'll seed a new
+    /// bucket.
+    FlushFirst,
+    /// Packet is not a GRO candidate (non-TCP, IP options,
+    /// fragmented, FIN/SYN/RST, zero-payload pure-ACK). Caller
+    /// writes it individually via `Device::write`.
+    NotCandidate,
+}
+
+/// Single-slot TCP GRO accumulator. The Phase-2b inverse of
+/// [`tso_split`]: collect same-flow packets back into a super-
+/// segment + `virtio_net_hdr`, write once.
+///
+/// **Single-slot, append-only.** wg-go's `tcpGROTable` is a full
+/// flow hashmap with prepend support. We don't need either: the
+/// receiving daemon under iperf3 sees ONE flow's data packets in
+/// seq order (per recvmmsg batch). Mismatch → flush → restart
+/// handles the rare interleaved-flow case correctly (just doesn't
+/// coalesce across the gap). The iperf3-is-one-flow assumption
+/// matches `RUST_REWRITE_10G.md` Phase 2b's profiling target.
+///
+/// **No csum verification.** wg-go's `checksumValid` gate
+/// (`offload_linux.go:389`) protects against an inner packet with
+/// a corrupt csum polluting the coalesced result (kernel only
+/// re-verifies the SUPER's csum, which we recompute). But our
+/// inner packets are SPTPS-AEAD-authenticated bytes from a peer's
+/// `tso_split` (or kernel TCP for non-GSO peers) — a bad csum
+/// here is a sender-side bug, not tampering. The `netns::
+/// tso_ingest_stream_integrity` sha256 catches it end-to-end.
+///
+/// Buffer layout: `[vnet_hdr(10)][IP super-packet]`. The slice
+/// returned by [`flush`] is fed directly to `Device::write_super`
+/// (raw TUN fd write, no eth munging).
+pub struct GroBucket {
+    /// `[vnet_hdr(10)][IP ≤65535]`.
+    buf: Box<[u8]>,
+    /// Valid length of `buf`. `0` = empty bucket.
+    len: usize,
+
+    // ─── coalesce key (wg-go `tcpFlowKey` shape) ────────────────
+    is_v6: bool,
+    iphlen: u8,
+    tcphlen: u8,
+    /// `[src_addr ‖ dst_addr]` straight from the IP header. Same
+    /// slice shape as `tso_split`'s `addrs` (8 bytes v4, 32 bytes
+    /// v6), padded into a fixed array for cheap compare.
+    addrs: [u8; 32],
+    sport: u16,
+    dport: u16,
+    /// wg-go `tcpFlowKey.rxAck`: "varying ack values should not be
+    /// coalesced" — the kernel's GRO does the same (`tcp_gro_
+    /// receive` in `net/ipv4/tcp_offload.c:268` flushes on ack
+    /// mismatch). Under heavy unidirectional flow, data-direction
+    /// segments share the same ack (it only moves when the SENDER
+    /// has new data, which iperf3-receiver-side rarely does).
+    ack: u32,
+    /// `tos`/`ttl` (v4) or `tclass`/`hlim` (v6). wg-go
+    /// `ipHeadersCanCoalesce`: kernel GRO flushes on these too.
+    /// Stored together: low byte = ttl/hlim, high = tos/tclass.
+    ip_meta: u16,
+
+    // ─── coalesce state (wg-go `tcpGROItem`) ───────────────────
+    /// Expected seq of the NEXT packet to append. `first_seq +
+    /// total_payload_appended`.
+    next_seq: u32,
+    /// Payload size of the FIRST packet. wg-go: subsequent packets'
+    /// payload must be ≤ this (a smaller packet may end the run; a
+    /// larger one would put a small packet mid-run, which the
+    /// kernel's GSO can't represent).
+    gso_size: u16,
+    /// PSH was seen on the last appended packet. Nothing may append
+    /// after PSH — "deliver now" must be the LAST segment.
+    psh_set: bool,
+    /// A smaller-than-gso_size packet was appended. wg-go: "a
+    /// smaller packet on the end" terminates the run — GSO emits
+    /// fixed-size segments + one short tail.
+    short_tail: bool,
+    /// Number of packets merged (including the first). 1 = single
+    /// packet, no GSO needed (zero vnet_hdr on flush).
+    num_merged: u16,
+}
+
+impl GroBucket {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buf: vec![0u8; VNET_HDR_LEN + GRO_MAX_IP_LEN].into_boxed_slice(),
+            len: 0,
+            is_v6: false,
+            iphlen: 0,
+            tcphlen: 0,
+            addrs: [0; 32],
+            sport: 0,
+            dport: 0,
+            ack: 0,
+            ip_meta: 0,
+            next_seq: 0,
+            gso_size: 0,
+            psh_set: false,
+            short_tail: false,
+            num_merged: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Try to coalesce `ip` into the bucket.
+    ///
+    /// `ip` is the raw IP packet (NO eth header, NO vnet_hdr) —
+    /// the daemon strips its synthetic eth before calling. wg-go
+    /// `tcpGRO` (`offload_linux.go:531`) shape, minus the table
+    /// machinery.
+    ///
+    /// `Coalesced`: packet absorbed, caller drops it. `FlushFirst`:
+    /// flush + retry. `NotCandidate`: write individually.
+    #[allow(clippy::too_many_lines)] // wg-go tcpGRO is 90 LOC; this is the linear unroll
+    pub fn offer(&mut self, ip: &[u8]) -> GroVerdict {
+        // ─── candidate check (wg-go `packetIsGROCandidate` :751) ───
+        if ip.len() < 40 {
+            // 20 (min IPv4) + 20 (min TCP). v6 is 60; checked below.
+            return GroVerdict::NotCandidate;
+        }
+        let is_v6 = match ip[0] >> 4 {
+            4 => {
+                // wg-go `:757`: "IPv4 packets w/IP options do not
+                // coalesce" — IHL must be exactly 5 words.
+                if ip[0] & 0x0F != 5 || ip[9] != IPPROTO_TCP {
+                    return GroVerdict::NotCandidate;
+                }
+                // wg-go `:561`: no fragmented segments. MF flag,
+                // or any fragment-offset bits.
+                if ip[6] & 0x20 != 0 || ip[6] & 0x1F != 0 || ip[7] != 0 {
+                    return GroVerdict::NotCandidate;
+                }
+                // wg-go `:546`: totlen sanity. A trailing pad (eth
+                // minimum-frame) would mismatch here.
+                if usize::from(u16::from_be_bytes([ip[2], ip[3]])) != ip.len() {
+                    return GroVerdict::NotCandidate;
+                }
+                false
+            }
+            6 => {
+                if ip.len() < 60 || ip[6] != IPPROTO_TCP {
+                    return GroVerdict::NotCandidate;
+                }
+                // wg-go `:541`: payload-len sanity. v6 has no
+                // header csum, so this is the only consistency
+                // check available.
+                if usize::from(u16::from_be_bytes([ip[4], ip[5]])) != ip.len() - 40 {
+                    return GroVerdict::NotCandidate;
+                }
+                true
+            }
+            _ => return GroVerdict::NotCandidate,
+        };
+        let iphlen: usize = if is_v6 { 40 } else { 20 };
+
+        let tcphlen = usize::from(ip[iphlen + TCP_DATAOFF_OFF] >> 4) * 4;
+        if !(20..=60).contains(&tcphlen) || ip.len() < iphlen + tcphlen {
+            return GroVerdict::NotCandidate;
+        }
+
+        // wg-go `:566-574`: only ACK or ACK|PSH. FIN/SYN/RST/URG
+        // → noop. Pure ACK (zero payload) → also noop — the kernel
+        // GRO doesn't coalesce them either (`:577`).
+        let flags = ip[iphlen + TCP_FLAGS_OFF];
+        let psh_set = flags & TCP_FLAG_PSH != 0;
+        if flags & !TCP_FLAG_PSH != TCP_FLAG_ACK {
+            return GroVerdict::NotCandidate;
+        }
+        let payload_len = ip.len() - iphlen - tcphlen;
+        if payload_len == 0 {
+            return GroVerdict::NotCandidate;
+        }
+
+        let seq = u32::from_be_bytes([
+            ip[iphlen + TCP_SEQ_OFF],
+            ip[iphlen + TCP_SEQ_OFF + 1],
+            ip[iphlen + TCP_SEQ_OFF + 2],
+            ip[iphlen + TCP_SEQ_OFF + 3],
+        ]);
+        let ack = u32::from_be_bytes([
+            ip[iphlen + 8],
+            ip[iphlen + 9],
+            ip[iphlen + 10],
+            ip[iphlen + 11],
+        ]);
+        let sport = u16::from_be_bytes([ip[iphlen], ip[iphlen + 1]]);
+        let dport = u16::from_be_bytes([ip[iphlen + 2], ip[iphlen + 3]]);
+        let (addr_off, addr_len) = if is_v6 {
+            (IPV6_SRCADDR_OFF, 32)
+        } else {
+            (IPV4_SRCADDR_OFF, 8)
+        };
+        // wg-go `ipHeadersCanCoalesce` `:279-307`. v4: tos at [1],
+        // ttl at [8], DF at [6]>>5. v6: tclass split across [0..2]
+        // (we store the [0] high nibble + [1] high nibble), hlim
+        // at [7]. Packed into one u16 so the compare below stays
+        // a single branch.
+        let ip_meta = if is_v6 {
+            u16::from(ip[0] & 0x0F) << 12 | u16::from(ip[1] & 0xF0) << 4 | u16::from(ip[7])
+        } else {
+            u16::from(ip[1]) << 8 | u16::from(ip[6] >> 5) << 7 | u16::from(ip[8])
+        };
+
+        #[allow(clippy::cast_possible_truncation)] // payload_len < 65535
+        let gso_size = payload_len as u16;
+
+        // ─── empty bucket: seed it ──────────────────────────────────
+        if self.len == 0 {
+            self.buf[VNET_HDR_LEN..VNET_HDR_LEN + ip.len()].copy_from_slice(ip);
+            self.len = VNET_HDR_LEN + ip.len();
+            self.is_v6 = is_v6;
+            #[allow(clippy::cast_possible_truncation)] // 20 or 40
+            {
+                self.iphlen = iphlen as u8;
+                self.tcphlen = tcphlen as u8;
+            }
+            self.addrs = [0; 32];
+            self.addrs[..addr_len].copy_from_slice(&ip[addr_off..addr_off + addr_len]);
+            self.sport = sport;
+            self.dport = dport;
+            self.ack = ack;
+            self.ip_meta = ip_meta;
+            self.next_seq = seq.wrapping_add(u32::from(gso_size));
+            self.gso_size = gso_size;
+            self.psh_set = psh_set;
+            self.short_tail = false;
+            self.num_merged = 1;
+            return GroVerdict::Coalesced;
+        }
+
+        // ─── flow key match (wg-go `tcpPacketsCanCoalesce` :334) ───
+        // wg-go's lookup is a hashmap miss; our single-slot is a
+        // linear compare. Same effect for the one-flow case.
+        if is_v6 != self.is_v6
+            || iphlen != usize::from(self.iphlen)
+            || tcphlen != usize::from(self.tcphlen)
+            || sport != self.sport
+            || dport != self.dport
+            || ack != self.ack
+            || ip_meta != self.ip_meta
+            || ip[addr_off..addr_off + addr_len] != self.addrs[..addr_len]
+        {
+            return GroVerdict::FlushFirst;
+        }
+        // wg-go `:340-345`: TCP options bytes must match exactly
+        // (timestamps with monotonic values would be safe to
+        // coalesce, but wg-go doesn't bother and neither do we —
+        // the kernel re-splits with the SUPER's timestamp anyway).
+        if tcphlen > 20 {
+            let pkt_head = &self.buf[VNET_HDR_LEN..];
+            if ip[iphlen + 20..iphlen + tcphlen] != pkt_head[iphlen + 20..iphlen + tcphlen] {
+                return GroVerdict::FlushFirst;
+            }
+        }
+        // wg-go `:352`: seq adjacency. Append-only: pkt must be
+        // exactly at `next_seq`. (wg-go also tries prepend at
+        // `:368`; we don't — reordered packets just flush.)
+        if seq != self.next_seq {
+            return GroVerdict::FlushFirst;
+        }
+        // wg-go `:354-357`: can't append after PSH; can't append
+        // after a short tail (GSO is fixed-size + one trailer).
+        if self.psh_set || self.short_tail {
+            return GroVerdict::FlushFirst;
+        }
+        // wg-go `:363`: larger packet can't follow smaller.
+        if gso_size > self.gso_size {
+            return GroVerdict::FlushFirst;
+        }
+        // 65535 cap.
+        if self.len - VNET_HDR_LEN + payload_len > GRO_MAX_IP_LEN {
+            return GroVerdict::FlushFirst;
+        }
+
+        // ─── append payload ─────────────────────────────────────────
+        // wg-go `coalesceTCPPackets` `:494-496`: just the bytes;
+        // headers stay from the FIRST packet. PSH propagates to
+        // the head's flags so the kernel sees it on the super.
+        self.buf[self.len..self.len + payload_len].copy_from_slice(&ip[iphlen + tcphlen..]);
+        self.len += payload_len;
+        self.next_seq = self.next_seq.wrapping_add(u32::from(gso_size));
+        if psh_set {
+            self.psh_set = true;
+            self.buf[VNET_HDR_LEN + iphlen + TCP_FLAGS_OFF] |= TCP_FLAG_PSH;
+        }
+        if gso_size < self.gso_size {
+            self.short_tail = true;
+        }
+        self.num_merged += 1;
+        GroVerdict::Coalesced
+    }
+
+    /// Finalize the bucket. Fixes up IP totlen/csum, writes the
+    /// `virtio_net_hdr`, returns the wire-ready `[vnet_hdr][IP]`
+    /// slice. wg-go `applyTCPCoalesceAccounting` (`:624`).
+    ///
+    /// `None` if empty. The bucket is reset on return.
+    pub fn flush(&mut self) -> Option<&[u8]> {
+        if self.len == 0 {
+            return None;
+        }
+        let len = self.len;
+        let iphlen = usize::from(self.iphlen);
+        let tcphlen = usize::from(self.tcphlen);
+        let pkt = &mut self.buf[VNET_HDR_LEN..len];
+
+        if self.num_merged > 1 {
+            // ─── fix up the super-packet's IP header ──────────────
+            // wg-go `:640-649`.
+            #[allow(clippy::cast_possible_truncation)] // capped at GRO_MAX_IP_LEN
+            let totlen = pkt.len() as u16;
+            if self.is_v6 {
+                pkt[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&(totlen - 40).to_be_bytes());
+            } else {
+                pkt[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
+                pkt[IPV4_CSUM_OFF] = 0;
+                pkt[IPV4_CSUM_OFF + 1] = 0;
+                let csum = checksum(&pkt[..iphlen], 0);
+                pkt[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
+            }
+
+            // ─── pseudo-header partial into TCP csum field ─────────
+            // wg-go `:658-664`. `NEEDS_CSUM` tells the kernel "L4
+            // csum is partial; finish from `csum_start`". We write
+            // the folded-but-NOT-complemented pseudo — the kernel
+            // chains it (RFC 1071) with the TCP-hdr+payload sum.
+            // Same shape `gso_none_checksum` reads on ingest.
+            let (addr_off, addr_len) = if self.is_v6 {
+                (IPV6_SRCADDR_OFF, 32)
+            } else {
+                (IPV4_SRCADDR_OFF, 8)
+            };
+            #[allow(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
+            let l4_len = (pkt.len() - iphlen) as u16;
+            let pseudo = pseudo_header_checksum_nofold(
+                IPPROTO_TCP,
+                &pkt[addr_off..addr_off + addr_len],
+                l4_len,
+            );
+            // Fold-no-complement. wg-go does `checksum([]byte{},
+            // psum)` — their `checksum` doesn't complement (`:92`
+            // returns the raw fold). Ours does, so fold by hand.
+            let mut p = pseudo;
+            p = (p >> 16) + (p & 0xffff);
+            p = (p >> 16) + (p & 0xffff);
+            #[allow(clippy::cast_possible_truncation)]
+            let p = p as u16;
+            pkt[iphlen + TCP_CSUM_OFF..iphlen + TCP_CSUM_OFF + 2].copy_from_slice(&p.to_be_bytes());
+
+            // ─── vnet_hdr ─────────────────────────────────────────────
+            // wg-go `:629-636`. The kernel's `virtio_net_hdr_to_skb`
+            // (`virtio_net.h:83`) maps NEEDS_CSUM → CHECKSUM_PARTIAL
+            // and gso_type → SKB_GSO_TCPV4/6; `napi_gro_receive`
+            // does the rest.
+            #[allow(clippy::cast_possible_truncation)] // iphlen+tcphlen ≤ 100
+            let hdr = VirtioNetHdr {
+                flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+                gso_type: if self.is_v6 {
+                    VIRTIO_NET_HDR_GSO_TCPV6
+                } else {
+                    VIRTIO_NET_HDR_GSO_TCPV4
+                },
+                hdr_len: (iphlen + tcphlen) as u16,
+                gso_size: self.gso_size,
+                csum_start: iphlen as u16,
+                csum_offset: TCP_CSUM_OFF as u16,
+            };
+            hdr.encode(&mut self.buf[..VNET_HDR_LEN]);
+        } else {
+            // num_merged == 1: single packet went through the
+            // bucket but nothing joined. wg-go `:667-672`: zero
+            // vnet_hdr (gso_type=NONE, no csum offload). The IP
+            // packet is verbatim from the first `offer` — csum
+            // already valid (sender's tso_split or kernel TCP).
+            self.buf[..VNET_HDR_LEN].fill(0);
+        }
+
+        self.len = 0; // reset for next batch
+        Some(&self.buf[..len])
+    }
+}
+
+impl Default for GroBucket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -573,6 +1005,13 @@ mod tests {
 
         // Short → None.
         assert!(VirtioNetHdr::decode(&[0; 9]).is_none());
+
+        // Roundtrip: encode → decode is identity. Covers the LE
+        // boundary in both directions; a `to_be_bytes` typo in
+        // encode would scramble fields here.
+        let mut roundtrip = [0u8; VNET_HDR_LEN];
+        h.encode(&mut roundtrip);
+        assert_eq!(roundtrip, raw);
     }
 
     /// RFC 1071 reference vector. From the RFC's example: sum over
@@ -954,5 +1393,271 @@ mod tests {
         tcp[17] = 0;
         let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, &pkt[12..20], 120);
         assert_eq!(checksum(&tcp, pseudo).to_be_bytes(), stored);
+    }
+
+    // ─── GRO bucket ─────────────────────────────────────────────────
+
+    /// Build N adjacent v4 TCP segments à la what a peer's tso_split
+    /// would emit. seq starts at 1000, each segment carries
+    /// `seg_len` bytes of `0xAA`, ACK only (no PSH except last).
+    fn build_v4_segs(n: usize, seg_len: usize, psh_on_last: bool) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let total = 20 + 20 + seg_len;
+                let mut p = vec![0u8; total];
+                p[0] = 0x45;
+                p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+                p[4..6].copy_from_slice(&(0x1234u16.wrapping_add(i as u16)).to_be_bytes());
+                p[6..8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+                p[8] = 64;
+                p[9] = IPPROTO_TCP;
+                p[12..16].copy_from_slice(&[10, 0, 0, 1]);
+                p[16..20].copy_from_slice(&[10, 0, 0, 2]);
+                let csum = checksum(&p[..20], 0);
+                p[10..12].copy_from_slice(&csum.to_be_bytes());
+                p[20..22].copy_from_slice(&1000u16.to_be_bytes());
+                p[22..24].copy_from_slice(&2000u16.to_be_bytes());
+                let seq = 1000u32 + (seg_len * i) as u32;
+                p[24..28].copy_from_slice(&seq.to_be_bytes());
+                p[28..32].copy_from_slice(&42u32.to_be_bytes()); // ack constant
+                p[32] = 5 << 4;
+                p[33] = TCP_FLAG_ACK
+                    | if psh_on_last && i == n - 1 {
+                        TCP_FLAG_PSH
+                    } else {
+                        0
+                    };
+                p[34..36].copy_from_slice(&65535u16.to_be_bytes());
+                for b in &mut p[40..] {
+                    *b = 0xAA;
+                }
+                let pseudo =
+                    pseudo_header_checksum_nofold(IPPROTO_TCP, &p[12..20], (20 + seg_len) as u16);
+                let csum = checksum(&p[20..], pseudo);
+                p[36..38].copy_from_slice(&csum.to_be_bytes());
+                p
+            })
+            .collect()
+    }
+
+    /// 3 in-order segments → 1 flush. The vnet_hdr describes a TSO
+    /// super; IP totlen/csum updated; payload concatenated.
+    #[test]
+    fn gro_coalesce_three_v4() {
+        let segs = build_v4_segs(3, 100, false);
+        let mut b = GroBucket::new();
+        for s in &segs {
+            assert_eq!(b.offer(s), GroVerdict::Coalesced);
+        }
+        let out = b.flush().expect("flush returns the super");
+
+        // vnet_hdr: NEEDS_CSUM, TCPV4, gso_size=100, csum_start=20.
+        let hdr = VirtioNetHdr::decode(&out[..VNET_HDR_LEN]).unwrap();
+        assert!(hdr.needs_csum());
+        assert_eq!(hdr.gso(), Some(GsoType::TcpV4));
+        assert_eq!(hdr.gso_size, 100);
+        assert_eq!(hdr.csum_start, 20);
+        assert_eq!(hdr.csum_offset, 16);
+
+        // IP totlen = 20 + 20 + 300, csum re-verifies.
+        let ip = &out[VNET_HDR_LEN..];
+        assert_eq!(u16::from_be_bytes([ip[2], ip[3]]), 340);
+        let mut h = ip[..20].to_vec();
+        let stored = [h[10], h[11]];
+        h[10] = 0;
+        h[11] = 0;
+        assert_eq!(checksum(&h, 0).to_be_bytes(), stored);
+
+        // Payload: 300 bytes of 0xAA.
+        assert_eq!(ip.len(), 340);
+        assert!(ip[40..].iter().all(|&b| b == 0xAA));
+
+        // TCP csum field is the partial pseudo: completing it
+        // (gso_none_checksum semantics) yields a valid full csum.
+        // This is what the kernel does on `NEEDS_CSUM` skb intake.
+        let mut ip_mut = ip.to_vec();
+        gso_none_checksum(&mut ip_mut, 20, 16);
+        let mut tcp = ip_mut[20..].to_vec();
+        let stored = [tcp[16], tcp[17]];
+        tcp[16] = 0;
+        tcp[17] = 0;
+        let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, &ip_mut[12..20], 320);
+        assert_eq!(checksum(&tcp, pseudo).to_be_bytes(), stored);
+
+        assert!(b.is_empty());
+    }
+
+    /// THE roundtrip: tso_split's output, fed to GRO, reassembles
+    /// the original payload. This is what alice→bob exercises:
+    /// alice's tso_split emits, bob's GRO coalesces, bob's kernel
+    /// re-splits. If THIS works, the sha256 stream test works.
+    #[test]
+    fn gro_reassembles_tso_split_output() {
+        // 1400-byte segments, 5 of them. Real iperf3 shape.
+        let pkt = build_v4_tcp(5 * 1400);
+        let hdr = hdr_v4(1400);
+        let mut split_out = vec![0u8; 8 * 1600];
+        let mut split_lens = [0usize; 8];
+        let n = tso_split(
+            &pkt,
+            &hdr,
+            GsoType::TcpV4,
+            &mut split_out,
+            1600,
+            &mut split_lens,
+        )
+        .unwrap();
+        assert_eq!(n, 5);
+
+        // tso_split puts PSH on the last segment (it was on the
+        // input). PSH terminates a GRO run — nothing after it. So
+        // 5 segments → still 1 super: the PSH segment is LAST and
+        // appends fine; only a SUBSEQUENT offer would FlushFirst.
+        let mut b = GroBucket::new();
+        for i in 0..n {
+            // Strip the synthetic eth header tso_split prepended.
+            let frame = &split_out[i * 1600..i * 1600 + split_lens[i]];
+            let ip = &frame[ETH_HLEN..];
+            assert_eq!(b.offer(ip), GroVerdict::Coalesced, "seg {i}");
+        }
+        let out = b.flush().unwrap();
+        let ip = &out[VNET_HDR_LEN..];
+        // Same payload bytes, same length, seq starts at 1000.
+        assert_eq!(ip.len(), pkt.len());
+        assert_eq!(&ip[40..], &pkt[40..]);
+        assert_eq!(u32::from_be_bytes([ip[24], ip[25], ip[26], ip[27]]), 1000);
+        // PSH propagated to the super's flags.
+        assert_eq!(ip[33] & TCP_FLAG_PSH, TCP_FLAG_PSH);
+    }
+
+    /// Single packet → zero vnet_hdr. The miss case (only one
+    /// packet in the recvmmsg batch matched the flow). The IP
+    /// packet is passed through verbatim — csum still valid.
+    #[test]
+    fn gro_single_packet_zero_vnet_hdr() {
+        let segs = build_v4_segs(1, 100, false);
+        let mut b = GroBucket::new();
+        assert_eq!(b.offer(&segs[0]), GroVerdict::Coalesced);
+        let out = b.flush().unwrap();
+        assert_eq!(&out[..VNET_HDR_LEN], &[0u8; VNET_HDR_LEN]);
+        assert_eq!(&out[VNET_HDR_LEN..], &segs[0][..]);
+    }
+
+    /// Reject criteria. Each is a wg-go check; each is a
+    /// kernel-contract requirement (`gro.c` selftests).
+    #[test]
+    fn gro_rejects() {
+        let mut b = GroBucket::new();
+
+        // Non-TCP (proto=UDP).
+        let mut p = build_v4_segs(1, 100, false).pop().unwrap();
+        p[9] = 17;
+        assert_eq!(b.offer(&p), GroVerdict::NotCandidate);
+
+        // FIN set — not a candidate (only ACK or ACK|PSH).
+        let mut p = build_v4_segs(1, 100, false).pop().unwrap();
+        p[33] |= TCP_FLAG_FIN;
+        assert_eq!(b.offer(&p), GroVerdict::NotCandidate);
+
+        // Zero payload (pure ACK).
+        let p = build_v4_segs(1, 0, false).pop().unwrap();
+        assert_eq!(b.offer(&p), GroVerdict::NotCandidate);
+
+        // Fragmented (MF set).
+        let mut p = build_v4_segs(1, 100, false).pop().unwrap();
+        p[6] |= 0x20;
+        assert_eq!(b.offer(&p), GroVerdict::NotCandidate);
+
+        // IP options (IHL=6).
+        let mut p = build_v4_segs(1, 100, false).pop().unwrap();
+        p[0] = 0x46;
+        assert_eq!(b.offer(&p), GroVerdict::NotCandidate);
+
+        assert!(b.is_empty());
+    }
+
+    /// FlushFirst on flow mismatch. Seed with one flow, offer a
+    /// different ack value (the iperf3-reverse-direction case:
+    /// data interleaved with the rare ack-carrying-data packet).
+    #[test]
+    fn gro_flush_on_mismatch() {
+        let segs = build_v4_segs(2, 100, false);
+        let mut b = GroBucket::new();
+        assert_eq!(b.offer(&segs[0]), GroVerdict::Coalesced);
+
+        // Same everything but ack=43 (was 42). wg-go: separate
+        // flow key.
+        let mut other = segs[1].clone();
+        other[28..32].copy_from_slice(&43u32.to_be_bytes());
+        assert_eq!(b.offer(&other), GroVerdict::FlushFirst);
+
+        // After flush, the mismatched packet seeds a new run.
+        let _ = b.flush();
+        assert_eq!(b.offer(&other), GroVerdict::Coalesced);
+
+        // Seq gap also flushes. Reset, seed seq=1000, offer
+        // seq=1200 (skipped 100).
+        let _ = b.flush();
+        assert_eq!(b.offer(&segs[0]), GroVerdict::Coalesced);
+        let mut gap = segs[1].clone();
+        gap[24..28].copy_from_slice(&1200u32.to_be_bytes());
+        assert_eq!(b.offer(&gap), GroVerdict::FlushFirst);
+    }
+
+    /// PSH terminates the run: nothing appends after.
+    #[test]
+    fn gro_psh_terminates() {
+        let segs = build_v4_segs(3, 100, false);
+        let mut b = GroBucket::new();
+        assert_eq!(b.offer(&segs[0]), GroVerdict::Coalesced);
+        // PSH on the second.
+        let mut psh = segs[1].clone();
+        psh[33] |= TCP_FLAG_PSH;
+        assert_eq!(b.offer(&psh), GroVerdict::Coalesced);
+        // Third can't append (psh_set).
+        assert_eq!(b.offer(&segs[2]), GroVerdict::FlushFirst);
+    }
+
+    /// Short tail terminates: 100, 100, 50 → ok; then 100 → flush.
+    /// GSO is `gso_size`-stride + one short trailer; nothing after.
+    #[test]
+    fn gro_short_tail_terminates() {
+        let mut b = GroBucket::new();
+        let segs100 = build_v4_segs(2, 100, false);
+        // Seg at seq=1200, 50 bytes.
+        let mut seg50 = build_v4_segs(1, 50, false).pop().unwrap();
+        seg50[24..28].copy_from_slice(&1200u32.to_be_bytes());
+        // Recompute csums (totlen changed when build used 50,
+        // but seq edit invalidated TCP csum).
+        let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, &seg50[12..20], 70);
+        seg50[36] = 0;
+        seg50[37] = 0;
+        let csum = checksum(&seg50[20..], pseudo);
+        seg50[36..38].copy_from_slice(&csum.to_be_bytes());
+
+        assert_eq!(b.offer(&segs100[0]), GroVerdict::Coalesced);
+        assert_eq!(b.offer(&segs100[1]), GroVerdict::Coalesced);
+        assert_eq!(b.offer(&seg50), GroVerdict::Coalesced);
+        // Next 100-byte seg at seq=1250 → short_tail blocks it.
+        let mut seg_after = build_v4_segs(1, 100, false).pop().unwrap();
+        seg_after[24..28].copy_from_slice(&1250u32.to_be_bytes());
+        assert_eq!(b.offer(&seg_after), GroVerdict::FlushFirst);
+    }
+
+    /// 65535 cap → FlushFirst when the next append would overflow.
+    #[test]
+    fn gro_hits_64k_cap() {
+        let mut b = GroBucket::new();
+        // 46 × 1400 = 64400 payload + 40 header = 64440 ≤ 65535.
+        // 47th × 1400 → 65800 > 65535.
+        for i in 0..46 {
+            let mut p = build_v4_segs(1, 1400, false).pop().unwrap();
+            let seq = 1000u32 + 1400 * i;
+            p[24..28].copy_from_slice(&seq.to_be_bytes());
+            assert_eq!(b.offer(&p), GroVerdict::Coalesced, "seg {i}");
+        }
+        let mut p = build_v4_segs(1, 1400, false).pop().unwrap();
+        p[24..28].copy_from_slice(&(1000u32 + 1400 * 46).to_be_bytes());
+        assert_eq!(b.offer(&p), GroVerdict::FlushFirst);
     }
 }

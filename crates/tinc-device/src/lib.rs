@@ -56,7 +56,9 @@ pub use arena::{DeviceArena, DrainResult, GsoType};
 // `tso_split` on it. NOT cfg-gated: the function is pure header
 // arithmetic on `&[u8]`, runs anywhere.
 mod tso;
-pub use tso::{TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split};
+pub use tso::{
+    GroBucket, GroVerdict, TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split,
+};
 
 /// L2 vs L3 device. C `device_type_t` (`linux/device.c:33-36`).
 /// The daemon resolves `DeviceType` config + `routing_mode` into
@@ -144,6 +146,25 @@ pub trait Device: Send {
     /// layer). The C logs and returns false; daemon drops the
     /// packet. We return `Err`; daemon does the same.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Phase 2b GRO write: pass `[vnet_hdr(10)][IP super]` straight
+    /// to the TUN fd. Unlike [`write`], no eth-header munging — the
+    /// GRO bucket already builds the kernel's `tun_get_user` shape.
+    ///
+    /// Default = unsupported. Only the Linux `Tun` backend overrides
+    /// (it's the only one with `IFF_VNET_HDR`). The daemon gates on
+    /// `Mode::Tun` so it never calls this on TAP/BSD/FdTun. The
+    /// `Err(Unsupported)` here is the unreachable-but-don't-panic
+    /// guard — if it fires, the gate is wrong, but the daemon falls
+    /// back to per-packet `write()` and the inner TCP just sees a
+    /// retransmit.
+    ///
+    /// # Errors
+    /// `io::Error` from `write(2)`. `Unsupported` for backends
+    /// without vnet_hdr.
+    fn write_super(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// `device_type` for logging. C: `device_type` global (`:35`).
     /// `route.c` branches on `routing_mode`, not this.

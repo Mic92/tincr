@@ -544,6 +544,22 @@ impl Device for Tun {
         }
     }
 
+    /// GRO super write (Phase 2b). `buf` is `[vnet_hdr(10)][IP
+    /// ≤65535]` from `GroBucket::flush` — already in `tun_get_user`'s
+    /// expected shape (`tun.c:1731`). Just `write()`.
+    ///
+    /// `IFF_VNET_HDR` is unconditionally on for `Mode::Tun` since
+    /// `5cf9b12d`; the daemon's `gro_enabled` gate checks mode
+    /// before calling, so the TAP arm is unreachable. Belt-and-
+    /// braces with the same "degrade not crash" guard as the trait
+    /// default.
+    fn write_super(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.mode {
+            Mode::Tun => write_fd(self.fd.as_raw_fd(), buf),
+            Mode::Tap => Err(io::ErrorKind::Unsupported.into()),
+        }
+    }
+
     fn mode(&self) -> Mode {
         self.mode
     }

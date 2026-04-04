@@ -251,6 +251,25 @@ impl Daemon {
 
         // ─── Phase 2: dispatch. iov borrows are dead; `batch.bufs`
         // is now free to read while we hold `&mut self`.
+        //
+        // Phase 2b GRO TUN write: arm the coalescer for the duration
+        // of this dispatch loop. `send_packet_myself` (the local-
+        // delivery sink, hit via `route_packet` when the inner dst
+        // is in our subnet) sees `gro_bucket.is_some()` and offers
+        // the IP packet to it instead of writing immediately. Batch
+        // boundary = coalesce window: flush after the loop, never
+        // hold across recvmmsg calls (latency cap; the kernel's own
+        // GRO has a similar napi-poll-quantum boundary).
+        //
+        // Only meaningful when count > 1 (single packet → nothing
+        // to coalesce with; the bucket would round-trip it through a
+        // memcpy for no win). And only when the device can take a
+        // vnet_hdr super — see the `gro_enabled` gate at setup.
+        let mut gro = if self.gro_enabled && count > 1 {
+            self.gro_bucket_spare.take()
+        } else {
+            None
+        };
         for (idx, &(n, peer)) in meta.iter().enumerate().take(count) {
             let n = usize::from(n);
             // C `:1887`: `if(len <= 0 || len > MAXSIZE) continue`.
@@ -258,7 +277,19 @@ impl Daemon {
                 continue;
             }
             let pkt = &batch.bufs[idx][..n];
+            // Park the bucket in self for the duration of this one
+            // packet's journey through handle_incoming_vpn_packet →
+            // route_packet → send_packet_myself. Same out-and-back
+            // as `rx_scratch`. Taken back below before the next
+            // iteration so the local `gro` owns it across the loop.
+            self.gro_bucket = gro.take();
             self.handle_incoming_vpn_packet(pkt, peer);
+            gro = self.gro_bucket.take();
+        }
+        if let Some(mut bucket) = gro {
+            self.gro_flush(&mut bucket);
+            // 64KB stays warm for the next batch.
+            self.gro_bucket_spare = Some(bucket);
         }
 
         count
@@ -1145,8 +1176,80 @@ impl Daemon {
         let myself_tunnel = self.tunnels.entry(self.myself).or_default();
         myself_tunnel.out_packets += 1;
         myself_tunnel.out_bytes += len;
+
+        // ─── Phase 2b GRO write ────────────────────────────────────
+        // Armed only inside `recvmmsg_batch`'s dispatch loop. The
+        // other call sites (broadcast echo, kernel-mode forward,
+        // ICMP unreachable) reach here with `gro_bucket = None` and
+        // fall through to the immediate write.
+        //
+        // `data` is `[synth eth(14)][IP]` — the offer wants raw IP.
+        // The eth header is throwaway in TUN mode anyway (the
+        // existing `device.write` stomps it for the vnet_hdr stomp).
+        if let Some(mut bucket) = self.gro_bucket.take() {
+            use tinc_device::GroVerdict;
+            const ETH_HLEN: usize = 14;
+            if data.len() > ETH_HLEN {
+                match bucket.offer(&data[ETH_HLEN..]) {
+                    GroVerdict::Coalesced => {
+                        self.gro_bucket = Some(bucket);
+                        return; // absorbed; written on flush
+                    }
+                    GroVerdict::FlushFirst => {
+                        // Ship the run, then re-offer. The packet
+                        // is a valid candidate (passed all the
+                        // shape checks), it just doesn't fit —
+                        // different ack, seq gap, post-PSH. Seeding
+                        // it now starts the NEXT run.
+                        self.gro_flush(&mut bucket);
+                        let v = bucket.offer(&data[ETH_HLEN..]);
+                        // Either it seeds the empty bucket
+                        // (Coalesced) or some race made it stop
+                        // qualifying (NotCandidate, can't happen
+                        // with an immutable slice but we don't
+                        // build correctness on that). Never
+                        // FlushFirst on an empty bucket.
+                        debug_assert_ne!(v, GroVerdict::FlushFirst);
+                        self.gro_bucket = Some(bucket);
+                        if v == GroVerdict::Coalesced {
+                            return;
+                        }
+                        // NotCandidate: fall through to write.
+                    }
+                    GroVerdict::NotCandidate => {
+                        // Non-TCP, FIN/SYN/RST, pure-ACK, fragment,
+                        // IP options. Ordering: anything already in
+                        // the bucket goes out FIRST. Same-flow stuff
+                        // can't be in the bucket (would've been a
+                        // key mismatch → FlushFirst), but a non-
+                        // candidate from the SAME flow (e.g. a FIN)
+                        // mustn't reorder past data with lower seq.
+                        self.gro_flush(&mut bucket);
+                        self.gro_bucket = Some(bucket);
+                    }
+                }
+            } else {
+                self.gro_bucket = Some(bucket);
+            }
+        }
+
         if let Err(e) = self.device.write(data) {
             log::debug!(target: "tincd::net", "Error writing to device: {e}");
+        }
+    }
+
+    /// Ship the GRO bucket. `bucket.flush()` finalizes vnet_hdr +
+    /// IP totlen/csum; `device.write_super` is a raw fd write.
+    /// `Unsupported` here means `gro_enabled` was wrong at setup
+    /// (the gate is supposed to make this unreachable). Log at
+    /// `warn` not `debug`: it's a daemon bug, not a transient.
+    fn gro_flush(&mut self, bucket: &mut tinc_device::GroBucket) {
+        if let Some(buf) = bucket.flush()
+            && let Err(e) = self.device.write_super(buf)
+        {
+            log::warn!(target: "tincd::net",
+                       "GRO super write failed: {e} — \
+                        gro_enabled gate let a non-vnet device through?");
         }
     }
 

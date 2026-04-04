@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rand_core::{OsRng, RngCore};
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
-use tinc_device::{Device, DeviceArena};
+use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, SubnetMsg, UdpInfo};
@@ -1243,6 +1243,32 @@ pub struct Daemon {
     /// dance as `rx_scratch` in `e49b5af6`).
     pub(crate) udp_rx_batch: Option<net::UdpRxBatch>,
 
+    /// GRO TUN-write coalescer (`RUST_REWRITE_10G.md` Phase 2b).
+    /// `recvmmsg_batch` arms it; `send_packet_myself` offers each
+    /// inbound-for-us packet; the post-dispatch flush ships the
+    /// super. Same `mem::take`-out-of-self dance as `rx_scratch`
+    /// (`send_packet_myself` is `&mut self` and the bucket borrow
+    /// would conflict). `None` outside the batch loop — the send
+    /// site checks: `Some` ⇒ try coalesce, `None` ⇒ immediate write
+    /// (the ICMP-reply / broadcast-echo / kernel-mode paths, which
+    /// hit `send_packet_myself` outside any UDP recv batch).
+    pub(crate) gro_bucket: Option<GroBucket>,
+
+    /// Persistent backing for `gro_bucket`. `GroBucket::new()` heap-
+    /// allocs 64KB; doing that per recvmmsg batch (the original
+    /// `then(GroBucket::new)` sketch) would be ~10k allocs/sec at
+    /// line rate. Same heap-once pattern as `udp_rx_batch`.
+    /// `recvmmsg_batch` parks it in `gro_bucket` for the dispatch
+    /// loop, then puts it back here. `flush()` resets internal
+    /// state; the 64KB stays.
+    pub(crate) gro_bucket_spare: Option<GroBucket>,
+
+    /// Whether `device.write_super()` works. Linux TUN with
+    /// `IFF_VNET_HDR` (the only backend that overrides the trait
+    /// default). Captured at setup so the hot path doesn't dyn-
+    /// dispatch a `mode()` call per packet.
+    pub(crate) gro_enabled: bool,
+
     /// `last_periodic_run_time` (`net.c:43`). Laptop-suspend
     /// detector at `net.c:189-213`: if `now - this > 2 * udp_
     /// discovery_timeout`, the daemon was asleep — force-close
@@ -2198,6 +2224,17 @@ impl Daemon {
             ),
             rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
             udp_rx_batch: Some(net::UdpRxBatch::new()),
+            gro_bucket: None,
+            gro_bucket_spare: Some(GroBucket::new()),
+            // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
+            // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
+            // Gate here so we never `offer()` into a bucket whose
+            // flush will fail at write — that would silently drop
+            // every coalesced burst.
+            #[cfg(target_os = "linux")]
+            gro_enabled: device_mode == tinc_device::Mode::Tun,
+            #[cfg(not(target_os = "linux"))]
+            gro_enabled: false,
             // C `net.c:43`: `static struct timeval last_periodic_
             // run_time` zero-init. We seed with now: the first
             // `on_ping_tick` (after `pingtimeout` seconds) sees
