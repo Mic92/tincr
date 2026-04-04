@@ -61,14 +61,14 @@ use tinc_proto::Subnet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ipv4Key {
     subnet: Subnet,
-    owner: String,
+    owner: Option<String>,
 }
 
 /// `subnet_compare_ipv6` sort key. `subnet_parse.c:161-183`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ipv6Key {
     subnet: Subnet,
-    owner: String,
+    owner: Option<String>,
 }
 
 /// `subnet_compare_mac` sort key. `subnet_parse.c:119-135`.
@@ -78,7 +78,7 @@ struct Ipv6Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MacKey {
     subnet: Subnet,
-    owner: String,
+    owner: Option<String>,
 }
 
 // ─── Ord impls: the C comparators ───────────────────────────────────
@@ -100,11 +100,10 @@ struct MacKey {
 // HOWEVER: `owner = NULL` is also a real tree state. `net_setup.c:
 // 485-505` inserts `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
 // `224.0.0.0/4`, `ff00::/8` with `subnet_add(NULL, s)`. `route.c:
-// 644,738`: `if(!subnet->owner) route_broadcast()`. We use `""` as
-// the sentinel — `check_id` (`utils.c`) rejects empty so no real node
-// can collide. The C `:154` short-circuit sorts ownerless before
-// owned at the owner tiebreak (NULL stops the strcmp); `String::Ord`
-// gives us the same: `"" < "anything"` lexically.
+// 644,738`: `if(!subnet->owner) route_broadcast()`. We use `None`.
+// The C `:154` short-circuit sorts ownerless before owned at the
+// owner tiebreak (NULL stops the strcmp); `Option::Ord` gives us
+// the same: `None < Some(_)`.
 
 impl Ord for Ipv4Key {
     /// `subnet_compare_ipv4`. Four-level tiebreak:
@@ -252,6 +251,7 @@ impl SubnetTree {
     /// (C `splay_insert` replaces, but the value IS the key so it's
     /// observationally identical).
     pub fn add(&mut self, subnet: Subnet, owner: String) {
+        let owner = Some(owner);
         match subnet {
             Subnet::V4 { .. } => {
                 self.ipv4.insert(Ipv4Key { subnet, owner });
@@ -272,11 +272,29 @@ impl SubnetTree {
     /// IPv4 limited broadcast, IPv4 multicast `224/4`, IPv6 multicast
     /// `ff00::/8`) plus any `BroadcastSubnet` config entries.
     ///
-    /// Sentinel: empty owner. `check_id` rejects `""` so no real
-    /// node name collides; `String::Ord` sorts it first (matching
-    /// C `subnet_parse.c:154`'s NULL-short-circuit).
+    /// `Option::Ord` sorts `None` first — matches C
+    /// `subnet_parse.c:154`'s NULL-short-circuit.
     pub fn add_broadcast(&mut self, subnet: Subnet) {
-        self.add(subnet, String::new());
+        match subnet {
+            Subnet::V4 { .. } => {
+                self.ipv4.insert(Ipv4Key {
+                    subnet,
+                    owner: None,
+                });
+            }
+            Subnet::V6 { .. } => {
+                self.ipv6.insert(Ipv6Key {
+                    subnet,
+                    owner: None,
+                });
+            }
+            Subnet::Mac { .. } => {
+                self.mac.insert(MacKey {
+                    subnet,
+                    owner: None,
+                });
+            }
+        }
     }
 
     /// `subnet_del`. C `subnet.c:206-214`.
@@ -290,7 +308,7 @@ impl SubnetTree {
         // a tuple — implementing `Borrow` for a `(Subnet, &str)`
         // newtype is more ceremony than the alloc costs. DEL is
         // rare (only on node death / reconfig).
-        let owner = owner.to_owned();
+        let owner = Some(owner.to_owned());
         match *subnet {
             Subnet::V4 { .. } => self.ipv4.remove(&Ipv4Key {
                 subnet: *subnet,
@@ -321,7 +339,7 @@ impl SubnetTree {
     /// `del()`). ADD_SUBNET is control-path-rare; the alloc is fine.
     #[must_use]
     pub fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
-        let owner = owner.to_owned();
+        let owner = Some(owner.to_owned());
         match *subnet {
             Subnet::V4 { .. } => self.ipv4.contains(&Ipv4Key {
                 subnet: *subnet,
@@ -366,7 +384,7 @@ impl SubnetTree {
         &self,
         addr: &Ipv4Addr,
         mut is_reachable: impl FnMut(&str) -> bool,
-    ) -> Option<(&Subnet, &str)> {
+    ) -> Option<(&Subnet, Option<&str>)> {
         // Build a /32 query subnet so we can reuse `Subnet::matches`
         // (which is `maskcmp` under the hood). Weight doesn't matter
         // for `matches(_, true)`.
@@ -375,18 +393,18 @@ impl SubnetTree {
             prefix: 32,
             weight: 0,
         };
-        let mut last_hit: Option<(&Subnet, &str)> = None;
+        let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.ipv4 {
             // C `subnet.c:272`: `if(!maskcmp(...))` — but C `maskcmp`
             // returns 0 for equal (memcmp convention), and `!0` is
             // truthy. So `!maskcmp(...)` is "if equal under mask".
             // Our `matches(_, true)` returns `true` for equal.
             if k.subnet.matches(&q, true) {
-                last_hit = Some((&k.subnet, k.owner.as_str()));
+                last_hit = Some((&k.subnet, k.owner.as_deref()));
                 // C :275: `if(!p->owner || p->owner->status.reachable)
                 // break`. Ownerless (broadcast) is always "reachable"
                 // — it goes to ALL reachable peers via route_broadcast.
-                if k.owner.is_empty() || is_reachable(&k.owner) {
+                if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
             }
@@ -399,18 +417,18 @@ impl SubnetTree {
         &self,
         addr: &Ipv6Addr,
         mut is_reachable: impl FnMut(&str) -> bool,
-    ) -> Option<(&Subnet, &str)> {
+    ) -> Option<(&Subnet, Option<&str>)> {
         let q = Subnet::V6 {
             addr: *addr,
             prefix: 128,
             weight: 0,
         };
-        let mut last_hit: Option<(&Subnet, &str)> = None;
+        let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.ipv6 {
             if k.subnet.matches(&q, true) {
-                last_hit = Some((&k.subnet, k.owner.as_str()));
+                last_hit = Some((&k.subnet, k.owner.as_deref()));
                 // C subnet.c:309: `!p->owner ||` short-circuit.
-                if k.owner.is_empty() || is_reachable(&k.owner) {
+                if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
             }
@@ -434,8 +452,8 @@ impl SubnetTree {
         &self,
         addr: &[u8; 6],
         mut is_reachable: impl FnMut(&str) -> bool,
-    ) -> Option<(&Subnet, &str)> {
-        let mut last_hit: Option<(&Subnet, &str)> = None;
+    ) -> Option<(&Subnet, Option<&str>)> {
+        let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.mac {
             // C `subnet.c:238`: `if(!memcmp(address, &p->address, 6))`.
             // Exact match — `Subnet::matches` would work but this is
@@ -444,9 +462,9 @@ impl SubnetTree {
                 unreachable!()
             };
             if a == *addr {
-                last_hit = Some((&k.subnet, k.owner.as_str()));
+                last_hit = Some((&k.subnet, k.owner.as_deref()));
                 // C subnet.c:241: `!p->owner ||` short-circuit.
-                if k.owner.is_empty() || is_reachable(&k.owner) {
+                if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
             }
@@ -473,10 +491,10 @@ impl SubnetTree {
     pub fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
         self.mac
             .iter()
-            .map(|k| (&k.subnet, k.owner.as_str()))
-            .chain(self.ipv4.iter().map(|k| (&k.subnet, k.owner.as_str())))
-            .chain(self.ipv6.iter().map(|k| (&k.subnet, k.owner.as_str())))
-            .filter(|(_, o)| !o.is_empty())
+            .map(|k| (&k.subnet, k.owner.as_deref()))
+            .chain(self.ipv4.iter().map(|k| (&k.subnet, k.owner.as_deref())))
+            .chain(self.ipv6.iter().map(|k| (&k.subnet, k.owner.as_deref())))
+            .filter_map(|(s, o)| o.map(|o| (s, o)))
     }
 
     /// All subnets owned by `name`, collected. Wrapper over `iter()` +
@@ -536,11 +554,11 @@ mod tests {
     fn ipv4_ord_prefixlen_desc() {
         let long = Ipv4Key {
             subnet: sn("10.0.0.0/24"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let short = Ipv4Key {
             subnet: sn("10.0.0.0/16"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         // /24 < /16 in our Ord (descending prefix → longer is "less").
         assert!(long < short);
@@ -554,11 +572,11 @@ mod tests {
     fn ipv4_ord_addr_tiebreak() {
         let lo = Ipv4Key {
             subnet: sn("10.0.0.0/24"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let hi = Ipv4Key {
             subnet: sn("10.0.1.0/24"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(lo < hi);
     }
@@ -569,11 +587,11 @@ mod tests {
     fn ipv4_ord_weight_tiebreak() {
         let pref = Ipv4Key {
             subnet: sn("10.0.0.0/24#5"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let backup = Ipv4Key {
             subnet: sn("10.0.0.0/24#20"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(pref < backup);
     }
@@ -586,11 +604,11 @@ mod tests {
     fn ipv4_ord_weight_negative() {
         let neg = Ipv4Key {
             subnet: sn("10.0.0.0/24#-100"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let pos = Ipv4Key {
             subnet: sn("10.0.0.0/24#100"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(neg < pos);
     }
@@ -600,11 +618,11 @@ mod tests {
     fn ipv4_ord_owner_tiebreak() {
         let alice = Ipv4Key {
             subnet: sn("10.0.0.0/24"),
-            owner: "alice".into(),
+            owner: Some("alice".into()),
         };
         let bob = Ipv4Key {
             subnet: sn("10.0.0.0/24"),
-            owner: "bob".into(),
+            owner: Some("bob".into()),
         };
         assert!(alice < bob);
     }
@@ -615,11 +633,11 @@ mod tests {
     fn ipv6_ord_prefixlen_desc() {
         let long = Ipv6Key {
             subnet: sn("2001:db8::/64"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let short = Ipv6Key {
             subnet: sn("2001:db8::/32"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(long < short);
     }
@@ -631,22 +649,22 @@ mod tests {
         // Addr is the first key.
         let lo = MacKey {
             subnet: sn("00:00:00:00:00:01"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let hi = MacKey {
             subnet: sn("00:00:00:00:00:02"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(lo < hi);
 
         // Same addr → weight breaks the tie.
         let pref = MacKey {
             subnet: sn("aa:bb:cc:dd:ee:ff#5"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         let backup = MacKey {
             subnet: sn("aa:bb:cc:dd:ee:ff#20"),
-            owner: "n".into(),
+            owner: Some("n".into()),
         };
         assert!(pref < backup);
     }
@@ -664,12 +682,12 @@ mod tests {
         t.add(sn("10.1.0.0/16"), "narrow".into());
 
         let (s, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 1, 2, 3), all_up).unwrap();
-        assert_eq!(owner, "narrow");
+        assert_eq!(owner, Some("narrow"));
         assert_eq!(*s, sn("10.1.0.0/16"));
 
         // 10.2.x.x is NOT in the /16, falls through to /8.
         let (s, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 2, 0, 0), all_up).unwrap();
-        assert_eq!(owner, "broad");
+        assert_eq!(owner, Some("broad"));
         assert_eq!(*s, sn("10.0.0.0/8"));
     }
 
@@ -694,7 +712,7 @@ mod tests {
         t.add(sn("10.0.0.0/24#5"), "primary".into());
 
         let (_, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
-        assert_eq!(owner, "primary");
+        assert_eq!(owner, Some("primary"));
     }
 
     /// C `subnet.c:275`: `if(p->owner->status.reachable) break`.
@@ -710,7 +728,7 @@ mod tests {
         let (s, owner) = t
             .lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), |o| o == "bob")
             .unwrap();
-        assert_eq!(owner, "bob");
+        assert_eq!(owner, Some("bob"));
         assert_eq!(*s, sn("10.0.0.0/16"));
     }
 
@@ -729,14 +747,14 @@ mod tests {
         let (s, owner) = t
             .lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), |_| false)
             .unwrap();
-        assert_eq!(owner, "bob");
+        assert_eq!(owner, Some("bob"));
         assert_eq!(*s, sn("10.0.0.0/16"));
     }
 
     /// C `subnet.c:275`: `!p->owner ||` — ownerless ALWAYS breaks
     /// the scan, regardless of `is_reachable`. The predicate isn't
-    /// even called (no name to pass). `route_ipv4` then sees the
-    /// empty owner and returns `Broadcast` (`route.c:644`).
+    /// even called (no name to pass). `route_ipv4` then sees `None`
+    /// and returns `Broadcast` (`route.c:644`).
     #[test]
     fn lookup_broadcast_short_circuits_reachable() {
         let mut t = SubnetTree::new();
@@ -753,7 +771,7 @@ mod tests {
                 panic!("is_reachable called for ownerless subnet")
             })
             .unwrap();
-        assert_eq!(owner, "");
+        assert_eq!(owner, None);
     }
 
     /// `iter()` skips ownerless. C `send_everything` walks per-node
@@ -781,11 +799,11 @@ mod tests {
 
         let q: Ipv6Addr = "2001:db8:1::1".parse().unwrap();
         let (_, owner) = t.lookup_ipv6(&q, all_up).unwrap();
-        assert_eq!(owner, "narrow");
+        assert_eq!(owner, Some("narrow"));
 
         let q: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
         let (_, owner) = t.lookup_ipv6(&q, all_up).unwrap();
-        assert_eq!(owner, "broad");
+        assert_eq!(owner, Some("broad"));
     }
 
     /// MAC: exact match, weight tiebreak.
@@ -799,7 +817,7 @@ mod tests {
         let (_, owner) = t
             .lookup_mac(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], all_up)
             .unwrap();
-        assert_eq!(owner, "primary");
+        assert_eq!(owner, Some("primary"));
 
         // Miss.
         assert!(t.lookup_mac(&[0, 0, 0, 0, 0, 0], all_up).is_none());
@@ -886,7 +904,7 @@ mod tests {
 
         // V4 lookup doesn't see v6/mac entries.
         let (_, o) = t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
-        assert_eq!(o, "v4");
+        assert_eq!(o, Some("v4"));
 
         // Del v4 doesn't touch the others.
         assert!(t.del(&sn("10.0.0.0/24"), "v4"));

@@ -124,9 +124,9 @@ pub fn route_ipv4<T>(
     // route.c:644-646: `if(!subnet->owner) route_broadcast()`.
     // Ownerless = broadcast subnet (224/4, 255.255.255.255, plus
     // BroadcastSubnet config). Daemon → broadcast_packet.
-    if owner.is_empty() {
+    let Some(owner) = owner else {
         return RouteResult::Broadcast;
-    }
+    };
 
     // route.c:648-651 owner==source loop check: daemon-side.
 
@@ -194,9 +194,9 @@ pub fn route_ipv6<T>(
 
     // route.c:738-741: `if(!subnet->owner) route_broadcast()`.
     // Ownerless = broadcast subnet (ff00::/8 plus config).
-    if owner.is_empty() {
+    let Some(owner) = owner else {
         return RouteResult::Broadcast;
-    }
+    };
 
     // route.c:743-746 owner==source: daemon-side.
 

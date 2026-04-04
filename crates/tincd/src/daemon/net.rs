@@ -1929,13 +1929,14 @@ impl Daemon {
         // C `:999`: silently ignore ARPs for our own subnets — the
         // kernel already knows; replying would create a wrong
         // arp-cache entry pointing at the TUN.
-        if owner == self.name {
+        if owner == Some(&self.name) {
             return false;
         }
         // C `:1011-1022`
         let mut reply = neighbor::build_arp_reply(data);
         log::debug!(target: "tincd::net",
-                    "route: ARP reply for {target} (owner {owner})");
+                    "route: ARP reply for {target} (owner {})",
+                    owner.unwrap_or("(broadcast)"));
         if let Err(e) = self.device.write(&mut reply) {
             log::debug!(target: "tincd::net",
                         "Error writing ARP reply to device: {e}");
@@ -1974,7 +1975,7 @@ impl Daemon {
             return;
         };
         // C `:883`
-        if owner == self.name {
+        if owner == Some(&self.name) {
             return;
         }
         // C `:893-896`: decrement_ttl on the SOLICIT before building
@@ -1997,7 +1998,8 @@ impl Daemon {
             return;
         };
         log::debug!(target: "tincd::net",
-                    "route: NDP advert for {target} (owner {owner})");
+                    "route: NDP advert for {target} (owner {})",
+                    owner.unwrap_or("(broadcast)"));
         if let Err(e) = self.device.write(&mut reply) {
             log::debug!(target: "tincd::net",
                         "Error writing NDP advert to device: {e}");
