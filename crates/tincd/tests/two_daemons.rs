@@ -508,7 +508,7 @@ fn two_daemons_connect_and_reach() {
 /// Why three daemons, not two: with two, killing alice's only peer
 /// also kills the only meta-connection that DEL_EDGE could arrive
 /// on. The `terminate()` path on the SURVIVING daemon's side does
-/// the local `del_edge` directly (`connect.rs:277`), which doesn't
+/// the local `del_edge` directly (`connect.rs::terminate`), which doesn't
 /// touch `on_del_edge` and so doesn't trigger our purge-on-del-edge
 /// hook. REQ_PURGE works either way, but the on_del_edge hook (the
 /// memory-growth fix) needs gossip to actually propagate.
@@ -561,7 +561,7 @@ fn purge_removes_unreachable_node() {
     });
 
     // ─── kill bob → mid gossips DEL_EDGE → alice purges ────────
-    // mid's `terminate()` (`connect.rs:264-301`) sends DEL_EDGE for
+    // mid's `terminate()` (`connect.rs`) sends DEL_EDGE for
     // mid→bob and bob→mid to alice. Alice's `on_del_edge` for the
     // mid→bob direction: deletes the edge, runs graph() → bob
     // unreachable, then our hook calls `purge()`. Pass 2 fires:
@@ -3377,7 +3377,7 @@ fn ipv6_unreachable_builds_icmpv6() {
     // the ether header from byte 0's version nibble. So we send a
     // 40-byte IPv6 header + payload.
     //
-    // route_ipv6 (route.rs:324) reads dst at IP6 hdr offset 24..40.
+    // `route_ipv6` reads dst at IP6 hdr offset 24..40.
     // No subnet for `fd00::99` → Unreachable{ICMP6_DST_UNREACH=1,
     // ICMP6_DST_UNREACH_ADDR=3}.
     let mut ipv6 = Vec::with_capacity(40 + 8);

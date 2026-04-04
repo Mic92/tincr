@@ -52,8 +52,9 @@ use crate::{Device, MTU, Mac, Mode};
 
 /// 4-byte AF prefix for utun/tunifhead. C uses literal `10`
 /// (`:451`); `ETH_HLEN - AF_PREFIX_LEN = 10` is the read offset.
-/// Contents: `htonl(AF_*)` — same SIZE/OFFSET as Linux `tun_pi`
-/// but different contents (and ignored on read anyway).
+/// Contents: `htonl(AF_*)` — same SIZE/OFFSET as the C linux
+/// backend's `tun_pi` (our linux.rs uses vnet_hdr instead);
+/// different contents (and ignored on read anyway).
 const AF_PREFIX_LEN: usize = 4;
 
 // BsdVariant — the offset dispatch

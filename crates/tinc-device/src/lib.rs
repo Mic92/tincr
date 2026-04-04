@@ -21,8 +21,9 @@
 //! ## API
 //!
 //! Backends take `&mut [u8]` slices, not `vpn_packet_t *`. The
-//! TUN-mode `+10` is the backend's concern (kernel interface); the
-//! `+12` packet offset is the daemon's. Linux-gated; `Dummy` is
+//! kernel-side framing (vnet_hdr on Linux TUN; AF prefix on BSD
+//! utun; raw on TAP) is the backend's concern; the `+12` packet
+//! offset is the daemon's. Linux-gated; `Dummy` is
 //! unconditional for tests.
 
 #![deny(unsafe_code)]
@@ -62,7 +63,8 @@ pub use tso::{TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split
 /// this; we get the resolved value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Layer-3 (IP). `IFF_TUN`, `tun_pi` prefix, +10 offset.
+    /// Layer-3 (IP). On Linux: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`;
+    /// `drain()` synthesizes the eth header. On BSD: AF prefix, +10.
     Tun,
     /// Layer-2 (Ethernet). `IFF_TAP | IFF_NO_PI`, raw frames.
     Tap,
@@ -114,9 +116,10 @@ pub trait Device: Send {
     /// Read a packet. C `devops.read(packet)` → bool (`device.h:
     /// 35`); we return the length.
     ///
-    /// `buf` is the daemon's `data[offset..]` slice (≥ `MTU`). TUN
-    /// writes at `buf[10..]` then zeroes `buf[0..12]`; returned
-    /// length is `kernel_len + 10`. TAP writes at `buf[0..]`.
+    /// `buf` is the daemon's `data[offset..]` slice (≥ `MTU`). Linux
+    /// TUN doesn't go through here (`drain()` overrides and reads
+    /// vnet_hdr layout directly). BSD `Utun` writes at `buf[10..]`
+    /// then zeroes `buf[0..12]`; TAP/raw writes at `buf[0..]`.
     /// Kernel `read() <= 0` → `Err` (C `device.c:149`).
     ///
     /// # Errors
@@ -128,11 +131,12 @@ pub trait Device: Send {
     /// Write a packet. C `devops.write(packet)` → bool (`device.h:
     /// 36`).
     ///
-    /// `buf` is `data[offset..offset+len]`. TUN zeroes `buf[10..12]`
-    /// (`tun_pi.flags`) then writes `buf[10..]`; TAP writes `buf`
-    /// directly. The TUN zero MUTATES `buf` (`device.c:188` does
-    /// too); those bytes are always zero anyway (synthetic src-MAC),
-    /// so idempotent. `&mut` is honest about the mutation.
+    /// `buf` is `data[offset..offset+len]`. Linux TUN zeroes
+    /// `buf[12..14]` (the synthetic ethertype) and writes `buf[4..]`
+    /// = `[vnet_hdr=0][IP]`; BSD `Utun` zeroes `buf[10..12]` and
+    /// writes `buf[10..]`; TAP writes `buf` directly. The zero
+    /// MUTATES `buf` (the C `device.c:188` does too); `&mut` is
+    /// honest about the mutation.
     ///
     /// # Errors
     /// `io::Error` from `write(2)`. `ENOBUFS` if the kernel TX
@@ -167,7 +171,7 @@ pub trait Device: Send {
     /// to `bsd.rs`/`linux.rs` for Phase 0.
     ///
     /// `cap` clamps to `arena.cap()`. Typically `DEVICE_DRAIN_CAP=64`
-    /// (`net.rs:528` — over-draining starves TUN of TX time, see
+    /// (`daemon/net.rs` — over-draining starves TUN of TX time, see
     /// commit `0f120b11`).
     ///
     /// EAGAIN on the first read → `Empty`. EAGAIN after ≥1 read →
@@ -457,7 +461,7 @@ mod tests {
     }
 
     /// Non-EAGAIN error mid-batch propagates. The daemon counts
-    /// consecutive failures (`net.rs:556`) and exits after 10. We
+    /// consecutive failures (`on_device_read`) and exits after 10. We
     /// don't swallow it; the partial batch is lost (the C does the
     /// same — `device.c:149` returns false, daemon breaks the loop).
     #[test]

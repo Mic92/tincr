@@ -3015,7 +3015,7 @@ fn process_priority_low_succeeds() {
 ///
 /// `PACKET 17` injection (not UDP) because the test has no UDP
 /// listener. C `net_packet.c:725`: direct neighbors short-circuit
-/// to TCP; the tcplen path (`metaconn.rs:607`) calls `route_packet`
+/// to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
 /// directly with the frame body.
 #[test]
 fn pcap_captures_tcp_packet() {
@@ -3254,7 +3254,7 @@ fn pcap_captures_tcp_packet() {
 
     // C `protocol_misc.c:98`: `"%d %d", PACKET, len`. Then C `:102`:
     // `send_meta(c, DATA(packet), len)` → SPTPS record type 0 with
-    // raw body. metaconn.rs:607: tcplen=60 set; NEXT record is the
+    // raw body. `metaconn.rs` Record arm: tcplen=60 set; NEXT record is the
     // blob. Two records: header line, then frame.
     let pkt_hdr = format!("17 {}\n", frame.len());
     let outs = sptps.send_record(0, pkt_hdr.as_bytes()).expect("pkt hdr");

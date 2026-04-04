@@ -396,10 +396,10 @@ impl Graph {
     ///
     /// Returns `None` if the slot is freed (stale `EdgeId`).
     ///
-    /// **Why this exists** when del+add already works (`daemon.rs:1946`):
+    /// **Why this exists** when del+add already works (`gossip::on_add_edge`):
     /// `EdgeId` stability. del+add recycles the slot — same index, but
-    /// any parallel table keyed on `EdgeId` (e.g. the floated
-    /// `HashMap<EdgeId, EdgeAddr>` for `e->address`, `daemon.rs:2210`)
+    /// any parallel table keyed on `EdgeId` (e.g. `Daemon::edge_addrs`
+    /// for `e->address`)
     /// would see a delete+insert. `update_edge` is one slot write; the
     /// ID is the same handle before and after.
     ///

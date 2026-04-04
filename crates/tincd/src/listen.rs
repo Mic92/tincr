@@ -1022,7 +1022,7 @@ impl Tarpit {
         //
         // I think the C author intended both to behave the same and
         // the off-by-one is accidental. Port faithfully — it's been
-        // this way since 2013 (commit `efa42d92`) and nobody's
+        // this way since 2013 (commit `24e3ec86`) and nobody's
         // noticed.
         if self.allhost_burst >= self.max_burst {
             self.allhost_burst = self.max_burst;

@@ -186,7 +186,7 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
 
 /// `security.py::test_invalid_id_own`. C `protocol_auth.c:376`:
 /// `if(... || !strcmp(name, myself->name))` → false. Our gate:
-/// `proto.rs::handle_id` `:495`: `if name == ctx.my_name`.
+/// `proto.rs::handle_id`: `if name == ctx.my_name`.
 ///
 /// The daemon sees `"0 testnode 17.7\n"` — its OWN name. The
 /// peer-is-us check fires before `send_id` (the C orders the check
@@ -200,7 +200,7 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
 fn own_id_rejected() {
     let d = OneDaemon::spawn("own-id", "");
     let stderr = assert_dropped(d, "0 testnode 17.7", false);
-    // The exact `Debug` format from `daemon.rs:2356`:
+    // The exact `Debug` format from `metaconn.rs`:
     // `"ID rejected from {}: {e:?}"`. The conn name at this point
     // is still `<unknown>` (the peer-branch's `conn.name = name`
     // line is AFTER the own-name check).
@@ -216,17 +216,18 @@ fn own_id_rejected() {
 
 /// `security.py::test_invalid_id_unknown`. C `protocol_auth.c:428`:
 /// `read_host_config` fails (no `hosts/baz`) → "unknown identity"
-/// → false. Our gate: `proto.rs::handle_id` `:587`: pubkey-load
-/// fails (the `let Some(ecdsa) = ecdsa else` arm).
+/// → false. Our gate: `proto.rs::handle_id` pubkey-load fails (the
+/// `let Some(ecdsa) = ecdsa else` arm).
 ///
 /// The C distinguishes "file missing" (`:428`) vs "file has no key"
 /// (the `read_ecdsa_public_key` fail). We collapse both into one
-/// error — see the comment at `proto.rs:555`. Either way: drop.
+/// error — see the comment at the `host_config` parse in `handle_id`.
+/// Either way: drop.
 ///
 /// **Timing nuance**: the C's `:428` check is BEFORE the version
-/// check; our pubkey-load is AFTER the version check (`:524`) and
-/// AFTER `conn.name = name` (`:517`). But still BEFORE `send_id`
-/// (`:635`). So: same observable behavior — no reply.
+/// check; our pubkey-load is AFTER the version check and AFTER
+/// `conn.name = name`. But still BEFORE the `send_id` reply. So:
+/// same observable behavior — no reply.
 #[test]
 fn unknown_id_rejected() {
     let d = OneDaemon::spawn("unknown-id", "");
@@ -248,7 +249,7 @@ fn unknown_id_rejected() {
 /// gate is the version-minor check.
 ///
 /// C `protocol_auth.c:443-447`: rollback check `if(ecdsa_active &&
-/// minor < 1)` → false. We're STRICTER (`proto.rs:606`): `minor < 2`
+/// minor < 1)` → false. We're STRICTER (`handle_id`): `minor < 2`
 /// is reject (we don't speak legacy at any minor). The daemon never
 /// gets to the METAKEY line.
 ///
@@ -264,7 +265,7 @@ fn legacy_minor_rejected() {
 
     write_config(&confbase, "testnode", 0x42, "");
     // We DO need a hosts/bar with a pubkey: the version check at
-    // `proto.rs:606` is AFTER the pubkey load (`:587`). Without
+    // The `minor < 2` check is AFTER the pubkey load. Without
     // a pubkey, the unknown-identity gate fires first.
     let bar_pub = *tinc_crypto::sign::SigningKey::from_seed(&[0x99; 32]).public_key();
     std::fs::write(
@@ -289,7 +290,7 @@ fn legacy_minor_rejected() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    // `17.0`: legacy. `proto.rs:606` `if minor < 2` → BadId.
+    // `17.0`: legacy. `handle_id` `if minor < 2` → BadId.
     writeln!(&stream, "0 bar 17.0").unwrap();
 
     let mut got = Vec::new();
@@ -656,7 +657,7 @@ fn splice_mitm_rejected() {
 
     // ─── ASSERT: dump nodes on each shows 1 row (self only) ────
     // `splice.py:85-86`. `REQ_DUMP_NODES = 3`. Row format
-    // (`daemon.rs:3590`): `"18 3 NAME ID HOST port PORT ..."`.
+    // (`gossip.rs::dump_nodes`): `"18 3 NAME ID HOST port PORT ..."`.
     // Terminator: bare `"18 3"`.
     fn dump_nodes(pidfile: &std::path::Path, socket: &std::path::Path) -> Vec<String> {
         let cookie = read_cookie(pidfile);

@@ -1269,7 +1269,7 @@ impl Daemon {
                 // `to == self.myself` arm above) is the second. v4
                 // → NET_ANO (`:660`), v6 → ADMIN (`:754`); MAC
                 // (Switch) → silent drop (`:1053`). Gap audit
-                // `bcc5c3e3`: parsed since `daemon.rs:1244`, never
+                // `bcc5c3e3`: parsed in `parse_settings`, never
                 // read — the security knob silently no-op'd.
                 if self.settings.forwarding_mode == ForwardingMode::Off && from.is_some() {
                     log::debug!(target: "tincd::net",

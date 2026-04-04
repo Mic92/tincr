@@ -59,8 +59,10 @@
 //!
 //! ## What's gained vs `first_packet_across_tunnel`
 //!
-//! 1. `LinuxTun::open()` exercised: TUNSETIFF, the `+10` offset,
-//!    `tun_pi` framing. Socketpair-TUN reads at `+14` (no tun_pi).
+//! 1. `LinuxTun::open()` exercised: TUNSETIFF with `IFF_NO_PI |
+//!    IFF_VNET_HDR`; `drain()` reads `[vnet_hdr][IP]` and synthesizes
+//!    the eth header. Socketpair-TUN (`FdTun`) reads at `+14` and
+//!    synthesizes from the IP version nibble — different code path.
 //! 2. Kernel's IP stack is source AND sink: real ICMP, real
 //!    checksums, real route lookup. The socketpair test hand-crafted
 //!    raw bytes with a zero checksum (nothing checked it).
@@ -449,13 +451,15 @@ impl Node {
 /// 1. **`LinuxTun::open()` TUNSETIFF**: the daemon attaches to a
 ///    precreated persistent device. Carrier flips from `NO-CARRIER`
 ///    to `LOWER_UP`. `wait_for_carrier` pins it.
-/// 2. **The `+10` offset trick**: `linux.rs::Tun::read` reads at
-///    `buf[10..]`, the kernel's 4-byte `tun_pi` lands with `proto`
-///    at `buf[12..14]` = ethertype slot. ICMP echo from ping has
-///    `tun_pi.proto = ETH_P_IP = 0x0800`; `route()` reads it as the
-///    ethertype, dispatches to `route_ipv4`. The socketpair test
-///    used `FdTun` which reads at `+14` (no tun_pi) — different
-///    code path.
+/// 2. **The vnet_hdr drain path**: `linux.rs::Tun::drain` reads
+///    `[virtio_net_hdr(10)][raw IP]` (`IFF_NO_PI | IFF_VNET_HDR`);
+///    no eth header from the kernel. ICMP echo is `gso_type=NONE`,
+///    so `drain()` strips the vnet_hdr and synthesizes the eth
+///    header from the IP version nibble (`0x45` → `ETH_P_IP =
+///    0x0800`); `route()` reads that ethertype and dispatches to
+///    `route_ipv4`. The socketpair test used `FdTun` which reads at
+///    `+14` and synthesizes the same way — but never touches the
+///    `Tun::drain` override or the vnet_hdr layout.
 /// 3. **Kernel checksums + TTL**: ping's ICMP echo has a real
 ///    checksum; the daemon doesn't touch it (just the route lookup
 ///    on `dst`); bob's kernel verifies it on receipt and replies.
@@ -561,15 +565,16 @@ fn real_tun_ping() {
 
     // ─── THE PING ───────────────────────────────────────────────
     // validkey set. `ping -c 3` sends three echo requests; each
-    // one: kernel writes ICMP into tinc0 → alice's `Tun::read`
-    // (at +10, tun_pi.proto=0x0800 lands at ethertype slot) →
-    // `route()` reads dst=10.42.0.2, finds bob's /32 →
-    // `Forward{to: bob}` → `send_sptps_packet` → SPTPS record →
-    // UDP sendto(bob's 127.0.0.1:PORT) → bob's `on_udp_recv` →
-    // SPTPS receive → `route()` reads dst=10.42.0.2, finds OWN
-    // subnet → `Forward{to: myself}` → `Tun::write` (at +10,
-    // tun_pi reconstructed) → bobside kernel ICMP layer →
-    // generates reply with dst=10.42.0.1 → backflow.
+    // one: kernel writes `[vnet_hdr][ICMP]` into tinc0 → alice's
+    // `Tun::drain` (gso_type=NONE: strip vnet_hdr, synth eth header
+    // from IP version nibble → ethertype 0x0800) → `route()` reads
+    // dst=10.42.0.2, finds bob's /32 → `Forward{to: bob}` →
+    // `send_sptps_packet` → SPTPS record → UDP sendto(bob's
+    // 127.0.0.1:PORT) → bob's `on_udp_recv` → SPTPS receive →
+    // `route()` reads dst=10.42.0.2, finds OWN subnet →
+    // `Forward{to: myself}` → `Tun::write` (stomps ethertype to a
+    // zero vnet_hdr at `buf[4..]`, writes `[vnet_hdr=0][IP]`) →
+    // bobside kernel ICMP layer → reply with dst=10.42.0.1 → back.
     //
     // `-W 2`: per-packet timeout. Loopback RTT is microseconds;
     // 2s is slack for CI scheduler jitter.
@@ -626,7 +631,7 @@ fn real_tun_ping() {
     let bob_stderr = drain_stderr(bob_child);
     let alice_stderr = drain_stderr(alice_child);
 
-    // `Tun::open` doesn't log itself, but daemon.rs:693 does:
+    // `Tun::open` doesn't log itself, but daemon::setup does:
     // "Device mode: Tun, interface: tinc0". Proves the kernel-
     // assigned name matched what we requested (TUNSETIFF wrote
     // it back into ifr_name; `Tun::open` read it).
@@ -750,8 +755,8 @@ fn real_tun_unreachable() {
 
 /// Phase 2a TSO ingest integrity gate. `RUST_REWRITE_10G.md`.
 ///
-/// With `ExperimentalGSO = on`, the daemon sets `IFF_VNET_HDR +
-/// TUNSETOFFLOAD(TUN_F_TSO4|6)`. Kernel TCP stops segmenting at the
+/// Linux TUN unconditionally sets `IFF_VNET_HDR` (since `5cf9b12d`);
+/// `Tun::open` then issues `TUNSETOFFLOAD(TUN_F_TSO4|6)`. Kernel TCP stops segmenting at the
 /// TUN MTU; it hands the daemon ≤64KB super-segments. The daemon's
 /// `tso_split` re-segments them with re-synthesized TCP headers
 /// (seqno arithmetic, csum recompute, IPv4 ID++).
@@ -963,9 +968,9 @@ fn tso_ingest_stream_integrity() {
     let alice_stderr = drain_stderr(alice_child);
 
     // The TSO-enabled log line. Proves the feature actually fired
-    // (config parsed, ioctl succeeded). Without this, a green hash
-    // could mean "ExperimentalGSO was silently ignored and we
-    // tested the non-vnet path". The `tinc_device` log target
+    // (TUNSETOFFLOAD succeeded). Without this, a green hash could
+    // mean the kernel rejected the offload ioctl and we never saw
+    // a super-segment (everything went through the GSO_NONE arm). The `tinc_device` log target
     // surfaces with `RUST_LOG=info` (no target filter → all crates).
     assert!(
         alice_stderr.contains("TSO ingest enabled"),

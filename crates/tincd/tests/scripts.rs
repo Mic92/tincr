@@ -133,7 +133,7 @@ impl Node {
 /// ```
 ///
 /// `|`-separated; values never contain `|`. No timestamp needed:
-/// scripts run synchronously (`script.rs:194` `Command::output()`
+/// scripts run synchronously (`script::execute` → `Command::status()`
 /// blocks), so **append order IS firing order**.
 ///
 /// Shebang required — `Command::output` is direct `execve()`, not
@@ -278,7 +278,7 @@ fn tinc_up_then_own_subnet_up() {
     // ─── Events 1..3: subnet-up for OWN subnets
     // NODE = our own name (`periodic.rs::run_subnet_script` sets
     // NODE=owner; here owner==myself). REMOTEADDRESS unset (the
-    // `if owner != self.name` guard at periodic.rs:296 skips it).
+    // `if owner != self.name` guard in `run_subnet_script` skips it).
     // Order between the two subnet-ups is iter order; don't pin it.
     let subnet_ups: Vec<&Event> = events[1..3].iter().collect();
     for ev in &subnet_ups {
@@ -293,7 +293,7 @@ fn tinc_up_then_own_subnet_up() {
         .map(|e| e.env["SUBNET"].as_str())
         .collect();
     // `Subnet::Display` strips `#weight`; `run_subnet_script`
-    // strips it again defensively (periodic.rs:303). Prefix
+    // strips it again defensively (`run_subnet_script`). Prefix
     // shown iff < max.
     assert_eq!(
         subnets,
@@ -302,7 +302,7 @@ fn tinc_up_then_own_subnet_up() {
     );
     // WEIGHT: per-subnet. 10.0.1.0/24#5 → "5"; fec0::/64 → "10"
     // (we always pass the integer; the C passes "" for default,
-    // doc'd at periodic.rs:281).
+    // doc'd at `run_subnet_script`).
     for ev in &subnet_ups {
         match ev.env["SUBNET"].as_str() {
             "10.0.1.0/24" => assert_eq!(ev.env["WEIGHT"], "5"),
@@ -324,7 +324,7 @@ fn tinc_up_then_own_subnet_up() {
 //
 // Our `gossip.rs` BecameReachable arm matches: `run_host_script`
 // (which fires both host-up AND hosts/NAME-up, in that order —
-// periodic.rs:332-341) THEN the subnet loop.
+// `run_host_script`) THEN the subnet loop.
 
 #[test]
 fn host_up_order_on_connect() {
@@ -391,12 +391,12 @@ fn host_up_order_on_connect() {
     assert_eq!(h.env["NAME"], "alice");
     assert_eq!(h.env["NODE"], "bob");
     assert_eq!(h.env["INTERFACE"], "dummy");
-    // REMOTEADDRESS/PORT: gossip.rs:1044 reads `nodes[bob].edge_addr`
+    // REMOTEADDRESS/PORT: BecameReachable reads `nodes[bob].edge_addr`
     // — for direct peers that's bob's bound address.
     assert_eq!(h.env["REMOTEADDRESS"], "127.0.0.1");
     assert_eq!(h.env["REMOTEPORT"], bob.port.to_string());
 
-    // ─── hosts/bob-up: same env as host-up (periodic.rs:341 reuses it)
+    // ─── hosts/bob-up: same env as host-up (`run_host_script` reuses it)
     let p = &events[per_node_idx];
     assert_eq!(p.env["NODE"], "bob");
     assert_eq!(p.env["REMOTEADDRESS"], "127.0.0.1");
@@ -407,7 +407,7 @@ fn host_up_order_on_connect() {
     assert_eq!(s.env["NODE"], "bob");
     assert_eq!(s.env["SUBNET"], "10.0.2.0/24");
     assert_eq!(s.env["WEIGHT"], "10"); // default
-    // REMOTEADDRESS: periodic.rs:296-299 sets it for non-self owners
+    // REMOTEADDRESS: `run_subnet_script` sets it for non-self owners
     // from `nodes[owner].edge_addr`.
     assert_eq!(s.env["REMOTEADDRESS"], "127.0.0.1");
     assert_eq!(s.env["REMOTEPORT"], bob.port.to_string());
@@ -495,13 +495,13 @@ fn host_down_order_on_disconnect() {
     // ─── host-down env
     let h = &down_events[host_down_idx];
     assert_eq!(h.env["NODE"], "bob");
-    // REMOTEADDRESS on host-down: gossip.rs:1092-1097 reads the addr
+    // REMOTEADDRESS on host-down: BecameUnreachable reads the addr
     // BEFORE `reset_unreachable` clears it (matching C `graph.c:281`
     // ordering — script call at `:284` precedes `update_node_udp(n,
     // NULL)` at `:296`). For a direct peer that just dropped, the
     // addr is still there.
     //
-    // (If this ever flips to empty: periodic.rs:320-322 documents
+    // (If this ever flips to empty: `run_host_script` documents
     // the deliberate choice to OMIT rather than pass `"unknown"`.)
     assert_eq!(h.env["REMOTEADDRESS"], "127.0.0.1");
 

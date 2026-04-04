@@ -360,7 +360,7 @@ impl Daemon {
         // :462-468: per outgoing, zero backoff + arm timer for now.
         // C's `if(o->ev.cb)` gate (don't arm a never-armed timer)
         // doesn't apply: every `outgoings` slot has a paired timer
-        // (`daemon.rs:1717` adds it unconditionally at insert).
+        // (`Daemon::setup` adds it unconditionally at insert).
         for (oid, outgoing) in &mut self.outgoings {
             outgoing.timeout = 0;
             if let Some(&tid) = self.outgoing_timers.get(oid) {

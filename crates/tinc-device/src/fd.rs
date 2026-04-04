@@ -9,7 +9,7 @@
 //! ## The +14 offset (`offset = ETH_HLEN − 0`)
 //!
 //! ```text
-//!   linux:  read at +10, tun_pi.proto lands at +12 (ethertype slot)
+//!   linux:  read vnet_hdr+IP via drain(), synth eth from IP nibble
 //!   fd:     read at +14, IP packet starts at +14 (after ether header)
 //! ```
 //!

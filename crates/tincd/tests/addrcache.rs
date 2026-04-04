@@ -162,7 +162,7 @@ impl Node {
 
 /// Write `CONFBASE/hosts/PEER-up` as a one-line shell appender.
 /// Fires after meta handshake → ACK → graph runs → BecameReachable
-/// (`gossip.rs:1051`). By then `add_recent` has already fired in
+/// (`gossip.rs` BecameReachable). By then `add_recent` has fired in
 /// `on_ack` (`connect.rs`). Shebang required — direct `execve()`,
 /// not `sh -c`; shebang-less script fails `ENOEXEC`.
 fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
@@ -181,17 +181,17 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
 ///
 /// The mechanism (`addrcache.rs`):
 /// - `AddressCache::open()` reads `CONFBASE/cache/NODENAME` (one
-///   `SocketAddr::Display` per line, `:112-130`). Cached addrs go
-///   FIRST in the dial order (`:84-90`). Config `Address =` lines
-///   go after.
+///   `SocketAddr::Display` per line). Cached addrs go FIRST in the
+///   dial order; config `Address =` lines go after (resolved lazily
+///   at `next_addr` time).
 /// - `on_ack` (`daemon/connect.rs`) calls `add_recent()` ungated
 ///   on every successful ACK. Dedups + prepends.
-/// - `Drop` calls `save()` (`:203-207`). Writes the file. SIGKILL
+/// - `Drop` calls `save()`. Writes the file. SIGKILL
 ///   skips Drop → file not written. SIGTERM → graceful → written.
 ///
 /// Why this isn't already covered: the `addrcache.rs` unit tests
 /// prove `open`/`save`/`load` roundtrip (file format). They don't
-/// prove the daemon CALLS `open()` correctly (`daemon.rs:1389`) or
+/// prove the daemon CALLS `open()` correctly (`Daemon::setup`) or
 /// that `add_recent` actually fires from a real handshake. This is
 /// the wire test.
 #[test]
@@ -264,7 +264,7 @@ fn restart_dials_from_cache() {
 
     // ─── Round 2: delete cache dir, reconnect, dir recreated ────────
     // address_cache.py:80. Same config — `Address =` still present.
-    // Just proves `save()` does `create_dir_all` (`addrcache.rs:188`).
+    // Just proves `save()` does `create_dir_all`.
     std::fs::remove_dir_all(alice.confbase.join("cache")).unwrap();
     std::fs::remove_file(&alice_log).ok();
     // Daemon::Drop unlinks pidfile/socket; should be clean. Belt-and-
@@ -295,7 +295,7 @@ fn restart_dials_from_cache() {
     // ─── Round 3: NO `Address =` in hosts/. Dial from cache. ────────
     // address_cache.py:87-96. THE assertion. Rewrite alice's
     // `hosts/bob` without the `Address =` line. ConnectTo stays.
-    // `resolve_config_addrs()` (`daemon.rs:1388`) returns empty.
+    // `resolve_config_addrs()` returns empty.
     // `AddressCache::open()` loads cache file → addrs = [127.0.0.1:BOBPORT].
     // `try_connect` (`outgoing.rs`) → `next_addr()` → dials.
     alice.write_config(Some(&bob), true, /*addr_in_hosts*/ false); // ← FALSE

@@ -5,7 +5,7 @@
 //! delivers the link-layer header directly.
 //!
 //! ```text
-//!   linux:  read at +10, kernel wrote tun_pi(4)+IP, synthesize ether
+//!   linux:  read vnet_hdr+IP via drain(),         synthesize ether
 //!   fd:     read at +14, Android wrote raw IP,      synthesize ether
 //!   raw:    read at +0,  kernel wrote raw ethernet, nothing to do
 //! ```
@@ -635,9 +635,9 @@ mod tests {
         assert_eq!(rn, frame_len);
         assert_eq!(&recv[..rn], &frame);
 
-        // The frame buffer is UNCHANGED. `linux.rs` zeroes
-        // `buf[10..12]` (the tun_pi.flags overwrite). We don't.
-        // This impl doesn't mutate.
+        // The frame buffer is UNCHANGED. `linux.rs::write` zeroes
+        // `buf[12..14]` (ethertype → vnet_hdr layout); BSD `Utun`
+        // zeroes `buf[10..12]`. We don't. This impl doesn't mutate.
         assert_eq!(frame[10], 0x0B); // shost byte 5, untouched
         assert_eq!(frame[11], 0x0C); // shost byte 6, untouched
     }
