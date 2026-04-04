@@ -4,6 +4,8 @@
 #
 # Trimmed from nixpkgs/nixos/tests/tinc: 2 nodes not 3, Ed25519 only.
 {
+  lib,
+  dnsutils,
   testers,
   tincd, # our build, the thing being tested
   tincd-c ? null, # set → beta runs C, proving wire compat at deploy level
@@ -39,9 +41,24 @@ let
         };
 
         # DeviceType=tun: our autodetect-from-Mode isn't ported yet.
+        # DNSAddress/DNSSuffix: alpha only, our build only — the C
+        # tincd silently ignores unknown keys (they sit unread in
+        # the config tree), but when crossimpl swaps beta to C, we
+        # don't want to be probing whether that's still true.
         settings = {
           DeviceType = "tun";
           ConnectTo = peer;
+        }
+        // lib.optionalAttrs (self == "alpha" && !crossimpl) {
+          # 10.20.0.53: inside the /24 on tinc.mesh (kernel routes
+          # it to the TUN), not any node's /32. The intercept
+          # matches dst==this && dport==53; no `ip addr add` here.
+          # That's the chicken-and-egg the intercept design avoids:
+          # bind() would need the address on an iface BEFORE setup()
+          # finishes, but networking.interfaces configures ADDRESSES
+          # AFTER tinc.mesh.service is ordered to start.
+          DNSAddress = "10.20.0.53";
+          DNSSuffix = "tinc.internal";
         };
 
         # -R cuts off /nix/store; tinc-up's shebang lives there.
@@ -70,7 +87,11 @@ let
       networking.firewall.allowedUDPPorts = [ 655 ];
 
       # Module only puts package in the unit's PATH, not the system's.
-      environment.systemPackages = [ pkg ];
+      # dnsutils: the testScript runs dig against the stub.
+      environment.systemPackages = [
+        pkg
+        dnsutils
+      ];
     };
 in
 testers.runNixOSTest {
@@ -99,5 +120,48 @@ testers.runNixOSTest {
     # Proves the daemon's derivation matches what the CLI computes.
     alpha.succeed("tinc -n mesh dump nodes | grep -w beta")
     beta.succeed("tinc -n mesh dump nodes | grep -w alpha")
+
+    ${lib.optionalString (!crossimpl) ''
+      # ─── DNS stub: dig against the TUN intercept ──────────────────
+      # tests/netns.rs covers wire-format-vs-kernel-checksum already
+      # (single bwrap'd netns, dig). Here we prove what netns CAN'T:
+      # the NixOS module's freeform settings type passes DNSAddress/
+      # DNSSuffix through to /etc/tinc/mesh/tinc.conf unmolested,
+      # under the real systemd unit's /run/ layout, with the iface
+      # configured by networking.interfaces (not `ip addr` in a
+      # script). Same dig assertions; what's tested is the plumbing.
+
+      with subtest("DNS config plumbed through NixOS module"):
+          # DNSAddress sits in the generated tinc.conf, not silently
+          # filtered by some module-level allowlist. Direct file
+          # check — the daemon reading it is proven by dig below.
+          alpha.succeed("grep -F 'DNSAddress=10.20.0.53' /etc/tinc/mesh/tinc.conf")
+          alpha.succeed("grep -F 'DNSSuffix=tinc.internal' /etc/tinc/mesh/tinc.conf")
+
+      with subtest("DNS stub: A record"):
+          out = alpha.succeed(
+              "dig @10.20.0.53 +short +tries=1 +timeout=2 beta.tinc.internal A"
+          ).strip()
+          assert out == "10.20.0.2", f"expected beta's /32, got {out!r}"
+
+      with subtest("DNS stub: PTR"):
+          # `dig -x 10.20.0.2` → 2.0.20.10.in-addr.arpa PTR. Our
+          # PTR lookup walks the same subnet tree as route(); if
+          # ADD_SUBNET-from-gossip didn't land in the tree, this is
+          # NXDOMAIN. Proves DNS sees the live table, not a snapshot.
+          out = alpha.succeed(
+              "dig @10.20.0.53 +short +tries=1 +timeout=2 -x 10.20.0.2"
+          ).strip()
+          assert out == "beta.tinc.internal.", f"got {out!r}"
+
+      with subtest("DNS stub: NXDOMAIN, no forward"):
+          # Not in our suffix → NXDOMAIN immediately. If the daemon
+          # tried to forward, dig would time out (the test VMs have
+          # no real upstream).
+          out = alpha.succeed(
+              "dig @10.20.0.53 +tries=1 +timeout=2 google.com A"
+          )
+          assert "NXDOMAIN" in out, f"expected NXDOMAIN; got:\n{out}"
+    ''}
   '';
 }

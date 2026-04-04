@@ -216,6 +216,16 @@ fn enter_netns(test_name: &str) -> Option<NetNs> {
         .args(["--dev-bind", "/dev/urandom", "/dev/urandom"])
         .args(["--proc", "/proc"])
         .args(["--tmpfs", "/run"])
+        // NixOS PATH lives at /run/current-system/sw/bin; the tmpfs
+        // above wiped it. ip/ping/unshare survive (the dev shell
+        // puts them at /nix/store paths in PATH), but dig/socat are
+        // host-level packages — only there. ro-bind it back over the
+        // tmpfs. Conditional: non-NixOS doesn't have it.
+        .args(if std::path::Path::new("/run/current-system").exists() {
+            &["--ro-bind", "/run/current-system", "/run/current-system"][..]
+        } else {
+            &[]
+        })
         .arg("--")
         .arg(&self_exe)
         .args(["--exact", test_name, "--nocapture", "--test-threads=1"])

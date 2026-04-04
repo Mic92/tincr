@@ -422,7 +422,7 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
             // Header-only error response. Echo ID + RD; QDCOUNT=0.
             // RFC 2308 §2.1 says we SHOULD include the question
             // section, but for FORMERR we may not have parsed it.
-            return Some(build_error(id, rd, rcode, &[]));
+            return Some(build_error(id, rd, rcode, &[], 0));
         }
     };
 
@@ -437,12 +437,24 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
             .strip_suffix(&suffix_lc)
             .and_then(|s| s.strip_suffix('.'))
         else {
-            return Some(build_error(q.id, q.rd, RCODE_NXDOMAIN, q.qname_wire));
+            return Some(build_error(
+                q.id,
+                q.rd,
+                RCODE_NXDOMAIN,
+                q.qname_wire,
+                q.qtype,
+            ));
         };
         // No further dots — `<service>.<node>.suffix` isn't a thing
         // (yet — see hyprspace's two-level names if we ever want it).
         if node.contains('.') {
-            return Some(build_error(q.id, q.rd, RCODE_NXDOMAIN, q.qname_wire));
+            return Some(build_error(
+                q.id,
+                q.rd,
+                RCODE_NXDOMAIN,
+                q.qname_wire,
+                q.qtype,
+            ));
         }
         // Walk the subnet tree, collect host-prefix subnets owned by
         // `node`. Case-insensitive owner compare: tinc names are
@@ -542,7 +554,13 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
             None
         };
         let Some(owner) = owner else {
-            return Some(build_error(q.id, q.rd, RCODE_NXDOMAIN, q.qname_wire));
+            return Some(build_error(
+                q.id,
+                q.rd,
+                RCODE_NXDOMAIN,
+                q.qname_wire,
+                q.qtype,
+            ));
         };
         // RDATA is the wire-encoded `<owner>.<suffix>.`
         let target = format!("{}.{}", owner.to_ascii_lowercase(), cfg.suffix);
@@ -555,7 +573,13 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
     // distinction between "no such name" and "I don't speak SRV"
     // doesn't matter for a private stub, and NXDOMAIN gets cached
     // properly).
-    Some(build_error(q.id, q.rd, RCODE_NXDOMAIN, q.qname_wire))
+    Some(build_error(
+        q.id,
+        q.rd,
+        RCODE_NXDOMAIN,
+        q.qname_wire,
+        q.qtype,
+    ))
 }
 
 /// One Resource Record. NAME echoed verbatim (wire format) — no
@@ -576,11 +600,19 @@ fn build_rr(name_wire: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
 }
 
 /// Header-only or header+question error response.
-fn build_error(id: u16, rd: bool, rcode: u16, qname_wire: &[u8]) -> Vec<u8> {
+///
+/// The echoed question section MUST include the original QTYPE —
+/// dig 9.20 validates `QNAME/QTYPE/QCLASS` of the echoed question
+/// against what it sent and rejects on mismatch ("Question section
+/// mismatch: got x/TYPE0/IN"). Older resolvers tolerated qtype=0.
+/// Caught by the NixOS test (real dig); the bwrap'd netns test was
+/// silently SKIPping (`--tmpfs /run` wiped /run/current-system/sw,
+/// where dig lives on NixOS).
+fn build_error(id: u16, rd: bool, rcode: u16, qname_wire: &[u8], qtype: u16) -> Vec<u8> {
     // Reuse the full builder with zero answers — same wire shape.
     // qname_wire empty → QDCOUNT=0 (the FORMERR case where we
-    // couldn't parse the question).
-    build_response(id, rd, rcode, qname_wire, 0, &[])
+    // couldn't parse the question; qtype is ignored then).
+    build_response(id, rd, rcode, qname_wire, qtype, &[])
 }
 
 /// Full response: header + (echoed) question + answers.
@@ -932,6 +964,39 @@ mod tests {
         assert_eq!(
             u16::from_be_bytes([resp[2], resp[3]]) & 0x0F,
             RCODE_NXDOMAIN
+        );
+    }
+
+    /// REGRESSION: NXDOMAIN must echo the question section with the
+    /// ORIGINAL qtype, not 0. dig 9.20 validates qname/qtype/qclass
+    /// of the echoed question against what it sent ("Question section
+    /// mismatch: got x/TYPE0/IN") and discards the whole response.
+    /// First caught by `nix/nixos-test.nix`; the bwrap'd netns test
+    /// was silently SKIPping (no dig in `--tmpfs /run`).
+    #[test]
+    fn nxdomain_echoes_qtype() {
+        let t = SubnetTree::new();
+        let q = mk_query("google.com", TYPE_A);
+        let resp = answer(&q, &cfg(), &t, "myself").unwrap();
+
+        assert_eq!(
+            u16::from_be_bytes([resp[2], resp[3]]) & 0x0F,
+            RCODE_NXDOMAIN
+        );
+        // QDCOUNT=1 → question section follows the 12-byte header.
+        assert_eq!(u16::from_be_bytes([resp[4], resp[5]]), 1);
+        // QNAME wire = encode_name("google.com") = 12 bytes.
+        // QTYPE is at [12 + qname_len .. +2].
+        let qname_len = encode_name("google.com").len();
+        let qtype_off = DNS_HDR_LEN + qname_len;
+        assert_eq!(
+            u16::from_be_bytes([resp[qtype_off], resp[qtype_off + 1]]),
+            TYPE_A,
+            "echoed qtype must match query (was 0 — dig 9.20 rejects)"
+        );
+        assert_eq!(
+            u16::from_be_bytes([resp[qtype_off + 2], resp[qtype_off + 3]]),
+            CLASS_IN
         );
     }
 
