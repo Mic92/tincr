@@ -61,7 +61,7 @@ impl Daemon {
     /// `handle_new_meta_connection` (`net_socket.c:734-779`).
     /// accept → tarpit-check → configure_tcp → allocate → register.
     pub(super) fn on_tcp_accept(&mut self, i: u8) {
-        let listener = &self.listeners[usize::from(i)];
+        let listener = &self.listeners[usize::from(i)].listener;
 
         // C `:745`. socket2 accept4(SOCK_CLOEXEC) fixes the C's
         // small CLOEXEC leak into script.c children for free.
@@ -178,8 +178,8 @@ impl Daemon {
         // get a slice. C is level-triggered so it just returns and
         // gets called again — same effect, no rearm syscall.
         if count == UDP_RX_BATCH
-            && let Some(&io_id) = self.listener_udp_io.get(usize::from(i))
-            && let Err(e) = self.ev.rearm(io_id)
+            && let Some(slot) = self.listeners.get(usize::from(i))
+            && let Err(e) = self.ev.rearm(slot.udp_io)
         {
             log::error!(target: "tincd::net", "UDP fd rearm failed: {e}");
         }
@@ -189,7 +189,7 @@ impl Daemon {
     /// messages the kernel gave us (0..=64). Separate fn so the
     /// `batch` borrow doesn't overlap `&mut self` at the call site.
     fn recvmmsg_batch(&mut self, i: u8, batch: &mut UdpRxBatch) -> usize {
-        let fd = self.listeners[usize::from(i)].udp.as_raw_fd();
+        let fd = self.listeners[usize::from(i)].listener.udp.as_raw_fd();
 
         // ─── Phase 1: syscall + extract (len, peer) per message.
         //
@@ -403,7 +403,7 @@ impl Daemon {
                     && tunnel.udp_addr != Some(peer_addr)
                 {
                     let listener_addrs: Vec<SocketAddr> =
-                        self.listeners.iter().map(|l| l.local).collect();
+                        self.listeners.iter().map(|s| s.listener.local).collect();
                     let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
                     if !tunnel.status.udp_confirmed {
                         log::debug!(target: "tincd::net",
@@ -486,7 +486,8 @@ impl Daemon {
         if let Some(peer_addr) = peer.filter(|_| direct) {
             // Resolve listener index once instead of per-send;
             // answer doesn't change while udp_addr doesn't.
-            let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
+            let listener_addrs: Vec<SocketAddr> =
+                self.listeners.iter().map(|s| s.listener.local).collect();
             let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
             let tunnel = self.tunnels.entry(from_nid).or_default();
             if !tunnel.status.udp_confirmed {
@@ -1847,17 +1848,17 @@ impl Daemon {
         if self.settings.priorityinheritance {
             let prio = self.tx_priority;
             let sock_idx = usize::from(sock);
-            if self.listener_tos.get(sock_idx).copied() != Some(prio)
-                && let Some(l) = self.listeners.get(sock_idx)
+            if let Some(slot) = self.listeners.get_mut(sock_idx)
+                && slot.last_tos != prio
             {
-                self.listener_tos[sock_idx] = prio;
-                set_udp_tos(l, sockaddr.is_ipv6(), prio);
+                slot.last_tos = prio;
+                set_udp_tos(&slot.listener, sockaddr.is_ipv6(), prio);
             }
         }
 
         // C `:1044`
-        if let Some(l) = self.listeners.get(usize::from(sock))
-            && let Err(e) = l.udp.send_to(&self.tx_scratch, sockaddr)
+        if let Some(slot) = self.listeners.get(usize::from(sock))
+            && let Err(e) = slot.listener.udp.send_to(&self.tx_scratch, sockaddr)
         {
             if e.kind() == io::ErrorKind::WouldBlock {
                 // Drop; UDP is unreliable.

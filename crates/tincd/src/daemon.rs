@@ -816,6 +816,18 @@ pub enum RunOutcome {
     PollError,
 }
 
+/// Daemon-side wrapper around `Listener`. Bundles the event-loop
+/// `IoId` (for UDP rearm after a `recvmmsg` batch cap; bug audit
+/// `deef1268`) and the last `IP_TOS`/`IPV6_TCLASS` set on the UDP
+/// socket (`listen_socket[sock].priority`, `net_packet.c:921`; only
+/// `setsockopt` when changed). Kept here, not on `Listener`, so
+/// `listen.rs` stays event-loop-agnostic.
+pub(crate) struct ListenerSlot {
+    pub(crate) listener: Listener,
+    pub(crate) udp_io: IoId,
+    pub(crate) last_tos: u8,
+}
+
 /// The daemon. C globals as fields; `run()` is `main_loop()`.
 ///
 /// Why fields are `pub(crate)` not `pub`: the loop body matches on
@@ -863,20 +875,7 @@ pub struct Daemon {
     /// `Vec` not array because `Listener` doesn't impl `Default`
     /// (sockets aren't defaultable). The C uses `static listen_
     /// socket_t[8]` zero-init; we just push.
-    pub(crate) listeners: Vec<Listener>,
-
-    /// `IoId` for each listener's UDP socket, parallel to
-    /// `listeners`. Stored so `on_udp_recv` can `rearm()` after
-    /// hitting its drain-loop cap (sibling of `device_io`; bug
-    /// audit `deef1268`). The TCP listener fds don't need this:
-    /// `on_tcp_accept` does one accept per edge.
-    pub(crate) listener_udp_io: Vec<IoId>,
-
-    /// `listen_socket[sock].priority` (`net_packet.c:921`). Last
-    /// `IP_TOS`/`IPV6_TCLASS` set on each UDP socket; only setsockopt
-    /// when changed. Parallel to `listeners`. Kept here, not on
-    /// `Listener`, to avoid touching `listen.rs` (sockopts agent).
-    pub(crate) listener_tos: Vec<u8>,
+    pub(crate) listeners: Vec<ListenerSlot>,
 
     /// `check_tarpit` statics + `tarpit()` ring buffer. Seven C
     /// statics packed into one struct. Mutated on every TCP accept.
@@ -1778,8 +1777,6 @@ impl Daemon {
             settings.addressfamily,
             &settings.sockopts,
         );
-        let mut listener_udp_io = Vec::with_capacity(listeners.len());
-        let listener_tos = vec![0u8; listeners.len()];
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
         // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
         // atoi(myport) == 0`; we always read back — simpler, same
@@ -1792,10 +1789,18 @@ impl Daemon {
                 "Unable to create any listening socket!".into(),
             ));
         }
+        // C `control.c:155-176`: get listeners[0]'s bound addr, map
+        // 0.0.0.0→127.0.0.1, format `"HOST port PORT"`. The CLI on
+        // Windows (no unix socket) actually CONNECTS to this addr.
+        // On Unix the CLI uses the unix socket and ignores the addr,
+        // but the pidfile format is fixed. Computed here, before
+        // `listeners` is consumed into `ListenerSlot`s.
+        let address = pidfile_addr(&listeners);
         // Register each pair. C `:723-724`: `io_add(&sock->tcp, ...)`.
         // The index `i` becomes `IoWhat::Tcp(i)` so the dispatch arm
         // can index back into `listeners[i]` for the accept.
-        for (i, l) in listeners.iter().enumerate() {
+        let mut listener_slots = Vec::with_capacity(listeners.len());
+        for (i, l) in listeners.into_iter().enumerate() {
             let (tcp_fd, udp_fd) = l.fds();
             // u8 cast: MAXSOCKETS=8 fits trivially. The C uses int.
             #[allow(clippy::cast_possible_truncation)]
@@ -1805,18 +1810,15 @@ impl Daemon {
             let udp_io = ev
                 .add(udp_fd, Io::Read, IoWhat::Udp(i))
                 .map_err(SetupError::Io)?;
-            listener_udp_io.push(udp_io);
+            listener_slots.push(ListenerSlot {
+                listener: l,
+                udp_io,
+                last_tos: 0,
+            });
         }
 
         // ─── init_control (net_setup.c:1263, control.c:148-231)
         let cookie = generate_cookie();
-
-        // C `control.c:155-176`: get listeners[0]'s bound addr, map
-        // 0.0.0.0→127.0.0.1, format `"HOST port PORT"`. The CLI on
-        // Windows (no unix socket) actually CONNECTS to this addr.
-        // On Unix the CLI uses the unix socket and ignores the addr,
-        // but the pidfile format is fixed.
-        let address = pidfile_addr(&listeners);
         write_pidfile(pidfile, &cookie, &address).map_err(SetupError::Io)?;
 
         let control = ControlSocket::bind(socket).map_err(|e| match e {
@@ -1923,9 +1925,7 @@ impl Daemon {
             conn_io: slotmap::SecondaryMap::new(),
             device,
             control,
-            listeners,
-            listener_udp_io,
-            listener_tos,
+            listeners: listener_slots,
             // Tarpit::new wants a now seed (avoids the C's `static
             // time_t = 0` first-tick bug). Use the cached now.
             tarpit: Tarpit::new(timers.now()),

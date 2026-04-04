@@ -1104,7 +1104,8 @@ impl Daemon {
     /// adapt_socket folded in (dual-stack: v6 target needs v6 socket).
     /// `&mut self` for the cycle counter (C function-static).
     pub(super) fn choose_udp_address(&mut self, to_nid: NodeId) -> Option<(SocketAddr, u8)> {
-        let listener_addrs: Vec<SocketAddr> = self.listeners.iter().map(|l| l.local).collect();
+        let listener_addrs: Vec<SocketAddr> =
+            self.listeners.iter().map(|s| s.listener.local).collect();
 
         // ─── send_locally override (C `:1033-1036`, folded in) ───
         let send_locally = self
