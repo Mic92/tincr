@@ -84,48 +84,6 @@ After source inspection, **none of the SPTPS crypto primitives match off-the-she
 
 The vendored `src/ed25519/` and `src/chacha-poly1305/` directories **are the wire protocol spec.** As of Phase 0a, KAT vectors are extracted (`crates/tinc-crypto/tests/kat/vectors.json`, reproducible via `nix build .#kat-vectors`) and the Rust replacements pass byte-for-byte. The C sources still must not be deleted — they remain the regenerate-vectors-after-upstream-merge mechanism, and Phase 0b's FFI harness links them.
 
-### Findings from Phase 0a
-
-Three assumptions in the original plan turned out wrong on inspection:
-
-1. **`chacha20` crate has no `legacy` feature.** `ChaCha20Legacy` is unconditionally exported in 0.9.x. The plan's dependency line was a phantom from older docs. (Fixed in `Cargo.toml`.)
-
-2. **tinc's base64 is more broken than "permissive alphabet".** It packs bits LSB-first within each 3-byte group: `triplet = b[0] | b[1]<<8 | b[2]<<16`, then emits the *low* 6 bits first. RFC 4648 packs MSB-first. These are different *output strings*, not just different decode tables — `tinc_b64([0x48]) == "IB"`, RFC 4648 gives `"SA"`. The dual-alphabet decoder is layered on top of that. No `base64` crate engine config can produce this; it's a hand-roll regardless.
-
-### Findings from Phase 0b
-
-One behaviour the plan didn't anticipate, surfaced by the re-KEX test:
-
-**During rekey, the responder's SIG and ACK both go out under the *old* `outcipher`.** Reading `receive_sig`: when `outstate` is already true (i.e. this is a rekey, not the initial handshake), it does `send_sig()` → `send_ack()` → *then* `chacha_poly1305_set_key(outcipher, new_key)`. Both sends use `send_record_priv` which checks the `outstate` flag (true) and encrypts with whatever `outcipher` currently holds (old key). The new key takes effect on the *next* record after.
-
-Phase 2's Rust state machine must replicate this ordering. The natural "set key, then send" structure is wrong here. **Replicated in `state.rs::receive_sig`; `rust_vs_c_rekey` is the test.**
-
-### Findings from Phase 2
-
-Two state-representation issues, one RNG-bridge subtlety. None of these are wire-format bugs — the interop tests passed before they were fixed — but the byte-identity test caught all three.
-
-1. **`outstate` (bool) vs `outcipher` (ctx*) are separate in C, collapsed into `Option<ChaPoly>` in Rust.** `receive_sig` replaces `outcipher` but doesn't touch `outstate`; `receive_handshake` then checks `if(s->outstate)` — which is the *old* value (set later, on line 423). Collapsing into one Option loses that bit. `receive_sig` returns `was_rekey: bool` to thread it through; the alternative is keeping a redundant field that exists only because the C did.
-
-2. **`chacha.c`'s `chacha_encrypt_bytes` is block-granular.** Counter increments on every call exit, even partial-block. Two consecutive `randomize(32)` calls produce block-0 bytes 0..32, then block-**1** bytes 0..32; block-0's unused half is discarded. `chacha20::ChaCha20Legacy::apply_keystream` is byte-granular and would give block-0 bytes 32..64 for the second call. `BridgeRng` in `tests/vs_c.rs` seeks to the next 64-byte boundary after each fill. **This is a test-harness quirk, not a state-machine bug** — the interop tests pass without it because each side agrees with itself.
-
-3. **Stream-mode `sptps_receive_data` processes one record per call.** No outer loop; it returns `total_read < len` and `protocol.c` calls it again with the tail. The Rust `receive` mimics this so the differential test can be strict about per-call consumed-byte counts. Phase 4's protocol layer needs to know to loop.
-
-3. **`key_exchange.c` does not validate the Edwards point.** It does `fe_frombytes` (which just masks bit 255 and loads whatever's left as a field element) then applies the birational map blindly. The clean Rust path — `CompressedEdwardsY::decompress()?.to_montgomery()` — *validates*, and would reject inputs the C code accepts. `curve25519-dalek` keeps `FieldElement` private with no escape hatch, so `tinc-crypto::ecdh` vendors ~50 lines of 51-bit-limb field arithmetic (`fe` module) to do `(1+y)/(1-y)` without a curve check. The KATs prove it matches; the math is the same ref10 schoolbook every Curve25519 impl uses.
-
----
-
-## Strategy: Strangler Fig, Not Big Bang
-
-A 33k LOC ground-up rewrite of a daemon with two custom security protocols is a multi-year effort with high risk of subtle interop regressions. Instead:
-
-1. **Phase 0** — Extract KAT vectors from the C crypto, build an SPTPS-only FFI harness, capture wire-traffic corpus.
-2. **Phases 1–4** — Replace subsystems leaf-first, keeping `tincd` shippable at every step.
-3. **Phase 5** — Drop the C event loop, switch to a Rust `main()`.
-
-Each phase ends with the existing `test/integration/*.py` suite passing.
-
----
-
 ## Workspace Layout
 
 ```
@@ -149,419 +107,229 @@ crates/
 xtask/                      # interop test harness
 ```
 
-**Key principle:** `tinc-proto`, `tinc-sptps`, `tinc-graph` must be `#![no_std]`-compatible (or at least zero-syscall pure libraries) so they can be exhaustively fuzzed and property-tested without spinning up sockets.
+**Key principle:** `tinc-proto`, `tinc-sptps`, `tinc-graph` are
+zero-syscall pure libraries — exhaustively fuzzable and
+property-testable without spinning up sockets.
 
 ---
 
-## Phase 0 — KATs, Corpus, and SPTPS Harness (~3 weeks)
+## What landed (per-crate)
 
-**Goal:** Lock down ground truth before writing any production Rust.
+The original plan had Phase 0-5 milestones; in practice everything
+below shipped leaf-first with the daemon assembled last (see the
+Status chunk-table at top). Per-crate findings here are the
+wire-adjacent ones — anything that affects interop. Full reasoning
+lives in source-file doc-comments.
 
-### ✅ 0a. Crypto KAT vectors + `tinc-crypto`
+### KAT generators + `tinc-ffi`
 
-**Done.** Approach taken differs from the original plan in one significant way: rather than instrumenting `sptps_test`, we built a standalone generator (`kat/gen_kat.c`) that links the crypto sources directly. This avoids meson entirely — the crypto subset has no per-OS code, so a single `cc` invocation suffices.
+`kat/gen_kat.c` (344 LOC) links the crypto C sources directly via
+the header-guard suppression trick (`-DTINC_SYSTEM_H ...` makes real
+headers no-op; force-include a 50-line shim for `xzalloc`/`xzfree`/
+`mem_eq`). Breaks loudly at compile time if upstream renames a
+guard. `nix build .#kat-vectors` reproduces `vectors.json`
+byte-identically. Same shape for `nix build .#kat-graph`.
 
-The trick that makes it work without patching upstream: predefine the include guards (`-DTINC_SYSTEM_H -DTINC_UTILS_H ...`) so the real headers become no-ops, then force-include a 50-line shim (`kat/system.h`) that provides the three symbols the crypto actually needs (`xzalloc`, `xzfree`, `mem_eq`). Breaks loudly at compile time if upstream renames a guard, which is exactly when we want to notice.
+`tinc-ffi` wraps **only** `sptps.c` + crypto deps via `cc::Build`
+(no bindgen). `csrc/shim.c` provides deterministic `randomize()`
+(ChaCha20 keystream, per-test seed). Safe wrapper with lifetime `'k`
+tying session to keys (`sptps_t` borrows the `ecdsa_t*`). 6 tests
+incl. byte-by-byte dribble feed and re-KEX. The protocol handlers
+(`protocol_*.c`) are deliberately NOT wrapped — they `sscanf` and
+immediately mutate global splay trees; no parse seam.
 
-What landed:
+**Wire-traffic corpus never built** — superseded by
+`tests/crossimpl.rs` (S4), which found wire bugs (UDP-label NUL,
+HKDF input) an `LD_PRELOAD` `send_request` replay couldn't have.
 
-| Artifact | Coverage |
-|---|---|
-| `kat/gen_kat.c` (344 LOC) | 10 ChaPoly cases (seqno {0, 1, 256, 2³²-1, distinct-bytes}, ptlen {0, 1, 63, 64, 65, 100, 1500}), 5 ECDH pairs, 9 PRF cases (incl. outlen=128 = `sizeof(sptps_key_t)`, secret>128 = HMAC key-hash path, empty secret), 5 sign cases, 9 b64 cases |
-| `crates/tinc-crypto/tests/kat/vectors.json` | Committed; `nix build .#kat-vectors` reproduces byte-identically |
-| `crates/tinc-crypto` (1000 LOC, `#![forbid(unsafe_code)]`, clippy pedantic) | All 5 primitives; 7 KAT tests pass |
+### `tinc-crypto` — five bespoke primitives
 
-**`sign.c` is confirmed standard RFC 8032** — dalek's `raw_sign::<Sha512>` matches byte-for-byte, fed via `hazmat::ExpandedSecretKey`. Verify uses dalek's `verify` (not `verify_strict`) to accept the same malleable-sig edge cases the C code does.
+~1000 LOC, `#![forbid(unsafe_code)]`. All KAT-locked. Doc-comments
+in each module are authoritative; key constraints:
 
-**PEM-ish key files landed in `tinc-conf`** — see Phase 1.
-
-### ✅ 0b. SPTPS-only FFI
-
-**Done.** `tinc-ffi` wraps **only** `sptps.c` + its crypto deps. The protocol handlers (`protocol_*.c`) are deliberately not wrapped — they `sscanf` and immediately mutate global splay trees, there's no parse seam.
-
-What landed:
-
-- `build.rs` (`cc::Build`, no bindgen): compiles `sptps.c` + the same crypto file set as Phase 0a + `ecdh.c` (sptps wraps the raw `ed25519_key_exchange` in an alloc-then-compute API). Same header-guard suppression; `csrc/shim.h` force-included for `xzalloc`/`memzero`/`mem_eq`/`randomize`/`prf` prototypes plus the `ecdsa_t` forward typedef.
-- `csrc/shim.c`: deterministic `randomize()` (ChaCha20 keystream, seed set per-test), our own `ecdsa_t` (96-byte blob, matches `tinc-crypto::SigningKey::to_blob`), event sink (flat byte arena, drained after each FFI return). `sizeof.c` is the one TU that includes real `sptps.h` to export `SPTPS_T_SIZE`.
-- `lib.rs`: safe wrapper. `CSptps::start(role, framing, &mykey, &hiskey, label) → (Self, Vec<Event>)`; `.receive(&[u8]) → (consumed, Vec<Event>)`; `.send_record(type, &[u8]) → Vec<Event>`; `.force_kex()`. Lifetime `'k` ties session to keys (sptps_t borrows the `ecdsa_t*`, doesn't copy). Process-global `seed_rng()` + `serial_guard()` mutex.
-- `tests/handshake.rs`: 6 tests — stream handshake, datagram handshake, byte-by-byte dribble feed, determinism (run twice, diff wire bytes), wrong-key SIG-verify failure, re-KEX (the SPTPS_ACK state). Top-of-file comment is a precise trace of the handshake state machine derived from reading `sptps.c`.
-
-The six tests are also the *spec* for Phase 2: the same test bodies will run with one peer swapped for `tinc-sptps`, asserting identical event sequences.
-
-### ~~0c. Wire-traffic corpus~~ — superseded by S4
-
-Never built. `tests/crossimpl.rs` (chunk 11) tests Rust↔C live, both
-directions, and found wire bugs (UDP-label NUL) that an `LD_PRELOAD`
-`send_request` replay couldn't have. The 20 `sscanf` format strings
-ARE pinned: every KAT in `tinc-proto` is a captured C output line.
-
----
-
-## Phase 1 — Pure Logic Crates (~4 weeks)
-
-These have no I/O and are the safest place to start. They map almost 1:1 to existing C files.
-
-### ✅ `tinc-proto` — done modulo intentional deferrals
-| C source | Rust module | Notes |
-|---|---|---|
-| ✅ `protocol.h` request enum | `request.rs` | `#[repr(u8)]`, `Request::peek()` is the `atoi` dispatch |
-| ✅ `protocol_edge.c` | `msg/edge.rs` | `AddEdge` (6-or-8 fields), `DelEdge` |
-| ✅ `protocol_subnet.c` | `msg/subnet.rs` | Shares one struct — same wire shape |
-| ✅ `protocol_misc.c` | `msg/misc.rs` | `TcpPacket`, `SptpsPacket`, `UdpInfo`, `MtuInfo`. Body-less `PING`/`PONG`/`TERMREQ` need no struct. |
-| ✅ `protocol_key.c` | `msg/key.rs` | `KeyChanged`, `ReqKey` (with the extension hole), `AnsKey` |
-| ✅ `subnet_parse.c` | `subnet.rs` | `str2net`/`net2str`/`maskcheck` |
-| ✅ `netutl.c` (`sockaddr2str` shape) | `addr.rs` | `AddrStr` newtype — see below |
-| ⏸️ `protocol_auth.c` | `msg/auth.rs` | Deferred to Phase 4 — see below |
-| ⏸️ `utils.c` `b64decode_tinc` | | First consumer is the `REQ_KEY` SPTPS payload decode, which is daemon-side. The encoder is already in `tinc-crypto`. |
-
-**What landed:** ~2400 LOC across two commits. 41 unit tests (KAT strings lifted directly from the `printf`/`sscanf` format strings) + 11 proptests at 1–2k cases each. `nom` was wrong: 23 sscanf call sites, all `%d`/`%x`/`%s` over space-separated tokens — a 60-LOC tokenizer (`tok.rs`) covers them all.
-
-**Findings from `tinc-proto`:**
-
-- **`AddrStr` is opaque.** `str2sockaddr` has an `AF_UNKNOWN` escape: `getaddrinfo(AI_NUMERICHOST)` failure stuffs the input string verbatim into `sa->unknown.{address,port}`, and `sockaddr2str` round-trips it. So at the parse layer, address fields are arbitrary whitespace-free tokens. `IpAddr::parse` would reject inputs the C accepts and forwards to the next hop. Resolution happens at `connect()` time, not parse time.
-
-- **Optional trailing fields are atomic pairs.** `add_edge_h` accepts `parameter_count == 6 || == 8`, never 7. `ans_key_h` accepts `>= 7` but the 8-case (one trailing token) is UB-adjacent in C. Both modeled as `Option<(_, _)>` with both-or-neither parse.
-
-- **`REQ_KEY` is two messages stapled.** Base `sscanf` accepts an optional fourth `%d` (sub-request type, re-uses `request_t` enum values), then `req_key_ext_h` re-scans for a fifth. We fuse: `Option<ReqKeyExt { reqno: i32, payload: Option<String> }>`. `reqno` stays raw `i32` because the C has a `default:` case that logs and continues — unknown sub-types are not parse errors.
-
-- **`%hd`-then-check-negative is a bounds check.** `tcppacket_h` parses length as `short` then checks `< 0`. Send side emits `%d` from a `uint16_t`; values ≥ 32768 wrap negative under `%hd` and get rejected. Same bound from parsing as `i16`.
-
-- **MAC must be tried before v6 in `str2net`.** `1:2:3:4:5:6` is valid syntax for both. Order matters; `mac_shadows_v6` test pins it.
-
-- **`KEY_CHANGED` skips `check_id`**, just `lookup_node`, fails soft. Replicated.
-
-**Why `protocol_auth.c` is deferred:** `id_h` parses `"%d.%d"` (major.minor) and writes `c->protocol_minor`; `ack_h` reads it back to gate 1.1 features. The parse and the connection-state mutation are *one* `sscanf`-then-if-chain in C with no clean cut point. The struct boundary is artificial there. Better done alongside the `connection_t` port in Phase 4, where the parse output feeds directly into the state it's coupled to.
-
-**Phase 0c (wire corpus) didn't block.** The KAT strings were transcribed by hand from the format strings + integration test configs. Corpus would still strengthen the tests — promote to nice-to-have.
-
-### ✅ `tinc-graph` — algorithms done, mutation deferred to first consumer
-| C source | Rust | Status |
-|---|---|---|
-| `splay_tree.c`, `list.c`, `hash.h` | `BTreeMap` / `Vec` / `VecDeque` | ✅ Not ported, replaced |
-| `graph.c` `sssp_bfs` | `Graph::sssp` | ✅ 18 KATs |
-| `graph.c` `mst_kruskal` | `Graph::mst` | ✅ 18 KATs |
-| `graph.c` `check_reachability` | — | ⏸️ Phase 5 — it's `execute_script`/`sptps_stop`/`timeout_del`, ~10 lines of actual diff logic |
-| `edge.c` `edge_add`/`lookup_edge` | `Graph::add_edge` (auto-links `reverse`) | ✅ |
-| `edge.c` `edge_del` | `Graph::del_edge` | ⏸️ Append-only slab can't delete in O(1); needs free-list or `slotmap`. First consumer is `del_edge_h` in Phase 5. |
-| `node.c` `lookup_node`, `node_add`/`node_del` | name→`NodeId` index | ⏸️ Same: first consumer is the daemon's `*_h` handlers |
-| `subnet.c` `lookup_subnet_*` (longest-prefix match) | route trie | ⏸️ First consumer is `route.c` in Phase 5 |
-
-**What landed:** ~540 LOC Rust + 600 LOC KAT generator. The generator includes the real `splay_tree.c`/`list.c` and copies `mst_kruskal`/`sssp_bfs` bodies verbatim from `graph.c`, so divergence shows up as either a build break or a KAT diff. `nix build .#kat-graph` reproduces the committed `tests/kat/graph.json`.
-
-The arena idea held up: `Vec<Node>`, `Vec<Edge>`, `NodeId(u32)`/`EdgeId(u32)` typed handles. No `slotmap` yet — the KAT graphs are append-only, so a plain slab is enough for now. Delete needs the free-list and lands with its first consumer.
-
-`BTreeMap<(weight, from_name, to_name), EdgeId>` is the `edge_weight_tree` analogue. The names are *cloned into the key* to dodge a borrow tangle (iterating the map while indexing `nodes` for compares). Tens of bytes per edge; cheap.
-
-**Findings from `tinc-graph`:**
-
-- **The indirect→direct upgrade overwrites `distance` but not `nexthop`.** `sssp_bfs` line 180's revisit clause (`!e->to->status.indirect || indirect`) makes a direct path always win over an indirect one, *regardless of hop count*. Then lines 188-191 gate `nexthop`/`weighted_distance` separately on a stricter condition (same-hops-and-lighter). So a node first reached indirectly at distance 1, then upgraded to direct at distance 3, ends up with `distance=3, weighted_distance=<from the dist-1 path>`. Internally inconsistent — but `via` (the UDP hole-punch target) is set unconditionally on revisit, and that's what matters. The KAT `diamond_indirect` pins it; `indirect_upgrade_can_increase_distance` is the dedicated trip-wire.
-
-- **Iteration order is part of the contract.** Per-node edges are `splay_each`-ordered by `to->name`; the global edge set by `(weight, from->name, to->name)`. When two paths tie on `(distance, weighted_distance, indirect)`, the alphabetically-earlier neighbor wins. We sort the per-node `Vec` on insert (cached `to_name` field on `Edge` to avoid the comparator borrowing `nodes`).
-
-- **Kruskal-without-union-find rewinds.** Progress-after-skip resets the iterator to head. Without it, a light edge between two unvisited nodes is skipped on the first pass and never revisited. KAT `mst_rewind`.
-
-- **One-way edges are skipped.** `!e->reverse → continue` in both algorithms. They exist transiently between the two halves of an `ADD_EDGE` pair. KAT `oneway`.
-
-- **`sssp` returns a side table, not in-place mutation.** The C writes routing fields directly into `node_t`; we return `Vec<Option<Route>>` indexed by `NodeId`. Two reasons: borrowck (mutating the slab while iterating it), and the daemon wants to diff old-vs-new before applying — `check_reachability`'s up/down detection becomes a clean `old.is_some() != new.is_some()`.
-
-**Testing approach was right.** "Generate random graphs, diff the tables" — except FFI was the wrong harness. `graph.c` reads `node_t` fields scattered across a 200-byte struct embedded in global splay trees; building those from Rust would mean replicating half of `node.c`. The standalone C generator (8 hand-built + 10 random cases → JSON) is the same shape as `kat/gen_kat.c` and dodges all of it. Hand-built cases each pin one branch (the two diamonds, the rewind, the one-way skip, the asymmetric weight); random cases catch interactions.
-
-### ✅ `tinc-conf`
-| C source | Rust | Status |
-|---|---|---|
-| `conf.c` `parse_config_line` | `parse::parse_line` | ✅ All 4 separator forms (`K=V`, `K V`, `K = V`, `K\t=\tV`) parse identically |
-| `conf.c` `read_config_file` | `parse::parse_file` | ✅ PEM-block skip (`-----BEGIN`..`END`), `#` comments, CRLF |
-| `conf.c` `config_compare` + `lookup_config{,_next}` | `Config` (sorted `Vec`) | ✅ Full 4-tuple ordering preserved |
-| `conf.c` `get_config_{bool,int,string}` | `Entry::get_{bool,int,str}` | ✅ `get_int` tightened: rejects trailing garbage |
-| `ecdsa.c` `read_pem` / `ecdsagen.c` `write_pem` | `pem::{read,write}_pem` | ✅ `Zeroizing` everywhere keys flow |
-| `conf_net.c` `get_config_subnet` | — | ⏸️ Daemon glue: `tinc-proto::Subnet::from_str` already does the parse |
-| `conf.c` `get_config_address` | — | ⏸️ Phase 5 — calls `getaddrinfo` |
-| `conf.c` `read_server_config` (`conf.d/` scan) | `parse::read_server_config` | ✅ cmdline merge skipped (daemon-only, fsck sees empty list). Ports pre-`40719189` behavior — see fsck note |
-| `tincctl.c` `variables[]` (74 entries) | `vars::{VARS, VarFlags, lookup}` | ✅ Order preserved incl. alpha-break; sed-diff verified. +3 invariants the C never asserts |
-| `names.c` | — | ✅ `tinc-tools::names` — `confbase`/`confdir` (4a) + `pidfilename`/`unixsocketname` resolution (5b chunk 1). The LOCALSTATEDIR fallback dance is a 3-row truth table; the bottom row (neither `/var/run/X.pid` nor `confbase/pid` exists → return `/var/run` path anyway) is the surprise, replicated. `unix_socket()` derives from `pidfile()` by string surgery: `> 4` not `>= 4`, case-sensitive `.pid` match. |
-| `conf.c` `append_config_file` | — | ⏸️ `tincctl` territory, not the daemon |
-
-**What landed:** ~740 LOC parse + ~430 LOC PEM, 33 unit + 3 proptest. The PEM body is `b64encode_tinc` (LSB-first — see Phase 0a finding 2); the codec was already KAT-locked, so the only thing tested here is framing: 48-byte chunks → 64-char lines on write, arbitrary line length on read, `strncmp` prefix match for the BEGIN type, END type unchecked.
-
-"Straightforward; the format is trivial" was almost right — the line tokenizer is 30 lines of careful index arithmetic, but the *tree* is where the sharp edges hide. Three findings:
-
-- **`config_compare` sorts by `line` before `file`.** The 4-tuple is `strcasecmp(var)` → `cmdline-before-file` → **`line`** → `strcmp(file)`. So `conf.d/a.conf:5` sorts *after* `conf.d/b.conf:3` — line number wins, filename only tiebreaks within the same line. This is the iteration order for `Subnet`/`ConnectTo`/`Address`, which are multi-valued, which means it's protocol-adjacent (a peer's `hosts/foo` is parsed into a config tree, and `Subnet` order can affect which route wins). Tested explicitly in `lookup_line_before_file`.
-
-- **Values starting with `=` don't round-trip** when the separator is whitespace-only. `"A\t=0"` → variable `A`, value `0` — the separator scan eats `\t` then the optional `=`. The C does the same; proptest found it on the 27th case. Not a bug because tinc never emits `=`-prefixed values (its b64 has no padding, addresses don't start with `=`, port numbers don't). The round-trip property holds over the constrained generator. Noted because a Phase 4 caller adding a new config key needs to know the value space.
-
-- **The PEM stripper in `read_config_file` is what makes `hosts/foo` files work.** Same file holds `Address = 1.2.3.4` lines *and* the public key armor; the parser steps over `-----BEGIN`..`END` without treating the base64 body as `key=value`. Then `read_pem` reads the *same file* a second time and ignores everything before `BEGIN`. Two passes, two different lenses. Tested in `file_skips_pem` + `read_skips_preamble` + the `pem_skips_preamble` proptest.
-
-The splay tree became a `Vec` + stable sort. `O(n)` lookup is fine — config files are tens of entries; the syscall to open them costs more than the scan.
-
----
-
-## Phase 2 — Crypto & SPTPS (~6 weeks, highest risk)
-
-`sptps.c` (774 LOC) is the most security-sensitive module. It is self-contained, but **every primitive it depends on is non-standard.** Budget two days per primitive to implement, two weeks per primitive to be *certain* it's right.
-
-### ✅ `tinc-crypto` — five bespoke primitives (done in Phase 0a)
-
-Landed API — close to the sketch but informed by what the KATs demanded:
-
-```rust
-// chapoly.rs — ~160 LOC
-pub struct ChaPoly { key: [u8; 64] }
-impl ChaPoly {
-    pub fn new(key: &[u8; 64]) -> Self;
-    pub fn seal(&self, seqno: u64, pt: &[u8]) -> Vec<u8>;        // ct ‖ tag[16]
-    pub fn open(&self, seqno: u64, sealed: &[u8]) -> Result<Vec<u8>, OpenError>;
-}
-
-// ecdh.rs — ~430 LOC (incl. ~180 LOC vendored field arithmetic)
-pub struct EcdhPrivate { expanded: [u8; 64] }
-impl EcdhPrivate {
-    pub fn from_seed(seed: &[u8; 32]) -> (Self, [u8; 32]);       // pub is Ed25519 point
-    pub fn from_expanded(expanded: &[u8; 64]) -> Self;           // for on-disk keys
-    pub fn compute_shared(self, peer_ed_pub: &[u8; 32]) -> [u8; 32];  // consumes self
-}
-
-// prf.rs — ~90 LOC
-pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]);
-
-// sign.rs — ~150 LOC
-pub struct SigningKey { expanded: [u8; 64], public: [u8; 32] }
-impl SigningKey {
-    pub fn from_blob(blob: &[u8; 96]) -> Self;                   // on-disk format
-    pub fn from_seed(seed: &[u8; 32]) -> Self;                   // KAT/gen only
-    pub fn sign(&self, msg: &[u8]) -> [u8; 64];
-}
-pub fn verify(public: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SignError>;
-
-// b64.rs — ~130 LOC
-pub fn encode(src: &[u8]) -> String;          // +/ alphabet
-pub fn encode_urlsafe(src: &[u8]) -> String;  // -_ alphabet
-pub fn decode(src: &str) -> Option<Vec<u8>>;  // accepts both, even mixed
-```
-
-Implementation notes (doc-comments in each module are authoritative):
-**chapoly** — `ChaCha20Legacy` + `Poly1305::compute_unpadded`,
-block-0 keystream is the Poly key. **ecdh** — dalek's
-`CompressedEdwardsY::decompress()` validates; `key_exchange.c`
-doesn't. Vendored `fe` module (5×51-bit limbs, ref10 inversion).
-**prf** — mirrors C's `[A(i)|seed]` in-place overwrite to get the
-`A(0)=zeros` quirk right. **sign** — `verify`, NOT `verify_strict`
-(strict rejects malleable sigs that `verify.c` accepts). **b64** —
-LSB-first packing, dual-alphabet decode. PEM framing in `tinc-conf`.
-
-### Legacy RSA + AES-CBC
-*Do not* port in this phase. Gate behind `--features legacy`, keep calling OpenSSL via FFI permanently for RSA — reimplementing 20-year-old PKCS#1 padding to be byte-compatible is a footgun. Note: legacy mode also needs LZO (see Dependencies).
+- **chapoly** — `ChaCha20Legacy` + `Poly1305::compute_unpadded`.
+  Block-0 keystream is the Poly key, then `seek(64)`.
+- **ecdh** — `key_exchange.c` does NOT validate the Edwards point
+  (raw `fe_frombytes`, mask bit 255, blind birational map). dalek's
+  `decompress()` validates and would reject inputs the C accepts.
+  Vendored `fe` module: 5×51-bit limbs, ref10 inversion. ~180 LOC.
+- **prf** — TLS 1.0 PRF over HMAC-SHA512. `A(0)=zeros` quirk.
+  Mirrors C's `[A(i)|seed]` in-place overwrite to get it right.
+- **sign** — RFC 8032 standard. `hazmat::ExpandedSecretKey` +
+  `raw_sign::<Sha512>`. Uses `verify`, NOT `verify_strict` — strict
+  rejects malleable sigs that `verify.c` accepts.
+- **b64** — LSB-first packing (`triplet = b[0]|b[1]<<8|b[2]<<16`,
+  emit low 6 first). NOT RFC 4648 — different output strings, not
+  just decode tables. `tinc_b64([0x48]) == "IB"`, RFC says `"SA"`.
+  Hand-rolled both directions; no `base64` crate config produces
+  this.
 
 ### `tinc-sptps`
-Sans-I/O state machine:
-```rust
-pub struct Sptps<C: Crypto> { state: State, ... }
-impl Sptps {
-    pub fn start(role: Role, my_key: Ecdsa, peer_key: EcdsaPub, label: &[u8]) -> (Self, Vec<u8> /* to send */);
-    pub fn receive(&mut self, data: &[u8]) -> Result<Vec<Event>, Error>;
-    pub fn send_record(&mut self, type_: u8, data: &[u8]) -> Vec<u8>;
-}
-pub enum Event { Handshake, Record { type_: u8, data: Vec<u8> } }
-```
 
-Maps directly to C `sptps_start`, `sptps_receive_data`, `sptps_send_record`, but **returns** bytes instead of invoking a callback — the caller does I/O.
+Sans-I/O state machine. `start`/`receive`/`send_record` map to C
+but **return** bytes instead of invoking callbacks.
+`byte_identical_wire_output` is the strongest test: same RNG seed →
+same wire bytes. Ed25519 accepts any valid sig over the right
+message; byte-identity proves we *built* the right message.
 
-**Testing — this is where the budget went:**
-1. ✅ **KAT:** Every `tinc-crypto` primitive passes Phase 0a vectors. Gate before any SPTPS code.
-2. ✅ **Self-interop:** Rust initiator ↔ Rust responder. (`tinc-sptps/tests/vs_c.rs::rust_self_handshake`)
-3. ✅ **Cross-interop:** Rust↔C in lockstep, no sockets. `byte_identical_wire_output` is stronger than the plan asked for — not just "handshake completes", but "same RNG seed → same wire bytes". Ed25519 accepts any valid sig over the right message; byte-identity proves we *built* the right message.
-4. ✅ **Rust↔Rust socket interop:** `tinc-tools/tests/self_roundtrip.rs`. Stream + datagram + 64KB reassembly. See `tinc-tools` below.
-5. ✅ **Rust↔C socket interop:** `tests/self_roundtrip.rs` 2×2 matrix — each role can be C or Rust. Gated on `TINC_C_SPTPS_TEST` env var. `nix build .#sptps-test-c` builds the C side (meson, nolegacy mode, no openssl).
-6. ⏸️ **Fuzz:** `cargo-fuzz` on `Sptps::receive`. The replay window and length checks are where the C has had CVEs.
+State-machine subtleties caught by byte-identity (not by interop):
 
-### ✅ `tinc-tools` — first shippable binaries
+- **Re-KEX: responder's SIG and ACK go out under the OLD
+  `outcipher`.** `receive_sig` does `send_sig()` → `send_ack()` →
+  *then* `chacha_poly1305_set_key(new)`. The natural "set key, then
+  send" structure is wrong. `rust_vs_c_rekey` is the test.
+- **`outstate` (bool) vs `outcipher` (ctx*) are separate in C**,
+  collapsed into `Option<ChaPoly>` in Rust loses one bit during
+  re-KEX. `receive_sig` returns `was_rekey: bool` to thread it.
+- **Stream-mode `sptps_receive_data` processes ONE record per
+  call** — no inner loop. Daemon must loop until `consumed == 0`.
 
-| Binary | C source | Status |
-|---|---|---|
-| `sptps_keypair` | `sptps_keypair.c` (140 LOC) | ✅ `OsRng` seed → `SigningKey::from_seed` → `tinc_conf::write_pem` × 2 |
-| `sptps_test` | `sptps_test.c` (747 LOC) | ✅ Spine: `poll()` loop bridging stdin↔socket through `Sptps`. Dropped: `--tun`, `--packet-loss`, `--special`, Windows stdin-thread. |
+⏸️ `cargo-fuzz` on `Sptps::receive` — replay window + length checks
+are where the C has had CVEs.
 
-`tests/self_roundtrip.rs` spawns both binaries as subprocesses —
-4 cases incl. `stream_large_payload` (64 KiB, forces kernel
-fragmentation; `sptps_basic.py` only sends 256 bytes). Findings:
+### `tinc-proto`
+
+~2400 LOC. 41 unit tests (KAT strings transcribed from C
+`printf`/`sscanf` format strings) + 11 proptests. `nom` was wrong:
+23 sscanf call sites, all `%d`/`%x`/`%s` over space-separated
+tokens — a 60-LOC tokenizer covers them all.
+
+- **`AddrStr` is opaque.** `str2sockaddr` has an `AF_UNKNOWN`
+  escape that stuffs unparseable input verbatim and round-trips it.
+  At the parse layer, address fields are arbitrary whitespace-free
+  tokens; `IpAddr::parse` would reject inputs the C accepts and
+  forwards. Resolution at `connect()` time, not parse time.
+- **Optional trailing fields are atomic pairs.** `add_edge_h`
+  accepts `count == 6 || == 8`, never 7. `Option<(_, _)>`.
+- **`REQ_KEY` is two messages stapled.** Base `sscanf` + extension
+  re-scan. `Option<ReqKeyExt>`; `reqno` stays raw `i32` because
+  unknown sub-types are not parse errors (C `default:` logs+continues).
+- **MAC tried before v6 in `str2net`** — `1:2:3:4:5:6` is valid for
+  both. `mac_shadows_v6` pins the order.
+- `protocol_auth.c` deferred to daemon: `id_h` parse + connection-
+  state mutation are one `sscanf`-then-if-chain with no cut point.
+
+### `tinc-graph`
+
+~540 LOC + 600 LOC KAT generator (8 hand-built + 10 random cases).
+Generator includes real `splay_tree.c`/`list.c` and copies
+`mst_kruskal`/`sssp_bfs` bodies verbatim — divergence is a build
+break or KAT diff. Arena: `Vec<Node>`, `Vec<Edge>`, typed handles.
+
+- **Indirect→direct upgrade overwrites `distance` but not
+  `nexthop`** (`graph.c:180-191`). A node first reached indirectly
+  at d=1, then upgraded direct at d=3, ends up `distance=3,
+  weighted_distance=<from d=1 path>`. Internally inconsistent —
+  but `via` is set unconditionally on revisit, and that's what
+  matters. KAT `diamond_indirect` + dedicated trip-wire.
+- **Iteration order is part of the contract.** Per-node edges
+  `splay_each` by `to->name`; tie-breaks go to alphabetically-
+  earlier neighbor. We sort per-node `Vec` on insert.
+- **Kruskal-without-union-find rewinds.** Progress-after-skip
+  resets iterator to head. KAT `mst_rewind`.
+- **One-way edges skipped** (`!e->reverse → continue`). Transient
+  between two halves of `ADD_EDGE` pair.
+- `sssp` returns a side table, not in-place mutation — borrowck +
+  daemon wants old-vs-new diff for `check_reachability`.
+
+### `tinc-conf`
+
+~740 LOC parse + ~430 LOC PEM. PEM body is `b64encode_tinc`
+(LSB-first, KAT-locked); only framing tested here. Splay tree →
+`Vec` + stable sort (`O(n)` lookup; configs are tens of entries).
+
+- **`config_compare` sorts by `line` BEFORE `file`.** 4-tuple:
+  `strcasecmp(var)` → cmdline-first → **`line`** → `strcmp(file)`.
+  `conf.d/a.conf:5` sorts after `conf.d/b.conf:3`. This is the
+  iteration order for `Subnet`/`ConnectTo` (multi-valued), so it's
+  protocol-adjacent. `lookup_line_before_file` pins it.
+- **The PEM stripper in `read_config_file` is what makes
+  `hosts/foo` work.** Same file holds `Address =` lines AND the key
+  armor; parser steps over `BEGIN..END`. `read_pem` reads the same
+  file a second time, ignores everything before `BEGIN`. Two passes,
+  two lenses.
+- `names.c` LOCALSTATEDIR fallback: 3-row truth table; bottom row
+  (neither `/var/run/X.pid` nor `confbase/pid` exists → return
+  `/var/run` anyway) is the surprise. `unix_socket()` from
+  `pidfile()` by string surgery: `> 4` not `>= 4`, case-sensitive.
+
+### `tinc-tools` — `sptps_test`, `sptps_keypair`, `tinc` CLI
+
+`sptps_test`/`sptps_keypair` are `#![forbid(unsafe_code)]`.
+`self_roundtrip.rs` 2×2 matrix (each role C or Rust, gated on
+`TINC_C_SPTPS_TEST`); stronger than `vs_c.rs` — independent entropy
+catches "wire format right but verification wrong". Findings:
 dropping a child's stderr pipe end = `SIGPIPE` (bites `script.c`
-port too); `Stdin::lock().read()` buffers (use `nix::unistd::read`
-for 1-read-1-datagram chunking); "`Listening on {port}...`" is API
-(`sptps_basic.py` regexes it).
+port too); `Stdin::lock().read()` buffers (use `nix::unistd::read`).
 
-**Cross-impl 2×2 matrix** parameterizes binary path per role
-(`TINC_C_SPTPS_TEST` / `TINC_C_SPTPS_KEYPAIR`). Stronger claim than
-`vs_c.rs`: vs_c proves byte-identity given same RNG seed; cross-impl
-proves wire compat with *independent entropy* — catches
-"wire format right but verification wrong" that vs_c can't.
+`tinc` CLI: 34/39 commands (`comm -23` vs `tincctl.c:2995-3050`).
+5 unported = 2 daemon-gated + 1 daemon-only-RPC + 2 legacy-RSA.
+`tincctl.c` is ~3.4k LOC split clean: ~2k filesystem (`init`/
+`generate-keys`/`export`/`edit`/`fsck`/`sign`), ~1k RPC (`dump`/
+`top`/`pcap`/`log`/`reload`). Hand-rolled `match argv[1]` — clap is
+10× deps for ~15 subcommands. Kept the C control protocol (pidfile
+`0600` cookie; ssh-agent model). `invitation.c` 1484→~1010 LOC
+after dropping HTTP probe / `ifconfig.c` / tty prompts; ifconfig
+keywords recognized, placeholder `tinc-up`, no per-platform shell
+gen (−300 LOC). Per-command findings in `cmd/*.rs` source docs.
 
 **TODO: hermetic `checks.cross-impl`.** Needs
-`rustPlatform.buildRustPackage` to vendor deps; CI uses the devshell
-invocation for now.
-
----
-
-## Phase 3 — Device & Transport (~3 weeks)
+`rustPlatform.buildRustPackage` to vendor deps; CI uses devshell.
 
 ### `tinc-device`
-| Platform | C source | Rust approach |
+
+| Platform | C source | Status |
 |---|---|---|
-| Linux | `linux/device.c` | ✅ `linux.rs` (907 LOC) — hand-rolled. **NOT** `tun-tap` crate, **NOT** `nix::ioctl_write_ptr_bad!`. Direct `libc::ioctl` because the macro generates `*const` and `TUNSETIFF` writes back. The ~150 LOC estimate was the *unsafe shims alone*; the +10 offset trick + testable seam + 15 tests are the rest. |
-| Dummy | `dummy_device.c` | ✅ `lib.rs` `Dummy` impl. Trivial. Read → `WouldBlock`, write → `Ok(len)`. |
-| `fd` (Android) | `fd_device.c` | ✅ `fd.rs` (1330 LOC) — the +14 cousin. `pipe()`-testable. nix `socket`+`uio` features for `recvmsg`+`SCM_RIGHTS`. |
-| `raw` (`PF_PACKET`) | `raw_socket_device.c` | ✅ `raw.rs` (797 LOC) — the +0. Shim #5 SUBSTITUTES (`if_nametoindex` for `SIOCGIFINDEX`). `SOCK_SEQPACKET` test fake. |
-| BSD/macOS | `bsd/device.c` (592 LOC) | ✅ `bsd.rs` (1218 LOC, 20 tests) — `BsdVariant::{Tun,Utun,Tap}`. **`cfg(unix)` MODULE, `cfg(bsd)` open()** — read/write logic tested on Linux via fakes; only constructors stubbed. `to_af_prefix` (the dual of `from_ip_nibble`) lives HERE not in `ether.rs` because `AF_INET6` is platform-varying. Shims #7 (`TUNSIFHEAD`) + #8 (`PF_SYSTEM`/`sockaddr_ctl`) noted in open() worklist. vmnet/tunemu dropped. |
-| Windows | `windows/device.c` | `wintun` crate (WireGuard's driver) — **drop** TAP-Windows support |
-| Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write`. nix has `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep pulls DNS (`getaddrinfo`); port after `tinc-proto` exposes addr resolution. |
-| UML/VDE | `*_device.c` | Drop. UML doesn't exist; VDE needs `libvdeplug`. |
+| Linux | `linux/device.c` | ✅ `linux.rs` — hand-rolled `libc::ioctl` (nix macro generates `*const`, `TUNSETIFF` writes back). +10 offset trick + testable seam. |
+| Dummy | `dummy_device.c` | ✅ trivial |
+| `fd` (Android) | `fd_device.c` | ✅ `fd.rs` — the +14 cousin. `pipe()`-testable. nix `recvmsg`+`SCM_RIGHTS`. |
+| `raw` (`PF_PACKET`) | `raw_socket_device.c` | ✅ `raw.rs` — the +0. `if_nametoindex` substitutes `SIOCGIFINDEX`. |
+| BSD/macOS | `bsd/device.c` | ✅ `bsd.rs` — `cfg(unix)` MODULE, `cfg(bsd)` `open()`: read/write logic tested on Linux via fakes. `to_af_prefix` lives here (`AF_INET6` platform-varying). |
+| Windows | `windows/device.c` | `wintun` crate — drop TAP-Windows |
+| Multicast | `multicast_device.c` | defer (niche) |
+| UML/VDE | `*_device.c` | drop |
 
-**Unsafe-shim decision tree** (full reasoning in source-file docs —
-`tinc-device/{linux,fd,raw,bsd,ether}.rs`, `tinc-event/sig.rs`):
-(1) nix doesn't wrap? hand-roll. (2) higher-level POSIX does same
-job? substitute (`if_nametoindex` for `SIOCGIFINDEX`). (3) wrapper
-matches kernel contract? use. (4) encoding lies? hand-roll
-(`TUNSETIFF` — nix macro generates `*const`, kernel writes back).
-(5) signal-context? hand-roll ("probably safe" isn't good enough).
-Don't pattern-match the neighboring shim; `raw.rs` mixes three
-classes in one file.
-
-**Standing decisions**: `cfg` gates the smallest platform-varying
-thing (`bsd.rs` is `cfg(unix)`, only `open()` is `cfg(bsd)` — logic
-tested on Linux for free). Platform-varying constants: pin the
-EXPRESSION not the bytes. RFC values (`ETH_P_IP`) hoist to
-`ether.rs`; ABI values (`AF_INET6={10,28,30}`) reference `libc::` at
+Unsafe-shim decision tree (full reasoning in source docs): nix
+doesn't wrap → hand-roll; higher-level POSIX exists → substitute;
+encoding lies (`TUNSETIFF`) → hand-roll; signal-context → hand-roll
+("probably safe" isn't good enough). Don't pattern-match the
+neighboring shim. `cfg` gates the smallest platform-varying thing.
+RFC values hoist to `ether.rs`; ABI values reference `libc::` at
 use site. `read_fd`/`write_fd` stay duplicated (6×8 LOC) — buys six
 small `#[allow(unsafe_code)]` scopes vs one crate-wide.
 
-Trait shape (`write` takes `&mut [u8]` — `linux.rs` zeroes
-`buf[10..12]`, `bsd.rs` clobbers `buf[10..14]`):
+`Device::write` takes `&mut [u8]` — `linux.rs` zeroes `buf[10..12]`,
+`bsd.rs` clobbers `buf[10..14]`. C `setup`/`close` = ctor + `Drop`.
 
-```rust
-pub trait Device: Send {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    fn mode(&self) -> Mode;       // Tun vs Tap
-    fn iface(&self) -> &str;      // for tinc-up's INTERFACE=
-    fn mac(&self) -> Option<Mac>; // TAP only; route.c ARP path
-    fn fd(&self) -> Option<RawFd>; // for poll(); Dummy is None
-}
-```
+`tinc-net` as a separate crate didn't happen — socket setup, proxy,
+addrcache, autoconnect all landed as `tincd` modules; no seam
+justified a crate boundary. `etherparse` evaluated, dropped:
+`packet.rs` is `#[repr(C, packed)]` for build AND parse; once you've
+hand-rolled the structs the parse path is `transmute` away.
 
-C `setup`/`close` are constructor + `Drop`, not trait methods.
+### `tinc-event` + `tincd`
 
-### ~~`tinc-net` separate crate~~ — didn't happen
-
-Socket setup, proxy, addrcache, autoconnect all landed as `tincd`
-modules (`listen.rs`, `socks.rs`, `addrcache.rs`, `autoconnect.rs`).
-No seam justified a crate boundary. The `upnp.c` `igd-next` plan
-stands for chunk 12+ if anyone asks.
-
-`etherparse` for packet parse: evaluated, dropped. `packet.rs` is
-`#[repr(C, packed)]` structs for build AND parse — the synth path
-needs field-level write access etherparse doesn't give, and once
-you've hand-rolled the structs the parse path is `transmute` away.
-
----
-
-## Phase 4 — `tinc` CLI (split: 4a filesystem, 5b RPC)
-
-`tincctl.c` is 3.4k LOC but on closer inspection it splits cleanly
-into two halves with opposite dependency profiles:
-
-| Half | Commands | Needs daemon? | LOC |
-|---|---|---|---|
-| **Filesystem** | `init`, `generate-keys`, `export`/`import`, `exchange`, `edit`, `fsck`, `sign`/`verify`, `network` | ❌ pure config-file munging | ~2000 |
-| **Daemon RPC** | `dump`, `top`, `pcap`, `log`, `reload`, `connect`/`disconnect`, `purge`, `debug`, `retry`, `pid`, `info` | ✅ control socket | ~1000 |
-
-The `connect_tincd()`-calling commands in `tincctl.c`: 18 of 30. The
-rest never touch a socket. (`stop` is a borderline case — it sends
-`SIGTERM` after reading the pidfile, no protocol.)
-
-### Phase 4a: Filesystem half — **Ship #2**
-
-Lands now, before the daemon. The filesystem commands have no
-testability problem: their inputs are argv + on-disk files, their
-outputs are on-disk files. Integration tests via `tempdir` + actual
-file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
-
-| C source | Rust |
-|---|---|
-| `tincctl.c` command dispatch | hand-rolled `match argv[1]` (same reasoning as `sptps_test`: clap is 10× deps for ~15 subcommands) |
-| `tincctl.c` `cmd_init` | `cmd/init.rs` — `mkdir`, write `tinc.conf`, gen Ed25519, write host file, stub `tinc-up` |
-| `tincctl.c` `cmd_generate_ed25519_keys` | ✅ `cmd/genkey.rs` — `disable_old_keys` then append. Plan said "thin wrapper"; the wrapper is thin, the disable function is the substance |
-| `tincctl.c` `cmd_export`/`cmd_import` | ✅ `cmd/exchange.rs` — `Name = X` line is the framing, `#---63 dashes---#` separates hosts. Plan said `BEGIN HOST` markers; wrong, the C uses `Name =` itself as the marker |
-| `tincctl.c` `cmd_sign`/`cmd_verify` | ✅ `cmd/sign.rs` — `golden_c_vector` is the proof: same key + same body + same `t` → same bytes |
-| `fsck.c` | ✅ `cmd/fsck.rs` — `Finding` enum + `Report`. `clean_init_passes` is the contract test |
-| `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
-| `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
-
-Per-command findings live in source-file docs (`cmd/*.rs`).
-**`CONFDIR` = `option_env!("TINC_CONFDIR")`** at compile time.
-`server_receive_cookie` (`protocol_auth.c:185-310` minus
-`connection_t*`) lifts to `tincd::auth`. Upstream `conf.d/` bug
-`40719189` filed; we port pre-regression behavior. `sign` doesn't
-respect `Ed25519PrivateKeyFile` (deferred; fsck does).
-
-### Phase 5b: RPC half — transport landed, kept C wire shape
-
-**Kept the C control protocol.** Pidfile is `0600` — cookie is
-fs-perms auth (ssh-agent model). JSON costs `serde_json` + the
-`nc -U` debuggability. C-is-WRONG findings ("works because the other
-side is nice" class) live in `cmd/*.rs` source docs and ISSUES.md.
-
-| Command | Blocked on |
-|---|---|
-| `start`/`restart` | Daemon binary needs to exist. Phase 3. |
-| `connect` | Daemon-only RPC (asks daemon to `outgoing_connection`); meaningless until daemon exists. Phase 3. |
-| `generate-keys`, `generate-rsa-keys` | RSA legacy crypto. We have `generate-ed25519-keys`. Intentionally not ported. |
-
-**True coverage** (`comm -23` against `tincctl.c:2995-3050` dispatch
-table, 39 entries): 34/39 ported. The 5 unported are 2 daemon-gated
-+ 1 daemon-only-RPC + 2 legacy-crypto. None reachable before Phase 5.
-
-**Deliberate C-behavior-drops**: `log`/`pcap` SIGINT handler (nobody
-scripts the exit code); `network NAME` global-mutation (no readline
-loop); `IFF_ONE_QUEUE` (kernel no-op since 2.6.27). **C source
-consumed**: `info.c`, `top.c`, `tincctl.c` `cmd_*`, `console.c`,
-`invitation.c` (1484→~1010 LOC after dropping HTTP probe / ifconfig
-/ tty prompts). `ifconfig.c` stubbed (keywords recognized,
-placeholder `tinc-up`, no per-platform shell gen — −300 LOC).
-Windows: named pipe via `windows-sys` `CreateFileW`, ~100 LOC behind
-`#[cfg(windows)]`. Per-command findings in `cmd/*.rs` source docs.
-
----
-
-## Phase 5 — The Daemon Core (~6 weeks)
-
-Only attempt this once Phases 1–3 are battle-tested.
-
-### Event loop — ✅ `tinc-event` (`aeabcaa6`)
-mio + manual poll, single-threaded. tokio rejected: the C's pervasive
+mio + manual poll, single-threaded. tokio rejected: C's pervasive
 shared mutable state (`node_tree`, `connection_list` globals) fights
-async borrow rules; one `&mut Daemon` into every handler mirrors the
-C globals without `static mut`. The C design is fine, just unsafe.
+async borrow rules. One `&mut Daemon` into every handler mirrors the
+C globals without `static mut`.
 
-**Dispatch enum, not callbacks.** C `io_add(&io, cb, data, fd, flags)`
-stores fn pointers; cb reaches `node_tree` via globals. Rust can't
-store `fn(&mut Daemon)` inside `Daemon`. The cb set is closed: 6 io
-callbacks (`rg 'io_add\(' src/*.c`), 7 timer callbacks. Encode as
-`enum IoWhat`/`enum TimerWhat`; the loop body is a `match`.
-`EventLoop<W: Copy>` stays daemon-agnostic.
+**Dispatch enum, not callbacks.** Can't store `fn(&mut Daemon)`
+inside `Daemon`. The cb set is closed (6 io + 7 timer); encode as
+`enum IoWhat`/`enum TimerWhat`, loop body is a `match`.
+`BTreeMap<(Instant, u64)>` not `BinaryHeap` — all 7 timers re-arm;
+heap = tombstone churn. **Deliberate semantic difference**: C
+auto-deletes if cb didn't re-arm; we make re-arm explicit. Self-pipe
+hand-rolled (`signal-hook` was +3 deps for 90 LOC).
+`sigaction(SA_RESTART)`, `pipe2(O_CLOEXEC)`.
 
-**`BTreeMap<(Instant, u64)>` not `BinaryHeap`.** All 7 timers re-arm
-(`timeout_set` from inside the cb, `event.c:127-129` checks if cb
-re-armed past now). Heap entries immutable → re-arm = push+tombstone
-churn. BTreeMap remove-reinsert is O(log n) same as C splay. The `u64`
-seq does what `event.c:62-72`'s ptr-compare does, stably. **Deliberate
-semantic difference**: C auto-deletes if cb didn't re-arm; we make
-re-arm explicit. Every match arm decides.
+SIGHUP reload doesn't rebuild from scratch — walks live trees,
+marks `expires=1`, re-reads, sweeps. The C `expires=1` flag is a
+splay-tree workaround; ours is `BTreeSet::difference`.
 
-**Self-pipe hand-rolled** (`signal-hook` was +3 deps for 90 LOC of C).
-`sigaction(SA_RESTART)` not `signal()`. `pipe2(O_CLOEXEC)`. Shim #7.
-
-**`while(running)` not ported.** `turn()` is one iteration. The loop,
-`event_exit()`, the tick/turn interleave — that's `tincd::main()`.
-
-**SIGHUP reload:** `reload_configuration()` does *not* rebuild from scratch — it walks the live subnet/node trees, marks entries `expires = 1`, re-reads configs, then sweeps expired entries while keeping connections alive. With `slotmap` this means `Daemon::reload(&mut self)` walks and patches in place. Do not assume "drop arena, build new one"; budget ~200 LOC for the selective expiry walk.
+**Legacy RSA + AES-CBC**: not ported. Gate behind `--features
+legacy`, keep OpenSSL-via-FFI permanently for RSA — reimplementing
+20-year-old PKCS#1 padding to be byte-compatible is a footgun.
 
 ### Module mapping (`85236bac`)
 
@@ -1125,23 +893,6 @@ Live risks:
 | Legacy protocol RSA padding mismatch | High (if ever ported) | Keep using OpenSSL via FFI for legacy auth indefinitely. Currently `STUB(chunk-never)`. |
 | Windows TUN driver churn | Medium | Switch to wintun (WireGuard's); better-maintained than TAP-Windows. Not yet started. |
 | Scope creep into "let's redesign the protocol" | High | **Hard rule:** byte-compatible port only. Protocol v18 ideas go in a separate doc. |
-
----
-
-## Suggested Order of Shipping
-
-1. ✅ **`sptps_test` + `sptps_keypair` in Rust** — proves crypto interop. **Shipped as `tinc-tools`.** Rust↔Rust + Rust↔C on real sockets (2×2 matrix, gated on `TINC_C_SPTPS_TEST`). Cross-impl is a stronger claim than vs_c: independent entropy on each side, only TCP/UDP bytes between binaries.
-
-   Three things the in-process differential test couldn't catch:
-
-   - **`OsRng` for real.** First time non-seeded entropy flows through key derivation.
-   - **TCP record splitting.** `stream_large_payload` pushes 64KB; the kernel fragments it, the SPTPS stream framing reassembles. The Phase 2 byte-identity test pumps whole records and never sees a partial.
-   - **The `SIGPIPE` footgun.** Found while writing the test, not by the test: dropping the read end of a child's stderr pipe means the child's next `eprintln!` is `EPIPE` → `SIGPIPE` → dead. Would have bitten the daemon's `script.c` port (it `popen()`s and reads; same shape). The test harness now holds stderr open for the child's lifetime and drains it on a thread.
-2. ✅ **`tinc` CLI in Rust** — 34/39 commands. `cross_init_key_loads_in_c` is the wire-compat closure: `OsRng` → `from_seed` → `write_pem` → `tinc-b64` → C `ecdsa_read_pem_private_key` → C `sptps_start` → 256 bytes match. The 5 unported are 2 daemon-gated + 1 daemon-only-RPC + 2 legacy-RSA.
-3. **`tincd` Rust, SPTPS-only (`nolegacy` mode)** — ~18 weeks in
-4. **`tincd` Rust with legacy protocol** — ~24 weeks in
-
-Total: roughly **7 months** for one experienced engineer. The extra month over a naïve estimate is the bespoke-crypto tax: each of ChaPoly/ECDH/PRF/key-format is two days to implement and two weeks to be *certain*. The Phase 0 KAT vectors are the highest-leverage investment in the whole plan — they turn "is the crypto right?" from a debugging nightmare into a `cargo test` boolean.
 
 ---
 
