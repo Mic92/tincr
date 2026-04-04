@@ -57,8 +57,8 @@ pub struct PmtuState {
     pub udp_ping_sent: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
-    /// RTT µs; -1 = unknown (`node.c` init).
-    pub udp_ping_rtt: i32,
+    /// RTT µs; `None` = unknown (`node.c` init: `-1`).
+    pub udp_ping_rtt: Option<u32>,
 }
 
 /// Action emitted by the state machine for the daemon to dispatch.
@@ -102,7 +102,7 @@ impl PmtuState {
             udp_ping_sent: now,
             mtu_ping_sent: now,
             maxrecentlen: 0,
-            udp_ping_rtt: -1,
+            udp_ping_rtt: None,
         }
     }
 
@@ -180,8 +180,8 @@ impl PmtuState {
         // ── RTT measurement ──── :184-194 ──────────────────────
         if self.ping_sent {
             let rtt = now.duration_since(self.udp_ping_sent);
-            // Saturate at i32::MAX (~35 min — never happens).
-            self.udp_ping_rtt = i32::try_from(rtt.as_micros()).unwrap_or(i32::MAX);
+            // Saturate at u32::MAX (~71 min — never happens).
+            self.udp_ping_rtt = Some(u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX));
             self.ping_sent = false;
         }
 
@@ -235,7 +235,7 @@ impl PmtuState {
             return;
         }
         self.udp_confirmed = false;
-        self.udp_ping_rtt = -1;
+        self.udp_ping_rtt = None;
         self.maxrecentlen = 0;
         self.mtuprobes = 0;
         self.minmtu = 0;
@@ -455,7 +455,7 @@ mod tests {
         s.ping_sent = true;
         s.udp_ping_sent = now;
         s.on_probe_reply(800, now + Duration::from_millis(42));
-        assert_eq!(s.udp_ping_rtt, 42_000);
+        assert_eq!(s.udp_ping_rtt, Some(42_000));
         assert!(!s.ping_sent);
     }
 
@@ -570,10 +570,10 @@ mod tests {
         s.maxmtu = 1400;
         s.mtuprobes = -1;
         s.maxrecentlen = 1200;
-        s.udp_ping_rtt = 42_000;
+        s.udp_ping_rtt = Some(42_000);
         s.on_udp_timeout();
         assert!(!s.udp_confirmed);
-        assert_eq!(s.udp_ping_rtt, -1);
+        assert_eq!(s.udp_ping_rtt, None);
         assert_eq!(s.maxrecentlen, 0);
         assert_eq!(s.mtuprobes, 0);
         assert_eq!(s.minmtu, 0);

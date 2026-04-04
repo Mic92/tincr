@@ -911,7 +911,8 @@ impl Daemon {
                 0,                            // %ld last_state_change
                 tunnel
                     .and_then(|t| t.pmtu.as_ref())
-                    .map_or(-1, |p| p.udp_ping_rtt), // %d
+                    .and_then(|p| p.udp_ping_rtt)
+                    .map_or(-1_i32, u32::cast_signed), // %d
                 tunnel.map_or(0, |t| t.in_packets), // %PRIu64
                 tunnel.map_or(0, |t| t.in_bytes),
                 tunnel.map_or(0, |t| t.out_packets),

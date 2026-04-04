@@ -102,7 +102,7 @@ impl TunnelState {
             p.maxrecentlen = 0;
             p.udp_confirmed = false;
             p.ping_sent = false;
-            p.udp_ping_rtt = -1;
+            p.udp_ping_rtt = None;
         }
         self.udp_reply_sent = None;
         self.udp_addr = None; // C `:296` `update_node_udp(n, NULL)`
