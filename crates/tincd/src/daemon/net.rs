@@ -928,12 +928,39 @@ impl Daemon {
                                 // C `:690,:174`: limit-14 = IP-layer
                                 // MTU. limit≥590 so sub never wraps.
                                 self.write_icmp_frag_needed(data, limit - 14);
+                            } else {
+                                // C `route.c:692`: fragment_ipv4_packet.
+                                // RFC 791 §2.3: routers MUST fragment.
+                                // Rare path (modern OS sets DF on TCP)
+                                // but UDP without DF through narrow-
+                                // MTU relay needs this.
+                                let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
+                                    log::debug!(target: "tincd::net",
+                                        "fragment_v4: malformed input, dropping");
+                                    return false;
+                                };
+                                // C `:611`: send_packet(dest, &fragment)
+                                // per loop iter. Mirror the normal
+                                // send path below: send_sptps_packet
+                                // + try_tx for PMTU drive.
+                                let n = frags.len();
+                                log::debug!(target: "tincd::net",
+                                    "Fragmenting packet of {} bytes into \
+                                     {n} pieces for {to}", data.len());
+                                {
+                                    let tunnel = self.tunnels.entry(to_nid).or_default();
+                                    for frag in &frags {
+                                        tunnel.out_packets += 1;
+                                        tunnel.out_bytes += frag.len() as u64;
+                                    }
+                                }
+                                let mut nw = false;
+                                for frag in &frags {
+                                    nw |= self.send_sptps_packet(to_nid, frag);
+                                }
+                                nw |= self.try_tx(to_nid, true);
+                                return nw;
                             }
-                            // NOT-PORTING(ipv4-fragment): C `:614-
-                            // 681` in-transit IPv4 frag (~70 LOC).
-                            // Modern OS sets DF on TCP (PMTUD); UDP
-                            // without DF through narrow-MTU relay
-                            // drops here. Niche.
                         } else {
                             // v6: no in-transit frag (RFC 8200 §5).
                             self.write_icmp_pkt_too_big(data, u32::from(limit - 14));
