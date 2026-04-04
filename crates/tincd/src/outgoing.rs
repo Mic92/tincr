@@ -50,10 +50,10 @@
 //!   `Option<SocketAddr>` and binds before `connect()`.
 //! - `bind_to_interface` (`:625`): `SO_BINDTODEVICE`. Linux-only,
 //!   root-only-for-non-root-sockets. `TODO(chunk-12-bind-iface)`.
-//! - DNS at connect time: `addrcache.rs` doc says we take pre-
-//!   resolved `SocketAddr` only. `try_outgoing_connections` resolves
-//!   `Address = host port` lines via `to_socket_addrs()` at OPEN
-//!   time (blocking DNS in setup, fine).
+//! - DNS at connect time: `addrcache.rs` resolves `Address =` lines
+//!   lazily inside `next_addr()` (matches C `address_cache.c:157-
+//!   199`). `resolve_config_addrs` here just PARSES `host port`
+//!   strings; no DNS at open time.
 
 // No `forbid(unsafe)`: do_outgoing_pipe needs fork(). The unsafe is
 // scoped to one block; the rest of the module is still allocation-
@@ -675,20 +675,21 @@ pub fn do_outgoing_pipe(
     }
 }
 
-/// Resolve `Address = host port` lines from `hosts/NAME` to
-/// `SocketAddr`s. C `address_cache.c:154-199` does this lazily
-/// inside `get_recent_address` via `str2addrinfo`; we do it
-/// eagerly at open time. Blocking DNS in setup; fine.
+/// Parse `Address = host port` lines from `hosts/NAME` into
+/// **unresolved** `(host, port)` pairs. C `address_cache.c:42-63`
+/// stores `struct config_t *cfg` (the raw string); resolve happens
+/// lazily in `get_recent_address` (`:157-199`). We mirror that:
+/// no DNS here, just string parsing. [`AddressCache::next_addr`]
+/// (crate::addrcache::AddressCache::next_addr) calls
+/// `to_socket_addrs()` when the cursor reaches tier 3.
 ///
-/// `Address = 10.0.0.1 655` → one addr. `Address = bob.example.com
-/// 655` → `to_socket_addrs()` resolves (may return v4+v6). `Address`
-/// without a port defaults to 655 (`net_setup.c:789`).
+/// `Address = 10.0.0.1 655` → `("10.0.0.1", 655)`. `Address =
+/// bob.example.com` (no port) → `("bob.example.com", 655)`
+/// (`net_setup.c:789` default).
 ///
-/// Unparseable / unresolvable lines warn-and-skip. C: `getaddrinfo`
-/// failure inside `str2addrinfo` returns NULL, the caller's loop
-/// moves to the next config line.
+/// Unparseable lines (bad port) warn-and-skip.
 #[must_use]
-pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<SocketAddr> {
+pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
     let host_file = confbase.join("hosts").join(node_name);
     let Ok(entries) = tinc_conf::parse_file(&host_file) else {
         // No hosts/NAME file. The cache file (if any) is the only
@@ -712,17 +713,8 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<SocketAddr>
         let mut parts = s.splitn(2, ' ');
         let host = parts.next().unwrap_or("");
         let port = parts.next().unwrap_or("655");
-        // `to_socket_addrs()` is `getaddrinfo` with `AI_NUMERICSERV`
-        // when port is numeric. Handles both numeric IPs (no DNS
-        // hit) and hostnames (blocking DNS).
         match (host, port.parse::<u16>().ok()) {
-            (h, Some(p)) if !h.is_empty() => match (h, p).to_socket_addrs() {
-                Ok(iter) => addrs.extend(iter),
-                Err(e) => {
-                    log::warn!(target: "tincd::conn",
-                               "Address = {s} for {node_name}: {e}");
-                }
-            },
+            (h, Some(p)) if !h.is_empty() => addrs.push((h.to_string(), p)),
             _ => {
                 log::warn!(target: "tincd::conn",
                            "Address = {s} for {node_name}: bad format");
@@ -770,8 +762,7 @@ mod tests {
         std::fs::write(tmp.join("hosts").join("bob"), "Address = 127.0.0.1 12345\n").unwrap();
 
         let addrs = resolve_config_addrs(&tmp, "bob");
-        assert_eq!(addrs.len(), 1);
-        assert_eq!(addrs[0], "127.0.0.1:12345".parse().unwrap());
+        assert_eq!(addrs, vec![("127.0.0.1".to_string(), 12345)]);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -788,8 +779,7 @@ mod tests {
         std::fs::write(tmp.join("hosts").join("bob"), "Address = 127.0.0.1\n").unwrap();
 
         let addrs = resolve_config_addrs(&tmp, "bob");
-        assert_eq!(addrs.len(), 1);
-        assert_eq!(addrs[0], "127.0.0.1:655".parse().unwrap());
+        assert_eq!(addrs, vec![("127.0.0.1".to_string(), 655)]);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

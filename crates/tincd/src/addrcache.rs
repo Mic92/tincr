@@ -23,13 +23,17 @@
 //! config + the first successful connection. Loss is one extra
 //! connect attempt on first run after switching binaries.
 //!
-//! ## Deferred: lazy hostname resolve
+//! ## Lazy hostname resolve (`:157-199`)
 //!
-//! C `get_recent_address` (`:157-199`) calls `str2addrinfo` (which
-//! calls `getaddrinfo`) for each `Address = bob.example.com 655`
-//! line as the cursor reaches it — DNS at connect time, not config
-//! load time. We take pre-resolved `SocketAddr`s only. Chunk 6's
-//! `do_outgoing_connection` integration owns DNS.
+//! C `get_recent_address` calls `str2addrinfo` (`getaddrinfo`) for
+//! each `Address = bob.example.com 655` line **as the cursor reaches
+//! it** — DNS at connect time, not config load time. Tier 3 stores
+//! unresolved `(host, port)` pairs; [`AddressCache::next_addr`]
+//! resolves on demand. The resolve is **blocking** (so
+//! is C's). Win over eager: `open()` doesn't block, AND each retry
+//! round (after `reset()`) re-resolves, so dynamic DNS picks up the
+//! new IP. Per-round resolve cache: each `Address` line resolves
+//! once per round, results buffered until `reset()`.
 //!
 //! ## Tier structure: three vecs, not one
 //!
@@ -47,13 +51,12 @@
 //! edges gives `bob→alice` whose reverse is `alice→bob`, whose `address`
 //! is 10.0.0.5 — where alice last saw bob. The graph already knows;
 //! try those before DNS.
-// TODO(chunk-6): lazy getaddrinfo for hostname `Address` lines (`:157-199`).
 
 #![forbid(unsafe_code)]
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 /// `address_cache.h:25`: `#define MAX_CACHED_ADDRESSES 8`. Only the
@@ -76,11 +79,20 @@ pub struct AddressCache {
     /// dial re-walks `n->edge_tree`. We replace via
     /// [`add_known_addresses`](Self::add_known_addresses).
     known: Vec<SocketAddr>,
-    /// Tier 3 (`:151-199`): `Address =` config lines, pre-resolved.
-    /// Static after `open()`.
-    config: Vec<SocketAddr>,
-    /// Index into the logical `cached ‖ known ‖ config` concatenation.
-    /// `reset()` zeroes. C: `tried` (`:122`, `:243`).
+    /// Tier 3 source (`:151-199`): `Address =` config lines, **unresolved**.
+    /// C `address_cache.c:42-63` stores `struct config_t *cfg` (the
+    /// raw string). Static after `open()`.
+    config: Vec<(String, u16)>,
+    /// Tier 3 resolved buffer. `next_addr` extends this lazily as the
+    /// cursor walks into tier 3 (one `to_socket_addrs()` per
+    /// `config[config_idx]` line). C's `cache->ai` (`:159-184`).
+    /// Cleared on `reset()` → fresh DNS each retry round.
+    config_resolved: Vec<SocketAddr>,
+    /// Next `config[]` index to resolve. C: implicit in the
+    /// `lookup_config_next` walk (`:194`).
+    config_idx: usize,
+    /// Index into the logical `cached ‖ known ‖ config_resolved`
+    /// concatenation. `reset()` zeroes. C: `tried` (`:122`, `:243`).
     cursor: usize,
     /// `confbase/cache/NODE`. `None` = in-memory only (tests).
     cache_file: Option<PathBuf>,
@@ -94,21 +106,20 @@ impl AddressCache {
     /// `memset` to empty. We do the same: any parse failure → just
     /// the config addrs, no error. It's a cache.
     #[must_use]
-    pub fn open(confbase: &Path, node_name: &str, config_addrs: Vec<SocketAddr>) -> Self {
+    pub fn open(confbase: &Path, node_name: &str, config_addrs: Vec<(String, u16)>) -> Self {
         let cache_file = confbase.join("cache").join(node_name);
         let cached = Self::load(&cache_file);
 
-        // Config addrs go AFTER cached-recent addrs (C: cached
-        // tried first `:121`, config tried last `:151-199`).
-        // Dedup: don't list a config addr that's already in the
-        // recent cache. C handles this implicitly via `find_cached`
-        // skip on the edge-addr path (`:137-139`); the config tier
-        // (`:151-`) has no such skip but we dedup anyway — harmless,
-        // saves a doomed connect attempt.
+        // Config addrs are unresolved (host, port) pairs; dedup vs
+        // tier 1 happens at RESOLVE time in `next_addr` (we can't
+        // compare a hostname to a `SocketAddr` here). The C config
+        // tier (`:151-199`) has no dedup either — it just walks
+        // `lookup_config_next`. Dedup the (host, port) pairs against
+        // each other to skip literal duplicate `Address =` lines.
         let mut config = Vec::new();
-        for a in config_addrs {
-            if !cached.contains(&a) && !config.contains(&a) {
-                config.push(a);
+        for hp in config_addrs {
+            if !config.contains(&hp) {
+                config.push(hp);
             }
         }
 
@@ -116,6 +127,8 @@ impl AddressCache {
             cached,
             known: Vec::new(),
             config,
+            config_resolved: Vec::new(),
+            config_idx: 0,
             cursor: 0,
             cache_file: Some(cache_file),
         }
@@ -131,6 +144,8 @@ impl AddressCache {
             cached: addrs,
             known: Vec::new(),
             config: Vec::new(),
+            config_resolved: Vec::new(),
+            config_idx: 0,
             cursor: 0,
             cache_file: None,
         }
@@ -183,26 +198,63 @@ impl AddressCache {
     }
 
     /// `get_recent_address` (`:119-215`). Returns next addr; `None`
-    /// when exhausted. The C does a complicated three-phase walk
-    /// (cached → edge-known → config-with-getaddrinfo) with `tried`
-    /// tracking which phase. We pre-built each tier so this is just
-    /// an index into the logical concatenation.
+    /// when exhausted. Three-phase walk: cached → edge-known →
+    /// config-with-getaddrinfo. Tiers 1/2 are pre-built; tier 3
+    /// resolves lazily HERE (`:157-199`: `str2addrinfo` per
+    /// `Address` line as the cursor reaches it).
+    ///
+    /// **Blocking**: tier-3 entry may call `to_socket_addrs()`
+    /// (= `getaddrinfo`). Same as C. Don't call from a hot loop
+    /// expecting sub-ms latency.
     pub fn next_addr(&mut self) -> Option<SocketAddr> {
-        let i = self.cursor;
-        let c = self.cached.len();
-        let k = c + self.known.len();
-        let a = if i < c {
-            self.cached.get(i)
-        } else if i < k {
-            self.known.get(i - c)
+        let cur = self.cursor;
+        let n_cached = self.cached.len();
+        let n_known = n_cached + self.known.len();
+        let addr = if cur < n_cached {
+            self.cached.get(cur).copied()
+        } else if cur < n_known {
+            self.known.get(cur - n_cached).copied()
         } else {
-            self.config.get(i - k)
-        }
-        .copied();
-        if a.is_some() {
+            // Tier 3. C `:157-199`: walk `Address =` lines, resolve
+            // each via `str2addrinfo`, return one addr per call. The
+            // resolved chain (`cache->ai`) is kept until reset so we
+            // don't re-resolve mid-round. `config_resolved` is that
+            // chain; `config_idx` is the `lookup_config_next` cursor.
+            let want = cur - n_known;
+            // Resolve more `Address` lines until we have addr `want` (or
+            // run out of lines). Each line may yield 0 (NXDOMAIN), 1,
+            // or several (v4+v6) addrs. Dups (vs tiers 1/2/3-so-far)
+            // just don't push — the loop keeps going. C's config tier
+            // doesn't dedup (`:151-199` has no `find_cached`); we do,
+            // harmlessly, saves a doomed connect.
+            while want >= self.config_resolved.len() && self.config_idx < self.config.len() {
+                let (host, port) = &self.config[self.config_idx];
+                self.config_idx += 1;
+                // C `:159` `str2addrinfo` → `getaddrinfo`. Failure
+                // (`:193`) just moves to the next config line.
+                match (host.as_str(), *port).to_socket_addrs() {
+                    Ok(iter) => {
+                        for a in iter {
+                            if !self.cached.contains(&a)
+                                && !self.known.contains(&a)
+                                && !self.config_resolved.contains(&a)
+                            {
+                                self.config_resolved.push(a);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(target: "tincd::conn",
+                                   "Address = {host} {port}: {e}");
+                    }
+                }
+            }
+            self.config_resolved.get(want).copied()
+        };
+        if addr.is_some() {
             self.cursor += 1;
         }
-        a
+        addr
     }
 
     /// `add_recent_address` (`:84-116`). Prepend a working address.
@@ -233,8 +285,13 @@ impl AddressCache {
 
     /// `reset_address_cache` (`:251-266`). Cursor to 0. Called on
     /// retry (the `retry_outgoing` exponential-backoff timer).
+    /// C `:261-263` frees `cache->ai` — the resolved-addrinfo chain
+    /// — so the next round re-resolves. Dynamic DNS: if `bob.
+    /// example.com` changed IPs between retries, we pick that up.
     pub fn reset(&mut self) {
         self.cursor = 0;
+        self.config_resolved.clear();
+        self.config_idx = 0;
     }
 
     /// Persist to `confbase/cache/NODE`. C does this inline in
@@ -284,6 +341,10 @@ mod tests {
 
     fn sa(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    fn cfg(host: &str, port: u16) -> (String, u16) {
+        (host.to_string(), port)
     }
 
     /// Unique tempdir per test. Workspace convention: thread id in
@@ -367,14 +428,14 @@ mod tests {
     fn roundtrip_file() {
         let tmp = tmpdir("roundtrip");
         {
-            let mut c = AddressCache::open(&tmp, "bob", vec![sa("10.0.0.1:655")]);
+            let mut c = AddressCache::open(&tmp, "bob", vec![cfg("10.0.0.1", 655)]);
             c.add_recent(sa("[::1]:655"));
             c.add_recent(sa("192.168.1.1:655"));
             // Drop saves.
         }
         // Reopen: cached addrs first, config addr deduped if
         // already cached, appended if not.
-        let mut c = AddressCache::open(&tmp, "bob", vec![sa("10.0.0.1:655")]);
+        let mut c = AddressCache::open(&tmp, "bob", vec![cfg("10.0.0.1", 655)]);
         assert_eq!(c.next_addr(), Some(sa("192.168.1.1:655")));
         assert_eq!(c.next_addr(), Some(sa("[::1]:655")));
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
@@ -407,7 +468,7 @@ mod tests {
     fn open_missing_file_is_config_only() {
         // C `:226`: `!fp` → memset. No cache dir at all.
         let tmp = tmpdir("missing");
-        let mut c = AddressCache::open(&tmp, "alice", vec![sa("10.0.0.1:655")]);
+        let mut c = AddressCache::open(&tmp, "alice", vec![cfg("10.0.0.1", 655)]);
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
         assert_eq!(c.next_addr(), None);
     }
@@ -424,7 +485,7 @@ mod tests {
             c.add_recent(sa("10.0.0.1:655"));
         }
         // Reopen with config (tier 3); inject edge-known (tier 2).
-        let mut c = AddressCache::open(&tmp, "bob", vec![sa("10.0.0.3:655")]);
+        let mut c = AddressCache::open(&tmp, "bob", vec![cfg("10.0.0.3", 655)]);
         c.add_known_addresses([sa("10.0.0.2:655")]);
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655"))); // cached
         assert_eq!(c.next_addr(), Some(sa("10.0.0.2:655"))); // known
@@ -478,6 +539,54 @@ mod tests {
         assert_eq!(body.trim(), "10.0.0.1:655");
     }
 
+    /// Lazy resolve: numeric `Address = 127.0.0.1 655` resolves to
+    /// the same `SocketAddr` as eager. No DNS hit (numeric host).
+    #[test]
+    fn lazy_resolve_numeric() {
+        let tmp = tmpdir("lazy-numeric");
+        let mut c = AddressCache::open(&tmp, "bob", vec![cfg("127.0.0.1", 655)]);
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
+        assert_eq!(c.next_addr(), None);
+    }
+
+    /// Two `Address =` lines: walk past tiers 1+2 (empty), tier 3
+    /// yields both, each exactly once per round. Reset → fresh
+    /// resolve, both yielded again. C `:157-199` per-line resolve;
+    /// `:261-263` frees `cache->ai` on reset.
+    #[test]
+    fn lazy_resolve_two_lines_once_per_round() {
+        let tmp = tmpdir("lazy-two");
+        let mut c = AddressCache::open(
+            &tmp,
+            "bob",
+            vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)],
+        );
+        // Round 1.
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
+        assert_eq!(c.next_addr(), None);
+        assert_eq!(c.next_addr(), None);
+        // Round 2: reset clears the resolve buffer.
+        c.reset();
+        assert_eq!(c.config_resolved.len(), 0);
+        assert_eq!(c.config_idx, 0);
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
+        assert_eq!(c.next_addr(), None);
+    }
+
+    /// Resolve dedup: a config addr that's already in tier 1 (cached)
+    /// is skipped at resolve time. The cursor doesn't drift.
+    #[test]
+    fn lazy_resolve_dedup_vs_cached() {
+        let mut c = AddressCache::new(vec![sa("127.0.0.1:655")]);
+        c.config = vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)];
+        // Tier 1: 127.0.0.1. Tier 3: 127.0.0.1 (dup, skipped) then 127.0.0.2.
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
+        assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
+        assert_eq!(c.next_addr(), None);
+    }
+
     #[test]
     fn load_garbage_is_empty() {
         // C-written sockaddr_storage binary blob hits this path.
@@ -486,7 +595,7 @@ mod tests {
         let dir = tmp.join("cache");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("bob"), b"\x01\x00\x00\x00garbage\xff\xfe").unwrap();
-        let mut c = AddressCache::open(&tmp, "bob", vec![sa("10.0.0.1:655")]);
+        let mut c = AddressCache::open(&tmp, "bob", vec![cfg("10.0.0.1", 655)]);
         // Only the config addr survives.
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
         assert_eq!(c.next_addr(), None);
