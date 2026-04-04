@@ -195,6 +195,20 @@ pub struct Connection {
     /// `sptpslen` accumulator. C reuses `c->inbuf` (`meta.c:205-207`);
     /// separate Vec keeps the "inbuf is plaintext-only" invariant.
     pub sptps_buf: Vec<u8>,
+
+    // ─── Per-host config extracted at id_h. C retains the whole
+    // `c->config_tree` (`protocol_auth.c:424` through `:1019`); we
+    // extract just the keys send_ack/ack_h read. None = absent.
+    /// `hosts/NAME` `IndirectData` (`protocol_auth.c:844`).
+    pub host_indirect: Option<bool>,
+    /// `hosts/NAME` `TCPOnly` (`protocol_auth.c:848`).
+    pub host_tcponly: Option<bool>,
+    /// `hosts/NAME` `ClampMSS` (`protocol_auth.c:857`, `:1011`).
+    pub host_clamp_mss: Option<bool>,
+    /// `hosts/NAME` `Weight` (`protocol_auth.c:863`).
+    pub host_weight: Option<i32>,
+    /// `hosts/NAME` `PMTU` (`protocol_auth.c:1003`).
+    pub host_pmtu: Option<u16>,
 }
 
 /// Events from one `feed()`. Order matters: an `ADD_EDGE` before a
@@ -249,6 +263,11 @@ impl Connection {
             tcplen: 0,
             sptpslen: 0,
             sptps_buf: Vec::new(),
+            host_indirect: None,
+            host_tcponly: None,
+            host_clamp_mss: None,
+            host_weight: None,
+            host_pmtu: None,
         }
     }
 
@@ -279,6 +298,11 @@ impl Connection {
             tcplen: 0,
             sptpslen: 0,
             sptps_buf: Vec::new(),
+            host_indirect: None,
+            host_tcponly: None,
+            host_clamp_mss: None,
+            host_weight: None,
+            host_pmtu: None,
         }
     }
 
@@ -317,6 +341,11 @@ impl Connection {
             tcplen: 0,
             sptpslen: 0,
             sptps_buf: Vec::new(),
+            host_indirect: None,
+            host_tcponly: None,
+            host_clamp_mss: None,
+            host_weight: None,
+            host_pmtu: None,
         }
     }
 

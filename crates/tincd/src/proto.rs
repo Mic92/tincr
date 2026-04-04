@@ -378,8 +378,10 @@ pub fn handle_id(
 
     // C `:404-419`: bypass_security, !experimental — SKIPPED (forbid both).
 
-    // C `:421-435`: load pubkey. We don't retain `c->config_tree`
-    // (only need the pubkey; `send_ack` re-reads). C distinguishes
+    // C `:421-435`: load pubkey. C retains `c->config_tree` through
+    // ack_h; we extract the 5 keys send_ack/ack_h read and store on
+    // the connection (lighter than retaining the whole HashMap).
+    // C distinguishes
     // file-missing (`:428` "unknown identity") from file-has-no-key;
     // we collapse — either way you `tinc import`.
     let host_config = {
@@ -395,6 +397,32 @@ pub fn handle_id(
 
     let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
     conn.ecdsa = ecdsa;
+
+    // C `:424` config_tree retained for `:844-865` + `:1003-1019`.
+    // Extract now; `host_config` drops at end of fn. `.ok()` matches
+    // C `get_config_bool` semantics: parse-fail = absent (returns
+    // false, doesn't write `*result`).
+    conn.host_indirect = host_config
+        .lookup("IndirectData")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_tcponly = host_config
+        .lookup("TCPOnly")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_clamp_mss = host_config
+        .lookup("ClampMSS")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_weight = host_config
+        .lookup("Weight")
+        .next()
+        .and_then(|e| e.get_int().ok());
+    conn.host_pmtu = host_config
+        .lookup("PMTU")
+        .next()
+        .and_then(|e| e.get_int().ok())
+        .and_then(|v| u16::try_from(v).ok());
 
     // C `:437-439`: `if(minor && !ecdsa) minor = 1` — downgrade to
     // legacy. We forbid legacy: no pubkey → reject outright.
@@ -475,8 +503,6 @@ pub fn handle_id(
 /// `"%d %s %d %x"` = `ACK myport.udp weight options`. First line through
 /// `sptps_send_record` (encrypted).
 ///
-/// STUB: per-host options (`:844-865`) not read; uses daemon defaults.
-///
 /// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight` (read
 /// by `ack_h` at `:996-999`, `:1048`).
 pub fn send_ack(
@@ -491,12 +517,41 @@ pub fn send_ack(
     // C `:838-840`: RTT ms. `as i32`: C `(int)` also wraps.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
-    conn.estimated_weight = weight;
+    // C `:844-865`: per-host config OR myself->options. C composes
+    // bit-by-bit; the per-host fields were extracted at id_h. Global
+    // `Weight` fallback (`:864`) deferred (separate gap, net_setup.c
+    // global config plumbing).
+    let mut opts: u32 = 0;
+    // C `:844-846`: IndirectData per-host (yes only) OR global.
+    if conn.host_indirect == Some(true) || myself_options & OPTION_INDIRECT != 0 {
+        opts |= OPTION_INDIRECT;
+    }
+    // C `:848-850`: TCPOnly implies INDIRECT.
+    if conn.host_tcponly == Some(true) || myself_options & OPTION_TCPONLY != 0 {
+        opts |= OPTION_TCPONLY | OPTION_INDIRECT;
+    }
+    // C `:852-854`: PMTU only if global says so AND we're not TCP-only
+    // — this is the load-bearing bit. Without it, per-host TCPOnly
+    // still left PMTU set, peer wastes udp_discovery_timeout probing
+    // a path the user already told us is broken.
+    if myself_options & OPTION_PMTU_DISCOVERY != 0 && opts & OPTION_TCPONLY == 0 {
+        opts |= OPTION_PMTU_DISCOVERY;
+    }
+    // C `:856-861`: per-host ClampMSS OVERRIDES global (not OR'd).
+    // `get_config_bool` writes through only on success, so absent =
+    // global default sticks.
+    if conn
+        .host_clamp_mss
+        .unwrap_or(myself_options & OPTION_CLAMP_MSS != 0)
+    {
+        opts |= OPTION_CLAMP_MSS;
+    }
+    conn.options = opts;
 
-    // C `:844-865`: per-host config OR myself->options. STUBBED — just
-    // inherit (no per-host TCPOnly → PMTU bit sticks).
-    conn.options = myself_options
-        & (OPTION_INDIRECT | OPTION_TCPONLY | OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
+    // C `:863-865`: per-host Weight overrides RTT measurement. Global
+    // `Weight` fallback (`:864`) deferred (config_tree global plumbing).
+    let weight = conn.host_weight.unwrap_or(weight);
+    conn.estimated_weight = weight;
 
     // C `:867`: `"%d %s %d %x"`. `myport.udp` is a STRING in C; same
     // wire bytes either way.
@@ -1081,6 +1136,93 @@ mod tests {
 
     // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad) covered
     // by `tests/stop.rs::peer_ack_exchange`.
+
+    /// `protocol_auth.c:848-854`: per-host `TCPOnly = yes` sets
+    /// TCPONLY|INDIRECT and CLEARS PMTU_DISCOVERY. The load-bearing
+    /// fix from gap-audit `bcc5c3e3`: previously inherited PMTU bit
+    /// stuck, peer wasted udp_discovery_timeout probing a path the
+    /// user told us is broken.
+    #[test]
+    fn send_ack_per_host_tcponly_clears_pmtu() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_tcponly = Some(true);
+        let now = Instant::now();
+        send_ack(&mut c, 655, myself_options_default(), now);
+        assert_eq!(c.options & OPTION_TCPONLY, OPTION_TCPONLY);
+        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
+        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, 0);
+        // ClampMSS unaffected (default on).
+        assert_eq!(c.options & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+        // Wire bits: 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, NOT 0x0c.
+        let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+        assert!(line.ends_with(" 700000b\n"), "got {line:?}");
+    }
+
+    /// `protocol_auth.c:856-861`: ClampMSS per-host overrides global
+    /// (not OR'd). `ClampMSS = no` in hosts/NAME clears it even though
+    /// the daemon default is on.
+    #[test]
+    fn send_ack_per_host_clamp_mss_overrides() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_clamp_mss = Some(false);
+        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        assert_eq!(c.options & OPTION_CLAMP_MSS, 0);
+        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+    }
+
+    /// `protocol_auth.c:844-846`: `IndirectData = yes` per-host. C's
+    /// `&& choice` means `= no` in hosts/NAME does NOT clear a global
+    /// INDIRECT (asymmetric with ClampMSS).
+    #[test]
+    fn send_ack_per_host_indirect() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_indirect = Some(true);
+        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
+        assert_eq!(c.options & OPTION_TCPONLY, 0);
+        // PMTU stays on (only TCPONLY suppresses it).
+        assert_eq!(c.options & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+
+        // `IndirectData = no` per-host doesn't clear global INDIRECT.
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_indirect = Some(false);
+        send_ack(
+            &mut c,
+            655,
+            OPTION_INDIRECT | OPTION_CLAMP_MSS,
+            Instant::now(),
+        );
+        assert_eq!(c.options & OPTION_INDIRECT, OPTION_INDIRECT);
+    }
+
+    /// `protocol_auth.c:863-865`: per-host Weight overrides RTT.
+    #[test]
+    fn send_ack_per_host_weight() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_weight = Some(42);
+        // RTT measure would be 0ms (start == now); per-host wins.
+        let now = c.start;
+        send_ack(&mut c, 655, myself_options_default(), now);
+        assert_eq!(c.estimated_weight, 42);
+        let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+        // "4 655 42 700000c\n"
+        assert!(line.contains(" 42 "), "got {line:?}");
+    }
+
+    /// No per-host overrides → inherit global. Regression: this is
+    /// what the STUBBED code did; ensure the rewrite preserves it.
+    #[test]
+    fn send_ack_no_per_host_inherits_global() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        assert_eq!(c.options, OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS);
+    }
 
     #[test]
     fn parse_ack_roundtrip() {

@@ -6,7 +6,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 impl Daemon {
     /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse done
     /// by `proto::parse_ack`; this does the world-model edits.
-    /// STUB: `:1003-1019` per-host PMTU/ClampMSS re-read.
+    #[allow(clippy::too_many_lines)] // C `ack_h` is 116 lines; close port
     pub(super) fn on_ack(
         &mut self,
         id: ConnId,
@@ -25,7 +25,24 @@ impl Daemon {
         }
         conn.options |= his;
 
-        // C `:1003-1019` STUBBED (config_tree not retained).
+        // C `:1011-1017`: per-host ClampMSS force-set/force-clear AFTER
+        // merging peer's options. Peer asked for ClampMSS but our
+        // hosts/NAME says no → we win (local config trumps wire).
+        if let Some(clamp) = conn.host_clamp_mss {
+            if clamp {
+                conn.options |= crate::proto::OPTION_CLAMP_MSS;
+            } else {
+                conn.options &= !crate::proto::OPTION_CLAMP_MSS;
+            }
+        }
+
+        // C `:1003-1009`: per-host PMTU clamp on `n->mtu`. C `node.c:84`
+        // inits `n->mtu = MTU` so the `< n->mtu` check passes for any
+        // sane config. We init `pmtu` lazily (try_tx); seed it now
+        // with the clamp so the first probe cycle starts from a sane
+        // ceiling instead of wasting probes above the user's known
+        // path MTU. Global `PMTU` (`:1007`) deferred (separate gap).
+        let host_pmtu = conn.host_pmtu;
 
         conn.allow_request = None; // C `:1023`
 
@@ -67,6 +84,24 @@ impl Daemon {
         // C `:965-991`: lookup_node BEFORE dup-conn check. Idempotent
         // (peer may already be in graph from transitive ADD_EDGE).
         let peer_id = self.lookup_or_add_node(&name);
+
+        // C `:1003-1005` `n->mtu = mtu`. Runs after node_add, before
+        // edge_add. Seed pmtu (or clamp existing) so try_mtu's `maxmtu`
+        // and the eventual fixed `mtu` don't exceed the user-declared
+        // ceiling. C only writes `n->mtu` (probes still binary-search
+        // 0..MTU); we also clamp `maxmtu` — strictly better, the
+        // search converges faster and never probes above the cap.
+        if let Some(cap) = host_pmtu {
+            let now = self.timers.now();
+            let tunnel = self.tunnels.entry(peer_id).or_default();
+            let p = tunnel
+                .pmtu
+                .get_or_insert_with(|| PmtuState::new(now, cap.min(MTU)));
+            if p.mtu == 0 || cap < p.mtu {
+                p.mtu = cap;
+            }
+            p.maxmtu = p.maxmtu.min(cap);
+        }
 
         if let Some(old) = self.nodes.get(&peer_id)
             && let Some(old_conn) = old.conn
