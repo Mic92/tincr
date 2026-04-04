@@ -55,13 +55,20 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod common;
+use common::linux::{ChildWithLog, run_ip, wait_for_carrier};
+use common::{
+    Ctl, TmpGuard, alloc_port, node_status, poll_until, pubkey_from_seed, wait_for_file,
+    write_ed25519_privkey,
+};
+
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("thr", tag)
+}
 
 // ═════════════════════════════ gates ═══════════════════════════════════════
 
@@ -208,59 +215,7 @@ impl Drop for NetNs {
     }
 }
 
-fn run_ip(args: &[&str]) {
-    let out = Command::new("ip").args(args).output().expect("spawn ip");
-    assert!(
-        out.status.success(),
-        "ip {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-fn wait_for_carrier(dev: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let out = Command::new("ip")
-            .args(["-o", "link", "show", dev])
-            .output()
-            .expect("ip link show");
-        if String::from_utf8_lossy(&out.stdout).contains("LOWER_UP") {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 // ═════════════════════════ daemon plumbing ═════════════════════════════════
-
-struct TmpGuard(PathBuf);
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("tincd-thr-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn alloc_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 /// Which binary backs this node. `Rust` is `CARGO_BIN_EXE_tincd`;
 /// `C(path)` is the env-gated C tincd.
@@ -305,14 +260,14 @@ impl Node {
     }
 
     fn pubkey(&self) -> [u8; 32] {
-        use tinc_crypto::sign::SigningKey;
-        *SigningKey::from_seed(&self.seed).public_key()
+        pubkey_from_seed(&self.seed)
+    }
+
+    fn ctl(&self) -> Ctl {
+        Ctl::connect(&self.socket, &self.pidfile)
     }
 
     fn write_config(&self, other: &Node, connect_to: bool) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!(
@@ -346,16 +301,7 @@ impl Node {
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     /// Spawn with stderr piped to a background drain thread. The
@@ -394,125 +340,6 @@ impl Node {
         };
         ChildWithLog::spawn(child)
     }
-}
-
-struct ChildWithLog {
-    child: Child,
-    log: Arc<Mutex<Vec<u8>>>,
-    drain: Option<std::thread::JoinHandle<()>>,
-}
-
-impl ChildWithLog {
-    fn spawn(mut child: Child) -> Self {
-        let stderr = child.stderr.take().expect("stderr piped");
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let log2 = Arc::clone(&log);
-        let drain = std::thread::spawn(move || {
-            let mut r = stderr;
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = r.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                log2.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        });
-        Self {
-            child,
-            log,
-            drain: Some(drain),
-        }
-    }
-
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
-    fn kill_and_log(mut self) -> String {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(h) = self.drain.take() {
-            let _ = h.join();
-        }
-        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
-    }
-}
-
-struct Ctl {
-    r: BufReader<UnixStream>,
-    w: UnixStream,
-}
-
-impl Ctl {
-    fn connect(node: &Node) -> Self {
-        let cookie = std::fs::read_to_string(&node.pidfile)
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .expect("pidfile has cookie")
-            .to_owned();
-        let stream = UnixStream::connect(&node.socket).expect("ctl connect");
-        let r = BufReader::new(stream.try_clone().unwrap());
-        let mut ctl = Self { r, w: stream };
-        writeln!(ctl.w, "0 ^{cookie} 0").unwrap();
-        let mut line = String::new();
-        ctl.r.read_line(&mut line).unwrap();
-        line.clear();
-        ctl.r.read_line(&mut line).unwrap();
-        ctl
-    }
-
-    fn dump(&mut self, subtype: u8) -> Vec<String> {
-        writeln!(self.w, "18 {subtype}").unwrap();
-        let term = format!("18 {subtype}");
-        let mut rows = Vec::new();
-        loop {
-            let mut line = String::new();
-            self.r.read_line(&mut line).expect("dump row");
-            let line = line.trim_end().to_owned();
-            if line == term {
-                break;
-            }
-            rows.push(line);
-        }
-        rows
-    }
-}
-
-fn wait_for_file(path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(v) = f() {
-            return v;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "poll timed out after {timeout:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn node_status(rows: &[String], name: &str) -> Option<u32> {
-    rows.iter().find_map(|r| {
-        let body = r.strip_prefix("18 3 ")?;
-        let toks: Vec<&str> = body.split_whitespace().collect();
-        if toks.first() != Some(&name) {
-            return None;
-        }
-        u32::from_str_radix(toks.get(10)?, 16).ok()
-    })
 }
 
 /// Read `minmtu` from a `dump nodes` row. Index 15 in the C
@@ -604,7 +431,7 @@ fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
     run_ip(&["link", "set", "tincT0", "up"]);
     run_ip(&["link", "set", "tincT1", "up"]);
 
-    let tmp = TmpGuard::new(tag);
+    let tmp = tmp(tag);
     let alice = Node::new(
         tmp.path(),
         "alice",
@@ -674,8 +501,8 @@ fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
     ]);
 
     // ─── handshake ──────────────────────────────────────────────
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     // Reachable (status bit 4): meta-SPTPS done, graph() ran.
     let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -826,6 +653,7 @@ fn measure(handle: &mut TunnelHandle) -> f64 {
     if !client.status.success() {
         let mut srv_err = String::new();
         if let Some(mut e) = server.stderr.take() {
+            use std::io::Read;
             let _ = e.read_to_string(&mut srv_err);
         }
         let a = handle.alice_log();

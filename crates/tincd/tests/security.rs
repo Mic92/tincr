@@ -40,72 +40,20 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-// ═══ Harness (copied from stop.rs/two_daemons.rs — see module doc)
+mod common;
+use common::{
+    TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_bin, wait_for_file,
+    write_ed25519_privkey,
+};
 
-struct TmpGuard(PathBuf);
-
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-sec-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
-}
-
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-fn read_cookie(pidfile: &std::path::Path) -> String {
-    let content = std::fs::read_to_string(pidfile).unwrap();
-    content
-        .split_whitespace()
-        .nth(1)
-        .expect("pidfile has cookie")
-        .to_owned()
-}
-
-fn read_tcp_addr(pidfile: &std::path::Path) -> std::net::SocketAddr {
-    let content = std::fs::read_to_string(pidfile).unwrap();
-    let after_cookie = content.splitn(3, ' ').nth(2).expect("pidfile has addr");
-    let mut parts = after_cookie.trim_end().split(" port ");
-    let host = parts.next().expect("host");
-    let port: u16 = parts.next().expect("port").parse().expect("port is num");
-    format!("{host}:{port}").parse().expect("parseable v4 addr")
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("sec", tag)
 }
 
 /// Minimal config for one daemon. Returns the daemon's pubkey
 /// (unused by the negative tests; the splice test reads it).
 /// `extra_conf` is appended to `tinc.conf` (for `PingTimeout`).
 fn write_config(confbase: &std::path::Path, name: &str, seed: u8, extra_conf: &str) -> [u8; 32] {
-    use std::os::unix::fs::OpenOptionsExt;
-    use tinc_crypto::sign::SigningKey;
-
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
@@ -114,18 +62,9 @@ fn write_config(confbase: &std::path::Path, name: &str, seed: u8, extra_conf: &s
     .unwrap();
     std::fs::write(confbase.join("hosts").join(name), "Port = 0\n").unwrap();
 
-    let sk = SigningKey::from_seed(&[seed; 32]);
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(confbase.join("ed25519_key.priv"))
-        .unwrap();
-    let mut w = std::io::BufWriter::new(f);
-    tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
-
-    *sk.public_key()
+    let seed = [seed; 32];
+    write_ed25519_privkey(confbase, &seed);
+    pubkey_from_seed(&seed)
 }
 
 /// Spawn a daemon. Same flags everywhere.
@@ -147,12 +86,6 @@ fn spawn_daemon(
         .expect("spawn tincd")
 }
 
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
 /// One daemon spawned + ready. The fixture for the single-daemon
 /// negative tests.
 struct OneDaemon {
@@ -163,7 +96,7 @@ struct OneDaemon {
 
 impl OneDaemon {
     fn spawn(tag: &str, extra_conf: &str) -> Self {
-        let tmp = TmpGuard::new(tag);
+        let tmp = tmp(tag);
         let confbase = tmp.path().join("vpn");
         let pidfile = tmp.path().join("tinc.pid");
         let socket = tmp.path().join("tinc.socket");
@@ -324,7 +257,7 @@ fn unknown_id_rejected() {
 /// KNOWN peer name with `17.0` to isolate the version gate.
 #[test]
 fn legacy_minor_rejected() {
-    let tmp = TmpGuard::new("legacy-minor");
+    let tmp = tmp("legacy-minor");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -394,7 +327,7 @@ fn legacy_minor_rejected() {
 /// pingtimeout` elapsed → "Timeout during authentication".
 #[test]
 fn id_timeout_half_open_survives() {
-    let tmp = TmpGuard::new("id-timeout");
+    let tmp = tmp("id-timeout");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -535,7 +468,7 @@ fn id_timeout_half_open_survives() {
 fn splice_mitm_rejected() {
     use std::net::TcpListener;
 
-    let tmp = TmpGuard::new("splice");
+    let tmp = tmp("splice");
 
     // ─── two-daemon setup (no ConnectTo on either side) ────────
     // Same shape as `two_daemons.rs::Node` but inlined: we need

@@ -21,69 +21,18 @@
 //! <100ms on loopback. Timeouts are 10s for slack on a loaded CI box;
 //! the tests typically complete in <1s.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-// Shared with stop.rs but tests can't share helpers across files
-// without a `tests/common/mod.rs`. Inline the small bits.
+mod common;
+use common::{
+    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_bin,
+    wait_for_file, write_ed25519_privkey,
+};
 
-struct TmpGuard(PathBuf);
-
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-2d-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
-}
-
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-fn read_cookie(pidfile: &std::path::Path) -> String {
-    let content = std::fs::read_to_string(pidfile).unwrap();
-    content
-        .split_whitespace()
-        .nth(1)
-        .expect("pidfile has cookie")
-        .to_owned()
-}
-
-/// Pre-allocate a port: bind to 0, read it back, drop. The race
-/// window is sub-millisecond on loopback.
-fn alloc_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    l.local_addr().unwrap().port()
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("2d", tag)
 }
 
 /// One daemon's config bundle. Seeds are distinct per node so the
@@ -141,8 +90,13 @@ impl Node {
 
     /// Ed25519 pubkey for cross-registration.
     fn pubkey(&self) -> [u8; 32] {
-        use tinc_crypto::sign::SigningKey;
-        *SigningKey::from_seed(&self.seed).public_key()
+        pubkey_from_seed(&self.seed)
+    }
+
+    /// Connect a control client. Thin wrapper so callsites stay
+    /// `node.ctl()`.
+    fn ctl(&self) -> Ctl {
+        Ctl::connect(&self.socket, &self.pidfile)
     }
 
     /// Write `tinc.conf` + `hosts/NAME` + `ed25519_key.priv` +
@@ -159,9 +113,6 @@ impl Node {
         device_fd: Option<i32>,
         subnet: Option<&str>,
     ) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         // tinc.conf
@@ -195,17 +146,7 @@ impl Node {
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
-        // Private key.
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     /// Three-node config: write `tinc.conf` with `ConnectTo` for
@@ -223,9 +164,6 @@ impl Node {
         device_fd: Option<i32>,
         subnet: Option<&str>,
     ) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
@@ -263,22 +201,10 @@ impl Node {
             std::fs::write(self.confbase.join("hosts").join(peer.name), cfg).unwrap();
         }
 
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     fn write_config(&self, other: &Node, connect_to: bool) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         // tinc.conf
@@ -317,17 +243,7 @@ impl Node {
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
-        // Private key.
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     /// Spawn with an inherited fd. Clears CLOEXEC on `fd` so the
@@ -373,68 +289,6 @@ impl Node {
     }
 }
 
-/// Control-socket client. Connects, does the greeting, ready for
-/// dump RPCs.
-struct Ctl {
-    r: BufReader<UnixStream>,
-    w: UnixStream,
-}
-
-impl Ctl {
-    fn connect(node: &Node) -> Self {
-        let cookie = read_cookie(&node.pidfile);
-        let stream = UnixStream::connect(&node.socket).expect("ctl connect");
-        let r = BufReader::new(stream.try_clone().unwrap());
-        let mut ctl = Self { r, w: stream };
-        // Greeting dance.
-        writeln!(ctl.w, "0 ^{cookie} 0").unwrap();
-        let mut line = String::new();
-        ctl.r.read_line(&mut line).unwrap(); // "0 NAME 17.7"
-        line.clear();
-        ctl.r.read_line(&mut line).unwrap(); // "4 0 PID"
-        ctl
-    }
-
-    /// Send a dump request, collect rows until terminator.
-    fn dump(&mut self, subtype: u8) -> Vec<String> {
-        writeln!(self.w, "18 {subtype}").unwrap();
-        let term = format!("18 {subtype}");
-        let mut rows = Vec::new();
-        loop {
-            let mut line = String::new();
-            self.r.read_line(&mut line).expect("dump row");
-            let line = line.trim_end().to_owned();
-            if line == term {
-                break;
-            }
-            rows.push(line);
-        }
-        rows
-    }
-}
-
-/// Spinloop helper: poll `f` until it returns `Some` or timeout.
-fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(v) = f() {
-            return v;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "poll timed out after {timeout:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Read a child's stderr (after kill+wait).
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
 // ═══════════════════════════════════════════════════════════════════
 
 /// Two real daemons. Alice has `ConnectTo = bob`. Full handshake →
@@ -467,7 +321,7 @@ fn drain_stderr(mut child: Child) -> String {
 ///    → `graph()` → `BecameUnreachable`.
 #[test]
 fn two_daemons_connect_and_reach() {
-    let tmp = TmpGuard::new("connect");
+    let tmp = tmp("connect");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
@@ -496,8 +350,8 @@ fn two_daemons_connect_and_reach() {
     // row (bob) with status bit 1 set (`active`, our `c->edge` proxy
     // — `0x2`). Same for bob. The control conn is also a row; it
     // has status `0x200` (bit 9). Filter on bit 1.
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     poll_until(Duration::from_secs(10), || {
         let a_conns = alice_ctl.dump(6);
@@ -649,7 +503,7 @@ fn two_daemons_connect_and_reach() {
 /// `#[ignore]` if CI is impatient; un-ignore once confident.
 #[test]
 fn outgoing_retry_after_refused() {
-    let tmp = TmpGuard::new("retry");
+    let tmp = tmp("retry");
     // PingTimeout=3 (not the default `write_config` PingTimeout=1):
     // alice's connect arrives mid-`turn()` on bob's side, so bob's
     // `Connection::new_meta` stamps `last_ping_time` from the
@@ -673,7 +527,7 @@ fn outgoing_retry_after_refused() {
 
     // Alice tries to connect immediately in setup(). ECONNREFUSED
     // → retry_outgoing arms +5s. Prove no active conn yet.
-    let mut alice_ctl = Ctl::connect(&alice);
+    let mut alice_ctl = alice.ctl();
     let conns = alice_ctl.dump(6);
     // Only the ctl conn. No "bob" row.
     assert!(
@@ -774,7 +628,7 @@ fn outgoing_retry_after_refused() {
 /// send the packet that actually crosses.
 #[test]
 fn first_packet_across_tunnel() {
-    let tmp = TmpGuard::new("first-pkt");
+    let tmp = tmp("first-pkt");
     let alice = Node::new(tmp.path(), "alice", 0xA7);
     let bob = Node::new(tmp.path(), "bob", 0xB7);
 
@@ -818,22 +672,11 @@ fn first_packet_across_tunnel() {
     unsafe { libc::close(alice_pair[1]) };
 
     // ─── wait for meta-conn handshake (chunk-6 milestone) ────────
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     // Status bit 4 (reachable) = both daemons completed ACK +
     // graph(). `dump nodes` row format: status is body token 10.
-    let node_status = |rows: &[String], name: &str| -> Option<u32> {
-        rows.iter().find_map(|r| {
-            let body = r.strip_prefix("18 3 ")?;
-            let toks: Vec<&str> = body.split_whitespace().collect();
-            if toks.first() != Some(&name) {
-                return None;
-            }
-            u32::from_str_radix(toks.get(10)?, 16).ok()
-        })
-    };
-
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(3);
         let b = bob_ctl.dump(3);
@@ -1067,7 +910,7 @@ fn mk_ipv4_pkt(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
 /// + bit handling + per-tunnel level dispatch.
 #[test]
 fn compression_roundtrip() {
-    let tmp = TmpGuard::new("compress");
+    let tmp = tmp("compress");
     // Compression is HOST-tagged but our `setup` reads from the
     // merged config tree (host file is merged into tinc.conf at
     // setup). Put it in tinc.conf via `with_conf`.
@@ -1099,20 +942,10 @@ fn compression_roundtrip() {
     }
     unsafe { libc::close(alice_pair[1]) };
 
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     // ─── reachable + validkey, same dance as first_packet ────────
-    let node_status = |rows: &[String], name: &str| -> Option<u32> {
-        rows.iter().find_map(|r| {
-            let body = r.strip_prefix("18 3 ")?;
-            let toks: Vec<&str> = body.split_whitespace().collect();
-            if toks.first() != Some(&name) {
-                return None;
-            }
-            u32::from_str_radix(toks.get(10)?, 16).ok()
-        })
-    };
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(3);
         let b = bob_ctl.dump(3);
@@ -1235,7 +1068,7 @@ fn compression_roundtrip() {
 /// 257` pinged-but-no-pong terminate path.
 #[test]
 fn ping_pong_keepalive() {
-    let tmp = TmpGuard::new("pingpong");
+    let tmp = tmp("pingpong");
     // PingInterval=1 makes PING observable in a 5s window.
     // PingTimeout=3 gives the SIGSTOP phase room: the stopped
     // daemon is paused for ~5s, the OTHER daemon's sweep needs
@@ -1257,8 +1090,8 @@ fn ping_pong_keepalive() {
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
 
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     // ─── wait for ACK on both sides ─────────────────────────────
     poll_until(Duration::from_secs(10), || {
@@ -1332,7 +1165,7 @@ fn ping_pong_keepalive() {
 fn tinc_up_runs() {
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = TmpGuard::new("tincup");
+    let tmp = tmp("tincup");
     let alice = Node::new(tmp.path(), "alice", 0xA9);
     let bob = Node::new(tmp.path(), "bob", 0xB9);
 
@@ -1414,7 +1247,7 @@ fn tinc_up_runs() {
 /// it's 65536 on Linux loopback so no problem.
 #[test]
 fn three_daemon_relay() {
-    let tmp = TmpGuard::new("relay3");
+    let tmp = tmp("relay3");
     let alice = Node::new(tmp.path(), "alice", 0xA3);
     let mid = Node::new(tmp.path(), "mid", 0xC3);
     let bob = Node::new(tmp.path(), "bob", 0xB3);
@@ -1480,20 +1313,9 @@ fn three_daemon_relay() {
     unsafe { libc::close(alice_pair[1]) };
 
     // ─── wait for full mesh reachability ────────────────────────
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
-    let _mid_ctl = Ctl::connect(&mid);
-
-    let node_status = |rows: &[String], name: &str| -> Option<u32> {
-        rows.iter().find_map(|r| {
-            let body = r.strip_prefix("18 3 ")?;
-            let toks: Vec<&str> = body.split_whitespace().collect();
-            if toks.first() != Some(&name) {
-                return None;
-            }
-            u32::from_str_radix(toks.get(10)?, 16).ok()
-        })
-    };
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
+    let _mid_ctl = mid.ctl();
 
     // alice must see bob as reachable (transitively, via mid).
     // SSSP: alice—mid edge from alice's ACK; mid—bob edge gossiped
@@ -1677,7 +1499,7 @@ fn three_daemon_relay() {
 /// on "only 2 nodes".
 #[test]
 fn three_daemon_tunnelserver() {
-    let tmp = TmpGuard::new("tunnelserver3");
+    let tmp = tmp("tunnelserver3");
     let alice = Node::new(tmp.path(), "alice", 0xA4);
     // mid: TunnelServer = yes. The whole point.
     let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
@@ -1758,9 +1580,9 @@ fn three_daemon_tunnelserver() {
     }
     unsafe { libc::close(alice_pair[1]) };
 
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
-    let mut mid_ctl = Ctl::connect(&mid);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
+    let mut mid_ctl = mid.ctl();
 
     // ─── wait for alice↔mid and bob↔mid to settle ────────────────
     // mid sees both spokes as active connections. Once that's
@@ -1958,7 +1780,7 @@ fn three_daemon_tunnelserver() {
 /// wrongly accepts the gossip).
 #[test]
 fn three_daemon_strictsubnets() {
-    let tmp = TmpGuard::new("strictsubnets3");
+    let tmp = tmp("strictsubnets3");
     // alice: StrictSubnets = yes. The RECEIVER of gossip.
     let alice = Node::new(tmp.path(), "alice", 0xA5).with_conf("StrictSubnets = yes\n");
     // mid: plain relay. NOT strict (so we can prove it accepts).
@@ -2004,8 +1826,8 @@ fn three_daemon_strictsubnets() {
     }
     unsafe { libc::close(alice_pair[1]) };
 
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut mid_ctl = Ctl::connect(&mid);
+    let mut alice_ctl = alice.ctl();
+    let mut mid_ctl = mid.ctl();
 
     // ─── wait: mid sees both spokes active ───────────────────────
     poll_until(Duration::from_secs(10), || {
@@ -2118,7 +1940,7 @@ fn three_daemon_strictsubnets() {
     }
     unsafe { libc::close(alice_pair2[1]) };
 
-    let mut alice_ctl2 = Ctl::connect(&alice);
+    let mut alice_ctl2 = alice.ctl();
     // Wait for alice↔mid handshake; bob's gossip via mid follows.
     // The preloaded subnet is there from cold-start regardless,
     // but wait for full mesh to prove the gossip path doesn't
@@ -2170,7 +1992,7 @@ fn has_subnet(rows: &[String], subnet: &str, owner: &str) -> bool {
 /// → peer's on_add_subnet → SubnetTree.
 #[test]
 fn sighup_reload_subnets() {
-    let tmp = TmpGuard::new("reload");
+    let tmp = tmp("reload");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
@@ -2189,8 +2011,8 @@ fn sighup_reload_subnets() {
     }
 
     // Wait for the connection.
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
     poll_until(Duration::from_secs(10), || {
         if has_active_peer(&bob_ctl.dump(6), "alice") {
             Some(())
@@ -2324,12 +2146,11 @@ fn tinc_join_against_real_daemon() {
     use tinc_crypto::invite::{build_slug, cookie_filename};
     use tinc_crypto::sign::SigningKey;
 
-    let tmp = TmpGuard::new("join");
+    let tmp = tmp("join");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
 
     // ─── alice's basic config (no peer; she just listens) ──────
     {
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(alice.confbase.join("hosts")).unwrap();
         std::fs::write(
             alice.confbase.join("tinc.conf"),
@@ -2350,34 +2171,14 @@ fn tinc_join_against_real_daemon() {
         )
         .unwrap();
         // alice's identity key.
-        let sk = SigningKey::from_seed(&alice.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(alice.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&alice.confbase, &alice.seed);
     }
 
     // ─── invitation key + invitation file ───────────────────────
     let inv_dir = alice.confbase.join("invitations");
     std::fs::create_dir_all(&inv_dir).unwrap();
     let inv_key = SigningKey::from_seed(&[0x11; 32]);
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(inv_dir.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &inv_key.to_blob()).unwrap();
-    }
+    write_ed25519_privkey(&inv_dir, &[0x11; 32]);
 
     // Cookie: deterministic for the test.
     let cookie: [u8; 18] = *b"test-cookie-18bxxx";
@@ -2523,7 +2324,7 @@ fn tinc_join_against_real_daemon() {
 /// and clutter stderr).
 #[test]
 fn load_all_nodes_populates_graph() {
-    let tmp = TmpGuard::new("loadall");
+    let tmp = tmp("loadall");
     let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xB9);
 
@@ -2548,7 +2349,7 @@ fn load_all_nodes_populates_graph() {
         panic!("alice setup failed: {}", drain_stderr(alice_child));
     }
 
-    let mut ctl = Ctl::connect(&alice);
+    let mut ctl = alice.ctl();
     let nodes = ctl.dump(3); // REQ_DUMP_NODES
 
     // Expect 3 rows: alice (myself), bob (hosts/ file), carol
@@ -2615,7 +2416,7 @@ fn load_all_nodes_populates_graph() {
 /// 30s; this fits. The CI profile has 60s.
 #[test]
 fn autoconnect_converges_to_three() {
-    let tmp = TmpGuard::new("autoconnect");
+    let tmp = tmp("autoconnect");
     // PingTimeout=10 on the peers: an inbound conn arriving at
     // +15s gets stamped with the cached `timers.now()` from the
     // previous event-loop turn (up to 5s stale — the periodic
@@ -2645,7 +2446,6 @@ fn autoconnect_converges_to_three() {
     // `has_address`. `write_config_multi` only writes Address
     // for ConnectTo targets; we write hosts/ manually instead.
     {
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(alice.confbase.join("hosts")).unwrap();
         std::fs::write(
             alice.confbase.join("tinc.conf"),
@@ -2671,16 +2471,7 @@ fn autoconnect_converges_to_three() {
             )
             .unwrap();
         }
-        let sk = tinc_crypto::sign::SigningKey::from_seed(&alice.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(alice.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&alice.confbase, &alice.seed);
     }
 
     // ─── spawn peers first (so alice's connects succeed) ─────────
@@ -2728,7 +2519,7 @@ fn autoconnect_converges_to_three() {
     // ─── poll: alice converges to 3 active peer conns ────────────
     // First periodic tick at +5s; one Connect per tick. 3 ticks
     // ≈ 15s to fill all three slots. 25s timeout for CI slop.
-    let mut alice_ctl = Ctl::connect(&alice);
+    let mut alice_ctl = alice.ctl();
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut last_conns;
     let mut last_count;
@@ -2814,7 +2605,7 @@ fn autoconnect_converges_to_three() {
 /// (alice connects once).
 fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("socks5 bind");
     let addr = listener.local_addr().unwrap();
@@ -2901,7 +2692,7 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 ///    `two_daemons_connect_and_reach`.
 #[test]
 fn socks5_proxy_roundtrip() {
-    let tmp = TmpGuard::new("socks5");
+    let tmp = tmp("socks5");
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
@@ -2930,8 +2721,8 @@ fn socks5_proxy_roundtrip() {
 
     // Poll for active peer conns on both sides. Same check as
     // `two_daemons_connect_and_reach`.
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(6);
         let b = bob_ctl.dump(6);
@@ -2975,7 +2766,7 @@ fn socks5_proxy_roundtrip() {
 /// One-shot: handles ONE connection then exits.
 fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::{Shutdown, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("http proxy bind");
     let addr = listener.local_addr().unwrap();
@@ -3065,7 +2856,7 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 /// 4. **Full handshake through the relay**: ID + SPTPS + ACK.
 #[test]
 fn http_proxy_roundtrip() {
-    let tmp = TmpGuard::new("httpproxy");
+    let tmp = tmp("httpproxy");
     let alice = Node::new(tmp.path(), "alice", 0xA6);
     let bob = Node::new(tmp.path(), "bob", 0xB6);
 
@@ -3093,8 +2884,8 @@ fn http_proxy_roundtrip() {
     }
 
     // Poll for active peer conns on both sides.
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(6);
         let b = bob_ctl.dump(6);
@@ -3154,7 +2945,7 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
 /// (compared before/after the spoofed send).
 #[test]
 fn udp_relay_gate_unauthenticated_sender() {
-    let tmp = TmpGuard::new("relay-gate");
+    let tmp = tmp("relay-gate");
     let alice = Node::new(tmp.path(), "alice", 0xA4);
     let mid = Node::new(tmp.path(), "mid", 0xC4);
     let bob = Node::new(tmp.path(), "bob", 0xB4);
@@ -3195,20 +2986,9 @@ fn udp_relay_gate_unauthenticated_sender() {
 
     // Wait for full mesh reachability (mid knows both, both know
     // each other transitively).
-    let _alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
-    let mut mid_ctl = Ctl::connect(&mid);
-
-    let node_status = |rows: &[String], name: &str| -> Option<u32> {
-        rows.iter().find_map(|r| {
-            let body = r.strip_prefix("18 3 ")?;
-            let toks: Vec<&str> = body.split_whitespace().collect();
-            if toks.first() != Some(&name) {
-                return None;
-            }
-            u32::from_str_radix(toks.get(10)?, 16).ok()
-        })
-    };
+    let _alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
+    let mut mid_ctl = mid.ctl();
 
     poll_until(Duration::from_secs(10), || {
         let m = mid_ctl.dump(3);
@@ -3314,7 +3094,7 @@ fn udp_relay_gate_unauthenticated_sender() {
 /// proper ICMPv6 (next-header=58, type=1 DST_UNREACH).
 #[test]
 fn ipv6_unreachable_builds_icmpv6() {
-    let tmp = TmpGuard::new("v6-unreach");
+    let tmp = tmp("v6-unreach");
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
@@ -3460,7 +3240,7 @@ fn del_subnet_legitimate_still_works() {
     // Reuse the SIGHUP-reload mechanism: alice adds, then removes
     // a subnet; bob sees both via gossip. Proves `on_del_subnet`'s
     // happy path survived the lookup-gate reorder.
-    let tmp = TmpGuard::new("del-subnet-gate");
+    let tmp = tmp("del-subnet-gate");
     let alice = Node::new(tmp.path(), "alice", 0xA6);
     let bob = Node::new(tmp.path(), "bob", 0xB6);
 
@@ -3487,7 +3267,7 @@ fn del_subnet_legitimate_still_works() {
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
 
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut bob_ctl = bob.ctl();
 
     // Wait for bob to learn both subnets via ADD_SUBNET gossip.
     // Subnet Display omits `/32` (default v4 prefix).

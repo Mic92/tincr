@@ -30,55 +30,19 @@
 //!   `tinc_join_against_real_daemon` test elsewhere.
 
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-// ═══════════════════════════════════════════════════════════════════
-// Fixture (cribbed from two_daemons.rs — tests/ files are separate
-// compile units, no shared `mod common`; we copy what we need).
+mod common;
+use common::{
+    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_bin,
+    wait_for_file_with as wait_for_file, write_ed25519_privkey,
+};
 
-struct TmpGuard(PathBuf);
-
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-scripts-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
-}
-
-/// Pre-allocate a port: bind to 0, read it back, drop. Race window
-/// is sub-ms on loopback.
-fn alloc_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    l.local_addr().unwrap().port()
-}
-
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("scripts", tag)
 }
 
 /// Minimal node fixture. Dummy device only — no fd plumbing here.
@@ -104,17 +68,13 @@ impl Node {
     }
 
     fn pubkey(&self) -> [u8; 32] {
-        use tinc_crypto::sign::SigningKey;
-        *SigningKey::from_seed(&self.seed).public_key()
+        pubkey_from_seed(&self.seed)
     }
 
     /// Write config. `peer` for cross-registration (pubkey + maybe
     /// Address). `connect_to` adds `ConnectTo = peer`. `subnets` go
     /// into `hosts/SELF`. Dummy device always.
     fn write_config(&self, peer: Option<&Node>, connect_to: bool, subnets: &[&str]) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!(
@@ -145,17 +105,7 @@ impl Node {
             std::fs::write(self.confbase.join("hosts").join(p.name), cfg).unwrap();
         }
 
-        // Private key.
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     fn spawn(&self) -> Child {
@@ -278,17 +228,6 @@ where
     }
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Test 1: tinc-up THEN subnet-up for OWN subnets at startup.
 //
@@ -303,7 +242,7 @@ fn wait_for_file(path: &Path, timeout: Duration) -> bool {
 
 #[test]
 fn tinc_up_then_own_subnet_up() {
-    let tmp = TmpGuard::new("startup");
+    let tmp = tmp("startup");
     let log = tmp.path().join("events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA1);
@@ -389,7 +328,7 @@ fn tinc_up_then_own_subnet_up() {
 
 #[test]
 fn host_up_order_on_connect() {
-    let tmp = TmpGuard::new("connect");
+    let tmp = tmp("connect");
     let alice_log = tmp.path().join("alice-events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA2);
@@ -483,7 +422,7 @@ fn host_up_order_on_connect() {
 
 #[test]
 fn host_down_order_on_disconnect() {
-    let tmp = TmpGuard::new("disconnect");
+    let tmp = tmp("disconnect");
     let alice_log = tmp.path().join("alice-events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA3);
@@ -583,7 +522,7 @@ fn host_down_order_on_disconnect() {
 
 #[test]
 fn tinc_down_on_shutdown() {
-    let tmp = TmpGuard::new("shutdown");
+    let tmp = tmp("shutdown");
     let log = tmp.path().join("events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA4);

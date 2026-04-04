@@ -38,67 +38,19 @@
 //!   and the cache-on-invite is a 1-line `add_recent` we have no
 //!   clean hook to assert separately.
 
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-// ═══════════════════════════════════════════════════════════════════
-// Fixture (cribbed from scripts.rs — tests/ files are separate
-// compile units, no shared `mod common`; we copy what we need).
+mod common;
+use common::{
+    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_bin,
+    wait_for_file_with as wait_for_file, write_ed25519_privkey,
+};
 
-struct TmpGuard(PathBuf);
-
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-addrcache-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
-}
-
-/// Pre-allocate a port: bind to 0, read it back, drop. Race window
-/// is sub-ms on loopback. Port is allocated ONCE at `Node::new` and
-/// reused across restarts — the cache file bakes in `127.0.0.1:PORT`.
-fn alloc_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    l.local_addr().unwrap().port()
-}
-
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn wait_for_file(path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("addrcache", tag)
 }
 
 /// Poll for `path` existing AND non-empty. Simpler than scripts.rs's
@@ -154,8 +106,7 @@ impl Node {
     }
 
     fn pubkey(&self) -> [u8; 32] {
-        use tinc_crypto::sign::SigningKey;
-        *SigningKey::from_seed(&self.seed).public_key()
+        pubkey_from_seed(&self.seed)
     }
 
     /// Write config. `peer` for cross-registration. `connect_to` adds
@@ -164,9 +115,6 @@ impl Node {
     /// written (peer stays trusted; just no dial target). Dummy
     /// device always.
     fn write_config(&self, peer: Option<&Node>, connect_to: bool, addr_in_hosts: bool) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!(
@@ -194,17 +142,7 @@ impl Node {
             std::fs::write(self.confbase.join("hosts").join(p.name), cfg).unwrap();
         }
 
-        // Private key.
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     fn spawn(&self) -> Child {
@@ -258,7 +196,7 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
 /// the wire test.
 #[test]
 fn restart_dials_from_cache() {
-    let tmp = TmpGuard::new("restart_dials_from_cache");
+    let tmp = tmp("restart_dials_from_cache");
     let alice = Node::new(tmp.path(), "alice", 0xA1);
     let bob = Node::new(tmp.path(), "bob", 0xB0);
 

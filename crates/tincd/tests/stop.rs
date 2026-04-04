@@ -35,41 +35,16 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Hand-rolled tempdir guard. Same pattern as the rest of the
-/// workspace: thread id in name, cleanup on drop, no `tempfile` dep.
-struct TmpGuard(PathBuf);
+mod common;
+use common::{
+    TmpGuard, read_cookie, read_tcp_addr, tincd_bin, wait_for_file, write_ed25519_privkey,
+};
 
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-stop-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Find the tincd binary cargo built. `CARGO_BIN_EXE_tincd` is set
-/// by cargo for THIS crate's integration tests. Same pattern as
-/// `tinc-tools/tests/self_roundtrip.rs::bin`.
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("stop", tag)
 }
 
 /// Write a minimal config: `tinc.conf`, `hosts/testnode`, AND
@@ -96,9 +71,6 @@ fn tincd_bin() -> PathBuf {
 /// ignore it; `peer_handshake_reaches_done` needs it for the SPTPS
 /// initiator side.
 fn write_config(confbase: &std::path::Path) -> [u8; 32] {
-    use std::os::unix::fs::OpenOptionsExt;
-    use tinc_crypto::sign::SigningKey;
-
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
@@ -109,65 +81,9 @@ fn write_config(confbase: &std::path::Path) -> [u8; 32] {
 
     // Daemon's private key. Seed `[0x42; 32]` — distinct from any
     // test-helper seeds (keys.rs uses 1..11, conn.rs uses 1/2/10/20).
-    let sk = SigningKey::from_seed(&[0x42; 32]);
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(confbase.join("ed25519_key.priv"))
-        .unwrap();
-    let mut w = std::io::BufWriter::new(f);
-    tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
-
-    *sk.public_key()
-}
-
-/// Poll for a file to appear. The daemon writes the pidfile in
-/// `setup()`; we don't know exactly when. Timeout 5s.
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-/// Read the cookie from the pidfile. Same format as
-/// `tinc-tools::Pidfile::read` parses: `<pid> <cookie> <host> port <port>\n`.
-fn read_cookie(pidfile: &std::path::Path) -> String {
-    let content = std::fs::read_to_string(pidfile).unwrap();
-    // Second whitespace-delimited token.
-    content
-        .split_whitespace()
-        .nth(1)
-        .expect("pidfile has cookie")
-        .to_owned()
-}
-
-/// Read the TCP address from the pidfile. The daemon writes
-/// `<pid> <cookie> <host> port <port>` (`control.c:178`, our
-/// `pidfile_addr`). With `AddressFamily = ipv4` and the unspec→
-/// loopback mapping, this is `127.0.0.1 port <kernel-port>`.
-///
-/// Returns a `SocketAddr` (the parser fuses host+port). v6 hosts
-/// don't have brackets in the pidfile (see `listen::fmt_addr_v6_
-/// no_brackets`), but `SocketAddr::from_str` wants brackets. So:
-/// only works for v4. Our tests use `AddressFamily = ipv4`.
-fn read_tcp_addr(pidfile: &std::path::Path) -> std::net::SocketAddr {
-    let content = std::fs::read_to_string(pidfile).unwrap();
-    // Format: `<pid> <cookie> <host> port <port>\n`.
-    // `" port "` is the literal separator (`sockaddr2hostname`).
-    let after_cookie = content.splitn(3, ' ').nth(2).expect("pidfile has addr");
-    // Now: `"127.0.0.1 port 50123\n"`.
-    let mut parts = after_cookie.trim_end().split(" port ");
-    let host = parts.next().expect("host");
-    let port: u16 = parts.next().expect("port").parse().expect("port is num");
-    // v4 only — see doc comment.
-    format!("{host}:{port}").parse().expect("parseable v4 addr")
+    let seed = [0x42; 32];
+    write_ed25519_privkey(confbase, &seed);
+    common::pubkey_from_seed(&seed)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -180,7 +96,7 @@ fn read_tcp_addr(pidfile: &std::path::Path) -> std::net::SocketAddr {
 /// `fake_daemon_setup`'s tests pass, both sides agree on the wire.
 #[test]
 fn spawn_connect_stop() {
-    let tmp = TmpGuard::new("connect-stop");
+    let tmp = tmp("connect-stop");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -296,7 +212,7 @@ fn spawn_connect_stop() {
 /// signal.
 #[test]
 fn sigterm_stops() {
-    let tmp = TmpGuard::new("sigterm");
+    let tmp = tmp("sigterm");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -350,7 +266,7 @@ fn sigterm_stops() {
 /// probe in `ControlSocket::bind` sees the first daemon listening.
 #[test]
 fn second_daemon_refused() {
-    let tmp = TmpGuard::new("second");
+    let tmp = tmp("second");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let pidfile2 = tmp.path().join("tinc2.pid");
@@ -416,7 +332,7 @@ fn second_daemon_refused() {
 /// PingTimeout from config and we can set it to 1s.)
 #[test]
 fn stays_alive_across_iterations() {
-    let tmp = TmpGuard::new("alive");
+    let tmp = tmp("alive");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -468,7 +384,7 @@ fn stays_alive_across_iterations() {
 /// `tinc-conf::read_server_config`.
 #[test]
 fn missing_config_fails() {
-    let tmp = TmpGuard::new("noconfig");
+    let tmp = tmp("noconfig");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -505,7 +421,7 @@ fn missing_config_fails() {
 /// `net_setup.c:778`: `logger(..., "Name for tinc daemon required!")`.
 #[test]
 fn missing_name_fails() {
-    let tmp = TmpGuard::new("noname");
+    let tmp = tmp("noname");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -537,7 +453,7 @@ fn missing_name_fails() {
 /// `handle_id` cookie check + `terminate` path.
 #[test]
 fn bad_cookie_dropped() {
-    let tmp = TmpGuard::new("badcookie");
+    let tmp = tmp("badcookie");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -609,7 +525,7 @@ fn bad_cookie_dropped() {
 fn tcp_connect_stop() {
     use std::net::TcpStream;
 
-    let tmp = TmpGuard::new("tcp-stop");
+    let tmp = tmp("tcp-stop");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -719,7 +635,7 @@ fn tcp_connect_stop() {
 /// hand-crafted minimal config (tinc.conf only) is also fine.
 #[test]
 fn missing_hosts_file_ok() {
-    let tmp = TmpGuard::new("nohosts");
+    let tmp = tmp("nohosts");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -729,27 +645,14 @@ fn missing_hosts_file_ok() {
     // see doc). The key IS required (chunk 4a); hosts/ is the
     // optional one being tested.
     //
-    // Can't use write_config() here — it creates hosts/. Inline
-    // the same key-write step.
-    use std::os::unix::fs::OpenOptionsExt;
-    use tinc_crypto::sign::SigningKey;
+    // Can't use write_config() here — it creates hosts/.
     std::fs::create_dir_all(&confbase).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
         "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nPort = 0\n",
     )
     .unwrap();
-    let sk = SigningKey::from_seed(&[0x42; 32]);
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(confbase.join("ed25519_key.priv"))
-        .unwrap();
-    let mut w = std::io::BufWriter::new(f);
-    tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
-    drop(w);
+    write_ed25519_privkey(&confbase, &[0x42; 32]);
     // Precondition: hosts/ doesn't exist. THIS is what's tested.
     assert!(!confbase.join("hosts").exists());
 
@@ -814,7 +717,7 @@ fn missing_hosts_file_ok() {
 fn udp_stray_packet_drained() {
     use std::net::UdpSocket;
 
-    let tmp = TmpGuard::new("udp-stray");
+    let tmp = tmp("udp-stray");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -965,7 +868,7 @@ fn peer_ack_exchange() {
     use tinc_crypto::sign::SigningKey;
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
-    let tmp = TmpGuard::new("peer-handshake");
+    let tmp = tmp("peer-handshake");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -1569,7 +1472,7 @@ fn peer_edge_triggers_reachable() {
     use tinc_crypto::sign::SigningKey;
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
-    let tmp = TmpGuard::new("peer-edge");
+    let tmp = tmp("peer-edge");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");
@@ -2144,7 +2047,7 @@ fn peer_wrong_key_fails_sig() {
     use tinc_crypto::sign::SigningKey;
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
-    let tmp = TmpGuard::new("peer-wrong-key");
+    let tmp = tmp("peer-wrong-key");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let socket = tmp.path().join("tinc.socket");

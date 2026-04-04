@@ -70,12 +70,20 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod common;
+use common::linux::{run_ip, wait_for_carrier};
+use common::{
+    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_bin,
+    wait_for_file, write_ed25519_privkey,
+};
+
+fn tmp(tag: &str) -> TmpGuard {
+    TmpGuard::new("netns", tag)
+}
 
 // ═════════════════════════ the bwrap re-exec wrapper ══════════════════════
 
@@ -321,69 +329,7 @@ impl Drop for NetNs {
     }
 }
 
-/// `ip` with assert. Captured stderr surfaces in panic.
-fn run_ip(args: &[&str]) {
-    let out = Command::new("ip").args(args).output().expect("spawn ip");
-    assert!(
-        out.status.success(),
-        "ip {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// Poll `ip link show DEV` for `LOWER_UP`. The daemon's TUNSETIFF
-/// brings carrier up (kernel: `tun_set_iff` → `netif_carrier_on`).
-/// Before that the precreated persistent device shows `NO-CARRIER`.
-fn wait_for_carrier(dev: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let out = Command::new("ip")
-            .args(["-o", "link", "show", dev])
-            .output()
-            .expect("ip link show");
-        if String::from_utf8_lossy(&out.stdout).contains("LOWER_UP") {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 // ═══════════════════════════ daemon plumbing ═══════════════════════════════
-// Mostly cribbed from two_daemons.rs. Can't share via a common module
-// without `tests/common/mod.rs` plumbing; the duplication is small
-// (TmpGuard, Node, Ctl, poll_until).
-
-struct TmpGuard(PathBuf);
-
-impl TmpGuard {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("tincd-netns-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn tincd_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
-}
-
-fn alloc_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    l.local_addr().unwrap().port()
-}
 
 struct Node {
     name: &'static str,
@@ -422,8 +368,11 @@ impl Node {
     }
 
     fn pubkey(&self) -> [u8; 32] {
-        use tinc_crypto::sign::SigningKey;
-        *SigningKey::from_seed(&self.seed).public_key()
+        pubkey_from_seed(&self.seed)
+    }
+
+    fn ctl(&self) -> Ctl {
+        Ctl::connect(&self.socket, &self.pidfile)
     }
 
     /// Write `tinc.conf` + `hosts/NAME` + `ed25519_key.priv` +
@@ -431,9 +380,6 @@ impl Node {
     /// `DeviceType = tun` + `Interface = ...` (vs two_daemons.rs's
     /// `dummy`/`fd`). Subnet always set.
     fn write_config(&self, other: &Node, connect_to: bool) {
-        use std::os::unix::fs::OpenOptionsExt;
-        use tinc_crypto::sign::SigningKey;
-
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         // tinc.conf — DeviceType=tun + Interface. AddressFamily=
@@ -463,17 +409,7 @@ impl Node {
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
-        // Private key.
-        let sk = SigningKey::from_seed(&self.seed);
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.confbase.join("ed25519_key.priv"))
-            .unwrap();
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
     fn spawn(&self) -> Child {
@@ -489,92 +425,6 @@ impl Node {
             .spawn()
             .expect("spawn tincd")
     }
-}
-
-struct Ctl {
-    r: BufReader<UnixStream>,
-    w: UnixStream,
-}
-
-impl Ctl {
-    fn connect(node: &Node) -> Self {
-        let cookie = std::fs::read_to_string(&node.pidfile)
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .expect("pidfile has cookie")
-            .to_owned();
-        let stream = UnixStream::connect(&node.socket).expect("ctl connect");
-        let r = BufReader::new(stream.try_clone().unwrap());
-        let mut ctl = Self { r, w: stream };
-        writeln!(ctl.w, "0 ^{cookie} 0").unwrap();
-        let mut line = String::new();
-        ctl.r.read_line(&mut line).unwrap();
-        line.clear();
-        ctl.r.read_line(&mut line).unwrap();
-        ctl
-    }
-
-    fn dump(&mut self, subtype: u8) -> Vec<String> {
-        writeln!(self.w, "18 {subtype}").unwrap();
-        let term = format!("18 {subtype}");
-        let mut rows = Vec::new();
-        loop {
-            let mut line = String::new();
-            self.r.read_line(&mut line).expect("dump row");
-            let line = line.trim_end().to_owned();
-            if line == term {
-                break;
-            }
-            rows.push(line);
-        }
-        rows
-    }
-}
-
-fn wait_for_file(path: &std::path::Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
-}
-
-fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(v) = f() {
-            return v;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "poll timed out after {timeout:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn drain_stderr(mut child: Child) -> String {
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// `dump nodes` row → status hex. Body token 10 (see two_daemons.rs
-/// for the index derivation: name, id, host, "port", port, cipher,
-/// digest, maclen, comp, opts, status).
-fn node_status(rows: &[String], name: &str) -> Option<u32> {
-    rows.iter().find_map(|r| {
-        let body = r.strip_prefix("18 3 ")?;
-        let toks: Vec<&str> = body.split_whitespace().collect();
-        if toks.first() != Some(&name) {
-            return None;
-        }
-        u32::from_str_radix(toks.get(10)?, 16).ok()
-    })
 }
 
 // ═══════════════════════════════ the test ══════════════════════════════════
@@ -609,7 +459,7 @@ fn real_tun_ping() {
         return;
     };
 
-    let tmp = TmpGuard::new("ping");
+    let tmp = tmp("ping");
     let alice = Node::new(tmp.path(), "alice", 0xA8, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xB8, "tinc1", "10.42.0.2/32");
 
@@ -654,8 +504,8 @@ fn real_tun_ping() {
     // ─── meta-conn handshake ────────────────────────────────────
     // Status bit 4 (reachable) on both → ACK + graph() done. Same
     // poll as first_packet_across_tunnel.
-    let mut alice_ctl = Ctl::connect(&alice);
-    let mut bob_ctl = Ctl::connect(&bob);
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
 
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(3);
@@ -808,7 +658,7 @@ fn real_tun_unreachable() {
         return;
     };
 
-    let tmp = TmpGuard::new("unreach");
+    let tmp = tmp("unreach");
     let alice = Node::new(tmp.path(), "alice", 0xA9, "tinc0", "10.42.0.1/32");
     // Bob's TUN exists (NetNs::setup precreated it) but no daemon
     // attaches. We need `bob` only for `write_config`'s pubkey/
