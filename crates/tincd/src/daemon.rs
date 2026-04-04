@@ -1676,13 +1676,7 @@ impl Daemon {
         // `ip link set up`; subnet-up scripts (which add routes)
         // assume the iface is configured. Same loop shape as the
         // BecameReachable arm at gossip.rs:1061-1069.
-        let owned: Vec<Subnet> = daemon
-            .subnets
-            .iter()
-            .filter(|(_, o)| *o == daemon.name)
-            .map(|(s, _)| *s)
-            .collect();
-        for s in &owned {
+        for s in &daemon.subnets.owned_by(&daemon.name) {
             daemon.run_subnet_script(true, &daemon.name, s);
         }
 
@@ -1880,13 +1874,7 @@ impl Drop for Daemon {
         // false)` BEFORE `device_disable`. Mirror of the setup-
         // time subnet-up loop. Subnet-down first (may `ip route
         // del`), THEN tinc-down (brings the iface down).
-        let owned: Vec<Subnet> = self
-            .subnets
-            .iter()
-            .filter(|(_, o)| *o == self.name)
-            .map(|(s, _)| *s)
-            .collect();
-        for s in &owned {
+        for s in &self.subnets.owned_by(&self.name) {
             self.run_subnet_script(false, &self.name, s);
         }
 

@@ -619,6 +619,21 @@ impl Connection {
         Ok(self.outbuf.is_empty())
     }
 
+    /// Send each row, then a `"{18} {req}"` terminator (the bare-
+    /// header line that signals end-of-dump in the C control proto:
+    /// `subnet.c:406`, `node.c:221`, `edge.c:135`, `connection.c:173`).
+    /// Returns `true` if outbuf went empty→nonempty across the batch.
+    /// `rows` is owned-Vec because every callsite collects up front
+    /// to drop the `&self` borrow before re-fetching `&mut conn`.
+    pub fn send_dump(&mut self, rows: Vec<String>, req: i32) -> bool {
+        let mut nw = false;
+        for row in rows {
+            nw |= self.send(format_args!("{row}"));
+        }
+        nw |= self.send(format_args!("{} {req}", Request::Control as u8));
+        nw
+    }
+
     #[cfg(test)]
     pub(crate) fn test_with_fd(fd: OwnedFd) -> Self {
         Self::new_control(fd, Instant::now())

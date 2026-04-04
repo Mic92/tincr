@@ -443,6 +443,19 @@ impl SubnetTree {
             .chain(self.ipv6.iter().map(|k| (&k.subnet, k.owner.as_str())))
     }
 
+    /// All subnets owned by `name`, collected. Wrapper over `iter()` +
+    /// filter + collect: 5 callsites had this exact 5-line block (`subnet_
+    /// update(n, NULL, ...)` in C terms, `subnet.c:352-372`). The collect
+    /// is intentional: callers immediately call `run_subnet_script` /
+    /// `del()` while iterating, which would self-borrow on the iterator.
+    #[must_use]
+    pub fn owned_by(&self, name: &str) -> Vec<Subnet> {
+        self.iter()
+            .filter(|(_, o)| *o == name)
+            .map(|(s, _)| *s)
+            .collect()
+    }
+
     /// Total entry count across all three families. For `dump
     /// subnets` and tests.
     #[must_use]

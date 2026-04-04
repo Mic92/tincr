@@ -357,12 +357,8 @@ impl Daemon {
         }
 
         // :396-428 subnet diff (non-strictsubnets branch)
-        let current_subnets: HashSet<Subnet> = self
-            .subnets
-            .iter()
-            .filter(|(_, owner)| *owner == self.name)
-            .map(|(s, _)| *s)
-            .collect();
+        let current_subnets: HashSet<Subnet> =
+            self.subnets.owned_by(&self.name).into_iter().collect();
         let new_subnets = parse_subnets_from_config(&config, &self.name);
         let diff = reload::diff_subnets(&current_subnets, &new_subnets);
 

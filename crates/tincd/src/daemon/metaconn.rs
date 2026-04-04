@@ -370,9 +370,13 @@ impl Daemon {
                 }
                 Request::Control => {
                     let (r, nw) = handle_control(conn, &line);
+                    // Dump arms: build rows with `&self` borrowed, drop
+                    // it, re-fetch `&mut conn`, then `send_dump` writes
+                    // rows + the bare-header terminator (C `:406/:221/
+                    // :135/:173`). Same shape ×4; the terminator format
+                    // is identical across all four C dump functions.
                     if r == DispatchResult::DumpSubnets {
-                        // `dump_subnets` (`subnet.c:395-410`). Drop conn,
-                        // walk tree into Vec, re-fetch (borrow dance).
+                        // `dump_subnets` (`subnet.c:395-410`).
                         let rows: Vec<String> = self
                             .subnets
                             .iter()
@@ -387,43 +391,19 @@ impl Daemon {
                             })
                             .collect();
                         let conn = self.conns.get_mut(id).expect("not terminated");
-                        let mut nw2 = false;
-                        for row in rows {
-                            nw2 |= conn.send(format_args!("{row}"));
-                        }
-                        nw2 |= conn.send(format_args!(
-                            "{} {}",
-                            Request::Control as u8,
-                            crate::proto::REQ_DUMP_SUBNETS
-                        ));
+                        let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_SUBNETS);
                         (DispatchResult::Ok, nw2)
                     } else if r == DispatchResult::DumpNodes {
                         // `dump_nodes` (`node.c:201-223`).
                         let rows = self.dump_nodes_rows();
                         let conn = self.conns.get_mut(id).expect("not terminated");
-                        let mut nw2 = false;
-                        for row in rows {
-                            nw2 |= conn.send(format_args!("{row}"));
-                        }
-                        nw2 |= conn.send(format_args!(
-                            "{} {}",
-                            Request::Control as u8,
-                            crate::proto::REQ_DUMP_NODES
-                        ));
+                        let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_NODES);
                         (DispatchResult::Ok, nw2)
                     } else if r == DispatchResult::DumpEdges {
                         // `dump_edges` (`edge.c:123-137`).
                         let rows = self.dump_edges_rows();
                         let conn = self.conns.get_mut(id).expect("not terminated");
-                        let mut nw2 = false;
-                        for row in rows {
-                            nw2 |= conn.send(format_args!("{row}"));
-                        }
-                        nw2 |= conn.send(format_args!(
-                            "{} {}",
-                            Request::Control as u8,
-                            crate::proto::REQ_DUMP_EDGES
-                        ));
+                        let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_EDGES);
                         (DispatchResult::Ok, nw2)
                     } else if r == DispatchResult::DumpConnections {
                         // `dump_connections` (`connection.c:166-175`).
@@ -446,15 +426,7 @@ impl Daemon {
                             })
                             .collect();
                         let conn = self.conns.get_mut(id).expect("not terminated");
-                        let mut nw2 = false;
-                        for row in rows {
-                            nw2 |= conn.send(format_args!("{row}"));
-                        }
-                        nw2 |= conn.send(format_args!(
-                            "{} {}",
-                            Request::Control as u8,
-                            crate::proto::REQ_DUMP_CONNECTIONS
-                        ));
+                        let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_CONNECTIONS);
                         (DispatchResult::Ok, nw2)
                     } else if r == DispatchResult::Reload {
                         // C `control.c:56-57`. CLI only checks zero/nonzero.

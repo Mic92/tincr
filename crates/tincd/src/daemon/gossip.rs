@@ -792,13 +792,7 @@ impl Daemon {
 
                     // C `graph.c:294` subnet_update(n, NULL, true):
                     // subnet-up for every owned subnet (`subnet.c:352-372`).
-                    let owned: Vec<Subnet> = self
-                        .subnets
-                        .iter()
-                        .filter(|(_, o)| *o == name_owned)
-                        .map(|(s, _)| *s)
-                        .collect();
-                    for s in &owned {
+                    for s in &self.subnets.owned_by(&name_owned) {
                         self.run_subnet_script(true, &name_owned, s);
                     }
                     // C `protocol_edge.c:163-165` sets status.sptps from
@@ -826,13 +820,7 @@ impl Daemon {
                     self.run_host_script(false, &name_owned, addr);
 
                     // C `graph.c:294`: subnet-down for every owned subnet.
-                    let owned: Vec<Subnet> = self
-                        .subnets
-                        .iter()
-                        .filter(|(_, o)| *o == name_owned)
-                        .map(|(s, _)| *s)
-                        .collect();
-                    for s in &owned {
+                    for s in &self.subnets.owned_by(&name_owned) {
                         self.run_subnet_script(false, &name_owned, s);
                     }
 
