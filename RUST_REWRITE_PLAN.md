@@ -401,48 +401,6 @@ bottleneck.
 
 ---
 
-## Coverage gaps (audited at `957f0ec5`)
-
-Function-by-function audit of every C file against `// C file.c:NNN`
-ref tags + STUB/TODO/DEFERRED markers. Full 718-line analysis at
-`bcc5c3e3`. **31 NOT-PORTED items found**: 4 HIGH (all fixed:
-`f58ebde4` IP_MTU_DISCOVER, `63146c64` KeyExpire, `727febdb`
-broadcast subnets, `e3513e52` Forwarding=off), 5 MED + 1 LOW
-fixed wave 1, 7 more wave 2 (`d58de33d`..`b2e8774c`). ~13
-remain. **Audit-staleness lesson**: the `dump_traffic` row claimed
-"counters don't exist on TunnelState" — they did (`tunnel.rs:85-88`,
-increments at `daemon/net.rs:567,736,815`); the actual gap was
-just the dump arm. The audit was run against a snapshot; rows
-that name a *mechanism* gap (vs a *wiring* gap) need re-checking
-before quoting an effort estimate. The %'s in the module-mapping table above are
-current; Status row "coverage-gap fixes" has the per-commit
-findings.
-
-| Item | C source | What we do | Effort | Pri |
-|---|---|---|---|---|
-| argv flag `-s` syslog (`-o`/`-n` `764674b8`; `-d`/`-L`/`--logfile` `374bdfa6`) | `tincd.c:174-331` | warn-unimplemented; journald captures stderr | ~30 LOC (syslog crate dep) | L |
-| `umbilical` ready-signal | `tincd.c:549-568,702-709` | `tinc start` would block forever | ~25 LOC | M |
-| `REQ_{PCAP,LOG}` (`RETRY`+`DISCONNECT` `14cf3ce4`, `DUMP_TRAFFIC` `17ca9397`, `PURGE` `e0b62259`) | `control.c:45-148` | fall through to `REQ_INVALID` (matches C default) | ~40 LOC | L |
-| `send_pcap` (`tinc pcap` backend) | `route.c:1109-1128` | DEFERRED; no `pcap` status bit | ~30 LOC | L |
-| Misc config keys (`ScriptsInterpreter`, `ScriptsExtension`, `MaxConnectionBurst`, `ReplayWindow`, `DeviceStandby`, `UDPDiscovery*`) | `net_setup.c` various | C defaults hardcoded | ~5 LOC each | L |
-
-**SIGPIPE downgrade**: the audit flagged this HIGH ("any peer that
-half-closes mid-write kills the daemon"). Wrong — Rust's std
-runtime does `signal(SIGPIPE, SIG_IGN)` in `sys::pal::unix::init`
-before `main()` runs (since 1.0; `-Zon-broken-pipe` exists
-*because* the default is SIG_IGN). `SelfPipe::add` calls
-`sigaction()` per-signal for TERM/INT/QUIT/HUP/ALRM; doesn't touch
-SIGPIPE. `send()` to closed peer → `EPIPE` → conn-terminate
-(correct). `MSG_NOSIGNAL` is 1-LOC defense-in-depth for the
-library-embed case.
-
-**`REQ_CONNECT` is vestigial in C too**: `tincctl.c:1461` sends it;
-`control.c` has no case for it; falls to `REQ_INVALID`. Our default
-arm matching C's is correct, not a gap. The audit's "6/14" became
-"6/12-that-exist".
-
----
-
 ## What to Drop
 
 Aggressively shed scope:
