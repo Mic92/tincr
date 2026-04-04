@@ -196,6 +196,14 @@ pub fn execute(
     // `:211-213` putenv loop. Per-spawn, doesn't touch process env.
     cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
 
+    // C `script.c` does NO chdir; scripts inherit the daemon's cwd,
+    // which is confbase because of `tincd.c:536`'s early chdir.
+    // main() mirrors that, so this is normally a no-op chdir in the
+    // child. Belt-and-suspenders: makes the contract self-contained
+    // (unit tests run execute() without going through main(); future
+    // code that chdirs mid-loop won't break script cwd).
+    cmd.current_dir(confbase);
+
     // `:221` system(). status() is fork+exec+waitpid. Blocks.
     let status = cmd.status()?;
 
@@ -327,5 +335,31 @@ mod tests {
         // With interpreter: works. `script.c:216` path.
         let r = execute(&dir, "tinc-up", &env, Some("/bin/sh")).unwrap();
         assert!(matches!(r, ScriptResult::Ok));
+    }
+
+    #[test]
+    fn script_cwd_is_confbase() {
+        // C `tincd.c:536` chdirs to confbase; `script.c` inherits.
+        // A `tinc-up` doing `cat hosts/$NODE` (relative) only works
+        // because of that. We set `.current_dir(confbase)` on the
+        // Command — this proves the script sees it.
+        let dir = tmpdir("cwd");
+        let probe = dir.join("cwd-probe");
+        write_script(
+            &dir,
+            "tinc-up",
+            &format!("#!/bin/sh\npwd > '{}'\n", probe.display()),
+        );
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+
+        let r = execute(&dir, "tinc-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::Ok));
+
+        let got = fs::read_to_string(&probe).unwrap();
+        // canonicalize both — tmpdir may be a symlink (/tmp →
+        // /private/tmp on macOS).
+        let want = dir.canonicalize().unwrap();
+        let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
+        assert_eq!(got, want);
     }
 }

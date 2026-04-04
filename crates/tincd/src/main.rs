@@ -930,6 +930,38 @@ fn main() -> ExitCode {
         }
     };
 
+    // C `tincd.c:536`: `chdir(confbase)`. Hard-fail (`return 1`).
+    // User-visible: tinc-up/tinc-down/host-* scripts inherit this
+    // as their cwd (C `script.c` does no chdir of its own; the
+    // daemon's cwd IS the script's cwd). A `tinc-up` doing
+    // `cat hosts/$NODE` works under C only because of this.
+    //
+    // We could `.current_dir(&confbase)` per-script in script.rs
+    // instead (more surgical, doesn't touch the daemon's own cwd).
+    // But: (a) /proc/self/cwd would differ from C, breaking ops
+    // debugging assumptions, (b) any future code that opens a
+    // relative path would silently work-under-C-break-under-us.
+    // One process-level chdir matches C exactly.
+    //
+    // BEFORE detach: C `:536` is at `:536`, detach at `:640`.
+    // `daemon(1, 0)` is nochdir=1 (preserves cwd across fork).
+    // Our detach() does the same — the only set_current_dir is
+    // post-chroot at `:721`.
+    //
+    // `-R` chroot: `drop_privs` later does `chdir("/")` AFTER
+    // chroot. That overrides this. cwd = jail root = confbase-
+    // as-seen-from-inside. Scripts still find `hosts/`.
+    if let Err(e) = std::env::set_current_dir(&args.confbase) {
+        // Logger not init'd yet. C uses `logger(DEBUG_ALWAYS,
+        // LOG_ERR)` which at this point goes to stderr
+        // (LOGMODE_STDERR until `:572` openlogger). eprintln matches.
+        eprintln!(
+            "Could not change to configuration directory {}: {e}",
+            args.confbase.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
     // ─── detach (process.c:200-243, called tincd.c:645)
     // BEFORE logger init: env_logger might spawn threads or hold
     // fds we don't want crossing the fork. (It doesn't currently,

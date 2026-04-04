@@ -3440,3 +3440,60 @@ fn set_debug_level_roundtrip() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// C `tincd.c:536`: `chdir(confbase)` before everything else. C
+/// `script.c` does no chdir of its own — scripts inherit the
+/// daemon's cwd. A `tinc-up` doing `cat hosts/$NODE` (relative)
+/// works under C only because of that early chdir.
+///
+/// We launch tincd from `/` (NOT confbase) to make the test
+/// meaningful: without the fix, `pwd` in tinc-up would print `/`.
+#[test]
+fn tinc_up_runs_with_confbase_cwd() {
+    let tmp = tmp("tinc-up-cwd");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    // Probe file OUTSIDE confbase (absolute path) so the
+    // relative-vs-absolute question doesn't taint the test.
+    let probe = tmp.path().join("cwd.txt");
+    let tinc_up = confbase.join("tinc-up");
+    std::fs::write(
+        &tinc_up,
+        format!("#!/bin/sh\npwd > '{}'\n", probe.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tinc_up, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut child = tincd_cmd()
+        .arg("-D")
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        // Launch from a DIFFERENT cwd. Without the fix, pwd would
+        // print THIS, not confbase.
+        .current_dir("/")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd should start; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let got = std::fs::read_to_string(&probe).expect("tinc-up should have run and written its cwd");
+    let want = confbase.canonicalize().unwrap();
+    let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
+    assert_eq!(got, want, "tinc-up cwd should be confbase");
+}
