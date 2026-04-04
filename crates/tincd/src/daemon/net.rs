@@ -2,10 +2,13 @@
 use super::*;
 
 use std::io::IoSliceMut;
-use std::net::{SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use nix::errno::Errno;
-use nix::sys::socket::{MsgFlags, MultiHeaders, SockaddrStorage, recvmmsg};
+use nix::sys::socket::{
+    AddressFamily, MsgFlags, MultiHeaders, SockFlag, SockType, SockaddrStorage, connect,
+    getsockname, recvmmsg, socket,
+};
 
 /// C `net_packet.c:1845`: `#define MAX_MSG 64`.
 const UDP_RX_BATCH: usize = 64;
@@ -1026,9 +1029,9 @@ impl Daemon {
                 let ethertype = u16::from_be_bytes([data[12], data[13]]);
                 let reply = if ethertype == 0x86DD {
                     // ETH_P_IPV6
-                    icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
+                    icmp::build_v6_unreachable(data, icmp_type, icmp_code, None, None)
                 } else {
-                    icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+                    icmp::build_v4_unreachable(data, icmp_type, icmp_code, None, None)
                 };
                 let Some(reply) = reply else {
                     log::debug!(target: "tincd::net",
@@ -1895,12 +1898,36 @@ impl Daemon {
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return;
         }
+        // C `route.c:148-169`/`:254-275`: only TIME_EXCEEDED gets the
+        // source-override dance — so traceroute shows OUR hop. This
+        // helper's only caller is the TtlResult::SendIcmp arm, which
+        // is always TIME_EXCEEDED, so do it unconditionally here.
+        // orig src lives at fixed offsets: eth(14)+ip_src(12)=[26..30]
+        // for v4, eth(14)+ip6_src(8)=[22..38] for v6. None on any
+        // failure (slice short, kernel says no) → falls back to the
+        // orig-dst-as-src behavior the C also falls back to.
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
         let reply = if ethertype == 0x86DD {
             // ETH_P_IPV6
-            icmp::build_v6_unreachable(data, icmp_type, icmp_code, None)
+            let src = data
+                .get(22..38)
+                .and_then(|s| <[u8; 16]>::try_from(s).ok())
+                .map(Ipv6Addr::from)
+                .and_then(|a| match local_ip_facing(IpAddr::V6(a))? {
+                    IpAddr::V6(v6) => Some(v6.octets()),
+                    IpAddr::V4(_) => None,
+                });
+            icmp::build_v6_unreachable(data, icmp_type, icmp_code, None, src)
         } else {
-            icmp::build_v4_unreachable(data, icmp_type, icmp_code, None)
+            let src = data
+                .get(26..30)
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                .map(Ipv4Addr::from)
+                .and_then(|a| match local_ip_facing(IpAddr::V4(a))? {
+                    IpAddr::V4(v4) => Some(v4.octets()),
+                    IpAddr::V6(_) => None,
+                });
+            icmp::build_v4_unreachable(data, icmp_type, icmp_code, None, src)
         };
         if let Some(reply) = reply {
             log::debug!(target: "tincd::net",
@@ -1922,6 +1949,7 @@ impl Daemon {
             route::ICMP_DEST_UNREACH,
             route::ICMP_FRAG_NEEDED,
             Some(frag_mtu),
+            None,
         ) {
             log::debug!(target: "tincd::net",
                         "route: FRAG_NEEDED, mtu={frag_mtu} ({} bytes)",
@@ -1937,7 +1965,7 @@ impl Daemon {
             return;
         }
         if let Some(reply) =
-            icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu))
+            icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu), None)
         {
             log::debug!(target: "tincd::net",
                         "route: PACKET_TOO_BIG, mtu={mtu} ({} bytes)",
@@ -1952,5 +1980,29 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "Error writing ICMP to device: {e}");
         }
+    }
+}
+
+/// `route.c:148-169` (v4) / `:254-275` (v6). For ICMP TIME_EXCEEDED:
+/// find our local IP facing the original sender so traceroute shows
+/// us correctly. UDP `connect()` + `getsockname()` — no packets sent
+/// (UDP connect is a route lookup + dst association). Same trick
+/// `choose_initial_maxmtu` uses (`9e2540ab`).
+///
+/// Port is irrelevant (route lookup); use 1 (some kernels reject 0
+/// for connect). The C ignores all errors and falls through to the
+/// default; we do the same with `?` → `None`.
+fn local_ip_facing(orig_src: IpAddr) -> Option<IpAddr> {
+    let af = match orig_src {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let sock = socket(af, SockType::Datagram, SockFlag::SOCK_CLOEXEC, None).ok()?;
+    let ss = SockaddrStorage::from(SocketAddr::new(orig_src, 1));
+    connect(sock.as_raw_fd(), &ss).ok()?;
+    let local: SockaddrStorage = getsockname(sock.as_raw_fd()).ok()?;
+    match orig_src {
+        IpAddr::V4(_) => Some(IpAddr::V4(local.as_sockaddr_in()?.ip())),
+        IpAddr::V6(_) => Some(IpAddr::V6(local.as_sockaddr_in6()?.ip())),
     }
 }

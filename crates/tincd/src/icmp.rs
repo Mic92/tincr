@@ -13,21 +13,20 @@
 //! build a fresh `Vec`: this fires at most 3×/sec ([`IcmpRateLimit`],
 //! `route.c:85-100`), alloc doesn't matter.
 //!
-//! ## TTL-exceeded source-address dance (NOT-PORTING)
+//! ## TTL-exceeded source-address override
 //!
 //! `route.c:148-169` does a `socket()/connect()/getsockname()` trick
 //! to discover which local IP the kernel would use to reach the
-//! original sender — that becomes the ICMP source. Only matters when
-//! we're a HOP in the middle (DecrementTTL hit 0), not the endpoint.
-//! We skip it: use original-dst-as-src, which is correct for the
-//! daemon-is-endpoint case.
+//! original sender — that becomes the ICMP source so `traceroute`
+//! shows our hop correctly. Only matters when we're a HOP in the
+//! middle (`DecrementTTL=yes` + TTL hit zero), not the endpoint.
+//! Without it, original-dst-as-src means traceroute shows the final
+//! destination at every relay hop.
 //!
-//! `NOT-PORTING(relay-ttl-src)`: `:148-169` getsockname() to find
-//! our local IP facing the original sender. Only for
-//! `ICMP_TIME_EXCEEDED` (`DecrementTTL=yes` + TTL hit zero at our
-//! relay hop). Current behavior uses original-dst as the ICMP
-//! source — wrong for traceroute, harmless for everything else.
-//! The override would be an `Option<Ipv4Addr>` 5th param.
+//! That trick is I/O; this module is `#![forbid(unsafe_code)]` and
+//! pure. The daemon does the discovery (`daemon/net.rs::
+//! local_ip_facing`) and passes the result as the `src_override` 5th
+//! param. `None` = current behavior (orig dst as ICMP source).
 
 #![forbid(unsafe_code)]
 
@@ -79,14 +78,16 @@ pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 /// Returns `None` if `original` is too short to contain an eth +
 /// IPv4 header (`route.c` guards with `checklength` upstream).
 ///
-/// `NOT-PORTING(relay-ttl-src)`: the TTL-exceeded `getsockname`
-/// source-discovery (`route.c:148-169`). See module doc.
+/// `src_override`: `Some(addr)` overrides the ICMP packet's IP
+/// source (`route.c:148-169` — TTL-exceeded `getsockname` dance,
+/// done by the caller). `None` = use original-dst (`:195`).
 #[must_use]
 pub fn build_v4_unreachable(
     original: &[u8],
     icmp_type: u8,
     icmp_code: u8,
     frag_mtu: Option<u16>,
+    src_override: Option<[u8; 4]>,
 ) -> Option<Vec<u8>> {
     // Need at least eth + IP hdr to parse src/dst (`:140`).
     if original.len() < ETHER_SIZE + IP_SIZE {
@@ -104,11 +105,11 @@ pub fn build_v4_unreachable(
     let orig_ip_bytes: &[u8; IP_SIZE] =
         original[ETHER_SIZE..ETHER_SIZE + IP_SIZE].try_into().ok()?;
     let orig_ip = Ipv4Hdr::from_bytes(orig_ip_bytes);
-    // `:144-145`: remember original src/dst.
+    // `:144-145`: remember original src/dst. `:148-169`: caller may
+    // override the dst (= our reply's src) for TIME_EXCEEDED —
+    // mirrors C's `ip_dst = addr.sin_addr` after getsockname().
     let ip_src = orig_ip.ip_src;
-    let ip_dst = orig_ip.ip_dst;
-    // NOT-PORTING(relay-ttl-src): `:148-169` would overwrite ip_dst
-    // here for ICMP_TIME_EXCEEDED via getsockname(). See module doc.
+    let ip_dst = src_override.unwrap_or(orig_ip.ip_dst);
 
     // ─── Quote length (`:170,176-178`).
     // `oldlen = packet->len - ether_size`: the whole original IP
@@ -181,14 +182,16 @@ pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 ///
 /// Returns `None` if `original` is too short for eth + IPv6 hdr.
 ///
-/// `NOT-PORTING(relay-ttl-src)`: TTL-exceeded `getsockname`
-/// (`route.c:254-275`). See module doc.
+/// `src_override`: `Some(addr)` overrides the ICMP packet's IPv6
+/// source (`route.c:254-275` — TTL-exceeded `getsockname` dance,
+/// done by the caller). `None` = use original-dst (`:296`).
 #[must_use]
 pub fn build_v6_unreachable(
     original: &[u8],
     icmp_type: u8,
     icmp_code: u8,
     pkt_too_big_mtu: Option<u32>,
+    src_override: Option<[u8; 16]>,
 ) -> Option<Vec<u8>> {
     if original.len() < ETHER_SIZE + IP6_SIZE {
         return None;
@@ -209,9 +212,9 @@ pub fn build_v6_unreachable(
 
     // `:248-249`: remember swapped. The C stores them directly in
     // `pseudo.ip6_src/dst` and reuses that struct; we keep locals.
-    // NOT-PORTING(relay-ttl-src): `:254-275` would overwrite
-    // new_src here. See module doc.
-    let new_src = orig_ip6.ip6_dst;
+    // `:254-275`: caller may override new_src for TIME_EXCEEDED —
+    // mirrors C's `pseudo.ip6_src = addr.sin6_addr` post-getsockname.
+    let new_src = src_override.unwrap_or(orig_ip6.ip6_dst);
     let new_dst = orig_ip6.ip6_src;
 
     // ─── Quote length (`:277,282-284`).
@@ -358,8 +361,8 @@ mod tests {
     #[test]
     fn v4_net_unknown_kat() {
         let orig = v4_orig_frame();
-        let got =
-            build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None).expect("built");
+        let got = build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None)
+            .expect("built");
 
         // ── Expected: assemble piecewise.
         let mut want = Vec::new();
@@ -402,7 +405,8 @@ mod tests {
     #[test]
     fn v4_swaps_addrs() {
         let orig = v4_orig_frame();
-        let out = build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None).unwrap();
+        let out =
+            build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None).unwrap();
         let ip = Ipv4Hdr::from_bytes(out[14..34].try_into().unwrap());
         assert_eq!(ip.ip_src, [10, 0, 0, 99]); // orig dst
         assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // orig src
@@ -416,7 +420,8 @@ mod tests {
     #[test]
     fn v4_quotes_original() {
         let orig = v4_orig_frame();
-        let out = build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None).unwrap();
+        let out =
+            build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None).unwrap();
         let oldlen = orig.len() - ETHER_SIZE; // 28, < cap
         let quote = &out[ETHER_SIZE + IP_SIZE + ICMP_SIZE..];
         assert_eq!(quote.len(), oldlen);
@@ -429,7 +434,8 @@ mod tests {
     fn v4_quote_capped_at_548() {
         let mut orig = v4_orig_frame();
         orig.resize(1500, 0xab); // big payload
-        let out = build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None).unwrap();
+        let out =
+            build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None).unwrap();
         assert_eq!(out.len(), ETHER_SIZE + IP_SIZE + ICMP_SIZE + V4_QUOTE_CAP);
         assert_eq!(out.len(), 14 + 20 + 8 + 548);
         // total IP len reflects the cap
@@ -449,7 +455,7 @@ mod tests {
         // ICMP_DEST_UNREACH=3, ICMP_FRAG_NEEDED=4 — the type/code
         // that triggers PMTU. Value of frag_mtu is whatever the
         // caller picked (in C it's packet->len - ether_size).
-        let out = build_v4_unreachable(&orig, 3, 4, Some(1400)).unwrap();
+        let out = build_v4_unreachable(&orig, 3, 4, Some(1400), None).unwrap();
         // ICMP hdr lives at [14+20 .. 14+20+8].
         let icmp_bytes = &out[34..42];
         // bytes 6-7 are nextmtu, BE.
@@ -480,13 +486,32 @@ mod tests {
     /// upstream via `checklength` (`:103-110`); we guard inline.
     #[test]
     fn v4_too_short_is_none() {
-        assert!(build_v4_unreachable(&[0u8; 10], 3, 0, None).is_none());
+        assert!(build_v4_unreachable(&[0u8; 10], 3, 0, None, None).is_none());
         // exactly eth-only: still no IP hdr
-        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE], 3, 0, None).is_none());
+        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE], 3, 0, None, None).is_none());
         // eth + 19 bytes IP: one short
-        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE + IP_SIZE - 1], 3, 0, None).is_none());
+        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE + IP_SIZE - 1], 3, 0, None, None).is_none());
         // eth + 20 bytes IP: minimum valid
-        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE + IP_SIZE], 3, 0, None).is_some());
+        assert!(build_v4_unreachable(&[0u8; ETHER_SIZE + IP_SIZE], 3, 0, None, None).is_some());
+    }
+
+    /// `route.c:148-169`: TTL-exceeded source override. The override
+    /// becomes the new IP src (→ traceroute shows OUR hop, not the
+    /// original destination). dst still = orig src. Checksum covers it.
+    #[test]
+    fn v4_src_override() {
+        let orig = v4_orig_frame();
+        // ICMP_TIME_EXCEEDED=11, ICMP_EXC_TTL=0
+        let out = build_v4_unreachable(&orig, 11, 0, None, Some([172, 16, 0, 5])).expect("built");
+        let ip = Ipv4Hdr::from_bytes(out[14..34].try_into().unwrap());
+        assert_eq!(ip.ip_src, [172, 16, 0, 5]); // override, NOT orig dst
+        assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // still orig src
+        // IP checksum verifies (override is in the summed region).
+        assert_eq!(inet_checksum(&out[14..34], 0xFFFF), 0);
+        // None = current behavior (orig dst).
+        let out_none = build_v4_unreachable(&orig, 11, 0, None, None).unwrap();
+        let ip_none = Ipv4Hdr::from_bytes(out_none[14..34].try_into().unwrap());
+        assert_eq!(ip_none.ip_src, [10, 0, 0, 99]);
     }
 
     // ─── IPv6
@@ -516,7 +541,7 @@ mod tests {
     fn v6_basic() {
         let orig = v6_orig_frame();
         // ICMP6_DST_UNREACH=1, ICMP6_DST_UNREACH_NOROUTE=0
-        let out = build_v6_unreachable(&orig, 1, 0, None).expect("built");
+        let out = build_v6_unreachable(&orig, 1, 0, None, None).expect("built");
 
         let quote_len = orig.len() - ETHER_SIZE; // 48
         assert_eq!(out.len(), ETHER_SIZE + IP6_SIZE + ICMP6_SIZE + quote_len);
@@ -572,15 +597,47 @@ mod tests {
     fn v6_pkt_too_big_sets_mtu() {
         let orig = v6_orig_frame();
         // ICMP6_PACKET_TOO_BIG=2
-        let out = build_v6_unreachable(&orig, 2, 0, Some(1280)).unwrap();
+        let out = build_v6_unreachable(&orig, 2, 0, Some(1280), None).unwrap();
         let icmp6_bytes = &out[54..62];
         assert_eq!(&icmp6_bytes[4..8], &1280u32.to_be_bytes());
     }
 
     #[test]
     fn v6_too_short_is_none() {
-        assert!(build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE - 1], 1, 0, None).is_none());
-        assert!(build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE], 1, 0, None).is_some());
+        assert!(
+            build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE - 1], 1, 0, None, None).is_none()
+        );
+        assert!(build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE], 1, 0, None, None).is_some());
+    }
+
+    /// `route.c:254-275`: v6 TTL-exceeded source override. Override
+    /// becomes ip6_src AND feeds the pseudo-header checksum.
+    #[test]
+    fn v6_src_override() {
+        let orig = v6_orig_frame();
+        let our_ip = *b"\x20\x01\x0d\xb8\0\0\0\0\0\0\0\0\0\0\0\x42";
+        // ICMP6_TIME_EXCEEDED=3, ICMP6_TIME_EXCEED_TRANSIT=0
+        let out = build_v6_unreachable(&orig, 3, 0, None, Some(our_ip)).expect("built");
+        let ip6 = Ipv6Hdr::from_bytes(out[14..54].try_into().unwrap());
+        assert_eq!(ip6.ip6_src, our_ip); // override, NOT orig dst
+        assert_eq!(ip6.ip6_dst, *b"\xfe\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\x01"); // orig src
+
+        // Pseudo-header checksum verifies with the override addr.
+        let icmp6_bytes = &out[54..62];
+        let quote = &out[62..];
+        let mut pseudo = Ipv6Pseudo::default();
+        pseudo.ip6_src = our_ip;
+        pseudo.ip6_dst = ip6.ip6_dst;
+        pseudo.set_length(u32::try_from(ICMP6_SIZE + quote.len()).unwrap());
+        pseudo.set_next(u32::from(IPPROTO_ICMPV6));
+        let mut hdr_zeroed = [0u8; 8];
+        hdr_zeroed.copy_from_slice(icmp6_bytes);
+        hdr_zeroed[2] = 0;
+        hdr_zeroed[3] = 0;
+        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        ck = inet_checksum(&hdr_zeroed, ck);
+        ck = inet_checksum(quote, ck);
+        assert_eq!(ck.to_ne_bytes(), [icmp6_bytes[2], icmp6_bytes[3]]);
     }
 
     // ─── Rate limit
