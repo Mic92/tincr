@@ -16,6 +16,14 @@ path = "src/bin/sptps_test.rs"
 name = "tinc"
 path = "src/bin/tinc.rs"
 
+# nginx auth_request backend. Separate binary, not a tincd endpoint:
+# nginx workers can outlive a daemon restart, and a 503 on
+# ECONNREFUSED is the right behavior. Tailscale made the same call
+# (cmd/nginx-auth talks to tailscaled over localapi).
+[[bin]]
+name = "tinc-auth"
+path = "src/bin/tinc-auth.rs"
+
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-sptps = { path = "../tinc-sptps" }

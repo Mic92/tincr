@@ -236,6 +236,14 @@
             nixos-tinc-crossimpl = pkgs.callPackage ./nix/nixos-test.nix {
               inherit (self'.packages) tincd tincd-c;
             };
+
+            # tinc-auth: nginx auth_request → control socket lookup.
+            # No C equivalent (nginx-auth is a Rust-side feature),
+            # so no crossimpl variant. Proves socket activation +
+            # the header reaches the proxied origin + off-mesh 401s.
+            nixos-tinc-auth = pkgs.callPackage ./nix/nixos-test-auth.nix {
+              inherit (self'.packages) tincd;
+            };
           };
 
           # The C tincd daemon. Target for crates/tincd/tests/
