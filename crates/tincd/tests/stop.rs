@@ -3352,3 +3352,91 @@ fn pcap_captures_tcp_packet() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// REQ_SET_DEBUG round-trip. C `control.c:79-93`: reply with the
+/// PREVIOUS level (sent BEFORE the assignment), then update if
+/// `level >= 0`. Negative → query-only.
+///
+/// This is the `tinc debug N` operator workflow: "daemon's
+/// misbehaving, crank up logging without restart". Before this
+/// arm existed, the daemon fell through to REQ_INVALID and the
+/// CLI's `recv_ack(SetDebug)` failed the ack-shape check.
+#[test]
+fn set_debug_level_roundtrip() {
+    let tmp = tmp("set-debug");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    write_config(&confbase);
+
+    // No -d flag, no RUST_LOG → debug_level seeds at 0.
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env_remove("RUST_LOG")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd didn't bind socket");
+
+    // ─── connect + greeting ──────────────────────────────────
+    let cookie = read_cookie(&pidfile);
+    let stream = UnixStream::connect(&socket).expect("connect to tincd");
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+    writeln!(writer, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    reader.read_line(&mut greet).unwrap();
+    assert_eq!(greet, "0 testnode 17.7\n");
+    let mut ack = String::new();
+    reader.read_line(&mut ack).unwrap(); // "4 0 <pid>"
+
+    // ─── set debug 5 → reply previous (0) ────────────────────
+    // C `control.c:86`: `send_request(..., debug_level)` BEFORE
+    // `:89` assigns. Startup level was 0 (no -d).
+    writeln!(writer, "18 9 5").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    assert_eq!(reply, "18 9 0\n", "reply with PREVIOUS level (0)");
+
+    // ─── query (-1) → reply current (5), no change ───────────
+    // C `:88`: `if(new_level >= 0)` — negative is query-only.
+    writeln!(writer, "18 9 -1").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    assert_eq!(reply, "18 9 5\n", "query reads back the set value");
+
+    // ─── set debug 2 → reply previous (5) ────────────────────
+    // Proves the i32 actually updated (lossless: not derived
+    // from log::max_level() inverse-mapping).
+    writeln!(writer, "18 9 2").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    assert_eq!(reply, "18 9 5\n", "previous was 5");
+
+    // ─── query again → 2 ────────────────────────────────────
+    writeln!(writer, "18 9 -1").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    assert_eq!(reply, "18 9 2\n");
+
+    // ─── malformed (no level) → conn dropped ─────────────────
+    // C `:83`: `if(sscanf(...) != 1) return false`. The ONLY ctl
+    // arm that does this (others reply REQ_INVALID and stay up).
+    // `return false` → `receive_request` (`protocol.c:183-188`)
+    // → "Bogus data" + terminate.
+    writeln!(writer, "18 9").unwrap();
+    let mut reply = String::new();
+    let n = reader.read_line(&mut reply).unwrap();
+    assert_eq!(n, 0, "EOF: daemon dropped the conn (C `return false`)");
+
+    // ─── cleanup ─────────────────────────────────────────────
+    let _ = child.kill();
+    let _ = child.wait();
+}

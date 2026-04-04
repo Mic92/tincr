@@ -458,6 +458,26 @@ impl Daemon {
                             crate::proto::REQ_PURGE
                         ));
                         (DispatchResult::Ok, nw_purge | nw2)
+                    } else if let DispatchResult::SetDebug(level) = r {
+                        // C `control.c:79-93`. Reply with PREVIOUS
+                        // level (`:86` send_request happens BEFORE
+                        // the assignment at `:89`). `level >= 0` →
+                        // update; `< 0` → query-only. None → C `:83`
+                        // `return false` (terminate ctl conn — the
+                        // ONLY ctl arm in C that does this; the rest
+                        // reply REQ_INVALID and stay up).
+                        let Some(level) = level else {
+                            self.terminate(id);
+                            return FeedDrain::Done;
+                        };
+                        let prev = crate::log_tap::set_debug_level(level);
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send(format_args!(
+                            "{} {} {prev}",
+                            Request::Control as u8,
+                            crate::proto::REQ_SET_DEBUG
+                        ));
+                        (DispatchResult::Ok, nw2)
                     } else if let DispatchResult::Disconnect(name) = r {
                         // C `control.c:102-122`. Walk conns, terminate
                         // by name. C `:116`: `terminate_connection(o,
@@ -566,7 +586,8 @@ impl Daemon {
                 | DispatchResult::Disconnect(_)
                 | DispatchResult::DumpTraffic
                 | DispatchResult::Log(_)
-                | DispatchResult::Pcap(_) => {
+                | DispatchResult::Pcap(_)
+                | DispatchResult::SetDebug(_) => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

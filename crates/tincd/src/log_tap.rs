@@ -42,11 +42,70 @@
 #![forbid(unsafe_code)]
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// Gate. `enabled()` checks this BEFORE formatting. C's
 /// `if(!logcontrol)` is the same gate (`logger.c:192`).
 static LOG_TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// `debug_level` (`tincd.c:63`). The C-style level (0..=5+).
+/// Separate from `log::max_level()` because the C↔Rust mapping is
+/// lossy (1 and 2 both → Debug). Stored so REQ_SET_DEBUG can
+/// reply with the exact previous value.
+static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
+
+/// C `debug_level` → `log::LevelFilter`. Same mapping as
+/// `main.rs::debug_level_to_filter` (5-line dup — the binary
+/// doesn't dep on this module's internals).
+fn level_to_filter(d: i32) -> log::LevelFilter {
+    match d {
+        ..=0 => log::LevelFilter::Info,
+        1 | 2 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
+    }
+}
+
+/// Seed the C-style debug level. main.rs calls this once after
+/// `init()`. Does NOT touch `log::max_level()`: `init()` already
+/// set it from `inner.filter()`, which reflects RUST_LOG. Calling
+/// `set_debug_level` here would clobber that (RUST_LOG=debug + no
+/// `-d` flag → we'd reset max_level back to Info).
+pub fn init_debug_level(level: i32) {
+    DEBUG_LEVEL.store(level, Ordering::Relaxed);
+}
+
+/// Read the current C-style debug level. For REQ_SET_DEBUG's
+/// "reply with previous level" (`control.c:86`).
+#[must_use]
+pub fn debug_level() -> i32 {
+    DEBUG_LEVEL.load(Ordering::Relaxed)
+}
+
+/// Set the debug level. Updates both the stored i32 (for readback)
+/// and `log::max_level()` (the actual gate). C `control.c:88-90`:
+/// `if(new_level >= 0) debug_level = new_level`. Negative = no-op
+/// (query-only). Returns the PREVIOUS level (what the C sends).
+///
+/// Interaction with `set_active`: REQ_LOG already bumps
+/// `max_level` to Trace. If a log conn is active and someone does
+/// `tinc debug 0`, we'd lower `max_level` back to Info, breaking
+/// the log tap. Check `LOG_TAP_ACTIVE` and don't lower below Trace
+/// if it's set.
+pub fn set_debug_level(new_level: i32) -> i32 {
+    let prev = DEBUG_LEVEL.load(Ordering::Relaxed);
+    if new_level >= 0 {
+        DEBUG_LEVEL.store(new_level, Ordering::Relaxed);
+        let filter = level_to_filter(new_level);
+        // Don't drop below Trace if a REQ_LOG conn is tapping.
+        // log_tap::set_active(true) sets Trace and expects it to
+        // stay. REQ_SET_DEBUG to a lower level would otherwise
+        // silence the tap mid-stream.
+        if !LOG_TAP_ACTIVE.load(Ordering::Relaxed) || filter >= log::LevelFilter::Trace {
+            log::set_max_level(filter);
+        }
+    }
+    prev
+}
 
 thread_local! {
     /// Tap buffer. `RefCell` because single-threaded; the `log::Log`
@@ -191,5 +250,40 @@ mod tests {
         LOG_TAP_ACTIVE.store(true, Ordering::Relaxed);
         assert!(LOG_TAP_ACTIVE.load(Ordering::Relaxed));
         LOG_TAP_ACTIVE.store(false, Ordering::Relaxed);
+    }
+
+    /// `set_debug_level`: stores the i32, returns previous, respects
+    /// LOG_TAP_ACTIVE. We DON'T assert on `log::max_level()` here:
+    /// it's process-global and tests race (same problem as
+    /// `gate_toggles` above). The atomic + return value are local.
+    #[test]
+    fn debug_level_roundtrip() {
+        // Snapshot+restore: DEBUG_LEVEL is a process global; other
+        // tests don't touch it but be defensive.
+        let saved = DEBUG_LEVEL.load(Ordering::Relaxed);
+
+        DEBUG_LEVEL.store(0, Ordering::Relaxed);
+        // Set 5 → returns previous (0).
+        assert_eq!(set_debug_level(5), 0);
+        assert_eq!(debug_level(), 5);
+        // Negative → query-only; returns 5, doesn't change.
+        assert_eq!(set_debug_level(-1), 5);
+        assert_eq!(debug_level(), 5);
+        // Set 2 → returns 5.
+        assert_eq!(set_debug_level(2), 5);
+        assert_eq!(debug_level(), 2);
+
+        DEBUG_LEVEL.store(saved, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn level_to_filter_mapping() {
+        // Same shape as main.rs::debug_level_to_filter.
+        assert_eq!(level_to_filter(-1), log::LevelFilter::Info);
+        assert_eq!(level_to_filter(0), log::LevelFilter::Info);
+        assert_eq!(level_to_filter(1), log::LevelFilter::Debug);
+        assert_eq!(level_to_filter(2), log::LevelFilter::Debug);
+        assert_eq!(level_to_filter(3), log::LevelFilter::Trace);
+        assert_eq!(level_to_filter(5), log::LevelFilter::Trace);
     }
 }

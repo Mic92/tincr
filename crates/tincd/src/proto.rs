@@ -142,6 +142,7 @@ pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
 pub(crate) const REQ_PURGE: i32 = 8;
+pub(crate) const REQ_SET_DEBUG: i32 = 9;
 pub(crate) const REQ_RETRY: i32 = 10;
 pub(crate) const REQ_DISCONNECT: i32 = 12;
 pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
@@ -195,6 +196,11 @@ pub enum DispatchResult {
     /// NO `control_ok` reply (C `:131` is plain `return true`); the
     /// CLI starts reading pcap headers immediately.
     Pcap(u16),
+    /// `REQ_SET_DEBUG` (`control.c:79-93`). Carries the parsed level.
+    /// `None` → sscanf failed (`:83`), terminate (C `return false`).
+    /// `Some(level)` → daemon replies with PREVIOUS level then
+    /// updates (if level >= 0; negative is query-only).
+    SetDebug(Option<i32>),
     /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
@@ -811,6 +817,22 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         Some(REQ_DUMP_CONNECTIONS) => (DispatchResult::DumpConnections, false),
         Some(REQ_RETRY) => (DispatchResult::Retry, false),
         Some(REQ_PURGE) => (DispatchResult::Purge, false),
+        Some(REQ_SET_DEBUG) => {
+            // C `control.c:81-83`: `sscanf("%*d %*d %d", &new_level)`.
+            // `!= 1` → `return false` (drop). The level is the 3rd
+            // token. `%d` accepts negative — the CLI never sends
+            // one, but C `control.c:88` gates on `>= 0` so it's a
+            // valid query-only path.
+            let level = line
+                .split(|&b| b.is_ascii_whitespace())
+                .filter(|t| !t.is_empty())
+                .nth(2)
+                .and_then(|t| std::str::from_utf8(t).ok())
+                .and_then(|s| s.parse::<i32>().ok());
+            // Surface to daemon: it has the log_tap atomic. The
+            // daemon arm Drops on None (C `:83` `return false`).
+            (DispatchResult::SetDebug(level), false)
+        }
         Some(REQ_DISCONNECT) => {
             // C `:106`: `sscanf("%*d %*d " MAX_STRING, name)`. Third
             // whitespace token. C `%s` stops at whitespace; we do too.
@@ -1347,6 +1369,36 @@ mod tests {
         c.allow_request = Some(Request::Control);
         let (r, _) = handle_control(&mut c, b"18 15 -1 1");
         assert_eq!(r, DispatchResult::Log(-1));
+    }
+
+    #[test]
+    fn control_set_debug() {
+        // C `control.c:79-93`. `"18 9 5"` — CONTROL SET_DEBUG level=5.
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, nw) = handle_control(&mut c, b"18 9 5");
+        assert_eq!(r, DispatchResult::SetDebug(Some(5)));
+        // Daemon arm sends, not proto.rs.
+        assert!(!nw);
+        assert!(c.outbuf.is_empty());
+
+        // Missing level → None (C `:83`: sscanf fails → return false).
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 9");
+        assert_eq!(r, DispatchResult::SetDebug(None));
+
+        // Negative level → query-only. C accepts it (sscanf %d).
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 9 -1");
+        assert_eq!(r, DispatchResult::SetDebug(Some(-1)));
+
+        // Garbage level → None (parse fail, same as missing).
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 9 garbage");
+        assert_eq!(r, DispatchResult::SetDebug(None));
     }
 
     #[test]
