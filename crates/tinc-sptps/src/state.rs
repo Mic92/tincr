@@ -247,7 +247,11 @@ impl ReplayWindow {
             }
         }
         if update && seqno >= self.inseqno {
-            self.inseqno = seqno + 1;
+            // C `seqno + 1` wraps silently at u32::MAX (sptps.c:502).
+            // Debug-mode `+` panics; `wrapping_add` matches C in both
+            // profiles. Lean proof `p5_wrap_receive_max` confirms the
+            // intended semantics: after seqno=MAX, inseqno wraps to 0.
+            self.inseqno = seqno.wrapping_add(1);
         }
         // C also tracks `received` (total packet count, resets on inseqno
         // wrap). It's read by net_packet.c for stats but never by sptps.c
@@ -978,7 +982,10 @@ impl Sptps {
             if seqno != self.replay.inseqno {
                 return Err(SptpsError::BadSeqno);
             }
-            self.replay.inseqno = seqno + 1;
+            // Same wrap-at-MAX as ReplayWindow::check above. Handshake
+            // phase hitting this is implausible (3-packet handshake) but
+            // costs nothing to be consistent.
+            self.replay.inseqno = seqno.wrapping_add(1);
             let ty = payload[0];
             if ty != REC_HANDSHAKE {
                 return Err(SptpsError::BadRecord);

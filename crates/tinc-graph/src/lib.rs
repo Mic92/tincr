@@ -254,6 +254,16 @@ impl Graph {
     /// On more than `u32::MAX` edges. Not a realistic concern; tinc
     /// meshes are tens to hundreds of nodes.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, weight: i32, options: u32) -> EdgeId {
+        // C `edge_add` (edge.c:82-85) bails on duplicate via splay_insert
+        // returning NULL. We don't dedup; per-node list would get two
+        // entries with same `to_name` (binary_search_by → unspecified
+        // match), and weight_order would silently drop the old EdgeId.
+        // Daemon discipline holds (on_add_edge does lookup_edge first,
+        // on_ack does terminate→del_edge first); this is a tripwire.
+        debug_assert!(
+            self.lookup_edge(from, to).is_none(),
+            "duplicate edge {from:?}→{to:?}"
+        );
         let id = if let Some(idx) = self.edge_free.pop() {
             debug_assert!(self.edges[idx as usize].is_none());
             EdgeId(idx)
@@ -839,7 +849,9 @@ mod tests {
         assert_eq!(g.node(a).unwrap().edges.len(), 1, "node list shrunk");
 
         // Free-list LIFO: deleted slot is the next one handed out.
-        let new = g.add_edge(c, a, 99, 0);
+        // (Replace with the same a→b pair; triangle's c→a still
+        // exists, so a fresh c→a would trip the duplicate assert.)
+        let new = g.add_edge(a, b, 99, 0);
         assert_eq!(new, ab, "freed slot recycled");
         assert_eq!(
             g.edge(new).unwrap().weight,
@@ -972,7 +984,8 @@ mod tests {
         let (mut g, [a, _, c], [_, _, bc, ..]) = triangle();
         g.del_edge(bc).unwrap();
         assert_eq!(g.edge_iter().count(), 5);
-        let new = g.add_edge(c, a, 99, 0); // recycles bc's slot
+        let _ = a;
+        let new = g.add_edge(c, c, 99, 0); // recycles bc's slot (self-loop: never collides with triangle)
         assert_eq!(new, bc);
         let ids: Vec<_> = g.edge_iter().map(|(id, _)| id).collect();
         assert_eq!(ids.len(), 6);
