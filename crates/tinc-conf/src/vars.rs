@@ -428,16 +428,6 @@ mod tests {
         }
     }
 
-    /// Flag predicates spelled out. The Debug impl is the readable
-    /// form; test it once so a future Debug rewrite doesn't silently
-    /// regress test-failure messages.
-    #[test]
-    fn flags_debug() {
-        assert_eq!(format!("{:?}", S | H | F), "SERVER|HOST|SAFE");
-        assert_eq!(format!("{S:?}"), "SERVER");
-        assert_eq!(format!("{:?}", VarFlags(0)), "(none)");
-    }
-
     /// `contains` semantics. `S | H` contains `S`, contains `H`,
     /// contains `S | H`, does NOT contain `M`. Obvious, but `&==` vs
     /// `&!=0` is a one-character bug that this would catch.

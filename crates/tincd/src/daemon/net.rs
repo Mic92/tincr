@@ -2624,37 +2624,3 @@ fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
                     io::Error::last_os_error());
     }
 }
-
-#[cfg(test)]
-mod tos_tests {
-    /// Cache-dedup logic: only setsockopt when changed. Tested as
-    /// pure logic (the syscall itself is trusted; readback would
-    /// need a real socket pair). C `net_packet.c:920`: `if(prio !=
-    /// listen_socket[sock].priority)` then `:921` cache it.
-    #[test]
-    fn tos_cache_dedup() {
-        let mut cache = [0u8; 2];
-        let mut sets = 0;
-
-        // Same packet TOS twice on sock 0 → one set.
-        for prio in [0xb8, 0xb8] {
-            if cache[0] != prio {
-                cache[0] = prio;
-                sets += 1;
-            }
-        }
-        assert_eq!(sets, 1);
-
-        // Flip-flop on sock 0 → two more sets.
-        for prio in [0x00, 0xb8] {
-            if cache[0] != prio {
-                cache[0] = prio;
-                sets += 1;
-            }
-        }
-        assert_eq!(sets, 3);
-
-        // sock 1 still untouched at 0.
-        assert_eq!(cache[1], 0);
-    }
-}

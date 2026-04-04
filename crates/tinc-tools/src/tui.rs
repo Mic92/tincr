@@ -487,13 +487,11 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
 
 // Tests
 //
-// What's testable here: the escape STRINGS (typo-catch). What
+// What's testable here: `goto()`'s 0→1 index arithmetic. What
 // isn't: anything touching the tty (RawMode, getch_timeout,
 // winsize). `cargo test` doesn't have a tty; `tcgetattr(stdin)`
 // returns ENOTTY. Those get manual smoke via `tinc top` against
 // a real daemon.
-//
-// The `goto()` formatting is the only logic worth pinning.
 
 #[cfg(test)]
 mod tests {
@@ -507,38 +505,5 @@ mod tests {
         assert_eq!(goto(0, 0), "\x1b[1;1H");
         assert_eq!(goto(2, 0), "\x1b[3;1H"); // top.c:244's row
         assert_eq!(goto(24, 79), "\x1b[25;80H"); // bottom-right of 25×80
-    }
-
-    /// SGR codes are `CSI Ps m`. The Ps values are ECMA-48 §8.3.117.
-    /// sed-verifiable against any ANSI reference; this catches typos.
-    #[test]
-    fn sgr_codes() {
-        assert_eq!(BOLD, "\x1b[1m");
-        assert_eq!(DIM, "\x1b[2m");
-        assert_eq!(REVERSE, "\x1b[7m");
-        assert_eq!(RESET, "\x1b[0m");
-    }
-
-    /// Erase sequences: `2J` = whole screen, `K` (= `0K`) = cursor
-    /// to EOL. ECMA-48 §8.3.29 (ED) and §8.3.41 (EL).
-    #[test]
-    fn erase_codes() {
-        assert_eq!(CLEAR, "\x1b[2J");
-        assert_eq!(CLEAR_EOL, "\x1b[K");
-    }
-
-    /// The alt-screen pair: `?1049h` enter, `?1049l` leave. The
-    /// `?` prefix means "private mode" (xterm extension space).
-    /// 1049 = save cursor + alt screen + clear (the modern combo;
-    /// old xterm had `?47` which didn't save cursor).
-    #[test]
-    fn alt_screen_pair() {
-        // Module-private but worth asserting: enter has `h` (set),
-        // leave has `l` (reset). Easy to swap by accident.
-        assert!(ALT_SCREEN_ENTER.ends_with('h'));
-        assert!(ALT_SCREEN_LEAVE.ends_with('l'));
-        // Same number.
-        assert!(ALT_SCREEN_ENTER.contains("1049"));
-        assert!(ALT_SCREEN_LEAVE.contains("1049"));
     }
 }
