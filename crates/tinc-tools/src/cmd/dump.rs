@@ -1347,39 +1347,34 @@ mod tests {
         assert!(r.reachable());
     }
 
-    /// `n->hostname = NULL` → daemon sends `"unknown port unknown"`
-    /// (`node.c:211`). The literal `port` still splits.
+    /// Host-field variants beyond the golden vector.
+    /// - `n->hostname = NULL` → daemon sends `"unknown port unknown"`
+    ///   (`node.c:211`); the `port` literal still splits.
+    /// - `MYSELF`: `tincctl.c:1291` checks `!strcmp(host, "MYSELF")`,
+    ///   so it's a literal in `sockaddr2hostname` format.
     #[test]
-    fn node_parse_unknown_host() {
-        let body = "carol 000000000000 unknown port unknown \
-            0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert_eq!(r.host, "unknown");
-        assert_eq!(r.port, "unknown");
-        // status = 0 → not reachable, not validkey.
-        assert!(!r.reachable());
-        assert!(!r.validkey());
-        // distance = 99 (a node that's far away in the graph).
-        assert_eq!(r.distance, 99);
-        // udp_ping_rtt = -1 → no rtt suffix in output (tested below).
-        assert_eq!(r.udp_ping_rtt, -1);
-    }
+    fn node_parse_host_variants() {
+        // ─── unknown host: status 0 → no reachable/validkey bits ───
+        let r = NodeRow::parse(
+            "carol 000000000000 unknown port unknown \
+             0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0",
+        )
+        .unwrap();
+        assert_eq!(r.host, "unknown", "unknown: host");
+        assert_eq!(r.port, "unknown", "unknown: port");
+        assert!(!r.reachable(), "unknown: status=0 → !reachable");
+        assert!(!r.validkey(), "unknown: status=0 → !validkey");
+        assert_eq!(r.distance, 99, "unknown: distance");
+        assert_eq!(r.udp_ping_rtt, -1, "unknown: rtt=-1");
 
-    /// MYSELF: the daemon's own self-node. Host literal `"MYSELF"`,
-    /// port `"unknown"` (or actually whatever the listen port is —
-    /// but the graph color check is just `host == "MYSELF"`).
-    #[test]
-    fn node_parse_myself() {
-        // I haven't found the exact code path that builds MYSELF's
-        // hostname; `tincctl.c:1291` checks `!strcmp(host, "MYSELF")`
-        // so it's a literal. Sending `MYSELF port 655` is what you'd
-        // see (sockaddr2hostname format with synthetic host).
-        let body = "myself 010203040506 MYSELF port 655 \
-            0 0 0 0 0 1f - myself 0 1518 1518 1518 1700000000 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert_eq!(r.host, "MYSELF");
-        // status 0x1f = bits 0-4 all set. Reachable.
-        assert!(r.reachable());
+        // ─── MYSELF: status 0x1f = bits 0-4 all set ───
+        let r = NodeRow::parse(
+            "myself 010203040506 MYSELF port 655 \
+             0 0 0 0 0 1f - myself 0 1518 1518 1518 1700000000 -1 0 0 0 0",
+        )
+        .unwrap();
+        assert_eq!(r.host, "MYSELF", "myself: host");
+        assert!(r.reachable(), "myself: status=0x1f → reachable");
     }
 
     /// Short row → ParseError. The C `tincctl.c:1284`: `n != 22`.
@@ -1398,63 +1393,52 @@ mod tests {
 
     /// `fmt_plain` output: the script-compatible format. C `tincctl.c
     /// :1310`. If this changes, `tinc dump nodes | awk` scripts break.
+    ///
+    /// Three facets of one contract:
+    /// - the full golden line (the spec, byte-for-byte)
+    /// - rtt suffix: present iff `udp_ping_rtt != -1`, `%03d` padded
+    ///   (C `tincctl.c:1313-1314`: `printf(" rtt %d.%03d", rtt/1000, rtt%1000)`)
+    /// - status `%04x` pad (contrast conn dump's unpadded `%x`)
     #[test]
-    fn node_fmt_plain_with_rtt() {
+    fn node_fmt_plain_contract() {
+        // ─── Full string match. This IS the spec. ───
         let r = NodeRow::parse(NODE_BODY).unwrap();
-        let line = r.fmt_plain();
-        // Full string match. This IS the spec.
         assert_eq!(
-            line,
+            r.fmt_plain(),
             "alice id 0a1b2c3d4e5f at 10.0.0.1 port 655 cipher 0 digest 0 \
              maclength 0 compression 0 options 1000000c status 0012 \
              nexthop bob via alice distance 1 pmtu 1518 (min 1400 max 1518) \
-             rx 100 50000 tx 200 100000 rtt 1.500"
+             rx 100 50000 tx 200 100000 rtt 1.500",
+            "golden line (with rtt)"
         );
-    }
 
-    /// `udp_ping_rtt = -1` → no rtt suffix. C `tincctl.c:1313`.
-    #[test]
-    fn node_fmt_plain_no_rtt() {
-        let body = "carol 000000000000 unknown port unknown \
-            0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        let line = r.fmt_plain();
-        // No `rtt` substring at all.
-        assert!(!line.contains("rtt"));
-        // Ends after the tx counter, no trailing space.
-        assert!(line.ends_with("tx 0 0"));
-    }
+        // ─── udp_ping_rtt = -1 → no rtt suffix at all ───
+        let no_rtt = NodeRow::parse(
+            "carol 000000000000 unknown port unknown \
+             0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0",
+        )
+        .unwrap()
+        .fmt_plain();
+        assert!(!no_rtt.contains("rtt"), "rtt=-1: no `rtt` substring");
+        assert!(
+            no_rtt.ends_with("tx 0 0"),
+            "rtt=-1: ends after tx, no trailing space"
+        );
 
-    /// `rtt` formatting: microseconds → `MS.uuu`. C `tincctl.c:1314`:
-    /// `printf(" rtt %d.%03d", rtt/1000, rtt%1000)`. The %03d pad.
-    #[test]
-    fn node_rtt_padding() {
-        // rtt = 50us → "0.050". The %03d pad fills.
-        let body = "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 50 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.fmt_plain().ends_with(" rtt 0.050"));
-
-        // rtt = 1000us = exactly 1ms → "1.000".
-        let body = "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 1000 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.fmt_plain().ends_with(" rtt 1.000"));
-
-        // rtt = 12345us → "12.345".
-        let body = "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 12345 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.fmt_plain().ends_with(" rtt 12.345"));
-    }
-
-    /// `status %04x` pad. status=0 → `0000`, status=0x12 → `0012`.
-    /// The C is inconsistent (conn dump's status is unpadded `%x`).
-    #[test]
-    fn node_status_pad() {
-        let r = NodeRow::parse(NODE_BODY).unwrap();
-        assert!(r.fmt_plain().contains("status 0012 "));
-        // status 0 → still 4 chars.
-        let body = "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 -1 0 0 0 0";
-        let r = NodeRow::parse(body).unwrap();
-        assert!(r.fmt_plain().contains("status 0000 "));
+        // ─── substring checks: %03d rtt pad + %04x status pad ───
+        let fmt = |body| NodeRow::parse(body).unwrap().fmt_plain();
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            // (label,                      body,                                                 must_contain)
+            ("rtt 50us → 0.050 (%03d pad)", "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 50 0 0 0 0",    " rtt 0.050"),
+            ("rtt 1000us → 1.000",          "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 1000 0 0 0 0",  " rtt 1.000"),
+            ("rtt 12345us → 12.345",        "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 12345 0 0 0 0", " rtt 12.345"),
+            ("status 0x12 → 0012 (%04x)",   NODE_BODY,                                              "status 0012 "),
+            ("status 0 → 0000 (4 chars)",   "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 -1 0 0 0 0",    "status 0000 "),
+        ];
+        for (label, body, want) in cases {
+            assert!(fmt(body).contains(want), "{label}");
+        }
     }
 
     // ─── DOT format: color cascade
@@ -1561,71 +1545,73 @@ mod tests {
         assert!(dot.contains("weight = 656.359985"));
     }
 
-    /// Digraph: emits both directions, `->` arrow.
+    /// `fmt_dot` dedup + arrow style. Digraph emits all (`->`).
+    /// Undirected: suppress `from > to` half (C `tincctl.c:1332`:
+    /// `do_graph == 1 && strcmp(node1, node2) > 0`; strcmp is
+    /// byte-order, Rust String Ord is byte-order). The C `>` not
+    /// `>=` means self-loops emit (tinc has no self-edges, but).
     #[test]
-    fn edge_dot_directed() {
-        // alice → bob: from < to (alphabetic).
-        let ab = EdgeRow::parse(EDGE_BODY).unwrap();
-        assert!(ab.fmt_dot(true).unwrap().contains("\"alice\" -> \"bob\""));
-        // bob → alice: from > to. Digraph still emits.
-        let ba = EdgeRow::parse("bob alice 10.0.0.1 port 655 unspec port unspec 0 100").unwrap();
-        assert!(ba.fmt_dot(true).unwrap().contains("\"bob\" -> \"alice\""));
-    }
-
-    /// Graph (undirected): suppress the `from > to` half. C
-    /// `tincctl.c:1332`: `do_graph == 1 && strcmp(node1, node2) > 0`.
-    /// strcmp is byte-order; Rust String Ord is byte-order. Same.
-    #[test]
-    fn edge_dot_undirected_dedup() {
-        // alice → bob: from < to → emit, with `--`.
-        let ab = EdgeRow::parse(EDGE_BODY).unwrap();
-        assert!(ab.fmt_dot(false).unwrap().contains("\"alice\" -- \"bob\""));
-        // bob → alice: from > to → suppress.
-        let ba = EdgeRow::parse("bob alice 10.0.0.1 port 655 unspec port unspec 0 100").unwrap();
-        assert_eq!(ba.fmt_dot(false), None);
-    }
-
-    /// `from == to` (self-loop). The C `>` not `>=` means self-loops
-    /// emit in undirected mode. tinc doesn't have self-edges, but
-    /// the comparison is what it is.
-    #[test]
-    fn edge_dot_self_loop() {
-        let r = EdgeRow::parse("a a h port p h port p 0 1").unwrap();
-        // from == to → "a" > "a" is false → emit.
-        assert!(r.fmt_dot(false).is_some());
+    fn edge_dot_dedup_table() {
+        const BA: &str = "bob alice 10.0.0.1 port 655 unspec port unspec 0 100";
+        const AA: &str = "a a h port p h port p 0 1";
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, bool, Option<&str>)] = &[
+            // (label,                       body,      directed, expect_contains_or_None)
+            ("digraph a<b: emit ->",          EDGE_BODY, true,  Some("\"alice\" -> \"bob\"")),
+            ("digraph b>a: still emit",       BA,        true,  Some("\"bob\" -> \"alice\"")),
+            ("undirected a<b: emit --",       EDGE_BODY, false, Some("\"alice\" -- \"bob\"")),
+            ("undirected b>a: suppress",      BA,        false, None),
+            ("undirected a==a: > is false → emit", AA,  false, Some("")),
+        ];
+        for (label, body, directed, want) in cases {
+            let got = EdgeRow::parse(body).unwrap().fmt_dot(*directed);
+            match want {
+                None => assert_eq!(got, None, "{label}"),
+                Some(sub) => assert!(got.unwrap().contains(sub), "{label}"),
+            }
+        }
     }
 
     // ─── SubnetRow + strip_weight
 
+    /// `SubnetRow::parse` shapes. Broadcast owner `"(broadcast)"`
+    /// (`subnet.c:406`; parens are literal). Weight suffix survives
+    /// parse — stored raw, stripped only at fmt time.
     #[test]
-    fn subnet_parse() {
-        let r = SubnetRow::parse("10.0.0.0/24 alice").unwrap();
-        assert_eq!(r.subnet, "10.0.0.0/24");
-        assert_eq!(r.owner, "alice");
+    fn subnet_parse_table() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str, &str)] = &[
+            // (label,             input,                         expect_subnet,       expect_owner)
+            ("basic",              "10.0.0.0/24 alice",           "10.0.0.0/24",       "alice"),
+            ("broadcast (parens)", "ff:ff:ff:ff:ff:ff (broadcast)", "ff:ff:ff:ff:ff:ff", "(broadcast)"),
+            ("weight stored raw",  "10.0.0.0/24#5 alice",         "10.0.0.0/24#5",     "alice"),
+        ];
+        for (label, input, sub, own) in cases {
+            let r = SubnetRow::parse(input).unwrap();
+            assert_eq!(r.subnet, *sub, "{label}: subnet");
+            assert_eq!(r.owner, *own, "{label}: owner");
+        }
     }
 
-    /// Broadcast subnets: owner is `"(broadcast)"`. `subnet.c:406`.
-    /// The parens are literal (it's not a sscanf grouping).
+    /// `fmt_plain`: `strip_weight` applied. The daemon shouldn't
+    /// SEND `#10` (its `net2str` already strips default), but defense
+    /// against older daemons. Non-default weights survive.
     #[test]
-    fn subnet_parse_broadcast() {
-        let r = SubnetRow::parse("ff:ff:ff:ff:ff:ff (broadcast)").unwrap();
-        assert_eq!(r.owner, "(broadcast)");
-    }
-
-    /// Weight suffix survives parse (it's stripped at fmt time).
-    #[test]
-    fn subnet_parse_with_weight() {
-        let r = SubnetRow::parse("10.0.0.0/24#5 alice").unwrap();
-        // Stored raw.
-        assert_eq!(r.subnet, "10.0.0.0/24#5");
-        // Not stripped (5 != 10).
-        assert_eq!(r.fmt_plain(), "10.0.0.0/24#5 owner alice");
-    }
-
-    #[test]
-    fn subnet_fmt_plain() {
-        let r = SubnetRow::parse("10.0.0.0/24 alice").unwrap();
-        assert_eq!(r.fmt_plain(), "10.0.0.0/24 owner alice");
+    fn subnet_fmt_table() {
+        let row = |s: &str, o: &str| SubnetRow {
+            subnet: s.into(),
+            owner: o.into(),
+        };
+        #[rustfmt::skip]
+        let cases: &[(&str, SubnetRow, &str)] = &[
+            // (label,             row,                              expect_fmt)
+            ("basic",              row("10.0.0.0/24",    "alice"), "10.0.0.0/24 owner alice"),
+            ("#5 not stripped",    row("10.0.0.0/24#5",  "alice"), "10.0.0.0/24#5 owner alice"),
+            ("#10 stripped (default)", row("10.0.0.0/24#10", "alice"), "10.0.0.0/24 owner alice"),
+        ];
+        for (label, r, want) in cases {
+            assert_eq!(r.fmt_plain(), *want, "{label}");
+        }
     }
 
     /// `strip_weight`: `#10` only. C `info.c:41-49`. Includes
@@ -1669,19 +1655,6 @@ mod tests {
         // 3. Update this assert.
     }
 
-    /// `strip_weight` applied in `fmt_plain`. The daemon shouldn't
-    /// SEND `#10` (its `net2str` already strips default), but defense.
-    #[test]
-    fn subnet_fmt_strips_default_weight() {
-        // Hypothetical: an old daemon sent it.
-        let r = SubnetRow {
-            subnet: "10.0.0.0/24#10".into(),
-            owner: "alice".into(),
-        };
-        // Stripped in output.
-        assert_eq!(r.fmt_plain(), "10.0.0.0/24 owner alice");
-    }
-
     // ─── ConnRow
 
     /// Golden vector. `connection.c:168`: `%d %d %s %s %x %d %x`.
@@ -1700,29 +1673,22 @@ mod tests {
         assert_eq!(r.status, 0x1a);
     }
 
-    /// `status %x` for connections is UNPADDED. C `tincctl.c:1364`.
-    /// Contrast node's `%04x`. The C is inconsistent; replicated.
+    /// `fmt_plain`: full golden line + `status %x` UNPADDED check.
+    /// C `tincctl.c:1364`. Contrast node's `%04x`; the C is
+    /// inconsistent and we replicate that.
     #[test]
-    fn conn_fmt_status_unpadded() {
-        let r = ConnRow::parse(CONN_BODY).unwrap();
-        // status = 0x1a → "1a", not "001a".
-        assert!(r.fmt_plain().ends_with("status 1a"));
-
-        // status = 0 → "0", one char.
-        let r0 = ConnRow {
-            status: 0,
-            ..r.clone()
-        };
-        assert!(r0.fmt_plain().ends_with("status 0"));
-    }
-
-    #[test]
-    fn conn_fmt_plain() {
+    fn conn_fmt_plain_contract() {
         let r = ConnRow::parse(CONN_BODY).unwrap();
         assert_eq!(
             r.fmt_plain(),
-            "bob at 10.0.0.2 port 655 options 0 socket 7 status 1a"
+            "bob at 10.0.0.2 port 655 options 0 socket 7 status 1a",
+            "golden line"
         );
+        // status = 0x1a → "1a", not "001a" (proven by golden above too).
+        assert!(r.fmt_plain().ends_with("status 1a"), "status 0x1a unpadded");
+        // status = 0 → "0", one char.
+        let r0 = ConnRow { status: 0, ..r };
+        assert!(r0.fmt_plain().ends_with("status 0"), "status 0 → 1 char");
     }
 
     // ─── dump_invitations
@@ -1760,60 +1726,49 @@ mod tests {
         s
     }
 
-    /// Empty dir → empty Vec. C: `found = false` → "No outstanding."
+    /// Empty results: dir present-but-empty AND dir missing both
+    /// yield `Ok(vec![])`. C `tincctl.c:1115`: `if(errno == ENOENT)
+    /// return 0;` — the dir is created by the first `tinc invite`,
+    /// not by `init`, so a never-invited node has no `invitations/`.
     #[test]
-    fn inv_empty_dir() {
+    fn inv_empty_cases() {
+        // Empty dir.
         let (_d, paths) = setup_inv();
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty());
-    }
+        assert!(
+            dump_invitations(&paths).unwrap().is_empty(),
+            "empty dir → empty vec"
+        );
 
-    /// Dir doesn't exist → empty Vec, NOT an error. C `tincctl.c
-    /// :1115`: `if(errno == ENOENT) return 0;`. The dir is created
-    /// by the first `tinc invite`, not by `init` — so a never-
-    /// invited node has no `invitations/`.
-    #[test]
-    fn inv_dir_missing() {
+        // Missing dir (ENOENT → Ok, not error).
         let (d, paths) = setup_inv();
-        // setup creates it; remove.
         fs::remove_dir(d.path().join("vpn/invitations")).unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        assert!(rows.is_empty());
+        assert!(
+            dump_invitations(&paths).unwrap().is_empty(),
+            "ENOENT → empty vec, not error"
+        );
     }
 
-    /// One valid invitation: 24-char b64 name, `Name = X` first line.
+    /// Valid invitations: 24-char b64 name, `Name = X` first line.
+    /// rstrip on the name value: C `strchr("\t \r\n", *--eol)` loop
+    /// strips all trailing whitespace (CRLF from Windows-edited files).
     #[test]
-    fn inv_one_valid() {
-        let (d, paths) = setup_inv();
-        let name = mk_filename(0);
-        let path = d.path().join("vpn/invitations").join(&name);
-        fs::write(&path, "Name = bob\n# rest of file\n").unwrap();
+    fn inv_valid_table() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str)] = &[
+            // (label,                      file content)
+            ("plain LF",                    "Name = bob\n# rest of file\n"),
+            ("rstrip: CRLF + trailing tab", "Name = bob\t \r\n"),
+        ];
+        for (label, content) in cases {
+            let (d, paths) = setup_inv();
+            let name = mk_filename(0);
+            fs::write(d.path().join("vpn/invitations").join(&name), content).unwrap();
 
-        let rows = dump_invitations(&paths).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].cookie_hash, name);
-        assert_eq!(rows[0].invitee, "bob");
-    }
-
-    /// rstrip: trailing `\r\n`, ` \t\n` etc. C `strchr("\t \r\n",
-    /// *--eol)` loop strips all of them.
-    #[test]
-    fn inv_rstrip() {
-        let (d, paths) = setup_inv();
-        let name = mk_filename(0);
-        // CRLF (Windows-edited file?) + trailing tab. The C strips
-        // all of `\t \r\n` from the right.
-        fs::write(
-            d.path().join("vpn/invitations").join(&name),
-            "Name = bob\t \r\n",
-        )
-        .unwrap();
-
-        let rows = dump_invitations(&paths).unwrap();
-        assert_eq!(rows.len(), 1);
-        // rstrip worked; `bob` not `bob\t `.
-        assert_eq!(rows[0].invitee, "bob");
+            let rows = dump_invitations(&paths).unwrap();
+            assert_eq!(rows.len(), 1, "{label}: row count");
+            assert_eq!(rows[0].cookie_hash, name, "{label}: cookie_hash");
+            assert_eq!(rows[0].invitee, "bob", "{label}: invitee (rstripped)");
+        }
     }
 
     /// Skip table: each entry is a (filename, content) pair that
