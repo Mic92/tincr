@@ -654,6 +654,74 @@ mod tests {
         assert!(neg < pos);
     }
 
+    /// **[DOCUMENTED]** divergence from C at `subnet_parse.c:152`.
+    ///
+    /// Found by `fuzz/fuzz_targets/subnet_cmp_diff.rs` in <1s. C does
+    /// `a->weight - b->weight` — signed-overflow UB, observably wrap
+    /// under `-fwrapv`. Rust uses `Ord::cmp` which never overflows.
+    /// At `i32::MAX` vs `i32::MIN` the C result wraps to `-1` (Less);
+    /// Rust correctly says Greater.
+    ///
+    /// **Wire-reachable:** weight is `%d`-parsed at `subnet_parse.c:250`
+    /// with no range check. `Subnet = 10.0.0.0/8#2147483647` is accepted.
+    /// Two such subnets with the same prefix+addr from different owners
+    /// route differently on C tincd vs Rust tincd: C's splay tree and
+    /// Rust's BTreeMap iterate them in opposite order.
+    ///
+    /// **Why we don't match C:** the C behaviour is *undefined*, not
+    /// merely different. Without `-fwrapv` (which upstream's meson
+    /// build does NOT set) the optimizer can assume the subtraction
+    /// never overflows and rearrange the comparison arbitrarily.
+    /// Replicating UB with `wrapping_sub().signum()` would pin us to
+    /// the gcc-x86_64-at-O2 behaviour, which is exactly the kind of
+    /// thing that breaks under LTO or a clang upgrade.
+    ///
+    /// **This test passes.** It pins the Rust behaviour (correct
+    /// integer order). If someone later "fixes" the comparator to
+    /// match C's wrap, this breaks and they read why that's wrong.
+    /// The right fix is on the parse side: clamp weight to a sane
+    /// range (±2^30) and the subtraction can't overflow on either
+    /// side. That's a wire-format change — separate commit, needs
+    /// crossimpl validation.
+    #[test]
+    fn ipv4_ord_weight_at_i32_extremes() {
+        // Same prefix+addr forces the comparator down to the weight
+        // tier. Use the absolute extremes — the worst the wire can
+        // deliver via `%d`.
+        let key = |w: i32| Ipv4Key {
+            subnet: Subnet::V4 {
+                addr: Ipv4Addr::UNSPECIFIED,
+                prefix: 24,
+                weight: w,
+            },
+            owner: None,
+        };
+        let max = key(i32::MAX);
+        let min = key(i32::MIN);
+
+        // Rust: MAX > MIN. Obviously. Ord::cmp doesn't care how far apart.
+        assert_eq!(max.cmp(&min), Ordering::Greater);
+        assert_eq!(min.cmp(&max), Ordering::Less);
+
+        // What C's `a->weight - b->weight` produces under wrap-on-
+        // overflow: MAX - MIN = 2^32 - 1 ≡ -1 (mod 2^32). Negative,
+        // so C says Less. Computed here to document the divergence;
+        // the fuzz harness in fuzz/ asserts it against the actual C.
+        let c_wrapped = i32::MAX.wrapping_sub(i32::MIN);
+        assert_eq!(c_wrapped, -1, "C's view: MAX - MIN wraps to -1");
+        assert_ne!(
+            c_wrapped.signum(),
+            1,
+            "C and Rust DISAGREE here — that's the documented divergence"
+        );
+
+        // Sanity: just below the overflow boundary, both agree.
+        let half_hi = key(i32::MAX / 2);
+        let half_lo = key(i32::MIN / 2);
+        assert_eq!(half_hi.cmp(&half_lo), Ordering::Greater);
+        assert!((i32::MAX / 2).wrapping_sub(i32::MIN / 2) > 0);
+    }
+
     /// Level 4: `owner` ascending. C: `strcmp`. Alpha order.
     #[test]
     fn ipv4_ord_owner_tiebreak() {
