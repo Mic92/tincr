@@ -272,7 +272,8 @@ impl Daemon {
                     to: to_name,
                 }
                 .format(Self::nonce());
-                self.broadcast_line(&line);
+                // nw covered by `maybe_set_write_any` below.
+                let _nw = self.broadcast_line(&line);
             }
 
             // C `:131-132`
@@ -298,7 +299,10 @@ impl Daemon {
                         to: self.name.clone(),
                     }
                     .format(Self::nonce());
-                    self.broadcast_line(&line);
+                    // nw covered by `maybe_set_write_any` below
+                    // (this is the `97ef5af0` callsite that exposed
+                    // the bug class; `#[must_use]` now guards it).
+                    let _nw = self.broadcast_line(&line);
                 }
                 self.graph.del_edge(rev); // C `:149`
                 self.edge_addrs.remove(&rev);

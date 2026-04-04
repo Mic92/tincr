@@ -602,6 +602,13 @@ impl Daemon {
     /// `send_request(everyone, ...)` (`protocol.c:122-125`). `from=None`
     /// skips nothing; new/dying conn isn't `active` so filtered anyway.
     /// C formats once then re-sends same bytes → one nonce, format outside loop.
+    ///
+    /// `#[must_use]`: dropping the return is the `97ef5af0` bug class
+    /// — line sits in outbuf until the next natural WRITE arm (up to
+    /// pinginterval=60s away). Either OR into the caller's `nw`, or
+    /// `let _nw =` with a comment pointing at the `maybe_set_write_any`
+    /// that covers it.
+    #[must_use]
     pub(super) fn broadcast_line(&mut self, line: &str) -> bool {
         let targets = self.broadcast_targets(None);
         let mut nw = false;
@@ -1395,7 +1402,7 @@ impl Daemon {
         }
 
         // C `:295-297`
-        let nw = if self.settings.tunnelserver {
+        let mut nw = if self.settings.tunnelserver {
             false
         } else {
             self.forward_request(from_conn, body)
@@ -1421,7 +1428,14 @@ impl Daemon {
                     to: my_name,
                 }
                 .format(Self::nonce());
-                self.broadcast_line(&line);
+                // `97ef5af0` bug class: this DEL_EDGE was queued but
+                // never armed WRITE. `purge()` below CAN cover it (same
+                // conns, broadcast = all active) — but only if purge has
+                // anything to broadcast. After `del_edge(rev)` below,
+                // `to` has zero outgoing edges; if it also owns no
+                // subnets, purge pass-1 emits nothing, `nw_purge=false`,
+                // and this line sits for up to pinginterval. OR it in.
+                nw |= self.broadcast_line(&line);
             }
             // C `:318`
             self.graph.del_edge(rev);

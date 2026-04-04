@@ -417,7 +417,8 @@ impl Daemon {
                 subnet: s,
             }
             .format(Request::DelSubnet, Self::nonce());
-            self.broadcast_line(&line);
+            // nw covered by `maybe_set_write_any` at fn end.
+            let _nw = self.broadcast_line(&line);
             self.run_subnet_script(false, &myname, &s); // :425
             self.subnets.del(&s, &myname); // :427
             // mac_table sync (rare in practice; matches C semantics)
@@ -433,7 +434,8 @@ impl Daemon {
                 subnet: s,
             }
             .format(Request::AddSubnet, Self::nonce());
-            self.broadcast_line(&line);
+            // nw covered by `maybe_set_write_any` at fn end.
+            let _nw = self.broadcast_line(&line);
             self.run_subnet_script(true, &myname, &s); // :419
             if let Subnet::Mac { addr, .. } = s {
                 self.mac_table.insert(addr, myname.clone());
