@@ -587,6 +587,20 @@ The release profile had no debuginfo and no frame pointers. `perf record -g` cou
 
 **Fix**: `force-frame-pointers=yes` in `.cargo/config.toml` (Fedora made this the system default in 2023 for the same reason; cost is one of 16 GPRs). `[profile.profiling]` inherits release with `debug=true` — same opt-level/LTO/codegen-units, debuginfo is dead weight at runtime. `PerfTrace` wraps `perf trace -s` (kernel tracepoint syscall counter, exact, not sampling). The `perf trace -s` syscall counts were the ground truth that found the PMTU bug above. **Validate the measurement before trusting the diagnosis.**
 
+### daemon/connect.rs:301 — `broadcast_line` queues without arming WRITE (the push-vs-edge bug class)
+
+**Found in `e0b62259`** by the purge integration test (mid never gossips bob's death to alice). Fixed at the find site with `maybe_set_write_any()` after the gossip block. **broadcast-nw-audit agent is currently sweeping for siblings.**
+
+Not a port-transcription error — a structural mismatch between how the C does I/O and how an edge-triggered event loop must do it. Same family as #4 (the read-side drain deadlock); this is the write-side dual.
+
+The C `send_request` (`meta.c:98`) is **push-based**: every call ends in `safe_write()`, which loops on `write()` until the buffer is gone or `EAGAIN`. The C never has to remember to flush — every queue IS a flush. Our `broadcast_line` queues to `outbuf` and returns; the actual `write()` happens when the event loop sees WRITE readiness on the fd. With `EPOLLET`, that readiness only fires on a *transition* to writable. If the socket was already writable when we queued (it almost always is — meta-conn traffic is small), no edge, no wake. The bytes sit until something *else* arms WRITE on that fd: the next PING, `pinginterval=60` seconds away.
+
+The purge test made it visible: alice↔mid↔bob, kill bob, mid's `del_edge_h` calls `purge()` → `broadcast_subnet`/`broadcast_edge` → `broadcast_line` queues the DEL_EDGE to alice's `outbuf` → returns. mid's event loop sleeps. alice never hears about it. The test polls alice's `dump nodes` for bob to disappear; times out.
+
+Why nothing caught it before: every existing gossip path that calls `broadcast_line` is downstream of an *inbound* meta-conn read — `on_add_edge` → forward, `on_ack` → `send_everything`. The dispatch loop that processed the inbound line ALSO writes the outbuf at the end of the turn (the `feed`→dispatch→`maybe_set_write` shape from chunk 4b). `purge()` is called from a *timer* (`del_edge_h` → `purge`, but also `REQ_PURGE` from the control socket and the periodic tick); the timer wake doesn't carry that implicit flush.
+
+**The bug class**: any path that queues to a meta-conn outbuf from outside the conn's own read-dispatch turn must explicitly arm WRITE. The C structure makes this impossible to miss (every queue is a write); ours makes it easy to miss (queue and write are decoupled, the arming is a separate call). The `broadcast-nw-audit` agent is walking every `broadcast_line`/`conn.send` call site for the same shape.
+
 ---
 
 ## Security findings (port audit)
