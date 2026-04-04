@@ -1,0 +1,49 @@
+[package]
+name = "tinc-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Workspace-level fuzz crate. Lives outside `crates/` so cargo-fuzz's
+# `--cfg fuzzing` doesn't leak into the daemon build, and so the
+# nightly-only `#![no_main]` libfuzzer harnesses don't break stable
+# `cargo build --workspace`.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+tinc-sptps = { path = "../crates/tinc-sptps" }
+tinc-ffi = { path = "../crates/tinc-ffi" }
+tincd = { path = "../crates/tincd" }
+
+[workspace]
+# Detached from the parent workspace: cargo-fuzz builds with
+# `RUSTFLAGS=--cfg fuzzing -Z sanitizer=address` and a nightly
+# toolchain. Letting that leak into the parent workspace's lock
+# resolution is asking for trouble.
+
+[[bin]]
+name = "replay_diff"
+path = "fuzz_targets/replay_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subnet_cmp_diff"
+path = "fuzz_targets/subnet_cmp_diff.rs"
+test = false
+doc = false
+bench = false
+
+# Release is the default for `cargo fuzz run`. We want overflow checks
+# OFF (the Lean Finding 4 wrap is now wrapping_add, but if we missed
+# one we want to find a *real* divergence, not a debug-panic that masks
+# C-faithful wrap behaviour). cargo-fuzz already builds with -O.
+[profile.release]
+debug = 1          # line tables for crash triage
+overflow-checks = false

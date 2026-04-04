@@ -82,6 +82,85 @@ unsafe extern "C" {
     fn ffi_force_kex(h: *mut c_void) -> bool;
 
     fn ffi_drain(h: *mut c_void, out_buf: *mut *const u8, out_overflow: *mut bool) -> usize;
+
+    // Differential-fuzz entry points (csrc/replay_shim.c). These bypass
+    // the harness and poke a single static function with hand-crafted
+    // state. Used by `fuzz/` targets, not by the handshake tests above.
+    fn ffi_check_seqno(st: *mut FfiReplayState, seqno: u32, update: bool) -> bool;
+    fn ffi_subnet_compare_ipv4(a: *const FfiIpv4Subnet, b: *const FfiIpv4Subnet) -> i32;
+}
+
+/// Layout-match for `csrc/replay_shim.c`'s `ffi_replay_state_t`.
+///
+/// Public because the fuzz crate constructs these directly. The `late`
+/// pointer is a non-owning borrow of a Rust slice for the duration of
+/// one [`c_check_seqno`] call — the C indexes into it, never frees.
+#[repr(C)]
+pub struct FfiReplayState {
+    /// Expected next seqno. C `s->inseqno`.
+    pub inseqno: u32,
+    /// Far-future drop counter. C `s->farfuture`.
+    pub farfuture: u32,
+    /// Window width in BYTES. C `s->replaywin`. The bitmap is `replaywin * 8` slots.
+    pub replaywin: u32,
+    /// Circular bitmap, `replaywin` bytes. **Caller owns; C borrows.**
+    pub late: *mut u8,
+}
+
+/// Layout-match for `csrc/replay_shim.c`'s `ffi_ipv4_subnet_t`.
+///
+/// Owner is omitted: the C comparator short-circuits at the owner tier
+/// when either is NULL (subnet_parse.c:154), and we always pass NULL.
+/// The owner compare is a `strcmp` — not where transcription bugs hide.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiIpv4Subnet {
+    /// Network-order octets. Same as `Ipv4Addr::octets()`.
+    pub addr: [u8; 4],
+    /// 0..=32 in well-formed subnets, but the C type is bare `int` and
+    /// the fuzzer will feed garbage. That's the point.
+    pub prefixlength: i32,
+    /// `%d`-parsed off the wire — negative is silly but legal.
+    pub weight: i32,
+}
+
+/// Run `sptps_check_seqno` on a hand-built state.
+///
+/// `late` must be exactly `replaywin` bytes. The C indexes
+/// `late[(seqno/8) % replaywin]`; a short buffer is an OOB write.
+///
+/// # Safety
+/// `late.len()` must equal `replaywin`. Asserted in debug; in release
+/// (where the fuzzer runs) the caller is on the hook — the fuzz harness
+/// derives both from the same input byte so they can't disagree.
+pub fn c_check_seqno(
+    inseqno: u32,
+    farfuture: u32,
+    late: &mut [u8],
+    seqno: u32,
+    update: bool,
+) -> (bool, u32, u32) {
+    debug_assert!(
+        !late.is_empty(),
+        "replaywin=0 makes the C skip the bitmap entirely; not interesting"
+    );
+    let mut st = FfiReplayState {
+        inseqno,
+        farfuture,
+        replaywin: late.len() as u32,
+        late: late.as_mut_ptr(),
+    };
+    let ok = unsafe { ffi_check_seqno(&mut st, seqno, update) };
+    (ok, st.inseqno, st.farfuture)
+}
+
+/// Run the C `subnet_compare_ipv4` on two hand-built subnets.
+///
+/// Returns the raw signed difference (not normalized to {-1,0,1}).
+/// Compare against Rust's `Ordering` via `.signum()`.
+#[must_use]
+pub fn c_subnet_compare_ipv4(a: &FfiIpv4Subnet, b: &FfiIpv4Subnet) -> i32 {
+    unsafe { ffi_subnet_compare_ipv4(a, b) }
 }
 
 // ────────────────────────────────────────────────────────────────────

@@ -29,8 +29,11 @@ fn main() {
         // shim
         csrc.join("shim.c"),
         csrc.join("sizeof.c"),
-        // sptps state machine
-        src.join("sptps.c"),
+        // sptps state machine — brought in via #include in replay_shim.c
+        // so we can wrap its statics (sptps_check_seqno). Compiling
+        // sptps.c directly as well would duplicate-define every
+        // non-static (sptps_start, sptps_stop, ...).
+        csrc.join("replay_shim.c"),
         // chacha-poly1305
         src.join("chacha-poly1305/chacha.c"),
         src.join("chacha-poly1305/chacha-poly1305.c"),
@@ -78,7 +81,12 @@ fn main() {
         // Upstream's crypto code is decade-old C; suppress its warnings
         // rather than patch it. Our shim is `-Wall`-clean by hand.
         .warnings(false)
-        .flag_if_supported("-Wno-unused-result");
+        .flag_if_supported("-Wno-unused-result")
+        // subnet_compare_ipv4's `a->weight - b->weight` is signed-overflow
+        // UB in stock C. The fuzzer feeds arbitrary i32 weights; without
+        // -fwrapv the optimizer can assume the subtraction never wraps
+        // and the divergence we're hunting becomes a heisenbug.
+        .flag_if_supported("-fwrapv");
 
     // Honour cross-compile.
     println!("cargo:rerun-if-changed={}", csrc.display());

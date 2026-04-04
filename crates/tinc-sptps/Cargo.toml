@@ -5,6 +5,11 @@ edition.workspace = true
 publish = false
 description = "SPTPS handshake state machine — Rust port of src/sptps.c"
 
+[lints.rust]
+# `--cfg fuzzing` is set by cargo-fuzz; not a cargo feature, hence the
+# check-cfg whitelist. The fuzz crate lives in fuzz/, detached workspace.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
 zeroize = { version = "1", features = ["zeroize_derive"] }
