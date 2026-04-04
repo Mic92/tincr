@@ -853,6 +853,101 @@ fn measure(handle: &mut TunnelHandle) -> f64 {
 
 // ═══════════════════════════ perf record ═══════════════════════════════════
 
+/// `perf trace -s -p PID`: exact syscall counts and per-call latency,
+/// RAII-stopped. Unlike `perf record` (statistical sampling, output
+/// shape depends on unwinder quality) this uses kernel tracepoints —
+/// every syscall enter/exit is recorded. The summary lists call
+/// COUNT, total time, and avg/max latency per syscall name. This is
+/// the ground truth for "do we issue more syscalls per packet than
+/// C, or does each one cost more".
+///
+/// Gated on `TINCD_TRACE=1`. Needs root or `CAP_PERFMON` (tracefs
+/// `events/raw_syscalls/sys_{enter,exit}` is `0640 root:root` by
+/// default; remountable with `mount -o remount,mode=755 /sys/kernel/
+/// tracing` but that's a host-wide change). Run the test under sudo
+/// for one-off measurements:
+///
+/// ```sh
+/// sudo -E env PATH=$PATH TINCD_TRACE=1 cargo nextest run -p tincd \
+///   --release -E 'test(/throughput/)' --run-ignored ignored-only
+/// ```
+///
+/// Tracepoint overhead is much lower than `strace -c` (no ptrace
+/// stops, no context switch per syscall — just a ringbuffer write).
+/// Still nonzero; throughput under trace is comparable but not
+/// identical to a clean run. Use the COUNTS, not the wall time.
+struct PerfTrace {
+    child: Option<Child>,
+    out: PathBuf,
+}
+
+impl PerfTrace {
+    fn start(pid: u32, out: &Path) -> Self {
+        if std::env::var_os("TINCD_TRACE").is_none() {
+            return Self {
+                child: None,
+                out: out.into(),
+            };
+        }
+        // -s: summary only at exit (not per-syscall lines, which
+        //   would be millions at line rate).
+        // -o: file, not stderr. We're already piping daemon stderr
+        //   for the failure log; mixing them is unreadable.
+        // No -e filter: we want ALL syscalls. The summary is short.
+        let child = Command::new("perf")
+            .args(["trace", "-s", "-p"])
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg(out)
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+        match &child {
+            Some(c) => eprintln!(
+                "perf trace -s -p {pid} -> {} (pid {})",
+                out.display(),
+                c.id()
+            ),
+            None => eprintln!(
+                "perf trace unavailable (needs root/CAP_PERFMON for tracefs; \
+                 run test under `sudo -E env PATH=$PATH TINCD_TRACE=1 ...`)"
+            ),
+        }
+        Self {
+            child,
+            out: out.into(),
+        }
+    }
+}
+
+impl Drop for PerfTrace {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Same SIGINT-then-wait as PerfRecord. perf trace flushes
+            // the summary on SIGINT.
+            // SAFETY: see PerfRecord::drop.
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGINT);
+            }
+            let _ = child.wait();
+        }
+        // Dump the summary inline. It's short (~20 lines, one per
+        // syscall). The whole point is to read it side-by-side with
+        // the C run in test output.
+        if let Ok(s) = std::fs::read_to_string(&self.out) {
+            // perf trace -s output starts with a blank line + a
+            // "Summary of events:" header. Keep it; the formatting
+            // is already a nice table.
+            if !s.trim().is_empty() {
+                eprintln!("--- syscall trace ({}) ---", self.out.display());
+                for line in s.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+        }
+    }
+}
+
 /// `perf record -p PID -g -F 999`, RAII-stopped. Drop → SIGINT →
 /// wait. SIGINT is the documented "finish writing, exit cleanly"
 /// signal for `perf record`; SIGTERM/SIGKILL would truncate.
@@ -989,13 +1084,14 @@ fn rust_vs_c_throughput() {
 
     let c_bin = c_tincd_bin().expect("gate checked in enter_netns");
     let perf_on = std::env::var_os("TINCD_PERF").is_some();
+    let trace_on = std::env::var_os("TINCD_TRACE").is_some();
     let perf_out = std::env::var_os("TINCD_PERF_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/tincd-perf"));
-    if perf_on {
+    if perf_on || trace_on {
         std::fs::create_dir_all(&perf_out).ok();
     } else {
-        eprintln!("(set TINCD_PERF=1 to attach perf record during measurement)");
+        eprintln!("(set TINCD_PERF=1 for sampling profile, TINCD_TRACE=1 for syscall counts)");
     }
 
     // ─── 1. C↔C baseline ───────────────────────────────────────
@@ -1011,6 +1107,8 @@ fn rust_vs_c_throughput() {
     let baseline = {
         let _perf_a = PerfRecord::start(cc.alice_pid, &c_perf_path);
         let _perf_b = perf_bob.then(|| PerfRecord::start(cc.bob_pid, &c_bob_perf_path));
+        let _trace_a = PerfTrace::start(cc.alice_pid, &perf_out.join("c-alice.trace"));
+        let _trace_b = PerfTrace::start(cc.bob_pid, &perf_out.join("c-bob.trace"));
         measure(&mut cc)
         // _perf drops here → SIGINT → perf flushes + exits
     };
@@ -1025,6 +1123,8 @@ fn rust_vs_c_throughput() {
     let rust = {
         let _perf_a = PerfRecord::start(rr.alice_pid, &r_perf_path);
         let _perf_b = perf_bob.then(|| PerfRecord::start(rr.bob_pid, &r_bob_perf_path));
+        let _trace_a = PerfTrace::start(rr.alice_pid, &perf_out.join("rust-alice.trace"));
+        let _trace_b = PerfTrace::start(rr.bob_pid, &perf_out.join("rust-bob.trace"));
         measure(&mut rr)
     };
     drop(rr);

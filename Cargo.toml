@@ -33,6 +33,23 @@ rust-version = "1.85"
 lto = "thin"
 codegen-units = 1
 
+# `--profile profiling` for `TINCD_PERF=1` runs. The default release
+# profile has codegen-units=1 + thin-LTO + no debuginfo: everything
+# inlines into a few huge functions and perf can't unwind through them.
+# `Daemon::run` showed 12% cumulative instead of ~99%, and the perf
+# sampling overhead itself was 2.5× worse than C (broken DWARF unwind
+# falls back to scanning) — so profile data was misleading AND it
+# perturbed throughput unequally. Debug info is dead weight in the
+# binary at runtime; frame pointers cost one register (negligible at
+# this width). Same opt-level/LTO/CGU — codegen is identical to release.
+[profile.profiling]
+inherits = "release"
+debug = true
+# rustc 1.94+: -Cforce-frame-pointers in cargo profiles. perf's default
+# fp-unwind needs these; --call-graph=dwarf works without but adds
+# measurable overhead (the test avoids it deliberately).
+# Alternatively put this in RUSTFLAGS but then it's all-or-nothing.
+
 # Centralised version pins. The crypto crates here are load-bearing for wire
 # compatibility — bumping them is a protocol-review event, not a routine update.
 [workspace.dependencies]

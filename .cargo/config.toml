@@ -27,8 +27,16 @@
 # `chacha20_force_avx2` additionally tells the chacha20 crate to skip its
 # cpufeatures runtime dispatch (one indirect call per apply_keystream)
 # and inline the AVX2 backend directly.
+# `force-frame-pointers`: makes `perf record -g` (the throughput test's
+# profiler) actually work. Without it, %rbp is a free register and perf
+# can't unwind: `Daemon::run` showed 12% cumulative instead of ~99%, all
+# kernel time was attributed to leaf syscalls with no caller, and the
+# sampling overhead itself was 2.5× worse than C (perf falls back to
+# slow heuristic stack scanning). Fedora made FP-on the system default
+# in 2023 for exactly this reason. Cost: one of 16 GPRs — negligible.
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
     "-C", "target-cpu=x86-64-v3",
+    "-C", "force-frame-pointers=yes",
     "--cfg", "chacha20_force_avx2",
 ]
