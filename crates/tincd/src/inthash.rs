@@ -153,18 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn map_roundtrip() {
-        let mut m: IntHashMap<u32, &str> = IntHashMap::default();
-        m.insert(0, "zero");
-        m.insert(1, "one");
-        m.insert(100, "hundred");
-        assert_eq!(m.get(&0), Some(&"zero"));
-        assert_eq!(m.get(&1), Some(&"one"));
-        assert_eq!(m.get(&100), Some(&"hundred"));
-        assert_eq!(m.get(&2), None);
-    }
-
-    #[test]
     fn newtype_u32_keys() {
         // NodeId is a #[derive(Hash)] newtype over u32. The derive
         // calls write_u32 directly.

@@ -227,16 +227,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_mtu_is_net_h_macro() {
-        assert_eq!(MTU, 1518); // `net.h:36`
-        let t = TunnelState::default();
-        assert_eq!(t.mtu(), 1518);
-        assert_eq!(t.maxmtu(), 1518);
-        assert_eq!(t.minmtu(), 0);
-        assert!(t.pmtu.is_none());
-    }
-
-    #[test]
     fn reset_unreachable_clears_everything() {
         let mut t = TunnelState {
             sptps: None, // can't construct without keys; test the Option

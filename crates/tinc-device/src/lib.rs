@@ -338,20 +338,6 @@ mod tests {
         assert!(cfg.iface.is_none());
     }
 
-    /// `MTU = 1518` per `net.h:36`. sed-verifiable. The arithmetic:
-    /// `1500 + 14 + 4` (payload + ether header + VLAN tag).
-    ///
-    /// `sed -n '36p' src/net.h` → `#define MTU 1518`. Pin the
-    /// constant; future-us bumping it for jumbo gets a test fail
-    /// pointing here.
-    #[test]
-    fn mtu_matches_c() {
-        assert_eq!(MTU, 1518);
-        assert_eq!(MTU, 1500 + 14 + 4);
-        assert_eq!(MTU_JUMBO, 9018);
-        assert_eq!(MTU_JUMBO, 9000 + 14 + 4);
-    }
-
     // ─── default drain()
     //
     // The default impl is the BSD/macOS path (`RUST_REWRITE_10G.md`

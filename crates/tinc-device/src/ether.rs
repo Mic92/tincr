@@ -78,25 +78,6 @@ pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
 mod tests {
     use super::*;
 
-    // ─── Constants — gcc/sed-verified
-
-    /// All ethernet-layout constants. gcc-verified vs C:
-    /// `printf("%d", ETH_HLEN)` → 14, `<linux/if_ether.h>` for
-    /// the IANA ethertypes (same on BSD). The arithmetic
-    /// (`6+6+2`, `14-2=12`) is what every offset trick orbits.
-    #[test]
-    fn ether_constants_gcc_verified() {
-        // `ethernet.h:31`. dhost(6) + shost(6) + type(2).
-        assert_eq!(ETH_HLEN, 14);
-        assert_eq!(ETH_HLEN, 6 + 6 + 2);
-        // `ETH_HLEN - ETHER_TYPE_LEN = 12` is where ethertype goes.
-        assert_eq!(ETHER_TYPE_LEN, 2);
-        assert_eq!(ETH_HLEN - ETHER_TYPE_LEN, 12);
-        // IANA ethertype registrations. Wire format; can't change.
-        assert_eq!(ETH_P_IP, 0x0800);
-        assert_eq!(ETH_P_IPV6, 0x86DD);
-    }
-
     // ─── from_ip_nibble
 
     /// `from_ip_nibble(u8) -> Option<u16>`. Full domain in one

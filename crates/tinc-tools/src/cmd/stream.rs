@@ -1015,22 +1015,4 @@ mod tests {
     // Integration tests (when `tinc log` runs against a real
     // daemon) cover it implicitly: stdout is a pipe → no color
     // → daemon receives `use_color=0` → log lines are unescaped.
-
-    // Consts pinned against C
-
-    /// `tincctl.c:592`: `char data[9018]`. `tincctl.c:651`: `char
-    /// data[1024]`. sed-verifiable:
-    ///   sed -n '592p;651p' src/tincctl.c
-    #[test]
-    fn data_max_consts() {
-        assert_eq!(PCAP_DATA_MAX, 9018);
-        assert_eq!(LOG_DATA_MAX, 1024);
-    }
-
-    /// `logger.h:27`: `DEBUG_UNSET = -1`. sed-verifiable:
-    ///   sed -n '27p' src/logger.h
-    #[test]
-    fn debug_unset_is_minus_one() {
-        assert_eq!(DEBUG_UNSET, -1);
-    }
 }

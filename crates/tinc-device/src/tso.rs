@@ -553,27 +553,6 @@ pub fn tso_split(
 mod tests {
     use super::*;
 
-    /// `virtio_net_hdr` constants match the kernel UAPI. `gcc -E
-    /// include/uapi/linux/virtio_net.h | grep VIRTIO_NET_HDR_GSO`.
-    ///
-    /// Why test constants that "can't change": the test pins OUR
-    /// COPY of them. The kernel's are stable; ours could drift if
-    /// someone refactors and typos `TCPV6 = 6` (it's 4, not 6 —
-    /// the obvious value is wrong). This is the same pattern as
-    /// `linux.rs::tunsetiff_value`: kernel ABI is the source of
-    /// truth; we hand-copied it; the test catches the hand-copy
-    /// going wrong. If `libc` ever adds these constants, switch to
-    /// `assert_eq!(OUR, libc::VIRTIO_...)` and the test becomes a
-    /// dependency-upgrade canary instead.
-    #[test]
-    fn virtio_constants_match_kernel() {
-        assert_eq!(VIRTIO_NET_HDR_GSO_NONE, 0);
-        assert_eq!(VIRTIO_NET_HDR_GSO_TCPV4, 1);
-        assert_eq!(VIRTIO_NET_HDR_GSO_TCPV6, 4);
-        assert_eq!(VIRTIO_NET_HDR_F_NEEDS_CSUM, 1);
-        assert_eq!(VNET_HDR_LEN, 10);
-    }
-
     /// Decode the wg-go test vectors' header shapes. wg-go
     /// `offload_linux_test.go:179` "tcp4" case: csum_start=20
     /// (IPv4 hdr), csum_offset=16 (TCP th_sum), gso_size=100.

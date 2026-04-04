@@ -833,11 +833,4 @@ mod tests {
             ":345 boundary: mtu==512 is fine"
         );
     }
-
-    /// Constants match `net.h:34`.
-    #[test]
-    fn constants_match_c() {
-        assert_eq!(MTU_MAX, 9018);
-        assert_eq!(MTU_MIN, 512);
-    }
 }

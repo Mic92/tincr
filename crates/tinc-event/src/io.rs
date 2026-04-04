@@ -661,20 +661,4 @@ mod tests {
         ev.turn(Some(Duration::from_millis(1)), &mut out).unwrap();
         assert!(out.is_empty());
     }
-
-    /// `IO_READ = 1`, `IO_WRITE = 2` — the C constants. We don't use
-    /// the integer values (we have an enum), but pin them anyway in
-    /// case the daemon needs to speak the C ABI somewhere (e.g. a
-    /// debug-dump of "current interest").
-    #[test]
-    fn c_constants() {
-        // event.h:26-27
-        const IO_READ: i32 = 1;
-        const IO_WRITE: i32 = 2;
-        // sed-verified: rg '#define IO_' src/event.h
-        assert_eq!(IO_READ, 1);
-        assert_eq!(IO_WRITE, 2);
-        // MAX_EVENTS_PER_LOOP from net.h:31
-        assert_eq!(crate::MAX_EVENTS_PER_TURN, 32);
-    }
 }

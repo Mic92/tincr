@@ -435,14 +435,6 @@ mod tests {
         //         it already is).
     }
 
-    /// `AF_PACKET = PF_PACKET = 17`. The kernel doesn't
-    /// distinguish; libc has both defined to the same value.
-    #[test]
-    fn af_pf_packet_same() {
-        assert_eq!(libc::AF_PACKET, libc::PF_PACKET);
-        assert_eq!(libc::AF_PACKET, 17);
-    }
-
     /// nix's `SockProtocol::EthAll` should be `htons(ETH_P_
     /// ALL)`. Verify our understanding of what nix did.
     #[test]

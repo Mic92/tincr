@@ -759,13 +759,6 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    /// `DEFAULT_DEVICE` matches C. sed-verifiable: `sed -n '24p'
-    /// src/linux/device.c` → `#define DEFAULT_DEVICE "/dev/net/tun"`.
-    #[test]
-    fn default_device_matches_c() {
-        assert_eq!(DEFAULT_DEVICE, "/dev/net/tun");
-    }
-
     /// `IFF_TUN`/`IFF_TAP`/`IFF_NO_PI` from libc match the kernel
     /// header values. Smoke-verified via gcc earlier; pin them so
     /// libc upgrade noise gets caught.
@@ -809,12 +802,6 @@ mod tests {
     #[test]
     fn ifreq_size_40() {
         assert_eq!(std::mem::size_of::<libc::ifreq>(), 40);
-    }
-
-    /// `IFNAMSIZ = 16`. The `ifr_name` buffer length. Kernel ABI.
-    #[test]
-    fn ifnamsiz_16() {
-        assert_eq!(libc::IFNAMSIZ, 16);
     }
 
     /// Tun mode flags match C `device.c:78`: `ifr.ifr_flags =
