@@ -392,7 +392,46 @@ Why ping (`crossimpl::rust_dials_c`, `netns::real_tun_ping`) passed: 84-byte ICM
 
 Why Rust↔C measured 12.9 Mbps not zero: the C `receive_meta` is also one-recv-per-callback, but **level-triggered** — the C drains everything alice sends. The 12.9 was the b64-over-TCP-over-SPTPS-stream throughput ceiling (encrypt twice: once for the per-tunnel SPTPS, once for the meta-conn SPTPS).
 
-**Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev. The residual gap was `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv` — closed by `8b6c3b09` (`seal_into`, three body-sized copies → one, in-place encrypt matching C `sptps.c:125`). 69.5%→76.6% of C; the rest is `net.rs:1718`'s UDP-header wrap (the C author's own TODO at `net_packet.c:1027`) + receive-side `chapoly::open`.
+**Fix**: drain loop in `on_conn_readable`, bounded at 64 iterations with `EPOLL_CTL_MOD` rearm at the cap. Same shape applied to `on_device_read` (which already had a drain loop, but unbounded — under sustained TUN ingress it would never return to the event loop). Throughput gate also waits for `minmtu ≥ 1500` before iperf so packets take the UDP path. Result: 0.0 → ~850 Mbps release / ~17 Mbps dev. The residual gap was `STUB(chunk-11-perf)` per-packet `Vec` allocations, profiled at ~7% in `Sptps::send_record_priv` — closed by `8b6c3b09` (`seal_into`, three body-sized copies → one, in-place encrypt matching C `sptps.c:125`). 69.5%→76.6% of C. The remaining gap was not in the hot path at all — see #5.
+
+### pmtu.rs — `choose_initial_maxmtu` NOT-PORTING was load-bearing (52% → 115% of C)
+
+**Fixed in `05ba1f82`.** Not a port-transcription error — a deliberate scope cut whose stated rationale was wrong. The most consequential bug of the project: 2× throughput degradation, persisting 10 minutes after each daemon restart via kernel PMTU cache poisoning.
+
+The NOT-PORTING comment in `pmtu.rs` said `choose_initial_maxmtu` (`net_packet.c:1249-1340`, getsockopt `IP_MTU` on a connected probe socket) was "just an optimization — C falls back to MTU=1518 without it". True but incomplete: **C with `#undef IP_MTU` would have the same bug.** The convergence speed is not optional.
+
+The chain:
+
+1. `route.c:685` sends ICMP Frag Needed when packet length exceeds `MAX(via->mtu, 590)`. `via->mtu` is **0** until `try_fix_mtu` fires (`minmtu >= maxmtu`).
+2. `MAX(0, 590) = 590`. Any packet over 590 bytes during the convergence window gets ICMP Frag Needed claiming MTU 576.
+3. Kernel caches that per-destination for 10 minutes (`/proc/sys/net/ipv4/route/mtu_expires`). TCP shrinks MSS to 536 and never recovers within the test duration.
+4. iperf3 sends 536-byte segments instead of 1460. **3× the packets, 3× the chacha-poly, 3× the syscalls per useful byte.**
+
+C has the same `via->mtu==0` window. `choose_initial_maxmtu` makes it ~1 RTT: read the kernel PMTU cache, subtract IP+UDP+SPTPS overhead, first probe goes out at the (likely correct) value, reply confirms, `minmtu==maxmtu`, `try_fix_mtu` fires immediately. Without it we walk the ~10-probe ladder (`probe_size(0, 1518, n)` for n=0..10: 1330, 1408, 1434, ..., 1518) at 333ms each — **~3.3s** during which any TCP flow that asks gets told the path MTU is 576. The throughput test waits for `minmtu>=1500` (probe 8) then starts iperf; `via->mtu` is still 0 for ~660ms more.
+
+**Found by** `perf trace -s` syscall counts (`9d849a71` infrastructure), not by sampling profiler:
+
+```
+C-alice:    206k sendto, 479 Mbps  → ~1453 bytes/sendto
+Rust-alice: 310k sendto, 261 Mbps  → ~524  bytes/sendto
+```
+
+Same 0.004ms per-call latency on both sides. We were not slower at `sendto`; we were doing it 3× more often for the same bytes. Every prior `perf record -g` measurement was misleading — see the profiling-infrastructure note below.
+
+**Fix** is two parts that compose:
+
+1. Port `choose_initial_maxmtu`. Three syscalls (socket+connect+getsockopt) at `try_tx` when `mtuprobes==0`. `nix` already wraps `sockopt::IpMtu`. ~40 lines. 1-RTT convergence, matching C.
+2. Gate the `route.c:685` frag check on `via_mtu != 0`. Don't claim a path MTU before discovery has measured one. Correct regardless of how fast convergence is; turns the failure mode from "2× throughput loss for 10 minutes" into "a few large packets dropped for ~1 RTT".
+
+Throughput (n=4): 110.0%, 110.6%, 118.8%, 122.1% of C. Gate passes.
+
+#### Side note: profiling infrastructure was lying (`9d849a71`)
+
+Not a wire bug, but it explains why every throughput measurement before `9d849a71` varied so much and pointed the wrong direction.
+
+The release profile had no debuginfo and no frame pointers. `perf record -g` could not unwind: `Daemon::run` showed 12% cumulative instead of ~99%, all kernel time was attributed to leaf syscalls with no caller. Worse: when fp-unwind fails, perf falls back to slow heuristic stack scanning — the **sampling overhead itself hit Rust 2.5× harder than C**. Under `TINCD_PERF=1`, C dropped 2024→2024 Mbps (no perturbation); Rust dropped 1100→437. The measurement was perturbing the thing measured, asymmetrically. Every sampling-based diagnosis before this commit was at minimum suspect.
+
+**Fix**: `force-frame-pointers=yes` in `.cargo/config.toml` (Fedora made this the system default in 2023 for the same reason; cost is one of 16 GPRs). `[profile.profiling]` inherits release with `debug=true` — same opt-level/LTO/codegen-units, debuginfo is dead weight at runtime. `PerfTrace` wraps `perf trace -s` (kernel tracepoint syscall counter, exact, not sampling). The `perf trace -s` syscall counts were the ground truth that found the PMTU bug above. **Validate the measurement before trusting the diagnosis.**
 
 ---
 

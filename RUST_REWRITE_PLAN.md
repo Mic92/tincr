@@ -190,13 +190,10 @@ The six tests are also the *spec* for Phase 2: the same test bodies will run wit
 
 ### ~~0c. Wire-traffic corpus~~ — superseded by S4
 
-Never built. The plan was `LD_PRELOAD`-hook `send_request` and replay
-the capture against the Rust parser. That tests Rust-reads-C-writes
-— half the surface. `tests/crossimpl.rs` (chunk 11) tests
-Rust↔C-live, both directions, and found two wire bugs the corpus
-couldn't have (UDP-label NUL is HKDF input, never crosses
-`send_request`). The 20 `sscanf` format strings ARE pinned: every
-KAT in `tinc-proto` is a captured C output line.
+Never built. `tests/crossimpl.rs` (chunk 11) tests Rust↔C live, both
+directions, and found wire bugs (UDP-label NUL) that an `LD_PRELOAD`
+`send_request` replay couldn't have. The 20 `sscanf` format strings
+ARE pinned: every KAT in `tinc-proto` is a captured C output line.
 
 ---
 
@@ -341,19 +338,15 @@ pub fn encode_urlsafe(src: &[u8]) -> String;  // -_ alphabet
 pub fn decode(src: &str) -> Option<Vec<u8>>;  // accepts both, even mixed
 ```
 
-Implementation notes that survived contact with the KATs (the doc-comments in each module are the authoritative reference; this is the digest):
-
-- **chapoly:** `ChaCha20Legacy` (64/64 layout) + `Poly1305::compute_unpadded`. Nonce is `seqno.to_be_bytes()`. Block 0 keystream → Poly1305 key, then `seek(64)` to block 1 for the actual cipher. The `Vec`-returning API is fine for now; an in-place variant is a Phase 5 perf concern.
-
-- **ecdh:** the original plan's `CompressedEdwardsY::decompress()` path **does not work** because it validates the point. `key_exchange.c` doesn't — it does raw `fe_frombytes` (mask bit 255) → `(1+y)/(1-y)` → ladder. We vendor the field math in a private `fe` module: 5×51-bit limbs, schoolbook mul with ×19 wrap, ref10's Fermat inversion chain. Runs once per handshake so performance is irrelevant; the KATs are the correctness proof. dalek's `MontgomeryPoint::mul_clamped` handles the ladder itself.
-
-- **prf:** Mirrors the C buffer layout exactly (`[A(i) | seed]` with in-place overwrite) because that's the simplest way to be sure the `A(0)=zeros` quirk is right. `Hmac::<Sha512>::new_from_slice` handles the long-key-gets-hashed path internally, so we don't replicate `prf.c`'s manual HMAC.
-
-- **sign:** `hazmat::ExpandedSecretKey::from_bytes` + `raw_sign::<Sha512>`. The expanded key's low half is already clamped on disk; dalek re-clamps internally (idempotent). **Verify uses `verify`, not `verify_strict`** — strict rejects non-canonical S and small-order R that `verify.c` accepts; that's a divergence we must not introduce.
-
-- **b64:** LSB-first packing (`triplet = b[0]|b[1]<<8|b[2]<<16`, emit low 6 bits first) is the deeper issue; the dual-alphabet decoder is the easy part. Hand-rolled both directions.
-
-**PEM framing landed in `tinc-conf`** (Phase 1). The `signing_key_roundtrip` test there does the full `SigningKey::from_seed` → `to_blob` → `write_pem` → `read_pem` → `from_blob` → same signature on same message.
+Implementation notes (doc-comments in each module are authoritative):
+**chapoly** — `ChaCha20Legacy` + `Poly1305::compute_unpadded`,
+block-0 keystream is the Poly key. **ecdh** — dalek's
+`CompressedEdwardsY::decompress()` validates; `key_exchange.c`
+doesn't. Vendored `fe` module (5×51-bit limbs, ref10 inversion).
+**prf** — mirrors C's `[A(i)|seed]` in-place overwrite to get the
+`A(0)=zeros` quirk right. **sign** — `verify`, NOT `verify_strict`
+(strict rejects malleable sigs that `verify.c` accepts). **b64** —
+LSB-first packing, dual-alphabet decode. PEM framing in `tinc-conf`.
 
 ### Legacy RSA + AES-CBC
 *Do not* port in this phase. Gate behind `--features legacy`, keep calling OpenSSL via FFI permanently for RSA — reimplementing 20-year-old PKCS#1 padding to be byte-compatible is a footgun. Note: legacy mode also needs LZO (see Dependencies).
@@ -387,49 +380,23 @@ Maps directly to C `sptps_start`, `sptps_receive_data`, `sptps_send_record`, but
 | `sptps_keypair` | `sptps_keypair.c` (140 LOC) | ✅ `OsRng` seed → `SigningKey::from_seed` → `tinc_conf::write_pem` × 2 |
 | `sptps_test` | `sptps_test.c` (747 LOC) | ✅ Spine: `poll()` loop bridging stdin↔socket through `Sptps`. Dropped: `--tun`, `--packet-loss`, `--special`, Windows stdin-thread. |
 
-The integration test (`tests/self_roundtrip.rs`) spawns both binaries as subprocesses — same shape as `test/integration/sptps_basic.py`, but a `cargo test`. Four cases: `stream_mode`, `datagram_mode`, `stream_swapped_roles`, and `stream_large_payload` (64 KiB — bigger than any TCP segment, forces kernel-level fragmentation, exercises the SPTPS stream-framing reassembly. `sptps_basic.py` only sends 256 bytes and never sees a partial record).
+`tests/self_roundtrip.rs` spawns both binaries as subprocesses —
+4 cases incl. `stream_large_payload` (64 KiB, forces kernel
+fragmentation; `sptps_basic.py` only sends 256 bytes). Findings:
+dropping a child's stderr pipe end = `SIGPIPE` (bites `script.c`
+port too); `Stdin::lock().read()` buffers (use `nix::unistd::read`
+for 1-read-1-datagram chunking); "`Listening on {port}...`" is API
+(`sptps_basic.py` regexes it).
 
-**The binaries are `#![forbid(unsafe_code)]`.** nix 0.29 has an asymmetry: `poll()` takes `BorrowedFd` (safe via `AsFd`), `read()` still takes `RawFd` (the i32, also safe but untyped). The obvious-but-wrong reach was `unsafe { BorrowedFd::borrow_raw(0) }` for stdin; the right answer is `AsFd` for the typed handle and `AsRawFd` only at the `read()` call site.
+**Cross-impl 2×2 matrix** parameterizes binary path per role
+(`TINC_C_SPTPS_TEST` / `TINC_C_SPTPS_KEYPAIR`). Stronger claim than
+`vs_c.rs`: vs_c proves byte-identity given same RNG seed; cross-impl
+proves wire compat with *independent entropy* — catches
+"wire format right but verification wrong" that vs_c can't.
 
-Three findings:
-
-- **UDP has no FIN.** The C "accepts" a UDP client by `recvfrom(MSG_PEEK)` to learn the peer address, then `connect()` to filter — the peeked datagram stays in the buffer for the main loop's first `recv()`. On shutdown the server `poll()` blocks forever; `sptps_basic.py` reads N bytes then `server.kill()`. We do the same, and that's correct: a UDP listener with no application-layer goodbye has no other option. (`reap(server, expect_clean: !datagram)`.)
-
-- **Dropping the read end of a child stderr pipe = `SIGPIPE`.** `wait_for_port` initially took `stderr` by value and dropped it on return → server's next `eprintln!("Connected")` got `EPIPE` → `SIGPIPE` → dead server. The 0.01s test duration was the tell — too fast for any real I/O. **This will bite the daemon's `script.c` port** (`popen()` of `tinc-up`, same shape: spawn, read until satisfied, drop pipe, child writes more). Fix here: hold the handle for the child's lifetime, drain to EOF on a thread. Noted forward.
-
-- **`Stdin::lock().read()` goes through a `BufReader`.** Would buffer past the requested size, breaking the `readsize=1460` datagram chunking (one stdin read → one wire datagram). C uses raw `read(2)`; we use `nix::unistd::read()` on `stdin.as_raw_fd()`.
-
-**"Listening on {port}...\n" is API.** `sptps_basic.py` regexes it to find the bound port (it passes `0` for ephemeral). Don't reword.
-
-#### Cross-impl 2×2 matrix
-
-`tests/self_roundtrip.rs` parameterizes the binary path per role. Set `TINC_C_SPTPS_TEST` / `TINC_C_SPTPS_KEYPAIR` to enable; unset → the `cross_*` tests skip silently:
-
-```sh
-C=$(nix build .#sptps-test-c --no-link --print-out-paths)
-TINC_C_SPTPS_TEST=$C/bin/sptps_test \
-TINC_C_SPTPS_KEYPAIR=$C/bin/sptps_keypair \
-  cargo test -p tinc-tools cross
-```
-
-Why not `sptps_basic.py`: it only knows one `SPTPS_TEST_PATH`. Same impl both sides. The whole point of cross-impl is *different* impls per role.
-
-The matrix is asymmetric in what each cell tests:
-
-| server | client | tests |
-|---|---|---|
-| Rust | Rust | the binary works at all (always run, 4 tests) |
-| Rust | C | Rust *responder* SPTPS path |
-| C | Rust | Rust *initiator* SPTPS path |
-| C | C | control — if this fails, the harness or C binary is broken |
-
-Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap layout) and `cross_stream_large_payload` (64KB through both off-diagonal cells).
-
-**This is a stronger claim than `tinc-sptps/tests/vs_c.rs`.** vs_c proves byte-identity given the same RNG seed. Cross-impl proves wire compatibility with *independent entropy* on each side — the C and Rust binaries don't share an RNG, don't share an address space, communicate only through TCP/UDP bytes. If a Rust SPTPS implementation passed vs_c (same wire bytes, same RNG) but failed cross-impl (independent RNG), the bug would be: the wire format is right but the *verification* is wrong (e.g. signature check succeeds against own pubkey but not peer's). vs_c can't catch that; both sides see the same key material because they're seeded identically. Cross-impl catches it.
-
-**TODO: hermetic `checks.cross-impl`.** Needs `rustPlatform.buildRustPackage` to vendor deps; a naive `runCommand` + `cargo test --offline` dies in the sandbox (no registry index). For now CI uses the devshell invocation above. Tracked.
-
-**TODO: align `cargo fmt` ↔ `flake-fmt`.** They're the same rustfmt binary (`--version` reports the rustfmt crate version 1.8.0, not the toolchain 1.94.0 — false alarm). The reflows in `83c4dbf6` and `540efcdd` were stale-file noise: `cargo fmt` skips files cargo doesn't see as part of the build graph; treefmt globs `*.rs`. The diffs ride along; need a `rustfmt.toml` to pin edition or just stop running both.
+**TODO: hermetic `checks.cross-impl`.** Needs
+`rustPlatform.buildRustPackage` to vendor deps; CI uses the devshell
+invocation for now.
 
 ---
 
@@ -447,46 +414,26 @@ Plus `cross_pem_read` (private-key cross-reads, the `ecdsa.c` struct-overlap lay
 | Multicast | `multicast_device.c` (224 LOC) | +0, TAP-only. Uses `recv`/`sendto` NOT `read`/`write`. nix has `IpAddMembership`/`IpMulticastTtl`/`IpMulticastLoop` sockopt wrappers. The `ignore_src` MAC-loopback-suppression (`:191`, `:214`) is the one piece of state. The `str2addrinfo` dep pulls DNS (`getaddrinfo`); port after `tinc-proto` exposes addr resolution. |
 | UML/VDE | `*_device.c` | Drop. UML doesn't exist; VDE needs `libvdeplug`. |
 
-**Transferable decisions** (full reasoning in source-file docs —
+**Unsafe-shim decision tree** (full reasoning in source-file docs —
 `tinc-device/{linux,fd,raw,bsd,ether}.rs`, `tinc-event/sig.rs`):
+(1) nix doesn't wrap? hand-roll. (2) higher-level POSIX does same
+job? substitute (`if_nametoindex` for `SIOCGIFINDEX`). (3) wrapper
+matches kernel contract? use. (4) encoding lies? hand-roll
+(`TUNSETIFF` — nix macro generates `*const`, kernel writes back).
+(5) signal-context? hand-roll ("probably safe" isn't good enough).
+Don't pattern-match the neighboring shim; `raw.rs` mixes three
+classes in one file.
 
-**Unsafe-shim decision matrix** (seven rows, four classes; `TUNSIFHEAD`
-and `PF_SYSTEM`/`sockaddr_ctl` are next, in the BSD `open()` worklist):
+**Standing decisions**: `cfg` gates the smallest platform-varying
+thing (`bsd.rs` is `cfg(unix)`, only `open()` is `cfg(bsd)` — logic
+tested on Linux for free). Platform-varying constants: pin the
+EXPRESSION not the bytes. RFC values (`ETH_P_IP`) hoist to
+`ether.rs`; ABI values (`AF_INET6={10,28,30}`) reference `libc::` at
+use site. `read_fd`/`write_fd` stay duplicated (6×8 LOC) — buys six
+small `#[allow(unsafe_code)]` scopes vs one crate-wide.
 
-| # | What | C does | We do | Class |
-|---|---|---|---|---|
-| 1 | `localtime_r` (`info.rs`) | `localtime_r` | hand-rolled `MaybeUninit<libc::tm>` | nix doesn't wrap |
-| 2 | `TIOCGWINSZ` (`tui.rs`) | ioctl | `nix::ioctl_read_bad!` | wraps-same-syscall, encoding honest |
-| 3 | `TUNSETIFF` (`linux.rs`) | ioctl | bypass; raw `libc::ioctl` | wraps-same-syscall, **encoding lies** |
-| 4 | `recvmsg`+`SCM_RIGHTS` (`fd.rs`) | ~40 LOC cmsghdr | `nix::sys::socket::recvmsg` | wraps-same-syscall, POSIX-clean, fixes C bug |
-| 5 | `SIOCGIFINDEX` (`raw.rs`) | ioctl | `nix::if_nametoindex` | **substitutes-with-higher-level-POSIX** |
-| 6 | `bind(sockaddr_ll)` (`raw.rs`) | `bind()` | hand-rolled `libc::bind` | nix half-baked (`LinkAddr` getters-only) |
-| 7 | signal-handler `write()` (`sig.rs`) | `write(pipefd[1], &num, 1)` | hand-rolled `libc::write` | **signal-context demands certainty** |
-
-Per-shim decision tree: (1) nix doesn't wrap? hand-roll. (2) higher-
-level POSIX primitive does same job? substitute. (3) wrapper matches
-kernel's actual contract? use. (4) half-baked or encoding lies?
-hand-roll. (5) signal-context AND wrapper goes through any abstraction
-you can't audit forever? hand-roll. Row #7's `nix::unistd::write` is
-`libc::write` + `Errno::result` — no allocation, no locks, *probably*
-safe. "Probably" isn't good enough for a handler. (`pipe2`/`sigaction`
-stayed hand-rolled by the same +1-dep-for-−10-LOC call as
-`read_fd`/`write_fd` factoring.)
-
-Don't pattern-match on the neighboring shim; `raw.rs` mixes three
-classes in one file. Read the man page per shim.
-
-**Four standing decisions** (the ones the daemon will hit):
-
-| Decision | Rule | Where the source-doc lives |
-|---|---|---|
-| `cfg` placement | Gate the smallest thing that's platform-varying. `bsd.rs` is `cfg(unix)` (read/write logic POSIX); `open()` is `cfg(bsd)` (the only platform-varying thing). Module-at-`cfg(unix)` gets you tested-on-Linux for free. | `bsd.rs` doc + `lib.rs` mod-gate comment |
-| Platform-varying constant tests | Pin the EXPRESSION (`(libc::AF_INET6 as u32).to_be_bytes()`), not the bytes (`[0,0,0,0x1e]`). Pin literals only for cross-platform invariants (`AF_INET=2` everywhere). | `bsd.rs::tests::prefix_ipv6_is_libc_af_inet6_be` |
-| RFC vs platform-ABI constants | RFC values (`ETH_P_IP=0x0800`) hoist to `ether.rs`. Platform values (`AF_INET6={10,28,30}`) reference `libc::` at use site. The `cfg`-boundary rule applies to the latter; the former never had a `cfg`. | `ether.rs` doc |
-| `read_fd`/`write_fd` factoring | Six module-private 8-line fns (four in `tinc-device`, two in `tincd::conn`). Don't factor: 48 LOC duplication buys six small `#[allow(unsafe_code)]` scopes. A shared fn widens unsafe to crate scope. Trigger isn't instance count; it's "the caller's lib.rs itself needs raw I/O." | `bsd.rs::read_fd` block comment; `tincd::conn` feed/flush |
-
-Trait shape (settled; `write` takes `&mut [u8]` because `linux.rs`
-zeroes `buf[10..12]` and `bsd.rs` clobbers `buf[10..14]`):
+Trait shape (`write` takes `&mut [u8]` — `linux.rs` zeroes
+`buf[10..12]`, `bsd.rs` clobbers `buf[10..14]`):
 
 ```rust
 pub trait Device: Send {
@@ -547,49 +494,19 @@ file diff, same shape as `tinc-tools/tests/self_roundtrip.rs`.
 | `names.c` | `names.rs` — `Paths` struct. **First consumer.** Was Phase 5 deferral; pulled forward because `tinc init` literally can't function without `confbase` |
 | `fs.c` `makedirs`/`fopenmask` | `names.rs` methods — `fs::create_dir_all` + `OpenOptions::mode()` |
 
-(Per-command findings live in source-file docs: `cmd/init.rs`,
-`cmd/exchange.rs`, `cmd/genkey.rs`, `cmd/sign.rs`, `cmd/fsck.rs`,
-`cmd/invite.rs`, `cmd/join.rs`. Status table at top has the dense
-summaries. Forward refs preserved below.)
-
-**`CONFDIR` = `option_env!("TINC_CONFDIR")` at compile time**, default
-`/etc`. Packagers set the env in their build (Nix derivation does).
-
-**`server_receive_cookie` is the daemon seed.** It's `protocol_auth.
-c:185-310` minus `connection_t*`: cookie→filename via KAT-tested
-`cookie_filename`, atomic `rename` to `.used` (single-use), mtime-
-vs-expiry, `Name =` first-line validate. Lifts to `tincd::auth`
-in Phase 5; the daemon version takes `&mut Connection`.
-
-**Upstream bug `40719189`** (2026-03-30, broke `conf.d/`): `if(!dir
-&& ENOENT) return true; else return false;` falls to else when
-opendir succeeds. `tinc-conf` ports pre-regression behavior. Filed
-upstream.
-
-**`sign` doesn't respect `Ed25519PrivateKeyFile`** (deferred fix).
-fsck does. `private_key_file_config` test in `fsck.rs` is the
-reference for when sign gets fixed.
+Per-command findings live in source-file docs (`cmd/*.rs`).
+**`CONFDIR` = `option_env!("TINC_CONFDIR")`** at compile time.
+`server_receive_cookie` (`protocol_auth.c:185-310` minus
+`connection_t*`) lifts to `tincd::auth`. Upstream `conf.d/` bug
+`40719189` filed; we port pre-regression behavior. `sign` doesn't
+respect `Ed25519PrivateKeyFile` (deferred; fsck does).
 
 ### Phase 5b: RPC half — transport landed, kept C wire shape
 
-**Kept the C control protocol.** The pidfile is `0600` (`umask|077`
-before `fopen`, `pidfile.c:28`) — cookie is fs-perms auth, same
-model as ssh-agent. JSON would have cost `serde_json` and the
-`nc -U /var/run/tinc.socket` debuggability. (Full reasoning in
-`ctl.rs` doc; per-chunk findings in `cmd/dump.rs`, `cmd/info.rs`,
-`cmd/top.rs`, `cmd/stream.rs`, `cmd/edit.rs`, `cmd/network.rs`.)
-
-**C-is-WRONG findings** (the masked-by-well-behaved-sender class —
-"works because the other side is nice" is a coupling smell):
-
-| Location | The bug | Why masked | Our fix |
-|---|---|---|---|
-| `fd_device.c:73` | `CMSG_FIRSTHDR` returns NULL on empty control buffer; C dereferences `cmsgptr->cmsg_level` without checking | Java sender always sends a cmsg; in practice never empty | nix's `msg.cmsgs()` iterator: empty → empty iter → `None` from `find_map` → error, not segfault |
-| `fd_device.c:86` | `cmsg_len` check rejects multi-fd AFTER `recvmsg` returned — kernel already dup'd; rejecting now leaks | Java sender always sends 1 fd | `let [fd] = fds[..] else { close all; Err }` |
-| `tincctl.c:2458` `system()` | `"\"%s\" \"%s\""` quotes both — `EDITOR="vim -f"` won't tokenize, `$` in filename expands | nobody sets spacey EDITOR | `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>` |
-| `conf.c` `40719189` | `conf.d/` early-return bug; opendir success falls through to `return false` | upstream regression 2026-03 | port pre-regression behavior |
-| `linux/event.c:121` | `tv->tv_sec * 1000` when `timeout_execute` returned NULL (empty tree); `event_select.c:98` correctly passes NULL to `select` | `net.c:489-492` arms `pingtimer`+`periodictimer` before `event_loop()` runs | `tick() -> Option<Duration>`, mio handles None |
-| `signal.c:77` + `:58` | `signal()` not `sigaction()` (SysV-vs-BSD semantics); pipe leaks into `script.c` children (no CLOEXEC) | glibc/BSD `signal()` give BSD semantics; children just have an extra fd | `sigaction(SA_RESTART)` explicit; `pipe2(O_CLOEXEC)` |
+**Kept the C control protocol.** Pidfile is `0600` — cookie is
+fs-perms auth (ssh-agent model). JSON costs `serde_json` + the
+`nc -U` debuggability. C-is-WRONG findings ("works because the other
+side is nice" class) live in `cmd/*.rs` source docs and ISSUES.md.
 
 | Command | Blocked on |
 |---|---|
@@ -601,34 +518,15 @@ model as ssh-agent. JSON would have cost `serde_json` and the
 table, 39 entries): 34/39 ported. The 5 unported are 2 daemon-gated
 + 1 daemon-only-RPC + 2 legacy-crypto. None reachable before Phase 5.
 
-**Deliberate C-behavior-drops:**
-
-| # | Command | What the C does | What we do | Why dropped |
-|---|---|---|---|---|
-| 1 | `log`/`pcap` | `signal(SIGINT)` → `shutdown(fd)` → exit 0 | default SIGINT → exit 130 | daemon doesn't care; nobody scripts `tinc log`'s exit code | needs-scaffolding |
-| 2 | `network NAME` | mutate globals for readline loop | error "use `-n NAME`" | no readline loop → mutation goes to /dev/null | needs-scaffolding |
-| 3 | `IFF_ONE_QUEUE` | reads `IffOneQueue` config, sets flag in `TUNSETIFF` | doesn't | kernel commit `5d09710` (2.6.27, 2008) made it a no-op | dead-kernel-side |
-
-**C source consumed:**
-
-| C source | Rust |
-|---|---|
-| `info.c` | ✅ `cmd::info` — the dead third arg, `Reachability` cascade, `Subnet::matches`. `info.c` fully consumed. |
-| `top.c` | ✅ `tui.rs` shim + `cmd::top` — the `i` field is a stable-sort emulation (don't port; `sort_by` is stable), `wrapping_sub` for daemon-restart spike, first-tick epoch-seconds bug-port. `top.c` fully consumed. |
-| `tincctl.c` `pcap`/`log_control` (590-669) + `cmd_pcap`/`cmd_log` (1518-1567) | ✅ `cmd::stream` — `recv_data` is `read_exact` on the `BufReader` (the shared-buffer worry was already solved by std). `to_ne_bytes()` for pcap headers. SIGINT handler NOT ported. `log_against_fake`/`pcap_against_fake` pin the C-daemon-compat seam: subscribe wire matches `control.c:128/135` sscanf, header wire matches `logger.c:213`/`route.c:1124` send_request. |
-| `console.c` (5-11, Unix branch) | ✅ `cmd::stream::use_ansi_escapes_stdout` — `isatty(stdout) && getenv("TERM") && strcmp(TERM, "dumb")`. |
-| `tincctl.c` `cmd_edit` (2399-2472) + `conffiles[]` (2399-2408) | ✅ `cmd::edit` — the resolution lattice (conffiles BEFORE dash-split), `sh -c '$TINC_EDITOR "$@"'` instead of `system()`. The C's shell-quoting is wrong twice; we fix both. STRICTER `/`/`..`/empty rejects. Silent reload best-effort (`let _ = ctl.send(Reload)`). |
-| `tincctl.c` `cmd_help`/`cmd_version` (2366-2384) | ✅ binary-level `cmd_help`/`cmd_version` — trivial dispatchers to `print_help`/`print_version`. `help: ""` makes them invisible in `--help` (recursive listing is silly; C doesn't list them either). |
-| `tincctl.c` `cmd_dump` (1182-1376) + `dump_invitations` (1108-1180) | ✅ `cmd::dump` — four row parsers, DOT-format graph, the `" port "` literal. `dump_nodes_against_fake` pins the C-daemon-compat seam. |
-| `tincctl.c` simple `cmd_*` (reload/purge/retry/stop/debug/pid/disconnect) | ✅ `cmd::ctl_simple` — 5-line wrappers around `CtlSocket` |
-| `tincctl.c::cmd_config` (1774-2138) | ✅ `cmd::config` — three-stage seam, `TmpGuard` RAII (tighter than C's leaked tmpfiles), Subnet validation via `tinc-proto::Subnet` |
-| `tincctl.c::connect_tincd` + `recvline`/`sendline` + `pidfile.c::read_pidfile` | ✅ `ctl.rs` — `CtlSocket` + `Pidfile` |
-| `control.c` | daemon-side `match`. **`CtlRequest` discriminants already aligned** — the daemon's switch is a straight transcription. |
-| ~~`invitation.c`~~ | **Reclassified to 4a, both halves landed.** 1484 LOC → ~1010 LOC Rust (invite+join+crypto kernel) after dropping HTTP probe / ifconfig.c / tty prompts. `server_receive_cookie` (the daemon's `receive_invitation_sptps` body) lives in `cmd::join` for now; lifts to `tincd::auth` in Phase 5. |
-| `ifconfig.c` | platform `ip`/`ifconfig` shelling-out for `tinc-up` generation. Used by `finalize_join` for `Ifconfig`/`Route` invitation keywords. **Stubbed**: keywords recognized (no "unknown variable" warning), placeholder `tinc-up` written, no per-platform shell generation. -300 LOC. Lands when someone needs it. |
-
-**Windows caveat unchanged:** named pipe, `windows-sys` raw
-`CreateFileW`. ~100 LOC behind `#[cfg(windows)]`.
+**Deliberate C-behavior-drops**: `log`/`pcap` SIGINT handler (nobody
+scripts the exit code); `network NAME` global-mutation (no readline
+loop); `IFF_ONE_QUEUE` (kernel no-op since 2.6.27). **C source
+consumed**: `info.c`, `top.c`, `tincctl.c` `cmd_*`, `console.c`,
+`invitation.c` (1484→~1010 LOC after dropping HTTP probe / ifconfig
+/ tty prompts). `ifconfig.c` stubbed (keywords recognized,
+placeholder `tinc-up`, no per-platform shell gen — −300 LOC).
+Windows: named pipe via `windows-sys` `CreateFileW`, ~100 LOC behind
+`#[cfg(windows)]`. Per-command findings in `cmd/*.rs` source docs.
 
 ---
 
@@ -692,8 +590,8 @@ re-arm explicit. Every match arm decides.
 | `script.c` | 253 | ✅ | `script.rs` (`984bdfdc`). `Command::envs` not `putenv`; ENOEXEC behavior diff doc'd. |
 | `protocol_key.c` | 648 | ~80% | `send_req_key`/`req_key_ext_h`/`ans_key_h` SPTPS + compression-level negotiation (chunk 9a). UDP relay receive (chunk 9b). Reflexive-UDP-addr append/consume (`67e0dc22`). Left: `REQ_PUBKEY`/`ANS_PUBKEY` (we require `hosts/NAME` instead), legacy (chunk-never). |
 | `protocol_misc.c` | 376 | ~95% | PING/PONG (chunk 8). UDP_INFO/MTU_INFO gates+handlers wired (`udp_info.rs`, chunk 11). The 7 send-gates as `should_send_* → bool`, receive as `→ enum Action`. PACKET parse-and-swallow (`463b9987` — cross-impl found we crashed on it). PACKET 17 routing (`bc62b722`). Left: nothing structural. |
-| `net_packet.c` | 1938 | ~90% | **The hot path.** Chunk 7: send/recv core. Chunk 9: PMTU/compression/`try_tx` chain. `send_sptps_data` relay decision tree (`:965-1056`). All three chunk-12 leaves WIRED: `choose_local_address`/`adapt_socket` (`67e0dc22`), `broadcast_packet` target selection (`2bbd51b0`), `receive_tcppacket_sptps` ladder (`300a8e96` — the architectural-trap fix). Send/receive offset switch-aware (`:696-700`, `:1108`). PACKET 17 send+recv (`bc62b722` — the `:684` `n->connection` gate, **C-is-WRONG #11** at `:708-726`). Left: `try_harder` (chunk-never), legacy crypto (`:800-960`, chunk-never), `IP_MTU` getsockopt (NOT-PORTING). |
-| `route.c` | 1176 | ~97% | Chunk 7: `route_ipv4`. Chunk 9: v6/ICMP/MSS/ARP/NDP/TTL. **C-is-WRONG #8** (`:344`). `route_mac` (`52f6f348`) + `learn_mac`/`age_subnets` (`bc9f223b`) WIRED in `2bbd51b0`. Full RMODE_SWITCH dispatch (`:1159`). `route_broadcast` (`:559-565`). FMODE_KERNEL (`:1135-1138`). FRAG_NEEDED v4/v6 + the two routing-loop guards (`:649,675`/`:745,770`) wired (`8ea18bed`). NOT-PORTING: `fragment_ipv4` (`:614-681`, DF-clear-only), `overwrite_mac` snatching (`:830,972`, router-on-TAP only), TIME_EXCEEDED `getsockname` (`:148-169`, traceroute IP only). |
+| `net_packet.c` | 1938 | ~92% | **The hot path.** Chunk 7: send/recv core. Chunk 9: PMTU/compression/`try_tx` chain. `send_sptps_data` relay decision tree (`:965-1056`). All three chunk-12 leaves WIRED: `choose_local_address`/`adapt_socket` (`67e0dc22`), `broadcast_packet` target selection (`2bbd51b0`), `receive_tcppacket_sptps` ladder (`300a8e96` — the architectural-trap fix). Send/receive offset switch-aware (`:696-700`, `:1108`). PACKET 17 send+recv (`bc62b722` — the `:684` `n->connection` gate, **C-is-WRONG #11** at `:708-726`). `choose_initial_maxmtu` (`:1249-1340`, `05ba1f82` — was THE throughput bug). `recvmmsg` batching (`:1845-1895`, `0f120b11`). `overwrite_mac` (`:1557-1562`, `31ea5c79`). Left: `try_harder` (chunk-never), legacy crypto (`:800-960`, chunk-never). |
+| `route.c` | 1176 | ~100% | Chunk 7: `route_ipv4`. Chunk 9: v6/ICMP/MSS/ARP/NDP/TTL. **C-is-WRONG #8** (`:344`). `route_mac` (`52f6f348`) + `learn_mac`/`age_subnets` (`bc9f223b`) WIRED in `2bbd51b0`. Full RMODE_SWITCH dispatch (`:1159`). `route_broadcast` (`:559-565`). FMODE_KERNEL (`:1135-1138`). FRAG_NEEDED v4/v6 + the two routing-loop guards (`:649,675`/`:745,770`) wired (`8ea18bed`). All three former NOT-PORTINGs ported: `fragment_ipv4_packet` (`:614-681`, `8b29ca5b`), TIME_EXCEEDED `getsockname` (`:148-169`, `b5ef3f86`), `overwrite_mac` snatching (`:830,972`, `31ea5c79`). |
 | `net.c` | 527 | ~85% | `timeout_handler` ping sweep + laptop-suspend (chunk 8), `periodic_handler` storm-detect (chunk 8), `reload_configuration` SIGHUP mark-sweep (chunk 10 — `reload.rs::diff_subnets/conns_to_terminate`). Left: `purge`/`retry` control-socket commands. The mark-sweep is `BTreeSet::difference`; the C's `expires=1` flag is a splay-tree workaround. |
 | `address_cache.c` | 284 | ~85% | `addrcache.rs`. Text-format (`SocketAddr::Display`) not C struct dump. next_addr/reset/add_recent/save. Integrated with `Outgoing` (per-outgoing not per-node — the C hangs it on `node_t` but only outgoings read it). Left: lazy hostname resolve at next_addr time (`:170` `str2addrinfo`); current `try_outgoing_connections` does blocking `to_socket_addrs()` at setup. |
 | `route.c` `inet_checksum` + headers | ~100 | ✅ | `packet.rs`. `#[repr(C, packed)]` Ipv4Hdr/Ip6Hdr/IcmpHdr/Icmp6Hdr/EtherArp + KAT-locked checksum (native-endian `memcpy` load, RFC 1071 §2(B)). Ready for chunk-9 builders. |
@@ -706,46 +604,30 @@ re-arm explicit. Every match arm decides.
 
 ### Non-goals: specific functions inside ported modules
 
-Distinct from the defer/drop row above (whole modules). These are functions inside otherwise-ported files, re-tagged NOT-PORTING in `66bea146` and the residuals sweep so the next audit doesn't re-open them.
+Distinct from the defer/drop row above (whole modules). These are
+functions inside otherwise-ported files, re-tagged NOT-PORTING in
+`66bea146` and the residuals sweep. **Four of five were later
+ported** — the table is kept as a record of the decisions and their
+fates because the IP_MTU one was a load-bearing mistake.
 
-| Item | C source | Gate | Why not |
-|---|---|---|---|
-| `IP_MTU` getsockopt | `net_packet.c:1249-1340` | none (always falls back) | PMTU converges from MTU=1518 anyway; saves ~2 probes |
-| `lzo1x_999_compress` | level 11 | minilzo doesn't include it | decompress works; compress falls back to raw |
-| `overwrite_mac` | `net_packet.c:1557-1562` | `Mode=router DeviceType=tap` | nobody uses that config; we don't parse the knob |
-| TIME_EXCEEDED `getsockname` | `route.c:148-169` | `DecrementTTL=yes` + relay hop | traceroute IP wrong; nothing else cares |
-| `fragment_ipv4_packet` | `route.c:614-681` | DF clear + `>via_mtu` + relay | modern OS sets DF (PMTUD); UDP-no-DF is the gap |
+| Item | C source | Gate | Why we said "not" | Ported in |
+|---|---|---|---|---|
+| `IP_MTU` getsockopt | `net_packet.c:1249-1340` | none (always falls back) | "PMTU converges from MTU=1518 anyway; saves ~2 probes" — **WRONG**. Convergence speed was load-bearing: during the ~3.3s slow-converge window, `route.c:685` fires Frag-Needed at MTU 576, kernel caches per-dst for 10 minutes, TCP MSS → 536, throughput halves. See Rust-is-WRONG #5. | `05ba1f82` |
+| `lzo1x_999_compress` | level 11 | minilzo doesn't include it | decompress works; compress falls back to raw | — (only one left) |
+| `overwrite_mac` | `net_packet.c:1557-1562` | `Mode=router DeviceType=tap` | nobody uses that config; we don't parse the knob | `31ea5c79` |
+| TIME_EXCEEDED `getsockname` | `route.c:148-169` | `DecrementTTL=yes` + relay hop | traceroute IP wrong; nothing else cares | `b5ef3f86` |
+| `fragment_ipv4_packet` | `route.c:614-681` | DF clear + `>via_mtu` + relay | modern OS sets DF (PMTUD); UDP-no-DF is the gap | `8b29ca5b` |
 
 ### Hot-path concerns (`net_packet.c`)
 
-The iperf3 gate (`throughput.rs`, chunk 11+) measures **1602 Mbps vs
-C's 2092 (76.6%)** post-`8b6c3b09`. Was 1338/1925 (69.5%) — note the
-C baseline jumped 167 Mbps between the two runs (machine load; the
-ratio is what's stable). Before that was 850/1020 (83%) on a
-different machine; the `2b5dda45` profile that pointed at
-`send_record_priv` was correct but the absolute gap was bigger than
-the earlier numbers suggested.
-
-What closed: `send_record_priv` was 7.62% self-time, three body-
-sized memcpys per packet hiding under inlined `Vec::extend_from_
-slice` (pt scratch → seal-copies-pt-into-fresh-out → wire.extend(
-sealed)). The C `sptps.c:108-130` does it with `alloca` + ONE
-`memcpy` + `chacha_poly1305_encrypt(.., buffer+4, .., buffer+4, ..)`
-in-place. `ChaPoly::seal_into` matches: caller pre-writes the
-plaintext header, `seal_into` appends type+body and encrypts in-
-place over `[encrypt_from..]`. 3 allocs → 1, 3 copies → 1. The
-`pt.zeroize()` was hygiene-theater (wiping a scratch copy of an IP
-packet that's already in the kernel TUN buffer).
-
-**Gate cleared post-PMTU-fix (median ~115% of C, n=4).** All three
-"what's left" items below were dispatched in `e455a1c2` /
-`e49b5af6` / the recvmmsg+PMTU commits, but none of them was the
-bottleneck. `perf trace -s` syscall counts found the real one:
-3× packets per byte because `route.c:685` was sending bogus ICMP
-Frag Needed at MTU 576 during the ~3.3s PMTU convergence window. C
-has the same `via->mtu==0` window but `choose_initial_maxmtu` makes
-it ~1 RTT. Ported. The hot path was never slow — it was running
-3× too often.
+**Gate passes (median ~115% of C, n=4).** See the Phase-6
+"perf to 95%" row for the full chain. The hot path was never slow
+— it was running 3× too often because of a NOT-PORTING decision
+gone wrong (`choose_initial_maxmtu`; Rust-is-WRONG #5 in
+ISSUES.md). The `seal_into` work (`8b6c3b09`, 69.5%→76.6%),
+zero-alloc receive (`e49b5af6`), and recvmmsg batching (`0f120b11`)
+all landed and were all real improvements, but none was THE
+bottleneck.
 
 ---
 
@@ -767,6 +649,15 @@ Aggressively shed scope:
 ---
 
 ## LOC accounting
+
+> **Staleness note**: numbers measured at `d88b5cfd` (pre-comment-
+> reduction). Seven commits since then dropped ~5.2k comment lines;
+> `thiserror` landed (`190a4007`, discussed below as a hypothetical);
+> `proto-thin` dropped 5 redundant tests; new code added (recvmmsg
+> batch infra, `fragment.rs`, `choose_initial_maxmtu`). The
+> logic-vs-logic 1.20× ratio is likely unchanged — the comment
+> thinning touched comments not code. Raw line counts will have
+> dropped ~5k since.
 
 The naive number is alarming: `crates/**/*.rs` is 68k raw lines vs
 `src/**/*.c` at 36k — nearly 2×. Every individual count below is
@@ -1073,9 +964,11 @@ a wire-format field that exists for *parsing* legacy peers' messages
 without *speaking* legacy (`proto/msg/key.rs:100`:
 `Option<ReqKeyExt>`, `None` for the 3-token legacy form). No legacy
 crypto, no RSA, no metakey handshake. **Nothing accidentally
-ported.** The 6 `STUB(chunk-never)` markers in `gossip.rs` /
-`net.rs` are the documented "legacy peer sent us X, we drop it"
-paths.
+ported.** The "legacy peer sent us X, we drop it" paths in
+`gossip.rs` / `net.rs` are documented as plain comments (re-tagged
+from `STUB(chunk-never)` in `957f0ec5` — they were never work
+items, just permanent boundaries). `rg 'STUB\('` now returns only 2
+cold-perf items in `txpath.rs` / `tcp_tunnel.rs`.
 
 ### 8. Dead code
 
@@ -1160,7 +1053,7 @@ The upstream C suite is 35 python files, ~4.8k LOC. The original Phase-0d plan w
 | `net.py::test_tunnel_server` | `TunnelServer = yes` filters indirect ADD_EDGE — foo↔mid↔bar, foo sees 2 nodes not 3 | S2 | 9c | ✅ `three_daemon_tunnelserver` (chunk 9c). **Stronger than the python**: also asserts the data-plane consequence (`ping 10.0.0.2` from alice gets ICMP `NET_UNKNOWN`). |
 | `address_cache.py` | addrcache file persistence across restart | S2 | 6 | ✅ `tests/addrcache.rs` (`15d1b8fb`). 3 restart rounds. Round 1: connect with `Address =` → SIGTERM → cache file exists with `127.0.0.1:PORT`. Round 2: `rm -rf cache/` → reconnect → dir recreated. Round 3: rewrite `hosts/bob` WITHOUT `Address =` → restart → connects from cache only — THE proof that `AddressCache::open()` wires into dial path. **SIGTERM not SIGKILL** — `addrcache::Drop` is the disk write. |
 | `compression.py` | `Compression = N` per-level (LZO/zlib/LZ4) — netns + TCP-over-tunnel content compare | S2 | 9 | ✅ `compression_roundtrip` (S2 not S3 — don't need real TUN to prove level-negotiation). Asymmetric: alice asks zlib-6, bob asks LZ4. LZO `STUB(chunk-9-lzo)`. |
-| `algorithms.py`, `legacy_protocol.py` | RSA+AES legacy crypto | — | never | `STUB(chunk-never)`. These two stay as `#[ignore]` placeholders documenting WHY. |
+| `algorithms.py`, `legacy_protocol.py` | RSA+AES legacy crypto | — | never | not done — no `#[ignore]` placeholder file was ever written; the chunk-never boundary is documented inline at the `gossip.rs`/`net.rs` drop paths instead. |
 | `bind_address.py`, `bind_port.py` | `BindToAddress`/`ListenAddress`, port-0 reuse | S1 | 10 | the chunk-3 listener worklist |
 | `proxy.py` | `Proxy = socks5/http/exec` | S2 | 10 | ✅ all three (`e841d05e` socks5, `1367cfaf` exec, `af26db41` http). `socks5_proxy_roundtrip`: in-process RFC 1928 server, byte-exact. `proxy_exec_roundtrip("cat")`. `http_proxy_roundtrip`: in-process headerless CONNECT server (matching `proxy.py:155`'s minimal form — the C breaks on header-sending proxies, **C-is-WRONG #10**). Agent caught BufReader leftover bug: tinc queues CONNECT+ID in one flush; `into_inner()` would lose ID; `reader.buffer().to_vec()` first. STRICTER: bracket IPv6 in authority (C doesn't). |
 | `device.py`, `device_tap.py`, `device_multicast.py`, `device_raw_socket.py` | non-TUN device backends | S3 | 9/10 | ✅ TAP (`2bbd51b0`): `rust_dials_c_switch`/`c_dials_rust_switch` ping over real TAP devices. Found the **TAP race** (IPv6 router solicits on link-up → simultaneous REQ_KEY → handshake loop); three-phase fix (devices up AFTER meta handshake). raw_socket: `tinc-device` module exists, daemon wiring not yet (no demand). multicast: defer. |
@@ -1178,19 +1071,14 @@ The upstream C suite is 35 python files, ~4.8k LOC. The original Phase-0d plan w
 
 ### iperf3 throughput gate (S3+S4, `#[ignore]`)
 
-Landed `efdd4092`, debugged `2b5dda45`. `tests/throughput.rs` (1032 LOC). Three configs (C↔C / R↔R / R↔C) sequentially in one bwrap, `perf record -g -F 999 -p` during the 5s iperf window (gated on `TINCD_PERF=1` — sampling overhead skews the gate). Top-10 self-time symbols always dumped to stderr; that's the baseline for the next regression.
-
-**On first run: 0.0 Mbps.** The third Rust-is-WRONG, but unlike the NUL byte and PACKET dispatch this isn't a port error — it's a level-vs-edge event-loop semantic mismatch. C `meta.c:185` does ONE `recv()` per io-callback (level-triggered: leftover bytes re-fire). mio is `EPOLLET`. Under iperf3, with PMTU not yet converged, full-MSS packets fell back to TCP-tunnelled SPTPS_PACKET (~2KB each after b64). One `recv(2176)` ≈ one message; bob never read the rest; deadlock. Why ping passed: 84-byte ICMP → ~150-byte b64; the whole handshake fits in one recv. Why R↔C measured 12.9 not zero: C is also one-recv-per-callback but level-triggered — it drains everything we send; 12.9 was the encrypt-twice b64-over-TCP ceiling.
-
-Fix (`2b5dda45`): 64-iteration drain in `on_conn_readable` + `EPOLL_CTL_MOD` rearm at cap (`tinc-event::rearm()`). Same applied to `on_device_read` (was unbounded — sustained TUN ingress could starve the event loop).
-
-| Config | Before | After (release) | After (dev) |
-|---|---|---|---|
-| C↔C | 910 | ~1020 | — |
-| R↔R | **0.0** | 845-857 | ~17 |
-| R↔C | 12.9 | 850-860 | — |
-
-Residual ~18% gap is per-packet `Vec` allocations: `Sptps::send_record_priv` at 7% in the profile, plus the `Output::Wire` collect. The C uses arena buffers (`vpn_packet_t` stack, `send_buffer` in meta.c). `STUB(chunk-11-perf)`. The dev-profile 17 Mbps is the chacha20 debug-assert + slice-precondition-check overhead (~50×); the gate is profile-aware (95% release / 1% dev).
+`tests/throughput.rs`. Three configs (C↔C / R↔R / R↔C) in one bwrap;
+`perf record -g` gated on `TINCD_PERF=1`, `perf trace -s` gated on
+`TINCD_TRACE=1`. **Gate passes at ~115% of C** (Phase-6 row). The
+gate found two of its own bugs en route: the EPOLLET drain deadlock
+(0.0 Mbps on first run, `2b5dda45`) and the IP_MTU NOT-PORTING (52%,
+`05ba1f82`) — both detailed in ISSUES.md Rust-is-WRONG #4 / #5. The
+dev-profile measures ~17 Mbps (chacha20 debug-assert overhead, ~50×);
+gate is profile-aware (95% release / 1% dev).
 
 ---
 
@@ -1259,159 +1147,13 @@ Total: roughly **7 months** for one experienced engineer. The extra month over a
 
 ## Appendix: Stub audit (post-chunk-5, FROZEN)
 
-> **⚠ Historical record at `83de6651`.** Do not chase these `:NNNN`
-> refs. `daemon.rs` was 9043 LOC at `abb2d2bd`, then split into
-> `daemon.rs` + `daemon/{periodic,net,txpath,metaconn,gossip,connect}.rs`.
-> The protocol handlers live in `daemon/gossip.rs` and `daemon/connect.rs`
-> now. The `rg snippet` column still finds them; the file-heading
-> below doesn't. Kept for the C-line-ref verification (column 4) and
-> the dark-stub annotations — those are timeless.
-
-`83de6651` claimed "STUB renumber 5b→6"; this audit walked all 66
-markers exhaustively, checked C line refs against `src/` HEAD, and
-verified chunk attribution against the chunk table above.
-
-**Locator note**: column 2 was Rust line numbers grepped at
-`83de6651`. `22a5ff82` (REQ_DUMP_NODES/EDGES, ~300 LOC) shifted
-everything mid-file. Converted to `rg`-able marker
-excerpts — line numbers will keep drifting; the marker text won't.
-For `proto.rs`/`addrcache.rs`/`tinc-tools` the original numbers are
-close enough (small diffs); kept as-is.
-
-### Method
-
-```sh
-rg -n 'STUB|TODO|FIXME|DEFERRED|XXX|HACK' crates/ --type rust
-# per marker: sed -n '<line>p' src/<file> + chunk-table cross-ref
-ctags -x --c-kinds=f src/{subnet,protocol*,node,edge,graph,meta,connection,address_cache}.c
-# reverse audit: C funcs with no Rust port AND no STUB
-```
-
-### Inventory (by file)
-
-#### `crates/tincd/src/daemon.rs` (48 → 55 markers, 5 dark stubs hardened)
-
-| Marker | rg snippet | Chunk | C ref | Status |
-|---|---|---|---|---|
-| `TODO(chunk-4b): too_many_lines` | `too_many_lines.*receive_meta` | 4b | meta.c:164 | ⚠ stale — chunk 4b LANDED; fn GREW to 351 LOC (SPTPS dispatch moved IN). TODO removed; allow stays with corrected rationale. |
-| `STUB(chunk-6): _mst feeds status.mst` | `_mst feeds` | ~~6~~→9 | graph.c:103 → net_packet.c:1635 | ⚠ re-chunk — `status.mst` only consumer is `broadcast_packet`, route.c-rest territory. Chunk 6 has no broadcast. |
-| `STUB(chunk-8): execute_script("host-up")` | `execute_script\("host-up` | 8 | ~~graph.c:265-270~~→284-287 | ⚠ wrong C ref — `execute_script` is at `:284,287`; `:265` is `udp_confirmed=false`. Ref fixed. |
-| `STUB(chunk-7): update_node_udp` | `update_node_udp — the SET` | 7 | ~~graph.c:291-320~~→201,297 | ⚠ wrong C ref — set path is sssp `:201`, clear path is `:297`. `:291-320` is the env-var/script-spawn block. Ref fixed. |
-| `STUB(chunk-8): execute_script("host-down")` | `execute_script\("host-down` | 8 | ~~graph.c:273~~→284-287 | ⚠ wrong C ref — `:273` is `char *name;`. Ref fixed. |
-| `STUB(chunk-7): sptps_stop + mtu reset` | `sptps_stop\(&n->sptps` | 7 | ~~graph.c:275-289~~→259-271 | ⚠ wrong C ref — `sptps_stop` is `:259`, `mtuprobes` is `:269`, `timeout_del` is `:271`. Ref fixed. |
-| `STUB(chunk-9): tunnelserver` (add_subnet) | `tunnelserver mode \(.:79-84` | 9 | protocol_subnet.c:79-84 | ✅ correct — `tunnelserver`/`strictsubnets` are config-mode niches; chunk 9 (`net_setup.c reloadable`) is the right home. Not in plan's chunk table explicitly but module-mapping says "deferred". |
-| `STUB(chunk-6): send_del_subnet` (retaliate) | `send_del_subnet\(c, &s` | 6 | ~~:102~~→:103 | ⚠ wrong C ref (off-by-one). **DARK** — `peer_ack_exchange` never sends ADD_SUBNET with our name. `debug_assert!(false, ...)` added. |
-| `STUB(chunk-9): strictsubnets` | `strictsubnets \(.:116` | 9 | protocol_subnet.c:116-122 | ✅ correct, dark (mode never enabled) |
-| `STUB(chunk-8): subnet_update(..., true)` | `subnet_update\(\.\.\., true` | 8 | protocol_subnet.c:130-132 | ✅ correct — script firing |
-| `STUB(chunk-6): forward_request` (add_subnet) | `forward_request.*:136-138` | 6 | protocol_subnet.c:136-138 | ✅ correct — exercised by `peer_ack_exchange` ADD_SUBNET (logs "would forward", verified silent on wire) |
-| `STUB(chunk-7): MAC fast-handoff` | `MAC fast-handoff` | ~~7~~→9 | protocol_subnet.c:142-148 | ⚠ re-chunk — `SUBNET_MAC` only exists in `RMODE_SWITCH` (route.c-rest). Chunk 7 is `route_ipv4` only. |
-| `STUB(chunk-6): send_add_subnet` (retaliate) | `send_add_subnet\(c, find` | 6 | protocol_subnet.c:234 | ✅ correct, **DARK** — `debug_assert!` added |
-| `STUB(chunk-6): forward_request` (del_subnet) | `forward_request \(.:244` | 6 | protocol_subnet.c:244-246 | ✅ correct — exercised by `peer_ack_exchange` DEL_SUBNET |
-| `STUB(chunk-8): subnet_update(..., false)` | `subnet_update\(owner, find, false` | 8 | protocol_subnet.c:254-256 | ✅ correct |
-| `STUB(chunk-9): tunnelserver` (add_edge) | `tunnelserver mode \(.:103-111` | 9 | ~~:102-111~~→103-111 | ⚠ off-by-one (`:102` is blank). Fixed. |
-| `STUB(chunk-6): send_add_edge` (retaliate) | `send_add_edge\(c, e\) \(.:153` | 6 | protocol_edge.c:153 | ✅ correct, **DARK** — `debug_assert!` added |
-| `STUB(chunk-6): contradicting_add_edge++` | `contradicting_add_edge\+\+` | 6 | ~~:187~~→:186 | ⚠ off-by-one. Fixed. |
-| `STUB(chunk-6): send_del_edge` (contradict) | `send_del_edge\(c, e\) \(.:190` | 6 | ~~:192~~→:190 | ⚠ wrong C ref — `:192` is `sockaddrfree`. **DARK** — `debug_assert!` added. |
-| `STUB(chunk-6): forward_request` (add_edge) | `forward_request.*:209-211` | 6 | protocol_edge.c:209-211 | ✅ correct — exercised by `peer_edge_triggers_reachable` |
-| `STUB(chunk-6): contradicting_del_edge++` | `contradicting_del_edge\+\+` | 6 | protocol_edge.c:288 | ✅ correct, **DARK** |
-| `STUB(chunk-6): send_add_edge` (del retaliate) | `send_add_edge\(c, e\) \(.:289` | 6 | protocol_edge.c:289 | ✅ correct, **DARK** — `debug_assert!` added |
-| `STUB(chunk-6): forward_request` (del_edge) | `forward_request \(.:295-297` | 6 | protocol_edge.c:295-297 | ✅ correct, dark (no DEL_EDGE in tests) |
-| `STUB(chunk-6): reverse-edge cleanup` | `:309-320.*reverse-edge` | 6 | protocol_edge.c:309-320 | ✅ correct, dark — comment says why (`on_ack` adds bidi) |
-| `:1003-1019 PMTU/ClampMSS STUBBED` | `PMTU/ClampMSS` | (9) | protocol_auth.c:1003-1019 | ✅ correct ref. Untagged with chunk number — intentional: tied to "config_tree retained" decision, lands when needed. Module-mapping says "chunk 9" (`send_ack` per-host config). |
-| `:1065 graph() STUBBED (chunk 5)` | `:1065.*graph\(\)` | 5 | ~~:1065~~→:1063 | ⚠ stale — chunk 5 LANDED, `run_graph_and_log()` IS called. Doc fixed. (Also `:1065` is `return true`; `graph()` is `:1063`.) |
-| `:989 graph() STUBBED` | `:989.*graph\(\).*after terminate` | — | protocol_auth.c:989 | ⚠ stale — the unconditional `run_graph_and_log()` 80 lines down covers it (extra `graph()` in C is idempotent w.r.t. state diff). Comment fixed. |
-| `STUB(chunk-6): send_everything actual sending` | `the actual sending` | 6 | protocol_auth.c:870-900 | ✅ correct — `peer_ack_exchange` asserts WouldBlock post-ACK (proves stub doesn't leak bytes) |
-| `STUB chunk-5b` (log msg) | `STUB chunk-6\)"\);` | ~~5b~~→6 | — | ⚠ stale — survived the `83de6651` renumber sweep. Fixed. |
-| `STUB(chunk-6): send_add_edge(everyone)` | `send_add_edge\(everyone` | 6 | ~~:1055-1061~~→:1055-1059 | ⚠ wrong C ref — `:1061` is `/* Run MST... */`. Fixed. |
-
-#### `crates/tincd/src/proto.rs` (2 markers)
-
-| Marker | Line | Chunk | C ref | Status |
-|---|---|---|---|---|
-| `:844-865 per-host config STUBBED` | 704 | (9) | protocol_auth.c:844-865 | ✅ correct ref (`:844` IndirectData, `:863` Weight). Same untagged/config-tree caveat as daemon.rs:2099. |
-| `:863-865 Weight STUBBED` | 717 | (9) | protocol_auth.c:863-865 | ✅ correct |
-
-#### `crates/tincd/src/addrcache.rs` (1 → 2 markers)
-
-| Marker | Line | Chunk | C ref | Status |
-|---|---|---|---|---|
-| `TODO(chunk6): lazy getaddrinfo` | 39 | 6 | ~~:151-199~~→:157-199 | ⚠ wrong C ref — `:151` is `if(!cache->config_tree)`; the `str2addrinfo` call is `:177`; the `Address` config walk starts `:157`. Fixed. |
-| 🔴 **unmarked gap**: `get_known_addresses` | — | 6 | address_cache.c:31-65, :126-148 | C `get_recent_address` has THREE phases: cached → **edge-derived** (`e->reverse->address`) → config+DNS. We collapsed to two (cached + config). The middle phase walks `n->edge_tree` for "where the graph last saw this peer" — useful when a peer roams. New `TODO(chunk-6)` added; same chunk as DNS resolve (both feed `do_outgoing_connection`). |
-
-#### `crates/tinc-tools/src/bin/tinc.rs` + `cmd/invite.rs` (4 markers)
-
-| Marker | Line | Chunk | C ref | Status |
-|---|---|---|---|---|
-| `TODO(5b): when control protocol lands` | tinc.rs:565 | ~~5b~~→8 | invitation.c:480-484 | ⚠ re-chunk — Phase 5b LANDED (CLI-side `CtlSocket::send(Reload)` works, used by `cmd_reload`/`cmd_edit`). But `invite` is `needs_daemon: false` — `resolve_runtime()` never runs, `paths.pidfile()` panics. AND daemon-side REQ_RELOAD is chunk 8 (currently returns REQ_INVALID per `proto.rs:1436` test). The C `connect_tincd` resolves runtime paths inline; our split gates it. Re-chunked → 8 (lands when daemon handler does). |
-| `TODO(5b)` (module doc) | invite.rs:39 | ~~5b~~→8 | invitation.c:480-484 | ⚠ re-chunk — same |
-| `TODO(5b)` (key-is-new flag) | invite.rs:228 | 5b | invitation.c:480 | ⚠ stale — prose only; comment fixed (binary wrapper handles the reload attempt or lack thereof) |
-| `TODO when script.rs lands` | invite.rs:269 | — | invitation.c:598 | ⚠ re-chunk → `TODO(chunk-8)` (scripts is chunk 8's `process.c`/`execute_script`) |
-
-#### `crates/tinc-tools/src/cmd/{join,fsck,invite}.rs`, `tinc-device/bsd.rs` — non-chunk markers
-
-| Marker | Line | Status |
-|---|---|---|
-| `join.rs:328` `join_XXXXXXXX` | prose word ("XXXXXXXX") | ✅ not a marker — describes C random-netname temp dir |
-| `join.rs:427` `TODO(ifconfig.c port)` | — | ✅ correct — `ifconfig.c` is in plan's chunk-10 table. Untagged with number; OK (it's the CLI side, daemon-side is chunk 10). |
-| `fsck.rs:1156,1923,1940` `TODO(feature)` | — | ✅ correct — explicitly NOT a port ("not a port; a feature"). Stays. |
-| `genkey.rs:369` `tmp.XXXXXX` | — | ✅ not a marker — mkstemp(3) template syntax in prose |
-| `invite.rs:423` `TODO: port check_netname` | utils.c:229 | ✅ correct — `names.rs` consolidation, lands "when more callers need it" |
-| `bsd.rs:467` "stubs aren't TODO comments" | — | ✅ not a marker — prose explaining the BSD `open()` worklist comments are actionable, not deferred |
-| `tinc_cli.rs:1201` "are TODO" | — | ✅ not a marker — prose noting Phase-6 cross-impl real-socket join test |
-| `stop.rs:1263` "send_everything STUBBED" | — | ✅ not a marker — test comment explaining why post-ACK reads `WouldBlock` |
-
-### Reverse audit: unmarked gaps
-
-C functions in chunk-5-touched files with no Rust port AND no STUB
-marker. `init_*`/`exit_*`/`free_*`/`new_*` lifecycle and comparator
-fns excluded (Drop/ctor/BTreeMap-key cover them).
-
-| C function | File:Line | Ported? | Status |
-|---|---|---|---|
-| `subnet_cache_flush_tables` | subnet.c:159, called graph.c:323 | ❌ | 🔴 unmarked gap — `graph()` calls this FIRST (`:323`). The hash cache (`subnet.c:53-130`) isn't ported; nothing to flush. New `STUB(chunk-9)` added in `run_graph_and_log` (cache is a perf opt, lands with `route.c` if profiling cares). |
-| `get_known_addresses` | address_cache.c:31 | ❌ | 🔴 unmarked gap — see addrcache.rs row above. New TODO added. |
-| `tunnelserver` filter (del_subnet) | protocol_subnet.c:199-204 | ❌ | 🔴 unmarked gap — `on_add_subnet` has the marker, `on_del_subnet` doesn't. Symmetry hole. `STUB(chunk-9)` added. |
-| `tunnelserver` filter (del_edge) | protocol_edge.c:253-261 | ❌ | 🔴 unmarked gap — same symmetry hole. `STUB(chunk-9)` added. |
-| `broadcast_meta` | meta.c:113 | ❌ | ✅ intentional — `forward_request`'s sibling. The chunk-6 plan row explicitly mentions `forward_request`; `broadcast_meta` is a helper of it. Covered by the existing `STUB(chunk-6): forward_request` markers transitively. |
-| `dump_edges` / `dump_nodes` / `dump_traffic` | edge.c:123, node.c:201,226 | ⚠ partial | `dump_edges`+`dump_nodes` landed in `22a5ff82`. `dump_traffic` still chunk 8 (needs per-node packet/byte counters). |
-| `lookup_node_id` / `lookup_node_udp` / `update_node_udp` | node.c:157,162,167 | ❌ | ✅ module-mapping says chunk 7 (UDP data plane). `update_node_udp` has explicit STUB marker in daemon.rs. |
-| `send_add_edge` / `send_del_edge` / `send_add_subnet` / `send_del_subnet` | protocol_edge.c:37,219; protocol_subnet.c:33,153 | ❌ | ✅ covered by 9× explicit `STUB(chunk-6)` markers in daemon.rs |
-| `send_everything` | protocol_auth.c:870 | ❌ | ✅ explicit `STUB(chunk-6)` in daemon.rs:2207 |
-| `forward_request` | protocol.c:135 | ❌ | ✅ explicit `STUB(chunk-6)` ×4 in daemon.rs |
-
-### Dark-stub hardening
-
-5 retaliate paths (`owner == myself` / `from == myself`) gained
-`debug_assert!(false, "STUB hit: ...")`. Why `debug_assert!` not
-`unreachable!()`: these ARE reachable in a real mesh (stale gossip
-about us from a third peer); the C handles them. They're dark only
-because chunk-5 tests are responder-only with one well-behaved peer.
-A `debug_assert!` in test profile = loud panic when chunk-6's
-multi-daemon test first hits one; no-op in release (the `return
-Ok(false)` drop-but-don't-terminate is correct chunk-5 behavior).
-
-| Path | C ref | Why dark in chunk-5 |
-|---|---|---|
-| ADD_SUBNET-for-ourself | protocol_subnet.c:103 | Test never sends `ADD_SUBNET ... testnode ...` (our name as owner) |
-| DEL_SUBNET-for-ourself | protocol_subnet.c:234 | Same |
-| ADD_EDGE-for-ourself-mismatch | protocol_edge.c:153 | Test never gossips our edge back at us with different params |
-| ADD_EDGE-for-ourself-nonexistent | protocol_edge.c:186-190 | Test never sends `ADD_EDGE testnode X` for an edge we don't have |
-| DEL_EDGE-for-ourself | protocol_edge.c:288-289 | Test never sends `DEL_EDGE testnode X` |
-
-### Summary
-
-| Category | Count | Action |
-|---|---|---|
-| ✅ correct | 28 | none |
-| ⚠ wrong C ref | 9 | fixed |
-| ⚠ re-chunk | 5 | `_mst` 6→9; MAC fast-handoff 7→9; `invitation-created` →8; 2× invite-reload 5b→8 |
-| ⚠ stale (landed) | 4 | `TODO(chunk-4b)`; `graph()` chunk-5; `:989 graph()`; `STUB chunk-5b` log msg |
-| 🔴 unmarked gap | 4 | new STUB/TODO markers added |
-| dark stubs hardened | 5 | `debug_assert!(false, ...)` |
-| not-a-marker (prose) | 5 | none |
-
-Net marker delta: 66 → 70 (-6 stale removed/fixed, +4 unmarked gaps,
-+5 debug_assert messages, +1 split-ref). The chunk-6 worklist's
-"15 grep-able `STUB(chunk-6)` markers" claim from the chunk-5 commit
-was undercounted — actual is 17 after this audit (+ the 2 retaliate
-paths previously missing line refs).
+> **⚠ Historical, superseded.** Exhaustive walk of all 66 markers at
+> `83de6651` (when `daemon.rs` was 9043 LOC, pre-split). Found 9
+> wrong C-line-refs, 5 re-chunks, 4 stale markers, 4 unmarked gaps;
+> all closed. The 5 dark-stub retaliate paths
+> (`owner == myself` / `from == myself` in `protocol_{edge,subnet}.c`)
+> got `debug_assert!(false, ...)` — reachable in a real mesh (stale
+> 3rd-party gossip about us), dark in 2-node tests. Full inventory
+> tables removed `957f0ec5`; the markers themselves were the
+> source of truth and have all since been resolved or re-tagged.
+> Current STUB count: `rg 'STUB\(' crates/` = 2 (cold-perf only).
