@@ -852,6 +852,31 @@ impl Daemon {
                     return false;
                 }
 
+                // C `route.c:659-662,753-756,1052-1054`: FMODE_OFF —
+                // operator says "I am an endpoint, not a relay". Gate
+                // is `source != myself && owner != myself`: `from.
+                // is_some()` is the first; this match arm (NOT the
+                // `to == self.myself` arm above) is the second. v4
+                // → NET_ANO (`:660`), v6 → ADMIN (`:754`); MAC
+                // (Switch) → silent drop (`:1053`). Gap audit
+                // `bcc5c3e3`: parsed since `daemon.rs:1244`, never
+                // read — the security knob silently no-op'd.
+                if self.settings.forwarding_mode == ForwardingMode::Off && from.is_some() {
+                    log::debug!(target: "tincd::net",
+                                "Forwarding=off: dropping transit packet \
+                                 to {to} (we are not a relay)");
+                    if self.settings.routing_mode == RoutingMode::Router {
+                        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                        let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+                            (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+                        } else {
+                            (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+                        };
+                        self.write_icmp_to_device(data, t, c);
+                    }
+                    return false;
+                }
+
                 // C `route.c:698` clamp_mss BEFORE send_packet, AFTER
                 // routing. C `:390-398` gate on OPTION_CLAMP_MSS;
                 // `via->options` from SSSP (`graph.c:192`).

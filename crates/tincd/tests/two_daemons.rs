@@ -3439,3 +3439,194 @@ fn keyexpire_forces_rekey() {
     // if force_kex broke SPTPS state, decrypt fails and the packet
     // drops. The "Expiring" log proves the timer arm + fire path.
 }
+
+
+/// Gap audit `bcc5c3e3`: `Forwarding = off` was parsed (`daemon.
+/// rs:1244`) but never read in `dispatch_route_result`. An operator
+/// who set it to opt out of being a transit relay got transit
+/// traffic anyway. C `route.c:659-662,753-756,1052-1054`.
+///
+/// ## Shape
+///
+/// alice ── mid ── bob, hub-and-spoke. mid has `Forwarding =
+/// off`. alice's `hosts/mid` claims `Subnet = 10.0.0.0/24` (alice
+/// is `StrictSubnets` so she ignores bob's gossiped /32 and
+/// believes mid owns the whole /24). alice tunnels 10.0.0.2 TO
+/// MID. mid decrypts → `route_packet(..., Some(alice))` → routes
+/// to bob (mid DOES have bob's /32 from gossip) → the FMODE_OFF
+/// gate fires.
+///
+/// Why this contortion: the simpler `three_daemon_relay` shape
+/// (alice tunnels TO BOB, mid relays at the UDP layer) never
+/// calls mid's `route_packet` — mid forwards opaque ciphertext.
+/// The `route.c:659` gate is L3 forwarding ONLY. Forcing alice
+/// to encapsulate FOR mid is what makes mid decrypt-then-route.
+///
+/// Before fix: bob receives the packet (gate never fires).
+/// After fix: bob receives nothing; mid logs the drop.
+#[test]
+fn three_daemon_forwarding_off_drops_transit() {
+    let tmp = tmp("fmode-off");
+    // alice: StrictSubnets so she ignores bob's gossiped subnet
+    // and routes purely off her hosts/ preloads (mid's /24).
+    let alice = Node::new(tmp.path(), "alice", 0xAF).with_conf("StrictSubnets = yes\n");
+    // mid: Forwarding = off. The whole point.
+    let mid = Node::new(tmp.path(), "mid", 0xCF).with_conf("Forwarding = off\n");
+    let bob = Node::new(tmp.path(), "bob", 0xBF);
+
+    let alice_pair = sockpair_seqpacket();
+    let bob_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+    for &fd in &bob_pair {
+        set_nonblocking(fd);
+    }
+
+    // mid: hub. dummy device, no subnet, no ConnectTo.
+    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device.
+    alice.write_config_multi(
+        &[&mid, &bob],
+        &["mid"],
+        Some(alice_pair[1]),
+        Some("10.0.0.1/32"),
+    );
+    // bob: ConnectTo=mid, owns 10.0.0.2/32, fd device.
+    bob.write_config_multi(
+        &[&mid, &alice],
+        &["mid"],
+        Some(bob_pair[1]),
+        Some("10.0.0.2/32"),
+    );
+
+    // alice's hosts/mid: claim 10.0.0.0/24. With StrictSubnets,
+    // `load_all_nodes` preloads this; bob's gossiped /32 is
+    // rejected (`:116-122` gate). alice's longest-prefix match
+    // for 10.0.0.2 → mid. write_config_multi only writes pubkey,
+    // so append.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(alice.confbase.join("hosts").join("mid"))
+            .unwrap();
+        writeln!(f, "Subnet = 10.0.0.0/24").unwrap();
+        // alice's StrictSubnets needs her OWN subnet authorized
+        // too (load_all_nodes preloads from hosts/alice, but
+        // write_config_multi already wrote that one).
+    }
+
+    // ─── spawn: mid first ────────────────────────────────────────
+    // mid runs at debug so we can assert the gate's log line.
+    let mut mid_child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&mid.confbase)
+        .arg("--pidfile")
+        .arg(&mid.pidfile)
+        .arg("--socket")
+        .arg(&mid.socket)
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mid");
+    if !wait_for_file(&mid.socket) {
+        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
+    }
+    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    if !wait_for_file(&bob.socket) {
+        let _ = mid_child.kill();
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    unsafe { libc::close(bob_pair[1]) };
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    let mut alice_ctl = alice.ctl();
+    let mut mid_ctl = mid.ctl();
+
+    // ─── wait: mesh up, mid knows bob's subnet ───────────────────
+    poll_until(Duration::from_secs(10), || {
+        let m = mid_ctl.dump(6);
+        (has_active_peer(&m, "alice") && has_active_peer(&m, "bob")).then_some(())
+    });
+    // mid must learn bob's /32 (mid is NOT strictsubnets) so it
+    // routes the decrypted packet to bob (otherwise mid would
+    // return Unreachable and the gate never fires).
+    poll_until(Duration::from_secs(5), || {
+        let m = mid_ctl.dump(5);
+        has_subnet(&m, "10.0.0.2", "bob").then_some(())
+    });
+    // alice's view: mid owns the /24, bob's /32 rejected. So
+    // 10.0.0.2 → Forward{to: mid}. /24 prints with prefix.
+    poll_until(Duration::from_secs(5), || {
+        let a = alice_ctl.dump(5);
+        has_subnet(&a, "10.0.0.0/24", "mid").then_some(())
+    });
+    let a_subnets = alice_ctl.dump(5);
+    assert!(
+        !has_subnet(&a_subnets, "10.0.0.2", "bob"),
+        "alice's StrictSubnets should reject bob's /32; got: {a_subnets:?}"
+    );
+
+    // ─── kick the alice↔mid tunnel ───────────────────────────────
+    // alice routes 10.0.0.2 → mid → REQ_KEY for mid → per-tunnel
+    // SPTPS handshake. validkey settles.
+    let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
+    write_fd(alice_pair[0], &kick);
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        node_status(&a, "mid")
+            .is_some_and(|s| s & 0x02 != 0)
+            .then_some(())
+    });
+
+    // ─── THE PROBE ────────────────────────────────────────────────
+    // alice encrypts for mid → mid decrypts → route_packet(...,
+    // Some(alice)) → route_ipv4 → Forward{to: bob} → gate fires.
+    // Spam (each iteration drives try_tx); drain bob's TUN. The
+    // negative assertion: bob NEVER sees the payload.
+    let payload = b"transit-forbidden";
+    let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut bob_got_transit = false;
+    while Instant::now() < deadline {
+        write_fd(alice_pair[0], &probe);
+        while let Some(r) = read_fd_nb(bob_pair[0]) {
+            // Any frame on bob's TUN ending in our payload ⇒
+            // mid forwarded transit traffic. Gate failed.
+            if r.ends_with(payload) {
+                bob_got_transit = true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    drop(alice_ctl);
+    drop(mid_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    unsafe { libc::close(bob_pair[0]) };
+    let _ = mid_child.kill();
+    let _ = bob_child.kill();
+    let mid_stderr = drain_stderr(mid_child);
+    let _ = drain_stderr(bob_child);
+    let _ = drain_stderr(alice_child);
+
+    assert!(
+        !bob_got_transit,
+        "Forwarding=off failed: bob received transit traffic via mid; \
+         mid stderr:\n{mid_stderr}"
+    );
+    // mid should have logged the gate firing. The kick + probes
+    // both hit it (≥2 sends post-validkey).
+    assert!(
+        mid_stderr.contains("Forwarding=off"),
+        "mid should log the FMODE_OFF gate firing; stderr:\n{mid_stderr}"
+    );
+}
+

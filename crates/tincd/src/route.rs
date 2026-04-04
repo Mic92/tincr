@@ -140,9 +140,9 @@ pub fn route_ipv4<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:658 FMODE_OFF → NET_ANO; :663
-    // decrement_ttl; :668 priorityinheritance; :679 directonly →
-    // NET_ANO; :684-696 MTU/fragment; :698 clamp_mss.
+    // DEFERRED(chunk-9): route.c:663 decrement_ttl; :668
+    // priorityinheritance; :679 directonly → NET_ANO; :684-696
+    // MTU/fragment; :698 clamp_mss.
     // route.c:672 via= and :674 via==source: daemon-side.
 
     RouteResult::Forward { to }
@@ -209,10 +209,10 @@ pub fn route_ipv6<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:753 FMODE_OFF → ADMIN; :758
-    // decrement_ttl; :763 priorityinheritance; :774 directonly →
-    // ADMIN; :779-784 MTU → PACKET_TOO_BIG (1294 = 1280+14); :786
-    // clamp_mss. route.c:767 via=: daemon-side.
+    // DEFERRED(chunk-9): route.c:758 decrement_ttl; :763
+    // priorityinheritance; :774 directonly → ADMIN; :779-784 MTU
+    // → PACKET_TOO_BIG (1294 = 1280+14); :786 clamp_mss.
+    // route.c:767 via=: daemon-side.
 
     RouteResult::Forward { to }
 }
