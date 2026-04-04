@@ -564,11 +564,14 @@ mod tests {
         }
     }
 
-    // The "everything is fine" baseline. Each gate test perturbs one
-    // field.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::fn_params_excessive_bools)]
-    fn udp_send(
+    // ── UDP_INFO send gates ────────────────────────────────────────
+    //
+    // Pattern C: 11-param fn, each gate test flips ONE input. Struct
+    // with all-gates-pass defaults; each row shows only what varies.
+
+    #[derive(Clone, Copy)]
+    #[allow(clippy::struct_excessive_bools)] // mirrors C's flat globals
+    struct Send {
         to_myself: bool,
         reachable: bool,
         to_conn: bool,
@@ -577,265 +580,73 @@ mod tests {
         to_opt: u32,
         my_opt: u32,
         nexthop: u32,
-        last: Option<Instant>,
-        now: Instant,
-        interval: Duration,
-    ) -> bool {
-        should_send_udp_info(
-            to_myself,
-            reachable,
-            to_conn,
-            from_myself,
-            from_opt,
-            to_opt,
-            my_opt,
-            nexthop,
-            last,
-            now,
-            interval,
-        )
+        last_ago: Option<Duration>,
+    }
+    impl Send {
+        // The "all gates pass" baseline. C `:155-215` with every gate
+        // open. Proven by the first assert in `udp_send_gates`.
+        const PASS: Self = Send {
+            to_myself: false,
+            reachable: true,
+            to_conn: false,
+            from_myself: true,
+            from_opt: 0,
+            to_opt: 0,
+            my_opt: 0,
+            nexthop: MINOR_5,
+            last_ago: None,
+        };
+        fn run(&self, now: Instant) -> bool {
+            let last = self.last_ago.map(|d| now.checked_sub(d).unwrap());
+            should_send_udp_info(
+                self.to_myself,
+                self.reachable,
+                self.to_conn,
+                self.from_myself,
+                self.from_opt,
+                self.to_opt,
+                self.my_opt,
+                self.nexthop,
+                last,
+                now,
+                Duration::from_secs(5),
+            )
+        }
     }
 
-    // ── UDP_INFO send gates ────────────────────────────────────────
-
-    /// `:170` `to == myself` → would loop.
+    /// `should_send_udp_info` gates. C `protocol_misc.c:155-215`.
+    /// Each row perturbs ONE field from `Send::PASS`.
     #[test]
-    fn udp_send_to_myself_false() {
+    #[rustfmt::skip]
+    fn udp_send_gates() {
         let now = Instant::now();
-        assert!(!udp_send(
-            true,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-    }
+        let p = Send::PASS;
+        let s = |secs| Some(Duration::from_secs(secs));
 
-    /// `:174` unreachable → no path to send on.
-    #[test]
-    fn udp_send_unreachable_false() {
-        let now = Instant::now();
-        assert!(!udp_send(
-            false,
-            false,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// `:179` from==myself && to->connection: directly connected, they
-    /// know our address from the edge.
-    #[test]
-    fn udp_send_from_myself_directly_connected_false() {
-        let now = Instant::now();
-        assert!(!udp_send(
-            false,
-            true,
-            true,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// Same flags but `from != myself`: the directly-connected check
-    /// doesn't apply (we're forwarding, not originating).
-    #[test]
-    fn udp_send_forwarding_ignores_directly_connected() {
-        let now = Instant::now();
-        assert!(udp_send(
-            false,
-            true,
-            true,
-            /* from_myself */ false,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// `:183-187` debounce: sent 2s ago, interval 5s → suppress.
-    #[test]
-    fn udp_send_debounce_suppresses() {
-        let now = Instant::now();
-        let last = now.checked_sub(Duration::from_secs(2)).unwrap();
-        assert!(!udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            Some(last),
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// Debounce passed: sent 6s ago, interval 5s → send.
-    #[test]
-    fn udp_send_debounce_passed() {
-        let now = Instant::now();
-        let last = now.checked_sub(Duration::from_secs(6)).unwrap();
-        assert!(udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            Some(last),
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// Debounce ignored when forwarding (`from != myself`).
-    #[test]
-    fn udp_send_forwarding_ignores_debounce() {
-        let now = Instant::now();
-        let last = now.checked_sub(Duration::from_secs(1)).unwrap();
-        assert!(udp_send(
-            false,
-            true,
-            false,
-            /* from_myself */ false,
-            0,
-            0,
-            0,
-            MINOR_5,
-            Some(last),
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// `:190` TCPONLY on any of three parties → suppress. Three sub-
-    /// cases collapsed.
-    #[test]
-    fn udp_send_tcponly_any_party_false() {
-        let now = Instant::now();
-        let int = Duration::from_secs(5);
-        // myself
-        assert!(!udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            OPTION_TCPONLY,
-            MINOR_5,
-            None,
-            now,
-            int
-        ));
-        // from
-        assert!(!udp_send(
-            false,
-            true,
-            false,
-            true,
-            OPTION_TCPONLY,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            int
-        ));
-        // to
-        assert!(!udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            OPTION_TCPONLY,
-            0,
-            MINOR_5,
-            None,
-            now,
-            int
-        ));
-    }
-
-    /// `:194` nexthop minor < 5 → too old to understand UDP_INFO.
-    #[test]
-    fn udp_send_nexthop_too_old() {
-        let now = Instant::now();
-        assert!(!udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_4,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-        // Exactly 5 → ok.
-        assert!(udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
-    }
-
-    /// All gates pass → send. The happy path.
-    #[test]
-    fn udp_send_all_gates_pass() {
-        let now = Instant::now();
-        assert!(udp_send(
-            false,
-            true,
-            false,
-            true,
-            0,
-            0,
-            0,
-            MINOR_5,
-            None,
-            now,
-            Duration::from_secs(5)
-        ));
+        assert!( p.run(now),                                        "all gates pass");
+        // `:170` to == myself → would loop
+        assert!(!Send { to_myself: true,       ..p }.run(now),      "to_myself blocks");
+        // `:174` unreachable → no path
+        assert!(!Send { reachable: false,      ..p }.run(now),      "unreachable blocks");
+        // `:179` from==myself && to->connection → they know our addr from edge
+        assert!(!Send { to_conn: true,         ..p }.run(now),      "directly_connected blocks");
+        // forwarding (from != myself) ignores `:179`
+        assert!( Send { to_conn: true, from_myself: false, ..p }.run(now),
+                                                                    "forwarding ignores directly_connected");
+        // `:183-187` debounce: sent 2s ago, interval 5s
+        assert!(!Send { last_ago: s(2),        ..p }.run(now),      "debounce suppresses");
+        // debounce passed: sent 6s ago
+        assert!( Send { last_ago: s(6),        ..p }.run(now),      "debounce passed");
+        // forwarding ignores `:183`
+        assert!( Send { last_ago: s(1), from_myself: false, ..p }.run(now),
+                                                                    "forwarding ignores debounce");
+        // `:190` three-way TCPONLY OR
+        assert!(!Send { my_opt:   OPTION_TCPONLY, ..p }.run(now),   "tcponly myself blocks");
+        assert!(!Send { from_opt: OPTION_TCPONLY, ..p }.run(now),   "tcponly from blocks");
+        assert!(!Send { to_opt:   OPTION_TCPONLY, ..p }.run(now),   "tcponly to blocks");
+        // `:194` nexthop minor < 5 → too old for UDP_INFO
+        assert!(!Send { nexthop: MINOR_4,      ..p }.run(now),      "nexthop minor<5 blocks");
+        assert!( Send { nexthop: MINOR_5,      ..p }.run(now),      "nexthop minor==5 ok");
     }
 
     // ── UDP_INFO receive ───────────────────────────────────────────
@@ -848,271 +659,91 @@ mod tests {
         }
     }
 
-    /// `:238` unknown from → UnknownNode.
+    /// `on_receive_udp_info` decision table. C `protocol_misc.c:238-265`.
+    ///
+    /// Unparseable-addr divergence: C `str2sockaddr` would yield
+    /// AF_UNKNOWN and trigger `update_node_udp` with garbage; we can't
+    /// represent AF_UNKNOWN as `SocketAddr` so we drop the learning.
+    /// Deliberate: garbage addresses don't propagate into our addr tree.
     #[test]
-    fn udp_recv_unknown_from() {
-        let m = mkudp("192.168.1.5", "50123");
-        assert_eq!(
-            on_receive_udp_info(&m, None, true, None),
-            UdpInfoAction::UnknownNode
-        );
-    }
+    #[rustfmt::skip]
+    fn udp_recv_table() {
+        use UdpInfoAction::*;
+        type Row = (&'static str, &'static str, &'static str,
+                    Option<FromState>, bool, Option<SocketAddr>, UdpInfoAction);
+        let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let ok = from_ok();
+        let direct = FromState { directly_connected: true,  ..ok };
+        let confm  = FromState { udp_confirmed:      true,  ..ok };
+        let novia  = FromState { via_is_self:        false, ..ok };
+        let v4 = sa("192.168.1.5:50123");
 
-    /// `:261` unknown to → UnknownNode.
-    #[test]
-    fn udp_recv_unknown_to() {
-        let m = mkudp("192.168.1.5", "50123");
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), false, None),
-            UdpInfoAction::UnknownNode
-        );
-    }
-
-    /// `:247` `from->via != from` → DroppedPastRelay.
-    #[test]
-    fn udp_recv_past_static_relay() {
-        let m = mkudp("192.168.1.5", "50123");
-        let mut f = from_ok();
-        f.via_is_self = false;
-        assert_eq!(
-            on_receive_udp_info(&m, Some(f), true, None),
-            UdpInfoAction::DroppedPastRelay
-        );
-    }
-
-    /// `:251` `from->connection` → Forward (we have the meta edge,
-    /// know their address better than the relay does).
-    #[test]
-    fn udp_recv_directly_connected_forward() {
-        let m = mkudp("192.168.1.5", "50123");
-        let mut f = from_ok();
-        f.directly_connected = true;
-        assert_eq!(
-            on_receive_udp_info(&m, Some(f), true, None),
-            UdpInfoAction::Forward
-        );
-    }
-
-    /// `:251` `from->status.udp_confirmed` → Forward (already have a
-    /// working UDP addr).
-    #[test]
-    fn udp_recv_udp_confirmed_forward() {
-        let m = mkudp("192.168.1.5", "50123");
-        let mut f = from_ok();
-        f.udp_confirmed = true;
-        assert_eq!(
-            on_receive_udp_info(&m, Some(f), true, None),
-            UdpInfoAction::Forward
-        );
-    }
-
-    /// `:254` parsed addr == current → Forward (no change).
-    #[test]
-    fn udp_recv_same_addr_forward() {
-        let m = mkudp("192.168.1.5", "50123");
-        let cur: SocketAddr = "192.168.1.5:50123".parse().unwrap();
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, Some(cur)),
-            UdpInfoAction::Forward
-        );
-    }
-
-    /// **The payoff**: !connected && !confirmed && addr differs →
-    /// UpdateAndForward. `:255` `update_node_udp(from, &from_addr)`.
-    #[test]
-    fn udp_recv_payoff_update() {
-        let m = mkudp("192.168.1.5", "50123");
-        let cur: SocketAddr = "10.0.0.1:655".parse().unwrap();
-        let want: SocketAddr = "192.168.1.5:50123".parse().unwrap();
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, Some(cur)),
-            UdpInfoAction::UpdateAndForward { new_addr: want }
-        );
-    }
-
-    /// Same payoff, current addr is None (never learned).
-    #[test]
-    fn udp_recv_payoff_from_none() {
-        let m = mkudp("192.168.1.5", "50123");
-        let want: SocketAddr = "192.168.1.5:50123".parse().unwrap();
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, None),
-            UdpInfoAction::UpdateAndForward { new_addr: want }
-        );
-    }
-
-    /// IPv6 address parses correctly.
-    #[test]
-    fn udp_recv_ipv6() {
-        let m = mkudp("fe80::1", "655");
-        let want: SocketAddr = "[fe80::1]:655".parse().unwrap();
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, None),
-            UdpInfoAction::UpdateAndForward { new_addr: want }
-        );
-    }
-
-    /// Unparseable addr (`unspec` placeholder, or hostname) →
-    /// Forward without update. C `str2sockaddr` would yield
-    /// AF_UNKNOWN; `sockaddrcmp` mismatches `from->address` … wait,
-    /// it WOULD trigger update_node_udp with garbage. But our
-    /// `update_node_udp` equivalent expects `SocketAddr`. We can't
-    /// represent AF_UNKNOWN. So we drop the learning. This is a
-    /// deliberate divergence: garbage addresses don't propagate into
-    /// our addr tree.
-    #[test]
-    fn udp_recv_unparseable_addr_forward() {
-        let m = mkudp("unspec", "0");
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, None),
-            UdpInfoAction::Forward
-        );
-        let m = mkudp("not-an-ip", "655");
-        assert_eq!(
-            on_receive_udp_info(&m, Some(from_ok()), true, None),
-            UdpInfoAction::Forward
-        );
+        let cases: &[Row] = &[
+            // (label,                       addr,          port,    from_state,  to_ok, cur_addr,           expected)
+            (":238 unknown from",            "192.168.1.5", "50123", None,        true,  None,               UnknownNode),
+            (":261 unknown to",              "192.168.1.5", "50123", Some(ok),    false, None,               UnknownNode),
+            (":247 past static relay",       "192.168.1.5", "50123", Some(novia), true,  None,               DroppedPastRelay),
+            (":251 directly_connected",      "192.168.1.5", "50123", Some(direct),true,  None,               Forward),
+            (":251 udp_confirmed",           "192.168.1.5", "50123", Some(confm),  true,  None,               Forward),
+            (":254 same addr no-op",         "192.168.1.5", "50123", Some(ok),    true,  Some(v4),           Forward),
+            (":255 payoff: addr differs",    "192.168.1.5", "50123", Some(ok),    true,  Some(sa("10.0.0.1:655")), UpdateAndForward { new_addr: v4 }),
+            (":255 payoff: cur=None",        "192.168.1.5", "50123", Some(ok),    true,  None,               UpdateAndForward { new_addr: v4 }),
+            ("ipv6 parses",                  "fe80::1",     "655",   Some(ok),    true,  None,               UpdateAndForward { new_addr: sa("[fe80::1]:655") }),
+            ("unspec → Forward (diverge)",   "unspec",      "0",     Some(ok),    true,  None,               Forward),
+            ("non-ip → Forward (diverge)",   "not-an-ip",   "655",   Some(ok),    true,  None,               Forward),
+        ];
+        for (label, addr, port, from, to_ok, cur, want) in cases {
+            let m = mkudp(addr, port);
+            assert_eq!(on_receive_udp_info(&m, *from, *to_ok, *cur), *want, "{label}");
+        }
     }
 
     // ── MTU_INFO send gates ────────────────────────────────────────
 
-    /// `:299` minor < 6 → too old. MTU_INFO came one release after
-    /// UDP_INFO.
+    /// `should_send_mtu_info` gates. C `protocol_misc.c:272-330`.
+    /// No TCPONLY check (`:190` is UDP_INFO-only). Minor gate is **6**
+    /// (MTU_INFO landed one release after UDP_INFO).
     #[test]
-    fn mtu_send_nexthop_minor_6_gate() {
+    fn mtu_send_gates() {
         let now = Instant::now();
         let int = Duration::from_secs(5);
-        assert!(!should_send_mtu_info(
-            false, true, false, true, None, now, int, MINOR_5
-        ));
-        assert!(should_send_mtu_info(
-            false, true, false, true, None, now, int, MINOR_6
-        ));
-    }
+        let ago = |s| Some(now.checked_sub(Duration::from_secs(s)).unwrap());
+        let send = |last, nh| should_send_mtu_info(false, true, false, true, last, now, int, nh);
 
-    /// MTU_INFO has its own debounce, separate timestamp.
-    #[test]
-    fn mtu_send_debounce() {
-        let now = Instant::now();
-        let int = Duration::from_secs(5);
-        let recent = now.checked_sub(Duration::from_secs(1)).unwrap();
-        assert!(!should_send_mtu_info(
-            false,
-            true,
-            false,
-            true,
-            Some(recent),
-            now,
-            int,
-            MINOR_6
-        ));
-        let old = now.checked_sub(Duration::from_secs(10)).unwrap();
-        assert!(should_send_mtu_info(
-            false,
-            true,
-            false,
-            true,
-            Some(old),
-            now,
-            int,
-            MINOR_6
-        ));
-    }
-
-    /// No TCPONLY check for MTU_INFO. `:190` is UDP_INFO-only;
-    /// MTU_INFO `:272-330` has no equivalent.
-    #[test]
-    fn mtu_send_no_tcponly_check() {
-        // No options parameters at all → just sanity that it passes.
-        let now = Instant::now();
-        assert!(should_send_mtu_info(
-            false,
-            true,
-            false,
-            true,
-            None,
-            now,
-            Duration::from_secs(5),
-            MINOR_6
-        ));
+        // happy path; also documents no-TCPONLY-check (no options param exists)
+        assert!(send(None, MINOR_6), "all gates pass");
+        // `:299` minor gate is 6 not 5
+        assert!(!send(None, MINOR_5), "nexthop minor<6 blocks");
+        assert!(send(None, MINOR_6), "nexthop minor==6 ok");
+        // separate debounce timestamp from UDP_INFO
+        assert!(!send(ago(1), MINOR_6), "debounce suppresses");
+        assert!(send(ago(10), MINOR_6), "debounce passed");
     }
 
     // ── MTU adjust ─────────────────────────────────────────────────
 
-    /// `:308` direct converged measurement OVERRIDES (can increase).
+    /// `adjust_mtu_for_send` branches. C `protocol_misc.c:305-320`.
     #[test]
-    fn mtu_adjust_direct_override() {
-        let from = PmtuSnapshot {
-            minmtu: 1400,
-            maxmtu: 1400,
-        };
-        // mtu=1000, from converged at 1400, via_is_myself → use 1400.
-        assert_eq!(
-            adjust_mtu_for_send(1000, true, Some(from), None, None),
-            1400
-        );
-        // Can also decrease.
-        assert_eq!(
-            adjust_mtu_for_send(9000, true, Some(from), None, None),
-            1400
-        );
-    }
+    #[rustfmt::skip]
+    fn mtu_adjust_table() {
+        type Row = (&'static str, i32, bool,
+                    Option<PmtuSnapshot>, Option<PmtuSnapshot>, Option<PmtuSnapshot>, i32);
+        let conv = |m| Some(PmtuSnapshot { minmtu: m, maxmtu: m });
+        let probe = Some(PmtuSnapshot { minmtu: 1000, maxmtu: 1500 }); // unconverged
 
-    /// `:308` requires via_is_myself. Without it, no override.
-    #[test]
-    fn mtu_adjust_direct_needs_via_myself() {
-        let from = PmtuSnapshot {
-            minmtu: 1400,
-            maxmtu: 1400,
-        };
-        // via_is_myself=false → falls through, no via/nexthop → unchanged.
-        assert_eq!(
-            adjust_mtu_for_send(1000, false, Some(from), None, None),
-            1000
-        );
-    }
-
-    /// `:314` static relay clamp: `min(mtu, via->minmtu)`. Never
-    /// increases.
-    #[test]
-    fn mtu_adjust_via_clamp() {
-        let via = PmtuSnapshot {
-            minmtu: 1300,
-            maxmtu: 1300,
-        };
-        // mtu=1500, via=1300 → 1300.
-        assert_eq!(
-            adjust_mtu_for_send(1500, false, None, Some(via), None),
-            1300
-        );
-        // mtu=1000, via=1300 → 1000 (min, not via's value).
-        assert_eq!(
-            adjust_mtu_for_send(1000, false, None, Some(via), None),
-            1000
-        );
-    }
-
-    /// `:318` dynamic relay nexthop clamp.
-    #[test]
-    fn mtu_adjust_via_nexthop_clamp() {
-        let nh = PmtuSnapshot {
-            minmtu: 1200,
-            maxmtu: 1200,
-        };
-        assert_eq!(adjust_mtu_for_send(1500, false, None, None, Some(nh)), 1200);
-    }
-
-    /// Unconverged measurements don't fire any branch.
-    #[test]
-    fn mtu_adjust_unconverged_passthrough() {
-        let probe = PmtuSnapshot {
-            minmtu: 1000,
-            maxmtu: 1500,
-        };
-        assert_eq!(
-            adjust_mtu_for_send(1400, true, Some(probe), Some(probe), Some(probe)),
-            1400
-        );
+        let cases: &[Row] = &[
+            // (label,                        mtu,  via_myself, from,       via,        via_nh,     want)
+            (":308 direct override (increase)", 1000, true,  conv(1400), None,       None,       1400),
+            (":308 direct override (decrease)", 9000, true,  conv(1400), None,       None,       1400),
+            (":308 needs via_is_myself",        1000, false, conv(1400), None,       None,       1000),
+            (":314 via clamp (tighten)",        1500, false, None,       conv(1300), None,       1300),
+            (":314 via clamp is min not set",   1000, false, None,       conv(1300), None,       1000),
+            (":318 via_nexthop clamp",          1500, false, None,       None,       conv(1200), 1200),
+            ("unconverged → passthrough",       1400, true,  probe,      probe,      probe,      1400),
+        ];
+        for &(label, mtu, via_my, from, via, nh, want) in cases {
+            assert_eq!(adjust_mtu_for_send(mtu, via_my, from, via, nh), want, "{label}");
+        }
     }
 
     // ── MTU_INFO receive ───────────────────────────────────────────
@@ -1125,104 +756,45 @@ mod tests {
         }
     }
 
-    /// `:345` mtu < 512 → Malformed (connection-fatal).
+    /// `on_receive_mtu_info` decision table. C `protocol_misc.c:345-375`.
     #[test]
-    fn mtu_recv_below_512_malformed() {
-        let m = mkmtu(400);
-        let f = FromMtuState {
+    fn mtu_recv_table() {
+        use MtuInfoAction::*;
+        let unconv = FromMtuState {
             mtu: 1500,
             minmtu: 1000,
             maxmtu: 1500,
         };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), true),
-            MtuInfoAction::Malformed
-        );
-        // Exactly 512 is fine.
-        assert_ne!(
-            on_receive_mtu_info(&mkmtu(512), Some(f), true),
-            MtuInfoAction::Malformed
-        );
-    }
-
-    /// `:365` mtu differs && not converged → ClampAndForward.
-    #[test]
-    fn mtu_recv_clamp_when_unconverged() {
-        let m = mkmtu(1400);
-        let f = FromMtuState {
-            mtu: 1500,
-            minmtu: 1000,
-            maxmtu: 1500,
-        };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), true),
-            MtuInfoAction::ClampAndForward { new_mtu: 1400 }
-        );
-    }
-
-    /// Already converged → Forward (our measurement beats hearsay).
-    #[test]
-    fn mtu_recv_converged_forward() {
-        let m = mkmtu(1400);
-        let f = FromMtuState {
+        let conv = FromMtuState {
             mtu: 1500,
             minmtu: 1500,
             maxmtu: 1500,
         };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), true),
-            MtuInfoAction::Forward
-        );
-    }
+        let max_u16 = u16::try_from(MTU_MAX).unwrap();
 
-    /// mtu matches current → Forward (no-op).
-    #[test]
-    fn mtu_recv_same_mtu_forward() {
-        let m = mkmtu(1500);
-        let f = FromMtuState {
-            mtu: 1500,
-            minmtu: 1000,
-            maxmtu: 1500,
-        };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), true),
-            MtuInfoAction::Forward
-        );
-    }
-
-    /// `:349` clamp to MTU_MAX. Jumbo peer sends 12000 → 9018.
-    #[test]
-    fn mtu_recv_clamp_to_max() {
-        let m = mkmtu(12000);
-        let f = FromMtuState {
-            mtu: 1500,
-            minmtu: 1000,
-            maxmtu: 1500,
-        };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), true),
-            MtuInfoAction::ClampAndForward {
-                new_mtu: u16::try_from(MTU_MAX).unwrap()
-            }
-        );
-    }
-
-    /// Unknown from/to → UnknownNode.
-    #[test]
-    fn mtu_recv_unknown_node() {
-        let m = mkmtu(1400);
-        assert_eq!(
-            on_receive_mtu_info(&m, None, true),
-            MtuInfoAction::UnknownNode
-        );
-        let f = FromMtuState {
-            mtu: 1500,
-            minmtu: 1000,
-            maxmtu: 1500,
-        };
-        assert_eq!(
-            on_receive_mtu_info(&m, Some(f), false),
-            MtuInfoAction::UnknownNode
+        #[rustfmt::skip]
+        let cases: &[(&str, i32, Option<FromMtuState>, bool, MtuInfoAction)] = &[
+            // (label,                        mtu,   from,         to_ok, expected)
+            (":345 mtu<512 → Malformed",      400,   Some(unconv), true,  Malformed),
+            (":365 unconverged → clamp",      1400,  Some(unconv), true,  ClampAndForward { new_mtu: 1400 }),
+            ("converged → Forward",           1400,  Some(conv),   true,  Forward),
+            ("same mtu → Forward",            1500,  Some(unconv), true,  Forward),
+            (":349 clamp to MTU_MAX",         12000, Some(unconv), true,  ClampAndForward { new_mtu: max_u16 }),
+            (":357 unknown from",             1400,  None,         true,  UnknownNode),
+            (":371 unknown to",               1400,  Some(unconv), false, UnknownNode),
+        ];
+        for &(label, mtu, from, to_ok, ref want) in cases {
+            assert_eq!(
+                on_receive_mtu_info(&mkmtu(mtu), from, to_ok),
+                *want,
+                "{label}"
+            );
+        }
+        // boundary: exactly 512 is NOT Malformed (assert_ne! preserved)
+        assert_ne!(
+            on_receive_mtu_info(&mkmtu(512), Some(unconv), true),
+            Malformed,
+            ":345 boundary: mtu==512 is fine"
         );
     }
 
