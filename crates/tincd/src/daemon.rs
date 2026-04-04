@@ -590,6 +590,59 @@ fn parse_connect_to_from_config(config: &tinc_conf::Config, myname: &str) -> Vec
         .collect()
 }
 
+/// `get_name()` $-expansion (`net_setup.c:220-233`).
+///
+/// `Name = $FOO` reads env var `FOO`. `Name = $HOST` falls back to
+/// `gethostname(2)` truncated at the first `.` when the env var is
+/// unset (the C special case). The result is sanitized: any non-alnum
+/// char becomes `_`, so a hostname like `my-host` is a valid node
+/// name. Sanitize-then-check_id is the C order.
+///
+/// Names without a `$` prefix are returned unchanged (NOT sanitized;
+/// the C only sanitizes the env branch).
+#[allow(unsafe_code)] // libc::gethostname; nix `hostname` feature not enabled
+fn expand_name(name: &str) -> Result<String, String> {
+    let Some(var) = name.strip_prefix('$') else {
+        return Ok(name.to_owned());
+    };
+
+    let raw = match std::env::var(var) {
+        Ok(v) => v,
+        Err(_) if var == "HOST" => {
+            // C: `gethostname(hostname, sizeof(hostname))` then
+            // `hostname[31] = 0`. 32-byte buf is the C limit; we keep it.
+            let mut buf = [0u8; 32];
+            // SAFETY: buf is valid, len is correct. gethostname(2)
+            // writes a NUL-terminated string (POSIX leaves truncation
+            // unspecified — we force-NUL the last byte like C does).
+            let rc =
+                unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
+            if rc != 0 {
+                return Err(format!(
+                    "gethostname failed: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            buf[31] = 0;
+            let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            // C: `if(dot) *dot = 0;` — strip domain part.
+            let dot = buf[..nul].iter().position(|&b| b == b'.').unwrap_or(nul);
+            String::from_utf8_lossy(&buf[..dot]).into_owned()
+        }
+        Err(_) => {
+            return Err(format!(
+                "Invalid Name: environment variable {var} does not exist"
+            ));
+        }
+    };
+
+    // C: `for(char *c = name; *c; c++) if(!isalnum(*c)) *c = '_';`
+    Ok(raw
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect())
+}
+
 // Daemon — the C globals + the loop
 
 /// What `run()` returns. C `main_loop` returns `int` (0 or 1).
@@ -1105,7 +1158,8 @@ impl Daemon {
 
         // ─── Name (net_setup.c:775-779)
         // C: `name = get_name(); if(!name) { ERR }`.
-        // `get_name()` does `lookup_config("Name")` + `check_id`.
+        // `get_name()` does `lookup_config("Name")` + `$`-expansion
+        // (`net_setup.c:220-233`, see `expand_name`) + `check_id`.
         // Skeleton: just lookup. `check_id` (alphanumeric + `_`)
         // is the right validation but tinc-tools/names.rs has it,
         // not tinc-conf — and we don't dep on tinc-tools. Chunk 3+
@@ -1114,8 +1168,9 @@ impl Daemon {
         let name = config
             .lookup("Name")
             .next()
-            .map(|e| e.get_str().to_owned())
+            .map(tinc_conf::Entry::get_str)
             .ok_or(SetupError::Config("Name for tinc daemon required!".into()))?;
+        let name = expand_name(name).map_err(SetupError::Config)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
 
         // ─── read_host_config (net_setup.c:786)
@@ -2126,5 +2181,55 @@ mod tests {
         // 6 variants. Can't introspect the count at runtime in
         // stable Rust without a macro. The match-exhaustiveness IS
         // the test.
+    }
+
+    /// `net_setup.c:220-233` `get_name()` $-expansion + sanitize.
+    #[test]
+    fn expand_name_passthrough() {
+        // No `$` prefix → returned as-is, NO sanitization. C only
+        // sanitizes the env-expanded branch; literal Name goes
+        // straight to check_id (which rejects `-`).
+        assert_eq!(expand_name("node1").unwrap(), "node1");
+        assert_eq!(expand_name("my-host").unwrap(), "my-host");
+    }
+
+    #[test]
+    fn expand_name_envvar() {
+        // `Name = $FOO` → getenv("FOO"). Non-alnum sanitized to `_`.
+        // SAFETY: nextest runs each test in its own process by
+        // default, so no concurrent env readers.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TINC_TEST_NAME_PLAIN", "alpha42");
+            std::env::set_var("TINC_TEST_NAME_DOTTED", "host.local");
+            std::env::set_var("TINC_TEST_NAME_DASHED", "my-host");
+        }
+        assert_eq!(expand_name("$TINC_TEST_NAME_PLAIN").unwrap(), "alpha42");
+        // C: `while(*c) if(!isalnum(*c)) *c='_';` — `.` → `_`.
+        assert_eq!(expand_name("$TINC_TEST_NAME_DOTTED").unwrap(), "host_local");
+        assert_eq!(expand_name("$TINC_TEST_NAME_DASHED").unwrap(), "my_host");
+    }
+
+    #[test]
+    fn expand_name_unset_var_errors() {
+        // C: `if(strcmp(name+1, "HOST")) { logger(ERR); return NULL; }`
+        // Any unset var that isn't $HOST is fatal.
+        let e = expand_name("$TINC_TEST_DEFINITELY_UNSET_XYZ").unwrap_err();
+        assert!(e.contains("TINC_TEST_DEFINITELY_UNSET_XYZ"));
+    }
+
+    #[test]
+    fn expand_name_host_fallback() {
+        // `$HOST` falls back to gethostname() when unset. We can't
+        // control the test machine's hostname, but we CAN assert:
+        //   1. it succeeds
+        //   2. result is non-empty
+        //   3. result is fully alphanumeric (sanitized) — no `.`
+        //      survived (C strips at first `.`, we sanitize it)
+        // If $HOST happens to be set in env, that path is exercised
+        // instead — same postconditions hold.
+        let n = expand_name("$HOST").unwrap();
+        assert!(!n.is_empty());
+        assert!(n.chars().all(|c| c.is_alphanumeric() || c == '_'));
     }
 }
