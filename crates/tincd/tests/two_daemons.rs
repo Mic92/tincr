@@ -3440,7 +3440,6 @@ fn keyexpire_forces_rekey() {
     // drops. The "Expiring" log proves the timer arm + fire path.
 }
 
-
 /// Gap audit `bcc5c3e3`: `Forwarding = off` was parsed (`daemon.
 /// rs:1244`) but never read in `dispatch_route_result`. An operator
 /// who set it to opt out of being a transit relay got transit
@@ -3629,4 +3628,3 @@ fn three_daemon_forwarding_off_drops_transit() {
         "mid should log the FMODE_OFF gate firing; stderr:\n{mid_stderr}"
     );
 }
-

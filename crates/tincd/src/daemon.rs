@@ -1082,10 +1082,26 @@ impl Daemon {
     /// subprocess.
     #[allow(clippy::too_many_lines)] // setup_myself is one long
     // sequence in C too. Splitting it scatters the boot order.
-    pub fn setup(confbase: &Path, pidfile: &Path, socket: &Path) -> Result<Self, SetupError> {
+    pub fn setup(
+        confbase: &Path,
+        pidfile: &Path,
+        socket: &Path,
+        cmdline_conf: &tinc_conf::Config,
+    ) -> Result<Self, SetupError> {
         // ─── read tinc.conf (tincd.c:590)
-        let config = tinc_conf::read_server_config(confbase)
+        let mut config = tinc_conf::read_server_config(confbase)
             .map_err(|e| SetupError::Config(format!("{e}")))?;
+
+        // ─── cmdline -o overrides (conf.c:read_server_config does
+        // `read_config_options(tree, NULL)` BEFORE reading tinc.conf,
+        // but the merge order is irrelevant: `Source::Cmdline` sorts
+        // before `Source::File` in the 4-tuple compare regardless of
+        // when it's inserted. Merging after is simpler — main.rs owns
+        // the cmdline list, this fn doesn't reach for a global).
+        //
+        // Empty `cmdline_conf` (no `-o` given) is a no-op merge.
+        // Tests pass `Config::new()`.
+        config.merge(cmdline_conf.entries().iter().cloned());
 
         // ─── Name (net_setup.c:775-779)
         // C: `name = get_name(); if(!name) { ERR }`.
@@ -1115,7 +1131,6 @@ impl Daemon {
         //
         // Per tinc-conf/parse.rs:523: read_host_config is intentionally
         // not a function. It's two lines.
-        let mut config = config;
         let host_file = confbase.join("hosts").join(&name);
         match tinc_conf::parse_file(&host_file) {
             Ok(entries) => config.merge(entries),

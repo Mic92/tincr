@@ -417,6 +417,173 @@ fn missing_config_fails() {
     assert!(!socket.exists());
 }
 
+/// `-o KEY=VALUE` overrides tinc.conf. C `tincd.c:232-241`: cmdline
+/// `-o` entries get `Source::Cmdline` which sorts BEFORE file entries
+/// in the config-compare 4-tuple, so `lookup().next()` returns the
+/// cmdline value.
+///
+/// Proves: tinc.conf says `Name = testnode`, `-o Name=override`
+/// wins. The greeting line shows the override.
+#[test]
+fn dash_o_overrides_config() {
+    let tmp = tmp("dash-o");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    write_config(&confbase);
+    // write_config wrote hosts/testnode but the daemon will look for
+    // hosts/override. It's a soft skip (warn + defaults) so the
+    // daemon still starts — see `Daemon::setup` host-file handling.
+    // Port falls back to 655 default; we don't connect over TCP here
+    // so the bind clash doesn't matter (oh wait, it does — 655 needs
+    // root). Write hosts/override with Port=0 too.
+    std::fs::write(confbase.join("hosts").join("override"), "Port = 0\n").unwrap();
+
+    let mut child = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        // The override. tinc.conf has `Name = testnode`; this wins.
+        .arg("-o")
+        .arg("Name = override")
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket), "tincd didn't bind; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    // Connect, do the greeting. Line 1 shows the daemon's name.
+    let cookie = read_cookie(&pidfile);
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+    writeln!(writer, "0 ^{cookie} 0").unwrap();
+
+    let mut line1 = String::new();
+    reader.read_line(&mut line1).unwrap();
+    // The override won. Not "testnode".
+    assert_eq!(
+        line1, "0 override 17.7\n",
+        "-o Name should override tinc.conf"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `-o` with malformed value (no `=`, no value) fails argv parsing.
+/// C `tincd.c:236`: `parse_config_line` returns NULL → `goto exit_fail`.
+#[test]
+fn dash_o_bad_value_fails() {
+    let tmp = tmp("dash-o-bad");
+    let out = Command::new(tincd_bin())
+        .arg("-c")
+        .arg(tmp.path())
+        .arg("--pidfile")
+        .arg(tmp.path().join("p"))
+        .arg("--socket")
+        .arg(tmp.path().join("s"))
+        .arg("-o")
+        .arg("KeyWithoutValue")
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // parse_line's error: "expected for variable". Don't pin the exact
+    // wording (tinc-conf owns it) but it should mention the key.
+    assert!(
+        stderr.contains("KeyWithoutValue"),
+        "expected -o parse error mentioning the key; got: {stderr}"
+    );
+}
+
+/// `-n NETNAME` derives confbase = CONFDIR/tinc/NETNAME. We can't
+/// write to /etc/tinc in tests, so this proves the DERIVATION by
+/// checking the error message: missing tinc.conf at the derived path.
+///
+/// C `tincd.c:221-225` + `names.c make_names`.
+#[test]
+fn dash_n_derives_confbase() {
+    let tmp = tmp("dash-n");
+    let out = Command::new(tincd_bin())
+        .arg("-n")
+        .arg("testnet")
+        .arg("--pidfile")
+        .arg(tmp.path().join("p"))
+        .arg("--socket")
+        .arg(tmp.path().join("s"))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The daemon tried to read CONFDIR/tinc/testnet/tinc.conf.
+    // CONFDIR is build-time (default /etc); the netname component
+    // is what we're checking for.
+    assert!(
+        stderr.contains("testnet"),
+        "expected derived confbase path with 'testnet'; got: {stderr}"
+    );
+}
+
+/// `NETNAME` env var as `-n` fallback. C `tincd.c:294-305`.
+#[test]
+fn netname_env_fallback() {
+    let tmp = tmp("netname-env");
+    let out = Command::new(tincd_bin())
+        .arg("--pidfile")
+        .arg(tmp.path().join("p"))
+        .arg("--socket")
+        .arg(tmp.path().join("s"))
+        .env("NETNAME", "envnet")
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("envnet"),
+        "expected confbase derived from NETNAME=envnet; got: {stderr}"
+    );
+}
+
+/// `-n` with path-traversal characters rejected. C `tincd.c:308-313`
+/// `strpbrk(netname, "\\/")`.
+#[test]
+fn dash_n_rejects_slash() {
+    let tmp = tmp("dash-n-slash");
+    let out = Command::new(tincd_bin())
+        .arg("-n")
+        .arg("foo/bar")
+        .arg("--pidfile")
+        .arg(tmp.path().join("p"))
+        .arg("--socket")
+        .arg(tmp.path().join("s"))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("netname") || stderr.to_lowercase().contains("invalid"),
+        "expected netname validation error; got: {stderr}"
+    );
+}
+
 /// `Name` missing from config → `setup_myself` fails. C
 /// `net_setup.c:778`: `logger(..., "Name for tinc daemon required!")`.
 #[test]
