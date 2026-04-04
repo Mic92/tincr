@@ -921,6 +921,7 @@ name = "tinc-sptps"
 version = "0.0.0"
 dependencies = [
  "chacha20",
+ "proptest",
  "rand_core 0.6.4",
  "tinc-crypto",
  "tinc-ffi",
