@@ -528,45 +528,7 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
 
     // ─── PTR: arpa → owner name
     if q.qtype == TYPE_PTR {
-        let owner = if let Some(ip) = parse_ptr_v4(&q.qname) {
-            // Reverse: lookup the EXACT /32 in the tree. `lookup_
-            // ipv4` does longest-prefix-match, which would let a /24
-            // answer for any host in it — wrong for PTR. Filter the
-            // hit to prefix==32. The reachability gate is `|_| true`
-            // because PTR is "who owns this", not "are they up"
-            // (matches the ARP handler's gate at `daemon/net.rs:2492`).
-            subnets.lookup_ipv4(&ip, |_| true).and_then(|(s, o)| {
-                if let Subnet::V4 { prefix: 32, .. } = s {
-                    o
-                } else {
-                    None
-                }
-            })
-        } else if let Some(ip) = parse_ptr_v6(&q.qname) {
-            subnets.lookup_ipv6(&ip, |_| true).and_then(|(s, o)| {
-                if let Subnet::V6 { prefix: 128, .. } = s {
-                    o
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-        let Some(owner) = owner else {
-            return Some(build_error(
-                q.id,
-                q.rd,
-                RCODE_NXDOMAIN,
-                q.qname_wire,
-                q.qtype,
-            ));
-        };
-        // RDATA is the wire-encoded `<owner>.<suffix>.`
-        let target = format!("{}.{}", owner.to_ascii_lowercase(), cfg.suffix);
-        let rdata = encode_name(&target);
-        let rr = build_rr(q.qname_wire, TYPE_PTR, &rdata);
-        return Some(build_response(q.id, q.rd, 0, q.qname_wire, TYPE_PTR, &[rr]));
+        return Some(answer_ptr(&q, cfg, subnets));
     }
 
     // Everything else: NXDOMAIN. We don't NOTIMP per-type (the
@@ -580,6 +542,44 @@ pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -
         q.qname_wire,
         q.qtype,
     ))
+}
+
+/// PTR: arpa qname → owner of the exact /32 or /128. Unlike the A/AAAA
+/// path, no `cfg.suffix` strip — the arpa namespace is its own thing.
+fn answer_ptr(q: &ParsedQuery<'_>, cfg: &DnsConfig, subnets: &SubnetTree) -> Vec<u8> {
+    let owner = if let Some(ip) = parse_ptr_v4(&q.qname) {
+        // Reverse: lookup the EXACT /32 in the tree. `lookup_
+        // ipv4` does longest-prefix-match, which would let a /24
+        // answer for any host in it — wrong for PTR. Filter the
+        // hit to prefix==32. The reachability gate is `|_| true`
+        // because PTR is "who owns this", not "are they up"
+        // (matches the ARP handler's gate at `daemon/net.rs:2492`).
+        subnets.lookup_ipv4(&ip, |_| true).and_then(|(s, o)| {
+            if let Subnet::V4 { prefix: 32, .. } = s {
+                o
+            } else {
+                None
+            }
+        })
+    } else if let Some(ip) = parse_ptr_v6(&q.qname) {
+        subnets.lookup_ipv6(&ip, |_| true).and_then(|(s, o)| {
+            if let Subnet::V6 { prefix: 128, .. } = s {
+                o
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let Some(owner) = owner else {
+        return build_error(q.id, q.rd, RCODE_NXDOMAIN, q.qname_wire, q.qtype);
+    };
+    // RDATA is the wire-encoded `<owner>.<suffix>.`
+    let target = format!("{}.{}", owner.to_ascii_lowercase(), cfg.suffix);
+    let rdata = encode_name(&target);
+    let rr = build_rr(q.qname_wire, TYPE_PTR, &rdata);
+    build_response(q.id, q.rd, 0, q.qname_wire, TYPE_PTR, &[rr])
 }
 
 /// One Resource Record. NAME echoed verbatim (wire format) — no
