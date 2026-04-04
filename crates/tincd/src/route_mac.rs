@@ -147,67 +147,55 @@ mod tests {
         t
     }
 
-    /// route.c:1104 happy path.
+    /// All standard-shape cases: `table()` fixture + `frame()` helper,
+    /// `myself` param constant. Varies dst/src/from_myself/source.
+    /// C-refs preserved in row labels.
     #[test]
-    fn route_mac_forwards_known_dest() {
+    fn route_mac_table() {
+        type Row = (
+            &'static str,
+            Mac,
+            Mac,
+            bool,
+            &'static str,
+            RouteResult<String>,
+            LearnAction,
+        );
+        use LearnAction::{New, NotOurs, Refresh};
+        use RouteResult::{Broadcast, Forward, Unsupported};
+
+        // frame() always emits exactly ETH_HDR_LEN — boundary case is
+        // every row (was route_mac_exactly_eth_hdr).
+        assert_eq!(frame([0; 6], [0; 6]).len(), ETH_HDR_LEN);
+
+        let fwd = |to: &str| Forward { to: to.into() };
+        let loop_ = Unsupported {
+            reason: "MAC routing loop (owner == source)",
+        };
+        #[rustfmt::skip]
+        let cases: &[Row] = &[
+            // (label,                                       dst,                          src,       from_myself, source,    route,          learn)
+            ("route.c:1104 forwards known dest",             [0xbb;6],                     [0xaa;6],  false,       "alice",   fwd("bob"),     NotOurs),
+            ("route.c:1042 broadcasts unknown dest",         [0xdd;6],                     [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
+            ("route.c:1031 learns New (src not in table)",   [0xdd;6],                     [0xee;6],  true,        "myself",  Broadcast,      New([0xee;6])),
+            ("route.c:551 refreshes (src IS in table)",      [0xbb;6],                     [0xaa;6],  true,        "myself",  fwd("bob"),     Refresh([0xaa;6])),
+            ("route.c:1031 no learn when !from_myself",      [0xbb;6],                     [0xee;6],  false,       "charlie", fwd("bob"),     NotOurs),
+            ("route.c:1047 loop (owner==source)",            [0xbb;6],                     [0xee;6],  false,       "bob",     loop_,           NotOurs),
+            ("ff:ff:.. broadcast MAC → not in table",        [0xff;6],                     [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
+            ("33:33:.. v6 multicast (RFC 2464 §7)",          [0x33,0x33,0,0,0,1],          [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
+            ("01:00:5e:.. v4 multicast (RFC 1112 §6.4)",     [0x01,0x00,0x5e,0,0,1],       [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
+            ("learn + route independent (New + Forward)",    [0xcc;6],                     [0xee;6],  true,        "myself",  fwd("charlie"), New([0xee;6])),
+        ];
         let t = table();
-        let f = frame([0xbb; 6], [0xaa; 6]);
-
-        let (r, learn) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
-        assert_eq!(learn, LearnAction::NotOurs);
+        for (label, dst, src, from_myself, source, want_r, want_learn) in cases {
+            let f = frame(*dst, *src);
+            let (r, learn) = route_mac(&f, *from_myself, source, "myself", &t, id);
+            assert_eq!(r, *want_r, "{label}: route");
+            assert_eq!(learn, *want_learn, "{label}: learn");
+        }
     }
 
-    /// route.c:1042-1045.
-    #[test]
-    fn route_mac_broadcasts_unknown_dest() {
-        let t = table();
-        let f = frame([0xdd; 6], [0xaa; 6]);
-
-        let (r, learn) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Broadcast);
-        assert_eq!(learn, LearnAction::NotOurs);
-    }
-
-    /// route.c:1031-1035: learn New independent of route decision.
-    #[test]
-    fn route_mac_learns_new_src_when_from_myself() {
-        let t = table();
-        let f = frame([0xdd; 6], [0xee; 6]); // src not in table
-
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Broadcast);
-        assert_eq!(learn, LearnAction::New([0xee; 6]));
-    }
-
-    /// route.c:551-555.
-    #[test]
-    fn route_mac_refreshes_known_src_when_from_myself() {
-        let t = table();
-        let f = frame([0xbb; 6], [0xaa; 6]); // src IS in table
-
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
-        assert_eq!(learn, LearnAction::Refresh([0xaa; 6]));
-    }
-
-    /// route.c:1031: source != myself → no learning.
-    #[test]
-    fn route_mac_does_not_learn_when_not_from_myself() {
-        let t = table();
-        let f = frame([0xbb; 6], [0xee; 6]);
-
-        let (r, learn) = route_mac(&f, false, "charlie", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
-        assert_eq!(learn, LearnAction::NotOurs);
-    }
-
-    /// route.c:1132 checklength.
+    /// route.c:1132 checklength. Truncated frame (not `frame()` shape).
     #[test]
     fn route_mac_too_short() {
         let t = table();
@@ -225,67 +213,7 @@ mod tests {
         assert_eq!(learn, LearnAction::NotOurs);
     }
 
-    #[test]
-    fn route_mac_exactly_eth_hdr() {
-        let t = table();
-        let f = frame([0xbb; 6], [0xaa; 6]);
-        assert_eq!(f.len(), ETH_HDR_LEN);
-
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Forward { to: "bob".into() });
-    }
-
-    /// route.c:1047-1050.
-    #[test]
-    fn route_mac_loop_detection() {
-        let t = table();
-        let f = frame([0xbb; 6], [0xee; 6]); // dst owned by bob; bob sent it
-
-        let (r, learn) = route_mac(&f, false, "bob", "myself", &t, id);
-
-        assert_eq!(
-            r,
-            RouteResult::Unsupported {
-                reason: "MAC routing loop (owner == source)",
-            }
-        );
-        assert_eq!(learn, LearnAction::NotOurs);
-    }
-
-    /// ff:ff:... never in table → Broadcast (no special case).
-    #[test]
-    fn route_mac_broadcast_mac() {
-        let t = table();
-        let f = frame([0xff; 6], [0xaa; 6]);
-
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Broadcast);
-    }
-
-    /// 33:33:... (RFC 2464 §7). Not in table → Broadcast.
-    #[test]
-    fn route_mac_multicast_mac_v6() {
-        let t = table();
-        let f = frame([0x33, 0x33, 0x00, 0x00, 0x00, 0x01], [0xaa; 6]);
-
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Broadcast);
-    }
-
-    /// 01:00:5e:... (RFC 1112 §6.4).
-    #[test]
-    fn route_mac_multicast_mac_v4() {
-        let t = table();
-        let f = frame([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01], [0xaa; 6]);
-
-        let (r, _) = route_mac(&f, false, "alice", "myself", &t, id);
-
-        assert_eq!(r, RouteResult::Broadcast);
-    }
-
+    /// Custom table (myself owns a MAC). Different setup → separate.
     #[test]
     fn route_mac_forwards_to_self() {
         let mut t = HashMap::new();
@@ -302,23 +230,6 @@ mod tests {
                 to: "myself".into()
             }
         );
-    }
-
-    /// Learn + route are independent.
-    #[test]
-    fn route_mac_learns_and_forwards() {
-        let t = table();
-        let f = frame([0xcc; 6], [0xee; 6]);
-
-        let (r, learn) = route_mac(&f, true, "myself", "myself", &t, id);
-
-        assert_eq!(
-            r,
-            RouteResult::Forward {
-                to: "charlie".into()
-            }
-        );
-        assert_eq!(learn, LearnAction::New([0xee; 6]));
     }
 
     /// Offset KAT: `memcpy(&src, &DATA[6], 6)` / `(&dest, &DATA[0], 6)`.
