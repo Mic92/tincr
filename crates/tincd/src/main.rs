@@ -77,6 +77,17 @@ const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
     None => "/etc",
 };
 
+/// `LOCALSTATEDIR` from `config.h`. Same compile-time pattern as
+/// CONFDIR. C uses this for the default pidfile (`names.c:134`,
+/// `LOCALSTATEDIR/run/tinc.NETNAME.pid`) and the default logfile
+/// (`names.c:130`, `LOCALSTATEDIR/log/tinc.NETNAME.log`). Duplicated
+/// from `tinc-tools/src/names.rs:73` for the same dep-arrow reason
+/// as CONFDIR above.
+const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
+    Some(d) => d,
+    None => "/var",
+};
+
 /// `tincd.c::debug_level` → `log::LevelFilter`. C levels (`logger.h:
 /// 27-37`): 0=NOTHING (still prints Ready/Terminating), 1=CONNECTIONS,
 /// 2=STATUS, 3=PROTOCOL, 4=META, 5=TRAFFIC. We don't have a 6-level
@@ -116,10 +127,10 @@ struct Args {
     /// wasn't given (`tincd.c:599-605`). RUST_LOG env still wins
     /// over both.
     debug_level: Option<u32>,
-    /// `--logfile [PATH]`. Some(None) means "default path" (the C
-    /// derives `LOCALSTATEDIR/log/tinc.NETNAME.log`); we require an
-    /// explicit path for now (the LOCALSTATEDIR derivation is the
-    /// same names.c dance as pidfile — separate change).
+    /// `--logfile [PATH]`. Bare `--logfile` (no arg) derives the C
+    /// default `LOCALSTATEDIR/log/tinc.NETNAME.log` (`names.c:130`);
+    /// the derivation happens post-loop in `parse_args` so it sees
+    /// the final netname.
     logfile: Option<PathBuf>,
     /// `-s` syslog. We don't have a syslog backend; this becomes a
     /// warn-unimplemented unless `--logfile` also given (then logfile
@@ -128,7 +139,22 @@ struct Args {
     use_syslog: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+/// Parse a `-o KEY=VALUE` argument. Factored out so the separated
+/// (`-o K=V`) and glued (`--option=K=V`) match arms share the
+/// parse_line+error-mapping; the `o_lineno` counter is owned by the
+/// caller.
+fn parse_o_arg(v: &str, o_lineno: u32) -> Result<tinc_conf::Entry, String> {
+    match parse_line(v, Source::Cmdline { line: o_lineno }) {
+        None => Err(format!("-o requires KEY=VALUE, got `{v}'")),
+        Some(Err(e)) => Err(format!("{e}")),
+        Some(Ok(e)) => Ok(e),
+    }
+}
+
+fn parse_args<I>(args: I) -> Result<Args, String>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
     let mut confbase: Option<PathBuf> = None;
     let mut netname: Option<String> = None;
     let mut pidfile = None;
@@ -145,10 +171,13 @@ fn parse_args() -> Result<Args, String> {
     let mut switchuser = None;
     let mut do_chroot = false;
     let mut debug_level: Option<u32> = None;
-    let mut logfile = None;
+    // Tri-state during the loop: None = not given, Some(None) = bare
+    // `--logfile` (derive default after we know netname), Some(Some(p))
+    // = explicit path. Collapsed to Option<PathBuf> post-loop.
+    let mut logfile: Option<Option<PathBuf>> = None;
     let mut use_syslog = false;
 
-    let mut args = std::env::args_os().skip(1).peekable();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let Some(arg) = arg.to_str() else {
             return Err(format!("non-UTF-8 argument: {arg:?}"));
@@ -159,6 +188,12 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .ok_or_else(|| "-c requires a path".to_string())?;
                 confbase = Some(PathBuf::from(v));
+            }
+            // `--config=DIR` glued. C `getopt_long` accepts the glued
+            // form for every `required_argument` option; the NixOS
+            // module's `tinc` wrapper uses it (`tinc.nix:473`).
+            _ if arg.starts_with("--config=") => {
+                confbase = Some(PathBuf::from(&arg["--config=".len()..]));
             }
             // C `tincd.c:221-225`: `case OPT_NETNAME: netname =
             // xstrdup(optarg)`. Short `-n`, long `--net`. The C
@@ -173,6 +208,9 @@ fn parse_args() -> Result<Args, String> {
                     .into_string()
                     .map_err(|v| format!("non-UTF-8 netname: {v:?}"))?;
                 netname = Some(v);
+            }
+            _ if arg.starts_with("--net=") => {
+                netname = Some(arg["--net=".len()..].to_owned());
             }
             // C `tincd.c:196-197`: `case OPT_NO_DETACH: do_detach = false`.
             "-D" | "--no-detach" => {
@@ -231,6 +269,12 @@ fn parse_args() -> Result<Args, String> {
                 let n: u32 = arg[2..].parse().unwrap_or(u32::MAX);
                 debug_level = Some(n);
             }
+            // `--debug=N` glued long form. C `getopt_long` accepts
+            // this (the optstring `d::` plus `optional_argument` long
+            // option). atoi-on-garbage gives 0; match that.
+            _ if arg.starts_with("--debug=") => {
+                debug_level = Some(arg["--debug=".len()..].parse().unwrap_or(0));
+            }
             // C `tincd.c:228-230`: `case OPT_SYSLOG`.
             "-s" | "--syslog" => {
                 // C: `use_logfile = false; use_syslog = true`. Mutually
@@ -239,16 +283,30 @@ fn parse_args() -> Result<Args, String> {
                 logfile = None;
                 use_syslog = true;
             }
-            // C `tincd.c:270-283`: `case OPT_LOGFILE`. Path is optional
-            // in C (defaults to LOCALSTATEDIR/log/tinc.NETNAME.log).
-            // We require a path — the default-path derivation needs
-            // names.c LOCALSTATEDIR plumbing we haven't ported.
+            // C `tincd.c:270-283`: `case OPT_LOGFILE`. The C optstring
+            // marks this `optional_argument`: bare `--logfile` is VALID
+            // and derives `LOCALSTATEDIR/log/tinc.NETNAME.log`
+            // (`names.c:130`). The C peeks `argv[optind]` gated on
+            // `*argv != '-'` (`tincd.c:275`) — `--logfile -d 5` must
+            // NOT eat `-d` as the path. Same peek shape as `-d N`
+            // above.
             "--logfile" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "--logfile requires a path".to_string())?;
                 use_syslog = false; // C `:273`
-                logfile = Some(PathBuf::from(v));
+                if let Some(next) = args.peek()
+                    && let Some(s) = next.to_str()
+                    && !s.starts_with('-')
+                {
+                    let v = args.next().unwrap();
+                    logfile = Some(Some(PathBuf::from(v)));
+                } else {
+                    // Bare form. Derive after the loop (netname may
+                    // be set by a later `-n`).
+                    logfile = Some(None);
+                }
+            }
+            _ if arg.starts_with("--logfile=") => {
+                use_syslog = false;
+                logfile = Some(Some(PathBuf::from(&arg["--logfile=".len()..])));
             }
             // C `tincd.c:255-257`: `case OPT_CHANGE_USER`.
             "-U" | "--user" => {
@@ -259,6 +317,9 @@ fn parse_args() -> Result<Args, String> {
                     .into_string()
                     .map_err(|v| format!("non-UTF-8 username: {v:?}"))?;
                 switchuser = Some(v);
+            }
+            _ if arg.starts_with("--user=") => {
+                switchuser = Some(arg["--user=".len()..].to_owned());
             }
             // C `tincd.c:251-253`: `case OPT_CHROOT`.
             "-R" | "--chroot" => {
@@ -278,27 +339,15 @@ fn parse_args() -> Result<Args, String> {
                     .into_string()
                     .map_err(|v| format!("non-UTF-8 -o value: {v:?}"))?;
                 o_lineno += 1;
-                // parse_line returns None for empty/whitespace lines.
-                // `-o ""` or `-o "  "` is silently a no-op in C (the
-                // parse falls through to the empty-variable check
-                // which... actually in C `parse_config_line` with an
-                // empty string: variable=value=NULL, the `if(!value
-                // || !*value)` fires, error logged). We match the
-                // error path: None → "expected KEY=VALUE".
-                let entry = match parse_line(&v, Source::Cmdline { line: o_lineno }) {
-                    None => {
-                        return Err(format!("-o requires KEY=VALUE, got `{v}'"));
-                    }
-                    Some(Err(e)) => {
-                        // `parse_line`'s ParseError already includes
-                        // the variable name and source ("in command
-                        // line option N"). Just wrap for the `tincd:`
-                        // prefix in main.
-                        return Err(format!("{e}"));
-                    }
-                    Some(Ok(e)) => e,
-                };
-                cmdline_conf.merge(std::iter::once(entry));
+                cmdline_conf.merge(std::iter::once(parse_o_arg(&v, o_lineno)?));
+            }
+            // `--option=K=V` glued. The value itself contains `=`
+            // (`--option=Port=655`); strip_prefix correctly leaves
+            // `"Port=655"` for parse_line.
+            _ if arg.starts_with("--option=") => {
+                o_lineno += 1;
+                let v = &arg["--option=".len()..];
+                cmdline_conf.merge(std::iter::once(parse_o_arg(v, o_lineno)?));
             }
             "--pidfile" => {
                 let v = args
@@ -306,11 +355,17 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| "--pidfile requires a path".to_string())?;
                 pidfile = Some(PathBuf::from(v));
             }
+            _ if arg.starts_with("--pidfile=") => {
+                pidfile = Some(PathBuf::from(&arg["--pidfile=".len()..]));
+            }
             "--socket" => {
                 let v = args
                     .next()
                     .ok_or_else(|| "--socket requires a path".to_string())?;
                 socket = Some(PathBuf::from(v));
+            }
+            _ if arg.starts_with("--socket=") => {
+                socket = Some(PathBuf::from(&arg["--socket=".len()..]));
             }
             "--help" | "-h" => {
                 eprintln!("Usage: tincd [-c DIR | -n NETNAME] --pidfile FILE --socket FILE");
@@ -372,10 +427,14 @@ fn parse_args() -> Result<Args, String> {
     //   netname given      → CONFDIR/tinc/NETNAME
     //   neither            → CONFDIR/tinc
     //
-    // The C also derives pidfile/socket here. We don't (yet) — they
-    // stay required. Adding the `LOCALSTATEDIR/run/tinc.NETNAME.pid`
-    // derivation is a separate change (it has the access(2) fallback
-    // dance from `names.c:111-148`, more than three lines).
+    // C `names.c:49-50` warns when both -c and -n are given. We
+    // match the outcome (use -c) and the warning (logger isn't init'd
+    // yet, eprintln).
+    if confbase.is_some() && netname.is_some() {
+        eprintln!(
+            "tincd: Warning: both netname and configuration directory given, using the latter..."
+        );
+    }
     let confbase = confbase.unwrap_or_else(|| {
         let mut p: PathBuf = [CONFDIR, "tinc"].iter().collect();
         if let Some(net) = &netname {
@@ -384,7 +443,50 @@ fn parse_args() -> Result<Args, String> {
         p
     });
 
-    let pidfile = pidfile.ok_or("missing --pidfile <path>")?;
+    // ─── identname (`names.c:43-47`): "tinc" or "tinc.NETNAME".
+    // Shared by the logfile + pidfile derivations below.
+    let identname = match &netname {
+        Some(net) => format!("tinc.{net}"),
+        None => "tinc".to_owned(),
+    };
+
+    // ─── derive logfile (`names.c:130`). Only when bare `--logfile`
+    // was given (Some(None) above). Netname may have been set by a
+    // later `-n`, hence post-loop.
+    let logfile = logfile.map(|explicit| {
+        explicit.unwrap_or_else(|| {
+            [LOCALSTATEDIR, "log", &format!("{identname}.log")]
+                .iter()
+                .collect()
+        })
+    });
+
+    // ─── derive pidfile (`names.c:108-148`, daemon=true branch).
+    // C: `access(LOCALSTATEDIR, R_OK|W_OK|X_OK)` — if /var is
+    // writable use `/var/run/tinc.NET.pid`; else fall back to
+    // `{confbase}/pid` with a warning (`names.c:143`). The fallback
+    // is for non-root daemons. `tinc start` and the NixOS module
+    // both pass --pidfile explicitly so this only fires for the
+    // tutorial `tincd -n foo` invocation.
+    let pidfile = pidfile.unwrap_or_else(|| {
+        use nix::unistd::{AccessFlags, access};
+        let var_writable = access(
+            LOCALSTATEDIR,
+            AccessFlags::R_OK | AccessFlags::W_OK | AccessFlags::X_OK,
+        )
+        .is_ok();
+        if var_writable {
+            [LOCALSTATEDIR, "run", &format!("{identname}.pid")]
+                .iter()
+                .collect()
+        } else {
+            eprintln!(
+                "tincd: cannot access {LOCALSTATEDIR}, storing pid/socket in {}",
+                confbase.display()
+            );
+            confbase.join("pid")
+        }
+    });
     // ─── derive unixsocketname from pidfilename (names.c:152-160).
     // Strip `.pid` → `.socket`, else append. The NixOS module passes
     // only --pidfile; without this the unit dies "missing --socket".
@@ -758,7 +860,7 @@ fn init_logging(args: &Args) {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("tincd: {e}");
@@ -894,5 +996,145 @@ fn main() -> ExitCode {
     match outcome {
         RunOutcome::Clean => ExitCode::SUCCESS,
         RunOutcome::PollError => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn argv(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn debug_glued_long() {
+        let a = parse_args(argv(&["--debug=5", "-c", "/tmp", "--pidfile=/tmp/p"])).unwrap();
+        assert_eq!(a.debug_level, Some(5));
+    }
+
+    #[test]
+    fn debug_glued_garbage_is_atoi_zero() {
+        let a = parse_args(argv(&["--debug=garbage", "-c", "/tmp", "--pidfile=/tmp/p"])).unwrap();
+        assert_eq!(a.debug_level, Some(0));
+    }
+
+    #[test]
+    fn config_glued() {
+        let a = parse_args(argv(&["--config=/foo", "--pidfile=/tmp/p"])).unwrap();
+        assert_eq!(a.confbase, PathBuf::from("/foo"));
+    }
+
+    #[test]
+    fn net_glued_derives_confbase() {
+        let a = parse_args(argv(&["--net=myvpn", "--pidfile=/tmp/p"])).unwrap();
+        assert!(a.confbase.ends_with("tinc/myvpn"));
+    }
+
+    #[test]
+    fn option_glued_with_embedded_equals() {
+        let a = parse_args(argv(&[
+            "--option=Port=1234",
+            "--pidfile=/tmp/p",
+            "-c",
+            "/tmp",
+        ]))
+        .unwrap();
+        // The value itself contains `=`; strip_prefix should leave "Port=1234".
+        assert!(a.cmdline_conf.lookup("Port").next().is_some());
+    }
+
+    #[test]
+    fn user_glued() {
+        let a = parse_args(argv(&["--user=nobody", "--pidfile=/tmp/p", "-c", "/tmp"])).unwrap();
+        assert_eq!(a.switchuser.as_deref(), Some("nobody"));
+    }
+
+    #[test]
+    fn logfile_bare_does_not_eat_next_flag() {
+        // Regression: old code did `args.next()` unconditionally and
+        // would consume `-d` as the logfile path. C peeks gated on
+        // `*argv != '-'` (tincd.c:275).
+        let a = parse_args(argv(&[
+            "--logfile",
+            "-d",
+            "5",
+            "--pidfile=/tmp/p",
+            "-c",
+            "/tmp",
+        ]))
+        .unwrap();
+        assert!(a.logfile.is_some(), "bare --logfile derives a default");
+        assert_ne!(a.logfile.as_deref(), Some(std::path::Path::new("-d")));
+        assert_eq!(a.debug_level, Some(5));
+    }
+
+    #[test]
+    fn logfile_separated() {
+        let a = parse_args(argv(&[
+            "--logfile",
+            "/tmp/log",
+            "--pidfile=/tmp/p",
+            "-c",
+            "/tmp",
+        ]))
+        .unwrap();
+        assert_eq!(a.logfile.as_deref(), Some(std::path::Path::new("/tmp/log")));
+    }
+
+    #[test]
+    fn logfile_glued() {
+        let a = parse_args(argv(&[
+            "--logfile=/tmp/log",
+            "--pidfile=/tmp/p",
+            "-c",
+            "/tmp",
+        ]))
+        .unwrap();
+        assert_eq!(a.logfile.as_deref(), Some(std::path::Path::new("/tmp/log")));
+    }
+
+    #[test]
+    fn logfile_bare_derives_from_netname() {
+        // `--logfile` precedes `-n`; derivation must use the final
+        // netname (post-loop, like C make_names).
+        let a = parse_args(argv(&["--logfile", "-n", "foo", "--pidfile=/tmp/p"])).unwrap();
+        assert!(a.logfile.unwrap().ends_with("log/tinc.foo.log"));
+    }
+
+    #[test]
+    fn pidfile_derived_when_absent() {
+        // No --pidfile given. Must derive SOMETHING (either
+        // /var/run/tinc.foo.pid or {confbase}/pid depending on /var
+        // writability) instead of erroring out. Don't assert the
+        // exact path — test runner may or may not have /var access.
+        let a = parse_args(argv(&["-n", "foo", "-c", "/tmp"])).unwrap();
+        assert!(
+            a.pidfile.ends_with("tinc.foo.pid") || a.pidfile.ends_with("pid"),
+            "derived pidfile {:?}",
+            a.pidfile
+        );
+    }
+
+    #[test]
+    fn both_c_and_n_uses_c() {
+        // C names.c:49-50: -c wins, warning to stderr (not asserted here).
+        let a = parse_args(argv(&["-c", "/tmp", "-n", "foo", "--pidfile=/tmp/p"])).unwrap();
+        assert_eq!(a.confbase, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn pidfile_glued() {
+        let a = parse_args(argv(&["--pidfile=/tmp/custom.pid", "-c", "/tmp"])).unwrap();
+        assert_eq!(a.pidfile, PathBuf::from("/tmp/custom.pid"));
+        // Socket still derived from pidfile.
+        assert_eq!(a.socket, PathBuf::from("/tmp/custom.socket"));
+    }
+
+    #[test]
+    fn socket_glued() {
+        let a = parse_args(argv(&["--socket=/tmp/s", "--pidfile=/tmp/p", "-c", "/tmp"])).unwrap();
+        assert_eq!(a.socket, PathBuf::from("/tmp/s"));
     }
 }
