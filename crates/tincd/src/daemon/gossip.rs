@@ -959,6 +959,32 @@ impl Daemon {
         rows
     }
 
+    /// `dump_traffic` row builder (`node.c:226-231`). C format `:228`:
+    /// `"%d %d %s %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64`. Walk all
+    /// known nodes (not just tunnels): C iterates `node_tree`, which
+    /// includes myself + unreachables. Nodes without a TunnelState
+    /// emit zeros (C `xzalloc`).
+    pub(super) fn dump_traffic_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        for nid in self.graph.node_ids() {
+            let Some(node) = self.graph.node(nid) else {
+                continue;
+            };
+            let t = self.tunnels.get(&nid);
+            rows.push(format!(
+                "{} {} {} {} {} {} {}",
+                Request::Control as u8,
+                crate::proto::REQ_DUMP_TRAFFIC,
+                node.name.as_str(),
+                t.map_or(0, |t| t.in_packets),
+                t.map_or(0, |t| t.in_bytes),
+                t.map_or(0, |t| t.out_packets),
+                t.map_or(0, |t| t.out_bytes),
+            ));
+        }
+        rows
+    }
+
     /// `add_subnet_h` (`protocol_subnet.c:43-140`). Subnets don't
     /// change topology — NO graph() call (C calls subnet_update only).
     pub(super) fn on_add_subnet(

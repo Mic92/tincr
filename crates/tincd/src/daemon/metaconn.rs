@@ -481,6 +481,12 @@ impl Daemon {
                             crate::proto::REQ_DISCONNECT
                         ));
                         (DispatchResult::Ok, nw2)
+                    } else if matches!(r, DispatchResult::DumpTraffic) {
+                        // `dump_traffic` (`node.c:226-231`).
+                        let rows = self.dump_traffic_rows();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_TRAFFIC);
+                        (DispatchResult::Ok, nw2)
                     } else {
                         (r, nw)
                     }
@@ -508,7 +514,8 @@ impl Daemon {
                 | DispatchResult::DumpEdges
                 | DispatchResult::Reload
                 | DispatchResult::Retry
-                | DispatchResult::Disconnect(_) => {
+                | DispatchResult::Disconnect(_)
+                | DispatchResult::DumpTraffic => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

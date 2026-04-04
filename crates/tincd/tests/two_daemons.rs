@@ -787,6 +787,47 @@ fn first_packet_across_tunnel() {
         "bob in counters: {b_in_p}/{b_in_b}; nodes: {b_nodes:?}"
     );
 
+    // ─── REQ_DUMP_TRAFFIC ────────────────────────────────────────
+    // C `node.c:226-231`. Format-is-contract: `"18 13 NAME in_p
+    // in_b out_p out_b"`. Same counters as the dump-nodes tail
+    // (both read `n->in_packets` etc) so cross-check exact values.
+    // Row count = node count (C iterates `node_tree`: includes
+    // myself).
+    let traffic_row = |rows: &[String], name: &str| -> Option<(u64, u64, u64, u64)> {
+        rows.iter().find_map(|r| {
+            let body = r.strip_prefix("18 13 ")?;
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.len() != 5 || toks[0] != name {
+                return None;
+            }
+            Some((
+                toks[1].parse().ok()?,
+                toks[2].parse().ok()?,
+                toks[3].parse().ok()?,
+                toks[4].parse().ok()?,
+            ))
+        })
+    };
+    let a_traffic = alice_ctl.dump(13);
+    let b_traffic = bob_ctl.dump(13);
+    assert_eq!(a_traffic.len(), 2, "alice traffic rows: {a_traffic:?}");
+    assert_eq!(b_traffic.len(), 2, "bob traffic rows: {b_traffic:?}");
+    let (_, _, at_out_p, at_out_b) = traffic_row(&a_traffic, "bob").expect("alice traffic bob");
+    let (bt_in_p, bt_in_b, _, _) = traffic_row(&b_traffic, "alice").expect("bob traffic alice");
+    assert_eq!(
+        (at_out_p, at_out_b),
+        (a_out_p, a_out_b),
+        "dump_traffic == dump_nodes tail"
+    );
+    assert_eq!((bt_in_p, bt_in_b), (b_in_p, b_in_b));
+    // myself row: alice's `in_packets` = TUN reads (C `:1928`).
+    // She read the kick + the real packet → ≥2. bob's `out_packets`
+    // = TUN writes (C `:1565`); he wrote at least the real packet.
+    let (am_in_p, _, _, _) = traffic_row(&a_traffic, "alice").expect("alice myself");
+    assert!(am_in_p >= 2, "alice myself in: {am_in_p}; {a_traffic:?}");
+    let (_, _, bm_out_p, _) = traffic_row(&b_traffic, "bob").expect("bob myself");
+    assert!(bm_out_p >= 1, "bob myself out: {bm_out_p}; {b_traffic:?}");
+
     // udp_confirmed (bit 7) is NOT asserted: with the C `:725`
     // gate now wired, `data.len() > minmtu(=0)` → PACKET 17 over
     // the meta-conn, not UDP. minmtu only goes nonzero after PMTU

@@ -109,6 +109,7 @@ pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
 pub(crate) const REQ_RETRY: i32 = 10;
 pub(crate) const REQ_DISCONNECT: i32 = 12;
+pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
 /// `control_common.h`: `REQ_INVALID = -1`.
 const REQ_INVALID: i32 = -1;
 
@@ -139,6 +140,9 @@ pub enum DispatchResult {
     /// conns, terminate matches, reply `"18 12 0"` if found else
     /// `"18 12 -2"`. `None` → sscanf failed (`:108`), reply `"18 12 -1"`.
     Disconnect(Option<String>),
+    /// `dump_traffic(c)` (`node.c:226-231`). Walk nodes, emit
+    /// `"18 13 NAME in_packets in_bytes out_packets out_bytes"`.
+    DumpTraffic,
     /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
@@ -767,6 +771,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
                 .map(str::to_owned);
             (DispatchResult::Disconnect(name), false)
         }
+        Some(REQ_DUMP_TRAFFIC) => (DispatchResult::DumpTraffic, false),
         Some(REQ_STOP) => {
             // C `:59-61`: `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
@@ -1203,6 +1208,16 @@ mod tests {
         c.allow_request = Some(Request::Control);
         let (r, _) = handle_control(&mut c, b"18 12");
         assert_eq!(r, DispatchResult::Disconnect(None));
+    }
+
+    #[test]
+    fn control_dump_traffic() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        // C `control.c:124`: `case REQ_DUMP_TRAFFIC: return dump_traffic(c)`.
+        let (r, nw) = handle_control(&mut c, b"18 13");
+        assert_eq!(r, DispatchResult::DumpTraffic);
+        assert!(!nw);
     }
 
     /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.
