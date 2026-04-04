@@ -800,11 +800,9 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
 /// (a detached daemon with no `--logfile` is mute). Warn about it
 /// pre-detach.
 ///
-/// Level: RUST_LOG env beats `-d` beats default Info. The C has a
-/// further fallback to `LogLevel` config key (`tincd.c:599-605`);
-/// that needs the config tree, which isn't read yet here. Skipped —
-/// you can `-o LogLevel=5` if you want it from config… except that
-/// also needs the tree. TODO when init order is reworked.
+/// Level: RUST_LOG env beats `-d` beats default Info. `LogLevel`
+/// from `-o`/tinc.conf was already folded into `args.debug_level`
+/// by [`resolve_debug_level`] before we get here.
 fn init_logging(args: &Args) {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("tincd=info"));
@@ -868,8 +866,62 @@ fn init_logging(args: &Args) {
     tincd::log_tap::init_debug_level(args.debug_level.map_or(0, |d| d as i32));
 }
 
+/// C `tincd.c:599-604`: consult the `LogLevel` config key when
+/// `-d` was not given on argv. C's order is read_server_config
+/// (`:591`) → LogLevel check (`:599`) → detach (`:640`). We had
+/// logger-init BEFORE config-read; rather than reorder all of
+/// init, read tinc.conf once here just for this key. The full
+/// config gets re-read inside Daemon::setup anyway — one extra
+/// ~1KB read at boot is free, and the alternative (delay logger
+/// init until after setup) means setup errors land on a logger
+/// that hasn't been told its level yet.
+///
+/// **Precedence** (first hit wins):
+/// 1. `-d` / `--debug` argv
+/// 2. `-o LogLevel=N` cmdline config
+/// 3. `LogLevel = N` in tinc.conf
+/// 4. None → caller defaults to Info
+///
+/// **C divergence:** C checks `debug_level == DEBUG_NOTHING` (0).
+/// `debug_level` STARTS at -1 (`tincd.c:63` — wait: `logger.c:33`
+/// says `DEBUG_NOTHING`; the *option* state at -1 is in tinc.c
+/// pre-options, but `tincd.c` actually has `debug_level++` at
+/// `:216`, and `debug_level` is the global at `logger.c:33` =
+/// `DEBUG_NOTHING` = 0). So: no `-d` → 0 → LogLevel read; bare
+/// `-d` → 1 → NOT read; `-d5` → 5 → NOT read. That's the sane
+/// thing. Our `is_none()` mirrors it exactly.
+fn resolve_debug_level(args: &Args) -> Option<u32> {
+    if args.debug_level.is_some() {
+        return args.debug_level; // -d wins
+    }
+
+    // Helper: pull LogLevel from a Config. get_int is i32 (C's
+    // `get_config_int` writes an int); negative LogLevel is
+    // nonsense, u32::try_from rejects it.
+    fn lookup(c: &Config) -> Option<u32> {
+        c.lookup("LogLevel")
+            .next()
+            .and_then(|e| e.get_int().ok())
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    // -o LogLevel= first. Source::Cmdline beats file in tinc-conf's
+    // 4-tuple sort, but we're not merging here so be explicit.
+    if let Some(v) = lookup(&args.cmdline_conf) {
+        return Some(v);
+    }
+
+    // tinc.conf. Read failure → silently None: logger isn't init'd
+    // yet to report it, and Daemon::setup will hit the same failure
+    // and report it properly. C `:591` returns 1 on parse failure
+    // but ALSO before its logger switches mode — same shape.
+    tinc_conf::read_server_config(&args.confbase)
+        .ok()
+        .and_then(|c| lookup(&c))
+}
+
 fn main() -> ExitCode {
-    let args = match parse_args(std::env::args_os().skip(1)) {
+    let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("tincd: {e}");
@@ -889,6 +941,13 @@ fn main() -> ExitCode {
         eprintln!("tincd: {e}");
         return ExitCode::FAILURE;
     }
+
+    // Fold tinc.conf's `LogLevel` into args.debug_level BEFORE the
+    // logger comes up (and before the seed at init_logging's tail,
+    // so REQ_SET_DEBUG sees it too). After detach is fine: file
+    // reads cross fork() safely. C does it before detach (`:599`
+    // vs `:640`) but the order doesn't change anything observable.
+    args.debug_level = resolve_debug_level(&args);
 
     init_logging(&args);
 
@@ -1145,5 +1204,93 @@ mod tests {
     fn socket_glued() {
         let a = parse_args(argv(&["--socket=/tmp/s", "--pidfile=/tmp/p", "-c", "/tmp"])).unwrap();
         assert_eq!(a.socket, PathBuf::from("/tmp/s"));
+    }
+
+    // ─── resolve_debug_level
+
+    // Hand-rolled tempdir (matches tests/common/mod.rs::TmpGuard;
+    // no tempfile dep in this crate). PID+TID → nextest-parallel-safe.
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!(
+                "tincd-loglevel-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Self(d)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn args_at(confbase: PathBuf) -> Args {
+        // pidfile/socket don't matter here; -c sets confbase.
+        let mut a = parse_args(argv(&["--pidfile=/tmp/p"])).unwrap();
+        a.confbase = confbase;
+        a
+    }
+
+    #[test]
+    fn loglevel_d_flag_wins() {
+        let t = Tmp::new("d-wins");
+        std::fs::write(t.0.join("tinc.conf"), "LogLevel = 3\n").unwrap();
+        let mut a = args_at(t.0.clone());
+        a.debug_level = Some(5);
+        assert_eq!(resolve_debug_level(&a), Some(5));
+    }
+
+    #[test]
+    fn loglevel_from_cmdline_o() {
+        // No tinc.conf on disk → if this passes, we know -o was
+        // checked BEFORE the file (and the file read short-circuited).
+        let a = parse_args(argv(&[
+            "-o",
+            "LogLevel=3",
+            "-c",
+            "/nonexistent/tincd-loglevel-test",
+            "--pidfile=/tmp/p",
+        ]))
+        .unwrap();
+        assert_eq!(a.debug_level, None);
+        assert_eq!(resolve_debug_level(&a), Some(3));
+    }
+
+    #[test]
+    fn loglevel_from_tinc_conf() {
+        let t = Tmp::new("from-conf");
+        std::fs::write(t.0.join("tinc.conf"), "LogLevel = 4\n").unwrap();
+        let a = args_at(t.0.clone());
+        assert_eq!(resolve_debug_level(&a), Some(4));
+    }
+
+    #[test]
+    fn loglevel_absent_everywhere() {
+        let t = Tmp::new("absent");
+        std::fs::write(t.0.join("tinc.conf"), "Name = foo\n").unwrap();
+        let a = args_at(t.0.clone());
+        assert_eq!(resolve_debug_level(&a), None);
+    }
+
+    #[test]
+    fn loglevel_missing_tinc_conf_is_silent() {
+        let a = args_at(PathBuf::from("/nonexistent/tincd-loglevel-test"));
+        assert_eq!(resolve_debug_level(&a), None); // no panic
+    }
+
+    #[test]
+    fn loglevel_negative_rejected() {
+        // C get_config_int would happily set debug_level = -2. We
+        // route through u32::try_from → None → default Info. Stricter
+        // than C; nonsense input gets nonsense (default) output.
+        let t = Tmp::new("neg");
+        std::fs::write(t.0.join("tinc.conf"), "LogLevel = -2\n").unwrap();
+        let a = args_at(t.0.clone());
+        assert_eq!(resolve_debug_level(&a), None);
     }
 }
