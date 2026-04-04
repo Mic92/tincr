@@ -3315,3 +3315,127 @@ fn del_subnet_legitimate_still_works() {
     let _ = bob_child.kill();
     let _ = bob_child.wait();
 }
+
+/// **KeyExpire timer forces SPTPS rekey.** `net_setup.c:144-160`,
+/// `protocol_key.c:38-62`. Gap-audit `bcc5c3e3`: timer was defined
+/// (`TimerWhat::KeyExpire`) but never armed; `unreachable!()` in the
+/// dispatch arm. SPTPS sessions lived forever on one key. The
+/// ChaCha20-Poly1305 nonce is `outseqno: u32` with no wrap check
+/// (`sptps.c:116`, `state.rs:403`); at sustained throughput nonce
+/// reuse is hours away.
+///
+/// `KeyExpire = 1` so the timer fires in-test. After the rekey, send
+/// a packet and prove it still crosses (the new key works).
+///
+/// C-nolegacy has the same bug (`timeout_add` at `net_setup.c:1049`
+/// is `#ifndef DISABLE_LEGACY`). This test would fail against
+/// `.#tincd-c` too.
+#[test]
+fn keyexpire_forces_rekey() {
+    let tmp = tmp("keyexpire");
+    let alice = Node::new(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
+    let bob = Node::new(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
+
+    let alice_pair = sockpair_seqpacket();
+    let bob_pair = sockpair_seqpacket();
+    for &fd in &alice_pair {
+        set_nonblocking(fd);
+    }
+    for &fd in &bob_pair {
+        set_nonblocking(fd);
+    }
+
+    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+
+    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    unsafe { libc::close(bob_pair[1]) };
+
+    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+    unsafe { libc::close(alice_pair[1]) };
+
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
+
+    // Wait for reachable.
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        let b = bob_ctl.dump(3);
+        let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+        let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+        if a_ok && b_ok { Some(()) } else { None }
+    });
+
+    // Kick the per-tunnel handshake (first packet starts REQ_KEY).
+    let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
+    write_fd(alice_pair[0], &kick);
+
+    // Wait for validkey both sides.
+    let vk = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(5), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if vk.is_err() {
+        let _ = bob_child.kill();
+        panic!(
+            "validkey timed out;\nalice:\n{}\nbob:\n{}",
+            drain_stderr(alice_child),
+            drain_stderr(bob_child)
+        );
+    }
+
+    // Drain the kick (PACKET 17 delivers it via meta-conn).
+    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+
+    // ─── wait past KeyExpire (1s) + rekey RTT ──────────────────
+    // The timer fires at +1s, force_kex sends KEX, the rekey is 3
+    // RTTs over the meta-conn. validkey stays SET through the rekey
+    // (the C doesn't clear it; SPTPS keeps the old key live until
+    // SIG arrives). 2s gives plenty of slack on loopback.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // ─── packet crosses under the NEW key ──────────────────────
+    // Proves the rekey transcript completed and dispatch_tunnel_
+    // outputs delivered the new keys end to end. If force_kex broke
+    // the SPTPS state, this packet decrypts to garbage or drops.
+    let pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"post-rekey");
+    write_fd(alice_pair[0], &pkt);
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    assert_eq!(recv, pkt, "post-rekey packet body mismatch");
+
+    // ─── stderr: the timer fired, the rekey happened ───────────
+    drop(alice_ctl);
+    drop(bob_ctl);
+    unsafe { libc::close(alice_pair[0]) };
+    unsafe { libc::close(bob_pair[0]) };
+    let _ = bob_child.kill();
+    let bob_stderr = drain_stderr(bob_child);
+    let alice_stderr = drain_stderr(alice_child);
+
+    // The on_keyexpire log. Proves the timer was armed and fired.
+    assert!(
+        alice_stderr.contains("Expiring symmetric keys"),
+        "alice's keyexpire timer never fired; stderr:\n{alice_stderr}"
+    );
+    assert!(
+        bob_stderr.contains("Expiring symmetric keys"),
+        "bob's keyexpire timer never fired; stderr:\n{bob_stderr}"
+    );
+    // The rekey HandshakeDone is silent (`dispatch_tunnel_outputs`
+    // only logs if `!validkey`, which stays set through the rekey).
+    // The packet-crosses-under-new-key assert above IS the proof:
+    // if force_kex broke SPTPS state, decrypt fails and the packet
+    // drops. The "Expiring" log proves the timer arm + fire path.
+}

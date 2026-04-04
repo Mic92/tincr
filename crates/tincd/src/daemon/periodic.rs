@@ -493,5 +493,75 @@ impl Daemon {
         true
     }
 
+    /// `keyexpire_handler` + `regenerate_key` + `send_key_changed`
+    /// (SPTPS-only branch). C `net_setup.c:144-160`, `protocol_
+    /// key.c:38-62`.
+    ///
+    /// C `regenerate_key` clears `validkey_in` for every node and
+    /// calls `send_key_changed`. Under `#ifdef DISABLE_LEGACY`
+    /// `send_key_changed` reduces to: walk every reachable+validkey
+    /// SPTPS tunnel, call `sptps_force_kex`. The `validkey_in` clear
+    /// is legacy-receive bookkeeping (gates `receive_udppacket`
+    /// `:437`); the SPTPS state machine handles the rekey transcript
+    /// independently.
+    ///
+    /// C-nolegacy NEVER ARMS this timer (`timeout_add` at `net_
+    /// setup.c:1049` is inside `#ifndef DISABLE_LEGACY`). That's a
+    /// C bug: `outseqno` is the ChaCha20-Poly1305 nonce, wraps at
+    /// u32::MAX with no check (`sptps.c:116,141`). We arm.
+    pub(super) fn on_keyexpire(&mut self) {
+        log::info!(target: "tincd", "Expiring symmetric keys");
+
+        // C `protocol_key.c:55-60`: `for splay_each(node_t, n,
+        // &node_tree) if(reachable && validkey && sptps)
+        // sptps_force_kex(&n->sptps)`.
+        //
+        // Borrow dance: collect (nid, name, outs) first; dispatch_
+        // tunnel_outputs needs `&mut self`. force_kex's RNG is
+        // OsRng — same as the receive paths in metaconn.rs/gossip.rs.
+        let mut pending: Vec<(NodeId, String, Vec<tinc_sptps::Output>)> = Vec::new();
+        for (&nid, tunnel) in &mut self.tunnels {
+            if !tunnel.status.validkey {
+                continue;
+            }
+            // C also checks `reachable`; our `validkey` is cleared on
+            // BecameUnreachable (tunnel.reset_unreachable, gossip.rs:
+            // 830-ish), so validkey ⇒ reachable here.
+            let Some(sptps) = tunnel.sptps.as_deref_mut() else {
+                continue;
+            };
+            match sptps.force_kex(&mut OsRng) {
+                Ok(outs) => {
+                    let name = self
+                        .graph
+                        .node(nid)
+                        .map_or_else(|| "<unknown>".to_owned(), |n| n.name.clone());
+                    pending.push((nid, name, outs));
+                }
+                Err(_) => {
+                    // InvalidState: rekey already in flight (state !=
+                    // SecondaryKex). C `sptps_force_kex` returns false;
+                    // C ignores it. Same.
+                    log::debug!(target: "tincd",
+                                "force_kex skipped (rekey already in flight)");
+                }
+            }
+        }
+
+        let mut nw = false;
+        for (nid, name, outs) in pending {
+            nw |= self.dispatch_tunnel_outputs(nid, &name, outs);
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
+
+        // C `net_setup.c:148-149`: re-arm +keylifetime.
+        self.timers.set(
+            self.keyexpire_timer,
+            Duration::from_secs(u64::from(self.settings.keylifetime)),
+        );
+    }
+
     // ─── io handlers
 }

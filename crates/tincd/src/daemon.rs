@@ -119,7 +119,8 @@ pub enum TimerWhat {
     Ping,
     /// `periodic_handler` (`net.c:268`). +5s.
     Periodic,
-    #[allow(dead_code)]
+    /// `keyexpire_handler` (`net_setup.c:144-150`). +`keylifetime`s
+    /// (default 3600). Forces SPTPS rekey on every active tunnel.
     KeyExpire,
     /// `age_past_requests` (`protocol.c:213-228`). +10s.
     AgePastRequests,
@@ -301,6 +302,17 @@ pub struct DaemonSettings {
     /// `mtu_info_interval` (`protocol_misc.c:34`). Seconds. Separate
     /// debounce from UDP_INFO. Default 5.
     pub mtu_info_interval: u32,
+    /// `keylifetime` (`net_setup.c:556-558`). Seconds. The KeyExpire
+    /// timer fires at this interval and forces an SPTPS rekey on
+    /// every tunnel with `validkey`. C default 3600.
+    ///
+    /// **Nonce-reuse guard.** SPTPS uses `outseqno: u32` as the
+    /// ChaCha20-Poly1305 nonce. Neither C (`sptps.c:116,141`) nor
+    /// Rust (`state.rs:403`) checks for wraparound. At 1.5 Gbps /
+    /// 1400-byte packets (≈134k pps), 2^32 packets is ≈9 hours to
+    /// nonce reuse — catastrophic for ChaCha20-Poly1305. The 3600s
+    /// timer caps any single key at ≈4.8e8 packets, well clear.
+    pub keylifetime: u32,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -401,6 +413,8 @@ impl Default for DaemonSettings {
             udp_info_interval: 5,
             // C `protocol_misc.c:34`: `int mtu_info_interval = 5`.
             mtu_info_interval: 5,
+            // C `net_setup.c:558`: `keylifetime = 3600`.
+            keylifetime: 3600,
         }
     }
 }
@@ -523,6 +537,13 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         && let Ok(v) = u64::try_from(v)
     {
         settings.invitation_lifetime = Duration::from_secs(v);
+    }
+    // KeyExpire (`:556-558`).
+    if let Some(e) = config.lookup("KeyExpire").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.keylifetime = v;
     }
 }
 
@@ -1002,6 +1023,8 @@ pub struct Daemon {
     pub(crate) age_timer: TimerId,
     /// `periodictimer` (`net.c:45`). Re-arms +5s.
     pub(crate) periodictimer: TimerId,
+    /// `keyexpire_handler` (`net_setup.c:144`). Re-arms +`keylifetime`.
+    pub(crate) keyexpire_timer: TimerId,
 
     /// `invitation_key` (`protocol_auth.c:56`). Loaded from
     /// `confbase/invitations/ed25519_key.priv` by `read_invitation_
@@ -1430,6 +1453,19 @@ impl Daemon {
         let periodictimer = timers.add(TimerWhat::Periodic);
         timers.set(periodictimer, Duration::from_secs(5));
 
+        // ─── keyexpire timer (net_setup.c:1049-1051)
+        // C: `timeout_add(&keyexpire_timeout, keyexpire_handler, ...,
+        // { keylifetime, jitter() })`. The handler (`:144-150`) calls
+        // `regenerate_key()` then re-arms +keylifetime. C-nolegacy
+        // never arms this (the timeout_add is `#ifndef DISABLE_
+        // LEGACY`); that's a C bug — SPTPS still needs the rekey to
+        // bound the ChaCha20 nonce counter. We arm unconditionally.
+        let keyexpire_timer = timers.add(TimerWhat::KeyExpire);
+        timers.set(
+            keyexpire_timer,
+            Duration::from_secs(u64::from(settings.keylifetime)),
+        );
+
         // ─── listeners (net_setup.c:1152-1183)
         // C: walk BindToAddress configs, then ListenAddress configs,
         // else `add_listen_address(NULL, NULL)` for the no-config
@@ -1618,6 +1654,7 @@ impl Daemon {
             pingtimer,
             age_timer,
             periodictimer,
+            keyexpire_timer,
             running: true,
         };
 
@@ -1751,7 +1788,10 @@ impl Daemon {
                     TimerWhat::AgeSubnets => {
                         self.on_age_subnets();
                     }
-                    TimerWhat::KeyExpire | TimerWhat::UdpPing => {
+                    TimerWhat::KeyExpire => {
+                        self.on_keyexpire();
+                    }
+                    TimerWhat::UdpPing => {
                         // Not armed yet. Unreachable.
                         unreachable!("timer {t:?} not armed yet")
                     }
