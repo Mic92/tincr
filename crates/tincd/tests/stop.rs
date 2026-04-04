@@ -35,12 +35,12 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, read_cookie, read_tcp_addr, tincd_bin, wait_for_file, write_ed25519_privkey,
+    TmpGuard, read_cookie, read_tcp_addr, tincd_cmd, wait_for_file, write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -105,7 +105,7 @@ fn spawn_connect_stop() {
 
     // ─── spawn ────────────────────────────────────────────────────
     // RUST_LOG=tincd=debug so failure stderr is informative.
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -219,7 +219,7 @@ fn sigterm_stops() {
 
     write_config(&confbase);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -274,7 +274,7 @@ fn second_daemon_refused() {
 
     write_config(&confbase);
 
-    let mut first = Command::new(tincd_bin())
+    let mut first = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -289,7 +289,7 @@ fn second_daemon_refused() {
 
     // Second daemon, same socket, different pidfile (so it doesn't
     // clobber the first's). Should fail in setup().
-    let second = Command::new(tincd_bin())
+    let second = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -349,7 +349,7 @@ fn stays_alive_across_iterations() {
     )
     .unwrap();
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -392,7 +392,7 @@ fn missing_config_fails() {
     // confbase exists but no tinc.conf inside.
     std::fs::create_dir_all(&confbase).unwrap();
 
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -440,7 +440,7 @@ fn dash_o_overrides_config() {
     // root). Write hosts/override with Port=0 too.
     std::fs::write(confbase.join("hosts").join("override"), "Port = 0\n").unwrap();
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -485,7 +485,7 @@ fn dash_o_overrides_config() {
 #[test]
 fn dash_o_bad_value_fails() {
     let tmp = tmp("dash-o-bad");
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("-c")
         .arg(tmp.path())
         .arg("--pidfile")
@@ -516,7 +516,7 @@ fn dash_o_bad_value_fails() {
 #[test]
 fn dash_n_derives_confbase() {
     let tmp = tmp("dash-n");
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("-n")
         .arg("testnet")
         .arg("--pidfile")
@@ -542,7 +542,7 @@ fn dash_n_derives_confbase() {
 #[test]
 fn netname_env_fallback() {
     let tmp = tmp("netname-env");
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("--pidfile")
         .arg(tmp.path().join("p"))
         .arg("--socket")
@@ -565,7 +565,7 @@ fn netname_env_fallback() {
 #[test]
 fn dash_n_rejects_slash() {
     let tmp = tmp("dash-n-slash");
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("-n")
         .arg("foo/bar")
         .arg("--pidfile")
@@ -597,7 +597,7 @@ fn missing_name_fails() {
     // Config without Name.
     std::fs::write(confbase.join("tinc.conf"), "DeviceType = dummy\n").unwrap();
 
-    let out = Command::new(tincd_bin())
+    let out = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -627,7 +627,7 @@ fn bad_cookie_dropped() {
 
     write_config(&confbase);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -699,7 +699,7 @@ fn tcp_connect_stop() {
 
     write_config(&confbase);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -823,7 +823,7 @@ fn missing_hosts_file_ok() {
     // Precondition: hosts/ doesn't exist. THIS is what's tested.
     assert!(!confbase.join("hosts").exists());
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -891,7 +891,7 @@ fn udp_stray_packet_drained() {
 
     write_config(&confbase);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -1053,7 +1053,7 @@ fn peer_ack_exchange() {
     .unwrap();
 
     // ─── spawn daemon ────────────────────────────────────────────
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -1654,7 +1654,7 @@ fn peer_edge_triggers_reachable() {
     )
     .unwrap();
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -2232,7 +2232,7 @@ fn peer_wrong_key_fails_sig() {
     )
     .unwrap();
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -2351,5 +2351,326 @@ fn peer_wrong_key_fails_sig() {
     assert!(
         !stderr.contains("SPTPS handshake completed"),
         "daemon should NOT have completed; stderr:\n{stderr}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// main.rs cluster: -D/-d/-L/-U/--logfile (`tincd.c::main2`)
+// ═══════════════════════════════════════════════════════════════════
+
+/// `-D` keeps the daemon foreground. Proves `do_detach=true` default
+/// is overridden: the spawned `Child` stays the daemon (PID matches
+/// the pidfile), `child.kill()` works.
+///
+/// This is the inverse of testing detach itself (which would lose
+/// the child). Every other test in this file relies on `-D` working;
+/// this one makes that reliance explicit.
+#[test]
+fn dash_d_upper_stays_foreground() {
+    let tmp = tmp("dash-D");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    // tincd_cmd() bakes in -D. We're proving that's load-bearing.
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket), "tincd didn't bind; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    // pidfile's PID == our Child's PID. If detach had run, the
+    // pidfile would hold the grandchild's PID and child.id() would
+    // be the (already-exited) parent.
+    let pid_line = std::fs::read_to_string(&pidfile).unwrap();
+    let pid: u32 = pid_line.split_whitespace().next().unwrap().parse().unwrap();
+    assert_eq!(pid, child.id(), "-D: daemon PID should be our direct child");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `-dN` glued form. C `tincd.c:213-218`: `atoi(optarg)`. The level
+/// shows up in the "starting" banner (`process.c:239-240`).
+#[test]
+fn dash_d_level_sets_debug() {
+    let tmp = tmp("dash-d-level");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-d5")
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env_remove("RUST_LOG") // -d5 should win on its own
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket));
+
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The banner: "tincd VERSION starting, debug level 5". Don't pin
+    // version; pin the level.
+    assert!(
+        stderr.contains("debug level 5"),
+        "expected -d5 in startup banner; stderr:\n{stderr}"
+    );
+}
+
+/// `--logfile PATH` redirects log output. The "starting" banner ends
+/// up in the file, NOT on stderr.
+#[test]
+fn logfile_redirects_output() {
+    let tmp = tmp("logfile");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    let logfile = tmp.path().join("tinc.log");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--logfile")
+        .arg(&logfile)
+        .env_remove("RUST_LOG")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket));
+
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let logged = std::fs::read_to_string(&logfile).unwrap();
+
+    // Banner went to the file.
+    assert!(
+        logged.contains("starting"),
+        "expected startup banner in logfile; got:\n{logged}"
+    );
+    // Banner did NOT go to stderr. (stderr might have the env_logger
+    // module noise or be empty; either way, no "starting".)
+    assert!(
+        !stderr.contains("starting"),
+        "--logfile should redirect; stderr still had:\n{stderr}"
+    );
+}
+
+/// `-U baduser` errors loudly. `tincd.c:378-384`: `getpwnam` returns
+/// NULL → "unknown user". Runs AFTER setup (sockets bound, tinc-up
+/// done) so the socket exists briefly then vanishes on Drop.
+///
+/// We don't test the success case (actually dropping privs) — that
+/// needs root, and the geteuid()==0 gate would skip on dev machines.
+/// The error path proves the call site is wired.
+#[test]
+fn dash_u_bad_user_fails() {
+    let tmp = tmp("dash-U-bad");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let out = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("-U")
+        .arg("definitely_not_a_real_user_xyz_9999")
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "-U baduser should exit nonzero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown user") && stderr.contains("definitely_not_a_real_user_xyz_9999"),
+        "expected `unknown user` error; got:\n{stderr}"
+    );
+}
+
+/// `-L` (mlockall) is wired. Whether it SUCCEEDS depends on
+/// RLIMIT_MEMLOCK / CAP_IPC_LOCK — the nix dev shell has 8MB which
+/// is enough for the daemon's resident set, CI sandboxes vary, root
+/// always succeeds. We can't reliably test the EPERM path.
+///
+/// What we CAN prove: `-L` parses, the syscall fires, and EITHER
+/// the daemon starts (mlockall worked) OR it fails fast with
+/// "mlockall" in the error. Both are valid; "silently ignore -L"
+/// is not.
+///
+/// C `tincd.c:652-659`: hard-fail on error. C `:199-206`: parse.
+#[test]
+fn dash_l_mlock_wired() {
+    let tmp = tmp("dash-L");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-L")
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Three-second wait: either the socket appears (mlockall ok,
+    // setup ran) or the child has exited (mlockall failed, error
+    // path). wait_for_file's 3s timeout covers both.
+    let started = wait_for_file(&socket);
+
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    if started {
+        // mlockall succeeded. The daemon ran. Prove `-L` didn't get
+        // dropped on the floor: no "unknown argument" complaint.
+        // (Weak, but the alternative is reading /proc/PID/status
+        // VmLck which is Linux-only AND racy against our kill.)
+        assert!(
+            !stderr.contains("unknown argument"),
+            "-L should be recognized; stderr:\n{stderr}"
+        );
+    } else {
+        // mlockall failed. Daemon should have said so and exited
+        // BEFORE setup (no socket). C `tincd.c:656`: the error
+        // mentions "mlockall" by name.
+        assert!(
+            stderr.contains("mlockall"),
+            "-L failure should mention mlockall; stderr:\n{stderr}"
+        );
+        assert!(!out.status.success());
+    }
+}
+
+/// `ProcessPriority = bogus` → error logged, daemon CONTINUES.
+/// C `tincd.c:690-693`: `goto end` on bad priority. We diverge: log
+/// and continue (apply_process_priority is best-effort). The C
+/// behavior is arguably a bug — refusing to tunnel because someone
+/// typo'd "Hihg" is hostile.
+#[test]
+fn process_priority_bad_value_warns() {
+    let tmp = tmp("priority-bad");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("-o")
+        .arg("ProcessPriority = bogus")
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Daemon DOES start (best-effort).
+    assert!(
+        wait_for_file(&socket),
+        "tincd should start despite bad priority"
+    );
+
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Invalid priority") && stderr.contains("bogus"),
+        "expected priority error in log; got:\n{stderr}"
+    );
+}
+
+/// `ProcessPriority = low` → setpriority(PRIO_PROCESS, 0, 10).
+/// Unprivileged users CAN lower their own priority (raise nice).
+/// Prove the syscall path executes without error.
+#[test]
+fn process_priority_low_succeeds() {
+    let tmp = tmp("priority-low");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("-o")
+        .arg("ProcessPriority = low")
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(wait_for_file(&socket));
+
+    // Read /proc/PID/stat field 19 (nice). Linux-only; skip elsewhere.
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        // Field 19, 0-indexed after the `)`-delimited comm field.
+        // /proc/stat format: pid (comm) state ppid ... nice ...
+        // Safer parse: rsplit on ')' to skip comm (can contain spaces).
+        let after_comm = stat.rsplit_once(')').unwrap().1;
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        // After `)`: state=0, ppid=1, ..., nice=16 (field 19 overall, 16 after comm).
+        let nice: i32 = fields[16].parse().unwrap();
+        assert_eq!(
+            nice, 10,
+            "ProcessPriority=low → nice 10; /proc/stat said {nice}"
+        );
+    }
+
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("setpriority") || !stderr.contains("failed"),
+        "setpriority should succeed for nice=10 (lowering); stderr:\n{stderr}"
     );
 }

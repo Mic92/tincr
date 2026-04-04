@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_bin, wait_for_file,
+    TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_cmd, wait_for_file,
     write_ed25519_privkey,
 };
 
@@ -73,7 +73,7 @@ fn spawn_daemon(
     pidfile: &std::path::Path,
     socket: &std::path::Path,
 ) -> Child {
-    Command::new(tincd_bin())
+    tincd_cmd()
         .arg("-c")
         .arg(confbase)
         .arg("--pidfile")

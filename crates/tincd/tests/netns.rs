@@ -77,7 +77,7 @@ use std::time::Duration;
 mod common;
 use common::linux::{run_ip, wait_for_carrier};
 use common::{
-    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_bin,
+    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_cmd,
     wait_for_file, write_ed25519_privkey,
 };
 
@@ -413,7 +413,7 @@ impl Node {
     }
 
     fn spawn(&self) -> Child {
-        Command::new(tincd_bin())
+        tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)
             .arg("--pidfile")

@@ -40,12 +40,12 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_bin,
+    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_cmd,
     wait_for_file_with as wait_for_file, write_ed25519_privkey,
 };
 
@@ -146,7 +146,7 @@ impl Node {
     }
 
     fn spawn(&self) -> Child {
-        Command::new(tincd_bin())
+        tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)
             .arg("--pidfile")

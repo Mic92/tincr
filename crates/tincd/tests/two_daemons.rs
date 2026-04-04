@@ -22,12 +22,12 @@
 //! the tests typically complete in <1s.
 
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_bin,
+    Ctl, TmpGuard, alloc_port, drain_stderr, node_status, poll_until, pubkey_from_seed, tincd_cmd,
     wait_for_file, write_ed25519_privkey,
 };
 
@@ -261,7 +261,7 @@ impl Node {
             assert!(flags >= 0, "fcntl GETFD");
             assert_eq!(libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC), 0);
         }
-        Command::new(tincd_bin())
+        tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)
             .arg("--pidfile")
@@ -275,7 +275,7 @@ impl Node {
     }
 
     fn spawn(&self) -> Child {
-        Command::new(tincd_bin())
+        tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)
             .arg("--pidfile")
@@ -1534,7 +1534,7 @@ fn three_daemon_relay() {
 
     // ─── spawn: mid first (the hub everyone connects to) ─────────
     // mid runs at debug-level so we can assert the relay log lines.
-    let mut mid_child = Command::new(tincd_bin())
+    let mut mid_child = tincd_cmd()
         .arg("-c")
         .arg(&mid.confbase)
         .arg("--pidfile")
@@ -1803,7 +1803,7 @@ fn three_daemon_tunnelserver() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
 
     // ─── spawn: mid first (the hub) ──────────────────────────────
-    let mut mid_child = Command::new(tincd_bin())
+    let mut mid_child = tincd_cmd()
         .arg("-c")
         .arg(&mid.confbase)
         .arg("--pidfile")
@@ -2733,7 +2733,7 @@ fn autoconnect_converges_to_three() {
     // tmpfile captures them for the failure dump.
     let spawn_logged = |n: &Node| {
         let log = std::fs::File::create(tmp.path().join(format!("{}.stderr", n.name))).unwrap();
-        Command::new(tincd_bin())
+        tincd_cmd()
             .arg("-c")
             .arg(&n.confbase)
             .arg("--pidfile")
@@ -3208,7 +3208,7 @@ fn udp_relay_gate_unauthenticated_sender() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
 
     // mid runs at debug-level so we can assert the gate log line.
-    let mut mid_child = Command::new(tincd_bin())
+    let mut mid_child = tincd_cmd()
         .arg("-c")
         .arg(&mid.confbase)
         .arg("--pidfile")
@@ -3770,7 +3770,7 @@ fn three_daemon_forwarding_off_drops_transit() {
 
     // ─── spawn: mid first ────────────────────────────────────────
     // mid runs at debug so we can assert the gate's log line.
-    let mut mid_child = Command::new(tincd_bin())
+    let mut mid_child = tincd_cmd()
         .arg("-c")
         .arg(&mid.confbase)
         .arg("--pidfile")

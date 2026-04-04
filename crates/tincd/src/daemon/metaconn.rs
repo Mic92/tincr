@@ -525,7 +525,8 @@ impl Daemon {
                 | DispatchResult::Reload
                 | DispatchResult::Retry
                 | DispatchResult::Purge
-                | DispatchResult::Disconnect(_)| DispatchResult::DumpTraffic => {
+                | DispatchResult::Disconnect(_)
+                | DispatchResult::DumpTraffic => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

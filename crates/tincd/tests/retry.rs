@@ -16,12 +16,12 @@
 //! territory (off-limits for this commit).
 
 use std::io::{BufRead, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    Ctl, TmpGuard, alloc_port, drain_stderr, read_cookie, tincd_bin, wait_for_file,
+    Ctl, TmpGuard, alloc_port, drain_stderr, read_cookie, tincd_cmd, wait_for_file,
     write_ed25519_privkey,
 };
 
@@ -111,7 +111,7 @@ fn sigalrm_retries_now() {
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -213,7 +213,7 @@ fn req_retry_retries_now() {
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
@@ -291,7 +291,7 @@ fn req_disconnect_replies() {
     std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
-    let mut child = Command::new(tincd_bin())
+    let mut child = tincd_cmd()
         .arg("-c")
         .arg(&confbase)
         .arg("--pidfile")

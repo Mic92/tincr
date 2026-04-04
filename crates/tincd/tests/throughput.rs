@@ -311,6 +311,10 @@ impl Node {
     fn spawn(&self) -> ChildWithLog {
         let child = match &self.which {
             Impl::Rust => Command::new(env!("CARGO_BIN_EXE_tincd"))
+                // Rust tincd now detaches by default (C compat).
+                // -D keeps it foreground so ChildWithLog can drain
+                // stderr and kill it on drop.
+                .arg("-D")
                 .arg("-c")
                 .arg(&self.confbase)
                 .arg("--pidfile")

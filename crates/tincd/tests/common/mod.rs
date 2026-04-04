@@ -32,7 +32,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 // ═══════════════════════════ tempdir ═══════════════════════════════
@@ -73,6 +73,25 @@ impl Drop for TmpGuard {
 /// `CARGO_BIN_EXE_tincd` — the binary cargo just built.
 pub fn tincd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tincd"))
+}
+
+/// `Command::new(tincd_bin())` with `-D` (no-detach) pre-added.
+///
+/// The C `tincd.c:64` defaults `do_detach = true`; the Rust binary
+/// matches that since the main.rs cluster commit. A detached child
+/// double-forks out from under `Child` — the test sees the original
+/// parent exit 0 immediately, wait_for_file races a process that
+/// isn't ours, and `child.kill()` is a no-op. Every test that
+/// observes the daemon must keep it foreground.
+///
+/// Tests that DON'T spawn (the `.output()` ones that just check
+/// argv-parse errors) don't need `-D` — the daemon errors out
+/// before `detach()` is reached — but they get it anyway via this
+/// helper. Harmless.
+pub fn tincd_cmd() -> Command {
+    let mut c = Command::new(tincd_bin());
+    c.arg("-D");
+    c
 }
 
 /// Pre-allocate a TCP port: bind to 0, read it back, drop the

@@ -510,6 +510,10 @@ impl Node {
     fn spawn(&self) -> ChildWithLog {
         let child = match self.which {
             Impl::Rust => Command::new(rust_tincd_bin())
+                // Rust tincd now matches C: detach by default. Same
+                // -D as the C arm below; the daemon would fork out
+                // from under ChildWithLog otherwise.
+                .arg("-D")
                 .arg("-c")
                 .arg(&self.confbase)
                 .arg("--pidfile")
