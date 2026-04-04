@@ -38,13 +38,14 @@ impl Daemon {
             }
         }
 
-        // C `:1003-1009`: per-host PMTU clamp on `n->mtu`. C `node.c:84`
-        // inits `n->mtu = MTU` so the `< n->mtu` check passes for any
-        // sane config. We init `pmtu` lazily (try_tx); seed it now
-        // with the clamp so the first probe cycle starts from a sane
-        // ceiling instead of wasting probes above the user's known
-        // path MTU. Global `PMTU` (`:1007`) deferred (separate gap).
-        let host_pmtu = conn.host_pmtu;
+        // C `:1003-1009`: per-host AND global PMTU clamp on `n->mtu`.
+        // C `node.c:84` inits `n->mtu = MTU` so the `< n->mtu` check
+        // passes for any sane config. We init `pmtu` lazily (try_tx);
+        // seed it now with the clamp so the first probe cycle starts
+        // from a sane ceiling instead of wasting probes above the
+        // user's known path MTU. The min(host, global) is computed in
+        // proto.rs::handle_id.
+        let pmtu_cap = conn.pmtu_cap;
 
         conn.allow_request = None; // C `:1023`
 
@@ -93,7 +94,7 @@ impl Daemon {
         // ceiling. C only writes `n->mtu` (probes still binary-search
         // 0..MTU); we also clamp `maxmtu` — strictly better, the
         // search converges faster and never probes above the cap.
-        if let Some(cap) = host_pmtu {
+        if let Some(cap) = pmtu_cap {
             let now = self.timers.now();
             let tunnel = self.tunnels.entry(peer_id).or_default();
             let p = tunnel

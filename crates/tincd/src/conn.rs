@@ -216,8 +216,11 @@ pub struct Connection {
     pub host_clamp_mss: Option<bool>,
     /// `hosts/NAME` `Weight` (`protocol_auth.c:863`).
     pub host_weight: Option<i32>,
-    /// `hosts/NAME` `PMTU` (`protocol_auth.c:1003`).
-    pub host_pmtu: Option<u16>,
+    /// PMTU clamp (`protocol_auth.c:1003-1009`). MIN of per-host
+    /// `PMTU` and global tinc.conf `PMTU` — both clamp, both `&& mtu
+    /// < n->mtu`. `None` = neither set. Named `cap` not `host_` since
+    /// the value may come from the global config.
+    pub pmtu_cap: Option<u16>,
     /// `c->status.log` + `c->log_level` (`connection.h:51,112`). When
     /// `Some`, this conn receives REQ_LOG records for messages at or
     /// above the level. C uses C debug-level ints (`-1..=10`); we map
@@ -285,7 +288,7 @@ impl Connection {
             host_tcponly: None,
             host_clamp_mss: None,
             host_weight: None,
-            host_pmtu: None,
+            pmtu_cap: None,
             log_level: None,
         }
     }
@@ -323,7 +326,7 @@ impl Connection {
             host_tcponly: None,
             host_clamp_mss: None,
             host_weight: None,
-            host_pmtu: None,
+            pmtu_cap: None,
             log_level: None,
         }
     }
@@ -369,7 +372,7 @@ impl Connection {
             host_tcponly: None,
             host_clamp_mss: None,
             host_weight: None,
-            host_pmtu: None,
+            pmtu_cap: None,
             log_level: None,
         }
     }

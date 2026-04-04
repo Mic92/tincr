@@ -355,6 +355,14 @@ pub struct DaemonSettings {
     /// and `try_mtu` skips the not-confirmed reset (`:1351`); the
     /// daemon falls back to TCP-only forwarding.
     pub udp_discovery: bool,
+    /// Global `PMTU` from tinc.conf (`protocol_auth.c:1007`). Clamps
+    /// ALL peers. Per-host `PMTU` ALSO clamps (both apply, min wins).
+    /// `None` = not set in tinc.conf.
+    pub global_pmtu: Option<u16>,
+    /// Global `Weight` from tinc.conf (`protocol_auth.c:864`).
+    /// Fallback when per-host `Weight` is absent. Overrides the RTT
+    /// measurement. `None` = not set, RTT wins.
+    pub global_weight: Option<i32>,
     /// `device_standby` (`net_setup.c:57`, set at `:1093` via
     /// `DeviceStandby`). Default false. When set, `tinc-up` is NOT
     /// fired at setup (`:1267`): the script defers until the FIRST
@@ -482,6 +490,10 @@ impl Default for DaemonSettings {
             max_connection_burst: 10,
             // C `net_packet.c:83`: `bool udp_discovery = true`.
             udp_discovery: true,
+            // C `protocol_auth.c:1007`: only set if config present.
+            global_pmtu: None,
+            // C `protocol_auth.c:864`: only set if config present.
+            global_weight: None,
             // C `net_setup.c:57`: `bool device_standby = false`.
             device_standby: false,
         }
@@ -511,6 +523,21 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         && let Ok(v) = u32::try_from(v)
     {
         settings.pingtimeout = v.clamp(1, settings.pinginterval);
+    }
+    // PMTU global (`protocol_auth.c:1007`). Per-host PMTU is read in
+    // proto.rs::handle_id; this is the tinc.conf-level clamp.
+    if let Some(e) = config.lookup("PMTU").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u16::try_from(v)
+    {
+        settings.global_pmtu = Some(v);
+    }
+    // Weight global (`protocol_auth.c:864`). Fallback when per-host
+    // Weight absent.
+    if let Some(e) = config.lookup("Weight").next()
+        && let Ok(v) = e.get_int()
+    {
+        settings.global_weight = Some(v);
     }
     // MaxTimeout (`:527-533`).
     if let Some(e) = config.lookup("MaxTimeout").next()
@@ -2675,6 +2702,9 @@ mod tests {
         // C `net_setup.c:57`: `bool device_standby = false`.
         assert!(!s.device_standby);
         assert!(s.scripts_interpreter.is_none());
+        // C `protocol_auth.c:864,1007`: only set if config present.
+        assert!(s.global_pmtu.is_none());
+        assert!(s.global_weight.is_none());
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max

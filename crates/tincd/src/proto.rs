@@ -321,6 +321,9 @@ pub struct IdCtx<'a> {
     /// `invitation_key` (`protocol_auth.c:56`). `None` → `?` branch
     /// rejects (`:341-344`).
     pub invitation_key: Option<&'a SigningKey>,
+    /// Global tinc.conf `PMTU` (`protocol_auth.c:1007`). Clamps in
+    /// addition to per-host (both `&& mtu < n->mtu`, min wins).
+    pub global_pmtu: Option<u16>,
 }
 
 /// `protocol_auth.c:372`: `sptps_start(..., "tinc invitation", 15, ...)`.
@@ -551,11 +554,17 @@ pub fn handle_id(
         .lookup("Weight")
         .next()
         .and_then(|e| e.get_int().ok());
-    conn.host_pmtu = host_config
+    let host_pmtu = host_config
         .lookup("PMTU")
         .next()
         .and_then(|e| e.get_int().ok())
         .and_then(|v| u16::try_from(v).ok());
+    // C `protocol_auth.c:1003-1009`: per-host then global, both clamp
+    // (`&& mtu < n->mtu`). Compute min here so connect.rs's single-
+    // cap clamp is correct. `Option::min` returns None if EITHER is
+    // None (wrong: absent should mean "no clamp", not "win").
+    // `flatten().min()` skips Nones — correct.
+    conn.pmtu_cap = [host_pmtu, ctx.global_pmtu].into_iter().flatten().min();
 
     // C `:437-439`: `if(minor && !ecdsa) minor = 1` — downgrade to
     // legacy. We forbid legacy: no pubkey → reject outright.
@@ -638,10 +647,14 @@ pub fn handle_id(
 ///
 /// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight` (read
 /// by `ack_h` at `:996-999`, `:1048`).
+///
+/// `global_weight`: tinc.conf `Weight` (`protocol_auth.c:864`) —
+/// fallback when per-host `Weight` absent. `None` = RTT wins.
 pub fn send_ack(
     conn: &mut Connection,
     my_udp_port: u16,
     myself_options: ConnOptions,
+    global_weight: Option<i32>,
     now: Instant,
 ) -> bool {
     // C `:827-829`: legacy upgrade. Forbidden; id_h already rejected.
@@ -651,9 +664,7 @@ pub fn send_ack(
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
     // C `:844-865`: per-host config OR myself->options. C composes
-    // bit-by-bit; the per-host fields were extracted at id_h. Global
-    // `Weight` fallback (`:864`) deferred (separate gap, net_setup.c
-    // global config plumbing).
+    // bit-by-bit; the per-host fields were extracted at id_h.
     let mut opts = ConnOptions::empty();
     // C `:844-846`: IndirectData per-host (yes only) OR global.
     if conn.host_indirect == Some(true) || myself_options.contains(ConnOptions::INDIRECT) {
@@ -682,9 +693,9 @@ pub fn send_ack(
     }
     conn.options = opts;
 
-    // C `:863-865`: per-host Weight overrides RTT measurement. Global
-    // `Weight` fallback (`:864`) deferred (config_tree global plumbing).
-    let weight = conn.host_weight.unwrap_or(weight);
+    // C `:863-865`: per-host > global > RTT. `if(!get_host) get_global`
+    // — fallback, not min. RTT (`:838`) loses to either config.
+    let weight = conn.host_weight.or(global_weight).unwrap_or(weight);
     conn.estimated_weight = weight;
 
     // C `:867`: `"%d %s %d %x"`. `myport.udp` is a STRING in C; same
@@ -938,6 +949,7 @@ mod tests {
             mykey,
             confbase: Path::new("."),
             invitation_key: None,
+            global_pmtu: None,
         }
     }
 
@@ -1097,6 +1109,7 @@ mod tests {
             mykey: &mykey,
             confbase: setup.confbase(),
             invitation_key: None,
+            global_pmtu: None,
         };
 
         // 18.7 — major 18, we're 17.
@@ -1122,6 +1135,7 @@ mod tests {
             mykey: &mykey,
             confbase: setup.confbase(),
             invitation_key: None,
+            global_pmtu: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng);
@@ -1149,6 +1163,7 @@ mod tests {
             mykey: &mykey,
             confbase: setup.confbase(),
             invitation_key: None,
+            global_pmtu: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut OsRng);
@@ -1179,6 +1194,7 @@ mod tests {
             mykey: &mykey,
             confbase: setup.confbase(),
             invitation_key: None,
+            global_pmtu: None,
         };
 
         let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut OsRng);
@@ -1208,6 +1224,7 @@ mod tests {
             mykey: &mykey,
             confbase: Path::new("."),
             invitation_key: Some(&inv_key),
+            global_pmtu: None,
         };
 
         // Too short (32 bytes b64 → 43 chars; this is 7).
@@ -1557,7 +1574,7 @@ mod tests {
         c.protocol_minor = 2;
         c.host_tcponly = Some(true);
         let now = Instant::now();
-        send_ack(&mut c, 655, myself_options_default(), now);
+        send_ack(&mut c, 655, myself_options_default(), None, now);
         assert!(c.options.contains(ConnOptions::TCPONLY));
         assert!(c.options.contains(ConnOptions::INDIRECT));
         assert!(!c.options.contains(ConnOptions::PMTU_DISCOVERY));
@@ -1576,7 +1593,7 @@ mod tests {
         let mut c = mkconn();
         c.protocol_minor = 2;
         c.host_clamp_mss = Some(false);
-        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        send_ack(&mut c, 655, myself_options_default(), None, Instant::now());
         assert!(!c.options.contains(ConnOptions::CLAMP_MSS));
         assert!(c.options.contains(ConnOptions::PMTU_DISCOVERY));
     }
@@ -1589,7 +1606,7 @@ mod tests {
         let mut c = mkconn();
         c.protocol_minor = 2;
         c.host_indirect = Some(true);
-        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        send_ack(&mut c, 655, myself_options_default(), None, Instant::now());
         assert!(c.options.contains(ConnOptions::INDIRECT));
         assert!(!c.options.contains(ConnOptions::TCPONLY));
         // PMTU stays on (only TCPONLY suppresses it).
@@ -1603,6 +1620,7 @@ mod tests {
             &mut c,
             655,
             ConnOptions::INDIRECT | ConnOptions::CLAMP_MSS,
+            None,
             Instant::now(),
         );
         assert!(c.options.contains(ConnOptions::INDIRECT));
@@ -1616,11 +1634,52 @@ mod tests {
         c.host_weight = Some(42);
         // RTT measure would be 0ms (start == now); per-host wins.
         let now = c.start;
-        send_ack(&mut c, 655, myself_options_default(), now);
+        send_ack(&mut c, 655, myself_options_default(), None, now);
         assert_eq!(c.estimated_weight, 42);
         let line = std::str::from_utf8(c.outbuf.live()).unwrap();
         // "4 655 42 700000c\n"
         assert!(line.contains(" 42 "), "got {line:?}");
+    }
+
+    /// `protocol_auth.c:864`: global Weight fallback when per-host
+    /// absent. `if(!get_host) get_global` — overrides RTT measure.
+    #[test]
+    fn send_ack_global_weight_fallback() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        // Per-host absent; RTT would be 0ms (start == now).
+        let now = c.start;
+        send_ack(&mut c, 655, myself_options_default(), Some(50), now);
+        assert_eq!(c.estimated_weight, 50); // global wins over RTT
+        let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+        assert!(line.contains(" 50 "), "got {line:?}");
+    }
+
+    /// `protocol_auth.c:863-865`: per-host suppresses global. Fallback
+    /// chain, NOT min: per-host > global > RTT.
+    #[test]
+    fn send_ack_per_host_beats_global() {
+        let mut c = mkconn();
+        c.protocol_minor = 2;
+        c.host_weight = Some(42);
+        let now = c.start;
+        send_ack(&mut c, 655, myself_options_default(), Some(50), now);
+        assert_eq!(c.estimated_weight, 42); // per-host wins
+    }
+
+    /// `protocol_auth.c:1003-1009`: per-host AND global PMTU both
+    /// clamp (min wins). NOT a fallback. The match in handle_id.
+    #[test]
+    fn pmtu_cap_is_min_of_host_and_global() {
+        // The `[a, b].into_iter().flatten().min()` idiom. Direct
+        // unit test of the semantics; handle_id wiring is exercised
+        // by the peer-branch integration tests.
+        let cap = |h: Option<u16>, g: Option<u16>| [h, g].into_iter().flatten().min();
+        assert_eq!(cap(Some(1200), Some(1400)), Some(1200));
+        assert_eq!(cap(None, Some(1400)), Some(1400));
+        assert_eq!(cap(Some(1400), Some(1200)), Some(1200));
+        assert_eq!(cap(None, None), None);
+        assert_eq!(cap(Some(1200), None), Some(1200));
     }
 
     /// No per-host overrides → inherit global. Regression: this is
@@ -1629,7 +1688,7 @@ mod tests {
     fn send_ack_no_per_host_inherits_global() {
         let mut c = mkconn();
         c.protocol_minor = 2;
-        send_ack(&mut c, 655, myself_options_default(), Instant::now());
+        send_ack(&mut c, 655, myself_options_default(), None, Instant::now());
         assert_eq!(
             c.options,
             ConnOptions::PMTU_DISCOVERY | ConnOptions::CLAMP_MSS

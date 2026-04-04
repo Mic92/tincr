@@ -245,6 +245,7 @@ impl Daemon {
                         mykey: &self.mykey,
                         confbase: &confbase,
                         invitation_key: self.invitation_key.as_ref(),
+                        global_pmtu: self.settings.global_pmtu,
                     };
                     let now = self.timers.now();
                     match handle_id(conn, &line, &ctx, now, &mut OsRng) {
@@ -641,7 +642,13 @@ impl Daemon {
                                conn.name, conn.hostname);
                     if conn.allow_request == Some(Request::Ack) {
                         let now = self.timers.now();
-                        needs_write |= send_ack(conn, self.my_udp_port, self.myself_options, now);
+                        needs_write |= send_ack(
+                            conn,
+                            self.my_udp_port,
+                            self.myself_options,
+                            self.settings.global_weight,
+                            now,
+                        );
                     }
                 }
                 Output::Record { mut bytes, .. } => {
