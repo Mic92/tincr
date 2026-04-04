@@ -17,8 +17,8 @@
 //! small fd leak the C has), `SockAddr` (= C `sockaddr_t` union).
 //!
 //! Deferred sockopts: `SO_MARK`/`SO_BINDTODEVICE` (`:225-247`, gated
-//! on `all`), `SO_RCVBUF`/`SO_SNDBUF` (`:334-335`), `IP_MTU_DISCOVER`
-//! (`:349-364`), `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
+//! on `all`), `SO_RCVBUF`/`SO_SNDBUF` (`:334-335`),
+//! `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
 //!
 //! ## getaddrinfo: skip it
 //!
@@ -218,8 +218,52 @@ fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
         log::warn!(target: "tincd::net", "IPV6_V6ONLY (udp): {e}");
     }
 
-    // Deferred: SO_RCVBUF/SO_SNDBUF (1MB each), IP_MTU_DISCOVER (PMTU),
-    // SO_MARK, SO_BINDTODEVICE.
+    // `:349-378`: IP_MTU_DISCOVER / IPV6_MTU_DISCOVER = PMTUDISC_DO.
+    // Forces DF on every datagram. Without this, oversized PMTU probes
+    // get IP-fragmented and arrive successfully — pmtu.rs walks minmtu
+    // up past the physical MTU, the kernel never populates its PMTU
+    // cache (so choose_initial_maxmtu reads nothing), and EMSGSIZE
+    // never reaches reduce_mtu. The whole PMTU machinery becomes
+    // decorative. C gates on OPTION_PMTU_DISCOVERY (default ON unless
+    // TCPOnly); we set unconditionally — if TCPOnly, this socket
+    // carries no data anyway. Best-effort like the C: warn, don't bail.
+    {
+        let (level, optname, optval, label) = if domain == Domain::IPV6 {
+            (
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MTU_DISCOVER,
+                libc::IPV6_PMTUDISC_DO,
+                "IPV6_MTU_DISCOVER",
+            )
+        } else {
+            (
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                libc::IP_PMTUDISC_DO,
+                "IP_MTU_DISCOVER",
+            )
+        };
+        // SAFETY: fd is live (Socket owns it); optval is a stack c_int
+        // whose address+len we pass for the duration of the call. The
+        // syscall copies out before return.
+        // truncation: size_of::<c_int>() == 4, fits socklen_t.
+        #[allow(unsafe_code, clippy::cast_possible_truncation)]
+        let rc = unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                level,
+                optname,
+                (&raw const optval).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            log::warn!(target: "tincd::net", "{label}: {}", io::Error::last_os_error());
+        }
+    }
+
+    // Deferred: SO_RCVBUF/SO_SNDBUF (1MB each), SO_MARK,
+    // SO_BINDTODEVICE.
 
     s.bind(addr)?;
 
@@ -1154,6 +1198,53 @@ mod tests {
         let (_, udp_fd) = listeners[0].fds();
         let flags = OFlag::from_bits_truncate(fcntl(udp_fd, FcntlArg::F_GETFL).unwrap());
         assert!(flags.contains(OFlag::O_NONBLOCK));
+    }
+
+    /// `setup_udp` sets `IP_MTU_DISCOVER = IP_PMTUDISC_DO` (and the v6
+    /// analogue). Read it back. Can't test the actual PMTU behaviour
+    /// here (the netns harness uses lo, MTU 65536) but we CAN prove
+    /// the syscall fires. Regression for the gap-audit's #1 finding:
+    /// without this, Linux defaults to `IP_PMTUDISC_WANT` and the
+    /// pmtu.rs probes get L3-fragmented through.
+    #[test]
+    fn open_udp_pmtudisc_do() {
+        fn get_mtu_discover(fd: RawFd, level: libc::c_int, optname: libc::c_int) -> libc::c_int {
+            let mut val: libc::c_int = -1;
+            // SAFETY: fd is live (held by `listeners` for the test's
+            // duration); val/len are stack locals.
+            // truncation: size_of::<c_int>() == 4, fits socklen_t.
+            #[allow(unsafe_code, clippy::cast_possible_truncation)]
+            let rc = unsafe {
+                let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                libc::getsockopt(
+                    fd,
+                    level,
+                    optname,
+                    (&raw mut val).cast::<libc::c_void>(),
+                    &raw mut len,
+                )
+            };
+            assert_eq!(rc, 0, "getsockopt: {}", io::Error::last_os_error());
+            val
+        }
+
+        // v4: always available.
+        let listeners = open_listeners(0, AddrFamily::Ipv4);
+        let (_, udp_fd) = listeners[0].fds();
+        assert_eq!(
+            get_mtu_discover(udp_fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER),
+            libc::IP_PMTUDISC_DO,
+        );
+
+        // v6: may be disabled. Skip if no listener.
+        let listeners6 = open_listeners(0, AddrFamily::Ipv6);
+        if let Some(l) = listeners6.first() {
+            let (_, udp_fd) = l.fds();
+            assert_eq!(
+                get_mtu_discover(udp_fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER),
+                libc::IPV6_PMTUDISC_DO,
+            );
+        }
     }
 
     /// Second listener pair on the same port: TCP bind fails (REUSEADDR
