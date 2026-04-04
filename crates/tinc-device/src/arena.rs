@@ -67,9 +67,19 @@ pub enum DrainResult {
     /// ring drain but doesn't today. macOS vmnet is `Frames` (batch,
     /// not super-packet — see `bsd-perf-findings.md`).
     Super {
+        /// Length of the IP packet in `as_contiguous()[..len]`. The
+        /// vnet_hdr prefix is already stripped by the device impl.
         len: usize,
+        /// MSS — payload bytes per output segment after `tso_split`.
         gso_size: u16,
         gso_type: GsoType,
+        /// `virtio_net_hdr.csum_start`: the L4 header offset (= IP
+        /// header length, since TUN has no L2). `tso_split` reads
+        /// the TCP header at `pkt[csum_start..]`.
+        csum_start: u16,
+        /// `virtio_net_hdr.csum_offset`: where the L4 checksum field
+        /// sits within the L4 header. 16 for TCP.
+        csum_offset: u16,
     },
 
     /// EAGAIN on the first read. Re-arm the fd and yield.

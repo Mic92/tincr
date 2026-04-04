@@ -392,6 +392,18 @@ impl Node {
             tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
         }
         tinc_conf.push_str("PingTimeout = 1\n");
+        // Phase 2a TSO ingest gate (`tso_ingest_stream_integrity`).
+        // Only on the SENDER (alice): she's the one reading super-
+        // segments from her TUN. Bob (receiver) writes decrypted
+        // segments back into his TUN — those are MTU-sized already
+        // (alice's tso_split produced them); no need for vnet_hdr
+        // on bob's side. Keeping bob on the non-vnet path also
+        // isolates the test: a failure means alice's tso_split is
+        // wrong, not bob's vnet_hdr write path.
+        if std::env::var_os("TINCD_TEST_GSO").is_some() && self.name == "alice" {
+            // `get_bool` accepts only `yes`/`no` (C `strcasecmp`).
+            tinc_conf.push_str("ExperimentalGSO = yes\n");
+        }
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         // hosts/SELF — Port + Subnet.
@@ -413,6 +425,15 @@ impl Node {
     }
 
     fn spawn(&self) -> Child {
+        self.spawn_with_log("tincd=debug")
+    }
+
+    /// Spawn with explicit `RUST_LOG`. The `tso_ingest_stream_
+    /// integrity` test pushes 8 MiB through; at `debug` per-packet
+    /// log volume the 64 KiB stderr pipe fills and the daemon
+    /// blocks on `write(2, ...)`. Same issue throughput.rs hit
+    /// (see `ChildWithLog`); here we just turn the volume down.
+    fn spawn_with_log(&self, rust_log: &str) -> Child {
         tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)
@@ -420,7 +441,7 @@ impl Node {
             .arg(&self.pidfile)
             .arg("--socket")
             .arg(&self.socket)
-            .env("RUST_LOG", "tincd=debug")
+            .env("RUST_LOG", rust_log)
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn tincd")
@@ -730,6 +751,263 @@ fn real_tun_unreachable() {
     assert!(
         alice_stderr.contains("unreachable, sending ICMP"),
         "alice should log the ICMP synth; stderr:\n{alice_stderr}"
+    );
+
+    drop(netns);
+}
+
+/// Phase 2a TSO ingest integrity gate. `RUST_REWRITE_10G.md`.
+///
+/// With `ExperimentalGSO = on`, the daemon sets `IFF_VNET_HDR +
+/// TUNSETOFFLOAD(TUN_F_TSO4|6)`. Kernel TCP stops segmenting at the
+/// TUN MTU; it hands the daemon ≤64KB super-segments. The daemon's
+/// `tso_split` re-segments them with re-synthesized TCP headers
+/// (seqno arithmetic, csum recompute, IPv4 ID++).
+///
+/// **The risk: get TCP seqno wrong → silent stream corruption.**
+/// The receiving kernel reassembles by seqno; off-by-one means
+/// wrong bytes in the right place, no error visible. Only a
+/// sha256-of-stream catches it.
+///
+/// ## What this proves
+///
+/// 1. **Seqno arithmetic**: 8 MiB of TCP at MSS ≈1400 = ~6000
+///    segments. Each segment's seqno = first + i*gso_size. If the
+///    arithmetic is off (e.g. `*` vs `+`, or `i` vs `i+1`), the
+///    sha256 differs.
+/// 2. **IPv4 csum recompute**: bob's kernel verifies the IP header
+///    csum on receipt (`ip_rcv` → `ip_fast_csum`). Bad csum →
+///    silently dropped → TCP retransmit storm → transfer either
+///    hangs (timeout) or completes via retransmit (which proves
+///    nothing). Either way, sha256 differs OR test times out.
+/// 3. **TCP csum recompute**: same, but `tcp_v4_rcv` →
+///    `tcp_checksum_complete`. The pseudo-header chaining must be
+///    correct.
+/// 4. **PSH/FIN flag clearing**: PSH on a non-last segment makes
+///    bob's kernel deliver early (cosmetic; doesn't corrupt). FIN
+///    on a non-last segment closes the connection mid-stream —
+///    `socat` exits early, sha256 differs.
+/// 5. **`gso_none_checksum`**: the FIN/ACK and bare-ACK frames at
+///    the end of the transfer are GSO_NONE with NEEDS_CSUM. If we
+///    don't complete the partial csum, bob drops the FIN → socat
+///    waits for FIN → timeout.
+///
+/// ## Why 8 MiB
+///
+/// Large enough that the kernel definitely batches into super-
+/// segments (it batches once cwnd opens, after ~10 RTTs of slow
+/// start). At 8 MiB, ~5800 full-MSS frames + a short tail —
+/// exercises both the even-split and short-tail paths in `tso_split`.
+/// Small enough to finish in <2s on loopback (no ChaCha20 release
+/// build needed; dev profile is fine).
+///
+/// ## Why socat not iperf3
+///
+/// iperf3 measures throughput; we want INTEGRITY. socat pipes raw
+/// bytes: `dd if=/dev/urandom | socat - TCP:bob` on one side,
+/// `socat TCP-LISTEN | sha256sum` on the other. Compare hashes.
+/// One process either side, no JSON parsing, deterministic.
+#[test]
+fn tso_ingest_stream_integrity() {
+    // Set BEFORE enter_netns so the inner re-exec inherits it.
+    // SAFETY: single-threaded at this point (before bwrap re-exec
+    // and before any daemon spawn). The libtest harness runs each
+    // test on its own thread, but no other thread reads the env
+    // until we spawn() below.
+    unsafe { std::env::set_var("TINCD_TEST_GSO", "1") };
+
+    let Some(netns) = enter_netns("tso_ingest_stream_integrity") else {
+        return;
+    };
+
+    let tmp = tmp("tso");
+    let alice = Node::new(tmp.path(), "alice", 0xA7, "tinc0", "10.42.0.1/32");
+    let bob = Node::new(tmp.path(), "bob", 0xB7, "tinc1", "10.42.0.2/32");
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
+
+    // ─── spawn (same dance as real_tun_ping) ────────────────────
+    // `info` not `debug`: 8 MiB at MSS 1400 = ~6000 frames; the
+    // per-packet `debug!("Sending packet of {len} bytes")` floods
+    // the 64 KiB stderr pipe. The `tinc_device=info` part lets the
+    // "TSO ingest enabled" log through (it's at info level).
+    let mut bob_child = bob.spawn_with_log("tincd=info");
+    if !wait_for_file(&bob.socket) {
+        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
+    }
+    let alice_child = alice.spawn_with_log("info");
+    if !wait_for_file(&alice.socket) {
+        let _ = bob_child.kill();
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
+    }
+
+    assert!(
+        wait_for_carrier("tinc0", Duration::from_secs(2)),
+        "alice TUNSETIFF; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
+    assert!(wait_for_carrier("tinc1", Duration::from_secs(2)));
+
+    netns.place_devices();
+
+    // ─── handshake ──────────────────────────────────────────────
+    let mut alice_ctl = alice.ctl();
+    let mut bob_ctl = bob.ctl();
+    poll_until(Duration::from_secs(10), || {
+        let a = alice_ctl.dump(3);
+        let b = bob_ctl.dump(3);
+        let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
+        let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x10 != 0);
+        if a_ok && b_ok { Some(()) } else { None }
+    });
+
+    // Kick validkey (same as real_tun_ping).
+    let _ = Command::new("ping")
+        .args(["-c", "1", "-W", "1", "10.42.0.2"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(5), || {
+            let a = alice_ctl.dump(3);
+            let b = bob_ctl.dump(3);
+            let a_ok = node_status(&a, "bob").is_some_and(|s| s & 0x02 != 0);
+            let b_ok = node_status(&b, "alice").is_some_and(|s| s & 0x02 != 0);
+            if a_ok && b_ok { Some(()) } else { None }
+        });
+    }));
+    if validkey.is_err() {
+        let _ = bob_child.kill();
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
+    }
+
+    // ─── generate test data + reference hash ────────────────────
+    // 8 MiB of random bytes. Written to a temp file so we can hash
+    // it once and pipe it once (urandom would give different bytes
+    // on each read).
+    let data_path = tmp.path().join("stream.bin");
+    let dd = Command::new("dd")
+        .args(["if=/dev/urandom", "bs=1M", "count=8"])
+        .arg(format!("of={}", data_path.display()))
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn dd");
+    assert!(dd.success(), "dd: {dd:?}");
+
+    let ref_hash = Command::new("sha256sum")
+        .arg(&data_path)
+        .output()
+        .expect("spawn sha256sum");
+    let ref_hash = String::from_utf8_lossy(&ref_hash.stdout)
+        .split_whitespace()
+        .next()
+        .expect("sha256sum output")
+        .to_owned();
+    eprintln!("reference sha256: {ref_hash}");
+
+    // ─── receiver: socat TCP-LISTEN | sha256sum (in bobside) ───
+    // The hash is written to a file because piping back across
+    // `ip netns exec` is finicky. We read the file after.
+    let rx_hash_path = tmp.path().join("rx.sha256");
+    let rx = Command::new("ip")
+        .args(["netns", "exec", "bobside", "sh", "-c"])
+        .arg(format!(
+            "socat -u TCP-LISTEN:18099,reuseaddr - | sha256sum > '{}'",
+            rx_hash_path.display()
+        ))
+        .spawn()
+        .expect("spawn rx socat");
+    // Wait for the listener to bind. socat doesn't have a
+    // ready-signal; poll for the socket via `ss` or just sleep.
+    // 200ms is generous on loopback.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // ─── sender: socat FILE TCP (in outer netns / alice's side) ─
+    // This is THE test. The kernel TCP stack writes data into
+    // tinc0; with TSO advertised it writes ≤64KB super-segments.
+    // alice's daemon `drain()` returns `Super{..}`, `tso_split`
+    // re-segments. If seqno is off, bob's kernel reassembles
+    // wrong-order bytes → sha256 differs. If csum is off, bob's
+    // kernel drops segments → TCP retransmit storm → timeout.
+    // `connect-timeout=5`: the SYN/SYN-ACK handshake should
+    // complete in microseconds on loopback. If it doesn't, the
+    // GSO_NONE csum-completion path is wrong (SYN gets dropped).
+    // No data-phase timeout: socat blocks until FIN; the nextest
+    // slow-timeout (30s) catches a hang.
+    let tx = Command::new("socat")
+        .arg("-u")
+        .arg(format!("FILE:{}", data_path.display()))
+        .arg("TCP:10.42.0.2:18099,connect-timeout=5")
+        .output()
+        .expect("spawn tx socat");
+    if !tx.status.success() {
+        let _ = bob_child.kill();
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!(
+            "socat tx failed: {:?}\nstderr: {}\n\
+             The TCP connect either timed out (csum bug → SYN dropped) \
+             or RST mid-stream (FIN-on-non-last in tso_split).\n\
+             === alice ===\n{asd}\n=== bob ===\n{bs}",
+            tx.status,
+            String::from_utf8_lossy(&tx.stderr),
+        );
+    }
+
+    // ─── wait for rx + compare hashes ──────────────────────────
+    // socat exits when it sees FIN. sha256sum exits when its stdin
+    // closes. The rx Child completes when both are done.
+    let rx_status = rx.wait_with_output().expect("wait for rx socat").status;
+    assert!(rx_status.success(), "rx socat: {rx_status:?}");
+
+    let rx_hash = std::fs::read_to_string(&rx_hash_path)
+        .expect("read rx hash")
+        .split_whitespace()
+        .next()
+        .expect("sha256sum output format")
+        .to_owned();
+    eprintln!("received  sha256: {rx_hash}");
+
+    drop(alice_ctl);
+    drop(bob_ctl);
+    let _ = bob_child.kill();
+    let bob_stderr = drain_stderr(bob_child);
+    let alice_stderr = drain_stderr(alice_child);
+
+    // The TSO-enabled log line. Proves the feature actually fired
+    // (config parsed, ioctl succeeded). Without this, a green hash
+    // could mean "ExperimentalGSO was silently ignored and we
+    // tested the non-vnet path". The `tinc_device` log target
+    // surfaces with `RUST_LOG=info` (no target filter → all crates).
+    assert!(
+        alice_stderr.contains("TSO ingest enabled"),
+        "alice should log TUNSETOFFLOAD success. \
+         If the assert fires but sha256 below matches anyway, the \
+         feature works — just the log target/level is wrong. \
+         stderr:\n{alice_stderr}"
+    );
+    // No `tso_split` warnings: every super-segment was successfully
+    // re-segmented. A `TooManySegments` or `BadTcpHlen` warn here
+    // means some traffic took the drop path (and TCP retransmitted
+    // around it, masking the error). Zero warns = every packet went
+    // through tso_split cleanly.
+    assert!(
+        !alice_stderr.contains("tso_split"),
+        "tso_split logged a warning (some segment was dropped); \
+         stderr:\n{alice_stderr}"
+    );
+
+    // THE ASSERT.
+    assert_eq!(
+        ref_hash, rx_hash,
+        "sha256 mismatch — tso_split CORRUPTED THE STREAM. \
+         Check seqno arithmetic (is it first_seq + i*gso_size?), \
+         IPv4 totlen/csum (off-by-ETH_HLEN?), TCP csum (pseudo-header \
+         length = tcp_hlen + payload, NOT including IP header).\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
     drop(netns);

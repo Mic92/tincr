@@ -548,6 +548,10 @@ impl Daemon {
     /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
     /// byte the same syscall sequence on bsd/linux/fd backends. The
     /// seam is in place for Phase 2 (vnet_hdr device returns `Super`).
+    #[allow(clippy::too_many_lines)] // three drain-result arms; the
+    // `Super` arm is the Phase-2a TSO-split path. Factoring it out
+    // would mean threading `arena`/`nw`/`tx_batch` through a helper;
+    // the control flow reads cleaner inline.
     pub(super) fn on_device_read(&mut self) {
         // mem::take: `route_packet` borrows `&mut self`; the arena
         // slot borrow conflicts. Same dance as `udp_rx_batch`. The
@@ -659,18 +663,126 @@ impl Daemon {
                                 "device fd rearm failed: {e}");
                 }
             }
-            tinc_device::DrainResult::Super { .. } => {
-                // Phase 2 (`RUST_REWRITE_10G.md`): vnet_hdr device
-                // returns a 64KB TCP super-segment, daemon does
-                // userspace TSO-split (TCP seqno arithmetic, csum
-                // recompute). NOT YET. No device impl returns this;
-                // the default `drain()` never can. If this fires,
-                // someone wired a Phase-2 device without the
-                // Phase-2 daemon code.
-                unreachable!(
-                    "DrainResult::Super is RUST_REWRITE_10G.md Phase 2; \
-                     no device impl returns it yet"
+            tinc_device::DrainResult::Super {
+                len,
+                gso_size,
+                gso_type,
+                csum_start,
+                csum_offset,
+            } => {
+                // Phase 2a (`RUST_REWRITE_10G.md`): the vnet_hdr
+                // device put a ≤64KB TCP super-segment in `arena`.
+                // `tso_split` re-segments it into MTU-sized frames
+                // with re-synthesized TCP/IP headers. `route_packet`
+                // runs ONCE (chunk[0]; same dst for all chunks — TSO
+                // is single-flow) then the rest skip the trie lookup.
+                self.device_errors = 0;
+
+                // Lazy alloc the scratch (first Super only).
+                let scratch = self.tso_scratch.get_or_insert_with(|| {
+                    vec![0u8; DEVICE_DRAIN_CAP * tinc_device::DeviceArena::STRIDE]
+                        .into_boxed_slice()
+                });
+                // Same `mem::take` dance as `device_arena`:
+                // `route_packet` borrows `&mut self`, the slice
+                // borrow conflicts.
+                let mut scratch = std::mem::take(scratch);
+                let mut tso_lens = std::mem::take(&mut self.tso_lens);
+
+                let hdr = tinc_device::VirtioNetHdr {
+                    flags: 0,    // unused by tso_split (it always csums)
+                    gso_type: 0, // ditto; gso_type passed separately
+                    hdr_len: 0,  // recomputed from csum_start + tcp doff
+                    gso_size,
+                    csum_start,
+                    csum_offset,
+                };
+                let split = tinc_device::tso_split(
+                    &arena.as_contiguous()[..len],
+                    &hdr,
+                    gso_type,
+                    &mut scratch,
+                    tinc_device::DeviceArena::STRIDE,
+                    &mut tso_lens,
                 );
+                match split {
+                    Ok(count) => {
+                        // Same TX-batch staging as `Frames`. Gate on
+                        // count>1 (one segment = no batch advantage).
+                        if count > 1 && self.tx_batch.is_none() {
+                            self.tx_batch = Some(crate::egress::TxBatch::new(
+                                DEVICE_DRAIN_CAP
+                                    * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                            ));
+                        }
+                        // Stats: count the super-packet as one ingest
+                        // (the "read() drops 30×" gate metric counts
+                        // syscalls, not stat increments). Bytes = the
+                        // raw IP payload we got from the kernel.
+                        let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                        myself_tunnel.in_packets += 1;
+                        myself_tunnel.in_bytes += len as u64;
+
+                        // The win: `route_packet` runs once per super.
+                        // The first call does the trie lookup; the
+                        // rest reuse the same dst (TSO is single-flow,
+                        // mixed-dst super-packets don't exist — the
+                        // kernel TCP stack segments per-socket).
+                        //
+                        // BUT: route_packet has side effects per-packet
+                        // (TX stats, PMTU drive via try_tx, the dense
+                        // batch staging). Calling it once and looping
+                        // would mean rewriting the send path. For now:
+                        // call it `count` times. The 0.94µs→0.56µs
+                        // "other" projection assumed the trie lookup
+                        // amortizes; it does (same `last_routes[]`
+                        // index), and that's the expensive half.
+                        //
+                        // Re-profile after this lands: if `route_packet`
+                        // overhead is still visible, factor a
+                        // `route_first_then_send_rest` that hoists the
+                        // dst out. ~+40 LOC; not yet.
+                        for i in 0..count {
+                            let n = tso_lens[i];
+                            let off = i * tinc_device::DeviceArena::STRIDE;
+                            nw |= self.route_packet(&mut scratch[off..off + n], None);
+                        }
+                        self.flush_tx_batch();
+                        self.tx_batch = None;
+                    }
+                    Err(e) => {
+                        // Kernel-contract violation (vnet_hdr describes
+                        // a packet shape that doesn't match the bytes)
+                        // or undersized scratch (gso_size tiny). Log +
+                        // drop. Inner-TCP retransmits.
+                        log::warn!(target: "tincd::net",
+                                   "tso_split: {e:?} (len={len} \
+                                    gso_size={gso_size}); dropping");
+                    }
+                }
+
+                self.tso_scratch = Some(scratch);
+                self.tso_lens = tso_lens;
+
+                // No re-arm: the vnet_hdr drain does ONE read per
+                // call (one super-packet IS the batch). If the kernel
+                // has another skb queued, the fd is still readable
+                // and the next epoll wake fires. The level-retriggered
+                // re-arm in `Frames` is for the cap-hit case (more in
+                // the queue, we stopped early); here we read until
+                // EAGAIN every time.
+                //
+                // ACTUALLY: we read ONCE, not until EAGAIN. If there's
+                // a second super-packet behind this one, we'd lose the
+                // edge. Re-arm unconditionally. The cost is one
+                // `epoll_ctl(MOD)` per super-packet — at ~2.6k reads/s
+                // (vs 110k pre-TSO) that's negligible.
+                if let Some(io_id) = self.device_io
+                    && let Err(e) = self.ev.rearm(io_id)
+                {
+                    log::error!(target: "tincd::net",
+                                "device fd rearm failed: {e}");
+                }
             }
         }
 

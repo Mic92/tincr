@@ -1302,6 +1302,23 @@ pub struct Daemon {
     /// conflicts. Take, walk, put back.
     pub(crate) device_arena: Option<DeviceArena>,
 
+    /// `tso_split` output scratch (`RUST_REWRITE_10G.md` Phase 2a).
+    /// `DrainResult::Super` means the device put a ≤64KB IP super-
+    /// segment in `device_arena`; `tso_split` writes N × ~1500B
+    /// eth frames into THIS buffer (the input slice can't overlap
+    /// the output — same arena would alias). Same `mem::take` dance:
+    /// `route_packet` borrows `&mut self`, the slot borrow conflicts.
+    ///
+    /// Sized at `DEVICE_DRAIN_CAP * STRIDE` = 64*1600 = 100KB. A
+    /// 64KB super-segment at MSS 1400 = 47 segments; fits with room.
+    /// `None` until the first `Super` arrives (the non-vnet path
+    /// never allocates this).
+    pub(crate) tso_scratch: Option<Box<[u8]>>,
+
+    /// Per-segment lengths from `tso_split`. Same lifetime as
+    /// `tso_scratch`; same lazy alloc.
+    pub(crate) tso_lens: Box<[usize]>,
+
     /// TX batch accumulator (`RUST_REWRITE_10G.md` Phase 1). The
     /// `on_device_read` drain loop stages encrypted frames here
     /// instead of `sendto`-per-frame; one `EgressBatch` ships the
@@ -1815,11 +1832,23 @@ impl Daemon {
                 // free). The netns test precreates so it can move the
                 // device into a child netns AFTER the daemon attaches
                 // (the fd→device binding survives `ip link set netns`).
+                // `ExperimentalGSO = on` → IFF_VNET_HDR + TUNSETOFFLOAD.
+                // `RUST_REWRITE_10G.md` Phase 2a: kernel TCP stops
+                // segmenting, hands us ≤64KB super-segments, daemon does
+                // userspace TSO-split. Feature-gated: get TCP seqno wrong
+                // and the inner stream silently corrupts. Default OFF.
+                // Gate test: `tests/netns.rs::tso_ingest_stream_integrity`.
+                let vnet_hdr = config
+                    .lookup("ExperimentalGSO")
+                    .next()
+                    .and_then(|e| e.get_bool().ok())
+                    .unwrap_or(false);
                 let cfg = tinc_device::DeviceConfig {
                     iface: config
                         .lookup("Interface")
                         .next()
                         .map(|e| e.get_str().to_owned()),
+                    vnet_hdr,
                     ..Default::default()
                 };
                 let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
@@ -2192,6 +2221,11 @@ impl Daemon {
             device_errors: 0,
             device_io,
             device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
+            // Lazy: only allocated on first `DrainResult::Super`.
+            // The non-vnet path (default; ExperimentalGSO=off) never
+            // reaches that arm and never spends the 100KB.
+            tso_scratch: None,
+            tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
             // None: the send site only stages when inside
             // `on_device_read`'s drain loop. The TxBatch itself
             // is built lazily on first drain (no point allocating

@@ -55,6 +55,14 @@ mod ether;
 mod arena;
 pub use arena::{DeviceArena, DrainResult, GsoType};
 
+// Userspace TSO split. Portable: same `virtio_net_hdr` on Linux
+// `IFF_VNET_HDR`, FreeBSD `TAPSVNETHDR`, Windows NDIS LSO. The
+// device backends produce `DrainResult::Super`; the daemon calls
+// `tso_split` on it. NOT cfg-gated: the function is pure header
+// arithmetic on `&[u8]`, runs anywhere.
+mod tso;
+pub use tso::{TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split};
+
 /// L2 vs L3 device. C `device_type_t` (`linux/device.c:33-36`).
 /// The daemon resolves `DeviceType` config + `routing_mode` into
 /// this; we get the resolved value.
@@ -88,6 +96,14 @@ pub struct DeviceConfig {
     /// Resolved mode (`device.c:77-89`). NOT `Option`: an unset
     /// `ifr_flags` is `EINVAL` on `TUNSETIFF`.
     pub mode: Mode,
+
+    /// `IFF_VNET_HDR + TUNSETOFFLOAD` — the Phase 2a TSO ingest
+    /// path. `RUST_REWRITE_10G.md`. Feature-gated: get TCP seqno
+    /// wrong in `tso_split` and the inner stream silently corrupts.
+    /// Default OFF; set by `-o ExperimentalGSO=on`. Only honored
+    /// for `Mode::Tun` (TAP would need `tso_split` to preserve the
+    /// real eth header instead of synthesizing one).
+    pub vnet_hdr: bool,
 }
 
 impl Default for Mode {

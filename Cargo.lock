@@ -882,6 +882,7 @@ name = "tinc-device"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "log",
  "nix",
 ]
 
