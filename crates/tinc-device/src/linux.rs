@@ -93,8 +93,12 @@ pub struct Tun {
     /// branches on this. Set ONCE at open; never changes.
     ///
     /// `RUST_REWRITE_10G.md` Phase 2a. Feature-gated by
-    /// `DeviceConfig::vnet_hdr` (`-o ExperimentalGSO=on`); default
-    /// off until the netns sha256-of-stream test is green.
+    /// `DeviceConfig::vnet_hdr` (`-o ExperimentalGSO=yes`). The
+    /// sha256-of-stream gate (`netns::tso_ingest_stream_integrity`)
+    /// is green; the gate stays until 2a + 2b ship together and
+    /// we re-profile against the recalibrated Phase 3 ceiling.
+    /// Flipping default-on changes the device's wire shape (no
+    /// tun_pi, vnet_hdr on writes) — do it once, not piecemeal.
     vnet_hdr: bool,
 }
 
@@ -703,11 +707,13 @@ impl Device for Tun {
         // 65535 + 10 bytes; `as_contiguous_mut` is `cap*STRIDE` =
         // 64*1600 = 102400 bytes. Fits.
         //
-        // We DON'T loop: a single TSO super-segment IS the batch
-        // (~43 frames worth). Reading two super-segments per drain
-        // would mean ~86 frames → `tso_split` needs 86 output slots
-        // but we have 64. One read; the next epoll wake gets the
-        // next one. This is the "read() drops 30×" gate metric.
+        // EPOLLET: returning while the queue is non-empty loses the
+        // wake. The daemon's `on_device_read` must call `drain` in a
+        // loop until `Empty`. The default `Frames` path doesn't need
+        // this because it loops INTERNALLY here; the Super path
+        // can't (one super-segment fills the output budget). The
+        // daemon side handles the loop — see the `Super` arm in
+        // `net.rs::on_device_read`.
         let buf = arena.as_contiguous_mut();
         let n = match read_fd(self.fd.as_raw_fd(), buf) {
             Ok(0) => {

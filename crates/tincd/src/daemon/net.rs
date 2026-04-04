@@ -553,240 +553,278 @@ impl Daemon {
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
     // the control flow reads cleaner inline.
     pub(super) fn on_device_read(&mut self) {
-        // mem::take: `route_packet` borrows `&mut self`; the arena
-        // slot borrow conflicts. Same dance as `udp_rx_batch`. The
-        // arena is `Some` between calls (set in `setup`, never
-        // taken elsewhere); the `expect` documents the invariant.
-        let mut arena = self
-            .device_arena
-            .take()
-            .expect("device_arena is Some between on_device_read calls");
-
-        let result = match self.device.drain(&mut arena, DEVICE_DRAIN_CAP) {
-            Ok(r) => r,
-            Err(e) => {
-                // C `:1933-1936`: 10 consecutive failures →
-                // event_exit(). C also sleep_millis(errors*50)
-                // for a flapping TUN; we don't (bound is 10,
-                // sleep would total 2.75s then exit anyway).
-                log::error!(target: "tincd::net",
-                            "Error reading from device: {e}");
-                self.device_errors += 1;
-                if self.device_errors > 10 {
-                    log::error!(target: "tincd",
-                                "Too many errors from device, exiting!");
-                    self.running = false;
-                }
-                self.device_arena = Some(arena);
-                return;
-            }
-        };
-
         let mut nw = false;
-        match result {
-            tinc_device::DrainResult::Empty => {
-                // EAGAIN on first read. Edge-triggered: nothing
-                // more to do, the next packet wakes us.
-            }
-            tinc_device::DrainResult::Frames { count } => {
-                self.device_errors = 0; // C `:1931`
-                // Phase 1 (`RUST_REWRITE_10G.md`): same per-frame
-                // route+encrypt loop, but the SEND is deferred.
-                // `tx_batch` being `Some` signals the send site
-                // (`send_sptps_data_relay` UDP path) to stage
-                // instead of `sendto`. After the loop, ship the
-                // accumulated run in one `EgressBatch` (one
-                // `sendmsg` with `UDP_SEGMENT` cmsg on Linux).
-                //
-                // The encrypt still goes into `tx_scratch` per-
-                // frame (Phase 0 unchanged); the batch COPIES from
-                // there. One extra ~1.5KB memcpy per frame vs
-                // 43× fewer syscalls. Phase 3 (par-encrypt) will
-                // encrypt directly into batch slots; for now the
-                // memcpy is the price of not restructuring
-                // `seal_data_into`'s Vec-based API.
-                //
-                // Lazy init: the ~100KB buffer only allocates the
-                // first time a device read fires. A tunnelserver
-                // (no local TUN) never gets here.
-                //
-                // Gate on `count > 1`: with one frame per drain,
-                // staging is pure overhead (one extra ~1.5KB memcpy
-                // tx_scratch → batch.buf, then a count=1 send that's
-                // identical to immediate-send). The TUN under iperf3
-                // saturation backlogs and `drain` reads many; an
-                // idle ping fires epoll per-frame and hits count=1.
-                // Don't tax the latter for the former. The send
-                // site sees `tx_batch.is_none()` and falls through
-                // to the Phase-0 immediate path.
-                if count > 1 && self.tx_batch.is_none() {
-                    self.tx_batch = Some(crate::egress::TxBatch::new(
-                        DEVICE_DRAIN_CAP * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                    ));
-                }
-                for i in 0..count {
-                    let n = arena.lens()[i];
-                    // C `:1928-1929`
-                    let myself_tunnel = self.tunnels.entry(self.myself).or_default();
-                    myself_tunnel.in_packets += 1;
-                    myself_tunnel.in_bytes += n as u64;
+        // EPOLLET drain loop. The default `Device::drain` loops
+        // INTERNALLY until EAGAIN or cap; one call suffices. The
+        // vnet_hdr drain reads ONE skb (`Super` or `Frames{1}`)
+        // per call — looping HERE keeps the EPOLLET contract
+        // (return to epoll only after EAGAIN). Bounded so a
+        // saturating sender doesn't starve UDP/timers (`0f120b11`).
+        //
+        // The `Frames` arm with the default drain hits this loop
+        // once: it returns count<cap (drained to EAGAIN, the second
+        // iteration sees `Empty`) or count==cap (we break out of
+        // the loop and rearm below). Either way, no behavior change
+        // for the non-vnet path.
+        let mut iters = 0usize;
+        let mut hit_cap = false;
+        while iters < DEVICE_DRAIN_CAP {
+            iters += 1;
+            // mem::take: `route_packet` borrows `&mut self`; the
+            // arena slot borrow conflicts. Same dance as
+            // `udp_rx_batch`. The arena is `Some` between calls
+            // (set in `setup`, never taken elsewhere).
+            let mut arena = self
+                .device_arena
+                .take()
+                .expect("device_arena is Some between on_device_read calls");
 
-                    // C `:1930`. `slot_mut` because route_packet
-                    // mutates (overwrite_mac, fragment in-place).
-                    // The send site sees `tx_batch.is_some()` and
-                    // stages; or flushes-then-stages on dst/size
-                    // mismatch; or falls through to immediate send
-                    // for the cold path (no `udp_addr_cached`).
-                    nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
-                }
-                // Ship whatever's left in the batch. The common
-                // case (iperf3 TCP burst to one peer): one run,
-                // `count` frames, one sendmsg.
-                self.flush_tx_batch();
-                // Re-disarm: the send site outside this loop
-                // (UDP-recv→forward, meta-conn→relay, probes) goes
-                // back to immediate-send. The batch only makes
-                // sense when we KNOW there's a burst to coalesce,
-                // which is exactly the device-drain case.
-                self.tx_batch = None;
-                // Hit cap exactly: there may be more in the device.
-                // Re-arm so the next epoll wake fires immediately
-                // (edge-triggered: without this, we'd lose the
-                // wake until the kernel writes ANOTHER packet).
-                // The `0f120b11` invariant: yield after `cap` so
-                // TX/timers/recv aren't starved.
-                if count == DEVICE_DRAIN_CAP
-                    && let Some(io_id) = self.device_io
-                    && let Err(e) = self.ev.rearm(io_id)
-                {
+            let result = match self.device.drain(&mut arena, DEVICE_DRAIN_CAP) {
+                Ok(r) => r,
+                Err(e) => {
+                    // C `:1933-1936`: 10 consecutive failures →
+                    // event_exit(). C also sleep_millis(errors*50)
+                    // for a flapping TUN; we don't (bound is 10,
+                    // sleep would total 2.75s then exit anyway).
                     log::error!(target: "tincd::net",
-                                "device fd rearm failed: {e}");
+                                "Error reading from device: {e}");
+                    self.device_errors += 1;
+                    if self.device_errors > 10 {
+                        log::error!(target: "tincd",
+                                    "Too many errors from device, exiting!");
+                        self.running = false;
+                    }
+                    self.device_arena = Some(arena);
+                    if nw {
+                        self.maybe_set_write_any();
+                    }
+                    return;
                 }
-            }
-            tinc_device::DrainResult::Super {
-                len,
-                gso_size,
-                gso_type,
-                csum_start,
-                csum_offset,
-            } => {
-                // Phase 2a (`RUST_REWRITE_10G.md`): the vnet_hdr
-                // device put a ≤64KB TCP super-segment in `arena`.
-                // `tso_split` re-segments it into MTU-sized frames
-                // with re-synthesized TCP/IP headers. `route_packet`
-                // runs ONCE (chunk[0]; same dst for all chunks — TSO
-                // is single-flow) then the rest skip the trie lookup.
-                self.device_errors = 0;
+            };
 
-                // Lazy alloc the scratch (first Super only).
-                let scratch = self.tso_scratch.get_or_insert_with(|| {
-                    vec![0u8; DEVICE_DRAIN_CAP * tinc_device::DeviceArena::STRIDE]
-                        .into_boxed_slice()
-                });
-                // Same `mem::take` dance as `device_arena`:
-                // `route_packet` borrows `&mut self`, the slice
-                // borrow conflicts.
-                let mut scratch = std::mem::take(scratch);
-                let mut tso_lens = std::mem::take(&mut self.tso_lens);
-
-                let hdr = tinc_device::VirtioNetHdr {
-                    flags: 0,    // unused by tso_split (it always csums)
-                    gso_type: 0, // ditto; gso_type passed separately
-                    hdr_len: 0,  // recomputed from csum_start + tcp doff
-                    gso_size,
-                    csum_start,
-                    csum_offset,
-                };
-                let split = tinc_device::tso_split(
-                    &arena.as_contiguous()[..len],
-                    &hdr,
-                    gso_type,
-                    &mut scratch,
-                    tinc_device::DeviceArena::STRIDE,
-                    &mut tso_lens,
-                );
-                match split {
-                    Ok(count) => {
-                        // Same TX-batch staging as `Frames`. Gate on
-                        // count>1 (one segment = no batch advantage).
-                        if count > 1 && self.tx_batch.is_none() {
-                            self.tx_batch = Some(crate::egress::TxBatch::new(
-                                DEVICE_DRAIN_CAP
-                                    * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                            ));
-                        }
-                        // Stats: count the super-packet as one ingest
-                        // (the "read() drops 30×" gate metric counts
-                        // syscalls, not stat increments). Bytes = the
-                        // raw IP payload we got from the kernel.
+            match result {
+                tinc_device::DrainResult::Empty => {
+                    // EAGAIN. Queue drained; we hold the EPOLLET
+                    // contract. Put arena back, exit the loop.
+                    self.device_arena = Some(arena);
+                    break;
+                }
+                tinc_device::DrainResult::Frames { count } => {
+                    self.device_errors = 0; // C `:1931`
+                    // Phase 1 (`RUST_REWRITE_10G.md`): same per-frame
+                    // route+encrypt loop, but the SEND is deferred.
+                    // `tx_batch` being `Some` signals the send site
+                    // (`send_sptps_data_relay` UDP path) to stage
+                    // instead of `sendto`. After the loop, ship the
+                    // accumulated run in one `EgressBatch` (one
+                    // `sendmsg` with `UDP_SEGMENT` cmsg on Linux).
+                    //
+                    // The encrypt still goes into `tx_scratch` per-
+                    // frame (Phase 0 unchanged); the batch COPIES from
+                    // there. One extra ~1.5KB memcpy per frame vs
+                    // 43× fewer syscalls. Phase 3 (par-encrypt) will
+                    // encrypt directly into batch slots; for now the
+                    // memcpy is the price of not restructuring
+                    // `seal_data_into`'s Vec-based API.
+                    //
+                    // Lazy init: the ~100KB buffer only allocates the
+                    // first time a device read fires. A tunnelserver
+                    // (no local TUN) never gets here.
+                    //
+                    // Gate on `count > 1`: with one frame per drain,
+                    // staging is pure overhead (one extra ~1.5KB memcpy
+                    // tx_scratch → batch.buf, then a count=1 send that's
+                    // identical to immediate-send). The TUN under iperf3
+                    // saturation backlogs and `drain` reads many; an
+                    // idle ping fires epoll per-frame and hits count=1.
+                    // Don't tax the latter for the former. The send
+                    // site sees `tx_batch.is_none()` and falls through
+                    // to the Phase-0 immediate path.
+                    if count > 1 && self.tx_batch.is_none() {
+                        self.tx_batch = Some(crate::egress::TxBatch::new(
+                            DEVICE_DRAIN_CAP
+                                * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                        ));
+                    }
+                    for i in 0..count {
+                        let n = arena.lens()[i];
+                        // C `:1928-1929`
                         let myself_tunnel = self.tunnels.entry(self.myself).or_default();
                         myself_tunnel.in_packets += 1;
-                        myself_tunnel.in_bytes += len as u64;
+                        myself_tunnel.in_bytes += n as u64;
 
-                        // The win: `route_packet` runs once per super.
-                        // The first call does the trie lookup; the
-                        // rest reuse the same dst (TSO is single-flow,
-                        // mixed-dst super-packets don't exist — the
-                        // kernel TCP stack segments per-socket).
-                        //
-                        // BUT: route_packet has side effects per-packet
-                        // (TX stats, PMTU drive via try_tx, the dense
-                        // batch staging). Calling it once and looping
-                        // would mean rewriting the send path. For now:
-                        // call it `count` times. The 0.94µs→0.56µs
-                        // "other" projection assumed the trie lookup
-                        // amortizes; it does (same `last_routes[]`
-                        // index), and that's the expensive half.
-                        //
-                        // Re-profile after this lands: if `route_packet`
-                        // overhead is still visible, factor a
-                        // `route_first_then_send_rest` that hoists the
-                        // dst out. ~+40 LOC; not yet.
-                        for i in 0..count {
-                            let n = tso_lens[i];
-                            let off = i * tinc_device::DeviceArena::STRIDE;
-                            nw |= self.route_packet(&mut scratch[off..off + n], None);
-                        }
-                        self.flush_tx_batch();
-                        self.tx_batch = None;
+                        // C `:1930`. `slot_mut` because route_packet
+                        // mutates (overwrite_mac, fragment in-place).
+                        // The send site sees `tx_batch.is_some()` and
+                        // stages; or flushes-then-stages on dst/size
+                        // mismatch; or falls through to immediate send
+                        // for the cold path (no `udp_addr_cached`).
+                        nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
                     }
-                    Err(e) => {
-                        // Kernel-contract violation (vnet_hdr describes
-                        // a packet shape that doesn't match the bytes)
-                        // or undersized scratch (gso_size tiny). Log +
-                        // drop. Inner-TCP retransmits.
-                        log::warn!(target: "tincd::net",
+                    // Ship whatever's left in the batch. The common
+                    // case (iperf3 TCP burst to one peer): one run,
+                    // `count` frames, one sendmsg.
+                    self.flush_tx_batch();
+                    // Re-disarm: the send site outside this loop
+                    // (UDP-recv→forward, meta-conn→relay, probes) goes
+                    // back to immediate-send. The batch only makes
+                    // sense when we KNOW there's a burst to coalesce,
+                    // which is exactly the device-drain case.
+                    self.tx_batch = None;
+                    // Hit cap exactly: there may be more in the device.
+                    // Re-arm so the next epoll wake fires immediately
+                    // (edge-triggered: without this, we'd lose the
+                    // wake until the kernel writes ANOTHER packet).
+                    // The `0f120b11` invariant: yield after `cap` so
+                    // TX/timers/recv aren't starved.
+                    self.device_arena = Some(arena);
+                    if count == DEVICE_DRAIN_CAP {
+                        hit_cap = true;
+                        break;
+                    }
+                    // count < cap: the default drain looped to EAGAIN
+                    // internally. We're done (the next outer iteration
+                    // would just see Empty). Exit the loop. The vnet
+                    // drain returns Frames{1} for GSO_NONE — we DO
+                    // need to loop for those (the next read might be
+                    // another GSO_NONE or a Super).
+                    if count > 1 {
+                        // count>1 only happens with the default drain
+                        // (it batched). It already drained to EAGAIN.
+                        break;
+                    }
+                    // count==1: vnet GSO_NONE. Loop again.
+                }
+                tinc_device::DrainResult::Super {
+                    len,
+                    gso_size,
+                    gso_type,
+                    csum_start,
+                    csum_offset,
+                } => {
+                    // Phase 2a (`RUST_REWRITE_10G.md`): the vnet_hdr
+                    // device put a ≤64KB TCP super-segment in `arena`.
+                    // `tso_split` re-segments it into MTU-sized frames
+                    // with re-synthesized TCP/IP headers. `route_packet`
+                    // runs ONCE (chunk[0]; same dst for all chunks — TSO
+                    // is single-flow) then the rest skip the trie lookup.
+                    self.device_errors = 0;
+
+                    // Lazy alloc the scratch (first Super only).
+                    let scratch = self.tso_scratch.get_or_insert_with(|| {
+                        vec![0u8; DEVICE_DRAIN_CAP * tinc_device::DeviceArena::STRIDE]
+                            .into_boxed_slice()
+                    });
+                    // Same `mem::take` dance as `device_arena`:
+                    // `route_packet` borrows `&mut self`, the slice
+                    // borrow conflicts.
+                    let mut scratch = std::mem::take(scratch);
+                    let mut tso_lens = std::mem::take(&mut self.tso_lens);
+
+                    let hdr = tinc_device::VirtioNetHdr {
+                        flags: 0,    // unused by tso_split (it always csums)
+                        gso_type: 0, // ditto; gso_type passed separately
+                        hdr_len: 0,  // recomputed from csum_start + tcp doff
+                        gso_size,
+                        csum_start,
+                        csum_offset,
+                    };
+                    let split = tinc_device::tso_split(
+                        &arena.as_contiguous()[..len],
+                        &hdr,
+                        gso_type,
+                        &mut scratch,
+                        tinc_device::DeviceArena::STRIDE,
+                        &mut tso_lens,
+                    );
+                    match split {
+                        Ok(count) => {
+                            // Same TX-batch staging as `Frames`. Gate on
+                            // count>1 (one segment = no batch advantage).
+                            if count > 1 && self.tx_batch.is_none() {
+                                self.tx_batch = Some(crate::egress::TxBatch::new(
+                                    DEVICE_DRAIN_CAP
+                                        * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                                ));
+                            }
+                            // Stats: count the super-packet as one ingest
+                            // (the "read() drops 30×" gate metric counts
+                            // syscalls, not stat increments). Bytes = the
+                            // raw IP payload we got from the kernel.
+                            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                            myself_tunnel.in_packets += 1;
+                            myself_tunnel.in_bytes += len as u64;
+
+                            // The win: `route_packet` runs once per super.
+                            // The first call does the trie lookup; the
+                            // rest reuse the same dst (TSO is single-flow,
+                            // mixed-dst super-packets don't exist — the
+                            // kernel TCP stack segments per-socket).
+                            //
+                            // BUT: route_packet has side effects per-packet
+                            // (TX stats, PMTU drive via try_tx, the dense
+                            // batch staging). Calling it once and looping
+                            // would mean rewriting the send path. For now:
+                            // call it `count` times. The 0.94µs→0.56µs
+                            // "other" projection assumed the trie lookup
+                            // amortizes; it does (same `last_routes[]`
+                            // index), and that's the expensive half.
+                            //
+                            // Re-profile after this lands: if `route_packet`
+                            // overhead is still visible, factor a
+                            // `route_first_then_send_rest` that hoists the
+                            // dst out. ~+40 LOC; not yet.
+                            for i in 0..count {
+                                let n = tso_lens[i];
+                                let off = i * tinc_device::DeviceArena::STRIDE;
+                                nw |= self.route_packet(&mut scratch[off..off + n], None);
+                            }
+                            self.flush_tx_batch();
+                            self.tx_batch = None;
+                        }
+                        Err(e) => {
+                            // Kernel-contract violation (vnet_hdr describes
+                            // a packet shape that doesn't match the bytes)
+                            // or undersized scratch (gso_size tiny). Log +
+                            // drop. Inner-TCP retransmits.
+                            log::warn!(target: "tincd::net",
                                    "tso_split: {e:?} (len={len} \
                                     gso_size={gso_size}); dropping");
+                        }
                     }
-                }
 
-                self.tso_scratch = Some(scratch);
-                self.tso_lens = tso_lens;
+                    self.tso_scratch = Some(scratch);
+                    self.tso_lens = tso_lens;
+                    self.device_arena = Some(arena);
 
-                // No re-arm: the vnet_hdr drain does ONE read per
-                // call (one super-packet IS the batch). If the kernel
-                // has another skb queued, the fd is still readable
-                // and the next epoll wake fires. The level-retriggered
-                // re-arm in `Frames` is for the cap-hit case (more in
-                // the queue, we stopped early); here we read until
-                // EAGAIN every time.
-                //
-                // ACTUALLY: we read ONCE, not until EAGAIN. If there's
-                // a second super-packet behind this one, we'd lose the
-                // edge. Re-arm unconditionally. The cost is one
-                // `epoll_ctl(MOD)` per super-packet — at ~2.6k reads/s
-                // (vs 110k pre-TSO) that's negligible.
-                if let Some(io_id) = self.device_io
-                    && let Err(e) = self.ev.rearm(io_id)
-                {
-                    log::error!(target: "tincd::net",
-                                "device fd rearm failed: {e}");
+                    // One Super = ~30-43 frames worth. Count it against
+                    // the iteration budget as if it were a Frames{cap}
+                    // — we don't want 64× super-packets per epoll wake
+                    // (that's 64×43 = 2752 frames; encrypt/send would
+                    // run for milliseconds, starving recv). One Super
+                    // per wake is the design; loop only to drain the
+                    // tail (the GSO_NONE ACKs that pile up behind).
+                    hit_cap = true;
+                    break;
                 }
-            }
+            } // match result
+        } // while iters
+
+        // Hit cap (or Super): there MAY be more queued. Rearm so
+        // the next epoll cycle checks. With EPOLLET, the rearm
+        // (epoll_ctl MOD) doesn't generate a synthetic wake, but
+        // mio's underlying registration uses EPOLLONESHOT-style
+        // semantics where the MOD does trigger a fresh check on
+        // the next epoll_wait. (If this is wrong and we still
+        // stall: the daemon's 1s ping tick will eventually call
+        // here and unwedge. Degraded but not deadlocked.)
+        if hit_cap
+            && let Some(io_id) = self.device_io
+            && let Err(e) = self.ev.rearm(io_id)
+        {
+            log::error!(target: "tincd::net",
+                        "device fd rearm failed: {e}");
         }
-
-        self.device_arena = Some(arena);
         if nw {
             self.maybe_set_write_any();
         }

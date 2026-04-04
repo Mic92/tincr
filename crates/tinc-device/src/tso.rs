@@ -35,8 +35,14 @@
 //! ## What's NOT here
 //!
 //! - `VIRTIO_NET_HDR_GSO_UDP_L4` (USO, kernel 6.2+): we don't set
-//!   `TUN_F_USO4/6`, so the kernel never hands it to us. Gate is
-//!   iperf3-TCP. Add when QUIC matters.
+//!   `TUN_F_USO4/6`, so the kernel never hands it to us. The split
+//!   itself is simpler than TCP (no seqno, just UDP length per chunk
+//!   — wg-go `:965` is 3 lines). What's missing is the use case:
+//!   inner-QUIC over tinc is a tunnel-in-tunnel scenario the project
+//!   hasn't seen yet. The kernel-6.2 floor also rules out half the
+//!   deploy targets. The hooks are here (`gso_type` enum has the
+//!   slot, `tso_split` would gain a `proto == UDP` branch); ~+30 LOC
+//!   when someone files the issue.
 //! - `VIRTIO_NET_HDR_GSO_ECN`: we don't set `TUN_F_TSO_ECN`. wg-go
 //!   doesn't either ("TODO: support TSO with ECN bits"). The kernel
 //!   software-segments ECN flows; we just see them as `GSO_NONE`.
@@ -52,13 +58,18 @@ use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, set_etherheader};
 ///
 /// ## Endianness
 ///
-/// `__virtio16` fields are LITTLE-endian on LE hosts (`tun_vnet.h:50`:
-/// `tun_vnet_legacy_is_little_endian` returns true unless
-/// `TUNSETVNETBE`/`LE` overrides). We don't override. On x86_64/
-/// aarch64 (the only platforms we ship), `from_le_bytes` is a no-op.
-/// On a hypothetical BE host, the kernel default is BE → we'd need
-/// `TUNSETVNETLE` ioctl OR `from_be_bytes` here. Not a concern today;
-/// `compile_error!` on BE if someone tries.
+/// `__virtio16` fields use legacy virtio endianness: HOST-endian
+/// (`tun_vnet.h:50` `tun_vnet_legacy_is_little_endian` =
+/// `virtio_legacy_is_little_endian()` = the host's native order).
+/// On LE hosts (x86_64, aarch64, riscv64 — every Linux target tinc
+/// builds for) that's LE, so `from_le_bytes` reads correctly.
+///
+/// BE Linux targets that the kernel still supports: s390x, ppc64
+/// (BE variant), and some embedded MIPS. On those, the kernel writes
+/// BE u16s here AND `from_le_bytes` byte-swaps them → garbage. The
+/// fix would be `from_ne_bytes` (matching the kernel's host-native
+/// behavior), but that's untested and we don't have a BE CI runner.
+/// Better to fail loudly than silently corrupt.
 #[cfg(target_endian = "big")]
 compile_error!("virtio_net_hdr endianness needs TUNSETVNETLE on BE hosts");
 
@@ -159,9 +170,13 @@ impl VirtioNetHdr {
 /// (`checksum.go:9`) — but without the 128-byte adc unroll.
 ///
 /// At 20-byte IP headers and ~1500-byte TCP payloads, the simple
-/// loop is ~0.5µs/pkt. Crypto is 4.6µs. Unrolling buys back ~0.3µs
-/// at the cost of 60 LOC of carry-prop arithmetic; do it if/when the
-/// profile says so. (wg-go has a "TODO: SIMD" comment on theirs.)
+/// loop is ~0.5µs/pkt. Crypto is 4.6µs. The wg-go unroll uses
+/// `bits.Add64` for explicit carry propagation — in Rust that's
+/// `u64::carrying_add` (nightly) or manual `(sum, carry)` tuple
+/// threading. The 8-byte-per-iteration loop with `u64::from_be_
+/// bytes` reads + `wrapping_add` + post-hoc carry count would gain
+/// ~0.3µs. Not nothing at 10G; not the bottleneck at 3G. Phase 3
+/// par-encrypt amortizes crypto first; revisit checksum after.
 ///
 /// `initial` is BIG-endian-interpreted (wg-go does a
 /// `NativeEndian → BigEndian` swap on entry). We accumulate in BE
@@ -540,7 +555,16 @@ mod tests {
 
     /// `virtio_net_hdr` constants match the kernel UAPI. `gcc -E
     /// include/uapi/linux/virtio_net.h | grep VIRTIO_NET_HDR_GSO`.
-    /// These are kernel ABI; can't change. Pin our copy.
+    ///
+    /// Why test constants that "can't change": the test pins OUR
+    /// COPY of them. The kernel's are stable; ours could drift if
+    /// someone refactors and typos `TCPV6 = 6` (it's 4, not 6 —
+    /// the obvious value is wrong). This is the same pattern as
+    /// `linux.rs::tunsetiff_value`: kernel ABI is the source of
+    /// truth; we hand-copied it; the test catches the hand-copy
+    /// going wrong. If `libc` ever adds these constants, switch to
+    /// `assert_eq!(OUR, libc::VIRTIO_...)` and the test becomes a
+    /// dependency-upgrade canary instead.
     #[test]
     fn virtio_constants_match_kernel() {
         assert_eq!(VIRTIO_NET_HDR_GSO_NONE, 0);
