@@ -30,6 +30,8 @@
 
 #![forbid(unsafe_code)]
 
+use zerocopy::{FromBytes, IntoBytes};
+
 use crate::packet::{Icmp6Hdr, IcmpHdr, Ipv4Hdr, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 
 // ── Sizes (`route.c:50-56`) ────────────────────────────────────────
@@ -104,7 +106,7 @@ pub fn build_v4_unreachable(
     // Length checked above; .ok()? is unreachable but quiets clippy.
     let orig_ip_bytes: &[u8; IP_SIZE] =
         original[ETHER_SIZE..ETHER_SIZE + IP_SIZE].try_into().ok()?;
-    let orig_ip = Ipv4Hdr::from_bytes(orig_ip_bytes);
+    let orig_ip = Ipv4Hdr::read_from_bytes(orig_ip_bytes).ok()?;
     // `:144-145`: remember original src/dst. `:148-169`: caller may
     // override the dst (= our reply's src) for TIME_EXCEEDED —
     // mirrors C's `ip_dst = addr.sin_addr` after getsockname().
@@ -132,9 +134,7 @@ pub fn build_v4_unreachable(
     ip.ip_src = ip_dst; // :195 — SWAPPED
     ip.ip_dst = ip_src; // :196
     // `:198`: `ip.ip_sum = inet_checksum(&ip, ip_size, 0xFFFF)`.
-    let ip_bytes_nosum = ip.to_bytes();
-    ip.ip_sum = inet_checksum(&ip_bytes_nosum, 0xFFFF);
-    let ip_bytes = ip.to_bytes();
+    ip.ip_sum = inet_checksum(ip.as_bytes(), 0xFFFF);
 
     // ─── Build ICMP hdr (`:173-175,202-208`).
     let mut icmp = IcmpHdr::default();
@@ -148,17 +148,15 @@ pub fn build_v4_unreachable(
         icmp.set_nextmtu(mtu);
     }
     // `:206-208`: chain ICMP hdr + quote.
-    let icmp_bytes_nosum = icmp.to_bytes();
-    let mut ck = inet_checksum(&icmp_bytes_nosum, 0xFFFF);
+    let mut ck = inet_checksum(icmp.as_bytes(), 0xFFFF);
     ck = inet_checksum(quote, ck);
     icmp.icmp_cksum = ck;
-    let icmp_bytes = icmp.to_bytes();
 
     // ─── Assemble (`:213-216`).
     let mut out = Vec::with_capacity(ETHER_SIZE + IP_SIZE + ICMP_SIZE + oldlen);
     out.extend_from_slice(&eth);
-    out.extend_from_slice(&ip_bytes);
-    out.extend_from_slice(&icmp_bytes);
+    out.extend_from_slice(ip.as_bytes());
+    out.extend_from_slice(icmp.as_bytes());
     out.extend_from_slice(quote);
     Some(out)
 }
@@ -208,7 +206,7 @@ pub fn build_v6_unreachable(
     let orig_ip6_bytes: &[u8; IP6_SIZE] = original[ETHER_SIZE..ETHER_SIZE + IP6_SIZE]
         .try_into()
         .ok()?;
-    let orig_ip6 = Ipv6Hdr::from_bytes(orig_ip6_bytes);
+    let orig_ip6 = Ipv6Hdr::read_from_bytes(orig_ip6_bytes).ok()?;
 
     // `:248-249`: remember swapped. The C stores them directly in
     // `pseudo.ip6_src/dst` and reuses that struct; we keep locals.
@@ -232,7 +230,6 @@ pub fn build_v6_unreachable(
     ip6.ip6_src = new_src; // :296
     ip6.ip6_dst = new_dst; // :297
     // No IPv6 header checksum.
-    let ip6_bytes = ip6.to_bytes();
 
     // ─── Build ICMPv6 hdr (`:278-280,301-303`).
     let mut icmp6 = Icmp6Hdr::default();
@@ -258,18 +255,16 @@ pub fn build_v6_unreachable(
     pseudo.set_next(u32::from(IPPROTO_ICMPV6)); // :309
 
     // `:313-315`: chain pseudo → icmp6 hdr → quote.
-    let icmp6_bytes_nosum = icmp6.to_bytes();
-    let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
-    ck = inet_checksum(&icmp6_bytes_nosum, ck);
+    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
+    ck = inet_checksum(icmp6.as_bytes(), ck);
     ck = inet_checksum(quote, ck);
     icmp6.icmp6_cksum = ck;
-    let icmp6_bytes = icmp6.to_bytes();
 
     // ─── Assemble (`:320-323`).
     let mut out = Vec::with_capacity(ETHER_SIZE + IP6_SIZE + ICMP6_SIZE + quote_len);
     out.extend_from_slice(&eth);
-    out.extend_from_slice(&ip6_bytes);
-    out.extend_from_slice(&icmp6_bytes);
+    out.extend_from_slice(ip6.as_bytes());
+    out.extend_from_slice(icmp6.as_bytes());
     out.extend_from_slice(quote);
     Some(out)
 }
@@ -407,7 +402,7 @@ mod tests {
         let orig = v4_orig_frame();
         let out =
             build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None).unwrap();
-        let ip = Ipv4Hdr::from_bytes(out[14..34].try_into().unwrap());
+        let ip = Ipv4Hdr::read_from_bytes(&out[14..34]).unwrap();
         assert_eq!(ip.ip_src, [10, 0, 0, 99]); // orig dst
         assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // orig src
         // and eth MACs too (`swap_mac_addresses`, :112)
@@ -439,7 +434,7 @@ mod tests {
         assert_eq!(out.len(), ETHER_SIZE + IP_SIZE + ICMP_SIZE + V4_QUOTE_CAP);
         assert_eq!(out.len(), 14 + 20 + 8 + 548);
         // total IP len reflects the cap
-        let ip = Ipv4Hdr::from_bytes(out[14..34].try_into().unwrap());
+        let ip = Ipv4Hdr::read_from_bytes(&out[14..34]).unwrap();
         assert_eq!(ip.total_len(), 20 + 8 + 548);
         assert_eq!(ip.total_len() as usize, IP_MSS);
         // quote bytes match original up to the cap
@@ -503,14 +498,14 @@ mod tests {
         let orig = v4_orig_frame();
         // ICMP_TIME_EXCEEDED=11, ICMP_EXC_TTL=0
         let out = build_v4_unreachable(&orig, 11, 0, None, Some([172, 16, 0, 5])).expect("built");
-        let ip = Ipv4Hdr::from_bytes(out[14..34].try_into().unwrap());
+        let ip = Ipv4Hdr::read_from_bytes(&out[14..34]).unwrap();
         assert_eq!(ip.ip_src, [172, 16, 0, 5]); // override, NOT orig dst
         assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // still orig src
         // IP checksum verifies (override is in the summed region).
         assert_eq!(inet_checksum(&out[14..34], 0xFFFF), 0);
         // None = current behavior (orig dst).
         let out_none = build_v4_unreachable(&orig, 11, 0, None, None).unwrap();
-        let ip_none = Ipv4Hdr::from_bytes(out_none[14..34].try_into().unwrap());
+        let ip_none = Ipv4Hdr::read_from_bytes(&out_none[14..34]).unwrap();
         assert_eq!(ip_none.ip_src, [10, 0, 0, 99]);
     }
 
@@ -552,7 +547,7 @@ mod tests {
         assert_eq!(&out[12..14], &[0x86, 0xdd]);
 
         // ip6 hdr
-        let ip6 = Ipv6Hdr::from_bytes(out[14..54].try_into().unwrap());
+        let ip6 = Ipv6Hdr::read_from_bytes(&out[14..54]).unwrap();
         assert_eq!(ip6.flow(), 0x6000_0000);
         assert_eq!(ip6.plen() as usize, ICMP6_SIZE + quote_len);
         assert_eq!(ip6.ip6_nxt, IPPROTO_ICMPV6);
@@ -581,7 +576,7 @@ mod tests {
         hdr_zeroed.copy_from_slice(icmp6_bytes);
         hdr_zeroed[2] = 0;
         hdr_zeroed[3] = 0;
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&hdr_zeroed, ck);
         ck = inet_checksum(quote, ck);
         assert_eq!(
@@ -618,7 +613,7 @@ mod tests {
         let our_ip = *b"\x20\x01\x0d\xb8\0\0\0\0\0\0\0\0\0\0\0\x42";
         // ICMP6_TIME_EXCEEDED=3, ICMP6_TIME_EXCEED_TRANSIT=0
         let out = build_v6_unreachable(&orig, 3, 0, None, Some(our_ip)).expect("built");
-        let ip6 = Ipv6Hdr::from_bytes(out[14..54].try_into().unwrap());
+        let ip6 = Ipv6Hdr::read_from_bytes(&out[14..54]).unwrap();
         assert_eq!(ip6.ip6_src, our_ip); // override, NOT orig dst
         assert_eq!(ip6.ip6_dst, *b"\xfe\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\x01"); // orig src
 
@@ -634,7 +629,7 @@ mod tests {
         hdr_zeroed.copy_from_slice(icmp6_bytes);
         hdr_zeroed[2] = 0;
         hdr_zeroed[3] = 0;
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&hdr_zeroed, ck);
         ck = inet_checksum(quote, ck);
         assert_eq!(ck.to_ne_bytes(), [icmp6_bytes[2], icmp6_bytes[3]]);

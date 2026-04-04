@@ -27,6 +27,8 @@
 
 #![forbid(unsafe_code)]
 
+use zerocopy::{FromBytes, IntoBytes};
+
 use crate::packet::{IP_MF, IP_OFFMASK, Ipv4Hdr, inet_checksum};
 
 const ETH_SIZE: usize = 14;
@@ -48,7 +50,7 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
 
     // C `:572`: memcpy(&ip, DATA(packet) + ether_size, ip_size);
     let ip_bytes: &[u8; 20] = frame[ETH_SIZE..ETH_SIZE + IP_SIZE].try_into().ok()?;
-    let mut ip = Ipv4Hdr::from_bytes(ip_bytes);
+    let mut ip = Ipv4Hdr::read_from_bytes(ip_bytes).ok()?;
 
     // C `:576-579`: ip.ip_hl != ip_size/4 — options? bail. RFC 791
     // permits copying options into fragments (per-option Copy bit);
@@ -117,15 +119,13 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
 
         // C `:606-607`: ip.ip_sum = 0; ip.ip_sum = inet_checksum(...);
         ip.ip_sum = 0;
-        let hdr_bytes = ip.to_bytes();
-        ip.ip_sum = inet_checksum(&hdr_bytes, !0);
-        let hdr_bytes = ip.to_bytes();
+        ip.ip_sum = inet_checksum(ip.as_bytes(), !0);
 
         // C `:601-603,608`: memcpy(..eth..); memcpy(..ip..); memcpy(..payload..);
         // fragment.len = ether_size + ip_size + len;
         let mut frag = Vec::with_capacity(ETH_SIZE + IP_SIZE + len);
         frag.extend_from_slice(eth_hdr);
-        frag.extend_from_slice(&hdr_bytes);
+        frag.extend_from_slice(ip.as_bytes());
         frag.extend_from_slice(&payload[offset..offset + len]);
         out.push(frag);
 
@@ -162,22 +162,21 @@ mod tests {
         ip.ip_src = [10, 0, 0, 1];
         ip.ip_dst = [10, 0, 0, 2];
         ip.ip_sum = 0;
-        let h = ip.to_bytes();
-        ip.ip_sum = inet_checksum(&h, !0);
+        ip.ip_sum = inet_checksum(ip.as_bytes(), !0);
 
         let mut f = Vec::with_capacity(ETH_SIZE + IP_SIZE + payload_len);
         // eth: dst, src, ethertype 0x0800
         f.extend_from_slice(&[0xaa; 6]);
         f.extend_from_slice(&[0xbb; 6]);
         f.extend_from_slice(&[0x08, 0x00]);
-        f.extend_from_slice(&ip.to_bytes());
+        f.extend_from_slice(ip.as_bytes());
         // payload: 0, 1, 2, ... wrapping
         f.extend((0..payload_len).map(|i| (i & 0xff) as u8));
         f
     }
 
     fn parse_ip(frag: &[u8]) -> Ipv4Hdr {
-        Ipv4Hdr::from_bytes(frag[ETH_SIZE..ETH_SIZE + IP_SIZE].try_into().unwrap())
+        Ipv4Hdr::read_from_bytes(&frag[ETH_SIZE..ETH_SIZE + IP_SIZE]).unwrap()
     }
 
     #[test]

@@ -17,6 +17,8 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use zerocopy::{FromBytes, IntoBytes};
+
 use crate::packet::{
     ARPHRD_ETHER, ARPOP_REPLY, ARPOP_REQUEST, ETH_P_IP, EtherArp, Ipv6Hdr, Ipv6Pseudo,
     inet_checksum,
@@ -51,7 +53,7 @@ pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     }
     // route.c:977
     let arp_bytes: &[u8; ARP_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].try_into().ok()?;
-    let arp = EtherArp::from_bytes(arp_bytes);
+    let arp = EtherArp::read_from_bytes(arp_bytes).ok()?;
 
     // route.c:980-984
     if arp.ea_hdr.hrd() != ARPHRD_ETHER
@@ -83,7 +85,7 @@ pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
     let arp_bytes: &[u8; ARP_SIZE] = original[ETHER_SIZE..ETHER_SIZE + ARP_SIZE]
         .try_into()
         .expect("validated");
-    let mut arp = EtherArp::from_bytes(arp_bytes);
+    let mut arp = EtherArp::read_from_bytes(arp_bytes).expect("28 bytes");
 
     std::mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa); // :1011-1013
     arp.arp_tha = arp.arp_sha; // :1014
@@ -96,7 +98,7 @@ pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
     arp.arp_sha[ETH_ALEN - 1] ^= 0xFF;
 
     arp.ea_hdr.set_op(ARPOP_REPLY); // :1017
-    out[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].copy_from_slice(&arp.to_bytes()); // :1022
+    out[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].copy_from_slice(arp.as_bytes()); // :1022
     out
 }
 
@@ -118,7 +120,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 
     // route.c:821-822
     let ip6_bytes: &[u8; IP6_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().ok()?;
-    let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
+    let ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
 
     // Not in C (route dispatch already branched); we're freestanding.
     if ip6.ip6_nxt != IPPROTO_ICMPV6 {
@@ -152,7 +154,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     pseudo.set_next(u32::from(IPPROTO_ICMPV6));
 
     // C feeds 4 separate calls (stack structs); we have contiguous bytes.
-    let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
     ck = inet_checksum(&frame[ns_off..ns_off + icmp_len], ck);
     if ck != 0 {
         return None;
@@ -195,14 +197,14 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     // ── IPv6 (route.c:902-903) ───────────────────────────────────
     let ip6_off = ETHER_SIZE;
     let ip6_bytes: &[u8; IP6_SIZE] = original[ip6_off..ip6_off + IP6_SIZE].try_into().ok()?;
-    let mut ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
+    let mut ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
 
     let ns_off = ETHER_SIZE + IP6_SIZE;
     let target: [u8; 16] = original[ns_off + 8..ns_off + 24].try_into().ok()?;
 
     ip6.ip6_dst = ip6.ip6_src; // :902
     ip6.ip6_src = target; //       :903
-    out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(&ip6.to_bytes());
+    out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(ip6.as_bytes());
 
     // ── ICMPv6 / NS (route.c:909-911) ────────────────────────────
     // [type][code][cksum:2][reserved:4][target:16]
@@ -226,7 +228,7 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     pseudo.set_length(icmp_len as u32);
     pseudo.set_next(u32::from(IPPROTO_ICMPV6));
 
-    let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
     ck = inet_checksum(&out[ns_off..ns_off + icmp_len], ck);
     out[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes()); // ne-order (packet.rs)
 
@@ -255,7 +257,7 @@ mod tests {
         a.arp_spa = spa;
         a.arp_tha = [0; 6];
         a.arp_tpa = tpa;
-        f.extend_from_slice(&a.to_bytes());
+        f.extend_from_slice(a.as_bytes());
         f
     }
 
@@ -293,7 +295,7 @@ mod tests {
         assert_eq!(r.len(), ETHER_SIZE + ARP_SIZE);
 
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
-        let arp = EtherArp::from_bytes(arp_bytes);
+        let arp = EtherArp::read_from_bytes(arp_bytes).unwrap();
 
         assert_eq!(arp.arp_spa, [10, 42, 0, 2]); // swapped
         assert_eq!(arp.arp_tpa, [10, 42, 0, 1]);
@@ -339,7 +341,7 @@ mod tests {
         let r = build_arp_reply(&f);
         assert_eq!(parse_arp_req(&r), None); // reply, not request
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
-        let arp = EtherArp::from_bytes(arp_bytes);
+        let arp = EtherArp::read_from_bytes(arp_bytes).unwrap();
         assert_eq!(arp.ea_hdr.hrd(), ARPHRD_ETHER);
         assert_eq!(arp.ea_hdr.pro(), ETH_P_IP);
     }
@@ -366,7 +368,7 @@ mod tests {
         ip6.ip6_hlim = 255;
         ip6.ip6_src = ip_src.octets();
         ip6.ip6_dst = ip_dst.octets();
-        f.extend_from_slice(&ip6.to_bytes());
+        f.extend_from_slice(ip6.as_bytes());
 
         let ns_off = f.len();
         f.push(ND_NEIGHBOR_SOLICIT);
@@ -384,7 +386,7 @@ mod tests {
         pseudo.ip6_dst = ip_dst.octets();
         pseudo.set_length(icmp_len as u32);
         pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&f[ns_off..], ck);
         f[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes());
 
@@ -447,14 +449,14 @@ mod tests {
 
         // Reverify independently (parse can't accept ADVERT, but checksum is shared).
         let ip6_bytes: &[u8; IP6_SIZE] = r[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().unwrap();
-        let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
+        let ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).unwrap();
         let icmp_len = NS_SIZE + OPT_SIZE + ETH_ALEN;
         let mut pseudo = Ipv6Pseudo::default();
         pseudo.ip6_src = ip6.ip6_src;
         pseudo.ip6_dst = ip6.ip6_dst;
         pseudo.set_length(icmp_len as u32);
         pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&r[ETHER_SIZE + IP6_SIZE..], ck);
         assert_eq!(ck, 0, "advert checksum must verify");
     }
@@ -469,7 +471,7 @@ mod tests {
         assert_eq!(&r[6..12], &[0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]); // src = fake
 
         let ip6_bytes: &[u8; IP6_SIZE] = r[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().unwrap();
-        let ip6 = Ipv6Hdr::from_bytes(ip6_bytes);
+        let ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).unwrap();
         assert_eq!(ip6.ip6_src, target.octets());
         let orig_src: Ipv6Addr = "fe80::1".parse().unwrap();
         assert_eq!(ip6.ip6_dst, orig_src.octets());
@@ -505,7 +507,7 @@ mod tests {
         ip6.ip6_hlim = 255;
         ip6.ip6_src = ip_src.octets();
         ip6.ip6_dst = ip_dst.octets();
-        f.extend_from_slice(&ip6.to_bytes());
+        f.extend_from_slice(ip6.as_bytes());
         let ns_off = f.len();
         f.push(ND_NEIGHBOR_SOLICIT);
         f.push(0);
@@ -517,7 +519,7 @@ mod tests {
         pseudo.ip6_dst = ip_dst.octets();
         pseudo.set_length(NS_SIZE as u32);
         pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&f[ns_off..], ck);
         f[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes());
 
@@ -528,13 +530,13 @@ mod tests {
         assert_eq!(r[ETHER_SIZE + IP6_SIZE], ND_NEIGHBOR_ADVERT);
 
         let ip6_bytes: &[u8; IP6_SIZE] = r[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().unwrap();
-        let ip6r = Ipv6Hdr::from_bytes(ip6_bytes);
+        let ip6r = Ipv6Hdr::read_from_bytes(ip6_bytes).unwrap();
         let mut pseudo = Ipv6Pseudo::default();
         pseudo.ip6_src = ip6r.ip6_src;
         pseudo.ip6_dst = ip6r.ip6_dst;
         pseudo.set_length(NS_SIZE as u32);
         pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-        let mut ck = inet_checksum(&pseudo.to_bytes(), 0xFFFF);
+        let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
         ck = inet_checksum(&r[ETHER_SIZE + IP6_SIZE..], ck);
         assert_eq!(ck, 0);
     }

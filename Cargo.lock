@@ -970,6 +970,7 @@ dependencies = [
  "tinc-proto",
  "tinc-sptps",
  "tinc-tools",
+ "zerocopy",
 ]
 
 [[package]]

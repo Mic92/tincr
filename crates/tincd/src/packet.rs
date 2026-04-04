@@ -6,15 +6,17 @@
 //! function the builders will use (chunk 7, when `vpn_packet_t`
 //! lands).
 //!
-//! ## `#[repr(C, packed)]` gotcha
+//! ## `#[repr(C, packed)]` + zerocopy
 //!
-//! Every struct here is packed. Packed → fields may be unaligned →
-//! Rust REFUSES `&self.field` (UB to construct a misaligned ref).
-//! Read with `let x = self.field;` (copy to local), or use
-//! `core::ptr::addr_of!` for raw addresses. The accessors below all
-//! copy out; setters write back. The C does the same thing
-//! (`route.c:140`: `memcpy(&ip, DATA(packet)+..., ip_size)` — copies
-//! the wire bytes onto an aligned stack struct first).
+//! Every struct here is packed, no padding (the `const _: () =
+//! assert!(size_of == N)` checks prove it). Serialization is just
+//! a transmute; `zerocopy::{FromBytes, IntoBytes}` derive that.
+//! `as_bytes()` is `route.c:213`'s `memcpy(DATA(packet)+..., &ip)`;
+//! `read_from_bytes()` is `route.c:140`'s `memcpy(&ip, ...)`.
+//!
+//! Packed → fields may be unaligned → Rust REFUSES `&self.field`.
+//! Read with `let x = self.field;` (copy to local). The accessors
+//! below all copy out; setters write back.
 //!
 //! ## Endianness
 //!
@@ -36,6 +38,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::mem::size_of;
+
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // ── inet_checksum ──────────────────────────────────────────────────
 
@@ -92,7 +96,7 @@ pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
 /// :67-72`); we use a `u8` and getters. Wire byte for normal IPv4
 /// is `0x45` (v=4, ihl=5 words = 20 bytes).
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv4Hdr {
     /// `(ip_v << 4) | ip_hl`. Bitfield in C; one byte here.
     pub ip_vhl: u8,
@@ -169,45 +173,6 @@ impl Ipv4Hdr {
     pub fn set_id(&mut self, v: u16) {
         self.ip_id = v.to_be();
     }
-
-    /// Serialize to wire bytes. Field-by-field, no transmute.
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 20] {
-        let mut b = [0u8; 20];
-        b[0] = self.ip_vhl;
-        b[1] = self.ip_tos;
-        // ip_len etc are already BE in storage — to_ne_bytes.
-        let len = self.ip_len;
-        b[2..4].copy_from_slice(&len.to_ne_bytes());
-        let id = self.ip_id;
-        b[4..6].copy_from_slice(&id.to_ne_bytes());
-        let off = self.ip_off;
-        b[6..8].copy_from_slice(&off.to_ne_bytes());
-        b[8] = self.ip_ttl;
-        b[9] = self.ip_p;
-        let sum = self.ip_sum;
-        b[10..12].copy_from_slice(&sum.to_ne_bytes());
-        b[12..16].copy_from_slice(&self.ip_src);
-        b[16..20].copy_from_slice(&self.ip_dst);
-        b
-    }
-
-    /// Parse from wire bytes. `route.c:140`: `memcpy(&ip, ...)`.
-    #[must_use]
-    pub fn from_bytes(b: &[u8; 20]) -> Self {
-        Self {
-            ip_vhl: b[0],
-            ip_tos: b[1],
-            ip_len: u16::from_ne_bytes([b[2], b[3]]),
-            ip_id: u16::from_ne_bytes([b[4], b[5]]),
-            ip_off: u16::from_ne_bytes([b[6], b[7]]),
-            ip_ttl: b[8],
-            ip_p: b[9],
-            ip_sum: u16::from_ne_bytes([b[10], b[11]]),
-            ip_src: [b[12], b[13], b[14], b[15]],
-            ip_dst: [b[16], b[17], b[18], b[19]],
-        }
-    }
 }
 
 // ── ICMP header (short) ────────────────────────────────────────────
@@ -222,7 +187,7 @@ impl Ipv4Hdr {
 /// SECOND `u16` of the 4-byte union). Bytes 4-5 are `ipm_void`
 /// (unused, zero).
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct IcmpHdr {
     pub icmp_type: u8,
     pub icmp_code: u8,
@@ -246,20 +211,6 @@ impl IcmpHdr {
         let raw = self.icmp_nextmtu;
         u16::from_be(raw)
     }
-
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 8] {
-        let mut b = [0u8; 8];
-        b[0] = self.icmp_type;
-        b[1] = self.icmp_code;
-        let ck = self.icmp_cksum;
-        b[2..4].copy_from_slice(&ck.to_ne_bytes());
-        let v = self.icmp_void;
-        b[4..6].copy_from_slice(&v.to_ne_bytes());
-        let m = self.icmp_nextmtu;
-        b[6..8].copy_from_slice(&m.to_ne_bytes());
-        b
-    }
 }
 
 // ── IPv6 header ────────────────────────────────────────────────────
@@ -269,7 +220,7 @@ impl IcmpHdr {
 /// `ip6_flow` is `(v<<28)|(tc<<20)|flow`. `route.c:292` writes
 /// `htonl(0x60000000)` — version 6, tc 0, flow 0.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv6Hdr {
     /// `ip6_un1_flow`. Network order. `(v<<28)|(tc<<20)|flow`.
     ip6_flow: u32,
@@ -310,36 +261,6 @@ impl Ipv6Hdr {
         let raw = self.ip6_plen;
         u16::from_be(raw)
     }
-
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 40] {
-        let mut b = [0u8; 40];
-        let f = self.ip6_flow;
-        b[0..4].copy_from_slice(&f.to_ne_bytes());
-        let p = self.ip6_plen;
-        b[4..6].copy_from_slice(&p.to_ne_bytes());
-        b[6] = self.ip6_nxt;
-        b[7] = self.ip6_hlim;
-        b[8..24].copy_from_slice(&self.ip6_src);
-        b[24..40].copy_from_slice(&self.ip6_dst);
-        b
-    }
-
-    #[must_use]
-    pub fn from_bytes(b: &[u8; 40]) -> Self {
-        let mut src = [0u8; 16];
-        let mut dst = [0u8; 16];
-        src.copy_from_slice(&b[8..24]);
-        dst.copy_from_slice(&b[24..40]);
-        Self {
-            ip6_flow: u32::from_ne_bytes([b[0], b[1], b[2], b[3]]),
-            ip6_plen: u16::from_ne_bytes([b[4], b[5]]),
-            ip6_nxt: b[6],
-            ip6_hlim: b[7],
-            ip6_src: src,
-            ip6_dst: dst,
-        }
-    }
 }
 
 // ── ICMPv6 header ──────────────────────────────────────────────────
@@ -349,7 +270,7 @@ impl Ipv6Hdr {
 /// `icmp6_data32[0]` aliases `icmp6_mtu` (`ipv6.h:89`). `route.c
 /// :281`: `icmp6.icmp6_mtu = htonl(len)` for `ICMP6_PACKET_TOO_BIG`.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Icmp6Hdr {
     pub icmp6_type: u8,
     pub icmp6_code: u8,
@@ -371,25 +292,13 @@ impl Icmp6Hdr {
         let raw = self.icmp6_data32;
         u32::from_be(raw)
     }
-
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 8] {
-        let mut b = [0u8; 8];
-        b[0] = self.icmp6_type;
-        b[1] = self.icmp6_code;
-        let ck = self.icmp6_cksum;
-        b[2..4].copy_from_slice(&ck.to_ne_bytes());
-        let d = self.icmp6_data32;
-        b[4..8].copy_from_slice(&d.to_ne_bytes());
-        b
-    }
 }
 
 // ── ARP ────────────────────────────────────────────────────────────
 
 /// `struct arphdr` (`ethernet.h:75-81`). Fixed 8-byte ARP header.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct ArpHdr {
     /// Hardware type. Network order. `ARPHRD_ETHER` = 1.
     ar_hrd: u16,
@@ -450,7 +359,7 @@ impl ArpHdr {
 /// `struct arphdr ea_hdr` and uses `#define arp_op ea_hdr.ar_op`
 /// to flatten access; we just embed.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct EtherArp {
     pub ea_hdr: ArpHdr,
     pub arp_sha: [u8; 6],
@@ -460,44 +369,6 @@ pub struct EtherArp {
 }
 
 const _: () = assert!(size_of::<EtherArp>() == 28);
-
-impl EtherArp {
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 28] {
-        let mut b = [0u8; 28];
-        let h = self.ea_hdr;
-        let hrd = h.ar_hrd;
-        b[0..2].copy_from_slice(&hrd.to_ne_bytes());
-        let pro = h.ar_pro;
-        b[2..4].copy_from_slice(&pro.to_ne_bytes());
-        b[4] = h.ar_hln;
-        b[5] = h.ar_pln;
-        let op = h.ar_op;
-        b[6..8].copy_from_slice(&op.to_ne_bytes());
-        b[8..14].copy_from_slice(&self.arp_sha);
-        b[14..18].copy_from_slice(&self.arp_spa);
-        b[18..24].copy_from_slice(&self.arp_tha);
-        b[24..28].copy_from_slice(&self.arp_tpa);
-        b
-    }
-
-    #[must_use]
-    pub fn from_bytes(b: &[u8; 28]) -> Self {
-        Self {
-            ea_hdr: ArpHdr {
-                ar_hrd: u16::from_ne_bytes([b[0], b[1]]),
-                ar_pro: u16::from_ne_bytes([b[2], b[3]]),
-                ar_hln: b[4],
-                ar_pln: b[5],
-                ar_op: u16::from_ne_bytes([b[6], b[7]]),
-            },
-            arp_sha: [b[8], b[9], b[10], b[11], b[12], b[13]],
-            arp_spa: [b[14], b[15], b[16], b[17]],
-            arp_tha: [b[18], b[19], b[20], b[21], b[22], b[23]],
-            arp_tpa: [b[24], b[25], b[26], b[27]],
-        }
-    }
-}
 
 // ── Pseudo-headers (checksum only) ─────────────────────────────────
 
@@ -511,7 +382,7 @@ impl EtherArp {
 /// `length` and `next` are `uint32_t` in C, written with `htonl`
 /// (`route.c:314-315`). We follow.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv6Pseudo {
     pub ip6_src: [u8; 16],
     pub ip6_dst: [u8; 16],
@@ -530,24 +401,13 @@ impl Ipv6Pseudo {
     pub fn set_next(&mut self, v: u32) {
         self.next = v.to_be();
     }
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 40] {
-        let mut b = [0u8; 40];
-        b[0..16].copy_from_slice(&self.ip6_src);
-        b[16..32].copy_from_slice(&self.ip6_dst);
-        let l = self.length;
-        b[32..36].copy_from_slice(&l.to_ne_bytes());
-        let n = self.next;
-        b[36..40].copy_from_slice(&n.to_ne_bytes());
-        b
-    }
 }
 
 /// IPv4 pseudo-header for TCP/UDP checksum (RFC 793 §3.1). 12 bytes.
 /// `route.c`'s MSS clamping uses this (chunk 7). Same shape as the
 /// kernel's `struct tcp_pseudo_hdr`.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv4Pseudo {
     pub ip_src: [u8; 4],
     pub ip_dst: [u8; 4],
@@ -563,17 +423,6 @@ impl Ipv4Pseudo {
     pub fn set_length(&mut self, v: u16) {
         self.length = v.to_be();
     }
-    #[must_use]
-    pub fn to_bytes(self) -> [u8; 12] {
-        let mut b = [0u8; 12];
-        b[0..4].copy_from_slice(&self.ip_src);
-        b[4..8].copy_from_slice(&self.ip_dst);
-        b[8] = self.zero;
-        b[9] = self.proto;
-        let l = self.length;
-        b[10..12].copy_from_slice(&l.to_ne_bytes());
-        b
-    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -581,6 +430,7 @@ impl Ipv4Pseudo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocopy::IntoBytes;
 
     // ─── Struct sizes — pin layout
 
@@ -614,8 +464,7 @@ mod tests {
         assert_eq!(h.version(), 4);
         assert_eq!(h.ihl(), 5);
         // Round-trip via wire.
-        let b = h.to_bytes();
-        assert_eq!(b[0], 0x45);
+        assert_eq!(h.as_bytes()[0], 0x45);
     }
 
     /// IPv6: `ip6.ip6_flow = htonl(0x60000000)` (`route.c:292`).
@@ -624,8 +473,7 @@ mod tests {
     fn ipv6_flow_version_packing() {
         let mut h = Ipv6Hdr::default();
         h.set_flow(0x6000_0000);
-        let b = h.to_bytes();
-        assert_eq!(b[0], 0x60);
+        assert_eq!(h.as_bytes()[0], 0x60);
         assert_eq!(h.version(), 6);
     }
 
@@ -640,8 +488,7 @@ mod tests {
         let mut h = Ipv4Hdr::default();
         h.set_total_len(115);
         assert_eq!(h.total_len(), 115);
-        let b = h.to_bytes();
-        assert_eq!(&b[2..4], &[0x00, 0x73]);
+        assert_eq!(&h.as_bytes()[2..4], &[0x00, 0x73]);
     }
 
     // ─── Round-trip
@@ -662,7 +509,7 @@ mod tests {
         h.ip_src = [192, 168, 0, 1];
         h.ip_dst = [192, 168, 0, 199];
 
-        let b = h.to_bytes();
+        let b = h.as_bytes();
         // This is the same header as kat/gen_checksum.c case 5.
         let expect: [u8; 20] = [
             0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8,
@@ -670,7 +517,7 @@ mod tests {
         ];
         assert_eq!(b, expect);
 
-        let back = Ipv4Hdr::from_bytes(&b);
+        let back = Ipv4Hdr::read_from_bytes(b).unwrap();
         assert_eq!(back.version(), 4);
         assert_eq!(back.ihl(), 5);
         assert_eq!(back.total_len(), 115);
@@ -690,14 +537,14 @@ mod tests {
         h.ip6_src = *b"\xfe\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\x01";
         h.ip6_dst = *b"\xfe\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\x02";
 
-        let b = h.to_bytes();
+        let b = h.as_bytes();
         assert_eq!(b[0], 0x60);
         assert_eq!(&b[4..6], &[0x00, 0x20]); // plen=32 BE
         assert_eq!(b[6], 58);
         assert_eq!(b[7], 255);
         assert_eq!(&b[8..24], &h.ip6_src);
 
-        let back = Ipv6Hdr::from_bytes(&b);
+        let back = Ipv6Hdr::read_from_bytes(b).unwrap();
         assert_eq!(back.flow(), 0x6000_0000);
         assert_eq!(back.plen(), 32);
         assert_eq!(back.ip6_nxt, 58);
@@ -717,14 +564,14 @@ mod tests {
         a.arp_tha = [0xbb; 6];
         a.arp_tpa = [10, 0, 0, 2];
 
-        let b = a.to_bytes();
+        let b = a.as_bytes();
         assert_eq!(&b[0..2], &[0x00, 0x01]); // ARPHRD_ETHER BE
         assert_eq!(&b[2..4], &[0x08, 0x00]); // ETH_P_IP BE
         assert_eq!(&b[6..8], &[0x00, 0x02]); // ARPOP_REPLY BE
         assert_eq!(&b[8..14], &[0xaa; 6]);
         assert_eq!(&b[14..18], &[10, 0, 0, 1]);
 
-        let back = EtherArp::from_bytes(&b);
+        let back = EtherArp::read_from_bytes(b).unwrap();
         assert_eq!(back.ea_hdr.op(), ARPOP_REPLY);
         assert_eq!(back.arp_spa, [10, 0, 0, 1]);
     }

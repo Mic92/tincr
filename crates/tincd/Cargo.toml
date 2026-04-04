@@ -63,6 +63,12 @@ nix = { version = "0.29", default-features = false, features = ["fs", "socket", 
 # No 'all' feature: V6ONLY/REUSEADDR/NODELAY/BROADCAST are all ungated.
 socket2 = "0.5"
 
+# packet.rs: derive FromBytes/IntoBytes on the #[repr(C, packed)]
+# wire structs instead of hand-writing field-by-field codecs. The
+# structs already store network-order bytes; serialization is a
+# transmute. Already in lockfile via dependencies.
+zerocopy = { version = "0.8", features = ["derive"] }
+
 # zlib levels 1-9. miniz backend (no C dep). The C tinc uses real
 # zlib; output bytes differ but cross-decompress fine (deflate is a
 # SPEC, both implement it). KAT in compress.rs proves cross-decode.
