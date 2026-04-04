@@ -818,25 +818,34 @@ mod tests {
         (g, [a, b, c], [ab, ba, bc, cb, ac, ca])
     }
 
+    /// Postconditions of a single `del_edge(ab)` on the triangle:
+    /// reverse-unlink (edge.c:106-108), per-node list removal
+    /// (edge.c:111), and free-list slot recycling.
     #[test]
-    fn del_edge_unlinks_reverse() {
-        // edge.c:106-108: `if(e->reverse) e->reverse->reverse = NULL;`
-        let (mut g, _, [ab, ba, ..]) = triangle();
+    fn del_edge_postconditions() {
+        let (mut g, [a, b, c], [ab, ba, ..]) = triangle();
         assert_eq!(g.edge(ba).unwrap().reverse, Some(ab));
-        g.del_edge(ab).unwrap();
-        assert!(g.edge(ab).is_none()); // slot freed
-        assert_eq!(g.edge(ba).unwrap().reverse, None); // twin orphaned
-    }
 
-    #[test]
-    fn del_edge_recycles_slot() {
-        // Free-list LIFO: deleted slot is the next one handed out.
-        let (mut g, [a, _, c], [ab, ..]) = triangle();
         g.del_edge(ab).unwrap();
-        // New edge (any pair) should reuse ab's slot index.
+
+        // edge.c:106-108: `if(e->reverse) e->reverse->reverse = NULL;`
+        assert!(g.edge(ab).is_none(), "slot freed");
+        assert_eq!(g.edge(ba).unwrap().reverse, None, "twin orphaned");
+
+        // edge.c:111: `splay_delete(&e->from->edge_tree, e)`.
+        // a had edges to b and c; now only c, list stays sorted.
+        assert_eq!(g.lookup_edge(a, b), None, "gone from node list");
+        assert!(g.lookup_edge(a, c).is_some(), "a→c still there");
+        assert_eq!(g.node(a).unwrap().edges.len(), 1, "node list shrunk");
+
+        // Free-list LIFO: deleted slot is the next one handed out.
         let new = g.add_edge(c, a, 99, 0);
         assert_eq!(new, ab, "freed slot recycled");
-        assert_eq!(g.edge(new).unwrap().weight, 99);
+        assert_eq!(
+            g.edge(new).unwrap().weight,
+            99,
+            "recycled slot has new payload"
+        );
     }
 
     #[test]
@@ -852,18 +861,6 @@ mod tests {
         for e in &mst {
             assert_ne!(g.edge(*e).unwrap().weight, 30);
         }
-    }
-
-    #[test]
-    fn del_edge_removes_from_node_list() {
-        // edge.c:111: `splay_delete(&e->from->edge_tree, e)`.
-        let (mut g, [a, b, c], [ab, ..]) = triangle();
-        // a has edges to b and c. Delete a→b.
-        g.del_edge(ab).unwrap();
-        assert_eq!(g.lookup_edge(a, b), None);
-        assert!(g.lookup_edge(a, c).is_some()); // still there
-        // The list stays sorted (only c left).
-        assert_eq!(g.node(a).unwrap().edges.len(), 1);
     }
 
     #[test]
