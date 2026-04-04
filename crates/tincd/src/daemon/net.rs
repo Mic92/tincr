@@ -581,13 +581,8 @@ impl Daemon {
         // our device still route (we're the originator). BEFORE the
         // length check (matches C order; device.write rejects short).
         if self.settings.forwarding_mode == ForwardingMode::Kernel && from.is_some() {
-            let len = data.len() as u64;
-            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
-            myself_tunnel.out_packets += 1;
-            myself_tunnel.out_bytes += len;
-            if let Err(e) = self.device.write(data) {
-                log::debug!(target: "tincd::net", "Error writing to device: {e}");
-            }
+            // C `:1137`: `send_packet(myself, packet)`.
+            self.send_packet_myself(data);
             return false;
         }
 
@@ -609,7 +604,7 @@ impl Daemon {
         // `route()` (which would return `Unsupported{"arp"}`).
         if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == crate::packet::ETH_P_ARP
         {
-            return self.handle_arp(data);
+            return self.handle_arp(data, from);
         }
 
         // C `route.c:655` reads `subnet->owner->status.reachable`
@@ -716,18 +711,39 @@ impl Daemon {
         nw
     }
 
+    /// `send_packet(myself, packet)` (`net_packet.c:1556-1568`).
+    /// The local-delivery half: write to the device, with the
+    /// `overwrite_mac` stamp (`:1557-1562`) gated on Mode=router +
+    /// TAP-ish device. Factored out so the kernel-mode shortcut
+    /// (`route.c:1137`), broadcast echo (`net_packet.c:1617`), and
+    /// `Forward{to:myself}` arms all hit the same stamp.
+    fn send_packet_myself(&mut self, data: &mut [u8]) {
+        // C `:1557-1562`. Dest MAC ← the kernel's own (snatched from
+        // ARP/NDP); source MAC ← dest XOR 0xFF on the last byte
+        // ("arbitrary fake source" — just-different so the kernel
+        // doesn't see its own MAC as src). data.len()≥12 holds at
+        // every callsite (post-route or post-checklength).
+        if self.overwrite_mac && data.len() >= 12 {
+            data[0..6].copy_from_slice(&self.mymac);
+            data[6..12].copy_from_slice(&self.mymac);
+            data[11] ^= 0xFF;
+        }
+        // C `:1565-1567`
+        let len = data.len() as u64;
+        let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+        myself_tunnel.out_packets += 1;
+        myself_tunnel.out_bytes += len;
+        if let Err(e) = self.device.write(data) {
+            log::debug!(target: "tincd::net", "Error writing to device: {e}");
+        }
+    }
+
     /// `broadcast_packet` (`net_packet.c:1612-1660`).
     fn broadcast_packet(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
         // C `:1616-1618`: echo a forwarded broadcast to local kernel.
+        // C `:1617`: `send_packet(myself, packet)`.
         if from.is_some() {
-            let len = data.len() as u64;
-            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
-            myself_tunnel.out_packets += 1;
-            myself_tunnel.out_bytes += len;
-            if let Err(e) = self.device.write(data) {
-                log::debug!(target: "tincd::net",
-                            "Error writing to device: {e}");
-            }
+            self.send_packet_myself(data);
         }
 
         // C `:1624-1626`. Tunnelserver: MST might be invalid
@@ -815,17 +831,8 @@ impl Daemon {
     ) -> bool {
         match result {
             RouteResult::Forward { to } if to == self.myself => {
-                // C `send_packet:1556-1568`: packet is for US; write
-                // to TUN. NOT-PORTING(overwrite-mac): `:1557-1562`
-                // (Mode=router DeviceType=tap; 6 LOC if needed).
-                let len = data.len() as u64;
-                let myself_tunnel = self.tunnels.entry(self.myself).or_default();
-                myself_tunnel.out_packets += 1;
-                myself_tunnel.out_bytes += len;
-                if let Err(e) = self.device.write(data) {
-                    log::debug!(target: "tincd::net",
-                                "Error writing to device: {e}");
-                }
+                // C `send_packet:1556-1568`: packet is for US.
+                self.send_packet_myself(data);
                 false
             }
             RouteResult::Forward { to: to_nid } => {
@@ -1046,7 +1053,7 @@ impl Daemon {
             }
             RouteResult::NeighborSolicit => {
                 // C `route.c:710-713` → `route_neighborsol`
-                self.handle_ndp(data);
+                self.handle_ndp(data, from);
                 false
             }
             RouteResult::Unsupported { reason } => {
@@ -1828,7 +1835,15 @@ impl Daemon {
     }
 
     /// `route_arp` (`route.c:956-1023`).
-    pub(super) fn handle_arp(&mut self, data: &[u8]) -> bool {
+    pub(super) fn handle_arp(&mut self, data: &[u8], from: Option<NodeId>) -> bool {
+        // C `:964-967`: ARP from a peer in router mode is a misconfig
+        // (their kernel shouldn't be ARPing across an L3 tunnel).
+        if let Some(from_nid) = from {
+            log::warn!(target: "tincd::net",
+                       "Got ARP request from {} while in router mode!",
+                       self.node_log_name(from_nid));
+            return false;
+        }
         // C `:960,977-984`
         let Some(target) = neighbor::parse_arp_req(data) else {
             // C `:984`
@@ -1836,6 +1851,14 @@ impl Daemon {
                         "route: dropping ARP packet (not a valid request)");
             return false;
         };
+        // C `:970-973`: snatch the kernel's MAC. parse_arp_req gated
+        // data.len()≥42 so [6..12] is safe. C snatches BEFORE the
+        // subnet lookup (and before the decrement_ttl gate at `:1004`
+        // — which is dead for ARP anyway: do_decrement_ttl returns
+        // true on non-IP ethertype).
+        if self.overwrite_mac {
+            self.mymac.copy_from_slice(&data[6..12]);
+        }
         // C `:988-996`: no reachability check — ARP just answers
         // "does someone own this", not "are they up".
         let Some((_, owner)) = self.subnets.lookup_ipv4(&target, |_| true) else {
@@ -1861,12 +1884,29 @@ impl Daemon {
     }
 
     /// `route_neighborsol` (`route.c:793-954`).
-    pub(super) fn handle_ndp(&mut self, data: &[u8]) {
+    pub(super) fn handle_ndp(&mut self, data: &mut [u8], from: Option<NodeId>) {
+        // C `:814-817`: NDP solicit from a peer in router mode —
+        // misconfig (router-mode is L3; kernel shouldn't be doing
+        // neighbor discovery across the tunnel).
+        if let Some(from_nid) = from {
+            log::warn!(target: "tincd::net",
+                       "Got neighbor solicitation request from {} \
+                        while in router mode!",
+                       self.node_log_name(from_nid));
+            return;
+        }
         let Some(target) = neighbor::parse_ndp_solicit(data) else {
             log::debug!(target: "tincd::net",
                         "route: dropping NDP solicit (parse/checksum failed)");
             return;
         };
+        // C `:830-832`: snatch the kernel's MAC. parse_ndp_solicit
+        // gated data.len()≥78. C snatches BEFORE the subnet lookup;
+        // the snatch is the only useful side effect even if no subnet
+        // owns the target (we still learned the kernel's MAC).
+        if self.overwrite_mac {
+            self.mymac.copy_from_slice(&data[6..12]);
+        }
         // C `:865-879`
         let Some((_, owner)) = self.subnets.lookup_ipv6(&target, |_| true) else {
             log::debug!(target: "tincd::net",
@@ -1876,6 +1916,21 @@ impl Daemon {
         // C `:883`
         if owner == self.name {
             return;
+        }
+        // C `:893-896`: decrement_ttl on the SOLICIT before building
+        // the advert. Triple-gate: DecrementTTL=yes (rare) + NDP
+        // (rarer) + the from-peer arm is unreachable here (gated
+        // above). decrement_ttl(v6, hlim=255) → 254 in the original;
+        // build_ndp_advert copies that hlim into the reply.
+        if self.settings.decrement_ttl {
+            match route::decrement_ttl(data) {
+                TtlResult::Decremented | TtlResult::TooShort => {}
+                TtlResult::DropSilent | TtlResult::SendIcmp { .. } => {
+                    // C `:895`: `if(!do_decrement_ttl) return`. No
+                    // ICMP synth (matches C — it just returns).
+                    return;
+                }
+            }
         }
         // C `:890-948`
         let Some(mut reply) = neighbor::build_ndp_advert(data) else {

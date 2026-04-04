@@ -8,8 +8,9 @@
 //! C inlines subnet-lookup; we split: `parse_*` returns target IP,
 //! daemon looks up, `build_*` synthesizes.
 //!
-//! `NOT-PORTING(overwrite-mac)`: `:970-973`, `:830-832` (Mode=router
-//! DeviceType=tap); `source != myself` `:964-967`, `:814-817`.
+//! `overwrite-mac` (`:970-973`, `:830-832`) and `source != myself`
+//! (`:964-967`, `:814-817`): handled at the daemon callsite
+//! (`handle_arp`/`handle_ndp`); this module stays pure.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)] // header-size constants, max 32
@@ -166,7 +167,8 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// RFC 4861 §7.2.2). Icmp6: type←ADVERT, reserved←Solicited (`:910`).
 /// Opt: type←TARGET_LLADDR, lladdr←fake MAC (`:904`).
 ///
-/// `NOT-PORTING(relay-ndp-ttl)`: `:895` decrement_ttl (triple-gate).
+/// `:895` decrement_ttl: gated at the daemon callsite (`handle_ndp`)
+/// before this fn is called — keeps this module pure.
 #[must_use]
 pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     if original.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
@@ -299,6 +301,35 @@ mod tests {
         assert_eq!(arp.arp_tha, [0x02, 0, 0, 0, 0, 0x01]); // orig sha
         assert_eq!(arp.arp_sha, [0x02, 0, 0, 0, 0, 0x01 ^ 0xFF]); // fake MAC
         assert_eq!(&r[..ETHER_SIZE], &f[..ETHER_SIZE]); // eth unchanged
+    }
+
+    /// `route.c:971` snatch + `net_packet.c:1557-1562` stamp.
+    /// neighbor.rs is pure (no daemon access); the daemon does the
+    /// 4-line snatch+stamp at the callsite. This test checks the
+    /// byte arithmetic is right.
+    #[test]
+    fn overwrite_mac_snatch_then_stamp() {
+        // ARP from kernel, eth-src = the kernel's interface MAC.
+        let mut req = mk_arp_req([10, 0, 0, 1], [10, 0, 0, 2]);
+        let kernel_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        req[6..12].copy_from_slice(&kernel_mac);
+
+        // C `route.c:971`: memcpy(mymac.x, DATA(packet)+ETH_ALEN, ETH_ALEN)
+        // Daemon snatches AFTER parse_arp_req validates.
+        assert!(parse_arp_req(&req).is_some());
+        let mut mymac = [0u8; 6];
+        mymac.copy_from_slice(&req[6..12]);
+        assert_eq!(mymac, kernel_mac);
+
+        // C `net_packet.c:1557-1562`: stamp on a frame headed TO the device.
+        let mut frame = [0u8; 60];
+        frame[0..6].copy_from_slice(&mymac);
+        frame[6..12].copy_from_slice(&mymac);
+        frame[11] ^= 0xFF;
+
+        assert_eq!(&frame[0..6], &kernel_mac); // dst = kernel's own
+        assert_eq!(&frame[6..11], &kernel_mac[..5]); // src = kernel's...
+        assert_eq!(frame[11], 0x00); // ...XOR 0xFF on last byte
     }
 
     #[test]

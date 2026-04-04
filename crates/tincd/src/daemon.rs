@@ -870,6 +870,25 @@ pub struct Daemon {
     /// (`script.c:125`).
     pub(crate) iface: String,
 
+    /// `overwrite_mac` (`route.c:44`). Derived, NOT a config var:
+    /// `(device emits full eth frames) && (Mode=router)`. C sets it
+    /// in each device backend's setup (`linux/device.c:82`, `bsd/
+    /// device.c:337`, `vde_device.c:70`, `windows/device.c:229`,
+    /// `linux/uml_device.c:160`). Router-mode IGNORES MACs but the
+    /// kernel doesn't — a TAP write with zero dst-MAC is dropped by
+    /// the rx filter. Fix: snatch the kernel's MAC from its own
+    /// ARP/NDP solicits, stamp it onto outgoing frames. See `mymac`.
+    pub(crate) overwrite_mac: bool,
+
+    /// `mymac` (`route.c:45`). The kernel's interface MAC. C init:
+    /// `{0xFE,0xFD,0,0,0,0}` (locally-administered placeholder).
+    /// On Linux TAP, `SIOCGIFHWADDR` (`device.mac()`) seeds it at
+    /// setup; on BSD TAP, `SIOCGIFADDR` (`bsd/device.c:369`). Then
+    /// REFRESHED on every ARP/NDP from the kernel (`route.c:830,
+    /// 971`) — the eth-src of those frames IS the kernel's MAC.
+    /// Read at `net_packet.c:1557-1562` (the stamp).
+    pub(crate) mymac: [u8; 6],
+
     /// `errors` static inside `handle_device_data` (`net_packet.c:
     /// 1918`). Consecutive device-read failures. Reset on success.
     /// At 10 (`:1933`): `event_exit()`. A flapping TUN means the
@@ -1320,9 +1339,20 @@ impl Daemon {
         // `&dyn` trait borrow makes `&mut self` script call sites
         // awkward. The C reads the `iface` global directly.
         let iface = device.iface().to_owned();
+        let device_mode = device.mode();
         log::info!(target: "tincd",
-                   "Device mode: {:?}, interface: {iface}",
-                   device.mode());
+                   "Device mode: {device_mode:?}, interface: {iface}");
+
+        // C `linux/device.c:82` (and bsd/vde/uml/windows): TAP-ish
+        // device + Mode=router → the kernel emits/expects eth frames
+        // but our routing layer ignores MACs. The stamp (`net_packet.c:
+        // 1557-1562`) writes a valid dst-MAC on the way to the device.
+        let overwrite_mac =
+            device_mode == tinc_device::Mode::Tap && settings.routing_mode == RoutingMode::Router;
+        // C `route.c:45`: `{0xFE,0xFD,0,0,0,0}` placeholder. C `bsd/
+        // device.c:369` (and Linux TAP via SIOCGIFHWADDR) seeds from
+        // the kernel; the ARP/NDP snatch then keeps it fresh.
+        let mymac = device.mac().unwrap_or([0xFE, 0xFD, 0, 0, 0, 0]);
 
         // ─── event loop scaffolding
         // tinc-event constructors. EventLoop::new can fail (epoll_
@@ -1561,6 +1591,8 @@ impl Daemon {
             // a delta of `pingtimeout`, well under `2*30`.
             last_periodic_run_time: timers.now(),
             iface,
+            overwrite_mac,
+            mymac,
             device_errors: 0,
             device_io,
             outgoings: SlotMap::with_key(),
