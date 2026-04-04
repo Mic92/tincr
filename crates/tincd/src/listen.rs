@@ -16,9 +16,7 @@
 //! (`:332`), `accept` (uses `accept4(SOCK_CLOEXEC)` — closes a
 //! small fd leak the C has), `SockAddr` (= C `sockaddr_t` union).
 //!
-//! Deferred sockopts: `SO_MARK`/`SO_BINDTODEVICE` (`:225-247`, gated
-//! on `all`), `SO_RCVBUF`/`SO_SNDBUF` (`:334-335`),
-//! `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
+//! Deferred sockopts: `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
 //!
 //! ## getaddrinfo: skip it
 //!
@@ -33,12 +31,113 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 
+use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+
+/// Per-listener socket options driven by config keys. Threaded from
+/// `daemon.rs` setup through `open_listeners` so the socket-creation
+/// helpers stay free of config-tree dependencies.
+///
+/// All fields except `bind_to_interface` are best-effort: setsockopt
+/// failure logs and continues, matching the C (`net_socket.c:248,
+/// 264-290` — no return-value check on `SO_MARK`, warn-only on the
+/// buffer ones).
+#[derive(Debug, Clone)]
+pub struct SockOpts {
+    /// `udp_rcvbuf` (`net_socket.c:41`). C default `1024*1024` (1MB).
+    /// 0 = skip the setsockopt entirely (`set_udp_buffer:264`: `if
+    /// (!size) return`). Kernel default on Linux is ~200KB — the C
+    /// bumps it to handle burst traffic. UDP-only.
+    pub udp_rcvbuf: usize,
+    /// `udp_sndbuf` (`net_socket.c:42`). Same shape as rcvbuf.
+    pub udp_sndbuf: usize,
+    /// `udp_{rcv,snd}buf_warnings` (`net_socket.c:43-44`). C sets this
+    /// to true ONLY when the operator explicitly configured
+    /// `UDPRcvBuf`/`UDPSndBuf` (`net_setup.c:895,904`). The 1MB
+    /// default firing without the operator asking would be log noise
+    /// on every boot (kernel almost always clamps 1MB).
+    pub udp_buf_warnings: bool,
+    /// `fwmark` (`net_socket.c:46`). `SO_MARK`. Linux netfilter mark
+    /// for policy routing. 0 = unset = skip. Applied to TCP + UDP
+    /// listeners (`:248`) AND outgoing TCP (`:383`, separate site).
+    /// Public so `outgoing.rs` can reuse the same parsed value.
+    pub fwmark: u32,
+    /// `BindToInterface` config (`net_socket.c:111-142`).
+    /// `SO_BINDTODEVICE`. Linux-only. `None` = skip. Unlike the
+    /// other knobs, the C makes this a HARD failure (`:244,391`:
+    /// `closesocket; return -1`) — if the operator says "bind to
+    /// eth0" and eth0 doesn't exist, silently binding to the
+    /// wrong interface defeats the security intent. We do the
+    /// same: failure here propagates up, kills the listener pair.
+    pub bind_to_interface: Option<String>,
+}
+
+impl Default for SockOpts {
+    fn default() -> Self {
+        Self {
+            // C `net_socket.c:41-42`: `int udp_rcvbuf = 1024*1024`.
+            udp_rcvbuf: 1024 * 1024,
+            udp_sndbuf: 1024 * 1024,
+            // C `:43-44`: `bool udp_rcvbuf_warnings;` (zero-init).
+            udp_buf_warnings: false,
+            // C `:46`: `int fwmark;` (zero-init = unset).
+            fwmark: 0,
+            bind_to_interface: None,
+        }
+    }
+}
+
+/// `set_udp_buffer` (`net_socket.c:262-290`). Set `SO_RCVBUF` or
+/// `SO_SNDBUF`, then optionally read back and warn if the kernel
+/// clamped. Linux DOUBLES the requested value internally (overhead
+/// accounting) and caps at `net.core.{r,w}mem_max`; the readback
+/// sees the doubled-then-capped figure. C `:287` checks `actual <
+/// size` (not `!=`) — doubling alone doesn't trip the warning.
+fn set_udp_buffer<O>(s: &Socket, opt: O, name: &str, size: usize, warn: bool)
+where
+    O: nix::sys::socket::SetSockOpt<Val = usize> + nix::sys::socket::GetSockOpt<Val = usize> + Copy,
+{
+    // `:264`: `if(!size) return`. 0 means "don't touch".
+    if size == 0 {
+        return;
+    }
+    if let Err(e) = setsockopt(&s.as_fd(), opt, &size) {
+        log::warn!(target: "tincd::net", "Can't set UDP {name} to {size}: {e}");
+        return;
+    }
+    if !warn {
+        return;
+    }
+    // `:278-289`: readback. nix wraps the optlen dance.
+    match nix::sys::socket::getsockopt(&s.as_fd(), opt) {
+        Ok(actual) if actual < size => {
+            log::warn!(
+                target: "tincd::net",
+                "Can't set UDP {name} to {size}, the system set it to {actual} instead"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!(target: "tincd::net", "Can't read back UDP {name}: {e}");
+        }
+    }
+}
+
+/// `bind_to_interface` (`net_socket.c:111-142`). `SO_BINDTODEVICE`.
+/// Returns `Err` on failure (caller closes the socket) — unlike the
+/// other sockopts, this is intentional: see `SockOpts.
+/// bind_to_interface`. The C `:132-135` returns `false` and the
+/// caller at `:391` does `closesocket; return -1`.
+fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
+    let name = std::ffi::OsString::from(iface);
+    setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
+        .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
+}
 
 /// `MAXSOCKETS` (`net.h:47`). C comment: "Probably overkill...".
 /// 8 listener pairs (TCP+UDP each). One v4, one v6, six spare for
@@ -142,7 +241,7 @@ impl Listener {
 /// fail too if the addr is in use; let `bind` produce the user-visible
 /// error). C does the same — none of the `setsockopt` calls in
 /// `setup_listen_socket` check the return value.
-fn setup_tcp(addr: &SockAddr) -> io::Result<Socket> {
+fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     // `Socket::new` does `SOCK_CLOEXEC` on Linux/BSD. C `:203` does
     // separate `fcntl(F_SETFD, FD_CLOEXEC)`. Same effect, atomic.
@@ -163,7 +262,22 @@ fn setup_tcp(addr: &SockAddr) -> io::Result<Socket> {
         log::warn!(target: "tincd::net", "IPV6_V6ONLY: {e}");
     }
 
-    // Deferred: SO_MARK (fwmark), SO_BINDTODEVICE (BindToInterface).
+    // `:248`: SO_MARK. Linux netfilter mark for policy routing.
+    // 0 = unset = skip (C: `if(fwmark)`). Best-effort — the C
+    // doesn't check the return value.
+    if opts.fwmark != 0
+        && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
+    {
+        log::warn!(target: "tincd::net", "SO_MARK={}: {e}", opts.fwmark);
+    }
+
+    // `:225-247`: SO_BINDTODEVICE. The C `setup_listen_socket` does
+    // this inline (NOT via the `bind_to_interface` helper — that's
+    // UDP-only at `:389`). Same semantics: hard failure (`:244`:
+    // `closesocket; return -1`). Propagate; Socket's Drop closes.
+    if let Some(iface) = &opts.bind_to_interface {
+        bind_to_interface(&s, iface)?;
+    }
 
     // `:250`: bind. C `try_bind` closes the fd on failure and logs;
     // we let `?` propagate. Socket's Drop closes.
@@ -190,7 +304,7 @@ fn setup_tcp(addr: &SockAddr) -> io::Result<Socket> {
 ///
 /// # Errors
 /// `socket`/`bind` errors. `setsockopt` warnings logged.
-fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
+fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     let s = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 
@@ -262,8 +376,34 @@ fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
         }
     }
 
-    // Deferred: SO_RCVBUF/SO_SNDBUF (1MB each), SO_MARK,
-    // SO_BINDTODEVICE.
+    // `:334-335`: SO_RCVBUF/SO_SNDBUF via `set_udp_buffer`.
+    // Default 1MB each (`net_socket.c:41-42`). Best-effort.
+    set_udp_buffer(
+        &s,
+        sockopt::RcvBuf,
+        "SO_RCVBUF",
+        opts.udp_rcvbuf,
+        opts.udp_buf_warnings,
+    );
+    set_udp_buffer(
+        &s,
+        sockopt::SndBuf,
+        "SO_SNDBUF",
+        opts.udp_sndbuf,
+        opts.udp_buf_warnings,
+    );
+
+    // `:383-387` (UDP site): SO_MARK. Same as TCP `:248`.
+    if opts.fwmark != 0
+        && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
+    {
+        log::warn!(target: "tincd::net", "SO_MARK={} (udp): {e}", opts.fwmark);
+    }
+
+    // `:389-392`: SO_BINDTODEVICE. Hard failure: propagate.
+    if let Some(iface) = &opts.bind_to_interface {
+        bind_to_interface(&s, iface)?;
+    }
 
     s.bind(addr)?;
 
@@ -298,18 +438,18 @@ fn setup_udp(addr: &SockAddr) -> io::Result<Socket> {
 /// C `:705-707` `continue`. The "no listeners" case is the caller's
 /// problem (returns empty Vec).
 #[must_use]
-pub fn open_listeners(port: u16, family: AddrFamily) -> Vec<Listener> {
+pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Listener> {
     let mut listeners = Vec::with_capacity(2);
 
     if family.try_v4() {
         let addr: SocketAddr = (Ipv4Addr::UNSPECIFIED, port).into();
-        if let Some(l) = open_one(addr) {
+        if let Some(l) = open_one(addr, opts) {
             listeners.push(l);
         }
     }
     if family.try_v6() {
         let addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
-        if let Some(l) = open_one(addr) {
+        if let Some(l) = open_one(addr, opts) {
             listeners.push(l);
         }
     }
@@ -325,10 +465,10 @@ pub fn open_listeners(port: u16, family: AddrFamily) -> Vec<Listener> {
 /// a port; UDP gets a DIFFERENT port (no `bind_reusing_port` yet).
 /// This is wrong vs the C but only matters for production; tests use
 /// the TCP port from the pidfile and don't touch UDP.
-fn open_one(addr: SocketAddr) -> Option<Listener> {
+fn open_one(addr: SocketAddr, opts: &SockOpts) -> Option<Listener> {
     let sa = SockAddr::from(addr);
 
-    let tcp = match setup_tcp(&sa) {
+    let tcp = match setup_tcp(&sa, opts) {
         Ok(s) => s,
         Err(e) => {
             // C `:705`: `if(tcp_fd < 0) continue`. Log + skip.
@@ -340,7 +480,7 @@ fn open_one(addr: SocketAddr) -> Option<Listener> {
         }
     };
 
-    let udp = match setup_udp(&sa) {
+    let udp = match setup_udp(&sa, opts) {
         Ok(s) => s,
         Err(e) => {
             // C `:718`: `closesocket(tcp_fd); continue`.
@@ -396,7 +536,8 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
     }
 
     // Deferred: IP_TOS=LOWDELAY (`:93`), IPV6_TCLASS=LOWDELAY (`:98`),
-    // SO_MARK (`:103`).
+    // SO_MARK (`:103` — the LISTEN-side mark is set in setup_tcp; the
+    // outgoing-connect mark at `net_socket.c:383` is separate).
 
     Ok(s.into())
 }
@@ -716,6 +857,12 @@ pub fn fmt_addr(sa: &SocketAddr) -> String {
 mod tests {
     use super::*;
     use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+    use nix::sys::socket::getsockopt;
+
+    /// Shorthand for tests that don't care about sockopts.
+    fn opts() -> SockOpts {
+        SockOpts::default()
+    }
     use std::net::{SocketAddrV4, SocketAddrV6};
 
     /// Reduce stutter. `addr("10.0.0.5", 0)` for v4, `addr("::1", 0)` for v6.
@@ -1134,7 +1281,7 @@ mod tests {
     /// `AddressFamily = ipv4`: one v4 listener, no v6.
     #[test]
     fn open_v4_only() {
-        let listeners = open_listeners(0, AddrFamily::Ipv4);
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
         assert_eq!(listeners.len(), 1);
         assert!(listeners[0].local.is_ipv4());
         // Port assigned by kernel.
@@ -1145,7 +1292,7 @@ mod tests {
     /// CI might be v4-only; both outcomes are valid.
     #[test]
     fn open_any_one_or_two() {
-        let listeners = open_listeners(0, AddrFamily::Any);
+        let listeners = open_listeners(0, AddrFamily::Any, &opts());
         assert!(
             listeners.len() == 1 || listeners.len() == 2,
             "got {} listeners",
@@ -1162,7 +1309,7 @@ mod tests {
     /// inherit.
     #[test]
     fn open_cloexec() {
-        let listeners = open_listeners(0, AddrFamily::Ipv4);
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
         let (tcp_fd, udp_fd) = listeners[0].fds();
 
         // F_GETFD bit 0 = FD_CLOEXEC.
@@ -1179,7 +1326,7 @@ mod tests {
     /// Skipped if system doesn't support v6.
     #[test]
     fn open_v6only_set() {
-        let listeners = open_listeners(0, AddrFamily::Ipv6);
+        let listeners = open_listeners(0, AddrFamily::Ipv6, &opts());
         // Might be empty on v6-disabled systems.
         let Some(l) = listeners.first() else {
             eprintln!("v6 unavailable, skipping");
@@ -1194,7 +1341,7 @@ mod tests {
     /// immediately).
     #[test]
     fn open_udp_nonblocking() {
-        let listeners = open_listeners(0, AddrFamily::Ipv4);
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
         let (_, udp_fd) = listeners[0].fds();
         let flags = OFlag::from_bits_truncate(fcntl(udp_fd, FcntlArg::F_GETFL).unwrap());
         assert!(flags.contains(OFlag::O_NONBLOCK));
@@ -1229,7 +1376,7 @@ mod tests {
         }
 
         // v4: always available.
-        let listeners = open_listeners(0, AddrFamily::Ipv4);
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
         let (_, udp_fd) = listeners[0].fds();
         assert_eq!(
             get_mtu_discover(udp_fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER),
@@ -1237,7 +1384,7 @@ mod tests {
         );
 
         // v6: may be disabled. Skip if no listener.
-        let listeners6 = open_listeners(0, AddrFamily::Ipv6);
+        let listeners6 = open_listeners(0, AddrFamily::Ipv6, &opts());
         if let Some(l) = listeners6.first() {
             let (_, udp_fd) = l.fds();
             assert_eq!(
@@ -1254,13 +1401,125 @@ mod tests {
     /// This is the "EADDRINUSE → continue" path (`:705`).
     #[test]
     fn open_port_clash_is_graceful() {
-        let first = open_listeners(0, AddrFamily::Ipv4);
+        let first = open_listeners(0, AddrFamily::Ipv4, &opts());
         let port = first[0].local.port();
 
         // Same port. SO_REUSEADDR is set, but there's an active
         // listener — bind fails anyway.
-        let second = open_listeners(port, AddrFamily::Ipv4);
+        let second = open_listeners(port, AddrFamily::Ipv4, &opts());
         assert!(second.is_empty(), "second bind on port {port} should fail");
         drop(first);
+    }
+
+    /// `setup_udp` sets `SO_RCVBUF`/`SO_SNDBUF`. Read back. Linux
+    /// doubles the requested value (overhead accounting) then caps at
+    /// `net.core.{r,w}mem_max`. We can't predict the cap, but we CAN
+    /// assert the value moved — kernel default is ~200KB, we ask for
+    /// 1MB, so readback should be > the default for an unconfigured
+    /// socket. Compare against a sibling socket with `udp_rcvbuf=0`
+    /// (skip-the-setsockopt) to get the kernel baseline.
+    #[test]
+    fn open_udp_rcvbuf_set() {
+        // Baseline: explicitly skip the setsockopt.
+        let skip = SockOpts {
+            udp_rcvbuf: 0,
+            udp_sndbuf: 0,
+            ..SockOpts::default()
+        };
+        let baseline = open_listeners(0, AddrFamily::Ipv4, &skip);
+        let base_rcv = getsockopt(&baseline[0].udp.as_fd(), sockopt::RcvBuf).unwrap();
+        let base_snd = getsockopt(&baseline[0].udp.as_fd(), sockopt::SndBuf).unwrap();
+
+        // Default 1MB request.
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
+        let rcv = getsockopt(&listeners[0].udp.as_fd(), sockopt::RcvBuf).unwrap();
+        let snd = getsockopt(&listeners[0].udp.as_fd(), sockopt::SndBuf).unwrap();
+
+        // Even capped, the request should at least equal the kernel
+        // default (sysctl `net.core.rmem_default` ≤ `rmem_max`).
+        // Typically: base ≈ 212992, ours ≈ 425984 or 2097152.
+        assert!(rcv >= base_rcv, "SO_RCVBUF: got {rcv}, baseline {base_rcv}");
+        assert!(snd >= base_snd, "SO_SNDBUF: got {snd}, baseline {base_snd}");
+        // And it definitely changed from "nothing was set".
+        assert_ne!(rcv, 0);
+    }
+
+    /// `SO_BINDTODEVICE` to `lo`. Always exists. Read back.
+    /// nix returns it with a trailing NUL — strip before compare.
+    #[test]
+    fn open_bind_to_interface_lo() {
+        let o = SockOpts {
+            bind_to_interface: Some("lo".into()),
+            ..SockOpts::default()
+        };
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
+        assert_eq!(listeners.len(), 1, "bind to lo should succeed");
+
+        // Readback on the UDP fd (TCP would do too — both get it).
+        let got = getsockopt(&listeners[0].udp.as_fd(), sockopt::BindToDevice).unwrap();
+        let got = got.to_string_lossy();
+        let got = got.trim_end_matches('\0');
+        assert_eq!(got, "lo");
+    }
+
+    /// `SO_BINDTODEVICE` to a nonexistent interface: hard failure.
+    /// `open_one` returns `None` (the C closes the fd at `:244,391`).
+    /// No panic; the listener pair just doesn't materialize.
+    #[test]
+    fn open_bind_to_interface_bad_is_graceful() {
+        let o = SockOpts {
+            bind_to_interface: Some("nonexistent-iface-9z".into()),
+            ..SockOpts::default()
+        };
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
+        assert!(listeners.is_empty(), "bad interface should kill the pair");
+    }
+
+    /// `SO_MARK` requires `CAP_NET_ADMIN`. Skip unless root.
+    /// (Gating on euid is crude but matches the netns harness's
+    /// shape; the cap-aware check would be `prctl(PR_CAPBSET_READ)`
+    /// but that's overkill for a unit test.)
+    #[test]
+    fn open_fwmark_set() {
+        // SAFETY: geteuid is infallible, no pointers.
+        #[allow(unsafe_code)]
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            eprintln!("SKIP open_fwmark_set: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
+            return;
+        }
+        let o = SockOpts {
+            fwmark: 0x1234,
+            ..SockOpts::default()
+        };
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
+        assert_eq!(listeners.len(), 1);
+        // Read back from BOTH sockets — TCP `:248` and UDP `:383`.
+        let tcp_mark = getsockopt(&listeners[0].tcp.as_fd(), sockopt::Mark).unwrap();
+        let udp_mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
+        assert_eq!(tcp_mark, 0x1234);
+        assert_eq!(udp_mark, 0x1234);
+    }
+
+    /// `fwmark = 0` (default) means "don't set". Verify the syscall
+    /// is skipped: SO_MARK readback is 0 even though we never called
+    /// setsockopt. (Weak assertion — kernel default IS 0 — but
+    /// proves we don't crash on the unprivileged path.)
+    #[test]
+    fn open_fwmark_zero_is_skip() {
+        let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
+        let mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
+        assert_eq!(mark, 0);
+    }
+
+    /// `SockOpts::default()` matches C globals at `net_socket.c:41-46`.
+    #[test]
+    fn sockopts_defaults_match_c() {
+        let o = SockOpts::default();
+        assert_eq!(o.udp_rcvbuf, 1024 * 1024);
+        assert_eq!(o.udp_sndbuf, 1024 * 1024);
+        assert!(!o.udp_buf_warnings);
+        assert_eq!(o.fwmark, 0);
+        assert!(o.bind_to_interface.is_none());
     }
 }

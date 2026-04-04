@@ -30,8 +30,8 @@ use crate::graph_glue::{Transition, run_graph};
 use crate::invitation_serve::{self, InvitePhase};
 use crate::keys::{PrivKeyError, read_ecdsa_private_key};
 use crate::listen::{
-    AddrFamily, Listener, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners, pidfile_addr,
-    unmap,
+    AddrFamily, Listener, SockOpts, Tarpit, configure_tcp, fmt_addr, is_local, open_listeners,
+    pidfile_addr, unmap,
 };
 use crate::node_id::{NodeId6, NodeId6Table};
 use crate::outgoing::{
@@ -313,6 +313,12 @@ pub struct DaemonSettings {
     /// nonce reuse — catastrophic for ChaCha20-Poly1305. The 3600s
     /// timer caps any single key at ≈4.8e8 packets, well clear.
     pub keylifetime: u32,
+    /// Per-listener sockopts (`net_socket.c:41-46`). `UDPRcvBuf`/
+    /// `UDPSndBuf`/`FWMark`/`BindToInterface` config keys. Non-
+    /// reloadable: rebinding would mean closing all listeners.
+    /// `fwmark` is also used by the outgoing-connect path
+    /// (`net_socket.c:383` — separate site, not yet wired).
+    pub sockopts: SockOpts,
     // Chunk 4+: ~32 more fields.
 }
 
@@ -415,6 +421,8 @@ impl Default for DaemonSettings {
             mtu_info_interval: 5,
             // C `net_setup.c:558`: `keylifetime = 3600`.
             keylifetime: 3600,
+            // C `net_socket.c:41-46`: globals with initializers.
+            sockopts: SockOpts::default(),
         }
     }
 }
@@ -1281,6 +1289,57 @@ impl Daemon {
             }
         }
 
+        // UDPRcvBuf / UDPSndBuf (`net_setup.c:889-904`). C rejects
+        // negative; we get that for free from the usize parse. C
+        // sets `udp_{rcv,snd}buf_warnings = true` ONLY when the
+        // operator explicitly configures — the 1MB default tripping
+        // the kernel cap on every boot would be log noise.
+        if let Some(e) = config.lookup("UDPRcvBuf").next()
+            && let Ok(v) = e.get_int()
+        {
+            match usize::try_from(v) {
+                Ok(v) => {
+                    settings.sockopts.udp_rcvbuf = v;
+                    settings.sockopts.udp_buf_warnings = true;
+                }
+                Err(_) => {
+                    return Err(SetupError::Config("UDPRcvBuf cannot be negative!".into()));
+                }
+            }
+        }
+        if let Some(e) = config.lookup("UDPSndBuf").next()
+            && let Ok(v) = e.get_int()
+        {
+            match usize::try_from(v) {
+                Ok(v) => {
+                    settings.sockopts.udp_sndbuf = v;
+                    settings.sockopts.udp_buf_warnings = true;
+                }
+                Err(_) => {
+                    return Err(SetupError::Config("UDPSndBuf cannot be negative!".into()));
+                }
+            }
+        }
+
+        // FWMark (`net_setup.c:907-912`). C `get_config_int` into
+        // `int fwmark`; 0 (default/unset) means "skip". The C has
+        // an `#ifndef SO_MARK` warning at `:910` for non-Linux —
+        // we're Linux-only for now so the gate is implicit.
+        if let Some(e) = config.lookup("FWMark").next()
+            && let Ok(v) = e.get_int()
+            && let Ok(v) = u32::try_from(v)
+        {
+            settings.sockopts.fwmark = v;
+        }
+
+        // BindToInterface (`net_socket.c:111-142`). The C reads
+        // this LAZILY inside `bind_to_interface()` per-socket; we
+        // hoist the config read to setup-time. Same effect: it's
+        // not reloadable either way (sockets are already bound).
+        if let Some(e) = config.lookup("BindToInterface").next() {
+            settings.sockopts.bind_to_interface = Some(e.get_str().to_owned());
+        }
+
         // Proxy (`net_setup.c:263-345`). Only `exec` is wired.
         // Non-reloadable (the C reads it inside setup_myself_
         // reloadable but our outgoing-connection path reads it at
@@ -1544,7 +1603,7 @@ impl Daemon {
         // C `:1180`: `if(!listen_sockets) { ERR; return false }`.
         // Hard error. The daemon can't function without at least one
         // listener (peers can't connect; we can't receive UDP).
-        let listeners = open_listeners(settings.port, settings.addressfamily);
+        let listeners = open_listeners(settings.port, settings.addressfamily, &settings.sockopts);
         let mut listener_udp_io = Vec::with_capacity(listeners.len());
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
         // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
@@ -2102,6 +2161,10 @@ mod tests {
         assert_eq!(s.mtu_info_interval, 5);
         // C `net_setup.c:1257`: `maxoutbufsize = 10 * MTU`.
         assert_eq!(s.maxoutbufsize, 10 * MTU as usize);
+        // C `net_socket.c:41-42`: `udp_{rcv,snd}buf = 1024*1024`.
+        assert_eq!(s.sockopts.udp_rcvbuf, 1024 * 1024);
+        assert_eq!(s.sockopts.udp_sndbuf, 1024 * 1024);
+        assert_eq!(s.sockopts.fwmark, 0);
     }
 
     /// `route.c:130-132` rate limit on the Unreachable arm. Max
