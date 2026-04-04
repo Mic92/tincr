@@ -130,10 +130,6 @@ fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     // const would be a compile-time `format!` (which doesn't exist).
     // Per-call alloc is fine; this runs once per log line, the
     // syscall to read the line dominates.
-    //
-    // (Can't use `parse + ==` because `req as i32` would compare
-    // `15i32 == 15i32` but require parsing. The string compare
-    // skips a parse; both correct.)
     if req != (kind as u8).to_string() {
         return None;
     }
@@ -750,28 +746,11 @@ mod tests {
     }
 
     // log_loop / pcap_loop — fake socket, captured output
-    //
-    // The CtlSocket constructor needs the Rc<RefCell> dance.
-    // Crate-internal: reach into ctl's internals. A test-only
-    // constructor `CtlSocket::for_test(S)` would be cleaner but
-    // would be `#[cfg(test)] pub fn` in another module — visible
-    // to ALL test modules, used by one. Direct construction here
-    // is fine; the fields are `pub(crate)` no wait let me check.
 
-    /// Build a CtlSocket reading from `wire`. The `Cursor` is
-    /// `Read+Write`; we only ever read (no `send` in these tests
-    /// — the `send_int2`/`send_int` is to the SAME cursor, which
-    /// would interleave with reads. The tests below DO call send
-    /// (the loops do), so the cursor DOES get written to. The
-    /// cursor's position advances on write; the reads then
-    /// continue from there. WRONG.)
-    ///
-    /// Fixed: use a duplex pair. `wire_in` for daemon→client
-    /// (we read), `wire_out` for client→daemon (we write,
-    /// captured for assertions). The Cursor for reading; a Vec
-    /// for writing.
-    ///
-    /// `Duplex` is a tiny adapter: Read from one, Write to other.
+    /// Read+Write adapter: reads come from `read_side`, writes
+    /// land in `write_side`. The loops under test both subscribe
+    /// (write) AND consume (read); a single Cursor would interleave
+    /// the two. Wrapped via `CtlSocket::wrap` (the test-seam ctor).
     struct Duplex {
         read_side: Cursor<Vec<u8>>,
         write_side: Vec<u8>,
@@ -796,15 +775,6 @@ mod tests {
             write_side: Vec::new(),
         };
         let shared = Rc::new(RefCell::new(dup));
-        // Reach into `ctl`'s internals. The fields are private to
-        // the `ctl` module — but we're in the SAME crate. The
-        // path is `crate::ctl::ReadHalf`, but those types ARE
-        // module-private (`struct ReadHalf<S>(...)`). So this
-        // doesn't compile from here.
-        //
-        // The fix: a `CtlSocket::wrap` constructor that's `pub`
-        // (or `pub(crate)`). The handshake/connect path stays as
-        // the production constructor; `wrap` is the test seam.
         let ctl = CtlSocket::wrap(Rc::clone(&shared));
         (ctl, shared)
     }

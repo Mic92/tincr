@@ -235,17 +235,9 @@ pub fn parse_slug(slug: &str) -> Option<([u8; COOKIE_LEN], [u8; COOKIE_LEN])> {
     if slug.len() != SLUG_LEN {
         return None;
     }
-    // We slice at SLUG_PART_LEN, which is 24 — a known-ASCII boundary
-    // because b64 output is all ASCII. No `from_utf8` round-trip needed;
-    // `&str` slicing at an ASCII byte index is sound. (The "don't
-    // round-trip when slicing at ASCII" rule.) But actually we need to
-    // verify the slug IS ASCII first, or the slice could panic mid-char.
-    // b64::decode does that: it rejects non-alphabet bytes. So decode
-    // each half independently and let decode's None propagate. But we
-    // still need the slice to be valid... use `is_char_boundary`.
-    //
-    // Actually, simpler: the slug came from a URL. If it has multibyte
-    // UTF-8 in it, it's garbage. Check up front.
+    // `split_at(SLUG_PART_LEN)` panics on a non-char-boundary. Valid
+    // slugs are b64 (all ASCII); reject non-ASCII up front so multibyte
+    // garbage at byte 24 returns None instead of panicking.
     if !slug.is_ascii() {
         return None;
     }

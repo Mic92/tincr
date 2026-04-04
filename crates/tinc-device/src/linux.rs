@@ -808,8 +808,8 @@ mod tests {
     /// C `device.c:78` is just `IFF_TUN` — we diverge here, the C's
     /// +10 tun_pi trick is gone in favor of vnet_hdr;
     /// wg-go `tun_linux.go:566` does the same). TAP flags match
-    /// C `:86`: `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
-    /// `Tun::open`'s flag computation gets caught.
+    /// C `device.c:86`: `IFF_TAP | IFF_NO_PI`. Pin both so a
+    /// refactor of `Tun::open`'s flag computation gets caught.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn mode_flags() {

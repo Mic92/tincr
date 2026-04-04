@@ -111,15 +111,9 @@ const CONFFILES: &[&str] = &[
 /// might not exist for a fresh `tinc init`; conffiles: confbase
 /// already exists).
 ///
-/// Not in the C — `cmd_edit` does mkdir-p never. `tinc edit alice`
-/// on a fresh tree fails when vi can't write to a nonexistent
-/// `hosts/`. The "create hosts/ if missing" is our addition; one
-/// `create_dir_all` doesn't hurt and `tinc init` does it anyway.
-///
-/// Actually NOT adding it — port C behavior. The `hosts/` mkdir
-/// is `tinc init`'s job. If `hosts/` doesn't exist, the user
-/// hasn't run `init`, and the editor will tell them when save
-/// fails. Consistent with C; one less thing to test.
+/// C `cmd_edit` never mkdir-p's. We don't either: `hosts/` mkdir
+/// is `tinc init`'s job. If `hosts/` doesn't exist the editor
+/// errors on save — same as C, one less thing to test.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// Full path. The caller spawns `$EDITOR` on this.
@@ -221,19 +215,12 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
     // host scripts (`tinc-up` analogues but per-host). They
     // EXECUTE. The check_id is "is this even a node?" — vi'ing
     // `hosts/garbage-up` and having it execute would be bad.
+    // (`tinc-up` itself never reaches here — step 3 caught it.)
     //
-    // ACTUALLY: the C ALSO validates `"tinc-up"` here? No —
-    // `tinc-up` matched conffiles[] in step 3, returned early.
-    // Step 4 only sees inputs that didn't match conffiles. So
-    // `"X-up"` here means X is a HOST name, not `"tinc"`. Good.
-    //
-    // The first dash, not the last: `find('-')`. A node named
-    // `"a-b"` (legal! check_id allows `_` but NOT `-`, so actually
-    // no: `tincctl.c:108`: `isalnum || c == '_'`). Dash isn't a
-    // legal name char. So `"a-b-up"` splits to `("a", "b-up")`,
-    // suffix is `"b-up"` ≠ `"up"`, error. Correct: `a-b` isn't a
-    // valid name anyway. The first-dash split happens to align
-    // with check_id's charset.
+    // First-dash split aligns with check_id's charset: `-` isn't
+    // a legal name char (`tincctl.c:108`: `isalnum || c == '_'`),
+    // so `a-b-up` → `("a", "b-up")` → suffix ≠ `up` → error,
+    // which is correct since `a-b` was never a valid name.
     if let Some((name, suffix)) = input.split_once('-') {
         // `tincctl.c:2437`: `(strcmp(dash, "up") && strcmp(dash,
         // "down"))` — both nonzero means neither matches. C boolean
@@ -299,24 +286,11 @@ fn pick_editor() -> OsString {
 ///        └────────────────────────── the script
 /// ```
 ///
-/// `"$EDITOR"` IN the script: the shell reads the env var and
-/// word-splits it. `EDITOR="emacsclient -nw"` becomes two argv
-/// entries to execvp.
-///
-/// Wait. Double-quoted `"$EDITOR"` is NOT word-split. That's the
-/// POINT of double-quoting in shell. `$EDITOR` (unquoted) is
-/// word-split. So the script should be `$EDITOR "$@"` —
-/// editor unquoted (split it), filename quoted (don't split it).
-///
-/// But unquoted `$EDITOR` ALSO does glob expansion. `EDITOR='vim
-/// foo*'` would glob `foo*`. Unlikely but wrong. The git way
-/// (`editor.c:63` in git.git) is: just `system()`-style with the
-/// filename appended via `$@`. Git's actual line: `sh -c
-/// '$GIT_EDITOR "$@"' "$GIT_EDITOR" filename...`. The unquoted
-/// `$GIT_EDITOR` gets split (and globbed, but git accepts that).
-///
-/// We accept the glob risk (it's the user's own EDITOR; they're
-/// only hurting themselves). The construction:
+/// `$TINC_EDITOR` is UNQUOTED in the script so the shell word-
+/// splits it (`EDITOR="emacsclient -nw"` → two argv entries).
+/// Unquoted also globs, but that's the user's own EDITOR — git
+/// (`editor.c:63` in git.git) accepts the same risk. The
+/// construction:
 ///
 ///   `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>`
 ///
