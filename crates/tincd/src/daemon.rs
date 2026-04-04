@@ -1500,6 +1500,7 @@ impl Daemon {
         pidfile: &Path,
         socket: &Path,
         cmdline_conf: &tinc_conf::Config,
+        socket_activation: Option<usize>,
     ) -> Result<Self, SetupError> {
         // ─── read tinc.conf (tincd.c:590)
         let mut config = tinc_conf::read_server_config(confbase)
@@ -1957,8 +1958,11 @@ impl Daemon {
             Duration::from_secs(u64::from(settings.keylifetime)),
         );
 
-        // ─── listeners (net_setup.c:1152-1183)
-        // C: walk BindToAddress configs, then ListenAddress configs,
+        // ─── listeners (net_setup.c:1105-1183)
+        // C `:1107`: `if(!do_detach && getenv("LISTEN_FDS"))` —
+        // socket activation BYPASSES BindToAddress/ListenAddress
+        // entirely. The .socket unit IS the bind config. Otherwise:
+        // walk BindToAddress configs, then ListenAddress configs,
         // else `add_listen_address(NULL, NULL)` for the no-config
         // default. Each `add_listen_address` resolves a hostname and
         // creates one TCP+UDP pair per resolved address.
@@ -1966,12 +1970,17 @@ impl Daemon {
         // C `:1180`: `if(!listen_sockets) { ERR; return false }`.
         // Hard error. The daemon can't function without at least one
         // listener (peers can't connect; we can't receive UDP).
-        let listeners = build_listeners(
-            &config,
-            settings.port,
-            settings.addressfamily,
-            &settings.sockopts,
-        );
+        let listeners = if let Some(n) = socket_activation {
+            crate::listen::adopt_listeners(n, &settings.sockopts)
+                .map_err(|e| SetupError::Config(format!("socket activation: {e}")))?
+        } else {
+            build_listeners(
+                &config,
+                settings.port,
+                settings.addressfamily,
+                &settings.sockopts,
+            )
+        };
         // `net_setup.c:1187-1197`: `myport.udp = get_bound_port(
         // listen_socket[0].udp.fd)`. C gates on `!port_specified ||
         // atoi(myport) == 0`; we always read back — simpler, same

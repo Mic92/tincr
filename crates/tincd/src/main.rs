@@ -920,6 +920,36 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
         .and_then(|c| lookup(&c))
 }
 
+/// `tincd.c:576-585` env-var parse, factored out for testability.
+/// Takes the env values as parameters so tests can inject them
+/// without `set_var` (which is `unsafe` since 1.85 and racy under
+/// nextest's shared-process model).
+///
+/// The PID check IS the security gate. systemd sets `LISTEN_PID` to
+/// the pid it forked. If we got the var by inheritance (a wrapper
+/// script `exec`'d us, or we were forked WITHOUT exec from something
+/// that had it set), the PID won't match → ignore. Without this
+/// check, a stale `LISTEN_FDS=3` in the env would make us treat
+/// fds 3..N as listen sockets even when they're a logfile / pipe /
+/// garbage.
+///
+/// Returns `Some(n)` only when BOTH the PID matches AND `LISTEN_FDS`
+/// parses as a positive count. C splits the two checks across
+/// `tincd.c:578` and `net_setup.c:1107`; we fuse them here because
+/// main.rs needs the answer BEFORE the detach decision.
+fn check_socket_activation(
+    listen_pid: Option<String>,
+    listen_fds: Option<String>,
+) -> Option<usize> {
+    let pid_ok = listen_pid.and_then(|s| s.parse::<u32>().ok()) == Some(std::process::id());
+    if !pid_ok {
+        return None;
+    }
+    listen_fds
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
@@ -960,6 +990,32 @@ fn main() -> ExitCode {
             args.confbase.display()
         );
         return ExitCode::FAILURE;
+    }
+
+    // ─── socket activation (tincd.c:576-585)
+    // BEFORE detach: socket-activated daemons don't fork (systemd
+    // already daemonized; another fork would orphan the fds — the
+    // child has a new PID, LISTEN_PID won't match in the child, but
+    // C clears do_detach BEFORE the fork so the fork never happens).
+    //
+    // The unsafe `remove_var`: glibc's setenv/getenv aren't thread-
+    // safe. We're pre-detach, pre-logger, pre-everything; the only
+    // thread is this one. Safe by construction.
+    let socket_activation = check_socket_activation(
+        std::env::var("LISTEN_PID").ok(),
+        std::env::var("LISTEN_FDS").ok(),
+    );
+    // C `:583` + `net_setup.c:1113`: unsetenv. Don't leak to tinc-up.
+    // SAFETY: single-threaded (see above). remove_var is documented
+    // unsafe only because of glibc's non-reentrant getenv; with no
+    // concurrent readers there's nothing to race.
+    unsafe {
+        std::env::remove_var("LISTEN_PID");
+        std::env::remove_var("LISTEN_FDS");
+    }
+    if socket_activation.is_some() {
+        // C `tincd.c:579`: `do_detach = false`.
+        args.do_detach = false;
     }
 
     // ─── detach (process.c:200-243, called tincd.c:645)
@@ -1022,6 +1078,7 @@ fn main() -> ExitCode {
         &args.pidfile,
         &args.socket,
         &args.cmdline_conf,
+        socket_activation,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1324,5 +1381,63 @@ mod tests {
         std::fs::write(t.0.join("tinc.conf"), "LogLevel = -2\n").unwrap();
         let a = args_at(t.0.clone());
         assert_eq!(resolve_debug_level(&a), None);
+    }
+
+    // ─── check_socket_activation
+
+    /// PID matching ours + LISTEN_FDS=2 → Some(2). The happy path.
+    #[test]
+    fn socket_activation_our_pid_with_fds() {
+        let our = std::process::id().to_string();
+        assert_eq!(
+            check_socket_activation(Some(our), Some("2".into())),
+            Some(2)
+        );
+    }
+
+    /// Wrong PID → None even with valid LISTEN_FDS. THE security
+    /// gate — inheritance from a wrapper that happened to have the
+    /// vars set must not make us adopt random fds.
+    #[test]
+    fn socket_activation_wrong_pid_ignored() {
+        // Our PID + 1 is guaranteed not-us (PIDs are unique).
+        let wrong = (std::process::id() + 1).to_string();
+        assert_eq!(check_socket_activation(Some(wrong), Some("2".into())), None);
+    }
+
+    /// Right PID but no LISTEN_FDS → None. C `net_setup.c:1107`
+    /// gates on `listen_fds` non-null too.
+    #[test]
+    fn socket_activation_no_fds() {
+        let our = std::process::id().to_string();
+        assert_eq!(check_socket_activation(Some(our), None), None);
+    }
+
+    /// LISTEN_FDS=0 → None. Zero sockets is not activation.
+    #[test]
+    fn socket_activation_zero_fds() {
+        let our = std::process::id().to_string();
+        assert_eq!(check_socket_activation(Some(our), Some("0".into())), None);
+    }
+
+    /// Garbage in either var → None. C uses `atoi` (returns 0 on
+    /// garbage); 0 != getpid() and 0 fds is filtered. Same outcome.
+    #[test]
+    fn socket_activation_garbage() {
+        let our = std::process::id().to_string();
+        assert_eq!(
+            check_socket_activation(Some("garbage".into()), Some("2".into())),
+            None
+        );
+        assert_eq!(
+            check_socket_activation(Some(our), Some("garbage".into())),
+            None
+        );
+    }
+
+    /// Neither var set → None. The common case (not socket-activated).
+    #[test]
+    fn socket_activation_absent() {
+        assert_eq!(check_socket_activation(None, None), None);
     }
 }

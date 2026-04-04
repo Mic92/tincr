@@ -30,7 +30,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
@@ -297,6 +297,129 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 }
 
 // setup_vpn_in_socket (UDP)
+
+/// `net_setup.c:1107-1153`: systemd socket activation. Consume `n`
+/// TCP fds at `start_fd..start_fd+n`, open a matching UDP socket
+/// for each (C ONLY takes TCP from systemd; UDP is
+/// `setup_vpn_in_socket(&sa)` against the same address).
+///
+/// **The fds are inherited, not opened.** They were `bind()`d and
+/// `listen()`d by systemd. We just adopt them. `getsockname` tells
+/// us what address systemd picked (we don't get to choose).
+///
+/// `bindto = false` for all: socket-activated listeners aren't
+/// `BindToAddress` (which would mean "use this as outgoing-dial
+/// source addr too"). The C path sets `listen_socket[i].sa` but
+/// never sets `bindto` — C zero-init = false.
+///
+/// `start_fd` is `SD_LISTEN_FDS_START` (= 3) in production; the
+/// parameter exists so unit tests can use a high fd and avoid
+/// fd-3 races (nextest may share processes within a test binary;
+/// fd 3 could be anything). Production callers use
+/// [`adopt_listeners`].
+///
+/// # Errors
+/// - `n > MAXSOCKETS` (`net_setup.c:1117-1120`): hard error.
+/// - `getsockname` failure (`:1128-1131`): hard error. The fd
+///   isn't a socket, or it's closed, or it's something we can't
+///   handle (`AF_UNIX`). C: `return false`.
+/// - `setup_udp` failure: hard error (C `:1138-1140`).
+pub(crate) fn adopt_listeners_from(
+    start_fd: RawFd,
+    n: usize,
+    opts: &SockOpts,
+) -> io::Result<Vec<Listener>> {
+    // C `:1117-1120`: cap. C clamps and errors; we just error
+    // (clamp-then-error is the same as just-error since the C
+    // returns false right after the clamp).
+    if n > MAXSOCKETS {
+        return Err(io::Error::other(format!(
+            "Too many listening sockets: LISTEN_FDS={n} > MAXSOCKETS={MAXSOCKETS}"
+        )));
+    }
+
+    let mut listeners = Vec::with_capacity(n);
+    for i in 0..n {
+        // C `:1125`: `int tcp_fd = i + 3`. RawFd is i32 on Linux;
+        // n ≤ MAXSOCKETS = 8 so the cast can't overflow.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let tcp_fd = start_fd + i as RawFd;
+
+        // C `:1127-1131`: `getsockname(tcp_fd, &sa, &salen)`.
+        // socket2 needs the fd wrapped first; from_raw_fd takes
+        // ownership (Socket's Drop will close it, which is what we
+        // want — we OWN these fds now).
+        //
+        // SAFETY: fd `start_fd..start_fd+n` was passed by systemd,
+        // is a socket (we trust LISTEN_PID gated this in main.rs),
+        // is open. Taking ownership is correct: no other code in
+        // this process will use these fds (we're the first and only
+        // consumer; main.rs read LISTEN_FDS and unset it before
+        // calling us).
+        #[allow(unsafe_code)]
+        let tcp = unsafe { Socket::from_raw_fd(tcp_fd) };
+
+        // getsockname via socket2. AF_UNIX would fail the
+        // SocketAddr conversion below — that's fine, hard error.
+        let local = tcp
+            .local_addr()
+            .and_then(|a| {
+                a.as_socket().ok_or_else(|| {
+                    io::Error::other(format!("LISTEN_FDS fd {tcp_fd}: not AF_INET/AF_INET6"))
+                })
+            })
+            .map_err(|e| {
+                io::Error::other(format!("Could not get address of listen fd {tcp_fd}: {e}"))
+            })?;
+
+        // C `:1134`: `fcntl(tcp_fd, F_SETFD, FD_CLOEXEC)`. Modern
+        // systemd already sets this (via O_CLOEXEC on the socket()
+        // call), but C is defensive. Best-effort like the C (no
+        // return-value check there either).
+        if let Err(e) = nix::fcntl::fcntl(
+            tcp.as_raw_fd(),
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        ) {
+            log::warn!(target: "tincd::net",
+                       "fd {tcp_fd}: F_SETFD FD_CLOEXEC: {e}");
+        }
+
+        // C `:1137`: `int udp_fd = setup_vpn_in_socket(&sa)`. UDP
+        // is OURS to open, against the same address. systemd only
+        // gives TCP (`ListenStream=` in the .socket unit; a
+        // separate `ListenDatagram=` would put a UDP fd in the mix,
+        // but tinc's protocol pairs TCP+UDP on the SAME addr —
+        // easier to just open UDP ourselves than to de-interleave
+        // systemd's fd list).
+        let udp = setup_udp(&SockAddr::from(local), opts)
+            .map_err(|e| io::Error::other(format!("UDP bind for listen fd {tcp_fd}: {e}")))?;
+
+        log::info!(target: "tincd::net",
+                   "Listening on {local} (socket activation)");
+
+        // `bindto = false`: see fn doc. C zero-init.
+        listeners.push(Listener {
+            bindto: false,
+            tcp,
+            udp,
+            local,
+        });
+    }
+
+    Ok(listeners)
+}
+
+/// [`adopt_listeners_from`] with `start_fd = SD_LISTEN_FDS_START`
+/// (= 3, after stdin/out/err). The production entry point.
+///
+/// # Errors
+/// See [`adopt_listeners_from`].
+#[inline]
+pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Listener>> {
+    /// `SD_LISTEN_FDS_START`. systemd passes fds starting at 3.
+    const SD_LISTEN_FDS_START: RawFd = 3;
+    adopt_listeners_from(SD_LISTEN_FDS_START, n, opts)
+}
 
 /// `setup_vpn_in_socket` (`net_socket.c:292-399`). One UDP socket.
 ///
@@ -1725,5 +1848,82 @@ mod tests {
         assert!(!o.udp_buf_warnings);
         assert_eq!(o.fwmark, 0);
         assert!(o.bind_to_interface.is_none());
+    }
+
+    // ─── adopt_listeners (socket activation)
+
+    /// Put a TCP listener at a high fd (avoiding the fd-3 races
+    /// that nextest's shared-process model would cause), call
+    /// `adopt_listeners_from`, verify the address was discovered
+    /// and a UDP socket was opened on the same port.
+    ///
+    /// The dup2-to-a-specific-fd dance is exactly what systemd
+    /// does (it dup2's the listening socket to fd 3 before exec).
+    /// Using a high fd (`dup` picks the lowest free; we re-dup
+    /// from there to a fixed slot) sidesteps collisions with
+    /// whatever the test harness has open at low numbers.
+    #[test]
+    fn adopt_listeners_from_high_fd() {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let want_addr = tcp.local_addr().unwrap();
+
+        // dup() to get a fresh high fd. We don't care WHERE it
+        // lands, just that it's distinct from `tcp`'s fd (so when
+        // we drop `tcp`, the duped fd survives) and not fd 3.
+        // SAFETY: tcp's fd is open (we just bound it). dup never
+        // closes the source.
+        #[allow(unsafe_code)]
+        let high_fd = unsafe { libc::dup(tcp.as_raw_fd()) };
+        assert!(high_fd >= 0, "dup: {}", io::Error::last_os_error());
+        // Original drops here; high_fd is the only handle now.
+        drop(tcp);
+
+        let listeners = adopt_listeners_from(high_fd, 1, &opts()).unwrap();
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].local, want_addr);
+        assert!(!listeners[0].bindto, "socket-activated → bindto=false");
+
+        // UDP got opened on the same port (C `setup_vpn_in_socket(&sa)`).
+        let udp_addr = listeners[0].udp.local_addr().unwrap().as_socket().unwrap();
+        assert_eq!(udp_addr.port(), want_addr.port());
+
+        // CLOEXEC was set (C `:1134`). Probe via F_GETFD.
+        let flags = fcntl(listeners[0].tcp.as_raw_fd(), FcntlArg::F_GETFD).unwrap();
+        assert!(
+            FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC),
+            "adopted TCP fd should be CLOEXEC"
+        );
+    }
+
+    /// `n > MAXSOCKETS` is the only pre-adoption guard (C `:1117`).
+    #[test]
+    fn adopt_listeners_too_many() {
+        let e = adopt_listeners_from(3, MAXSOCKETS + 1, &opts())
+            .err()
+            .expect("n > MAXSOCKETS should error")
+            .to_string();
+        assert!(e.contains("Too many"), "got: {e}");
+    }
+
+    /// Fd is not a socket → ENOTSOCK from getsockname → hard error.
+    /// C `:1128-1131`: `if(getsockname < 0) { ERR; return false }`.
+    #[test]
+    fn adopt_listeners_not_a_socket() {
+        // /dev/null at a high fd. getsockname → ENOTSOCK.
+        let f = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: f's fd is open. dup is safe to call on any open fd.
+        #[allow(unsafe_code)]
+        let high_fd = unsafe { libc::dup(f.as_raw_fd()) };
+        assert!(high_fd >= 0);
+        drop(f);
+
+        // adopt_listeners_from took ownership of high_fd via
+        // Socket::from_raw_fd; the error path drops the Socket,
+        // which closes high_fd. No leak.
+        let e = adopt_listeners_from(high_fd, 1, &opts())
+            .err()
+            .expect("expected ENOTSOCK")
+            .to_string();
+        assert!(e.contains("Could not get address"), "got: {e}");
     }
 }
