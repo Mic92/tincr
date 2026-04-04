@@ -993,6 +993,18 @@ impl Daemon {
             return nw | self.handle_arp(data, from);
         }
 
+        // DNS stub intercept (Rust-only). Tailscale's trick: no
+        // socket bind, just match `dst==magic && dport==53` on TUN
+        // ingress (`wgengine/netstack/netstack.go:847-858`). ROUTER-
+        // mode + device-read only — `from.is_some()` means a peer
+        // sent us a DNS query, which is either misconfig (their
+        // resolved is pointed at OUR magic IP) or weird; let it hit
+        // route() and Forward/Unreachable normally. The `is_some()`
+        // gate is the cheap path: feature off = one branch.
+        if from.is_none() && self.dns.is_some() && self.try_dns_intercept(data) {
+            return nw;
+        }
+
         // C `route.c:655` reads `subnet->owner->status.reachable`
         // via pointer chain; we close over node_ids+graph and gate
         // on reachability. `myself` is always reachable, so the C
@@ -2460,6 +2472,73 @@ impl Daemon {
             }
         }
         false // UDP send doesn't touch any meta-conn outbuf
+    }
+
+    /// DNS stub TUN intercept (Rust-only). Returns `true` if `data`
+    /// was a DNS query for the magic IP and we wrote a reply; the
+    /// caller skips `route()` entirely. `false` for non-match (wrong
+    /// dst, wrong port, not UDP, ihl!=5) — packet falls through to
+    /// normal routing. Ownership stays with the borrow; we read
+    /// `data` and write a fresh reply frame.
+    ///
+    /// Hot-path cost: when the feature is on but the packet isn't
+    /// for us, this is ~5 byte compares (`match_v4` early-outs on
+    /// the first non-matching field). When off (`self.dns == None`),
+    /// the caller's `is_some()` gate skips this call entirely.
+    ///
+    /// Caller pre-checks `self.dns.is_some()`; the `take()` here
+    /// always succeeds. The take/put-back dance avoids the borrow
+    /// conflict between `&self.dns` and `device.write(&mut self)`
+    /// — same pattern as `device_arena` in `on_device_read`.
+    /// `DnsConfig` is two `Option<IpAddr>` + a `String`; the move
+    /// is cheap (no realloc, the String's heap buffer stays put).
+    fn try_dns_intercept(&mut self, data: &[u8]) -> bool {
+        let cfg = self.dns.take().expect("caller gated on is_some()");
+        // v4 path. `match_v4` does the full eth+IP+UDP+port check;
+        // None means "not for us" — fall through to v6 then route().
+        let hit = if let Some(dns_ip) = cfg.dns_addr4
+            && let Some((src, sport, dns)) = crate::dns::match_v4(data, &dns_ip)
+        {
+            let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
+                // Malformed past header recovery (truncated ID, or
+                // QR bit set = reflection attempt). Drop silently.
+                // NOT route() — it'd Forward{to:myself} (the magic IP
+                // is on the TUN), and the kernel would ICMP port-
+                // unreachable, leaking that something's there.
+                self.dns = Some(cfg);
+                return true;
+            };
+            let mut frame = crate::dns::wrap_v4(data, &reply, &dns_ip, &src, sport);
+            log::debug!(target: "tincd::dns",
+                        "reply {} bytes to {src}:{sport}", reply.len());
+            if let Err(e) = self.device.write(&mut frame) {
+                log::debug!(target: "tincd::dns",
+                            "device write failed: {e}");
+            }
+            true
+        }
+        // v6 path. Same shape; UDP checksum is mandatory here
+        // (RFC 8200 §8.1) — wrap_v6 always computes it.
+        else if let Some(dns_ip) = cfg.dns_addr6
+            && let Some((src, sport, dns)) = crate::dns::match_v6(data, &dns_ip)
+        {
+            let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
+                self.dns = Some(cfg);
+                return true;
+            };
+            let mut frame = crate::dns::wrap_v6(data, &reply, &dns_ip, &src, sport);
+            log::debug!(target: "tincd::dns",
+                        "reply {} bytes to [{src}]:{sport}", reply.len());
+            if let Err(e) = self.device.write(&mut frame) {
+                log::debug!(target: "tincd::dns",
+                            "device write failed: {e}");
+            }
+            true
+        } else {
+            false
+        };
+        self.dns = Some(cfg);
+        hit
     }
 
     /// `route_arp` (`route.c:956-1023`).

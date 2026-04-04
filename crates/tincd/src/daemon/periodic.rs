@@ -172,7 +172,22 @@ impl Daemon {
     /// the return; a failing script never aborts the daemon.
     /// `DEVICE`/`NETNAME`/`DEBUG`: not threaded through yet (None).
     pub(super) fn run_script(&self, name: &str) {
-        let env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        // Rust-only: thread DNS config through to tinc-up so the
+        // script can `resolvectl dns "$INTERFACE" "$DNS_ADDR"`
+        // without hardcoding the magic IP. Only set when the stub
+        // is on; scripts can `[ -n "$DNS_ADDR" ] && resolvectl ...`.
+        // Separate v4/v6 vars (resolvectl takes both in one call,
+        // but the script may want to gate on which is present).
+        if let Some(cfg) = &self.dns {
+            if let Some(a) = cfg.dns_addr4 {
+                env.add("DNS_ADDR", a.to_string());
+            }
+            if let Some(a) = cfg.dns_addr6 {
+                env.add("DNS_ADDR6", a.to_string());
+            }
+            env.add("DNS_SUFFIX", cfg.suffix.clone());
+        }
         let interp = self.settings.scripts_interpreter.as_deref();
         Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
     }

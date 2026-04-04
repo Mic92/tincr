@@ -34,6 +34,7 @@ pub mod compress;
 pub mod conn;
 pub mod control;
 pub mod daemon;
+pub mod dns;
 pub mod egress;
 pub mod fragment;
 pub mod graph_glue;

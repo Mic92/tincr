@@ -1100,6 +1100,13 @@ pub struct Daemon {
     /// `dump subnets` walks.
     pub(crate) subnets: SubnetTree,
 
+    /// DNS stub config. `None` = feature off (the TUN-intercept
+    /// branch in `route_packet` never fires). Non-reloadable: the
+    /// magic IP has to be added to the TUN in `tinc-up`, and
+    /// re-running that mid-daemon is the same can-of-worms as
+    /// `DeviceType` reload.
+    pub(crate) dns: Option<crate::dns::DnsConfig>,
+
     /// `past_request_tree` (`protocol.c:89`). Anti-loop dedup for
     /// flooded ADD/DEL messages. Handlers call `seen.check(body)`
     /// before processing; `true` → dup, drop silently.
@@ -2135,6 +2142,60 @@ impl Daemon {
             subnets.add(s, name.clone());
         }
 
+        // ─── DNS stub (Rust-only, no C analog)
+        // Tailscale-style TUN intercept (`dns.rs`). Off unless BOTH
+        // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
+        // also be added to the TUN in `tinc-up` (the daemon doesn't
+        // do that — `ip addr add` needs root, same slot as the rest
+        // of the script). `DNSAddress` can be repeated for v4+v6.
+        let dns = {
+            let mut a4 = None;
+            let mut a6 = None;
+            for e in config.lookup("DNSAddress") {
+                match e.get_str().parse::<std::net::IpAddr>() {
+                    Ok(std::net::IpAddr::V4(v)) => a4 = Some(v),
+                    Ok(std::net::IpAddr::V6(v)) => a6 = Some(v),
+                    Err(_) => {
+                        return Err(SetupError::Config(format!(
+                            "DNSAddress = {}: not a valid IP address",
+                            e.get_str()
+                        )));
+                    }
+                }
+            }
+            let suffix = config
+                .lookup("DNSSuffix")
+                .next()
+                .map(|e| e.get_str().trim_matches('.').to_owned());
+            match (a4.is_some() || a6.is_some(), suffix) {
+                (true, Some(suffix)) => {
+                    log::info!(target: "tincd::dns",
+                               "DNS stub enabled: {} for *.{suffix}",
+                               a4.map(|a| a.to_string())
+                                 .into_iter()
+                                 .chain(a6.map(|a| a.to_string()))
+                                 .collect::<Vec<_>>()
+                                 .join(" + "));
+                    Some(crate::dns::DnsConfig {
+                        dns_addr4: a4,
+                        dns_addr6: a6,
+                        suffix,
+                    })
+                }
+                (true, None) => {
+                    return Err(SetupError::Config(
+                        "DNSAddress set but DNSSuffix missing".into(),
+                    ));
+                }
+                (false, Some(_)) => {
+                    return Err(SetupError::Config(
+                        "DNSSuffix set but DNSAddress missing".into(),
+                    ));
+                }
+                (false, None) => None,
+            }
+        };
+
         // ─── BroadcastSubnet (net_setup.c:485-505)
         // C: hard-coded `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
         // `224.0.0.0/4`, `ff00::/8` inserted with `subnet_add(NULL,
@@ -2272,6 +2333,7 @@ impl Daemon {
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),
             age_subnets_timer: None,
+            dns,
             settings,
             // Set true by `device_enable()` after this struct is
             // built (when `!device_standby`); else false until the
