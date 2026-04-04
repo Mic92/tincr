@@ -95,7 +95,16 @@ struct MacKey {
 // That's the search-key sentinel pattern: `lookup_subnet` builds a
 // fake `subnet_t` with `owner = NULL` and `splay_search`es for it.
 // We don't need that — `BTreeMap::get`/`iter` don't take fake
-// entries. Our owner is always a real `String`.
+// entries.
+//
+// HOWEVER: `owner = NULL` is also a real tree state. `net_setup.c:
+// 485-505` inserts `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
+// `224.0.0.0/4`, `ff00::/8` with `subnet_add(NULL, s)`. `route.c:
+// 644,738`: `if(!subnet->owner) route_broadcast()`. We use `""` as
+// the sentinel — `check_id` (`utils.c`) rejects empty so no real node
+// can collide. The C `:154` short-circuit sorts ownerless before
+// owned at the owner tiebreak (NULL stops the strcmp); `String::Ord`
+// gives us the same: `"" < "anything"` lexically.
 
 impl Ord for Ipv4Key {
     /// `subnet_compare_ipv4`. Four-level tiebreak:
@@ -256,6 +265,20 @@ impl SubnetTree {
         }
     }
 
+    /// `subnet_add(NULL, s)`. C `net_setup.c:485-505`.
+    ///
+    /// Ownerless subnets divert to `route_broadcast` (`route.c:644,
+    /// 738,1042`). The four hard-coded defaults (Ethernet broadcast,
+    /// IPv4 limited broadcast, IPv4 multicast `224/4`, IPv6 multicast
+    /// `ff00::/8`) plus any `BroadcastSubnet` config entries.
+    ///
+    /// Sentinel: empty owner. `check_id` rejects `""` so no real
+    /// node name collides; `String::Ord` sorts it first (matching
+    /// C `subnet_parse.c:154`'s NULL-short-circuit).
+    pub fn add_broadcast(&mut self, subnet: Subnet) {
+        self.add(subnet, String::new());
+    }
+
     /// `subnet_del`. C `subnet.c:206-214`.
     ///
     /// Returns `true` if the entry was present. The C `splay_delete`
@@ -360,8 +383,10 @@ impl SubnetTree {
             // Our `matches(_, true)` returns `true` for equal.
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_str()));
-                // C :275: break on first reachable hit.
-                if is_reachable(&k.owner) {
+                // C :275: `if(!p->owner || p->owner->status.reachable)
+                // break`. Ownerless (broadcast) is always "reachable"
+                // — it goes to ALL reachable peers via route_broadcast.
+                if k.owner.is_empty() || is_reachable(&k.owner) {
                     break;
                 }
             }
@@ -384,7 +409,8 @@ impl SubnetTree {
         for k in &self.ipv6 {
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_str()));
-                if is_reachable(&k.owner) {
+                // C subnet.c:309: `!p->owner ||` short-circuit.
+                if k.owner.is_empty() || is_reachable(&k.owner) {
                     break;
                 }
             }
@@ -419,7 +445,8 @@ impl SubnetTree {
             };
             if a == *addr {
                 last_hit = Some((&k.subnet, k.owner.as_str()));
-                if is_reachable(&k.owner) {
+                // C subnet.c:241: `!p->owner ||` short-circuit.
+                if k.owner.is_empty() || is_reachable(&k.owner) {
                     break;
                 }
             }
@@ -435,12 +462,21 @@ impl SubnetTree {
     /// ordering: type discriminant ascending (V4=1, V6=2, MAC=0 in
     /// the C enum — wait, the C enum is `MAC=0, V4=1, V6=2`, so
     /// MAC sorts FIRST). Match: mac, v4, v6.
+    ///
+    /// SKIPS ownerless (broadcast) subnets. The C `send_everything`
+    /// (`protocol_auth.c:892-895`) walks per-node `n->subnet_tree`s;
+    /// broadcast subnets aren't in any node's tree, so they're never
+    /// gossiped. Our gossip.rs walks this global iterator instead —
+    /// filtering here keeps the wire output equivalent. (Cosmetic
+    /// fallout: `dump_subnets` won't print `(broadcast)` rows. C
+    /// `subnet.c:405` does. Separate fix if anyone cares.)
     pub fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
         self.mac
             .iter()
             .map(|k| (&k.subnet, k.owner.as_str()))
             .chain(self.ipv4.iter().map(|k| (&k.subnet, k.owner.as_str())))
             .chain(self.ipv6.iter().map(|k| (&k.subnet, k.owner.as_str())))
+            .filter(|(_, o)| !o.is_empty())
     }
 
     /// All subnets owned by `name`, collected. Wrapper over `iter()` +
@@ -695,6 +731,45 @@ mod tests {
             .unwrap();
         assert_eq!(owner, "bob");
         assert_eq!(*s, sn("10.0.0.0/16"));
+    }
+
+    /// C `subnet.c:275`: `!p->owner ||` — ownerless ALWAYS breaks
+    /// the scan, regardless of `is_reachable`. The predicate isn't
+    /// even called (no name to pass). `route_ipv4` then sees the
+    /// empty owner and returns `Broadcast` (`route.c:644`).
+    #[test]
+    fn lookup_broadcast_short_circuits_reachable() {
+        let mut t = SubnetTree::new();
+        t.add_broadcast(sn("224.0.0.0/4"));
+        // alice owns an overlapping /8 (impossible in practice, but
+        // proves the short-circuit: /4 sorts AFTER /8 by descending
+        // prefix — wait, /8 is longer than /4. /8 wins on prefix.
+        // Use a non-overlapping owned subnet to make sure the
+        // broadcast match is the only hit).
+
+        // mDNS to 224.0.0.251: only the /4 covers it.
+        let (_, owner) = t
+            .lookup_ipv4(&Ipv4Addr::new(224, 0, 0, 251), |_| {
+                panic!("is_reachable called for ownerless subnet")
+            })
+            .unwrap();
+        assert_eq!(owner, "");
+    }
+
+    /// `iter()` skips ownerless. C `send_everything` walks per-node
+    /// trees; broadcast subnets never appear on the wire.
+    #[test]
+    fn iter_skips_broadcast() {
+        let mut t = SubnetTree::new();
+        t.add(sn("10.0.0.0/24"), "alice".into());
+        t.add_broadcast(sn("224.0.0.0/4"));
+        t.add_broadcast(sn("ff00::/8"));
+        t.add_broadcast(sn("ff:ff:ff:ff:ff:ff"));
+
+        let owners: Vec<&str> = t.iter().map(|(_, o)| o).collect();
+        assert_eq!(owners, vec!["alice"]);
+        // But len() counts everything (it's the raw tree size).
+        assert_eq!(t.len(), 4);
     }
 
     /// V6 longest-prefix. Same logic, 16 bytes.

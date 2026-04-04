@@ -121,7 +121,13 @@ pub fn route_ipv4<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:644-646 ownerless → broadcast.
+    // route.c:644-646: `if(!subnet->owner) route_broadcast()`.
+    // Ownerless = broadcast subnet (224/4, 255.255.255.255, plus
+    // BroadcastSubnet config). Daemon → broadcast_packet.
+    if owner.is_empty() {
+        return RouteResult::Broadcast;
+    }
+
     // route.c:648-651 owner==source loop check: daemon-side.
 
     // route.c:653-656: lookup_ipv4 may return an unreachable owner
@@ -187,7 +193,12 @@ pub fn route_ipv6<T>(
         };
     };
 
-    // DEFERRED(chunk-9): route.c:738-741 ownerless → broadcast.
+    // route.c:738-741: `if(!subnet->owner) route_broadcast()`.
+    // Ownerless = broadcast subnet (ff00::/8 plus config).
+    if owner.is_empty() {
+        return RouteResult::Broadcast;
+    }
+
     // route.c:743-746 owner==source: daemon-side.
 
     // route.c:748-751: same fallback re-check as route_ipv4.
@@ -421,6 +432,33 @@ mod tests {
         );
     }
 
+    /// route.c:644-646: ownerless subnet → Broadcast. mDNS to
+    /// 224.0.0.251, DHCP to 255.255.255.255. Before this fix, these
+    /// hit Unreachable{NET_UNKNOWN} — daemon ICMP-bounced its own
+    /// kernel's multicast. Silent (mDNS doesn't surface ICMP).
+    #[test]
+    fn route_ipv4_broadcast_subnet() {
+        let mut t = SubnetTree::new();
+        t.add_broadcast(sn("224.0.0.0/4"));
+        t.add_broadcast(sn("255.255.255.255"));
+
+        let p = ipv4_packet(Ipv4Addr::new(224, 0, 0, 251)); // mDNS
+        assert_eq!(route_ipv4(&p, &t, always), RouteResult::Broadcast);
+
+        let p = ipv4_packet(Ipv4Addr::BROADCAST); // DHCP
+        assert_eq!(route_ipv4(&p, &t, always), RouteResult::Broadcast);
+
+        // 10.0.0.5 doesn't match — falls through to NET_UNKNOWN.
+        let p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(
+            route_ipv4(&p, &t, always),
+            RouteResult::Unreachable {
+                icmp_type: ICMP_DEST_UNREACH,
+                icmp_code: ICMP_NET_UNKNOWN,
+            }
+        );
+    }
+
     /// route.c:653-656: unreachable owner → type 3 code 0.
     #[test]
     fn route_ipv4_unreachable_owner() {
@@ -522,6 +560,20 @@ mod tests {
                 icmp_code: ICMP6_DST_UNREACH_ADDR,
             }
         );
+    }
+
+    /// route.c:738-741: ownerless → Broadcast. NDP to ff02::1,
+    /// mDNS to ff02::fb. Before: Unreachable{DST_UNREACH_ADDR}.
+    #[test]
+    fn route_ipv6_broadcast_subnet() {
+        let mut t = SubnetTree::new();
+        t.add_broadcast(sn("ff00::/8"));
+
+        let p = ipv6_packet("ff02::1".parse().unwrap()); // all-nodes
+        assert_eq!(route_ipv6(&p, &t, always), RouteResult::Broadcast);
+
+        let p = ipv6_packet("ff02::fb".parse().unwrap()); // mDNS
+        assert_eq!(route_ipv6(&p, &t, always), RouteResult::Broadcast);
     }
 
     /// route.c:748-751: unreachable → NOROUTE not ADDR.

@@ -1557,6 +1557,38 @@ impl Daemon {
             subnets.add(s, name.clone());
         }
 
+        // ─── BroadcastSubnet (net_setup.c:485-505)
+        // C: hard-coded `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
+        // `224.0.0.0/4`, `ff00::/8` inserted with `subnet_add(NULL,
+        // s)`, then walk `BroadcastSubnet` config keys (also NULL
+        // owner). `route.c:644,738`: ownerless → `route_broadcast`.
+        // Without these, kernel multicast (mDNS, NDP, DHCP) read
+        // from TUN hit Unreachable{NET_UNKNOWN} and we ICMP-bounce
+        // our own kernel. Silent breakage — mDNS doesn't surface
+        // ICMP. (`Mode = switch` unaffected: route_mac floods on
+        // miss anyway.)
+        for s in [
+            "ff:ff:ff:ff:ff:ff",
+            "255.255.255.255",
+            "224.0.0.0/4",
+            "ff00::/8",
+        ] {
+            // C `:489`: `if(!str2net(...)) abort()`. These literals
+            // are correct by construction; expect() is the abort.
+            subnets.add_broadcast(s.parse().expect("hard-coded broadcast subnet"));
+        }
+        // C `:497-505`: walk multi-valued config key.
+        for e in config.lookup("BroadcastSubnet") {
+            match e.get_str().parse::<Subnet>() {
+                Ok(s) => subnets.add_broadcast(s),
+                Err(_) => {
+                    // C `:500`: `if(!get_config_subnet(...)) continue`.
+                    log::error!(target: "tincd",
+                                "Invalid BroadcastSubnet = {}", e.get_str());
+                }
+            }
+        }
+
         // ─── ConnectTo (try_outgoing_connections, net_socket.c:815-884)
         // C: walk `ConnectTo` configs, `lookup_or_add_node`, build
         // `outgoing_t`, call `setup_outgoing_connection`. The actual
