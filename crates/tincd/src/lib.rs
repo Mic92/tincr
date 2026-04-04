@@ -54,6 +54,7 @@ pub mod reload;
 pub mod route;
 pub mod route_mac;
 pub mod script;
+pub mod sd_notify;
 pub mod seen;
 pub mod socks;
 pub mod subnet_tree;
