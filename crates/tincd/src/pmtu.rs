@@ -1,20 +1,21 @@
 //! PMTU discovery (`net_packet.c:90-240, 1170-1460`).
 //!
 //! Per-node binary search for the largest UDP datagram that fits
-//! without fragmentation. The `mtuprobes` integer encodes a
-//! 5-phase state machine; the probe sizes follow an exponential
-//! that front-loads near-typical-MTU sizes (1329, then 1407 —
+//! without fragmentation. The C `mtuprobes` integer encodes a
+//! 5-phase state machine via sign+magnitude; here that's
+//! [`PmtuPhase`]. The probe sizes follow an exponential that
+//! front-loads near-typical-MTU sizes (1329, then 1407 —
 //! `net_packet.c:1417-1424` "math simulations").
 //!
 //! ## State machine
 //!
-//! | `mtuprobes` | Phase | Tick action |
+//! | C `mtuprobes` | [`PmtuPhase`] | Tick action |
 //! |---|---|---|
-//! | `0..19` | Discovery | 8-probe burst, exponential offsets |
-//! | `20` | Fix | `mtu := minmtu`, → `-1` |
-//! | `-1` | Steady | Probe `maxmtu` and `maxmtu+1` every `pinginterval` |
-//! | `-2..=-3` | Re-validate | One `maxmtu` probe/sec |
-//! | `-4` | Lost | Reset → `0` |
+//! | `0..19` | `Discovery{sent}` | 8-probe burst, exponential offsets |
+//! | `20` | `Fix` | `mtu := minmtu`, → `Steady` |
+//! | `-1` | `Steady` | Probe `maxmtu` and `maxmtu+1` every `pinginterval` |
+//! | `-2..=-3` | `Revalidate{misses}` | One `maxmtu` probe/sec |
+//! | `-4` | `Lost` | Reset → `Discovery{0}` |
 //!
 //! Events: `Tick` (driven by `try_tx`, ~1/sec), `ProbeReply{len}`,
 //! `Emsgsize{at_len}`. Actions: `SendProbe{len}`,
@@ -44,13 +45,56 @@ pub const MIN_PROBE_SIZE: u16 = 18;
 /// `net_packet.c:1415`.
 const PROBES_PER_CYCLE: u32 = 8;
 
+/// PMTU discovery phase. Replaces C `node_t.mtuprobes` (i32) where
+/// sign+magnitude select the phase (`net_packet.c:1372-1406`).
+///
+/// `mtu`/`minmtu`/`maxmtu` stay flat on [`PmtuState`] (orthogonal
+/// to phase — the same `minmtu` raise can happen in Discovery or
+/// Revalidate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmtuPhase {
+    /// C `mtuprobes ∈ 0..19`. `sent` = probes sent so far; also
+    /// the input to the exponential probe-size formula (cycle
+    /// position = `sent % 8`).
+    Discovery { sent: u8 },
+    /// C `mtuprobes == 20`. Next `tick()` locks `mtu := minmtu`
+    /// and goes to `Steady`. Distinct from `Discovery{20}` because
+    /// `try_fix_mtu` runs at the *top* of the tick, before the
+    /// discovery branch would send probe #20.
+    Fix,
+    /// C `mtuprobes == -1`. Probe `maxmtu` (+ `maxmtu+1` increase
+    /// detector) every `pinginterval`.
+    Steady,
+    /// C `mtuprobes ∈ -2..=-3`. `misses` = unanswered steady-state
+    /// probes (1 or 2). One `maxmtu` probe/sec.
+    Revalidate { misses: u8 },
+    /// C `mtuprobes == -4`. Next `tick()` resets to `Discovery{0}`.
+    Lost,
+}
+
+impl PmtuPhase {
+    /// `mtuprobes == 0`: discovery hasn't sent its first probe.
+    /// `txpath.rs` uses this to gate the C `:1408-1410` maxmtu
+    /// re-seed (`choose_initial_maxmtu`).
+    #[must_use]
+    pub fn is_discovery_start(&self) -> bool {
+        matches!(self, Self::Discovery { sent: 0 })
+    }
+
+    /// `mtuprobes < 0`: MTU already fixed (steady/revalidate/lost).
+    #[must_use]
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, Self::Steady | Self::Revalidate { .. } | Self::Lost)
+    }
+}
+
 /// Per-node PMTU state. Mirrors `node_t.{mtu,minmtu,maxmtu,mtuprobes,...}`.
 #[derive(Debug)]
 pub struct PmtuState {
     pub mtu: u16,
     pub minmtu: u16,
     pub maxmtu: u16,
-    pub mtuprobes: i32,
+    pub phase: PmtuPhase,
     pub udp_confirmed: bool,
     /// `node_status_t::ping_sent` — next reply is the RTT measurement.
     pub ping_sent: bool,
@@ -69,7 +113,9 @@ pub enum PmtuAction {
     SendProbe { len: u16 },
 
     /// `:103-104` log: "Fixing MTU of %s to %d after %d probes".
-    LogFixed { mtu: u16, probes: i32 },
+    /// `probes` = how many discovery probes were sent before
+    /// converging (0..=20; 20 = timeout).
+    LogFixed { mtu: u16, probes: u8 },
 
     /// `:1390` log: "Decrease in PMTU detected, restarting".
     LogReset,
@@ -96,7 +142,7 @@ impl PmtuState {
             mtu: 0,
             minmtu: 0,
             maxmtu: initial_maxmtu,
-            mtuprobes: 0,
+            phase: PmtuPhase::Discovery { sent: 0 },
             udp_confirmed: false,
             ping_sent: false,
             udp_ping_sent: now,
@@ -104,6 +150,13 @@ impl PmtuState {
             maxrecentlen: 0,
             udp_ping_rtt: None,
         }
+    }
+
+    /// `mtuprobes := 0` — restart discovery from scratch. Used by
+    /// `tunnel.rs::reset_unreachable` (`graph.c:266-269`) and
+    /// `on_udp_timeout` (`net_packet.c:124-137`).
+    pub fn start_discovery(&mut self) {
+        self.phase = PmtuPhase::Discovery { sent: 0 };
     }
 
     /// `try_mtu` (`net_packet.c:1346-1458`) + `try_fix_mtu` (`:90-107`).
@@ -115,19 +168,32 @@ impl PmtuState {
     pub fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
         // ── Cadence gate ───── net_packet.c:1372-1386 ──────────
         let elapsed = now.duration_since(self.mtu_ping_sent);
-        if self.mtuprobes >= 0 {
-            // Discovery: 333ms (C: tv_sec==0 && tv_usec<333333).
-            if self.mtuprobes != 0 && elapsed < Duration::from_micros(333_333) {
-                return vec![];
+        match self.phase {
+            PmtuPhase::Discovery { sent } => {
+                // 333ms (C: tv_sec==0 && tv_usec<333333). First probe
+                // (sent==0) is ungated.
+                if sent != 0 && elapsed < Duration::from_micros(333_333) {
+                    return vec![];
+                }
             }
-        } else if self.mtuprobes < -1 {
-            // Re-validate: 1/sec.
-            if elapsed < Duration::from_secs(1) {
-                return vec![];
+            // Fix gates as Discovery (mtuprobes >= 0); sent != 0 here.
+            PmtuPhase::Fix => {
+                if elapsed < Duration::from_micros(333_333) {
+                    return vec![];
+                }
             }
-        } else if elapsed < pinginterval {
-            // Steady (-1): 1/pinginterval.
-            return vec![];
+            PmtuPhase::Steady => {
+                // C `:1383`: 1/pinginterval.
+                if elapsed < pinginterval {
+                    return vec![];
+                }
+            }
+            PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => {
+                // C `:1379`: 1/sec.
+                if elapsed < Duration::from_secs(1) {
+                    return vec![];
+                }
+            }
         }
 
         self.mtu_ping_sent = now;
@@ -138,36 +204,60 @@ impl PmtuState {
         self.try_fix_mtu(&mut out);
 
         // ── Lost-reprobes reset ──── :1391-1396 ────────────────
-        if self.mtuprobes < -3 {
+        // C `if (mtuprobes < -3)`. After try_fix_mtu we might have
+        // just transitioned Fix→Steady; check phase fresh.
+        if self.phase == PmtuPhase::Lost {
             out.push(PmtuAction::LogReset);
-            self.mtuprobes = 0;
+            self.phase = PmtuPhase::Discovery { sent: 0 };
             self.minmtu = 0;
         }
 
         // ── Steady / re-validate branch ──── :1398-1406 ────────
-        if self.mtuprobes < 0 {
-            // maxmtu, and at -1 also maxmtu+1 (increase detector).
-            // Then decrement; maxmtu reply rewinds to -1 (on_probe_reply).
-            out.push(PmtuAction::SendProbe {
-                len: self.maxmtu.max(MIN_PROBE_SIZE),
-            });
-            if self.mtuprobes == -1 && self.maxmtu + 1 < MTU {
+        // C `if (mtuprobes < 0)`. Probe maxmtu, in Steady also
+        // maxmtu+1 (increase detector). Then "decrement"; a maxmtu
+        // reply rewinds to Steady (on_probe_reply).
+        match self.phase {
+            PmtuPhase::Steady => {
                 out.push(PmtuAction::SendProbe {
-                    len: self.maxmtu + 1,
+                    len: self.maxmtu.max(MIN_PROBE_SIZE),
                 });
+                if self.maxmtu + 1 < MTU {
+                    out.push(PmtuAction::SendProbe {
+                        len: self.maxmtu + 1,
+                    });
+                }
+                // C `mtuprobes--`: -1 → -2.
+                self.phase = PmtuPhase::Revalidate { misses: 1 };
             }
-            self.mtuprobes -= 1;
-            return out;
+            PmtuPhase::Revalidate { misses } => {
+                out.push(PmtuAction::SendProbe {
+                    len: self.maxmtu.max(MIN_PROBE_SIZE),
+                });
+                // C `mtuprobes--`: -2→-3, -3→-4.
+                self.phase = if misses >= 2 {
+                    PmtuPhase::Lost
+                } else {
+                    PmtuPhase::Revalidate { misses: misses + 1 }
+                };
+            }
+            // Lost was reset above; Fix was consumed by try_fix_mtu.
+            PmtuPhase::Lost | PmtuPhase::Fix => unreachable!(),
+            PmtuPhase::Discovery { sent } => {
+                // ── Discovery branch ──── :1407-1455 ───────────────
+                // C re-seeds maxmtu via choose_initial_maxmtu; we did in new().
+                // C's for(;;) observes synchronous EMSGSIZE; we send ONE.
+                let len = probe_size(self.minmtu, self.maxmtu, sent);
+                out.push(PmtuAction::SendProbe {
+                    len: len.max(MIN_PROBE_SIZE),
+                });
+                // C `mtuprobes++`: 19→20 = Fix.
+                self.phase = if sent + 1 >= 20 {
+                    PmtuPhase::Fix
+                } else {
+                    PmtuPhase::Discovery { sent: sent + 1 }
+                };
+            }
         }
-
-        // ── Discovery branch ──── :1407-1455 ───────────────────
-        // C re-seeds maxmtu via choose_initial_maxmtu; we did in new().
-        // C's for(;;) observes synchronous EMSGSIZE; we send ONE.
-        let len = probe_size(self.minmtu, self.maxmtu, self.mtuprobes);
-        out.push(PmtuAction::SendProbe {
-            len: len.max(MIN_PROBE_SIZE),
-        });
-        self.mtuprobes += 1;
         out
     }
 
@@ -188,19 +278,20 @@ impl PmtuState {
         // ── UDP confirmed ──── :199-210 ────────────────────────
         self.udp_confirmed = true;
 
-        // ── :219-225 PMTU-increase detector. mtuprobes := 1 (not 0)
-        // so the C-side maxmtu re-seed doesn't undo this.
+        // ── :219-225 PMTU-increase detector. C `mtuprobes := 1`
+        // (not 0) so the C-side maxmtu re-seed doesn't undo this.
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
             self.minmtu = len;
             self.maxmtu = MTU;
-            self.mtuprobes = 1;
+            self.phase = PmtuPhase::Discovery { sent: 1 };
             return out;
         }
 
         // ── Steady-state confirmation ──── :226-230 ────────────
-        if self.mtuprobes < 0 && len == self.maxmtu {
-            self.mtuprobes = -1;
+        // C `if (mtuprobes < 0 && len == maxmtu) mtuprobes = -1`.
+        if self.phase.is_fixed() && len == self.maxmtu {
+            self.phase = PmtuPhase::Steady;
             self.mtu_ping_sent = now;
         }
 
@@ -237,18 +328,24 @@ impl PmtuState {
         self.udp_confirmed = false;
         self.udp_ping_rtt = None;
         self.maxrecentlen = 0;
-        self.mtuprobes = 0;
+        self.start_discovery();
         self.minmtu = 0;
         self.maxmtu = MTU;
     }
 
     /// `try_fix_mtu` (`net_packet.c:90-107`). Lock in: 20 probes
     /// (timeout) or `minmtu >= maxmtu` (converged).
+    ///
+    /// C `if (mtuprobes < 0) return` → only acts in Discovery/Fix.
     fn try_fix_mtu(&mut self, out: &mut Vec<PmtuAction>) {
-        if self.mtuprobes < 0 {
-            return;
-        }
-        if self.mtuprobes == 20 || self.minmtu >= self.maxmtu {
+        // C `:92`: only fires when mtuprobes >= 0.
+        let probes = match self.phase {
+            PmtuPhase::Discovery { sent } => sent,
+            PmtuPhase::Fix => 20,
+            PmtuPhase::Steady | PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => return,
+        };
+        // C `:96`: mtuprobes == 20 || minmtu >= maxmtu.
+        if matches!(self.phase, PmtuPhase::Fix) || self.minmtu >= self.maxmtu {
             if self.minmtu > self.maxmtu {
                 self.minmtu = self.maxmtu;
             } else {
@@ -257,9 +354,9 @@ impl PmtuState {
             self.mtu = self.minmtu;
             out.push(PmtuAction::LogFixed {
                 mtu: self.mtu,
-                probes: self.mtuprobes,
+                probes,
             });
-            self.mtuprobes = -1;
+            self.phase = PmtuPhase::Steady;
         }
     }
 }
@@ -278,13 +375,12 @@ impl PmtuState {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn probe_size(minmtu: u16, maxmtu: u16, mtuprobes: i32) -> u16 {
+fn probe_size(minmtu: u16, maxmtu: u16, sent: u8) -> u16 {
     let multiplier: f32 = if maxmtu == MTU { 0.97 } else { 1.0 };
 
-    // Counts down 7→0 per 8-cycle. mtuprobes >= 0 here (discovery only).
-    #[allow(clippy::cast_sign_loss)]
+    // Counts down 7→0 per 8-cycle.
     let cycle_position =
-        PROBES_PER_CYCLE as f32 - (mtuprobes as u32 % PROBES_PER_CYCLE) as f32 - 1.0;
+        PROBES_PER_CYCLE as f32 - (u32::from(sent) % PROBES_PER_CYCLE) as f32 - 1.0;
 
     let minmtu_eff = minmtu.max(MINMTU);
     let interval = f32::from(maxmtu.saturating_sub(minmtu_eff));
@@ -346,13 +442,13 @@ mod tests {
     // ─── tick: discovery ───────────────────────────────────────
 
     #[test]
-    fn tick_discovery_advances_mtuprobes() {
+    fn tick_discovery_advances_phase() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
         let out = s.tick(now, Duration::from_secs(60));
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], PmtuAction::SendProbe { len } if (1329..=1330).contains(&len)));
-        assert_eq!(s.mtuprobes, 1);
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
     }
 
     #[test]
@@ -362,28 +458,29 @@ mod tests {
         s.tick(now, Duration::from_secs(60));
         let out = s.tick(now + Duration::from_millis(100), Duration::from_secs(60));
         assert!(out.is_empty());
-        assert_eq!(s.mtuprobes, 1);
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
         let out = s.tick(now + Duration::from_millis(400), Duration::from_secs(60));
         assert_eq!(out.len(), 1);
-        assert_eq!(s.mtuprobes, 2);
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 2 });
     }
 
     #[test]
     fn tick_at_20_fixes() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
-        s.mtuprobes = 19;
+        s.phase = PmtuPhase::Discovery { sent: 19 };
         s.minmtu = 1400;
-        // Probe #19 → mtuprobes=20.
+        // Probe #19 → Fix.
         let out = s.tick(now + Duration::from_secs(1), Duration::from_secs(60));
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], PmtuAction::SendProbe { .. }));
-        assert_eq!(s.mtuprobes, 20);
+        assert_eq!(s.phase, PmtuPhase::Fix);
         // try_fix_mtu fires.
         let out = s.tick(now + Duration::from_secs(2), Duration::from_secs(60));
         assert_eq!(s.mtu, 1400);
         assert_eq!(s.maxmtu, 1400);
-        assert_eq!(s.mtuprobes, -2); // -1 from fix, then -- from steady
+        // Fix → Steady (try_fix_mtu), then steady probe → Revalidate{1}.
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
         assert!(out.contains(&PmtuAction::LogFixed {
             mtu: 1400,
             probes: 20
@@ -417,7 +514,7 @@ mod tests {
             }]
         );
         assert_eq!(s.mtu, 1400);
-        assert_eq!(s.mtuprobes, -1);
+        assert_eq!(s.phase, PmtuPhase::Steady);
     }
 
     #[test]
@@ -427,12 +524,13 @@ mod tests {
         s.maxmtu = 1400;
         s.minmtu = 1400;
         s.mtu = 1400;
-        s.mtuprobes = -1;
+        s.phase = PmtuPhase::Steady;
         let out = s.on_probe_reply(1401, now);
         assert_eq!(out, vec![PmtuAction::LogIncrease]);
         assert_eq!(s.minmtu, 1401);
         assert_eq!(s.maxmtu, MTU);
-        assert_eq!(s.mtuprobes, 1);
+        // C `mtuprobes := 1` — skip the maxmtu re-seed.
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
     }
 
     #[test]
@@ -441,10 +539,10 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         s.maxmtu = 1400;
         s.minmtu = 1400;
-        s.mtuprobes = -3;
+        s.phase = PmtuPhase::Revalidate { misses: 2 };
         let out = s.on_probe_reply(1400, now + Duration::from_secs(5));
         assert!(out.is_empty());
-        assert_eq!(s.mtuprobes, -1);
+        assert_eq!(s.phase, PmtuPhase::Steady);
         assert_eq!(s.mtu_ping_sent, now + Duration::from_secs(5));
     }
 
@@ -505,7 +603,7 @@ mod tests {
         s.mtu = 1400;
         s.minmtu = 1400;
         s.maxmtu = 1400;
-        s.mtuprobes = -1;
+        s.phase = PmtuPhase::Steady;
         s.mtu_ping_sent = now;
         let out = s.tick(now + Duration::from_secs(30), Duration::from_secs(60));
         assert!(out.is_empty());
@@ -517,7 +615,7 @@ mod tests {
                 PmtuAction::SendProbe { len: 1401 },
             ]
         );
-        assert_eq!(s.mtuprobes, -2);
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
     }
 
     #[test]
@@ -527,7 +625,7 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         s.maxmtu = MTU - 1;
         s.minmtu = MTU - 1;
-        s.mtuprobes = -1;
+        s.phase = PmtuPhase::Steady;
         let out = s.tick(now + Duration::from_secs(61), Duration::from_secs(60));
         assert_eq!(out, vec![PmtuAction::SendProbe { len: MTU - 1 }]);
     }
@@ -539,20 +637,20 @@ mod tests {
         s.mtu = 1400;
         s.minmtu = 1400;
         s.maxmtu = 1400;
-        s.mtuprobes = -1;
+        s.phase = PmtuPhase::Steady;
         s.udp_confirmed = true;
         let pi = Duration::from_secs(60);
         s.tick(now + Duration::from_secs(61), pi);
-        assert_eq!(s.mtuprobes, -2);
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
         s.tick(now + Duration::from_secs(62), pi);
-        assert_eq!(s.mtuprobes, -3);
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 2 });
         s.tick(now + Duration::from_secs(63), pi);
-        assert_eq!(s.mtuprobes, -4);
-        // mtuprobes < -3 → reset
+        assert_eq!(s.phase, PmtuPhase::Lost);
+        // Lost → reset
         let out = s.tick(now + Duration::from_secs(64), pi);
         assert!(out.contains(&PmtuAction::LogReset));
-        // Reset to 0, then discovery ran one probe → 1.
-        assert_eq!(s.mtuprobes, 1);
+        // Reset to Discovery{0}, then discovery ran one probe → {1}.
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
         assert_eq!(s.minmtu, 0);
         // C :1391-1396 does NOT reset maxmtu (on_udp_timeout does).
         assert_eq!(s.maxmtu, 1400);
@@ -568,14 +666,14 @@ mod tests {
         s.mtu = 1400;
         s.minmtu = 1400;
         s.maxmtu = 1400;
-        s.mtuprobes = -1;
+        s.phase = PmtuPhase::Steady;
         s.maxrecentlen = 1200;
         s.udp_ping_rtt = Some(42_000);
         s.on_udp_timeout();
         assert!(!s.udp_confirmed);
         assert_eq!(s.udp_ping_rtt, None);
         assert_eq!(s.maxrecentlen, 0);
-        assert_eq!(s.mtuprobes, 0);
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 0 });
         assert_eq!(s.minmtu, 0);
         assert_eq!(s.maxmtu, MTU);
         assert_eq!(s.mtu, 1400); // C :124-137 doesn't touch mtu
@@ -588,5 +686,14 @@ mod tests {
         s.maxmtu = 1400;
         s.on_udp_timeout();
         assert_eq!(s.maxmtu, 1400); // untouched
+    }
+
+    // ─── phase helpers ─────────────────────────────────────────
+
+    #[test]
+    fn is_discovery_start_only_at_zero() {
+        assert!(PmtuPhase::Discovery { sent: 0 }.is_discovery_start());
+        assert!(!PmtuPhase::Discovery { sent: 1 }.is_discovery_start());
+        assert!(!PmtuPhase::Steady.is_discovery_start());
     }
 }

@@ -98,7 +98,7 @@ impl TunnelState {
         if let Some(p) = &mut self.pmtu {
             p.maxmtu = MTU;
             p.minmtu = 0;
-            p.mtuprobes = 0;
+            p.start_discovery();
             p.maxrecentlen = 0;
             p.udp_confirmed = false;
             p.ping_sent = false;
@@ -256,7 +256,7 @@ mod tests {
                 p.mtu = 1400;
                 p.minmtu = 1200;
                 p.maxmtu = 1450;
-                p.mtuprobes = 7;
+                p.phase = crate::pmtu::PmtuPhase::Discovery { sent: 7 };
                 p.udp_confirmed = true;
                 p
             }),
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(p.mtu, 1400, "mtu survives unreachable");
         assert_eq!(p.maxmtu, MTU);
         assert_eq!(p.minmtu, 0);
-        assert_eq!(p.mtuprobes, 0);
+        assert!(p.phase.is_discovery_start());
         assert!(!p.udp_confirmed);
         assert!(t.udp_reply_sent.is_none());
         assert!(t.udp_addr.is_none()); // `:296`

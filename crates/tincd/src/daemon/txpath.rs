@@ -292,7 +292,7 @@ impl Daemon {
                 .tunnels
                 .get(&target)
                 .and_then(|t| t.pmtu.as_ref())
-                .is_none_or(|p| p.mtuprobes == 0);
+                .is_none_or(|p| p.phase.is_discovery_start());
             let initial_maxmtu = if needs_seed {
                 self.choose_udp_address(target)
                     .map_or(MTU, |(addr, _)| choose_initial_maxmtu(addr))
@@ -307,7 +307,7 @@ impl Daemon {
             // C `:1409` re-seeds even if pmtu state already exists
             // (UDP timeout reset mtuprobes to 0). Our get_or_insert
             // only seeds on first construction; mirror C's re-seed.
-            if p.mtuprobes == 0 {
+            if p.phase.is_discovery_start() {
                 p.maxmtu = initial_maxmtu;
             }
             if p.udp_confirmed {
