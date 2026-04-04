@@ -48,8 +48,9 @@
 //!
 //! - `bind_to_address` (`:624`): wired. `try_connect` takes
 //!   `Option<SocketAddr>` and binds before `connect()`.
-//! - `bind_to_interface` (`:625`): `SO_BINDTODEVICE`. Linux-only,
-//!   root-only-for-non-root-sockets. `TODO(chunk-12-bind-iface)`.
+//! - `bind_to_interface` (`:623`) + `SO_MARK` (`configure_tcp:104`):
+//!   wired via `apply_dial_sockopts`. Warn-only on dial (C `:623`
+//!   discards the return); listen-side hard-fails (`listen.rs`).
 //! - DNS at connect time: `addrcache.rs` resolves `Address =` lines
 //!   lazily inside `next_addr()` (matches C `address_cache.c:157-
 //!   199`). `resolve_config_addrs` here just PARSES `host port`
@@ -69,6 +70,7 @@ use slotmap::new_key_type;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::addrcache::AddressCache;
+use crate::listen::SockOpts;
 
 new_key_type! {
     /// `outgoing_t*`. Slotmap key for `Daemon.outgoings`. Carried
@@ -133,6 +135,33 @@ pub enum ConnectAttempt {
     Exhausted,
 }
 
+/// `configure_tcp:104-106` (SO_MARK) + `do_outgoing_connection:623`
+/// (SO_BINDTODEVICE). Shared by direct dial + SOCKS/HTTP proxy dial
+/// (the C `:613` `if(proxytype != PROXY_EXEC)` gate covers both).
+///
+/// Best-effort: C `:623` discards `bind_to_interface`'s return value
+/// on the dial path (only listen `:244,391` hard-fails). We match —
+/// log + continue. Policy-routing setups get a warning; the connect
+/// proceeds (kernel picks via routing table, same as no-bind).
+fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
+    // C `configure_tcp:104-106`: `if(fwmark) setsockopt(SO_MARK)`.
+    // No return-value check in C. 0 = unset = skip.
+    if sockopts.fwmark != 0 {
+        use nix::sys::socket::{setsockopt, sockopt};
+        use std::os::fd::AsFd;
+        if let Err(e) = setsockopt(&sock.as_fd(), sockopt::Mark, &sockopts.fwmark) {
+            log::warn!(target: "tincd::conn",
+                       "SO_MARK={}: {e}", sockopts.fwmark);
+        }
+    }
+    // C `:623`: `bind_to_interface(c->socket)`. Return discarded.
+    if let Some(iface) = &sockopts.bind_to_interface
+        && let Err(e) = crate::listen::bind_to_interface(sock, iface)
+    {
+        log::warn!(target: "tincd::conn", "{e}");
+    }
+}
+
 /// One iteration of `do_outgoing_connection`'s `goto begin` loop.
 /// Creates a socket, sets nonblocking, calls `connect()`. The daemon
 /// loops this until `Started` or `Exhausted`.
@@ -143,6 +172,7 @@ pub fn try_connect(
     addr_cache: &mut AddressCache,
     node_name: &str,
     bind_to: Option<SocketAddr>,
+    sockopts: &SockOpts,
 ) -> ConnectAttempt {
     // C `:570`: `sa = get_recent_address(outgoing->node->address_cache)`.
     let Some(addr) = addr_cache.next_addr() else {
@@ -194,6 +224,10 @@ pub fn try_connect(
         let _ = sock.set_only_v6(true);
     }
 
+    // C `configure_tcp:104` (SO_MARK) + `:623` (bind_to_interface).
+    // BEFORE `:624` bind_to_address — matches C ordering.
+    apply_dial_sockopts(&sock, sockopts);
+
     // C `:624`: `bind_to_addr(c->socket)`. Forces the source addr
     // for outgoing connections. Niche (multi-homed hosts where the
     // default route doesn't go via the desired interface). `None`
@@ -208,9 +242,6 @@ pub fn try_connect(
         log::warn!(target: "tincd::conn",
                         "Can't bind to {local}: {e}");
     }
-    // TODO(chunk-12-bind-iface): `bind_to_interface` (`:625`).
-    // `setsockopt(SO_BINDTODEVICE)`. Linux-only, root-only-for-
-    // non-root-sockets. The `BindToInterface` config knob.
 
     // C `:630`: `connect(c->socket, &c->address.sa, salen)`.
     // socket2 wraps this. Nonblocking → returns EINPROGRESS for
@@ -267,6 +298,7 @@ pub fn try_connect_via_proxy(
     proxy_port: u16,
     peer_addr: SocketAddr,
     node_name: &str,
+    sockopts: &SockOpts,
 ) -> ConnectAttempt {
     // C `:591`: `proxyai = str2addrinfo(proxyhost, proxyport, ...)`.
     // We resolve here. Blocking DNS (same as the C — `getaddrinfo`
@@ -310,6 +342,10 @@ pub fn try_connect_via_proxy(
     if matches!(proxy_addr, SocketAddr::V6(_)) {
         let _ = sock.set_only_v6(true);
     }
+
+    // C `:613` gate: `if(proxytype != PROXY_EXEC)` — SOCKS/HTTP
+    // proxy sockets are real TCP and run through `:623-624`.
+    apply_dial_sockopts(&sock, sockopts);
 
     // C `:637`: `connect(c->socket, proxyai->ai_addr, ...)`.
     let sock_addr = SockAddr::from(proxy_addr);
@@ -727,6 +763,63 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u1
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `apply_dial_sockopts`: `SO_BINDTODEVICE` to `lo` reads back
+    /// correctly. Mirror of `listen.rs::open_bind_to_interface_lo`
+    /// but on a bare dial socket (no bind/connect). Proves the
+    /// outgoing path actually applies the sockopt.
+    #[test]
+    fn dial_sockopts_bind_to_interface_lo() {
+        use nix::sys::socket::{getsockopt, sockopt};
+        use std::os::fd::AsFd;
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        let opts = SockOpts {
+            bind_to_interface: Some("lo".into()),
+            ..SockOpts::default()
+        };
+        apply_dial_sockopts(&sock, &opts);
+        let got = getsockopt(&sock.as_fd(), sockopt::BindToDevice).unwrap();
+        let got = got.to_string_lossy();
+        assert_eq!(got.trim_end_matches('\0'), "lo");
+    }
+
+    /// `apply_dial_sockopts` is warn-only: bad interface doesn't
+    /// panic, doesn't error. C `:623` discards the return. The
+    /// socket survives (we'd `connect()` next).
+    #[test]
+    fn dial_sockopts_bad_iface_is_warn_only() {
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        let opts = SockOpts {
+            bind_to_interface: Some("nonexistent-iface-9z".into()),
+            ..SockOpts::default()
+        };
+        apply_dial_sockopts(&sock, &opts); // would panic if not warn-only
+        // Socket still usable: setting a benign opt proves it's open.
+        sock.set_nodelay(true).unwrap();
+    }
+
+    /// `apply_dial_sockopts`: `SO_MARK` reads back. Needs
+    /// `CAP_NET_ADMIN`; skip otherwise (matches `listen.rs::
+    /// open_fwmark_set`).
+    #[test]
+    fn dial_sockopts_fwmark() {
+        use nix::sys::socket::{getsockopt, sockopt};
+        use std::os::fd::AsFd;
+        // SAFETY: geteuid is infallible, no pointers.
+        #[allow(unsafe_code)]
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            eprintln!("SKIP dial_sockopts_fwmark: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
+            return;
+        }
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        let opts = SockOpts {
+            fwmark: 0x1234,
+            ..SockOpts::default()
+        };
+        apply_dial_sockopts(&sock, &opts);
+        assert_eq!(getsockopt(&sock.as_fd(), sockopt::Mark).unwrap(), 0x1234);
+    }
 
     /// `retry_outgoing` arithmetic (`net_socket.c:406-410`): +5 each
     /// time, capped at `maxtimeout`. C `:406`: `outgoing->timeout

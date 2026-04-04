@@ -132,7 +132,7 @@ where
 /// other sockopts, this is intentional: see `SockOpts.
 /// bind_to_interface`. The C `:132-135` returns `false` and the
 /// caller at `:391` does `closesocket; return -1`.
-fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
+pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))

@@ -508,12 +508,13 @@ impl Daemon {
                     self.retry_outgoing(oid);
                     return;
                 };
-                try_connect_via_proxy(phost, pport, peer_addr, &name)
+                try_connect_via_proxy(phost, pport, peer_addr, &name, &self.settings.sockopts)
             } else {
                 try_connect(
                     &mut outgoing.addr_cache,
                     &name,
                     self.settings.bind_to_address,
+                    &self.settings.sockopts,
                 )
             };
 
