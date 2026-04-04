@@ -579,6 +579,15 @@ impl Daemon {
     /// 1553-1617`). `from`: `None` = device read; `Some` = peer.
     /// Returns the io_set signal.
     pub(super) fn route_packet(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
+        // C `route.c:1131`: `if(pcap) send_pcap(packet)`. FIRST thing
+        // in route() — a tap, sees everything (incl. kernel-mode
+        // forward, runt frames, ARP). The cheap-gate is the field
+        // load; `send_pcap` walks conns only when armed (debugging).
+        let mut nw = false;
+        if self.any_pcap {
+            nw |= self.send_pcap(data);
+        }
+
         // C `route.c:1135-1138`: kernel-mode shortcut — peer traffic
         // straight to TUN, OS forwarding table decides. Packets from
         // our device still route (we're the originator). BEFORE the
@@ -586,17 +595,17 @@ impl Daemon {
         if self.settings.forwarding_mode == ForwardingMode::Kernel && from.is_some() {
             // C `:1137`: `send_packet(myself, packet)`.
             self.send_packet_myself(data);
-            return false;
+            return nw;
         }
 
         // C `route.c:1146`
         match self.settings.routing_mode {
             RoutingMode::Switch => {
-                return self.route_packet_mac(data, from); // `route.c:1159`
+                return nw | self.route_packet_mac(data, from); // `route.c:1159`
             }
             RoutingMode::Hub => {
                 // `route.c:1163`: always broadcast, no learning.
-                return self.dispatch_route_result(RouteResult::Broadcast, data, from);
+                return nw | self.dispatch_route_result(RouteResult::Broadcast, data, from);
             }
             RoutingMode::Router => {}
         }
@@ -607,7 +616,7 @@ impl Daemon {
         // `route()` (which would return `Unsupported{"arp"}`).
         if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == crate::packet::ETH_P_ARP
         {
-            return self.handle_arp(data, from);
+            return nw | self.handle_arp(data, from);
         }
 
         // C `route.c:655` reads `subnet->owner->status.reachable`
@@ -622,7 +631,64 @@ impl Daemon {
             graph.node(nid).filter(|n| n.reachable).map(|_| nid)
         });
 
-        self.dispatch_route_result(result, data, from)
+        nw | self.dispatch_route_result(result, data, from)
+    }
+
+    /// `send_pcap` (`route.c:1109-1128`). Walk pcap subscribers,
+    /// emit `"18 14 LEN\n"` + raw packet body to each. The body is
+    /// the FULL eth frame (whatever `route()` sees — same `vpn_
+    /// packet_t` `DATA(packet)` the C dumps at `:1125`).
+    ///
+    /// Recomputes `any_pcap` as it walks (`:1110-1117`): the C sets
+    /// `pcap = false` at the top, then `pcap = true` for each live
+    /// subscriber. If a subscriber dropped, the NEXT packet's walk
+    /// finds zero and clears the gate — `terminate()` stays ignorant.
+    /// One wasted walk per disconnect; cheap (conns is ~5).
+    ///
+    /// Wire shape (control conns are plaintext, no SPTPS):
+    ///   `send_request`: `"18 14 LEN\n"` (`send` appends `\n`)
+    ///   `send_meta`:    raw `data[..LEN]` bytes, no terminator
+    /// The CLI's `recv_line()` reads to `\n`, then `recv_data(LEN)`
+    /// reads exactly LEN bytes (`stream.rs:556-571`). The packet body
+    /// MAY contain `\n`; the length-prefixed framing makes that safe.
+    ///
+    /// Hot path WHEN armed (which is rare — debugging only). The
+    /// `any_pcap` gate keeps the unarmed cost at one branch.
+    fn send_pcap(&mut self, data: &[u8]) -> bool {
+        let mut nw = false;
+        let mut still_armed = false; // C `:1110`: `pcap = false`
+        for (_, conn) in &mut self.conns {
+            if !conn.pcap {
+                continue; // C `:1113-1115`
+            }
+            still_armed = true; // C `:1117`
+
+            // C `:1118-1122`: `int len = packet->len; if(c->
+            // outmaclength && c->outmaclength < len) len =
+            // c->outmaclength`. snaplen=0 → no clip (the `&&`).
+            let snap = usize::from(conn.pcap_snaplen);
+            let len = if snap != 0 && snap < data.len() {
+                snap
+            } else {
+                data.len()
+            };
+
+            // C `:1124`: `send_request(c, "%d %d %d", CONTROL,
+            // REQ_PCAP, len)`. Control conns are plaintext (`conn.
+            // sptps` is None), so `send` formats straight to outbuf.
+            nw |= conn.send(format_args!(
+                "{} {} {len}",
+                tinc_proto::Request::Control as u8,
+                crate::proto::REQ_PCAP
+            ));
+            // C `:1125`: `send_meta(c, DATA(packet), len)`. Raw body,
+            // no `\n`. C gates this on send_request's bool return
+            // (`if(...)`); our `send` is infallible (queues to
+            // outbuf, write errors surface at `flush()`).
+            nw |= conn.send_raw(&data[..len]);
+        }
+        self.any_pcap = still_armed;
+        nw
     }
 
     /// `route_mac` wrapper (`route.c:1031`). Switch-mode dispatch.

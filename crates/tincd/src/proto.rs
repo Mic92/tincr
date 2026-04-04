@@ -147,6 +147,7 @@ pub(crate) const REQ_DISCONNECT: i32 = 12;
 pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
 /// `control_common.h:43`. `tincctl.c:649`: `level, use_color`.
 pub(crate) const REQ_LOG: i32 = 15;
+pub(crate) const REQ_PCAP: i32 = 14;
 /// `control_common.h`: `REQ_INVALID = -1`.
 const REQ_INVALID: i32 = -1;
 
@@ -188,6 +189,12 @@ pub enum DispatchResult {
     /// the level and ignore colorize (no ANSI in the tap). `i32` is
     /// the C debug level (`-1..=10`); daemon maps to `log::Level`.
     Log(i32),
+    /// `REQ_PCAP` (`control.c:127-131`). Daemon arms `conn.pcap` and
+    /// the global `pcap` gate. Carries the parsed snaplen (`sscanf(
+    /// "%*d %*d %d", &c->outmaclength)`); 0 means unparsed or full.
+    /// NO `control_ok` reply (C `:131` is plain `return true`); the
+    /// CLI starts reading pcap headers immediately.
+    Pcap(u16),
     /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
@@ -837,6 +844,27 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
                 .unwrap_or(0);
             (DispatchResult::Log(level), false)
         }
+        Some(REQ_PCAP) => {
+            // C `control.c:128`: `sscanf("%*d %*d %d", &c->outmaclength)`.
+            // sscanf failure leaves outmaclength untouched (0 from
+            // xzalloc) — same here: missing/bad token → 0. Negative
+            // snaplen makes no sense; %d would accept it but the
+            // `route.c:1120` `outmaclength && outmaclength < len`
+            // gate is harmless (negative-int < positive-len always true,
+            // so it'd clip to a negative — BUT C `send_meta` length is
+            // `int` and would overflow). The CLI sends 0 or small
+            // positive (`stream.rs:537`). We clamp negative → 0, and
+            // saturate to u16 (snaplen > MTU is functionally ∞ anyway).
+            let snaplen = line
+                .split(|&b| b.is_ascii_whitespace())
+                .filter(|t| !t.is_empty())
+                .nth(2)
+                .and_then(|t| std::str::from_utf8(t).ok())
+                .and_then(|s| s.parse::<i32>().ok())
+                .filter(|&n| n > 0)
+                .map_or(0u16, |n| u16::try_from(n).unwrap_or(u16::MAX));
+            (DispatchResult::Pcap(snaplen), false)
+        }
         Some(REQ_STOP) => {
             // C `:59-61`: `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
@@ -1319,6 +1347,36 @@ mod tests {
         c.allow_request = Some(Request::Control);
         let (r, _) = handle_control(&mut c, b"18 15 -1 1");
         assert_eq!(r, DispatchResult::Log(-1));
+    }
+
+    #[test]
+    fn control_pcap() {
+        // C `control.c:127-131`. Snaplen present.
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, nw) = handle_control(&mut c, b"18 14 96");
+        assert_eq!(r, DispatchResult::Pcap(96));
+        // C `:131` is `return true` — NO control_ok reply.
+        assert!(!nw);
+        assert!(c.outbuf.is_empty());
+
+        // Snaplen absent: sscanf fails, outmaclength stays 0.
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 14");
+        assert_eq!(r, DispatchResult::Pcap(0));
+
+        // Snaplen 0 explicit (CLI default "full packet").
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 14 0");
+        assert_eq!(r, DispatchResult::Pcap(0));
+
+        // Huge snaplen → saturate (functionally ∞: > MTU captures all).
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 14 999999");
+        assert_eq!(r, DispatchResult::Pcap(u16::MAX));
     }
 
     /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.

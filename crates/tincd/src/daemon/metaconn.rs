@@ -522,6 +522,19 @@ impl Daemon {
                         // C `:139`: `logcontrol = true`. Our gate.
                         crate::log_tap::set_active(true);
                         (DispatchResult::Ok, false)
+                    } else if let DispatchResult::Pcap(snaplen) = r {
+                        // C `control.c:127-131`. NO `control_ok` reply
+                        // (`:131` is plain `return true`): the CLI
+                        // (`tincctl.c:618`) writes the global pcap
+                        // header then immediately starts reading
+                        // `"18 14 LEN"` lines — a `"18 14 0"` ack would
+                        // be misparsed as a 0-byte capture.
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        conn.pcap = true;
+                        conn.pcap_snaplen = snaplen;
+                        // C `:130`: `pcap = true` (the route.c gate).
+                        self.any_pcap = true;
+                        (DispatchResult::Ok, false)
                     } else {
                         (r, nw)
                     }
@@ -552,7 +565,8 @@ impl Daemon {
                 | DispatchResult::Purge
                 | DispatchResult::Disconnect(_)
                 | DispatchResult::DumpTraffic
-                | DispatchResult::Log(_) => {
+                | DispatchResult::Log(_)
+                | DispatchResult::Pcap(_) => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

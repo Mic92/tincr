@@ -147,6 +147,15 @@ pub struct Connection {
     pub allow_request: Option<Request>,
     /// `c->status.control`.
     pub control: bool,
+    /// `c->status.pcap` (`connection.h:50`, bit 10). Set by `REQ_PCAP`
+    /// (`control.c:129`); read by `send_pcap` (`route.c:1113`).
+    pub pcap: bool,
+    /// `c->outmaclength` repurposed (`control.c:128`). Legacy MAC length
+    /// field reused as pcap snaplen — pcap subscribers don't use legacy
+    /// crypto so the field was free. 0 = full packet (`route.c:1120`:
+    /// `if(c->outmaclength && c->outmaclength < len)`). C is `int`; we
+    /// use u16: MTU is 1518, snaplen > that captures everything anyway.
+    pub pcap_snaplen: u16,
     /// `c->status.invitation`. When `Some`, SPTPS records dispatch via
     /// `dispatch_invitation_outputs` (raw bytes, not request lines).
     pub invite: Option<InvitePhase>,
@@ -252,6 +261,8 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            pcap: false,
+            pcap_snaplen: 0,
             invite: None,
             name: "<control>".to_string(),               // C :800
             hostname: "localhost port unix".to_string(), // C :802
@@ -288,6 +299,8 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            pcap: false,
+            pcap_snaplen: 0,
             invite: None,
             name: "<unknown>".to_string(), // C :759
             hostname,
@@ -332,6 +345,8 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            pcap: false,
+            pcap_snaplen: 0,
             invite: None,
             name,
             hostname,
@@ -393,6 +408,9 @@ impl Connection {
         // Bit 11: `status.log` (`connection.h:51`).
         if self.log_level.is_some() {
             v |= 1 << 11;
+        }
+        if self.pcap {
+            v |= 1 << 10;
         }
         v
     }

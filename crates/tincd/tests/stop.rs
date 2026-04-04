@@ -2797,3 +2797,356 @@ fn process_priority_low_succeeds() {
         "setpriority should succeed for nice=10 (lowering); stderr:\n{stderr}"
     );
 }
+
+/// `REQ_PCAP` arm + `send_pcap` end-to-end. Proves the wire format
+/// the CLI's `tinc pcap` decoder reads (`stream.rs::pcap_loop`).
+///
+/// Format-is-contract: the CLI does `recv_line()` (reads to `\n`)
+/// then `recv_data(LEN)` (reads exactly LEN bytes). Packet body MAY
+/// contain `\n` — the length prefix makes that safe. We deliberately
+/// inject a frame with `0x0a` mid-body to prove this.
+///
+/// `Mode = switch`: no subnet/ARP/reachability dance — unknown dst
+/// MAC → `route_mac` returns `Broadcast` → packet visits `route_
+/// packet` → `send_pcap` fires. The broadcast itself goes nowhere
+/// (no other peers); we only care that the tap saw it.
+///
+/// `PACKET 17` injection (not UDP) because the test has no UDP
+/// listener. C `net_packet.c:725`: direct neighbors short-circuit
+/// to TCP; the tcplen path (`metaconn.rs:607`) calls `route_packet`
+/// directly with the frame body.
+#[test]
+fn pcap_captures_tcp_packet() {
+    use rand_core::OsRng;
+    use std::io::Read;
+    use std::net::TcpStream;
+    use tinc_crypto::sign::SigningKey;
+    use tinc_sptps::{Framing, Output, Role, Sptps};
+
+    let tmp = tmp("pcap");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    // ─── config: Mode=switch so route_packet_mac broadcasts ───
+    // Can't reuse `write_config` (router mode). Inline.
+    std::fs::create_dir_all(confbase.join("hosts")).unwrap();
+    std::fs::write(
+        confbase.join("tinc.conf"),
+        "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nMode = switch\n",
+    )
+    .unwrap();
+    std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
+    let seed = [0x42; 32];
+    write_ed25519_privkey(&confbase, &seed);
+    let daemon_pub = common::pubkey_from_seed(&seed);
+
+    let our_key = SigningKey::from_seed(&[0x77; 32]);
+    let our_pub = *our_key.public_key();
+    let b64 = tinc_crypto::b64::encode(&our_pub);
+    std::fs::write(
+        confbase.join("hosts").join("testpeer"),
+        format!("Ed25519PublicKey = {b64}\n"),
+    )
+    .unwrap();
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
+        let _ = child.kill();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    });
+
+    // ─── SPTPS pump (lifted from peer_edge_triggers_reachable) ───
+    let tcp_addr = read_tcp_addr(&pidfile);
+    let stream = TcpStream::connect(tcp_addr).expect("TCP connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(&stream, "0 testpeer 17.7").unwrap();
+
+    let mut buf = Vec::with_capacity(256);
+    let mut tmp_buf = [0u8; 256];
+    let id_end = loop {
+        let n = (&stream).read(&mut tmp_buf).expect("recv");
+        if n == 0 {
+            panic!("daemon closed before ID");
+        }
+        buf.extend_from_slice(&tmp_buf[..n]);
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            break pos;
+        }
+    };
+    assert_eq!(&buf[..id_end], b"0 testnode 17.7");
+
+    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
+    label.push(0);
+    let (mut sptps, init) = Sptps::start(
+        Role::Initiator,
+        Framing::Stream,
+        our_key,
+        daemon_pub,
+        label,
+        0,
+        &mut OsRng,
+    );
+    for o in init {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send KEX");
+        }
+    }
+
+    struct NoRng;
+    impl rand_core::RngCore for NoRng {
+        fn next_u32(&mut self) -> u32 {
+            unreachable!()
+        }
+        fn next_u64(&mut self) -> u64 {
+            unreachable!()
+        }
+        fn fill_bytes(&mut self, _: &mut [u8]) {
+            unreachable!()
+        }
+        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+            unreachable!()
+        }
+    }
+
+    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
+    let mut handshake_done = false;
+    let mut got_ack = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(handshake_done && got_ack) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("handshake timeout");
+        }
+        let mut off = 0;
+        while off < pending.len() {
+            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
+            off += n;
+            for o in outs {
+                match o {
+                    Output::Wire { bytes, .. } => {
+                        (&stream).write_all(&bytes).expect("send");
+                    }
+                    Output::HandshakeDone => handshake_done = true,
+                    Output::Record { .. } => got_ack = true,
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        pending.clear();
+        if handshake_done && got_ack {
+            break;
+        }
+        let n = (&stream).read(&mut tmp_buf).expect("read");
+        if n == 0 {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "daemon EOF before handshake; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        pending.extend_from_slice(&tmp_buf[..n]);
+    }
+
+    // ACK + reverse edge (so on_ack completes; conn.active = true).
+    let outs = sptps.send_record(0, b"4 0 1 700000c\n").expect("ack");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send ACK");
+        }
+    }
+    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
+    let outs = sptps.send_record(0, our_edge).expect("our edge");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send ADD_EDGE");
+        }
+    }
+
+    // Drain post-ACK ADD_EDGE gossip (don't care, just clear the pipe).
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    pending.clear();
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > drain_deadline {
+            panic!("post-ACK drain timeout");
+        }
+        let mut off = 0;
+        while off < pending.len() {
+            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
+            if n == 0 {
+                break;
+            }
+            off += n;
+            for o in outs {
+                if let Output::Wire { bytes, .. } = o {
+                    (&stream).write_all(&bytes).expect("send");
+                }
+            }
+        }
+        pending.drain(..off);
+        match (&stream).read(&mut tmp_buf) {
+            Ok(0) => panic!("daemon EOF post-ACK"),
+            Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if pending.is_empty() {
+                    break;
+                }
+            }
+            Err(e) => panic!("read error: {e}"),
+        }
+    }
+
+    // ─── arm pcap on the control socket ────────────────────────
+    // `"18 14 0"`: REQ_PCAP, snaplen=0 (full packet). C `control.c:
+    // 128-131`: NO ack (`return true` not `control_ok`). The CLI
+    // (`stream.rs:540`) sends this then immediately starts reading
+    // `"18 14 LEN"` lines.
+    let cookie = read_cookie(&pidfile);
+    let ctl = UnixStream::connect(&socket).expect("ctl connect");
+    ctl.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut ctl_r = BufReader::new(&ctl);
+    let mut ctl_w = &ctl;
+    writeln!(ctl_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    ctl_r.read_line(&mut greet).unwrap();
+    let mut ack = String::new();
+    ctl_r.read_line(&mut ack).unwrap();
+    writeln!(ctl_w, "18 14 0").unwrap();
+
+    // ─── inject a frame via PACKET 17 ─────────────────────────
+    // 60-byte minimal ethernet frame. dst MAC unknown → switch-mode
+    // `route_mac` floods (Broadcast). `0x0a` at byte 5 of dst MAC:
+    // the pcap body MAY contain `\n`; the length-prefix framing must
+    // tolerate it (BufReader::read_line on the ctl socket would
+    // misframe if we'd put a `\n` in the HEADER, but the body is
+    // length-read).
+    let frame: Vec<u8> = {
+        let mut f = Vec::with_capacity(60);
+        f.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x0a]); // dst (0x0a = '\n')
+        f.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]); // src
+        f.extend_from_slice(&0x0800u16.to_be_bytes()); // ethertype IPv4 (ignored in switch)
+        f.resize(60, 0xee); // pad to min eth frame
+        f
+    };
+    assert_eq!(frame.len(), 60);
+
+    // C `protocol_misc.c:98`: `"%d %d", PACKET, len`. Then C `:102`:
+    // `send_meta(c, DATA(packet), len)` → SPTPS record type 0 with
+    // raw body. metaconn.rs:607: tcplen=60 set; NEXT record is the
+    // blob. Two records: header line, then frame.
+    let pkt_hdr = format!("17 {}\n", frame.len());
+    let outs = sptps.send_record(0, pkt_hdr.as_bytes()).expect("pkt hdr");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send PACKET 17");
+        }
+    }
+    let outs = sptps.send_record(0, &frame).expect("pkt body");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send frame body");
+        }
+    }
+
+    // ─── read pcap header + body from ctl socket ─────────────
+    // C `route.c:1124`: `"%d %d %d"` = `"18 14 60"`. Then `:1125`:
+    // `send_meta(c, DATA(packet), len)` = 60 raw bytes. Control
+    // conn is plaintext: `send` appends `\n`, `send_raw` doesn't.
+    let mut hdr = String::new();
+    match ctl_r.read_line(&mut hdr) {
+        Ok(0) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "ctl EOF waiting for pcap header; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "ctl read error waiting for pcap header: {e}; stderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    assert_eq!(hdr, "18 14 60\n", "pcap header line");
+
+    // Body: exactly 60 bytes, byte-for-byte the frame we sent.
+    // BufReader::read_exact: reads from buffered + underlying.
+    // The 0x0a in the body must NOT have been consumed by the
+    // read_line above (it wasn't — read_line stopped at the
+    // header's `\n`, body is still buffered/on the socket).
+    let mut body = [0u8; 60];
+    ctl_r.read_exact(&mut body).expect("read pcap body");
+    assert_eq!(&body[..], &frame[..], "pcap body byte-for-byte");
+
+    // ─── snaplen clip: re-arm with snaplen=20, send again ────
+    // Second ctl conn (the first is still subscribed at snaplen=0;
+    // a fresh conn is the simpler test path). C `route.c:1120`:
+    // `if(c->outmaclength && c->outmaclength < len) len = c->
+    // outmaclength`. snaplen=20 < 60 → clip to 20.
+    drop(ctl_r);
+    drop(ctl);
+    let ctl2 = UnixStream::connect(&socket).expect("ctl2 connect");
+    ctl2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut ctl2_r = BufReader::new(&ctl2);
+    let mut ctl2_w = &ctl2;
+    writeln!(ctl2_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    ctl2_r.read_line(&mut greet).unwrap();
+    let mut ack = String::new();
+    ctl2_r.read_line(&mut ack).unwrap();
+    writeln!(ctl2_w, "18 14 20").unwrap();
+
+    // The first ctl conn was dropped → daemon's send_pcap walk on
+    // the next packet finds only ctl2. (any_pcap may be re-derived
+    // lazily on the first walk; the test doesn't care — it just
+    // works either way.)
+    let outs = sptps.send_record(0, pkt_hdr.as_bytes()).expect("pkt hdr 2");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send PACKET 17 #2");
+        }
+    }
+    let outs = sptps.send_record(0, &frame).expect("pkt body 2");
+    for o in outs {
+        if let Output::Wire { bytes, .. } = o {
+            (&stream).write_all(&bytes).expect("send frame body #2");
+        }
+    }
+
+    let mut hdr2 = String::new();
+    ctl2_r.read_line(&mut hdr2).expect("read pcap header 2");
+    assert_eq!(hdr2, "18 14 20\n", "snaplen clip: header says 20");
+    let mut body2 = [0u8; 20];
+    ctl2_r.read_exact(&mut body2).expect("read pcap body 2");
+    assert_eq!(&body2[..], &frame[..20], "snaplen clip: first 20 bytes");
+
+    // ─── cleanup ─────────────────────────────────────────────
+    drop(stream);
+    let _ = child.kill();
+    let _ = child.wait();
+}

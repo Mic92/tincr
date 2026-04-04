@@ -932,6 +932,8 @@ pub(crate) struct ListenerSlot {
 /// can reach every global. The Rust gain is `&mut self` exclusivity
 /// (no two handlers run concurrently — but they couldn't in the C
 /// either, single-threaded loop. The gain is the COMPILER knows.).
+#[allow(clippy::struct_excessive_bools)] // C globals; the bools are
+// independent gates (overwrite_mac, any_pcap, etc), not a state enum.
 pub struct Daemon {
     // ─── arena
     /// `connection_list`. Slotmap not `Vec<Option>` — generational
@@ -1375,6 +1377,16 @@ pub struct Daemon {
     /// sets `running = false`; `event_loop()` checks before each
     /// iteration. Same here.
     pub(crate) running: bool,
+
+    /// `pcap` global (`route.c:42`). Cheap gate at `route.c:1131`:
+    /// `if(pcap) send_pcap(packet)`. Armed by `REQ_PCAP` (`control.c:
+    /// 130`). LAZILY recomputed inside `send_pcap` itself (`route.c:
+    /// 1110-1117`): the loop sets `pcap = false`, then back to `true`
+    /// if any conn still wants it. So a pcap subscriber dropping its
+    /// connection costs ONE extra `send_pcap` walk (which finds zero
+    /// subscribers and clears the flag) — `terminate()` doesn't need
+    /// to know about pcap. The C does the same.
+    pub(crate) any_pcap: bool,
 }
 
 impl Daemon {
@@ -2111,6 +2123,7 @@ impl Daemon {
             periodictimer,
             keyexpire_timer,
             running: true,
+            any_pcap: false,
         };
 
         // ─── try_outgoing_connections — the actual setup
