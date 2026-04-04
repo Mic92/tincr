@@ -310,10 +310,57 @@ impl Daemon {
                 }
             }
             SignalWhat::Retry => {
-                // C retry() (net.c:460-485). Not yet implemented.
-                log::info!(target: "tincd", "Got SIGALRM, retry not implemented");
+                // C `net.c:330-332`: `sigalrm_handler` → `retry()`.
+                log::info!(target: "tincd", "Got SIGALRM, retrying outgoing connections");
+                self.on_retry();
             }
         }
+    }
+
+    /// `retry()` (`net.c:460-482`). The "network came back, reconnect
+    /// NOW" button: zeroes outgoing backoff, fires retry timers
+    /// immediately, and kicks the ping sweep so in-progress connects
+    /// (stuck on a stale fd before suspend) get reaped this turn
+    /// instead of after `pingtimeout` more seconds.
+    ///
+    /// Triggered by SIGALRM (`:330-332`) and `tinc retry` → `REQ_RETRY`
+    /// (`control.c:95-96`). Without this, a laptop suspended past
+    /// `MaxTimeout` waits up to 15 min for the next reconnect attempt.
+    pub(super) fn on_retry(&mut self) {
+        // :462-468: per outgoing, zero backoff + arm timer for now.
+        // C's `if(o->ev.cb)` gate (don't arm a never-armed timer)
+        // doesn't apply: every `outgoings` slot has a paired timer
+        // (`daemon.rs:1717` adds it unconditionally at insert).
+        for (oid, outgoing) in &mut self.outgoings {
+            outgoing.timeout = 0;
+            if let Some(&tid) = self.outgoing_timers.get(oid) {
+                self.timers.set(tid, Duration::ZERO);
+            }
+        }
+
+        // :471-475: in-progress outgoing conns (`!c->node` ≡ pre-ACK
+        // ≡ `!conn.active`; `c->node` is set by `ack_h`, same place
+        // we flip `active`). C does `last_ping_time = 0` (epoch);
+        // `Instant` has no zero, so subtract pingtimeout+1 from now.
+        // Same effect: next ping sweep sees stale > pingtimeout and
+        // hits the `:236-247` pre-ACK-timeout branch → terminate →
+        // `do_outgoing_connection` retries from a fresh socket.
+        let now = self.timers.now();
+        let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
+        if let Some(stale) = now.checked_sub(pingtimeout + Duration::from_secs(1)) {
+            for conn in self.conns.values_mut() {
+                if conn.outgoing.is_some() && !conn.active {
+                    conn.last_ping_time = stale;
+                }
+            }
+        }
+
+        // :479-481: kick the ping sweep. The retry timers above fire
+        // BEFORE this in the next `expired()` walk (BTreeMap order is
+        // (when, seq); same `when`, lower seq wins) so by the time
+        // the sweep runs, any new in-progress conns from the retry
+        // already have a fresh `last_ping_time` and survive.
+        self.timers.set(self.pingtimer, Duration::ZERO);
     }
 
     /// `reload_configuration` (`net.c:336-458`). False if config

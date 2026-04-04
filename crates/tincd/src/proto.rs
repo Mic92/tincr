@@ -107,6 +107,8 @@ pub(crate) const REQ_DUMP_NODES: i32 = 3;
 pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
+pub(crate) const REQ_RETRY: i32 = 10;
+pub(crate) const REQ_DISCONNECT: i32 = 12;
 /// `control_common.h`: `REQ_INVALID = -1`.
 const REQ_INVALID: i32 = -1;
 
@@ -115,7 +117,7 @@ const CTL_VERSION: u8 = 0;
 
 /// Result of dispatching one line. C handlers return `bool` (`false` =
 /// drop); we disambiguate the `true` flavors that flip daemon state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchResult {
     Ok,
     /// `event_exit()`. Loop finishes this turn then exits.
@@ -130,6 +132,13 @@ pub enum DispatchResult {
     DumpEdges,
     /// `REQ_RELOAD` (`control.c:56`). Daemon reloads + replies `"18 1 <r>"`.
     Reload,
+    /// `REQ_RETRY` (`control.c:95-96`). Daemon calls `retry()` then
+    /// `control_ok` → `"18 10 0"`.
+    Retry,
+    /// `REQ_DISCONNECT` (`control.c:102-122`). `Some(name)` → walk
+    /// conns, terminate matches, reply `"18 12 0"` if found else
+    /// `"18 12 -2"`. `None` → sscanf failed (`:108`), reply `"18 12 -1"`.
+    Disconnect(Option<String>),
     /// Handler returned `false` (`receive_request:183-188`).
     Drop,
 }
@@ -743,6 +752,21 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         Some(REQ_DUMP_EDGES) => (DispatchResult::DumpEdges, false),
         Some(REQ_DUMP_SUBNETS) => (DispatchResult::DumpSubnets, false),
         Some(REQ_DUMP_CONNECTIONS) => (DispatchResult::DumpConnections, false),
+        Some(REQ_RETRY) => (DispatchResult::Retry, false),
+        Some(REQ_DISCONNECT) => {
+            // C `:106`: `sscanf("%*d %*d " MAX_STRING, name)`. Third
+            // whitespace token. C `%s` stops at whitespace; we do too.
+            // `check_id` not in C here — it just strcmp's against the
+            // conn-list — so don't add it (a bad name simply won't match).
+            let name = line
+                .split(|&b| b.is_ascii_whitespace())
+                .filter(|t| !t.is_empty())
+                .nth(2)
+                .and_then(|t| std::str::from_utf8(t).ok())
+                .filter(|s| s.len() <= tinc_proto::MAX_STRING)
+                .map(str::to_owned);
+            (DispatchResult::Disconnect(name), false)
+        }
         Some(REQ_STOP) => {
             // C `:59-61`: `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
@@ -1151,6 +1175,34 @@ mod tests {
         // No write yet — daemon queues the reply after reload runs.
         assert!(!nw);
         assert!(c.outbuf.is_empty());
+    }
+
+    #[test]
+    fn control_retry() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+
+        let (r, nw) = handle_control(&mut c, b"18 10");
+        assert_eq!(r, DispatchResult::Retry);
+        // Daemon writes the `"18 10 0"` ack after `on_retry()` runs.
+        assert!(!nw);
+        assert!(c.outbuf.is_empty());
+    }
+
+    #[test]
+    fn control_disconnect() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+
+        // C `:106`: `"%*d %*d " MAX_STRING` — token 3 is the name.
+        let (r, _) = handle_control(&mut c, b"18 12 bob");
+        assert_eq!(r, DispatchResult::Disconnect(Some("bob".into())));
+
+        // No third token → sscanf returns 0. C `:108` → -1 reply.
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+        let (r, _) = handle_control(&mut c, b"18 12");
+        assert_eq!(r, DispatchResult::Disconnect(None));
     }
 
     /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.

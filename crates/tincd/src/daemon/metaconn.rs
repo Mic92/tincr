@@ -375,7 +375,7 @@ impl Daemon {
                     // rows + the bare-header terminator (C `:406/:221/
                     // :135/:173`). Same shape ×4; the terminator format
                     // is identical across all four C dump functions.
-                    if r == DispatchResult::DumpSubnets {
+                    if matches!(r, DispatchResult::DumpSubnets) {
                         // `dump_subnets` (`subnet.c:395-410`).
                         let rows: Vec<String> = self
                             .subnets
@@ -393,19 +393,19 @@ impl Daemon {
                         let conn = self.conns.get_mut(id).expect("not terminated");
                         let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_SUBNETS);
                         (DispatchResult::Ok, nw2)
-                    } else if r == DispatchResult::DumpNodes {
+                    } else if matches!(r, DispatchResult::DumpNodes) {
                         // `dump_nodes` (`node.c:201-223`).
                         let rows = self.dump_nodes_rows();
                         let conn = self.conns.get_mut(id).expect("not terminated");
                         let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_NODES);
                         (DispatchResult::Ok, nw2)
-                    } else if r == DispatchResult::DumpEdges {
+                    } else if matches!(r, DispatchResult::DumpEdges) {
                         // `dump_edges` (`edge.c:123-137`).
                         let rows = self.dump_edges_rows();
                         let conn = self.conns.get_mut(id).expect("not terminated");
                         let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_EDGES);
                         (DispatchResult::Ok, nw2)
-                    } else if r == DispatchResult::DumpConnections {
+                    } else if matches!(r, DispatchResult::DumpConnections) {
                         // `dump_connections` (`connection.c:166-175`).
                         let rows: Vec<String> = self
                             .conns
@@ -428,7 +428,7 @@ impl Daemon {
                         let conn = self.conns.get_mut(id).expect("not terminated");
                         let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_CONNECTIONS);
                         (DispatchResult::Ok, nw2)
-                    } else if r == DispatchResult::Reload {
+                    } else if matches!(r, DispatchResult::Reload) {
                         // C `control.c:56-57`. CLI only checks zero/nonzero.
                         let result = i32::from(!self.reload_configuration());
                         let conn = self.conns.get_mut(id).expect("not terminated");
@@ -436,6 +436,49 @@ impl Daemon {
                             "{} {} {result}",
                             Request::Control as u8,
                             crate::proto::REQ_RELOAD
+                        ));
+                        (DispatchResult::Ok, nw2)
+                    } else if matches!(r, DispatchResult::Retry) {
+                        // C `control.c:95-96`: `retry(); control_ok(c, REQ_RETRY)`.
+                        self.on_retry();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send(format_args!(
+                            "{} {} 0",
+                            Request::Control as u8,
+                            crate::proto::REQ_RETRY
+                        ));
+                        (DispatchResult::Ok, nw2)
+                    } else if let DispatchResult::Disconnect(name) = r {
+                        // C `control.c:102-122`. Walk conns, terminate
+                        // by name. C `:116`: `terminate_connection(o,
+                        // o->edge)` — our `terminate()` keys DEL_EDGE
+                        // on `conn.active` already (same semantics).
+                        // Control conns are skipped: their name is
+                        // `<control>` (proto.rs:254), so a valid node
+                        // name never matches; also covers self-disconnect.
+                        let result = match name {
+                            None => -1, // C `:108`: sscanf failed
+                            Some(name) => {
+                                let to_term: Vec<ConnId> = self
+                                    .conns
+                                    .iter()
+                                    .filter(|(_, c)| !c.control && c.name == name)
+                                    .map(|(cid, _)| cid)
+                                    .collect();
+                                let found = !to_term.is_empty();
+                                for cid in to_term {
+                                    self.terminate(cid);
+                                }
+                                if found { 0 } else { -2 }
+                            }
+                        };
+                        // `terminate()` only touches the matched conn;
+                        // the ctl conn `id` is still here.
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send(format_args!(
+                            "{} {} {result}",
+                            Request::Control as u8,
+                            crate::proto::REQ_DISCONNECT
                         ));
                         (DispatchResult::Ok, nw2)
                     } else {
@@ -463,7 +506,9 @@ impl Daemon {
                 | DispatchResult::DumpSubnets
                 | DispatchResult::DumpNodes
                 | DispatchResult::DumpEdges
-                | DispatchResult::Reload => {
+                | DispatchResult::Reload
+                | DispatchResult::Retry
+                | DispatchResult::Disconnect(_) => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}
