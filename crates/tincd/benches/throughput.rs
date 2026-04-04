@@ -4,6 +4,7 @@
 //! ```sh
 //! cargo bench --bench throughput --profile profiling
 //! cargo bench --bench throughput -- rust_rust   # one pairing only
+//! cargo bench --bench throughput -- latency     # latency only (idle + load)
 //! ```
 //!
 //! `harness = false` — this isn't a microbenchmark, the netns +
@@ -710,6 +711,219 @@ mod bench {
         parsed.end.sum_received.bits_per_second
     }
 
+    // ═══════════════════════════ latency measurement ══════════════════════════════
+    // Phase 3 (par-crypto) batches decrypts: frame 0 waits for the
+    // whole batch before route fires. Throughput doesn't see that —
+    // it's a tail-latency cost. Idle ping won't trigger batching
+    // either (threshold is ~8 frames in flight). So: ping under
+    // iperf3 load, report percentiles. The interesting number is
+    // p99-under-load vs p99-idle, and Rust↔Rust vs C↔C under load.
+
+    /// Per-packet RTTs in milliseconds, sorted. Derived from `ping -D`
+    /// output — each reply line has `time=X ms`. The summary line's
+    /// `min/avg/max/mdev` doesn't give percentiles; for tail latency
+    /// (the par-crypto batching cost) we need the distribution.
+    ///
+    /// Sample input (iputils-20250605, captured against loopback):
+    /// ```text
+    /// [1775318329.288389] 64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.021 ms
+    /// ...
+    /// rtt min/avg/max/mdev = 0.018/0.027/0.053/0.014 ms
+    /// ```
+    /// `rsplit_once("time=")` skips the summary's `time 45ms` (no `=`).
+    #[derive(Debug)]
+    struct PingStats {
+        rtts_ms: Vec<f64>,
+        sent: u32,
+    }
+
+    impl PingStats {
+        fn percentile(&self, p: f64) -> f64 {
+            if self.rtts_ms.is_empty() {
+                return f64::NAN;
+            }
+            // Nearest-rank. 100 samples → p99 is the 99th value;
+            // good enough for a diagnostic. Not interpolating.
+            let idx = ((p / 100.0) * (self.rtts_ms.len() - 1) as f64).round() as usize;
+            self.rtts_ms[idx.min(self.rtts_ms.len() - 1)]
+        }
+        fn p50(&self) -> f64 {
+            self.percentile(50.0)
+        }
+        fn p99(&self) -> f64 {
+            self.percentile(99.0)
+        }
+        fn max(&self) -> f64 {
+            self.rtts_ms.last().copied().unwrap_or(f64::NAN)
+        }
+        fn recv(&self) -> usize {
+            self.rtts_ms.len()
+        }
+    }
+
+    /// `ping -c COUNT -i 0.01 -D 10.44.0.2`, parse per-packet RTTs.
+    /// 10ms interval × 100 = ~1s wall time. `-D` adds timestamps but
+    /// we don't use them — it's there to match the format we tested
+    /// the parser against; the `time=` field is what we read.
+    ///
+    /// Loss is reported but not asserted on: under saturating iperf3
+    /// load a few ICMP drops are normal (bob's recv buffer fills,
+    /// kernel drops). The latency of the packets that DID make it is
+    /// what shows the batching delay.
+    fn ping_rtts(count: u32) -> PingStats {
+        let out = Command::new("ping")
+            .arg("-c")
+            .arg(count.to_string())
+            .args(["-i", "0.01", "-D", "10.44.0.2"])
+            .output()
+            .expect("spawn ping");
+        // ping exits non-zero if ANY packets are lost. Under load
+        // that's not a failure mode we care about; parse what we got.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut rtts: Vec<f64> = stdout
+            .lines()
+            .filter_map(|l| {
+                // `[1775318329.288389] 64 bytes from ...: ... time=0.021 ms`
+                let t = l.rsplit_once("time=")?.1;
+                let ms = t.split_ascii_whitespace().next()?;
+                ms.parse().ok()
+            })
+            .collect();
+        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if rtts.is_empty() {
+            panic!(
+                "ping got zero replies (tunnel dead?):\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        PingStats {
+            rtts_ms: rtts,
+            sent: count,
+        }
+    }
+
+    /// Idle RTT: tunnel is up, nothing flowing through it but the
+    /// pings themselves. Baseline. Par-crypto batching shouldn't kick
+    /// in here (1 packet every 10ms is far below the threshold).
+    fn measure_latency_idle(_handle: &mut TunnelHandle) -> PingStats {
+        ping_rtts(100)
+    }
+
+    /// RTT under throughput load: THE measurement for par-crypto.
+    /// iperf3 saturates bob's decrypt path; concurrent pings see the
+    /// queueing delay that batching introduces. Returns (mbps, ping).
+    ///
+    /// The iperf3 here uses `-t 3` not `-t 5`: ping does 100 × 10ms =
+    /// ~1s of work; we ramp 500ms, ping ~1s, and want the load to
+    /// outlast the ping. 3s covers it with margin. Shorter than the
+    /// throughput-only `measure()` because here Mbps is context, not
+    /// the headline number.
+    fn measure_latency_load(handle: &mut TunnelHandle) -> (f64, PingStats) {
+        let mut server = Command::new("ip")
+            .args(["netns", "exec", "tbobside", "iperf3", "-s", "--one-off"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn iperf3 server");
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Client backgrounded so ping runs concurrently. --json so
+        // we can report the Mbps that the latency was measured AT —
+        // "p99=2ms under 800Mbps" reads differently than under 80.
+        let client = Command::new("iperf3")
+            .args(["-c", "10.44.0.2", "-t", "3", "--json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn iperf3 client");
+
+        // Ramp: TCP slow-start + first batch of full-MSS frames.
+        // Without this the first ~20 pings see an idle-ish tunnel.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let ping = ping_rtts(100);
+
+        let client_out = client.wait_with_output().expect("wait iperf3 client");
+        let _ = server.wait();
+
+        if !client_out.status.success() {
+            let mut srv_err = String::new();
+            if let Some(mut e) = server.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut srv_err);
+            }
+            let a = handle.alice_log();
+            let b = handle.bob_log();
+            panic!(
+                "iperf3 client (latency-load) failed: {:?}\n\
+                 client stderr: {}\nserver stderr: {}\n\
+                 === alice ===\n{a}\n=== bob ===\n{b}",
+                client_out.status,
+                String::from_utf8_lossy(&client_out.stderr),
+                srv_err,
+            );
+        }
+
+        let parsed: IperfResult = serde_json::from_slice(&client_out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "iperf3 JSON parse: {e}\nstdout: {}",
+                String::from_utf8_lossy(&client_out.stdout)
+            )
+        });
+        (parsed.end.sum_received.bits_per_second, ping)
+    }
+
+    /// One latency pairing: idle, then under-load, on the same tunnel.
+    /// Reusing the tunnel between idle and load means the PMTU/handshake
+    /// state is identical for both — the only variable is the load.
+    /// Returns (idle, load_mbps, load) for the cross-pairing summary.
+    fn run_latency(
+        p: &Pairing,
+        do_idle: bool,
+        do_load: bool,
+    ) -> (Option<PingStats>, Option<(f64, PingStats)>) {
+        eprintln!("--- latency {} ---", p.label);
+        // "lat-" tag prefix → distinct tmpdir from the throughput run
+        // of the same pairing (matters when both run in one invocation).
+        let mut tunnel = setup_tunnel(&format!("lat-{}", p.tag), p.alice.clone(), p.bob.clone());
+
+        let idle = do_idle.then(|| {
+            let s = measure_latency_idle(&mut tunnel);
+            eprintln!(
+                "  idle:  p50={:>7.3}ms  p99={:>7.3}ms  max={:>7.3}ms  ({}/{} recv)",
+                s.p50(),
+                s.p99(),
+                s.max(),
+                s.recv(),
+                s.sent
+            );
+            s
+        });
+
+        let load = do_load.then(|| {
+            let (bps, s) = measure_latency_load(&mut tunnel);
+            eprintln!(
+                "  load:  p50={:>7.3}ms  p99={:>7.3}ms  max={:>7.3}ms  ({}/{} recv, {:.0} Mbps)",
+                s.p50(),
+                s.p99(),
+                s.max(),
+                s.recv(),
+                s.sent,
+                bps / 1e6
+            );
+            (bps, s)
+        });
+
+        // No per-pairing gate. Tried `load.p99 > 5× idle.p99` — fires
+        // on Rust↔Rust (0.26ms idle → 18× ratio) but not C↔C (1.76ms
+        // idle → 4.8×) despite Rust having LOWER absolute load p99.
+        // The ratio is dominated by how good idle is, not how bad
+        // load is. The cross-impl Δ at the end is the real signal.
+
+        drop(tunnel);
+        (idle, load)
+    }
+
     // ═══════════════════════════ perf record ═══════════════════════════════════
 
     /// `perf trace -s -p PID`: exact syscall counts and per-call latency,
@@ -1044,17 +1258,34 @@ mod bench {
         ];
 
         let mut results: [Option<f64>; 3] = [None; 3];
+        // (idle_p99, load_p99) per pairing, for the cross-impl summary.
+        let mut lat_results: [Option<(Option<f64>, Option<f64>)>; 3] = [None, None, None];
         let mut ran_any = false;
         for (i, p) in pairings.iter().enumerate() {
+            // Throughput: bare pairing name ("rust_rust").
             if matches(p.name) {
                 results[i] = Some(run_pairing(p, &perf_out, perf_bob));
+                ran_any = true;
+            }
+            // Latency: "latency_{idle,load}_<pairing>". Substring filter
+            // means `-- latency` runs all six, `-- latency_idle` runs
+            // three, `-- latency_load_rust_rust` runs one. The
+            // `want_latency` guard stops a bare `-- rust_rust` from
+            // also matching `latency_load_rust_rust` (substring would).
+            let want_latency = filters.is_empty() || filters.iter().any(|f| f.contains("latency"));
+            let lat_idle = want_latency && matches(&format!("latency_idle_{}", p.name));
+            let lat_load = want_latency && matches(&format!("latency_load_{}", p.name));
+            if lat_idle || lat_load {
+                let (idle, load) = run_latency(p, lat_idle, lat_load);
+                lat_results[i] = Some((idle.map(|s| s.p99()), load.map(|(_, s)| s.p99())));
                 ran_any = true;
             }
         }
         if !ran_any {
             eprintln!(
                 "no pairing matched filter(s) {filters:?}; \
-             available: c_c, rust_rust, rust_c"
+             available: c_c, rust_rust, rust_c, \
+             latency_{{idle,load}}_{{c_c,rust_rust,rust_c}}"
             );
             std::process::exit(1);
         }
@@ -1106,6 +1337,21 @@ mod bench {
                     mixed / slower * 100.0
                 );
             }
+        }
+
+        // ─── latency summary ───────────────────────────────────────
+        // The Rust-vs-C p99-under-load delta is the par-crypto cost
+        // isolated: same kernel, same iperf3, only the daemon differs.
+        // Diagnostic, not a gate — absolute latency varies wildly
+        // across machines (loopback netns on a laptop vs a CI VM).
+        let [lat_c, lat_r, _] = lat_results;
+        if let (Some((_, Some(c_load))), Some((_, Some(r_load)))) = (lat_c, lat_r) {
+            eprintln!(
+                "latency p99 under load: Rust {:.3}ms vs C {:.3}ms (Δ {:+.3}ms)",
+                r_load,
+                c_load,
+                r_load - c_load
+            );
         }
 
         drop(netns);
