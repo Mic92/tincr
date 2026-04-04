@@ -41,7 +41,7 @@ use crate::outgoing::{
 use crate::pmtu::{self, PmtuAction, PmtuState};
 use crate::proto::{
     DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
-    myself_options_default, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
+    myself_options_from_config, parse_ack, parse_add_edge, parse_add_subnet, parse_del_edge,
     parse_del_subnet, record_body, send_ack,
 };
 use crate::reload;
@@ -690,8 +690,8 @@ pub struct Daemon {
 
     /// `myself->options`. Bitfield (`connection.h:32-36` + PROT_MINOR
     /// in top byte). C builds in `setup_myself_reloadable` (`net_
-    /// setup.c:383-453,800`). Chunk 4b: defaults only. Chunk 9
-    /// reads `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS`.
+    /// setup.c:383-453,800`). Built from global `IndirectData`/
+    /// `TCPOnly`/`PMTUDiscovery`/`ClampMSS` at `setup()`.
     pub(crate) myself_options: u32,
 
     /// `myport.udp`. C string (`net_setup.c:54,794`); we store the
@@ -1629,7 +1629,7 @@ impl Daemon {
             name,
             mykey,
             confbase: confbase.to_path_buf(),
-            myself_options: myself_options_default(),
+            myself_options: myself_options_from_config(&config),
             my_udp_port,
             graph,
             node_ids,

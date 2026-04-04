@@ -30,11 +30,73 @@ pub const OPTION_PMTU_DISCOVERY: u32 = 0x0004;
 /// `OPTION_CLAMP_MSS`: default on (`net_setup.c:449-453`).
 pub const OPTION_CLAMP_MSS: u32 = 0x0008;
 
-/// `myself->options` defaults (`net_setup.c:800`): PMTU + CLAMP_MSS +
-/// PROT_MINOR<<24. STUB: per-host config (`:383-453`) not read yet.
-#[must_use]
-pub(crate) const fn myself_options_default() -> u32 {
+/// `myself->options` with all-defaults (no `IndirectData`/`TCPOnly`/etc
+/// in tinc.conf). `net_setup.c:800` after `:383-453` falls through every
+/// `get_config_bool`: PMTU + CLAMP_MSS + PROT_MINOR<<24. Daemon `setup()`
+/// uses [`myself_options_from_config`]; this const is a test fixture.
+#[cfg(test)]
+const fn myself_options_default() -> u32 {
     OPTION_PMTU_DISCOVERY | OPTION_CLAMP_MSS | ((PROT_MINOR as u32) << 24)
+}
+
+/// Build `myself->options` from global config (`net_setup.c:383-393,
+/// 442-453,800`). Called once at `setup()`. Returns the GLOBAL defaults
+/// that per-host `IndirectData`/`TCPOnly`/`ClampMSS` (read at id_h time,
+/// `5ceb8011`) OR against in [`send_ack`].
+///
+/// Implication chain matches C exactly:
+///   - `:391` `TCPOnly` → also INDIRECT
+///   - `:442` `PMTUDiscovery` default = `!(options & OPTION_TCPONLY)`
+///   - `:449` `ClampMSS` default = on
+///
+/// `.ok()` matches C `get_config_bool`: parse-fail = absent (returns
+/// `false`, doesn't write `*result`).
+#[must_use]
+pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> u32 {
+    let mut opts = u32::from(PROT_MINOR) << 24;
+
+    // C `:383-385`: `if(get_config_bool(...) && choice)`.
+    if config
+        .lookup("IndirectData")
+        .next()
+        .and_then(|e| e.get_bool().ok())
+        == Some(true)
+    {
+        opts |= OPTION_INDIRECT;
+    }
+    // C `:387-389` + `:391-393` `if(TCPONLY) options |= INDIRECT`.
+    if config
+        .lookup("TCPOnly")
+        .next()
+        .and_then(|e| e.get_bool().ok())
+        == Some(true)
+    {
+        opts |= OPTION_TCPONLY | OPTION_INDIRECT;
+    }
+    // C `:442-447`: `choice = !(options & TCPONLY); get_config_bool(
+    // "PMTUDiscovery", &choice); if(choice) options |= PMTU_DISCOVERY`.
+    // The default is on UNLESS TCPOnly already set it to off.
+    let pmtu_default = opts & OPTION_TCPONLY == 0;
+    if config
+        .lookup("PMTUDiscovery")
+        .next()
+        .and_then(|e| e.get_bool().ok())
+        .unwrap_or(pmtu_default)
+    {
+        opts |= OPTION_PMTU_DISCOVERY;
+    }
+    // C `:449-453`: `choice = true; get_config_bool("ClampMSS", &choice);
+    // if(choice) options |= CLAMP_MSS`. Default on.
+    if config
+        .lookup("ClampMSS")
+        .next()
+        .and_then(|e| e.get_bool().ok())
+        .unwrap_or(true)
+    {
+        opts |= OPTION_CLAMP_MSS;
+    }
+
+    opts
 }
 
 /// `control_common.h`. Dup of `tinc-tools::ctl::CtlRequest` (daemon
@@ -1132,6 +1194,75 @@ mod tests {
         assert_eq!(opts >> 24, u32::from(PROT_MINOR));
         assert_eq!(opts & 0x00ff_ff00, 0);
         assert_eq!(opts, 0x0700_000c);
+    }
+
+    fn cfg(lines: &[&str]) -> tinc_conf::Config {
+        let mut c = tinc_conf::Config::default();
+        c.merge(lines.iter().enumerate().filter_map(|(i, l)| {
+            tinc_conf::parse_line(
+                l,
+                tinc_conf::Source::File {
+                    path: "tinc.conf".into(),
+                    line: u32::try_from(i).unwrap() + 1,
+                },
+            )?
+            .ok()
+        }));
+        c
+    }
+
+    /// `net_setup.c:383-453`: empty config = all `get_config_bool`
+    /// fall-throughs. Same bits as `myself_options_default`.
+    #[test]
+    fn myself_options_empty_config() {
+        let opts = myself_options_from_config(&tinc_conf::Config::default());
+        assert_eq!(opts, myself_options_default());
+    }
+
+    /// `net_setup.c:387-393` + `:442`: `TCPOnly = yes` sets TCPONLY
+    /// and INDIRECT (`:391` implication), and `:442` `choice =
+    /// !(options & OPTION_TCPONLY)` makes the PMTU default off.
+    /// ClampMSS unaffected (`:449` default on).
+    #[test]
+    fn myself_options_tcponly_implies_indirect_clears_pmtu() {
+        let opts = myself_options_from_config(&cfg(&["TCPOnly = yes"]));
+        assert_eq!(opts & OPTION_TCPONLY, OPTION_TCPONLY);
+        assert_eq!(opts & OPTION_INDIRECT, OPTION_INDIRECT);
+        assert_eq!(opts & OPTION_PMTU_DISCOVERY, 0);
+        assert_eq!(opts & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+        // 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, top byte PROT_MINOR.
+        assert_eq!(opts, 0x0700_000b);
+    }
+
+    /// `net_setup.c:383-385` standalone: only INDIRECT, defaults
+    /// otherwise. PMTU default `:442` is `!(options & TCPONLY)` =
+    /// true; ClampMSS `:449` true.
+    #[test]
+    fn myself_options_indirect_only() {
+        let opts = myself_options_from_config(&cfg(&["IndirectData = yes"]));
+        assert_eq!(opts & OPTION_INDIRECT, OPTION_INDIRECT);
+        assert_eq!(opts & OPTION_TCPONLY, 0);
+        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+        assert_eq!(opts & OPTION_CLAMP_MSS, OPTION_CLAMP_MSS);
+    }
+
+    /// `net_setup.c:443`: explicit `PMTUDiscovery = yes` overrides
+    /// the `!TCPONLY` default. The C reads `PMTUDiscovery` AFTER
+    /// computing the default — explicit wins.
+    #[test]
+    fn myself_options_tcponly_but_pmtu_forced_on() {
+        let opts = myself_options_from_config(&cfg(&["TCPOnly = yes", "PMTUDiscovery = yes"]));
+        assert_eq!(opts & OPTION_TCPONLY, OPTION_TCPONLY);
+        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
+    }
+
+    /// `net_setup.c:449-453`: `ClampMSS = no` clears the bit.
+    #[test]
+    fn myself_options_clamp_mss_off() {
+        let opts = myself_options_from_config(&cfg(&["ClampMSS = no"]));
+        assert_eq!(opts & OPTION_CLAMP_MSS, 0);
+        // PMTU still default-on.
+        assert_eq!(opts & OPTION_PMTU_DISCOVERY, OPTION_PMTU_DISCOVERY);
     }
 
     // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad) covered
