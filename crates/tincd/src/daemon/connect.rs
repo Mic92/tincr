@@ -301,6 +301,16 @@ impl Daemon {
                 self.graph.del_edge(rev); // C `:149`
                 self.edge_addrs.remove(&rev);
             }
+
+            // `broadcast_line` queues to outbuf but doesn't arm WRITE
+            // (it returns `nw` for the caller to do that). With
+            // pinginterval=60, the next natural write arm is up to a
+            // minute away — the DEL_EDGE sits in outbuf and the mesh
+            // never learns this peer died. C is push-based (`send_
+            // request` writes synchronously, `meta.c:98`); we're
+            // edge-triggered epoll. Exposed by the purge integration
+            // test (mid never gossips bob's death to alice).
+            self.maybe_set_write_any();
         }
 
         // C `net.c:155-161`: outgoing retry. C runs `:161` unconditionally;

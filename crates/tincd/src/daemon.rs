@@ -59,6 +59,7 @@ mod gossip;
 mod metaconn;
 mod net;
 mod periodic;
+mod purge;
 mod txpath;
 
 // `net.h:106-108`: SPTPS record-type bits for the per-tunnel data

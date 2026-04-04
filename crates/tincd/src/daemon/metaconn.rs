@@ -448,6 +448,16 @@ impl Daemon {
                             crate::proto::REQ_RETRY
                         ));
                         (DispatchResult::Ok, nw2)
+                    } else if matches!(r, DispatchResult::Purge) {
+                        // C `control.c:75-77`: `purge(); control_ok(c, REQ_PURGE)`.
+                        let nw_purge = self.purge();
+                        let conn = self.conns.get_mut(id).expect("not terminated");
+                        let nw2 = conn.send(format_args!(
+                            "{} {} 0",
+                            Request::Control as u8,
+                            crate::proto::REQ_PURGE
+                        ));
+                        (DispatchResult::Ok, nw_purge | nw2)
                     } else if let DispatchResult::Disconnect(name) = r {
                         // C `control.c:102-122`. Walk conns, terminate
                         // by name. C `:116`: `terminate_connection(o,
@@ -514,8 +524,8 @@ impl Daemon {
                 | DispatchResult::DumpEdges
                 | DispatchResult::Reload
                 | DispatchResult::Retry
-                | DispatchResult::Disconnect(_)
-                | DispatchResult::DumpTraffic => {
+                | DispatchResult::Purge
+                | DispatchResult::Disconnect(_)| DispatchResult::DumpTraffic => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
                 DispatchResult::Ok => {}

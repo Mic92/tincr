@@ -107,6 +107,7 @@ pub(crate) const REQ_DUMP_NODES: i32 = 3;
 pub(crate) const REQ_DUMP_EDGES: i32 = 4;
 pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
 pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
+pub(crate) const REQ_PURGE: i32 = 8;
 pub(crate) const REQ_RETRY: i32 = 10;
 pub(crate) const REQ_DISCONNECT: i32 = 12;
 pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
@@ -136,6 +137,9 @@ pub enum DispatchResult {
     /// `REQ_RETRY` (`control.c:95-96`). Daemon calls `retry()` then
     /// `control_ok` → `"18 10 0"`.
     Retry,
+    /// `REQ_PURGE` (`control.c:75-77`). Daemon calls `purge()` then
+    /// `control_ok` → `"18 8 0"`.
+    Purge,
     /// `REQ_DISCONNECT` (`control.c:102-122`). `Some(name)` → walk
     /// conns, terminate matches, reply `"18 12 0"` if found else
     /// `"18 12 -2"`. `None` → sscanf failed (`:108`), reply `"18 12 -1"`.
@@ -757,6 +761,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         Some(REQ_DUMP_SUBNETS) => (DispatchResult::DumpSubnets, false),
         Some(REQ_DUMP_CONNECTIONS) => (DispatchResult::DumpConnections, false),
         Some(REQ_RETRY) => (DispatchResult::Retry, false),
+        Some(REQ_PURGE) => (DispatchResult::Purge, false),
         Some(REQ_DISCONNECT) => {
             // C `:106`: `sscanf("%*d %*d " MAX_STRING, name)`. Third
             // whitespace token. C `%s` stops at whitespace; we do too.
@@ -1190,6 +1195,18 @@ mod tests {
         let (r, nw) = handle_control(&mut c, b"18 10");
         assert_eq!(r, DispatchResult::Retry);
         // Daemon writes the `"18 10 0"` ack after `on_retry()` runs.
+        assert!(!nw);
+        assert!(c.outbuf.is_empty());
+    }
+
+    #[test]
+    fn control_purge() {
+        let mut c = mkconn();
+        c.allow_request = Some(Request::Control);
+
+        let (r, nw) = handle_control(&mut c, b"18 8");
+        assert_eq!(r, DispatchResult::Purge);
+        // Daemon writes the `"18 8 0"` ack after `purge()` runs.
         assert!(!nw);
         assert!(c.outbuf.is_empty());
     }
