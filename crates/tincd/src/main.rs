@@ -61,7 +61,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tinc_conf::{Config, Source, parse_line};
-use tincd::{Daemon, RunOutcome};
+use tincd::{Daemon, RunOutcome, sd_notify};
 
 /// `CONFDIR` from `config.h`. Same compile-time treatment as
 /// `tinc-tools/src/names.rs::CONFDIR` — `option_env!` with `/etc`
@@ -730,8 +730,44 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // ─── sd_notify READY=1
+    // After setup (sockets bound, TUN open, tinc-up done) but before
+    // the poll loop. systemd's Type=notify waits for this; firing it
+    // here means dependent units don't start until we're actually
+    // ready to forward packets. No-op when NOTIFY_SOCKET is unset.
+    sd_notify::notify_ready();
+
+    // ─── sd_notify WATCHDOG=1
+    // If WatchdogSec= is set, ping at half the interval from a
+    // *separate thread*. Threading this through TimerWhat would mean
+    // the event loop arms its own watchdog — so a hung event loop
+    // (the very thing the watchdog is meant to catch) would stop
+    // pinging only by accident. A detached thread keeps pinging as
+    // long as the *process* is alive, which is what systemd actually
+    // checks. The sd_notify writes are independent (just a sendto on
+    // a Unix dgram socket), so no shared state with the main loop.
+    if let Some(iv) = sd_notify::watchdog_interval() {
+        std::thread::Builder::new()
+            .name("sd-watchdog".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(iv);
+                    sd_notify::notify_watchdog();
+                }
+            })
+            .expect("spawn watchdog thread");
+    }
+
     // ─── main_loop (tincd.c:717)
-    match daemon.run() {
+    let outcome = daemon.run();
+
+    // ─── sd_notify STOPPING=1
+    // run() returns on SIGTERM/SIGINT (RunOutcome::Clean) or fatal
+    // poll error. Either way we're going down; tell systemd so it
+    // extends the stop timeout for tinc-down + Daemon::Drop cleanup.
+    sd_notify::notify_stopping();
+
+    match outcome {
         RunOutcome::Clean => ExitCode::SUCCESS,
         RunOutcome::PollError => ExitCode::FAILURE,
     }
