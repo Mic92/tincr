@@ -2,6 +2,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::proto::ConnOptions;
 
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
@@ -205,11 +206,10 @@ impl Daemon {
                 .last_routes
                 .get(target.0 as usize)
                 .and_then(Option::as_ref)
-                .map_or(0, |r| r.options);
-            let tcponly =
-                // TODO(bitflags-opts): target_options is u32 from tinc-graph
-                // Route. .bits() shim until udp-info-carry agent lands.
-                (self.myself_options.bits() | target_options) & crate::proto::OPTION_TCPONLY != 0;
+                .map_or(ConnOptions::empty(), |r| {
+                    ConnOptions::from_bits_retain(r.options)
+                });
+            let tcponly = (self.myself_options | target_options).contains(ConnOptions::TCPONLY);
             if tcponly {
                 let has_direct_conn = self.nodes.get(&target).is_some_and(|ns| ns.conn.is_some());
                 if has_direct_conn {
@@ -704,7 +704,7 @@ impl Daemon {
             // opportunistic hints, just skip.
             return false;
         };
-        let to_options_orig = orig_route.options;
+        let to_options_orig = ConnOptions::from_bits_retain(orig_route.options);
         let dereffed = if orig_route.via == self.myself {
             orig_route.nexthop
         } else {
@@ -715,16 +715,18 @@ impl Daemon {
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&dereffed).and_then(|ns| ns.conn).is_some();
-        let nexthop_options = self
-            .route_of(dereffed)
-            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+        let nexthop_options = self.route_of(dereffed).map_or(ConnOptions::empty(), |r| {
+            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
+                ConnOptions::from_bits_retain(nr.options)
+            })
+        });
 
-        // TODO(bitflags-opts): u32 boundary into udp_info::should_send_
-        // udp_info (owned by udp-info-carry agent). .bits() shim.
         let from_options = if from_is_myself {
-            self.myself_options.bits()
+            self.myself_options
         } else {
-            self.route_of(to_nid).map_or(0, |r| r.options)
+            self.route_of(to_nid).map_or(ConnOptions::empty(), |r| {
+                ConnOptions::from_bits_retain(r.options)
+            })
         };
 
         let now = self.timers.now();
@@ -738,7 +740,7 @@ impl Daemon {
             from_is_myself,
             from_options,
             to_options_orig,
-            self.myself_options.bits(),
+            self.myself_options,
             nexthop_options,
             last_sent,
             now,
@@ -795,7 +797,7 @@ impl Daemon {
         let Some(orig_route) = self.route_of(to_nid) else {
             return false;
         };
-        let to_options_orig = orig_route.options;
+        let to_options_orig = ConnOptions::from_bits_retain(orig_route.options);
         let dereffed = if orig_route.via == self.myself {
             orig_route.nexthop
         } else {
@@ -805,10 +807,14 @@ impl Daemon {
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
         // `:179` to->connection check only fires when from==myself.
-        let from_options = self.route_of(from_nid).map_or(0, |r| r.options);
-        let nexthop_options = self
-            .route_of(dereffed)
-            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+        let from_options = self.route_of(from_nid).map_or(ConnOptions::empty(), |r| {
+            ConnOptions::from_bits_retain(r.options)
+        });
+        let nexthop_options = self.route_of(dereffed).map_or(ConnOptions::empty(), |r| {
+            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
+                ConnOptions::from_bits_retain(nr.options)
+            })
+        });
 
         if !udp_info::should_send_udp_info(
             to_is_myself,
@@ -817,7 +823,7 @@ impl Daemon {
             false, // from_is_myself
             from_options,
             to_options_orig,
-            self.myself_options.bits(),
+            self.myself_options,
             nexthop_options,
             None, // last_sent — only checked when from==myself
             self.timers.now(),
@@ -881,9 +887,11 @@ impl Daemon {
         let to_is_myself = to_nid == self.myself;
         let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&to_nid).and_then(|ns| ns.conn).is_some();
-        let nexthop_options = self
-            .route_of(to_nid)
-            .map_or(0, |r| self.route_of(r.nexthop).map_or(0, |nr| nr.options));
+        let nexthop_options = self.route_of(to_nid).map_or(ConnOptions::empty(), |r| {
+            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
+                ConnOptions::from_bits_retain(nr.options)
+            })
+        });
 
         let now = self.timers.now();
         let last_sent = self.tunnels.get(&to_nid).and_then(|t| t.mtu_info_sent);

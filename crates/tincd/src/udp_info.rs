@@ -42,9 +42,7 @@ use std::time::{Duration, Instant};
 
 use tinc_proto::msg::misc::{MtuInfo, UdpInfo};
 
-/// `connection.h:33`: `OPTION_TCPONLY`. UDP info is moot if any party
-/// in the path requested TCP-only forwarding.
-pub const OPTION_TCPONLY: u32 = 0x0002;
+use crate::proto::ConnOptions;
 
 /// `net.h:34`: `MTU` in jumbo build (9000 payload + 14 eth + 4 VLAN).
 /// `mtu_info_h` (`:349`) clamps received MTUs to this. We use the
@@ -157,9 +155,9 @@ pub fn should_send_udp_info(
     // OPTION_TCPONLY`. Any party opting out of UDP makes UDP info
     // moot. Note this is `to`'s ORIGINAL options, before the `:158`
     // relay deref.
-    from_options: u32,
-    to_options: u32,
-    myself_options: u32,
+    from_options: ConnOptions,
+    to_options: ConnOptions,
+    myself_options: ConnOptions,
     // `:194` `(to->nexthop->options >> 24) < 5`. The relay's protocol
     // minor (top byte of options). UDP_INFO was introduced at minor
     // 5 (commit 2013); older relays would log "unknown request type"
@@ -171,7 +169,7 @@ pub fn should_send_udp_info(
     // to). After `:158` `to` may BE `to->nexthop` (the via-myself
     // case), but in the static-relay case they differ. We just need
     // the nexthop's options here.
-    nexthop_options: u32,
+    nexthop_options: ConnOptions,
     // `:183` `now - to->udp_info_sent < udp_info_interval`. Per-`to`
     // debounce. `None` = never sent → no debounce. Only checked when
     // `from_is_myself`.
@@ -203,11 +201,11 @@ pub fn should_send_udp_info(
         }
     }
     // `:190` — three-way TCPONLY OR.
-    if (myself_options | from_options | to_options) & OPTION_TCPONLY != 0 {
+    if (myself_options | from_options | to_options).contains(ConnOptions::TCPONLY) {
         return false;
     }
     // `:194` — relay too old to understand UDP_INFO. Minor 5 (2013).
-    if (nexthop_options >> 24) < 5 {
+    if nexthop_options.prot_minor() < 5 {
         return false;
     }
     true
@@ -389,7 +387,7 @@ pub fn should_send_mtu_info(
     now: Instant,
     interval: Duration,
     // `:299` `(to->nexthop->options >> 24) < 6`. Minor 6, not 5.
-    nexthop_options: u32,
+    nexthop_options: ConnOptions,
 ) -> bool {
     if to_is_myself {
         return false;
@@ -408,7 +406,7 @@ pub fn should_send_mtu_info(
         }
     }
     // `:299` — minor 6. MTU_INFO came after UDP_INFO.
-    if (nexthop_options >> 24) < 6 {
+    if nexthop_options.prot_minor() < 6 {
         return false;
     }
     true
@@ -576,11 +574,11 @@ mod tests {
     use super::*;
     use tinc_proto::AddrStr;
 
-    // Minor-version-5 nexthop options (UDP_INFO capable). Minor is in
-    // the top byte: `5 << 24`.
-    const MINOR_5: u32 = 5 << 24;
-    const MINOR_6: u32 = 6 << 24;
-    const MINOR_4: u32 = 4 << 24;
+    // Minor-version-N nexthop options (UDP_INFO needs ≥5, MTU_INFO
+    // needs ≥6). Minor is in the top byte.
+    const MINOR_5: ConnOptions = ConnOptions::from_bits_retain(5 << 24);
+    const MINOR_6: ConnOptions = ConnOptions::from_bits_retain(6 << 24);
+    const MINOR_4: ConnOptions = ConnOptions::from_bits_retain(4 << 24);
 
     fn mkudp(addr: &str, port: &str) -> UdpInfo {
         UdpInfo {
@@ -603,10 +601,10 @@ mod tests {
         reachable: bool,
         to_conn: bool,
         from_myself: bool,
-        from_opt: u32,
-        to_opt: u32,
-        my_opt: u32,
-        nexthop: u32,
+        from_opt: ConnOptions,
+        to_opt: ConnOptions,
+        my_opt: ConnOptions,
+        nexthop: ConnOptions,
         last_ago: Option<Duration>,
     }
     impl Send {
@@ -617,9 +615,9 @@ mod tests {
             reachable: true,
             to_conn: false,
             from_myself: true,
-            from_opt: 0,
-            to_opt: 0,
-            my_opt: 0,
+            from_opt: ConnOptions::empty(),
+            to_opt: ConnOptions::empty(),
+            my_opt: ConnOptions::empty(),
             nexthop: MINOR_5,
             last_ago: None,
         };
@@ -668,9 +666,9 @@ mod tests {
         assert!( Send { last_ago: s(1), from_myself: false, ..p }.run(now),
                                                                     "forwarding ignores debounce");
         // `:190` three-way TCPONLY OR
-        assert!(!Send { my_opt:   OPTION_TCPONLY, ..p }.run(now),   "tcponly myself blocks");
-        assert!(!Send { from_opt: OPTION_TCPONLY, ..p }.run(now),   "tcponly from blocks");
-        assert!(!Send { to_opt:   OPTION_TCPONLY, ..p }.run(now),   "tcponly to blocks");
+        assert!(!Send { my_opt:   ConnOptions::TCPONLY, ..p }.run(now),   "tcponly myself blocks");
+        assert!(!Send { from_opt: ConnOptions::TCPONLY, ..p }.run(now),   "tcponly from blocks");
+        assert!(!Send { to_opt:   ConnOptions::TCPONLY, ..p }.run(now),   "tcponly to blocks");
         // `:194` nexthop minor < 5 → too old for UDP_INFO
         assert!(!Send { nexthop: MINOR_4,      ..p }.run(now),      "nexthop minor<5 blocks");
         assert!( Send { nexthop: MINOR_5,      ..p }.run(now),      "nexthop minor==5 ok");
@@ -836,10 +834,9 @@ mod tests {
         );
     }
 
-    /// Constants match `connection.h:33`, `net.h:34`.
+    /// Constants match `net.h:34`.
     #[test]
     fn constants_match_c() {
-        assert_eq!(OPTION_TCPONLY, 0x0002);
         assert_eq!(MTU_MAX, 9018);
         assert_eq!(MTU_MIN, 512);
     }
