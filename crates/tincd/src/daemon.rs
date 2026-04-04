@@ -593,8 +593,15 @@ fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSe
         settings.autoconnect = v;
     }
     // ScriptsInterpreter (`net_setup.c:237`). C `read_interpreter`
-    // also has a sandbox-guard (`:239-243`: don't change interp
-    // mid-run if sandboxed); we don't sandbox, so just read it.
+    // gates on `sandbox_can(USE_NEW_PATHS)` (`:239-243`: don't
+    // change interp mid-run if the new path wasn't in the unveil
+    // set). We DON'T mirror that gate: at Sandbox=normal Landlock
+    // grants Execute on confbase, so an interpreter under confbase
+    // works fine; an interpreter at /usr/bin/python won't, but
+    // that's true on first boot too, not just on reload — the
+    // operator finds out either way. At high, scripts don't run at
+    // all (`script::execute` short-circuits) so the value here is
+    // moot.
     // ScriptsExtension (`:257`) is NOT parsed: on Unix the C
     // default is "" (`names.c`) and `script.rs::execute` doesn't
     // append a suffix. Windows-only knob; we'd compile_error there.

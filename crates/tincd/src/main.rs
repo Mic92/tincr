@@ -61,7 +61,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tinc_conf::{Config, Source, parse_line};
-use tincd::{Daemon, RunOutcome, sd_notify};
+use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
 
 /// `CONFDIR` from `config.h`. Same compile-time treatment as
 /// `tinc-tools/src/names.rs::CONFDIR` — `option_env!` with `/etc`
@@ -727,10 +727,12 @@ fn drop_privs(
     }
 
     // C `:425`: `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`.
-    // Daemon::setup already creates what it needs (cache/ on demand
-    // in addrcache.rs, hosts/ is required-exists). Skip.
+    // Moved into sandbox::enter() (the Landlock arm) because the
+    // pre-create is what makes the PathBeneath fd-open succeed.
+    // Non-sandboxed runs don't need it (addrcache lazily mkdirs).
     //
-    // C `:427`: `sandbox_enter()`. Seccomp/pledge. Separate gap row.
+    // C `:427`: `sandbox_enter()`. Done by the caller right after
+    // this returns (main() owns the Paths struct).
 
     Ok(())
 }
@@ -920,6 +922,41 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
         .and_then(|c| lookup(&c))
 }
 
+/// `tincd.c:335-370` `read_sandbox_level`. Same early-read shape as
+/// `resolve_debug_level`: tinc.conf is re-read here just for this
+/// key. C reads it AFTER `read_server_config` (`:595`), BEFORE
+/// detach. We read it after detach (the file read crosses fork()
+/// fine) but before logger init would be too early to report parse
+/// errors; after init_logging is the right spot.
+///
+/// Default `none`. C `tincd.c:354-358`: `normal` when `HAVE_SANDBOX`
+/// (OpenBSD), else `none`. We're the non-OpenBSD case: explicit
+/// opt-in. Landlock is always compiled in on Linux but the DEFAULT
+/// stays `none` so an unconfigured daemon behaves as before.
+///
+/// `-o Sandbox=` cmdline override beats tinc.conf same as LogLevel.
+fn resolve_sandbox_level(
+    confbase: &std::path::Path,
+    cmdline: &Config,
+) -> Result<sandbox::Level, String> {
+    fn lookup(c: &Config) -> Option<Result<sandbox::Level, String>> {
+        c.lookup("Sandbox").next().map(|e| {
+            sandbox::Level::parse(e.get_str()).map_err(|v| format!("Bad sandbox value {v}!"))
+        })
+    }
+    if let Some(r) = lookup(cmdline) {
+        return r;
+    }
+    // tinc.conf re-read. Same silent-on-read-fail as
+    // resolve_debug_level: Daemon::setup will surface the real error.
+    if let Ok(c) = tinc_conf::read_server_config(confbase)
+        && let Some(r) = lookup(&c)
+    {
+        return r;
+    }
+    Ok(sandbox::Level::None)
+}
+
 /// `tincd.c:576-585` env-var parse, factored out for testability.
 /// Takes the env values as parameters so tests can inject them
 /// without `set_var` (which is `unsafe` since 1.85 and racy under
@@ -1100,6 +1137,41 @@ fn main() -> ExitCode {
     // can't `ip link set down` after setuid). C lives with it; so
     // do we.
     if let Err(e) = drop_privs(args.switchuser.as_deref(), args.do_chroot, &args.confbase) {
+        log::error!(target: "tincd", "{e}");
+        return ExitCode::FAILURE;
+    }
+
+    // ─── sandbox_enter (tincd.c:427)
+    // AFTER drop_privs (the C order). tinc-up has run; device is
+    // open; listeners are bound. Everything from here is the epoll
+    // loop, which only touches confbase (hosts/, cache/), the
+    // device fd (already open — Landlock doesn't gate fd I/O), and
+    // the pidfile/socket on Drop.
+    //
+    // Device path: hard-coded /dev/net/tun on Linux. tinc-device's
+    // DEFAULT_DEVICE is private but every Linux backend opens that
+    // one path. The fd is already held; this rule is for the
+    // (theoretical) case of a re-open mid-run, which doesn't
+    // happen. C unveils it anyway (`openbsd/tincd.c:37`); we match.
+    // dummy/fd device types pass None (no path-based open).
+    let sandbox_level = match resolve_sandbox_level(&args.confbase, &args.cmdline_conf) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!(target: "tincd", "{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let sandbox_paths = sandbox::Paths {
+        confbase: args.confbase.clone(),
+        #[cfg(target_os = "linux")]
+        device: Some("/dev/net/tun".into()),
+        #[cfg(not(target_os = "linux"))]
+        device: None,
+        logfile: args.logfile.clone(),
+        pidfile: args.pidfile.clone(),
+        unixsocket: args.socket.clone(),
+    };
+    if let Err(e) = sandbox::enter(sandbox_level, &sandbox_paths, args.do_chroot) {
         log::error!(target: "tincd", "{e}");
         return ExitCode::FAILURE;
     }

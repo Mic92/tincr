@@ -259,6 +259,14 @@ impl Daemon {
         match r {
             // :203 NotFound silent; :230 Ok silent
             Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
+            // `script.c:145` returned false silently. We log once
+            // at debug so an operator who wonders why their host-up
+            // didn't fire under Sandbox=high can find out without
+            // reading the source.
+            Ok(ScriptResult::Sandboxed) => {
+                log::debug!(target: "tincd",
+                    "Script {name}: skipped (Sandbox=high)");
+            }
             // :231-238
             Ok(ScriptResult::Failed(st)) => {
                 log::warn!(target: "tincd", "Script {name}: {st}");

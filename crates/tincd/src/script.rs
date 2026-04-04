@@ -49,6 +49,8 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
+use crate::sandbox;
+
 /// One script invocation's environment. C `environment_t`
 /// (`script.h`, built by `script.c:73-135`): a growing `char**`
 /// arena of `"KEY=value"` strings, fed to `putenv()`. We use a
@@ -126,6 +128,12 @@ pub enum ScriptResult {
     NotFound,
     /// Ran, exit 0. C `:230` `if(WIFEXITED && !WEXITSTATUS)`.
     Ok,
+    /// `sandbox_can(START_PROCESSES, RIGHT_NOW)` false (`script.c:
+    /// 145`). Sandbox=high. C returns `false` here; callers ignore
+    /// it (script never runs, daemon doesn't abort). Distinct from
+    /// `NotFound` so the log says WHY — a `host-up` that silently
+    /// no-ops at high should be discoverable.
+    Sandboxed,
     /// Ran, exit non-zero or killed by signal (`:231-247`). C logs
     /// `LOG_ERR` and returns `false`; callers ignore the `false`.
     /// Carries [`ExitStatus`] so the daemon can format
@@ -165,6 +173,15 @@ pub fn execute(
 ) -> io::Result<ScriptResult> {
     #[cfg(windows)]
     compile_error!("script.c:156-199 PATHEXT search not ported");
+
+    // `:145-147`. EARLIEST gate: don't even stat the file. The C
+    // returns `false` (which callers ignore); we return a variant
+    // so `Daemon::log_script` can surface it once at debug level.
+    // tinc-up still runs: sandbox::enter() is called from main()
+    // AFTER Daemon::setup, and can() returns true before enter().
+    if !sandbox::can(sandbox::Action::StartProcesses) {
+        return Ok(ScriptResult::Sandboxed);
+    }
 
     // `:152` snprintf("%s/%s%s", confbase, name, scriptextension)
     let scriptname = confbase.join(name);
