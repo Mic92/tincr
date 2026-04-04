@@ -99,6 +99,20 @@ pub struct ReqKey {
     pub to: String,
     /// `None` for legacy (3-token) form. `Some` for extended (4+ token).
     pub ext: Option<ReqKeyExt>,
+    /// Reflexive UDP address of `from`, appended by a relay during forward.
+    ///
+    /// **Rust extension** — not present in C tinc. Mirrors `AnsKey::udp_addr`
+    /// but on the *request* leg of the handshake, so the *responder* learns
+    /// the initiator's NAT-reflexive address (the existing `ANS_KEY` append
+    /// only teaches the *initiator* about the *responder*). With both legs
+    /// carrying a relay observation, both sides can punch within one RTT of
+    /// each other — the timing window for simultaneous open.
+    ///
+    /// Wire compat: C `req_key_ext_h` parses with `sscanf("%*d %*s %*s %*d
+    /// %s", buf)`. `%s` stops at whitespace; trailing addr/port tokens are
+    /// silently dropped. A C relay forwards verbatim (`send_request("%s",
+    /// request)`), so the append survives a multi-hop path with mixed nodes.
+    pub udp_addr: Option<(AddrStr, AddrStr)>,
 }
 
 impl ReqKey {
@@ -132,10 +146,22 @@ impl ReqKey {
             }),
         };
 
+        // Reflexive append (Rust extension): two more optional tokens after
+        // the payload. C peers never send these and never read past `payload`;
+        // a Rust relay appends them, a Rust endpoint consumes them. Atomic
+        // pair (both-or-neither) like AnsKey — a single trailing token is
+        // garbage from a misbehaving peer, not half a hint.
+        let udp_addr = match (t.s_opt()?, t.s_opt()?) {
+            (None, None) => None,
+            (Some(a), Some(p)) => Some((AddrStr::new(a)?, AddrStr::new(p)?)),
+            _ => return Err(ParseError),
+        };
+
         Ok(Self {
             from: from.to_string(),
             to: to.to_string(),
             ext,
+            udp_addr,
         })
     }
 
@@ -163,6 +189,14 @@ impl ReqKey {
                 payload: Some(p),
             }) => format!("{head} {reqno} {p}"),
         }
+    }
+
+    /// Relay-appended form. Mirrors `AnsKey::format` with `udp_addr`.
+    /// Only meaningful when `ext.payload.is_some()` (the SPTPS-init case);
+    /// the relay path checks `ext.reqno == REQ_KEY` before appending.
+    #[must_use]
+    pub fn format_with_reflexive(&self, addr: &str, port: &str) -> String {
+        format!("{} {addr} {port}", self.format())
     }
 }
 
@@ -330,6 +364,39 @@ mod tests {
         // Unknown reqno is *not* a parse error.
         let m = ReqKey::parse("15 a b 999").unwrap();
         assert_eq!(m.ext.as_ref().unwrap().reqno, 999);
+    }
+
+    #[test]
+    fn req_key_reflexive_append() {
+        // Rust extension: relay appends from's observed UDP addr after the
+        // SPTPS payload. C `sscanf %s` stops at whitespace → silently
+        // ignored by C endpoints, consumed by Rust ones.
+        let line = "15 alice bob 15 SGVsbG8gV29ybGQ 192.0.2.7 51234";
+        let m = ReqKey::parse(line).unwrap();
+        assert_eq!(
+            m.ext.as_ref().unwrap().payload.as_deref(),
+            Some("SGVsbG8gV29ybGQ")
+        );
+        let (a, p) = m.udp_addr.as_ref().unwrap();
+        assert_eq!(a.as_str(), "192.0.2.7");
+        assert_eq!(p.as_str(), "51234");
+
+        // Round-trip via format_with_reflexive (the relay's emit path).
+        let bare = ReqKey {
+            udp_addr: None,
+            ..m.clone()
+        };
+        assert_eq!(bare.format_with_reflexive("192.0.2.7", "51234"), line);
+
+        // One trailing token = error (atomic pair, like AnsKey).
+        assert!(ReqKey::parse("15 alice bob 15 SGVsbG8 192.0.2.7").is_err());
+
+        // No payload, with addr: "15 alice bob 19 192.0.2.7 51234". Parser
+        // greedily consumes "192.0.2.7" as the *payload* (no schema knows
+        // 19=REQ_PUBKEY has no payload). udp_addr would then be the lone
+        // "51234" → atomic-pair error. This is fine: the relay only appends
+        // when `ext.reqno == REQ_KEY` (which always has a payload).
+        assert!(ReqKey::parse("15 alice bob 19 192.0.2.7 51234").is_err());
     }
 
     #[test]

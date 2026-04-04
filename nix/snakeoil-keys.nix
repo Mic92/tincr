@@ -20,4 +20,15 @@
     '';
     ed25519Public = "Yg4ZBtM/P0KUpVSXAfx1LhUMc88C6XeAG8KiR473G/L";
   };
+  # Third node for the NAT-punch test (nix/nixos-test-nat.nix). Generated
+  # the same way: `target/debug/sptps_keypair gamma.priv gamma.pub`.
+  gamma = {
+    ed25519Private = ''
+      -----BEGIN ED25519 PRIVATE KEY-----
+      Y8246pHi8M3xbxs+74VGSFbxgVeI837vYXbYaT9bNNk+G7pizKbn9FYiXSmceHfz
+      dYdOLtXZzZcxDuhCndzcVgHRKq/NWHEnKPsAp4Q+6H40DWAYvm22kIrQgQlpprOx
+      -----END ED25519 PRIVATE KEY-----
+    '';
+    ed25519Public = "4Rki6fj1BxpyDLQKOkv+BO9gFA2rptNJyKEIUZa6qTM";
+  };
 }

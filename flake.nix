@@ -244,6 +244,15 @@
             nixos-tinc-auth = pkgs.callPackage ./nix/nixos-test-auth.nix {
               inherit (self'.packages) tincd;
             };
+
+            # Tier-0 NAT punch: two leaves behind iptables MASQUERADE,
+            # one relay. Asserts the leaves go direct (not via relay)
+            # within 30s. The two-node test above can't exercise this —
+            # both nodes there have static `Address=`; the punch path
+            # never fires.
+            nixos-tinc-nat = pkgs.callPackage ./nix/nixos-test-nat.nix {
+              inherit (self'.packages) tincd;
+            };
           };
 
           # The C tincd daemon. Target for crates/tincd/tests/
