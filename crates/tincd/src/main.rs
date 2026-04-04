@@ -1,8 +1,7 @@
 //! tincd binary entry point. Ports `tincd.c::main` (`tincd.c:464-735`).
 //!
 //! Hand-rolled argv (no clap; ~12 flags). `--socket` is a testability
-//! addition (C derives it from `--pidfile`). Not yet ported:
-//! umbilical (needs `tinc start` to fork; that's tinc-tools' job).
+//! addition (C derives it from `--pidfile`).
 //!
 //! ## C ordering (`tincd.c::main2`, `:640-720`)
 //!
@@ -57,6 +56,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -405,6 +405,87 @@ fn parse_args() -> Result<Args, String> {
 /// so we do the mode decision BEFORE init in `main()`. The "tincd
 /// starting" log line therefore goes to the post-detach destination,
 /// same as C.
+/// `tincd.c:549-568` (parse env) + `tincd.c:702-709` (snip).
+///
+/// `tinc start` does `socketpair`, forks, child gets `TINC_UMBILICAL
+/// = "<fd> <colorize>"` in env, exec's tincd. The fd is the child end
+/// of the socketpair. Parent reads from its end: any bytes before the
+/// final nul are early-startup log lines (the C `logger.c:183-188`
+/// tees `real_logger` output to the umbilical so a detaching daemon's
+/// startup errors reach `tinc start`'s stderr). The final nul byte
+/// means "ready"; close means "done starting, go away".
+///
+/// We don't tee log output through the umbilical — env_logger doesn't
+/// have a hook for it, and our "detached with no --logfile is mute"
+/// warning (init_logging) already covers the lost-logs case. So this
+/// function does only the snip half: write 1 nul byte, close.
+///
+/// `colorize` (the second int) drives the C's `format_pretty` for
+/// teed log lines. We ignore it (no teeing).
+///
+/// The C parses the env *early* (`:549`, before `detach()`) but
+/// writes *late* (`:702`, after `Ready`). The fd survives `daemon(3)`
+/// because daemon(1, 0) only closes 0/1/2, and `tinc start` passes
+/// fd ≥3 (it's a socketpair half, not stdio). We can do both halves
+/// here in one place because we don't tee — nothing needs the fd
+/// between parse and snip.
+///
+/// One irreducible `unsafe`: `OwnedFd::from_raw_fd`. The fd number
+/// came from a string in an env var — asserting we *own* it (not
+/// just that it's open) is a trust statement the type system can't
+/// verify. F_GETFL probes that it's open; the env-var protocol is
+/// the ownership proof. Same shape as systemd socket activation
+/// (`LISTEN_FDS`): inherited fd, number in env, one unsafe to claim.
+fn cut_umbilical() {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
+    let Ok(spec) = std::env::var("TINC_UMBILICAL") else {
+        return;
+    };
+    // C `:554`: `sscanf(umbstr, "%d %d", &umbilical, &colorize)`.
+    // First token is the fd. Second (colorize) we drop. sscanf with
+    // one matched field returns 1 — the C doesn't check the return,
+    // so a bare "%d" string (no second int) leaves colorize at its
+    // initializer 0. Same here: only the first token matters.
+    let Some(fd) = spec
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<std::os::fd::RawFd>().ok())
+    else {
+        return;
+    };
+    // C `:557-558`: `if(fcntl(umbilical, F_GETFL) < 0) umbilical = 0`.
+    // Validates the fd is real — inherited across the exec, not just
+    // a stale number in the env. F_GETFL on a closed fd is EBADF.
+    // After this check we know `from_raw_fd` below won't double-close
+    // some other fd that happened to land on the same number.
+    //
+    // nix 0.29's `fcntl` takes `RawFd` directly: it's a probe, not
+    // an ownership claim. Even garbage input is just EBADF.
+    if fcntl(fd, FcntlArg::F_GETFL).is_err() {
+        return;
+    }
+    // C `:564`: `fcntl(umbilical, F_SETFD, FD_CLOEXEC)`. So tinc-up
+    // and friends don't inherit it. Best-effort (the C doesn't check
+    // the return either).
+    let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+    // C `:703-708`: `write(umbilical, "", 1)` then `close(umbilical)`.
+    // The empty string literal is a 1-byte buffer (the nul). `tinc
+    // start` (`tincctl.c:1011-1020`) reads in a loop; a nul byte as
+    // the *last* byte before EOF means success. Any other last byte
+    // (or read error, or no bytes at all) means the daemon died
+    // mid-startup.
+    //
+    // SAFETY: fd validated open by F_GETFL above. The TINC_UMBILICAL
+    // protocol IS the ownership transfer — the spawner set the env
+    // var to hand us this fd; nobody else in this process knows the
+    // number. Taking ownership means drop closes it: the C's
+    // explicit `close(umbilical)`.
+    let f = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let _ = nix::unistd::write(&f, b"\0");
+    // Drop closes. snip!
+}
+
 fn detach() -> Result<(), String> {
     // SIGPIPE is already SIG_IGN — Rust runtime does that for us
     // (`library/std/src/sys/pal/unix/mod.rs::reset_sigpipe`). The
@@ -741,6 +822,15 @@ fn main() -> ExitCode {
     // here means dependent units don't start until we're actually
     // ready to forward packets. No-op when NOTIFY_SOCKET is unset.
     sd_notify::notify_ready();
+
+    // ─── umbilical snip (tincd.c:702-709)
+    // Sibling of sd_notify: same "daemon is up" signal, different
+    // consumer. `tinc start` forks us with TINC_UMBILICAL=<fd> in
+    // env, then blocks reading that fd. The single nul byte we write
+    // here is the "ready" handshake; closing the fd lets `tinc
+    // start` exit 0. No-op when TINC_UMBILICAL is unset (the normal
+    // case — systemd, manual start, tests all spawn directly).
+    cut_umbilical();
 
     // ─── sd_notify WATCHDOG=1
     // If WatchdogSec= is set, ping at half the interval from a

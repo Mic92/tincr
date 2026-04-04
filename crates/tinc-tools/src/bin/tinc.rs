@@ -185,8 +185,25 @@ const COMMANDS: &[CmdEntry] = &[
     // ─── 5b: daemon RPC
     // The simple ones. Each is `connect → send → ack → check`.
     // `dump`/`top`/`log`/`pcap` are the complex ones — streaming or
-    // multi-row — they land separately. `start`/`restart` need the
-    // daemon binary to exist.
+    // multi-row — they land separately.
+    //
+    // `start`/`restart`: not really daemon-RPC (they *spawn* the
+    // daemon) but `needs_daemon: true` gets us `resolve_runtime()`
+    // — `cmd::start` needs `paths.pidfile()` and `paths.unix_socket()`
+    // both for the already-running check (`CtlSocket::connect`) and
+    // to pass `--pidfile`/`--socket` explicitly to the spawned tincd.
+    CmdEntry {
+        name: "start",
+        needs_daemon: true,
+        run: cmd_start,
+        help: "start [tincd OPTIONS]  Start tincd.",
+    },
+    CmdEntry {
+        name: "restart",
+        needs_daemon: true,
+        run: cmd_restart,
+        help: "restart [tincd OPTIONS] Restart tincd.",
+    },
     CmdEntry {
         name: "pid",
         needs_daemon: true,
@@ -596,6 +613,20 @@ fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> 
     // C: `printf("%d\n", pid)`. Stdout, newline.
     println!("{pid}");
     Ok(())
+}
+
+/// `cmd_start`: any number of args, all passed through to tincd.
+/// C `tincctl.c:949-955`: everything after `start` becomes a tincd
+/// arg. `tinc start -d 5` → `tincd -c … --pidfile … --socket … -d 5`.
+#[cfg(unix)]
+fn cmd_start(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    cmd::start::start(paths, args)
+}
+
+/// `cmd_restart`: stop (best-effort), then start.
+#[cfg(unix)]
+fn cmd_restart(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    cmd::start::restart(paths, args)
 }
 
 /// `cmd_stop`: zero args. Stops daemon, drains until socket closes.
@@ -1299,7 +1330,7 @@ fn print_help() {
     // Footer: only the daemon-gated commands left. The streaming
     // ones (dump/top/log/pcap) all landed; remove them from the
     // "coming soon" list.
-    println!("start/restart land with the daemon. See RUST_REWRITE_PLAN.md.");
+    println!("Report bugs to https://github.com/gsliepen/tinc/issues.");
 }
 
 fn print_version() {

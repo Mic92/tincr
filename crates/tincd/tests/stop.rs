@@ -207,6 +207,208 @@ fn spawn_connect_stop() {
     assert!(!socket.exists(), "socket should be unlinked on exit");
 }
 
+/// `tinc start` umbilical handshake. The full cross-crate proof:
+/// `tinc-tools::cmd::start::start()` forks, exec's the real tincd
+/// with `TINC_UMBILICAL=<fd>` set, tincd's `cut_umbilical()` writes
+/// the nul byte after `Daemon::setup` returns, `start()` reads it
+/// and returns Ok.
+///
+/// This is the test that proves both halves of the umbilical agree
+/// on the protocol. The unit tests in `cmd::start` only prove the
+/// negative cases (no nul byte → error); THIS proves the positive.
+///
+/// We call `tinc_tools::cmd::start::start()` in-process (not via
+/// the `tinc` binary) so we can point `TINCD_PATH` at our
+/// just-built tincd. The forked child IS a separate process; only
+/// the `start()` parent half runs in the test process.
+#[test]
+fn umbilical_ready_signal() {
+    let tmp = tmp("umbilical");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+
+    write_config(&confbase);
+
+    // ─── Paths setup
+    // `start()` needs `pidfile()` and `unix_socket()` resolved —
+    // it passes them as `--pidfile`/`--socket` to the spawned
+    // tincd. Explicit pidfile means `unix_socket()` derives
+    // `tinc.socket` (the `.pid` → `.socket` substitution).
+    let input = tinc_tools::names::PathsInput {
+        confbase: Some(confbase.clone()),
+        pidfile: Some(pidfile.clone()),
+        ..Default::default()
+    };
+    let mut paths = tinc_tools::names::Paths::for_cli(&input);
+    paths.resolve_runtime(&input);
+    let socket = paths.unix_socket();
+
+    // ─── point start() at our tincd
+    // `find_tincd` checks TINCD_PATH first. CARGO_BIN_EXE_tincd
+    // is the binary cargo just built for THIS crate.
+    //
+    // SAFETY: nextest runs each test in its own process; no
+    // env-mutation race with parallel tests.
+    unsafe {
+        std::env::set_var("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
+    }
+
+    // ─── the call under test
+    // `start()` forks, child exec's tincd, tincd detaches (default
+    // do_detach=true), the original child exits 0, tincd writes the
+    // nul byte, parent reads it + waitpid succeeds. Ok(()).
+    //
+    // No `-D` in extra_args — we WANT detach, that's the production
+    // shape. The detached daemon keeps running after `start()`
+    // returns; we connect-and-stop it below.
+    let result = tinc_tools::cmd::start::start(&paths, &[]);
+
+    unsafe {
+        std::env::remove_var("TINCD_PATH");
+    }
+
+    // The umbilical handshake itself. If the nul byte didn't
+    // arrive (cut_umbilical didn't fire, or fired before setup
+    // succeeded somehow), this is `Err("Error starting …")`.
+    if let Err(e) = &result {
+        panic!("tinc start failed: {e}");
+    }
+
+    // ─── daemon is actually ready
+    // The whole point of the umbilical: by the time `start()`
+    // returns, the daemon's control socket is bound. No
+    // `wait_for_file` needed — if we needed it, the umbilical
+    // would be lying.
+    assert!(
+        socket.exists(),
+        "socket should exist immediately after start() returns; \
+         umbilical fired before Daemon::setup finished?"
+    );
+    assert!(pidfile.exists(), "pidfile should exist after start()");
+
+    // ─── idempotent start
+    // C `tincctl.c:906-912`: second `start` with daemon running
+    // is a no-op success. `CtlSocket::connect` succeeds → early
+    // return Ok with the "already running" message.
+    unsafe {
+        std::env::set_var("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
+    }
+    let second = tinc_tools::cmd::start::start(&paths, &[]);
+    unsafe {
+        std::env::remove_var("TINCD_PATH");
+    }
+    assert!(second.is_ok(), "second start should be idempotent Ok");
+
+    // ─── stop it
+    // Via the same control socket. `cmd::ctl_simple::stop` is the
+    // production stop path; using it here proves `start && stop`
+    // works end-to-end (the canonical sysadmin sequence).
+    tinc_tools::cmd::ctl_simple::stop(&paths).expect("stop after start");
+
+    // The detached daemon's exit doesn't surface as a Child we can
+    // waitpid (it double-forked away from us). Best we can do:
+    // poll for the pidfile to disappear (Daemon::drop unlinks it).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pidfile.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "daemon didn't unlink pidfile after stop"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Daemon-side half in isolation: spawn tincd with TINC_UMBILICAL
+/// pointing at a socketpair we control, read the nul byte ourselves.
+/// Proves `cut_umbilical` does the right thing without involving
+/// `tinc-tools::cmd::start` at all.
+///
+/// This is the cheaper test — no fork-from-the-test, just a
+/// `Command::spawn` with an inherited fd. If the cross-crate test
+/// above breaks, this one tells you which half is at fault.
+#[test]
+fn umbilical_daemon_side() {
+    use std::os::fd::AsRawFd;
+
+    let tmp = tmp("umbilical-daemon");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    write_config(&confbase);
+
+    // socketpair. We keep `ours`, the child inherits `theirs`.
+    // UnixStream::pair is the safe wrapper around socketpair(
+    // AF_UNIX, SOCK_STREAM).
+    let (mut ours, theirs) = UnixStream::pair().unwrap();
+
+    // The child's fd number for `theirs` is stable across spawn
+    // ONLY if we don't set CLOEXEC on it. UnixStream::pair sets
+    // CLOEXEC by default (Rust's std does for everything). We
+    // need it inherited, so clear CLOEXEC. nix::fcntl on RawFd is
+    // a safe wrapper — it's a probe-style call, not ownership.
+    let theirs_fd = theirs.as_raw_fd();
+    nix::fcntl::fcntl(
+        theirs_fd,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .unwrap();
+
+    // -D so the child doesn't detach — we want to waitpid it
+    // directly. (The cross-crate test above does detach; this
+    // one is the simpler shape.)
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env("TINC_UMBILICAL", format!("{theirs_fd} 0"))
+        .env("RUST_LOG", "tincd=debug")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    // CRITICAL: drop `theirs` in the parent so we see EOF when the
+    // child closes its copy. Same as `tincctl.c:996` `close(pfd[1])`.
+    drop(theirs);
+
+    // Read the umbilical. cut_umbilical writes exactly 1 nul byte
+    // then closes. We don't tee logs, so 1 byte then EOF is the
+    // whole conversation.
+    ours.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let n = std::io::Read::read(&mut ours, &mut buf).expect("read umbilical");
+    assert_eq!(n, 1, "expected exactly 1 byte (the nul)");
+    assert_eq!(buf[0], 0, "expected nul byte, got {:#04x}", buf[0]);
+
+    // Second read: EOF (cut_umbilical closed).
+    let n = std::io::Read::read(&mut ours, &mut buf).expect("read for EOF");
+    assert_eq!(n, 0, "expected EOF after nul byte");
+
+    // The daemon is still running (foreground, -D). The umbilical
+    // signal arrived, which means setup succeeded — the socket is
+    // bound. Connect and stop.
+    assert!(socket.exists(), "socket bound after umbilical signal");
+
+    let cookie = read_cookie(&pidfile);
+    let stream = UnixStream::connect(&socket).expect("connect to tincd");
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+    writeln!(writer, "0 ^{cookie} 0").unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    writeln!(writer, "18 0").unwrap(); // REQ_STOP
+    while reader.read_line(&mut line).unwrap() > 0 {}
+
+    let status = child.wait().unwrap();
+    assert!(status.success(), "tincd exit: {status:?}");
+}
+
 /// SIGTERM also stops the daemon. Proves the SelfPipe + signal
 /// handler path. Same setup; instead of sending REQ_STOP, send a
 /// signal.
