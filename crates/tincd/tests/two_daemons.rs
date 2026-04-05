@@ -21,6 +21,13 @@
 //! <100ms on loopback. Timeouts are 10s for slack on a loaded CI box;
 //! the tests typically complete in <1s.
 
+// Integration tests are end-to-end scenarios; their length reflects
+// the steps (spawn N daemons → wait for mesh → inject → assert →
+// teardown). The `Node` helper below already absorbs the per-daemon
+// boilerplate; the test BODIES diverge on the load-bearing config
+// differences (TunnelServer/StrictSubnets/Forwarding/AutoConnect).
+#![allow(clippy::too_many_lines)]
+
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};

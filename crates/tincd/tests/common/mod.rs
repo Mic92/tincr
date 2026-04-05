@@ -264,6 +264,348 @@ pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
     })
 }
 
+// ═══════════════════════════ SPTPS peer fixture ═══════════════════
+//
+// Shared by `stop.rs::{peer_ack_exchange, peer_edge_triggers_
+// reachable, pcap_captures_tcp_packet}`. The first ~130 lines of
+// those tests were byte-identical: paths → config → spawn → wait →
+// TCP connect → send ID → read daemon's ID (raw, find '\n') → SPTPS
+// start → pump until HandshakeDone + first Record (the daemon's ACK).
+//
+// Tests that DON'T fit:
+//   - `peer_wrong_key_fails_sig`: registers a FAKE pubkey for
+//     testpeer (negative test — the pump must NOT complete).
+//   - `security.rs::splice_mitm_rejected`: two daemons, the test
+//     process is a relay not an SPTPS peer.
+//
+// `our_key` seed is `[0x77; 32]` everywhere; that's baked in.
+// Daemon name is `testnode`, peer name is `testpeer`. The label
+// (`"tinc TCP key expansion testpeer testnode\0"`) follows. If a
+// future test needs different names, parametrize then — not now.
+
+/// `RngCore` that asserts it's never touched. The initiator's
+/// `Sptps::receive` doesn't generate randomness during the initial
+/// handshake (only `start` does, for KEX); after `HandshakeDone`,
+/// `receive` decrypts (no RNG). If this ever fires, the SPTPS state
+/// machine changed — the test should know.
+pub struct NoRng;
+impl rand_core::RngCore for NoRng {
+    fn next_u32(&mut self) -> u32 {
+        unreachable!("RNG touched")
+    }
+    fn next_u64(&mut self) -> u64 {
+        unreachable!("RNG touched")
+    }
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        unreachable!("RNG touched")
+    }
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+        unreachable!("RNG touched")
+    }
+}
+
+/// One spawned daemon + an active SPTPS peer connection from the
+/// test process. Handshake is COMPLETE; the daemon's ACK record is
+/// captured.
+///
+/// Dropping this kills the child (via `Child`'s drop … actually
+/// `Child` doesn't kill on drop; tests must call `child.kill()`
+/// explicitly when they're done. Same as before the fixture.)
+pub struct PeerFixture {
+    pub tmp: TmpGuard,
+    pub confbase: PathBuf,
+    pub pidfile: PathBuf,
+    pub socket: PathBuf,
+    pub child: Child,
+    /// TCP stream to the daemon. Read/Write impls on `&TcpStream`
+    /// (the duplex shared-ref trick). 5s read timeout set.
+    pub stream: std::net::TcpStream,
+    /// SPTPS session. Past `HandshakeDone`; ready for `send_record`.
+    pub sptps: tinc_sptps::Sptps,
+    /// The daemon's first post-handshake record (its ACK:
+    /// `"4 <udp-port> <weight> <opts-hex>\n"`). `peer_ack_exchange`
+    /// parses this; other tests ignore it.
+    pub daemon_ack: Vec<u8>,
+}
+
+impl PeerFixture {
+    /// Standard setup: router-mode config (`write_config_default`),
+    /// our pubkey registered as `hosts/testpeer`.
+    pub fn spawn(tag: &str) -> Self {
+        Self::spawn_with_config(tag, |confbase| {
+            // Same body as `stop.rs::write_config`: minimal
+            // router-mode config, seed `[0x42; 32]`.
+            std::fs::create_dir_all(confbase.join("hosts")).unwrap();
+            std::fs::write(
+                confbase.join("tinc.conf"),
+                "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\n",
+            )
+            .unwrap();
+            std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
+            let seed = [0x42; 32];
+            write_ed25519_privkey(confbase, &seed);
+            pubkey_from_seed(&seed)
+        })
+    }
+
+    /// Custom config: caller writes `tinc.conf` + `hosts/testnode` +
+    /// `ed25519_key.priv`, returns the daemon's pubkey. The fixture
+    /// writes `hosts/testpeer` and does the rest.
+    ///
+    /// `pcap_captures_tcp_packet` uses this for `Mode = switch`.
+    #[allow(clippy::too_many_lines)] // linear setup script; splitting hides the sequence
+    pub fn spawn_with_config(tag: &str, write_conf: impl FnOnce(&Path) -> [u8; 32]) -> Self {
+        use rand_core::OsRng;
+        use std::io::{Read, Write};
+        use tinc_crypto::sign::SigningKey;
+        use tinc_sptps::{Framing, Output, Role, Sptps};
+
+        let tmp = TmpGuard::new("stop", tag);
+        let confbase = tmp.path().join("vpn");
+        let pidfile = tmp.path().join("tinc.pid");
+        let socket = tmp.path().join("tinc.socket");
+
+        // ─── config: daemon's tinc.conf + our hosts/testpeer ───
+        let daemon_pub = write_conf(&confbase);
+        let our_key = SigningKey::from_seed(&[0x77; 32]);
+        let our_pub = *our_key.public_key();
+        let b64 = tinc_crypto::b64::encode(&our_pub);
+        std::fs::write(
+            confbase.join("hosts").join("testpeer"),
+            format!("Ed25519PublicKey = {b64}\n"),
+        )
+        .unwrap();
+
+        // ─── spawn daemon (RUST_LOG=tincd=info captures the
+        //     "handshake completed" / "became reachable" lines) ───
+        let mut child = tincd_cmd()
+            .arg("-c")
+            .arg(&confbase)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .arg("--socket")
+            .arg(&socket)
+            .env("RUST_LOG", "tincd=info")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn tincd");
+
+        assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        });
+
+        let tcp_addr = read_tcp_addr(&pidfile);
+
+        // ─── TCP connect + send ID line ───────────────────────────
+        // `"%d %s %d.%d"` — we are testpeer, version 17.7. The
+        // `&TcpStream` Read+Write impls handle the duplex; bind
+        // immutable, use `(&stream).read()` / `(&stream).write_all()`.
+        let stream = std::net::TcpStream::connect(tcp_addr).expect("TCP connect to tincd");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(&stream, "0 testpeer 17.7").unwrap();
+
+        // ─── recv daemon's ID line ────────────────────────────────
+        // CAN'T use BufReader.read_line: it buffers PAST the `\n`
+        // and swallows the daemon's KEX bytes. Read raw, find `\n`.
+        let mut buf = Vec::with_capacity(256);
+        let mut tmp_buf = [0u8; 256];
+        let id_end = loop {
+            let n = (&stream).read(&mut tmp_buf).expect("recv from daemon");
+            assert_ne!(n, 0, "daemon closed before sending ID line; got: {buf:?}");
+            buf.extend_from_slice(&tmp_buf[..n]);
+            if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                break pos;
+            }
+        };
+        assert_eq!(&buf[..id_end], b"0 testnode 17.7", "daemon ID reply");
+
+        // ─── SPTPS start: WE are the initiator ───────────────────
+        // Label: `"tinc TCP key expansion <initiator> <responder>\0"`.
+        // We connected (outgoing) → we are the initiator. The NUL
+        // terminator matters — same construction as `proto::tcp_label`.
+        let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
+        label.push(0);
+
+        let (mut sptps, init) = Sptps::start(
+            Role::Initiator,
+            Framing::Stream,
+            our_key,
+            daemon_pub,
+            label,
+            0,
+            &mut OsRng,
+        );
+        for o in init {
+            if let Output::Wire { bytes, .. } = o {
+                (&stream).write_all(&bytes).expect("send KEX");
+            }
+        }
+
+        // ─── pump: feed daemon ↔ sptps until HandshakeDone + ACK ──
+        // Daemon's SIG arrives in the same flush as its `send_ack`;
+        // both might land in one read or two. Loop until we have
+        // BOTH `HandshakeDone` AND the first `Record` (the ACK).
+        let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
+        let mut handshake_done = false;
+        let mut daemon_ack: Option<Vec<u8>> = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while !(handshake_done && daemon_ack.is_some()) {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "handshake didn't complete in 5s; stderr:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            let mut off = 0;
+            while off < pending.len() {
+                let (n, outs) = match sptps.receive(&pending[off..], &mut NoRng) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = child.kill();
+                        let out = child.wait_with_output().unwrap();
+                        panic!(
+                            "SPTPS receive failed: {e:?}; stderr:\n{}",
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                    }
+                };
+                off += n;
+                for o in outs {
+                    match o {
+                        Output::Wire { bytes, .. } => {
+                            // Our SIG (initiator sends after recv'ing
+                            // responder's KEX).
+                            (&stream).write_all(&bytes).expect("send Wire");
+                        }
+                        Output::HandshakeDone => handshake_done = true,
+                        Output::Record { bytes, .. } => {
+                            // First (and only) post-handshake record
+                            // before we ACK back: the daemon's ACK.
+                            daemon_ack = Some(bytes);
+                        }
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            pending.clear();
+            if handshake_done && daemon_ack.is_some() {
+                break;
+            }
+            match (&stream).read(&mut tmp_buf) {
+                Ok(0) => {
+                    let _ = child.kill();
+                    let out = child.wait_with_output().unwrap();
+                    panic!(
+                        "daemon EOF before HandshakeDone; stderr:\n{}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+                Err(e) => {
+                    let _ = child.kill();
+                    let out = child.wait_with_output().unwrap();
+                    panic!(
+                        "read error: {e}; stderr:\n{}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+        }
+
+        Self {
+            tmp,
+            confbase,
+            pidfile,
+            socket,
+            child,
+            stream,
+            sptps,
+            daemon_ack: daemon_ack.expect("loop exited with daemon_ack set"),
+        }
+    }
+
+    /// Send an SPTPS record body to the daemon. Wraps the
+    /// `sptps.send_record(0, body)` + `for Wire { write_all }` boilerplate.
+    pub fn send_record(&mut self, body: &[u8]) {
+        use std::io::Write;
+        use tinc_sptps::Output;
+        let outs = self.sptps.send_record(0, body).expect("send_record");
+        for o in outs {
+            if let Output::Wire { bytes, .. } = o {
+                (&self.stream).write_all(&bytes).expect("send Wire");
+            }
+        }
+    }
+
+    /// Drain SPTPS records from the daemon until the socket would
+    /// block AND there's no partial buffered. Sets a short read
+    /// timeout (`timeout_ms`) and pumps until WouldBlock with an
+    /// empty buffer.
+    ///
+    /// Returns all `Record` bodies seen. Used to drain the
+    /// post-ACK `send_everything` gossip and to verify
+    /// `forward_request`'s skip-from logic (we are `from`, so an
+    /// empty result proves the broadcast skipped us).
+    pub fn drain_records(&mut self, timeout_ms: u64) -> Vec<Vec<u8>> {
+        use std::io::Read;
+        use tinc_sptps::Output;
+        self.stream
+            .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
+            .unwrap();
+        let mut pending = Vec::new();
+        let mut recs = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut tmp_buf = [0u8; 256];
+        loop {
+            assert!(Instant::now() <= deadline, "drain timeout");
+            let mut off = 0;
+            while off < pending.len() {
+                let (n, outs) = self
+                    .sptps
+                    .receive(&pending[off..], &mut NoRng)
+                    .expect("sptps");
+                if n == 0 {
+                    break;
+                }
+                off += n;
+                for o in outs {
+                    if let Output::Record { bytes, .. } = o {
+                        recs.push(bytes);
+                    }
+                }
+            }
+            pending.drain(..off);
+            match (&self.stream).read(&mut tmp_buf) {
+                Ok(0) => panic!("daemon EOF mid-drain"),
+                Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if pending.is_empty() {
+                        return recs;
+                    }
+                }
+                Err(e) => panic!("read error: {e}"),
+            }
+        }
+    }
+
+    /// Kill the daemon and return its stderr. Consumes the fixture
+    /// (the `Child` is gone after `wait_with_output`).
+    pub fn kill_and_stderr(mut self) -> String {
+        let _ = self.child.kill();
+        let out = self.child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+}
+
 // ═══════════════════════════ linux netns helpers ═══════════════════
 // Only used by netns/crossimpl/throughput, all of which are already
 // `#![cfg(target_os = "linux")]`. cfg-gating here too keeps the

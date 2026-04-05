@@ -40,7 +40,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, read_cookie, read_tcp_addr, tincd_cmd, wait_for_file, write_ed25519_privkey,
+    PeerFixture, TmpGuard, read_cookie, read_tcp_addr, tincd_cmd, wait_for_file,
+    write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -1226,255 +1227,21 @@ fn udp_stray_packet_drained() {
 /// an SPTPS `Record`, parse `"%d %s %d %x"`, send our ACK, daemon
 /// activates. `tinc dump connections` then shows ONE peer row.
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
-#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
+#[allow(clippy::too_many_lines)] // assertion phases are deliberately verbose; setup is in PeerFixture
 fn peer_ack_exchange() {
-    use rand_core::OsRng;
     use std::io::Read;
-    use std::net::TcpStream;
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role, Sptps};
+    use tinc_sptps::Output;
 
-    let tmp = tmp("peer-handshake");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
-
-    // ─── setup: daemon's config + OUR (testpeer) hosts entry ───
-    // The daemon needs `hosts/testpeer` with our pubkey.
-    let daemon_pub = write_config(&confbase);
-    let our_key = SigningKey::from_seed(&[0x77; 32]);
-    let our_pub = *our_key.public_key();
-    let b64 = tinc_crypto::b64::encode(&our_pub);
-    std::fs::write(
-        confbase.join("hosts").join("testpeer"),
-        format!("Ed25519PublicKey = {b64}\n"),
-    )
-    .unwrap();
-
-    // ─── spawn daemon ────────────────────────────────────────────
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
-        // INFO captures the "SPTPS handshake completed" line.
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
-    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
-
-    let tcp_addr = read_tcp_addr(&pidfile);
-
-    // ─── TCP connect + send ID line ────────────────────────────────
-    // `"%d %s %d.%d"`. We are testpeer,
-    // version 17.7. The daemon's id_h fires, peer branch.
-    //
-    // `TcpStream` impls Read AND Write for `&TcpStream` (the
-    // shared-ref impl) — the kernel handles the duplex; Rust's
-    // borrow checker just needs the type-level workaround. We
-    // bind `let stream` (no `mut`) and use `(&stream).read()` /
-    // `(&stream).write_all()`. Same trick as `tcp_connect_stop`
-    // but here we INTERLEAVE reads and writes (the handshake
-    // pump), so the trick is load-bearing.
-    let stream = TcpStream::connect(tcp_addr).expect("TCP connect to tincd");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    writeln!(&stream, "0 testpeer 17.7").unwrap();
-
-    // ─── recv daemon's ID line ────────────────────────────────────
-    // The daemon's `send_id` reply: `"0 testnode 17.7\n"`. THEN
-    // the responder's KEX bytes (binary, no newline). We CAN'T use
-    // BufReader.read_line for the ID — it'll buffer MORE than the
-    // line and we lose the KEX bytes into BufReader's internal
-    // buffer. Read raw, find the `\n` ourselves.
-    let mut buf = Vec::with_capacity(256);
+    let mut fx = PeerFixture::spawn("peer-handshake");
+    let pidfile = fx.pidfile.clone();
+    let socket = fx.socket.clone();
     let mut tmp_buf = [0u8; 256];
-    let id_end = loop {
-        let n = (&stream).read(&mut tmp_buf).expect("recv from daemon");
-        assert_ne!(
-            n, 0,
-            "daemon closed before sending ID line; buf so far: {buf:?}"
-        );
-        buf.extend_from_slice(&tmp_buf[..n]);
-        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            break pos;
-        }
-    };
-    let id_line = std::str::from_utf8(&buf[..id_end]).expect("ID line ASCII");
-    assert_eq!(id_line, "0 testnode 17.7", "daemon ID reply");
-
-    // ─── SPTPS start: WE are the initiator ───────────────────────
-    // outgoing → `"tinc TCP key expansion %s %s", myself,
-    // c->name`. We're outgoing (we connected). myself=
-    // testpeer, c->name=testnode. Label: `(testpeer, testnode)`.
-    //
-    // SAME bytes as the daemon's `tcp_label("testpeer", "testnode")`.
-    // Including the NUL. We construct via the same fn (proto::
-    // tcp_label is pub(crate), not reachable from here — inline).
-    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
-    label.push(0);
-    // Sanity: matches `25 + strlen + strlen`.
-    assert_eq!(label.len(), 25 + 8 + 8);
-
-    let (mut sptps, init) = Sptps::start(
-        Role::Initiator,
-        Framing::Stream,
-        our_key,
-        daemon_pub,
-        label,
-        0,
-        &mut OsRng,
-    );
-
-    // Send our KEX. `init` has one Wire (initiator's KEX from
-    // sptps_start's send_kex).
-    for o in init {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send KEX");
-        }
-    }
-
-    // ─── the pump: feed daemon's bytes to sptps until done ────────
-    // The daemon sends: KEX (already in buf past id_end+1), then
-    // (after we send our SIG) SIG. We feed everything we receive,
-    // send everything sptps emits, stop on HandshakeDone.
-    //
-    // The pump is borrowed from `tinc-tools/cmd/join.rs:980` but
-    // simpler — we only care about reaching HandshakeDone, not
-    // post-handshake records. Same NoRng idiom (initiator's
-    // receive() doesn't trigger send_kex during the initial
-    // handshake).
-    struct NoRng;
-    impl rand_core::RngCore for NoRng {
-        fn next_u32(&mut self) -> u32 {
-            unreachable!("rng touched")
-        }
-        fn next_u64(&mut self) -> u64 {
-            unreachable!("rng touched")
-        }
-        fn fill_bytes(&mut self, _: &mut [u8]) {
-            unreachable!("rng touched")
-        }
-        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-            unreachable!("rng touched")
-        }
-    }
-
-    // Seed the pump with bytes already in `buf` past the ID line.
-    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
-    let mut handshake_done = false;
-    let mut daemon_ack: Option<Vec<u8>> = None;
-    let pump_deadline = Instant::now() + Duration::from_secs(5);
-
-    'pump: loop {
-        if Instant::now() > pump_deadline {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "handshake didn't complete in 5s; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-
-        // Feed pending bytes to sptps. The do-while: receive()
-        // processes one record at a time.
-        //
-        // (Match not unwrap_or_else: the closure would capture
-        // `child` by move once, making it unusable for the later
-        // panic-with-stderr arms. The borrow checker can't see
-        // that the closure body diverges. Match is explicit.)
-        let mut off = 0;
-        while off < pending.len() {
-            let (n, outs) = match sptps.receive(&pending[off..], &mut NoRng) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = child.kill();
-                    let out = child.wait_with_output().unwrap();
-                    panic!(
-                        "SPTPS receive failed: {e:?}; stderr:\n{}",
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-            };
-            off += n;
-            for o in outs {
-                match o {
-                    Output::Wire { bytes, .. } => {
-                        // Our SIG (initiator sends SIG after
-                        // receiving responder's KEX).
-                        (&stream).write_all(&bytes).expect("send Wire");
-                    }
-                    Output::HandshakeDone => {
-                        handshake_done = true;
-                    }
-                    Output::Record { bytes, .. } => {
-                        // Chunk 4b: the daemon's ACK. First (and
-                        // only, in 4b) post-handshake record.
-                        // Stash for parsing after the pump.
-                        daemon_ack = Some(bytes);
-                    }
-                }
-            }
-            // Stream-mode receive() can return 0 only on empty
-            // input. We checked `off < pending.len()`. If it
-            // returns 0 anyway, that's a tinc-sptps bug — break
-            // to avoid spin.
-            if n == 0 {
-                break;
-            }
-        }
-        pending.clear();
-
-        // Chunk 4b: pump until we have BOTH HandshakeDone AND the
-        // daemon's ACK record. They might arrive in the same
-        // `pending` chunk (the daemon's SIG + send_ack are queued
-        // in the same outbuf flush) or separate reads.
-        if handshake_done && daemon_ack.is_some() {
-            break 'pump;
-        }
-
-        // Read more from the daemon. read_timeout is set; this
-        // returns WouldBlock after 5s if the daemon stalls.
-        let n = match (&stream).read(&mut tmp_buf) {
-            Ok(0) => {
-                // EOF before HandshakeDone. The daemon dropped us.
-                // Probably: id_h reject (bad name, version, no
-                // pubkey). The stderr will say why.
-                let _ = child.kill();
-                let out = child.wait_with_output().unwrap();
-                panic!(
-                    "daemon EOF before HandshakeDone; stderr:\n{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Ok(n) => n,
-            Err(e) => {
-                let _ = child.kill();
-                let out = child.wait_with_output().unwrap();
-                panic!(
-                    "read error: {e}; stderr:\n{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-        };
-        pending.extend_from_slice(&tmp_buf[..n]);
-    }
 
     // ─── parse the daemon's ACK ─────────────────────────────────
     // `"%d %s %d %x"` = `"4 <udp-port> <weight> <opts>"`.
     // Record body has trailing `\n` (`send_request:120` appends).
-    let ack = daemon_ack.expect("pump exited with daemon_ack set");
-    let body = ack.strip_suffix(b"\n").unwrap_or(&ack);
+    let ack = &fx.daemon_ack;
+    let body = ack.strip_suffix(b"\n").unwrap_or(ack);
     let body = std::str::from_utf8(body).expect("ACK is ASCII");
     let mut t = body.split_whitespace();
     assert_eq!(t.next(), Some("4"), "ACK reqno: {body:?}");
@@ -1502,13 +1269,7 @@ fn peer_ack_exchange() {
     // that here. Port 0 (we have no UDP listener); weight 1ms
     // (fake); same default options. The `\n` is required (`meta.c:
     // 156` strips it; daemon's `record_body`).
-    let our_ack = b"4 0 1 700000c\n";
-    let outs = sptps.send_record(0, our_ack).expect("post-handshake");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send our ACK");
-        }
-    }
+    fx.send_record(b"4 0 1 700000c\n");
     // `send_add_edge(everyone, c->edge)`: a real peer's `on_ack`
     // broadcasts ITS edge (testpeer→testnode). The daemon's SSSP
     // only follows edges with `e->reverse` set; without this
@@ -1517,13 +1278,7 @@ fn peer_ack_exchange() {
     // (chunk-9b removed the synthesized reverse from `on_ack` —
     // it broke 3-node relay forwarding. Tests that drive the
     // daemon manually now must send what a real peer sends.)
-    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
-    let outs = sptps.send_record(0, our_edge).expect("our edge");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send our ADD_EDGE");
-        }
-    }
+    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
 
     // ─── daemon activates: send_everything + send_add_edge ─────
     // Log: "Connection with X (Y) activated". Then
@@ -1542,51 +1297,7 @@ fn peer_ack_exchange() {
     // testnode testpeer`. Then drain until WouldBlock — proves the
     // skip-from logic for `forward_request` (we ARE `from` for any
     // ADD_SUBNET we send below; broadcast skips us).
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    let mut post_ack_records: Vec<Vec<u8>> = Vec::new();
-    pending.clear();
-    let drain_deadline = Instant::now() + Duration::from_secs(5);
-    'drain: loop {
-        assert!(
-            Instant::now() <= drain_deadline,
-            "send_everything drain timeout"
-        );
-        let mut off = 0;
-        while off < pending.len() {
-            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
-            if n == 0 {
-                break;
-            }
-            off += n;
-            for o in outs {
-                if let Output::Record { bytes, .. } = o {
-                    post_ack_records.push(bytes);
-                }
-            }
-        }
-        pending.drain(..off);
-        match (&stream).read(&mut tmp_buf) {
-            Ok(0) => {
-                let _ = child.kill();
-                let out = child.wait_with_output().unwrap();
-                panic!(
-                    "daemon closed post-ACK; stderr:\n{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Nothing more. If we got at least one record we're done.
-                if !post_ack_records.is_empty() {
-                    break 'drain;
-                }
-                // Else: keep waiting (daemon might not have flushed yet).
-            }
-            Err(e) => panic!("read error post-ACK: {e}"),
-        }
-    }
+    let post_ack_records = fx.drain_records(500);
     // At least 1 ADD_EDGE (send_everything). Possibly 2 (the
     // `send_add_edge(everyone)` broadcast).
     assert!(
@@ -1614,10 +1325,21 @@ fn peer_ack_exchange() {
             "unexpected post-ACK record: {s:?}"
         );
     }
-    // Short timeout for subsequent no-reply checks.
-    stream
+    // Short timeout for subsequent no-reply checks. The drain
+    // above already set 500ms; tighten to 100ms so the WouldBlock
+    // assertions below are fast.
+    fx.stream
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
+    // Destructure: the rest of the test does raw stream reads (the
+    // "no reply" WouldBlock checks). Can't use fx.send_record for
+    // those without re-borrowing fx every time; pull out the parts.
+    let PeerFixture {
+        mut child,
+        stream,
+        mut sptps,
+        ..
+    } = fx;
 
     // ─── dump connections over control socket ────────────────────
     // Walk connection_list, format `"%d %d %s %s %x %d %x"` per
@@ -1686,8 +1408,7 @@ fn peer_ack_exchange() {
     // `Subnet::Display` omits `#10`, so the dump row reads
     // `192.168.99.0/24`. Match the dump format, not the wire.
     let add_subnet = b"10 deadbeef testpeer 192.168.99.0/24#10\n";
-    let outs = sptps.send_record(0, add_subnet).expect("post-handshake");
-    for o in outs {
+    for o in sptps.send_record(0, add_subnet).expect("post-handshake") {
         if let Output::Wire { bytes, .. } = o {
             (&stream).write_all(&bytes).expect("send ADD_SUBNET");
         }
@@ -1743,8 +1464,7 @@ fn peer_ack_exchange() {
     // Send the SAME ADD_SUBNET again. `seen.check` dup-drops it.
     // The full body string (incl nonce)
     // is the cache key — same nonce → same key → hit.
-    let outs = sptps.send_record(0, add_subnet).expect("dup send");
-    for o in outs {
+    for o in sptps.send_record(0, add_subnet).expect("dup send") {
         if let Output::Wire { bytes, .. } = o {
             (&stream).write_all(&bytes).expect("send dup ADD_SUBNET");
         }
@@ -1766,8 +1486,7 @@ fn peer_ack_exchange() {
     // string, so it wouldn't collide. Distinct nonce anyway for
     // realism: each flood is fresh `prng()` output).
     let del_subnet = b"11 cafef00d testpeer 192.168.99.0/24#10\n";
-    let outs = sptps.send_record(0, del_subnet).expect("del send");
-    for o in outs {
+    for o in sptps.send_record(0, del_subnet).expect("del send") {
         if let Output::Wire { bytes, .. } = o {
             (&stream).write_all(&bytes).expect("send DEL_SUBNET");
         }
@@ -1833,209 +1552,24 @@ fn peer_ack_exchange() {
 /// `dump connections` STILL shows one row (testpeer): faraway has
 /// no direct connection — graph-only.
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
-#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
+#[allow(clippy::too_many_lines)] // assertion phases are deliberately verbose; setup is in PeerFixture
 fn peer_edge_triggers_reachable() {
-    use rand_core::OsRng;
-    use std::io::Read;
-    use std::net::TcpStream;
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role, Sptps};
-
-    let tmp = tmp("peer-edge");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
-
-    let daemon_pub = write_config(&confbase);
-    let our_key = SigningKey::from_seed(&[0x77; 32]);
-    let our_pub = *our_key.public_key();
-    let b64 = tinc_crypto::b64::encode(&our_pub);
-    std::fs::write(
-        confbase.join("hosts").join("testpeer"),
-        format!("Ed25519PublicKey = {b64}\n"),
-    )
-    .unwrap();
-
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
-        // INFO captures the "became reachable" line. graph_glue
-        // logs at `tincd::graph` target.
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
-    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
-
-    let tcp_addr = read_tcp_addr(&pidfile);
-    let stream = TcpStream::connect(tcp_addr).expect("TCP connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    writeln!(&stream, "0 testpeer 17.7").unwrap();
-
-    // ─── ID line + SPTPS pump (same as peer_ack_exchange) ────────
-    let mut buf = Vec::with_capacity(256);
-    let mut tmp_buf = [0u8; 256];
-    let id_end = loop {
-        let n = (&stream).read(&mut tmp_buf).expect("recv");
-        assert_ne!(n, 0, "daemon closed before ID");
-        buf.extend_from_slice(&tmp_buf[..n]);
-        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            break pos;
-        }
-    };
-    assert_eq!(&buf[..id_end], b"0 testnode 17.7");
-
-    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
-    label.push(0);
-    let (mut sptps, init) = Sptps::start(
-        Role::Initiator,
-        Framing::Stream,
-        our_key,
-        daemon_pub,
-        label,
-        0,
-        &mut OsRng,
-    );
-    for o in init {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send KEX");
-        }
-    }
-
-    // Minimal pump: feed until HandshakeDone + daemon's ACK record.
-    // Same NoRng idiom as peer_ack_exchange.
-    struct NoRng;
-    impl rand_core::RngCore for NoRng {
-        fn next_u32(&mut self) -> u32 {
-            unreachable!()
-        }
-        fn next_u64(&mut self) -> u64 {
-            unreachable!()
-        }
-        fn fill_bytes(&mut self, _: &mut [u8]) {
-            unreachable!()
-        }
-        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-            unreachable!()
-        }
-    }
-
-    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
-    let mut handshake_done = false;
-    let mut got_ack = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !(handshake_done && got_ack) {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("handshake timeout");
-        }
-        let mut off = 0;
-        while off < pending.len() {
-            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
-            off += n;
-            for o in outs {
-                match o {
-                    Output::Wire { bytes, .. } => {
-                        (&stream).write_all(&bytes).expect("send");
-                    }
-                    Output::HandshakeDone => handshake_done = true,
-                    Output::Record { .. } => got_ack = true,
-                }
-            }
-            if n == 0 {
-                break;
-            }
-        }
-        pending.clear();
-        if handshake_done && got_ack {
-            break;
-        }
-        let n = (&stream).read(&mut tmp_buf).expect("read");
-        if n == 0 {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon EOF before handshake; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        pending.extend_from_slice(&tmp_buf[..n]);
-    }
+    let mut fx = PeerFixture::spawn("peer-edge");
+    let pidfile = fx.pidfile.clone();
+    let socket = fx.socket.clone();
 
     // Send our ACK. Daemon activates + adds myself→testpeer edge
     // + runs graph. Then our ADD_EDGE (testpeer→testnode) gives
     // the daemon's edge its reverse; THAT graph() fires
     // BecameReachable. (Real peers' on_ack sends both in one
     // burst; chunk-9b removed the daemon's synthesized reverse.)
-    let outs = sptps.send_record(0, b"4 0 1 700000c\n").expect("ack");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send ACK");
-        }
-    }
-    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
-    let outs = sptps.send_record(0, our_edge).expect("our edge");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send our ADD_EDGE");
-        }
-    }
+    fx.send_record(b"4 0 1 700000c\n");
+    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
 
     // Chunk 6: daemon's `on_ack` now calls `send_everything` +
     // `send_add_edge(everyone)`. We get 1-2 ADD_EDGE records for
-    // testnode→testpeer. Drain them. Helper closure: pump records
-    // out of `pending` + socket until WouldBlock with no partial.
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
-    let drain_records =
-        |sptps: &mut Sptps, stream: &TcpStream, pending: &mut Vec<u8>| -> Vec<Vec<u8>> {
-            let mut recs = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut tmp_buf = [0u8; 256];
-            loop {
-                assert!(Instant::now() <= deadline, "drain timeout");
-                let mut off = 0;
-                while off < pending.len() {
-                    let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
-                    if n == 0 {
-                        break;
-                    }
-                    off += n;
-                    for o in outs {
-                        if let Output::Record { bytes, .. } = o {
-                            recs.push(bytes);
-                        }
-                    }
-                }
-                pending.drain(..off);
-                match (&*stream).read(&mut tmp_buf) {
-                    Ok(0) => panic!("daemon EOF mid-drain"),
-                    Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // No more bytes AND no partial buffered.
-                        if pending.is_empty() {
-                            return recs;
-                        }
-                    }
-                    Err(e) => panic!("read error: {e}"),
-                }
-            }
-        };
-    pending.clear();
-    let post_ack = drain_records(&mut sptps, &stream, &mut pending);
+    // testnode→testpeer. Drain them.
+    let post_ack = fx.drain_records(500);
     // 1-2 ADD_EDGE records for testnode→testpeer.
     assert!(
         !post_ack.is_empty(),
@@ -2048,9 +1582,6 @@ fn peer_edge_triggers_reachable() {
             "unexpected post-ACK record: {s:?}"
         );
     }
-    stream
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
 
     // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
     // `"%d %x %s %s %s %s %x %d"`.
@@ -2066,20 +1597,12 @@ fn peer_edge_triggers_reachable() {
     // Different nonces — each is a separate `prng()` in C.
     // Addresses are arbitrary tokens (Phase-1 finding: `AddrStr`
     // is opaque, `str2sockaddr` accepts anything).
-    let fwd = b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n";
-    let rev = b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n";
-    for body in [fwd.as_slice(), rev.as_slice()] {
-        let outs = sptps.send_record(0, body).expect("add_edge");
-        for o in outs {
-            if let Output::Wire { bytes, .. } = o {
-                (&stream).write_all(&bytes).expect("send ADD_EDGE");
-            }
-        }
-    }
+    fx.send_record(b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n");
+    fx.send_record(b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n");
 
     // Daemon's `forward_request` skips `from` (us). No other active
     // conns. Drain: should be empty (proves the from-skip).
-    let after_edge = drain_records(&mut sptps, &stream, &mut pending);
+    let after_edge = fx.drain_records(100);
     assert!(
         after_edge.is_empty(),
         "forward_request should skip from-conn; got: {after_edge:?}"
@@ -2333,15 +1856,9 @@ fn peer_edge_triggers_reachable() {
     // EdgeId slot, the HashMap entry was overwritten in place).
     //
     // Different nonce: `seen_request` would dedup an exact resend.
-    let upd = b"12 33333333 testpeer faraway 10.99.0.2 655 0 99\n";
-    let outs = sptps.send_record(0, upd).expect("add_edge update");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send ADD_EDGE update");
-        }
-    }
+    fx.send_record(b"12 33333333 testpeer faraway 10.99.0.2 655 0 99\n");
     // No reply: forward_request skips us. Drain empty.
-    let after_upd = drain_records(&mut sptps, &stream, &mut pending);
+    let after_upd = fx.drain_records(100);
     assert!(
         after_upd.is_empty(),
         "forward_request should skip from-conn; got: {after_upd:?}"
@@ -2379,10 +1896,7 @@ fn peer_edge_triggers_reachable() {
     );
 
     // ─── stderr: BecameReachable fired for faraway ──────────────
-    drop(stream);
-    let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = fx.kill_and_stderr();
     // The on_ack graph bridge fires testpeer-reachable first.
     assert!(
         stderr.contains("Node testpeer became reachable"),
@@ -3015,204 +2529,33 @@ fn process_priority_low_succeeds() {
 /// listener. Direct neighbors short-circuit to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
 /// directly with the frame body.
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
-#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
 #[allow(clippy::similar_names)] // ctl/ctl2 distinguish first/second control conns
 fn pcap_captures_tcp_packet() {
-    use rand_core::OsRng;
     use std::io::Read;
-    use std::net::TcpStream;
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role, Sptps};
-
-    let tmp = tmp("pcap");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
 
     // ─── config: Mode=switch so route_packet_mac broadcasts ───
-    // Can't reuse `write_config` (router mode). Inline.
-    std::fs::create_dir_all(confbase.join("hosts")).unwrap();
-    std::fs::write(
-        confbase.join("tinc.conf"),
-        "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nMode = switch\n",
-    )
-    .unwrap();
-    std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
-    let seed = [0x42; 32];
-    write_ed25519_privkey(&confbase, &seed);
-    let daemon_pub = common::pubkey_from_seed(&seed);
-
-    let our_key = SigningKey::from_seed(&[0x77; 32]);
-    let our_pub = *our_key.public_key();
-    let b64 = tinc_crypto::b64::encode(&our_pub);
-    std::fs::write(
-        confbase.join("hosts").join("testpeer"),
-        format!("Ed25519PublicKey = {b64}\n"),
-    )
-    .unwrap();
-
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
-    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
-
-    // ─── SPTPS pump (lifted from peer_edge_triggers_reachable) ───
-    let tcp_addr = read_tcp_addr(&pidfile);
-    let stream = TcpStream::connect(tcp_addr).expect("TCP connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+    // The default `write_config` is router mode; we need switch.
+    let mut fx = PeerFixture::spawn_with_config("pcap", |confbase| {
+        std::fs::create_dir_all(confbase.join("hosts")).unwrap();
+        std::fs::write(
+            confbase.join("tinc.conf"),
+            "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nMode = switch\n",
+        )
         .unwrap();
-    writeln!(&stream, "0 testpeer 17.7").unwrap();
-
-    let mut buf = Vec::with_capacity(256);
-    let mut tmp_buf = [0u8; 256];
-    let id_end = loop {
-        let n = (&stream).read(&mut tmp_buf).expect("recv");
-        assert_ne!(n, 0, "daemon closed before ID");
-        buf.extend_from_slice(&tmp_buf[..n]);
-        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            break pos;
-        }
-    };
-    assert_eq!(&buf[..id_end], b"0 testnode 17.7");
-
-    let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
-    label.push(0);
-    let (mut sptps, init) = Sptps::start(
-        Role::Initiator,
-        Framing::Stream,
-        our_key,
-        daemon_pub,
-        label,
-        0,
-        &mut OsRng,
-    );
-    for o in init {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send KEX");
-        }
-    }
-
-    struct NoRng;
-    impl rand_core::RngCore for NoRng {
-        fn next_u32(&mut self) -> u32 {
-            unreachable!()
-        }
-        fn next_u64(&mut self) -> u64 {
-            unreachable!()
-        }
-        fn fill_bytes(&mut self, _: &mut [u8]) {
-            unreachable!()
-        }
-        fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-            unreachable!()
-        }
-    }
-
-    let mut pending: Vec<u8> = buf[id_end + 1..].to_vec();
-    let mut handshake_done = false;
-    let mut got_ack = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !(handshake_done && got_ack) {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            panic!("handshake timeout");
-        }
-        let mut off = 0;
-        while off < pending.len() {
-            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
-            off += n;
-            for o in outs {
-                match o {
-                    Output::Wire { bytes, .. } => {
-                        (&stream).write_all(&bytes).expect("send");
-                    }
-                    Output::HandshakeDone => handshake_done = true,
-                    Output::Record { .. } => got_ack = true,
-                }
-            }
-            if n == 0 {
-                break;
-            }
-        }
-        pending.clear();
-        if handshake_done && got_ack {
-            break;
-        }
-        let n = (&stream).read(&mut tmp_buf).expect("read");
-        if n == 0 {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "daemon EOF before handshake; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        pending.extend_from_slice(&tmp_buf[..n]);
-    }
+        std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
+        let seed = [0x42; 32];
+        write_ed25519_privkey(confbase, &seed);
+        common::pubkey_from_seed(&seed)
+    });
+    let pidfile = fx.pidfile.clone();
+    let socket = fx.socket.clone();
 
     // ACK + reverse edge (so on_ack completes; conn.active = true).
-    let outs = sptps.send_record(0, b"4 0 1 700000c\n").expect("ack");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send ACK");
-        }
-    }
-    let our_edge = b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n";
-    let outs = sptps.send_record(0, our_edge).expect("our edge");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send ADD_EDGE");
-        }
-    }
+    fx.send_record(b"4 0 1 700000c\n");
+    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
 
     // Drain post-ACK ADD_EDGE gossip (don't care, just clear the pipe).
-    stream
-        .set_read_timeout(Some(Duration::from_millis(300)))
-        .unwrap();
-    pending.clear();
-    let drain_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        assert!(Instant::now() <= drain_deadline, "post-ACK drain timeout");
-        let mut off = 0;
-        while off < pending.len() {
-            let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
-            if n == 0 {
-                break;
-            }
-            off += n;
-            for o in outs {
-                if let Output::Wire { bytes, .. } = o {
-                    (&stream).write_all(&bytes).expect("send");
-                }
-            }
-        }
-        pending.drain(..off);
-        match (&stream).read(&mut tmp_buf) {
-            Ok(0) => panic!("daemon EOF post-ACK"),
-            Ok(n) => pending.extend_from_slice(&tmp_buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if pending.is_empty() {
-                    break;
-                }
-            }
-            Err(e) => panic!("read error: {e}"),
-        }
-    }
+    let _ = fx.drain_records(300);
 
     // ─── arm pcap on the control socket ────────────────────────
     // `"18 14 0"`: REQ_PCAP, snaplen=0 (full packet). NO ack
@@ -3253,18 +2596,8 @@ fn pcap_captures_tcp_packet() {
     // raw body. `metaconn.rs` Record arm: tcplen=60 set; NEXT record is the
     // blob. Two records: header line, then frame.
     let pkt_hdr = format!("17 {}\n", frame.len());
-    let outs = sptps.send_record(0, pkt_hdr.as_bytes()).expect("pkt hdr");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send PACKET 17");
-        }
-    }
-    let outs = sptps.send_record(0, &frame).expect("pkt body");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send frame body");
-        }
-    }
+    fx.send_record(pkt_hdr.as_bytes());
+    fx.send_record(&frame);
 
     // ─── read pcap header + body from ctl socket ─────────────
     // `"%d %d %d"` = `"18 14 60"`. Then `send_meta(c,
@@ -3272,23 +2605,13 @@ fn pcap_captures_tcp_packet() {
     // conn is plaintext: `send` appends `\n`, `send_raw` doesn't.
     let mut hdr = String::new();
     match ctl_r.read_line(&mut hdr) {
-        Ok(0) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
+        Ok(0) | Err(_) => {
             panic!(
-                "ctl EOF waiting for pcap header; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
+                "ctl read failed waiting for pcap header; stderr:\n{}",
+                fx.kill_and_stderr()
             );
         }
         Ok(_) => {}
-        Err(e) => {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "ctl read error waiting for pcap header: {e}; stderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
     }
     assert_eq!(hdr, "18 14 60\n", "pcap header line");
 
@@ -3323,18 +2646,8 @@ fn pcap_captures_tcp_packet() {
     // the next packet finds only ctl2. (any_pcap may be re-derived
     // lazily on the first walk; the test doesn't care — it just
     // works either way.)
-    let outs = sptps.send_record(0, pkt_hdr.as_bytes()).expect("pkt hdr 2");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send PACKET 17 #2");
-        }
-    }
-    let outs = sptps.send_record(0, &frame).expect("pkt body 2");
-    for o in outs {
-        if let Output::Wire { bytes, .. } = o {
-            (&stream).write_all(&bytes).expect("send frame body #2");
-        }
-    }
+    fx.send_record(pkt_hdr.as_bytes());
+    fx.send_record(&frame);
 
     let mut hdr2 = String::new();
     ctl2_r.read_line(&mut hdr2).expect("read pcap header 2");
@@ -3344,9 +2657,8 @@ fn pcap_captures_tcp_packet() {
     assert_eq!(&body2[..], &frame[..20], "snaplen clip: first 20 bytes");
 
     // ─── cleanup ─────────────────────────────────────────────
-    drop(stream);
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = fx.child.kill();
+    let _ = fx.child.wait();
 }
 
 /// `REQ_SET_DEBUG` round-trip. Reply with the PREVIOUS level (sent

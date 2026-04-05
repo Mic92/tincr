@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_cmd, wait_for_file,
-    write_ed25519_privkey,
+    Ctl, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_cmd,
+    wait_for_file, write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -656,32 +656,8 @@ fn splice_mitm_rejected() {
     // `splice.py:85-86`. `REQ_DUMP_NODES = 3`. Row format
     // (`gossip.rs::dump_nodes`): `"18 3 NAME ID HOST port PORT ..."`.
     // Terminator: bare `"18 3"`.
-    fn dump_nodes(pidfile: &std::path::Path, socket: &std::path::Path) -> Vec<String> {
-        let cookie = read_cookie(pidfile);
-        let stream = UnixStream::connect(socket).expect("ctl");
-        let mut r = BufReader::new(stream.try_clone().unwrap());
-        let w = stream;
-        writeln!(&w, "0 ^{cookie} 0").unwrap();
-        let mut line = String::new();
-        r.read_line(&mut line).unwrap(); // ID
-        line.clear();
-        r.read_line(&mut line).unwrap(); // ACK
-        writeln!(&w, "18 3").unwrap();
-        let mut rows = Vec::new();
-        loop {
-            line.clear();
-            r.read_line(&mut line).expect("dump row");
-            let l = line.trim_end();
-            if l == "18 3" {
-                break;
-            }
-            rows.push(l.to_owned());
-        }
-        rows
-    }
-
-    let alice_nodes = dump_nodes(&alice.pidfile, &alice.socket);
-    let bob_nodes = dump_nodes(&bob.pidfile, &bob.socket);
+    let alice_nodes = Ctl::connect(&alice.socket, &alice.pidfile).dump(3);
+    let bob_nodes = Ctl::connect(&bob.socket, &bob.pidfile).dump(3);
 
     let alice_stderr = drain_stderr(alice_child);
     let bob_stderr = drain_stderr(bob_child);
