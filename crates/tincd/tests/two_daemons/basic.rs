@@ -382,6 +382,7 @@ fn ping_pong_keepalive() {
     // timeout fires.
     // SAFETY: kill() with SIGSTOP on a valid pid. The child is
     // alive (we just polled it).
+    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
     let alice_pid = alice_child.id() as libc::pid_t;
     assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGSTOP) }, 0);
 

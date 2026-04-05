@@ -46,6 +46,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// wait for `validkey` (poll `dump nodes` for status bit 1), THEN
 /// send the packet that actually crosses.
 #[test]
+#[allow(clippy::similar_names)] // at_out_* vs bt_in_*: parallel names, test compares them
 fn first_packet_across_tunnel() {
     let tmp = tmp("first-pkt");
     let alice = Node::new(tmp.path(), "alice", 0xA7);

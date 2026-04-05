@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 
@@ -86,12 +87,12 @@ impl Node {
         // tinc.conf
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
         if let Some(fd) = device_fd {
-            tinc_conf.push_str(&format!("DeviceType = fd\nDevice = {fd}\n"));
+            writeln!(tinc_conf, "DeviceType = fd\nDevice = {fd}").unwrap();
         } else {
             tinc_conf.push_str("DeviceType = dummy\n");
         }
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            writeln!(tinc_conf, "ConnectTo = {}", other.name).unwrap();
         }
         // `extra_conf` (e.g. `Compression = N`) before the default
         // PingTimeout: first-occurrence-wins in tinc-conf lookup.
@@ -102,7 +103,7 @@ impl Node {
         // hosts/SELF — Port + maybe Subnet.
         let mut self_cfg = format!("Port = {}\n", self.port);
         if let Some(s) = subnet {
-            self_cfg.push_str(&format!("Subnet = {s}\n"));
+            writeln!(self_cfg, "Subnet = {s}").unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(self.name), self_cfg).unwrap();
 
@@ -110,7 +111,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port).unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -136,12 +137,12 @@ impl Node {
 
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
         if let Some(fd) = device_fd {
-            tinc_conf.push_str(&format!("DeviceType = fd\nDevice = {fd}\n"));
+            writeln!(tinc_conf, "DeviceType = fd\nDevice = {fd}").unwrap();
         } else {
             tinc_conf.push_str("DeviceType = dummy\n");
         }
         for ct in connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {ct}\n"));
+            writeln!(tinc_conf, "ConnectTo = {ct}").unwrap();
         }
         tinc_conf.push_str(&self.extra_conf);
         tinc_conf.push_str("PingTimeout = 1\n");
@@ -149,7 +150,7 @@ impl Node {
 
         let mut self_cfg = format!("Port = {}\n", self.port);
         if let Some(s) = subnet {
-            self_cfg.push_str(&format!("Subnet = {s}\n"));
+            writeln!(self_cfg, "Subnet = {s}").unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(self.name), self_cfg).unwrap();
 
@@ -158,7 +159,7 @@ impl Node {
             let mut cfg = format!("Ed25519PublicKey = {pk}\n");
             // Address only for ConnectTo targets.
             if connect_to.contains(&peer.name) {
-                cfg.push_str(&format!("Address = 127.0.0.1 {}\n", peer.port));
+                writeln!(cfg, "Address = 127.0.0.1 {}", peer.port).unwrap();
             }
             // The peer's Subnet must be in OUR copy of hosts/PEER
             // so `route()` knows to forward to them. The C reads
@@ -181,7 +182,7 @@ impl Node {
             self.name
         );
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            writeln!(tinc_conf, "ConnectTo = {}", other.name).unwrap();
         }
         // `extra_conf` FIRST: tinc-conf's `lookup().next()` is
         // first-occurrence-wins; tests that set PingTimeout via
@@ -207,7 +208,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port).unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 

@@ -23,12 +23,14 @@ pub(crate) fn write_fd(fd: i32, buf: &[u8]) {
     // SAFETY: write(2) on a valid fd. SEQPACKET is one-shot (no
     // short writes for in-flight datagrams).
     let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    assert_eq!(
-        ret as usize,
-        buf.len(),
+    assert!(
+        ret >= 0,
         "write fd={fd}: {}",
         std::io::Error::last_os_error()
     );
+    #[allow(clippy::cast_sign_loss)] // guarded by ret >= 0 above
+    let wrote = ret as usize;
+    assert_eq!(wrote, buf.len(), "short write fd={fd}");
 }
 
 /// Non-blocking read; `None` on EAGAIN. The poll loop wraps this.
@@ -44,6 +46,7 @@ pub(crate) fn read_fd_nb(fd: i32) -> Option<Vec<u8>> {
         panic!("read fd={fd}: {e}");
     }
     assert!(ret != 0, "read fd={fd}: EOF (peer closed)");
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     buf.truncate(ret as usize);
     Some(buf)
 }
@@ -54,7 +57,7 @@ pub(crate) fn read_fd_nb(fd: i32) -> Option<Vec<u8>> {
 /// nothing checks them (`route_ipv4` doesn't, and the packet never
 /// hits a kernel IP stack).
 pub(crate) fn mk_ipv4_pkt(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
-    let total_len = (20 + payload.len()) as u16;
+    let total_len = u16::try_from(20 + payload.len()).expect("payload too big for IPv4");
     let mut p = Vec::with_capacity(20 + payload.len());
     p.push(0x45); // version=4, IHL=5
     p.push(0); // DSCP/ECN

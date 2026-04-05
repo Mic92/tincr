@@ -226,9 +226,7 @@ fn three_daemon_relay() {
             None
         })
     }));
-    let recv = if let Ok(r) = recv_result {
-        r
-    } else {
+    let Ok(recv) = recv_result else {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
         let ms = drain_stderr(mid_child);
@@ -845,7 +843,7 @@ fn udp_relay_gate_unauthenticated_sender() {
 
     // Wait for full mesh reachability (mid knows both, both know
     // each other transitively).
-    let _alice_ctl = alice.ctl();
+    let alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
     let mut mid_ctl = mid.ctl();
 
@@ -917,7 +915,7 @@ fn udp_relay_gate_unauthenticated_sender() {
     );
 
     // ─── assert: mid logged the gate ────────────────────────────
-    drop(_alice_ctl);
+    drop(alice_ctl);
     drop(bob_ctl);
     drop(mid_ctl);
     let _ = mid_child.kill();
