@@ -1,35 +1,34 @@
 //! I/O readiness loop. Ports `linux/event.c` (`io_add`/`_set`/`_del`/
 //! `event_loop`) and the per-platform splay-tree bookkeeping.
 //!
-//! mio abstracts the epoll/kqueue split — `bsd/event.c` and
-//! `event_select.c` are not separately ported. The mio `Poll` is the
-//! `epollset` static; `Token(usize)` is `epoll_event.data.ptr`.
+//! The platform syscall surface lives in `epoll.rs` (and a future
+//! `kqueue.rs`). The `OwnedFd` is the `epollset` static; the slot
+//! index is `epoll_event.data.u64`.
 //!
-//! # `SourceFd` doesn't own the fd
+//! # The loop doesn't own fds
 //!
 //! `linux/event.c` does `epoll_ctl(epollset, ..., io->fd, ...)` — the
 //! event loop never owns fds. The `connection_t` does, via
 //! `c->socket`. The loop just tells the kernel "wake me when this fd
-//! is readable." mio's `SourceFd(&RawFd)` is the same shape: borrowed
-//! at the register/reregister/deregister call site, dropped
-//! immediately.
+//! is readable."
 //!
 //! This means `EventLoop` stores `RawFd` per slot (so it can
 //! reregister/deregister later), but doesn't `close()` on drop.
 //! Closing is the `connection_t` equivalent's job.
 
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
-use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token};
+#[cfg(target_os = "linux")]
+mod epoll;
+#[cfg(target_os = "linux")]
+use epoll::{RawEvent, create, ctl, del, ev_readable, ev_token, ev_writable, wait};
 
 use crate::MAX_EVENTS_PER_TURN;
 
 /// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h:26-27`.
 ///
-/// `mio::Interest` is `NonZeroU8` (can't be empty) — fine for us. The
 /// `io_set(io, 0)` is only ever called internally during `io_del`.
 /// The daemon-level API never sets zero interest; it goes READ ↔︎
 /// READ|WRITE (the meta connection adds WRITE on outbuf, drops it
@@ -42,14 +41,6 @@ pub enum Io {
 }
 
 impl Io {
-    fn to_mio(self) -> Interest {
-        match self {
-            Io::Read => Interest::READABLE,
-            Io::Write => Interest::WRITABLE,
-            Io::ReadWrite => Interest::READABLE | Interest::WRITABLE,
-        }
-    }
-
     /// Does this interest include the given readiness? The
     /// generation-guard substitute — see `dispatch` below.
     const fn wants(self, ready: Ready) -> bool {
@@ -68,7 +59,8 @@ pub enum Ready {
     Write,
 }
 
-/// Opaque io handle. The mio `Token` IS this (same `usize`).
+/// Opaque io handle. The epoll token (`epoll_event.u64`) IS this
+/// (same `usize`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IoId(usize);
 
@@ -81,14 +73,14 @@ struct Slot<W> {
     what: W,
 }
 
-/// The event loop. Owns the mio `Poll`, the `Events` buffer, and the
+/// The event loop. Owns the epoll fd, the events buffer, and the
 /// slot slab. Does NOT own fds.
 ///
 /// Generic over `W: Copy` — the daemon's `enum IoWhat`. See lib.rs.
 pub struct EventLoop<W> {
-    poll: Poll,
-    events: Events,
-    /// Hand-rolled slab. `None` = freed slot. mio `Token(idx)` indexes
+    ep: OwnedFd,
+    events: Vec<RawEvent>,
+    /// Hand-rolled slab. `None` = freed slot. The epoll token indexes
     /// directly. Same data structure as `Timers::slots` but with
     /// `Option<Slot>` instead of a separate freelist — the `None`
     /// IS the freelist marker, and we need `get(token).is_none()`
@@ -104,8 +96,8 @@ impl<W: Copy> EventLoop<W> {
     /// Returns the underlying I/O error if epoll/kqueue creation fails.
     pub fn new() -> io::Result<Self> {
         Ok(Self {
-            poll: Poll::new()?,
-            events: Events::with_capacity(MAX_EVENTS_PER_TURN),
+            ep: create()?,
+            events: Vec::with_capacity(MAX_EVENTS_PER_TURN),
             slots: Vec::new(),
             free: Vec::new(),
         })
@@ -116,11 +108,11 @@ impl<W: Copy> EventLoop<W> {
     /// Re-adding the same fd is the caller's bug — that's
     /// "already added, idempotent." We don't have that signal (caller
     /// doesn't pass an `IoId` until they have one). Calling `add`
-    /// twice for the same fd is a caller bug. mio will return
-    /// `EEXIST` from epoll (`epoll_ctl(EPOLL_CTL_ADD)` on an
-    /// already-registered fd fails); we propagate it.
+    /// twice for the same fd is a caller bug. epoll returns `EEXIST`
+    /// (`epoll_ctl(EPOLL_CTL_ADD)` on an already-registered fd
+    /// fails); we propagate it.
     ///
-    /// The fd is registered with the kernel (via `SourceFd`) here.
+    /// The fd is registered with the kernel here.
     /// `EventLoop` stores it for later reregister/deregister; does
     /// NOT close it on drop or `del`.
     ///
@@ -137,12 +129,7 @@ impl<W: Copy> EventLoop<W> {
         // goes back to the freelist. C's order is: populate `io_t`,
         // then `io_set` which `epoll_ctl`s — but C doesn't check
         // errors on populate, so the order doesn't matter there.
-        let token = Token(idx);
-        if let Err(e) = self
-            .poll
-            .registry()
-            .register(&mut SourceFd(&fd), token, interest.to_mio())
-        {
+        if let Err(e) = ctl(self.ep.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, idx, interest) {
             self.free.push(idx);
             return Err(e);
         }
@@ -159,12 +146,11 @@ impl<W: Copy> EventLoop<W> {
     /// Returns early if interest is unchanged — `epoll_ctl(MOD)` is a
     /// syscall; skipping it when nothing changed is meaningful.
     ///
-    /// mio's `reregister` is `MOD` directly (epoll on Linux, `EV_ADD` on kqueue which
-    /// upserts). We don't have the `flags == 0` case (see `Io` docs),
-    /// so reregister is right.
+    /// We don't have the `flags == 0` case (see `Io` docs), so `MOD`
+    /// is right.
     ///
     /// # Errors
-    /// Propagates `epoll_ctl(MOD)` failures from `reregister`.
+    /// Propagates `epoll_ctl(MOD)` failures.
     ///
     /// # Panics
     /// If `id` is dangling. C dereferences caller-owned `io_t*` —
@@ -174,31 +160,26 @@ impl<W: Copy> EventLoop<W> {
         if slot.interest == Some(interest) {
             return Ok(());
         }
-        // We MOD via reregister.
         // Edge case: slot.interest == None means it was deregistered
         // (only happens internally via del, which frees the slot —
         // so we never get here with None and a live id. The expect
-        // above would have fired. But: register-not-reregister if
-        // interest was None, for symmetry with what del would do).
+        // above would have fired. But: ADD-not-MOD if interest was
+        // None, for symmetry with what del would do).
         let fd = slot.fd;
-        let result = if slot.interest.is_some() {
-            self.poll
-                .registry()
-                .reregister(&mut SourceFd(&fd), Token(id.0), interest.to_mio())
+        let op = if slot.interest.is_some() {
+            libc::EPOLL_CTL_MOD
         } else {
             // Unreachable in current API (del frees slot). Kept for
             // when/if we expose a "deregister but keep slot" path.
-            self.poll
-                .registry()
-                .register(&mut SourceFd(&fd), Token(id.0), interest.to_mio())
+            libc::EPOLL_CTL_ADD
         };
-        result?;
+        ctl(self.ep.as_raw_fd(), op, fd, id.0, interest)?;
         slot.interest = Some(interest);
         Ok(())
     }
 
     /// Force-rearm an fd at its current interest. Edge-triggered
-    /// epoll (`EPOLLET`, which mio always uses) only fires once per
+    /// epoll (`EPOLLET`, set in `epoll.rs`) only fires once per
     /// readiness edge: if a drain loop returns before reading to
     /// `EAGAIN` (to bound iterations under sustained load), the next
     /// `turn()` won't re-fire even though the fd is still readable.
@@ -222,10 +203,13 @@ impl<W: Copy> EventLoop<W> {
             // fire), but mirrors the unreachable arm in `set`.
             return Ok(());
         };
-        let fd = slot.fd;
-        self.poll
-            .registry()
-            .reregister(&mut SourceFd(&fd), Token(id.0), interest.to_mio())
+        ctl(
+            self.ep.as_raw_fd(),
+            libc::EPOLL_CTL_MOD,
+            slot.fd,
+            id.0,
+            interest,
+        )
     }
 
     /// Deregister from epoll AND free the slot.
@@ -248,7 +232,7 @@ impl<W: Copy> EventLoop<W> {
         };
         if slot.interest.is_some() {
             // Best-effort.
-            let _ = self.poll.registry().deregister(&mut SourceFd(&slot.fd));
+            let _ = del(self.ep.as_raw_fd(), slot.fd);
         }
         self.free.push(id.0);
     }
@@ -268,9 +252,9 @@ impl<W: Copy> EventLoop<W> {
     /// loop when a cb removes/alters another slot, we check per-event:
     /// `slots.get(token)` returns `None` if removed; `interest.wants
     /// (ready)` is false if reregistered to a non-overlapping
-    /// interest. Stale events are dropped silently. mio is level-
-    /// triggered — anything still actually ready will re-fire next
-    /// turn.
+    /// interest. Stale events are dropped silently. mio is
+    /// level-triggered — anything still actually ready will re-fire
+    /// next turn.
     ///
     /// This processes more events per wake than C (C bails at first
     /// change; we keep going). That's correct: the C bail is
@@ -299,9 +283,8 @@ impl<W: Copy> EventLoop<W> {
         // anything else as error. `sockwouldblock` is `EWOULDBLOCK || EINTR`
         // (`utils.h:62`).
         //
-        // mio does NOT swallow EINTR. Verified mio 1.2 `epoll.rs:60`:
-        // `syscall!(epoll_wait(...))` — the `syscall!` macro just
-        // `Err(last_os_error())`s on rc<0. EINTR comes through.
+        // `epoll::wait` does NOT swallow EINTR — it comes through as
+        // `io::Error` with kind `Interrupted`.
         //
         // EINTR happens when a signal arrives during `epoll_wait`.
         // `SA_RESTART` does NOT auto-retry epoll_wait (it's in the
@@ -316,7 +299,7 @@ impl<W: Copy> EventLoop<W> {
         // same: a signal might have re-armed a timer (it didn't, the
         // handler is just write-one-byte, but the structure is sound).
         // The self-pipe byte will be there next turn.
-        match self.poll.poll(&mut self.events, timeout) {
+        match wait(self.ep.as_raw_fd(), &mut self.events, timeout) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // Empty `out`, caller loops. The self-pipe is
@@ -328,7 +311,7 @@ impl<W: Copy> EventLoop<W> {
         }
 
         for ev in &self.events {
-            let idx = ev.token().0;
+            let idx = ev_token(ev);
             // Generation-guard substitute, part 1: slot still exists.
             let Some(slot) = self.slots.get(idx).and_then(Option::as_ref) else {
                 continue; // del'd by an earlier event in this batch
@@ -337,7 +320,7 @@ impl<W: Copy> EventLoop<W> {
             let interest = slot.interest;
 
             // WRITE first. Part 2: interest still includes WRITE.
-            if ev.is_writable() && interest.is_some_and(|i| i.wants(Ready::Write)) {
+            if ev_writable(ev) && interest.is_some_and(|i| i.wants(Ready::Write)) {
                 out.push((what, Ready::Write));
             }
 
@@ -345,7 +328,7 @@ impl<W: Copy> EventLoop<W> {
             // collecting into `out`, not firing inline, so it cannot
             // have changed since the WRITE check. The C re-check at
             // :149 sits BETWEEN cb invocations; we have no cb yet.
-            if ev.is_readable() && interest.is_some_and(|i| i.wants(Ready::Read)) {
+            if ev_readable(ev) && interest.is_some_and(|i| i.wants(Ready::Read)) {
                 out.push((what, Ready::Read));
             }
         }
@@ -379,7 +362,6 @@ impl<W: Copy> EventLoop<W> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum What {
@@ -603,7 +585,7 @@ mod tests {
     }
 
     /// `add` failure rolls back the slot allocation. EEXIST: register
-    /// the same fd twice (mio/epoll rejects).
+    /// the same fd twice (epoll rejects).
     #[test]
     fn add_failure_frees_slot() {
         let mut ev = EventLoop::new().unwrap();
@@ -615,10 +597,8 @@ mod tests {
 
         // Same fd again — epoll EEXIST.
         let err = ev.add(fd, Io::Read, What::Conn(99)).unwrap_err();
-        // Linux: EEXIST. kqueue: also fails (EV_ADD on existing fd
-        // with same filter is upsert, but mio's bookkeeping might
-        // differ — don't pin the exact errno, just that it failed
-        // and didn't leak a slot).
+        // Linux: EEXIST. Don't pin the exact errno, just that it
+        // failed and didn't leak a slot.
         let _ = err;
         assert_eq!(ev.len(), 1, "failed add must not leak slot");
 
