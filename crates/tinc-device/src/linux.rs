@@ -205,6 +205,112 @@ impl Tun {
             mac,
         })
     }
+
+    /// `IFF_MULTI_QUEUE` open: N fds attached to one TUN device.
+    ///
+    /// Kernel `tun_automq_select_queue` (`tun.c:474`) hashes the inner
+    /// flow's 4-tuple to pick a queue. One TCP connection → one queue →
+    /// one reader thread, no eBPF prog needed. The kernel's flow learning
+    /// IS the steering: 1024 distinct flows across 2 queues showed a
+    /// 354k/402k split (1.1× balance ratio) in the prototype.
+    ///
+    /// `n=1` → calls `Tun::open` (no `IFF_MULTI_QUEUE` flag, exact same
+    /// fd as today). The flag forces the kernel to alloc 256 tx queues
+    /// even at n=1 (`MAX_TAP_QUEUES`); waste it doesn't need.
+    ///
+    /// `n>1` requirements:
+    ///   - `cfg.iface` set: the second `TUNSETIFF` finds the device by
+    ///     name. Auto-pick (`tun%d`) would create N independent devices.
+    ///   - `Mode::Tun`: TAP has no `IFF_VNET_HDR` here, and sharding is
+    ///     router-mode only (switch mode's `mac_table` is shared mutable
+    ///     on the data path — MAC learning).
+    ///
+    /// `TUNSETIFF` flags = `IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE |
+    /// IFF_VNET_HDR` = `0x5101`. The `IFF_MULTI_QUEUE` bit must be set
+    /// on EVERY call; `tun.c:2719` rejects the second call if the bit
+    /// doesn't match the first (`EINVAL`).
+    ///
+    /// `TUNSETOFFLOAD` once on fd[0]: offload bits live on the netdev
+    /// (`tun_struct.features`), not per-`tun_file`. One call arms TSO
+    /// for all queues.
+    ///
+    /// # Errors
+    /// `InvalidInput`: `n>1` with `cfg.iface = None` or `Mode::Tap`, or
+    /// iface name ≥ 16 bytes. `PermissionDenied`/`NotFound`: same as
+    /// `open`. `EINVAL` on `TUNSETIFF`: kernel rejected the flag combo
+    /// (kernel <3.8 — ancient; `IFF_MULTI_QUEUE`+`IFF_VNET_HDR` proven
+    /// to compose on 6.19.9).
+    ///
+    /// # Panics
+    /// `n == 0` or `n > 256` (kernel `MAX_TAP_QUEUES`).
+    pub fn open_mq(cfg: &DeviceConfig, n: usize) -> io::Result<Vec<Tun>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        assert!(n > 0 && n <= 256, "queue count {n} out of [1, 256]");
+
+        if n == 1 {
+            // One queue: no MQ flag. Exact same fd shape as before
+            // open_mq existed. The daemon's single-shard path is
+            // bit-identical.
+            return Tun::open(cfg).map(|t| vec![t]);
+        }
+
+        // ─── n > 1: explicit name + TUN-only ───────────────────────────
+        let Some(name) = cfg.iface.as_deref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multiqueue requires explicit iface name \
+                 (kernel matches subsequent TUNSETIFF by name; \
+                 auto-pick would create N independent devices)",
+            ));
+        };
+        if cfg.mode != Mode::Tun {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multiqueue requires Mode::Tun (sharding is router-mode \
+                 only; TAP path has no IFF_VNET_HDR)",
+            ));
+        }
+
+        let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
+        let ifr_name = pack_ifr_name(Some(name))?;
+
+        // 0x5101. The MQ bit must be set on every TUNSETIFF —
+        // tun.c:2719 rejects mismatch. Same vnet_hdr handling as
+        // single-queue (drain/write_super are unchanged).
+        #[allow(clippy::cast_possible_truncation)]
+        let flags =
+            (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_MULTI_QUEUE | libc::IFF_VNET_HDR) as i16;
+
+        let mut queues = Vec::with_capacity(n);
+        for k in 0..n {
+            let fd = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(device)?;
+
+            let iface = tunsetiff(fd.as_raw_fd(), flags, ifr_name)?;
+
+            // Offload is per-netdev. Once. Same feature-detect
+            // warning as Tun::open: failure means vnet_hdr is on
+            // but gso_type stays NONE — drain handles that.
+            if k == 0
+                && let Err(e) = tunsetoffload(fd.as_raw_fd())
+            {
+                log::warn!(target: "tinc_device",
+                           "TUNSETOFFLOAD failed on multiqueue: {e}; \
+                            vnet_hdr active but no TSO");
+            }
+
+            queues.push(Tun {
+                fd,
+                iface,
+                mode: Mode::Tun,
+                mac: None,
+            });
+        }
+        Ok(queues)
+    }
 }
 
 // ifr_name packing — the testable seam
@@ -812,6 +918,62 @@ mod tests {
         // 0x0001 | 0x1000 | 0x4000 = 0x5001.
         assert_eq!(flags_for(Mode::Tun), 0x5001);
         assert_eq!(flags_for(Mode::Tap), 0x1002);
+    }
+
+    /// `open_mq(n>1)` flags: `IFF_TUN|IFF_NO_PI|IFF_MULTI_QUEUE|
+    /// IFF_VNET_HDR` = `0x5101`. Validated against kernel 6.19.9;
+    /// pin the bit-value so a libc upgrade or refactor that drops
+    /// a flag fails CI.
+    #[test]
+    fn iff_multi_queue_value() {
+        assert_eq!(libc::IFF_MULTI_QUEUE, 0x0100);
+        // The full open_mq combo:
+        let combo = libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_MULTI_QUEUE | libc::IFF_VNET_HDR;
+        assert_eq!(combo, 0x5101);
+    }
+
+    /// `open_mq(n>1)` rejects `iface = None`. Validation BEFORE
+    /// open (no `CAP_NET_ADMIN` needed). Same shape as
+    /// `open_too_long_iface_err_before_open`.
+    #[test]
+    fn open_mq_requires_iface() {
+        let cfg = DeviceConfig {
+            iface: None,
+            ..DeviceConfig::default()
+        };
+        let e = Tun::open_mq(&cfg, 2).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert!(e.to_string().contains("explicit iface name"));
+    }
+
+    /// `open_mq(n>1)` rejects TAP. Router-mode only.
+    #[test]
+    fn open_mq_requires_tun_mode() {
+        let cfg = DeviceConfig {
+            iface: Some("shard0".to_owned()),
+            mode: Mode::Tap,
+            ..DeviceConfig::default()
+        };
+        let e = Tun::open_mq(&cfg, 2).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert!(e.to_string().contains("Mode::Tun"));
+    }
+
+    /// `open_mq(1)` ≡ `open()`. No MQ flag; same validation path.
+    /// With `iface = None` it should succeed validation (and fail
+    /// on the syscall, non-root).
+    #[test]
+    fn open_mq_one_is_open() {
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("(skipping open_mq_one_is_open: root would open a TUN)");
+            return;
+        }
+        // No iface, n=1: delegates to Tun::open, which permits
+        // None (kernel picks). Fails on EACCES/ENOENT, NOT
+        // InvalidInput — proves the n=1 branch was taken.
+        let cfg = DeviceConfig::default();
+        let e = Tun::open_mq(&cfg, 1).unwrap_err();
+        assert_ne!(e.kind(), io::ErrorKind::InvalidInput);
     }
 
     // pack_ifr_name — the testable seam
