@@ -238,7 +238,7 @@ impl Daemon {
     /// receive, SRCID alone is fine (AEAD tag validates end-to-end);
     /// for relay we never decrypt, so this gate is the only thing
     /// stopping a 1:1 UDP reflector attack (security audit `2f72c2ba`).
-    #[allow(clippy::too_many_lines)] // fast-path open_data_into + slow-path Vec<Output> fallback share the dst_id/src_id parse and the udp_addr-confirm logic
+    #[allow(clippy::too_many_lines)] // fast-path open_data_into + slow-path Vec<Output> fallback share the dst_id/src_id parse and the udp_addr-confirm logic; relay branch already split to handle_relay_receive
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
         // ─── DHT port-probe demux (Rust extension). Gate is source
         // addr, NOT `pkt[0]==b'd'`: SPTPS's first byte is dst_id6[0] =
@@ -267,15 +267,6 @@ impl Daemon {
         let src_id = NodeId6::from_bytes(pkt[6..12].try_into().unwrap());
         let ct = &pkt[12..];
 
-        // O(nodes) scan is fine (relay is the rare branch).
-        // `n.is_some()` ≡ "this UDP src addr belongs to a node that
-        // has confirmed UDP with us".
-        let n: Option<NodeId> = peer.and_then(|peer_addr| {
-            self.tunnels.iter().find_map(|(&nid, t)| {
-                (t.status.udp_confirmed && t.udp_addr == Some(peer_addr)).then_some(nid)
-            })
-        });
-
         // No decrypt-by-trial for legacy packets (no NodeId6 prefix)
         // or the ~never NodeId6 collision case (sha512(name)[:6],
         // birthday on 48 bits). SPTPS-only build — log + drop.
@@ -289,59 +280,10 @@ impl Daemon {
         // `dst==null` → direct-to-us. `dst!=null`: either still for
         // us (sender didn't know we're a direct neighbor) or a relay
         // packet we forward.
-        if !dst_id.is_null() {
-            let Some(to_nid) = self.id6_table.lookup(dst_id) else {
-                log::debug!(target: "tincd::net",
-                            "Received UDP relay packet from {from_name} \
-                             with unknown dst ID {dst_id}");
-                return;
-            };
-            // dst just became unreachable (race).
-            if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
-                log::debug!(target: "tincd::net",
-                            "Cannot relay UDP packet from {from_name}: \
-                             dst {dst_id} is unreachable");
-                return;
-            }
-            // Hot relay path. `from_nid` so the wire prefix carries
-            // the ORIGINAL source ID.
-            if to_nid != self.myself {
-                // Unauthenticated sender cannot relay. Without this
-                // gate anyone who knows two node names can use us as
-                // a 1:1 UDP reflector (security audit `2f72c2ba`).
-                if n.is_none() {
-                    log::debug!(target: "tincd::net",
-                                "Dropping relay request from unauthenticated UDP \
-                                 sender ({peer:?}): dst={dst_id} src={src_id}");
-                    return;
-                }
-                log::debug!(target: "tincd::net",
-                            "Relaying UDP packet from {from_name} to {} \
-                             ({} bytes)",
-                            self.node_log_name(to_nid), ct.len());
-                let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(ct));
-                nw |= self.try_tx(to_nid, true);
-                if nw {
-                    self.maybe_set_write_any();
-                }
-                return;
-            }
-            // dst == myself but not nullid: fall through to direct
-            // receive. Packet arrived via a dynamic relay; if WE're
-            // the static relay tell `from` where they're reachable
-            // so next packet skips the dynamic relay. Gated to
-            // static-relay-only so every hop in a chain doesn't emit
-            // its own hint.
-            let from_via = self
-                .last_routes
-                .get(from_nid.0 as usize)
-                .and_then(Option::as_ref)
-                .map(|r| r.via);
-            // Non-null dst_id6 means SOMEONE relayed (if `from`
-            // itself, the prefix would be null).
-            if from_via == Some(self.myself) && self.send_udp_info(from_nid, &from_name, true) {
-                self.maybe_set_write_any();
-            }
+        if !dst_id.is_null()
+            && self.handle_relay_receive(ct, peer, dst_id, src_id, from_nid, &from_name)
+        {
+            return;
         }
 
         let tunnel = self.tunnels.entry(from_nid).or_default();
@@ -506,5 +448,86 @@ impl Daemon {
         if nw {
             self.maybe_set_write_any();
         }
+    }
+
+    /// Relay-receive path. `dst_id != null` → packet is addressed to
+    /// someone, possibly us-via-relay. Returns `true` when the packet
+    /// was consumed (forwarded or dropped); `false` when `dst ==
+    /// myself` and the caller should fall through to local decrypt.
+    ///
+    /// Validates the immediate UDP sender against the addr-confirm
+    /// gate before forwarding — we never decrypt on the relay path,
+    /// so without this check anyone who knows two node names could
+    /// use us as a 1:1 UDP reflector (security audit `2f72c2ba`).
+    fn handle_relay_receive(
+        &mut self,
+        ct: &[u8],
+        peer: Option<SocketAddr>,
+        dst_id: NodeId6,
+        src_id: NodeId6,
+        from_nid: NodeId,
+        from_name: &str,
+    ) -> bool {
+        let Some(to_nid) = self.id6_table.lookup(dst_id) else {
+            log::debug!(target: "tincd::net",
+                        "Received UDP relay packet from {from_name} \
+                         with unknown dst ID {dst_id}");
+            return true;
+        };
+        // dst just became unreachable (race).
+        if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+            log::debug!(target: "tincd::net",
+                        "Cannot relay UDP packet from {from_name}: \
+                         dst {dst_id} is unreachable");
+            return true;
+        }
+        // Hot relay path. `from_nid` so the wire prefix carries
+        // the ORIGINAL source ID.
+        if to_nid != self.myself {
+            // Unauthenticated sender cannot relay. Without this
+            // gate anyone who knows two node names can use us as
+            // a 1:1 UDP reflector (security audit `2f72c2ba`).
+            // O(nodes) scan is fine (relay is the rare branch):
+            // "does this UDP src addr belong to a node that has
+            // confirmed UDP with us?"
+            let n_confirmed = peer.is_some_and(|peer_addr| {
+                self.tunnels
+                    .values()
+                    .any(|t| t.status.udp_confirmed && t.udp_addr == Some(peer_addr))
+            });
+            if !n_confirmed {
+                log::debug!(target: "tincd::net",
+                            "Dropping relay request from unauthenticated UDP \
+                             sender ({peer:?}): dst={dst_id} src={src_id}");
+                return true;
+            }
+            log::debug!(target: "tincd::net",
+                        "Relaying UDP packet from {from_name} to {} \
+                         ({} bytes)",
+                        self.node_log_name(to_nid), ct.len());
+            let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(ct));
+            nw |= self.try_tx(to_nid, true);
+            if nw {
+                self.maybe_set_write_any();
+            }
+            return true;
+        }
+        // dst == myself but not nullid: fall through to direct
+        // receive. Packet arrived via a dynamic relay; if WE're
+        // the static relay tell `from` where they're reachable
+        // so next packet skips the dynamic relay. Gated to
+        // static-relay-only so every hop in a chain doesn't emit
+        // its own hint.
+        let from_via = self
+            .last_routes
+            .get(from_nid.0 as usize)
+            .and_then(Option::as_ref)
+            .map(|r| r.via);
+        // Non-null dst_id6 means SOMEONE relayed (if `from`
+        // itself, the prefix would be null).
+        if from_via == Some(self.myself) && self.send_udp_info(from_nid, from_name, true) {
+            self.maybe_set_write_any();
+        }
+        false
     }
 }
