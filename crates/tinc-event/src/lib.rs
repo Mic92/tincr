@@ -23,7 +23,6 @@
 //! [`Timers`] field docs for why `BTreeMap` over `BinaryHeap`.
 
 #![deny(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 mod io;
 mod timer;

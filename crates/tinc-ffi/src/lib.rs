@@ -26,7 +26,6 @@
 //! upstream. Serial tests don't care.
 
 #![warn(missing_docs)]
-#![allow(clippy::pedantic)] // test scaffolding, not API surface
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -52,7 +51,9 @@ static RNG_LOCK: Mutex<()> = Mutex::new(());
 /// `harness_t`s and re-seeds, the only shared state is the RNG context,
 /// which the next `seed_rng` overwrites unconditionally.
 pub fn serial_guard() -> MutexGuard<'static, ()> {
-    RNG_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    RNG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -147,10 +148,12 @@ pub fn c_check_seqno(
     let mut st = FfiReplayState {
         inseqno,
         farfuture,
+        // replay window is u8 in tinc.conf (max 255); test harness caps at 32
+        #[allow(clippy::cast_possible_truncation)]
         replaywin: late.len() as u32,
         late: late.as_mut_ptr(),
     };
-    let ok = unsafe { ffi_check_seqno(&mut st, seqno, update) };
+    let ok = unsafe { ffi_check_seqno(&raw mut st, seqno, update) };
     (ok, st.inseqno, st.farfuture)
 }
 
@@ -249,6 +252,9 @@ impl CKey {
     /// Matches `tinc_crypto::sign::SigningKey::from_blob` — same input
     /// produces the same signing behaviour, modulo whatever bugs exist
     /// on either side. That's the whole point.
+    ///
+    /// # Panics
+    /// If C-side `xzalloc` returns NULL (i.e. OOM on a test box — won't happen).
     #[must_use]
     pub fn from_private_blob(blob: &[u8; 96]) -> Self {
         let ptr = unsafe { ffi_ecdsa_from_blob(blob.as_ptr()) };
@@ -307,6 +313,10 @@ impl<'k> CSptps<'k> {
     ///
     /// The returned events include the first wire bytes — `sptps_start`
     /// calls `send_kex` before returning.
+    ///
+    /// # Panics
+    /// If C-side `calloc` for the harness arena returns NULL.
+    #[must_use]
     pub fn start(
         role: Role,
         framing: Framing,
@@ -355,6 +365,10 @@ impl<'k> CSptps<'k> {
     /// Send an application record. Only valid after [`Event::HandshakeDone`].
     ///
     /// `record_type` must be < 128. The C side asserts that.
+    ///
+    /// # Panics
+    /// If `data.len() > u16::MAX` (SPTPS framing caps records at 64K),
+    /// or `sptps_send_record` returns false (state machine misuse).
     pub fn send_record(&mut self, record_type: u8, data: &[u8]) -> Vec<Event> {
         let len: u16 = data.len().try_into().expect("SPTPS records cap at 64K");
         let ok = unsafe { ffi_send_record(self.h.as_ptr(), record_type, data.as_ptr(), len) };
@@ -367,6 +381,9 @@ impl<'k> CSptps<'k> {
     /// the Rust state machine handles re-KEX, which has different
     /// transitions than the initial handshake (`SPTPS_ACK` only happens
     /// on rekey — see `receive_handshake`'s switch).
+    ///
+    /// # Panics
+    /// If `sptps_force_kex` returns false (not in `SECONDARY_KEX` state).
     pub fn force_kex(&mut self) -> Vec<Event> {
         let ok = unsafe { ffi_force_kex(self.h.as_ptr()) };
         assert!(ok, "sptps_force_kex returned false (not in SECONDARY_KEX?)");
@@ -380,7 +397,7 @@ impl<'k> CSptps<'k> {
     fn drain(&self) -> Vec<Event> {
         let mut buf_ptr: *const u8 = std::ptr::null();
         let mut overflow = false;
-        let len = unsafe { ffi_drain(self.h.as_ptr(), &mut buf_ptr, &mut overflow) };
+        let len = unsafe { ffi_drain(self.h.as_ptr(), &raw mut buf_ptr, &raw mut overflow) };
 
         assert!(
             !overflow,

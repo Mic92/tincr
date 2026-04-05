@@ -22,7 +22,6 @@
 //! `base64 -d` gives 32 different bytes → wrong key → false negative.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use std::process::ExitCode;
 

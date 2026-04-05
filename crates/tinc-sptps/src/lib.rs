@@ -45,7 +45,7 @@
 //! right message. Byte-identity proves we built the same message.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic, missing_docs)]
+#![warn(missing_docs)]
 #![allow(
     clippy::doc_markdown,
     // Same rationale as tinc-crypto: backticking proper nouns reads like

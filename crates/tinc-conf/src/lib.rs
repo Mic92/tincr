@@ -56,7 +56,6 @@
 //! test the framing.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 pub mod parse;
 pub mod pem;

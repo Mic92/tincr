@@ -12,10 +12,8 @@ edition.workspace = true
 # daemon (tinc_cli.rs's fake_daemon_setup is the inverse of this);
 # socket2 wraps the C's four-step socket→setsockopt→bind→listen.
 
-[lints.rust]
-# `--cfg fuzzing` gates subnet_tree::cmp_ipv4_fuzz. Set by cargo-fuzz,
-# not a feature; whitelist it so check-cfg doesn't bark.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+[lints]
+workspace = true
 
 [[bin]]
 name = "tincd"

@@ -11,7 +11,7 @@
 //! changed something protocol-relevant** — do not "fix" the test.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs, clippy::pedantic)]
+#![warn(missing_docs)]
 #![allow(
     clippy::module_name_repetitions,
     // doc_markdown wants backticks around words like ChaCha, OpenSSH, X25519.

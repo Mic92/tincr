@@ -14,3 +14,6 @@ edition.workspace = true
 # control socket, and the self-pipe).
 mio = { version = "1", default-features = false, features = ["os-poll", "os-ext"] }
 libc = "0.2"
+
+[lints]
+workspace = true

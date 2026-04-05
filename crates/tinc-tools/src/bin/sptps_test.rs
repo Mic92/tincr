@@ -30,7 +30,6 @@
 //! Don't reword.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 // All the `as` casts are `usize ↔ ssize_t` on `read()`/`write()`
 // returns, and `i32` fd extractions. Monotone, never wrap in practice.
 #![allow(

@@ -9,7 +9,6 @@
 //! ceremony for not much. Hand-roll.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;

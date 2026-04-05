@@ -18,6 +18,22 @@ edition = "2024"
 license = "GPL-2.0-or-later"
 rust-version = "1.85"
 
+# Single source of truth for lint policy. Every crate sets
+# `[lints] workspace = true`. CI runs `clippy --all-targets -- -D warnings`,
+# so warn-level pedantic here = hard error in CI.
+#
+# `priority = -1` lets crate-level #[allow(clippy::specific_lint)] in
+# source override the group: pedantic loads first, item allows win.
+# Without it, the group is non-deterministically ordered against
+# explicit lints and you get spurious flicker.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+# `--cfg fuzzing` is set by cargo-fuzz; not a cargo feature, so check-cfg
+# would bark. Harmless for crates that don't use it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 # Thin LTO for cross-crate inlining on the data path. The hot chain
 # is `daemon::net::send_sptps_packet` (tincd) → `Sptps::seal_data_into`
 # (tinc-sptps) → `ChaPoly::seal_into` (tinc-crypto) → `apply_keystream`

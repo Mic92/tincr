@@ -36,7 +36,7 @@
 // already does plenty of OS-specific things via nix; one localtime_r
 // is the same shape as one nix::sys::stat::utimes.
 #![deny(unsafe_code)]
-#![warn(clippy::pedantic)]
+
 // Backticking proper nouns reads like a ransom note. Same allow as
 // tinc-crypto/tinc-sptps.
 

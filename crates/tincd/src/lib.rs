@@ -24,7 +24,6 @@
 //! | `DEBUG_TRAFFIC` | `"tincd::route"` | `LOG_DEBUG` | `Debug` |
 
 #![deny(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 pub mod addrcache;
 pub mod autoconnect;

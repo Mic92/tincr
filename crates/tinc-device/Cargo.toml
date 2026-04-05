@@ -41,19 +41,5 @@ nix = { version = "0.29", default-features = false, features = ["socket", "uio",
 # fail with EACCES). The test skip is the only consumer.
 nix = { version = "0.29", default-features = false, features = ["user"] }
 
-[lints.rust]
-# Third crate with scoped allows: tinc-tools (localtime_r,
-# TIOCGWINSZ), now this (TUNSETIFF). The pattern: nix gives the
-# safe-usage MACRO, libc gives the constants, the macro generates
-# `unsafe fn`, we wrap it once with a SAFETY comment that says
-# "the macro IS the safe-usage pattern, the unsafe is FFI calling
-# convention."
-unsafe_code = "deny"
-
-[lints.clippy]
-# Same pedantic gate as the other crates.
-pedantic = { level = "warn", priority = -1 }
-# doc_markdown wants backticks on every identifier-shaped word.
-# Module-level allow with rationale; we'd be backticking every
-# third word in the offset-layout doc.
-doc_markdown = "allow"
+[lints]
+workspace = true

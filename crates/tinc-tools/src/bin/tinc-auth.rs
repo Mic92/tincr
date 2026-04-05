@@ -60,7 +60,6 @@
 // std has no safe wrapper because "this fd is uniquely yours" is
 // a runtime contract the type system can't express.
 #![deny(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;

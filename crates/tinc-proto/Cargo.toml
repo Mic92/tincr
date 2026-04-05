@@ -9,3 +9,6 @@ description = "Wire-protocol parse/format — Rust port of protocol_*.c sscanf/p
 
 [dev-dependencies]
 proptest = "1"
+
+[lints]
+workspace = true

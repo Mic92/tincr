@@ -13,5 +13,5 @@ thiserror.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
 tempfile = "3"
 
-[lints.clippy]
-pedantic = "warn"
+[lints]
+workspace = true

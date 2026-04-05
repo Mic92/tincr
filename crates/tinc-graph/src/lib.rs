@@ -83,7 +83,6 @@
 //! and the cascade nulled the reverse).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use std::collections::{BTreeMap, VecDeque};
 

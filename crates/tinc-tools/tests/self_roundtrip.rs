@@ -62,7 +62,7 @@
 //! goodbye message.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
+
 // Backticking proper nouns reads like a ransom note. Same allow as
 // tinc-crypto/tinc-sptps.
 
