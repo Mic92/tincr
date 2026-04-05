@@ -1,4 +1,4 @@
-//! Userspace TSO split — `RUST_REWRITE_10G.md` Phase 2a.
+//! Userspace TSO split — `RUST_REWRITE_10G.md`.
 //!
 //! When `IFF_VNET_HDR + TUNSETOFFLOAD(TUN_F_TSO4|TUN_F_TSO6)` is set,
 //! the kernel TCP stack stops segmenting at the TUN MTU. It hands us
@@ -149,8 +149,8 @@ impl VirtioNetHdr {
     /// Encode into a 10-byte buffer. wg-go `encode` (`:45`): an
     /// `unsafe.Slice` memcpy. We write fields explicitly so the LE
     /// encoding is documented at the boundary, mirroring [`decode`].
-    /// Phase 2b GRO write path: this fills the slot that `1da3d1d7`
-    /// left zeroed.
+    /// GRO TUN write path: this fills the `vnet_hdr` slot that
+    /// `1da3d1d7` left zeroed.
     ///
     /// # Panics
     /// Debug-asserts `buf.len() >= 10`. Callers slice the GRO
@@ -199,8 +199,8 @@ impl VirtioNetHdr {
 /// `u64::carrying_add` (nightly) or manual `(sum, carry)` tuple
 /// threading. The 8-byte-per-iteration loop with `u64::from_be_
 /// bytes` reads + `wrapping_add` + post-hoc carry count would gain
-/// ~0.3µs. Not nothing at 10G; not the bottleneck at 3G. Phase 3
-/// par-encrypt amortizes crypto first; revisit checksum after.
+/// ~0.3µs. Not nothing at 10G; not the bottleneck at 3G. Crypto
+/// dominates; revisit checksum unrolling if it ever doesn't.
 ///
 /// `initial` is BIG-endian-interpreted (wg-go does a
 /// `NativeEndian → BigEndian` swap on entry). We accumulate in BE
@@ -569,7 +569,7 @@ pub fn tso_split(
     Ok(i)
 }
 
-// ── GRO coalesce (Phase 2b) ────────────────────────────────────────
+// ── GRO coalesce ───────────────────────────────────────────────────
 
 /// Max coalesced IP packet size. The kernel's `tun_get_user` accepts
 /// up to `IP_MAX_MTU` (65535) for `gso_type != NONE` skbs. We cap
@@ -593,8 +593,8 @@ pub enum GroVerdict {
     NotCandidate,
 }
 
-/// Single-slot TCP GRO accumulator. The Phase-2b inverse of
-/// [`tso_split`]: collect same-flow packets back into a super-
+/// Single-slot TCP GRO accumulator. The inverse of [`tso_split`]:
+/// collect same-flow packets back into a super-
 /// segment + `virtio_net_hdr`, write once.
 ///
 /// **Single-slot, append-only.** wg-go's `tcpGROTable` is a full
@@ -603,7 +603,7 @@ pub enum GroVerdict {
 /// seq order (per recvmmsg batch). Mismatch → flush → restart
 /// handles the rare interleaved-flow case correctly (just doesn't
 /// coalesce across the gap). The iperf3-is-one-flow assumption
-/// matches `RUST_REWRITE_10G.md` Phase 2b's profiling target.
+/// matches `RUST_REWRITE_10G.md`'s profiling target.
 ///
 /// **No csum verification.** wg-go's `checksumValid` gate
 /// (`offload_linux.go:389`) protects against an inner packet with

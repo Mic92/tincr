@@ -2,8 +2,8 @@
 //!
 //! Only used for the rare case: relaying a too-big IPv4 packet with
 //! DF clear. Modern OSes set DF on TCP (PMTUD); this fires for legacy
-//! UDP / weird configs. We could drop these (we did before this
-//! commit) but RFC 791 §2.3 says routers MUST fragment.
+//! UDP / weird configs. RFC 791 §2.3 says routers MUST fragment;
+//! we comply even though it's rare.
 //!
 //! The 8-byte alignment (`& !7`) is RFC 791 §3.2: the fragment-offset
 //! field is in units of 8 bytes, so every fragment except the last

@@ -5,9 +5,9 @@
 //! faithful conduit: bytes go in, the right bytes come out, the event
 //! sequence matches what `sptps.c` documents.
 //!
-//! Once Phase 2 lands, the same test bodies run again with one peer swapped
-//! for the Rust implementation. The "spec" of what events to expect is
-//! whatever this file asserts — so be precise.
+//! The same test bodies run again in `tinc-sptps/tests/vs_c.rs` with one
+//! peer swapped for the Rust implementation. The "spec" of what events to
+//! expect is whatever this file asserts — so be precise.
 //!
 //! ## What a stream-mode handshake looks like on the wire
 //!
@@ -58,10 +58,10 @@ const DGRAM_SIG_LEN: usize = 4 + 1 + 64;
 // Helpers
 
 /// Generate a key blob from a deterministic seed. Uses tinc-crypto's
-/// `from_seed`, which Phase 0a's KATs proved matches `ed25519_create_keypair`
+/// `from_seed`, which the KAT vectors proved matches `ed25519_create_keypair`
 /// byte-for-byte. So the C side is signing/verifying with key material that
 /// the Rust side could have produced — exactly the cross-implementation
-/// scenario Phase 2 cares about.
+/// scenario the differential tests exercise.
 fn keypair(seed_tag: u8) -> ([u8; 96], [u8; 32]) {
     let mut seed = [0u8; 32];
     seed[0] = seed_tag;
@@ -357,7 +357,7 @@ fn datagram_handshake_c_to_c() {
 fn handshake_is_deterministic_under_same_seeds() {
     let _g = serial_guard();
     // The whole point of the harness: same inputs → same wire bytes.
-    // If this test ever flakes, the harness is useless as a Phase 2 oracle.
+    // If this test ever flakes, the harness is useless as a differential-test oracle.
 
     #[allow(clippy::items_after_statements)] // local helper, clearer inline
     fn run() -> Vec<Vec<u8>> {
@@ -450,8 +450,8 @@ fn rekey_uses_ack_state() {
     // Re-KEX after the initial handshake exercises a different state
     // transition: SPTPS_ACK is only reachable when outstate was already
     // true (see receive_handshake). The initial handshake skips it via
-    // a synthetic receive_ack. Phase 2's Rust state machine has to get
-    // both paths right; this test is the oracle for the second one.
+    // a synthetic receive_ack. The Rust state machine has to get both paths
+    // right; this test is the oracle for the second one.
 
     let (alice_priv, alice_pub) = keypair(1);
     let (bob_priv, bob_pub) = keypair(2);
@@ -512,7 +512,7 @@ fn rekey_uses_ack_state() {
     //   - !initiator → send_sig (encrypted with NEW key... no wait.
     //     outcipher is set at the end of receive_sig. send_sig uses
     //     send_record_priv which checks outstate, which was already true.
-    //     So SIG is encrypted with the OLD key. This matters for Phase 2.)
+    //     So SIG is encrypted with the OLD key. The Rust side must match this.)
     //   - outstate was already true → send_ack (encrypted with... the
     //     NEW key now, since chacha_poly1305_set_key already ran. But
     //     wait, send_ack comes BEFORE the set_key call. Let me re-read.)

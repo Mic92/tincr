@@ -1,9 +1,10 @@
 //! The `tinc` CLI binary.
 //!
-//! ## Current scope: Phase 4a filesystem-only commands
+//! ## Dispatch
 //!
-//! Just `init` for now. The dispatch table (`COMMANDS`) is the same
-//! shape as upstream's `commands[]` array; adding a command is one entry + one module in `cmd/`. The argv parsing and
+//! The dispatch table (`COMMANDS`) is the same shape as upstream's
+//! `commands[]` array; adding a command is one entry + one module in
+//! `cmd/`. The argv parsing and
 //! `Paths` resolution are done once, here, and every command gets them
 //! pre-chewed.
 //!
@@ -45,23 +46,21 @@ use tinc_tools::names::{Paths, PathsInput};
 struct CmdEntry {
     name: &'static str,
     /// `connect_tincd` commands. C: `commands[].ctl` (well — the C
-    /// table doesn't actually have that flag, the comment in 4a lied;
-    /// the C just calls `connect_tincd` inline in each cmd_*. But
-    /// the *intent* is the same: some commands need the daemon, some
-    /// don't.).
+    /// table doesn't actually have that flag; the C just calls
+    /// `connect_tincd` inline in each cmd_*. But the *intent* is
+    /// the same: some commands need the daemon, some don't.).
     ///
     /// When `true`, `main()` calls `paths.resolve_runtime()` before
     /// dispatch. The fs probe (`access(2)` on `/var/run/tinc.pid`)
-    /// only fires for commands that need it. 4a commands like
-    /// `init` and `export` never reach for `pidfile()`, so the
+    /// only fires for commands that need it. Filesystem commands
+    /// like `init` and `export` never reach for `pidfile()`, so the
     /// `Option<PathBuf>` stays `None` and the panic-on-unresolved
     /// catches accidental use.
     ///
     /// Why a flag and not a second table: the handler signature is
-    /// the same (`&Paths, &Globals, &[String]`). The 4a doc comment
-    /// predicted "separate table because `&mut CtlSocket` instead of
-    /// `&Paths`", but `connect()` takes `&Paths` and creates the
-    /// socket internally. Same shape, one table.
+    /// the same (`&Paths, &Globals, &[String]`). `connect()` takes
+    /// `&Paths` and creates the socket internally. Same shape, one
+    /// table.
     needs_daemon: bool,
     /// Positional args after the subcommand name. The handler does its
     /// own arity checking — `init` wants exactly one, `export` wants
@@ -99,8 +98,8 @@ struct Globals {
 
 /// The `commands[]` dispatch table.
 ///
-/// 4a (filesystem) and 5b (daemon RPC) commands share one table —
-/// the signature is the same after all (`connect()` takes `&Paths`,
+/// Filesystem and daemon-RPC commands share one table — the
+/// signature is the same after all (`connect()` takes `&Paths`,
 /// creates its own socket). The `needs_daemon` flag drives whether
 /// `resolve_runtime()` runs before dispatch.
 const COMMANDS: &[CmdEntry] = &[
@@ -191,7 +190,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: cmd_join,
         help: "join INVITATION        Join a VPN using an invitation.",
     },
-    // ─── 5b: daemon RPC
+    // ─── daemon RPC
     // The simple ones. Each is `connect → send → ack → check`.
     // `dump`/`top`/`log`/`pcap` are the complex ones — streaming or
     // multi-row — they land separately.
@@ -601,11 +600,12 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     Ok(())
 }
 
-// 5b adapters — the simple control commands
+// Daemon-RPC adapters — the simple control commands
 //
 // Each is: arity check → `cmd::ctl_simple::*`. The arity check is
 // the only thing the adapter adds; everything else (connect, send,
-// ack) is in the lib function. Same pattern as the 4a adapters.
+// ack) is in the lib function. Same pattern as the filesystem-
+// command adapters.
 
 /// `cmd_pid`: zero args. Prints daemon's pid + newline.
 fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
@@ -913,8 +913,8 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// death is `Ok(())` — silent exit, same as upstream.
 ///
 /// `g.netname` for the row-0 header (`netname ? netname : ""`).
-/// This is the FIRST adapter to use Globals — the
-/// 4a/5b commands take `_: &Globals`. (`cmd_invite` uses it too, for
+/// This is the FIRST adapter to use Globals — the others take
+/// `_: &Globals`. (`cmd_invite` uses it too, for
 /// the URL fragment, but that's a Paths concern; this is pure
 /// display.)
 fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
@@ -1212,7 +1212,7 @@ fn parse_global_options(
                 return Ok((input, globals, rest));
             }
             // `--pidfile=FILE`. Overrides the /var/run ↔ confbase resolution dance entirely. Only
-            // matters for 5b commands. No short form (C: long-only).
+            // matters for daemon-RPC commands. No short form (C: long-only).
             "--pidfile" => {
                 let val = args.next().ok_or("option --pidfile requires an argument")?;
                 input.pidfile = Some(PathBuf::from(val));
@@ -1344,7 +1344,7 @@ fn main() -> ExitCode {
         None => {
             // `if(optind >= argc) return cmd_shell(...)` — bare
             // `tinc` enters interactive shell mode. We don't have
-            // shell mode (5b). Print help, exit 1. Matches what
+            // shell mode. Print help, exit 1. Matches what
             // `git` does for bare `git`.
             eprintln!("No command given.");
             eprintln!("Try `tinc --help' for more information.");
@@ -1388,10 +1388,11 @@ fn main() -> ExitCode {
     };
     let mut paths = Paths::for_cli(&input);
 
-    // 5b commands need pidfile/socket resolved. The probe touches
-    // the fs (`access(2)` on `/var/run/tinc.X.pid`) so we only do
-    // it for commands that need it. 4a commands stay probe-free —
-    // `tinc init` doesn't `stat /var/run` for no reason.
+    // Daemon-RPC commands need pidfile/socket resolved. The probe
+    // touches the fs (`access(2)` on `/var/run/tinc.X.pid`) so we
+    // only do it for commands that need it. Filesystem commands
+    // stay probe-free — `tinc init` doesn't `stat /var/run` for
+    // no reason.
     //
     // The `&input` reborrow works because `for_cli` only borrows;
     // `resolve_runtime` borrows again. (If for_cli consumed, we'd

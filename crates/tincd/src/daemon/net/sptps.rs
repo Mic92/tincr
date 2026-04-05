@@ -703,7 +703,7 @@ impl Daemon {
             inherit_tos(&mut self.listeners, sock, sockaddr, self.tx_priority);
         }
 
-        // Phase 1 (`RUST_REWRITE_10G.md`): if we're inside
+        // TX batching (`RUST_REWRITE_10G.md`): if we're inside
         // `on_device_read`'s drain loop AND on the cached-
         // addr fast path, STAGE into `tx_batch` instead of sending.
         // The drain loop ships the whole run in one `sendmsg` with
@@ -712,7 +712,7 @@ impl Daemon {
         // Gates for staging:
         //   - `tx_batch.is_some()`: only set during the drain loop.
         //     UDP-recv→forward, meta-conn→relay, probes hit `None`
-        //     and fall through to immediate send (Phase 0 path).
+        //     and fall through to immediate send.
         //   - `cached.is_some()`: the cold path's `cold_sockaddr`
         //     is a stack local that dies at function return; can't
         //     stash a reference to it. Cold path is pre-PMTU-
@@ -748,14 +748,14 @@ impl Daemon {
             return false; // staged; UDP send doesn't touch outbuf
         }
 
-        // Immediate-send path (Phase 0). Hit when: outside the
-        // drain loop, OR cold path (no cached addr), OR relay/
+        // Immediate-send path. Hit when: outside the drain loop,
+        // OR cold path (no cached addr), OR relay/
         // handshake (`ct.is_some()`).
         self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen);
         false // UDP send doesn't touch any meta-conn outbuf
     }
 
-    /// Phase-0 single-frame UDP send for [`Self::send_sptps_data_relay`].
+    /// Single-frame UDP send for [`Self::send_sptps_data_relay`].
     /// `count=1` means `stride == last_len`; both `Portable` and
     /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink.
     fn send_sptps_udp_immediate(

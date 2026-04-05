@@ -127,11 +127,10 @@ impl Tun {
         // `IFF_ONE_QUEUE` NOT set: no-op since kernel `5d09710`
         // (2.6.27).
         //
-        // TUN: `IFF_VNET_HDR | IFF_NO_PI` (Phase 2a). Reads are
+        // TUN: `IFF_VNET_HDR | IFF_NO_PI`. Reads are
         // `[vnet_hdr(10)][raw IP]`; eth header synthesized in
         // `drain()` or by `tso_split`. Same approach as wg-go
-        // (`tun_linux.go:566`). The C's +10 tun_pi trick is gone
-        // — it was a workaround for not having vnet_hdr.
+        // (`tun_linux.go:566`).
         //
         // TAP: `IFF_NO_PI` only. vnet_hdr would need `tso_split`
         // to preserve the real eth header instead of synthesizing
@@ -176,7 +175,7 @@ impl Tun {
             Mode::Tun => None,
         };
 
-        // ─── TUNSETOFFLOAD (Phase 2a, TUN only) ────────────────
+        // ─── TUNSETOFFLOAD (TUN only) ──────────────────────────
         // Feature-detect: `TUNSETOFFLOAD` returns `EINVAL` for
         // unknown flags (`tun.c:2886` "gives the user a way to test
         // for new features"). `TUN_F_TSO4/6` is kernel 2.6.27 —
@@ -453,11 +452,9 @@ impl Device for Tun {
     /// TUN doesn't go through here: `drain()` is overridden and
     /// reads directly via `read_fd` (`vnet_hdr` layout). The trait
     /// default `drain` calls `self.read()`, but our override
-    /// doesn't. The legacy +10 `tun_pi` trick is gone (no `tun_pi`
-    /// with `IFF_NO_PI`); see git history at `1da3d1d7^` for the
-    /// archaeology.
+    /// doesn't.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // TUN: dead path since Phase 2a (vnet drain bypasses).
+        // TUN: dead path — the vnet drain override bypasses this.
         // If this fires, drain() got de-overridden.
         debug_assert_eq!(
             self.mode,
@@ -505,11 +502,9 @@ impl Device for Tun {
             // ICMP reply or a forwarded inbound packet, both done
             // after write returns).
             //
-            // Phase 2b (GRO TUN write) will fill in a real vnet_hdr
-            // here for coalesced ACK bursts. For now: zeros.
-            //
-            // The legacy +10 tun_pi write is gone: with IFF_NO_PI
-            // there's no tun_pi prefix to construct.
+            // The GRO coalesce path fills a real vnet_hdr via
+            // `write_super`; THIS path (per-packet write) always
+            // sends gso_type=NONE.
             Mode::Tun => {
                 debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
                 // Ethertype → 0. Bytes [4..12] are already 0
@@ -527,7 +522,7 @@ impl Device for Tun {
         }
     }
 
-    /// GRO super write (Phase 2b). `buf` is `[vnet_hdr(10)][IP
+    /// GRO super write. `buf` is `[vnet_hdr(10)][IP
     /// ≤65535]` from `GroBucket::flush` — already in `tun_get_user`'s
     /// expected shape (`tun.c:1731`). Just `write()`.
     ///
@@ -803,9 +798,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<libc::ifreq>(), 40);
     }
 
-    /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (Phase 2a;
-    /// the legacy +10 `tun_pi` trick is gone in favor of `vnet_hdr`;
-    /// wg-go `tun_linux.go:566` does the same). TAP flags:
+    /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (same as
+    /// wg-go `tun_linux.go:566`). TAP flags:
     /// `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
     /// `Tun::open`'s flag computation gets caught.
     #[test]

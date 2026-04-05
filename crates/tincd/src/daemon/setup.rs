@@ -271,9 +271,9 @@ fn register_listeners(
             .map_err(SetupError::Io)?;
         ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
             .map_err(SetupError::Io)?;
-        // Phase 1 (`RUST_REWRITE_10G.md`): on Linux, dup into
-        // `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per
-        // batch). No probe: kernel ≥4.18 floor; ENOPROTOOPT at
+        // On Linux, dup into `linux::Fast` (UDP_SEGMENT cmsg,
+        // one sendmsg per batch — `RUST_REWRITE_10G.md`).
+        // No probe: kernel ≥4.18 floor; ENOPROTOOPT at
         // first batch → panic with a clear message (see
         // `egress/linux.rs::map_errno`). Non-Linux stays
         // `Portable` (count × sendto).
@@ -428,7 +428,7 @@ fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
     }
 }
 
-// Daemon — the formerly-global state + the loop
+// Daemon — the C-global state + the loop
 
 impl Daemon {
     /// `confbase` is the `-c` argument (or `CONFDIR/tinc[/NETNAME]`

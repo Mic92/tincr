@@ -321,7 +321,7 @@ fn real_tun_unreachable() {
     drop(netns);
 }
 
-/// Phase 2a TSO ingest integrity gate. `RUST_REWRITE_10G.md`.
+/// TSO ingest integrity gate. `RUST_REWRITE_10G.md`.
 ///
 /// Linux TUN unconditionally sets `IFF_VNET_HDR` (since `5cf9b12d`);
 /// `Tun::open` then issues `TUNSETOFFLOAD(TUN_F_TSO4|6)`. Kernel TCP stops segmenting at the

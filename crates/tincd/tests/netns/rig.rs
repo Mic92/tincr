@@ -333,7 +333,7 @@ impl Node {
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         tinc_conf.push_str(extra);
-        // Linux TUN unconditionally uses IFF_VNET_HDR (Phase 2a).
+        // Linux TUN unconditionally uses IFF_VNET_HDR.
         // `real_tun_ping`/`real_tun_unreachable` exercise the
         // GSO_NONE path (ICMP → gso_none_checksum + eth synth);
         // `tso_ingest_stream_integrity` exercises the Super arm.

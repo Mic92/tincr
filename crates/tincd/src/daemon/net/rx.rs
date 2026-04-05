@@ -179,7 +179,7 @@ impl Daemon {
         // ─── Phase 2: dispatch. iov borrows are dead; `batch.bufs`
         // is now free to read while we hold `&mut self`.
         //
-        // Phase 2b GRO TUN write: arm the coalescer for the duration
+        // GRO TUN write: arm the coalescer for the duration
         // of this dispatch loop. `send_packet_myself` (the local-
         // delivery sink, hit via `route_packet` when the inner dst
         // is in our subnet) sees `gro_bucket.is_some()` and offers

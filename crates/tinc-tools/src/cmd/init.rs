@@ -18,8 +18,7 @@
 //!
 //! ## Intentional deviations from upstream
 //!
-//! Documented in `RUST_REWRITE_PLAN.md` Phase 4a as deliberate, not
-//! bugs to fix later.
+//! Deliberate, not bugs to fix later.
 //!
 //! - **No interactive name prompt.** The prompt only exists for the
 //!   interactive `tinc> ` shell mode, which we don't have. When shell

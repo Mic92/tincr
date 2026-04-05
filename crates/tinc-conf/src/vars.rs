@@ -14,8 +14,8 @@
 //! | invitation join | lookup; reject `!SAFE` keys from invitation payload (defense: invitation comes from a peer you don't yet trust) |
 //! | tab-complete | prefix scan over names |
 //!
-//! Three of four are `tinc-tools` commands (4a/5b). One is the daemon
-//! (invitation handling, Phase 5). The table is *about* config keys,
+//! Three of four are `tinc-tools` commands. One is the daemon (invitation
+//! handling). The table is *about* config keys,
 //! which is `tinc-conf`'s domain. Putting it here means both binaries
 //! reach it without `tinc-tools` ← `tincd` or vice versa.
 //!

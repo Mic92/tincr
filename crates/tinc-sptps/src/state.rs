@@ -9,7 +9,7 @@
 //!
 //! - **`receive_sig` sets the new `outcipher` *after* `send_sig` and
 //!   `send_ack`.** During rekey, both go out under the old key. See the
-//!   doc comment on `receive_sig` — Phase 0b's harness test pinned this.
+//!   doc comment on `receive_sig` — the `tinc-ffi` harness test pinned this.
 //!
 //! - **`receive_handshake`'s switch falls through `SECONDARY_KEX → KEX`.**
 //!   When the responder gets an unsolicited rekey, it sends its own KEX
@@ -294,7 +294,7 @@ impl ReplayWindow {
         }
         // C also tracks `received` (total packet count, resets on inseqno
         // wrap). It's read by net_packet.c for stats but never by sptps.c
-        // itself. Phase 4 wires that in; for now, omitted.
+        // itself. Omitted here; the daemon counts packets at its own layer.
         Ok(())
     }
 }
@@ -435,9 +435,7 @@ impl Sptps {
     ///
     /// Hot-path note: this is the ONE per-packet allocation on the SPTPS
     /// send side. One right-sized `Vec`, one `extend_from_slice(body)`
-    /// inside `seal_into`, encrypt-in-place. Previous version built a `pt` scratch
-    /// Vec, called `seal()` (which alloc'd a fresh output and copied `pt`
-    /// into it), then copied THAT into `wire` — 3 allocs, 3 copies of body.
+    /// inside `seal_into`, encrypt-in-place.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
         let seqno = self.outseqno;
         self.outseqno = self.outseqno.wrapping_add(1);

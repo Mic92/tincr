@@ -32,16 +32,14 @@
 //! replaced with a `Vec` + stable sort — config files are tens of
 //! lines; `O(n)` lookup is invisible next to the `fopen`.
 //!
-//! ## What's deferred
+//! ## What lives elsewhere
 //!
-//!  - `get_config_address` → `str2addrinfo` → `getaddrinfo`. Phase 5.
-//!  - `get_config_subnet` → `str2net` already lives in `tinc-proto`.
-//!    Daemon glues those together; not this crate's job.
-//!  - `read_server_config`'s `conf.d/*.conf` scan and `cmdline_conf`
-//!    merge — daemon startup, Phase 5. The pieces (`parse_file` +
-//!    `Config::merge`) are here.
-//!  - `names.c` (`confbase`, `pidfilename`, etc.) — Phase 5 with the
-//!    `directories` crate. Nothing in *this* crate hardcodes paths.
+//!  - `get_config_address` → `str2addrinfo` → `getaddrinfo` — daemon-side
+//!    (`crates/tincd`). Network I/O, not config parsing.
+//!  - `get_config_subnet` → `str2net` lives in `tinc-proto`. Daemon glues
+//!    those together; not this crate's job.
+//!  - `names.c` (`confbase`, `pidfilename`, etc.) — `tinc-tools::names`.
+//!    Nothing in *this* crate hardcodes paths.
 //!  - `append_config_file` — `tincctl` territory, not the daemon.
 //!
 //! ## PEM

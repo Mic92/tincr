@@ -717,7 +717,7 @@ mod bench {
     }
 
     // ═══════════════════════════ latency measurement ══════════════════════════════
-    // Phase 3 (par-crypto) batches decrypts: frame 0 waits for the
+    // Batched decrypt makes frame 0 wait for the
     // whole batch before route fires. Throughput doesn't see that —
     // it's a tail-latency cost. Idle ping won't trigger batching
     // either (threshold is ~8 frames in flight). So: ping under

@@ -2,12 +2,11 @@
 //! vtable; daemon stores `Box<dyn Device>`. Setup/close are the
 //! constructor + `Drop`.
 //!
-//! ## Linux TUN: `vnet_hdr` (Phase 2a)
+//! ## Linux TUN: `vnet_hdr`
 //!
 //! `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`. Reads are `[virtio_net_
 //! hdr(10)][raw IP]`; the eth header is synthesized by `drain()` or
-//! `tso_split`. The legacy `+10` `tun_pi` trick is gone — it was a
-//! workaround for not having `vnet_hdr`.
+//! `tso_split`.
 //!
 //! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No `vnet_hdr`.
 //!
@@ -139,8 +138,8 @@ pub trait Device: Send {
     /// packet. We return `Err`; daemon does the same.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// Phase 2b GRO write: pass `[vnet_hdr(10)][IP super]` straight
-    /// to the TUN fd. Unlike [`write`], no eth-header munging — the
+    /// GRO super write: pass `[vnet_hdr(10)][IP super]` straight to
+    /// the TUN fd. Unlike [`write`], no eth-header munging — the
     /// GRO bucket already builds the kernel's `tun_get_user` shape.
     ///
     /// Default = unsupported. Only the Linux `Tun` backend overrides
@@ -174,14 +173,12 @@ pub trait Device: Send {
     /// daemon skips the register.
     fn fd(&self) -> Option<std::os::unix::io::RawFd>;
 
-    /// Drain available frames into the arena. The 10G ingest seam
-    /// (`RUST_REWRITE_10G.md` Phase 0).
+    /// Drain available frames into the arena. The 10G ingest seam.
     ///
     /// Default: loop `self.read()` into arena slots until EAGAIN or
-    /// `cap`. Never returns `Super` — that's a Phase-2 `vnet_hdr` device
+    /// `cap`. Never returns `Super` — that's the Linux `vnet_hdr`
     /// override. The default IS the BSD/macOS/mock path: their
-    /// existing byte-pipe `read()` is the building block. Zero changes
-    /// to `bsd.rs`/`linux.rs` for Phase 0.
+    /// existing byte-pipe `read()` is the building block.
     ///
     /// `cap` clamps to `arena.cap()`. Typically `DEVICE_DRAIN_CAP=64`
     /// (`daemon/net.rs` — over-draining starves TUN of TX time, see
@@ -349,8 +346,7 @@ mod tests {
 
     // ─── default drain()
     //
-    // The default impl is the BSD/macOS path (`RUST_REWRITE_10G.md`
-    // Phase 0: "zero changes to bsd.rs"). Test it with a mock that
+    // The default impl is the BSD/macOS path. Test it with a mock that
     // returns a scripted sequence of read() outcomes; the trait body
     // does the rest. This is the seam — if the default is right,
     // every byte-pipe backend is right.

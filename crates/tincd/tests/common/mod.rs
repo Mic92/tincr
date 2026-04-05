@@ -42,8 +42,7 @@ use std::time::{Duration, Instant};
 /// processes) don't collide. Cleanup on drop. No `tempfile` dep.
 ///
 /// `prefix` namespaces by test FILE so `ls /tmp/tincd-*` is
-/// readable in debug. Each file used to bake in a different prefix
-/// (`tincd-2d-`, `tincd-stop-`, …); now it's an arg.
+/// readable in debug.
 pub struct TmpGuard(PathBuf);
 
 impl TmpGuard {

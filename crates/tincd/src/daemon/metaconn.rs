@@ -609,9 +609,8 @@ impl Daemon {
                     // ─── tcplen short-circuit
                     // PACKET 17 sets tcplen; the NEXT record is a raw
                     // VPN blob (single-encrypted, meta-SPTPS only —
-                    // direct neighbors only). WIRE BUG found by
-                    // crossimpl.rs: before this branch we'd terminate
-                    // on every probe.
+                    // direct neighbors only). crossimpl.rs pins this:
+                    // terminating here drops every C-peer MTU probe.
                     if conn.tcplen != 0 {
                         // SPTPS records are exact; mismatch is a
                         // framing bug, not a partial read.

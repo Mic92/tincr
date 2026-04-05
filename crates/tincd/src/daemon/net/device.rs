@@ -13,13 +13,11 @@ impl Daemon {
     /// the TUN shouldn't starve meta-conn flush/UDP recv/timers)
     /// and pulls `GSO_NONE` ACKs that pile up behind a TSO super.
     ///
-    /// Phase 0 (`RUST_REWRITE_10G.md`): same loop body, but the
-    /// per-read `device.read(&mut stack_buf)` becomes one
-    /// `device.drain(&mut arena, cap)` returning N frames in arena
+    /// One `device.drain(&mut arena, cap)` returns N frames in arena
     /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
-    /// byte the same syscall sequence on bsd/linux/fd backends. The
-    /// seam is in place for Phase 2 (`vnet_hdr` device returns `Super`).
-    // `Super` arm is the Phase-2a TSO-split path. Factoring it out
+    /// byte the same syscall sequence on bsd/fd backends. The Linux
+    /// `vnet_hdr` device override returns `Super` for TSO segments.
+    // `Super` arm is the TSO-split path. Factoring it out
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
     // the control flow reads cleaner inline.
     pub(in crate::daemon) fn on_device_read(&mut self) {
@@ -36,7 +34,7 @@ impl Daemon {
         // re-fires next turn). Either way, no behavior change for
         // the non-vnet path.
         let mut iters = 0usize;
-        // tx_batch armed ACROSS outer-loop iterations. The Phase-1
+        // tx_batch armed ACROSS outer-loop iterations. The original
         // batch-then-ship logic was designed for one drain returning
         // N frames; the vnet path returns 1 frame per drain but
         // multiple drains per epoll wake. The burst is in `iters`,
@@ -89,20 +87,19 @@ impl Daemon {
                 }
                 tinc_device::DrainResult::Frames { count } => {
                     self.device_errors = 0;
-                    // Phase 1 (`RUST_REWRITE_10G.md`): same per-frame
-                    // route+encrypt loop, but the SEND is deferred.
-                    // `tx_batch` being `Some` signals the send site
+                    // TX batching (`RUST_REWRITE_10G.md`): same
+                    // per-frame route+encrypt loop, but the SEND is
+                    // deferred. `tx_batch` being `Some` signals the
+                    // send site
                     // (`send_sptps_data_relay` UDP path) to stage
                     // instead of `sendto`. After the loop, ship the
                     // accumulated run in one `EgressBatch` (one
                     // `sendmsg` with `UDP_SEGMENT` cmsg on Linux).
                     //
                     // The encrypt still goes into `tx_scratch` per-
-                    // frame (Phase 0 unchanged); the batch COPIES from
-                    // there. One extra ~1.5KB memcpy per frame vs
-                    // 43× fewer syscalls. Phase 3 (par-encrypt) will
-                    // encrypt directly into batch slots; for now the
-                    // memcpy is the price of not restructuring
+                    // frame; the batch COPIES from there. One extra
+                    // ~1.5KB memcpy per frame vs 43× fewer syscalls.
+                    // The memcpy is the price of not restructuring
                     // `seal_data_into`'s Vec-based API.
                     //
                     // Lazy init: the ~100KB buffer only allocates the
@@ -115,7 +112,7 @@ impl Daemon {
                     // Frames{1} multiple times this epoll wake — bob's
                     // ACK-burst case). An idle ping fires epoll per-
                     // frame, hits count==1 && iters==1, falls through
-                    // to Phase-0 immediate send (no memcpy tax).
+                    // to immediate send (no memcpy tax).
                     //
                     // Once armed, stays armed across outer iterations:
                     // the vnet's Frames{1}-then-Frames{1}-then-Super
@@ -175,8 +172,8 @@ impl Daemon {
                     csum_start,
                     csum_offset,
                 } => {
-                    // Phase 2a (`RUST_REWRITE_10G.md`): the vnet_hdr
-                    // device put a ≤64KB TCP super-segment in `arena`.
+                    // TSO ingest: the vnet_hdr device put a ≤64KB
+                    // TCP super-segment in `arena`.
                     // `tso_split` re-segments it into MTU-sized frames
                     // with re-synthesized TCP/IP headers. `route_packet`
                     // runs ONCE (chunk[0]; same dst for all chunks — TSO
@@ -287,7 +284,7 @@ impl Daemon {
         // No-op for the non-vnet path (count>1 arm flushed already)
         // and for the iters==1 idle-ping case (batch never armed).
         // Disarm so UDP-recv→forward / meta-conn→relay / probes go
-        // back to Phase-0 immediate-send outside this fn.
+        // back to immediate-send outside this fn.
         if batch_armed {
             self.flush_tx_batch();
             self.tx_batch = None;
@@ -300,7 +297,7 @@ impl Daemon {
         }
     }
 
-    /// Ship the staged TX batch (Phase 1). Called at the end of
+    /// Ship the staged TX batch. Called at the end of
     /// `on_device_read`'s drain loop and on dst/size mismatch
     /// mid-loop. No-op on empty.
     fn flush_tx_batch(&mut self) {
@@ -390,7 +387,7 @@ impl Daemon {
         myself_tunnel.out_packets += 1;
         myself_tunnel.out_bytes += len;
 
-        // ─── Phase 2b GRO write ────────────────────────────────────
+        // ─── GRO write ─────────────────────────────────────────────
         // Armed only inside `recvmmsg_batch`'s dispatch loop. The
         // other call sites (broadcast echo, kernel-mode forward,
         // ICMP unreachable) reach here with `gro_bucket = None` and

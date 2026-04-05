@@ -1,4 +1,4 @@
-//! `linux::Fast` — `UDP_SEGMENT` cmsg egress (`RUST_REWRITE_10G.md` Phase 1).
+//! `linux::Fast` — `UDP_SEGMENT` cmsg egress (`RUST_REWRITE_10G.md`).
 //!
 //! One `sendmsg` with `cmsg{SOL_UDP, UDP_SEGMENT, gso_size: u16}`;
 //! the kernel splits at `gso_size` boundaries (`udp_send_skb` GSO
@@ -198,7 +198,7 @@ impl UdpEgress for Fast {
         // Build the msghdr. All pointers are into stack/self memory
         // that lives for the duration of `sendmsg`. The kernel
         // copies everything it needs before returning (no async
-        // buffer ownership; that's MSG_ZEROCOPY, Phase 4).
+        // buffer ownership; that's MSG_ZEROCOPY, not used here).
         //
         // `socket2::SockAddr::as_ptr()` → `*const sockaddr`, `len()`
         // → `socklen_t`. socket2 stores a `sockaddr_storage`
@@ -317,8 +317,8 @@ mod tests {
         assert_eq!(&buf[..n], payload);
     }
 
-    /// The point of Phase 1: one `sendmsg` with `UDP_SEGMENT` cmsg
-    /// produces N datagrams. Hits the real kernel GSO path
+    /// One `sendmsg` with `UDP_SEGMENT` cmsg produces N datagrams.
+    /// Hits the real kernel GSO path
     /// (`udp_send_skb` → `__udp_gso_segment`); loopback has no NIC
     /// USO so this exercises the SOFTWARE split, which is the path
     /// most deployments hit anyway.
@@ -399,8 +399,9 @@ mod tests {
 
     /// `Fast` → `Portable` wire equivalence. Same `EgressBatch`, two
     /// impls, two listeners, byte-identical results. This is the
-    /// Phase-1 invariant: the receiver can't tell which egress sent
-    /// the batch. If this fails, `linux::Fast` changed semantics
+    /// wire-equivalence invariant: the receiver can't tell which
+    /// egress sent the batch. If this fails, `linux::Fast` changed
+    /// semantics
     /// and the netns integration tests are suspect.
     #[test]
     fn fast_matches_portable_on_wire() {

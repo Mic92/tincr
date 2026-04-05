@@ -112,8 +112,8 @@ impl ChaPoly {
     ///
     /// Output length is always `plaintext.len() + TAG_LEN`. SPTPS frames are
     /// short (≤ 64KiB on the wire) so a `Vec` allocation per record is fine
-    /// at this layer; the hot UDP path in `tinc-net` will want an in-place
-    /// variant later, but that's a Phase 5 concern.
+    /// at this layer; the hot UDP path uses [`seal_into`](Self::seal_into)
+    /// for in-place encryption.
     #[must_use]
     pub fn seal(&self, seqno: u64, plaintext: &[u8]) -> Vec<u8> {
         let (poly, mut cipher) = self.record_state(seqno);

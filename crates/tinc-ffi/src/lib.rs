@@ -4,16 +4,17 @@
 //!
 //! `sptps.c` compiled fresh from `src/` and wrapped in just enough Rust to
 //! drive it from a test. The C side runs the real handshake — same code that
-//! ships in `tincd` — so when Phase 2's pure-Rust `tinc-sptps` lands, this
-//! crate is the byte-for-byte oracle: feed both the same keys + RNG seed,
-//! diff the wire output.
+//! ships in `tincd` — and serves as the byte-for-byte oracle for the pure-Rust
+//! `tinc-sptps` crate: feed both the same keys + RNG seed, diff the wire
+//! output.
 //!
 //! ## What this is not
 //!
 //! Production code. The `unsafe` here is contained but not zero-cost: every
 //! call mallocs a 64K event sink, the deterministic RNG is a process-global,
 //! and there's no panic-unwinding-across-FFI guard because none of the
-//! callbacks call back into Rust. Phase 2 throws this crate away.
+//! callbacks call back into Rust. Kept for cross-impl differential testing;
+//! never linked into the daemon.
 //!
 //! ## Determinism contract
 //!
@@ -190,7 +191,7 @@ pub enum Role {
 /// big-endian seqno and assumes one record per call (UDP).
 ///
 /// SPTPS over the meta-protocol uses stream; SPTPS over the data channel
-/// uses datagram. Both must round-trip for Phase 2.
+/// uses datagram. The differential tests cover both.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Framing {
     /// 2-byte length prefix, reassembly buffer.
@@ -376,8 +377,8 @@ impl<'k> CSptps<'k> {
     }
 
     /// Trigger a rekey. Only valid in `SECONDARY_KEX` state (i.e. after
-    /// the first handshake completed). Exposed so Phase 2 tests can verify
-    /// the Rust state machine handles re-KEX, which has different
+    /// the first handshake completed). Exposed so the differential tests can
+    /// verify the Rust state machine handles re-KEX, which has different
     /// transitions than the initial handshake (`SPTPS_ACK` only happens
     /// on rekey — see `receive_handshake`'s switch).
     ///

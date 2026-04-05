@@ -1,19 +1,17 @@
 //! `DeviceArena` — fixed-stride slot arena for the 10G datapath.
 //!
-//! The spine of the GSO/TSO/par-enc/ZC stack (`RUST_REWRITE_10G.md`):
+//! The spine of the GSO/TSO datapath (`RUST_REWRITE_10G.md`):
 //!
-//! - Phase 0 (this commit): `Device::drain` reads frames into slots.
-//! - Phase 1 (`UDP_SEGMENT`): encrypt into slots, hand the contiguous
-//!   region to one `sendmsg` with cmsg `gso_size = STRIDE`. The
-//!   kernel splits at `STRIDE` boundaries — slot layout IS the wire
-//!   layout.
-//! - Phase 3 (par-enc): rayon workers each fill one slot. Fixed
-//!   stride means no inter-worker coordination on offsets.
-//! - Phase 4 (`MSG_ZEROCOPY)`: kernel pins the arena pages directly.
-//!   This is why we page-align NOW — costs nothing today, avoids
-//!   rebuilding the arena (and re-auditing slot lifetimes) later.
+//! - `Device::drain` reads frames into slots.
+//! - The TSO ingest path puts a 64KB super-segment in slot 0
+//!   (spilling into 1..N); `tso_split` reads from there.
+//! - Fixed stride means slots are independently addressable for
+//!   future parallel encrypt (no inter-worker offset coordination).
+//! - Page-aligned for `MSG_ZEROCOPY` page-pin should that land —
+//!   costs nothing today, avoids rebuilding the arena (and
+//!   re-auditing slot lifetimes) later.
 //!
-//! One allocation, three uses. The layout is the design.
+//! One allocation, multiple uses. The layout is the design.
 //!
 //! ## Page alignment
 //!
@@ -59,7 +57,7 @@ pub enum DrainResult {
     /// `gso_size`/`gso_type` extracted from it. The payload sits in
     /// slot 0 as one IP packet with `total_len > MTU` (up to 65535).
     /// Caller does the userspace TSO-split (portable header
-    /// arithmetic — `RUST_REWRITE_10G.md` Phase 2).
+    /// arithmetic — see `tso.rs`).
     ///
     /// Producers: Linux `IFF_VNET_HDR` + `TUNSETOFFLOAD`. FreeBSD
     /// `TAPSVNETHDR` (same `virtio_net_hdr` wire format).
@@ -105,7 +103,7 @@ pub enum GsoType {
 ///
 /// `STRIDE` = the largest frame the device hands us at MTU 1518.
 /// Rounded to 64 (cacheline) so consecutive slots don't false-share
-/// — Phase 3 has rayon workers writing adjacent slots concurrently.
+/// if adjacent slots are ever written concurrently.
 ///
 /// Slot 0 doubles as the super-packet buffer for `DrainResult::Super`:
 /// a 64KB TSO segment fits because `cap × STRIDE ≥ 65535` for any
@@ -147,16 +145,16 @@ const PAGE: usize = 4096;
 impl DeviceArena {
     /// Slot stride: `MTU` rounded up to a cacheline. `MTU=1518`
     /// → 1536. The 18 bytes of slack are the SPTPS overhead margin
-    /// for Phase 1 (encrypt in-place into the slot: body+33 fits
-    /// because body ≤ MTU−14 and 1518−14+33 = 1537 — one byte over.
-    /// We round UP to cacheline, so 1536 < 1537 by one. Bump to
-    /// 1600 to give Phase 1 headroom; still cacheline-aligned).
+    /// for in-place encrypt (body+33 fits because body ≤ MTU−14 and
+    /// 1518−14+33 = 1537 — one byte over. We round UP to cacheline,
+    /// so 1536 < 1537 by one. Bump to 1600 for headroom; still
+    /// cacheline-aligned).
     ///
     /// (The "+33" is `mt-kernel-findings.md`'s on-wire overhead:
-    /// 12 ids + 4 seqno + 1 type + 16 tag. Phase 0 doesn't encrypt
-    /// into the arena yet — `tx_scratch` does — but Phase 1 will,
-    /// and rebuilding the arena to change STRIDE means re-auditing
-    /// every slot accessor. Fix it now.)
+    /// 12 ids + 4 seqno + 1 type + 16 tag. The encrypt path
+    /// currently goes through `tx_scratch`, not the arena — but
+    /// rebuilding the arena to change STRIDE means re-auditing
+    /// every slot accessor, so the headroom is reserved now.)
     pub const STRIDE: usize = {
         let need = super::MTU + 33; // 1518 + 33 = 1551
         // Round up to cacheline (64). 1551 → 1600.
@@ -177,8 +175,8 @@ impl DeviceArena {
             .expect("DeviceArena: cap * STRIDE overflows");
         // Round size up to a page so the LAST slot doesn't share a
         // page with whatever malloc puts after us. Matters for
-        // Phase 4 (kernel pins whole pages; sharing means pinning
-        // unrelated allocations).
+        // `MSG_ZEROCOPY` (kernel pins whole pages; sharing means
+        // pinning unrelated allocations).
         let size = (size + PAGE - 1) & !(PAGE - 1);
         let layout = Layout::from_size_align(size, PAGE)
             .expect("DeviceArena: layout invariant (PAGE is power of 2)");
@@ -237,9 +235,8 @@ impl DeviceArena {
     }
 
     /// The whole arena as one slice — for `DrainResult::Super`
-    /// (the device writes past slot boundaries) and for Phase 1's
-    /// `UDP_SEGMENT` send (the kernel reads `count*STRIDE` bytes
-    /// in one `sendmsg`).
+    /// (the device writes past slot boundaries) and for TSO ingest
+    /// (`tso_split` reads the super-segment from here).
     #[must_use]
     pub const fn as_contiguous(&self) -> &[u8] {
         // SAFETY: the full allocation. `layout.size()` is what we
@@ -250,8 +247,8 @@ impl DeviceArena {
         }
     }
 
-    /// Mutable whole-arena slice. The `vnet_hdr` device (Phase 2)
-    /// writes a 64KB super-segment into slot 0's region, spilling
+    /// Mutable whole-arena slice. The `vnet_hdr` device writes a
+    /// 64KB super-segment into slot 0's region, spilling
     /// into slots 1..N. `Frames` and `Super` are exclusive per
     /// drain call so there's no overlap with `slot_mut`.
     #[must_use]
@@ -318,7 +315,7 @@ mod tests {
     }
 
     /// Page alignment is the whole point of the custom alloc. If
-    /// this fails, Phase 4's ZC page-pin math is wrong.
+    /// this fails, the `MSG_ZEROCOPY` page-pin math is wrong.
     #[test]
     fn arena_is_page_aligned() {
         let a = DeviceArena::new(64);
@@ -346,8 +343,8 @@ mod tests {
         assert_eq!(a.slot(2), b"");
     }
 
-    /// Consecutive slots don't overlap. Phase 3 has rayon workers
-    /// writing adjacent slots — if they alias, that's UB.
+    /// Consecutive slots don't overlap. If adjacent slots are ever
+    /// written concurrently and they alias, that's UB.
     #[test]
     fn slots_are_disjoint() {
         let a = DeviceArena::new(4);
@@ -365,9 +362,9 @@ mod tests {
         }
     }
 
-    /// Slot ranges all live inside `as_contiguous`. The Phase-1
-    /// `UDP_SEGMENT` path slices the contiguous region at slot
-    /// boundaries; this is the invariant that makes that valid.
+    /// Slot ranges all live inside `as_contiguous`. Callers slice
+    /// the contiguous region at slot boundaries; this is the
+    /// invariant that makes that valid.
     #[test]
     fn slots_within_contiguous() {
         let mut a = DeviceArena::new(8);

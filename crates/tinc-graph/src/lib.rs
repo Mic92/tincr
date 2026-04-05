@@ -12,7 +12,7 @@
 //!
 //! Here we port the two algorithms. They produce per-node routing
 //! results plus a list of MST edge IDs. `check_reachability` is daemon
-//! territory — Phase 5.
+//! territory — see `crates/tincd/src/graph_glue.rs`.
 //!
 //! ## The arena
 //!
@@ -121,8 +121,8 @@ pub struct Node {
     /// `n->status.reachable` — *input* to the algorithms. Kruskal uses
     /// it to pick a starting point; SSSP uses it to gate the
     /// `update_node_udp` call (which we don't fire here, but the gate
-    /// affects whether the call *would* fire — Phase 5's diff).
-    /// Set by the *previous* SSSP via `check_reachability`.
+    /// affects whether the call *would* fire — the daemon diffs old vs
+    /// new). Set by the *previous* SSSP via `check_reachability`.
     pub reachable: bool,
 }
 

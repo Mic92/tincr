@@ -1,16 +1,15 @@
 //! `UdpEgress` — the send-side seam for the 10G datapath.
 //!
-//! `RUST_REWRITE_10G.md` Phase 0. The trait is the contract: ship
-//! `count` UDP datagrams to `dst`. HOW depends on what the kernel
-//! offers. The daemon builds an `EgressBatch` and doesn't care.
+//! `RUST_REWRITE_10G.md`. The trait is the contract: ship `count`
+//! UDP datagrams to `dst`. HOW depends on what the kernel offers.
+//! The daemon builds an `EgressBatch` and doesn't care.
 //!
-//! Phase 0 (this commit): one impl, `Portable`. `count` × `sendto`.
-//! Same wire output as the `slot.listener.udp.send_to` it replaces
-//! (`net.rs:1930`). Works on every POSIX.
+//! - `Portable`: `count` × `sendto`. Works on every POSIX.
+//! - `linux::Fast`: one `sendmsg` with `cmsg UDP_SEGMENT=stride`;
+//!   the kernel splits at egress.
 //!
-//! Phase 1 swaps `linux::Fast`: one `sendmsg(MSG_ZEROCOPY)` with
-//! `cmsg UDP_SEGMENT=stride`, kernel splits at egress. Same `count`
-//! datagrams hit the wire; the receiver can't tell the difference.
+//! Same `count` datagrams hit the wire either way; the receiver
+//! can't tell the difference.
 //!
 //! ## Why `Box<dyn>` not generics
 //!
@@ -62,12 +61,12 @@ pub const UDP_MAX_SEGMENTS: u16 = 128;
 /// 128-segment one.)
 const BATCH_MAX_BYTES: usize = 0xFFFF - 48;
 
-/// A run of encrypted frames to one destination. Daemon builds these
-/// from par-encrypt output (Phase 3) or one-at-a-time today.
+/// A run of encrypted frames to one destination.
 ///
-/// `frames` is a contiguous slice into `DeviceArena` (Phase 1+) or
-/// `tx_scratch` (Phase 0, `count=1`). The egress impl decides how
-/// to ship; the wire result is `count` UDP datagrams either way.
+/// `frames` is a contiguous slice into the `TxBatch` dense buffer
+/// (batched path) or `tx_scratch` (`count=1`, immediate-send path).
+/// The egress impl decides how to ship; the wire result is `count`
+/// UDP datagrams either way.
 pub struct EgressBatch<'a> {
     /// Destination. `SockAddr` not `SocketAddr` — `socket2::send_to`
     /// takes `&SockAddr` and the daemon already has one cached
@@ -94,7 +93,8 @@ pub struct EgressBatch<'a> {
     pub last_len: u16,
 }
 
-/// Ship batches. The Phase-0 contract; Phase 1/4 add fast impls.
+/// Ship batches. `Portable` is the baseline; `linux::Fast` is the
+/// `UDP_SEGMENT` impl.
 pub trait UdpEgress: Send {
     /// Ship a batch: `count` UDP datagrams to `dst`. Same wire
     /// result on every impl; the kernel-side mechanism differs.
@@ -110,19 +110,20 @@ pub trait UdpEgress: Send {
     /// ZC completion poll. Default no-op (Portable doesn't ZC).
     /// Called from the event loop on errqueue `EPOLLIN`. Returns
     /// the count of arena slots now reusable (the buffer the kernel
-    /// pinned is released). Phase 4 wires this; until then, the
-    /// daemon never registers an errqueue fd, never calls this.
+    /// pinned is released). `MSG_ZEROCOPY` plumbing — not yet
+    /// wired; the daemon never registers an errqueue fd, never
+    /// calls this. Default impl never errs.
     ///
     /// # Errors
-    /// `io::Error` from `recvmsg(MSG_ERRQUEUE)` (Phase 4). Default
-    /// impl never errs.
+    /// `io::Error` from `recvmsg(MSG_ERRQUEUE)` once a ZC impl
+    /// overrides this.
     fn poll_completions(&mut self) -> io::Result<usize> {
         Ok(0)
     }
 }
 
-/// TX batch accumulator. Phase 1: the daemon stages encrypted frames
-/// here during the `on_device_read` drain loop, then ships the run
+/// TX batch accumulator. The daemon stages encrypted frames here
+/// during the `on_device_read` drain loop, then ships the run
 /// in one `EgressBatch` after the loop. The "no TX batch exists
 /// today" problem from `mt-crypto-findings.md` Finding 1 — this is
 /// CREATING the batch.
@@ -146,7 +147,7 @@ pub trait UdpEgress: Send {
 /// run and flush on mismatch. Simpler, and the common case (iperf3
 /// TCP burst to one peer) is one run anyway. Multi-peer interleave
 /// degrades to per-change flushes — still fewer syscalls than per-
-/// frame, never worse than Phase 0.
+/// frame, never worse than the unbatched path.
 pub struct TxBatch {
     /// Dense-packed encrypted frames. Capacity sized for one drain
     /// pass at MTU+overhead; never reallocs after warmup.
@@ -345,10 +346,10 @@ impl Portable {
 
 impl UdpEgress for Portable {
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
-        // Phase 0: count is always 1 (the daemon hasn't batched
-        // yet). The loop is here so Phase 1's daemon-side batching
-        // works on Portable too — BSD/macOS get the per-frame
-        // sendto, Linux gets `linux::Fast`.
+        // The loop handles batched sends on non-Linux — BSD/macOS
+        // get per-frame sendto here; Linux gets one `UDP_SEGMENT`
+        // sendmsg in `linux::Fast`. Immediate-send (`count=1`)
+        // hits this loop once.
         let stride = usize::from(b.stride);
         for i in 0..b.count {
             let off = usize::from(i) * stride;
@@ -369,8 +370,8 @@ mod tests {
     use std::net::{SocketAddr, UdpSocket};
 
     /// `Portable::send_batch` with `count=1` produces the same bytes
-    /// on the wire as a direct `send_to`. This is the Phase-0
-    /// invariant: the seam is transparent. If this fails, the
+    /// on the wire as a direct `send_to`. The seam-transparency
+    /// invariant: if this fails, the
     /// abstraction changed semantics and all 1210 tests are suspect.
     ///
     /// Uses a real loopback UDP pair — same kernel path as
@@ -412,10 +413,9 @@ mod tests {
     }
 
     /// `count > 1` produces `count` datagrams in order, each `stride`
-    /// bytes except the last (`last_len`). Phase 0 doesn't exercise
-    /// this (daemon always builds `count=1`), but the loop is here
-    /// for Phase 1 — and it must be right NOW so we don't debug the
-    /// portable fallback while debugging `UDP_SEGMENT`.
+    /// bytes except the last (`last_len`). The non-Linux batched
+    /// path — must be right so we don't debug the portable fallback
+    /// while debugging `UDP_SEGMENT`.
     #[test]
     fn portable_batch_splits_at_stride() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -471,11 +471,10 @@ mod tests {
         assert_eq!(&buf[..n], b"still alive");
     }
 
-    /// `poll_completions` default is a no-op returning 0. Phase 4
-    /// overrides it; until then the daemon never calls it (no
-    /// errqueue fd registered). This test pins the default so a
-    /// stray refactor that makes it `unimplemented!()` fails CI
-    /// before it hits a Phase-4 caller.
+    /// `poll_completions` default is a no-op returning 0. The daemon
+    /// never calls it (no errqueue fd registered — ZC not wired).
+    /// This test pins the default so a stray refactor that makes
+    /// it `unimplemented!()` fails CI.
     #[test]
     fn poll_completions_default_noop() {
         let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();

@@ -22,7 +22,7 @@ fn main() {
     let src = root.join("src");
 
     // The crypto sources are pure computation — no per-OS code. The same
-    // file set as Phase 0a's KAT generator, plus sptps.c, plus ecdh.c
+    // file set as the KAT generator, plus sptps.c, plus ecdh.c
     // (KAT called ed25519_key_exchange directly; sptps wraps it in an
     // alloc-then-compute API we have to honor).
     let c_sources = [

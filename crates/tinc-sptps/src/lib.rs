@@ -4,11 +4,11 @@
 //! ## What this is a port of
 //!
 //! `src/sptps.c`, function-for-function. The C is small (774 lines) and
-//! has no dependencies past the crypto primitives — which `tinc-crypto`
-//! already proved equivalent in Phase 0a. So this crate is "structurally
-//! boring on purpose": every method here has a corresponding `static bool`
-//! in the C, named the same, doing the same thing in the same order. The
-//! interesting work was the byte-level KAT in Phase 0a; this is plumbing.
+//! has no dependencies past the crypto primitives — which `tinc-crypto`'s
+//! KAT vectors proved equivalent. So this crate is "structurally boring on
+//! purpose": every method here has a corresponding `static bool` in the C,
+//! named the same, doing the same thing in the same order. The interesting
+//! work was the byte-level KATs; this is plumbing.
 //!
 //! That said, three places diverge from a mechanical translation, because
 //! the C does something Rust can't or shouldn't:

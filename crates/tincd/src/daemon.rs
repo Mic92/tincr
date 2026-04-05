@@ -1,4 +1,4 @@
-//! `Daemon` — all the formerly-global state as one struct, plus the main loop.
+//! `Daemon` — all the C-global state as one struct, plus the main loop.
 //!
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
@@ -142,10 +142,9 @@ pub enum RunOutcome {
 pub(crate) struct ListenerSlot {
     pub(crate) listener: Listener,
     pub(crate) last_tos: u8,
-    /// `UdpEgress` for this listener's UDP socket. Phase 0
-    /// (`RUST_REWRITE_10G.md`): always `Portable` (count × sendto,
-    /// same wire output as the direct `udp.send_to` it replaced).
-    /// Phase 1 swaps `linux::Fast` (`UDP_SEGMENT` cmsg) on Linux.
+    /// `UdpEgress` for this listener's UDP socket. `linux::Fast`
+    /// (`UDP_SEGMENT` cmsg, one sendmsg per batch) on Linux;
+    /// `Portable` (count × sendto, same wire output) elsewhere.
     /// `Box<dyn>`: vtable indirect per-BATCH (~20k/s @ 10G × 2ns
     /// ≈ nothing). Lives here, not in a parallel `Vec`, because
     /// the `sock` index already picks the slot - one fewer
@@ -370,7 +369,7 @@ pub struct Daemon {
     /// dance as `rx_scratch`).
     pub(crate) udp_rx_batch: Option<net::UdpRxBatch>,
 
-    /// GRO TUN-write coalescer (`RUST_REWRITE_10G.md` Phase 2b).
+    /// GRO TUN-write coalescer (`RUST_REWRITE_10G.md`).
     /// `recvmmsg_batch` arms it; `send_packet_myself` offers each
     /// inbound-for-us packet; the post-dispatch flush ships the
     /// super. Same `mem::take`-out-of-self dance as `rx_scratch`
@@ -426,20 +425,18 @@ pub struct Daemon {
     /// tight-looping forever helps nobody.
     pub(crate) device_errors: u32,
 
-    /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md` Phase
-    /// 0). Replaces `on_device_read`'s 1.5KB stack buf: drain reads
-    /// frames into slots, the loop body walks them. Phase 1 widens:
-    /// encrypt into slots, hand the contiguous run to `egress`.
-    /// Phase 0 only uses it on the read side; `tx_scratch` stays
-    /// for the encrypt path until Phase 1 unifies them (separate
-    /// buffers, no overlap).
+    /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md`).
+    /// Replaces `on_device_read`'s 1.5KB stack buf: drain reads
+    /// frames into slots, the loop body walks them. Read-side only;
+    /// `tx_scratch` handles the encrypt path (separate buffers,
+    /// no overlap).
     ///
     /// `Option` for the same `mem::take` dance as `udp_rx_batch`:
     /// `route_packet` borrows `&mut self`; the arena slot borrow
     /// conflicts. Take, walk, put back.
     pub(crate) device_arena: Option<DeviceArena>,
 
-    /// `tso_split` output scratch (`RUST_REWRITE_10G.md` Phase 2a).
+    /// `tso_split` output scratch.
     /// `DrainResult::Super` means the device put a ≤64KB IP super-
     /// segment in `device_arena`; `tso_split` writes N × ~1500B
     /// eth frames into THIS buffer (the input slice can't overlap
@@ -456,13 +453,13 @@ pub struct Daemon {
     /// `tso_scratch`; same lazy alloc.
     pub(crate) tso_lens: Box<[usize]>,
 
-    /// TX batch accumulator (`RUST_REWRITE_10G.md` Phase 1). The
+    /// TX batch accumulator (`RUST_REWRITE_10G.md`). The
     /// `on_device_read` drain loop stages encrypted frames here
     /// instead of `sendto`-per-frame; one `EgressBatch` ships the
     /// run after the loop. `None` outside the drain loop - the send
     /// site (`send_sptps_data_relay`) checks: `Some` ⇒ stage,
-    /// `None` ⇒ immediate send (the Phase-0 path; still hit by
-    /// UDP-recv → forward, meta-conn → relay, probe sends).
+    /// `None` ⇒ immediate send (still hit by UDP-recv → forward,
+    /// meta-conn → relay, probe sends).
     ///
     /// `Option` not for `mem::take` (it's never borrowed across a
     /// `&mut self` call) but as the in-batch-loop signal. The drain
