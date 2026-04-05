@@ -819,8 +819,12 @@ impl Daemon {
             id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
 
             crate::shard::TxSnapshot {
-                slowpath_all: daemon.any_pcap
-                    || daemon.dns.is_some()
+                // any_pcap NOT folded — it flips at runtime via
+                // `tinc pcap` (metaconn.rs sets, route.rs recomputes
+                // on conn drop). Checked live at the call site
+                // (device.rs) so the fast path bypasses pcap when
+                // armed instead of silently shipping uncaptured.
+                slowpath_all: daemon.dns.is_some()
                     || daemon.settings.routing_mode != RoutingMode::Router
                     || daemon.settings.priorityinheritance,
                 myself: daemon.myself,

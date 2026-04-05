@@ -133,11 +133,10 @@ pub struct TunnelHandles {
 /// at most one event-loop iteration.
 ///
 pub struct TxSnapshot {
-    /// Spawn-time fold of every "this packet must go through control"
-    /// gate that's stable for the daemon's lifetime: `any_pcap |
-    /// dns.is_some() | routing_mode != Router | priorityinheritance`.
-    /// Set true ⇒ [`tx_probe`] returns `None` immediately. Set once
-    /// at setup from daemon settings; never re-read.
+    /// Spawn-time fold of every config-immutable slow-path gate:
+    /// `dns.is_some() | routing_mode != Router | priorityinheritance`.
+    /// `any_pcap` is NOT folded — it flips at runtime; checked live
+    /// at the device.rs call site. Set once at setup; never re-read.
     pub slowpath_all: bool,
 
     /// `Daemon::myself`. The loopback gate (`to == myself`).

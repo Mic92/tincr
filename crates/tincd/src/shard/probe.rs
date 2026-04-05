@@ -44,8 +44,8 @@ pub struct TxTarget {
 /// alloc), returns the copies the seal loop needs. `None` ⇒ slow path.
 ///
 /// Gates (any ⇒ `None`):
-///   - `slowpath_all` (setup-time fold of `any_pcap | dns | !Router |
-///     priorityinheritance` — ALL the per-packet-mutate-conns gates)
+///   - `slowpath_all` (setup-time fold of `dns | !Router |
+///     priorityinheritance`; `any_pcap` checked live at call site)
 ///   - ARP ethertype (`handle_arp` writes device, reads subnets diff)
 ///   - `route()` returns `Forward` (not Unreachable/Broadcast/etc)
 ///   - `to != myself` (loopback writes TUN directly)

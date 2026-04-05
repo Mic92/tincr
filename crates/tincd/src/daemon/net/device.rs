@@ -254,12 +254,19 @@ impl Daemon {
                             // &mut self.listeners alongside. Same
                             // dance as device_arena/tso_scratch.
                             let snap = self.tx_snap.take();
-                            if !self.tx_fast_super(
-                                snap.as_ref(),
-                                count,
-                                &scratch,
-                                &tso_lens[..count],
-                            ) {
+                            // any_pcap is the only slowpath_all input
+                            // that flips at runtime (`tinc pcap` arms
+                            // it via the control conn). The fold was
+                            // computed at setup; check the live bit
+                            // here. One bool load per super.
+                            if self.any_pcap
+                                || !self.tx_fast_super(
+                                    snap.as_ref(),
+                                    count,
+                                    &scratch,
+                                    &tso_lens[..count],
+                                )
+                            {
                                 for i in 0..count {
                                     let n = tso_lens[i];
                                     let off = i * tinc_device::DeviceArena::STRIDE;
