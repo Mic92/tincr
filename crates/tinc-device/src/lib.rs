@@ -1,13 +1,13 @@
-//! TUN/TAP device backends. C `devops_t` (`device.h:32-40`) is a
-//! vtable of fn pointers; here it's a trait, daemon stores
-//! `Box<dyn Device>`. C `setup`/`close` become constructor + `Drop`.
+//! TUN/TAP device backends. The `Device` trait is the read/write
+//! vtable; daemon stores `Box<dyn Device>`. Setup/close are the
+//! constructor + `Drop`.
 //!
 //! ## Linux TUN: `vnet_hdr` (Phase 2a)
 //!
 //! `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`. Reads are `[virtio_net_
 //! hdr(10)][raw IP]`; the eth header is synthesized by `drain()` or
-//! `tso_split`. The C's `+10` `tun_pi` trick (`linux/device.c:
-//! 148-167`) is gone — it was a workaround for not having `vnet_hdr`.
+//! `tso_split`. The legacy `+10` `tun_pi` trick is gone — it was a
+//! workaround for not having `vnet_hdr`.
 //!
 //! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No `vnet_hdr`.
 //!
@@ -60,9 +60,8 @@ pub use tso::{
     GroBucket, GroVerdict, TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split,
 };
 
-/// L2 vs L3 device. C `device_type_t` (`linux/device.c:33-36`).
-/// The daemon resolves `DeviceType` config + `routing_mode` into
-/// this; we get the resolved value.
+/// L2 vs L3 device. The daemon resolves `DeviceType` config +
+/// `routing_mode` into this; we get the resolved value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Layer-3 (IP). On Linux: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`;
@@ -72,27 +71,25 @@ pub enum Mode {
     Tap,
 }
 
-/// MAC address (C `mac_t = uint8_t[6]`). TAP reads the kernel-
-/// assigned MAC via `SIOCGIFHWADDR` (`device.c:121-126`); TUN
-/// has none (`route.c` never reads `mymac` in router mode). We
-/// model that as `Option<Mac>`.
+/// MAC address. TAP reads the kernel-assigned MAC via
+/// `SIOCGIFHWADDR`; TUN has none (`route.c` never reads `mymac`
+/// in router mode). We model that as `Option<Mac>`.
 pub type Mac = [u8; 6];
 
 /// What the daemon needs to open a device. C reads these from
 /// `config_tree`; the daemon maps that to this struct.
 #[derive(Debug, Default)]
 pub struct DeviceConfig {
-    /// `Device` config var. C default `/dev/net/tun` (`linux/
-    /// device.c:24`); `None` defers to the consumer.
+    /// `Device` config var. Default is `/dev/net/tun` on Linux;
+    /// `None` defers to the consumer.
     pub device: Option<String>,
 
-    /// `Interface` config var (`device.c:50-52`). `None`: kernel
-    /// picks (`tun0`, `tun1`, ...). The netname-default is the
-    /// daemon's job.
+    /// `Interface` config var. `None`: kernel picks (`tun0`,
+    /// `tun1`, ...). The netname-default is the daemon's job.
     pub iface: Option<String>,
 
-    /// Resolved mode (`device.c:77-89`). NOT `Option`: an unset
-    /// `ifr_flags` is `EINVAL` on `TUNSETIFF`.
+    /// Resolved mode. NOT `Option`: an unset `ifr_flags` is
+    /// `EINVAL` on `TUNSETIFF`.
     pub mode: Mode,
 }
 
@@ -105,24 +102,21 @@ impl Default for Mode {
 
 // `EBADFD` is a regular `io::Error`, not a separate signal: the
 // errno is already carried; the daemon's `event_exit()` fast-path
-// (`device.c:155-157`, commit `d73cdee5`) checks `raw_os_error()`.
-// `Result<usize, io::Error>` is the trait return; no new type.
+// (commit `d73cdee5`) checks `raw_os_error()`. `Result<usize,
+// io::Error>` is the trait return; no new type.
 
 // Trait
 
-/// `devops_t` — the read/write vtable. `device.h:32-40`.
-///
-/// C `setup`/`close` become constructor + `Drop`; not trait methods.
-/// `Send` but not `Sync`: `read`/`write` take `&mut self`.
+/// The read/write vtable. Setup/close are constructor + `Drop`, not
+/// trait methods. `Send` but not `Sync`: `read`/`write` take `&mut self`.
 pub trait Device: Send {
-    /// Read a packet. C `devops.read(packet)` → bool (`device.h:
-    /// 35`); we return the length.
+    /// Read a packet. Returns the length.
     ///
     /// `buf` is the daemon's `data[offset..]` slice (≥ `MTU`). Linux
     /// TUN doesn't go through here (`drain()` overrides and reads
     /// `vnet_hdr` layout directly). BSD `Utun` writes at `buf[10..]`
     /// then zeroes `buf[0..12]`; TAP/raw writes at `buf[0..]`.
-    /// Kernel `read() <= 0` → `Err` (C `device.c:149`).
+    /// Kernel `read() <= 0` → `Err`.
     ///
     /// # Errors
     /// `io::Error` from `read(2)`. `EAGAIN` if `O_NONBLOCK` with
@@ -130,15 +124,13 @@ pub trait Device: Send {
     /// (commit `d73cdee5`: network restart).
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// Write a packet. C `devops.write(packet)` → bool (`device.h:
-    /// 36`).
+    /// Write a packet.
     ///
     /// `buf` is `data[offset..offset+len]`. Linux TUN zeroes
     /// `buf[12..14]` (the synthetic ethertype) and writes `buf[4..]`
     /// = `[vnet_hdr=0][IP]`; BSD `Utun` zeroes `buf[10..12]` and
     /// writes `buf[10..]`; TAP writes `buf` directly. The zero
-    /// MUTATES `buf` (the C `device.c:188` does too); `&mut` is
-    /// honest about the mutation.
+    /// MUTATES `buf`; `&mut` is honest about the mutation.
     ///
     /// # Errors
     /// `io::Error` from `write(2)`. `ENOBUFS` if the kernel TX
@@ -170,16 +162,16 @@ pub trait Device: Send {
     /// `route.c` branches on `routing_mode`, not this.
     fn mode(&self) -> Mode;
 
-    /// Kernel-chosen interface name. C `iface` global (`:41`), set
-    /// post-TUNSETIFF. Daemon passes it as `INTERFACE=` to scripts.
+    /// Kernel-chosen interface name, set post-TUNSETIFF. Daemon
+    /// passes it as `INTERFACE=` to scripts.
     fn iface(&self) -> &str;
 
     /// `mymac` — TAP only (`SIOCGIFHWADDR`, `:121-126`). `None`
     /// for TUN.
     fn mac(&self) -> Option<Mac>;
 
-    /// Raw fd for `mio::Poll::register`. C `device_fd` global
-    /// (`:39`). `Dummy` returns `None`; daemon skips the register.
+    /// Raw fd for `mio::Poll::register`. `Dummy` returns `None`;
+    /// daemon skips the register.
     fn fd(&self) -> Option<std::os::unix::io::RawFd>;
 
     /// Drain available frames into the arena. The 10G ingest seam
@@ -226,22 +218,19 @@ pub trait Device: Send {
 
 // Dummy — `dummy_device.c` (58 LOC)
 
-/// `dummy_devops` (`dummy_device.c:53-58`). Read fails, write
-/// drops. `DeviceType = dummy` runs the daemon as a pure relay
-/// and lets tests avoid `CAP_NET_ADMIN`.
+/// Read fails, write drops. `DeviceType = dummy` runs the daemon
+/// as a pure relay and lets tests avoid `CAP_NET_ADMIN`.
 #[derive(Debug, Default)]
 pub struct Dummy;
 
 impl Device for Dummy {
-    /// C `dummy_device.c:43-46`: `return false`. `WouldBlock` is
-    /// the closest semantic. (Poll loop never calls us anyway: no
-    /// fd → no readable event.)
+    /// `WouldBlock`. (Poll loop never calls us anyway: no fd → no
+    /// readable event.)
     fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
         Err(io::ErrorKind::WouldBlock.into())
     }
 
-    /// C `dummy_device.c:48-51`: `return true`. Silent drop;
-    /// return `len` so the daemon's stats counters tick.
+    /// Silent drop; return `len` so the daemon's stats counters tick.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         Ok(buf.len())
     }
@@ -252,8 +241,6 @@ impl Device for Dummy {
         Mode::Tun
     }
 
-    /// C `dummy_device.c:31`: `iface = "dummy"`.
-    ///
     /// `clippy::unnecessary_literal_bound`: trait signature is
     /// `&str` borrowed from `&self`; `Tun::iface` returns
     /// `&self.iface` (not static). Can't widen without diverging
@@ -314,8 +301,7 @@ pub use bsd::{BsdTun, BsdVariant};
 mod tests {
     use super::*;
 
-    /// `dummy_device.c:43-46`. Read fails. The C returns `false`;
-    /// we return `WouldBlock`. The daemon never actually calls
+    /// Read fails: `WouldBlock`. The daemon never actually calls
     /// this (no fd to poll).
     #[test]
     fn dummy_read_would_block() {
@@ -325,9 +311,8 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
     }
 
-    /// `dummy_device.c:48-51`. Write succeeds, drops. Returns the
-    /// length so daemon stats count "bytes that would have gone
-    /// out."
+    /// Write succeeds, drops. Returns the length so daemon stats
+    /// count "bytes that would have gone out."
     #[test]
     fn dummy_write_drops() {
         let mut d = Dummy;
@@ -340,9 +325,8 @@ mod tests {
         assert_eq!(buf[99], 0x42);
     }
 
-    /// `dummy_device.c:31`: `iface = "dummy"`. The daemon's tinc-up
-    /// script gets `INTERFACE=dummy`. C leaves `device_fd = -1`,
-    /// `mymac = {0}`; we model as `None` for both.
+    /// `iface = "dummy"`. The daemon's tinc-up script gets
+    /// `INTERFACE=dummy`. fd and mac are `None`.
     #[test]
     fn dummy_surface() {
         let d = Dummy;
@@ -483,8 +467,8 @@ mod tests {
 
     /// Non-EAGAIN error mid-batch propagates. The daemon counts
     /// consecutive failures (`on_device_read`) and exits after 10. We
-    /// don't swallow it; the partial batch is lost (the C does the
-    /// same — `device.c:149` returns false, daemon breaks the loop).
+    /// don't swallow it; the partial batch is lost (daemon breaks
+    /// the loop on error).
     #[test]
     fn drain_propagates_real_error() {
         let mut d = ScriptedDev::new(vec![Ok(b"ok".to_vec()), Err(io::ErrorKind::BrokenPipe)]);

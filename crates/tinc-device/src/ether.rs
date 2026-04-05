@@ -37,10 +37,9 @@ pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 
 // from_ip_nibble — version → ethertype
 
-/// IP version nibble → ethertype. `fd_device.c:192-202` and
-/// `bsd/device.c:427-443` (same logic, literal vs symbolic
-/// constants). IPv4 and IPv6 both put the version in the high
-/// nibble of byte 0; `>> 4` extracts it. The first IP byte is
+/// IP version nibble → ethertype. IPv4 and IPv6 both put the
+/// version in the high nibble of byte 0; `>> 4` extracts it.
+/// The first IP byte is
 /// always at `buf[ETH_HLEN]` regardless of read offset.
 ///
 /// `None` for unknown: C uses an `ETH_P_MAX` sentinel or errors
@@ -56,11 +55,9 @@ pub(crate) fn from_ip_nibble(ip0: u8) -> Option<u16> {
 
 // set_etherheader — zero MACs + write ethertype
 
-/// `set_etherheader` (`fd_device.c:204-208`, `bsd/device.c
-/// :429-445` inline). Zero MACs, write big-endian ethertype.
-/// The two C sources order memset-then-type vs type-then-memset;
-/// they touch disjoint bytes (`[0..12]` vs `[12..14]`) so the
-/// result is identical. Caller guarantees `buf.len() ≥ 14`.
+/// Zero MACs, write big-endian ethertype. The MAC zero and the
+/// ethertype write touch disjoint bytes (`[0..12]` vs `[12..14]`)
+/// so order doesn't matter. Caller guarantees `buf.len() ≥ 14`.
 pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
     // Zero MACs. 12 bytes. NOT 14 — leave ethertype slot alone.
     buf[..ETH_HLEN - ETHER_TYPE_LEN].fill(0);
@@ -82,8 +79,7 @@ mod tests {
 
     /// `from_ip_nibble(u8) -> Option<u16>`. Full domain in one
     /// table: only the HIGH nibble matters (IP version field).
-    /// C `fd_device.c` returns `ETH_P_MAX` sentinel for unknown;
-    /// C `bsd/device.c` errors inline. We use `Option`.
+    /// Unknown versions yield `None`.
     #[test]
     fn nibble_cases() {
         #[rustfmt::skip]
@@ -113,9 +109,8 @@ mod tests {
 
     // ─── set_etherheader
 
-    /// Zero MACs, write ethertype big-endian. `fd_device.c:204-208`;
-    /// `bsd/device.c:429-445` inline. Pre-fill with garbage to
-    /// verify the zero AND that bytes past 14 are untouched.
+    /// Zero MACs, write ethertype big-endian. Pre-fill with garbage
+    /// to verify the zero AND that bytes past 14 are untouched.
     #[test]
     fn set_etherheader_cases() {
         #[rustfmt::skip]
@@ -136,17 +131,16 @@ mod tests {
         }
     }
 
-    /// Our `to_be_bytes()` matches the C's manual `>> 8` /
-    /// `& 0xFF` (`fd_device.c:207-208`) AND matches `bsd/
-    /// device.c`'s literal `0x86` then `0xDD` (`:434-435`).
-    /// Three ways to spell the same bytes.
+    /// `to_be_bytes()` matches manual `>> 8` / `& 0xFF` shifting
+    /// AND matches literal `0x86` then `0xDD`. Three ways to spell
+    /// the same bytes.
     #[test]
-    fn set_etherheader_be_matches_c_manual_split() {
+    fn set_etherheader_be_matches_manual_split() {
         let et = ETH_P_IPV6;
-        // What fd_device.c does:
+        // Manual shift/mask:
         let c_high = ((et >> 8) & 0xFF) as u8;
         let c_low = (et & 0xFF) as u8;
-        // What bsd/device.c does (literal hex):
+        // Literal hex:
         let bsd_high = 0x86u8;
         let bsd_low = 0xDDu8;
         // What we do:

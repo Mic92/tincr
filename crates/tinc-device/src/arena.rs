@@ -62,8 +62,8 @@ pub enum DrainResult {
     /// arithmetic — `RUST_REWRITE_10G.md` Phase 2).
     ///
     /// Producers: Linux `IFF_VNET_HDR` + `TUNSETOFFLOAD`. FreeBSD
-    /// `TAPSVNETHDR` (same `virtio_net_hdr` wire format —
-    /// `if_tuntap.c:168`). Windows could synthesize from a `WinTun`
+    /// `TAPSVNETHDR` (same `virtio_net_hdr` wire format).
+    /// Windows could synthesize from a `WinTun`
     /// ring drain but doesn't today. macOS vmnet is `Frames` (batch,
     /// not super-packet — see `bsd-perf-findings.md`).
     Super {

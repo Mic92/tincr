@@ -1,9 +1,5 @@
 //! Invitation URL crypto kernel.
 //!
-//! C reference: `src/invitation.c:499-551` (`cmd_invite`),
-//! `src/invitation.c:1308-1410` (`cmd_join`),
-//! `src/protocol_auth.c:199-207` (`receive_invitation_sptps` daemon side).
-//!
 //! ## What an invitation URL is
 //!
 //! ```text
@@ -32,8 +28,8 @@
 //! Each line is a place to be silently wrong:
 //!
 //! - `fingerprint` uses `b64encode_tinc` (the `+/` variant) because that's
-//!   what `ecdsa_get_base64_public_key` calls (`ecdsa.c:63`). Only the
-//!   *output* of the kernel is url-safe.
+//!   what the public-key encoder emits. Only the *output* of the kernel
+//!   is url-safe.
 //! - `key_hash` hashes the **base64 string**, not the raw pubkey. The C
 //!   does `sha512(fingerprint, strlen(fingerprint), hash)` — `strlen` is
 //!   the giveaway. This is unusual; you'd expect raw bytes. But it's wire-
@@ -59,7 +55,7 @@ use zeroize::Zeroize;
 use crate::b64;
 use crate::sign::PUBLIC_LEN;
 
-/// Cookie length, raw bytes. `invitation.c:508`: `randomize(cookie, 18)`.
+/// Cookie length, raw bytes.
 ///
 /// Why 18: it's `144 / 8`. 144 bits → exactly 24 base64 characters with no
 /// padding (`18 * 4 / 3 = 24`). The same length is used for the truncated
@@ -72,8 +68,6 @@ pub const COOKIE_LEN: usize = 18;
 pub const SLUG_PART_LEN: usize = 24;
 
 /// Full slug length: `b64(key_hash) || b64(cookie)`.
-///
-/// `invitation.c:1277`: `if(strlen(slash) != 48) goto invalid;`.
 pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 
 // Compile-time witness that 18 → 24 is the encoding length we claimed.
@@ -82,12 +76,10 @@ pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 const _: () = assert!(COOKIE_LEN * 4 / 3 == SLUG_PART_LEN);
 const _: () = assert!(COOKIE_LEN * 4 % 3 == 0); // exactness, not just division
 
-/// `ecdsa_get_base64_public_key`. `ed25519/ecdsa.c:62`.
-///
 /// Encodes the 32-byte public key with the standard `+/` alphabet — *not*
 /// url-safe. This string is what the daemon transmits in its meta-greeting
-/// (`protocol_auth.c:354`: `send_request(c, "%d %s", ACK, mykey)`), so
-/// `cmd_join` receives it and hashes it directly for comparison. The b64
+/// (`ACK` request payload), so `cmd_join` receives it and hashes it
+/// directly for comparison. The b64
 /// alphabet is therefore protocol-locked. Always 43 chars (32 → 43 in
 /// no-pad b64).
 ///
@@ -103,13 +95,12 @@ pub fn fingerprint(public: &[u8; PUBLIC_LEN]) -> String {
     f
 }
 
-/// `sha512(fingerprint(pk))[..18]`. `invitation.c:500-502`.
+/// `sha512(fingerprint(pk))[..18]`.
 ///
 /// This is what the first half of the URL slug encodes. `cmd_join` decodes
 /// it from the URL, then after the meta-greeting receives the daemon's
 /// pubkey (as a b64 string), hashes *that*, and compares. If they match,
-/// the daemon really holds the invitation key. `invitation.c:1400`:
-/// `sha512(fingerprint, strlen(fingerprint), hishash); mem_eq(hishash, hash, 18)`.
+/// the daemon really holds the invitation key.
 ///
 /// The hash is over the b64 string, not the raw pubkey. See module doc
 /// for why that's not a bug.
@@ -125,7 +116,7 @@ pub fn key_hash(public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
 
 /// `sha512(fingerprint_string)[..18]`. The body of [`key_hash`], exposed
 /// separately because `cmd_join` receives the fingerprint *as a b64 string
-/// off the wire* and hashes it directly. `invitation.c:1400`:
+/// off the wire* and hashes it directly:
 ///
 /// ```c
 /// char *fingerprint = line + 2;  // pointer into the recv buffer
@@ -152,8 +143,7 @@ pub fn fingerprint_hash(fp: &str) -> [u8; COOKIE_LEN] {
     out
 }
 
-/// `sha512(cookie || fingerprint(pk))[..18]`. `invitation.c:511-518`,
-/// `protocol_auth.c:199-207`.
+/// `sha512(cookie || fingerprint(pk))[..18]`.
 ///
 /// This is the **filename** of the invitation file. The cookie is a
 /// bearer token; storing the file as `invitations/COOKIE` would leak it
@@ -168,9 +158,8 @@ pub fn fingerprint_hash(fp: &str) -> [u8; COOKIE_LEN] {
 /// Zeroizes the intermediate buffer because it contains the cookie.
 #[must_use]
 pub fn cookie_hash(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
-    // C: `memcpy(buf, cookie, 18); memcpy(buf+18, fingerprint, fplen);`
-    //    `sha512(buf, buflen, cookiehash);`
-    // protocol_auth.c does the same dance, byte-for-byte.
+    // `sha512(cookie || fingerprint)` — same dance on the daemon side,
+    // byte-for-byte.
     let fp = fingerprint(public);
     // 18 + 43 = 61 bytes. Preallocate to final size — only zeroize one
     // allocation. (The Zeroizing<Vec> rule from sign.rs.)
@@ -185,7 +174,6 @@ pub fn cookie_hash(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> [u8;
 }
 
 /// Build the URL slug: `b64_url(key_hash) || b64_url(cookie)`.
-/// `invitation.c:502, 522, 551`.
 ///
 /// Returns the 48-character string that goes after `/` in the URL.
 /// The `address[:port]/` prefix is the caller's job — this is the
@@ -202,13 +190,11 @@ pub fn build_slug(public: &[u8; PUBLIC_LEN], cookie: &[u8; COOKIE_LEN]) -> Strin
 
 /// Filename for the invitation file. `b64_url(cookie_hash)`, 24 chars.
 ///
-/// `invitation.c:518` + `protocol_auth.c:207`. Relative name only;
-/// caller prepends `<confbase>/invitations/`.
+/// Relative name only; caller prepends `<confbase>/invitations/`.
 ///
 /// The expiry sweep in `cmd_invite` uses `strlen(ent->d_name) != 24`
-/// (`invitation.c:409`) to recognize invitation files in a `readdir`
-/// scan. The filename length is therefore load-bearing; this returns
-/// exactly that.
+/// to recognize invitation files in a `readdir` scan. The filename
+/// length is therefore load-bearing; this returns exactly that.
 #[must_use]
 pub fn cookie_filename(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> String {
     let s = b64::encode_urlsafe(&cookie_hash(cookie, public));
@@ -216,7 +202,7 @@ pub fn cookie_filename(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> 
     s
 }
 
-/// Parse a URL slug back into `(key_hash, cookie)`. `invitation.c:1310`.
+/// Parse a URL slug back into `(key_hash, cookie)`.
 ///
 /// `cmd_join` does this:
 /// ```c
@@ -242,10 +228,8 @@ pub fn parse_slug(slug: &str) -> Option<([u8; COOKIE_LEN], [u8; COOKIE_LEN])> {
         return None;
     }
     let (h, c) = slug.split_at(SLUG_PART_LEN);
-    // b64::decode accepts both alphabets (+ and -, / and _) — that's
-    // the C `base64_decode` table's union behavior. So a slug printed
-    // with +/ would also parse here. The C does the same (`b64decode_tinc`
-    // is the only decoder; it's alphabet-agnostic). In practice slugs
+    // b64::decode accepts both alphabets (+ and -, / and _). So a
+    // slug printed with +/ would also parse here. In practice slugs
     // are always urlsafe because `cmd_invite` emits them that way.
     let hash = b64::decode(h)?;
     let cookie = b64::decode(c)?;

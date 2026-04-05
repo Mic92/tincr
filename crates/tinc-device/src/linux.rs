@@ -1,12 +1,12 @@
-//! Linux TUN/TAP — `linux/device.c` (225 LOC, 1.1 branch HEAD).
+//! Linux TUN/TAP.
 //!
 //! ──────────── ioctl approach: NOT the nix macro ────────────────────
 //!
 //! `tui.rs` uses `nix::ioctl_read_bad!` for `TIOCGWINSZ`. That works
 //! because `TIOCGWINSZ` only writes (kernel → us). `TUNSETIFF` is
-//! encoded as `_IOW` (us → kernel) but the kernel WRITES BACK `ifr_
-//! name` (`linux/device.c:108-111`: `strncpy(ifrname, ifr.ifr_name)`
-//! AFTER the ioctl). The ioctl encoding lies about the direction.
+//! encoded as `_IOW` (us → kernel) but the kernel WRITES BACK
+//! `ifr_name` after the ioctl. The ioctl encoding lies about the
+//! direction.
 //!
 //! `nix::ioctl_write_ptr_bad!` generates `unsafe fn(fd, *const T)`.
 //! We'd need `*mut T` to soundly let the kernel write. Casting
@@ -28,14 +28,13 @@
 //! `ifr_ifru` union (largest members are 16 bytes, padded to 24).
 //!
 //! `ifr_flags` is `ifr_ifru.ifru_flags: c_short` (2 bytes at offset
-//! 16). The C uses `ifr.ifr_flags` (a `#define` alias into the
-//! union); we write `ifr.ifr_ifru.ifru_flags`.
+//! 16). C code typically uses `ifr.ifr_flags` (a `#define` alias
+//! into the union); we write `ifr.ifr_ifru.ifru_flags`.
 //!
 //! ──────────── Why `O_CLOEXEC` matters here more than usual ──────────
 //!
-//! C `device.c:63`: `fcntl(device_fd, F_SETFD, FD_CLOEXEC)`. The
-//! daemon spawns `tinc-up`, `tinc-down`, `host-NAME-up` scripts
-//! (`script.c`). Without CLOEXEC, the script inherits the TUN fd.
+//! The daemon spawns `tinc-up`, `tinc-down`, `host-NAME-up` scripts.
+//! Without CLOEXEC, the script inherits the TUN fd.
 //! The device survives a child closing its inherited fd (refcounted),
 //! but the script could write garbage to the TUN. CLOEXEC: defense.
 //!
@@ -52,15 +51,12 @@ use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
 use crate::{Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode};
 
-/// `DEFAULT_DEVICE` — `linux/device.c:24`. The kernel's TUN/TAP
-/// multiplexer. Opening it doesn't give you a device; `TUNSETIFF`
-/// does. The fd is just a handle into the driver until then.
+/// The kernel's TUN/TAP multiplexer. Opening it doesn't give you a
+/// device; `TUNSETIFF` does. The fd is just a handle into the driver until then.
 const DEFAULT_DEVICE: &str = "/dev/net/tun";
 
-/// `os_devops` for Linux. Owns the fd; `Drop` closes it (via
-/// `File::drop`, which is `close(2)`). C `close_device` (`:132-
-/// 142`) does `close(device_fd)` then frees the strings; we get
-/// both for free.
+/// Linux device. Owns the fd; `Drop` closes it (via `File::drop`,
+/// which is `close(2)`).
 ///
 /// NOT `Clone`: there's one TUN fd per daemon. Cloning would
 /// either dup the fd (two fds, same device — confusing) or share
@@ -84,14 +80,13 @@ pub struct Tun {
     mode: Mode,
 
     /// TAP only: kernel-assigned MAC. Read via `SIOCGIFHWADDR`
-    /// post-TUNSETIFF (`device.c:121-126`). For TUN: `None`.
+    /// post-TUNSETIFF. For TUN: `None`.
     mac: Option<Mac>,
 }
 
 impl Tun {
-    /// `setup_device` (`linux/device.c:46-130`). Open `/dev/net/
-    /// tun`, `TUNSETIFF` to instantiate, optionally `SIOCGIFHWADDR`
-    /// to read the TAP MAC.
+    /// Open `/dev/net/tun`, `TUNSETIFF` to instantiate, optionally
+    /// `SIOCGIFHWADDR` to read the TAP MAC.
     ///
     /// # Errors
     /// `io::Error`:
@@ -116,22 +111,21 @@ impl Tun {
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
         // ─── open
-        // C `device.c:56`: `open(device, O_RDWR | O_NONBLOCK)`.
-        // C `:63`: `fcntl(device_fd, F_SETFD, FD_CLOEXEC)` — race
-        // window between open and fcntl. We close the window with
-        // `O_CLOEXEC` in the open flags. `custom_flags` ORs into
-        // the underlying `open(2)` flags; `OpenOptions` already
-        // sets `O_RDWR` from `.read(true).write(true)`.
+        // `O_RDWR | O_NONBLOCK | O_CLOEXEC`. CLOEXEC atomically in
+        // the open flags closes the open→fcntl race window.
+        // `custom_flags` ORs into the underlying `open(2)` flags;
+        // `OpenOptions` already sets `O_RDWR` from
+        // `.read(true).write(true)`.
         let fd = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(device)?;
 
-        // ─── ifr_flags (C `device.c:77-89`)
+        // ─── ifr_flags
         // `as i16`: constants fit (1, 2, 0x1000, 0x4000).
         // `IFF_ONE_QUEUE` NOT set: no-op since kernel `5d09710`
-        // (2.6.27); C `:93-98` still sets it, we don't.
+        // (2.6.27).
         //
         // TUN: `IFF_VNET_HDR | IFF_NO_PI` (Phase 2a). Reads are
         // `[vnet_hdr(10)][raw IP]`; eth header synthesized in
@@ -154,9 +148,6 @@ impl Tun {
         } as i16;
 
         // ─── ifr_name
-        // C `device.c:103-105`: `strncpy(ifr.ifr_name, iface,
-        // IFNAMSIZ); ifr.ifr_name[IFNAMSIZ-1] = 0`.
-        //
         // `iface = None` → leave name zeroed → kernel picks `tun0`
         // / `tap0` / first free.
         //
@@ -168,15 +159,10 @@ impl Tun {
         // but the kernel writes ifr_name back; the macro generates
         // `*const` which documents the wrong contract).
         //
-        // Returns the kernel-chosen `ifr_name`. We read it post-
-        // ioctl (`device.c:108-111`).
+        // Returns the kernel-chosen `ifr_name` (read back post-ioctl).
         let iface = tunsetiff(fd.as_raw_fd(), flags, ifr_name)?;
 
         // ─── SIOCGIFHWADDR (TAP only)
-        // C `device.c:119-127`: `if(ifr.ifr_flags & IFF_TAP)` then
-        // `ioctl(SIOCGIFHWADDR)` into a fresh `ifreq`, `memcpy` 6
-        // bytes from `ifr_hwaddr.sa_data`.
-        //
         // The MAC is kernel-generated (random with the locally-
         // administered bit set). The daemon's `route.c` uses it
         // for ARP replies in switch mode.
@@ -184,7 +170,7 @@ impl Tun {
         // Failure (`:125`: `LOG_WARNING`, not error) → C continues
         // with `mymac = {0}`. We `None`. The ARP path with `None`
         // would send all-zeros source MAC, which is invalid but
-        // the C does the same thing. Port the warning-not-error.
+        // Port the warning-not-error.
         let mac = match cfg.mode {
             Mode::Tap => siocgifhwaddr(fd.as_raw_fd()).ok(),
             Mode::Tun => None,
@@ -228,9 +214,9 @@ impl Tun {
 /// `open(/dev/net/tun)` so length validation fires without
 /// `CAP_NET_ADMIN`.
 ///
-/// `None` → zeros → kernel picks (C `:103` `if(iface)`).
-/// `len >= 16` → `Err`. STRICTER than C's `strncpy + [15]=0`
-/// truncation (which fails three steps later as `ENODEV` in the
+/// `None` → zeros → kernel picks. `len >= 16` → `Err`. STRICTER
+/// than `strncpy + [15]=0` truncation (which fails three steps
+/// later as `ENODEV` in the
 /// user's `ip addr add`). `c_char` sign varies by arch; cast is
 /// sound (kernel reads bytes).
 ///
@@ -290,7 +276,8 @@ fn tunsetiff(
     // it gives a NULL pointer, which is valid. Can't `Default`
     // (libc doesn't impl it for unions); can't struct-literal
     // (union member needs to be set, but which one?). Zeroed-
-    // then-field-assign is the C `struct ifreq ifr = {0}` pattern.
+    // then-field-assign is the standard `struct ifreq ifr = {0}`
+    // pattern.
     //
     // SAFETY (zeroed): `ifreq` is `repr(C)` with no niche. All
     // fields are integers, byte arrays, or pointers (NULL valid).
@@ -335,8 +322,6 @@ fn tunsetiff(
     }
 
     // ─── Read back ifr_name
-    // C `device.c:108-110`: `strncpy(ifrname, ifr.ifr_name,
-    // IFNAMSIZ); ifrname[IFNAMSIZ-1] = 0; iface = xstrdup(ifrname)`.
     //
     // The kernel `strscpy`s into `ifr_name`, NUL-terminated. The
     // C's defensive `[15]=0` is belt-and-suspenders (kernel always
@@ -400,14 +385,14 @@ fn tunsetoffload(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// `SIOCGIFHWADDR` — read the device's MAC. C `device.c:121-126`.
+/// `SIOCGIFHWADDR` — read the device's MAC.
 ///
 /// Uses `ifr_ifru.ifru_hwaddr: sockaddr`. The MAC is in `sa_data
 /// [0..6]` (the rest of `sockaddr` is unused/garbage for hwaddr).
 #[allow(unsafe_code)]
 fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
-    // C `:120`: `struct ifreq ifr_mac = {0}`. The kernel reads
-    // NOTHING from this ifreq — `SIOCGIFHWADDR` on a TUN/TAP fd
+    // The kernel reads NOTHING from this ifreq — `SIOCGIFHWADDR`
+    // on a TUN/TAP fd
     // ignores `ifr_name` (the fd already names the device). Zeroed
     // is just hygiene.
     //
@@ -436,8 +421,7 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     }
 
     // `sockaddr.sa_data` is `[c_char; 14]`. First 6 bytes are the
-    // MAC. C `:124`: `memcpy(mymac.x, ifr.ifr_hwaddr.sa_data,
-    // ETH_ALEN)` where ETH_ALEN=6.
+    // MAC (ETH_ALEN=6).
     //
     // SAFETY (union read): the kernel wrote `ifru_hwaddr`. Reading
     // it now is sound (it's the active variant from the kernel's
@@ -464,14 +448,14 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
 // Device trait — read/write with the offset trick
 
 impl Device for Tun {
-    /// `read_packet` (`linux/device.c:144-183`). TAP only.
+    /// Read a packet. TAP only.
     ///
     /// TUN doesn't go through here: `drain()` is overridden and
     /// reads directly via `read_fd` (`vnet_hdr` layout). The trait
     /// default `drain` calls `self.read()`, but our override
-    /// doesn't. The C `:146-165` +10 `tun_pi` trick is gone (no
-    /// `tun_pi` with `IFF_NO_PI`); see git history at `1da3d1d7^`
-    /// for the archaeology.
+    /// doesn't. The legacy +10 `tun_pi` trick is gone (no `tun_pi`
+    /// with `IFF_NO_PI`); see git history at `1da3d1d7^` for the
+    /// archaeology.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // TUN: dead path since Phase 2a (vnet drain bypasses).
         // If this fires, drain() got de-overridden.
@@ -483,8 +467,8 @@ impl Device for Tun {
         );
 
         // ─── TAP ───────────────────────────────────────────────
-        // C `:167-179`. `IFF_NO_PI` → no `tun_pi` prefix; raw
-        // ethernet. Direct read, no offset, no memset.
+        // `IFF_NO_PI` → no `tun_pi` prefix; raw ethernet. Direct
+        // read, no offset, no memset.
         debug_assert!(
             buf.len() >= MTU,
             "buf too small for TAP read: {} < {MTU}",
@@ -501,7 +485,6 @@ impl Device for Tun {
         Ok(n)
     }
 
-    /// `write_packet` (`linux/device.c:185-211`).
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
             // ─── TUN (vnet_hdr) ────────────────────────────────
@@ -525,8 +508,8 @@ impl Device for Tun {
             // Phase 2b (GRO TUN write) will fill in a real vnet_hdr
             // here for coalesced ACK bursts. For now: zeros.
             //
-            // The C `:188-196` +10 tun_pi write is gone: with
-            // IFF_NO_PI there's no tun_pi prefix to construct.
+            // The legacy +10 tun_pi write is gone: with IFF_NO_PI
+            // there's no tun_pi prefix to construct.
             Mode::Tun => {
                 debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
                 // Ethertype → 0. Bytes [4..12] are already 0
@@ -539,7 +522,7 @@ impl Device for Tun {
             }
 
             // ─── TAP
-            // C `:198-204`. Direct write.
+            // Direct write.
             Mode::Tap => write_fd(self.fd.as_raw_fd(), buf),
         }
     }
@@ -821,11 +804,10 @@ mod tests {
     }
 
     /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (Phase 2a;
-    /// C `device.c:78` is just `IFF_TUN` — we diverge here, the C's
-    /// +10 `tun_pi` trick is gone in favor of `vnet_hdr`;
-    /// wg-go `tun_linux.go:566` does the same). TAP flags match
-    /// C `device.c:86`: `IFF_TAP | IFF_NO_PI`. Pin both so a
-    /// refactor of `Tun::open`'s flag computation gets caught.
+    /// the legacy +10 `tun_pi` trick is gone in favor of `vnet_hdr`;
+    /// wg-go `tun_linux.go:566` does the same). TAP flags:
+    /// `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
+    /// `Tun::open`'s flag computation gets caught.
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn mode_flags() {
@@ -844,9 +826,8 @@ mod tests {
 
     // pack_ifr_name — the testable seam
 
-    /// Ok-path: `None` → all zeros (C `if(iface)` guard skips the
-    /// strncpy; kernel picks). `Some` → packed, NUL-padded (C
-    /// `strncpy` zero-fills the rest). The boundary: `< IFNAMSIZ`
+    /// Ok-path: `None` → all zeros (kernel picks). `Some` → packed,
+    /// NUL-padded. The boundary: `< IFNAMSIZ`
     /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
     /// `c_char` signedness; values are ASCII either way.
     #[test]

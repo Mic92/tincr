@@ -10,8 +10,8 @@
 //!   raw:    read at +0,  kernel wrote raw ethernet, nothing to do
 //! ```
 //!
-//! C `:45` doesn't reject `routing_mode != RMODE_SWITCH` (it should,
-//! like `fd_device.c` does). We document via `mode() → Tap`.
+//! `routing_mode != RMODE_SWITCH` isn't explicitly rejected (it
+//! probably should be). We document via `mode() → Tap`.
 //!
 //! ## Unsafe-shim matrix
 //!
@@ -22,11 +22,10 @@
 //!   #5 SIOCGIFINDEX: different syscall same job, POSIX std    → substitute
 //! ```
 //!
-//! Shim #5: `if_nametoindex(3)` (POSIX 2001) replaces the C's
-//! `SIOCGIFINDEX` ioctl. STRICTER: errors on overlong names where
-//! C truncates (`:60-61`). nix `socket()` handles creation and
-//! atomic CLOEXEC; `bind(sockaddr_ll)` is hand-rolled (shim #6)
-//! since nix's `LinkAddr` is getters-only.
+//! Shim #5: `if_nametoindex(3)` (POSIX 2001) replaces `SIOCGIFINDEX`.
+//! STRICTER: errors on overlong names instead of truncating. nix
+//! `socket()` handles creation and atomic CLOEXEC; `bind(sockaddr_ll)`
+//! is hand-rolled (shim #6) since nix's `LinkAddr` is getters-only.
 
 #![allow(clippy::doc_markdown)]
 
@@ -44,9 +43,9 @@ const ETH_P_ALL: u16 = 0x0003;
 
 // RawSocket — the Device impl
 
-/// `raw_socket_devops` (`raw_socket_device.c:112-117`). TAP-only.
+/// PF_PACKET raw socket device. TAP-only.
 ///
-/// No `mac` field: C doesn't query `SIOCGIFHWADDR` here. raw_socket
+/// No `mac` field: `SIOCGIFHWADDR` isn't queried here. raw_socket
 /// attaches to an EXISTING interface (sniffing, not hosting); the
 /// daemon doesn't originate ARP replies on a real segment.
 /// `mac() → None` is correct despite TAP mode — `linux::Tun` in TAP
@@ -62,14 +61,9 @@ pub struct RawSocket {
 }
 
 impl RawSocket {
-    /// `setup_device` (`raw_socket_device.c:36-78`). Create the
-    /// `PF_PACKET` socket, look up the interface index, bind.
-    ///
-    /// The C ALSO reads `Interface =` and `Device =` config
-    /// (`:40-46`). NOT here: daemon's job. We get the resolved
-    /// `iface`. The C's `Device = ` for raw_socket is just a
-    /// label (it doesn't `open()` it like `linux.rs` opens
-    /// `/dev/net/tun`); we don't carry it.
+    /// Create the `PF_PACKET` socket, look up the interface index,
+    /// bind. Config parsing (`Interface =`, `Device =`) is the
+    /// daemon's job; we get the resolved `iface`.
     ///
     /// # Errors
     /// `io::Error`:
@@ -80,24 +74,21 @@ impl RawSocket {
     ///     nothing to validate-first here — `socket()` IS the
     ///     first thing that can fail.
     ///   - `if_nametoindex` fails: `NotFound` (`ENODEV` — no such
-    ///     interface; the C ioctl errors the same). The "STRICTER
-    ///     than C" path: 16+ byte ifname errors here, not silent
-    ///     truncation.
-    ///   - `bind` fails: rare (we just verified the ifindex). The
-    ///     C check `:70` covers it.
+    ///     interface). STRICTER: 16+ byte ifname errors here, not
+    ///     silent truncation.
+    ///   - `bind` fails: rare (we just verified the ifindex).
     pub fn open(iface: &str) -> io::Result<Self> {
         use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
         // ─── socket
-        // C `:45`: `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`.
+        // `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`.
         //
         // nix's `socket()` returns `OwnedFd` (the right type;
         // see field comment). `SockProtocol::EthAll` IS
         // `htons(ETH_P_ALL)` — nix does the byte-swap. `SockFlag
-        // ::SOCK_CLOEXEC` sets CLOEXEC atomically — the C does
-        // open-then-fcntl (`:53-55`), which has the fork-race we
-        // documented in `linux.rs`. nix gives us the atomic path
-        // for free.
+        // ::SOCK_CLOEXEC` sets CLOEXEC atomically — closes the
+        // open-then-fcntl fork-race documented in `linux.rs`. nix
+        // gives us the atomic path for free.
         //
         // `PF_PACKET` == `AF_PACKET` (the kernel doesn't
         // distinguish; the `PF_`/`AF_` split is a 4.2BSD-era
@@ -114,10 +105,10 @@ impl RawSocket {
         )?;
 
         // ─── ifindex
-        // C `:60-68`: SIOCGIFINDEX ioctl. We use `if_nametoindex`
-        // instead — the POSIX function, same resolution.
+        // `if_nametoindex` (POSIX) instead of `SIOCGIFINDEX` ioctl.
+        // Same resolution.
         //
-        // The substitution: C builds an `ifreq`, strncpy's the
+        // The substitution: building an `ifreq`, strncpy'ing the
         // name (TRUNCATING at IFNAMSIZ-1), ioctls, reads back
         // `ifr_ifindex`. We hand the name to `if_nametoindex`
         // which errors ENODEV if not found. No truncation; no
@@ -126,8 +117,8 @@ impl RawSocket {
         // wrapper around the netlink path or the ioctl,
         // depending on the libc, but the RESULT is the same).
         //
-        // STRICTER: C `:60-61` truncates `Interface =
-        // sixteenchars_long` to `sixteenchars_lo`. If that
+        // STRICTER: `strncpy` truncation would turn `Interface =
+        // sixteenchars_long` into `sixteenchars_lo`. If that
         // truncated name happens to match a REAL interface (you
         // have `sixteenchars_lo` AND `sixteenchars_long`): the C
         // binds to the WRONG one. We error. Same fix class as
@@ -146,13 +137,12 @@ impl RawSocket {
         let ifindex = nix::net::if_::if_nametoindex(iface)?;
 
         // ─── bind
-        // C `:66-73`: build `sockaddr_ll`, bind. nix's `LinkAddr`
-        // is GETTERS ONLY (no constructor). Raw `libc::bind`.
-        // The sixth shim, but trivial (8 lines, one syscall).
+        // Build `sockaddr_ll`, bind. nix's `LinkAddr` is GETTERS
+        // ONLY (no constructor). Raw `libc::bind`. The sixth shim,
+        // but trivial (8 lines, one syscall).
         bind_packet(fd.as_raw_fd(), ifindex)?;
 
-        // C `:75`: `logger(LOG_INFO, "%s is a %s")`. Not here;
-        // daemon logs post-open if it wants.
+        // No log here; daemon logs post-open if it wants.
 
         Ok(RawSocket {
             fd,
@@ -196,9 +186,8 @@ impl RawSocket {
 /// `if_nametoindex` returns `c_uint` (unsigned); `sll_ifindex`
 /// is `c_int` (signed). Kernel ifindexes are small positive
 /// integers (1-based, allocated sequentially); 2 billion
-/// interfaces would overflow. The C does the same implicit
-/// conversion (`:68`: `ifr.ifr_ifindex` is `int`, no cast).
-/// libc's signedness mismatch is a historical glibc quirk.
+/// interfaces would overflow. libc's signedness mismatch is a
+/// historical glibc quirk.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #[allow(unsafe_code)]
 fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
@@ -206,29 +195,28 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // niche, all integers/bytes; zero is valid for all fields.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
-    // C `:66`: `sa.sll_family = AF_PACKET`. The discriminant.
-    // `c_ushort` cast: `AF_PACKET` is `c_int` in libc; the
-    // struct field is `c_ushort`. Value is 17, fits trivially.
+    // `sll_family = AF_PACKET`. The discriminant. `c_ushort` cast:
+    // `AF_PACKET` is `c_int` in libc; the struct field is
+    // `c_ushort`. Value is 17, fits trivially.
     #[allow(clippy::cast_sign_loss)]
     {
         sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     }
 
-    // C `:67`: `sa.sll_protocol = htons(ETH_P_ALL)`. Network
-    // byte order. `to_be()`: on a little-endian host (x86_64,
-    // aarch64), `0x0003` → `0x0300`. On big-endian: identity.
+    // `sll_protocol = htons(ETH_P_ALL)`. Network byte order.
+    // `to_be()`: on a little-endian host (x86_64, aarch64),
+    // `0x0003` → `0x0300`. On big-endian: identity.
     // The kernel reads it as `__be16`; `to_be()` writes it as
     // such regardless of host endianness.
     sa.sll_protocol = ETH_P_ALL.to_be();
 
-    // C `:68`: `sa.sll_ifindex = ifr.ifr_ifindex`. The result
-    // of our `if_nametoindex`. See fn-level cast-allow comment
-    // for the `c_uint → c_int` signedness.
+    // `sll_ifindex` = result of `if_nametoindex`. See fn-level
+    // cast-allow comment for the `c_uint → c_int` signedness.
     sa.sll_ifindex = ifindex as libc::c_int;
 
-    // C `:70`: `bind(device_fd, (struct sockaddr *)&sa,
-    // sizeof(sa))`. The cast is the standard sockaddr type-
-    // erasure (the kernel discriminates on `sa_family`).
+    // `bind(fd, (struct sockaddr *)&sa, sizeof(sa))`. The cast is
+    // the standard sockaddr type-erasure (the kernel discriminates
+    // on `sa_family`).
     //
     // SAFETY: `sa` is fully initialized (zeroed + 3 writes).
     // `bind` reads `addrlen` bytes from the pointer; we pass
@@ -249,28 +237,25 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
 // Device impl — the +0 read/write
 
 impl Device for RawSocket {
-    /// `read_packet` (`raw_socket_device.c:88-100`). The +0 read.
-    /// Kernel writes ethernet at offset 0; we read at offset 0.
-    /// No offset arithmetic. The simplest backend.
+    /// The +0 read. Kernel writes ethernet at offset 0; we read at
+    /// offset 0. No offset arithmetic. The simplest backend.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() >= MTU,
             "buf too small for raw_socket read: {} < {MTU}",
             buf.len()
         );
-        // C `:89`: `read(device_fd, DATA, MTU)`. Offset 0. Cap at
-        // MTU. (Jumbo frames on `eth0` would truncate. The C
-        // doesn't handle jumbo here either — `MTU` is 1518.)
+        // `read(fd, DATA, MTU)`. Offset 0. Cap at MTU. (Jumbo
+        // frames on `eth0` would truncate — `MTU` is 1518.)
         let n = read_fd(self.fd.as_raw_fd(), &mut buf[..MTU])?;
 
-        // C `:91`: `if(inlen <= 0)`. `read_fd` already converted
-        // `<0`. `==0` on a `PF_PACKET` socket is EOF — happens
+        // `read_fd` already converted `<0`. `==0` on a `PF_PACKET`
+        // socket is EOF — happens
         // if the interface goes DOWN while we're reading
         // (kernel sends EOF on the socket). Unlike kernel TUN
         // (never EOFs) and like `fd.rs` (Java side can close),
-        // this is a real condition. The C errors `strerror(
-        // errno)` which is "Success" for `==0` — same UGLY as
-        // `linux/device.c`. We say something useful.
+        // this is a real condition. We say something useful
+        // (rather than `strerror(0)` = "Success").
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -281,20 +266,18 @@ impl Device for RawSocket {
             ));
         }
 
-        // C `:95`: `packet->len = inlen`. No `+ OFFSET` because
-        // there is no offset.
+        // No `+ OFFSET` because there is no offset.
         Ok(n)
     }
 
-    /// `write_packet` (`raw_socket_device.c:102-111`). The +0
-    /// write. Full ethernet frame in `buf[0..]`; write it all.
+    /// The +0 write. Full ethernet frame in `buf[0..]`; write it
+    /// all.
     ///
     /// THIS impl doesn't mutate `buf`. Same as `FdTun::write`.
     /// The trait's `&mut [u8]` is for `linux.rs` (which zeroes
     /// `buf[10..12]`); we just slice.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // C `:106`: `write(device_fd, DATA, packet->len)`. The
-        // whole thing. No header strip.
+        // The whole thing. No header strip.
         write_fd(self.fd.as_raw_fd(), buf)
     }
 
@@ -408,7 +391,7 @@ mod tests {
     }
 
     /// `htons(ETH_P_ALL)` on little-endian = 0x0300. The byte-
-    /// swap that goes into `sll_protocol`. C `:67`.
+    /// swap that goes into `sll_protocol`.
     #[test]
     fn eth_p_all_htons() {
         // `to_be()` on LE host: swap. On BE host: identity.

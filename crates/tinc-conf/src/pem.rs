@@ -9,10 +9,9 @@
 //!
 //! ## Layout
 //!
-//! `write_pem` (`ecdsagen.c:50-68`) chunks at 48 raw bytes per line
-//! → 64 base64 chars. So a 96-byte private key blob is two lines.
-//! `read_pem` (`ecdsa.c:71-128`) accepts any line length — it just
-//! decodes line-by-line and concatenates.
+//! `write_pem` chunks at 48 raw bytes per line → 64 base64 chars. So
+//! a 96-byte private key blob is two lines. `read_pem` accepts any
+//! line length — it just decodes line-by-line and concatenates.
 //!
 //! ## The struct overlap trick
 //!
@@ -28,9 +27,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use tinc_crypto::b64;
 use zeroize::Zeroizing;
 
-/// `read_pem` errors. The C sets `errno` (`EINVAL` or `ENOENT`) and
-/// logs; we typed-enum it. `NotFound` maps to the C `ENOENT` case
-/// where the BEGIN marker is absent — distinct from "found but
+/// `read_pem` errors. `NotFound` maps to the case where the BEGIN
+/// marker is absent — distinct from "found but
 /// malformed" because callers (`read_ecdsa_public_key` in
 /// `net_setup.c`) check `errno == ENOENT` to fall through to the
 /// `Ed25519PublicKey =` config-variable path.
@@ -40,7 +38,6 @@ pub enum PemError {
     #[error("PEM block not found")]
     NotFound,
     /// Found the block but `b64decode_tinc` rejected a line.
-    /// C: `"Invalid base64 data in PEM file"`, `errno = EINVAL`.
     #[error("invalid base64 data in PEM file")]
     BadBase64,
     /// Decoded total ≠ expected. C distinguishes "too much" (line
@@ -64,8 +61,7 @@ pub enum PemError {
 /// the exact strings) but preserved for fidelity.
 ///
 /// Result is wrapped in `Zeroizing` because private keys flow through
-/// here. The C `memzero`s its buffers on the error path (`ecdsa.c:
-/// 121-126`); `Zeroizing` does it on *every* drop.
+/// here; `Zeroizing` clears the buffer on every drop.
 ///
 /// # Errors
 /// See [`PemError`]. Notably, `NotFound` is the common no-key-in-file
@@ -95,14 +91,11 @@ pub fn read_pem(
         if n == 0 {
             break; // EOF
         }
-        // C `strcspn(line, "\r\n")` for the body lines, `strncmp` for
-        // the markers. Stripping CR/LF up front handles both.
+        // Strip CR/LF up front; covers both body lines and markers.
         let trimmed = line.trim_end_matches(['\r', '\n']);
 
         if !in_block {
-            // C: `strncmp(line, "-----BEGIN ", 11)` then
-            //    `strncmp(line + 11, type, typelen)`.
-            // The second is *prefix*, not exact — see fn doc.
+            // The type check is *prefix*, not exact — see fn doc.
             if let Some(rest) = trimmed.strip_prefix("-----BEGIN ")
                 && rest.starts_with(ty)
             {
@@ -111,27 +104,24 @@ pub fn read_pem(
             continue;
         }
 
-        // C: `strncmp(line, "-----END ", 9)`. Doesn't check the type
-        // matches BEGIN — first END of *any* type closes the block.
-        // tinc only writes matched pairs so it never matters.
+        // First END of *any* type closes the block (type isn't checked
+        // against BEGIN). tinc only writes matched pairs so it never
+        // matters.
         if trimmed.starts_with("-----END ") {
             // Exited cleanly. Size check below.
             return finish(out, expected_len);
         }
 
-        // Body line. C `b64decode_tinc(line, line, linelen)` decodes
-        // in place; we can't (immutable `&str`). The decoder returns
-        // 0 on bad input *or* on empty input — C `if(!len)` treats
-        // both as error, but a blank line inside a PEM block is also
-        // not something tinc writes. Preserve.
+        // Body line. The decoder returns 0 on bad input *or* on empty
+        // input — both are treated as error. A blank line inside a
+        // PEM block is not something tinc writes. Preserve.
         let decoded = b64::decode(trimmed).ok_or(PemError::BadBase64)?;
         if decoded.is_empty() {
             return Err(PemError::BadBase64);
         }
 
-        // C `if(len > size)` — overflow check before memcpy. `size` is
-        // the remaining capacity, decremented per line. We check
-        // total-so-far instead; same outcome, simpler bookkeeping.
+        // Overflow check. We check total-so-far instead of remaining
+        // capacity; same outcome, simpler bookkeeping.
         if out.len() + decoded.len() > expected_len {
             return Err(PemError::Size {
                 got: out.len() + decoded.len(),
@@ -253,7 +243,7 @@ mod tests {
         assert_eq!(&*back, &blob[..]);
     }
 
-    /// CRLF input. The C `strcspn(line, "\r\n")` handles it; so do we.
+    /// CRLF input.
     #[test]
     fn read_crlf() {
         let blob: Vec<u8> = (0..32u8).collect();
@@ -303,7 +293,7 @@ mod tests {
         ));
     }
 
-    /// Size mismatch: too little. C `if(size)` after the loop.
+    /// Size mismatch: too little.
     #[test]
     fn read_size_short() {
         let pem = "-----BEGIN X-----\nAA\n-----END X-----\n"; // 1 byte
@@ -313,7 +303,7 @@ mod tests {
         ));
     }
 
-    /// Size mismatch: too much. C `if(len > size)` mid-loop.
+    /// Size mismatch: too much.
     #[test]
     fn read_size_long() {
         let blob = [0u8; 100];
@@ -326,7 +316,7 @@ mod tests {
         ));
     }
 
-    /// Empty body line inside the block. C `if(!len)` rejects.
+    /// Empty body line inside the block: rejected.
     #[test]
     fn read_empty_body_line() {
         let pem = "-----BEGIN X-----\nAA\n\nAA\n-----END X-----\n";

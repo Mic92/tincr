@@ -1,4 +1,4 @@
-//! `variables[]` — `tincctl.c:1680-1758`. The static metadata table
+//! Config variable metadata table — `variables[]`. Static metadata
 //! about config keys: which file they belong in, whether they repeat,
 //! whether they're obsolete, whether they're safe to accept from an
 //! untrusted invitation.
@@ -9,10 +9,10 @@
 //!
 //! | Consumer | Uses |
 //! |---|---|
-//! | `fsck.c:157` | linear scan; warn on obsolete, server-var-in-host, host-var-in-server, non-multiple-appearing-twice |
-//! | `tincctl.c:1858` (`cmd_config` set/get) | lookup; reject set on obsolete, reject `node.var` if `!HOST`, reject bare `var` if `!SERVER`, downgrade `add` → `set` if `!MULTIPLE` |
-//! | `invitation.c:879` | lookup; reject `!SAFE` keys from invitation payload (defense: invitation comes from a peer you don't yet trust) |
-//! | `tincctl.c:3100` (tab-complete) | prefix scan over names |
+//! | `fsck` | linear scan; warn on obsolete, server-var-in-host, host-var-in-server, non-multiple-appearing-twice |
+//! | `cmd_config` set/get | lookup; reject set on obsolete, reject `node.var` if `!HOST`, reject bare `var` if `!SERVER`, downgrade `add` → `set` if `!MULTIPLE` |
+//! | invitation join | lookup; reject `!SAFE` keys from invitation payload (defense: invitation comes from a peer you don't yet trust) |
+//! | tab-complete | prefix scan over names |
 //!
 //! Three of four are `tinc-tools` commands (4a/5b). One is the daemon
 //! (invitation handling, Phase 5). The table is *about* config keys,
@@ -44,7 +44,7 @@
 //! query strings come from parsed config, which already preserves
 //! case for error messages). Returns `Option<&'static Var>` so the
 //! canonical-case `name` is available — `cmd_config` uses it to
-//! normalize `port` → `Port` in the file it writes (`tincctl.c:1864`).
+//! normalize `port` → `Port` in the file it writes.
 //!
 //! Tab-complete needs prefix scan; that's just `.iter()` on the
 //! slice. Expose `VARS` directly for that.
@@ -102,8 +102,8 @@ impl VarFlags {
     /// occurrence (`Config::lookup().next()`). fsck warns when a
     /// non-MULTIPLE key appears twice — it's the only place that
     /// surfaces the silent-first-wins behavior. `cmd_config add`
-    /// downgrades to `set` for non-MULTIPLE keys (`tincctl.c:1915`)
-    /// — adding a second `Port` would silently shadow itself.
+    /// downgrades to `set` for non-MULTIPLE keys — adding a second
+    /// `Port` would silently shadow itself.
     pub const MULTIPLE: Self = Self(4);
 
     /// `VAR_OBSOLETE = 8`. Deprecated. fsck warns; `cmd_config set`
@@ -118,7 +118,7 @@ impl VarFlags {
     /// or `ScriptsInterpreter` would be a remote-exec vector. SAFE
     /// is the allowlist — `Subnet`, `ConnectTo`, address-family/mode
     /// stuff. Anything that picks a file path or a binary is NOT
-    /// safe. (`invitation.c:912`.)
+    /// safe.
     pub const SAFE: Self = Self(16);
 
     /// `flags.contains(VarFlags::SERVER)`. The C does `type &
@@ -179,15 +179,13 @@ impl core::fmt::Debug for VarFlags {
 #[derive(Debug, Clone, Copy)]
 pub struct Var {
     /// Canonical case. `Port`, not `port`. `cmd_config set port 655`
-    /// writes `Port = 655` — the table is the canonicalization source
-    /// (`tincctl.c:1864`: `variable = (char *)variables[i].name`).
+    /// writes `Port = 655` — the table is the canonicalization source.
     pub name: &'static str,
     pub flags: VarFlags,
 }
 
-// The table. Transcribed line-for-line from tincctl.c:1680-1758.
-// C order preserved (see module doc). The {NULL, 0} sentinel is just
-// the slice end.
+// The table. C order preserved (see module doc). The {NULL, 0}
+// sentinel is just the slice end.
 //
 // Spelling out the macro: `S` = SERVER, `H` = HOST, `M` = MULTIPLE,
 // `O` = OBSOLETE, `F` (saFe) = SAFE. Single-letter consts to keep
@@ -218,7 +216,7 @@ const fn v(name: &'static str, flags: VarFlags) -> Var {
 /// assert. If the assert fires *without* you adding one, you have a
 /// transcription error.
 pub static VARS: &[Var] = &[
-    // ─── Server configuration (tincctl.c:1681 comment) ──────────────
+    // ─── Server configuration ───────────────────────────────────────
     v("AddressFamily", S.union(F)),
     v("AutoConnect", S.union(F)),
     v("BindToAddress", S.union(M)),
@@ -267,8 +265,8 @@ pub static VARS: &[Var] = &[
     v("UDPDiscoveryKeepaliveInterval", S.union(F)),
     v("UDPDiscoveryInterval", S.union(F)),
     v("UDPDiscoveryTimeout", S.union(F)),
-    // ─── Alpha break in C: these two come after UDPDiscovery* ──────
-    // tincctl.c:1731-1732. Preserved.
+    // ─── Alpha break: these two come after UDPDiscovery* ───────────
+    // (preserved from upstream order)
     v("MTUInfoInterval", S.union(F)),
     v("UDPInfoInterval", S.union(F)),
     v("UDPRcvBuf", S),
@@ -278,7 +276,7 @@ pub static VARS: &[Var] = &[
     v("UPnPRefreshPeriod", S),
     v("VDEGroup", S),
     v("VDEPort", S),
-    // ─── Host configuration (tincctl.c:1740 comment) ────────────────
+    // ─── Host configuration ─────────────────────────────────────────
     v("Address", H.union(M)),
     v("Cipher", S.union(H)),
     v("ClampMSS", S.union(H).union(F)),
@@ -320,10 +318,10 @@ pub static VARS: &[Var] = &[
     v("DhtDiscovery", S),
 ];
 
-/// Transcription tripwire. C has 74 entries (`grep '{"' | wc -l` on
-/// `tincctl.c:1681-1758`). +2 Rust-side keys (DhtDiscovery, DhtBootstrap)
-/// that the C never reads. The C-count check is the one that matters —
-/// drift here means a config key was added/removed upstream and our table
+/// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
+/// (DhtDiscovery, DhtBootstrap) that upstream never reads. The 74
+/// check is the one that matters — drift here means a config key was
+/// added/removed upstream and our table
 /// is stale. The +2 is fixed (this crate owns those keys).
 const _: () = assert!(VARS.len() == 74 + 2);
 
@@ -335,8 +333,8 @@ const _: () = assert!(VARS.len() == 74 + 2);
 /// `cmd_config`'s canonicalization: `lookup("port").unwrap().name`
 /// gives `"Port"` with `'static` lifetime, no clone needed.
 ///
-/// `None` for unknown keys. fsck *skips* unknowns (`var_type == 0` →
-/// `continue`, `fsck.c:164`) — this is intentional: a typo'd key
+/// `None` for unknown keys. fsck *skips* unknowns — intentional: a
+/// typo'd key
 /// doesn't crash, it's just inert (and the actual `Config::lookup`
 /// finds nothing, so the daemon ignores it). Surfacing "unknown key"
 /// as a warning is a feature request, not a port — the C doesn't.
@@ -390,9 +388,9 @@ mod tests {
         // SERVER | HOST | OBSOLETE.
         assert_eq!(lookup("PublicKeyFile").unwrap().flags, S | H | O);
 
-        // The alpha-break boundary (tincctl.c:1731). MTUInfoInterval
-        // is at index 48 in the C array (zero-indexed). Verify our
-        // index matches — proves order preservation, not just content.
+        // The alpha-break boundary. MTUInfoInterval is at index 48
+        // upstream (zero-indexed). Verify our index matches — proves
+        // order preservation, not just content.
         assert_eq!(VARS[48].name, "MTUInfoInterval");
         assert_eq!(VARS[49].name, "UDPInfoInterval");
     }
@@ -464,9 +462,9 @@ mod tests {
         assert!(f.contains(S | H));
         assert!(!f.contains(M));
         // The subtle one: `contains(S | M)` on `S | H` is FALSE. Both
-        // bits required, only one present. C `(type & (S|M)) == (S|M)`
-        // semantics. (C consumers actually test one bit at a time so
-        // this case never comes up there; but `contains` should be
+        // bits required, only one present — `(x & m) == m` semantics.
+        // (Consumers actually test one bit at a time so this case
+        // never comes up in practice; but `contains` should be
         // correct anyway.)
         assert!(!f.contains(S | M));
     }

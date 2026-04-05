@@ -24,10 +24,9 @@ struct Kat {
     myself: u32,
     sssp: Vec<KatRoute>,
     mst: Vec<u32>,
-    /// Edges to delete after the first sssp/mst snapshot. Tests
-    /// `del_edge` against the C `edge_del`: same deletes on both
-    /// sides, then re-run sssp+mst, diff again. Absent in append-only
-    /// cases (everything before `chain5_del`).
+    /// Edges to delete after the first sssp/mst snapshot. Same
+    /// deletes on both sides, then re-run sssp+mst, diff again.
+    /// Absent in append-only cases (everything before `chain5_del`).
     #[serde(default)]
     del_edges: Vec<u32>,
     #[serde(default)]

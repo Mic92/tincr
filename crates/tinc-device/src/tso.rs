@@ -27,8 +27,8 @@
 //! ## Why this lives in `tinc-device`, not `tincd`
 //!
 //! `RUST_REWRITE_10G.md` §"Design implication": same `virtio_net_hdr`
-//! wire format on FreeBSD `TAPSVNETHDR` (`if_tuntap.c:168`). Same
-//! input on Windows NDIS LSO. One ~200 LOC function, three platforms.
+//! wire format on FreeBSD `TAPSVNETHDR`. Same input on Windows NDIS
+//! LSO. One ~200 LOC function, three platforms.
 //! Keep it next to `DrainResult::Super` (its consumer) and `ether.rs`
 //! (its dependency for the synthetic header).
 //!

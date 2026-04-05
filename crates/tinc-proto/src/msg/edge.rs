@@ -42,8 +42,7 @@ pub struct AddEdge {
     /// `e->options`, hex on the wire.
     pub options: u32,
     /// Dijkstra edge weight. Signed because `%d`; negative is silly but
-    /// the protocol doesn't reject it (the C `int weight` is never
-    /// range-checked).
+    /// the protocol doesn't reject it (never range-checked).
     pub weight: i32,
     /// `from`'s LAN-side address, if known. Newer peers send it so the
     /// receiver can prefer LAN paths.
@@ -79,9 +78,9 @@ impl AddEdge {
         let local = match (t.s_opt()?, t.s_opt()?) {
             (None, None) => None,
             (Some(la), Some(lp)) => Some((AddrStr::new(la)?, AddrStr::new(lp)?)),
-            // 7 tokens. The C `sscanf` would also return 7 here (it parses
-            // greedily until a %s fails); the C then rejects via the
-            // `parameter_count != 6 && parameter_count != 8` check.
+            // 7 tokens. `sscanf` would also return 7 here (parses greedily
+            // until a %s fails); rejected via the `parameter_count != 6 &&
+            // parameter_count != 8` check.
             _ => return Err(ParseError),
         };
 
@@ -200,8 +199,8 @@ mod tests {
         assert_eq!(m.format(0), line);
     }
 
-    /// 7 tokens (one local field, not two): C `sscanf` returns 7,
-    /// `parameter_count != 6 && != 8` fires. We reject too.
+    /// 7 tokens (one local field, not two): `parameter_count != 6 &&
+    /// != 8` fires. We reject too.
     #[test]
     fn add_edge_seven_tokens_rejected() {
         assert!(AddEdge::parse("12 0 a b 1.1.1.1 655 0 50 lonely").is_err());
@@ -209,7 +208,7 @@ mod tests {
 
     #[test]
     fn add_edge_self_loop_rejected() {
-        // from == to: `!strcmp(from_name, to_name)` at protocol_edge.c:88
+        // from == to: self-loops are rejected at parse time.
         assert!(AddEdge::parse("12 0 alice alice 1.1.1.1 655 0 50").is_err());
     }
 

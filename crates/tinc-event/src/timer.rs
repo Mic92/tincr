@@ -1,11 +1,10 @@
-//! Timer wheel. Ports `event.c:80-137` (`timeout_add`/`_set`/`_del`/
-//! `_execute`).
+//! Timer wheel. `timeout_add`/`_set`/`_del`/`_execute`.
 //!
-//! C uses a splay tree keyed on `(struct timeval, struct timeout_t*)`.
-//! The pointer compare at `event.c:62-72` is a tiebreak for same-tv
-//! timers (without it `splay_insert_node` aborts on duplicate key,
-//! `event.c:99`). We use `(Instant, u64)` — the `u64` is a monotonic
-//! sequence number. Same disambiguation, doesn't change between runs.
+//! Keyed on `(Instant, u64)` where the `u64` is a monotonic sequence
+//! number. The sequence number is a tiebreak for timers set to the
+//! same instant — without it, two timers set in the same tick to the
+//! same offset would collide in the map. Same disambiguation as a
+//! pointer compare, but stable across runs.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -20,8 +19,7 @@ use std::time::{Duration, Instant};
 pub struct TimerId(usize);
 
 /// One timer slot. `at` is `None` when disarmed (after `del`, or
-/// freshly created and not yet `set`). C's equivalent is
-/// `timeout->cb == NULL` (`event.c:105`).
+/// freshly created and not yet `set`).
 struct Slot<W> {
     what: W,
     /// Current map key, when armed. Stored so `del`/`set` can find
@@ -37,8 +35,7 @@ pub struct Timers<W> {
     /// Ordered by deadline. Value is the slot index. `(Instant, u64)`
     /// because `Instant` alone collides for timers armed in the same
     /// `tick` to the same offset (and `BTreeMap::insert` overwrites,
-    /// silently dropping the earlier — that's the bug `event.c:99`'s
-    /// `abort()` was guarding against).
+    /// silently dropping the earlier).
     ///
     /// `BTreeMap` not `BinaryHeap`: every timer in tinc is re-armable,
     /// and re-arm on a heap means push-new + tombstone-old. The map's
@@ -56,8 +53,8 @@ pub struct Timers<W> {
     /// in practice (1 set per nanosecond for 584 years).
     seq: u64,
 
-    /// `event.c:24`'s `struct timeval now`. Updated once per `tick`;
-    /// `set` reads it. See lib.rs "now: cached" section for why this
+    /// Cached `now`. Updated once per `tick`; `set` reads it. See
+    /// lib.rs "now: cached" section for why this
     /// is correctness not optimization.
     now: Instant,
 }
@@ -74,9 +71,8 @@ impl<W: Copy> Timers<W> {
         }
     }
 
-    /// Ports `timeout_add` (`event.c:80-86`). C version takes a `cb`;
-    /// we take a `what`. C calls `timeout_set` immediately; we don't
-    /// — the caller calls `set` separately. Reason: `add` happens
+    /// Allocate a timer slot. The caller calls `set` separately.
+    /// Reason: `add` happens
     /// once at construction (or per-connection-create), `set` happens
     /// per-re-arm. Separating them makes the dynamic timers
     /// (`RetryOutgoing(OutgoingId)`) cheap to pre-create.
@@ -94,12 +90,9 @@ impl<W: Copy> Timers<W> {
         TimerId(idx)
     }
 
-    /// Ports `timeout_set` (`event.c:88-100`). `after` is RELATIVE
-    /// (the C takes a `struct timeval *tv` that's relative too, then
-    /// `timeradd(&now, tv, &timeout->tv)` at `:97`).
+    /// Arm a timer. `after` is RELATIVE to the cached `now`.
     ///
-    /// If already armed, removes from the map first (`event.c:89-91`:
-    /// `if(timerisset(&timeout->tv)) splay_unlink_node(...)`).
+    /// If already armed, removes the old entry from the map first.
     ///
     /// # Panics
     /// If `id` is dangling (was `del`'d). C doesn't check — it
@@ -107,24 +100,20 @@ impl<W: Copy> Timers<W> {
     /// We panic, which is louder.
     pub fn set(&mut self, id: TimerId, after: Duration) {
         let slot = &mut self.slots[id.0];
-        // C: timerisset() check + splay_unlink_node
         if let Some(old_key) = slot.at.take() {
             self.by_deadline.remove(&old_key);
         }
-        // C: timeradd(&now, tv, &timeout->tv)
         let when = self.now + after;
         self.seq += 1;
         let key = (when, self.seq);
         slot.at = Some(key);
-        // C: splay_insert_node, abort() on duplicate. We can't
-        // duplicate (seq is monotonic), so the unwrap-is-none is a
-        // debug assertion not a runtime check.
+        // Can't duplicate (seq is monotonic), so the unwrap-is-none is
+        // a debug assertion not a runtime check.
         let prev = self.by_deadline.insert(key, id.0);
         debug_assert!(prev.is_none(), "seq tiebreak collided — impossible");
     }
 
-    /// Ports `timeout_del` (`event.c:104-114`). Idempotent — C checks
-    /// `if(!timeout->cb) return` at `:105`; we check `slot.at`.
+    /// Delete a timer. Idempotent.
     ///
     /// Slot is returned to the freelist. Caller must not use `id`
     /// after this. (C nulls `cb` and zeroes `tv`; the `timeout_t`
@@ -139,10 +128,10 @@ impl<W: Copy> Timers<W> {
         self.free.push(id.0);
     }
 
-    /// Ports `timeout_execute` (`event.c:116-137`).
+    /// Execute expired timers.
     ///
-    /// Snapshots `Instant::now()` into `self.now` (C `gettimeofday`
-    /// at `:117`), then drains all expired timers into `out`. Returns
+    /// Snapshots `Instant::now()` into `self.now`, then drains all
+    /// expired timers into `out`. Returns
     /// the duration until the next un-expired timer, or `None` if
     /// the wheel is empty. That `Option<Duration>` is the poll
     /// timeout — passed straight to `mio::Poll::poll`.
@@ -177,7 +166,7 @@ impl<W: Copy> Timers<W> {
     #[allow(clippy::missing_panics_doc)]
     pub fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
-        // C event.c:117 — single gettimeofday per execute.
+        // Single clock read per execute.
         self.now = Instant::now();
 
         // Drain everything <= now. C's `while(timeout_tree.head)`
@@ -189,32 +178,28 @@ impl<W: Copy> Timers<W> {
             let key = match self.by_deadline.first_key_value() {
                 Some((k, _)) if k.0 <= self.now => *k,
                 Some((k, _)) => {
-                    // C event.c:131-132: tv = diff; break.
                     return Some(k.0 - self.now);
                 }
                 None => {
-                    // C: returns NULL. linux/event.c:121 derefs it
-                    // (bug); we return None and mio handles it.
+                    // No more timers. mio handles `None` as infinite wait.
                     return None;
                 }
             };
-            // C event.c:120-121: timeout = head->data
             // remove() not pop_first() — pop_first is logically the
             // same here but remove(key) is what we'd do for the
             // re-arm path, and using one operation keeps it obvious.
             let idx = self.by_deadline.remove(&key).expect("just peeked");
             let slot = &mut self.slots[idx];
-            // C event.c:127-129's auto-del: NOT ported, see doc.
-            // We do clear `at` though — the timer is disarmed until
+            // Auto-del NOT ported, see doc. We do clear `at` though —
+            // the timer is disarmed until
             // the daemon's match arm calls `set` again.
             slot.at = None;
             out.push(slot.what);
         }
     }
 
-    /// Current cached `now`. Exposed because `net.c:258` does
-    /// `c->last_ping_time + pinginterval <= now.tv_sec` — it wants
-    /// the SAME now the timer comparisons used, not a fresh
+    /// Current cached `now`. Exposed because the daemon's ping-interval
+    /// check wants the SAME now the timer comparisons used, not a fresh
     /// `Instant::now()` per check.
     #[must_use]
     pub fn now(&self) -> Instant {
@@ -222,8 +207,7 @@ impl<W: Copy> Timers<W> {
     }
 
     /// True if no timers are armed. Tests use this; daemon shouldn't
-    /// (it always has `pingtimer` armed — the very thing that masks
-    /// `linux/event.c:121`).
+    /// (it always has `pingtimer` armed).
     #[must_use]
     pub fn is_idle(&self) -> bool {
         self.by_deadline.is_empty()
@@ -250,8 +234,7 @@ mod tests {
         Retry(u32),
     }
 
-    /// `event.c:116-137` — empty tree returns NULL. The thing
-    /// `linux/event.c:121` segfaults on; we return None.
+    /// Empty wheel returns None (infinite poll timeout).
     #[test]
     fn tick_empty_returns_none() {
         let mut t: Timers<What> = Timers::new();
@@ -261,9 +244,8 @@ mod tests {
         assert!(t.is_idle());
     }
 
-    /// `event.c:97` — `timeradd(&now, tv, &timeout->tv)`. set() takes
-    /// a RELATIVE duration. After tick advances `now` past the
-    /// deadline, the timer fires.
+    /// set() takes a RELATIVE duration. After tick advances `now`
+    /// past the deadline, the timer fires.
     #[test]
     fn fires_after_duration() {
         let mut t = Timers::new();
@@ -281,8 +263,8 @@ mod tests {
         assert_eq!(next, None); // wheel is empty after firing
     }
 
-    /// `event.c:89-91` — set() on an already-armed timer unlinks
-    /// the old entry first. Re-arming to a later deadline must NOT
+    /// set() on an already-armed timer unlinks the old entry first.
+    /// Re-arming to a later deadline must NOT
     /// leave a ghost entry firing at the old time.
     #[test]
     fn rearm_removes_old_deadline() {
@@ -304,15 +286,14 @@ mod tests {
         assert_eq!(t.by_deadline.len(), 1);
     }
 
-    /// `event.c:62-72` — pointer-compare tiebreak. Two timers set
-    /// to the same relative offset in the same tick get the same
-    /// `Instant` (because `set` reads cached `self.now`). Without
+    /// Sequence-number tiebreak. Two timers set to the same relative
+    /// offset in the same tick get the same `Instant` (because `set`
+    /// reads cached `self.now`). Without
     /// the seq tiebreak, BTreeMap::insert would overwrite. With it,
     /// both fire.
     ///
-    /// This is the test for the bug `event.c:99`'s abort() guards
-    /// against. The C aborts if splay_insert_node fails on duplicate;
-    /// if it didn't abort, one timer would silently be lost.
+    /// Without disambiguation, one timer would silently be lost on
+    /// the duplicate insert.
     #[test]
     fn same_instant_timers_both_fire() {
         let mut t = Timers::new();
@@ -341,9 +322,7 @@ mod tests {
         assert!(out.contains(&What::Retry(2)));
     }
 
-    /// `event.c:104-114` — del is idempotent. C checks `!cb` at
-    /// `:105` and returns early. We check `at.is_none()` and the
-    /// slot already being freed.
+    /// del is idempotent.
     #[test]
     fn del_idempotent() {
         let mut t = Timers::new();
@@ -361,8 +340,8 @@ mod tests {
         assert_eq!(periodic.0, ping.0, "freelist reused slot");
     }
 
-    /// `event.c:131-132` — when the head is in the future, return
-    /// the diff (poll timeout) and don't fire anything.
+    /// When the head is in the future, return the diff (poll timeout)
+    /// and don't fire anything.
     #[test]
     fn future_timer_returns_diff() {
         let mut t = Timers::new();
@@ -379,10 +358,10 @@ mod tests {
         assert!(next <= Duration::from_secs(10));
     }
 
-    /// The "did cb re-arm?" semantics that we DELIBERATELY don't port
-    /// (C `event.c:127-129`). After firing, the slot is disarmed but
-    /// allocated. Calling `set` re-arms; not calling it leaves it
-    /// idle. The daemon is responsible.
+    /// The "did cb re-arm?" auto-del semantics we DELIBERATELY don't
+    /// port. After firing, the slot is disarmed but allocated. Calling
+    /// `set` re-arms; not calling it leaves it idle. The daemon is
+    /// responsible.
     ///
     /// This test pins the SHAPE: tick disarms, set re-arms.
     #[test]
@@ -406,7 +385,7 @@ mod tests {
     }
 
     /// Multiple timers, mixed expiry. Drains all <= now in one tick.
-    /// `event.c:120-134` is a `while(head)` loop, not a single pop.
+    /// It's a loop, not a single pop.
     #[test]
     fn drains_all_expired() {
         let mut t = Timers::new();

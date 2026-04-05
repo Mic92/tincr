@@ -94,8 +94,8 @@ impl Subnet {
         }
     }
 
-    /// `info.c:281-323`: does `self` match `find`, given a query
-    /// shape that's either an exact subnet or a single address?
+    /// Does `self` match `find`, given a query shape that's either
+    /// an exact subnet or a single address?
     ///
     /// `info_subnet` parses the user's input then walks every subnet
     /// the daemon knows, asking "does this one match?". The match
@@ -110,8 +110,8 @@ impl Subnet {
     ///
     /// MAC subnets ignore `as_address` (no prefix → only exact-match).
     /// Mismatched types (V4 vs V6) never match. Weight is ignored —
-    /// `info_subnet` checks weight separately (`info.c:285`, only when
-    /// the user typed a `#` suffix).
+    /// `info_subnet` checks weight separately (only when the user
+    /// typed a `#` suffix).
     ///
     /// The C does this inline with three nested `if`s per type. We
     /// pull it here because (a) `Subnet` IS the wire-format type,
@@ -137,7 +137,6 @@ impl Subnet {
     pub fn matches(&self, find: &Self, as_address: bool) -> bool {
         match (self, find) {
             // ─── IPv4 ──────────────────────────────────────────────
-            // C `info.c:291-303`.
             (
                 Self::V4 {
                     addr: a, prefix: p, ..
@@ -145,9 +144,8 @@ impl Subnet {
                 Self::V4 { addr: fa, .. },
             ) if as_address => {
                 // Address lookup: top `p` bits of find.addr must
-                // equal `self`. C `info.c:293`: `maskcmp(&find,
-                // &subnet, subnet.prefixlength)` — the SUBNET's
-                // prefix, not find's. (If find is a /32 address,
+                // equal `self`. The SUBNET's prefix, not find's.
+                // (If find is a /32 address,
                 // its own prefix is irrelevant — we're asking
                 // "does the /24 contain it?".)
                 maskcmp(&a.octets(), &fa.octets(), *p)
@@ -163,8 +161,6 @@ impl Subnet {
                 },
             ) => {
                 // Exact subnet: prefix equal, addr bytes equal.
-                // C `info.c:297-301`: `prefixlength != prefixlength`
-                // then `memcmp(&addr, &addr, sizeof addr)`.
                 //
                 // The memcmp checks ALL 4 bytes, NOT just the top
                 // `p` bits. So `10.0.0.1/24` (which is_canonical()
@@ -175,7 +171,7 @@ impl Subnet {
             }
 
             // ─── IPv6 ──────────────────────────────────────────────
-            // Same shape, 16 bytes. C `info.c:304-316`.
+            // Same shape, 16 bytes.
             (
                 Self::V6 {
                     addr: a, prefix: p, ..
@@ -194,32 +190,28 @@ impl Subnet {
             ) => p == fp && a == fa,
 
             // ─── MAC ───────────────────────────────────────────────
-            // C `info.c:318-322`: only memcmp. No prefix on MAC,
-            // so address-mode and exact-mode collapse. The C
-            // doesn't even read `address` in the MAC arm.
+            // Only memcmp. No prefix on MAC, so address-mode and
+            // exact-mode collapse. `address` isn't read in this arm.
             (Self::Mac { addr: a, .. }, Self::Mac { addr: fa, .. }) => a == fa,
 
             // ─── Type mismatch ─────────────────────────────────────
-            // C `info.c:281`: `if(find.type != subnet.type) continue`.
             // V4 query against V6 subnet → no match.
             _ => false,
         }
     }
 }
 
-/// `maskcmp` from `subnet_parse.c:32-50`: do the top `prefix` bits
-/// of `a` and `b` agree?
+/// Do the top `prefix` bits of `a` and `b` agree?
 ///
-/// The C returns `int` (memcmp-style sign), but every caller
-/// (`info.c:293,307`, `subnet.c:lookup_*`) only checks `!= 0`. We
-/// return `bool` (true = equal-under-mask).
+/// Returns `bool` (true = equal-under-mask). Every caller only
+/// checks `!= 0`, so the memcmp-style sign isn't needed.
 ///
 /// The C bit-math `0x100 - (1 << (8 - m))` makes a high-bits mask:
 /// `m=3` → `0x100 - 0x20` = `0xe0` = `0b1110_0000` (top 3 bits).
 /// We spell it `!0 << (8 - m)` which is the same thing (`0xff <<
 /// 5` = `0xe0`, after the implicit u8 truncation).
 ///
-/// Generic over 4 vs 16 bytes via slices, same as the C `void*`.
+/// Generic over 4 vs 16 bytes via slices.
 fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     let full = usize::from(prefix / 8);
     let bits = prefix % 8;
@@ -249,9 +241,8 @@ fn maskcheck(bytes: &[u8], prefix: u8) -> bool {
     let bits = prefix % 8;
     let mut i = full;
     if bits != 0 {
-        // Partial byte: low (8-bits) bits must be zero.
-        // C: `a[i++] & (0xff >> masklen)` — shift right by the *kept*
-        // bits, leaving a mask of the cleared ones.
+        // Partial byte: low (8-bits) bits must be zero. Shift right
+        // by the *kept* bits, leaving a mask of the cleared ones.
         if bytes[i] & (0xff >> bits) != 0 {
             return false;
         }
@@ -286,9 +277,8 @@ impl FromStr for Subnet {
         };
         let (s, prefix) = match s.split_once('/') {
             Some((head, p)) => {
-                // C: sscanf %d into int, then check `< 0`. So negative is
-                // a parse-then-reject, not a parse failure. We collapse
-                // both into Err — same observable result.
+                // Negative prefix is rejected; we collapse parse-failure
+                // and parse-then-reject into the same Err.
                 let p: i32 = p.parse().map_err(|_| ParseError)?;
                 if p < 0 {
                     return Err(ParseError);
@@ -310,7 +300,7 @@ impl FromStr for Subnet {
         // separator), so it's at most whatever's between colons. Old
         // tinc emitted single-digit parts; we accept 1-2 digits.
         if let Some(addr) = parse_mac(s) {
-            // C: `if(prefixlength >= 0) return false;` — MAC has no prefix.
+            // MAC has no prefix.
             if prefix.is_some() {
                 return Err(ParseError);
             }
@@ -609,7 +599,7 @@ mod tests {
     /// The C bit-math `0x100 - (1 << (8 - m))` and our `0xff << (8-m)`
     /// produce the same mask for m=1..7. m=0 doesn't reach the math.
     /// m=8 doesn't either (that's a full byte). Exhaustive over the
-    /// 7 reachable values — sed-verifiable against `subnet_parse.c:46`.
+    /// 7 reachable values.
     #[test]
     fn maskcmp_mask_equivalence() {
         for m in 1u32..8 {
@@ -738,16 +728,15 @@ mod tests {
     fn matches_type_mismatch() {
         // ::ffff:10.0.0.5 is the v4-mapped v6 address. Semantically
         // "the same host", but the type discriminant differs (V6).
-        // C `info.c:281`: `find.type != subnet.type → continue`. No
-        // v4-in-v6 collapse.
+        // No v4-in-v6 collapse.
         assert!(!sn("10.0.0.0/24").matches(&sn("::ffff:10.0.0.5"), true));
         // V4 vs MAC → no.
         assert!(!sn("10.0.0.0/24").matches(&sn("01:02:03:04:05:06"), true));
     }
 
     /// Weight is ignored. `info_subnet` checks weight in a SEPARATE
-    /// branch (`info.c:285-289`), only when the user typed `#`.
-    /// `matches` doesn't see weight at all.
+    /// branch, only when the user typed `#`. `matches` doesn't see
+    /// weight at all.
     #[test]
     fn matches_ignores_weight() {
         // 10.0.0.0/24#5 vs 10.0.0.0/24#10 → match (in exact mode).

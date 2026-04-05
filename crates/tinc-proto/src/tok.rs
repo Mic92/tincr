@@ -13,11 +13,11 @@
 //!
 //! ## The `" port "` literal
 //!
-//! `sockaddr2hostname` (`netutl.c:153`) returns `"10.0.0.1 port 655"` —
-//! a single string with embedded spaces. The daemon writes it via *one*
-//! `%s` (e.g. `node.c:210`), and the CLI parses it back via `%s port %s`
-//! (e.g. `tincctl.c:1282`). The literal `port` in the format string is
-//! how `sscanf` skips the word. `lit()` does the same here.
+//! `sockaddr2hostname` returns `"10.0.0.1 port 655"` — a single string
+//! with embedded spaces. The daemon writes it via *one* `%s`, and the
+//! CLI parses it back via `%s port %s`. The literal `port` in the
+//! format string is how `sscanf` skips the word. `lit()` does the
+//! same here.
 //!
 //! That means the dump-format strings have ONE more sscanf conversion
 //! than they have printf conversions, per `" port "` instance. The
@@ -45,9 +45,9 @@ pub struct ParseError;
 ///
 /// Public because `tinc-tools` parses dump rows with the same `sscanf`
 /// shape. The dump format is CLI↔daemon (not on the wire to peers) but
-/// the C `tinc` CLI↔C `tincd` cross-impl seam wants to keep working
-/// until the C daemon retires; and the four format strings live in
-/// `tincctl.c` next to the message-protocol ones, so co-locating their
+/// the cross-impl seam (Rust CLI ↔ C daemon and vice versa) wants to
+/// keep working; and the four format strings live next to the
+/// message-protocol ones upstream, so co-locating their
 /// parser here keeps them in lockstep.
 pub struct Tok<'a> {
     /// What's left after the last token. Kept around so `rest()` can
@@ -87,7 +87,7 @@ impl<'a> Tok<'a> {
         self.s().map(|_| ())
     }
 
-    /// `%d`. C `sscanf %d` accepts a leading `+` or `-`; the protocol
+    /// `%d`. `sscanf %d` accepts a leading `+` or `-`; the protocol
     /// only emits unsigned via `%d` so we don't bother with `+`, but
     /// `-` is observably parsed (e.g. `mtu_info_h` checks `mtu < 512`
     /// after `%d` — no separate negativity check, so `i32` semantics).
@@ -118,8 +118,8 @@ impl<'a> Tok<'a> {
     /// conversion is negated (in the return type)" — i.e. negated as
     /// unsigned. `-1` → `0u64.wrapping_sub(1)` = `u64::MAX`.
     ///
-    /// `net_packet.c:996` exploits this: in SPTPS-handshake-via-ANS_KEY
-    /// mode it sends the literal string `"-1 -1 -1"` for cipher/digest/
+    /// SPTPS-handshake-via-ANS_KEY mode exploits this: it sends the
+    /// literal string `"-1 -1 -1"` for cipher/digest/
     /// maclen (the values are placeholders — SPTPS doesn't use legacy
     /// crypto, so `ans_key_h` never reads them). The first two are `%d`
     /// (i32, fine). The third is `%lu`. A strict `u64::parse` would
@@ -150,9 +150,9 @@ impl<'a> Tok<'a> {
     /// (unsigned), so a negative parse means corruption — the C
     /// detects it via the signed type. We do the same.
     ///
-    /// `tincctl.c:1282` also uses `%hd` for pmtu/minmtu/maxmtu in
-    /// the node dump (the daemon writes `%d`, those fields are
-    /// `int n->mtu` but they're MTU values ≤ 9000ish so `i16` fits).
+    /// `%hd` is also used for pmtu/minmtu/maxmtu in the node dump
+    /// (the daemon writes `%d`; those fields are `int` but they're
+    /// MTU values ≤ 9000ish so `i16` fits).
     ///
     /// # Errors
     /// `ParseError` if no tokens remain or the token isn't a valid `i16`.
@@ -161,7 +161,7 @@ impl<'a> Tok<'a> {
     }
 
     /// `%ld`. Only `last_state_change` in the node dump uses it —
-    /// it's a `time_t` cast to `long` (`node.c:219`). `time_t` is
+    /// it's a `time_t` cast to `long`. `time_t` is
     /// `i64` on every platform we care about; `long` is `i32` on
     /// 32-bit systems but `time_t` would already have wrapped by
     /// then, so the C is wrong on 32-bit-with-64-bit-time_t and
@@ -187,8 +187,8 @@ impl<'a> Tok<'a> {
     /// # Errors
     /// `ParseError` if the next token isn't exactly `expected`.
     /// Case-sensitive: `sscanf` literal matching is `memcmp`, and
-    /// the daemon writes lowercase `"port"` always (it's a string
-    /// literal in `netutl.c:163,174`, no `tolower` involved).
+    /// the daemon writes lowercase `"port"` always (string literal,
+    /// no `tolower` involved).
     pub fn lit(&mut self, expected: &str) -> Result<(), ParseError> {
         if self.s()? == expected {
             Ok(())
@@ -270,8 +270,8 @@ mod tests {
 
     #[test]
     fn lu_accepts_negative_glibc_style() {
-        // net_packet.c:996 sends literal "-1" for the SPTPS ANS_KEY
-        // placeholder maclen. sscanf("%lu", "-1") = ULONG_MAX. We must
+        // SPTPS ANS_KEY placeholder maclen is the literal "-1".
+        // sscanf("%lu", "-1") = ULONG_MAX. We must
         // accept it or the cross-impl handshake dies right after SPTPS
         // record exchange.
         assert_eq!(Tok::new("-1").lu().unwrap(), u64::MAX);

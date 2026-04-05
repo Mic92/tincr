@@ -174,12 +174,12 @@ enum State {
 /// fields are otherwise private; the daemon never touches them.
 #[cfg_attr(not(fuzzing), allow(unreachable_pub))]
 pub struct ReplayWindow {
-    /// Expected next seqno. Mirrors C `s->inseqno`.
+    /// Expected next seqno.
     pub(crate) inseqno: u32,
     /// Circular bitmap. Length = `replaywin` bytes = `replaywin * 8` slots.
     /// Default 16 bytes (128 packets) per `sptps_replaywin` in C.
     pub(crate) late: Vec<u8>,
-    /// Far-future drop counter. Mirrors C `s->farfuture`.
+    /// Far-future drop counter.
     pub(crate) farfuture: u32,
 }
 
@@ -286,9 +286,9 @@ impl ReplayWindow {
             }
         }
         if update && seqno >= self.inseqno {
-            // C `seqno + 1` wraps silently at u32::MAX (sptps.c:502).
-            // Debug-mode `+` panics; `wrapping_add` matches C in both
-            // profiles. Lean proof `p5_wrap_receive_max` confirms the
+            // `seqno + 1` must wrap silently at u32::MAX (protocol
+            // requirement). Debug-mode `+` panics; `wrapping_add`
+            // matches in both profiles. Lean proof `p5_wrap_receive_max` confirms the
             // intended semantics: after seqno=MAX, inseqno wraps to 0.
             self.inseqno = seqno.wrapping_add(1);
         }
@@ -343,8 +343,8 @@ pub struct Sptps {
     // `instate`/`outstate` in C are bools that gate encryption. Rust models
     // that with Option: `None` = plaintext, `Some(cipher)` = encrypted.
     // The seqnos live alongside even when None because they tick during
-    // the plaintext handshake too (the C `outseqno++` in send_record_priv
-    // happens unconditionally).
+    // the plaintext handshake too (`outseqno++` happens unconditionally
+    // in send_record_priv).
     incipher: Option<ChaPoly>,
     inseqno: u32, // stream mode only; datagram uses ReplayWindow.inseqno
     outcipher: Option<ChaPoly>,
@@ -416,7 +416,6 @@ impl Sptps {
             label: label.into(),
         };
         let mut out = Vec::new();
-        // C: `s->state = SPTPS_KEX; return send_kex(s);`
         // send_kex can only fail if mykex is already set. We just zeroed it.
         s.send_kex(rng, &mut out).expect("first send_kex");
         (s, out)
@@ -435,10 +434,8 @@ impl Sptps {
     /// SIG=1), not 0.
     ///
     /// Hot-path note: this is the ONE per-packet allocation on the SPTPS
-    /// send side. The C does it with `alloca` + ONE `memcpy` of `body` +
-    /// in-place encrypt over `buffer+4` (`sptps.c:108-130`). We match that
-    /// shape: one right-sized `Vec`, one `extend_from_slice(body)` inside
-    /// `seal_into`, encrypt-in-place. Previous version built a `pt` scratch
+    /// send side. One right-sized `Vec`, one `extend_from_slice(body)`
+    /// inside `seal_into`, encrypt-in-place. Previous version built a `pt` scratch
     /// Vec, called `seal()` (which alloc'd a fresh output and copied `pt`
     /// into it), then copied THAT into `wire` — 3 allocs, 3 copies of body.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
@@ -521,9 +518,9 @@ impl Sptps {
     /// across packets. After the first call it has grown to `headroom +
     /// body.len() + 21`; subsequent same-size calls do zero heap ops.
     ///
-    /// This is the C author's `net_packet.c:1027` pre-padding TODO. They
-    /// never did it because their `alloca` made the prepend-memcpy cheap
-    /// enough; our heap-Vec equivalent showed up at 1.6% alloc + 1.5%
+    /// This pre-padding optimization was a long-standing upstream TODO.
+    /// It never landed there because `alloca` made the prepend-memcpy
+    /// cheap enough; our heap-Vec equivalent showed up at 1.6% alloc + 1.5%
     /// memmove in the profile.
     ///
     /// vs [`send_record`]: bypasses the `Vec<Output>` push/match (one alloc,
@@ -565,8 +562,7 @@ impl Sptps {
         out.extend_from_slice(&seqno.to_be_bytes());
 
         // type+body, encrypted in-place, tag appended. Same span the
-        // C hands to `chacha_poly1305_encrypt`: `buffer + 4` for
-        // `1 + body.len()` bytes (`sptps.c:125`).
+        // Encrypt `[type | body]` past the 4-byte plaintext seqno header.
         cipher.seal_into(u64::from(seqno), record_type, body, out, headroom + 4);
         Ok(())
     }
@@ -670,8 +666,8 @@ impl Sptps {
         rng: &mut impl RngCore,
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
-        // C: `if(s->mykex) return false;` — re-KEX before the previous
-        // one finished. State machine bug, not a wire error.
+        // Re-KEX before the previous one finished. State machine bug,
+        // not a wire error.
         if self.mykex.is_some() {
             return Err(SptpsError::InvalidState);
         }
@@ -981,8 +977,8 @@ impl Sptps {
     /// # Errors
     ///
     /// All variants are reachable. **`Err` is terminal in stream mode**:
-    /// `inseqno` ticks before decrypt (`sptps.c:676`), so a decrypt
-    /// failure poisons every later record. The daemon closes the
+    /// `inseqno` ticks before decrypt, so a decrypt failure poisons
+    /// every later record. The daemon closes the
     /// connection on stream `Err`; don't retry. Datagram `Err` is
     /// per-packet and safe to ignore (next packet may succeed).
     pub fn receive(
@@ -1107,8 +1103,8 @@ impl Sptps {
         }
 
         // Phase 3: have a whole record. Process it.
-        // C: `uint32_t seqno = s->inseqno++;` — unconditional tick,
-        // even on plaintext records. Same significance as outseqno:
+        // Unconditional tick, even on plaintext records. Same
+        // significance as outseqno:
         // the first encrypted record's seqno is 2, not 0.
         let seqno = self.inseqno;
         self.inseqno = self.inseqno.wrapping_add(1);

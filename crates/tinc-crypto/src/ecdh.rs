@@ -47,9 +47,8 @@ pub const SHARED_LEN: usize = 32;
 
 /// Ephemeral ECDH private state.
 ///
-/// Holds the full 64-byte SHA-512 expansion to match the C `ecdh_t` struct,
-/// even though only the first 32 bytes are used in the ladder. The C code
-/// `xzfree`s all 64 bytes; `ZeroizeOnDrop` does the same.
+/// Holds the full 64-byte SHA-512 expansion, even though only the first
+/// 32 bytes are used in the ladder. `ZeroizeOnDrop` clears all 64.
 #[derive(ZeroizeOnDrop)]
 pub struct EcdhPrivate {
     expanded: [u8; 64],

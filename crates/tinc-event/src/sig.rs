@@ -1,8 +1,8 @@
 //! Self-pipe signal handling. Ports `signal.c` (90 LOC).
 //!
-//! C `signal.c:33-39` — async-signal-safe handler does
-//! `write(pipefd[1], &num, 1)`. The poll loop reads `pipefd[0]` and
-//! dispatches. Standard self-pipe trick (DJB, 1990s).
+//! Async-signal-safe handler does `write(pipefd[1], &num, 1)`. The
+//! poll loop reads `pipefd[0]` and dispatches. Standard self-pipe
+//! trick (DJB, 1990s).
 //!
 //! We use the same trick. `signal-hook` exists and does this with
 //! more polish, but it's +3 deps (`signal-hook`, `signal-hook-
@@ -11,8 +11,7 @@
 //!
 //! # `signal()` vs `sigaction()`
 //!
-//! C `signal.c:77` calls `signal(signum, signal_handler)`. POSIX
-//! `signal()` is underspecified — System V semantics reset to
+//! POSIX `signal()` is underspecified — System V semantics reset to
 //! `SIG_DFL` after one delivery; BSD semantics don't. Linux glibc
 //! gives BSD semantics (the man page warns). The C code works on
 //! Linux/BSD by accident of the libc.
@@ -51,9 +50,9 @@
 //!
 //! # `NSIG` and the dispatch table
 //!
-//! C `signal.c:31` `signal_handle[NSIG + 1]`. The handler writes
-//! `signum` as a `u8` (`signal.c:34`); `signum` fits because real-
-//! time signals top out around 64. The poll-side reads the byte and
+//! Dispatch table indexed by signum. The handler writes `signum` as
+//! a `u8`; `signum` fits because real-time signals top out around
+//! 64. The poll-side reads the byte and
 //! indexes the table.
 //!
 //! `tincd.c` registers exactly 4 signals: HUP (reload), TERM (exit),
@@ -65,8 +64,7 @@ use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-/// The write-end fd for the handler. C `signal.c:30` `pipefd[1]`.
-/// `-1` means "not initialized" — the handler reads this and bails
+/// The write-end fd for the handler. `-1` means "not initialized" — the handler reads this and bails
 /// if so (defensive; shouldn't happen because `SelfPipe::new`
 /// installs the handler AFTER setting the fd).
 ///
@@ -99,7 +97,7 @@ pub struct SelfPipe<W> {
     /// doesn't half-close. `_` prefix because we never read it
     /// directly — `PIPE_WR` is the handler's copy.
     _wr: OwnedFd,
-    /// `signal.c:31` `signal_handle[NSIG + 1]`. Indexed by signum.
+    /// Dispatch table, indexed by signum.
     table: [Option<W>; NSIG_TABLE],
 }
 
@@ -107,9 +105,8 @@ pub struct SelfPipe<W> {
 ///
 /// Only async-signal-safe operations: atomic load, raw write.
 ///
-/// `signal.c:33-39` does `write(pipefd[1], &num, 1)` and ignores the
-/// result with a comment "Pipe full or broken, nothing we can do."
-/// Same here. If the pipe is full (64KB of pending signals), losing
+/// `write(pipefd[1], &num, 1)`; result ignored — pipe full or broken,
+/// nothing we can do. If the pipe is full (64KB of pending signals), losing
 /// one is fine — they coalesce semantically (two SIGHUPs = one
 /// reload). If the pipe is broken (`EPIPE`), the daemon is dying
 /// anyway.
@@ -135,24 +132,21 @@ extern "C" fn handler(signum: libc::c_int) {
 }
 
 impl<W: Copy> SelfPipe<W> {
-    /// Ports `pipe_init` (`signal.c:57-61`). Creates the pipe,
-    /// stashes the write fd in `PIPE_WR` for the handler. Does NOT
+    /// Creates the pipe, stashes the write fd in `PIPE_WR` for the
+    /// handler. Does NOT
     /// register with the event loop — caller does that with `read_
     /// fd()` + `EventLoop::add`.
     ///
     /// # Panics
     /// If a `SelfPipe` already exists (PIPE_WR is set). The C
-    /// `pipe_init` checks `pipefd[0] == -1` at the call site
-    /// (`signal.c:72-74`) — same protection. Multiple self-pipes
-    /// don't make sense (one global handler per signal).
+    /// Multiple self-pipes don't make sense (one global handler per signal).
     ///
     /// # Errors
     /// Returns the underlying I/O error if `pipe2(O_CLOEXEC)` fails.
     pub fn new() -> io::Result<Self> {
-        // C signal.c:58 `pipe(pipefd)`. We add O_CLOEXEC (the C
-        // doesn't, which means the pipe leaks into `script.c`'s
-        // children — minor C-is-WRONG, the children just have an
-        // extra unused fd).
+        // STRICTER: O_CLOEXEC. Without it the pipe leaks into spawned
+        // script children — they'd just have an extra unused fd, but
+        // it's untidy.
         let mut fds = [0i32; 2];
         // SAFETY: pipe2 writes two valid fds on success.
         #[allow(unsafe_code)]
@@ -165,7 +159,7 @@ impl<W: Copy> SelfPipe<W> {
         #[allow(unsafe_code)]
         let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
 
-        // signal.c:72-74's "already initialized?" check.
+        // "already initialized?" singleton check.
         let prev = PIPE_WR.swap(fds[1], Ordering::Relaxed);
         assert_eq!(prev, -1, "SelfPipe already exists — singleton");
 
@@ -183,8 +177,8 @@ impl<W: Copy> SelfPipe<W> {
         self.rd.as_raw_fd()
     }
 
-    /// Ports `signal_add` (`signal.c:63-80`). Installs the handler
-    /// for `signum` and stores `what` in the dispatch table.
+    /// Installs the handler for `signum` and stores `what` in the
+    /// dispatch table.
     ///
     /// `sigaction()` not `signal()` — see module doc. `SA_RESTART`
     /// so syscalls auto-retry on EINTR (the C gets this implicitly
@@ -199,8 +193,7 @@ impl<W: Copy> SelfPipe<W> {
         let idx = usize::try_from(signum).expect("signum negative");
         assert!(idx < NSIG_TABLE, "signum {signum} >= {NSIG_TABLE}");
 
-        // C signal.c:77: signal(signum, signal_handler).
-        // We sigaction with SA_RESTART. sa_mask empty (don't block
+        // sigaction with SA_RESTART. sa_mask empty (don't block
         // anything during the handler — it's just a write()).
         // SAFETY: libc::sigaction is the standard syscall wrapper.
         // `act` is fully initialized (zeroed sigset_t is the empty
@@ -220,13 +213,12 @@ impl<W: Copy> SelfPipe<W> {
             }
         }
 
-        // C signal.c:79: signal_handle[signum] = sig.
         self.table[idx] = Some(what);
         Ok(())
     }
 
-    /// Ports `signalio_handler` (`signal.c:41-55`). Called when
-    /// `turn()` reports the pipe readable. Reads ALL pending bytes
+    /// Called when `turn()` reports the pipe readable. Reads ALL
+    /// pending bytes
     /// (signals can coalesce in the pipe) and pushes their `what`s
     /// into `out`.
     ///
@@ -262,9 +254,8 @@ impl<W: Copy> SelfPipe<W> {
         let n = n as usize;
         for &signum in &buf[..n] {
             let idx = signum as usize;
-            // signal.c:50-54: look up in table, call cb if set.
-            // Unknown signum (table[idx] is None) — C does nothing
-            // (`if(sig)` at :52). Same here. Can happen if a signal
+            // Unknown signum (table[idx] is None) — silently skipped.
+            // Can happen if a signal
             // was del'd between handler write and drain read.
             if let Some(what) = self.table.get(idx).copied().flatten() {
                 out.push(what);
@@ -272,8 +263,7 @@ impl<W: Copy> SelfPipe<W> {
         }
     }
 
-    /// Ports `signal_del` (`signal.c:83-90`). Restores `SIG_DFL`,
-    /// clears the table entry.
+    /// Restores `SIG_DFL`, clears the table entry.
     ///
     /// Idempotent. C checks `!sig->cb` at `:84`.
     pub fn del(&mut self, signum: i32) {
@@ -286,7 +276,6 @@ impl<W: Copy> SelfPipe<W> {
         if slot.is_none() {
             return; // already del'd / never added
         }
-        // C signal.c:87: signal(sig->signum, SIG_DFL).
         // SAFETY: same as `add` — sigaction with SIG_DFL.
         #[allow(unsafe_code)]
         unsafe {
@@ -370,8 +359,7 @@ mod tests {
         assert_eq!(out, vec![Sig::Reload, Sig::Exit, Sig::Reload]);
     }
 
-    /// Unknown signum in pipe — drain skips it. C `signal.c:52`
-    /// `if(sig)` check.
+    /// Unknown signum in pipe — drain skips it.
     #[test]
     fn drain_skips_unknown() {
         let _g = SERIAL.lock().unwrap();
@@ -404,8 +392,8 @@ mod tests {
         let _sp2: SelfPipe<Sig> = SelfPipe::new().unwrap();
     }
 
-    /// `signal.c:31` — table size. SIGHUP=1, SIGINT=2, SIGALRM=14,
-    /// SIGTERM=15. All fit in 32.
+    /// Table size. SIGHUP=1, SIGINT=2, SIGALRM=14, SIGTERM=15. All
+    /// fit in 32.
     #[test]
     fn tincd_signals_fit() {
         // The 4 signals tincd.c registers. All are small positive

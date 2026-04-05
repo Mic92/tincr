@@ -75,9 +75,9 @@
 //!
 //! `del_node` is the same shape but rarer (peer leaves the mesh
 //! entirely vs. edge churn on every reconnect). It cascades: deletes
-//! all the node's outgoing edges first, like `node.c:141-143`. It
-//! does *not* hunt down incoming edges — the C doesn't either; the
-//! protocol layer (`del_edge_h`) deletes both halves of a pair before
+//! all the node's outgoing edges first. It does *not* hunt down
+//! incoming edges — the protocol layer (`del_edge_h`) deletes both
+//! halves of a pair before
 //! `node_del` runs. An incoming half-edge with a dangling `to` is the
 //! caller's bug, and it's harmless here (sssp skips reverseless edges
 //! and the cascade nulled the reverse).
@@ -104,17 +104,18 @@ pub const OPTION_INDIRECT: u32 = 0x0001;
 // ────────────────────────────────────────────────────────────────────
 // Slab payloads. Minimal — just what the algorithms read.
 
-/// One node. The C `node_t` is huge; this is the graph-relevant slice.
-/// The daemon keeps the rest (SPTPS state, MTU probe, address cache)
+/// One node. This is the graph-relevant slice of the daemon's node
+/// state. The daemon keeps the rest (SPTPS state, MTU probe, address
+/// cache)
 /// in a parallel table keyed by `NodeId`.
 #[derive(Debug, Clone)]
 pub struct Node {
     /// Tie-break key. The C splay trees sort on `strcmp(name)`.
     pub name: String,
 
-    /// Outgoing edges, sorted by destination name. C `node_t.edge_tree`
-    /// is a splay tree keyed on `to->name`; we keep a sorted `Vec`
-    /// (typical degree is small enough that linear insert beats
+    /// Outgoing edges, sorted by destination name. A sorted `Vec`
+    /// instead of a tree (typical degree is small enough that linear
+    /// insert beats
     /// `BTreeSet` overhead).
     edges: Vec<EdgeId>,
 
@@ -154,7 +155,7 @@ pub struct Edge {
 
 /// SSSP routing for one node, or `None` if unreachable from `myself`.
 ///
-/// "Unreachable" maps to C `n->status.visited == false` after the BFS.
+/// "Unreachable" means the BFS never visited the node.
 /// (`check_reachability` then flips `reachable` to match `visited`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
@@ -254,8 +255,7 @@ impl Graph {
     /// On more than `u32::MAX` edges. Not a realistic concern; tinc
     /// meshes are tens to hundreds of nodes.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, weight: i32, options: u32) -> EdgeId {
-        // C `edge_add` (edge.c:82-85) bails on duplicate via splay_insert
-        // returning NULL. We don't dedup; per-node list would get two
+        // We don't dedup; per-node list would get two
         // entries with same `to_name` (binary_search_by → unspecified
         // match), and weight_order would silently drop the old EdgeId.
         // Daemon discipline holds (on_add_edge does lookup_edge first,
@@ -309,9 +309,8 @@ impl Graph {
         id
     }
 
-    /// `edge.c:105-112` `edge_del`. Unlinks the twin's `reverse`,
-    /// removes from the per-node sorted list and `weight_order`, frees
-    /// the slot.
+    /// Delete an edge. Unlinks the twin's `reverse`, removes from the
+    /// per-node sorted list and `weight_order`, frees the slot.
     ///
     /// Returns `None` if the slot was already freed. The C would
     /// dereference a dangling pointer (UB); we no-op. Chosen over
@@ -335,12 +334,11 @@ impl Graph {
             (edge.from, edge.to_name.clone(), edge.weight, edge.reverse)
         };
 
-        // C: `if(e->reverse) e->reverse->reverse = NULL;`
+        // Unlink twin's back-pointer.
         if let Some(r) = reverse {
             slot!(mut self.edges, r).reverse = None;
         }
 
-        // C: `splay_delete(&e->from->edge_tree, e)`.
         // Per-node list is sorted by `to_name`; binary-search the slot
         // out. The `from` node must be live — deleting an edge whose
         // origin is gone is a caller bug (and the C would crash too).
@@ -351,8 +349,8 @@ impl Graph {
             .expect("edge in from's list");
         from_edges.remove(pos);
 
-        // C: `splay_delete(&edge_weight_tree, e)`.
-        // Recompute the key. `from_name` we don't cache (only `to_name`
+        // Recompute the weight-order key. `from_name` we don't cache
+        // (only `to_name`
         // is needed for the sort comparator); look it up. Cheaper than
         // a third name clone on every edge.
         let from_name = slot!(self.nodes, from).name.clone();
@@ -363,9 +361,8 @@ impl Graph {
         Some(())
     }
 
-    /// `node.c:134-147` `node_del`. Cascades: deletes all the node's
-    /// outgoing edges first (their twins become reverseless), then
-    /// frees the slot.
+    /// Delete a node. Cascades: deletes all the node's outgoing edges
+    /// first (their twins become reverseless), then frees the slot.
     ///
     /// Does **not** hunt down *incoming* edges. The C doesn't either:
     /// `node_del` walks `n->edge_tree` only. Any edge with `to ==`
@@ -378,14 +375,13 @@ impl Graph {
     /// Returns `None` if already freed (same rationale as
     /// [`Self::del_edge`]).
     ///
-    /// Subnet cascade (`node.c:137-139`) is not here — subnets are
-    /// daemon-side, not in this crate.
+    /// Subnet cascade is not here — subnets are daemon-side, not in
+    /// this crate.
     pub fn del_node(&mut self, n: NodeId) -> Option<()> {
         // Can't `take` yet — `del_edge` needs the node live to look
         // up `from_name` and edit `from_edges`. Check liveness, drain
-        // edges, *then* take.
-        // C `splay_each` reads `next` before the body so
-        // `splay_delete` mid-iteration is safe; we drain a snapshot.
+        // edges, *then* take. Drain a snapshot to avoid iterator
+        // invalidation during `del_edge`.
         let outgoing: Vec<EdgeId> = self.nodes[n.0 as usize].as_ref()?.edges.clone();
         for e in outgoing {
             self.del_edge(e);
@@ -396,12 +392,11 @@ impl Graph {
         Some(())
     }
 
-    /// `protocol_edge.c:162-182`: in-place edge update. The C mutates
-    /// `e->options` directly and re-links `edge_weight_tree` only if
-    /// weight changed (weight is the sort key there). It does *not*
-    /// touch `from->edge_tree` — `edge_compare` (`edge.c:53-55`) keys
-    /// on `to->name` alone, so a weight change doesn't break the
-    /// per-node index. We do the same: mutate the slot, re-key
+    /// In-place edge update. Mutates `options` directly; re-keys
+    /// `weight_order` only if weight changed (weight is the sort key
+    /// there). Does *not* touch the per-node index — that's keyed on
+    /// `to_name` alone, so a weight change doesn't break it. Mutate
+    /// the slot, re-key
     /// `weight_order` if weight moved, leave `from.edges` untouched.
     ///
     /// Returns `None` if the slot is freed (stale `EdgeId`).
@@ -422,8 +417,7 @@ impl Graph {
         if edge.weight == weight {
             return Some(());
         }
-        // Weight changed: re-key `weight_order`. Same shape as the C's
-        // `splay_unlink`/`splay_insert_node` pair (protocol_edge.c:179-181).
+        // Weight changed: re-key `weight_order` (unlink, reinsert).
         let old_weight = edge.weight;
         edge.weight = weight;
         let to_name = edge.to_name.clone();
@@ -435,8 +429,8 @@ impl Graph {
         Some(())
     }
 
-    /// `edge.c:114-121` `lookup_edge`. Find the edge `from → to` if
-    /// it exists. The C searches `from->edge_tree` keyed on `to->name`.
+    /// Find the edge `from → to` if it exists. Searches the per-node
+    /// list keyed on `to_name`.
     #[must_use]
     pub fn lookup_edge(&self, from: NodeId, to: NodeId) -> Option<EdgeId> {
         let to_name = self.nodes[to.0 as usize].as_ref()?.name.as_str();
@@ -481,9 +475,9 @@ impl Graph {
             .map(NodeId)
     }
 
-    /// `edge.c:123-137` `dump_edges`. The C does a nested walk —
-    /// `splay_each(node_tree)` outer (alphabetical by node name),
-    /// `splay_each(edge_tree)` inner (alphabetical by `to->name`). We
+    /// Dump all edges. Nested walk — outer over nodes (alphabetical
+    /// by node name), inner over each node's edges (alphabetical by
+    /// `to_name`). We
     /// have a flat slab; this yields slot order (insertion-then-recycle).
     ///
     /// **Order divergence is intentional**: `tincctl.c` reads dump rows
@@ -502,9 +496,8 @@ impl Graph {
         })
     }
 
-    /// Outgoing edges of `n`, sorted by destination name. Mirrors
-    /// the C `splay_each(edge_t, e, &n->edge_tree)` walk shape
-    /// (`edge.c:125`). Empty slice for freed slots.
+    /// Outgoing edges of `n`, sorted by destination name. Empty slice
+    /// for freed slots.
     #[must_use]
     pub fn node_edges(&self, n: NodeId) -> &[EdgeId] {
         self.nodes
@@ -519,8 +512,7 @@ impl Graph {
     /// `sssp_bfs`. Returns one `Option<Route>` per node, indexed by
     /// `NodeId.0`. `None` = unreachable from `myself`.
     ///
-    /// Port is line-by-line from `graph.c:125-211`. The revisit
-    /// condition (lines 180-183) is the part that needs care:
+    /// The revisit condition is the part that needs care:
     ///
     /// ```c
     /// if (e->to->status.visited
@@ -615,7 +607,8 @@ impl Graph {
 
                 let (nexthop, weighted_distance) = if update_nexthop {
                     (
-                        // C: `(n->nexthop == myself) ? e->to : n->nexthop`
+                        // First hop from myself is the edge target;
+                        // beyond that, inherit the parent's nexthop.
                         if n_nexthop == myself { e.to } else { n_nexthop },
                         cand_wdist,
                     )
@@ -690,7 +683,7 @@ impl Graph {
         let mut visited = vec![false; self.nodes.len()];
         let mut mst_edges = Vec::new();
 
-        // C: walk edge_weight_tree, find first reachable `from`, mark.
+        // Walk weight order, find first reachable `from`, mark.
         // `weight_order` only holds live edges (`del_edge` removes),
         // so `slot!` is safe here.
         for &eid in self.weight_order.values() {
@@ -701,12 +694,10 @@ impl Graph {
             }
         }
 
-        // C: linear walk with `next = head` rewind on
-        // skipped→progress. We use an index and reset it.
+        // Linear walk with rewind-to-head on skipped→progress. We use
+        // an index and reset it.
         //
-        // The C `splay_each` macro reads `next = node->next` *before*
-        // the body, then after the body does `node = next`. The rewind
-        // assigns `next = edge_weight_tree.head`, so the next iteration
+        // The rewind assigns the index back to 0, so the next iteration
         // starts from the head. We collect the order once (it doesn't
         // change mid-walk) and index.
         let order: Vec<EdgeId> = self.weight_order.values().copied().collect();
@@ -720,7 +711,8 @@ impl Graph {
             let v_from = visited[e.from.0 as usize];
             let v_to = visited[e.to.0 as usize];
 
-            // C: `if(!e->reverse || (e->from->status.visited == e->to->status.visited))`
+            // Skip if no reverse twin, or both endpoints have the same
+            // visited state (already in tree, or both unreachable).
             if e.reverse.is_none() || v_from == v_to {
                 skipped = true;
                 i += 1;
@@ -829,8 +821,8 @@ mod tests {
     }
 
     /// Postconditions of a single `del_edge(ab)` on the triangle:
-    /// reverse-unlink (edge.c:106-108), per-node list removal
-    /// (edge.c:111), and free-list slot recycling.
+    /// reverse-unlink, per-node list removal, and free-list slot
+    /// recycling.
     #[test]
     fn del_edge_postconditions() {
         let (mut g, [a, b, c], [ab, ba, ..]) = triangle();
@@ -838,11 +830,9 @@ mod tests {
 
         g.del_edge(ab).unwrap();
 
-        // edge.c:106-108: `if(e->reverse) e->reverse->reverse = NULL;`
         assert!(g.edge(ab).is_none(), "slot freed");
         assert_eq!(g.edge(ba).unwrap().reverse, None, "twin orphaned");
 
-        // edge.c:111: `splay_delete(&e->from->edge_tree, e)`.
         // a had edges to b and c; now only c, list stays sorted.
         assert_eq!(g.lookup_edge(a, b), None, "gone from node list");
         assert!(g.lookup_edge(a, c).is_some(), "a→c still there");
@@ -862,7 +852,6 @@ mod tests {
 
     #[test]
     fn del_edge_removes_from_weight_order() {
-        // edge.c:110: `splay_delete(&edge_weight_tree, e)`.
         // After deleting both halves of a-c, MST should be the a-b-c
         // path (4 edges) and never see weight=30.
         let (mut g, _, [_, _, _, _, ac, ca]) = triangle();
@@ -923,8 +912,7 @@ mod tests {
 
     #[test]
     fn del_node_cascades_outgoing() {
-        // node.c:141-143: `for splay_each(edge_t, e, &n->edge_tree)
-        // edge_del(e)`. Only outgoing; incoming become reverseless.
+        // Cascade: only outgoing; incoming become reverseless.
         let (mut g, [a, b, c], [ab, ba, bc, cb, ac, ca]) = triangle();
         g.del_node(b).unwrap();
 
@@ -1003,7 +991,7 @@ mod tests {
         assert_eq!(g.lookup_edge(a, b), Some(ab));
         g.update_edge(ab, 999, OPTION_INDIRECT).unwrap();
         // Same ID still resolves via the per-node index (which is
-        // keyed on to_name, not weight — edge.c:53-55).
+        // keyed on to_name, not weight).
         assert_eq!(g.lookup_edge(a, b), Some(ab));
         let e = g.edge(ab).unwrap();
         assert_eq!(e.weight, 999);
@@ -1019,9 +1007,9 @@ mod tests {
 
     #[test]
     fn update_edge_same_weight_is_noop_on_weight_order() {
-        // protocol_edge.c:178: the splay unlink/reinsert is gated on
-        // `e->weight != weight`. Options-only update mustn't churn
-        // weight_order. Observable via mst (which walks weight_order).
+        // The unlink/reinsert is gated on `weight != new_weight`.
+        // Options-only update mustn't churn weight_order. Observable
+        // via mst (which walks weight_order).
         let (mut g, _, [ab, ..]) = triangle();
         let before = g.mst();
         g.update_edge(ab, 10, OPTION_INDIRECT).unwrap(); // same weight
@@ -1053,7 +1041,6 @@ mod tests {
 
     #[test]
     fn lookup_edge_finds_by_names() {
-        // edge.c:114-121: `splay_search(&from->edge_tree, &v)`.
         let (g, [a, b, c], [ab, _, _, _, ac, _]) = triangle();
         assert_eq!(g.lookup_edge(a, b), Some(ab));
         assert_eq!(g.lookup_edge(a, c), Some(ac));

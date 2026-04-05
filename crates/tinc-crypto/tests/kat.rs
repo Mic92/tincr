@@ -335,9 +335,6 @@ fn b64_decode_accepts_mixed_alphabet() {
 /// Invitation crypto kernel: the chain of compositions that builds a URL
 /// slug. Every stage is a place to be silently wrong; we check them all.
 ///
-/// The C side is `invitation.c:499-518` (`cmd_invite`) +
-/// `protocol_auth.c:199-207` (daemon's filename recovery).
-///
 /// Why per-stage assertions instead of just checking the final slug:
 /// when this fails (and it will, if anyone touches b64 or sha2), "slug
 /// is wrong" tells you nothing. "fingerprint matches but `key_hash`

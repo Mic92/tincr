@@ -1,6 +1,5 @@
 //! I/O readiness loop. Ports `linux/event.c` (`io_add`/`_set`/`_del`/
-//! `event_loop`) and the per-platform splay-tree bookkeeping in
-//! `event.c:77` + `event_select.c`.
+//! `event_loop`) and the per-platform splay-tree bookkeeping.
 //!
 //! mio abstracts the epoll/kqueue split — `bsd/event.c` and
 //! `event_select.c` are not separately ported. The mio `Poll` is the
@@ -31,10 +30,10 @@ use crate::MAX_EVENTS_PER_TURN;
 /// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h:26-27`.
 ///
 /// `mio::Interest` is `NonZeroU8` (can't be empty) — fine for us. The
-/// only `io_set(io, 0)` callers in C are internal to `io_del`
-/// (`event_select.c:72`, `linux/event.c:108`). The daemon-level API
-/// never sets zero interest; it goes READ ↔︎ READ|WRITE
-/// (`meta.c:51,94,110` adds WRITE; `net_socket.c:510` drops it).
+/// `io_set(io, 0)` is only ever called internally during `io_del`.
+/// The daemon-level API never sets zero interest; it goes READ ↔︎
+/// READ|WRITE (the meta connection adds WRITE on outbuf, drops it
+/// when drained).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Io {
     Read,
@@ -61,8 +60,8 @@ impl Io {
     }
 }
 
-/// What kind of readiness fired. Ports the `IO_READ`/`IO_WRITE` arg to
-/// the C cb (`io->cb(io->data, IO_WRITE)` at `linux/event.c:144`).
+/// What kind of readiness fired. The `IO_READ`/`IO_WRITE` arg passed
+/// to the callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ready {
     Read,
@@ -99,8 +98,7 @@ pub struct EventLoop<W> {
 }
 
 impl<W: Copy> EventLoop<W> {
-    /// Ports the `epoll_create` at `linux/event.c:37` + `Events`
-    /// allocation.
+    /// Create the poll instance + `Events` buffer.
     ///
     /// # Errors
     /// Returns the underlying I/O error if epoll/kqueue creation fails.
@@ -113,9 +111,9 @@ impl<W: Copy> EventLoop<W> {
         })
     }
 
-    /// Ports `io_add` (`linux/event.c:53-64`).
+    /// Register an fd.
     ///
-    /// C bails early if `io->cb` is already set (`:54-56`) — that's
+    /// Re-adding the same fd is the caller's bug — that's
     /// "already added, idempotent." We don't have that signal (caller
     /// doesn't pass an `IoId` until they have one). Calling `add`
     /// twice for the same fd is a caller bug. mio will return
@@ -156,17 +154,12 @@ impl<W: Copy> EventLoop<W> {
         Ok(IoId(idx))
     }
 
-    /// Ports `io_set` (`linux/event.c:66-100`). Changes interest on an
-    /// already-registered fd.
+    /// Change interest on an already-registered fd.
     ///
-    /// C `:68-70` returns early if `flags == io->flags`. We do too —
-    /// `epoll_ctl(MOD)` is a syscall; skipping it when nothing changed
-    /// is meaningful.
+    /// Returns early if interest is unchanged — `epoll_ctl(MOD)` is a
+    /// syscall; skipping it when nothing changed is meaningful.
     ///
-    /// C `:79` does `epoll_ctl(DEL)` then `:96` does `epoll_ctl(ADD)`.
-    /// Why not `MOD`? Because `linux/event.c:92-95` handles the
-    /// `flags == 0` case by stopping after the DEL. mio's `reregister`
-    /// is `MOD` directly (epoll on Linux, `EV_ADD` on kqueue which
+    /// mio's `reregister` is `MOD` directly (epoll on Linux, `EV_ADD` on kqueue which
     /// upserts). We don't have the `flags == 0` case (see `Io` docs),
     /// so reregister is right.
     ///
@@ -178,11 +171,10 @@ impl<W: Copy> EventLoop<W> {
     /// would be UAF.
     pub fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
         let slot = self.slots[id.0].as_mut().expect("dangling IoId");
-        // C linux/event.c:68-70: if(flags == io->flags) return;
         if slot.interest == Some(interest) {
             return Ok(());
         }
-        // C linux/event.c:79+96: DEL then ADD. We MOD via reregister.
+        // We MOD via reregister.
         // Edge case: slot.interest == None means it was deregistered
         // (only happens internally via del, which frees the slot —
         // so we never get here with None and a live id. The expect
@@ -236,8 +228,7 @@ impl<W: Copy> EventLoop<W> {
             .reregister(&mut SourceFd(&fd), Token(id.0), interest.to_mio())
     }
 
-    /// Ports `io_del` (`linux/event.c:105-109`). Deregisters from
-    /// epoll AND frees the slot.
+    /// Deregister from epoll AND free the slot.
     ///
     /// C is two-step: `io_set(io, 0)` (deregisters, `:108`), then
     /// `io->cb = NULL` (marks slot dead). The `io_t` struct is
@@ -256,27 +247,25 @@ impl<W: Copy> EventLoop<W> {
             return; // already del'd
         };
         if slot.interest.is_some() {
-            // Best-effort. C linux/event.c:79 ignores the return too.
+            // Best-effort.
             let _ = self.poll.registry().deregister(&mut SourceFd(&slot.fd));
         }
         self.free.push(id.0);
     }
 
-    /// Ports the inner body of `event_loop` (`linux/event.c:111-160`)
-    /// — ONE iteration. The `while(running)` loop is the daemon's job.
+    /// ONE iteration of the event loop. The `while(running)` outer
+    /// loop is the daemon's job.
     ///
     /// Blocks for at most `timeout` (or forever if `None`). Drains
     /// readiness into `out` as `(what, ready)` pairs. The daemon's
     /// loop matches on `what`.
     ///
-    /// `Ok(())` even if no events fired (timeout expired). C `n == 0`
-    /// at `:135-137` is `continue` — same.
+    /// `Ok(())` even if no events fired (timeout expired).
     ///
     /// # The generation-guard substitute
     ///
-    /// C `linux/event.c:141-149` bails the dispatch loop if
-    /// `io_tree.generation` changed (a cb removed/altered another
-    /// slot in the batch). We instead check per-event:
+    /// Generation tracking: instead of bailing the whole dispatch
+    /// loop when a cb removes/alters another slot, we check per-event:
     /// `slots.get(token)` returns `None` if removed; `interest.wants
     /// (ready)` is false if reregistered to a non-overlapping
     /// interest. Stale events are dropped silently. mio is level-
@@ -292,10 +281,8 @@ impl<W: Copy> EventLoop<W> {
     ///
     /// # WRITE before READ
     ///
-    /// C dispatches WRITE first (`linux/event.c:143-145`), then READ
-    /// (`:151-153`). The comment at `event_select.c:114-121` explains:
-    /// "the callback might modify the io_tree" — but more
-    /// specifically, `meta.c`'s WRITE cb can drain the outbuf and call
+    /// WRITE is dispatched before READ. The reason: the meta
+    /// connection's WRITE cb can drain the outbuf and call
     /// `io_set(READ)`, which means the READ that follows is for a slot
     /// that just changed. C's generation bail handles that. We check
     /// `interest.wants` between WRITE and READ dispatch for the same
@@ -308,9 +295,8 @@ impl<W: Copy> EventLoop<W> {
     pub fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
         out.clear();
 
-        // C `linux/event.c:125-132`: `epoll_wait()` then
-        // `if(n < 0) { if(sockwouldblock(sockerrno)) continue; else
-        // return false; }`. `sockwouldblock` is `EWOULDBLOCK || EINTR`
+        // `epoll_wait()`; treat `EWOULDBLOCK || EINTR` as continue,
+        // anything else as error. `sockwouldblock` is `EWOULDBLOCK || EINTR`
         // (`utils.h:62`).
         //
         // mio does NOT swallow EINTR. Verified mio 1.2 `epoll.rs:60`:
@@ -341,7 +327,6 @@ impl<W: Copy> EventLoop<W> {
             Err(e) => return Err(e),
         }
 
-        // C `for(int i = 0; i < n; i++)` at :140
         for ev in &self.events {
             let idx = ev.token().0;
             // Generation-guard substitute, part 1: slot still exists.
@@ -351,8 +336,7 @@ impl<W: Copy> EventLoop<W> {
             let what = slot.what;
             let interest = slot.interest;
 
-            // C linux/event.c:143-145: WRITE first.
-            // Part 2: interest still includes WRITE.
+            // WRITE first. Part 2: interest still includes WRITE.
             if ev.is_writable() && interest.is_some_and(|i| i.wants(Ready::Write)) {
                 out.push((what, Ready::Write));
             }
@@ -450,8 +434,8 @@ mod tests {
         ev.del(id);
     }
 
-    /// `linux/event.c:68-70` — io_set with same flags is a no-op.
-    /// No syscall (we can't directly observe that, but we can observe
+    /// io_set with same flags is a no-op. No syscall (we can't
+    /// directly observe that, but we can observe
     /// no error and no behavior change).
     #[test]
     fn set_same_interest_noop() {
@@ -469,8 +453,8 @@ mod tests {
         ev.del(id);
     }
 
-    /// `meta.c:51` → `net_socket.c:510` — the READ ↔︎ READ|WRITE
-    /// dance. Adding WRITE interest, getting WRITE readiness, then
+    /// The READ ↔︎ READ|WRITE dance. Adding WRITE interest, getting
+    /// WRITE readiness, then
     /// dropping WRITE interest, NOT getting WRITE readiness anymore.
     #[test]
     fn set_changes_interest() {
@@ -501,7 +485,7 @@ mod tests {
         drop(wr);
     }
 
-    /// `linux/event.c:105-109` — del is idempotent.
+    /// del is idempotent.
     #[test]
     fn del_idempotent() {
         let mut ev = EventLoop::new().unwrap();
@@ -570,8 +554,7 @@ mod tests {
         ev.del(id2);
     }
 
-    /// Two events in one turn. WRITE before READ per C dispatch order
-    /// (`linux/event.c:143-153`).
+    /// Two events in one turn. WRITE before READ per dispatch order.
     ///
     /// This tests the dispatch ORDER for one fd that's both readable
     /// and writable. Socketpair (not pipe — pipes are unidirectional;

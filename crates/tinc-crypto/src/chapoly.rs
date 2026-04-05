@@ -146,8 +146,8 @@ impl ChaPoly {
     /// Net: ONE copy of `body` (the `extend_from_slice`), zero scratch
     /// allocs. Replaces [`seal`]'s alloc-out + extend-plaintext + return-Vec
     /// with append-to-caller's-buffer + encrypt-in-place. The C reference
-    /// does the same shape: `chacha_poly1305_encrypt(.., buffer+4, ..,
-    /// buffer+4, ..)` over an `alloca`'d span (`sptps.c:125`).
+    /// does the same shape: encrypt in place over the same span,
+    /// starting past a plaintext header.
     ///
     /// `encrypt_from` lets the caller pre-write headers that stay plaintext.
     pub fn seal_into(
@@ -213,8 +213,8 @@ impl ChaPoly {
     /// Net: ONE copy of the ciphertext body, zero scratch allocs.
     /// Replaces [`open`]'s `ct.to_vec()` + return-Vec with append-to-
     /// caller's-buffer + decrypt-in-place. The C reference does the same
-    /// shape: `chacha_poly1305_decrypt(.., buffer+4, .., buffer+4, ..)`
-    /// over an `alloca`'d span (`sptps.c:199`).
+    /// shape: decrypt in place over the same span, starting past a
+    /// plaintext header.
     ///
     /// # Errors
     ///

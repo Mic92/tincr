@@ -108,9 +108,9 @@ pub struct ReqKey {
     /// carrying a relay observation, both sides can punch within one RTT of
     /// each other — the timing window for simultaneous open.
     ///
-    /// Wire compat: C `req_key_ext_h` parses with `sscanf("%*d %*s %*s %*d
-    /// %s", buf)`. `%s` stops at whitespace; trailing addr/port tokens are
-    /// silently dropped. A C relay forwards verbatim (`send_request("%s",
+    /// Wire compat: legacy peers parse with `sscanf("%*d %*s %*s %*d
+    /// %s", buf)`. `%s` stops at whitespace; trailing addr/port tokens
+    /// are silently dropped. A legacy relay forwards verbatim (`send_request("%s",
     /// request)`), so the append survives a multi-hop path with mixed nodes.
     pub udp_addr: Option<(AddrStr, AddrStr)>,
 }
@@ -205,7 +205,7 @@ impl ReqKey {
 
 /// Body of `ANS_KEY`. The session-key reply. Seven mandatory fields,
 /// two optional (reflexive UDP addr/port — appended by relays, not the
-/// origin; see `protocol_key.c:477`).
+/// origin).
 ///
 /// `key` is hex-encoded session key for legacy, or unused for SPTPS
 /// (the SPTPS path goes through `REQ_KEY` extension instead). We don't
@@ -369,8 +369,8 @@ mod tests {
     #[test]
     fn req_key_reflexive_append() {
         // Rust extension: relay appends from's observed UDP addr after the
-        // SPTPS payload. C `sscanf %s` stops at whitespace → silently
-        // ignored by C endpoints, consumed by Rust ones.
+        // SPTPS payload. `sscanf %s` stops at whitespace → silently ignored
+        // by legacy endpoints, consumed by Rust ones.
         let line = "15 alice bob 15 SGVsbG8gV29ybGQ 192.0.2.7 51234";
         let m = ReqKey::parse(line).unwrap();
         assert_eq!(
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn ans_key_sptps_placeholder_fields() {
-        // The exact wire shape a C SPTPS peer sends. net_packet.c:996:
+        // The exact wire shape an SPTPS peer sends:
         // `send_request("%d %s %s %s -1 -1 -1 %d", ANS_KEY, ...)`.
         // The `-1` tokens are LITERAL STRING, not a `%d` arg. cipher/
         // digest are `%d` → i32 (parses -1 fine). maclen is `%lu` →
@@ -438,8 +438,8 @@ mod tests {
         assert_eq!(m.maclen, u64::MAX);
         assert_eq!(m.compression, 0);
         // Round-trips: u64::MAX formats as a big positive decimal,
-        // NOT as "-1". That's fine — the C `%lu` printf would do the
-        // same. We only need to PARSE "-1", not emit it via format()
+        // NOT as "-1". That's fine — `%lu` printf would do the same.
+        // We only need to PARSE "-1", not emit it via format()
         // (the daemon emits it as a literal in the format_args!).
         assert!(m.format().contains("18446744073709551615"));
     }

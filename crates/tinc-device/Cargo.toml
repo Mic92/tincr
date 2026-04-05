@@ -20,13 +20,12 @@ log = "0.4"
 # back; the macro generates `*const`, wrong contract). So: no
 # `ioctl` feature. Direct `libc::ioctl` for that shim.
 #
-# `socket` IS pulled. `fd_device.c:39-93` does ~40 LOC of cmsghdr/
-# CMSG_FIRSTHDR/CMSG_DATA boilerplate to receive an SCM_RIGHTS fd
-# over AF_UNIX. nix::sys::socket::recvmsg + ControlMessageOwned::
-# ScmRights collapses it AND fixes the C's NULL-deref bug at line
-# 73 (CMSG_FIRSTHDR returns NULL when control buf is empty; C
-# dereferences without checking; nix iterator handles it). The
-# fourth unsafe-shim instance — but this time, nix earns the dep.
+# `socket` IS pulled. SCM_RIGHTS fd reception over AF_UNIX is ~40
+# LOC of cmsghdr/CMSG_FIRSTHDR/CMSG_DATA boilerplate by hand;
+# nix::sys::socket::recvmsg + ControlMessageOwned::ScmRights
+# collapses it AND structurally avoids the CMSG_FIRSTHDR NULL-deref
+# trap (nix's iterator handles empty control buffers). The fourth
+# unsafe-shim instance — but this time, nix earns the dep.
 # `uio` gates cmsg_space! + recvmsg + ControlMessageOwned. The
 # `socket` feature alone gives the AF_UNIX types but not the cmsg
 # machinery. Both needed.

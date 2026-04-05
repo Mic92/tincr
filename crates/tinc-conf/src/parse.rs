@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 // ────────────────────────────────────────────────────────────────────
 // Line parser
 
-/// Error from a single line. Carries enough context to produce the
-/// same diagnostic the C `logger()` call would: variable name, file,
-/// line number.
+/// Error from a single line. Carries enough context for a useful
+/// diagnostic: variable name, file, line number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     /// The key half (everything before the separator). Present even on
@@ -25,7 +24,6 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // C: "No value for variable `%s' on line %d while reading config file %s"
         write!(
             f,
             "{} for variable `{}' {}",
@@ -68,7 +66,7 @@ impl fmt::Display for Source {
 
 /// `parse_config_line`. Splits one line into `(variable, value)`.
 ///
-/// C reference: `conf.c:237-278`. The separator grammar, in PCRE:
+/// The separator grammar, in PCRE:
 ///
 /// ```text
 /// ^(\S+)[\t ]*=?[\t ]*(.*?)[\t ]*$
@@ -89,9 +87,7 @@ impl fmt::Display for Source {
 ///    the caller anyway (`!*line` after the strip, `read_config_file`
 ///    line 296).
 ///
-///  - **No 1024-byte buffer truncation.** C `readline` uses
-///    `MAX_STRING_SIZE`, silently truncates longer lines. We accept
-///    arbitrary length — if someone has a 2KB `Subnet` value something
+///  - **No 1024-byte buffer truncation.** We accept arbitrary length — if someone has a 2KB `Subnet` value something
 ///    has gone wrong upstream of the parser.
 ///
 /// Returns `None` for lines that should be skipped (empty after
@@ -108,9 +104,7 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
     // byte index found by scanning for ASCII is always a char boundary.
     let bytes = line.as_bytes();
 
-    // Trailing strip: `\t` and ` ` only. C `strchr("\t ", c)` matches
-    // those two plus NUL (NUL is in every C string), but NUL doesn't
-    // appear in `&str` so the difference is moot.
+    // Trailing strip: `\t` and ` ` only.
     let end = bytes
         .iter()
         .rposition(|&b| b != b'\t' && b != b' ')
@@ -118,9 +112,8 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
     let line = &line[..end];
     let bytes = &bytes[..end];
 
-    // C `read_config_file` checks `!*line` *before* `parse_config_line`
-    // and returns the original line if no newline was stripped — but it
-    // checks `!*line` on the *original* (pre-trailing-strip) line. So
+    // The empty-line check is on the *original* (pre-trailing-strip)
+    // line. So
     // a line of pure spaces actually *enters* `parse_config_line` and
     // hits the `*--eol` underflow. We instead make this fn idempotent
     // about it: empty-after-strip → skip.
@@ -153,9 +146,9 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
 
     let value = &line[i..];
 
-    // C: `if(!*value)` — empty value is an error. Variable can be
-    // empty (line starting with `=` or space) and that's *not* checked
-    // — it'll fail downstream at `lookup_config` time (no key matches
+    // Empty value is an error. Variable can be empty (line starting
+    // with `=` or space) and that's *not* checked — it'll fail
+    // downstream at `lookup_config` time (no key matches
     // ""). We don't add a check the C doesn't have.
     if value.is_empty() {
         return Some(Err(ParseError {
@@ -193,8 +186,7 @@ fn ascii_fold(s: &str) -> String {
 /// `key=value`.
 ///
 /// C reads with `fgets` into a fixed 1024-byte buffer; we use
-/// `BufRead::lines()` which handles `\r\n` (the C strips `\r` manually
-/// at `conf.c:226`) and unbounded lines.
+/// `BufRead::lines()` which handles `\r\n` and unbounded lines.
 ///
 /// First parse error aborts (matches C: `if(!cfg) break;`). I/O errors
 /// also abort. The C distinguishes "EOF cleanly" from "fgets failed" via
@@ -288,8 +280,7 @@ pub enum ReadError {
 
 /// One `key = value` entry, with provenance.
 ///
-/// Immutable once created — the C `config_t` is too (set once at parse
-/// time, freed on `exit_configuration`).
+/// Immutable once created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// `cfg->variable`. Preserved as-written (case and all) for
@@ -363,7 +354,7 @@ impl Entry {
 /// The config tree. C: a splay tree of `config_t*` keyed by
 /// `config_compare`. We: a sorted `Vec`.
 ///
-/// The C compare function (`conf.c:48-71`) is a 4-tuple:
+/// The compare function is a 4-tuple:
 ///
 ///   1. `strcasecmp(variable)` — same-key entries are contiguous
 ///   2. `!b->file - !a->file` — cmdline (file=NULL) before file
@@ -401,9 +392,7 @@ impl Config {
     }
 
     /// `lookup_config` + `lookup_config_next`: all entries for `key`,
-    /// in priority order. First element is what the C `lookup_config`
-    /// returns; subsequent elements are what walking `lookup_config_next`
-    /// yields.
+    /// in priority order.
     ///
     /// The dominant call pattern is single-valued keys
     /// (`.lookup("Port").next()`), but multi-valued keys (`Subnet`,
@@ -427,7 +416,7 @@ impl Config {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// read_server_config — conf.c:388-433
+// read_server_config
 //
 // ## What this is, what it isn't
 //
@@ -452,7 +441,7 @@ impl Config {
 //
 // ## The 40719189 mishap
 //
-// HEAD's conf.c:405-410 reads:
+// Upstream HEAD reads:
 //
 //     if(!dir && errno == ENOENT) {
 //         return true;
@@ -513,16 +502,15 @@ impl Config {
 ///
 /// # Errors
 ///
-/// - `tinc.conf` absent or unparseable → error. Hard fail in C
-///   (`conf.c:395`); a daemon without a tinc.conf has no Name.
+/// - `tinc.conf` absent or unparseable → error. A daemon without a
+///   tinc.conf has no Name.
 /// - `conf.d/` absent → fine. Expected case (most installs don't
 ///   use it). Pre-40719189 C: any opendir failure is silently OK.
 /// - `conf.d/` present but `read_dir` fails after open → error. C
 ///   wouldn't notice (`readdir()` returns NULL on error AND eof; the C
 ///   doesn't check errno after the loop). We're stricter — a
 ///   transient I/O error during fsck shouldn't read as "no findings."
-/// - Any `*.conf` file in `conf.d/` unparseable → error. C: hard fail
-///   (`conf.c:425`).
+/// - Any `*.conf` file in `conf.d/` unparseable → error.
 pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadError> {
     let confbase = confbase.as_ref();
     let mut cfg = Config::new();
@@ -559,8 +547,8 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
     // match), so the behavior aligns.
     let mut files: Vec<PathBuf> = Vec::new();
     for ent in rd {
-        // C: readdir error is invisible (NULL means error OR eof).
-        // We: surface it. fsck reading a half-directory and saying
+        // STRICTER: surface readdir errors instead of treating them
+        // as eof. fsck reading a half-directory and saying
         // "all good" is the failure mode this prevents.
         let ent = ent.map_err(|err| ReadError::Io {
             path: conf_d.clone(),
@@ -568,8 +556,7 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
         })?;
         let name = ent.file_name();
         let Some(name) = name.to_str() else { continue };
-        // C: `!strcmp(".conf", name+l-5)` — strcmp is CASE-SENSITIVE.
-        // `foo.CONF` is rejected by the C; we match. clippy's
+        // CASE-SENSITIVE: `foo.CONF` is rejected. clippy's
         // "use Path::extension + eq_ignore_ascii_case" suggestion
         // would change behavior. Bytes-suffix is the port-faithful
         // form (and trivially also rejects non-ASCII look-alikes).
@@ -592,7 +579,7 @@ fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
     a.key_folded
         .cmp(&b.key_folded)
         .then_with(|| match (&a.source, &b.source) {
-            // C: `!b->file - !a->file`. file=NULL (Cmdline) < file!=NULL.
+            // Cmdline < File.
             (Source::Cmdline { .. }, Source::File { .. }) => Ordering::Less,
             (Source::File { .. }, Source::Cmdline { .. }) => Ordering::Greater,
             // Within cmdline: line only.
@@ -806,8 +793,7 @@ mod tests {
         assert_eq!(e("-1").get_int(), Ok(-1));
         // Leading whitespace: `%d` accepts.
         assert_eq!(e("  655").get_int(), Ok(655));
-        // Trailing garbage: C `sscanf("%d")` accepts (returns 1, parsed
-        // 655), we reject. Intentional tightening.
+        // Trailing garbage: STRICTER, we reject. Intentional tightening.
         assert!(e("655x").get_int().is_err());
         // Out of i32 range.
         assert!(e("99999999999").get_int().is_err());
@@ -858,7 +844,7 @@ Subnet = 10.0.0.0/24
         assert!(matches!(entries[1].source, Source::File { line: 5, .. }));
     }
 
-    /// CRLF handled. C `readline` strips `\r`; `BufRead::lines()` does too.
+    /// CRLF handled by `BufRead::lines()`.
     #[test]
     fn file_crlf() {
         let input = "Port = 655\r\nSubnet = 10.0.0.0/24\r\n";
@@ -955,9 +941,9 @@ more garbage
         // both conf.d entries are line 1, so file name tiebreaks →
         // 10-one before 20-two. THEN tinc.conf line 2 (higher line).
         //
-        // The compare is line-then-file, not file-then-line
-        // (config_compare, conf.c:48), so conf.d/*.conf:1 sorts before
-        // tinc.conf:2. Surprising but C-faithful; fsck can warn someday.
+        // The compare is line-then-file, not file-then-line, so
+        // conf.d/*.conf:1 sorts before tinc.conf:2. Surprising but
+        // protocol-faithful; fsck can warn someday.
         assert_eq!(connects, ["carol", "dave", "bob"]);
     }
 

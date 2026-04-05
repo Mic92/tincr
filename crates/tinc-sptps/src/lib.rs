@@ -20,8 +20,8 @@
 //!    deliberately, so the differential tests in `tests/vs_c.rs` can
 //!    compare event-for-event.
 //!
-//! 2. **No `alloca`.** The C `alloca`s the SIG transcript and the PRF seed
-//!    on every handshake step. Rust `Vec`s. The transcript is at most
+//! 2. **No `alloca`.** The SIG transcript and the PRF seed are heap
+//!    `Vec`s on every handshake step. The transcript is at most
 //!    `1 + 65 + 65 + label.len()` bytes; the allocation is not a hot path.
 //!
 //! 3. **RNG injected, not global.** `send_kex` calls `randomize()` which is
@@ -67,9 +67,8 @@ pub use state::ReplayWindow;
 
 /// Body of a KEX record: `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
 ///
-/// `PACKED struct sptps_kex_t` in `sptps.h`. The C `STATIC_ASSERT`s this
-/// is 65 bytes. We use a flat byte array rather than a struct so there's
-/// no `#[repr(packed)]` to forget — it goes on the wire byte-for-byte
+/// The KEX wire payload. 65 bytes. A flat byte array rather than a
+/// struct so there's no `#[repr(packed)]` to forget — it goes on the wire byte-for-byte
 /// either way, and the field accessors are just slice math.
 pub const KEX_LEN: usize = 65;
 

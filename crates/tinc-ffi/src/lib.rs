@@ -97,11 +97,11 @@ unsafe extern "C" {
 /// one [`c_check_seqno`] call — the C indexes into it, never frees.
 #[repr(C)]
 pub struct FfiReplayState {
-    /// Expected next seqno. C `s->inseqno`.
+    /// Expected next seqno.
     pub inseqno: u32,
-    /// Far-future drop counter. C `s->farfuture`.
+    /// Far-future drop counter.
     pub farfuture: u32,
-    /// Window width in BYTES. C `s->replaywin`. The bitmap is `replaywin * 8` slots.
+    /// Window width in BYTES. The bitmap is `replaywin * 8` slots.
     pub replaywin: u32,
     /// Circular bitmap, `replaywin` bytes. **Caller owns; C borrows.**
     pub late: *mut u8,
@@ -110,8 +110,8 @@ pub struct FfiReplayState {
 /// Layout-match for `csrc/replay_shim.c`'s `ffi_ipv4_subnet_t`.
 ///
 /// Owner is omitted: the C comparator short-circuits at the owner tier
-/// when either is NULL (subnet_parse.c:154), and we always pass NULL.
-/// The owner compare is a `strcmp` — not where transcription bugs hide.
+/// when either is NULL, and we always pass NULL. The owner compare is
+/// a `strcmp` — not where transcription bugs hide.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FfiIpv4Subnet {
@@ -154,7 +154,7 @@ pub fn c_check_seqno(
     (ok, st.inseqno, st.farfuture)
 }
 
-/// Run the C `subnet_compare_ipv4` on two hand-built subnets.
+/// Run the C IPv4 subnet comparator on two hand-built subnets.
 ///
 /// Returns the raw signed difference (not normalized to {-1,0,1}).
 /// Compare against Rust's `Ordering` via `.signum()`.
