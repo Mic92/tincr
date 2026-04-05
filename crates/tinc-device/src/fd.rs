@@ -458,7 +458,7 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 
@@ -470,7 +470,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 
@@ -857,7 +857,7 @@ mod tests {
                 )
             };
             assert!(ret > 0, "write failed");
-            #[allow(clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
             {
                 off += ret as usize;
             }
@@ -873,7 +873,7 @@ mod tests {
                 libc::write(f.as_raw_fd(), buf.as_ptr().add(off).cast(), buf.len() - off)
             };
             assert!(ret > 0, "write failed");
-            #[allow(clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
             {
                 off += ret as usize;
             }
@@ -888,7 +888,7 @@ mod tests {
             let ret =
                 unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().add(off).cast(), n - off) };
             assert!(ret > 0, "read failed or EOF");
-            #[allow(clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
             {
                 off += ret as usize;
             }

@@ -196,7 +196,7 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // `sll_family = AF_PACKET`. The discriminant. `c_ushort` cast:
     // `AF_PACKET` is `c_int` in libc; the struct field is
     // `c_ushort`. Value is 17, fits trivially.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // AF_PACKET=17, fits c_ushort
     {
         sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     }
@@ -340,7 +340,7 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 
@@ -352,7 +352,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 

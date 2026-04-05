@@ -593,7 +593,7 @@ fn inv_skipped() {
 fn inv_multiple() {
     let (d, paths) = setup_inv();
     for (i, who) in ["bob", "carol", "dave"].iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // i ∈ 0..3 (loop over 3-elem array)
         let name = mk_filename(i as u8);
         fs::write(
             d.path().join("vpn/invitations").join(&name),

@@ -52,7 +52,7 @@ impl Daemon {
                 return true; // fake success
             }
             // len fits u16: MTU=1518.
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation)] // data.len() ≤ MTU (1518)
             let req = tinc_proto::msg::TcpPacket {
                 len: data.len() as u16,
             };

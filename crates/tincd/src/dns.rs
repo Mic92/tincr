@@ -389,7 +389,7 @@ fn encode_name(name: &str) -> Vec<u8> {
         // RFC 1035 §2.3.4: labels are 63 octets max. tinc node
         // names are well under that (`check_id` rejects long ones);
         // the suffix is operator-provided. Clamp rather than error.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // .min(63) clamps to u8 range
         let len = label.len().min(63) as u8;
         out.push(len);
         out.extend_from_slice(&label.as_bytes()[..len as usize]);
@@ -593,7 +593,7 @@ fn build_rr(name_wire: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
     rr.extend_from_slice(&TTL.to_be_bytes());
     // RDLENGTH: 16 bits. /32 → 4, /128 → 16, PTR name is bounded
     // by max DNS name (255). Never overflows.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // rdata is ≤4/16/255 bytes (see above)
     rr.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
     rr.extend_from_slice(rdata);
     rr
@@ -693,7 +693,7 @@ pub fn wrap_v4(
     ip.set_vhl(4, 5);
     // truncation: DNS responses are bounded (~512 in practice with
     // our few RRs); + 28 for IP+UDP. Never near u16.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     ip.set_total_len((IP4_SIZE + UDP_SIZE + dns_reply.len()) as u16);
     ip.ip_ttl = 64;
     ip.ip_p = IPPROTO_UDP;
@@ -703,7 +703,7 @@ pub fn wrap_v4(
     out.extend_from_slice(ip.as_bytes());
 
     // ─── UDP. 8 bytes: sport, dport, len, csum.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
     let mut udp = [0u8; UDP_SIZE];
     udp[0..2].copy_from_slice(&53u16.to_be_bytes()); // src = 53
@@ -757,7 +757,7 @@ pub fn wrap_v6(
     // ─── IPv6. No IP-level checksum (it's the UDP layer's job).
     let mut ip6 = Ipv6Hdr::default();
     ip6.set_flow(0x6000_0000);
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     ip6.set_plen((UDP_SIZE + dns_reply.len()) as u16);
     ip6.ip6_nxt = IPPROTO_UDP;
     ip6.ip6_hlim = 64;
@@ -766,7 +766,7 @@ pub fn wrap_v6(
     out.extend_from_slice(ip6.as_bytes());
 
     // ─── UDP
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
     let mut udp = [0u8; UDP_SIZE];
     udp[0..2].copy_from_slice(&53u16.to_be_bytes());

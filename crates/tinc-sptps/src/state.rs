@@ -237,7 +237,7 @@ impl ReplayWindow {
     /// translation creates a subtle interop bug: a peer that accepts
     /// packets the C rejects (or vice versa) is a connection that flaps
     /// under packet loss. Match the C bit-for-bit.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // late.len() is replay-window bytes (≪ u32::MAX); seqno arith is mod 2^32
     fn check(&mut self, seqno: u32, update: bool) -> Result<(), SptpsError> {
         let win = self.late.len() as u32;
         if win > 0 {

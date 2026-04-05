@@ -141,7 +141,7 @@ impl Tun {
         // path on a second TUNSETIFF (`tun.c:2744`) requires
         // re-attach (`:2729`) which fails on an already-attached
         // fd — there's no "change flags only" ioctl.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (max 0x5001)
         let flags = match cfg.mode {
             Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
@@ -223,7 +223,7 @@ impl Tun {
 /// # Errors
 /// `InvalidInput` for too-long name. The error message includes
 /// the name and the limit.
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap)] // ASCII bytes → c_char (sign is platform noise)
 fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSIZ]> {
     let mut buf = [0; libc::IFNAMSIZ];
     let Some(name) = iface else {
@@ -430,7 +430,7 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     // read `[0..6]`.
     //
     // `c_char → u8`: same `as u8` cast as above. Bytes are bytes.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes, sign is platform noise
     let mac: Mac = {
         let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data;
         [
@@ -730,7 +730,7 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     }
     // `ret` is `isize` (`ssize_t`). Non-negative; `as usize` is
     // value-preserving.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 
@@ -748,7 +748,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
     Ok(ret as usize)
 }
 
@@ -809,7 +809,7 @@ mod tests {
     /// `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
     /// `Tun::open`'s flag computation gets caught.
     #[test]
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (asserted below)
     fn mode_flags() {
         // Mirrors `Tun::open`. The actual open inlines it; this
         // is the test seam.
@@ -831,7 +831,7 @@ mod tests {
     /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
     /// `c_char` signedness; values are ASCII either way.
     #[test]
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII test bytes
     fn pack_ifr_name_ok() {
         #[rustfmt::skip]
         let cases: &[(Option<&str>, &[u8])] = &[

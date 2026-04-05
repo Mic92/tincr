@@ -38,7 +38,7 @@ fn variant_mode() {
 fn prefix_ipv4_is_af_inet_be() {
     let prefix = to_af_prefix(ETH_P_IP).unwrap();
     // The structure: big-endian u32 of the libc constant.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // libc::AF_INET is a small positive int
     let want = (libc::AF_INET as u32).to_be_bytes();
     assert_eq!(prefix, want);
     // The literal: AF_INET is 2 everywhere (verified vs
@@ -61,7 +61,7 @@ fn prefix_ipv4_is_af_inet_be() {
 #[test]
 fn prefix_ipv6_is_libc_af_inet6_be() {
     let prefix = to_af_prefix(ETH_P_IPV6).unwrap();
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // libc::AF_INET6 is a small positive int
     let want = (libc::AF_INET6 as u32).to_be_bytes();
     assert_eq!(prefix, want);
     // NOT: `assert_eq!(prefix, [0, 0, 0, 0x1e])`. That's
@@ -107,7 +107,7 @@ fn nibble_then_prefix_roundtrip() {
     // The cast goes c_int (signed 32-bit) → u32 (lossless
     // for the small positive AF values) → to_be_bytes →
     // last byte.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // libc::AF_INET6 is a small positive int
     let af6_low = (libc::AF_INET6 as u32).to_be_bytes()[3];
     assert_eq!(prefix[3], af6_low);
 }
@@ -360,7 +360,7 @@ fn utun_write_synthesizes_ipv6_prefix() {
     let got = drain(&test_r);
 
     // The structure: htonl(AF_INET6) for THIS platform.
-    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)] // libc::AF_INET6 is a small positive int
     let want = (libc::AF_INET6 as u32).to_be_bytes();
     assert_eq!(&got[..4], &want);
     // High three bytes always zero (AF values are small).

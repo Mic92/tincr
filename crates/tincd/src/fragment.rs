@@ -97,7 +97,7 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         let len = todo.min(maxlen);
 
         // len ≤ maxlen < dest_mtu ≤ u16::MAX, so IP_SIZE+len fits.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // len < dest_mtu (u16) per above
         ip.set_total_len((IP_SIZE + len) as u16);
 
         // MF on every fragment except the last — UNLESS origf already
@@ -119,7 +119,7 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         // used.
         todo -= len;
         offset += len;
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // len < dest_mtu (u16); /8 makes it smaller
         {
             ip_off += (len / 8) as u16;
         }

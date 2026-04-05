@@ -241,7 +241,7 @@ fn make_new_connection(
     // C :45 prng(count) — uniform over [0, count).
     // Clippy: cast is fine, eligible.len() < node_tree size, well
     // under u32::MAX in practice; tinc meshes top out at ~thousands.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // eligible.len() bounded by node count (≪ u32::MAX)
     let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
     let pick = eligible[r];
 
@@ -275,7 +275,7 @@ fn connect_to_unreachable(
     }
 
     // C :86. prng over ALL nodes. node_tree includes myself.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // nodes.len() bounded by node count (≪ u32::MAX)
     let r = (rng.next_u32() % (nodes.len() as u32)) as usize;
     let n = &nodes[r];
 
@@ -330,7 +330,7 @@ fn drop_superfluous_outgoing(
         return AutoAction::Noop;
     }
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // droppable.len() bounded by conn count (≪ u32::MAX)
     let r = (rng.next_u32() % (droppable.len() as u32)) as usize;
     AutoAction::Disconnect {
         name: droppable[r].to_string(),

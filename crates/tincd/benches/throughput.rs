@@ -1012,7 +1012,7 @@ mod bench {
                 // the summary on SIGINT.
                 // SAFETY: see PerfRecord::drop.
                 // PIDs are < 2^22 on Linux; never wraps.
-                #[allow(clippy::cast_possible_wrap)]
+                #[allow(clippy::cast_possible_wrap)] // PID < pid_max ≤ 2^22
                 unsafe {
                     libc::kill(child.id() as i32, libc::SIGINT);
                 }
@@ -1104,7 +1104,7 @@ mod bench {
                 // PID was reused — but we hold the Child, so it
                 // hasn't been reaped, so the PID is still ours.
                 // PIDs are < 2^22 on Linux; never wraps.
-                #[allow(clippy::cast_possible_wrap)]
+                #[allow(clippy::cast_possible_wrap)] // PID < pid_max ≤ 2^22
                 unsafe {
                     libc::kill(child.id() as i32, libc::SIGINT);
                 }

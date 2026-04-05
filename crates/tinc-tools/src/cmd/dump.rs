@@ -618,7 +618,7 @@ impl EdgeRow {
         //
         // `as f32` from i32 is exact for the values we see (weight
         // is < 2^24 in any sane tinc setup).
-        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)] // weight < 2^24; exact for f32
         let w = 1.0_f32 + 65536.0_f32 / self.weight as f32;
 
         // ─── DOT line

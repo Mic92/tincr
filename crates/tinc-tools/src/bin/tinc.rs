@@ -488,7 +488,7 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     // `(time_t)-1` on the same system (and then `%ld` formats it as
     // `-1`, and `verify`'s `!t` check passes — a different bug). We
     // crash. Better.
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")

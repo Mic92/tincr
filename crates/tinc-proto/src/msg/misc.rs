@@ -56,7 +56,7 @@ impl TcpPacket {
             return Err(ParseError);
         }
         // Safe: just checked `len >= 0`, so it fits in u16.
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
         Ok(Self { len: len as u16 })
     }
 
@@ -89,7 +89,7 @@ impl SptpsPacket {
         if len < 0 {
             return Err(ParseError);
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
         Ok(Self { len: len as u16 })
     }
 

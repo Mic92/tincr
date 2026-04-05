@@ -223,7 +223,7 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
             err: e,
         })?;
         // enumerate() is usize; truncates only at 4B-line config files.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // 4B-line config files don't exist
         let lineno = (i + 1) as u32;
 
         // C order matters here: blank/comment check is *before* the

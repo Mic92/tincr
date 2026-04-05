@@ -116,7 +116,7 @@ pub fn build_v4_unreachable(
     ip.set_vhl(4, 5); // :186-187: ip_hl = ip_size/4 = 20/4
     ip.ip_tos = 0; // :188
     // truncation: 20+8+548 = 576 < u16::MAX
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // oldlen capped at V4_QUOTE_CAP=548
     ip.set_total_len((IP_SIZE + ICMP_SIZE + oldlen) as u16); // :189
     ip.set_id(0); // :190
     ip.set_off(0); // :191
@@ -214,7 +214,7 @@ pub fn build_v6_unreachable(
     let mut ip6 = Ipv6Hdr::default();
     ip6.set_flow(0x6000_0000); // :292
     // truncation: 8+528 = 536 < u16::MAX
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // quote_len capped at V6_QUOTE_CAP
     ip6.set_plen((ICMP6_SIZE + quote_len) as u16); // :293
     ip6.ip6_nxt = IPPROTO_ICMPV6; // :294
     ip6.ip6_hlim = 255; // :295
@@ -241,7 +241,7 @@ pub fn build_v6_unreachable(
     pseudo.ip6_dst = new_dst;
     // `:308`: `pseudo.length = htonl(icmp6_size + pseudo.length)`.
     // truncation: 8+528 = 536 < u32::MAX
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // quote_len capped at V6_QUOTE_CAP
     pseudo.set_length((ICMP6_SIZE + quote_len) as u32);
     pseudo.set_next(u32::from(IPPROTO_ICMPV6)); // :309
 

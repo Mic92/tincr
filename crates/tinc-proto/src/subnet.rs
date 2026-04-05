@@ -604,7 +604,7 @@ mod tests {
     fn maskcmp_mask_equivalence() {
         for m in 1u32..8 {
             // m ∈ 1..7 → result ∈ {0x80..0xfe}, always fits u8.
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation)] // result ∈ {0x80..0xfe} per above
             let c_mask = (0x100u32 - (1u32 << (8 - m))) as u8;
             let rs_mask = 0xffu8 << (8 - m);
             assert_eq!(c_mask, rs_mask, "m={m}");

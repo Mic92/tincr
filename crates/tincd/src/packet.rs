@@ -78,7 +78,7 @@ pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     }
 
     // u32→u16: the fold loop guarantees high half is zero.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation)] // fold loop above zeroes high half
     {
         !(checksum as u16)
     }

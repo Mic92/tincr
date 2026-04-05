@@ -148,7 +148,7 @@ fn sigalrm_retries_now() {
 
     // ─── SIGALRM ────────────────────────────────────────────────
     // PIDs are < 2^22 on Linux; never wraps.
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = child.id() as libc::pid_t;
     // SAFETY: kill(2) on a known-live child (wait_for_file above).
     #[allow(unsafe_code)]

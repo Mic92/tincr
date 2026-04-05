@@ -271,7 +271,7 @@ mod fe {
             acc |= u128::from(limb) << acc_bits;
             acc_bits += 51;
             while acc_bits >= 8 && o < 32 {
-                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_possible_truncation)] // intentional: extract low 8 bits of acc
                 {
                     out[o] = acc as u8;
                 }
@@ -281,7 +281,7 @@ mod fe {
             }
         }
         // Final partial byte (top limb bit 50 lands at out[31] bit 6).
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // intentional: extract low 8 bits of acc
         if o < 32 {
             out[o] = acc as u8;
         }
@@ -422,7 +422,7 @@ mod fe {
             r[4] &= u128::from(MASK);
             r[0] += c * 19;
         }
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // each r[i] masked to 51 bits above, fits u64
         [
             r[0] as u64,
             r[1] as u64,

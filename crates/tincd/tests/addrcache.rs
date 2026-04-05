@@ -65,7 +65,7 @@ fn wait_for_line(path: &Path, timeout: Duration) -> bool {
 /// → `save()` → disk write.
 fn sigterm_and_wait(mut child: Child) {
     // PIDs are < 2^22 on Linux; never wraps.
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = child.id() as libc::pid_t;
     // SAFETY: kill(2) on a known-live child PID.
     unsafe {

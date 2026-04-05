@@ -518,7 +518,7 @@ pub fn tso_split(
             #[allow(clippy::cast_possible_truncation)] // i ≤ 47 in practice
             let id = first_id.wrapping_add(i as u16);
             ip[IPV4_ID_OFF..IPV4_ID_OFF + 2].copy_from_slice(&id.to_be_bytes());
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation)] // total_len ≤ hdr+gso_size ≤ MTU < 65536
             let totlen = total_len as u16;
             ip[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
             // Csum field already zeroed (from hdr_buf). Compute over
@@ -533,7 +533,7 @@ pub fn tso_split(
 
         // wg-go `:956`: seqno = first + gso_size * i. Wrapping is
         // correct (TCP seqno is mod 2^32, RFC 793 §3.3).
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // TCP seqno is mod 2^32 (RFC 793 §3.3)
         let seq = first_seq.wrapping_add((gso_size * i) as u32);
         ip[iphlen + TCP_SEQ_OFF..iphlen + TCP_SEQ_OFF + 4].copy_from_slice(&seq.to_be_bytes());
 
@@ -556,7 +556,7 @@ pub fn tso_split(
         // wg-go `:973-977`. Pseudo-header + TCP header + payload.
         // RFC 793 §3.1. The pseudo-header `tcp_len` is "TCP header
         // + data" — same as what we sum over.
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // tcp_hlen+seg_data_len ≤ MTU < 65536
         let len_for_pseudo = (tcp_hlen + seg_data_len) as u16;
         let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, addrs, len_for_pseudo);
         let tcp_csum = checksum(&ip[iphlen..total_len], pseudo);
@@ -935,7 +935,7 @@ impl GroBucket {
             let mut p = pseudo;
             p = (p >> 16) + (p & 0xffff);
             p = (p >> 16) + (p & 0xffff);
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation)] // 32-bit one's-complement fold to 16-bit
             let p = p as u16;
             pkt[iphlen + TCP_CSUM_OFF..iphlen + TCP_CSUM_OFF + 2].copy_from_slice(&p.to_be_bytes());
 

@@ -856,7 +856,7 @@ fn init_logging(args: &Args) {
     // `set_debug_level`: the latter calls `log::set_max_level`,
     // which would clobber what `init()` just set from RUST_LOG.
     // `as i32`: u32 here, i32 in the atomic; CLI accepts 0..5.
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap)] // debug_level is 0..=5 (CLI-validated)
     tincd::log_tap::init_debug_level(args.debug_level.map_or(0, |d| d as i32));
 }
 
