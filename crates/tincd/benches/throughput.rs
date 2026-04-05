@@ -587,20 +587,20 @@ mod bench {
         // sends them via TCP-tunnelled SPTPS_PACKET (b64 over the
         // meta-conn) at ~10 Mbps instead of ~1 Gbps.
         //
-        // The C tincd avoids this wait via `choose_initial_maxmtu`:
-        // `getsockopt(IP_MTU)` on a connected socket returns the
-        // kernel's PMTU cache; on loopback that's 65536, clamped to
-        // MTU=1518, and the very first probe at maxmtu
-        // confirms in one round-trip. We `STUB(chunk-9c)` that
-        // getsockopt, seed `maxmtu=MTU`, and walk the exponential probe
-        // ladder (1329, 1407, ...) at 333ms intervals: ~2-3s to 1500.
+        // Both impls walk the same ladder here. `choose_initial_maxmtu`
+        // is ported (`txpath.rs`), but on loopback `getsockopt(IP_MTU)`
+        // returns 65536 → clamped to `MTU=1518` → `probe_size` sees
+        // `maxmtu == MTU` → 0.97 multiplier → first probe is ~1329,
+        // not maxmtu. The 1-RTT fast path only fires when the kernel
+        // returns something BELOW 1518 (real link, real PMTU cache
+        // entry). Loopback: 2-3 probes × 333ms cadence ≈ 1s to 1500.
         //
         // `try_tx` (which calls `pmtu.tick()`) only fires on VPN packet
-        // egress — not ctl-dump traffic. Ping inside the poll loop.
+        // egress — not ctl-dump traffic. Ping inside the poll loop to
+        // drive a tick per side; the 333ms probe cadence gates progress,
+        // not ping rate. 10s budget is slack — ~1s in practice.
         let pmtu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             poll_until(Duration::from_secs(10), || {
-                // One ping drives one `try_tx` per side. The 333ms
-                // probe cadence is the bottleneck, not ping rate.
                 let _ = Command::new("ping")
                     .args(["-c", "1", "-W", "1", "10.44.0.2"])
                     .stdout(Stdio::null())
@@ -1334,10 +1334,11 @@ mod bench {
         // tunnel dead" check is better caught by netns.rs::ping.
         // Compare ratios across commits by eye. If Rust/C drops to
         // ~50%, look for per-packet Vec::clone (_ZN5alloc... high in
-        // the hot-symbol report). The chunk-11-perf STUBs (per-packet
-        // Vec allocs in send_record_priv, maybe_set_write_any walking
-        // all conns) cost ~15-20% — STUB(chunk-11-perf): close those
-        // and we should be further ahead.
+        // the hot-symbol report) — that's a regression; the hot UDP
+        // data path is zero-alloc via `seal_data_into` + `tx_scratch`
+        // (`send_record_priv` is handshake/probe-only now). Remaining
+        // cold-perf STUB: `maybe_set_write_any` walking all conns
+        // (`txpath.rs`); irrelevant at n=2 peers.
         if let (Some(baseline), Some(rust)) = (baseline, rust) {
             eprintln!("Rust/C ratio: {:.1}%", rust / baseline * 100.0);
             // Mixed against the SLOWER endpoint: a mixed pair is
