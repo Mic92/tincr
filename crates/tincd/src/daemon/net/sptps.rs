@@ -477,11 +477,112 @@ impl Daemon {
     ///
     /// TCP if: `SPTPS_HANDSHAKE` (`ANS_KEY` also propagates reflexive
     /// UDP addr); tcponly; relay too old (proto minor<4); or
+    /// TCP-transport slow path for [`Self::send_sptps_data_relay`].
+    /// Two sub-paths: `SPTPS_PACKET` (binary) for proto minor≥7;
+    /// `ANS_KEY`/`REQ_KEY` (b64) otherwise. Queues to the relay's
+    /// metaconn.
+    fn send_sptps_tcp(
+        &mut self,
+        to_nid: NodeId,
+        from_nid: NodeId,
+        record_type: u8,
+        ct: Option<&[u8]>,
+        from_is_myself: bool,
+    ) -> bool {
+        // `match` not `unwrap_or`: latter is eager, would
+        // slice-panic on empty scratch even when ct=Some.
+        let ct = match ct {
+            Some(s) => s,
+            None => &self.tx_scratch[12..],
+        };
+
+        let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+            log::warn!(target: "tincd::net",
+                       "No meta connection toward {}",
+                       self.node_log_name(to_nid));
+            return false;
+        };
+        let to_name = self
+            .graph
+            .node(to_nid)
+            .map_or("<gone>", |n| n.name.as_str());
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+
+        // SPTPS_PACKET (binary). Handshakes stay on b64
+        // (ANS_KEY also propagates reflexive UDP addr; binary
+        // doesn't). SPTPS_PACKET introduced in proto minor 7;
+        // b64 is the universal fallback. send_raw bypasses SPTPS
+        // framing (blob is already per-tunnel-encrypted).
+        if record_type != tinc_sptps::REC_HANDSHAKE && conn.options.prot_minor() >= 7 {
+            if crate::tcp_tunnel::random_early_drop(
+                conn.outbuf.live_len(),
+                self.settings.maxoutbufsize,
+                &mut OsRng,
+            ) {
+                return true; // fake success
+            }
+            // The `direct⇒nullid` for dst is UDP-only; binary
+            // TCP path always uses the real dst id.
+            let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
+            let dst_id = self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL);
+            let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
+            let mut nw = conn.send(format_args!(
+                "{} {}",
+                Request::SptpsPacket as u8,
+                frame.len()
+            ));
+            nw |= conn.send_raw(&frame);
+            return nw;
+        }
+
+        let b64 = tinc_crypto::b64::encode(ct);
+        let from_name = if from_is_myself {
+            self.name.clone()
+        } else {
+            self.graph
+                .node(from_nid)
+                .map_or("<gone>", |n| n.name.as_str())
+                .to_owned()
+        };
+
+        if record_type == tinc_sptps::REC_HANDSHAKE {
+            // ANS_KEY. Only set incompression when from==myself
+            // (relayed handshakes don't touch state).
+            let my_compression = self.settings.compression;
+            if from_is_myself {
+                self.tunnels.entry(to_nid).or_default().incompression = my_compression;
+            }
+            // `-1 -1 -1` are LITERAL string (cipher/digest/maclen
+            // placeholders for SPTPS mode, never read by
+            // ans_key_h). Byte-identical wire for pcap-compare.
+            // tok.rs::lu accepts `-1` (glibc strtoul "negate as
+            // unsigned" → u64::MAX).
+            return conn.send(format_args!(
+                "{} {} {} {} -1 -1 -1 {}",
+                Request::AnsKey,
+                from_name,
+                to_name,
+                b64,
+                my_compression,
+            ));
+        }
+        // REQ_KEY with reqno=SPTPS_PACKET.
+        conn.send(format_args!(
+            "{} {} {} {} {}",
+            Request::ReqKey,
+            from_name,
+            to_name,
+            Request::SptpsPacket as u8,
+            b64,
+        ))
+    }
+
     /// `origlen > relay->minmtu` (TCP fragments fine).
     ///
     /// `from_nid`: ORIGINAL source. For relay forwarding it's the
     /// original sender's `NodeId` — wire prefix carries THEIR `src_id6`.
-    #[allow(clippy::too_many_lines)] // TCP-b64/TCP-binary/UDP-batch/UDP-immediate arms all need relay_nid/direct/from_is_myself computed by the decision tree at the top
     pub(in crate::daemon) fn send_sptps_data_relay(
         &mut self,
         to_nid: NodeId,
@@ -552,96 +653,7 @@ impl Daemon {
             || too_big;
 
         if go_tcp {
-            // Two sub-paths: SPTPS_PACKET (binary) for proto
-            // minor≥7; ANS_KEY/REQ_KEY (b64) otherwise. `match` not
-            // `unwrap_or`: latter is eager, would slice-panic on
-            // empty scratch even when ct=Some.
-            let ct = match ct {
-                Some(s) => s,
-                None => &self.tx_scratch[12..],
-            };
-
-            let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
-                log::warn!(target: "tincd::net",
-                           "No meta connection toward {}",
-                           self.node_log_name(to_nid));
-                return false;
-            };
-            let to_name = self
-                .graph
-                .node(to_nid)
-                .map_or("<gone>", |n| n.name.as_str());
-            let Some(conn) = self.conns.get_mut(conn_id) else {
-                return false;
-            };
-
-            // SPTPS_PACKET (binary). Handshakes stay on b64
-            // (ANS_KEY also propagates reflexive UDP addr; binary
-            // doesn't). SPTPS_PACKET introduced in proto minor 7;
-            // b64 is the universal fallback. send_raw bypasses SPTPS
-            // framing (blob is already per-tunnel-encrypted).
-            if record_type != tinc_sptps::REC_HANDSHAKE && conn.options.prot_minor() >= 7 {
-                if crate::tcp_tunnel::random_early_drop(
-                    conn.outbuf.live_len(),
-                    self.settings.maxoutbufsize,
-                    &mut OsRng,
-                ) {
-                    return true; // fake success
-                }
-                // The `direct⇒nullid` for dst is UDP-only; binary
-                // TCP path always uses the real dst id.
-                let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
-                let dst_id = self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL);
-                let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
-                let mut nw = conn.send(format_args!(
-                    "{} {}",
-                    Request::SptpsPacket as u8,
-                    frame.len()
-                ));
-                nw |= conn.send_raw(&frame);
-                return nw;
-            }
-
-            let b64 = tinc_crypto::b64::encode(ct);
-            let from_name = if from_is_myself {
-                self.name.clone()
-            } else {
-                self.graph
-                    .node(from_nid)
-                    .map_or("<gone>", |n| n.name.as_str())
-                    .to_owned()
-            };
-
-            if record_type == tinc_sptps::REC_HANDSHAKE {
-                // ANS_KEY. Only set incompression when from==myself
-                // (relayed handshakes don't touch state).
-                let my_compression = self.settings.compression;
-                if from_is_myself {
-                    self.tunnels.entry(to_nid).or_default().incompression = my_compression;
-                }
-                // `-1 -1 -1` are LITERAL string (cipher/digest/maclen
-                // placeholders for SPTPS mode, never read by
-                // ans_key_h). Byte-identical wire for pcap-compare.
-                // tok.rs::lu accepts `-1` (glibc strtoul "negate as
-                // unsigned" → u64::MAX).
-                return conn.send(format_args!(
-                    "{} {} {} {} -1 -1 -1 {}",
-                    Request::AnsKey,
-                    from_name,
-                    to_name,
-                    b64,
-                    my_compression,
-                ));
-            }
-            // REQ_KEY with reqno=SPTPS_PACKET.
-            return conn.send(format_args!(
-                "{} {} {} {} {}",
-                Request::ReqKey,
-                from_name,
-                to_name,
-                Request::SptpsPacket as u8,
-                b64,
-            ));
+            return self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself);
         }
 
         // We always prefix (peers are ≥1.1). direct ⇒ dst=nullid.
@@ -688,17 +700,8 @@ impl Daemon {
             (&cold_sockaddr, sock)
         };
 
-        // Copy inner TOS to outer socket. Without it, all encrypted
-        // traffic gets default DSCP regardless of inner QoS marking.
         if self.settings.priorityinheritance {
-            let prio = self.tx_priority;
-            let sock_idx = usize::from(sock);
-            if let Some(slot) = self.listeners.get_mut(sock_idx)
-                && slot.last_tos != prio
-            {
-                slot.last_tos = prio;
-                set_udp_tos(&slot.listener, sockaddr.is_ipv6(), prio);
-            }
+            inherit_tos(&mut self.listeners, sock, sockaddr, self.tx_priority);
         }
 
         // Phase 1 (`RUST_REWRITE_10G.md`): if we're inside
@@ -748,48 +751,77 @@ impl Daemon {
 
         // Immediate-send path (Phase 0). Hit when: outside the
         // drain loop, OR cold path (no cached addr), OR relay/
-        // handshake (`ct.is_some()`). `count=1` means `stride ==
-        // last_len`; both `Portable` and `linux::Fast` skip GSO.
+        // handshake (`ct.is_some()`).
+        self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen);
+        false // UDP send doesn't touch any meta-conn outbuf
+    }
+
+    /// Phase-0 single-frame UDP send for [`Self::send_sptps_data_relay`].
+    /// `count=1` means `stride == last_len`; both `Portable` and
+    /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink.
+    fn send_sptps_udp_immediate(
+        &mut self,
+        sockaddr: &socket2::SockAddr,
+        sock: u8,
+        relay_nid: NodeId,
+        origlen: usize,
+    ) {
         #[allow(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
         let len = self.tx_scratch.len() as u16;
-        if let Some(slot) = self.listeners.get_mut(usize::from(sock))
-            && let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
-                dst: sockaddr,
-                frames: &self.tx_scratch,
-                stride: len,
-                count: 1,
-                last_len: len,
-            })
-        {
-            if e.kind() == io::ErrorKind::WouldBlock {
-                // Drop; UDP is unreliable.
-            } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
-                // EMSGSIZE = LOCAL kernel rejected (interface MTU).
-                // Shrink relay's maxmtu. Don't log: this IS the
-                // discovery mechanism.
-                #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
-                let at_len = origlen as u16;
-                if let Some(p) = self
-                    .tunnels
-                    .get_mut(&relay_nid)
-                    .and_then(|t| t.pmtu.as_mut())
-                {
-                    let relay_name = self
-                        .graph
-                        .node(relay_nid)
-                        .map_or("<gone>", |n| n.name.as_str());
-                    for a in p.on_emsgsize(at_len) {
-                        Self::log_pmtu_action(relay_name, &a);
-                    }
+        let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
+            return;
+        };
+        let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
+            dst: sockaddr,
+            frames: &self.tx_scratch,
+            stride: len,
+            count: 1,
+            last_len: len,
+        }) else {
+            return;
+        };
+        if e.kind() == io::ErrorKind::WouldBlock {
+            // Drop; UDP is unreliable.
+        } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+            // EMSGSIZE = LOCAL kernel rejected (interface MTU).
+            // Shrink relay's maxmtu. Don't log: this IS the
+            // discovery mechanism.
+            #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
+            let at_len = origlen as u16;
+            if let Some(p) = self
+                .tunnels
+                .get_mut(&relay_nid)
+                .and_then(|t| t.pmtu.as_mut())
+            {
+                let relay_name = self
+                    .graph
+                    .node(relay_nid)
+                    .map_or("<gone>", |n| n.name.as_str());
+                for a in p.on_emsgsize(at_len) {
+                    Self::log_pmtu_action(relay_name, &a);
                 }
-            } else {
-                let relay_name = self.node_log_name(relay_nid);
-                log::warn!(target: "tincd::net",
-                               "Error sending UDP SPTPS packet to \
-                                {relay_name}: {e}");
             }
+        } else {
+            let relay_name = self.node_log_name(relay_nid);
+            log::warn!(target: "tincd::net",
+                       "Error sending UDP SPTPS packet to {relay_name}: {e}");
         }
-        false // UDP send doesn't touch any meta-conn outbuf
+    }
+}
+
+/// Copy inner TOS to outer socket. Without it, all encrypted
+/// traffic gets default DSCP regardless of inner QoS marking.
+fn inherit_tos(
+    listeners: &mut [crate::daemon::ListenerSlot],
+    sock: u8,
+    sockaddr: &socket2::SockAddr,
+    prio: u8,
+) {
+    if let Some(slot) = listeners.get_mut(usize::from(sock))
+        && slot.last_tos != prio
+    {
+        slot.last_tos = prio;
+        set_udp_tos(&slot.listener, sockaddr.is_ipv6(), prio);
     }
 }
 
