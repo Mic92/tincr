@@ -21,17 +21,17 @@
 //!   `tick → turn → match` works
 //! - `tinc-event`: a real epoll wakes on a real unix socket; timers
 //!   tick (Ping fires and re-arms)
-//! - `proto.rs`: the greeting exchange + REQ_STOP path
+//! - `proto.rs`: the greeting exchange + `REQ_STOP` path
 //! - `conn.rs`: feed/send/flush over a real fd
 //! - `control.rs`: pidfile format readable by the same parser
 //!   `tinc-tools::Pidfile::read` uses
 //!
-//! ## SelfPipe singleton
+//! ## `SelfPipe` singleton
 //!
 //! `Daemon::setup` calls `SelfPipe::new()` which is a process
 //! singleton (panics if called twice). Tests can't construct a
 //! `Daemon` in-process. Hence: subprocess. The subprocess is its
-//! own process; SelfPipe is fresh.
+//! own process; `SelfPipe` is fresh.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -60,7 +60,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// `Port` is HOST-tagged (per `tincctl.c:1751`). Goes in `hosts/
 /// testnode`. The daemon's `read_host_config` merges it.
 ///
-/// `ed25519_key.priv` is required since chunk 4a (`net_setup.c:803`
+/// `ed25519_key.priv` is required since chunk 4a (`net_setup.c`:803
 /// loads it; we forbid the legacy fallback). The key is deterministic
 /// (seeded from a constant) so tests are reproducible. Mode 0600 to
 /// avoid the perm warning. The daemon never USES this key in tests
@@ -89,7 +89,7 @@ fn write_config(confbase: &std::path::Path) -> [u8; 32] {
 // ═══════════════════════════════════════════════════════════════════
 
 /// THE walking-skeleton proof. Spawn tincd, connect to its control
-/// socket, do the greeting dance, send REQ_STOP, daemon exits 0.
+/// socket, do the greeting dance, send `REQ_STOP`, daemon exits 0.
 ///
 /// Exact same protocol bytes as `tinc-tools/tests/tinc_cli.rs::
 /// fake_daemon_setup` expects from a daemon. If THIS passes and
@@ -323,7 +323,7 @@ fn umbilical_ready_signal() {
 /// Proves `cut_umbilical` does the right thing without involving
 /// `tinc-tools::cmd::start` at all.
 ///
-/// This is the cheaper test — no fork-from-the-test, just a
+/// This is the cheaper test — no fork-from-the-test, just
 /// `Command::spawn` with an inherited fd. If the cross-crate test
 /// above breaks, this one tells you which half is at fault.
 #[test]
@@ -446,6 +446,7 @@ fn sigterm_stops() {
     // it's alive (wait_for_file confirmed it bound the socket).
     // SIGTERM is the polite shutdown signal.
     #[allow(unsafe_code)]
+    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
     unsafe {
         let rc = libc::kill(pid as libc::pid_t, libc::SIGTERM);
         assert_eq!(rc, 0, "kill failed: {}", std::io::Error::last_os_error());
@@ -521,7 +522,7 @@ fn second_daemon_refused() {
 /// Pingtimer fires and re-arms. We can't observe this directly
 /// (it's internal), but: leave the daemon running for >2s (initial
 /// pingtimeout=5s is too long; reduce via config? — no, the
-/// skeleton doesn't read PingTimeout. Ugh.)
+/// skeleton doesn't read `PingTimeout`. Ugh.)
 ///
 /// What we CAN test: the daemon stays alive for several seconds
 /// without crashing. If `on_ping_tick` forgot to re-arm, `tick()`
@@ -531,7 +532,7 @@ fn second_daemon_refused() {
 /// (Weaker than a direct timer-fired check but proves the loop
 /// stays alive across multiple iterations. The `pingtimeout=5s`
 /// means the timer fires once at most in this test. Chunk 3 reads
-/// PingTimeout from config and we can set it to 1s.)
+/// `PingTimeout` from config and we can set it to 1s.)
 #[test]
 fn stays_alive_across_iterations() {
     let tmp = tmp("alive");
@@ -1131,7 +1132,7 @@ fn udp_stray_packet_drained() {
     let socket_inodes: std::collections::HashSet<String> =
         std::fs::read_dir(format!("/proc/{daemon_pid}/fd"))
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .filter_map(|e| std::fs::read_link(e.path()).ok())
             .filter_map(|target| {
                 target
@@ -1213,7 +1214,7 @@ fn udp_stray_packet_drained() {
 // side from the test process using `tinc-sptps::Sptps` directly.
 // Same shape as `tinc-tools/cmd/join.rs`'s pump loop.
 //
-// Chunk 4a stopped at HandshakeDone. Chunk 4b CONTINUES:
+// Chunk 4a stopped at `HandshakeDone`. Chunk 4b CONTINUES:
 //   - daemon's HandshakeDone arm calls send_ack (NOT terminate)
 //   - the ACK arrives as a SPTPS Record (encrypted)
 //   - we send our ACK back (also encrypted)
@@ -1230,6 +1231,8 @@ fn udp_stray_packet_drained() {
 /// an SPTPS `Record`, parse `"%d %s %d %x"`, send our ACK, daemon
 /// activates. `tinc dump connections` then shows ONE peer row.
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
+#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
 fn peer_ack_exchange() {
     use rand_core::OsRng;
     use std::io::Read;
@@ -1303,9 +1306,7 @@ fn peer_ack_exchange() {
     let mut tmp_buf = [0u8; 256];
     let id_end = loop {
         let n = (&stream).read(&mut tmp_buf).expect("recv from daemon");
-        if n == 0 {
-            panic!("daemon closed before sending ID line; buf so far: {buf:?}");
-        }
+        assert_ne!(n, 0, "daemon closed before sending ID line; buf so far: {buf:?}");
         buf.extend_from_slice(&tmp_buf[..n]);
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             break pos;
@@ -1550,9 +1551,10 @@ fn peer_ack_exchange() {
     pending.clear();
     let drain_deadline = Instant::now() + Duration::from_secs(5);
     'drain: loop {
-        if Instant::now() > drain_deadline {
-            panic!("send_everything drain timeout");
-        }
+        assert!(
+            Instant::now() <= drain_deadline,
+            "send_everything drain timeout"
+        );
         let mut off = 0;
         while off < pending.len() {
             let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
@@ -1810,7 +1812,7 @@ fn peer_ack_exchange() {
         !stderr.contains("send_ack not implemented"),
         "chunk-4a placeholder leaked; stderr:\n{stderr}"
     );
-    // Chunk 5: on_ack → graph.add_edge → run_graph → BecameReachable.
+    // Chunk 5: `on_ack` → `graph.add_edge` → `run_graph` → `BecameReachable`.
     // C `graph.c:261`: `"Node %s became reachable"`. Our log says
     // `"Node testpeer became reachable"`. THIS is the proof that
     // graph_glue::run_graph fired and the diff produced a transition.
@@ -1834,6 +1836,8 @@ fn peer_ack_exchange() {
 /// `dump connections` STILL shows one row (testpeer): faraway has
 /// no direct connection — graph-only.
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
+#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
 fn peer_edge_triggers_reachable() {
     use rand_core::OsRng;
     use std::io::Read;
@@ -1888,9 +1892,7 @@ fn peer_edge_triggers_reachable() {
     let mut tmp_buf = [0u8; 256];
     let id_end = loop {
         let n = (&stream).read(&mut tmp_buf).expect("recv");
-        if n == 0 {
-            panic!("daemon closed before ID");
-        }
+        assert_ne!(n, 0, "daemon closed before ID");
         buf.extend_from_slice(&tmp_buf[..n]);
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             break pos;
@@ -2007,9 +2009,7 @@ fn peer_edge_triggers_reachable() {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut tmp_buf = [0u8; 256];
             loop {
-                if Instant::now() > deadline {
-                    panic!("drain timeout");
-                }
+                assert!(Instant::now() <= deadline, "drain timeout");
                 let mut off = 0;
                 while off < pending.len() {
                     let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
@@ -2407,8 +2407,9 @@ fn peer_edge_triggers_reachable() {
 /// Same setup as `peer_handshake_reaches_done` but we register a
 /// FAKE pubkey for ourselves in `hosts/testpeer`. The daemon's
 /// SPTPS receive_sig step computes the transcript with that fake
-/// pubkey, our SIG was made with the real one → BadSig.
+/// pubkey, our SIG was made with the real one → `BadSig`.
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn peer_wrong_key_fails_sig() {
     use rand_core::OsRng;
     use std::io::Read;
@@ -2460,9 +2461,7 @@ fn peer_wrong_key_fails_sig() {
     let mut tmp_buf = [0u8; 256];
     let id_end = loop {
         let n = (&stream).read(&mut tmp_buf).unwrap();
-        if n == 0 {
-            panic!("daemon closed early");
-        }
+        assert_ne!(n, 0, "daemon closed early");
         buf.extend_from_slice(&tmp_buf[..n]);
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             break pos;
@@ -2507,6 +2506,7 @@ fn peer_wrong_key_fails_sig() {
             // But if it does fail: that's also a stop condition
             // (and the stderr check below disambiguates).
             match sptps.receive(&pending[off..], &mut OsRng) {
+                #[allow(clippy::match_same_arms)] // Ok(0,_) and Err(_) both stop, but for different reasons
                 Ok((0, _)) => break,
                 Ok((n, outs)) => {
                     off += n;
@@ -2722,12 +2722,12 @@ fn dash_u_bad_user_fails() {
 }
 
 /// `-L` (mlockall) is wired. Whether it SUCCEEDS depends on
-/// RLIMIT_MEMLOCK / CAP_IPC_LOCK — the nix dev shell has 8MB which
+/// `RLIMIT_MEMLOCK` / `CAP_IPC_LOCK` — the nix dev shell has 8MB which
 /// is enough for the daemon's resident set, CI sandboxes vary, root
 /// always succeeds. We can't reliably test the EPERM path.
 ///
 /// What we CAN prove: `-L` parses, the syscall fires, and EITHER
-/// the daemon starts (mlockall worked) OR it fails fast with
+/// the daemon starts (`mlockall` worked) OR it fails fast with
 /// "mlockall" in the error. Both are valid; "silently ignore -L"
 /// is not.
 ///
@@ -2782,8 +2782,8 @@ fn dash_l_mlock_wired() {
     }
 }
 
-/// REQ_LOG: live log streaming over the ctl socket. C `control.c:
-/// 133-140` arms the conn; `logger.c:192-218` walks log conns on each
+/// `REQ_LOG`: live log streaming over the ctl socket. C `control.c`:
+/// 133-140 arms the conn; `logger.c:192-218` walks log conns on each
 /// `logger()` call. Our tap pushes to a thread-local buffer drained
 /// once per event-loop turn.
 ///
@@ -2947,7 +2947,7 @@ fn process_priority_bad_value_warns() {
     );
 }
 
-/// `ProcessPriority = low` → setpriority(PRIO_PROCESS, 0, 10).
+/// `ProcessPriority = low` → `setpriority(PRIO_PROCESS, 0, 10)`.
 /// Unprivileged users CAN lower their own priority (raise nice).
 /// Prove the syscall path executes without error.
 #[test]
@@ -3018,6 +3018,9 @@ fn process_priority_low_succeeds() {
 /// to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
 /// directly with the frame body.
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
+#[allow(clippy::items_after_statements)] // local NoRng helper kept inline for clarity
+#[allow(clippy::similar_names)] // ctl/ctl2 distinguish first/second control conns
 fn pcap_captures_tcp_packet() {
     use rand_core::OsRng;
     use std::io::Read;
@@ -3082,9 +3085,7 @@ fn pcap_captures_tcp_packet() {
     let mut tmp_buf = [0u8; 256];
     let id_end = loop {
         let n = (&stream).read(&mut tmp_buf).expect("recv");
-        if n == 0 {
-            panic!("daemon closed before ID");
-        }
+        assert_ne!(n, 0, "daemon closed before ID");
         buf.extend_from_slice(&tmp_buf[..n]);
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             break pos;
@@ -3189,9 +3190,7 @@ fn pcap_captures_tcp_packet() {
     pending.clear();
     let drain_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if Instant::now() > drain_deadline {
-            panic!("post-ACK drain timeout");
-        }
+        assert!(Instant::now() <= drain_deadline, "post-ACK drain timeout");
         let mut off = 0;
         while off < pending.len() {
             let (n, outs) = sptps.receive(&pending[off..], &mut NoRng).expect("sptps");
@@ -3353,13 +3352,13 @@ fn pcap_captures_tcp_packet() {
     let _ = child.wait();
 }
 
-/// REQ_SET_DEBUG round-trip. C `control.c:79-93`: reply with the
+/// `REQ_SET_DEBUG` round-trip. C `control.c:79-93`: reply with the
 /// PREVIOUS level (sent BEFORE the assignment), then update if
 /// `level >= 0`. Negative → query-only.
 ///
 /// This is the `tinc debug N` operator workflow: "daemon's
 /// misbehaving, crank up logging without restart". Before this
-/// arm existed, the daemon fell through to REQ_INVALID and the
+/// arm existed, the daemon fell through to `REQ_INVALID` and the
 /// CLI's `recv_ack(SetDebug)` failed the ack-shape check.
 #[test]
 fn set_debug_level_roundtrip() {
@@ -3450,6 +3449,8 @@ fn set_debug_level_roundtrip() {
 /// meaningful: without the fix, `pwd` in tinc-up would print `/`.
 #[test]
 fn tinc_up_runs_with_confbase_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+
     let tmp = tmp("tinc-up-cwd");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
@@ -3465,7 +3466,6 @@ fn tinc_up_runs_with_confbase_cwd() {
         format!("#!/bin/sh\npwd > '{}'\n", probe.display()),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&tinc_up, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut child = tincd_cmd()

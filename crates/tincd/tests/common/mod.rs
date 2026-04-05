@@ -22,8 +22,8 @@
 //! to gut the bulk of each `write_config`.
 //!
 //! `enter_netns` / `NetNs`. The bwrap re-exec is parametrized by
-//! test name (the `--exact` arg), device names, env gates (TINC_C_
-//! TINCD vs iperf3), and `--ignored` for throughput. The crossimpl.rs
+//! test name (the `--exact` arg), device names, env gates
+//! (`TINC_C_TINCD` vs `iperf3`), and `--ignored` for throughput. The crossimpl.rs
 //! comment is right: "Two ~100-line copies are cheaper than the
 //! plumbing."
 
@@ -80,7 +80,7 @@ pub fn tincd_bin() -> PathBuf {
 /// The C `tincd.c:64` defaults `do_detach = true`; the Rust binary
 /// matches that since the main.rs cluster commit. A detached child
 /// double-forks out from under `Child` — the test sees the original
-/// parent exit 0 immediately, wait_for_file races a process that
+/// parent exit 0 immediately, `wait_for_file` races a process that
 /// isn't ours, and `child.kill()` is a no-op. Every test that
 /// observes the daemon must keep it foreground.
 ///

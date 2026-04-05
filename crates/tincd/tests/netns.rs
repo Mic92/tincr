@@ -1,6 +1,6 @@
 //! Real kernel TUN inside an unprivileged user+net namespace.
 //!
-//! `first_packet_across_tunnel` (two_daemons.rs) uses `DeviceType =
+//! `first_packet_across_tunnel` (`two_daemons.rs`) uses `DeviceType =
 //! fd` on a socketpair: the test process IS the IP stack. Proves the
 //! daemon's wiring; doesn't prove `linux/if_tun.h` interop. THIS test
 //! uses `DeviceType = tun` — `LinuxTun::open()` does TUNSETIFF, the
@@ -39,7 +39,7 @@
 //! CHILD netns's IP stack. Ping in the outer ns goes into `tinc0`;
 //! the reply comes from `tinc1` in the child ns.
 //!
-//! Sequence (proven in the python PoC during development):
+//! Sequence (proven in the python proof-of-concept during development):
 //!   1. `ip tuntap add tinc0` + `tinc1` (persistent, outer ns)
 //!   2. spawn alice (TUNSETIFF attaches to `tinc0`)
 //!   3. spawn bob (TUNSETIFF attaches to `tinc1`)
@@ -90,6 +90,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -316,6 +317,7 @@ impl NetNs {
     /// on both). Moves bob's TUN into the child netns and
     /// configures addresses on both. Moving an interface resets
     /// its UP state and flushes addresses, so configure AFTER move.
+    #[allow(clippy::unused_self)] // method form keeps the call ordered after NetNs::setup
     fn place_devices(&self) {
         // ─── move tinc1 into bobside ─────────────────────────────
         // The fd→device binding survives. Bob's daemon (in the
@@ -372,7 +374,7 @@ struct Node {
     /// Goes into `Interface = ...` in tinc.conf. The daemon's
     /// `LinuxTun::open` TUNSETIFF-attaches to it.
     iface: &'static str,
-    /// /32 in `hosts/NAME` `Subnet = ...`. The daemon's route()
+    /// /32 in `hosts/NAME` `Subnet = ...`. The daemon's `route()`
     /// lookup key. NOT the /24 on the device — that's kernel-side.
     subnet: &'static str,
 }
@@ -406,8 +408,8 @@ impl Node {
     }
 
     /// Write `tinc.conf` + `hosts/NAME` + `ed25519_key.priv` +
-    /// `hosts/OTHER`. `connect_to` toggles ConnectTo + Address.
-    /// `DeviceType = tun` + `Interface = ...` (vs two_daemons.rs's
+    /// `hosts/OTHER`. `connect_to` toggles `ConnectTo` + Address.
+    /// `DeviceType = tun` + `Interface = ...` (vs `two_daemons.rs`'s
     /// `dummy`/`fd`). Subnet always set.
     fn write_config(&self, other: &Node, connect_to: bool) {
         self.write_config_with(other, connect_to, "");
@@ -426,7 +428,7 @@ impl Node {
             self.name, self.iface
         );
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            writeln!(tinc_conf, "ConnectTo = {}", other.name).unwrap();
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         tinc_conf.push_str(extra);
@@ -447,7 +449,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port).unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -487,15 +489,15 @@ impl Node {
 /// 1. **`LinuxTun::open()` TUNSETIFF**: the daemon attaches to a
 ///    precreated persistent device. Carrier flips from `NO-CARRIER`
 ///    to `LOWER_UP`. `wait_for_carrier` pins it.
-/// 2. **The vnet_hdr drain path**: `linux.rs::Tun::drain` reads
+/// 2. **The `vnet_hdr` drain path**: `linux.rs::Tun::drain` reads
 ///    `[virtio_net_hdr(10)][raw IP]` (`IFF_NO_PI | IFF_VNET_HDR`);
 ///    no eth header from the kernel. ICMP echo is `gso_type=NONE`,
-///    so `drain()` strips the vnet_hdr and synthesizes the eth
+///    so `drain()` strips the `vnet_hdr` and synthesizes the eth
 ///    header from the IP version nibble (`0x45` → `ETH_P_IP =
 ///    0x0800`); `route()` reads that ethertype and dispatches to
 ///    `route_ipv4`. The socketpair test used `FdTun` which reads at
 ///    `+14` and synthesizes the same way — but never touches the
-///    `Tun::drain` override or the vnet_hdr layout.
+///    `Tun::drain` override or the `vnet_hdr` layout.
 /// 3. **Kernel checksums + TTL**: ping's ICMP echo has a real
 ///    checksum; the daemon doesn't touch it (just the route lookup
 ///    on `dst`); bob's kernel verifies it on receipt and replies.
@@ -504,9 +506,10 @@ impl Node {
 /// 4. **fd→device binding survives netns move**: bob's daemon stays
 ///    in the outer netns (127.0.0.1 listeners), bob's TUN moves to
 ///    the child netns. Daemon writes to its fd; packets land in
-///    child kernel's IP stack. The PoC during dev proved this; the
-///    test pins it (ping wouldn't reply otherwise).
+///    child kernel's IP stack. The proof-of-concept during dev proved
+///    this; the test pins it (ping wouldn't reply otherwise).
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn real_tun_ping() {
     let Some(netns) = enter_netns("real_tun_ping") else {
         return;
@@ -523,9 +526,11 @@ fn real_tun_ping() {
     // Bob first (listener); alice has ConnectTo. Same ordering
     // rationale as two_daemons.rs (avoid the 5s retry backoff).
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
 
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
@@ -767,9 +772,11 @@ impl ChaosRig {
         // reject signal. Target-filter it through.
         let log = "tincd=info,tincd::net=debug";
         let mut bob_child = bob.spawn_with_log(log);
-        if !wait_for_file(&bob.socket) {
-            panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-        }
+        assert!(
+            wait_for_file(&bob.socket),
+            "bob setup failed; stderr:\n{}",
+            drain_stderr(bob_child)
+        );
         let alice_child = alice.spawn_with_log(log);
         if !wait_for_file(&alice.socket) {
             let _ = bob_child.kill();
@@ -846,7 +853,7 @@ impl ChaosRig {
         }
     }
 
-    /// `dump nodes` row → (in_packets, out_packets) for `name`.
+    /// `dump nodes` row → (`in_packets`, `out_packets`) for `name`.
     /// Tail-4, tail-2 of the row (`gossip.rs:947-950`).
     fn traffic(ctl: &mut Ctl, name: &str) -> (u64, u64) {
         ctl.dump(3)
@@ -863,7 +870,7 @@ impl ChaosRig {
             .expect("node row")
     }
 
-    /// Kill both, return (alice_stderr, bob_stderr). Consumes self
+    /// Kill both, return (`alice_stderr`, `bob_stderr`). Consumes self
     /// so the test can't accidentally poll a dead daemon.
     fn finish(mut self) -> (String, String) {
         drop(self.alice_ctl);
@@ -1092,9 +1099,9 @@ fn chaos_replay_under_reorder() {
 /// 2. The reject doesn't cascade. `net.rs:495` fires `send_req_key`
 ///    on decode failure, gated to once per 10s. A dup-reject is NOT
 ///    a decode failure semantically, but the code path is the same.
-///    If req_key fires on every dup, that's a meta-conn storm under
+///    If `req_key` fires on every dup, that's a meta-conn storm under
 ///    realistic 1% network dup. The 10s gate should prevent it; the
-///    burst here is ~2s, so we expect ≤1 req_key per side.
+///    burst here is ~2s, so we expect ≤1 `req_key` per side.
 /// 3. Ping still works. The original (non-dup) packet got through;
 ///    only the clone is rejected.
 #[test]
@@ -1221,7 +1228,7 @@ fn chaos_replay_under_duplicate() {
 ///
 /// Single daemon (alice only): the unreachable path doesn't need a
 /// peer. The ICMP synth fires BEFORE `send_sptps_packet`. No SPTPS
-/// handshake, no validkey wait — just route() → Unreachable →
+/// handshake, no validkey wait — just `route()` → Unreachable →
 /// device.write. Faster + less moving parts than `real_tun_ping`.
 #[test]
 fn real_tun_unreachable() {
@@ -1242,9 +1249,11 @@ fn real_tun_unreachable() {
     alice.write_config(&bob, false);
 
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
 
     assert!(
         wait_for_carrier("tinc0", Duration::from_secs(2)),
@@ -1322,7 +1331,7 @@ fn real_tun_unreachable() {
 /// ## What this proves
 ///
 /// 1. **Seqno arithmetic**: 8 MiB of TCP at MSS ≈1400 = ~6000
-///    segments. Each segment's seqno = first + i*gso_size. If the
+///    segments. Each segment's seqno = first + i*`gso_size`. If the
 ///    arithmetic is off (e.g. `*` vs `+`, or `i` vs `i+1`), the
 ///    sha256 differs.
 /// 2. **IPv4 csum recompute**: bob's kernel verifies the IP header
@@ -1338,7 +1347,7 @@ fn real_tun_unreachable() {
 ///    on a non-last segment closes the connection mid-stream —
 ///    `socat` exits early, sha256 differs.
 /// 5. **`gso_none_checksum`**: the FIN/ACK and bare-ACK frames at
-///    the end of the transfer are GSO_NONE with NEEDS_CSUM. If we
+///    the end of the transfer are `GSO_NONE` with `NEEDS_CSUM`. If we
 ///    don't complete the partial csum, bob drops the FIN → socat
 ///    waits for FIN → timeout.
 ///
@@ -1348,7 +1357,7 @@ fn real_tun_unreachable() {
 /// segments (it batches once cwnd opens, after ~10 RTTs of slow
 /// start). At 8 MiB, ~5800 full-MSS frames + a short tail —
 /// exercises both the even-split and short-tail paths in `tso_split`.
-/// Small enough to finish in <2s on loopback (no ChaCha20 release
+/// Small enough to finish in <2s on loopback (no `ChaCha20` release
 /// build needed; dev profile is fine).
 ///
 /// ## Why socat not iperf3
@@ -1358,6 +1367,7 @@ fn real_tun_unreachable() {
 /// `socat TCP-LISTEN | sha256sum` on the other. Compare hashes.
 /// One process either side, no JSON parsing, deterministic.
 #[test]
+#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn tso_ingest_stream_integrity() {
     let Some(netns) = enter_netns("tso_ingest_stream_integrity") else {
         return;
@@ -1376,9 +1386,11 @@ fn tso_ingest_stream_integrity() {
     // the 64 KiB stderr pipe. The `tinc_device=info` part lets the
     // "TSO ingest enabled" log through (it's at info level).
     let mut bob_child = bob.spawn_with_log("tincd=info");
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn_with_log("info");
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
@@ -1570,7 +1582,7 @@ fn tso_ingest_stream_integrity() {
 ///    with `#!/bin/sh` shebang fails: the daemon's exec of
 ///    confbase/host-up succeeds (Execute granted on confbase), but
 ///    the kernel's shebang-chase to /bin/sh hits a path NOT under
-///    any PathBeneath rule → EACCES. This is the documented sharp
+///    any `PathBeneath` rule → EACCES. This is the documented sharp
 ///    edge (sandbox.rs module doc): we don't port C's `open_exec_
 ///    paths` (/bin, /sbin, etc) because that's distro-specific.
 ///    The test pins the behavior so it's intentional.
@@ -1582,6 +1594,8 @@ fn tso_ingest_stream_integrity() {
 /// "Entered sandbox"; absent → SKIP.
 #[test]
 fn sandbox_normal_ping() {
+    use std::os::unix::fs::PermissionsExt;
+
     let Some(netns) = enter_netns("sandbox_normal_ping") else {
         return;
     };
@@ -1597,16 +1611,17 @@ fn sandbox_normal_ping() {
     // body is irrelevant: the kernel never gets past the shebang.
     let host_up = alice.confbase.join("host-up");
     std::fs::write(&host_up, "#!/bin/sh\nexit 0\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
     let mut perm = std::fs::metadata(&host_up).unwrap().permissions();
     perm.set_mode(0o755);
     std::fs::set_permissions(&host_up, perm).unwrap();
 
     // ─── spawn (same as real_tun_ping) ────────────────────────
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup: {}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup: {}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
@@ -1662,14 +1677,13 @@ fn sandbox_normal_ping() {
     let alice_stderr = drain_stderr(alice_child);
     let bob_stderr = drain_stderr(bob_child);
 
-    if !ping.status.success() {
-        panic!(
-            "ping failed under Sandbox=normal: {:?}\nstdout: {}\n\
-             === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}",
-            ping.status,
-            String::from_utf8_lossy(&ping.stdout),
-        );
-    }
+    assert!(
+        ping.status.success(),
+        "ping failed under Sandbox=normal: {:?}\nstdout: {}\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}",
+        ping.status,
+        String::from_utf8_lossy(&ping.stdout),
+    );
     eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
 
     // ─── Landlock actually entered (not silently no-op'd) ──────
@@ -1716,7 +1730,7 @@ fn sandbox_normal_ping() {
 }
 
 /// `Sandbox = high` blocks ALL scripts via `can(StartProcesses)`.
-/// The gate is intent-tracking (sandbox::STATE atomic), independent
+/// The gate is intent-tracking (`sandbox::STATE` atomic), independent
 /// of whether Landlock actually enforced — so this runs even on
 /// kernels without Landlock, modulo the hard-fail check below.
 ///
@@ -1725,6 +1739,8 @@ fn sandbox_normal_ping() {
 /// early-return is broken.
 #[test]
 fn sandbox_high_blocks_scripts() {
+    use std::os::unix::fs::PermissionsExt;
+
     let Some(_netns) = enter_netns("sandbox_high_blocks_scripts") else {
         return;
     };
@@ -1748,7 +1764,6 @@ fn sandbox_high_blocks_scripts() {
         format!("#!/bin/sh\ntouch '{}'\n", witness.display()),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
     let mut perm = std::fs::metadata(&tinc_down).unwrap().permissions();
     perm.set_mode(0o755);
     std::fs::set_permissions(&tinc_down, perm).unwrap();
@@ -1775,6 +1790,7 @@ fn sandbox_high_blocks_scripts() {
     // SAFETY: kill(2). We spawned this child; wait_for_file
     // confirmed it's alive and serving.
     #[allow(unsafe_code)]
+    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
     unsafe {
         let rc = libc::kill(alice_child.id() as libc::pid_t, libc::SIGTERM);
         assert_eq!(rc, 0, "kill: {}", std::io::Error::last_os_error());
@@ -1871,9 +1887,11 @@ fn dns_stub_dig() {
     .unwrap();
 
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
     assert!(
         wait_for_carrier("tinc0", Duration::from_secs(2)),
         "alice TUNSETIFF didn't bring carrier up; stderr:\n{}",
@@ -1981,7 +1999,7 @@ fn dns_stub_dig() {
 /// (mandatory UDP checksum, RFC 8200 §8.1 — kernel rejects zero).
 ///
 /// Single daemon again. The TUN gets an fd00::/8 ULA prefix; the
-/// magic DNS IP is fd00::53. Same kernel-verifies-checksum proof
+/// magic DNS IP is `fd00::53`. Same kernel-verifies-checksum proof
 /// as the v4 test, but the v6 UDP-over-pseudo-header sum is the
 /// fiddly one (`dns.rs::wrap_v6` — the v4 sum is optional and
 /// Linux accepts zero, so `wrap_v4_shape` could be silently wrong
@@ -2017,9 +2035,11 @@ fn dns_stub_dig_v6() {
     .unwrap();
 
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
     assert!(
         wait_for_carrier("tinc0", Duration::from_secs(2)),
         "carrier; stderr:\n{}",
