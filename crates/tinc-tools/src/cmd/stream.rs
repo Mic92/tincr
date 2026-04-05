@@ -369,7 +369,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 /// `clippy::similar_names`: `tv_sec`/`tv_usec` are the libpcap
 /// struct field names. The names ARE the doc; renaming breaks
 /// libpcap-side grep.
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names)] // tv_sec/tv_usec: libc struct timeval field names, pcap header mirrors them
 fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     // `unwrap_or_default`: `duration_since` errs if `now < EPOCH`
     // (clock set to 1960). Default Duration is 0s — the timestamp

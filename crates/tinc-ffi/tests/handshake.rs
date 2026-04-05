@@ -1,6 +1,4 @@
 //! C↔C SPTPS handshake: prove the harness can drive `sptps.c` end-to-end.
-// Protocol code legitimately uses `kex_a2`/`kex_b2`, `sig_a2`/`sig_b2`.
-#![allow(clippy::similar_names)]
 //!
 //! These tests don't validate `sptps.c` itself — that's what `sptps_test.c`
 //! and the integration suite are for. They validate that the *harness* is a
@@ -446,6 +444,7 @@ fn handshake_fails_on_wrong_peer_key() {
 }
 
 #[test]
+#[allow(clippy::similar_names)] // kex_a2/kex_b2, sig_a2/sig_b2: rekey round-2 vs round-1
 fn rekey_uses_ack_state() {
     let _g = serial_guard();
     // Re-KEX after the initial handshake exercises a different state
