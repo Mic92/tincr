@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
-use tinc_event::{EventLoop, Io, SelfPipe, Timers};
+use tinc_event::{EventLoop, Io, SelfPipe, TimerId, Timers};
 use tinc_graph::Graph;
 use tinc_proto::Subnet;
 
@@ -37,7 +37,7 @@ use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 
 use super::settings::{
-    RoutingMode, load_settings, parse_bind_addr, parse_connect_to_from_config,
+    DaemonSettings, RoutingMode, load_settings, parse_bind_addr, parse_connect_to_from_config,
     parse_subnets_from_config,
 };
 use super::{Daemon, IoWhat, ListenerSlot, SetupError, SignalWhat, TimerWhat, net};
@@ -346,6 +346,90 @@ fn load_dns_config(
     }
 }
 
+/// Register the four daemon-wide timers. Returns the handles in the
+/// order `setup()` needs them for the `Daemon` struct literal.
+fn register_timers(
+    timers: &mut Timers<TimerWhat>,
+    settings: &DaemonSettings,
+) -> (TimerId, TimerId, TimerId, TimerId) {
+    // ─── ping timer
+    // Initial fire is `pingtimeout` seconds from now; the handler
+    // re-arms at +1s. tinc-event re-arm is EXPLICIT - the match
+    // arm calls `timers.set(pingtimer, ...)`.
+    let pingtimer = timers.add(TimerWhat::Ping);
+    timers.set(
+        pingtimer,
+        Duration::from_secs(u64::from(settings.pingtimeout)),
+    );
+
+    // ─── age_past_requests timer
+    // Re-arms +10s. The eviction window is `pinginterval` (the
+    // cache key TTL); the timer's 10s is just the sweep frequency.
+    let age_timer = timers.add(TimerWhat::AgePastRequests);
+    timers.set(age_timer, Duration::from_secs(10));
+
+    // ─── periodic timer
+    // Arm +5s directly: no contradictions exist at setup, counters
+    // are zero, an immediate first call would just halve sleeptime
+    // (10 → 5 → floored to 10) and re-arm.
+    let periodictimer = timers.add(TimerWhat::Periodic);
+    timers.set(periodictimer, Duration::from_secs(5));
+
+    // ─── keyexpire timer
+    // Arm unconditionally: SPTPS needs the rekey to bound the
+    // ChaCha20 nonce counter (see `keylifetime` doc).
+    let keyexpire_timer = timers.add(TimerWhat::KeyExpire);
+    timers.set(
+        keyexpire_timer,
+        Duration::from_secs(u64::from(settings.keylifetime)),
+    );
+
+    (pingtimer, age_timer, periodictimer, keyexpire_timer)
+}
+
+/// Register the signal handlers and the self-pipe read end on `ev`.
+/// TERM/QUIT/INT all map to Exit. HUP → Reload, ALRM → Retry.
+fn register_signals(
+    signals: &mut SelfPipe<SignalWhat>,
+    ev: &mut EventLoop<IoWhat>,
+) -> Result<(), io::Error> {
+    signals.add(libc::SIGTERM, SignalWhat::Exit)?;
+    signals.add(libc::SIGINT, SignalWhat::Exit)?;
+    signals.add(libc::SIGQUIT, SignalWhat::Exit)?;
+    signals.add(libc::SIGHUP, SignalWhat::Reload)?;
+    signals.add(libc::SIGALRM, SignalWhat::Retry)?;
+
+    // Register the self-pipe read end.
+    ev.add(signals.read_fd(), Io::Read, IoWhat::Signal)?;
+    Ok(())
+}
+
+/// Add the hard-coded multicast/broadcast subnets and any from
+/// `BroadcastSubnet=` config. Ownerless → `route_broadcast`. Without
+/// these, kernel multicast (mDNS, NDP, DHCP) read from TUN hit
+/// Unreachable and we ICMP-bounce our own kernel. Silent breakage —
+/// mDNS doesn't surface ICMP. (`Mode = switch` unaffected: `route_mac`
+/// floods on miss anyway.)
+fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
+    for s in [
+        "ff:ff:ff:ff:ff:ff",
+        "255.255.255.255",
+        "224.0.0.0/4",
+        "ff00::/8",
+    ] {
+        subnets.add_broadcast(s.parse().expect("hard-coded broadcast subnet"));
+    }
+    for e in config.lookup("BroadcastSubnet") {
+        match e.get_str().parse::<Subnet>() {
+            Ok(s) => subnets.add_broadcast(s),
+            Err(_) => {
+                log::error!(target: "tincd",
+                            "Invalid BroadcastSubnet = {}", e.get_str());
+            }
+        }
+    }
+}
+
 // Daemon — the formerly-global state + the loop
 
 impl Daemon {
@@ -451,69 +535,19 @@ impl Daemon {
         let mut signals = SelfPipe::new().map_err(SetupError::Io)?;
 
         // ─── signals
-        // TERM/QUIT/INT all map to Exit. HUP → Reload, ALRM → Retry.
-        signals
-            .add(libc::SIGTERM, SignalWhat::Exit)
-            .map_err(SetupError::Io)?;
-        signals
-            .add(libc::SIGINT, SignalWhat::Exit)
-            .map_err(SetupError::Io)?;
-        signals
-            .add(libc::SIGQUIT, SignalWhat::Exit)
-            .map_err(SetupError::Io)?;
-        signals
-            .add(libc::SIGHUP, SignalWhat::Reload)
-            .map_err(SetupError::Io)?;
-        signals
-            .add(libc::SIGALRM, SignalWhat::Retry)
-            .map_err(SetupError::Io)?;
-
-        // Register the self-pipe read end.
-        ev.add(signals.read_fd(), Io::Read, IoWhat::Signal)
-            .map_err(SetupError::Io)?;
+        register_signals(&mut signals, &mut ev).map_err(SetupError::Io)?;
 
         // ─── device fd
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
-        let device_io = if let Some(fd) = device.fd() {
-            Some(
-                ev.add(fd, Io::Read, IoWhat::Device)
-                    .map_err(SetupError::Io)?,
-            )
-        } else {
-            None
-        };
+        let device_io = device
+            .fd()
+            .map(|fd| ev.add(fd, Io::Read, IoWhat::Device))
+            .transpose()
+            .map_err(SetupError::Io)?;
 
-        // ─── ping timer
-        // Initial fire is `pingtimeout` seconds from now; the handler
-        // re-arms at +1s. tinc-event re-arm is EXPLICIT - the match
-        // arm calls `timers.set(pingtimer, ...)`.
-        let pingtimer = timers.add(TimerWhat::Ping);
-        timers.set(
-            pingtimer,
-            Duration::from_secs(u64::from(settings.pingtimeout)),
-        );
-
-        // ─── age_past_requests timer
-        // Re-arms +10s. The eviction window is `pinginterval` (the
-        // cache key TTL); the timer's 10s is just the sweep frequency.
-        let age_timer = timers.add(TimerWhat::AgePastRequests);
-        timers.set(age_timer, Duration::from_secs(10));
-
-        // ─── periodic timer
-        // Arm +5s directly: no contradictions exist at setup, counters
-        // are zero, an immediate first call would just halve sleeptime
-        // (10 → 5 → floored to 10) and re-arm.
-        let periodictimer = timers.add(TimerWhat::Periodic);
-        timers.set(periodictimer, Duration::from_secs(5));
-
-        // ─── keyexpire timer
-        // Arm unconditionally: SPTPS needs the rekey to bound the
-        // ChaCha20 nonce counter (see `keylifetime` doc).
-        let keyexpire_timer = timers.add(TimerWhat::KeyExpire);
-        timers.set(
-            keyexpire_timer,
-            Duration::from_secs(u64::from(settings.keylifetime)),
-        );
+        // ─── timers (ping, age_past_requests, periodic, keyexpire)
+        let (pingtimer, age_timer, periodictimer, keyexpire_timer) =
+            register_timers(&mut timers, &settings);
 
         // ─── listeners
         // Socket activation BYPASSES BindToAddress/ListenAddress
@@ -592,29 +626,7 @@ impl Daemon {
         let dns = load_dns_config(&config)?;
 
         // ─── BroadcastSubnet
-        // Hard-coded multicast/broadcast subnets, ownerless →
-        // `route_broadcast`. Without these, kernel multicast (mDNS,
-        // NDP, DHCP) read from TUN hit Unreachable and we ICMP-bounce
-        // our own kernel. Silent breakage - mDNS doesn't surface
-        // ICMP. (`Mode = switch` unaffected: route_mac floods on
-        // miss anyway.)
-        for s in [
-            "ff:ff:ff:ff:ff:ff",
-            "255.255.255.255",
-            "224.0.0.0/4",
-            "ff00::/8",
-        ] {
-            subnets.add_broadcast(s.parse().expect("hard-coded broadcast subnet"));
-        }
-        for e in config.lookup("BroadcastSubnet") {
-            match e.get_str().parse::<Subnet>() {
-                Ok(s) => subnets.add_broadcast(s),
-                Err(_) => {
-                    log::error!(target: "tincd",
-                                "Invalid BroadcastSubnet = {}", e.get_str());
-                }
-            }
-        }
+        add_broadcast_subnets(&mut subnets, &config);
 
         // ─── ConnectTo
         // Collect names here; the actual connect is done below (it
@@ -768,32 +780,7 @@ impl Daemon {
 
         // ─── DHT discovery spawn (Rust extension). After listeners
         // (need `my_udp_port` resolved). Spawn failure is non-fatal.
-        if daemon.settings.dht_discovery {
-            // SigningKey doesn't impl Clone by design.
-            let key = SigningKey::from_blob(&daemon.mykey.to_blob());
-            let bootstrap = if daemon.settings.dht_bootstrap.is_empty() {
-                None
-            } else {
-                Some(daemon.settings.dht_bootstrap.as_slice())
-            };
-            match crate::discovery::Discovery::spawn(key, daemon.my_udp_port, bootstrap) {
-                Ok(d) => {
-                    log::info!(target: "tincd::discovery",
-                    "DHT discovery enabled (port {}, bootstrap: {})",
-                    daemon.my_udp_port,
-                    bootstrap.map_or(
-                        "mainline".to_owned(),
-                        |b| b.join(", ")
-                    ));
-                    daemon.discovery = Some(d);
-                }
-                Err(e) => {
-                    log::warn!(target: "tincd::discovery",
-                               "DHT actor spawn failed (continuing \
-                                without): {e}");
-                }
-            }
-        }
+        daemon.spawn_dht_discovery();
 
         // ─── tinc-up
         // The script typically does `ip addr add` / `ip link set up`
@@ -813,6 +800,38 @@ impl Daemon {
         }
 
         Ok(daemon)
+    }
+
+    /// Spawn the DHT discovery actor if enabled. Non-fatal on failure.
+    /// After listeners: needs `my_udp_port` resolved.
+    fn spawn_dht_discovery(&mut self) {
+        if !self.settings.dht_discovery {
+            return;
+        }
+        // SigningKey doesn't impl Clone by design.
+        let key = SigningKey::from_blob(&self.mykey.to_blob());
+        let bootstrap = if self.settings.dht_bootstrap.is_empty() {
+            None
+        } else {
+            Some(self.settings.dht_bootstrap.as_slice())
+        };
+        match crate::discovery::Discovery::spawn(key, self.my_udp_port, bootstrap) {
+            Ok(d) => {
+                log::info!(target: "tincd::discovery",
+                "DHT discovery enabled (port {}, bootstrap: {})",
+                self.my_udp_port,
+                bootstrap.map_or(
+                    "mainline".to_owned(),
+                    |b| b.join(", ")
+                ));
+                self.discovery = Some(d);
+            }
+            Err(e) => {
+                log::warn!(target: "tincd::discovery",
+                           "DHT actor spawn failed (continuing \
+                            without): {e}");
+            }
+        }
     }
 }
 
