@@ -300,10 +300,10 @@ mod bench {
             if connect_to {
                 let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
             }
-            // Tight ping for fast detection of a hung daemon, but bumped
-            // when profiling bob: two perf samplers + saturated receiver
-            // can lose a ping under load.
-            let pingtimeout = if std::env::var_os("TINCD_PERF_BOB").is_some() {
+            // Tight ping for fast detection of a hung daemon. Bumped
+            // under TINCD_PERF: two samplers + saturated tunnel can
+            // delay a ping cycle. 5 is plenty given -F 499.
+            let pingtimeout = if std::env::var_os("TINCD_PERF").is_some() {
                 5
             } else {
                 1
@@ -1060,9 +1060,14 @@ mod bench {
             //   encrypt-on-send or decrypt-on-recv. With -g you get
             //   the chain back through send_sptps_data / on_udp_recv.
             //
-            // -F 999: 999 Hz, not 1000 — stay off any kernel periodic
-            //   tick alignment. 5s × 999/s ≈ 5k samples per CPU,
-            //   enough resolution for anything ≥ 1% of time.
+            // -F 499: 499 Hz, not 500 — stay off any kernel periodic
+            //   tick alignment. 5s × 499/s ≈ 2.5k samples per CPU,
+            //   enough resolution for anything ≥ 1% of time. Was 999
+            //   when only alice was sampled; halved when bob's
+            //   recorder was made unconditional — two samplers at
+            //   999 Hz starved the meta-conn of pings under a
+            //   saturated tunnel even with PingTimeout=5. Aggregate
+            //   interrupt rate stayed where it was.
             //
             // No --call-graph=dwarf: dev profile has frame pointers
             //   (Cargo default in debug). dwarf is more accurate but
@@ -1075,7 +1080,7 @@ mod bench {
             // processes; Debian defaults to `2`. We can't fix the
             // sysctl from inside the test — feature-detect and degrade.
             let child = Command::new("perf")
-                .args(["record", "-g", "-F", "999", "-p"])
+                .args(["record", "-g", "-F", "499", "-p"])
                 .arg(pid.to_string())
                 .arg("-o")
                 .arg(out)
@@ -1179,20 +1184,22 @@ mod bench {
     /// Spawn alice+bob, iperf3, teardown. Returns received bps.
     /// Perf/trace recorders bracket the measurement window only — not
     /// the handshake/PMTU convergence (`setup_tunnel`).
-    fn run_pairing(p: &Pairing, perf_out: &Path, perf_bob: bool) -> f64 {
+    fn run_pairing(p: &Pairing, perf_out: &Path) -> f64 {
         eprintln!("--- {} ---", p.label);
         let mut tunnel = setup_tunnel(p.tag, p.alice.clone(), p.bob.clone());
 
         let bps = if let Some(tag) = p.perf_tag {
             let alice_perf = perf_out.join(format!("{tag}-alice.perf.data"));
             let bob_perf = perf_out.join(format!("{tag}-bob.perf.data"));
+            // Both ends profiled: send-side and recv-side
+            // optimizations show up on opposite ends, and "why no
+            // bump" is unanswerable without seeing both. The flap
+            // risk (two samplers + saturated receiver losing a ping)
+            // is handled by bumping PingTimeout to 5 under
+            // TINCD_PERF — the same env that gates perf record
+            // itself, so they always move together.
             let _pa = PerfRecord::start(tunnel.alice_pid, &alice_perf);
-            // TINCD_PERF profiles alice (sender). TINCD_PERF_BOB
-            // additionally profiles bob (receiver) — opt-in because two
-            // `perf -F 999` samplers + PingTimeout=1 + a saturated
-            // receiver is enough overhead to flap the meta-conn on slow
-            // hosts. Set both envs.
-            let _pb = perf_bob.then(|| PerfRecord::start(tunnel.bob_pid, &bob_perf));
+            let _pb = PerfRecord::start(tunnel.bob_pid, &bob_perf);
             let _ta = PerfTrace::start(
                 tunnel.alice_pid,
                 &perf_out.join(format!("{tag}-alice.trace")),
@@ -1231,7 +1238,6 @@ mod bench {
         let c_bin = c_tincd_bin().expect("gate checked in enter_netns");
         let perf_on = std::env::var_os("TINCD_PERF").is_some();
         let trace_on = std::env::var_os("TINCD_TRACE").is_some();
-        let perf_bob = std::env::var_os("TINCD_PERF_BOB").is_some();
         let perf_out = std::env::var_os("TINCD_PERF_DIR")
             .map_or_else(|| PathBuf::from("/tmp/tincd-perf"), PathBuf::from);
         if perf_on || trace_on {
@@ -1278,7 +1284,7 @@ mod bench {
         for (i, p) in pairings.iter().enumerate() {
             // Throughput: bare pairing name ("rust_rust").
             if matches(p.name) {
-                results[i] = Some(run_pairing(p, &perf_out, perf_bob));
+                results[i] = Some(run_pairing(p, &perf_out));
                 ran_any = true;
             }
             // Latency: "latency_{idle,load}_<pairing>". Substring filter
@@ -1315,15 +1321,11 @@ mod bench {
         if perf_on {
             if rust.is_some() {
                 report_hot_symbols(&perf_out.join("rust-alice.perf.data"));
-                if perf_bob {
-                    report_hot_symbols(&perf_out.join("rust-bob.perf.data"));
-                }
+                report_hot_symbols(&perf_out.join("rust-bob.perf.data"));
             }
             if baseline.is_some() {
                 report_hot_symbols(&perf_out.join("c-alice.perf.data"));
-                if perf_bob {
-                    report_hot_symbols(&perf_out.join("c-bob.perf.data"));
-                }
+                report_hot_symbols(&perf_out.join("c-bob.perf.data"));
             }
             eprintln!("perf data: {}", perf_out.display());
         }
