@@ -75,13 +75,13 @@ impl PmtuPhase {
     /// `txpath.rs` uses this to gate the maxmtu re-seed
     /// (`choose_initial_maxmtu`).
     #[must_use]
-    pub fn is_discovery_start(&self) -> bool {
+    pub const fn is_discovery_start(&self) -> bool {
         matches!(self, Self::Discovery { sent: 0 })
     }
 
     /// `mtuprobes < 0`: MTU already fixed (steady/revalidate/lost).
     #[must_use]
-    pub fn is_fixed(&self) -> bool {
+    pub const fn is_fixed(&self) -> bool {
         matches!(self, Self::Steady | Self::Revalidate { .. } | Self::Lost)
     }
 }
@@ -135,7 +135,7 @@ impl PmtuState {
     /// (That ICMP poisoned the kernel's per-dst PMTU cache for 10
     /// minutes)
     #[must_use]
-    pub fn new(now: Instant, initial_maxmtu: u16) -> Self {
+    pub const fn new(now: Instant, initial_maxmtu: u16) -> Self {
         Self {
             mtu: 0,
             minmtu: 0,
@@ -152,7 +152,7 @@ impl PmtuState {
 
     /// `mtuprobes := 0` — restart discovery from scratch. Used by
     /// `tunnel.rs::reset_unreachable` and `on_udp_timeout`.
-    pub fn start_discovery(&mut self) {
+    pub const fn start_discovery(&mut self) {
         self.phase = PmtuPhase::Discovery { sent: 0 };
     }
 
@@ -315,7 +315,7 @@ impl PmtuState {
     }
 
     /// `udp_probe_timeout_handler`. Idempotent on already-unconfirmed.
-    pub fn on_udp_timeout(&mut self) {
+    pub const fn on_udp_timeout(&mut self) {
         if !self.udp_confirmed {
             return;
         }

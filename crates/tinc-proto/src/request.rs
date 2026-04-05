@@ -64,7 +64,7 @@ impl Request {
     /// Discriminant → enum. `None` for out-of-range, including the
     /// guard values `ALL = -1` and `LAST = 24`.
     #[must_use]
-    pub fn from_id(id: i32) -> Option<Self> {
+    pub const fn from_id(id: i32) -> Option<Self> {
         // No `#[repr]` magic transmute: explicit match. The compiler
         // turns this into a jump table; the explicitness means adding
         // a variant without a case is a compile error, which is what
@@ -101,7 +101,7 @@ impl Request {
     /// `request_entries[req].name`. The C uses these for log output
     /// (`"Got %s from..."`). All-caps in C; we match.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Id => "ID",
             Self::Metakey => "METAKEY",

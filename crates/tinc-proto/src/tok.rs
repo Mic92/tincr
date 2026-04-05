@@ -58,7 +58,7 @@ pub struct Tok<'a> {
 
 impl<'a> Tok<'a> {
     #[must_use]
-    pub fn new(s: &'a str) -> Self {
+    pub const fn new(s: &'a str) -> Self {
         Self { rest: s }
     }
 

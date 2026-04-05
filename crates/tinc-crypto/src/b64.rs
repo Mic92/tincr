@@ -112,7 +112,7 @@ pub fn decode(src: &str) -> Option<Vec<u8>> {
 ///
 /// Returns `None` for anything else, including `'='` (tinc never pads).
 #[inline]
-fn decode_byte(c: u8) -> Option<u8> {
+const fn decode_byte(c: u8) -> Option<u8> {
     // Explicit match rather than a 256-byte table: the optimizer turns this
     // into a jump table anyway, and the source stays grep-able for "where
     // does the union-alphabet thing happen".

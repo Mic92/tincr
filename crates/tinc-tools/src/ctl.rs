@@ -96,7 +96,7 @@ impl CtlRequest {
     /// Permissive: anything not in the enum is `None`, not a
     /// protocol error.
     #[must_use]
-    pub fn from_i32(n: i32) -> Option<Self> {
+    pub const fn from_i32(n: i32) -> Option<Self> {
         Some(match n {
             0 => Self::Stop,
             1 => Self::Reload,

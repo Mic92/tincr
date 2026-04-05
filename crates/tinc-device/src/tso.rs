@@ -170,7 +170,7 @@ impl VirtioNetHdr {
     /// or ECN — but if it does, the caller falls back to `Frames`
     /// with one frame and lets `route_packet` deal with it).
     #[must_use]
-    pub fn gso(&self) -> Option<GsoType> {
+    pub const fn gso(&self) -> Option<GsoType> {
         match self.gso_type {
             VIRTIO_NET_HDR_GSO_NONE => Some(GsoType::None),
             VIRTIO_NET_HDR_GSO_TCPV4 => Some(GsoType::TcpV4),
@@ -183,7 +183,7 @@ impl VirtioNetHdr {
     /// partial checksum (the kernel's TX csum offload, separate from
     /// segmentation). [`gso_none_checksum`] completes it.
     #[must_use]
-    pub fn needs_csum(&self) -> bool {
+    pub const fn needs_csum(&self) -> bool {
         self.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0
     }
 }
@@ -690,7 +690,7 @@ impl GroBucket {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 

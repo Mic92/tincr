@@ -214,7 +214,7 @@ pub enum Severity {
 impl Finding {
     /// `ERROR:` / `WARNING:` / (nothing) prefix.
     #[must_use]
-    pub fn severity(&self) -> Severity {
+    pub const fn severity(&self) -> Severity {
         use Finding as F;
         match self {
             F::TincConfMissing

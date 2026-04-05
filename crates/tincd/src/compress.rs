@@ -73,7 +73,7 @@ impl Level {
     /// back to raw, but we map unknown to `None` so it doesn't even
     /// hit the failure path on inbound).
     #[must_use]
-    pub fn from_wire(n: u8) -> Self {
+    pub const fn from_wire(n: u8) -> Self {
         match n {
             1 => Self::Zlib1,
             2 => Self::Zlib2,
@@ -92,7 +92,7 @@ impl Level {
     }
 
     /// zlib compression level (1–9) if this is a zlib variant.
-    fn zlib_level(self) -> Option<u32> {
+    const fn zlib_level(self) -> Option<u32> {
         match self {
             Self::Zlib1 => Some(1),
             Self::Zlib2 => Some(2),

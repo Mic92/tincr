@@ -203,7 +203,7 @@ impl Tarpit {
     /// aren't exposed); useful for asserting "9 connections is
     /// fine, 10th gets pitted" without spawning real sockets.
     #[cfg(test)]
-    pub(crate) fn buckets(&self) -> (u32, u32) {
+    pub(crate) const fn buckets(&self) -> (u32, u32) {
         (self.samehost_burst, self.allhost_burst)
     }
 }

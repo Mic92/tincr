@@ -47,7 +47,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 /// bit. Public-domain (Steele/Lea/Flood, 2014); used by `java.util.
 /// SplittableRandom` and as the seeding function for `xoshiro`.
 #[inline]
-fn mix64(mut x: u64) -> u64 {
+const fn mix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);

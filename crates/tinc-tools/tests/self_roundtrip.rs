@@ -114,7 +114,7 @@ impl Impl {
             Impl::C => std::env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
         }
     }
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Impl::Rust => "rust",
             Impl::C => "c",

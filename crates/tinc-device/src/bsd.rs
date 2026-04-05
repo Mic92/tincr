@@ -155,7 +155,7 @@ impl BsdVariant {
 /// but the value is small positive. The `as u32` is exact.
 #[must_use]
 #[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive ints
-pub(crate) fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
+pub(crate) const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     // We get the ethertype already host-order from the caller
     // (who read it via `u16::from_be_bytes`).
     let af = match ethertype {

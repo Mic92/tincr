@@ -86,7 +86,7 @@ impl Subnet {
 
     /// `weight` accessor — saves matching at every call site.
     #[must_use]
-    pub fn weight(&self) -> i32 {
+    pub const fn weight(&self) -> i32 {
         match self {
             Subnet::Mac { weight, .. } | Subnet::V4 { weight, .. } | Subnet::V6 { weight, .. } => {
                 *weight

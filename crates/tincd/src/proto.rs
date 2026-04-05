@@ -40,7 +40,7 @@ bitflags::bitflags! {
 impl ConnOptions {
     /// `OPTION_VERSION(x)` (`connection.h:36`). Top byte = `PROT_MINOR`.
     #[must_use]
-    pub fn prot_minor(self) -> u8 {
+    pub const fn prot_minor(self) -> u8 {
         (self.bits() >> 24) as u8
     }
     /// `connection.h:36` inverse: stamp `PROT_MINOR` into top byte.

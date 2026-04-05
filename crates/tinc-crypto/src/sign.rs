@@ -74,7 +74,7 @@ impl SigningKey {
 
     /// The public key half. Same bytes that go on the wire in the KEX.
     #[must_use]
-    pub fn public_key(&self) -> &[u8; PUBLIC_LEN] {
+    pub const fn public_key(&self) -> &[u8; PUBLIC_LEN] {
         &self.public
     }
 
@@ -106,13 +106,13 @@ impl SigningKey {
 
     /// The expanded private half, for serialisation.
     #[must_use]
-    pub fn expanded_private(&self) -> &[u8; 64] {
+    pub const fn expanded_private(&self) -> &[u8; 64] {
         &self.expanded
     }
 
     /// The public half, for serialisation and verification.
     #[must_use]
-    pub fn public(&self) -> &[u8; PUBLIC_LEN] {
+    pub const fn public(&self) -> &[u8; PUBLIC_LEN] {
         &self.public
     }
 

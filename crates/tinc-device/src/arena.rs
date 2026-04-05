@@ -241,7 +241,7 @@ impl DeviceArena {
     /// `UDP_SEGMENT` send (the kernel reads `count*STRIDE` bytes
     /// in one `sendmsg`).
     #[must_use]
-    pub fn as_contiguous(&self) -> &[u8] {
+    pub const fn as_contiguous(&self) -> &[u8] {
         // SAFETY: the full allocation. `layout.size()` is what we
         // alloc'd; ≥ cap*STRIDE.
         #[allow(unsafe_code)]
@@ -255,7 +255,7 @@ impl DeviceArena {
     /// into slots 1..N. `Frames` and `Super` are exclusive per
     /// drain call so there's no overlap with `slot_mut`.
     #[must_use]
-    pub fn as_contiguous_mut(&mut self) -> &mut [u8] {
+    pub const fn as_contiguous_mut(&mut self) -> &mut [u8] {
         // SAFETY: same as `as_contiguous`; `&mut self` excludes.
         #[allow(unsafe_code)]
         unsafe {
@@ -286,7 +286,7 @@ impl DeviceArena {
 
     /// Slot count.
     #[must_use]
-    pub fn cap(&self) -> usize {
+    pub const fn cap(&self) -> usize {
         self.cap
     }
 }

@@ -52,7 +52,7 @@ impl Io {
 
     /// Does this interest include the given readiness? The
     /// generation-guard substitute — see `dispatch` below.
-    fn wants(self, ready: Ready) -> bool {
+    const fn wants(self, ready: Ready) -> bool {
         matches!(
             (self, ready),
             (Io::Read | Io::ReadWrite, Ready::Read) | (Io::Write | Io::ReadWrite, Ready::Write)

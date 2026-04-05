@@ -277,7 +277,7 @@ impl fmt::Display for Reachability {
 impl NodeRow {
     /// Check one status bit. `info` uses 6 of the 13.
     #[must_use]
-    pub fn is(&self, bit: StatusBit) -> bool {
+    pub const fn is(&self, bit: StatusBit) -> bool {
         self.status & bit.0 != 0
     }
 }

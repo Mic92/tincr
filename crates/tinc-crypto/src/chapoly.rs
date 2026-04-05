@@ -72,7 +72,7 @@ impl ChaPoly {
     /// `header_ctx` from `key[32..64]`; we don't, because SPTPS never calls
     /// the header-encrypt path.
     #[must_use]
-    pub fn new(key: &[u8; KEY_LEN]) -> Self {
+    pub const fn new(key: &[u8; KEY_LEN]) -> Self {
         Self { key: *key }
     }
 

@@ -101,7 +101,7 @@ pub struct PmtuSnapshot {
 impl PmtuSnapshot {
     /// `from->minmtu == from->maxmtu`: probing converged.
     #[must_use]
-    pub fn converged(&self) -> bool {
+    pub const fn converged(&self) -> bool {
         self.minmtu == self.maxmtu
     }
 }

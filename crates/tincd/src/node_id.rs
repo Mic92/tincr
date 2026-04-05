@@ -65,7 +65,7 @@ impl NodeId6 {
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 6] {
+    pub const fn as_bytes(&self) -> &[u8; 6] {
         &self.0
     }
 
@@ -73,7 +73,7 @@ impl NodeId6 {
     /// bytes out of the packet buffer at `SRCID`/`DSTID` offsets;
     /// this is the typed wrapper for that slice.
     #[must_use]
-    pub fn from_bytes(b: [u8; 6]) -> Self {
+    pub const fn from_bytes(b: [u8; 6]) -> Self {
         Self(b)
     }
 }

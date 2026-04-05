@@ -136,28 +136,28 @@ enum DevMode {
 }
 
 impl DevMode {
-    fn dev0(self) -> &'static str {
+    const fn dev0(self) -> &'static str {
         match self {
             DevMode::Tun => "tincX0",
             DevMode::Tap => "tincS0",
             DevMode::TunTcpOnly => "tincY0",
         }
     }
-    fn dev1(self) -> &'static str {
+    const fn dev1(self) -> &'static str {
         match self {
             DevMode::Tun => "tincX1",
             DevMode::Tap => "tincS1",
             DevMode::TunTcpOnly => "tincY1",
         }
     }
-    fn ns(self) -> &'static str {
+    const fn ns(self) -> &'static str {
         match self {
             DevMode::Tun => "xbobside",
             DevMode::Tap => "xbobside_s",
             DevMode::TunTcpOnly => "xbobside_y",
         }
     }
-    fn tuntap_mode(self) -> &'static str {
+    const fn tuntap_mode(self) -> &'static str {
         match self {
             DevMode::Tun | DevMode::TunTcpOnly => "tun",
             DevMode::Tap => "tap",

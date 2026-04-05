@@ -94,7 +94,7 @@ const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
 /// log crate; squash 0→Info, 1-2→Debug, 3+→Trace. Coarse but the
 /// `target: "tincd"` substring filter still works for narrowing
 /// (`RUST_LOG=tincd::proto=trace` etc).
-fn debug_level_to_filter(d: u32) -> log::LevelFilter {
+const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     match d {
         0 => log::LevelFilter::Info,
         1 | 2 => log::LevelFilter::Debug,

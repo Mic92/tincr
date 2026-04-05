@@ -769,7 +769,7 @@ mod bench {
         fn max(&self) -> f64 {
             self.rtts_ms.last().copied().unwrap_or(f64::NAN)
         }
-        fn recv(&self) -> usize {
+        const fn recv(&self) -> usize {
             self.rtts_ms.len()
         }
     }

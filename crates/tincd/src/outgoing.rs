@@ -452,7 +452,7 @@ impl ProxyConfig {
     /// The proxy server's address, for `try_connect_via_proxy`.
     /// `Exec` has no proxy addr (the pipe IS the connection).
     #[must_use]
-    pub fn proxy_addr(&self) -> Option<(&str, u16)> {
+    pub const fn proxy_addr(&self) -> Option<(&str, u16)> {
         match self {
             Self::Exec { .. } => None,
             Self::Socks4 { host, port, .. }
@@ -465,7 +465,7 @@ impl ProxyConfig {
     /// `None` for non-SOCKS variants (Exec has no handshake; HTTP is
     /// line-based).
     #[must_use]
-    pub fn socks_type(&self) -> Option<crate::socks::ProxyType> {
+    pub const fn socks_type(&self) -> Option<crate::socks::ProxyType> {
         match self {
             Self::Socks4 { .. } => Some(crate::socks::ProxyType::Socks4),
             Self::Socks5 { .. } => Some(crate::socks::ProxyType::Socks5),

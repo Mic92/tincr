@@ -202,7 +202,7 @@ impl<W: Copy> Timers<W> {
     /// check wants the SAME now the timer comparisons used, not a fresh
     /// `Instant::now()` per check.
     #[must_use]
-    pub fn now(&self) -> Instant {
+    pub const fn now(&self) -> Instant {
         self.now
     }
 

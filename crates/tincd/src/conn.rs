@@ -80,7 +80,7 @@ impl LineBuf {
     /// `buffer_read(buffer, n)`. Exact-N read. Used for the SOCKS
     /// reply (binary, fixed-length, not
     /// line-terminated). Same range-validity contract as `read_line`.
-    pub fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
+    pub const fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
         if self.live_len() < n {
             return None;
         }
@@ -90,12 +90,12 @@ impl LineBuf {
     }
 
     #[must_use]
-    pub fn live_len(&self) -> usize {
+    pub const fn live_len(&self) -> usize {
         self.data.len() - self.offset
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.offset >= self.data.len()
     }
 
@@ -382,7 +382,7 @@ impl Connection {
 
     /// For `socket2::SockRef::from` (`getsockname` in `ack_h:1040-1045`).
     #[must_use]
-    pub fn owned_fd(&self) -> &OwnedFd {
+    pub const fn owned_fd(&self) -> &OwnedFd {
         &self.fd
     }
 
@@ -390,7 +390,7 @@ impl Connection {
     /// bool N → bit N: 0=pinged, `1=unused_active`, 2=connecting,
     /// 9=control.
     #[must_use]
-    pub fn status_value(&self) -> u32 {
+    pub const fn status_value(&self) -> u32 {
         let mut v = 0u32;
         if self.pinged {
             v |= 1 << 0;

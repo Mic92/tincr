@@ -163,10 +163,10 @@ impl AddrFamily {
         }
     }
 
-    pub(crate) fn try_v4(self) -> bool {
+    pub(crate) const fn try_v4(self) -> bool {
         matches!(self, Self::Any | Self::Ipv4)
     }
-    pub(crate) fn try_v6(self) -> bool {
+    pub(crate) const fn try_v6(self) -> bool {
         matches!(self, Self::Any | Self::Ipv6)
     }
 }
@@ -791,7 +791,7 @@ pub fn unmap(sa: SocketAddr) -> SocketAddr {
 /// == 127`). `Ipv6Addr::is_loopback` is `::1` only (matches
 /// `IN6_IS_ADDR_LOOPBACK`).
 #[must_use]
-pub fn is_local(sa: &SocketAddr) -> bool {
+pub const fn is_local(sa: &SocketAddr) -> bool {
     match sa {
         SocketAddr::V4(v4) => v4.ip().is_loopback(),
         SocketAddr::V6(v6) => v6.ip().is_loopback(),

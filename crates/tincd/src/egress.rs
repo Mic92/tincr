@@ -305,7 +305,7 @@ impl TxBatch {
 
     /// Reset to empty. Call after `take()`'s borrow is dropped.
     /// Keeps `buf` capacity (the whole point: warm reuse).
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.count = 0;
         self.dst = None;
         // buf cleared on next stage's count==0 branch; no need here.
@@ -314,7 +314,7 @@ impl TxBatch {
     /// Count of staged frames. For the daemon's "did anything
     /// stage?" check.
     #[must_use]
-    pub fn count(&self) -> u16 {
+    pub const fn count(&self) -> u16 {
         self.count
     }
 }

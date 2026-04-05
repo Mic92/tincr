@@ -124,49 +124,49 @@ pub const IP_MF: u16 = 0x2000;
 impl Ipv4Hdr {
     /// `ip_v` — high nibble. 4 for IPv4.
     #[must_use]
-    pub fn version(self) -> u8 {
+    pub const fn version(self) -> u8 {
         self.ip_vhl >> 4
     }
     /// `ip_hl` — low nibble. Header length in 32-bit words.
     #[must_use]
-    pub fn ihl(self) -> u8 {
+    pub const fn ihl(self) -> u8 {
         self.ip_vhl & 0x0F
     }
     /// Set version + IHL.
-    pub fn set_vhl(&mut self, version: u8, ihl: u8) {
+    pub const fn set_vhl(&mut self, version: u8, ihl: u8) {
         self.ip_vhl = (version << 4) | (ihl & 0x0F);
     }
 
     /// `ntohs(ip_len)`. Named `total_len` not `len`: this is the
     /// IPv4 total-length field, not a collection length.
     #[must_use]
-    pub fn total_len(self) -> u16 {
+    pub const fn total_len(self) -> u16 {
         // packed: copy out before swap.
         let raw = self.ip_len;
         u16::from_be(raw)
     }
     /// `ip_len = htons(v)`.
-    pub fn set_total_len(&mut self, v: u16) {
+    pub const fn set_total_len(&mut self, v: u16) {
         self.ip_len = v.to_be();
     }
 
     /// `ntohs(ip_off)`. Compare against `IP_OFFMASK`/`IP_MF`.
     #[must_use]
-    pub fn off(self) -> u16 {
+    pub const fn off(self) -> u16 {
         let raw = self.ip_off;
         u16::from_be(raw)
     }
-    pub fn set_off(&mut self, v: u16) {
+    pub const fn set_off(&mut self, v: u16) {
         self.ip_off = v.to_be();
     }
 
     /// `ntohs(ip_id)`.
     #[must_use]
-    pub fn id(self) -> u16 {
+    pub const fn id(self) -> u16 {
         let raw = self.ip_id;
         u16::from_be(raw)
     }
-    pub fn set_id(&mut self, v: u16) {
+    pub const fn set_id(&mut self, v: u16) {
         self.ip_id = v.to_be();
     }
 }
@@ -199,11 +199,11 @@ const _: () = assert!(size_of::<IcmpHdr>() == 8);
 
 impl IcmpHdr {
     /// `icmp.icmp_nextmtu = htons(v)`.
-    pub fn set_nextmtu(&mut self, v: u16) {
+    pub const fn set_nextmtu(&mut self, v: u16) {
         self.icmp_nextmtu = v.to_be();
     }
     #[must_use]
-    pub fn nextmtu(self) -> u16 {
+    pub const fn nextmtu(self) -> u16 {
         let raw = self.icmp_nextmtu;
         u16::from_be(raw)
     }
@@ -232,28 +232,28 @@ const _: () = assert!(size_of::<Ipv6Hdr>() == 40);
 
 impl Ipv6Hdr {
     /// `ip6.ip6_flow = htonl(v)`.
-    pub fn set_flow(&mut self, v: u32) {
+    pub const fn set_flow(&mut self, v: u32) {
         self.ip6_flow = v.to_be();
     }
     #[must_use]
-    pub fn flow(self) -> u32 {
+    pub const fn flow(self) -> u32 {
         let raw = self.ip6_flow;
         u32::from_be(raw)
     }
     /// Version nibble. High 4 bits of byte 0. 6 for IPv6.
     #[must_use]
-    pub fn version(self) -> u8 {
+    pub const fn version(self) -> u8 {
         // High byte of BE u32, high nibble.
         let raw = self.ip6_flow;
         (u32::from_be(raw) >> 28) as u8
     }
 
     /// `ip6.ip6_plen = htons(v)`.
-    pub fn set_plen(&mut self, v: u16) {
+    pub const fn set_plen(&mut self, v: u16) {
         self.ip6_plen = v.to_be();
     }
     #[must_use]
-    pub fn plen(self) -> u16 {
+    pub const fn plen(self) -> u16 {
         let raw = self.ip6_plen;
         u16::from_be(raw)
     }
@@ -280,11 +280,11 @@ const _: () = assert!(size_of::<Icmp6Hdr>() == 8);
 
 impl Icmp6Hdr {
     /// `icmp6.icmp6_mtu = htonl(v)`.
-    pub fn set_mtu(&mut self, v: u32) {
+    pub const fn set_mtu(&mut self, v: u32) {
         self.icmp6_data32 = v.to_be();
     }
     #[must_use]
-    pub fn mtu(self) -> u32 {
+    pub const fn mtu(self) -> u32 {
         let raw = self.icmp6_data32;
         u32::from_be(raw)
     }
@@ -325,27 +325,27 @@ pub const ETH_P_ARP: u16 = 0x0806;
 
 impl ArpHdr {
     #[must_use]
-    pub fn hrd(self) -> u16 {
+    pub const fn hrd(self) -> u16 {
         let raw = self.ar_hrd;
         u16::from_be(raw)
     }
-    pub fn set_hrd(&mut self, v: u16) {
+    pub const fn set_hrd(&mut self, v: u16) {
         self.ar_hrd = v.to_be();
     }
     #[must_use]
-    pub fn pro(self) -> u16 {
+    pub const fn pro(self) -> u16 {
         let raw = self.ar_pro;
         u16::from_be(raw)
     }
-    pub fn set_pro(&mut self, v: u16) {
+    pub const fn set_pro(&mut self, v: u16) {
         self.ar_pro = v.to_be();
     }
     #[must_use]
-    pub fn op(self) -> u16 {
+    pub const fn op(self) -> u16 {
         let raw = self.ar_op;
         u16::from_be(raw)
     }
-    pub fn set_op(&mut self, v: u16) {
+    pub const fn set_op(&mut self, v: u16) {
         self.ar_op = v.to_be();
     }
 }
@@ -385,10 +385,10 @@ pub struct Ipv6Pseudo {
 const _: () = assert!(size_of::<Ipv6Pseudo>() == 40);
 
 impl Ipv6Pseudo {
-    pub fn set_length(&mut self, v: u32) {
+    pub const fn set_length(&mut self, v: u32) {
         self.length = v.to_be();
     }
-    pub fn set_next(&mut self, v: u32) {
+    pub const fn set_next(&mut self, v: u32) {
         self.next = v.to_be();
     }
 }
@@ -410,7 +410,7 @@ pub struct Ipv4Pseudo {
 const _: () = assert!(size_of::<Ipv4Pseudo>() == 12);
 
 impl Ipv4Pseudo {
-    pub fn set_length(&mut self, v: u16) {
+    pub const fn set_length(&mut self, v: u16) {
         self.length = v.to_be();
     }
 }

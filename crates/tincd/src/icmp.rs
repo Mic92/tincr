@@ -287,7 +287,7 @@ impl IcmpRateLimit {
     /// The boundary (`>=` not `>`) means `freq=3` allows exactly 3
     /// per second: calls 1,2,3 increment to 1,2,3 (return false);
     /// call 4 sees `count(3) >= freq(3)` and returns true early.
-    pub fn should_drop(&mut self, now_sec: u64, freq: u32) -> bool {
+    pub const fn should_drop(&mut self, now_sec: u64, freq: u32) -> bool {
         if self.last_sec == now_sec {
             // :90-92
             if self.count >= freq {

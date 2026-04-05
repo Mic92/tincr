@@ -99,7 +99,7 @@ impl EcdhPrivate {
     /// Needed for the on-disk key format (`ecdsa_t.private`), which stores
     /// the post-SHA-512 expansion, not the seed. The seed is unrecoverable.
     #[must_use]
-    pub fn from_expanded(expanded: &[u8; 64]) -> Self {
+    pub const fn from_expanded(expanded: &[u8; 64]) -> Self {
         Self {
             expanded: *expanded,
         }
@@ -205,7 +205,7 @@ mod fe {
     /// `2^255 - 19`, limb-wise. Used for the final freeze in `to_bytes`.
     const P: Fe = [MASK - 18, MASK, MASK, MASK, MASK];
 
-    pub(super) fn one() -> Fe {
+    pub(super) const fn one() -> Fe {
         [1, 0, 0, 0, 0]
     }
 
@@ -288,7 +288,7 @@ mod fe {
         out
     }
 
-    pub(super) fn add(a: &Fe, b: &Fe) -> Fe {
+    pub(super) const fn add(a: &Fe, b: &Fe) -> Fe {
         // No carry needed yet: 2^51 + 2^51 = 2^52, fits in u64. Carry happens
         // in mul/to_bytes where it matters.
         [
@@ -300,7 +300,7 @@ mod fe {
         ]
     }
 
-    pub(super) fn sub(a: &Fe, b: &Fe) -> Fe {
+    pub(super) const fn sub(a: &Fe, b: &Fe) -> Fe {
         // Add 2p first so subtraction can't underflow. 2p per limb is
         // ~2^52, sum is < 2^53, still fine.
         let two_p: Fe = [2 * P[0], 2 * P[1], 2 * P[2], 2 * P[3], 2 * P[4]];

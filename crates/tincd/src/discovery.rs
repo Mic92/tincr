@@ -294,7 +294,7 @@ impl Discovery {
     /// `info()` is ~seconds away (one `find_node` round-trip to seed nodes +
     /// 3-4 hops to find our neighbourhood).
     #[must_use]
-    pub fn with_dht(dht: Dht, key: SigningKey, udp_port: u16) -> Self {
+    pub const fn with_dht(dht: Dht, key: SigningKey, udp_port: u16) -> Self {
         Self {
             dht,
             last_vote: None,
@@ -328,7 +328,7 @@ impl Discovery {
     /// Separate from `probe_targets()` so a daemon that found no v4
     /// listener (and therefore sent nothing) doesn't lie about having
     /// probed.
-    pub fn probe_sent(&mut self, now: Instant) {
+    pub const fn probe_sent(&mut self, now: Instant) {
         self.last_probe = Some(now);
     }
 

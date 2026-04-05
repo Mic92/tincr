@@ -137,7 +137,7 @@ impl AddressCache {
     /// constructor predates the tier split: everything goes in
     /// `cached` (so `add_recent` and `save` work as before).
     #[must_use]
-    pub fn new(addrs: Vec<SocketAddr>) -> Self {
+    pub const fn new(addrs: Vec<SocketAddr>) -> Self {
         Self {
             cached: addrs,
             known: Vec::new(),

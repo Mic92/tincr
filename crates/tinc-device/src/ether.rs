@@ -43,7 +43,7 @@ pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 /// `None` for unknown: C uses an `ETH_P_MAX` sentinel or errors
 /// inline; both mean "drop". Caller decides the error.
 #[must_use]
-pub(crate) fn from_ip_nibble(ip0: u8) -> Option<u16> {
+pub(crate) const fn from_ip_nibble(ip0: u8) -> Option<u16> {
     match ip0 >> 4 {
         4 => Some(ETH_P_IP),
         6 => Some(ETH_P_IPV6),

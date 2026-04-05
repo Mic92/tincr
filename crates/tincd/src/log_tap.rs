@@ -54,7 +54,7 @@ static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
 /// tinc `debug_level` → `log::LevelFilter`. Same mapping as
 /// `main.rs::debug_level_to_filter` (5-line dup — the binary
 /// doesn't dep on this module's internals).
-fn level_to_filter(d: i32) -> log::LevelFilter {
+const fn level_to_filter(d: i32) -> log::LevelFilter {
     match d {
         ..=0 => log::LevelFilter::Info,
         1 | 2 => log::LevelFilter::Debug,

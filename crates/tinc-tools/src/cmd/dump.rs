@@ -109,7 +109,7 @@ impl Kind {
     /// `cmd_dump` adapter checks this BEFORE `connect()` — so
     /// `dump invitations` works with daemon down.
     #[must_use]
-    pub fn needs_daemon(self) -> bool {
+    pub const fn needs_daemon(self) -> bool {
         !matches!(self, Kind::Invitations)
     }
 }
@@ -399,13 +399,13 @@ impl NodeRow {
 
     /// Is bit 4 (reachable) set? `dump reachable nodes` filter.
     #[must_use]
-    pub fn reachable(&self) -> bool {
+    pub const fn reachable(&self) -> bool {
         self.status & STATUS_REACHABLE != 0
     }
 
     /// Bit 1 (validkey). Graph mode picks black for !validkey.
     #[must_use]
-    pub fn validkey(&self) -> bool {
+    pub const fn validkey(&self) -> bool {
         self.status & STATUS_VALIDKEY != 0
     }
 

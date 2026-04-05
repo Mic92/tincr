@@ -171,7 +171,7 @@ impl TunnelStatus {
     /// ‡ transient — 0 in practice between event-loop turns.)
     /// `reachable` is a param (owned by graph, not `TunnelStatus`).
     #[must_use]
-    pub fn as_u32(&self, reachable: bool) -> u32 {
+    pub const fn as_u32(&self, reachable: bool) -> u32 {
         let mut v = 0u32;
         if self.validkey {
             v |= 1 << 1;
