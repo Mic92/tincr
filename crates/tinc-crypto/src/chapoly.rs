@@ -76,6 +76,21 @@ impl ChaPoly {
         Self { key: *key }
     }
 
+    /// Borrow the raw 64-byte key.
+    ///
+    /// For external seal/open without holding the cipher: copy once per
+    /// session (not per packet), build a fresh `ChaPoly::new(&key)`.
+    /// 64 bytes is cheaper than `Arc<ChaPoly>` at ~800k seals/s — no
+    /// atomic refcount on a contended cacheline. A stale key (after
+    /// re-KEX) means a tag mismatch, which is exactly the signal the
+    /// caller needs to ask for a fresh one.
+    ///
+    /// Caller is responsible for zeroizing the copy.
+    #[must_use]
+    pub const fn key_bytes(&self) -> &[u8; KEY_LEN] {
+        &self.key
+    }
+
     /// Derive the per-record Poly1305 key and a cipher positioned at block 1.
     ///
     /// Factored out so seal/open share the exact same setup — the C code

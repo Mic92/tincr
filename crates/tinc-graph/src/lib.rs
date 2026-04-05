@@ -156,7 +156,11 @@ pub struct Edge {
 ///
 /// "Unreachable" means the BFS never visited the node.
 /// (`check_reachability` then flips `reachable` to match `visited`.)
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Copy`: 32 bytes, all-Copy fields. The daemon snapshots the routes
+/// vector behind `Arc`; by-value lookup avoids a borrow chain through
+/// the `Arc` deref at every read site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
     /// `n->status.indirect`. Reached only through `OPTION_INDIRECT`
     /// edges. UDP can't reach this node directly; relay through `via`.

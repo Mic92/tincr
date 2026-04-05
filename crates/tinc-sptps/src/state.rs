@@ -17,6 +17,9 @@
 //!   with a literal `// Fall through` and no `break`. Rust does it by
 //!   matching `SecondaryKex | Kex` and gating the send on the variant.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
 use rand_core::RngCore;
 use tinc_crypto::chapoly::{ChaPoly, KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
@@ -172,7 +175,7 @@ enum State {
 /// Exposed under `cfg(fuzzing)` so the differential-fuzz harness can
 /// build identical Rust and C state from the same input bytes. The
 /// fields are otherwise private; the daemon never touches them.
-#[cfg_attr(not(fuzzing), allow(unreachable_pub))]
+#[derive(Default)]
 pub struct ReplayWindow {
     /// Expected next seqno.
     pub(crate) inseqno: u32,
@@ -223,6 +226,24 @@ impl ReplayWindow {
             late: vec![0; win],
             farfuture: 0,
         }
+    }
+
+    /// Shard-side replay commit. Public wrapper around the
+    /// daemon-private `check(seqno, true)` so a shard holding
+    /// `Arc<Mutex<ReplayWindow>>` (from [`Sptps::replay_handle`]) can
+    /// commit without going through `&mut Sptps`. Same body as
+    /// [`Sptps::replay_check`]; the wrapper exists because that one
+    /// borrows `self.replay` through `Sptps`, and the shard has the
+    /// lock guard directly.
+    ///
+    /// Call AFTER decrypt succeeds. The window is order-sensitive
+    /// (`farfuture` heuristic); a forged seqno that fails the tag
+    /// must not advance it. Same gate as [`Sptps::open_data_into`].
+    ///
+    /// # Errors
+    /// `BadSeqno` on replay/out-of-window.
+    pub fn check_public(&mut self, seqno: u32) -> Result<(), SptpsError> {
+        self.check(seqno, true)
     }
 
     /// `sptps_check_seqno`. The `update` flag is `update_state` in C:
@@ -337,7 +358,15 @@ pub struct Sptps {
 
     // ─── Reassembly / replay ───
     stream: StreamBuf, // unused in datagram mode (zero-sized buf)
-    replay: ReplayWindow,
+    // `Arc<Mutex<_>>`: shard hand-off. The daemon's single-thread path
+    // never contends (one writer); `lock()` on an uncontended `Mutex`
+    // is a CAS + fence, ~50ns vs the ~4µs ChaCha decrypt it follows.
+    // The `Arc` lets [`replay_handle`] hand a clone to a shard so it
+    // can `lock()` from a non-epoll thread. `into_inner` on poison: a
+    // panicking shard left the bitmap mid-write; the worst case is one
+    // false positive/negative on the replay check, and the daemon is
+    // about to tear the session down anyway (the shard is dead).
+    replay: Arc<Mutex<ReplayWindow>>,
 
     // ─── Crypto state ───
     // `instate`/`outstate` in C are bools that gate encryption. Rust models
@@ -348,7 +377,16 @@ pub struct Sptps {
     incipher: Option<ChaPoly>,
     inseqno: u32, // stream mode only; datagram uses ReplayWindow.inseqno
     outcipher: Option<ChaPoly>,
-    outseqno: u32,
+    // `Arc<AtomicU64>`: shard hand-off. `fetch_add(n, Relaxed)` from
+    // any thread allocates a contiguous run; the truncation to u32 at
+    // use is the same wrap C's unsigned overflow gives. Wider counter
+    // doesn't change wire semantics: `(prev + n) as u32 ==
+    // (prev as u32).wrapping_add(n)` for all values. The `Arc` lets
+    // [`outseqno_handle`] hand a clone to a shard. `Relaxed` is
+    // correct: the seqno is just a nonce, the per-shard SHIP order may
+    // differ from the cross-shard ALLOC order, and the receiver's
+    // 128-slot replay window absorbs the interleave.
+    outseqno: Arc<AtomicU64>,
 
     // ─── Handshake-transient state ───
     // mykex/hiskex/ecdh/key are all heap-allocated in C, freed at specific
@@ -402,11 +440,11 @@ impl Sptps {
             framing,
             state: State::Kex,
             stream: StreamBuf::default(),
-            replay: ReplayWindow::new(replaywin),
+            replay: Arc::new(Mutex::new(ReplayWindow::new(replaywin))),
             incipher: None,
             inseqno: 0,
             outcipher: None,
-            outseqno: 0,
+            outseqno: Arc::new(AtomicU64::new(0)),
             mykex: None,
             hiskex: None,
             ecdh: None,
@@ -437,8 +475,11 @@ impl Sptps {
     /// send side. One right-sized `Vec`, one `extend_from_slice(body)`
     /// inside `seal_into`, encrypt-in-place.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
-        let seqno = self.outseqno;
-        self.outseqno = self.outseqno.wrapping_add(1);
+        // u64 -> u32 truncate: same wrap as C's `s->outseqno++`
+        // unsigned overflow. fetch_add returns the *previous* value.
+        #[allow(clippy::cast_possible_truncation)]
+        // wire seqno IS 4 bytes; mod-2^32 is the protocol
+        let seqno = self.outseqno.fetch_add(1, Ordering::Relaxed) as u32;
 
         // Compute final length so the ONE alloc is right-sized.
         // Stream:   2 (len)   + 1 (type) + body + [16 (tag) if encrypted]
@@ -545,12 +586,131 @@ impl Sptps {
         if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
             return Err(SptpsError::InvalidState);
         }
+        if self.outcipher.is_none() {
+            return Err(SptpsError::InvalidState);
+        }
+        let seqno = self.alloc_seqnos(1);
+        // Infallible: outcipher checked above, framing/record_type
+        // checked at the top of this fn.
+        self.seal_with_seqno(seqno, record_type, body, out, headroom)
+    }
+
+    /// Reserve a contiguous run of `n` outgoing sequence numbers.
+    /// Returns the base; caller assigns `base.wrapping_add(i)` to
+    /// chunk `i`. The wrap is correct: seqno is u32 on the wire,
+    /// wraps at ~4G records per session, and the C wraps too
+    /// (`sptps.c:108` `s->outseqno++` is unsigned overflow).
+    ///
+    /// Par-encrypt's serial preamble: one thread bumps `outseqno`;
+    /// N workers then call [`seal_with_seqno`] (`&self`) with
+    /// disjoint seqnos. The seqno space stays exactly what `n` calls
+    /// to [`seal_data_into`] would have produced.
+    ///
+    /// Caller MUST emit all `n` reserved seqnos. Gaps are harmless on
+    /// the wire (replay window tolerates skips) but waste seqno space.
+    pub fn alloc_seqnos(&mut self, n: u32) -> u32 {
+        // u64 fetch_add, truncate at read. `(prev + n) as u32 ==
+        // (prev as u32).wrapping_add(n)`: the high bits the wider
+        // counter carries are invisible on the wire. `Relaxed`: the
+        // seqno is a nonce, not a happens-before edge; uniqueness is
+        // what matters and fetch_add gives it monotonically.
+        #[allow(clippy::cast_possible_truncation)]
+        // wire seqno IS 4 bytes; mod-2^32 is the protocol
+        let base = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed) as u32;
+        base
+    }
+
+    /// Clone the outgoing seqno counter for shard hand-off. The shard
+    /// `fetch_add(1, Relaxed)`s from its own thread and pairs the
+    /// result with [`seal_with_seqno`] (or its own `ChaPoly` built
+    /// from [`outcipher_key`]). Multiple shards sharing one counter is
+    /// the point: automq hashes per-FLOW, so two flows to the same
+    /// peer can land on different shards — both seal, both need fresh
+    /// nonces from the same space.
+    ///
+    /// The wire still wraps at 2^32 (`seqno.to_be_bytes()` is 4 bytes
+    /// in [`seal_with_seqno`]). The u64 counter just means the wrap
+    /// happens via truncation instead of `wrapping_add`; same bits.
+    #[must_use]
+    pub fn outseqno_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.outseqno)
+    }
+
+    /// Clone the replay window for shard hand-off. Shard locks for
+    /// ~50ns AFTER decrypt (which is ~4µs/pkt at MTU); contention only
+    /// when two shards hit the same peer in the same instant. The
+    /// far-future heuristic inside is order-sensitive across shards,
+    /// but two shards' arrivals are *already* ordered by the kernel's
+    /// `SO_REUSEPORT` hash — each peer's packets land on one socket.
+    /// The cross-shard case is roam (PMTU re-probe from a new addr,
+    /// hashed to a different shard), rare.
+    #[must_use]
+    pub fn replay_handle(&self) -> Arc<Mutex<ReplayWindow>> {
+        Arc::clone(&self.replay)
+    }
+
+    /// Copy the outbound cipher key. Shard hand-off: workers get a
+    /// 64-byte copy per session so they never hold `&Sptps` across a
+    /// re-KEX. Re-KEX swaps `outcipher`; an in-flight seal with the
+    /// old key produces a packet the peer rejects (tag mismatch under
+    /// the new key) — one drop, peer's TCP retransmits. Cheaper than
+    /// `Arc<ChaPoly>` at ~800k seals/s: no refcount inc/dec on a
+    /// contended cacheline.
+    ///
+    /// `None` until [`Output::HandshakeDone`].
+    ///
+    /// Pair with seqnos from [`outseqno_handle`] and
+    /// `tinc_crypto::chapoly::ChaPoly::new(&key).seal_into(...)`.
+    /// Produces wire bytes identical to [`seal_with_seqno`] — the
+    /// `seal_into` API is what [`seal_with_seqno`] calls internally;
+    /// same body span, same headroom math.
+    #[must_use]
+    pub fn outcipher_key(&self) -> Option<[u8; CIPHER_KEY_LEN]> {
+        self.outcipher.as_ref().map(|c| *c.key_bytes())
+    }
+
+    /// Copy the inbound cipher key. Mirror of [`outcipher_key`] for
+    /// par-decrypt. Pair with [`replay_handle`].
+    ///
+    /// `None` until [`Output::HandshakeDone`].
+    #[must_use]
+    pub fn incipher_key(&self) -> Option<[u8; CIPHER_KEY_LEN]> {
+        self.incipher.as_ref().map(|c| *c.key_bytes())
+    }
+
+    /// Seal one datagram with a caller-supplied seqno. `&self`: no
+    /// state mutation. Body of [`seal_data_into`] minus the
+    /// `outseqno++`.
+    ///
+    /// Precondition: `seqno` came from [`alloc_seqnos`] and is not
+    /// reused. Reuse is a nonce reuse, which leaks the XOR of two
+    /// plaintexts under ChaCha20 — catastrophic. The type system
+    /// can't enforce this; the par-encrypt loop's `base + i` indexing
+    /// does.
+    ///
+    /// On return, `out` is `[0u8; headroom] ‖ seqno:4 ‖ enc(type ‖
+    /// body) ‖ tag:16` — byte-identical to [`seal_data_into`] called
+    /// when `outseqno == seqno`. `out` is **cleared** first.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidState` if not [`Framing::Datagram`], if `outcipher`
+    /// is `None` (handshake not complete), or if `record_type >= 128`.
+    /// Same gate as [`seal_data_into`].
+    pub fn seal_with_seqno(
+        &self,
+        seqno: u32,
+        record_type: u8,
+        body: &[u8],
+        out: &mut Vec<u8>,
+        headroom: usize,
+    ) -> Result<(), SptpsError> {
+        if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
+            return Err(SptpsError::InvalidState);
+        }
         let Some(cipher) = self.outcipher.as_ref() else {
             return Err(SptpsError::InvalidState);
         };
-
-        let seqno = self.outseqno;
-        self.outseqno = self.outseqno.wrapping_add(1);
 
         // Clear, don't dealloc. Reused Vec keeps its capacity; after
         // the first packet this resize is a no-op (len already 0 from
@@ -607,6 +767,66 @@ impl Sptps {
         if self.framing != Framing::Datagram {
             return Err(SptpsError::InvalidState);
         }
+        // Decrypt-then-replay-check (see open_with_seqno doc): a
+        // packet that fails decrypt shouldn't advance the window.
+        let (seqno, ty) = self.open_with_seqno(data, out, headroom)?;
+
+        // Check replay BEFORE leaving plaintext in `out`. On reject,
+        // truncate — same Err contract as open_with_seqno's BadRecord
+        // arm: `out == [0u8; headroom]` on every Err return. Decrypt
+        // first is still required (forged seqnos must not advance the
+        // window) but check-before-shift means the memmove below only
+        // runs on the Ok path.
+        if let Err(e) = self
+            .replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .check(seqno, true)
+        {
+            out.truncate(headroom);
+            return Err(e);
+        }
+
+        // Strip the type byte: shift body left by one. Small memmove.
+        out.copy_within(headroom + 1.., headroom);
+        out.truncate(out.len() - 1);
+        Ok(ty)
+    }
+
+    /// Decrypt one datagram WITHOUT touching the replay window.
+    /// `&self`: no state mutation. Body of [`open_data_into`] minus
+    /// `replay.check()` and minus the type-byte strip.
+    ///
+    /// Par-decrypt: N workers call this concurrently (the cipher
+    /// borrow is `&self`); the serial epilogue then calls
+    /// [`replay_check`] in arrival order. Decrypt is ~4µs/pkt at
+    /// MTU; replay check is ~10ns. Amdahl says parallelize the 4µs.
+    ///
+    /// On `Ok((seqno, ty))`: `out` is `[0u8; headroom] ‖ type:1 ‖
+    /// body`. The type byte is NOT stripped (vs [`open_data_into`])
+    /// — caller does that after replay-check passes, so a replayed
+    /// packet doesn't pay the memmove. `out` is **cleared** first.
+    ///
+    /// On every `Err`: `out == [0u8; headroom]` (same contract as
+    /// [`open_data_into`]).
+    ///
+    /// # Errors
+    ///
+    /// - `InvalidState`: not [`Framing::Datagram`], or no `incipher`.
+    /// - `BadSeqno`: packet shorter than 21 bytes.
+    /// - `DecryptFailed`: tag mismatch. `out` is unchanged (the
+    ///   `open_into` extend happens after the tag check).
+    /// - `BadRecord`: decrypted `record_type >= REC_HANDSHAKE`. `out`
+    ///   is truncated back to `headroom`.
+    pub fn open_with_seqno(
+        &self,
+        data: &[u8],
+        out: &mut Vec<u8>,
+        headroom: usize,
+    ) -> Result<(u32, u8), SptpsError> {
+        if self.framing != Framing::Datagram {
+            return Err(SptpsError::InvalidState);
+        }
         let Some(cipher) = self.incipher.as_ref() else {
             return Err(SptpsError::InvalidState);
         };
@@ -620,37 +840,39 @@ impl Sptps {
         out.clear();
         out.resize(headroom, 0);
 
-        // Decrypt-then-replay-check, same order as receive_datagram: a
-        // packet that fails decrypt shouldn't advance the window. The
-        // type byte lands at out[headroom], body at out[headroom+1..].
+        // The type byte lands at out[headroom], body at out[headroom+1..].
         cipher
             .open_into(u64::from(seqno), &data[4..], out, headroom)
             .map_err(|_| SptpsError::DecryptFailed)?;
 
         let ty = out[headroom];
         if ty >= REC_HANDSHAKE {
-            // Don't advance replay. Caller falls back to receive() which
-            // re-decrypts and handles the handshake. Restore out to its
-            // pre-call shape so the next packet's clear/resize is cheap.
+            // Restore out to its pre-call shape.
             out.truncate(headroom);
             return Err(SptpsError::BadRecord);
         }
+        Ok((seqno, ty))
+    }
 
-        // Check replay BEFORE leaving plaintext in `out`. On reject,
-        // truncate — same Err contract as the BadRecord arm above:
-        // `out == [0u8; headroom]` on every Err return. Decrypt first
-        // is still required (forged seqnos must not advance the
-        // window) but check-before-shift means the memmove below only
-        // runs on the Ok path.
-        if let Err(e) = self.replay.check(seqno, true) {
-            out.truncate(headroom);
-            return Err(e);
-        }
-
-        // Strip the type byte: shift body left by one. Small memmove.
-        out.copy_within(headroom + 1.., headroom);
-        out.truncate(out.len() - 1);
-        Ok(ty)
+    /// Commit `seqno` to the replay window. Serial epilogue for
+    /// par-decrypt: after [`open_with_seqno`] authenticates the
+    /// packet, this records it as seen. `&mut self` because the
+    /// window's bitmap mutates.
+    ///
+    /// Separate from [`open_with_seqno`] so the order is preserved:
+    /// decrypt is parallel and arbitrary-order; replay-commit is
+    /// serial in arrival order. The window's far-future heuristic
+    /// (`sptps.c:476` farfuture counter) is order-sensitive.
+    ///
+    /// # Errors
+    ///
+    /// `BadSeqno` if `seqno` is replayed or out-of-window. Caller
+    /// drops the (already-decrypted) plaintext.
+    pub fn replay_check(&mut self, seqno: u32) -> Result<(), SptpsError> {
+        self.replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .check(seqno, true)
     }
 
     /// `send_kex`: emit `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
@@ -1012,13 +1234,18 @@ impl Sptps {
         if self.incipher.is_none() {
             // Plaintext handshake phase. Seqno must be exactly inseqno —
             // no replay window yet, just a strict counter.
-            if seqno != self.replay.inseqno {
+            // Handshake-phase only: 3 packets, never hot. Hold the
+            // lock across the read+write so a (hypothetical) concurrent
+            // datagram receive sees a consistent counter.
+            let mut win = self.replay.lock().unwrap_or_else(PoisonError::into_inner);
+            if seqno != win.inseqno {
                 return Err(SptpsError::BadSeqno);
             }
             // Same wrap-at-MAX as ReplayWindow::check above. Handshake
             // phase hitting this is implausible (3-packet handshake) but
             // costs nothing to be consistent.
-            self.replay.inseqno = seqno.wrapping_add(1);
+            win.inseqno = seqno.wrapping_add(1);
+            drop(win);
             let ty = payload[0];
             if ty != REC_HANDSHAKE {
                 return Err(SptpsError::BadRecord);
@@ -1033,7 +1260,10 @@ impl Sptps {
         let pt = cipher
             .open(u64::from(seqno), payload)
             .map_err(|_| SptpsError::DecryptFailed)?;
-        self.replay.check(seqno, true)?;
+        self.replay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .check(seqno, true)?;
 
         let ty = pt[0];
         let body = &pt[1..];

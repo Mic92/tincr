@@ -56,13 +56,7 @@
 
 mod state;
 
-pub use state::{Framing, Output, Role, Sptps, SptpsError};
-
-/// Differential-fuzz hook. Gated on `--cfg fuzzing` (set by cargo-fuzz)
-/// so the daemon build doesn't grow a public API surface for what is
-/// strictly a test concern.
-#[cfg(fuzzing)]
-pub use state::ReplayWindow;
+pub use state::{Framing, Output, ReplayWindow, Role, Sptps, SptpsError};
 
 /// Body of a KEX record: `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
 ///
