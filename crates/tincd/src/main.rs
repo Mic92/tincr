@@ -152,7 +152,22 @@ fn parse_o_arg(v: &str, o_lineno: u32) -> Result<tinc_conf::Entry, String> {
     }
 }
 
-#[allow(clippy::too_many_lines)] // straight-line argv parser; splitting hurts readability
+/// Pull the next argv element as the value for `flag`, decoding to
+/// UTF-8. Factored out of the per-flag match arms: ~6 of them did
+/// the same `next().ok_or().into_string().map_err()` dance with only
+/// the error wording differing. The wording is now uniform; nobody
+/// was relying on the old per-flag phrasing.
+fn next_str(
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    flag: &str,
+) -> Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("{flag} requires an argument"))?
+        .into_string()
+        .map_err(|v| format!("{flag}: non-UTF-8 argument: {}", v.display()))
+}
+
+#[allow(clippy::too_many_lines)] // one match arm per CLI option; flat is clearest
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -188,10 +203,7 @@ where
         };
         match arg {
             "-c" | "--config" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "-c requires a path".to_string())?;
-                confbase = Some(PathBuf::from(v));
+                confbase = Some(PathBuf::from(next_str(&mut args, "-c")?));
             }
             // `--config=DIR` glued. `getopt_long` accepts the glued
             // form for every `required_argument` option; the NixOS
@@ -205,13 +217,7 @@ where
             // (the C uses getopt which splits it). Nobody types
             // `-nfoo`; if a script does, it gets "unknown argument".
             "-n" | "--net" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "-n requires a netname".to_string())?;
-                let v = v
-                    .into_string()
-                    .map_err(|v| format!("non-UTF-8 netname: {}", v.display()))?;
-                netname = Some(v);
+                netname = Some(next_str(&mut args, "-n")?);
             }
             _ if arg.starts_with("--net=") => {
                 netname = Some(arg["--net=".len()..].to_owned());
@@ -314,13 +320,7 @@ where
             }
             // `case OPT_CHANGE_USER`.
             "-U" | "--user" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "-U requires a username".to_string())?;
-                let v = v
-                    .into_string()
-                    .map_err(|v| format!("non-UTF-8 username: {}", v.display()))?;
-                switchuser = Some(v);
+                switchuser = Some(next_str(&mut args, "-U")?);
             }
             _ if arg.starts_with("--user=") => {
                 switchuser = Some(arg["--user=".len()..].to_owned());
@@ -336,12 +336,7 @@ where
             //
             // C also accepts `--option`. We do too.
             "-o" | "--option" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "-o requires KEY=VALUE".to_string())?;
-                let v = v
-                    .into_string()
-                    .map_err(|v| format!("non-UTF-8 -o value: {}", v.display()))?;
+                let v = next_str(&mut args, "-o")?;
                 o_lineno += 1;
                 cmdline_conf.merge(std::iter::once(parse_o_arg(&v, o_lineno)?));
             }
@@ -354,19 +349,13 @@ where
                 cmdline_conf.merge(std::iter::once(parse_o_arg(v, o_lineno)?));
             }
             "--pidfile" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "--pidfile requires a path".to_string())?;
-                pidfile = Some(PathBuf::from(v));
+                pidfile = Some(PathBuf::from(next_str(&mut args, "--pidfile")?));
             }
             _ if arg.starts_with("--pidfile=") => {
                 pidfile = Some(PathBuf::from(&arg["--pidfile=".len()..]));
             }
             "--socket" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| "--socket requires a path".to_string())?;
-                socket = Some(PathBuf::from(v));
+                socket = Some(PathBuf::from(next_str(&mut args, "--socket")?));
             }
             _ if arg.starts_with("--socket=") => {
                 socket = Some(PathBuf::from(&arg["--socket=".len()..]));
@@ -991,7 +980,7 @@ fn check_socket_activation(
         .filter(|&n| n > 0)
 }
 
-#[allow(clippy::too_many_lines)] // top-level wiring; splitting is out of scope for a lint sweep
+#[allow(clippy::too_many_lines)] // top-level wiring
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,

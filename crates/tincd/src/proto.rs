@@ -341,10 +341,6 @@ const INVITE_LABEL: &[u8] = b"tinc invitation";
 /// # Errors
 /// `BadId`: malformed, cookie mismatch, bad name, peer==self, version
 /// mismatch, no pubkey, rollback.
-///
-/// `too_many_lines`: upstream `id_h` is one 158-line function; version-parse
-/// and `send_id` are shared between branches. Splitting was worse.
-#[allow(clippy::too_many_lines)]
 pub fn handle_id(
     conn: &mut Connection,
     line: &[u8],
@@ -352,122 +348,19 @@ pub fn handle_id(
     now: Instant,
     rng: &mut impl RngCore,
 ) -> Result<IdOk, DispatchError> {
-    // `sscanf("%*d %s %d.%d", name, &major, &minor)`.
-    let mut toks = line
-        .split(|&b| b.is_ascii_whitespace())
-        .filter(|t| !t.is_empty());
-    let _reqno = toks.next(); // %*d — skip
-    let name_tok = toks
-        .next()
-        .ok_or_else(|| DispatchError::BadId("no name token".into()))?;
-    // `< 2` → major required. Control sends `"0"` (no dot):
-    // sscanf reads major=0, `.` fails, returns 2, minor stays 0.
-    let (major, minor): (u8, u8) = {
-        let ver = toks
-            .next()
-            .and_then(|t| std::str::from_utf8(t).ok())
-            .ok_or_else(|| DispatchError::BadId("no version token".into()))?;
-        let mut parts = ver.splitn(2, '.');
-        let major = parts
-            .next()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| DispatchError::BadId(format!("bad major in {ver:?}")))?;
-        let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        (major, minor)
-    };
+    let (name_tok, major, minor) = parse_id_line(line)?;
 
-    // ─── BRANCH 1: `^cookie` — control connection (`:325-338`)
-    if let Some(rest) = name_tok.strip_prefix(b"^") {
-        // Not constant-time; mode-0600 secret + unix socket fs perms.
-        if rest != ctx.cookie.as_bytes() {
-            return Err(DispatchError::BadId("cookie mismatch".into()));
-        }
-
-        conn.control = true;
-        conn.allow_request = Some(Request::Control);
-        // `:328`: `last_ping_time = now + 3600` — exempt from ping sweep.
-        conn.last_ping_time = now + std::time::Duration::from_secs(3600);
-        conn.name = "<control>".to_string();
-
-        // `if(!c->outgoing) send_id(c)`: `"%d %s %d.%d"`.
-        let needs_write = conn.send(format_args!(
-            "{} {} {}.{}",
-            Request::Id as u8,
-            ctx.my_name,
-            PROT_MAJOR,
-            PROT_MINOR
-        ));
-        // `"%d %d %d", ACK, CTL_VER, getpid()`.
-        conn.send(format_args!(
-            "{} {} {}",
-            Request::Ack as u8,
-            CTL_VERSION,
-            std::process::id()
-        ));
-
-        return Ok(IdOk::Control { needs_write });
+    // ─── Dispatch on name-token sigil. The three branches
+    // share NOTHING after this point: control uses cookie + pid,
+    // invitation uses the daemon-wide invitation key + a throwaway
+    // pubkey from the joiner, peer uses hosts/NAME + mykey. Upstream
+    // `id_h` keeps them inline; we split because the only thing they
+    // shared was the `(major, minor)` parse above.
+    if let Some(cookie) = name_tok.strip_prefix(b"^") {
+        return id_control(conn, cookie, ctx, now);
     }
-
-    // ─── BRANCH 2: `?` — invitation (`:340-373`).
     if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
-        // `if(!invitation_key)` → reject.
-        let Some(inv_key) = ctx.invitation_key else {
-            return Err(DispatchError::BadId(format!(
-                "got invitation from {} but we don't have an invitation key",
-                conn.hostname
-            )));
-        };
-
-        // Decode joiner's THROWAWAY pubkey (NOT their node
-        // identity — that's the later type-1 record).
-        let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
-            .ok()
-            .and_then(tinc_crypto::b64::decode)
-            .filter(|v| v.len() == PUBLIC_LEN)
-            .and_then(|v| v.try_into().ok())
-            .ok_or_else(|| {
-                DispatchError::BadId(format!("got bad invitation from {}", conn.hostname))
-            })?;
-
-        // b64 of OUR invitation pubkey → line 2. Joiner
-        // hashes + compares to URL slug (`fingerprint_hash`).
-        let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
-
-        // Line 1. PLAINTEXT (sptps not installed yet).
-        let mut needs_write = conn.send(format_args!(
-            "{} {} {}.{}",
-            Request::Id as u8,
-            ctx.my_name,
-            PROT_MAJOR,
-            PROT_MINOR
-        ));
-
-        // Line 2, ACK with our invitation pubkey. Plaintext.
-        needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
-
-        // Cosmetic for us (`feed()` checks `sptps.is_some()`).
-        conn.protocol_minor = 2;
-
-        // `sptps_start(..., false, false, ..., "tinc invitation", 15, ...)`.
-        let inv_key_clone = SigningKey::from_blob(&inv_key.to_blob());
-        let (sptps, init) = Sptps::start(
-            Role::Responder,
-            Framing::Stream,
-            inv_key_clone,
-            throwaway,
-            INVITE_LABEL,
-            0, // replaywin: ignored in stream mode
-            rng,
-        );
-        conn.sptps = Some(Box::new(sptps));
-
-        // `c->status.invitation = true`. Daemon sets
-        // `conn.invite` at the IdOk dispatch site.
-
-        log::info!(target: "tincd::auth",
-                   "Starting invitation handshake with {}", conn.hostname);
-
-        return Ok(IdOk::Invitation { needs_write, init });
+        return id_invitation(conn, throwaway_b64, ctx, rng);
     }
 
     // ─── BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
@@ -514,61 +407,9 @@ pub fn handle_id(
 
     // bypass_security, !experimental — SKIPPED (forbid both).
 
-    // Load pubkey. Upstream retains `c->config_tree` through
-    // ack_h; we extract the 5 keys send_ack/ack_h read and store on
-    // the connection (lighter than retaining the whole HashMap).
-    // C distinguishes
-    // file-missing (`:428` "unknown identity") from file-has-no-key;
-    // we collapse — either way you `tinc import`.
-    let host_config = {
-        let host_file = ctx.confbase.join("hosts").join(name);
-        let mut cfg = tinc_conf::Config::default();
-        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-            cfg.merge(entries);
-        }
-        // Parse failure doesn't doom us yet — read_ecdsa_public_key
-        // source 3 (raw PEM) gets a chance below.
-        cfg
-    };
-
-    let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
-    conn.ecdsa = ecdsa;
-
-    // config_tree retained for send_ack + ack_h.
-    // Extract now; `host_config` drops at end of fn. `.ok()` matches
-    // `get_config_bool` semantics: parse-fail = absent (returns
-    // false, doesn't write `*result`).
-    conn.host_indirect = host_config
-        .lookup("IndirectData")
-        .next()
-        .and_then(|e| e.get_bool().ok());
-    conn.host_tcponly = host_config
-        .lookup("TCPOnly")
-        .next()
-        .and_then(|e| e.get_bool().ok());
-    conn.host_clamp_mss = host_config
-        .lookup("ClampMSS")
-        .next()
-        .and_then(|e| e.get_bool().ok());
-    conn.host_weight = host_config
-        .lookup("Weight")
-        .next()
-        .and_then(|e| e.get_int().ok());
-    let host_pmtu = host_config
-        .lookup("PMTU")
-        .next()
-        .and_then(|e| e.get_int().ok())
-        .and_then(|v| u16::try_from(v).ok());
-    // Per-host then global, both clamp
-    // (`&& mtu < n->mtu`). Compute min here so connect.rs's single-
-    // cap clamp is correct. `Option::min` returns None if EITHER is
-    // None (wrong: absent should mean "no clamp", not "win").
-    // `flatten().min()` skips Nones — correct.
-    conn.pmtu_cap = [host_pmtu, ctx.global_pmtu].into_iter().flatten().min();
-
     // `if(minor && !ecdsa) minor = 1` — downgrade to
     // legacy. We forbid legacy: no pubkey → reject outright.
-    let Some(ecdsa) = ecdsa else {
+    let Some(ecdsa) = load_peer_host_config(conn, ctx, name) else {
         return Err(DispatchError::BadId(format!(
             "peer {} ({}) had unknown identity (no Ed25519 public key)",
             conn.name, conn.hostname
@@ -638,6 +479,199 @@ pub fn handle_id(
                conn.name, conn.hostname);
 
     Ok(IdOk::Peer { needs_write, init })
+}
+
+/// `sscanf("%*d %s %d.%d", name, &major, &minor)`. The `%*d` skips
+/// the request number (already dispatched on). C's `< 2` check makes
+/// major required but minor optional: control connections send `"0"`
+/// (no dot), sscanf reads major=0, the `.` match fails, returns 2,
+/// minor stays 0.
+fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
+    let mut toks = line
+        .split(|&b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty());
+    let _reqno = toks.next(); // %*d — skip
+    let name_tok = toks
+        .next()
+        .ok_or_else(|| DispatchError::BadId("no name token".into()))?;
+    let ver = toks
+        .next()
+        .and_then(|t| std::str::from_utf8(t).ok())
+        .ok_or_else(|| DispatchError::BadId("no version token".into()))?;
+    let mut parts = ver.splitn(2, '.');
+    let major = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| DispatchError::BadId(format!("bad major in {ver:?}")))?;
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Ok((name_tok, major, minor))
+}
+
+/// `id_h` `:325-338` — the `^cookie` control-connection branch.
+/// Cookie check is not constant-time; the secret is mode-0600 and the
+/// listener is a unix socket gated by fs perms, so timing leaks the
+/// length of a value the attacker already needs read access to know.
+fn id_control(
+    conn: &mut Connection,
+    cookie: &[u8],
+    ctx: &IdCtx<'_>,
+    now: Instant,
+) -> Result<IdOk, DispatchError> {
+    if cookie != ctx.cookie.as_bytes() {
+        return Err(DispatchError::BadId("cookie mismatch".into()));
+    }
+
+    conn.control = true;
+    conn.allow_request = Some(Request::Control);
+    // `:328`: `last_ping_time = now + 3600` — exempt from ping sweep.
+    conn.last_ping_time = now + std::time::Duration::from_secs(3600);
+    conn.name = "<control>".to_string();
+
+    // `if(!c->outgoing) send_id(c)`: `"%d %s %d.%d"`.
+    let needs_write = conn.send(format_args!(
+        "{} {} {}.{}",
+        Request::Id as u8,
+        ctx.my_name,
+        PROT_MAJOR,
+        PROT_MINOR
+    ));
+    // `"%d %d %d", ACK, CTL_VER, getpid()`.
+    conn.send(format_args!(
+        "{} {} {}",
+        Request::Ack as u8,
+        CTL_VERSION,
+        std::process::id()
+    ));
+
+    Ok(IdOk::Control { needs_write })
+}
+
+/// `id_h` `:340-373` — the `?`-prefixed invitation branch. Extracted
+/// from `handle_id` because it shares no state with the peer branch:
+/// it uses the daemon's *invitation* key (not `mykey`), the joiner's
+/// throwaway pubkey (not a hosts/ entry), and a different SPTPS label.
+/// Returning early from `handle_id` keeps the three ID-prefix cases
+/// (`^` control, `?` invite, bare peer) symmetric.
+fn id_invitation(
+    conn: &mut Connection,
+    throwaway_b64: &[u8],
+    ctx: &IdCtx<'_>,
+    rng: &mut impl RngCore,
+) -> Result<IdOk, DispatchError> {
+    // `if(!invitation_key)` → reject.
+    let Some(inv_key) = ctx.invitation_key else {
+        return Err(DispatchError::BadId(format!(
+            "got invitation from {} but we don't have an invitation key",
+            conn.hostname
+        )));
+    };
+
+    // Decode joiner's THROWAWAY pubkey (NOT their node
+    // identity — that's the later type-1 record).
+    let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
+        .ok()
+        .and_then(tinc_crypto::b64::decode)
+        .filter(|v| v.len() == PUBLIC_LEN)
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| {
+            DispatchError::BadId(format!("got bad invitation from {}", conn.hostname))
+        })?;
+
+    // b64 of OUR invitation pubkey → line 2. Joiner
+    // hashes + compares to URL slug (`fingerprint_hash`).
+    let inv_pub_b64 = tinc_crypto::b64::encode(inv_key.public_key());
+
+    // Line 1. PLAINTEXT (sptps not installed yet).
+    let mut needs_write = conn.send(format_args!(
+        "{} {} {}.{}",
+        Request::Id as u8,
+        ctx.my_name,
+        PROT_MAJOR,
+        PROT_MINOR
+    ));
+
+    // Line 2, ACK with our invitation pubkey. Plaintext.
+    needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
+
+    // Cosmetic for us (`feed()` checks `sptps.is_some()`).
+    conn.protocol_minor = 2;
+
+    // `sptps_start(..., false, false, ..., "tinc invitation", 15, ...)`.
+    let inv_key_clone = SigningKey::from_blob(&inv_key.to_blob());
+    let (sptps, init) = Sptps::start(
+        Role::Responder,
+        Framing::Stream,
+        inv_key_clone,
+        throwaway,
+        INVITE_LABEL,
+        0, // replaywin: ignored in stream mode
+        rng,
+    );
+    conn.sptps = Some(Box::new(sptps));
+
+    // `c->status.invitation = true`. Daemon sets
+    // `conn.invite` at the IdOk dispatch site.
+
+    log::info!(target: "tincd::auth",
+               "Starting invitation handshake with {}", conn.hostname);
+
+    Ok(IdOk::Invitation { needs_write, init })
+}
+
+/// Load `hosts/NAME`, extract the pubkey + the 5 keys `send_ack`/`ack_h`
+/// later read, stash them on `conn`, return the pubkey.
+///
+/// Upstream retains `c->config_tree` through `ack_h`; we extract
+/// eagerly so the `Config` HashMap drops here instead of riding the
+/// connection. C distinguishes file-missing (`:428` "unknown identity")
+/// from file-has-no-key; we collapse — either way you `tinc import`.
+fn load_peer_host_config(
+    conn: &mut Connection,
+    ctx: &IdCtx<'_>,
+    name: &str,
+) -> Option<[u8; PUBLIC_LEN]> {
+    let host_file = ctx.confbase.join("hosts").join(name);
+    let mut host_config = tinc_conf::Config::default();
+    if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+        host_config.merge(entries);
+    }
+    // Parse failure doesn't doom us yet — read_ecdsa_public_key
+    // source 3 (raw PEM) gets a chance below.
+
+    let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
+    conn.ecdsa = ecdsa;
+
+    // `.ok()` matches `get_config_bool` semantics: parse-fail =
+    // absent (returns false, doesn't write `*result`).
+    conn.host_indirect = host_config
+        .lookup("IndirectData")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_tcponly = host_config
+        .lookup("TCPOnly")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_clamp_mss = host_config
+        .lookup("ClampMSS")
+        .next()
+        .and_then(|e| e.get_bool().ok());
+    conn.host_weight = host_config
+        .lookup("Weight")
+        .next()
+        .and_then(|e| e.get_int().ok());
+    let host_pmtu = host_config
+        .lookup("PMTU")
+        .next()
+        .and_then(|e| e.get_int().ok())
+        .and_then(|v| u16::try_from(v).ok());
+    // Per-host then global, both clamp (`&& mtu < n->mtu`). Compute
+    // min here so connect.rs's single-cap clamp is correct.
+    // `Option::min` returns None if EITHER is None (wrong: absent
+    // should mean "no clamp", not "win"). `flatten().min()` skips
+    // Nones — correct.
+    conn.pmtu_cap = [host_pmtu, ctx.global_pmtu].into_iter().flatten().min();
+
+    ecdsa
 }
 
 /// `send_ack`. Called on SPTPS `HandshakeDone` when
