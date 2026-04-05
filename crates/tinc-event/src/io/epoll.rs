@@ -83,20 +83,14 @@ pub(super) fn wait(
         d.as_millis().min(libc::c_int::MAX as u128) as libc::c_int
     });
     events.clear();
-    // SAFETY: events.as_mut_ptr() is valid for capacity() writes;
+    // capacity() = MAX_EVENTS_PER_TURN = 32; try_from cannot fail.
+    let maxevents =
+        libc::c_int::try_from(events.capacity()).expect("MAX_EVENTS_PER_TURN fits c_int");
+    // SAFETY: events.as_mut_ptr() is valid for `maxevents` writes;
     // capacity is set by Vec::with_capacity in EventLoop::new and
     // never shrunk. epoll_wait fills [0..n) and returns n.
     #[allow(unsafe_code)]
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    // EVENT_CAP is 64, fits c_int
-    let n = unsafe {
-        libc::epoll_wait(
-            ep,
-            events.as_mut_ptr(),
-            events.capacity() as libc::c_int,
-            ms,
-        )
-    };
+    let n = unsafe { libc::epoll_wait(ep, events.as_mut_ptr(), maxevents, ms) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
