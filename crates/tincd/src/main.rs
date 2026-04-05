@@ -152,6 +152,41 @@ fn parse_o_arg(v: &str, o_lineno: u32) -> Result<tinc_conf::Entry, String> {
     }
 }
 
+/// Parse the value for a bare `-d` / `--debug` (no glued digits).
+/// Handles two of the three forms C tincd accepts:
+///
+///   `-d 5`  separated — peek next argv, consume iff it's a number
+///   `-d`    bare      — increment current level
+///
+/// (The third, glued `-d5`, is a separate match arm in `parse_args`
+/// because it's a distinct argv string pattern.)
+///
+/// C semantics: `debug_level++` from `DEBUG_UNSET = -1`, so first
+/// bare `-d` gives 0 = `DEBUG_NOTHING`, second gives 1. We model the
+/// increment from 0 instead — first `-d` produces level 1. C-compat
+/// for the common cases (`-d`, `-d5`); the edge case `-d -d` gives 2
+/// instead of 1, which maps to the same `LevelFilter` bucket anyway.
+///
+/// The separated-arg peek mirrors C tincd's `argv[optind]` lookahead
+/// gated on `*argv != '-'`: `-d -D` must NOT eat `-D` as the level.
+/// The NixOS module emits `-d 0` as two argv entries; without this
+/// the `0` would be "unknown argument".
+fn parse_debug_arg<I>(current: Option<u32>, args: &mut std::iter::Peekable<I>) -> u32
+where
+    I: Iterator<Item = std::ffi::OsString>,
+{
+    if let Some(next) = args.peek()
+        && let Some(s) = next.to_str()
+        && !s.starts_with('-')
+    {
+        let n: u32 = s.parse().unwrap_or(0);
+        args.next(); // consume it
+        n
+    } else {
+        current.unwrap_or(0) + 1
+    }
+}
+
 /// Pull the next argv element as the value for `flag`, decoding to
 /// UTF-8. Factored out of the per-flag match arms: ~6 of them did
 /// the same `next().ok_or().into_string().map_err()` dance with only
@@ -231,44 +266,12 @@ where
             "-L" | "--mlock" => {
                 do_mlock = true;
             }
-            // `case OPT_DEBUG`. Allows
-            // `-d` (increment), `-dN` (glued), `-d N` (separate; uses
-            // optind peek). We support all three.
+            // `case OPT_DEBUG`. Allows `-d` (increment), `-dN`
+            // (glued), `-d N` (separate; uses optind peek). All three
+            // supported; this arm covers the first and third, glued
+            // forms are separate arms below. See parse_debug_arg.
             "-d" | "--debug" => {
-                // Increment-only form. C: `debug_level++` from -1
-                // start, so first `-d` → 0… wait no: `debug_level`
-                // starts at `DEBUG_UNSET = -1`, then checks
-                // `if(debug_level == DEBUG_NOTHING)` which is 0.
-                // `int debug_level = -1;`.
-                // First `-d` makes it 0. We track "given or not"
-                // separately, so first `-d` → Some(0) is wrong;
-                // it should be Some(1) to match `-d` ≈ "show
-                // connections". Re-read… `debug_level++` from -1
-                // gives 0 = DEBUG_NOTHING. Second `-d` gives 1 =
-                // DEBUG_CONNECTIONS. That's the C. Match it: bare
-                // `-d` increments from current-or-minus-one.
-                //
-                // Practically nobody types `-d -d`; they type `-d5`.
-                // Model the increment as "from 0" — first `-d`
-                // produces level 1 (≈ Debug). C-compat for the
-                // common cases (`-d`, `-d5`); the edge case `-d -d`
-                // gives 2 instead of 1, which is the same LevelFilter
-                // bucket anyway.
-                //
-                // BUT: `-d N` separated also exists.
-                // 215` peeks `argv[optind]`, atoi's it iff not `-`-
-                // prefixed. The NixOS module emits `-d 0` as two argv
-                // entries; without this the `0` is "unknown argument".
-                if let Some(next) = args.peek()
-                    && let Some(s) = next.to_str()
-                    && !s.starts_with('-')
-                {
-                    let n: u32 = s.parse().unwrap_or(0);
-                    args.next(); // consume it
-                    debug_level = Some(n);
-                } else {
-                    debug_level = Some(debug_level.unwrap_or(0) + 1);
-                }
+                debug_level = Some(parse_debug_arg(debug_level, &mut args));
             }
             // `-dN` glued. getopt's `d::` (optional arg) lets `-d5`
             // through. We pattern-match the prefix.
