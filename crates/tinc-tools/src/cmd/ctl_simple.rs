@@ -32,28 +32,8 @@
 //! unit-tested.
 
 use crate::cmd::CmdError;
-use crate::ctl::{CtlError, CtlRequest, CtlSocket};
+use crate::ctl::{CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};
-
-/// Convert a `CtlError` to `CmdError::BadInput`. The control errors
-/// all become "daemon problem" from the CLI's perspective; the
-/// `Display` carries the specifics.
-///
-/// Why `BadInput` not a new `CmdError::Daemon`: `BadInput` already
-/// has the "string message → exit 1" semantics every caller wants.
-/// A separate variant would route to the same place. If we later
-/// want a different exit code for daemon-down (so scripts can
-/// distinguish), then we add the variant. YAGNI for now.
-///
-/// Owned-taking because every callsite is `.map_err(daemon_err)`
-/// where `Result::map_err` passes the error by value. clippy's
-/// needless-pass-by-value fires (the body only borrows for
-/// `to_string`); allowed because the alternative (`|e| ctl_err(&e)`
-/// at every site) is worse.
-#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; |e| daemon_err(&e) is uglier
-fn daemon_err(e: CtlError) -> CmdError {
-    CmdError::BadInput(e.to_string())
-}
 
 /// Connect with a useful "daemon not running" message. We return
 /// the error and let the binary print.
@@ -62,7 +42,7 @@ fn daemon_err(e: CtlError) -> CmdError {
 /// `pidfile()` is the assertion that the binary did its job.
 #[cfg(unix)]
 fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, CmdError> {
-    CtlSocket::connect(paths).map_err(daemon_err)
+    CtlSocket::connect(paths).map_err(Into::into)
 }
 
 /// `cmd_pid`. The simplest command: connect, print the pid from
@@ -92,8 +72,8 @@ pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
 #[cfg(unix)]
 pub fn reload(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Reload).map_err(daemon_err)?;
-    let result = ctl.recv_ack(CtlRequest::Reload).map_err(daemon_err)?;
+    ctl.send(CtlRequest::Reload)?;
+    let result = ctl.recv_ack(CtlRequest::Reload)?;
     if result != 0 {
         return Err(CmdError::BadInput("Could not reload configuration.".into()));
     }
@@ -109,8 +89,8 @@ pub fn reload(paths: &Paths) -> Result<(), CmdError> {
 #[cfg(unix)]
 pub fn purge(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Purge).map_err(daemon_err)?;
-    let result = ctl.recv_ack(CtlRequest::Purge).map_err(daemon_err)?;
+    ctl.send(CtlRequest::Purge)?;
+    let result = ctl.recv_ack(CtlRequest::Purge)?;
     if result != 0 {
         return Err(CmdError::BadInput(
             "Could not purge old information.".into(),
@@ -128,8 +108,8 @@ pub fn purge(paths: &Paths) -> Result<(), CmdError> {
 #[cfg(unix)]
 pub fn retry(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Retry).map_err(daemon_err)?;
-    let result = ctl.recv_ack(CtlRequest::Retry).map_err(daemon_err)?;
+    ctl.send(CtlRequest::Retry)?;
+    let result = ctl.recv_ack(CtlRequest::Retry)?;
     if result != 0 {
         return Err(CmdError::BadInput(
             "Could not retry outgoing connections.".into(),
@@ -152,7 +132,7 @@ pub fn retry(paths: &Paths) -> Result<(), CmdError> {
 #[cfg(unix)]
 pub fn stop(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Stop).map_err(daemon_err)?;
+    ctl.send(CtlRequest::Stop)?;
     // Drain. `recv_line` distinguishes Ok(None)=EOF from Err. EOF is
     // what we want. Real I/O error after STOP is also kind of
     // success (the daemon's gone), so we don't propagate it.
@@ -172,10 +152,9 @@ pub fn stop(paths: &Paths) -> Result<(), CmdError> {
 #[cfg(unix)]
 pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
     let mut ctl = connect(paths)?;
-    ctl.send_int(CtlRequest::SetDebug, level)
-        .map_err(daemon_err)?;
+    ctl.send_int(CtlRequest::SetDebug, level)?;
     // Result is the previous level, not an error code.
-    ctl.recv_ack(CtlRequest::SetDebug).map_err(daemon_err)
+    ctl.recv_ack(CtlRequest::SetDebug).map_err(Into::into)
 }
 
 /// `cmd_disconnect`. Tell the daemon to drop its connection to
@@ -197,9 +176,8 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     }
 
     let mut ctl = connect(paths)?;
-    ctl.send_str(CtlRequest::Disconnect, name)
-        .map_err(daemon_err)?;
-    let result = ctl.recv_ack(CtlRequest::Disconnect).map_err(daemon_err)?;
+    ctl.send_str(CtlRequest::Disconnect, name)?;
+    let result = ctl.recv_ack(CtlRequest::Disconnect)?;
     if result != 0 {
         return Err(CmdError::BadInput(format!("Could not disconnect {name}.")));
     }

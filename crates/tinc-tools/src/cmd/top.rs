@@ -956,7 +956,7 @@ pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
     // ─── Connect
     // BEFORE entering raw mode — if connect fails the error
     // message goes to a sane terminal.
-    let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
+    let mut ctl = CtlSocket::connect(paths)?;
 
     // ─── Raw mode
     // RawMode's Drop is `endwin()`. The Drop fires on panic too,
@@ -1027,13 +1027,6 @@ pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
     drop(stdout);
 
     Ok(())
-}
-
-/// Re-declared (modules independent). `dump.rs`, `info.rs`,
-/// `ctl_simple.rs` each have their own.
-#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; closure is uglier
-fn daemon_err(e: CtlError) -> CmdError {
-    CmdError::BadInput(e.to_string())
 }
 
 // Tests

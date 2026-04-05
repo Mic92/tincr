@@ -55,7 +55,7 @@ use tinc_proto::Subnet;
 
 use crate::cmd::CmdError;
 use crate::cmd::dump::{NodeRow, StatusBit, SubnetRow, strip_weight};
-use crate::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
+use crate::ctl::{CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
 
 // fmt_localtime — the one unsafe block in tinc-tools
@@ -453,13 +453,6 @@ impl NodeInfo {
 
 // I/O: the three dump-recv loops
 
-/// Adapter, same as `dump::daemon_err`. Re-declared (modules
-/// independent).
-#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; closure is uglier
-fn daemon_err(e: CtlError) -> CmdError {
-    CmdError::BadInput(e.to_string())
-}
-
 /// `ParseError → CmdError` with upstream's message:
 /// `"Unable to parse X dump from tincd."`.
 fn parse_err(what: &str, body: &str) -> CmdError {
@@ -490,8 +483,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
     // The third arg is dead on the wire (daemon doesn't read it)
     // but we send it anyway — wire-compat, tcpdump traces match.
     // `send_str` does `"18 3 alice\n"`.
-    ctl.send_str(CtlRequest::DumpNodes, name)
-        .map_err(daemon_err)?;
+    ctl.send_str(CtlRequest::DumpNodes, name)?;
 
     // ─── Match loop
     // `loop`-with-`break value` not `let mut found = None` — the
@@ -499,7 +491,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
     // then breaks. The break-value form makes that single-assignment
     // structural.
     let found = loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             DumpRow::End(_) => {
                 // Terminator without match. Caller maps to
                 // "Unknown node". No drain needed: terminator IS
@@ -522,7 +514,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
     // discard until terminator. We don't even tokenize: recv_row
     // does the End detect for us.
     loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, _) => {} // discard
         }
@@ -541,12 +533,11 @@ fn collect_edges<S: std::io::Read + std::io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Vec<String>, CmdError> {
-    ctl.send_str(CtlRequest::DumpEdges, name)
-        .map_err(daemon_err)?;
+    ctl.send_str(CtlRequest::DumpEdges, name)?;
 
     let mut to_names = Vec::new();
     loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
                 // Just first two strings — `from` and `to`. We
@@ -578,12 +569,11 @@ fn collect_subnets<S: std::io::Read + std::io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Vec<String>, CmdError> {
-    ctl.send_str(CtlRequest::DumpSubnets, name)
-        .map_err(daemon_err)?;
+    ctl.send_str(CtlRequest::DumpSubnets, name)?;
 
     let mut subnets = Vec::new();
     loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
                 let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;
@@ -607,7 +597,7 @@ fn collect_subnets<S: std::io::Read + std::io::Write>(
 /// `BadInput("Unknown node X.")` if not found, or daemon I/O /
 /// parse failures.
 fn info_node(paths: &Paths, name: &str) -> Result<String, CmdError> {
-    let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
+    let mut ctl = CtlSocket::connect(paths)?;
 
     // ─── 1. Find the node
     let Some(row) = find_node(&mut ctl, name)? else {
@@ -672,14 +662,13 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
     let with_weight = item.contains('#');
 
     // ─── Dump and filter
-    let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
+    let mut ctl = CtlSocket::connect(paths)?;
     // Third arg is dead, daemon ignores.
-    ctl.send_str(CtlRequest::DumpSubnets, item)
-        .map_err(daemon_err)?;
+    ctl.send_str(CtlRequest::DumpSubnets, item)?;
 
     let mut matches = Vec::new();
     loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
                 let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;

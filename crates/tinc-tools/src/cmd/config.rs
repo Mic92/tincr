@@ -720,8 +720,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
 /// use a sentinel one. The user sees `Could not access <tmpfile>:
 /// <errno>` — fine, the errno is what matters (probably ENOSPC).
 ///
-/// `clippy::needless_pass_by_value`: same shape as `daemon_err` in
-/// `ctl_simple.rs` — `.map_err(tmpfile_werr)` passes by value.
+/// `clippy::needless_pass_by_value`: `.map_err(tmpfile_werr)` passes by
+/// value; closure is uglier.
 #[allow(clippy::needless_pass_by_value)] // .map_err(tmpfile_werr) passes by value; closure is uglier
 fn tmpfile_werr(e: std::io::Error) -> CmdError {
     CmdError::Io {

@@ -74,7 +74,7 @@ use std::io::{BufRead, BufReader};
 use tinc_proto::{ParseError, Tok};
 
 use crate::cmd::{CmdError, io_err};
-use crate::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
+use crate::ctl::{CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
 
 // Kind: the 7 sub-verbs
@@ -881,13 +881,6 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
 // The daemon-backed dumps
 
-/// Adapter: `CtlError → CmdError`. Same shape as `ctl_simple::
-/// daemon_err`, re-declared (modules independent).
-#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; |e| daemon_err(&e) is uglier
-fn daemon_err(e: CtlError) -> CmdError {
-    CmdError::BadInput(e.to_string())
-}
-
 /// Result of a daemon dump. Separate type so the binary can route
 /// `Ok(DumpOutput::Lines(v))` → `println!` per line and the
 /// "no entries" case to stderr (the convention for empty dumps is
@@ -923,7 +916,7 @@ pub enum DumpOutput {
 pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
 
-    let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
+    let mut ctl = CtlSocket::connect(paths)?;
 
     // ─── Send: 1 or 2 requests
     // Graph/digraph send NODES then EDGES; everything else sends
@@ -931,24 +924,24 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     // terminator).
     match kind {
         Kind::Nodes | Kind::ReachableNodes => {
-            ctl.send(CtlRequest::DumpNodes).map_err(daemon_err)?;
+            ctl.send(CtlRequest::DumpNodes)?;
         }
         Kind::Edges => {
-            ctl.send(CtlRequest::DumpEdges).map_err(daemon_err)?;
+            ctl.send(CtlRequest::DumpEdges)?;
         }
         Kind::Subnets => {
-            ctl.send(CtlRequest::DumpSubnets).map_err(daemon_err)?;
+            ctl.send(CtlRequest::DumpSubnets)?;
         }
         Kind::Connections => {
-            ctl.send(CtlRequest::DumpConnections).map_err(daemon_err)?;
+            ctl.send(CtlRequest::DumpConnections)?;
         }
         Kind::Graph | Kind::Digraph => {
             // TWO sends. The daemon doesn't pipeline (it's strictly
             // request-response on CONTROL), so the second request
             // actually arrives while the daemon is still SENDING
             // the first response. That's fine — TCP buffers it.
-            ctl.send(CtlRequest::DumpNodes).map_err(daemon_err)?;
-            ctl.send(CtlRequest::DumpEdges).map_err(daemon_err)?;
+            ctl.send(CtlRequest::DumpNodes)?;
+            ctl.send(CtlRequest::DumpEdges)?;
         }
         Kind::Invitations => unreachable!("debug_assert above"),
     }
@@ -972,7 +965,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     let directed = matches!(kind, Kind::Digraph);
 
     loop {
-        match ctl.recv_row().map_err(daemon_err)? {
+        match ctl.recv_row()? {
             // ─── Terminator: maybe done
             DumpRow::End(end_kind) => {
                 // Graph mode continues past the NODES terminator,
