@@ -1,5 +1,16 @@
-#[allow(clippy::wildcard_imports)]
-use super::super::*;
+use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
+
+use std::io;
+use std::os::fd::AsRawFd;
+
+use crate::compress;
+use crate::listen::Listener;
+use crate::node_id::NodeId6;
+use crate::tunnel::{MTU, TunnelState};
+
+use rand_core::OsRng;
+use tinc_graph::NodeId;
+use tinc_proto::Request;
 
 impl Daemon {
     /// Router strips the eth header (receiver re-synthesizes from

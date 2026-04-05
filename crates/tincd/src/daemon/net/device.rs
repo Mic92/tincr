@@ -1,7 +1,11 @@
-#[allow(clippy::wildcard_imports)]
-use super::super::*;
-
+use super::super::Daemon;
 use super::DEVICE_DRAIN_CAP;
+
+use std::io;
+
+use crate::tunnel::{MTU, TunnelState};
+
+use tinc_graph::NodeId;
 
 impl Daemon {
     /// We drain because mio is edge-triggered — returning before

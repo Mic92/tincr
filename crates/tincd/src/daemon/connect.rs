@@ -1,7 +1,23 @@
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::{ConnId, Daemon, IoWhat, NodeState};
+
+use std::net::SocketAddr;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::time::Duration;
+
+use crate::conn::Connection;
+use crate::listen::fmt_addr;
+use crate::outgoing::{
+    ConnectAttempt, OutgoingId, ProxyConfig, probe_connecting, try_connect, try_connect_via_proxy,
+};
+use crate::pmtu::PmtuState;
+use crate::proto::parse_ack;
+use crate::tunnel::MTU;
+use crate::{local_addr, socks};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use tinc_event::Io;
+use tinc_proto::msg::DelEdge;
+use tinc_proto::{AddrStr, Request};
 
 use crate::proto::ConnOptions;
 

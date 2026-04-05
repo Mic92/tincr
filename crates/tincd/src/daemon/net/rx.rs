@@ -1,13 +1,22 @@
-#[allow(clippy::wildcard_imports)]
-use super::super::*;
+use super::super::{Daemon, IoWhat};
+use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 
-use std::io::IoSliceMut;
+use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
+
+use crate::conn::Connection;
+use crate::listen::{configure_tcp, fmt_addr, is_local, unmap};
+use crate::local_addr;
+use crate::node_id::NodeId6;
+use crate::tunnel::MTU;
+
+use rand_core::OsRng;
+use tinc_event::Io;
+use tinc_graph::NodeId;
 
 use nix::errno::Errno;
 use nix::sys::socket::{MsgFlags, recvmmsg};
-
-use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 
 impl Daemon {
     /// accept → tarpit-check → configure_tcp → allocate → register.

@@ -3,53 +3,30 @@
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::inthash::IntHashMap;
-use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
-use rand_core::OsRng;
-#[allow(unused_imports)] // trait for OsRng::fill_bytes in submodules
-use rand_core::RngCore;
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
-use tinc_event::{EventLoop, Io, IoId, Ready, SelfPipe, TimerId, Timers};
+use tinc_event::{EventLoop, IoId, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
-use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, SubnetMsg, UdpInfo};
-use tinc_proto::{AddrStr, Request, Subnet};
-use tinc_sptps::{Framing, Role, Sptps};
+use tinc_proto::AddrStr;
 
-use crate::autoconnect::{self, AutoAction, NodeSnapshot};
-use crate::conn::{Connection, FeedResult, SptpsEvent};
+use crate::conn::Connection;
 use crate::control::ControlSocket;
 use crate::egress::{TxBatch, UdpEgress};
-use crate::graph_glue::{Transition, run_graph};
-use crate::invitation_serve::{self, InvitePhase};
-use crate::listen::{Listener, Tarpit, configure_tcp, fmt_addr, is_local, unmap};
-use crate::node_id::{NodeId6, NodeId6Table};
-use crate::outgoing::{
-    ConnectAttempt, Outgoing, OutgoingId, ProxyConfig, probe_connecting, resolve_config_addrs,
-    try_connect, try_connect_via_proxy,
-};
-use crate::pmtu::{self, PmtuAction, PmtuState};
-use crate::proto::{
-    DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, parse_ack,
-    parse_add_edge, parse_add_subnet, parse_del_edge, parse_del_subnet, record_body, send_ack,
-};
-use crate::reload;
-use crate::route::{self, RouteResult, TtlResult, route};
-use crate::script::{self, ScriptEnv, ScriptResult};
+use crate::listen::{Listener, Tarpit};
+use crate::node_id::NodeId6Table;
+use crate::outgoing::{Outgoing, OutgoingId};
 use crate::seen::SeenRequests;
-use crate::socks;
 use crate::subnet_tree::SubnetTree;
-use crate::tunnel::{MTU, TunnelState, make_udp_label};
-use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
-use crate::{broadcast, compress, icmp, local_addr, mac_lease, mss, neighbor, route_mac};
+use crate::tunnel::TunnelState;
+use crate::{compress, icmp, mac_lease, route_mac};
 
 mod connect;
 mod gossip;
@@ -842,6 +819,7 @@ pub enum SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// `IoWhat` is `Copy`. `EventLoop<W: Copy>` requires it; this
     /// pins it. Adding a non-Copy field to `IoWhat` (like a String)

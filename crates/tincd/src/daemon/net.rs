@@ -1,5 +1,5 @@
-#[allow(clippy::wildcard_imports)]
-use super::*;
+// Re-export: device.rs body references `super::ListenerSlot`.
+pub(super) use super::ListenerSlot;
 
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 

@@ -37,8 +37,13 @@
 //! next `graph()` call. `last_mst` can't reference dead edges (MST
 //! only spans reachable nodes). `edge_addrs` swept per-edge in pass 1.
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::Daemon;
+
+use std::collections::HashSet;
+
+use tinc_graph::{EdgeId, NodeId};
+use tinc_proto::msg::{DelEdge, SubnetMsg};
+use tinc_proto::{Request, Subnet};
 
 impl Daemon {
     /// See module doc.

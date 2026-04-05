@@ -1,8 +1,25 @@
 #![forbid(unsafe_code)]
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
-use crate::proto::ConnOptions;
+use super::{ConnId, Daemon, PKT_PROBE, TimerWhat, parse_subnets_from_config};
+
+use std::collections::HashSet;
+use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
+
+use crate::autoconnect::{AutoAction, NodeSnapshot};
+use crate::outgoing::{Outgoing, OutgoingId, resolve_config_addrs};
+use crate::pmtu::{PmtuAction, PmtuState};
+use crate::proto::{ConnOptions, DispatchError};
+use crate::tunnel::{MTU, TunnelState};
+use crate::udp_info::{FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
+use crate::{autoconnect, local_addr, pmtu, udp_info};
+
+use rand_core::{OsRng, RngCore};
+use tinc_event::Io;
+use tinc_graph::{NodeId, Route};
+use tinc_proto::AddrStr;
+use tinc_proto::msg::{MtuInfo, UdpInfo};
 
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,

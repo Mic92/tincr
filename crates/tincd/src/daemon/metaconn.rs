@@ -1,7 +1,26 @@
 #![forbid(unsafe_code)]
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::{ConnId, Daemon, IoWhat};
+
+use std::io;
+use std::net::SocketAddr;
+use std::os::fd::OwnedFd;
+use std::time::SystemTime;
+
+use crate::conn::{Connection, FeedResult, SptpsEvent};
+use crate::invitation_serve::InvitePhase;
+use crate::outgoing::{OutgoingId, ProxyConfig};
+use crate::proto::{
+    DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, record_body,
+    send_ack,
+};
+use crate::script::ScriptEnv;
+use crate::tunnel::MTU;
+use crate::{invitation_serve, script, socks};
+
+use rand_core::OsRng;
+use tinc_event::Io;
+use tinc_proto::Request;
 
 /// `Again`: caller should loop (kernel may have more). `Done`: stop.
 enum FeedDrain {

@@ -1,7 +1,22 @@
 #![forbid(unsafe_code)]
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::{ConnId, Daemon, ForwardingMode};
+
+use crate::graph_glue::{Transition, run_graph};
+use crate::listen::fmt_addr;
+use crate::node_id::NodeId6;
+use crate::proto::{
+    DispatchError, parse_add_edge, parse_add_subnet, parse_del_edge, parse_del_subnet,
+};
+use crate::tunnel::{MTU, TunnelState, make_udp_label};
+use crate::{compress, local_addr};
+
+use rand_core::{OsRng, RngCore};
+use tinc_crypto::sign::SigningKey;
+use tinc_graph::{EdgeId, NodeId};
+use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, ReqKey, SubnetMsg};
+use tinc_proto::{AddrStr, Request, Subnet};
+use tinc_sptps::{Framing, Role, Sptps};
 
 impl Daemon {
     /// Lookup-or-add fused. Does NOT add a `NodeState` — transitives
