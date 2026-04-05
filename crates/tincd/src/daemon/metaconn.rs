@@ -91,7 +91,6 @@ impl Daemon {
 
     /// One `recv()` + dispatch. Splitting would thread id/conn/self
     /// borrows.
-    #[allow(clippy::too_many_lines)] // ID-handler piggyback (Peer/Invitation arms) needs to early-return FeedDrain on terminate(); the line-drain loop is the remaining bulk
     fn on_conn_readable_once(&mut self, id: ConnId) -> FeedDrain {
         let conn = self.conns.get_mut(id).expect("checked contains_key");
         match conn.feed(&mut OsRng) {
@@ -163,141 +162,10 @@ impl Daemon {
 
             // ─── handler dispatch
             let (result, needs_write) = match req {
-                Request::Id => {
-                    // `id_h`. The clones aren't strictly needed (disjoint
-                    // fields vs &mut self.conns) but cheap; keep for now.
-                    let cookie = self.cookie.clone();
-                    let my_name = self.name.clone();
-                    let confbase = self.confbase.clone();
-                    let ctx = IdCtx {
-                        cookie: &cookie,
-                        my_name: &my_name,
-                        mykey: &self.mykey,
-                        confbase: &confbase,
-                        invitation_key: self.invitation_key.as_ref(),
-                        global_pmtu: self.settings.global_pmtu,
-                    };
-                    let now = self.timers.now();
-                    match handle_id(conn, &line, &ctx, now, &mut OsRng) {
-                        Ok(IdOk::Control { needs_write }) => (DispatchResult::Ok, needs_write),
-                        Ok(IdOk::Peer { needs_write, init }) => {
-                            // SPTPS-start: queue init Wire (KEX),
-                            // take_rest from inbuf, re-feed (the
-                            // id-line piggyback), dispatch.
-                            let mut nw = needs_write;
-                            for o in init {
-                                if let tinc_sptps::Output::Wire { bytes, .. } = o {
-                                    nw |= conn.send_raw(&bytes);
-                                }
-                                // sptps_start only emits Wire.
-                            }
-
-                            // feed_sptps is an associated fn taking
-                            // &mut Sptps directly (borrow split).
-                            let leftover = conn.inbuf.take_rest();
-                            let outs = if leftover.is_empty() {
-                                Vec::new()
-                            } else {
-                                let sptps = conn
-                                    .sptps
-                                    .as_deref_mut()
-                                    .expect("handle_id_peer just installed it");
-                                match Connection::feed_sptps(
-                                    sptps, &leftover, &conn.name, &mut OsRng,
-                                ) {
-                                    FeedResult::Sptps(evs) => evs
-                                        .into_iter()
-                                        .map(|ev| match ev {
-                                            SptpsEvent::Record(o) => o,
-                                            SptpsEvent::Blob(_) => {
-                                                unreachable!("feed_sptps emits Record only")
-                                            }
-                                        })
-                                        .collect(),
-                                    FeedResult::Dead => {
-                                        log::error!(
-                                            target: "tincd::proto",
-                                            "SPTPS error in piggyback from {}",
-                                            conn.name
-                                        );
-                                        self.terminate(id);
-                                        return FeedDrain::Done;
-                                    }
-                                    _ => unreachable!(),
-                                }
-                            };
-
-                            if self.dispatch_sptps_outputs(id, outs) {
-                                nw = true;
-                            }
-                            if !self.conns.contains_key(id) {
-                                return FeedDrain::Done;
-                            }
-
-                            (DispatchResult::Ok, nw)
-                        }
-                        Ok(IdOk::Invitation { needs_write, init }) => {
-                            // Same shape as Peer; the difference is
-                            // `conn.invite` so dispatch_sptps_outputs
-                            // early-branches.
-                            conn.invite = Some(InvitePhase::WaitingCookie);
-
-                            let mut nw = needs_write;
-                            for o in init {
-                                if let tinc_sptps::Output::Wire { bytes, .. } = o {
-                                    nw |= conn.send_raw(&bytes);
-                                }
-                            }
-
-                            let leftover = conn.inbuf.take_rest();
-                            let outs = if leftover.is_empty() {
-                                Vec::new()
-                            } else {
-                                let sptps = conn
-                                    .sptps
-                                    .as_deref_mut()
-                                    .expect("handle_id Invitation just installed it");
-                                match Connection::feed_sptps(
-                                    sptps, &leftover, &conn.name, &mut OsRng,
-                                ) {
-                                    FeedResult::Sptps(evs) => evs
-                                        .into_iter()
-                                        .map(|ev| match ev {
-                                            SptpsEvent::Record(o) => o,
-                                            SptpsEvent::Blob(_) => {
-                                                unreachable!("feed_sptps emits Record only")
-                                            }
-                                        })
-                                        .collect(),
-                                    FeedResult::Dead => {
-                                        log::error!(
-                                            target: "tincd::proto",
-                                            "SPTPS error in invitation piggyback from {}",
-                                            conn.hostname
-                                        );
-                                        self.terminate(id);
-                                        return FeedDrain::Done;
-                                    }
-                                    _ => unreachable!(),
-                                }
-                            };
-
-                            if self.dispatch_sptps_outputs(id, outs) {
-                                nw = true;
-                            }
-                            if !self.conns.contains_key(id) {
-                                return FeedDrain::Done;
-                            }
-
-                            (DispatchResult::Ok, nw)
-                        }
-                        Err(e) => {
-                            log::error!(target: "tincd::proto",
-                                        "ID rejected from {}: {e:?}", conn.name);
-                            (DispatchResult::Drop, false)
-                        }
-                    }
-                }
+                Request::Id => match self.dispatch_request_id(id, &line) {
+                    Some(r) => r,
+                    None => return FeedDrain::Done, // terminated mid-handshake
+                },
                 Request::Control => self.dispatch_control(id, &line),
                 _ => {
                     // allow_request gates to ID/CONTROL; shouldn't fire.
@@ -346,10 +214,116 @@ impl Daemon {
         FeedDrain::Again
     }
 
+    /// `Request::Id` arm: build `IdCtx`, call `handle_id`, then drain
+    /// the SPTPS-init piggyback.
+    ///
+    /// `handle_id` itself is pure (in `proto.rs`); the piggyback is
+    /// the messy part. SPTPS-start emits the first KEX as `Output::Wire`.
+    /// We queue that, then `take_rest` from inbuf — the peer often
+    /// sends ID + KEX in one TCP segment, and the bytes after the
+    /// ID-line newline are now SPTPS framing, not protocol lines.
+    /// Re-feed those through `feed_sptps` immediately.
+    ///
+    /// `Peer` and `Invitation` cases are the same shape; the only
+    /// per-case bits are `conn.invite = Some(...)` for invitations
+    /// and which name field goes in the error log.
+    ///
+    /// Returns `None` if the conn was terminated (SPTPS error in
+    /// piggyback, or `dispatch_sptps_outputs` killed it). Caller
+    /// must `return FeedDrain::Done`.
+    fn dispatch_request_id(&mut self, id: ConnId, line: &[u8]) -> Option<(DispatchResult, bool)> {
+        // The clones aren't strictly needed (disjoint fields vs &mut
+        // self.conns) but cheap; keep for now.
+        let cookie = self.cookie.clone();
+        let my_name = self.name.clone();
+        let confbase = self.confbase.clone();
+        let ctx = IdCtx {
+            cookie: &cookie,
+            my_name: &my_name,
+            mykey: &self.mykey,
+            confbase: &confbase,
+            invitation_key: self.invitation_key.as_ref(),
+            global_pmtu: self.settings.global_pmtu,
+        };
+        let now = self.timers.now();
+
+        let conn = self.conns.get_mut(id).expect("dispatched from live conn");
+        let id_result = handle_id(conn, line, &ctx, now, &mut OsRng);
+
+        let (needs_write, init, is_invite) = match id_result {
+            Ok(IdOk::Control { needs_write }) => return Some((DispatchResult::Ok, needs_write)),
+            Ok(IdOk::Peer { needs_write, init }) => (needs_write, init, false),
+            Ok(IdOk::Invitation { needs_write, init }) => {
+                conn.invite = Some(InvitePhase::WaitingCookie);
+                (needs_write, init, true)
+            }
+            Err(e) => {
+                log::error!(target: "tincd::proto",
+                            "ID rejected from {}: {e:?}", conn.name);
+                return Some((DispatchResult::Drop, false));
+            }
+        };
+
+        // ─── SPTPS-init piggyback (Peer + Invitation common path)
+        // Queue the init Wire frames (sptps_start emits KEX-only).
+        let mut nw = needs_write;
+        for o in init {
+            if let tinc_sptps::Output::Wire { bytes, .. } = o {
+                nw |= conn.send_raw(&bytes);
+            }
+        }
+
+        // take_rest: bytes after the ID-line newline are SPTPS now,
+        // not protocol lines. feed_sptps is an associated fn taking
+        // &mut Sptps directly (borrow split: &mut conn.sptps + &conn.name).
+        let leftover = conn.inbuf.take_rest();
+        let outs = if leftover.is_empty() {
+            Vec::new()
+        } else {
+            let log_name = if is_invite {
+                conn.hostname.clone()
+            } else {
+                conn.name.clone()
+            };
+            let sptps = conn
+                .sptps
+                .as_deref_mut()
+                .expect("handle_id just installed it");
+            match Connection::feed_sptps(sptps, &leftover, &conn.name, &mut OsRng) {
+                FeedResult::Sptps(evs) => evs
+                    .into_iter()
+                    .map(|ev| match ev {
+                        SptpsEvent::Record(o) => o,
+                        SptpsEvent::Blob(_) => unreachable!("feed_sptps emits Record only"),
+                    })
+                    .collect(),
+                FeedResult::Dead => {
+                    log::error!(
+                        target: "tincd::proto",
+                        "SPTPS error in {}piggyback from {}",
+                        if is_invite { "invitation " } else { "" },
+                        log_name
+                    );
+                    self.terminate(id);
+                    return None;
+                }
+                _ => unreachable!(),
+            }
+        };
+
+        if self.dispatch_sptps_outputs(id, outs) {
+            nw = true;
+        }
+        if !self.conns.contains_key(id) {
+            return None;
+        }
+
+        Some((DispatchResult::Ok, nw))
+    }
+
     /// CONTROL request dispatch. Dump arms: build rows with `&self`
     /// borrowed, drop it, re-fetch `&mut conn`, then `send_dump`
     /// writes rows + the bare-header terminator.
-    #[allow(clippy::too_many_lines)] // one arm per ctl subcommand; each is a self-contained build-rows-then-send block
     fn dispatch_control(&mut self, id: ConnId, line: &[u8]) -> (DispatchResult, bool) {
         let conn = self.conns.get_mut(id).expect("dispatched from live conn");
         let (r, nw) = handle_control(conn, line);
@@ -606,7 +580,6 @@ impl Daemon {
         FeedDrain::Again
     }
 
-    #[allow(clippy::too_many_lines)] // request-dispatch table is half of it; each arm is a one-liner protocol handler
     pub(super) fn dispatch_sptps_outputs(
         &mut self,
         id: ConnId,
@@ -915,7 +888,6 @@ impl Daemon {
 
     /// Records dispatch by `(type, InvitePhase)`, NOT `check_gate` —
     /// the bytes are file chunks and b64 pubkeys, not request lines.
-    #[allow(clippy::too_many_lines)] // cookie→file→chunk→send shares hostname/conn_addr/used_path across phases
     pub(super) fn dispatch_invitation_outputs(
         &mut self,
         id: ConnId,
