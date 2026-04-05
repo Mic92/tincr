@@ -66,7 +66,7 @@ pub const OPTION_CLAMP_MSS: u32 = ConnOptions::CLAMP_MSS.bits();
 
 /// `myself->options` with all-defaults (no `IndirectData`/`TCPOnly`/etc
 /// in tinc.conf). All-defaults falls through every `get_config_bool`:
-/// PMTU + CLAMP_MSS + PROT_MINOR<<24. Daemon `setup()`
+/// PMTU + `CLAMP_MSS` + `PROT_MINOR`<<24. Daemon `setup()`
 /// uses [`myself_options_from_config`]; this const is a test fixture.
 #[cfg(test)]
 fn myself_options_default() -> ConnOptions {
@@ -75,7 +75,7 @@ fn myself_options_default() -> ConnOptions {
 
 /// Build `myself->options` from global config. Called once at
 /// `setup()`. Returns the GLOBAL defaults that per-host
-/// `IndirectData`/`TCPOnly`/`ClampMSS` (read at id_h time,
+/// `IndirectData`/`TCPOnly`/`ClampMSS` (read at `id_h` time,
 /// `5ceb8011`) OR against in [`send_ack`].
 ///
 /// Implication chain:
@@ -295,7 +295,7 @@ pub enum IdOk {
     Control { needs_write: bool },
     /// Peer ID accepted, SPTPS installed. Daemon must: queue `init` to
     /// outbuf, `inbuf.take_rest()` + re-feed (same TCP segment may carry
-    /// initiator's KEX), then IO_WRITE. `needs_write` reflects ONLY the
+    /// initiator's KEX), then `IO_WRITE`. `needs_write` reflects ONLY the
     /// `send_id` line; OR with `send_raw`'s result.
     Peer {
         needs_write: bool,
@@ -622,7 +622,7 @@ fn id_invitation(
 /// later read, stash them on `conn`, return the pubkey.
 ///
 /// Upstream retains `c->config_tree` through `ack_h`; we extract
-/// eagerly so the `Config` HashMap drops here instead of riding the
+/// eagerly so the `Config` `HashMap` drops here instead of riding the
 /// connection. C distinguishes file-missing (`:428` "unknown identity")
 /// from file-has-no-key; we collapse — either way you `tinc import`.
 fn load_peer_host_config(

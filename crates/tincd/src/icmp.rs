@@ -155,13 +155,13 @@ pub fn build_v4_unreachable(
 
 // ── IPv6 unreachable ───────────────────────────────────────────────
 
-/// Max bytes of the original IPv6 datagram quoted in the ICMPv6 body.
+/// Max bytes of the original IPv6 datagram quoted in the `ICMPv6` body.
 /// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
 pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
 /// `route_ipv6_unreachable`. RFC 4443.
 ///
-/// Same shape as [`build_v4_unreachable`] but the ICMPv6 checksum
+/// Same shape as [`build_v4_unreachable`] but the `ICMPv6` checksum
 /// includes a pseudo-header (RFC 4443 §2.3 → RFC 2460 §8.1):
 /// src/dst addrs + upper-layer length + next-hdr.
 /// Uses [`Ipv6Pseudo`].
@@ -501,7 +501,7 @@ mod tests {
     // ─── IPv6
 
     /// Hand-built original v6 frame: eth + IPv6(UDP) + 8-byte UDP.
-    /// fe80::1 → fe80::99
+    /// `fe80::1` → `fe80::99`
     fn v6_orig_frame() -> Vec<u8> {
         let mut f = Vec::new();
         f.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]); // eth dst
@@ -575,7 +575,7 @@ mod tests {
         );
     }
 
-    /// PACKET_TOO_BIG sets `icmp6_mtu`. Bytes 4-7 of the ICMPv6
+    /// `PACKET_TOO_BIG` sets `icmp6_mtu`. Bytes 4-7 of the `ICMPv6`
     /// hdr, BE u32.
     #[test]
     fn v6_pkt_too_big_sets_mtu() {
@@ -594,7 +594,7 @@ mod tests {
         assert!(build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE], 1, 0, None, None).is_some());
     }
 
-    /// v6 TTL-exceeded source override. Override becomes ip6_src
+    /// v6 TTL-exceeded source override. Override becomes `ip6_src`
     /// AND feeds the pseudo-header checksum.
     #[test]
     fn v6_src_override() {

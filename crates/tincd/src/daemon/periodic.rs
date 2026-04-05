@@ -247,7 +247,7 @@ impl Daemon {
     }
 
     /// Fires `tinc-up`. Idempotent via `device_enabled`: called on
-    /// every graph run where reachable_count went 0→>0; the flag
+    /// every graph run where `reachable_count` went 0→>0; the flag
     /// dedups.
     pub(super) fn device_enable(&mut self) {
         if self.device_enabled {
@@ -258,7 +258,7 @@ impl Daemon {
     }
 
     /// Fires `tinc-down`. Mirror of `device_enable`. Called when the
-    /// last peer becomes unreachable (DeviceStandby mode).
+    /// last peer becomes unreachable (`DeviceStandby` mode).
     pub(super) fn device_disable(&mut self) {
         if !self.device_enabled {
             return;
@@ -268,7 +268,7 @@ impl Daemon {
     }
 
     /// Single-subnet script. The loop-all path is inlined in
-    /// BecameReachable. We always pass the weight integer (more
+    /// `BecameReachable`. We always pass the weight integer (more
     /// useful than an empty string; scripts guard anyway).
     pub(super) fn run_subnet_script(&self, up: bool, owner: &str, subnet: &Subnet) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
@@ -346,7 +346,7 @@ impl Daemon {
         self.timers.set(self.age_timer, Duration::from_secs(10));
     }
 
-    /// Expire learned MAC subnets. Lazy-armed by learn_mac.
+    /// Expire learned MAC subnets. Lazy-armed by `learn_mac`.
     /// 10s = sweep frequency; macexpire (600s) = lease duration.
     pub(super) fn on_age_subnets(&mut self) {
         let now = self.timers.now();
@@ -454,7 +454,7 @@ impl Daemon {
 
     /// False if config re-read failed; daemon continues either way.
     ///
-    /// NOT reloadable: Port, AddressFamily, DeviceType (need re-bind/
+    /// NOT reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
     #[allow(clippy::too_many_lines)] // sequential apply of disjoint config sections; splitting would scatter the "what's reloadable" picture
     pub(super) fn reload_configuration(&mut self) -> bool {
@@ -631,7 +631,7 @@ impl Daemon {
     ///
     /// We arm this timer even though it's traditionally a legacy-
     /// crypto concern: `outseqno` is the ChaCha20-Poly1305 nonce and
-    /// wraps at u32::MAX with no check. Rekeying every `keylifetime`
+    /// wraps at `u32::MAX` with no check. Rekeying every `keylifetime`
     /// seconds keeps it well clear.
     pub(super) fn on_keyexpire(&mut self) {
         log::info!(target: "tincd", "Expiring symmetric keys");

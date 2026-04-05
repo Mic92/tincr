@@ -24,7 +24,7 @@ fn config_get_name() {
 }
 
 /// THE regression: `tinc add ConnectTo bob` then `tinc add ConnectTo
-/// carol` must result in TWO ConnectTo lines. ConnectTo is MULTIPLE.
+/// carol` must result in TWO `ConnectTo` lines. `ConnectTo` is MULTIPLE.
 /// The buggy single-adapter would route both adds to SET, and the
 /// second one would delete the first.
 #[test]
@@ -48,7 +48,7 @@ fn config_add_is_not_set() {
 }
 
 /// `tinc del ConnectTo` (no value) deletes all. Proves the `del`
-/// argv → Action::Del dispatch (the filtered-del *logic* is unit-
+/// argv → `Action::Del` dispatch (the filtered-del *logic* is unit-
 /// covered in `config.rs::del_filtered`).
 #[test]
 fn config_del_all() {
@@ -120,7 +120,7 @@ fn config_set_survives_fsck() {
 }
 
 /// Post-edit opportunistic reload: real fake daemon receives the
-/// REQ_RELOAD. Same harness as `ctl_reload_against_fake_daemon`
+/// `REQ_RELOAD`. Same harness as `ctl_reload_against_fake_daemon`
 /// but the reload is triggered by `tinc set`, not `tinc reload`.
 ///
 /// Proves the `let _ = ctl_simple::reload(paths)` line in the binary

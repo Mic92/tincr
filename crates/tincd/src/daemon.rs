@@ -65,7 +65,7 @@ new_key_type! {
 #[derive(Debug, Clone)]
 pub struct NodeState {
     /// Our edge to this peer. `terminate_connection` deletes +
-    /// broadcasts DEL_EDGE.
+    /// broadcasts `DEL_EDGE`.
     pub edge: Option<EdgeId>,
     /// Direct connection. None = known but not directly connected.
     pub conn: Option<ConnId>,
@@ -73,7 +73,7 @@ pub struct NodeState {
     pub edge_addr: Option<SocketAddr>,
     /// Avg of RTTs, ms.
     pub edge_weight: i32,
-    /// Top byte = peer's PROT_MINOR.
+    /// Top byte = peer's `PROT_MINOR`.
     pub edge_options: crate::proto::ConnOptions,
 }
 
@@ -147,7 +147,7 @@ pub(crate) struct ListenerSlot {
     /// `UdpEgress` for this listener's UDP socket. Phase 0
     /// (`RUST_REWRITE_10G.md`): always `Portable` (count × sendto,
     /// same wire output as the direct `udp.send_to` it replaced).
-    /// Phase 1 swaps `linux::Fast` (UDP_SEGMENT cmsg) on Linux.
+    /// Phase 1 swaps `linux::Fast` (`UDP_SEGMENT` cmsg) on Linux.
     /// `Box<dyn>`: vtable indirect per-BATCH (~20k/s @ 10G × 2ns
     /// ≈ nothing). Lives here, not in a parallel `Vec`, because
     /// the `sock` index already picks the slot - one fewer
@@ -219,7 +219,7 @@ pub struct Daemon {
     /// Stored once here, borrowed into each `IdCtx`.
     pub(crate) confbase: PathBuf,
 
-    /// Our options bitfield (PROT_MINOR in top byte). Built from
+    /// Our options bitfield (`PROT_MINOR` in top byte). Built from
     /// global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS` at
     /// `setup()`.
     pub(crate) myself_options: crate::proto::ConnOptions,
@@ -233,7 +233,7 @@ pub struct Daemon {
     /// walk. Split from runtime annotation - see `NodeState` doc.
     ///
     /// `myself` is added at setup. Transitively-known nodes are
-    /// added by `lookup_or_add_node` from ADD_EDGE/ADD_SUBNET
+    /// added by `lookup_or_add_node` from `ADD_EDGE/ADD_SUBNET`
     /// handlers. The graph crate has no name→id reverse lookup -
     /// that's `node_ids` below.
     pub(crate) graph: Graph,
@@ -251,7 +251,7 @@ pub struct Daemon {
     /// the edge/subnet handlers compare against this.
     pub(crate) myself: NodeId,
 
-    /// The routing table. ADD_SUBNET inserts, DEL_SUBNET removes,
+    /// The routing table. `ADD_SUBNET` inserts, `DEL_SUBNET` removes,
     /// `route_ipv4` reads, `dump subnets` walks.
     pub(crate) subnets: SubnetTree,
 
@@ -273,7 +273,7 @@ pub struct Daemon {
     ///
     /// Only DIRECTLY-connected peers get a `NodeState` (via
     /// `on_ack`). Transitively-known nodes (learned from forwarded
-    /// ADD_EDGE) are graph-only.
+    /// `ADD_EDGE`) are graph-only.
     ///
     /// Keyed by `NodeId`: tincd never calls `Graph::del_node`, so
     /// any `NodeId` is always live. Keying by the `Copy` ID kills
@@ -318,7 +318,7 @@ pub struct Daemon {
     /// our world-view diverged from the mesh's badly enough that
     /// gossip won't converge.
     pub(crate) contradicting_add_edge: u32,
-    /// Same, for DEL_EDGE: peer says we DON'T have an edge we DO have.
+    /// Same, for `DEL_EDGE`: peer says we DON'T have an edge we DO have.
     pub(crate) contradicting_del_edge: u32,
 
     /// Seconds the periodic handler blocks for when contradicting-
@@ -336,9 +336,9 @@ pub struct Daemon {
     /// ALL unreachable destinations.
     pub(crate) icmp_ratelimit: icmp::IcmpRateLimit,
 
-    /// Per-daemon compression workspace. Currently a ZST (lz4_flex
+    /// Per-daemon compression workspace. Currently a ZST (`lz4_flex`
     /// is stateless, zlib one-shot per call); kept as a struct so
-    /// adding persistent z_stream state doesn't churn wire-up sites.
+    /// adding persistent `z_stream` state doesn't churn wire-up sites.
     pub(crate) compressor: compress::Compressor,
 
     /// Reused send-side scratch for the UDP data path. `seal_data_into`
@@ -530,7 +530,7 @@ pub struct Daemon {
 
     /// Expiry tracker for OUR learned MACs (those owned by
     /// `myself`). NOT all MAC subnets - peers' learned MACs are in
-    /// `mac_table` (via gossip ADD_SUBNET) but not here. Lifecycles
+    /// `mac_table` (via gossip `ADD_SUBNET`) but not here. Lifecycles
     /// kept separate (see `mac_lease.rs` doc).
     pub(crate) mac_leases: mac_lease::MacLeases,
 
@@ -568,7 +568,7 @@ pub struct Daemon {
 
     /// Loaded from `confbase/invitations/ed25519_key.priv`. `None`
     /// when no invitations have been issued (the file doesn't
-    /// exist) - the `?` greeting is then rejected at id_h.
+    /// exist) - the `?` greeting is then rejected at `id_h`.
     /// Re-loaded on SIGHUP.
     pub(crate) invitation_key: Option<SigningKey>,
 
@@ -841,7 +841,7 @@ mod tests {
     }
 
     /// Rate limit on the Unreachable arm. Max 3/sec. Can't
-    /// construct a full `Daemon` (SelfPipe singleton); test the
+    /// construct a full `Daemon` (`SelfPipe` singleton); test the
     /// `IcmpRateLimit` directly with the same `freq=3` the daemon
     /// uses. The wiring (daemon-uptime-secs as the key) is
     /// exercised by the `real_tun_unreachable` netns test.
@@ -859,7 +859,7 @@ mod tests {
     }
 
     /// `periodic_handler` backoff arithmetic. Can't construct a
-    /// full `Daemon` (SelfPipe is process-singleton); test the math
+    /// full `Daemon` (`SelfPipe` is process-singleton); test the math
     /// on a fake. The function is
     /// extracted so the storm-detection arithmetic is checkable
     /// without sleeping.
@@ -896,7 +896,7 @@ mod tests {
         assert_eq!(step(101, 101, 3600), (3600, Duration::from_secs(3600)));
     }
 
-    /// The IoWhat enum has all six variants. Compile-time check:
+    /// The `IoWhat` enum has all six variants. Compile-time check:
     /// adding a 7th without updating `run()` won't compile.
     #[test]
     fn iowhat_variant_census() {

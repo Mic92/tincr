@@ -175,7 +175,7 @@ Subnets:      10.0.1.0/24
 /// on unknown node.
 /// — BEFORE the second sendline.
 ///
-/// The fake daemon asserts NO second request arrives (read_line
+/// The fake daemon asserts NO second request arrives (`read_line`
 /// would block; we drop the socket after the nodes terminator and
 /// the test thread's daemon-side join confirms it returned).
 #[test]

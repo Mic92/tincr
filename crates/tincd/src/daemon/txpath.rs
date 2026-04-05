@@ -134,8 +134,8 @@ impl Daemon {
     }
 
     /// Type-2 reply: length in bytes [1..3], wire packet is
-    /// MIN_PROBE_SIZE. The receive path stashed udp_addr already, so
-    /// choose_udp_address sends the reply back the way it came.
+    /// `MIN_PROBE_SIZE`. The receive path stashed `udp_addr` already, so
+    /// `choose_udp_address` sends the reply back the way it came.
     pub(super) fn send_udp_probe_reply(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
         let mut body = vec![0u8; usize::from(pmtu::MIN_PROBE_SIZE)];
         body[0] = 2;
@@ -193,8 +193,8 @@ impl Daemon {
     /// 2. `route_packet` Forward arm: once per forwarded packet,
     ///    `mtu=true`. Drives PMTU discovery.
     ///
-    /// Chain: REQ_KEY if needed → via deref → try_udp (probe send)
-    /// → try_mtu (PMTU tick).
+    /// Chain: `REQ_KEY` if needed → via deref → `try_udp` (probe send)
+    /// → `try_mtu` (PMTU tick).
     ///
     /// Via-recursion: recurse on relay if `via != target`. Finite:
     /// via-chain is the sssp tree (acyclic).
@@ -483,7 +483,7 @@ impl Daemon {
     /// EVERY hosts/-file name goes into the graph even with no edge
     /// to us — a `has_address && !reachable` node is exactly
     /// autoconnect's eligible-to-dial set. Without the graph add it'd
-    /// be invisible to decide().
+    /// be invisible to `decide()`.
     ///
     /// strictsubnets: preload Subnet= lines so the lookup-first gate
     /// in `on_add_subnet` finds them; only unauthorized subnets fall
@@ -545,7 +545,7 @@ impl Daemon {
     // ─── autoconnect ────────────────────────────────────────────
 
     /// Build snapshot, call `autoconnect::decide`. Nodes sorted by
-    /// name: decide() indexes by position (`prng(count)` then walk-
+    /// name: `decide()` indexes by position (`prng(count)` then walk-
     /// to-index).
     pub(super) fn decide_autoconnect(&self) -> AutoAction {
         let mut names: Vec<&str> = self.node_ids.keys().map(String::as_str).collect();
@@ -848,7 +848,7 @@ impl Daemon {
         conn.send(format_args!("{}", msg.format()))
     }
 
-    /// No static-relay deref unlike UDP_INFO.
+    /// No static-relay deref unlike `UDP_INFO`.
     pub(super) fn send_mtu_info(
         &mut self,
         to_nid: NodeId,
@@ -1071,12 +1071,12 @@ impl Daemon {
         }
     }
 
-    /// Three modes: send_locally → choose_local from edge_addrs
-    /// [2,3]; udp_confirmed → stashed addr; otherwise 1-in-3 cycle:
+    /// Three modes: `send_locally` → `choose_local` from `edge_addrs`
+    /// [2,3]; `udp_confirmed` → stashed addr; otherwise 1-in-3 cycle:
     /// 2 of 3 calls explore an edge addr, 3rd uses reflexive — probes
-    /// both even when udp_addr is set but unconfirmed (NAT hairpin).
+    /// both even when `udp_addr` is set but unconfirmed (NAT hairpin).
     ///
-    /// adapt_socket folded in (dual-stack: v6 target needs v6 socket).
+    /// `adapt_socket` folded in (dual-stack: v6 target needs v6 socket).
     /// `&mut self` for the cycle counter.
     pub(super) fn choose_udp_address(&mut self, to_nid: NodeId) -> Option<(SocketAddr, u8)> {
         let listener_addrs: Vec<SocketAddr> =
@@ -1133,9 +1133,9 @@ impl Daemon {
         Some((addr, sock))
     }
 
-    /// io_set ReadWrite for any conn with nonempty outbuf. Device-read
-    /// / udp-recv paths queue on meta-conns without a ConnId in scope.
-    /// STUB(chunk-11-perf): track touched ConnIds instead of sweeping.
+    /// `io_set` `ReadWrite` for any conn with nonempty outbuf. Device-read
+    /// / udp-recv paths queue on meta-conns without a `ConnId` in scope.
+    /// STUB(chunk-11-perf): track touched `ConnIds` instead of sweeping.
     pub(super) fn maybe_set_write_any(&mut self) {
         let dirty: Vec<ConnId> = self
             .conns

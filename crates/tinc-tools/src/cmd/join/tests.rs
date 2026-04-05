@@ -329,7 +329,7 @@ fn finalize_no_name() {
     assert!(msg.contains("No Name"));
 }
 
-/// Invalid name → bail. Same check_id as everywhere else.
+/// Invalid name → bail. Same `check_id` as everywhere else.
 #[test]
 fn finalize_bad_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -362,7 +362,7 @@ fn finalize_existing_tinc_conf() {
 
 // server_receive_cookie — the daemon stub
 
-/// Full server-side flow on a real invitation file from invite().
+/// Full server-side flow on a real invitation file from `invite()`.
 #[test]
 fn server_stub_recovers_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -425,8 +425,8 @@ fn server_stub_single_use() {
 
 // The CONTRACT TEST: full invite ↔ join roundtrip, in-process
 
-/// **The contract.** invite() writes a file → server stub reads
-/// it → SPTPS ping-pong → finalize_join writes a confbase →
+/// **The contract.** `invite()` writes a file → server stub reads
+/// it → SPTPS ping-pong → `finalize_join` writes a confbase →
 /// the confbase loads. No subprocess. No real socket. Two
 /// `Sptps` structs ping-ponging.
 ///

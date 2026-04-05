@@ -15,7 +15,7 @@
 //!   then can't flood; switch learning still works for known MACs.
 //!
 //! C also checks `tunnelserver` (`:1622`) — MST might be invalid in
-//! tunnelserver mode (filtered ADD_EDGE). Daemon-side gate.
+//! tunnelserver mode (filtered `ADD_EDGE`). Daemon-side gate.
 //!
 //! ## What's NOT here
 //!
@@ -46,7 +46,7 @@ pub enum BroadcastMode {
 /// `nodes` map (`NodeState{conn, edge}`).
 ///
 /// `mst` is the `Vec<EdgeId>` from `tinc_graph::mst()`. Convert to a
-/// set for O(1) membership; ≤ conn count elements so HashSet is fine.
+/// set for O(1) membership; ≤ conn count elements so `HashSet` is fine.
 ///
 /// `from_conn`: the connection the packet ARRIVED on
 /// (`from->nexthop->connection`). `None` for locally-originated

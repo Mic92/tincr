@@ -21,7 +21,7 @@
 //!     `recv()`s, coalesce two `send()`s into one `recv()`, deliver
 //!     short reads. The SPTPS stream framing has to survive that. The
 //!     in-process test pumps whole records.
-//!   - **The poll() loop** — the actual binary entry point, fd
+//!   - **The `poll()` loop** — the actual binary entry point, fd
 //!     plumbing, EOF detection. No way to unit-test that without
 //!     spawning the binary.
 //!
@@ -65,7 +65,6 @@
 #![warn(clippy::pedantic)]
 // Backticking proper nouns reads like a ransom note. Same allow as
 // tinc-crypto/tinc-sptps.
-#![allow(clippy::doc_markdown)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -352,7 +351,7 @@ fn payload() -> Vec<u8> {
 }
 
 /// Common scenario: gen two keypairs, push `data`, diff against what
-/// the server received. The (server_impl, client_impl) pair is the
+/// the server received. The (`server_impl`, `client_impl`) pair is the
 /// independent variable. Returns true if it ran, false if it skipped
 /// (C binary not available).
 ///

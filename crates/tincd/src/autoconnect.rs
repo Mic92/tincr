@@ -360,8 +360,8 @@ mod tests {
     }
 
     /// Exactly 3 conns, no pending, no unreachable → Noop.
-    /// Neither <3 nor >3 fires; cancel_pending has nothing;
-    /// connect_to_unreachable rolls but finds only reachable nodes.
+    /// Neither <3 nor >3 fires; `cancel_pending` has nothing;
+    /// `connect_to_unreachable` rolls but finds only reachable nodes.
     #[test]
     fn noop_at_exactly_3() {
         let nodes = vec![
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(act, AutoAction::Noop);
     }
 
-    /// 5 active outgoing conns, all peers multi-homed (edge_count
+    /// 5 active outgoing conns, all peers multi-homed (`edge_count`
     /// >= 2). Must Disconnect one.
     #[test]
     fn disconnect_when_over_3() {
@@ -487,9 +487,9 @@ mod tests {
         }
     }
 
-    /// Over 3, but every peer has edge_count == 1 (we're their only
+    /// Over 3, but every peer has `edge_count` == 1 (we're their only
     /// link). Can't drop any without isolating. With no pending
-    /// either, falls through to connect_to_unreachable, which finds
+    /// either, falls through to `connect_to_unreachable`, which finds
     /// only reachable nodes → Noop.
     #[test]
     fn disconnect_skips_single_homed() {
@@ -513,7 +513,7 @@ mod tests {
     }
 
     /// 4 active (over 3), all single-homed (can't drop), but 2 pending.
-    /// → CancelPending fires.
+    /// → `CancelPending` fires.
     #[test]
     fn cancel_pending_when_over_3() {
         let nodes = vec![
@@ -536,7 +536,7 @@ mod tests {
     }
 
     /// THE design intent test. 100 nodes, 1 unreachable. At exactly 3
-    /// conns (so neither <3 nor >3 fires), connect_to_unreachable runs
+    /// conns (so neither <3 nor >3 fires), `connect_to_unreachable` runs
     /// every tick. P(connect) = 1/100 per tick. 1000 ticks → expect
     /// ~10. Binomial(1000, 0.01): mean 10, σ ≈ 3.15. Loose bounds.
     #[test]
@@ -634,7 +634,7 @@ mod tests {
     }
 
     /// Exactly 3 conns, but a pending outgoing exists. C calls
-    /// drop_superfluous_pending unconditionally after the <3
+    /// `drop_superfluous_pending` unconditionally after the <3
     /// early-return — so at nc==3 it fires. Cancel it.
     #[test]
     fn cancel_pending_at_exactly_3() {
@@ -660,8 +660,8 @@ mod tests {
         );
     }
 
-    /// Disconnect filters: an inbound conn (directly_connected but NOT
-    /// in active_outgoing_conns) is never picked for Disconnect, even
+    /// Disconnect filters: an inbound conn (`directly_connected` but NOT
+    /// in `active_outgoing_conns`) is never picked for Disconnect, even
     /// if multi-homed.
     #[test]
     fn disconnect_never_picks_inbound() {

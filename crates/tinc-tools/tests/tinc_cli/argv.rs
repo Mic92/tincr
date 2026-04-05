@@ -86,7 +86,7 @@ fn network_list_doesnt_panic() {
 }
 
 /// Help output doesn't list `help` or `version` (recursive). The
-/// `help: ""` empty string makes print_help skip them.
+/// `help: ""` empty string makes `print_help` skip them.
 #[test]
 fn help_does_not_list_itself() {
     let out = tinc(&["help"]);
@@ -162,7 +162,7 @@ fn unknown_option_exits_nonzero() {
 /// `NETNAME` in env, also pass `-c`, expect the "Both netname and
 /// configuration directory given" warning. The warning is emitted by
 /// `Paths::for_cli` *iff* `input.netname.is_some()`. If the env var
-/// wasn't being read, `netname` would be `None` (we env_remove'd it
+/// wasn't being read, `netname` would be `None` (we `env_remove`'d it
 /// from inheritance) and there'd be no warning.
 #[test]
 fn netname_env_reaches_paths() {

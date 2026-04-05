@@ -149,7 +149,7 @@ pub struct JoinResult {
 /// single-use cookie on the daemon side.
 ///
 /// # Errors
-/// - `BadInput`: bad URL, daemon greeting wrong, key_hash mismatch,
+/// - `BadInput`: bad URL, daemon greeting wrong, `key_hash` mismatch,
 ///   blob parse failed.
 /// - `Io`: connect/read/write failed, fs writes from `finalize_join`.
 ///

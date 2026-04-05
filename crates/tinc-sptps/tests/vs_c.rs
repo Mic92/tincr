@@ -31,7 +31,7 @@
 //! `randomize()` call. ...also overkill.
 //!
 //! Actually the simplest thing: **make the Rust RNG match the C's stream
-//! by using the same `ChaCha` primitive**. The C shim uses tinc's vendored
+//! by using the same ChaCha primitive**. The C shim uses tinc's vendored
 //! `chacha.c` (DJB `ChaCha20`, 64-bit counter, 8-byte nonce). `tinc-crypto`
 //! already wraps that exact variant in `ChaPoly` — but that's an AEAD, not
 //! a raw stream. The underlying `chacha20::ChaCha20Legacy` *is* the right

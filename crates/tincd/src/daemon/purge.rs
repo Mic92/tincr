@@ -49,8 +49,8 @@ impl Daemon {
     /// See module doc.
     ///
     /// Called from:
-    /// - REQ_PURGE ctl arm
-    /// - `on_del_edge` after a DEL_EDGE makes `to` unreachable —
+    /// - `REQ_PURGE` ctl arm
+    /// - `on_del_edge` after a `DEL_EDGE` makes `to` unreachable —
     ///   see `gossip.rs` callsite comment.
     ///
     /// Returns `needs_write` from the gossip broadcasts (pass 1) so

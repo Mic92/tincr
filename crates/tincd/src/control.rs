@@ -273,7 +273,7 @@ mod tests {
     }
 
     /// Two cookies differ. (Probability of collision: 2^-256.
-    /// If this fails, OsRng is broken.)
+    /// If this fails, `OsRng` is broken.)
     #[test]
     fn cookies_differ() {
         assert_ne!(generate_cookie(), generate_cookie());

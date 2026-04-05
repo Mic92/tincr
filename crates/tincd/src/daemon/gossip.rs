@@ -34,12 +34,12 @@ impl Daemon {
         id
     }
 
-    /// Start per-tunnel SPTPS as initiator; send KEX via REQ_KEY.
+    /// Start per-tunnel SPTPS as initiator; send KEX via `REQ_KEY`.
     ///
     /// `Sptps::start` returns `Vec<Output>`. First Wire goes via
-    /// REQ_KEY; subsequent (none from start()) would go via ANS_KEY.
+    /// `REQ_KEY`; subsequent (none from `start()`) would go via `ANS_KEY`.
     ///
-    /// REQ_PUBKEY: hard-errored. Operator provisions `hosts/{to}`.
+    /// `REQ_PUBKEY`: hard-errored. Operator provisions `hosts/{to}`.
     pub(super) fn send_req_key(&mut self, to_nid: NodeId) -> bool {
         let Some(to_name) = self.graph.node(to_nid).map(|n| n.name.clone()) else {
             return false;
@@ -121,10 +121,10 @@ impl Daemon {
         nw
     }
 
-    /// Per-tunnel SPTPS responder side. REQ_KEY is heavily
+    /// Per-tunnel SPTPS responder side. `REQ_KEY` is heavily
     /// overloaded; `to == myself` + `ext.reqno == REQ_KEY` ⇒ peer
     /// initiating SPTPS ⇒ start as responder, feed their KEX.
-    /// REQ_PUBKEY/ANS_PUBKEY: hard-error.
+    /// `REQ_PUBKEY/ANS_PUBKEY`: hard-error.
     #[allow(clippy::too_many_lines)] // relay path, SPTPS_PACKET deliver, SPTPS-init responder — three disjoint protocols multiplexed on one request type
     pub(super) fn on_req_key(
         &mut self,
@@ -645,7 +645,7 @@ impl Daemon {
         self.seen.check(s, self.timers.now())
     }
 
-    /// Dedup nonce. OsRng (overkill, but linked + not hot).
+    /// Dedup nonce. `OsRng` (overkill, but linked + not hot).
     pub(super) fn nonce() -> u32 {
         OsRng.next_u32()
     }
@@ -707,7 +707,7 @@ impl Daemon {
     /// Returns `None` if edge or addr entry missing — the
     /// synthesized reverse from `on_ack` has no addr; skip rather
     /// than emit `"unknown port unknown"` (peers would parse to
-    /// AF_UNKNOWN, never connect).
+    /// `AF_UNKNOWN`, never connect).
     pub(super) fn fmt_add_edge(&self, eid: EdgeId, nonce: u32) -> Option<String> {
         let e = self.graph.edge(eid)?;
         let (addr, port, la, lp) = self.edge_addrs.get(&eid)?;
@@ -929,7 +929,7 @@ impl Daemon {
 
     /// 21 fields per row; CLI parses 22 (`" port "` re-split).
     /// Placeholders: cipher/digest/maclength=0 (legacy-only);
-    /// last_state_change=0 (deferred). status bitfield: bit 4
+    /// `last_state_change=0` (deferred). status bitfield: bit 4
     /// reachable feeds CLI's filter.
     pub(super) fn dump_nodes_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
@@ -1011,7 +1011,7 @@ impl Daemon {
     }
 
     /// 6 body fields; CLI parses 8 (two `" port "` re-splits).
-    /// `edge_addrs` stores raw AddrStr tokens; format as `"%s port %s"`.
+    /// `edge_addrs` stores raw `AddrStr` tokens; format as `"%s port %s"`.
     pub(super) fn dump_edges_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         // Order differs from a tree walk; tincctl sorts client-side
@@ -1045,7 +1045,7 @@ impl Daemon {
     }
 
     /// Walk all known nodes (not just tunnels): includes myself +
-    /// unreachables. Nodes without a TunnelState emit zeros.
+    /// unreachables. Nodes without a `TunnelState` emit zeros.
     pub(super) fn dump_traffic_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         for nid in self.graph.node_ids() {
@@ -1067,7 +1067,7 @@ impl Daemon {
         rows
     }
 
-    /// Subnets don't change topology — NO graph() call.
+    /// Subnets don't change topology — NO `graph()` call.
     pub(super) fn on_add_subnet(
         &mut self,
         from_conn: ConnId,
@@ -1185,7 +1185,7 @@ impl Daemon {
     }
 
     /// DEL for unknown owner/subnet is warn-and-drop (NOT
-    /// lookup_or_add).
+    /// `lookup_or_add`).
     pub(super) fn on_del_subnet(
         &mut self,
         from_conn: ConnId,
@@ -1281,8 +1281,8 @@ impl Daemon {
         Ok(nw)
     }
 
-    /// Edge exists with different params ⇒ update in place (Graph::
-    /// update_edge keeps EdgeId slot stable; edge_addrs is keyed on
+    /// Edge exists with different params ⇒ update in place (`Graph::`
+    /// `update_edge` keeps `EdgeId` slot stable; `edge_addrs` is keyed on
     /// it).
     pub(super) fn on_add_edge(
         &mut self,
@@ -1392,7 +1392,7 @@ impl Daemon {
         Ok(nw)
     }
 
-    /// Missing node/edge is warn-and-drop (NOT lookup_or_add).
+    /// Missing node/edge is warn-and-drop (NOT `lookup_or_add`).
     pub(super) fn on_del_edge(
         &mut self,
         from_conn: ConnId,

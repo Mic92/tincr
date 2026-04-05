@@ -19,7 +19,7 @@ use nix::errno::Errno;
 use nix::sys::socket::{MsgFlags, recvmmsg};
 
 impl Daemon {
-    /// accept → tarpit-check → configure_tcp → allocate → register.
+    /// accept → tarpit-check → `configure_tcp` → allocate → register.
     pub(in crate::daemon) fn on_tcp_accept(&mut self, i: u8) {
         let listener = &self.listeners[usize::from(i)].listener;
 
@@ -101,7 +101,7 @@ impl Daemon {
     /// "direct to you".
     ///
     /// We're EPOLLET, so a full batch (64 returned) means "maybe
-    /// more" → rearm so the next turn() picks them up after the rest
+    /// more" → rearm so the next `turn()` picks them up after the rest
     /// of the event loop runs. Same drain semantics as the old
     /// `recv_from` loop's `UDP_DRAIN_CAP=64` (bug audit `deef1268`):
     /// 64 packets per turn, then yield to TUN-read/meta-conn/timers.

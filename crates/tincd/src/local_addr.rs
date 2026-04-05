@@ -1,7 +1,7 @@
 //! `choose_local_address` + `adapt_socket`: LAN-direct UDP address
 //! selection.
 //!
-//! ADD_EDGE carries TWO addresses: the WAN-visible one (`e->address`, what
+//! `ADD_EDGE` carries TWO addresses: the WAN-visible one (`e->address`, what
 //! the peer's `accept()` saw) and the local one (`e->local_address`,
 //! what `getsockname()` on the connecting end returned — see
 //! `daemon/connect.rs:192-210`). For two nodes behind the same
@@ -23,8 +23,8 @@
 //!
 //! ## What's NOT here
 //!
-//! `n->status.send_locally` flag — daemon's TunnelState. The `try_udp` probe
-//! loop — `daemon/txpath.rs`. Reflexive ANS_KEY append/consume —
+//! `n->status.send_locally` flag — daemon's `TunnelState`. The `try_udp` probe
+//! loop — `daemon/txpath.rs`. Reflexive `ANS_KEY` append/consume —
 //! `daemon/gossip.rs` `on_ans_key`.
 #![forbid(unsafe_code)]
 
@@ -142,7 +142,7 @@ pub fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// `sockaddr2str` shape for the ANS_KEY append. Dotted-quad / RFC-5952 v6.
+/// `sockaddr2str` shape for the `ANS_KEY` append. Dotted-quad / RFC-5952 v6.
 /// `IpAddr::Display` matches.
 #[must_use]
 pub fn format_addr_port(sa: &SocketAddr) -> (String, String) {

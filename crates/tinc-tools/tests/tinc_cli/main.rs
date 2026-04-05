@@ -30,8 +30,6 @@
 //! but not the other would slip through `cross_pem_read` but get
 //! caught here.
 
-#![allow(clippy::doc_markdown)]
-
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

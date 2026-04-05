@@ -1,6 +1,6 @@
 use super::{bare_dir, init_dir, tinc, tinc_stdin};
 
-/// `export` without `init` first → fails (no tinc.conf, can't get_my_name).
+/// `export` without `init` first → fails (no tinc.conf, can't `get_my_name`).
 #[test]
 fn export_no_config() {
     let (_dir, cb) = bare_dir();

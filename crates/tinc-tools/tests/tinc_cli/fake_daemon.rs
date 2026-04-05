@@ -31,7 +31,7 @@ pub(crate) fn fake_daemon_setup() -> (
     (dir, cb_s, pidfile_s, listener, cookie)
 }
 
-/// Serves the greeting + handshake. Returns (BufReader, write-handle).
+/// Serves the greeting + handshake. Returns (`BufReader`, write-handle).
 /// The closure pattern from existing tests, hoisted.
 pub(crate) fn serve_greeting<'a>(
     stream: &'a std::os::unix::net::UnixStream,

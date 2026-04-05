@@ -43,7 +43,7 @@ pub struct DaemonSettings {
     /// asleep, every peer has given up on us, force-close all conns
     /// to avoid sending into stale SPTPS contexts. Default 30.
     pub udp_discovery_timeout: u32,
-    /// `Compression = N` config knob. Advertised in ANS_KEY; peers
+    /// `Compression = N` config knob. Advertised in `ANS_KEY`; peers
     /// compress TOWARDS us at this level. Default 0 (none). 1-9
     /// zlib, 12 LZ4; 10-11 LZO (stubbed, rejected at setup).
     pub compression: u8,
@@ -60,7 +60,7 @@ pub struct DaemonSettings {
     pub udp_discovery_keepalive_interval: u32,
     /// Hub-mode: don't gossip indirect topology. Our direct peers
     /// learn each other only by us telling them; they can't learn
-    /// each other's far-side neighbors. ADD/DEL_EDGE/SUBNET are
+    /// each other's far-side neighbors. `ADD/DEL_EDGE/SUBNET` are
     /// filtered (drop if neither endpoint is us or a direct peer)
     /// and not forwarded.
     ///
@@ -69,9 +69,9 @@ pub struct DaemonSettings {
     /// AND doesn't trust direct peers to claim arbitrary subnets.
     pub tunnelserver: bool,
     /// The operator's `hosts/NAME` files become the AUTHORITY for
-    /// which subnets each node owns. ADD_SUBNET gossip for subnets
+    /// which subnets each node owns. `ADD_SUBNET` gossip for subnets
     /// not in the file is ignored (forwarded, not added locally).
-    /// DEL_SUBNET for subnets that ARE in the file is ignored.
+    /// `DEL_SUBNET` for subnets that ARE in the file is ignored.
     ///
     /// Implied by `tunnelserver`. `load_all_nodes` preloads the
     /// authorized subnets at startup; lookup-first means authorized
@@ -137,9 +137,9 @@ pub struct DaemonSettings {
     /// Seconds. Debounce for `send_udp_info` (only when WE
     /// originate). Default 5.
     pub udp_info_interval: u32,
-    /// Seconds. Separate debounce from UDP_INFO. Default 5.
+    /// Seconds. Separate debounce from `UDP_INFO`. Default 5.
     pub mtu_info_interval: u32,
-    /// Seconds. The KeyExpire timer fires at this interval and
+    /// Seconds. The `KeyExpire` timer fires at this interval and
     /// forces an SPTPS rekey on every tunnel with `validkey`.
     /// Default 3600.
     ///
@@ -200,7 +200,7 @@ pub struct DaemonSettings {
     // Chunk 4+: ~32 more fields.
 }
 
-/// Three-way forwarding knob. `Internal` gates the SPTPS_PACKET
+/// Three-way forwarding knob. `Internal` gates the `SPTPS_PACKET`
 /// relay; `Kernel` is checked at the top of `route_packet`:
 /// anything from a peer goes straight to the TUN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -285,7 +285,7 @@ impl Default for DaemonSettings {
 
 /// Parse the reloadable subset of settings from `config`. Called
 /// from `setup()` AND `reload_configuration()`. Non-reloadable
-/// settings (Port, AddressFamily, DeviceType) are NOT here - they
+/// settings (Port, `AddressFamily`, `DeviceType`) are NOT here - they
 /// need re-bind / re-open which `setup()` does inline.
 #[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
 pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
@@ -523,8 +523,8 @@ pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
 /// Parse the non-reloadable settings from `config` into a fresh
 /// `DaemonSettings`. Called once from `setup()`. Reloadable settings
 /// are folded in via `apply_reloadable_settings`; the rest (Port,
-/// AddressFamily, Mode, sockopts, Proxy, Compression, Forwarding,
-/// DHT, DeviceStandby) need re-bind / re-open and are setup-only.
+/// `AddressFamily`, Mode, sockopts, Proxy, Compression, Forwarding,
+/// DHT, `DeviceStandby`) need re-bind / re-open and are setup-only.
 #[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
 pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
     let mut settings = DaemonSettings::default();

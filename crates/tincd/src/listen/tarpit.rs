@@ -65,7 +65,7 @@ pub struct Tarpit {
     max_burst: u32,
 
     /// `pits[10]`. Tarpitted fds. Ring buffer. Option because the
-    /// slot is empty until first eviction. OwnedFd because Drop
+    /// slot is empty until first eviction. `OwnedFd` because Drop
     /// closes — `closesocket(pits[next_pit])` on eviction; we get
     /// that via `mem::replace` dropping the old value.
     pits: [Option<OwnedFd>; PIT_SIZE],
@@ -266,12 +266,12 @@ mod tests {
     /// - conn 1 (A): prev=None, no match. sh=0. ah=1.
     /// - conn 2..9 (A): prev=A, match. sh ticks: 1,2,...,8. ah: 2..9.
     /// - conn 10 (A): sh=9. ah=10, >=10, PITTED by all-host. ah clamped
-    ///   at 10. prev_addr was updated (prev_sa update is BEFORE the
+    ///   at 10. `prev_addr` was updated (`prev_sa` update is BEFORE the
     ///   all-host check, AFTER the same-host check).
     /// - conn 11 (A): sh=10. >10? no. ah: 10-0+1=11, >=10, PITTED by
     ///   all-host. Clamped at 10 again.
     /// - conn 12 (A): sh=11. >10? YES. PITTED BY SAME-HOST. Early
-    ///   return: ah stays at 10, prev_addr stays A.
+    ///   return: ah stays at 10, `prev_addr` stays A.
     /// - conn 13 (A): sh=12. Same-host pit again. ah STILL 10.
     /// - conn 14 (B) at t=2: prev=A, no match. sh stays 12. ah: 10-2=8,
     ///   refill to 9. PASSES.
@@ -446,7 +446,7 @@ mod tests {
 
     // ─── Tarpit: pit ring buffer
 
-    /// /dev/null fd. Dup'd because we want distinct OwnedFd's that
+    /// /dev/null fd. Dup'd because we want distinct `OwnedFd`'s that
     /// each genuinely close on drop. `OwnedFd::try_clone` returns a
     /// fresh fd (dup).
     fn nullfd() -> OwnedFd {
@@ -478,7 +478,7 @@ mod tests {
     /// Drop closes everything. We can verify the drop actually runs
     /// by counting open fds before/after, but that's brittle (other
     /// tests in the same process open fds). Instead: verify the
-    /// destructure doesn't panic. The actual close is OwnedFd's
+    /// destructure doesn't panic. The actual close is `OwnedFd`'s
     /// contract (which std tests).
     #[test]
     fn pit_drop_is_clean() {

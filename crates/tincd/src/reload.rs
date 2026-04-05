@@ -33,14 +33,14 @@
 //!   deltas. Cold-start preload in
 //!   `load_all_nodes` is sufficient for the integration test.
 //!
-//! What IS here: the three diffs (subnets, ConnectTo, conn-mtime) as
+//! What IS here: the three diffs (subnets, `ConnectTo`, conn-mtime) as
 //! pure functions.
 //!
 //! ## Reload boundary
 //!
 //! The serial wire-up will NOT re-run `setup()` — `setup()` is
 //! one-shot (creates listeners, opens TUN). The reloadable subset is
-//! settings + subnets + ConnectTo + conn-revoke. The daemon re-reads
+//! settings + subnets + `ConnectTo` + conn-revoke. The daemon re-reads
 //! config, calls these diff functions, applies the deltas.
 //!
 //! `last_config_check` initializes to daemon-start time. The first
@@ -99,7 +99,7 @@ pub fn diff_subnets<S: BuildHasher>(
 
 /// `try_outgoing_connections` mark-sweep + re-kick.
 ///
-/// `current`: ConnectTo names with active outgoings.
+/// `current`: `ConnectTo` names with active outgoings.
 /// `from_config`: `ConnectTo =` lines in re-read tinc.conf.
 ///
 /// Returns `(to_add, to_remove)`. `to_add` → daemon calls
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(out, vec!["bob".to_string()]);
     }
 
-    /// `>`, not `>=`. mtime == last_check → KEEP.
+    /// `>`, not `>=`. mtime == `last_check` → KEEP.
     /// One-second granularity caveat: see module doc.
     #[test]
     fn conns_to_terminate_mtime_exactly_equal() {

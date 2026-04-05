@@ -16,7 +16,7 @@ fn mkconn() -> Connection {
     Connection::test_with_fd(nullfd())
 }
 
-/// IdCtx for tests not reaching the peer pubkey load. `OnceLock`
+/// `IdCtx` for tests not reaching the peer pubkey load. `OnceLock`
 /// for `'static` lifetime. `confbase="."` → pubkey load fails;
 /// tests reaching it use `PeerSetup`.
 fn mkctx(cookie: &str) -> IdCtx<'_> {
@@ -337,7 +337,7 @@ fn tcp_label_has_trailing_nul() {
     assert_eq!(&label[..], b"tinc TCP key expansion alice bob\0");
 }
 
-/// Always (initiator, responder). Swap → BadSig.
+/// Always (initiator, responder). Swap → `BadSig`.
 #[test]
 fn tcp_label_order_matters() {
     let a = tcp_label("alice", "bob");
@@ -443,7 +443,7 @@ fn control_dump_traffic() {
     assert!(!nw);
 }
 
-/// REQ_LOG: parse level.
+/// `REQ_LOG`: parse level.
 #[test]
 fn control_log() {
     let mut c = mkconn();
@@ -596,7 +596,7 @@ fn myself_options_empty_config() {
 /// `TCPOnly = yes` sets TCPONLY
 /// and INDIRECT (`:391` implication), and `:442` `choice =
 /// !(options & OPTION_TCPONLY)` makes the PMTU default off.
-/// ClampMSS unaffected (`:449` default on).
+/// `ClampMSS` unaffected (`:449` default on).
 #[test]
 fn myself_options_tcponly_implies_indirect_clears_pmtu() {
     let opts = myself_options_from_config(&cfg(&["TCPOnly = yes"]));
@@ -610,7 +610,7 @@ fn myself_options_tcponly_implies_indirect_clears_pmtu() {
 
 /// `IndirectData = yes` standalone: only INDIRECT, defaults
 /// otherwise. PMTU default `:442` is `!(options & TCPONLY)` =
-/// true; ClampMSS `:449` true.
+/// true; `ClampMSS` `:449` true.
 #[test]
 fn myself_options_indirect_only() {
     let opts = myself_options_from_config(&cfg(&["IndirectData = yes"]));
@@ -643,9 +643,9 @@ fn myself_options_clamp_mss_off() {
 // by `tests/stop.rs::peer_ack_exchange`.
 
 /// Per-host `TCPOnly = yes` sets
-/// TCPONLY|INDIRECT and CLEARS PMTU_DISCOVERY. The load-bearing
+/// TCPONLY|INDIRECT and CLEARS `PMTU_DISCOVERY`. The load-bearing
 /// fix from gap-audit `bcc5c3e3`: previously inherited PMTU bit
-/// stuck, peer wasted udp_discovery_timeout probing a path the
+/// stuck, peer wasted `udp_discovery_timeout` probing a path the
 /// user told us is broken.
 #[test]
 fn send_ack_per_host_tcponly_clears_pmtu() {
@@ -664,7 +664,7 @@ fn send_ack_per_host_tcponly_clears_pmtu() {
     assert!(line.ends_with(" 700000b\n"), "got {line:?}");
 }
 
-/// ClampMSS per-host overrides global
+/// `ClampMSS` per-host overrides global
 /// (not OR'd). `ClampMSS = no` in hosts/NAME clears it even though
 /// the daemon default is on.
 #[test]
@@ -679,7 +679,7 @@ fn send_ack_per_host_clamp_mss_overrides() {
 
 /// `IndirectData = yes` per-host. The
 /// `&& choice` means `= no` in hosts/NAME does NOT clear a global
-/// INDIRECT (asymmetric with ClampMSS).
+/// INDIRECT (asymmetric with `ClampMSS`).
 #[test]
 fn send_ack_per_host_indirect() {
     let mut c = mkconn();
@@ -747,7 +747,7 @@ fn send_ack_per_host_beats_global() {
 }
 
 /// Per-host AND global PMTU both
-/// clamp (min wins). NOT a fallback. The match in handle_id.
+/// clamp (min wins). NOT a fallback. The match in `handle_id`.
 #[test]
 fn pmtu_cap_is_min_of_host_and_global() {
     // The `[a, b].into_iter().flatten().min()` idiom. Direct

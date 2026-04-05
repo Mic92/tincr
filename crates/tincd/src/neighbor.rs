@@ -102,7 +102,7 @@ pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
 // ── NDP ────────────────────────────────────────────────────────────
 
 /// Returns `nd_ns_target` iff: long enough, `ip6_nxt == ICMPV6`,
-/// type 135, opt-type ok, and **ICMPv6 checksum verifies**.
+/// type 135, opt-type ok, and **`ICMPv6` checksum verifies**.
 /// Hop-limit (RFC 4861
 /// §7.1.1) is the kernel's job. We add the `ip6_nxt` check (C gets
 /// it from route dispatch; we're freestanding).
@@ -161,9 +161,9 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// Eth: dst←orig-src, src←orig-src⊕FF. Ip6: dst←orig-src,
 /// src←target (hlim untouched; kernel set 255, RFC 4861 §7.2.2).
 /// Icmp6: type←ADVERT, reserved←Solicited.
-/// Opt: type←TARGET_LLADDR, lladdr←fake MAC (`:904`).
+/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC (`:904`).
 ///
-/// `:895` decrement_ttl: gated at the daemon callsite (`handle_ndp`)
+/// `:895` `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
 /// before this fn is called — keeps this module pure.
 #[must_use]
 pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
@@ -341,7 +341,7 @@ mod tests {
 
     // ── NDP fixtures ──────────────────────────────────────────────
 
-    /// Valid NS with SOURCE_LLADDR opt + correct checksum.
+    /// Valid NS with `SOURCE_LLADDR` opt + correct checksum.
     fn mk_ndp_solicit(target: Ipv6Addr) -> Vec<u8> {
         let eth_src = [0x02, 0, 0, 0, 0, 0x01];
         let ip_src: Ipv6Addr = "fe80::1".parse().unwrap();

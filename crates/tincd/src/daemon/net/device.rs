@@ -17,7 +17,7 @@ impl Daemon {
     /// `device.drain(&mut arena, cap)` returning N frames in arena
     /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
     /// byte the same syscall sequence on bsd/linux/fd backends. The
-    /// seam is in place for Phase 2 (vnet_hdr device returns `Super`).
+    /// seam is in place for Phase 2 (`vnet_hdr` device returns `Super`).
     #[allow(clippy::too_many_lines)] // three drain-result arms; the
     // `Super` arm is the Phase-2a TSO-split path. Factoring it out
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
@@ -466,7 +466,7 @@ impl Daemon {
         }
     }
 
-    /// Ship the GRO bucket. `bucket.flush()` finalizes vnet_hdr +
+    /// Ship the GRO bucket. `bucket.flush()` finalizes `vnet_hdr` +
     /// IP totlen/csum; `device.write_super` is a raw fd write.
     /// `Unsupported` here means `gro_enabled` was wrong at setup
     /// (the gate is supposed to make this unreachable). Log at

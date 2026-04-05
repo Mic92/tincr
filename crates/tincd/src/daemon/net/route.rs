@@ -11,7 +11,7 @@ use tinc_proto::{Request, Subnet};
 
 impl Daemon {
     /// `from`: `None` = device read; `Some` = peer. Returns the
-    /// io_set signal.
+    /// `io_set` signal.
     pub(in crate::daemon) fn route_packet(
         &mut self,
         data: &mut [u8],
@@ -174,8 +174,8 @@ impl Daemon {
         nw
     }
 
-    /// New source MAC on TAP → Subnet::Mac + broadcast ADD_SUBNET +
-    /// arm age_subnets timer.
+    /// New source MAC on TAP → `Subnet::Mac` + broadcast `ADD_SUBNET` +
+    /// arm `age_subnets` timer.
     fn learn_mac(&mut self, mac: route_mac::Mac) -> bool {
         log::info!(target: "tincd::net",
                    "Learned new MAC address \

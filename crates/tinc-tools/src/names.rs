@@ -603,7 +603,7 @@ mod tests {
 
     /// `unix_socket` derivation: `.pid` → `.socket` substitution.
     /// Tests the string surgery in isolation by setting pidfile
-    /// directly via PathsInput (no fs probe).
+    /// directly via `PathsInput` (no fs probe).
     #[test]
     fn unix_socket_dot_pid_replaced() {
         let mut p = Paths::for_cli(&PathsInput {

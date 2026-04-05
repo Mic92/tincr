@@ -127,7 +127,7 @@ impl PmtuState {
     ///
     /// `initial_maxmtu`: from `choose_initial_maxmtu`
     /// (`getsockopt(IP_MTU)`). With it, PMTU converges in ~1 RTT.
-    /// Without it (kernel lacks `IP_MTU`, or socket()/connect()
+    /// Without it (kernel lacks `IP_MTU`, or `socket()/connect()`
     /// fails), pass `MTU` and convergence takes ~10 probes (~3.3s at
     /// 333ms cadence) — `dispatch_route_result` gates the frag-needed
     /// check on `via_mtu != 0` during that window so we don't send

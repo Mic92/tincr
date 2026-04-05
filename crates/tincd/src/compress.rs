@@ -35,8 +35,8 @@
 //! 11); the latter stays stubbed. Decompress uses the shared
 //! `lzo1x_decompress_safe` for both — same wire format — so we can
 //! RECEIVE level-11 packets, just not SEND them. Asymmetric is fine:
-//! we advertise our compression in `ANS_KEY`; if we want LzoLo, peer
-//! sends LzoLo.
+//! we advertise our compression in `ANS_KEY`; if we want `LzoLo`, peer
+//! sends `LzoLo`.
 
 // Not `forbid`: the lzo module needs `unsafe` for FFI to vendored C.
 // All other code in this file remains safe; the unsafe is scoped to
@@ -118,7 +118,7 @@ impl Level {
 #[derive(Debug, Default)]
 pub struct Compressor {
     /// `lzo_wrkmem` (`tincd.c`: static `lzo_align_t lzo_wrkmem[...]`).
-    /// Lazy: `None` until first LzoLo compress. Boxed because 128KB
+    /// Lazy: `None` until first `LzoLo` compress. Boxed because 128KB
     /// on the stack is too much. `lzo_align_t` is a max-align union
     /// in C; Vec's heap allocation is sufficiently aligned (the
     /// global allocator returns at least `align_of::<usize>()`, and
@@ -293,8 +293,8 @@ mod lzo {
 
         /// `lzo_init()` is a macro wrapping this. First arg is
         /// `LZO_VERSION` (unsigned), the rest are `(int)sizeof(...)`
-        /// for short, int, long, lzo_uint32_t, lzo_uint, dict_t,
-        /// char*, void*, lzo_callback_t — runtime ABI check.
+        /// for short, int, long, `lzo_uint32_t`, `lzo_uint`, `dict_t`,
+        /// char*, void*, `lzo_callback_t` — runtime ABI check.
         fn __lzo_init_v2(
             v: c_uint,
             s_short: c_int,
@@ -658,7 +658,7 @@ mod tests {
     }
 
     /// And the other direction: OUR LZ4 output must decode with the
-    /// reference. We can't run liblz4 here, but lz4_flex's own
+    /// reference. We can't run liblz4 here, but `lz4_flex`'s own
     /// decompress IS the reference algorithm — block format has no
     /// encoder freedom for short literals. Spot-check that our output
     /// for a tiny input matches the C KAT byte-for-byte (LZ4 block

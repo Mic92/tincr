@@ -532,7 +532,7 @@ mod tests {
     }
 
     /// **The full rotation workflow.** This is what `genkey::run` does
-    /// to the private key file: disable_old_keys, then append a fresh
+    /// to the private key file: `disable_old_keys`, then append a fresh
     /// PEM. The result has one commented block and one live one.
     /// `tinc-conf::pem::read_pem` reads the live one (it skips
     /// `#`-comments — they're not `-----BEGIN`).

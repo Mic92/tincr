@@ -70,11 +70,11 @@ pub enum RouteResult<T> {
     /// Daemon logs + drops.
     Unsupported { reason: &'static str },
 
-    /// ICMPv6 type 135. Daemon synthesises Neighbor Advert
+    /// `ICMPv6` type 135. Daemon synthesises Neighbor Advert
     /// (`route_neighborsol`).
     NeighborSolicit,
 
-    /// `route_mac`: unknown dest MAC. RMODE_SWITCH only (router
+    /// `route_mac`: unknown dest MAC. `RMODE_SWITCH` only (router
     /// uses `Unreachable` instead). Daemon → `broadcast_packet`.
     Broadcast,
 
@@ -148,7 +148,7 @@ pub fn route_ipv4<T>(
 // route_ipv6
 
 /// Same shape as [`route_ipv4`]; differences: dst at offset 38,
-/// ICMPv6 codes, NDP divert, MTU check
+/// `ICMPv6` codes, NDP divert, MTU check
 /// uses `MAX(via->mtu, 1294)` (v6 forbids in-net frag, RFC 8200 §5).
 pub fn route_ipv6<T>(
     data: &[u8],
@@ -345,7 +345,7 @@ pub fn extract_tos(data: &[u8]) -> Option<u8> {
 // ────────────────────────────────────────────────────────────────────
 // route — top-level dispatch
 
-/// Ethertype dispatch (RMODE_ROUTER only).
+/// Ethertype dispatch (`RMODE_ROUTER` only).
 /// `data` is full eth frame; TUN synthesises the header in router mode.
 pub fn route<T>(
     data: &[u8],
@@ -387,7 +387,7 @@ mod tests {
     use super::*;
     use tinc_proto::Subnet;
 
-    /// 34-byte eth+IPv4; only ethertype and ip_dst set.
+    /// 34-byte eth+IPv4; only ethertype and `ip_dst` set.
     fn ipv4_packet(dst: Ipv4Addr) -> Vec<u8> {
         let mut p = vec![0u8; ETHER_SIZE + IP_SIZE];
         p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
@@ -449,7 +449,7 @@ mod tests {
 
     /// ownerless subnet → Broadcast. mDNS to
     /// 224.0.0.251, DHCP to 255.255.255.255. Before this fix, these
-    /// hit Unreachable{NET_UNKNOWN} — daemon ICMP-bounced its own
+    /// hit `Unreachable{NET_UNKNOWN`} — daemon ICMP-bounced its own
     /// kernel's multicast. Silent (mDNS doesn't surface ICMP).
     #[test]
     fn route_ipv4_broadcast_subnet() {
@@ -573,8 +573,8 @@ mod tests {
         );
     }
 
-    /// ownerless → Broadcast. NDP to ff02::1,
-    /// mDNS to ff02::fb. Before: Unreachable{DST_UNREACH_ADDR}.
+    /// ownerless → Broadcast. NDP to `ff02::1`,
+    /// mDNS to `ff02::fb`. Before: `Unreachable{DST_UNREACH_ADDR`}.
     #[test]
     fn route_ipv6_broadcast_subnet() {
         let mut t = SubnetTree::new();
@@ -685,7 +685,7 @@ mod tests {
     }
 
     /// Storm guard. Tests upstream's actual (buggy) offsets: [+11]
-    /// is ip_sum low byte not ip_p, but ported as-is.
+    /// is `ip_sum` low byte not `ip_p`, but ported as-is.
     #[test]
     fn decrement_ttl_v4_at_1_but_is_timeexceeded() {
         let mut p = vec![0u8; ETHER_SIZE + 33]; // need [ethlen+32]

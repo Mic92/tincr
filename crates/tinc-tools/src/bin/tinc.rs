@@ -32,7 +32,6 @@
 
 // Silence pedantic lints that fight CLI binary patterns. Same set as
 // sptps_test, same reasoning.
-#![allow(clippy::doc_markdown)]
 #![forbid(unsafe_code)]
 
 use std::env;
@@ -692,7 +691,7 @@ fn cmd_debug(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError
 
 /// `cmd_config` core. The `action` is decided by the caller — either
 /// from the toplevel command name (get/set/add/del adapters below)
-/// or from `tinc config <verb>` peeling (cmd_config_umbrella).
+/// or from `tinc config <verb>` peeling (`cmd_config_umbrella`).
 ///
 /// `args` here is everything AFTER the verb — `["Port", "655"]` for
 /// `tinc set Port 655`.
@@ -915,7 +914,7 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 ///
 /// `g.netname` for the row-0 header (`netname ? netname : ""`).
 /// This is the FIRST adapter to use Globals — the
-/// 4a/5b commands take `_: &Globals`. (cmd_invite uses it too, for
+/// 4a/5b commands take `_: &Globals`. (`cmd_invite` uses it too, for
 /// the URL fragment, but that's a Paths concern; this is pure
 /// display.)
 fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
@@ -1026,7 +1025,7 @@ fn cmd_network(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErr
 /// Upstream also accepts `tinc join` with no arg + tty prompt. We
 /// support stdin read (so `echo URL | tinc -c CONF join` works)
 /// but no tty prompt — same "no prompts" deviation as elsewhere.
-/// `--force` propagates to `finalize_join`'s VAR_SAFE override.
+/// `--force` propagates to `finalize_join`'s `VAR_SAFE` override.
 fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     use std::io::Read;
 

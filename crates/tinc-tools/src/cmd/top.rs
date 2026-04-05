@@ -29,7 +29,7 @@
 //! falls back to `na->i - nb->i` on ties. It's a stable-sort
 //! emulation for non-stable `qsort`. Rust's `slice::sort_by` IS
 //! stable, so we just sort `Stats::display_order` in place each
-//! frame (append-only on new nodes; not rebuilt from BTreeMap which
+//! frame (append-only on new nodes; not rebuilt from `BTreeMap` which
 //! would name-sort and undo prior stability).
 //!
 //! ## Daemon restart wraps to 18 quintillion, ported faithfully
@@ -112,7 +112,7 @@ impl TrafficRow {
 
 // Layer 2: state machine — `update()` + `sortfunc()`
 
-/// Per-node accumulator. MINUS the `name` (it's the BTreeMap key)
+/// Per-node accumulator. MINUS the `name` (it's the `BTreeMap` key)
 /// and MINUS the `i` (stable-sort emulation we don't need, see
 /// module doc).
 ///
@@ -150,7 +150,7 @@ pub struct Stats {
     /// Upstream uses a sorted list (linear search, insert-before
     /// to keep sorted); the daemon's `splay_each` iterates name-
     /// sorted so insert-before is amortized O(1) per row. We don't
-    /// bother with the trick — BTreeMap upsert is O(log n)
+    /// bother with the trick — `BTreeMap` upsert is O(log n)
     /// regardless of daemon ordering. Same outcome (entries name-
     /// sorted), simpler.
     ///
@@ -166,7 +166,7 @@ pub struct Stats {
     /// Why this matters: `slice::sort_by` is stable. Sorting THE
     /// SAME Vec means equal-key entries stay in their previous-
     /// frame positions. If we rebuilt from `nodes.keys()` each
-    /// frame, equal-key entries would be name-sorted (BTreeMap
+    /// frame, equal-key entries would be name-sorted (`BTreeMap`
     /// iteration), undoing stability.
     pub display_order: Vec<String>,
 
@@ -244,14 +244,14 @@ const SORTNAME: [&str; 7] = [
 
 impl Stats {
     /// One tick. Upstream's `update()` MINUS the I/O — caller sends
-    /// DUMP_TRAFFIC and collects rows; this merges them. Splitting
+    /// `DUMP_TRAFFIC` and collects rows; this merges them. Splitting
     /// the I/O from the merge makes the merge testable.
     ///
     /// `now` is a parameter so tests can feed deterministic
     /// instants. `run()` passes `Instant::now()`.
     ///
     /// Returns true if a new node appeared. The caller doesn't
-    /// actually need it (display_order is updated as a side effect),
+    /// actually need it (`display_order` is updated as a side effect),
     /// but it's the observable signal for "topology changed".
     #[allow(clippy::cast_precision_loss)] // u64 → f32. Loses precision past 2^24
     // (~16M), which a 1-second delta will only hit at 16M
@@ -685,7 +685,7 @@ fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
 /// without curses' double-buffer). Rows past `max_rows` are
 /// clipped (curses clips silently; we clip explicitly).
 ///
-/// Called AFTER `Stats::sort()` — display_order is in render order.
+/// Called AFTER `Stats::sort()` — `display_order` is in render order.
 ///
 /// `max_rows` is `winsize().rows`. Passed in (not queried here) so
 /// tests can give a small value and assert the clip.
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     /// `display_order` is append-only and reflects ARRIVAL order,
-    /// not name order. The BTreeMap sorts; the Vec doesn't. The
+    /// not name order. The `BTreeMap` sorts; the Vec doesn't. The
     /// Vec's job is to PERSIST order across sorts (stability), not
     /// to BE sorted on its own.
     #[test]
@@ -1331,7 +1331,7 @@ mod tests {
     /// `"Tinc %-16s  Nodes: %4d  Sort: %-10s  %s"`. Golden the
     /// row-0 portion.
     ///
-    /// `goto(0,0)` is `"\x1b[1;1H"`. Then the body. Then CLEAR_EOL
+    /// `goto(0,0)` is `"\x1b[1;1H"`. Then the body. Then `CLEAR_EOL`
     /// `"\x1b[K"`.
     #[test]
     fn render_header_row0_golden() {
@@ -1533,8 +1533,8 @@ mod tests {
     // mapping is the integration test's job (against fake daemon,
     // send 'i', assert sort changed).
 
-    /// key → sortmode discriminants. We can't run handle_key
-    /// (RawMode), but we CAN assert the SortMode discriminants
+    /// key → sortmode discriminants. We can't run `handle_key`
+    /// (`RawMode`), but we CAN assert the `SortMode` discriminants
     /// match what the key handlers assign.
     #[test]
     fn sortmode_discriminants_match_expected() {

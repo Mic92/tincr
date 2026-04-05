@@ -43,7 +43,7 @@ pub struct TunnelState {
     pub udp_addr_cached: Option<(socket2::SockAddr, u8)>,
 
     /// `n->status` (`node.h:59`). Unpacked (C bitfield is splay-node
-    /// memory squeeze; we have a HashMap).
+    /// memory squeeze; we have a `HashMap`).
     pub status: TunnelStatus,
 
     /// `n->last_req_key`. Debounce gate. `None` = `0` (always passes).
@@ -67,7 +67,7 @@ pub struct TunnelState {
     /// debounces.
     pub mtu_info_sent: Option<Instant>,
 
-    /// `n->outcompression`. Level PEER advertised in ANS_KEY; we
+    /// `n->outcompression`. Level PEER advertised in `ANS_KEY`; we
     /// compress TO them at this level.
     pub outcompression: u8,
 
@@ -164,9 +164,9 @@ impl TunnelState {
 
 impl TunnelStatus {
     /// Reconstruct `node_status_t.value` for `dump_nodes`.
-    /// GCC-LSB-first: bit 0 unused_active, 1 validkey,
+    /// GCC-LSB-first: bit 0 `unused_active`, 1 validkey,
     /// 2 waitingforkey, 3 visited†, 4 reachable(param), 5 indirect†,
-    /// 6 sptps, 7 udp_confirmed, 8 send_locally‡, 9 udppacket,
+    /// 6 sptps, 7 `udp_confirmed`, 8 `send_locally`‡, 9 udppacket,
     /// 10-12 omitted†. († always 0: graph scratch / unported.
     /// ‡ transient — 0 in practice between event-loop turns.)
     /// `reachable` is a param (owned by graph, not `TunnelStatus`).

@@ -173,7 +173,7 @@ fn open_any_one_or_two() {
     }
 }
 
-/// CLOEXEC set. socket2 does this via SOCK_CLOEXEC. C does it
+/// CLOEXEC set. socket2 does this via `SOCK_CLOEXEC`. C does it
 /// via separate fcntl. Either way: `script.c` children don't
 /// inherit.
 #[test]
@@ -264,7 +264,7 @@ fn open_udp_pmtudisc_do() {
 }
 
 /// Second listener pair on the same port: TCP bind fails (REUSEADDR
-/// only helps with TIME_WAIT, not active listeners). The fail is
+/// only helps with `TIME_WAIT`, not active listeners). The fail is
 /// graceful — `open_one` returns `None`, no panic.
 ///
 /// This is the "EADDRINUSE → continue" path (`:705`).
@@ -371,7 +371,7 @@ fn open_fwmark_set() {
 }
 
 /// `fwmark = 0` (default) means "don't set". Verify the syscall
-/// is skipped: SO_MARK readback is 0 even though we never called
+/// is skipped: `SO_MARK` readback is 0 even though we never called
 /// setsockopt. (Weak assertion — kernel default IS 0 — but
 /// proves we don't crash on the unprivileged path.)
 #[test]

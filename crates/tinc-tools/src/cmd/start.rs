@@ -16,7 +16,7 @@
 //!
 //! Why socketpair not pipe: upstream tees early-startup log lines
 //! through the umbilical too, so `tinc start` shows you what went
-//! wrong if setup fails. Our daemon doesn't tee logs (env_logger
+//! wrong if setup fails. Our daemon doesn't tee logs (`env_logger`
 //! has no hook), so we just get the nul byte. The drain loop here
 //! still passes any bytes it gets to stderr — forward-compat if
 //! log teeing lands, and cross-compat with the upstream tincd.
@@ -47,7 +47,6 @@
 //! override with `TINCD_PATH` env (our addition for `cargo nextest`,
 //! where the tincd binary lives in a different `target/` subdir).
 
-#![allow(clippy::doc_markdown)]
 #![cfg(unix)]
 
 use std::io::{IsTerminal, Read, Write};
@@ -282,7 +281,7 @@ mod tests {
     /// Daemon-not-running → proceed past the connect check, attempt
     /// spawn. With `TINCD_PATH=/bin/true`, spawn+wait succeed but
     /// `/bin/true` doesn't write the nul byte → `failure` stays true
-    /// → "Error starting". Proves: (a) PidfileMissing doesn't block
+    /// → "Error starting". Proves: (a) `PidfileMissing` doesn't block
     /// start, (b) the drain loop's last-byte logic works for the
     /// "no bytes at all" case.
     #[test]

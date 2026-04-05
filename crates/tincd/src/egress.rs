@@ -57,7 +57,7 @@ pub const UDP_MAX_SEGMENTS: u16 = 128;
 /// shrinks PMTU thinking it's a path-MTU failure → death spiral.
 /// `can_coalesce` must cap below this. Conservative: leave headroom
 /// for the outer UDP+IP headers (28 bytes IPv4, 48 IPv6) the kernel
-/// adds to `len` before the comparison. (Willem's UDP_SEGMENT design
+/// adds to `len` before the comparison. (Willem's `UDP_SEGMENT` design
 /// expects ~64 KB super-packets; the practical cap is here, not the
 /// 128-segment one.)
 const BATCH_MAX_BYTES: usize = 0xFFFF - 48;
@@ -415,7 +415,7 @@ mod tests {
     /// bytes except the last (`last_len`). Phase 0 doesn't exercise
     /// this (daemon always builds `count=1`), but the loop is here
     /// for Phase 1 — and it must be right NOW so we don't debug the
-    /// portable fallback while debugging UDP_SEGMENT.
+    /// portable fallback while debugging `UDP_SEGMENT`.
     #[test]
     fn portable_batch_splits_at_stride() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();

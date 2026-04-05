@@ -27,8 +27,6 @@
 //! `socket()` handles creation and atomic CLOEXEC; `bind(sockaddr_ll)`
 //! is hand-rolled (shim #6) since nix's `LinkAddr` is getters-only.
 
-#![allow(clippy::doc_markdown)]
-
 use std::io;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
@@ -43,9 +41,9 @@ const ETH_P_ALL: u16 = 0x0003;
 
 // RawSocket — the Device impl
 
-/// PF_PACKET raw socket device. TAP-only.
+/// `PF_PACKET` raw socket device. TAP-only.
 ///
-/// No `mac` field: `SIOCGIFHWADDR` isn't queried here. raw_socket
+/// No `mac` field: `SIOCGIFHWADDR` isn't queried here. `raw_socket`
 /// attaches to an EXISTING interface (sniffing, not hosting); the
 /// daemon doesn't originate ARP replies on a real segment.
 /// `mac() → None` is correct despite TAP mode — `linux::Tun` in TAP
@@ -295,9 +293,9 @@ impl Device for RawSocket {
         &self.iface
     }
 
-    /// No MAC. See struct comment: raw_socket is sniffing, not
+    /// No MAC. See struct comment: `raw_socket` is sniffing, not
     /// hosting. The route.c path that needs `mymac` doesn't
-    /// fire in switch mode (which raw_socket implies).
+    /// fire in switch mode (which `raw_socket` implies).
     fn mac(&self) -> Option<Mac> {
         None
     }
@@ -331,7 +329,7 @@ impl Device for RawSocket {
 // THAT'S when the factoring discussion reopens. Noted; deferred.)
 
 /// `read(2)` on the fd. Same as the other two; see `linux.rs`
-/// for the SAFETY argument. PF_PACKET sockets ARE datagram (one
+/// for the SAFETY argument. `PF_PACKET` sockets ARE datagram (one
 /// read = one frame, atomic) like TUN — the "the syscall IS the
 /// documentation" argument applies.
 #[allow(unsafe_code)]
@@ -433,10 +431,10 @@ mod tests {
     // open() gate — error path coverage without CAP_NET_RAW
 
     /// `open()` on a nonexistent interface: either EPERM
-    /// (socket() failed, no CAP_NET_RAW) or ENODEV (socket()
-    /// succeeded, if_nametoindex failed). Either way: error,
+    /// (`socket()` failed, no `CAP_NET_RAW`) or ENODEV (`socket()`
+    /// succeeded, `if_nametoindex` failed). Either way: error,
     /// not panic. The "no truncation" path is implicit — the
-    /// 23-char name passed straight to if_nametoindex which
+    /// 23-char name passed straight to `if_nametoindex` which
     /// errors on the FULL name.
     #[test]
     fn open_nonexistent_iface_errors() {
@@ -456,10 +454,10 @@ mod tests {
         );
     }
 
-    /// Empty interface name → if_nametoindex errors. The C's
+    /// Empty interface name → `if_nametoindex` errors. The C's
     /// `Interface = ` (empty) → strncpy of empty string →
     /// `ifr_name[0] = 0` → ioctl errors (kernel rejects empty
-    /// ifname). We hit the same error via if_nametoindex. Not
+    /// ifname). We hit the same error via `if_nametoindex`. Not
     /// stricter (both error); just verifying the path.
     #[test]
     fn open_empty_iface_errors() {
@@ -479,10 +477,10 @@ mod tests {
 
     /// The `sockaddr_ll` we'd pass to bind: zeroed except
     /// family/protocol/ifindex. Verify the layout matches what
-    /// the kernel expects (man 7 packet: "only sll_protocol and
-    /// sll_ifindex are used" + sll_family discriminant).
+    /// the kernel expects (man 7 packet: "only `sll_protocol` and
+    /// `sll_ifindex` are used" + `sll_family` discriminant).
     ///
-    /// We can't actually CALL bind (need CAP_NET_RAW + a real
+    /// We can't actually CALL bind (need `CAP_NET_RAW` + a real
     /// socket). But we can inspect the struct we'd pass.
     #[test]
     #[allow(unsafe_code)]
@@ -528,7 +526,7 @@ mod tests {
 
     /// Test fixture: a `RawSocket` wrapping one end of a
     /// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. Can't go through
-    /// `open()` (that does PF_PACKET, needs CAP_NET_RAW); we
+    /// `open()` (that does `PF_PACKET`, needs `CAP_NET_RAW`); we
     /// construct the struct directly.
     ///
     /// Module-private struct construction: `RawSocket { fd,

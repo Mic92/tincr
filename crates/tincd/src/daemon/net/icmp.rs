@@ -115,9 +115,9 @@ impl Daemon {
         }
     }
 
-    /// v4/v6 dispatch on ethertype, not icmp_type: ICMP_DEST_UNREACH
-    /// =3 collides with ICMP6_TIME_EXCEEDED=3 (bug audit `deef1268`).
-    /// data.len()≥14 holds: every caller is post-route() (TooShort
+    /// v4/v6 dispatch on ethertype, not `icmp_type`: `ICMP_DEST_UNREACH`
+    /// =3 collides with `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`).
+    /// data.len()≥14 holds: every caller is `post-route()` (`TooShort`
     /// gate) or post-decrement_ttl.
     pub(super) fn write_icmp_to_device(&mut self, data: &[u8], icmp_type: u8, icmp_code: u8) {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
@@ -163,7 +163,7 @@ impl Daemon {
         }
     }
 
-    /// v4 FRAG_NEEDED. Separate helper: passes frag_mtu through.
+    /// v4 `FRAG_NEEDED`. Separate helper: passes `frag_mtu` through.
     pub(super) fn write_icmp_frag_needed(&mut self, data: &[u8], frag_mtu: u16) {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
@@ -183,7 +183,7 @@ impl Daemon {
         }
     }
 
-    /// v6 PACKET_TOO_BIG.
+    /// v6 `PACKET_TOO_BIG`.
     pub(super) fn write_icmp_pkt_too_big(&mut self, data: &[u8], mtu: u32) {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
@@ -207,7 +207,7 @@ impl Daemon {
     }
 }
 
-/// For ICMP TIME_EXCEEDED: find our local IP facing the original
+/// For ICMP `TIME_EXCEEDED`: find our local IP facing the original
 /// sender so traceroute shows us correctly. UDP `connect()` then
 /// `getsockname()` — no packets sent (UDP connect is a route lookup
 /// plus dst association). Same trick `choose_initial_maxmtu` uses

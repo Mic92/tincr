@@ -138,7 +138,7 @@ impl<W: Copy> SelfPipe<W> {
     /// fd()` + `EventLoop::add`.
     ///
     /// # Panics
-    /// If a `SelfPipe` already exists (PIPE_WR is set). The C
+    /// If a `SelfPipe` already exists (`PIPE_WR` is set). The C
     /// Multiple self-pipes don't make sense (one global handler per signal).
     ///
     /// # Errors
@@ -225,14 +225,14 @@ impl<W: Copy> SelfPipe<W> {
     /// The C reads ONE byte per call (`read(pipefd[0], &signum, 1)`
     /// at `:46`). The pipe is level-triggered, so if there are 3
     /// pending bytes, epoll wakes 3 times. That works but is silly.
-    /// We drain in a loop with O_NONBLOCK on the read end —
-    /// actually wait, we didn't set O_NONBLOCK on the read end.
-    /// pipe2(O_CLOEXEC) doesn't set it. We need O_NONBLOCK so the
+    /// We drain in a loop with `O_NONBLOCK` on the read end —
+    /// actually wait, we didn't set `O_NONBLOCK` on the read end.
+    /// `pipe2(O_CLOEXEC)` doesn't set it. We need `O_NONBLOCK` so the
     /// drain loop terminates with EAGAIN instead of blocking.
     ///
-    /// Fix: set O_NONBLOCK in new(). Or: read exactly as many bytes
+    /// Fix: set `O_NONBLOCK` in `new()`. Or: read exactly as many bytes
     /// as fit in a buffer, once. The pipe has at most NSIG bytes
-    /// pending (signals don't queue per-signum without SA_SIGINFO).
+    /// pending (signals don't queue per-signum without `SA_SIGINFO`).
     /// One read of a 64-byte buffer drains everything.
     pub fn drain(&self, out: &mut Vec<W>) {
         let mut buf = [0u8; 64];
@@ -378,7 +378,7 @@ mod tests {
         assert!(out.is_empty(), "unknown signum should be skipped");
     }
 
-    /// PIPE_WR is reset on drop — fresh SelfPipe can be created.
+    /// `PIPE_WR` is reset on drop — fresh `SelfPipe` can be created.
     /// Tests need this (each test wants its own pipe); daemon doesn't.
     #[test]
     fn drop_resets_singleton() {
@@ -416,7 +416,7 @@ mod tests {
     /// EAGAIN — actually, blocking pipe with no data BLOCKS. We
     /// rely on epoll telling us it's readable first. This test
     /// would hang without that contract. So: don't test "drain on
-    /// empty"; the contract is "drain after turn() says READ").
+    /// empty"; the contract is "drain after `turn()` says READ").
     ///
     /// Instead test: drain doesn't OVER-read. Write 1 byte; drain
     /// returns 1 element; pipe is empty.

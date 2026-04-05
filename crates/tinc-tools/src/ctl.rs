@@ -42,8 +42,6 @@
 //! Windows TCP fallback: Unix-only for now. Reconnect-on-dead: the
 //! readline shell reuses one fd; we're one command per process.
 
-#![allow(clippy::doc_markdown)]
-
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -85,7 +83,7 @@ pub enum CtlRequest {
     Purge = 8,
     SetDebug = 9,
     Retry = 10,
-    /// Dead-on-arrival upstream: daemon has no case — replies REQ_INVALID.
+    /// Dead-on-arrival upstream: daemon has no case — replies `REQ_INVALID`.
     Connect = 11,
     Disconnect = 12,
     DumpTraffic = 13,
@@ -1042,7 +1040,7 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    /// `send_int`: REQ_SET_DEBUG with the level argument.
+    /// `send_int`: `REQ_SET_DEBUG` with the level argument.
     #[test]
     fn send_with_int_arg() {
         let cookie = "f".repeat(64);
@@ -1066,7 +1064,7 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    /// `send_str`: REQ_DISCONNECT with a node name.
+    /// `send_str`: `REQ_DISCONNECT` with a node name.
     #[test]
     fn send_with_str_arg() {
         let cookie = "0".repeat(64);
@@ -1133,7 +1131,7 @@ mod tests {
     }
 
     /// `recv_ack` rejects mismatched request echo. Daemon sent ack
-    /// for REQ_PURGE, we expected REQ_RELOAD. Either a daemon bug
+    /// for `REQ_PURGE`, we expected `REQ_RELOAD`. Either a daemon bug
     /// or response interleaving (which doesn't happen in the
     /// strictly-alternating protocol, but defense).
     #[test]
@@ -1156,7 +1154,7 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    /// The stop pattern: send REQ_STOP, drain until EOF. The daemon
+    /// The stop pattern: send `REQ_STOP`, drain until EOF. The daemon
     /// acks then exits, closing the socket.
     #[test]
     fn stop_drains_to_eof() {
@@ -1294,7 +1292,7 @@ mod tests {
     }
 
     /// Graph mode: TWO sends, TWO terminators. The first End
-    /// (DumpNodes) doesn't end the loop — caller checks which kind.
+    /// (`DumpNodes`) doesn't end the loop — caller checks which kind.
     /// `recv_row` itself doesn't track state; it just hands back
     /// (kind, body) per row. The CALLER's loop knows graph mode
     /// continues past the first End. This test is the daemon side

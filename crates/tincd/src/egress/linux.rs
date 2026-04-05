@@ -266,9 +266,9 @@ mod tests {
     use std::net::UdpSocket;
 
     /// Cmsg layout invariants. If these break, libc changed the
-    /// macro arithmetic and the in-place gso_size patch in
+    /// macro arithmetic and the in-place `gso_size` patch in
     /// `send_batch` writes to the wrong offset → kernel reads
-    /// garbage gso_size → splits at the wrong boundary.
+    /// garbage `gso_size` → splits at the wrong boundary.
     #[test]
     fn cmsg_layout_invariants() {
         // CMSG_LEN(n) = CMSG_LEN(0) + n. Data offset arithmetic.
@@ -449,10 +449,10 @@ mod tests {
     }
 
     /// Stride changes between batches: the cmsg buffer is reused,
-    /// gso_size patched in-place. Ship batch A at stride=8, then
+    /// `gso_size` patched in-place. Ship batch A at stride=8, then
     /// batch B at stride=12; both split correctly. Regression test
     /// for the obvious bug where the patch offset is wrong and the
-    /// SECOND batch reuses the FIRST's gso_size.
+    /// SECOND batch reuses the FIRST's `gso_size`.
     #[test]
     fn fast_gso_stride_changes() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();

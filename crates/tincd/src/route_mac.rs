@@ -2,7 +2,7 @@
 //!
 //! Exact-match MAC lookup; unknown → broadcast (switch learning).
 //! `learn_mac` is split out: we return [`LearnAction`], daemon does
-//! the subnet-add + ADD_SUBNET broadcast.
+//! the subnet-add + `ADD_SUBNET` broadcast.
 //!
 //! Daemon-side: `age_subnets` (`:491-521`), `route_broadcast`
 //! (`:559`), and the post-route mutations (`:1052-1102`).
@@ -29,7 +29,7 @@ pub enum LearnAction {
     /// `:1031` source != myself.
     NotOurs,
 
-    /// `:528 if(!subnet)`. Daemon: subnet_add, ADD_SUBNET, arm timer.
+    /// `:528 if(!subnet)`. Daemon: `subnet_add`, `ADD_SUBNET`, arm timer.
     New(Mac),
 
     /// `:551-555 else`. Daemon: bump lease (no gossip). Fires even
@@ -42,8 +42,8 @@ pub enum LearnAction {
 /// `Broadcast` (`:1042`), not `Unreachable` — switches flood.
 ///
 /// `from_myself`: gates learning (`:1031`). `source`: for the
-/// `:1047` loop check (we have the table here, unlike route_ipv4).
-/// `myself`: gates the FMODE_OFF/decrement_ttl deferrals (`:1052`).
+/// `:1047` loop check (we have the table here, unlike `route_ipv4`).
+/// `myself`: gates the `FMODE_OFF/decrement_ttl` deferrals (`:1052`).
 /// `resolve`: `None` → Broadcast (stale gossip safe default).
 ///
 /// # Panics
@@ -142,7 +142,7 @@ mod tests {
     }
 
     /// All standard-shape cases: `table()` fixture + `frame()` helper,
-    /// `myself` param constant. Varies dst/src/from_myself/source.
+    /// `myself` param constant. Varies `dst/src/from_myself/source`.
     /// C-refs preserved in row labels.
     #[test]
     fn route_mac_table() {

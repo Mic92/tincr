@@ -5,7 +5,7 @@
 //! When PMTU is unconverged or `TCPOnly = yes`, packets go over the
 //! meta-conn TCP, not UDP. Two paths:
 //!
-//! - b64 via REQ_KEY: `"15 from to 21 <b64>\n"`. Works always;
+//! - b64 via `REQ_KEY`: `"15 from to 21 <b64>\n"`. Works always;
 //!   ALREADY WIRED (`daemon/gossip.rs:312`). Slow: b64 inflate × meta-conn-SPTPS encrypt × per-tunnel-SPTPS
 //!   encrypt. The 12.9 Mbps from `2b5dda45`'s commit body.
 //!
@@ -150,7 +150,7 @@ pub enum TcpRouteDecision<'a> {
     UnknownDest(NodeId6),
     /// `:637` `return true`. Same.
     UnknownSrc { dest: &'a str, src: NodeId6 },
-    /// `:644` `return true`. Race vs DEL_EDGE.
+    /// `:644` `return true`. Race vs `DEL_EDGE`.
     Unreachable { from: &'a str, to: &'a str },
     /// `:655-659`. `to != myself`. Daemon: if `validkey`
     /// `send_sptps_data(to, from, 0, data)`; always `try_tx(to,
@@ -328,7 +328,7 @@ mod tests {
 
     // ── route ────────────────────────────────────────────────────────
 
-    /// Test fixture: closures over HashMaps. The `RouteCtx` borrows
+    /// Test fixture: closures over `HashMaps`. The `RouteCtx` borrows
     /// these, so they must outlive the ctx — hence build inline in
     /// each test rather than via a helper returning `RouteCtx`.
     struct Fixture {

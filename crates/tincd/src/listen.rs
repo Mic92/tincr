@@ -193,7 +193,7 @@ pub struct Listener {
     pub udp: Socket,
     /// `listen_socket_t.sa`. The local bound address. `SocketAddr`
     /// not `SockAddr` — we know it's v4 or v6 (we bound it), not
-    /// AF_UNIX.
+    /// `AF_UNIX`.
     pub local: SocketAddr,
 }
 
@@ -413,10 +413,10 @@ pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Liste
 /// `setup_vpn_in_socket`. One UDP socket.
 ///
 /// Same four-step shape as TCP but no `listen` (UDP doesn't have it)
-/// and more sockopts (broadcast for LocalDiscovery, buffer sizes,
+/// and more sockopts (broadcast for `LocalDiscovery`, buffer sizes,
 /// PMTU). Most deferred.
 ///
-/// O_NONBLOCK is set HERE (`:308-316`), unlike TCP listeners (the
+/// `O_NONBLOCK` is set HERE (`:308-316`), unlike TCP listeners (the
 /// listener fd doesn't need non-blocking — `accept` blocking is fine
 /// because we only call it when epoll says ready). UDP `recvfrom`
 /// IS the data path; non-blocking is mandatory.
@@ -539,9 +539,9 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 /// v4 listener, one v6 listener, both on `port`.
 ///
 /// We skip getaddrinfo. The two addresses are KNOWN (`0.0.0.0:port`
-/// and `[::]:port` — the AI_PASSIVE wildcards). The "is this family
+/// and `[::]:port` — the `AI_PASSIVE` wildcards). The "is this family
 /// supported on this system" probe is `Socket::new` failing for
-/// AF_INET6 on a v6-disabled kernel. Same effect.
+/// `AF_INET6` on a v6-disabled kernel. Same effect.
 ///
 /// `family` filters which to try. Maps `AddressFamily` config →
 /// the C's `hint.ai_family = addressfamily` at `:655`.
@@ -766,7 +766,7 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 /// std `Ipv6Addr::to_ipv4_mapped()` is `Some` iff the high 80 bits
 /// are zero and the next 16 are `ffff`. Same condition as C
 /// `IN6_IS_ADDR_V4MAPPED`. Writes the low 32 bits over
-/// `sin_addr` and changes `sa_family` — net effect: a SocketAddrV4.
+/// `sin_addr` and changes `sa_family` — net effect: a `SocketAddrV4`.
 #[must_use]
 pub fn unmap(sa: SocketAddr) -> SocketAddr {
     if let SocketAddr::V6(v6) = sa
@@ -783,8 +783,8 @@ pub fn unmap(sa: SocketAddr) -> SocketAddr {
 /// connections — the tarpit defends against external scan/DoS, and
 /// rate-limiting yourself is pointless.
 ///
-/// C cases: AF_INET (high octet == 127), AF_INET6 (`IN6_IS_ADDR_
-/// LOOPBACK` → `::1`), AF_UNIX (always true). We don't see AF_UNIX
+/// C cases: `AF_INET` (high octet == 127), `AF_INET6` (`IN6_IS_ADDR_
+/// LOOPBACK` → `::1`), `AF_UNIX` (always true). We don't see `AF_UNIX`
 /// here (TCP only); two cases.
 ///
 /// std's `Ipv4Addr::is_loopback` is `127.0.0.0/8` (matches C's `>> 24
@@ -807,7 +807,7 @@ pub fn is_local(sa: &SocketAddr) -> bool {
 /// not the wildcard), format as `"HOST port PORT"`.
 ///
 /// The format is `sockaddr2hostname`: `"%s port %s"`.
-/// std's `Display` for SocketAddr is `"host:port"`. The CLI's pidfile
+/// std's `Display` for `SocketAddr` is `"host:port"`. The CLI's pidfile
 /// parser (`tinc-tools/ctl.rs`) splits on `" port "`.
 ///
 /// Why the unspecified→loopback mapping: the daemon binds `0.0.0.0`

@@ -2,7 +2,7 @@
 //!
 //! Every UDP packet on the wire is `[dst_id:6][src_id:6][sptps...]`
 //! (`net.h:92-93` `SRCID`/`DSTID` macros, `DEFAULT_PACKET_OFFSET=12`).
-//! The receiver does a HashMap lookup on the 6-byte source ID
+//! The receiver does a `HashMap` lookup on the 6-byte source ID
 //! (`lookup_node_id`) to find which peer's SPTPS state to feed the ciphertext to. On miss it falls back to
 //! `try_mac` — trial-decrypt against every node — which is the slow
 //! path the ID prefix exists to avoid.
@@ -33,7 +33,7 @@ use tinc_graph::NodeId;
 /// `node_id_t` (`net.h:61-63`): `struct { uint8_t x[6]; }`.
 ///
 /// `Copy` because the C passes it by value all over `net_packet.c`.
-/// `Hash`/`Eq` because it's a HashMap key.
+/// `Hash`/`Eq` because it's a `HashMap` key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId6([u8; 6]);
 
@@ -96,7 +96,7 @@ impl fmt::Debug for NodeId6 {
     }
 }
 
-/// `node_id_tree`. We use a HashMap. The reverse index (`by_node`)
+/// `node_id_tree`. We use a `HashMap`. The reverse index (`by_node`)
 /// replaces the inline `n->id` field — `graph::Node`
 /// doesn't carry it, so we keep a side table.
 ///

@@ -57,8 +57,6 @@
 //! `key = val` tokenizer because the use case (preserve unmatched
 //! lines verbatim) doesn't fit the parsed-tree model.
 
-#![allow(clippy::doc_markdown)]
-
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -484,7 +482,7 @@ impl TmpGuard {
     /// Rename tmp → target. Consumes self; drop becomes a no-op.
     ///
     /// `mem::take` on the path because we can't destructure a Drop
-    /// type (E0509). After the take, `self.tmp` is empty PathBuf;
+    /// type (E0509). After the take, `self.tmp` is empty `PathBuf`;
     /// when `self` drops at function end (after rename succeeded),
     /// `remove_file("")` is an `ENOENT` no-op. If rename FAILS, we
     /// manually unlink before the take'd `tmp` drops.
@@ -723,7 +721,7 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
 /// <errno>` — fine, the errno is what matters (probably ENOSPC).
 ///
 /// `clippy::needless_pass_by_value`: same shape as `daemon_err` in
-/// ctl_simple.rs — `.map_err(tmpfile_werr)` passes by value.
+/// `ctl_simple.rs` — `.map_err(tmpfile_werr)` passes by value.
 #[allow(clippy::needless_pass_by_value)]
 fn tmpfile_werr(e: std::io::Error) -> CmdError {
     CmdError::Io {
@@ -1021,7 +1019,7 @@ mod tests {
 
     /// Routing + canonicalization table: which file does this var go to?
     /// SERVER → tinc.conf (node=None); HOST-only → hosts/$me via
-    /// get_my_name; explicit node prefix wins.
+    /// `get_my_name`; explicit node prefix wins.
     #[test]
     fn intent_routing() {
         let (_d, paths) = setup("alice");
@@ -1204,7 +1202,7 @@ mod tests {
     // Stage 3: run_get — read-only file walk
 
     /// `run_get` table. Match is case-insensitive; no-match → empty
-    /// vec (the "no match → error" is in run(), not run_get()).
+    /// vec (the "no match → error" is in `run()`, not `run_get()`).
     #[test]
     fn get_table() {
         let dir = tempfile::tempdir().unwrap();
@@ -1437,7 +1435,7 @@ mod tests {
     }
 
     /// Tmpfile is gone after a failed DEL. We do it via
-    /// TmpGuard::drop.
+    /// `TmpGuard::drop`.
     #[test]
     fn tmpfile_cleaned_up_on_del_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -1467,7 +1465,7 @@ mod tests {
     }
 
     /// PEM block at the end of a host file. `tinc set Port 655`
-    /// must NOT mangle the base64 lines. The split_line tokenizer
+    /// must NOT mangle the base64 lines. The `split_line` tokenizer
     /// returns `Some((garbage, garbage))` for them but they don't
     /// match `Port`, so they copy verbatim.
     #[test]

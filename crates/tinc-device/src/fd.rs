@@ -2,7 +2,7 @@
 //!
 //! Android's `VpnService` opens the tun fd in the Java process and
 //! hands it over. Two transports: fd inheritance (2017, `7a54fe5e`,
-//! `Device = 5`) and SCM_RIGHTS over AF_UNIX (2020, `f5223937`,
+//! `Device = 5`) and `SCM_RIGHTS` over `AF_UNIX` (2020, `f5223937`,
 //! `Device = /path` or `@abstract`). C dispatches on `sscanf("%d")`;
 //! we make the union explicit as `FdSource`.
 //!
@@ -19,13 +19,11 @@
 //!
 //! ## nix earns its dep here
 //!
-//! Uses `nix::sys::socket::recvmsg` for SCM_RIGHTS: hand-rolling is
+//! Uses `nix::sys::socket::recvmsg` for `SCM_RIGHTS`: hand-rolling is
 //! ~40 LOC of `cmsghdr` boilerplate with a NULL-deref trap (`CMSG_
 //! FIRSTHDR` returns NULL on empty buffer; easy to dereference
 //! unchecked). Shim #4 uses the wrapper (POSIX-clean, no encoding
 //! lies), unlike #3 TUNSETIFF which bypassed it.
-
-#![allow(clippy::doc_markdown)]
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
@@ -47,13 +45,13 @@ pub enum FdSource {
     /// `dup2(tun_fd, 5)` before `exec()`. The fd is already
     /// open in our process; we wrap it.
     ///
-    /// On Android pre-2020 SELinux policy, this was the only
+    /// On Android pre-2020 `SELinux` policy, this was the only
     /// way. Post-2020, blocked: the policy forbids fd
     /// inheritance across exec for tun fds.
     Inherited(RawFd),
 
     /// `Device = /path` mode (2020). Java side listens; we connect;
-    /// fd arrives via SCM_RIGHTS. `@` prefix → abstract namespace.
+    /// fd arrives via `SCM_RIGHTS`. `@` prefix → abstract namespace.
     UnixSocket(std::path::PathBuf),
 }
 
@@ -65,7 +63,7 @@ pub enum FdSource {
 pub struct FdTun {
     /// The tun fd. Raw IP channel — no `tun_pi`, no prefix.
     /// `File` for ownership; `from_raw_fd` asserts the previous
-    /// owner (Java process or kernel SCM_RIGHTS dup) gave it up.
+    /// owner (Java process or kernel `SCM_RIGHTS` dup) gave it up.
     fd: File,
 
     /// `"fd/5"` or `"fd:/path"` for error messages. C logs
@@ -155,7 +153,7 @@ impl FdTun {
 ///
 /// # Errors
 /// - `connect`: `NotFound`, `ConnectionRefused`, `PermissionDenied`
-/// - `InvalidData`: cmsg wasn't SCM_RIGHTS, ≠1 fd, or `MSG_CTRUNC`
+/// - `InvalidData`: cmsg wasn't `SCM_RIGHTS`, ≠1 fd, or `MSG_CTRUNC`
 ///   set
 fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
@@ -298,7 +296,7 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
 /// The `@` → abstract-namespace dispatch.
 ///
 /// Separate fn for testability: connect-to-abstract is testable
-/// without the full SCM_RIGHTS flow (a test can listen on an
+/// without the full `SCM_RIGHTS` flow (a test can listen on an
 /// abstract addr, this fn connects, both sides agree).
 fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     // Check the first byte of the path's OsStr encoding.
@@ -516,7 +514,7 @@ mod tests {
     // The test exercises the OFFSET ARITHMETIC, which is fd-
     // agnostic.)
 
-    /// The full read flow: write IPv4 bytes to a pipe, FdTun
+    /// The full read flow: write IPv4 bytes to a pipe, `FdTun`
     /// reads at +14, synthesizes 0x0800 ethertype at +12,
     /// returns len+14.
     ///
@@ -596,7 +594,7 @@ mod tests {
         assert_eq!(&buf[14..54], &ip_packet);
     }
 
-    /// Unknown IP version → InvalidData.
+    /// Unknown IP version → `InvalidData`.
     #[test]
     fn read_unknown_version_via_pipe() {
         let garbage = [0x50u8; 20]; // version=5 (ST-II, dead)
@@ -615,7 +613,7 @@ mod tests {
         assert!(msg.contains("0x5"), "msg: {msg}");
     }
 
-    /// EOF → UnexpectedEof. The Java VpnService stopped. C
+    /// EOF → `UnexpectedEof`. The Java `VpnService` stopped. C
     /// `:213` errors on `lenin <= 0`.
     #[test]
     fn read_eof_via_pipe() {
@@ -633,7 +631,7 @@ mod tests {
         assert!(msg.contains("fd/"), "msg: {msg}");
     }
 
-    /// The write flow: hand FdTun a 14+20 byte buffer (ether +
+    /// The write flow: hand `FdTun` a 14+20 byte buffer (ether +
     /// IP), it strips the 14, writes the 20.
     #[test]
     fn write_strips_ether_via_pipe() {
@@ -686,7 +684,7 @@ mod tests {
     // The connect() is NOT covered (that's connect_unix, tested
     // separately if at all — it's a thin std wrapper).
 
-    /// SCM_RIGHTS round-trip: send an fd through a socketpair,
+    /// `SCM_RIGHTS` round-trip: send an fd through a socketpair,
     /// receive it. The received fd is a DIFFERENT NUMBER (kernel
     /// dup'd) but points at the SAME FILE (write to the original,
     /// read from the dup).
@@ -866,7 +864,7 @@ mod tests {
         }
     }
 
-    /// Same but for `&File` (the SCM_RIGHTS test wraps in File).
+    /// Same but for `&File` (the `SCM_RIGHTS` test wraps in File).
     fn write_all_file(f: &File, buf: &[u8]) {
         let mut off = 0;
         while off < buf.len() {

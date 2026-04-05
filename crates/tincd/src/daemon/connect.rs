@@ -225,7 +225,7 @@ impl Daemon {
         }
     }
 
-    /// Connection teardown. `conn.active` gates DEL_EDGE broadcast
+    /// Connection teardown. `conn.active` gates `DEL_EDGE` broadcast
     /// (only past-ACK conns have an edge to delete).
     pub(super) fn terminate(&mut self, id: ConnId) {
         let Some(conn) = self.conns.remove(id) else {
@@ -398,7 +398,7 @@ impl Daemon {
     }
 
     /// Walk addr cache, register first non-sync-fail.
-    /// PROXY_EXEC: socketpair+fork, skip async probe. PROXY_SOCKS/
+    /// `PROXY_EXEC`: socketpair+fork, skip async probe. `PROXY_SOCKS`/
     /// HTTP: connect to PROXY addr; peer addr still walked (it's the
     /// CONNECT target).
     #[allow(clippy::too_many_lines)] // PROXY_EXEC is a parallel path with its own conn-insert + io_add ceremony; merging with the SOCKS/HTTP arm would obscure both
@@ -643,7 +643,7 @@ impl Daemon {
         }
     }
 
-    /// add_recent_address is deferred to `on_ack` (the right port
+    /// `add_recent_address` is deferred to `on_ack` (the right port
     /// alone doesn't mean tinc).
     pub(super) fn finish_connecting(&mut self, id: ConnId) {
         // Drop probe socket; dup'd OwnedFd on Connection is live now.

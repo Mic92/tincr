@@ -90,7 +90,7 @@ impl Level {
 
 /// `sandbox_action_t` (`sandbox.h:12-15`). Only `START_PROCESSES`
 /// is wired; `USE_NEW_PATHS` exists for parity but the only caller
-/// (ScriptsInterpreter reload guard) is commented out — we re-read
+/// (`ScriptsInterpreter` reload guard) is commented out — we re-read
 /// the interpreter unconditionally
 /// because Landlock at `normal` grants `Execute` on confbase, so a
 /// reloaded interpreter under confbase still works.
@@ -115,9 +115,9 @@ pub enum Action {
 /// one path.
 ///
 /// Relative paths are resolved by `path_beneath_rules` against the
-/// daemon's cwd at ruleset-build time. main() chdir'd to confbase
+/// daemon's cwd at ruleset-build time. `main()` chdir'd to confbase
 /// (`main.rs:983`); confbase as a relative path
-/// would resolve to itself. We pass absolutes anyway (main() has
+/// would resolve to itself. We pass absolutes anyway (`main()` has
 /// them) so the chroot interaction is the only path-semantics gotcha.
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -151,7 +151,7 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 
 const ENTERED_BIT: u8 = 0b100;
 
-/// `sandbox_can`. We always answer RIGHT_NOW because the only
+/// `sandbox_can`. We always answer `RIGHT_NOW` because the only
 /// caller is `script::execute` which runs after `enter()`. Before
 /// `enter()`: always true.
 #[must_use]
@@ -185,7 +185,7 @@ pub fn entered_level() -> Level {
 /// `sandbox_enter`. One-shot.
 ///
 /// `chrooted`: upstream's `chrooted()` checks `!confbase`; we
-/// take it as a flag because main() knows whether `-R` was set.
+/// take it as a flag because `main()` knows whether `-R` was set.
 /// When chrooted: skip the Landlock ruleset (paths inside the jail
 /// don't match the build-time absolute paths) but still record the
 /// level so `can(StartProcesses)` gates correctly.
@@ -200,7 +200,7 @@ pub fn entered_level() -> Level {
 /// # Panics
 ///
 /// Called twice. C asserts `!entered` (`:137`). The state machine
-/// is one-shot; a second call is a bug in main().
+/// is one-shot; a second call is a bug in `main()`.
 pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> {
     let prev = STATE.swap(level as u8 | ENTERED_BIT, Ordering::Relaxed);
     assert_eq!(prev & ENTERED_BIT, 0, "sandbox::enter called twice");
@@ -415,8 +415,8 @@ mod tests {
     }
 
     /// `can()` before `enter()` always returns true. tinc-up and
-    /// the subnet-up loop in Daemon::setup run BEFORE main()
-    /// calls enter(); they must not be gated.
+    /// the subnet-up loop in `Daemon::setup` run BEFORE `main()`
+    /// calls `enter()`; they must not be gated.
     ///
     /// nextest per-process model means each #[test] is its own
     /// process, so STATE is fresh. (cargo test without nextest

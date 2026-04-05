@@ -341,7 +341,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     })
 }
 
-/// `cmd_verify`, full pipeline. Slurp + verify_blob + write body.
+/// `cmd_verify`, full pipeline. Slurp + `verify_blob` + write body.
 ///
 /// Separated from `verify_blob` so tests can supply the blob directly
 /// without filesystem/stdin choreography.
@@ -420,7 +420,7 @@ mod tests {
     use std::fs;
 
     /// Set up a confbase with `init`-equivalent contents: tinc.conf
-    /// with `Name = NAME`, ed25519_key.priv, hosts/NAME with the
+    /// with `Name = NAME`, `ed25519_key.priv`, hosts/NAME with the
     /// pubkey config line. Same shape as `cmd::init::run` produces,
     /// but inline so we don't depend on init's correctness here.
     fn fake_init(dir: &tempfile::TempDir, name: &str) -> Paths {

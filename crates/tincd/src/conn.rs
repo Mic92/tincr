@@ -220,10 +220,10 @@ pub struct Connection {
     /// the value may come from the global config.
     pub pmtu_cap: Option<u16>,
     /// `c->status.log` + `c->log_level` (`connection.h:51,112`). When
-    /// `Some`, this conn receives REQ_LOG records for messages at or
+    /// `Some`, this conn receives `REQ_LOG` records for messages at or
     /// above the level. C uses C debug-level ints (`-1..=10`); we map
-    /// to `log::Level` at the REQ_LOG arm. `c->status.log_color` is
-    /// not stored: we don't ANSI-format (env_logger does, but we
+    /// to `log::Level` at the `REQ_LOG` arm. `c->status.log_color` is
+    /// not stored: we don't ANSI-format (`env_logger` does, but we
     /// send the bare `args()` — see `log_tap.rs`).
     pub log_level: Option<log::Level>,
 }
@@ -387,7 +387,7 @@ impl Connection {
     }
 
     /// `c->status.value`. GCC packs LSB-first; declaration-order
-    /// bool N → bit N: 0=pinged, 1=unused_active, 2=connecting,
+    /// bool N → bit N: 0=pinged, `1=unused_active`, 2=connecting,
     /// 9=control.
     #[must_use]
     pub fn status_value(&self) -> u32 {
@@ -580,7 +580,7 @@ impl Connection {
     }
 
     /// `send_meta_sptps`. Queue already-framed bytes.
-    /// `bool` return is the io_set signal.
+    /// `bool` return is the `io_set` signal.
     pub fn send_raw(&mut self, bytes: &[u8]) -> bool {
         let was_empty = self.outbuf.is_empty();
         self.outbuf.add(bytes);

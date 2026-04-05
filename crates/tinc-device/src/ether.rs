@@ -6,13 +6,11 @@
 //! syscalls; RFC constants don't vary across `cfg`. `pub(crate)`:
 //! header synthesis is a backend concern; the daemon only reads.
 //!
-//! NOT here: `ETH_P_ALL` (Linux PF_PACKET API value, not a wire
+//! NOT here: `ETH_P_ALL` (Linux `PF_PACKET` API value, not a wire
 //! ethertype — stays in `raw.rs`); `AF_INET6` (per-platform kernel
 //! ABI: 10/Linux, 28/FreeBSD, 30/macOS — stays in `bsd.rs` via
 //! `libc`). `0x86DD` is wire-format truth; `AF_INET6` is local
 //! convention.
-
-#![allow(clippy::doc_markdown)]
 
 // Ethernet header constants — `ethernet.h`, RFC 894, IEEE 802.3
 
@@ -26,7 +24,7 @@ pub(crate) const ETH_HLEN: usize = 14;
 const ETHER_TYPE_LEN: usize = 2;
 
 /// `ETH_P_IP` — `ethernet.h:44`. IPv4's IANA-registered ethertype.
-/// IANA "EtherType" registry, assigned 1983 (before IANA was
+/// IANA "`EtherType`" registry, assigned 1983 (before IANA was
 /// IANA). Network byte order on the wire; we hold host order and
 /// `to_be_bytes()` at write time.
 pub(crate) const ETH_P_IP: u16 = 0x0800;

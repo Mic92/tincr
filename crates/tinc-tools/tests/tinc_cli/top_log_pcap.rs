@@ -12,7 +12,7 @@ fn top_too_many_args() {
 }
 
 /// `top::run` connects FIRST, then enters raw mode. Under cargo
-/// test, stdin is a pipe, so RawMode::enter fails with "stdin is
+/// test, stdin is a pipe, so `RawMode::enter` fails with "stdin is
 /// not a terminal". We assert that:
 ///
 ///   - The connect SUCCEEDS (fake daemon's greeting is exchanged).

@@ -63,9 +63,9 @@ impl Daemon {
 
     /// Edge-triggered drain wrapper. mio is edge-triggered: returning
     /// before `EAGAIN` loses the wake forever (found by `throughput.rs`
-    /// deadlock when TCP-tunnelled SPTPS_PACKETs filled the kernel
+    /// deadlock when TCP-tunnelled `SPTPS_PACKETs` filled the kernel
     /// buffer). Bounded at 64 iters (≈136KB/turn) so UDP/TUN/timers
-    /// get a turn; rearm() forces the next epoll_wait to fire if
+    /// get a turn; `rearm()` forces the next `epoll_wait` to fire if
     /// still readable.
     pub(super) fn on_conn_readable(&mut self, id: ConnId) {
         const META_DRAIN_CAP: u32 = 64;
@@ -591,7 +591,7 @@ impl Daemon {
         }
     }
 
-    /// Returns io_set signal. May `terminate(id)` — caller checks
+    /// Returns `io_set` signal. May `terminate(id)` — caller checks
     /// `conns.contains_key(id)`.
     #[allow(clippy::too_many_lines)] // request-dispatch table is half of it; each arm is a one-liner protocol handler
     pub(super) fn dispatch_sptps_outputs(
@@ -801,7 +801,7 @@ impl Daemon {
 
     /// Blob is an already-encrypted SPTPS UDP wireframe (`dst[6]‖
     /// src[6]‖ct`). Inlined ladder (vs `tcp_tunnel::route()`): we
-    /// already have NodeIds from id6_table; avoids name→NodeId
+    /// already have `NodeIds` from `id6_table`; avoids name→NodeId
     /// reverse lookup.
     pub(super) fn on_sptps_blob(&mut self, id: ConnId, blob: &[u8]) -> bool {
         // len < 12 → hard error.

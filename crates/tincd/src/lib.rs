@@ -25,7 +25,6 @@
 
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::doc_markdown)]
 
 pub mod addrcache;
 pub mod autoconnect;

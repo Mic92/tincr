@@ -201,7 +201,7 @@ pub struct Discovery {
 }
 
 /// Background `get_mutable` thread. Resolves fire on the retry-outgoing
-/// schedule (5s/10s/15s backoff); a daemon with several stalled ConnectTo
+/// schedule (5s/10s/15s backoff); a daemon with several stalled `ConnectTo`
 /// peers could stack multiple blocking queries per tick. The thread
 /// serializes them off the epoll loop. The Dht handle is a `flume::Sender`
 /// clone — same actor `tick()` queues against.
@@ -614,8 +614,8 @@ mod tests {
         );
     }
 
-    /// Hand-rolled `PORT_PROBE_PING` → real serde_bencode deserializer →
-    /// real mainline server → real serde_bencode serializer → our
+    /// Hand-rolled `PORT_PROBE_PING` → real `serde_bencode` deserializer →
+    /// real mainline server → real `serde_bencode` serializer → our
     /// `windows(6)` scanner. No mocks. If either end of the contract
     /// drifts, this catches it.
     #[test]

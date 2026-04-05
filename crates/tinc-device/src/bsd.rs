@@ -40,8 +40,6 @@
 //! fakes. `open()` constructors are BSD-gated stubs. TUNEMU/VMNET
 //! dropped (external library deps).
 
-#![allow(clippy::doc_markdown)]
-
 use std::io;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
@@ -53,7 +51,7 @@ use crate::{Device, MTU, Mac, Mode};
 /// 4-byte AF prefix for utun/tunifhead. C uses literal `10`
 /// (`:451`); `ETH_HLEN - AF_PREFIX_LEN = 10` is the read offset.
 /// Contents: `htonl(AF_*)` — same SIZE/OFFSET as Linux `tun_pi`
-/// (our linux.rs uses vnet_hdr instead); different contents (and
+/// (our linux.rs uses `vnet_hdr` instead); different contents (and
 /// ignored on read anyway).
 const AF_PREFIX_LEN: usize = 4;
 
@@ -85,8 +83,8 @@ impl BsdVariant {
     /// The read offset. `read(fd, buf + offset, MTU - offset)`.
     /// What route.c expects at `buf[0..14]`: ethernet header.
     /// What the kernel writes at `buf[offset..]`: prefix (if any)
-    /// then IP, or full ethernet. `offset = ETH_HLEN - prefix_len
-    /// - (does kernel write ether? ETH_HLEN : 0)`.
+    /// then IP, or full ethernet.
+    /// `offset = ETH_HLEN - prefix_len - (does kernel write ether? ETH_HLEN : 0)`.
     ///
     /// `const fn` so the test can `assert_eq!` at compile-time
     /// shape if it wants. `#[inline]` because it's a leaf called
@@ -180,10 +178,10 @@ pub(crate) fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
 /// `open("/dev/tun*")`). `OwnedFd` is the lowest common
 /// denominator. Same `Drop` semantics. Same as `raw.rs`.
 ///
-/// `iface`: stored as resolved by open(). For `/dev/tunN` it's
+/// `iface`: stored as resolved by `open()`. For `/dev/tunN` it's
 /// `tunN` (strip `/dev/`). For utun it's `utunN` (the kernel
 /// picks N; read back via `getsockopt(UTUN_OPT_IFNAME)`). For
-/// TAP it's the `TAPGIFNAME` ioctl result. Open() stubs fill
+/// TAP it's the `TAPGIFNAME` ioctl result. `Open()` stubs fill
 /// this; tests use a literal.
 ///
 /// `mac`: NOT stored. `SIOCGIFADDR` (note: not `SIOCGIFHWADDR`;
@@ -192,7 +190,7 @@ pub(crate) fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
 /// is don't-read. We return `None` (same as `RawSocket`, same
 /// rationale: TAP-mode bridging doesn't need `mymac` for ARP
 /// because real hosts answer their own ARP). When `overwrite_
-/// mac` lands with the open() stubs, it becomes an `Option<Mac>`
+/// mac` lands with the `open()` stubs, it becomes an `Option<Mac>`
 /// field. NOT YET.
 #[derive(Debug)]
 pub struct BsdTun {
@@ -200,11 +198,11 @@ pub struct BsdTun {
     /// `PF_SYSTEM` socket. `Drop` closes.
     fd: OwnedFd,
 
-    /// Which offset behavior. Chosen at open() time, never
+    /// Which offset behavior. Chosen at `open()` time, never
     /// changes.
     variant: BsdVariant,
 
-    /// Interface name as resolved by open(). For `iface()`.
+    /// Interface name as resolved by `open()`. For `iface()`.
     iface: String,
 }
 
@@ -376,7 +374,7 @@ impl Device for BsdTun {
     /// config is set; default is don't-read. The MAC
     /// query ioctl is BSD-specific (`SIOCGIFADDR` on a TAP fd
     /// gives the link-layer addr; on Linux it gives the IP
-    /// addr — DIFFERENT meaning). Stubbed `None` until open()
+    /// addr — DIFFERENT meaning). Stubbed `None` until `open()`
     /// lands.
     fn mac(&self) -> Option<Mac> {
         None
@@ -956,7 +954,7 @@ mod tests {
 
     // ─── EOF + error paths
 
-    /// EOF on any variant → UnexpectedEof. Seqpacket gives
+    /// EOF on any variant → `UnexpectedEof`. Seqpacket gives
     /// EOF on close; pipe also gives EOF on close (read
     /// returns 0). Both work.
     #[test]
@@ -972,7 +970,7 @@ mod tests {
         assert!(msg.contains("Tap"), "msg: {msg}");
     }
 
-    /// Unknown IP nibble (Tun and Utun) → InvalidData.
+    /// Unknown IP nibble (Tun and Utun) → `InvalidData`.
     /// Feed a packet with version=5 (ST-II, dead).
     #[test]
     fn tun_read_unknown_nibble_errors() {
@@ -1012,7 +1010,7 @@ mod tests {
 
     // ─── Device trait surface
 
-    /// `mac()` always None (open() stub doesn't read it).
+    /// `mac()` always None (`open()` stub doesn't read it).
     /// `fd()` always Some. Surface accessors don't panic.
     #[test]
     fn device_surface() {

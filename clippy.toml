@@ -1,0 +1,16 @@
+doc-valid-idents = [
+    # Protocols / acronyms
+    "DoS",
+    "QoS",
+    # Algorithms / crypto
+    "ChaCha",
+    "ChaCha20",
+    "Ed25519",
+    "SipHash",
+    "LibTomCrypt",
+    # Product / project names
+    "BitTorrent",
+    "MagicDNS",
+    # Keep clippy's built-in list (OAuth, GraphQL, IPv4, IPv6, etc.)
+    "..",
+]

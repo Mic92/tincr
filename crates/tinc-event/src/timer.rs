@@ -244,7 +244,7 @@ mod tests {
         assert!(t.is_idle());
     }
 
-    /// set() takes a RELATIVE duration. After tick advances `now`
+    /// `set()` takes a RELATIVE duration. After tick advances `now`
     /// past the deadline, the timer fires.
     #[test]
     fn fires_after_duration() {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(next, None); // wheel is empty after firing
     }
 
-    /// set() on an already-armed timer unlinks the old entry first.
+    /// `set()` on an already-armed timer unlinks the old entry first.
     /// Re-arming to a later deadline must NOT
     /// leave a ghost entry firing at the old time.
     #[test]
@@ -289,7 +289,7 @@ mod tests {
     /// Sequence-number tiebreak. Two timers set to the same relative
     /// offset in the same tick get the same `Instant` (because `set`
     /// reads cached `self.now`). Without
-    /// the seq tiebreak, BTreeMap::insert would overwrite. With it,
+    /// the seq tiebreak, `BTreeMap::insert` would overwrite. With it,
     /// both fire.
     ///
     /// Without disambiguation, one timer would silently be lost on

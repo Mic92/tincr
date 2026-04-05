@@ -40,8 +40,6 @@
 //! still compatible, and it's deterministic for tests. `.` floats
 //! to top (ASCII `.` < letters).
 
-#![allow(clippy::doc_markdown)]
-
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -293,7 +291,7 @@ mod tests {
     }
 
     /// `tinc.conf` unreadable → not listed. `chmod 000` makes it
-    /// exist but fail open with PermissionDenied. Same skip.
+    /// exist but fail open with `PermissionDenied`. Same skip.
     ///
     /// SKIP under root: root reads `chmod 000` files (DAC
     /// override). The test would pass with `n=2` not `n=1`. CI

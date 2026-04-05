@@ -46,8 +46,6 @@
 //! `to_ne_bytes()` per-field to match. The struct is all-u32 (no
 //! padding); we write field-by-field so no padding question.
 
-#![allow(clippy::doc_markdown)]
-
 use std::io::{Read, Write};
 use std::time::SystemTime;
 
@@ -296,7 +294,7 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
 /// compliant and the once-per-session 24-byte write isn't perf-
 /// critical.
 ///
-/// `snaplen`: from the user. 0 → defaults to PCAP_DATA_MAX (9018).
+/// `snaplen`: from the user. 0 → defaults to `PCAP_DATA_MAX` (9018).
 /// The header records what the file PROMISES; the daemon enforces
 /// it.
 ///
@@ -544,7 +542,7 @@ mod tests {
 
     // pcap headers — byte-exact
 
-    /// Global header bytes on little-endian (x86_64). Field-by-
+    /// Global header bytes on little-endian (`x86_64`). Field-by-
     /// field. The `cfg(target_endian)` is because `to_ne_bytes()`
     /// differs on big-endian — the magic would be `[a1, b2, c3, d4]`
     /// there. We don't have a BE CI; LE is what every dev machine

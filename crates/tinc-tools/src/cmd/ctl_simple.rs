@@ -31,8 +31,6 @@
 //! it composes (pidfile read, socket connect, handshake) are each
 //! unit-tested.
 
-#![allow(clippy::doc_markdown)]
-
 use crate::cmd::CmdError;
 use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};

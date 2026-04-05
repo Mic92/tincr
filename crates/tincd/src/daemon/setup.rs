@@ -358,7 +358,7 @@ impl Daemon {
     /// socket bind failed (already running).
     ///
     /// # Panics
-    /// `SelfPipe::new` panics if a SelfPipe already exists in this
+    /// `SelfPipe::new` panics if a `SelfPipe` already exists in this
     /// process (it's a singleton - see tinc-event/sig.rs). Can't
     /// happen here: setup is called once. Tests that call setup
     /// twice in one process are wrong; integration tests use

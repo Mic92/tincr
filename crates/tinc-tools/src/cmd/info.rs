@@ -47,7 +47,6 @@
 //! (info needs the daemon).
 //!
 
-#![allow(clippy::doc_markdown)]
 #![cfg(unix)]
 
 use std::fmt::{self, Write as _};
@@ -73,13 +72,13 @@ use crate::names::{Paths, check_id};
 ///
 ///   1. `time_t` is created from `i64` via `as` cast. On every
 ///      platform tinc targets, `time_t` is `i64` (64-bit Linux,
-///      macOS, BSDs). The cast is identity. On a 32-bit time_t
+///      macOS, BSDs). The cast is identity. On a 32-bit `time_t`
 ///      platform (none we care about), values past 2038 would wrap.
 ///   2. `tm` is `MaybeUninit::zeroed()` — `localtime_r` fully
 ///      initializes it (POSIX guarantees this on success), but we
 ///      zero-init anyway because `tm` has a `*const c_char tm_zone`
 ///      and reading an uninit pointer is UB even if we never deref.
-///      Zero is a valid (null) pointer; localtime_r overwrites it.
+///      Zero is a valid (null) pointer; `localtime_r` overwrites it.
 ///   3. NULL return means error (per POSIX). The only documented
 ///      errno is `EOVERFLOW` (year doesn't fit `int`), which for
 ///      `tm_year` (offset from 1900) means timestamps past year
@@ -172,7 +171,7 @@ const fn option_version(options: u32) -> u32 {
 /// indirect check, etc. `reachability_cascade_order` pins it.
 ///
 /// Carries display data inline so `Display` is self-contained
-/// (no back-reference to the NodeRow). The `pmtu`/`rtt` only matter
+/// (no back-reference to the `NodeRow`). The `pmtu`/`rtt` only matter
 /// for `DirectUdp` — printed on the next lines, but only in that
 /// arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +203,7 @@ pub enum Reachability {
 }
 
 impl Reachability {
-    /// Compute from NodeRow. The cascade.
+    /// Compute from `NodeRow`. The cascade.
     ///
     /// `name` is the queried node name (for `via`/`nexthop` self-
     /// compare). It's the function argument, not the parsed field
@@ -823,7 +822,7 @@ mod tests {
 
     /// TZ=UTC pin: under UTC, the output is deterministic. We can't
     /// `setenv("TZ")` here (other tests might be touching libc tz
-    /// state in parallel; tzset() is process-global). Instead: the
+    /// state in parallel; `tzset()` is process-global). Instead: the
     /// integration test runs with `TZ=UTC` env on the SUBPROCESS,
     /// where it's safe.
     ///
@@ -856,7 +855,7 @@ mod tests {
     // is what's pinned: a row that's MYSELF + unreachable = MYSELF
     // (first match wins).
 
-    /// Builder: minimal NodeRow with overridable cascade-relevant
+    /// Builder: minimal `NodeRow` with overridable cascade-relevant
     /// fields. The other 16 fields don't affect `from_row`.
     fn cascade_row(
         host: &str,
@@ -1000,7 +999,7 @@ mod tests {
 
     // ─── NodeInfo::format — the full golden
 
-    /// Build a known NodeRow, assert byte-exact output. This is the
+    /// Build a known `NodeRow`, assert byte-exact output. This is the
     /// `diff <(tinc-c info bob) <(tinc-rs info bob)` test, in unit
     /// form. The values are chosen to exercise every line.
     ///

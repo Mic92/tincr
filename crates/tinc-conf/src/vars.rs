@@ -71,8 +71,6 @@
 //! it's HOST-allowed." That's correct: a config file with `Cipher =
 //! aes-256-cbc` is *valid syntax* even on a daemon that ignores it.
 
-#![allow(clippy::doc_markdown)]
-
 /// Bitflags for config-key metadata. `tincctl.h:36-40`.
 ///
 /// `u8` newtype — see module doc for why not `bitflags!`.
@@ -319,7 +317,7 @@ pub static VARS: &[Var] = &[
 ];
 
 /// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
-/// (DhtDiscovery, DhtBootstrap) that upstream never reads. The 74
+/// (`DhtDiscovery`, `DhtBootstrap`) that upstream never reads. The 74
 /// check is the one that matters — drift here means a config key was
 /// added/removed upstream and our table
 /// is stale. The +2 is fixed (this crate owns those keys).

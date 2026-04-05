@@ -30,7 +30,7 @@
 //!
 //! We `connect()` for every auth request. Tailscale's
 //! `tailscale.WhoIs()` does the same (one localapi HTTP call per
-//! WhoIs). nginx auth_request is a presence gate, not a per-asset
+//! `WhoIs`). nginx `auth_request` is a presence gate, not a per-asset
 //! check; request rate is "page loads", not "every CSS file".
 //! Persistent control connections would mean reconnect logic, stale
 //! socket detection, daemon-restart races. Not worth it.
@@ -61,7 +61,6 @@
 // a runtime contract the type system can't express.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::doc_markdown)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
@@ -79,7 +78,7 @@ use tinc_tools::names::{Paths, PathsInput};
 /// systemd socket activation: first passed fd. `sd_listen_fds(3)`.
 const SD_LISTEN_FDS_START: i32 = 3;
 
-/// Max request size we'll buffer. nginx auth_request subrequests
+/// Max request size we'll buffer. nginx `auth_request` subrequests
 /// are tiny (no body, `proxy_pass_request_body off`). 4 KB is
 /// over 10× a real subrequest's headers; the cap stops a slow-loris
 /// from holding a thread on a connection that never sends `\r\n\r\n`.
@@ -250,7 +249,7 @@ fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
 }
 
 /// Write a complete HTTP response. `Connection: close` always:
-/// nginx auth_request subrequests are one-shot, and not having to
+/// nginx `auth_request` subrequests are one-shot, and not having to
 /// implement keepalive is the *point* of hand-rolling.
 fn respond(mut stream: &UnixStream, status: &str, extra_headers: &[(&str, &str)]) {
     // `write!` to the socket. Errors (EPIPE if nginx already gave

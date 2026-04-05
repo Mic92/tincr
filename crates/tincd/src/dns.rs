@@ -606,7 +606,7 @@ fn build_rr(name_wire: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
 /// against what it sent and rejects on mismatch ("Question section
 /// mismatch: got x/TYPE0/IN"). Older resolvers tolerated qtype=0.
 /// Caught by the NixOS test (real dig); the bwrap'd netns test was
-/// silently SKIPping (`--tmpfs /run` wiped /run/current-system/sw,
+/// silently `SKIP`ping (`--tmpfs /run` wiped /run/current-system/sw,
 /// where dig lives on NixOS).
 fn build_error(id: u16, rd: bool, rcode: u16, qname_wire: &[u8], qtype: u16) -> Vec<u8> {
     // Reuse the full builder with zero answers — same wire shape.
@@ -972,7 +972,7 @@ mod tests {
     /// of the echoed question against what it sent ("Question section
     /// mismatch: got x/TYPE0/IN") and discards the whole response.
     /// First caught by `nix/nixos-test.nix`; the bwrap'd netns test
-    /// was silently SKIPping (no dig in `--tmpfs /run`).
+    /// was silently `SKIP`ping (no dig in `--tmpfs /run`).
     #[test]
     fn nxdomain_echoes_qtype() {
         let t = SubnetTree::new();

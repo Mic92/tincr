@@ -50,7 +50,7 @@ fn ctl_disconnect_missing_arg() {
     assert!(stderr.contains("No node name given"), "{stderr}");
 }
 
-/// `tinc disconnect bad/name` → check_id fails before connect.
+/// `tinc disconnect bad/name` → `check_id` fails before connect.
 /// Same preflight property as join's tinc.conf-exists check.
 #[test]
 fn ctl_disconnect_bad_name() {

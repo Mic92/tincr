@@ -10,7 +10,7 @@
 //! 2. You give the URL to alice (out-of-band; the URL is the secret).
 //! 3. `tinc join URL` on alice's machine TCP-connects to `myhost:655`,
 //!    speaks two lines of meta-protocol, then SPTPS — the inviting daemon
-//!    proves it holds the invitation key (key_hash check), receives the
+//!    proves it holds the invitation key (`key_hash` check), receives the
 //!    cookie, finds the matching invitation file, ships its contents.
 //! 4. alice writes a fresh tinc.conf + hosts/ from those contents.
 //!
@@ -301,7 +301,7 @@ fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
     write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).map_err(io_err(path))
 }
 
-/// Write the invitation file at 0600 with O_EXCL.
+/// Write the invitation file at 0600 with `O_EXCL`.
 fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;

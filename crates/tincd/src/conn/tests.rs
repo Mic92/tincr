@@ -180,7 +180,7 @@ fn send_formats_id_greeting() {
     assert_eq!(c.outbuf.live(), b"0 testnode 17.7\n");
 }
 
-/// Second send returns `false` (don't double-register IO_WRITE).
+/// Second send returns `false` (don't double-register `IO_WRITE`).
 #[test]
 fn send_second_doesnt_signal() {
     let mut c = Connection::test_with_fd(devnull());
@@ -560,7 +560,7 @@ fn feed_sptpslen_straddle() {
 
 /// THE TRAP. `["21 12\n" record | 12 raw bytes | PING record]` as
 /// one chunk. Before fix: `receive()` re-called on raw bytes →
-/// DecryptFailed → Dead. After: feed() peeks "21 ", sets sptpslen,
+/// `DecryptFailed` → Dead. After: `feed()` peeks "21 ", sets sptpslen,
 /// next iter eats blob. Events MUST be `[Blob, Record(PING)]`.
 #[test]
 fn feed_sptpslen_then_record() {

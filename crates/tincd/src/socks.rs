@@ -4,10 +4,10 @@
 //! Req `[04][01][port:2be][ip:4][userid\0]`; resp 8B, status `0x5A`.
 //!
 //! SOCKS5 (RFC 1928): three round-trips sent as one blob (`:175-237`).
-//! Greet+auth+connect; resp is choice+auth_status+conn_resp concat.
+//! Greet+auth+connect; resp is `choice+auth_status+conn_resp` concat.
 //!
 //! NOT here: SOCKS4A (`:80` "not implemented"), HTTP CONNECT
-//! (daemon's send_proxyrequest), PROXY_EXEC (I/O).
+//! (daemon's `send_proxyrequest`), `PROXY_EXEC` (I/O).
 
 #![forbid(unsafe_code)]
 
@@ -195,7 +195,7 @@ fn check_socks4(buf: &[u8]) -> SocksResponse {
     }
 }
 
-/// Layout depends on server's auth choice (anon: no auth_status block).
+/// Layout depends on server's auth choice (anon: no `auth_status` block).
 fn check_socks5(buf: &[u8]) -> SocksResponse {
     if buf.len() < SOCKS5_SERVER_CHOICE_LEN {
         return SocksResponse::Malformed("Received short response from proxy");
@@ -239,7 +239,7 @@ fn check_socks5(buf: &[u8]) -> SocksResponse {
     }
 }
 
-/// Addr/port not validated (addr_type is just for length check).
+/// Addr/port not validated (`addr_type` is just for length check).
 fn check_socks5_conn(buf: &[u8]) -> SocksResponse {
     // Caller checked len >= SOCKS5_CONN_RESP_LEN.
     let addr_type = buf[3];

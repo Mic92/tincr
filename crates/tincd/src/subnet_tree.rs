@@ -370,7 +370,7 @@ impl SubnetTree {
     /// (not in tree → fall through to `:116`).
     ///
     /// Allocates a `String` for the lookup key (same shape as
-    /// `del()`). ADD_SUBNET is control-path-rare; the alloc is fine.
+    /// `del()`). `ADD_SUBNET` is control-path-rare; the alloc is fine.
     #[must_use]
     pub fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
         let owner = Some(owner.to_owned());
@@ -654,7 +654,7 @@ mod tests {
     /// **Wire-reachable:** weight is `%d`-parsed with no range check. `Subnet = 10.0.0.0/8#2147483647` is accepted.
     /// Two such subnets with the same prefix+addr from different owners
     /// route differently on C tincd vs Rust tincd: C's splay tree and
-    /// Rust's BTreeMap iterate them in opposite order.
+    /// Rust's `BTreeMap` iterate them in opposite order.
     ///
     /// **Why we don't match C:** the C behaviour is *undefined*, not
     /// merely different. Without `-fwrapv` (which upstream's meson
@@ -960,7 +960,7 @@ mod tests {
     }
 
     /// `add` is idempotent. Re-adding doesn't create a second entry
-    /// (BTreeMap key uniqueness).
+    /// (`BTreeMap` key uniqueness).
     #[test]
     fn add_idempotent() {
         let mut t = SubnetTree::new();

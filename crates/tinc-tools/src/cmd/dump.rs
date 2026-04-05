@@ -28,7 +28,7 @@
 //! | dump | daemon `%` (after 18 N) | CLI `%` (after `%*d %*d`) | port literals |
 //! |---|---|---|---|
 //! | nodes | 21 | 22 | 1 |
-//! | edges | 6 | 8 | 2 (addr + local_addr) |
+//! | edges | 6 | 8 | 2 (addr + `local_addr`) |
 //! | connections | 5 | 6 | 1 |
 //! | subnets | 2 | 2 | 0 |
 //!
@@ -66,8 +66,6 @@
 //!   help text. We just error; the binary's main can print usage
 //!   if it wants.
 //!
-
-#![allow(clippy::doc_markdown)]
 
 use std::fmt::Write as _;
 use std::fs;
@@ -274,7 +272,7 @@ pub struct NodeRow {
     pub id: String,
     /// `%s` — host portion of `n->hostname`. After `Tok::lit("port")`
     /// re-splits the `sockaddr2hostname` output. Values: `"10.0.0.1"`,
-    /// `"unknown"` (unreachable), `"unspec"` (AF_UNSPEC), `"MYSELF"`
+    /// `"unknown"` (unreachable), `"unspec"` (`AF_UNSPEC`), `"MYSELF"`
     /// (the running daemon's self-node — graph mode greens it).
     pub host: String,
     /// `port %s` — the port. Same notes as host. `String` not `u16`
@@ -517,7 +515,7 @@ impl NodeRow {
 // EdgeRow
 
 /// One row of `dump edges`. 8 fields, two `port` literals (both
-/// addr and local_addr are `sockaddr2hostname` output).
+/// addr and `local_addr` are `sockaddr2hostname` output).
 ///
 /// Edges are directional in tinc's graph (an edge A→B is distinct
 /// from B→A; the daemon stores both). `dump edges` lists them all;
@@ -694,7 +692,7 @@ impl SubnetRow {
 /// a bare `#10` isn't a valid subnet, daemon won't send it.)
 ///
 /// `tinc_proto::DEFAULT_WEIGHT` is 10 — we're matching the literal
-/// `"#10"`, not formatting an int. If DEFAULT_WEIGHT ever changes,
+/// `"#10"`, not formatting an int. If `DEFAULT_WEIGHT` ever changes,
 /// this needs to change too; the test `strip_weight_tracks_default`
 /// notices.
 #[must_use]
@@ -1255,7 +1253,7 @@ mod tests {
         assert!(r.reachable(), "myself: status=0x1f → reachable");
     }
 
-    /// Short row → ParseError. Our `?` chain bails at first missing
+    /// Short row → `ParseError`. Our `?` chain bails at first missing
     /// field.
     #[test]
     fn node_parse_short() {
@@ -1383,8 +1381,8 @@ mod tests {
         assert_eq!(r.weight, 100);
     }
 
-    /// AF_UNSPEC local address: `"unspec port unspec"`. Common —
-    /// local_address is often unset.
+    /// `AF_UNSPEC` local address: `"unspec port unspec"`. Common —
+    /// `local_address` is often unset.
     #[test]
     fn edge_parse_unspec_local() {
         let body = "a b 10.0.0.1 port 655 unspec port unspec 0 1";

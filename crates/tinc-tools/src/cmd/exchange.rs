@@ -54,8 +54,6 @@
 //!   consumed by import as part of the previous host's content.
 //!   Harmless but a "fix" would break round-trip.
 
-#![allow(clippy::doc_markdown)]
-
 use std::fs;
 use std::io::{BufRead, BufWriter, Write};
 
@@ -715,7 +713,7 @@ mod tests {
     }
 
     /// Round-trip through export-all + separator. Tests that the
-    /// separator is correctly injected by export_all and stripped by
+    /// separator is correctly injected by `export_all` and stripped by
     /// import.
     #[test]
     fn roundtrip_multi() {

@@ -64,8 +64,6 @@
 //! check which does validate the prefix). Dropped; same observable
 //! behavior.
 
-#![allow(clippy::doc_markdown)]
-
 mod conf;
 mod display;
 mod keys;

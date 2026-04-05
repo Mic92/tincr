@@ -125,7 +125,7 @@ impl Daemon {
     }
 
     /// SPTPS callback bridge. SPTPS returns Vec<Output> so this is
-    /// both the receive_sptps_record and send_sptps_data sides.
+    /// both the `receive_sptps_record` and `send_sptps_data` sides.
     pub(in crate::daemon) fn dispatch_tunnel_outputs(
         &mut self,
         peer: NodeId,
@@ -475,12 +475,12 @@ impl Daemon {
     /// neighbor, always TCP-reachable). PROBEs always prefer `via`
     /// (tiny, and the point is to discover via's MTU).
     ///
-    /// TCP if: SPTPS_HANDSHAKE (ANS_KEY also propagates reflexive
+    /// TCP if: `SPTPS_HANDSHAKE` (`ANS_KEY` also propagates reflexive
     /// UDP addr); tcponly; relay too old (proto minor<4); or
     /// `origlen > relay->minmtu` (TCP fragments fine).
     ///
     /// `from_nid`: ORIGINAL source. For relay forwarding it's the
-    /// original sender's NodeId — wire prefix carries THEIR src_id6.
+    /// original sender's `NodeId` — wire prefix carries THEIR `src_id6`.
     #[allow(clippy::too_many_lines)] // TCP-b64/TCP-binary/UDP-batch/UDP-immediate arms all need relay_nid/direct/from_is_myself computed by the decision tree at the top
     pub(in crate::daemon) fn send_sptps_data_relay(
         &mut self,

@@ -13,12 +13,12 @@
 //!
 //! ## What's NOT here
 //!
-//! - The actual `Subnet::Mac` add/del + ADD/DEL_SUBNET gossip — daemon,
+//! - The actual `Subnet::Mac` add/del + `ADD/DEL_SUBNET` gossip — daemon,
 //!   on `learn`/`age` return.
 //! - The `route_mac::LearnAction → mac_lease` plumbing — daemon's
 //!   `route_packet_mac` (`daemon/net.rs`).
 //! - The skip-configured-subnets guard: we ONLY hold learned MACs.
-//!   The daemon's SubnetTree holds both; only learned ones are
+//!   The daemon's `SubnetTree` holds both; only learned ones are
 //!   mirrored here. The guard is implicit.
 //! - The 10s timer arming — daemon's `TimerWhat`.
 #![forbid(unsafe_code)]
@@ -67,8 +67,8 @@ impl MacLeases {
 
     /// Known MAC; bump lease.
     ///
-    /// `false` if the MAC wasn't in the table (route_mac thought it was
-    /// known — stale routing snapshot? race vs age()?). Daemon: log
+    /// `false` if the MAC wasn't in the table (`route_mac` thought it was
+    /// known — stale routing snapshot? race vs `age()`?). Daemon: log
     /// warn, treat as no-op (the next `New` re-adds).
     pub fn refresh(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
         match self.leases.get_mut(&mac) {

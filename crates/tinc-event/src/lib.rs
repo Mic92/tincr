@@ -24,7 +24,6 @@
 
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::doc_markdown)]
 
 mod io;
 mod timer;

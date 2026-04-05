@@ -309,7 +309,7 @@ mod tests {
         assert!(pubkey_from_b64("").is_none());
     }
 
-    /// 43 chars but bad alphabet → b64::decode returns None.
+    /// 43 chars but bad alphabet → `b64::decode` returns None.
     #[test]
     fn b64_bad_char() {
         // `!` isn't in tinc's b64 alphabet (neither standard nor URL-safe).

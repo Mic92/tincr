@@ -39,7 +39,6 @@
 #![warn(clippy::pedantic)]
 // Backticking proper nouns reads like a ransom note. Same allow as
 // tinc-crypto/tinc-sptps.
-#![allow(clippy::doc_markdown)]
 
 pub mod cmd;
 pub mod ctl;

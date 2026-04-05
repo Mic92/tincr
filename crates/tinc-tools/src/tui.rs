@@ -26,7 +26,6 @@
 //! (caller checks `winsize()` instead), and `KEY_BREAK` (Windows-
 //! only, we're `#[cfg(unix)]`).
 
-#![allow(clippy::doc_markdown)]
 #![cfg(unix)]
 
 use std::io::{self, Write};

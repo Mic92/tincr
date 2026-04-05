@@ -9,7 +9,7 @@
 //! can't reach in directly.
 //!
 //! What makes this cheap: **the daemon is single-threaded**. The
-//! only other thread is the sd_notify watchdog (`8967cb7f`), which
+//! only other thread is the `sd_notify` watchdog (`8967cb7f`), which
 //! doesn't log. Every `log::info!` happens INSIDE `daemon.run()`'s
 //! event loop, on the same thread, in the middle of some handler.
 //!
@@ -47,7 +47,7 @@ static LOG_TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The tinc-style debug level (0..=5+). Separate from
 /// `log::max_level()` because the tinc↔Rust mapping is
-/// lossy (1 and 2 both → Debug). Stored so REQ_SET_DEBUG can
+/// lossy (1 and 2 both → Debug). Stored so `REQ_SET_DEBUG` can
 /// reply with the exact previous value.
 static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
 
@@ -64,14 +64,14 @@ fn level_to_filter(d: i32) -> log::LevelFilter {
 
 /// Seed the C-style debug level. main.rs calls this once after
 /// `init()`. Does NOT touch `log::max_level()`: `init()` already
-/// set it from `inner.filter()`, which reflects RUST_LOG. Calling
-/// `set_debug_level` here would clobber that (RUST_LOG=debug + no
-/// `-d` flag → we'd reset max_level back to Info).
+/// set it from `inner.filter()`, which reflects `RUST_LOG`. Calling
+/// `set_debug_level` here would clobber that (`RUST_LOG=debug` + no
+/// `-d` flag → we'd reset `max_level` back to Info).
 pub fn init_debug_level(level: i32) {
     DEBUG_LEVEL.store(level, Ordering::Relaxed);
 }
 
-/// Read the current tinc-style debug level. For REQ_SET_DEBUG's
+/// Read the current tinc-style debug level. For `REQ_SET_DEBUG`'s
 /// "reply with previous level".
 #[must_use]
 pub fn debug_level() -> i32 {
@@ -82,7 +82,7 @@ pub fn debug_level() -> i32 {
 /// and `log::max_level()` (the actual gate). Negative = no-op
 /// (query-only). Returns the PREVIOUS level.
 ///
-/// Interaction with `set_active`: REQ_LOG already bumps
+/// Interaction with `set_active`: `REQ_LOG` already bumps
 /// `max_level` to Trace. If a log conn is active and someone does
 /// `tinc debug 0`, we'd lower `max_level` back to Info, breaking
 /// the log tap. Check `LOG_TAP_ACTIVE` and don't lower below Trace
@@ -209,7 +209,7 @@ mod tests {
 
     /// Gate is off → drain is empty even if something pushed (which
     /// it can't through the real logger, but the daemon might call
-    /// drain() before any REQ_LOG arrives).
+    /// `drain()` before any `REQ_LOG` arrives).
     #[test]
     fn drain_starts_empty() {
         // thread_local: each test thread gets a fresh TAP.
@@ -246,7 +246,7 @@ mod tests {
     }
 
     /// `set_debug_level`: stores the i32, returns previous, respects
-    /// LOG_TAP_ACTIVE. We DON'T assert on `log::max_level()` here:
+    /// `LOG_TAP_ACTIVE`. We DON'T assert on `log::max_level()` here:
     /// it's process-global and tests race (same problem as
     /// `gate_toggles` above). The atomic + return value are local.
     #[test]

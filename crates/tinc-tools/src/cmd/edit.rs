@@ -29,14 +29,14 @@
 //! | `"tinc.conf"`    | `confbase/tinc.conf`   | conffiles[] membership  |
 //! | `"hosts/alice"`  | `hosts_dir/alice`      | NONE (after strip)      |
 //! | `"alice"`        | `hosts_dir/alice`      | NONE (no dash)          |
-//! | `"alice-up"`     | `hosts_dir/alice-up`   | suffix + check_id       |
+//! | `"alice-up"`     | `hosts_dir/alice-up`   | suffix + `check_id`       |
 //!
 //! The "NONE" cases let `tinc edit ../../etc/passwd` resolve to
 //! `hosts_dir/../../etc/passwd`. We add two checks upstream lacks:
 //! reject `/` anywhere in the input (after the `hosts/` strip), and
 //! reject `..` as a path component. Neither changes valid inputs.
 //!
-//! ## system() vs Command — shell-injection FIXED
+//! ## `system()` vs Command — shell-injection FIXED
 //!
 //! Upstream builds `"$EDITOR" "$FILENAME"` and passes to `system()`
 //! — the double-quote escaping is wrong for `"`/`$`. We match git
@@ -52,8 +52,6 @@
 //! IS running, it reloads. `CtlSocket::connect()` → `Err` is
 //! swallowed. `send(Reload)` → don't even `recv_ack`. The daemon's
 //! reload runs asynchronously; we'd be gone by the time it finishes.
-
-#![allow(clippy::doc_markdown)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -268,7 +266,7 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
 ///
 /// Resolve the shorthand → spawn editor → wait → silent reload.
 ///
-/// The `paths` for both resolve (confbase/hosts_dir) AND the
+/// The `paths` for both resolve (`confbase/hosts_dir`) AND the
 /// reload (pidfile/socket). `needs_daemon: false` in the binary's
 /// table — the reload is OPTIONAL, the edit isn't blocked on a
 /// running daemon.

@@ -80,7 +80,7 @@ fn sign_stdin_verify_stdin() {
     assert_eq!(verified.stdout, data);
 }
 
-/// verify with no signer arg → "No signer given!" (MissingArg).
+/// verify with no signer arg → "No signer given!" (`MissingArg`).
 #[test]
 fn verify_no_signer_arg() {
     let (_dir, cb) = bare_dir();

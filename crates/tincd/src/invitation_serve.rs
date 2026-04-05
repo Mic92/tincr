@@ -378,7 +378,7 @@ mod tests {
         assert!(matches!(err, ServeError::BadInvitationFile(_)));
     }
 
-    /// check_id path-traversal defense.
+    /// `check_id` path-traversal defense.
     #[test]
     fn serve_cookie_bad_name_chars() {
         let key = test_key();

@@ -31,7 +31,7 @@
 //! used methods are ungated. The `Socket` is consumed into `OwnedFd`
 //! after the connect probe succeeds — same as `configure_tcp`.
 //!
-//! ## PROXY_EXEC (`do_outgoing_pipe`, `:428-483`)
+//! ## `PROXY_EXEC` (`do_outgoing_pipe`, `:428-483`)
 //!
 //! `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's its end
 //! to stdin/stdout, exec's `/bin/sh -c <cmd>`. Parent treats its end
@@ -130,8 +130,8 @@ pub enum ConnectAttempt {
     Exhausted,
 }
 
-/// `configure_tcp:104-106` (SO_MARK) + `do_outgoing_connection:623`
-/// (SO_BINDTODEVICE). Shared by direct dial + SOCKS/HTTP proxy dial
+/// `configure_tcp:104-106` (`SO_MARK`) + `do_outgoing_connection:623`
+/// (`SO_BINDTODEVICE`). Shared by direct dial + SOCKS/HTTP proxy dial
 /// (the `if(proxytype != PROXY_EXEC)` gate covers both).
 ///
 /// Best-effort: `bind_to_interface`'s return value is discarded on
@@ -698,7 +698,7 @@ pub fn do_outgoing_pipe(
 /// **unresolved** `(host, port)` pairs. Resolve happens
 /// lazily in `get_recent_address` (`:157-199`). We mirror that:
 /// no DNS here, just string parsing. [`AddressCache::next_addr`]
-/// (crate::addrcache::AddressCache::next_addr) calls
+/// (`crate::addrcache::AddressCache::next_addr`) calls
 /// `to_socket_addrs()` when the cursor reaches tier 3.
 ///
 /// `Address = 10.0.0.1 655` → `("10.0.0.1", 655)`. `Address =
