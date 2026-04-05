@@ -310,11 +310,8 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     //   uint32_t ll_type     = 1 (LINKTYPE_ETHERNET)
     //
     // 4 + 2 + 2 + 4 + 4 + 4 + 4 = 24 bytes. No padding (the two
-    // u16 pack to one u32-aligned slot).
-    //
-    // `0xa1b2c3d4` is the standard magic. Readers detect endianness
-    // by whether they see `a1b2c3d4` or `d4c3b2a1`. `to_ne_bytes`
-    // writes whatever the host CPU does — same as `fwrite(&u32)`.
+    // u16 pack to one u32-aligned slot). Native-endian — see
+    // module doc "pcap headers: native-endian".
     let magic: u32 = 0xa1b2_c3d4;
     let major: u16 = 2;
     let minor: u16 = 4;

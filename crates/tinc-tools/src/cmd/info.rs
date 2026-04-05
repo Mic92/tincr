@@ -480,9 +480,8 @@ fn find_node<S: std::io::Read + std::io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Option<NodeRow>, CmdError> {
-    // The third arg is dead on the wire (daemon doesn't read it)
-    // but we send it anyway — wire-compat, tcpdump traces match.
-    // `send_str` does `"18 3 alice\n"`.
+    // Third arg is dead on the wire — see module doc "The dead
+    // third arg". `send_str` does `"18 3 alice\n"`.
     ctl.send_str(CtlRequest::DumpNodes, name)?;
 
     // ─── Match loop
@@ -540,12 +539,9 @@ fn collect_edges<S: std::io::Read + std::io::Write>(
         match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
-                // Just first two strings — `from` and `to`. We
-                // don't parse the tail (`host port host port
-                // options weight`). NOT `splitn(3, ' ')` — sscanf
-                // collapses runs of whitespace, daemon's printf has
-                // single spaces, but match the semantics not the
-                // spacing.
+                // First two strings only — see module doc "Partial
+                // parses". NOT `splitn(3, ' ')`: sscanf collapses
+                // whitespace runs; match the semantics not spacing.
                 let mut it = body.split_ascii_whitespace();
                 let (Some(from), Some(to)) = (it.next(), it.next()) else {
                     return Err(parse_err("edge", &body));
@@ -663,7 +659,7 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
 
     // ─── Dump and filter
     let mut ctl = CtlSocket::connect(paths)?;
-    // Third arg is dead, daemon ignores.
+    // Third arg dead — see module doc "The dead third arg".
     ctl.send_str(CtlRequest::DumpSubnets, item)?;
 
     let mut matches = Vec::new();

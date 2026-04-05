@@ -263,29 +263,13 @@ impl Stats {
         use std::collections::btree_map::Entry;
 
         // ─── Timekeeping
-        //
-        // First tick: `prev = {0,0}`. `diff = cur - {0,0} = cur`.
-        // `interval ≈ epoch seconds ≈ 1.7e9`. Ported faithfully:
-        // `SystemTime::now() - UNIX_EPOCH` IS what `gettimeofday()`
-        // returns. We can't use `Instant` for this case (`Instant`
-        // is monotonic, no zero); SystemTime is the wall-clock
-        // thing upstream uses.
-        //
-        // The PURPOSE of the epoch-seconds first-tick interval is
-        // accidental (upstream just didn't initialize prev), but
-        // the EFFECT is harmless: rate = counter / 1.7e9 ≈ 0.0,
-        // prints as `0` via `%10.0f`. Tick 2 (1s later) is correct.
-        // We port the accident because (a) the user sees "0 0 0 0"
-        // for one tick either way, and (b) NOT porting it means
-        // picking some "first tick interval" out of thin air, which
-        // is its own kind of wrong.
+        // First tick: prev=None → interval ≈ epoch seconds → rate ≈ 0.
+        // See module doc "First-tick rates are nonsense".
         let interval: f32 = match self.prev_instant {
             Some(prev) => now.duration_since(prev).as_secs_f32(),
             None => {
-                // The epoch-seconds nonsense. Fallible if system
-                // clock is before 1970; unwrap_or(huge) is the
-                // same outcome — large interval, zero rate, fixed
-                // next tick.
+                // Fallible if clock is pre-1970; unwrap_or(huge) is
+                // the same outcome — huge interval, zero rate.
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or(Duration::from_secs(1_700_000_000))

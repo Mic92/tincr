@@ -538,10 +538,8 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 /// bind each, `continue` on bind failure (`:705-707`). Result: one
 /// v4 listener, one v6 listener, both on `port`.
 ///
-/// We skip getaddrinfo. The two addresses are KNOWN (`0.0.0.0:port`
-/// and `[::]:port` — the `AI_PASSIVE` wildcards). The "is this family
-/// supported on this system" probe is `Socket::new` failing for
-/// `AF_INET6` on a v6-disabled kernel. Same effect.
+/// We skip getaddrinfo and try both wildcards directly — see
+/// module doc "getaddrinfo: skip it".
 ///
 /// `family` filters which to try. Maps `AddressFamily` config →
 /// the C's `hint.ai_family = addressfamily` at `:655`.
