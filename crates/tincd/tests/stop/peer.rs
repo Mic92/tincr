@@ -359,109 +359,19 @@ fn peer_ack_exchange() {
 ///
 /// `dump connections` STILL shows one row (testpeer): faraway has
 /// no direct connection — graph-only.
-#[test]
-#[allow(clippy::too_many_lines)] // assertion phases are deliberately verbose; setup is in PeerFixture
-fn peer_edge_triggers_reachable() {
-    let mut fx = PeerFixture::spawn("peer-edge");
-    let pidfile = fx.pidfile.clone();
-    let socket = fx.socket.clone();
-
-    // Send our ACK. Daemon activates + adds myself→testpeer edge
-    // + runs graph. Then our ADD_EDGE (testpeer→testnode) gives
-    // the daemon's edge its reverse; THAT graph() fires
-    // BecameReachable. (Real peers' on_ack sends both in one
-    // burst; chunk-9b removed the daemon's synthesized reverse.)
-    fx.send_record(b"4 0 1 700000c\n");
-    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
-
-    // Chunk 6: daemon's `on_ack` now calls `send_everything` +
-    // `send_add_edge(everyone)`. We get 1-2 ADD_EDGE records for
-    // testnode→testpeer. Drain them.
-    let post_ack = fx.drain_records(500);
-    // 1-2 ADD_EDGE records for testnode→testpeer.
-    assert!(
-        !post_ack.is_empty(),
-        "expected ADD_EDGE from send_everything"
-    );
-    for rec in &post_ack {
-        let s = std::str::from_utf8(rec).unwrap();
-        assert!(
-            s.starts_with("12 ") && s.contains(" testnode testpeer "),
-            "unexpected post-ACK record: {s:?}"
-        );
-    }
-
-    // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
-    // `"%d %x %s %s %s %s %x %d"`.
-    // `12 <nonce> <from> <to> <addr> <port> <opts> <weight>`.
-    // No local-addr suffix (6-token form, pre-1.0.24 compat).
-    //
-    // `sssp` follows edges only if `e->reverse` is set (`graph.c:
-    // 159`). `Graph::add_edge` auto-links the reverse if it exists.
-    // So: send BOTH directions. The C peer would do the same (each
-    // side's `ack_h` adds its `c->edge` and broadcasts; testpeer
-    // sends `testpeer→faraway`, faraway sends `faraway→testpeer`).
-    //
-    // Different nonces — each is a separate `prng()` in C.
-    // Addresses are arbitrary tokens (Phase-1 finding: `AddrStr`
-    // is opaque, `str2sockaddr` accepts anything).
-    fx.send_record(b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n");
-    fx.send_record(b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n");
-
-    // Daemon's `forward_request` skips `from` (us). No other active
-    // conns. Drain: should be empty (proves the from-skip).
-    let after_edge = fx.drain_records(100);
-    assert!(
-        after_edge.is_empty(),
-        "forward_request should skip from-conn; got: {after_edge:?}"
-    );
-
-    // ─── dump connections: STILL one peer row ───────────────────
-    // faraway is graph-only (no NodeState, no Connection).
-    // `dump_connections` walks `conns`, not `node_ids`.
-    let cookie = read_cookie(&pidfile);
-    let ctl = UnixStream::connect(&socket).expect("ctl connect");
-    let mut ctl_r = BufReader::new(&ctl);
-    let mut ctl_w = &ctl;
-    writeln!(ctl_w, "0 ^{cookie} 0").unwrap();
-    let mut greet = String::new();
-    ctl_r.read_line(&mut greet).unwrap();
-    let mut ack = String::new();
-    ctl_r.read_line(&mut ack).unwrap();
-
-    writeln!(ctl_w, "18 6").unwrap();
-    let mut rows = Vec::new();
-    loop {
-        let mut line = String::new();
-        ctl_r.read_line(&mut line).expect("dump row");
-        let line = line.trim_end().to_owned();
-        if line == "18 6" {
-            break;
-        }
-        rows.push(line);
-    }
-    // testpeer + <control>. NOT faraway.
-    assert_eq!(rows.len(), 2, "dump connections: {rows:?}");
-    assert!(
-        rows.iter().any(|r| r.contains("testpeer")),
-        "no testpeer: {rows:?}"
-    );
-    assert!(
-        !rows.iter().any(|r| r.contains("faraway")),
-        "faraway shouldn't have a connection: {rows:?}"
-    );
-
-    // ─── dump nodes: 3 rows, all reachable ─────────────────────
-    // Walks the graph (NOT `nodes`/`conns`).
-    // After ACK + bidi ADD_EDGE: testnode (myself), testpeer
-    // (direct), faraway (transitive). All reachable (status bit
-    // 4 set; `node.h:38` field 4, GCC LSB-first → 0x10).
-    //
-    // REQ_DUMP_NODES = 3. Format: `"18 3 <name> <id> <host> port
-    // <port> <cipher> <digest> <maclen> <comp> <opts:x> <stat:x>
-    // <nexthop> <via> <dist> <mtu> <minmtu> <maxmtu> <ts> <rtt>
-    // <in_p> <in_b> <out_p> <out_b>"`. CLI parser: `tinc-tools::
-    // cmd::dump::NodeRow::parse`.
+//
+// helper for peer_edge_triggers_reachable: dump-nodes phase.
+//
+// Walks the graph (NOT `nodes`/`conns`). After ACK + bidi ADD_EDGE:
+// testnode (myself), testpeer (direct), faraway (transitive). All
+// reachable (status bit 4 set; `node.h:38` field 4, GCC LSB-first
+// → 0x10).
+//
+// REQ_DUMP_NODES = 3. Format: `"18 3 <name> <id> <host> port <port>
+// <cipher> <digest> <maclen> <comp> <opts:x> <stat:x> <nexthop> <via>
+// <dist> <mtu> <minmtu> <maxmtu> <ts> <rtt> <in_p> <in_b> <out_p>
+// <out_b>"`. CLI parser: `tinc-tools::cmd::dump::NodeRow::parse`.
+fn assert_dump_nodes_reachable(ctl_r: &mut BufReader<&UnixStream>, mut ctl_w: &UnixStream) {
     writeln!(ctl_w, "18 3").unwrap();
     let mut node_rows = Vec::new();
     loop {
@@ -575,15 +485,18 @@ fn peer_edge_triggers_reachable() {
         far_row.ends_with(" -1 0 0 0 0"),
         "faraway tail (rtt=-1, counters=0); row: {far_row}"
     );
+}
 
-    // ─── dump edges: 4 rows (2 bidi pairs) ─────────────────────
-    // Nested per-node walk. After ACK + the
-    // two ADD_EDGE bodies: testnode↔testpeer (from `on_ack`, both
-    // halves) + testpeer↔faraway (from the wire, both halves).
-    //
-    // REQ_DUMP_EDGES = 4. Format: `"18 4 <from> <to> <addr> port
-    // <p> <local> port <lp> <opts:x> <weight>"`. CLI: `EdgeRow::
-    // parse` (8 fields, two `" port "` re-splits).
+// helper for peer_edge_triggers_reachable: dump-edges phase.
+//
+// Nested per-node walk. After ACK + the two ADD_EDGE bodies:
+// testnode↔testpeer (from `on_ack`, both halves) + testpeer↔faraway
+// (from the wire, both halves).
+//
+// REQ_DUMP_EDGES = 4. Format: `"18 4 <from> <to> <addr> port <p>
+// <local> port <lp> <opts:x> <weight>"`. CLI: `EdgeRow::parse`
+// (8 fields, two `" port "` re-splits).
+fn assert_dump_edges_four(ctl_r: &mut BufReader<&UnixStream>, mut ctl_w: &UnixStream) {
     writeln!(ctl_w, "18 4").unwrap();
     let mut edge_rows = Vec::new();
     loop {
@@ -655,6 +568,104 @@ fn peer_edge_triggers_reachable() {
         ft, "18 4 faraway testpeer 10.99.0.1 port 655 unspec port unspec 0 50",
         "transitive reverse: AddrStr round-trip"
     );
+}
+
+#[test]
+fn peer_edge_triggers_reachable() {
+    let mut fx = PeerFixture::spawn("peer-edge");
+    let pidfile = fx.pidfile.clone();
+    let socket = fx.socket.clone();
+
+    // Send our ACK. Daemon activates + adds myself→testpeer edge
+    // + runs graph. Then our ADD_EDGE (testpeer→testnode) gives
+    // the daemon's edge its reverse; THAT graph() fires
+    // BecameReachable. (Real peers' on_ack sends both in one
+    // burst; chunk-9b removed the daemon's synthesized reverse.)
+    fx.send_record(b"4 0 1 700000c\n");
+    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
+
+    // Chunk 6: daemon's `on_ack` now calls `send_everything` +
+    // `send_add_edge(everyone)`. We get 1-2 ADD_EDGE records for
+    // testnode→testpeer. Drain them.
+    let post_ack = fx.drain_records(500);
+    // 1-2 ADD_EDGE records for testnode→testpeer.
+    assert!(
+        !post_ack.is_empty(),
+        "expected ADD_EDGE from send_everything"
+    );
+    for rec in &post_ack {
+        let s = std::str::from_utf8(rec).unwrap();
+        assert!(
+            s.starts_with("12 ") && s.contains(" testnode testpeer "),
+            "unexpected post-ACK record: {s:?}"
+        );
+    }
+
+    // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
+    // `"%d %x %s %s %s %s %x %d"`.
+    // `12 <nonce> <from> <to> <addr> <port> <opts> <weight>`.
+    // No local-addr suffix (6-token form, pre-1.0.24 compat).
+    //
+    // `sssp` follows edges only if `e->reverse` is set (`graph.c:
+    // 159`). `Graph::add_edge` auto-links the reverse if it exists.
+    // So: send BOTH directions. The C peer would do the same (each
+    // side's `ack_h` adds its `c->edge` and broadcasts; testpeer
+    // sends `testpeer→faraway`, faraway sends `faraway→testpeer`).
+    //
+    // Different nonces — each is a separate `prng()` in C.
+    // Addresses are arbitrary tokens (Phase-1 finding: `AddrStr`
+    // is opaque, `str2sockaddr` accepts anything).
+    fx.send_record(b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n");
+    fx.send_record(b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n");
+
+    // Daemon's `forward_request` skips `from` (us). No other active
+    // conns. Drain: should be empty (proves the from-skip).
+    let after_edge = fx.drain_records(100);
+    assert!(
+        after_edge.is_empty(),
+        "forward_request should skip from-conn; got: {after_edge:?}"
+    );
+
+    // ─── dump connections: STILL one peer row ───────────────────
+    // faraway is graph-only (no NodeState, no Connection).
+    // `dump_connections` walks `conns`, not `node_ids`.
+    let cookie = read_cookie(&pidfile);
+    let ctl = UnixStream::connect(&socket).expect("ctl connect");
+    let mut ctl_r = BufReader::new(&ctl);
+    let mut ctl_w = &ctl;
+    writeln!(ctl_w, "0 ^{cookie} 0").unwrap();
+    let mut greet = String::new();
+    ctl_r.read_line(&mut greet).unwrap();
+    let mut ack = String::new();
+    ctl_r.read_line(&mut ack).unwrap();
+
+    writeln!(ctl_w, "18 6").unwrap();
+    let mut rows = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump row");
+        let line = line.trim_end().to_owned();
+        if line == "18 6" {
+            break;
+        }
+        rows.push(line);
+    }
+    // testpeer + <control>. NOT faraway.
+    assert_eq!(rows.len(), 2, "dump connections: {rows:?}");
+    assert!(
+        rows.iter().any(|r| r.contains("testpeer")),
+        "no testpeer: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("faraway")),
+        "faraway shouldn't have a connection: {rows:?}"
+    );
+
+    // ─── dump nodes: 3 rows, all reachable ─────────────────────
+    assert_dump_nodes_reachable(&mut ctl_r, ctl_w);
+
+    // ─── dump edges: 4 rows (2 bidi pairs) ─────────────────────
+    assert_dump_edges_four(&mut ctl_r, ctl_w);
 
     // ─── update_edge: same edge, different weight ────────────
     // In-place update path. Send the
