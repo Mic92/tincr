@@ -12,6 +12,7 @@ use crate::node_id::NodeId6;
 use crate::tunnel::MTU;
 
 use rand_core::OsRng;
+use tinc_device::{Device, GroBucket, GroVerdict};
 use tinc_event::Io;
 use tinc_graph::NodeId;
 
@@ -93,6 +94,67 @@ impl Daemon {
                 log::error!(target: "tincd::conn",
                             "Failed to register connection: {e}");
             }
+        }
+    }
+
+    /// RX fast-path TUN sink. Mirror of `send_packet_myself`'s GRO
+    /// arm (device.rs:429-474), but as an associated fn so the
+    /// dispatch loop can call it while `tx_snap` is borrowed out of
+    /// `self`. `&mut self.device` + `&mut gro` (the dispatch loop's
+    /// local `Option<GroBucket>`) is the disjoint-borrow shape.
+    ///
+    /// `data` is `[synth_eth:14][IP]` (`rx_open`'s output). The
+    /// offer wants raw IP; the eth header is throwaway in TUN mode
+    /// (the device write stomps it for the vnet header anyway).
+    ///
+    /// `gro = None` (`gro_enabled` false, or count == 1): immediate
+    /// device write, no coalesce attempt. Same fall-through as
+    /// `send_packet_myself`.
+    ///
+    /// FlushFirst/NotCandidate flush inline (no `gro_flush` — that's
+    /// `&mut self`). The `flush()` + `write_super` body is two lines;
+    /// inlined. The error log matches `gro_flush`'s wording so grep
+    /// finds both.
+    fn rx_fast_sink(device: &mut Box<dyn Device>, gro: &mut Option<GroBucket>, data: &mut [u8]) {
+        const ETH_HLEN: usize = 14;
+        // Inline gro_flush body: `&mut self` not available here.
+        // The `gro_enabled` setup gate makes the Unsupported error
+        // unreachable in practice (same wording as device.rs:491).
+        let flush = |device: &mut Box<dyn Device>, b: &mut GroBucket| {
+            if let Some(buf) = b.flush()
+                && let Err(e) = device.write_super(buf)
+            {
+                log::warn!(target: "tincd::net",
+                           "GRO super write failed: {e} — \
+                            gro_enabled gate let a non-vnet device through?");
+            }
+        };
+        if let Some(bucket) = gro.as_mut()
+            && data.len() > ETH_HLEN
+        {
+            match bucket.offer(&data[ETH_HLEN..]) {
+                GroVerdict::Coalesced => return, // absorbed; written on batch flush
+                GroVerdict::FlushFirst => {
+                    // Ship the run, re-offer to seed the next run.
+                    // Same dance as send_packet_myself (device.rs:444).
+                    flush(device, bucket);
+                    let v = bucket.offer(&data[ETH_HLEN..]);
+                    debug_assert_ne!(v, GroVerdict::FlushFirst);
+                    if v == GroVerdict::Coalesced {
+                        return;
+                    }
+                    // NotCandidate: fall through to write.
+                }
+                GroVerdict::NotCandidate => {
+                    // Ordering: anything in the bucket goes out
+                    // first. A non-candidate from the same flow
+                    // (FIN) mustn't reorder past lower-seq data.
+                    flush(device, bucket);
+                }
+            }
+        }
+        if let Err(e) = device.write(data) {
+            log::debug!(target: "tincd::net", "Error writing to device: {e}");
         }
     }
 
@@ -198,21 +260,80 @@ impl Daemon {
         } else {
             None
         };
+        // RX fast-path: take the snapshot out for the loop body.
+        // rx_probe is &TxSnapshot but rx_open's GRO offer +
+        // device.write needs &mut self.device alongside. Same dance
+        // as the TX Super arm (device.rs:256). The any_pcap gate is
+        // checked once here, not per-packet — it flips at gossip-
+        // rate via `tinc pcap`, not packet-rate; a packet that
+        // sneaks past during the flip just doesn't get captured.
+        // Same one-packet window as TX.
+        //
+        // rx_fast_scratch: dp.rx_fast_scratch, NOT dp.rx_scratch.
+        // The slow path mem::takes dp.rx_scratch internally (sptps.
+        // rs:354,389,428); a separate Vec lets fast/slow interleave
+        // in one batch without scratch contention. Taken out here
+        // (not Vec::new) so capacity persists across wakes — ~50k
+        // recvmmsg calls per bench run, one alloc-per-wake would be
+        // measurable.
+        let snap = if self.any_pcap {
+            None
+        } else {
+            self.tx_snap.take()
+        };
+        let mut rx_fast_scratch = std::mem::take(&mut self.dp.rx_fast_scratch);
+        let mut dst_memo = crate::shard::RxDstMemo::default();
         for (idx, &(n, peer)) in meta.iter().enumerate().take(count) {
             let n = usize::from(n);
             if n == 0 {
                 continue;
             }
             let pkt = &batch.bufs[idx][..n];
-            // Park the bucket in self for the duration of this one
-            // packet's journey through handle_incoming_vpn_packet →
-            // route_packet → send_packet_myself. Same out-and-back
-            // as `rx_scratch`. Taken back below before the next
-            // iteration so the local `gro` owns it across the loop.
+
+            // ─── RX fast-path attempt. rx_probe walks the gate
+            // chain (slowpath_all/dst_null/src_known/tunnel/udp_addr);
+            // rx_open decrypts + post-gates + replay-commits. On Ok
+            // we have `[eth:14][IP]` in rx_fast_scratch ready for
+            // GRO/TUN. On any miss we fall through to the slow path
+            // with the replay window UNTOUCHED (rx.rs hard rule).
+            //
+            // Ordering invariant: the GRO bucket is a SINGLE bucket
+            // shared by fast and slow paths. Packet 4 (fast) coalesces
+            // into `gro`; packet 5 (slow, e.g. PKT_PROBE) parks the
+            // SAME bucket into dp.gro_bucket via the take/restore
+            // below; send_packet_myself sees packet 4's data in there
+            // and either coalesces into it or flushes-first. Same
+            // bucket, same handoff, no reordering.
+            if let Some(snap) = snap.as_ref()
+                && let Some(target) = crate::shard::rx_probe(snap, pkt)
+                && let Ok(len) =
+                    crate::shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
+            {
+                // Consumed. Replay window IS advanced — the slow
+                // path won't see this packet. GRO offer/TUN write
+                // inline (no &mut self via send_packet_myself; we
+                // own the bucket and the device borrow directly).
+                Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
+                continue;
+            }
+
+            // ─── Slow path. Park the bucket in self for the
+            // duration of this one packet's journey through
+            // handle_incoming_vpn_packet → route_packet →
+            // send_packet_myself. Same out-and-back as `rx_scratch`.
+            // Taken back below before the next iteration so the
+            // local `gro` owns it across the loop.
             self.dp.gro_bucket = gro.take();
             self.handle_incoming_vpn_packet(pkt, peer);
             gro = self.dp.gro_bucket.take();
         }
+        // Restore before gro_flush takes &mut self. The is_some()
+        // gate keeps tx_snap untouched on the any_pcap branch (it
+        // was never taken).
+        if snap.is_some() {
+            self.tx_snap = snap;
+        }
+        self.dp.rx_fast_scratch = rx_fast_scratch;
         if let Some(mut bucket) = gro {
             self.gro_flush(&mut bucket);
             // 64KB stays warm for the next batch.

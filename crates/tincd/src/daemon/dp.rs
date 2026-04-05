@@ -74,6 +74,14 @@ pub struct DataPlane {
     /// the per-packet receive path.
     pub rx_scratch: Vec<u8>,
 
+    /// RX fast-path decrypt scratch. Separate from `rx_scratch` so
+    /// fast/slow paths interleave in one batch without contention
+    /// (slow path takes `rx_scratch` internally; touching the same
+    /// Vec from the dispatch loop would race the take/restore).
+    /// Same growth pattern: ~14+MTU after first packet, then zero
+    /// allocs. Taken per batch in `recvmmsg_batch`.
+    pub rx_fast_scratch: Vec<u8>,
+
     /// recvmmsg batch state (~108KB). Heap-allocated once at setup.
     /// `Option` so `on_udp_recv` can `mem::take` it (the bufs borrow
     /// fights `&mut self` for `handle_incoming_vpn_packet`; same

@@ -674,6 +674,7 @@ impl Daemon {
                     12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
                 ),
                 rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
+                rx_fast_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
                 udp_rx_batch: Some(net::UdpRxBatch::new()),
                 gro_bucket: None,
                 gro_bucket_spare: Some(GroBucket::new()),
@@ -824,9 +825,18 @@ impl Daemon {
                 // on conn drop). Checked live at the call site
                 // (device.rs) so the fast path bypasses pcap when
                 // armed instead of silently shipping uncaptured.
+                // overwrite_mac (Router+TAP) folded for the RX fast
+                // path: send_packet_myself stamps the eth header
+                // before TUN write. RX fast path inlines that write
+                // without the stamp — fine for TUN (kernel ignores
+                // eth), wrong for TAP. Spawn-const; fold here. TX
+                // fast path doesn't write TUN, doesn't care; the
+                // gate is shared so TAP loses TX fast-path too —
+                // acceptable, TAP+Router is fringe.
                 slowpath_all: daemon.dns.is_some()
                     || daemon.settings.routing_mode != RoutingMode::Router
-                    || daemon.settings.priorityinheritance,
+                    || daemon.settings.priorityinheritance
+                    || daemon.overwrite_mac,
                 myself: daemon.myself,
                 myself_options: daemon.myself_options.bits(),
                 id6_prefix,
