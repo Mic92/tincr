@@ -417,8 +417,7 @@ impl Default for DaemonSettings {
 /// from `setup()` AND `reload_configuration()`. Non-reloadable
 /// settings (Port, AddressFamily, DeviceType) are NOT here - they
 /// need re-bind / re-open which `setup()` does inline.
-#[allow(clippy::too_many_lines)] // straight-line config-var parse;
-// splitting per-key obscures the one-key-one-block structure.
+#[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
 fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     if let Some(e) = config.lookup("PingInterval").next()
         && let Ok(v) = e.get_int()
@@ -782,6 +781,345 @@ fn expand_name(name: &str) -> Result<String, String> {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect())
+}
+
+/// Parse the non-reloadable settings from `config` into a fresh
+/// `DaemonSettings`. Called once from `setup()`. Reloadable settings
+/// are folded in via `apply_reloadable_settings`; the rest (Port,
+/// AddressFamily, Mode, sockopts, Proxy, Compression, Forwarding,
+/// DHT, DeviceStandby) need re-bind / re-open and are setup-only.
+#[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
+fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
+    let mut settings = DaemonSettings::default();
+
+    // Port. HOST-tagged. `Port = 0` is valid: kernel picks (tests
+    // use this). Non-numeric Port (service-name resolution) not
+    // supported; reject.
+    if let Some(e) = config.lookup("Port").next() {
+        settings.port = e.get_str().parse().map_err(|_| {
+            SetupError::Config(format!("Port = {} is not a valid port number", e.get_str()))
+        })?;
+    }
+
+    // AddressFamily. SERVER-tagged. Unknown values silently
+    // ignored; stays at default.
+    if let Some(e) = config.lookup("AddressFamily").next() {
+        if let Some(af) = AddrFamily::from_config(e.get_str()) {
+            settings.addressfamily = af;
+        } else {
+            log::warn!(target: "tincd",
+                       "Unknown AddressFamily = {}, using default",
+                       e.get_str());
+        }
+    }
+
+    // Reloadable settings. Factored into a helper so
+    // reload_configuration can call it too.
+    // NOT Port/AddressFamily (those need re-bind, setup-only).
+    apply_reloadable_settings(config, &mut settings);
+
+    // BindToAddress for outgoing source-addr selection. Non-
+    // reloadable. We only stash the FIRST entry here for the
+    // outgoing-connect bind; the FULL set is re-read below in the
+    // listener-creation block.
+    if let Some(e) = config.lookup("BindToAddress").next() {
+        let s = e.get_str();
+        let (host, port) = parse_bind_addr(s, 0);
+        match (host, port).to_socket_addrs() {
+            Ok(mut iter) => settings.bind_to_address = iter.next(),
+            Err(e) => {
+                log::warn!(target: "tincd",
+                           "BindToAddress = {s}: {e}; not binding");
+            }
+        }
+    }
+
+    // UDPRcvBuf / UDPSndBuf. Warnings enabled ONLY when the
+    // operator explicitly configures - the 1MB default tripping
+    // the kernel cap on every boot would be log noise.
+    if let Some(e) = config.lookup("UDPRcvBuf").next()
+        && let Ok(v) = e.get_int()
+    {
+        match usize::try_from(v) {
+            Ok(v) => {
+                settings.sockopts.udp_rcvbuf = v;
+                settings.sockopts.udp_buf_warnings = true;
+            }
+            Err(_) => {
+                return Err(SetupError::Config("UDPRcvBuf cannot be negative!".into()));
+            }
+        }
+    }
+    if let Some(e) = config.lookup("UDPSndBuf").next()
+        && let Ok(v) = e.get_int()
+    {
+        match usize::try_from(v) {
+            Ok(v) => {
+                settings.sockopts.udp_sndbuf = v;
+                settings.sockopts.udp_buf_warnings = true;
+            }
+            Err(_) => {
+                return Err(SetupError::Config("UDPSndBuf cannot be negative!".into()));
+            }
+        }
+    }
+
+    // FWMark. 0 (default/unset) means "skip".
+    if let Some(e) = config.lookup("FWMark").next()
+        && let Ok(v) = e.get_int()
+        && let Ok(v) = u32::try_from(v)
+    {
+        settings.sockopts.fwmark = v;
+    }
+
+    // BindToInterface. Hoisted to setup-time; not reloadable
+    // (sockets are already bound).
+    if let Some(e) = config.lookup("BindToInterface").next() {
+        settings.sockopts.bind_to_interface = Some(e.get_str().to_owned());
+    }
+
+    // Proxy. Non-reloadable: our outgoing-connection path reads
+    // it at dial time; reload would need to re-dial existing conns.
+    if let Some(e) = config.lookup("Proxy").next() {
+        settings.proxy = parse_proxy_config(e.get_str()).map_err(SetupError::Config)?;
+    }
+
+    // Compression. HOST-tagged. The level WE want peers to
+    // compress towards us at. Reject LZO (stubbed) and >12.
+    if let Some(e) = config.lookup("Compression").next()
+        && let Ok(v) = e.get_int()
+    {
+        let v = u8::try_from(v).unwrap_or(255);
+        match compress::Level::from_wire(v) {
+            compress::Level::LzoLo | compress::Level::LzoHi => {
+                return Err(SetupError::Config(format!(
+                    "Compression = {v}: LZO compression is \
+                         unavailable on this node"
+                )));
+            }
+            compress::Level::None if v != 0 => {
+                // `from_wire` mapped >12 → None. Reject.
+                return Err(SetupError::Config(format!(
+                    "Compression = {v} is unrecognized by this node"
+                )));
+            }
+            _ => settings.compression = v,
+        }
+    }
+
+    // Mode. NOT in apply_reloadable_settings (device re-open).
+    if let Some(e) = config.lookup("Mode").next() {
+        settings.routing_mode = match e.get_str().to_ascii_lowercase().as_str() {
+            "router" => RoutingMode::Router,
+            "switch" => RoutingMode::Switch,
+            "hub" => RoutingMode::Hub,
+            v => {
+                return Err(SetupError::Config(format!(
+                    "Mode = {v}: invalid routing mode (router|switch|hub)"
+                )));
+            }
+        };
+    }
+
+    // DeviceStandby. Non-reloadable: decides whether tinc-up
+    // fires at setup vs first-peer.
+    if let Some(e) = config.lookup("DeviceStandby").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.device_standby = v;
+    }
+
+    // Rust extension. Non-reloadable.
+    if let Some(e) = config.lookup("DhtDiscovery").next()
+        && let Ok(v) = e.get_bool()
+    {
+        settings.dht_discovery = v;
+    }
+    settings.dht_bootstrap = config
+        .lookup("DhtBootstrap")
+        .map(|e| e.get_str().to_owned())
+        .collect();
+
+    if let Some(e) = config.lookup("Forwarding").next() {
+        match e.get_str().to_ascii_lowercase().as_str() {
+            "off" => settings.forwarding_mode = ForwardingMode::Off,
+            "internal" => settings.forwarding_mode = ForwardingMode::Internal,
+            "kernel" => settings.forwarding_mode = ForwardingMode::Kernel,
+            v => {
+                return Err(SetupError::Config(format!(
+                    "Forwarding = {v}: invalid forwarding mode"
+                )));
+            }
+        }
+    }
+
+    Ok(settings)
+}
+
+/// Open the tun/tap/fd device per `DeviceType`. Factored from
+/// `setup()`: pure config→Device, no daemon state.
+fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError> {
+    let device_type = config
+        .lookup("DeviceType")
+        .next()
+        .map(|e| e.get_str().to_ascii_lowercase());
+    let device: Box<dyn Device> = match device_type.as_deref() {
+        None | Some("dummy") => Box::new(tinc_device::Dummy),
+        #[cfg(target_os = "linux")]
+        Some("fd") => {
+            // The fd comes from `Device = N` (inherited fd) or
+            // `--device-fd N`. The integration test creates a
+            // socketpair, writes one end's fd into `Device = N`,
+            // and pumps IP packets through it. `FdTun` reads at
+            // `+14` (raw IP, no tun_pi prefix) and synthesizes
+            // the ethertype - the framing `route()` expects.
+            let dev_str = config
+                .lookup("Device")
+                .next()
+                .map(tinc_conf::Entry::get_str)
+                .ok_or_else(|| SetupError::Config("DeviceType=fd requires Device = <fd>".into()))?;
+            let fd: std::os::unix::io::RawFd = dev_str
+                .parse()
+                .map_err(|_| SetupError::Config(format!("Device = {dev_str} is not a valid fd")))?;
+            let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
+                .map_err(SetupError::Io)?;
+            Box::new(tun)
+        }
+        #[cfg(target_os = "linux")]
+        Some("tun") => {
+            // Real kernel TUN via `/dev/net/tun` + TUNSETIFF.
+            // Needs `CAP_NET_ADMIN`; the netns harness grants it
+            // inside an unprivileged userns via bwrap.
+            //
+            // `Interface = NAME` → attach to a precreated
+            // persistent device; unset → kernel picks `tun0`/etc.
+            // The netns test precreates so it can move the device
+            // into a child netns AFTER the daemon attaches (the
+            // fd→device binding survives `ip link set netns`).
+            let cfg = tinc_device::DeviceConfig {
+                iface: config
+                    .lookup("Interface")
+                    .next()
+                    .map(|e| e.get_str().to_owned()),
+                ..Default::default()
+            };
+            let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+            Box::new(tun)
+        }
+        #[cfg(target_os = "linux")]
+        Some("tap") => {
+            // TODO: auto-derive tap when Mode != router and
+            // DeviceType is unset. We only handle the explicit
+            // form here; the cross-impl test sets it explicitly.
+            let cfg = tinc_device::DeviceConfig {
+                iface: config
+                    .lookup("Interface")
+                    .next()
+                    .map(|e| e.get_str().to_owned()),
+                mode: tinc_device::Mode::Tap,
+                ..Default::default()
+            };
+            let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+            Box::new(tun)
+        }
+        Some(other) => {
+            return Err(SetupError::Config(format!(
+                "DeviceType={other} not supported yet; use dummy or fd"
+            )));
+        }
+    };
+    Ok(device)
+}
+
+/// Register each listener pair on the event loop and wrap into
+/// `ListenerSlot`s. Factored from `setup()`: consumes the bare
+/// `Listener`s and yields the daemon-side slots.
+fn register_listeners(
+    listeners: Vec<Listener>,
+    ev: &mut EventLoop<IoWhat>,
+) -> Result<Vec<ListenerSlot>, SetupError> {
+    let mut listener_slots = Vec::with_capacity(listeners.len());
+    for (i, l) in listeners.into_iter().enumerate() {
+        let (tcp_fd, udp_fd) = l.fds();
+        #[allow(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
+        let i = i as u8;
+        ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
+            .map_err(SetupError::Io)?;
+        let udp_io = ev
+            .add(udp_fd, Io::Read, IoWhat::Udp(i))
+            .map_err(SetupError::Io)?;
+        // Phase 1 (`RUST_REWRITE_10G.md`): on Linux, dup into
+        // `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per
+        // batch). No probe: kernel ≥4.18 floor; ENOPROTOOPT at
+        // first batch → panic with a clear message (see
+        // `egress/linux.rs::map_errno`). Non-Linux stays
+        // `Portable` (count × sendto).
+        //
+        // The listener keeps its copy for `recvmmsg`; the egress
+        // sends on the dup. Same file description → same bound
+        // addr, same TOS (the daemon's `set_udp_tos` sets it on
+        // the listener fd).
+        #[cfg(target_os = "linux")]
+        let egress: Box<dyn UdpEgress> =
+            Box::new(crate::egress::linux::Fast::new(&l.udp).map_err(SetupError::Io)?);
+        #[cfg(not(target_os = "linux"))]
+        let egress: Box<dyn UdpEgress> = Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
+        listener_slots.push(ListenerSlot {
+            listener: l,
+            udp_io,
+            last_tos: 0,
+            egress,
+        });
+    }
+    Ok(listener_slots)
+}
+
+/// Parse `DNSAddress`/`DNSSuffix` into `DnsConfig`. Rust-only
+/// extension. Off (returns `Ok(None)`) unless BOTH are set.
+fn load_dns_config(
+    config: &tinc_conf::Config,
+) -> Result<Option<crate::dns::DnsConfig>, SetupError> {
+    let mut a4 = None;
+    let mut a6 = None;
+    for e in config.lookup("DNSAddress") {
+        match e.get_str().parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(v)) => a4 = Some(v),
+            Ok(std::net::IpAddr::V6(v)) => a6 = Some(v),
+            Err(_) => {
+                return Err(SetupError::Config(format!(
+                    "DNSAddress = {}: not a valid IP address",
+                    e.get_str()
+                )));
+            }
+        }
+    }
+    let suffix = config
+        .lookup("DNSSuffix")
+        .next()
+        .map(|e| e.get_str().trim_matches('.').to_owned());
+    match (a4.is_some() || a6.is_some(), suffix) {
+        (true, Some(suffix)) => {
+            log::info!(target: "tincd::dns",
+                       "DNS stub enabled: {} for *.{suffix}",
+                       a4.map(|a| a.to_string())
+                         .into_iter()
+                         .chain(a6.map(|a| a.to_string()))
+                         .collect::<Vec<_>>()
+                         .join(" + "));
+            Ok(Some(crate::dns::DnsConfig {
+                dns_addr4: a4,
+                dns_addr6: a6,
+                suffix,
+            }))
+        }
+        (true, None) => Err(SetupError::Config(
+            "DNSAddress set but DNSSuffix missing".into(),
+        )),
+        (false, Some(_)) => Err(SetupError::Config(
+            "DNSSuffix set but DNSAddress missing".into(),
+        )),
+        (false, None) => Ok(None),
+    }
 }
 
 // Daemon — the formerly-global state + the loop
@@ -1290,8 +1628,7 @@ impl Daemon {
     /// happen here: setup is called once. Tests that call setup
     /// twice in one process are wrong; integration tests use
     /// subprocess.
-    #[allow(clippy::too_many_lines)] // linear boot sequence;
-    // splitting scatters the boot order across helpers.
+    #[allow(clippy::too_many_lines)] // boot wiring + ~100-line struct literal; phases extracted, rest is glue
     pub fn setup(
         confbase: &Path,
         pidfile: &Path,
@@ -1350,241 +1687,10 @@ impl Daemon {
         })?;
 
         // ─── settings
-        let mut settings = DaemonSettings::default();
-
-        // Port. HOST-tagged. `Port = 0` is valid: kernel picks (tests
-        // use this). Non-numeric Port (service-name resolution) not
-        // supported; reject.
-        if let Some(e) = config.lookup("Port").next() {
-            settings.port = e.get_str().parse().map_err(|_| {
-                SetupError::Config(format!("Port = {} is not a valid port number", e.get_str()))
-            })?;
-        }
-
-        // AddressFamily. SERVER-tagged. Unknown values silently
-        // ignored; stays at default.
-        if let Some(e) = config.lookup("AddressFamily").next() {
-            if let Some(af) = AddrFamily::from_config(e.get_str()) {
-                settings.addressfamily = af;
-            } else {
-                log::warn!(target: "tincd",
-                           "Unknown AddressFamily = {}, using default",
-                           e.get_str());
-            }
-        }
-
-        // Reloadable settings. Factored into a helper so
-        // reload_configuration can call it too.
-        // NOT Port/AddressFamily (those need re-bind, setup-only).
-        apply_reloadable_settings(&config, &mut settings);
-
-        // BindToAddress for outgoing source-addr selection. Non-
-        // reloadable. We only stash the FIRST entry here for the
-        // outgoing-connect bind; the FULL set is re-read below in the
-        // listener-creation block.
-        if let Some(e) = config.lookup("BindToAddress").next() {
-            let s = e.get_str();
-            let (host, port) = parse_bind_addr(s, 0);
-            match (host, port).to_socket_addrs() {
-                Ok(mut iter) => settings.bind_to_address = iter.next(),
-                Err(e) => {
-                    log::warn!(target: "tincd",
-                               "BindToAddress = {s}: {e}; not binding");
-                }
-            }
-        }
-
-        // UDPRcvBuf / UDPSndBuf. Warnings enabled ONLY when the
-        // operator explicitly configures - the 1MB default tripping
-        // the kernel cap on every boot would be log noise.
-        if let Some(e) = config.lookup("UDPRcvBuf").next()
-            && let Ok(v) = e.get_int()
-        {
-            match usize::try_from(v) {
-                Ok(v) => {
-                    settings.sockopts.udp_rcvbuf = v;
-                    settings.sockopts.udp_buf_warnings = true;
-                }
-                Err(_) => {
-                    return Err(SetupError::Config("UDPRcvBuf cannot be negative!".into()));
-                }
-            }
-        }
-        if let Some(e) = config.lookup("UDPSndBuf").next()
-            && let Ok(v) = e.get_int()
-        {
-            match usize::try_from(v) {
-                Ok(v) => {
-                    settings.sockopts.udp_sndbuf = v;
-                    settings.sockopts.udp_buf_warnings = true;
-                }
-                Err(_) => {
-                    return Err(SetupError::Config("UDPSndBuf cannot be negative!".into()));
-                }
-            }
-        }
-
-        // FWMark. 0 (default/unset) means "skip".
-        if let Some(e) = config.lookup("FWMark").next()
-            && let Ok(v) = e.get_int()
-            && let Ok(v) = u32::try_from(v)
-        {
-            settings.sockopts.fwmark = v;
-        }
-
-        // BindToInterface. Hoisted to setup-time; not reloadable
-        // (sockets are already bound).
-        if let Some(e) = config.lookup("BindToInterface").next() {
-            settings.sockopts.bind_to_interface = Some(e.get_str().to_owned());
-        }
-
-        // Proxy. Non-reloadable: our outgoing-connection path reads
-        // it at dial time; reload would need to re-dial existing conns.
-        if let Some(e) = config.lookup("Proxy").next() {
-            settings.proxy = parse_proxy_config(e.get_str()).map_err(SetupError::Config)?;
-        }
-
-        // Compression. HOST-tagged. The level WE want peers to
-        // compress towards us at. Reject LZO (stubbed) and >12.
-        if let Some(e) = config.lookup("Compression").next()
-            && let Ok(v) = e.get_int()
-        {
-            let v = u8::try_from(v).unwrap_or(255);
-            match compress::Level::from_wire(v) {
-                compress::Level::LzoLo | compress::Level::LzoHi => {
-                    return Err(SetupError::Config(format!(
-                        "Compression = {v}: LZO compression is \
-                             unavailable on this node"
-                    )));
-                }
-                compress::Level::None if v != 0 => {
-                    // `from_wire` mapped >12 → None. Reject.
-                    return Err(SetupError::Config(format!(
-                        "Compression = {v} is unrecognized by this node"
-                    )));
-                }
-                _ => settings.compression = v,
-            }
-        }
-
-        // Mode. NOT in apply_reloadable_settings (device re-open).
-        if let Some(e) = config.lookup("Mode").next() {
-            settings.routing_mode = match e.get_str().to_ascii_lowercase().as_str() {
-                "router" => RoutingMode::Router,
-                "switch" => RoutingMode::Switch,
-                "hub" => RoutingMode::Hub,
-                v => {
-                    return Err(SetupError::Config(format!(
-                        "Mode = {v}: invalid routing mode (router|switch|hub)"
-                    )));
-                }
-            };
-        }
-
-        // DeviceStandby. Non-reloadable: decides whether tinc-up
-        // fires at setup vs first-peer.
-        if let Some(e) = config.lookup("DeviceStandby").next()
-            && let Ok(v) = e.get_bool()
-        {
-            settings.device_standby = v;
-        }
-
-        // Rust extension. Non-reloadable.
-        if let Some(e) = config.lookup("DhtDiscovery").next()
-            && let Ok(v) = e.get_bool()
-        {
-            settings.dht_discovery = v;
-        }
-        settings.dht_bootstrap = config
-            .lookup("DhtBootstrap")
-            .map(|e| e.get_str().to_owned())
-            .collect();
-
-        if let Some(e) = config.lookup("Forwarding").next() {
-            match e.get_str().to_ascii_lowercase().as_str() {
-                "off" => settings.forwarding_mode = ForwardingMode::Off,
-                "internal" => settings.forwarding_mode = ForwardingMode::Internal,
-                "kernel" => settings.forwarding_mode = ForwardingMode::Kernel,
-                v => {
-                    return Err(SetupError::Config(format!(
-                        "Forwarding = {v}: invalid forwarding mode"
-                    )));
-                }
-            }
-        }
+        let settings = load_settings(&config)?;
 
         // ─── device
-        let device_type = config
-            .lookup("DeviceType")
-            .next()
-            .map(|e| e.get_str().to_ascii_lowercase());
-        let device: Box<dyn Device> = match device_type.as_deref() {
-            None | Some("dummy") => Box::new(tinc_device::Dummy),
-            #[cfg(target_os = "linux")]
-            Some("fd") => {
-                // The fd comes from `Device = N` (inherited fd) or
-                // `--device-fd N`. The integration test creates a
-                // socketpair, writes one end's fd into `Device = N`,
-                // and pumps IP packets through it. `FdTun` reads at
-                // `+14` (raw IP, no tun_pi prefix) and synthesizes
-                // the ethertype - the framing `route()` expects.
-                let dev_str = config
-                    .lookup("Device")
-                    .next()
-                    .map(tinc_conf::Entry::get_str)
-                    .ok_or_else(|| {
-                        SetupError::Config("DeviceType=fd requires Device = <fd>".into())
-                    })?;
-                let fd: std::os::unix::io::RawFd = dev_str.parse().map_err(|_| {
-                    SetupError::Config(format!("Device = {dev_str} is not a valid fd"))
-                })?;
-                let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
-                    .map_err(SetupError::Io)?;
-                Box::new(tun)
-            }
-            #[cfg(target_os = "linux")]
-            Some("tun") => {
-                // Real kernel TUN via `/dev/net/tun` + TUNSETIFF.
-                // Needs `CAP_NET_ADMIN`; the netns harness grants it
-                // inside an unprivileged userns via bwrap.
-                //
-                // `Interface = NAME` → attach to a precreated
-                // persistent device; unset → kernel picks `tun0`/etc.
-                // The netns test precreates so it can move the device
-                // into a child netns AFTER the daemon attaches (the
-                // fd→device binding survives `ip link set netns`).
-                let cfg = tinc_device::DeviceConfig {
-                    iface: config
-                        .lookup("Interface")
-                        .next()
-                        .map(|e| e.get_str().to_owned()),
-                    ..Default::default()
-                };
-                let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
-                Box::new(tun)
-            }
-            #[cfg(target_os = "linux")]
-            Some("tap") => {
-                // TODO: auto-derive tap when Mode != router and
-                // DeviceType is unset. We only handle the explicit
-                // form here; the cross-impl test sets it explicitly.
-                let cfg = tinc_device::DeviceConfig {
-                    iface: config
-                        .lookup("Interface")
-                        .next()
-                        .map(|e| e.get_str().to_owned()),
-                    mode: tinc_device::Mode::Tap,
-                    ..Default::default()
-                };
-                let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
-                Box::new(tun)
-            }
-            Some(other) => {
-                return Err(SetupError::Config(format!(
-                    "DeviceType={other} not supported yet; use dummy or fd"
-                )));
-            }
-        };
+        let device = open_device(&config)?;
         // Captured BEFORE the Box goes into the Daemon struct: the
         // `&dyn` trait borrow makes `&mut self` script call sites
         // awkward.
@@ -1708,40 +1814,7 @@ impl Daemon {
         let address = pidfile_addr(&listeners);
         // Register each pair. Index `i` becomes `IoWhat::Tcp(i)` so
         // the dispatch arm can index back for the accept.
-        let mut listener_slots = Vec::with_capacity(listeners.len());
-        for (i, l) in listeners.into_iter().enumerate() {
-            let (tcp_fd, udp_fd) = l.fds();
-            #[allow(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
-            let i = i as u8;
-            ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
-                .map_err(SetupError::Io)?;
-            let udp_io = ev
-                .add(udp_fd, Io::Read, IoWhat::Udp(i))
-                .map_err(SetupError::Io)?;
-            // Phase 1 (`RUST_REWRITE_10G.md`): on Linux, dup into
-            // `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per
-            // batch). No probe: kernel ≥4.18 floor; ENOPROTOOPT at
-            // first batch → panic with a clear message (see
-            // `egress/linux.rs::map_errno`). Non-Linux stays
-            // `Portable` (count × sendto).
-            //
-            // The listener keeps its copy for `recvmmsg`; the egress
-            // sends on the dup. Same file description → same bound
-            // addr, same TOS (the daemon's `set_udp_tos` sets it on
-            // the listener fd).
-            #[cfg(target_os = "linux")]
-            let egress: Box<dyn UdpEgress> =
-                Box::new(crate::egress::linux::Fast::new(&l.udp).map_err(SetupError::Io)?);
-            #[cfg(not(target_os = "linux"))]
-            let egress: Box<dyn UdpEgress> =
-                Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
-            listener_slots.push(ListenerSlot {
-                listener: l,
-                udp_io,
-                last_tos: 0,
-                egress,
-            });
-        }
+        let listener_slots = register_listeners(listeners, &mut ev)?;
 
         // ─── init_control
         let cookie = generate_cookie();
@@ -1781,53 +1854,7 @@ impl Daemon {
         // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
         // also be added to the TUN in `tinc-up`. `DNSAddress` can be
         // repeated for v4+v6.
-        let dns = {
-            let mut a4 = None;
-            let mut a6 = None;
-            for e in config.lookup("DNSAddress") {
-                match e.get_str().parse::<std::net::IpAddr>() {
-                    Ok(std::net::IpAddr::V4(v)) => a4 = Some(v),
-                    Ok(std::net::IpAddr::V6(v)) => a6 = Some(v),
-                    Err(_) => {
-                        return Err(SetupError::Config(format!(
-                            "DNSAddress = {}: not a valid IP address",
-                            e.get_str()
-                        )));
-                    }
-                }
-            }
-            let suffix = config
-                .lookup("DNSSuffix")
-                .next()
-                .map(|e| e.get_str().trim_matches('.').to_owned());
-            match (a4.is_some() || a6.is_some(), suffix) {
-                (true, Some(suffix)) => {
-                    log::info!(target: "tincd::dns",
-                               "DNS stub enabled: {} for *.{suffix}",
-                               a4.map(|a| a.to_string())
-                                 .into_iter()
-                                 .chain(a6.map(|a| a.to_string()))
-                                 .collect::<Vec<_>>()
-                                 .join(" + "));
-                    Some(crate::dns::DnsConfig {
-                        dns_addr4: a4,
-                        dns_addr6: a6,
-                        suffix,
-                    })
-                }
-                (true, None) => {
-                    return Err(SetupError::Config(
-                        "DNSAddress set but DNSSuffix missing".into(),
-                    ));
-                }
-                (false, Some(_)) => {
-                    return Err(SetupError::Config(
-                        "DNSSuffix set but DNSAddress missing".into(),
-                    ));
-                }
-                (false, None) => None,
-            }
-        };
+        let dns = load_dns_config(&config)?;
 
         // ─── BroadcastSubnet
         // Hard-coded multicast/broadcast subnets, ownerless →
