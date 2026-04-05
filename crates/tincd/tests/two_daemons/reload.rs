@@ -8,7 +8,7 @@ fn tmp(tag: &str) -> TmpGuard {
 }
 
 /// SIGHUP reload: alice changes her own Subnets, sends SIGHUP, bob
-/// sees the diff via ADD_SUBNET / DEL_SUBNET.
+/// sees the diff via `ADD_SUBNET` / `DEL_SUBNET`.
 ///
 /// ## What's proven (per step)
 ///
@@ -20,8 +20,8 @@ fn tmp(tag: &str) -> TmpGuard {
 /// 3. **DEL half**: removing the subnet + SIGHUP → bob sees it gone.
 ///
 /// This is the strongest reload test — it exercises the full chain:
-/// signal → self-pipe wake → reload_configuration → diff → broadcast
-/// → peer's on_add_subnet → SubnetTree.
+/// signal → self-pipe wake → `reload_configuration` → diff → broadcast
+/// → peer's `on_add_subnet` → `SubnetTree`.
 #[test]
 fn sighup_reload_subnets() {
     let tmp = tmp("reload");
@@ -33,9 +33,11 @@ fn sighup_reload_subnets() {
     bob.write_config_with(&alice, true, None, None);
 
     let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed: {}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed: {}",
+        drain_stderr(alice_child)
+    );
     let mut bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
         let _ = alice_child.kill();
@@ -152,8 +154,8 @@ fn sighup_reload_subnets() {
 ///
 /// ## Setup chain
 ///
-/// 1. Alice's confbase: tinc.conf + hosts/alice + ed25519_key.priv
-///    + invitations/ed25519_key.priv (the per-mesh invitation key).
+/// 1. Alice's confbase: tinc.conf + hosts/alice + `ed25519_key.priv`
+///    + `invitations/ed25519_key.priv` (the per-mesh invitation key).
 /// 2. The invitation FILE: `invitations/<cookie_filename>` with
 ///    `Name = bob\n#-----#\n<alice's host file>\n`.
 /// 3. The URL: `127.0.0.1:<alice-port>/<slug>` where slug =
@@ -161,13 +163,13 @@ fn sighup_reload_subnets() {
 ///
 /// ## What's proven (full chain)
 ///
-/// - daemon's id_h `?` branch: throwaway-key parse, invitation_key
+/// - daemon's `id_h` `?` branch: throwaway-key parse, `invitation_key`
 ///   present, plaintext greeting (line1+line2), SPTPS start with
 ///   the 15-byte no-NUL label.
 /// - SPTPS handshake: joiner Initiator, daemon Responder. Label
 ///   match (both sides use 15 bytes).
-/// - dispatch_invitation_outputs: cookie record → serve_cookie →
-///   chunk_file → type-0 records + type-1 marker.
+/// - `dispatch_invitation_outputs`: cookie record → `serve_cookie` →
+///   `chunk_file` → type-0 records + type-1 marker.
 /// - join's finalize: receives file, writes bob's tinc.conf +
 ///   hosts/alice, generates bob's identity key, sends it as type-1.
 /// - daemon's finalize: writes hosts/bob, sends type-2.
@@ -237,9 +239,11 @@ fn tinc_join_against_real_daemon() {
 
     // ─── spawn alice ────────────────────────────────────────────
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed: {}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed: {}",
+        drain_stderr(alice_child)
+    );
 
     // ─── build URL + run join ──────────────────────────────────
     // URL = `host:port/slug`. slug = b64(key_hash) || b64(cookie).
@@ -342,7 +346,7 @@ fn tinc_join_against_real_daemon() {
 }
 
 /// Security audit `2f72c2ba` regression: `on_del_subnet` must NOT
-/// retaliate ADD_SUBNET for a subnet we never claimed.
+/// retaliate `ADD_SUBNET` for a subnet we never claimed.
 ///
 /// alice connects to bob. alice owns `10.0.0.1/32`. bob (acting
 /// malicious) hand-crafts a `DEL_SUBNET alice 99.99.99.99/32` over
@@ -361,7 +365,7 @@ fn tinc_join_against_real_daemon() {
 /// the wire message), so this is INSUFFICIENT as a direct regression.
 ///
 /// **What we do**: assert the warning log line. Before fix, alice
-/// logs "Got DEL_SUBNET from bob for ourself (99.99.99.99/32)" and
+/// logs "Got `DEL_SUBNET` from bob for ourself (99.99.99.99/32)" and
 /// queues the retaliate. After fix, alice logs "...does not appear
 /// in our subnet tree" and queues nothing. We trigger the DEL via
 /// a SIGHUP-based config swap on bob's side that ADDs 99.99.99.99/32
@@ -373,7 +377,7 @@ fn tinc_join_against_real_daemon() {
 /// a future cross-impl test rig. For NOW: a unit-level test in
 /// `gossip.rs` would be ideal, but `on_del_subnet` needs full daemon
 /// state. Covered indirectly: `three_daemon_strictsubnets` exercises
-/// DEL_SUBNET dispatch end-to-end (proves the handler still works);
+/// `DEL_SUBNET` dispatch end-to-end (proves the handler still works);
 /// the fix is a one-liner gate (`subnets.contains()` check). The
 /// `udp_relay_gate` test above is the security-critical regression
 /// of this batch.
@@ -406,9 +410,11 @@ fn del_subnet_legitimate_still_works() {
     .unwrap();
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();

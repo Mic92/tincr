@@ -10,7 +10,7 @@ fn tmp(tag: &str) -> TmpGuard {
 }
 
 /// **THREE DAEMONS, RELAY PATH.** alice ← mid → bob, NO direct
-/// alice↔bob ConnectTo. Alice's packet to bob's subnet routes
+/// alice↔bob `ConnectTo`. Alice's packet to bob's subnet routes
 /// `Forward{to: bob}`; `send_sptps_data`'s relay decision sends
 /// it via `mid` (the nexthop). Mid's `on_udp_recv` sees
 /// `dst_id == bob`, calls `send_sptps_data_relay(to=bob, from=
@@ -18,8 +18,8 @@ fn tmp(tag: &str) -> TmpGuard {
 /// SPTPS, writes to TUN.
 ///
 /// Exercises the full chunk-9b chain:
-/// - REQ_KEY/ANS_KEY relay (`on_req_key`/`on_ans_key` `to !=
-///   myself`): alice's REQ_KEY for bob goes via mid's meta-conn.
+/// - `REQ_KEY/ANS_KEY` relay (`on_req_key`/`on_ans_key` `to !=
+///   myself`): alice's `REQ_KEY` for bob goes via mid's meta-conn.
 /// - `send_sptps_data_relay` `:967` `relay = nexthop` (since
 ///   `via == myself` for alice — bob is reachable but indirect
 ///   only via the SSSP path through mid).
@@ -40,7 +40,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// ## TCP-tunneled handshake, possibly TCP-tunneled data
 ///
 /// alice↔bob have no direct TCP connection. Their per-tunnel SPTPS
-/// handshake goes via REQ_KEY/ANS_KEY relayed by mid. That's the
+/// handshake goes via `REQ_KEY/ANS_KEY` relayed by mid. That's the
 /// `to != myself` arms in `on_req_key`/`on_ans_key`.
 ///
 /// The DATA path: until `mid`'s `minmtu` is discovered (which
@@ -97,9 +97,11 @@ fn three_daemon_relay() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn mid");
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
 
     let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
     if !wait_for_file(&bob.socket) {
@@ -224,18 +226,17 @@ fn three_daemon_relay() {
             None
         })
     }));
-    let recv = match recv_result {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = mid_child.kill();
-            let _ = bob_child.kill();
-            let ms = drain_stderr(mid_child);
-            let bs = drain_stderr(bob_child);
-            let asd = drain_stderr(alice_child);
-            panic!(
-                "packet relay timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}"
-            );
-        }
+    let recv = if let Ok(r) = recv_result {
+        r
+    } else {
+        let _ = mid_child.kill();
+        let _ = bob_child.kill();
+        let ms = drain_stderr(mid_child);
+        let bs = drain_stderr(bob_child);
+        let asd = drain_stderr(alice_child);
+        panic!(
+            "packet relay timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}"
+        );
     };
 
     assert_eq!(
@@ -277,7 +278,7 @@ fn three_daemon_relay() {
 /// `on_add_subnet`/`on_add_edge` never `forward_request`. So:
 ///
 /// - alice's `dump nodes` shows bob as **unreachable**. She
-///   never received bob's ADD_EDGE because mid didn't forward it.
+///   never received bob's `ADD_EDGE` because mid didn't forward it.
 ///   (bob IS in alice's graph: `load_all_nodes` walks hosts/ at
 ///   setup and adds every name. But no edge reaches him.)
 /// - bob: same. alice is unreachable from bob's view.
@@ -285,8 +286,8 @@ fn three_daemon_relay() {
 ///   know each other's edges.
 /// - A packet from alice to `10.0.0.2` (bob's subnet) → alice's
 ///   `route()` returns `Unreachable` (alice doesn't have bob's
-///   subnet — mid didn't forward bob's ADD_SUBNET). alice writes
-///   ICMP DEST_UNREACH back to her own TUN. **This is the
+///   subnet — mid didn't forward bob's `ADD_SUBNET`). alice writes
+///   ICMP `DEST_UNREACH` back to her own TUN. **This is the
 ///   operator-visible behavior**: tunnelserver makes mid a router-
 ///   only hub; alice can't reach bob through it without explicit
 ///   config.
@@ -364,9 +365,11 @@ fn three_daemon_tunnelserver() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn mid");
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
 
     let mut bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
@@ -547,13 +550,13 @@ fn three_daemon_tunnelserver() {
 
 /// `StrictSubnets = yes`: alice's `hosts/bob` is the AUTHORITY for
 /// which subnets bob may claim. bob owns `10.0.0.2/32` in his own
-/// config; he gossips ADD_SUBNET for it via mid → alice. alice's
+/// config; he gossips `ADD_SUBNET` for it via mid → alice. alice's
 /// `hosts/bob` does NOT have `Subnet = 10.0.0.2/32`. The
 /// strictsubnets gate fires: alice forwards the gossip (to nobody,
 /// no other peers) but does NOT add it locally.
 ///
 /// Unlike `tunnelserver`, `strictsubnets` does NOT filter topology:
-/// alice still learns bob exists (mid forwards bob's ADD_EDGE). She
+/// alice still learns bob exists (mid forwards bob's `ADD_EDGE`). She
 /// just won't route to subnets she didn't pre-authorize on disk.
 ///
 /// ## Shape
@@ -563,7 +566,7 @@ fn three_daemon_tunnelserver() {
 ///   `Subnet` line.
 /// - mid: dumb relay (NOT strictsubnets). `ConnectTo` neither.
 ///   Forwards gossip both ways.
-/// - bob: `ConnectTo = mid`, owns `10.0.0.2/32`. His ADD_SUBNET
+/// - bob: `ConnectTo = mid`, owns `10.0.0.2/32`. His `ADD_SUBNET`
 ///   reaches alice via mid's `forward_request`.
 ///
 /// ## Assertions
@@ -571,9 +574,9 @@ fn three_daemon_tunnelserver() {
 /// 1. alice `dump nodes` shows 3 reachable (topology unfiltered).
 /// 2. alice `dump subnets` does NOT have `10.0.0.2` (the gate).
 /// 3. mid `dump subnets` DOES have `10.0.0.2` (mid isn't strict).
-/// 4. ping `10.0.0.2` from alice → ICMP NET_UNKNOWN (no route).
+/// 4. ping `10.0.0.2` from alice → ICMP `NET_UNKNOWN` (no route).
 /// 5. Append `Subnet = 10.0.0.2/32` to alice's `hosts/bob`, restart
-///    alice → `load_all_nodes` preloads it → ADD_SUBNET gossip
+///    alice → `load_all_nodes` preloads it → `ADD_SUBNET` gossip
 ///    arrives, `subnets.contains` finds it (the `:93` lookup-first),
 ///    silent noop → `dump subnets` now shows it. (Restart not
 ///    SIGHUP; reload diff is `TODO(chunk-12-strictsubnets-reload)`.)
@@ -612,9 +615,11 @@ fn three_daemon_strictsubnets() {
 
     // ─── spawn: mid first ────────────────────────────────────────
     let mut mid_child = mid.spawn();
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
     let mut bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
         let _ = mid_child.kill();
@@ -790,7 +795,7 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
 /// sha512("alice")[:6]][garbage]`. The `if(!n) return` gate drops
 /// this; before the fix, our relay branch
 /// trusted the SRCID and forwarded the garbage to bob (whose SPTPS
-/// rejects it, kicking the REQ_KEY restart timer).
+/// rejects it, kicking the `REQ_KEY` restart timer).
 ///
 /// **Assertions**: mid's stderr has "unauthenticated UDP sender";
 /// bob's `in_packets` for alice does NOT bump from the garbage
@@ -819,9 +824,11 @@ fn udp_relay_gate_unauthenticated_sender() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn mid");
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
 
     let mut bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
@@ -946,7 +953,7 @@ fn udp_relay_gate_unauthenticated_sender() {
 /// is `StrictSubnets` so she ignores bob's gossiped /32 and
 /// believes mid owns the whole /24). alice tunnels 10.0.0.2 TO
 /// MID. mid decrypts → `route_packet(..., Some(alice))` → routes
-/// to bob (mid DOES have bob's /32 from gossip) → the FMODE_OFF
+/// to bob (mid DOES have bob's /32 from gossip) → the `FMODE_OFF`
 /// gate fires.
 ///
 /// Why this contortion: the simpler `three_daemon_relay` shape
@@ -1023,9 +1030,11 @@ fn three_daemon_forwarding_off_drops_transit() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn mid");
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
     let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
     if !wait_for_file(&bob.socket) {
         let _ = mid_child.kill();

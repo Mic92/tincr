@@ -176,7 +176,7 @@ fn sandbox_normal_ping() {
 /// kernels without Landlock, modulo the hard-fail check below.
 ///
 /// Single daemon, no peer: the gate fires on tinc-down at
-/// Daemon::Drop. If the witness file appears, `script::execute`'s
+/// `Daemon::Drop`. If the witness file appears, `script::execute`'s
 /// early-return is broken.
 #[test]
 fn sandbox_high_blocks_scripts() {

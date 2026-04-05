@@ -173,7 +173,7 @@ fn dns_stub_dig() {
 /// IPv6: AAAA query over an IPv6 transport. Proves the v6 wrap
 /// (mandatory UDP checksum, RFC 8200 §8.1 — kernel rejects zero).
 ///
-/// Single daemon again. The TUN gets an fd00::/8 ULA prefix; the
+/// Single daemon again. The TUN gets an `fd00::/8` ULA prefix; the
 /// magic DNS IP is `fd00::53`. Same kernel-verifies-checksum proof
 /// as the v4 test, but the v6 UDP-over-pseudo-header sum is the
 /// fiddly one (`dns.rs::wrap_v6` — the v4 sum is optional and

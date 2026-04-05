@@ -31,7 +31,7 @@ fn tmp(tag: &str) -> super::common::TmpGuard {
 // `proto::tests::tcp_label_has_trailing_nul` pins gcc bytes.
 
 /// SPTPS handshake → ACK exchange → connection activated. The
-/// daemon's HandshakeDone arm queues `send_ack`; we receive it as
+/// daemon's `HandshakeDone` arm queues `send_ack`; we receive it as
 /// an SPTPS `Record`, parse `"%d %s %d %x"`, send our ACK, daemon
 /// activates. `tinc dump connections` then shows ONE peer row.
 #[test]
@@ -346,7 +346,7 @@ fn peer_ack_exchange() {
     );
 }
 
-/// ADD_EDGE for a transitive node triggers `BecameReachable` for
+/// `ADD_EDGE` for a transitive node triggers `BecameReachable` for
 /// that node. Proves `on_add_edge` → `graph.add_edge` → `run_graph`
 /// → `Transition::BecameReachable` → log.
 ///
@@ -725,7 +725,7 @@ fn peer_edge_triggers_reachable() {
 ///
 /// Same setup as `peer_handshake_reaches_done` but we register a
 /// FAKE pubkey for ourselves in `hosts/testpeer`. The daemon's
-/// SPTPS receive_sig step computes the transcript with that fake
+/// SPTPS `receive_sig` step computes the transcript with that fake
 /// pubkey, our SIG was made with the real one → `BadSig`.
 #[test]
 #[allow(clippy::too_many_lines)] // test bodies are allowed to be long

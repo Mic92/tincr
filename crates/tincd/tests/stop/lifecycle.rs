@@ -239,7 +239,7 @@ fn umbilical_ready_signal() {
     }
 }
 
-/// Daemon-side half in isolation: spawn tincd with TINC_UMBILICAL
+/// Daemon-side half in isolation: spawn tincd with `TINC_UMBILICAL`
 /// pointing at a socketpair we control, read the nul byte ourselves.
 /// Proves `cut_umbilical` does the right thing without involving
 /// `tinc-tools::cmd::start` at all.
@@ -330,8 +330,8 @@ fn umbilical_daemon_side() {
     assert!(status.success(), "tincd exit: {status:?}");
 }
 
-/// SIGTERM also stops the daemon. Proves the SelfPipe + signal
-/// handler path. Same setup; instead of sending REQ_STOP, send a
+/// SIGTERM also stops the daemon. Proves the `SelfPipe` + signal
+/// handler path. Same setup; instead of sending `REQ_STOP`, send a
 /// signal.
 #[test]
 fn sigterm_stops() {

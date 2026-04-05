@@ -126,9 +126,11 @@ fn socks5_proxy_roundtrip() {
     alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
@@ -264,7 +266,7 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 /// 2. **`metaconn` HTTP intercept**: alice reads `HTTP/1.1 200
 ///    OK\r\n\r\n` BEFORE `check_gate`. Status line → skip; blank
 ///    line → skip. Then bob's ID line hits `check_gate` normally.
-///    Without the intercept, `atoi("HTTP/1.1")=0` → BadRequest.
+///    Without the intercept, `atoi("HTTP/1.1")=0` → `BadRequest`.
 /// 3. **Gate closes naturally**: no `proxy_passed` flag. Once
 ///    `id_h` changes `allow_request`, the intercept condition
 ///    `allow_request==Id` is false — subsequent lines go straight
@@ -290,9 +292,11 @@ fn http_proxy_roundtrip() {
     alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();

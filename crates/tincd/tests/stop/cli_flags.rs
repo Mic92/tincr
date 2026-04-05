@@ -548,7 +548,7 @@ fn dash_l_mlock_wired() {
 
 /// `ProcessPriority = bogus` → error logged, daemon CONTINUES.
 /// Upstream does `goto end` on bad priority. We diverge: log and
-/// continue (apply_process_priority is best-effort). Upstream
+/// continue (`apply_process_priority` is best-effort). Upstream
 /// behavior is arguably a bug — refusing to tunnel because someone
 /// typo'd "Hihg" is hostile.
 #[test]

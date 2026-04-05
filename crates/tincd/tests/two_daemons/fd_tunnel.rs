@@ -43,15 +43,13 @@ pub(crate) fn read_fd_nb(fd: i32) -> Option<Vec<u8>> {
         }
         panic!("read fd={fd}: {e}");
     }
-    if ret == 0 {
-        panic!("read fd={fd}: EOF (peer closed)");
-    }
+    assert!(ret != 0, "read fd={fd}: EOF (peer closed)");
     buf.truncate(ret as usize);
     Some(buf)
 }
 
 /// Minimal IPv4 packet: 20-byte header + payload. Only the fields
-/// `route_ipv4` reads (version nibble for FdTun's ethertype synth,
+/// `route_ipv4` reads (version nibble for `FdTun`'s ethertype synth,
 /// dst addr for the subnet lookup). Checksum/len are filled but
 /// nothing checks them (`route_ipv4` doesn't, and the packet never
 /// hits a kernel IP stack).

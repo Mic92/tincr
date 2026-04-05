@@ -548,7 +548,7 @@ impl PeerFixture {
 
     /// Drain SPTPS records from the daemon until the socket would
     /// block AND there's no partial buffered. Sets a short read
-    /// timeout (`timeout_ms`) and pumps until WouldBlock with an
+    /// timeout (`timeout_ms`) and pumps until `WouldBlock` with an
     /// empty buffer.
     ///
     /// Returns all `Record` bodies seen. Used to drain the

@@ -12,8 +12,8 @@ fn tmp(tag: &str) -> TmpGuard {
 ///
 /// Full chain: `IoWhat::Device` → `route()` → `Forward{to: bob}`
 /// → `send_sptps_packet` → (no validkey yet) `send_req_key` →
-/// REQ_KEY over the meta-conn SPTPS → bob's `on_req_key` →
-/// responder `Sptps::start` → ANS_KEY back → alice's `on_ans_key`
+/// `REQ_KEY` over the meta-conn SPTPS → bob's `on_req_key` →
+/// responder `Sptps::start` → `ANS_KEY` back → alice's `on_ans_key`
 /// → `HandshakeDone` → validkey set. Then alice's NEXT TUN read →
 /// `send_sptps_packet` → `sptps.send_record(0, ip_bytes)` →
 /// `Output::Wire` → `send_sptps_data` UDP branch → `[nullid][src]
@@ -75,9 +75,11 @@ fn first_packet_across_tunnel() {
 
     // ─── spawn ──────────────────────────────────────────────────
     let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     // Close OUR copy of bob's daemon-end fd. The child has its own
     // (dup'd by fork). If we keep ours open, bob's read() never
     // sees EOF and the test process leaks an fd. Same for alice.
@@ -272,7 +274,7 @@ fn first_packet_across_tunnel() {
 }
 
 /// Per-tunnel compression negotiation. alice asks for zlib-6, bob
-/// for LZ4. Each advertises its level in ANS_KEY (`net_packet.c:
+/// for LZ4. Each advertises its level in `ANS_KEY` (`net_packet.c:
 /// 996`); the peer stores it as `outcompression` (`protocol_key.c:
 /// 545`) and compresses TOWARDS them at that level. The compressed
 /// SPTPS record carries `PKT_COMPRESSED`; receiver decompresses at
@@ -311,9 +313,11 @@ fn compression_roundtrip() {
     alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     unsafe { libc::close(bob_pair[1]) };
 
     let alice_child = alice.spawn_with_fd(alice_pair[1]);
@@ -429,7 +433,7 @@ fn compression_roundtrip() {
 }
 
 /// Bug audit `deef1268` regression: `RouteResult::Unreachable` for
-/// an IPv6 destination must build an ICMPv6 packet, not ICMPv4.
+/// an IPv6 destination must build an `ICMPv6` packet, not `ICMPv4`.
 ///
 /// Single-daemon test: alice with NO IPv6 subnet, send an IPv6
 /// packet to her TUN, read back the ICMP unreachable. Before fix:
@@ -437,7 +441,7 @@ fn compression_roundtrip() {
 /// `build_v4_unreachable`, producing an ICMPv4-shaped frame with
 /// type=1 (unassigned in v4) and bytes from the IPv6 header
 /// reinterpreted as IPv4. After fix: ethertype-dispatched, gets
-/// proper ICMPv6 (next-header=58, type=1 DST_UNREACH).
+/// proper `ICMPv6` (next-header=58, type=1 `DST_UNREACH`).
 #[test]
 fn ipv6_unreachable_builds_icmpv6() {
     let tmp = tmp("v6-unreach");
@@ -455,9 +459,11 @@ fn ipv6_unreachable_builds_icmpv6() {
     alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
 
     let alice_child = alice.spawn_with_fd(alice_pair[1]);
     if !wait_for_file(&alice.socket) {
@@ -539,7 +545,7 @@ fn ipv6_unreachable_builds_icmpv6() {
     let _alice_stderr = drain_stderr(alice_child);
 }
 
-/// **KeyExpire timer forces SPTPS rekey.** Gap-audit `bcc5c3e3`:
+/// **`KeyExpire` timer forces SPTPS rekey.** Gap-audit `bcc5c3e3`:
 /// timer was defined
 /// (`TimerWhat::KeyExpire`) but never armed; `unreachable!()` in the
 /// dispatch arm. SPTPS sessions lived forever on one key. The
@@ -571,9 +577,11 @@ fn keyexpire_forces_rekey() {
     alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     unsafe { libc::close(bob_pair[1]) };
 
     let alice_child = alice.spawn_with_fd(alice_pair[1]);

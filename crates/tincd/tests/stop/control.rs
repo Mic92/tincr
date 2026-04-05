@@ -156,7 +156,7 @@ fn udp_stray_packet_drained() {
 /// `logger()` call. Our tap pushes to a thread-local buffer drained
 /// once per event-loop turn.
 ///
-/// Test shape: connect ctl#1, send REQ_LOG. Connect ctl#2 — the
+/// Test shape: connect ctl#1, send `REQ_LOG`. Connect ctl#2 — the
 /// daemon's `on_unix_accept` logs "Connection from ... (control)"
 /// at Info level. ctl#1 receives that line as `"18 15 <len>\n"` +
 /// `<len>` raw bytes (no trailing `\n`, `send_meta`).

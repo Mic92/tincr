@@ -7,28 +7,28 @@ fn tmp(tag: &str) -> TmpGuard {
     TmpGuard::new("2d", tag)
 }
 
-/// `purge()` via REQ_PURGE.
+/// `purge()` via `REQ_PURGE`.
 ///
 /// Three daemons in a chain: alice — mid — bob. Kill bob; mid's
-/// `terminate()` deletes the mid↔bob edges and gossips DEL_EDGE to
+/// `terminate()` deletes the mid↔bob edges and gossips `DEL_EDGE` to
 /// alice. Alice's `on_del_edge` runs `graph()` → bob unreachable.
 ///
-/// Then send REQ_PURGE to alice. Pass 1 deletes bob's outgoing
+/// Then send `REQ_PURGE` to alice. Pass 1 deletes bob's outgoing
 /// edges (none — alice never had a bob→* edge, only mid→bob),
-/// pass 2 sees no edge with `to == bob` (mid's DEL_EDGE
+/// pass 2 sees no edge with `to == bob` (mid's `DEL_EDGE`
 /// removed it), `!autoconnect` (we set `AutoConnect = no`), no
-/// strictsubnets → `node_del`. dump_nodes goes from 3 rows to 2.
+/// strictsubnets → `node_del`. `dump_nodes` goes from 3 rows to 2.
 ///
 /// Why three daemons, not two: with two, killing alice's only peer
-/// also kills the only meta-connection that DEL_EDGE could arrive
+/// also kills the only meta-connection that `DEL_EDGE` could arrive
 /// on. The `terminate()` path on the SURVIVING daemon's side does
 /// the local `del_edge` directly (`connect.rs::terminate`), which doesn't
 /// touch `on_del_edge` and so doesn't trigger our purge-on-del-edge
-/// hook. REQ_PURGE works either way, but the on_del_edge hook (the
+/// hook. `REQ_PURGE` works either way, but the `on_del_edge` hook (the
 /// memory-growth fix) needs gossip to actually propagate.
 ///
 /// We test BOTH triggers: alice's `on_del_edge` should auto-purge
-/// bob (the `gossip.rs` hook); we then verify with REQ_PURGE that
+/// bob (the `gossip.rs` hook); we then verify with `REQ_PURGE` that
 /// the ctl arm replies `"18 8 0"` and is idempotent (already gone).
 #[test]
 fn purge_removes_unreachable_node() {
@@ -48,9 +48,11 @@ fn purge_removes_unreachable_node() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, None);
 
     let mut mid_child = mid.spawn();
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
@@ -136,7 +138,7 @@ fn purge_removes_unreachable_node() {
 /// with `AutoConnect = yes` (the default). Kill bob → bob becomes
 /// unreachable on alice. Auto-purge fires (the `on_del_edge` hook),
 /// but pass 2's `!autoconnect` gate is false, so bob STAYS in the
-/// node list. dump_nodes: still 3 rows, bob status `0x0`.
+/// node list. `dump_nodes`: still 3 rows, bob status `0x0`.
 ///
 /// This proves we don't over-purge: the gate exists because
 /// autoconnect WANTS dead nodes around — it dials them.
@@ -155,9 +157,11 @@ fn purge_respects_autoconnect_gate() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, None);
 
     let mut mid_child = mid.spawn();
-    if !wait_for_file(&mid.socket) {
-        panic!("mid setup failed; stderr:\n{}", drain_stderr(mid_child));
-    }
+    assert!(
+        wait_for_file(&mid.socket),
+        "mid setup failed; stderr:\n{}",
+        drain_stderr(mid_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();

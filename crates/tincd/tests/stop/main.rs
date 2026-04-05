@@ -59,7 +59,7 @@ use common::write_ed25519_privkey;
 /// loads it; we forbid the legacy fallback). The key is deterministic
 /// (seeded from a constant) so tests are reproducible. Mode 0600 to
 /// avoid the perm warning. The daemon never USES this key in tests
-/// that don't peer-connect, but setup() loads it unconditionally
+/// that don't peer-connect, but `setup()` loads it unconditionally
 /// (the C does too — you can't run tincd without a key).
 ///
 /// Returns the daemon's PUBLIC key. Tests that don't peer-connect

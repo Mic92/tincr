@@ -17,9 +17,9 @@ fn tmp(tag: &str) -> TmpGuard {
 ///    connects to bob's port. The probe succeeds (loopback).
 /// 2. **Initiator-side `id_h`**: alice's `finish_connecting` sends
 ///    ID first; bob's `id_h` fires (responder); bob's ID reply fires
-///    alice's `id_h` (with `outgoing.is_some()` → name check + Role::
+///    alice's `id_h` (with `outgoing.is_some()` → name check + `Role::`
 ///    Initiator). Label arg order is swapped; both sides agree.
-/// 3. **SPTPS handshake**: both reach HandshakeDone. The trailing-NUL
+/// 3. **SPTPS handshake**: both reach `HandshakeDone`. The trailing-NUL
 ///    label is the same construction on both sides (still can't catch
 ///    "both wrong"; the `tcp_label_has_trailing_nul` unit test pins
 ///    gcc bytes).
@@ -51,9 +51,11 @@ fn two_daemons_connect_and_reach() {
     // connect before bob is bound → ECONNREFUSED → `retry_outgoing`
     // arms a 5s backoff. Would still work, but slow.
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
 
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
@@ -167,7 +169,7 @@ fn two_daemons_connect_and_reach() {
                 .and_then(|b| b.split_whitespace().next())
                 == Some("alice")
         });
-        if !has_alice { Some(()) } else { None }
+        if has_alice { None } else { Some(()) }
     });
 
     // dump nodes: alice still THERE (graph keeps the node), but
@@ -212,7 +214,7 @@ fn two_daemons_connect_and_reach() {
 /// Retry-backoff: alice's `ConnectTo = bob` but bob ISN'T running.
 /// Alice's `do_outgoing_connection` gets ECONNREFUSED → addr cache
 /// exhausted (only one Address) → `retry_outgoing` arms the 5s
-/// backoff. Then we start bob; alice's RetryOutgoing timer fires →
+/// backoff. Then we start bob; alice's `RetryOutgoing` timer fires →
 /// `setup_outgoing_connection` → connects.
 ///
 /// The 5s wait makes this slower than the happy-path test. Tag
@@ -235,9 +237,11 @@ fn outgoing_retry_after_refused() {
 
     // ─── spawn alice FIRST. Bob isn't running. ─────────────────
     let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
 
     // Alice tries to connect immediately in setup(). ECONNREFUSED
     // → retry_outgoing arms +5s. Prove no active conn yet.
@@ -334,9 +338,11 @@ fn ping_pong_keepalive() {
     alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        drain_stderr(bob_child)
+    );
     let mut alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
@@ -440,18 +446,22 @@ fn tinc_up_runs() {
     std::fs::set_permissions(&script_path, perm).unwrap();
 
     let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
 
     // `ControlSocket::bind` runs ~220 lines BEFORE `run_script("tinc-up")`
     // in `Daemon::setup`. `wait_for_file(socket)` proves the daemon is
     // past the bind, NOT past the script. Under parallel load the gap is
     // observable. Poll for the marker (same shape as every other
     // event-wait in this file).
-    if !wait_for_file(&marker) {
-        panic!("tinc-up didn't run; stderr:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&marker),
+        "tinc-up didn't run; stderr:\n{}",
+        drain_stderr(alice_child)
+    );
     let got = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(got.trim(), "iface=dummy name=alice");
 
@@ -492,9 +502,11 @@ fn load_all_nodes_populates_graph() {
     std::fs::write(alice.confbase.join("hosts").join(".swp"), "garbage\n").unwrap();
 
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        panic!("alice setup failed: {}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed: {}",
+        drain_stderr(alice_child)
+    );
 
     let mut ctl = alice.ctl();
     let nodes = ctl.dump(3); // REQ_DUMP_NODES
@@ -680,7 +692,7 @@ fn autoconnect_converges_to_three() {
                     let name = t.next();
                     let status = t.last().and_then(|s| u32::from_str_radix(s, 16).ok());
                     // Active (bit 1) AND not the control conn (bit 9).
-                    matches!(name, Some("bob") | Some("carol") | Some("dave"))
+                    matches!(name, Some("bob" | "carol" | "dave"))
                         && status.is_some_and(|s| s & 0x2 != 0)
                 })
             })

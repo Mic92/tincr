@@ -2,8 +2,8 @@
 //! port is pre-allocated. Proves the full chain: `do_outgoing_
 //! connection` → async-connect probe → `finish_connecting` → ID
 //! exchange (initiator side) → SPTPS handshake → ACK exchange →
-//! `send_everything` → graph(). Then stop alice, prove bob's
-//! `terminate` → DEL_EDGE → graph() → unreachable.
+//! `send_everything` → `graph()`. Then stop alice, prove bob's
+//! `terminate` → `DEL_EDGE` → `graph()` → unreachable.
 //!
 //! ## The chicken-and-egg
 //!
