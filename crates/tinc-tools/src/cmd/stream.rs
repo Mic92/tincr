@@ -362,11 +362,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 /// per-packet. The timestamp is "when the CLI received it," not
 /// "when the daemon routed it." Socket latency is ~10µs (localhost),
 /// well below the µs resolution. Good enough.
-///
-/// `clippy::similar_names`: `tv_sec`/`tv_usec` are the libpcap
-/// struct field names. The names ARE the doc; renaming breaks
-/// libpcap-side grep.
-#[allow(clippy::similar_names)] // tv_sec/tv_usec: libc struct timeval field names, pcap header mirrors them
+#[allow(clippy::similar_names)] // tv_sec/tv_usec: libpcap struct field names, kept verbatim for grep
 fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     // `unwrap_or_default`: `duration_since` errs if `now < EPOCH`
     // (clock set to 1960). Default Duration is 0s — the timestamp
@@ -376,10 +372,7 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
 
-    // `as u32`: truncates. INTENTIONAL — see fn doc on the 2038
-    // problem. `subsec_micros` returns `u32` already (always in
-    // [0, 999999]).
-    #[allow(clippy::cast_possible_truncation)] // documented above
+    #[allow(clippy::cast_possible_truncation)] // pcap tv_sec is u32; see fn doc re: 2038
     let tv_sec: u32 = dur.as_secs() as u32;
     let tv_usec: u32 = dur.subsec_micros();
 
@@ -416,11 +409,7 @@ where
     Clock: FnMut() -> SystemTime,
 {
     // ─── Subscribe
-    // The cast: `snaplen` is `u32`, `send_int` takes `i32`.
-    // `snaplen` from user is 0 or a small number (typical: 96,
-    // 1500); fits. The daemon side reads `%d` (signed), so the
-    // wire is `i32`-shaped anyway. `as i32` matches the wire.
-    #[allow(clippy::cast_possible_wrap)] // snaplen is small; matches %d wire
+    #[allow(clippy::cast_possible_wrap)] // snaplen ≤ MTU; daemon reads %d (i32 wire)
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
     // ─── Global header

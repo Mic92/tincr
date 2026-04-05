@@ -14,11 +14,7 @@
 #![warn(missing_docs)]
 #![allow(
     clippy::module_name_repetitions,
-    // doc_markdown wants backticks around words like ChaCha, OpenSSH, X25519.
-    // These are proper nouns in prose, not code identifiers; backticking them
-    // makes the docs read like a ransom note. We keep backticks for actual
-    // code (function names, types, file paths) and trust the reader to know
-    // what ChaCha is.
+    // ChaCha, OpenSSH, X25519 etc. are proper nouns, not code identifiers
     clippy::doc_markdown,
 )]
 

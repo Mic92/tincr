@@ -694,8 +694,8 @@ pub fn send_ack(
     // Legacy upgrade. Forbidden; id_h already rejected.
     debug_assert!(conn.protocol_minor >= 2);
 
-    // RTT ms. `as i32`: `(int)` also wraps.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // RTT ms: C wraps too
+    // RTT ms: C `(int)` wraps too
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
     // Per-host config OR myself->options. Composes
     // bit-by-bit; the per-host fields were extracted at id_h.

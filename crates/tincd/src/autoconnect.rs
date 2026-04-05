@@ -239,9 +239,7 @@ fn make_new_connection(
     }
 
     // C :45 prng(count) — uniform over [0, count).
-    // Clippy: cast is fine, eligible.len() < node_tree size, well
-    // under u32::MAX in practice; tinc meshes top out at ~thousands.
-    #[allow(clippy::cast_possible_truncation)] // eligible.len() bounded by node count (≪ u32::MAX)
+    #[allow(clippy::cast_possible_truncation)] // eligible.len() ≤ node count (~thousands)
     let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
     let pick = eligible[r];
 

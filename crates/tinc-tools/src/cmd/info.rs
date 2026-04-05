@@ -394,10 +394,6 @@ impl NodeInfo {
         // — modules independent (Constraints). Three copies of
         // `= 17`, all sed-verifiable, beats one pub-use-chain that
         // ties module visibility together.
-        //
-        // `clippy::items_after_statements`: a `const` mid-function
-        // is hoisted to function scope, but the visual position
-        // next to its only use is the point.
         #[allow(clippy::items_after_statements)] // const next to its only use; hoisting hides the value
         const PROT_MAJOR: u8 = 17;
         let _ = writeln!(

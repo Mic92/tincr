@@ -179,24 +179,16 @@ impl RawSocket {
 ///   `&raw const sa` cast to `*const sockaddr` (the kernel
 ///   discriminates on `sa_family`, finds `AF_PACKET`, reads as
 ///   `sockaddr_ll`).
-///
-/// `clippy::cast_possible_truncation` for `ifindex as i32`:
-/// `if_nametoindex` returns `c_uint` (unsigned); `sll_ifindex`
-/// is `c_int` (signed). Kernel ifindexes are small positive
-/// integers (1-based, allocated sequentially); 2 billion
-/// interfaces would overflow. libc's signedness mismatch is a
-/// historical glibc quirk.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // ifindex: kernel allocs 1-based sequential ints, never near 2^31
+// ifindex: c_uint→c_int glibc signedness quirk; kernel allocs small positive ints
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #[allow(unsafe_code)]
 fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // SAFETY: see fn comment. `sockaddr_ll` is repr(C), no
     // niche, all integers/bytes; zero is valid for all fields.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
-    // `sll_family = AF_PACKET`. The discriminant. `c_ushort` cast:
-    // `AF_PACKET` is `c_int` in libc; the struct field is
-    // `c_ushort`. Value is 17, fits trivially.
-    #[allow(clippy::cast_sign_loss)] // AF_PACKET=17, fits c_ushort
+    // `sll_family = AF_PACKET`. The discriminant.
+    #[allow(clippy::cast_sign_loss)] // AF_PACKET=17 (c_int→c_ushort, fits trivially)
     {
         sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     }

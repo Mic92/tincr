@@ -117,9 +117,8 @@ extern "C" fn handler(signum: libc::c_int) {
         // before installing the handler. Defensive.
         return;
     }
-    // signum fits in u8 (NSIG < 256 everywhere). Cast is safe.
-    // The C does the same: `unsigned char num = signum;` at :34.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // POSIX sigs: 1..=31
+    // C does the same: `unsigned char num = signum;` at :34.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // NSIG < 256
     let byte = signum as u8;
     // SAFETY: write(2) is async-signal-safe (POSIX.1). fd is a
     // valid pipe write-end (set in new() before this handler was

@@ -47,9 +47,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(
+    // SPTPS, ChaCha, Ed25519 etc. are proper nouns, not code identifiers
     clippy::doc_markdown,
-    // Same rationale as tinc-crypto: backticking proper nouns reads like
-    // a ransom note. SPTPS, ChaCha, Ed25519 are names.
     clippy::module_name_repetitions,
     // SptpsError is the standard idiom for an error type in a crate named
     // sptps. The lint dislikes it; the ecosystem does it anyway.

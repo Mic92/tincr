@@ -698,8 +698,8 @@ impl Daemon {
                     match socks::build_request(socks_type, target, creds.as_ref()) {
                         Ok((bytes, resp_len)) => {
                             needs_write |= conn.send_raw(&bytes);
-                            // resp_len fits u16: SOCKS5 max 26, SOCKS4 8.
-                            #[allow(clippy::cast_possible_truncation)] // SOCKS reply ≤ 26 bytes
+                            // SOCKS reply ≤ 26 bytes (SOCKS5 max), fits u16
+                            #[allow(clippy::cast_possible_truncation)]
                             {
                                 conn.tcplen = resp_len as u16;
                             }

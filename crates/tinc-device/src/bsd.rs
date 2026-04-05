@@ -150,11 +150,8 @@ impl BsdVariant {
 /// reading them is the same platform. The test can pin the
 /// STRUCTURE (`(libc::AF_INET6 as u32).to_be_bytes()`) but not
 /// literal bytes. See `prefix_ipv6_is_libc_af_inet6_be` test.
-///
-/// `clippy::cast_sign_loss`: `libc::AF_INET` is `c_int` (signed)
-/// but the value is small positive. The `as u32` is exact.
 #[must_use]
-#[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive ints
+#[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
 pub(crate) const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     // We get the ethertype already host-order from the caller
     // (who read it via `u16::from_be_bytes`).

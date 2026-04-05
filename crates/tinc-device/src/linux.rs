@@ -427,8 +427,6 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     // write). The 14 bytes are: `[0..6]` MAC, `[6..14]` undefined
     // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
     // read `[0..6]`.
-    //
-    // `c_char → u8`: same `as u8` cast as above. Bytes are bytes.
     #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes, sign is platform noise
     let mac: Mac = {
         let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data;
@@ -723,9 +721,7 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    // `ret` is `isize` (`ssize_t`). Non-negative; `as usize` is
-    // value-preserving.
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
+    #[allow(clippy::cast_sign_loss)] // ret ≥ 0 checked above; ssize_t→usize preserves value
     Ok(ret as usize)
 }
 

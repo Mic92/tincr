@@ -253,12 +253,7 @@ impl Stats {
     /// Returns true if a new node appeared. The caller doesn't
     /// actually need it (`display_order` is updated as a side effect),
     /// but it's the observable signal for "topology changed".
-    #[allow(clippy::cast_precision_loss)] // u64 → f32. Loses precision past 2^24
-    // (~16M), which a 1-second delta will only hit at 16M
-    // packets/sec on one node. The cumulative path also casts,
-    // where the value is the actual counter — but it's display-
-    // only, `%10.0f`, nobody's doing arithmetic on the printed
-    // value.
+    #[allow(clippy::cast_precision_loss)] // u64→f32: 1s deltas ≪ 2^24; cumulative is display-only
     pub fn update(&mut self, rows: &[TrafficRow], now: Instant) -> bool {
         use std::collections::btree_map::Entry;
 

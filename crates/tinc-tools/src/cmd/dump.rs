@@ -346,9 +346,8 @@ impl NodeRow {
         // ─── %d %d %d %d
         let cipher = t.d()?;
         let digest = t.d()?;
-        // Daemon `%lu`, CLI `%d`. Read as lu, narrow. The value
-        // (digest_length) is < 256 always, narrowing is safe.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // digest_length<256
+        // Daemon `%lu`, CLI `%d`. Read as lu, narrow; digest_length < 256 always.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let maclength = t.lu()? as i32;
         let compression = t.d()?;
         // ─── %x %x
@@ -615,10 +614,7 @@ impl EdgeRow {
         // ─── Weight: float
         // `weight` is signed; negative would give negative `w`,
         // weird for DOT but upstream doesn't guard. Neither do we.
-        //
-        // `as f32` from i32 is exact for the values we see (weight
-        // is < 2^24 in any sane tinc setup).
-        #[allow(clippy::cast_precision_loss)] // weight < 2^24; exact for f32
+        #[allow(clippy::cast_precision_loss)] // weight < 2^24 in sane meshes; exact for f32
         let w = 1.0_f32 + 65536.0_f32 / self.weight as f32;
 
         // ─── DOT line

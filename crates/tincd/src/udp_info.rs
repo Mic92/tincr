@@ -521,8 +521,6 @@ pub fn on_receive_mtu_info<N>(
     // `:349` `mtu = MIN(mtu, MTU)`. Clamp to compile-time max. We use
     // the jumbo build's max; see [`MTU_MAX`].
     let mtu = parsed.mtu.min(MTU_MAX);
-    // `:349` post-clamp the value fits in u16 (9018 < 65535).
-    // `as` is fine: `mtu` is in `[512, 9018]` here.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // clamped to [512,9018]
     let mtu = mtu as u16;
 

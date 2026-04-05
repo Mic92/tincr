@@ -158,8 +158,8 @@ impl Daemon {
                     let mut k = 0usize;
                     for (idx, msg) in msgs.enumerate() {
                         k = idx + 1;
-                        // u16 cast: UDP_RX_BUFSZ=2048 fits.
-                        #[allow(clippy::cast_possible_truncation)] // .min(2048) clamps to u16
+                        // .min(UDP_RX_BUFSZ=2048) clamps to u16
+                        #[allow(clippy::cast_possible_truncation)]
                         let n = msg.bytes.min(UDP_RX_BUFSZ) as u16;
                         let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
                         meta[idx] = (n, peer);
