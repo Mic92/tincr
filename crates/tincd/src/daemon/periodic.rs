@@ -4,21 +4,19 @@
 use super::*;
 
 impl Daemon {
-    /// `timeout_handler` (`net.c:180-266`). Dead-conn sweep + ping.
+    /// Dead-conn sweep + ping.
     ///
-    /// Per-conn cases: `:219` skip control; `:236-247` pre-ACK
-    /// timeout (handshake stalled); `:253-257` PING sent but no
-    /// PONG; `:260-262` idle → send PING.
+    /// Per-conn cases: skip control; pre-ACK timeout (handshake
+    /// stalled); PING sent but no PONG; idle → send PING.
     ///
-    /// Laptop-suspend detector (`:189-213`): timer skipped >1min →
-    /// daemon was asleep → peers dropped us → force-close all
-    /// (sending into stale SPTPS contexts is just noise).
-    #[allow(clippy::too_many_lines)] // C `timeout_handler` is 86 LOC
+    /// Laptop-suspend detector: timer skipped >1min → daemon was
+    /// asleep → peers dropped us → force-close all (sending into
+    /// stale SPTPS contexts is just noise).
     pub(super) fn on_ping_tick(&mut self) {
         let now = self.timers.now();
 
-        // :189-213 laptop-suspend detection. Saturating sub:
-        // clock-goes-backwards (NTP) reads as zero (safe).
+        // Laptop-suspend detection. Saturating sub: clock-goes-
+        // backwards (NTP) reads as zero (safe).
         let sleep_time = now.saturating_duration_since(self.last_periodic_run_time);
         let threshold = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout) * 2);
         let close_all_connections = sleep_time > threshold;
@@ -27,7 +25,7 @@ impl Daemon {
                         "Awaking from dead after {} seconds of sleep",
                         sleep_time.as_secs());
         }
-        self.last_periodic_run_time = now; // :215
+        self.last_periodic_run_time = now;
 
         let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
         let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
@@ -40,38 +38,35 @@ impl Daemon {
                 continue; // earlier terminate in this sweep
             };
 
-            // :219-221
             if conn.control {
                 continue;
             }
 
-            // :224-228
             if close_all_connections {
                 log::error!(target: "tincd",
                             "Forcing connection close after sleep time {} ({})",
                             conn.name, conn.hostname);
-                // C: terminate_connection(c, c->edge). c->edge!=NULL
-                // ≡ conn.active; terminate() keys DEL_EDGE on it.
+                // terminate() keys DEL_EDGE on conn.active.
                 self.terminate(id);
                 continue;
             }
 
-            // :231-233: not yet stale
+            // not yet stale
             let stale = now.saturating_duration_since(conn.last_ping_time);
             if stale <= pingtimeout {
                 continue;
             }
 
-            // :236-247: pre-ACK timeout
+            // pre-ACK timeout
             if !conn.active {
                 if conn.connecting {
                     log::warn!(target: "tincd::conn",
                                "Timeout while connecting to {} ({})",
                                conn.name, conn.hostname);
                 } else {
-                    // C :240-241 also sets c->status.tarpit. Our
-                    // Tarpit is accept-side only; harmless (auth-
-                    // timeout is benign, accept-side covers spam).
+                    // Our Tarpit is accept-side only; harmless
+                    // (auth-timeout is benign, accept-side covers
+                    // spam).
                     log::warn!(target: "tincd::conn",
                                "Timeout from {} ({}) during authentication",
                                conn.name, conn.hostname);
@@ -80,12 +75,10 @@ impl Daemon {
                 continue;
             }
 
-            // :250 try_tx(c->node, false). UDP keepalive (no PMTU).
-            //
-            // Gate on validkey: C try_tx fires for ALL direct
-            // neighbors here, but unconditional REQ_KEY races with
-            // gossip during mesh formation. Per-packet try_tx (in
-            // route_packet) handles the initial handshake instead.
+            // UDP keepalive (no PMTU). Gate on validkey:
+            // unconditional REQ_KEY races with gossip during mesh
+            // formation. Per-packet try_tx (in route_packet) handles
+            // the initial handshake instead.
             let try_nid = self
                 .node_ids
                 .get(&conn.name)
@@ -99,7 +92,7 @@ impl Daemon {
                 nw |= self.try_tx(nid, false);
             }
 
-            // :253-257: PING sent, no PONG
+            // PING sent, no PONG
             if pinged {
                 log::info!(target: "tincd::conn",
                            "{conn_name} ({conn_hostname}) didn't respond \
@@ -108,7 +101,6 @@ impl Daemon {
                 continue;
             }
 
-            // :260-262 send_ping (protocol_misc.c:47-52)
             if stale >= pinginterval {
                 let conn = self.conns.get_mut(id).expect("just checked");
                 conn.pinged = true;
@@ -120,43 +112,37 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
-        // :263-265 re-arm +1s (jitter() not ported)
+        // re-arm +1s
         self.timers.set(self.pingtimer, Duration::from_secs(1));
     }
 
-    /// `periodic_handler` (`net.c:268-303`). Contradicting-edge
-    /// storm detection + autoconnect.
+    /// Contradicting-edge storm detection + autoconnect.
     ///
-    /// `:274-291`: both counters >100 → two daemons same Name. Fix
-    /// is **synchronous sleep** — blocking the loop IS the point
-    /// (stop sending corrections). Doubled per trigger (cap 3600s),
-    /// halved per clean period (floor 10s).
+    /// Both counters >100 → two daemons same Name. Fix is
+    /// **synchronous sleep** — blocking the loop IS the point (stop
+    /// sending corrections). Doubled per trigger (cap 3600s), halved
+    /// per clean period (floor 10s).
     ///
     /// Returns would-sleep duration for the unit test only.
     pub(super) fn on_periodic_tick(&mut self) -> Duration {
-        // :274
         let slept = if self.contradicting_del_edge > 100 && self.contradicting_add_edge > 100 {
             log::warn!(target: "tincd",
                        "Possible node with same Name as us! Sleeping {} seconds.",
                        self.sleeptime);
             let d = Duration::from_secs(u64::from(self.sleeptime));
-            // :276. Blocking sleep is intentional — see doc.
+            // Blocking sleep is intentional — see doc.
             #[cfg(not(test))]
             std::thread::sleep(d);
-            // :277-281. C `< 0` catches signed overflow; u32 cap explicit.
             self.sleeptime = self.sleeptime.saturating_mul(2).min(3600);
             d
         } else {
-            // :282-289
             self.sleeptime = (self.sleeptime / 2).max(10);
             Duration::ZERO
         };
 
-        // :290-291
         self.contradicting_add_edge = 0;
         self.contradicting_del_edge = 0;
 
-        // :294-296. node_tree.count > 1 ≡ node_ids.len() > 1.
         if self.settings.autoconnect && self.node_ids.len() > 1 {
             let action = self.decide_autoconnect();
             self.execute_auto_action(action);
@@ -216,15 +202,13 @@ impl Daemon {
             }
         }
 
-        // :298-300
         self.timers.set(self.periodictimer, Duration::from_secs(5));
 
         slept
     }
 
-    /// `execute_script` (`script.c:144-253`). C callers all ignore
-    /// the return; a failing script never aborts the daemon.
-    /// `DEVICE`/`NETNAME`/`DEBUG`: not threaded through yet (None).
+    /// A failing script never aborts the daemon. `DEVICE`/`NETNAME`/
+    /// `DEBUG`: not threaded through yet (None).
     pub(super) fn run_script(&self, name: &str) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
         // Rust-only: thread DNS config through to tinc-up so the
@@ -246,14 +230,9 @@ impl Daemon {
         Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
     }
 
-    /// `device_enable` (`net_setup.c:743-754`). Fires `tinc-up`.
-    /// Idempotent via `device_enabled`: `graph.c:316` calls this on
-    /// every graph run where reachable_count went 0→>0; the C guard
-    /// is exact arithmetic, ours is this flag.
-    ///
-    /// C also calls `devops.enable()` (`:744-746`) — a no-op on
-    /// every backend except Windows (`mingw/device.c:231` arms an
-    /// I/O completion). Our device trait has no `enable`; skip.
+    /// Fires `tinc-up`. Idempotent via `device_enabled`: called on
+    /// every graph run where reachable_count went 0→>0; the flag
+    /// dedups.
     pub(super) fn device_enable(&mut self) {
         if self.device_enabled {
             return;
@@ -262,9 +241,8 @@ impl Daemon {
         self.run_script("tinc-up");
     }
 
-    /// `device_disable` (`net_setup.c:756-765`). Fires `tinc-down`.
-    /// Mirror of `device_enable`. Called from `graph.c:314` when
-    /// the last peer becomes unreachable (DeviceStandby mode).
+    /// Fires `tinc-down`. Mirror of `device_enable`. Called when the
+    /// last peer becomes unreachable (DeviceStandby mode).
     pub(super) fn device_disable(&mut self) {
         if !self.device_enabled {
             return;
@@ -273,15 +251,13 @@ impl Daemon {
         self.run_script("tinc-down");
     }
 
-    /// `subnet_update` single-subnet (`subnet.c:376-390`). The
-    /// loop-all path (`:352-372`) is inlined in BecameReachable.
-    ///
-    /// C `:360-366` strips `#weight` and passes `""` for default;
-    /// we always pass the integer (more useful, scripts guard anyway).
+    /// Single-subnet script. The loop-all path is inlined in
+    /// BecameReachable. We always pass the weight integer (more
+    /// useful than an empty string; scripts guard anyway).
     pub(super) fn run_subnet_script(&self, up: bool, owner: &str, subnet: &Subnet) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
-        env.add("NODE", owner.to_owned()); // :337
-        // :339-345: REMOTEADDRESS/REMOTEPORT only if owner != myself
+        env.add("NODE", owner.to_owned());
+        // REMOTEADDRESS/REMOTEPORT only if owner != myself
         if owner != self.name
             && let Some(addr) = self
                 .node_ids
@@ -292,7 +268,7 @@ impl Daemon {
             env.add("REMOTEADDRESS", addr.ip().to_string());
             env.add("REMOTEPORT", addr.port().to_string());
         }
-        // :359-368: strip #weight if present
+        // strip #weight if present
         let netstr = subnet.to_string();
         let netstr = netstr.split_once('#').map_or(netstr.as_str(), |(s, _)| s);
         env.add("SUBNET", netstr.to_owned());
@@ -303,52 +279,46 @@ impl Daemon {
         Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
     }
 
-    /// `graph.c:273-289`: host-up/down AND hosts/NAME-up/down.
-    /// `addr` None → REMOTEADDRESS omitted (C would pass "unknown").
+    /// host-up/down AND hosts/NAME-up/down. `addr` None →
+    /// REMOTEADDRESS omitted.
     pub(super) fn run_host_script(&self, up: bool, node: &str, addr: Option<SocketAddr>) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
-        env.add("NODE", node.to_owned()); // :279
+        env.add("NODE", node.to_owned());
         if let Some(a) = addr {
             env.add("REMOTEADDRESS", a.ip().to_string());
             env.add("REMOTEPORT", a.port().to_string());
         }
 
-        // :284
         let name = if up { "host-up" } else { "host-down" };
         let interp = self.settings.scripts_interpreter.as_deref();
         Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
 
-        // :286-287 per-node hook, same env
+        // per-node hook, same env
         let per = format!("hosts/{node}-{}", if up { "up" } else { "down" });
         Self::log_script(&per, script::execute(&self.confbase, &per, &env, interp));
     }
 
-    /// `script.c:228-250` outcome logging.
+    /// Script outcome logging.
     pub(super) fn log_script(name: &str, r: io::Result<ScriptResult>) {
         match r {
-            // :203 NotFound silent; :230 Ok silent
             Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
-            // `script.c:145` returned false silently. We log once
-            // at debug so an operator who wonders why their host-up
-            // didn't fire under Sandbox=high can find out without
-            // reading the source.
+            // Log Sandboxed at debug so an operator who wonders why
+            // their host-up didn't fire under Sandbox=high can find
+            // out without reading the source.
             Ok(ScriptResult::Sandboxed) => {
                 log::debug!(target: "tincd",
                     "Script {name}: skipped (Sandbox=high)");
             }
-            // :231-238
             Ok(ScriptResult::Failed(st)) => {
                 log::warn!(target: "tincd", "Script {name}: {st}");
             }
-            // :249-250 spawn fail
             Err(e) => {
                 log::error!(target: "tincd", "Script {name} spawn failed: {e}");
             }
         }
     }
 
-    /// `age_past_requests` (`protocol.c:213-228`). Evict entries
-    /// older than `pinginterval`. `:226`: skip log if 0/0.
+    /// Evict seen-request entries older than `pinginterval`.
     pub(super) fn on_age_past_requests(&mut self) {
         let now = self.timers.now();
         let max_age = Duration::from_secs(u64::from(self.settings.pinginterval));
@@ -357,10 +327,10 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Aging past requests: deleted {deleted}, left {left}");
         }
-        self.timers.set(self.age_timer, Duration::from_secs(10)); // :228
+        self.timers.set(self.age_timer, Duration::from_secs(10));
     }
 
-    /// `age_subnets` (`route.c:491-521`). Lazy-armed by learn_mac.
+    /// Expire learned MAC subnets. Lazy-armed by learn_mac.
     /// 10s = sweep frequency; macexpire (600s) = lease duration.
     pub(super) fn on_age_subnets(&mut self) {
         let now = self.timers.now();
@@ -368,27 +338,27 @@ impl Daemon {
 
         let myname = self.name.clone();
         for mac in &expired {
-            // learn_mac:538: weight=10. del compares full Subnet incl weight.
+            // weight=10 matches learn_mac. del compares full Subnet
+            // incl weight.
             let subnet = Subnet::Mac {
                 addr: *mac,
                 weight: 10,
             };
             log::info!(target: "tincd::net", "Subnet {subnet} expired");
 
-            // :506-509
             let targets = self.broadcast_targets(None);
             for cid in targets {
                 let _ = self.send_subnet(cid, Request::DelSubnet, &myname, &subnet);
             }
 
-            // :511. C does NOT fire subnet_update here — originator's
-            // expiry doesn't run subnet-down (only receiver's del_subnet_h).
+            // Originator's expiry doesn't run subnet-down (only
+            // receiver's del_subnet_h does).
             self.subnets.del(&subnet, &myname);
             self.mac_table.remove(mac);
         }
 
-        // :518-521: re-arm only if leases remain. Else clear slot;
-        // next learn_mac re-creates (learn() returns true on empty).
+        // Re-arm only if leases remain. Else clear slot; next
+        // learn_mac re-creates (learn() returns true on empty).
         if any_left {
             if let Some(tid) = self.age_subnets_timer {
                 self.timers.set(tid, Duration::from_secs(10));
@@ -400,7 +370,7 @@ impl Daemon {
 
     // ─── signal handlers
 
-    /// `net.c:316-333` sigterm/sighup/sigalrm handlers.
+    /// SIGTERM/SIGHUP/SIGALRM handlers.
     pub(super) fn on_signal(&mut self, s: SignalWhat) {
         match s {
             SignalWhat::Exit => {
@@ -408,8 +378,8 @@ impl Daemon {
                 self.running = false;
             }
             SignalWhat::Reload => {
-                // :321-328. No log file to reopen (env_logger → stderr).
-                // C continues either way; so do we.
+                // No log file to reopen (env_logger → stderr).
+                // Continue either way.
                 log::info!(target: "tincd", "Got SIGHUP, reloading");
                 if !self.reload_configuration() {
                     log::error!(target: "tincd",
@@ -417,27 +387,25 @@ impl Daemon {
                 }
             }
             SignalWhat::Retry => {
-                // C `net.c:330-332`: `sigalrm_handler` → `retry()`.
                 log::info!(target: "tincd", "Got SIGALRM, retrying outgoing connections");
                 self.on_retry();
             }
         }
     }
 
-    /// `retry()` (`net.c:460-482`). The "network came back, reconnect
-    /// NOW" button: zeroes outgoing backoff, fires retry timers
-    /// immediately, and kicks the ping sweep so in-progress connects
-    /// (stuck on a stale fd before suspend) get reaped this turn
-    /// instead of after `pingtimeout` more seconds.
+    /// The "network came back, reconnect NOW" button: zeroes outgoing
+    /// backoff, fires retry timers immediately, and kicks the ping
+    /// sweep so in-progress connects (stuck on a stale fd before
+    /// suspend) get reaped this turn instead of after `pingtimeout`
+    /// more seconds.
     ///
-    /// Triggered by SIGALRM (`:330-332`) and `tinc retry` → `REQ_RETRY`
-    /// (`control.c:95-96`). Without this, a laptop suspended past
-    /// `MaxTimeout` waits up to 15 min for the next reconnect attempt.
+    /// Triggered by SIGALRM and `tinc retry`. Without this, a laptop
+    /// suspended past `MaxTimeout` waits up to 15 min for the next
+    /// reconnect attempt.
     pub(super) fn on_retry(&mut self) {
-        // :462-468: per outgoing, zero backoff + arm timer for now.
-        // C's `if(o->ev.cb)` gate (don't arm a never-armed timer)
-        // doesn't apply: every `outgoings` slot has a paired timer
-        // (`Daemon::setup` adds it unconditionally at insert).
+        // Per outgoing, zero backoff + arm timer for now. Every
+        // `outgoings` slot has a paired timer (`Daemon::setup` adds
+        // it unconditionally at insert).
         for (oid, outgoing) in &mut self.outgoings {
             outgoing.timeout = 0;
             if let Some(&tid) = self.outgoing_timers.get(oid) {
@@ -445,13 +413,11 @@ impl Daemon {
             }
         }
 
-        // :471-475: in-progress outgoing conns (`!c->node` ≡ pre-ACK
-        // ≡ `!conn.active`; `c->node` is set by `ack_h`, same place
-        // we flip `active`). C does `last_ping_time = 0` (epoch);
+        // In-progress outgoing conns (pre-ACK ≡ `!conn.active`).
         // `Instant` has no zero, so subtract pingtimeout+1 from now.
-        // Same effect: next ping sweep sees stale > pingtimeout and
-        // hits the `:236-247` pre-ACK-timeout branch → terminate →
-        // `do_outgoing_connection` retries from a fresh socket.
+        // Next ping sweep sees stale > pingtimeout and hits the
+        // pre-ACK-timeout branch → terminate → `do_outgoing_
+        // connection` retries from a fresh socket.
         let now = self.timers.now();
         let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
         if let Some(stale) = now.checked_sub(pingtimeout + Duration::from_secs(1)) {
@@ -462,22 +428,20 @@ impl Daemon {
             }
         }
 
-        // :479-481: kick the ping sweep. The retry timers above fire
-        // BEFORE this in the next `expired()` walk (BTreeMap order is
+        // Kick the ping sweep. The retry timers above fire BEFORE
+        // this in the next `expired()` walk (BTreeMap order is
         // (when, seq); same `when`, lower seq wins) so by the time
         // the sweep runs, any new in-progress conns from the retry
         // already have a fresh `last_ping_time` and survive.
         self.timers.set(self.pingtimer, Duration::ZERO);
     }
 
-    /// `reload_configuration` (`net.c:336-458`). False if config
-    /// re-read failed (`:343`); daemon continues either way.
+    /// False if config re-read failed; daemon continues either way.
     ///
     /// NOT reloadable: Port, AddressFamily, DeviceType (need re-bind/
-    /// re-open; C same). Not-yet: Compression, Forwarding.
-    #[allow(clippy::too_many_lines)] // C is 122 lines; shared state
+    /// re-open). Not-yet: Compression, Forwarding.
+    #[allow(clippy::too_many_lines)] // sequential apply of disjoint config sections; splitting would scatter the "what's reloadable" picture
     pub(super) fn reload_configuration(&mut self) -> bool {
-        // :340-354
         let config = match tinc_conf::read_server_config(&self.confbase) {
             Ok(c) => c,
             Err(e) => {
@@ -486,17 +450,15 @@ impl Daemon {
                 return false;
             }
         };
-        // :350-351 read_host_config
         let mut config = config;
         let host_file = self.confbase.join("hosts").join(&self.name);
         if let Ok(entries) = tinc_conf::parse_file(&host_file) {
             config.merge(entries);
         }
 
-        // :355 setup_myself_reloadable
         apply_reloadable_settings(&config, &mut self.settings);
 
-        // net_setup.c:570: operator may have run `tinc invite` since boot.
+        // Operator may have run `tinc invite` since boot.
         match invitation_serve::read_invitation_key(&self.confbase) {
             Ok(k) => {
                 if k.is_some() && self.invitation_key.is_none() {
@@ -510,13 +472,13 @@ impl Daemon {
             }
         }
 
-        // :396-428 subnet diff (non-strictsubnets branch)
+        // ─── subnet diff
         let current_subnets: HashSet<Subnet> =
             self.subnets.owned_by(&self.name).into_iter().collect();
         let new_subnets = parse_subnets_from_config(&config, &self.name);
         let diff = reload::diff_subnets(&current_subnets, &new_subnets);
 
-        // :423-427 removed → send DEL, subnet-down, del
+        // removed → send DEL, subnet-down, del
         let myname = self.name.clone();
         for s in diff.removed {
             let line = SubnetMsg {
@@ -526,16 +488,16 @@ impl Daemon {
             .format(Request::DelSubnet, Self::nonce());
             // nw covered by `maybe_set_write_any` at fn end.
             let _nw = self.broadcast_line(&line);
-            self.run_subnet_script(false, &myname, &s); // :425
-            self.subnets.del(&s, &myname); // :427
-            // mac_table sync (rare in practice; matches C semantics)
+            self.run_subnet_script(false, &myname, &s);
+            self.subnets.del(&s, &myname);
+            // mac_table sync (rare in practice)
             if let Subnet::Mac { addr, .. } = s {
                 self.mac_table.remove(&addr);
             }
         }
-        // :415-419 added → add, send ADD, subnet-up (C order matched)
+        // added → add, send ADD, subnet-up
         for s in diff.added {
-            self.subnets.add(s, myname.clone()); // :415
+            self.subnets.add(s, myname.clone());
             let line = SubnetMsg {
                 owner: myname.clone(),
                 subnet: s,
@@ -543,13 +505,13 @@ impl Daemon {
             .format(Request::AddSubnet, Self::nonce());
             // nw covered by `maybe_set_write_any` at fn end.
             let _nw = self.broadcast_line(&line);
-            self.run_subnet_script(true, &myname, &s); // :419
+            self.run_subnet_script(true, &myname, &s);
             if let Subnet::Mac { addr, .. } = s {
                 self.mac_table.insert(addr, myname.clone());
             }
         }
 
-        // :432 try_outgoing_connections. C mark-sweeps; we diff.
+        // ─── ConnectTo diff
         let current_ct: BTreeSet<String> = self
             .outgoings
             .iter()
@@ -560,7 +522,7 @@ impl Daemon {
             .collect();
         let (to_add, to_remove) = reload::diff_connect_to(&current_ct, &new_ct);
 
-        // Remove: terminate conn, drop slot+timer. C net_socket.c:870-883.
+        // Remove: terminate conn, drop slot+timer.
         for name in to_remove {
             let oid = self
                 .outgoings
@@ -605,7 +567,7 @@ impl Daemon {
             self.setup_outgoing_connection(oid);
         }
 
-        // :438-455 mtime check
+        // ─── host file mtime check
         let conn_names: Vec<String> = self
             .conns
             .values()
@@ -638,51 +600,35 @@ impl Daemon {
             }
         }
 
-        // net.c:370. C does this BEFORE try_outgoing_connections;
         // ConnectTo diff above doesn't read has_address, so order ok.
         self.load_all_nodes();
 
-        self.last_config_check = SystemTime::now(); // :455
+        self.last_config_check = SystemTime::now();
 
         self.maybe_set_write_any();
 
         true
     }
 
-    /// `keyexpire_handler` + `regenerate_key` + `send_key_changed`
-    /// (SPTPS-only branch). C `net_setup.c:144-160`, `protocol_
-    /// key.c:38-62`.
+    /// Periodic SPTPS rekey: walk every reachable+validkey tunnel,
+    /// call `sptps_force_kex`.
     ///
-    /// C `regenerate_key` clears `validkey_in` for every node and
-    /// calls `send_key_changed`. Under `#ifdef DISABLE_LEGACY`
-    /// `send_key_changed` reduces to: walk every reachable+validkey
-    /// SPTPS tunnel, call `sptps_force_kex`. The `validkey_in` clear
-    /// is legacy-receive bookkeeping (gates `receive_udppacket`
-    /// `:437`); the SPTPS state machine handles the rekey transcript
-    /// independently.
-    ///
-    /// C-nolegacy NEVER ARMS this timer (`timeout_add` at `net_
-    /// setup.c:1049` is inside `#ifndef DISABLE_LEGACY`). That's a
-    /// C bug: `outseqno` is the ChaCha20-Poly1305 nonce, wraps at
-    /// u32::MAX with no check (`sptps.c:116,141`). We arm.
+    /// We arm this timer even though it's traditionally a legacy-
+    /// crypto concern: `outseqno` is the ChaCha20-Poly1305 nonce and
+    /// wraps at u32::MAX with no check. Rekeying every `keylifetime`
+    /// seconds keeps it well clear.
     pub(super) fn on_keyexpire(&mut self) {
         log::info!(target: "tincd", "Expiring symmetric keys");
 
-        // C `protocol_key.c:55-60`: `for splay_each(node_t, n,
-        // &node_tree) if(reachable && validkey && sptps)
-        // sptps_force_kex(&n->sptps)`.
-        //
         // Borrow dance: collect (nid, name, outs) first; dispatch_
-        // tunnel_outputs needs `&mut self`. force_kex's RNG is
-        // OsRng — same as the receive paths in metaconn.rs/gossip.rs.
+        // tunnel_outputs needs `&mut self`.
         let mut pending: Vec<(NodeId, String, Vec<tinc_sptps::Output>)> = Vec::new();
         for (&nid, tunnel) in &mut self.tunnels {
             if !tunnel.status.validkey {
                 continue;
             }
-            // C also checks `reachable`; our `validkey` is cleared on
-            // BecameUnreachable (tunnel.reset_unreachable, gossip.rs:
-            // 830-ish), so validkey ⇒ reachable here.
+            // `validkey` is cleared on BecameUnreachable, so
+            // validkey ⇒ reachable here.
             let Some(sptps) = tunnel.sptps.as_deref_mut() else {
                 continue;
             };
@@ -695,9 +641,7 @@ impl Daemon {
                     pending.push((nid, name, outs));
                 }
                 Err(_) => {
-                    // InvalidState: rekey already in flight (state !=
-                    // SecondaryKex). C `sptps_force_kex` returns false;
-                    // C ignores it. Same.
+                    // InvalidState: rekey already in flight.
                     log::debug!(target: "tincd",
                                 "force_kex skipped (rekey already in flight)");
                 }
@@ -712,7 +656,6 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
-        // C `net_setup.c:148-149`: re-arm +keylifetime.
         self.timers.set(
             self.keyexpire_timer,
             Duration::from_secs(u64::from(self.settings.keylifetime)),

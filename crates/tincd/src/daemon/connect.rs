@@ -6,9 +6,9 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use crate::proto::ConnOptions;
 
 impl Daemon {
-    /// `ack_h` mutation half (`protocol_auth.c:965-1064`). Parse done
-    /// by `proto::parse_ack`; this does the world-model edits.
-    #[allow(clippy::too_many_lines)] // C `ack_h` is 116 lines; close port
+    /// ACK handler, mutation half. Parse done by `proto::parse_ack`;
+    /// this does the world-model edits.
+    #[allow(clippy::too_many_lines)] // dup-conn termination, edge add, gossip, graph run — all share peer_id/conn borrows; splitting threads them as args
     pub(super) fn on_ack(
         &mut self,
         id: ConnId,
@@ -17,9 +17,7 @@ impl Daemon {
         let parsed = parse_ack(body)?;
         let conn = self.conns.get_mut(id).expect("caller checked");
 
-        // C `:948-950` upgrade_h: unreachable (id_h rejected minor < 2).
-
-        // C `:996-999`: PMTU only sticks if BOTH sides set it.
+        // PMTU only sticks if BOTH sides set it.
         let mut his = parsed.his_options;
         if !(conn.options & his).contains(ConnOptions::PMTU_DISCOVERY) {
             conn.options.remove(ConnOptions::PMTU_DISCOVERY);
@@ -27,9 +25,9 @@ impl Daemon {
         }
         conn.options |= his;
 
-        // C `:1011-1017`: per-host ClampMSS force-set/force-clear AFTER
-        // merging peer's options. Peer asked for ClampMSS but our
-        // hosts/NAME says no → we win (local config trumps wire).
+        // Per-host ClampMSS force-set/force-clear AFTER merging
+        // peer's options. Peer asked for ClampMSS but our hosts/NAME
+        // says no → we win (local config trumps wire).
         if let Some(clamp) = conn.host_clamp_mss {
             if clamp {
                 conn.options.insert(ConnOptions::CLAMP_MSS);
@@ -38,42 +36,38 @@ impl Daemon {
             }
         }
 
-        // C `:1003-1009`: per-host AND global PMTU clamp on `n->mtu`.
-        // C `node.c:84` inits `n->mtu = MTU` so the `< n->mtu` check
-        // passes for any sane config. We init `pmtu` lazily (try_tx);
-        // seed it now with the clamp so the first probe cycle starts
-        // from a sane ceiling instead of wasting probes above the
-        // user's known path MTU. The min(host, global) is computed in
-        // proto.rs::handle_id.
+        // Per-host AND global PMTU clamp. We init `pmtu` lazily
+        // (try_tx); seed it now with the clamp so the first probe
+        // cycle starts from a sane ceiling instead of wasting probes
+        // above the user's known path MTU. The min(host, global) is
+        // computed in proto.rs::handle_id.
         let pmtu_cap = conn.pmtu_cap;
 
-        conn.allow_request = None; // C `:1023`
+        conn.allow_request = None;
 
         log::info!(target: "tincd::conn",
                    "Connection with {} ({}) activated",
                    conn.name, conn.hostname);
 
-        // C `:965-994`: lookup_node / node_add. Dup-conn (`:975-990`):
-        // already have a live conn to this node → new wins, terminate old.
+        // Dup-conn: already have a live conn to this node → new
+        // wins, terminate old.
         let name = conn.name.clone();
         let conn_outgoing = conn.outgoing.map(OutgoingId::from);
         let conn_addr = conn.address;
         let edge_addr = conn.address.map(|mut a| {
-            // C `:1024-1025`: peer's TCP-source addr, port rewritten
-            // to their UDP port ("how do I reach you for data").
+            // Peer's TCP-source addr, port rewritten to their UDP
+            // port ("how do I reach you for data").
             a.set_port(parsed.his_udp_port);
             a
         });
-        // C `:1048`: `(weight + estimated) / 2`. midpoint rounds toward
-        // neg-inf vs C's truncate-to-zero, but both weights non-negative
-        // so identical. midpoint doesn't overflow (C is UB at 24-day RTT).
+        // midpoint: both weights non-negative so rounding mode is
+        // moot. midpoint doesn't overflow.
         let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
         let edge_options = conn.options;
 
-        // C `protocol_misc.c:69-73` + `graph.c:238`: reset backoff +
-        // add_recent_address. We do it ungated here, slightly earlier
-        // than C (idempotent; pinned by tests/addrcache.rs). The conn
-        // got all the way to ACK — the address WORKED.
+        // Reset backoff + add_recent_address. The conn got all the
+        // way to ACK — the address WORKED. Idempotent; pinned by
+        // tests/addrcache.rs.
         if let Some(oid) = conn_outgoing
             && let Some(o) = self.outgoings.get_mut(oid)
         {
@@ -81,19 +75,17 @@ impl Daemon {
             if let Some(a) = conn_addr {
                 o.addr_cache.add_recent(a);
             }
-            o.addr_cache.reset(); // C `address_cache.c:251`
+            o.addr_cache.reset();
         }
 
-        // C `:965-991`: lookup_node BEFORE dup-conn check. Idempotent
-        // (peer may already be in graph from transitive ADD_EDGE).
+        // Idempotent (peer may already be in graph from transitive
+        // ADD_EDGE).
         let peer_id = self.lookup_or_add_node(&name);
 
-        // C `:1003-1005` `n->mtu = mtu`. Runs after node_add, before
-        // edge_add. Seed pmtu (or clamp existing) so try_mtu's `maxmtu`
-        // and the eventual fixed `mtu` don't exceed the user-declared
-        // ceiling. C only writes `n->mtu` (probes still binary-search
-        // 0..MTU); we also clamp `maxmtu` — strictly better, the
-        // search converges faster and never probes above the cap.
+        // Seed pmtu (or clamp existing) so try_mtu's `maxmtu` and the
+        // eventual fixed `mtu` don't exceed the user-declared ceiling.
+        // We also clamp `maxmtu` — the search converges faster and
+        // never probes above the cap.
         if let Some(cap) = pmtu_cap {
             let now = self.timers.now();
             let tunnel = self.tunnels.entry(peer_id).or_default();
@@ -110,28 +102,26 @@ impl Daemon {
             && let Some(old_conn) = old.conn
             && old_conn != id
         {
-            // C `:976-978`
             log::debug!(target: "tincd::conn",
                                 "Established a second connection with {name}, \
                                  closing old connection");
             self.terminate(old_conn);
-            // C `:989` graph() covered by unconditional call below.
+            // graph() covered by unconditional call below.
         }
 
-        // C `:1032-1051`: `c->edge = new_edge(); edge_add()`. We add
-        // ONLY the forward edge (`:1051`). The reverse comes from the
-        // PEER's `send_add_edge(everyone)` gossip (their `:1058`). SSSP
-        // skips edges without a reverse (`graph.c:159`), so our edge is
-        // dead until peer's gossip arrives — which it does in the same
-        // burst. Do NOT synthesize the reverse: at 3+ nodes the relay's
-        // `lookup_edge` would find it, idempotent-return, never forward,
-        // and transitive nodes never learn the reverse.
+        // Add ONLY the forward edge. The reverse comes from the
+        // PEER's `send_add_edge(everyone)` gossip. SSSP skips edges
+        // without a reverse, so our edge is dead until peer's gossip
+        // arrives — which it does in the same burst. Do NOT
+        // synthesize the reverse: at 3+ nodes the relay's
+        // `lookup_edge` would find it, idempotent-return, never
+        // forward, and transitive nodes never learn the reverse.
         let fwd_eid = self
             .graph
             .add_edge(self.myself, peer_id, edge_weight, edge_options.bits());
 
-        // C `:1040-1045`: getsockname → local_address, port rewritten
-        // to myport.udp. SockRef is the non-owning wrapper.
+        // getsockname → local_address, port rewritten to myport.udp.
+        // SockRef is the non-owning wrapper.
         let local_addr = self.conns.get(id).and_then(|c| {
             let sockref = socket2::SockRef::from(c.owned_fd());
             sockref.local_addr().ok().and_then(|sa| sa.as_socket())
@@ -140,8 +130,8 @@ impl Daemon {
             // Ipv6Addr::Display doesn't bracket (matches NI_NUMERICHOST).
             let addr = AddrStr::new(ea.ip().to_string()).expect("numeric IP is whitespace-free");
             let port = AddrStr::new(ea.port().to_string()).expect("numeric");
-            // C `:1042-1045`: rewrite local port to OUR udp port (peer
-            // sends UDP there, not the ephemeral TCP port).
+            // Rewrite local port to OUR udp port (peer sends UDP
+            // there, not the ephemeral TCP port).
             let (la, lp) = if let Some(mut local) = local_addr {
                 local.set_port(self.my_udp_port);
                 (
@@ -154,7 +144,6 @@ impl Daemon {
             };
             self.edge_addrs.insert(fwd_eid, (addr, port, la, lp));
         }
-        // C `:993-994` + `:1051`: `n->connection = c; c->edge = e`.
         self.nodes.insert(
             peer_id,
             NodeState {
@@ -166,25 +155,21 @@ impl Daemon {
             },
         );
 
-        // C `:1051`: `c->edge = e` is the `broadcast_meta` (`meta.c:115`)
-        // "past ACK" filter. C ordering: `:1051` is AFTER `:1028`
-        // (send_everything) but BEFORE `:1058` (broadcast) — so the new
-        // conn DOES get its own edge back; receiver's `seen.check` dups it.
-        // Match: set active BEFORE broadcast.
+        // `active` is the `broadcast_targets` "past ACK" filter. Set
+        // BEFORE broadcast so the new conn DOES get its own edge back;
+        // receiver's `seen.check` dups it.
         if let Some(conn) = self.conns.get_mut(id) {
             conn.active = true;
         }
 
-        // C `:1028`: `send_everything(c)`. C runs this BEFORE `:1051`
-        // edge_add, so C doesn't include the new edge. We added it
-        // earlier (line ordering for NodeState.edge), so we double-send;
-        // peer's `seen.check` dups it. Harmless; not worth skipping fwd_eid.
+        // We added the new edge before this call, so we double-send
+        // it; peer's `seen.check` dups it. Harmless; not worth
+        // skipping fwd_eid.
         let mut nw = self.send_everything(id);
 
-        // C `:1055-1059`: `send_add_edge(everyone, c->edge)`.
         // tunnelserver: send only to the new peer (hub mode — spokes
         // never learn about each other). Format ONCE then broadcast
-        // (one nonce for all targets, per `send_request:122`).
+        // (one nonce for all targets).
         if let Some(line) = self.fmt_add_edge(fwd_eid, Self::nonce()) {
             if self.settings.tunnelserver {
                 if let Some(c) = self.conns.get_mut(id) {
@@ -195,19 +180,18 @@ impl Daemon {
             }
         }
 
-        // C `:1065`: `graph()`. First time peer becomes reachable.
+        // First time peer becomes reachable.
         self.run_graph_and_log();
 
         Ok(nw)
     }
 
-    /// `handle_meta_io` WRITE path → `handle_meta_write`
-    /// (`net_socket.c:486-511`).
+    /// Meta-conn WRITE handler.
     pub(super) fn on_conn_writable(&mut self, id: ConnId) {
         let conn = self.conns.get_mut(id).expect("checked contains_key");
         match conn.flush() {
             Ok(true) => {
-                // C `:509-511`: outbuf empty → io_set IO_READ.
+                // outbuf empty → drop WRITE interest.
                 if let Some(&io_id) = self.conn_io.get(id)
                     && let Err(e) = self.ev.set(io_id, Io::Read)
                 {
@@ -218,7 +202,6 @@ impl Daemon {
             }
             Ok(false) => {} // more to send; stay WRITE
             Err(e) => {
-                // C `:502-504`
                 log::info!(target: "tincd::conn",
                            "Connection write failed: {e}");
                 self.terminate(id);
@@ -226,9 +209,8 @@ impl Daemon {
         }
     }
 
-    /// `terminate_connection` (`net.c:118-170`). C's `report` flag
-    /// (`:128`) gates DEL_EDGE broadcast; we test `conn.active`
-    /// (same condition: `report = c->edge != NULL` at call sites).
+    /// Connection teardown. `conn.active` gates DEL_EDGE broadcast
+    /// (only past-ACK conns have an edge to delete).
     pub(super) fn terminate(&mut self, id: ConnId) {
         let Some(conn) = self.conns.remove(id) else {
             // Slotmap is generational; stale ConnId → None. Idempotent.
@@ -251,16 +233,15 @@ impl Daemon {
             self.ev.del(io_id);
         }
 
-        // C `logger.c:195,203`: `logcontrol = false; ... logcontrol
-        // = true` recompute-during-walk. If this was a log conn,
-        // re-check whether any remain and close the gate if not.
-        // Doing this in `terminate` (not just on EOF) covers all
-        // teardown paths (REQ_DISCONNECT, ping timeout, error).
+        // If this was a log conn, re-check whether any remain and
+        // close the gate if not. Doing this in `terminate` (not just
+        // on EOF) covers all teardown paths (REQ_DISCONNECT, ping
+        // timeout, error).
         if was_log && !self.conns.values().any(|c| c.log_level.is_some()) {
             crate::log_tap::set_active(false);
         }
 
-        // C `:121-123`: clear the back-ref (node outlives conn).
+        // Clear the back-ref (node outlives conn).
         let our_edge = conn_nid
             .and_then(|nid| self.nodes.get_mut(&nid))
             .and_then(|ns| {
@@ -272,9 +253,8 @@ impl Daemon {
                 }
             });
 
-        // C `:126-152`: edge cleanup. Only fires post-ACK (`:1051` set c->edge).
+        // Edge cleanup. Only fires post-ACK.
         if let Some(eid) = our_edge {
-            // C `:127-129`: `if(report && !tunnelserver) send_del_edge(everyone)`.
             if was_active && !self.settings.tunnelserver {
                 let to_name = conn_name.clone();
                 let my_name = self.name.clone();
@@ -287,14 +267,12 @@ impl Daemon {
                 let _nw = self.broadcast_line(&line);
             }
 
-            // C `:131-132`
             self.graph.del_edge(eid);
             self.edge_addrs.remove(&eid);
 
-            // C `:136`
             self.run_graph_and_log();
 
-            // C `:140-152`: reverse-edge cleanup if peer now unreachable.
+            // Reverse-edge cleanup if peer now unreachable.
             let peer_unreachable = conn_nid
                 .and_then(|nid| self.graph.node(nid))
                 .is_some_and(|n| !n.reachable);
@@ -303,7 +281,6 @@ impl Daemon {
                 && let Some(peer_nid) = conn_nid
                 && let Some(rev) = self.graph.lookup_edge(peer_nid, self.myself)
             {
-                // C `:144-146`
                 if !self.settings.tunnelserver {
                     let line = DelEdge {
                         from: conn_name.clone(),
@@ -315,7 +292,7 @@ impl Daemon {
                     // the bug class; `#[must_use]` now guards it).
                     let _nw = self.broadcast_line(&line);
                 }
-                self.graph.del_edge(rev); // C `:149`
+                self.graph.del_edge(rev);
                 self.edge_addrs.remove(&rev);
             }
 
@@ -323,16 +300,15 @@ impl Daemon {
             // (it returns `nw` for the caller to do that). With
             // pinginterval=60, the next natural write arm is up to a
             // minute away — the DEL_EDGE sits in outbuf and the mesh
-            // never learns this peer died. C is push-based (`send_
-            // request` writes synchronously, `meta.c:98`); we're
-            // edge-triggered epoll. Exposed by the purge integration
-            // test (mid never gossips bob's death to alice).
+            // never learns this peer died. We're edge-triggered
+            // epoll. Exposed by the purge integration test (mid
+            // never gossips bob's death to alice).
             self.maybe_set_write_any();
         }
 
-        // C `net.c:155-161`: outgoing retry. C runs `:161` unconditionally;
-        // we gate on was_active because a probe-fail is already handled
-        // by `on_connecting`→`do_outgoing_connection` directly (no double-retry).
+        // Outgoing retry. Gate on was_active: a probe-fail is already
+        // handled by `on_connecting`→`do_outgoing_connection`
+        // directly (no double-retry).
         if was_active
             && conn_nid.is_some_and(|nid| self.nodes.contains_key(&nid))
             // Can't read `conn.outgoing` (conn already dropped).
@@ -351,21 +327,19 @@ impl Daemon {
         }
     }
 
-    // ─── outgoing connections (`net_socket.c:405-681`)
+    // ─── outgoing connections
 
-    /// `setup_outgoing_connection` (`net_socket.c:664-681`).
     pub(super) fn setup_outgoing_connection(&mut self, oid: OutgoingId) {
-        // C `:666` timeout_del: not ported. tinc-event's `del` frees
-        // the slot but we want to keep it. Safe to skip: the timer
-        // can't fire mid-connect (we don't return to run() until exit);
-        // next `retry_outgoing` `set` overwrites anyway.
+        // No timer del: the timer can't fire mid-connect (we don't
+        // return to run() until exit); next `retry_outgoing` `set`
+        // overwrites anyway.
 
         let Some(outgoing) = self.outgoings.get(oid) else {
             return; // gone (chunk 8's mark-sweep)
         };
         let name = outgoing.node_name.clone();
 
-        // C `:674-676`: `if(n->connection)`. No node_ids entry = never ACK'd.
+        // No node_ids entry = never ACK'd.
         let nid = self.node_ids.get(&name).copied();
         if nid
             .and_then(|nid| self.nodes.get(&nid))
@@ -377,22 +351,14 @@ impl Daemon {
             return;
         }
 
-        // `get_known_addresses` (`address_cache.c:31-65`) edge-walk.
-        // C does this lazily inside `get_recent_address:128-129` after
-        // tier 1 is exhausted; we walk eagerly here (still per-retry:
-        // `RetryOutgoing` timer → this fn → fresh graph snapshot). C
-        // `reset_address_cache:261-263` frees `cache->ai` so each
-        // retry re-walks too — same churn-tolerance, different timing.
-        //
-        // C walks `n->edge_tree` (bob's OUTgoing edges) and reads
-        // `e->reverse->address`. The reverse of bob→alice is alice→
-        // bob, whose address field is what alice's `ADD_EDGE` reported
-        // for bob ("I see bob at 10.0.0.5:655"). C `:36-37` skips
-        // reverseless edges (gossip half-arrived).
-        //
-        // We don't have an `n->edge_tree` for unknown nodes — if bob
-        // was never gossiped (no `node_ids` entry), `nid` is `None`
-        // and tier 2 stays empty. Same as C: no node, no edges.
+        // Edge-walk for known addresses. Walk eagerly here (still
+        // per-retry: `RetryOutgoing` timer → this fn → fresh graph
+        // snapshot). Walk bob's OUTgoing edges and read the reverse's
+        // address: the reverse of bob→alice is alice→bob, whose
+        // address field is what alice's `ADD_EDGE` reported for bob
+        // ("I see bob at 10.0.0.5:655"). Skip reverseless edges
+        // (gossip half-arrived). If bob was never gossiped (no
+        // `node_ids` entry), `nid` is `None` and tier 2 stays empty.
         let known: Vec<SocketAddr> = nid
             .into_iter()
             .flat_map(|n| self.graph.node_edges(n).iter().copied())
@@ -412,15 +378,14 @@ impl Daemon {
             o.addr_cache.add_known_addresses(known);
         }
 
-        self.do_outgoing_connection(oid); // C `:678`
+        self.do_outgoing_connection(oid);
     }
 
-    /// `do_outgoing_connection` (`net_socket.c:564-662`). The `goto
-    /// begin` loop: walk addr cache, register first non-sync-fail.
-    /// PROXY_EXEC (`:588,:631`): socketpair+fork, skip async probe.
-    /// PROXY_SOCKS/HTTP (`:590-601,:637`): connect to PROXY addr;
-    /// peer addr still walked (it's the CONNECT target).
-    #[allow(clippy::too_many_lines)] // PROXY_EXEC is a parallel path; C is 98 lines, we're ~119
+    /// Walk addr cache, register first non-sync-fail.
+    /// PROXY_EXEC: socketpair+fork, skip async probe. PROXY_SOCKS/
+    /// HTTP: connect to PROXY addr; peer addr still walked (it's the
+    /// CONNECT target).
+    #[allow(clippy::too_many_lines)] // PROXY_EXEC is a parallel path with its own conn-insert + io_add ceremony; merging with the SOCKS/HTTP arm would obscure both
     pub(super) fn do_outgoing_connection(&mut self, oid: OutgoingId) {
         loop {
             let Some(outgoing) = self.outgoings.get_mut(oid) else {
@@ -428,11 +393,11 @@ impl Daemon {
             };
             let name = outgoing.node_name.clone();
 
-            // ─── PROXY_EXEC (C `:588-590`, `:631`)
-            // Walk addr cache for env vars; fd is socketpair half (no probe).
+            // ─── PROXY_EXEC
+            // Walk addr cache for env vars; fd is socketpair half
+            // (no probe).
             if let Some(ProxyConfig::Exec { cmd }) = self.settings.proxy.clone() {
                 let Some(addr) = outgoing.addr_cache.next_addr() else {
-                    // C `:572-575`
                     log::error!(target: "tincd::conn",
                                 "Could not set up a meta connection to {name}");
                     self.retry_outgoing(oid);
@@ -445,14 +410,14 @@ impl Daemon {
                     Err(e) => {
                         log::error!(target: "tincd::conn",
                                     "Proxy exec failed for {name}: {e}");
-                        continue; // C `:605-608` goto begin
+                        continue; // try next addr
                     }
                 };
                 let flags = OFlag::from_bits_truncate(
                     fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0),
                 );
                 let _ = fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
-                // C `:631`: `result = 0`. No async connect; ready NOW.
+                // No async connect; ready NOW.
                 let now = self.timers.now();
                 let raw_fd = fd.as_raw_fd();
                 let mut conn = Connection::new_outgoing(
@@ -476,7 +441,7 @@ impl Daemon {
                         continue;
                     }
                 }
-                // C `:425`: send_id. Proxy is transport; peer expects ID.
+                // Proxy is transport; peer expects ID.
                 if let Some(conn) = self.conns.get_mut(id) {
                     log::info!(target: "tincd::conn",
                                 "Connected to {} ({}) via proxy exec",
@@ -500,8 +465,9 @@ impl Daemon {
                 return;
             }
 
-            // ─── SOCKS/HTTP: connect to PROXY addr (C `:590-601`).
-            // Addr cache still walks PEER addrs (CONNECT target varies).
+            // ─── SOCKS/HTTP: connect to PROXY addr.
+            // Addr cache still walks PEER addrs (CONNECT target
+            // varies).
             let proxy_hp = self
                 .settings
                 .proxy
@@ -526,8 +492,8 @@ impl Daemon {
 
             match attempt {
                 ConnectAttempt::Started { sock, addr } => {
-                    // C `:649-658`. WRITE registration triggers
-                    // `on_connecting` when kernel finishes async connect.
+                    // WRITE registration triggers `on_connecting`
+                    // when kernel finishes async connect.
                     let now = self.timers.now();
                     // Probe needs `&Socket` (take_error); Connection.fd is
                     // OwnedFd. dup: the dup goes on Connection (long-lived,
@@ -553,9 +519,9 @@ impl Daemon {
                     );
                     let id = self.conns.insert(conn);
                     self.connecting_socks.insert(id, sock);
-                    // C `:658`: IO_READ|IO_WRITE. EPOLLOUT fires on
-                    // connect complete OR fail. READ too (loopback
-                    // connect+immediate-data is possible).
+                    // IO_READ|IO_WRITE. EPOLLOUT fires on connect
+                    // complete OR fail. READ too (loopback connect+
+                    // immediate-data is possible).
                     match self.ev.add(fd, Io::ReadWrite, IoWhat::Conn(id)) {
                         Ok(io_id) => {
                             self.conn_io.insert(id, io_id);
@@ -568,11 +534,10 @@ impl Daemon {
                             continue;
                         }
                     }
-                    return; // C `:660`
+                    return;
                 }
-                ConnectAttempt::Retry => {} // C `goto begin`
+                ConnectAttempt::Retry => {}
                 ConnectAttempt::Exhausted => {
-                    // C `:572-575`
                     self.retry_outgoing(oid);
                     return;
                 }
@@ -580,15 +545,14 @@ impl Daemon {
         }
     }
 
-    /// `retry_outgoing` (`net_socket.c:405-417`). C `:414` jitter not
-    /// ported (loop tick rate already desyncs identical-config daemons).
+    /// Exponential backoff for outgoing retry. No jitter: loop tick
+    /// rate already desyncs identical-config daemons.
     pub(super) fn retry_outgoing(&mut self, oid: OutgoingId) {
         let Some(outgoing) = self.outgoings.get_mut(oid) else {
             return;
         };
         let timeout = outgoing.bump_timeout(self.settings.maxtimeout);
-        // C resets in `setup_outgoing_connection:670`, not here. We
-        // didn't port that line; reset HERE so next retry walks from top.
+        // Reset HERE so next retry walks from top.
         outgoing.addr_cache.reset();
         let name = outgoing.node_name.clone();
         log::info!(target: "tincd::conn",
@@ -619,10 +583,10 @@ impl Daemon {
         }
     }
 
-    /// `handle_meta_io` connecting branch (`net_socket.c:517-555`).
-    /// Returns `true` to fall through to write/read (C `:553`). The
-    /// fall-through matters: mio is edge-triggered; the WRITE edge
-    /// that woke us is the same one that flushes the ID line.
+    /// Async connect completion check. Returns `true` to fall through
+    /// to write/read. The fall-through matters: mio is edge-triggered;
+    /// the WRITE edge that woke us is the same one that flushes the
+    /// ID line.
     pub(super) fn on_connecting(&mut self, id: ConnId) -> bool {
         let Some(sock) = self.connecting_socks.get(id) else {
             log::warn!(target: "tincd::conn",
@@ -632,13 +596,13 @@ impl Daemon {
         };
         match probe_connecting(sock) {
             Ok(true) => {
-                self.finish_connecting(id); // C `:553-554`
+                self.finish_connecting(id);
                 true
             }
-            Ok(false) => false, // spurious; C `:534`
+            Ok(false) => false, // spurious
             Err(e) => {
-                // C `:546-547`. C's `terminate_connection(c, false)`:
-                // report=false ↔ our was_active=false (no edge yet).
+                // was_active=false (no edge yet) → terminate won't
+                // gossip DEL_EDGE.
                 let (name, hostname) = self
                     .conns
                     .get(id)
@@ -663,9 +627,8 @@ impl Daemon {
         }
     }
 
-    /// `finish_connecting` (`net_socket.c:419-426`). add_recent_address
-    /// is deferred to `on_ack` (C does it there too at `:939-943`;
-    /// the right port alone doesn't mean tinc).
+    /// add_recent_address is deferred to `on_ack` (the right port
+    /// alone doesn't mean tinc).
     pub(super) fn finish_connecting(&mut self, id: ConnId) {
         // Drop probe socket; dup'd OwnedFd on Connection is live now.
         self.connecting_socks.remove(id);
@@ -675,41 +638,41 @@ impl Daemon {
         };
         log::info!(target: "tincd::conn",
                    "Connected to {} ({})", conn.name, conn.hostname);
-        conn.last_ping_time = self.timers.now(); // C `:423`
-        conn.connecting = false; // C `:424`
+        conn.last_ping_time = self.timers.now();
+        conn.connecting = false;
 
-        // C `protocol_auth.c:111-114`: send_proxyrequest BEFORE send_id.
-        // Both queue into outbuf, flush in one send(). Pipelining is
-        // intentional: proxy buffers the ID line while processing greeting.
+        // send_proxyrequest BEFORE send_id. Both queue into outbuf,
+        // flush in one send(). Pipelining is intentional: proxy
+        // buffers the ID line while processing greeting.
         let mut needs_write = false;
         if let (true, Some(proxy)) = (conn.outgoing.is_some(), &self.settings.proxy) {
             match proxy {
                 ProxyConfig::Exec { .. } => {
-                    // C `protocol_auth.c:84`. Unreachable (Exec skips
-                    // finish_connecting); arm makes match exhaustive.
+                    // Unreachable (Exec skips finish_connecting);
+                    // arm makes match exhaustive.
                 }
                 ProxyConfig::Http { .. } => {
-                    // C `protocol_auth.c:60-68`. send_request appends `\n`
-                    // → wire is `CONNECT h:p HTTP/1.1\r\n\r\n`. No Host:
-                    // header (RFC 7230 §5.4 violation; proxies accept it).
-                    // c->address is the PEER addr (proxy is transport).
+                    // send() appends `\n` → wire is `CONNECT h:p
+                    // HTTP/1.1\r\n\r\n`. No Host: header (RFC 7230
+                    // §5.4 violation; proxies accept it). conn.
+                    // address is the PEER addr (proxy is transport).
                     let Some(target) = conn.address else {
                         log::error!(target: "tincd::conn",
                             "HTTP proxy: no peer address on {}", conn.name);
                         self.terminate(id);
                         return;
                     };
-                    // STRICTER-than-C: bracket IPv6 (RFC 7230 §2.7.1).
-                    // C's sockaddr2str doesn't bracket → `CONNECT ::1:655`
-                    // is ambiguous. SocketAddr::Display brackets v6.
+                    // Bracket IPv6 (RFC 7230 §2.7.1). `CONNECT
+                    // ::1:655` would be ambiguous. SocketAddr::
+                    // Display brackets v6.
                     let line = format!("CONNECT {target} HTTP/1.1\r\n\r\n");
                     needs_write |= conn.send_raw(line.as_bytes());
                     log::debug!(target: "tincd::conn",
                         "Queued HTTP CONNECT for {} → {target}", conn.name);
-                    // No tcplen — response is line-based (`protocol.c:148-161`).
+                    // No tcplen — response is line-based.
                 }
                 ProxyConfig::Socks4 { .. } | ProxyConfig::Socks5 { .. } => {
-                    // C `protocol_auth.c:71-77`. Target = PEER addr.
+                    // Target = PEER addr.
                     let Some(target) = conn.address else {
                         log::error!(target: "tincd::conn",
                             "SOCKS proxy: no peer address on {}", conn.name);
@@ -720,7 +683,6 @@ impl Daemon {
                     let creds = proxy.socks_creds();
                     match socks::build_request(socks_type, target, creds.as_ref()) {
                         Ok((bytes, resp_len)) => {
-                            // C `:75-76`
                             needs_write |= conn.send_raw(&bytes);
                             // resp_len fits u16: SOCKS5 max 26, SOCKS4 8.
                             #[allow(clippy::cast_possible_truncation)]
@@ -732,7 +694,7 @@ impl Daemon {
                                 bytes.len(), conn.name, resp_len);
                         }
                         Err(e) => {
-                            // SOCKS4+IPv6, or 256-byte cred (C-is-WRONG #9).
+                            // SOCKS4+IPv6, or 256-byte cred.
                             log::error!(target: "tincd::conn",
                                 "SOCKS request build failed for {}: {e:?}",
                                 conn.name);
@@ -744,7 +706,7 @@ impl Daemon {
             }
         }
 
-        // C `:425`: send_id. WE go first (initiator); peer's `id_h:451` replies.
+        // send_id. WE go first (initiator); peer replies.
         let conn = self.conns.get_mut(id).expect("not terminated");
         needs_write |= conn.send(format_args!(
             "{} {} {}.{}",
@@ -754,8 +716,8 @@ impl Daemon {
             tinc_proto::request::PROT_MINOR
         ));
 
-        // Re-register: was ReadWrite (probe); now READ (or RW if queued).
-        // C `:658` registers RW always; `:509` drops WRITE when empty.
+        // Re-register: was ReadWrite (probe); now READ (or RW if
+        // queued).
         if let Some(&io_id) = self.conn_io.get(id) {
             let interest = if needs_write { Io::ReadWrite } else { Io::Read };
             if let Err(e) = self.ev.set(io_id, interest) {
