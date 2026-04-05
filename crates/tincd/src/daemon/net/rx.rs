@@ -100,11 +100,10 @@ impl Daemon {
     /// ID prefix is OUTSIDE SPTPS framing; `dst == nullid` means
     /// "direct to you".
     ///
-    /// We're EPOLLET, so a full batch (64 returned) means "maybe
-    /// more" → rearm so the next `turn()` picks them up after the rest
-    /// of the event loop runs. Same drain semantics as the old
-    /// `recv_from` loop's `UDP_DRAIN_CAP=64` (bug audit `deef1268`):
-    /// 64 packets per turn, then yield to TUN-read/meta-conn/timers.
+    /// One `recvmmsg(64)` per wake. LT epoll: if the kernel had ≥64
+    /// queued, the next `turn()` re-fires after TUN-read/meta-conn/
+    /// timers get a slice. Same fairness as the old `recv_from` loop's
+    /// `UDP_DRAIN_CAP=64` (bug audit `deef1268`).
     /// iperf3 is TCP-over-tunnel — alice MUST get back to TUN reads
     /// or the send window fills and the whole thing stalls.
     pub(in crate::daemon) fn on_udp_recv(&mut self, i: u8) {
@@ -118,19 +117,9 @@ impl Daemon {
             .take()
             .expect("udp_rx_batch is Some between on_udp_recv calls");
 
-        let count = self.recvmmsg_batch(i, &mut batch);
+        self.recvmmsg_batch(i, &mut batch);
 
         self.udp_rx_batch = Some(batch);
-
-        // EPOLLET: kernel had ≥64 queued → there may be more.
-        // Rearm; next turn() drains the rest after meta-conn/timers
-        // get a slice.
-        if count == UDP_RX_BATCH
-            && let Some(slot) = self.listeners.get(usize::from(i))
-            && let Err(e) = self.ev.rearm(slot.udp_io)
-        {
-            log::error!(target: "tincd::net", "UDP fd rearm failed: {e}");
-        }
     }
 
     /// One `recvmmsg(64)` + dispatch. Returns the number of

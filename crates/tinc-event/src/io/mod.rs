@@ -178,40 +178,6 @@ impl<W: Copy> EventLoop<W> {
         Ok(())
     }
 
-    /// Force-rearm an fd at its current interest. Edge-triggered
-    /// epoll (`EPOLLET`, set in `epoll.rs`) only fires once per
-    /// readiness edge: if a drain loop returns before reading to
-    /// `EAGAIN` (to bound iterations under sustained load), the next
-    /// `turn()` won't re-fire even though the fd is still readable.
-    /// `EPOLL_CTL_MOD` re-evaluates readiness against current fd
-    /// state and fires on the next `epoll_wait` if still ready.
-    ///
-    /// Unlike [`set`](Self::set), this does NOT short-circuit when
-    /// the interest is unchanged — the `MOD` syscall IS the point.
-    ///
-    /// # Errors
-    /// `epoll_ctl(MOD)` failures (`EBADF` if the fd was closed under
-    /// us). The slot is left as-is on error.
-    ///
-    /// # Panics
-    /// If `id` is dangling (slot freed via `del`).
-    pub fn rearm(&mut self, id: IoId) -> io::Result<()> {
-        let slot = self.slots[id.0].as_ref().expect("dangling IoId");
-        let Some(interest) = slot.interest else {
-            // Never registered; nothing to rearm. Unreachable in the
-            // current API (del frees the slot, expect above would
-            // fire), but mirrors the unreachable arm in `set`.
-            return Ok(());
-        };
-        ctl(
-            self.ep.as_raw_fd(),
-            libc::EPOLL_CTL_MOD,
-            slot.fd,
-            id.0,
-            interest,
-        )
-    }
-
     /// Deregister from epoll AND free the slot.
     ///
     /// C is two-step: `io_set(io, 0)` (deregisters, `:108`), then
@@ -252,9 +218,8 @@ impl<W: Copy> EventLoop<W> {
     /// loop when a cb removes/alters another slot, we check per-event:
     /// `slots.get(token)` returns `None` if removed; `interest.wants
     /// (ready)` is false if reregistered to a non-overlapping
-    /// interest. Stale events are dropped silently. mio is
-    /// level-triggered — anything still actually ready will re-fire
-    /// next turn.
+    /// interest. Stale events are dropped silently. Level-triggered:
+    /// anything still actually ready re-fires next turn.
     ///
     /// This processes more events per wake than C (C bails at first
     /// change; we keep going). That's correct: the C bail is

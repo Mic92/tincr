@@ -77,7 +77,7 @@ impl<W: Copy> Timers<W> {
     /// per-re-arm. Separating them makes the dynamic timers
     /// (`RetryOutgoing(OutgoingId)`) cheap to pre-create.
     ///
-    /// Returns a stable handle. Unlike `IoId` this is NOT a mio token
+    /// Returns a stable handle. Unlike `IoId` this is NOT an epoll token
     /// — timers don't go through the poll fd.
     pub fn add(&mut self, what: W) -> TimerId {
         let idx = if let Some(idx) = self.free.pop() {
@@ -134,7 +134,7 @@ impl<W: Copy> Timers<W> {
     /// expired timers into `out`. Returns
     /// the duration until the next un-expired timer, or `None` if
     /// the wheel is empty. That `Option<Duration>` is the poll
-    /// timeout — passed straight to `mio::Poll::poll`.
+    /// timeout — passed straight to `epoll_wait`.
     ///
     /// The C version FIRES the callbacks inline (`timeout->cb(data)`
     /// at `:125`). We can't — the daemon owns `&mut Timers` AND
@@ -181,7 +181,7 @@ impl<W: Copy> Timers<W> {
                     return Some(k.0 - self.now);
                 }
                 None => {
-                    // No more timers. mio handles `None` as infinite wait.
+                    // No more timers. `epoll_wait(-1)` is infinite wait.
                     return None;
                 }
             };

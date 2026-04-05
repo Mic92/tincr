@@ -13,7 +13,7 @@ use std::time::{Instant, SystemTime};
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
-use tinc_event::{EventLoop, IoId, Ready, SelfPipe, TimerId, Timers};
+use tinc_event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::AddrStr;
 
@@ -135,14 +135,12 @@ pub enum RunOutcome {
     PollError,
 }
 
-/// Daemon-side wrapper around `Listener`. Bundles the event-loop
-/// `IoId` (for UDP rearm after a `recvmmsg` batch cap; bug audit
-/// `deef1268`) and the last `IP_TOS`/`IPV6_TCLASS` set on the UDP
-/// socket (only `setsockopt` when changed). Kept here, not on
+/// Daemon-side wrapper around `Listener`. Bundles the last
+/// `IP_TOS`/`IPV6_TCLASS` set on the UDP socket (only `setsockopt`
+/// when changed) and the egress sender. Kept here, not on
 /// `Listener`, so `listen.rs` stays event-loop-agnostic.
 pub(crate) struct ListenerSlot {
     pub(crate) listener: Listener,
-    pub(crate) udp_io: IoId,
     pub(crate) last_tos: u8,
     /// `UdpEgress` for this listener's UDP socket. Phase 0
     /// (`RUST_REWRITE_10G.md`): always `Portable` (count × sendto,
@@ -178,7 +176,7 @@ pub struct Daemon {
     /// `Connection` is testable without `EventLoop`. Argument against:
     /// two-map coherence. For now: two maps, debug asserts on
     /// coherence. Revisit if it bites.)
-    pub(crate) conn_io: slotmap::SecondaryMap<ConnId, IoId>,
+    pub(crate) conn_io: slotmap::SecondaryMap<ConnId, tinc_event::IoId>,
 
     // ─── substrate
     /// The TUN/TAP. `Box<dyn>` - the variant (`Dummy`/`Tun`/`Fd`/
@@ -428,12 +426,6 @@ pub struct Daemon {
     /// tight-looping forever helps nobody.
     pub(crate) device_errors: u32,
 
-    /// The device fd's `IoId`. `None` for `Dummy` (no fd, never
-    /// registered). Stored so `on_device_read` can `rearm()` after
-    /// hitting its drain-loop iteration cap - see the bounded-drain
-    /// comment in that fn for why this matters under sustained load.
-    pub(crate) device_io: Option<IoId>,
-
     /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md` Phase
     /// 0). Replaces `on_device_read`'s 1.5KB stack buf: drain reads
     /// frames into slots, the loop body walks them. Phase 1 widens:
@@ -551,7 +543,7 @@ pub struct Daemon {
     pub(crate) device_enabled: bool,
 
     // ─── event loop machinery
-    /// `mio::Poll` + slot table. Generic over `IoWhat`.
+    /// epoll + slot table. Generic over `IoWhat`.
     pub(crate) ev: EventLoop<IoWhat>,
     /// Timer wheel. Generic over `TimerWhat`.
     pub(crate) timers: Timers<TimerWhat>,
@@ -636,7 +628,7 @@ impl Daemon {
     ///
     /// `timeout = None` means block forever - only safe because
     /// `tick()` returns `None` precisely when no timers are armed,
-    /// and we always re-arm. mio handles `None` correctly.
+    /// and we always re-arm. `epoll_wait(-1)` blocks forever.
     #[must_use]
     pub fn run(mut self) -> RunOutcome {
         // Reusable buffers. `tick`/`turn`/`drain` clear these
@@ -708,12 +700,14 @@ impl Daemon {
                         }
                         // Connecting check FIRST. The async-connect
                         // probe. On success FALL THROUGH to the
-                        // write/read dispatch - the WRITE edge that
-                        // woke us is the SAME edge that lets us flush
-                        // the ID line. mio is EDGE-triggered: if we
-                        // `continue` here, the next WRITE wake never
-                        // comes (the socket was already writable when
-                        // we queued the ID). Probe-spurious and
+                        // write/read dispatch — the socket is
+                        // writable now and the ID line is queued; do
+                        // the flush in the same wake instead of
+                        // costing another loop iteration. Under LT
+                        // epoll this is an optimisation, not a
+                        // correctness requirement (a `continue` would
+                        // re-fire on the next `turn()` since the fd
+                        // is still writable). Probe-spurious and
                         // probe-fail paths DO return; probe-success
                         // falls through.
                         if self.conns[id].connecting {

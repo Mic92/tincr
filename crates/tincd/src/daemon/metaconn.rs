@@ -61,12 +61,11 @@ impl Daemon {
         }
     }
 
-    /// Edge-triggered drain wrapper. mio is edge-triggered: returning
-    /// before `EAGAIN` loses the wake forever (found by `throughput.rs`
-    /// deadlock when TCP-tunnelled `SPTPS_PACKETs` filled the kernel
-    /// buffer). Bounded at 64 iters (≈136KB/turn) so UDP/TUN/timers
-    /// get a turn; `rearm()` forces the next `epoll_wait` to fire if
-    /// still readable.
+    /// Fairness cap, not ET requirement. LT epoll re-fires next
+    /// `turn()` if the fd is still readable. C does one `recv()` per
+    /// wake (`meta.c:185`); we do up to 64 (≈136KB/turn) — cheap
+    /// insurance against a peer flooding the line and starving the
+    /// device fd.
     pub(super) fn on_conn_readable(&mut self, id: ConnId) {
         const META_DRAIN_CAP: u32 = 64;
         for _ in 0..META_DRAIN_CAP {
@@ -79,14 +78,7 @@ impl Daemon {
                 FeedDrain::Done => return,
             }
         }
-        // Hit the cap; rearm so next turn() fires immediately.
-        if let Some(&io_id) = self.conn_io.get(id)
-            && let Err(e) = self.ev.rearm(io_id)
-        {
-            log::error!(target: "tincd::conn",
-                            "conn fd rearm failed for {id:?}: {e}");
-            self.terminate(id);
-        }
+        // Cap hit. LT re-fires next turn — no rearm needed.
     }
 
     /// One `recv()` + dispatch. Splitting would thread id/conn/self

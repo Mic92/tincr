@@ -598,9 +598,9 @@ impl Daemon {
     }
 
     /// Async connect completion check. Returns `true` to fall through
-    /// to write/read. The fall-through matters: mio is edge-triggered;
-    /// the WRITE edge that woke us is the same one that flushes the
-    /// ID line.
+    /// to write/read. Fall-through saves a loop iteration: the socket
+    /// is writable now and the ID line is queued. (LT would re-fire
+    /// next turn anyway; this just avoids the round-trip.)
     pub(super) fn on_connecting(&mut self, id: ConnId) -> bool {
         let Some(sock) = self.connecting_socks.get(id) else {
             log::warn!(target: "tincd::conn",

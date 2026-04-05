@@ -8,9 +8,10 @@ use crate::tunnel::{MTU, TunnelState};
 use tinc_graph::NodeId;
 
 impl Daemon {
-    /// We drain because mio is edge-triggered — returning before
-    /// EAGAIN loses the wake forever. Bounded so iperf3 saturating
-    /// the TUN doesn't starve meta-conn flush/UDP recv/timers.
+    /// Drain loop. LT epoll re-fires next turn if we leave bytes
+    /// behind; the loop here is a fairness cap (iperf3 saturating
+    /// the TUN shouldn't starve meta-conn flush/UDP recv/timers)
+    /// and pulls `GSO_NONE` ACKs that pile up behind a TSO super.
     ///
     /// Phase 0 (`RUST_REWRITE_10G.md`): same loop body, but the
     /// per-read `device.read(&mut stack_buf)` becomes one
@@ -23,20 +24,18 @@ impl Daemon {
     // the control flow reads cleaner inline.
     pub(in crate::daemon) fn on_device_read(&mut self) {
         let mut nw = false;
-        // EPOLLET drain loop. The default `Device::drain` loops
-        // INTERNALLY until EAGAIN or cap; one call suffices. The
-        // vnet_hdr drain reads ONE skb (`Super` or `Frames{1}`)
-        // per call — looping HERE keeps the EPOLLET contract
-        // (return to epoll only after EAGAIN). Bounded so a
+        // The default `Device::drain` loops INTERNALLY until EAGAIN
+        // or cap; one call suffices. The vnet_hdr drain reads ONE
+        // skb (`Super` or `Frames{1}`) per call — looping HERE pulls
+        // the GSO_NONE ACKs queued behind a TSO super. Bounded so a
         // saturating sender doesn't starve UDP/timers (`0f120b11`).
         //
         // The `Frames` arm with the default drain hits this loop
         // once: it returns count<cap (drained to EAGAIN, the second
-        // iteration sees `Empty`) or count==cap (we break out of
-        // the loop and rearm below). Either way, no behavior change
-        // for the non-vnet path.
+        // iteration sees `Empty`) or count==cap (we break out; LT
+        // re-fires next turn). Either way, no behavior change for
+        // the non-vnet path.
         let mut iters = 0usize;
-        let mut hit_cap = false;
         // tx_batch armed ACROSS outer-loop iterations. The Phase-1
         // batch-then-ship logic was designed for one drain returning
         // N frames; the vnet path returns 1 frame per drain but
@@ -153,7 +152,7 @@ impl Daemon {
                     }
                     self.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
-                        hit_cap = true;
+                        // Cap hit. LT re-fires next turn.
                         break;
                     }
                     // count < cap: the default drain looped to EAGAIN
@@ -279,7 +278,6 @@ impl Daemon {
                     // run for milliseconds, starving recv). One Super
                     // per wake is the design; loop only to drain the
                     // tail (the GSO_NONE ACKs that pile up behind).
-                    hit_cap = true;
                     break;
                 }
             } // match result
@@ -294,21 +292,9 @@ impl Daemon {
             self.flush_tx_batch();
             self.tx_batch = None;
         }
-        // Hit cap (or Super): there MAY be more queued. Rearm so
-        // the next epoll cycle checks. With EPOLLET, the rearm
-        // (epoll_ctl MOD) doesn't generate a synthetic wake, but
-        // mio's underlying registration uses EPOLLONESHOT-style
-        // semantics where the MOD does trigger a fresh check on
-        // the next epoll_wait. (If this is wrong and we still
-        // stall: the daemon's 1s ping tick will eventually call
-        // here and unwedge. Degraded but not deadlocked.)
-        if hit_cap
-            && let Some(io_id) = self.device_io
-            && let Err(e) = self.ev.rearm(io_id)
-        {
-            log::error!(target: "tincd::net",
-                        "device fd rearm failed: {e}");
-        }
+        // Cap hit. LT re-fires next turn — encrypt cost of one super
+        // (~43 frames) per wake is the fairness bound, not an ET
+        // workaround.
         if nw {
             self.maybe_set_write_any();
         }

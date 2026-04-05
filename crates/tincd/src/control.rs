@@ -187,7 +187,7 @@ impl ControlSocket {
         // fine, control connections are rare.
 
         // ─── nonblocking
-        // mio is level-triggered; the listener fd needs O_NONBLOCK
+        // epoll is level-triggered; the listener fd needs O_NONBLOCK
         // so accept() returns EWOULDBLOCK when the queue is empty
         // instead of blocking the loop. C doesn't set this — it
         // relies on accept-only-when-epoll-says-READ, which works

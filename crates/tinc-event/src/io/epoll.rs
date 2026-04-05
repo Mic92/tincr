@@ -12,9 +12,7 @@ use std::time::Duration;
 
 pub(super) type RawEvent = libc::epoll_event;
 
-// EPOLLET is i32 in libc (0x8000_0000 sign-extends); cast is the bit pattern.
-#[allow(clippy::cast_sign_loss)]
-const FLAGS_BASE: u32 = libc::EPOLLET as u32; // matches mio today; commit 2 drops this
+const FLAGS_BASE: u32 = 0; // level-triggered, matches src/linux/event.c:97
 
 pub(super) fn create() -> io::Result<OwnedFd> {
     // SAFETY: epoll_create1 returns a fresh fd or -1. No invariants

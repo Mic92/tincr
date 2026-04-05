@@ -170,7 +170,7 @@ pub trait Device: Send {
     /// for TUN.
     fn mac(&self) -> Option<Mac>;
 
-    /// Raw fd for `mio::Poll::register`. `Dummy` returns `None`;
+    /// Raw fd for `EventLoop::add`. `Dummy` returns `None`;
     /// daemon skips the register.
     fn fd(&self) -> Option<std::os::unix::io::RawFd>;
 

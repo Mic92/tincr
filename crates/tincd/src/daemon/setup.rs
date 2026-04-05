@@ -269,8 +269,7 @@ fn register_listeners(
         let i = i as u8;
         ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
             .map_err(SetupError::Io)?;
-        let udp_io = ev
-            .add(udp_fd, Io::Read, IoWhat::Udp(i))
+        ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
             .map_err(SetupError::Io)?;
         // Phase 1 (`RUST_REWRITE_10G.md`): on Linux, dup into
         // `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per
@@ -290,7 +289,6 @@ fn register_listeners(
         let egress: Box<dyn UdpEgress> = Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
         listener_slots.push(ListenerSlot {
             listener: l,
-            udp_io,
             last_tos: 0,
             egress,
         });
@@ -538,11 +536,10 @@ impl Daemon {
 
         // ─── device fd
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
-        let device_io = device
-            .fd()
-            .map(|fd| ev.add(fd, Io::Read, IoWhat::Device))
-            .transpose()
-            .map_err(SetupError::Io)?;
+        if let Some(fd) = device.fd() {
+            ev.add(fd, Io::Read, IoWhat::Device)
+                .map_err(SetupError::Io)?;
+        }
 
         // ─── timers (ping, age_past_requests, periodic, keyexpire)
         let (pingtimer, age_timer, periodictimer, keyexpire_timer) =
@@ -701,7 +698,6 @@ impl Daemon {
             overwrite_mac,
             mymac,
             device_errors: 0,
-            device_io,
             device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
             // Lazy: only allocated on first `DrainResult::Super`.
             // TAP and non-Linux backends never produce Super,
