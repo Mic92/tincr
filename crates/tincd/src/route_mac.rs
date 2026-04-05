@@ -67,10 +67,8 @@ pub fn route_mac<T, S: std::hash::BuildHasher>(
         );
     }
 
-    // :1033, :1039
-    #[allow(clippy::missing_panics_doc)] // unreachable: ETH_HDR_LEN check above
+    // :1033, :1039 — expects are infallible: ETH_HDR_LEN guard above ensures 14+ bytes
     let src: Mac = frame[6..12].try_into().expect("len-checked above");
-    #[allow(clippy::missing_panics_doc)] // unreachable: same length guard
     let dst: Mac = frame[0..6].try_into().expect("len-checked above");
 
     // :1031-1035 learn_mac (daemon does the actual subnet_add/broadcast)
