@@ -81,7 +81,6 @@ fn sign_stdin_verify_stdin() {
 }
 
 /// verify with no signer arg → "No signer given!" (MissingArg).
-/// C `tincctl.c:2860`.
 #[test]
 fn verify_no_signer_arg() {
     let (_dir, cb) = bare_dir();

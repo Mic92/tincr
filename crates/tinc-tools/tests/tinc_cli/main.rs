@@ -13,7 +13,7 @@
 //!
 //! Those are the binary's job. Test the binary.
 //!
-//! ## Cross-impl: `tinc init` → C `sptps_test`
+//! ## Cross-impl: `tinc init` → upstream `sptps_test`
 //!
 //! `cross_init_key_loads_in_c` is the load-bearing test. It runs
 //! `tinc init`, then takes the resulting `ed25519_key.priv` and uses

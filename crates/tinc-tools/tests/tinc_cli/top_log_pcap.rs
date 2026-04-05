@@ -8,7 +8,6 @@ fn top_too_many_args() {
     let out = tinc(&["top", "extra"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // `tincctl.c:1500`: `"Too many arguments!"`.
     assert!(stderr.contains("Too many arguments"), "stderr: {stderr}");
 }
 
@@ -21,9 +20,8 @@ fn top_too_many_args() {
 ///   - The fake daemon's socket is read for greeting and then
 ///     dropped (NO `DUMP_TRAFFIC` request — raw mode failed first).
 ///
-/// This pins the connect-before-raw order. The C does the same
-/// (`tincctl.c:1506` connect, `top.c:284` initscr inside `top()`),
-/// for the same reason: "daemon not running" is more useful on a
+/// This pins the connect-before-raw order: "daemon not running"
+/// is more useful on a
 /// sane terminal.
 #[test]
 fn top_stdin_not_tty_fails_after_connect() {
@@ -44,8 +42,8 @@ fn top_stdin_not_tty_fails_after_connect() {
         // read_to_string blocks until EOF. EOF arrives when the
         // client drops. Timeout via the join below if it hangs.
         br.read_to_string(&mut buf).unwrap();
-        // `node.c:228`: "18 13" is `CONTROL REQ_DUMP_TRAFFIC`.
-        // Asserting it's NOT here proves raw-mode-failed-first.
+        // "18 13" is `CONTROL REQ_DUMP_TRAFFIC`. Asserting it's NOT
+        // here proves raw-mode-failed-first.
         assert!(
             !buf.contains("18 13"),
             "daemon got DUMP_TRAFFIC; raw mode should have failed first. got: {buf:?}"
@@ -88,20 +86,19 @@ fn top_stdin_not_tty_fails_after_connect() {
 //
 // Unlike `top`, these don't need a tty. The fake daemon can drive
 // the full path: subscribe, push records, close. Client should
-// produce exactly what C `tinc log` / `tinc pcap` would.
+// produce exactly what upstream `tinc log` / `tinc pcap` would.
 //
-// THE seam: subscribe wire → daemon (C control.c:128/135 sscanf),
-// header wire ← daemon (C logger.c:213 / route.c:1124 send_
-// request). Both halves of the C-compat are pinned.
+// THE seam: subscribe wire → daemon, header wire ← daemon.
+// Both halves of the wire-compat are pinned.
 
 /// Full `tinc log` end-to-end. Daemon pushes two log lines.
 ///
-/// Subscribe wire (`tincctl.c:649`): `"18 15 -1 0\n"`. The `-1`
-/// is `DEBUG_UNSET` (no level arg). The `0` is `use_color`: cargo
+/// Subscribe wire: `"18 15 -1 0\n"`. `-1` is `DEBUG_UNSET` (no
+/// level arg). The `0` is `use_color`: cargo
 /// test's stdout is a pipe, `is_terminal()` false, no color.
 ///
-/// Daemon push wire (`logger.c:213`): `"18 15 N\n"` then N raw
-/// bytes. NO `\n` after data — the CLI adds it (`tincctl.c:667`).
+/// Daemon push wire: `"18 15 N\n"` then N raw bytes. NO `\n`
+/// after data — the CLI adds it.
 ///
 /// Stdout: `"Hello\nWorld\n"`. The two log lines, each with the
 /// CLI-added trailing newline.
@@ -116,21 +113,20 @@ fn log_against_fake() {
         let (mut br, mut w) = serve_greeting(&stream, &cookie);
 
         // ─── Receive subscription ─────────────────────────────────
-        // Daemon-side `control.c:135`: `sscanf("%*d %*d %d %d")`.
         // We assert the EXACT wire — no parsing slack here, this
         // is the C-compat seam.
         let mut req = String::new();
         br.read_line(&mut req).unwrap();
-        // `tincctl.c:649`: `sendline("%d %d %d %d", CONTROL,
-        // REQ_LOG, level, use_color)`. CONTROL=18, REQ_LOG=15,
+        // `sendline("%d %d %d %d", CONTROL, REQ_LOG, level,
+        // use_color)`. CONTROL=18, REQ_LOG=15,
         // level=-1 (DEBUG_UNSET, no arg), use_color=0 (stdout is
         // a pipe under cargo test — `is_terminal()` returns
         // false). EXACT wire match.
         assert_eq!(req, "18 15 -1 0\n", "subscribe wire mismatch");
 
         // ─── Push two records ─────────────────────────────────────
-        // `logger.c:213`: `send_request(c, "%d %d %lu", CONTROL,
-        // REQ_LOG, msglen)` then `send_meta(c, pretty, msglen)`.
+        // `send_request(c, "%d %d %lu", CONTROL, REQ_LOG, msglen)`
+        // then `send_meta(c, pretty, msglen)`.
         // `send_meta` is RAW bytes, no \n.
         //
         // Single write per record (header + data) to exercise the
@@ -160,8 +156,7 @@ fn log_against_fake() {
     daemon.join().unwrap();
 
     // ─── Exit code ───────────────────────────────────────────────
-    // Daemon closed cleanly → client exits Ok. The C `cmd_log`
-    // returns 0 (`tincctl.c:1567`). Same.
+    // Daemon closed cleanly → client exits Ok.
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -169,8 +164,8 @@ fn log_against_fake() {
     );
 
     // ─── Stdout ──────────────────────────────────────────────────
-    // `tincctl.c:666-668`: `fwrite(data, len); fputc('\n');`.
-    // EXACT bytes: "Hello\nWorld\n". The added \n is OURS.
+    // EXACT bytes: "Hello\nWorld\n". The trailing \n is added by
+    // the CLI, not the daemon.
     assert_eq!(
         out.stdout,
         b"Hello\nWorld\n",
@@ -180,8 +175,8 @@ fn log_against_fake() {
 }
 
 /// `tinc log 5` — level arg forwarded. Subscribe wire is
-/// `"18 15 5 0\n"`. The daemon would CLAMP this (`control.c:136`)
-/// but our fake just asserts the wire.
+/// `"18 15 5 0\n"`. The real daemon would clamp the level; our
+/// fake just asserts the wire.
 #[test]
 fn log_level_arg_forwarded_against_fake() {
     use std::io::BufRead;
@@ -208,7 +203,7 @@ fn log_level_arg_forwarded_against_fake() {
     assert_eq!(out.stdout, b"");
 }
 
-/// `tinc log abc` — garbage level rejected. The C `atoi("abc")`
+/// `tinc log abc` — garbage level rejected. atoi-style `"abc"`
 /// would silently use 0; we error. STRICTER. Daemon never sees a
 /// request.
 #[test]
@@ -221,7 +216,7 @@ fn log_garbage_level_rejected() {
 
 /// Full `tinc pcap` end-to-end. Daemon pushes one packet.
 ///
-/// Subscribe wire (`tincctl.c:591`): `"18 14 0\n"` (snaplen=0).
+/// Subscribe wire: `"18 14 0\n"` (snaplen=0).
 ///
 /// Stdout: 24-byte global header + 16-byte packet header + N
 /// data bytes. The libpcap savefile format. We assert the magic,
@@ -239,12 +234,11 @@ fn pcap_against_fake() {
 
         let mut req = String::new();
         br.read_line(&mut req).unwrap();
-        // `tincctl.c:591`: snaplen=0 (no arg). CONTROL=18,
-        // REQ_PCAP=14.
+        // snaplen=0 (no arg). CONTROL=18, REQ_PCAP=14.
         assert_eq!(req, "18 14 0\n");
 
-        // `route.c:1124`: `send_request(c, "%d %d %d", CONTROL,
-        // REQ_PCAP, len)` then `send_meta(c, DATA(packet), len)`.
+        // `send_request(c, "%d %d %d", CONTROL, REQ_PCAP, len)`
+        // then `send_meta(c, DATA(packet), len)`.
         // 4-byte fake "packet" — not a real Ethernet frame, but
         // the format doesn't care (length-framed raw bytes).
         w.write_all(b"18 14 4\nABCD").unwrap();
@@ -264,8 +258,8 @@ fn pcap_against_fake() {
     let stdout = &out.stdout;
 
     // ─── Global header (24 bytes) ─────────────────────────────────
-    // `tincctl.c:594-608`. The magic identifies endianness; the
-    // test runs on x86_64 (LE) so it's `d4 c3 b2 a1`. (BE CI
+    // The pcap magic identifies endianness; the test runs on
+    // x86_64 (LE) so it's `d4 c3 b2 a1`. (BE CI
     // would see `a1 b2 c3 d4`; both are valid pcap.)
     #[cfg(target_endian = "little")]
     {
@@ -287,7 +281,7 @@ fn pcap_against_fake() {
     assert!(tv_sec > 1_000_000_000, "tv_sec sanity (past 2001)");
 
     // len at [32..36] = 4, origlen at [36..40] = 4.
-    // `tincctl.c:640-641`: both set to received len.
+    // Both set to received len (no truncation at snaplen=0).
     assert_eq!(
         u32::from_ne_bytes([stdout[32], stdout[33], stdout[34], stdout[35]]),
         4,

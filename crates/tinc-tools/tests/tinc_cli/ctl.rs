@@ -28,7 +28,7 @@ fn ctl_pidfile_malformed() {
     let dir = tempfile::tempdir().unwrap();
     let cb = dir.path().to_str().unwrap();
     let pidfile = dir.path().join("bad.pid");
-    // Missing fields. C `fscanf` returns < 4.
+    // Missing fields. fscanf-style parse returns short.
     std::fs::write(&pidfile, "1234 toolittle\n").unwrap();
     let pidfile_s = pidfile.to_str().unwrap();
 
@@ -119,7 +119,7 @@ fn ctl_full_connect_against_fake_daemon() {
         let mut br = BufReader::new(&stream);
         let mut w = &stream;
 
-        // Recv ID, check cookie. C `id_h:325`.
+        // Recv ID, check cookie.
         let mut line = String::new();
         br.read_line(&mut line).unwrap();
         assert!(line.contains(&format!("^{cookie_thr}")));
@@ -128,7 +128,7 @@ fn ctl_full_connect_against_fake_daemon() {
         // The pid in line 2 is what `cmd_pid` will print — we send
         // a *different* pid here than the one in the pidfile to
         // prove the printed pid comes from the greeting, not the
-        // pidfile. (C `tincctl.c:891` overwrites `pid` from line 2.)
+        // pidfile.
         writeln!(w, "0 fakedaemon 17.7").unwrap();
         writeln!(w, "4 0 99999").unwrap();
 
@@ -148,8 +148,7 @@ fn ctl_full_connect_against_fake_daemon() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(out.status.success(), "stderr: {stderr}");
-    // The pid from greeting line 2, NOT from the pidfile. C
-    // `tincctl.c:891`: `sscanf("%d %d %d", ..., &pid)` — line 2
+    // The pid from greeting line 2, NOT from the pidfile. Line 2
     // overwrites the pid that was read from the pidfile. The
     // pidfile's pid is for the kill(2) probe; the greeting's pid
     // is the truth.
@@ -207,7 +206,7 @@ fn ctl_reload_against_fake_daemon() {
 
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(out.status.success(), "stderr: {stderr}");
-    // No output on success. C `cmd_reload` returns 0 silently.
+    // No output on success. `cmd_reload` returns 0 silently.
     assert!(out.stdout.is_empty());
 }
 

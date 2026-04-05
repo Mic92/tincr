@@ -212,8 +212,7 @@ fn pick_editor() -> OsString {
 /// `$TINC_EDITOR` is UNQUOTED in the script so the shell word-
 /// splits it (`EDITOR="emacsclient -nw"` → two argv entries).
 /// Unquoted also globs, but that's the user's own EDITOR — git
-/// (`editor.c:63` in git.git) accepts the same risk. The
-/// construction:
+/// accepts the same risk. The construction:
 ///
 ///   `sh -c '$TINC_EDITOR "$@"' tinc-edit <file>`
 ///

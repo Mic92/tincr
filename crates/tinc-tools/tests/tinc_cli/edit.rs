@@ -42,7 +42,6 @@ fn edit_true_exits_zero() {
 }
 
 /// `EDITOR=false` → editor exits 1 → our exit nonzero.
-/// `tincctl.c:2461`: `if(result) return result`.
 #[test]
 fn edit_false_exits_nonzero() {
     let (_, out) = run_edit("false", "alice");
@@ -77,7 +76,7 @@ fn edit_echo_shows_resolved_path() {
 /// `argv = [echo, arg, <path>]` → stdout `"arg <path>"`.
 ///
 /// THE proof that `sh -c '$TINC_EDITOR "$@"'` word-splits the
-/// editor. The C `system("\"%s\" ...")` does NOT: it builds
+/// editor. The upstream `system("\"%s\" ...")` does NOT: it builds
 /// `"echo arg" "filename"`, the shell parses `"echo arg"` as ONE
 /// token (double-quoted = no word splitting), and `exec("echo arg")`
 /// fails ENOENT. We support it via unquoted `$TINC_EDITOR` —
@@ -95,7 +94,7 @@ fn edit_spacey_editor_tokenized() {
 /// `EDITOR=echo`, file with `$` in the name — NOT expanded.
 /// THE shell-safety proof: `"$@"` quotes the arg.
 ///
-/// The C `system("\"echo\" \"$HOME\"")` would expand `$HOME`
+/// The upstream `system("\"echo\" \"$HOME\"")` would expand `$HOME`
 /// (it's inside double-quotes IN THE SHELL). We don't: `$`
 /// stays literal in stdout.
 #[test]
@@ -118,7 +117,7 @@ fn edit_dollar_in_filename_not_expanded() {
 }
 
 /// Invalid arg count: `tinc edit` (none) and `tinc edit a b`
-/// (two) both error. C `tincctl.c:2412`: `argc != 2`.
+/// (two) both error.
 #[test]
 fn edit_argc_check() {
     let out = tinc(&["edit"]);

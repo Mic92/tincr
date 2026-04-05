@@ -52,18 +52,17 @@ fn info_node_against_fake() {
         let (mut br, mut w) = serve_greeting(&stream, &cookie);
 
         // ─── Round 1: DUMP_NODES ────────────────────────────────
-        // Request includes `bob` as the dead third arg. C `info.c
-        // :53`. Daemon doesn't read it (`control.c:63`: just `case
-        // REQ_DUMP_NODES: return dump_nodes(c)`). We assert it
-        // arrives anyway — wire-compat with what C `tinc info`
+        // Request includes `bob` as a dead third arg. The daemon
+        // doesn't read it (just dispatches on REQ_DUMP_NODES). We
+        // assert it
+        // arrives anyway — wire-compat with what upstream `tinc info`
         // sends.
         let mut req = String::new();
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 3 bob", "dead third arg should be sent");
 
         // Three node rows. bob is #2 (so the match-loop skips alice,
-        // matches bob, then DRAINS carol). All 22 wire fields per
-        // `node.c:210`.
+        // matches bob, then DRAINS carol). All 22 wire fields.
         //
         // bob's row: reachable+validkey+sptps (status=0x52),
         // direct UDP (minmtu>0), version 7 (options=0x07000004 =
@@ -90,14 +89,13 @@ fn info_node_against_fake() {
 
         // ─── Round 2: DUMP_EDGES ────────────────────────────────
         // Only fires AFTER the nodes terminator (sequential, not
-        // pipelined — `info.c:201` is after the drain loop). The
-        // dead third arg again.
+        // pipelined). Dead third arg again.
         req.clear();
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 4 bob");
 
         // 4 edges. Two have from=bob → collected. The other two
-        // are filtered out. C `info.c:214`: `if(!strcmp(from, item))`.
+        // are filtered out (only edges FROM the queried node).
         //
         // Full 8-field rows BUT the parse only reads the first two
         // strings. The trailing junk after `to` proves that:
@@ -173,8 +171,8 @@ Subnets:      10.0.1.0/24
 }
 
 /// `tinc info dave` (nonexistent): NODES dump runs, no match,
-/// terminator, error. EDGES/SUBNETS NEVER sent. C `info.c:97-100`:
-/// `if(!found) { fprintf(stderr, "Unknown node"); return 1; }`
+/// terminator, error. EDGES/SUBNETS NEVER sent — short-circuit
+/// on unknown node.
 /// — BEFORE the second sendline.
 ///
 /// The fake daemon asserts NO second request arrives (read_line
@@ -208,8 +206,8 @@ fn info_node_not_found_short_circuits() {
         // "18 4 dave\n". Instead the CLI's socket drops → EOF →
         // read_line returns 0 bytes.
         //
-        // The C: `info.c:97` returns 1 BEFORE `info.c:202`'s
-        // sendline. If our impl pipelined or didn't short-circuit,
+        // The error returns BEFORE the edges request goes out.
+        // If our impl pipelined or didn't short-circuit,
         // this assert catches it.
         req.clear();
         let n = br.read_line(&mut req).unwrap();
@@ -221,7 +219,6 @@ fn info_node_not_found_short_circuits() {
 
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    // C `info.c:98`: `"Unknown node %s.\n"`.
     assert!(stderr.contains("Unknown node dave."));
     assert!(out.stdout.is_empty());
 }
@@ -261,8 +258,8 @@ fn info_subnet_address_mode() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
 
-    // C `info.c:325-327`: `"Subnet: %s\nOwner:  %s\n"`. Two spaces
-    // after `Owner:` (column alignment). Per match.
+    // `"Subnet: %s\nOwner:  %s\n"`. Two spaces after `Owner:`
+    // (column alignment with `Subnet:`). Per match.
     let expected = "\
 Subnet: 10.0.0.0/24
 Owner:  alice
@@ -276,8 +273,8 @@ Owner:  bob
     assert!(!stdout.contains("broadcast"));
 }
 
-/// `tinc info 99.99.99.99` (no match): "Unknown address". C `info.c
-/// :333`. The wording differs from "Unknown subnet" (which is the
+/// `tinc info 99.99.99.99` (no match): "Unknown address". The
+/// wording differs from "Unknown subnet" (which is the
 /// `/`-present case at :336).
 #[test]
 fn info_subnet_no_match() {
@@ -301,19 +298,18 @@ fn info_subnet_no_match() {
 
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    // No `/` → "address" wording. C `info.c:333`.
+    // No `/` in arg → "address" wording (vs. "subnet").
     assert!(stderr.contains("Unknown address 99.99.99.99."));
     assert!(out.stdout.is_empty());
 }
 
 /// `tinc info @!$` (neither node name nor subnet): the dispatch
-/// rejects before connect. C `info.c:355`. Daemon never accepts.
+/// rejects before connect. Daemon never accepts.
 #[test]
 fn info_invalid_arg() {
     let (_d, cb, pf) = config_init("alice");
     let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "@!$"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    // C `info.c:355`: exact string.
     assert!(stderr.contains("Argument is not a node name, subnet or address."));
 }

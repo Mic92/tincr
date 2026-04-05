@@ -10,8 +10,8 @@ fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
     cmd.output().expect("spawn tinc")
 }
 
-/// `tinc version` ≡ `tinc --version`. Same stdout. C `tincctl.c
-/// :2383`: `version()` is the same fn the option calls.
+/// `tinc version` ≡ `tinc --version`. Same stdout: `version()` is
+/// the same fn the option calls.
 #[test]
 fn version_subcommand_same_as_option() {
     let out_cmd = tinc(&["version"]);
@@ -25,7 +25,7 @@ fn version_subcommand_same_as_option() {
     assert!(s.contains("(Rust)"), "stdout: {s}");
 }
 
-/// `tinc help` ≡ `tinc --help`. C `:2370`: `usage(false)`.
+/// `tinc help` ≡ `tinc --help`. Same `usage(false)` call.
 #[test]
 fn help_subcommand_same_as_option() {
     let out_cmd = tinc(&["help"]);
@@ -41,7 +41,7 @@ fn help_subcommand_same_as_option() {
 // ────────────────────────────────────────────────────────────────────
 
 /// `tinc network NAME` → error with `-n` advice. Deliberate
-/// C-behavior-drop #2. The C `switch_network` mutates globals
+/// Upstream-behavior-drop #2. The upstream `switch_network` mutates globals
 /// for the readline loop; we have no loop.
 #[test]
 fn network_switch_rejected() {
@@ -149,7 +149,7 @@ fn unknown_option_exits_nonzero() {
     assert!(stderr.contains("--bogus"));
 }
 
-/// `NETNAME` from env reaches `Paths::for_cli`. C: `tincctl.c:258-263`.
+/// `NETNAME` from env reaches `Paths::for_cli`.
 ///
 /// Direct testing is tricky — env-derived netname resolves to
 /// `CONFDIR/tinc/NETNAME`, and `CONFDIR` is `/etc` baked at compile
@@ -207,8 +207,8 @@ fn netname_flag_reaches_paths() {
 
 #[test]
 fn netname_dot_is_noop() {
-    // `NETNAME=.` means "no netname" — `tincctl.c:267-270`. The `.`
-    // is normalized to None in `parse_options` BEFORE `make_names`
+    // `NETNAME=.` means "no netname". The `.` is normalized to
+    // None in `parse_options` BEFORE `make_names`
     // does the both-given check. So `NETNAME=. tinc -c /tmp/x init`
     // sees netname=None confbase=/tmp/x → no warning. Our
     // `parse_global_options` and `for_cli` preserve the same order.

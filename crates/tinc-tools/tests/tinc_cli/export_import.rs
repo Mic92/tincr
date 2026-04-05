@@ -124,10 +124,10 @@ fn export_all_import_workflow() {
 }
 
 /// Cross-impl: Rust `tinc export` → same blob as we'd parse with the
-/// C `sscanf("Name = %s")`. Tested by feeding Rust export output back
+/// upstream `sscanf("Name = %s")`. Tested by feeding Rust export output back
 /// into Rust import (above) AND by checking the format manually here.
 ///
-/// We can't easily run C `tinc import` (no C `tinc` binary in the
+/// We can't easily run the upstream `tinc import` (no upstream binary in the
 /// fixture), but we *can* prove the format matches: the export blob
 /// must start with literally `Name = alice\n` — that's what C
 /// `sscanf("Name = %4095s")` matches. If the Rust output were
@@ -144,7 +144,7 @@ fn export_format_matches_c_sscanf() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
 
-    // The exact byte sequence C `sscanf("Name = %s")` matches.
+    // The exact byte sequence the upstream `sscanf("Name = %s")` matches.
     // Uppercase N, space, equals, space.
     let first_line = stdout.lines().next().unwrap();
     assert_eq!(first_line, "Name = node1");

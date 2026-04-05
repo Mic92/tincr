@@ -75,8 +75,8 @@ fn config_unknown_var() {
     assert!(stderr.contains("--force"));
 }
 
-/// `tinc config Name` (no verb) → default GET. C `tincctl.c:1785`.
-/// Also proves the `config` umbrella verb dispatches at all.
+/// `tinc config Name` (no verb) → default GET. Also proves the
+/// `config` umbrella verb dispatches at all.
 #[test]
 fn config_umbrella_default_get() {
     let (_d, cb, pf) = config_init("alice");
@@ -85,8 +85,8 @@ fn config_umbrella_default_get() {
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "alice");
 }
 
-/// `tinc config replace` is an alias for set. C `tincctl.c:1793`.
-/// Only available under `config`, not as toplevel.
+/// `tinc config replace` is an alias for set. Only available under
+/// `config`, not as toplevel.
 #[test]
 fn config_replace_alias() {
     let (_d, cb, pf) = config_init("alice");
@@ -124,7 +124,7 @@ fn config_set_survives_fsck() {
 /// but the reload is triggered by `tinc set`, not `tinc reload`.
 ///
 /// Proves the `let _ = ctl_simple::reload(paths)` line in the binary
-/// actually fires and sends the right wire bytes. C `tincctl.c:2132`.
+/// actually fires and sends the right wire bytes.
 #[test]
 #[cfg(unix)]
 fn config_set_fires_reload() {
@@ -195,8 +195,8 @@ fn config_set_fires_reload() {
 /// `tinc set` with NO daemon listening: file is written, reload
 /// silently fails, exit 0. Best-effort means BEST-EFFORT.
 ///
-/// C `tincctl.c:2132`: `if(connect_tincd(false))` — the `false`
-/// means "don't error if connect fails". Our `let _ = reload()`
+/// `connect_tincd(false)` — the `false` means "don't error if
+/// connect fails". Our `let _ = reload()`
 /// is the same swallow.
 #[test]
 fn config_set_no_daemon_still_succeeds() {

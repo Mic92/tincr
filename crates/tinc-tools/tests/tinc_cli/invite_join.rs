@@ -97,7 +97,7 @@ fn invite_netname_threads_through() {
     // -n NETNAME → confbase = CONFDIR/tinc/NETNAME, but we override
     // with -c. The "both given" warning fires; confbase wins for path
     // resolution. The netname global is STILL set even when
-    // confbasegiven is true (C `invitation.c:559` reads it
+    // confbasegiven is true (the invite handler reads it
     // unconditionally), so it threads through to the NetName= line.
     let cb = dir.path().join("vpn");
     let cb_s = cb.to_str().unwrap();
@@ -200,7 +200,7 @@ fn join_existing_config_fails_early() {
     );
 }
 
-/// URL via stdin. `echo URL | tinc join`. C `invitation.c:1257`
+/// URL via stdin. `echo URL | tinc join`. The handler
 /// `fgets(line, ..., stdin)`.
 #[test]
 fn join_url_from_stdin() {

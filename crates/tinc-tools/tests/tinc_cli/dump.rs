@@ -18,12 +18,11 @@ fn config_init(name: &str) -> (tempfile::TempDir, String, String) {
 }
 
 /// `tinc dump nodes` against a fake daemon. The daemon sends a
-/// 22-field row exactly as C `node.c:210` would. Our binary parses
-/// it and prints exactly what C `tinc dump nodes` would.
+/// 22-field row in the daemon's wire format. Our binary parses it
+/// and prints exactly what upstream `tinc dump nodes` would.
 ///
-/// THE seam: this is C-daemon-compat. If `dump_nodes_against_fake`
-/// passes and `node.c:210` hasn't changed, Rust `tinc` works against
-/// C `tincd`.
+/// THE seam: this is daemon-wire-compat. If this passes, Rust
+/// `tinc` works against an upstream `tincd`.
 #[test]
 fn dump_nodes_against_fake() {
     use std::io::{BufRead, Write};
@@ -40,7 +39,6 @@ fn dump_nodes_against_fake() {
         assert_eq!(req.trim_end(), "18 3");
 
         // ─── Send: TWO node rows + terminator ──────────────────
-        // Format: `node.c:210`.
         // `%d %d %s %s %s %d %d %lu %d %x %x %s %s %d %d %d %d
         //  %ld %d %llu %llu %llu %llu`
         //
@@ -79,9 +77,9 @@ fn dump_nodes_against_fake() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {stdout:?}");
 
-    // ─── Assert: byte-for-byte what C `tinc dump nodes` prints ──
-    // C `tincctl.c:1310` printf format. `status %04x` (0x12 → "0012").
-    // The `rtt 1.500` suffix because udp_ping_rtt != -1.
+    // ─── Assert: byte-for-byte upstream `tinc dump nodes` output ─
+    // `status %04x` (0x12 → "0012"). The `rtt 1.500` suffix appears
+    // because udp_ping_rtt != -1.
     assert_eq!(
         lines[0],
         "alice id 0a1b2c3d4e5f at 10.0.0.1 port 655 cipher 0 digest 0 \
@@ -100,7 +98,7 @@ fn dump_nodes_against_fake() {
 }
 
 /// `tinc dump reachable nodes`: same fetch, filtered. carol (status=0,
-/// bit 4 clear) is dropped. C `tincctl.c:1306`.
+/// bit 4 clear) is dropped.
 #[test]
 fn dump_reachable_nodes_filters() {
     use std::io::{BufRead, Write};
@@ -157,12 +155,12 @@ fn dump_subnets_against_fake() {
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 5"); // DUMP_SUBNETS
 
-        // `subnet.c:403`: `%d %d %s %s` → netstr, owner.
-        // Daemon's net2str already strips #10, so "10.0.0.0/24"
+        // `%d %d %s %s` → netstr, owner. Daemon's net2str already
+        // strips #10, so "10.0.0.0/24"
         // not "10.0.0.0/24#10". But we test strip_weight too:
         writeln!(w, "18 5 10.0.0.0/24 alice").unwrap();
         writeln!(w, "18 5 192.168.0.0/16#5 bob").unwrap();
-        // (broadcast) literal — `subnet.c:406`.
+        // (broadcast) is a literal owner string in the wire format.
         writeln!(w, "18 5 ff:ff:ff:ff:ff:ff (broadcast)").unwrap();
         // Hypothetical old daemon sending #10 — strip_weight strips.
         writeln!(w, "18 5 172.16.0.0/12#10 carol").unwrap();
@@ -176,7 +174,6 @@ fn dump_subnets_against_fake() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 4);
-    // C `tincctl.c:1352`: `"%s owner %s"`.
     assert_eq!(lines[0], "10.0.0.0/24 owner alice");
     // #5 (non-default) survives.
     assert_eq!(lines[1], "192.168.0.0/16#5 owner bob");
@@ -186,8 +183,8 @@ fn dump_subnets_against_fake() {
 }
 
 /// `tinc dump digraph`: TWO sends (nodes+edges), DOT output, two
-/// terminators. The first End(DumpNodes) doesn't exit the loop.
-/// C `tincctl.c:1247`: `if(do_graph && req == REQ_DUMP_NODES) continue;`.
+/// terminators. The first End(DumpNodes) doesn't exit the loop
+/// (digraph mode reads nodes THEN edges).
 ///
 /// This is the trickiest dump: pipelined sends, interleaved recv,
 /// per-row format dispatch, undirected dedup (for `graph`).
@@ -227,8 +224,8 @@ fn dump_digraph_against_fake() {
         writeln!(w, "18 3").unwrap(); // FIRST terminator
 
         // ─── Edges response ───────────────────────────────────
-        // `edge.c:128`: `%d %d %s %s %s %s %x %d`.
-        // Both addresses fused (sockaddr2hostname).
+        // `%d %d %s %s %s %s %x %d`. Both addresses fused
+        // (sockaddr2hostname).
         // Digraph emits both directions.
         writeln!(
             w,
@@ -252,14 +249,13 @@ fn dump_digraph_against_fake() {
     let lines: Vec<&str> = stdout.lines().collect();
 
     // ─── Assert: DOT structure ──────────────────────────────────
-    // C `tincctl.c:1238`: `printf("digraph {\n")`. Then per-node
-    // DOT lines (`tincctl.c:1303`), per-edge DOT lines (1334-1336),
-    // then `printf("}\n")` (1250).
+    // `digraph {\n`, then per-node DOT lines, per-edge DOT lines,
+    // then `}\n`.
     assert_eq!(lines[0], "digraph {");
     assert_eq!(lines.last().unwrap(), &"}");
     assert_eq!(lines.len(), 6); // header + 2 nodes + 2 edges + footer
 
-    // alice (MYSELF): green + filled. C `tincctl.c:1303`.
+    // alice (MYSELF): green + filled.
     assert_eq!(
         lines[1],
         " \"alice\" [label = \"alice\", color = \"green\", style = \"filled\"];"
@@ -280,7 +276,7 @@ fn dump_digraph_against_fake() {
 
 /// `tinc dump graph` (undirected): same as digraph, but only ONE
 /// edge survives (the from < to one). bob → alice has bob > alice
-/// (strcmp), suppressed. C `tincctl.c:1332`.
+/// (strcmp), suppressed.
 #[test]
 fn dump_graph_dedups_edges() {
     use std::io::{BufRead, Write};
@@ -328,7 +324,7 @@ fn dump_graph_dedups_edges() {
     assert_eq!(lines[3], "}");
 }
 
-/// `tinc list nodes` is `tinc dump nodes`. C `tincctl.c:3010`.
+/// `tinc list nodes` is an alias for `tinc dump nodes`.
 #[test]
 fn dump_list_alias() {
     use std::io::{BufRead, Write};
@@ -378,7 +374,7 @@ fn dump_invitations_no_daemon() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 1);
-    // C `tincctl.c:1170`: `"%s %s"` — cookie-hash space invitee.
+    // `"%s %s"` — cookie-hash space invitee.
     let parts: Vec<&str> = lines[0].split(' ').collect();
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0].len(), 24); // the b64 cookie hash
@@ -393,7 +389,7 @@ fn dump_invitations_no_daemon() {
 }
 
 /// `tinc dump invitations` with NONE outstanding: stderr message,
-/// exit 0. C `tincctl.c:1116,1176`.
+/// exit 0.
 #[test]
 fn dump_invitations_none() {
     let (_d, cb, pf) = config_init("alice");
