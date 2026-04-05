@@ -288,7 +288,6 @@ impl Daemon {
     }
 
     /// `RouteResult` dispatch. Shared by Router and Switch paths.
-    #[allow(clippy::too_many_lines)] // Forward arm ~100 LOC: 5 gates share via_nid/via_mtu
     #[allow(clippy::needless_pass_by_value)] // RouteResult<NodeId>: Copy
     fn dispatch_route_result(
         &mut self,
@@ -301,203 +300,7 @@ impl Daemon {
                 self.send_packet_myself(data);
                 false
             }
-            RouteResult::Forward { to: to_nid } => {
-                let to = self
-                    .graph
-                    .node(to_nid)
-                    .map_or_else(|| "<gone>".to_owned(), |n| n.name.clone());
-
-                // Dest subnet OWNED by sender — overlapping subnets,
-                // misconfig.
-                if Some(to_nid) == from {
-                    log::warn!(target: "tincd::net",
-                               "Packet looping back to {to}");
-                    return false;
-                }
-
-                // FMODE_OFF — operator says "I am an endpoint, not a
-                // relay". Gate is `source != myself && owner !=
-                // myself`: `from.is_some()` is the first; this match
-                // arm (NOT the `to == self.myself` arm above) is the
-                // second. v4 → NET_ANO, v6 → ADMIN; MAC (Switch) →
-                // silent drop. Gap audit `bcc5c3e3`: parsed in
-                // `parse_settings`, never read — the security knob
-                // silently no-op'd.
-                if self.settings.forwarding_mode == ForwardingMode::Off && from.is_some() {
-                    log::debug!(target: "tincd::net",
-                                "Forwarding=off: dropping transit packet \
-                                 to {to} (we are not a relay)");
-                    if self.settings.routing_mode == RoutingMode::Router {
-                        let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                        let (t, c) = if ethertype == crate::packet::ETH_P_IP {
-                            (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
-                        } else {
-                            (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
-                        };
-                        self.write_icmp_to_device(data, t, c);
-                    }
-                    return false;
-                }
-
-                // clamp_mss BEFORE send, AFTER routing. last_routes
-                // is current for any Forward target (route() only
-                // returns Forward for reachable owners).
-                let route = self
-                    .last_routes
-                    .get(to_nid.0 as usize)
-                    .and_then(Option::as_ref);
-                let via_options = route.map_or(0, |r| r.options);
-                let via_nid = route.map_or(to_nid, |r| {
-                    if r.via == self.myself {
-                        r.nexthop
-                    } else {
-                        r.via
-                    }
-                });
-
-                // Next hop IS the sender — bounce loop (stale graph
-                // data, DEL_EDGE arrived but run_graph hasn't
-                // recomputed via).
-                if Some(via_nid) == from {
-                    let from_name = from
-                        .and_then(|nid| self.graph.node(nid))
-                        .map_or("?", |n| n.name.as_str());
-                    log::error!(target: "tincd::net",
-                                "Routing loop for packet from {from_name}");
-                    return false;
-                }
-
-                // TunnelState::default() inits to MTU (not 0); until
-                // PMTU runs: 1518 ceiling.
-                let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
-
-                // directonly — operator opts out of relay.
-                if self.settings.directonly && to_nid != via_nid {
-                    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                    let (t, c) = if ethertype == crate::packet::ETH_P_IP {
-                        (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
-                    } else {
-                        (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
-                    };
-                    self.write_icmp_to_device(data, t, c);
-                    return false;
-                }
-                // Packet too big for next hop's PMTU. Only when
-                // relaying (clamp_mss + kernel PMTU handle our own
-                // outbound). Floors: 590=576+14 (RFC 791),
-                // 1294=1280+14 (RFC 8200) — don't claim MTU < 576
-                // even if discovery hasn't run.
-                //
-                // `via_mtu != 0`: don't claim a path MTU before
-                // discovery has measured one. `try_fix_mtu` only
-                // sets `mtu` once `minmtu >= maxmtu`; until then
-                // it's 0, `MAX(0,590)` claims 576, and the kernel
-                // caches that per-dst for 10 minutes — any TCP flow
-                // in that window is stuck at MSS 536 forever. 3×
-                // packets/crypto/syscalls for the same bytes.
-                if via_nid != self.myself && via_mtu != 0 {
-                    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                    let floor: u16 = if ethertype == crate::packet::ETH_P_IP {
-                        590
-                    } else {
-                        1294
-                    };
-                    let limit = via_mtu.max(floor);
-                    if data.len() > usize::from(limit) {
-                        if ethertype == crate::packet::ETH_P_IP {
-                            // DF flag (data.len()>590 ⇒ [20] in bounds).
-                            let df_set = data[20] & 0x40 != 0;
-                            if df_set {
-                                // limit-14 = IP-layer MTU. limit≥590
-                                // so sub never wraps.
-                                self.write_icmp_frag_needed(data, limit - 14);
-                            } else {
-                                // RFC 791 §2.3: routers MUST fragment.
-                                // Rare path (modern OS sets DF on TCP)
-                                // but UDP without DF through narrow-
-                                // MTU relay needs this.
-                                let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
-                                    log::debug!(target: "tincd::net",
-                                        "fragment_v4: malformed input, dropping");
-                                    return false;
-                                };
-                                // Mirror the normal send path below:
-                                // send_sptps_packet + try_tx for PMTU
-                                // drive.
-                                let n = frags.len();
-                                log::debug!(target: "tincd::net",
-                                    "Fragmenting packet of {} bytes into \
-                                     {n} pieces for {to}", data.len());
-                                {
-                                    let tunnel = self.tunnels.entry(to_nid).or_default();
-                                    for frag in &frags {
-                                        tunnel.out_packets += 1;
-                                        tunnel.out_bytes += frag.len() as u64;
-                                    }
-                                }
-                                let mut nw = false;
-                                for frag in &frags {
-                                    nw |= self.send_sptps_packet(to_nid, frag);
-                                }
-                                nw |= self.try_tx(to_nid, true);
-                                return nw;
-                            }
-                        } else {
-                            // v6: no in-transit frag (RFC 8200 §5).
-                            self.write_icmp_pkt_too_big(data, u32::from(limit - 14));
-                        }
-                        return false;
-                    }
-                }
-
-                if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
-                    let mtu = via_mtu.min(MTU);
-                    let _ = mss::clamp(data, mtu);
-                }
-
-                // `source != myself` gate: don't decrement on
-                // TUN-origin (we ARE the first hop).
-                if self.settings.decrement_ttl && from.is_some() {
-                    match route::decrement_ttl(data) {
-                        TtlResult::Decremented => {}
-                        TtlResult::TooShort | TtlResult::DropSilent => {
-                            return false;
-                        }
-                        TtlResult::SendIcmp {
-                            icmp_type,
-                            icmp_code,
-                        } => {
-                            self.write_icmp_to_device(data, icmp_type, icmp_code);
-                            return false;
-                        }
-                    }
-                }
-
-                // Read inner TOS for the outer UDP socket. Threaded
-                // via Daemon.tx_priority. Reset to 0 each packet —
-                // priority only ever flows from data through to UDP
-                // send. Done here, not at route_packet entry, to stay
-                // clear of the dump-traffic agent's route boundary.
-                self.tx_priority = if self.settings.priorityinheritance {
-                    route::extract_tos(data).unwrap_or(0)
-                } else {
-                    0
-                };
-
-                let len = data.len();
-                log::debug!(target: "tincd::net",
-                            "Sending packet of {len} bytes to {to}");
-                // Counts attempts, not deliveries.
-                let tunnel = self.tunnels.entry(to_nid).or_default();
-                tunnel.out_packets += 1;
-                tunnel.out_bytes += len as u64;
-
-                // try_tx: every forwarded packet drives PMTU
-                // discovery one step.
-                let mut nw = self.send_sptps_packet(to_nid, data);
-                nw |= self.try_tx(to_nid, true);
-                nw
-            }
+            RouteResult::Forward { to: to_nid } => self.dispatch_forward(to_nid, data, from),
             RouteResult::Unreachable {
                 icmp_type,
                 icmp_code,
@@ -559,6 +362,209 @@ impl Daemon {
                 false
             }
         }
+    }
+
+    /// The Forward-to-peer arm: 5 gates (loop check, `FMODE_OFF`,
+    /// directonly, PMTU, TTL) all derived from the route table entry
+    /// for `to_nid`. Gates share `via_nid`/`via_mtu` so they live
+    /// together.
+    #[allow(clippy::too_many_lines)] // 5 gates share via_nid/via_mtu
+    fn dispatch_forward(&mut self, to_nid: NodeId, data: &mut [u8], from: Option<NodeId>) -> bool {
+        let to = self
+            .graph
+            .node(to_nid)
+            .map_or_else(|| "<gone>".to_owned(), |n| n.name.clone());
+
+        // Dest subnet OWNED by sender — overlapping subnets,
+        // misconfig.
+        if Some(to_nid) == from {
+            log::warn!(target: "tincd::net",
+                       "Packet looping back to {to}");
+            return false;
+        }
+
+        // FMODE_OFF — operator says "I am an endpoint, not a
+        // relay". Gate is `source != myself && owner !=
+        // myself`: `from.is_some()` is the first; this match
+        // arm (NOT the `to == self.myself` arm above) is the
+        // second. v4 → NET_ANO, v6 → ADMIN; MAC (Switch) →
+        // silent drop. Gap audit `bcc5c3e3`: parsed in
+        // `parse_settings`, never read — the security knob
+        // silently no-op'd.
+        if self.settings.forwarding_mode == ForwardingMode::Off && from.is_some() {
+            log::debug!(target: "tincd::net",
+                        "Forwarding=off: dropping transit packet \
+                         to {to} (we are not a relay)");
+            if self.settings.routing_mode == RoutingMode::Router {
+                let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+                    (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+                } else {
+                    (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+                };
+                self.write_icmp_to_device(data, t, c);
+            }
+            return false;
+        }
+
+        // clamp_mss BEFORE send, AFTER routing. last_routes
+        // is current for any Forward target (route() only
+        // returns Forward for reachable owners).
+        let route = self
+            .last_routes
+            .get(to_nid.0 as usize)
+            .and_then(Option::as_ref);
+        let via_options = route.map_or(0, |r| r.options);
+        let via_nid = route.map_or(to_nid, |r| {
+            if r.via == self.myself {
+                r.nexthop
+            } else {
+                r.via
+            }
+        });
+
+        // Next hop IS the sender — bounce loop (stale graph
+        // data, DEL_EDGE arrived but run_graph hasn't
+        // recomputed via).
+        if Some(via_nid) == from {
+            let from_name = from
+                .and_then(|nid| self.graph.node(nid))
+                .map_or("?", |n| n.name.as_str());
+            log::error!(target: "tincd::net",
+                        "Routing loop for packet from {from_name}");
+            return false;
+        }
+
+        // TunnelState::default() inits to MTU (not 0); until
+        // PMTU runs: 1518 ceiling.
+        let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
+
+        // directonly — operator opts out of relay.
+        if self.settings.directonly && to_nid != via_nid {
+            let ethertype = u16::from_be_bytes([data[12], data[13]]);
+            let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+                (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+            } else {
+                (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+            };
+            self.write_icmp_to_device(data, t, c);
+            return false;
+        }
+        // Packet too big for next hop's PMTU. Only when
+        // relaying (clamp_mss + kernel PMTU handle our own
+        // outbound). Floors: 590=576+14 (RFC 791),
+        // 1294=1280+14 (RFC 8200) — don't claim MTU < 576
+        // even if discovery hasn't run.
+        //
+        // `via_mtu != 0`: don't claim a path MTU before
+        // discovery has measured one. `try_fix_mtu` only
+        // sets `mtu` once `minmtu >= maxmtu`; until then
+        // it's 0, `MAX(0,590)` claims 576, and the kernel
+        // caches that per-dst for 10 minutes — any TCP flow
+        // in that window is stuck at MSS 536 forever. 3×
+        // packets/crypto/syscalls for the same bytes.
+        if via_nid != self.myself && via_mtu != 0 {
+            let ethertype = u16::from_be_bytes([data[12], data[13]]);
+            let floor: u16 = if ethertype == crate::packet::ETH_P_IP {
+                590
+            } else {
+                1294
+            };
+            let limit = via_mtu.max(floor);
+            if data.len() > usize::from(limit) {
+                if ethertype == crate::packet::ETH_P_IP {
+                    // DF flag (data.len()>590 ⇒ [20] in bounds).
+                    let df_set = data[20] & 0x40 != 0;
+                    if df_set {
+                        // limit-14 = IP-layer MTU. limit≥590
+                        // so sub never wraps.
+                        self.write_icmp_frag_needed(data, limit - 14);
+                    } else {
+                        // RFC 791 §2.3: routers MUST fragment.
+                        // Rare path (modern OS sets DF on TCP)
+                        // but UDP without DF through narrow-
+                        // MTU relay needs this.
+                        let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
+                            log::debug!(target: "tincd::net",
+                                "fragment_v4: malformed input, dropping");
+                            return false;
+                        };
+                        // Mirror the normal send path below:
+                        // send_sptps_packet + try_tx for PMTU
+                        // drive.
+                        let n = frags.len();
+                        log::debug!(target: "tincd::net",
+                            "Fragmenting packet of {} bytes into \
+                             {n} pieces for {to}", data.len());
+                        {
+                            let tunnel = self.tunnels.entry(to_nid).or_default();
+                            for frag in &frags {
+                                tunnel.out_packets += 1;
+                                tunnel.out_bytes += frag.len() as u64;
+                            }
+                        }
+                        let mut nw = false;
+                        for frag in &frags {
+                            nw |= self.send_sptps_packet(to_nid, frag);
+                        }
+                        nw |= self.try_tx(to_nid, true);
+                        return nw;
+                    }
+                } else {
+                    // v6: no in-transit frag (RFC 8200 §5).
+                    self.write_icmp_pkt_too_big(data, u32::from(limit - 14));
+                }
+                return false;
+            }
+        }
+
+        if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
+            let mtu = via_mtu.min(MTU);
+            let _ = mss::clamp(data, mtu);
+        }
+
+        // `source != myself` gate: don't decrement on
+        // TUN-origin (we ARE the first hop).
+        if self.settings.decrement_ttl && from.is_some() {
+            match route::decrement_ttl(data) {
+                TtlResult::Decremented => {}
+                TtlResult::TooShort | TtlResult::DropSilent => {
+                    return false;
+                }
+                TtlResult::SendIcmp {
+                    icmp_type,
+                    icmp_code,
+                } => {
+                    self.write_icmp_to_device(data, icmp_type, icmp_code);
+                    return false;
+                }
+            }
+        }
+
+        // Read inner TOS for the outer UDP socket. Threaded
+        // via Daemon.tx_priority. Reset to 0 each packet —
+        // priority only ever flows from data through to UDP
+        // send. Done here, not at route_packet entry, to stay
+        // clear of the dump-traffic agent's route boundary.
+        self.tx_priority = if self.settings.priorityinheritance {
+            route::extract_tos(data).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let len = data.len();
+        log::debug!(target: "tincd::net",
+                    "Sending packet of {len} bytes to {to}");
+        // Counts attempts, not deliveries.
+        let tunnel = self.tunnels.entry(to_nid).or_default();
+        tunnel.out_packets += 1;
+        tunnel.out_bytes += len as u64;
+
+        // try_tx: every forwarded packet drives PMTU
+        // discovery one step.
+        let mut nw = self.send_sptps_packet(to_nid, data);
+        nw |= self.try_tx(to_nid, true);
+        nw
     }
 
     /// DNS stub TUN intercept (Rust-only). Returns `true` if `data`
