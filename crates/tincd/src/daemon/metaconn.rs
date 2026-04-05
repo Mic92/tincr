@@ -91,7 +91,7 @@ impl Daemon {
 
     /// One `recv()` + dispatch. Splitting would thread id/conn/self
     /// borrows.
-    #[allow(clippy::too_many_lines)] // SOCKS-reply consume + SPTPS-event loop + ID-handler piggyback all need to early-return FeedDrain on terminate(); a helper would have to bubble that
+    #[allow(clippy::too_many_lines)] // ID-handler piggyback (Peer/Invitation arms) needs to early-return FeedDrain on terminate(); the line-drain loop is the remaining bulk
     fn on_conn_readable_once(&mut self, id: ConnId) -> FeedDrain {
         let conn = self.conns.get_mut(id).expect("checked contains_key");
         match conn.feed(&mut OsRng) {
@@ -101,89 +101,12 @@ impl Daemon {
                 return FeedDrain::Done;
             }
             FeedResult::Data => {
-                // ─── pre-SPTPS tcplen consume (SOCKS proxy reply)
-                // Mutually exclusive with the Sptps arm: SOCKS sets
-                // tcplen before SPTPS starts.
-                let conn = self.conns.get_mut(id).expect("just fed");
-                if conn.tcplen != 0
-                    && conn.outgoing.is_some()
-                    && conn.allow_request == Some(Request::Id)
-                {
-                    let n = usize::from(conn.tcplen);
-                    let Some(range) = conn.inbuf.read_n(n) else {
-                        // Partial. Do NOT fall through to read_line
-                        // (SOCKS bytes would parse as garbage).
-                        return FeedDrain::Done;
-                    };
-                    let buf: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
-                    conn.tcplen = 0;
-
-                    // Only SOCKS sets tcplen in finish_connecting.
-                    let Some(proxy) = &self.settings.proxy else {
-                        log::error!(target: "tincd::conn",
-                            "tcplen set but no proxy configured for {}",
-                            conn.name);
-                        self.terminate(id);
-                        return FeedDrain::Done;
-                    };
-                    let Some(socks_type) = proxy.socks_type() else {
-                        log::error!(target: "tincd::conn",
-                            "tcplen set but proxy is not SOCKS for {}",
-                            conn.name);
-                        self.terminate(id);
-                        return FeedDrain::Done;
-                    };
-                    let creds = proxy.socks_creds();
-                    match socks::check_response(socks_type, creds.as_ref(), &buf) {
-                        socks::SocksResponse::Granted => {
-                            // Fall through: peer's ID may already be
-                            // in inbuf (same segment).
-                            log::debug!(target: "tincd::conn",
-                                "Proxy request granted for {} ({n} reply bytes)",
-                                conn.name);
-                        }
-                        socks::SocksResponse::Rejected => {
-                            log::error!(target: "tincd::conn",
-                                "Proxy request rejected for {}", conn.name);
-                            self.terminate(id);
-                            return FeedDrain::Done;
-                        }
-                        socks::SocksResponse::Malformed(why) => {
-                            log::error!(target: "tincd::conn",
-                                "Malformed proxy response for {}: {why}",
-                                conn.name);
-                            self.terminate(id);
-                            return FeedDrain::Done;
-                        }
-                    }
+                if let Some(r) = self.on_feed_data(id) {
+                    return r;
                 }
+                // fall through to line drain
             }
-            FeedResult::Sptps(events) => {
-                // Order matters: an ADD_EDGE record before a blob can
-                // change reachability that the blob's route reads.
-                let mut needs_write = false;
-                for ev in events {
-                    match ev {
-                        SptpsEvent::Record(o) => {
-                            needs_write |= self.dispatch_sptps_outputs(id, vec![o]);
-                        }
-                        SptpsEvent::Blob(blob) => {
-                            needs_write |= self.on_sptps_blob(id, &blob);
-                        }
-                    }
-                    if !self.conns.contains_key(id) {
-                        return FeedDrain::Done;
-                    }
-                }
-                // Dispatch may have queued to ANY conn (broadcast,
-                // forward, relay); sweep all.
-                if needs_write {
-                    self.maybe_set_write_any();
-                }
-                // SPTPS mode doesn't touch inbuf. Loop back to feed()
-                // (edge-triggered; must drain to EAGAIN).
-                return FeedDrain::Again;
-            }
+            FeedResult::Sptps(events) => return self.on_feed_sptps(id, events),
         }
 
         // ─── drain inbuf
@@ -593,6 +516,96 @@ impl Daemon {
 
     /// Returns `io_set` signal. May `terminate(id)` — caller checks
     /// `conns.contains_key(id)`.
+    /// `FeedResult::Data` body: pre-SPTPS tcplen consume (SOCKS proxy
+    /// reply). Returns `Some(FeedDrain)` if the conn is mid-SOCKS
+    /// (caller should return that), `None` if SOCKS either didn't
+    /// apply or completed cleanly and the caller should fall through
+    /// to the line-based dispatch loop.
+    fn on_feed_data(&mut self, id: ConnId) -> Option<FeedDrain> {
+        // ─── pre-SPTPS tcplen consume (SOCKS proxy reply)
+        // Mutually exclusive with the Sptps arm: SOCKS sets
+        // tcplen before SPTPS starts.
+        let conn = self.conns.get_mut(id).expect("just fed");
+        if conn.tcplen != 0 && conn.outgoing.is_some() && conn.allow_request == Some(Request::Id) {
+            let n = usize::from(conn.tcplen);
+            let Some(range) = conn.inbuf.read_n(n) else {
+                // Partial. Do NOT fall through to read_line
+                // (SOCKS bytes would parse as garbage).
+                return Some(FeedDrain::Done);
+            };
+            let buf: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
+            conn.tcplen = 0;
+
+            // Only SOCKS sets tcplen in finish_connecting.
+            let Some(proxy) = &self.settings.proxy else {
+                log::error!(target: "tincd::conn",
+                    "tcplen set but no proxy configured for {}",
+                    conn.name);
+                self.terminate(id);
+                return Some(FeedDrain::Done);
+            };
+            let Some(socks_type) = proxy.socks_type() else {
+                log::error!(target: "tincd::conn",
+                    "tcplen set but proxy is not SOCKS for {}",
+                    conn.name);
+                self.terminate(id);
+                return Some(FeedDrain::Done);
+            };
+            let creds = proxy.socks_creds();
+            match socks::check_response(socks_type, creds.as_ref(), &buf) {
+                socks::SocksResponse::Granted => {
+                    // Fall through: peer's ID may already be
+                    // in inbuf (same segment).
+                    log::debug!(target: "tincd::conn",
+                        "Proxy request granted for {} ({n} reply bytes)",
+                        conn.name);
+                }
+                socks::SocksResponse::Rejected => {
+                    log::error!(target: "tincd::conn",
+                        "Proxy request rejected for {}", conn.name);
+                    self.terminate(id);
+                    return Some(FeedDrain::Done);
+                }
+                socks::SocksResponse::Malformed(why) => {
+                    log::error!(target: "tincd::conn",
+                        "Malformed proxy response for {}: {why}",
+                        conn.name);
+                    self.terminate(id);
+                    return Some(FeedDrain::Done);
+                }
+            }
+        }
+        None
+    }
+
+    /// `FeedResult::Sptps` body: drain SPTPS events in order.
+    fn on_feed_sptps(&mut self, id: ConnId, events: Vec<SptpsEvent>) -> FeedDrain {
+        // Order matters: an ADD_EDGE record before a blob can
+        // change reachability that the blob's route reads.
+        let mut needs_write = false;
+        for ev in events {
+            match ev {
+                SptpsEvent::Record(o) => {
+                    needs_write |= self.dispatch_sptps_outputs(id, vec![o]);
+                }
+                SptpsEvent::Blob(blob) => {
+                    needs_write |= self.on_sptps_blob(id, &blob);
+                }
+            }
+            if !self.conns.contains_key(id) {
+                return FeedDrain::Done;
+            }
+        }
+        // Dispatch may have queued to ANY conn (broadcast,
+        // forward, relay); sweep all.
+        if needs_write {
+            self.maybe_set_write_any();
+        }
+        // SPTPS mode doesn't touch inbuf. Loop back to feed()
+        // (edge-triggered; must drain to EAGAIN).
+        FeedDrain::Again
+    }
+
     #[allow(clippy::too_many_lines)] // request-dispatch table is half of it; each arm is a one-liner protocol handler
     pub(super) fn dispatch_sptps_outputs(
         &mut self,
