@@ -784,7 +784,7 @@ mod tests {
         // documents the intent (compare as u64) but clippy
         // catches the no-op. Direct compare; the literal type
         // suffix matches.
-        #[allow(clippy::unreadable_literal)]
+        #[allow(clippy::unreadable_literal)] // TUNSETIFF: keep contiguous for kernel-hdr grep
         let want: libc::c_ulong = 0x400454ca;
         assert_eq!(libc::TUNSETIFF, want);
     }

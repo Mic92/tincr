@@ -418,7 +418,7 @@ impl Device for FdTun {
     ///
     /// `clippy::unnecessary_literal_bound`: trait signature says
     /// `&str`; impl can't widen. Same as Dummy.
-    #[allow(clippy::unnecessary_literal_bound)]
+    #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "fd"
     }

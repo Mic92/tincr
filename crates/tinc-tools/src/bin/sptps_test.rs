@@ -56,7 +56,7 @@ use tinc_tools::keypair;
 // CLI flags are inherently boolean. The lint's advice ("consider a
 // state machine") doesn't apply — these are five independent toggles,
 // not encoding of one state.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags: each bool maps to a -d/-q/-r/-w/-v switch
 struct Args {
     datagram: bool,
     quit_on_eof: bool,
@@ -293,7 +293,7 @@ fn udp_accept(addr: SocketAddr) -> io::Result<Sock> {
 // The poll loop is one function: two arms (sock readable, stdin
 // readable) share six pieces of mutable state. The body is one
 // `loop` with two `if`s.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // poll loop: two arms share six pieces of mutable state
 fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 

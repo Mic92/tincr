@@ -1,4 +1,4 @@
-#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_truncation)] // synthetic TCP packets: option lengths fit u8/u16
 use super::*;
 
 /// One's-complement sum over 16-bit big-endian words. For

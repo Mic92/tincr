@@ -825,8 +825,7 @@ fn peer_wrong_key_fails_sig() {
             // But if it does fail: that's also a stop condition
             // (and the stderr check below disambiguates).
             match sptps.receive(&pending[off..], &mut OsRng) {
-                #[allow(clippy::match_same_arms)]
-                // Ok(0,_) and Err(_) both stop, but for different reasons
+                #[allow(clippy::match_same_arms)] // Ok(0)/Err: same break, different why
                 Ok((0, _)) => break,
                 Ok((n, outs)) => {
                     off += n;

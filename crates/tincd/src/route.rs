@@ -173,7 +173,7 @@ pub fn route_ipv6<T>(
 
     // DATA[38] = ETHER_SIZE + offsetof(ip6_hdr, ip6_dst) = 14+24
     let dst_off = ETHER_SIZE + 24;
-    #[allow(clippy::missing_panics_doc)]
+    #[allow(clippy::missing_panics_doc)] // unreachable: ip6 hdr len-checked above
     let dest: [u8; 16] = data[dst_off..dst_off + 16]
         .try_into()
         .expect("len-checked above");

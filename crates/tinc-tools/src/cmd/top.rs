@@ -627,7 +627,7 @@ fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
     // The rates ARE 0.0 when nothing happened (`0u64 as f32 /
     // interval == 0.0`, exact). Any nonzero delta gives a nonzero
     // rate (interval is finite positive). No epsilon needed.
-    #[allow(clippy::float_cmp)]
+    #[allow(clippy::float_cmp)] // 0u64/interval = exact 0.0; nonzero delta ⇒ nonzero rate
     let attr = if !s.known {
         tui::DIM
     } else if s.in_packets_rate != 0.0 || s.out_packets_rate != 0.0 {
@@ -1031,7 +1031,7 @@ pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
 
 /// Re-declared (modules independent). `dump.rs`, `info.rs`,
 /// `ctl_simple.rs` each have their own.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; closure is uglier
 fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
 }

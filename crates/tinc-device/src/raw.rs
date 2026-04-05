@@ -186,7 +186,7 @@ impl RawSocket {
 /// integers (1-based, allocated sequentially); 2 billion
 /// interfaces would overflow. libc's signedness mismatch is a
 /// historical glibc quirk.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // ifindex: kernel allocs 1-based sequential ints, never near 2^31
 #[allow(unsafe_code)]
 fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // SAFETY: see fn comment. `sockaddr_ll` is repr(C), no
@@ -484,7 +484,7 @@ mod tests {
     /// socket). But we can inspect the struct we'd pass.
     #[test]
     #[allow(unsafe_code)]
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // AF_PACKET=17 fits c_ushort; mirrors bind_packet
     fn sockaddr_ll_layout() {
         // SAFETY: same as `bind_packet` — zeroed sockaddr_ll
         // is sound.

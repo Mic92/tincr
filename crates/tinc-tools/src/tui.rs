@@ -135,7 +135,7 @@ pub fn winsize() -> Winsize {
     // Hoisting to module scope would put a one-use ioctl 100
     // lines from where it's understood. Same reasoning as info.rs's
     // mid-function `const PROT_MAJOR`.
-    #[allow(clippy::items_after_statements)]
+    #[allow(clippy::items_after_statements)] // one-use ioctl: hoisting puts it 100 lines from its call
     mod ioctl {
         nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
     }
@@ -197,7 +197,6 @@ pub fn winsize() -> Winsize {
 /// is just to prove we held a handle (we don't actually use it
 /// after enter — writes go through `io::stdout()` fresh each time
 /// because `StdoutLock` would prevent the cooked-mode `read_line`).
-#[allow(clippy::struct_field_names)] // `original` is the right name
 pub struct RawMode {
     /// The termios as it was before we touched it. Drop restores.
     original: Termios,

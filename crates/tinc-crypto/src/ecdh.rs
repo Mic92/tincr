@@ -254,10 +254,10 @@ mod fe {
                 s[i] = v + (borrow << 51);
             }
             // borrow == 0 ⇒ t >= p ⇒ take s. Constant-time select.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // borrow∈{0,1}
             let mask = (borrow as u64).wrapping_sub(1); // 0 if borrow, !0 if not
             for i in 0..5 {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // s[i]∈[0,2^51)
                 let s_i = s[i] as u64;
                 t[i] = (t[i] & !mask) | (s_i & mask);
             }

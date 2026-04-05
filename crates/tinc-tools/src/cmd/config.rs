@@ -566,7 +566,7 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<GetResult, CmdE
 /// match exists, they append.
 // missing_panics_doc: the unwrap is provably safe behind is_some_and
 // but clippy can't see across statements.
-#[allow(clippy::missing_panics_doc)]
+#[allow(clippy::missing_panics_doc)] // unwrap guarded by is_some_and; clippy can't see across statements
 pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
@@ -722,7 +722,7 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
 ///
 /// `clippy::needless_pass_by_value`: same shape as `daemon_err` in
 /// `ctl_simple.rs` — `.map_err(tmpfile_werr)` passes by value.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)] // .map_err(tmpfile_werr) passes by value; closure is uglier
 fn tmpfile_werr(e: std::io::Error) -> CmdError {
     CmdError::Io {
         path: PathBuf::from("<tmpfile>"),

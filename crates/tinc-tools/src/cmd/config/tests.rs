@@ -7,7 +7,7 @@ use crate::names::PathsInput;
 /// `\t =`, and `strchr(key, '.')` runs only on the key slice.
 #[test]
 fn parse_var_expr_ok() {
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(&str, (Option<&str>, &str, &str))] = &[
         // ─── bare var, no value ───
@@ -125,7 +125,7 @@ fn setup(name: &str) -> (tempfile::TempDir, Paths) {
 #[test]
 fn intent_routing() {
     let (_d, paths) = setup("alice");
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, Option<&str>, &str)] = &[
         //          (action,      explicit_node, var,      value,          expect_node,   expect_canonical_var)
@@ -217,7 +217,7 @@ fn intent_action_coercion() {
 #[test]
 fn intent_errors() {
     let (_d, paths) = setup("alice");
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, &str)] = &[
         //          (action,      explicit_node,    var,      value,          msg_contains)

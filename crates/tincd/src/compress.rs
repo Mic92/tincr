@@ -330,7 +330,7 @@ mod lzo {
     /// called once before any other LZO function. Panics on ABI
     /// mismatch — that's a build/porting bug, not a runtime
     /// condition.
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // size_of: all <16; LZO ABI wants c_int
     pub fn ensure_init() {
         INIT.call_once(|| {
             // SAFETY: pure function, no preconditions. The whole

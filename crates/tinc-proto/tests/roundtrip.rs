@@ -182,7 +182,6 @@ macro_rules! roundtrip {
             #![proptest_config(ProptestConfig::with_cases(1000))]
             #[test]
             fn $name(m in $strategy) {
-                #[allow(clippy::redundant_closure_call)]
                 let wire = $fmt(&m);
                 let back = <$ty>::parse(&wire).unwrap();
                 prop_assert_eq!(m, back, "wire={:?}", wire);

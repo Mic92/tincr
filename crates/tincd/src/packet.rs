@@ -32,7 +32,6 @@
 //! store one `u8` and shift/mask. No fight, no `bitfield` crate.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::module_name_repetitions)]
 
 use std::mem::size_of;
 

@@ -41,7 +41,7 @@ fn tinc_utc(args: &[&str]) -> std::process::Output {
 /// output check. One scenario, end-to-end. Splitting would mean
 /// helpers that wrap helpers.
 #[test]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // fake-daemon script + golden output: one e2e scenario
 fn info_node_against_fake() {
     use std::io::{BufRead, Write};
 

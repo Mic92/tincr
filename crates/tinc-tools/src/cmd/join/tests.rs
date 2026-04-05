@@ -390,7 +390,7 @@ fn server_stub_recovers_file() {
     assert!(used_path.exists());
     // `.used` is literal; case-sensitive is the port-faithful
     // comparison.
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)] // ".used": literal we wrote
     let has_used = used_path.to_str().unwrap().ends_with(".used");
     assert!(has_used);
 }

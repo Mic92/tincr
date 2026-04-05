@@ -50,7 +50,7 @@ use crate::names::{Paths, check_id};
 /// needless-pass-by-value fires (the body only borrows for
 /// `to_string`); allowed because the alternative (`|e| ctl_err(&e)`
 /// at every site) is worse.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; |e| daemon_err(&e) is uglier
 fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
 }

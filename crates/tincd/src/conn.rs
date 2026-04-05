@@ -137,7 +137,7 @@ impl LineBuf {
 // `struct_excessive_bools`: `connection_status_t` is a packed
 // bitfield. The bits are independent (a conn is active AND pinged
 // in steady state); a state-enum doesn't fit.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
 pub struct Connection {
     fd: OwnedFd,
     pub inbuf: LineBuf,

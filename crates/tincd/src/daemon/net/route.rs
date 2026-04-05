@@ -288,8 +288,7 @@ impl Daemon {
     }
 
     /// `RouteResult` dispatch. Shared by Router and Switch paths.
-    #[allow(clippy::too_many_lines)]
-    // Forward arm alone is ~100 LOC: directonly/forwarding-off/PMTU-frag/clamp_mss/decrement_ttl all gate on via_nid/via_mtu computed at the top
+    #[allow(clippy::too_many_lines)] // Forward arm ~100 LOC: 5 gates share via_nid/via_mtu
     #[allow(clippy::needless_pass_by_value)] // RouteResult<NodeId>: Copy
     fn dispatch_route_result(
         &mut self,

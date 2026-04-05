@@ -247,7 +247,7 @@ fn check_key_mode(path: &Path, force: bool, findings: &mut Vec<Finding>) {
     // clippy suggests `mode.trailing_zeros() >= 6` here, which is
     // technically equivalent but obfuscates the intent: this is a
     // Unix permission-bit mask, not a power-of-2 check.
-    #[allow(clippy::verbose_bit_mask)]
+    #[allow(clippy::verbose_bit_mask)] // perm-bit mask; trailing_zeros() obscures intent
     if mode & 0o077 == 0 {
         return; // clean
     }

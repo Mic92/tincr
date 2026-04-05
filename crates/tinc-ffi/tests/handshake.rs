@@ -538,7 +538,7 @@ fn rekey_uses_ack_state() {
     // ACK is an empty body. Encrypted: len[2]=0 + chacha-poly(type[1]) + tag.
     // The +0 spelled out below is the body length — the formula shape is the
     // same as every other length assertion in this file, just with body=0.
-    #[allow(clippy::identity_op)]
+    #[allow(clippy::identity_op)] // +0 is the body length: keeps the formula shape uniform
     {
         assert_eq!(ack_b.len(), 2 + 1 + 0 + 16);
     }

@@ -453,7 +453,7 @@ fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 
 /// `cmd_generate_rsa_keys` under `DISABLE_LEGACY`: warn, succeed.
 /// Accepts the optional `[bits]` arg (NixOS module passes `4096`).
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps)] // dispatch table contract: all entries return Result
 fn cmd_genkey_rsa_stub(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     if args.len() > 1 {
         return Err(CmdError::TooManyArgs);
@@ -1001,7 +1001,7 @@ fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> 
 /// `clippy::unnecessary_wraps`: the dispatch table needs `fn(
 /// &Paths, &Globals, &[String]) -> Result<_,_>`. Can't return
 /// `()`. The wrap IS the table contract.
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps)] // dispatch table contract: all entries return Result
 fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
     print_help();
     Ok(())

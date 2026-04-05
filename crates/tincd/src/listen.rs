@@ -331,7 +331,7 @@ pub(crate) fn adopt_listeners_from(
     for i in 0..n {
         // `int tcp_fd = i + 3`. RawFd is i32 on Linux; n ≤
         // MAXSOCKETS = 8 so the cast can't overflow.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // n≤8 (MAXSOCKETS)
         let tcp_fd = start_fd + i as RawFd;
 
         // `getsockname(tcp_fd, &sa, &salen)`. socket2 needs the fd

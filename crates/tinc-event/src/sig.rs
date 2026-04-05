@@ -119,7 +119,7 @@ extern "C" fn handler(signum: libc::c_int) {
     }
     // signum fits in u8 (NSIG < 256 everywhere). Cast is safe.
     // The C does the same: `unsigned char num = signum;` at :34.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // POSIX sigs: 1..=31
     let byte = signum as u8;
     // SAFETY: write(2) is async-signal-safe (POSIX.1). fd is a
     // valid pipe write-end (set in new() before this handler was
@@ -346,7 +346,7 @@ mod tests {
 
         // Write signums to the pipe directly. This is what the
         // handler does, minus the atomic load.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
         let bytes = [libc::SIGHUP as u8, libc::SIGTERM as u8, libc::SIGHUP as u8];
         let wr_fd = PIPE_WR.load(Ordering::Relaxed);
         assert!(wr_fd >= 0, "new() set PIPE_WR");
@@ -367,7 +367,7 @@ mod tests {
         // table is all None.
 
         let wr_fd = PIPE_WR.load(Ordering::Relaxed);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
         let byte = [libc::SIGUSR1 as u8];
         #[allow(unsafe_code)]
         let n = unsafe { libc::write(wr_fd, byte.as_ptr().cast(), 1) };
@@ -427,7 +427,7 @@ mod tests {
         sp.table[libc::SIGHUP as usize] = Some(Sig::Reload);
 
         let wr_fd = PIPE_WR.load(Ordering::Relaxed);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
         let byte = [libc::SIGHUP as u8];
         #[allow(unsafe_code)]
         unsafe {

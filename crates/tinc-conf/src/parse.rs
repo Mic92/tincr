@@ -560,7 +560,7 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
         // "use Path::extension + eq_ignore_ascii_case" suggestion
         // would change behavior. Bytes-suffix is the port-faithful
         // form (and trivially also rejects non-ASCII look-alikes).
-        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        #[allow(clippy::case_sensitive_file_extension_comparisons)] // tinc writes ".conf" exactly
         if name.len() > 5 && name.ends_with(".conf") {
             files.push(ent.path());
         }

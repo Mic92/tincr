@@ -83,7 +83,6 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
 fn hmac(key: &[u8], msg: &[u8]) -> [u8; MD_LEN] {
     // `new_from_slice` accepts any key length and applies RFC 2104's
     // hash-if-too-long rule internally, matching `hmac_sha512` in prf.c.
-    #[allow(clippy::unwrap_used)]
     let mut mac = HmacSha512::new_from_slice(key).unwrap();
     mac.update(msg);
     mac.finalize().into_bytes().into()

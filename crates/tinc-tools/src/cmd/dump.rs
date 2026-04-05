@@ -348,7 +348,7 @@ impl NodeRow {
         let digest = t.d()?;
         // Daemon `%lu`, CLI `%d`. Read as lu, narrow. The value
         // (digest_length) is < 256 always, narrowing is safe.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // digest_length<256
         let maclength = t.lu()? as i32;
         let compression = t.d()?;
         // ─── %x %x
@@ -883,7 +883,7 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
 /// Adapter: `CtlError → CmdError`. Same shape as `ctl_simple::
 /// daemon_err`, re-declared (modules independent).
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; |e| daemon_err(&e) is uglier
 fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
 }

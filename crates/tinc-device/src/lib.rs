@@ -245,7 +245,7 @@ impl Device for Dummy {
     /// `&str` borrowed from `&self`; `Tun::iface` returns
     /// `&self.iface` (not static). Can't widen without diverging
     /// from the trait.
-    #[allow(clippy::unnecessary_literal_bound)]
+    #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "dummy"
     }
@@ -385,7 +385,7 @@ mod tests {
         fn mode(&self) -> Mode {
             Mode::Tun
         }
-        #[allow(clippy::unnecessary_literal_bound)]
+        #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
         fn iface(&self) -> &str {
             "mock"
         }

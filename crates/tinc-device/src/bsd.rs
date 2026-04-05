@@ -219,7 +219,7 @@ impl Device for BsdTun {
     /// structure (the three arms are MEANT to look similar;
     /// that's the point — they're the SAME logic at three
     /// offsets).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)] // three-arm switch mirrors C; splitting hides parallel structure
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() >= MTU,

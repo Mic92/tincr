@@ -398,7 +398,7 @@ impl NodeInfo {
         // `clippy::items_after_statements`: a `const` mid-function
         // is hoisted to function scope, but the visual position
         // next to its only use is the point.
-        #[allow(clippy::items_after_statements)]
+        #[allow(clippy::items_after_statements)] // const next to its only use; hoisting hides the value
         const PROT_MAJOR: u8 = 17;
         let _ = writeln!(
             out,
@@ -455,7 +455,7 @@ impl NodeInfo {
 
 /// Adapter, same as `dump::daemon_err`. Re-declared (modules
 /// independent).
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)] // .map_err(daemon_err) passes by value; closure is uglier
 fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
 }

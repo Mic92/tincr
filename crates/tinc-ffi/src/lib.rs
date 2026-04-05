@@ -148,8 +148,7 @@ pub fn c_check_seqno(
     let mut st = FfiReplayState {
         inseqno,
         farfuture,
-        // replay window is u8 in tinc.conf (max 255); test harness caps at 32
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // replaywin: tinc.conf u8 (≤255), test caps at 32
         replaywin: late.len() as u32,
         late: late.as_mut_ptr(),
     };

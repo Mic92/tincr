@@ -1,4 +1,4 @@
-#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_truncation)] // test packet builders: u8/u16 header field consts
 use super::*;
 
 /// Decode the wg-go test vectors' header shapes. wg-go

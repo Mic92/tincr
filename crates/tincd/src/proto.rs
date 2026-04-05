@@ -695,7 +695,7 @@ pub fn send_ack(
     debug_assert!(conn.protocol_minor >= 2);
 
     // RTT ms. `as i32`: `(int)` also wraps.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // RTT ms: C wraps too
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
     // Per-host config OR myself->options. Composes
     // bit-by-bit; the per-host fields were extracted at id_h.
@@ -844,7 +844,7 @@ pub fn record_body(bytes: &[u8]) -> &[u8] {
 /// `control_h` always returns `true`; CLI closes its end.
 ///
 /// `single_match_else`: this is the `switch`; it grows arms.
-#[allow(clippy::single_match_else)]
+#[allow(clippy::single_match_else)] // this is the C switch; arms accrete as ctl subcommands land
 pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
     // `sscanf("%*d %d", &type)`.
     let subtype = line

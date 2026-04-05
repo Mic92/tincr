@@ -119,7 +119,7 @@ pub struct InviteResult {
 /// Same panic contract as `keypair::generate`.
 // Sequence of distinct steps (validate, mkdir, sweep, key, hash, file,
 // url) sharing local state. Splitting would mean threading 6 args.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // linear setup script: validate/mkdir/sweep/key/hash/file/url share state
 pub fn invite(
     paths: &Paths,
     netname: Option<&str>,

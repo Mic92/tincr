@@ -128,8 +128,8 @@ impl PmtuSnapshot {
 /// reachable`, etc. — direct globals. Flattening into 11 parameters
 /// is *correct* but ugly. A `SendCtx` struct would just move the
 /// noise. Live with it.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)] // each param maps to one C global-state read; struct just moves the noise
+#[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub fn should_send_udp_info(
     // `:170` `if(to == myself) return true;` — would be sending a
@@ -365,8 +365,8 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
 ///
 /// The MTU *value* adjustment (`:305-320`) is NOT here — see
 /// [`adjust_mtu_for_send`].
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param = one C global read
+#[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub fn should_send_mtu_info(
     // `:278` — same as UDP_INFO.
@@ -523,7 +523,7 @@ pub fn on_receive_mtu_info<N>(
     let mtu = parsed.mtu.min(MTU_MAX);
     // `:349` post-clamp the value fits in u16 (9018 < 65535).
     // `as` is fine: `mtu` is in `[512, 9018]` here.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // clamped to [512,9018]
     let mtu = mtu as u16;
 
     // `:357` — from lookup.
