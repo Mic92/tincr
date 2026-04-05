@@ -830,6 +830,14 @@ impl Daemon {
                 myself: daemon.myself,
                 myself_options: daemon.myself_options.bits(),
                 id6_prefix,
+                myself_name: daemon.name.clone().into_boxed_str(),
+                // load_all_nodes ran above; ConnectTo + hosts/ names
+                // are already in id6_table. tx_snap_refresh_graph
+                // re-clones on every BFS, so this initial clone is
+                // mostly for symmetry — first packet doesn't arrive
+                // until handshake done, by which time refresh_graph
+                // has run at least once.
+                id6: std::sync::Arc::new(daemon.id6_table.clone()),
                 routes: std::sync::Arc::clone(&daemon.last_routes),
                 subnets: std::sync::Arc::new(daemon.subnets.clone()),
                 ns: std::sync::Arc::default(),

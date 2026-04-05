@@ -110,7 +110,7 @@ impl fmt::Debug for NodeId6 {
 /// We diverge slightly: insert-overwrites + WARN. Either way a real
 /// collision means a misconfigured (or hostile) network; the WARN is
 /// the operator-visible breadcrumb the C lacks.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NodeId6Table {
     // IntHashMap: NodeId6 is 48 bits of SHA-512 output (already
     // uniform; no DoS-resistant hash needed) and NodeId is a dense

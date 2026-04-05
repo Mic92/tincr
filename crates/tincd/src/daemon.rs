@@ -538,6 +538,13 @@ impl Daemon {
                 &self.nodes,
                 self.last_routes.len(),
             ));
+            // id6_table changes at the same sites that change
+            // node_ids: lookup_or_add_node (gossip.rs:33) and purge
+            // (purge.rs:164). Both already call this hook. The
+            // periodic.rs `load_all_nodes` reload doesn't add new
+            // node_ids (it only reads hosts/ for subnets), so it
+            // doesn't change id6_table either. One clone covers all.
+            s.id6 = Arc::new(self.id6_table.clone());
         }
     }
 }

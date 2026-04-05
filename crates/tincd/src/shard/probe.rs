@@ -248,6 +248,8 @@ mod tests {
             myself: alice,
             myself_options: 0,
             id6_prefix: [0u8; 12],
+            myself_name: "alice".into(),
+            id6: Arc::default(),
             routes,
             subnets: Arc::new(st),
             ns,

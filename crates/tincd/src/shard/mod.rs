@@ -25,9 +25,11 @@
 #![forbid(unsafe_code)]
 
 mod probe;
+mod rx;
 mod seal;
 mod snapshot;
 pub use probe::{TxTarget, tx_probe};
+pub use rx::{RxDstMemo, RxTarget, rx_open, rx_probe};
 pub use seal::{SealErr, SealOk, seal_super};
 pub use snapshot::{NodeView, NodeViewEntry};
 
@@ -38,6 +40,7 @@ use tinc_graph::{NodeId, Route};
 use tinc_sptps::ReplayWindow;
 
 use crate::inthash::IntHashMap;
+use crate::node_id::NodeId6Table;
 use crate::subnet_tree::SubnetTree;
 
 /// ChaCha20-Poly1305 cipher key length. Re-stated here (not re-exported
@@ -151,6 +154,29 @@ pub struct TxSnapshot {
     /// ⇒ dst=NULL (`net_packet.c:1015`); src is always us. Computed
     /// once at setup; the seal loop `copy_from_slice`s it.
     pub id6_prefix: [u8; 12],
+
+    /// `Daemon::name`. The dst-subnet probe in [`rx_open`] resolves
+    /// the trie's owner string to "is this me?" by string compare.
+    /// One compare per memo MISS (≈ once per recvmmsg batch for a
+    /// unidirectional flow). The TX path's `route()` doesn't need
+    /// this — it resolves owner→nid via `ns.resolve()` and compares
+    /// nids — but the RX path only cares about myself/not-myself
+    /// (everything else is slow-path forwarding) so a string compare
+    /// is cheaper than a hashmap probe + nid compare. Set once at
+    /// setup; never changes.
+    pub myself_name: Box<str>,
+
+    /// `id6_table` snapshot. The RX gate chain reads `pkt[6..12]`
+    /// (`src_id6`), looks it up here → `NodeId`, then `tunnels.get()`.
+    /// Same `Arc::new(clone())` pattern as `subnets`: O(nodes) clone
+    /// at gossip-rate. Refreshed in `tx_snap_refresh_graph` — the
+    /// table only changes on `lookup_or_add_node` (which only does
+    /// real work on the FIRST `ADD_EDGE`/`ADD_SUBNET` mentioning a
+    /// new name) and `purge`, both of which already run that hook.
+    /// A node learned via `ADD_SUBNET` alone (no edge) cannot send
+    /// us UDP — unreachable — so the lag between subnet-learn and
+    /// edge-learn-triggers-refresh is harmless.
+    pub id6: Arc<NodeId6Table>,
 
     /// `last_routes` snapshot. Same Arc the daemon holds; refreshed
     /// at the end of `run_graph_and_log` (one `Arc::clone`, no copy).
