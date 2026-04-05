@@ -1,10 +1,9 @@
-//! The `tinc` CLI binary. C reference: `tincctl.c`.
+//! The `tinc` CLI binary.
 //!
 //! ## Current scope: Phase 4a filesystem-only commands
 //!
 //! Just `init` for now. The dispatch table (`COMMANDS`) is the same
-//! shape as `tincctl.c:3000-3050`'s `commands[]` array; adding a
-//! command is one entry + one module in `cmd/`. The argv parsing and
+//! shape as upstream's `commands[]` array; adding a command is one entry + one module in `cmd/`. The argv parsing and
 //! `Paths` resolution are done once, here, and every command gets them
 //! pre-chewed.
 //!
@@ -28,7 +27,7 @@
 //!
 //! ## Exit codes
 //!
-//! C `tincctl.c` returns 1 on any error. So do we. There's no
+//! Upstream returns 1 on any error. So do we. There's no
 //! granular exit code tradition to preserve.
 
 // Silence pedantic lints that fight CLI binary patterns. Same set as
@@ -87,7 +86,7 @@ struct CmdEntry {
 /// behavior toggles. Different lifetimes (a future shell mode resets
 /// `force` per-command but keeps `Paths`), different concerns.
 struct Globals {
-    /// `--force`. C: `tincctl.c:75`. Currently used by: `import`
+    /// `--force`. Currently used by: `import`
     /// (overwrite existing), eventually `set` (allow obsolete vars).
     force: bool,
     /// `-n NETNAME` after `.` → None normalization. Separate from
@@ -95,11 +94,11 @@ struct Globals {
     /// not the original netname — but `tinc invite` needs the netname
     /// to write into the invitation file (`NetName = X` line).
     /// `cmd_join` also needs it (it's the directory the new node's
-    /// config goes in). C: `netname` global, `tincctl.c:77`.
+    /// config goes in).
     netname: Option<String>,
 }
 
-/// `tincctl.c:3000` `static const struct { ... } commands[]`.
+/// The `commands[]` dispatch table.
 ///
 /// 4a (filesystem) and 5b (daemon RPC) commands share one table —
 /// the signature is the same after all (`connect()` takes `&Paths`,
@@ -258,18 +257,16 @@ const COMMANDS: &[CmdEntry] = &[
         help: "disconnect NODE        Close meta connection with NODE.",
     },
     // ─── cmd_config: get/set/add/del + the `config` umbrella
-    // C `tincctl.c:3020-3024`. Five entries route to one function.
-    // The C does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
+    // Five entries route to one function. Upstream does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
     // — if you typed `tinc add Foo bar`, shift argv back so
     // `argv[1]` is `add` again, then dispatch on it. We do the
     // shift in cmd_config_dispatch.
     //
     // `needs_daemon: true` for ALL of them — even `get` (it might
     // hit the Port-from-pidfile path). The `set`/`add`/`del` need
-    // it for the post-edit reload. C `commands[].ctl` is `true`
-    // only for `config` (`tincctl.c:3020`); the C aliases are
-    // `false`. Inconsistent (the C author probably forgot). We're
-    // consistent: all `true`.
+    // it for the post-edit reload. Upstream's `ctl` is `true` only
+    // for `config`; the aliases are `false`. Inconsistent (the
+    // author probably forgot). We're consistent: all `true`.
     CmdEntry {
         name: "get",
         needs_daemon: true,
@@ -295,9 +292,9 @@ const COMMANDS: &[CmdEntry] = &[
         help: "del VARIABLE [VALUE]   Remove VARIABLE [only ones with watching VALUE]",
     },
     // The `config` umbrella: `tinc config get Port` ≡ `tinc get
-    // Port`. The C `bool ctl=true` on this one (line 3020) is the
-    // exception that proves the rule — they remembered for `config`
-    // and forgot for the aliases.
+    // Port`. Upstream's `ctl=true` on this one is the exception
+    // that proves the rule — they remembered for `config` and
+    // forgot for the aliases.
     CmdEntry {
         name: "config",
         needs_daemon: true,
@@ -307,11 +304,10 @@ const COMMANDS: &[CmdEntry] = &[
         help: "",
     },
     // ─── dump: nodes/edges/subnets/connections/graph/invitations
-    // C `tincctl.c:3009-3010`: `dump` and `list` both → cmd_dump.
+    // `dump` and `list` both → cmd_dump.
     //
     // `needs_daemon: true` even though `dump invitations` is pure
-    // readdir. The C has `ctl=false` (`tincctl.c:3009`) and connects
-    // INSIDE cmd_dump after the kind switch. We can't — our adapter
+    // readdir. Upstream has `ctl=false` and connects INSIDE cmd_dump after the kind switch. We can't — our adapter
     // gets immutable `&Paths`, and `CtlSocket::connect` needs the
     // resolved `pidfile()`, and `resolve_runtime` is `&mut`. So:
     // resolve unconditionally. `dump invitations` pays one harmless
@@ -335,8 +331,7 @@ const COMMANDS: &[CmdEntry] = &[
             "    invitations              - outstanding invitations",
         ),
     },
-    // C `tincctl.c:3010`: `{"list", cmd_dump, false}`. Exact alias.
-    // No help line (it's `dump` by another name).
+    // Exact alias. No help line (it's `dump` by another name).
     CmdEntry {
         name: "list",
         needs_daemon: true,
@@ -344,8 +339,7 @@ const COMMANDS: &[CmdEntry] = &[
         help: "",
     },
     // ─── info: node summary or route lookup
-    // C `tincctl.c:3011`: `{"info", cmd_info, true}`. Unlike
-    // `dump`'s `ctl=false`, info has `ctl=true` — it ALWAYS hits
+    // Unlike `dump`'s `ctl=false`, info has `ctl=true` — it ALWAYS hits
     // the daemon (no readdir-only path). So `needs_daemon: true`
     // is exact, not a compromise.
     CmdEntry {
@@ -355,16 +349,14 @@ const COMMANDS: &[CmdEntry] = &[
         help: "info NODE|SUBNET|ADDRESS    Give information about a particular NODE, SUBNET or ADDRESS.",
     },
     // ─── top: real-time per-node traffic
-    // C `tincctl.c:3016`: `{"top", cmd_top, false}`. The `false` is
-    // the `ctl` field meaning "don't pre-connect_tincd" — cmd_top
-    // calls connect itself (`tincctl.c:1506`). Same here:
-    // `needs_daemon: true` makes main() resolve the pidfile path
+    // The `ctl=false` means "don't pre-connect_tincd" — cmd_top
+    // calls connect itself. Same here: `needs_daemon: true` makes main() resolve the pidfile path
     // (which `top::run` needs) but doesn't connect; `top::run`
     // connects.
     //
-    // C `tincctl.c:186`: help line. The `#ifdef HAVE_CURSES` else-
-    // branch (`tincctl.c:1513`) prints "compiled without curses
-    // support"; we always have it (tui.rs is always built on Unix).
+    // The `#ifdef HAVE_CURSES` else-branch prints "compiled without
+    // curses support"; we always have it (tui.rs is always built on
+    // Unix).
     CmdEntry {
         name: "top",
         needs_daemon: true,
@@ -372,12 +364,11 @@ const COMMANDS: &[CmdEntry] = &[
         help: "top                         Show real-time statistics",
     },
     // ─── log: stream daemon's logger() output
-    // C `tincctl.c:3018`: `{"log", cmd_log, false}`. The `false` is
-    // "don't pre-connect" (cmd_log connects itself, line 1550).
+    // `ctl=false`: "don't pre-connect" (cmd_log connects itself).
     // Same as `top`: `needs_daemon: true` resolves the pidfile path
     // (the connect needs it), but doesn't connect.
     //
-    // C `tincctl.c:189`: help line. Runs forever; Ctrl-C to stop.
+    // Runs forever; Ctrl-C to stop.
     CmdEntry {
         name: "log",
         needs_daemon: true,
@@ -385,8 +376,7 @@ const COMMANDS: &[CmdEntry] = &[
         help: "log [level]                 Dump log output [up to the specified level]",
     },
     // ─── pcap: stream packet capture
-    // C `tincctl.c:3017`: `{"pcap", cmd_pcap, false}`. Same
-    // self-connect pattern. `tinc pcap | wireshark -k -i -` is the
+    // Same self-connect pattern. `tinc pcap | wireshark -k -i -` is the
     // use case.
     CmdEntry {
         name: "pcap",
@@ -395,15 +385,13 @@ const COMMANDS: &[CmdEntry] = &[
         help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
     },
     // ─── edit: spawn $EDITOR on a config file, then reload
-    // C `tincctl.c:3034`: `{"edit", cmd_edit, false}`. The `false`
-    // means "doesn't need pre-connect" — the reload AFTER edit is
+    // `ctl=false`: "doesn't need pre-connect" — the reload AFTER edit is
     // best-effort. We set `needs_daemon: true` anyway so the
     // pidfile path gets resolved (the silent reload needs it).
     // The connect-can-fail is INSIDE cmd::edit::run.
     //
-    // C help: NOT LISTED. `tincctl.c:139-202` (the usage block)
-    // has no `edit` line. Undocumented in C. We list it; it's
-    // useful.
+    // Undocumented upstream (no `edit` line in the usage block).
+    // We list it; it's useful.
     CmdEntry {
         name: "edit",
         needs_daemon: true,
@@ -411,9 +399,7 @@ const COMMANDS: &[CmdEntry] = &[
         help: "edit FILE                   Edit a config file with $VISUAL/$EDITOR/vi",
     },
     // ─── version, help: trivial dispatchers
-    // C `tincctl.c:3031-3032`. `tinc help` ≡ `tinc --help`, `tinc
-    // version` ≡ `tinc --version`. The C `cmd_help` calls `usage(
-    // false)` (`:2370`); `cmd_version` calls `version()` (`:2383`).
+    // `tinc help` ≡ `tinc --help`, `tinc version` ≡ `tinc --version`.
     // Both ignore args (well, version checks `argc > 1`).
     //
     // `needs_daemon: false` — these need NOTHING. The Paths is
@@ -436,8 +422,7 @@ const COMMANDS: &[CmdEntry] = &[
         help: "",
     },
     // ─── network: list networks under confdir
-    // C `tincctl.c:3042`: `{"network", cmd_network, false}`. The
-    // C has TWO modes (list / switch); we only have list. The
+    // Upstream has TWO modes (list / switch); we only have list. The
     // switch is C-behavior-drop #2 — only useful in the readline
     // loop, which we don't have. `tinc network NAME` errors with
     // "use -n NAME" advice.
@@ -445,9 +430,7 @@ const COMMANDS: &[CmdEntry] = &[
     // `needs_daemon: false` — just reads the filesystem. No
     // daemon, no socket, no pidfile.
     //
-    // C help (`tincctl.c:197`): "List all known networks, or
-    // switch to the one named NETNAME." We drop the switch half
-    // from the help too.
+    // We drop the switch half from the help too.
     CmdEntry {
         name: "network",
         needs_daemon: false,
@@ -459,7 +442,7 @@ const COMMANDS: &[CmdEntry] = &[
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
 /// Each command has one of these; it's where arity errors live.
 ///
-/// C `cmd_init` does `if(argc > 2)` / `if(argc < 2)` inline. We do it
+/// Upstream does `if(argc > 2)` / `if(argc < 2)` inline. We do it
 /// here so `cmd::init::run` gets a nice `&str` and never sees argv.
 fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     match args {
@@ -482,8 +465,7 @@ fn cmd_genkey_rsa_stub(_: &Paths, _: &Globals, args: &[String]) -> Result<(), Cm
     Ok(())
 }
 
-/// `cmd_generate_ed25519_keys`: zero args. C `tincctl.c:2351`.
-/// The C accepts no args; the wrapper is 5 lines.
+/// `cmd_generate_ed25519_keys`: zero args. The wrapper is 5 lines.
 fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     if !args.is_empty() {
         return Err(CmdError::TooManyArgs);
@@ -491,7 +473,7 @@ fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
     cmd::genkey::run(paths)
 }
 
-/// `cmd_sign`: optional file arg. C `tincctl.c:2770`.
+/// `cmd_sign`: optional file arg.
 /// `t = time(NULL)` → `SystemTime::now().duration_since(UNIX_EPOCH)`.
 /// `as_secs()` returns `u64`; we need `i64` for the `%ld` format.
 /// `as i64` is safe until 292 billion CE.
@@ -503,7 +485,7 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         [_, _, ..] => return Err(CmdError::TooManyArgs),
     };
     // `expect` is fine: `now() < UNIX_EPOCH` only on a system whose
-    // clock is set before 1970. The C `time(NULL)` would return
+    // clock is set before 1970. `time(NULL)` would return
     // `(time_t)-1` on the same system (and then `%ld` formats it as
     // `-1`, and `verify`'s `!t` check passes — a different bug). We
     // crash. Better.
@@ -515,14 +497,14 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     cmd::sign::sign(paths, input, t, std::io::stdout().lock())
 }
 
-/// `cmd_fsck`: zero args. C `tincctl.c:2732`.
+/// `cmd_fsck`: zero args.
 ///
 /// fsck never `Err`s — its job is to report errors, not propagate.
 /// `Report::ok` maps to exit code. The `Err` arm here only fires if
 /// `cmd::fsck::run` itself panics-via-?, which it doesn't.
 ///
-/// `cmd_prefix` reconstruction: C does this in `print_tinc_cmd`
-/// (`fsck.c:68`) by reading `confbasegiven`/`netname` globals. We
+/// `cmd_prefix` reconstruction: upstream does this by reading
+/// `confbasegiven`/`netname` globals. We
 /// reconstruct it from `Paths` — we don't have the globals, but we
 /// know `confbase` is always set, so `tinc -c CONFBASE` is the
 /// canonical form. Slightly less pretty than the C (which would say
@@ -534,15 +516,15 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
         return Err(CmdError::TooManyArgs);
     }
 
-    // C `fsck.c:640`: `fsck(orig_argv[0])`. The argv[0] becomes
-    // `exe_name` for the suggestion messages. We hardcode `tinc` —
-    // there's only one binary name. (C cares because of legacy:
+    // The argv[0] becomes `exe_name` for the suggestion messages.
+    // We hardcode `tinc` — there's only one binary name. (Upstream
+    // cares because of legacy:
     // `tincctl` was once a separate binary.)
     let cmd_prefix = format!("tinc -c {}", paths.confbase.display());
 
     let report = cmd::fsck::run(paths, g.force)?;
 
-    // ERROR: / WARNING: prefixes per the C `fprintf` strings.
+    // ERROR: / WARNING: prefixes.
     for f in &report.findings {
         let prefix = match f.severity() {
             Severity::Error => "ERROR: ",
@@ -555,7 +537,6 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
         }
     }
 
-    // C `fsck.c:678`: `return success ? EXIT_SUCCESS : EXIT_FAILURE`.
     // Our dispatch maps `Ok(())` → 0 and `Err` → 1. fsck-fail isn't
     // a `CmdError` (it's not a usage error or an I/O error — it's
     // "your config is bad"), so we synthesize a `BadInput`. The
@@ -575,11 +556,10 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
 }
 
 /// `cmd_invite`: one required arg (the new node's name).
-/// C `invitation.c:332`.
 ///
 /// Prints the URL to stdout (the only thing on stdout, so
-/// `tinc invite alice | mail alice@example` works — the C does
-/// the same, `puts(url)` at `invitation.c:607`). Warnings to stderr.
+/// `tinc invite alice | mail alice@example` works). Warnings to
+/// stderr.
 fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     let [invitee] = args else {
         return Err(if args.is_empty() {
@@ -597,9 +577,9 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     )?;
 
     if r.key_is_new {
-        // C `invitation.c:480-484`: `if(connect_tincd(true)) reload;
-        // else fprintf("Could not signal...")`. Phrasing matches C
-        // exactly so users grepping stack overflow find the right
+        // `if(connect_tincd(true)) reload; else fprintf("Could not
+        // signal...")`. Phrasing matches upstream exactly so users
+        // grepping stack overflow find the right
         // post.
         //
         // `invite` is `needs_daemon: false` — `resolve_runtime()`
@@ -634,14 +614,13 @@ fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> 
         return Err(CmdError::TooManyArgs);
     }
     let pid = cmd::ctl_simple::pid(paths)?;
-    // C: `printf("%d\n", pid)`. Stdout, newline.
+    // Stdout, newline.
     println!("{pid}");
     Ok(())
 }
 
 /// `cmd_start`: any number of args, all passed through to tincd.
-/// C `tincctl.c:949-955`: everything after `start` becomes a tincd
-/// arg. `tinc start -d 5` → `tincd -c … --pidfile … --socket … -d 5`.
+/// Everything after `start` becomes a tincd arg. `tinc start -d 5` → `tincd -c … --pidfile … --socket … -d 5`.
 #[cfg(unix)]
 fn cmd_start(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     cmd::start::start(paths, args)
@@ -685,11 +664,11 @@ fn cmd_purge(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError
     cmd::ctl_simple::purge(paths)
 }
 
-/// `cmd_debug`: exactly one arg (the level). C `tincctl.c:1400`:
+/// `cmd_debug`: exactly one arg (the level). Upstream:
 /// `if(argc != 2)` — not optional, must be given. We extend: no arg
 /// queries the current level (sends -1, daemon returns current
-/// without changing). The C doesn't expose this but the daemon
-/// supports it (`control.c:88`: `if(new_level >= 0)`).
+/// without changing). Upstream doesn't expose this but the daemon
+/// supports it (`if(new_level >= 0)`).
 fn cmd_debug(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     let level = match args {
         // Our extension: query mode.
@@ -700,8 +679,8 @@ fn cmd_debug(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError
         _ => return Err(CmdError::TooManyArgs),
     };
     let prev = cmd::ctl_simple::debug(paths, level)?;
-    // C: `"Old level %d, new level %d.\n"` to stderr (yes, stderr,
-    // `tincctl.c:1422`). We match. The query mode prints just the
+    // `"Old level %d, new level %d.\n"` to stderr (yes, stderr).
+    // We match. The query mode prints just the
     // level (it's the answer to the question, goes to stdout).
     if level < 0 {
         println!("{prev}");
@@ -724,15 +703,14 @@ fn cmd_config_with_action(
     args: &[String],
 ) -> Result<(), CmdError> {
     // ─── Arity
-    // C `tincctl.c:1797`: `if(argc < 2)` after the verb peel.
-    // "2" because argv includes argv[0]; ours doesn't, so "1".
+    // `if(argc < 2)` after the verb peel. "2" because argv includes
+    // argv[0]; ours doesn't, so "1".
     if args.is_empty() {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     }
 
     // ─── Join the rest
-    // C `tincctl.c:1805-1809`: `strncat` loop with single space.
-    // `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
+    // `strncat` loop with single space. `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
     // val="foo bar". The space-join recreates the user's intent
     // (modulo collapsing multiple shell-quoted spaces, but the
     // C has the same loss).
@@ -750,7 +728,7 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
     use cmd::config::ConfigOutput;
 
     // ─── Print warnings to stderr
-    // C `fprintf(stderr, ...)` inline. We collect-then-print.
+    // We collect-then-print.
     for w in warnings {
         eprintln!("{w}");
     }
@@ -758,15 +736,13 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
     // ─── Handle output
     match out {
         ConfigOutput::Got(values) => {
-            // C `tincctl.c:2025`: `printf("%s\n", bvalue)`.
             // One per line, stdout.
             for v in values {
                 println!("{v}");
             }
         }
         ConfigOutput::Edited(result) => {
-            // C `tincctl.c:2132`: `if(connect_tincd(false))
-            // sendline(fd, "%d %d", CONTROL, REQ_RELOAD);`.
+            // `if(connect_tincd(false)) sendline(REQ_RELOAD)`.
             // Best-effort. The `false` means "don't error if the
             // daemon's down". We swallow the entire Result —
             // daemon down? fine. daemon up but reload failed?
@@ -806,15 +782,15 @@ fn cmd_del(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
     cmd_config_with_action(p, g, cmd::config::Action::Del, a)
 }
 
-/// `tinc config <verb> ...`. The umbrella form. C `tincctl.c:1780`
-/// is the `if(strcasecmp(argv[0], "config"))` test that DOESN'T
-/// shift — so argv[1] is already the verb to peel.
+/// `tinc config <verb> ...`. The umbrella form. The
+/// `if(strcasecmp(argv[0], "config"))` test DOESN'T shift — so
+/// argv[1] is already the verb to peel.
 ///
-/// `tinc config Port` (no verb) → default GET. C `tincctl.c:1785`:
-/// `action = GET` is the init, overwritten only on verb match.
+/// `tinc config Port` (no verb) → default GET: `action = GET` is
+/// the init, overwritten only on verb match.
 ///
-/// `replace` and `change` are aliases for `set` (C `tincctl.c:1793`).
-/// Only available here, not as toplevel commands — same as C.
+/// `replace` and `change` are aliases for `set`. Only available
+/// here, not as toplevel commands — same as upstream.
 fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::config::Action;
 
@@ -836,7 +812,7 @@ fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<()
     cmd_config_with_action(paths, g, action, rest)
 }
 
-/// `cmd_disconnect`: exactly one arg (node name). C `tincctl.c:1471`.
+/// `cmd_disconnect`: exactly one arg (node name).
 fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     match args {
         [] => Err(CmdError::MissingArg("node name")),
@@ -845,7 +821,7 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
     }
 }
 
-/// `cmd_dump`: argv[1] is the kind. C `tincctl.c:1182-1376` (200 lines).
+/// `cmd_dump`: argv[1] is the kind.
 ///
 /// Two-stage dispatch: argv → `Kind` (the `reachable` shift dance),
 /// then `Kind` → connect-or-readdir. The C does it as one function
@@ -855,32 +831,30 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
 ///
 /// Output goes to stdout line-by-line. For an empty dump (zero rows)
 /// the C is silent (exit 0, no output); for `dump invitations` with
-/// no invitations the C writes `"No outstanding invitations."` to
-/// STDERR (`tincctl.c:1116,1176`). The stderr-not-stdout choice is
+/// no invitations upstream writes `"No outstanding invitations."`
+/// to STDERR. The stderr-not-stdout choice is
 /// a hint: scripts parsing `tinc dump invitations | while read` don't
 /// want a non-data line. We match.
 fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::dump::{DumpOutput, Kind, dump, dump_invitations, parse_kind};
 
     // ─── argv → Kind
-    // The arity errors and `Unknown dump type` live in here. The C
-    // does the same checks inline at `tincctl.c:1185-1232`.
+    // The arity errors and `Unknown dump type` live in here.
     let kind = parse_kind(args)?;
 
     // ─── Invitations: pure readdir, no daemon
-    // C `tincctl.c:1203-1205`: BEFORE `connect_tincd`. Works
-    // daemon-down. (We did pay one `access(2)` for `resolve_runtime`
+    // BEFORE `connect_tincd`. Works daemon-down. (We did pay one `access(2)` for `resolve_runtime`
     // — see the table-entry comment.)
     if kind == Kind::Invitations {
         let rows = dump_invitations(paths)?;
         if rows.is_empty() {
-            // C `tincctl.c:1116,1176`: stderr, exit 0. The C has
-            // a typo (`"Cannot not read"`) on the EACCES path but
-            // not on the empty path; we don't replicate the typo.
+            // stderr, exit 0. Upstream has a typo (`"Cannot not
+            // read"`) on the EACCES path but not on the empty path;
+            // we don't replicate the typo.
             eprintln!("No outstanding invitations.");
         } else {
-            // C `tincctl.c:1170`: `printf("%s %s\n", filename, name)`.
-            // Space-separated, one per line.
+            // `printf("%s %s\n", filename, name)`. Space-separated,
+            // one per line.
             for r in rows {
                 println!("{} {}", r.cookie_hash, r.invitee);
             }
@@ -897,8 +871,7 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     Ok(())
 }
 
-/// `cmd_info`: one arg (node name OR subnet OR address). C `info.c:
-/// 347-356` for dispatch + `tincctl.c:1378-1393` for the argv glue.
+/// `cmd_info`: one arg (node name OR subnet OR address).
 ///
 /// Bimodal output: node → one big block; subnet → zero-to-many
 /// `Subnet:/Owner:` pairs. The lib code returns `InfoOutput`; we
@@ -906,8 +879,7 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::info::{InfoOutput, info};
 
-    // C `tincctl.c:1380-1389`: `if(argc != 2)` → "Invalid number
-    // of arguments." Exactly one positional.
+    // Exactly one positional.
     let item = match args {
         [] => return Err(CmdError::MissingArg("node name, subnet, or address")),
         [item] => item,
@@ -921,9 +893,8 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         InfoOutput::Node(s) => {
             print!("{s}");
         }
-        // Subnet mode: per-match block. C `info.c:325-327`:
-        // `printf("Subnet: %s\nOwner:  %s\n", ...)`. Two spaces
-        // after `Owner:` (column alignment with `Subnet:`).
+        // Subnet mode: per-match block. Two spaces after `Owner:`
+        // (column alignment with `Subnet:`).
         InfoOutput::Subnet(matches) => {
             for m in matches {
                 println!("Subnet: {}", m.subnet);
@@ -934,36 +905,33 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     Ok(())
 }
 
-/// `cmd_top`: zero args. The TUI loop. `tincctl.c:1496-1514`.
+/// `cmd_top`: zero args. The TUI loop.
 ///
 /// Unlike every other command, this one DOESN'T return until the
 /// user quits ('q') or the daemon dies. The `Result` return is for
 /// connect failures ("daemon not running") and the `RawMode::enter`
 /// stdin-not-a-tty case (`tinc top </dev/null`). Mid-session daemon
-/// death is `Ok(())` — silent exit, same as the C (`top.c:291`).
+/// death is `Ok(())` — silent exit, same as upstream.
 ///
-/// `g.netname` for the row-0 header (`top.c:242`: `netname ?
-/// netname : ""`). This is the FIRST adapter to use Globals — the
+/// `g.netname` for the row-0 header (`netname ? netname : ""`).
+/// This is the FIRST adapter to use Globals — the
 /// 4a/5b commands take `_: &Globals`. (cmd_invite uses it too, for
 /// the URL fragment, but that's a Paths concern; this is pure
 /// display.)
 fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     if !args.is_empty() {
-        // C `tincctl.c:1499-1502`: `if(argc > 1) "Too many
-        // arguments!"`.
         return Err(CmdError::TooManyArgs);
     }
     cmd::top::run(paths, g.netname.as_deref())
 }
 
-/// `cmd_log`: optional level arg. `tincctl.c:1544-1567`.
+/// `cmd_log`: optional level arg.
 ///
 /// `tinc log` → daemon's level. `tinc log 5` → filter at 5.
 /// Runs until Ctrl-C (kills process, exit 130) or daemon dies
 /// (clean exit 0).
 ///
-/// The C `atoi(argv[1])` accepts garbage → 0; we error. The arity
-/// check is `argc > 2` (`:1545`); ours is `args.len() > 1`.
+/// Upstream's `atoi(argv[1])` accepts garbage → 0; we error.
 fn cmd_log(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     let level = match args {
         [] => None,
@@ -980,13 +948,13 @@ fn cmd_log(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> 
     cmd::stream::run_log(paths, level)
 }
 
-/// `cmd_pcap`: optional snaplen arg. `tincctl.c:1518-1530`.
+/// `cmd_pcap`: optional snaplen arg.
 ///
 /// `tinc pcap` → full packets. `tinc pcap 96` → first 96 bytes
 /// (headers only, less throughput). The 0 default means "daemon
-/// don't clip" (`route.c:1120` checks truthy).
+/// don't clip" (the router checks truthy).
 ///
-/// `parse::<u32>()` rejects negative — the C's `atoi("-5")` would
+/// `parse::<u32>()` rejects negative — `atoi("-5")` would
 /// be `-5` then implicit-cast to a `uint32_t` arg, becoming a
 /// huge number, daemon never clips. `tinc pcap -5` failing is
 /// better than silently capturing 4GiB packets.
@@ -1002,35 +970,32 @@ fn cmd_pcap(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 }
 
 /// `cmd_edit`: shorthand resolves to confbase or hosts/, spawn
-/// editor, silent reload. `tincctl.c:2410-2472`.
+/// editor, silent reload.
 ///
 /// `tinc edit tinc.conf` → `vi /etc/tinc/.../tinc.conf`.
 /// `tinc edit alice` → `vi /etc/tinc/.../hosts/alice`.
 ///
-/// The C `argc != 2` check (`:2412`): exactly one arg.
+/// Exactly one arg.
 fn cmd_edit(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     let [file] = args else {
-        // C: `"Invalid number of arguments."` Same message for
-        // 0 and 2+.
+        // Same message for 0 and 2+.
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     };
     cmd::edit::run(paths, file)
 }
 
-/// `cmd_version`: `tincctl.c:2374-2384`. Print and exit. `argc > 1`
-/// is `TooManyArgs` (`:2378`). The print itself is `print_version()`
+/// `cmd_version`: print and exit. `argc > 1` is `TooManyArgs`.
+/// The print itself is `print_version()`
 /// from this binary — same fn `--version` calls.
 fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     if !args.is_empty() {
-        // C `tincctl.c:2378`: `"Too many arguments!"`.
         return Err(CmdError::TooManyArgs);
     }
     print_version();
     Ok(())
 }
 
-/// `cmd_help`: `tincctl.c:2366-2372`. Print and exit. The C
-/// IGNORES args (`(void)argc; (void)argv`); `tinc help foo` is
+/// `cmd_help`: print and exit. Upstream IGNORES args (`(void)argc; (void)argv`); `tinc help foo` is
 /// the same as `tinc help`. Match it. (Per-subcommand help would
 /// be nice but the C doesn't have it; YAGNI.)
 ///
@@ -1043,24 +1008,22 @@ fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `cmd_network`: list or (rejected) switch. `tincctl.c:2690-2730`.
+/// `cmd_network`: list or (rejected) switch.
 ///
 /// `tinc network` → list. `tinc network NAME` → "use -n NAME"
-/// error. `tinc network a b` → too many. C `:2691-2694`: `argc > 2`.
+/// error. `tinc network a b` → too many.
 fn cmd_network(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     let arg = match args {
         [] => None,
         [name] => Some(name.as_str()),
-        // C `tincctl.c:2693`: `"Too many arguments!"`.
         _ => return Err(CmdError::TooManyArgs),
     };
     cmd::network::run(paths, arg)
 }
 
 /// `cmd_join`: one arg (the URL) or zero (read URL from stdin).
-/// C `invitation.c:1218`.
 ///
-/// The C also accepts `tinc join` with no arg + tty prompt. We
+/// Upstream also accepts `tinc join` with no arg + tty prompt. We
 /// support stdin read (so `echo URL | tinc -c CONF join` works)
 /// but no tty prompt — same "no prompts" deviation as elsewhere.
 /// `--force` propagates to `finalize_join`'s VAR_SAFE override.
@@ -1071,8 +1034,7 @@ fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
     let url: &str = match args {
         [u] => u,
         [] => {
-            // C `invitation.c:1249-1262`: `if(tty) prompt;
-            // fgets(line, ..., stdin); rstrip(line);`.
+            // `if(tty) prompt; fgets(line, ..., stdin); rstrip(line);`.
             // We always read from stdin (no tty check). One line,
             // strip trailing newline. Same as `tinc import` does
             // for its blob.
@@ -1094,7 +1056,6 @@ fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
 }
 
 /// `cmd_verify`: required signer arg, optional file arg.
-/// C `tincctl.c:2858`.
 fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     let (signer_arg, input) = match args {
         [] => return Err(CmdError::MissingArg("signer")),
@@ -1124,7 +1085,7 @@ fn cmd_export_all(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
 }
 
 /// `cmd_import`: zero args, read from stdin. Maps count→exit-code:
-/// C returns 1 if zero imported. C: `tincctl.c:2640-2648`.
+/// returns 1 if zero imported.
 fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     if !args.is_empty() {
         return Err(CmdError::TooManyArgs);
@@ -1134,17 +1095,16 @@ fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
         eprintln!("Imported {count} host configuration files.");
         Ok(())
     } else {
-        // The C `fprintf(stderr, ...)` then `return 1`. We surface as
-        // BadInput so the dispatcher prints + exits 1. Same effect.
+        // We surface as BadInput so the dispatcher prints + exits 1. Same effect.
         Err(CmdError::BadInput(
             "No host configuration files imported.".into(),
         ))
     }
 }
 
-/// `cmd_exchange`: export, then import. C: `tincctl.c:2650-2652`.
+/// `cmd_exchange`: export, then import.
 ///
-/// The C is `return cmd_export(...) ? 1 : cmd_import(...)`. Short-
+/// Upstream is `return cmd_export(...) ? 1 : cmd_import(...)`. Short-
 /// circuit on export failure. The `fclose(stdout)` in `cmd_export`
 /// means stdin's peer (whoever is on the other end of the pipe —
 /// usually another `tinc exchange` over ssh) sees EOF and finishes
@@ -1182,13 +1142,13 @@ fn cmd_exchange(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdEr
     cmd_import(paths, g, args)
 }
 
-/// `cmd_exchange_all`: export-all, then import. C: `tincctl.c:2654-2656`.
+/// `cmd_exchange_all`: export-all, then import.
 fn cmd_exchange_all(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     cmd_export_all(paths, g, args)?;
     cmd_import(paths, g, args)
 }
 
-/// `parse_options` + the env-var fallback. C: `tincctl.c:207-278`.
+/// `parse_options` + the env-var fallback.
 ///
 /// Returns the resolved `PathsInput` and the leftover argv (the
 /// subcommand name plus its positionals). The leftover is `Vec<String>`
@@ -1211,7 +1171,7 @@ fn parse_global_options(
     };
     let mut rest = Vec::new();
 
-    // C `getopt_long(argc, argv, "+bc:n:", ...)` — the `+` means stop
+    // `getopt_long(argc, argv, "+bc:n:", ...)` — the `+` means stop
     // at first non-option. We loop until we hit something that doesn't
     // start with `-`, then dump everything remaining into `rest`.
     //
@@ -1252,9 +1212,7 @@ fn parse_global_options(
                 rest.push("--version".into());
                 return Ok((input, globals, rest));
             }
-            // `--pidfile=FILE`. C `tincctl.c:245`: `OPT_PIDFILE` →
-            // `pidfilename = xstrdup(optarg)`. Overrides the
-            // /var/run ↔ confbase resolution dance entirely. Only
+            // `--pidfile=FILE`. Overrides the /var/run ↔ confbase resolution dance entirely. Only
             // matters for 5b commands. No short form (C: long-only).
             "--pidfile" => {
                 let val = args.next().ok_or("option --pidfile requires an argument")?;
@@ -1263,13 +1221,12 @@ fn parse_global_options(
             s if s.starts_with("--pidfile=") => {
                 input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
             }
-            // C `OPT_BATCH` sets `tty = false` — disables interactive
+            // `OPT_BATCH` sets `tty = false` — disables interactive
             // prompts. We have no prompts (see `cmd/init.rs` doc), so
             // -b is a no-op. Accept-and-ignore for compat with scripts
             // that pass it.
             "-b" | "--batch" => {}
-            // `--force`. C: `tincctl.c:250`. No short form — the C
-            // long-only OPT_FORCE doesn't map to a single char.
+            // `--force`. No short form — the long-only OPT_FORCE doesn't map to a single char.
             "--force" => {
                 globals.force = true;
             }
@@ -1290,7 +1247,7 @@ fn parse_global_options(
     }
 
     // ─── NETNAME env fallback
-    // C: `tincctl.c:258-263`. Only if -n wasn't given. Standard
+    // Only if -n wasn't given. Standard
     // env-under-flag precedence.
     if input.netname.is_none()
         && let Ok(env_net) = env::var("NETNAME")
@@ -1299,7 +1256,7 @@ fn parse_global_options(
     }
 
     // ─── netname "." → None
-    // C: `tincctl.c:267-270`. "." is the "top-level" sentinel — it
+    // "." is the "top-level" sentinel — it
     // means "no netname, use confdir as confbase". Allows `NETNAME=.`
     // in your env to explicitly say "I want /etc/tinc not
     // /etc/tinc/$NETNAME". Also the empty string (which you can't
@@ -1309,8 +1266,7 @@ fn parse_global_options(
     }
 
     // ─── netname path-traversal guard
-    // C: `tincctl.c:272-276` `strpbrk(netname, "\\/") || *netname == '.'`.
-    // Netname becomes a path component; slashes would escape confdir.
+    // `strpbrk(netname, "\\/") || *netname == '.'`. Netname becomes a path component; slashes would escape confdir.
     // Leading dot rejects `..` (`strpbrk` doesn't catch `..` but `*=='.'`
     // does — and also rejects `.hidden`, which is fine, nobody names
     // their VPN `.git`).
@@ -1344,8 +1300,7 @@ fn print_help() {
     println!("Commands:");
     for c in COMMANDS {
         // `config` has empty help (it's the umbrella nobody types).
-        // C `tincctl.c:100`: `if(commands[i].help) printf(...)` —
-        // same skip-on-empty.
+        // Same skip-on-empty as upstream's `if(commands[i].help)`.
         if !c.help.is_empty() {
             println!("  {}", c.help);
         }
@@ -1388,7 +1343,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         None => {
-            // C: `if(optind >= argc) return cmd_shell(...)` — bare
+            // `if(optind >= argc) return cmd_shell(...)` — bare
             // `tinc` enters interactive shell mode. We don't have
             // shell mode (5b). Print help, exit 1. Matches what
             // `git` does for bare `git`.
@@ -1403,7 +1358,7 @@ fn main() -> ExitCode {
     let cmd_args = &rest[1..];
 
     // ─── Dispatch
-    // C: linear scan of `commands[]` with `strcasecmp`. We use
+    // Linear scan of `commands[]` with `strcasecmp`. We use
     // `eq_ignore_ascii_case` (same as strcasecmp on ASCII; we already
     // pinned everything to ASCII in tinc-conf for the same reason).
     // Yes, `tinc INIT alice` works in the C. Preserved because it's

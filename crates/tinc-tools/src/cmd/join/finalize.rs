@@ -1,0 +1,405 @@
+//! `finalize_join` — parse the invitation blob and write a confbase.
+//!
+//! The testable seam: pure-filesystem, no network. Input is the
+//! decrypted SPTPS payload; output is a `JoinResult` carrying what
+//! needs to go back over the wire.
+
+use std::fs;
+use std::io::Write;
+
+use tinc_conf::vars::{self, VarFlags};
+use tinc_crypto::b64;
+
+use crate::cmd::{CmdError, io_err, makedir};
+use crate::keypair;
+use crate::names::{Paths, check_id};
+
+use super::JoinResult;
+
+/// Parse `data` and write a fresh confbase.
+///
+/// `data` is the invitation file body (what `cmd_invite` wrote, what
+/// the daemon's `receive_invitation_sptps` sends). Chunk 1 is the new
+/// node's bootstrap config, filtered through `VAR_SAFE`; chunks 2+
+/// are host files, separated by `Name = X` lines.
+///
+/// `force = false` → unsafe vars dropped with a warning (the default).
+/// `force = true` → unsafe vars accepted with a warning. Same gate
+/// as `cmd_import`'s `--force`.
+///
+/// Preconditions the caller must check (`cmd_join` does these before
+/// the SPTPS loop):
+/// - `paths.confbase` is writable (or creatable)
+/// - `paths.tinc_conf()` does NOT already exist
+///
+/// We re-check the second one because TOCTOU between `cmd_join`'s
+/// check and this call is possible (the SPTPS handshake takes
+/// nonzero time). But the first one is on the caller — if `makedir`
+/// fails here, you get a fs error mid-write, not a clean "no
+/// permission" up front.
+///
+/// # Errors
+/// - `BadInput`: blob is malformed (no `Name = X` first line, invalid
+///   name, secondary chunk would clobber our own host file).
+/// - `Io`: any filesystem write.
+///
+/// # Panics
+/// Only via `keypair::generate`'s `OsRng::fill_bytes` if the OS
+/// entropy source is broken.
+// Sequence of distinct steps sharing local state (open file handles,
+// the line iterator). Upstream is 400 lines for the same reason; it
+// does it with goto.
+#[allow(clippy::too_many_lines)]
+pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
+    // ─── Validate blob is text
+    // Upstream treats `data` as a NUL-terminated C string. Embedded
+    // NUL would truncate the parser silently. We accept any UTF-8
+    // (which includes ASCII, which is all the file should be).
+    // Non-UTF-8 → bail; better than silently truncating.
+    //
+    // Why not `&str` parameter: the SPTPS receive path delivers
+    // `Vec<u8>` (it doesn't know the payload is text). The
+    // bytes→str is the SPTPS↔config boundary.
+    let data = std::str::from_utf8(data)
+        .map_err(|_| CmdError::BadInput("Invitation data is not valid UTF-8".into()))?;
+
+    // ─── Parse first chunk's first line: must be `Name = OURNAME`
+    // `get_value(data, "Name")` parses the *first* line and checks
+    // if it's the requested key. Not a search — first-line-only. So
+    // the invitation file format is rigid: `Name = X` MUST be line 1.
+    // `cmd_invite` writes it that way (`invite.rs:build_invitation_
+    // file` emits `Name` first). The contract test pins this.
+    let mut lines = data.lines();
+    let first = lines
+        .next()
+        .ok_or_else(|| CmdError::BadInput("No Name found in invitation!".into()))?;
+    let name = parse_name_line(first)
+        .ok_or_else(|| CmdError::BadInput("No Name found in invitation!".into()))?;
+
+    if !check_id(name) {
+        return Err(CmdError::BadInput(
+            "Invalid Name found in invitation!".into(),
+        ));
+    }
+    let name = name.to_owned();
+
+    // ─── NetName: ignored
+    // Upstream: if no `-n` was given, grep blob for `NetName`, set
+    // the global, then re-derive paths. We don't do dynamic path
+    // re-derivation (Paths is immutable, by design). The caller
+    // already picked confbase via `-c` or `-n`. If the blob's
+    // `NetName` disagrees with what they picked, the join succeeds
+    // anyway — the netname is just a directory name, not a wire
+    // concept. The upstream loop is for "I didn't pick a netname,
+    // use the one from the invite"; we say "pick one".
+    //
+    // The `NetName` line in chunk 1 is *recognized* (not "unknown
+    // variable") and dropped.
+
+    // ─── Check tinc.conf doesn't exist
+    // The join_XXXXXXXX random-netname dance is here upstream; we
+    // just bail.
+    let tinc_conf = paths.tinc_conf();
+    if tinc_conf.exists() {
+        return Err(CmdError::BadInput(format!(
+            "Configuration file {} already exists!",
+            tinc_conf.display()
+        )));
+    }
+
+    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CACHE)
+    // Same mode 0755 as init.
+    if let Some(confdir) = &paths.confdir {
+        makedir(confdir, 0o755)?;
+    }
+    makedir(&paths.confbase, 0o755)?;
+    makedir(&paths.hosts_dir(), 0o755)?;
+    makedir(&paths.cache_dir(), 0o755)?;
+
+    // ─── Open three output files
+    // tinc.conf, hosts/NAME, invitation-data (raw blob for
+    // debugging). Upstream also opens `tinc-up.invitation` for
+    // `ifconfig_*`; we write a placeholder later, no streaming build.
+    //
+    // Keep `fh` (hosts/NAME) open across the chunk-1 loop AND the
+    // keygen step — the pubkey goes in *after* the chunk-1 vars,
+    // matching upstream's write order. Close `f` (tinc.conf) right
+    // after chunk 1.
+    let mut f = fs::File::create(&tinc_conf).map_err(io_err(&tinc_conf))?;
+    // FIRST line of tinc.conf. Everything else is appended below.
+    writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
+
+    let host_file = paths.host_file(&name);
+    let mut fh = fs::File::create(&host_file).map_err(io_err(&host_file))?;
+
+    // `invitation-data` — the raw blob, for debugging "what did the
+    // daemon send?". Write the whole thing now; nothing reads it
+    // programmatically.
+    let inv_data_path = paths.confbase.join("invitation-data");
+    fs::write(&inv_data_path, data).map_err(io_err(&inv_data_path))?;
+
+    // ─── Chunk 1: filter through variables[]
+    // The hand-rolled tokenizer again (sixth instance). We use
+    // `vars::lookup`.
+    //
+    // The loop semantics are subtle. Upstream walks until `Name = X`
+    // where X != name (chunk boundary), `break`. Then the next loop
+    // picks up *with l still set to that Name line*. We replicate by
+    // tracking the current line across the chunk-1/chunk-2 boundary
+    // via `lines.by_ref()` — chunk 1 loop pushes the boundary line
+    // back by storing it.
+    let mut boundary: Option<(&str, &str)> = None; // (name_of_next_chunk, value)
+
+    for line in lines.by_ref() {
+        // Skip comments. The separator line `#---...---#` starts
+        // with `#` and is correctly skipped.
+        if line.starts_with('#') {
+            continue;
+        }
+
+        // The tokenizer: splits at first of `\t` ` ` `=`, then skips
+        // ws+`=`+ws to the value. `Port=655` → key="Port", val="655".
+        // `Port = 655` → same. `Port655` → key="Port655", val="".
+        let Some((key, val)) = split_var(line) else {
+            // Empty key: blank lines, ws-only.
+            continue;
+        };
+
+        // `Name = ourname` → skip (already wrote it). `Name = other`
+        // → chunk boundary, exit loop with `boundary` set.
+        if key.eq_ignore_ascii_case("Name") {
+            if val == name {
+                continue;
+            }
+            boundary = Some((key, val));
+            break;
+        }
+
+        // Recognized, dropped. See comment above.
+        if key.eq_ignore_ascii_case("NetName") {
+            continue;
+        }
+
+        let Some(var) = vars::lookup(key) else {
+            // We recognize Ifconfig/Route (so no "unknown" warning)
+            // but stub the action.
+            if key.eq_ignore_ascii_case("Ifconfig") || key.eq_ignore_ascii_case("Route") {
+                // TODO(ifconfig port): generate platform-specific
+                // shell commands in tinc-up.invitation. -300 LOC.
+                // For now: silent no-op. The placeholder tinc-up
+                // (written below) covers the "you need to configure
+                // your interface" message.
+                continue;
+            }
+            eprintln!("Ignoring unknown variable '{key}' in invitation.");
+            continue;
+        };
+
+        // Non-SAFE vars are an attack vector (the inviter could set
+        // `ScriptsInterpreter = /bin/sh` and own you). `--force` is
+        // the "I trust this inviter" knob.
+        if !var.flags.contains(VarFlags::SAFE) {
+            if force {
+                eprintln!("Warning: unsafe variable '{key}' in invitation.");
+            } else {
+                eprintln!("Ignoring unsafe variable '{key}' in invitation.");
+                continue;
+            }
+        }
+
+        // HOST vars → hosts/NAME, SERVER vars → tinc.conf.
+        // Dual-tagged (SERVER|HOST) go to hosts/NAME since
+        // `& VAR_HOST` matches — e.g. `Subnet` from the inviter
+        // goes to our host file (it's our subnet).
+        //
+        // We write `var.name` (canonical case from the table), not
+        // `key` (what the inviter wrote). Upstream writes the
+        // original case. We canonicalize. The daemon's config reader
+        // is case-insensitive so this doesn't change behavior; it
+        // just normalizes the output. Same canonicalization as
+        // `cmd_set` will do.
+        let target = if var.flags.contains(VarFlags::HOST) {
+            &mut fh
+        } else {
+            &mut f
+        };
+        writeln!(target, "{} = {}", var.name, val).map_err(io_err(&tinc_conf))?;
+    }
+
+    // tinc.conf done. Close before the chunk-2 loop opens more files.
+    drop(f);
+
+    // ─── Chunk 2+: host files, unfiltered
+    // Each chunk is `Name = X\n` then verbatim lines until the next
+    // `Name = X` or EOF. The separator `#--...--#` is recognized and
+    // dropped.
+    //
+    // "Unfiltered" means no `variables[]` check. The host file is
+    // a *peer's* config; you don't filter what a peer publishes
+    // about themselves. (You DO filter what they tell you about
+    // YOUR config — that's chunk 1.)
+    //
+    // Loop structure: outer `while(l && Name)` { open file; inner
+    // `while(get_line)` until next Name; close }. `l` carries across
+    // iterations. We do the same with `boundary` carrying.
+    let mut hosts_written = Vec::new();
+
+    while let Some((_, host_name)) = boundary.take() {
+        if !check_id(host_name) {
+            return Err(CmdError::BadInput(
+                "Invalid Name found in invitation.".into(),
+            ));
+        }
+        // Secondary chunk with our own name would clobber the
+        // hosts/NAME we just opened. Malicious inviter detection.
+        if host_name == name {
+            return Err(CmdError::BadInput(
+                "Secondary chunk would overwrite our own host config file.".into(),
+            ));
+        }
+
+        let host_path = paths.host_file(host_name);
+        let mut hf = fs::File::create(&host_path).map_err(io_err(&host_path))?;
+        hosts_written.push(host_name.to_owned());
+
+        // Inner loop: lines until next `Name = X` or EOF.
+        for line in lines.by_ref() {
+            // Exact match — the separator. (Regular `#` comments are
+            // NOT skipped here, unlike chunk 1. The host file is
+            // verbatim.)
+            if line == crate::cmd::invite::SEPARATOR {
+                continue;
+            }
+
+            // Upstream's tokenizer here only checks if the FIRST
+            // token is exactly "Name" (4 chars). `Namespace = foo`
+            // passes through (len=9).
+            //
+            // We use `split_var` (the chunk-1 tokenizer) and check
+            // for "Name". Its `=` handling differs slightly from the
+            // strcspn check (split_var splits AT `=`, the strcspn
+            // here splits AT `\t =` so len includes chars before any
+            // of those). For `Name = X` and `Name=X`: both produce
+            // key="Name". Good enough — `cmd_invite` writes the
+            // canonical form.
+            if let Some((k, v)) = split_var(line)
+                && k.eq_ignore_ascii_case("Name")
+            {
+                boundary = Some((k, v));
+                break;
+            }
+
+            // `.lines()` strips the newline; add it back. (Yes, this
+            // means a host file with no trailing newline *gains* one.
+            // Upstream does the same. Harmless.)
+            writeln!(hf, "{line}").map_err(io_err(&host_path))?;
+        }
+    }
+
+    // ─── Generate our real node key
+    // Same as `init`: PEM private key at 0600, b64 pubkey as config
+    // line in hosts/NAME. The pubkey goes back over SPTPS so the
+    // daemon writes our hosts entry on its end.
+    let sk = keypair::generate();
+    let pubkey_b64 = b64::encode(sk.public_key());
+
+    {
+        let priv_path = paths.ed25519_private();
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let f = opts.open(&priv_path).map_err(io_err(&priv_path))?;
+        let mut w = std::io::BufWriter::new(f);
+        tinc_conf::pem::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob())
+            .map_err(io_err(&priv_path))?;
+        w.flush().map_err(io_err(&priv_path))?;
+    }
+
+    // Appended *after* whatever chunk-1 HOST vars went in.
+    writeln!(fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_file))?;
+    drop(fh);
+
+    // ─── Write tinc-up placeholder
+    // Same content as `init`'s placeholder. The `Ifconfig`/`Route`
+    // lines from chunk 1 would have populated this with real
+    // commands; we write the "edit me" comment instead.
+    write_tinc_up_placeholder(paths)?;
+
+    Ok(JoinResult {
+        name,
+        pubkey_b64,
+        hosts_written,
+    })
+}
+
+/// `init.rs`'s tinc-up content, lifted. Mode 0755, `O_EXCL`.
+///
+/// Not factored to a shared helper because the two call sites have
+/// different surrounding context (init is the only writer; join might
+/// later grow ifconfig integration that writes a *different* body).
+/// Dead-code rule applies: unify when there's a third caller.
+fn write_tinc_up_placeholder(paths: &Paths) -> Result<(), CmdError> {
+    let path = paths.tinc_up();
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o755);
+    }
+    let mut f = opts.open(&path).map_err(io_err(&path))?;
+    // Same body as init.
+    writeln!(f, "#!/bin/sh").map_err(io_err(&path))?;
+    writeln!(f, "echo 'Unconfigured tinc-up script, please edit '$0'!'").map_err(io_err(&path))?;
+
+    // chmod after write because umask may have stripped the x bit
+    // from the create mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(io_err(&path))?;
+    }
+    Ok(())
+}
+
+/// Parse the `Name = X` line specifically.
+///
+/// Returns `Some(value)` only if the line's key is `Name` (case-
+/// insensitive). Unlike `split_var`, this checks the key.
+pub(super) fn parse_name_line(line: &str) -> Option<&str> {
+    let (k, v) = split_var(line)?;
+    if k.eq_ignore_ascii_case("Name") {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// The `strcspn(l, "\t =")` tokenizer: split at first of tab/space/
+/// `=`, then skip ws, optional `=`, ws.
+///
+/// `Port = 655` → ("Port", "655"). `Port=655` → ("Port", "655").
+/// `Port` → ("Port", ""). `  ` → None. `# comment` → ("#", "comment")
+/// — the caller checks `starts_with('#')` first.
+///
+/// Returns `None` only for empty key.
+pub(super) fn split_var(line: &str) -> Option<(&str, &str)> {
+    let key_end = line.find(['\t', ' ', '=']).unwrap_or(line.len());
+    let key = &line[..key_end];
+    if key.is_empty() {
+        return None;
+    }
+
+    // Skip past the separator: `strspn` past ws, then optional `=`,
+    // then `strspn` past ws again.
+    let rest = &line[key_end..];
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('=').unwrap_or(rest);
+    let val = rest.trim_start_matches([' ', '\t']);
+
+    Some((key, val))
+}
