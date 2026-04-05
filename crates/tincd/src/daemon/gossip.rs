@@ -1140,6 +1140,7 @@ impl Daemon {
                        "Got ADD_SUBNET from {conn_name} for ourself ({subnet})");
             // Dark in single-peer tests; reachable via stale gossip
             // in multi-peer mesh.
+            // borrow-split: send_subnet takes &mut self; can't pass &self.name
             let nw = self.send_subnet(from_conn, Request::DelSubnet, &self.name.clone(), &subnet);
             return Ok(nw);
         }
@@ -1255,6 +1256,7 @@ impl Daemon {
             }
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for ourself ({subnet})");
+            // borrow-split: send_subnet takes &mut self; can't pass &self.name
             let nw = self.send_subnet(from_conn, Request::AddSubnet, &self.name.clone(), &subnet);
             return Ok(nw);
         }
@@ -1377,9 +1379,9 @@ impl Daemon {
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
             let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
+            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
             self.edge_addrs
-                .insert(existing, (edge.addr.clone(), edge.port.clone(), la, lp));
+                .insert(existing, (edge.addr, edge.port, la, lp));
         } else if from_id == self.myself {
             // Contradiction — peer says we have an edge we don't.
             // Counter read by on_periodic_tick.
@@ -1396,9 +1398,8 @@ impl Daemon {
                 .add_edge(from_id, to_id, edge.weight, edge.options);
             // local optional (pre-1.0.24); default to "unspec".
             let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.clone().unwrap_or_else(|| (unspec(), unspec()));
-            self.edge_addrs
-                .insert(eid, (edge.addr.clone(), edge.port.clone(), la, lp));
+            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
+            self.edge_addrs.insert(eid, (edge.addr, edge.port, la, lp));
         }
 
         let nw = if self.settings.tunnelserver {
@@ -1492,11 +1493,9 @@ impl Daemon {
             && let Some(rev) = self.graph.lookup_edge(to_id, self.myself)
         {
             if !self.settings.tunnelserver {
-                let to_name = edge.to.clone();
-                let my_name = self.name.clone();
                 let line = DelEdge {
-                    from: to_name,
-                    to: my_name,
+                    from: edge.to,
+                    to: self.name.clone(),
                 }
                 .format(Self::nonce());
                 // `97ef5af0` bug class: this DEL_EDGE was queued but

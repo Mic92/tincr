@@ -232,22 +232,16 @@ impl Daemon {
     /// piggyback, or `dispatch_sptps_outputs` killed it). Caller
     /// must `return FeedDrain::Done`.
     fn dispatch_request_id(&mut self, id: ConnId, line: &[u8]) -> Option<(DispatchResult, bool)> {
-        // The clones aren't strictly needed (disjoint fields vs &mut
-        // self.conns) but cheap; keep for now.
-        let cookie = self.cookie.clone();
-        let my_name = self.name.clone();
-        let confbase = self.confbase.clone();
+        let conn = self.conns.get_mut(id).expect("dispatched from live conn");
         let ctx = IdCtx {
-            cookie: &cookie,
-            my_name: &my_name,
+            cookie: &self.cookie,
+            my_name: &self.name,
             mykey: &self.mykey,
-            confbase: &confbase,
+            confbase: &self.confbase,
             invitation_key: self.invitation_key.as_ref(),
             global_pmtu: self.settings.global_pmtu,
         };
         let now = self.timers.now();
-
-        let conn = self.conns.get_mut(id).expect("dispatched from live conn");
         let id_result = handle_id(conn, line, &ctx, now, &mut OsRng);
 
         let (needs_write, init, is_invite) = match id_result {
@@ -281,9 +275,9 @@ impl Daemon {
             Vec::new()
         } else {
             let log_name = if is_invite {
-                conn.hostname.clone()
+                &conn.hostname
             } else {
-                conn.name.clone()
+                &conn.name
             };
             let sptps = conn
                 .sptps
