@@ -35,12 +35,16 @@ impl RngCore for NoRng {
 
 /// Minimal seeded RNG for the handshake KEX.
 struct SeedRng(u64);
+#[allow(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
 impl RngCore for SeedRng {
     fn next_u32(&mut self) -> u32 {
         self.next_u64() as u32
     }
     fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         self.0
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -166,7 +170,7 @@ fn open_data_into_handshake_falls_back() {
     assert!(matches!(outs[0], Output::Wire { .. }));
 }
 
-/// `open_data_into` before handshake completes → InvalidState (no incipher).
+/// `open_data_into` before handshake completes → `InvalidState` (no incipher).
 #[test]
 fn open_data_into_pre_handshake() {
     let (alice_key, _) = keypair(1);

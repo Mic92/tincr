@@ -17,13 +17,13 @@
 //! So: bypass the macro. Direct `libc::ioctl(fd, req, *mut ifreq)`.
 //! The macro's value was `if ret < 0 { Err(Errno::last()) }` — three
 //! lines we can write ourselves. We get the right pointer type AND
-//! the third-instance pattern (tui ioctl, info localtime_r, this)
+//! the third-instance pattern (tui ioctl, info `localtime_r`, this)
 //! still holds: scoped `#[allow(unsafe_code)]`, SAFETY comment that
 //! says what the kernel reads/writes/locks.
 //!
 //! ──────────── `libc::ifreq` layout ─────────────────────────────────
 //!
-//! Smoke-verified `sizeof(struct ifreq) == 40` on x86_64 glibc, and
+//! Smoke-verified `sizeof(struct ifreq) == 40` on `x86_64` glibc, and
 //! `libc::ifreq` matches. Layout: `ifr_name: [c_char; 16]` + 24-byte
 //! `ifr_ifru` union (largest members are 16 bytes, padded to 24).
 //!
@@ -31,7 +31,7 @@
 //! 16). The C uses `ifr.ifr_flags` (a `#define` alias into the
 //! union); we write `ifr.ifr_ifru.ifru_flags`.
 //!
-//! ──────────── Why O_CLOEXEC matters here more than usual ──────────
+//! ──────────── Why `O_CLOEXEC` matters here more than usual ──────────
 //!
 //! C `device.c:63`: `fcntl(device_fd, F_SETFD, FD_CLOEXEC)`. The
 //! daemon spawns `tinc-up`, `tinc-down`, `host-NAME-up` scripts
@@ -226,7 +226,7 @@ impl Tun {
 
 /// `[c_char; IFNAMSIZ]` from `Option<&str>`. Called BEFORE
 /// `open(/dev/net/tun)` so length validation fires without
-/// CAP_NET_ADMIN.
+/// `CAP_NET_ADMIN`.
 ///
 /// `None` → zeros → kernel picks (C `:103` `if(iface)`).
 /// `len >= 16` → `Err`. STRICTER than C's `strncpy + [15]=0`
@@ -467,10 +467,10 @@ impl Device for Tun {
     /// `read_packet` (`linux/device.c:144-183`). TAP only.
     ///
     /// TUN doesn't go through here: `drain()` is overridden and
-    /// reads directly via `read_fd` (vnet_hdr layout). The trait
+    /// reads directly via `read_fd` (`vnet_hdr` layout). The trait
     /// default `drain` calls `self.read()`, but our override
-    /// doesn't. The C `:146-165` +10 tun_pi trick is gone (no
-    /// tun_pi with `IFF_NO_PI`); see git history at `1da3d1d7^`
+    /// doesn't. The C `:146-165` +10 `tun_pi` trick is gone (no
+    /// `tun_pi` with `IFF_NO_PI`); see git history at `1da3d1d7^`
     /// for the archaeology.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // TUN: dead path since Phase 2a (vnet drain bypasses).
@@ -576,21 +576,21 @@ impl Device for Tun {
         Some(self.fd.as_raw_fd())
     }
 
-    /// vnet_hdr drain. Overrides the default `read()`-loop only
+    /// `vnet_hdr` drain. Overrides the default `read()`-loop only
     /// when `IFF_VNET_HDR` is on; otherwise delegates.
     ///
-    /// Read shape with vnet_hdr (`tun_put_user`, `tun.c:2064`):
-    /// `[virtio_net_hdr(10)][raw IP packet (≤65535)]`. NO tun_pi
+    /// Read shape with `vnet_hdr` (`tun_put_user`, `tun.c:2064`):
+    /// `[virtio_net_hdr(10)][raw IP packet (≤65535)]`. NO `tun_pi`
     /// (`IFF_NO_PI` set), NO eth header (TUN mode). One read = one
     /// skb. For `gso_type==TCPV4/6`, the IP packet is a super-
     /// segment (`totlen > MTU`).
     ///
     /// `gso_type==NONE` (the common case for non-TCP, ARP, ICMP,
-    /// short TCP): strip the vnet_hdr, complete partial csum if
+    /// short TCP): strip the `vnet_hdr`, complete partial csum if
     /// `NEEDS_CSUM`, synthesize eth header, return as single
     /// `Frames{count: 1}`. Same wire result as the non-vnet path.
     ///
-    /// `gso_type==TCPV4/6`: strip vnet_hdr, return `Super{..}`.
+    /// `gso_type==TCPV4/6`: strip `vnet_hdr`, return `Super{..}`.
     /// The daemon calls `tso_split` on the contiguous buffer.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         if self.mode == Mode::Tap {
@@ -822,7 +822,7 @@ mod tests {
 
     /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (Phase 2a;
     /// C `device.c:78` is just `IFF_TUN` — we diverge here, the C's
-    /// +10 tun_pi trick is gone in favor of vnet_hdr;
+    /// +10 `tun_pi` trick is gone in favor of `vnet_hdr`;
     /// wg-go `tun_linux.go:566` does the same). TAP flags match
     /// C `device.c:86`: `IFF_TAP | IFF_NO_PI`. Pin both so a
     /// refactor of `Tun::open`'s flag computation gets caught.
@@ -848,7 +848,7 @@ mod tests {
     /// strncpy; kernel picks). `Some` → packed, NUL-padded (C
     /// `strncpy` zero-fills the rest). The boundary: `< IFNAMSIZ`
     /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
-    /// c_char signedness; values are ASCII either way.
+    /// `c_char` signedness; values are ASCII either way.
     #[test]
     #[allow(clippy::cast_sign_loss)]
     fn pack_ifr_name_ok() {
@@ -932,9 +932,9 @@ mod tests {
         // NOT PermissionDenied (same). The validation fired.
     }
 
-    /// `Tun::open` with valid config but no CAP_NET_ADMIN → some
+    /// `Tun::open` with valid config but no `CAP_NET_ADMIN` → some
     /// `Err` (EACCES on open, or ENOENT if /dev/net/tun missing).
-    /// NOT InvalidInput — the validation passed, the syscall
+    /// NOT `InvalidInput` — the validation passed, the syscall
     /// failed.
     ///
     /// SKIP under root: open might actually succeed, and then

@@ -1,4 +1,6 @@
 //! Differential test: Rust SPTPS vs `sptps.c` via `tinc-ffi`.
+// Protocol code legitimately uses `alice_key`/`alice_kex`, `kex_a2`/`kex_b2`.
+#![allow(clippy::similar_names)]
 //!
 //! The strongest claim this file makes is in `byte_identical_wire_output`:
 //! given the same keys and the same RNG bytes, the Rust state machine
@@ -9,7 +11,7 @@
 //!
 //! ## RNG synchronization
 //!
-//! The C harness's `randomize()` is a ChaCha20 keystream over a fixed key
+//! The C harness's `randomize()` is a `ChaCha20` keystream over a fixed key
 //! (set by `tinc_ffi::seed_rng`). We need a Rust `RngCore` that produces
 //! the *same byte stream*. `rand_chacha::ChaCha20Rng::from_seed(key)` does
 //! NOT — it's a different construction (it sets the nonce to a fixed value
@@ -29,8 +31,8 @@
 //! `randomize()` call. ...also overkill.
 //!
 //! Actually the simplest thing: **make the Rust RNG match the C's stream
-//! by using the same ChaCha primitive**. The C shim uses tinc's vendored
-//! `chacha.c` (DJB ChaCha20, 64-bit counter, 8-byte nonce). `tinc-crypto`
+//! by using the same `ChaCha` primitive**. The C shim uses tinc's vendored
+//! `chacha.c` (DJB `ChaCha20`, 64-bit counter, 8-byte nonce). `tinc-crypto`
 //! already wraps that exact variant in `ChaPoly` — but that's an AEAD, not
 //! a raw stream. The underlying `chacha20::ChaCha20Legacy` *is* the right
 //! primitive though. Build a tiny `RngCore` over it.
@@ -428,6 +430,7 @@ fn byte_identical_wire_output() {
 
     /// Run a full handshake + one app record, return all wire bytes in order.
     /// `who` picks Rust vs C; same script either way.
+    #[allow(clippy::items_after_statements)] // local helper, clearer inline
     fn run(
         who: Impl,
         alice_priv: &[u8; 96],
@@ -626,6 +629,7 @@ fn rust_vs_c_rekey() {
 // ────────────────────────────────────────────────────────────────────
 // Abstraction for byte_identical_wire_output: same script, two backends.
 
+#[derive(Clone, Copy)]
 enum Impl {
     Rust,
     C,
@@ -645,7 +649,7 @@ enum Peer<'k> {
 
 impl Impl {
     fn start<'k>(
-        &self,
+        self,
         role: Role,
         my_priv: &[u8; 96],
         his_pub: &[u8; 32],

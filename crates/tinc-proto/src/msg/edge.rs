@@ -230,7 +230,7 @@ mod tests {
         assert!(DelEdge::parse("13 0 alice").is_err()); // too short
     }
 
-    /// AF_UNKNOWN round-trip: addr is whatever string came in.
+    /// `AF_UNKNOWN` round-trip: addr is whatever string came in.
     /// `str2sockaddr` accepts anything (stuffs it in `sa->unknown.address`
     /// on `getaddrinfo` failure), so a peer can send garbage and it'll
     /// be passed through to the next hop unchanged.

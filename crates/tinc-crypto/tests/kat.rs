@@ -214,9 +214,9 @@ fn ecdh_from_seed_matches_c() {
         assert_eq!(shared_ab, shared_ba, "ecdh[{i}] commutativity");
 
         // Also exercise the from_expanded path — that's how on-disk keys load.
-        let priv_a2 = ecdh::EcdhPrivate::from_expanded(&want_priv_a);
-        let shared_a2 = priv_a2.compute_shared(&want_pub_b);
-        assert_eq!(shared_a2, want_shared, "ecdh[{i}] from_expanded");
+        let priv_a_expanded = ecdh::EcdhPrivate::from_expanded(&want_priv_a);
+        let shared_expanded = priv_a_expanded.compute_shared(&want_pub_b);
+        assert_eq!(shared_expanded, want_shared, "ecdh[{i}] from_expanded");
     }
 }
 
@@ -335,12 +335,12 @@ fn b64_decode_accepts_mixed_alphabet() {
 /// Invitation crypto kernel: the chain of compositions that builds a URL
 /// slug. Every stage is a place to be silently wrong; we check them all.
 ///
-/// The C side is `invitation.c:499-518` (cmd_invite) +
+/// The C side is `invitation.c:499-518` (`cmd_invite`) +
 /// `protocol_auth.c:199-207` (daemon's filename recovery).
 ///
 /// Why per-stage assertions instead of just checking the final slug:
 /// when this fails (and it will, if anyone touches b64 or sha2), "slug
-/// is wrong" tells you nothing. "fingerprint matches but key_hash
+/// is wrong" tells you nothing. "fingerprint matches but `key_hash`
 /// doesn't" tells you the hash boundary is the bug.
 #[test]
 fn invitation_crypto_kernel_matches_c() {

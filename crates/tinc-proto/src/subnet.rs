@@ -356,7 +356,7 @@ impl FromStr for Subnet {
 /// only.
 ///
 /// Why not insist on exactly 2? See the comment in `subnet_parse.c` line
-/// 260: "old tinc versions net2str() will aggressively return MAC
+/// 260: "old tinc versions `net2str()` will aggressively return MAC
 /// addresses with one-digit parts". `0:a:b:c:d:e` is on the wire from
 /// 1.0-era peers.
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -383,6 +383,7 @@ impl fmt::Display for Subnet {
     /// `net2str`. Canonical form: `%02x` for MAC parts, `inet_ntop`
     /// (= `Ipv*Addr::Display`) for IP. Prefix omitted if max, weight
     /// omitted if default.
+    #[allow(clippy::many_single_char_names)] // MAC byte destructuring
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Subnet::Mac { addr, weight } => {
@@ -612,6 +613,8 @@ mod tests {
     #[test]
     fn maskcmp_mask_equivalence() {
         for m in 1u32..8 {
+            // m ∈ 1..7 → result ∈ {0x80..0xfe}, always fits u8.
+            #[allow(clippy::cast_possible_truncation)]
             let c_mask = (0x100u32 - (1u32 << (8 - m))) as u8;
             let rs_mask = 0xffu8 << (8 - m);
             assert_eq!(c_mask, rs_mask, "m={m}");
@@ -632,7 +635,7 @@ mod tests {
 
     /// Partial byte: prefix=20 → 2 full bytes + top 4 bits of byte 3.
     /// 10.0.{0x10}.X vs 10.0.{0x1f}.X: top-4 of 0x10 = top-4 of 0x1f
-    /// (both 0001_xxxx → mask 0xf0 → 0x10) → equal.
+    /// (both `0001_xxxx` → mask 0xf0 → 0x10) → equal.
     #[test]
     fn maskcmp_partial_byte() {
         // Top 4 bits of 0x10 (0001_0000) and 0x1f (0001_1111) under
@@ -709,7 +712,7 @@ mod tests {
         assert!(!net.matches(&sn("10.0.0.1/24"), false));
     }
 
-    /// V6 address mode. 2001:db8::1 is in 2001:db8::/32.
+    /// V6 address mode. `2001:db8::1` is in `2001:db8::/32`.
     #[test]
     fn matches_address_mode_v6() {
         let host = sn("2001:db8::1");

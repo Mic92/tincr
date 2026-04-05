@@ -2,14 +2,14 @@
 //! vtable of fn pointers; here it's a trait, daemon stores
 //! `Box<dyn Device>`. C `setup`/`close` become constructor + `Drop`.
 //!
-//! ## Linux TUN: vnet_hdr (Phase 2a)
+//! ## Linux TUN: `vnet_hdr` (Phase 2a)
 //!
 //! `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`. Reads are `[virtio_net_
 //! hdr(10)][raw IP]`; the eth header is synthesized by `drain()` or
 //! `tso_split`. The C's `+10` `tun_pi` trick (`linux/device.c:
-//! 148-167`) is gone — it was a workaround for not having vnet_hdr.
+//! 148-167`) is gone — it was a workaround for not having `vnet_hdr`.
 //!
-//! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No vnet_hdr.
+//! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No `vnet_hdr`.
 //!
 //! ## Not ported
 //!
@@ -21,7 +21,7 @@
 //! ## API
 //!
 //! Backends take `&mut [u8]` slices, not `vpn_packet_t *`. The
-//! kernel-side framing (vnet_hdr on Linux TUN; AF prefix on BSD
+//! kernel-side framing (`vnet_hdr` on Linux TUN; AF prefix on BSD
 //! utun; raw on TAP) is the backend's concern; the `+12` packet
 //! offset is the daemon's. Linux-gated; `Dummy` is
 //! unconditional for tests.
@@ -120,7 +120,7 @@ pub trait Device: Send {
     ///
     /// `buf` is the daemon's `data[offset..]` slice (≥ `MTU`). Linux
     /// TUN doesn't go through here (`drain()` overrides and reads
-    /// vnet_hdr layout directly). BSD `Utun` writes at `buf[10..]`
+    /// `vnet_hdr` layout directly). BSD `Utun` writes at `buf[10..]`
     /// then zeroes `buf[0..12]`; TAP/raw writes at `buf[0..]`.
     /// Kernel `read() <= 0` → `Err` (C `device.c:149`).
     ///
@@ -161,7 +161,7 @@ pub trait Device: Send {
     ///
     /// # Errors
     /// `io::Error` from `write(2)`. `Unsupported` for backends
-    /// without vnet_hdr.
+    /// without `vnet_hdr`.
     fn write_super(&mut self, _buf: &[u8]) -> io::Result<usize> {
         Err(io::ErrorKind::Unsupported.into())
     }
@@ -186,7 +186,7 @@ pub trait Device: Send {
     /// (`RUST_REWRITE_10G.md` Phase 0).
     ///
     /// Default: loop `self.read()` into arena slots until EAGAIN or
-    /// `cap`. Never returns `Super` — that's a Phase-2 vnet_hdr device
+    /// `cap`. Never returns `Super` — that's a Phase-2 `vnet_hdr` device
     /// override. The default IS the BSD/macOS/mock path: their
     /// existing byte-pipe `read()` is the building block. Zero changes
     /// to `bsd.rs`/`linux.rs` for Phase 0.
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// `Mode::default()` is TUN. `route.c` defaults to RMODE_
-    /// ROUTER, which picks TUN. The DeviceConfig default builder
+    /// ROUTER, which picks TUN. The `DeviceConfig` default builder
     /// chains through this.
     #[test]
     fn mode_default_tun() {
@@ -371,7 +371,7 @@ mod tests {
     // does the rest. This is the seam — if the default is right,
     // every byte-pipe backend is right.
 
-    /// Mock device: returns scripted read() outcomes. Each `Ok(bytes)`
+    /// Mock device: returns scripted `read()` outcomes. Each `Ok(bytes)`
     /// writes the byte pattern at `buf[0..]` and returns its length;
     /// `Err(kind)` returns the error. Exhausted → `WouldBlock`.
     struct ScriptedDev {
@@ -413,7 +413,7 @@ mod tests {
         }
     }
 
-    /// Dummy::read returns WouldBlock → drain returns Empty. The
+    /// `Dummy::read` returns `WouldBlock` → drain returns Empty. The
     /// daemon's `IoWhat::Device` arm never fires for Dummy (no fd),
     /// but if it did, this is the right answer.
     #[test]
@@ -425,7 +425,7 @@ mod tests {
 
     /// Three frames then EAGAIN → Frames{3}. The bytes land in
     /// slots 0..3 in order; slot lengths match. This is the common
-    /// case under normal load (less than DEVICE_DRAIN_CAP available).
+    /// case under normal load (less than `DEVICE_DRAIN_CAP` available).
     #[test]
     fn drain_frames_until_eagain() {
         let mut d = ScriptedDev::new(vec![

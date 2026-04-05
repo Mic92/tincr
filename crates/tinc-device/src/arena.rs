@@ -3,13 +3,13 @@
 //! The spine of the GSO/TSO/par-enc/ZC stack (`RUST_REWRITE_10G.md`):
 //!
 //! - Phase 0 (this commit): `Device::drain` reads frames into slots.
-//! - Phase 1 (UDP_SEGMENT): encrypt into slots, hand the contiguous
+//! - Phase 1 (`UDP_SEGMENT`): encrypt into slots, hand the contiguous
 //!   region to one `sendmsg` with cmsg `gso_size = STRIDE`. The
 //!   kernel splits at `STRIDE` boundaries — slot layout IS the wire
 //!   layout.
 //! - Phase 3 (par-enc): rayon workers each fill one slot. Fixed
 //!   stride means no inter-worker coordination on offsets.
-//! - Phase 4 (MSG_ZEROCOPY): kernel pins the arena pages directly.
+//! - Phase 4 (`MSG_ZEROCOPY)`: kernel pins the arena pages directly.
 //!   This is why we page-align NOW — costs nothing today, avoids
 //!   rebuilding the arena (and re-auditing slot lifetimes) later.
 //!
@@ -18,7 +18,7 @@
 //! ## Page alignment
 //!
 //! `Box<[u8]>` from `vec![].into_boxed_slice()` is malloc-aligned
-//! (16B on glibc). MSG_ZEROCOPY pins user pages
+//! (16B on glibc). `MSG_ZEROCOPY` pins user pages
 //! (`Documentation/networking/msg_zerocopy.rst`); a buffer straddling
 //! a page boundary works but pins one extra page per straddle, and
 //! the page-pin cost is the whole break-even calculation. Aligning
@@ -45,7 +45,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ptr::NonNull;
 
 /// One drain pass result. The daemon dispatches per-RESULT, not
-/// per-device — Linux+vnet_hdr can yield EITHER on consecutive
+/// per-device — `Linux+vnet_hdr` can yield EITHER on consecutive
 /// reads (one TSO super-segment, then a `gso_type==NONE` ARP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainResult {
@@ -63,12 +63,12 @@ pub enum DrainResult {
     ///
     /// Producers: Linux `IFF_VNET_HDR` + `TUNSETOFFLOAD`. FreeBSD
     /// `TAPSVNETHDR` (same `virtio_net_hdr` wire format —
-    /// `if_tuntap.c:168`). Windows could synthesize from a WinTun
+    /// `if_tuntap.c:168`). Windows could synthesize from a `WinTun`
     /// ring drain but doesn't today. macOS vmnet is `Frames` (batch,
     /// not super-packet — see `bsd-perf-findings.md`).
     Super {
         /// Length of the IP packet in `as_contiguous()[..len]`. The
-        /// vnet_hdr prefix is already stripped by the device impl.
+        /// `vnet_hdr` prefix is already stripped by the device impl.
         len: usize,
         /// MSS — payload bytes per output segment after `tso_split`.
         gso_size: u16,
@@ -250,7 +250,7 @@ impl DeviceArena {
         }
     }
 
-    /// Mutable whole-arena slice. The vnet_hdr device (Phase 2)
+    /// Mutable whole-arena slice. The `vnet_hdr` device (Phase 2)
     /// writes a 64KB super-segment into slot 0's region, spilling
     /// into slots 1..N. `Frames` and `Super` are exclusive per
     /// drain call so there's no overlap with `slot_mut`.

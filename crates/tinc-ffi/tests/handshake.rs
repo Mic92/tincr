@@ -1,4 +1,6 @@
 //! C↔C SPTPS handshake: prove the harness can drive `sptps.c` end-to-end.
+// Protocol code legitimately uses `kex_a2`/`kex_b2`, `sig_a2`/`sig_b2`.
+#![allow(clippy::similar_names)]
 //!
 //! These tests don't validate `sptps.c` itself — that's what `sptps_test.c`
 //! and the integration suite are for. They validate that the *harness* is a
@@ -15,7 +17,7 @@
 //!
 //! 1. **Both sides: KEX out** (during `start`). 68 bytes: 2-byte len (0x0041)
 //!    + 1-byte type (0x80=HANDSHAKE) + 65-byte body (version[1] + nonce[32]
-//!    + ecdh_pub[32]). Plaintext — no cipher state yet.
+//!    + `ecdh_pub`[32]). Plaintext — no cipher state yet.
 //!
 //! 2. **Initiator on receiving KEX → sends SIG.** 67 bytes: 2-byte len +
 //!    type + 64-byte Ed25519 signature over `[1][mykex][hiskex][label]`.
@@ -26,11 +28,11 @@
 //!
 //! 4. **Responder on receiving SIG → verifies, sends own SIG, derives keys.**
 //!    `receive_sig` runs verify, ECDH, PRF, then `send_sig` (because
-//!    `!initiator`), then sets `outcipher`. State → SECONDARY_KEX.
+//!    `!initiator`), then sets `outcipher`. State → `SECONDARY_KEX`.
 //!    Then because `!outstate` was true going in, it synthesizes the ACK
 //!    locally (`receive_ack(NULL, 0)`) and fires `HandshakeDone`.
 //!
-//! 5. **Initiator on receiving SIG → derives keys, HandshakeDone.** Same
+//! 5. **Initiator on receiving SIG → derives keys, `HandshakeDone`.** Same
 //!    code path. Doesn't re-send SIG (it's the initiator). Same synthetic
 //!    ACK.
 //!
@@ -359,6 +361,7 @@ fn handshake_is_deterministic_under_same_seeds() {
     // The whole point of the harness: same inputs → same wire bytes.
     // If this test ever flakes, the harness is useless as a Phase 2 oracle.
 
+    #[allow(clippy::items_after_statements)] // local helper, clearer inline
     fn run() -> Vec<Vec<u8>> {
         let (alice_priv, alice_pub) = keypair(1);
         let (bob_priv, bob_pub) = keypair(2);

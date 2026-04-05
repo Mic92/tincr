@@ -21,7 +21,7 @@
 //!
 //! That means the dump-format strings have ONE more sscanf conversion
 //! than they have printf conversions, per `" port "` instance. The
-//! ADD_EDGE message-protocol format does NOT have this — there `addr`
+//! `ADD_EDGE` message-protocol format does NOT have this — there `addr`
 //! and `port` are separate `%s` tokens both ways — because the daemon
 //! formats them with `sockaddr2str` (two outputs) not `sockaddr2hostname`
 //! (one fused). Dump uses the fused form. The asymmetry is annoying;
@@ -57,11 +57,15 @@ pub struct Tok<'a> {
 }
 
 impl<'a> Tok<'a> {
+    #[must_use]
     pub fn new(s: &'a str) -> Self {
         Self { rest: s }
     }
 
     /// Next token, or `Err` if exhausted. Enforces the 2048-byte limit.
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token exceeds `MAX_STRING`.
     pub fn s(&mut self) -> Result<&'a str, ParseError> {
         let s = self
             .rest
@@ -76,6 +80,9 @@ impl<'a> Tok<'a> {
     }
 
     /// `%*s` / `%*d` / `%*x` — skip a token, don't care what's in it.
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain.
     pub fn skip(&mut self) -> Result<(), ParseError> {
         self.s().map(|_| ())
     }
@@ -84,6 +91,9 @@ impl<'a> Tok<'a> {
     /// only emits unsigned via `%d` so we don't bother with `+`, but
     /// `-` is observably parsed (e.g. `mtu_info_h` checks `mtu < 512`
     /// after `%d` — no separate negativity check, so `i32` semantics).
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token isn't a valid `i32`.
     pub fn d(&mut self) -> Result<i32, ParseError> {
         self.s()?.parse().map_err(|_| ParseError)
     }
@@ -91,6 +101,9 @@ impl<'a> Tok<'a> {
     /// `%x`. Used for the dedup nonce and option bitfields. `printf %x`
     /// is lowercase, no `0x`; that's all we accept. (`sscanf %x` would
     /// also take uppercase and `0x` — not on the wire, not supported.)
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token isn't lowercase hex.
     pub fn x(&mut self) -> Result<u32, ParseError> {
         u32::from_str_radix(self.s()?, 16).map_err(|_| ParseError)
     }
@@ -111,6 +124,10 @@ impl<'a> Tok<'a> {
     /// crypto, so `ans_key_h` never reads them). The first two are `%d`
     /// (i32, fine). The third is `%lu`. A strict `u64::parse` would
     /// reject the line and drop the connection. Match glibc.
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token parses as neither
+    /// `u64` nor `i64`.
     #[allow(clippy::cast_sign_loss)] // intentional: strtoul "negate as unsigned"
     pub fn lu(&mut self) -> Result<u64, ParseError> {
         let s = self.s()?;
@@ -124,6 +141,7 @@ impl<'a> Tok<'a> {
         // actually sends anything but `-1` here, but matching strtoul
         // semantics (rather than special-casing the literal `"-1"`) is
         // the principled fix — future C might send `-7` for all we know.
+        // (Clippy: `# Errors` doc on the method itself covers this.)
         s.parse::<i64>().map(|i| i as u64).map_err(|_| ParseError)
     }
 
@@ -135,6 +153,9 @@ impl<'a> Tok<'a> {
     /// `tincctl.c:1282` also uses `%hd` for pmtu/minmtu/maxmtu in
     /// the node dump (the daemon writes `%d`, those fields are
     /// `int n->mtu` but they're MTU values ≤ 9000ish so `i16` fits).
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token isn't a valid `i16`.
     pub fn hd(&mut self) -> Result<i16, ParseError> {
         self.s()?.parse().map_err(|_| ParseError)
     }
@@ -145,6 +166,9 @@ impl<'a> Tok<'a> {
     /// 32-bit systems but `time_t` would already have wrapped by
     /// then, so the C is wrong on 32-bit-with-64-bit-time_t and
     /// we don't try to be wrong the same way. `i64` everywhere.
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain or the token isn't a valid `i64`.
     pub fn ld(&mut self) -> Result<i64, ParseError> {
         self.s()?.parse().map_err(|_| ParseError)
     }
@@ -180,6 +204,9 @@ impl<'a> Tok<'a> {
     /// optional. The C handles all three with `sscanf(...) < N` instead
     /// of `!= N` and leaves the trailing locals at their initial value.
     /// This is the moral equivalent.
+    ///
+    /// # Errors
+    /// `ParseError` if a token is present but exceeds `MAX_STRING`.
     pub fn s_opt(&mut self) -> Result<Option<&'a str>, ParseError> {
         match self.s() {
             Ok(tok) => Ok(Some(tok)),
@@ -191,6 +218,9 @@ impl<'a> Tok<'a> {
     }
 
     /// `%d` optional. See `s_opt`.
+    ///
+    /// # Errors
+    /// `ParseError` if a token is present but isn't a valid `i32`.
     pub fn d_opt(&mut self) -> Result<Option<i32>, ParseError> {
         match self.s_opt()? {
             Some(t) => t.parse().map(Some).map_err(|_| ParseError),

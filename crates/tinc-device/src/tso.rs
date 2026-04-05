@@ -11,7 +11,7 @@
 //! recompute are byte-for-byte the same operations. Differences:
 //!
 //! - wg-go uses `IFF_NO_PI` and gets raw IP packets. We **also** use
-//!   `IFF_NO_PI` on the vnet_hdr path (the kernel writes
+//!   `IFF_NO_PI` on the `vnet_hdr` path (the kernel writes
 //!   `[vnet_hdr][IP packet]` — no `tun_pi`, no eth header). But the
 //!   *daemon* speaks ethernet frames internally (`route_packet` reads
 //!   ethertype at byte 12). So `tso_split` writes a synthetic eth
@@ -20,7 +20,7 @@
 //!   prepend 14 bytes per chunk.
 //!
 //! - wg-go's checksum is unrolled 128-byte adc. We use a simpler
-//!   2-byte loop. The bottleneck is ChaCha20 (4.6µs/pkt), not the
+//!   2-byte loop. The bottleneck is `ChaCha20` (4.6µs/pkt), not the
 //!   checksum (~0.02µs for a 20-byte IP header). Don't optimize what
 //!   isn't hot.
 //!
@@ -80,7 +80,7 @@ compile_error!("virtio_net_hdr endianness needs TUNSETVNETLE on BE hosts");
 pub const VNET_HDR_LEN: usize = 10;
 
 /// `VIRTIO_NET_HDR_F_NEEDS_CSUM` — `virtio_net.h:153`. `flags` bit:
-/// "the kernel left the L4 checksum partial (CHECKSUM_PARTIAL skb
+/// "the kernel left the L4 checksum partial (`CHECKSUM_PARTIAL` skb
 /// state); compute it from `csum_start` and place at `csum_start +
 /// csum_offset`". Set on every TSO frame (TSO implies csum offload).
 /// Also set on `GSO_NONE` frames when the kernel TX path has csum
@@ -123,7 +123,7 @@ impl VirtioNetHdr {
     /// `unsafe.Slice` memcpy; we read fields explicitly so the LE
     /// conversion is documented at the boundary.
     ///
-    /// Returns `None` if `raw.len() < 10` — short read on a vnet_hdr
+    /// Returns `None` if `raw.len() < 10` — short read on a `vnet_hdr`
     /// device means the device is misconfigured (kernel always writes
     /// the full header). Caller drops the frame.
     #[must_use]
@@ -166,7 +166,7 @@ impl VirtioNetHdr {
     }
 
     /// `gso_type` → our enum. `None` for unknown types (we only
-    /// advertise TSO4/6, so the kernel should never hand us UDP_L4
+    /// advertise TSO4/6, so the kernel should never hand us `UDP_L4`
     /// or ECN — but if it does, the caller falls back to `Frames`
     /// with one frame and lets `route_packet` deal with it).
     #[must_use]
@@ -283,7 +283,7 @@ const TCP_FLAG_ACK: u8 = 0x10;
 const IPPROTO_TCP: u8 = 6;
 
 /// What went wrong. All of these are kernel-contract violations
-/// (the vnet_hdr describes a packet shape that doesn't match the
+/// (the `vnet_hdr` describes a packet shape that doesn't match the
 /// actual bytes) — log + drop, don't panic. wg-go returns `error`;
 /// we map to a unit-per-variant enum so the daemon can log which one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,10 +336,10 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
 /// Split a TCP super-segment. wg-go `gsoSplit` (`offload_linux.go:901`).
 ///
 /// `pkt`: the IP packet from the device read, AFTER stripping the
-/// 10-byte vnet_hdr. `[IP header][TCP header][≤64KB payload]`. NO
-/// eth header (vnet_hdr device uses `IFF_NO_PI` and L3 mode).
+/// 10-byte `vnet_hdr`. `[IP header][TCP header][≤64KB payload]`. NO
+/// eth header (`vnet_hdr` device uses `IFF_NO_PI` and L3 mode).
 ///
-/// `hdr`: the decoded vnet_hdr. `gso_type` MUST be `TcpV4` or `TcpV6`
+/// `hdr`: the decoded `vnet_hdr`. `gso_type` MUST be `TcpV4` or `TcpV6`
 /// (caller checks; we `debug_assert`).
 ///
 /// `out`: scratch buffer for the segments. Each segment is written
@@ -663,7 +663,7 @@ pub struct GroBucket {
     /// fixed-size segments + one short tail.
     short_tail: bool,
     /// Number of packets merged (including the first). 1 = single
-    /// packet, no GSO needed (zero vnet_hdr on flush).
+    /// packet, no GSO needed (zero `vnet_hdr` on flush).
     num_merged: u16,
 }
 
@@ -696,7 +696,7 @@ impl GroBucket {
 
     /// Try to coalesce `ip` into the bucket.
     ///
-    /// `ip` is the raw IP packet (NO eth header, NO vnet_hdr) —
+    /// `ip` is the raw IP packet (NO eth header, NO `vnet_hdr`) —
     /// the daemon strips its synthetic eth before calling. wg-go
     /// `tcpGRO` (`offload_linux.go:531`) shape, minus the table
     /// machinery.
@@ -986,8 +986,8 @@ mod tests {
     use super::*;
 
     /// Decode the wg-go test vectors' header shapes. wg-go
-    /// `offload_linux_test.go:179` "tcp4" case: csum_start=20
-    /// (IPv4 hdr), csum_offset=16 (TCP th_sum), gso_size=100.
+    /// `offload_linux_test.go:179` "tcp4" case: `csum_start=20`
+    /// (IPv4 hdr), `csum_offset=16` (TCP `th_sum`), `gso_size=100`.
     #[test]
     fn vnet_hdr_decode() {
         // flags=NEEDS_CSUM(1), gso=TCPV4(1), hdr_len=40, gso_size=100,
@@ -1171,7 +1171,7 @@ mod tests {
 
     // ─── tso_split: the main cases ─────────────────────────────
 
-    /// IPv4, 200 bytes payload, gso_size=100 → 2 segments of 100.
+    /// IPv4, 200 bytes payload, `gso_size=100` → 2 segments of 100.
     /// wg-go `offload_linux_test.go:179` "tcp4" case shape.
     #[test]
     fn split_v4_even() {
@@ -1203,7 +1203,7 @@ mod tests {
         assert_eq!(out[1600 + ETH_HLEN + 40], 0xAA);
     }
 
-    /// IPv4, 250 bytes, gso_size=100 → 3 segments: 100, 100, 50.
+    /// IPv4, 250 bytes, `gso_size=100` → 3 segments: 100, 100, 50.
     /// Last segment shorter — the iperf3 trailing-ACK case.
     #[test]
     fn split_v4_short_tail() {
@@ -1228,7 +1228,7 @@ mod tests {
         assert_eq!(out[3200 + ETH_HLEN + 33] & TCP_FLAG_PSH, TCP_FLAG_PSH);
     }
 
-    /// Single chunk: payload ≤ gso_size → 1 segment, identical to
+    /// Single chunk: payload ≤ `gso_size` → 1 segment, identical to
     /// input (modulo eth header). The "kernel handed us a small
     /// packet anyway" case.
     #[test]
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(out[ETH_HLEN + 33] & TCP_FLAG_PSH, TCP_FLAG_PSH);
     }
 
-    /// IPv6: no IP csum, no ID, payload_len field instead of totlen.
+    /// IPv6: no IP csum, no ID, `payload_len` field instead of totlen.
     #[test]
     fn split_v6_even() {
         let pkt = build_v6_tcp(200);
@@ -1369,7 +1369,7 @@ mod tests {
 
     /// `gso_none_checksum`: the partial-csum completion. Build a
     /// packet with the pseudo-header sum stuffed into the csum field
-    /// (what the kernel does), call gso_none_checksum, verify the
+    /// (what the kernel does), call `gso_none_checksum`, verify the
     /// resulting csum is valid.
     #[test]
     fn gso_none_completes_partial_csum() {
@@ -1397,7 +1397,7 @@ mod tests {
 
     // ─── GRO bucket ─────────────────────────────────────────────────
 
-    /// Build N adjacent v4 TCP segments à la what a peer's tso_split
+    /// Build N adjacent v4 TCP segments à la what a peer's `tso_split`
     /// would emit. seq starts at 1000, each segment carries
     /// `seg_len` bytes of `0xAA`, ACK only (no PSH except last).
     fn build_v4_segs(n: usize, seg_len: usize, psh_on_last: bool) -> Vec<Vec<u8>> {
@@ -1440,7 +1440,7 @@ mod tests {
             .collect()
     }
 
-    /// 3 in-order segments → 1 flush. The vnet_hdr describes a TSO
+    /// 3 in-order segments → 1 flush. The `vnet_hdr` describes a TSO
     /// super; IP totlen/csum updated; payload concatenated.
     #[test]
     fn gro_coalesce_three_v4() {
@@ -1487,9 +1487,9 @@ mod tests {
         assert!(b.is_empty());
     }
 
-    /// THE roundtrip: tso_split's output, fed to GRO, reassembles
+    /// THE roundtrip: `tso_split`'s output, fed to GRO, reassembles
     /// the original payload. This is what alice→bob exercises:
-    /// alice's tso_split emits, bob's GRO coalesces, bob's kernel
+    /// alice's `tso_split` emits, bob's GRO coalesces, bob's kernel
     /// re-splits. If THIS works, the sha256 stream test works.
     #[test]
     fn gro_reassembles_tso_split_output() {
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(ip[33] & TCP_FLAG_PSH, TCP_FLAG_PSH);
     }
 
-    /// Single packet → zero vnet_hdr. The miss case (only one
+    /// Single packet → zero `vnet_hdr`. The miss case (only one
     /// packet in the recvmmsg batch matched the flow). The IP
     /// packet is passed through verbatim — csum still valid.
     #[test]
@@ -1576,7 +1576,7 @@ mod tests {
         assert!(b.is_empty());
     }
 
-    /// FlushFirst on flow mismatch. Seed with one flow, offer a
+    /// `FlushFirst` on flow mismatch. Seed with one flow, offer a
     /// different ack value (the iperf3-reverse-direction case:
     /// data interleaved with the rare ack-carrying-data packet).
     #[test]
@@ -1644,7 +1644,7 @@ mod tests {
         assert_eq!(b.offer(&seg_after), GroVerdict::FlushFirst);
     }
 
-    /// 65535 cap → FlushFirst when the next append would overflow.
+    /// 65535 cap → `FlushFirst` when the next append would overflow.
     #[test]
     fn gro_hits_64k_cap() {
         let mut b = GroBucket::new();
