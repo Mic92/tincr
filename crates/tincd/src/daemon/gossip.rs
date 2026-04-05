@@ -244,7 +244,6 @@ impl Daemon {
     /// overloaded; `to == myself` + `ext.reqno == REQ_KEY` ⇒ peer
     /// initiating SPTPS ⇒ start as responder, feed their KEX.
     /// `REQ_PUBKEY/ANS_PUBKEY`: hard-error.
-    #[allow(clippy::too_many_lines)] // SPTPS_PACKET deliver + SPTPS-init responder — two disjoint protocols sharing parse/from_nid; relay path lives in relay_req_key
     pub(super) fn on_req_key(
         &mut self,
         from_conn: ConnId,
@@ -485,7 +484,6 @@ impl Daemon {
 
     /// SPTPS branch only. b64-decode key field, feed to
     /// `tunnels[from].sptps`. Legacy branch not present.
-    #[allow(clippy::too_many_lines)] // relay-with-append, compression check, sptps feed, reflexive-addr punch — sequential phases sharing from_nid/msg
     pub(super) fn on_ans_key(
         &mut self,
         from_conn: ConnId,

@@ -24,7 +24,6 @@ use crate::proto::ConnOptions;
 impl Daemon {
     /// ACK handler, mutation half. Parse done by `proto::parse_ack`;
     /// this does the world-model edits.
-    #[allow(clippy::too_many_lines)] // dup-conn termination, edge add, gossip, graph run — all share peer_id/conn borrows; splitting threads them as args
     pub(super) fn on_ack(
         &mut self,
         id: ConnId,
@@ -401,7 +400,6 @@ impl Daemon {
     /// `PROXY_EXEC`: socketpair+fork, skip async probe. `PROXY_SOCKS`/
     /// HTTP: connect to PROXY addr; peer addr still walked (it's the
     /// CONNECT target).
-    #[allow(clippy::too_many_lines)] // PROXY_EXEC is a parallel path with its own conn-insert + io_add ceremony; merging with the SOCKS/HTTP arm would obscure both
     pub(super) fn do_outgoing_connection(&mut self, oid: OutgoingId) {
         loop {
             let Some(outgoing) = self.outgoings.get_mut(oid) else {

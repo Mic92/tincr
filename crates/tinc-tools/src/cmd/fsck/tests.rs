@@ -797,7 +797,6 @@ fn confd_checked() {
 /// it. This tests that no variant `panic!`s in formatting, and
 /// that the messages contain the expected user-greppable bits.)
 #[test]
-#[allow(clippy::too_many_lines)] // one assertion per Finding variant
 fn display_exhaustive() {
     use Finding as F;
     let p = PathBuf::from("/x/y");

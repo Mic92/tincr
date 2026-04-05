@@ -357,7 +357,6 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
 /// # Errors
 /// See [`TsoError`]. All variants indicate a malformed input or
 /// undersized scratch — log + drop the super-segment.
-#[allow(clippy::too_many_lines)] // wg-go's gsoSplit is ~90 LOC; this
 // adds eth-header synthesis and the validation that wg-go does in
 // `handleVirtioRead` before the call. Factoring would obscure the
 // 1:1 port mapping that lets you diff against upstream for bugs.
@@ -703,7 +702,6 @@ impl GroBucket {
     ///
     /// `Coalesced`: packet absorbed, caller drops it. `FlushFirst`:
     /// flush + retry. `NotCandidate`: write individually.
-    #[allow(clippy::too_many_lines)] // wg-go tcpGRO is 90 LOC; this is the linear unroll
     pub fn offer(&mut self, ip: &[u8]) -> GroVerdict {
         // ─── candidate check (wg-go `packetIsGROCandidate` :751) ───
         if ip.len() < 40 {

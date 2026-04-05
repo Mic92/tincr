@@ -202,7 +202,6 @@ fn next_str(
         .map_err(|v| format!("{flag}: non-UTF-8 argument: {}", v.display()))
 }
 
-#[allow(clippy::too_many_lines)] // one match arm per CLI option; flat is clearest
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -983,7 +982,6 @@ fn check_socket_activation(
         .filter(|&n| n > 0)
 }
 
-#[allow(clippy::too_many_lines)] // top-level wiring
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,

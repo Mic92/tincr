@@ -188,7 +188,6 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
 /// that `add_recent` actually fires from a real handshake. This is
 /// the wire test.
 #[test]
-#[allow(clippy::too_many_lines)] // 3-round restart scenario; splitting fragments narrative
 fn restart_dials_from_cache() {
     let tmp = tmp("restart_dials_from_cache");
     let alice = Node::new(tmp.path(), "alice", 0xA1);

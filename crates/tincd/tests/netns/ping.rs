@@ -36,7 +36,6 @@ fn tmp(tag: &str) -> TmpGuard {
 ///    child kernel's IP stack. The proof-of-concept during dev proved
 ///    this; the test pins it (ping wouldn't reply otherwise).
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn real_tun_ping() {
     let Some(netns) = enter_netns("real_tun_ping") else {
         return;
@@ -374,7 +373,6 @@ fn real_tun_unreachable() {
 /// `socat TCP-LISTEN | sha256sum` on the other. Compare hashes.
 /// One process either side, no JSON parsing, deterministic.
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn tso_ingest_stream_integrity() {
     let Some(netns) = enter_netns("tso_ingest_stream_integrity") else {
         return;

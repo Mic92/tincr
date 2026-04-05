@@ -26,7 +26,6 @@
 // teardown). The `Node` helper below already absorbs the per-daemon
 // boilerplate; the test BODIES diverge on the load-bearing config
 // differences (TunnelServer/StrictSubnets/Forwarding/AutoConnect).
-#![allow(clippy::too_many_lines)]
 
 #[path = "../common/mod.rs"]
 mod common;

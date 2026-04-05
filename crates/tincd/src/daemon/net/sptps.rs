@@ -288,7 +288,6 @@ impl Daemon {
     /// storage changed. The slow-path version is still called from
     /// `dispatch_tunnel_outputs` (handshake fallback) and the
     /// TCP-tunneled path in `gossip.rs`.
-    #[allow(clippy::too_many_lines)] // mirrors receive_sptps_record; the rx_scratch mem::take dance for &mut self conflicts is unavoidable per-branch
     pub(super) fn receive_sptps_record_fast(
         &mut self,
         peer: NodeId,

@@ -7,7 +7,6 @@ use super::Finding;
 /// Phrasing preserved from upstream for the same reason as
 /// `CmdError::Display` — users grep error strings, forum posts
 /// reference them. Minor deviations noted inline.
-#[allow(clippy::too_many_lines)] // exhaustive match over many-variant enum
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Finding as F;

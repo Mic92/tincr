@@ -451,7 +451,6 @@ mod bench {
     /// Returns once both sides have `validkey | udp_confirmed` set —
     /// i.e. UDP data path is hot, no TCP-fallback packets in flight
     /// (PACKET 17 routes now, but iperf3 wants the UDP path measured).
-    #[allow(clippy::too_many_lines)] // linear setup script; splitting hurts readability
     fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
         // Node status bits (`node.h:41`).
         const VALIDKEY: u32 = 0x02;
@@ -1212,7 +1211,6 @@ mod bench {
 
     // ═════════════════════════════════ main ════════════════════════════════════
 
-    #[allow(clippy::too_many_lines)] // top-level bench harness wiring
     pub fn main() {
         // Substring filter, cargo bench convention. `cargo bench --bench
         // throughput -- rust_rust` → argv = [self, "--bench", "rust_rust"].

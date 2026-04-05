@@ -18,7 +18,6 @@ impl Daemon {
     /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
     /// byte the same syscall sequence on bsd/linux/fd backends. The
     /// seam is in place for Phase 2 (`vnet_hdr` device returns `Super`).
-    #[allow(clippy::too_many_lines)] // three drain-result arms; the
     // `Super` arm is the Phase-2a TSO-split path. Factoring it out
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
     // the control flow reads cleaner inline.

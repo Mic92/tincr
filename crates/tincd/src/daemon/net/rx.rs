@@ -238,7 +238,6 @@ impl Daemon {
     /// receive, SRCID alone is fine (AEAD tag validates end-to-end);
     /// for relay we never decrypt, so this gate is the only thing
     /// stopping a 1:1 UDP reflector attack (security audit `2f72c2ba`).
-    #[allow(clippy::too_many_lines)] // fast-path open_data_into + slow-path Vec<Output> fallback share the dst_id/src_id parse and the udp_addr-confirm logic; relay branch already split to handle_relay_receive
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
         // ─── DHT port-probe demux (Rust extension). Gate is source
         // addr, NOT `pkt[0]==b'd'`: SPTPS's first byte is dst_id6[0] =

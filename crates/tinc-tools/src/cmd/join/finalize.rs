@@ -49,7 +49,6 @@ use super::JoinResult;
 // Sequence of distinct steps sharing local state (open file handles,
 // the line iterator). Upstream is 400 lines for the same reason; it
 // does it with goto.
-#[allow(clippy::too_many_lines)] // sequential steps share file handles + line iterator; upstream uses goto for same
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
     // ─── Validate blob is text
     // Upstream treats `data` as a NUL-terminated C string. Embedded

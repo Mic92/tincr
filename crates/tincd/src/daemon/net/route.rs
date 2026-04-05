@@ -368,7 +368,6 @@ impl Daemon {
     /// directonly, PMTU, TTL) all derived from the route table entry
     /// for `to_nid`. Gates share `via_nid`/`via_mtu` so they live
     /// together.
-    #[allow(clippy::too_many_lines)] // 5 gates share via_nid/via_mtu
     fn dispatch_forward(&mut self, to_nid: NodeId, data: &mut [u8], from: Option<NodeId>) -> bool {
         let to = self
             .graph

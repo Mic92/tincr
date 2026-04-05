@@ -35,7 +35,6 @@ fn tmp(tag: &str) -> super::common::TmpGuard {
 /// an SPTPS `Record`, parse `"%d %s %d %x"`, send our ACK, daemon
 /// activates. `tinc dump connections` then shows ONE peer row.
 #[test]
-#[allow(clippy::too_many_lines)] // assertion phases are deliberately verbose; setup is in PeerFixture
 fn peer_ack_exchange() {
     use std::io::Read;
     use tinc_sptps::Output;
@@ -739,7 +738,6 @@ fn peer_edge_triggers_reachable() {
 /// SPTPS `receive_sig` step computes the transcript with that fake
 /// pubkey, our SIG was made with the real one → `BadSig`.
 #[test]
-#[allow(clippy::too_many_lines)] // test bodies are allowed to be long
 fn peer_wrong_key_fails_sig() {
     use rand_core::OsRng;
     use std::io::Read;

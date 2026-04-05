@@ -287,7 +287,6 @@ impl Default for DaemonSettings {
 /// from `setup()` AND `reload_configuration()`. Non-reloadable
 /// settings (Port, `AddressFamily`, `DeviceType`) are NOT here - they
 /// need re-bind / re-open which `setup()` does inline.
-#[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
 pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     if let Some(e) = config.lookup("PingInterval").next()
         && let Ok(v) = e.get_int()
@@ -525,7 +524,6 @@ pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
 /// are folded in via `apply_reloadable_settings`; the rest (Port,
 /// `AddressFamily`, Mode, sockopts, Proxy, Compression, Forwarding,
 /// DHT, `DeviceStandby`) need re-bind / re-open and are setup-only.
-#[allow(clippy::too_many_lines)] // flat config→settings field map; one key per block, no branching
 pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
     let mut settings = DaemonSettings::default();
 

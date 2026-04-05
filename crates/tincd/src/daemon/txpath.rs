@@ -198,7 +198,6 @@ impl Daemon {
     ///
     /// Via-recursion: recurse on relay if `via != target`. Finite:
     /// via-chain is the sssp tree (acyclic).
-    #[allow(clippy::too_many_lines)] // try_sptps/try_udp/try_mtu unfolded inline; each phase reads tunnel state the prior phase set
     pub(super) fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
         // TCPONLY + direct meta conn ⇒ skip UDP.
         {

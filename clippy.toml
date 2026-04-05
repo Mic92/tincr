@@ -14,3 +14,4 @@ doc-valid-idents = [
     # Keep clippy's built-in list (OAuth, GraphQL, IPv4, IPv6, etc.)
     "..",
 ]
+too-many-lines-threshold = 200

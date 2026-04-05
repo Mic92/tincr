@@ -293,7 +293,6 @@ fn udp_accept(addr: SocketAddr) -> io::Result<Sock> {
 // The poll loop is one function: two arms (sock readable, stdin
 // readable) share six pieces of mutable state. The body is one
 // `loop` with two `if`s.
-#[allow(clippy::too_many_lines)] // poll loop: two arms share six pieces of mutable state
 fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
     use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 

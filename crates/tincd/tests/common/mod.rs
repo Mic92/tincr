@@ -353,7 +353,6 @@ impl PeerFixture {
     /// writes `hosts/testpeer` and does the rest.
     ///
     /// `pcap_captures_tcp_packet` uses this for `Mode = switch`.
-    #[allow(clippy::too_many_lines)] // linear setup script; splitting hides the sequence
     pub fn spawn_with_config(tag: &str, write_conf: impl FnOnce(&Path) -> [u8; 32]) -> Self {
         use rand_core::OsRng;
         use std::io::{Read, Write};

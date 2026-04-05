@@ -447,7 +447,6 @@ impl Daemon {
     /// happen here: setup is called once. Tests that call setup
     /// twice in one process are wrong; integration tests use
     /// subprocess.
-    #[allow(clippy::too_many_lines)] // boot wiring + ~100-line struct literal; phases extracted, rest is glue
     pub fn setup(
         confbase: &Path,
         pidfile: &Path,

@@ -158,7 +158,6 @@ pub struct JoinResult {
 // Sequence of distinct steps sharing local state (sockets, SPTPS
 // pump, accumulated blob). Upstream is one function for the same
 // reason — the steps share too much state to split cleanly.
-#[allow(clippy::too_many_lines)] // sequential steps share sockets/SPTPS/blob; upstream is one fn for same reason
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // ─── Parse URL
     let parsed =

@@ -456,7 +456,6 @@ impl Daemon {
     ///
     /// NOT reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
-    #[allow(clippy::too_many_lines)] // sequential apply of disjoint config sections; splitting would scatter the "what's reloadable" picture
     pub(super) fn reload_configuration(&mut self) -> bool {
         let config = match tinc_conf::read_server_config(&self.confbase) {
             Ok(c) => c,
