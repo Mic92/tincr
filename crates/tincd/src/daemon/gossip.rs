@@ -121,11 +121,130 @@ impl Daemon {
         nw
     }
 
+    /// Relay leg of `on_req_key`: `to_nid != self.myself`. Returns
+    /// `None` if the message is for us (caller handles locally),
+    /// `Some(nw)` once forwarded or dropped.
+    ///
+    /// Two relay shapes: `SPTPS_PACKET` goes via `send_sptps_data_relay`
+    /// (may shortcut to UDP); everything else forwards verbatim over
+    /// the meta nexthop, optionally appending `from`'s reflexive UDP
+    /// addr for the punch hint (see body comment).
+    fn relay_req_key(
+        &mut self,
+        to_nid: NodeId,
+        from_nid: NodeId,
+        msg: &ReqKey,
+        body_str: &str,
+        conn_name: &str,
+    ) -> Option<bool> {
+        if to_nid == self.myself {
+            return None;
+        }
+        // Hub doesn't relay key requests for indirect peers.
+        if self.settings.tunnelserver {
+            return Some(false);
+        }
+        if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
+            log::warn!(target: "tincd::proto",
+                       "Got REQ_KEY from {conn_name} destination {} \
+                        which is not reachable", msg.to);
+            return Some(false);
+        }
+        // SPTPS_PACKET relay: decode + send_sptps_data (may go
+        // UDP). Only when FMODE_INTERNAL; else falls through to
+        // verbatim-forward.
+        if let Some(ext) = &msg.ext
+            && ext.reqno == Request::SptpsPacket as i32
+            && self.settings.forwarding_mode == ForwardingMode::Internal
+        {
+            let Some(payload) = ext.payload.as_deref() else {
+                return Some(false);
+            };
+            let Some(data) = tinc_crypto::b64::decode(payload) else {
+                log::error!(target: "tincd::proto",
+                                "Got bad SPTPS_PACKET relay from {}",
+                                msg.from);
+                return Some(false);
+            };
+            log::debug!(target: "tincd::proto",
+                            "Relaying SPTPS_PACKET {} → {} ({} bytes)",
+                            msg.from, msg.to, data.len());
+            let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(&data));
+            nw |= self.try_tx(to_nid, true);
+            return Some(nw);
+        }
+        // Forward verbatim.
+        //
+        // Tier-0 punch coordination: append `from`'s observed UDP
+        // addr, mirroring the ANS_KEY append below. The ANS_KEY
+        // append teaches the *initiator* where to punch the
+        // *responder*; this teaches the responder where to punch
+        // the initiator. Both legs of one handshake → both sides
+        // punch within ~1 RTT → simultaneous open.
+        //
+        // Gates (same shape as ANS_KEY's):
+        // - `msg.udp_addr.is_none()`: first relay only (no double-append
+        //   over multi-hop — each hop sees a different src addr; only
+        //   the first one is what `from` actually mapped through)
+        // - `ext.reqno == REQ_KEY`: SPTPS-init only (the message that
+        //   has a payload to anchor against; SPTPS_PACKET goes via
+        //   send_sptps_data above and doesn't reach here)
+        // - `from`'s tunnel has a `udp_addr`: we've actually seen UDP
+        //   from them (set by recvfrom in net.rs or by ADD_EDGE/UDP_INFO)
+        //
+        // Dropped from the ANS_KEY recipe: `to->minmtu > 0` ("is `to`
+        // already using UDP"). For REQ_KEY the responder hasn't started
+        // yet — minmtu is always 0 here. The append is *speculative*:
+        // worst case the responder probes a closed port. Same risk as
+        // ADD_EDGE's port guess.
+        //
+        // Wire compat: legacy peers parse the payload with `%s`,
+        // which stops at whitespace; trailing tokens are silently
+        // dropped. Relays forward verbatim including the append.
+        // So a Rust→C→Rust path works; a C endpoint just doesn't
+        // see the hint.
+        let appended = if msg.udp_addr.is_none()
+            && msg
+                .ext
+                .as_ref()
+                .is_some_and(|e| e.reqno == Request::ReqKey as i32)
+        {
+            self.tunnels
+                .get(&from_nid)
+                .and_then(|t| t.udp_addr)
+                .map(|from_addr| {
+                    log::debug!(target: "tincd::proto",
+                                "Appending reflexive UDP address to \
+                                 REQ_KEY from {} to {}",
+                                msg.from, msg.to);
+                    let (a, p) = local_addr::format_addr_port(&from_addr);
+                    format!("{body_str} {a} {p}")
+                })
+        } else {
+            None
+        };
+        let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+            log::warn!(target: "tincd::proto",
+                       "No nexthop connection toward {} for REQ_KEY relay",
+                       msg.to);
+            return Some(false);
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return Some(false);
+        };
+        log::debug!(target: "tincd::proto",
+                    "Relaying REQ_KEY {} → {}", msg.from, msg.to);
+        Some(match appended {
+            Some(a) => conn.send(format_args!("{a}")),
+            None => conn.send(format_args!("{body_str}")),
+        })
+    }
+
     /// Per-tunnel SPTPS responder side. `REQ_KEY` is heavily
     /// overloaded; `to == myself` + `ext.reqno == REQ_KEY` ⇒ peer
     /// initiating SPTPS ⇒ start as responder, feed their KEX.
     /// `REQ_PUBKEY/ANS_PUBKEY`: hard-error.
-    #[allow(clippy::too_many_lines)] // relay path, SPTPS_PACKET deliver, SPTPS-init responder — three disjoint protocols multiplexed on one request type
+    #[allow(clippy::too_many_lines)] // SPTPS_PACKET deliver + SPTPS-init responder — two disjoint protocols sharing parse/from_nid; relay path lives in relay_req_key
     pub(super) fn on_req_key(
         &mut self,
         from_conn: ConnId,
@@ -157,105 +276,8 @@ impl Daemon {
             return Ok(false);
         };
 
-        if to_nid != self.myself {
-            // Hub doesn't relay key requests for indirect peers.
-            if self.settings.tunnelserver {
-                return Ok(false);
-            }
-            if !self.graph.node(to_nid).is_some_and(|n| n.reachable) {
-                log::warn!(target: "tincd::proto",
-                           "Got REQ_KEY from {conn_name} destination {} \
-                            which is not reachable", msg.to);
-                return Ok(false);
-            }
-            // SPTPS_PACKET relay: decode + send_sptps_data (may go
-            // UDP). Only when FMODE_INTERNAL; else falls through to
-            // verbatim-forward.
-            if let Some(ext) = &msg.ext
-                && ext.reqno == Request::SptpsPacket as i32
-                && self.settings.forwarding_mode == ForwardingMode::Internal
-            {
-                let Some(payload) = ext.payload.as_deref() else {
-                    return Ok(false);
-                };
-                let Some(data) = tinc_crypto::b64::decode(payload) else {
-                    log::error!(target: "tincd::proto",
-                                    "Got bad SPTPS_PACKET relay from {}",
-                                    msg.from);
-                    return Ok(false);
-                };
-                log::debug!(target: "tincd::proto",
-                                "Relaying SPTPS_PACKET {} → {} ({} bytes)",
-                                msg.from, msg.to, data.len());
-                let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(&data));
-                nw |= self.try_tx(to_nid, true);
-                return Ok(nw);
-            }
-            // Forward verbatim.
-            //
-            // Tier-0 punch coordination: append `from`'s observed UDP
-            // addr, mirroring the ANS_KEY append below. The ANS_KEY
-            // append teaches the *initiator* where to punch the
-            // *responder*; this teaches the responder where to punch
-            // the initiator. Both legs of one handshake → both sides
-            // punch within ~1 RTT → simultaneous open.
-            //
-            // Gates (same shape as ANS_KEY's):
-            // - `msg.udp_addr.is_none()`: first relay only (no double-append
-            //   over multi-hop — each hop sees a different src addr; only
-            //   the first one is what `from` actually mapped through)
-            // - `ext.reqno == REQ_KEY`: SPTPS-init only (the message that
-            //   has a payload to anchor against; SPTPS_PACKET goes via
-            //   send_sptps_data above and doesn't reach here)
-            // - `from`'s tunnel has a `udp_addr`: we've actually seen UDP
-            //   from them (set by recvfrom in net.rs or by ADD_EDGE/UDP_INFO)
-            //
-            // Dropped from the ANS_KEY recipe: `to->minmtu > 0` ("is `to`
-            // already using UDP"). For REQ_KEY the responder hasn't started
-            // yet — minmtu is always 0 here. The append is *speculative*:
-            // worst case the responder probes a closed port. Same risk as
-            // ADD_EDGE's port guess.
-            //
-            // Wire compat: legacy peers parse the payload with `%s`,
-            // which stops at whitespace; trailing tokens are silently
-            // dropped. Relays forward verbatim including the append.
-            // So a Rust→C→Rust path works; a C endpoint just doesn't
-            // see the hint.
-            let appended = if msg.udp_addr.is_none()
-                && msg
-                    .ext
-                    .as_ref()
-                    .is_some_and(|e| e.reqno == Request::ReqKey as i32)
-            {
-                self.tunnels
-                    .get(&from_nid)
-                    .and_then(|t| t.udp_addr)
-                    .map(|from_addr| {
-                        log::debug!(target: "tincd::proto",
-                                    "Appending reflexive UDP address to \
-                                     REQ_KEY from {} to {}",
-                                    msg.from, msg.to);
-                        let (a, p) = local_addr::format_addr_port(&from_addr);
-                        format!("{body_str} {a} {p}")
-                    })
-            } else {
-                None
-            };
-            let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
-                log::warn!(target: "tincd::proto",
-                           "No nexthop connection toward {} for REQ_KEY relay",
-                           msg.to);
-                return Ok(false);
-            };
-            let Some(conn) = self.conns.get_mut(conn_id) else {
-                return Ok(false);
-            };
-            log::debug!(target: "tincd::proto",
-                        "Relaying REQ_KEY {} → {}", msg.from, msg.to);
-            return Ok(match appended {
-                Some(a) => conn.send(format_args!("{a}")),
-                None => conn.send(format_args!("{body_str}")),
-            });
+        if let Some(nw) = self.relay_req_key(to_nid, from_nid, &msg, body_str, &conn_name) {
+            return Ok(nw);
         }
 
         if !self.graph.node(from_nid).is_some_and(|n| n.reachable) {
