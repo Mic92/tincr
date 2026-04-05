@@ -71,7 +71,7 @@ fn write_config(confbase: &std::path::Path) {
 /// connect against that port succeeds.
 ///
 /// Note no `-D` flag: socket activation should suppress detach
-/// itself (C `tincd.c:579`). If our LISTEN_PID gate works, the
+/// itself (C `tincd.c:579`). If our `LISTEN_PID` gate works, the
 /// child stays foreground without us asking.
 #[test]
 fn socket_activation_adopts_tcp_fd() {
@@ -161,7 +161,7 @@ fn socket_activation_adopts_tcp_fd() {
 }
 
 /// Detach is suppressed: `systemd-socket-activate`'s child does
-/// NOT fork. If our LISTEN_PID gate is broken, tincd forks (default
+/// NOT fork. If our `LISTEN_PID` gate is broken, tincd forks (default
 /// `do_detach = true`), the parent exits, the activator sees its
 /// child die. `try_wait()` → `Some(_)` would mean the child exited.
 #[test]

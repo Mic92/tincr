@@ -93,7 +93,7 @@ const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
 /// 2=STATUS, 3=PROTOCOL, 4=META, 5=TRAFFIC. We don't have a 6-level
 /// log crate; squash 0→Info, 1-2→Debug, 3+→Trace. Coarse but the
 /// `target: "tincd"` substring filter still works for narrowing
-/// (RUST_LOG=tincd::proto=trace etc).
+/// (`RUST_LOG=tincd::proto=trace` etc).
 fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     match d {
         0 => log::LevelFilter::Info,
@@ -102,12 +102,13 @@ fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // CLI flag bag, not a state machine
 struct Args {
     confbase: PathBuf,
     pidfile: PathBuf,
     socket: PathBuf,
     /// Parsed `-o` entries, `Source::Cmdline`-tagged. Passed through
-    /// to `Daemon::setup`. Empty when no `-o` given; setup() merges
+    /// to `Daemon::setup`. Empty when no `-o` given; `setup()` merges
     /// an empty Config (no-op) — simpler than `Option<Config>`.
     cmdline_conf: Config,
 
@@ -118,13 +119,13 @@ struct Args {
     /// `switchuser` (`tincd.c:89`). `-U USER`. None → don't drop.
     switchuser: Option<String>,
     /// `do_chroot` (`tincd.c:88`). `-R`. Stored, applied in
-    /// drop_privs alongside setuid (the C interleaves them: chroot
+    /// `drop_privs` alongside setuid (the C interleaves them: chroot
     /// BETWEEN initgroups+setgid and setuid, `tincd.c:403-414`).
     do_chroot: bool,
     /// `debug_level` (`tincd.c:63`). `-d` increments, `-dN` sets.
     /// None means "not given on cmdline" — distinct from 0, because
     /// the C falls back to `LogLevel` config key only when `-d`
-    /// wasn't given (`tincd.c:599-605`). RUST_LOG env still wins
+    /// wasn't given (`tincd.c:599-605`). `RUST_LOG` env still wins
     /// over both.
     debug_level: Option<u32>,
     /// `--logfile [PATH]`. Bare `--logfile` (no arg) derives the C
@@ -151,6 +152,7 @@ fn parse_o_arg(v: &str, o_lineno: u32) -> Result<tinc_conf::Entry, String> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // straight-line argv parser; splitting hurts readability
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -180,7 +182,7 @@ where
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         let Some(arg) = arg.to_str() else {
-            return Err(format!("non-UTF-8 argument: {arg:?}"));
+            return Err(format!("non-UTF-8 argument: {}", arg.display()));
         };
         match arg {
             "-c" | "--config" => {
@@ -206,7 +208,7 @@ where
                     .ok_or_else(|| "-n requires a netname".to_string())?;
                 let v = v
                     .into_string()
-                    .map_err(|v| format!("non-UTF-8 netname: {v:?}"))?;
+                    .map_err(|v| format!("non-UTF-8 netname: {}", v.display()))?;
                 netname = Some(v);
             }
             _ if arg.starts_with("--net=") => {
@@ -315,7 +317,7 @@ where
                     .ok_or_else(|| "-U requires a username".to_string())?;
                 let v = v
                     .into_string()
-                    .map_err(|v| format!("non-UTF-8 username: {v:?}"))?;
+                    .map_err(|v| format!("non-UTF-8 username: {}", v.display()))?;
                 switchuser = Some(v);
             }
             _ if arg.starts_with("--user=") => {
@@ -337,7 +339,7 @@ where
                     .ok_or_else(|| "-o requires KEY=VALUE".to_string())?;
                 let v = v
                     .into_string()
-                    .map_err(|v| format!("non-UTF-8 -o value: {v:?}"))?;
+                    .map_err(|v| format!("non-UTF-8 -o value: {}", v.display()))?;
                 o_lineno += 1;
                 cmdline_conf.merge(std::iter::once(parse_o_arg(&v, o_lineno)?));
             }
@@ -524,15 +526,15 @@ where
 /// `daemon(3)` is single-fork (fork+setsid) on glibc, NOT the
 /// double-fork dance. The C uses single-fork too — the doc comment
 /// in the brief said "double-fork" but `process.c:215` is `daemon(1,
-/// 0)`. Single fork is fine on Linux/BSD: setsid() makes the child
+/// 0)`. Single fork is fine on Linux/BSD: `setsid()` makes the child
 /// a session leader, and a session leader can't acquire a controlling
-/// tty by accident on modern kernels (the open() needs O_NOCTTY off
+/// tty by accident on modern kernels (the `open()` needs `O_NOCTTY` off
 /// AND the process must not already have one — setsid satisfies the
-/// second). Double-fork was for SysV.
+/// second). Double-fork was for `SysV`.
 ///
 /// Logging mode switch (`process.c:229-238`): the C reopens its
-/// logger here, switching from LOGMODE_STDERR to LOGMODE_SYSLOG or
-/// LOGMODE_FILE. We can't reopen env_logger (it's `init()`-once),
+/// logger here, switching from `LOGMODE_STDERR` to `LOGMODE_SYSLOG` or
+/// `LOGMODE_FILE`. We can't reopen `env_logger` (it's `init()`-once),
 /// so we do the mode decision BEFORE init in `main()`. The "tincd
 /// starting" log line therefore goes to the post-detach destination,
 /// same as C.
@@ -546,9 +548,9 @@ where
 /// startup errors reach `tinc start`'s stderr). The final nul byte
 /// means "ready"; close means "done starting, go away".
 ///
-/// We don't tee log output through the umbilical — env_logger doesn't
+/// We don't tee log output through the umbilical — `env_logger` doesn't
 /// have a hook for it, and our "detached with no --logfile is mute"
-/// warning (init_logging) already covers the lost-logs case. So this
+/// warning (`init_logging`) already covers the lost-logs case. So this
 /// function does only the snip half: write 1 nul byte, close.
 ///
 /// `colorize` (the second int) drives the C's `format_pretty` for
@@ -564,7 +566,7 @@ where
 /// One irreducible `unsafe`: `OwnedFd::from_raw_fd`. The fd number
 /// came from a string in an env var — asserting we *own* it (not
 /// just that it's open) is a trust statement the type system can't
-/// verify. F_GETFL probes that it's open; the env-var protocol is
+/// verify. `F_GETFL` probes that it's open; the env-var protocol is
 /// the ownership proof. Same shape as systemd socket activation
 /// (`LISTEN_FDS`): inherited fd, number in env, one unsafe to claim.
 fn cut_umbilical() {
@@ -650,7 +652,7 @@ fn detach() -> Result<(), String> {
 ///   getpwnam → initgroups → setgid → [chroot] → setuid
 ///
 /// `chroot` between setgid and setuid is deliberate: chroot needs
-/// CAP_SYS_CHROOT (root), but you want supplementary groups set
+/// `CAP_SYS_CHROOT` (root), but you want supplementary groups set
 /// BEFORE the chroot (initgroups reads /etc/group, which is outside
 /// the jail). And setuid LAST so it can't be undone.
 fn drop_privs(
@@ -742,7 +744,7 @@ fn drop_privs(
 /// can still tunnel packets).
 ///
 /// Reads tinc.conf again here rather than threading the merged
-/// config out of Daemon::setup. ~1KB file, read once at boot.
+/// config out of `Daemon::setup`. ~1KB file, read once at boot.
 /// The alternative (a `Daemon::config()` accessor or a callback
 /// hook) touches daemon.rs which two other agents are editing.
 fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
@@ -790,19 +792,19 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
 }
 
 /// Logging init. Folds `process.c:229-238` (logmode decision) and
-/// the `-d`/`--logfile` argv knobs into one env_logger build.
+/// the `-d`/`--logfile` argv knobs into one `env_logger` build.
 ///
 /// C precedence (`process.c:229-237`):
-///   logfile set        → LOGMODE_FILE
-///   syslog OR detach   → LOGMODE_SYSLOG
-///   else               → LOGMODE_STDERR
+///   logfile set        → `LOGMODE_FILE`
+///   syslog OR detach   → `LOGMODE_SYSLOG`
+///   else               → `LOGMODE_STDERR`
 ///
 /// We don't have syslog. The middle case becomes "still stderr but
 /// stderr is /dev/null after detach". That's a regression vs C
 /// (a detached daemon with no `--logfile` is mute). Warn about it
 /// pre-detach.
 ///
-/// Level: RUST_LOG env beats `-d` beats default Info. `LogLevel`
+/// Level: `RUST_LOG` env beats `-d` beats default Info. `LogLevel`
 /// from `-o`/tinc.conf was already folded into `args.debug_level`
 /// by [`resolve_debug_level`] before we get here.
 fn init_logging(args: &Args) {
@@ -869,11 +871,11 @@ fn init_logging(args: &Args) {
 }
 
 /// C `tincd.c:599-604`: consult the `LogLevel` config key when
-/// `-d` was not given on argv. C's order is read_server_config
-/// (`:591`) → LogLevel check (`:599`) → detach (`:640`). We had
+/// `-d` was not given on argv. C's order is `read_server_config`
+/// (`:591`) → `LogLevel` check (`:599`) → detach (`:640`). We had
 /// logger-init BEFORE config-read; rather than reorder all of
 /// init, read tinc.conf once here just for this key. The full
-/// config gets re-read inside Daemon::setup anyway — one extra
+/// config gets re-read inside `Daemon::setup` anyway — one extra
 /// ~1KB read at boot is free, and the alternative (delay logger
 /// init until after setup) means setup errors land on a logger
 /// that hasn't been told its level yet.
@@ -889,14 +891,10 @@ fn init_logging(args: &Args) {
 /// says `DEBUG_NOTHING`; the *option* state at -1 is in tinc.c
 /// pre-options, but `tincd.c` actually has `debug_level++` at
 /// `:216`, and `debug_level` is the global at `logger.c:33` =
-/// `DEBUG_NOTHING` = 0). So: no `-d` → 0 → LogLevel read; bare
+/// `DEBUG_NOTHING` = 0). So: no `-d` → 0 → `LogLevel` read; bare
 /// `-d` → 1 → NOT read; `-d5` → 5 → NOT read. That's the sane
 /// thing. Our `is_none()` mirrors it exactly.
 fn resolve_debug_level(args: &Args) -> Option<u32> {
-    if args.debug_level.is_some() {
-        return args.debug_level; // -d wins
-    }
-
     // Helper: pull LogLevel from a Config. get_int is i32 (C's
     // `get_config_int` writes an int); negative LogLevel is
     // nonsense, u32::try_from rejects it.
@@ -905,6 +903,10 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
             .next()
             .and_then(|e| e.get_int().ok())
             .and_then(|v| u32::try_from(v).ok())
+    }
+
+    if args.debug_level.is_some() {
+        return args.debug_level; // -d wins
     }
 
     // -o LogLevel= first. Source::Cmdline beats file in tinc-conf's
@@ -925,16 +927,16 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
 /// `tincd.c:335-370` `read_sandbox_level`. Same early-read shape as
 /// `resolve_debug_level`: tinc.conf is re-read here just for this
 /// key. C reads it AFTER `read_server_config` (`:595`), BEFORE
-/// detach. We read it after detach (the file read crosses fork()
+/// detach. We read it after detach (the file read crosses `fork()`
 /// fine) but before logger init would be too early to report parse
-/// errors; after init_logging is the right spot.
+/// errors; after `init_logging` is the right spot.
 ///
 /// Default `none`. C `tincd.c:354-358`: `normal` when `HAVE_SANDBOX`
 /// (OpenBSD), else `none`. We're the non-OpenBSD case: explicit
 /// opt-in. Landlock is always compiled in on Linux but the DEFAULT
 /// stays `none` so an unconfigured daemon behaves as before.
 ///
-/// `-o Sandbox=` cmdline override beats tinc.conf same as LogLevel.
+/// `-o Sandbox=` cmdline override beats tinc.conf same as `LogLevel`.
 fn resolve_sandbox_level(
     confbase: &std::path::Path,
     cmdline: &Config,
@@ -987,6 +989,7 @@ fn check_socket_activation(
         .filter(|&n| n > 0)
 }
 
+#[allow(clippy::too_many_lines)] // top-level wiring; splitting is out of scope for a lint sweep
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
@@ -1457,7 +1460,7 @@ mod tests {
 
     // ─── check_socket_activation
 
-    /// PID matching ours + LISTEN_FDS=2 → Some(2). The happy path.
+    /// PID matching ours + `LISTEN_FDS=2` → Some(2). The happy path.
     #[test]
     fn socket_activation_our_pid_with_fds() {
         let our = std::process::id().to_string();
@@ -1467,7 +1470,7 @@ mod tests {
         );
     }
 
-    /// Wrong PID → None even with valid LISTEN_FDS. THE security
+    /// Wrong PID → None even with valid `LISTEN_FDS`. THE security
     /// gate — inheritance from a wrapper that happened to have the
     /// vars set must not make us adopt random fds.
     #[test]
@@ -1477,7 +1480,7 @@ mod tests {
         assert_eq!(check_socket_activation(Some(wrong), Some("2".into())), None);
     }
 
-    /// Right PID but no LISTEN_FDS → None. C `net_setup.c:1107`
+    /// Right PID but no `LISTEN_FDS` → None. C `net_setup.c:1107`
     /// gates on `listen_fds` non-null too.
     #[test]
     fn socket_activation_no_fds() {
@@ -1485,7 +1488,7 @@ mod tests {
         assert_eq!(check_socket_activation(Some(our), None), None);
     }
 
-    /// LISTEN_FDS=0 → None. Zero sockets is not activation.
+    /// `LISTEN_FDS=0` → None. Zero sockets is not activation.
     #[test]
     fn socket_activation_zero_fds() {
         let our = std::process::id().to_string();
@@ -1493,7 +1496,7 @@ mod tests {
     }
 
     /// Garbage in either var → None. C uses `atoi` (returns 0 on
-    /// garbage); 0 != getpid() and 0 fds is filtered. Same outcome.
+    /// garbage); 0 != `getpid()` and 0 fds is filtered. Same outcome.
     #[test]
     fn socket_activation_garbage() {
         let our = std::process::id().to_string();

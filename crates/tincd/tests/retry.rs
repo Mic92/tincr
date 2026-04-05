@@ -1,6 +1,6 @@
 //! `retry()` (`net.c:460-482`): the "network came back, reconnect
-//! NOW" button. Triggered by SIGALRM and `tinc retry` (REQ_RETRY,
-//! `control.c:95`). Also REQ_DISCONNECT (`control.c:102-122`).
+//! NOW" button. Triggered by SIGALRM and `tinc retry` (`REQ_RETRY`,
+//! `control.c:95`). Also `REQ_DISCONNECT` (`control.c:102-122`).
 //!
 //! ## What's proven
 //!
@@ -8,10 +8,10 @@
 //! period before re-dialing. With it, the timer is reset to fire-now
 //! and the backoff seconds zeroed. The test sets up an outgoing to a
 //! port nobody's listening on, lets the daemon hit ECONNREFUSED →
-//! `retry_outgoing` (5s backoff), then sends SIGALRM (or REQ_RETRY)
+//! `retry_outgoing` (5s backoff), then sends SIGALRM (or `REQ_RETRY`)
 //! and asserts the next dial attempt arrives in well under 5s.
 //!
-//! REQ_DISCONNECT we test the not-found path (`"18 12 -2"`) — the
+//! `REQ_DISCONNECT` we test the not-found path (`"18 12 -2"`) — the
 //! found path needs a real second daemon, which is `two_daemons.rs`
 //! territory (off-limits for this commit).
 
@@ -29,7 +29,7 @@ fn tmp(tag: &str) -> TmpGuard {
     TmpGuard::new("retry", tag)
 }
 
-/// Minimal config: ConnectTo a peer whose Address points at a port
+/// Minimal config: `ConnectTo` a peer whose Address points at a port
 /// nobody's listening on. `do_outgoing_connection` → ECONNREFUSED →
 /// addr cache exhausted (one Address) → `retry_outgoing` → 5s backoff.
 fn write_config_dead_peer(confbase: &std::path::Path, dead_port: u16) {
@@ -149,6 +149,8 @@ fn sigalrm_retries_now() {
     let armed_at = Instant::now();
 
     // ─── SIGALRM ────────────────────────────────────────────────
+    // PIDs are < 2^22 on Linux; never wraps.
+    #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as libc::pid_t;
     // SAFETY: kill(2) on a known-live child (wait_for_file above).
     #[allow(unsafe_code)]
@@ -201,7 +203,7 @@ fn sigalrm_retries_now() {
     let _ = child.wait();
 }
 
-/// REQ_RETRY (`"18 10"`) → same `on_retry()` path. Ack `"18 10 0"`.
+/// `REQ_RETRY` (`"18 10"`) → same `on_retry()` path. Ack `"18 10 0"`.
 /// C `control.c:95-96`: `retry(); return control_ok(c, REQ_RETRY)`.
 #[test]
 fn req_retry_retries_now() {
@@ -268,7 +270,7 @@ fn req_retry_retries_now() {
     let _ = child.wait();
 }
 
-/// REQ_DISCONNECT not-found (`"18 12 nobody"` → `"18 12 -2"`) and
+/// `REQ_DISCONNECT` not-found (`"18 12 nobody"` → `"18 12 -2"`) and
 /// malformed (`"18 12"` → `"18 12 -1"`). C `control.c:108,121`.
 ///
 /// The found path (terminate a real conn) needs a second daemon —

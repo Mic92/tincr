@@ -254,7 +254,7 @@ fn unknown_id_rejected() {
 /// gets to the METAKEY line.
 ///
 /// **The catch**: the python sends to `foo` (the daemon's own name)
-/// AND `17.0`. Two gates fire; the C's check_id is first. We send a
+/// AND `17.0`. Two gates fire; the C's `check_id` is first. We send a
 /// KNOWN peer name with `17.0` to isolate the version gate.
 #[test]
 fn legacy_minor_rejected() {
@@ -443,14 +443,14 @@ fn id_timeout_half_open_survives() {
 ///    (inbound conns, `outgoing.is_none()`). Both send KEX (in
 ///    `sptps_start`), both receive the other's KEX via the relay,
 ///    NEITHER sends SIG. Deadlock. The C splice has the same
-///    behavior — `splice.py` only asserts node count, not BadSig.
+///    behavior — `splice.py` only asserts node count, not `BadSig`.
 ///
 /// 2. **Label asymmetry** (`proto.rs::tcp_label`): IF a SIG ever
 ///    arrived (e.g. the relay also injected a fake one, or one
 ///    daemon was an initiator via `ConnectTo`), the labels would
 ///    diverge — alice computes `tcp_label("bob", "alice")`, bob
 ///    computes `tcp_label("alice", "bob")`. Different transcripts
-///    → BadSig. This layer is WHY the relay can't just inject SIGs
+///    → `BadSig`. This layer is WHY the relay can't just inject SIGs
 ///    or forward an initiator's bytes: even with real keys on both
 ///    ends, the labels disagree. THIS test exercises layer 1;
 ///    `stop.rs::peer_wrong_key_fails_sig` exercises the SIG verify
@@ -466,6 +466,9 @@ fn id_timeout_half_open_survives() {
 /// C `net_setup.c:186-189` does the same. The MITM-defense
 /// invariant is reachability: no edge → unreachable.)
 #[test]
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
+// too_many_lines: end-to-end MITM scenario; splitting fragments the narrative.
+// items_after_statements: helpers are scoped to this test for clarity.
 fn splice_mitm_rejected() {
     use std::net::TcpListener;
 

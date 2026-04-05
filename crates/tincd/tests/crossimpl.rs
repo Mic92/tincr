@@ -63,7 +63,7 @@
 //! 3. **ACK + graph**: ACK fields parse on both sides. `ADD_EDGE`/
 //!    `ADD_SUBNET` flood. Our `dump nodes` shows bob reachable
 //!    (status bit 4).
-//! 4. **REQ_KEY/ANS_KEY**: the SPTPS-handshake-via-ANS_KEY path.
+//! 4. **`REQ_KEY`/`ANS_KEY`**: the SPTPS-handshake-via-`ANS_KEY` path.
 //!    THE PARSER FIX: `net_packet.c:996` sends literal `"-1 -1 -1"`
 //!    for cipher/digest/maclen. Our `Tok::lu` was strict-u64 and
 //!    rejected `-1`. Now it's glibc-strtoul-compatible (negate as
@@ -81,6 +81,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -398,7 +399,7 @@ impl Node {
             self.name, self.iface
         );
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
@@ -412,7 +413,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            let _ = writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port);
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -425,7 +426,7 @@ impl Node {
     /// - `Mode = switch` in `tinc.conf` (→ `RoutingMode::Switch`).
     /// - `DeviceType = tap` (full eth frames; the C
     ///   `linux/device.c:76-91` would derive this from
-    ///   `Mode = switch` when DeviceType is unset, but our Rust
+    ///   `Mode = switch` when `DeviceType` is unset, but our Rust
     ///   currently requires it explicit).
     /// - NO `Subnet =` line in `hosts/SELF`. Switch mode learns MAC
     ///   subnets dynamically (`route.c:524-556 learn_mac`); pre-
@@ -439,7 +440,7 @@ impl Node {
             self.name, self.iface
         );
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
@@ -454,7 +455,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            let _ = writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port);
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -462,7 +463,7 @@ impl Node {
     }
 
     /// `TCPOnly = yes` variant. Same on-disk shape as `write_config`
-    /// (router mode, TUN, /32 subnets) plus the TCPOnly knob in BOTH
+    /// (router mode, TUN, /32 subnets) plus the `TCPOnly` knob in BOTH
     /// `tinc.conf` AND `hosts/OTHER`.
     ///
     /// Why both: the C `net_setup.c:598` reads `TCPOnly` from the
@@ -479,7 +480,7 @@ impl Node {
             self.name, self.iface
         );
         if connect_to {
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+            let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
@@ -496,7 +497,7 @@ impl Node {
         let other_pub = tinc_crypto::b64::encode(&other.pubkey());
         let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\nTCPOnly = yes\n");
         if connect_to {
-            other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+            let _ = writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port);
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -550,6 +551,10 @@ impl Node {
 /// validkey, ping. The two `#[test]` fns below just permute who's
 /// who. Factored out because the assertions are identical and 200
 /// lines duplicated would rot.
+// Node status bits (`node.h:41`). Used by both run_crossimpl variants.
+const VALIDKEY: u32 = 0x02;
+const UDP_CONFIRMED: u32 = 0x80;
+
 fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     let tmp = tmp(tag);
     let alice = Node::new(
@@ -571,9 +576,11 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     // as ours; `wait_for_file(socket)` is the readiness signal for
     // both impls.
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        bob_child.kill_and_log()
+    );
 
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
@@ -636,8 +643,6 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     // but the validkey-only race remains for the FIRST few packets
     // while UDP is still discovering). Wait for udp_confirmed for
     // stability — this test is exercising the UDP path.
-    const VALIDKEY: u32 = 0x02;
-    const UDP_CONFIRMED: u32 = 0x80;
     let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -701,7 +706,7 @@ fn rust_dials_c() {
 /// C dials, Rust listens. Tests our RESPONDER paths. The C's
 /// `do_outgoing_connection` (`net_socket.c`) initiates; our `id_h`
 /// gets the responder-side SPTPS role; our `req_key_h` parses the
-/// C's REQ_KEY ext-SPTPS init; our `ans_key_h` parses the C's
+/// C's `REQ_KEY` ext-SPTPS init; our `ans_key_h` parses the C's
 /// `-1 -1 -1` line — THE direct exercise of the `Tok::lu` fix.
 #[test]
 fn c_dials_rust() {
@@ -751,9 +756,11 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
     alice.write_config_tcponly(&bob, true);
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        bob_child.kill_and_log()
+    );
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let bs = bob_child.kill_and_log();
@@ -912,9 +919,11 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
     alice.write_config_switch(&bob, true);
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
-    }
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        bob_child.kill_and_log()
+    );
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket) {
         let bs = bob_child.kill_and_log();
@@ -971,8 +980,6 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
         .status();
 
     // ─── validkey + udp_confirmed (mode-agnostic) ───────────────
-    const VALIDKEY: u32 = 0x02;
-    const UDP_CONFIRMED: u32 = 0x80;
     let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -1043,7 +1050,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
 }
 
 /// Rust dials, C listens. Switch mode. Tests our INITIATOR-side
-/// MAC learning + ADD_SUBNET wire format + broadcast against the
+/// MAC learning + `ADD_SUBNET` wire format + broadcast against the
 /// reference.
 #[test]
 fn rust_dials_c_switch() {
@@ -1054,7 +1061,7 @@ fn rust_dials_c_switch() {
 }
 
 /// C dials, Rust listens. Switch mode. Tests our RESPONDER-side
-/// route_mac broadcast (the C's first ARP arrives over the wire;
+/// `route_mac` broadcast (the C's first ARP arrives over the wire;
 /// our `route_packet` with `from = Some(peer)` must echo to TAP
 /// AND forward to the MST — which is just back to C in 2-node).
 #[test]

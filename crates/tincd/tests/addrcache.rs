@@ -16,7 +16,7 @@
 //! && c->outgoing->timeout` — i.e. it only caches after a RETRY
 //! succeeded. On a clean first connect (timeout still 0), C's
 //! `pong_h` doesn't cache. C *does* cache on first connect via
-//! `graph.c:238` (BecameReachable arm), but only if
+//! `graph.c:238` (`BecameReachable` arm), but only if
 //! `n->connection && n->connection->outgoing`.
 //!
 //! We diverge: `daemon/connect.rs::on_ack` calls `add_recent`
@@ -38,6 +38,7 @@
 //!   and the cache-on-invite is a 1-line `add_recent` we have no
 //!   clean hook to assert separately.
 
+use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -73,6 +74,8 @@ fn wait_for_line(path: &Path, timeout: Duration) -> bool {
 /// SIGTERM → `run()` returns → `Daemon::Drop` → `AddressCache::Drop`
 /// → `save()` → disk write.
 fn sigterm_and_wait(mut child: Child) {
+    // PIDs are < 2^22 on Linux; never wraps.
+    #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as libc::pid_t;
     // SAFETY: kill(2) on a known-live child PID.
     unsafe {
@@ -123,7 +126,7 @@ impl Node {
         );
         if connect_to {
             let p = peer.expect("connect_to requires peer");
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", p.name));
+            let _ = writeln!(tinc_conf, "ConnectTo = {}", p.name);
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
@@ -137,7 +140,7 @@ impl Node {
             let pk = tinc_crypto::b64::encode(&p.pubkey());
             let mut cfg = format!("Ed25519PublicKey = {pk}\n");
             if addr_in_hosts {
-                cfg.push_str(&format!("Address = 127.0.0.1 {}\n", p.port));
+                let _ = writeln!(cfg, "Address = 127.0.0.1 {}", p.port);
             }
             std::fs::write(self.confbase.join("hosts").join(p.name), cfg).unwrap();
         }
@@ -161,8 +164,8 @@ impl Node {
 }
 
 /// Write `CONFBASE/hosts/PEER-up` as a one-line shell appender.
-/// Fires after meta handshake → ACK → graph runs → BecameReachable
-/// (`gossip.rs` BecameReachable). By then `add_recent` has fired in
+/// Fires after meta handshake → ACK → graph runs → `BecameReachable`
+/// (`gossip.rs` `BecameReachable`). By then `add_recent` has fired in
 /// `on_ack` (`connect.rs`). Shebang required — direct `execve()`,
 /// not `sh -c`; shebang-less script fails `ENOEXEC`.
 fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
@@ -195,6 +198,7 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
 /// that `add_recent` actually fires from a real handshake. This is
 /// the wire test.
 #[test]
+#[allow(clippy::too_many_lines)] // 3-round restart scenario; splitting fragments narrative
 fn restart_dials_from_cache() {
     let tmp = tmp("restart_dials_from_cache");
     let alice = Node::new(tmp.path(), "alice", 0xA1);
@@ -210,13 +214,17 @@ fn restart_dials_from_cache() {
     write_host_up_script(&alice.confbase, "bob", &alice_log);
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket, Duration::from_secs(5)) {
-        panic!("r1 bob setup failed:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket, Duration::from_secs(5)),
+        "r1 bob setup failed:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket, Duration::from_secs(5)) {
-        panic!("r1 alice setup failed:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket, Duration::from_secs(5)),
+        "r1 alice setup failed:\n{}",
+        drain_stderr(alice_child)
+    );
 
     // Wait for host-up. PONG fires after meta handshake → ACK →
     // graph runs → reachable → host-up. By then `add_recent` has
@@ -273,13 +281,17 @@ fn restart_dials_from_cache() {
     std::fs::remove_file(&bob.pidfile).ok();
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket, Duration::from_secs(5)) {
-        panic!("r2 bob setup failed:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket, Duration::from_secs(5)),
+        "r2 bob setup failed:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket, Duration::from_secs(5)) {
-        panic!("r2 alice setup failed:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket, Duration::from_secs(5)),
+        "r2 alice setup failed:\n{}",
+        drain_stderr(alice_child)
+    );
     if !wait_for_line(&alice_log, Duration::from_secs(10)) {
         let a = drain_stderr(alice_child);
         let b = drain_stderr(bob_child);
@@ -320,13 +332,17 @@ fn restart_dials_from_cache() {
     );
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket, Duration::from_secs(5)) {
-        panic!("r3 bob setup failed:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket, Duration::from_secs(5)),
+        "r3 bob setup failed:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket, Duration::from_secs(5)) {
-        panic!("r3 alice setup failed:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket, Duration::from_secs(5)),
+        "r3 alice setup failed:\n{}",
+        drain_stderr(alice_child)
+    );
 
     // The proof. With no `Address =` and an empty/missing cache,
     // alice would have nothing to dial. `next_addr()` returns None.

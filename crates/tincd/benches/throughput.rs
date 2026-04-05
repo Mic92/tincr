@@ -67,7 +67,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
-    bench::main()
+    bench::main();
 }
 
 // Benches can't `mod common;` from tests/. Nine other test files
@@ -84,6 +84,7 @@ mod common;
 #[cfg(target_os = "linux")]
 mod bench {
 
+    use std::fmt::Write as _;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::Duration;
@@ -297,7 +298,7 @@ mod bench {
                 self.name, self.iface
             );
             if connect_to {
-                tinc_conf.push_str(&format!("ConnectTo = {}\n", other.name));
+                let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
             }
             // Tight ping for fast detection of a hung daemon, but bumped
             // when profiling bob: two perf samplers + saturated receiver
@@ -307,7 +308,7 @@ mod bench {
             } else {
                 1
             };
-            tinc_conf.push_str(&format!("PingTimeout = {pingtimeout}\n"));
+            let _ = writeln!(tinc_conf, "PingTimeout = {pingtimeout}");
             std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
             std::fs::write(
@@ -319,7 +320,7 @@ mod bench {
             let other_pub = tinc_crypto::b64::encode(&other.pubkey());
             let mut other_cfg = format!("Ed25519PublicKey = {other_pub}\n");
             if connect_to {
-                other_cfg.push_str(&format!("Address = 127.0.0.1 {}\n", other.port));
+                let _ = writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port);
             }
             std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
 
@@ -373,7 +374,7 @@ mod bench {
     /// maclen comp options status nexthop via distance mtu minmtu ...`.
     /// PMTU discovery converges `minmtu` toward the path MTU; until it
     /// reaches ≥1500, full-MSS packets fall back to TCP-tunnelled
-    /// SPTPS_PACKET (b64 over the meta-conn) which is ~100x slower.
+    /// `SPTPS_PACKET` (b64 over the meta-conn) which is ~100x slower.
     fn node_minmtu(rows: &[String], name: &str) -> Option<u16> {
         rows.iter().find_map(|r| {
             let body = r.strip_prefix("18 3 ")?;
@@ -411,13 +412,13 @@ mod bench {
         fn alice_log(&mut self) -> String {
             self.alice
                 .take()
-                .map(|c| c.kill_and_log())
+                .map(ChildWithLog::kill_and_log)
                 .unwrap_or_default()
         }
         fn bob_log(&mut self) -> String {
             self.bob
                 .take()
-                .map(|c| c.kill_and_log())
+                .map(ChildWithLog::kill_and_log)
                 .unwrap_or_default()
         }
     }
@@ -450,7 +451,12 @@ mod bench {
     /// Returns once both sides have `validkey | udp_confirmed` set —
     /// i.e. UDP data path is hot, no TCP-fallback packets in flight
     /// (PACKET 17 routes now, but iperf3 wants the UDP path measured).
+    #[allow(clippy::too_many_lines)] // linear setup script; splitting hurts readability
     fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
+        // Node status bits (`node.h:41`).
+        const VALIDKEY: u32 = 0x02;
+        const UDP_CONFIRMED: u32 = 0x80;
+
         // ─── fresh persistent TUN devices ──────────────────────────
         run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT0"]);
         run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT1"]);
@@ -474,9 +480,11 @@ mod bench {
         // ─── spawn ──────────────────────────────────────────────────
         let bob_child = bob.spawn();
         let bob_pid = bob_child.pid();
-        if !wait_for_file(&bob.socket) {
-            panic!("bob setup failed; stderr:\n{}", bob_child.kill_and_log());
-        }
+        assert!(
+            wait_for_file(&bob.socket),
+            "bob setup failed; stderr:\n{}",
+            bob_child.kill_and_log()
+        );
         let alice_child = alice.spawn();
         let alice_pid = alice_child.pid();
         if !wait_for_file(&alice.socket) {
@@ -558,8 +566,6 @@ mod bench {
         // sides. Without udp_confirmed the C falls back to TCP-
         // tunnelled PACKET frames; the Rust daemon drops those, so
         // the iperf3 stream would crater immediately.
-        const VALIDKEY: u32 = 0x02;
-        const UDP_CONFIRMED: u32 = 0x80;
         let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             poll_until(Duration::from_secs(10), || {
                 let a = alice_ctl.dump(3);
@@ -629,7 +635,7 @@ mod bench {
     struct IperfEnd {
         /// Server-side received throughput. The client-side `sum_sent`
         /// can include bytes still in flight; `sum_received` is what
-        /// actually made it through the tunnel + got ACKed.
+        /// actually made it through the tunnel + got `ACKed`.
         sum_received: IperfSum,
     }
     #[derive(Debug, serde::Deserialize)]
@@ -744,6 +750,13 @@ mod bench {
             }
             // Nearest-rank. 100 samples → p99 is the 99th value;
             // good enough for a diagnostic. Not interpolating.
+            // Casts: p ∈ [0,100], len ≤ 100 (we send 100 pings) so the
+            // f64 product is well within both usize and f64 precision.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
             let idx = ((p / 100.0) * (self.rtts_ms.len() - 1) as f64).round() as usize;
             self.rtts_ms[idx.min(self.rtts_ms.len() - 1)]
         }
@@ -790,12 +803,11 @@ mod bench {
             })
             .collect();
         rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if rtts.is_empty() {
-            panic!(
-                "ping got zero replies (tunnel dead?):\nstdout:\n{stdout}\nstderr:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
+        assert!(
+            !rtts.is_empty(),
+            "ping got zero replies (tunnel dead?):\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         PingStats {
             rtts_ms: rtts,
             sent: count,
@@ -876,7 +888,7 @@ mod bench {
     /// One latency pairing: idle, then under-load, on the same tunnel.
     /// Reusing the tunnel between idle and load means the PMTU/handshake
     /// state is identical for both — the only variable is the load.
-    /// Returns (idle, load_mbps, load) for the cross-pairing summary.
+    /// Returns (idle, `load_mbps`, load) for the cross-pairing summary.
     fn run_latency(
         p: &Pairing,
         do_idle: bool,
@@ -999,6 +1011,8 @@ mod bench {
                 // Same SIGINT-then-wait as PerfRecord. perf trace flushes
                 // the summary on SIGINT.
                 // SAFETY: see PerfRecord::drop.
+                // PIDs are < 2^22 on Linux; never wraps.
+                #[allow(clippy::cast_possible_wrap)]
                 unsafe {
                     libc::kill(child.id() as i32, libc::SIGINT);
                 }
@@ -1089,6 +1103,8 @@ mod bench {
                 // spawned it, haven't waited it yet). Worst case the
                 // PID was reused — but we hold the Child, so it
                 // hasn't been reaped, so the PID is still ours.
+                // PIDs are < 2^22 on Linux; never wraps.
+                #[allow(clippy::cast_possible_wrap)]
                 unsafe {
                     libc::kill(child.id() as i32, libc::SIGINT);
                 }
@@ -1196,6 +1212,7 @@ mod bench {
 
     // ═════════════════════════════════ main ════════════════════════════════════
 
+    #[allow(clippy::too_many_lines)] // top-level bench harness wiring
     pub fn main() {
         // Substring filter, cargo bench convention. `cargo bench --bench
         // throughput -- rust_rust` → argv = [self, "--bench", "rust_rust"].
@@ -1218,8 +1235,7 @@ mod bench {
         let trace_on = std::env::var_os("TINCD_TRACE").is_some();
         let perf_bob = std::env::var_os("TINCD_PERF_BOB").is_some();
         let perf_out = std::env::var_os("TINCD_PERF_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp/tincd-perf"));
+            .map_or_else(|| PathBuf::from("/tmp/tincd-perf"), PathBuf::from);
         if perf_on || trace_on {
             std::fs::create_dir_all(&perf_out).ok();
         } else {

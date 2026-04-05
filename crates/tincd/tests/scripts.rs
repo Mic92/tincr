@@ -30,6 +30,7 @@
 //!   `tinc_join_against_real_daemon` test elsewhere.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -83,7 +84,7 @@ impl Node {
         );
         if connect_to {
             let p = peer.expect("connect_to requires peer");
-            tinc_conf.push_str(&format!("ConnectTo = {}\n", p.name));
+            let _ = writeln!(tinc_conf, "ConnectTo = {}", p.name);
         }
         tinc_conf.push_str("PingTimeout = 1\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
@@ -91,7 +92,7 @@ impl Node {
         // hosts/SELF — Port + Subnets.
         let mut self_cfg = format!("Port = {}\n", self.port);
         for s in subnets {
-            self_cfg.push_str(&format!("Subnet = {s}\n"));
+            let _ = writeln!(self_cfg, "Subnet = {s}");
         }
         std::fs::write(self.confbase.join("hosts").join(self.name), self_cfg).unwrap();
 
@@ -100,7 +101,7 @@ impl Node {
             let pk = tinc_crypto::b64::encode(&p.pubkey());
             let mut cfg = format!("Ed25519PublicKey = {pk}\n");
             if connect_to {
-                cfg.push_str(&format!("Address = 127.0.0.1 {}\n", p.port));
+                let _ = writeln!(cfg, "Address = 127.0.0.1 {}", p.port);
             }
             std::fs::write(self.confbase.join("hosts").join(p.name), cfg).unwrap();
         }
@@ -257,13 +258,12 @@ fn tinc_up_then_own_subnet_up() {
     // synchronously before binding the control socket.
     let events = wait_for_events(&log, Duration::from_secs(5), |e| e.len() >= 3);
 
-    if events.len() < 3 {
-        panic!(
-            "expected 3 events (tinc-up + 2× subnet-up), got {}: {events:#?}\nstderr:\n{}",
-            events.len(),
-            drain_stderr(alice_child)
-        );
-    }
+    assert!(
+        events.len() >= 3,
+        "expected 3 events (tinc-up + 2× subnet-up), got {}: {events:#?}\nstderr:\n{}",
+        events.len(),
+        drain_stderr(alice_child)
+    );
 
     // ─── Event 0: tinc-up
     // Base env only: NAME + INTERFACE (`periodic.rs::run_script`).
@@ -339,9 +339,11 @@ fn host_up_order_on_connect() {
     write_all_scripts(&alice.confbase, &alice_log, Some("bob"));
 
     let bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket, Duration::from_secs(5)) {
-        panic!("bob setup failed:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket, Duration::from_secs(5)),
+        "bob setup failed:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
     if !wait_for_file(&alice.socket, Duration::from_secs(5)) {
         let _ = drain_stderr(bob_child);
@@ -433,9 +435,11 @@ fn host_down_order_on_disconnect() {
     write_all_scripts(&alice.confbase, &alice_log, Some("bob"));
 
     let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket, Duration::from_secs(5)) {
-        panic!("bob setup failed:\n{}", drain_stderr(bob_child));
-    }
+    assert!(
+        wait_for_file(&bob.socket, Duration::from_secs(5)),
+        "bob setup failed:\n{}",
+        drain_stderr(bob_child)
+    );
     let alice_child = alice.spawn();
 
     // Wait for the connect sequence to complete (subnet-up for bob).
@@ -530,9 +534,11 @@ fn tinc_down_on_shutdown() {
     write_all_scripts(&alice.confbase, &log, None);
 
     let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket, Duration::from_secs(5)) {
-        panic!("alice setup failed:\n{}", drain_stderr(alice_child));
-    }
+    assert!(
+        wait_for_file(&alice.socket, Duration::from_secs(5)),
+        "alice setup failed:\n{}",
+        drain_stderr(alice_child)
+    );
 
     // Startup events: tinc-up + 1 subnet-up.
     let started = wait_for_events(&log, Duration::from_secs(5), |e| e.len() >= 2);
@@ -541,6 +547,8 @@ fn tinc_down_on_shutdown() {
 
     // SIGTERM → run() returns → Daemon::Drop. Can't use
     // `child.kill()` (= SIGKILL, no Drop). Use libc directly.
+    // PIDs are < 2^22 on Linux; never wraps.
+    #[allow(clippy::cast_possible_wrap)]
     let pid = alice_child.id() as libc::pid_t;
     // SAFETY: kill(2) on a known-live child PID.
     unsafe {
