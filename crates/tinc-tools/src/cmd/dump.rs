@@ -1,4 +1,4 @@
-//! `cmd_dump` — `tincctl.c:1182-1376`, `dump_invitations` `:1108-1180`.
+//! `cmd_dump` — daemon state and invitation listings.
 //!
 //! ```text
 //!   tinc dump nodes              → list all nodes the daemon knows
@@ -9,23 +9,21 @@
 //!   tinc dump graph              → DOT format, undirected
 //!   tinc dump digraph            → DOT format, directed
 //!   tinc dump invitations        → outstanding invites (NO daemon)
-//!   tinc list ...                → alias (`tincctl.c:3010`)
+//!   tinc list ...                → alias
 //! ```
 //!
 //! ## Dump format is a cross-impl seam
 //!
-//! Format is pinned by the C daemon's `dump_*` functions: `node.c:210`,
-//! `edge.c:128`, `subnet.c:403`, `connection.c:168`. Rust `tinc dump`
-//! ←→ C `tincd` is a useful cross-impl test asserting identical-to-C
-//! output.
+//! Format is pinned by the daemon's `dump_*` functions. Rust
+//! `tinc dump` ←→ upstream `tincd` is a useful cross-impl test asserting
+//! identical output.
 //!
 //! ## The `" port "` literal — wire vs printf-conversion mismatch
 //!
-//! `n->hostname` is built by `sockaddr2hostname` (`netutl.c:153`) as
-//! `"10.0.0.1 port 655"`. The daemon writes it via ONE `%s` (`node.c
-//! :211`); the CLI reads it back via `%s port %s` (`tincctl.c:1282`).
-//! So the daemon's printf has one fewer conversion than the CLI's
-//! sscanf, per `" port "` instance:
+//! `n->hostname` is built by `sockaddr2hostname` as `"10.0.0.1
+//! port 655"`. The daemon writes it via ONE `%s`; the CLI reads it
+//! back via `%s port %s`. So the daemon's printf has one fewer
+//! conversion than the CLI's sscanf, per `" port "` instance:
 //!
 //! | dump | daemon `%` (after 18 N) | CLI `%` (after `%*d %*d`) | port literals |
 //! |---|---|---|---|
@@ -34,41 +32,39 @@
 //! | connections | 5 | 6 | 1 |
 //! | subnets | 2 | 2 | 0 |
 //!
-//! Dump uses the fused `sockaddr2hostname` form (the log-message form);
-//! the message protocol uses split `sockaddr2str`. `Tok::lit("port")`
-//! skips the literal.
+//! Dump uses the fused `sockaddr2hostname` form (the log-message
+//! form); the message protocol uses split `sockaddr2str`.
+//! `Tok::lit("port")` skips the literal.
 //!
 //! ## `node_status_t` is a bitfield — bit positions matter
 //!
-//! `node.h:32-49`: `union { struct { bool x:1; ... }; uint32_t value; }`.
-//! GCC/Clang on x86-64 pack LSB-first. We only need bit 4 (reachable)
-//! and bit 1 (validkey) — named constants, not a struct.
+//! `union { struct { bool x:1; ... }; uint32_t value; }`. GCC/Clang
+//! on x86-64 pack LSB-first. We only need bit 4 (reachable) and
+//! bit 1 (validkey) — named constants, not a struct.
 //!
 //! ## `strip_weight` — display sugar
 //!
-//! `info.c:41`: `"10.0.0.0/24#10"` → `"10.0.0.0/24"` (default weight).
-//! The daemon's `net2str` (`subnet_parse.c:370`) already omits `#10`
-//! so this is belt-and-suspenders against older daemons. 3 lines;
-//! the C does it.
+//! `"10.0.0.0/24#10"` → `"10.0.0.0/24"` (default weight). The
+//! daemon's `net2str` already omits `#10` so this is belt-and-
+//! suspenders against older daemons.
 //!
 //! ## What we tighten
 //!
-//! - `recv_row` validates `code == 18` per row. C `tincctl.c:1245`
-//!   checks `n >= 2` but never checks `code` — a `"19 3 ..."` row
-//!   would be dispatched on whatever `req` parsed as. We reject.
+//! - `recv_row` validates `code == 18` per row. Upstream checks
+//!   `n >= 2` but never checks `code` — a `"19 3 ..."` row would
+//!   be dispatched on whatever `req` parsed as. We reject.
 //!
 //! - `dump invitations` checks `name.len() == 24` BEFORE decode.
-//!   C `b64decode_tinc(..., 24)` reads first 24 chars, returns 18
-//!   on valid. A 25-char name with valid first-24 would pass C's
-//!   check; daemon lookup is exact-24 so it'd never match anyway.
+//!   Upstream's `b64decode_tinc(..., 24)` reads first 24 chars,
+//!   returns 18 on valid. A 25-char name with valid first-24 would
+//!   pass; daemon lookup is exact-24 so it'd never match anyway.
 //!   We tighten to exact-24. Same as `sweep_expired`.
 //!
 //! ## What we drop
 //!
-//! - `usage(true)` calls on bad argument. C dumps the full help
-//!   text. We just error; the binary's main can print usage if it
-//!   wants. (It doesn't, and neither does the C `tinc set` path,
-//!   so the inconsistency is also C's.)
+//! - `usage(true)` calls on bad argument. Upstream dumps the full
+//!   help text. We just error; the binary's main can print usage
+//!   if it wants.
 //!
 
 #![allow(clippy::doc_markdown)]
@@ -85,11 +81,11 @@ use crate::names::{Paths, check_id};
 
 // Kind: the 7 sub-verbs
 
-/// Which `dump` sub-verb. C uses string matches inline + `do_graph`
-/// int + `only_reachable` bool — three local vars threading through
-/// one switch. We collapse to one enum because the dispatch is 1:1
-/// (the C three-var space has 7 valid points and a lot of impossible
-/// ones like `do_graph=1 && only_reachable`).
+/// Which `dump` sub-verb. Upstream uses string matches inline +
+/// `do_graph` int + `only_reachable` bool — three local vars
+/// threading through one switch. We collapse to one enum because
+/// the dispatch is 1:1 (the three-var space has 7 valid points and
+/// a lot of impossible ones like `do_graph=1 && only_reachable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// `dump nodes`
@@ -113,46 +109,42 @@ pub enum Kind {
 impl Kind {
     /// Does this sub-verb need to talk to the daemon? The binary's
     /// `cmd_dump` adapter checks this BEFORE `connect()` — so
-    /// `dump invitations` works with daemon down, same as C
-    /// (`tincctl.c:1204`: the `return dump_invitations()` is before
-    /// `connect_tincd`).
+    /// `dump invitations` works with daemon down.
     #[must_use]
     pub fn needs_daemon(self) -> bool {
         !matches!(self, Kind::Invitations)
     }
 }
 
-/// Parse `argv` → `Kind`. C `tincctl.c:1182-1232`.
+/// Parse `argv` → `Kind`.
 ///
 /// The `reachable` shift dance: `dump reachable nodes` is parsed as
 /// `dump nodes` with a bool, via `argv++; argc--`. We do the same
 /// shape (slice, not pointer arith) so the error messages line up.
 ///
-/// All matches case-insensitive: C `strcasecmp`.
+/// All matches case-insensitive (`strcasecmp`).
 ///
 /// # Errors
-/// `BadInput` mirroring the C's three error strings — `reachable`
+/// `BadInput` mirroring upstream's three error strings — `reachable`
 /// without `nodes`, wrong arg count, unknown type.
 pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     // ─── `reachable` prefix (only valid before `nodes`)
-    // C `tincctl.c:1185-1195`. The check is `argc > 2 &&
-    // !strcasecmp(argv[1], "reachable")` — argc>2 because we need a
-    // word AFTER reachable. Then check that word is `nodes`.
+    // The check is `argc > 2 && !strcasecmp(argv[1], "reachable")` —
+    // argc>2 because we need a word AFTER reachable. Then check
+    // that word is `nodes`.
     let (only_reachable, args) = match args {
         [first, rest @ ..] if first.eq_ignore_ascii_case("reachable") => {
-            // C: must have a second arg, and it must be "nodes".
-            // The `argc > 2` check means rest is nonempty.
+            // Must have a second arg, and it must be "nodes".
             let Some(second) = rest.first() else {
-                // `dump reachable` with nothing after. C checks
-                // `argc > 2` before strcasecmp, so it does NOT
-                // shift — falls through to "Invalid number of
+                // `dump reachable` with nothing after. Upstream
+                // checks `argc > 2` before strcasecmp, so it does
+                // NOT shift — falls through to "Invalid number of
                 // arguments." Match that: bail without shifting.
                 return Err(CmdError::BadInput("Invalid number of arguments.".into()));
             };
             if !second.eq_ignore_ascii_case("nodes") {
-                // C `tincctl.c:1187`: `"\`reachable' only supported
-                // for nodes."`. The backtick-apostrophe quoting is
-                // 90s GNU style; preserved.
+                // The backtick-apostrophe quoting is 90s GNU style;
+                // preserved.
                 return Err(CmdError::BadInput(
                     "`reachable' only supported for nodes.".into(),
                 ));
@@ -163,18 +155,13 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     };
 
     // ─── Arity: exactly one (after the shift)
-    // C `tincctl.c:1197`: `if(argc != 2)`. After the shift, that's
-    // "one arg after the verb". For us args[0] IS that arg.
     let [what] = args else {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     };
 
     // ─── Dispatch
-    // C `tincctl.c:1203-1232`. The if-else chain. `strcasecmp` is
-    // case-insensitive; eq_ignore_ascii_case matches.
-    //
     // `only_reachable` was already validated to be nodes-only above,
-    // but the C code structure means we COULD arrive here with
+    // but the code structure means we COULD arrive here with
     // only_reachable=true and what=="nodes" (the only valid combo)
     // or only_reachable=false and any what. We just match what; the
     // only_reachable bit only modifies the Nodes arm.
@@ -197,8 +184,6 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     } else if what.eq_ignore_ascii_case("invitations") {
         Kind::Invitations
     } else {
-        // C `tincctl.c:1230`: `"Unknown dump type '%s'."`. The
-        // single-quote is C; we keep it (the user typed it).
         return Err(CmdError::BadInput(format!("Unknown dump type '{what}'.")));
     };
 
@@ -207,97 +192,85 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
 
 // node_status_t bits — only the two we use
 //
-// `node.h:32-49`: 13 bool:1 fields in a union with uint32_t. GCC
-// packs LSB-first on x86-64 (it's "implementation-defined" per C
-// standard; in practice GCC and Clang agree). Field N is bit (1<<N).
+// 13 bool:1 fields in a union with uint32_t. GCC packs LSB-first
+// on x86-64 (it's "implementation-defined" per C standard; in
+// practice GCC and Clang agree). Field N is bit (1<<N).
 //
-// We only need two for the C-compatible output:
+// We only need two for the upstream-compatible output:
 //
 //   reachable (field 4 → bit 4) — `dump reachable nodes` filter
 //   validkey  (field 1 → bit 1) — graph color: black if not validkey
 //
 // The other 11 are daemon-internal (visited, waitingforkey, etc.).
-// The CLI doesn't read them. NOT a `bitflags!` because we use 2 of 13
-// and the daemon's port will define all 13 in its own type — these
-// are the CLI's view of an opaque hex int, not a shared definition.
-//
-// Compile-time pin: if anyone reorders `node.h`'s bitfield, the
-// fake-daemon integration test (which sends a known status hex)
-// catches it.
+// The CLI doesn't read them. NOT a `bitflags!` because we use 2 of
+// 13 and the daemon's port will define all 13 in its own type —
+// these are the CLI's view of an opaque hex int, not a shared
+// definition.
 
-/// `node_status_t` bit positions. `node.h:32-49`: a 13-field `bool:1`
-/// bitfield in a `u32` union. GCC packs LSB-first on x86-64 (and
-/// every target tinc builds on); bit N is field N counting from 0.
+/// `node_status_t` bit positions: a 13-field `bool:1` bitfield in a
+/// `u32` union. GCC packs LSB-first on x86-64 (and every target tinc
+/// builds on); bit N is field N counting from 0.
 ///
 /// `dump` needs bits 1+4 (validkey/reachable). `info` needs the six
-/// that the `Status:` line prints (`info.c:128-152`). The daemon's
-/// port will define all 13 in its own `NodeStatus` type; for the CLI
-/// these are display-only, so a `u8` newtype + `is(bit)` is the lean
-/// answer. Public so `cmd::info` can share.
+/// that the `Status:` line prints. The daemon's port will define all
+/// 13 in its own `NodeStatus` type; for the CLI these are display-
+/// only, so a `u8` newtype + `is(bit)` is the lean answer. Public so
+/// `cmd::info` can share.
 ///
-/// sed-verifiable against `node.h:33-46`: each line is `bool NAME: 1;`,
-/// position is line-order. The test `status_bits_match_node_h_order`
-/// pins it.
+/// The test `status_bits_match_node_h_order` pins it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusBit(pub u32);
 
 impl StatusBit {
-    /// `node.h:35`: `bool validkey: 1;`. Field 1 (after `unused_active`).
-    /// Set when we have a working session key for this node — SPTPS
-    /// or legacy KEY exchange completed. The DOT graph greens when
-    /// validkey AND `minmtu > 0`; else black.
+    /// Field 1 (after `unused_active`). Set when we have a working
+    /// session key for this node — SPTPS or legacy KEY exchange
+    /// completed. The DOT graph greens when validkey AND `minmtu >
+    /// 0`; else black.
     pub const VALIDKEY: Self = Self(1 << 1);
-    /// `node.h:37`: `bool visited: 1;`. Field 3. Set during BFS
-    /// (`graph.c`) to mark seen nodes. Transient — cleared at the
-    /// start of each graph walk. Appearing in `info` output means
-    /// "the daemon's last BFS reached this node", which is the same
-    /// thing as `reachable` modulo timing (the bit's sticky between
-    /// the BFS-clear and the next set). Mostly noise, but C prints it.
+    /// Field 3. Set during BFS to mark seen nodes. Transient —
+    /// cleared at the start of each graph walk. Appearing in `info`
+    /// output means "the daemon's last BFS reached this node", which
+    /// is the same thing as `reachable` modulo timing. Mostly noise,
+    /// but upstream prints it.
     pub const VISITED: Self = Self(1 << 3);
-    /// `node.h:38`: `bool reachable: 1;`. Field 4. The big one —
-    /// can we route packets to this node? `dump reachable nodes`
-    /// filters on it. `info` switches `Online since:` / `Last seen:`.
+    /// Field 4. The big one — can we route packets to this node?
+    /// `dump reachable nodes` filters on it. `info` switches `Online
+    /// since:` / `Last seen:`.
     pub const REACHABLE: Self = Self(1 << 4);
-    /// `node.h:39`: `bool indirect: 1;`. Field 5. `via != self`.
-    /// UDP traffic to this node is relayed through another node
-    /// (typically because of `IndirectData = yes` in the host file,
-    /// or because it's behind a NAT we can't punch). The DOT graph
-    /// has a separate orange-via-relay color cascade arm.
+    /// Field 5. `via != self`. UDP traffic to this node is relayed
+    /// through another node (typically because of `IndirectData =
+    /// yes` in the host file, or because it's behind a NAT we can't
+    /// punch).
     pub const INDIRECT: Self = Self(1 << 5);
-    /// `node.h:40`: `bool sptps: 1;`. Field 6. Node speaks the new
-    /// (1.1+) handshake. Absence means legacy RSA + AES-CBC-HMAC,
-    /// which is `DISABLE_LEGACY`-gated in our build.
+    /// Field 6. Node speaks the new (1.1+) handshake. Absence means
+    /// legacy RSA + AES-CBC-HMAC, which is `DISABLE_LEGACY`-gated in
+    /// our build.
     pub const SPTPS: Self = Self(1 << 6);
-    /// `node.h:41`: `bool udp_confirmed: 1;`. Field 7. We've SEEN a
-    /// UDP packet from this address (vs just sent to it hoping).
-    /// PMTU discovery sends probes; this bit means one came back.
+    /// Field 7. We've SEEN a UDP packet from this address (vs just
+    /// sent to it hoping). PMTU discovery sends probes; this bit
+    /// means one came back.
     pub const UDP_CONFIRMED: Self = Self(1 << 7);
 }
 
 // Backward-compat aliases for the existing dump.rs callers. Same
-// values, just the old names. Module-private — new code uses StatusBit.
+// values, just the old names. Module-private — new code uses
+// StatusBit.
 const STATUS_REACHABLE: u32 = StatusBit::REACHABLE.0;
 const STATUS_VALIDKEY: u32 = StatusBit::VALIDKEY.0;
 
 // NodeRow — the 22-field beast
 
-/// One row of `dump nodes`. C `tincctl.c:1282`: 22 sscanf fields.
+/// One row of `dump nodes`. 22 sscanf fields.
 ///
-/// Field types match the C declarations at `tincctl.c:1262-1278`.
-/// The daemon-side printf (`node.c:210`) has 21 conversions because
-/// `n->hostname` (one `%s`) is `"HOST port PORT"` (three tokens).
-///
-/// `clippy::struct_excessive_bools` doesn't fire (zero bools — they
-/// live in the `status` u32) but `too_many_lines` might on tests.
-/// Allowed at item.
+/// The daemon-side printf has 21 conversions because `n->hostname`
+/// (one `%s`) is `"HOST port PORT"` (three tokens).
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     /// `%s` — `n->name`. The graph mode's DOT output uses this twice
     /// (label = name, id = name).
     pub name: String,
-    /// `%s` — `n->id` as 12 hex chars (6 bytes, `node_id_t`). The
-    /// daemon's hex-loop is `node.c:204-208`. We keep it as a string
-    /// (it's display-only).
+    /// `%s` — `n->id` as 12 hex chars (6 bytes, `node_id_t`). We
+    /// keep it as a string (it's display-only).
     pub id: String,
     /// `%s` — host portion of `n->hostname`. After `Tok::lit("port")`
     /// re-splits the `sockaddr2hostname` output. Values: `"10.0.0.1"`,
@@ -305,20 +278,17 @@ pub struct NodeRow {
     /// (the running daemon's self-node — graph mode greens it).
     pub host: String,
     /// `port %s` — the port. Same notes as host. `String` not `u16`
-    /// because it might be `"unknown"`/`"unspec"`. C also keeps it
-    /// as `char[4096]`.
+    /// because it might be `"unknown"`/`"unspec"`.
     pub port: String,
     /// `%d` — `cipher_get_nid(n->outcipher)`. Always 0 with
-    /// `DISABLE_LEGACY` (`node.c:213`). We don't act on it.
+    /// `DISABLE_LEGACY`. We don't act on it.
     pub cipher: i32,
     /// `%d` — `digest_get_nid(n->outdigest)`. Always 0 with legacy off.
     pub digest: i32,
     /// `%d` — `digest_length(n->outdigest)`. The daemon writes `%lu`
-    /// (it's a `size_t`); the C CLI reads `%d`. We follow the daemon:
-    /// `u64` parse, `i32` would lose nothing in practice (it's a HMAC
-    /// length, max 64) but the wire is `%lu` so we honor it. Stored
-    /// `i32` because that's what the C output printf expects (`%d`).
-    /// The `as i32` after `lu()` is the same wrap C's read does.
+    /// (it's a `size_t`); the CLI reads `%d`. We follow the daemon:
+    /// `u64` parse, stored `i32` because that's what the output
+    /// printf expects. The value (HMAC length, max 64) fits.
     pub maclength: i32,
     /// `%d` — `n->outcompression`. 0-11 (zlib levels + lz4).
     pub compression: i32,
@@ -334,9 +304,8 @@ pub struct NodeRow {
     pub via: String,
     /// `%d` — `n->distance`. Graph distance (edge count to here).
     pub distance: i32,
-    /// `%hd` — `n->mtu`. Path MTU. Daemon writes `%d`, CLI reads
-    /// `%hd` — the C says `short int pmtu`. Values cap at ~9000
-    /// (jumbo frames) so it fits.
+    /// `%hd` — `n->mtu`. Path MTU. Values cap at ~9000 (jumbo
+    /// frames) so it fits.
     pub pmtu: i16,
     /// `%hd` — `n->minmtu`. Lower bound during PMTU discovery.
     pub minmtu: i16,
@@ -347,8 +316,8 @@ pub struct NodeRow {
     /// bit-time_t. We store i64 (see `Tok::ld` doc).
     pub last_state_change: i64,
     /// `%d` — `n->udp_ping_rtt`. Microseconds, or `-1` for "never
-    /// pinged". The output formats this as `rtt %d.%03d` (ms.us) iff
-    /// not -1 (`tincctl.c:1313`).
+    /// pinged". The output formats this as `rtt %d.%03d` (ms.us)
+    /// iff not -1.
     pub udp_ping_rtt: i32,
     /// `%PRIu64` × 4 — traffic counters.
     pub in_packets: u64,
@@ -360,15 +329,13 @@ pub struct NodeRow {
 impl NodeRow {
     /// Parse the body (after `recv_row` strips `"18 3 "`).
     ///
-    /// C `tincctl.c:1282`: one giant `sscanf` with 22 conversions.
-    /// We do one `Tok` walk with 22 calls. Same shape, no arrays
-    /// (the C's `if(n != 22)` becomes `?` chain — first short field
-    /// errors).
+    /// One giant sscanf with 22 conversions. We do one `Tok` walk
+    /// with 22 calls. Same shape — first short field errors.
     ///
     /// # Errors
-    /// `ParseError` if any field is missing or malformed. The C
-    /// doesn't distinguish which field failed; neither do we
-    /// (debugging a malformed dump means looking at the wire).
+    /// `ParseError` if any field is missing or malformed. We don't
+    /// distinguish which field failed (debugging a malformed dump
+    /// means looking at the wire).
     pub fn parse(body: &str) -> Result<Self, ParseError> {
         let mut t = Tok::new(body);
         // ─── %s %s %s port %s
@@ -383,14 +350,10 @@ impl NodeRow {
         let digest = t.d()?;
         // Daemon `%lu`, CLI `%d`. Read as lu, narrow. The value
         // (digest_length) is < 256 always, narrowing is safe.
-        // `clippy::cast_possible_truncation` would fire on `as i32`;
-        // the C does the same (read %d into int from a %lu source).
-        // The cast is the documented behavior.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let maclength = t.lu()? as i32;
         let compression = t.d()?;
         // ─── %x %x
-        // `%"PRIx32"` is `%x` on every platform we target.
         let options = t.x()?;
         let status = t.x()?;
         // ─── %s %s %d
@@ -437,7 +400,6 @@ impl NodeRow {
     }
 
     /// Is bit 4 (reachable) set? `dump reachable nodes` filter.
-    /// C `tincctl.c:1306`: `if(only_reachable && !status.reachable)`.
     #[must_use]
     pub fn reachable(&self) -> bool {
         self.status & STATUS_REACHABLE != 0
@@ -449,27 +411,19 @@ impl NodeRow {
         self.status & STATUS_VALIDKEY != 0
     }
 
-    /// The plain-text output line. C `tincctl.c:1310-1316`.
+    /// The plain-text output line.
     ///
-    /// One `printf` for the body, an OPTIONAL `printf(" rtt ...")` if
-    /// `udp_ping_rtt != -1`, then `\n`. We build to a String so the
-    /// binary can `print!` once (the rtt-conditional is hard to do
-    /// with `println!` directly).
+    /// One `printf` for the body, an OPTIONAL `printf(" rtt ...")`
+    /// if `udp_ping_rtt != -1`, then `\n`. We build to a String so
+    /// the binary can `print!` once.
     ///
-    /// The format string is wire-compatible with C `tinc dump nodes`
-    /// — scripts that parse it (people DO this) keep working.
-    /// `clippy::format_push_string` would prefer `write!`; allowed
-    /// because the conditional part NEEDS write! and mixing the two
-    /// is uglier.
+    /// The format string is wire-compatible with upstream `tinc dump
+    /// nodes` — scripts that parse it (people DO this) keep working.
     #[must_use]
     pub fn fmt_plain(&self) -> String {
-        // `%s id %s at %s port %s cipher %d digest %d maclength %d
-        //  compression %d options %x status %04x nexthop %s via %s
-        //  distance %d pmtu %d (min %d max %d) rx %llu %llu tx %llu
-        //  %llu`
-        //
-        // The `status %04x` pad is C's; we replicate. Everything
-        // else is bare. The `(min N max N)` parens are literal.
+        // The `status %04x` pad is upstream's; we replicate.
+        // Everything else is bare. The `(min N max N)` parens are
+        // literal.
         let mut s = format!(
             "{} id {} at {} port {} cipher {} digest {} maclength {} \
              compression {} options {:x} status {:04x} nexthop {} via {} \
@@ -495,9 +449,9 @@ impl NodeRow {
             self.out_packets,
             self.out_bytes,
         );
-        // C `tincctl.c:1313-1315`: `if(udp_ping_rtt != -1)`. The
-        // value is microseconds; output is `rtt MS.uuu` (millis dot
-        // micros-mod-1000). The `%03d` pad makes `1500us` → `1.500`.
+        // The value is microseconds; output is `rtt MS.uuu` (millis
+        // dot micros-mod-1000). The `%03d` pad makes `1500us` →
+        // `1.500`.
         if self.udp_ping_rtt != -1 {
             let _ = write!(
                 s,
@@ -509,7 +463,7 @@ impl NodeRow {
         s
     }
 
-    /// The DOT-format node line. C `tincctl.c:1289-1304`.
+    /// The DOT-format node line.
     ///
     /// Five-way color cascade by status:
     ///
@@ -522,19 +476,18 @@ impl NodeRow {
     /// | `minmtu > 0` | green | UDP works (PMTU discovered) |
     /// | (else) | black | TCP-only |
     ///
-    /// The `via != node` check (`tincctl.c:1294`) means "this node's
-    /// UDP traffic is relayed through a different node" — indirect.
-    /// The `minmtu > 0` check means PMTU discovery succeeded, i.e.
-    /// direct UDP works.
+    /// The `via != node` check means "this node's UDP traffic is
+    /// relayed through a different node" — indirect. The `minmtu >
+    /// 0` check means PMTU discovery succeeded, i.e. direct UDP
+    /// works.
     ///
-    /// `style = "filled"` only for MYSELF (the C `?:` at line 1303).
+    /// `style = "filled"` only for MYSELF.
     #[must_use]
     pub fn fmt_dot(&self) -> String {
         let myself = self.host == "MYSELF";
         // ─── Color cascade (first-match-wins)
-        // The C's if-else-if chain `tincctl.c:1290-1301`. The
-        // ORDER matters: a node that's MYSELF and also has minmtu>0
-        // is green-because-self, not green-because-udp.
+        // The ORDER matters: a node that's MYSELF and also has
+        // minmtu>0 is green-because-self, not green-because-udp.
         let color = if myself {
             "green"
         } else if !self.reachable() {
@@ -549,13 +502,9 @@ impl NodeRow {
             "black"
         };
         // ─── DOT line
-        // C `tincctl.c:1303`:
-        // `printf(" \"%s\" [label = \"%s\", color = \"%s\"%s];\n",
-        //         node, node, color, myself ? ", style = \"filled\"" : "")`
-        //
         // The leading space + double-quote escaping is DOT syntax.
         // `label = name` (twice) is redundant in DOT — the node id
-        // IS the default label — but the C does it (probably for
+        // IS the default label — but upstream does it (probably for
         // names with special chars; quoted DOT id makes them safe).
         let style = if myself { ", style = \"filled\"" } else { "" };
         format!(
@@ -567,8 +516,8 @@ impl NodeRow {
 
 // EdgeRow
 
-/// One row of `dump edges`. C `tincctl.c:1323`: 8 fields, two `port`
-/// literals (both addr and local_addr are `sockaddr2hostname` output).
+/// One row of `dump edges`. 8 fields, two `port` literals (both
+/// addr and local_addr are `sockaddr2hostname` output).
 ///
 /// Edges are directional in tinc's graph (an edge A→B is distinct
 /// from B→A; the daemon stores both). `dump edges` lists them all;
@@ -584,12 +533,12 @@ pub struct EdgeRow {
     pub options: u32,
     /// `%d` — `e->weight`. Edge cost for shortest-path. The DOT
     /// weight is `1 + 65536/weight` (so high-weight edges look
-    /// thinner — `tincctl.c:1330`).
+    /// thinner).
     pub weight: i32,
 }
 
 impl EdgeRow {
-    /// Parse body. C `tincctl.c:1323`.
+    /// Parse body.
     ///
     /// # Errors
     /// `ParseError` if short or malformed.
@@ -619,10 +568,9 @@ impl EdgeRow {
         })
     }
 
-    /// Plain-text. C `tincctl.c:1338`.
+    /// Plain-text.
     #[must_use]
     pub fn fmt_plain(&self) -> String {
-        // `%s to %s at %s port %s local %s port %s options %x weight %d`
         format!(
             "{} to {} at {} port {} local {} port {} options {:x} weight {}",
             self.from,
@@ -636,29 +584,25 @@ impl EdgeRow {
         )
     }
 
-    /// DOT edge line. C `tincctl.c:1330-1336`.
+    /// DOT edge line.
     ///
-    /// `directed`: digraph mode (`->`). Graph mode (`--`) deduplicates
-    /// by `strcmp(from, to) > 0` — only emit one of each pair.
-    /// Returns `None` for the suppressed half in undirected mode.
+    /// `directed`: digraph mode (`->`). Graph mode (`--`)
+    /// deduplicates by `strcmp(from, to) > 0` — only emit one of
+    /// each pair. Returns `None` for the suppressed half in
+    /// undirected mode.
     ///
     /// The weight calculation `1 + 65536/weight` makes a weight-1
-    /// edge `w = 65537` (very strong) and a weight-500 edge `w = 132`
-    /// (weak). DOT layout engines use higher weight to keep nodes
-    /// closer. Integer-divides in C; we use float to match.
+    /// edge `w = 65537` (very strong) and a weight-500 edge `w =
+    /// 132` (weak). DOT layout engines use higher weight to keep
+    /// nodes closer.
     #[must_use]
     pub fn fmt_dot(&self, directed: bool) -> Option<String> {
         // ─── Undirected dedup
-        // C `tincctl.c:1332`: `if(do_graph == 1 && strcmp(node1,
-        // node2) > 0)`. The C uses `node1`/`node2` from the OUTER
-        // sscanf (`tincctl.c:1243`), which are positionally the
-        // same as `from`/`to` (first two fields). It works because
-        // the daemon emits both A→B and B→A; suppressing the half
-        // where from > to (strcmp) leaves one per pair.
-        //
-        // The C does `>`, not `>=` — if from == to (self-loop)
-        // both would emit. tinc doesn't have self-edges so it's
-        // moot, but `>` is what's written.
+        // It works because the daemon emits both A→B and B→A;
+        // suppressing the half where from > to (strcmp) leaves one
+        // per pair. The check is `>`, not `>=` — if from == to
+        // (self-loop) both would emit. tinc doesn't have self-edges
+        // so it's moot, but `>` is what's written.
         let arrow = if directed {
             "->"
         } else {
@@ -671,10 +615,8 @@ impl EdgeRow {
         };
 
         // ─── Weight: float
-        // C `tincctl.c:1330`: `float w = 1.0f + 65536.0f / (float)
-        // weight;`. The cast and float division. `weight` is signed;
-        // negative would give negative `w`, weird for DOT but the C
-        // doesn't guard. Neither do we.
+        // `weight` is signed; negative would give negative `w`,
+        // weird for DOT but upstream doesn't guard. Neither do we.
         //
         // `as f32` from i32 is exact for the values we see (weight
         // is < 2^24 in any sane tinc setup).
@@ -682,16 +624,15 @@ impl EdgeRow {
         let w = 1.0_f32 + 65536.0_f32 / self.weight as f32;
 
         // ─── DOT line
-        // C: `" \"%s\" %s \"%s\" [w = %f, weight = %f];\n"`. The
-        // `%f` is C printf default float format: 6 decimal places.
+        // `%f` is printf default float format: 6 decimal places.
         // Rust `{}` for f32 picks shortest-repr (1.0 → "1"). Use
-        // `{:.6}` to match C exactly — `dot` itself doesn't care
+        // `{:.6}` to match exactly — `dot` itself doesn't care
         // about decimals but downstream scripts might.
         //
         // Why TWO weight attributes (`w` and `weight`)? `weight` is
         // graphviz's edge weight (layout hint). `w` is... not a
         // standard attribute. Probably for some downstream tool.
-        // The C's been writing it since 2012; keep it.
+        // Upstream's been writing it since 2012; keep it.
         Some(format!(
             " \"{from}\" {arrow} \"{to}\" [w = {w:.6}, weight = {w:.6}];",
             from = self.from,
@@ -702,7 +643,7 @@ impl EdgeRow {
 
 // SubnetRow
 
-/// One row of `dump subnets`. C `tincctl.c:1345`: 2 fields.
+/// One row of `dump subnets`. 2 fields.
 ///
 /// Simplest of the four. No `port` literal (subnets don't have
 /// ports). The subnet string is `net2str` output; `strip_weight`
@@ -714,7 +655,7 @@ pub struct SubnetRow {
     /// strips `#10` again anyway (`strip_weight`).
     pub subnet: String,
     /// `%s` — owner name, or `"(broadcast)"` (literal, parens
-    /// included) for broadcast subnets (`subnet.c:406`).
+    /// included) for broadcast subnets.
     pub owner: String,
 }
 
@@ -730,34 +671,32 @@ impl SubnetRow {
         Ok(Self { subnet, owner })
     }
 
-    /// Plain-text. C `tincctl.c:1352`: `"%s owner %s"`.
-    /// `strip_weight` is applied here, not in parse — so tests can
-    /// see the raw subnet too.
+    /// Plain-text. `strip_weight` is applied here, not in parse —
+    /// so tests can see the raw subnet too.
     #[must_use]
     pub fn fmt_plain(&self) -> String {
         format!("{} owner {}", strip_weight(&self.subnet), self.owner)
     }
 }
 
-/// `info.c:41-49`. Strip `#10` suffix (default weight).
+/// Strip `#10` suffix (default weight).
 ///
-/// The daemon's `net2str` (`subnet_parse.c:370`) already omits `#10`
-/// when `weight == DEFAULT_WEIGHT`, so this should be a no-op against
-/// a same-version daemon. It's defense against:
+/// The daemon's `net2str` already omits `#10` when `weight ==
+/// DEFAULT_WEIGHT`, so this should be a no-op against a same-version
+/// daemon. It's defense against:
 ///
 /// 1. Older daemons that didn't have the omit logic.
 /// 2. The default ever changing (then old configs with explicit
 ///    `#10` would surface it).
 ///
-/// C: `if(len >= 3 && !strcmp(netstr + len - 3, "#10"))`. The
 /// `>= 3` not `> 3` means `"#10"` alone (3 chars) → `""`. Probably
-/// not what you want, but it's what C does. (Never happens — a bare
-/// `#10` isn't a valid subnet, daemon won't send it.)
+/// not what you want, but it's what upstream does. (Never happens —
+/// a bare `#10` isn't a valid subnet, daemon won't send it.)
 ///
-/// `tinc_proto::DEFAULT_WEIGHT` is 10 — re-declared as a string here
-/// because we're matching the literal `"#10"`, not formatting an
-/// int. If DEFAULT_WEIGHT ever changes, this needs to change too;
-/// the test `strip_weight_tracks_default` notices.
+/// `tinc_proto::DEFAULT_WEIGHT` is 10 — we're matching the literal
+/// `"#10"`, not formatting an int. If DEFAULT_WEIGHT ever changes,
+/// this needs to change too; the test `strip_weight_tracks_default`
+/// notices.
 #[must_use]
 pub fn strip_weight(s: &str) -> &str {
     s.strip_suffix("#10").unwrap_or(s)
@@ -765,8 +704,7 @@ pub fn strip_weight(s: &str) -> &str {
 
 // ConnRow
 
-/// One row of `dump connections`. C `tincctl.c:1357`: 6 fields, one
-/// `port` literal.
+/// One row of `dump connections`. 6 fields, one `port` literal.
 ///
 /// "Connections" are the live meta-connections (the TCP sockets to
 /// peers), as opposed to "edges" (the graph edges, which include
@@ -777,7 +715,7 @@ pub struct ConnRow {
     pub host: String,
     pub port: String,
     pub options: u32,
-    /// `%d` — `c->socket`. The fd number. `i32` because C `int`.
+    /// `%d` — `c->socket`. The fd number.
     pub socket: i32,
     /// `%x` — `c->status.value`. Different bitfield from node
     /// status (`connection.h` has its own). We don't read bits;
@@ -809,12 +747,10 @@ impl ConnRow {
         })
     }
 
-    /// Plain-text. C `tincctl.c:1364`.
+    /// Plain-text. Unpadded hex for both, unlike node's
+    /// `status %04x`. Yes upstream is inconsistent. Replicated.
     #[must_use]
     pub fn fmt_plain(&self) -> String {
-        // `%s at %s port %s options %x socket %d status %x`
-        // Unpadded hex for both, unlike node's `status %04x`.
-        // Yes the C is inconsistent. Replicated.
         format!(
             "{} at {} port {} options {:x} socket {} status {:x}",
             self.name, self.host, self.port, self.options, self.socket, self.status,
@@ -824,8 +760,8 @@ impl ConnRow {
 
 // Dump invitations — pure fs, no daemon
 
-/// One outstanding invitation. The C just prints them; we collect
-/// so the binary can decide stdout/stderr.
+/// One outstanding invitation. We collect so the binary can decide
+/// stdout/stderr.
 #[derive(Debug, Clone)]
 pub struct InviteRow {
     /// The 24-char b64 cookie-hash (the filename).
@@ -834,36 +770,24 @@ pub struct InviteRow {
     pub invitee: String,
 }
 
-/// `dump_invitations` — `tincctl.c:1108-1180`.
-///
 /// Walks `confbase/invitations/`, finds 24-char-b64-named files,
-/// reads `Name = ` from line 1, collects. C printf-per-file; we
-/// return Vec for the binary to print.
+/// reads `Name = ` from line 1, collects. Upstream printf-per-file;
+/// we return Vec for the binary to print.
 ///
-/// The C has THREE per-file failure modes that warn-and-skip
+/// Upstream has THREE per-file failure modes that warn-and-skip
 /// (`fprintf(stderr, ...); continue;`):
 ///
-/// 1. File won't open → `"Cannot open %s"`
-/// 2. Empty file → `"Invalid invitation file %s"`
-/// 3. First line isn't `Name = VALID_ID` → same message
+/// 1. File won't open
+/// 2. Empty file
+/// 3. First line isn't `Name = VALID_ID`
 ///
-/// We don't `eprintln!` from lib code. The binary COULD inspect
-/// these (return a `(Vec<InviteRow>, Vec<Warning>)`), but the C
-/// caller doesn't either — it just prints and moves on. The most
-/// useful behavior is "show what's valid, skip the rest". So we
-/// silently skip. If someone wants the warnings, the seam is here.
-///
-/// Returns `(rows, found_any)`. The `found_any` bool drives the
-/// "No outstanding invitations." stderr line — the C distinguishes
-/// "directory exists, was empty/all-invalid" (found=false, prints)
-/// from "directory doesn't exist" (also prints, exit 0). Both same
-/// outcome here (`rows.is_empty()`); we collapse.
+/// We don't `eprintln!` from lib code. The most useful behavior is
+/// "show what's valid, skip the rest". So we silently skip. If
+/// someone wants the warnings, the seam is here.
 ///
 /// # Errors
 /// `Io` if the directory exists but readdir fails (perms?).
-/// ENOENT is NOT an error — exit 0 with empty Vec, same as C
-/// `tincctl.c:1115`: `if(errno == ENOENT) { fprintf("No outstanding");
-/// return 0; }`.
+/// ENOENT is NOT an error — exit 0 with empty Vec.
 pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     use tinc_crypto::invite::SLUG_PART_LEN;
 
@@ -874,7 +798,6 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // C `tincctl.c:1115`: `if(errno == ENOENT) return 0;`.
             // Never created the dir → no invites → not an error.
             return Ok(Vec::new());
         }
@@ -885,21 +808,17 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
     for entry in entries {
         // ─── Per-entry errors are skip, not fail
-        // C `readdir` doesn't fail per-entry on Linux but it CAN
-        // (e.g. NFS weirdness). The C doesn't check; we skip.
+        // `readdir` doesn't fail per-entry on Linux but it CAN
+        // (e.g. NFS weirdness). Upstream doesn't check; we skip.
         let Ok(entry) = entry else { continue };
         let name_os = entry.file_name();
 
         // ─── 24-char-b64 filter
-        // C `tincctl.c:1130`: `b64decode_tinc(ent->d_name, buf, 24)
-        // != 18`. The C reads first-24-chars (length cap), decodes,
-        // checks for 18 bytes out.
-        //
-        // We're stricter: name must be EXACTLY 24 chars AND decode
-        // to 18 bytes. C would accept a 25-char name with valid
-        // first 24 (the cap reads 24, decodes to 18). Daemon lookup
-        // is exact-24, so a 25-char file never matches an invite
-        // anyway. Same as `sweep_expired` (`invite.rs:326`).
+        // We're stricter than upstream: name must be EXACTLY 24
+        // chars AND decode to 18 bytes. Upstream would accept a
+        // 25-char name with valid first 24. Daemon lookup is
+        // exact-24, so a 25-char file never matches an invite
+        // anyway. Same as `sweep_expired`.
         //
         // OsStr::len() is bytes (Unix). 24 bytes is 24 ASCII chars
         // for valid b64; non-ASCII bytes would fail decode anyway.
@@ -913,7 +832,6 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
         };
         // Decode-validate. We don't NEED the bytes (we just need to
         // know the name is valid b64), but `decode` is the validator.
-        // Same as C's discard of `buf`.
         let Some(decoded) = tinc_crypto::b64::decode(name) else {
             continue;
         };
@@ -924,43 +842,33 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
         debug_assert_eq!(decoded.len(), 18);
 
         // ─── Read first line
-        // C `tincctl.c:1141-1156`: `fopen`, `fgets`, `fclose`. We
-        // read just enough — the file might have a long body (the
-        // host config blob), don't slurp it.
+        // We read just enough — the file might have a long body
+        // (the host config blob), don't slurp it.
         let path = entry.path();
         let Ok(file) = fs::File::open(&path) else {
-            // C: `fprintf(stderr, "Cannot open %s: %s")`. Skip.
             continue;
         };
         let mut first = String::new();
         // BufReader for one line is overhead but cleaner than a
         // hand-rolled byte-by-byte newline scan.
         if BufReader::new(file).read_line(&mut first).is_err() || first.is_empty() {
-            // C `tincctl.c:1152`: `if(!fgets(buf, ...))`.
-            // Empty file or read error → "Invalid invitation file".
             continue;
         }
 
         // ─── Extract `Name = X`
-        // C `tincctl.c:1158-1166`: rstrip `\t \r\n`, then
-        // `strncmp(buf, "Name = ", 7) || !check_id(buf + 7)`.
-        //
-        // The rstrip uses a pre-decrement loop with `strchr("\t \r\n",
-        // ...)` — strips any combination from the right. We do the
-        // same set.
+        // The rstrip uses `strchr("\t \r\n", ...)` — strips any
+        // combination from the right. We do the same set.
         //
         // The `"Name = "` (7 chars, exact match including spaces)
-        // is what `cmd_invite` writes (`invitation.c:557`). It's NOT
-        // the general config tokenizer — `Name=X` (no spaces) would
-        // FAIL here even though it parses fine in `tinc.conf`. This
-        // is intentional: the format we wrote is the format we read.
+        // is what `cmd_invite` writes. It's NOT the general config
+        // tokenizer — `Name=X` (no spaces) would FAIL here even
+        // though it parses fine in `tinc.conf`. This is intentional:
+        // the format we wrote is the format we read.
         let first = first.trim_end_matches(['\t', ' ', '\r', '\n']);
         let Some(invitee) = first.strip_prefix("Name = ") else {
-            // C: "Invalid invitation file %s". Skip.
             continue;
         };
         if !check_id(invitee) {
-            // C: same. Skip.
             continue;
         }
 
@@ -976,7 +884,7 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 // The daemon-backed dumps
 
 /// Adapter: `CtlError → CmdError`. Same shape as `ctl_simple::
-/// daemon_err`, re-declared (modules independent — see Constraints).
+/// daemon_err`, re-declared (modules independent).
 #[allow(clippy::needless_pass_by_value)]
 fn daemon_err(e: CtlError) -> CmdError {
     CmdError::BadInput(e.to_string())
@@ -984,36 +892,35 @@ fn daemon_err(e: CtlError) -> CmdError {
 
 /// Result of a daemon dump. Separate type so the binary can route
 /// `Ok(DumpOutput::Lines(v))` → `println!` per line and the
-/// "no entries" case to stderr (the C convention for empty dumps
-/// is silence — exit 0, no output. We follow).
+/// "no entries" case to stderr (the convention for empty dumps is
+/// silence — exit 0, no output).
 #[derive(Debug)]
 pub enum DumpOutput {
     /// Lines ready for stdout. The binary prints each + `\n`.
     Lines(Vec<String>),
 }
 
-/// Run one of the daemon-backed dumps. `tincctl.c:1208-1376`.
+/// Run one of the daemon-backed dumps.
 ///
 /// `paths` must be `resolve_runtime()`d (the binary's `needs_daemon`
 /// gate handles this).
 ///
 /// The function shape: connect, send 1-2 requests, recv-loop with
-/// per-kind parse, format, return lines. The C inlines all four
+/// per-kind parse, format, return lines. Upstream inlines all four
 /// parses into one switch inside one loop; we do the same — the
 /// graph mode interleaves nodes-then-edges and the loop body
 /// dispatches on the row's kind, so per-kind helper functions
 /// would NEED a closure or generic anyway. One function, one match.
 ///
-/// `clippy::too_many_lines`: the C is 165 lines for the same span
-/// (one switch in one loop). Pulling the per-kind parse out would
-/// make the graph-mode interleave less obvious. Allowed.
+/// `clippy::too_many_lines`: ~165 lines for the same span. Pulling
+/// the per-kind parse out would make the graph-mode interleave less
+/// obvious. Allowed.
 ///
 /// # Errors
 /// Connect failure, recv failure (daemon crashed mid-dump), or
 /// row parse failure. Row parse failure SHOULD never happen
 /// against same-version daemon — if it does, the format strings
-/// drifted, file a bug. The C `tincctl.c:1285`: `"Unable to parse
-/// node dump from tincd: %s"` (it includes the line; we do too).
+/// drifted, file a bug.
 #[cfg(unix)]
 pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
@@ -1021,9 +928,9 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     let mut ctl = CtlSocket::connect(paths).map_err(daemon_err)?;
 
     // ─── Send: 1 or 2 requests
-    // C `tincctl.c:1213-1228`. Graph/digraph send NODES then EDGES;
-    // everything else sends one. The daemon responds in order
-    // (each ends with its terminator).
+    // Graph/digraph send NODES then EDGES; everything else sends
+    // one. The daemon responds in order (each ends with its
+    // terminator).
     match kind {
         Kind::Nodes | Kind::ReachableNodes => {
             ctl.send(CtlRequest::DumpNodes).map_err(daemon_err)?;
@@ -1038,11 +945,10 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
             ctl.send(CtlRequest::DumpConnections).map_err(daemon_err)?;
         }
         Kind::Graph | Kind::Digraph => {
-            // C `tincctl.c:1221-1228`: TWO sends. The daemon
-            // doesn't pipeline (it's strictly request-response on
-            // CONTROL), so the second request actually arrives
-            // while the daemon is still SENDING the first response.
-            // That's fine — TCP buffers it.
+            // TWO sends. The daemon doesn't pipeline (it's strictly
+            // request-response on CONTROL), so the second request
+            // actually arrives while the daemon is still SENDING
+            // the first response. That's fine — TCP buffers it.
             ctl.send(CtlRequest::DumpNodes).map_err(daemon_err)?;
             ctl.send(CtlRequest::DumpEdges).map_err(daemon_err)?;
         }
@@ -1050,15 +956,15 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     }
 
     // ─── Receive loop
-    // C `tincctl.c:1241-1376`. The big while-recvline-switch.
+    // The big while-recvline-switch.
     //
     // Exit condition: a terminator (2-int row). For graph mode,
     // the FIRST terminator (DUMP_NODES) is a continue, the SECOND
     // (DUMP_EDGES) exits. For everything else, first terminator
-    // exits. The C `tincctl.c:1247-1254`.
+    // exits.
     let mut lines = Vec::new();
 
-    // Graph mode header. C `tincctl.c:1235-1239`.
+    // Graph mode header.
     match kind {
         Kind::Graph => lines.push("graph {".to_owned()),
         Kind::Digraph => lines.push("digraph {".to_owned()),
@@ -1071,30 +977,17 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
         match ctl.recv_row().map_err(daemon_err)? {
             // ─── Terminator: maybe done
             DumpRow::End(end_kind) => {
-                // C `tincctl.c:1245-1254`: `n == 2`. Graph mode
-                // continues past the NODES terminator, exits on
-                // EDGES. Non-graph exits on any terminator.
-                //
-                // clippy::redundant_continue: the `continue` IS the
-                // semantics here — it's how C reads (`if(do_graph
-                // && req == REQ_DUMP_NODES) continue;`). The
-                // alternative (invert to `if !match { break }`)
-                // hides the only-one-arm-loops structure. Allowed
-                // by spelling the conditional out: the body of the
-                // single match arm is empty and the loop continues.
+                // Graph mode continues past the NODES terminator,
+                // exits on EDGES. Non-graph exits on any terminator.
                 if matches!(
                     (kind, end_kind),
-                    // Graph mode, first terminator (NODES). The C:
-                    // `if(do_graph && req == REQ_DUMP_NODES) continue`.
-                    // Edges still to come.
+                    // Graph mode, first terminator (NODES). Edges
+                    // still to come.
                     (Kind::Graph | Kind::Digraph, CtlRequest::DumpNodes)
                 ) {
                     // Empty: fall through to next loop iteration.
-                    // (clippy doesn't object to falling through,
-                    // just to spelling `continue` at the bottom.)
                 } else {
-                    // Anything else: done. C: `return 0;` (after
-                    // printing `}` for graph).
+                    // Anything else: done.
                     break;
                 }
             }
@@ -1102,19 +995,17 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
             // ─── Node row
             // The kind-from-row, NOT the kind-we-asked-for. Graph
             // mode interleaves; the daemon sends `18 3 ...` then
-            // `18 4 ...` and we dispatch on the 3/4. C `switch(req)`.
+            // `18 4 ...` and we dispatch on the 3/4.
             DumpRow::Row(CtlRequest::DumpNodes, body) => {
                 let row = NodeRow::parse(&body).map_err(|_| {
-                    // C `tincctl.c:1285`: includes the bad line.
-                    // We do too — debugging a wire mismatch needs it.
+                    // Includes the bad line. Debugging a wire
+                    // mismatch needs it.
                     CmdError::BadInput(format!("Unable to parse node dump from tincd: {body}"))
                 })?;
 
                 match kind {
                     Kind::Nodes => lines.push(row.fmt_plain()),
                     Kind::ReachableNodes => {
-                        // C `tincctl.c:1306`: `if(only_reachable
-                        // && !status.reachable) continue;`.
                         if row.reachable() {
                             lines.push(row.fmt_plain());
                         }
@@ -1122,10 +1013,9 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
                     Kind::Graph | Kind::Digraph => {
                         lines.push(row.fmt_dot());
                     }
-                    // We sent the wrong request?? Daemon bug, or
-                    // the unsafe-tighten-of-C-code path: C doesn't
-                    // check this, just dispatches on `req`. We
-                    // tighten here too — getting NODES when we
+                    // We sent the wrong request?? Daemon bug.
+                    // Upstream doesn't check this, just dispatches
+                    // on `req`. We tighten — getting NODES when we
                     // asked for EDGES is a protocol violation.
                     _ => {
                         return Err(CmdError::BadInput("Unexpected node row".into()));
@@ -1136,9 +1026,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
             // ─── Edge row
             DumpRow::Row(CtlRequest::DumpEdges, body) => {
                 let row = EdgeRow::parse(&body).map_err(|_| {
-                    // C `tincctl.c:1326`: doesn't include the line
-                    // (just `"Unable to parse edge dump"`). We add
-                    // it — same format as node, more useful.
                     CmdError::BadInput(format!("Unable to parse edge dump from tincd: {body}"))
                 })?;
 
@@ -1146,9 +1033,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
                     Kind::Edges => lines.push(row.fmt_plain()),
                     Kind::Graph | Kind::Digraph => {
                         // fmt_dot returns None for the suppressed
-                        // half (undirected dedup). C does the
-                        // suppression with an if-around-printf;
-                        // we do it with Option.
+                        // half (undirected dedup).
                         if let Some(line) = row.fmt_dot(directed) {
                             lines.push(line);
                         }
@@ -1176,7 +1061,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
             }
 
             // ─── Unknown row type
-            // C `tincctl.c:1368-1370`: `default:` in the switch.
             // The daemon sent a row type we didn't ask for and
             // don't know. This is a daemon bug or version skew.
             DumpRow::Row(_, _) => {
@@ -1188,8 +1072,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
     }
 
     // ─── Graph footer
-    // C `tincctl.c:1249-1250`: `if(do_graph) printf("}\n")` is
-    // INSIDE the n==2 block, before `return 0`. Same effect.
     match kind {
         Kind::Graph | Kind::Digraph => lines.push("}".to_owned()),
         _ => {}
@@ -1201,8 +1083,8 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
 // Tests
 //
 // Golden vectors transcribed from the daemon's printf format strings.
-// The daemon's `node.c:210` is the spec; these test inputs are what
-// you'd see on the wire if you `nc -U` the control socket.
+// These test inputs are what you'd see on the wire if you `nc -U`
+// the control socket.
 //
 // The fmt_plain output is also pinned — it's a script-compatibility
 // surface. If anyone changes the output format, scripts that parse
@@ -1218,20 +1100,20 @@ mod tests {
     // ─── Kind parsing
     //
     // The argv → Kind step. The `reachable nodes` shift is the
-    // tricky one (must shift BEFORE arity check, like C).
+    // tricky one (must shift BEFORE arity check).
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|&x| x.to_owned()).collect()
     }
 
-    /// `parse_kind` Ok-path table. C uses `strcasecmp` throughout
-    /// (`tincctl.c:1185` et al). The `reachable nodes` shift: C does
-    /// argv++/argc-- so the rest of cmd_dump sees `nodes` as argv[1].
+    /// `parse_kind` Ok-path table. `strcasecmp` throughout. The
+    /// `reachable nodes` shift: argv++/argc-- so the rest of the
+    /// dispatch sees `nodes` as argv[1].
     #[test]
     fn kind_ok() {
         #[rustfmt::skip]
         let cases: &[(&[&str], Kind)] = &[
-            // ─── basic ───
+            // basic
             (&["nodes"],            Kind::Nodes),
             (&["edges"],            Kind::Edges),
             (&["subnets"],          Kind::Subnets),
@@ -1239,12 +1121,12 @@ mod tests {
             (&["graph"],            Kind::Graph),
             (&["digraph"],          Kind::Digraph),
             (&["invitations"],      Kind::Invitations),
-            // ─── strcasecmp: nobody types it this way, but C accepts ───
+            // strcasecmp: nobody types it this way, but accepted
             (&["NODES"],            Kind::Nodes),
             (&["Digraph"],          Kind::Digraph),
-            // ─── reachable shift (C argv++/argc--) ───
+            // reachable shift
             (&["reachable", "nodes"], Kind::ReachableNodes),
-            // strcasecmp on `reachable` too — `tincctl.c:1185`
+            // strcasecmp on `reachable` too
             (&["REACHABLE", "nodes"], Kind::ReachableNodes),
         ];
         for (input, expected) in cases {
@@ -1257,19 +1139,19 @@ mod tests {
     }
 
     /// `parse_kind` Err-path table. All `CmdError::BadInput`;
-    /// message text is user-facing (C printf format strings).
+    /// message text is user-facing.
     #[test]
     fn kind_err() {
         #[rustfmt::skip]
         let cases: &[(&[&str], &str)] = &[
-            // `reachable X` for X != nodes. C `tincctl.c:1187`.
+            // `reachable X` for X != nodes.
             (&["reachable", "edges"], "only supported for nodes"),
             // The 90s GNU backtick-apostrophe.
             (&["reachable", "graph"], "`reachable'"),
-            // `reachable` alone: C `argc > 2` fails first, falls to `argc != 2`.
+            // `reachable` alone: `argc > 2` fails first, falls to `argc != 2`.
             // Our match: rest.first() is None → arity message.
             (&["reachable"],          "Invalid number"),
-            // Zero args → arity. C `argc != 2` after no shift.
+            // Zero args → arity.
             (&[],                     "Invalid number"),
             // Two args without `reachable` → arity. `dump nodes edges`.
             (&["nodes", "edges"],     "Invalid number"),
@@ -1281,8 +1163,8 @@ mod tests {
                 "input: {input:?}"
             );
         }
-        // Unknown type: exact match. C `tincctl.c:1230`:
-        // `"Unknown dump type '%s'."` — single-quote + trailing period.
+
+        // Unknown type: exact match. Single-quote + trailing period.
         let err = parse_kind(&s(&["lasers"])).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(m) if m == "Unknown dump type 'lasers'."));
     }
@@ -1298,14 +1180,11 @@ mod tests {
 
     // ─── NodeRow parse
     //
-    // Golden vector: hand-computed from `node.c:210`'s format string,
+    // Golden vector: hand-computed from the daemon's format string,
     // with realistic values. `n->hostname` = "10.0.0.1 port 655".
 
-    /// The reference row. `node.c:210` formats:
-    ///   `%d %d %s %s %s %d %d %lu %d %x %x %s %s %d %d %d %d %ld %d
-    ///    %llu %llu %llu %llu`
-    /// We construct: `recv_row` strips `18 3 `, so the body starts
-    /// at `name`.
+    /// The reference row. `recv_row` strips `18 3 `, so the body
+    /// starts at `name`.
     ///
     /// Values chosen for unambiguity:
     /// - `status = 0x12` → bit 1 set (validkey), bit 4 set
@@ -1348,13 +1227,12 @@ mod tests {
     }
 
     /// Host-field variants beyond the golden vector.
-    /// - `n->hostname = NULL` → daemon sends `"unknown port unknown"`
-    ///   (`node.c:211`); the `port` literal still splits.
-    /// - `MYSELF`: `tincctl.c:1291` checks `!strcmp(host, "MYSELF")`,
-    ///   so it's a literal in `sockaddr2hostname` format.
+    /// - `n->hostname = NULL` → daemon sends `"unknown port unknown"`;
+    ///   the `port` literal still splits.
+    /// - `MYSELF`: a literal in `sockaddr2hostname` format.
     #[test]
     fn node_parse_host_variants() {
-        // ─── unknown host: status 0 → no reachable/validkey bits ───
+        // unknown host: status 0 → no reachable/validkey bits
         let r = NodeRow::parse(
             "carol 000000000000 unknown port unknown \
              0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0",
@@ -1367,7 +1245,7 @@ mod tests {
         assert_eq!(r.distance, 99, "unknown: distance");
         assert_eq!(r.udp_ping_rtt, -1, "unknown: rtt=-1");
 
-        // ─── MYSELF: status 0x1f = bits 0-4 all set ───
+        // MYSELF: status 0x1f = bits 0-4 all set
         let r = NodeRow::parse(
             "myself 010203040506 MYSELF port 655 \
              0 0 0 0 0 1f - myself 0 1518 1518 1518 1700000000 -1 0 0 0 0",
@@ -1377,8 +1255,8 @@ mod tests {
         assert!(r.reachable(), "myself: status=0x1f → reachable");
     }
 
-    /// Short row → ParseError. The C `tincctl.c:1284`: `n != 22`.
-    /// Our `?` chain bails at first missing field.
+    /// Short row → ParseError. Our `?` chain bails at first missing
+    /// field.
     #[test]
     fn node_parse_short() {
         assert!(NodeRow::parse("alice 0a1b2c3d4e5f 10.0.0.1").is_err());
@@ -1391,13 +1269,12 @@ mod tests {
         );
     }
 
-    /// `fmt_plain` output: the script-compatible format. C `tincctl.c
-    /// :1310`. If this changes, `tinc dump nodes | awk` scripts break.
+    /// `fmt_plain` output: the script-compatible format. If this
+    /// changes, `tinc dump nodes | awk` scripts break.
     ///
     /// Three facets of one contract:
     /// - the full golden line (the spec, byte-for-byte)
     /// - rtt suffix: present iff `udp_ping_rtt != -1`, `%03d` padded
-    ///   (C `tincctl.c:1313-1314`: `printf(" rtt %d.%03d", rtt/1000, rtt%1000)`)
     /// - status `%04x` pad (contrast conn dump's unpadded `%x`)
     #[test]
     fn node_fmt_plain_contract() {
@@ -1443,8 +1320,7 @@ mod tests {
 
     // ─── DOT format: color cascade
 
-    /// `fmt_dot` color cascade. C `tincctl.c:1290-1303`, an
-    /// if-else-if chain in this order:
+    /// `fmt_dot` color cascade, an if-else-if chain in this order:
     ///   1. MYSELF → green + filled
     ///   2. !reachable → red
     ///   3. via != name (indirect, UDP relayed) → orange
@@ -1490,9 +1366,8 @@ mod tests {
 
     // ─── EdgeRow
 
-    /// Golden vector. `edge.c:128`: `%d %d %s %s %s %s %x %d`.
-    /// Both addresses are `sockaddr2hostname` output (3 tokens each).
-    /// Body has `recv_row` already stripped `18 4 `.
+    /// Golden vector. Both addresses are `sockaddr2hostname` output
+    /// (3 tokens each). Body has `recv_row` already stripped `18 4 `.
     const EDGE_BODY: &str = "alice bob 10.0.0.2 port 655 192.168.1.5 port 655 1000000c 100";
 
     #[test]
@@ -1508,8 +1383,8 @@ mod tests {
         assert_eq!(r.weight, 100);
     }
 
-    /// AF_UNSPEC local address: `"unspec port unspec"` (`netutl.c
-    /// :160`). Common — local_address is often unset.
+    /// AF_UNSPEC local address: `"unspec port unspec"`. Common —
+    /// local_address is often unset.
     #[test]
     fn edge_parse_unspec_local() {
         let body = "a b 10.0.0.1 port 655 unspec port unspec 0 1";
@@ -1528,16 +1403,15 @@ mod tests {
         );
     }
 
-    /// DOT edge weight: `1 + 65536/weight`. C `tincctl.c:1330`.
-    /// `%f` is 6 decimal places. weight=100 → 1+655.36 = 656.36.
+    /// DOT edge weight: `1 + 65536/weight`. `%f` is 6 decimal places.
+    /// weight=100 → 1+655.36 = 656.36.
     #[test]
     fn edge_dot_weight_calc() {
         let r = EdgeRow::parse(EDGE_BODY).unwrap();
         let dot = r.fmt_dot(true).unwrap();
         // 1.0 + 65536.0/100.0 = 656.36. Six decimals: 656.360000.
         // BUT: f32 precision. 656.36 might be 656.359985 in f32.
-        // The C uses float (32-bit) so it has the same issue. Let's
-        // check what C printf %f gives for that:
+        // Upstream uses float (32-bit) so it has the same issue:
         //   float w = 1.0f + 65536.0f / 100.0f;  → 656.359985
         //   printf("%f", w);                      → "656.359985"
         // We must match that, which we do by using f32. Assert it.
@@ -1546,10 +1420,9 @@ mod tests {
     }
 
     /// `fmt_dot` dedup + arrow style. Digraph emits all (`->`).
-    /// Undirected: suppress `from > to` half (C `tincctl.c:1332`:
-    /// `do_graph == 1 && strcmp(node1, node2) > 0`; strcmp is
-    /// byte-order, Rust String Ord is byte-order). The C `>` not
-    /// `>=` means self-loops emit (tinc has no self-edges, but).
+    /// Undirected: suppress `from > to` half (strcmp is byte-order,
+    /// Rust String Ord is byte-order). The `>` not `>=` means
+    /// self-loops emit (tinc has no self-edges, but).
     #[test]
     fn edge_dot_dedup_table() {
         const BA: &str = "bob alice 10.0.0.1 port 655 unspec port unspec 0 100";
@@ -1575,8 +1448,8 @@ mod tests {
     // ─── SubnetRow + strip_weight
 
     /// `SubnetRow::parse` shapes. Broadcast owner `"(broadcast)"`
-    /// (`subnet.c:406`; parens are literal). Weight suffix survives
-    /// parse — stored raw, stripped only at fmt time.
+    /// (parens are literal). Weight suffix survives parse — stored
+    /// raw, stripped only at fmt time.
     #[test]
     fn subnet_parse_table() {
         #[rustfmt::skip]
@@ -1614,8 +1487,8 @@ mod tests {
         }
     }
 
-    /// `strip_weight`: `#10` only. C `info.c:41-49`. Includes
-    /// corner cases from C's `len >= 3` check.
+    /// `strip_weight`: `#10` only. Includes corner cases from
+    /// upstream's `len >= 3` check.
     #[test]
     fn strip_weight_table() {
         #[rustfmt::skip]
@@ -1625,16 +1498,15 @@ mod tests {
             ("10.0.0.0/24#5",   "10.0.0.0/24#5"),    // other weights survive
             ("10.0.0.0/24#100", "10.0.0.0/24#100"),  // #100 ≠ #10
             ("10.0.0.0/24",     "10.0.0.0/24"),      // no suffix → unchanged
-            // ─── C `len >= 3` corner cases ───
+            // ─── upstream `len >= 3` corner cases ───
             // `"#10"` (3 chars) → `""`. Never a valid subnet but it's
-            // what C does (`!strcmp(netstr + 0, "#10")` matches).
+            // what upstream does (`!strcmp(netstr + 0, "#10")` matches).
             ("#10",    ""),
-            // 2 chars → no match. C `len >= 3` fails first.
+            // 2 chars → no match. `len >= 3` fails first.
             ("10",     "10"),
             // "#100" ends in "100", not "#10" → no match.
             ("a#100",  "a#100"),
-            // `#10#10`: ends in `#10` → strip once. C does one pass;
-            // `strip_suffix` is one pass.
+            // `#10#10`: ends in `#10` → strip once. One pass.
             ("#10#10", "#10"),
         ];
         for (input, expected) in cases {
@@ -1651,15 +1523,15 @@ mod tests {
         assert_eq!(tinc_proto::subnet::DEFAULT_WEIGHT, 10);
         // If you're here because DEFAULT_WEIGHT changed:
         // 1. Update the "#10" literal in `strip_weight`.
-        // 2. Update the C comparison (info.c:44 hardcodes "#10").
+        // 2. Update upstream comparison (also hardcodes "#10").
         // 3. Update this assert.
     }
 
     // ─── ConnRow
 
-    /// Golden vector. `connection.c:168`: `%d %d %s %s %x %d %x`.
-    /// Daemon: 5 fields (after 18 6). CLI: 6 (one `port` literal).
-    /// `c->hostname` is `sockaddr2hostname` of the peer's address.
+    /// Golden vector. Daemon: 5 fields (after 18 6). CLI: 6 (one
+    /// `port` literal). `c->hostname` is `sockaddr2hostname` of the
+    /// peer's address.
     const CONN_BODY: &str = "bob 10.0.0.2 port 655 0 7 1a";
 
     #[test]
@@ -1674,8 +1546,8 @@ mod tests {
     }
 
     /// `fmt_plain`: full golden line + `status %x` UNPADDED check.
-    /// C `tincctl.c:1364`. Contrast node's `%04x`; the C is
-    /// inconsistent and we replicate that.
+    /// Contrast node's `%04x`; upstream is inconsistent and we
+    /// replicate that.
     #[test]
     fn conn_fmt_plain_contract() {
         let r = ConnRow::parse(CONN_BODY).unwrap();
@@ -1727,9 +1599,9 @@ mod tests {
     }
 
     /// Empty results: dir present-but-empty AND dir missing both
-    /// yield `Ok(vec![])`. C `tincctl.c:1115`: `if(errno == ENOENT)
-    /// return 0;` — the dir is created by the first `tinc invite`,
-    /// not by `init`, so a never-invited node has no `invitations/`.
+    /// yield `Ok(vec![])`. The dir is created by the first `tinc
+    /// invite`, not by `init`, so a never-invited node has no
+    /// `invitations/`.
     #[test]
     fn inv_empty_cases() {
         // Empty dir.
@@ -1749,8 +1621,8 @@ mod tests {
     }
 
     /// Valid invitations: 24-char b64 name, `Name = X` first line.
-    /// rstrip on the name value: C `strchr("\t \r\n", *--eol)` loop
-    /// strips all trailing whitespace (CRLF from Windows-edited files).
+    /// rstrip on the name value strips all trailing whitespace
+    /// (CRLF from Windows-edited files).
     #[test]
     fn inv_valid_table() {
         #[rustfmt::skip]
@@ -1772,8 +1644,7 @@ mod tests {
     }
 
     /// Skip table: each entry is a (filename, content) pair that
-    /// `dump_invitations` must silently skip. The C silently skips
-    /// bad ones (with stderr warnings; we don't warn from lib code).
+    /// `dump_invitations` must silently skip.
     #[test]
     fn inv_skipped() {
         // Filenames with non-static lifetimes built up front.
@@ -1791,19 +1662,17 @@ mod tests {
             ("ed25519_key.priv",     "key blob",         "key file (wrong length)"),
             // 23 chars, valid b64.
             (&short,                 "Name = nope\n",    "23-char name"),
-            // 25 chars. C `b64decode_tinc(..., 24)` would read first 24
-            // and pass; we tighten to exact.
+            // 25 chars. Upstream would read first 24 and pass; we tighten to exact.
             (&long,                  "Name = nope\n",    "25-char name"),
-            // ─── 24 chars, NOT valid b64. C `b64decode_tinc` returns 0. ───
+            // ─── 24 chars, NOT valid b64 ───
             (&bad_b64,               "Name = bob\n",     "bad b64 (`*` not in alphabet)"),
             // ─── valid filename, bad content ───
-            // `Name=bob` (no spaces): C `strncmp(buf, "Name = ", 7)` is
-            // exact-prefix. The format `cmd_invite` writes
-            // (`invitation.c:557`: `"Name = %s\n"`) is the format dump reads.
+            // `Name=bob` (no spaces): exact-prefix `"Name = "` (7 chars).
+            // The format `cmd_invite` writes is the format dump reads.
             (&valid_name,            "Name=bob\n",       "strict `Name = ` prefix"),
             // `check_id` failure: name with hyphen.
             (&valid_name,            "Name = bad-name\n", "bad invitee name"),
-            // Empty file: `fgets` returns NULL. C `tincctl.c:1152`.
+            // Empty file.
             (&valid_name,            "",                 "empty file"),
         ];
         for (fname, content, why) in cases {
@@ -1815,7 +1684,7 @@ mod tests {
     }
 
     /// Multiple invites: collect all. Order is readdir order
-    /// (filesystem-defined). We don't sort; C doesn't either.
+    /// (filesystem-defined). We don't sort; upstream doesn't either.
     #[test]
     fn inv_multiple() {
         let (d, paths) = setup_inv();
@@ -1839,7 +1708,7 @@ mod tests {
     }
 
     /// Mixed: one valid, one bad-b64, one wrong-length, one bad-name.
-    /// Only the valid one survives. The C silently skips bad ones
+    /// Only the valid one survives. Upstream silently skips bad ones
     /// (with stderr warnings; we don't warn from lib code).
     #[test]
     fn inv_mixed() {
@@ -1863,9 +1732,8 @@ mod tests {
     }
 
     /// Permission denied on the DIRECTORY → error (not ENOENT).
-    /// C `tincctl.c:1121`: `"Cannot not [sic] read directory"`.
-    /// (Yes the C has a double negative typo. We don't replicate
-    /// the message — `CmdError::Io` says "Could not access".)
+    /// (Upstream's message has a "Cannot not [sic]" double negative
+    /// typo. We don't replicate the message.)
     #[test]
     #[cfg(unix)]
     fn inv_dir_perms() {
@@ -1891,8 +1759,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Per-file permission denied → SKIP, not error. C `tincctl.c
-    /// :1144`: `fprintf("Cannot open"); continue;`. The other files
+    /// Per-file permission denied → SKIP, not error. The other files
     /// still show.
     #[test]
     #[cfg(unix)]
@@ -1903,9 +1770,6 @@ mod tests {
         // One bad-perms, one good.
         let bad = inv_dir.join(mk_filename(0));
         fs::write(&bad, "Name = unreadable\n").unwrap();
-        // Create with 0o600 then chmod 0 — can't open for read.
-        // Actually OpenOptions mode + write would have set perms;
-        // simpler: write then chmod.
         fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
 
         fs::write(inv_dir.join(mk_filename(1)), "Name = good\n").unwrap();

@@ -1,7 +1,5 @@
 //! Streaming control commands: `log` and `pcap`.
 //!
-//! C: `tincctl.c:590-669` (`pcap()`, `log_control()`).
-//!
 //! Both commands subscribe-and-loop-forever:
 //!
 //! ```text
@@ -12,53 +10,41 @@
 //! ```
 //!
 //! Unlike `dump`, these are PUSHES with no terminator. The daemon
-//! sets `c->status.log = true` (`control.c:137`); every `logger()`
-//! call thereafter `send_request`s to subscribers (`logger.c:213`).
-//! The CLI loops until daemon EOF or Ctrl-C.
+//! sets `c->status.log = true`; every `logger()` call thereafter
+//! `send_request`s to subscribers. The CLI loops until daemon EOF
+//! or Ctrl-C.
 //!
 //! ## The wire shape (recvdata vs recvline)
 //!
-//! Daemon-side:
-//!
-//! ```text
-//!   logger.c:213:  send_request(c, "%d %d %lu", CONTROL, REQ_LOG, len);
-//!   logger.c:214:  send_meta(c, pretty, msglen);
-//!
-//!   route.c:1124:  send_request(c, "%d %d %d", CONTROL, REQ_PCAP, len);
-//!   route.c:1125:  send_meta(c, DATA(packet), len);
-//! ```
-//!
-//! `send_request` is line-framed (printf + `\n`). `send_meta` is
-//! raw bytes, NO `\n`. The data IS arbitrary bytes — pcap data is
-//! Ethernet frames, log data may have embedded `\n`s (if the log
-//! message itself does — rare, but `logger.c` doesn't filter). So:
+//! Daemon-side, log/pcap each emit a `send_request` (line-framed,
+//! printf + `\n`) followed by `send_meta` (raw bytes, NO `\n`).
+//! The data IS arbitrary bytes — pcap data is Ethernet frames, log
+//! data may have embedded `\n`s. So:
 //!
 //!   - Parse the header with `recv_line` (line-framed)
 //!   - Read the data with `recv_data` (length-framed, raw bytes)
 //!
-//! The C `recvdata` (`tincctl.c:536`) does the second. It shares
-//! the buffer with `recvline` because `recvline`'s `recv()` might
-//! over-read past the `\n` into the start of the data block. See
-//! `ctl.rs`'s `CtlSocket` doc-comment for why `BufReader` is that
-//! shared buffer.
+//! `recv_line`'s `recv()` might over-read past the `\n` into the
+//! start of the data block; see `ctl.rs`'s `CtlSocket` doc-comment
+//! for why `BufReader` is the shared buffer.
 //!
 //! ## The SIGINT handler — NOT ported
 //!
-//! C `tincctl.c:1533-1541` installs a SIGINT handler that
-//! `shutdown(fd, SHUT_RDWR)`s so the loop exits cleanly with code 0
-//! instead of 130. NOT ported: the daemon doesn't care (kernel
-//! closes the socket either way, connection-reaper handles it),
-//! `tinc log` is interactive so nobody checks `$?`, and the static-fd
-//! signal-handler dance has hairy failure modes. Exit codes for
-//! streaming commands aren't a contract.
+//! Upstream installs a SIGINT handler that `shutdown(fd, SHUT_RDWR)`s
+//! so the loop exits cleanly with code 0 instead of 130. NOT ported:
+//! the daemon doesn't care (kernel closes the socket either way,
+//! connection-reaper handles it), `tinc log` is interactive so
+//! nobody checks `$?`, and the static-fd signal-handler dance has
+//! hairy failure modes. Exit codes for streaming commands aren't a
+//! contract.
 //!
 //! ## pcap headers: native-endian
 //!
-//! `tincctl.c:594-616` writes pcap headers via `fwrite(&struct)` —
-//! native-endian. This is by design: libpcap's magic `0xa1b2c3d4`
-//! is the endianness marker, readers byte-swap as needed. We use
-//! `to_ne_bytes()` per-field to match. The C structs are all-u32
-//! (no padding); we write field-by-field so no padding question.
+//! Upstream writes pcap headers via `fwrite(&struct)` — native-
+//! endian. This is by design: libpcap's magic `0xa1b2c3d4` is the
+//! endianness marker, readers byte-swap as needed. We use
+//! `to_ne_bytes()` per-field to match. The struct is all-u32 (no
+//! padding); we write field-by-field so no padding question.
 
 #![allow(clippy::doc_markdown)]
 
@@ -72,68 +58,53 @@ use super::CmdError;
 
 // Shared header parse + size limits
 
-/// Max log line. `tincctl.c:651`: `char data[1024]`. Daemon-side
-/// `pretty[1024]` in `logger.c` (the format buffer). Log lines that
-/// somehow exceed this would be silently truncated by the daemon's
-/// `snprintf`; we'd never see len>1024 on the wire. The check is
-/// defense against a buggy daemon, same as the C.
+/// Max log line. Daemon-side `pretty[1024]` (the format buffer).
+/// Log lines that somehow exceed this would be silently truncated
+/// by the daemon's `snprintf`; we'd never see len>1024 on the wire.
+/// The check is defense against a buggy daemon.
 const LOG_DATA_MAX: usize = 1024;
 
-/// Max packet capture. `tincctl.c:592`: `char data[9018]`. 9000-byte
-/// jumbo MTU + Ethernet header (14) + a few for slop. Daemon-side
-/// `vpn_packet_t` is `MAXSIZE` (9018, `net.h`). The check is the
-/// SAME defense — a daemon bug saying len=2^32 would alloc 4GiB
-/// without this. The C protects a stack buffer; we protect the
-/// heap-alloc.
+/// Max packet capture. 9000-byte jumbo MTU + Ethernet header (14) +
+/// a few for slop. Daemon-side `vpn_packet_t` is `MAXSIZE` (9018).
+/// The check is the SAME defense — a daemon bug saying len=2^32
+/// would alloc 4GiB without this.
 const PCAP_DATA_MAX: usize = 9018;
 
 /// Parse `"18 N len"` header. The shared header shape for both
-/// streams. `tincctl.c:656`, `629`: `sscanf("%d %d %d")` then
-/// `code != CONTROL || req != REQ_X` checks.
+/// streams.
 ///
 /// Returns `Some(len)` if header is well-formed and the request
 /// type matches. `None` for malformed or wrong type — the caller
-/// breaks. (The C `tincctl.c:658-660`: `n != 3 || code != ... →
-/// break`. SILENT exit.)
+/// breaks (silent exit).
 ///
-/// `kind`: which stream. `CtlRequest::Log` or `::Pcap`. The header
-/// echoes the subscription type — a `REQ_LOG` subscriber sees
-/// `"18 15 N"` headers, a `REQ_PCAP` subscriber sees `"18 14 N"`.
-/// Why check it: the daemon's connection mux means a bug COULD
-/// cross-send. Unlikely; defense.
+/// `kind`: which stream. The header echoes the subscription type —
+/// a `REQ_LOG` subscriber sees `"18 15 N"` headers, a `REQ_PCAP`
+/// subscriber sees `"18 14 N"`. Why check it: the daemon's
+/// connection mux means a bug COULD cross-send. Unlikely; defense.
 ///
-/// `max`: per-stream size limit. `len > max → None`. The C
-/// inlines this in the same `if` (`len > sizeof(data)`).
+/// `max`: per-stream size limit. `len > max → None`.
 ///
-/// `len < 0 → None` for log (`tincctl.c:658`: `len < 0 || ... >
-/// sizeof(data)`); pcap uses `%lu` (unsigned, `:629`). We parse as
-/// `usize` for both — `parse::<usize>()` rejects negative AND the
-/// `%lu` overflow case. The pcap `%lu` vs log `%d` is a C-ism
-/// (printf format-string type-safety theatre); the WIRE is ASCII
-/// digits either way.
+/// We parse `len` as `usize` for both streams — `parse::<usize>()`
+/// rejects negative AND overflow. The wire is ASCII digits either
+/// way.
 fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     // `"18 15 7"`. Three space-separated ints.
     let mut it = line.split(' ');
     let code = it.next()?;
     let req = it.next()?;
     let len = it.next()?;
-    // No `it.next().is_none()` check — `sscanf("%d %d %d")` ignores
-    // trailing. The daemon won't send any (`logger.c:213` is exactly
-    // `"%d %d %lu"`), but match the C's slack.
+    // No `it.next().is_none()` check — sscanf-style ignores trailing.
+    // The daemon won't send any, but match the slack.
 
-    // `tincctl.c:658`: `code != CONTROL`. CONTROL = 18.
     if code != "18" {
         return None;
     }
-    // `req != REQ_LOG`. Compare as ASCII (the wire is ASCII).
-    // `kind as u8 → string`: 15 → "15" or 14 → "14". A formatted
-    // const would be a compile-time `format!` (which doesn't exist).
-    // Per-call alloc is fine; this runs once per log line, the
-    // syscall to read the line dominates.
+    // Compare as ASCII (the wire is ASCII). `kind as u8 → string`:
+    // 15 → "15" or 14 → "14". Per-call alloc is fine; this runs
+    // once per log line, the syscall to read the line dominates.
     if req != (kind as u8).to_string() {
         return None;
     }
-    // `%d` / `%lu` → usize. Rejects negative and too-large.
     let len: usize = len.parse().ok()?;
     if len > max {
         return None;
@@ -143,72 +114,48 @@ fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
 
 // `tinc log [LEVEL]` — stream daemon's logger() output
 //
-// `tincctl.c:649-669`. Subscribe with `(level, use_color)`, then
-// loop: header, data, write data + `\n` to stdout.
+// Subscribe with `(level, use_color)`, then loop: header, data,
+// write data + `\n` to stdout.
 //
 // `level` is the FILTER, not the daemon's debug level. The daemon
-// CLAMPs it (`control.c:136`) into `c->log_level`, and `logger.c
-// :205` checks `level > c->log_level → continue` per-connection.
-// `-1` (`DEBUG_UNSET`) means "use the daemon's own debug level".
-// Higher numbers = more verbose.
+// CLAMPs it into `c->log_level`, and checks `level > c->log_level
+// → continue` per-connection. `-1` (`DEBUG_UNSET`) means "use the
+// daemon's own debug level". Higher numbers = more verbose.
 //
-// `use_color`: pass-through to the daemon's `format_pretty`.
-// `console.c:5-11`: `isatty(fileno(out)) && getenv("TERM") &&
-// strcmp(TERM, "dumb")`. Per-subscriber: the daemon formats the
-// SAME log line both colored and uncolored if it has subscribers
-// of both kinds. (`logger.c:209`.)
+// `use_color`: pass-through to the daemon's `format_pretty`. Per-
+// subscriber: the daemon formats the SAME log line both colored
+// and uncolored if it has subscribers of both kinds.
 
-/// `DEBUG_UNSET`. `logger.h:27`. The "use daemon's level" sentinel.
-/// `tincctl.c:1559`: `argc > 1 ? atoi(argv[1]) : DEBUG_UNSET`.
+/// `DEBUG_UNSET`. The "use daemon's level" sentinel.
 const DEBUG_UNSET: i32 = -1;
 
-/// `console.c:5-11` for stdout.
-///
-/// ```text
-///   bool is_tty = isatty(fileno(out));
-///   const char *term = getenv("TERM");
-///   return is_tty && term && strcmp(term, "dumb");
-/// ```
-///
 /// Three checks: stdout IS a tty, TERM is set, TERM isn't `"dumb"`.
-/// `strcmp(term, "dumb")` returns 0 (false) on match — so the C
-/// reads "TERM != dumb". The double negative is C-idiomatic;
-/// our `!=` is the same thing.
 ///
-/// `tincctl.c:1559` calls this for STDOUT specifically (`log_control
-/// (fd, stdout, ...)`). Hard-coded stdout. The daemon writes
-/// log lines to OUR stdout via the socket; if we're piped
-/// (`tinc log | less`), color escapes look like garbage in less
-/// without `-R`. `isatty(stdout)` is false then → no color.
+/// Hard-coded stdout. The daemon writes log lines to OUR stdout
+/// via the socket; if we're piped (`tinc log | less`), color
+/// escapes look like garbage in less without `-R`.
+/// `isatty(stdout)` is false then → no color.
 ///
-/// Why not check `NO_COLOR` env var (the modern convention): the C
-/// doesn't. `tinc log | tee` users who want color can `tinc log
-/// 2>&1 | tee` no wait that doesn't work either. `script -c "tinc
-/// log"` is the answer (PTY in between). Same as every isatty-gated
-/// colorizer.
+/// Why not check `NO_COLOR` env var (the modern convention):
+/// upstream doesn't. `script -c "tinc log"` is the answer (PTY in
+/// between). Same as every isatty-gated colorizer.
 fn use_ansi_escapes_stdout() -> bool {
-    // `isatty(STDOUT_FILENO)`. `std::io::IsTerminal` is the Rust
-    // 1.70+ way. (`nix::unistd::isatty` works too but takes RawFd
-    // and we'd `as_raw_fd()`; std's trait is cleaner.)
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         return false;
     }
-    // `getenv("TERM")`. Empty string is "set" in the C sense
-    // (`getenv` returns non-NULL for `TERM=`). `env::var` returns
-    // `Ok("")` for that, which is `!= "dumb"`, so colors on. Same
-    // as the C: `term && strcmp(term, "dumb")` — `term` is non-NULL
-    // (truthy), `strcmp("", "dumb")` is nonzero (truthy). Colors on.
-    // Probably wrong (TERM= means "no terminfo"), but C-compat.
+    // Empty string is "set" in the getenv sense (non-NULL for
+    // `TERM=`). `env::var` returns `Ok("")` for that, which is
+    // `!= "dumb"`, so colors on. Probably wrong (TERM= means "no
+    // terminfo"), but upstream-compat.
     match std::env::var("TERM") {
         Ok(term) => term != "dumb",
         Err(_) => false, // unset, or non-UTF-8 (unlikely)
     }
 }
 
-/// The main loop. `tincctl.c:649-669`. Generic over the output
-/// `Write` so the test can pass a `Vec`. Production passes stdout's
-/// lock.
+/// The main loop. Generic over the output `Write` so the test can
+/// pass a `Vec`. Production passes stdout's lock.
 ///
 /// `level`: the filter. `None` → `DEBUG_UNSET` (-1). `Some(n)` →
 /// the user's `tinc log 5`. The daemon CLAMPs out-of-range, so we
@@ -221,10 +168,7 @@ fn use_ansi_escapes_stdout() -> bool {
 /// Runs forever. Returns when:
 ///   - daemon closes socket (`recv_line → None`): `Ok(())`, clean
 ///   - I/O error mid-read: `Err(CtlError::Io(_))`
-///   - malformed header: `Ok(())`, clean (the C breaks silently)
-///
-/// The clean-on-malformed is `tincctl.c:660`: `break;`. No message.
-/// Daemon's broken; user sees the prompt again.
+///   - malformed header: `Ok(())`, clean (silent break)
 ///
 /// # Errors
 /// Socket I/O. The output Write's errors too — `tinc log | head`
@@ -243,12 +187,8 @@ where
     W: Write,
 {
     // ─── Subscribe
-    // `tincctl.c:649`: `sendline(fd, "%d %d %d %d", CONTROL, REQ_
-    // LOG, level, use_color)`. Daemon's `control.c:135` `sscanf
-    // (%*d %*d %d %d)` reads both. The bool prints as 0/1; the
-    // daemon reads as int and treats nonzero as true (`c->status.
-    // log_color = colorize` then later `c->status.log_color` as
-    // a bool). `i32::from(bool)` is 0/1.
+    // The bool prints as 0/1; the daemon reads as int and treats
+    // nonzero as true. `i32::from(bool)` is 0/1.
     ctl.send_int2(
         CtlRequest::Log,
         level.unwrap_or(DEBUG_UNSET),
@@ -256,54 +196,38 @@ where
     )?;
 
     // ─── Receive loop
-    // `tincctl.c:653-669`. Reused buffer; `clear` + `resize`
-    // per-iteration. The C uses a stack `char[1024]`; we heap
-    // (resize doesn't shrink capacity, so after the first message
-    // we never re-alloc).
-    //
-    // `with_capacity` for the FIRST message: pre-size to max so
-    // even the first iteration doesn't grow. Log lines are usually
-    // <200 bytes; 1024 is plenty and matches the C buffer.
+    // Reused buffer; `clear` + `resize` per-iteration. `resize`
+    // doesn't shrink capacity, so after the first message we never
+    // re-alloc. `with_capacity` for the FIRST message: pre-size to
+    // max so even the first iteration doesn't grow.
     let mut buf: Vec<u8> = Vec::with_capacity(LOG_DATA_MAX);
 
-    // `while(recvline(...))`. `recv_line → Some` is the C's `true`.
-    // `None` is EOF (daemon closed) — `Ok(())` clean exit.
+    // `recv_line → None` is EOF (daemon closed) — `Ok(())` clean.
     while let Some(line) = ctl.recv_line()? {
-        // Parse header. Malformed → break (silent, C-compat).
+        // Malformed → break (silent).
         let Some(len) = parse_header(&line, CtlRequest::Log, LOG_DATA_MAX) else {
             break;
         };
 
-        // `tincctl.c:662`: `recvdata(fd, data, len)`. Exactly `len`
-        // raw bytes after the header line. `resize` (NOT `reserve`)
-        // because `recv_data` writes into `&mut [u8]` — we need
-        // initialized length, not just capacity.
-        //
-        // `resize(len, 0)`: fills new positions with 0. Those
-        // zeroes get OVERWRITTEN by `recv_data`. The init is
-        // wasted work. There's no safe resize-uninit (`set_len`
-        // would do it but `unsafe` for a 1024-byte memset is
-        // silly). The memset is one cache line; the syscall
-        // dominates by 10000×.
+        // Exactly `len` raw bytes after the header line. `resize`
+        // (NOT `reserve`) because `recv_data` writes into `&mut
+        // [u8]` — we need initialized length, not just capacity.
+        // The zero-fill is wasted work but the syscall dominates
+        // by 10000×.
         buf.clear();
         buf.resize(len, 0);
-        // `if(!recvdata) break`. Mid-data EOF → silent exit.
-        // (`tincctl.c:664`.) `recv_data` returns `Err` on short
-        // read; we bubble it (slightly noisier than C, but the
-        // daemon dying mid-stream is rare and a message helps).
+        // Mid-data EOF → bubble (slightly noisier than upstream,
+        // but the daemon dying mid-stream is rare and a message
+        // helps).
         ctl.recv_data(&mut buf)?;
 
-        // `tincctl.c:666-668`: `fwrite(data, len, 1, out); fputc
-        // ('\n', out); fflush(out);`. The data is the FORMATTED
-        // log line (priority prefix, timestamp, message). It
-        // doesn't include a trailing `\n` — `format_pretty`
-        // doesn't add one, `send_meta` doesn't add one. We add
-        // it. Then flush (line-buffered output for interactive
-        // viewing).
+        // The data is the FORMATTED log line (priority prefix,
+        // timestamp, message). It doesn't include a trailing `\n`
+        // — we add it. Then flush (line-buffered output for
+        // interactive viewing).
         //
         // `write_all` not `write`: partial writes happen (pipe
-        // full); `write_all` retries. The C's `fwrite` does the
-        // same internally.
+        // full); `write_all` retries.
         //
         // EPIPE: the binary's `signal(SIGPIPE, SIG_IGN)` means we
         // get the error not the signal. Bubble it; main exits.
@@ -315,12 +239,12 @@ where
     Ok(())
 }
 
-/// CLI entry: `tinc log [LEVEL]`. `tincctl.c:1544-1567`.
+/// CLI entry: `tinc log [LEVEL]`.
 ///
-/// `LEVEL` is `atoi`'d in C (`:1559`). `atoi("garbage")` is 0
-/// (silently). We use `parse::<i32>()` which errors. STRICTER
-/// than C, but `tinc log abc` succeeding-with-level-0 is a footgun.
-/// The change is observable but only for invalid input.
+/// `LEVEL` is `atoi`'d upstream; `atoi("garbage")` is 0 (silently).
+/// We use `parse::<i32>()` which errors. STRICTER, but `tinc log
+/// abc` succeeding-with-level-0 is a footgun. The change is
+/// observable but only for invalid input.
 ///
 /// The SIGINT handler is NOT here (see module doc). Ctrl-C kills
 /// the process; exit 130. Daemon doesn't care.
@@ -331,9 +255,8 @@ where
 pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     let mut ctl = CtlSocket::connect(paths).map_err(|e| CmdError::BadInput(e.to_string()))?;
 
-    // `use_ansi_escapes(stdout)` — checked HERE not inside `log_
-    // loop` so the test can pass a fixed bool. Production: stdout's
-    // tty-ness.
+    // Checked HERE not inside `log_loop` so the test can pass a
+    // fixed bool.
     let use_color = use_ansi_escapes_stdout();
 
     // `stdout().lock()` for the duration. The loop flushes per-line
@@ -348,16 +271,13 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
 
 // `tinc pcap [SNAPLEN]` — stream packet capture in libpcap format
 //
-// `tincctl.c:590-645`. Subscribe with `snaplen`, write the libpcap
-// global header, then loop: tinc header, data, libpcap packet
-// header + data to stdout.
+// Subscribe with `snaplen`, write the libpcap global header, then
+// loop: tinc header, data, libpcap packet header + data to stdout.
 //
 // `snaplen`: max bytes per packet to capture. 0 = full packet.
-// Daemon clips (`route.c:1120`: `if(c->outmaclength && c->
-// outmaclength < len) len = c->outmaclength`). The repurposed
-// `outmaclength` field is a hack — it was the legacy MAC length,
-// reused for pcap snaplen because every connection has it and
-// pcap subscribers don't use legacy crypto.
+// Daemon clips. The repurposed `outmaclength` field is a hack — it
+// was the legacy MAC length, reused for pcap snaplen because every
+// connection has it and pcap subscribers don't use legacy crypto.
 //
 // Output is the libpcap "savefile" format (the original, not
 // pcapng). Magic `0xa1b2c3d4`, version 2.4, link-type 1
@@ -365,26 +285,24 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
 //
 // `tinc pcap | wireshark -k -i -` is the use case. Real-time
 // packet view of the VPN traffic. The daemon hands us raw Ethernet
-// frames (the same `vpn_packet_t` the routing engine sees,
-// `route.c:1125`).
+// frames (the same `vpn_packet_t` the routing engine sees).
 
-/// Libpcap global header. 24 bytes. `tincctl.c:594-608`.
+/// Libpcap global header. 24 bytes.
 ///
 /// Field-by-field `to_ne_bytes()` rather than a `#[repr(C)]`
 /// struct + `bytemuck::bytes_of` (or unsafe `std::slice::from_raw_
-/// parts`). The C does `fwrite(&struct)` which is native-endian
-/// padded layout. Our struct WOULD have the same layout (all-u32 +
-/// two u16, no padding holes), but per-field bytes is `forbid(
-/// unsafe)`-compliant and the once-per-session 24-byte write
-/// isn't perf-critical.
+/// parts`). Our struct WOULD have the same layout (all-u32 + two
+/// u16, no padding holes), but per-field bytes is `forbid(unsafe)`-
+/// compliant and the once-per-session 24-byte write isn't perf-
+/// critical.
 ///
 /// `snaplen`: from the user. 0 → defaults to PCAP_DATA_MAX (9018).
-/// `tincctl.c:606`: `snaplen ? snaplen : sizeof(data)`. The header
-/// records what the file PROMISES; the daemon enforces it.
+/// The header records what the file PROMISES; the daemon enforces
+/// it.
 ///
 /// Returns the 24 header bytes ready to write.
 fn pcap_global_header(snaplen: u32) -> [u8; 24] {
-    // C's struct, in declaration order:
+    // Layout, in declaration order:
     //   uint32_t magic       = 0xa1b2c3d4
     //   uint16_t major       = 2
     //   uint16_t minor       = 4
@@ -393,9 +311,8 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     //   uint32_t snaplen
     //   uint32_t ll_type     = 1 (LINKTYPE_ETHERNET)
     //
-    // Layout: 4 + 2 + 2 + 4 + 4 + 4 + 4 = 24 bytes. No padding
-    // (the two u16 pack to one u32-aligned slot). `fwrite(&struct,
-    // sizeof, 1)` writes exactly this on every C compiler.
+    // 4 + 2 + 2 + 4 + 4 + 4 + 4 = 24 bytes. No padding (the two
+    // u16 pack to one u32-aligned slot).
     //
     // `0xa1b2c3d4` is the standard magic. Readers detect endianness
     // by whether they see `a1b2c3d4` or `d4c3b2a1`. `to_ne_bytes`
@@ -405,17 +322,14 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     let minor: u16 = 4;
     let tz_offset: u32 = 0;
     let tz_accuracy: u32 = 0;
-    // `tincctl.c:606`: `snaplen ? snaplen : sizeof(data)`. The C's
-    // `snaplen` is from `atoi(argv[1])` so 0 means "user didn't
-    // pass one OR passed 0" — both → max. `as u32` is safe:
-    // PCAP_DATA_MAX (9018) fits.
+    // 0 means "user didn't pass one OR passed 0" — both → max.
     #[allow(clippy::cast_possible_truncation)] // 9018 < u32::MAX, const
     let snaplen = if snaplen == 0 {
         PCAP_DATA_MAX as u32
     } else {
         snaplen
     };
-    let ll_type: u32 = 1; // LINKTYPE_ETHERNET. `pcap/dlt.h`.
+    let ll_type: u32 = 1; // LINKTYPE_ETHERNET
 
     let mut h = [0u8; 24];
     h[0..4].copy_from_slice(&magic.to_ne_bytes());
@@ -428,7 +342,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     h
 }
 
-/// Libpcap per-packet record header. 16 bytes. `tincctl.c:610-617`.
+/// Libpcap per-packet record header. 16 bytes.
 ///
 /// ```text
 ///   uint32_t tv_sec    — wall-clock seconds (gettimeofday)
@@ -438,36 +352,27 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 /// ```
 ///
 /// `len` and `origlen`: the daemon clips to `snaplen` BEFORE
-/// sending (`route.c:1120`), so we receive `len` bytes and don't
-/// know the original. `tincctl.c:641-642`: `packet.len = len;
-/// packet.origlen = len;`. Both set to what we got. Wireshark shows
-/// "X bytes captured" with no truncation marker. Slightly wrong
-/// but the C does it; the daemon would have to send origlen too
-/// for accuracy.
+/// sending, so we receive `len` bytes and don't know the original.
+/// Both set to what we got. Wireshark shows "X bytes captured"
+/// with no truncation marker. Slightly wrong but the daemon would
+/// have to send origlen too for accuracy.
 ///
-/// `tv_sec` is the LOW 32 bits of `time_t`. `tincctl.c:639`:
-/// `packet.tv_sec = tv.tv_sec;`. On 64-bit platforms `tv.tv_sec`
-/// is `i64`; the assignment to a `uint32_t` field truncates. After
-/// 2038 (well, 2106 — unsigned wraps later) this rolls over.
-/// Libpcap's 2038 problem; not ours. There's a microsecond-magic
-/// (`0xa1b2_3c4d`) for 64-bit timestamps but the C doesn't use it.
+/// `tv_sec` is the LOW 32 bits of `time_t`. After 2106 (unsigned
+/// wraps later than 2038) this rolls over. Libpcap's 2038 problem;
+/// not ours. There's a microsecond-magic (`0xa1b2_3c4d`) for 64-bit
+/// timestamps but we don't use it.
 ///
 /// Why we timestamp HERE (CLI-side) not daemon-side: the daemon's
-/// `send_pcap` doesn't include time (`route.c:1124`: `"%d %d %d"`,
-/// no timestamp field). The CLI calls `gettimeofday` per-packet
-/// (`tincctl.c:628`). The timestamp is "when the CLI received it,"
-/// not "when the daemon routed it." Socket latency is ~10µs
-/// (localhost), well below the µs resolution. Good enough.
+/// `send_pcap` doesn't include time. The CLI calls `gettimeofday`
+/// per-packet. The timestamp is "when the CLI received it," not
+/// "when the daemon routed it." Socket latency is ~10µs (localhost),
+/// well below the µs resolution. Good enough.
 ///
-/// `clippy::similar_names`: `tv_sec`/`tv_usec` are the C struct
-/// field names (`tincctl.c:614-615`). The names ARE the doc;
-/// renaming breaks C-side grep. Allow at fn (the `#[allow]` on a
-/// `let` doesn't cover the NEXT `let`).
+/// `clippy::similar_names`: `tv_sec`/`tv_usec` are the libpcap
+/// struct field names. The names ARE the doc; renaming breaks
+/// libpcap-side grep.
 #[allow(clippy::similar_names)]
 fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
-    // `gettimeofday(&tv, NULL)`. `SystemTime::now()` then
-    // `duration_since(UNIX_EPOCH)`. Same wall-clock seconds + µs.
-    //
     // `unwrap_or_default`: `duration_since` errs if `now < EPOCH`
     // (clock set to 1960). Default Duration is 0s — the timestamp
     // would be wrong but the file is still valid pcap. Better than
@@ -477,13 +382,8 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
         .unwrap_or_default();
 
     // `as u32`: truncates. INTENTIONAL — see fn doc on the 2038
-    // problem. `tv.tv_sec` is `i64` on linux x86_64; the C's
-    // assignment to `uint32_t` is the same truncation.
-    //
-    // `subsec_micros` returns `u32` already. `tv_usec` in the C
-    // is `suseconds_t` (long); the assignment to `uint32_t`
-    // truncates THAT too, but `tv_usec ∈ [0, 999999]` always
-    // fits. Our `subsec_micros` is the same range.
+    // problem. `subsec_micros` returns `u32` already (always in
+    // [0, 999999]).
     #[allow(clippy::cast_possible_truncation)] // documented above
     let tv_sec: u32 = dur.as_secs() as u32;
     let tv_usec: u32 = dur.subsec_micros();
@@ -496,22 +396,19 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     h
 }
 
-/// The main loop. `tincctl.c:590-645`. Same `Write`-generic as
-/// `log_loop`.
+/// The main loop. Same `Write`-generic as `log_loop`.
 ///
 /// `snaplen`: 0 = full packet. Passed to daemon AND embedded in
 /// the global header. Daemon enforces; we record.
 ///
 /// `now`: clock function. Production passes `SystemTime::now`;
-/// tests pass a fixed time. Per-packet call, not pre-loop —
-/// each packet gets its OWN timestamp (`tincctl.c:628`: `gettimeofday`
-/// inside the loop).
+/// tests pass a fixed time. Per-packet call, not pre-loop — each
+/// packet gets its OWN timestamp.
 ///
 /// Runs forever. Same exit conditions as `log_loop`.
 ///
 /// # Errors
-/// Socket I/O, output I/O. Malformed-header is `Ok(())` clean
-/// exit (`tincctl.c:631`: `break`).
+/// Socket I/O, output I/O. Malformed-header is `Ok(())` clean exit.
 pub fn pcap_loop<S, W, Clock>(
     ctl: &mut CtlSocket<S>,
     out: &mut W,
@@ -524,19 +421,14 @@ where
     Clock: FnMut() -> SystemTime,
 {
     // ─── Subscribe
-    // `tincctl.c:591`: `sendline(fd, "%d %d %d", CONTROL, REQ_PCAP,
-    // snaplen)`. Daemon's `control.c:128`: `sscanf("%*d %*d %d",
-    // &c->outmaclength)`. The cast: `snaplen` is `u32`, `send_int`
-    // takes `i32`. `snaplen` from user is 0 or a small number
-    // (typical: 96, 1500); fits. `as i32` truncates to negative
-    // for snaplen >= 2^31 (won't happen; user-supplied small int).
-    // The daemon side reads `%d` (signed), so the wire is `i32`-
-    // shaped anyway. `as i32` matches the wire.
+    // The cast: `snaplen` is `u32`, `send_int` takes `i32`.
+    // `snaplen` from user is 0 or a small number (typical: 96,
+    // 1500); fits. The daemon side reads `%d` (signed), so the
+    // wire is `i32`-shaped anyway. `as i32` matches the wire.
     #[allow(clippy::cast_possible_wrap)] // snaplen is small; matches %d wire
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
     // ─── Global header
-    // `tincctl.c:618-619`: `fwrite(&header, ...); fflush(out);`.
     // ONCE, before the loop. Wireshark reads this to know the
     // link-type and endianness.
     out.write_all(&pcap_global_header(snaplen))
@@ -553,27 +445,19 @@ where
             break;
         };
 
-        // `tincctl.c:628`: `gettimeofday(&tv, NULL)`. INSIDE the
-        // loop, per-packet, BEFORE the data read. The C does it
-        // before `if(n != 3)` so even malformed-header packets
-        // get a (wasted) gettimeofday. We do it after the `let
-        // else` — the malformed case breaks anyway, who cares
-        // about the wasted call. (Neither order is observably
-        // different; the data hasn't arrived yet either way.)
+        // INSIDE the loop, per-packet, BEFORE the data read.
+        // (Neither order is observably different; the data hasn't
+        // arrived yet either way.)
         let ts = now();
 
         buf.clear();
         buf.resize(len, 0);
         ctl.recv_data(&mut buf)?;
 
-        // `tincctl.c:639-644`: build packet header, fwrite header,
-        // fwrite data, fflush. Per-packet flush so `tinc pcap |
-        // wireshark -k -i -` shows packets in real-time (Wireshark
-        // reads from a pipe; no flush → it sees nothing until
-        // the pipe buffer fills, ~64KiB ≈ dozens of packets).
-        //
-        // `len as u32`: `len ≤ PCAP_DATA_MAX (9018) ≤ u32::MAX`.
-        // Checked by `parse_header`.
+        // Per-packet flush so `tinc pcap | wireshark -k -i -`
+        // shows packets in real-time (Wireshark reads from a pipe;
+        // no flush → it sees nothing until the pipe buffer fills,
+        // ~64KiB ≈ dozens of packets).
         #[allow(clippy::cast_possible_truncation)] // len ≤ 9018 by parse_header
         let len_u32 = len as u32;
         out.write_all(&pcap_packet_header(ts, len_u32))
@@ -585,12 +469,12 @@ where
     Ok(())
 }
 
-/// CLI entry: `tinc pcap [SNAPLEN]`. `tincctl.c:1518-1530`.
+/// CLI entry: `tinc pcap [SNAPLEN]`.
 ///
-/// `SNAPLEN`: `atoi`'d in C. We `parse::<u32>()`. Stricter (rejects
-/// negative — `atoi("-5")` is `-5` then assigned to a `uint32_t`
-/// arg which wraps to a huge number; daemon then never clips).
-/// `tinc pcap -5` failing is better.
+/// `SNAPLEN`: `atoi`'d upstream. We `parse::<u32>()`. Stricter
+/// (rejects negative — `atoi("-5")` is `-5` then assigned to a
+/// `uint32_t` arg which wraps to a huge number; daemon then never
+/// clips). `tinc pcap -5` failing is better.
 ///
 /// # Errors
 /// Same as `run_log`.
@@ -617,41 +501,40 @@ mod tests {
 
     // parse_header
 
-    /// `parse_header` table. C `tincctl.c:629,656,658`. The two
-    /// golden rows are wire-format pins; the rest are the C's
-    /// `sscanf %d %d %d` failure modes + bounds checks.
+    /// `parse_header` table. The two golden rows are wire-format
+    /// pins; the rest are sscanf-style failure modes + bounds.
     #[test]
     fn parse_header_table() {
         use CtlRequest::{Log, Pcap};
         #[rustfmt::skip]
         let cases: &[(&str, CtlRequest, usize, Option<usize>)] = &[
             //          (input,                req,   max,   expected)
-            // ─── GOLDEN: `"18 15 7"` for log. `tincctl.c:656`. ───
+            // GOLDEN: log
             ("18 15 7",                Log,   1024,  Some(7)),
-            // ─── GOLDEN: `"18 14 1500"` for pcap. `tincctl.c:629`. ───
+            // GOLDEN: pcap
             ("18 14 1500",             Pcap,  9018,  Some(1500)),
-            // ─── wrong code: `code != CONTROL`. `tincctl.c:658`. ───
+            // wrong code
             ("17 15 7",                Log,   1024,  None),
-            // ─── wrong req: log subscriber gets pcap header (daemon mux bug case) ───
+            // wrong req: log subscriber gets pcap header (daemon mux bug case)
             ("18 14 7",                Log,   1024,  None),
             ("18 15 7",                Pcap,  9018,  None),
-            // ─── len boundary: `len > sizeof(data)`. max is OK, max+1 is not. ───
+            // len boundary: max is OK, max+1 is not
             ("18 15 1024",             Log,   1024,  Some(1024)),
             ("18 15 1025",             Log,   1024,  None),
             ("18 14 9018",             Pcap,  9018,  Some(9018)),
             ("18 14 9019",             Pcap,  9018,  None),
-            // ─── negative len: `len < 0`. `parse::<usize>()` rejects. ───
+            // negative len: parse::<usize>() rejects
             ("18 15 -1",               Log,   1024,  None),
-            // ─── short line: `n != 3` ───
+            // short line
             ("18 15",                  Log,   1024,  None),
             ("18",                     Log,   1024,  None),
             ("",                       Log,   1024,  None),
-            // ─── non-numeric len: `sscanf %d` fails ───
+            // non-numeric len
             ("18 15 abc",              Log,   1024,  None),
-            // ─── trailing garbage: `sscanf("%d %d %d")` stops after 3rd int, ignores ───
+            // trailing garbage: sscanf-style stops after 3rd int, ignores
             ("18 15 7 extra stuff",    Log,   1024,  Some(7)),
-            // ─── len zero: valid! Zero-byte log line. Daemon won't send it
-            //     (`logger.c` always has `pretty` non-empty), but wire allows. ───
+            // len zero: valid! Zero-byte log line. Daemon won't send it,
+            // but wire allows.
             ("18 15 0",                Log,   1024,  Some(0)),
         ];
         for &(input, req, max, expected) in cases {
@@ -659,13 +542,13 @@ mod tests {
         }
     }
 
-    // pcap headers — byte-exact, sed-verifiable
+    // pcap headers — byte-exact
 
-    /// Global header bytes on little-endian (x86_64). `tincctl.c
-    /// :596-608`. Field-by-field. The `cfg(target_endian)` is
-    /// because `to_ne_bytes()` differs on big-endian — the magic
-    /// would be `[a1, b2, c3, d4]` there. We don't have a BE CI;
-    /// LE is what every dev machine and prod box runs.
+    /// Global header bytes on little-endian (x86_64). Field-by-
+    /// field. The `cfg(target_endian)` is because `to_ne_bytes()`
+    /// differs on big-endian — the magic would be `[a1, b2, c3, d4]`
+    /// there. We don't have a BE CI; LE is what every dev machine
+    /// and prod box runs.
     #[test]
     #[cfg(target_endian = "little")]
     fn pcap_global_header_bytes_le() {
@@ -683,8 +566,7 @@ mod tests {
         assert_eq!(&h[20..24], &[1, 0, 0, 0]);
     }
 
-    /// Snaplen 0 → defaults to 9018. `tincctl.c:606`: `snaplen ?
-    /// snaplen : sizeof(data)`.
+    /// Snaplen 0 → defaults to 9018.
     #[test]
     #[cfg(target_endian = "little")]
     fn pcap_global_header_snaplen_zero_defaults() {
@@ -695,7 +577,6 @@ mod tests {
     }
 
     /// Packet header bytes. Fixed timestamp for determinism.
-    /// `tincctl.c:639-642`.
     #[test]
     #[cfg(target_endian = "little")]
     fn pcap_packet_header_bytes_le() {
@@ -707,15 +588,13 @@ mod tests {
         assert_eq!(&h[0..4], &[0xe8, 0x03, 0, 0]);
         // tv_usec = 500 = 0x1f4. LE.
         assert_eq!(&h[4..8], &[0xf4, 0x01, 0, 0]);
-        // len = origlen = 1500 = 0x5dc. LE. BOTH set to the same
-        // value (`tincctl.c:641-642`).
+        // len = origlen = 1500 = 0x5dc. LE. BOTH set to the same value.
         assert_eq!(&h[8..12], &[0xdc, 0x05, 0, 0]);
         assert_eq!(&h[12..16], &[0xdc, 0x05, 0, 0]);
     }
 
     /// 2038 truncation: a timestamp past `u32::MAX` seconds gets
-    /// the low 32 bits. `tincctl.c:639`: `packet.tv_sec = tv.tv_sec`
-    /// is a `i64 → uint32_t` assignment, same truncation.
+    /// the low 32 bits.
     #[test]
     #[cfg(target_endian = "little")]
     fn pcap_packet_header_y2038_truncates() {
@@ -732,11 +611,8 @@ mod tests {
     /// the file is valid pcap.
     #[test]
     fn pcap_packet_header_before_epoch_is_zero() {
-        // SystemTime can't actually represent before-epoch on
-        // some platforms. The test of the `unwrap_or_default`
-        // branch is the API contract: if `duration_since` fails,
-        // we don't panic. Construct a SystemTime BEFORE epoch
-        // by subtracting from epoch — works on Unix.
+        // Construct a SystemTime BEFORE epoch by subtracting from
+        // epoch — works on Unix.
         let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
         let h = pcap_packet_header(before, 100);
         // tv_sec = 0, tv_usec = 0 (Duration::default()).
@@ -802,13 +678,10 @@ mod tests {
 
         log_loop(&mut ctl, &mut out, None, false).unwrap();
 
-        // ─── Subscription wire
-        // `tincctl.c:649`. level=DEBUG_UNSET (-1), color=0.
+        // Subscription wire: level=DEBUG_UNSET (-1), color=0.
         assert_eq!(shared.borrow().write_side, b"18 15 -1 0\n");
 
-        // ─── Output
-        // `tincctl.c:666-668`: data + '\n'. The flushes are
-        // invisible in a Vec.
+        // Output: data + '\n'. The flushes are invisible in a Vec.
         assert_eq!(out, b"Hello\nWorld\n");
     }
 
@@ -824,8 +697,7 @@ mod tests {
         assert_eq!(out, b"");
     }
 
-    /// `use_color=true` → fourth int is 1. `tincctl.c:649`:
-    /// `use_color` printed as `%d`.
+    /// `use_color=true` → fourth int is 1.
     #[test]
     fn log_loop_color_forwarded() {
         let (mut ctl, shared) = ctl_from_wire(Vec::new());
@@ -836,8 +708,7 @@ mod tests {
         assert_eq!(shared.borrow().write_side, b"18 15 -1 1\n");
     }
 
-    /// Malformed header → clean break. `tincctl.c:660`: `break;`.
-    /// No error, partial output kept.
+    /// Malformed header → clean break. No error, partial output kept.
     #[test]
     fn log_loop_malformed_breaks_clean() {
         let mut wire = Vec::new();
@@ -860,7 +731,7 @@ mod tests {
     /// Data with embedded newline. Log lines DON'T usually have
     /// these but the format allows it (length-framed, not line-
     /// framed). The data is passed through verbatim. The added
-    /// `\n` is OURS (`fputc('\n', out)`).
+    /// `\n` is OURS.
     #[test]
     fn log_loop_data_with_newline() {
         let mut wire = Vec::new();
@@ -895,12 +766,10 @@ mod tests {
         let fixed_time = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         pcap_loop(&mut ctl, &mut out, 96, || fixed_time).unwrap();
 
-        // ─── Subscription wire
-        // `tincctl.c:591`: `"%d %d %d"`, snaplen=96.
+        // Subscription wire: snaplen=96.
         assert_eq!(shared.borrow().write_side, b"18 14 96\n");
 
-        // ─── Output
-        // 24 + 16 + 4 = 44 bytes.
+        // Output: 24 + 16 + 4 = 44 bytes.
         assert_eq!(out.len(), 44);
 
         // Global header: magic at [0..4].
@@ -919,9 +788,8 @@ mod tests {
     }
 
     /// `snaplen=0` → subscription says 0, header says 9018.
-    /// `tincctl.c:591` (subscribe with raw snaplen) vs `:606`
-    /// (header defaults). The daemon sees 0 → no clip (`route.c
-    /// :1120`: `if(c->outmaclength && ...)` — 0 is falsy).
+    /// The daemon sees 0 → no clip (`if(c->outmaclength && ...)` —
+    /// 0 is falsy).
     #[test]
     #[cfg(target_endian = "little")]
     fn pcap_loop_snaplen_zero() {
@@ -980,9 +848,8 @@ mod tests {
     //
     // Can't unit-test `is_terminal()` without a PTY (cargo test's
     // stdout is a pipe). The TERM check IS testable but only if
-    // we factor it out, and the function is 6 lines. The C
-    // (`console.c:5-11`) is correctness-by-inspection; same here.
-    // Integration tests (when `tinc log` runs against a real
-    // daemon) cover it implicitly: stdout is a pipe → no color
-    // → daemon receives `use_color=0` → log lines are unescaped.
+    // we factor it out, and the function is 6 lines. Integration
+    // tests (when `tinc log` runs against a real daemon) cover it
+    // implicitly: stdout is a pipe → no color → daemon receives
+    // `use_color=0` → log lines are unescaped.
 }
