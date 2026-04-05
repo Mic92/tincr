@@ -59,6 +59,7 @@ pub mod sandbox;
 pub mod script;
 pub mod sd_notify;
 pub mod seen;
+pub mod shard;
 pub mod socks;
 pub mod subnet_tree;
 pub mod tcp_tunnel;

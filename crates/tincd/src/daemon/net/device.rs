@@ -240,14 +240,36 @@ impl Daemon {
                             // "other" projection assumed the trie lookup
                             // amortizes; it does (same `last_routes[]`
                             // index), and that's the expensive half.
-                            for i in 0..count {
-                                let n = tso_lens[i];
-                                let off = i * tinc_device::DeviceArena::STRIDE;
-                                nw |= self.route_packet(&mut scratch[off..off + n], None);
+                            //
+                            // TX fast-path: tx_probe walks the gate
+                            // chain on the snapshot once per super.
+                            // On Some we seal+ship inline — no
+                            // route_packet, no &mut self reborrow per
+                            // chunk. Wire-identical (handle_based_
+                            // seal_byte_identical proves the bytes;
+                            // netns tests prove the wiring).
+                            //
+                            // mem::take: tx_probe is &TxSnapshot but
+                            // seal+ship needs &mut self.dp +
+                            // &mut self.listeners alongside. Same
+                            // dance as device_arena/tso_scratch.
+                            let snap = self.tx_snap.take();
+                            if !self.tx_fast_super(
+                                snap.as_ref(),
+                                count,
+                                &scratch,
+                                &tso_lens[..count],
+                            ) {
+                                for i in 0..count {
+                                    let n = tso_lens[i];
+                                    let off = i * tinc_device::DeviceArena::STRIDE;
+                                    nw |= self.route_packet(&mut scratch[off..off + n], None);
+                                }
+                                // Ship the super's segments. The post-
+                                // loop flush below is a no-op on empty.
+                                self.flush_tx_batch();
                             }
-                            // Ship the super's segments. The post-
-                            // loop flush below is a no-op on empty.
-                            self.flush_tx_batch();
+                            self.tx_snap = snap;
                         }
                         Err(e) => {
                             // Kernel-contract violation (vnet_hdr describes
@@ -462,5 +484,86 @@ impl Daemon {
                        "GRO super write failed: {e} — \
                         gro_enabled gate let a non-vnet device through?");
         }
+    }
+
+    /// TX fast-path attempt for one super. Returns `true` if the
+    /// super was sealed+shipped (caller skips the slow loop), `false`
+    /// if any gate failed (caller runs `route_packet` per chunk).
+    ///
+    /// Lifted out of the Super arm to keep nesting sane: the caller
+    /// is already 5 levels deep in `match drain { Super { match split`.
+    /// `count > 1`: single-chunk supers get no batch win. `tx_batch`
+    /// is `Some` here (armed at `count > 1`). Snap is `&Option<_>`
+    /// because the caller `mem::take`s and restores; passing it by
+    /// value would force the restore inside this fn for both arms.
+    fn tx_fast_super(
+        &mut self,
+        snap: Option<&crate::shard::TxSnapshot>,
+        count: usize,
+        scratch: &[u8],
+        lens: &[usize],
+    ) -> bool {
+        let Some(snap) = snap else { return false };
+        // count <= DEVICE_DRAIN_CAP = 64; try_from succeeds. The else
+        // arm is dead with the current cap; falls to slow path if
+        // someone bumps the cap past u32 (unlikely).
+        let Ok(alloc) = u32::try_from(count) else {
+            return false;
+        };
+        if alloc < 2 {
+            return false;
+        }
+        let Some(target) = crate::shard::tx_probe(snap, &scratch[..lens[0]], alloc) else {
+            return false;
+        };
+        // target.sock is the listener index from udp_addr.1 — same
+        // socket the slow path's send_sptps_data_relay would pick.
+        // Listener-gone (reload mid-super) ⇒ slow path; rare.
+        // Seqnos already burned by tx_probe — fine, gaps are valid
+        // (replay window is a sliding bitmap).
+        let Some(slot) = self.listeners.get_mut(usize::from(target.sock)) else {
+            return false;
+        };
+        // tx_batch is Some: armed at count > 1, and alloc > 1 gated
+        // us in. take+restore so seal_super's &mut TxBatch doesn't
+        // fight &mut self.dp.tx_scratch.
+        let mut batch = self.dp.tx_batch.take().expect("armed at count>1");
+        let r = crate::shard::seal_super(
+            &target,
+            tinc_device::DeviceArena::STRIDE,
+            lens,
+            scratch,
+            &mut self.dp.tx_scratch,
+            &mut batch,
+            slot.egress.as_mut(),
+        );
+        self.dp.tx_batch = Some(batch);
+        match r {
+            Ok(ok) => {
+                // Out-stats. Slow path bumps these per-chunk in
+                // route_packet → send_sptps_packet; we sum once.
+                let t = self.dp.tunnels.entry(target.to_nid).or_default();
+                t.out_packets += ok.packets;
+                t.out_bytes += ok.bytes;
+            }
+            Err((relay, origlen)) => {
+                // Same dispatch as ship_tx_batch: PMTU shrank under
+                // us; cap maxmtu so the NEXT super's stride fits.
+                // Frames lost; inner-TCP retransmits.
+                if let Some(p) = self
+                    .dp
+                    .tunnels
+                    .get_mut(&relay)
+                    .and_then(|t| t.pmtu.as_mut())
+                {
+                    let name = self.graph.node(relay).map_or("<gone>", |n| n.name.as_str());
+                    for a in p.on_emsgsize(origlen) {
+                        Self::log_pmtu_action(name, &a);
+                    }
+                }
+            }
+        }
+        // Batch already shipped inside seal_super.
+        true
     }
 }

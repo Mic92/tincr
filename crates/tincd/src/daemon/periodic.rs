@@ -372,6 +372,14 @@ impl Daemon {
             self.subnets.del(&subnet, &myname);
             self.mac_table.remove(mac);
         }
+        // One refresh after the loop. MAC subnets are Switch-mode
+        // only; `slowpath_all` is true for Switch (the `!= Router`
+        // gate) so tx_probe never reads this snapshot. Gated on
+        // `!expired.is_empty()` because the timer fires every 10s
+        // but lease duration is 600s — most ticks delete nothing.
+        if !expired.is_empty() {
+            self.tx_snap_refresh_subnets();
+        }
 
         // Re-arm only if leases remain. Else clear slot; next
         // learn_mac re-creates (learn() returns true on empty).
@@ -525,6 +533,8 @@ impl Daemon {
                 self.mac_table.insert(addr, myname.clone());
             }
         }
+        // SIGHUP-reload is rare; unconditional refresh is fine.
+        self.tx_snap_refresh_subnets();
 
         // ─── ConnectTo diff
         let current_ct: BTreeSet<String> = self

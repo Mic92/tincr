@@ -147,6 +147,34 @@ impl Daemon {
                         log::info!(target: "tincd::net",
                                    "SPTPS key exchange with {peer_name} successful");
                     }
+                    // Build the fast-path handles. The Sptps just
+                    // emitted HandshakeDone so both ciphers are
+                    // populated; the expects on outcipher_key/
+                    // incipher_key are post-handshake invariants.
+                    // outseqno_handle/replay_handle clone the existing
+                    // Arcs inside the Sptps — the fast path's
+                    // fetch_add/lock hits the SAME counter the
+                    // control-side seal_data_into would. Rekey: this
+                    // arm fires again, fresh Arc replaces; old drops.
+                    if let Some(sptps) = tunnel.sptps.as_deref() {
+                        let handles = std::sync::Arc::new(crate::shard::TunnelHandles {
+                            outseqno: sptps.outseqno_handle(),
+                            replay: sptps.replay_handle(),
+                            outkey: sptps.outcipher_key().expect("post-HandshakeDone"),
+                            inkey: sptps.incipher_key().expect("post-HandshakeDone"),
+                            udp_addr: std::sync::Mutex::new(tunnel.udp_addr_cached.clone()),
+                            validkey: std::sync::atomic::AtomicBool::new(true),
+                            minmtu: std::sync::atomic::AtomicU16::new(tunnel.minmtu()),
+                            outcompression: tunnel.outcompression,
+                        });
+                        // Mirror first so on_probe_reply's minmtu
+                        // store finds it.
+                        self.tunnel_handles
+                            .insert(peer, std::sync::Arc::clone(&handles));
+                        if let Some(s) = self.tx_snap.as_mut() {
+                            s.tunnels.insert(peer, handles);
+                        }
+                    }
                 }
                 Output::Record { record_type, bytes } => {
                     nw |= self.receive_sptps_record(peer, peer_name, record_type, &bytes);

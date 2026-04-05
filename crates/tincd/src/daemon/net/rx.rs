@@ -334,7 +334,15 @@ impl Daemon {
                         tunnel.status.udp_confirmed = true;
                     }
                     tunnel.udp_addr = Some(peer_addr);
-                    tunnel.udp_addr_cached = Some((socket2::SockAddr::from(peer_addr), sock));
+                    let cached = (socket2::SockAddr::from(peer_addr), sock);
+                    tunnel.udp_addr_cached = Some(cached.clone());
+                    // Mirror into the fast-path handles. tx_probe
+                    // gates on `udp_addr.is_some()`; HandshakeDone
+                    // typically fans None (UDP not yet confirmed).
+                    // Uncontended lock single-threaded.
+                    if let Some(h) = self.tunnel_handles.get(&from_nid) {
+                        *h.udp_addr.lock().unwrap() = Some(cached);
+                    }
                 }
                 // Clear udppacket here so the borrow of `tunnel` ends
                 // before receive_sptps_record_fast takes &mut self.
@@ -419,7 +427,11 @@ impl Daemon {
             }
             tunnel.udp_addr = Some(peer_addr);
             // Pre-converted SockAddr: was 0.37% self-time per-packet.
-            tunnel.udp_addr_cached = Some((socket2::SockAddr::from(peer_addr), sock));
+            let cached = (socket2::SockAddr::from(peer_addr), sock);
+            tunnel.udp_addr_cached = Some(cached.clone());
+            if let Some(h) = self.tunnel_handles.get(&from_nid) {
+                *h.udp_addr.lock().unwrap() = Some(cached);
+            }
         }
         // Tell `from` our MTU floor so they can switch to direct
         // UDP. Bug audit `deef1268`: was missing entirely.

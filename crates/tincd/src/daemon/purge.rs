@@ -173,6 +173,22 @@ impl Daemon {
             }
         }
 
+        // `node_ids.remove` + `graph.del_node` invalidates NodeView:
+        // the slot is freed, the next `lookup_or_add_node` recycles
+        // it, and a stale snapshot would map the new nid to the OLD
+        // name's reachable bit. `purge` is the only path that doesn't
+        // follow with `run_graph_and_log` (purged nodes were already
+        // unreachable; no BFS change). Subnets/handles also mutated
+        // in the loop; one refresh covers all.
+        self.tx_snap_refresh_graph();
+        self.tx_snap_refresh_subnets();
+        if let Some(s) = self.tx_snap.as_mut() {
+            // Purged nids were unreachable so BecameUnreachable
+            // already cleared their handles, but be defensive.
+            s.tunnels
+                .retain(|nid, _| self.tunnel_handles.contains_key(nid));
+        }
+
         nw
     }
 }

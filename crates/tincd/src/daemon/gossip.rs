@@ -865,6 +865,12 @@ impl Daemon {
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
         self.last_routes = std::sync::Arc::new(routes);
+        // Snapshot refresh: must happen BEFORE the transition loop's
+        // BecameUnreachable arm clears tunnel_handles, but AFTER the
+        // BFS so routes are post-sssp. The transition loop only
+        // touches dp.tunnels, not the graph/node_ids that NodeView
+        // reads. Refresh once here; the post-transition state is the
+        // same as far as routes/ns are concerned.
         // Keep edge IDs and map at broadcast time.
         self.last_mst = mst;
         for t in transitions {
@@ -938,6 +944,13 @@ impl Daemon {
                     if let Some(tunnel) = self.dp.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
+                    // Drop the fast-path handles. The snapshot's
+                    // `tunnels.get(&nid)` returns None next probe;
+                    // packet falls to slow path.
+                    self.tunnel_handles.remove(&node);
+                    if let Some(s) = self.tx_snap.as_mut() {
+                        s.tunnels.remove(&node);
+                    }
                 }
             }
         }
@@ -952,6 +965,11 @@ impl Daemon {
                 self.device_disable();
             }
         }
+        // Refresh AFTER the transition loop: `reachable` is post-BFS,
+        // and `nodes`/`node_ids` reflect any `on_ack`/`terminate`
+        // mutation that triggered this call (both call sites do the
+        // mutation FIRST, then `run_graph_and_log`).
+        self.tx_snap_refresh_graph();
     }
 
     /// 21 fields per row; CLI parses 22 (`" port "` re-split).
@@ -1173,6 +1191,7 @@ impl Daemon {
         }
 
         self.subnets.add(subnet, owner_name.clone());
+        self.tx_snap_refresh_subnets();
 
         // mac_table sync for route_mac.rs.
         if let Subnet::Mac { addr, .. } = subnet {
@@ -1284,7 +1303,11 @@ impl Daemon {
         // peer-triggers-fork-exec DoS (flood DEL with fresh nonces).
         // Do del() FIRST. We invert script-before-del (del() returns
         // bool) — script env doesn't read the table; same behavior.
-        if !self.subnets.del(&subnet, &owner_name) {
+        let did_del = self.subnets.del(&subnet, &owner_name);
+        if did_del {
+            self.tx_snap_refresh_subnets();
+        }
+        if !did_del {
             // Warn, no script.
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for {owner_name} \

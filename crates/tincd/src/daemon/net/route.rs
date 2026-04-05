@@ -188,6 +188,7 @@ impl Daemon {
         };
         let myname = self.name.clone();
         self.subnets.add(subnet, myname.clone());
+        self.tx_snap_refresh_subnets();
         self.mac_table.insert(mac, myname.clone());
         self.run_subnet_script(true, &myname, &subnet);
 

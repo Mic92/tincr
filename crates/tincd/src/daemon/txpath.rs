@@ -129,6 +129,15 @@ impl Daemon {
         for a in &actions {
             Self::log_pmtu_action(peer_name, a);
         }
+        // Publish minmtu to the fast path. NOT a per-packet write —
+        // probe replies are seconds apart. Unconditional store: may
+        // have raised, capped (LogFixed clamps), or stayed put;
+        // reading the post-action value covers all three. None until
+        // first HandshakeDone (probes start after the SPTPS dance).
+        if let Some(h) = self.tunnel_handles.get(&peer) {
+            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
+            h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
+        }
         // No per-node UDP-timeout timer (PMTU is driven inline by
         // try_tx/pmtu.tick()).
         false

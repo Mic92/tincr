@@ -743,6 +743,8 @@ impl Daemon {
             discovery: None,
             dht_hints: HashMap::new(),
             dht_probe_sent: HashSet::new(),
+            tx_snap: None,
+            tunnel_handles: IntHashMap::default(),
         };
 
         // ─── try_outgoing_connections - the actual setup
@@ -796,6 +798,40 @@ impl Daemon {
         for s in &daemon.subnets.owned_by(&daemon.name) {
             daemon.run_subnet_script(true, &daemon.name, s);
         }
+
+        // ─── TX fast-path snapshot. Built post-load_all_nodes so
+        // `subnets` has our own configured subnets. routes/ns/tunnels
+        // are still empty — tx_probe returns None at route_of()? until
+        // the first run_graph_and_log refreshes them. That first call
+        // happens on the first on_ack/ADD_EDGE (gossip.rs), well
+        // before any TUN read can produce a Super.
+        daemon.tx_snap = Some({
+            use crate::node_id::NodeId6;
+            // id6 prefix: [NULL ‖ myself]. Direct send always (probe
+            // gates on via==to, which makes relay==to, which makes
+            // the slow-path equivalent set dst_id = nullid).
+            let src_id6 = daemon
+                .id6_table
+                .id_of(daemon.myself)
+                .unwrap_or(NodeId6::NULL);
+            let mut id6_prefix = [0u8; 12];
+            id6_prefix[..6].copy_from_slice(NodeId6::NULL.as_bytes());
+            id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
+
+            crate::shard::TxSnapshot {
+                slowpath_all: daemon.any_pcap
+                    || daemon.dns.is_some()
+                    || daemon.settings.routing_mode != RoutingMode::Router
+                    || daemon.settings.priorityinheritance,
+                myself: daemon.myself,
+                myself_options: daemon.myself_options.bits(),
+                id6_prefix,
+                routes: std::sync::Arc::clone(&daemon.last_routes),
+                subnets: std::sync::Arc::new(daemon.subnets.clone()),
+                ns: std::sync::Arc::default(),
+                tunnels: IntHashMap::default(),
+            }
+        });
 
         Ok(daemon)
     }

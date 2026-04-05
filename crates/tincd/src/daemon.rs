@@ -495,6 +495,51 @@ pub struct Daemon {
     /// round so stale targets don't latch a late reply. Why source addr,
     /// not packet shape: see `handle_incoming_vpn_packet`.
     pub(crate) dht_probe_sent: HashSet<SocketAddr>,
+
+    /// TX fast-path snapshot. The Super arm `mem::take`s this,
+    /// calls `tx_probe(&snap, ...)`, runs the seal-send loop on
+    /// `Some`, restores. `None` until setup finishes; `Default` for
+    /// `mem::take`.
+    pub(crate) tx_snap: Option<crate::shard::TxSnapshot>,
+
+    /// Per-peer fast-path handles. Same `Arc` as in `tx_snap.tunnels`;
+    /// kept here so `minmtu`/`udp_addr` updates have a place to
+    /// write without `mem::take`-ing the snapshot. `store(Relaxed)`
+    /// here is visible to the next `tx_probe`'s `load(Relaxed)` — no
+    /// fence, no fan-out, no wake. Populated at `HandshakeDone`;
+    /// cleared at `BecameUnreachable`.
+    pub(crate) tunnel_handles: IntHashMap<NodeId, Arc<crate::shard::TunnelHandles>>,
+}
+
+impl Daemon {
+    /// Refresh the TX snapshot's subnet trie. Called after each
+    /// `subnets.add()`/`del()` (gossip, MAC lease, purge, reload).
+    /// Clones the `BTreeMap` (O(n) String clones); subnet churn is
+    /// gossip-rate, not packet-rate. No-op until setup builds the
+    /// snapshot — setup runs the script subnet adds before that point,
+    /// and the snapshot's initial clone covers them.
+    pub(super) fn tx_snap_refresh_subnets(&mut self) {
+        if let Some(s) = self.tx_snap.as_mut() {
+            s.subnets = Arc::new(self.subnets.clone());
+        }
+    }
+
+    /// Refresh routes + node view. Called at the END of
+    /// `run_graph_and_log` (after the transition loop, so `reachable`
+    /// is post-BFS) and after `purge` (the only path that removes from
+    /// `node_ids` without a follow-up BFS). `last_routes.len()` is the
+    /// graph slab length — same indexing invariant as `route_of`.
+    pub(super) fn tx_snap_refresh_graph(&mut self) {
+        if let Some(s) = self.tx_snap.as_mut() {
+            s.routes = Arc::clone(&self.last_routes);
+            s.ns = Arc::new(crate::shard::NodeView::build(
+                &self.graph,
+                &self.node_ids,
+                &self.nodes,
+                self.last_routes.len(),
+            ));
+        }
+    }
 }
 
 impl Daemon {
