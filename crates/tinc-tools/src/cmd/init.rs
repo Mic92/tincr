@@ -1,4 +1,4 @@
-//! `tinc init NAME`. C reference: `tincctl.c:2209-2301` `cmd_init`.
+//! `tinc init NAME`.
 //!
 //! ## What it does
 //!
@@ -16,47 +16,32 @@
 //! That's it. Five files/dirs. The user then `tinc edit tinc.conf` to
 //! add `ConnectTo`, runs `tinc-up` setup, and `tincd` is good to go.
 //!
-//! ## Intentional behavioral changes from C
+//! ## Intentional deviations from upstream
 //!
-//! These are documented in `RUST_REWRITE_PLAN.md` Phase 4a as deliberate
-//! deviations, not bugs to fix later.
+//! Documented in `RUST_REWRITE_PLAN.md` Phase 4a as deliberate, not
+//! bugs to fix later.
 //!
-//! ### No interactive name prompt
-//!
-//! C `cmd_init` prompts on stdin if `argc < 2 && isatty(stdin)`. The
-//! prompt only exists for the interactive `tinc> ` shell mode, which
-//! we don't have yet. When shell mode lands the prompt becomes a
-//! shell-layer concern; the command itself stays prompt-free.
-//!
-//! ### No `check_port`
-//!
-//! C tries to bind 655; if busy, picks a random high port and writes
-//! `Port = N`. Dropped: (a) pulls in socket code, (b) the random pick
-//! is often wrong (firewall/NAT doesn't allow it). Better to fail
-//! loudly at first daemon start than silently pick an unknown port.
-//!
-//! ### No RSA keygen
-//!
-//! `DISABLE_LEGACY` is permanently on. We don't speak the 1.0.x RSA
-//! protocol; we don't generate RSA keys. C wraps it in `#ifndef
-//! DISABLE_LEGACY` (`tincctl.c:2269`); ours is just absent.
+//! - **No interactive name prompt.** The prompt only exists for the
+//!   interactive `tinc> ` shell mode, which we don't have. When shell
+//!   mode lands the prompt becomes a shell-layer concern.
+//! - **No `check_port`.** Upstream tries to bind 655 and picks a
+//!   random high port if busy. Dropped: pulls in socket code, and the
+//!   random pick is often wrong (firewall/NAT). Better to fail loudly
+//!   at first daemon start.
+//! - **No RSA keygen.** `DISABLE_LEGACY` is permanently on.
 //!
 //! ## File mode subtlety
 //!
-//! C's `fopenmask` does a umask dance to ensure the private key stays
-//! 0600 regardless of a permissive umask, and the executable bit on
-//! tinc-up survives. We use `OpenOptions::mode(0o600)` for the key
-//! (umask only clears bits, never widens) plus `set_permissions(0o755)`
-//! for tinc-up. Simpler, same security guarantee. We lose: with umask
-//! 077, C's tinc-up would be 0700 but ours is 0755 — the security-
+//! `OpenOptions::mode(0o600)` for the key (umask only clears bits,
+//! never widens) plus `set_permissions(0o755)` for tinc-up. With
+//! umask 077, tinc-up ends up 0755 instead of 0700; the security-
 //! relevant file (the key) is unaffected.
 //!
 //! ## Idempotency: NO
 //!
 //! `tinc init` on an existing confbase fails (`tinc.conf already
 //! exists`). Re-init would overwrite the private key. No rollback on
-//! partial failure, matching C — the failure mode (disk full, perm
-//! flip mid-init) is rare.
+//! partial failure — disk full / perm flip mid-init is rare.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -78,9 +63,8 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
 /// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
 ///
-/// Progress goes to stderr (matches C `fprintf(stderr, ...)`). Not
-/// stdout — stdout is reserved for command *output* (export does this),
-/// progress chatter is diagnostics.
+/// Progress goes to stderr. Stdout is reserved for command *output*
+/// (export does this); progress chatter is diagnostics.
 ///
 /// # Errors
 ///
@@ -91,11 +75,9 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 /// Doesn't roll back on partial failure. See module doc.
 pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // ─── Guard: already initialized?
-    // C: `if(!access(tinc_conf, F_OK))` — `access(F_OK)` is "exists?",
-    // returns 0 (success) if it does. The `!` flips it. We use
-    // `try_exists` not `exists` because `exists` swallows EACCES
-    // (returns false on permission-denied to the parent dir), and
-    // we'd rather surface that as `Io` than silently re-init.
+    // `try_exists` not `exists`: `exists` swallows EACCES (returns
+    // false on permission-denied to the parent dir), and we'd rather
+    // surface that as `Io` than silently re-init.
     let tinc_conf = paths.tinc_conf();
     match tinc_conf.try_exists() {
         Ok(true) => return Err(CmdError::Exists(tinc_conf)),
@@ -103,23 +85,16 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         Err(e) => return Err(io_err(&tinc_conf)(e)),
     }
 
-    // ─── Guard: valid node name?
-    // C: `if(!check_id(name))`. Doing this *after* the exists check
-    // matches the C order (`tincctl.c:2249` is after `:2210`). Both
-    // are pure checks so order is academic, but fidelity is free.
     if !check_id(name) {
         return Err(CmdError::BadInput(
             "Invalid Name! Only a-z, A-Z, 0-9 and _ are allowed.".into(),
         ));
     }
 
-    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CONFDIR | DIR_CACHE)
-    // C `fs.c:23-64`. The order matters: confdir before confbase
-    // (parent before child), confbase before hosts/cache (children).
-    // C `makedir` does `mkdir; if EEXIST chmod` — i.e. it forces the
-    // mode even if the dir was already there. We do the same: an
-    // existing `/etc/tinc/myvpn` with mode 0777 gets clamped to 0755.
-    // Paranoia, but cheap.
+    // ─── makedirs
+    // Order matters: confdir before confbase (parent before child),
+    // confbase before hosts/cache. `makedir` chmod-on-exists clamps
+    // an existing `/etc/tinc/myvpn` with mode 0777 to 0755.
     //
     // `confdir` is `Some` iff `-c` wasn't given. See `Paths::confdir` doc.
     if let Some(confdir) = &paths.confdir {
@@ -130,40 +105,30 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     makedir(&paths.cache_dir(), 0o755)?;
 
     // ─── Write tinc.conf
-    // C: `fprintf(f, "Name = %s\n", name)`. That's the entire file.
-    // Mode is whatever `fopen("w")` gives — 0666 & ~umask, typically
-    // 0644. We use `File::create` (same semantics).
-    //
     // No `O_EXCL` — we already checked `try_exists` above. There's a
     // TOCTOU here (check, then someone-else-creates, then we
-    // overwrite), but the C has the same race and the threat model
-    // doesn't include hostile concurrent `tinc init`s.
+    // overwrite), but the threat model doesn't include hostile
+    // concurrent `tinc init`s.
     {
         let mut f = fs::File::create(&tinc_conf).map_err(io_err(&tinc_conf))?;
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
     }
 
     // ─── Generate Ed25519 keypair
-    // C `ed25519_keygen(false)`: generate, write private as PEM to
-    // `ed25519_key.priv` (mode 0600), write public as a config *line*
-    // to `hosts/NAME` (NOT a PEM file — `Ed25519PublicKey = <b64>`).
-    //
-    // The asymmetry matters. The private key file is read by the
-    // daemon at startup (`net_setup.c` `read_ecdsa_private_key`) via
-    // `read_pem`. The public key in `hosts/NAME` is read by *peers*
-    // via the config parser (`get_config_string("Ed25519PublicKey")`).
-    // Different readers, different formats. `keypair::write_pair` does
-    // PEM-both-sides for `sptps_keypair`; this does PEM-then-config.
+    // Private → PEM at `ed25519_key.priv` (mode 0600). Public → a
+    // config *line* in `hosts/NAME` (NOT a PEM — `Ed25519PublicKey =
+    // <b64>`). Different readers, different formats: the daemon reads
+    // the private PEM at startup, *peers* read the public via the
+    // config parser. `keypair::write_pair` does PEM-both-sides for
+    // `sptps_keypair`; this does PEM-then-config.
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
 
-    // Private: PEM, mode 0600. `O_EXCL` here because clobbering an
-    // existing key is *catastrophic* — you lose the ability to prove
-    // identity to existing peers. C uses mode "a" (append) which has a
-    // similar effect (won't truncate), combined with `disable_old_keys`
-    // commenting out prior blocks. For init, the file shouldn't exist
-    // at all (we just made the dir); excl is the right semantics.
+    // Private: PEM, mode 0600. `O_EXCL` because clobbering an existing
+    // key is *catastrophic* — you lose the ability to prove identity
+    // to existing peers. For init, the file shouldn't exist at all
+    // (we just made the dir); excl is the right semantics.
     {
         let priv_path = paths.ed25519_private();
         let f = open_mode_excl(&priv_path, 0o600)?;
@@ -173,18 +138,12 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         w.flush().map_err(io_err(&priv_path))?;
     }
 
-    // Public: config line in `hosts/NAME`. C: `fprintf(f,
-    // "Ed25519PublicKey = %s\n", b64encode_tinc(public, ..., 32))`.
-    // The b64 is tinc's LSB-first variant — `b64::encode`, NOT
-    // standard base64. A peer's `ecdsa_set_base64_public_key`
-    // (`ecdsa.c:43`) decodes with `b64decode_tinc`; standard b64 here
-    // would fail to round-trip and the peer rejects your key. This
-    // is the highest-stakes line in the whole file.
+    // Public: config line in `hosts/NAME`. The b64 is tinc's LSB-first
+    // variant — `b64::encode`, NOT standard base64. Standard b64 here
+    // would fail to round-trip on the peer side and the key would be
+    // rejected. Highest-stakes line in the file.
     //
-    // Mode is 0666 in C (`ask_and_open(..., 0666)`); after umask 022
-    // that's 0644. The host file is meant to be shared (export sends
-    // it to peers), so world-readable is fine. We use `OpenOptions`
-    // with append — `cmd_init` is the first writer but `check_port`
+    // Append mode: `cmd_init` is the first writer but `check_port`
     // (when we add it) appends `Port = N` to the same file.
     {
         let host_path = paths.host_file(name);
@@ -198,32 +157,21 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     }
 
     // ─── tinc-up stub
-    // Unix-only (C: `#ifndef HAVE_WINDOWS`). A shell script that yells
-    // at you to configure it. Mode 0777 in C, becomes 0755 after umask.
-    //
-    // The C checks `if(access(filename, F_OK))` — only write if it
-    // *doesn't* exist (note: `access` returns 0 on exists, so the
-    // condition is "doesn't exist"). We just made the directory, so
-    // it can't exist, but the check matters if `cmd_init` is ever
-    // called on a partial-state confbase (it shouldn't be —
-    // `tinc.conf` exists check should catch that — but defense in
-    // depth). `O_EXCL` gives us the same don't-clobber.
+    // Unix-only. A shell script that yells at you to configure it.
+    // Only write if it doesn't exist — we just made the directory so
+    // it can't, but the check matters if `cmd_init` is ever called on
+    // a partial-state confbase. `O_EXCL` is the don't-clobber.
     #[cfg(unix)]
     {
         let up_path = paths.tinc_up();
         // `try_exists` then `O_EXCL` is belt-and-suspenders, but it
-        // lets us silently skip (matching C) instead of erroring on
-        // EEXIST. The C silently skips; so do we.
+        // lets us silently skip instead of erroring on EEXIST.
         if !up_path.try_exists().map_err(io_err(&up_path))? {
             let f = open_mode_excl(&up_path, 0o755)?;
-            // The text matches `tincctl.c:2294` — including the
-            // commented-out ifconfig line. That line is a fossil
-            // (modern Linux uses `ip addr add`, not `ifconfig`), but
-            // changing it is a separate decision. Fidelity.
+            // The commented-out ifconfig line is a fossil (modern
+            // Linux uses `ip addr add`); changing it is a separate
+            // decision. Fidelity to upstream's stub for now.
             let mut w = std::io::BufWriter::new(f);
-            // Literal newlines in the source make the multi-line
-            // string read like the file it produces. The C uses one
-            // long `\n\n` string; same content.
             w.write_all(
                 b"#!/bin/sh\n\
                   \n\
@@ -234,12 +182,8 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
             .map_err(io_err(&up_path))?;
             w.flush().map_err(io_err(&up_path))?;
             // The +x bit: `OpenOptions::mode(0o755)` sets the create
-            // mode, but the kernel applies umask, so umask 022 gives
-            // 0755 (good) but umask 077 gives 0700. C `fopenmask` does
-            // an explicit `fchmod` to make sure +x sticks regardless.
-            // We do the same. `set_permissions` is `chmod`, not
-            // `fchmod` — we already closed the file (BufWriter drop),
-            // path-based is fine.
+            // mode, but the kernel applies umask, so umask 077 would
+            // give 0700. Explicit chmod to make +x stick regardless.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -266,11 +210,8 @@ use super::makedir;
 /// clears bits, never sets). For files where we want bits *above* what
 /// umask allows (executables), the caller does a follow-up `chmod`.
 ///
-/// Why `O_EXCL` instead of C's `fopenmask("a", ...)` append mode: for
-/// the private key, append-to-existing is just as bad as truncate
-/// (`disable_old_keys` makes append work in C by commenting out old
-/// blocks first; we don't have that yet, and excl is the right
-/// semantics for init anyway — see callers).
+/// `O_EXCL`: for the private key, append-to-existing is just as bad
+/// as truncate. excl is the right semantics for init — see callers.
 fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdError> {
     #[cfg(unix)]
     let opts = {
@@ -393,10 +334,8 @@ mod tests {
         assert!(matches!(err, CmdError::BadInput(_)));
 
         // Nothing was created — `check_id` runs before any mkdir.
-        // Well, almost: the `try_exists` check on tinc.conf runs
-        // first (matching C order), so the *parent* dir needs to be
-        // stat-able, but nothing is *written*. Confirm: confbase
-        // doesn't exist.
+        // (The `try_exists` on tinc.conf runs first, so the *parent*
+        // dir needs to be stat-able, but nothing is *written*.)
         assert!(!paths.confbase.exists());
     }
 

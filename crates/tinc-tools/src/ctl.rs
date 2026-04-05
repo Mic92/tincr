@@ -1,15 +1,10 @@
 //! Control socket transport. The CLI ↔ daemon channel.
 //!
-//! `tincctl.c::connect_tincd` (lines 747-902) + `recvline`/`sendline`
-//! (499-588), as a struct holding the socket. Replaces a global `int
-//! fd` + `char buffer[4096]` + `size_t blen`.
-//!
 //! ## Shape of the protocol
 //!
 //! The control socket is a **regular meta connection** that took the
-//! `^` branch in `id_h` (`protocol_auth.c:325`). Same `\n`-delimited
-//! lines, same request-type-first-int convention, same `connection_t`
-//! on the daemon side. The control conversation looks like:
+//! `^` branch in `id_h`. Same `\n`-delimited lines, same request-
+//! type-first-int convention. The control conversation looks like:
 //!
 //! ```text
 //!   C → D:  "0 ^<64-hex-cookie> 0\n"       ID, ^prefix, ctl-ver=0
@@ -44,9 +39,8 @@
 //!
 //! ## Not here
 //!
-//! Windows TCP fallback (`tincctl.c:817-869`): Unix-only for now.
-//! Reconnect-on-dead (`tincctl.c:748-760`): C readline shell reuses
-//! `fd`; we're one command per process.
+//! Windows TCP fallback: Unix-only for now. Reconnect-on-dead: the
+//! readline shell reuses one fd; we're one command per process.
 
 #![allow(clippy::doc_markdown)]
 
@@ -57,47 +51,41 @@ use std::path::Path;
 
 use crate::names::Paths;
 
-/// `request_type` enum from `control_common.h`. The second int after
-/// `CONTROL` in every control line.
+/// `request_type` enum. The second int after `CONTROL` in every
+/// control line.
 ///
-/// Why a `u8`-newtype-ish enum and not strings: the C uses ints
-/// (cheap to format/parse), and we have no compat constraint to
-/// change them. The numbers are also stable across our releases
-/// because they're a closed set — `REQ_FOO` is added at the end,
-/// never reordered.
+/// Ints not strings: cheap to format/parse, no compat constraint to
+/// change them. The numbers are stable across releases because
+/// they're a closed set — new values added at the end, never reordered.
 ///
 /// `REQ_INVALID = -1` is the daemon's error response, not a request
 /// the CLI sends. Represented as `Option<CtlRequest>::None` on parse.
 ///
-/// `REQ_RESTART` and `REQ_DUMP_GRAPH` exist in the enum but are
-/// **never sent** by `tincctl.c` and never matched by `control_h`.
+/// `Restart` and `DumpGraph` are **never sent** and never matched.
 /// Dead values. We include them anyway: zero cost, and the gap in
 /// the discriminant sequence (2→3, 7→8) would be more surprising
 /// than the dead variants.
 ///
-/// `REQ_CONNECT`: C `tincctl.c:1446` has `cmd_connect`, but
-/// `control.c` has no `REQ_CONNECT` case — falls through to
-/// `default: REQ_INVALID`. The CLI sends a request the daemon
-/// doesn't handle. Effectively dead-on-arrival in C; we don't
-/// bother sending.
+/// `Connect` is dead-on-arrival upstream: the CLI sends it but the
+/// daemon has no case for it (falls through to `REQ_INVALID`). We
+/// don't bother sending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CtlRequest {
     Stop = 0,
     Reload = 1,
-    /// Dead in C. Daemon never matches it.
+    /// Dead upstream. Daemon never matches it.
     Restart = 2,
     DumpNodes = 3,
     DumpEdges = 4,
     DumpSubnets = 5,
     DumpConnections = 6,
-    /// Dead in C. The CLI synthesizes graph from nodes+edges instead.
+    /// Dead upstream. The CLI synthesizes graph from nodes+edges instead.
     DumpGraph = 7,
     Purge = 8,
     SetDebug = 9,
     Retry = 10,
-    /// Dead-on-arrival in C. `tincctl.c:1446` sends it; `control.c`
-    /// has no case — daemon replies REQ_INVALID.
+    /// Dead-on-arrival upstream: daemon has no case — replies REQ_INVALID.
     Connect = 11,
     Disconnect = 12,
     DumpTraffic = 13,
@@ -107,9 +95,8 @@ pub enum CtlRequest {
 
 impl CtlRequest {
     /// Parse the second int. `None` for unknown / `REQ_INVALID`.
-    /// We're permissive: anything not in the enum is `None`, not a
-    /// protocol error. The C's `default:` case in `control_h` does
-    /// the same.
+    /// Permissive: anything not in the enum is `None`, not a
+    /// protocol error.
     #[must_use]
     pub fn from_i32(n: i32) -> Option<Self> {
         Some(match n {
@@ -134,36 +121,28 @@ impl CtlRequest {
     }
 }
 
-/// `CONTROL` request type from `protocol.h:52`. Count from `ID = 0`:
-/// ID/METAKEY/CHALLENGE/CHAL_REPLY/ACK/STATUS/ERROR/TERMREQ/PING/PONG/
-/// ADD_SUBNET/DEL_SUBNET/ADD_EDGE/DEL_EDGE/KEY_CHANGED/REQ_KEY/ANS_KEY/
-/// PACKET → 18.
+/// `CONTROL` request type = 18 (count from `ID = 0` through `PACKET`).
 ///
-/// `tinc_proto::request::Request::Control` is the canonical place for
-/// this. We re-declare here because `ctl.rs` doesn't otherwise use
+/// `tinc_proto::request::Request::Control` is the canonical place.
+/// We re-declare here because `ctl.rs` doesn't otherwise use
 /// `tinc-proto` and one constant isn't worth the dependency edge.
-/// Same call as `SEPARATOR` redeclared in invite.rs/exchange.rs.
 const CONTROL: u8 = 18;
-/// `ID` from `protocol.h:44`. The greeting opener.
+/// `ID` — the greeting opener.
 const ID: u8 = 0;
-/// `ACK` from `protocol.h:44`. The greeting closer.
+/// `ACK` — the greeting closer.
 const ACK: u8 = 4;
-/// `TINC_CTL_VERSION_CURRENT` from `control_common.h:46`. Hasn't
-/// changed since 2007. We send it (because the C daemon checks it,
-/// for as long as we care about C-daemon compat during transition);
-/// our own daemon will check it too (cheap, and lets us bump if we
-/// ever change the framing).
+/// `TINC_CTL_VERSION_CURRENT`. Hasn't changed since 2007. We send it
+/// (the upstream daemon checks it, for as long as we care about
+/// cross-compat during transition); our own daemon will check it too.
 const CTL_VERSION: u8 = 0;
 
-/// Contents of the pidfile. `pidfile_t` (`pidfile.h`).
+/// Contents of the pidfile.
 ///
-/// The C also has `host` and `port` fields (for the Windows TCP
-/// fallback). We drop them — Unix-only daemon path. When/if Windows
-/// lands, this grows; the parse already skips them.
+/// `host` is dropped (Windows TCP fallback); Unix-only daemon path.
+/// When/if Windows lands, this grows; the parse already skips it.
 ///
-/// `cookie` is the bearer token. `controlcookie[65]` in C is 32
-/// random bytes, hex-encoded. The pidfile is mode 0600 (`pidfile.c:28`
-/// `umask(mask | 077)`) so only the daemon's UID can read it; the
+/// `cookie` is the bearer token. 32 random bytes, hex-encoded. The
+/// pidfile is mode 0600 so only the daemon's UID can read it; the
 /// cookie is auth-via-fs-perms.
 #[derive(Debug)]
 pub struct Pidfile {
@@ -173,29 +152,20 @@ pub struct Pidfile {
     /// the same hex string. Round-tripping through bytes would just
     /// be an opportunity to disagree on case.
     pub cookie: String,
-    /// The port the daemon is listening on. String, not u16 — the
-    /// pidfile says `port 655` but `Port = 655/udp` is also valid
-    /// config syntax (`netutl.c:43` parses with `getaddrinfo`).
-    /// `read_actual_port` (`tincctl.c:1765`) prints this verbatim;
-    /// it's the *runtime* port (the daemon resolved `Port = 0` to
+    /// The port the daemon is listening on. String, not u16 — `Port
+    /// = 655/udp` is valid config syntax (parsed via `getaddrinfo`).
+    /// This is the *runtime* port (the daemon resolved `Port = 0` to
     /// a real port and wrote it here).
     pub port: String,
 }
 
 impl Pidfile {
-    /// `read_pidfile` (`pidfile.c:6-23`). Format:
-    /// `"<pid> <cookie> <host> port <port>\n"`.
+    /// Format: `"<pid> <cookie> <host> port <port>\n"`.
     ///
-    /// C `fscanf(f, "%20d %64s %128s port %128s")`. The `%20d` width
-    /// limit is overflow paranoia (20 digits fits `u64`); the `%64s`
-    /// is exactly the cookie length; `%128s` is "more than enough".
-    ///
-    /// We're stricter than the C in one place: `%d` accepts leading
-    /// whitespace and `+`/`-`; `parse::<u32>` doesn't. A pidfile
-    /// with `+123` would parse in C and fail here. The pidfile is
-    /// written by `fprintf(f, "%d ...")` which never emits `+`, so
-    /// the only source of a leading sign is hand-editing or a buggy
-    /// daemon. Stricter is fine.
+    /// We're stricter than upstream in one place: `parse::<u32>`
+    /// doesn't accept leading `+`/`-`. The daemon never emits `+`,
+    /// so the only source of a leading sign is hand-editing.
+    /// Stricter is fine.
     ///
     /// # Errors
     /// File open failed, or contents don't match the expected shape.
@@ -208,19 +178,14 @@ impl Pidfile {
             err: e,
         })?;
 
-        // C parses with fscanf. We tokenize on whitespace — `%s` is
-        // "read non-whitespace", so split_whitespace is the moral
-        // equivalent. The literal `port` in the format string is
-        // matched by checking-then-skipping, not by sscanf doing it
-        // (C `%128s port %128s` reads, skips ws, expects literal
-        // `port`, skips ws, reads). We just check token 3.
+        // Tokenize on whitespace. The literal `port` is checked at
+        // token 3.
         let mut tok = s.split_whitespace();
         let pid_s = tok.next().ok_or(CtlError::PidfileMalformed)?;
         let cookie = tok.next().ok_or(CtlError::PidfileMalformed)?;
         // host, "port", port: we don't use them but we *do* check
-        // shape. C `if(read != 4)` — fscanf must consume all four.
-        // A truncated pidfile (daemon crashed mid-write?) should
-        // fail here, not connect with a half-read cookie.
+        // shape. A truncated pidfile (daemon crashed mid-write?)
+        // should fail here, not connect with a half-read cookie.
         let _host = tok.next().ok_or(CtlError::PidfileMalformed)?;
         let port_lit = tok.next().ok_or(CtlError::PidfileMalformed)?;
         let port = tok.next().ok_or(CtlError::PidfileMalformed)?;
@@ -228,19 +193,13 @@ impl Pidfile {
             return Err(CtlError::PidfileMalformed);
         }
 
-        // C `%20d`. u32 covers all real pids. The C reads into `int`
-        // and never checks for negative; we get the check for free.
+        // u32 covers all real pids; the check for negative is free.
         let pid: u32 = pid_s.parse().map_err(|_| CtlError::PidfileMalformed)?;
 
-        // Cookie length: the C reads into a `[65]` buffer with `%64s`.
-        // If the cookie is somehow longer, fscanf truncates; if
-        // shorter, no problem. We check exact-64 because the daemon
-        // *writes* exact-64 (`bin2hex` of 32 bytes), and length
-        // disagreement = silent auth failure later. Better here.
-        //
-        // Hex-only check: same reasoning. The daemon writes lowercase
-        // hex (`bin2hex` uses `"0123456789abcdef"`, `utils.c:43`).
-        // Non-hex = corruption or hand-editing.
+        // Cookie length: the daemon *writes* exact-64 (`bin2hex` of
+        // 32 bytes); length disagreement = silent auth failure later.
+        // Better here. Hex-only check: same reasoning. Non-hex =
+        // corruption or hand-editing.
         if cookie.len() != 64 || !cookie.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(CtlError::PidfileMalformed);
         }
@@ -259,18 +218,15 @@ impl Pidfile {
 /// some callers (`cmd_invite`'s best-effort reload) want to treat
 /// as a soft no-op.
 ///
-/// The C's `verbose` parameter to `connect_tincd` controls whether
-/// these print to stderr. We model that as: errors always carry the
-/// message, the *caller* decides whether to print (`cmd_reload`
-/// prints, `cmd_invite`'s opportunistic reload swallows). Matches
-/// the call-site control without a `verbose` arg threading through.
-// C phrasing where it exists. The daemon's down — these go to stderr
-// in `cmd_reload` etc., users grep for them.
+/// Errors always carry the message; the *caller* decides whether to
+/// print (`cmd_reload` prints, `cmd_invite`'s opportunistic reload
+/// swallows). Matches call-site control without threading a
+/// `verbose` arg through.
+// Upstream phrasing where it exists — users grep for these.
 #[derive(Debug, thiserror::Error)]
 pub enum CtlError {
-    /// `read_pidfile` returned NULL (ENOENT or EACCES). The daemon
-    /// isn't running, or never wrote a pidfile, or you can't read
-    /// it. C: `"Could not open pid file %s: %s\n"` (`tincctl.c:767`).
+    /// ENOENT or EACCES. The daemon isn't running, or never wrote a
+    /// pidfile, or you can't read it.
     #[error("Could not open pid file {}: {err}", path.display())]
     PidfileMissing {
         path: std::path::PathBuf,
@@ -278,24 +234,18 @@ pub enum CtlError {
         err: std::io::Error,
     },
     /// Pidfile exists but doesn't parse. Daemon crashed mid-write,
-    /// or it's a stale pidfile from a different tinc version. C:
-    /// `read_pidfile` returns NULL on parse failure too, undifferentiated;
-    /// we distinguish for the test that hand-crafts bad pidfiles.
-    /// C doesn't have this message (it conflates with missing).
-    /// Ours is new but follows the pattern.
+    /// or it's from a different tinc version. Upstream conflates this
+    /// with missing; we distinguish for hand-crafted-bad-pidfile tests.
     #[error("Could not parse pid file")]
     PidfileMalformed,
     /// `kill(pid, 0)` returned ESRCH. Daemon was running, isn't now,
-    /// pidfile is stale. C: `"Could not find tincd running at pid %d"`.
-    ///
-    /// The C also unlinks the stale pidfile and socket here. We don't
-    /// — that's a side effect across the `Paths` boundary, and the
-    /// daemon's next start overwrites the pidfile anyway. If we add
-    /// it, it's a separate `cleanup_stale` fn the caller invokes.
+    /// pidfile is stale. Upstream also unlinks the stale pidfile and
+    /// socket here; we don't — the daemon's next start overwrites
+    /// the pidfile anyway.
     #[error("Could not find tincd running at pid {pid}")]
     DaemonDead { pid: u32 },
     /// `connect(AF_UNIX)` failed. Socket file gone, or daemon not
-    /// listening. C: `"Cannot connect to UNIX socket %s: %s\n"`.
+    /// listening.
     #[error("Cannot connect to UNIX socket {}: {err}", path.display())]
     SocketConnect {
         path: std::path::PathBuf,
@@ -303,37 +253,27 @@ pub enum CtlError {
         err: std::io::Error,
     },
     /// Greeting exchange failed. Wrong cookie, daemon spoke wrong
-    /// protocol, EOF mid-greeting. C: `"Cannot read greeting from
-    /// control socket"` or `"Could not fully establish control
-    /// socket connection"`. Both messages, depending on which line.
+    /// protocol, EOF mid-greeting.
     #[error("{0}")]
     Greeting(String),
     /// Socket I/O after greeting. Daemon closed, write failed.
-    /// The C doesn't distinguish — `recvline` returns false, caller
-    /// prints "could not X". We name it for the test.
     #[error("Connection to tincd lost: {0}")]
     Io(#[source] std::io::Error),
 }
 
-/// The connected control socket. `int fd` + `buffer`/`blen` from
-/// `tincctl.c`, plus the daemon's pid (set by greeting line 2).
+/// The connected control socket, plus the daemon's pid (from
+/// greeting line 2).
 ///
 /// Generic over the stream so tests can pass `UnixStream::pair()`
 /// halves. In production it's always `UnixStream`.
 ///
-/// `BufReader` wraps the reader half. The C hand-rolls a buffer
-/// (`tincctl.c:496`: `char buffer[4096]; size_t blen`) because
-/// `recvline` and `recvdata` share it: `recvline` might over-read
-/// past the `\n`, into the start of the next data block. The
-/// shared buffer means `recvdata` sees those bytes.
-///
-/// **`BufReader` already solves this.** It IS that shared buffer.
-/// `read_line` over-reads into its internal 8KiB, stops at `\n`.
-/// Then `read_exact` on the `BufReader` (NOT the inner stream —
-/// `BufReader<T>: Read`) drains the internal buffer FIRST, before
-/// touching `T`. The plan's "blocked on draining `buffer()` by
-/// hand" was wrong: that's `BufReader::read`'s default behavior.
-/// Verified by smoke: `Cursor::new("18 15 7\nLOGDATA")`, one
+/// `BufReader` wraps the reader half. `recvline` and `recvdata`
+/// share a buffer: `recvline` might over-read past the `\n` into
+/// the start of the next data block. **`BufReader` already solves
+/// this** — it IS that shared buffer. `read_line` over-reads into
+/// its internal 8KiB; then `read_exact` on the `BufReader` (NOT the
+/// inner stream — `BufReader<T>: Read`) drains the internal buffer
+/// FIRST. Verified by smoke: `Cursor::new("18 15 7\nLOGDATA")`, one
 /// `read_line`, one `read_exact(7)`, both correct.
 ///
 /// Why not `BufWriter`: control commands are fire-and-forget —
@@ -350,7 +290,7 @@ pub struct CtlSocket<S: Read + Write> {
     /// Writer half. Unbuffered.
     writer: WriteHalf<S>,
     /// Daemon's pid, from greeting line 2. `cmd_pid` prints this;
-    /// nothing else uses it. C: global `pid`.
+    /// nothing else uses it.
     pub pid: u32,
 }
 
@@ -419,7 +359,6 @@ impl<S: Read + Write> CtlSocket<S> {
     }
 
     /// Do the greeting exchange over an already-connected stream.
-    /// `tincctl.c:876-900`.
     ///
     /// Separate from `connect()` because tests pass a mock stream.
     /// The OS bits (pidfile read, kill check, socket connect) live
@@ -433,37 +372,25 @@ impl<S: Read + Write> CtlSocket<S> {
     /// `Greeting` if the daemon's response doesn't match the
     /// expected shape. Wrong cookie → daemon closes after our send,
     /// next recv returns 0 → `Greeting("Cannot read greeting...")`.
-    /// (The C daemon doesn't actually close on bad cookie — `id_h`
-    /// returns `false` which falls through to the `check_id` check
-    /// which also fails on `^hex...` because `^` isn't alnum. The
-    /// connection then gets dropped by the meta loop. Same outcome.)
     pub fn handshake(stream: S, cookie: &str) -> Result<Self, CtlError> {
         let shared = Rc::new(RefCell::new(stream));
         let mut reader = BufReader::new(ReadHalf(Rc::clone(&shared)));
         let mut writer = WriteHalf(shared);
 
         // ─── Send ID
-        // C: `sendline(fd, "%d ^%s %d", ID, controlcookie,
-        //     TINC_CTL_VERSION_CURRENT)`.
         // The `^` prefix is what routes this to the control path in
         // `id_h`. Without it, the daemon would try to parse `cookie`
-        // as a node name, fail `check_id` (hex chars are fine but a
-        // 64-char name is unusual enough to maybe-fail something
-        // downstream — actually no, check_id only checks charset.
-        // Doesn't matter: the `^` is the intent.).
+        // as a node name.
         writeln!(writer, "{ID} ^{cookie} {CTL_VERSION}").map_err(CtlError::Io)?;
 
         // ─── Recv line 1: daemon's send_id()
-        // C: `recvline(); sscanf("%d %4095s %d") == 3 && code == 0`.
-        // We get `"0 <daemon-name> <maj>.<min>"`. The daemon sends
-        // this *after* our ID arrives (`if(!c->outgoing) send_id(c)`
-        // in `id_h:333`) — the unix-socket connection has no
-        // outgoing flag set, so the daemon's ID is reactive, not
-        // proactive. The version field is `protocol_major.protocol_minor`,
-        // not the control version — that's in line 2.
+        // `"0 <daemon-name> <maj>.<min>"`. The daemon sends this
+        // *after* our ID arrives — the unix-socket connection has no
+        // outgoing flag set, so the daemon's ID is reactive. The
+        // version field is `protocol_major.protocol_minor`, not the
+        // control version — that's in line 2.
         //
         // We don't *use* anything from line 1. Just check shape.
-        // The C checks `code == 0` (it's an ID) and ignores the rest.
         let line1 = recv_one(&mut reader, "Cannot read greeting from control socket")?;
         let mut t1 = line1.split_ascii_whitespace();
         if t1.next() != Some("0") {
@@ -473,16 +400,11 @@ impl<S: Read + Write> CtlSocket<S> {
                 "Cannot read greeting from control socket: unexpected response {line1:?}"
             )));
         }
-        // Name and version ignored. The C `%4095s %d` consumes them
-        // but never reads `data` or `version` afterward. We don't
-        // even consume — the next line is where the action is.
+        // Name and version ignored — the next line is where the action is.
 
         // ─── Recv line 2: ACK with control-ver and pid
-        // C: `recvline(); sscanf("%d %d %d") == 3 && code == 4 &&
-        //     version == TINC_CTL_VERSION_CURRENT`.
         // Shape: `"4 0 <pid>"`. The `4` is ACK; `0` is control-ver
-        // (the daemon echoes what we sent, sort of — it sends its
-        // own `TINC_CTL_VERSION_CURRENT`, which equals ours).
+        // (the daemon sends its own `TINC_CTL_VERSION_CURRENT`).
         let line2 = recv_one(
             &mut reader,
             "Could not fully establish control socket connection",
@@ -492,8 +414,6 @@ impl<S: Read + Write> CtlSocket<S> {
         let ver = t2.next().and_then(|s| s.parse::<u8>().ok());
         let pid = t2.next().and_then(|s| s.parse::<u32>().ok());
 
-        // All three checks at once. C does them sequentially with
-        // one error message; we match.
         let (Some(ACK), Some(CTL_VERSION), Some(pid)) = (code, ver, pid) else {
             return Err(CtlError::Greeting(format!(
                 "Could not fully establish control socket connection: \
@@ -508,9 +428,8 @@ impl<S: Read + Write> CtlSocket<S> {
         })
     }
 
-    /// Send a CONTROL request with no arguments. `sendline(fd,
-    /// "%d %d", CONTROL, type)`. The common case (reload, purge,
-    /// retry, stop, all the dumps).
+    /// Send a CONTROL request with no arguments. The common case
+    /// (reload, purge, retry, stop, all the dumps).
     ///
     /// # Errors
     /// `Io` if the write fails. Socket closed, daemon dead.
@@ -518,10 +437,8 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Send with one int argument. `sendline(fd, "%d %d %d", CONTROL,
-    /// type, arg)`. `REQ_SET_DEBUG`, `REQ_PCAP` (snaplen). NOT
-    /// `REQ_LOG`: that's two ints (`level`, `use_color`), see
-    /// `send_int2`.
+    /// Send with one int argument. `REQ_SET_DEBUG`, `REQ_PCAP`
+    /// (snaplen). NOT `REQ_LOG`: that's two ints, see `send_int2`.
     ///
     /// # Errors
     /// Same as `send`.
@@ -529,15 +446,10 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {arg}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Send with two int arguments. `sendline(fd, "%d %d %d %d", CONTROL,
-    /// type, a, b)`. The ONLY consumer is `REQ_LOG` (`tincctl.c:649`):
+    /// Send with two int arguments. The ONLY consumer is `REQ_LOG`:
     /// `level` then `use_color` (a 0/1 boolean printed as int).
     ///
-    /// Why not `send_int(..., a) + write " b"` or a builder: the C
-    /// has exactly one two-int request, so does this. The `i32` for
-    /// the second arg is bool-shaped (0/1) but the daemon's `sscanf
-    /// (%d %d)` reads both as int (`control.c:135`). `i32` × 2 keeps
-    /// the wire shape symmetric with `send_int`.
+    /// `i32` × 2 keeps the wire shape symmetric with `send_int`.
     ///
     /// # Errors
     /// Same as `send`.
@@ -545,12 +457,11 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {a} {b}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Send with one string argument. `sendline(fd, "%d %d %s", ...)`.
-    /// `REQ_DISCONNECT` (the node name).
+    /// Send with one string argument. `REQ_DISCONNECT` (node name).
     ///
-    /// `arg` should be a single token (no spaces) — the daemon's
-    /// `sscanf MAX_STRING` reads one word. Node names pass `check_id`
-    /// so this holds; we don't re-validate (caller's job).
+    /// `arg` should be a single token (no spaces) — the daemon reads
+    /// one word. Node names pass `check_id` so this holds; we don't
+    /// re-validate (caller's job).
     ///
     /// # Errors
     /// Same as `send`.
@@ -558,9 +469,8 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {arg}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Receive and parse a one-shot ack. `recvline(); sscanf("%d %d
-    /// %d") && code==CONTROL && req==X && result==0`. The pattern
-    /// every simple command does.
+    /// Receive and parse a one-shot ack. The pattern every simple
+    /// command does.
     ///
     /// Returns the `result` int. `0` = success, anything else =
     /// daemon-side failure. `REQ_SET_DEBUG` repurposes `result` as
@@ -577,8 +487,6 @@ impl<S: Read + Write> CtlSocket<S> {
     /// distinction.
     pub fn recv_ack(&mut self, expected: CtlRequest) -> Result<i32, CtlError> {
         let line = recv_one(&mut self.reader, "lost connection to tincd")?;
-        // C: `sscanf(line, "%d %d %d", &code, &req, &result) == 3 &&
-        //     code == CONTROL && req == REQ_X && !result`.
         let mut t = line.split_ascii_whitespace();
         let code = t.next().and_then(|s| s.parse::<u8>().ok());
         let req = t.next().and_then(|s| s.parse::<i32>().ok());
@@ -598,10 +506,9 @@ impl<S: Read + Write> CtlSocket<S> {
     /// per-type and lives in the caller. Returns `None` on EOF (daemon
     /// closed cleanly — `cmd_stop` expects this).
     ///
-    /// The C `recvline` returns `false` on EOF and on error
-    /// undifferentiated. We distinguish: `Ok(None)` for EOF (clean),
-    /// `Err` for I/O. The `cmd_stop` "wait for daemon to close" loop
-    /// wants the former; everything else wants the latter to surface.
+    /// We distinguish `Ok(None)` for EOF (clean) from `Err` for I/O.
+    /// The `cmd_stop` "wait for daemon to close" loop wants the
+    /// former; everything else wants the latter to surface.
     ///
     /// # Errors
     /// `Io` on read failure (not EOF).
@@ -610,8 +517,6 @@ impl<S: Read + Write> CtlSocket<S> {
         match self.reader.read_line(&mut buf) {
             Ok(0) => Ok(None),
             Ok(_) => {
-                // Strip the trailing \n. C `recvline` does this:
-                // `len = newline - buffer; line[len] = 0`.
                 if buf.ends_with('\n') {
                     buf.pop();
                 }
@@ -621,8 +526,7 @@ impl<S: Read + Write> CtlSocket<S> {
         }
     }
 
-    /// Receive one dump row. The shared loop body of `cmd_dump`
-    /// (`tincctl.c:1241`): read a line, parse the `"18 N"` prefix,
+    /// Receive one dump row: read a line, parse the `"18 N"` prefix,
     /// check for the 2-int terminator, hand back `(kind, body)`.
     ///
     /// Daemon-side dump functions all share one shape:
@@ -634,15 +538,12 @@ impl<S: Read + Write> CtlSocket<S> {
     ///   send_request(c, "18 N")               // terminator
     /// ```
     ///
-    /// (`node.c:223`, `edge.c:137`, etc.) The terminator is the
-    /// SAME prefix with NO body. The C detects this with `sscanf
-    /// ("%d %d %4095s %4095s") == 2` — four conversions asked for,
-    /// two filled. We're explicit: empty body → `RowEnd`.
+    /// The terminator is the SAME prefix with NO body. We're
+    /// explicit: empty body → `End`.
     ///
     /// `Row(kind, body)` carries the request type because graph mode
     /// fires TWO dumps (`DUMP_NODES` then `DUMP_EDGES`) and reads
-    /// both responses with one loop. The C `switch(req)` dispatches
-    /// per-row (`tincctl.c:1280`). Same here.
+    /// both responses with one loop, dispatching per-row.
     ///
     /// `body` is a `String`, not `&str`, because the caller passes
     /// it to `Tok::new` which borrows for the parse lifetime, and
@@ -651,44 +552,33 @@ impl<S: Read + Write> CtlSocket<S> {
     /// dump output is dozens of rows, not millions.
     ///
     /// # Errors
-    /// `Io` on read failure. `Greeting` if EOF before terminator
-    /// (the C `tincctl.c:1374`: `"Error receiving dump."`). The
-    /// daemon closing the socket mid-dump is daemon-crashed; we
+    /// `Io` on read failure. `Greeting` if EOF before terminator.
+    /// The daemon closing the socket mid-dump is daemon-crashed; we
     /// don't try to use partial results.
     pub fn recv_row(&mut self) -> Result<DumpRow, CtlError> {
         let line = self
             .recv_line()?
-            // C `tincctl.c:1374`: `while(recvline()) {...} return 1;`
-            // — falling out of the loop without seeing the terminator
-            // is the error. EOF mid-dump = daemon crashed.
+            // EOF mid-dump = daemon crashed.
             .ok_or_else(|| CtlError::Greeting("Error receiving dump.".to_owned()))?;
 
         // ─── Prefix: `18 N`
-        // `sscanf("%d %d %s %s")` reads code, req, and OPTIONALLY
-        // tries for two more. The two-ints-only case is `n == 2`
-        // (`tincctl.c:1245`). We split prefix from body manually
-        // — same effect, no double-scan.
-        //
-        // The body MUST stay byte-exact: `Tok` will re-tokenize
-        // it, and the line came from `printf %s` of a hostname
-        // that might be `unknown port unknown` (sockaddr2hostname
-        // for AF_UNSPEC). The literal `port` is a token. Don't
-        // collapse spaces; just slice past the second one.
+        // The body MUST stay byte-exact: `Tok` will re-tokenize it,
+        // and a hostname like `unknown port unknown` has the literal
+        // `port` as a token. Don't collapse spaces; slice past the
+        // second one.
         let bad = || CtlError::Greeting("Unable to parse dump from tincd.".to_owned());
 
         let (code_s, after_code) = line.split_once(' ').ok_or_else(bad)?;
         if code_s.parse::<u8>().ok() != Some(CONTROL) {
-            // C `tincctl.c:1245-1257`: `n < 2` falls out, but
-            // `n >= 2 && code != CONTROL` is unhandled — it falls
-            // into the per-type switch with whatever `req` parsed
-            // as. We tighten: wrong code → row-level failure.
+            // We tighten over upstream: wrong code → row-level
+            // failure (upstream would fall into the per-type switch
+            // with whatever `req` parsed as).
             return Err(bad());
         }
 
         // ─── Request type, then body or terminator
-        // `split_once` again for the SECOND space. None → no body
-        // → terminator. Some("") would mean trailing space, which
-        // `printf` doesn't emit; treat as terminator anyway.
+        // `split_once` for the SECOND space. None → no body →
+        // terminator. Some("") (trailing space) → also terminator.
         match after_code.split_once(' ') {
             None => {
                 // "18 3\n" — the trailing \n is already stripped.
@@ -697,14 +587,9 @@ impl<S: Read + Write> CtlSocket<S> {
                 let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
                 Ok(DumpRow::End(kind))
             }
-            // clippy::redundant_guard wants us to fold this into the
-            // None arm via `Some((req_s, ""))`. That works but loses
-            // the doc comment positioning. Match a literal empty.
             Some((req_s, "")) => {
                 // "18 3 " — trailing space. Daemon doesn't emit
-                // this (printf with no trailing space) but the C
-                // sscanf would call it n==2 (the third %s reads
-                // nothing). Same as terminator.
+                // this. Same as terminator.
                 let req = req_s.parse::<i32>().map_err(|_| bad())?;
                 let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
                 Ok(DumpRow::End(kind))
@@ -720,28 +605,18 @@ impl<S: Read + Write> CtlSocket<S> {
     }
 
     /// Receive exactly `len` raw bytes after a header line.
-    /// `tincctl.c:536`'s `recvdata`: read until `len` accumulated,
-    /// memcpy out, memmove the remainder.
     ///
-    /// The C's `memmove` is the shared-buffer machinery. **We don't
-    /// need it**: `BufReader<T>: Read`, and its `read` impl drains
-    /// the internal buffer before touching `T`. `read_exact` on a
-    /// `BufReader` is the same shared-buffer semantics, for free.
-    /// (See the struct doc-comment for the smoke.)
+    /// `BufReader<T>: Read`, and its `read` impl drains the internal
+    /// buffer before touching `T`. `read_exact` on a `BufReader` IS
+    /// the shared-buffer semantics. (See the struct doc-comment.)
     ///
-    /// `buf.len()` IS the requested `len` — the caller sizes it.
-    /// Mirrors `read_exact`'s contract. The C takes `len` separately
-    /// because `data` is a fixed `char[9018]`; we use `Vec` sized
-    /// per-call so the slice carries length.
+    /// `buf.len()` IS the requested length — the caller sizes it.
+    /// Mirrors `read_exact`'s contract.
     ///
-    /// Why not return `Vec<u8>`: `cmd_log` writes to stdout, `cmd_
-    /// pcap` writes a packet record. Both write-and-discard. A
-    /// reused `Vec` (the caller `clear()`s + `resize()`s) avoids
-    /// per-packet alloc. Same as the C's stack buffer reuse.
+    /// Why not return `Vec<u8>`: `cmd_log` and `cmd_pcap` both
+    /// write-and-discard. A reused `Vec` avoids per-packet alloc.
     ///
-    /// EINTR retry: `read_exact` does it (default `Read::read_exact`
-    /// loops on `Ok(0)`-is-err and `Interrupted`). The C `tincctl.c
-    /// :540` does it manually. Same effect.
+    /// EINTR retry: `read_exact` already loops on `Interrupted`.
     ///
     /// # Errors
     /// `Io` on read failure or unexpected EOF mid-data. `read_exact`
@@ -753,9 +628,8 @@ impl<S: Read + Write> CtlSocket<S> {
     }
 }
 
-/// One line from a dump response. The C inlines this distinction
-/// into the `n == 2` check inside the loop body (`tincctl.c:1245`).
-/// We make it a type so the caller's loop is `match` not `if`.
+/// One line from a dump response. We make the row/terminator
+/// distinction a type so the caller's loop is `match` not `if`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DumpRow {
     /// `"18 N FIELDS"` — one item. Body is `FIELDS` exactly as
@@ -766,16 +640,12 @@ pub enum DumpRow {
 
     /// `"18 N"` — terminator. Per-dump-type, so graph mode (which
     /// fires NODES then EDGES) sees TWO of these and exits on the
-    /// second. The C `tincctl.c:1247-1250`: `if(do_graph && req ==
-    /// REQ_DUMP_NODES) continue;` — skip the first terminator. The
-    /// caller does the same here by checking which `End` it got.
+    /// second. The caller checks which `End` it got.
     End(CtlRequest),
 }
 
 /// Read one line, error if EOF. The greeting recvs and `recv_ack`
-/// want EOF-is-error semantics; only `recv_line` (the raw one) wants
-/// EOF-is-end. Factored out so the error message is parameterized
-/// (greeting line 1 and 2 have different C messages).
+/// want EOF-is-error semantics; only `recv_line` wants EOF-is-end.
 fn recv_one<R: BufRead>(r: &mut R, eof_msg: &str) -> Result<String, CtlError> {
     let mut buf = String::new();
     match r.read_line(&mut buf) {
@@ -792,19 +662,15 @@ fn recv_one<R: BufRead>(r: &mut R, eof_msg: &str) -> Result<String, CtlError> {
 
 #[cfg(unix)]
 impl CtlSocket<UnixStream> {
-    /// `connect_tincd` — the full OS-side connect. `tincctl.c:747-902`.
+    /// The full OS-side connect.
     ///
     /// Reads the pidfile, checks the daemon is alive, connects the
     /// unix socket, does the greeting. The four points of failure
     /// each have their own `CtlError` variant.
     ///
-    /// The C also unlinks stale pidfile + socket on `DaemonDead`
-    /// (`tincctl.c:781-783`). We don't — that's a side effect across
-    /// the `Paths` boundary, and `cmd_stop` (the only legitimate
-    /// "daemon should be down" caller) wants different handling
-    /// anyway. Stale pidfile cleanup is the daemon's job (next start
-    /// overwrites it). If we add it, it's a separate `cleanup_stale`
-    /// fn the caller invokes after seeing `DaemonDead`.
+    /// Upstream also unlinks stale pidfile + socket on `DaemonDead`.
+    /// We don't — the daemon's next start overwrites the pidfile
+    /// anyway. If we add it, it's a separate `cleanup_stale` fn.
     ///
     /// `paths` must have had `resolve_runtime()` called. The panic
     /// from `pidfile()` is the assertion.
@@ -817,22 +683,17 @@ impl CtlSocket<UnixStream> {
         let pf = Pidfile::read(pidfile_path)?;
 
         // ─── kill(pid, 0) liveness check
-        // C: `if((pid == 0) || (kill(pid, 0) && errno == ESRCH))`.
-        // The `pid == 0` check: `kill(0, 0)` would signal our own
-        // process group, which is a non-error and would mask "no
-        // daemon" as "daemon alive". A zero pid in the pidfile
-        // means corrupted write.
+        // `pid == 0`: `kill(0, 0)` would signal our own process
+        // group, masking "no daemon" as "daemon alive". A zero pid
+        // in the pidfile means corrupted write.
         //
         // `kill` can also fail with EPERM (daemon running as a
-        // different user). The C only checks ESRCH — EPERM means
-        // *something* is at that pid, which is "alive enough" for
-        // the connect attempt. We replicate: only ESRCH → DaemonDead.
-        // Pid range: real pids fit in i32 (`/proc/sys/kernel/pid_max`
-        // defaults to 4M and can't exceed 2^22). The pidfile parse
-        // already bounds it to u32 (no negatives). `try_from` rather
-        // than `as` so a corrupted pidfile with pid > 2^31 lands on
-        // the `pid == 0` check below instead of wrapping to a
-        // negative i32 and probing some unrelated process.
+        // different user). EPERM means *something* is at that pid —
+        // "alive enough" for the connect attempt. Only ESRCH →
+        // DaemonDead. Pid range: `try_from` rather than `as` so a
+        // corrupted pidfile with pid > 2^31 lands on the `== 0`
+        // check instead of wrapping negative and probing some
+        // unrelated process.
         let raw_pid = i32::try_from(pf.pid).unwrap_or(0);
         if raw_pid == 0 {
             return Err(CtlError::DaemonDead { pid: pf.pid });
@@ -849,30 +710,19 @@ impl CtlSocket<UnixStream> {
         }
 
         // ─── Connect socket
-        // C: socket(AF_UNIX), connect. UnixStream::connect does both.
-        // The C also checks `strlen(unixsocketname) >= sun_path` —
-        // path-too-long for the sockaddr. UnixStream::connect surfaces
-        // this as an io::Error with ENAMETOOLONG; same outcome,
-        // wrapped in our SocketConnect.
+        // UnixStream::connect surfaces ENAMETOOLONG (path-too-long
+        // for the sockaddr) as an io::Error; wrapped in SocketConnect.
         let sock_path = paths.unix_socket();
         let stream = UnixStream::connect(&sock_path).map_err(|e| CtlError::SocketConnect {
             path: sock_path,
             err: e,
         })?;
 
-        // ─── SO_NOSIGPIPE (best-effort, macOS only)
-        // C: `setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, ...)`.
-        // Linux doesn't have it (uses MSG_NOSIGNAL per-send). The C
-        // also passes MSG_NOSIGNAL to send() (`tincctl.c:576`); we
-        // don't have per-write control with `Write::write_all`, so
-        // SIGPIPE → process death.
-        //
-        // BUT: this is a CLI tool. The daemon dying mid-conversation
-        // → our write returns EPIPE → SIGPIPE → we exit. That's…
-        // fine? The C goes to lengths to handle it because of the
-        // readline shell mode where one failed command shouldn't
-        // kill the shell. We're one command per process. If we
-        // need it later (shell mode lands), `signal(SIGPIPE,
+        // ─── SO_NOSIGPIPE (NOT done)
+        // The daemon dying mid-conversation → our write returns
+        // EPIPE → SIGPIPE → we exit. That's fine for a CLI tool
+        // (one command per process). Upstream handles it for the
+        // readline shell mode; if shell mode lands, `signal(SIGPIPE,
         // SIG_IGN)` at binary startup. Not here.
 
         // ─── Greeting
@@ -888,9 +738,8 @@ mod tests {
     use std::io::Write;
     use std::thread;
 
-    /// `CtlRequest` discriminants match `control_common.h` exactly.
-    /// Hand-transcribed table — verify against the C at commit time
-    /// per the constraint (sed-diff'd, see commit message).
+    /// `CtlRequest` discriminants. Verified against upstream at
+    /// commit time.
     #[test]
     fn request_discriminants() {
         assert_eq!(CtlRequest::Stop as u8, 0);
@@ -923,8 +772,7 @@ mod tests {
         assert_eq!(CtlRequest::from_i32(999), None);
     }
 
-    /// Pidfile parse, happy path. Format from `pidfile.c::write_pidfile`:
-    /// `"<pid> <cookie> <host> port <port>\n"`.
+    /// Pidfile parse, happy path. `"<pid> <cookie> <host> port <port>\n"`.
     #[test]
     fn pidfile_parse() {
         let dir = tempfile::tempdir().unwrap();
@@ -935,13 +783,11 @@ mod tests {
         let pf = Pidfile::read(&path).unwrap();
         assert_eq!(pf.pid, 12345);
         assert_eq!(pf.cookie, cookie);
-        // The runtime port — `tinc get Port` reads this when the
-        // daemon is up. C `read_actual_port`.
         assert_eq!(pf.port, "655");
     }
 
     /// Pidfile validation: cookie must be exactly 64 hex chars.
-    /// Neither check is in the C (it just `%64s`-reads); we tighten.
+    /// We tighten over upstream here.
     #[test]
     fn pidfile_cookie_validated() {
         let dir = tempfile::tempdir().unwrap();
@@ -968,19 +814,16 @@ mod tests {
         assert!(Pidfile::read(&path).is_ok());
 
         // Uppercase hex also passes — `is_ascii_hexdigit` accepts
-        // both. The C `bin2hex` writes lowercase, but a hand-edited
-        // pidfile (debugging, testing) shouldn't be rejected on case.
-        // The greeting comparison on the daemon side is `strcmp`
-        // (case-sensitive), so uppercase here would *fail auth* —
-        // but that's a different, more useful error than "malformed
-        // pidfile".
+        // both. The daemon writes lowercase, but a hand-edited
+        // pidfile shouldn't be rejected on case. The greeting compare
+        // is case-sensitive, so uppercase would *fail auth* — but
+        // that's a different, more useful error.
         let upper = "0123456789ABCDEF".repeat(4);
         std::fs::write(&path, format!("1 {upper} 127.0.0.1 port 655\n")).unwrap();
         assert!(Pidfile::read(&path).is_ok());
     }
 
-    /// Pidfile shape: missing fields fail. C `if(read != 4)`.
-    /// All four sscanf conversions must succeed.
+    /// Pidfile shape: missing fields fail.
     #[test]
     fn pidfile_shape_enforced() {
         let dir = tempfile::tempdir().unwrap();
@@ -994,7 +837,7 @@ mod tests {
             Err(CtlError::PidfileMalformed)
         ));
 
-        // `port` literal wrong. C fscanf would fail the literal match.
+        // `port` literal wrong.
         std::fs::write(&path, format!("1 {cookie} 127.0.0.1 prt 655\n")).unwrap();
         assert!(matches!(
             Pidfile::read(&path),
@@ -1009,14 +852,11 @@ mod tests {
         ));
     }
 
-    /// Pidfile missing → distinct error. C: `fopen` returns NULL,
-    /// `read_pidfile` returns NULL, caller prints `"Could not open
-    /// pid file %s: %s"`.
+    /// Pidfile missing → distinct error.
     #[test]
     fn pidfile_missing() {
         let err = Pidfile::read(std::path::Path::new("/nonexistent/pidfile")).unwrap_err();
         assert!(matches!(err, CtlError::PidfileMissing { .. }));
-        // The Display matches C phrasing.
         assert!(err.to_string().contains("Could not open pid file"));
     }
 
@@ -1063,9 +903,6 @@ mod tests {
             let mut br = BufReader::new(read);
 
             // ─── Recv ID, check cookie
-            // C `id_h:325`: `if(name[0] == '^' && !strcmp(name+1,
-            // controlcookie))`. The whole `^cookie` is in the `%s`
-            // field after `ID`.
             let mut line = String::new();
             br.read_line(&mut line).unwrap();
             // Shape: "0 ^COOKIE 0\n".
@@ -1077,17 +914,10 @@ mod tests {
             assert_eq!(parts[2], "0");
 
             // ─── Send greeting line 1 (send_id)
-            // C `protocol_auth.c::send_id`: `"%d %s %d.%d", ID,
-            // myself->name, PROT_MAJOR, PROT_MINOR` (modulo the
-            // experimental `^` prefix on minor, which doesn't matter
-            // for control connections — the CLI ignores everything
-            // after the first int). We send a plausible name and
-            // version.
+            // The CLI ignores everything after the first int.
             writeln!(write, "0 fakedaemon 17.7").unwrap();
 
             // ─── Send greeting line 2 (ACK + ctl-ver + pid)
-            // C `id_h:337`: `send_request(c, "%d %d %d", ACK,
-            // TINC_CTL_VERSION_CURRENT, getpid())`.
             writeln!(write, "4 0 {daemon_pid}").unwrap();
 
             // ─── Hand off to test-specific serving
@@ -1223,10 +1053,8 @@ mod tests {
             br.read_line(&mut line).unwrap();
             // "18 9 5\n" — CONTROL SET_DEBUG level=5.
             assert_eq!(line.trim_end(), "18 9 5");
-            // Ack with previous level (3, say). REQ_SET_DEBUG
-            // repurposes the result field — `control.c:86`:
-            // `send_request(c, "%d %d %d", CONTROL, REQ_SET_DEBUG,
-            // debug_level)` *before* updating it.
+            // Ack with previous level (3). REQ_SET_DEBUG repurposes
+            // the result field: send old level *before* updating.
             writeln!(w, "18 9 3").unwrap();
         });
 
@@ -1249,8 +1077,7 @@ mod tests {
             br.read_line(&mut line).unwrap();
             // "18 12 alice\n" — CONTROL DISCONNECT name=alice.
             assert_eq!(line.trim_end(), "18 12 alice");
-            // Ack: 0 = found and disconnected. C `control.c:122`:
-            // `found ? 0 : -2`.
+            // Ack: 0 = found and disconnected. -2 would be not-found.
             writeln!(w, "18 12 0").unwrap();
         });
 
@@ -1330,8 +1157,7 @@ mod tests {
     }
 
     /// The stop pattern: send REQ_STOP, drain until EOF. The daemon
-    /// acks then exits, closing the socket. C `tincctl.c:677-684`:
-    /// `sendline(STOP); while(recvline()) {} closesocket(fd)`.
+    /// acks then exits, closing the socket.
     #[test]
     fn stop_drains_to_eof() {
         let cookie = "3".repeat(64);
@@ -1341,9 +1167,8 @@ mod tests {
             let mut line = String::new();
             br.read_line(&mut line).unwrap();
             assert_eq!(line.trim_end(), "18 0"); // STOP
-            // Ack, then drop. C `control.c:61`: `event_exit();
-            // return control_ok(c, REQ_STOP)`. The ack is sent,
-            // then the event loop exits, connections close.
+            // Ack, then drop. The ack is sent, then the event loop
+            // exits, connections close.
             writeln!(w, "18 0 0").unwrap();
             // Thread returns → `theirs` drops → EOF.
         });
@@ -1351,9 +1176,7 @@ mod tests {
         let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
         ctl.send(CtlRequest::Stop).unwrap();
 
-        // Drain. We see the ack line, then EOF. The C loop is
-        // `while(recvline())` — discards the ack, just waits for
-        // close. We replicate: read until None.
+        // Drain. We see the ack line, then EOF. Read until None.
         let mut drained = 0;
         while ctl.recv_line().unwrap().is_some() {
             drained += 1;
@@ -1420,8 +1243,7 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    /// EOF before terminator → error. C `tincctl.c:1374`: the while
-    /// loop falls out, `"Error receiving dump."`. Daemon crashed.
+    /// EOF before terminator → error. Daemon crashed.
     #[test]
     fn recv_row_eof_mid_dump() {
         let cookie = "3".repeat(64);
@@ -1441,17 +1263,15 @@ mod tests {
         // First recv: the partial row. Fine.
         let r1 = ctl.recv_row().unwrap();
         assert!(matches!(r1, DumpRow::Row(CtlRequest::DumpNodes, _)));
-        // Second: EOF → error, not Ok(None). The C distinction.
+        // Second: EOF → error, not Ok(None).
         let err = ctl.recv_row().unwrap_err();
-        // Message check: it's the C string.
         assert!(matches!(err, CtlError::Greeting(m) if m.contains("Error receiving dump")));
 
         daemon.join().unwrap();
     }
 
-    /// Wrong code (`"19 3 ..."`) → error. C doesn't check this
-    /// (`tincctl.c:1245` only checks `n >= 2`, never re-reads `code`).
-    /// We tighten: a non-18 prefix is corruption.
+    /// Wrong code (`"19 3 ..."`) → error. We tighten over upstream:
+    /// a non-18 prefix is corruption.
     #[test]
     fn recv_row_bad_code() {
         let cookie = "4".repeat(64);
@@ -1522,9 +1342,8 @@ mod tests {
         daemon.join().unwrap();
     }
 
-    /// `"18 3 "` with trailing space (which the daemon never emits,
-    /// but) → terminator. The C `sscanf %d %d %s %s` would get n=2
-    /// (the third %s reads nothing). We match: empty body → End.
+    /// `"18 3 "` with trailing space (daemon never emits) →
+    /// terminator. Empty body → End.
     #[test]
     fn recv_row_trailing_space_is_terminator() {
         let cookie = "6".repeat(64);
@@ -1567,8 +1386,7 @@ mod tests {
         // Record 1: "18 15 7\n" + 7 bytes "LOGDATA"
         // Record 2: "18 15 5\n" + 5 bytes "HELLO"
         // No newline after data — the daemon doesn't add one
-        // (`logger.c:213`: `send_request` for the header, then
-        // `send_meta` for raw bytes).
+        // (header via `send_request`, raw bytes via `send_meta`).
         let mut wire = Vec::new();
         wire.extend_from_slice(b"18 15 7\n");
         wire.extend_from_slice(b"LOGDATA");
@@ -1616,9 +1434,6 @@ mod tests {
 
     /// `recv_data` with daemon EOF mid-data: header said 100 bytes,
     /// daemon dies after 50. `read_exact` returns `UnexpectedEof`.
-    ///
-    /// `tincctl.c:543`: `nrecv <= 0 → return false`. Same effect
-    /// (loop exits) but `read_exact`'s error is more specific.
     #[test]
     fn recv_data_short_is_error() {
         let wire = b"18 15 100\nshort".to_vec();
@@ -1647,7 +1462,7 @@ mod tests {
     }
 
     /// `send_int2` wire shape: `"18 15 -1 1\n"`. The `REQ_LOG`
-    /// request: level=-1 (`DEBUG_UNSET`), color=1. `tincctl.c:649`.
+    /// request: level=-1 (`DEBUG_UNSET`), color=1.
     #[test]
     fn send_int2_wire() {
         let buf: Vec<u8> = Vec::new();
@@ -1661,11 +1476,8 @@ mod tests {
 
         ctl.send_int2(CtlRequest::Log, -1, 1).unwrap();
 
-        // Cursor's inner Vec is the written bytes. Reach in.
         let written = shared.borrow().get_ref().clone();
         // `"18 15 -1 1\n"`. CONTROL=18, REQ_LOG=15, level=-1, color=1.
-        // `tincctl.c:649`: `sendline(fd, "%d %d %d %d", CONTROL,
-        // REQ_LOG, level, use_color)`.
         assert_eq!(written, b"18 15 -1 1\n");
     }
 }

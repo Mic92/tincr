@@ -1,13 +1,13 @@
-//! `cmd_generate_ed25519_keys` — `tincctl.c:2351`.
+//! `cmd_generate_ed25519_keys`.
 //!
 //! Key rotation. Unlike `init`, the private key file *probably already
-//! exists* — that's the whole point. The C uses append mode (`"a"`)
-//! after running `disable_old_keys` to comment out the previous PEM
-//! block. The result is a private key file with N commented-out blocks
-//! and one live one at the end. `read_pem` reads the first
-//! *uncommented* block, so it just works.
+//! exists* — that's the whole point. We use append mode after running
+//! `disable_old_keys` to comment out the previous PEM block. The
+//! result is a private key file with N commented-out blocks and one
+//! live one at the end. `read_pem` reads the first *uncommented*
+//! block, so it just works.
 //!
-//! ## `disable_old_keys` (`keys.c:10-100`)
+//! ## `disable_old_keys`
 //!
 //! Read `filename` line-by-line, write `filename.tmp` (preserving the
 //! original's `st_mode`), prefix `#` to:
@@ -30,27 +30,25 @@
 //! exact line that the C wrote, not every line `tinc-conf` would
 //! recognize.
 //!
-//! ## What we drop vs C
+//! ## What we drop vs upstream
 //!
 //! - The `what` parameter (RSA vs Ed25519). `DISABLE_LEGACY` is on.
-//! - The interactive filename prompt (`ask_and_open`). See `cmd/init.rs`.
+//! - The interactive filename prompt. See `cmd/init.rs`.
 //! - Relative-path absolutization. `Paths` always resolves to absolute.
-//! - The `fopenmask` umask dance. We have `OpenOptions::mode()`.
 //!
 //! ## Mode preservation
 //!
-//! C `fstat` + `fopenmask` preserves source mode (e.g. user-set 0400)
-//! to the tmpfile at create. We `set_permissions` after write — the
-//! window is a tmpfile we're about to rename or unlink, so the
-//! ordering difference doesn't matter.
+//! Upstream preserves source mode (e.g. user-set 0400) to the tmpfile
+//! at create. We `set_permissions` after write — the window is a
+//! tmpfile we're about to rename or unlink, so the ordering doesn't
+//! matter.
 //!
 //! ## The two output files
 //!
 //! Same asymmetry as `init`: private PEM at `ed25519_key.priv`, public
 //! config line in `hosts/NAME`. `disable_old_keys` runs on both before
-//! append. We don't support genkey-before-init (`tincctl.c:386-390`
-//! falls back to PEM at `ed25519_key.pub`); `sptps_keypair` covers
-//! that workflow better.
+//! append. We don't support genkey-before-init; `sptps_keypair`
+//! covers that workflow better.
 //!
 //! ## Append, not excl
 //!
@@ -80,10 +78,7 @@ use tinc_crypto::b64;
 /// and re-exporting two-word constants is more noise than help.
 const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
-/// `cmd_generate_ed25519_keys`. The 5-line wrapper in C
-/// (`tincctl.c:2351`) is `name = get_my_name(false)` (no error if
-/// missing — `false` is `verbose`, not `required`) then
-/// `ed25519_keygen(true)`. We require the name; see module doc.
+/// `cmd_generate_ed25519_keys`. We require the name; see module doc.
 ///
 /// # Errors
 ///
@@ -91,45 +86,31 @@ const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 /// for any filesystem failure. `Exists` is *not* possible — we append,
 /// not excl.
 pub fn run(paths: &Paths) -> Result<(), CmdError> {
-    // ─── Get our name
-    // C `tincctl.c:2360`: `if(!name) name = get_my_name(false)`. The
-    // `false` means don't print an error if missing — C falls through
-    // to writing `ed25519_key.pub` as a PEM file in that case
-    // (`tincctl.c:389`). We don't support that; see module doc.
-    //
-    // `get_my_name` already errors on no-conf with a `BadInput`
-    // pointing at `tinc.conf` (see `cmd/exchange.rs:118`). Perfect.
     let name = get_my_name(paths)?;
 
     let priv_path = paths.ed25519_private();
     let host_path = paths.host_file(&name);
 
     // ─── disable_old_keys on both files
-    // C `tincctl.c:338` runs it via `ask_and_open` for each of the two
-    // opens. We run both up front, then both writes. Same effect (each
-    // disable+write pair is independent of the other), and "do all the
-    // mutating reads before any mutating write" is a clearer flow.
+    // Run both up front, then both writes — "do all the mutating
+    // reads before any mutating write" is a clearer flow.
     //
-    // `disable_old_keys` is no-op if the file doesn't exist (returns
-    // `Ok(false)`). C: `if(!r) return false`. So genkey-on-fresh-dir
-    // (after `mkdir -p hosts/`) works — disable does nothing, append
-    // creates.
+    // `disable_old_keys` is no-op if the file doesn't exist. So
+    // genkey-on-fresh-dir (after `mkdir -p hosts/`) works — disable
+    // does nothing, append creates.
     disable_old_keys(&priv_path)?;
     disable_old_keys(&host_path)?;
 
     // ─── Generate
-    // Same progress chatter as `init`. C `tincctl.c:362-370`.
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
 
     // ─── Append private (PEM)
-    // C: `ask_and_open(fname, "...", "a", ask, 0600)`. Mode `"a"` is
-    // `O_WRONLY | O_CREAT | O_APPEND`. The 0600 is the *create* mode;
-    // if the file exists (the rotation case), the existing mode wins,
-    // and `disable_old_keys` already preserved it on the tmpfile that
-    // got renamed in. So mode here only matters for the first-ever
-    // genkey on a path.
+    // The 0600 is the *create* mode; if the file exists (the rotation
+    // case), the existing mode wins, and `disable_old_keys` already
+    // preserved it on the tmpfile that got renamed in. So mode here
+    // only matters for the first-ever genkey on a path.
     {
         let f = open_append(&priv_path, 0o600)?;
         let mut w = BufWriter::new(f);
@@ -138,9 +119,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     }
 
     // ─── Append public (config line)
-    // C: `ask_and_open(..., 0666)` then `fprintf(f, "Ed25519PublicKey
-    // = %s\n", ...)`. Same LSB-first b64 as init. Same
-    // highest-stakes-line caveat.
+    // Same LSB-first b64 as init. Same highest-stakes-line caveat.
     {
         let mut f = open_append(&host_path, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
@@ -150,47 +129,35 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `keys.c:10` `disable_old_keys`, minus the RSA branch and the `what`
-/// parameter (see module doc).
+/// `disable_old_keys`, minus the RSA branch (see module doc).
 ///
 /// Returns `Ok(true)` if any lines were commented out (and thus the
-/// file was rewritten via rename), `Ok(false)` if nothing matched (and
-/// the file is untouched — tmpfile was unlinked). `Ok(false)` also if
-/// the file didn't exist at all.
+/// file was rewritten via rename), `Ok(false)` if nothing matched
+/// (file untouched — tmpfile was unlinked). `Ok(false)` also if the
+/// file didn't exist at all.
 ///
-/// The bool isn't used by `genkey::run` (it doesn't care — append
-/// happens either way). It's for `fsck`, which calls this and then
-/// warns if it was a no-op (`fsck.c:274` checks the return).
+/// The bool isn't used by `genkey::run` (append happens either way).
+/// It's for `fsck`, which calls this and warns if it was a no-op.
 ///
 /// # Errors
 ///
 /// `Io` if reading the source, writing the tmpfile, or the final
-/// rename fails. The tmpfile is best-effort-unlinked on error (C does
-/// the same: `keys.c:76` `unlink(tmpfile)` in the error path).
+/// rename fails. The tmpfile is best-effort-unlinked on error.
 ///
 /// Does NOT error on file-not-found — that's `Ok(false)`.
 pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     // ─── Open source
-    // C: `FILE *r = fopen(filename, "r"); if(!r) return false;`
-    // ENOENT is silent-false. EACCES is also silent-false in C (it
-    // doesn't check errno). We follow: any open failure on the source
-    // is `Ok(false)`. The downstream append will surface the real
-    // error (can't append to a file you can't read either, usually).
+    // Any open failure on the source is `Ok(false)`. The downstream
+    // append will surface the real error (can't append to a file you
+    // can't read either, usually).
     let Ok(r) = fs::File::open(path) else {
         return Ok(false);
     };
 
     // ─── Preserve mode
-    // C: `struct stat st = {.st_mode = 0600}; fstat(fileno(r), &st);`
-    // The `= 0600` initializer is the fallback if fstat fails (which
-    // it won't on a just-opened fd, but defensiveness). We `metadata()`
-    // on the open file (== fstat) and capture perms.
-    //
-    // We apply this *after* writing, not at create. C applies at create
-    // via `fopenmask`. The window is the tmpfile, which we're about to
-    // rename or unlink — observable difference is zero unless someone
-    // is racing us on `<path>.tmp`, and the C has the same race on the
-    // umask-restore in `fopenmask`.
+    // `metadata()` on the open file (== fstat). We apply this *after*
+    // writing, not at create. The window is the tmpfile, which we're
+    // about to rename or unlink — observable difference is zero.
     #[cfg(unix)]
     let src_perms = r
         .metadata()
@@ -198,32 +165,25 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         .map_err(io_err(path))?;
 
     // ─── Open tmpfile
-    // C: `snprintf(tmpfile, ..., "%s.tmp", filename)`. Just `.tmp`
-    // suffix, no mkstemp randomness. There's a race here (concurrent
-    // `disable_old_keys` on the same path stomp each other's tmpfile)
-    // but the C has it too and the threat model doesn't include that.
+    // `<path>.tmp` suffix, no mkstemp randomness. There's a race here
+    // (concurrent calls on the same path stomp each other's tmpfile)
+    // but the threat model doesn't include that.
     //
-    // `add_extension` doesn't exist; manual OsString concat. Not
-    // `with_extension` — that *replaces* the existing extension.
-    // `ed25519_key.priv` would become `ed25519_key.tmp`, which
-    // collides with `ed25519_key.pub.tmp` → ... no it doesn't, those
-    // are different paths. But `foo.tar.gz` → `foo.tar.tmp` is wrong
-    // semantics. Append-suffix is what C does; do that.
+    // Manual OsString concat, not `with_extension` — that *replaces*
+    // the existing extension. `foo.tar.gz` → `foo.tar.tmp` is wrong
+    // semantics. Append the suffix.
     let tmp_path = {
         let mut s = path.as_os_str().to_owned();
         s.push(".tmp");
         std::path::PathBuf::from(s)
     };
 
-    // C `fopenmask(tmpfile, "w", st.st_mode)`. We create + truncate.
-    // No `O_EXCL` — C overwrites a stale tmpfile, so do we. (A stale
-    // tmpfile means a previous run was interrupted; clobbering it is
-    // the right recovery.)
+    // No `O_EXCL` — overwrite a stale tmpfile. (A stale tmpfile means
+    // a previous run was interrupted; clobbering is the recovery.)
     let w = fs::File::create(&tmp_path).map_err(io_err(&tmp_path))?;
 
     // RAII guard: unlink tmpfile if we bail. Disarmed on the success
-    // path right before rename. C does this manually with `if(w)
-    // unlink(tmpfile)` in each error branch; we do it once.
+    // path right before rename.
     let mut tmp_guard = TmpGuard(Some(tmp_path.clone()));
 
     // ─── Copy with #-prefixing
@@ -232,15 +192,10 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     let mut disabled = false;
     let mut in_block = false;
 
-    // C uses `fgets(buf, sizeof(buf), r)` — keeps the trailing
-    // newline. `BufRead::lines()` strips it. We need to preserve
-    // newlines (the file should round-trip byte-exact for unmatched
-    // lines), so we use `read_line` which keeps them.
-    //
-    // `read_line` also handles a final line with no trailing newline
-    // correctly (returns it without `\n`, then next call returns 0).
-    // C `fgets` does the same. The output then also has no trailing
-    // newline. Round-trip preserved.
+    // `read_line` keeps the trailing newline (we need byte-exact
+    // round-trip for unmatched lines). It also handles a final line
+    // with no trailing newline correctly: returns it without `\n`,
+    // then next call returns 0. Round-trip preserved.
     let mut line = String::new();
     loop {
         line.clear();
@@ -249,53 +204,26 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
             break; // EOF
         }
 
-        // The matching is on the line *with* its trailing newline.
-        // `strncmp(buf, "-----BEGIN ", 11)` doesn't care about it
-        // (the prefix is short). `strchr(" \t=", buf[16])` — char 16
-        // is past the newline only on a 16-char line, which
-        // "Ed25519PublicKey" exactly is, but then there's no `=`
-        // after it so the match should fail anyway. Edge: a line
-        // that is *exactly* `Ed25519PublicKey\n` (17 bytes) has
-        // `buf[16] = '\n'`, and `'\n'` is not in `" \t="`. Correct.
-        // A line `Ed25519PublicKey=x\n` has `buf[16] = '='`. Match.
-
         // ─── PEM block detection
-        // C `keys.c:33`: `if(!block && !strncmp(buf, "-----BEGIN ", 11))`
-        // The `!block` means a BEGIN inside a block is ignored (treated
-        // as block content). Shouldn't happen in well-formed PEM but
-        // garbage-in-garbage-preserved.
+        // The `!in_block` means a BEGIN inside a block is ignored
+        // (treated as block content). Shouldn't happen in well-formed
+        // PEM but garbage-in-garbage-preserved.
         //
-        // C then does `strstr(buf, " ED25519 ")` — space-delimited
-        // substring anywhere in the line. `-----BEGIN ED25519 PRIVATE
-        // KEY-----` has it; `-----BEGIN MYED25519FOO-----` doesn't
-        // (no space before ED25519). We dropped the `strstr(what,
-        // "Ed25519")` check — see module doc.
+        // ` ED25519 ` is space-delimited: `-----BEGIN ED25519 PRIVATE
+        // KEY-----` has it; `-----BEGIN MYED25519FOO-----` doesn't.
         if !in_block && line.starts_with("-----BEGIN ") && line.contains(" ED25519 ") {
             disabled = true;
             in_block = true;
         }
 
         // ─── Config-line detection
-        // C `keys.c:40`: `!strncasecmp(buf, "Ed25519PublicKey", 16)
-        // && strchr(" \t=", buf[16])`. Prefix-16-case-insensitive
-        // then delim-at-16.
+        // Prefix-16-case-insensitive then delim-at-16. Delim must be
+        // in {' ', '\t', '='}. A line `Ed25519PublicKey\n` (just the
+        // key name, no value) has `'\n'` at index 16 — doesn't match.
+        // Good: not a valid config line anyway.
         //
-        // `strchr(" \t=", c)` returns non-null iff c ∈ {' ', '\t',
-        // '='}. NOT c == '\0' — `strchr` finds the terminator only if
-        // you ask for `'\0'`, and here `buf[16]` of a line that has
-        // exactly 16 chars before the newline is `'\n'`, not `'\0'`
-        // (fgets keeps the newline). So `Ed25519PublicKey\n` (line of
-        // just the key name, no value) doesn't match. Good — that's
-        // not a valid config line anyway (`tinc-conf` would reject:
-        // key but no value).
-        //
-        // `eq_ignore_ascii_case` for the strncasecmp. `as_bytes()
-        // .get(16)` for the delim — `get` because a short line indexes
-        // OOB and we want false, not panic. C reads `buf[16]` even if
-        // the line is short (it's reading into the 1024-byte buffer's
-        // stale or zero-init contents) — undefined-ish, but in practice
-        // the `strncasecmp` already failed for short lines so the `&&`
-        // short-circuits. Our `len >= 16 && ...` is the explicit form.
+        // `len >= 17` not `>= 16`: we need both the 16-byte prefix
+        // and at least one delimiter byte after it.
         let pubkey_line = line.len() >= 17 // 16 + at-least-the-delim
             && line.as_bytes()[..16].eq_ignore_ascii_case(b"Ed25519PublicKey")
             && matches!(line.as_bytes()[16], b' ' | b'\t' | b'=');
@@ -304,21 +232,17 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         }
 
         // ─── Write (with # if disabled)
-        // C `keys.c:46-54`: `if(block || ed25519pubkey) fputc('#', w);
-        // fputs(buf, w);`. The # goes before the whole line including
-        // its newline, so `#-----BEGIN ...\n`. Exactly one byte
-        // prepended.
+        // The # goes before the whole line including its newline,
+        // so `#-----BEGIN ...\n`. Exactly one byte prepended.
         if in_block || pubkey_line {
             w.write_all(b"#").map_err(io_err(&tmp_path))?;
         }
         w.write_all(line.as_bytes()).map_err(io_err(&tmp_path))?;
 
         // ─── PEM block end detection
-        // C `keys.c:57`: AFTER the write. `if(block && !strncmp(buf,
-        // "-----END ", 9))`. The END line itself gets the `#` (we
-        // already wrote it above), and NEXT iteration `in_block` is
-        // false. C doesn't check that the END type matches the BEGIN
-        // type (`keys.c:57` just checks the prefix). Neither do we.
+        // AFTER the write: the END line itself gets the `#` (already
+        // written above), and NEXT iteration `in_block` is false. We
+        // don't check that END type matches BEGIN type.
         if in_block && line.starts_with("-----END ") {
             in_block = false;
         }
@@ -330,11 +254,8 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     drop(w); // close the fd before rename — not required on Unix, but clean
 
     // ─── If nothing was disabled, leave the original alone
-    // C `keys.c:71-101`: the whole rename dance is inside
-    // `if(disabled)`. The `else` branch (`keys.c:103`) just unlinks
-    // the tmpfile. (We wrote a perfect copy, but rename-ing a copy
-    // over the original is a no-op modulo inode/mtime — C avoids the
-    // mtime bump, so do we.)
+    // We wrote a perfect copy, but renaming it over the original is
+    // a no-op modulo inode/mtime — avoid the mtime bump.
     if !disabled {
         // Guard's drop unlinks. Explicit drop here is redundant (it'd
         // happen at scope end) but makes the intent visible.
@@ -343,18 +264,14 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     }
 
     // ─── Preserve mode, then atomic rename
-    // C does mode-at-create via `fopenmask`. We do it now, just before
-    // rename. See module doc "Mode preservation" for why the timing
-    // difference doesn't matter.
+    // See module doc "Mode preservation" for why we do this here
+    // instead of at create.
     #[cfg(unix)]
     fs::set_permissions(&tmp_path, src_perms).map_err(io_err(&tmp_path))?;
 
     // Disarm the guard — rename consumes the tmpfile, unlink would race.
     tmp_guard.0 = None;
 
-    // C `keys.c:90`: `if(rename(tmpfile, filename))` (inside `#else`,
-    // i.e. non-Windows). Unix rename is atomic and clobbers the
-    // destination. Exactly what we want.
     fs::rename(&tmp_path, path).map_err(io_err(path))?;
 
     Ok(true)
@@ -362,35 +279,29 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
 
 /// Unlink-on-drop. Disarmed by setting `.0 = None`.
 ///
-/// Not `tempfile::NamedTempFile` — that picks a random name in a
-/// system temp dir, but C uses `<path>.tmp` (same dir as the target,
-/// for the rename to be atomic-on-same-fs). We could use
-/// `NamedTempFile::new_in(path.parent())` but then the name isn't
-/// `<path>.tmp` and a crash leaves a `tmp.XXXXXX` mystery file
-/// instead of an obviously-stale `ed25519_key.priv.tmp`. Match C.
+/// Not `tempfile::NamedTempFile` — we want `<path>.tmp` (same dir
+/// as the target, for the rename to be atomic-on-same-fs). A crash
+/// leaves an obviously-stale `ed25519_key.priv.tmp`, not a
+/// `tmp.XXXXXX` mystery file.
 struct TmpGuard(Option<std::path::PathBuf>);
 
 impl Drop for TmpGuard {
     fn drop(&mut self) {
         if let Some(p) = self.0.take() {
-            // Best-effort. C `keys.c:76` ignores unlink's return too.
             let _ = fs::remove_file(p);
         }
     }
 }
 
-/// `O_WRONLY | O_CREAT | O_APPEND`. C `fopen("a")`.
+/// `O_WRONLY | O_CREAT | O_APPEND`.
 ///
 /// The mode is the *create* mode — only matters if the file doesn't
-/// exist. If it does (the rotation case), existing perms win. C
-/// `fopenmask` does `fchmod` after open to force the mode regardless,
-/// but only `if(perms & 0444)` (`fs.c:85`) — that's "if any read bit
-/// is set", which is always (you'd never want a write-only key file).
-/// So C *does* clamp on every genkey. We... don't. Intentional
-/// deviation: if you `chmod 0400` your private key (read-only), genkey
-/// shouldn't silently flip it back to 0600. C does flip it. The C
-/// behavior is arguably a bug (it undoes your hardening); ours
-/// respects it. Noted here so the diff is on purpose.
+/// exist. If it does (the rotation case), existing perms win.
+///
+/// Intentional deviation from upstream: if you `chmod 0400` your
+/// private key (read-only), genkey shouldn't silently flip it back
+/// to 0600. Upstream does flip it (arguably a bug — undoes your
+/// hardening); ours respects it.
 fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
     #[cfg(unix)]
     let opts = {
@@ -513,7 +424,6 @@ mod tests {
     }
 
     /// Tab and `=` (no space) are valid delimiters at char 16.
-    /// `strchr(" \t=", buf[16])`.
     #[test]
     fn disable_config_line_delims() {
         for (delim, want) in [
@@ -530,7 +440,7 @@ mod tests {
         }
     }
 
-    /// Case-insensitive on the key name. `strncasecmp`.
+    /// Case-insensitive on the key name.
     #[test]
     fn disable_config_line_case() {
         let dir = tmp();
@@ -558,7 +468,7 @@ mod tests {
     }
 
     /// `-----BEGIN MYED25519FOO-----` (no space before ED25519) NOT
-    /// matched. The `strstr(buf, " ED25519 ")` is space-delimited.
+    /// matched. ` ED25519 ` is space-delimited.
     #[test]
     fn disable_space_delimited_type() {
         let dir = tmp();

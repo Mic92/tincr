@@ -1,8 +1,8 @@
-//! The seven escape sequences `top.c` actually needs.
+//! The seven escape sequences `tinc top` actually needs.
 //!
-//! `top.c`'s ncurses footprint, exhaustively:
+//! ncurses footprint, exhaustively:
 //!
-//! | C call | What it does | Here |
+//! | curses call | What it does | Here |
 //! |---|---|---|
 //! | `initscr()` + `endwin()` | Alt screen + raw mode + restore | [`RawMode`] RAII |
 //! | `timeout(ms)` + `getch()` | Read 1 byte OR timeout | [`getch_timeout`] |
@@ -23,8 +23,8 @@
 //!
 //! What we lose vs curses: terminfo (we emit ANSI X3.64 directly —
 //! every terminal since VT100 speaks it), implicit row clipping
-//! (caller checks `winsize()` instead, `top.c:269`), and `KEY_BREAK`
-//! (`top.c:386` — Windows-only, we're `#[cfg(unix)]`).
+//! (caller checks `winsize()` instead), and `KEY_BREAK` (Windows-
+//! only, we're `#[cfg(unix)]`).
 
 #![allow(clippy::doc_markdown)]
 #![cfg(unix)]
@@ -42,36 +42,34 @@ use nix::unistd;
 // is `CSI Ps m` where Ps is the parameter. The five SGR codes here
 // are universal: every terminal since the VT100 understands them.
 
-/// `CSI 2 J` — erase entire screen. `top.c:240`: `erase()`.
+/// `CSI 2 J` — erase entire screen.
 ///
 /// NOT `CSI H CSI 2J` (home + clear) — `goto(0,0)` is separate.
-/// The C's `erase()` clears curses' BUFFER; the next `refresh()`
-/// emits the diff. We have no buffer; we emit clear then redraw
-/// everything. Same visual result, more bytes on the wire (ncurses
-/// would diff and emit only changed cells). For `top`'s 1Hz refresh
-/// of ~50 rows × ~60 cols = 3KB/tick, the diff savings don't matter.
+/// We have no buffer; we emit clear then redraw everything. ncurses
+/// would diff and emit only changed cells, but for `top`'s 1Hz
+/// refresh of ~50 rows × ~60 cols = 3KB/tick, the savings don't
+/// matter.
 pub const CLEAR: &str = "\x1b[2J";
 
-/// `CSI K` — erase from cursor to end of line. `top.c:245`:
-/// `chgat(-1, A_REVERSE, ...)` — that's "reverse-video the rest
-/// of the line", which is `REVERSE` + write spaces to EOL... or
-/// `REVERSE` + `CLEAR_EOL` (the cleared cells take the current
-/// SGR). The latter is what curses actually emits for `chgat`.
+/// `CSI K` — erase from cursor to end of line. Used for
+/// "reverse-video the rest of the line": `REVERSE` + `CLEAR_EOL`
+/// (the cleared cells take the current SGR). Same as what curses
+/// emits for `chgat(-1, A_REVERSE, ...)`.
 pub const CLEAR_EOL: &str = "\x1b[K";
 
-/// `CSI 1 m` — bold. `top.c:274`: nodes with traffic this tick.
+/// `CSI 1 m` — bold. Nodes with traffic this tick.
 pub const BOLD: &str = "\x1b[1m";
 
-/// `CSI 2 m` — faint/dim. `top.c:278`: nodes that disappeared
-/// (`!known` — were in last dump, not this one).
+/// `CSI 2 m` — faint/dim. Nodes that disappeared (`!known` — were
+/// in last dump, not this one).
 pub const DIM: &str = "\x1b[2m";
 
-/// `CSI 7 m` — reverse video (swap fg/bg). `top.c:243-244`: the
-/// column header row. The header looks like a "selected" bar.
+/// `CSI 7 m` — reverse video (swap fg/bg). The column header row;
+/// looks like a "selected" bar.
 pub const REVERSE: &str = "\x1b[7m";
 
-/// `CSI 0 m` — reset all attributes. `top.c:276,290`: between
-/// rows so each row's attribute doesn't bleed.
+/// `CSI 0 m` — reset all attributes. Between rows so each row's
+/// attribute doesn't bleed.
 pub const RESET: &str = "\x1b[0m";
 
 /// `CSI ? 1049 h` — switch to alternate screen buffer (xterm
@@ -93,13 +91,11 @@ const CURSOR_SHOW: &str = "\x1b[?25h";
 /// `CSI {row} ; {col} H` — cursor position. 1-indexed (the VT100
 /// inheritance). `mvprintw(r, c, ...)` is this then printf.
 ///
-/// Returns a `String` because the caller `write!`s it inline
-/// (`write!(out, "{}{data}", goto(3, 0))`). A `Display` newtype
-/// would be more idiomatic but the call-site noise (`Goto(3,0)`)
-/// vs `goto(3,0)` is a wash, and the alloc is once-per-row at 1Hz.
+/// Returns a `String` because the caller `write!`s it inline.
+/// The alloc is once-per-row at 1Hz.
 ///
-/// Args are 0-indexed (the C convention, `mvprintw(0,0,...)` is
-/// top-left); we add 1 for the escape.
+/// Args are 0-indexed (top-left is `(0,0)`); we add 1 for the
+/// escape.
 #[must_use]
 pub fn goto(row: u16, col: u16) -> String {
     format!("\x1b[{};{}H", row + 1, col + 1)
@@ -107,11 +103,9 @@ pub fn goto(row: u16, col: u16) -> String {
 
 // winsize — TIOCGWINSZ
 
-/// Terminal dimensions. `top.c` doesn't query these (curses' `LINES`
-/// /`COLS` globals do it), but we need them to clip the data-row
-/// loop — `mvprintw(row=5000, ...)` is a curses no-op past `LINES`;
-/// for us it'd write past the visible area and the terminal would
-/// scroll (or wrap, or both). Explicit clip.
+/// Terminal dimensions. Needed to clip the data-row loop — curses
+/// no-ops `mvprintw` past `LINES`; for us it'd write past the
+/// visible area and the terminal would scroll. Explicit clip.
 #[derive(Debug, Clone, Copy)]
 pub struct Winsize {
     pub rows: u16,
@@ -195,13 +189,10 @@ pub fn winsize() -> Winsize {
 /// keystroke goes straight to the next process. The fix is `stty
 /// sane`, but the user shouldn't have to know that.
 ///
-/// The C `endwin()` is at `top.c:394`, after the loop. A SIGSEGV
-/// before that line leaves the terminal broken. (The C also doesn't
-/// have signal handlers, so Ctrl-C does the same. We don't either,
-/// but Ctrl-C → SIGINT → process death → kernel doesn't restore
+/// Ctrl-C → SIGINT → process death → kernel doesn't restore
 /// termios. KNOWN GAP. The fix is a `signal_hook` SIGINT handler
 /// that drops the guard; deferred until someone Ctrl-C's it and
-/// complains. The C has the same gap.)
+/// complains.
 ///
 /// Field order matters for Drop: `original` is restored, `_stdout`
 /// is just to prove we held a handle (we don't actually use it
@@ -214,9 +205,9 @@ pub struct RawMode {
 }
 
 impl RawMode {
-    /// Enter raw mode + alt screen + hide cursor. `top.c:297`:
-    /// `initscr()`. Everything `initscr` does, minus the terminfo
-    /// dance (we're hardcoded ANSI).
+    /// Enter raw mode + alt screen + hide cursor. Everything
+    /// `initscr()` does, minus the terminfo dance (we're hardcoded
+    /// ANSI).
     ///
     /// "Raw mode" specifically means: no echo (`ECHO` off — typed
     /// chars don't print), no canonical mode (`ICANON` off — `read`
@@ -227,25 +218,19 @@ impl RawMode {
     /// `nix::termios::cfmakeraw` would set MORE flags (the full
     /// POSIX raw — `IXON` off, `OPOST` off, etc.). We only need
     /// the three. `OPOST` off would stop `\n` → `\r\n` translation;
-    /// our escapes use `goto()` for positioning anyway so it
-    /// doesn't matter, but every `println!` in error paths would
-    /// emit bare `\n` (cursor down, NOT carriage return). Keeping
-    /// `OPOST` on means the rest of the program's output works
+    /// keeping it on means the rest of the program's output works
     /// normally if it sneaks through.
     ///
     /// # Errors
-    /// Stdin isn't a tty (piped, redirected). The C: `initscr`
-    /// would `exit(1)` with "Error opening terminal". We return
-    /// `Err`; caller maps to `CmdError`.
+    /// Stdin isn't a tty (piped, redirected). Caller maps to
+    /// `CmdError`.
     pub fn enter() -> io::Result<Self> {
         let stdin = io::stdin();
         let fd = stdin.as_fd();
 
         // Preflight: stdin a tty? `tcgetattr` would fail with
         // ENOTTY anyway, but "stdin is not a terminal" is a better
-        // user message than "Inappropriate ioctl for device". The
-        // C: `initscr()` writes "Error opening terminal: unknown."
-        // and `exit(1)`.
+        // user message than "Inappropriate ioctl for device".
         //
         // `nix::Errno` → `io::Error` via `From` (`errno.rs:183`
         // in nix 0.29: `impl From<Errno> for io::Error { from_raw_
@@ -303,16 +288,12 @@ impl RawMode {
     }
 
     /// Temporarily restore cooked mode, run `f`, re-enter raw.
-    /// `top.c:310-320`: the `'s'` key drops to a `scanw("%f")`
-    /// prompt. `scanw` is curses' `scanf` — it does cooked-mode
-    /// line reading internally. We do the same: restore termios,
-    /// `read_line`, re-raw.
+    /// Used for the `'s'` key prompt: restore termios, `read_line`,
+    /// re-raw.
     ///
-    /// Stays on alt screen (no `ALT_SCREEN_LEAVE`/`ENTER` pair).
-    /// The C's `scanw` doesn't leave alt screen either — the
-    /// prompt appears AT the cursor position (which `top.c:312`
-    /// sets via `mvprintw(1, 0, ...)`). Cursor shown for the
-    /// duration so the user sees where they're typing.
+    /// Stays on alt screen — the prompt appears AT the cursor
+    /// position. Cursor shown for the duration so the user sees
+    /// where they're typing.
     ///
     /// `f` gets a `BufRead` over stdin. Caller does `read_line`
     /// + `.trim().parse::<f32>()` (or whatever).
@@ -358,8 +339,7 @@ impl RawMode {
 }
 
 impl Drop for RawMode {
-    /// `top.c:394`: `endwin()`. Leave alt screen, show cursor,
-    /// restore termios. In that order: if termios restore fails
+    /// Leave alt screen, show cursor, restore termios. In that order: if termios restore fails
     /// (it won't — `tcsetattr` to a valid `Termios` on a valid
     /// fd doesn't fail), the user at least sees their cursor and
     /// their scrollback.
@@ -378,30 +358,21 @@ impl Drop for RawMode {
 
 // getch_timeout — poll + read
 
-/// `top.c:298,308`: `timeout(delay)` then `getch()`. Curses'
-/// `timeout(ms)` sets a per-`getch()` deadline; `getch()` then
-/// returns `ERR` on timeout.
-///
-/// We `poll([stdin], ms)` then `read(0, &c, 1)`. Poll is the
-/// timeout mechanism; read is non-blocking-in-practice (poll
-/// said data's there). Returns `None` on timeout, `Some(byte)`
-/// on key. Same shape as `getch() == ERR`.
+/// `timeout(delay)` + `getch()`: poll stdin with a deadline,
+/// return `None` on timeout, `Some(byte)` on key.
 ///
 /// **No keycode decoding.** Curses turns `\x1b[A` (up arrow,
-/// 3 bytes) into `KEY_UP` (one int). We don't — `top.c`'s switch
-/// (`top.c:308-391`) only has single-byte ASCII keys (`'s'`, `'c'`,
-/// `'n'`, etc. and `'q'`). Arrow keys would come through as ESC
+/// 3 bytes) into `KEY_UP` (one int). We don't — `top` only has
+/// single-byte ASCII keys. Arrow keys would come through as ESC
 /// then `[` then `A`, three separate `Some` returns, and the
-/// switch would match `default` for all three (no-op). Harmless.
-/// If a future command needs arrows, that's a state machine here.
+/// switch would no-op all three. Harmless. If a future command
+/// needs arrows, that's a state machine here.
 ///
 /// **EOF (`read` returns 0) → `Some(b'q')`.** Stdin closed mid-
 /// `top` (the tty went away, or someone piped EOF in). The right
 /// answer is "quit cleanly". Returning `None` would make the
 /// loop spin (poll says readable, read says 0, repeat). Mapping
-/// to `'q'` makes the existing quit case fire. The C: `getch()`
-/// returns `ERR` on EOF too — the loop spins. Our behavior is
-/// better.
+/// to `'q'` makes the existing quit case fire.
 ///
 /// # Errors
 /// I/O errors on stdin (fd closed under us, etc.). EINTR is NOT
@@ -417,8 +388,8 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     // ─── poll
     // `PollTimeout::from(ms)` — nix wraps the `int timeout` arg.
     // 0 means "don't block" (immediate); -1 means "forever" (we
-    // never want that — `top`'s minimum delay is 100ms per `top.c
-    // :316`). u16 max is 65535ms = ~65s, plenty.
+    // never want that — `top`'s minimum delay is 100ms). u16 max
+    // is 65535ms = ~65s, plenty.
     match poll(&mut fds, PollTimeout::from(ms)) {
         // 0 fds ready → timeout. The `getch() == ERR` case.
         //
@@ -498,12 +469,11 @@ mod tests {
     use super::*;
 
     /// `goto(0,0)` → `\x1b[1;1H`. The 0-indexed → 1-indexed
-    /// adjustment. C's `mvprintw(0, 0, ...)` is top-left;
-    /// the escape sequence is 1-indexed (VT100 inheritance).
+    /// adjustment (VT100 escape sequences are 1-indexed).
     #[test]
     fn goto_adjusts_to_one_indexed() {
         assert_eq!(goto(0, 0), "\x1b[1;1H");
-        assert_eq!(goto(2, 0), "\x1b[3;1H"); // top.c:244's row
+        assert_eq!(goto(2, 0), "\x1b[3;1H");
         assert_eq!(goto(24, 79), "\x1b[25;80H"); // bottom-right of 25×80
     }
 }

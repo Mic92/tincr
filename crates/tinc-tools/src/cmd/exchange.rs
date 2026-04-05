@@ -1,5 +1,4 @@
 //! `tinc export`/`import`/`export-all`/`exchange`/`exchange-all`.
-//! C reference: `tincctl.c:2474-2655`.
 //!
 //! ## What this is for
 //!
@@ -52,8 +51,8 @@
 //!   `Ed25519PublicKey =` and not the armor body as a key=value).
 //!
 //! - **The blank line before the separator** (`\n#---..#\n`) is
-//!   consumed by import as part of the previous host's content. C
-//!   does this too; harmless but a "fix" would break round-trip.
+//!   consumed by import as part of the previous host's content.
+//!   Harmless but a "fix" would break round-trip.
 
 #![allow(clippy::doc_markdown)]
 
@@ -63,14 +62,14 @@ use std::io::{BufRead, BufWriter, Write};
 use crate::cmd::{CmdError, io_err};
 use crate::names::{self, Paths, check_id};
 
-/// 65 chars: `#` + 63 dashes + `#`. C: `tincctl.c:2554` and `:2624`.
+/// 65 chars: `#` + 63 dashes + `#`.
 ///
-/// `import` matches against `SEPARATOR + "\n"` (the C `strcmp` includes
-/// the `fgets` newline). We keep the newline separate so `export_all`
-/// can write `\n` + SEPARATOR + `\n` (it wants a blank line *before*).
+/// `import` matches against this exactly. We keep the newline
+/// separate so `export_all` can write `\n` + SEPARATOR + `\n` (it
+/// wants a blank line *before*).
 ///
 /// **Don't reformat.** rustfmt won't touch a `const &str`, but a
-/// well-meaning human might "fix" the dash count. The C count is
+/// well-meaning human might "fix" the dash count. The count is
 /// exact; one off and import treats it as content.
 const SEPARATOR: &str = "#---------------------------------------------------------------#";
 
@@ -79,20 +78,11 @@ const SEPARATOR: &str = "#------------------------------------------------------
 const _: () = assert!(SEPARATOR.len() == 65);
 
 /// `get_my_name` — read `Name = X` from `tinc.conf`, expand `$HOST`.
-/// C: `tincctl.c:1596-1644`.
 ///
-/// The C hand-rolls a config-line tokenizer (the same `strcspn` /
-/// `strspn` dance as `conf.c::parse_config_line`, copy-pasted). We
-/// have `tinc-conf` for that. Reads the whole file, looks up `Name`,
-/// returns the first hit. Slightly more work than the C's stop-at-
-/// first-match streaming scan, but `tinc.conf` is ~5 lines.
+/// Uses `tinc-conf` for tokenization. Reads the whole file, looks
+/// up `Name`, returns the first hit. `tinc.conf` is ~5 lines.
 ///
 /// Returns the *post-expansion* name. `Name = $HOST` resolves.
-///
-/// `verbose` controls whether errors get a message — `cmd_export`
-/// wants the message, `cmd_init`'s "is there already a tinc.conf"
-/// pre-check (`tincctl.c:2318`) doesn't. We don't have that caller
-/// yet but we will.
 ///
 /// # Errors
 /// - `tinc.conf` doesn't exist or can't be read
@@ -101,16 +91,8 @@ const _: () = assert!(SEPARATOR.len() == 65);
 pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     let tinc_conf = paths.tinc_conf();
 
-    // tinc-conf's `parse_file` already handles the line tokenization
-    // (the strcspn/strspn dance), comment stripping, PEM skipping.
-    // The C `get_my_name` reimplements all of that inline — it's a
-    // ~40-line copy-paste of `parse_config_line`. We don't.
-    let entries = tinc_conf::parse_file(&tinc_conf).map_err(|e| {
-        // C: `Could not open %s: %s`. We get tinc-conf's slightly more
-        // detailed message (it distinguishes parse error from I/O
-        // error). Close enough — the path is what users grep for.
-        CmdError::BadInput(format!("Could not open {}: {e}", tinc_conf.display()))
-    })?;
+    let entries = tinc_conf::parse_file(&tinc_conf)
+        .map_err(|e| CmdError::BadInput(format!("Could not open {}: {e}", tinc_conf.display())))?;
 
     let mut config = tinc_conf::Config::new();
     config.merge(entries);
@@ -123,7 +105,6 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
             CmdError::BadInput(format!("Could not find Name in {}.", tinc_conf.display()))
         })?;
 
-    // C: `return replace_name(value)`. The expansion + check_id.
     #[cfg(unix)]
     {
         names::replace_name(raw).map_err(CmdError::BadInput)
@@ -151,61 +132,43 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
 /// to `out`, prefixed with `Name = X`, with any `Name =` lines from
 /// the file itself stripped.
 ///
-/// C: `tincctl.c:2474-2500`.
-///
 /// # Errors
 /// I/O on the host file or `out`.
 pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), CmdError> {
     let path = paths.host_file(name);
-    // C: `fopen(filename, "r")` then `fgets` loop. We `read_to_string`.
-    // Host files are small (a few KB at most — public key + a handful
-    // of config lines). The streaming read isn't buying anything.
-    //
-    // `read_to_string` does mean we reject non-UTF-8 host files, which
-    // the C wouldn't. Host files are ASCII in practice (config keys
-    // are ASCII, b64 is ASCII, addresses are ASCII). A non-UTF-8 host
-    // file is corruption, and failing loudly is better than passing
-    // corrupted bytes to a peer.
+    // Host files are small (a few KB at most). `read_to_string`
+    // rejects non-UTF-8; host files are ASCII in practice (config
+    // keys, b64, addresses). A non-UTF-8 host file is corruption.
     let content = fs::read_to_string(&path).map_err(io_err(&path))?;
 
-    // C: `fprintf(out, "Name = %s\n", name)`.
     writeln!(out, "Name = {name}").map_err(io_err("<stdout>"))?;
 
     for line in content.lines() {
-        // C: `if(strcspn(buf, "\t =") != 4 || strncasecmp(buf, "Name", 4))`.
+        // "Length of leading run containing none of TAB/SPACE/=".
+        // If that's exactly 4, AND the first 4 bytes are "Name"
+        // (case-insensitive), skip.
         //
-        // Unpack: `strcspn(buf, "\t =")` is "length of the leading run
-        // containing none of TAB/SPACE/=". If that's exactly 4, AND
-        // the first 4 bytes are "Name" (case-insensitive), skip.
+        //    `Name = foo`   → stop=4, prefix matches → skip
+        //    `Name=foo`     → stop=4, prefix matches → skip
+        //    `Name foo`     → stop=4, prefix matches → skip
+        //    `Namespace =`  → stop=9, doesn't match  → keep
+        //    `name = foo`   → stop=4, prefix matches → skip
+        //    `Named = foo`  → stop=5, doesn't match  → keep
+        //    ` Name = foo`  → stop=0, doesn't match  → keep ← note!
         //
-        // So `Name = foo`   → strcspn=4, prefix matches → skip
-        //    `Name=foo`     → strcspn=4, prefix matches → skip
-        //    `Name foo`     → strcspn=4, prefix matches → skip
-        //    `Namespace =`  → strcspn=9, doesn't match  → keep
-        //    `name = foo`   → strcspn=4, strncasecmp matches → skip
-        //    `Named = foo`  → strcspn=5, doesn't match  → keep
-        //    ` Name = foo`  → strcspn=0, doesn't match  → keep ← note!
-        //
-        // The leading-space case is odd: a line ` Name = foo` (with a
-        // space) is *kept*. The C config parser strips leading
-        // whitespace before tokenizing, so ` Name = foo` *is* a Name
-        // line as far as the daemon is concerned. But export's filter
-        // doesn't strip, so it doesn't catch it. This is a (harmless,
-        // unlikely) C bug. We replicate it — the cost of not
-        // replicating is a behavioral difference, the cost of
-        // replicating is one comment.
+        // The leading-space case is a (harmless, unlikely) upstream
+        // bug: the config parser strips leading whitespace, so
+        // ` Name = foo` *is* a Name line to the daemon. But this
+        // filter doesn't strip, so it doesn't catch it. We replicate
+        // for fidelity — the cost is just this comment.
         if is_name_line(line) {
             continue;
         }
-        // C: `fputs(buf, out)`. The C `buf` includes the `fgets`
-        // newline; `lines()` strips it; `writeln!` puts it back.
-        // Net effect: we normalize CRLF→LF if the input had CRLF.
-        // Intentional — the C's `fputs` would preserve CRLF, but tinc
-        // host files written by tinc are LF, and a CRLF file came from
-        // a Windows editor and the CR will confuse the next reader.
-        // This is a tiny "fix" but it's the kind that doesn't break
-        // anything (the config parser strips trailing whitespace
-        // including CR).
+        // `lines()` strips the newline; `writeln!` puts LF back.
+        // Net effect: we normalize CRLF→LF. Intentional — a CRLF
+        // file came from a Windows editor and the CR confuses the
+        // next reader. The config parser strips trailing whitespace
+        // including CR, so this doesn't break anything.
         writeln!(out, "{line}").map_err(io_err("<stdout>"))?;
     }
 
@@ -215,36 +178,26 @@ pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), 
 /// `Name =` line filter. See the call site in `export_one` for the
 /// full breakdown of what this matches.
 fn is_name_line(line: &str) -> bool {
-    // `strcspn(buf, "\t =")` — length of the prefix containing none
-    // of these bytes. We're working in bytes because the C does
-    // (and TAB/SPACE/= are ASCII so byte-index == char-index for the
-    // boundary).
+    // Length of the prefix containing none of TAB/SPACE/=. Working
+    // in bytes: TAB/SPACE/= are ASCII so byte-index == char-index.
     let stop = line
         .bytes()
         .position(|b| b == b'\t' || b == b' ' || b == b'=')
         .unwrap_or(line.len());
 
-    // `!= 4` — must be exactly 4.
     if stop != 4 {
         return false;
     }
 
-    // `strncasecmp(buf, "Name", 4)` — first 4 bytes, case-insensitive.
-    // We checked stop==4 so the slice is in-bounds; ASCII bytes mean
-    // the byte slice is also a valid str slice.
+    // First 4 bytes, case-insensitive. stop==4 so slice is in-bounds.
     line[..4].eq_ignore_ascii_case("Name")
 }
 
 /// `cmd_export`. Just `get_my_name` then `export_one`.
 ///
-/// C: `tincctl.c:2503-2525`.
-///
-/// The C's `if(!tty) fclose(stdout)` is dropped. It exists so the
-/// other end of a pipe sees EOF before this process exits (relevant
-/// for `exchange` where stdout goes to a peer's stdin). Rust's
-/// `stdout().lock()` is dropped at scope exit, which flushes; process
-/// exit closes the fd. The peer sees EOF either way. The explicit
-/// close was a C-ism for the `FILE*` buffer, not an fd concern.
+/// Upstream's `if(!tty) fclose(stdout)` is dropped: Rust's
+/// `stdout().lock()` flushes on drop and process exit closes the
+/// fd. The peer sees EOF either way.
 ///
 /// # Errors
 /// `get_my_name` or `export_one` failed.
@@ -255,17 +208,11 @@ pub fn export(paths: &Paths, out: impl Write) -> Result<(), CmdError> {
 
 /// `cmd_export_all`. Walk `hosts/`, export each, separator between.
 ///
-/// C: `tincctl.c:2527-2567`.
+/// **Ordering**: we sort. Upstream uses `readdir` order (filesystem-
+/// dependent). Sorting makes `tinc export-all > all.txt` diffable
+/// across machines and tests deterministic.
 ///
-/// **Ordering**: the C uses `readdir` order, which is filesystem-
-/// dependent (ext4: insertion order, sort of; tmpfs: hash order;
-/// btrfs: something else). We sort. This is a behavioral difference
-/// from the C, but a *good* one — the output is deterministic, which
-/// makes `tinc export-all > all.txt` diffable across machines, and
-/// makes tests not depend on the filesystem.
-///
-/// The C's "best effort, |= results, continue on error" is preserved:
-/// one bad host file doesn't stop the whole export.
+/// Best effort: one bad host file doesn't stop the whole export.
 ///
 /// # Errors
 /// `hosts_dir` can't be opened. Per-file errors are accumulated.
@@ -274,19 +221,15 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
     let mut entries: Vec<String> = fs::read_dir(&hosts_dir)
         .map_err(io_err(&hosts_dir))?
         .filter_map(|e| {
-            // C: `if(!check_id(ent->d_name)) continue`. Silently skip
-            // anything that doesn't look like a node name — `.`, `..`,
-            // editor swap files, README, whatever.
-            //
-            // `to_str()` failing (non-UTF-8 dirent) → skip. The C's
-            // `check_id` would also skip it (any byte ≥0x80 fails
-            // `isalnum`), so same outcome.
+            // Silently skip anything that doesn't look like a node
+            // name — `.`, `..`, editor swap files, README, whatever.
+            // `to_str()` failing (non-UTF-8 dirent) → also skip;
+            // `check_id` would reject it anyway (bytes ≥0x80).
             let name = e.ok()?.file_name().to_str()?.to_owned();
             check_id(&name).then_some(name)
         })
         .collect();
 
-    // The deviation from C: deterministic order.
     entries.sort();
 
     let mut first = true;
@@ -296,14 +239,14 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
         if first {
             first = false;
         } else {
-            // C: `printf("\n#--...--#\n")`. Blank line, separator, newline.
-            // The blank line ends up trailing the *previous* host's
-            // content on the import side. See module doc.
+            // Blank line, separator, newline. The blank line ends up
+            // trailing the *previous* host's content on the import
+            // side. See module doc.
             writeln!(out).map_err(io_err("<stdout>"))?;
             writeln!(out, "{SEPARATOR}").map_err(io_err("<stdout>"))?;
         }
 
-        // C: `result |= export(...)`. Best-effort: log error, continue.
+        // Best-effort: log error, continue.
         if let Err(e) = export_one(paths, name, &mut out) {
             eprintln!("{e}");
             any_error = true;
@@ -311,9 +254,7 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
     }
 
     if any_error {
-        // The C returns the OR of error codes; in practice that's
-        // always 1 if any failed. We map to a generic CmdError. The
-        // per-file message already went to stderr above.
+        // The per-file message already went to stderr above.
         Err(CmdError::BadInput(
             "Some host files could not be exported".into(),
         ))
@@ -327,15 +268,10 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 /// `cmd_import`. Read the export-blob format from `inp`, write
 /// `hosts/NAME` for each `Name = NAME` section.
 ///
-/// C: `tincctl.c:2569-2648`.
-///
 /// `force`: if false, skip hosts whose file already exists (with a
-/// stderr warning). If true, truncate-and-overwrite. C: `--force`
-/// global, `if(!force && !access(filename, F_OK))`.
+/// stderr warning). If true, truncate-and-overwrite.
 ///
-/// Returns the count of files written. C `cmd_import` returns 0 on
-/// success / 1 on failure; we let the caller map count→exit-code.
-/// Count is more useful for tests.
+/// Returns the count of files written; the caller maps count→exit.
 ///
 /// ## The state machine
 ///
@@ -349,20 +285,19 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 /// first `Name =`, or a `Name =` whose file already exists (with
 /// `!force`). In both cases content lines are silently dropped.
 ///
-/// ## On the `sscanf` parse
+/// ## Section header parse
 ///
-/// C: `sscanf(buf, "Name = %4095s", name)`. This matches:
+/// Matches *only* the canonical `Name = X` form:
 /// - `Name = foo`      → "foo"
-/// - `Name =  foo`     → "foo" (`%s` skips leading whitespace)
-/// - `Name = foo bar`  → "foo" (`%s` stops at whitespace)
-/// - `Name=foo`        → 0 matches (literal " " in fmt doesn't match nothing)
-/// - `name = foo`      → 0 matches (literal "Name" is case-sensitive)
-/// - ` Name = foo`     → 0 matches (literal "N" doesn't match " ")
+/// - `Name =  foo`     → "foo" (skips leading whitespace)
+/// - `Name = foo bar`  → "foo" (stops at whitespace)
+/// - `Name=foo`        → no match (literal " " required)
+/// - `name = foo`      → no match (case-sensitive)
+/// - ` Name = foo`     → no match (no leading whitespace)
 ///
-/// So *only* the canonical `Name = X` form. The export side always
-/// writes that exact form, so import only needs to match what export
-/// produces. A hand-edited blob with `Name=foo` won't import.
-/// Replicated faithfully because looser matching could change behavior
+/// The export side always writes that exact form, so import only
+/// needs to match what export produces. A hand-edited blob with
+/// `Name=foo` won't import. Looser matching could change behavior
 /// on weird inputs (a host file containing `Name=something` as a
 /// *comment* would suddenly trigger a section boundary).
 ///
@@ -377,34 +312,25 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 //
 pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, CmdError> {
     let mut out: Option<BufWriter<fs::File>> = None;
-    // For error messages. C: `char filename[PATH_MAX]`, set when out is.
+    // For error messages. Set when `out` is.
     let mut current_path: Option<std::path::PathBuf> = None;
     let mut count = 0usize;
     let mut firstline = true;
 
-    // C: `while(fgets(buf, sizeof(buf), in))`. We use `lines()` which
-    // strips the newline; the separator match adjusts.
-    //
-    // `fgets` with a 4096 buffer truncates lines longer than 4095
-    // chars (the rest spills into the next iteration). We don't
-    // truncate. A 5000-char line is preserved. This is a tightening:
-    // the C would silently corrupt a long line, we don't. No real
-    // host file has lines that long (the longest is a 64-char b64
-    // PEM body line).
+    // `lines()` strips the newline; the separator match adjusts.
+    // We don't truncate long lines (upstream's 4096 buffer would).
+    // No real host file has lines that long anyway.
     for line in inp.lines() {
         let line = line.map_err(io_err("<stdin>"))?;
 
         // ─── "Name = X" → switch files
-        // C: `if(sscanf(buf, "Name = %4095s", name) == 1)`. See the
-        // doc comment above for what this matches. We replicate:
-        // exact prefix `"Name = "`, then take the first whitespace-
-        // delimited token of the rest.
+        // Exact prefix `"Name = "`, then take the first whitespace-
+        // delimited token. See doc comment for what this matches.
         if let Some(tail) = line.strip_prefix("Name = ") {
             firstline = false;
 
-            // `%s` semantics: skip leading whitespace, take until
-            // whitespace. `split_whitespace().next()` does exactly
-            // that. Empty (`Name = ` with nothing after) → None →
+            // Skip leading whitespace, take until whitespace.
+            // Empty (`Name = ` with nothing after) → None →
             // empty string → check_id fails.
             let name = tail.split_whitespace().next().unwrap_or("");
 
@@ -412,9 +338,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
                 return Err(CmdError::BadInput("Invalid Name in input!".into()));
             }
 
-            // C: `if(out) fclose(out)`. Drop = close + flush.
-            // The drop happens via reassignment below; explicit here
-            // for clarity and so flush errors surface (BufWriter::drop
+            // Explicit flush so errors surface (BufWriter::drop
             // swallows errors).
             if let Some(mut prev) = out.take() {
                 prev.flush()
@@ -423,17 +347,10 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
 
             let path = paths.host_file(name);
 
-            // C: `if(!force && !access(filename, F_OK))`.
-            //
-            // We use `try_exists()` not `exists()` — `exists()`
-            // returns false on permission-denied, which would mean we
-            // try to open it and fail with a different error. C's
-            // `access(F_OK)` returns -1 on EACCES too (so the C also
-            // tries to open and fails). Replicating the C: `exists()`.
-            // Actually no — `try_exists` returning Err means we *can't
-            // tell*, and the safest thing is to not overwrite. But
-            // the C overwrites in that case (because `access` returned
-            // nonzero). Fidelity wins: use `exists()`.
+            // `exists()` not `try_exists()`: on permission-denied to
+            // the parent dir, `exists()` returns false and we proceed
+            // to open (which then fails with a useful error). Upstream
+            // does the same. Fidelity.
             if !force && path.exists() {
                 eprintln!(
                     "Host configuration file {} already exists, skipping.",
@@ -444,9 +361,9 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
                 continue;
             }
 
-            // C: `fopen(filename, "w")`. Truncate-and-create.
-            // Not `O_EXCL` — the `!force` check above already gated
-            // existence; with `force`, truncating is the *point*.
+            // Truncate-and-create. Not `O_EXCL` — the `!force` check
+            // above already gated existence; with `force`, truncating
+            // is the *point*.
             let f = fs::File::create(&path).map_err(io_err(&path))?;
             out = Some(BufWriter::new(f));
             current_path = Some(path);
@@ -458,38 +375,24 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
         if firstline {
             eprintln!("Junk at the beginning of the input, ignoring.");
             firstline = false;
-            // C: warn, then *fall through* — the junk line itself
-            // isn't written anywhere (out is None), but we still
-            // check the separator below. Doesn't matter (separator
-            // before any Name is junk anyway), but fidelity.
         }
 
         // ─── Separator → skip
-        // C: `if(!strcmp(buf, "#--...--#\n"))`. The C buf includes
-        // the fgets newline. Our `line` doesn't (lines() strips).
-        // So we compare against SEPARATOR sans newline.
-        //
-        // Note: the C's strcmp means a separator line at EOF *without*
-        // a trailing newline doesn't match (strcmp against the
-        // with-newline string fails) and gets written as content. Our
-        // `lines()` doesn't distinguish "last line had \n" from
-        // "last line didn't", so we'd skip both. Tiny difference;
-        // export always writes the trailing newline so this is only
-        // observable on hand-crafted input. Not worth the complexity
-        // to replicate.
+        // `lines()` strips the newline, so compare sans newline.
+        // Tiny upstream difference: a separator at EOF without a
+        // trailing newline would be content there but skipped here.
+        // Export always writes the trailing newline; not worth
+        // replicating for hand-crafted input.
         if line == SEPARATOR {
             continue;
         }
 
-        // ─── Content → write to current file
-        // C: `if(out) fputs(buf, out)`. Silently dropped if out==NULL.
+        // ─── Content → write to current file (silently dropped if none)
         if let Some(f) = out.as_mut() {
-            // C `buf` has the newline; we add it back.
             writeln!(f, "{line}").map_err(io_err(current_path.as_ref().unwrap()))?;
         }
     }
 
-    // C: `if(out) fclose(out)`. Same flush-explicitly as above.
     if let Some(mut f) = out {
         f.flush().map_err(io_err(current_path.as_ref().unwrap()))?;
     }
@@ -536,11 +439,11 @@ mod tests {
         assert!(is_name_line("Name foo"));
         assert!(is_name_line("name = foo")); // case-insensitive
         assert!(is_name_line("NAME\tfoo"));
-        assert!(!is_name_line("Namespace = foo")); // strcspn=9
-        assert!(!is_name_line("Named = foo")); // strcspn=5
-        assert!(!is_name_line(" Name = foo")); // strcspn=0, the C bug
-        assert!(!is_name_line("")); // strcspn=0
-        assert!(!is_name_line("Nam")); // strcspn=3
+        assert!(!is_name_line("Namespace = foo")); // stop=9
+        assert!(!is_name_line("Named = foo")); // stop=5
+        assert!(!is_name_line(" Name = foo")); // stop=0, the upstream bug
+        assert!(!is_name_line("")); // stop=0
+        assert!(!is_name_line("Nam")); // stop=3
     }
 
     #[test]
@@ -608,8 +511,8 @@ mod tests {
         let mut out = Vec::new();
         export_all(&paths, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
-        // The C check is `check_id`, period. README is `[A-Za-z]+`
-        // which passes — so it's a valid node name and C exports it.
+        // The check is `check_id`, period. README is `[A-Za-z]+`
+        // which passes — so it's a valid node name and gets exported.
         assert!(s.contains("Name = alice"));
         assert!(s.contains("Name = README")); // ← yes, really
         assert!(!s.contains("with-dash"));
@@ -750,7 +653,7 @@ mod tests {
 
     #[test]
     fn import_name_format_is_exact() {
-        // `sscanf("Name = %s")` is picky. See the doc comment.
+        // The header parse is picky. See the doc comment.
         let dir = tempfile::tempdir().unwrap();
         let confbase = dir.path().join("vpn");
         fs::create_dir_all(confbase.join("hosts")).unwrap();

@@ -21,8 +21,8 @@
 //!    `Remote-Addr: $remote_addr` set (nginx config).
 //! 2. We send `REQ_DUMP_SUBNETS` to tincd's control socket and walk
 //!    the dump doing a longest-prefix match against `Remote-Addr`.
-//!    Same algorithm as `tinc info <addr>` (`info.c:267-320`); the
-//!    daemon dumps everything, the client filters.
+//!    Same algorithm as `tinc info <addr>`: the daemon dumps
+//!    everything, the client filters.
 //! 3. Hit → 204 + headers. Miss / unparseable → 401. Dead daemon
 //!    → 503 so nginx fails the auth subrequest cleanly.
 //!
@@ -166,19 +166,18 @@ struct Match {
     prefix: u8,
 }
 
-/// `info.c:267-320` minus the all-matches collection. Dump subnets,
-/// longest-prefix match, return the owner.
+/// Dump subnets, longest-prefix match, return the owner. Same as
+/// `tinc info <addr>` minus the all-matches collection.
 ///
-/// `(broadcast)` subnets (subnet.c:406's literal) are filtered:
-/// they have no owner node and would 204 with `Tinc-Node:
-/// (broadcast)`, which is worse than useless for auth.
+/// `(broadcast)` subnets are filtered: they have no owner node and
+/// would 204 with `Tinc-Node: (broadcast)`, which is worse than
+/// useless for auth.
 fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
     // Build the query Subnet from a parsed IpAddr instead of
     // re-parsing a string. `Subnet::from_str` would work too
     // (a bare address parses as /32 or /128 with default weight),
     // but we already have the typed value. `weight` is irrelevant —
-    // `matches()` ignores it (info.c:285 checks weight separately,
-    // gated on `#` in the input string, which we never have).
+    // `matches()` ignores it.
     let find = match addr {
         IpAddr::V4(a) => Subnet::V4 {
             addr: a,
@@ -193,11 +192,6 @@ fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
     };
 
     let mut ctl = CtlSocket::connect(paths)?;
-    // `info.c:267` sends the query string as a third arg. The daemon
-    // ignores it (control.c:63 doesn't sscanf past the type — see
-    // `cmd/info.rs`'s "dead third arg" doc-comment). We have an
-    // IpAddr not a string, so we'd have to format just to throw it
-    // away. `send` not `send_str`.
     ctl.send(CtlRequest::DumpSubnets)?;
 
     let mut best: Option<Match> = None;
@@ -219,16 +213,14 @@ fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
                 };
 
                 // `as_address: true` — route lookup, "is `find`
-                // INSIDE `self`". info.c:293's `maskcmp` against
-                // the SUBNET's prefix. The mode where `tinc info
+                // INSIDE `self`". The mode where `tinc info
                 // 10.0.0.5` asks "which net routes this".
                 if !subnet.matches(&find, true) {
                     continue;
                 }
 
-                // info.c doesn't filter `(broadcast)` because it's
-                // informational ("yes, 255.255.255.255 routes to
-                // broadcast"). We do filter: a 204 with no real
+                // `tinc info` doesn't filter `(broadcast)` because
+                // it's informational. We do: a 204 with no real
                 // node is a footgun.
                 if row.owner == "(broadcast)" {
                     continue;

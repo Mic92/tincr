@@ -1,25 +1,13 @@
-//! Path resolution. C reference: `src/names.c` `make_names()`.
-//!
-//! ## What this is
+//! Path resolution.
 //!
 //! Every tinc command needs to know "where is the config for net X".
-//! In C, `make_names()` reads `netname`/`confbase` globals, scribbles
-//! `confbase`/`tinc_conf`/`hosts_dir`/`pidfilename`/`unixsocketname`/…
-//! globals back, and every other function reads those. It's a pure
-//! function disguised as a side effect.
-//!
-//! Here it's an actual function: argv-shaped inputs → `Paths` struct.
-//! No globals. Every command takes `&Paths`.
+//! argv-shaped inputs → `Paths` struct. No globals; every command
+//! takes `&Paths`.
 //!
 //! ## What's NOT here yet
 //!
-//! `pidfilename`, `unixsocketname`, `logfilename` — the
-//! daemon/control-socket paths with the `LOCALSTATEDIR` access-probe
-//! fallback (`names.c:108-148`). First consumer is Phase 5b RPC
-//! (`connect_tincd` reads pidfile + connects to unix socket). The
-//! filesystem-only commands (`init`, `generate-keys`, `export`, etc.)
-//! never touch those globals. Add the fields when 5b lands, alongside
-//! the consumer.
+//! `logfilename` — daemon log path. First consumer is the daemon's
+//! logger.
 //!
 //! `identname` — `"tinc.NETNAME"` for syslog. First consumer is the
 //! daemon's logger.
@@ -29,19 +17,15 @@
 //!
 //! ## On `CONFDIR`
 //!
-//! C bakes it at meson configure time (`-Dsysconfdir`, default `/etc`
-//! or `/usr/local/etc` depending on prefix). Rust doesn't have a
-//! configure step. We use `option_env!("TINC_CONFDIR")` at compile
-//! time, defaulting to `/etc`. The Nix derivation can set it; a
-//! `cargo build` from a fresh checkout gets `/etc`. If you want
-//! `/usr/local/etc`, `TINC_CONFDIR=/usr/local/etc cargo build`.
+//! `option_env!("TINC_CONFDIR")` at compile time, defaulting to
+//! `/etc`. The Nix derivation can set it; `cargo build` from a fresh
+//! checkout gets `/etc`. If you want `/usr/local/etc`,
+//! `TINC_CONFDIR=/usr/local/etc cargo build`.
 //!
 //! There's a temptation to do XDG (`~/.config/tinc`) when running
-//! unprivileged. The C does **not** do this — `tinc init` as non-root
-//! fails with EACCES on `/etc/tinc` mkdir, and that's a known
-//! papercut upstream. We don't fix it here. Don't add behavior the C
-//! doesn't have without a separate, deliberate decision; that decision
-//! lives in `RUST_REWRITE_PLAN.md` Phase 4a notes.
+//! unprivileged. Upstream does **not** — `tinc init` as non-root
+//! fails with EACCES on `/etc/tinc` mkdir, a known papercut. We
+//! don't fix it here. That decision lives in `RUST_REWRITE_PLAN.md`.
 
 use std::path::PathBuf;
 
@@ -52,40 +36,29 @@ use std::path::PathBuf;
 /// `/etc`. Same effective behavior as meson's `dir_sysconf`.
 const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
     Some(d) => d,
-    // C: `cdata.set_quoted('CONFDIR', dir_sysconf)` in `src/meson.build:7`.
-    // meson's default sysconfdir under prefix=/usr is /etc. Under
-    // prefix=/usr/local it's /usr/local/etc. We pick /etc because
-    // distro packages set prefix=/usr, and that's the common case.
+    // distro packages set prefix=/usr → sysconfdir=/etc, the common case.
     None => "/etc",
 };
 
-/// `LOCALSTATEDIR`. C: `cdata.set_quoted('LOCALSTATEDIR', dir_local_state)`
-/// in `src/meson.build:9`.
-///
-/// Same compile-time constant treatment as `CONFDIR`. meson default
-/// under prefix=/usr is `/var`. Nix builds will set `TINC_LOCALSTATEDIR`
-/// alongside `TINC_CONFDIR` to whatever `dir_local_state` resolves to.
+/// `LOCALSTATEDIR`. Same compile-time constant treatment as `CONFDIR`.
+/// Nix builds set `TINC_LOCALSTATEDIR` alongside `TINC_CONFDIR`.
 ///
 /// Only used for the pidfile/socket path: `/var/run/tinc.NETNAME.pid`.
-/// The fallback dance (`names.c:111-148`) means this path is *tried
-/// first*, then `confbase/pid` if `/var/run` isn't writable (non-root
-/// testing).
+/// This path is *tried first*, then `confbase/pid` if `/var/run`
+/// isn't writable (non-root testing).
 const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
     Some(d) => d,
     None => "/var",
 };
 
-/// All the paths a command needs. The C globals, materialized.
+/// All the paths a command needs.
 ///
-/// These are the *input* paths — where to look for config — not output
-/// paths. `init` writes here; `export` reads here. Neither cares about
-/// `pidfilename`.
+/// These are the *input* paths — where to look for config. `init`
+/// writes here; `export` reads here.
 ///
-/// `tinc_conf` and `hosts_dir` are derived from `confbase` (just
-/// `confbase.join(...)`). The C precomputes them as separate globals
-/// (`tincctl.c:3343-3344`) because `snprintf` is verbose; we do the
-/// same because `paths.tinc_conf()` reads better at every call site
-/// than `paths.confbase.join("tinc.conf")`.
+/// `tinc_conf` and `hosts_dir` are derived from `confbase`. We
+/// precompute them as accessors because `paths.tinc_conf()` reads
+/// better at every call site than `paths.confbase.join("tinc.conf")`.
 #[derive(Debug, Clone)]
 pub struct Paths {
     /// `confbase` — config root for this net. `/etc/tinc/NETNAME` or
@@ -96,19 +69,15 @@ pub struct Paths {
     pub confbase: PathBuf,
 
     /// `pidfilename` — where the daemon writes its pid + control
-    /// cookie. The CLI reads this in `connect_tincd` (`tincctl.c:763`).
+    /// cookie. The CLI reads this in `connect_tincd`.
     ///
     /// Only set when *resolved*. `for_cli()` doesn't resolve it (the
     /// 4a commands don't need it). 5b commands call `resolve_runtime()`
-    /// which fills it via the LOCALSTATEDIR fallback dance, after
-    /// which `pidfile()`/`unix_socket()` are valid.
+    /// which fills it via the LOCALSTATEDIR fallback dance.
     ///
-    /// Why lazy: the resolution `access(2)`s the filesystem (probes
-    /// for `/var/run/tinc.X.pid` then `confbase/pid`). 4a commands
-    /// like `init` and `export` shouldn't be doing fs probes for
-    /// state they don't use. C does it eagerly (`make_names` always
-    /// resolves, even for `cmd_init`) because globals are free; we
-    /// have a struct, so we make the dependency explicit.
+    /// Why lazy: the resolution probes the filesystem. Commands like
+    /// `init` and `export` shouldn't be doing fs probes for state
+    /// they don't use. We make the dependency explicit.
     ///
     /// `Option<PathBuf>` so `pidfile()` can panic with a clear
     /// message if you forgot `resolve_runtime()`. Better than a
@@ -122,18 +91,15 @@ pub struct Paths {
     /// the parent should be, and the user said where to look, so we
     /// trust the path exists or `mkdir(confbase)` will fail loudly.
     ///
-    /// C: `confdir` is always set (to `CONFDIR "/tinc"` even when
-    /// `confbase_given`), but `makedirs` skips creating it when
-    /// `confbase_given` is true (`fs.c:37`). Same effect, modeled
-    /// differently: rather than store a path we'll never use plus a
-    /// flag saying not to use it, store `Option`.
+    /// Modeled as `Option` rather than store a path we'll never use
+    /// plus a flag saying not to use it.
     pub confdir: Option<PathBuf>,
 }
 
 /// Where the pidfile resolved to. Distinct because the *daemon* uses
 /// the same dance but needs to know which branch fired — for the
-/// LOCALSTATEDIR-unwritable warning (`names.c:142`). The CLI doesn't
-/// care, it just opens whichever exists.
+/// LOCALSTATEDIR-unwritable warning. The CLI doesn't care, it just
+/// opens whichever exists.
 ///
 /// Not used by the CLI yet (it just calls `pidfile()`); the variant
 /// is wired for when `for_daemon()` lands.
@@ -147,11 +113,10 @@ pub enum PidfileSource {
     Confbase,
 }
 
-/// Input axis. The C globals that `make_names()` *reads*, before it
-/// writes the others. These come from getopt (`-c` / `-n`).
+/// Input axis. These come from getopt (`-c` / `-n`).
 ///
 /// You only ever set one or the other in practice (`-c` overrides
-/// `-n`), but the C accepts both with a warning, and so do we.
+/// `-n`), but we accept both with a warning.
 #[derive(Debug, Default)]
 pub struct PathsInput {
     /// `-n NETNAME` / `--net=NETNAME`. Names a subdirectory of confdir.
@@ -160,8 +125,7 @@ pub struct PathsInput {
     /// `-c DIR` / `--config=DIR`. Explicit confbase. Wins over netname.
     pub confbase: Option<PathBuf>,
 
-    /// `--pidfile=X`. Overrides all the resolution logic. C
-    /// `tincctl.c:245-246`: `OPT_PIDFILE` → `pidfilename = xstrdup(optarg)`.
+    /// `--pidfile=X`. Overrides all the resolution logic.
     ///
     /// Why this is in `PathsInput`: it's input, same axis as `-c`/`-n`.
     /// The fact that it bypasses resolution is the whole point of
@@ -171,37 +135,24 @@ pub struct PathsInput {
 }
 
 impl Paths {
-    /// `make_names(daemon=false)`. The CLI flavor.
+    /// The CLI flavor.
     ///
-    /// (The daemon flavor differs only in pidfile/log resolution, which
-    /// we don't have yet. When we add those fields, this grows a
-    /// `daemon: bool` parameter — or more likely a separate
-    /// `for_daemon()` constructor, since the daemon binary calls it
-    /// once with a literal `true` and the CLI calls it once with a
-    /// literal `false`, no runtime variance.)
-    ///
-    /// C: `names.c:41-98` (skipping the Windows registry block and
-    /// the pidfile/log block at 108+).
+    /// (The daemon flavor differs only in pidfile/log resolution.
+    /// When we add those fields, this gets a separate `for_daemon()`
+    /// constructor.)
     #[must_use]
     pub fn for_cli(input: &PathsInput) -> Self {
-        // C `if(netname && confbase) logger(...)` — both given, confbase
-        // wins, warn. We warn to stderr (no logger framework yet, and
-        // this is a CLI tool — stderr is the logger). The C uses
-        // logger() which goes to stderr in non-daemon mode anyway.
         if input.netname.is_some() && input.confbase.is_some() {
             eprintln!("Both netname and configuration directory given, using the latter...");
         }
 
-        // The actual decision tree. Three cases, C does it as
-        // fall-through if-chains (`names.c:89-95`):
-        //
+        // Decision tree:
         //   confbase given     → use it, confdir is moot
         //   netname given      → CONFDIR/tinc/NETNAME, confdir = CONFDIR/tinc
         //   neither            → CONFDIR/tinc,         confdir = CONFDIR/tinc
         //
-        // The neither case means confbase == confdir. The C still sets
-        // both as separate strings; `makedirs` then idempotently mkdirs
-        // the same path twice. Harmless.
+        // The neither case means confbase == confdir. `makedirs` then
+        // idempotently mkdirs the same path twice. Harmless.
 
         if let Some(explicit) = &input.confbase {
             return Self {
@@ -226,8 +177,7 @@ impl Paths {
 
     /// Resolve `pidfilename` and (implicitly) `unixsocketname`. Idempotent.
     ///
-    /// `names.c:108-163`, the `daemon=false` branch. The CLI's resolution
-    /// is **probe-first-then-fall-back**: try `/var/run/tinc.X.pid`,
+    /// **Probe-first-then-fall-back**: try `/var/run/tinc.X.pid`,
     /// and only fall back to `confbase/pid` if the system path doesn't
     /// exist *but* the confbase one does. The asymmetry matters:
     ///
@@ -238,12 +188,10 @@ impl Paths {
     /// | missing        | missing      | /var/run/X.pid  |
     ///
     /// The bottom row is the surprise: if *neither* exists, we return
-    /// the LOCALSTATEDIR path, not confbase. C `names.c:116-125`:
-    /// `fallback` only goes true when `access(LOCALSTATEDIR/...) fails
-    /// AND access(confbase/pid) succeeds`. The rationale: if no daemon
-    /// is running anywhere, the error message should say `/var/run/...`
-    /// (the place a daemon *should* write to) not `confbase/pid` (the
-    /// fallback that only matters when /var/run is unwritable).
+    /// the LOCALSTATEDIR path, not confbase. The rationale: if no
+    /// daemon is running anywhere, the error message should say
+    /// `/var/run/...` (where a daemon *should* write) not
+    /// `confbase/pid` (the fallback for unwritable /var/run).
     ///
     /// Why this is `&mut self` not a constructor: the resolution
     /// `access(2)`s the filesystem. Mutating an existing `Paths`
@@ -252,13 +200,10 @@ impl Paths {
     /// `for_cli()` and only the 5b tests add `.resolve_runtime()`.
     ///
     /// `identname` (the `tinc.NETNAME` bit) is derived here from
-    /// `netname`. We don't store identname — only one consumer (this
-    /// function), and the C only stores it because syslog wants it,
-    /// which we also don't have yet. When we do, lift it.
+    /// `netname`. We don't store it — only one consumer. When syslog
+    /// lands, lift it.
     pub fn resolve_runtime(&mut self, input: &PathsInput) -> PidfileSource {
-        // --pidfile wins. No probing. C: `if(!pidfilename)` guards
-        // every assignment in `names.c:104-146`; getopt already
-        // populated it, so all branches are skipped.
+        // --pidfile wins. No probing.
         if let Some(explicit) = &input.pidfile {
             self.pidfile = Some(explicit.clone());
             return PidfileSource::Explicit;
@@ -271,31 +216,24 @@ impl Paths {
             return PidfileSource::Confbase;
         }
 
-        // identname: `tinc.NETNAME` or `tinc`. C `names.c:53-59`.
-        // The dot is significant: `tinc.myvpn.pid` not `tincmyvpn.pid`.
-        // identname is *also* the syslog tag, which is why it's
-        // human-readable.
+        // identname: `tinc.NETNAME` or `tinc`. The dot is significant:
+        // `tinc.myvpn.pid` not `tincmyvpn.pid`. identname is *also*
+        // the syslog tag, which is why it's human-readable.
         let identname = match &input.netname {
             Some(net) => format!("tinc.{net}"),
             None => "tinc".to_owned(),
         };
 
-        // The probe. C uses `access(R_OK)` which checks *effective*
-        // UID. `Path::exists` uses `stat`, which doesn't — but for
-        // "does this file exist at all" the difference only matters
-        // if you have a pidfile you can't read (mode 000), which
-        // means the *daemon* set it that way, which is nonsense.
-        // The C's `access` is incidental, not load-bearing. Match
-        // intent (existence), not mechanism.
+        // `Path::exists` uses `stat`. For "does this file exist at
+        // all" that's sufficient — a mode-000 pidfile would mean the
+        // *daemon* set it that way, which is nonsense.
         let system_path: PathBuf = [LOCALSTATEDIR, "run", &format!("{identname}.pid")]
             .iter()
             .collect();
         let confbase_path = self.confbase.join("pid");
 
-        // The truth table from the doc comment, in code. Note the
-        // implicit `else` at the end: if neither exists, no
-        // assignment to `fallback`, so it stays false, so we use
-        // system_path. C structure preserved.
+        // The truth table from the doc comment, in code. If neither
+        // exists, the final else → system_path.
         let (path, source) = if system_path.exists() {
             (system_path, PidfileSource::LocalState)
         } else if confbase_path.exists() {
@@ -322,12 +260,10 @@ impl Paths {
     }
 
     /// `unixsocketname`. Derived from `pidfilename` by string surgery.
-    /// `names.c:152-161`.
     ///
     /// The rule: `foo.pid` → `foo.socket`; anything else gets
-    /// `.socket` appended. Case-sensitive (`strcmp` not `strcasecmp`),
-    /// exactly 4 trailing bytes (`len > 4 && pidfilename + len - 4`).
-    /// `Foo.PID` does NOT match — `Foo.PID.socket`. Replicated
+    /// `.socket` appended. Case-sensitive, exactly 4 trailing bytes.
+    /// `Foo.PID` does NOT match → `Foo.PID.socket`. Replicated
     /// faithfully because socket-path mismatch = silent connect fail.
     ///
     /// Why derived not stored: it's pure (no fs probe), and storing
@@ -342,19 +278,16 @@ impl Paths {
     #[must_use]
     pub fn unix_socket(&self) -> PathBuf {
         let pid = self.pidfile();
-        // Work in OsStr land. The C does byte-level strcmp; pidfile
-        // paths are ASCII in practice (we built them from ASCII
-        // constants + netname which passed `check_id`), but `--pidfile`
-        // can be anything. `as_encoded_bytes` is the platform-native
-        // byte view; on Unix it's the literal path bytes.
+        // Work in OsStr land: pidfile paths are ASCII in practice
+        // (built from ASCII constants + check_id'd netname), but
+        // `--pidfile` can be anything. `as_encoded_bytes` is the
+        // platform-native byte view; on Unix it's literal path bytes.
         let bytes = pid.as_os_str().as_encoded_bytes();
-        // C: `if(len > 4 && !strcmp(pidfilename + len - 4, ".pid"))`.
         // `> 4` not `>= 4` — a file named exactly `.pid` (len=4)
-        // doesn't match. Unlikely but the off-by-one is in the C.
+        // doesn't match. Unlikely but preserved.
         if bytes.len() > 4 && bytes.ends_with(b".pid") {
-            // strncpy(unixsocketname + len - 4, ".socket", 8).
             // Slice off the .pid, append .socket. Can't `with_extension`
-            // because that would also turn `tinc.myvpn.pid` into
+            // because that would turn `tinc.myvpn.pid` into
             // `tinc.socket` (drops everything after the last dot).
             // We want exactly the last 4 bytes replaced.
             //
@@ -376,54 +309,42 @@ impl Paths {
             }
             #[cfg(not(unix))]
             {
-                // On Windows the C never reaches this (different
-                // path resolution via registry). Stub the type-check.
+                // Windows uses different path resolution via registry.
+                // Stub the type-check.
                 let _ = stem;
                 let mut s = pid.as_os_str().to_owned();
                 s.push(".socket");
                 PathBuf::from(s)
             }
         } else {
-            // strncpy(unixsocketname + len, ".socket", 8). Append.
             let mut s = pid.as_os_str().to_owned();
             s.push(".socket");
             PathBuf::from(s)
         }
     }
 
-    /// `tinc.conf` — the main config file. `tincctl.c:3343`.
+    /// `tinc.conf` — the main config file.
     #[must_use]
     pub fn tinc_conf(&self) -> PathBuf {
         self.confbase.join("tinc.conf")
     }
 
-    /// `hosts/` — per-peer config + public keys. `tincctl.c:3344`.
+    /// `hosts/` — per-peer config + public keys.
     #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.confbase.join("hosts")
     }
 
-    /// `confdir` materialized — the C-faithful version. `names.c:86`:
-    /// `confdir = xstrdup(CONFDIR "/tinc")` UNCONDITIONALLY. Our
-    /// `self.confdir` is `Option` (None when `--config` was given,
-    /// because makedirs doesn't NEED the parent then). But `cmd_
-    /// network` (`tincctl.c:2700`) reads `confdir` regardless —
-    /// `tinc -c /foo network` lists `/etc/tinc/*/tinc.conf` not
-    /// `/foo/../*` (the latter would be wrong anyway; `-c` points
-    /// at ONE confbase, not a parent-of-confbases).
+    /// `confdir` materialized. `self.confdir` is `Option` (None when
+    /// `--config` was given, because makedirs doesn't need the parent
+    /// then). But `cmd_network` reads `confdir` regardless — `tinc
+    /// -c /foo network` lists `/etc/tinc/*/tinc.conf` not `/foo/../*`
+    /// (`-c` points at ONE confbase, not a parent-of-confbases).
     ///
-    /// This method materializes the C's always-set: `Some(x)` → `x`,
-    /// `None` → `CONFDIR/tinc`. Only `cmd_network` calls it; the
-    /// `Option` field is the right model for the OTHER consumer
-    /// (makedirs).
+    /// `Some(x)` → `x`, `None` → `CONFDIR/tinc`. Only `cmd_network`
+    /// calls it; the `Option` field is the right model for makedirs.
     #[must_use]
     pub fn confdir_always(&self) -> PathBuf {
-        // `self.confdir` is `Some` when confbase was DERIVED (from
-        // netname or default). `None` when `-c` was given. The C
-        // sets `CONFDIR/tinc` either way; we synthesize the same
-        // value here. The two paths ARE the same value when not -c
-        // (line 214 in `for_cli`), so this is just "always /etc/
-        // tinc" with extra steps. The extra steps document WHY.
         self.confdir
             .clone()
             .unwrap_or_else(|| [CONFDIR, "tinc"].iter().collect())
@@ -438,16 +359,15 @@ impl Paths {
         self.confbase.join("hosts").join(name)
     }
 
-    /// `cache/` — `address_cache.c` writes recently-seen peer addresses
-    /// here. `tinc init` creates it empty. `fs.c:50`.
+    /// `cache/` — recently-seen peer addresses. `tinc init` creates
+    /// it empty.
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {
         self.confbase.join("cache")
     }
 
-    /// `<confbase>/invitations`. Directory mode 0700 (`fs.c:42`).
-    /// Only `cmd_invite` populates it; only the daemon's
-    /// `receive_invitation_sptps` reads from it.
+    /// `<confbase>/invitations`. Directory mode 0700. Only
+    /// `cmd_invite` populates it; only the daemon reads from it.
     #[must_use]
     pub fn invitations_dir(&self) -> PathBuf {
         self.confbase.join("invitations")
@@ -456,19 +376,19 @@ impl Paths {
     /// `<confbase>/invitations/ed25519_key.priv`. The per-mesh
     /// invitation signing key, NOT the node's own key. Generated by
     /// `cmd_invite` on first invite (or after all invites expire),
-    /// loaded by the daemon on startup. `invitation.c:440`.
+    /// loaded by the daemon on startup.
     #[must_use]
     pub fn invitation_key(&self) -> PathBuf {
         self.invitations_dir().join("ed25519_key.priv")
     }
 
-    /// `ed25519_key.priv` — the daemon's signing key. `tincctl.c:372`.
+    /// `ed25519_key.priv` — the daemon's signing key.
     #[must_use]
     pub fn ed25519_private(&self) -> PathBuf {
         self.confbase.join("ed25519_key.priv")
     }
 
-    /// `tinc-up` — script run when the interface comes up. `tincctl.c:2283`.
+    /// `tinc-up` — script run when the interface comes up.
     #[must_use]
     #[cfg(unix)]
     pub fn tinc_up(&self) -> PathBuf {
@@ -476,13 +396,10 @@ impl Paths {
     }
 }
 
-/// `check_id` — node names must be `[A-Za-z0-9_]+`. `utils.c:216-226`.
+/// `check_id` — node names must be `[A-Za-z0-9_]+`, nonempty.
 ///
-/// Nonempty (`!*id` check — empty string is invalid). The C uses
-/// `isalnum((uint8_t) *id)`, which is locale-dependent in principle,
-/// but in practice every locale agrees on ASCII alnum and node names
-/// are ASCII by convention. We pin to ASCII explicitly; same as the
-/// `ascii_fold` decision in `tinc-conf::parse`.
+/// We pin to ASCII explicitly; same as the `ascii_fold` decision in
+/// `tinc-conf::parse`.
 ///
 /// This isn't just a sanity check — it's load-bearing security. Node
 /// names go into filesystem paths (`hosts/NAME`, scripts) and into
@@ -497,7 +414,7 @@ pub fn check_id(name: &str) -> bool {
 }
 
 /// `replace_name` — expand `$HOST`/`$FOO` in `Name = ...` values, then
-/// `check_id`. C: `utils.c:246-289`.
+/// `check_id`.
 ///
 /// ## What this is for
 ///
@@ -513,17 +430,14 @@ pub fn check_id(name: &str) -> bool {
 ///
 /// ## Why this is in `names.rs` not `cmd/exchange.rs`
 ///
-/// First consumer is `get_my_name` (`cmd/exchange.rs`). But the daemon
-/// also calls `replace_name` from `net_setup.c:setup_myself` — it's
-/// the *same* code path: read `Name` from config, expand, validate.
-/// Shared infrastructure goes here.
+/// First consumer is `get_my_name` (`cmd/exchange.rs`). The daemon
+/// also calls this from setup — same code path: read `Name` from
+/// config, expand, validate. Shared infrastructure goes here.
 ///
 /// ## Why `Result<String, String>` not `Option`
 ///
-/// The C has three distinct error messages: "env var X does not
-/// exist", "could not get hostname", "invalid name". A caller doing
-/// `expect()` gets the right message; a test gets the right discriminant.
-/// `Option` would lose that.
+/// Three distinct error messages: "env var X does not exist", "could
+/// not get hostname", "invalid name". `Option` would lose that.
 ///
 /// # Errors
 /// - `$FOO` (not `$HOST`) and env var `FOO` is unset
@@ -541,26 +455,16 @@ pub fn replace_name(raw: &str) -> Result<String, String> {
 #[cfg(unix)]
 fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     let resolved = if let Some(var_name) = raw.strip_prefix('$') {
-        // C: `if(name[0] == '$')`. The whole tail is the var name —
-        // no `${FOO}` syntax, no `$FOO_suffix` parsing. `$HOST` means
-        // env var `HOST`, full stop.
+        // The whole tail is the var name — no `${FOO}` syntax, no
+        // `$FOO_suffix` parsing. `$HOST` means env var `HOST`.
         match env(var_name) {
             Some(v) => v,
-            // C distinguishes "not $HOST" (hard error) from "$HOST and
-            // unset" (fall through to gethostname). The `strcmp(name+1,
-            // "HOST")` is exact — `$host` doesn't get the fallback.
-            // `var()` returning `NotUnicode` is folded into `None` by
-            // the wrapper: a non-UTF-8 hostname would fail the
-            // alnum-squash anyway (every byte ≥0x80 → `_`), and the
-            // C's behavior on a non-UTF-8 `getenv` result is to feed
-            // it to isalnum which returns 0 for everything ≥0x80,
-            // same outcome.
+            // `$HOST` and unset → fall through to gethostname.
+            // `$host` (lowercase) does NOT get the fallback — exact
+            // match. Non-UTF-8 env values are folded into None: every
+            // byte ≥0x80 would become `_` in the squash anyway.
             None if var_name == "HOST" => {
-                // C: `gethostname(hostname, HOST_NAME_MAX+1)`. nix's
-                // wrapper allocates the buffer and returns `OsString`.
-                // Same cast-to-String concern as above: non-UTF-8
-                // hostname → lossy → squash → probably-valid. The
-                // C's `isalnum` on raw bytes is no more correct.
+                // Non-UTF-8 hostname → lossy → squash → probably-valid.
                 nix::unistd::gethostname()
                     .map_err(|e| format!("Could not get hostname: {e}"))?
                     .to_string_lossy()
@@ -577,14 +481,13 @@ fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<
         raw.to_owned()
     };
 
-    // C: squash non-alnum to `_`. ONLY for the `$` branch — the C's
-    // for-loop is inside `if(name[0] == '$')`. A literal `Name = a-b`
-    // does NOT get squashed; it goes to `check_id` as-is and fails.
+    // Squash non-alnum to `_` — ONLY for the `$` branch. A literal
+    // `Name = a-b` does NOT get squashed; it goes to `check_id`
+    // as-is and fails.
     //
-    // Subtle: this means `Name = my-laptop` is an error but
-    // `Name = $HOST` on a machine called `my-laptop` succeeds (becomes
-    // `my_laptop`). The squash is a *convenience for hostnames*, not a
-    // general sanitizer. Replicated faithfully.
+    // Subtle: `Name = my-laptop` is an error but `Name = $HOST` on a
+    // machine called `my-laptop` succeeds (becomes `my_laptop`). The
+    // squash is a *convenience for hostnames*, not a general sanitizer.
     let name = if raw.starts_with('$') {
         resolved
             .chars()
@@ -597,8 +500,6 @@ fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<
     if check_id(&name) {
         Ok(name)
     } else {
-        // C: `"Invalid name for myself!"`. Yes, with the exclamation
-        // mark. Yes, even for the empty case.
         Err("Invalid name for myself!".to_owned())
     }
 }
@@ -649,14 +550,13 @@ mod tests {
         assert!(check_id("Node_1"));
         assert!(check_id("_"));
         assert!(check_id("123")); // pure-digit is fine
-        assert!(!check_id("")); // C: `if(!*id) return false`
+        assert!(!check_id(""));
         assert!(!check_id("has space"));
         assert!(!check_id("has-dash")); // dash is not in the set
         assert!(!check_id("path/traversal"));
         assert!(!check_id("dot.ted"));
         // Non-ASCII: `bytes()` sees the UTF-8 encoding bytes, none of
         // which are ASCII alnum (multibyte sequences are all ≥0x80).
-        // Same outcome as C `isalnum((uint8_t)*id)` on UTF-8 bytes.
         assert!(!check_id("ünicode"));
     }
 
@@ -721,7 +621,7 @@ mod tests {
 
     /// No `.pid` suffix → append. `confbase/pid` (the fallback path)
     /// has no `.pid` extension — it's a *file named pid*, not
-    /// *something.pid*. C `names.c:160`: append branch.
+    /// *something.pid*.
     #[test]
     fn unix_socket_no_dot_pid_appended() {
         let mut p = Paths::for_cli(&PathsInput {
@@ -735,8 +635,8 @@ mod tests {
         assert_eq!(p.unix_socket(), Path::new("/etc/tinc/myvpn/pid.socket"));
     }
 
-    /// Exactly `.pid` (len=4) does NOT match — the C's `len > 4`
-    /// not `>= 4`. Absurd path but the off-by-one is real.
+    /// Exactly `.pid` (len=4) does NOT match — `len > 4` not `>= 4`.
+    /// Absurd path but the off-by-one is real.
     #[test]
     fn unix_socket_exactly_dot_pid() {
         let mut p = Paths::for_cli(&PathsInput {
@@ -751,10 +651,9 @@ mod tests {
         assert_eq!(p.unix_socket(), Path::new(".pid.socket"));
     }
 
-    /// Case-sensitive match. C: `strcmp` not `strcasecmp`. `tinc.PID`
-    /// from a confused user does not match → `tinc.PID.socket`, which
-    /// won't be where the daemon listens. The case-sensitivity is
-    /// load-bearing for correctness; both halves use the same code.
+    /// Case-sensitive match. `tinc.PID` does not match →
+    /// `tinc.PID.socket`, which won't be where the daemon listens.
+    /// Load-bearing for correctness; both halves use the same code.
     #[test]
     fn unix_socket_case_sensitive() {
         let mut p = Paths::for_cli(&PathsInput {

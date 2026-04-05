@@ -1,4 +1,4 @@
-//! `cmd_sign` + `cmd_verify` — `tincctl.c:2770-2998`.
+//! `cmd_sign` + `cmd_verify`.
 //!
 //! Detached-ish signature over an arbitrary file. NOT a PEM envelope.
 //! NOT GPG-style ASCII armor. Format:
@@ -21,21 +21,17 @@
 //! <file_contents> || " " || <name> || " " || <unix_time>
 //! ```
 //!
-//! Note the **leading space** before name. C: `xasprintf(&trailer,
-//! " %s %ld", name, t)` — `tincctl.c:2833`. That space is in the
-//! format string, not an artifact. The trailer is `memcpy`'d after
-//! the file bytes (`tincctl.c:2837`), then signed. The trailer is
-//! **not** in the output — only in the signature input.
+//! Note the **leading space** before name. That space is in the
+//! format, not an artifact. The trailer is appended after the file
+//! bytes, then signed. The trailer is **not** in the output — only
+//! in the signature input.
 //!
 //! The trailer binds name+time inside the signed message; without it
 //! they'd be unsigned header metadata, freely rewritable. The leading
-//! space is a separator between file contents and trailer — the C
-//! has it (`tincctl.c:2833`), we replicate. No trailing newline on
-//! the trailer (`xasprintf(" %s %ld", ...)` doesn't add one).
+//! space is a separator between file contents and trailer. No
+//! trailing newline on the trailer.
 //!
 //! ## `verify`'s signer argument
-//!
-//! `tincctl.c:2872-2889`:
 //!
 //! - `.` → own name (`get_my_name`). "Verify this was signed by me."
 //! - `*` → any. Use the `<name>` from the header, look up
@@ -48,27 +44,22 @@
 //! signature without knowing in advance who signed it (you trust your
 //! `hosts/` directory as a keyring).
 //!
-//! ## `get_pubkey` — the fourth tokenizer
+//! ## `get_pubkey`
 //!
-//! `tincctl.c:1647-1678` is another hand-rolled config-line tokenizer.
-//! We use `tinc-conf::parse_file` instead. The C falls back to
-//! `ecdsa_read_pem_public_key` (`tincctl.c:2972`) for host files with
-//! a PEM block instead of a config line; we replicate the fallback.
+//! We use `tinc-conf::parse_file`, falling back to a PEM block for
+//! host files without an `Ed25519PublicKey =` config line.
 //!
 //! ## Time parameterized for tests
 //!
-//! C uses `time(NULL)`. We take time as a parameter for deterministic
-//! golden-output tests; the binary wrapper supplies `SystemTime::now()`.
+//! Time is a parameter for deterministic golden-output tests; the
+//! binary wrapper supplies `SystemTime::now()`.
 //!
 //! ## Replicated quirks
 //!
-//! - File slurped whole (`read_to_end`, no size limit; `tincctl.c:2743`
-//!   does `realloc` doubling). Don't sign 10 GB files.
-//! - `verify` writes nothing on failure (`tincctl.c:2991`).
-//! - `MAX_STRING_SIZE - 1 = 2048` cap on header line (`tincctl.c:2918`).
-//!   No overflow risk for us but it's a malformed-input sanity check.
-//! - `!t` check rejects time zero (`tincctl.c:2930`). Defensive;
-//!   unreachable on the happy path.
+//! - File slurped whole (no size limit). Don't sign 10 GB files.
+//! - `verify` writes nothing on failure.
+//! - 2048 cap on header line — malformed-input sanity check.
+//! - `t == 0` rejected. Defensive; unreachable on the happy path.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -82,24 +73,17 @@ use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SIG_LEN, verify};
 
 /// 64-byte raw signature → 86-char tinc-b64. `ceil(64 * 4 / 3) = 86`.
-/// C `tincctl.c:2930`: `strlen(sig) != 86` is a hardcoded check.
-/// `const _:` is the no-runtime-cost form of asserting our
-/// arithmetic matches. If `SIG_LEN` changes (it won't — Ed25519
-/// signatures are 64 bytes by definition) this fails at compile time.
+/// `const _:` is the no-runtime-cost form of asserting our arithmetic
+/// matches. If `SIG_LEN` changes (it won't — Ed25519 signatures are
+/// 64 bytes by definition) this fails at compile time.
 const SIG_B64_LEN: usize = 86;
 const _: () = assert!((SIG_LEN * 4).div_ceil(3) == SIG_B64_LEN);
 
-/// `MAX_STRING_SIZE - 1 = 2048`. `tincctl.c:2918`. The C check is
-/// `newline - data > MAX_STRING_SIZE - 1`, i.e. header (without the
-/// `\n`) longer than 2048 bytes is rejected. Our parsed line is
-/// already without the `\n` (we slice at it), so direct comparison.
+/// Header (without the `\n`) longer than 2048 bytes is rejected. Our
+/// parsed line is already without the `\n` (we slice at it).
 const MAX_HEADER_LEN: usize = 2048;
 
-/// Slurp `path` or stdin. C `readfile` (`tincctl.c:2743`).
-///
-/// `path = None` → stdin. The error path naming is slightly off in C:
-/// `tincctl.c:2826` does `argv[1]` even when `argc < 2` (reads stack
-/// garbage). We say `<stdin>`.
+/// Slurp `path` or stdin. `path = None` → stdin.
 fn slurp(path: Option<&Path>) -> Result<Vec<u8>, CmdError> {
     let mut buf = Vec::new();
     match path {
@@ -120,22 +104,10 @@ fn slurp(path: Option<&Path>) -> Result<Vec<u8>, CmdError> {
 /// Build the signed message: `data || " " || name || " " || t`.
 /// **Leading space is load-bearing** — see module doc.
 ///
-/// C `tincctl.c:2832-2838`: `xasprintf(&trailer, " %s %ld", name, t)`
-/// then `xrealloc(data, len + trailer_len); memcpy(data + len,
-/// trailer, trailer_len)`. The xrealloc grows `data` in place; we
-/// can't do that (we'd need ownership games), so we build a fresh
-/// `Vec`. One extra alloc. The data we're signing is already
-/// in-memory whole (slurped); one more copy is noise.
-///
-/// `t` formatted with `%ld` — i.e., decimal, sign-allowed-but-time-is-
-/// positive, no padding. Our `{t}` does the same for `i64`.
-///
-/// The `name` here can be either *our* name (sign) or the *signer's*
-/// name from the header (verify reconstructs the same trailer). In
-/// both cases it's already validated (`get_my_name` runs `check_id`;
-/// `verify` runs `check_id(signer)` after sscanf). So no spaces in
-/// `name`, no ambiguity in the trailer parse — but again, nobody
-/// parses the trailer. It's signed-then-discarded.
+/// `t` formatted decimal, no padding. `name` is already validated
+/// (`get_my_name` runs `check_id`; `verify` runs `check_id(signer)`).
+/// No spaces in `name`, no ambiguity — but nobody parses the trailer
+/// anyway. It's signed-then-discarded.
 fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
     use std::fmt::Write as _;
     // Preallocate. `data.len()` for the body + `1 + name.len() + 1
@@ -154,24 +126,16 @@ fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
 
 /// `cmd_sign`. The header + body, written to `out`.
 ///
-/// `t` is the unix time to embed. Caller supplies `time(NULL)`; tests
-/// supply a fixed value. C `tincctl.c:2831`: `long t = time(NULL)`.
-/// We use `i64` — `long` is 64-bit on every Unix tinc targets (LP64),
-/// 32-bit on Windows (LLP64). `i64` is the safe bet for a unix
-/// timestamp (won't overflow until 292 billion years from now).
+/// `t` is the unix time to embed. Caller supplies the current time;
+/// tests supply a fixed value. `i64` — won't overflow until 292
+/// billion years from now.
 ///
 /// # Errors
 ///
 /// `BadInput` if `tinc.conf` missing or no `Name`. `Io` for the
 /// private key open or the input file open. **Not** for the signature
-/// itself — `ecdsa_sign` (the C) returns false only on alloc failure
-/// (`ed25519/sign.c` — the actual crypto can't fail), and our
-/// `SigningKey::sign` returns `[u8; 64]` directly.
+/// itself — `SigningKey::sign` returns `[u8; 64]` directly.
 pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Result<(), CmdError> {
-    // ─── Load name + private key
-    // C `tincctl.c:2776-2801`: `get_my_name(true)` then read PEM. The
-    // `true` is `verbose` — it controls whether `get_my_name` prints
-    // an error itself. Ours always returns the error (caller prints).
     let name = get_my_name(paths)?;
     let sk = keypair::read_private(&paths.ed25519_private())
         .map_err(|e| CmdError::BadInput(e.to_string()))?;
@@ -184,10 +148,6 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     // ─── Slurp input
     let data = slurp(input)?;
 
-    // ─── Build signed message + sign
-    // C `tincctl.c:2831-2847`. The `b64encode_tinc(sig, sig, 64)`
-    // (`:2849`) encodes in-place into a `char sig[87]` — the 87 is
-    // 86 b64 chars + NUL. Our encode returns a fresh `String`.
     let msg = signed_message(&data, &name, t);
     let sig_raw = sk.sign(&msg);
     let sig_b64 = b64::encode(&sig_raw);
@@ -198,11 +158,8 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     debug_assert_eq!(sig_b64.len(), SIG_B64_LEN);
 
     // ─── Emit
-    // C `tincctl.c:2852-2853`: `fprintf(stdout, "Signature = %s %ld
-    // %s\n", name, t, sig)` then `fwrite(data, len, 1, stdout)`.
-    //
     // The body is the *original* `data`, NOT `msg` (which has the
-    // trailer). `len` not `len + trailer_len`. Load-bearing.
+    // trailer). Load-bearing.
     let mut out = out;
     writeln!(out, "Signature = {name} {t} {sig_b64}").map_err(io_err("<stdout>"))?;
     out.write_all(&data).map_err(io_err("<stdout>"))?;
@@ -235,10 +192,9 @@ impl Signer {
     /// `.` and `tinc.conf` is missing/nameless (propagated from
     /// `get_my_name`).
     pub fn parse(arg: &str, paths: &Paths) -> Result<Self, CmdError> {
-        // C `tincctl.c:2872-2889`. The order is `.` then `*` then
-        // check_id. So `.` and `*` are NOT validated as names —
-        // they're metasyntax. (They'd fail `check_id` anyway: `.`
-        // and `*` aren't alnum-or-underscore.)
+        // `.` then `*` then check_id. `.` and `*` are NOT validated
+        // as names — they're metasyntax (and would fail `check_id`
+        // anyway: not alnum-or-underscore).
         match arg {
             "." => Ok(Signer::Named(get_my_name(paths)?)),
             "*" => Ok(Signer::Any),
@@ -246,7 +202,6 @@ impl Signer {
                 if check_id(name) {
                     Ok(Signer::Named(name.to_owned()))
                 } else {
-                    // C `:2888`: `fprintf(stderr, "Invalid node name\n")`.
                     Err(CmdError::BadInput("Invalid node name".into()))
                 }
             }
@@ -256,12 +211,9 @@ impl Signer {
 
 /// What `verify` discovers. The body (header-stripped input) and the
 /// signer's name (relevant when `Signer::Any` — caller might want to
-/// know *who* signed it, not just that *someone* did).
-///
-/// C doesn't return this — it just `fwrite`s the body to stdout
-/// (`tincctl.c:2993`). We return it so tests can assert on the body
-/// without capturing stdout. The binary wrapper writes `body` to
-/// stdout to match C.
+/// know *who* signed it). We return it so tests can assert on the
+/// body without capturing stdout. The binary wrapper writes `body`
+/// to stdout.
 #[derive(Debug)]
 pub struct Verified {
     /// The signer's name. For `Signer::Named(n)` this is just `n`.
@@ -277,16 +229,14 @@ pub struct Verified {
 /// # Errors
 ///
 /// `BadInput("Invalid input")` for any header parse failure (no
-/// newline, header too long, sscanf shape mismatch, sig length wrong,
-/// `t == 0`, signer fails `check_id`). C bundles all these into one
-/// message (`tincctl.c:2918`, `:2930`). We do too.
+/// newline, header too long, shape mismatch, sig length wrong,
+/// `t == 0`, signer fails `check_id`). All bundled into one message.
 ///
 /// `BadInput("Signature is not made by NAME")` if `Signer::Named` and
-/// the header's signer doesn't match. C `tincctl.c:2936`.
+/// the header's signer doesn't match.
 ///
 /// `BadInput("Invalid signature")` if the crypto fails. Covers both
-/// b64-decode failure and Ed25519 verify failure — C lumps them
-/// (`tincctl.c:2984`: `b64decode_tinc(...) != 64 || !ecdsa_verify`).
+/// b64-decode failure and Ed25519 verify failure.
 ///
 /// `Io` for host-file open failure.
 ///
@@ -296,10 +246,7 @@ pub struct Verified {
 /// wrong.)
 pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verified, CmdError> {
     // ─── Find the header line
-    // C `tincctl.c:2916-2924`: `memchr(data, '\n', len)`. If no
-    // newline, OR header longer than `MAX_STRING_SIZE - 1`, fail. The
-    // C then `*newline++ = '\0'` to NUL-terminate for `sscanf`; we
-    // slice instead.
+    // No newline, or header too long → fail.
     let nl = blob
         .iter()
         .position(|&b| b == b'\n')
@@ -313,35 +260,11 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     let body = &blob[nl + 1..];
 
     // ─── Parse header
-    // C `tincctl.c:2930`: `sscanf(data, "Signature = %s %ld %s",
-    // signer, &t, sig) != 3 || strlen(sig) != 86 || !t || !check_id`.
-    //
-    // `%s` skips leading whitespace, reads non-whitespace. So the
-    // sscanf accepts `Signature = alice  123  xyz` (extra spaces).
-    // The format string's literal spaces also match any whitespace
-    // (sscanf's space matches `[ \t\n]*`). And the literal `=` must
-    // match exactly. So:
-    //
-    //   Signature = alice 123 xyz   → parses
-    //   Signature=alice 123 xyz     → FAILS (no space before =? no:
-    //                                  the format's "Signature " needs
-    //                                  the space-then-= to match. wait.)
-    //
-    // Actually: sscanf format-string whitespace matches *zero or more*
-    // input whitespace. So `"Signature = "` matches `Signature=` (the
-    // space-before-= matches zero chars, the `=` matches `=`, the
-    // space-after matches zero). Ugh. sscanf is permissive.
-    //
-    // We could replicate that exactly (zero-or-more whitespace at each
-    // format-string-space), but sign always emits the canonical form
-    // (`tincctl.c:2852`: `"Signature = %s %ld %s\n"` — single spaces).
-    // The only way to get a non-canonical header is hand-editing.
-    // We accept the canonical form; deviation noted. If a user reports
-    // "verify rejects my hand-edited header" the answer is "don't".
-    //
-    // Practically: split on single spaces, expect exactly 5 fields:
-    // `["Signature", "=", name, t, sig]`. Stricter than sscanf,
-    // matches sign's output exactly.
+    // Split on single spaces, expect exactly 5 fields:
+    // `["Signature", "=", name, t, sig]`. Stricter than upstream's
+    // sscanf (which accepts extra/missing whitespace), but sign
+    // always emits the canonical form. The only way to get a
+    // non-canonical header is hand-editing; the answer is "don't".
     let header =
         std::str::from_utf8(header).map_err(|_| CmdError::BadInput("Invalid input".into()))?;
     let mut fields = header.split(' ');
@@ -356,42 +279,33 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         return Err(CmdError::BadInput("Invalid input".into()));
     };
 
-    // `strlen(sig) != 86`. Do this before b64-decode — it's cheaper
-    // and catches truncation/garbage early.
+    // Do this before b64-decode — cheaper, catches truncation early.
     if sig_b64.len() != SIG_B64_LEN {
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // `%ld` → i64. `parse()` rejects trailing garbage (sscanf's `%ld`
-    // stops at the first non-digit, leaving garbage for the next `%`;
-    // here the next `%s` would consume it. Same outcome: non-digit
-    // after time is rejected, just at a different layer.)
+    // `parse()` rejects trailing garbage. Same outcome as upstream
+    // (non-digit after time is rejected), different layer.
     let t: i64 = t_str
         .parse()
         .map_err(|_| CmdError::BadInput("Invalid input".into()))?;
-    // `!t` — C rejects time zero. See module doc.
     if t == 0 {
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // `check_id(signer)`. Node names are alnum-or-underscore. A
-    // signer name with `/` or `..` would let `*` mode read
-    // `hosts/../../../etc/passwd`. The C check is here for the same
-    // reason — and we already trust check_id to reject those.
+    // Node names are alnum-or-underscore. A signer name with `/` or
+    // `..` would let `*` mode read `hosts/../../../etc/passwd`.
     if !check_id(signer_name) {
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
     // ─── Match signer
-    // C `tincctl.c:2935-2943`: `if(node && strcmp(node, signer))`
-    // (where `node = NULL` is the `*` case).
     let resolved_signer = match signer {
         Signer::Any => signer_name,
         Signer::Named(n) => {
             if n != signer_name {
-                // C `:2936`: `"Signature is not made by %s\n"`.
                 // Use `n` (what the user asked for) not `signer_name`
-                // (what the blob claims). C uses `node` = `n`.
+                // (what the blob claims).
                 return Err(CmdError::BadInput(format!("Signature is not made by {n}")));
             }
             signer_name
@@ -399,28 +313,24 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     };
 
     // ─── Load public key
-    // C `tincctl.c:2960-2982`: `fopen(hosts/NAME)`, `get_pubkey`,
-    // fall back to `ecdsa_read_pem_public_key` if `get_pubkey`
-    // returned NULL.
     let host_path = paths.host_file(resolved_signer);
     let pubkey = load_host_pubkey(&host_path)?;
 
     // ─── Decode sig + reconstruct trailer + verify
-    // C `tincctl.c:2984`: `b64decode_tinc(sig, sig, 86) != 64 ||
-    // !ecdsa_verify(...)`. Both failures map to "Invalid signature".
+    // Both b64-decode failure and Ed25519 verify failure map to
+    // "Invalid signature".
     let sig_raw =
         b64::decode(sig_b64).ok_or_else(|| CmdError::BadInput("Invalid signature".into()))?;
     let sig_raw: [u8; SIG_LEN] = sig_raw
         .try_into()
         .map_err(|_| CmdError::BadInput("Invalid signature".into()))?;
 
-    // Reconstruct the trailer. The C does the same xasprintf+memcpy
-    // dance as `sign` (`tincctl.c:2948-2954`), using the *header's*
-    // signer name and time — not anything the verifier knows
-    // independently. This is correct: the trailer is *inside* the
-    // signature, so if the header lies about name/time, the
-    // reconstructed trailer differs from what was signed, and verify
-    // fails. The signature *binds* the header fields.
+    // Reconstruct the trailer using the *header's* signer name and
+    // time — not anything the verifier knows independently. Correct:
+    // the trailer is *inside* the signature, so if the header lies
+    // about name/time, the reconstructed trailer differs from what
+    // was signed, and verify fails. The signature *binds* the header
+    // fields.
     let msg = signed_message(body, resolved_signer, t);
 
     verify(&pubkey, &msg, &sig_raw).map_err(|_| CmdError::BadInput("Invalid signature".into()))?;
@@ -447,24 +357,15 @@ pub fn verify_cmd(
 ) -> Result<(), CmdError> {
     let blob = slurp(input)?;
     let v = verify_blob(paths, signer, &blob)?;
-    // C `tincctl.c:2993`: `fwrite(newline, len - skip, 1, stdout)`.
-    // Body, byte-exact. Only on success — error paths return before
-    // here.
+    // Body, byte-exact. Only on success — error paths return before here.
     let mut out = out;
     out.write_all(&v.body).map_err(io_err("<stdout>"))?;
     Ok(())
 }
 
-/// `get_pubkey` (`tincctl.c:1647`) + the PEM fallback (`tincctl.c:
-/// 2972`). Read `hosts/NAME`, look for `Ed25519PublicKey = <b64>`,
-/// fall back to a `-----BEGIN ED25519 PUBLIC KEY-----` PEM block.
-///
-/// The C fallback does `fseek(fp, 0, SEEK_SET)` then re-reads the
-/// same `FILE*`. We re-read from the path. Same I/O count (one extra
-/// open, but the kernel cached the inode), simpler code.
-///
-/// `tinc-conf::parse_file` replaces the strcspn/strspn tokenizer (the
-/// fourth — see module doc).
+/// Read `hosts/NAME`, look for `Ed25519PublicKey = <b64>`, fall back
+/// to a `-----BEGIN ED25519 PUBLIC KEY-----` PEM block. We re-read
+/// from the path for the fallback (kernel cached the inode).
 fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
     // ─── Try config-line form
     // `parse_file` errors on file-not-found. That's the right error
@@ -481,9 +382,6 @@ fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
     cfg.merge(entries);
 
     if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
-        // `ecdsa_set_base64_public_key` (`ed25519/ecdsa.c:59`) does
-        // the b64 decode + 32-byte check. Our `b64::decode` returns
-        // `Option<Vec<u8>>`; we check the length here.
         let raw = b64::decode(&entry.value).ok_or_else(|| {
             CmdError::BadInput(format!(
                 "Could not read public key from {}",
@@ -504,10 +402,8 @@ fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
     // It errors `LoadError::Pem(NotFound)` if there's no PEM block.
     // That's our "neither form found" terminal error.
     keypair::read_public(host_path).map_err(|_| {
-        // Don't expose `LoadError` details — C just says "Could not
-        // read public key from PATH" (`tincctl.c:2978`). The user
-        // doesn't need to know whether parse_file or read_pem failed;
-        // the actionable info is "this host file has no pubkey".
+        // Don't expose `LoadError` details — the actionable info is
+        // "this host file has no pubkey".
         CmdError::BadInput(format!(
             "Could not read public key from {}",
             host_path.display()
@@ -615,8 +511,8 @@ mod tests {
         sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
         // We don't have `hosts/bob`, but the signer-mismatch check
-        // runs *before* the pubkey load (`tincctl.c:2935` is before
-        // `:2960`). So we hit the mismatch error, not "no host file".
+        // runs *before* the pubkey load. So we hit the mismatch
+        // error, not "no host file".
         let err = verify_blob(&paths, &Signer::Named("bob".into()), &signed).unwrap_err();
         let CmdError::BadInput(msg) = err else {
             panic!("wrong variant")
@@ -916,23 +812,22 @@ mod tests {
         assert_eq!(v.body, data);
     }
 
-    /// **Golden vector from the C test suite.** `test/integration/
-    /// cmd_sign_verify.py` has a blob produced by C `cmd_sign` (fixed
-    /// key, fixed time `1653397516`). If Rust `verify_blob` accepts
-    /// it, the format is byte-compatible. This is the cross-impl test
-    /// that doesn't need a C binary — the artifact IS the test.
+    /// **Golden vector from upstream's test suite.** `test/integration/
+    /// cmd_sign_verify.py` has a blob produced with a fixed key and
+    /// fixed time `1653397516`. If `verify_blob` accepts it, the
+    /// format is byte-compatible. The artifact IS the test — no
+    /// upstream binary needed.
     ///
     /// This proves, simultaneously:
     /// - The trailer format (` foo 1653397516`, leading space) matches
-    /// - The header sscanf parse matches (we accept what C emits)
+    /// - The header parse accepts what upstream emits
     /// - tinc-b64 encoding matches (sig decodes to 64 bytes)
     /// - The Ed25519 verify matches (`tinc-crypto::sign::verify`)
-    /// - `load_host_pubkey` parses the C-written `Ed25519PublicKey =`
-    ///   line (same b64, same alphabet)
+    /// - `load_host_pubkey` parses the `Ed25519PublicKey =` line
     ///
     /// If any one of those is wrong, this test fails.
     #[test]
-    fn golden_c_vector() {
+    fn golden_upstream_vector() {
         // Transcribed from `test/integration/cmd_sign_verify.py:12-29`.
         // The PEM has leading/trailing newlines in the Python (it's a
         // triple-quoted string starting with `\n`); read_pem skips
@@ -977,9 +872,9 @@ hello there\n";
             ..Default::default()
         });
 
-        // ─── Verify the C-signed blob
-        // The Python tests `.` and `foo` and `*` (line 78-83). We do
-        // all three. If ANY of them fails, format compat is broken.
+        // ─── Verify the upstream-signed blob
+        // The Python tests `.` and `foo` and `*`. We do all three.
+        // If ANY of them fails, format compat is broken.
         for signer in [
             Signer::Named("foo".into()),
             Signer::Any,
@@ -993,20 +888,17 @@ hello there\n";
         }
 
         // ─── Re-sign and confirm round-trip
-        // We can't compare our signed output to SIGNED directly —
-        // Ed25519 is deterministic given the key+message, so actually
-        // we CAN. The signature is a pure function of (private key,
-        // message). Same key, same body, same time, same trailer →
-        // same sig. Prove it.
+        // Ed25519 is deterministic given key+message. Same key, same
+        // body, same time, same trailer → same sig. Prove it.
         let body_file = dir.path().join("body");
         fs::write(&body_file, BODY).unwrap();
         let mut resigned = Vec::new();
         sign(&paths, Some(&body_file), 1_653_397_516, &mut resigned).unwrap();
 
-        // **Byte-identical to the C output.** This is the strongest
-        // possible compat statement: not just "our verify accepts C's
-        // sign", but "our sign IS C's sign".
-        assert_eq!(resigned, SIGNED, "Rust sign output != C sign output");
+        // **Byte-identical to upstream's output.** This is the
+        // strongest possible compat statement: not just "our verify
+        // accepts upstream's sign", but "our sign IS upstream's sign".
+        assert_eq!(resigned, SIGNED, "Rust sign output != upstream sign output");
     }
 
     /// Empty body. Degenerate but valid — you can sign nothing.

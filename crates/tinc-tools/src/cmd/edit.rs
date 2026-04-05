@@ -1,9 +1,7 @@
 //! `tinc edit FILE` — spawn `$VISUAL`/`$EDITOR`/`vi` on a config
 //! file, then silently signal the daemon to reload.
 //!
-//! C: `tincctl.c:2399-2472`.
-//!
-//! ## The path-resolution lattice (`tincctl.c:2418-2440`)
+//! ## The path-resolution lattice
 //!
 //! `cmd_edit`'s input is a SHORTHAND, not a path — the point is
 //! `tinc edit tinc.conf` instead of `vi /etc/tinc/foo/tinc.conf`.
@@ -11,18 +9,17 @@
 //! ```text
 //!   conffiles[] = {"tinc.conf", "tinc-up", ..., NULL};
 //!
-//!   if (input doesn't start with "hosts/"):     ← :2418 strncmp
-//!     for f in conffiles:                       ← :2419-2424
+//!   if (input doesn't start with "hosts/"):
+//!     for f in conffiles:
 //!       if input == f: filename = confbase/f
-//!   else:                                       ← :2425-2427
-//!     input += 6                                  (strip "hosts/")
+//!   else:
+//!     input += 6  (strip "hosts/")
 //!
-//!   if filename still empty:                    ← :2429 *filename
-//!     filename = hosts_dir/input                ← :2430
-//!     if input contains '-':                    ← :2431-2440
+//!   if filename still empty:
+//!     filename = hosts_dir/input
+//!     if input contains '-':
 //!       split at first '-'
-//!       require suffix ∈ {"up","down"}
-//!         AND check_id(prefix)
+//!       require suffix ∈ {"up","down"} AND check_id(prefix)
 //! ```
 //!
 //! Four cases:
@@ -35,37 +32,26 @@
 //! | `"alice-up"`     | `hosts_dir/alice-up`   | suffix + check_id       |
 //!
 //! The "NONE" cases let `tinc edit ../../etc/passwd` resolve to
-//! `hosts_dir/../../etc/passwd`. We add two checks the C lacks:
+//! `hosts_dir/../../etc/passwd`. We add two checks upstream lacks:
 //! reject `/` anywhere in the input (after the `hosts/` strip), and
 //! reject `..` as a path component. Neither changes valid inputs.
 //!
 //! ## system() vs Command — shell-injection FIXED
 //!
-//! C `tincctl.c:2455` builds `"$EDITOR" "$FILENAME"` and passes it
-//! to `system()` — the double-quote escaping is wrong for `"`/`$`
-//! in either expansion. We match git (`editor.c` in git.git): spawn
-//! `sh -c 'exec $TINC_EDITOR "$@"' -- "$file"`. The shell tokenizes
-//! `$TINC_EDITOR` (so `EDITOR="emacsclient -nw"` works), but `$file`
-//! is `$@` so it's NOT re-expanded (filenames with `$` stay literal).
+//! Upstream builds `"$EDITOR" "$FILENAME"` and passes to `system()`
+//! — the double-quote escaping is wrong for `"`/`$`. We match git
+//! (`editor.c` in git.git): spawn `sh -c 'exec $TINC_EDITOR "$@"' --
+//! "$file"`. The shell tokenizes `$TINC_EDITOR` (so `EDITOR=
+//! "emacsclient -nw"` works), but `$file` is `$@` so it's NOT
+//! re-expanded (filenames with `$` stay literal).
 //!
 //! ## The silent reload — best-effort
 //!
-//! `tincctl.c:2465-2467`:
-//!
-//! ```text
-//!   if(connect_tincd(false)) {        ← false = don't print error
-//!     sendline(fd, "%d %d", CONTROL, REQ_RELOAD);
-//!   }
-//! ```
-//!
-//! No `recvline`. No status check. Fire-and-forget. If the daemon
-//! isn't running, silently nothing happens (and that's fine — the
-//! edit was the point). If the daemon IS running, it reloads.
-//!
-//! We do the same. `CtlSocket::connect()` → `Err` is swallowed.
-//! `send(Reload)` → don't even `recv_ack`. The daemon's `reload_
-//! configuration` runs asynchronously; we'd be gone by the time
-//! it finishes anyway.
+//! Fire-and-forget. If the daemon isn't running, silently nothing
+//! happens (and that's fine — the edit was the point). If the daemon
+//! IS running, it reloads. `CtlSocket::connect()` → `Err` is
+//! swallowed. `send(Reload)` → don't even `recv_ack`. The daemon's
+//! reload runs asynchronously; we'd be gone by the time it finishes.
 
 #![allow(clippy::doc_markdown)]
 
@@ -80,20 +66,15 @@ use super::CmdError;
 
 // conffiles[] — the "edit a top-level config file" shortlist
 
-/// `tincctl.c:2399-2408`. The files that live DIRECTLY in `confbase`
-/// (not under `hosts/`). `tinc edit tinc.conf` resolves to `confbase/
-/// tinc.conf`; `tinc edit alice` resolves to `confbase/hosts/alice`.
-/// This list is the discriminator.
+/// The files that live DIRECTLY in `confbase` (not under `hosts/`).
+/// `tinc edit tinc.conf` resolves to `confbase/tinc.conf`; `tinc edit
+/// alice` resolves to `confbase/hosts/alice`. This list is the
+/// discriminator.
 ///
-/// Order preserved from C (sed-verifiable). Doesn't matter for
-/// correctness (we check membership, not first-match) but matching
-/// the C makes the diff trivially auditable.
-///
-/// `tinc-up`/`tinc-down`: the network up/down hook scripts. `subnet-
-/// up`/`subnet-down`/`host-up`/`host-down`: per-event hooks. All in
+/// `tinc-up`/`tinc-down`: network up/down hook scripts. `subnet-up`/
+/// `subnet-down`/`host-up`/`host-down`: per-event hooks. All in
 /// `confbase`, not `hosts/`. The DASH in `tinc-up` is why the
-/// `conffiles` check happens BEFORE the dash-split (`tincctl.c:2418`
-/// checks list FIRST; only if not found does it dash-split).
+/// `conffiles` check happens BEFORE the dash-split.
 const CONFFILES: &[&str] = &[
     "tinc.conf",
     "tinc-up",
@@ -106,22 +87,17 @@ const CONFFILES: &[&str] = &[
 
 // Path resolution — the lattice
 
-/// What `cmd_edit` resolved an input to. The PATH plus whether
-/// we should mkdir-p the parent (host files: yes, the `hosts/` dir
-/// might not exist for a fresh `tinc init`; conffiles: confbase
-/// already exists).
-///
-/// C `cmd_edit` never mkdir-p's. We don't either: `hosts/` mkdir
-/// is `tinc init`'s job. If `hosts/` doesn't exist the editor
-/// errors on save — same as C, one less thing to test.
+/// What `cmd_edit` resolved an input to. We never mkdir-p —
+/// `hosts/` mkdir is `tinc init`'s job. If `hosts/` doesn't exist
+/// the editor errors on save.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// Full path. The caller spawns `$EDITOR` on this.
     pub(crate) path: PathBuf,
 }
 
-/// `tincctl.c:2418-2440` — the resolution lattice. Separate from
-/// `run()` so it's unit-testable WITHOUT spawning an editor.
+/// The resolution lattice. Separate from `run()` so it's unit-
+/// testable WITHOUT spawning an editor.
 ///
 /// `input`: the user's shorthand. `"tinc.conf"`, `"hosts/alice"`,
 /// `"alice"`, `"alice-up"`. NOT a path.
@@ -132,110 +108,71 @@ pub(crate) struct Resolved {
 /// for our STRICTER checks (`/`, `..`).
 ///
 /// # Errors
-/// `BadInput("Invalid configuration filename.")` — matches the C's
-/// stderr message (`tincctl.c:2438`) plus our extra rejects.
+/// `BadInput("Invalid configuration filename.")` — matches
+/// upstream's stderr message plus our extra rejects.
 pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> {
     let bad = || CmdError::BadInput("Invalid configuration filename.".into());
 
     // ─── Step 1: strip "hosts/" prefix if present
-    // `tincctl.c:2418`: `if(strncmp(argv[1], "hosts" SLASH, 6))`.
-    // The `strncmp != 0` means "DOESN'T start with" — so the
-    // conffiles check runs when there's NO prefix, and the strip
-    // runs when there IS. Somewhat backwards-reading C.
-    //
     // After strip, `"hosts/alice"` and `"alice"` are equivalent.
-    // The C does this by `argv[1] += 6` (mutate the input pointer);
-    // we do it by re-binding `input`.
-    //
-    // `"hosts/"` literal (6 chars). The C uses `SLASH` macro for
-    // Windows backslash; we're Unix-only, hardcode `/`.
+    // We're Unix-only; hardcode `/`.
     let (input, stripped) = match input.strip_prefix("hosts/") {
         Some(rest) => (rest, true),
         None => (input, false),
     };
 
-    // ─── Step 2 (NOT in C): reject path-traversal
+    // ─── Step 2 (NOT upstream): reject path-traversal
     // `/` in the (post-strip) input means they're trying to reach
-    // outside `hosts_dir`. `..` likewise. The C doesn't check;
+    // outside `hosts_dir`. `..` likewise. Upstream doesn't check;
     // `tinc edit ../../etc/passwd` works there. We reject.
     //
     // The `/` check subsumes most `..` cases (`../foo` has both)
     // but `..` alone (`tinc edit hosts/..`) would be `hosts_dir/..`
-    // = `confbase` — harmless, but the user clearly didn't mean
-    // it. Reject both.
-    //
-    // Empty string: `tinc edit ""` → would be `hosts_dir/` (the dir
-    // itself). Reject. The C doesn't check; vi-on-a-directory
-    // works but is confusing. Our `is_empty` catches it.
+    // = `confbase` — harmless, but unintended. Reject both. Empty
+    // string → `hosts_dir/` itself; reject.
     if input.is_empty() || input.contains('/') || input == ".." {
         return Err(bad());
     }
 
     // ─── Step 3: conffiles check (skipped if we stripped)
-    // `tincctl.c:2419-2424`: only inside the `!strncmp` branch.
-    // If the user said `"hosts/tinc.conf"` they MEANT the host
-    // file named `tinc.conf` (weird but valid: a node named
-    // `tinc.conf` would need a host config file). The strip
-    // happened first; we don't conffiles-check the stripped name.
+    // If the user said `"hosts/tinc.conf"` they MEANT the host file
+    // named `tinc.conf`. The strip happened first; we don't
+    // conffiles-check the stripped name.
     //
-    // `"tinc.conf"` (no prefix) → conffiles match → `confbase/
-    // tinc.conf`. `"hosts/tinc.conf"` (prefix) → strip →
-    // `"tinc.conf"` → SKIP conffiles check → `hosts_dir/
-    // tinc.conf`. Different files. The C does this by the branch
-    // structure (conffiles loop is inside the `!prefix` arm).
+    // `"tinc.conf"` → conffiles match → `confbase/tinc.conf`.
+    // `"hosts/tinc.conf"` → strip → SKIP conffiles →
+    // `hosts_dir/tinc.conf`. Different files.
     if !stripped && let Some(&conf) = CONFFILES.iter().find(|&&f| f == input) {
-        // `tincctl.c:2422`: `confbase SLASH argv[1]`.
         return Ok(Resolved {
             path: paths.confbase.join(conf),
         });
     }
 
     // ─── Step 4: it's a host file — validate the dash form
-    // `tincctl.c:2429-2440`. The path is `hosts_dir/input`
-    // UNCONDITIONALLY (the snprintf at :2430 happens before the
-    // dash check). The dash check only VALIDATES; it doesn't
-    // change the path.
-    //
-    // `strchr(argv[1], '-')`: first dash. If found, split there.
-    // `dash++` after `*dash = 0`: classic C "split string in
-    // place, advance past the separator." The PREFIX is `argv[1]`
-    // (now NUL-terminated at the dash); the SUFFIX is `dash`.
-    //
-    // The check (`tincctl.c:2437`): suffix is "up" or "down" AND
-    // prefix is a valid node name. Otherwise error.
+    // The path is `hosts_dir/input` UNCONDITIONALLY. The dash check
+    // only VALIDATES; it doesn't change the path.
     //
     // No dash → no validation. `"alice"` is fine. `"192.168.1.1"`
-    // is also fine (not a valid node name, but the C doesn't
-    // check_id the no-dash case). The user gets vi on `hosts_dir/
-    // 192.168.1.1`; if they save it the daemon will choke later.
-    // Not our problem (and STRICTER would break valid names that
-    // happen to look weird).
+    // is also fine (not a valid node name, but the no-dash case
+    // isn't check_id'd). Not our problem.
     //
     // Why the dash case IS validated: `alice-up`/`alice-down` are
-    // host scripts (`tinc-up` analogues but per-host). They
-    // EXECUTE. The check_id is "is this even a node?" — vi'ing
-    // `hosts/garbage-up` and having it execute would be bad.
-    // (`tinc-up` itself never reaches here — step 3 caught it.)
+    // host scripts. They EXECUTE. The check_id is "is this even a
+    // node?" — vi'ing `hosts/garbage-up` and having it execute
+    // would be bad. (`tinc-up` never reaches here — step 3 caught
+    // it.)
     //
-    // First-dash split aligns with check_id's charset: `-` isn't
-    // a legal name char (`tincctl.c:108`: `isalnum || c == '_'`),
-    // so `a-b-up` → `("a", "b-up")` → suffix ≠ `up` → error,
-    // which is correct since `a-b` was never a valid name.
-    if let Some((name, suffix)) = input.split_once('-') {
-        // `tincctl.c:2437`: `(strcmp(dash, "up") && strcmp(dash,
-        // "down"))` — both nonzero means neither matches. C boolean
-        // logic via strcmp. The OR with `!check_id` is the second
-        // check. De Morgan: `!(suffix∈{up,down} && check_id)`.
-        if !((suffix == "up" || suffix == "down") && check_id(name)) {
-            return Err(bad());
-        }
+    // First-dash split aligns with check_id's charset: `-` isn't a
+    // legal name char, so `a-b-up` → `("a", "b-up")` → suffix ≠
+    // `up` → error, correct since `a-b` was never a valid name.
+    if let Some((name, suffix)) = input.split_once('-')
+        && !((suffix == "up" || suffix == "down") && check_id(name))
+    {
+        return Err(bad());
     }
-    // No dash → `if let` doesn't enter → no validation. Matches
-    // the C `if(dash)` skip.
 
-    // `tincctl.c:2430`: `hosts_dir SLASH argv[1]`. The full input
-    // (with dash, if any), NOT the split `name`. The path is
-    // `hosts/alice-up`; the split was only for VALIDATION.
+    // The full input (with dash, if any), NOT the split `name`.
+    // The path is `hosts/alice-up`; the split was only for VALIDATION.
     Ok(Resolved {
         path: paths.hosts_dir().join(input),
     })
@@ -243,36 +180,22 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
 
 // Editor spawn — sh -c, the git way
 
-/// Pick the editor. `tincctl.c:2444-2453` (Unix branch):
-///
-/// ```text
-///   const char *editor = getenv("VISUAL");
-///   if(!editor) editor = getenv("EDITOR");
-///   if(!editor) editor = "vi";
-/// ```
-///
-/// `VISUAL` first (the convention: `VISUAL` for full-screen editors,
-/// `EDITOR` for line editors; in 2026 they're synonymous). `vi` as
-/// last resort (POSIX says it's always there).
+/// Pick the editor: `$VISUAL` → `$EDITOR` → `vi`. POSIX says `vi`
+/// is always there.
 ///
 /// Returns `OsString` not `String` — env vars are bytes on Unix,
 /// `EDITOR=/weird/path/émacs` is fine. `var_os` not `var`.
 fn pick_editor() -> OsString {
-    // The C `getenv` returns NULL for unset; `var_os` returns None.
-    // EMPTY (`EDITOR=`) is "set" — `getenv` returns `""`, the C
-    // would `xasprintf("\"\" \"%s\"", ...)` and `system` would try
-    // to run `""`. Broken. Our `var_os` returns `Some("")`;
-    // `Command::new("")` will fail too. Same brokenness, ported.
-    //
-    // (Could check empty-and-fall-through, but that's a behavior
-    // change. The user who sets `EDITOR=` deserves the error.)
+    // EMPTY (`EDITOR=`) is "set" — `var_os` returns `Some("")`;
+    // `Command::new("")` will fail. The user who sets `EDITOR=`
+    // deserves the error.
     std::env::var_os("VISUAL")
         .or_else(|| std::env::var_os("EDITOR"))
         .unwrap_or_else(|| OsString::from("vi"))
 }
 
-/// Spawn the editor. `tincctl.c:2455-2458`, but via `sh -c` for
-/// shell-tokenized `$EDITOR` WITHOUT shell-expanding the filename.
+/// Spawn the editor via `sh -c` for shell-tokenized `$EDITOR`
+/// WITHOUT shell-expanding the filename.
 ///
 /// The construction:
 ///
@@ -305,12 +228,10 @@ fn pick_editor() -> OsString {
 /// receives bytes; `$TINC_EDITOR` expands to those bytes. UTF-8
 /// or not, the shell doesn't care.
 ///
-/// Returns the editor's exit status. `tincctl.c:2461`: `if(result)`
-/// — nonzero = failure. The caller maps to error.
+/// Returns the editor's exit status; nonzero = failure.
 ///
 /// Why `tinc-edit` for `$0`: it shows up in `ps` and in the
-/// shell's error messages (`tinc-edit: line 1: foo: command not
-/// found`). Better than `sh` or `--`.
+/// shell's error messages. Better than `sh` or `--`.
 ///
 /// # Errors
 /// `Command::status()` I/O. `sh` not found (would be a VERY broken
@@ -329,8 +250,7 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
     Command::new("sh")
         .arg("-c")
         .arg(SCRIPT)
-        // `$0` for the script. Shows in error messages. The C
-        // `system()` would show `sh` here; ours is more useful.
+        // `$0` for the script. Shows in error messages.
         .arg("tinc-edit")
         // `$1` = the file. `"$@"` quotes it; `$` `*` `"` etc in
         // the path stay literal.
@@ -345,7 +265,7 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
 
 // CLI entry
 
-/// `tinc edit FILE`. `tincctl.c:2410-2472`.
+/// `tinc edit FILE`.
 ///
 /// Resolve the shorthand → spawn editor → wait → silent reload.
 ///
@@ -354,15 +274,10 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
 /// table — the reload is OPTIONAL, the edit isn't blocked on a
 /// running daemon.
 ///
-/// Actually `needs_daemon` in the binary controls whether `Paths`
-/// gets the pidfile resolved. If `false`, `paths.pidfile()` might
-/// not be set, and `CtlSocket::connect` would fail on a missing
-/// pidfile. The C `tincctl.c:3034`: `{"edit", cmd_edit, false}`.
-/// `false` means "doesn't need a connection BEFORE running" — but
-/// `cmd_edit` still calls `connect_tincd(false)` AFTER. Our
-/// `needs_daemon: true` is the lie that makes `Paths` resolve the
-/// pidfile path, even though we might not use it. Same as `top`
-/// and `log`. Set `true` in the binary.
+/// `needs_daemon` in the binary controls whether `Paths` gets the
+/// pidfile resolved. We set `true` so `CtlSocket::connect` has a
+/// path to try, even though we might not use it. Same as `top` and
+/// `log`.
 ///
 /// # Errors
 /// `BadInput("Invalid configuration filename.")` for unresolvable
@@ -370,8 +285,8 @@ fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::proce
 /// `sh` spawn failing (rare).
 ///
 /// The reload is BEST-EFFORT — never errors. Daemon down? Fine.
-/// Reload failed daemon-side? Also fine (the C doesn't even
-/// `recvline` the ack). The edit happened; that's success.
+/// Reload failed daemon-side? Also fine. The edit happened; that's
+/// success.
 #[cfg(unix)]
 pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
     // ─── Resolve
@@ -393,18 +308,10 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
         }
     })?;
 
-    // `tincctl.c:2461`: `if(result) return result`. Nonzero exit
-    // = failure. The C returns the raw `system()` result (which is
-    // the wait-status, NOT the exit code — `WEXITSTATUS` would be
-    // needed; the C doesn't do that, so `tinc edit` returning 256
-    // for editor-exit-1 is a C bug). We use `status.success()`,
-    // which IS exit-code-aware. Our error message includes the
-    // status; the C just propagates the int.
-    //
-    // SIGINT in the editor: `status.success()` is false (signal
-    // termination). The C's `result` is also nonzero (`system()`
-    // returns the wait-status, signal-terminated is nonzero).
-    // Same: edit-aborted, no reload.
+    // Nonzero exit = failure. `status.success()` is exit-code-aware
+    // (upstream returned the raw wait-status, which is a bug we
+    // don't replicate). SIGINT in the editor → also false →
+    // edit-aborted, no reload.
     if !status.success() {
         // `editor` is `OsString`. `to_string_lossy` for the error
         // message — non-UTF-8 EDITOR shows as replacement chars,
@@ -416,17 +323,9 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
     }
 
     // ─── Silent reload
-    // `tincctl.c:2465-2467`: `if(connect_tincd(false)) sendline(
-    // ..., REQ_RELOAD)`. The `false` is "don't fprintf stderr on
-    // connect failure." We swallow the Err. NO `recv_ack` — the C
-    // doesn't `recvline` either. Fire and forget.
-    //
-    // `if let Ok` not `match` — we don't CARE about Err. The
-    // daemon being down is a normal case (you edit, then start).
-    //
-    // `_ = ctl.send(...)` — we ALSO don't care about send failing.
-    // The C doesn't check `sendline`'s return either (`:2466`
-    // bare call). The socket might be half-dead; whatever.
+    // Swallow connect Err (daemon being down is a normal case). NO
+    // `recv_ack` — fire and forget. We also don't care about send
+    // failing; the socket might be half-dead, whatever.
     if let Ok(mut ctl) = CtlSocket::connect(paths) {
         let _ = ctl.send(CtlRequest::Reload);
         // No recv. We're about to exit; the socket closes; the
@@ -452,11 +351,8 @@ mod tests {
 
     // CONFFILES — sed-verified vs C
 
-    /// `tincctl.c:2399-2408`. sed-verifiable:
-    ///   sed -n '2400,2406p' src/tincctl.c | sed 's/.*"\(.*\)".*/\1/'
-    /// produces these seven strings in order.
     #[test]
-    fn conffiles_match_c() {
+    fn conffiles_list() {
         assert_eq!(
             CONFFILES,
             &[
@@ -473,9 +369,9 @@ mod tests {
 
     // resolve — the lattice
 
-    /// `resolve` Ok-path table. The lattice is `tincctl.c:2419-2440`:
-    /// conffiles check FIRST (`:2419`, returns early), then `hosts/`
-    /// strip (`:2425`), then dash-split for validation only (`:2431`).
+    /// `resolve` Ok-path table. The lattice: conffiles check FIRST
+    /// (returns early), then `hosts/` strip, then dash-split for
+    /// validation only.
     ///
     /// The `Dir` enum lets us check the resolved path against either
     /// `confbase` or `hosts_dir` without hardcoding the test confbase.
@@ -489,28 +385,25 @@ mod tests {
         #[rustfmt::skip]
         let cases: &[(&str, Dir, &str)] = &[
             //          (input,             dir,        joined)
-            // ─── conffile match → confbase/X. `tincctl.c:2422`. ───
+            // ─── conffile match → confbase/X ───
             ("tinc.conf",        Dir::Conf,  "tinc.conf"),
-            // ─── bare name (no dash) → hosts_dir/X. NO validation.
-            //     `tincctl.c:2430` without entering `if(dash)` (`:2433`). ───
+            // ─── bare name (no dash) → hosts_dir/X. NO validation. ───
             ("alice",            Dir::Hosts, "alice"),
-            // ─── `hosts/` prefix strip. `tincctl.c:2426`: `argv[1] += 6`. ───
+            // ─── `hosts/` prefix strip ───
             ("hosts/alice",      Dir::Hosts, "alice"),
             // ─── `hosts/tinc.conf` → hosts_dir/tinc.conf, NOT confbase.
-            //     THE non-obvious case. Strip happens FIRST (`:2425`);
-            //     conffiles check runs only WITHOUT the prefix. Pins branch order. ───
+            //     THE non-obvious case. Strip happens FIRST; conffiles check
+            //     runs only WITHOUT the prefix. Pins branch order. ───
             ("hosts/tinc.conf",  Dir::Hosts, "tinc.conf"),
-            // ─── dash-split for validation. `tincctl.c:2431-2440`.
-            //     Path keeps the dash; split is validation-only. ───
+            // ─── dash-split for validation. Path keeps the dash. ───
             ("alice-up",         Dir::Hosts, "alice-up"),
             ("alice-down",       Dir::Hosts, "alice-down"),
             // ─── `tinc-up` matches CONFFILES → confbase. NOT dash-split.
             //     Pins the order: conffiles BEFORE dash-split. Would otherwise
             //     split to ("tinc","up") — both valid → hosts_dir/tinc-up. WRONG. ───
             ("tinc-up",          Dir::Conf,  "tinc-up"),
-            // ─── `"."`: weird (vi hosts_dir/.) but C accepts (no dash, no slash).
-            //     NOT in our reject list. The `..` reject is the security one;
-            //     `.` is just odd. Port C behavior. ───
+            // ─── `"."`: weird (vi hosts_dir/.) but accepted (no dash, no slash).
+            //     The `..` reject is the security one; `.` is just odd. ───
             (".",                Dir::Hosts, "."),
         ];
         for (input, dir, joined) in cases {
@@ -528,36 +421,34 @@ mod tests {
         }
     }
 
-    /// `resolve` Err-path table. C `tincctl.c:2437` validation +
-    /// our STRICTER checks (slash/dotdot/empty rejection — not in C).
+    /// `resolve` Err-path table. Dash-split validation + our
+    /// STRICTER checks (slash/dotdot/empty — not in upstream).
     #[test]
     fn resolve_err() {
         let p = paths();
         for input in [
-            // ─── dash-split validation: `tincctl.c:2437` ───
-            // suffix isn't `up`/`down`. `strcmp(dash, "up") && strcmp(dash, "down")`.
+            // ─── dash-split validation ───
+            // suffix isn't `up`/`down`.
             "alice-garbage",
-            // suffix ok but `check_id("bad name")` fails (space). `|| !check_id(argv[1])`.
+            // suffix ok but `check_id("bad name")` fails (space).
             "bad name-up",
             // split at FIRST dash → name="", suffix="up". `check_id("")` fails.
-            // C: `argv[1]` becomes "" after `*dash = 0`.
             "-up",
             // split at FIRST dash → name="a", suffix="b-up". `"b-up"` ≠ `"up"`.
-            // C `strchr` finds FIRST dash; `strcmp(dash, "up")` compares WHOLE
-            // suffix including subsequent dashes. Same as `split_once`.
+            // `split_once` finds FIRST dash; suffix compared WHOLE.
             "a-b-up",
-            // ─── our STRICTER checks (not in C) ───
-            // slash anywhere (after `hosts/` strip). C would resolve
+            // ─── our STRICTER checks (not upstream) ───
+            // slash anywhere (after `hosts/` strip). Upstream resolves
             // `hosts_dir/a/b` (path traversal); we reject.
             "a/b",
             "../etc/passwd",
             // `hosts/../etc/passwd` strips to `../etc/passwd` → has slash.
-            // THE traversal case. C would `vi confbase/hosts/../etc/passwd`.
+            // THE traversal case.
             "hosts/../etc/passwd",
-            // `..` alone → hosts_dir/.. = confbase. C would `vi confbase` (a dir).
+            // `..` alone → hosts_dir/.. = confbase.
             "..",
             "hosts/..",
-            // empty → C would `vi hosts_dir/`. Our `is_empty` catches it.
+            // empty → hosts_dir/. Our `is_empty` catches it.
             "",
             // `hosts/` strips to "". Same rejection.
             "hosts/",

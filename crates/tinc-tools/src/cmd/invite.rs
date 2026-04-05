@@ -1,7 +1,5 @@
 //! `tinc invite NODENAME` — generate an invitation URL for a new node.
 //!
-//! C reference: `src/invitation.c:332-610` (`cmd_invite`).
-//!
 //! ## What an invitation is
 //!
 //! A self-contained capability token that lets a new node join the mesh
@@ -30,32 +28,26 @@
 //!   leak the cookie. The daemon recomputes the hash from the cookie
 //!   it receives.
 //!
-//! ## What we drop from the C
+//! ## What we drop from upstream
 //!
-//! - `connect_tincd(false)` name-uniqueness check (`invitation.c:366-389`):
-//!   best-effort in C, degrades to no-op when daemon's down. The
-//!   `hosts/NAME` exists check (kept) covers the disk case.
-//! - `connect_tincd(true)` reload (`invitation.c:480-484`): we always
-//!   print the "please restart" warning. `invite` is `needs_daemon:
-//!   false` (no `resolve_runtime()`), and daemon-side REQ_RELOAD is
-//!   chunk 8. **TODO(chunk-8)**: wire best-effort reload once both
-//!   land.
-//! - `get_my_hostname` HTTP probe (`invitation.c:140-203`): hand-crafted
-//!   `GET /host.cgi` to `tinc-vpn.org:80` to discover our IP. We require
-//!   `Address` to be set instead.
-//! - `get_my_hostname` tty prompt (`invitation.c:211-243`): same "no
-//!   prompts" deviation as init/genkey/fsck.
-//! - `execute_script("invitation-created")` (`invitation.c:598-604`):
-//!   user hook, C ignores return code. **TODO**: lifts to
-//!   `tinc-tools::script` with daemon's `execute_script`.
+//! - Daemon name-uniqueness check: best-effort upstream, degrades to
+//!   no-op when daemon's down. The `hosts/NAME` exists check (kept)
+//!   covers the disk case.
+//! - Daemon reload: we always print the "please restart" warning.
+//!   `invite` is `needs_daemon: false`. **TODO(chunk-8)**: wire
+//!   best-effort reload.
+//! - `get_my_hostname` HTTP probe: hand-crafted `GET /host.cgi` to
+//!   `tinc-vpn.org:80` to discover our IP. We require `Address` to be
+//!   set instead.
+//! - `get_my_hostname` tty prompt: same "no prompts" deviation as
+//!   init/genkey/fsck.
+//! - `execute_script("invitation-created")`: user hook. **TODO**:
+//!   lifts to `tinc-tools::script` with daemon's `execute_script`.
 //!
 //! ## What we tighten
 //!
-//! - Cookie zeroized on every exit path. C `memzero`s in some error
-//!   branches (`invitation.c:529, 545`) but not all (e.g. the
-//!   `append_host_config` failure path at `:594` leaks it via `cookie[]`
-//!   on the stack, though that's stack-reuse risk not heap-leak). We
-//!   wrap in `Zeroizing` so Drop handles it.
+//! - Cookie zeroized on every exit path. We wrap in `Zeroizing` so
+//!   Drop handles it.
 
 use std::fs;
 use std::io::Write;
@@ -74,19 +66,18 @@ use crate::names::{Paths, check_id};
 use super::exchange::get_my_name;
 use super::{CmdError, io_err, makedir};
 
-/// Invitation expiry: one week. `invitation.c:406`: `time(NULL) - 604800`.
+/// Invitation expiry: one week (604800s).
 ///
-/// Hardcoded in C; the `InvitationExpire` config var (`conf.c`) is
-/// daemon-side — it controls how long the *daemon* honors an invitation,
-/// not how long `cmd_invite`'s sweep keeps the file. They're the same
-/// default (604800) but checked independently. We match the C constant.
+/// The `InvitationExpire` config var is daemon-side — it controls how
+/// long the *daemon* honors an invitation, not how long `cmd_invite`'s
+/// sweep keeps the file. Same default but checked independently.
 pub(crate) const EXPIRY: Duration = Duration::from_secs(604_800);
 
-/// `#` + 63 dashes + `#` = 65 chars. Same string as `cmd::exchange::SEPARATOR`
-/// but the modules are independent — re-declared, same compile-time check.
-/// `invitation.c:586`: hardcoded inline. The invitation file format reuses
-/// the export/import separator because `finalize_join` is essentially a
-/// special-cased `import`.
+/// `#` + 63 dashes + `#` = 65 chars. Same string as
+/// `cmd::exchange::SEPARATOR` but the modules are independent —
+/// re-declared. The invitation file format reuses the export/import
+/// separator because `finalize_join` is essentially a special-cased
+/// `import`.
 pub(crate) const SEPARATOR: &str =
     "#---------------------------------------------------------------#";
 const _: () = assert!(SEPARATOR.len() == 65);
@@ -108,17 +99,14 @@ pub struct InviteResult {
     pub key_is_new: bool,
 }
 
-/// `tinc invite NODENAME`. `invitation.c:332`.
+/// `tinc invite NODENAME`.
 ///
-/// `now` is parameterized for tests; production passes `SystemTime::now()`.
-/// (Same pattern as `cmd::sign`, where `t` is parameterized for the same
-/// reason: golden vectors need deterministic time.)
+/// `now` is parameterized for tests; production passes
+/// `SystemTime::now()`. Same pattern as `cmd::sign`.
 ///
 /// `netname` threads through to the invitation file's `NetName =` line;
-/// `Paths` doesn't carry it (it only carries the *resolved* confbase),
-/// and the binary still has the original. `None` = no `NetName` line,
-/// matching C's `if(check_netname(netname, true)) fprintf(...)` which
-/// also skips when netname is unset.
+/// `Paths` doesn't carry it (only the *resolved* confbase). `None` =
+/// no `NetName` line.
 ///
 /// # Errors
 /// - `BadInput`: invalid node name, name collision with existing host,
@@ -129,35 +117,24 @@ pub struct InviteResult {
 /// # Panics
 /// Only via `OsRng::fill_bytes` if the OS entropy source is broken.
 /// Same panic contract as `keypair::generate`.
-#[allow(
-    // The function is long because the C cmd_invite is long — it's a
-    // sequence of distinct steps (validate, mkdir, sweep, key,
-    // hash, file, url) that share no control flow but share local
-    // state (paths, key, cookie). Splitting into helpers would mean
-    // either threading 6 args through each one or building a struct
-    // for one-shot use. The C is 280 lines for a reason.
-    clippy::too_many_lines,
-)]
+// Sequence of distinct steps (validate, mkdir, sweep, key, hash, file,
+// url) sharing local state. Splitting would mean threading 6 args.
+#[allow(clippy::too_many_lines)]
 pub fn invite(
     paths: &Paths,
     netname: Option<&str>,
     invitee: &str,
     now: SystemTime,
 ) -> Result<InviteResult, CmdError> {
-    // ─── Validate name
-    // C `invitation.c:344`: `if(!check_id(argv[1]))`.
     if !check_id(invitee) {
         return Err(CmdError::BadInput(format!(
             "Invalid name for node: {invitee}"
         )));
     }
 
-    // C `invitation.c:349`: `myname = get_my_name(true);`. Reads
-    // `Name` from tinc.conf. We need it for the `ConnectTo` line and
-    // the host config dump.
+    // Needed for the `ConnectTo` line and the host config dump.
     let myname = get_my_name(paths)?;
 
-    // C `invitation.c:358-363`: `if(!access(hosts/NAME, F_OK)) bail`.
     // `hosts/alice` exists → alice is already known. Can't invite.
     let host_file = paths.host_file(invitee);
     if host_file.exists() {
@@ -166,76 +143,54 @@ pub fn invite(
         )));
     }
 
-    // C `invitation.c:366-389`: connect_tincd name-uniqueness check.
-    // Dropped — see module doc. The hosts/ check above covers disk.
-
     // ─── Get our address (for the URL host part)
-    // C `invitation.c:541`: `get_my_hostname(&address, &port)`.
-    // Done early so failure happens BEFORE we create files. The C
-    // does it late (after the invitation file is already opened),
-    // which means a no-Address failure leaves a 0-byte invitation
-    // file behind. The next `invite` for the same node would then
-    // see... actually no, the file is named by cookiehash and the
-    // cookie is fresh, so it's a different file. But the dead file
-    // sits in invitations/ until expiry. Ordering it here is cleaner.
+    // Done early so failure happens BEFORE we create files. Upstream
+    // does it late, which leaves a 0-byte invitation file behind on
+    // no-Address failure (it sits in invitations/ until expiry).
+    // Ordering it here is cleaner.
     let address = get_my_address(paths, &myname)?;
 
     // ─── makedirs(DIR_INVITATIONS)
-    // C `invitation.c:391`: `makedirs(DIR_INVITATIONS)`.
-    // Mode 0700 — `fs.c:42`. Only readable by the daemon's user.
+    // Mode 0700 — only readable by the daemon's user.
     let inv_dir = paths.invitations_dir();
     makedir(&inv_dir, 0o700)?;
 
     // ─── Sweep expired invitations, count live ones
-    // C `invitation.c:396-438`. Walk invitations/, for each file with
-    // a 24-char name (the b64-of-18-byte hash format), if mtime is
-    // older than a week, unlink it. Count the survivors.
+    // Walk invitations/: each file with a 24-char name (the
+    // b64-of-18-byte hash format), if mtime > week old, unlink it.
+    // Count the survivors.
     //
     // `count == 0` after the sweep means "no live invitations" → safe
-    // to rotate the invitation key. Any leaked key from an old invite
-    // is now useless: the new key has a different fingerprint, so the
-    // old URL's key_hash won't verify.
+    // to rotate the invitation key. A leaked key from an old invite
+    // is now useless: the new key has a different fingerprint.
     let live_count = sweep_expired(&inv_dir, now)?;
 
     // ─── Load or generate invitation key
-    // C `invitation.c:440-496`.
     let key_path = paths.invitation_key();
 
-    // C `invitation.c:444`: `if(!count) unlink(filename);`
     // No live invitations → drop the old key. The next block then
-    // sees ENOENT and generates a fresh one. This is the "rotate on
-    // empty" mechanism.
+    // sees ENOENT and generates a fresh one. "Rotate on empty."
     if live_count == 0 {
         // Best-effort. ENOENT (no key yet) is fine; other errors
         // (EACCES?) would surface in the open below anyway.
         let _ = fs::remove_file(&key_path);
     }
 
-    // C `invitation.c:448`: `FILE *f = fopen(filename, "r");`.
-    // The two-armed `if(!f)` pattern: ENOENT → generate, other → bail.
-    // read_private's Err covers both ENOENT and bad-PEM. The C
-    // distinguishes (`if(errno != ENOENT) bail`); we lump them —
-    // if the file exists but is corrupt, regenerating it is the
-    // right thing too. C bails because it can't tell "corrupt" from
-    // "I lack permission" (errno is whatever fopen left). We could
-    // `metadata()` to distinguish, but corrupt-key → regenerate is
-    // more useful behavior than corrupt-key → bail.
+    // ENOENT → generate. read_private's Err covers both ENOENT and
+    // bad-PEM. Upstream distinguishes (bails on non-ENOENT); we lump
+    // them — corrupt-key → regenerate is more useful than bailing.
     let (sk, key_is_new) = if let Ok(sk) = keypair::read_private(&key_path) {
         (sk, false)
     } else {
         let sk = keypair::generate();
         write_invitation_key(&key_path, &sk)?;
-        // C `invitation.c:480`: `if(connect_tincd(true)) reload;
-        // else fprintf("please restart")`. We set the flag; the
-        // binary wrapper attempts the reload (best-effort).
+        // We set the flag; the binary wrapper attempts the reload.
         (sk, true)
     };
 
-    // ─── The crypto kernel
-    // C `invitation.c:499-522`. KAT-tested in tinc-crypto.
+    // ─── The crypto kernel (KAT-tested in tinc-crypto)
 
-    // Cookie: 18 fresh random bytes. C `randomize(cookie, 18)`.
-    // Zeroizing because the cookie is the secret.
+    // Cookie: 18 fresh random bytes. Zeroizing — the cookie is the secret.
     let mut cookie = Zeroizing::new([0u8; COOKIE_LEN]);
     OsRng.fill_bytes(&mut *cookie);
 
@@ -249,75 +204,60 @@ pub fn invite(
     let inv_path = inv_dir.join(&inv_filename);
 
     // ─── Write the invitation file
-    // C `invitation.c:525-595`.
-    // O_RDWR | O_CREAT | O_EXCL, 0600. EXCL: cookie collision is
-    // cryptographically impossible (18 bytes from OsRng), so EEXIST
-    // means something is very wrong. C returns 1 with strerror.
+    // O_EXCL, 0600. EXCL: cookie collision is cryptographically
+    // impossible (18 bytes from OsRng), so EEXIST means something is
+    // very wrong.
     //
-    // We write the *whole* file as a string then write_all once,
-    // rather than the C's incremental fprintf. Easier to test (the
-    // builder is a separate fn), no partial-write risk, and the
-    // file is small (a few KB at most — it's a config blob).
+    // We build the *whole* file as a string then write_all once.
+    // Easier to test (the builder is a separate fn), no partial-write
+    // risk, and the file is a few KB at most.
     let body = build_invitation_file(paths, netname, invitee, &myname, &address)?;
     write_invitation_file(&inv_path, &body)?;
 
     // ─── Build the URL
-    // C `invitation.c:551`: `xasprintf(&url, "%s/%s%s", address, hash, cookie);`
     // The address already has [:port] formatting from get_my_address.
     let slug = Zeroizing::new(build_slug(pubkey, &cookie));
     let url = Zeroizing::new(format!("{address}/{}", *slug));
 
-    // C `invitation.c:598`: execute_script("invitation-created").
-    // Dropped — see module doc. TODO(chunk-8): lifts to shared
-    // script.rs with daemon's execute_script.
+    // TODO(chunk-8): execute_script("invitation-created") — lifts to
+    // shared script.rs with daemon's execute_script.
 
     Ok(InviteResult { url, key_is_new })
 }
 
 // Helpers
 
-/// Expiry sweep + live count. `invitation.c:396-438`.
+/// Expiry sweep + live count.
 ///
 /// Walks `inv_dir`, for each entry with a 24-char name:
 /// - if `mtime + 1 week < now`, unlink it
 /// - else, count it as live
 ///
 /// 24 chars is `SLUG_PART_LEN` — the b64-of-18-bytes shape. Any other
-/// filename (`.`, `..`, `ed25519_key.priv`) is skipped. C: `if(strlen
-/// (ent->d_name) != 24) continue;` (`invitation.c:409`).
+/// filename (`.`, `..`, `ed25519_key.priv`) is skipped.
 ///
 /// `now` parameterized so tests don't need to mess with file mtimes.
 fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
-    // C `time(NULL) - 604800`. We compute the deadline as a SystemTime
-    // (mtime is one); avoids the i64-seconds arithmetic.
     let deadline = now.checked_sub(EXPIRY).unwrap_or(SystemTime::UNIX_EPOCH);
 
     let mut count = 0u32;
     let entries = fs::read_dir(inv_dir).map_err(io_err(inv_dir))?;
     for entry in entries {
-        // C: `errno = 0, ent = readdir(dir)` then check errno after the
-        // loop. We propagate per-entry errors immediately — if readdir
+        // We propagate per-entry errors immediately — if readdir
         // fails partway, the count is meaningless anyway.
         let entry = entry.map_err(io_err(inv_dir))?;
         let name = entry.file_name();
 
         // The 24-char filter. `OsStr::len()` is bytes; on Unix that's
-        // fine (filenames are bytes). C `strlen` is also bytes. The
-        // b64 alphabet is all ASCII, so a 24-byte name is 24 chars.
-        // (A 24-byte name with multibyte chars would not be a valid
-        // b64 cookiehash and the daemon's lookup would fail anyway.)
+        // fine. The b64 alphabet is all ASCII, so 24 bytes = 24 chars.
         if name.len() != SLUG_PART_LEN {
             continue;
         }
 
         let path = entry.path();
-        // C: `if(!stat(invname, &st)) { ... } else { fprintf; }`.
-        // stat failure is logged-and-skipped, not fatal. We do the
-        // same — `metadata` failing on a single file shouldn't kill
-        // the whole sweep.
+        // stat failure is logged-and-skipped, not fatal — `metadata`
+        // failing on a single file shouldn't kill the whole sweep.
         let Ok(meta) = entry.metadata() else {
-            // C prints to stderr; we don't (no eprintln in lib code).
-            // The binary doesn't care — the sweep is best-effort.
             continue;
         };
         let Ok(mtime) = meta.modified() else {
@@ -328,8 +268,7 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
         };
 
         if mtime < deadline {
-            // Expired. C: `unlink(invname)`. Best-effort; if it fails
-            // (race with daemon?) the next sweep retries.
+            // Best-effort; if it fails the next sweep retries.
             let _ = fs::remove_file(&path);
         } else {
             count += 1;
@@ -338,16 +277,13 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
     Ok(count)
 }
 
-/// Write the invitation private key. `invitation.c:462-478`.
+/// Write the invitation private key.
 ///
-/// `chmod(filename, 0600)` then PEM-write. The C does `fopen("w")`
-/// (truncate) then `chmod` after — there's a race window where the
-/// file is 0644 (umask default). We use `OpenOptions::mode(0600)`
-/// to set it atomically at create time.
+/// `OpenOptions::mode(0600)` sets the mode atomically at create time
+/// (upstream does `fopen("w")` then `chmod` after, with a race window
+/// where the file is 0644).
 ///
-/// NOT `O_EXCL` — we just unlinked it (or it didn't exist). If
-/// somehow it reappeared between the unlink and now (concurrent
-/// `tinc invite`?), truncate-and-write is the C's behavior too.
+/// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -360,16 +296,12 @@ fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
 
     let f = opts.open(path).map_err(io_err(path))?;
     let mut w = std::io::BufWriter::new(f);
-    // C `ecdsa_write_pem_private_key(key, f)`. Same PEM type string
-    // as the node's own key (`ED25519 PRIVATE KEY`); the daemon
+    // Same PEM type string as the node's own key; the daemon
     // distinguishes them by *path*, not by PEM type.
     write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).map_err(io_err(path))
 }
 
-/// Write the invitation file at 0600 with O_EXCL. `invitation.c:526`.
-///
-/// The C does `open(O_RDWR | O_CREAT | O_EXCL, 0600)` then `fdopen("w")`.
-/// O_RDWR is presumably for some historical fdopen reason; we only write.
+/// Write the invitation file at 0600 with O_EXCL.
 fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -383,7 +315,7 @@ fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
     f.write_all(body.as_bytes()).map_err(io_err(path))
 }
 
-/// Build the invitation file body. `invitation.c:556-591`.
+/// Build the invitation file body.
 ///
 /// The file is two chunks separated by `#--...--#`:
 /// 1. The invitee's bootstrap config: `Name`, `NetName`, `ConnectTo`,
@@ -407,58 +339,41 @@ fn build_invitation_file(
     let mut out = String::new();
 
     // ─── Chunk 1: invitee's bootstrap config
-    // C `invitation.c:557`: `fprintf(f, "Name = %s\n", argv[1]);`
-    // This is the FIRST line, and `finalize_join`'s `get_value(data,
-    // "Name")` (`invitation.c:724`) reads it to know what node it's
-    // becoming. Must be first — `get_value` finds the first match.
+    // `Name = X` is the FIRST line; `finalize_join` reads it to know
+    // what node it's becoming. Must be first — `get_value` finds the
+    // first match.
     out.push_str("Name = ");
     out.push_str(invitee);
     out.push('\n');
 
-    // C `invitation.c:559-561`: `if(check_netname) fprintf("NetName = %s")`.
-    // Only emitted if netname is set AND passes `check_netname(_, true)`
-    // (the strict variant). We don't have `check_netname` ported yet;
-    // the binary's `-n` parser already does a path-traversal guard, and
-    // `finalize_join` re-validates with `check_netname` on the receiving
-    // side anyway. So: if it's set, emit it; let join's filter catch bad
-    // values.
+    // Only emitted if netname is set. We don't have `check_netname`
+    // ported yet; the binary's `-n` parser already does a
+    // path-traversal guard, and `finalize_join` re-validates on the
+    // receiving side anyway. So: if set, emit it; let join's filter
+    // catch bad values.
     //
-    // TODO: port `check_netname` to names.rs when more callers need it.
-    // It's `utils.c:229`, ~20 lines, rejects control chars and / \ and
-    // (in strict mode) shell metachars.
+    // TODO: port `check_netname` to names.rs when more callers need
+    // it. ~20 lines: rejects control chars, / \, shell metachars.
     if let Some(n) = netname {
         out.push_str("NetName = ");
         out.push_str(n);
         out.push('\n');
     }
 
-    // C `invitation.c:563`: `fprintf(f, "ConnectTo = %s\n", myname);`
-    // Tells the new node who to connect to. There's only one inviter,
-    // so one ConnectTo. The new node can add more later.
+    // Tells the new node who to connect to.
     out.push_str("ConnectTo = ");
     out.push_str(myname);
     out.push('\n');
 
-    // C `invitation.c:566-584`: scan tinc.conf for Mode/Broadcast and
-    // copy them. These are the "mesh shape" vars — switch vs router,
-    // broadcast yes/no — that the new node needs to match. Everything
-    // else is per-node and the invitee picks.
-    //
-    // The C does a hand-rolled line scan with `strncasecmp`. We use
-    // tinc-conf. (Fifth instance of "C's hand-rolled tokenizer
-    // replaced by parse_file": get_my_name, scan_for_hostname,
-    // get_pubkey, fsck's check_conffile, now this.)
+    // Scan tinc.conf for Mode/Broadcast and copy them. These are the
+    // "mesh shape" vars — switch vs router, broadcast yes/no — that
+    // the new node needs to match. Everything else is per-node.
     copy_mesh_vars(paths, &mut out)?;
 
-    // ─── Separator
-    // C `invitation.c:586`: hardcoded inline `fprintf(f, "#---...---#\n")`.
     out.push_str(SEPARATOR);
     out.push('\n');
 
     // ─── Chunk 2: our host config
-    // C `invitation.c:587-591`: `Name = myname` then
-    // `append_host_config(f, myname, port)` which is
-    // `copy_config_replacing_port(f, hosts/myname, port)`.
     out.push_str("Name = ");
     out.push_str(myname);
     out.push('\n');
@@ -469,16 +384,11 @@ fn build_invitation_file(
 }
 
 /// Copy `Mode` and `Broadcast` from tinc.conf into the invitation.
-/// `invitation.c:566-584`.
 ///
-/// The C version reads tinc.conf line-by-line and copies lines that
-/// start with `Mode` or `Broadcast` (case-insensitive, followed by
-/// `\t`, ` `, or `=`). We use `tinc-conf` to parse and re-emit
-/// canonically. This means whitespace differences in the source
-/// (`Mode=switch` vs `Mode = switch`) become canonical (`Mode = switch`)
-/// in the invitation. The C preserves source bytes; we don't. Doesn't
-/// matter — `finalize_join` re-parses through `variables[]` and emits
-/// canonically anyway. The pass-through-preserving was just lazy C.
+/// We use `tinc-conf` to parse and re-emit canonically. Whitespace
+/// differences in the source (`Mode=switch` vs `Mode = switch`)
+/// become canonical in the invitation. Doesn't matter —
+/// `finalize_join` re-parses and emits canonically anyway.
 fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     let tc = paths.tinc_conf();
     let entries =
@@ -486,14 +396,10 @@ fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     let mut cfg = Config::new();
     cfg.merge(entries);
 
-    // Just two vars. `lookup` is case-insensitive, matching C's
-    // `strncasecmp`. C only copies the FIRST occurrence (it's
-    // `if(...) fputs; continue;` in a loop, but each line is one
-    // var, and Mode is non-MULTIPLE — we take the first too).
-    // Actually no: re-reading the C, `while(fgets) { if(match) fputs }`
-    // copies EVERY matching line. With non-MULTIPLE vars duplicates
-    // are an fsck warning anyway. We copy first only — the daemon's
-    // config reader takes first-wins, so the rest are noise.
+    // Just two vars. `lookup` is case-insensitive. Upstream copies
+    // every matching line; we copy first only — the daemon's config
+    // reader takes first-wins, so duplicates are noise (and an fsck
+    // warning anyway).
     for var in &["Mode", "Broadcast"] {
         if let Some(entry) = cfg.lookup(var).next() {
             out.push_str(var);
@@ -505,8 +411,6 @@ fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `copy_config_replacing_port`. `invitation.c:296-322`.
-///
 /// Copies `hosts/myname` line-by-line, but: if a line's variable name
 /// is `Port`, replace the whole line with `Port = ACTUAL_PORT`. This
 /// handles the `Port = 0` case (ephemeral port) — the invitation needs
@@ -530,55 +434,37 @@ fn copy_host_replacing_port(
     port: &str,
     out: &mut String,
 ) -> Result<(), CmdError> {
-    // C: `var_beg = line + strspn(line, "\t "); var_end = var_beg +
-    //     strcspn(var_beg, "\t ")`. Then: if `var_end > var_beg &&
-    //     !strncasecmp(var_beg, "Port", var_end - var_beg)`.
+    // Extract the first whitespace-delimited token (after leading
+    // whitespace). Match: token is exactly 4 chars AND those 4 chars
+    // are "Port" case-insensitively. "Port" matches, "PORT" matches,
+    // "Porting" does NOT (token is 7 chars).
     //
-    // The strspn/strcspn extracts the first whitespace-delimited
-    // token (after leading whitespace). The strncasecmp with len =
-    // (var_end - var_beg) means: token is exactly 4 chars AND those
-    // 4 chars match "Port" case-insensitively. So "Port" matches,
-    // "port" matches, "PORT" matches, but "Porting" does NOT —
-    // var_end - var_beg = 7, and `strncasecmp("Porting", "Port", 7)`
-    // hits the NUL terminator in "Port" at index 4 and returns the
-    // difference, nonzero. So yes, exact-4.
+    // Subtlety: token stops at TAB or SPACE but NOT at `=`. So
+    // `Port=655` has token "Port=655" (8 chars), doesn't match.
+    // `Port=655` passes through unchanged. We replicate; init writes
+    // `Port = X` form anyway.
     //
-    // Subtlety: `strcspn(var_beg, "\t ")` stops at TAB or SPACE but
-    // NOT at `=`. So `Port=655` has token "Port=655", which is 8
-    // chars, doesn't match. The C only matches `Port 655` or `Port =
-    // 655` or `Port\t655`. `Port=655` passes through unchanged.
-    //
-    // We replicate. Doesn't matter much (init writes `Port = X` form),
-    // but byte-compat is byte-compat.
-    //
-    // Implementation: `read_to_string` + `split_inclusive('\n')`.
-    // `split_inclusive` is the read_line-shaped iterator: each chunk
-    // includes its trailing `\n` (if there was one), the last chunk
-    // has no `\n` iff the file doesn't end with one. Same fidelity
-    // as a `read_line` loop, less ceremony.
+    // `split_inclusive('\n')`: each chunk includes its trailing `\n`
+    // (if there was one). Same fidelity as a `read_line` loop.
     let body = fs::read_to_string(host_file).map_err(io_err(host_file))?;
 
     for chunk in body.split_inclusive('\n') {
-        // chunk includes trailing \n except possibly the last.
-        // Strip it for the token match, but pass through unchanged.
         let trimmed = chunk.strip_suffix('\n').unwrap_or(chunk);
 
-        // Replicate the C tokenizer. Leading whitespace skipped, then
-        // first token is bytes until next \t or space.
+        // Leading whitespace skipped, then first token until \t or space.
         let after_lead = trimmed.trim_start_matches([' ', '\t']);
         let token_end = after_lead.find([' ', '\t']).unwrap_or(after_lead.len());
         let token = &after_lead[..token_end];
 
         if token.len() == 4 && token.eq_ignore_ascii_case("Port") {
-            // Replace. C: `fprintf(out, "Port = %s\n", port);`.
-            // Always emits a newline regardless of whether the
-            // input chunk had one.
+            // Replace. Always emits a newline regardless of whether
+            // the input chunk had one.
             out.push_str("Port = ");
             out.push_str(port);
             out.push('\n');
         } else {
             // Pass through verbatim, including whatever newline
-            // (or lack thereof) the chunk had. C `fprintf("%s", line)`.
+            // (or lack thereof) the chunk had.
             out.push_str(chunk);
         }
     }
@@ -587,29 +473,22 @@ fn copy_host_replacing_port(
 
 /// Our address for the URL host part. `host[:port]` formatted.
 ///
-/// The C `get_my_hostname` (`invitation.c:105-294`) is 190 lines:
-/// scan host file → scan tinc.conf → read pidfile → HTTP probe →
-/// tty prompt. We do the first two and bail with a clear message.
+/// Upstream's `get_my_hostname` is 190 lines: scan host file → scan
+/// tinc.conf → read pidfile → HTTP probe → tty prompt. We do the
+/// first two and bail with a clear message.
 ///
-/// The pidfile read (`invitation.c:123`) is for `Port = 0` resolution:
-/// the daemon writes its actual bound port to the pidfile. Without
-/// a daemon connection we can't get that, so `Port = 0` + no port
-/// on the `Address` line = error. (`Port` defaults to 655 if absent
-/// entirely; `0` is the explicit "ephemeral" value.)
+/// The pidfile read is for `Port = 0` resolution: the daemon writes
+/// its actual bound port there. Without a daemon connection we can't
+/// get that, so `Port = 0` + no port on the `Address` line = error.
+/// (`Port` defaults to 655 if absent; `0` is explicit "ephemeral".)
 fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> {
-    // C `scan_for_hostname` reads BOTH the host file and tinc.conf,
-    // in that order, taking the first `Address` it finds and the
-    // first `Port`. Port can come from a different file than Address.
-    // The C also handles `Address = host port` (port-on-address-line),
-    // which is a thing tinc supports — `Address = 1.2.3.4 1234` is
-    // equivalent to `Address = 1.2.3.4` + `Port = 1234`.
+    // We handle `Address = host port` (port-on-address-line) —
+    // `Address = 1.2.3.4 1234` ≡ `Address = 1.2.3.4` + `Port = 1234`.
     //
-    // We use parse_file on the host file. tinc.conf as fallback for
-    // Address is unusual (Address is a host var, not a server var)
-    // but the C does scan it. We skip the tinc.conf fallback — fsck
-    // would warn about Address-in-tinc.conf anyway (`HostVarInServer`).
-    // If someone has that setup, they'll get "set Address in your
-    // host file" which is the right fix.
+    // We skip the tinc.conf fallback for Address — it's a host var,
+    // not a server var; fsck would warn (`HostVarInServer`). If
+    // someone has that setup, they'll get "set Address in your host
+    // file" which is the right fix.
 
     let host_file = paths.host_file(myname);
     let entries = parse_file(&host_file)
@@ -627,12 +506,8 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
     };
     let addr_value = addr_entry.get_str();
 
-    // C `scan_for_hostname` (`invitation.c:87-95`): the line tokenizer
-    // splits on `\t` and space. After `Address = X Y`, X is hostname,
-    // Y (if present) is port. We split the same way.
-    //
-    // tinc-conf gives us the raw value after `=`, which may be
-    // `host port` or just `host`. Split once on whitespace.
+    // After `Address = X Y`, X is hostname, Y (if present) is port.
+    // tinc-conf gives us the raw value after `=`; split once.
     let mut parts = addr_value.split_whitespace();
     let host = parts
         .next()
@@ -640,16 +515,14 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
         .to_owned();
     let addr_line_port = parts.next().map(str::to_owned);
 
-    // Port: from Address line (highest precedence per C), then from
-    // `Port =` config entry, then default 655. C also reads pidfile
-    // for the dynamic-port case; we don't (no daemon).
+    // Port: from Address line (highest precedence), then `Port =`
+    // config entry, then default 655.
     let port = if let Some(p) = addr_line_port {
         p
     } else if let Some(port_entry) = cfg.lookup("Port").next() {
         let p = port_entry.get_str().to_owned();
-        // C `invitation.c:122`: `if(!port || (is_decimal(port) &&
-        // atoi(port) == 0))` → read pidfile. We can't read pidfile
-        // (no daemon, no pidfile). Port=0 with no daemon → bail.
+        // Port=0 means ephemeral; the daemon writes the real port to
+        // the pidfile. No daemon → can't resolve → bail.
         if p == "0" {
             return Err(CmdError::BadInput(
                 "Port = 0 means dynamic port allocation, but tincd is not running. \
@@ -659,9 +532,8 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
         }
         p
     } else {
-        // C default port: 655. `cmd_join` uses `"655"` if no port in
-        // URL (`invitation.c:1305`). The daemon binds 655 by default
-        // (`net_setup.c`). All consistent.
+        // Default port: 655. `cmd_join` uses `"655"` if no port in
+        // URL; daemon binds 655 by default. All consistent.
         String::from("655")
     };
 
@@ -672,22 +544,20 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
 ///
 /// Separate struct (not a tuple) because the formatting rule is
 /// non-obvious and lives with the data: IPv6 literals need `[]`
-/// brackets in URLs. C `invitation.c:262-270`.
+/// brackets in URLs.
 #[derive(Debug)]
 struct AddressPort {
     host: String,
-    /// Kept as a string, not u16: the C never parses it (it's
-    /// `xasprintf("%s:%s")`), and ports can be service names
-    /// (`Port = tinc` → `getaddrinfo("tinc")` → 655). Unlikely
-    /// but valid. String round-trips.
+    /// Kept as a string, not u16: ports can be service names
+    /// (`Port = tinc` → `getaddrinfo("tinc")` → 655). String
+    /// round-trips.
     port: String,
 }
 
 impl std::fmt::Display for AddressPort {
-    /// C `invitation.c:262`: `if(strchr(hostname, ':')) "[%s]:%s"
-    /// else "%s:%s"`. The colon check is a "is this IPv6" heuristic;
-    /// hostnames can't contain colons, IPv4 can't, only IPv6
-    /// literals do. `[::1]:655` not `::1:655` (which is ambiguous).
+    /// The colon check is a "is this IPv6" heuristic; hostnames
+    /// can't contain colons, IPv4 can't, only IPv6 literals do.
+    /// `[::1]:655` not `::1:655` (ambiguous).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.host.contains(':') {
             write!(f, "[{}]:{}", self.host, self.port)
@@ -751,16 +621,13 @@ mod tests {
             "12345",
             "Address = 1.2.3.4\nPort = 12345\nEd25519PublicKey = abc\n",
         );
-        // `Port=655` (no space before `=`) does NOT match. The C
-        // tokenizer's `strcspn("\t ")` stops at whitespace, not `=`,
-        // so the token is `Port=655` (8 chars), not `Port` (4 chars).
-        // Byte-compat is byte-compat.
+        // `Port=655` (no space before `=`) does NOT match. The
+        // tokenizer stops at whitespace, not `=`, so the token is
+        // `Port=655` (8 chars), not `Port` (4 chars).
         case("Port=0\n", "12345", "Port=0\n");
-        // No trailing newline on last line: preserved. `fgets` and
-        // `split_inclusive` agree on this.
+        // No trailing newline on last line: preserved.
         case("Subnet = 10.0.0.0/24", "655", "Subnet = 10.0.0.0/24");
-        // Case-insensitive match (C `strncasecmp`). Both replaced;
-        // C copies every matching line.
+        // Case-insensitive match. Both replaced.
         case("PORT = 0\nport = 1\n", "x", "Port = x\nPort = x\n");
         // PEM block preserved byte-exact. This is why we DON'T use
         // `parse_file` for the host copy — it would silently drop the
@@ -836,9 +703,6 @@ mod tests {
             panic!("wrong variant: {err:?}")
         };
         assert!(msg.contains("dynamic port"), "{msg}");
-        // The error message mentions starting tincd, matching the C's
-        // hint. integration test in tinc_cli.rs checks the binary
-        // surfaces this.
         assert!(msg.contains("tincd"), "{msg}");
     }
 
@@ -1046,7 +910,7 @@ mod tests {
     }
 
     /// invite with no Address → clear error before any files created.
-    /// The "fail early" reorder vs C.
+    /// The "fail early" reorder.
     #[test]
     fn invite_no_address_fails_clean() {
         let dir = tempfile::tempdir().unwrap();
@@ -1059,11 +923,9 @@ mod tests {
         };
         assert!(msg.contains("No Address"));
 
-        // **Nothing created.** The C would have made invitations/
-        // and possibly written a key by this point (`get_my_hostname`
-        // is called late). Our reorder means a no-Address failure
-        // leaves no trace. The next `invite` (after fixing Address)
-        // starts clean.
+        // **Nothing created.** Upstream would have made invitations/
+        // and possibly written a key by this point. Our reorder
+        // means a no-Address failure leaves no trace.
         assert!(
             !confbase.join("invitations").exists(),
             "no-Address failure should not create invitations/"
@@ -1081,7 +943,7 @@ mod tests {
     }
 
     /// `Mode` and `Broadcast` from tinc.conf get copied. Nothing
-    /// else does (the C's filter).
+    /// else does.
     #[test]
     fn mesh_vars_copied() {
         let dir = tempfile::tempdir().unwrap();
@@ -1114,7 +976,7 @@ mod tests {
         let chunk1 = body.split(SEPARATOR).next().unwrap();
         assert!(chunk1.contains("Mode = switch\n"));
         assert!(chunk1.contains("Broadcast = no\n"));
-        // Device is NOT copied. It's not in the C's filter.
+        // Device is NOT copied. Not in the filter.
         assert!(!chunk1.contains("Device"));
     }
 }

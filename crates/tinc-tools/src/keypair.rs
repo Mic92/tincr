@@ -4,10 +4,9 @@
 //! ## On-disk layout
 //!
 //! Private key file: `private[64] || public[32]` = 96 bytes, wrapped in
-//! `-----BEGIN ED25519 PRIVATE KEY-----`. The C `read_pem` writes those
-//! 96 bytes straight into `struct { uint8_t private[64]; uint8_t
-//! public[32]; }` via the struct-overlap trick — see `tinc-conf::pem`
-//! module doc. `SigningKey::from_blob` expects the same layout.
+//! `-----BEGIN ED25519 PRIVATE KEY-----`. See the `tinc-conf::pem`
+//! module doc for the struct-overlap layout. `SigningKey::from_blob`
+//! expects the same.
 //!
 //! Public key file: `public[32]`, wrapped in `-----BEGIN ED25519 PUBLIC
 //! KEY-----`. One body line (32 bytes → 43 b64 chars).
@@ -22,19 +21,15 @@ use zeroize::Zeroizing;
 use tinc_conf::pem::{PemError, read_pem, write_pem};
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
-/// PEM type strings. Not configurable — `ecdsagen.c:71` and `ecdsa.c:132`
-/// hardcode these. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
+/// PEM type strings. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
 const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
 /// `sizeof(struct ecdsa)`. The private blob length.
 const PRIVATE_BLOB_LEN: usize = 96;
 
-/// `ecdsa_generate`: 32 bytes of OS entropy → expanded keypair.
-///
-/// The C `randomize(seed, 32)` reads `/dev/urandom` (or `getrandom(2)`).
-/// `OsRng` does the same. The seed is zeroized before return —
-/// `ecdsagen.c:43` `memzero(seed, sizeof(seed))`.
+/// 32 bytes of OS entropy → expanded keypair. The seed is zeroized
+/// before return.
 ///
 /// # Panics
 /// Only if the OS RNG fails (`OsRng::fill_bytes` panics). At that point
@@ -46,14 +41,11 @@ pub fn generate() -> SigningKey {
     SigningKey::from_seed(&seed)
 }
 
-/// `ecdsa_write_pem_private_key` + `ecdsa_write_pem_public_key`.
-/// Creates both files; overwrites if they exist (matches C `fopen("w")`).
+/// Creates both files; overwrites if they exist.
 ///
 /// # Errors
-/// I/O on either file. The C version closes the private file before
-/// opening the public one and bails if the second `fopen` fails — same
-/// here, you can end up with a private file written and no public file.
-/// Not transactional; nothing in tinc is.
+/// I/O on either file. Not transactional: you can end up with a
+/// private file written and no public file. Nothing in tinc is.
 pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Result<()> {
     // Private: full 96-byte blob.
     {
@@ -114,9 +106,8 @@ pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
     Ok(arr)
 }
 
-/// Key file load failure. Wraps the inner errors with the path because
-/// the C `logger()` calls all include `argv[n]` and we want the same
-/// quality of diagnostic.
+/// Key file load failure. Wraps the inner errors with the path for
+/// diagnostic quality.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("Could not open {}: {err}", path.display())]

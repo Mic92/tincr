@@ -41,9 +41,6 @@ fn main() -> ExitCode {
     let sk = keypair::generate();
 
     if let Err(e) = keypair::write_pair(&sk, &private, &public) {
-        // C: `fprintf(stderr, "Could not open '%s' for writing: %s\n", ...)`
-        // The error already has path context via `File::create`'s OS
-        // error message; just print it.
         eprintln!("Could not write key pair: {e}");
         return ExitCode::FAILURE;
     }

@@ -1306,7 +1306,10 @@ fn peer_ack_exchange() {
     let mut tmp_buf = [0u8; 256];
     let id_end = loop {
         let n = (&stream).read(&mut tmp_buf).expect("recv from daemon");
-        assert_ne!(n, 0, "daemon closed before sending ID line; buf so far: {buf:?}");
+        assert_ne!(
+            n, 0,
+            "daemon closed before sending ID line; buf so far: {buf:?}"
+        );
         buf.extend_from_slice(&tmp_buf[..n]);
         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             break pos;
@@ -2506,7 +2509,8 @@ fn peer_wrong_key_fails_sig() {
             // But if it does fail: that's also a stop condition
             // (and the stderr check below disambiguates).
             match sptps.receive(&pending[off..], &mut OsRng) {
-                #[allow(clippy::match_same_arms)] // Ok(0,_) and Err(_) both stop, but for different reasons
+                #[allow(clippy::match_same_arms)]
+                // Ok(0,_) and Err(_) both stop, but for different reasons
                 Ok((0, _)) => break,
                 Ok((n, outs)) => {
                     off += n;
