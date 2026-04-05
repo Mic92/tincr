@@ -4,7 +4,7 @@
 //! fd` on a socketpair: the test process IS the IP stack. Proves the
 //! daemon's wiring; doesn't prove `linux/if_tun.h` interop. THIS test
 //! uses `DeviceType = tun` — `LinuxTun::open()` does TUNSETIFF, the
-//! `+10`-offset reads, `IFF_NO_PI` flag. All previously dark in CI.
+//! `+10`-offset reads, `IFF_NO_PI` flag.
 //!
 //! ## The bwrap re-exec trick
 //!

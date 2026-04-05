@@ -642,11 +642,10 @@ fn myself_options_clamp_mss_off() {
 // `send_ack` wire format (`"%d %s %d %x"` lowercase no-pad) covered
 // by `tests/stop.rs::peer_ack_exchange`.
 
-/// Per-host `TCPOnly = yes` sets
-/// TCPONLY|INDIRECT and CLEARS `PMTU_DISCOVERY`. The load-bearing
-/// fix from gap-audit `bcc5c3e3`: previously inherited PMTU bit
-/// stuck, peer wasted `udp_discovery_timeout` probing a path the
-/// user told us is broken.
+/// Per-host `TCPOnly = yes` sets TCPONLY|INDIRECT and CLEARS
+/// `PMTU_DISCOVERY`. The clear is load-bearing: if the inherited
+/// PMTU bit stuck, peer would waste `udp_discovery_timeout` probing
+/// a path the user told us is broken.
 #[test]
 fn send_ack_per_host_tcponly_clears_pmtu() {
     let mut c = mkconn();

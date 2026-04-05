@@ -599,8 +599,7 @@ impl Daemon {
     /// or an `Edge`'s endpoints is always live. The `<gone>`
     /// fallback never fires - it exists because `Graph::node`
     /// returns `Option` (the graph crate doesn't know tincd's
-    /// monotonic-node usage). Helper consolidates 11 callsites that
-    /// previously open-coded the `map_or`.
+    /// monotonic-node usage).
     pub(super) fn node_log_name(&self, nid: NodeId) -> &str {
         self.graph.node(nid).map_or("<gone>", |n| n.name.as_str())
     }
