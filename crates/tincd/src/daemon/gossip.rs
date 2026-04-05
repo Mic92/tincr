@@ -78,7 +78,7 @@ impl Daemon {
             &mut OsRng,
         );
         let now = self.timers.now();
-        let tunnel = self.tunnels.entry(to_nid).or_default();
+        let tunnel = self.dp.tunnels.entry(to_nid).or_default();
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
         tunnel.status.waitingforkey = true;
@@ -209,7 +209,8 @@ impl Daemon {
                 .as_ref()
                 .is_some_and(|e| e.reqno == Request::ReqKey as i32)
         {
-            self.tunnels
+            self.dp
+                .tunnels
                 .get(&from_nid)
                 .and_then(|t| t.udp_addr)
                 .map(|from_addr| {
@@ -312,6 +313,7 @@ impl Daemon {
                 return Ok(false);
             };
             let Some(sptps) = self
+                .dp
                 .tunnels
                 .get_mut(&from_nid)
                 .and_then(|t| t.sptps.as_deref_mut())
@@ -330,7 +332,7 @@ impl Daemon {
                                "Failed to decode SPTPS_PACKET from {}: {e:?}",
                                msg.from);
                     let now = self.timers.now();
-                    let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                    let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
                         t.last_req_key
                             .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
                     });
@@ -380,6 +382,7 @@ impl Daemon {
 
         // Peer re-initiating; the assignment below resets state.
         if self
+            .dp
             .tunnels
             .get(&from_nid)
             .is_some_and(|t| t.sptps.is_some())
@@ -419,7 +422,7 @@ impl Daemon {
 
         // Stash SPTPS before dispatching outputs.
         let now = self.timers.now();
-        let tunnel = self.tunnels.entry(from_nid).or_default();
+        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
         tunnel.status.waitingforkey = true;
@@ -446,7 +449,7 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Relay-observed UDP address for {} (REQ_KEY): {addr}",
                         msg.from);
-            let t = self.tunnels.entry(from_nid).or_default();
+            let t = self.dp.tunnels.entry(from_nid).or_default();
             t.udp_addr = Some(addr);
             t.udp_addr_cached = None;
         }
@@ -529,8 +532,8 @@ impl Daemon {
             // have a UDP addr for from, `to.minmtu>0` (to is actively
             // using UDP so reflexive addr is useful).
             let appended = if msg.udp_addr.is_none() {
-                let from_udp = self.tunnels.get(&from_nid).and_then(|t| t.udp_addr);
-                let to_minmtu = self.tunnels.get(&to_nid).map_or(0, TunnelState::minmtu);
+                let from_udp = self.dp.tunnels.get(&from_nid).and_then(|t| t.udp_addr);
+                let to_minmtu = self.dp.tunnels.get(&to_nid).map_or(0, TunnelState::minmtu);
                 match from_udp {
                     Some(from_addr) if to_minmtu > 0 => {
                         log::debug!(target: "tincd::proto",
@@ -577,7 +580,7 @@ impl Daemon {
             }
             _ => {}
         }
-        self.tunnels.entry(from_nid).or_default().outcompression = their_compression;
+        self.dp.tunnels.entry(from_nid).or_default().outcompression = their_compression;
 
         let Some(hs_bytes) = tinc_crypto::b64::decode(&msg.key) else {
             log::error!(target: "tincd::proto",
@@ -587,6 +590,7 @@ impl Daemon {
 
         // SPTPS must already exist (send_req_key set it).
         let Some(sptps) = self
+            .dp
             .tunnels
             .get_mut(&from_nid)
             .and_then(|t| t.sptps.as_deref_mut())
@@ -606,7 +610,7 @@ impl Daemon {
                            "Failed to decode ANS_KEY SPTPS data from {}: {e:?}; restarting",
                            msg.from);
                 let now = self.timers.now();
-                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
                     t.last_req_key
                         .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
                 });
@@ -623,6 +627,7 @@ impl Daemon {
         // it the addr could be a replay) + relay appended one.
         if let Some((addr_s, port_s)) = &msg.udp_addr {
             let validkey = self
+                .dp
                 .tunnels
                 .get(&from_nid)
                 .is_some_and(|t| t.status.validkey);
@@ -632,7 +637,7 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                let t = self.tunnels.entry(from_nid).or_default();
+                let t = self.dp.tunnels.entry(from_nid).or_default();
                 t.udp_addr = Some(addr);
                 t.udp_addr_cached = None; // stale: reflexive addr supersedes
 
@@ -857,8 +862,9 @@ impl Daemon {
     /// sssp + diff + mst.
     pub(super) fn run_graph_and_log(&mut self) {
         let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself);
-        // Side-table for dump_nodes.
-        self.last_routes = routes;
+        // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
+        // Old Arc drops here (refcount 1, single-thread).
+        self.last_routes = std::sync::Arc::new(routes);
         // Keep edge IDs and map at broadcast time.
         self.last_mst = mst;
         for t in transitions {
@@ -888,7 +894,7 @@ impl Daemon {
                     let name_owned = name.to_owned();
                     let addr = self.nodes.get(&node).and_then(|ns| ns.edge_addr);
                     if let Some(addr) = addr {
-                        let tunnel = self.tunnels.entry(node).or_default();
+                        let tunnel = self.dp.tunnels.entry(node).or_default();
                         tunnel.udp_addr = Some(addr);
                         tunnel.udp_addr_cached = None;
                     }
@@ -901,7 +907,7 @@ impl Daemon {
                         self.run_subnet_script(true, &name_owned, s);
                     }
                     // Always true (no legacy); set for dump.
-                    self.tunnels.entry(node).or_default().status.sptps = true;
+                    self.dp.tunnels.entry(node).or_default().status.sptps = true;
                 }
                 Transition::BecameUnreachable { node } => {
                     let name = self
@@ -914,6 +920,7 @@ impl Daemon {
                     let name_owned = name.to_owned();
                     // Read addr BEFORE reset clears it.
                     let addr = self
+                        .dp
                         .tunnels
                         .get(&node)
                         .and_then(|t| t.udp_addr)
@@ -928,7 +935,7 @@ impl Daemon {
 
                     // reset_unreachable: sptps_stop + mtu reset +
                     // clear UDP addr.
-                    if let Some(tunnel) = self.tunnels.get_mut(&node) {
+                    if let Some(tunnel) = self.dp.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
                 }
@@ -971,14 +978,11 @@ impl Daemon {
 
             // options: written by sssp from incoming edge. myself: 0.
             // Unreachable: 0.
-            let route = self
-                .last_routes
-                .get(nid.0 as usize)
-                .and_then(Option::as_ref);
+            let route = self.route_of(nid);
             let options = route.map_or(0, |r| r.options);
 
             // status. myself: just reachable.
-            let tunnel = self.tunnels.get(&nid);
+            let tunnel = self.dp.tunnels.get(&nid);
             let status = tunnel.map_or_else(
                 || {
                     if node.reachable { 1 << 4 } else { 0 }
@@ -1072,7 +1076,7 @@ impl Daemon {
             let Some(node) = self.graph.node(nid) else {
                 continue;
             };
-            let t = self.tunnels.get(&nid);
+            let t = self.dp.tunnels.get(&nid);
             rows.push(format!(
                 "{} {} {} {} {} {} {}",
                 Request::Control as u8,

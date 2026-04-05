@@ -265,7 +265,11 @@ impl PartialOrd for MacKey {
 /// family: lookups never cross families anyway (`route_ipv4` never
 /// asks about MAC), and three separate trees means iteration skips
 /// the `p->type != SUBNET_IPV4` check on every element.
-#[derive(Debug, Default)]
+/// `Clone`: snapshot-and-publish for the TX fast path. Clone is O(n)
+/// String clones (the `owner` field); for a 100-subnet mesh that's
+/// ~1KB, called once per `ADD_SUBNET`/`DEL_SUBNET` gossip event —
+/// rare. The hot path reads through `Arc<SubnetTree>`, no fence.
+#[derive(Debug, Default, Clone)]
 pub struct SubnetTree {
     ipv4: BTreeSet<Ipv4Key>,
     ipv6: BTreeSet<Ipv6Key>,

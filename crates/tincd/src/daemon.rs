@@ -4,6 +4,7 @@
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::inthash::IntHashMap;
 use std::net::SocketAddr;
@@ -12,23 +13,23 @@ use std::time::{Instant, SystemTime};
 
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
-use tinc_device::{Device, DeviceArena, GroBucket};
+use tinc_device::Device;
 use tinc_event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
 use tinc_graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::AddrStr;
 
 use crate::conn::Connection;
 use crate::control::ControlSocket;
-use crate::egress::{TxBatch, UdpEgress};
+use crate::egress::UdpEgress;
 use crate::listen::{Listener, Tarpit};
 use crate::node_id::NodeId6Table;
 use crate::outgoing::{Outgoing, OutgoingId};
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
-use crate::tunnel::TunnelState;
-use crate::{compress, icmp, mac_lease, route_mac};
+use crate::{icmp, mac_lease, route_mac};
 
 mod connect;
+mod dp;
 mod gossip;
 mod metaconn;
 mod net;
@@ -41,6 +42,7 @@ mod txpath;
 // Re-exports so the 7 submodules' `use super::*;` keep resolving
 // items that moved into settings.rs. `lib.rs` re-exports
 // `DaemonSettings` from this module's root.
+pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
 pub(crate) use settings::{
     apply_reloadable_settings, parse_connect_to_from_config, parse_subnets_from_config,
@@ -48,7 +50,7 @@ pub(crate) use settings::{
 
 // SPTPS record-type bits for the per-tunnel data channel.
 // Type 0 = plain IP packet (router mode, no compression). Bits OR.
-const PKT_NORMAL: u8 = 0;
+pub(crate) const PKT_NORMAL: u8 = 0;
 const PKT_COMPRESSED: u8 = 1;
 const PKT_MAC: u8 = 2;
 const PKT_PROBE: u8 = 4;
@@ -289,19 +291,15 @@ pub struct Daemon {
     /// (transitive). Cleaned up alongside `graph.del_edge`.
     pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
 
-    /// `choose_udp_address` cycle counter. 2-of-3 calls explore an
-    /// edge address; 1-of-3 sticks with the reflexive. NOT random -
-    /// a strict cycle. One global counter, not per-node.
-    pub(crate) choose_udp_x: u8,
-
-    /// Data-plane half. Separate from `nodes`/`NodeState` because
-    /// the lifecycles differ - `TunnelState` exists for ANY
-    /// reachable node (we send UDP to nodes we have no TCP
-    /// connection to, forwarding the handshake via nexthop's conn).
-    ///
-    /// `entry().or_default()` lazy-init: a node learned from
-    /// `ADD_EDGE` has no tunnel until `send_req_key` starts one.
-    pub(crate) tunnels: IntHashMap<NodeId, TunnelState>,
+    /// Per-packet state. Everything the hot loop touches lives here;
+    /// everything the gossip/timer/meta-conn machinery touches lives
+    /// in `Daemon` proper. The exception is `dp.tunnels`: gossip
+    /// pokes it for `BecameReachable`/`Unreachable` transitions and
+    /// `ans_key` handshake completion. `self.dp.tunnels` outside
+    /// `net/` and `txpath` is the grep pattern for finding the
+    /// boundary between gossip-triggered tunnel state changes and
+    /// per-packet reads.
+    pub(crate) dp: DataPlane,
 
     /// UDP fast-path lookup: every packet has `[dst_id6][src_id6]`
     /// prefix; receiver maps `src_id6` → `NodeId` to find which
@@ -333,68 +331,6 @@ pub struct Daemon {
     /// ALL unreachable destinations.
     pub(crate) icmp_ratelimit: icmp::IcmpRateLimit,
 
-    /// Per-daemon compression workspace. Currently a ZST (`lz4_flex`
-    /// is stateless, zlib one-shot per call); kept as a struct so
-    /// adding persistent `z_stream` state doesn't churn wire-up sites.
-    pub(crate) compressor: compress::Compressor,
-
-    /// Reused send-side scratch for the UDP data path. `seal_data_into`
-    /// writes `[0;12] ‖ SPTPS-datagram` here; `send_sptps_data_relay`
-    /// then overwrites the 12-byte prefix with `[dst_id6 ‖ src_id6]`
-    /// in-place and `sendto`s the whole thing. Cleared (not freed)
-    /// between packets - after the first packet at MTU, capacity is
-    /// `12 + MTU + 21` and stays there. Net: zero allocs on the
-    /// per-packet send path. Can't VLA in Rust; a daemon-owned Vec
-    /// is the closest equivalent to a stack arena.
-    pub(crate) tx_scratch: Vec<u8>,
-
-    /// Inner-packet TOS set by `route_packet`, read by the UDP send
-    /// path. The daemon is single-threaded so a field works in lieu
-    /// of threading it via a packet struct. Reset to 0 at the top of
-    /// each `route_packet`.
-    pub(crate) tx_priority: u8,
-
-    /// Reused recv-side scratch for the UDP data path. Mirror of
-    /// `tx_scratch`. `open_data_into` writes `[0;14] ‖ decrypted-body`
-    /// here; `receive_sptps_record_fast` then overwrites `[12..14]` with
-    /// the synthesized ethertype in-place and routes the whole slice.
-    /// Cleared (not freed) between packets - after the first packet at
-    /// MTU, capacity is `14 + MTU` and stays there. Net: zero allocs on
-    /// the per-packet receive path.
-    pub(crate) rx_scratch: Vec<u8>,
-
-    /// recvmmsg batch state (~108KB). Heap-allocated once at setup.
-    /// `Option` so `on_udp_recv` can `mem::take` it (the bufs borrow
-    /// fights `&mut self` for `handle_incoming_vpn_packet`; same
-    /// dance as `rx_scratch`).
-    pub(crate) udp_rx_batch: Option<net::UdpRxBatch>,
-
-    /// GRO TUN-write coalescer (`RUST_REWRITE_10G.md`).
-    /// `recvmmsg_batch` arms it; `send_packet_myself` offers each
-    /// inbound-for-us packet; the post-dispatch flush ships the
-    /// super. Same `mem::take`-out-of-self dance as `rx_scratch`
-    /// (`send_packet_myself` is `&mut self` and the bucket borrow
-    /// would conflict). `None` outside the batch loop - the send
-    /// site checks: `Some` ⇒ try coalesce, `None` ⇒ immediate write
-    /// (the ICMP-reply / broadcast-echo / kernel-mode paths, which
-    /// hit `send_packet_myself` outside any UDP recv batch).
-    pub(crate) gro_bucket: Option<GroBucket>,
-
-    /// Persistent backing for `gro_bucket`. `GroBucket::new()` heap-
-    /// allocs 64KB; doing that per recvmmsg batch (the original
-    /// `then(GroBucket::new)` sketch) would be ~10k allocs/sec at
-    /// line rate. Same heap-once pattern as `udp_rx_batch`.
-    /// `recvmmsg_batch` parks it in `gro_bucket` for the dispatch
-    /// loop, then puts it back here. `flush()` resets internal
-    /// state; the 64KB stays.
-    pub(crate) gro_bucket_spare: Option<GroBucket>,
-
-    /// Whether `device.write_super()` works. Linux TUN with
-    /// `IFF_VNET_HDR` (the only backend that overrides the trait
-    /// default). Captured at setup so the hot path doesn't dyn-
-    /// dispatch a `mode()` call per packet.
-    pub(crate) gro_enabled: bool,
-
     /// Laptop-suspend detector: if `now - this > 2 *
     /// udp_discovery_timeout`, the daemon was asleep - force-close
     /// every connection (the peers gave up on us; sending into stale
@@ -424,48 +360,6 @@ pub struct Daemon {
     /// exit. A flapping TUN means the kernel device is gone;
     /// tight-looping forever helps nobody.
     pub(crate) device_errors: u32,
-
-    /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md`).
-    /// Replaces `on_device_read`'s 1.5KB stack buf: drain reads
-    /// frames into slots, the loop body walks them. Read-side only;
-    /// `tx_scratch` handles the encrypt path (separate buffers,
-    /// no overlap).
-    ///
-    /// `Option` for the same `mem::take` dance as `udp_rx_batch`:
-    /// `route_packet` borrows `&mut self`; the arena slot borrow
-    /// conflicts. Take, walk, put back.
-    pub(crate) device_arena: Option<DeviceArena>,
-
-    /// `tso_split` output scratch.
-    /// `DrainResult::Super` means the device put a ≤64KB IP super-
-    /// segment in `device_arena`; `tso_split` writes N × ~1500B
-    /// eth frames into THIS buffer (the input slice can't overlap
-    /// the output - same arena would alias). Same `mem::take` dance:
-    /// `route_packet` borrows `&mut self`, the slot borrow conflicts.
-    ///
-    /// Sized at `DEVICE_DRAIN_CAP * STRIDE` = 64*1600 = 100KB. A
-    /// 64KB super-segment at MSS 1400 = 47 segments; fits with room.
-    /// `None` until the first `Super` arrives (the non-vnet path
-    /// never allocates this).
-    pub(crate) tso_scratch: Option<Box<[u8]>>,
-
-    /// Per-segment lengths from `tso_split`. Same lifetime as
-    /// `tso_scratch`; same lazy alloc.
-    pub(crate) tso_lens: Box<[usize]>,
-
-    /// TX batch accumulator (`RUST_REWRITE_10G.md`). The
-    /// `on_device_read` drain loop stages encrypted frames here
-    /// instead of `sendto`-per-frame; one `EgressBatch` ships the
-    /// run after the loop. `None` outside the drain loop - the send
-    /// site (`send_sptps_data_relay`) checks: `Some` ⇒ stage,
-    /// `None` ⇒ immediate send (still hit by UDP-recv → forward,
-    /// meta-conn → relay, probe sends).
-    ///
-    /// `Option` not for `mem::take` (it's never borrowed across a
-    /// `&mut self` call) but as the in-batch-loop signal. The drain
-    /// loop sets `Some` before walking slots, ships + sets `None`
-    /// after.
-    pub(crate) tx_batch: Option<TxBatch>,
 
     /// One slot per `ConnectTo` in `tinc.conf`. Populated by
     /// `try_outgoing_connections` at setup. The mark-sweep only
@@ -502,7 +396,18 @@ pub struct Daemon {
     /// indexing as `sssp`'s output). `dump_nodes` reads this for
     /// the `nexthop`/`via`/`distance` columns. Updated by
     /// `run_graph_and_log`.
-    pub(crate) last_routes: Vec<Option<Route>>,
+    ///
+    /// `Arc`: `sssp` already builds a fresh `Vec` per BFS, so the
+    /// swap is `Arc::new(routes)` — no copy-on-write, no in-place
+    /// mutation. Reads deref through `Arc` transparently (zero
+    /// hot-path cost: `*arc` is a pointer chase, same as `&Vec`).
+    /// Clonable into a snapshot for the TX fast path.
+    ///
+    /// Not `ArcSwap`: the daemon's own loop is single-threaded, so
+    /// the writer and reader are the same thread. The per-read
+    /// fence in `ArcSwap::load()` measured -2.4% on the hot path
+    /// for zero benefit.
+    pub(crate) last_routes: Arc<Vec<Option<Route>>>,
 
     /// MST membership. We store the edge IDs and map at broadcast
     /// time (`NodeState.edge` is the conn→edge link). Populated by

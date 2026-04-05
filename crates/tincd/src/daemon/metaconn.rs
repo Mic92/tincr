@@ -638,7 +638,7 @@ impl Daemon {
                             continue;
                         };
                         let len = bytes.len() as u64;
-                        let tunnel = self.tunnels.entry(from_nid).or_default();
+                        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
                         tunnel.in_packets += 1;
                         tunnel.in_bytes += len;
                         needs_write |= self.route_packet(&mut bytes, Some(from_nid));
@@ -808,11 +808,7 @@ impl Daemon {
 
         // send_udp_info, gated on `to.via == myself` (static-relay
         // check; for to==myself it's the sssp seed invariant).
-        let to_via = self
-            .last_routes
-            .get(to_nid.0 as usize)
-            .and_then(Option::as_ref)
-            .map(|r| r.via);
+        let to_via = self.route_of(to_nid).map(|r| r.via);
         let mut nw = false;
         if to_via == Some(self.myself) {
             nw |= self.send_udp_info(from_nid, &from_name, true);
@@ -821,7 +817,11 @@ impl Daemon {
         // Relay. validkey gate skips unkeyed tunnels (would buffer
         // and stall). try_tx always.
         if to_nid != self.myself {
-            let validkey = self.tunnels.get(&to_nid).is_some_and(|t| t.status.validkey);
+            let validkey = self
+                .dp
+                .tunnels
+                .get(&to_nid)
+                .is_some_and(|t| t.status.validkey);
             if validkey {
                 log::debug!(target: "tincd::net",
                             "Relaying SPTPS_PACKET {from_name} → {} \
@@ -835,6 +835,7 @@ impl Daemon {
 
         // Deliver local. udppacket bit stays false (came via TCP).
         let Some(sptps) = self
+            .dp
             .tunnels
             .get_mut(&from_nid)
             .and_then(|t| t.sptps.as_deref_mut())
@@ -855,7 +856,7 @@ impl Daemon {
                             "Failed to decode SPTPS_PACKET from \
                              {from_name}: {e:?}");
                 let now = self.timers.now();
-                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
                     t.last_req_key
                         .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
                 });

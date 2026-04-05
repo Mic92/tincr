@@ -99,7 +99,7 @@ impl Daemon {
                 .node_ids
                 .get(&conn.name)
                 .copied()
-                .filter(|nid| self.tunnels.get(nid).is_some_and(|t| t.status.validkey));
+                .filter(|nid| self.dp.tunnels.get(nid).is_some_and(|t| t.status.validkey));
             let pinged = conn.pinged;
             let conn_name = conn.name.clone();
             let conn_hostname = conn.hostname.clone();
@@ -638,7 +638,7 @@ impl Daemon {
         // Borrow dance: collect (nid, name, outs) first; dispatch_
         // tunnel_outputs needs `&mut self`.
         let mut pending: Vec<(NodeId, String, Vec<tinc_sptps::Output>)> = Vec::new();
-        for (&nid, tunnel) in &mut self.tunnels {
+        for (&nid, tunnel) in &mut self.dp.tunnels {
             if !tunnel.status.validkey {
                 continue;
             }

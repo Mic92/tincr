@@ -168,7 +168,7 @@ impl Daemon {
                 // cheap, and a recycled NodeId pointing at stale
                 // state is a debugging nightmare.
                 self.nodes.remove(&nid);
-                self.tunnels.remove(&nid);
+                self.dp.tunnels.remove(&nid);
                 self.graph.del_node(nid);
             }
         }

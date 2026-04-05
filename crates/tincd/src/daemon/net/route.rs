@@ -236,7 +236,7 @@ impl Daemon {
             broadcast::BroadcastMode::None => unreachable!("checked above"),
             broadcast::BroadcastMode::Mst => {
                 let from_conn: Option<ConnId> = from.and_then(|nid| {
-                    let route = self.last_routes.get(nid.0 as usize)?.as_ref()?;
+                    let route = self.route_of(nid)?;
                     self.nodes.get(&route.nexthop)?.conn
                 });
 
@@ -265,8 +265,9 @@ impl Daemon {
             broadcast::BroadcastMode::Direct => {
                 // Walk reachable nodes, filter to one-hop.
                 // last_routes[nid] None for unreachable.
+                let routes = &self.last_routes;
                 let nodes_iter = self.node_ids.values().filter_map(|&nid| {
-                    let r = self.last_routes.get(nid.0 as usize)?.as_ref()?;
+                    let r = (*routes.get(nid.0 as usize)?)?;
                     Some((nid, Some(r.via), Some(r.nexthop)))
                 });
                 broadcast::direct_targets(nodes_iter, self.myself, from_is_self)
@@ -278,7 +279,7 @@ impl Daemon {
         let mut nw = false;
         for nid in target_nids {
             let len = data.len();
-            let tunnel = self.tunnels.entry(nid).or_default();
+            let tunnel = self.dp.tunnels.entry(nid).or_default();
             tunnel.out_packets += 1;
             tunnel.out_bytes += len as u64;
             nw |= self.send_sptps_packet(nid, data);
@@ -409,10 +410,7 @@ impl Daemon {
         // clamp_mss BEFORE send, AFTER routing. last_routes
         // is current for any Forward target (route() only
         // returns Forward for reachable owners).
-        let route = self
-            .last_routes
-            .get(to_nid.0 as usize)
-            .and_then(Option::as_ref);
+        let route = self.route_of(to_nid);
         let via_options = route.map_or(0, |r| r.options);
         let via_nid = route.map_or(to_nid, |r| {
             if r.via == self.myself {
@@ -436,7 +434,7 @@ impl Daemon {
 
         // TunnelState::default() inits to MTU (not 0); until
         // PMTU runs: 1518 ceiling.
-        let via_mtu = self.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
+        let via_mtu = self.dp.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
 
         // directonly — operator opts out of relay.
         if self.settings.directonly && to_nid != via_nid {
@@ -496,7 +494,7 @@ impl Daemon {
                             "Fragmenting packet of {} bytes into \
                              {n} pieces for {to}", data.len());
                         {
-                            let tunnel = self.tunnels.entry(to_nid).or_default();
+                            let tunnel = self.dp.tunnels.entry(to_nid).or_default();
                             for frag in &frags {
                                 tunnel.out_packets += 1;
                                 tunnel.out_bytes += frag.len() as u64;
@@ -545,7 +543,7 @@ impl Daemon {
         // priority only ever flows from data through to UDP
         // send. Done here, not at route_packet entry, to stay
         // clear of the dump-traffic agent's route boundary.
-        self.tx_priority = if self.settings.priorityinheritance {
+        self.dp.tx_priority = if self.settings.priorityinheritance {
             route::extract_tos(data).unwrap_or(0)
         } else {
             0
@@ -555,7 +553,7 @@ impl Daemon {
         log::debug!(target: "tincd::net",
                     "Sending packet of {len} bytes to {to}");
         // Counts attempts, not deliveries.
-        let tunnel = self.tunnels.entry(to_nid).or_default();
+        let tunnel = self.dp.tunnels.entry(to_nid).or_default();
         tunnel.out_packets += 1;
         tunnel.out_bytes += len as u64;
 

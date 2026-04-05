@@ -103,7 +103,7 @@ impl Daemon {
         // never probes above the cap.
         if let Some(cap) = pmtu_cap {
             let now = self.timers.now();
-            let tunnel = self.tunnels.entry(peer_id).or_default();
+            let tunnel = self.dp.tunnels.entry(peer_id).or_default();
             let p = tunnel
                 .pmtu
                 .get_or_insert_with(|| PmtuState::new(now, cap.min(MTU)));

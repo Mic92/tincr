@@ -445,6 +445,7 @@ impl Daemon {
     /// happen here: setup is called once. Tests that call setup
     /// twice in one process are wrong; integration tests use
     /// subprocess.
+    #[allow(clippy::too_many_lines)] // straight-line struct init; pulling 3 fields out makes it worse
     pub fn setup(
         confbase: &Path,
         pidfile: &Path,
@@ -664,32 +665,45 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: IntHashMap::default(),
             edge_addrs: HashMap::new(),
-            choose_udp_x: 0,
-            tunnels: IntHashMap::default(),
+            dp: super::DataPlane {
+                tunnels: IntHashMap::default(),
+                choose_udp_x: 0,
+                compressor: compress::Compressor::new(),
+                tx_priority: 0,
+                tx_scratch: Vec::with_capacity(
+                    12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
+                ),
+                rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
+                udp_rx_batch: Some(net::UdpRxBatch::new()),
+                gro_bucket: None,
+                gro_bucket_spare: Some(GroBucket::new()),
+                // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
+                // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
+                // Gate here so we never `offer()` into a bucket whose
+                // flush will fail at write — that would silently drop
+                // every coalesced burst.
+                #[cfg(target_os = "linux")]
+                gro_enabled: device_mode == tinc_device::Mode::Tun,
+                #[cfg(not(target_os = "linux"))]
+                gro_enabled: false,
+                device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
+                // Lazy: only allocated on first `DrainResult::Super`.
+                // TAP and non-Linux backends never produce Super,
+                // never spend the 100KB.
+                tso_scratch: None,
+                tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
+                // None: the send site only stages when inside
+                // `on_device_read`'s drain loop. The TxBatch itself
+                // is built lazily on first drain (no point allocating
+                // ~100KB on a tunnelserver that never sees device reads).
+                tx_batch: None,
+            },
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
             sleeptime: 10,
             started_at: timers.now(),
             icmp_ratelimit: icmp::IcmpRateLimit::new(),
-            compressor: compress::Compressor::new(),
-            tx_priority: 0,
-            tx_scratch: Vec::with_capacity(
-                12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
-            ),
-            rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
-            udp_rx_batch: Some(net::UdpRxBatch::new()),
-            gro_bucket: None,
-            gro_bucket_spare: Some(GroBucket::new()),
-            // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
-            // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
-            // Gate here so we never `offer()` into a bucket whose
-            // flush will fail at write - that would silently drop
-            // every coalesced burst.
-            #[cfg(target_os = "linux")]
-            gro_enabled: device_mode == tinc_device::Mode::Tun,
-            #[cfg(not(target_os = "linux"))]
-            gro_enabled: false,
             // Seed with now: the first `on_ping_tick` (after
             // `pingtimeout` seconds) sees a delta of `pingtimeout`,
             // well under the `2*30` suspend-detect threshold.
@@ -698,22 +712,11 @@ impl Daemon {
             overwrite_mac,
             mymac,
             device_errors: 0,
-            device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
-            // Lazy: only allocated on first `DrainResult::Super`.
-            // TAP and non-Linux backends never produce Super,
-            // never spend the 100KB.
-            tso_scratch: None,
-            tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
-            // None: the send site only stages when inside
-            // `on_device_read`'s drain loop. The TxBatch itself
-            // is built lazily on first drain (no point allocating
-            // ~100KB on a tunnelserver that never sees device reads).
-            tx_batch: None,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             connecting_socks: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
-            last_routes: Vec::new(),
+            last_routes: std::sync::Arc::new(Vec::new()),
             last_mst: Vec::new(),
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),

@@ -25,7 +25,7 @@ impl Daemon {
             RoutingMode::Router => (14, PKT_NORMAL),
             RoutingMode::Switch | RoutingMode::Hub => (0, PKT_MAC),
         };
-        let tunnel = self.tunnels.entry(to_nid).or_default();
+        let tunnel = self.dp.tunnels.entry(to_nid).or_default();
 
         // PACKET 17 short-circuit: direct meta-conn + doesn't fit
         // MTU → single-encrypt via meta-SPTPS. Gated BEFORE
@@ -87,7 +87,7 @@ impl Daemon {
         let compressed;
         let body: &[u8] = if level == compress::Level::None {
             payload
-        } else if let Some(c) = self.compressor.compress(payload, level) {
+        } else if let Some(c) = self.dp.compressor.compress(payload, level) {
             if c.len() < payload.len() {
                 record_type |= PKT_COMPRESSED;
                 compressed = c;
@@ -114,7 +114,7 @@ impl Daemon {
         // Encrypt into scratch with 12 bytes headroom for
         // [dst_id6‖src_id6]. Zero per-packet allocs; see
         // `seal_data_into` doc for the previous 3-alloc shape.
-        if let Err(e) = sptps.seal_data_into(record_type, body, &mut self.tx_scratch, 12) {
+        if let Err(e) = sptps.seal_data_into(record_type, body, &mut self.dp.tx_scratch, 12) {
             // Shouldn't happen: validkey checked, per-tunnel SPTPS
             // is always datagram-framed.
             log::warn!(target: "tincd::net",
@@ -140,7 +140,7 @@ impl Daemon {
                     nw |= self.send_sptps_data(peer, record_type, &bytes);
                 }
                 Output::HandshakeDone => {
-                    let tunnel = self.tunnels.entry(peer).or_default();
+                    let tunnel = self.dp.tunnels.entry(peer).or_default();
                     if !tunnel.status.validkey {
                         tunnel.status.validkey = true;
                         tunnel.status.waitingforkey = false;
@@ -174,7 +174,11 @@ impl Daemon {
         // over UDP (they ARE the PMTU discovery mechanism);
         // TCP-tunneled probe = peer bug.
         if record_type == PKT_PROBE {
-            let udppacket = self.tunnels.get(&peer).is_some_and(|t| t.status.udppacket);
+            let udppacket = self
+                .dp
+                .tunnels
+                .get(&peer)
+                .is_some_and(|t| t.status.udppacket);
             if !udppacket {
                 log::error!(target: "tincd::net",
                             "Got SPTPS PROBE from {peer_name} via TCP");
@@ -183,7 +187,7 @@ impl Daemon {
             // maxrecentlen for try_udp's gratuitous reply.
             #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
             let body_len = body.len() as u16;
-            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+            if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
                 && body_len > p.maxrecentlen
             {
                 p.maxrecentlen = body_len;
@@ -220,9 +224,9 @@ impl Daemon {
         // Decompress at the level WE asked for.
         let decompressed;
         let body: &[u8] = if record_type & PKT_COMPRESSED != 0 {
-            let incomp = self.tunnels.get(&peer).map_or(0, |t| t.incompression);
+            let incomp = self.dp.tunnels.get(&peer).map_or(0, |t| t.incompression);
             let level = compress::Level::from_wire(incomp);
-            if let Some(d) = self.compressor.decompress(body, level, MTU as usize) {
+            if let Some(d) = self.dp.compressor.decompress(body, level, MTU as usize) {
                 decompressed = d;
                 &decompressed
             } else {
@@ -262,7 +266,7 @@ impl Daemon {
         // maxrecentlen for try_udp's gratuitous probe-reply size.
         #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ MTU
         let frame_len = frame.len() as u16;
-        if let Some(t) = self.tunnels.get_mut(&peer)
+        if let Some(t) = self.dp.tunnels.get_mut(&peer)
             && t.status.udppacket
             && let Some(p) = t.pmtu.as_mut()
             && frame_len > p.maxrecentlen
@@ -271,7 +275,7 @@ impl Daemon {
         }
 
         let len = frame.len() as u64;
-        let tunnel = self.tunnels.entry(peer).or_default();
+        let tunnel = self.dp.tunnels.entry(peer).or_default();
         tunnel.in_packets += 1;
         tunnel.in_bytes += len;
 
@@ -279,7 +283,7 @@ impl Daemon {
     }
 
     /// Fast-path version of [`receive_sptps_record`]. Reads the body
-    /// from `self.rx_scratch[14..]` instead of a borrowed slice. Avoids
+    /// from `self.dp.rx_scratch[14..]` instead of a borrowed slice. Avoids
     /// the `frame: Vec<u8>` allocation by building the ethernet frame
     /// in-place in `rx_scratch` (the headroom was pre-reserved by
     /// `open_data_into`).
@@ -294,7 +298,7 @@ impl Daemon {
         peer_name: &str,
         record_type: u8,
     ) -> bool {
-        let body_len = self.rx_scratch.len() - 14;
+        let body_len = self.dp.rx_scratch.len() - 14;
 
         if body_len > usize::from(crate::tunnel::MTU) {
             log::error!(target: "tincd::net",
@@ -311,7 +315,7 @@ impl Daemon {
         if record_type == PKT_PROBE {
             #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
             let body_len_u16 = body_len as u16;
-            if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+            if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
                 && body_len_u16 > p.maxrecentlen
             {
                 p.maxrecentlen = body_len_u16;
@@ -319,9 +323,9 @@ impl Daemon {
             // udp_probe_h takes &[u8] and does its own copy for the
             // reply; safe to slice rx_scratch here (it borrows self
             // but udp_probe_h is &mut self... mem::take dance).
-            let scratch = std::mem::take(&mut self.rx_scratch);
+            let scratch = std::mem::take(&mut self.dp.rx_scratch);
             let nw = self.udp_probe_h(peer, peer_name, &scratch[14..]);
-            self.rx_scratch = scratch;
+            self.dp.rx_scratch = scratch;
             return nw;
         }
         if record_type & !(PKT_COMPRESSED | PKT_MAC) != 0 {
@@ -352,15 +356,16 @@ impl Daemon {
         // compressor already returns Vec; don't fight it.
         let decompressed: Option<Vec<u8>>;
         if record_type & PKT_COMPRESSED != 0 {
-            let incomp = self.tunnels.get(&peer).map_or(0, |t| t.incompression);
+            let incomp = self.dp.tunnels.get(&peer).map_or(0, |t| t.incompression);
             let level = compress::Level::from_wire(incomp);
             // mem::take so we can borrow rx_scratch immutably while
-            // calling &mut self.compressor.
-            let scratch = std::mem::take(&mut self.rx_scratch);
+            // calling &mut self.dp.compressor.
+            let scratch = std::mem::take(&mut self.dp.rx_scratch);
             let d = self
+                .dp
                 .compressor
                 .decompress(&scratch[14..], level, MTU as usize);
-            self.rx_scratch = scratch;
+            self.dp.rx_scratch = scratch;
             if let Some(d) = d {
                 decompressed = Some(d);
             } else {
@@ -386,14 +391,14 @@ impl Daemon {
         // The take leaves an empty Vec (no alloc); the restore brings
         // back the capacity-carrying one.
         let mut frame_vec: Vec<u8>;
-        let mut scratch = std::mem::take(&mut self.rx_scratch);
+        let mut scratch = std::mem::take(&mut self.dp.rx_scratch);
         let frame: &mut [u8] = if let Some(body) = &decompressed {
             // Compressed: synth a frame Vec the slow way.
             if offset == 0 {
                 frame_vec = body.clone();
             } else {
                 if body.is_empty() {
-                    self.rx_scratch = scratch;
+                    self.dp.rx_scratch = scratch;
                     return false;
                 }
                 let ethertype: u16 = match body[0] >> 4 {
@@ -402,7 +407,7 @@ impl Daemon {
                     v => {
                         log::debug!(target: "tincd::net",
                                     "Unknown IP version {v} in packet from {peer_name}");
-                        self.rx_scratch = scratch;
+                        self.dp.rx_scratch = scratch;
                         return false;
                     }
                 };
@@ -417,7 +422,7 @@ impl Daemon {
         } else {
             // Router mode (THE HOT PATH).
             if body_len == 0 {
-                self.rx_scratch = scratch;
+                self.dp.rx_scratch = scratch;
                 return false;
             }
             let ethertype: u16 = match scratch[14] >> 4 {
@@ -426,7 +431,7 @@ impl Daemon {
                 v => {
                     log::debug!(target: "tincd::net",
                                 "Unknown IP version {v} in packet from {peer_name}");
-                    self.rx_scratch = scratch;
+                    self.dp.rx_scratch = scratch;
                     return false;
                 }
             };
@@ -441,19 +446,19 @@ impl Daemon {
         // unconditionally.
         #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ 14+MTU
         let frame_len = frame.len() as u16;
-        if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+        if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
             && frame_len > p.maxrecentlen
         {
             p.maxrecentlen = frame_len;
         }
 
         let len = frame.len() as u64;
-        let tunnel = self.tunnels.entry(peer).or_default();
+        let tunnel = self.dp.tunnels.entry(peer).or_default();
         tunnel.in_packets += 1;
         tunnel.in_bytes += len;
 
         let nw = self.route_packet(frame, Some(peer));
-        self.rx_scratch = scratch;
+        self.dp.rx_scratch = scratch;
         nw
     }
 
@@ -492,7 +497,7 @@ impl Daemon {
         // slice-panic on empty scratch even when ct=Some.
         let ct = match ct {
             Some(s) => s,
-            None => &self.tx_scratch[12..],
+            None => &self.dp.tx_scratch[12..],
         };
 
         let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
@@ -551,7 +556,7 @@ impl Daemon {
             // (relayed handshakes don't touch state).
             let my_compression = self.settings.compression;
             if from_is_myself {
-                self.tunnels.entry(to_nid).or_default().incompression = my_compression;
+                self.dp.tunnels.entry(to_nid).or_default().incompression = my_compression;
             }
             // `-1 -1 -1` are LITERAL string (cipher/digest/maclen
             // placeholders for SPTPS mode, never read by
@@ -593,14 +598,10 @@ impl Daemon {
         // tx_scratch[12..] from seal_data_into. Some(ct): relay/
         // handshake/probe path. origlen is plaintext body length
         // (relay's MTU measured at that layer).
-        let ct_len = ct.map_or_else(|| self.tx_scratch.len() - 12, <[u8]>::len);
+        let ct_len = ct.map_or_else(|| self.dp.tx_scratch.len() - 12, <[u8]>::len);
         let origlen = ct_len.saturating_sub(tinc_sptps::DATAGRAM_OVERHEAD);
 
-        let Some(route) = self
-            .last_routes
-            .get(to_nid.0 as usize)
-            .and_then(Option::as_ref)
-        else {
+        let Some(route) = self.route_of(to_nid) else {
             log::debug!(target: "tincd::net",
                         "No route to {}; dropping",
                         self.node_log_name(to_nid));
@@ -612,7 +613,7 @@ impl Daemon {
         // PROBE always prefers via (tiny + measures via's MTU); data
         // prefers via only if it FITS. minmtu=0 until discovery →
         // data goes hop-by-hop via nexthop until then (correct).
-        let via_minmtu = self.tunnels.get(&via_nid).map_or(0, TunnelState::minmtu);
+        let via_minmtu = self.dp.tunnels.get(&via_nid).map_or(0, TunnelState::minmtu);
         let relay_nid = if via_nid != self.myself
             && (record_type == PKT_PROBE || origlen <= usize::from(via_minmtu))
         {
@@ -627,11 +628,7 @@ impl Daemon {
         let direct = from_is_myself && to_nid == relay_nid;
 
         // proto minor 4+ understands the 12-byte ID prefix.
-        let relay_options = self
-            .last_routes
-            .get(relay_nid.0 as usize)
-            .and_then(Option::as_ref)
-            .map_or(0, |r| r.options);
+        let relay_options = self.route_of(relay_nid).map_or(0, |r| r.options);
         let relay_supported = (relay_options >> 24) >= 4;
 
         // EITHER side requesting tcponly forces TCP.
@@ -643,7 +640,11 @@ impl Daemon {
         // minmtu==0 means "unknown" not "zero"; we go UDP
         // optimistically until PMTU runs. First packet over a fresh
         // relay needs the dance to settle either way.
-        let relay_minmtu = self.tunnels.get(&relay_nid).map_or(0, TunnelState::minmtu);
+        let relay_minmtu = self
+            .dp
+            .tunnels
+            .get(&relay_nid)
+            .map_or(0, TunnelState::minmtu);
         let too_big =
             record_type != PKT_PROBE && relay_minmtu > 0 && origlen > usize::from(relay_minmtu);
         let go_tcp = record_type == tinc_sptps::REC_HANDSHAKE
@@ -666,13 +667,13 @@ impl Daemon {
         // allocs/copies. Some(ct): relay/handshake — one body
         // memmove, alloc amortized to zero (scratch persists).
         if let Some(ct) = ct {
-            self.tx_scratch.clear();
-            self.tx_scratch.extend_from_slice(dst_id.as_bytes());
-            self.tx_scratch.extend_from_slice(src_id.as_bytes());
-            self.tx_scratch.extend_from_slice(ct);
+            self.dp.tx_scratch.clear();
+            self.dp.tx_scratch.extend_from_slice(dst_id.as_bytes());
+            self.dp.tx_scratch.extend_from_slice(src_id.as_bytes());
+            self.dp.tx_scratch.extend_from_slice(ct);
         } else {
-            self.tx_scratch[0..6].copy_from_slice(dst_id.as_bytes());
-            self.tx_scratch[6..12].copy_from_slice(src_id.as_bytes());
+            self.dp.tx_scratch[0..6].copy_from_slice(dst_id.as_bytes());
+            self.dp.tx_scratch[6..12].copy_from_slice(src_id.as_bytes());
         }
 
         // Send to RELAY, not `to`. Fast path: udp_addr_cached set
@@ -680,6 +681,7 @@ impl Daemon {
         // deterministic. Full choose_udp_address was 2.18% self-time
         // (Vec alloc + scan per packet).
         let cached = self
+            .dp
             .tunnels
             .get(&relay_nid)
             .and_then(|t| t.udp_addr_cached.clone());
@@ -700,7 +702,7 @@ impl Daemon {
         };
 
         if self.settings.priorityinheritance {
-            inherit_tos(&mut self.listeners, sock, sockaddr, self.tx_priority);
+            inherit_tos(&mut self.listeners, sock, sockaddr, self.dp.tx_priority);
         }
 
         // TX batching (`RUST_REWRITE_10G.md`): if we're inside
@@ -727,24 +729,29 @@ impl Daemon {
         // current run, start a new one. Never worse than per-frame.
         if ct.is_none()
             && cached.is_some()
-            && let Some(batch) = self.tx_batch.as_mut()
+            && let Some(batch) = self.dp.tx_batch.as_mut()
         {
             // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
             // the immediate-send path uses below.
             #[allow(clippy::cast_possible_truncation)] // ≤ MTU
             let at_len = origlen as u16;
-            if !batch.can_coalesce(sockaddr, sock, self.tx_scratch.len()) {
+            if !batch.can_coalesce(sockaddr, sock, self.dp.tx_scratch.len()) {
                 // Take the batch out, flush, put back. Can't call
                 // `flush_tx_batch` (borrows &mut self while batch
                 // is borrowed). Same `mem::take` dance as the
                 // arena.
-                let mut b = self.tx_batch.take().expect("checked Some above");
-                Self::ship_tx_batch(&mut b, &mut self.listeners, &mut self.tunnels, &self.graph);
-                self.tx_batch = Some(b);
+                let mut b = self.dp.tx_batch.take().expect("checked Some above");
+                Self::ship_tx_batch(
+                    &mut b,
+                    &mut self.listeners,
+                    &mut self.dp.tunnels,
+                    &self.graph,
+                );
+                self.dp.tx_batch = Some(b);
             }
             // Reborrow after the possible take/restore.
-            let batch = self.tx_batch.as_mut().expect("restored above");
-            batch.stage(sockaddr, sock, relay_nid, at_len, &self.tx_scratch);
+            let batch = self.dp.tx_batch.as_mut().expect("restored above");
+            batch.stage(sockaddr, sock, relay_nid, at_len, &self.dp.tx_scratch);
             return false; // staged; UDP send doesn't touch outbuf
         }
 
@@ -766,13 +773,13 @@ impl Daemon {
         origlen: usize,
     ) {
         #[allow(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
-        let len = self.tx_scratch.len() as u16;
+        let len = self.dp.tx_scratch.len() as u16;
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
             return;
         };
         let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
             dst: sockaddr,
-            frames: &self.tx_scratch,
+            frames: &self.dp.tx_scratch,
             stride: len,
             count: 1,
             last_len: len,
@@ -788,6 +795,7 @@ impl Daemon {
             #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
             let at_len = origlen as u16;
             if let Some(p) = self
+                .dp
                 .tunnels
                 .get_mut(&relay_nid)
                 .and_then(|t| t.pmtu.as_mut())

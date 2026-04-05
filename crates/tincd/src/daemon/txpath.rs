@@ -111,18 +111,19 @@ impl Daemon {
         // udp_confirmed lives in BOTH `status` (dump_nodes packing)
         // and `pmtu` (authoritative).
         let now = self.timers.now();
-        let actions = if let Some(p) = self.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
+        let actions = if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+        {
             p.on_probe_reply(len, now)
         } else {
             // No pmtu state yet — seed now to record the floor.
-            let tunnel = self.tunnels.entry(peer).or_default();
+            let tunnel = self.dp.tunnels.entry(peer).or_default();
             let mut p = PmtuState::new(now, MTU);
             let actions = p.on_probe_reply(len, now);
             tunnel.pmtu = Some(p);
             actions
         };
         // Mirror udp_confirmed into status.
-        if let Some(t) = self.tunnels.get_mut(&peer) {
+        if let Some(t) = self.dp.tunnels.get_mut(&peer) {
             t.status.udp_confirmed = true;
         }
         for a in &actions {
@@ -167,7 +168,7 @@ impl Daemon {
 
     /// Shared path for probe requests and replies.
     pub(super) fn send_probe_record(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
-        let tunnel = self.tunnels.entry(peer).or_default();
+        let tunnel = self.dp.tunnels.entry(peer).or_default();
         if !tunnel.status.validkey {
             return false;
         }
@@ -201,13 +202,9 @@ impl Daemon {
     pub(super) fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
         // TCPONLY + direct meta conn ⇒ skip UDP.
         {
-            let target_options = self
-                .last_routes
-                .get(target.0 as usize)
-                .and_then(Option::as_ref)
-                .map_or(ConnOptions::empty(), |r| {
-                    ConnOptions::from_bits_retain(r.options)
-                });
+            let target_options = self.route_of(target).map_or(ConnOptions::empty(), |r| {
+                ConnOptions::from_bits_retain(r.options)
+            });
             let tcponly = (self.myself_options | target_options).contains(ConnOptions::TCPONLY);
             if tcponly {
                 let has_direct_conn = self.nodes.get(&target).is_some_and(|ns| ns.conn.is_some());
@@ -222,7 +219,7 @@ impl Daemon {
         // 10-second restart.
         let now = self.timers.now();
         {
-            let tunnel = self.tunnels.entry(target).or_default();
+            let tunnel = self.dp.tunnels.entry(target).or_default();
             if !tunnel.status.validkey {
                 if !tunnel.status.waitingforkey {
                     return self.send_req_key(target);
@@ -246,10 +243,7 @@ impl Daemon {
         // Static-relay recursion. Two-phase borrow: copy NodeId,
         // drop, recurse.
         {
-            let route = self
-                .last_routes
-                .get(target.0 as usize)
-                .and_then(Option::as_ref);
+            let route = self.route_of(target);
             // Unreachable: pretend direct.
             let via_nid = route.map_or(target, |r| {
                 if r.via == self.myself {
@@ -261,11 +255,7 @@ impl Daemon {
             if via_nid != target {
                 // minor <4 lacks relay support. Our default is
                 // 7<<24; gate matters for old-C interop.
-                let via_options = self
-                    .last_routes
-                    .get(via_nid.0 as usize)
-                    .and_then(Option::as_ref)
-                    .map_or(0, |r| r.options);
+                let via_options = self.route_of(via_nid).map_or(0, |r| r.options);
                 if (via_options >> 24) < 4 {
                     return false;
                 }
@@ -288,6 +278,7 @@ impl Daemon {
             // no UDP addr yet the probe wouldn't go anywhere either
             // — fall back to MTU and let the next try_tx pick it up.
             let needs_seed = self
+                .dp
                 .tunnels
                 .get(&target)
                 .and_then(|t| t.pmtu.as_ref())
@@ -299,7 +290,7 @@ impl Daemon {
                 MTU
             };
 
-            let tunnel = self.tunnels.entry(target).or_default();
+            let tunnel = self.dp.tunnels.entry(target).or_default();
             let p = tunnel
                 .pmtu
                 .get_or_insert_with(|| PmtuState::new(now, initial_maxmtu));
@@ -327,24 +318,17 @@ impl Daemon {
         // while trying direct UDP, so send_sptps_data's b64-TCP
         // fallback can reach.
         let udp_confirmed = self
+            .dp
             .tunnels
             .get(&target)
             .and_then(|t| t.pmtu.as_ref())
             .is_some_and(|p| p.udp_confirmed);
         if !udp_confirmed {
-            let nexthop = self
-                .last_routes
-                .get(target.0 as usize)
-                .and_then(Option::as_ref)
-                .map(|r| r.nexthop);
+            let nexthop = self.route_of(target).map(|r| r.nexthop);
             if let Some(nh) = nexthop
                 && nh != target
             {
-                let nh_options = self
-                    .last_routes
-                    .get(nh.0 as usize)
-                    .and_then(Option::as_ref)
-                    .map_or(0, |r| r.options);
+                let nh_options = self.route_of(nh).map_or(0, |r| r.options);
                 if (nh_options >> 24) >= 4 {
                     nw |= self.try_tx(nh, mtu);
                 }
@@ -362,7 +346,7 @@ impl Daemon {
             return false;
         }
 
-        let tunnel = self.tunnels.entry(target).or_default();
+        let tunnel = self.dp.tunnels.entry(target).or_default();
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
 
         // ─── gratuitous reply keepalive ──────────────────────────
@@ -390,7 +374,7 @@ impl Daemon {
 
         // ─── probe request ──────────────────────────────────────
         // Seed pmtu if needed (we read udp_ping_sent).
-        let tunnel = self.tunnels.entry(target).or_default();
+        let tunnel = self.dp.tunnels.entry(target).or_default();
         let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
         let interval = if p.udp_confirmed {
             self.settings.udp_discovery_keepalive_interval
@@ -407,21 +391,17 @@ impl Daemon {
             // no early-return between set/clear.
             if self.settings.local_discovery {
                 let confirmed = self
+                    .dp
                     .tunnels
                     .get(&target)
                     .is_some_and(|t| t.status.udp_confirmed);
-                let has_prevedge = self
-                    .last_routes
-                    .get(target.0 as usize)
-                    .and_then(Option::as_ref)
-                    .and_then(|r| r.prevedge)
-                    .is_some();
+                let has_prevedge = self.route_of(target).and_then(|r| r.prevedge).is_some();
                 if !confirmed && has_prevedge {
-                    if let Some(t) = self.tunnels.get_mut(&target) {
+                    if let Some(t) = self.dp.tunnels.get_mut(&target) {
                         t.status.send_locally = true;
                     }
                     nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
-                    if let Some(t) = self.tunnels.get_mut(&target) {
+                    if let Some(t) = self.dp.tunnels.get_mut(&target) {
                         t.status.send_locally = false;
                     }
                 }
@@ -453,25 +433,30 @@ impl Daemon {
 
     /// `to->nexthop->connection`. Meta conn for routing toward `to`.
     pub(super) fn conn_for_nexthop(&self, to_nid: NodeId) -> Option<ConnId> {
-        let nexthop = self
-            .last_routes
-            .get(to_nid.0 as usize)
-            .and_then(Option::as_ref)?
-            .nexthop;
+        let nexthop = self.route_of(to_nid)?.nexthop;
         self.nodes.get(&nexthop)?.conn
     }
 
     /// `Route` lookup. Reads cached `last_routes` (not a fresh sssp).
-    pub(super) fn route_of(&self, nid: NodeId) -> Option<&Route> {
-        self.last_routes.get(nid.0 as usize)?.as_ref()
+    ///
+    /// By-value: `Route` is `Copy` (32 bytes, all-Copy fields). The
+    /// `Arc` deref is transparent — same codegen as `&Vec`.
+    #[inline]
+    pub(super) fn route_of(&self, nid: NodeId) -> Option<Route> {
+        *self.last_routes.get(nid.0 as usize)?
     }
 
     /// `n->{min,max}mtu` snapshot for `adjust_mtu_for_send`.
     pub(super) fn pmtu_snapshot(&self, nid: NodeId) -> Option<PmtuSnapshot> {
-        self.tunnels.get(&nid)?.pmtu.as_ref().map(|p| PmtuSnapshot {
-            minmtu: p.minmtu,
-            maxmtu: p.maxmtu,
-        })
+        self.dp
+            .tunnels
+            .get(&nid)?
+            .pmtu
+            .as_ref()
+            .map(|p| PmtuSnapshot {
+                minmtu: p.minmtu,
+                maxmtu: p.maxmtu,
+            })
     }
 
     // ─── load_all_nodes ─────────────────────────────────────────
@@ -718,7 +703,7 @@ impl Daemon {
         };
 
         let now = self.timers.now();
-        let last_sent = self.tunnels.get(&dereffed).and_then(|t| t.udp_info_sent);
+        let last_sent = self.dp.tunnels.get(&dereffed).and_then(|t| t.udp_info_sent);
         let interval = Duration::from_secs(u64::from(self.settings.udp_info_interval));
 
         if !udp_info::should_send_udp_info(
@@ -761,7 +746,7 @@ impl Daemon {
         let nw = conn.send(format_args!("{}", msg.format()));
 
         if from_is_myself {
-            self.tunnels.entry(dereffed).or_default().udp_info_sent = Some(now);
+            self.dp.tunnels.entry(dereffed).or_default().udp_info_sent = Some(now);
         }
         nw
     }
@@ -819,6 +804,7 @@ impl Daemon {
 
         // Our observation of from's UDP address (or unspec).
         let (addr, port) = self
+            .dp
             .tunnels
             .get(&from_nid)
             .and_then(|t| t.udp_addr)
@@ -878,7 +864,7 @@ impl Daemon {
         });
 
         let now = self.timers.now();
-        let last_sent = self.tunnels.get(&to_nid).and_then(|t| t.mtu_info_sent);
+        let last_sent = self.dp.tunnels.get(&to_nid).and_then(|t| t.mtu_info_sent);
         let interval = Duration::from_secs(u64::from(self.settings.mtu_info_interval));
 
         if !udp_info::should_send_mtu_info(
@@ -915,7 +901,7 @@ impl Daemon {
         );
 
         if from_is_myself {
-            self.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
+            self.dp.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
         }
 
         let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
@@ -961,6 +947,7 @@ impl Daemon {
         let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             let directly_connected = self.nodes.get(&nid).and_then(|ns| ns.conn).is_some();
             let udp_confirmed = self
+                .dp
                 .tunnels
                 .get(&nid)
                 .is_some_and(|t| t.status.udp_confirmed);
@@ -977,7 +964,7 @@ impl Daemon {
         });
         let to = self.node_ids.get(&parsed.to).copied();
         let current_from_addr =
-            from.and_then(|(nid, _)| self.tunnels.get(&nid).and_then(|t| t.udp_addr));
+            from.and_then(|(nid, _)| self.dp.tunnels.get(&nid).and_then(|t| t.udp_addr));
 
         match udp_info::on_receive_udp_info(&parsed, from, to, current_from_addr) {
             UdpInfoAction::UnknownNode => {
@@ -996,7 +983,7 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
-                let t = self.tunnels.entry(from).or_default();
+                let t = self.dp.tunnels.entry(from).or_default();
                 t.udp_addr = Some(new_addr);
                 t.udp_addr_cached = None; // stale
                 Ok(self.send_udp_info_forward(from, to))
@@ -1026,7 +1013,7 @@ impl Daemon {
 
         let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             // Supply zero defaults for missing tunnel state.
-            let t = self.tunnels.get(&nid);
+            let t = self.dp.tunnels.get(&nid);
             (
                 nid,
                 FromMtuState {
@@ -1057,7 +1044,7 @@ impl Daemon {
                 // matters if pmtu seeded; unseeded reads MTU anyway.
                 log::debug!(target: "tincd::proto",
                             "Using provisional MTU {new_mtu} for {}", parsed.from);
-                if let Some(p) = self.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
+                if let Some(p) = self.dp.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
                     p.mtu = new_mtu;
                 }
                 Ok(self.send_mtu_info_from(from, to, &parsed.to, i32::from(new_mtu), false))
@@ -1083,6 +1070,7 @@ impl Daemon {
 
         // ─── send_locally override ───────────────────────────────
         let send_locally = self
+            .dp
             .tunnels
             .get(&to_nid)
             .is_some_and(|t| t.status.send_locally);
@@ -1106,7 +1094,7 @@ impl Daemon {
         }
 
         // ─── reflexive (stashed udp_addr) ────────────────────────
-        if let Some(t) = self.tunnels.get(&to_nid)
+        if let Some(t) = self.dp.tunnels.get(&to_nid)
             && let Some(addr) = t.udp_addr
         {
             if t.status.udp_confirmed {
@@ -1115,9 +1103,9 @@ impl Daemon {
             }
             // 1-of-3 returns early with stashed addr; other 2 fall
             // through to edge exploration.
-            self.choose_udp_x = self.choose_udp_x.wrapping_add(1);
-            if self.choose_udp_x >= 3 {
-                self.choose_udp_x = 0;
+            self.dp.choose_udp_x = self.dp.choose_udp_x.wrapping_add(1);
+            if self.dp.choose_udp_x >= 3 {
+                self.dp.choose_udp_x = 0;
                 let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
                 return Some((addr, sock));
             }

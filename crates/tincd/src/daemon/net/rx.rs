@@ -113,13 +113,14 @@ impl Daemon {
         // this is the only `take` site, no re-entrancy (epoll is
         // single-threaded), and we always put it back below.
         let mut batch = self
+            .dp
             .udp_rx_batch
             .take()
             .expect("udp_rx_batch is Some between on_udp_recv calls");
 
         self.recvmmsg_batch(i, &mut batch);
 
-        self.udp_rx_batch = Some(batch);
+        self.dp.udp_rx_batch = Some(batch);
     }
 
     /// One `recvmmsg(64)` + dispatch. Returns the number of
@@ -192,8 +193,8 @@ impl Daemon {
         // to coalesce with; the bucket would round-trip it through a
         // memcpy for no win). And only when the device can take a
         // vnet_hdr super — see the `gro_enabled` gate at setup.
-        let mut gro = if self.gro_enabled && count > 1 {
-            self.gro_bucket_spare.take()
+        let mut gro = if self.dp.gro_enabled && count > 1 {
+            self.dp.gro_bucket_spare.take()
         } else {
             None
         };
@@ -208,14 +209,14 @@ impl Daemon {
             // route_packet → send_packet_myself. Same out-and-back
             // as `rx_scratch`. Taken back below before the next
             // iteration so the local `gro` owns it across the loop.
-            self.gro_bucket = gro.take();
+            self.dp.gro_bucket = gro.take();
             self.handle_incoming_vpn_packet(pkt, peer);
-            gro = self.gro_bucket.take();
+            gro = self.dp.gro_bucket.take();
         }
         if let Some(mut bucket) = gro {
             self.gro_flush(&mut bucket);
             // 64KB stays warm for the next batch.
-            self.gro_bucket_spare = Some(bucket);
+            self.dp.gro_bucket_spare = Some(bucket);
         }
 
         count
@@ -274,7 +275,7 @@ impl Daemon {
             return;
         }
 
-        let tunnel = self.tunnels.entry(from_nid).or_default();
+        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
         let Some(sptps) = tunnel.sptps.as_deref_mut() else {
             // UDP packet before handshake started; kick send_req_key
             // (harmless if one's already in flight).
@@ -303,7 +304,7 @@ impl Daemon {
         //   - InvalidState: no incipher yet (pre-handshake UDP)
         //   - BadRecord: REC_HANDSHAKE/KEX-renegotiate (rare; replay
         //     window NOT advanced, receive() sees the seqno fresh)
-        match sptps.open_data_into(ct, &mut self.rx_scratch, 14) {
+        match sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14) {
             Ok(record_type) => {
                 // Only direct (dst == nullid) confirms udp_addr;
                 // relayed-to-us would cache the relay's addr. Once
@@ -360,7 +361,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "Failed to decode UDP packet from {from_name}: {e:?}");
                 let now = self.timers.now();
-                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
                     t.last_req_key
                         .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
                 });
@@ -373,6 +374,7 @@ impl Daemon {
 
         // Slow path stays exactly as-is.
         let Some(sptps) = self
+            .dp
             .tunnels
             .get_mut(&from_nid)
             .and_then(|t| t.sptps.as_deref_mut())
@@ -387,7 +389,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "Failed to decode UDP packet from {from_name}: {e:?}");
                 let now = self.timers.now();
-                let gate_ok = self.tunnels.get(&from_nid).is_none_or(|t| {
+                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
                     t.last_req_key
                         .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
                 });
@@ -409,7 +411,7 @@ impl Daemon {
             let listener_addrs: Vec<SocketAddr> =
                 self.listeners.iter().map(|s| s.listener.local).collect();
             let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
-            let tunnel = self.tunnels.entry(from_nid).or_default();
+            let tunnel = self.dp.tunnels.entry(from_nid).or_default();
             if !tunnel.status.udp_confirmed {
                 log::debug!(target: "tincd::net",
                             "UDP address of {from_name} confirmed: {peer_addr}");
@@ -430,7 +432,7 @@ impl Daemon {
 
         let nw = self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
         // Clear udppacket (deferred, see above).
-        if let Some(t) = self.tunnels.get_mut(&from_nid) {
+        if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
             t.status.udppacket = false;
         }
         if nw {
@@ -479,7 +481,8 @@ impl Daemon {
             // "does this UDP src addr belong to a node that has
             // confirmed UDP with us?"
             let n_confirmed = peer.is_some_and(|peer_addr| {
-                self.tunnels
+                self.dp
+                    .tunnels
                     .values()
                     .any(|t| t.status.udp_confirmed && t.udp_addr == Some(peer_addr))
             });
@@ -506,11 +509,7 @@ impl Daemon {
         // so next packet skips the dynamic relay. Gated to
         // static-relay-only so every hop in a chain doesn't emit
         // its own hint.
-        let from_via = self
-            .last_routes
-            .get(from_nid.0 as usize)
-            .and_then(Option::as_ref)
-            .map(|r| r.via);
+        let from_via = self.route_of(from_nid).map(|r| r.via);
         // Non-null dst_id6 means SOMEONE relayed (if `from`
         // itself, the prefix would be null).
         if from_via == Some(self.myself) && self.send_udp_info(from_nid, from_name, true) {

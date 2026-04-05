@@ -52,6 +52,7 @@ impl Daemon {
             // `udp_rx_batch`. The arena is `Some` between calls
             // (set in `setup`, never taken elsewhere).
             let mut arena = self
+                .dp
                 .device_arena
                 .take()
                 .expect("device_arena is Some between on_device_read calls");
@@ -70,7 +71,7 @@ impl Daemon {
                                     "Too many errors from device, exiting!");
                         self.running = false;
                     }
-                    self.device_arena = Some(arena);
+                    self.dp.device_arena = Some(arena);
                     if nw {
                         self.maybe_set_write_any();
                     }
@@ -82,7 +83,7 @@ impl Daemon {
                 tinc_device::DrainResult::Empty => {
                     // EAGAIN. Queue drained; we hold the EPOLLET
                     // contract. Put arena back, exit the loop.
-                    self.device_arena = Some(arena);
+                    self.dp.device_arena = Some(arena);
                     break;
                 }
                 tinc_device::DrainResult::Frames { count } => {
@@ -118,8 +119,8 @@ impl Daemon {
                     // the vnet's Frames{1}-then-Frames{1}-then-Super
                     // sequence accumulates into one sendmsg.
                     if !batch_armed && (count > 1 || iters > 1) {
-                        if self.tx_batch.is_none() {
-                            self.tx_batch = Some(crate::egress::TxBatch::new(
+                        if self.dp.tx_batch.is_none() {
+                            self.dp.tx_batch = Some(crate::egress::TxBatch::new(
                                 DEVICE_DRAIN_CAP
                                     * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
                             ));
@@ -128,7 +129,7 @@ impl Daemon {
                     }
                     for i in 0..count {
                         let n = arena.lens()[i];
-                        let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                        let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                         myself_tunnel.in_packets += 1;
                         myself_tunnel.in_bytes += n as u64;
 
@@ -147,7 +148,7 @@ impl Daemon {
                     if count > 1 {
                         self.flush_tx_batch();
                     }
-                    self.device_arena = Some(arena);
+                    self.dp.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
                         // Cap hit. LT re-fires next turn.
                         break;
@@ -181,7 +182,7 @@ impl Daemon {
                     self.device_errors = 0;
 
                     // Lazy alloc the scratch (first Super only).
-                    let scratch = self.tso_scratch.get_or_insert_with(|| {
+                    let scratch = self.dp.tso_scratch.get_or_insert_with(|| {
                         vec![0u8; DEVICE_DRAIN_CAP * tinc_device::DeviceArena::STRIDE]
                             .into_boxed_slice()
                     });
@@ -189,7 +190,7 @@ impl Daemon {
                     // `route_packet` borrows `&mut self`, the slice
                     // borrow conflicts.
                     let mut scratch = std::mem::take(scratch);
-                    let mut tso_lens = std::mem::take(&mut self.tso_lens);
+                    let mut tso_lens = std::mem::take(&mut self.dp.tso_lens);
 
                     let hdr = tinc_device::VirtioNetHdr {
                         flags: 0,    // unused by tso_split (it always csums)
@@ -211,8 +212,8 @@ impl Daemon {
                         Ok(count) => {
                             // Same TX-batch staging as `Frames`. Gate on
                             // count>1 (one segment = no batch advantage).
-                            if count > 1 && self.tx_batch.is_none() {
-                                self.tx_batch = Some(crate::egress::TxBatch::new(
+                            if count > 1 && self.dp.tx_batch.is_none() {
+                                self.dp.tx_batch = Some(crate::egress::TxBatch::new(
                                     DEVICE_DRAIN_CAP
                                         * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
                                 ));
@@ -221,7 +222,7 @@ impl Daemon {
                             // (the "read() drops 30×" gate metric counts
                             // syscalls, not stat increments). Bytes = the
                             // raw IP payload we got from the kernel.
-                            let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+                            let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                             myself_tunnel.in_packets += 1;
                             myself_tunnel.in_bytes += len as u64;
 
@@ -239,18 +240,13 @@ impl Daemon {
                             // "other" projection assumed the trie lookup
                             // amortizes; it does (same `last_routes[]`
                             // index), and that's the expensive half.
-                            //
-                            // Re-profile after this lands: if `route_packet`
-                            // overhead is still visible, factor a
-                            // `route_first_then_send_rest` that hoists the
-                            // dst out. ~+40 LOC; not yet.
                             for i in 0..count {
                                 let n = tso_lens[i];
                                 let off = i * tinc_device::DeviceArena::STRIDE;
                                 nw |= self.route_packet(&mut scratch[off..off + n], None);
                             }
-                            // Ship the super's segments. The post-loop
-                            // flush below is a no-op on empty.
+                            // Ship the super's segments. The post-
+                            // loop flush below is a no-op on empty.
                             self.flush_tx_batch();
                         }
                         Err(e) => {
@@ -264,9 +260,9 @@ impl Daemon {
                         }
                     }
 
-                    self.tso_scratch = Some(scratch);
-                    self.tso_lens = tso_lens;
-                    self.device_arena = Some(arena);
+                    self.dp.tso_scratch = Some(scratch);
+                    self.dp.tso_lens = tso_lens;
+                    self.dp.device_arena = Some(arena);
 
                     // One Super = ~30-43 frames worth. Count it against
                     // the iteration budget as if it were a Frames{cap}
@@ -287,7 +283,7 @@ impl Daemon {
         // back to immediate-send outside this fn.
         if batch_armed {
             self.flush_tx_batch();
-            self.tx_batch = None;
+            self.dp.tx_batch = None;
         }
         // Cap hit. LT re-fires next turn — encrypt cost of one super
         // (~43 frames) per wake is the fairness bound, not an ET
@@ -301,9 +297,14 @@ impl Daemon {
     /// `on_device_read`'s drain loop and on dst/size mismatch
     /// mid-loop. No-op on empty.
     fn flush_tx_batch(&mut self) {
-        if let Some(mut b) = self.tx_batch.take() {
-            Self::ship_tx_batch(&mut b, &mut self.listeners, &mut self.tunnels, &self.graph);
-            self.tx_batch = Some(b);
+        if let Some(mut b) = self.dp.tx_batch.take() {
+            Self::ship_tx_batch(
+                &mut b,
+                &mut self.listeners,
+                &mut self.dp.tunnels,
+                &self.graph,
+            );
+            self.dp.tx_batch = Some(b);
         }
     }
 
@@ -383,7 +384,7 @@ impl Daemon {
             data[11] ^= 0xFF;
         }
         let len = data.len() as u64;
-        let myself_tunnel = self.tunnels.entry(self.myself).or_default();
+        let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
         myself_tunnel.out_packets += 1;
         myself_tunnel.out_bytes += len;
 
@@ -396,13 +397,13 @@ impl Daemon {
         // `data` is `[synth eth(14)][IP]` — the offer wants raw IP.
         // The eth header is throwaway in TUN mode anyway (the
         // existing `device.write` stomps it for the vnet_hdr stomp).
-        if let Some(mut bucket) = self.gro_bucket.take() {
+        if let Some(mut bucket) = self.dp.gro_bucket.take() {
             use tinc_device::GroVerdict;
             const ETH_HLEN: usize = 14;
             if data.len() > ETH_HLEN {
                 match bucket.offer(&data[ETH_HLEN..]) {
                     GroVerdict::Coalesced => {
-                        self.gro_bucket = Some(bucket);
+                        self.dp.gro_bucket = Some(bucket);
                         return; // absorbed; written on flush
                     }
                     GroVerdict::FlushFirst => {
@@ -420,7 +421,7 @@ impl Daemon {
                         // build correctness on that). Never
                         // FlushFirst on an empty bucket.
                         debug_assert_ne!(v, GroVerdict::FlushFirst);
-                        self.gro_bucket = Some(bucket);
+                        self.dp.gro_bucket = Some(bucket);
                         if v == GroVerdict::Coalesced {
                             return;
                         }
@@ -435,11 +436,11 @@ impl Daemon {
                         // candidate from the SAME flow (e.g. a FIN)
                         // mustn't reorder past data with lower seq.
                         self.gro_flush(&mut bucket);
-                        self.gro_bucket = Some(bucket);
+                        self.dp.gro_bucket = Some(bucket);
                     }
                 }
             } else {
-                self.gro_bucket = Some(bucket);
+                self.dp.gro_bucket = Some(bucket);
             }
         }
 
