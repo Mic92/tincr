@@ -1,10 +1,9 @@
-//! Raw epoll syscalls. No mio. The shared slab + dispatch lives in
-//! `mod.rs`; this is just the platform syscall surface so a future
-//! `kqueue.rs` can slot in.
+//! Raw epoll syscalls. The shared slab + dispatch lives in `mod.rs`;
+//! this is just the platform syscall surface so a future `kqueue.rs`
+//! can slot in.
 //!
-//! mio used to do this for us. mio's `epoll.rs` is ~200 LOC because
-//! it abstracts over flags we don't use (`EPOLLPRI`, `EPOLLRDHUP`,
-//! one-shot mode). We need ~90.
+//! We don't register `EPOLLPRI`/`EPOLLRDHUP`/oneshot — peer-close is
+//! detected via `read() → 0`, same as C tinc.
 
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -77,9 +76,8 @@ pub(super) fn wait(
     events: &mut Vec<RawEvent>,
     timeout: Option<Duration>,
 ) -> io::Result<()> {
-    // Same clamp mio does internally. Our timer wheel caps at
-    // ~pingtimeout so this never triggers in practice, but
-    // saturating arithmetic is free.
+    // Clamp to c_int range. Our timer wheel caps at ~pingtimeout so
+    // this never triggers in practice, but saturating is free.
     #[allow(clippy::cast_possible_truncation)] // c_int::MAX = 24.8 days; we min() to it
     let ms: libc::c_int = timeout.map_or(-1, |d| {
         d.as_millis().min(libc::c_int::MAX as u128) as libc::c_int
@@ -113,9 +111,7 @@ pub(super) fn wait(
     Ok(())
 }
 
-// Event accessors. mio's Event::is_* covered EPOLLPRI/EPOLLRDHUP
-// too — we never asked. Peer-close is detected via read() → 0
-// (same as C).
+// Event accessors. Only EPOLLIN/EPOLLOUT — see module doc.
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)] // tokens are slot indices, fit usize on any platform

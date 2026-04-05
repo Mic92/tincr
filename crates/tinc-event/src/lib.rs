@@ -38,6 +38,6 @@ pub use sig::SelfPipe;
 
 /// Maximum events processed per `turn()`. Ports `MAX_EVENTS_PER_LOOP`
 /// from `net.h:31`. The C comment doesn't explain it; it's just the
-/// `epoll_wait` `maxevents` cap. mio's `Events::with_capacity` is the
-/// same knob.
+/// `epoll_wait` `maxevents` cap. `Vec::with_capacity` in
+/// `EventLoop::new` sets the same knob.
 pub const MAX_EVENTS_PER_TURN: usize = 32;

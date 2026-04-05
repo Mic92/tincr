@@ -4,15 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 
 # Ports event.c (137 LOC) + linux/event.c (169 LOC) + signal.c (90 LOC).
-# bsd/event.c and event_select.c are not ported — mio abstracts the
-# epoll/kqueue split.
+# bsd/event.c is not ported — io/kqueue.rs slot is open for when
+# macOS CI lands. event_select.c not needed — no pre-2.6 kernels.
 
 [dependencies]
-# mio 1.x default-features pulls `log`; we don't want it. os-poll is
-# the actual epoll/kqueue wrapper; os-ext is SourceFd (register a raw
-# fd that mio doesn't own — needed for tun device fd, the AF_UNIX
-# control socket, and the self-pipe).
-mio = { version = "1", default-features = false, features = ["os-poll", "os-ext"] }
 libc = "0.2"
 
 [lints]
