@@ -1,9 +1,9 @@
-//! Learned-MAC lease table (`route.c:491-556` state).
+//! Learned-MAC lease table.
 //!
 //! `route_mac.rs` decides PER-PACKET whether the source MAC is
 //! `New`/`Refresh`/`NotOurs`. This module holds the expiry CLOCK for
 //! those decisions: `New` inserts a lease, `Refresh` bumps it, the
-//! daemon's `age_subnets` timer (`route.c:491`, fires every 10s) calls
+//! daemon's `age_subnets` timer (fires every 10s) calls
 //! [`MacLeases::age`] to find expired entries.
 //!
 //! C smushes `expires` into `subnet_t` (`subnet.h:53`). We don't —
@@ -17,10 +17,9 @@
 //!   on `learn`/`age` return.
 //! - The `route_mac::LearnAction → mac_lease` plumbing — daemon's
 //!   `route_packet_mac` (`daemon/net.rs`).
-//! - The `if(subnet->expires)` skip-configured-subnets guard
-//!   (`route.c:553`): we ONLY hold learned MACs. The daemon's
-//!   SubnetTree holds both; only learned ones are mirrored here. The
-//!   guard is implicit.
+//! - The skip-configured-subnets guard: we ONLY hold learned MACs.
+//!   The daemon's SubnetTree holds both; only learned ones are
+//!   mirrored here. The guard is implicit.
 //! - The 10s timer arming — daemon's `TimerWhat`.
 #![forbid(unsafe_code)]
 
@@ -29,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::route_mac::Mac;
 
-/// Default `macexpire` (`net_setup.c:523-524`). 10 minutes.
+/// Default `macexpire`. 10 minutes.
 pub const DEFAULT_EXPIRE_SECS: u64 = 600;
 
 /// Learned-MAC expiry table.
@@ -41,15 +40,15 @@ pub struct MacLeases {
 }
 
 impl MacLeases {
-    /// `route.c:536-548`. New MAC. Returns `true` if this was the FIRST
-    /// lease (table was empty). C arms the timer on first add
-    /// (`:549-551` `timeout_add`); daemon does the same on `true`
+    /// New MAC. Returns `true` if this was the FIRST lease (table
+    /// was empty). Daemon arms the age timer on first add (on
+    /// `true`).
     /// return.
     ///
-    /// Idempotent: `learn` of an already-leased MAC just refreshes (the
-    /// C `lookup_subnet_mac` would have returned non-NULL → `route_mac`
-    /// returns `Refresh`, not `New` → daemon calls `refresh`, not
-    /// `learn`). But guard against caller mistakes: if the MAC is
+    /// Idempotent: `learn` of an already-leased MAC just refreshes
+    /// (`route_mac` returns `Refresh`, not `New` → daemon calls
+    /// `refresh`, not `learn`). But guard against caller mistakes:
+    /// if the MAC is
     /// already in the table, log debug + treat as refresh.
     pub fn learn(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
         let expires = now + Duration::from_secs(expire_secs);
@@ -66,7 +65,7 @@ impl MacLeases {
         was_empty
     }
 
-    /// `route.c:551-555` `else`. Known MAC; bump lease.
+    /// Known MAC; bump lease.
     ///
     /// `false` if the MAC wasn't in the table (route_mac thought it was
     /// known — stale routing snapshot? race vs age()?). Daemon: log
@@ -81,8 +80,7 @@ impl MacLeases {
         }
     }
 
-    /// `route.c:491-517`. Prune expired. Returns
-    /// `(expired_macs, any_left)`.
+    /// Prune expired. Returns `(expired_macs, any_left)`.
     ///
     /// `any_left` = at least one unexpired lease remains (`:512-514`).
     /// Daemon re-arms the 10s timer iff `any_left`; otherwise lets it
@@ -91,13 +89,11 @@ impl MacLeases {
     /// `expired` are removed from `self`. Daemon for each:
     /// `subnets.del(Subnet::Mac{addr,..})` + broadcast DEL.
     ///
-    /// Expiry boundary: C `:496` is `s->expires < now.tv_sec`, STRICT
-    /// less. A lease expiring exactly at `now` is still alive for one
-    /// more tick.
+    /// Expiry boundary: STRICT less. A lease expiring exactly at
+    /// `now` is still alive for one more tick.
     pub fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
         let mut expired = Vec::new();
-        // C: `s->expires < now.tv_sec` — strict less. `expires == now`
-        // → NOT expired yet.
+        // Strict less. `expires == now` → NOT expired yet.
         self.leases.retain(|mac, &mut expires| {
             if expires < now {
                 expired.push(*mac);
@@ -226,8 +222,7 @@ mod tests {
 
     #[test]
     fn age_exactly_at_expiry() {
-        // C route.c:496 is `s->expires < now.tv_sec` — STRICT less.
-        // lease expiring exactly at `now` survives.
+        // STRICT less: lease expiring exactly at `now` survives.
         let mut m = MacLeases::default();
         let t = t0();
         m.learn(A, t, 600); // expires at exactly t+600

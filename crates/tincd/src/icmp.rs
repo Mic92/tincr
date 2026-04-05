@@ -1,4 +1,4 @@
-//! ICMP error synthesis for the routing layer (`route.c:121-327`).
+//! ICMP error synthesis for the routing layer.
 //!
 //! When `route_ipv4`/`route_ipv6` decides Unreachable, we don't
 //! silently drop — we send the originating host a structured "no,
@@ -8,15 +8,15 @@
 //! the ICMP body (RFC 792 §3: "Internet Header + 64 bits of Original
 //! Data Datagram").
 //!
-//! The C mutates the `vpn_packet_t` in place — `memmove` the quote
-//! down, overwrite the front, write back (`route.c:182,213-216`). We
-//! build a fresh `Vec`: this fires at most 3×/sec ([`IcmpRateLimit`],
-//! `route.c:85-100`), alloc doesn't matter.
+//! Upstream mutates the `vpn_packet_t` in place — `memmove` the
+//! quote down, overwrite the front, write back. We build a fresh
+//! `Vec`: this fires at most 3×/sec ([`IcmpRateLimit`]), alloc
+//! doesn't matter.
 //!
 //! ## TTL-exceeded source-address override
 //!
-//! `route.c:148-169` does a `socket()/connect()/getsockname()` trick
-//! to discover which local IP the kernel would use to reach the
+//! TTL-exceeded does a `socket()/connect()/getsockname()` trick to
+//! discover which local IP the kernel would use to reach the
 //! original sender — that becomes the ICMP source so `traceroute`
 //! shows our hop correctly. Only matters when we're a HOP in the
 //! middle (`DecrementTTL=yes` + TTL hit zero), not the endpoint.
@@ -34,37 +34,30 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use crate::packet::{Icmp6Hdr, IcmpHdr, Ipv4Hdr, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 
-// ── Sizes (`route.c:50-56`) ────────────────────────────────────────
+// ── Sizes ──────────────────────────────────────────────────────────
 
-/// `sizeof(struct ether_header)` — `route.c:50`.
 const ETHER_SIZE: usize = 14;
-/// `sizeof(struct ip)` — `route.c:51`.
 const IP_SIZE: usize = 20;
-/// `sizeof(struct icmp) - sizeof(struct ip)` — `route.c:53`. The C
 /// `struct icmp` is 28 bytes (8 hdr + 20 quoted-IP tail in the
-/// union); `route.c` uses only the first 8.
+/// union); we use only the first 8.
 const ICMP_SIZE: usize = 8;
-/// `sizeof(struct ip6_hdr)` — `route.c:54`.
 const IP6_SIZE: usize = 40;
-/// `sizeof(struct icmp6_hdr)` — `route.c:55`.
 const ICMP6_SIZE: usize = 8;
 /// `IP_MSS` — `ipv4.h:88`. RFC 791: "Every internet module must be
 /// able to forward a datagram of 576 octets". Used as the cap for
 /// the synthesized error packet's total IP length.
 const IP_MSS: usize = 576;
 
-/// `IPPROTO_ICMP`. `route.c:193`: `ip.ip_p = IPPROTO_ICMP`.
 const IPPROTO_ICMP: u8 = 1;
-/// `IPPROTO_ICMPV6`. `route.c:294`: `ip6.ip6_nxt = IPPROTO_ICMPV6`.
 const IPPROTO_ICMPV6: u8 = 58;
 
 // ── IPv4 unreachable ───────────────────────────────────────────────
 
 /// Max bytes of the original IP datagram quoted in the ICMP body.
-/// `route.c:176-178`: `IP_MSS - ip_size - icmp_size` = 576−20−8.
+/// `IP_MSS - ip_size - icmp_size` = 576−20−8.
 pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 
-/// `route_ipv4_unreachable` (`route.c:121-218`). RFC 792.
+/// `route_ipv4_unreachable`. RFC 792.
 ///
 /// `original` is the full ethernet frame as read from the TUN
 /// (eth hdr + IP hdr + payload). Returns a new ethernet frame:
@@ -73,16 +66,15 @@ pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 /// then up to [`V4_QUOTE_CAP`] bytes of the original IP datagram.
 ///
 /// `frag_mtu`: `Some(mtu)` for `(DEST_UNREACH, FRAG_NEEDED)` —
-/// fills `icmp.nextmtu` (`route.c:173-175`). `None` otherwise.
-/// Note the C derives this from `packet->len - ether_size`; we
-/// take it as a parameter so the caller can decide.
+/// fills `icmp.nextmtu`. `None` otherwise. We take it as a
+/// parameter so the caller can decide.
 ///
 /// Returns `None` if `original` is too short to contain an eth +
 /// IPv4 header (`route.c` guards with `checklength` upstream).
 ///
 /// `src_override`: `Some(addr)` overrides the ICMP packet's IP
-/// source (`route.c:148-169` — TTL-exceeded `getsockname` dance,
-/// done by the caller). `None` = use original-dst (`:195`).
+/// source (TTL-exceeded `getsockname` dance, done by the caller).
+/// `None` = use original-dst.
 #[must_use]
 pub fn build_v4_unreachable(
     original: &[u8],
@@ -164,25 +156,24 @@ pub fn build_v4_unreachable(
 // ── IPv6 unreachable ───────────────────────────────────────────────
 
 /// Max bytes of the original IPv6 datagram quoted in the ICMPv6 body.
-/// `route.c:282-284`: `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
+/// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
 pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
-/// `route_ipv6_unreachable` (`route.c:222-327`). RFC 4443.
+/// `route_ipv6_unreachable`. RFC 4443.
 ///
 /// Same shape as [`build_v4_unreachable`] but the ICMPv6 checksum
-/// includes a pseudo-header (`route.c:305-315`, RFC 4443 §2.3 →
-/// RFC 2460 §8.1): src/dst addrs + upper-layer length + next-hdr.
+/// includes a pseudo-header (RFC 4443 §2.3 → RFC 2460 §8.1):
+/// src/dst addrs + upper-layer length + next-hdr.
 /// Uses [`Ipv6Pseudo`].
 ///
 /// `pkt_too_big_mtu`: `Some(mtu)` for `ICMP6_PACKET_TOO_BIG` —
-/// fills `icmp6.icmp6_mtu` (`route.c:278-280`). The C derives this
-/// from the original packet length; we take it as a parameter.
+/// fills `icmp6.icmp6_mtu`. We take it as a parameter.
 ///
 /// Returns `None` if `original` is too short for eth + IPv6 hdr.
 ///
 /// `src_override`: `Some(addr)` overrides the ICMP packet's IPv6
-/// source (`route.c:254-275` — TTL-exceeded `getsockname` dance,
-/// done by the caller). `None` = use original-dst (`:296`).
+/// source (TTL-exceeded `getsockname` dance, done by the caller).
+/// `None` = use original-dst.
 #[must_use]
 pub fn build_v6_unreachable(
     original: &[u8],
@@ -271,16 +262,15 @@ pub fn build_v6_unreachable(
 
 // ── Rate limit ─────────────────────────────────────────────────────
 
-/// `ratelimit` (`route.c:85-100`). Per-second token bucket.
+/// `ratelimit`. Per-second token bucket.
 ///
-/// The C uses `static time_t lasttime; static int count` — process-
+/// Upstream uses `static time_t lasttime; static int count` — process-
 /// global. We make it a small struct the daemon owns. `now` is a
 /// parameter (no global `now.tv_sec`).
 #[derive(Debug, Default)]
 pub struct IcmpRateLimit {
-    /// `static time_t lasttime` — `route.c:86`. Unix seconds.
+    /// Unix seconds.
     last_sec: u64,
-    /// `static int count` — `route.c:87`.
     count: u32,
 }
 
@@ -292,8 +282,8 @@ impl IcmpRateLimit {
 
     /// Returns `true` if we should DROP (rate-limited).
     ///
-    /// `route.c:90-98`: same-second + `count >= freq` → drop (return
-    /// `true`). Different second → reset count to 0. Then `count++`.
+    /// Same-second + `count >= freq` → drop (return `true`).
+    /// Different second → reset count to 0. Then `count++`.
     /// The boundary (`>=` not `>`) means `freq=3` allows exactly 3
     /// per second: calls 1,2,3 increment to 1,2,3 (return false);
     /// call 4 sees `count(3) >= freq(3)` and returns true early.
@@ -396,7 +386,7 @@ mod tests {
         assert_eq!(inet_checksum(&got[14..34], 0xFFFF), 0);
     }
 
-    /// `route.c:195-196`: `ip.ip_src = ip_dst; ip.ip_dst = ip_src`.
+    /// `ip.ip_src = ip_dst; ip.ip_dst = ip_src`.
     #[test]
     fn v4_swaps_addrs() {
         let orig = v4_orig_frame();
@@ -410,7 +400,6 @@ mod tests {
         assert_eq!(&out[6..12], &orig[0..6]);
     }
 
-    /// `route.c:182`: `memmove(..., DATA(packet)+ether_size, oldlen)`.
     /// The quote IS the original IP datagram, byte-for-byte.
     #[test]
     fn v4_quotes_original() {
@@ -423,8 +412,8 @@ mod tests {
         assert_eq!(quote, &orig[ETHER_SIZE..ETHER_SIZE + oldlen]);
     }
 
-    /// `route.c:176-178`: `if(oldlen >= IP_MSS - ip_size - icmp_size)
-    /// oldlen = ...`. 1500-byte original → quote capped at 548.
+    /// `if(oldlen >= IP_MSS - ip_size - icmp_size) oldlen = ...`.
+    /// 1500-byte original → quote capped at 548.
     #[test]
     fn v4_quote_capped_at_548() {
         let mut orig = v4_orig_frame();
@@ -442,8 +431,8 @@ mod tests {
         assert_eq!(quote, &orig[ETHER_SIZE..ETHER_SIZE + V4_QUOTE_CAP]);
     }
 
-    /// `route.c:173-175`: `icmp.icmp_nextmtu = htons(...)`. Bytes
-    /// 6-7 of the ICMP header (the second u16 of the union).
+    /// `icmp.icmp_nextmtu = htons(...)`. Bytes 6-7 of the ICMP
+    /// header (the second u16 of the union).
     #[test]
     fn v4_frag_needed_sets_mtu() {
         let orig = v4_orig_frame();
@@ -490,8 +479,8 @@ mod tests {
         assert!(build_v4_unreachable(&[0u8; ETHER_SIZE + IP_SIZE], 3, 0, None, None).is_some());
     }
 
-    /// `route.c:148-169`: TTL-exceeded source override. The override
-    /// becomes the new IP src (→ traceroute shows OUR hop, not the
+    /// TTL-exceeded source override. The override becomes the new IP
+    /// src (→ traceroute shows OUR hop, not the
     /// original destination). dst still = orig src. Checksum covers it.
     #[test]
     fn v4_src_override() {
@@ -586,8 +575,8 @@ mod tests {
         );
     }
 
-    /// `route.c:278-280`: PACKET_TOO_BIG sets `icmp6_mtu`. Bytes
-    /// 4-7 of the ICMPv6 hdr, BE u32.
+    /// PACKET_TOO_BIG sets `icmp6_mtu`. Bytes 4-7 of the ICMPv6
+    /// hdr, BE u32.
     #[test]
     fn v6_pkt_too_big_sets_mtu() {
         let orig = v6_orig_frame();
@@ -605,8 +594,8 @@ mod tests {
         assert!(build_v6_unreachable(&[0u8; ETHER_SIZE + IP6_SIZE], 1, 0, None, None).is_some());
     }
 
-    /// `route.c:254-275`: v6 TTL-exceeded source override. Override
-    /// becomes ip6_src AND feeds the pseudo-header checksum.
+    /// v6 TTL-exceeded source override. Override becomes ip6_src
+    /// AND feeds the pseudo-header checksum.
     #[test]
     fn v6_src_override() {
         let orig = v6_orig_frame();
@@ -637,7 +626,7 @@ mod tests {
 
     // ─── Rate limit
 
-    /// `route.c:90-98`: freq=3 allows exactly 3 per second.
+    /// freq=3 allows exactly 3 per second.
     #[test]
     fn ratelimit_allows_then_drops() {
         let mut rl = IcmpRateLimit::new();

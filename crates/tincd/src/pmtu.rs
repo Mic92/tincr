@@ -1,15 +1,14 @@
-//! PMTU discovery (`net_packet.c:90-240, 1170-1460`).
+//! PMTU discovery.
 //!
 //! Per-node binary search for the largest UDP datagram that fits
-//! without fragmentation. The C `mtuprobes` integer encodes a
-//! 5-phase state machine via sign+magnitude; here that's
-//! [`PmtuPhase`]. The probe sizes follow an exponential that
-//! front-loads near-typical-MTU sizes (1329, then 1407 —
-//! `net_packet.c:1417-1424` "math simulations").
+//! without fragmentation. The `mtuprobes` integer encodes a 5-phase
+//! state machine via sign+magnitude; here that's [`PmtuPhase`]. The
+//! probe sizes follow an exponential that front-loads
+//! near-typical-MTU sizes (1329, then 1407 — "math simulations").
 //!
 //! ## State machine
 //!
-//! | C `mtuprobes` | [`PmtuPhase`] | Tick action |
+//! | `mtuprobes` | [`PmtuPhase`] | Tick action |
 //! |---|---|---|
 //! | `0..19` | `Discovery{sent}` | 8-probe burst, exponential offsets |
 //! | `20` | `Fix` | `mtu := minmtu`, → `Steady` |
@@ -23,9 +22,9 @@
 //!
 //! ## Divergence from C
 //!
-//! C `try_mtu`'s `for(;;)` loop (`:1412-1450`) sends a probe and
-//! synchronously observes EMSGSIZE shrinking `maxmtu` mid-call,
-//! then recomputes and retries in the same tick. We don't have
+//! `try_mtu`'s `for(;;)` loop sends a probe and synchronously
+//! observes EMSGSIZE shrinking `maxmtu` mid-call, then recomputes
+//! and retries in the same tick. We don't have
 //! that synchronous feedback (the daemon sends later); instead
 //! `tick()` returns ONE probe, `on_emsgsize()` recomputes bounds,
 //! and the *next* `tick()` uses the new bounds. Slightly slower
@@ -39,43 +38,42 @@ use std::time::{Duration, Instant};
 pub const MTU: u16 = 1518;
 /// `net.h:39` — below this we don't consider UDP to be working.
 pub const MINMTU: u16 = 512;
-/// `net_packet.c:62` — eth header (14) + 4 random bytes.
+/// eth header (14) + 4 random bytes.
 pub const MIN_PROBE_SIZE: u16 = 18;
 
-/// `net_packet.c:1415`.
 const PROBES_PER_CYCLE: u32 = 8;
 
-/// PMTU discovery phase. Replaces C `node_t.mtuprobes` (i32) where
-/// sign+magnitude select the phase (`net_packet.c:1372-1406`).
+/// PMTU discovery phase. Replaces `node_t.mtuprobes` (i32) where
+/// sign+magnitude select the phase.
 ///
 /// `mtu`/`minmtu`/`maxmtu` stay flat on [`PmtuState`] (orthogonal
 /// to phase — the same `minmtu` raise can happen in Discovery or
 /// Revalidate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PmtuPhase {
-    /// C `mtuprobes ∈ 0..19`. `sent` = probes sent so far; also
+    /// `mtuprobes ∈ 0..19`. `sent` = probes sent so far; also
     /// the input to the exponential probe-size formula (cycle
     /// position = `sent % 8`).
     Discovery { sent: u8 },
-    /// C `mtuprobes == 20`. Next `tick()` locks `mtu := minmtu`
+    /// `mtuprobes == 20`. Next `tick()` locks `mtu := minmtu`
     /// and goes to `Steady`. Distinct from `Discovery{20}` because
     /// `try_fix_mtu` runs at the *top* of the tick, before the
     /// discovery branch would send probe #20.
     Fix,
-    /// C `mtuprobes == -1`. Probe `maxmtu` (+ `maxmtu+1` increase
+    /// `mtuprobes == -1`. Probe `maxmtu` (+ `maxmtu+1` increase
     /// detector) every `pinginterval`.
     Steady,
-    /// C `mtuprobes ∈ -2..=-3`. `misses` = unanswered steady-state
+    /// `mtuprobes ∈ -2..=-3`. `misses` = unanswered steady-state
     /// probes (1 or 2). One `maxmtu` probe/sec.
     Revalidate { misses: u8 },
-    /// C `mtuprobes == -4`. Next `tick()` resets to `Discovery{0}`.
+    /// `mtuprobes == -4`. Next `tick()` resets to `Discovery{0}`.
     Lost,
 }
 
 impl PmtuPhase {
     /// `mtuprobes == 0`: discovery hasn't sent its first probe.
-    /// `txpath.rs` uses this to gate the C `:1408-1410` maxmtu
-    /// re-seed (`choose_initial_maxmtu`).
+    /// `txpath.rs` uses this to gate the maxmtu re-seed
+    /// (`choose_initial_maxmtu`).
     #[must_use]
     pub fn is_discovery_start(&self) -> bool {
         matches!(self, Self::Discovery { sent: 0 })
@@ -108,8 +106,8 @@ pub struct PmtuState {
 /// Action emitted by the state machine for the daemon to dispatch.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PmtuAction {
-    /// `send_udp_probe_packet` (`net_packet.c:1175-1195`). `len`
-    /// already clamped to `>= MIN_PROBE_SIZE`.
+    /// `send_udp_probe_packet`. `len` already clamped to
+    /// `>= MIN_PROBE_SIZE`.
     SendProbe { len: u16 },
 
     /// `:103-104` log: "Fixing MTU of %s to %d after %d probes".
@@ -125,15 +123,15 @@ pub enum PmtuAction {
 }
 
 impl PmtuState {
-    /// C `node.c` zeros struct, sets `maxmtu = MTU`, `udp_ping_rtt = -1`.
+    /// Zeroed struct, `maxmtu = MTU`, `udp_ping_rtt = -1`.
     ///
-    /// `initial_maxmtu`: from `choose_initial_maxmtu` (`txpath.rs`,
-    /// ports `net_packet.c:1249-1340` `getsockopt(IP_MTU)`). With it,
-    /// PMTU converges in ~1 RTT. Without it (kernel lacks `IP_MTU`,
-    /// or socket()/connect() fails), pass `MTU` and convergence takes
-    /// ~10 probes (~3.3s at 333ms cadence) — `dispatch_route_result`
-    /// gates the `route.c:685` frag-needed check on `via_mtu != 0`
-    /// during that window so we don't send bogus ICMP claiming MTU 576.
+    /// `initial_maxmtu`: from `choose_initial_maxmtu`
+    /// (`getsockopt(IP_MTU)`). With it, PMTU converges in ~1 RTT.
+    /// Without it (kernel lacks `IP_MTU`, or socket()/connect()
+    /// fails), pass `MTU` and convergence takes ~10 probes (~3.3s at
+    /// 333ms cadence) — `dispatch_route_result` gates the frag-needed
+    /// check on `via_mtu != 0` during that window so we don't send
+    /// bogus ICMP claiming MTU 576.
     /// (That ICMP poisoned the kernel's per-dst PMTU cache for 10
     /// minutes)
     #[must_use]
@@ -153,20 +151,18 @@ impl PmtuState {
     }
 
     /// `mtuprobes := 0` — restart discovery from scratch. Used by
-    /// `tunnel.rs::reset_unreachable` (`graph.c:266-269`) and
-    /// `on_udp_timeout` (`net_packet.c:124-137`).
+    /// `tunnel.rs::reset_unreachable` and `on_udp_timeout`.
     pub fn start_discovery(&mut self) {
         self.phase = PmtuPhase::Discovery { sent: 0 };
     }
 
-    /// `try_mtu` (`net_packet.c:1346-1458`) + `try_fix_mtu` (`:90-107`).
-    /// Cadence: 333ms discovery, `pinginterval` steady, 1s re-validate.
+    /// `try_mtu` + `try_fix_mtu`. Cadence: 333ms discovery, `pinginterval` steady, 1s re-validate.
     ///
     /// Caller handles preconditions: `OPTION_PMTU_DISCOVERY` set,
     /// `udp_confirmed` if `udp_discovery` on. The `:1358-1364` reset
     /// for not-confirmed is `on_udp_timeout`.
     pub fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
-        // ── Cadence gate ───── net_packet.c:1372-1386 ──────────
+        // ── Cadence gate ──────────────────────────────────────
         let elapsed = now.duration_since(self.mtu_ping_sent);
         match self.phase {
             PmtuPhase::Discovery { sent } => {
@@ -183,13 +179,13 @@ impl PmtuState {
                 }
             }
             PmtuPhase::Steady => {
-                // C `:1383`: 1/pinginterval.
+                // 1/pinginterval.
                 if elapsed < pinginterval {
                     return vec![];
                 }
             }
             PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => {
-                // C `:1379`: 1/sec.
+                // 1/sec.
                 if elapsed < Duration::from_secs(1) {
                     return vec![];
                 }
@@ -200,11 +196,11 @@ impl PmtuState {
 
         let mut out = Vec::new();
 
-        // ── try_fix_mtu ──── net_packet.c:1389 → :90-107 ───────
+        // ── try_fix_mtu ───────────────────────────────────────
         self.try_fix_mtu(&mut out);
 
-        // ── Lost-reprobes reset ──── :1391-1396 ────────────────
-        // C `if (mtuprobes < -3)`. After try_fix_mtu we might have
+        // ── Lost-reprobes reset ───────────────────────────────
+        // `if (mtuprobes < -3)`. After try_fix_mtu we might have
         // just transitioned Fix→Steady; check phase fresh.
         if self.phase == PmtuPhase::Lost {
             out.push(PmtuAction::LogReset);
@@ -212,8 +208,8 @@ impl PmtuState {
             self.minmtu = 0;
         }
 
-        // ── Steady / re-validate branch ──── :1398-1406 ────────
-        // C `if (mtuprobes < 0)`. Probe maxmtu, in Steady also
+        // ── Steady / re-validate branch ───────────────────────
+        // `if (mtuprobes < 0)`. Probe maxmtu, in Steady also
         // maxmtu+1 (increase detector). Then "decrement"; a maxmtu
         // reply rewinds to Steady (on_probe_reply).
         match self.phase {
@@ -226,14 +222,14 @@ impl PmtuState {
                         len: self.maxmtu + 1,
                     });
                 }
-                // C `mtuprobes--`: -1 → -2.
+                // `mtuprobes--`: -1 → -2.
                 self.phase = PmtuPhase::Revalidate { misses: 1 };
             }
             PmtuPhase::Revalidate { misses } => {
                 out.push(PmtuAction::SendProbe {
                     len: self.maxmtu.max(MIN_PROBE_SIZE),
                 });
-                // C `mtuprobes--`: -2→-3, -3→-4.
+                // `mtuprobes--`: -2→-3, -3→-4.
                 self.phase = if misses >= 2 {
                     PmtuPhase::Lost
                 } else {
@@ -250,7 +246,7 @@ impl PmtuState {
                 out.push(PmtuAction::SendProbe {
                     len: len.max(MIN_PROBE_SIZE),
                 });
-                // C `mtuprobes++`: 19→20 = Fix.
+                // `mtuprobes++`: 19→20 = Fix.
                 self.phase = if sent + 1 >= 20 {
                     PmtuPhase::Fix
                 } else {
@@ -261,9 +257,8 @@ impl PmtuState {
         out
     }
 
-    /// `udp_probe_h` reply branch (`net_packet.c:196-238`). Daemon
-    /// already extracted type-2 length (`:177-182`). Daemon-side:
-    /// address-cache (`:203-209`), UDP-timeout reset (`:213-217`).
+    /// `udp_probe_h` reply branch. Daemon already extracted type-2
+    /// length. Daemon-side: address-cache, UDP-timeout reset.
     pub fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
         let mut out = Vec::new();
 
@@ -278,8 +273,8 @@ impl PmtuState {
         // ── UDP confirmed ──── :199-210 ────────────────────────
         self.udp_confirmed = true;
 
-        // ── :219-225 PMTU-increase detector. C `mtuprobes := 1`
-        // (not 0) so the C-side maxmtu re-seed doesn't undo this.
+        // ── PMTU-increase detector. `mtuprobes := 1` (not 0) so
+        // the maxmtu re-seed doesn't undo this.
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
             self.minmtu = len;
@@ -288,8 +283,8 @@ impl PmtuState {
             return out;
         }
 
-        // ── Steady-state confirmation ──── :226-230 ────────────
-        // C `if (mtuprobes < 0 && len == maxmtu) mtuprobes = -1`.
+        // ── Steady-state confirmation ────────────────────────
+        // `if (mtuprobes < 0 && len == maxmtu) mtuprobes = -1`.
         if self.phase.is_fixed() && len == self.maxmtu {
             self.phase = PmtuPhase::Steady;
             self.mtu_ping_sent = now;
@@ -304,9 +299,9 @@ impl PmtuState {
         out
     }
 
-    /// `reduce_mtu` (`net_packet.c:109-122`). EMSGSIZE: cap maxmtu/mtu.
+    /// `reduce_mtu`. EMSGSIZE: cap maxmtu/mtu.
     pub fn on_emsgsize(&mut self, at_len: u16) -> Vec<PmtuAction> {
-        // C callers pass len-1; we take failed size. Floor at MINMTU (:110).
+        // Upstream callers pass len-1; we take failed size. Floor at MINMTU.
         let mtu = at_len.saturating_sub(1).max(MINMTU);
         if self.maxmtu > mtu {
             self.maxmtu = mtu;
@@ -319,8 +314,7 @@ impl PmtuState {
         out
     }
 
-    /// `udp_probe_timeout_handler` (`net_packet.c:124-137`).
-    /// Idempotent on already-unconfirmed (`:127-129`).
+    /// `udp_probe_timeout_handler`. Idempotent on already-unconfirmed.
     pub fn on_udp_timeout(&mut self) {
         if !self.udp_confirmed {
             return;
@@ -333,18 +327,18 @@ impl PmtuState {
         self.maxmtu = MTU;
     }
 
-    /// `try_fix_mtu` (`net_packet.c:90-107`). Lock in: 20 probes
-    /// (timeout) or `minmtu >= maxmtu` (converged).
+    /// `try_fix_mtu`. Lock in: 20 probes (timeout) or
+    /// `minmtu >= maxmtu` (converged).
     ///
-    /// C `if (mtuprobes < 0) return` → only acts in Discovery/Fix.
+    /// `if (mtuprobes < 0) return` → only acts in Discovery/Fix.
     fn try_fix_mtu(&mut self, out: &mut Vec<PmtuAction>) {
-        // C `:92`: only fires when mtuprobes >= 0.
+        // Only fires when mtuprobes >= 0.
         let probes = match self.phase {
             PmtuPhase::Discovery { sent } => sent,
             PmtuPhase::Fix => 20,
             PmtuPhase::Steady | PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => return,
         };
-        // C `:96`: mtuprobes == 20 || minmtu >= maxmtu.
+        // mtuprobes == 20 || minmtu >= maxmtu.
         if matches!(self.phase, PmtuPhase::Fix) || self.minmtu >= self.maxmtu {
             if self.minmtu > self.maxmtu {
                 self.minmtu = self.maxmtu;
@@ -361,7 +355,7 @@ impl PmtuState {
     }
 }
 
-/// `net_packet.c:1424-1440` exponential probe-size formula.
+/// Exponential probe-size formula.
 ///
 /// Exponential (not linear) because too-large probes vanish silently;
 /// concentrate near `minmtu` where replies happen. Last probe per
@@ -529,7 +523,7 @@ mod tests {
         assert_eq!(out, vec![PmtuAction::LogIncrease]);
         assert_eq!(s.minmtu, 1401);
         assert_eq!(s.maxmtu, MTU);
-        // C `mtuprobes := 1` — skip the maxmtu re-seed.
+        // `mtuprobes := 1` — skip the maxmtu re-seed.
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
     }
 

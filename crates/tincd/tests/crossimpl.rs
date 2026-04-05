@@ -30,15 +30,15 @@
 //!
 //! - One daemon is the C binary instead of `CARGO_BIN_EXE_tincd`.
 //!   The C takes `-D` (no-detach), `-d5` (debug level), `-c`,
-//!   `--pidfile`. NO `--socket` flag — `names.c:152-160` derives the
-//!   socket path from the pidfile by `s/\.pid$/.socket/`. Our `Node`
+//!   `--pidfile`. NO `--socket` flag — it derives the socket path
+//!   from the pidfile by `s/\.pid$/.socket/`. Our `Node`
 //!   already names them `NAME.pid` / `NAME.socket`, so the derived
 //!   path matches.
 //!
 //! - The C reads the SAME config format (`tinc.conf`, `hosts/NAME`,
 //!   `ed25519_key.priv`). The PEM blob is the SAME 96 bytes
-//!   (`ecdsa.c:26`: `uint8_t private[64]; uint8_t public[32];` —
-//!   our `SigningKey::to_blob()` is exactly that). `Node::write_
+//!   (`uint8_t private[64]; uint8_t public[32];` — our
+//!   `SigningKey::to_blob()` is exactly that). `Node::write_
 //!   config` is verbatim from `netns.rs`.
 //!
 //! - The C's control protocol is the SAME (it's where ours was
@@ -64,8 +64,8 @@
 //!    `ADD_SUBNET` flood. Our `dump nodes` shows bob reachable
 //!    (status bit 4).
 //! 4. **`REQ_KEY`/`ANS_KEY`**: the SPTPS-handshake-via-`ANS_KEY` path.
-//!    THE PARSER FIX: `net_packet.c:996` sends literal `"-1 -1 -1"`
-//!    for cipher/digest/maclen. Our `Tok::lu` was strict-u64 and
+//!    THE PARSER FIX: upstream sends literal `"-1 -1 -1"` for
+//!    cipher/digest/maclen. Our `Tok::lu` was strict-u64 and
 //!    rejected `-1`. Now it's glibc-strtoul-compatible (negate as
 //!    unsigned → `u64::MAX`). Without that fix, this test would die
 //!    right after the per-tunnel SPTPS record exchange.
@@ -346,8 +346,8 @@ struct Node {
     seed: [u8; 32],
     confbase: PathBuf,
     pidfile: PathBuf,
-    /// For `Impl::C`, this is DERIVED, not passed: `names.c:157`
-    /// does `s/\.pid$/.socket/` on the pidfile path. We name them
+    /// For `Impl::C`, this is DERIVED, not passed: the C does
+    /// `s/\.pid$/.socket/` on the pidfile path. We name them
     /// `NAME.pid` / `NAME.socket` so the derivation lands here.
     socket: PathBuf,
     port: u16,
@@ -386,10 +386,10 @@ impl Node {
         Ctl::connect(&self.socket, &self.pidfile)
     }
 
-    /// Same on-disk layout for both impls. The C `read_ecdsa_
-    /// private_key` (`keys.c:108`) defaults to `CONFBASE/
-    /// ed25519_key.priv` and reads a 96-byte PEM body — exactly
-    /// `SigningKey::to_blob()`. The C's `linux/device.c` honors
+    /// Same on-disk layout for both impls. The C defaults to
+    /// `CONFBASE/ed25519_key.priv` and reads a 96-byte PEM body —
+    /// exactly `SigningKey::to_blob()`. The C's `linux/device.c`
+    /// honors
     /// `Interface = ...` for TUNSETIFF the same way ours does.
     fn write_config(&self, other: &Node, connect_to: bool) {
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
@@ -424,14 +424,13 @@ impl Node {
     /// router-mode form above:
     ///
     /// - `Mode = switch` in `tinc.conf` (→ `RoutingMode::Switch`).
-    /// - `DeviceType = tap` (full eth frames; the C
-    ///   `linux/device.c:76-91` would derive this from
-    ///   `Mode = switch` when `DeviceType` is unset, but our Rust
-    ///   currently requires it explicit).
+    /// - `DeviceType = tap` (full eth frames; the C would derive
+    ///   this from `Mode = switch` when `DeviceType` is unset, but
+    ///   our Rust currently requires it explicit).
     /// - NO `Subnet =` line in `hosts/SELF`. Switch mode learns MAC
-    ///   subnets dynamically (`route.c:524-556 learn_mac`); pre-
-    ///   declared MAC subnets would never expire (`:553`) and we
-    ///   want to test the learning path.
+    ///   subnets dynamically (`learn_mac`); pre-declared MAC
+    ///   subnets would never expire and we want to test the
+    ///   learning path.
     fn write_config_switch(&self, other: &Node, connect_to: bool) {
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
@@ -466,8 +465,8 @@ impl Node {
     /// (router mode, TUN, /32 subnets) plus the `TCPOnly` knob in BOTH
     /// `tinc.conf` AND `hosts/OTHER`.
     ///
-    /// Why both: the C `net_setup.c:598` reads `TCPOnly` from the
-    /// per-host config and OR's it into `n->options`. Our setup
+    /// Why both: the C reads `TCPOnly` from the per-host config and
+    /// OR's it into `n->options`. Our setup
     /// reads from `tinc.conf` for the local override AND `hosts/
     /// OTHER` for what we believe about the peer. Setting both
     /// makes the test deterministic regardless of which side picks
@@ -525,11 +524,10 @@ impl Node {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn rust tincd"),
-            // C: `-D` no-detach (foreground, stderr logging); `-d5`
+            // `-D` no-detach (foreground, stderr logging); `-d5`
             // debug level (max useful — d6+ is just hex dumps).
             // No `--socket`: derived from pidfile, see Node::socket
-            // doc. The C's `tincd.c:572` opens LOGMODE_STDERR when
-            // not using syslog/logfile, which `-D` implies.
+            // doc. `-D` implies LOGMODE_STDERR.
             Impl::C => Command::new(c_tincd_bin().expect("gate checked"))
                 .arg("-D")
                 .arg("-d5")
@@ -717,8 +715,8 @@ fn c_dials_rust() {
 }
 
 // ═══════════════════════ TCPOnly cross-impl ════════════════════════════
-// `PACKET 17` data-plane wire-compat. `net_packet.c:725`: with a
-// direct meta-conn AND `origpkt->len > minmtu` the C short-circuits
+// `PACKET 17` data-plane wire-compat. With a direct meta-conn AND
+// `origpkt->len > minmtu` the C short-circuits
 // to `send_tcppacket` BEFORE per-tunnel SPTPS. With `TCPOnly = yes`,
 // `try_tx_sptps:1477` returns early so PMTU never runs → minmtu
 // stays 0 → every packet > 0 → always PACKET 17, never UDP.
@@ -727,9 +725,9 @@ fn c_dials_rust() {
 //
 // - **Receive PACKET 17** (`metaconn.rs` `tcplen != 0` block): the
 //   blob is a RAW VPN frame inside a meta-SPTPS record (single-
-//   encrypted, the C `:720-724` comment is explicit — "we don't
-//   really care about end-to-end security since we're not sending
-//   the message through any intermediate nodes"). Route it.
+//   encrypted — "we don't really care about end-to-end security
+//   since we're not sending the message through any intermediate
+//   nodes"). Route it.
 // - **Send PACKET 17** (`net.rs::send_sptps_packet` `n->connection`
 //   gate): without per-tunnel SPTPS validkey, the ONLY way to reply
 //   is PACKET 17 back. `300a8e96` (SPTPS_PACKET 21) does NOT cover
@@ -783,8 +781,8 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
     netns.place_devices();
 
     // ─── meta handshake (only readiness gate) ─────────────────────
-    // Status bit 4 = reachable. With TCPOnly + direct neighbor the
-    // C `try_tx_sptps:1477` returns early; per-tunnel SPTPS NEVER
+    // Status bit 4 = reachable. With TCPOnly + direct neighbor,
+    // `try_tx_sptps` returns early; per-tunnel SPTPS NEVER
     // starts. validkey stays 0 forever. The data plane is PACKET 17
     // exclusively, riding the meta-SPTPS — reachable IS the gate.
     let mut alice_ctl = alice.ctl();
@@ -861,9 +859,9 @@ fn c_dials_rust_tcponly() {
 // ────────────────────────────────────────────────────────────────────
 // TODO(chunk-12-tcp-fallback): SPTPS_PACKET 21 cross-impl wire test
 //
-// Can't be done in 2-node form. The C `net_packet.c:725` `if(n->
-// connection && origpkt->len > n->minmtu) send_tcppacket()` short-
-// circuits to `PACKET 17` for direct neighbors before reaching
+// Can't be done in 2-node form. `if(n->connection && origpkt->len >
+// n->minmtu) send_tcppacket()` short-circuits to `PACKET 17` for
+// direct neighbors before reaching
 // `sptps_send_record` → `send_sptps_data` → `:975` binary path.
 // With `TCPOnly = yes`, `try_tx_sptps:1477` also returns early so
 // `minmtu` stays 0 — every packet > 0, always PACKET 17.
@@ -884,25 +882,24 @@ fn c_dials_rust_tcponly() {
 // relay` but with C bob.
 
 // ═══════════════════════ RMODE_SWITCH cross-impl ════════════════════════
-// `route_mac.rs` daemon wire-up. The C side
-// already works: `route.c:1159 case RMODE_SWITCH: route_mac(...)`
-// is the reference. This is the wire-compat proof.
+// `route_mac.rs` daemon wire-up. The C side already works; this is
+// the wire-compat proof.
 //
 // What it proves over `rust_dials_c`:
 //
 // - **MAC learning gossip**: alice's kernel ARPs for 10.43.0.2 over
 //   the TAP. Our `route_mac` sees `from_myself=true`, returns
 //   `LearnAction::New(alice's-tap-mac)`. Daemon sends `ADD_SUBNET`
-//   with `Subnet::Mac{addr: ..., weight: 10}` (`route.c:538`). Bob
-//   (C) parses it (`subnet_add.c:add_subnet_h`), routes the ARP
+//   with `Subnet::Mac{addr: ..., weight: 10}`. Bob (C) parses it
+//   (`add_subnet_h`), routes the ARP
 //   reply back to alice by MAC. Without correct `Subnet::Mac` wire
 //   format → ARP times out, no ping.
 // - **`Broadcast` dispatch**: the FIRST ARP request has dst-MAC
 //   ff:ff:ff:ff:ff:ff. `route_mac` returns `RouteResult::Broadcast`.
 //   Daemon `broadcast_packet`s it to bob.
 // - **TAP device path**: `tinc-device` opened `IFF_TAP`. Full eth
-//   header preserved. Switch mode goes straight to `route_mac`
-//   (`route.c:1159`); no ARP/NDP intercept.
+//   header preserved. Switch mode goes straight to `route_mac`; no
+//   ARP/NDP intercept.
 //
 // Both directions: the LEARNING is asymmetric. The dialer's first
 // packet (ARP request) triggers the responder's broadcast; the
@@ -1026,7 +1023,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
     eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
 
     // ─── Prove learn_mac fired ──────────────────────────────────
-    // Ctl dump 5 = subnets (`REQ_DUMP_SUBNETS`, `control.c:137`).
+    // Ctl dump 5 = subnets (`REQ_DUMP_SUBNETS`).
     // MAC subnets format with single colons (xx:xx:xx:xx:xx:xx);
     // IPv6 has double-colons. Filter for `:` without `::`. After a
     // successful ping there should be at least one MAC subnet

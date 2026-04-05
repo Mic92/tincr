@@ -57,8 +57,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// `AddressFamily = ipv4` reduces to one listener. v6 might be
 /// disabled in the build sandbox.
 ///
-/// `Port` is HOST-tagged (per `tincctl.c:1751`). Goes in `hosts/
-/// testnode`. The daemon's `read_host_config` merges it.
+/// `Port` is HOST-tagged. Goes in `hosts/testnode`. The daemon's `read_host_config` merges it.
 ///
 /// `ed25519_key.priv` is required since chunk 4a (`net_setup.c`:803
 /// loads it; we forbid the legacy fallback). The key is deterministic
@@ -162,9 +161,9 @@ fn spawn_connect_stop() {
     // `"18 0\n"` — CONTROL=18, REQ_STOP=0.
     writeln!(writer, "18 0").unwrap();
 
-    // C protocol: the ack `"18 0 0"` MAY OR MAY NOT arrive. C
-    // `tincctl.c:679-681` does `while(recvline()) {}` — drain until
-    // EOF, ignoring contents. The C daemon QUEUES the ack but
+    // The ack `"18 0 0"` MAY OR MAY NOT arrive. The CLI does
+    // `while(recvline()) {}` — drain until EOF, ignoring contents.
+    // The daemon QUEUES the ack but
     // `event_loop()` exits before flushing (the WRITE event would
     // fire on the next turn, but `running=false` means there is no
     // next turn). The connection closes with the ack stuck in outbuf.
@@ -287,8 +286,7 @@ fn umbilical_ready_signal() {
     assert!(pidfile.exists(), "pidfile should exist after start()");
 
     // ─── idempotent start
-    // C `tincctl.c:906-912`: second `start` with daemon running
-    // is a no-op success. `CtlSocket::connect` succeeds → early
+    // Second `start` with daemon running is a no-op success. `CtlSocket::connect` succeeds → early
     // return Ok with the "already running" message.
     unsafe {
         std::env::set_var("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
@@ -371,7 +369,7 @@ fn umbilical_daemon_side() {
         .expect("spawn tincd");
 
     // CRITICAL: drop `theirs` in the parent so we see EOF when the
-    // child closes its copy. Same as `tincctl.c:996` `close(pfd[1])`.
+    // child closes its copy. Same as `close(pfd[1])`.
     drop(theirs);
 
     // Read the umbilical. cut_umbilical writes exactly 1 nul byte
@@ -620,8 +618,8 @@ fn missing_config_fails() {
     assert!(!socket.exists());
 }
 
-/// `-o KEY=VALUE` overrides tinc.conf. C `tincd.c:232-241`: cmdline
-/// `-o` entries get `Source::Cmdline` which sorts BEFORE file entries
+/// `-o KEY=VALUE` overrides tinc.conf. Cmdline `-o` entries get
+/// `Source::Cmdline` which sorts BEFORE file entries
 /// in the config-compare 4-tuple, so `lookup().next()` returns the
 /// cmdline value.
 ///
@@ -684,7 +682,6 @@ fn dash_o_overrides_config() {
 }
 
 /// `-o` with malformed value (no `=`, no value) fails argv parsing.
-/// C `tincd.c:236`: `parse_config_line` returns NULL → `goto exit_fail`.
 #[test]
 fn dash_o_bad_value_fails() {
     let tmp = tmp("dash-o-bad");
@@ -714,8 +711,6 @@ fn dash_o_bad_value_fails() {
 /// `-n NETNAME` derives confbase = CONFDIR/tinc/NETNAME. We can't
 /// write to /etc/tinc in tests, so this proves the DERIVATION by
 /// checking the error message: missing tinc.conf at the derived path.
-///
-/// C `tincd.c:221-225` + `names.c make_names`.
 #[test]
 fn dash_n_derives_confbase() {
     let tmp = tmp("dash-n");
@@ -741,7 +736,7 @@ fn dash_n_derives_confbase() {
     );
 }
 
-/// `NETNAME` env var as `-n` fallback. C `tincd.c:294-305`.
+/// `NETNAME` env var as `-n` fallback.
 #[test]
 fn netname_env_fallback() {
     let tmp = tmp("netname-env");
@@ -763,7 +758,7 @@ fn netname_env_fallback() {
     );
 }
 
-/// `-n` with path-traversal characters rejected. C `tincd.c:308-313`
+/// `-n` with path-traversal characters rejected.
 /// `strpbrk(netname, "\\/")`.
 #[test]
 fn dash_n_rejects_slash() {
@@ -787,8 +782,8 @@ fn dash_n_rejects_slash() {
     );
 }
 
-/// `Name` missing from config → `setup_myself` fails. C
-/// `net_setup.c:778`: `logger(..., "Name for tinc daemon required!")`.
+/// `Name` missing from config → `setup_myself` fails.
+/// `"Name for tinc daemon required!"`.
 #[test]
 fn missing_name_fails() {
     let tmp = tmp("noname");
@@ -983,9 +978,9 @@ fn tcp_connect_stop() {
     assert!(status.success(), "tincd exit nonzero: {status:?}");
 }
 
-/// `hosts/NAME` missing → daemon starts anyway, port defaults to 655.
-/// C `net_setup.c:786` calls `read_host_config` and DOESN'T check the
-/// return value. We match: warn + continue.
+/// `hosts/NAME` missing → daemon starts anyway, port defaults to
+/// 655. `read_host_config` failure is not checked. We match: warn +
+/// continue.
 ///
 /// We can't actually let it bind 655 (might clash with something on
 /// the build host, or with another test). So: this test ONLY checks
@@ -996,8 +991,8 @@ fn tcp_connect_stop() {
 /// Per the C: `lookup_config("Port")` searches the merged tree.
 /// `read_server_config` merges tinc.conf; `read_host_config` merges
 /// hosts/NAME. If hosts/NAME is missing, the tree only has tinc.conf
-/// entries. So putting Port in tinc.conf works — the C `lookup`
-/// doesn't care which file an entry came from. The `vars.rs` HOST
+/// entries. So putting Port in tinc.conf works — `lookup` doesn't
+/// care which file an entry came from. The `vars.rs` HOST
 /// tag is for `cmd_config set` (which file to WRITE to), not lookup.
 ///
 /// What this proves: `read_host_config` is genuinely optional. A
@@ -1280,7 +1275,7 @@ fn peer_ack_exchange() {
     let tcp_addr = read_tcp_addr(&pidfile);
 
     // ─── TCP connect + send ID line ────────────────────────────────
-    // C `protocol_auth.c:116`: `"%d %s %d.%d"`. We are testpeer,
+    // `"%d %s %d.%d"`. We are testpeer,
     // version 17.7. The daemon's id_h fires, peer branch.
     //
     // `TcpStream` impls Read AND Write for `&TcpStream` (the
@@ -1319,8 +1314,8 @@ fn peer_ack_exchange() {
     assert_eq!(id_line, "0 testnode 17.7", "daemon ID reply");
 
     // ─── SPTPS start: WE are the initiator ───────────────────────
-    // C `id_h:460-462`: outgoing → `"tinc TCP key expansion %s %s",
-    // myself, c->name`. We're outgoing (we connected). myself=
+    // outgoing → `"tinc TCP key expansion %s %s", myself,
+    // c->name`. We're outgoing (we connected). myself=
     // testpeer, c->name=testnode. Label: `(testpeer, testnode)`.
     //
     // SAME bytes as the daemon's `tcp_label("testpeer", "testnode")`.
@@ -1328,7 +1323,7 @@ fn peer_ack_exchange() {
     // tcp_label is pub(crate), not reachable from here — inline).
     let mut label = b"tinc TCP key expansion testpeer testnode".to_vec();
     label.push(0);
-    // Sanity: matches the C `25 + strlen + strlen`.
+    // Sanity: matches `25 + strlen + strlen`.
     assert_eq!(label.len(), 25 + 8 + 8);
 
     let (mut sptps, init) = Sptps::start(
@@ -1476,7 +1471,7 @@ fn peer_ack_exchange() {
     }
 
     // ─── parse the daemon's ACK ─────────────────────────────────
-    // C `:867`: `"%d %s %d %x"` = `"4 <udp-port> <weight> <opts>"`.
+    // `"%d %s %d %x"` = `"4 <udp-port> <weight> <opts>"`.
     // Record body has trailing `\n` (`send_request:120` appends).
     let ack = daemon_ack.expect("pump exited with daemon_ack set");
     let body = ack.strip_suffix(b"\n").unwrap_or(&ack);
@@ -1488,7 +1483,7 @@ fn peer_ack_exchange() {
     let daemon_udp_port: u16 = t.next().unwrap().parse().expect("udp port");
     assert_ne!(daemon_udp_port, 0);
     // Weight: RTT in ms. Localhost handshake is fast; >= 0, < some
-    // sane bound. The C `:840` is `(now - c->start)` ms.
+    // sane bound. `(now - c->start)` ms.
     let daemon_weight: i32 = t.next().unwrap().parse().expect("weight");
     assert!(
         (0..5000).contains(&daemon_weight),
@@ -1502,7 +1497,7 @@ fn peer_ack_exchange() {
     assert_eq!(daemon_opts, 0x0700_000c, "options: {body:?}");
 
     // ─── send OUR ACK ─────────────────────────────────────────────
-    // C INITIATOR side: `meta.c:131` `if(allow == ACK) send_ack(c)`.
+    // INITIATOR side: `if(allow == ACK) send_ack(c)`.
     // The initiator's HandshakeDone fires the SAME arm. We model
     // that here. Port 0 (we have no UDP listener); weight 1ms
     // (fake); same default options. The `\n` is required (`meta.c:
@@ -1514,10 +1509,10 @@ fn peer_ack_exchange() {
             (&stream).write_all(&bytes).expect("send our ACK");
         }
     }
-    // C `ack_h:1058 send_add_edge(everyone, c->edge)`: a real
-    // peer's `on_ack` broadcasts ITS edge (testpeer→testnode).
-    // The daemon's SSSP only follows edges with `e->reverse` set
-    // (`graph.c:159`); without this gossip, the daemon's testnode→
+    // `send_add_edge(everyone, c->edge)`: a real peer's `on_ack`
+    // broadcasts ITS edge (testpeer→testnode). The daemon's SSSP
+    // only follows edges with `e->reverse` set; without this
+    // gossip, the daemon's testnode→
     // testpeer edge has no twin and `BecameReachable` never fires.
     // (chunk-9b removed the synthesized reverse from `on_ack` —
     // it broke 3-node relay forwarding. Tests that drive the
@@ -1531,8 +1526,8 @@ fn peer_ack_exchange() {
     }
 
     // ─── daemon activates: send_everything + send_add_edge ─────
-    // C `:1025` log: "Connection with X (Y) activated". Then
-    // `:1028 send_everything(c)` walks the world model. With zero
+    // Log: "Connection with X (Y) activated". Then
+    // `send_everything(c)` walks the world model. With zero
     // subnets and ONE edge (testnode→testpeer, just added with an
     // addr entry), we get 1 ADD_EDGE record. Then `:1058 send_add_
     // edge(everyone, c->edge)` broadcasts the same edge — we ARE
@@ -1625,8 +1620,8 @@ fn peer_ack_exchange() {
         .unwrap();
 
     // ─── dump connections over control socket ────────────────────
-    // `connection.c:166-175`: walk connection_list, format `"%d %d
-    // %s %s %x %d %x"` per row, then terminator `"%d %d"`. With
+    // Walk connection_list, format `"%d %d %s %s %x %d %x"` per
+    // row, then terminator `"%d %d"`. With
     // ONE peer + ONE control conn (us), we get 2 rows.
     //
     // The peer row's name is `testpeer`, hostname is `127.0.0.1
@@ -1679,14 +1674,13 @@ fn peer_ack_exchange() {
     assert!(peer_row.contains(" 700000c "), "peer row: {peer_row}");
 
     // ─── chunk 5: ADD_SUBNET / dump subnets / dedup / DEL ──────
-    // C `add_subnet_h` (`protocol_subnet.c:43-140`). Send an
-    // ADD_SUBNET via SPTPS record, daemon parses + inserts into
+    // `add_subnet_h`. Send an ADD_SUBNET via SPTPS record, daemon
+    // parses + inserts into
     // SubnetTree, `dump subnets` over the control socket shows it.
     //
     // Record body format: `"10 <nonce-hex> <owner> <netstr>\n"`
-    // (`protocol_subnet.c:40`: `"%d %x %s %s"`). The `\n` is
-    // appended by `send_request:120`; daemon's `record_body`
-    // strips it (`meta.c:156`).
+    // (`"%d %x %s %s"`). The `\n` is appended by `send_request`;
+    // daemon's `record_body` strips it.
     //
     // `192.168.99.0/24#10`: weight 10 is the default —
     // `Subnet::Display` omits `#10`, so the dump row reads
@@ -1716,9 +1710,9 @@ fn peer_ack_exchange() {
         Err(e) => panic!("read error after ADD_SUBNET: {e}"),
     }
 
-    // `dump subnets` (`subnet.c:395-410`). REQ_DUMP_SUBNETS = 5.
-    // Format: `"18 5 <netstr> <owner>"` per row, terminator `"18 5"`.
-    // C `:404`: `"%d %d %s %s"`. With one subnet: one row.
+    // `dump subnets`. REQ_DUMP_SUBNETS = 5. Format: `"18 5
+    // <netstr> <owner>"` per row, terminator `"18 5"`. With one
+    // subnet: one row.
     //
     // Helper closure: send REQ_DUMP_SUBNETS, collect rows. Called
     // three times below (after ADD, after dup-ADD, after DEL).
@@ -1739,15 +1733,15 @@ fn peer_ack_exchange() {
 
     let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
     assert_eq!(rows.len(), 1, "dump subnets after ADD: {rows:?}");
-    // C `subnet.c:404`: `netstr owner`. `net2str` omits `#10`
-    // (default weight). `Subnet::Display` matches.
+    // `netstr owner`. `net2str` omits `#10` (default weight).
+    // `Subnet::Display` matches.
     assert_eq!(
         rows[0], "18 5 192.168.99.0/24 testpeer",
         "subnet row: {rows:?}"
     );
 
-    // Send the SAME ADD_SUBNET again. `seen.check` dup-drops it
-    // (`protocol.c:234-249`). The full body string (incl nonce)
+    // Send the SAME ADD_SUBNET again. `seen.check` dup-drops it.
+    // The full body string (incl nonce)
     // is the cache key — same nonce → same key → hit.
     let outs = sptps.send_record(0, add_subnet).expect("dup send");
     for o in outs {
@@ -1766,7 +1760,7 @@ fn peer_ack_exchange() {
     let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
     assert_eq!(rows.len(), 1, "dump after dup ADD (seen.check): {rows:?}");
 
-    // DEL_SUBNET. `protocol_subnet.c:163-261`. Same wire shape,
+    // DEL_SUBNET. Same wire shape,
     // reqno 11. DIFFERENT nonce (the dup ADD_SUBNET above already
     // primed `seen` with `deadbeef` — but on a different reqno
     // string, so it wouldn't collide. Distinct nonce anyway for
@@ -1816,8 +1810,8 @@ fn peer_ack_exchange() {
         "chunk-4a placeholder leaked; stderr:\n{stderr}"
     );
     // Chunk 5: `on_ack` → `graph.add_edge` → `run_graph` → `BecameReachable`.
-    // C `graph.c:261`: `"Node %s became reachable"`. Our log says
-    // `"Node testpeer became reachable"`. THIS is the proof that
+    // `"Node %s became reachable"`. Our log says `"Node testpeer
+    // became reachable"`. THIS is the proof that
     // graph_glue::run_graph fired and the diff produced a transition.
     assert!(
         stderr.contains("Node testpeer became reachable"),
@@ -1831,8 +1825,8 @@ fn peer_ack_exchange() {
 ///
 /// Same setup as `peer_ack_exchange` (handshake + ACK), then send
 /// `ADD_EDGE testpeer faraway` plus the reverse `faraway testpeer`.
-/// `sssp` only follows bidi edges (`graph.c:159`: `if(!e->reverse)
-/// continue`); both directions are needed for the transition to
+/// `sssp` only follows bidi edges (`if(!e->reverse) continue`);
+/// both directions are needed for the transition to
 /// fire. The C peer would send both (each side's `ack_h` adds its
 /// `c->edge`, then broadcasts).
 ///
@@ -2059,7 +2053,7 @@ fn peer_edge_triggers_reachable() {
         .unwrap();
 
     // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
-    // C `protocol_edge.c:29-62`: `"%d %x %s %s %s %s %x %d"`.
+    // `"%d %x %s %s %s %s %x %d"`.
     // `12 <nonce> <from> <to> <addr> <port> <opts> <weight>`.
     // No local-addr suffix (6-token form, pre-1.0.24 compat).
     //
@@ -2127,7 +2121,7 @@ fn peer_edge_triggers_reachable() {
     );
 
     // ─── dump nodes: 3 rows, all reachable ─────────────────────
-    // C `node.c:201-223`. Walks the graph (NOT `nodes`/`conns`).
+    // Walks the graph (NOT `nodes`/`conns`).
     // After ACK + bidi ADD_EDGE: testnode (myself), testpeer
     // (direct), faraway (transitive). All reachable (status bit
     // 4 set; `node.h:38` field 4, GCC LSB-first → 0x10).
@@ -2208,8 +2202,8 @@ fn peer_edge_triggers_reachable() {
     );
 
     // myself: hostname is `"MYSELF port <udp>"` (`net_setup.c:
-    // 1199`). nexthop/via are itself (sssp seeds `myself` with
-    // `nexthop=myself, via=myself`, `graph.c:138-145`).
+    // `). nexthop/via are itself (sssp seeds `myself` with
+    // `nexthop=myself, via=myself`).
     // distance=0.
     assert!(
         myself_row.contains(" MYSELF port "),
@@ -2234,7 +2228,7 @@ fn peer_edge_triggers_reachable() {
     );
 
     // faraway: transitive (no NodeState). hostname is the
-    // literal `"unknown port unknown"` (`node.c:211`). nexthop
+    // literal `"unknown port unknown"`. nexthop
     // =testpeer (first hop), via=faraway (direct — no INDIRECT
     // option set), distance=2.
     assert!(
@@ -2252,7 +2246,7 @@ fn peer_edge_triggers_reachable() {
     );
 
     // ─── dump edges: 4 rows (2 bidi pairs) ─────────────────────
-    // C `edge.c:123-137`. Nested per-node walk. After ACK + the
+    // Nested per-node walk. After ACK + the
     // two ADD_EDGE bodies: testnode↔testpeer (from `on_ack`, both
     // halves) + testpeer↔faraway (from the wire, both halves).
     //
@@ -2310,8 +2304,8 @@ fn peer_edge_triggers_reachable() {
     // testpeer→faraway: from the ADD_EDGE wire body. Addr tokens
     // round-tripped verbatim (`10.99.0.2` `655` from the `fwd`
     // body above). 6-token form (no local-addr suffix) → local
-    // is `"unspec port unspec"` (`netutl.c:159-160`: `AF_UNSPEC`
-    // case of `sockaddr2hostname`). options=0, weight=50.
+    // is `"unspec port unspec"` (`AF_UNSPEC` case of
+    // `sockaddr2hostname`). options=0, weight=50.
     let tf = edge_rows
         .iter()
         .find(|r| r.starts_with("18 4 testpeer faraway "))
@@ -2332,7 +2326,7 @@ fn peer_edge_triggers_reachable() {
     );
 
     // ─── update_edge: same edge, different weight ────────────
-    // C `protocol_edge.c:159-183` in-place update path. Send the
+    // In-place update path. Send the
     // SAME `testpeer→faraway` edge with weight 99 (was 50). Same
     // addr tokens — the addr in the dump row must stay identical
     // (proves `edge_addrs` key stability: `update_edge` keeps the
@@ -2395,7 +2389,7 @@ fn peer_edge_triggers_reachable() {
         "on_ack reachable; stderr:\n{stderr}"
     );
     // THE PROOF: on_add_edge → run_graph → BecameReachable for the
-    // TRANSITIVE node. C `graph.c:261`: `"Node %s became reachable"`.
+    // TRANSITIVE node. `"Node %s became reachable"`.
     assert!(
         stderr.contains("Node faraway became reachable"),
         "on_add_edge didn't fire BecameReachable for transitive node; \
@@ -2608,8 +2602,8 @@ fn dash_d_upper_stays_foreground() {
     let _ = child.wait();
 }
 
-/// `-dN` glued form. C `tincd.c:213-218`: `atoi(optarg)`. The level
-/// shows up in the "starting" banner (`process.c:239-240`).
+/// `-dN` glued form (`atoi(optarg)`). The level shows up in the
+/// "starting" banner.
 #[test]
 fn dash_d_level_sets_debug() {
     let tmp = tmp("dash-d-level");
@@ -2689,8 +2683,8 @@ fn logfile_redirects_output() {
     );
 }
 
-/// `-U baduser` errors loudly. `tincd.c:378-384`: `getpwnam` returns
-/// NULL → "unknown user". Runs AFTER setup (sockets bound, tinc-up
+/// `-U baduser` errors loudly. `getpwnam` returns NULL → "unknown
+/// user". Runs AFTER setup (sockets bound, tinc-up
 /// done) so the socket exists briefly then vanishes on Drop.
 ///
 /// We don't test the success case (actually dropping privs) — that
@@ -2735,7 +2729,7 @@ fn dash_u_bad_user_fails() {
 /// "mlockall" in the error. Both are valid; "silently ignore -L"
 /// is not.
 ///
-/// C `tincd.c:652-659`: hard-fail on error. C `:199-206`: parse.
+/// Hard-fail on error.
 #[test]
 fn dash_l_mlock_wired() {
     let tmp = tmp("dash-L");
@@ -2776,8 +2770,8 @@ fn dash_l_mlock_wired() {
         );
     } else {
         // mlockall failed. Daemon should have said so and exited
-        // BEFORE setup (no socket). C `tincd.c:656`: the error
-        // mentions "mlockall" by name.
+        // BEFORE setup (no socket). The error mentions "mlockall"
+        // by name.
         assert!(
             stderr.contains("mlockall"),
             "-L failure should mention mlockall; stderr:\n{stderr}"
@@ -2786,8 +2780,8 @@ fn dash_l_mlock_wired() {
     }
 }
 
-/// `REQ_LOG`: live log streaming over the ctl socket. C `control.c`:
-/// 133-140 arms the conn; `logger.c:192-218` walks log conns on each
+/// `REQ_LOG`: live log streaming over the ctl socket. The control
+/// arm flags the conn; the logger walks log conns on each
 /// `logger()` call. Our tap pushes to a thread-local buffer drained
 /// once per event-loop turn.
 ///
@@ -2844,11 +2838,11 @@ fn req_log_streams() {
     log_r.read_line(&mut ack).unwrap();
     assert!(ack.starts_with("4 0 "));
 
-    // `tincctl.c:649`: `"18 15 <level> <use_color>"`. level=0 maps
+    // `"18 15 <level> <use_color>"`. level=0 maps
     // to Info on the daemon side; the "Connection from" log we'll
     // trigger is Info. use_color=0 (ignored anyway).
     writeln!(log_w, "18 15 0 0").unwrap();
-    // No reply (C `control.c:140`: `return true` without control_ok).
+    // No reply (`return true` without control_ok).
 
     // ─── ctl#2: trigger an Info-level log inside the daemon ────
     // `on_unix_accept` logs "Connection from localhost port unix
@@ -2910,8 +2904,8 @@ fn req_log_streams() {
 }
 
 /// `ProcessPriority = bogus` → error logged, daemon CONTINUES.
-/// C `tincd.c:690-693`: `goto end` on bad priority. We diverge: log
-/// and continue (apply_process_priority is best-effort). The C
+/// Upstream does `goto end` on bad priority. We diverge: log and
+/// continue (apply_process_priority is best-effort). Upstream
 /// behavior is arguably a bug — refusing to tunnel because someone
 /// typo'd "Hihg" is hostile.
 #[test]
@@ -3018,8 +3012,7 @@ fn process_priority_low_succeeds() {
 /// (no other peers); we only care that the tap saw it.
 ///
 /// `PACKET 17` injection (not UDP) because the test has no UDP
-/// listener. C `net_packet.c:725`: direct neighbors short-circuit
-/// to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
+/// listener. Direct neighbors short-circuit to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
 /// directly with the frame body.
 #[test]
 #[allow(clippy::too_many_lines)] // test bodies are allowed to be long
@@ -3222,8 +3215,8 @@ fn pcap_captures_tcp_packet() {
     }
 
     // ─── arm pcap on the control socket ────────────────────────
-    // `"18 14 0"`: REQ_PCAP, snaplen=0 (full packet). C `control.c:
-    // 128-131`: NO ack (`return true` not `control_ok`). The CLI
+    // `"18 14 0"`: REQ_PCAP, snaplen=0 (full packet). NO ack
+    // (`return true` not `control_ok`). The CLI
     // (`stream.rs:540`) sends this then immediately starts reading
     // `"18 14 LEN"` lines.
     let cookie = read_cookie(&pidfile);
@@ -3255,8 +3248,8 @@ fn pcap_captures_tcp_packet() {
     };
     assert_eq!(frame.len(), 60);
 
-    // C `protocol_misc.c:98`: `"%d %d", PACKET, len`. Then C `:102`:
-    // `send_meta(c, DATA(packet), len)` → SPTPS record type 0 with
+    // `"%d %d", PACKET, len`. Then `send_meta(c, DATA(packet),
+    // len)` → SPTPS record type 0 with
     // raw body. `metaconn.rs` Record arm: tcplen=60 set; NEXT record is the
     // blob. Two records: header line, then frame.
     let pkt_hdr = format!("17 {}\n", frame.len());
@@ -3274,8 +3267,8 @@ fn pcap_captures_tcp_packet() {
     }
 
     // ─── read pcap header + body from ctl socket ─────────────
-    // C `route.c:1124`: `"%d %d %d"` = `"18 14 60"`. Then `:1125`:
-    // `send_meta(c, DATA(packet), len)` = 60 raw bytes. Control
+    // `"%d %d %d"` = `"18 14 60"`. Then `send_meta(c,
+    // DATA(packet), len)` = 60 raw bytes. Control
     // conn is plaintext: `send` appends `\n`, `send_raw` doesn't.
     let mut hdr = String::new();
     match ctl_r.read_line(&mut hdr) {
@@ -3310,8 +3303,8 @@ fn pcap_captures_tcp_packet() {
 
     // ─── snaplen clip: re-arm with snaplen=20, send again ────
     // Second ctl conn (the first is still subscribed at snaplen=0;
-    // a fresh conn is the simpler test path). C `route.c:1120`:
-    // `if(c->outmaclength && c->outmaclength < len) len = c->
+    // a fresh conn is the simpler test path). `if(c->outmaclength
+    // && c->outmaclength < len) len = c->
     // outmaclength`. snaplen=20 < 60 → clip to 20.
     drop(ctl_r);
     drop(ctl);
@@ -3356,8 +3349,8 @@ fn pcap_captures_tcp_packet() {
     let _ = child.wait();
 }
 
-/// `REQ_SET_DEBUG` round-trip. C `control.c:79-93`: reply with the
-/// PREVIOUS level (sent BEFORE the assignment), then update if
+/// `REQ_SET_DEBUG` round-trip. Reply with the PREVIOUS level (sent
+/// BEFORE the assignment), then update if
 /// `level >= 0`. Negative → query-only.
 ///
 /// This is the `tinc debug N` operator workflow: "daemon's
@@ -3401,15 +3394,15 @@ fn set_debug_level_roundtrip() {
     reader.read_line(&mut ack).unwrap(); // "4 0 <pid>"
 
     // ─── set debug 5 → reply previous (0) ────────────────────
-    // C `control.c:86`: `send_request(..., debug_level)` BEFORE
-    // `:89` assigns. Startup level was 0 (no -d).
+    // `send_request(..., debug_level)` BEFORE the assignment.
+    // Startup level was 0 (no -d).
     writeln!(writer, "18 9 5").unwrap();
     let mut reply = String::new();
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 0\n", "reply with PREVIOUS level (0)");
 
     // ─── query (-1) → reply current (5), no change ───────────
-    // C `:88`: `if(new_level >= 0)` — negative is query-only.
+    // `if(new_level >= 0)` — negative is query-only.
     writeln!(writer, "18 9 -1").unwrap();
     let mut reply = String::new();
     reader.read_line(&mut reply).unwrap();
@@ -3430,22 +3423,21 @@ fn set_debug_level_roundtrip() {
     assert_eq!(reply, "18 9 2\n");
 
     // ─── malformed (no level) → conn dropped ─────────────────
-    // C `:83`: `if(sscanf(...) != 1) return false`. The ONLY ctl
-    // arm that does this (others reply REQ_INVALID and stay up).
-    // `return false` → `receive_request` (`protocol.c:183-188`)
-    // → "Bogus data" + terminate.
+    // `if(sscanf(...) != 1) return false`. The ONLY ctl arm that
+    // does this (others reply REQ_INVALID and stay up). `return
+    // false` → `receive_request` → "Bogus data" + terminate.
     writeln!(writer, "18 9").unwrap();
     let mut reply = String::new();
     let n = reader.read_line(&mut reply).unwrap();
-    assert_eq!(n, 0, "EOF: daemon dropped the conn (C `return false`)");
+    assert_eq!(n, 0, "EOF: daemon dropped the conn (`return false`)");
 
     // ─── cleanup ─────────────────────────────────────────────
     let _ = child.kill();
     let _ = child.wait();
 }
 
-/// C `tincd.c:536`: `chdir(confbase)` before everything else. C
-/// `script.c` does no chdir of its own — scripts inherit the
+/// `chdir(confbase)` before everything else. Script execution does
+/// no chdir of its own — scripts inherit the
 /// daemon's cwd. A `tinc-up` doing `cat hosts/$NODE` (relative)
 /// works under C only because of that early chdir.
 ///

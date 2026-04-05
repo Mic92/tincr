@@ -77,8 +77,7 @@ pub fn tincd_bin() -> PathBuf {
 
 /// `Command::new(tincd_bin())` with `-D` (no-detach) pre-added.
 ///
-/// The C `tincd.c:64` defaults `do_detach = true`; the Rust binary
-/// matches that since the main.rs cluster commit. A detached child
+/// `do_detach` defaults true; the Rust binary matches. A detached child
 /// double-forks out from under `Child` — the test sees the original
 /// parent exit 0 immediately, `wait_for_file` races a process that
 /// isn't ours, and `child.kill()` is a no-op. Every test that
@@ -113,7 +112,7 @@ pub fn drain_stderr(mut child: Child) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Pidfile format (`control.c:178`): `<pid> <cookie> <host> port <port>\n`.
+/// Pidfile format: `<pid> <cookie> <host> port <port>\n`.
 /// Second whitespace token is the cookie.
 pub fn read_cookie(pidfile: &Path) -> String {
     std::fs::read_to_string(pidfile)
@@ -250,10 +249,10 @@ impl Ctl {
     }
 }
 
-/// `dump nodes` row → status hex (body token 10). Row format
-/// (`node.c:210` / our `dump_nodes_rows`): `name id host "port"
-/// PORT cipher digest maclen comp opts STATUS nexthop ...`. Status
-/// bits: `0x10` reachable, `0x02` validkey.
+/// `dump nodes` row → status hex (body token 10). Row format (see
+/// `dump_nodes_rows`): `name id host "port" PORT cipher digest
+/// maclen comp opts STATUS nexthop ...`. Status bits: `0x10`
+/// reachable, `0x02` validkey.
 pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
     rows.iter().find_map(|r| {
         let body = r.strip_prefix("18 3 ")?;

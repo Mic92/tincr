@@ -15,11 +15,10 @@
 //! ## What this caught
 //!
 //! Writing `tinc_up_then_own_subnet_up` revealed `daemon.rs::setup()`
-//! ran `tinc-up` (`net_setup.c:745`, `device_enable`) but skipped
-//! `net_setup.c:1273`: `subnet_update(myself, NULL, true)` — fire
-//! `subnet-up` for our OWN configured subnets at startup. Same gap
-//! mirrored in `Drop` (C `:1298` fires `subnet-down` before
-//! `device_disable`). Both are now fixed; this file pins them.
+//! ran `tinc-up` but skipped firing `subnet-up` for our OWN
+//! configured subnets at startup. Same gap mirrored in `Drop`
+//! (`subnet-down` should fire before `tinc-down`). Both are now
+//! fixed; this file pins them.
 //!
 //! ## Skipped (vs the Python)
 //!
@@ -232,9 +231,8 @@ where
 // ═══════════════════════════════════════════════════════════════════
 // Test 1: tinc-up THEN subnet-up for OWN subnets at startup.
 //
-// C `net_setup.c:1267-1273`: `device_enable()` (= tinc-up) THEN
-// `subnet_update(myself, NULL, true)` (= subnet-up for every
-// configured Subnet). The order matters: tinc-up typically does
+// `device_enable()` (= tinc-up) THEN subnet-up for every
+// configured Subnet. The order matters: tinc-up typically does
 // `ip addr add` / `ip link set up`; subnet-up scripts (which might
 // add routes) assume the interface is configured.
 //
@@ -317,9 +315,9 @@ fn tinc_up_then_own_subnet_up() {
 // ═══════════════════════════════════════════════════════════════════
 // Test 2: host-up → hosts/NAME-up → subnet-up ORDER on connect.
 //
-// C `graph.c:273-294`: when a node becomes reachable,
-//   `:284`  execute_script("host-up")
-//   `:287`  execute_script("hosts/NAME-up")
+// When a node becomes reachable:
+//   1. execute_script("host-up")
+//   2. execute_script("hosts/NAME-up")
 //   `:294`  subnet_update(n, NULL, true)  ─ loops subnet-up
 //
 // Our `gossip.rs` BecameReachable arm matches: `run_host_script`
@@ -378,7 +376,7 @@ fn host_up_order_on_connect() {
         .position(|e| e.script == "subnet-up" && e.env["NODE"] == "bob")
         .unwrap_or_else(|| panic!("no subnet-up for bob; events: {events:#?}"));
 
-    // ─── ORDER (graph.c:273-294)
+    // ─── ORDER
     assert!(
         host_up_idx < per_node_idx,
         "host-up must precede hosts/bob-up; got idx {host_up_idx} vs {per_node_idx}"
@@ -418,8 +416,7 @@ fn host_up_order_on_connect() {
 // ═══════════════════════════════════════════════════════════════════
 // Test 3: host-down → hosts/NAME-down → subnet-down on disconnect.
 //
-// Same graph.c:273-294 path, `reachable=false`. Our gossip.rs
-// BecameUnreachable arm: `run_host_script(false, ...)` then subnet
+// Same path, `reachable=false`. Our gossip.rs BecameUnreachable arm: `run_host_script(false, ...)` then subnet
 // loop. `run_host_script` itself does host-down THEN hosts/N-down.
 
 #[test]
@@ -500,9 +497,9 @@ fn host_down_order_on_disconnect() {
     let h = &down_events[host_down_idx];
     assert_eq!(h.env["NODE"], "bob");
     // REMOTEADDRESS on host-down: BecameUnreachable reads the addr
-    // BEFORE `reset_unreachable` clears it (matching C `graph.c:281`
-    // ordering — script call at `:284` precedes `update_node_udp(n,
-    // NULL)` at `:296`). For a direct peer that just dropped, the
+    // BEFORE `reset_unreachable` clears it (script call precedes
+    // `update_node_udp(n, NULL)`). For a direct peer that just
+    // dropped, the
     // addr is still there.
     //
     // (If this ever flips to empty: `run_host_script` documents
@@ -518,9 +515,9 @@ fn host_down_order_on_disconnect() {
 // ═══════════════════════════════════════════════════════════════════
 // Test 4: subnet-down for OWN subnets THEN tinc-down on shutdown.
 //
-// C `net_setup.c:1294-1298` (`close_network_connections`):
-//   `:1298`  subnet_update(myself, NULL, false)  ─ own subnet-down
-//   then    `device_disable()` → tinc-down
+// On shutdown (`close_network_connections`):
+//   1. own subnet-down
+//   2. `device_disable()` → tinc-down
 //
 // Mirror of test 1's bug, in `Daemon::Drop`.
 

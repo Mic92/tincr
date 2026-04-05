@@ -12,19 +12,9 @@
 //!
 //! ## A small intentional divergence from C
 //!
-//! C `protocol_misc.c:69-72` (`pong_h`) is gated on `c->outgoing
-//! && c->outgoing->timeout` — i.e. it only caches after a RETRY
-//! succeeded. On a clean first connect (timeout still 0), C's
-//! `pong_h` doesn't cache. C *does* cache on first connect via
-//! `graph.c:238` (`BecameReachable` arm), but only if
-//! `n->connection && n->connection->outgoing`.
-//!
 //! We diverge: `daemon/connect.rs::on_ack` calls `add_recent`
-//! UNGATED — every successful ACK caches the address. The comment
-//! there cites `protocol_auth.c:939-945` but that's actually
-//! `upgrade_h` (legacy upgrade path); the real C `ack_h` has no
-//! `add_recent_address` call at all. Our `on_ack` add is a small
-//! Rust addition: harmless (idempotent dedup), arguably better
+//! UNGATED — every successful ACK caches the address. This is a
+//! small Rust addition: harmless (idempotent dedup), arguably better
 //! (cache earlier, no failure cycle needed).
 //!
 //! Net effect: round 3 below passes without source changes. The

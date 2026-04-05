@@ -1,7 +1,7 @@
-//! ARP/NDP reply synthesis (`route.c:793-1035`).
+//! ARP/NDP reply synthesis.
 //!
-//! The fake-MAC trick (`route.c:1015-1016`, `:899-900`): answer the
-//! kernel's ARP/NS with its OWN eth-src MAC, last byte XOR `0xFF`.
+//! The fake-MAC trick: answer the kernel's ARP/NS with its OWN
+//! eth-src MAC, last byte XOR `0xFF`.
 //! Kernel caches it, sends to it; daemon reads everything off TUN
 //! regardless of dst MAC. The XOR is cosmetic ("for consistency").
 //!
@@ -24,7 +24,7 @@ use crate::packet::{
     inet_checksum,
 };
 
-// ── Sizes (`route.c:50-56`) ────────────────────────────────────────
+// ── Sizes ──────────────────────────────────────────────────────────
 
 const ETHER_SIZE: usize = 14;
 const ETH_ALEN: usize = 6;
@@ -43,19 +43,16 @@ pub const ND_OPT_TARGET_LINKADDR: u8 = 2;
 
 // ── ARP ────────────────────────────────────────────────────────────
 
-/// `route.c:960,977-984`. Returns `arp_tpa` iff `frame` is a valid
-/// Ethernet/IP ARP who-has. Caller does subnet lookup (`:988-1002`).
+/// Returns `arp_tpa` iff `frame` is a valid Ethernet/IP ARP
+/// who-has. Caller does subnet lookup.
 #[must_use]
 pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
-    // route.c:960 checklength
     if frame.len() < ETHER_SIZE + ARP_SIZE {
         return None;
     }
-    // route.c:977
     let arp_bytes: &[u8; ARP_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].try_into().ok()?;
     let arp = EtherArp::read_from_bytes(arp_bytes).ok()?;
 
-    // route.c:980-984
     if arp.ea_hdr.hrd() != ARPHRD_ETHER
         || arp.ea_hdr.pro() != ETH_P_IP
         || arp.ea_hdr.ar_hln != ETH_ALEN as u8
@@ -68,8 +65,8 @@ pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(arp.arp_tpa))
 }
 
-/// `route.c:1011-1022`. `arp_sha` = orig eth-src XOR `0xFF` on last
-/// byte (the fake-MAC trick).
+/// `arp_sha` = orig eth-src XOR `0xFF` on last byte (the fake-MAC
+/// trick).
 ///
 /// # Panics
 /// If `original.len() < 42`. Caller validates with [`parse_arp_req`].
@@ -104,21 +101,18 @@ pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
 
 // ── NDP ────────────────────────────────────────────────────────────
 
-/// `route.c:808-861`. Returns `nd_ns_target` iff: long enough,
-/// `ip6_nxt == ICMPV6`, type 135, opt-type ok (`:835-836`), and
-/// **ICMPv6 checksum verifies** (`:847-861`). Hop-limit (RFC 4861
+/// Returns `nd_ns_target` iff: long enough, `ip6_nxt == ICMPV6`,
+/// type 135, opt-type ok, and **ICMPv6 checksum verifies**.
+/// Hop-limit (RFC 4861
 /// §7.1.1) is the kernel's job. We add the `ip6_nxt` check (C gets
 /// it from route dispatch; we're freestanding).
 #[must_use]
 pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
-    // route.c:808 checklength
     if frame.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
         return None;
     }
-    // route.c:812
     let has_opt = frame.len() >= ETHER_SIZE + IP6_SIZE + NS_SIZE + OPT_SIZE + ETH_ALEN;
 
-    // route.c:821-822
     let ip6_bytes: &[u8; IP6_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().ok()?;
     let ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
 
@@ -164,9 +158,9 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     Some(Ipv6Addr::from(target))
 }
 
-/// `route.c:890-948`. Eth: dst←orig-src, src←orig-src⊕FF (`:899`).
-/// Ip6: dst←orig-src, src←target (hlim untouched; kernel set 255,
-/// RFC 4861 §7.2.2). Icmp6: type←ADVERT, reserved←Solicited (`:910`).
+/// Eth: dst←orig-src, src←orig-src⊕FF. Ip6: dst←orig-src,
+/// src←target (hlim untouched; kernel set 255, RFC 4861 §7.2.2).
+/// Icmp6: type←ADVERT, reserved←Solicited.
 /// Opt: type←TARGET_LLADDR, lladdr←fake MAC (`:904`).
 ///
 /// `:895` decrement_ttl: gated at the daemon callsite (`handle_ndp`)
@@ -186,7 +180,7 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
 
     let mut out = original[..total].to_vec();
 
-    // ── Ethernet (route.c:899-900) ───────────────────────────────
+    // ── Ethernet ─────────────────────────────────────────────────
     // memcpy leaves dst=src=orig-src, then XOR hits the src half.
     let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
     out[..ETH_ALEN].copy_from_slice(&eth_src);
@@ -194,7 +188,7 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     out[ETH_ALEN * 2 - 1] ^= 0xFF;
     let fake_mac: [u8; ETH_ALEN] = out[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
 
-    // ── IPv6 (route.c:902-903) ───────────────────────────────────
+    // ── IPv6 ─────────────────────────────────────────────────────
     let ip6_off = ETHER_SIZE;
     let ip6_bytes: &[u8; IP6_SIZE] = original[ip6_off..ip6_off + IP6_SIZE].try_into().ok()?;
     let mut ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
@@ -206,22 +200,22 @@ pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     ip6.ip6_src = target; //       :903
     out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(ip6.as_bytes());
 
-    // ── ICMPv6 / NS (route.c:909-911) ────────────────────────────
+    // ── ICMPv6 / NS ──────────────────────────────────────────────
     // [type][code][cksum:2][reserved:4][target:16]
-    out[ns_off] = ND_NEIGHBOR_ADVERT; // :910
+    out[ns_off] = ND_NEIGHBOR_ADVERT;
     out[ns_off + 2] = 0; // :909
     out[ns_off + 3] = 0;
     // :911 Solicited flag (spec says R|S|O for proxy; tinc sets S only).
     out[ns_off + 4..ns_off + 8].copy_from_slice(&0x4000_0000u32.to_be_bytes());
 
-    // ── Option (route.c:904-907,912) ─────────────────────────────
+    // ── Option ───────────────────────────────────────────────────
     if has_opt {
         let opt_off = ns_off + NS_SIZE;
         out[opt_off] = ND_OPT_TARGET_LINKADDR; // :912
         out[opt_off + OPT_SIZE..opt_off + OPT_SIZE + ETH_ALEN].copy_from_slice(&fake_mac); // :905-907
     }
 
-    // ── Checksum (route.c:916-936) ───────────────────────────────
+    // ── Checksum ─────────────────────────────────────────────────
     let mut pseudo = Ipv6Pseudo::default();
     pseudo.ip6_src = ip6.ip6_src;
     pseudo.ip6_dst = ip6.ip6_dst;
@@ -305,8 +299,8 @@ mod tests {
         assert_eq!(&r[..ETHER_SIZE], &f[..ETHER_SIZE]); // eth unchanged
     }
 
-    /// `route.c:971` snatch + `net_packet.c:1557-1562` stamp.
-    /// neighbor.rs is pure (no daemon access); the daemon does the
+    /// Snatch + stamp. neighbor.rs is pure (no daemon access);
+    /// the daemon does the
     /// 4-line snatch+stamp at the callsite. This test checks the
     /// byte arithmetic is right.
     #[test]
@@ -316,14 +310,13 @@ mod tests {
         let kernel_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         req[6..12].copy_from_slice(&kernel_mac);
 
-        // C `route.c:971`: memcpy(mymac.x, DATA(packet)+ETH_ALEN, ETH_ALEN)
         // Daemon snatches AFTER parse_arp_req validates.
         assert!(parse_arp_req(&req).is_some());
         let mut mymac = [0u8; 6];
         mymac.copy_from_slice(&req[6..12]);
         assert_eq!(mymac, kernel_mac);
 
-        // C `net_packet.c:1557-1562`: stamp on a frame headed TO the device.
+        // Stamp on a frame headed TO the device.
         let mut frame = [0u8; 60];
         frame[0..6].copy_from_slice(&mymac);
         frame[6..12].copy_from_slice(&mymac);

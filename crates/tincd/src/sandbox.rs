@@ -8,8 +8,8 @@
 //! ## Ordering
 //!
 //! `enter()` is called from `main()` AFTER `drop_privs` (chroot+
-//! setuid), BEFORE the epoll loop. Same as C `tincd.c:427`. By that
-//! point `tinc-up` has already run with root (`Daemon::setup` fires
+//! setuid), BEFORE the epoll loop. By that point `tinc-up` has
+//! already run with root (`Daemon::setup` fires
 //! it), the device is open, listeners are bound. Landlock is the
 //! last gate before steady-state.
 //!
@@ -26,8 +26,8 @@
 //!
 //! ## chroot interaction
 //!
-//! C `sandbox_paths` (`openbsd/tincd.c:90-94`): "chroot is used.
-//! Disabling path sandbox." If `-R` is set, every path is already
+//! "chroot is used. Disabling path sandbox." If `-R` is set, every
+//! path is already
 //! under confbase-as-root; Landlock `PathBeneath` rules would be
 //! both redundant and confused (they resolve at ruleset-build time
 //! against the post-chroot view). We mirror: `enter()` no-ops on
@@ -36,9 +36,9 @@
 //!
 //! ## What we DON'T port
 //!
-//! `open_exec_paths` (`/bin`, `/sbin`, etc — `openbsd/tincd.c:52-
-//! 67`). At `normal` the C grants exec to the standard PATH so
-//! scripts can call `ip`, `route`, etc. On Linux+Landlock that's a
+//! `open_exec_paths` (`/bin`, `/sbin`, etc). At `normal`, exec is
+//! granted to the standard PATH so scripts can call `ip`, `route`,
+//! etc. On Linux+Landlock that's a
 //! distro-specific guess; the operator's `tinc-up` shebang might
 //! point at `/nix/store/.../bin/sh`. We grant `Execute` on confbase
 //! (so `confbase/tinc-up` itself can be exec'd) and rely on the
@@ -71,9 +71,8 @@ pub enum Level {
 }
 
 impl Level {
-    /// `tincd.c:339-350`. C `strcasecmp("off", ...)` etc. C accepts
-    /// `off` for `none` (the variable name vs the enum constant);
-    /// we accept both. Case-insensitive like every other tinc enum
+    /// Accepts `off` for `none` (the variable name vs the enum
+    /// constant). Case-insensitive like every other tinc enum
     /// config (`Mode`, `Forwarding`, `ProcessPriority`).
     ///
     /// # Errors
@@ -90,9 +89,9 @@ impl Level {
 }
 
 /// `sandbox_action_t` (`sandbox.h:12-15`). Only `START_PROCESSES`
-/// is wired; `USE_NEW_PATHS` exists for the C parity but the only
-/// caller (`net_setup.c:239` ScriptsInterpreter reload guard) is
-/// commented out — we re-read the interpreter unconditionally
+/// is wired; `USE_NEW_PATHS` exists for parity but the only caller
+/// (ScriptsInterpreter reload guard) is commented out — we re-read
+/// the interpreter unconditionally
 /// because Landlock at `normal` grants `Execute` on confbase, so a
 /// reloaded interpreter under confbase still works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +104,8 @@ pub enum Action {
     UseNewPaths,
 }
 
-/// Paths the daemon needs after `enter()`. The fields are 1:1 with
-/// `open_common_paths` (`openbsd/tincd.c:30-49`). `Option<_>` for
-/// paths that may be unset (logfile when logging to stderr; device
+/// Paths the daemon needs after `enter()`. `Option<_>` for paths
+/// that may be unset (logfile when logging to stderr; device
 /// when `DeviceType=dummy`).
 ///
 /// Constructed in `main()` because that's where confbase/pidfile/
@@ -118,7 +116,7 @@ pub enum Action {
 ///
 /// Relative paths are resolved by `path_beneath_rules` against the
 /// daemon's cwd at ruleset-build time. main() chdir'd to confbase
-/// at `tincd.c:536` (`main.rs:983`); confbase as a relative path
+/// (`main.rs:983`); confbase as a relative path
 /// would resolve to itself. We pass absolutes anyway (main() has
 /// them) so the chroot interaction is the only path-semantics gotcha.
 #[derive(Debug, Clone)]
@@ -153,11 +151,9 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 
 const ENTERED_BIT: u8 = 0b100;
 
-/// `sandbox_can` (`openbsd/tincd.c:123-130`). The C takes `when`
-/// (RIGHT_NOW vs AFTER_SANDBOX); we always answer RIGHT_NOW because
-/// the only caller is `script::execute` which runs after `enter()`.
-/// Before `enter()`: always true (matches C `:127`: `else return
-/// true`).
+/// `sandbox_can`. We always answer RIGHT_NOW because the only
+/// caller is `script::execute` which runs after `enter()`. Before
+/// `enter()`: always true.
 #[must_use]
 pub fn can(action: Action) -> bool {
     let s = STATE.load(Ordering::Relaxed);
@@ -166,10 +162,8 @@ pub fn can(action: Action) -> bool {
     }
     let level = s & 0b11;
     match action {
-        // C `:112`: `current_level < SANDBOX_HIGH`.
         Action::StartProcesses => level < Level::High as u8,
-        // C `:116`: `can_use_new_paths` — false after `enter()` at
-        // any non-None level.
+        // false after `enter()` at any non-None level
         Action::UseNewPaths => level == Level::None as u8,
     }
 }
@@ -188,9 +182,9 @@ pub fn entered_level() -> Level {
     }
 }
 
-/// `sandbox_enter` (`openbsd/tincd.c:136-159`). One-shot.
+/// `sandbox_enter`. One-shot.
 ///
-/// `chrooted`: C's `chrooted()` (`:19-21`) checks `!confbase`; we
+/// `chrooted`: upstream's `chrooted()` checks `!confbase`; we
 /// take it as a flag because main() knows whether `-R` was set.
 /// When chrooted: skip the Landlock ruleset (paths inside the jail
 /// don't match the build-time absolute paths) but still record the
@@ -217,7 +211,6 @@ pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> 
     }
 
     if chrooted {
-        // C `openbsd/tincd.c:92`.
         log::debug!(target: "tincd",
             "chroot is used. Disabling path sandbox.");
         return Ok(());
@@ -260,8 +253,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
 
     let can_exec = level < Level::High;
 
-    // C `open_common_paths` (`:34-42`). confbase: r at high, rx
-    // at normal. Subdirs cache/hosts/invitations: rwc (+x at
+    // confbase: r at high, rx at normal. Subdirs cache/hosts/invitations: rwc (+x at
     // normal for hosts/ because `hosts/NAME-up` per-node scripts
     // live there — `periodic.rs:254`).
     //
@@ -273,9 +265,9 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     let cache = paths.confbase.join("cache");
     let hosts = paths.confbase.join("hosts");
     let invitations = paths.confbase.join("invitations");
-    // C `tincd.c:425`: `makedirs(DIR_CACHE | DIR_HOSTS |
-    // DIR_INVITATIONS)`. main.rs comment at :731 said "Daemon::
-    // setup already creates what it needs ... Skip." That was
+    // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`. main.rs
+    // comment said "Daemon::setup already creates what it needs
+    // ... Skip." That was
     // true for non-sandboxed runs (addrcache lazily mkdirs cache/).
     // With Landlock, lazy mkdir AFTER restrict_self needs
     // MakeDir on confbase itself, which we don't grant. Pre-create
@@ -341,7 +333,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
         rwc_paths.push(p.to_owned());
     }
 
-    // C `:35-36`: /dev/{u,}random "r". On Linux getrandom(2) is
+    // /dev/{u,}random "r". On Linux getrandom(2) is
     // the primary; the urandom fd is rand_core's libc fallback
     // for ancient kernels. Harmless to grant. The bwrap netns
     // harness dev-binds /dev/urandom; without the rule that
@@ -393,8 +385,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
 
 #[cfg(not(target_os = "linux"))]
 fn enter_impl(level: Level, _paths: &Paths) -> Result<(), String> {
-    // C `tincd.c:362-367`: `#ifndef HAVE_SANDBOX ... return false`.
-    // C HARD-FAILS at any level >none on non-OpenBSD. We mirror at
+    // Upstream HARD-FAILS at any level >none on non-OpenBSD. We mirror at
     // high (security promise); at normal warn and continue — same
     // best-effort stance as the Landlock arm on a too-old kernel.
     if level == Level::High {
@@ -423,8 +414,7 @@ mod tests {
         assert_eq!(Level::parse("garbage"), Err("garbage"));
     }
 
-    /// `can()` before `enter()` always returns true. C
-    /// `openbsd/tincd.c:127`: `else return true`. tinc-up and
+    /// `can()` before `enter()` always returns true. tinc-up and
     /// the subnet-up loop in Daemon::setup run BEFORE main()
     /// calls enter(); they must not be gated.
     ///
@@ -453,8 +443,7 @@ mod tests {
             pidfile: "/run/tinc.mesh.pid".into(),
             unixsocket: "/run/tinc.mesh.socket".into(),
         };
-        // Confbase subdirs: cache, hosts, invitations. The C
-        // `open_conf_subdir` calls (`openbsd/tincd.c:45-47`).
+        // Confbase subdirs: cache, hosts, invitations.
         assert_eq!(p.confbase.join("cache").as_os_str(), "/etc/tinc/mesh/cache");
         assert_eq!(p.confbase.join("hosts").as_os_str(), "/etc/tinc/mesh/hosts");
         assert_eq!(

@@ -1,4 +1,4 @@
-//! RFC 791 IPv4 fragmentation. Ports `route.c:570-617`.
+//! RFC 791 IPv4 fragmentation.
 //!
 //! Only used for the rare case: relaying a too-big IPv4 packet with
 //! DF clear. Modern OSes set DF on TCP (PMTUD); this fires for legacy
@@ -10,8 +10,6 @@
 //! must carry a payload whose length is a multiple of 8.
 //!
 //! ## Re-fragmentation edge case
-//!
-//! C `route.c:595-596`:
 //!
 //! ```c
 //! origf = ip_off & ~IP_OFFMASK;   // preserve DF/MF from original
@@ -34,46 +32,42 @@ use crate::packet::{IP_MF, IP_OFFMASK, Ipv4Hdr, inet_checksum};
 const ETH_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
 
-/// `route.c:570-617`. Splits `frame` (eth + IPv4, DF clear, no
-/// options) into fragments that fit `dest_mtu`. Returns `None` if the
-/// input is malformed (IP options, length mismatch) — C logs+returns,
+/// Splits `frame` (eth + IPv4, DF clear, no options) into fragments
+/// that fit `dest_mtu`. Returns `None` if the input is malformed
+/// (IP options, length mismatch).
 /// caller drops.
 ///
-/// `dest_mtu` is the tinc-layer MTU (eth + ip + payload max). C
-/// applies `MAX(dest->mtu, 590)` at the call site (`route.c:692`);
-/// callers do the same.
+/// `dest_mtu` is the tinc-layer MTU (eth + ip + payload max).
+/// Callers apply `MAX(dest->mtu, 590)` at the call site.
 #[must_use]
 pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
     if frame.len() < ETH_SIZE + IP_SIZE {
         return None;
     }
 
-    // C `:572`: memcpy(&ip, DATA(packet) + ether_size, ip_size);
     let ip_bytes: &[u8; 20] = frame[ETH_SIZE..ETH_SIZE + IP_SIZE].try_into().ok()?;
     let mut ip = Ipv4Hdr::read_from_bytes(ip_bytes).ok()?;
 
-    // C `:576-579`: ip.ip_hl != ip_size/4 — options? bail. RFC 791
-    // permits copying options into fragments (per-option Copy bit);
-    // C doesn't bother, neither do we. Options-carrying packets are
+    // ip.ip_hl != ip_size/4 — options? bail. RFC 791 permits
+    // copying options into fragments (per-option Copy bit); we
+    // don't bother. Options-carrying packets are
     // vanishingly rare on the modern internet.
     if usize::from(ip.ihl()) != IP_SIZE / 4 {
         return None;
     }
 
-    // C `:581`: todo = ntohs(ip.ip_len) - ip_size;
     let ip_len = usize::from(ip.total_len());
     if ip_len < IP_SIZE {
         return None;
     }
     let mut todo = ip_len - IP_SIZE;
 
-    // C `:583-587`: ether_size + ip_size + todo != packet->len.
     // Length mismatch — header lied or frame is short/padded.
     if ETH_SIZE + IP_SIZE + todo != frame.len() {
         return None;
     }
 
-    // C `:592`: maxlen = (MAX(dest->mtu, 590) - ether_size - ip_size) & ~0x7;
+    // maxlen = (MAX(dest->mtu, 590) - ether_size - ip_size) & ~0x7.
     // The & ~7: fragment offset is in 8-byte units (RFC 791 §3.2),
     // so payload length (except last) must be ≡ 0 mod 8.
     // Caller has already done the MAX(,590) floor, so dest_mtu ≥ 590
@@ -87,9 +81,6 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         return None;
     }
 
-    // C `:594-596`: ip_off = ntohs(ip.ip_off);
-    //               origf = ip_off & ~IP_OFFMASK;
-    //               ip_off &= IP_OFFMASK;
     // `origf` preserves the original's flag bits. Normally 0 (DF is
     // clear or we wouldn't be here). But if the input is ALREADY a
     // fragment, its MF bit is set — preserve it on all our pieces.
@@ -102,34 +93,27 @@ pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
     let mut offset = 0usize;
     let mut out = Vec::new();
 
-    // C `:598-617`: while(todo) { ... }
     while todo > 0 {
         let len = todo.min(maxlen);
 
-        // C `:604`: ip.ip_len = htons(ip_size + len);
         // len ≤ maxlen < dest_mtu ≤ u16::MAX, so IP_SIZE+len fits.
         #[allow(clippy::cast_possible_truncation)]
         ip.set_total_len((IP_SIZE + len) as u16);
 
-        // C `:605`: ip.ip_off = htons(ip_off | origf | (todo > len ? IP_MF : 0));
         // MF on every fragment except the last — UNLESS origf already
         // has MF set (re-fragmentation), in which case all get it.
         let mf = if todo > len { IP_MF } else { 0 };
         ip.set_off(ip_off | origf | mf);
 
-        // C `:606-607`: ip.ip_sum = 0; ip.ip_sum = inet_checksum(...);
         ip.ip_sum = 0;
         ip.ip_sum = inet_checksum(ip.as_bytes(), !0);
 
-        // C `:601-603,608`: memcpy(..eth..); memcpy(..ip..); memcpy(..payload..);
-        // fragment.len = ether_size + ip_size + len;
         let mut frag = Vec::with_capacity(ETH_SIZE + IP_SIZE + len);
         frag.extend_from_slice(eth_hdr);
         frag.extend_from_slice(ip.as_bytes());
         frag.extend_from_slice(&payload[offset..offset + len]);
         out.push(frag);
 
-        // C `:613-615`: todo -= len; offset += len; ip_off += len / 8;
         // Offset in 8-byte units (RFC 791). `len` is a multiple of 8
         // for all but the last fragment, where ip_off is no longer
         // used.
@@ -273,7 +257,7 @@ mod tests {
     }
 
     /// Re-fragmentation: input is already a middle fragment (MF set,
-    /// nonzero offset). C `route.c:595-596` `origf` preservation.
+    /// nonzero offset). `origf` preservation.
     #[test]
     fn refragmentation_preserves_mf_and_offset() {
         // Input fragment: offset 100 (= 800 bytes into original), MF set.

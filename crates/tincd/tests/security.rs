@@ -184,9 +184,8 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
 // ═══════════════════════════════════════════════════════════════════
 // security.py ports
 
-/// `security.py::test_invalid_id_own`. C `protocol_auth.c:376`:
-/// `if(... || !strcmp(name, myself->name))` → false. Our gate:
-/// `proto.rs::handle_id`: `if name == ctx.my_name`.
+/// Reject ID claiming our own name. Gate: `proto.rs::handle_id`
+/// `if name == ctx.my_name`.
 ///
 /// The daemon sees `"0 testnode 17.7\n"` — its OWN name. The
 /// peer-is-us check fires before `send_id` (the C orders the check
@@ -214,9 +213,8 @@ fn own_id_rejected() {
     );
 }
 
-/// `security.py::test_invalid_id_unknown`. C `protocol_auth.c:428`:
-/// `read_host_config` fails (no `hosts/baz`) → "unknown identity"
-/// → false. Our gate: `proto.rs::handle_id` pubkey-load fails (the
+/// Reject ID for unknown peer (no `hosts/baz`). Gate:
+/// `proto.rs::handle_id` pubkey-load fails (the
 /// `let Some(ecdsa) = ecdsa else` arm).
 ///
 /// The C distinguishes "file missing" (`:428`) vs "file has no key"
@@ -248,9 +246,8 @@ fn unknown_id_rejected() {
 /// legacy entirely (`DISABLE_LEGACY` equivalent). The relevant
 /// gate is the version-minor check.
 ///
-/// C `protocol_auth.c:443-447`: rollback check `if(ecdsa_active &&
-/// minor < 1)` → false. We're STRICTER (`handle_id`): `minor < 2`
-/// is reject (we don't speak legacy at any minor). The daemon never
+/// We're stricter than upstream: `minor < 2` is reject (we don't
+/// speak legacy at any minor). The daemon never
 /// gets to the METAKEY line.
 ///
 /// **The catch**: the python sends to `foo` (the daemon's own name)
@@ -317,7 +314,7 @@ fn legacy_minor_rejected() {
 
 /// `security.py::test_id_timeout`. Python: send `"0 bar 17.7"` then
 /// SLEEP 3s (1.5× `PingTimeout=2`). Daemon drops us via the
-/// timeout sweep (`net.c:236-247` pre-edge timeout).
+/// pre-edge timeout sweep.
 ///
 /// We send a name that PASSES `id_h` (so the daemon enters the
 /// post-ID-waiting-for-KEX state — the realistic half-open). For
@@ -458,13 +455,12 @@ fn id_timeout_half_open_survives() {
 ///    `proto::tests::tcp_label_has_trailing_nul`.
 ///
 /// **Assertion**: `dump nodes` on each daemon shows exactly 1
-/// REACHABLE node (itself). Neither gained a peer. C `splice.
-/// py:85-86`: `check.nodes(foo, 1); check.nodes(bar, 1)`.
+/// REACHABLE node (itself). Neither gained a peer.
 ///
 /// (`load_all_nodes` adds the OTHER name to the graph at setup
 /// — each daemon has a hosts/ file for the other for the pubkey.
-/// C `net_setup.c:186-189` does the same. The MITM-defense
-/// invariant is reachability: no edge → unreachable.)
+/// The MITM-defense invariant is reachability: no edge →
+/// unreachable.)
 #[test]
 #[allow(clippy::too_many_lines, clippy::items_after_statements)]
 // too_many_lines: end-to-end MITM scenario; splitting fragments the narrative.
@@ -561,10 +557,8 @@ fn splice_mitm_rejected() {
     });
 
     // ─── the splice: connect to both, lie about identity ───────
-    // splice.c `:100-121`. To alice: pretend to be bob. To bob:
-    // pretend to be alice. C `:108`: `"0 %s %s\n", argv[4-3*i],
-    // protocol` — argv[4] is name2 (sent to daemon 1), argv[1]
-    // is name1 (sent to daemon 2). The cross-over.
+    // To alice: pretend to be bob. To bob: pretend to be alice.
+    // The cross-over.
     let to_alice = TcpStream::connect(("127.0.0.1", alice.port)).expect("connect alice");
     let to_bob = TcpStream::connect(("127.0.0.1", bob.port)).expect("connect bob");
     to_alice
@@ -577,9 +571,9 @@ fn splice_mitm_rejected() {
     writeln!(&to_alice, "0 bob 17.7").unwrap();
     writeln!(&to_bob, "0 alice 17.7").unwrap();
 
-    // ─── consume ID replies (`splice.c:114-119`: read until '\n') ──
-    // The C reads byte-by-byte until `\n`. We do the same — can't
-    // use BufReader (it buffers past the `\n` into KEX bytes which
+    // ─── consume ID replies (read until '\n') ───────────────────
+    // Read byte-by-byte until `\n` — can't use BufReader (it
+    // buffers past the `\n` into KEX bytes which
     // we then can't proxy). Same gotcha as `stop.rs:1028`.
     fn read_until_nl(mut s: &TcpStream) -> Vec<u8> {
         let mut out = Vec::new();

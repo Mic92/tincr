@@ -1,8 +1,8 @@
-//! MAC-layer routing for `RMODE_SWITCH` (`route.c:1025-1100`).
+//! MAC-layer routing for `RMODE_SWITCH`.
 //!
 //! Exact-match MAC lookup; unknown → broadcast (switch learning).
-//! C `learn_mac` (`:524-556`) is split out: we return [`LearnAction`],
-//! daemon does the subnet-add + ADD_SUBNET broadcast.
+//! `learn_mac` is split out: we return [`LearnAction`], daemon does
+//! the subnet-add + ADD_SUBNET broadcast.
 //!
 //! Daemon-side: `age_subnets` (`:491-521`), `route_broadcast`
 //! (`:559`), and the post-route mutations (`:1052-1102`).
@@ -13,15 +13,13 @@ use std::collections::HashMap;
 
 use crate::route::RouteResult;
 
-/// `ethernet.h:36`. C `route_mac` doesn't check this (`:1028`); the
-/// caller `route()` does at `:1132`. We check anyway (we're `pub`).
+/// Ethernet header length. We check this here (we're `pub`).
 pub const ETH_HDR_LEN: usize = 14;
 
-/// C `mac_t` (`net.h:92`).
 pub type Mac = [u8; 6];
 
-/// `learn_mac` extraction (`route.c:524-556`). Daemon does the
-/// actual subnet-add + `ADD_SUBNET` broadcast.
+/// `learn_mac` extraction. Daemon does the actual subnet-add +
+/// `ADD_SUBNET` broadcast.
 ///
 /// New-vs-Refresh is provisional: `mac_table` is a snapshot of ALL
 /// nodes' MACs, not just `myself`'s. The C scopes the lookup to
@@ -39,9 +37,8 @@ pub enum LearnAction {
     Refresh(Mac),
 }
 
-/// `route_mac` (`route.c:1025-1100`).
-///
-/// `frame` includes the real eth header (TAP). Unknown dest →
+/// `route_mac`. `frame` includes the real eth header (TAP). Unknown
+/// dest →
 /// `Broadcast` (`:1042`), not `Unreachable` — switches flood.
 ///
 /// `from_myself`: gates learning (`:1031`). `source`: for the
@@ -60,7 +57,6 @@ pub fn route_mac<T, S: std::hash::BuildHasher>(
     mac_table: &HashMap<Mac, String, S>,
     resolve: impl FnOnce(&str) -> Option<T>,
 ) -> (RouteResult<T>, LearnAction) {
-    // route.c:1132 checklength (C does it at dispatch level; we're pub)
     if frame.len() < ETH_HDR_LEN {
         return (
             RouteResult::TooShort {
@@ -173,12 +169,12 @@ mod tests {
         #[rustfmt::skip]
         let cases: &[Row] = &[
             // (label,                                       dst,                          src,       from_myself, source,    route,          learn)
-            ("route.c:1104 forwards known dest",             [0xbb;6],                     [0xaa;6],  false,       "alice",   fwd("bob"),     NotOurs),
-            ("route.c:1042 broadcasts unknown dest",         [0xdd;6],                     [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
-            ("route.c:1031 learns New (src not in table)",   [0xdd;6],                     [0xee;6],  true,        "myself",  Broadcast,      New([0xee;6])),
-            ("route.c:551 refreshes (src IS in table)",      [0xbb;6],                     [0xaa;6],  true,        "myself",  fwd("bob"),     Refresh([0xaa;6])),
-            ("route.c:1031 no learn when !from_myself",      [0xbb;6],                     [0xee;6],  false,       "charlie", fwd("bob"),     NotOurs),
-            ("route.c:1047 loop (owner==source)",            [0xbb;6],                     [0xee;6],  false,       "bob",     loop_,           NotOurs),
+            ("forwards known dest",                [0xbb;6],                     [0xaa;6],  false,       "alice",   fwd("bob"),     NotOurs),
+            ("broadcasts unknown dest",            [0xdd;6],                     [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
+            ("learns New (src not in table)",      [0xdd;6],                     [0xee;6],  true,        "myself",  Broadcast,      New([0xee;6])),
+            ("refreshes (src IS in table)",        [0xbb;6],                     [0xaa;6],  true,        "myself",  fwd("bob"),     Refresh([0xaa;6])),
+            ("no learn when !from_myself",         [0xbb;6],                     [0xee;6],  false,       "charlie", fwd("bob"),     NotOurs),
+            ("loop (owner==source)",               [0xbb;6],                     [0xee;6],  false,       "bob",     loop_,           NotOurs),
             ("ff:ff:.. broadcast MAC → not in table",        [0xff;6],                     [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
             ("33:33:.. v6 multicast (RFC 2464 §7)",          [0x33,0x33,0,0,0,1],          [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
             ("01:00:5e:.. v4 multicast (RFC 1112 §6.4)",     [0x01,0x00,0x5e,0,0,1],       [0xaa;6],  false,       "alice",   Broadcast,      NotOurs),
@@ -193,7 +189,7 @@ mod tests {
         }
     }
 
-    /// route.c:1132 checklength. Truncated frame (not `frame()` shape).
+    /// Truncated frame (not `frame()` shape).
     #[test]
     fn route_mac_too_short() {
         let t = table();

@@ -1,4 +1,4 @@
-//! `broadcast_packet` target selection (`net_packet.c:1614-1660`).
+//! `broadcast_packet` target selection.
 //!
 //! Broadcast = packet goes to ALL nodes. Two strategies:
 //!
@@ -29,8 +29,7 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-/// `BMODE_*` (`net.h:71-73`). Default MST (`net_setup.c:883`
-/// `bcast_mode = BMODE_MST`).
+/// Broadcast strategy. Default MST.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BroadcastMode {
     None,
@@ -39,8 +38,8 @@ pub enum BroadcastMode {
     Direct,
 }
 
-/// `net_packet.c:1633-1636` `case BMODE_MST`. Filter active conns to
-/// those whose edge is in the MST, EXCEPT the one the packet arrived
+/// MST broadcast: filter active conns to those whose edge is in the
+/// MST, EXCEPT the one the packet arrived
 /// on (`c != from->nexthop->connection`).
 ///
 /// Generic over `(ConnId, EdgeId)` pairs — daemon builds from its
@@ -75,9 +74,8 @@ where
         .collect()
 }
 
-/// `net_packet.c:1648-1652` `case BMODE_DIRECT`. The condition:
-/// `(n->via == myself && n->nexthop == n) || n->via == n`. In English:
-/// nodes we can reach in one hop (either directly UDP-dialable, or
+/// Direct broadcast. The condition: `(n->via == myself && n->nexthop
+/// == n) || n->via == n`. In English: nodes we can reach in one hop (either directly UDP-dialable, or
 /// `via` themselves = self-relay = direct).
 ///
 /// `:1644-1646` `if(from != myself) break` — direct mode ONLY

@@ -1,10 +1,10 @@
 //! `linux::Fast` — `UDP_SEGMENT` cmsg egress (`RUST_REWRITE_10G.md` Phase 1).
 //!
 //! One `sendmsg` with `cmsg{SOL_UDP, UDP_SEGMENT, gso_size: u16}`;
-//! the kernel splits at `gso_size` boundaries (`net/ipv4/udp.c:1139`,
-//! `udp_send_skb` GSO branch → `__udp_gso_segment` at
-//! `udp_offload.c:480`). The receiver sees `count` independent UDP
-//! datagrams — wire-identical to `Portable`'s `count × sendto`.
+//! the kernel splits at `gso_size` boundaries (`udp_send_skb` GSO
+//! branch → `__udp_gso_segment`). The receiver sees `count`
+//! independent UDP datagrams — wire-identical to `Portable`'s
+//! `count × sendto`.
 //!
 //! ## Why raw libc, not `nix::sendmsg`
 //!
@@ -26,8 +26,8 @@
 //! `[cmsghdr{len=CMSG_LEN(2), level=SOL_UDP, type=UDP_SEGMENT}][u16][pad]`.
 //! Total `CMSG_SPACE(2)` bytes (24 on glibc x86-64: 16-byte cmsghdr,
 //! 2-byte payload, 6-byte trailing align). The kernel reads exactly
-//! `CMSG_LEN(2)` bytes; `__udp_cmsg_send` (`udp.c:1238`) rejects with
-//! `EINVAL` on length mismatch. Padding is unread.
+//! `CMSG_LEN(2)` bytes; `__udp_cmsg_send` rejects with `EINVAL` on
+//! length mismatch. Padding is unread.
 //!
 //! A `#[repr(C, align(..))]` wrapper struct gives us cmsghdr-aligned
 //! storage at a `const` size. `CMSG_SPACE` is `const fn` in libc, so
@@ -143,11 +143,11 @@ impl UdpEgress for Fast {
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
         // count=1: skip the cmsg entirely. Two reasons:
         //
-        // (a) Kernel's `udp_send_skb` GSO branch (`udp.c:1160`) only
-        //     fires when `datalen > gso_size`. With `count=1` and
-        //     `last_len ≤ stride`, `datalen ≤ gso_size` — the kernel
-        //     skips GSO and does a plain send anyway. The cmsg parse
-        //     (`__udp_cmsg_send`, `udp.c:1233`) is pure overhead.
+        // (a) Kernel's `udp_send_skb` GSO branch only fires when
+        //     `datalen > gso_size`. With `count=1` and `last_len ≤
+        //     stride`, `datalen ≤ gso_size` — the kernel skips GSO
+        //     and does a plain send anyway. The cmsg parse is pure
+        //     overhead.
         //
         // (b) The common case. `on_device_read` only arms the batch
         //     for `drain count > 1`. A single ICMP, ARP, control
@@ -167,15 +167,15 @@ impl UdpEgress for Fast {
 
         // The GSO path. One iovec spanning the whole dense-packed
         // run; kernel reads it in one `copy_from_iter`, splits at
-        // `b.stride`. Last segment may be shorter (`udp.c:1163`
-        // `DIV_ROUND_UP`; Willem's commit msg explicitly allows it).
+        // `b.stride`. Last segment may be shorter (Willem's commit
+        // msg explicitly allows it).
         //
         // `b.frames` is exactly `(count-1)*stride + last_len` bytes
         // — the daemon's `TxBatch::stage` packed them densely. NO
         // gaps, no padding; the kernel's split-at-stride math
         // depends on this.
         //
-        // Hard limits the daemon already respects (`udp.c:1143-1158`):
+        // Hard limits the daemon already respects:
         //   - `gso_size + iphdr + udphdr ≤ PMTU` else `EMSGSIZE`.
         //     `stride` is `body+33` where body ≤ `relay.minmtu`; the
         //     PMTU machinery set `minmtu` from probe replies, so
@@ -190,8 +190,8 @@ impl UdpEgress for Fast {
         // Patch gso_size into the pre-built cmsg. `CMSG_DATA` is
         // `(cmsg as *cmsghdr).offset(1)` — i.e. `CMSG_LEN(0)` bytes
         // from the start. The kernel reads exactly
-        // `*(u16*)CMSG_DATA(cmsg)` (`udp.c:1240`). `to_ne_bytes` +
-        // slice copy is a 2-byte memcpy: alignment-agnostic, no UB
+        // `*(u16*)CMSG_DATA(cmsg)`. `to_ne_bytes` + slice copy is a
+        // 2-byte memcpy: alignment-agnostic, no UB
         // even though the offset happens to be even on every arch.
         self.cmsg.0[GSO_DATA_OFF..GSO_DATA_OFF + 2].copy_from_slice(&b.stride.to_ne_bytes());
 
@@ -320,8 +320,8 @@ mod tests {
     /// The point of Phase 1: one `sendmsg` with `UDP_SEGMENT` cmsg
     /// produces N datagrams. Hits the real kernel GSO path
     /// (`udp_send_skb` → `__udp_gso_segment`); loopback has no NIC
-    /// USO so this exercises the SOFTWARE split (`udp_offload.c:480`),
-    /// which is the path most deployments hit anyway.
+    /// USO so this exercises the SOFTWARE split, which is the path
+    /// most deployments hit anyway.
     ///
     /// Asserts: 3 datagrams arrive, in order, with correct payloads.
     /// The kernel split at `stride` boundaries, so each datagram is

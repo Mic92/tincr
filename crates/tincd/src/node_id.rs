@@ -1,23 +1,22 @@
-//! 6-byte SHA-512-prefix node identity (`node.c:125-132`, `net.h:61-63`).
+//! 6-byte SHA-512-prefix node identity.
 //!
 //! Every UDP packet on the wire is `[dst_id:6][src_id:6][sptps...]`
 //! (`net.h:92-93` `SRCID`/`DSTID` macros, `DEFAULT_PACKET_OFFSET=12`).
 //! The receiver does a HashMap lookup on the 6-byte source ID
-//! (`net_packet.c:617-633` `lookup_node_id`) to find which peer's
-//! SPTPS state to feed the ciphertext to. On miss it falls back to
+//! (`lookup_node_id`) to find which peer's SPTPS state to feed the ciphertext to. On miss it falls back to
 //! `try_mac` — trial-decrypt against every node — which is the slow
 //! path the ID prefix exists to avoid.
 //!
-//! The ID is `SHA-512(name)[:6]`. C `node_add` (`node.c:126-128`):
-//! `sha512(n->name, strlen(n->name), buf); memcpy(&n->id, buf, 6)`.
-//! No NUL byte. Names are ASCII (`net_setup.c` validates `[A-Za-z0-9_]`)
+//! The ID is `SHA-512(name)[:6]`: `sha512(n->name, strlen(n->name),
+//! buf); memcpy(&n->id, buf, 6)`. No NUL byte. Names are ASCII
+//! (validated `[A-Za-z0-9_]`)
 //! but the hash doesn't care; we hash `str::as_bytes()`.
 //!
 //! ## Why a side table, not a `graph::Node` field
 //!
-//! C stores `node_id_t id` inline in `node_t` and keys a second splay
-//! tree on it (`node_id_tree`, `node.c:60`). `tinc-graph::Node` is the
-//! pure-BFS slot — no daemon-layer baggage. So we keep the bidi map
+//! Upstream stores `node_id_t id` inline in `node_t` and keys a
+//! second splay tree on it. `tinc-graph::Node` is the pure-BFS slot
+//! — no daemon-layer baggage. So we keep the bidi map
 //! here: `NodeId6 → NodeId` for the UDP receive path, `NodeId →
 //! NodeId6` for the send path (we need our own ID to write into
 //! `SRCID`). Same data, two indices, like the C's two trees.
@@ -34,22 +33,20 @@ use tinc_graph::NodeId;
 /// `node_id_t` (`net.h:61-63`): `struct { uint8_t x[6]; }`.
 ///
 /// `Copy` because the C passes it by value all over `net_packet.c`.
-/// `Hash`/`Eq` because it's a HashMap key (the C uses `memcmp` via
-/// `node_id_compare`, `node.c:63-65`).
+/// `Hash`/`Eq` because it's a HashMap key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId6([u8; 6]);
 
 impl NodeId6 {
-    /// `net_packet.c:1014`: `node_id_t nullid = {0}`. Six zero bytes
-    /// is the "no source ID" marker on the relay path: when `to !=
+    /// Six zero bytes: the "no source ID" marker on the relay path.
+    /// When `to !=
     /// myself` we forward, and the forwarded packet's SRCID stays
     /// null so the final hop's `lookup_node_id` falls through to
     /// `try_mac`. (Relay nodes don't have the endpoint's SPTPS key
     /// anyway, so the ID lookup would be useless to them.)
     pub const NULL: Self = Self([0; 6]);
 
-    /// `node.c:126-128`. SHA-512 of `name` bytes (no NUL), keep the
-    /// first 6.
+    /// SHA-512 of `name` bytes (no NUL), keep the first 6.
     ///
     /// `strlen` in the C means UTF-8 bytes here, not chars — but
     /// node names are validated ASCII upstream so the distinction
@@ -81,9 +78,8 @@ impl NodeId6 {
     }
 }
 
-/// `node.c:204-208` `dump_nodes` format: `snprintf(id + 2*c, 3,
-/// "%02x", n->id.x[c])` for `c` in `0..6`. Lowercase, no separators,
-/// 12 chars. Chunk-5 `dump_nodes` currently writes the literal
+/// `dump_nodes` format: lowercase hex, no separators, 12 chars.
+/// Chunk-5 `dump_nodes` currently writes the literal
 /// `"000000000000"`; this is the real value to slot in there.
 impl fmt::Display for NodeId6 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -100,18 +96,16 @@ impl fmt::Debug for NodeId6 {
     }
 }
 
-/// `node_id_tree` (`node.c:60`). C uses a splay tree keyed on
-/// `memcmp` of the 6 bytes; we use a HashMap. The reverse index
-/// (`by_node`) replaces the C's inline `n->id` field — `graph::Node`
+/// `node_id_tree`. We use a HashMap. The reverse index (`by_node`)
+/// replaces the inline `n->id` field — `graph::Node`
 /// doesn't carry it, so we keep a side table.
 ///
 /// ## Collisions
 ///
 /// 48 bits, SHA-512 is uniform. Birthday bound is ~16M nodes before
-/// 50% collision probability. The C does NOT handle this:
-/// `splay_insert` returns NULL on duplicate key, `node.c:131` ignores
-/// the return. A second node with the same ID just doesn't get
-/// indexed, so UDP packets from it fall through to `try_mac`.
+/// 50% collision probability. Upstream does NOT handle this:
+/// `splay_insert` returns NULL on duplicate key and the return is
+/// ignored. A second node with the same ID just doesn't get indexed, so UDP packets from it fall through to `try_mac`.
 ///
 /// We diverge slightly: insert-overwrites + WARN. Either way a real
 /// collision means a misconfigured (or hostile) network; the WARN is
@@ -134,8 +128,7 @@ impl NodeId6Table {
         Self::default()
     }
 
-    /// `node_add` (`node.c:125-131`). Computes the ID from `name` and
-    /// indexes both directions. Called alongside `lookup_or_add_node`
+    /// Computes the ID from `name` and indexes both directions. Called alongside `lookup_or_add_node`
     /// — every node the daemon learns about (from `ADD_EDGE`, from
     /// config, from invite) gets an entry here.
     ///
@@ -168,9 +161,9 @@ impl NodeId6Table {
         self.by_node.insert(node, id6);
     }
 
-    /// `lookup_node_id` (`node.c:157-160`). The UDP fast path:
-    /// `net_packet.c:617-633` reads 6 bytes at `SRCID(pkt)`, calls
-    /// this, gets the graph slot. `None` → fall back to `try_mac`.
+    /// `lookup_node_id`. The UDP fast path: read 6 bytes at
+    /// `SRCID(pkt)`, call this, get the graph slot. `None` → fall
+    /// back to `try_mac`.
     #[must_use]
     pub fn lookup(&self, id6: NodeId6) -> Option<NodeId> {
         self.by_id.get(&id6).copied()
@@ -185,9 +178,7 @@ impl NodeId6Table {
         self.by_node.get(&node).copied()
     }
 
-    /// `node_del` (`node.c:144-145`): `splay_delete(&node_id_tree,
-    /// n)`. Called when a node leaves the mesh. We remove both
-    /// directions.
+    /// Called when a node leaves the mesh. Removes both directions.
     ///
     /// If a collision had displaced this node from `by_id`, the
     /// `by_id.remove` is a no-op on the wrong key — but we look up
@@ -257,9 +248,9 @@ mod tests {
         assert_eq!(NodeId6::from_bytes([0; 6]), NodeId6::NULL);
     }
 
-    /// `node.c:204-208`: the `dump_nodes` snprintf loop. `%02x`
-    /// lowercase, 6 iterations, no separators → 12 chars exactly.
-    /// The KAT above already checks the *value*; this checks the
+    /// `dump_nodes` format: `%02x` lowercase, 6 iterations, no
+    /// separators → 12 chars exactly. The KAT above already checks
+    /// the *value*; this checks the
     /// *format invariants* independently.
     #[test]
     fn display_is_12_hex_lowercase() {

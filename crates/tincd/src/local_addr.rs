@@ -1,10 +1,10 @@
-//! `choose_local_address` + `adapt_socket` (`net_packet.c:732-808`).
-//! LAN-direct UDP address selection.
+//! `choose_local_address` + `adapt_socket`: LAN-direct UDP address
+//! selection.
 //!
 //! ADD_EDGE carries TWO addresses: the WAN-visible one (`e->address`, what
-//! the peer's `accept()` saw) and the local one (`e->local_address`, what
-//! `getsockname()` on the connecting end returned — `protocol_auth.c:1041-
-//! 1044`, our `daemon/connect.rs:192-210`). For two nodes behind the same
+//! the peer's `accept()` saw) and the local one (`e->local_address`,
+//! what `getsockname()` on the connecting end returned — see
+//! `daemon/connect.rs:192-210`). For two nodes behind the same
 //! NAT, WAN round-trips the gateway; LAN goes direct.
 //!
 //! `try_udp` (`:1240-1245`) sets `n->status.send_locally`, sends a probe via
@@ -32,9 +32,6 @@ use std::net::{IpAddr, SocketAddr};
 
 use rand_core::RngCore;
 
-/// `net_packet.c:732-740`. The C: `if(listen_socket[*sock].sa.sa.sa_family
-/// != sa->sa.sa_family)` scan for a match.
-///
 /// Contract: `current` indexes into `listener_addrs`. If
 /// `listener_addrs[current]` already matches `target`'s family, return
 /// `current` unchanged (the C's early-exit). Otherwise scan; first match
@@ -50,9 +47,9 @@ pub fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAd
     // `is_ipv4()` is the family check; SocketAddr has no direct family().
     let want_v4 = target.is_ipv4();
 
-    // C `:734`: early-exit if current already matches. Guard against an
-    // out-of-range index (shouldn't happen, but C would UB; we return
-    // unchanged and let sendto fail).
+    // Early-exit if current already matches. Guard against an
+    // out-of-range index (shouldn't happen; we return unchanged and
+    // let sendto fail).
     if listener_addrs
         .get(current as usize)
         .is_some_and(|a| a.is_ipv4() == want_v4)
@@ -60,19 +57,16 @@ pub fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAd
         return current;
     }
 
-    // C `:735-739`: linear scan, first match wins, `break`. ≤8 listeners
-    // (`net.h` MAXSOCKETS=8) so u8 always fits.
+    // Linear scan, first match wins. ≤8 listeners (MAXSOCKETS=8) so
+    // u8 always fits.
     listener_addrs
         .iter()
         .position(|a| a.is_ipv4() == want_v4)
         .and_then(|i| u8::try_from(i).ok())
-        // C `:740`: loop fell through, `*sock` left as-is.
-        .unwrap_or(current)
+        .unwrap_or(current) // no match: leave as-is
 }
 
-/// `net_packet.c:787-808`. C iterates `n->edge_tree` (edges WHERE
-/// `from == n`, per `edge.c:83`), picks random by `prng(count)` index,
-/// returns `candidate->local_address` if family is set.
+/// Pick a random edge's `local_address` (edges WHERE `from == n`).
 ///
 /// We take the candidates pre-filtered. Daemon builds:
 /// ```ignore
@@ -100,22 +94,20 @@ pub fn choose_local<R: RngCore>(
     rng: &mut R,
     listener_addrs: &[SocketAddr],
 ) -> Option<(SocketAddr, u8)> {
-    // C `:788`: `*sa = NULL`. C `:802`: `if(candidate && ...family)` — the
-    // family check is folded into the daemon's `filter_map(parse_addr_port)`
-    // above (UNSPEC → None), so empty slice covers both "no edges" and "no
+    // The family check is folded into the daemon's
+    // `filter_map(parse_addr_port)` above (UNSPEC → None), so empty
+    // slice covers both "no edges" and "no
     // edge has a local address".
     if candidates.is_empty() {
         return None;
     }
 
-    // C `:793`: `prng(n->edge_tree.count)` then linear walk to that index.
-    // We index directly.
     let j = (rng.next_u32() as usize) % candidates.len();
     let sa = candidates[j];
 
-    // C `:805`: `prng(listen_sockets)` for initial sock. Guard div-by-zero;
-    // a daemon with no listeners has bigger problems but adapt_socket handles
-    // it gracefully (returns 0 unchanged).
+    // Random initial sock. Guard div-by-zero; a daemon with no
+    // listeners has bigger problems but adapt_socket handles it
+    // gracefully (returns 0 unchanged).
     let n_listen = u32::try_from(listener_addrs.len()).unwrap_or(u32::MAX);
     let sock = if n_listen == 0 {
         0
@@ -124,7 +116,6 @@ pub fn choose_local<R: RngCore>(
         u8::try_from(rng.next_u32() % n_listen).unwrap_or(0)
     };
 
-    // C `:806`: `adapt_socket(*sa, sock)`.
     Some((sa, adapt_socket(&sa, sock, listener_addrs)))
 }
 
@@ -151,9 +142,7 @@ pub fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// `sockaddr2str` shape for the ANS_KEY append. `protocol_key.c:476-477`:
-/// `sockaddr2str(&from->address, &address, &port)`. The C's
-/// `getnameinfo(NI_NUMERICHOST)` gives dotted-quad / RFC-5952 v6.
+/// `sockaddr2str` shape for the ANS_KEY append. Dotted-quad / RFC-5952 v6.
 /// `IpAddr::Display` matches.
 #[must_use]
 pub fn format_addr_port(sa: &SocketAddr) -> (String, String) {
@@ -314,7 +303,7 @@ mod tests {
         // Base ANS_KEY (7-field, no addr).
         let base = "16 alice bob aGVsbG8 0 0 0 0";
         for sa in [v4("192.168.1.42:655"), v6("[fe80::1]:12345")] {
-            // Relay-side: format + raw concat (the C `"%s %s %s"`).
+            // Relay-side: format + raw concat (`"%s %s %s"`).
             let (a, p) = format_addr_port(&sa);
             let appended = format!("{base} {a} {p}");
             // Destination-side: parse + extract.

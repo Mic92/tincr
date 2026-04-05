@@ -1,6 +1,6 @@
-//! Diff-core for `reload_configuration` (`net.c:336-458`).
+//! Diff-core for `reload_configuration`.
 //!
-//! ## The C mark-sweep, translated
+//! ## The mark-sweep, translated
 //!
 //! C uses `subnet->expires = 1` as a mark bit, then sweeps:
 //!
@@ -29,8 +29,8 @@
 //!   ADD+broadcast. We don't have per-subnet `expires`; the same
 //!   shape is two `BTreeSet<(Subnet,String)>` snapshots diffed (see
 //!   `diff_subnets` below). Needs `SubnetTree` to expose a snapshot.
-//!   Scope: diff old/new authorized sets per `net.c:372-396`,
-//!   broadcast ADD/DEL for the deltas. Cold-start preload in
+//!   Scope: diff old/new authorized sets, broadcast ADD/DEL for the
+//!   deltas. Cold-start preload in
 //!   `load_all_nodes` is sufficient for the integration test.
 //!
 //! What IS here: the three diffs (subnets, ConnectTo, conn-mtime) as
@@ -43,9 +43,8 @@
 //! settings + subnets + ConnectTo + conn-revoke. The daemon re-reads
 //! config, calls these diff functions, applies the deltas.
 //!
-//! `last_config_check` initializes to daemon-start time
-//! (`net.c:458`: `last_config_check = now.tv_sec`). The first SIGHUP
-//! compares against that. `setup()` will set it.
+//! `last_config_check` initializes to daemon-start time. The first
+//! SIGHUP compares against that. `setup()` will set it.
 
 #![forbid(unsafe_code)]
 
@@ -55,29 +54,27 @@ use std::time::SystemTime;
 
 use tinc_proto::Subnet;
 
-/// Result of diffing old subnets against new config. `net.c:396-428`.
+/// Result of diffing old subnets against new config.
 ///
 /// ## Subnet identity includes weight
 ///
 /// `Subnet`'s derived `Eq`/`Hash` includes the `weight` field. So
 /// `10.0.0.0/24 weight 5` ≠ `10.0.0.0/24 weight 10`. Changing a
-/// weight in the config is remove-old + add-new. This matches the C:
-/// `subnet_compare_ipv4` (`subnet_parse.c:152`) includes weight in
-/// the splay-tree key, so `lookup_subnet` won't find the old entry
-/// when weight changed → falls through to the add path.
+/// weight in the config is remove-old + add-new. `subnet_compare_*`
+/// includes weight in the key, so `lookup_subnet` won't find the
+/// old entry when weight changed → falls through to the add path.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SubnetDiff {
     /// New in config, not in current set. → `subnet_add` +
     /// `send_add_subnet(everyone)` + `subnet_update(true)`.
-    /// C `:415-419`.
     pub added: Vec<Subnet>,
     /// In current set, not in new config. → `send_del_subnet` +
-    /// `subnet_update(false)` + `subnet_del`. C `:423-427`.
+    /// `subnet_update(false)` + `subnet_del`.
     pub removed: Vec<Subnet>,
     // No "kept" field — caller doesn't need to act on those.
 }
 
-/// `net.c:396-428`. The subnet mark-sweep.
+/// The subnet mark-sweep.
 ///
 /// `current`: subnets owned by `myself` right now.
 /// `from_config`: subnets parsed from the re-read `Subnet =` lines
@@ -100,8 +97,7 @@ pub fn diff_subnets<S: BuildHasher>(
     }
 }
 
-/// `net.c:865-883` (`try_outgoing_connections` mark-sweep) +
-/// `:432` re-kick.
+/// `try_outgoing_connections` mark-sweep + re-kick.
 ///
 /// `current`: ConnectTo names with active outgoings.
 /// `from_config`: `ConnectTo =` lines in re-read tinc.conf.
@@ -126,11 +122,11 @@ pub fn diff_connect_to(
     (to_add, to_remove)
 }
 
-/// `net.c:438-455`. Which conns need terminating because their
-/// hosts/ file changed since last reload.
+/// Which conns need terminating because their hosts/ file changed
+/// since last reload.
 ///
 /// `conns`: active connection names (excluding control conns —
-///   caller filters; C `:440`: `if(c->status.control) continue`).
+///   caller filters).
 /// `host_mtimes`: `(name, mtime)` for each conn whose `hosts/{name}`
 ///   exists. The daemon does the `stat`; this function decides.
 ///   Missing hosts/ file → conn IS in `conns` but NOT in
@@ -139,14 +135,13 @@ pub fn diff_connect_to(
 /// `last_check`: `last_config_check` from previous reload (or
 ///   daemon start).
 ///
-/// C `:447`: `if(stat(fname, &s) || s.st_mtime > last_config_check)`.
-/// The `||` means: stat-failed (ENOENT, deleted) OR newer. Both
-/// terminate.
+/// `if(stat(fname, &s) || s.st_mtime > last_config_check)`: the `||`
+/// means stat-failed (ENOENT, deleted) OR newer. Both terminate.
 ///
 /// ## `>` not `>=` — one-second granularity
 ///
-/// C `:447` is `s.st_mtime > last_config_check`. Strict greater-than.
-/// `st_mtime` is seconds (no nsec field used in the C). So if you
+/// `s.st_mtime > last_config_check`: strict greater-than. `st_mtime`
+/// is seconds. So if you
 /// reload twice in the same wall-clock second, a file written
 /// *between* the reloads has `mtime == last_check` and does NOT
 /// trigger. The C has this issue too. We replicate it: changing the
@@ -287,8 +282,8 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// C `:447`: `stat()` returns nonzero → terminate. Operator
-    /// deleted `hosts/bob` → revoke bob.
+    /// `stat()` fails → terminate. Operator deleted `hosts/bob` →
+    /// revoke bob.
     #[test]
     fn conns_to_terminate_file_deleted() {
         let last = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
@@ -300,7 +295,7 @@ mod tests {
         assert_eq!(out, vec!["bob".to_string()]);
     }
 
-    /// C `:447` is `>`, not `>=`. mtime == last_check → KEEP.
+    /// `>`, not `>=`. mtime == last_check → KEEP.
     /// One-second granularity caveat: see module doc.
     #[test]
     fn conns_to_terminate_mtime_exactly_equal() {

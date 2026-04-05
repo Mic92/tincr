@@ -1,4 +1,4 @@
-//! tincd binary entry point. Ports `tincd.c::main` (`tincd.c:464-735`).
+//! tincd binary entry point.
 //!
 //! Hand-rolled argv (no clap; ~12 flags). `--socket` is a testability
 //! addition (C derives it from `--pidfile`).
@@ -6,7 +6,7 @@
 //! ## C ordering (`tincd.c::main2`, `:640-720`)
 //!
 //! ```text
-//! detach()           ← fork+setsid, switch logmode (process.c:200-243)
+//! detach()           ← fork+setsid, switch logmode
 //! mlockall()         ← AFTER fork (parent doesn't need locked pages)
 //! setup_network()    ← opens sockets (root for <1024) AND runs tinc-up
 //! ProcessPriority    ← setpriority(PRIO_PROCESS, 0, nice)
@@ -21,7 +21,7 @@
 //!
 //! ## detach default (`-D` to disable)
 //!
-//! C `tincd.c:64`: `bool do_detach = true`. We MATCH that. This
+//! `bool do_detach = true`. We MATCH that. This
 //! breaks `cargo nextest` unless every spawned tincd gets `-D` —
 //! which is what the C integration suite does too. The test helper
 //! `tests/common/mod.rs::tincd_cmd()` bakes in `-D`. Anything that
@@ -31,7 +31,7 @@
 //!
 //! ## `-n` / `-o`
 //!
-//! `-n NETNAME` (`tincd.c:221-225`): derives confbase from
+//! `-n NETNAME`: derives confbase from
 //! `CONFDIR/tinc/NETNAME` when `-c` not given. The "run multiple
 //! tinc instances" knob. NETNAME env var as fallback (`tincd.c:
 //! 294-305`). The C calls `make_names()` to do the join; we inline
@@ -39,7 +39,7 @@
 //! pidfile fallback dance, daemon always wants explicit paths or
 //! the standard one).
 //!
-//! `-o KEY=VALUE` (`tincd.c:232-241`): per-invocation config
+//! `-o KEY=VALUE`: per-invocation config
 //! overrides without editing tinc.conf. Repeatable. Parsed with
 //! `tinc-conf::parse_line` (same parser as tinc.conf — `=` optional,
 //! whitespace-separated works too: `-o "Port 655"`). Passed to
@@ -78,9 +78,9 @@ const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
 };
 
 /// `LOCALSTATEDIR` from `config.h`. Same compile-time pattern as
-/// CONFDIR. C uses this for the default pidfile (`names.c:134`,
+/// CONFDIR. Used for the default pidfile (
 /// `LOCALSTATEDIR/run/tinc.NETNAME.pid`) and the default logfile
-/// (`names.c:130`, `LOCALSTATEDIR/log/tinc.NETNAME.log`). Duplicated
+/// `LOCALSTATEDIR/log/tinc.NETNAME.log`). Duplicated
 /// from `tinc-tools/src/names.rs:73` for the same dep-arrow reason
 /// as CONFDIR above.
 const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
@@ -112,30 +112,30 @@ struct Args {
     /// an empty Config (no-op) — simpler than `Option<Config>`.
     cmdline_conf: Config,
 
-    /// `do_detach` (`tincd.c:64`). Default true; `-D` clears it.
+    /// `do_detach`. Default true; `-D` clears it.
     do_detach: bool,
-    /// `do_mlock` (`tincd.c:66`). `-L` sets it.
+    /// `do_mlock`. `-L` sets it.
     do_mlock: bool,
-    /// `switchuser` (`tincd.c:89`). `-U USER`. None → don't drop.
+    /// `switchuser`. `-U USER`. None → don't drop.
     switchuser: Option<String>,
-    /// `do_chroot` (`tincd.c:88`). `-R`. Stored, applied in
+    /// `do_chroot`. `-R`. Stored, applied in
     /// `drop_privs` alongside setuid (the C interleaves them: chroot
-    /// BETWEEN initgroups+setgid and setuid, `tincd.c:403-414`).
+    /// BETWEEN initgroups+setgid and setuid).
     do_chroot: bool,
-    /// `debug_level` (`tincd.c:63`). `-d` increments, `-dN` sets.
+    /// `debug_level`. `-d` increments, `-dN` sets.
     /// None means "not given on cmdline" — distinct from 0, because
     /// the C falls back to `LogLevel` config key only when `-d`
-    /// wasn't given (`tincd.c:599-605`). `RUST_LOG` env still wins
+    /// wasn't given. `RUST_LOG` env still wins
     /// over both.
     debug_level: Option<u32>,
     /// `--logfile [PATH]`. Bare `--logfile` (no arg) derives the C
-    /// default `LOCALSTATEDIR/log/tinc.NETNAME.log` (`names.c:130`);
+    /// default `LOCALSTATEDIR/log/tinc.NETNAME.log`;
     /// the derivation happens post-loop in `parse_args` so it sees
     /// the final netname.
     logfile: Option<PathBuf>,
     /// `-s` syslog. We don't have a syslog backend; this becomes a
     /// warn-unimplemented unless `--logfile` also given (then logfile
-    /// wins, matching C `tincd.c:273-274`: `use_syslog = false` when
+    /// wins: `use_syslog = false` when
     /// logfile is set).
     use_syslog: bool,
 }
@@ -162,7 +162,9 @@ where
     let mut pidfile = None;
     let mut socket = None;
     let mut cmdline_conf = Config::new();
-    // C `tincd.c:234`: `++lineno` for each `-o`. The line number is
+    // `-o` ordinal (1-based), used for stable sort within cmdline
+    // entries. Matters for multi-valued keys: `-o Subnet=a -o
+    // Subnet=b` keeps both in argv order. The line number is
     // the `-o` ordinal (1-based), used for stable sort within cmdline
     // entries. Matters for multi-valued keys (`-o Subnet=a -o
     // Subnet=b` → both kept, in argv order).
@@ -191,13 +193,13 @@ where
                     .ok_or_else(|| "-c requires a path".to_string())?;
                 confbase = Some(PathBuf::from(v));
             }
-            // `--config=DIR` glued. C `getopt_long` accepts the glued
+            // `--config=DIR` glued. `getopt_long` accepts the glued
             // form for every `required_argument` option; the NixOS
             // module's `tinc` wrapper uses it (`tinc.nix:473`).
             _ if arg.starts_with("--config=") => {
                 confbase = Some(PathBuf::from(&arg["--config=".len()..]));
             }
-            // C `tincd.c:221-225`: `case OPT_NETNAME: netname =
+            // `case OPT_NETNAME: netname =
             // xstrdup(optarg)`. Short `-n`, long `--net`. The C
             // also accepts `-n NETNAME` glued (`-nfoo`); we don't
             // (the C uses getopt which splits it). Nobody types
@@ -214,24 +216,24 @@ where
             _ if arg.starts_with("--net=") => {
                 netname = Some(arg["--net=".len()..].to_owned());
             }
-            // C `tincd.c:196-197`: `case OPT_NO_DETACH: do_detach = false`.
+            // `case OPT_NO_DETACH: do_detach = false`.
             "-D" | "--no-detach" => {
                 do_detach = false;
             }
-            // C `tincd.c:199-206`: `case OPT_MLOCK`. The C errors if
+            // `case OPT_MLOCK`. Upstream errors if
             // built without HAVE_MLOCKALL; we always have it on Unix.
             "-L" | "--mlock" => {
                 do_mlock = true;
             }
-            // C `tincd.c:208-219`: `case OPT_DEBUG`. The C allows
+            // `case OPT_DEBUG`. Allows
             // `-d` (increment), `-dN` (glued), `-d N` (separate; uses
             // optind peek). We support all three.
             "-d" | "--debug" => {
                 // Increment-only form. C: `debug_level++` from -1
                 // start, so first `-d` → 0… wait no: `debug_level`
-                // starts at `DEBUG_UNSET = -1`, the C `:599` checks
+                // starts at `DEBUG_UNSET = -1`, then checks
                 // `if(debug_level == DEBUG_NOTHING)` which is 0.
-                // Actually `tincd.c:63`: `int debug_level = -1;`.
+                // `int debug_level = -1;`.
                 // First `-d` makes it 0. We track "given or not"
                 // separately, so first `-d` → Some(0) is wrong;
                 // it should be Some(1) to match `-d` ≈ "show
@@ -247,7 +249,7 @@ where
                 // gives 2 instead of 1, which is the same LevelFilter
                 // bucket anyway.
                 //
-                // BUT: `-d N` separated also exists. C `tincd.c:211-
+                // BUT: `-d N` separated also exists.
                 // 215` peeks `argv[optind]`, atoi's it iff not `-`-
                 // prefixed. The NixOS module emits `-d 0` as two argv
                 // entries; without this the `0` is "unknown argument".
@@ -271,29 +273,29 @@ where
                 let n: u32 = arg[2..].parse().unwrap_or(u32::MAX);
                 debug_level = Some(n);
             }
-            // `--debug=N` glued long form. C `getopt_long` accepts
+            // `--debug=N` glued long form. `getopt_long` accepts
             // this (the optstring `d::` plus `optional_argument` long
             // option). atoi-on-garbage gives 0; match that.
             _ if arg.starts_with("--debug=") => {
                 debug_level = Some(arg["--debug=".len()..].parse().unwrap_or(0));
             }
-            // C `tincd.c:228-230`: `case OPT_SYSLOG`.
+            // `case OPT_SYSLOG`.
             "-s" | "--syslog" => {
-                // C: `use_logfile = false; use_syslog = true`. Mutually
+                // `use_logfile = false; use_syslog = true`. Mutually
                 // exclusive, last-wins. We don't have a syslog backend;
                 // see init_logging() for the fallback.
                 logfile = None;
                 use_syslog = true;
             }
-            // C `tincd.c:270-283`: `case OPT_LOGFILE`. The C optstring
+            // `case OPT_LOGFILE`. The optstring
             // marks this `optional_argument`: bare `--logfile` is VALID
             // and derives `LOCALSTATEDIR/log/tinc.NETNAME.log`
-            // (`names.c:130`). The C peeks `argv[optind]` gated on
-            // `*argv != '-'` (`tincd.c:275`) — `--logfile -d 5` must
+            // We peek the next arg gated on `*argv != '-'` —
+            // `--logfile -d 5` must
             // NOT eat `-d` as the path. Same peek shape as `-d N`
             // above.
             "--logfile" => {
-                use_syslog = false; // C `:273`
+                use_syslog = false;
                 if let Some(next) = args.peek()
                     && let Some(s) = next.to_str()
                     && !s.starts_with('-')
@@ -310,7 +312,7 @@ where
                 use_syslog = false;
                 logfile = Some(Some(PathBuf::from(&arg["--logfile=".len()..])));
             }
-            // C `tincd.c:255-257`: `case OPT_CHANGE_USER`.
+            // `case OPT_CHANGE_USER`.
             "-U" | "--user" => {
                 let v = args
                     .next()
@@ -323,11 +325,11 @@ where
             _ if arg.starts_with("--user=") => {
                 switchuser = Some(arg["--user=".len()..].to_owned());
             }
-            // C `tincd.c:251-253`: `case OPT_CHROOT`.
+            // `case OPT_CHROOT`.
             "-R" | "--chroot" => {
                 do_chroot = true;
             }
-            // C `tincd.c:232-241`: `case OPT_OPTION`. Parse the value
+            // `case OPT_OPTION`. Parse the value
             // as a config line right here, fail-fast on malformed.
             // The C does `cfg = parse_config_line(optarg, NULL,
             // ++lineno); if(!cfg) goto exit_fail;` — same shape.
@@ -393,8 +395,8 @@ where
         }
     }
 
-    // ─── NETNAME env fallback (tincd.c:294-305)
-    // C: `if(!netname && (netname = getenv("NETNAME")))`. Only if
+    // ─── NETNAME env fallback
+    // `if(!netname && (netname = getenv("NETNAME")))`. Only if
     // `-n` wasn't given. Standard env-under-flag precedence.
     if netname.is_none()
         && let Ok(env_net) = std::env::var("NETNAME")
@@ -402,8 +404,7 @@ where
         netname = Some(env_net);
     }
 
-    // ─── netname "." → None (tincd.c:301-303 in some versions; the
-    // tincctl side has it at `tincctl.c:267-270`). "." is the
+    // ─── netname "." → None. "." is the
     // "top-level" sentinel — means "no netname, use confdir as
     // confbase". Allows `NETNAME=.` in env to explicitly say "I want
     // /etc/tinc not /etc/tinc/$NETNAME". Also empty string.
@@ -411,8 +412,8 @@ where
         netname = None;
     }
 
-    // ─── netname path-traversal guard (tincd.c:308-313)
-    // C: `if(netname && (strpbrk(netname, "\\/") || *netname == '.'))`.
+    // ─── netname path-traversal guard
+    // `if(netname && (strpbrk(netname, "\\/") || *netname == '.'))`.
     // Netname becomes a path component; slashes would escape confdir.
     // Leading dot rejects `..` (and also `.hidden`, which is fine).
     // Weaker than `check_id` — netname allows `-`, etc. The C is
@@ -424,12 +425,12 @@ where
     }
 
     // ─── derive confbase (the daemon-side `make_names`, abridged)
-    // C `names.c:make_names(true)`. Three cases:
+    // `make_names(true)`. Three cases:
     //   -c given           → use it (netname ignored)
     //   netname given      → CONFDIR/tinc/NETNAME
     //   neither            → CONFDIR/tinc
     //
-    // C `names.c:49-50` warns when both -c and -n are given. We
+    // Warn when both -c and -n are given. We
     // match the outcome (use -c) and the warning (logger isn't init'd
     // yet, eprintln).
     if confbase.is_some() && netname.is_some() {
@@ -445,14 +446,14 @@ where
         p
     });
 
-    // ─── identname (`names.c:43-47`): "tinc" or "tinc.NETNAME".
+    // ─── identname: "tinc" or "tinc.NETNAME".
     // Shared by the logfile + pidfile derivations below.
     let identname = match &netname {
         Some(net) => format!("tinc.{net}"),
         None => "tinc".to_owned(),
     };
 
-    // ─── derive logfile (`names.c:130`). Only when bare `--logfile`
+    // ─── derive logfile. Only when bare `--logfile`
     // was given (Some(None) above). Netname may have been set by a
     // later `-n`, hence post-loop.
     let logfile = logfile.map(|explicit| {
@@ -463,10 +464,10 @@ where
         })
     });
 
-    // ─── derive pidfile (`names.c:108-148`, daemon=true branch).
-    // C: `access(LOCALSTATEDIR, R_OK|W_OK|X_OK)` — if /var is
+    // ─── derive pidfile (daemon=true branch).
+    // `access(LOCALSTATEDIR, R_OK|W_OK|X_OK)` — if /var is
     // writable use `/var/run/tinc.NET.pid`; else fall back to
-    // `{confbase}/pid` with a warning (`names.c:143`). The fallback
+    // `{confbase}/pid` with a warning. The fallback
     // is for non-root daemons. `tinc start` and the NixOS module
     // both pass --pidfile explicitly so this only fires for the
     // tutorial `tincd -n foo` invocation.
@@ -489,7 +490,7 @@ where
             confbase.join("pid")
         }
     });
-    // ─── derive unixsocketname from pidfilename (names.c:152-160).
+    // ─── derive unixsocketname from pidfilename.
     // Strip `.pid` → `.socket`, else append. The NixOS module passes
     // only --pidfile; without this the unit dies "missing --socket".
     // `tinc -n NET` derives the same path on the CLI side.
@@ -518,32 +519,32 @@ where
     })
 }
 
-/// `process.c:200-243` `detach()`. The C calls `daemon(1, 0)`:
+/// `detach()`. Calls `daemon(1, 0)`:
 /// nochdir=1 (stay in cwd; confbase paths are relative-safe already
 /// because we resolved them, but the C does it so we match),
 /// noclose=0 (redirect stdio → /dev/null).
 ///
 /// `daemon(3)` is single-fork (fork+setsid) on glibc, NOT the
 /// double-fork dance. The C uses single-fork too — the doc comment
-/// in the brief said "double-fork" but `process.c:215` is `daemon(1,
+/// in the brief said "double-fork" but the actual call is `daemon(1,
 /// 0)`. Single fork is fine on Linux/BSD: `setsid()` makes the child
 /// a session leader, and a session leader can't acquire a controlling
 /// tty by accident on modern kernels (the `open()` needs `O_NOCTTY` off
 /// AND the process must not already have one — setsid satisfies the
 /// second). Double-fork was for `SysV`.
 ///
-/// Logging mode switch (`process.c:229-238`): the C reopens its
+/// Logging mode switch: upstream reopens its
 /// logger here, switching from `LOGMODE_STDERR` to `LOGMODE_SYSLOG` or
 /// `LOGMODE_FILE`. We can't reopen `env_logger` (it's `init()`-once),
 /// so we do the mode decision BEFORE init in `main()`. The "tincd
 /// starting" log line therefore goes to the post-detach destination,
 /// same as C.
-/// `tincd.c:549-568` (parse env) + `tincd.c:702-709` (snip).
+/// Umbilical: parse env + snip.
 ///
 /// `tinc start` does `socketpair`, forks, child gets `TINC_UMBILICAL
 /// = "<fd> <colorize>"` in env, exec's tincd. The fd is the child end
 /// of the socketpair. Parent reads from its end: any bytes before the
-/// final nul are early-startup log lines (the C `logger.c:183-188`
+/// final nul are early-startup log lines (upstream
 /// tees `real_logger` output to the umbilical so a detaching daemon's
 /// startup errors reach `tinc start`'s stderr). The final nul byte
 /// means "ready"; close means "done starting, go away".
@@ -575,7 +576,7 @@ fn cut_umbilical() {
     let Ok(spec) = std::env::var("TINC_UMBILICAL") else {
         return;
     };
-    // C `:554`: `sscanf(umbstr, "%d %d", &umbilical, &colorize)`.
+    // `sscanf(umbstr, "%d %d", &umbilical, &colorize)`.
     // First token is the fd. Second (colorize) we drop. sscanf with
     // one matched field returns 1 — the C doesn't check the return,
     // so a bare "%d" string (no second int) leaves colorize at its
@@ -587,7 +588,7 @@ fn cut_umbilical() {
     else {
         return;
     };
-    // C `:557-558`: `if(fcntl(umbilical, F_GETFL) < 0) umbilical = 0`.
+    // `if(fcntl(umbilical, F_GETFL) < 0) umbilical = 0`.
     // Validates the fd is real — inherited across the exec, not just
     // a stale number in the env. F_GETFL on a closed fd is EBADF.
     // After this check we know `from_raw_fd` below won't double-close
@@ -598,13 +599,13 @@ fn cut_umbilical() {
     if fcntl(fd, FcntlArg::F_GETFL).is_err() {
         return;
     }
-    // C `:564`: `fcntl(umbilical, F_SETFD, FD_CLOEXEC)`. So tinc-up
+    // `fcntl(umbilical, F_SETFD, FD_CLOEXEC)`. So tinc-up
     // and friends don't inherit it. Best-effort (the C doesn't check
     // the return either).
     let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
-    // C `:703-708`: `write(umbilical, "", 1)` then `close(umbilical)`.
+    // `write(umbilical, "", 1)` then `close(umbilical)`.
     // The empty string literal is a 1-byte buffer (the nul). `tinc
-    // start` (`tincctl.c:1011-1020`) reads in a loop; a nul byte as
+    // start` reads in a loop; a nul byte as
     // the *last* byte before EOF means success. Any other last byte
     // (or read error, or no bytes at all) means the daemon died
     // mid-startup.
@@ -622,7 +623,7 @@ fn cut_umbilical() {
 fn detach() -> Result<(), String> {
     // SIGPIPE is already SIG_IGN — Rust runtime does that for us
     // (`library/std/src/sys/pal/unix/mod.rs::reset_sigpipe`). The
-    // C `process.c:204-207` explicitly ignores SIGPIPE/USR1/USR2/
+    // Explicitly ignore SIGPIPE/USR1/USR2/
     // WINCH. USR1/USR2 are caught by SelfPipe in daemon.rs (they
     // dump state). WINCH we don't care about (no curses).
 
@@ -643,12 +644,12 @@ fn detach() -> Result<(), String> {
     Ok(())
 }
 
-/// `tincd.c:373-428` `drop_privs()`. Called AFTER `setup_network`
+/// `drop_privs()`. Called AFTER `setup_network`
 /// (so root has bound port 655, opened TUN, AND run tinc-up which
 /// does `ip addr add`). Called BEFORE `main_loop` so the event loop
 /// runs unprivileged.
 ///
-/// Ordering inside (`tincd.c:378-420`):
+/// Ordering inside:
 ///   getpwnam → initgroups → setgid → [chroot] → setuid
 ///
 /// `chroot` between setgid and setuid is deliberate: chroot needs
@@ -661,13 +662,13 @@ fn drop_privs(
     confbase: &std::path::Path,
 ) -> Result<(), String> {
     let uid_gid = if let Some(user) = switchuser {
-        // C `tincd.c:378-384`: `getpwnam(switchuser)`. nix's
+        // `getpwnam(switchuser)`. nix's
         // `User::from_name` wraps the reentrant `getpwnam_r`.
         let pw = nix::unistd::User::from_name(user)
             .map_err(|e| format!("getpwnam_r `{user}': {e}"))?
             .ok_or_else(|| format!("unknown user `{user}'"))?;
 
-        // C `tincd.c:389-394`: `initgroups(switchuser, pw->pw_gid)
+        // `initgroups(switchuser, pw->pw_gid)
         // || setgid(pw->pw_gid)`. initgroups sets supplementary
         // groups from /etc/group; setgid sets the primary.
         //
@@ -692,10 +693,10 @@ fn drop_privs(
         None
     };
 
-    // C `tincd.c:403-414`: chroot AFTER initgroups (which reads
+    // chroot AFTER initgroups (which reads
     // /etc/group), BEFORE setuid (chroot needs root).
     if do_chroot {
-        // C `:405`: `tzset()` first. Loads /etc/localtime BEFORE
+        // `tzset()` first. Loads /etc/localtime BEFORE
         // we lose access to it. Log timestamps stay in local tz.
         // libc crate doesn't bind tzset on unix (it's POSIX, just
         // not in their unix/mod.rs). Declare it.
@@ -718,28 +719,28 @@ fn drop_privs(
                 std::io::Error::last_os_error()
             ));
         }
-        // C `:407`: `chdir("/")`. Inside the jail now; cwd was
+        // `chdir("/")`. Inside the jail now; cwd was
         // outside. Don't leave a handle to outside-the-jail.
         std::env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
     }
 
-    // C `tincd.c:416-420`: setuid LAST. After this we can't undo.
+    // setuid LAST. After this we can't undo.
     if let Some(uid) = uid_gid {
         nix::unistd::setuid(uid).map_err(|e| format!("System call `setuid' failed: {e}"))?;
     }
 
-    // C `:425`: `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`.
+    // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`.
     // Moved into sandbox::enter() (the Landlock arm) because the
     // pre-create is what makes the PathBeneath fd-open succeed.
     // Non-sandboxed runs don't need it (addrcache lazily mkdirs).
     //
-    // C `:427`: `sandbox_enter()`. Done by the caller right after
+    // `sandbox_enter()`. Done by the caller right after
     // this returns (main() owns the Paths struct).
 
     Ok(())
 }
 
-/// `tincd.c:670-698` `ProcessPriority` config key. Best-effort:
+/// `ProcessPriority` config key. Best-effort:
 /// log on failure but don't abort (a daemon that can't nice itself
 /// can still tunnel packets).
 ///
@@ -765,7 +766,7 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
     };
     let prio_str = e.get_str();
 
-    // C `tincd.c:452-454` Unix mapping (the macros for the Windows
+    // Unix mapping (the macros for the Windows
     // priority class names): Normal=0, Low=10, High=-10. nice values.
     let nice: libc::c_int = match prio_str.to_ascii_lowercase().as_str() {
         "normal" => 0,
@@ -791,10 +792,10 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
     }
 }
 
-/// Logging init. Folds `process.c:229-238` (logmode decision) and
+/// Logging init. Folds the logmode decision and
 /// the `-d`/`--logfile` argv knobs into one `env_logger` build.
 ///
-/// C precedence (`process.c:229-237`):
+/// Precedence:
 ///   logfile set        → `LOGMODE_FILE`
 ///   syslog OR detach   → `LOGMODE_SYSLOG`
 ///   else               → `LOGMODE_STDERR`
@@ -861,7 +862,7 @@ fn init_logging(args: &Args) {
     tincd::log_tap::init(inner);
 
     // Seed the C-style debug-level atomic so REQ_SET_DEBUG can
-    // reply with the actual startup value (`control.c:86` sends
+    // reply with the actual startup value (REQ_SET_DEBUG sends
     // `debug_level`; ours is in log_tap). `init_debug_level`, NOT
     // `set_debug_level`: the latter calls `log::set_max_level`,
     // which would clobber what `init()` just set from RUST_LOG.
@@ -870,7 +871,7 @@ fn init_logging(args: &Args) {
     tincd::log_tap::init_debug_level(args.debug_level.map_or(0, |d| d as i32));
 }
 
-/// C `tincd.c:599-604`: consult the `LogLevel` config key when
+/// Consult the `LogLevel` config key when
 /// `-d` was not given on argv. C's order is `read_server_config`
 /// (`:591`) → `LogLevel` check (`:599`) → detach (`:640`). We had
 /// logger-init BEFORE config-read; rather than reorder all of
@@ -887,10 +888,10 @@ fn init_logging(args: &Args) {
 /// 4. None → caller defaults to Info
 ///
 /// **C divergence:** C checks `debug_level == DEBUG_NOTHING` (0).
-/// `debug_level` STARTS at -1 (`tincd.c:63` — wait: `logger.c:33`
+/// `debug_level` STARTS at -1 (wait: the logger global
 /// says `DEBUG_NOTHING`; the *option* state at -1 is in tinc.c
 /// pre-options, but `tincd.c` actually has `debug_level++` at
-/// `:216`, and `debug_level` is the global at `logger.c:33` =
+/// , and `debug_level` is the logger global =
 /// `DEBUG_NOTHING` = 0). So: no `-d` → 0 → `LogLevel` read; bare
 /// `-d` → 1 → NOT read; `-d5` → 5 → NOT read. That's the sane
 /// thing. Our `is_none()` mirrors it exactly.
@@ -917,21 +918,21 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
 
     // tinc.conf. Read failure → silently None: logger isn't init'd
     // yet to report it, and Daemon::setup will hit the same failure
-    // and report it properly. C `:591` returns 1 on parse failure
+    // and report it properly. Upstream returns 1 on parse failure
     // but ALSO before its logger switches mode — same shape.
     tinc_conf::read_server_config(&args.confbase)
         .ok()
         .and_then(|c| lookup(&c))
 }
 
-/// `tincd.c:335-370` `read_sandbox_level`. Same early-read shape as
+/// `read_sandbox_level`. Same early-read shape as
 /// `resolve_debug_level`: tinc.conf is re-read here just for this
 /// key. C reads it AFTER `read_server_config` (`:595`), BEFORE
 /// detach. We read it after detach (the file read crosses `fork()`
 /// fine) but before logger init would be too early to report parse
 /// errors; after `init_logging` is the right spot.
 ///
-/// Default `none`. C `tincd.c:354-358`: `normal` when `HAVE_SANDBOX`
+/// Default `none`. Upstream uses `normal` when `HAVE_SANDBOX`
 /// (OpenBSD), else `none`. We're the non-OpenBSD case: explicit
 /// opt-in. Landlock is always compiled in on Linux but the DEFAULT
 /// stays `none` so an unconfigured daemon behaves as before.
@@ -959,7 +960,8 @@ fn resolve_sandbox_level(
     Ok(sandbox::Level::None)
 }
 
-/// `tincd.c:576-585` env-var parse, factored out for testability.
+/// `LISTEN_PID`/`LISTEN_FDS` env-var parse, factored out for
+/// testability.
 /// Takes the env values as parameters so tests can inject them
 /// without `set_var` (which is `unsafe` since 1.85 and racy under
 /// nextest's shared-process model).
@@ -974,7 +976,7 @@ fn resolve_sandbox_level(
 ///
 /// Returns `Some(n)` only when BOTH the PID matches AND `LISTEN_FDS`
 /// parses as a positive count. C splits the two checks across
-/// `tincd.c:578` and `net_setup.c:1107`; we fuse them here because
+/// We fuse the two checks here because
 /// main.rs needs the answer BEFORE the detach decision.
 fn check_socket_activation(
     listen_pid: Option<String>,
@@ -1000,9 +1002,9 @@ fn main() -> ExitCode {
         }
     };
 
-    // C `tincd.c:536`: `chdir(confbase)`. Hard-fail (`return 1`).
+    // `chdir(confbase)`. Hard-fail (`return 1`).
     // User-visible: tinc-up/tinc-down/host-* scripts inherit this
-    // as their cwd (C `script.c` does no chdir of its own; the
+    // as their cwd (script execution does no chdir of its own; the
     // daemon's cwd IS the script's cwd). A `tinc-up` doing
     // `cat hosts/$NODE` works under C only because of this.
     //
@@ -1013,7 +1015,7 @@ fn main() -> ExitCode {
     // relative path would silently work-under-C-break-under-us.
     // One process-level chdir matches C exactly.
     //
-    // BEFORE detach: C `:536` is at `:536`, detach at `:640`.
+    // BEFORE detach.
     // `daemon(1, 0)` is nochdir=1 (preserves cwd across fork).
     // Our detach() does the same — the only set_current_dir is
     // post-chroot at `:721`.
@@ -1032,7 +1034,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // ─── socket activation (tincd.c:576-585)
+    // ─── socket activation
     // BEFORE detach: socket-activated daemons don't fork (systemd
     // already daemonized; another fork would orphan the fds — the
     // child has a new PID, LISTEN_PID won't match in the child, but
@@ -1045,7 +1047,7 @@ fn main() -> ExitCode {
         std::env::var("LISTEN_PID").ok(),
         std::env::var("LISTEN_FDS").ok(),
     );
-    // C `:583` + `net_setup.c:1113`: unsetenv. Don't leak to tinc-up.
+    // unsetenv. Don't leak to tinc-up.
     // SAFETY: single-threaded (see above). remove_var is documented
     // unsafe only because of glibc's non-reentrant getenv; with no
     // concurrent readers there's nothing to race.
@@ -1054,11 +1056,11 @@ fn main() -> ExitCode {
         std::env::remove_var("LISTEN_FDS");
     }
     if socket_activation.is_some() {
-        // C `tincd.c:579`: `do_detach = false`.
+        // `do_detach = false`.
         args.do_detach = false;
     }
 
-    // ─── detach (process.c:200-243, called tincd.c:645)
+    // ─── detach
     // BEFORE logger init: env_logger might spawn threads or hold
     // fds we don't want crossing the fork. (It doesn't currently,
     // but the safe ordering is fork-first.) The "starting" log line
@@ -1079,7 +1081,7 @@ fn main() -> ExitCode {
 
     init_logging(&args);
 
-    // C `process.c:239-240`: the "tincd starting" banner. C says
+    // The "tincd starting" banner. Upstream says
     // "tincd %s (%s %s) starting, debug level %d" with build date.
     // We don't have a build date (reproducible builds); just version.
     log::info!(
@@ -1089,8 +1091,8 @@ fn main() -> ExitCode {
         args.debug_level.unwrap_or(0)
     );
 
-    // ─── mlockall (tincd.c:652-659)
-    // C `:651` comment: "after daemon()/fork() so it works for
+    // ─── mlockall
+    // "after daemon()/fork() so it works for
     // child. No need to do that in parent as it's very short-lived."
     // We forked above. Lock now.
     //
@@ -1109,7 +1111,7 @@ fn main() -> ExitCode {
         }
     }
 
-    // ─── setup_network (tincd.c:665)
+    // ─── setup_network
     // This opens TUN, binds sockets, AND runs tinc-up (daemon.rs:
     // ~1755). All of that needs root (TUN open, port <1024 bind,
     // `ip addr add` in the script). drop_privs is AFTER this.
@@ -1127,12 +1129,12 @@ fn main() -> ExitCode {
         }
     };
 
-    // ─── ProcessPriority (tincd.c:670-698)
+    // ─── ProcessPriority
     // After setup (config is read), before drop_privs (negative
     // nice needs root or CAP_SYS_NICE).
     apply_process_priority(&args.confbase, &args.cmdline_conf);
 
-    // ─── drop_privs (tincd.c:694-696)
+    // ─── drop_privs
     // tinc-up has run (with root). Everything from here is
     // unprivileged: poll loop, SPTPS handshakes, packet relay.
     // tinc-down (in Daemon::Drop, daemon.rs:~1973) will run
@@ -1144,7 +1146,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // ─── sandbox_enter (tincd.c:427)
+    // ─── sandbox_enter
     // AFTER drop_privs (the C order). tinc-up has run; device is
     // open; listeners are bound. Everything from here is the epoll
     // loop, which only touches confbase (hosts/, cache/), the
@@ -1155,7 +1157,7 @@ fn main() -> ExitCode {
     // DEFAULT_DEVICE is private but every Linux backend opens that
     // one path. The fd is already held; this rule is for the
     // (theoretical) case of a re-open mid-run, which doesn't
-    // happen. C unveils it anyway (`openbsd/tincd.c:37`); we match.
+    // happen. Upstream unveils it anyway; we match.
     // dummy/fd device types pass None (no path-based open).
     let sandbox_level = match resolve_sandbox_level(&args.confbase, &args.cmdline_conf) {
         Ok(l) => l,
@@ -1186,7 +1188,7 @@ fn main() -> ExitCode {
     // ready to forward packets. No-op when NOTIFY_SOCKET is unset.
     sd_notify::notify_ready();
 
-    // ─── umbilical snip (tincd.c:702-709)
+    // ─── umbilical snip
     // Sibling of sd_notify: same "daemon is up" signal, different
     // consumer. `tinc start` forks us with TINC_UMBILICAL=<fd> in
     // env, then blocks reading that fd. The single nul byte we write
@@ -1216,7 +1218,7 @@ fn main() -> ExitCode {
             .expect("spawn watchdog thread");
     }
 
-    // ─── main_loop (tincd.c:717)
+    // ─── main_loop
     let outcome = daemon.run();
 
     // ─── sd_notify STOPPING=1
@@ -1287,7 +1289,7 @@ mod tests {
     fn logfile_bare_does_not_eat_next_flag() {
         // Regression: old code did `args.next()` unconditionally and
         // would consume `-d` as the logfile path. C peeks gated on
-        // `*argv != '-'` (tincd.c:275).
+        // `*argv != '-'`.
         let a = parse_args(argv(&[
             "--logfile",
             "-d",
@@ -1351,7 +1353,7 @@ mod tests {
 
     #[test]
     fn both_c_and_n_uses_c() {
-        // C names.c:49-50: -c wins, warning to stderr (not asserted here).
+        // -c wins, warning to stderr (not asserted here).
         let a = parse_args(argv(&["-c", "/tmp", "-n", "foo", "--pidfile=/tmp/p"])).unwrap();
         assert_eq!(a.confbase, PathBuf::from("/tmp"));
     }
@@ -1480,7 +1482,7 @@ mod tests {
         assert_eq!(check_socket_activation(Some(wrong), Some("2".into())), None);
     }
 
-    /// Right PID but no `LISTEN_FDS` → None. C `net_setup.c:1107`
+    /// Right PID but no `LISTEN_FDS` → None. Upstream
     /// gates on `listen_fds` non-null too.
     #[test]
     fn socket_activation_no_fds() {

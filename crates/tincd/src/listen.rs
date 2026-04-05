@@ -6,24 +6,24 @@
 //! ## socket2, not hand-rolled setsockopt
 //!
 //! std's `TcpListener::bind` is atomic; no seam for `IPV6_V6ONLY`.
-//! socket2 gives the C's four-step shape (`net_socket.c:196,210,
-//! 214,254`). Not a shim-matrix row — it's "std with seams".
+//! socket2 gives the four-step shape (socket/setsockopt/bind/
+//! listen). Not a shim-matrix row — it's "std with seams".
 //!
 //! Used (all ungated): `Socket::new` (auto-`SOCK_CLOEXEC`),
 //! `set_reuse_address` (`:210`), `set_only_v6` (`:214` — load-
 //! bearing for separate v4+v6 listeners), `set_nodelay`
 //! (`configure_tcp:89`), `set_nonblocking`, `set_broadcast`
-//! (`:332`), `accept` (uses `accept4(SOCK_CLOEXEC)` — closes a
-//! small fd leak the C has), `SockAddr` (= C `sockaddr_t` union).
+//! `accept` (uses `accept4(SOCK_CLOEXEC)` — closes a small fd leak
+//! upstream has), `SockAddr` (= the `sockaddr_t` union).
 //!
 //! Deferred sockopts: `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
 //!
 //! ## getaddrinfo: skip it
 //!
-//! C `add_listen_address(NULL, NULL)` uses getaddrinfo as a per-
-//! family probe (`0.0.0.0` then `::`, gcc-verified). We probe by
-//! trying both binds; `Socket::new(Domain::IPV6, ...)` failing is
-//! the same outcome. Bind failure is `continue` (C `:705-707`).
+//! `add_listen_address(NULL, NULL)` uses getaddrinfo as a
+//! per-family probe (`0.0.0.0` then `::`, gcc-verified). We probe
+//! by trying both binds; `Socket::new(Domain::IPV6, ...)` failing
+//! is the same outcome. Bind failure is `continue`.
 //! `BindToAddress` resolution lives in `daemon.rs` (it owns the
 //! config tree); resolved `SocketAddr`s flow into
 //! `open_listener_pair` here.
@@ -43,31 +43,30 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 /// helpers stay free of config-tree dependencies.
 ///
 /// All fields except `bind_to_interface` are best-effort: setsockopt
-/// failure logs and continues, matching the C (`net_socket.c:248,
-/// 264-290` — no return-value check on `SO_MARK`, warn-only on the
+/// failure logs and continues (no return-value check on `SO_MARK`,
+/// warn-only on the
 /// buffer ones).
 #[derive(Debug, Clone)]
 pub struct SockOpts {
-    /// `udp_rcvbuf` (`net_socket.c:41`). C default `1024*1024` (1MB).
-    /// 0 = skip the setsockopt entirely (`set_udp_buffer:264`: `if
+    /// `udp_rcvbuf`. Default `1024*1024` (1MB). 0 = skip the
+    /// setsockopt entirely (`set_udp_buffer`: `if
     /// (!size) return`). Kernel default on Linux is ~200KB — the C
     /// bumps it to handle burst traffic. UDP-only.
     pub udp_rcvbuf: usize,
-    /// `udp_sndbuf` (`net_socket.c:42`). Same shape as rcvbuf.
+    /// `udp_sndbuf`. Same shape as rcvbuf.
     pub udp_sndbuf: usize,
-    /// `udp_{rcv,snd}buf_warnings` (`net_socket.c:43-44`). C sets this
-    /// to true ONLY when the operator explicitly configured
-    /// `UDPRcvBuf`/`UDPSndBuf` (`net_setup.c:895,904`). The 1MB
+    /// `udp_{rcv,snd}buf_warnings`. Set to true ONLY when the
+    /// operator explicitly configured `UDPRcvBuf`/`UDPSndBuf`. The
+    /// 1MB
     /// default firing without the operator asking would be log noise
     /// on every boot (kernel almost always clamps 1MB).
     pub udp_buf_warnings: bool,
-    /// `fwmark` (`net_socket.c:46`). `SO_MARK`. Linux netfilter mark
+    /// `fwmark`. `SO_MARK`. Linux netfilter mark
     /// for policy routing. 0 = unset = skip. Applied to TCP + UDP
     /// listeners (`:248`) AND outgoing TCP (`:383`, separate site).
     /// Public so `outgoing.rs` can reuse the same parsed value.
     pub fwmark: u32,
-    /// `BindToInterface` config (`net_socket.c:111-142`).
-    /// `SO_BINDTODEVICE`. Linux-only. `None` = skip. Unlike the
+    /// `BindToInterface` config. `SO_BINDTODEVICE`. Linux-only. `None` = skip. Unlike the
     /// other knobs, the C makes this a HARD failure (`:244,391`:
     /// `closesocket; return -1`) — if the operator says "bind to
     /// eth0" and eth0 doesn't exist, silently binding to the
@@ -79,24 +78,21 @@ pub struct SockOpts {
 impl Default for SockOpts {
     fn default() -> Self {
         Self {
-            // C `net_socket.c:41-42`: `int udp_rcvbuf = 1024*1024`.
             udp_rcvbuf: 1024 * 1024,
             udp_sndbuf: 1024 * 1024,
-            // C `:43-44`: `bool udp_rcvbuf_warnings;` (zero-init).
             udp_buf_warnings: false,
-            // C `:46`: `int fwmark;` (zero-init = unset).
-            fwmark: 0,
+            fwmark: 0, // 0 = unset
             bind_to_interface: None,
         }
     }
 }
 
-/// `set_udp_buffer` (`net_socket.c:262-290`). Set `SO_RCVBUF` or
-/// `SO_SNDBUF`, then optionally read back and warn if the kernel
+/// `set_udp_buffer`. Set `SO_RCVBUF` or `SO_SNDBUF`, then
+/// optionally read back and warn if the kernel
 /// clamped. Linux DOUBLES the requested value internally (overhead
 /// accounting) and caps at `net.core.{r,w}mem_max`; the readback
-/// sees the doubled-then-capped figure. C `:287` checks `actual <
-/// size` (not `!=`) — doubling alone doesn't trip the warning.
+/// sees the doubled-then-capped figure. We check `actual < size`
+/// (not `!=`) — doubling alone doesn't trip the warning.
 fn set_udp_buffer<O>(s: &Socket, opt: O, name: &str, size: usize, warn: bool)
 where
     O: nix::sys::socket::SetSockOpt<Val = usize> + nix::sys::socket::GetSockOpt<Val = usize> + Copy,
@@ -127,11 +123,9 @@ where
     }
 }
 
-/// `bind_to_interface` (`net_socket.c:111-142`). `SO_BINDTODEVICE`.
-/// Returns `Err` on failure (caller closes the socket) — unlike the
-/// other sockopts, this is intentional: see `SockOpts.
-/// bind_to_interface`. The C `:132-135` returns `false` and the
-/// caller at `:391` does `closesocket; return -1`.
+/// `bind_to_interface`. `SO_BINDTODEVICE`. Returns `Err` on failure
+/// (caller closes the socket) — unlike the other sockopts, this is
+/// intentional: see `SockOpts.bind_to_interface`.
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
@@ -143,7 +137,7 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 /// `BindToAddress` entries.
 pub const MAXSOCKETS: usize = 8;
 
-/// `addressfamily` (`net_socket.c:38`). Which families to bind.
+/// `addressfamily`. Which families to bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AddrFamily {
     /// `AF_UNSPEC`. Try v4 AND v6.
@@ -156,14 +150,14 @@ pub enum AddrFamily {
 }
 
 impl AddrFamily {
-    /// Parse the `AddressFamily` config value. C `net_setup.c:538-548`.
-    /// Returns `None` for unrecognized values; the C also does this
+    /// Parse the `AddressFamily` config value. Returns `None` for
+    /// unrecognized values; upstream also does this
     /// (silent ignore — `addressfamily` stays at its default
     /// `AF_UNSPEC`).
     #[must_use]
     pub fn from_config(s: &str) -> Option<Self> {
-        // C `strcasecmp`. The vars table normalizes case at parse time
-        // but the C also re-checks here. Match.
+        // `strcasecmp`. The vars table normalizes case at parse
+        // time but we also re-check here. Match.
         match s.to_ascii_lowercase().as_str() {
             "ipv4" => Some(Self::Ipv4),
             "ipv6" => Some(Self::Ipv6),
@@ -186,13 +180,13 @@ impl AddrFamily {
 /// outgoing UDP source selection).
 ///
 /// `bindto` distinguishes `BindToAddress` (use this addr for
-/// outgoing connections too — `net_socket.c:624` source-addr
-/// selection) from `ListenAddress` (listen-only). The no-config
+/// outgoing connections too — source-addr selection) from
+/// `ListenAddress` (listen-only). The no-config
 /// default is `bindto = false`.
 pub struct Listener {
     /// `listen_socket_t.bindto`. True iff this listener came from a
     /// `BindToAddress` config line (vs `ListenAddress` or the
-    /// implicit wildcard). C `net_setup.c:1160` vs `:1169`. Consumed
+    /// implicit wildcard). Consumed
     /// by outgoing-connect to pick a source address.
     pub bindto: bool,
     /// `listen_socket_t.tcp`. TCP listener, accepting peer conns.
@@ -213,8 +207,7 @@ impl Listener {
         (self.tcp.as_raw_fd(), self.udp.as_raw_fd())
     }
 
-    /// `get_bound_port(sock->udp.fd)` (`net_setup.c:1194`). The UDP
-    /// port, AFTER bind. With `bind_reusing_port` (`open_one`) this
+    /// `get_bound_port(sock->udp.fd)`. The UDP port, AFTER bind. With `bind_reusing_port` (`open_one`) this
     /// equals `local.port()` for the first listener; kept as a
     /// separate accessor because subsequent listeners on a system
     /// where the port is taken on UDP fall back to ephemeral
@@ -231,7 +224,7 @@ impl Listener {
 
 // setup_listen_socket (TCP)
 
-/// `setup_listen_socket` (`net_socket.c:191-262`). One TCP listener.
+/// `setup_listen_socket`. One TCP listener.
 ///
 /// Four-step shape, matching the C:
 /// 1. `socket(family, SOCK_STREAM, IPPROTO_TCP)` — `:196`
@@ -239,8 +232,8 @@ impl Listener {
 /// 3. `bind` — `:250` (via `try_bind`)
 /// 4. `listen(backlog=3)` — `:254`
 ///
-/// Backlog is 3. C `:254`: `listen(nfd, 3)`. tinc isn't a high-QPS
-/// server; 3 pending accepts is plenty. We match.
+/// Backlog is 3. tinc isn't a high-QPS server; 3 pending accepts is
+/// plenty.
 ///
 /// # Errors
 /// `socket`/`bind`/`listen` errors. `setsockopt` failures are LOGGED
@@ -250,8 +243,8 @@ impl Listener {
 /// `setup_listen_socket` check the return value.
 fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
-    // `Socket::new` does `SOCK_CLOEXEC` on Linux/BSD. C `:203` does
-    // separate `fcntl(F_SETFD, FD_CLOEXEC)`. Same effect, atomic.
+    // `Socket::new` does `SOCK_CLOEXEC` on Linux/BSD. Same effect
+    // as separate `fcntl(F_SETFD, FD_CLOEXEC)`, atomic.
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 
     // `:210`: `setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)`. Restart
@@ -278,16 +271,15 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
         log::warn!(target: "tincd::net", "SO_MARK={}: {e}", opts.fwmark);
     }
 
-    // `:225-247`: SO_BINDTODEVICE. The C `setup_listen_socket` does
-    // this inline (NOT via the `bind_to_interface` helper — that's
+    // SO_BINDTODEVICE. `setup_listen_socket` does this inline (NOT
+    // via the `bind_to_interface` helper — that's
     // UDP-only at `:389`). Same semantics: hard failure (`:244`:
     // `closesocket; return -1`). Propagate; Socket's Drop closes.
     if let Some(iface) = &opts.bind_to_interface {
         bind_to_interface(&s, iface)?;
     }
 
-    // `:250`: bind. C `try_bind` closes the fd on failure and logs;
-    // we let `?` propagate. Socket's Drop closes.
+    // bind. We let `?` propagate. Socket's Drop closes on failure.
     s.bind(addr)?;
 
     // `:254`: `listen(nfd, 3)`.
@@ -298,8 +290,8 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 
 // setup_vpn_in_socket (UDP)
 
-/// `net_setup.c:1107-1153`: systemd socket activation. Consume `n`
-/// TCP fds at `start_fd..start_fd+n`, open a matching UDP socket
+/// systemd socket activation. Consume `n` TCP fds at
+/// `start_fd..start_fd+n`, open a matching UDP socket
 /// for each (C ONLY takes TCP from systemd; UDP is
 /// `setup_vpn_in_socket(&sa)` against the same address).
 ///
@@ -319,18 +311,18 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 /// [`adopt_listeners`].
 ///
 /// # Errors
-/// - `n > MAXSOCKETS` (`net_setup.c:1117-1120`): hard error.
-/// - `getsockname` failure (`:1128-1131`): hard error. The fd
+/// - `n > MAXSOCKETS`: hard error.
+/// - `getsockname` failure: hard error. The fd
 ///   isn't a socket, or it's closed, or it's something we can't
-///   handle (`AF_UNIX`). C: `return false`.
-/// - `setup_udp` failure: hard error (C `:1138-1140`).
+///   handle (`AF_UNIX`).
+/// - `setup_udp` failure: hard error.
 pub(crate) fn adopt_listeners_from(
     start_fd: RawFd,
     n: usize,
     opts: &SockOpts,
 ) -> io::Result<Vec<Listener>> {
-    // C `:1117-1120`: cap. C clamps and errors; we just error
-    // (clamp-then-error is the same as just-error since the C
+    // Cap. Upstream clamps and errors; we just error (clamp-then-
+    // error is the same as just-error since the
     // returns false right after the clamp).
     if n > MAXSOCKETS {
         return Err(io::Error::other(format!(
@@ -340,13 +332,13 @@ pub(crate) fn adopt_listeners_from(
 
     let mut listeners = Vec::with_capacity(n);
     for i in 0..n {
-        // C `:1125`: `int tcp_fd = i + 3`. RawFd is i32 on Linux;
-        // n ≤ MAXSOCKETS = 8 so the cast can't overflow.
+        // `int tcp_fd = i + 3`. RawFd is i32 on Linux; n ≤
+        // MAXSOCKETS = 8 so the cast can't overflow.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let tcp_fd = start_fd + i as RawFd;
 
-        // C `:1127-1131`: `getsockname(tcp_fd, &sa, &salen)`.
-        // socket2 needs the fd wrapped first; from_raw_fd takes
+        // `getsockname(tcp_fd, &sa, &salen)`. socket2 needs the fd
+        // wrapped first; from_raw_fd takes
         // ownership (Socket's Drop will close it, which is what we
         // want — we OWN these fds now).
         //
@@ -372,8 +364,8 @@ pub(crate) fn adopt_listeners_from(
                 io::Error::other(format!("Could not get address of listen fd {tcp_fd}: {e}"))
             })?;
 
-        // C `:1134`: `fcntl(tcp_fd, F_SETFD, FD_CLOEXEC)`. Modern
-        // systemd already sets this (via O_CLOEXEC on the socket()
+        // `fcntl(tcp_fd, F_SETFD, FD_CLOEXEC)`. Modern systemd
+        // already sets this (via O_CLOEXEC on the socket()
         // call), but C is defensive. Best-effort like the C (no
         // return-value check there either).
         if let Err(e) = nix::fcntl::fcntl(
@@ -384,8 +376,8 @@ pub(crate) fn adopt_listeners_from(
                        "fd {tcp_fd}: F_SETFD FD_CLOEXEC: {e}");
         }
 
-        // C `:1137`: `int udp_fd = setup_vpn_in_socket(&sa)`. UDP
-        // is OURS to open, against the same address. systemd only
+        // `int udp_fd = setup_vpn_in_socket(&sa)`. UDP is OURS to
+        // open, against the same address. systemd only
         // gives TCP (`ListenStream=` in the .socket unit; a
         // separate `ListenDatagram=` would put a UDP fd in the mix,
         // but tinc's protocol pairs TCP+UDP on the SAME addr —
@@ -421,7 +413,7 @@ pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Liste
     adopt_listeners_from(SD_LISTEN_FDS_START, n, opts)
 }
 
-/// `setup_vpn_in_socket` (`net_socket.c:292-399`). One UDP socket.
+/// `setup_vpn_in_socket`. One UDP socket.
 ///
 /// Same four-step shape as TCP but no `listen` (UDP doesn't have it)
 /// and more sockopts (broadcast for LocalDiscovery, buffer sizes,
@@ -506,8 +498,8 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
         }
     }
 
-    // `:334-335`: SO_RCVBUF/SO_SNDBUF via `set_udp_buffer`.
-    // Default 1MB each (`net_socket.c:41-42`). Best-effort.
+    // SO_RCVBUF/SO_SNDBUF via `set_udp_buffer`. Default 1MB each.
+    // Best-effort.
     set_udp_buffer(
         &s,
         sockopt::RcvBuf,
@@ -542,12 +534,10 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 
 // add_listen_address
 
-/// `add_listen_address(NULL, false)` — the no-config default
-/// (`net_setup.c:1173`: `if(!cfgs) add_listen_address(address, NULL)`
-/// where `address` is uninitialized → NULL).
+/// `add_listen_address(NULL, false)` — the no-config default.
 ///
-/// C `:655-740`: `getaddrinfo(NULL, port, AI_PASSIVE)` returns
-/// `0.0.0.0` then `::` (gcc-verified on a dual-stack Linux). Loop,
+/// `getaddrinfo(NULL, port, AI_PASSIVE)` returns `0.0.0.0` then
+/// `::` (gcc-verified on a dual-stack Linux). Loop,
 /// bind each, `continue` on bind failure (`:705-707`). Result: one
 /// v4 listener, one v6 listener, both on `port`.
 ///
@@ -559,14 +549,13 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 /// `family` filters which to try. Maps `AddressFamily` config →
 /// the C's `hint.ai_family = addressfamily` at `:655`.
 ///
-/// Returns 0, 1, or 2 listeners. Zero is an error in the caller
-/// (`net_setup.c:1180`: `if(!listen_sockets) { ERR }`); we let the
-/// caller check.
+/// Returns 0, 1, or 2 listeners. Zero is an error in the caller; we
+/// let the caller check.
 ///
 /// # Errors
-/// Never returns `Err` — bind failures are warnings + skip, matching
-/// C `:705-707` `continue`. The "no listeners" case is the caller's
-/// problem (returns empty Vec).
+/// Never returns `Err` — bind failures are warnings + skip
+/// (`continue`). The "no listeners" case is the caller's problem
+/// (returns empty Vec).
 #[must_use]
 pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Listener> {
     let mut listeners = Vec::with_capacity(2);
@@ -579,8 +568,8 @@ pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Lis
     }
     if family.try_v6() {
         let addr: SocketAddr = (Ipv6Addr::UNSPECIFIED, port).into();
-        // C `:700`: `from_fd = listen_socket[0].tcp.fd`. The v6
-        // listener tries to reuse the v4 listener's port. With
+        // The v6 listener tries to reuse the v4 listener's port.
+        // With
         // `Port=0` this makes both families converge on one port.
         let reuse = listeners.first().map(|l| l.local.port());
         if let Some(l) = open_one(addr, opts, reuse, false) {
@@ -591,16 +580,16 @@ pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Lis
     listeners
 }
 
-/// `assign_static_port` (`net_setup.c:577-609`). If `addr.port()` is
-/// 0 (dynamic), rewrite it to `reuse_port`. Otherwise leave it
+/// `assign_static_port`. If `addr.port()` is 0 (dynamic), rewrite
+/// it to `reuse_port`. Otherwise leave it
 /// alone (already static). C checks `sa.sa_family` and writes the
 /// `sin_port` / `sin6_port` field; `SocketAddr::set_port` covers
 /// both. C returns `false` on bad fd / unknown family; we encode
 /// "nothing to do" as `reuse_port == None` and let the caller skip.
 fn assign_static_port(mut addr: SocketAddr, reuse_port: Option<u16>) -> Option<SocketAddr> {
     let port = reuse_port?;
-    // C `:590-601`: only overwrite if the existing port is zero.
-    // A `BindToAddress = 10.0.0.1 5000` line has a static port;
+    // Only overwrite if the existing port is zero. A
+    // `BindToAddress = 10.0.0.1 5000` line has a static port;
     // don't clobber it with the first listener's ephemeral.
     if addr.port() == 0 {
         addr.set_port(port);
@@ -610,8 +599,8 @@ fn assign_static_port(mut addr: SocketAddr, reuse_port: Option<u16>) -> Option<S
     }
 }
 
-/// `bind_reusing_port` (`net_setup.c:613-632`). Try `setup` with the
-/// port stolen from an already-bound socket; on failure, fall back
+/// `bind_reusing_port`. Try `setup` with the port stolen from an
+/// already-bound socket; on failure, fall back
 /// to the original `addr` (port 0 → fresh ephemeral). The C threads
 /// a function pointer (`bind_fn_t`); we take a closure.
 ///
@@ -620,32 +609,31 @@ fn assign_static_port(mut addr: SocketAddr, reuse_port: Option<u16>) -> Option<S
 /// (different IP) usually CAN reuse X (different (addr,port) tuple),
 /// but if X happens to be taken on that interface, we'd rather get
 /// a working listener on a different port than no listener at all.
-/// C `:629`: `if(fd < 0) fd = setup(sa)`.
+/// `if(fd < 0) fd = setup(sa)`.
 fn bind_reusing_port<F>(addr: SocketAddr, reuse_port: Option<u16>, setup: F) -> io::Result<Socket>
 where
     F: Fn(&SockAddr) -> io::Result<Socket>,
 {
-    // C `:621-624`: only attempt the reuse if assign_static_port
-    // succeeded (i.e. addr had port 0 AND we have a port to steal).
+    // Only attempt the reuse if assign_static_port succeeded (i.e.
+    // addr had port 0 AND we have a port to steal).
     // Reuse failed (port taken on this interface) → fall through.
     if let Some(reused) = assign_static_port(addr, reuse_port)
         && let Ok(s) = setup(&SockAddr::from(reused))
     {
         return Ok(s);
     }
-    // C `:629`: original address. With port 0 the kernel picks fresh.
+    // Original address. With port 0 the kernel picks fresh.
     setup(&SockAddr::from(addr))
 }
 
-/// One TCP+UDP pair on `addr`. C `add_listen_address:698-736`.
+/// One TCP+UDP pair on `addr`.
 /// Either both succeed or neither makes it into `listen_socket[]`
 /// (`:717-720`: TCP succeeds, UDP fails → close TCP, continue).
 ///
 /// `reuse_port`: with `Port=0`, the FIRST listener gets a kernel
 /// port. Subsequent calls pass that port here so the whole daemon
 /// converges on one port across all listeners (and TCP/UDP within
-/// a pair). C `:700`: `int from_fd = listen_socket[0].tcp.fd`;
-/// `:710-711`: after the first TCP bind, `from_fd = tcp_fd` so UDP
+/// a pair). After the first TCP bind, `from_fd = tcp_fd` so UDP
 /// reuses the just-assigned TCP port.
 ///
 /// `bindto`: stored on the result, see `Listener.bindto`.
@@ -668,12 +656,12 @@ fn open_one(
     reuse_port: Option<u16>,
     bindto: bool,
 ) -> Option<Listener> {
-    // ─── TCP. C `:703`: `bind_reusing_port(sa, from_fd,
+    // ─── TCP. `bind_reusing_port(sa, from_fd,
     // setup_listen_socket)`.
     let tcp = match bind_reusing_port(addr, reuse_port, |sa| setup_tcp(sa, opts)) {
         Ok(s) => s,
         Err(e) => {
-            // C `:705`: `if(tcp_fd < 0) continue`. Log + skip.
+            // `if(tcp_fd < 0) continue`. Log + skip.
             // Warn not Error: this is expected on a v6-disabled
             // system. The "no listeners at all" check in setup is
             // where the hard error lives.
@@ -682,7 +670,7 @@ fn open_one(
         }
     };
 
-    // C `:710-711`: `if(!from_fd) from_fd = tcp_fd`. The first
+    // `if(!from_fd) from_fd = tcp_fd`. The first
     // listener pair has no prior socket to steal from (`from_fd ==
     // listen_socket[0].tcp.fd == 0`), so it uses the just-bound TCP
     // socket as the port source for UDP. Subsequent pairs already
@@ -699,12 +687,12 @@ fn open_one(
         .and_then(|a| a.as_socket())
         .map(|a| a.port());
 
-    // ─── UDP. C `:715`: `bind_reusing_port(sa, from_fd,
+    // ─── UDP. `bind_reusing_port(sa, from_fd,
     // setup_vpn_in_socket)`.
     let udp = match bind_reusing_port(addr, tcp_port, |sa| setup_udp(sa, opts)) {
         Ok(s) => s,
         Err(e) => {
-            // C `:718`: `closesocket(tcp_fd); continue`.
+            // `closesocket(tcp_fd); continue`.
             // tcp drops here, fd closes.
             log::warn!(target: "tincd::net", "UDP bind on {addr}: {e}");
             return None;
@@ -735,13 +723,13 @@ fn open_one(
 
 // configure_tcp (per-connection, post-accept)
 
-/// `configure_tcp` (`net_socket.c:68-108`). Set the accepted fd's
+/// `configure_tcp`. Set the accepted fd's
 /// options: NONBLOCK + NODELAY. The C also does TOS/TCLASS/MARK
 /// (deferred — see module doc).
 ///
 /// Called from `handle_new_meta_connection` after `accept` returns.
 /// The listener's options DON'T inherit to the accepted fd (NONBLOCK
-/// in particular doesn't; it's why C `:71-76` does it again here).
+/// in particular doesn't; it's why we do it again here).
 ///
 /// Consumes `Socket`, returns `OwnedFd`. The conversion strips
 /// socket2's wrapper; daemon.rs's `Connection` wants raw bytes via
@@ -750,7 +738,7 @@ fn open_one(
 /// # Errors
 /// `set_nonblocking` failing means the fd is broken; propagate.
 /// `set_nodelay` failing is a warn — the connection works without it,
-/// just with Nagle latency. C `:89` ignores the return value too.
+/// just with Nagle latency. The return value is ignored.
 pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
     // `:71-76`: O_NONBLOCK. The conn read path is non-blocking.
     s.set_nonblocking(true)?;
@@ -763,14 +751,14 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 
     // Deferred: IP_TOS=LOWDELAY (`:93`), IPV6_TCLASS=LOWDELAY (`:98`),
     // SO_MARK (`:103` — the LISTEN-side mark is set in setup_tcp; the
-    // outgoing-connect mark at `net_socket.c:383` is separate).
+    // outgoing-connect mark is separate).
 
     Ok(s.into())
 }
 
 // sockaddrunmap + is_local_connection
 
-/// `sockaddrunmap` (`netutl.c:272-277`). v4-mapped v6 addr → plain v4.
+/// `sockaddrunmap`. v4-mapped v6 addr → plain v4.
 ///
 /// `accept` on a v6 socket WITHOUT V6ONLY returns `::ffff:10.0.0.5`
 /// for a v4 peer. We DO set V6ONLY so this never fires for our
@@ -780,7 +768,7 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 ///
 /// std `Ipv6Addr::to_ipv4_mapped()` is `Some` iff the high 80 bits
 /// are zero and the next 16 are `ffff`. Same condition as C
-/// `IN6_IS_ADDR_V4MAPPED`. C `:274` writes the low 32 bits over
+/// `IN6_IS_ADDR_V4MAPPED`. Writes the low 32 bits over
 /// `sin_addr` and changes `sa_family` — net effect: a SocketAddrV4.
 #[must_use]
 pub fn unmap(sa: SocketAddr) -> SocketAddr {
@@ -792,7 +780,7 @@ pub fn unmap(sa: SocketAddr) -> SocketAddr {
     sa
 }
 
-/// `is_local_connection` (`netutl.c:304-319`): loopback peer check.
+/// `is_local_connection`: loopback peer check.
 ///
 /// `handle_new_meta_connection` (`:751`) skips tarpit for local
 /// connections — the tarpit defends against external scan/DoS, and
@@ -821,14 +809,14 @@ pub fn is_local(sa: &SocketAddr) -> bool {
 /// and `::` → `::1` (a CLI on the same host needs a connectable addr,
 /// not the wildcard), format as `"HOST port PORT"`.
 ///
-/// The format is `sockaddr2hostname` (`netutl.c:188`): `"%s port %s"`.
+/// The format is `sockaddr2hostname`: `"%s port %s"`.
 /// std's `Display` for SocketAddr is `"host:port"`. The CLI's pidfile
 /// parser (`tinc-tools/ctl.rs`) splits on `" port "`.
 ///
 /// Why the unspecified→loopback mapping: the daemon binds `0.0.0.0`
 /// (all interfaces). The CLI reads the pidfile, connects. `connect(
 /// 0.0.0.0, port)` is undefined (Linux interprets it as 127.0.0.1
-/// but BSD doesn't). C `:164-173` patches it.
+/// but BSD doesn't). We patch it.
 ///
 /// On systems where v6 binds first (depends on getaddrinfo ordering,
 /// which depends on /etc/gai.conf), `listeners[0]` is the v6 entry.
@@ -837,40 +825,40 @@ pub fn is_local(sa: &SocketAddr) -> bool {
 /// mapping handles both.
 #[must_use]
 pub fn pidfile_addr(listeners: &[Listener]) -> String {
-    // C `:161`: `if(getsockname(...))` failure → fall back to
+    // `if(getsockname(...))` failure → fall back to
     // `"127.0.0.1 port %s" % myport`. We've already done getsockname
     // in `open_one`; can't fail here.
-    // No listeners: caller will error separately. C `:161` would fail
+    // No listeners: caller will error separately.
     // getsockname on fd=0 (stdin) and fall through to the printf.
     // Match the printf.
     let local = listeners
         .first()
         .map_or_else(|| (Ipv4Addr::LOCALHOST, 0).into(), |l| l.local);
 
-    // C `:164-173`: 0.0.0.0 → 127.0.0.1, :: → ::1.
+    // 0.0.0.0 → 127.0.0.1, :: → ::1.
     let mapped = match local {
         SocketAddr::V4(v4) if v4.ip().is_unspecified() => (Ipv4Addr::LOCALHOST, v4.port()).into(),
         SocketAddr::V6(v6) if v6.ip().is_unspecified() => (Ipv6Addr::LOCALHOST, v6.port()).into(),
         x => x,
     };
 
-    // C `:176`: `sockaddr2hostname(&sa)` → `"%s port %s"`.
+    // `sockaddr2hostname(&sa)` → `"%s port %s"`.
     // SocketAddr::ip() Display is plain (no port, no brackets for v6).
     format!("{} port {}", mapped.ip(), mapped.port())
 }
 
 // Tarpit
 
-/// `max_connection_burst` (`net_socket.c:45`). Leaky bucket capacity.
+/// `max_connection_burst`. Leaky bucket capacity.
 /// C default; the runtime value comes from `MaxConnectionBurst` config
 /// via `Tarpit::new`. Tests use this to seed the default behaviour.
 #[cfg(test)]
 const MAX_BURST: u32 = 10;
 
-/// `pits` array length (`net.c:97`). Ring buffer of tarpitted fds.
+/// `pits` array length. Ring buffer of tarpitted fds.
 const PIT_SIZE: usize = 10;
 
-/// `check_tarpit` (`net_socket.c:681-732`) + `tarpit` (`net.c:96-109`).
+/// `check_tarpit` + `tarpit`.
 ///
 /// Two leaky buckets:
 /// - same-host: `prev_sa` tracks the last peer; if THIS peer matches,
@@ -884,7 +872,7 @@ const PIT_SIZE: usize = 10;
 /// stay open, doing nothing, until evicted by a NEWER pit (10 slots).
 /// The peer's `connect()` succeeds (TCP handshake completes — kernel
 /// did that before we called `accept`), but reads block forever.
-/// Slows down scanners. C `net.c:96-109`.
+/// Slows down scanners.
 ///
 /// C uses 5 statics (`prev_sa`, `samehost_burst`, `samehost_burst_
 /// time`, `connection_burst`, `connection_burst_time`) + 2 more in
@@ -912,18 +900,17 @@ pub struct Tarpit {
     /// `connection_burst_time` (`:710`).
     allhost_time: Instant,
 
-    /// `max_connection_burst` (`net_socket.c:45`). Per-instance
-    /// from config (`MaxConnectionBurst`); the C is a global. The
+    /// `max_connection_burst`. Per-instance from config
+    /// (`MaxConnectionBurst`); upstream is a global. The
     /// `>` vs `>=` off-by-one (see struct doc) is preserved.
     max_burst: u32,
 
-    /// `pits[10]` (`net.c:97`). Tarpitted fds. Ring buffer.
-    /// Option because the slot is empty until first eviction.
-    /// OwnedFd because Drop closes — the C does `closesocket(pits[
-    /// next_pit])` on eviction (`net.c:100-101`); we get that via
-    /// `mem::replace` dropping the old value.
+    /// `pits[10]`. Tarpitted fds. Ring buffer. Option because the
+    /// slot is empty until first eviction. OwnedFd because Drop
+    /// closes — `closesocket(pits[next_pit])` on eviction; we get
+    /// that via `mem::replace` dropping the old value.
     pits: [Option<OwnedFd>; PIT_SIZE],
-    /// `next_pit` (`net.c:98`). Ring cursor.
+    /// `next_pit`. Ring cursor.
     next_pit: usize,
 }
 
@@ -953,9 +940,8 @@ impl Tarpit {
     ///
     /// Mutates self even on `false` — the buckets always update.
     ///
-    /// `addr` should be `unmap()`ed and stripped of port. The C
-    /// `sockaddrcmp_noport` (`netutl.c:228`) zeroes the port before
-    /// `memcmp`. We use `SocketAddr` with port set to 0 by the caller
+    /// `addr` should be `unmap()`ed and stripped of port.
+    /// `sockaddrcmp_noport` zeroes the port before `memcmp`. We use `SocketAddr` with port set to 0 by the caller
     /// (or compare just `.ip()` — but port-0 makes the test setup
     /// readable).
     ///
@@ -963,8 +949,8 @@ impl Tarpit {
     /// secs()` — second granularity to match C's `time_t`.
     pub fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
         // ─── same-host bucket
-        // C `:686`: `if(!sockaddrcmp_noport(sa, &prev_sa))`. The `!`
-        // is because `sockaddrcmp` is memcmp-style: 0 means equal.
+        // `if(!sockaddrcmp_noport(sa, &prev_sa))`. The `!` is
+        // because `sockaddrcmp` is memcmp-style: 0 means equal.
         // Compare on .ip() — the caller's port-strip is just for
         // making test expected-values look nice.
         let same_host = self.prev_addr.is_some_and(|p| p.ip() == addr.ip());
@@ -973,7 +959,7 @@ impl Tarpit {
             // `:690-694`: leak. If MORE seconds elapsed than the
             // bucket holds, drain to zero. Else subtract elapsed.
             let elapsed = now.saturating_duration_since(self.samehost_time).as_secs();
-            // C `if(elapsed > burst) burst = 0; else burst -= elapsed`.
+            // `if(elapsed > burst) burst = 0; else burst -= elapsed`.
             // saturating_sub is the same arithmetic (going below 0
             // means "would have drained"). C uses signed `time_t`;
             // a negative `elapsed` (clock went backwards) would
@@ -1032,7 +1018,7 @@ impl Tarpit {
         false
     }
 
-    /// `tarpit` (`net.c:96-109`). Shove the fd into the pit ring.
+    /// `tarpit`. Shove the fd into the pit ring.
     /// Evict-on-insert: if the slot is occupied, drop the old fd
     /// (closes it).
     ///
@@ -1045,12 +1031,12 @@ impl Tarpit {
     /// 10 slots = 10 simultaneous tarpitted peers. The 11th evicts
     /// the 1st (its `OwnedFd` drops, peer sees RST). Fixed memory.
     pub fn pit(&mut self, fd: OwnedFd) {
-        // `net.c:100-101`: `if(pits[next_pit] != -1) closesocket(...)`.
+        // `if(pits[next_pit] != -1) closesocket(...)`.
         // Option::replace drops the old OwnedFd; Drop closes. The
         // returned old value is dropped immediately (we don't bind it).
         // `let _ =` so clippy knows the discard is intentional.
         let _ = self.pits[self.next_pit].replace(fd);
-        // `net.c:104-108`: `next_pit++; if(next_pit >= 10) next_pit = 0`.
+        // `next_pit++; if(next_pit >= 10) next_pit = 0`.
         self.next_pit = (self.next_pit + 1) % PIT_SIZE;
     }
 
@@ -1065,22 +1051,22 @@ impl Tarpit {
 
 // sockaddr2hostname (the printable-address part)
 
-/// `sockaddr2hostname` (`netutl.c:183-203`) — a subset. The C does
-/// `getnameinfo` with `NI_NUMERICHOST | NI_NUMERICSERV`, which is
+/// `sockaddr2hostname` — a subset. `getnameinfo` with
+/// `NI_NUMERICHOST | NI_NUMERICSERV`, which is
 /// just printf for the addr (no DNS). std's `Display` for `IpAddr`
 /// does the same.
 ///
 /// Format: `"HOST port PORT"`. Appears in log lines and the pidfile.
 /// `tinc-tools::Tok` parses this with `lit(" port ")`.
 ///
-/// We DON'T do the `AF_UNKNOWN` case (`netutl.c:193`) — that's for
-/// addresses round-tripped through the wire protocol's text format,
+/// We DON'T do the `AF_UNKNOWN` case — that's for addresses
+/// round-tripped through the wire protocol's text format,
 /// which our `SocketAddr` can't represent. `tinc-proto::addr` has
 /// the full-generality version; this is for SOCKETS we own.
 #[must_use]
 pub fn fmt_addr(sa: &SocketAddr) -> String {
-    // C `:202`: `xasprintf("%s port %s", host, port)`. The %s comes
-    // from getnameinfo NI_NUMERICHOST. For v6 that's "::1" not "[::1]"
+    // `xasprintf("%s port %s", host, port)`. The %s comes from
+    // getnameinfo NI_NUMERICHOST. For v6 that's "::1" not "[::1]"
     // (NI_NUMERICHOST doesn't bracket). std's Ipv6Addr Display also
     // doesn't bracket. Match.
     format!("{} port {}", sa.ip(), sa.port())
@@ -1107,7 +1093,7 @@ mod tests {
 
     // ─── unmap
 
-    /// C `IN6_IS_ADDR_V4MAPPED`. `unmap(SocketAddr) -> SocketAddr` is
+    /// `IN6_IS_ADDR_V4MAPPED`. `unmap(SocketAddr) -> SocketAddr` is
     /// ~5 lines; pin its full domain in one table.
     #[test]
     fn unmap_cases() {
@@ -1136,9 +1122,9 @@ mod tests {
 
     // ─── is_local
 
-    /// v4: 127.0.0.0/8 (C `:308`: `ntohl(...) >> 24 == 127`). Any
-    /// addr in the /8, not just .0.0.1.
-    /// v6: `::1` ONLY (C `IN6_IS_ADDR_LOOPBACK`), not the whole `::/8`.
+    /// v4: 127.0.0.0/8 (`ntohl(...) >> 24 == 127`). Any addr in
+    /// the /8, not just .0.0.1.
+    /// v6: `::1` ONLY (`IN6_IS_ADDR_LOOPBACK`), not the whole `::/8`.
     #[test]
     fn is_local_cases() {
         #[rustfmt::skip]
@@ -1151,7 +1137,7 @@ mod tests {
             ("::1",               true),
             ("::2",               false),
             // ::ffff:127.0.0.1 — v4-mapped loopback. NOT a v6 loopback.
-            // C `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
+            // `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
             // should `unmap()` first; if they don't, this is `false`.
             ("::ffff:127.0.0.1",  false),
             // ─── nonlocal
@@ -1211,7 +1197,7 @@ mod tests {
 
     // ─── AddrFamily
 
-    /// C `net_setup.c:538-548`. strcasecmp.
+    /// `strcasecmp`.
     #[test]
     fn addr_family_parse() {
         assert_eq!(AddrFamily::from_config("ipv4"), Some(AddrFamily::Ipv4));
@@ -1245,7 +1231,6 @@ mod tests {
 
     /// 9 connections from DIFFERENT hosts in 0 seconds: all OK.
     /// 10th: pitted. The all-host bucket triggers at `>= 10`.
-    /// (`net_socket.c:721`: `>=`.)
     #[test]
     fn tarpit_allhost_triggers_at_ten() {
         let t0 = Instant::now();
@@ -1267,8 +1252,8 @@ mod tests {
         assert_eq!(allhost, 10);
     }
 
-    /// The same-host early-return. When same-host triggers, it returns
-    /// BEFORE updating `prev_addr` or the all-host bucket. C `:699-702`:
+    /// The same-host early-return. When same-host triggers, it
+    /// returns BEFORE updating `prev_addr` or the all-host bucket.
     /// `if(samehost_burst > max) { tarpit(fd); return true; }` — the
     /// `return` is before `:705 prev_sa = *sa` and before the all-host
     /// section.
@@ -1747,8 +1732,8 @@ mod tests {
         assert_eq!(mark, 0);
     }
 
-    /// `bind_reusing_port` (`net_setup.c:613-632`): with `Port=0`,
-    /// TCP gets a kernel ephemeral, UDP reuses it. Before this
+    /// `bind_reusing_port`: with `Port=0`, TCP gets a kernel
+    /// ephemeral, UDP reuses it. Before this
     /// landed, the two sockets got DIFFERENT kernel ports — peers
     /// connecting on TCP would learn port X, then send UDP to X
     /// where nobody's listening (UDP was on Y).
@@ -1763,7 +1748,7 @@ mod tests {
     }
 
     /// With `Port=0` and `AddressFamily=any`, the v6 listener
-    /// reuses the v4 listener's port (C `:700`: `from_fd =
+    /// reuses the v4 listener's port (`from_fd =
     /// listen_socket[0].tcp.fd`). All four sockets (v4 tcp, v4 udp,
     /// v6 tcp, v6 udp) end up on the same port.
     #[test]
@@ -1781,7 +1766,7 @@ mod tests {
     }
 
     /// `assign_static_port`: only overwrite zero ports.
-    /// C `net_setup.c:590-601`: `if(!sin_port) sin_port = htons(X)`.
+    /// `if(!sin_port) sin_port = htons(X)`.
     #[test]
     fn assign_static_port_cases() {
         // Port 0 + reuse → rewritten.
@@ -1800,8 +1785,8 @@ mod tests {
         );
     }
 
-    /// `bind_reusing_port` fallback (C `:629`). Reuse port is
-    /// already taken → fall through to the original addr (port 0
+    /// `bind_reusing_port` fallback. Reuse port is already taken →
+    /// fall through to the original addr (port 0
     /// → fresh ephemeral). Prove the listener still materializes.
     #[test]
     fn bind_reusing_port_fallback() {
@@ -1839,7 +1824,7 @@ mod tests {
         assert_eq!(l.udp_port(), l.local.port(), "port reuse within pair");
     }
 
-    /// `SockOpts::default()` matches C globals at `net_socket.c:41-46`.
+    /// `SockOpts::default()` matches upstream globals.
     #[test]
     fn sockopts_defaults_match_c() {
         let o = SockOpts::default();
@@ -1883,11 +1868,11 @@ mod tests {
         assert_eq!(listeners[0].local, want_addr);
         assert!(!listeners[0].bindto, "socket-activated → bindto=false");
 
-        // UDP got opened on the same port (C `setup_vpn_in_socket(&sa)`).
+        // UDP got opened on the same port (`setup_vpn_in_socket(&sa)`).
         let udp_addr = listeners[0].udp.local_addr().unwrap().as_socket().unwrap();
         assert_eq!(udp_addr.port(), want_addr.port());
 
-        // CLOEXEC was set (C `:1134`). Probe via F_GETFD.
+        // CLOEXEC was set. Probe via F_GETFD.
         let flags = fcntl(listeners[0].tcp.as_raw_fd(), FcntlArg::F_GETFD).unwrap();
         assert!(
             FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC),
@@ -1895,7 +1880,7 @@ mod tests {
         );
     }
 
-    /// `n > MAXSOCKETS` is the only pre-adoption guard (C `:1117`).
+    /// `n > MAXSOCKETS` is the only pre-adoption guard.
     #[test]
     fn adopt_listeners_too_many() {
         let e = adopt_listeners_from(3, MAXSOCKETS + 1, &opts())
@@ -1906,7 +1891,6 @@ mod tests {
     }
 
     /// Fd is not a socket → ENOTSOCK from getsockname → hard error.
-    /// C `:1128-1131`: `if(getsockname < 0) { ERR; return false }`.
     #[test]
     fn adopt_listeners_not_a_socket() {
         // /dev/null at a high fd. getsockname → ENOTSOCK.

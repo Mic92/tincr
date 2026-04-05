@@ -1,10 +1,7 @@
-//! Control socket setup. Ports `pidfile.c::write_pidfile` (13 LOC) +
-//! `control.c::init_control` unix-socket bits (`control.c:186-227`,
-//! 42 LOC).
+//! Control socket setup: `write_pidfile` + `init_control`
+//! unix-socket bits.
 //!
 //! ## What `init_control` does
-//!
-//! C `control.c:148-231`:
 //!
 //! 1. Generate 32-byte random cookie, hex-encode to 64 chars
 //! 2. Get the address+port of `listen_socket[0]` for the pidfile's
@@ -45,9 +42,7 @@ use std::path::Path;
 use nix::sys::stat::{Mode, umask};
 use rand_core::{OsRng, RngCore};
 
-/// 32 random bytes → 64 hex chars. C `controlcookie[65]` (the +1 is
-/// the C string NUL). `control.c:149-150`: `randomize(32 bytes);
-/// bin2hex(32 bytes)`.
+/// 32 random bytes → 64 hex chars.
 pub const COOKIE_BYTES: usize = 32;
 pub const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 
@@ -56,14 +51,12 @@ pub const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 /// the daemon. The pidfile is mode 0600 = filesystem-based auth,
 /// same model as ssh-agent's socket.
 ///
-/// `bin2hex` uses lowercase (`"0123456789abcdef"`, `utils.c:43`).
-/// `format!("{:02x}")` matches.
+/// `bin2hex` uses lowercase. `format!("{:02x}")` matches.
 ///
 /// # Panics
 /// Only via `OsRng::fill_bytes`, only if `/dev/urandom` (or
 /// `getrandom(2)`) is unavailable. At that point the daemon can't
-/// generate session keys either; aborting is correct. Same as
-/// `randomize` (`random.c:48` `abort()`).
+/// generate session keys either; aborting is correct.
 #[must_use]
 pub fn generate_cookie() -> String {
     let mut bytes = [0u8; COOKIE_BYTES];
@@ -76,14 +69,14 @@ pub fn generate_cookie() -> String {
     hex
 }
 
-/// `write_pidfile` (`pidfile.c:26-38`). The format is:
+/// `write_pidfile`. The format is:
 ///
 /// ```text
 /// <pid> <cookie> <host> port <port>\n
 /// ```
 ///
-/// `tinc-tools::Pidfile::read` parses this. The C `fscanf` format
-/// is `"%20d %64s %128s port %128s"` — `port` is a literal in the
+/// `tinc-tools::Pidfile::read` parses this. The `fscanf` format is
+/// `"%20d %64s %128s port %128s"` — `port` is a literal in the
 /// format string. We match: `host port portnum` is one space-joined
 /// `address` arg in C (`fprintf(f, "%d %s %s\n", pid, cookie,
 /// address)` where `address = "127.0.0.1 port 655"`).
@@ -96,41 +89,37 @@ pub fn generate_cookie() -> String {
 /// non-root, pidfile path is in `/var/run`) is the common one; the
 /// caller logs and exits.
 pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()> {
-    // C `pidfile.c:28-29`: umask(0); umask(mask | 077); fopen("w").
-    // We OpenOptions::mode(0o600). create+truncate is `fopen("w")`.
+    // OpenOptions::mode(0o600). create+truncate is `fopen("w")`.
     let mut f = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    // C `fprintf(f, "%d %s %s\n", getpid(), cookie, address)`.
     writeln!(f, "{} {} {}", std::process::id(), cookie, address)?;
-    // C `return !fclose(f)`. fclose flushes; we let Drop close, but
-    // sync_data to catch ENOSPC/EIO before the caller assumes success.
-    // Actually no: `sync_data` is overkill (the C doesn't fsync). The
+    // fclose flushes; we let Drop close. `sync_data` is overkill. The
     // pidfile is read by another process; the write must be visible
     // to a subsequent open() in another process. Kernel page cache
     // guarantees that without fsync. Let Drop close.
     Ok(())
 }
 
-/// `init_control` unix socket bits (`control.c:186-227`). socket →
-/// connect-probe → unlink → umask-bind → listen.
+/// `init_control` unix socket bits. socket → connect-probe → unlink
+/// → umask-bind → listen.
 ///
 /// The connect-probe: before unlinking the stale socket file, try
 /// connecting to it. If connect succeeds, there's a live daemon
-/// already listening — REFUSE to start (`control.c:205-208`). This
-/// is the "second tincd" guard. If connect fails (`ECONNREFUSED` =
+/// already listening — REFUSE to start. This is the "second tincd"
+/// guard. If connect fails (`ECONNREFUSED` =
 /// stale socket file from a crashed daemon), unlink and proceed.
 ///
 /// Returns the listener; caller does `EventLoop::add(fd, READ,
 /// IoWhat::UnixListener)`.
 pub struct ControlSocket {
     listener: UnixListener,
-    /// Kept so `drop` can unlink. C `exit_control` (`control.c:233-
-    /// 240`) unlinks both pidfile and socket; our drop does just
-    /// the socket (pidfile is the daemon's responsibility, see
+    /// Kept so `drop` can unlink. `exit_control` unlinks both
+    /// pidfile and socket; our drop does just the socket (pidfile
+    /// is the daemon's responsibility, see
     /// `Daemon::drop`).
     path: std::path::PathBuf,
 }
@@ -156,9 +145,8 @@ impl ControlSocket {
     /// `AlreadyRunning` if the connect-probe succeeds (second daemon).
     /// `Io` for socket/bind/listen failures.
     pub fn bind(path: &Path) -> Result<Self, BindError> {
-        // ─── connect-probe (control.c:205-208)
-        // C: socket(); strncpy sun_path; if(connect() >= 0) ERROR.
-        // We `UnixStream::connect`. If it succeeds, something's
+        // ─── connect-probe
+        // `UnixStream::connect`: if it succeeds, something's
         // there. If `ECONNREFUSED` (or `ENOENT` — no socket file
         // at all), good, proceed.
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
@@ -168,14 +156,12 @@ impl ControlSocket {
         // error — ECONNREFUSED, ENOENT, EACCES all mean "nothing
         // is healthily listening there", which is what we want.
 
-        // ─── unlink stale (control.c:210)
-        // C: `unlink(unixsocketname)`. Errors ignored (`ENOENT` is
-        // expected on first run; if it's something else, bind will
-        // fail and we'll see why).
+        // ─── unlink stale
+        // Errors ignored (`ENOENT` is expected on first run; if it's
+        // something else, bind will fail and we'll see why).
         let _ = std::fs::remove_file(path);
 
-        // ─── bind with umask 077 (control.c:212-214)
-        // C: `mask = umask(0); umask(mask | 077); bind(); umask(mask)`.
+        // ─── bind with umask 077
         // The socket file's perms come from `0o777 & ~umask`. With
         // `umask | 077`, group/other bits are stripped → `0o700`.
         //
@@ -194,9 +180,9 @@ impl ControlSocket {
 
         let listener = bind_result.map_err(BindError::Io)?;
 
-        // ─── listen(3) (control.c:222)
+        // ─── listen
         // `UnixListener::bind` already calls `listen()` internally
-        // with backlog 128 (std's default). C uses backlog 3. The
+        // with backlog 128 (std's default). The
         // backlog is "max pending accept() queue length"; 128 is
         // fine, control connections are rare.
 
@@ -217,9 +203,9 @@ impl ControlSocket {
     /// `accept()` wrapper. Non-blocking; returns `WouldBlock` if no
     /// connection pending (spurious wakeup).
     ///
-    /// `handle_new_unix_connection` (`net_socket.c:781-812`) does
-    /// `accept()` and constructs a `connection_t`. We do just the
-    /// `accept()` part — connection construction is the daemon's job
+    /// `handle_new_unix_connection` does `accept()` and constructs a
+    /// `connection_t`. We do just the `accept()` part — connection
+    /// construction is the daemon's job
     /// (it owns the slotmap).
     ///
     /// The accepted stream is set non-blocking before return —
@@ -249,9 +235,9 @@ impl ControlSocket {
 }
 
 impl Drop for ControlSocket {
-    /// `exit_control` (`control.c:235`). Unlink the socket file so
-    /// the next daemon's connect-probe doesn't get a false positive
-    /// from a stale file. The C also unlinks the pidfile (`:240`);
+    /// Unlink the socket file so the next daemon's connect-probe
+    /// doesn't get a false positive from a stale file. `exit_control`
+    /// also unlinks the pidfile;
     /// we let `Daemon` own that (it created it).
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -282,7 +268,7 @@ mod tests {
         let c = generate_cookie();
         assert_eq!(c.len(), COOKIE_HEX_LEN);
         assert!(c.chars().all(|ch| ch.is_ascii_hexdigit()));
-        // bin2hex uses lowercase. `utils.c:43`.
+        // bin2hex uses lowercase.
         assert_eq!(c, c.to_lowercase());
     }
 

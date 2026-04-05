@@ -248,7 +248,6 @@ mod tests {
         assert!(parse_watchdog_usec(None).is_none());
         assert!(parse_watchdog_usec(Some("")).is_none());
         assert!(parse_watchdog_usec(Some("nope")).is_none());
-        // C: `if (... || !timeout) return false;` — zero means disabled.
-        assert!(parse_watchdog_usec(Some("0")).is_none());
+        assert!(parse_watchdog_usec(Some("0")).is_none()); // zero = disabled
     }
 }

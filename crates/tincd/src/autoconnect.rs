@@ -1,14 +1,13 @@
 //! `do_autoconnect` (`autoconnect.c`, 197 LOC). Pure decision logic —
 //! converge to ~3 direct connections.
 //!
-//! Called every `5+jitter` seconds from `periodic_handler`
-//! (`net.c:296`). Takes a snapshot of world state, returns ONE action
+//! Called every `5+jitter` seconds from `periodic_handler`. Takes a
+//! snapshot of world state, returns ONE action
 //! (or `Noop`). The daemon executes it.
 //!
 //! ## The 3-connection target
 //!
-//! Hardcoded magic number. The C doesn't make it configurable
-//! (`autoconnect.c:183` / `:188` literal `3`). Rationale (inferred): 3
+//! Hardcoded magic number, not configurable. Rationale (inferred): 3
 //! is enough redundancy that losing one peer doesn't isolate you, but
 //! few enough that an N-node mesh has O(N) total conns, not O(N²). The
 //! spanning-tree algorithms (sssp, mst) work on ANY connected graph;
@@ -16,8 +15,7 @@
 //!
 //! ## The four sub-decisions
 //!
-//! `do_autoconnect` (`autoconnect.c:170-197`) is a priority dispatch.
-//! `nc` is the count of ALL active meta connections (inbound +
+//! `do_autoconnect` is a priority dispatch. `nc` is the count of ALL active meta connections (inbound +
 //! outbound — anything with `c->edge` set, i.e. past `ACK`):
 //!
 //! 1. `nc < 3` → `make_new_connection`: pick a random eligible node,
@@ -68,14 +66,12 @@ use rand_core::RngCore;
 pub enum AutoAction {
     /// `<3` conns (`make_new_connection`) or `connect_to_unreachable`.
     /// Daemon: `lookup_or_add_node`, build `Outgoing`,
-    /// `setup_outgoing_connection`. C `autoconnect.c:67-71`, `:106-110`.
+    /// `setup_outgoing_connection`.
     Connect { name: String },
     /// `>3` conns. Drop this outgoing + terminate its conn.
-    /// C `autoconnect.c:143-146`: `list_delete(&outgoing_list, ..)`,
-    /// `c->outgoing = NULL`, `terminate_connection(c, c->edge)`.
     Disconnect { name: String },
-    /// Cancel a between-retries pending outgoing. C `:165-166`. Daemon:
-    /// just remove from `outgoings` slotmap (no conn to terminate).
+    /// Cancel a between-retries pending outgoing. Daemon: just
+    /// remove from `outgoings` slotmap (no conn to terminate).
     CancelPending { name: String },
     /// Nothing to do this tick. Can mean: at exactly 3 with nothing to
     /// heal; or under 3 but no eligible nodes; or
@@ -89,9 +85,9 @@ pub enum AutoAction {
 ///
 /// ## `has_address` — not yet wired
 ///
-/// C sets it at `net_setup.c:211` `load_all_nodes()`: walk `hosts/`,
-/// for each file with `Address = `, set the bit. We don't
-/// `load_all_nodes` yet — we read `hosts/` on demand in `id_h`. The
+/// Upstream sets it in `load_all_nodes()`: walk `hosts/`, for each
+/// file with `Address = `, set the bit. We don't `load_all_nodes`
+/// yet — we read `hosts/` on demand in `id_h`. The
 /// serial wire-up (chunk-11) needs either: (a) `load_all_nodes` at
 /// setup, or (b) a cheap "does `hosts/{name}` have `Address`" probe.
 /// **For this module: it's just a `bool`. How the daemon populates it
@@ -99,8 +95,8 @@ pub enum AutoAction {
 ///
 /// ## `edge_count` is per-node, not per-connection
 ///
-/// C `:121` reads `c->node->edge_tree.count` — the *peer's* edge count
-/// from the gossiped graph. When considering dropping our conn to
+/// The *peer's* edge count from the gossiped graph. When
+/// considering dropping our conn to
 /// `node`, we ask: does `node` have other edges? If `edge_count < 2`,
 /// our edge is its only one; dropping it isolates the peer.
 #[derive(Debug, Clone)]
@@ -121,7 +117,7 @@ pub struct NodeSnapshot {
     pub edge_count: usize,
 }
 
-/// `do_autoconnect` (`autoconnect.c:170-197`).
+/// `do_autoconnect`.
 ///
 /// # Arguments
 ///
@@ -135,8 +131,7 @@ pub struct NodeSnapshot {
 ///   inbound conns are someone else's choice, we don't unilaterally
 ///   close them (`:121` `!c->outgoing` skip).
 /// - `pending_outgoings` — names with an `Outgoing` slot but NO conn.
-///   The retry timer is waiting. C `:152-163` walks `outgoing_list`
-///   and skips entries with a matching `c->outgoing`.
+///   The retry timer is waiting.
 ///
 /// `nc` (the `<3`/`>3` decision) counts ALL direct conns (inbound +
 /// outbound), derived from `nodes` where `directly_connected`. C
@@ -160,9 +155,9 @@ pub struct NodeSnapshot {
 ///
 /// # `make_new_connection` already-pending → `Noop`
 ///
-/// C `:59-71`: even if eligible, if we already have a pending
-/// `Outgoing` for the picked node, `break` — don't add a duplicate,
-/// but ALSO don't pick another. Next tick will re-roll. We mirror
+/// Even if eligible, if we already have a pending `Outgoing` for
+/// the picked node, `break` — don't add a duplicate, but ALSO don't
+/// pick another. Next tick will re-roll. We mirror
 /// this: if the random pick is in `pending_outgoings`, return `Noop`.
 #[must_use]
 pub fn decide(
@@ -198,7 +193,7 @@ pub fn decide(
     // outgoings: if we already have enough conns, no point keeping a
     // retry timer alive.
     if let Some(name) = pending_outgoings.first() {
-        // C `:150-168` cancels ALL of them in one tick (it's a list
+        // Upstream cancels ALL of them in one tick (it's a list
         // walk). We return one; next tick gets the next one. The
         // 5-second cadence stretches this out, but pending outgoings
         // accumulating while at >=3 conns is itself rare.
@@ -209,7 +204,7 @@ pub fn decide(
     connect_to_unreachable(myself_name, nodes, pending_outgoings, rng)
 }
 
-/// `make_new_connection` (`autoconnect.c:29-76`).
+/// `make_new_connection`.
 ///
 /// Eligible: not myself, not directly connected, AND
 /// `(has_address || reachable)`. The reachable-but-no-address case:
@@ -261,7 +256,7 @@ fn make_new_connection(
     }
 }
 
-/// `connect_to_unreachable` (`autoconnect.c:78-113`).
+/// `connect_to_unreachable`.
 ///
 /// **The all-node prng is the back-off.** See module docs.
 ///
@@ -301,9 +296,9 @@ fn connect_to_unreachable(
     }
 }
 
-/// `drop_superfluous_outgoing_connection` (`autoconnect.c:115-148`).
+/// `drop_superfluous_outgoing_connection`.
 ///
-/// Only OUTGOING conns are eligible: `:121` `!c->outgoing` skips
+/// Only OUTGOING conns are eligible: `!c->outgoing` skips
 /// inbound. Inbound conns are someone else's `AutoConnect` decision;
 /// we don't unilaterally close them.
 ///

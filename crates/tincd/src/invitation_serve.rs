@@ -1,4 +1,4 @@
-//! Daemon-side invitation handler. `protocol_auth.c:119-310`.
+//! Daemon-side invitation handler.
 //!
 //! Flow: SPTPS handshake (label `"tinc invitation"`, 15 bytes, NOT
 //! NUL-terminated) → type-0 cookie (18B) → atomic-rename to `.used`,
@@ -20,7 +20,6 @@ use std::time::{Duration, SystemTime};
 use tinc_conf::read_pem;
 use tinc_crypto::invite::cookie_filename;
 
-/// `protocol_auth.c:196`: `if(len != 18)`.
 pub use tinc_crypto::invite::COOKIE_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::check_id;
@@ -29,13 +28,13 @@ use tinc_proto::check_id;
 const PRIVATE_BLOB_LEN: usize = 96;
 const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
-/// `protocol_auth.c:294`: `char buf[1024]`. Matched for wire-shape parity.
+/// Chunk size matched for wire-shape parity with C tincd.
 pub const CHUNK_SIZE: usize = 1024;
 
-/// C `c->status.invitation_used` + `c->name`.
+/// Invitation handshake phase.
 #[derive(Debug)]
 pub enum InvitePhase {
-    /// `protocol_auth.c:196`: type != 0 || len != 18 → close.
+    /// type != 0 || len != 18 → close.
     WaitingCookie,
     /// `c->status.invitation_used = true`. Carries `.used` path for
     /// the post-`finalize` unlink (`:305`).
@@ -99,8 +98,8 @@ pub fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>, ServeE
 
 // ─── Hoisted from tinc-tools/src/cmd/join.rs ───────────────────────
 
-/// C tokenizer for `Key = Value` (`protocol_auth.c:255-275`).
-/// `Port = 655` → `("Port", "655")`. `Port` → `("Port", "")`.
+/// Tokenizer for `Key = Value`. `Port = 655` → `("Port", "655")`.
+/// `Port` → `("Port", "")`.
 fn split_var(line: &str) -> Option<(&str, &str)> {
     let key_end = line.find(['\t', ' ', '=']).unwrap_or(line.len());
     let key = &line[..key_end];
@@ -114,7 +113,6 @@ fn split_var(line: &str) -> Option<(&str, &str)> {
     Some((key, val))
 }
 
-/// `protocol_auth.c:255-277`.
 fn parse_name_line(line: &str) -> Option<&str> {
     let (k, v) = split_var(line)?;
     if k.eq_ignore_ascii_case("Name") {
@@ -124,9 +122,8 @@ fn parse_name_line(line: &str) -> Option<&str> {
     }
 }
 
-/// `receive_invitation_sptps` type-0 handler (`protocol_auth.c:196-310`).
-///
-/// Returns `(file_contents, invited_name, used_path)`.
+/// `receive_invitation_sptps` type-0 handler. Returns
+/// `(file_contents, invited_name, used_path)`.
 ///
 /// # Errors
 /// - `NonExisting`: rename ENOENT. Single-use is enforced BY the
@@ -192,14 +189,13 @@ pub fn serve_cookie(
     Ok((contents, invited_name, used_path))
 }
 
-/// `finalize_invitation` (`protocol_auth.c:119-183`): type-1 handler.
+/// `finalize_invitation`: type-1 handler.
 /// Writes `hosts/{name}`. Addrcache/script/unlink/type-2 are daemon-side.
 ///
 /// # Errors
 /// - `BadPubkey` (`:125`): newline = config-injection (**security**).
-/// - `HostFileExists` (`:131`): don't overwrite (**security**: attacker
-///   could replace a known key). C `access()`+`fopen("w")` has TOCTOU;
-///   we use `O_CREAT|O_EXCL`.
+/// - `HostFileExists`: don't overwrite (**security**: attacker could
+///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
 pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf, ServeError> {
     // :122-126
     if pubkey_b64.contains('\n') {
@@ -230,7 +226,7 @@ pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf
     Ok(host_path)
 }
 
-/// `protocol_auth.c:296-303`. Use [`CHUNK_SIZE`] for wire parity.
+/// Use [`CHUNK_SIZE`] for wire parity.
 ///
 /// # Panics
 /// If `chunk_size == 0`.
@@ -418,7 +414,6 @@ mod tests {
         assert!(!tmp.path().join("hosts").join("bob").exists());
     }
 
-    /// C: access()+fopen("w") (TOCTOU). We: O_CREAT|O_EXCL.
     #[test]
     fn finalize_rejects_existing() {
         let tmp = TmpDir::new("fin-exists");

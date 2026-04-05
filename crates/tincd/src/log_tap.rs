@@ -1,6 +1,5 @@
-//! `REQ_LOG` log tap. C `logger.c:192-218`: in the log write hook,
-//! walk conns with `status.log`, send each log line over the ctl
-//! socket.
+//! `REQ_LOG` log tap. In the log write hook, walk conns with
+//! `status.log`, send each log line over the ctl socket.
 //!
 //! ## The interception problem
 //!
@@ -21,8 +20,7 @@
 //! ## Perf
 //!
 //! - **No log conns** (steady state): one Relaxed atomic load per
-//!   `log::*!` call, BEFORE format. Same overhead as the C global
-//!   `if(!logcontrol)` (`logger.c:192`). The `log::log!` macro calls
+//!   `log::*!` call, BEFORE format. The `log::log!` macro calls
 //!   `enabled()` first and only evaluates `format_args!` if that
 //!   returns true — the format is the expensive part.
 //! - **Log conn exists**: per log line, one `to_string()` format
@@ -44,17 +42,16 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-/// Gate. `enabled()` checks this BEFORE formatting. C's
-/// `if(!logcontrol)` is the same gate (`logger.c:192`).
+/// Gate. `enabled()` checks this BEFORE formatting.
 static LOG_TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// `debug_level` (`tincd.c:63`). The C-style level (0..=5+).
-/// Separate from `log::max_level()` because the C↔Rust mapping is
+/// The tinc-style debug level (0..=5+). Separate from
+/// `log::max_level()` because the tinc↔Rust mapping is
 /// lossy (1 and 2 both → Debug). Stored so REQ_SET_DEBUG can
 /// reply with the exact previous value.
 static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
 
-/// C `debug_level` → `log::LevelFilter`. Same mapping as
+/// tinc `debug_level` → `log::LevelFilter`. Same mapping as
 /// `main.rs::debug_level_to_filter` (5-line dup — the binary
 /// doesn't dep on this module's internals).
 fn level_to_filter(d: i32) -> log::LevelFilter {
@@ -74,17 +71,16 @@ pub fn init_debug_level(level: i32) {
     DEBUG_LEVEL.store(level, Ordering::Relaxed);
 }
 
-/// Read the current C-style debug level. For REQ_SET_DEBUG's
-/// "reply with previous level" (`control.c:86`).
+/// Read the current tinc-style debug level. For REQ_SET_DEBUG's
+/// "reply with previous level".
 #[must_use]
 pub fn debug_level() -> i32 {
     DEBUG_LEVEL.load(Ordering::Relaxed)
 }
 
 /// Set the debug level. Updates both the stored i32 (for readback)
-/// and `log::max_level()` (the actual gate). C `control.c:88-90`:
-/// `if(new_level >= 0) debug_level = new_level`. Negative = no-op
-/// (query-only). Returns the PREVIOUS level (what the C sends).
+/// and `log::max_level()` (the actual gate). Negative = no-op
+/// (query-only). Returns the PREVIOUS level.
 ///
 /// Interaction with `set_active`: REQ_LOG already bumps
 /// `max_level` to Trace. If a log conn is active and someone does
@@ -139,12 +135,10 @@ impl log::Log for TapLogger {
         if LOG_TAP_ACTIVE.load(Ordering::Relaxed) {
             // Format ONCE, push. Daemon drains per-turn.
             //
-            // C `logger.c:197`: `vsnprintf(message, sizeof message,
-            // format, ap)` then `:213` send. We don't have access to
-            // the env_logger-formatted output (timestamps, level
-            // tag); the CLI side (`tincctl.c:658`) just reads raw
-            // bytes anyway. The `args()` is the bare message — same
-            // as C's `message` buffer pre-`format_pretty`.
+            // We don't have access to the env_logger-formatted
+            // output (timestamps, level tag); the CLI side just
+            // reads raw bytes anyway. The `args()` is the bare
+            // message.
             TAP.with_borrow_mut(|v| v.push((r.level(), r.args().to_string())));
         }
     }
@@ -186,8 +180,7 @@ pub fn drain() -> Vec<(log::Level, String)> {
 
 /// Gate control. Daemon calls `set_active(true)` when the first
 /// `REQ_LOG` arrives, `set_active(false)` when the last log conn
-/// disconnects. Mirrors C's `logcontrol = true/false` recompute-
-/// during-walk (`logger.c:195,203`).
+/// disconnects.
 ///
 /// `on=true` also raises `max_level` to `Trace` so the `log!` macro
 /// reaches our `enabled()`. `on=false` does NOT lower it back: we

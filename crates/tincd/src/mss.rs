@@ -1,4 +1,4 @@
-//! TCP MSS option clamping (`route.c:389-487`).
+//! TCP MSS option clamping.
 //!
 //! TCP advertises max segment size in the SYN's MSS option. If
 //! both endpoints have 1500-MTU NICs but the tinc tunnel between
@@ -19,7 +19,7 @@
 // `ETH_P_8021Q` is not anywhere else in the workspace yet.
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86DD;
-/// 802.1Q VLAN tag (`route.c:404`).
+/// 802.1Q VLAN tag.
 const ETH_P_8021Q: u16 = 0x8100;
 
 /// Ethernet header is 14 bytes (`route.c` `ether_size`).
@@ -38,18 +38,16 @@ const ETHER_SIZE: usize = 14;
 /// fuzz corpus.
 #[must_use]
 pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
-    // route.c:401-402 — read ethertype from eth header.
-    // C indexes [12]/[13] without a bounds check (it's gated on
-    // packet routing earlier); we must check.
+    // Read ethertype from eth header. We must bounds-check
+    // (upstream gates this earlier in routing).
     if packet.len() < ETHER_SIZE {
         return false;
     }
     let mut start = ETHER_SIZE;
     let mut ethertype = u16::from(packet[12]) << 8 | u16::from(packet[13]);
 
-    // route.c:404-407 — 802.1Q: skip the 4-byte VLAN tag and
-    // re-read the inner ethertype at offset 16/17. Only one tag
-    // (no QinQ); the C only handles one too.
+    // 802.1Q: skip the 4-byte VLAN tag and re-read the inner
+    // ethertype at offset 16/17. Only one tag (no QinQ).
     if ethertype == ETH_P_8021Q {
         start += 4;
         if packet.len() < 18 {
@@ -58,14 +56,13 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         ethertype = u16::from(packet[16]) << 8 | u16::from(packet[17]);
     }
 
-    // route.c:410-413 — IP-in-IP (RFC 2003). Outer IPv4 with
-    // protocol field (offset +9) == 4 → the payload is another
-    // IPv4 header. Skip a fixed 20 bytes (the C assumes the outer
+    // IP-in-IP (RFC 2003). Outer IPv4 with protocol field (offset
+    // +9) == 4 → the payload is another IPv4 header. Skip a fixed
+    // 20 bytes (assumes the outer
     // IP header has no options, IHL=5).
     //
-    // Bounds: route.c:414 checks `len <= start+20` *after* this
-    // bump, but the [start+9] read itself is unchecked in C. We
-    // must check, since a 14-byte frame with type=0800 would
+    // We must bounds-check the [start+9] read here, since a
+    // 14-byte frame with type=0800 would
     // otherwise read OOB.
     if ethertype == ETH_P_IP {
         if packet.len() <= start + 9 {
@@ -76,19 +73,17 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         }
     }
 
-    // route.c:414-416 — must have at least a minimal IP header's
-    // worth of bytes left.
+    // Must have at least a minimal IP header's worth of bytes left.
     if packet.len() <= start + 20 {
         return false;
     }
 
-    // route.c:418-424 — find TCP. v4: protocol byte at +9 must be
-    // 6, then skip IHL*4 bytes. v6: next-header byte at +6 must be
-    // 6, then skip the fixed 40-byte header. (No v6 ext-header
+    // Find TCP. v4: protocol byte at +9 must be 6, then skip IHL*4
+    // bytes. v6: next-header byte at +6 must be 6, then skip the
+    // fixed 40-byte header. (No v6 ext-header
     // chasing — the C doesn't either.)
     if ethertype == ETH_P_IP && packet[start + 9] == 6 {
-        // route.c:419 — IHL is the low nibble of the first byte,
-        // in units of 4 bytes.
+        // IHL is the low nibble of the first byte, units of 4 bytes.
         let ihl = (packet[start] & 0x0f) as usize;
         start += ihl * 4;
     } else if ethertype == ETH_P_IPV6 && packet[start + 6] == 6 {
@@ -97,15 +92,15 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         return false;
     }
 
-    // route.c:426-428 — must have at least a minimal TCP header
-    // (20 bytes) after the IP header.
+    // Must have at least a minimal TCP header (20 bytes) after the
+    // IP header.
     if packet.len() <= start + 20 {
         return false;
     }
 
-    // route.c:431 — TCP data-offset (high nibble of byte 12, in
-    // 32-bit words). Options span from byte 20 to doff*4.
-    // `(doff - 5) * 4` = option-bytes count. C uses signed `int`
+    // TCP data-offset (high nibble of byte 12, in 32-bit words).
+    // Options span from byte 20 to doff*4. `(doff - 5) * 4` =
+    // option-bytes count. Upstream uses signed `int`
     // here; doff < 5 makes `len` negative and the loop body never
     // runs. We use usize, so guard explicitly.
     let doff = (packet[start + 12] >> 4) as usize;
@@ -114,32 +109,32 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
     }
     let opt_len = (doff - 5) * 4;
 
-    // route.c:433-435 — full options region must be in-bounds.
+    // Full options region must be in-bounds.
     if packet.len() < start + 20 + opt_len {
         return false;
     }
 
-    // route.c:438-487 — TCP option TLV walk. Options are
-    // [kind, len, data...] EXCEPT kind 0 (EOL, 1 byte) and kind 1
-    // (NOP, 1 byte) which have no len byte.
+    // TCP option TLV walk. Options are [kind, len, data...] EXCEPT
+    // kind 0 (EOL, 1 byte) and kind 1 (NOP, 1 byte) which have no
+    // len byte.
     let mut i = 0usize;
     while i < opt_len {
         let kind = packet[start + 20 + i];
 
-        // route.c:440-442 — End-of-options. Stop.
+        // End-of-options. Stop.
         if kind == 0 {
             return false;
         }
 
-        // route.c:444-447 — NOP. Single byte, no length.
+        // NOP. Single byte, no length.
         if kind == 1 {
             i += 1;
             continue;
         }
 
-        // route.c:449-451 — bounds check on the length byte and
-        // the option body. `i > opt_len - 2` means the length
-        // byte itself would be OOB. `i > opt_len - opt[i+1]`
+        // Bounds check on the length byte and the option body.
+        // `i > opt_len - 2` means the length byte itself would be
+        // OOB. `i > opt_len - opt[i+1]`
         // means the body would overrun. The C reads
         // `packet[start+21+i]` inside the second condition; that
         // read is itself guarded by the first condition because
@@ -159,10 +154,10 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             return false;
         }
 
-        // route.c:453-460 — not MSS: skip by stated length.
-        // The `< 2` guard (route.c:457) catches malformed options
-        // claiming length 0 or 1, which would otherwise loop
-        // forever (0) or re-read the kind byte as a new len (1).
+        // Not MSS: skip by stated length. The `< 2` guard catches
+        // malformed options claiming length 0 or 1, which would
+        // otherwise loop forever (0) or re-read the kind byte as a
+        // new len (1).
         if kind != 2 {
             if this_len < 2 {
                 return false;
@@ -171,8 +166,8 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             continue;
         }
 
-        // route.c:462-464 — MSS option must have length exactly 4
-        // (kind, len, 2-byte MSS).
+        // MSS option must have length exactly 4 (kind, len, 2-byte
+        // MSS).
         //
         // Mirror the C bug-for-bug: it reads `packet[start+21]`
         // (NOT `+i`) — the *first* option's length byte, not this
@@ -186,12 +181,12 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             return false;
         }
 
-        // route.c:467-469 — read the existing MSS (big-endian).
+        // Read the existing MSS (big-endian).
         let oldmss = u16::from(packet[start + 22 + i]) << 8 | u16::from(packet[start + 23 + i]);
 
-        // route.c:468 — newmss is the path MTU minus everything
-        // up to and including the TCP header's first 20 bytes.
-        // `start` here already counts eth + (vlan) + (outer IP) +
+        // newmss is the path MTU minus everything up to and
+        // including the TCP header's first 20 bytes. `start` here
+        // already counts eth + (vlan) + (outer IP) +
         // IP, so subtracting it from MTU and then subtracting the
         // 20-byte TCP fixed header leaves the max segment payload.
         // Guard against underflow: if mtu is absurdly small the C
@@ -204,18 +199,18 @@ pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             return false;
         };
 
-        // route.c:472-475 — never *increase* the MSS. The peer
-        // chose a smaller value for a reason (its own MTU, maybe).
+        // Never *increase* the MSS. The peer chose a smaller value
+        // for a reason (its own MTU, maybe).
         if oldmss <= newmss {
             return false;
         }
 
-        // route.c:477-478 — write the new MSS, big-endian.
+        // Write the new MSS, big-endian.
         packet[start + 22 + i] = (newmss >> 8) as u8;
         packet[start + 23 + i] = (newmss & 0xff) as u8;
 
-        // route.c:479-485 — incremental TCP checksum adjustment,
-        // RFC 1624. The TCP checksum is the one's-complement of
+        // Incremental TCP checksum adjustment, RFC 1624. The TCP
+        // checksum is the one's-complement of
         // the one's-complement sum over the pseudo-header + TCP
         // segment. We changed exactly one 16-bit word (the MSS).
         // RFC 1624 eqn 3: HC' = ~(~HC + ~m + m')
@@ -380,7 +375,7 @@ mod tests {
     #[test]
     fn does_not_increase() {
         // MSS=1200, mtu=1500. newmss would be 1500-54=1446 > 1200.
-        // route.c:472 — `if oldmss <= newmss: break`.
+        // `if oldmss <= newmss: break`.
         let mut pkt = build_v4_tcp(&[0x02, 0x04, 0x04, 0xb0]); // 1200
         let before = pkt.clone();
         assert!(!clamp(&mut pkt, 1500));
@@ -419,9 +414,9 @@ mod tests {
     #[test]
     fn skips_other_option_then_finds_mss() {
         // [opt 8 (timestamp) len=10, ..8 bytes.., NOP, NOP, MSS]
-        // Wait — route.c:462 reads packet[start+21] which is the
+        // Wait — the len check reads packet[start+21] which is the
         // FIRST option's len byte (10), not the MSS option's (4).
-        // So this would bail. The C bug. Skip; covered separately.
+        // So this would bail. Upstream bug. Skip; covered separately.
         //
         // Instead test: [NOP, NOP, NOP, NOP, MSS]. NOPs are
         // single-byte so they don't trip the start+21 check.
@@ -506,8 +501,8 @@ mod tests {
 
     #[test]
     fn malformed_opt_len_0() {
-        // Option kind=5 (SACK) with len=0. route.c:457 catches
-        // this — `len < 2 → break`. Otherwise i += 0 loops forever.
+        // Option kind=5 (SACK) with len=0. `len < 2 → break`
+        // catches this. Otherwise i += 0 loops forever.
         let mut pkt = build_v4_tcp(&[0x05, 0x00, 0x00, 0x00]);
         let before = pkt.clone();
         assert!(!clamp(&mut pkt, 1400));
@@ -518,7 +513,7 @@ mod tests {
     fn malformed_opt_len_1() {
         // len=1: the length byte counts the kind but not itself.
         // i += 1 would re-read the len byte as a new kind. Also
-        // caught by route.c:457.
+        // caught by the `< 2` guard.
         let mut pkt = build_v4_tcp(&[0x05, 0x01, 0x00, 0x00]);
         let before = pkt.clone();
         assert!(!clamp(&mut pkt, 1400));
@@ -528,7 +523,7 @@ mod tests {
     #[test]
     fn malformed_opt_len_overrun() {
         // Option claims len=200 but only 4 bytes of options exist.
-        // route.c:449-451 — `i > len - opt_len` catches this.
+        // `i > len - opt_len` catches this.
         let mut pkt = build_v4_tcp(&[0x05, 200, 0x00, 0x00]);
         let before = pkt.clone();
         assert!(!clamp(&mut pkt, 1400));
@@ -538,7 +533,7 @@ mod tests {
     #[test]
     fn truncated_after_mss_kind() {
         // doff says 6 (24-byte TCP header, 4 opt bytes) but the
-        // packet was cut short. route.c:433 — `len < start+20+len`.
+        // packet was cut short. `len < start+20+len`.
         let mut pkt = build_v4_tcp(&[0x02, 0x04, 0x05, 0xb4]);
         pkt.truncate(pkt.len() - 2); // chop the MSS value
         let before = pkt.clone();

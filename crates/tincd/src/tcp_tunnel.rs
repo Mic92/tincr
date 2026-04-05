@@ -1,14 +1,12 @@
-//! Binary `SPTPS_PACKET` TCP-tunnel frame (`net_packet.c:616-680`,
-//! `:975-986`, `protocol_misc.c:78-151`).
+//! Binary `SPTPS_PACKET` TCP-tunnel frame.
 //!
 //! ## Why this exists
 //!
 //! When PMTU is unconverged or `TCPOnly = yes`, packets go over the
 //! meta-conn TCP, not UDP. Two paths:
 //!
-//! - b64 via REQ_KEY (`net_packet.c:988-998`): `"15 from to 21
-//!   <b64>\n"`. Works always; ALREADY WIRED (`daemon/gossip.rs:312`).
-//!   Slow: b64 inflate × meta-conn-SPTPS encrypt × per-tunnel-SPTPS
+//! - b64 via REQ_KEY: `"15 from to 21 <b64>\n"`. Works always;
+//!   ALREADY WIRED (`daemon/gossip.rs:312`). Slow: b64 inflate × meta-conn-SPTPS encrypt × per-tunnel-SPTPS
 //!   encrypt. The 12.9 Mbps from `2b5dda45`'s commit body.
 //!
 //! - binary (`:975-986`): `"21 LEN\n"` then `LEN` raw bytes via
@@ -42,13 +40,13 @@ use rand_core::RngCore;
 
 use crate::node_id::NodeId6;
 
-// ─── frame build/parse ── net_packet.c:975-986 / :616-634 ────────────
+// ─── frame build/parse ───────────────────────────────────────────────
 
-/// `dst_id ‖ src_id` header length. `:617`: `if(len <
+/// `dst_id ‖ src_id` header length. `if(len <
 /// sizeof(node_id_t) * 2)`.
 pub const HDR_LEN: usize = 12;
 
-/// `net_packet.c:976-984`. `dst[6] ‖ src[6] ‖ sptps_ct`.
+/// `dst[6] ‖ src[6] ‖ sptps_ct`.
 ///
 /// IDENTICAL to the UDP wire frame at `daemon/net.rs:1246-1254`. The
 /// transport differs; bytes don't.
@@ -80,20 +78,18 @@ pub fn parse_frame(blob: &[u8]) -> Option<(NodeId6, NodeId6, &[u8])> {
     ))
 }
 
-// ─── random early drop ── protocol_misc.c:78-86 ──────────────────────
+// ─── random early drop ───────────────────────────────────────────────
 
-/// `protocol_misc.c:78-86`. Congestion gate for the TCP fallback.
-/// Higher outbuf fill → linearly higher drop probability above the
-/// half-max threshold.
+/// Congestion gate for the TCP fallback. Higher outbuf fill →
+/// linearly higher drop probability above the half-max threshold.
 ///
-/// C: `if(outbuf.len > max/2) if((outbuf.len - max/2) > prng(max/2))
+/// `if(outbuf.len > max/2) if((outbuf.len - max/2) > prng(max/2))
 /// return true`.
 ///
 /// Returns `true` = DROP this packet. Don't send.
 ///
-/// C `prng()` is `(uint32_t)rand() / (RAND_MAX / n + 1)` —
-/// uniform-ish over `[0, n)`. We use `next_u32() % half` (modulo
-/// bias is negligible at these sizes; matches `autoconnect.rs`
+/// We use `next_u32() % half` (modulo bias is negligible at these
+/// sizes; matches `autoconnect.rs`
 /// idiom). Doesn't matter — this is congestion heuristics, not
 /// crypto.
 #[must_use]
@@ -118,17 +114,17 @@ pub fn random_early_drop<R: RngCore>(outbuf_len: usize, max: usize, rng: &mut R)
     excess > r
 }
 
-// ─── route decision ── net_packet.c:616-680 ──────────────────────────
+// ─── route decision ──────────────────────────────────────────────────
 
 /// `receive_tcppacket_sptps` decision tree. The daemon supplies a
 /// context view; we return what to do.
 ///
 /// **Design**: `&dyn Fn` chosen over a plain-data struct
 /// (`HashMap<NodeId6, &str>` + bool maps). The dyn-fn version maps
-/// 1:1 onto the C call sites (`lookup_node_id`, `n->status.X`) so
-/// reading `route()` against `net_packet.c:616-680` is a line-by-
-/// line diff. This is the fallback path — not hot — so the indirect
-/// call cost is irrelevant. Tests build closures over `HashMap`s.
+/// 1:1 onto the original call sites (`lookup_node_id`,
+/// `n->status.X`). This is the fallback path — not hot — so the
+/// indirect call cost is irrelevant. Tests build closures over
+/// `HashMap`s.
 #[derive(Clone, Copy)]
 pub struct RouteCtx<'a> {
     /// `lookup_node_id` (`:623`, `:632`). `None` = unknown.
@@ -182,7 +178,6 @@ pub enum TcpRouteDecision<'a> {
     },
 }
 
-/// `net_packet.c:616-680` ladder.
 #[must_use]
 pub fn route<'a>(blob: &'a [u8], ctx: &RouteCtx<'a>) -> TcpRouteDecision<'a> {
     // :617 — len check

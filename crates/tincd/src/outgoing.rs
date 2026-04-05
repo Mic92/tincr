@@ -48,12 +48,12 @@
 //!
 //! - `bind_to_address` (`:624`): wired. `try_connect` takes
 //!   `Option<SocketAddr>` and binds before `connect()`.
-//! - `bind_to_interface` (`:623`) + `SO_MARK` (`configure_tcp:104`):
-//!   wired via `apply_dial_sockopts`. Warn-only on dial (C `:623`
-//!   discards the return); listen-side hard-fails (`listen.rs`).
+//! - `bind_to_interface` + `SO_MARK`: wired via `apply_dial_sockopts`.
+//!   Warn-only on dial (the return is discarded); listen-side
+//!   hard-fails (`listen.rs`).
 //! - DNS at connect time: `addrcache.rs` resolves `Address =` lines
-//!   lazily inside `next_addr()` (matches C `address_cache.c:157-
-//!   199`). `resolve_config_addrs` here just PARSES `host port`
+//!   lazily inside `next_addr()`. `resolve_config_addrs` here just
+//!   PARSES `host port`
 //!   strings; no DNS at open time.
 
 // No `forbid(unsafe)`: do_outgoing_pipe needs fork(). The unsafe is
@@ -90,8 +90,7 @@ pub struct Outgoing {
     /// `outgoing->node->name`. The `ConnectTo = bob` value.
     pub node_name: String,
     /// `outgoing->timeout`. Exponential backoff seconds. `retry_
-    /// outgoing` (`:406`) adds 5, caps at `maxtimeout` (default 900,
-    /// `net_setup.c:533`). C: `int`, starts 0 (`xzalloc`).
+    /// outgoing` adds 5, caps at `maxtimeout` (default 900). Starts 0.
     pub timeout: u32,
     /// `outgoing->node->address_cache`. Tries cached-recent then
     /// config `Address` lines. `next_addr()` walks; `reset()` on
@@ -99,19 +98,16 @@ pub struct Outgoing {
     pub addr_cache: AddressCache,
 }
 
-/// `MaxTimeout` default (`net_setup.c:533`). C: `maxtimeout = 900`.
-/// 15 minutes. The retry backoff caps here.
+/// `MaxTimeout` default: 900 = 15 minutes. The retry backoff caps here.
 pub const MAX_TIMEOUT_DEFAULT: u32 = 900;
 
 impl Outgoing {
-    /// `retry_outgoing` arithmetic (`net_socket.c:406-410`). Bumps
-    /// `timeout += 5`, caps at `maxtimeout`. The TIMER ARM (`:412`)
+    /// `retry_outgoing` arithmetic. Bumps `timeout += 5`, caps at
+    /// `maxtimeout`. The TIMER ARM
     /// lives in the daemon (it owns `Timers`).
     ///
     /// Returns the new timeout for the caller to arm.
     pub fn bump_timeout(&mut self, maxtimeout: u32) -> u32 {
-        // C `:406-410`: `outgoing->timeout += 5; if(> maxtimeout)
-        // outgoing->timeout = maxtimeout`.
         self.timeout = (self.timeout + 5).min(maxtimeout);
         self.timeout
     }
@@ -124,28 +120,26 @@ impl Outgoing {
 pub enum ConnectAttempt {
     /// `connect()` returned 0 OR `EINPROGRESS`. The socket is
     /// registered for WRITE; the connecting probe finishes it.
-    /// C `:649-658`.
     Started { sock: Socket, addr: SocketAddr },
     /// This addr failed (socket creation or immediate connect
-    /// error). C `:605-608,644-648`: `goto begin` to try next addr.
-    /// The error is logged here; caller loops.
+    /// error). `goto begin` to try next addr. The error is logged
+    /// here; caller loops.
     Retry,
-    /// Addr cache exhausted. C `:572-575`: `retry_outgoing`. Caller
-    /// arms the backoff timer.
+    /// Addr cache exhausted. `retry_outgoing`. Caller arms the
+    /// backoff timer.
     Exhausted,
 }
 
 /// `configure_tcp:104-106` (SO_MARK) + `do_outgoing_connection:623`
 /// (SO_BINDTODEVICE). Shared by direct dial + SOCKS/HTTP proxy dial
-/// (the C `:613` `if(proxytype != PROXY_EXEC)` gate covers both).
+/// (the `if(proxytype != PROXY_EXEC)` gate covers both).
 ///
-/// Best-effort: C `:623` discards `bind_to_interface`'s return value
-/// on the dial path (only listen `:244,391` hard-fails). We match —
+/// Best-effort: `bind_to_interface`'s return value is discarded on
+/// the dial path (only listen hard-fails). We match —
 /// log + continue. Policy-routing setups get a warning; the connect
 /// proceeds (kernel picks via routing table, same as no-bind).
 fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
-    // C `configure_tcp:104-106`: `if(fwmark) setsockopt(SO_MARK)`.
-    // No return-value check in C. 0 = unset = skip.
+    // `if(fwmark) setsockopt(SO_MARK)`. 0 = unset = skip.
     if sockopts.fwmark != 0 {
         use nix::sys::socket::{setsockopt, sockopt};
         use std::os::fd::AsFd;
@@ -154,7 +148,7 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
                        "SO_MARK={}: {e}", sockopts.fwmark);
         }
     }
-    // C `:623`: `bind_to_interface(c->socket)`. Return discarded.
+    // `bind_to_interface(c->socket)`. Return discarded.
     if let Some(iface) = &sockopts.bind_to_interface
         && let Err(e) = crate::listen::bind_to_interface(sock, iface)
     {
@@ -166,29 +160,27 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
 /// Creates a socket, sets nonblocking, calls `connect()`. The daemon
 /// loops this until `Started` or `Exhausted`.
 ///
-/// C `:564-662`, `proxytype == NONE` path only. Proxy modes are
-/// chunk 10.
+/// `proxytype == NONE` path only. Proxy modes are chunk 10.
 pub fn try_connect(
     addr_cache: &mut AddressCache,
     node_name: &str,
     bind_to: Option<SocketAddr>,
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    // C `:570`: `sa = get_recent_address(outgoing->node->address_cache)`.
     let Some(addr) = addr_cache.next_addr() else {
-        // C `:572-575`: "Could not set up a meta connection".
+        // "Could not set up a meta connection".
         log::error!(target: "tincd::conn",
                     "Could not set up a meta connection to {node_name}");
         return ConnectAttempt::Exhausted;
     };
 
-    // C `:580-581`: `c->hostname = sockaddr2hostname(&c->address)`.
-    // Logged at `:583` as `"Trying to connect to %s (%s)"`.
+    // `c->hostname = sockaddr2hostname(&c->address)`. Logged as
+    // `"Trying to connect to %s (%s)"`.
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
 
-    // C `:586`: `socket(c->address.sa.sa_family, SOCK_STREAM, IPPROTO_TCP)`.
-    // socket2 auto-sets CLOEXEC (closes the C's `:611` FD_CLOEXEC fcntl).
+    // `socket(c->address.sa.sa_family, SOCK_STREAM, IPPROTO_TCP)`.
+    // socket2 auto-sets CLOEXEC.
     let domain = match addr {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
@@ -196,15 +188,15 @@ pub fn try_connect(
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(s) => s,
         Err(e) => {
-            // C `:605-608`: "Creating socket for %s failed".
+            // "Creating socket for %s failed".
             log::error!(target: "tincd::conn",
                         "Creating socket for {addr} failed: {e}");
             return ConnectAttempt::Retry;
         }
     };
 
-    // C `:587`: `configure_tcp(c)`. NONBLOCK + NODELAY. NONBLOCK
-    // BEFORE connect — that's what makes connect() return
+    // `configure_tcp(c)`. NONBLOCK + NODELAY. NONBLOCK BEFORE
+    // connect — that's what makes connect() return
     // EINPROGRESS instead of blocking. The C's `configure_tcp`
     // (`:71-76`) does it via fcntl; same effect.
     if let Err(e) = sock.set_nonblocking(true) {
@@ -213,22 +205,20 @@ pub fn try_connect(
         return ConnectAttempt::Retry;
     }
     if let Err(e) = sock.set_nodelay(true) {
-        // C `:89` ignores the return value. Warn.
         log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
     }
 
-    // C `:616-621`: IPV6_V6ONLY for v6 sockets. We're CONNECTING,
-    // not binding; V6ONLY only matters for dual-stack listeners.
+    // We're CONNECTING, not binding; V6ONLY only matters for
+    // dual-stack listeners.
     // The C sets it anyway (defensive against weird kernels). Match.
     if matches!(addr, SocketAddr::V6(_)) {
         let _ = sock.set_only_v6(true);
     }
 
-    // C `configure_tcp:104` (SO_MARK) + `:623` (bind_to_interface).
-    // BEFORE `:624` bind_to_address — matches C ordering.
+    // SO_MARK + bind_to_interface. BEFORE bind_to_address.
     apply_dial_sockopts(&sock, sockopts);
 
-    // C `:624`: `bind_to_addr(c->socket)`. Forces the source addr
+    // `bind_to_addr(c->socket)`. Forces the source addr
     // for outgoing connections. Niche (multi-homed hosts where the
     // default route doesn't go via the desired interface). `None`
     // → no bind → kernel picks from the route table (the default).
@@ -237,29 +227,28 @@ pub fn try_connect(
     if let Some(local) = bind_to
         && let Err(e) = sock.bind(&SockAddr::from(local))
     {
-        // C `:129-131` (in `bind_to_addr`): warn, continue.
-        // The connect may still work via a different source.
+        // Warn, continue. The connect may still work via a
+        // different source.
         log::warn!(target: "tincd::conn",
                         "Can't bind to {local}: {e}");
     }
 
-    // C `:630`: `connect(c->socket, &c->address.sa, salen)`.
-    // socket2 wraps this. Nonblocking → returns EINPROGRESS for
+    // `connect(c->socket, &c->address.sa, salen)`. Nonblocking →
+    // returns EINPROGRESS for
     // anything other than loopback (which might connect synchronously).
     let sock_addr = SockAddr::from(addr);
     match sock.connect(&sock_addr) {
         Ok(()) => {
-            // Immediate success. Loopback can do this. C `:641` —
-            // `result == 0` falls through to `:649-658`.
+            // Immediate success. Loopback can do this.
         }
         Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {
-            // Normal nonblocking-connect-started. C `:641`:
+            // Normal nonblocking-connect-started.
             // `result == -1 && sockinprogress(sockerrno)` — the
             // `!` makes it FALSE, falls through to `:649-658`.
         }
         Err(e) => {
-            // C `:642-648`: "Could not connect to %s (%s)".
-            // `goto begin`. The error here is immediate (e.g.
+            // "Could not connect to %s (%s)". `goto begin`. The
+            // error here is immediate (e.g.
             // ENETUNREACH for an unroutable addr).
             log::error!(target: "tincd::conn",
                         "Could not connect to {node_name} ({addr}): {e}");
@@ -267,14 +256,14 @@ pub fn try_connect(
         }
     }
 
-    // C `:649-658`: register for IO_READ | IO_WRITE. The daemon
-    // does the registration (it owns the EventLoop). We hand back
+    // Register for IO_READ | IO_WRITE. The daemon does the
+    // registration (it owns the EventLoop). We hand back
     // the socket + addr.
     ConnectAttempt::Started { sock, addr }
 }
 
-/// `do_outgoing_connection` proxy branch (`net_socket.c:590-601,
-/// 633-639`). Connects to the PROXY's address, not the peer's. The
+/// `do_outgoing_connection` proxy branch. Connects to the PROXY's
+/// address, not the peer's. The
 /// peer addr goes into the SOCKS/HTTP CONNECT request later (in
 /// `finish_connecting`).
 ///
@@ -300,8 +289,8 @@ pub fn try_connect_via_proxy(
     node_name: &str,
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    // C `:591`: `proxyai = str2addrinfo(proxyhost, proxyport, ...)`.
-    // We resolve here. Blocking DNS (same as the C — `getaddrinfo`
+    // `proxyai = str2addrinfo(proxyhost, proxyport, ...)`. We
+    // resolve here. Blocking DNS (`getaddrinfo`
     // inside the connect loop). Take the first addr; the C uses
     // `proxyai->ai_addr` (also first).
     let resolved = (proxy_host, proxy_port)
@@ -314,11 +303,11 @@ pub fn try_connect_via_proxy(
         return ConnectAttempt::Exhausted;
     };
 
-    // C `:598`: `"Using proxy at %s port %s"`.
+    // `"Using proxy at %s port %s"`.
     log::info!(target: "tincd::conn",
                "Using proxy at {proxy_addr} for {node_name} ({peer_addr})");
 
-    // C `:600`: `socket(proxyai->ai_family, SOCK_STREAM, IPPROTO_TCP)`.
+    // `socket(proxyai->ai_family, SOCK_STREAM, IPPROTO_TCP)`.
     let domain = match proxy_addr {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
@@ -343,11 +332,11 @@ pub fn try_connect_via_proxy(
         let _ = sock.set_only_v6(true);
     }
 
-    // C `:613` gate: `if(proxytype != PROXY_EXEC)` — SOCKS/HTTP
-    // proxy sockets are real TCP and run through `:623-624`.
+    // `if(proxytype != PROXY_EXEC)` — SOCKS/HTTP proxy sockets are
+    // real TCP and get sockopts.
     apply_dial_sockopts(&sock, sockopts);
 
-    // C `:637`: `connect(c->socket, proxyai->ai_addr, ...)`.
+    // `connect(c->socket, proxyai->ai_addr, ...)`.
     let sock_addr = SockAddr::from(proxy_addr);
     match sock.connect(&sock_addr) {
         Ok(()) => {}
@@ -369,8 +358,8 @@ pub fn try_connect_via_proxy(
     }
 }
 
-/// `handle_meta_io` connecting branch (`net_socket.c:517-555`). Probe
-/// the async connect: `send(fd, NULL, 0, 0)` returns 0 on success,
+/// `handle_meta_io` connecting branch. Probe the async connect:
+/// `send(fd, NULL, 0, 0)` returns 0 on success,
 /// `EWOULDBLOCK` on spurious wakeup (Linux), `ENOTCONN` on failure
 /// (POSIX) — in which case `getsockopt(SO_ERROR)` gets the cause.
 ///
@@ -381,39 +370,37 @@ pub fn try_connect_via_proxy(
 /// Connect failed (`ECONNREFUSED`, `EHOSTUNREACH`, etc). Caller
 /// terminates and retries the next addr.
 pub fn probe_connecting(sock: &Socket) -> io::Result<bool> {
-    // C `:531`: `if(send(c->socket, NULL, 0, 0) != 0)`. socket2's
-    // `send(&[])` does the same — a zero-byte write that touches
+    // `if(send(c->socket, NULL, 0, 0) != 0)`. socket2's `send(&[])`
+    // does the same — a zero-byte write that touches
     // the connection state without sending data.
     match sock.send(&[]) {
         Ok(_) => {
-            // C `:553-554`: `c->status.connecting = false`.
             // Connected. `_` not `0`: send() returns bytes sent;
             // we sent 0, so it's 0. Don't pin that.
             Ok(true)
         }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-            // C `:533-535`: `if(sockwouldblock(sockerrno)) return`.
             // Linux-specific spurious wakeup. Stay registered.
             Ok(false)
         }
         Err(e) => {
-            // C `:537-551`. Either the immediate error IS the cause
-            // (Linux: ECONNREFUSED bubbles up directly), or it's
+            // Either the immediate error IS the cause (Linux:
+            // ECONNREFUSED bubbles up directly), or it's
             // ENOTCONN and we read SO_ERROR for the real cause.
             //
-            // C `:539`: `if(!socknotconn(sockerrno)) socket_error =
-            // sockerrno`. socknotconn is `errno == ENOTCONN`.
+            // `if(!socknotconn(sockerrno)) socket_error = sockerrno`.
+            // socknotconn is `errno == ENOTCONN`.
             let cause = if e.raw_os_error() == Some(libc::ENOTCONN) {
-                // C `:541-543`: `getsockopt(SOL_SOCKET, SO_ERROR)`.
-                // socket2's `take_error()` wraps this. `Ok(None)`
+                // `getsockopt(SOL_SOCKET, SO_ERROR)`. socket2's
+                // `take_error()` wraps this. `Ok(None)`
                 // means SO_ERROR was 0 — shouldn't happen here
                 // (we got ENOTCONN from send, SOMETHING failed).
-                // C `:545` checks `if(socket_error)`; if 0, falls
-                // through to `:550 return` (no log, no terminate).
+                // `if(socket_error)`; if 0, falls through to
+                // `return` (no log, no terminate).
                 // We treat it as spurious too.
                 match sock.take_error() {
                     Ok(Some(cause)) => cause,
-                    Ok(None) => return Ok(false), // C `:545` fallthrough
+                    Ok(None) => return Ok(false), // fallthrough
                     Err(ge) => ge,                // getsockopt itself failed; use that
                 }
             } else {
@@ -427,10 +414,10 @@ pub fn probe_connecting(sock: &Socket) -> io::Result<bool> {
 /// `proxytype_t` (`net.h:148-155`). C has six (`NONE`/`SOCKS4`/
 /// `SOCKS4A`/`SOCKS5`/`HTTP`/`EXEC`); we have four. `NONE` is
 /// `Option::None` at the `DaemonSettings.proxy` level. `SOCKS4A` is
-/// faithfully unimplemented (`proxy.c:80`: "not implemented yet").
+/// faithfully unimplemented ("not implemented yet" upstream too).
 #[derive(Debug, Clone)]
 pub enum ProxyConfig {
-    /// `PROXY_EXEC` (`net_socket.c:588`). `socketpair` + `fork` +
+    /// `PROXY_EXEC`. `socketpair` + `fork` +
     /// `/bin/sh -c <cmd>`. The simple mode: no handshake bytes.
     Exec { cmd: String },
     /// `PROXY_SOCKS4`. Connect to `{host}:{port}`, then send a
@@ -462,8 +449,7 @@ pub enum ProxyConfig {
 }
 
 impl ProxyConfig {
-    /// The proxy server's address, for `try_connect_via_proxy`. C
-    /// `net_socket.c:591`: `str2addrinfo(proxyhost, proxyport, ...)`.
+    /// The proxy server's address, for `try_connect_via_proxy`.
     /// `Exec` has no proxy addr (the pipe IS the connection).
     #[must_use]
     pub fn proxy_addr(&self) -> Option<(&str, u16)> {
@@ -507,8 +493,8 @@ impl ProxyConfig {
     }
 }
 
-/// Parse `Proxy = type [args...]` (`net_setup.c:263-345`). Returns
-/// `Ok(None)` for `Proxy = none` and missing config; `Err` for
+/// Parse `Proxy = type [args...]`. Returns `Ok(None)` for
+/// `Proxy = none` and missing config; `Err` for
 /// unknown types and types we don't support yet (SOCKS/HTTP).
 ///
 /// # Errors
@@ -516,7 +502,6 @@ impl ProxyConfig {
 /// arg, or unsupported type). The caller (`setup()`) wraps this in
 /// `SetupError::Config`.
 pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
-    // C `:266-271`: `space = strchr(proxy, ' '); if(space) *space++=0`.
     // First word is the type, rest is args.
     let mut parts = value.splitn(2, ' ');
     let kind = parts.next().unwrap_or("");
@@ -525,8 +510,7 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
     match kind.to_ascii_lowercase().as_str() {
         "none" | "" => Ok(None),
         "exec" => {
-            // C `:313-318`: `if(!space || !*space) ERR "Argument
-            // expected"`.
+            // `if(!space || !*space) ERR "Argument expected"`.
             if args.is_empty() {
                 return Err("Argument expected for Proxy = exec".into());
             }
@@ -534,26 +518,27 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
                 cmd: args.to_owned(),
             }))
         }
-        // C `:326-378`: SOCKS4/4A/5/HTTP all share the same parse
-        // shape: `space`-walk through `host port [user [pass]]`.
-        // `socks4a`: C `proxy.c:80` "not implemented yet". Reject.
-        "socks4a" => Err("Proxy type socks4a not implemented (the C tinc doesn't either)".into()),
+        // SOCKS4/4A/5/HTTP all share the same parse shape: walk
+        // through `host port [user [pass]]`. `socks4a`: "not
+        // implemented yet" upstream. Reject.
+        "socks4a" => {
+            Err("Proxy type socks4a not implemented (upstream tinc doesn't either)".into())
+        }
         "socks4" | "socks5" | "http" => {
-            // C `:330-345`: walk space-separated tokens. The C does
-            // it with strchr+NUL-stomp; we split_whitespace (handles
+            // Walk space-separated tokens. We split_whitespace (handles
             // multiple spaces, same effect for valid input).
             let mut toks = args.split_whitespace();
             let host = toks.next().filter(|s| !s.is_empty());
             let port = toks.next().and_then(|s| s.parse::<u16>().ok());
             let (Some(host), Some(port)) = (host, port) else {
-                // C `:339-343`: "Host and port argument expected".
+                // "Host and port argument expected".
                 return Err(format!(
                     "Host and port argument expected for Proxy = {kind}"
                 ));
             };
-            // C `:348-360`: user/pass optional. Empty string → None
-            // (C `:367-369`: `if(proxyuser && *proxyuser)` — the
-            // pointer-nonnull AND deref-nonNUL idiom).
+            // user/pass optional. Empty string → None (`if(proxyuser
+            // && *proxyuser)` — the pointer-nonnull AND
+            // deref-nonNUL idiom).
             let user = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
             let pass = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
             let host = host.to_owned();
@@ -573,14 +558,13 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
     }
 }
 
-/// `do_outgoing_pipe` (`net_socket.c:428-483`). `socketpair(AF_UNIX,
-/// SOCK_STREAM)` + `fork`. Child dup2's `sock[1]` to fds 0 and 1,
+/// `do_outgoing_pipe`. `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's `sock[1]` to fds 0 and 1,
 /// runs `/bin/sh -c <cmd>`. Parent gets `sock[0]` as an `OwnedFd`
 /// that acts like a connected TCP socket.
 ///
 /// `addr`/`node_name`/`my_name`: for the child's environment
-/// (`REMOTEADDRESS`, `REMOTEPORT`, `NODE`, `NAME`). C `:455-465`.
-/// The proxy script reads these to know where to connect.
+/// (`REMOTEADDRESS`, `REMOTEPORT`, `NODE`, `NAME`). The proxy
+/// script reads these to know where to connect.
 ///
 /// ## Why `unsafe`
 ///
@@ -594,7 +578,7 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
 /// `_exit`). The `CString` allocations happen in the PARENT before
 /// the fork; the child only borrows their `.as_ptr()`.
 ///
-/// The C `do_outgoing_pipe` doesn't have this problem (tincd is
+/// Upstream `do_outgoing_pipe` doesn't have this problem (tincd is
 /// single-threaded), but our test harness might be multi-threaded
 /// (cargo-nextest spawns threads). We're paranoid for free.
 ///
@@ -627,8 +611,8 @@ pub fn do_outgoing_pipe(
         core::ptr::null(),
     ];
 
-    // C `:455-460`: setenv("REMOTEADDRESS", host); setenv("REMOTEPORT",
-    // port); etc. The child does these post-fork (it has its own env
+    // setenv("REMOTEADDRESS", host); setenv("REMOTEPORT", port);
+    // etc. The child does these post-fork (it has its own env
     // copy). We pre-format the strings; child setenv's the pointers.
     let remote_addr = CString::new(addr.ip().to_string()).unwrap();
     let remote_port = CString::new(addr.port().to_string()).unwrap();
@@ -643,15 +627,15 @@ pub fn do_outgoing_pipe(
     // Everything that allocates was done above, in the parent.
     #[allow(unsafe_code)]
     unsafe {
-        // C `:432`: `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`.
+        // `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`.
         let mut fds = [-1i32; 2];
         if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) != 0 {
             return Err(io::Error::last_os_error());
         }
         let (parent_fd, child_fd) = (fds[0], fds[1]);
 
-        // C `:437-442`: `if(fork()) { ... parent ... return; }`.
-        // The C doesn't check for fork failure (`-1`); we do.
+        // `if(fork()) { ... parent ... return; }`. We check for
+        // fork failure (`-1`).
         match libc::fork() {
             -1 => {
                 let e = io::Error::last_os_error();
@@ -663,7 +647,7 @@ pub fn do_outgoing_pipe(
                 // ────── CHILD ──────
                 // libc-only until exec. NO std (locks could be held).
 
-                // C `:444-449`: close(0), close(1), close(fd[0]),
+                // close(0), close(1), close(fd[0]),
                 // dup2(fd[1], 0), dup2(fd[1], 1), close(fd[1]).
                 libc::close(0);
                 libc::close(1);
@@ -672,18 +656,17 @@ pub fn do_outgoing_pipe(
                 libc::dup2(child_fd, 1);
                 libc::close(child_fd);
 
-                // C `:451`: `setsid()`. Detach from controlling tty.
+                // `setsid()`. Detach from controlling tty.
                 // The proxy script shouldn't get our SIGINT.
                 libc::setsid();
 
-                // C `:455-465`: setenv. NETNAME omitted (not threaded
+                // setenv. NETNAME omitted (not threaded
                 // through the daemon yet; same as run_script).
                 libc::setenv(k_remote_addr.as_ptr(), remote_addr.as_ptr(), 1);
                 libc::setenv(k_remote_port.as_ptr(), remote_port.as_ptr(), 1);
                 libc::setenv(k_name.as_ptr(), name_env.as_ptr(), 1);
                 libc::setenv(k_node.as_ptr(), node_env.as_ptr(), 1);
 
-                // C `:469`: `system(command)` then `:477` `exit(result)`.
                 // We use execvp (replaces the process image entirely;
                 // no double-fork from system()'s internal fork).
                 // `/bin/sh -c <cmd>` is what system() does anyway.
@@ -695,8 +678,8 @@ pub fn do_outgoing_pipe(
             }
             _pid => {
                 // ────── PARENT ──────
-                // C `:438-441`: `c->socket = fd[0]; close(fd[1]);
-                // return`. Don't waitpid — the child is detached.
+                // `c->socket = fd[0]; close(fd[1]); return`. Don't
+                // waitpid — the child is detached.
                 // If it dies, parent's read returns EOF and the
                 // normal terminate path fires. The zombie reaper:
                 // SIGCHLD is SIG_DFL; init eventually reaps after
@@ -712,16 +695,14 @@ pub fn do_outgoing_pipe(
 }
 
 /// Parse `Address = host port` lines from `hosts/NAME` into
-/// **unresolved** `(host, port)` pairs. C `address_cache.c:42-63`
-/// stores `struct config_t *cfg` (the raw string); resolve happens
+/// **unresolved** `(host, port)` pairs. Resolve happens
 /// lazily in `get_recent_address` (`:157-199`). We mirror that:
 /// no DNS here, just string parsing. [`AddressCache::next_addr`]
 /// (crate::addrcache::AddressCache::next_addr) calls
 /// `to_socket_addrs()` when the cursor reaches tier 3.
 ///
 /// `Address = 10.0.0.1 655` → `("10.0.0.1", 655)`. `Address =
-/// bob.example.com` (no port) → `("bob.example.com", 655)`
-/// (`net_setup.c:789` default).
+/// bob.example.com` (no port) → `("bob.example.com", 655)` (default).
 ///
 /// Unparseable lines (bad port) warn-and-skip.
 #[must_use]
@@ -741,8 +722,8 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u1
 
     let mut addrs = Vec::new();
     for e in cfg.lookup("Address") {
-        // C `address_cache.c:157-159`: `get_config_string(cfg,
-        // &address); port = strchr(address, ' ')` — same `host port`
+        // `get_config_string(cfg, &address); port = strchr(address,
+        // ' ')` — same `host port`
         // shape as everywhere else in tinc. Missing port → default
         // 655 (`:165-166` `if(!port) port = "655"`).
         let s = e.get_str();
@@ -784,8 +765,8 @@ mod tests {
     }
 
     /// `apply_dial_sockopts` is warn-only: bad interface doesn't
-    /// panic, doesn't error. C `:623` discards the return. The
-    /// socket survives (we'd `connect()` next).
+    /// panic, doesn't error. The socket survives (we'd `connect()`
+    /// next).
     #[test]
     fn dial_sockopts_bad_iface_is_warn_only() {
         let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
@@ -821,9 +802,8 @@ mod tests {
         assert_eq!(getsockopt(&sock.as_fd(), sockopt::Mark).unwrap(), 0x1234);
     }
 
-    /// `retry_outgoing` arithmetic (`net_socket.c:406-410`): +5 each
-    /// time, capped at `maxtimeout`. C `:406`: `outgoing->timeout
-    /// += 5`. C `:408-410`: `if(> maxtimeout) = maxtimeout`.
+    /// `retry_outgoing` arithmetic: +5 each time, capped at
+    /// `maxtimeout`.
     #[test]
     fn bump_timeout_backoff() {
         let mut o = Outgoing {
@@ -860,7 +840,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `Address` without a port defaults to 655 (`net_setup.c:789`).
+    /// `Address` without a port defaults to 655.
     #[test]
     fn resolve_default_port() {
         let tmp = std::env::temp_dir().join(format!(
@@ -950,7 +930,7 @@ mod tests {
             Some(ProxyConfig::Exec { .. })
         ));
 
-        // SOCKS4: host port [user]. C `net_setup.c:326-378`.
+        // SOCKS4: host port [user].
         match parse_proxy_config("socks4 10.0.0.1 1080").unwrap() {
             Some(ProxyConfig::Socks4 { host, port, user }) => {
                 assert_eq!(host, "10.0.0.1");
@@ -999,13 +979,13 @@ mod tests {
             other => panic!("expected Http, got {other:?}"),
         }
 
-        // Missing host/port → error. C `:339-343`.
+        // Missing host/port → error.
         assert!(parse_proxy_config("socks4").is_err());
         assert!(parse_proxy_config("socks5 localhost").is_err());
         assert!(parse_proxy_config("socks5 localhost notaport").is_err());
         assert!(parse_proxy_config("http localhost").is_err());
 
-        // socks4a: faithfully unimplemented. C `proxy.c:80`.
+        // socks4a: faithfully unimplemented upstream.
         assert!(parse_proxy_config("socks4a localhost 1080").is_err());
 
         // unknown.

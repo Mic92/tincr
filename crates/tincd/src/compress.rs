@@ -1,6 +1,6 @@
-//! Packet compression (`net_packet.c:240-400`).
+//! Packet compression.
 //!
-//! Per-packet, hot path. The C uses static workspace buffers
+//! Per-packet, hot path. Upstream uses static workspace buffers
 //! (`lzo_wrkmem`, `lz4_stream`, `z_stream`); we put them in a struct
 //! the daemon owns. Compression level is per-REMOTE-peer (their
 //! `Compression = N` config, sent in `ADD_EDGE`), so the struct must
@@ -132,9 +132,7 @@ impl Compressor {
         Self::default()
     }
 
-    /// `compress_packet` (`net_packet.c:291-322`).
-    ///
-    /// Returns `None` on backend failure (lib error, or backend
+    /// Compress a packet. Returns `None` on backend failure (lib error, or backend
     /// stubbed). C returns 0; the caller compares `complen <
     /// origlen` and falls back to uncompressed when compression
     /// didn't help. We don't compare here — that's the caller's job —
@@ -179,9 +177,7 @@ impl Compressor {
         }
     }
 
-    /// `uncompress_packet` (`net_packet.c:325-400`).
-    ///
-    /// `level` is the SENDER's level (we know it from their
+    /// Decompress a packet. `level` is the SENDER's level (we know it from their
     /// `ADD_EDGE`). `max_len` is the dest buffer cap — for LZ4 it's
     /// the only sizing hint (C's `LZ4_decompress_safe(src, dest,
     /// srclen, destlen)` has no length prefix); for zlib it's the
@@ -194,7 +190,6 @@ impl Compressor {
     pub fn decompress(&mut self, src: &[u8], level: Level, max_len: usize) -> Option<Vec<u8>> {
         match level {
             Level::None => {
-                // C: `if(dest_len >= len) memcpy(...) else return 0`.
                 if src.len() <= max_len {
                     Some(src.to_vec())
                 } else {
@@ -211,8 +206,7 @@ impl Compressor {
 
             Level::LzoLo | Level::LzoHi => {
                 // Same _safe decompressor for both: lzo1x_1 and
-                // lzo1x_999 share a wire format. C `net_packet.c:359`
-                // does the same — one `lzo1x_decompress_safe` call.
+                // lzo1x_999 share a wire format.
                 lzo::ensure_init();
                 lzo::decompress_safe(src, max_len)
             }
@@ -360,7 +354,7 @@ mod lzo {
         });
     }
 
-    /// `lzo1x_1_compress` (`net_packet.c:264`). Worst-case output is
+    /// `lzo1x_1_compress`. Worst-case output is
     /// `src_len + src_len/16 + 64 + 3` (LZO docs). Never fails when
     /// the dest buffer is sized to that bound — but we still gate on
     /// `LZO_E_OK` for paranoia.
@@ -390,8 +384,7 @@ mod lzo {
         }
     }
 
-    /// `lzo1x_decompress_safe` (`net_packet.c:359`). The `_safe`
-    /// variant bounds-checks; the non-safe one trusts input lengths.
+    /// `lzo1x_decompress_safe`. The `_safe` variant bounds-checks; the non-safe one trusts input lengths.
     /// Ours come from the wire — MUST use `_safe`.
     pub fn decompress_safe(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
         let mut out = vec![0u8; max_len];
@@ -453,7 +446,6 @@ mod tests {
 
     #[test]
     fn none_decompress_respects_max_len() {
-        // C: `if(dest_len >= len) ... else return 0`.
         let mut c = Compressor::new();
         let src = b"hello world";
         assert!(c.decompress(src, Level::None, 5).is_none());

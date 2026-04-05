@@ -52,8 +52,8 @@ pub struct LineBuf {
 }
 
 impl LineBuf {
-    /// `buffer_add` (`buffer.c:40-43`). Compacts if doing so avoids
-    /// a realloc (simpler than C's `offset/7 > len/8` heuristic).
+    /// Compacts if doing so avoids a realloc (simpler than the
+    /// `offset/7 > len/8` heuristic).
     pub fn add(&mut self, bytes: &[u8]) {
         if self.offset > 0 && self.data.len() + bytes.len() > self.data.capacity() {
             self.data.drain(..self.offset);
@@ -65,9 +65,8 @@ impl LineBuf {
     /// `buffer_readline`. Range indexes `bytes_raw()`; stays valid
     /// until next `add`/`consume`/`read_line`.
     ///
-    /// NO reset-on-empty here (unlike C `buffer.c:71-74`): the
-    /// returned range would be into a cleared buffer. C's pointer
-    /// stays valid because reset doesn't free `data`. Reset lives in
+    /// NO reset-on-empty here: the returned range would be into a
+    /// cleared buffer. Reset lives in
     /// `add()`/`consume()` instead.
     pub fn read_line(&mut self) -> Option<Range<usize>> {
         let live = &self.data[self.offset..];
@@ -78,8 +77,8 @@ impl LineBuf {
         Some(start..end)
     }
 
-    /// `buffer_read(buffer, n)` (`buffer.c:88-94`). Exact-N read.
-    /// Used for the SOCKS reply (binary, fixed-length, not
+    /// `buffer_read(buffer, n)`. Exact-N read. Used for the SOCKS
+    /// reply (binary, fixed-length, not
     /// line-terminated). Same range-validity contract as `read_line`.
     pub fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
         if self.live_len() < n {
@@ -111,7 +110,7 @@ impl LineBuf {
         &self.data[self.offset..]
     }
 
-    /// Advance the cursor. C `net_socket.c:507` (after partial `send()`).
+    /// Advance the cursor (after partial `send()`).
     pub fn consume(&mut self, n: usize) {
         self.offset += n;
         if self.offset >= self.data.len() {
@@ -134,10 +133,10 @@ impl LineBuf {
 
 // Connection
 
-/// `connection_t` (`connection.h:86-127`).
-// `struct_excessive_bools`: C `connection_status_t` is a packed
-// bitfield (`connection.h:38-56`). The bits are independent (a conn
-// is active AND pinged in steady state); a state-enum doesn't fit.
+/// `connection_t`.
+// `struct_excessive_bools`: `connection_status_t` is a packed
+// bitfield. The bits are independent (a conn is active AND pinged
+// in steady state); a state-enum doesn't fit.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Connection {
     fd: OwnedFd,
@@ -147,14 +146,14 @@ pub struct Connection {
     pub allow_request: Option<Request>,
     /// `c->status.control`.
     pub control: bool,
-    /// `c->status.pcap` (`connection.h:50`, bit 10). Set by `REQ_PCAP`
-    /// (`control.c:129`); read by `send_pcap` (`route.c:1113`).
+    /// `c->status.pcap` (bit 10). Set by `REQ_PCAP`; read by
+    /// `send_pcap`.
     pub pcap: bool,
-    /// `c->outmaclength` repurposed (`control.c:128`). Legacy MAC length
-    /// field reused as pcap snaplen — pcap subscribers don't use legacy
-    /// crypto so the field was free. 0 = full packet (`route.c:1120`:
-    /// `if(c->outmaclength && c->outmaclength < len)`). C is `int`; we
-    /// use u16: MTU is 1518, snaplen > that captures everything anyway.
+    /// `c->outmaclength` repurposed. Legacy MAC length field reused
+    /// as pcap snaplen — pcap subscribers don't use legacy crypto so
+    /// the field was free. 0 = full packet (`if(c->outmaclength &&
+    /// c->outmaclength < len)`). We use u16: MTU is 1518, snaplen >
+    /// that captures everything anyway.
     pub pcap_snaplen: u16,
     /// `c->status.invitation`. When `Some`, SPTPS records dispatch via
     /// `dispatch_invitation_outputs` (raw bytes, not request lines).
@@ -163,10 +162,9 @@ pub struct Connection {
     pub name: String,
     /// `c->hostname`. Set at accept; never changes.
     pub hostname: String,
-    /// `c->last_ping_time`. Control conns get +1h (`protocol_auth.c:328`).
+    /// `c->last_ping_time`. Control conns get +1h.
     pub last_ping_time: Instant,
-    /// `c->protocol_minor`. `>= 2` means SPTPS; `< 2` is rejected
-    /// (`protocol_auth.c:443-447`).
+    /// `c->protocol_minor`. `>= 2` means SPTPS; `< 2` is rejected.
     pub protocol_minor: u8,
     /// `c->ecdsa`. Peer's public key, loaded by `id_h`.
     pub ecdsa: Option<[u8; PUBLIC_LEN]>,
@@ -174,16 +172,16 @@ pub struct Connection {
     pub sptps: Option<Box<Sptps>>,
     /// `c->options` (`connection.h:32-36`). Top byte is `PROT_MINOR`.
     pub options: crate::proto::ConnOptions,
-    /// `c->estimated_weight`. RTT ms (`protocol_auth.c:840`). i32: wire `%d`.
+    /// `c->estimated_weight`. RTT ms. i32: wire `%d`.
     pub estimated_weight: i32,
-    /// `c->start` (`protocol_auth.c:94`). Set at construct (~μs earlier
-    /// than C's `send_id`-time).
+    /// `c->start`. Set at construct (~μs earlier than upstream's
+    /// `send_id`-time).
     pub start: Instant,
     /// `c->address` (`connection.h:90`). `None` for unix-socket control.
     pub address: Option<SocketAddr>,
-    /// `c->edge != NULL`. The "past ACK" mark `broadcast_meta` keys on
-    /// (`meta.c:115`). C never sets `connection.h:40` `unused_active`;
-    /// the edge pointer-as-bool IS the check.
+    /// `c->edge != NULL`. The "past ACK" mark `broadcast_meta` keys
+    /// on. Upstream never sets `unused_active`; the edge
+    /// pointer-as-bool IS the check.
     pub active: bool,
     /// `c->status.pinged` (`connection.h:38`, bit 0).
     pub pinged: bool,
@@ -192,31 +190,31 @@ pub struct Connection {
     pub connecting: bool,
     /// `c->outgoing` (`connection.h:92`). `KeyData` to avoid daemon dep.
     pub outgoing: Option<slotmap::KeyData>,
-    /// `c->tcplen` (`connection.h:87`). After `PACKET 17 <len>`, the next
-    /// record is a raw VPN-packet blob (`meta.c:143-151`). We don't SEND
-    /// TCP probes but a C peer does (found by cross-impl tests).
+    /// `c->tcplen`. After `PACKET 17 <len>`, the next record is a
+    /// raw VPN-packet blob. We don't SEND TCP probes but a C peer
+    /// does (found by cross-impl tests).
     pub tcplen: u16,
     /// `c->sptpslen` (`connection.h:88`). After `SPTPS_PACKET 21 <len>`,
-    /// the next `sptpslen` RAW bytes (NOT SPTPS-framed, `send_meta_raw`)
-    /// are an encrypted UDP wireframe. C `meta.c:203-217` checks this
+    /// the next `sptpslen` RAW bytes (NOT SPTPS-framed,
+    /// `send_meta_raw`) are an encrypted UDP wireframe. Checked
     /// FIRST (outer loop); `tcplen` is inside the SPTPS callback.
     pub sptpslen: u16,
-    /// `sptpslen` accumulator. C reuses `c->inbuf` (`meta.c:205-207`);
-    /// separate Vec keeps the "inbuf is plaintext-only" invariant.
+    /// `sptpslen` accumulator. Upstream reuses `c->inbuf`; separate
+    /// Vec keeps the "inbuf is plaintext-only" invariant.
     pub sptps_buf: Vec<u8>,
 
-    // ─── Per-host config extracted at id_h. C retains the whole
-    // `c->config_tree` (`protocol_auth.c:424` through `:1019`); we
-    // extract just the keys send_ack/ack_h read. None = absent.
-    /// `hosts/NAME` `IndirectData` (`protocol_auth.c:844`).
+    // ─── Per-host config extracted at id_h. Upstream retains the
+    // whole `c->config_tree`; we extract just the keys send_ack/ack_h
+    // read. None = absent.
+    /// `hosts/NAME` `IndirectData`.
     pub host_indirect: Option<bool>,
-    /// `hosts/NAME` `TCPOnly` (`protocol_auth.c:848`).
+    /// `hosts/NAME` `TCPOnly`.
     pub host_tcponly: Option<bool>,
-    /// `hosts/NAME` `ClampMSS` (`protocol_auth.c:857`, `:1011`).
+    /// `hosts/NAME` `ClampMSS`.
     pub host_clamp_mss: Option<bool>,
-    /// `hosts/NAME` `Weight` (`protocol_auth.c:863`).
+    /// `hosts/NAME` `Weight`.
     pub host_weight: Option<i32>,
-    /// PMTU clamp (`protocol_auth.c:1003-1009`). MIN of per-host
+    /// PMTU clamp. MIN of per-host
     /// `PMTU` and global tinc.conf `PMTU` — both clamp, both `&& mtu
     /// < n->mtu`. `None` = neither set. Named `cap` not `host_` since
     /// the value may come from the global config.
@@ -236,17 +234,17 @@ pub struct Connection {
 #[derive(Debug)]
 pub enum SptpsEvent {
     Record(Output),
-    /// `SPTPS_PACKET` blob (`dst[6]‖src[6]‖ct`). C `net_packet.c:616-680`.
+    /// `SPTPS_PACKET` blob (`dst[6]‖src[6]‖ct`).
     Blob(Vec<u8>),
 }
 
-/// C `receive_meta` returns `bool`; we disambiguate "would block" vs
+/// `receive_meta` returns `bool`; we disambiguate "would block" vs
 /// "drop me" and add the SPTPS-mode arm.
 #[derive(Debug)]
 pub enum FeedResult {
     /// Plaintext buffered; drain `read_line`. Pre-SPTPS only.
     Data,
-    /// `EWOULDBLOCK` — spurious wakeup. C `meta.c:192`.
+    /// `EWOULDBLOCK` — spurious wakeup.
     WouldBlock,
     /// EOF, error, or SPTPS decrypt fail.
     Dead,
@@ -255,7 +253,7 @@ pub enum FeedResult {
 }
 
 impl Connection {
-    /// `handle_new_unix_connection` (`net_socket.c:798-811`).
+    /// `handle_new_unix_connection`.
     #[must_use]
     pub fn new_control(fd: OwnedFd, now: Instant) -> Self {
         Self {
@@ -293,7 +291,7 @@ impl Connection {
         }
     }
 
-    /// `handle_new_meta_connection` (`net_socket.c:758-776`).
+    /// `handle_new_meta_connection`.
     #[must_use]
     pub fn new_meta(fd: OwnedFd, hostname: String, address: SocketAddr, now: Instant) -> Self {
         Self {
@@ -331,8 +329,8 @@ impl Connection {
         }
     }
 
-    /// `do_outgoing_connection` (`net_socket.c:578-655`). `name` is the
-    /// `ConnectTo` value (`:653`); `id_h:385-391` checks the peer sent it.
+    /// `do_outgoing_connection`. `name` is the `ConnectTo` value;
+    /// `id_h` checks the peer sent it.
     #[must_use]
     pub fn new_outgoing(
         fd: OwnedFd,
@@ -388,9 +386,9 @@ impl Connection {
         &self.fd
     }
 
-    /// `c->status.value` (`connection.c:171`). GCC packs LSB-first;
-    /// declaration-order bool N → bit N (`connection.h:38-56`):
-    /// 0=pinged, 1=unused_active, 2=connecting, 9=control.
+    /// `c->status.value`. GCC packs LSB-first; declaration-order
+    /// bool N → bit N: 0=pinged, 1=unused_active, 2=connecting,
+    /// 9=control.
     #[must_use]
     pub fn status_value(&self) -> u32 {
         let mut v = 0u32;
@@ -418,16 +416,15 @@ impl Connection {
         v
     }
 
-    /// `receive_meta` recv-and-buffer half (`meta.c:185`).
+    /// `receive_meta` recv-and-buffer half.
     ///
     /// `rng`: only touched on SPTPS rekey (HANDSHAKE → `send_kex`).
     #[allow(clippy::missing_panics_doc)] // expect on take after is_some
     pub fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
         let mut stack = [0u8; MAXBUFSIZE];
 
-        // C `meta.c:180-183`: cap shrinks as inbuf fills. SPTPS mode
-        // doesn't touch inbuf so cap stays full (same in C: `:224`
-        // path skips `buffer_add(&c->inbuf)`).
+        // Cap shrinks as inbuf fills. SPTPS mode doesn't touch inbuf
+        // so cap stays full (the SPTPS path skips `buffer_add`).
         let cap = if self.sptps.is_some() {
             MAXBUFSIZE
         } else {
@@ -444,7 +441,6 @@ impl Connection {
         // `UnixStream::from(fd)` would take ownership (double-close).
         let n = match read(self.fd.as_raw_fd(), buf) {
             Ok(0) => {
-                // C `meta.c:188-190`.
                 log::info!(target: "tincd::conn",
                            "Connection closed by {}", self.name);
                 return FeedResult::Dead;
@@ -462,10 +458,10 @@ impl Connection {
         };
         let chunk = &buf[..n];
 
-        // C `meta.c:224`: `if(c->protocol_minor >= 2)`. `sptps.is_some()`
-        // is the same condition (`id_h:455` sets both together).
+        // `if(c->protocol_minor >= 2)`. `sptps.is_some()` is the
+        // same condition (`id_h` sets both together).
         if self.sptps.is_some() {
-            // C do-while at `meta.c:200-231`. Inlined (NOT delegated to
+            // do-while. Inlined (NOT delegated to
             // feed_sptps): the same chunk has [SPTPS-framed "21 LEN" |
             // raw blob], and feed_sptps would eat the whole chunk before
             // sptpslen could be set. C dispatches INSIDE receive()
@@ -477,7 +473,7 @@ impl Connection {
             let mut events = Vec::new();
             let mut off = 0;
             'outer: while off < chunk.len() {
-                // C `meta.c:203-217`: sptpslen check FIRST.
+                // sptpslen check FIRST.
                 if self.sptpslen > 0 {
                     let want = usize::from(self.sptpslen) - self.sptps_buf.len();
                     let take = want.min(chunk.len() - off);
@@ -491,7 +487,7 @@ impl Connection {
                     self.sptpslen = 0;
                     continue;
                 }
-                // C `meta.c:225-231`: one record.
+                // One record.
                 match sptps.receive(&chunk[off..], rng) {
                     Ok((0, _)) => {
                         // Unreachable in stream mode; defensive.
@@ -515,7 +511,7 @@ impl Connection {
                                         .ok()
                                         .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
                                 {
-                                    self.sptpslen = pkt.len; // C protocol_misc.c:148
+                                    self.sptpslen = pkt.len;
                                     continue 'outer;
                                 }
                             }
@@ -542,8 +538,7 @@ impl Connection {
         FeedResult::Data
     }
 
-    /// SPTPS receive-loop (`meta.c:200-313`). Factored out for the
-    /// `take_rest` re-feed (post-id_h mode-switch).
+    /// SPTPS receive-loop. Factored out for the `take_rest` re-feed (post-id_h mode-switch).
     pub(crate) fn feed_sptps(
         sptps: &mut Sptps,
         chunk: &[u8],
@@ -569,7 +564,7 @@ impl Connection {
                     off += consumed;
                 }
                 Err(e) => {
-                    // C `meta.c:227`: `if(!len) return false`.
+                    // `if(!len) return false`.
                     let level = match e {
                         // Key mismatch or tampering → ERR; rest → INFO.
                         SptpsError::DecryptFailed | SptpsError::BadSig => log::Level::Error,
@@ -584,7 +579,7 @@ impl Connection {
         FeedResult::Sptps(events)
     }
 
-    /// `send_meta_sptps` (`meta.c:41-54`). Queue already-framed bytes.
+    /// `send_meta_sptps`. Queue already-framed bytes.
     /// `bool` return is the io_set signal.
     pub fn send_raw(&mut self, bytes: &[u8]) -> bool {
         let was_empty = self.outbuf.is_empty();
@@ -616,10 +611,10 @@ impl Connection {
         was_empty
     }
 
-    /// `send_request` (`protocol.c:97-132`) → `send_meta` (`meta.c:55-96`).
-    /// Plaintext: straight into outbuf. SPTPS: `sptps_send_record(.., 0,
-    /// line, len)` (`meta.c:65-67`). The `\n` is redundant under SPTPS
-    /// framing but C sends it (`send_request:120`); `meta.c:156` strips.
+    /// `send_request` → `send_meta`. Plaintext: straight into
+    /// outbuf. SPTPS: `sptps_send_record(.., 0, line, len)`. The
+    /// `\n` is redundant under SPTPS framing but upstream sends it;
+    /// the receive side strips.
     ///
     /// Returns `true` if outbuf went empty→nonempty.
     ///
@@ -630,10 +625,10 @@ impl Connection {
     pub fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
         let was_empty = self.outbuf.is_empty();
 
-        // C `meta.c:65`: `if(c->protocol_minor >= 2)`. ORDERING: `id_h`
-        // calls `send()` BEFORE `Sptps::start` (proto.rs), so `sptps` is
-        // None for the id-reply line. C achieves the same via
-        // `protocol.c:126-130` routing ID through `send_meta_raw`.
+        // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
+        // `send()` BEFORE `Sptps::start` (proto.rs), so `sptps` is
+        // None for the id-reply line. Upstream achieves the same by
+        // routing ID through `send_meta_raw`.
         if let Some(sptps) = self.sptps.as_deref_mut() {
             let mut line = Vec::with_capacity(64);
             write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
@@ -655,7 +650,7 @@ impl Connection {
         was_empty
     }
 
-    /// `handle_meta_write` (`net_socket.c:486-511`).
+    /// `handle_meta_write`.
     /// `Ok(true)` → outbuf empty, drop `IO_WRITE`. `Ok(false)` → more
     /// to send. `Err` → dead.
     ///
@@ -667,7 +662,7 @@ impl Connection {
         }
 
         let live = self.outbuf.live();
-        // `send(2)` (C `net_socket.c:491`): ENOTSOCK is a useful sanity check.
+        // `send(2)`: ENOTSOCK is a useful sanity check.
         let n = match send(self.fd.as_raw_fd(), live, MsgFlags::MSG_NOSIGNAL) {
             Ok(n) => n,
             Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
@@ -684,8 +679,7 @@ impl Connection {
     }
 
     /// Send each row, then a `"{18} {req}"` terminator (the bare-
-    /// header line that signals end-of-dump in the C control proto:
-    /// `subnet.c:406`, `node.c:221`, `edge.c:135`, `connection.c:173`).
+    /// header line that signals end-of-dump in the control proto).
     /// Returns `true` if outbuf went empty→nonempty across the batch.
     /// `rows` is owned-Vec because every callsite collects up front
     /// to drop the `&self` borrow before re-fetching `&mut conn`.
@@ -749,7 +743,7 @@ mod tests {
         assert!(b.is_empty());
     }
 
-    /// Line then partial: C `receive_meta`'s inner loop hits this
+    /// Line then partial: `receive_meta`'s inner loop hits this
     /// (recv brings "REQ\nPAR", dispatches REQ, PAR stays buffered).
     #[test]
     fn linebuf_line_then_partial() {
@@ -806,7 +800,7 @@ mod tests {
         assert_eq!(&b.bytes_raw()[r], b"0123456789");
     }
 
-    /// C `buffer_read(buf, 0)`: returns ptr, advances 0.
+    /// `buffer_read(buf, 0)`: returns ptr, advances 0.
     #[test]
     fn linebuf_read_n_zero() {
         let mut b = LineBuf::default();
@@ -899,7 +893,6 @@ mod tests {
         assert_eq!(c.outbuf.live(), b"0 a 17.7\n4 0 99\n");
     }
 
-    /// `net_socket.c:811`.
     #[test]
     fn new_control_defaults() {
         let c = Connection::test_with_fd(devnull());
@@ -1006,8 +999,8 @@ mod tests {
         // NoRng not panicked → sptps.receive not called.
     }
 
-    /// Two records in one chunk → both processed (`meta.c:200-313`
-    /// do-while). Single `receive()` call would strand the second.
+    /// Two records in one chunk → both processed (do-while). Single
+    /// `receive()` call would strand the second.
     #[test]
     fn feed_sptps_two_records_one_chunk() {
         use tinc_crypto::sign::SigningKey;
@@ -1121,7 +1114,7 @@ mod tests {
         }
     }
 
-    /// Decrypt fail → Dead. C `meta.c:227`.
+    /// Decrypt fail → Dead.
     #[test]
     fn feed_sptps_decrypt_fail_is_dead() {
         use tinc_crypto::sign::SigningKey;
@@ -1145,7 +1138,7 @@ mod tests {
         assert!(matches!(r, FeedResult::Dead), "expected Dead, got {r:?}");
     }
 
-    // ─── feed() sptpslen mechanism (`meta.c:203-217`)
+    // ─── feed() sptpslen mechanism
     // Tested via socketpair: write chunk to one end, feed() reads other.
 
     /// Handshaked pair with bob as a Connection's sptps.
@@ -1241,7 +1234,7 @@ mod tests {
         assert!(conn.sptps_buf.is_empty());
     }
 
-    /// Blob spans two recv()s. C `meta.c:209-211`.
+    /// Blob spans two recv()s.
     #[test]
     fn feed_sptpslen_straddle() {
         let (mut conn, _alice, wr) = sptps_conn_pair();

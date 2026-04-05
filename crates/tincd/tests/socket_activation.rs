@@ -47,9 +47,9 @@ fn activator() -> Option<std::path::PathBuf> {
 }
 
 /// Minimal config. Port = 0 here is DELIBERATE noise: the activation
-/// path must BYPASS it (`net_setup.c:1107` — the `.socket` unit IS
-/// the bind config). The pidfile-port assertion below proves the
-/// adopted port won, not this one.
+/// path must BYPASS it (the `.socket` unit IS the bind config). The
+/// pidfile-port assertion below proves the adopted port won, not
+/// this one.
 fn write_config(confbase: &std::path::Path) {
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
@@ -70,9 +70,9 @@ fn write_config(confbase: &std::path::Path) {
 /// the activator's port (not the config's `Port = 0`), and a TCP
 /// connect against that port succeeds.
 ///
-/// Note no `-D` flag: socket activation should suppress detach
-/// itself (C `tincd.c:579`). If our `LISTEN_PID` gate works, the
-/// child stays foreground without us asking.
+/// Note no `-D` flag: socket activation should suppress detach by
+/// itself. If our `LISTEN_PID` gate works, the child stays
+/// foreground without us asking.
 #[test]
 fn socket_activation_adopts_tcp_fd() {
     let Some(activator) = activator() else {
@@ -136,9 +136,9 @@ fn socket_activation_adopts_tcp_fd() {
     );
 
     // Stronger check: pidfile addr line should mention the
-    // activator's port. C `control.c:155`: pidfile line 1 =
-    // `"PID COOKIE HOST port PORT"`. The HOST/PORT come from
-    // `getsockname` on listeners[0] — which is the adopted fd.
+    // activator's port. Pidfile line 1 = `"PID COOKIE HOST port
+    // PORT"`. The HOST/PORT come from `getsockname` on listeners[0]
+    // — which is the adopted fd.
     // If we'd fallen through to `build_listeners`, Port = 0 in
     // the config would give us an ephemeral port ≠ this one.
     let pidfile_contents = std::fs::read_to_string(&pidfile).unwrap();

@@ -44,15 +44,14 @@ use socket2::{SockAddr, Socket};
 pub mod linux;
 
 /// `UDP_MAX_SEGMENTS` (`include/linux/udp.h:124`). The kernel rejects
-/// `UDP_SEGMENT` sends with more segments than this (`EINVAL`,
-/// `udp.c:1149`). The daemon's `DEVICE_DRAIN_CAP=64` is well under;
+/// `UDP_SEGMENT` sends with more segments than this (`EINVAL`).
+/// The daemon's `DEVICE_DRAIN_CAP=64` is well under;
 /// this is here for the `can_coalesce` check so a future cap bump
 /// doesn't silently overflow the kernel limit.
 pub const UDP_MAX_SEGMENTS: u16 = 128;
 
-/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE`
-/// (`udp.c:1292`) BEFORE the GSO branch even runs — this is the UDP
-/// datagram-length field cap, not a path-MTU thing. The cmsg parse
+/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` BEFORE the
+/// GSO branch even runs — this is the UDP datagram-length field cap, not a path-MTU thing. The cmsg parse
 /// happens AFTER, so the kernel never learns we wanted GSO; it just
 /// sees a too-big plain send. The daemon's `EMSGSIZE` handler then
 /// shrinks PMTU thinking it's a path-MTU failure → death spiral.
@@ -132,7 +131,7 @@ pub trait UdpEgress: Send {
 ///
 /// Frames are appended at `[count*stride .. count*stride + len]`,
 /// NOT at fixed STRIDE-sized slots. `UDP_SEGMENT` splits at
-/// `gso_size` boundaries (`udp_offload.c:480`); a gap between frames
+/// `gso_size` boundaries; a gap between frames
 /// would land in the previous datagram's tail. The buffer IS the
 /// wire layout.
 ///
@@ -222,8 +221,8 @@ impl TxBatch {
         self.sock == sock
             && self.count < UDP_MAX_SEGMENTS
             // Total bytes after this stage ≤ the UDP datagram cap.
-            // `udp_sendmsg` (`udp.c:1292`) rejects `len > 0xFFFF`
-            // BEFORE the GSO cmsg parse — it sees the whole iovec as
+            // `udp_sendmsg` rejects `len > 0xFFFF` BEFORE the GSO
+            // cmsg parse — it sees the whole iovec as
             // one too-big plain send. At MTU≈1500 + 33 overhead this
             // caps batches at ~43 frames; the "43 same-MSS segments"
             // from `mt-kernel-findings.md` fit exactly (not a
@@ -572,8 +571,8 @@ mod tests {
 
     /// `BATCH_MAX_BYTES` cap: a 44th frame at stride=1519 (MTU+33,
     /// the SPTPS on-wire size for a full-MSS inner-TCP segment) does
-    /// NOT coalesce — 43×1519 = 65317 fits the UDP datagram cap
-    /// (`udp.c:1292`), 44×1519 = 66836 doesn't. The kernel rejects
+    /// NOT coalesce — 43×1519 = 65317 fits the UDP datagram cap,
+    /// 44×1519 = 66836 doesn't. The kernel rejects
     /// the latter with `EMSGSIZE` BEFORE the GSO cmsg parse, the
     /// daemon's PMTU machinery shrinks `maxmtu` thinking it's a
     /// path-MTU failure, and the next batch goes TCP. Regression

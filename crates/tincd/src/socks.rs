@@ -13,7 +13,7 @@
 
 use std::net::SocketAddr;
 
-// ── SOCKS4 wire constants (proxy.c:13-16) ──────────────────────────
+// ── SOCKS4 wire constants ──────────────────────────────────────────
 const SOCKS4_VERSION: u8 = 4;
 const SOCKS4_CMD_CONN: u8 = 1;
 const SOCKS4_REPLY_VERSION: u8 = 0;
@@ -21,7 +21,7 @@ const SOCKS4_STATUS_OK: u8 = 0x5A;
 /// `sizeof(socks4_response_t)` (`proxy.h:18-23`): ver+status+port+ip.
 const SOCKS4_RESPONSE_LEN: usize = 8;
 
-// ── SOCKS5 wire constants (proxy.c:18-30) ──────────────────────────
+// ── SOCKS5 wire constants ──────────────────────────────────────────
 const SOCKS5_VERSION: u8 = 5;
 const SOCKS5_AUTH_METHOD_NONE: u8 = 0;
 const SOCKS5_AUTH_METHOD_PASSWORD: u8 = 2;
@@ -50,8 +50,8 @@ pub enum ProxyType {
     Socks5,
 }
 
-/// `proxyuser`/`proxypass` globals. SOCKS4: user only. SOCKS5: both
-/// for password auth; `pass=None` → anonymous (`proxy.c:192`).
+/// `proxyuser`/`proxypass`. SOCKS4: user only. SOCKS5: both for
+/// password auth; `pass=None` → anonymous.
 #[derive(Debug, Clone)]
 pub struct Creds {
     pub user: String,
@@ -59,14 +59,13 @@ pub struct Creds {
     pub pass: Option<String>,
 }
 
-/// `create_socks_req` (`proxy.c:278-285`).
-/// Returns `(request_bytes, expected_response_len)`.
+/// `create_socks_req`. Returns `(request_bytes, expected_response_len)`.
 ///
 /// # Errors
-/// - `Socks4Ipv6`: `proxy.c:157`.
-/// - `CredTooLong`: **C-is-WRONG #9**: C truncates
-///   `size_t` userlen to u8 (`*auth++ = userlen`); 256B username
-///   sends `[00]`, proxy reads 0 bytes. RFC 1929 says 1..255. STRICTER.
+/// - `Socks4Ipv6`: SOCKS4 has no v6 addressing.
+/// - `CredTooLong`: STRICTER than upstream, which truncates `size_t`
+///   userlen to u8; a 256B username would send `[00]` and the proxy
+///   would read 0 bytes. RFC 1929 says 1..255.
 pub fn build_request(
     proxy: ProxyType,
     target: SocketAddr,
@@ -78,9 +77,7 @@ pub fn build_request(
     }
 }
 
-/// `create_socks4_req` (`proxy.c:156-172`).
 fn build_socks4(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, usize), BuildError> {
-    // :157-160
     let SocketAddr::V4(v4) = target else {
         return Err(BuildError::Socks4Ipv6);
     };
@@ -100,12 +97,11 @@ fn build_socks4(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
     Ok((buf, SOCKS4_RESPONSE_LEN)) // :172
 }
 
-/// `create_socks5_req` (`proxy.c:175-237`).
 fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, usize), BuildError> {
-    // :192: password auth needs BOTH user AND pass
+    // password auth needs BOTH user AND pass
     let password_auth = creds.and_then(|c| c.pass.as_ref().map(|p| (c.user.as_str(), p.as_str())));
 
-    // C-is-WRONG #9: :201,206 narrow size_t→u8. We check (RFC 1929).
+    // STRICTER: upstream narrows size_t→u8; we check (RFC 1929).
     if let Some((user, pass)) = password_auth
         && (user.len() > 255 || pass.len() > 255)
     {
@@ -163,7 +159,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
     Ok((buf, resplen))
 }
 
-/// Response from a SOCKS proxy. `check_socks_resp` (`proxy.c:145-152`).
+/// Response from a SOCKS proxy.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SocksResponse {
     /// `0x5A` (SOCKS4) or `0x00` (SOCKS5). Tunnel open.
@@ -174,9 +170,8 @@ pub enum SocksResponse {
     Malformed(&'static str),
 }
 
-/// `check_socks_resp` (`proxy.c:145-152`). Slice is exactly
-/// `expected_response_len`. `creds` unused: `:92-144` dispatches on
-/// server's choice byte (predictable since nmethods=1).
+/// Slice is exactly `expected_response_len`. `creds` unused:
+/// dispatches on server's choice byte (predictable since nmethods=1).
 #[must_use]
 pub fn check_response(proxy: ProxyType, _creds: Option<&Creds>, buf: &[u8]) -> SocksResponse {
     match proxy {
@@ -185,7 +180,6 @@ pub fn check_response(proxy: ProxyType, _creds: Option<&Creds>, buf: &[u8]) -> S
     }
 }
 
-/// `check_socks4_resp` (`proxy.c:45-58`).
 fn check_socks4(buf: &[u8]) -> SocksResponse {
     if buf.len() < SOCKS4_RESPONSE_LEN {
         return SocksResponse::Malformed("Received short response from proxy");
@@ -201,8 +195,7 @@ fn check_socks4(buf: &[u8]) -> SocksResponse {
     }
 }
 
-/// `check_socks5_resp` (`proxy.c:92-144`). Layout depends on server's
-/// auth choice (anon: no auth_status block).
+/// Layout depends on server's auth choice (anon: no auth_status block).
 fn check_socks5(buf: &[u8]) -> SocksResponse {
     if buf.len() < SOCKS5_SERVER_CHOICE_LEN {
         return SocksResponse::Malformed("Received short response from proxy");
@@ -246,8 +239,7 @@ fn check_socks5(buf: &[u8]) -> SocksResponse {
     }
 }
 
-/// `socks5_check_result` (`proxy.c:60-90`). Addr/port not validated
-/// (C doesn't either; addr_type is just for length check).
+/// Addr/port not validated (addr_type is just for length check).
 fn check_socks5_conn(buf: &[u8]) -> SocksResponse {
     // Caller checked len >= SOCKS5_CONN_RESP_LEN.
     let addr_type = buf[3];
@@ -280,9 +272,9 @@ fn check_socks5_conn(buf: &[u8]) -> SocksResponse {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BuildError {
-    /// `proxy.c:157`: SOCKS4 + IPv6.
+    /// SOCKS4 + IPv6.
     Socks4Ipv6,
-    /// Credential string > 255 bytes. STRICTER than C.
+    /// Credential string > 255 bytes. STRICTER than upstream.
     CredTooLong,
 }
 
@@ -376,7 +368,7 @@ mod tests {
 
     #[test]
     fn socks5_user_without_pass_is_anonymous() {
-        // proxy.c:192: both must be set.
+        // both must be set.
         let creds = Creds {
             user: "bob".into(),
             pass: None,
@@ -428,7 +420,7 @@ mod tests {
         assert_eq!(err, BuildError::CredTooLong);
     }
 
-    // ── SOCKS4 check (proxy.c:45-58) ───────────────────────────────
+    // ── SOCKS4 check ───────────────────────────────────────────────
 
     #[test]
     fn check_socks4_table() {
@@ -449,7 +441,7 @@ mod tests {
         }
     }
 
-    // ── SOCKS5 check (proxy.c:92-144) ──────────────────────────────
+    // ── SOCKS5 check ───────────────────────────────────────────────
     // `_creds` param unused (dispatch on server's choice byte), so all
     // rows pass `None`. The v6 row's 24B layout is asserted inline.
 
@@ -468,7 +460,7 @@ mod tests {
             ("anon granted",         &[0x05, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0],             Granted),
             ("password granted",     &[0x05, 0x02, 0x01, 0x00, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0], Granted),
             ("v6 addr in response",  v6_granted,                                                     Granted),
-            // Auth fail is VALID → Rejected, not Malformed (proxy.c:127-130).
+            // Auth fail is VALID → Rejected, not Malformed.
             ("auth rejected",        &[0x05, 0x02, 0x01, 0x01, 0x05, 0x00, 0x00, 0x01, 0,0,0,0,0,0], Rejected),
             ("auth method 0xff",     &[0x05, 0xff, 0,0,0,0,0,0,0,0,0,0],                             Rejected),
             ("conn rejected",        &[0x05, 0x00, 0x05, 0x01, 0x00, 0x01, 0,0,0,0,0,0],             Rejected),

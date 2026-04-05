@@ -1268,9 +1268,8 @@ fn real_tun_unreachable() {
     run_ip(&["link", "set", "tinc0", "up"]);
 
     // ─── THE PING ────────────────────────────────────────────────
-    // `-c 2`: send 2 echoes. Stay under the 3/sec rate limit
-    // (`route.c:130` `ratelimit(3)`); a 4th would silently time
-    // out instead of getting ICMP back.
+    // `-c 2`: send 2 echoes. Stay under the 3/sec ICMP rate limit;
+    // a 4th would silently time out instead of getting ICMP back.
     // `-W 2`: 2s per-packet timeout. The ICMP error is synchronous
     // (TUN write → kernel ICMP rcv is in-process); 2s is just CI
     // slack. WITHOUT our synth, ping would block for the full 2s

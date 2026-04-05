@@ -1,7 +1,8 @@
 //! `route.c`: the forwarding decision.
 //!
-//! C `route_ipv4`/`route_ipv6` call `send_packet()`/`route_..._
-//! unreachable()` directly. We return [`RouteResult`] and the daemon
+//! `route_ipv4`/`route_ipv6` call `send_packet()`/`route_..._
+//! unreachable()` directly upstream. We return [`RouteResult`] and
+//! the daemon
 //! dispatches — pure function of `(bytes, subnets, resolve)`.
 //! Config-gated post-route mutations live daemon-side.
 
@@ -12,7 +13,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::packet::{ETH_P_ARP, ETH_P_IP};
 use crate::subnet_tree::SubnetTree;
 
-// ── Wire constants (`route.c:56-59`, `ipv4.h`, `ipv6.h`) ──────────
+// ── Wire constants ─────────────────────────────────────────────────
 
 const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
@@ -24,8 +25,8 @@ const ETH_P_8021Q: u16 = 0x8100;
 // ICMPv4 (RFC 792, RFC 1122). `ipv4.h:35-63`.
 pub const ICMP_DEST_UNREACH: u8 = 3;
 pub const ICMP_NET_UNKNOWN: u8 = 6;
-/// Code 9 (admin prohibited). C uses for `directonly` (`route.c:680`)
-/// and `FMODE_OFF` (`:660`): route exists, we refuse to forward.
+/// Code 9 (admin prohibited). Used for `directonly` and `FMODE_OFF`:
+/// route exists, we refuse to forward.
 pub const ICMP_NET_ANO: u8 = 9;
 pub const ICMP_NET_UNREACH: u8 = 0;
 pub const ICMP_FRAG_NEEDED: u8 = 4;
@@ -37,13 +38,13 @@ pub const ICMP6_DST_UNREACH: u8 = 1;
 pub const ICMP6_DST_UNREACH_NOROUTE: u8 = 0;
 pub const ICMP6_DST_UNREACH_ADMIN: u8 = 1;
 pub const ICMP6_DST_UNREACH_ADDR: u8 = 3;
-/// RFC 4443 type 2. `route.c:780`: `len > MAX(via->mtu, 1294)` —
-/// 1294 = 1280 (v6 min MTU, RFC 8200) + 14 eth.
+/// RFC 4443 type 2. `len > MAX(via->mtu, 1294)` — 1294 = 1280 (v6
+/// min MTU, RFC 8200) + 14 eth.
 pub const ICMP6_PACKET_TOO_BIG: u8 = 2;
 pub const ICMP6_TIME_EXCEEDED: u8 = 3;
 pub const ICMP6_TIME_EXCEED_TRANSIT: u8 = 0;
 
-/// RFC 4861 §4.3. `route.c:710` diverts to `route_neighborsol`.
+/// RFC 4861 §4.3. Diverts to `route_neighborsol`.
 const ND_NEIGHBOR_SOLICIT: u8 = 135;
 
 const IPPROTO_ICMP: u8 = 1;
@@ -59,42 +60,39 @@ const IPPROTO_ICMPV6: u8 = 58;
 /// to `T`; `None` = unreachable.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteResult<T> {
-    /// `route.c:706` `send_packet(owner, ...)`. `to == myself` →
-    /// daemon writes to TUN (C `send_packet` special-cases same).
+    /// `send_packet(owner, ...)`. `to == myself` → daemon writes to
+    /// TUN (`send_packet` special-cases same).
     Forward { to: T },
 
-    /// `route.c:640,655,660,681,690` `route_ipv4_unreachable(...)`.
-    /// Daemon synthesises ICMP error (`route.c:121-215`).
+    /// `route_ipv4_unreachable(...)`. Daemon synthesises ICMP error.
     Unreachable { icmp_type: u8, icmp_code: u8 },
 
-    /// `route.c:1149,1154,1163`. Daemon logs + drops.
+    /// Daemon logs + drops.
     Unsupported { reason: &'static str },
 
-    /// `route.c:710-713`: ICMPv6 type 135. Daemon synthesises
-    /// Neighbor Advert (`route_neighborsol`, `:793-954`).
+    /// ICMPv6 type 135. Daemon synthesises Neighbor Advert
+    /// (`route_neighborsol`).
     NeighborSolicit,
 
-    /// `route.c:1042-1045` (`route_mac`): unknown dest MAC.
-    /// RMODE_SWITCH only (router uses `Unreachable` instead).
-    /// Daemon → `broadcast_packet` (`net_packet.c:1612-1660`).
+    /// `route_mac`: unknown dest MAC. RMODE_SWITCH only (router
+    /// uses `Unreachable` instead). Daemon → `broadcast_packet`.
     Broadcast,
 
-    /// `route.c:103-108` `checklength` failed.
+    /// `checklength` failed.
     TooShort { need: usize, have: usize },
 }
 
 // ────────────────────────────────────────────────────────────────────
 // route_ipv4
 
-/// `route.c:620-710`. Reads `ip_dst`, looks up in `subnets`, returns
-/// the owner. `resolve` returns `None` for unreachable; `myself` is
-/// always reachable so C `:655`'s remote-only check falls out.
+/// Reads `ip_dst`, looks up in `subnets`, returns the owner.
+/// `resolve` returns `None` for unreachable; `myself` is always
+/// reachable so the remote-only check falls out.
 pub fn route_ipv4<T>(
     data: &[u8],
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> RouteResult<T> {
-    // route.c:621 checklength
     let need = ETHER_SIZE + IP_SIZE;
     if data.len() < need {
         return RouteResult::TooShort {
@@ -103,7 +101,7 @@ pub fn route_ipv4<T>(
         };
     }
 
-    // route.c:629: DATA[30] = ETHER_SIZE + offsetof(ip, ip_dst) = 14+16
+    // DATA[30] = ETHER_SIZE + offsetof(ip, ip_dst) = 14+16
     let dst_off = ETHER_SIZE + 16;
     let dest = Ipv4Addr::new(
         data[dst_off],
@@ -112,27 +110,26 @@ pub fn route_ipv4<T>(
         data[dst_off + 3],
     );
 
-    // route.c:630 lookup_subnet_ipv4
     let Some((_subnet, owner)) = subnets.lookup_ipv4(&dest, |n| resolve(n).is_some()) else {
-        // route.c:632-641: no covering subnet
+        // no covering subnet
         return RouteResult::Unreachable {
             icmp_type: ICMP_DEST_UNREACH,
             icmp_code: ICMP_NET_UNKNOWN,
         };
     };
 
-    // route.c:644-646: `if(!subnet->owner) route_broadcast()`.
-    // Ownerless = broadcast subnet (224/4, 255.255.255.255, plus
+    // `if(!subnet->owner) route_broadcast()`. Ownerless = broadcast
+    // subnet (224/4, 255.255.255.255, plus
     // BroadcastSubnet config). Daemon → broadcast_packet.
     let Some(owner) = owner else {
         return RouteResult::Broadcast;
     };
 
-    // route.c:648-651 owner==source loop check: daemon-side.
+    // owner==source loop check: daemon-side.
 
-    // route.c:653-656: lookup_ipv4 may return an unreachable owner
-    // (last-hit fallback, subnet_tree.rs:310). Re-check.
-    // route.c:706: owner==myself → Forward{to:myself}, daemon → TUN.
+    // lookup_ipv4 may return an unreachable owner (last-hit
+    // fallback, subnet_tree.rs). Re-check. owner==myself →
+    // Forward{to:myself}, daemon → TUN.
     let Some(to) = resolve(owner) else {
         return RouteResult::Unreachable {
             icmp_type: ICMP_DEST_UNREACH,
@@ -140,8 +137,8 @@ pub fn route_ipv4<T>(
         };
     };
 
-    // route.c:663-698 (decrement_ttl, priorityinheritance, via=,
-    // directonly, MTU/fragment, clamp_mss): all daemon-side, in
+    // decrement_ttl, priorityinheritance, via=, directonly,
+    // MTU/fragment, clamp_mss: all daemon-side, in
     // dispatch_route_result. They need tunnels/last_routes/settings.
 
     RouteResult::Forward { to }
@@ -150,15 +147,14 @@ pub fn route_ipv4<T>(
 // ────────────────────────────────────────────────────────────────────
 // route_ipv6
 
-/// `route.c:705-791`. Same shape as [`route_ipv4`]; differences:
-/// dst at offset 38, ICMPv6 codes, NDP divert at `:710`, MTU check
+/// Same shape as [`route_ipv4`]; differences: dst at offset 38,
+/// ICMPv6 codes, NDP divert, MTU check
 /// uses `MAX(via->mtu, 1294)` (v6 forbids in-net frag, RFC 8200 §5).
 pub fn route_ipv6<T>(
     data: &[u8],
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> RouteResult<T> {
-    // route.c:706 checklength
     let need = ETHER_SIZE + IP6_SIZE;
     if data.len() < need {
         return RouteResult::TooShort {
@@ -167,7 +163,7 @@ pub fn route_ipv6<T>(
         };
     }
 
-    // route.c:710-713 NDP divert. [20]=ip6_nxt (14+6), [54]=icmp6_type (14+40).
+    // NDP divert. [20]=ip6_nxt (14+6), [54]=icmp6_type (14+40).
     if data[20] == IPPROTO_ICMPV6
         && data.len() >= ETHER_SIZE + IP6_SIZE + ICMP6_SIZE
         && data[54] == ND_NEIGHBOR_SOLICIT
@@ -175,7 +171,7 @@ pub fn route_ipv6<T>(
         return RouteResult::NeighborSolicit;
     }
 
-    // route.c:719: DATA[38] = ETHER_SIZE + offsetof(ip6_hdr, ip6_dst) = 14+24
+    // DATA[38] = ETHER_SIZE + offsetof(ip6_hdr, ip6_dst) = 14+24
     let dst_off = ETHER_SIZE + 24;
     #[allow(clippy::missing_panics_doc)]
     let dest: [u8; 16] = data[dst_off..dst_off + 16]
@@ -183,24 +179,22 @@ pub fn route_ipv6<T>(
         .expect("len-checked above");
     let dest = Ipv6Addr::from(dest);
 
-    // route.c:720 lookup_subnet_ipv6
     let Some((_subnet, owner)) = subnets.lookup_ipv6(&dest, |n| resolve(n).is_some()) else {
-        // route.c:722-735
         return RouteResult::Unreachable {
             icmp_type: ICMP6_DST_UNREACH,
             icmp_code: ICMP6_DST_UNREACH_ADDR,
         };
     };
 
-    // route.c:738-741: `if(!subnet->owner) route_broadcast()`.
-    // Ownerless = broadcast subnet (ff00::/8 plus config).
+    // `if(!subnet->owner) route_broadcast()`. Ownerless = broadcast
+    // subnet (ff00::/8 plus config).
     let Some(owner) = owner else {
         return RouteResult::Broadcast;
     };
 
-    // route.c:743-746 owner==source: daemon-side.
+    // owner==source: daemon-side.
 
-    // route.c:748-751: same fallback re-check as route_ipv4.
+    // Same fallback re-check as route_ipv4.
     let Some(to) = resolve(owner) else {
         return RouteResult::Unreachable {
             icmp_type: ICMP6_DST_UNREACH,
@@ -208,8 +202,8 @@ pub fn route_ipv6<T>(
         };
     };
 
-    // route.c:758-786 (decrement_ttl, priorityinheritance, via=,
-    // directonly, MTU → PACKET_TOO_BIG, clamp_mss): daemon-side.
+    // decrement_ttl, priorityinheritance, via=, directonly, MTU →
+    // PACKET_TOO_BIG, clamp_mss: daemon-side.
 
     RouteResult::Forward { to }
 }
@@ -217,8 +211,8 @@ pub fn route_ipv6<T>(
 // ────────────────────────────────────────────────────────────────────
 // decrement_ttl
 
-/// `do_decrement_ttl` outcome (`route.c:328-388`). C returns bool
-/// + side-effects; we reify the four exits.
+/// `do_decrement_ttl` outcome. Upstream returns bool + side-effects;
+/// we reify the four exits.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TtlResult {
     /// `:365,384,386`: TTL>1 decremented (or unknown ethertype).
@@ -232,11 +226,11 @@ pub enum TtlResult {
     TooShort,
 }
 
-/// `do_decrement_ttl` (`route.c:328-388`). In-place TTL/hop-limit
-/// decrement + IPv4 checksum adjust (RFC 1624 incremental: `csum +=
+/// `do_decrement_ttl`. In-place TTL/hop-limit decrement + IPv4
+/// checksum adjust (RFC 1624 incremental: `csum +=
 /// old + ~new` then fold — `:354-360`). v6 has no IP checksum.
 pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
-    // route.c:329-335: read ethertype, skip 8021Q tag if present.
+    // Read ethertype, skip 8021Q tag if present.
     if data.len() < ETHER_SIZE {
         return TtlResult::TooShort;
     }
@@ -324,7 +318,6 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 // extract_tos
 
 /// Read the inner packet's TOS/TC byte for `PriorityInheritance`.
-/// `route.c:669,765,1063-1068`.
 ///
 /// v4: `DATA[15]` — 14 (eth) + 1 (ver/ihl) = byte 15 is the TOS
 /// field (RFC 791 §3.1). v6: traffic class straddles bytes 14/15:
@@ -332,8 +325,8 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 /// 4-bit version field eats the high nibble of byte 14).
 ///
 /// `None` for non-IP ethertype or short frame — caller leaves
-/// priority at 0. Matches C `route.c:1063-1068` MAC-mode shape:
-/// only set `packet->priority` when ethertype+length both pass.
+/// priority at 0. Only set `packet->priority` when ethertype+length
+/// both pass.
 #[must_use]
 pub fn extract_tos(data: &[u8]) -> Option<u8> {
     if data.len() < ETHER_SIZE {
@@ -341,12 +334,8 @@ pub fn extract_tos(data: &[u8]) -> Option<u8> {
     }
     let ethertype = u16::from_be_bytes([data[12], data[13]]);
     match ethertype {
-        ETH_P_IP if data.len() >= ETHER_SIZE + IP_SIZE => {
-            // route.c:669,1064
-            Some(data[15])
-        }
+        ETH_P_IP if data.len() >= ETHER_SIZE + IP_SIZE => Some(data[15]),
         ETH_P_IPV6 if data.len() >= ETHER_SIZE + IP6_SIZE => {
-            // route.c:765,1066
             Some((data[14] & 0x0f) << 4 | data[15] >> 4)
         }
         _ => None,
@@ -356,16 +345,15 @@ pub fn extract_tos(data: &[u8]) -> Option<u8> {
 // ────────────────────────────────────────────────────────────────────
 // route — top-level dispatch
 
-/// `route.c:1130-1180`. Ethertype dispatch (RMODE_ROUTER only).
+/// Ethertype dispatch (RMODE_ROUTER only).
 /// `data` is full eth frame; TUN synthesises the header in router mode.
 pub fn route<T>(
     data: &[u8],
     subnets: &SubnetTree,
     resolve: impl FnMut(&str) -> Option<T>,
 ) -> RouteResult<T> {
-    // DEFERRED(chunk-9): route.c:1131 pcap; :1135 FMODE_KERNEL.
+    // DEFERRED(chunk-9): pcap; FMODE_KERNEL.
 
-    // route.c:1140 checklength(ether_size)
     if data.len() < ETHER_SIZE {
         return RouteResult::TooShort {
             need: ETHER_SIZE,
@@ -373,21 +361,19 @@ pub fn route<T>(
         };
     }
 
-    // route.c:1144
     let ethertype = u16::from_be_bytes([data[12], data[13]]);
 
-    // route.c:1148. DEFERRED(chunk-9): :1146 RMODE_SWITCH/RMODE_HUB.
+    // DEFERRED(chunk-9): RMODE_SWITCH/RMODE_HUB.
     match ethertype {
         ETH_P_IP => route_ipv4(data, subnets, resolve),
         ETH_P_IPV6 => route_ipv6(data, subnets, resolve),
         ETH_P_ARP => RouteResult::Unsupported {
             reason: "arp: chunk 9",
         },
-        // route.c:1145: C strips 4-byte tag before the switch. Deferred.
+        // Upstream strips 4-byte tag before the switch. Deferred.
         ETH_P_8021Q => RouteResult::Unsupported {
             reason: "vlan: chunk 9",
         },
-        // route.c:1163
         _ => RouteResult::Unsupported {
             reason: "unknown ethertype",
         },
@@ -421,7 +407,6 @@ mod tests {
         None
     }
 
-    /// route.c:706 happy path.
     #[test]
     fn route_ipv4_forwards_to_owner() {
         let mut t = SubnetTree::new();
@@ -433,7 +418,7 @@ mod tests {
         assert_eq!(r, RouteResult::Forward { to: "bob".into() });
     }
 
-    /// route.c:706 owner==myself → still Forward.
+    /// owner==myself → still Forward.
     #[test]
     fn route_ipv4_forwards_to_self() {
         let mut t = SubnetTree::new();
@@ -445,7 +430,7 @@ mod tests {
         assert_eq!(r, RouteResult::Forward { to: "alice".into() });
     }
 
-    /// route.c:632-641: no subnet → type 3 code 6.
+    /// no subnet → type 3 code 6.
     #[test]
     fn route_ipv4_unknown_net() {
         let t = SubnetTree::new();
@@ -462,7 +447,7 @@ mod tests {
         );
     }
 
-    /// route.c:644-646: ownerless subnet → Broadcast. mDNS to
+    /// ownerless subnet → Broadcast. mDNS to
     /// 224.0.0.251, DHCP to 255.255.255.255. Before this fix, these
     /// hit Unreachable{NET_UNKNOWN} — daemon ICMP-bounced its own
     /// kernel's multicast. Silent (mDNS doesn't surface ICMP).
@@ -489,7 +474,7 @@ mod tests {
         );
     }
 
-    /// route.c:653-656: unreachable owner → type 3 code 0.
+    /// unreachable owner → type 3 code 0.
     #[test]
     fn route_ipv4_unreachable_owner() {
         let mut t = SubnetTree::new();
@@ -507,7 +492,6 @@ mod tests {
         );
     }
 
-    /// route.c:621 checklength.
     #[test]
     fn route_too_short() {
         let p = vec![0u8; 30];
@@ -517,7 +501,7 @@ mod tests {
         assert_eq!(r, RouteResult::TooShort { need: 34, have: 30 });
     }
 
-    /// route.c:1148 ethertype dispatch.
+    /// ethertype dispatch.
     #[test]
     fn route_ethertype_dispatch() {
         let t = SubnetTree::new();
@@ -543,7 +527,6 @@ mod tests {
         assert_eq!(r, RouteResult::TooShort { need: 54, have: 14 });
     }
 
-    /// route.c:1140.
     #[test]
     fn route_too_short_for_ethertype() {
         let p = vec![0u8; 10];
@@ -563,7 +546,6 @@ mod tests {
         p
     }
 
-    /// route.c:789.
     #[test]
     fn route_ipv6_forwards_to_owner() {
         let mut t = SubnetTree::new();
@@ -575,7 +557,6 @@ mod tests {
         assert_eq!(r, RouteResult::Forward { to: "bob".into() });
     }
 
-    /// route.c:722-735.
     #[test]
     fn route_ipv6_unknown_is_unreachable_addr() {
         let t = SubnetTree::new();
@@ -592,7 +573,7 @@ mod tests {
         );
     }
 
-    /// route.c:738-741: ownerless → Broadcast. NDP to ff02::1,
+    /// ownerless → Broadcast. NDP to ff02::1,
     /// mDNS to ff02::fb. Before: Unreachable{DST_UNREACH_ADDR}.
     #[test]
     fn route_ipv6_broadcast_subnet() {
@@ -606,7 +587,7 @@ mod tests {
         assert_eq!(route_ipv6(&p, &t, always), RouteResult::Broadcast);
     }
 
-    /// route.c:748-751: unreachable → NOROUTE not ADDR.
+    /// unreachable → NOROUTE not ADDR.
     #[test]
     fn route_ipv6_unreachable_owner_is_noroute() {
         let mut t = SubnetTree::new();
@@ -624,7 +605,6 @@ mod tests {
         );
     }
 
-    /// route.c:706 checklength.
     #[test]
     fn route_ipv6_too_short() {
         let mut p = vec![0u8; 50];
@@ -635,7 +615,7 @@ mod tests {
         assert_eq!(r, RouteResult::TooShort { need: 54, have: 50 });
     }
 
-    /// route.c:710-713: NDP divert needs eth+ip6+icmp6 (62 bytes).
+    /// NDP divert needs eth+ip6+icmp6 (62 bytes).
     #[test]
     fn route_ipv6_ndp_divert() {
         let mut p = vec![0u8; ETHER_SIZE + IP6_SIZE + ICMP6_SIZE];
@@ -673,7 +653,7 @@ mod tests {
         p
     }
 
-    /// route.c:351-365. RFC-1624: incremental adjust == recompute.
+    /// RFC-1624: incremental adjust == recompute.
     #[test]
     fn decrement_ttl_v4_decrements_and_adjusts_checksum() {
         let mut p = ipv4_ttl_packet(64, 6); // TCP, TTL 64
@@ -689,7 +669,6 @@ mod tests {
         assert_eq!(adjusted, fresh.to_ne_bytes());
     }
 
-    /// route.c:343-348.
     #[test]
     fn decrement_ttl_v4_at_1_sends_icmp() {
         let mut p = ipv4_ttl_packet(1, 6); // TCP
@@ -705,8 +684,8 @@ mod tests {
         assert_eq!(p[ETHER_SIZE + 8], 1); // untouched on bounce
     }
 
-    /// route.c:344-347 storm guard. Tests the C's actual (buggy)
-    /// offsets: [+11] is ip_sum low byte not ip_p, but ported as-is.
+    /// Storm guard. Tests upstream's actual (buggy) offsets: [+11]
+    /// is ip_sum low byte not ip_p, but ported as-is.
     #[test]
     fn decrement_ttl_v4_at_1_but_is_timeexceeded() {
         let mut p = vec![0u8; ETHER_SIZE + 33]; // need [ethlen+32]
@@ -719,7 +698,6 @@ mod tests {
         assert_eq!(r, TtlResult::DropSilent);
     }
 
-    /// route.c:383.
     #[test]
     fn decrement_ttl_v6_decrements() {
         let mut p = vec![0u8; ETHER_SIZE + IP6_SIZE];
@@ -731,7 +709,6 @@ mod tests {
         assert_eq!(p[ETHER_SIZE + 7], 63);
     }
 
-    /// route.c:372-378.
     #[test]
     fn decrement_ttl_v6_at_1_sends_icmp() {
         let mut p = vec![0u8; ETHER_SIZE + IP6_SIZE + 1];
@@ -749,7 +726,6 @@ mod tests {
         );
     }
 
-    /// route.c:386.
     #[test]
     fn decrement_ttl_unknown_ethertype_noop() {
         let mut p = vec![0u8; ETHER_SIZE];
@@ -759,7 +735,6 @@ mod tests {
         assert_eq!(r, TtlResult::Decremented);
     }
 
-    /// route.c:332-335.
     #[test]
     fn decrement_ttl_8021q_skip() {
         let mut p = vec![0u8; ETHER_SIZE + 4 + IP_SIZE];
@@ -775,7 +750,7 @@ mod tests {
     // ────────────────────────────────────────────────────────────────
     // extract_tos
 
-    /// route.c:669: v4 TOS at byte 15.
+    /// v4 TOS at byte 15.
     #[test]
     fn extract_tos_v4() {
         let mut p = ipv4_packet(Ipv4Addr::new(10, 0, 0, 1));
@@ -783,7 +758,7 @@ mod tests {
         assert_eq!(extract_tos(&p), Some(0xb8));
     }
 
-    /// route.c:765: v6 TC straddles bytes 14/15.
+    /// v6 TC straddles bytes 14/15.
     /// `0x6b` `0x80` → ver=6, TC = (0xb<<4)|(0x8) = 0xb8.
     #[test]
     fn extract_tos_v6() {
@@ -793,7 +768,7 @@ mod tests {
         assert_eq!(extract_tos(&p), Some(0xb8));
     }
 
-    /// route.c:1063-1068: short / non-IP → None (priority stays 0).
+    /// short / non-IP → None (priority stays 0).
     #[test]
     fn extract_tos_gates() {
         // Too short for ethertype.

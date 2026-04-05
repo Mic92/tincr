@@ -25,8 +25,8 @@
 //!
 //! ## Lazy hostname resolve (`:157-199`)
 //!
-//! C `get_recent_address` calls `str2addrinfo` (`getaddrinfo`) for
-//! each `Address = bob.example.com 655` line **as the cursor reaches
+//! `get_recent_address` calls `getaddrinfo` for each `Address =
+//! bob.example.com 655` line **as the cursor reaches
 //! it** — DNS at connect time, not config load time. Tier 3 stores
 //! unresolved `(host, port)` pairs; [`AddressCache::next_addr`]
 //! resolves on demand. The resolve is **blocking** (so
@@ -37,11 +37,10 @@
 //!
 //! ## Tier structure: three vecs, not one
 //!
-//! C `get_recent_address` (`:119-215`) walks three sources in order:
-//! cached (`:121`), edge-known (`:126-148` via `get_known_addresses`
-//! `:31-65`), config (`:151-199`). C `reset_address_cache` (`:256-263`)
-//! FREES `cache->ai` (the edge-known list) so the next dial re-walks
-//! the graph — the topology may have changed between retries. We mirror
+//! `get_recent_address` walks three sources in order: cached,
+//! edge-known, config. `reset_address_cache` FREES `cache->ai` (the
+//! edge-known list) so the next dial re-walks the graph — the
+//! topology may have changed between retries. We mirror
 //! that: `known` is a separate vec that `add_known_addresses` replaces
 //! wholesale; the daemon calls it on every `setup_outgoing_connection`
 //! tick with a fresh edge-walk.
@@ -79,9 +78,8 @@ pub struct AddressCache {
     /// dial re-walks `n->edge_tree`. We replace via
     /// [`add_known_addresses`](Self::add_known_addresses).
     known: Vec<SocketAddr>,
-    /// Tier 3 source (`:151-199`): `Address =` config lines, **unresolved**.
-    /// C `address_cache.c:42-63` stores `struct config_t *cfg` (the
-    /// raw string). Static after `open()`.
+    /// Tier 3 source: `Address =` config lines, **unresolved**.
+    /// Static after `open()`.
     config: Vec<(String, u16)>,
     /// Tier 3 resolved buffer. `next_addr` extends this lazily as the
     /// cursor walks into tier 3 (one `to_socket_addrs()` per
@@ -154,9 +152,9 @@ impl AddressCache {
     /// `get_known_addresses` injection point (`:31-65`, `:126-148`).
     /// Replaces tier 2 wholesale with a fresh edge-walk.
     ///
-    /// **REPLACES**, not appends: C `reset_address_cache:261-263`
-    /// frees `cache->ai` so the next `get_recent_address` calls
-    /// `get_known_addresses(cache->node)` from scratch (`:128-129`).
+    /// **REPLACES**, not appends: `reset_address_cache` frees
+    /// `cache->ai` so the next `get_recent_address` calls
+    /// `get_known_addresses(cache->node)` from scratch.
     /// The graph may have churned between retries; stale gossip is
     /// worse than none. Caller (`setup_outgoing_connection`) walks
     /// the live graph each tick.
@@ -179,7 +177,6 @@ impl AddressCache {
     }
 
     /// Best-effort read. Missing file, unparseable line → empty.
-    /// C `:226`: `if(!fp || fread(...) != 1 || version != ...) memset(&data, 0, ...)`.
     fn load(path: &Path) -> Vec<SocketAddr> {
         let Ok(f) = fs::File::open(path) else {
             return Vec::new();
@@ -215,9 +212,9 @@ impl AddressCache {
         } else if cur < n_known {
             self.known.get(cur - n_cached).copied()
         } else {
-            // Tier 3. C `:157-199`: walk `Address =` lines, resolve
-            // each via `str2addrinfo`, return one addr per call. The
-            // resolved chain (`cache->ai`) is kept until reset so we
+            // Tier 3. Walk `Address =` lines, resolve each via
+            // `getaddrinfo`, return one addr per call. The resolved
+            // chain is kept until reset so we
             // don't re-resolve mid-round. `config_resolved` is that
             // chain; `config_idx` is the `lookup_config_next` cursor.
             let want = cur - n_known;
@@ -230,8 +227,8 @@ impl AddressCache {
             while want >= self.config_resolved.len() && self.config_idx < self.config.len() {
                 let (host, port) = &self.config[self.config_idx];
                 self.config_idx += 1;
-                // C `:159` `str2addrinfo` → `getaddrinfo`. Failure
-                // (`:193`) just moves to the next config line.
+                // `getaddrinfo` failure just moves to the next
+                // config line.
                 match (host.as_str(), *port).to_socket_addrs() {
                     Ok(iter) => {
                         for a in iter {
@@ -272,9 +269,9 @@ impl AddressCache {
     /// (C survives a crash mid-session with partial learning; we
     /// don't); fine for a cache.
     pub fn add_recent(&mut self, addr: SocketAddr) {
-        // C `:86-89` `find_cached` walks `data.address[]` only (the
-        // on-disk cache). We tier-split now so this matches exactly:
-        // dedup within tier 1, don't touch tiers 2/3.
+        // `find_cached` walks `data.address[]` only (the on-disk
+        // cache). We tier-split so this matches exactly: dedup
+        // within tier 1, don't touch tiers 2/3.
         self.cached.retain(|a| *a != addr);
         self.cached.insert(0, addr);
         // Cursor is now stale. The C doesn't reset `tried` here
@@ -285,8 +282,8 @@ impl AddressCache {
 
     /// `reset_address_cache` (`:251-266`). Cursor to 0. Called on
     /// retry (the `retry_outgoing` exponential-backoff timer).
-    /// C `:261-263` frees `cache->ai` — the resolved-addrinfo chain
-    /// — so the next round re-resolves. Dynamic DNS: if `bob.
+    /// Frees the resolved-addrinfo chain so the next round
+    /// re-resolves. Dynamic DNS: if `bob.
     /// example.com` changed IPs between retries, we pick that up.
     pub fn reset(&mut self) {
         self.cursor = 0;
@@ -313,7 +310,7 @@ impl AddressCache {
             fs::create_dir_all(dir)?;
         }
         let mut buf = Vec::new();
-        // Only tier 1 persists (C `data.address[]`). Tiers 2/3 are
+        // Only tier 1 persists (`data.address[]`). Tiers 2/3 are
         // regenerated from graph/config at next `open`.
         for a in self.cached.iter().take(MAX_CACHED_ADDRESSES) {
             writeln!(buf, "{a}")?;
@@ -409,8 +406,8 @@ mod tests {
 
     #[test]
     fn add_recent_moves_to_front() {
-        // C `:86-104`: `find_cached` returns position, `memmove`
-        // shifts [0..pos) right by one, write to [0]. Net: rotate.
+        // `find_cached` returns position, shift [0..pos) right by
+        // one, write to [0]. Net: rotate.
         let mut c = AddressCache::new(vec![
             sa("10.0.0.1:655"),
             sa("10.0.0.2:655"),
@@ -466,7 +463,7 @@ mod tests {
 
     #[test]
     fn open_missing_file_is_config_only() {
-        // C `:226`: `!fp` → memset. No cache dir at all.
+        // No cache dir at all → empty cache.
         let tmp = tmpdir("missing");
         let mut c = AddressCache::open(&tmp, "alice", vec![cfg("10.0.0.1", 655)]);
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
@@ -493,8 +490,7 @@ mod tests {
         assert_eq!(c.next_addr(), None);
     }
 
-    /// C `:40-50` (intra-walk dedup) and `:137-139` (`find_cached`
-    /// skip): edge-known addrs dedup vs themselves and vs tier 1.
+    /// Edge-known addrs dedup vs themselves and vs tier 1.
     #[test]
     fn known_addresses_dedup() {
         let mut c = AddressCache::new(vec![sa("10.0.0.1:655")]);
@@ -524,8 +520,8 @@ mod tests {
         assert_eq!(c.next_addr(), None);
     }
 
-    /// C `:108-116` only writes `data.address[]`. Edge-known addrs
-    /// are volatile (the graph regenerates them); don't persist.
+    /// Only `data.address[]` is written. Edge-known addrs are
+    /// volatile (the graph regenerates them); don't persist.
     #[test]
     fn known_addresses_not_persisted() {
         let tmp = tmpdir("known-nopersist");
@@ -551,8 +547,7 @@ mod tests {
 
     /// Two `Address =` lines: walk past tiers 1+2 (empty), tier 3
     /// yields both, each exactly once per round. Reset → fresh
-    /// resolve, both yielded again. C `:157-199` per-line resolve;
-    /// `:261-263` frees `cache->ai` on reset.
+    /// resolve, both yielded again.
     #[test]
     fn lazy_resolve_two_lines_once_per_round() {
         let tmp = tmpdir("lazy-two");
@@ -589,8 +584,8 @@ mod tests {
 
     #[test]
     fn load_garbage_is_empty() {
-        // C-written sockaddr_storage binary blob hits this path.
-        // C `:226`: version mismatch → memset.
+        // Upstream-written sockaddr_storage binary blob hits this
+        // path. Version mismatch → empty.
         let tmp = tmpdir("garbage");
         let dir = tmp.join("cache");
         fs::create_dir_all(&dir).unwrap();

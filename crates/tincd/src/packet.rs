@@ -11,8 +11,6 @@
 //! Every struct here is packed, no padding (the `const _: () =
 //! assert!(size_of == N)` checks prove it). Serialization is just
 //! a transmute; `zerocopy::{FromBytes, IntoBytes}` derive that.
-//! `as_bytes()` is `route.c:213`'s `memcpy(DATA(packet)+..., &ip)`;
-//! `read_from_bytes()` is `route.c:140`'s `memcpy(&ip, ...)`.
 //!
 //! Packed → fields may be unaligned → Rust REFUSES `&self.field`.
 //! Read with `let x = self.field;` (copy to local). The accessors
@@ -22,9 +20,8 @@
 //!
 //! Fields are stored RAW — network-order bytes as they sit on the
 //! wire. Getters do `u16::from_be(raw)`. Setters take host-order
-//! and write `to_be()`. The C does `htons`/`ntohs` at use sites
-//! (`route.c:188`: `ip.ip_len = htons(...)`). We push it into
-//! accessors so the caller never sees a wrong-endian number.
+//! and write `to_be()`. We push the `htons`/`ntohs` into accessors
+//! so the caller never sees a wrong-endian number.
 //!
 //! ## No bitfields
 //!
@@ -43,13 +40,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // ── inet_checksum ──────────────────────────────────────────────────
 
-/// `inet_checksum` (`route.c:63-86`). RFC 1071 one's-complement sum.
+/// `inet_checksum`. RFC 1071 one's-complement sum.
 ///
 /// Chainable: pass `0xFFFF` for the first call, then feed the
-/// previous return value as `prevsum` to fold in more data
-/// (`route.c:207-208`: ICMP header, then chain the payload).
+/// previous return value as `prevsum` to fold in more data (e.g.
+/// ICMP header, then chain the payload).
 ///
-/// **Endianness**: the C does `memcpy(&word, data, 2)` — a NATIVE-
+/// **Endianness**: `memcpy(&word, data, 2)` is a NATIVE-
 /// endian load. We use `from_ne_bytes`. RFC 1071 §2(B) proves the
 /// sum is byte-order independent on the wire (the byte-swapped sum
 /// equals the swap of the sum), but the *numeric* `u16` we return
@@ -57,9 +54,9 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// raw checksum field via `memcpy`/`to_ne_bytes`, so the bytes on
 /// the wire are correct on either endianness.
 ///
-/// **Odd tail** (`route.c:78-80`): `checksum += *data` puts the
-/// last byte in the LOW half of the u32, NOT high. Easy to get
-/// wrong if you "fix" it to look like a big-endian high-byte pad.
+/// **Odd tail**: `checksum += *data` puts the last byte in the LOW
+/// half of the u32, NOT high. Easy to get wrong if you "fix" it to
+/// look like a big-endian high-byte pad.
 #[must_use]
 pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     let mut checksum: u32 = u32::from(prevsum ^ 0xFFFF);
@@ -70,12 +67,12 @@ pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
         let word = u16::from_ne_bytes([pair[0], pair[1]]);
         checksum += u32::from(word);
     }
-    // route.c:78-80: tail byte goes in the LOW half. RFC 1071 §4.1.
+    // Tail byte goes in the LOW half. RFC 1071 §4.1.
     if let [tail] = chunks.remainder() {
         checksum += u32::from(*tail);
     }
 
-    // route.c:82-84: fold carries until the high half is zero.
+    // Fold carries until the high half is zero.
     while checksum >> 16 != 0 {
         checksum = (checksum & 0xFFFF) + (checksum >> 16);
     }
@@ -108,7 +105,7 @@ pub struct Ipv4Hdr {
     pub ip_ttl: u8,
     pub ip_p: u8,
     /// Checksum, raw. NOT byte-swapped: `inet_checksum` returns
-    /// host-order which `memcpy`'s back as-is (`route.c:202`).
+    /// host-order which `memcpy`'s back as-is.
     pub ip_sum: u16,
     /// `struct in_addr ip_src`. Raw bytes, network order.
     pub ip_src: [u8; 4],
@@ -135,8 +132,7 @@ impl Ipv4Hdr {
     pub fn ihl(self) -> u8 {
         self.ip_vhl & 0x0F
     }
-    /// Set version + IHL. `route.c:186-187` does `ip.ip_v=4;
-    /// ip.ip_hl=ip_size/4`.
+    /// Set version + IHL.
     pub fn set_vhl(&mut self, version: u8, ihl: u8) {
         self.ip_vhl = (version << 4) | (ihl & 0x0F);
     }
@@ -149,7 +145,7 @@ impl Ipv4Hdr {
         let raw = self.ip_len;
         u16::from_be(raw)
     }
-    /// `ip_len = htons(v)` (`route.c:188`).
+    /// `ip_len = htons(v)`.
     pub fn set_total_len(&mut self, v: u16) {
         self.ip_len = v.to_be();
     }
@@ -179,11 +175,11 @@ impl Ipv4Hdr {
 
 /// `struct icmp`, FIRST 8 BYTES ONLY. The full C struct (`ipv4.h
 /// :100-148`) is 28 bytes with a variant tail union. `route.c` only
-/// touches type/code/cksum/nextmtu and uses `icmp_size = 8`
-/// (`route.c:53`). We model just that.
+/// touches type/code/cksum/nextmtu and uses `icmp_size = 8`. We
+/// model just that.
 ///
-/// `route.c:177` writes `icmp.icmp_nextmtu = htons(...)` which is
-/// `icmp_hun.ih_pmtu.ipm_nextmtu` — bytes 6-7 of the struct (the
+/// `icmp.icmp_nextmtu = htons(...)` is `icmp_hun.ih_pmtu.ipm_nextmtu`
+/// — bytes 6-7 of the struct (the
 /// SECOND `u16` of the 4-byte union). Bytes 4-5 are `ipm_void`
 /// (unused, zero).
 #[repr(C, packed)]
@@ -202,7 +198,7 @@ pub struct IcmpHdr {
 const _: () = assert!(size_of::<IcmpHdr>() == 8);
 
 impl IcmpHdr {
-    /// `icmp.icmp_nextmtu = htons(v)` (`route.c:177`).
+    /// `icmp.icmp_nextmtu = htons(v)`.
     pub fn set_nextmtu(&mut self, v: u16) {
         self.icmp_nextmtu = v.to_be();
     }
@@ -217,8 +213,8 @@ impl IcmpHdr {
 
 /// `struct ip6_hdr` (`ipv6.h:42-53`). 40 bytes.
 ///
-/// `ip6_flow` is `(v<<28)|(tc<<20)|flow`. `route.c:292` writes
-/// `htonl(0x60000000)` — version 6, tc 0, flow 0.
+/// `ip6_flow` is `(v<<28)|(tc<<20)|flow`. `htonl(0x60000000)` is
+/// version 6, tc 0, flow 0.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv6Hdr {
@@ -235,7 +231,7 @@ pub struct Ipv6Hdr {
 const _: () = assert!(size_of::<Ipv6Hdr>() == 40);
 
 impl Ipv6Hdr {
-    /// `ip6.ip6_flow = htonl(v)` (`route.c:292`: `0x60000000`).
+    /// `ip6.ip6_flow = htonl(v)`.
     pub fn set_flow(&mut self, v: u32) {
         self.ip6_flow = v.to_be();
     }
@@ -252,7 +248,7 @@ impl Ipv6Hdr {
         (u32::from_be(raw) >> 28) as u8
     }
 
-    /// `ip6.ip6_plen = htons(v)` (`route.c:293`).
+    /// `ip6.ip6_plen = htons(v)`.
     pub fn set_plen(&mut self, v: u16) {
         self.ip6_plen = v.to_be();
     }
@@ -283,7 +279,7 @@ pub struct Icmp6Hdr {
 const _: () = assert!(size_of::<Icmp6Hdr>() == 8);
 
 impl Icmp6Hdr {
-    /// `icmp6.icmp6_mtu = htonl(v)` (`route.c:281`).
+    /// `icmp6.icmp6_mtu = htonl(v)`.
     pub fn set_mtu(&mut self, v: u32) {
         self.icmp6_data32 = v.to_be();
     }
@@ -372,23 +368,17 @@ const _: () = assert!(size_of::<EtherArp>() == 28);
 
 // ── Pseudo-headers (checksum only) ─────────────────────────────────
 
-/// IPv6 pseudo-header for upper-layer checksum (`route.c:220-225`,
-/// RFC 2460 §8.1). Anonymous struct in C; we name it. 40 bytes.
-///
-/// `route.c:313-316` fills this and feeds it to `inet_checksum`
-/// before the ICMPv6 header+payload. NOT a wire header — never
-/// transmitted; checksum input only.
-///
-/// `length` and `next` are `uint32_t` in C, written with `htonl`
-/// (`route.c:314-315`). We follow.
+/// IPv6 pseudo-header for upper-layer checksum (RFC 2460 §8.1). 40
+/// bytes. NOT a wire header — never transmitted; checksum input
+/// only. `length` and `next` are `uint32_t`, written with `htonl`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct Ipv6Pseudo {
     pub ip6_src: [u8; 16],
     pub ip6_dst: [u8; 16],
-    /// Upper-layer length, network order. `htonl` at `route.c:314`.
+    /// Upper-layer length, network order.
     length: u32,
-    /// Next header (`IPPROTO_ICMPV6`), network order. `route.c:315`.
+    /// Next header (`IPPROTO_ICMPV6`), network order.
     next: u32,
 }
 
@@ -440,7 +430,7 @@ mod tests {
     #[test]
     fn struct_sizes_match_c_static_asserts() {
         assert_eq!(size_of::<Ipv4Hdr>(), 20); // ipv4.h:93
-        assert_eq!(size_of::<IcmpHdr>(), 8); // route.c:53 icmp_size
+        assert_eq!(size_of::<IcmpHdr>(), 8); // icmp_size
         assert_eq!(size_of::<Ipv6Hdr>(), 40); // ipv6.h:63
         assert_eq!(size_of::<Icmp6Hdr>(), 8); // ipv6.h:91
         assert_eq!(size_of::<ArpHdr>(), 8); // ethernet.h:90
@@ -467,8 +457,8 @@ mod tests {
         assert_eq!(h.as_bytes()[0], 0x45);
     }
 
-    /// IPv6: `ip6.ip6_flow = htonl(0x60000000)` (`route.c:292`).
-    /// Byte 0 on the wire is `0x60` (v=6, tc high nibble = 0).
+    /// IPv6: `ip6.ip6_flow = htonl(0x60000000)`. Byte 0 on the wire
+    /// is `0x60` (v=6, tc high nibble = 0).
     #[test]
     fn ipv6_flow_version_packing() {
         let mut h = Ipv6Hdr::default();
@@ -493,8 +483,7 @@ mod tests {
 
     // ─── Round-trip
 
-    /// Build, serialize, parse, eq. `route.c:140` memcpy-in,
-    /// `route.c:213` memcpy-out.
+    /// Build, serialize, parse, eq.
     #[test]
     fn ipv4hdr_roundtrip() {
         let mut h = Ipv4Hdr::default();
@@ -578,9 +567,9 @@ mod tests {
 
     // ─── inet_checksum KAT
 
-    /// KAT vectors from `kat/gen_checksum.c`. Generated by linking
-    /// `route.c:63-86` verbatim. Proves bit-for-bit match including
-    /// the native-endian `memcpy` load and the low-half tail byte.
+    /// KAT vectors from `kat/gen_checksum.c`. Proves bit-for-bit
+    /// match including the native-endian `memcpy` load and the
+    /// low-half tail byte.
     #[test]
     fn inet_checksum_kat() {
         // Embedded vectors. Regenerate: nix build .#kat-checksum
@@ -607,9 +596,9 @@ mod tests {
         }
     }
 
-    /// Separate test: chain == single. `route.c:207-208` relies on
-    /// this property — checksum the ICMP header, then chain the
-    /// payload. Result MUST equal checksumming both at once.
+    /// Separate test: chain == single. The chained-checksum pattern
+    /// (ICMP header, then payload) relies on this property: result
+    /// MUST equal checksumming both at once.
     #[test]
     fn inet_checksum_is_chainable() {
         let data = decode_hex("0001f203f4f5f6f7");

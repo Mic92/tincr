@@ -1,10 +1,10 @@
-//! `node_t` (`node.h:50-128`) — DATA-PLANE half. C `node_t` is a 60-field
+//! `node_t` — DATA-PLANE half. Upstream `node_t` is a 60-field
 //! god-struct; `NodeState` is the meta-connection half, this is the
-//! per-tunnel half (`sptps`/`status`/`address`/`mtu*`/counters). Separate
-//! maps: `TunnelState` exists for ANY reachable node, not just direct
-//! TCP neighbors (`protocol_key.c:111` forwards via `nexthop`).
+//! per-tunnel half (`sptps`/`status`/`address`/`mtu*`/counters).
+//! Separate maps: `TunnelState` exists for ANY reachable node, not
+//! just direct TCP neighbors (`REQ_KEY` forwards via `nexthop`).
 //!
-//! SPTPS-only: legacy fields (`node.h:67-74`, `:89-93`) dropped.
+//! SPTPS-only: legacy fields dropped.
 //! `status.sptps` is always true; kept for `dump nodes` parity.
 //!
 //! `node_status_t` (`node.h:31-48`): GCC packs LSB-first; field
@@ -22,19 +22,17 @@ use crate::pmtu::PmtuState;
 /// `net.h:36` `#define MTU 1518` (1500 + 14 eth + 4 VLAN).
 pub const MTU: u16 = 1518;
 
-/// `node_t` data-plane fields (`node.h:50-118`). Parallel map to
-/// `NodeState`. C `new_node` (`node.c:43-64`): `xzalloc` + `maxmtu=MTU`.
+/// `node_t` data-plane fields. Parallel map to `NodeState`.
+/// Init: zeroed + `maxmtu=MTU`.
 #[derive(Default)]
 pub struct TunnelState {
-    /// `n->sptps` (`node.h:64`). Set by `sptps_start` (`protocol_key.c:131`,
-    /// `datagram=true`); cleared by `graph.c:259`. Boxed: ~1KB, most nodes
-    /// never tunnel.
+    /// `n->sptps`. Set by `sptps_start` (`datagram=true`); cleared
+    /// on unreachable. Boxed: ~1KB, most nodes never tunnel.
     pub sptps: Option<Box<Sptps>>,
 
-    /// `n->address` (`node.h:57`). UDP send-to. Set by `update_node_udp`
-    /// (`node.c:165` via `graph.c:201` SSSP). NOT `NodeState.edge_addr`
-    /// (that's TCP `getpeername`); may be NAT-reflexive from `ans_key_h`
-    /// (`protocol_key.c:571`).
+    /// `n->address`. UDP send-to. Set by `update_node_udp` (via
+    /// SSSP). NOT `NodeState.edge_addr` (that's TCP `getpeername`);
+    /// may be NAT-reflexive from `ans_key_h`.
     pub udp_addr: Option<SocketAddr>,
 
     /// `(sockaddr, listener_index)` cached after `udp_confirmed`. The
@@ -48,37 +46,34 @@ pub struct TunnelState {
     /// memory squeeze; we have a HashMap).
     pub status: TunnelStatus,
 
-    /// `n->last_req_key` (`node.h:61`). Debounce gate (`net_packet.c:1167`,
-    /// `protocol_key.c:560`). `None` = C `0` (always passes).
+    /// `n->last_req_key`. Debounce gate. `None` = `0` (always passes).
     pub last_req_key: Option<Instant>,
 
     /// `n->{mtu,minmtu,maxmtu,mtuprobes,...}` (`node.h:108-118`).
     /// `pmtu.udp_confirmed` is authoritative; `status.udp_confirmed`
-    /// mirrors for `dump_nodes`. `pmtu.mtu` SURVIVES `reset_unreachable`
-    /// (`graph.c:266-269` resets the others). `Option` because
+    /// mirrors for `dump_nodes`. `pmtu.mtu` SURVIVES
+    /// `reset_unreachable` (the others are reset). `Option` because
     /// `PmtuState::new` needs an `Instant`; lazily seeded by `try_tx`.
     pub pmtu: Option<PmtuState>,
 
-    /// `n->udp_reply_sent` (`node.h:121`). `try_udp` keepalive gate
-    /// (`net_packet.c:1211`).
+    /// `n->udp_reply_sent`. `try_udp` keepalive gate.
     pub udp_reply_sent: Option<Instant>,
 
-    /// `n->udp_info_sent` (`node.h:122`). `send_udp_info` debounce
-    /// (`protocol_misc.c:183`). Only when WE originate; forwarding skips.
+    /// `n->udp_info_sent`. `send_udp_info` debounce. Only when WE
+    /// originate; forwarding skips.
     pub udp_info_sent: Option<Instant>,
 
-    /// `n->mtu_info_sent` (`node.h:123`). Separate from `udp_info_sent`
-    /// (`protocol_misc.c:291`): independent debounces.
+    /// `n->mtu_info_sent`. Separate from `udp_info_sent`: independent
+    /// debounces.
     pub mtu_info_sent: Option<Instant>,
 
-    /// `n->outcompression` (`node.h:77`). Level PEER advertised in ANS_KEY
-    /// (`protocol_key.c:545`); we compress TO them at this level
-    /// (`net_packet.c:708`).
+    /// `n->outcompression`. Level PEER advertised in ANS_KEY; we
+    /// compress TO them at this level.
     pub outcompression: u8,
 
-    /// `n->incompression` (`node.h:76`). OUR config copied per-tunnel at
-    /// handshake (`net_packet.c:995`). Per-tunnel (not settings read) so
-    /// SIGHUP-reload mid-session doesn't break decompress.
+    /// `n->incompression`. OUR config copied per-tunnel at handshake.
+    /// Per-tunnel (not settings read) so SIGHUP-reload mid-session
+    /// doesn't break decompress.
     pub incompression: u8,
 
     /// `n->{in,out}_{packets,bytes}` (`node.h:113-116`). `dump_nodes` cols.
@@ -89,12 +84,12 @@ pub struct TunnelState {
 }
 
 impl TunnelState {
-    /// `graph.c:256-297`, `BecameUnreachable`. `n->mtu` NOT reset (learned
-    /// PMTU survives). Traffic counters NOT reset (lifetime totals).
+    /// `BecameUnreachable`. `n->mtu` NOT reset (learned PMTU
+    /// survives). Traffic counters NOT reset (lifetime totals).
     pub fn reset_unreachable(&mut self) {
-        self.sptps = None; // C `:259` `sptps_stop`
-        self.last_req_key = None; // C `:263`
-        // C `:266-269`: probe state reset; `mtu` preserved.
+        self.sptps = None; // `sptps_stop`
+        self.last_req_key = None;
+        // Probe state reset; `mtu` preserved.
         if let Some(p) = &mut self.pmtu {
             p.maxmtu = MTU;
             p.minmtu = 0;
@@ -105,10 +100,9 @@ impl TunnelState {
             p.udp_ping_rtt = None;
         }
         self.udp_reply_sent = None;
-        self.udp_addr = None; // C `:296` `update_node_udp(n, NULL)`
+        self.udp_addr = None; // `update_node_udp(n, NULL)`
         self.udp_addr_cached = None;
-        // C `:297`: `memset(&n->status, 0, ...)`. Subsumes `:256,260,265`.
-        self.status = TunnelStatus::default();
+        self.status = TunnelStatus::default(); // `memset(&n->status, 0, ...)`
     }
 }
 
@@ -122,9 +116,8 @@ impl TunnelState {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelStatus {
-    /// `node.h:34`. Bit 1. Set by SPTPS `receive_record` cb on
-    /// `SPTPS_HANDSHAKE` (NOT `ans_key_h` — `protocol_key.c:568` reads).
-    /// Gates `send_sptps_packet` (`net_packet.c:685`).
+    /// Bit 1. Set by SPTPS `receive_record` cb on `SPTPS_HANDSHAKE`
+    /// (NOT `ans_key_h` — it reads). Gates `send_sptps_packet`.
     pub validkey: bool,
 
     /// `node.h:35`. Bit 2. Set in `send_req_key:128`; cleared on
@@ -135,13 +128,13 @@ pub struct TunnelStatus {
     /// `node.h:40`. Bit 6. Always true (no legacy). `dump nodes` parity.
     pub sptps: bool,
 
-    /// `node.h:41`. Bit 7. Valid UDP packet received from this node
-    /// (`net_packet.c:164`). Gates TCP-tunnel → UDP-direct switch.
+    /// Bit 7. Valid UDP packet received from this node. Gates
+    /// TCP-tunnel → UDP-direct switch.
     pub udp_confirmed: bool,
 
-    /// `node.h:42`. Bit 8. Transient: set/clear bracket around
-    /// `send_udp_probe_packet` (`net_packet.c:1242,1244`). Side-channel
-    /// from `try_udp` to `send_sptps_data` (4 layers down).
+    /// Bit 8. Transient: set/clear bracket around
+    /// `send_udp_probe_packet`. Side-channel from `try_udp` to
+    /// `send_sptps_data` (4 layers down).
     pub send_locally: bool,
 
     /// `node.h:43`. Bit 9. Ephemeral, per-packet. `route.c` reads for
@@ -170,8 +163,8 @@ impl TunnelState {
 }
 
 impl TunnelStatus {
-    /// Reconstruct C `node_status_t.value` for `dump_nodes`.
-    /// `node.h:31-48` GCC-LSB-first: bit 0 unused_active, 1 validkey,
+    /// Reconstruct `node_status_t.value` for `dump_nodes`.
+    /// GCC-LSB-first: bit 0 unused_active, 1 validkey,
     /// 2 waitingforkey, 3 visited†, 4 reachable(param), 5 indirect†,
     /// 6 sptps, 7 udp_confirmed, 8 send_locally‡, 9 udppacket,
     /// 10-12 omitted†. († always 0: graph scratch / unported.
@@ -205,16 +198,15 @@ impl TunnelStatus {
     }
 }
 
-/// `protocol_key.c:124` `"tinc UDP key expansion %s %s"`. Per-tunnel
-/// HKDF label, (initiator, responder). DIFFERENT from `"tinc TCP key
-/// expansion"` (`protocol_auth.c:462`) — meta vs tunnel must not
-/// share keys.
+/// `"tinc UDP key expansion %s %s"`. Per-tunnel HKDF label,
+/// (initiator, responder). DIFFERENT from `"tinc TCP key
+/// expansion"` — meta vs tunnel must not share keys.
 #[must_use]
 pub fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
-    // C `:122-131`: `labellen = 25 + a + b`, passed to `sptps_start`
-    // (NOT `strlen(label)`). Format is 24 fixed chars; +1 is snprintf's
-    // NUL. The NUL is in the SIG transcript + HKDF seed (`sptps.c:206,258`).
-    // Same arithmetic as TCP label. Previously omitted the NUL —
+    // `labellen = 25 + a + b`, passed to `sptps_start` (NOT
+    // `strlen(label)`). Format is 24 fixed chars; +1 is snprintf's
+    // NUL. The NUL is in the SIG transcript + HKDF seed. Same
+    // arithmetic as TCP label. Previously omitted the NUL —
     // Rust↔Rust agreed with itself on the wrong label until cross-impl
     // tests caught it.
     let mut label = format!("tinc UDP key expansion {initiator} {responder}").into_bytes();
@@ -263,9 +255,9 @@ mod tests {
 
         t.reset_unreachable();
 
-        assert!(t.sptps.is_none()); // `graph.c:259`
-        assert!(t.last_req_key.is_none()); // `:263`
-        // `:266-269`: `mtu` survives, rest reset.
+        assert!(t.sptps.is_none());
+        assert!(t.last_req_key.is_none());
+        // `mtu` survives, rest reset.
         let p = t.pmtu.as_ref().expect("pmtu state survives");
         assert_eq!(p.mtu, 1400, "mtu survives unreachable");
         assert_eq!(p.maxmtu, MTU);
@@ -284,8 +276,8 @@ mod tests {
 
     #[test]
     fn make_udp_label_format() {
-        // `protocol_key.c:122-131`: `labellen = 25 + a + b` (NOT strlen).
-        // NUL is in the signed/HKDF material (`sptps.c:206,258`).
+        // `labellen = 25 + a + b` (NOT strlen). NUL is in the
+        // signed/HKDF material.
         assert_eq!(
             make_udp_label("alice", "bob"),
             b"tinc UDP key expansion alice bob\0"
@@ -299,7 +291,6 @@ mod tests {
 
     #[test]
     fn make_udp_label_differs_from_tcp() {
-        // `protocol_auth.c:462` vs `protocol_key.c:124`.
         let udp = make_udp_label("a", "b");
         let tcp = b"tinc TCP key expansion a b";
         assert_ne!(udp.as_slice(), tcp.as_slice());

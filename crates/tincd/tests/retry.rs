@@ -1,6 +1,6 @@
-//! `retry()` (`net.c:460-482`): the "network came back, reconnect
-//! NOW" button. Triggered by SIGALRM and `tinc retry` (`REQ_RETRY`,
-//! `control.c:95`). Also `REQ_DISCONNECT` (`control.c:102-122`).
+//! `retry()`: the "network came back, reconnect NOW" button.
+//! Triggered by SIGALRM and `tinc retry` (`REQ_RETRY`). Also
+//! `REQ_DISCONNECT`.
 //!
 //! ## What's proven
 //!
@@ -130,9 +130,7 @@ fn sigalrm_retries_now() {
     }
 
     // ─── wait for first connect attempt + 5s backoff arm ────────
-    // C `net_socket.c:583`: `"Trying to connect to %s (%s)"`.
-    // C `net_socket.c:414-416`: `"Trying to re-establish outgoing
-    // connection in %d seconds"` — 5 on first failure.
+    // First failure backs off 5s.
     let deadline = Instant::now() + Duration::from_secs(5);
     while count_in_log(&log, "Trying to connect to deadpeer") < 1 {
         assert!(Instant::now() < deadline, "no first connect attempt");
@@ -204,7 +202,6 @@ fn sigalrm_retries_now() {
 }
 
 /// `REQ_RETRY` (`"18 10"`) → same `on_retry()` path. Ack `"18 10 0"`.
-/// C `control.c:95-96`: `retry(); return control_ok(c, REQ_RETRY)`.
 #[test]
 fn req_retry_retries_now() {
     let tmp = tmp("req-retry");
@@ -249,7 +246,7 @@ fn req_retry_retries_now() {
     let mut ctl = Ctl::connect(&socket, &pidfile);
     writeln!(ctl.w, "18 10").unwrap();
 
-    // C `control_ok` → `"%d %d %d", CONTROL, type, 0` → `"18 10 0\n"`.
+    // `control_ok` → `"%d %d %d", CONTROL, type, 0` → `"18 10 0\n"`.
     let mut ack = String::new();
     ctl.r.read_line(&mut ack).expect("retry ack");
     assert_eq!(ack.trim_end(), "18 10 0", "REQ_RETRY ack");
@@ -271,7 +268,7 @@ fn req_retry_retries_now() {
 }
 
 /// `REQ_DISCONNECT` not-found (`"18 12 nobody"` → `"18 12 -2"`) and
-/// malformed (`"18 12"` → `"18 12 -1"`). C `control.c:108,121`.
+/// malformed (`"18 12"` → `"18 12 -1"`).
 ///
 /// The found path (terminate a real conn) needs a second daemon —
 /// covered by `two_daemons.rs` infrastructure, off-limits here.
@@ -320,22 +317,20 @@ fn req_disconnect_replies() {
     r.read_line(&mut ack).unwrap();
 
     // ─── not found: `"18 12 nobody"` → `"18 12 -2"` ─────────────
-    // C `:120-121`: `found ? 0 : -2`. Only conn is us (`<control>`);
-    // no `nobody` conn exists.
+    // Only conn is us (`<control>`); no `nobody` conn exists.
     writeln!(w, "18 12 nobody").unwrap();
     let mut reply = String::new();
     r.read_line(&mut reply).unwrap();
     assert_eq!(reply.trim_end(), "18 12 -2", "not-found reply");
 
     // ─── malformed: `"18 12"` (no name) → `"18 12 -1"` ──────────
-    // C `:108`: `if(sscanf(...) != 1) return control_return(c, ..., -1)`.
     writeln!(w, "18 12").unwrap();
     let mut reply = String::new();
     r.read_line(&mut reply).unwrap();
     assert_eq!(reply.trim_end(), "18 12 -1", "malformed reply");
 
     // ─── ctl conn still alive after both ────────────────────────
-    // C `control_return` always returns true; conn stays.
+    // `control_return` always returns true; conn stays.
     // REQ_DUMP_CONNECTIONS proves we can still talk.
     writeln!(w, "18 6").unwrap();
     let mut rows = Vec::new();

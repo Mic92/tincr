@@ -37,9 +37,9 @@ fn tmp(tag: &str) -> TmpGuard {
 
 /// One daemon's config bundle. Seeds are distinct per node so the
 /// keys differ.
-/// Row format (`connection.c:168`): `"18 6 NAME HOST port P
-/// OPTS_HEX FD STATUS_HEX"`. Status bit 1 (`0x2`) is `active`
-/// (past ACK — `c->edge != NULL` in C). Control conn has bit 9
+/// Row format: `"18 6 NAME HOST port P OPTS_HEX FD STATUS_HEX"`.
+/// Status bit 1 (`0x2`) is `active` (past ACK — `c->edge !=
+/// NULL`). Control conn has bit 9
 /// (`0x200`). Filter rows by name AND active bit.
 fn has_active_peer(rows: &[String], peer_name: &str) -> bool {
     rows.iter().any(|r| {
@@ -252,8 +252,8 @@ impl Node {
     fn spawn_with_fd(&self, fd: i32) -> Child {
         // Clear CLOEXEC so the fd survives `exec()`. Rust's `Command::
         // spawn` doesn't close inherited fds (only stdin/out/err are
-        // managed). C tincd's `Device = N` mode (`fd_device.c:163`)
-        // assumes the parent did this.
+        // managed). C tincd's `Device = N` mode assumes the parent
+        // did this.
         // SAFETY: `fcntl(F_SETFD, 0)` clears the CLOEXEC bit. The fd
         // is valid (just from socketpair).
         unsafe {
@@ -364,7 +364,7 @@ fn two_daemons_connect_and_reach() {
     });
 
     // ─── dump nodes: 2 rows, both reachable ─────────────────────
-    // Row format (`node.c:210`): 23 fields. Status is field 11
+    // Row format: 23 fields. Status is field 11
     // (`%x`). Bit 4 = reachable = `0x10`.
     let node_reachable = |rows: &[String], name: &str| -> bool {
         rows.iter().any(|r| {
@@ -413,8 +413,8 @@ fn two_daemons_connect_and_reach() {
     // arrives as ADD_EDGE on alice. Alice's `on_add_edge` does
     // `lookup_edge(bob, alice)` → finds the synthesized reverse →
     // weight/options compare (probably same) → idempotent return
-    // (no addr update because the C `:136-148` returns early on
-    // weight+options match without updating address).
+    // (no addr update because we return early on weight+options
+    // match without updating address).
     //
     // So alice's graph has 2 edges. Same for bob. Both see both
     // directions; the synthesized reverse has no `edge_addrs` entry
@@ -493,15 +493,15 @@ fn two_daemons_connect_and_reach() {
     );
 }
 
-/// `purge()` (`net.c:50-93`) via REQ_PURGE (`control.c:75-77`).
+/// `purge()` via REQ_PURGE.
 ///
 /// Three daemons in a chain: alice — mid — bob. Kill bob; mid's
 /// `terminate()` deletes the mid↔bob edges and gossips DEL_EDGE to
 /// alice. Alice's `on_del_edge` runs `graph()` → bob unreachable.
 ///
-/// Then send REQ_PURGE to alice. C `:55-93`: pass 1 deletes bob's
-/// outgoing edges (none — alice never had a bob→* edge, only
-/// mid→bob), pass 2 sees no edge with `to == bob` (mid's DEL_EDGE
+/// Then send REQ_PURGE to alice. Pass 1 deletes bob's outgoing
+/// edges (none — alice never had a bob→* edge, only mid→bob),
+/// pass 2 sees no edge with `to == bob` (mid's DEL_EDGE
 /// removed it), `!autoconnect` (we set `AutoConnect = no`), no
 /// strictsubnets → `node_del`. dump_nodes goes from 3 rows to 2.
 ///
@@ -522,8 +522,8 @@ fn purge_removes_unreachable_node() {
 
     let tmp = tmp("purge");
     // AutoConnect = no: pass 2's gate is `!autoconnect`. Default is
-    // true (`net_setup.c:561`), under which purge NEVER deletes
-    // nodes (it wants to dial them).
+    // true, under which purge NEVER deletes nodes (it wants to dial
+    // them).
     let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
     let mid = Node::new(tmp.path(), "mid", 0xC9).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xB9).with_conf("AutoConnect = no\n");
@@ -586,9 +586,9 @@ fn purge_removes_unreachable_node() {
     });
 
     // ─── REQ_PURGE: ack `"18 8 0"`, idempotent ───────────────────
-    // C `control.c:77`: `control_ok(c, REQ_PURGE)` → `"18 8 0\n"`.
-    // bob is already gone (auto-purge above); this proves the ctl
-    // arm is wired up and handles the empty-purge case (C does:
+    // `control_ok(c, REQ_PURGE)` → `"18 8 0\n"`. bob is already
+    // gone (auto-purge above); this proves the ctl arm is wired up
+    // and handles the empty-purge case (
     // both `splay_each` loops just iterate zero unreachable nodes).
     writeln!(alice_ctl.w, "18 8").unwrap();
     let mut ack = String::new();
@@ -614,8 +614,8 @@ fn purge_removes_unreachable_node() {
     let _ = mid_child.wait();
 }
 
-/// `purge()` pass-2 early return (`net.c:80-85`): a single edge to
-/// ANY unreachable node aborts ALL node deletions. The autoconnect
+/// `purge()` pass-2 early return: a single edge to ANY unreachable
+/// node aborts ALL node deletions. The autoconnect
 /// gate also prevents deletion (default config).
 ///
 /// Same chain as `purge_removes_unreachable_node`, but alice runs
@@ -624,14 +624,14 @@ fn purge_removes_unreachable_node() {
 /// but pass 2's `!autoconnect` gate is false, so bob STAYS in the
 /// node list. dump_nodes: still 3 rows, bob status `0x0`.
 ///
-/// This proves we don't over-purge: the C `:86` gate exists because
+/// This proves we don't over-purge: the gate exists because
 /// autoconnect WANTS dead nodes around — it dials them.
 #[test]
 fn purge_respects_autoconnect_gate() {
     use std::io::{BufRead, Write};
 
     let tmp = tmp("purge-ac");
-    // No `AutoConnect = no` line → default true (`net_setup.c:561`).
+    // No `AutoConnect = no` line → default true.
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let mid = Node::new(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xBA).with_conf("AutoConnect = no\n");
@@ -716,10 +716,8 @@ fn outgoing_retry_after_refused() {
     // `Connection::new_meta` stamps `last_ping_time` from the
     // CACHED `timers.now()` — up to ~1s stale (the sweep ticks at
     // 1s). With PingTimeout=1 the conn is born already-stale and
-    // the next sweep reaps it before `id_h` even runs. The C has
-    // the same race (`net_socket.c:764` uses the cached global
-    // `now`); PingTimeout=1 is just an unrealistic config. 3s
-    // gives the handshake room.
+    // the next sweep reaps it before `id_h` even runs. PingTimeout=1
+    // is just an unrealistic config. 3s gives the handshake room.
     let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingTimeout = 3\n");
     let bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingTimeout = 3\n");
 
@@ -780,7 +778,7 @@ fn outgoing_retry_after_refused() {
     let _ = bob_child.kill();
     let _ = bob_child.wait();
     let alice_stderr = drain_stderr(alice_child);
-    // C `:416`: "Trying to re-establish outgoing connection in N seconds".
+    // "Trying to re-establish outgoing connection in N seconds".
     assert!(
         alice_stderr.contains("Trying to re-establish outgoing connection in 5 seconds"),
         "retry_outgoing log missing; stderr:\n{alice_stderr}"
@@ -822,10 +820,10 @@ fn outgoing_retry_after_refused() {
 ///
 /// `O_NONBLOCK` on the daemon's end: `FdTun` doesn't set it; the
 /// daemon's `on_device_read` loops until `WouldBlock`, so blocking
-/// fds would hang the loop. We set it in the test before passing the
-/// fd in. (C tincd's `linux/device.c:63` does `O_NONBLOCK` via the
-/// `ioctl` flow; `fd_device.c` doesn't — the Java parent is supposed
-/// to. We're the Java parent.)
+/// fds would hang the loop. We set it in the test before passing
+/// the fd in. (C tincd's TUN open does `O_NONBLOCK` via the `ioctl`
+/// flow; the fd-device path doesn't — the parent is supposed to.
+/// We're the parent.)
 ///
 /// ## The first packet is dropped
 ///
@@ -896,8 +894,8 @@ fn first_packet_across_tunnel() {
     // Send one packet to alice's TUN. `route()` says Forward{to:
     // bob}; `send_sptps_packet`'s PACKET 17 short-circuit fires
     // (direct conn, minmtu=0) so the kick is DELIVERED, not dropped.
-    // The C `:684` was `!validkey && !connection`; with a direct
-    // conn validkey doesn't matter. The follow-up `try_tx` kicks
+    // `!validkey && !connection`; with a direct conn validkey
+    // doesn't matter. The follow-up `try_tx` kicks
     // `send_req_key` for the UDP path.
     //
     // Packet shape for FdTun: RAW IPv4 bytes (no ether header,
@@ -995,8 +993,7 @@ fn first_packet_across_tunnel() {
     );
 
     // ─── REQ_DUMP_TRAFFIC ────────────────────────────────────────
-    // C `node.c:226-231`. Format-is-contract: `"18 13 NAME in_p
-    // in_b out_p out_b"`. Same counters as the dump-nodes tail
+    // Format-is-contract: `"18 13 NAME in_p in_b out_p out_b"`. Same counters as the dump-nodes tail
     // (both read `n->in_packets` etc) so cross-check exact values.
     // Row count = node count (C iterates `node_tree`: includes
     // myself).
@@ -1027,16 +1024,16 @@ fn first_packet_across_tunnel() {
         "dump_traffic == dump_nodes tail"
     );
     assert_eq!((bt_in_p, bt_in_b), (b_in_p, b_in_b));
-    // myself row: alice's `in_packets` = TUN reads (C `:1928`).
-    // She read the kick + the real packet → ≥2. bob's `out_packets`
-    // = TUN writes (C `:1565`); he wrote at least the real packet.
+    // myself row: alice's `in_packets` = TUN reads. She read the
+    // kick + the real packet → ≥2. bob's `out_packets` = TUN
+    // writes; he wrote at least the real packet.
     let (am_in_p, _, _, _) = traffic_row(&a_traffic, "alice").expect("alice myself");
     assert!(am_in_p >= 2, "alice myself in: {am_in_p}; {a_traffic:?}");
     let (_, _, bm_out_p, _) = traffic_row(&b_traffic, "bob").expect("bob myself");
     assert!(bm_out_p >= 1, "bob myself out: {bm_out_p}; {b_traffic:?}");
 
-    // udp_confirmed (bit 7) is NOT asserted: with the C `:725`
-    // gate now wired, `data.len() > minmtu(=0)` → PACKET 17 over
+    // udp_confirmed (bit 7) is NOT asserted: with the
+    // `data.len() > minmtu(=0)` gate now wired, → PACKET 17 over
     // the meta-conn, not UDP. minmtu only goes nonzero after PMTU
     // converges (separate from validkey). The C would do the same.
     // The previous assert relied on the PACKET 17 send path being
@@ -1303,8 +1300,8 @@ fn compression_roundtrip() {
 ///
 /// Then SIGSTOP one daemon. The other side's PING goes unanswered
 /// (the stopped process doesn't `recv()`). After `PingTimeout`, the
-/// `pinged` bit is still set → "didn't respond to PING" → terminate
-/// (`net.c:253-257`). SIGCONT → the stopped daemon wakes, sees EOF
+/// `pinged` bit is still set → "didn't respond to PING" →
+/// terminate. SIGCONT → the stopped daemon wakes, sees EOF
 /// on its socket (the OTHER side closed it), terminates, and its
 /// outgoing retry kicks in. `PingTimeout=3` gives the stopped
 /// daemon room to NOT trigger its OWN sweep on wake (it was asleep
@@ -1312,8 +1309,7 @@ fn compression_roundtrip() {
 /// post-wake — wait, no, the suspend detector triggers if the GAP
 /// is >60s. SIGSTOP for 5s doesn't trigger it).
 ///
-/// Exercises `protocol_misc.c:47-76` (PING/PONG) and the `:253-
-/// 257` pinged-but-no-pong terminate path.
+/// Exercises PING/PONG and the pinged-but-no-pong terminate path.
 #[test]
 fn ping_pong_keepalive() {
     let tmp = tmp("pingpong");
@@ -1384,8 +1380,7 @@ fn ping_pong_keepalive() {
 
     // ─── SIGCONT alice; she sees EOF, retries, reconnects ──────
     // Alice wakes. Bob already closed his side; alice's next read
-    // sees EOF → terminate → outgoing retry (`net.c:155-161`).
-    // The retry connects; the handshake runs; ACK; both active
+    // sees EOF → terminate → outgoing retry. The retry connects; the handshake runs; ACK; both active
     // again. The retry is immediate (`timeout = 0` after a conn
     // that reached ACK).
     assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGCONT) }, 0);
@@ -1403,7 +1398,7 @@ fn ping_pong_keepalive() {
 
 /// `tinc-up` runs at setup. Write a script that touches a marker;
 /// spawn the daemon; assert the marker exists. Also covers the
-/// `INTERFACE` env var (`script.c:125`): the script reads it and
+/// `INTERFACE` env var: the script reads it and
 /// echoes into the marker.
 ///
 /// Shebang required: `Command::status` is direct `execve()`, not
@@ -1649,8 +1644,7 @@ fn three_daemon_relay() {
     // forwards). bob decrypts.
     //
     // Security audit `2f72c2ba` relay gate: mid drops UDP relay
-    // packets from senders it hasn't UDP-confirmed (C `net_packet.
-    // c:1758`). validkey (alice↔bob tunnel) and udp_confirmed
+    // packets from senders it hasn't UDP-confirmed. validkey (alice↔bob tunnel) and udp_confirmed
     // (alice@mid) race — the kick above drove `try_tx(bob)` → PMTU
     // probe to mid, but the probe-reply may not have landed yet.
     // Resend the data packet on each poll: each send drives `try_
@@ -1728,8 +1722,7 @@ fn three_daemon_relay() {
 /// - alice's `dump nodes` shows bob as **unreachable**. She
 ///   never received bob's ADD_EDGE because mid didn't forward it.
 ///   (bob IS in alice's graph: `load_all_nodes` walks hosts/ at
-///   setup and adds every name — C `net_setup.c:186-189`. But
-///   no edge reaches him.)
+///   setup and adds every name. But no edge reaches him.)
 /// - bob: same. alice is unreachable from bob's view.
 /// - mid: 3 nodes, all REACHABLE. Hub knows spokes; spokes don't
 ///   know each other's edges.
@@ -1871,8 +1864,8 @@ fn three_daemon_tunnelserver() {
             .collect()
     };
 
-    // `load_all_nodes` (C `net_setup.c:186-189`) adds every
-    // hosts/-file name to the graph at setup, so bob IS in
+    // `load_all_nodes` adds every hosts/-file name to the graph at
+    // setup, so bob IS in
     // alice's `dump nodes` (alice has hosts/bob for the pubkey).
     // The tunnelserver assertion is REACHABILITY, not presence:
     // mid never forwarded bob's ADD_EDGE → no edge to bob →
@@ -1998,9 +1991,9 @@ fn three_daemon_tunnelserver() {
 /// `StrictSubnets = yes`: alice's `hosts/bob` is the AUTHORITY for
 /// which subnets bob may claim. bob owns `10.0.0.2/32` in his own
 /// config; he gossips ADD_SUBNET for it via mid → alice. alice's
-/// `hosts/bob` does NOT have `Subnet = 10.0.0.2/32`. The gate at
-/// `protocol_subnet.c:116-122` fires: alice forwards the gossip
-/// (to nobody, no other peers) but does NOT add it locally.
+/// `hosts/bob` does NOT have `Subnet = 10.0.0.2/32`. The
+/// strictsubnets gate fires: alice forwards the gossip (to nobody,
+/// no other peers) but does NOT add it locally.
 ///
 /// Unlike `tunnelserver`, `strictsubnets` does NOT filter topology:
 /// alice still learns bob exists (mid forwards bob's ADD_EDGE). She
@@ -2436,7 +2429,7 @@ fn tinc_join_against_real_daemon() {
     let cookie: [u8; 18] = *b"test-cookie-18bxxx";
     let inv_filename = cookie_filename(&cookie, inv_key.public_key());
 
-    // Invitation file body. Format (`invitation.c:536-558`):
+    // Invitation file body. Format:
     //   Name = <invited>\n
     //   <some-config>\n
     //   #---#\n
@@ -2565,7 +2558,7 @@ fn tinc_join_against_real_daemon() {
 // autoconnect (chunk-11)
 
 /// `load_all_nodes` populates `has_address` AND adds hosts/-only
-/// names to the graph (`net_setup.c:186-189`). Alice has a `hosts/
+/// names to the graph. Alice has a `hosts/
 /// carol` file with `Address =` but NO `ConnectTo = carol` and
 /// carol never runs. After spawn, `dump nodes` shows carol as a
 /// row — proves `lookup_or_add_node` ran for hosts/-file-only
@@ -2657,14 +2650,14 @@ fn load_all_nodes_populates_graph() {
 /// **Why ~15s and not faster**: `make_new_connection` randomizes
 /// over eligible nodes. With 3 eligibles, the first pick is 1/3
 /// each. Once one connects, `nc=1`, next tick picks from 2. The
-/// `pending_outgoings` check (`autoconnect.c:59-71`) means a
-/// re-roll on the SAME node is `Noop` — doesn't burn a tick. With
+/// `pending_outgoings` check means a re-roll on the SAME node is
+/// `Noop` — doesn't burn a tick. With
 /// the periodic timer at 5s, worst-case is 3 successful picks =
 /// 15s. Add slop for the connect+handshake latency (loopback,
 /// ~100ms each).
 ///
-/// **Slow test**: ~15s. The 5s periodic is hardcoded (C `net.c:
-/// 298`: `{ 5, jitter() }`). Nextest's default slow-timeout is
+/// **Slow test**: ~15s. The 5s periodic is hardcoded
+/// (`{ 5, jitter() }`). Nextest's default slow-timeout is
 /// 30s; this fits. The CI profile has 60s.
 #[test]
 fn autoconnect_converges_to_three() {
@@ -3011,9 +3004,9 @@ fn socks5_proxy_roundtrip() {
 /// CONNECT line, dials upstream, sends 200, bidirectional relay.
 ///
 /// Mirrors `test/integration/proxy.py:127-158`. Sends NO headers
-/// (just status + blank line) — same as the python, which is what
-/// the C `protocol.c:148-161` works with. A header-sending proxy
-/// would terminate the C tinc connection (C-is-WRONG #10).
+/// (just status + blank line) — same as the python. A
+/// header-sending proxy would terminate the upstream tinc
+/// connection (upstream bug).
 ///
 /// One-shot: handles ONE connection then exits.
 fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
@@ -3054,8 +3047,8 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         let upstream = TcpStream::connect(target).expect("upstream connect");
 
         // ─── Reply: status + blank line, NO headers ─────────────────
-        // Same as proxy.py:155. The C only works with this minimal
-        // form (C-is-WRONG #10).
+        // Same as proxy.py:155. Upstream only works with this
+        // minimal form (upstream bug).
         //
         // tinc queues CONNECT + ID in the same flush (`connect.rs`:
         // `send_raw(CONNECT)` then `conn.send(Id)` before any read),
@@ -3187,8 +3180,8 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
 /// Three-node mesh, mid is the relay hub. After alice/bob both reach
 /// validkey via mid, an unauthenticated socket sends a crafted UDP
 /// packet to mid's port: `[dst_id6=sha512("bob")[:6]][src_id6=
-/// sha512("alice")[:6]][garbage]`. The C `net_packet.c:1758` gate
-/// (`if(!n) return`) drops this; before the fix, our relay branch
+/// sha512("alice")[:6]][garbage]`. The `if(!n) return` gate drops
+/// this; before the fix, our relay branch
 /// trusted the SRCID and forwarded the garbage to bob (whose SPTPS
 /// rejects it, kicking the REQ_KEY restart timer).
 ///
@@ -3450,8 +3443,8 @@ fn ipv6_unreachable_builds_icmpv6() {
 ///
 /// alice connects to bob. alice owns `10.0.0.1/32`. bob (acting
 /// malicious) hand-crafts a `DEL_SUBNET alice 99.99.99.99/32` over
-/// the meta-conn. C `protocol_subnet.c:216-225`: lookup_subnet
-/// fails, warn, return true. Before fix: alice's `owner == myself`
+/// the meta-conn. `lookup_subnet` fails, warn, return true. Before
+/// fix: alice's `owner == myself`
 /// fired BEFORE lookup, retaliated `ADD_SUBNET alice 99.99.99.99/32`
 /// — lying about a subnet she never claimed.
 ///
@@ -3478,9 +3471,9 @@ fn ipv6_unreachable_builds_icmpv6() {
 /// `gossip.rs` would be ideal, but `on_del_subnet` needs full daemon
 /// state. Covered indirectly: `three_daemon_strictsubnets` exercises
 /// DEL_SUBNET dispatch end-to-end (proves the handler still works);
-/// the fix is a one-liner gate (`subnets.contains()` check) reviewed
-/// against C `:216-225`. The `udp_relay_gate` test above is the
-/// security-critical regression of this batch.
+/// the fix is a one-liner gate (`subnets.contains()` check). The
+/// `udp_relay_gate` test above is the security-critical regression
+/// of this batch.
 ///
 /// Same applies to fix #5 (subnet-down for unknown subnets): the
 /// del-first reorder is structurally identical; `scripts.rs::host_
@@ -3568,20 +3561,19 @@ fn del_subnet_legitimate_still_works() {
     let _ = bob_child.wait();
 }
 
-/// **KeyExpire timer forces SPTPS rekey.** `net_setup.c:144-160`,
-/// `protocol_key.c:38-62`. Gap-audit `bcc5c3e3`: timer was defined
+/// **KeyExpire timer forces SPTPS rekey.** Gap-audit `bcc5c3e3`:
+/// timer was defined
 /// (`TimerWhat::KeyExpire`) but never armed; `unreachable!()` in the
 /// dispatch arm. SPTPS sessions lived forever on one key. The
 /// ChaCha20-Poly1305 nonce is `outseqno: u32` with no wrap check
-/// (`sptps.c:116`, `state.rs:403`); at sustained throughput nonce
+/// (`state.rs:403`); at sustained throughput nonce
 /// reuse is hours away.
 ///
 /// `KeyExpire = 1` so the timer fires in-test. After the rekey, send
 /// a packet and prove it still crosses (the new key works).
 ///
-/// C-nolegacy has the same bug (`timeout_add` at `net_setup.c:1049`
-/// is `#ifndef DISABLE_LEGACY`). This test would fail against
-/// `.#tincd-c` too.
+/// C-nolegacy has the same bug (`timeout_add` is `#ifndef
+/// DISABLE_LEGACY`). This test would fail against `.#tincd-c` too.
 #[test]
 fn keyexpire_forces_rekey() {
     let tmp = tmp("keyexpire");
@@ -3695,7 +3687,7 @@ fn keyexpire_forces_rekey() {
 /// Gap audit `bcc5c3e3`: `Forwarding = off` was parsed (`daemon.
 /// rs:1244`) but never read in `dispatch_route_result`. An operator
 /// who set it to opt out of being a transit relay got transit
-/// traffic anyway. C `route.c:659-662,753-756,1052-1054`.
+/// traffic anyway.
 ///
 /// ## Shape
 ///
@@ -3710,7 +3702,7 @@ fn keyexpire_forces_rekey() {
 /// Why this contortion: the simpler `three_daemon_relay` shape
 /// (alice tunnels TO BOB, mid relays at the UDP layer) never
 /// calls mid's `route_packet` — mid forwards opaque ciphertext.
-/// The `route.c:659` gate is L3 forwarding ONLY. Forcing alice
+/// The forwarding gate is L3 forwarding ONLY. Forcing alice
 /// to encapsulate FOR mid is what makes mid decrypt-then-route.
 ///
 /// Before fix: bob receives the packet (gate never fires).

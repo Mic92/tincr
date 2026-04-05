@@ -1,4 +1,4 @@
-//! `seen_request` anti-loop cache (`protocol.c:78-228`).
+//! `seen_request` anti-loop cache.
 //!
 //! `ADD_EDGE`/`ADD_SUBNET` flood the mesh: a node receiving one
 //! re-broadcasts to all OTHER connections. Without dedup, any cycle
@@ -14,14 +14,14 @@
 //! goes through `Borrow<str>` so a cache hit allocates nothing; only
 //! a miss pays for `to_owned()`. The C is the same: `splay_search`
 //! borrows the caller's `const char*` on the stack, `xstrdup` only
-//! on insert (`protocol.c:237-243`).
+//! on insert.
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// `past_request_tree` (`protocol.c:89-92`). Key = full wire line.
+/// Dedup cache. Key = full wire line.
 pub struct SeenRequests {
     cache: HashMap<String, Instant>,
 }
@@ -34,9 +34,8 @@ impl SeenRequests {
         }
     }
 
-    /// `seen_request` (`protocol.c:234-249`). Returns `true` if
-    /// `line` was already seen (dup — drop it). Inserts `(line,
-    /// now)` and returns `false` if not.
+    /// Returns `true` if `line` was already seen (dup — drop it).
+    /// Inserts `(line, now)` and returns `false` if not.
     ///
     /// No alloc on hit: `HashMap<String, _>::contains_key(&str)`
     /// works via `String: Borrow<str>`. Mirrors C's stack-borrowed
@@ -49,25 +48,19 @@ impl SeenRequests {
         false
     }
 
-    /// `age_past_requests` (`protocol.c:213-228`). Evict entries
-    /// older than `max_age`. Returns `(deleted, left)` for the C's
-    /// `:226` debug log: `"Aging past requests: deleted %d, left
+    /// Evict entries older than `max_age`. Returns `(deleted, left)`
+    /// for the debug log: `"Aging past requests: deleted %d, left
     /// %d"`.
     ///
     /// C condition is `p->firstseen + pinginterval <= now.tv_sec`
     /// (`:219`); we keep the `<=` boundary: an entry exactly
     /// `max_age` old is evicted.
     ///
-    /// `HashMap::retain` is the borrowck-clean walk-and-delete; the
-    /// C `splay_each` + `splay_delete_node` is safe only because
-    /// `splay_each` caches the next pointer before the body runs.
-    ///
     /// `saturating_duration_since` not `duration_since`: an entry
     /// inserted at `t1` with `age()` later called with `t0 < t1`
     /// would panic. The daemon won't do this (both `now`s come from
-    /// `timers.now()`, monotonic) but the C `:219` `time_t` arith
-    /// doesn't panic either — future timestamps just don't expire.
-    /// One word; matches C exactly.
+    /// `timers.now()`, monotonic) but future timestamps shouldn't
+    /// crash either — they just don't expire.
     pub fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
         let before = self.cache.len();
         self.cache.retain(|_, firstseen| {
@@ -163,7 +156,7 @@ mod tests {
 
     #[test]
     fn age_boundary_evicts() {
-        // C `:219`: `firstseen + pinginterval <= now` — `<=`, so
+        // `firstseen + pinginterval <= now` — `<=`, so
         // exactly-max_age-old is evicted.
         let mut s = SeenRequests::new();
         let t0 = Instant::now();

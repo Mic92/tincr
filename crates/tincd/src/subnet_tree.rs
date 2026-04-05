@@ -7,20 +7,19 @@
 //!
 //! ## Data structure
 //!
-//! C `subnet.c` uses ONE `splay_tree_t subnet_tree` for all three
+//! Upstream uses ONE `splay_tree_t subnet_tree` for all three
 //! address families, with a `type` discriminant on each entry and a
-//! `if(p->type != SUBNET_IPV4) continue` guard in every lookup loop
-//! (`subnet.c:268`). We split into three `BTreeMap`s — same iteration
+//! `if(p->type != SUBNET_IPV4) continue` guard in every lookup loop.
+//! We split into three `BTreeMap`s — same iteration
 //! order, no per-iteration type check, and the borrow checker doesn't
 //! tangle when v4 and v6 lookups happen on the same packet (TAP mode
 //! with dual-stack ARP).
 //!
 //! ## The comparator IS the algorithm
 //!
-//! `subnet_compare_ipv4` (`subnet_parse.c:137-159`) sorts by prefix
-//! length DESCENDING first. So in-order tree iteration visits `/32`
-//! before `/24` before `/8`. `lookup_subnet_ipv4` (`subnet.c:256-290`)
-//! is then a linear scan: first `maskcmp` hit IS the longest match.
+//! `subnet_compare_ipv4` sorts by prefix length DESCENDING first.
+//! So in-order tree iteration visits `/32` before `/24` before
+//! `/8`. `lookup_subnet_ipv4` is then a linear scan: first `maskcmp` hit IS the longest match.
 //! No trie needed. The sort order does the work.
 //!
 //! Our `Ord for Ipv4Key` is the C comparator; `BTreeMap::iter()` is
@@ -28,9 +27,9 @@
 //!
 //! ## What's NOT here
 //!
-//! - The hash cache (`subnet.c:33-36`, `ipv4_cache` etc). Hot-path
-//!   optimization; separate commit once routing actually works.
-//! - The per-node subnet tree (`node->subnet_tree`). The C maintains
+//! - The hash cache (`ipv4_cache` etc). Hot-path optimization;
+//!   separate commit once routing actually works.
+//! - The per-node subnet tree (`node->subnet_tree`). Upstream maintains
 //!   TWO trees per subnet (global + the owner's). We only need the
 //!   global one for routing; the per-node view is for `dump subnets`
 //!   and that can filter the global tree by owner.
@@ -53,7 +52,7 @@ use tinc_proto::Subnet;
 // and value. `Subnet` is `Copy` (enum of PODs); storing once saves
 // ~28 bytes per entry. The owner `String` is the only allocation.
 
-/// `subnet_compare_ipv4` sort key. `subnet_parse.c:137-159`.
+/// `subnet_compare_ipv4` sort key.
 ///
 /// The `Subnet` field is always `Subnet::V4` — enforced by `add()`.
 /// We keep the full enum (not destructured fields) so `lookup_ipv4`
@@ -64,14 +63,14 @@ struct Ipv4Key {
     owner: Option<String>,
 }
 
-/// `subnet_compare_ipv6` sort key. `subnet_parse.c:161-183`.
+/// `subnet_compare_ipv6` sort key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ipv6Key {
     subnet: Subnet,
     owner: Option<String>,
 }
 
-/// `subnet_compare_mac` sort key. `subnet_parse.c:119-135`.
+/// `subnet_compare_mac` sort key.
 ///
 /// No prefix length — MAC addresses are exact-match (TAP-mode bridge
 /// learning, like a switch's FDB).
@@ -86,30 +85,31 @@ struct MacKey {
 // The C does `b->prefixlength - a->prefixlength` (int subtraction).
 // That's fine for u8-range values but `a->weight - b->weight` is an
 // i32-on-i32 subtraction and the wire format never range-checks
-// weight (`%d` parse, `subnet_parse.c:250`). `i32::MIN - 1` is UB
-// in C and a panic in Rust. We use `Ord::cmp` chaining; the
-// descending-prefix bit is `.reverse()`.
+// weight (`%d` parse). `i32::MIN - 1` is UB in C and a panic in
+// Rust. We use `Ord::cmp` chaining; the descending-prefix bit is
+// `.reverse()`.
 //
-// The C also short-circuits owner compare when either owner is NULL
-// (`subnet_parse.c:154`: `if(result || !a->owner || !b->owner)`).
-// That's the search-key sentinel pattern: `lookup_subnet` builds a
+// Upstream also short-circuits owner compare when either owner is
+// NULL (`if(result || !a->owner || !b->owner)`). That's the
+// search-key sentinel pattern: `lookup_subnet` builds a
 // fake `subnet_t` with `owner = NULL` and `splay_search`es for it.
 // We don't need that — `BTreeMap::get`/`iter` don't take fake
 // entries.
 //
-/// Differential-fuzz hook: the first three tiers of `subnet_compare_ipv4`
-/// (`subnet_parse.c:137-154`) as a free function over plain fields.
+/// Differential-fuzz hook: the first three tiers of
+/// `subnet_compare_ipv4` as a free function over plain fields.
 ///
 /// The `Ord for Ipv4Key` impl below does the same comparison but takes a
 /// `Subnet` enum + `Option<String>` owner. The fuzz harness wants to feed
 /// arbitrary bytes without constructing `Subnet::V4` (which has its own
 /// invariants the parser enforces). Exposing this lets the fuzzer hit
-/// the comparison logic directly with garbage `prefix`/`weight` values
-/// — the C `int` type accepts those, our `u8 prefix` would clamp them.
+/// the comparison logic directly with garbage `prefix`/`weight`
+/// values — upstream `int` accepts those, our `u8 prefix` would
+/// clamp them.
 ///
-/// `prefix` is `i32` here (matching C's bare `int`) not `u8`: the wire
-/// format is `%d` and a buggy peer could send `prefixlength = -1` or
-/// `300`. The parser rejects those (`subnet_parse.c:254`), but the fuzz
+/// `prefix` is `i32` here (matching bare `int`) not `u8`: the wire
+/// format is `%d` and a buggy peer could send `prefixlength = -1`
+/// or `300`. The parser rejects those, but the fuzz
 /// harness wants to know what happens if one slips through. The
 /// `Ipv4Key::cmp` below uses the post-parse `u8` and is therefore a
 /// strictly narrower domain — if fuzz over `i32` is clean, `u8` is too.
@@ -141,10 +141,10 @@ pub fn cmp_ipv4_fuzz(
 // HOWEVER: `owner = NULL` is also a real tree state. `net_setup.c:
 // 485-505` inserts `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
 // `224.0.0.0/4`, `ff00::/8` with `subnet_add(NULL, s)`. `route.c:
-// 644,738`: `if(!subnet->owner) route_broadcast()`. We use `None`.
-// The C `:154` short-circuit sorts ownerless before owned at the
-// owner tiebreak (NULL stops the strcmp); `Option::Ord` gives us
-// the same: `None < Some(_)`.
+// `if(!subnet->owner) route_broadcast()`. We use `None`. The
+// upstream short-circuit sorts ownerless before owned at the owner
+// tiebreak (NULL stops the strcmp); `Option::Ord` gives us the
+// same: `None < Some(_)`.
 
 impl Ord for Ipv4Key {
     /// `subnet_compare_ipv4`. Four-level tiebreak:
@@ -174,8 +174,7 @@ impl Ord for Ipv4Key {
             unreachable!("Ipv4Key holds non-V4 subnet")
         };
 
-        // C `subnet_parse.c:140`: `b->prefixlength - a->prefixlength`.
-        // Descending → `.reverse()`.
+        // `b->prefixlength - a->prefixlength`. Descending → `.reverse()`.
         pa.cmp(&pb)
             .reverse()
             // C :146: `memcmp(&a->address, &b->address, sizeof ipv4_t)`.
@@ -194,7 +193,6 @@ impl PartialOrd for Ipv4Key {
 
 impl Ord for Ipv6Key {
     /// `subnet_compare_ipv6`. Same shape as v4, 16 bytes.
-    /// `subnet_parse.c:161-183`.
     fn cmp(&self, other: &Self) -> Ordering {
         let Subnet::V6 {
             addr: a,
@@ -227,9 +225,7 @@ impl PartialOrd for Ipv6Key {
 }
 
 impl Ord for MacKey {
-    /// `subnet_compare_mac`. `subnet_parse.c:119-135`.
-    ///
-    /// THREE levels, not four — no prefix on MAC:
+    /// `subnet_compare_mac`. THREE levels, not four — no prefix on MAC:
     /// 1. `address` (`memcmp` 6 bytes ≡ `[u8; 6]` `Ord`)
     /// 2. `weight`
     /// 3. `owner`
@@ -282,14 +278,13 @@ impl SubnetTree {
         Self::default()
     }
 
-    /// `subnet_add`. C `subnet.c:194-204`.
-    ///
-    /// Dispatches on `Subnet` variant to the right tree. The C
+    /// `subnet_add`. Dispatches on `Subnet` variant to the right
+    /// tree. Upstream
     /// inserts into BOTH the global tree and `n->subnet_tree`; we
     /// only have the global one (see module doc).
     ///
     /// Idempotent — re-adding the same `(subnet, owner)` is a no-op
-    /// (C `splay_insert` replaces, but the value IS the key so it's
+    /// (`splay_insert` replaces, but the value IS the key so it's
     /// observationally identical).
     pub fn add(&mut self, subnet: Subnet, owner: String) {
         let owner = Some(owner);
@@ -306,15 +301,15 @@ impl SubnetTree {
         }
     }
 
-    /// `subnet_add(NULL, s)`. C `net_setup.c:485-505`.
+    /// `subnet_add(NULL, s)`.
     ///
-    /// Ownerless subnets divert to `route_broadcast` (`route.c:644,
-    /// 738,1042`). The four hard-coded defaults (Ethernet broadcast,
+    /// Ownerless subnets divert to `route_broadcast`. The four
+    /// hard-coded defaults (Ethernet broadcast,
     /// IPv4 limited broadcast, IPv4 multicast `224/4`, IPv6 multicast
     /// `ff00::/8`) plus any `BroadcastSubnet` config entries.
     ///
-    /// `Option::Ord` sorts `None` first — matches C
-    /// `subnet_parse.c:154`'s NULL-short-circuit.
+    /// `Option::Ord` sorts `None` first — matches upstream's
+    /// NULL-short-circuit.
     pub fn add_broadcast(&mut self, subnet: Subnet) {
         match subnet {
             Subnet::V4 { .. } => {
@@ -338,10 +333,8 @@ impl SubnetTree {
         }
     }
 
-    /// `subnet_del`. C `subnet.c:206-214`.
-    ///
-    /// Returns `true` if the entry was present. The C `splay_delete`
-    /// is void; we expose the bool because `del_subnet_h` (the
+    /// `subnet_del`. Returns `true` if the entry was present.
+    /// `splay_delete` is void; we expose the bool because `del_subnet_h` (the
     /// protocol handler) wants to log "got DEL for unknown subnet".
     pub fn del(&mut self, subnet: &Subnet, owner: &str) -> bool {
         // Allocates a `String` for the lookup key. `BTreeSet::remove`
@@ -366,11 +359,11 @@ impl SubnetTree {
         }
     }
 
-    /// `lookup_subnet`. C `subnet.c:219-227`. Exact-match lookup
-    /// (NOT prefix-match — that's `lookup_ipv4`/`lookup_ipv6`).
+    /// `lookup_subnet`. Exact-match lookup (NOT prefix-match —
+    /// that's `lookup_ipv4`/`lookup_ipv6`).
     ///
-    /// Used by `add_subnet_h` (`protocol_subnet.c:93`) for the
-    /// strictsubnets lookup-first idempotency check: if the gossiped
+    /// Used by `add_subnet_h` for the strictsubnets lookup-first
+    /// idempotency check: if the gossiped
     /// subnet is already in the tree (preloaded by `load_all_nodes`
     /// from the operator's hosts/ files), the strictsubnets gate is
     /// silently bypassed. The gate fires only on UNAUTHORIZED subnets
@@ -397,7 +390,7 @@ impl SubnetTree {
         }
     }
 
-    /// `lookup_subnet_ipv4`. C `subnet.c:256-290`.
+    /// `lookup_subnet_ipv4`.
     ///
     /// Linear scan in tree order. Tree order has `/32` before `/24`
     /// before `/8` (descending prefix), so the FIRST entry whose
@@ -406,8 +399,8 @@ impl SubnetTree {
     ///
     /// ## Reachability
     ///
-    /// C `subnet.c:275`: `if(!p->owner || p->owner->status.reachable)
-    /// break`. The scan KEEPS GOING past matches whose owner is down,
+    /// `if(!p->owner || p->owner->status.reachable) break`. The scan
+    /// KEEPS GOING past matches whose owner is down,
     /// looking for a less-specific match owned by someone reachable.
     /// (If alice owns `10.0.0.0/24` but is offline, and bob owns
     /// `10.0.0.0/16`, route to bob.)
@@ -418,8 +411,8 @@ impl SubnetTree {
     ///
     /// C also remembers the LAST match (`r = p`) even if it never
     /// finds a reachable owner — `route_ipv4` then logs "Node %s
-    /// is not reachable" with that owner's name (`route.c:512`).
-    /// We return `Some` for that fallback too: the last `maskcmp`
+    /// is not reachable" with that owner's name. We return `Some`
+    /// for that fallback too: the last `maskcmp`
     /// hit, reachable or not.
     pub fn lookup_ipv4(
         &self,
@@ -436,9 +429,9 @@ impl SubnetTree {
         };
         let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.ipv4 {
-            // C `subnet.c:272`: `if(!maskcmp(...))` — but C `maskcmp`
-            // returns 0 for equal (memcmp convention), and `!0` is
-            // truthy. So `!maskcmp(...)` is "if equal under mask".
+            // `if(!maskcmp(...))` — `maskcmp` returns 0 for equal
+            // (memcmp convention), and `!0` is truthy. So
+            // `!maskcmp(...)` is "if equal under mask".
             // Our `matches(_, true)` returns `true` for equal.
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
@@ -453,7 +446,7 @@ impl SubnetTree {
         last_hit
     }
 
-    /// `lookup_subnet_ipv6`. C `subnet.c:292-326`. Same as v4.
+    /// `lookup_subnet_ipv6`. Same as v4.
     pub fn lookup_ipv6(
         &self,
         addr: &Ipv6Addr,
@@ -468,7 +461,7 @@ impl SubnetTree {
         for k in &self.ipv6 {
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
-                // C subnet.c:309: `!p->owner ||` short-circuit.
+                // `!p->owner ||` short-circuit.
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
@@ -477,9 +470,7 @@ impl SubnetTree {
         last_hit
     }
 
-    /// `lookup_subnet_mac`. C `subnet.c:222-254`.
-    ///
-    /// MAC has no prefix → exact-match only. Still a scan because
+    /// `lookup_subnet_mac`. MAC has no prefix → exact-match only. Still a scan because
     /// the same MAC can be advertised by multiple nodes with
     /// different weights (failover for a service VIP), and we want
     /// the lowest-weight reachable one. Tree order delivers
@@ -496,15 +487,15 @@ impl SubnetTree {
     ) -> Option<(&Subnet, Option<&str>)> {
         let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.mac {
-            // C `subnet.c:238`: `if(!memcmp(address, &p->address, 6))`.
-            // Exact match — `Subnet::matches` would work but this is
+            // `if(!memcmp(address, &p->address, 6))`. Exact match —
+            // `Subnet::matches` would work but this is
             // clearer (and skips constructing a query subnet).
             let Subnet::Mac { addr: a, .. } = k.subnet else {
                 unreachable!()
             };
             if a == *addr {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
-                // C subnet.c:241: `!p->owner ||` short-circuit.
+                // `!p->owner ||` short-circuit.
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
@@ -516,19 +507,18 @@ impl SubnetTree {
     /// `for splay_each(subnet_t, subnet, &subnet_tree)` (`subnet.c:
     /// 396`). All families, in C-splay-order: v4 first (descending
     /// prefix), then v6, then MAC. The C has ONE tree interleaved
-    /// by `subnet_compare`'s `a->type - b->type` first key (`subnet_
-    /// parse.c:185-192`); we have three trees and chain. Same
-    /// ordering: type discriminant ascending (V4=1, V6=2, MAC=0 in
-    /// the C enum — wait, the C enum is `MAC=0, V4=1, V6=2`, so
+    /// by `subnet_compare`'s `a->type - b->type` first key; we have
+    /// three trees and chain. Same ordering: type discriminant
+    /// ascending (the upstream enum is `MAC=0, V4=1, V6=2`, so
     /// MAC sorts FIRST). Match: mac, v4, v6.
     ///
-    /// SKIPS ownerless (broadcast) subnets. The C `send_everything`
-    /// (`protocol_auth.c:892-895`) walks per-node `n->subnet_tree`s;
-    /// broadcast subnets aren't in any node's tree, so they're never
-    /// gossiped. Our gossip.rs walks this global iterator instead —
+    /// SKIPS ownerless (broadcast) subnets. Upstream `send_everything`
+    /// walks per-node `n->subnet_tree`s; broadcast subnets aren't in
+    /// any node's tree, so they're never gossiped. Our gossip.rs
+    /// walks this global iterator instead —
     /// filtering here keeps the wire output equivalent. (Cosmetic
-    /// fallout: `dump_subnets` won't print `(broadcast)` rows. C
-    /// `subnet.c:405` does. Separate fix if anyone cares.)
+    /// fallout: `dump_subnets` won't print `(broadcast)` rows.
+    /// Separate fix if anyone cares.)
     pub fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
         self.mac
             .iter()
@@ -539,8 +529,8 @@ impl SubnetTree {
     }
 
     /// All subnets owned by `name`, collected. Wrapper over `iter()` +
-    /// filter + collect: 5 callsites had this exact 5-line block (`subnet_
-    /// update(n, NULL, ...)` in C terms, `subnet.c:352-372`). The collect
+    /// filter + collect: 5 callsites had this exact 5-line block
+    /// (`subnet_update(n, NULL, ...)` in upstream terms). The collect
     /// is intentional: callers immediately call `run_subnet_script` /
     /// `del()` while iterating, which would self-borrow on the iterator.
     #[must_use]
@@ -588,9 +578,9 @@ mod tests {
     // The comparator IS the algorithm. If these break, routing breaks.
     // Each test isolates ONE level by holding the others equal.
 
-    /// Level 1: `prefixlength` DESCENDING. C `subnet_parse.c:140`:
-    /// `b - a`. /24 sorts BEFORE /16 in tree order — the longer
-    /// prefix is "smaller" so iteration sees it first.
+    /// Level 1: `prefixlength` DESCENDING (`b - a`). /24 sorts
+    /// BEFORE /16 in tree order — the longer prefix is "smaller" so
+    /// iteration sees it first.
     #[test]
     fn ipv4_ord_prefixlen_desc() {
         let long = Ipv4Key {
@@ -637,10 +627,9 @@ mod tests {
         assert!(pref < backup);
     }
 
-    /// Weight is `i32`, C parses with `%d`, never bounds-checks
-    /// (`subnet_parse.c:250`). `Ord::cmp` doesn't overflow; the C
-    /// `a->weight - b->weight` would. Pin: negative sorts before
-    /// positive (it's just integer order).
+    /// Weight is `i32`, parsed with `%d`, never bounds-checked.
+    /// `Ord::cmp` doesn't overflow; `a->weight - b->weight` would.
+    /// Pin: negative sorts before positive (it's just integer order).
     #[test]
     fn ipv4_ord_weight_negative() {
         let neg = Ipv4Key {
@@ -654,16 +643,15 @@ mod tests {
         assert!(neg < pos);
     }
 
-    /// **[DOCUMENTED]** divergence from C at `subnet_parse.c:152`.
+    /// **[DOCUMENTED]** divergence from upstream `subnet_compare`.
     ///
-    /// Found by `fuzz/fuzz_targets/subnet_cmp_diff.rs` in <1s. C does
+    /// Found by `fuzz/fuzz_targets/subnet_cmp_diff.rs` in <1s. Upstream does
     /// `a->weight - b->weight` — signed-overflow UB, observably wrap
     /// under `-fwrapv`. Rust uses `Ord::cmp` which never overflows.
     /// At `i32::MAX` vs `i32::MIN` the C result wraps to `-1` (Less);
     /// Rust correctly says Greater.
     ///
-    /// **Wire-reachable:** weight is `%d`-parsed at `subnet_parse.c:250`
-    /// with no range check. `Subnet = 10.0.0.0/8#2147483647` is accepted.
+    /// **Wire-reachable:** weight is `%d`-parsed with no range check. `Subnet = 10.0.0.0/8#2147483647` is accepted.
     /// Two such subnets with the same prefix+addr from different owners
     /// route differently on C tincd vs Rust tincd: C's splay tree and
     /// Rust's BTreeMap iterate them in opposite order.
@@ -751,8 +739,8 @@ mod tests {
         assert!(long < short);
     }
 
-    /// `subnet_compare_mac` (`subnet_parse.c:119-135`): NO prefix
-    /// level. Just addr, weight, owner. Three levels not four.
+    /// `subnet_compare_mac`: NO prefix level. Just addr, weight,
+    /// owner. Three levels not four.
     #[test]
     fn mac_no_prefix() {
         // Addr is the first key.
@@ -812,8 +800,7 @@ mod tests {
     }
 
     /// Same subnet, two owners, different weight. Lower weight wins
-    /// (sorts first, hits first). C `subnet_parse.c:152`: `a->weight
-    /// - b->weight` ascending.
+    /// (sorts first, hits first). `a->weight - b->weight` ascending.
     #[test]
     fn lookup_weight_prefers_lower() {
         let mut t = SubnetTree::new();
@@ -824,8 +811,8 @@ mod tests {
         assert_eq!(owner, Some("primary"));
     }
 
-    /// C `subnet.c:275`: `if(p->owner->status.reachable) break`.
-    /// alice owns the /24 but is down; bob owns the /16 and is up.
+    /// `if(p->owner->status.reachable) break`. alice owns the /24
+    /// but is down; bob owns the /16 and is up.
     /// Scan finds alice first (longer prefix), `is_reachable` says
     /// no, scan continues, finds bob, breaks. Route to bob.
     #[test]
@@ -841,10 +828,10 @@ mod tests {
         assert_eq!(*s, sn("10.0.0.0/16"));
     }
 
-    /// C `subnet.c:273`: `r = p` happens BEFORE the reachable check.
-    /// If NOBODY is reachable, return the last (= shortest matching)
-    /// subnet anyway. `route_ipv4` uses this to log "would route to
-    /// X but X is unreachable" instead of "no route" (`route.c:512`).
+    /// `r = p` happens BEFORE the reachable check. If NOBODY is
+    /// reachable, return the last (= shortest matching) subnet
+    /// anyway. `route_ipv4` uses this to log "would route to X but X
+    /// is unreachable" instead of "no route".
     #[test]
     fn lookup_returns_unreachable_fallback() {
         let mut t = SubnetTree::new();
@@ -860,10 +847,9 @@ mod tests {
         assert_eq!(*s, sn("10.0.0.0/16"));
     }
 
-    /// C `subnet.c:275`: `!p->owner ||` — ownerless ALWAYS breaks
-    /// the scan, regardless of `is_reachable`. The predicate isn't
-    /// even called (no name to pass). `route_ipv4` then sees `None`
-    /// and returns `Broadcast` (`route.c:644`).
+    /// `!p->owner ||` — ownerless ALWAYS breaks the scan, regardless
+    /// of `is_reachable`. The predicate isn't even called (no name to
+    /// pass). `route_ipv4` then sees `None` and returns `Broadcast`.
     #[test]
     fn lookup_broadcast_short_circuits_reachable() {
         let mut t = SubnetTree::new();
@@ -883,7 +869,7 @@ mod tests {
         assert_eq!(owner, None);
     }
 
-    /// `iter()` skips ownerless. C `send_everything` walks per-node
+    /// `iter()` skips ownerless. `send_everything` walks per-node
     /// trees; broadcast subnets never appear on the wire.
     #[test]
     fn iter_skips_broadcast() {
@@ -984,10 +970,9 @@ mod tests {
     }
 
     /// `iter()` walks in C-splay-order: type discriminant first
-    /// (MAC=0, V4=1, V6=2 in `subnet.h:39-43`), then per-family
-    /// comparator. `dump_subnets` (`subnet.c:395-410`) walks this
-    /// way. The CLI doesn't depend on order but matching C makes
-    /// diffing dump output easy.
+    /// (MAC=0, V4=1, V6=2), then per-family comparator.
+    /// `dump_subnets` walks this way. The CLI doesn't depend on
+    /// order but matching upstream makes diffing dump output easy.
     #[test]
     fn iter_order_matches_c_splay() {
         let mut t = SubnetTree::new();

@@ -7,13 +7,13 @@
 //! `tinc-event` is generic over `W: Copy`. The daemon's `IoWhat` has
 //! six variants for six C callbacks. `ConnId` is a generational
 //! `slotmap::DefaultKey`; `conns.get(id)` returning `None` for a
-//! reused slot replaces C's `linux/event.c:141` generation guard.
+//! reused slot is the generation guard.
 //!
 //! ## Logger mapping
 //!
-//! C `logger(DEBUG_TOPIC, LOG_PRIORITY, ...)` has two axes; the `log`
-//! crate has `target=` and `Level`. `LOG_NOTICE` collapses into
-//! `Info`. `RUST_LOG=tincd::meta=debug` ≈ `tincd -d4`.
+//! Upstream's `logger(DEBUG_TOPIC, LOG_PRIORITY, ...)` has two axes;
+//! the `log` crate has `target=` and `Level`. `LOG_NOTICE` collapses
+//! into `Info`. `RUST_LOG=tincd::meta=debug` ≈ `tincd -d4`.
 //!
 //! | C topic | `log` target | C priority | `log::Level` |
 //! |---|---|---|---|

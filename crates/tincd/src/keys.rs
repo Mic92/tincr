@@ -1,4 +1,4 @@
-//! `keys.c:108-213` — load Ed25519 keys.
+//! Load Ed25519 keys.
 //!
 //! `read_ecdsa_private_key`: resolves path from config, warns on
 //! insecure perms, hints "run `tinc generate-ed25519-keys`" on
@@ -10,9 +10,9 @@
 //! avoids depending on the whole CLI crate. Factor trigger is "a
 //! third crate needs this" → `tinc-conf`.
 //!
-//! C-is-WRONG #7: `keys.c:141` checks `& ~0100700u`, flagging
-//! symlinks and setuid bits. Intent is `& 0o077` (no group/other
-//! read). We port the bug; the warning is cosmetic and 1.1 users
+//! Upstream checks `& ~0100700u`, flagging symlinks and setuid
+//! bits. Intent is `& 0o077` (no group/other read). We port the
+//! bug; the warning is cosmetic and 1.1 users
 //! grep for the C message.
 
 use std::fs::File;
@@ -25,8 +25,8 @@ use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 // PEM type strings + blob length
 
-/// `ecdsa.c:29-30`. Same constants as `tinc-tools/keypair.rs`. Upstream's
-/// casing — "ED25519", not "Ed25519".
+/// Same constants as `tinc-tools/keypair.rs`. Upstream's casing —
+/// "ED25519", not "Ed25519".
 const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
@@ -34,7 +34,7 @@ const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 /// sign::SigningKey::from_blob` takes this.
 const PRIVATE_BLOB_LEN: usize = 96;
 
-// Public-key b64 (`ecdsa.c:42-60`)
+// Public-key b64
 
 /// `ecdsa_set_base64_public_key`. Decode 43 b64 chars → 32 bytes.
 ///
@@ -42,7 +42,7 @@ const PRIVATE_BLOB_LEN: usize = 96;
 /// could let `b64::decode` reject everything (wrong length → wrong
 /// output length → arr fail), but matching the C's two-step makes the
 /// log lines distinguishable: "Invalid size 42" vs "Invalid format".
-/// One length, one decode. C `:45`, `:53`.
+/// One length, one decode.
 ///
 /// 43 because `ceil(32 * 4/3) = 43` — tinc's b64 doesn't pad. The
 /// exported pubkey is always exactly 43 chars (`ecdsa_get_base64_
@@ -56,53 +56,50 @@ fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
     let bytes = b64::decode(p)?;
     bytes.as_slice().try_into().ok().or_else(|| {
         // b64::decode of 43 chars should ALWAYS give 32 bytes.
-        // Reaching here means tinc-crypto's b64 disagrees with the
-        // C `b64decode_tinc`. The KAT tests pin that, so this is
-        // unreachable-in-practice. But the C checks it (`:53`) so
-        // we do too.
+        // Reaching here means tinc-crypto's b64 disagrees with
+        // upstream `b64decode_tinc`. The KAT tests pin that, so
+        // this is unreachable-in-practice. We check anyway.
         log::debug!(target: "tincd::keys",
                     "Invalid format of public key! len = {}", bytes.len());
         None
     })
 }
 
-// Private key (`keys.c:108-161`)
+// Private key
 
-/// Why `read_ecdsa_private_key` failed. The C just returns NULL and
+/// Why `read_ecdsa_private_key` failed. Upstream just returns NULL and
 /// logs; we return the variant so `setup()` can decide whether the
-/// daemon can boot at all. `Missing` is fatal (can't auth as ourselves
-/// → can't peer). The C `net_setup.c:803-828` has a fallback to RSA
-/// (legacy) when this fails, but we forbid legacy, so all variants
-/// are fatal for us.
+/// daemon can boot at all. `Missing` is fatal (can't auth as
+/// ourselves → can't peer). Upstream has a fallback to RSA (legacy)
+/// when this fails, but we forbid legacy, so all variants are
+/// fatal for us.
 #[derive(Debug, thiserror::Error)]
 pub enum PrivKeyError {
-    /// `ENOENT`. C `keys.c:123-125` prints the gen-keys hint at
-    /// INFO level. We carry the path for that message.
+    /// `ENOENT`. Carries the path for the gen-keys hint message.
     #[error("Error reading Ed25519 private key file `{}': No such file or directory", .0.display())]
     Missing(PathBuf),
-    /// Any other I/O error on `fopen`. C `:121`.
+    /// Any other I/O error on `fopen`.
     #[error("Error reading Ed25519 private key file `{}': {}", .0.display(), .1)]
     Io(PathBuf, #[source] std::io::Error),
     /// `read_pem` failed: bad armor, wrong type string, wrong size.
-    /// C `:152-154` logs "X PEM key not found in Y".
     #[error("Ed25519 private key in `{}' malformed: {}", .0.display(), .1)]
     Pem(PathBuf, #[source] tinc_conf::PemError),
 }
 
-/// `read_ecdsa_private_key` (`keys.c:108-161`).
+/// `read_ecdsa_private_key`.
 ///
 /// Path resolution: `Ed25519PrivateKeyFile` config var if set, else
-/// `confbase/ed25519_key.priv`. C `:114-116`. (The C's `Ed25519Private
-/// KeyFile` is in tinc.conf, not hosts/NAME — it's SERVER-tagged per
-/// `vars.rs`. The `config` here is the merged tree after `read_host_
+/// `confbase/ed25519_key.priv`. (`Ed25519PrivateKeyFile` is in
+/// tinc.conf, not hosts/NAME — it's SERVER-tagged per `vars.rs`.
+/// The `config` here is the merged tree after `read_host_
 /// config`, but it doesn't matter — the lookup finds it wherever.)
 ///
-/// Permission warning: C `:141` `if(s.st_mode & ~0100700u)`. See module
-/// doc for why this is over-broad. Warning, not error.
+/// Permission warning: `if(s.st_mode & ~0100700u)`. See module doc
+/// for why this is over-broad. Warning, not error.
 ///
-/// The C `keyfile` out-parameter (`:108` `char **keyfile`) is unused
-/// in `net_setup.c:803` (passes NULL). We drop it. The path is in the
-/// error variant if you need it.
+/// Upstream's `keyfile` out-parameter is unused (caller passes
+/// NULL). We drop it. The path is in the error variant if you need
+/// it.
 ///
 /// # Errors
 /// `Missing` if the file doesn't exist (caller prints the gen-keys
@@ -126,8 +123,8 @@ pub fn read_ecdsa_private_key(
         }
     })?;
 
-    // C `:134-144`: `fstat(fileno(fp), &s)` then `s.st_mode &
-    // ~0100700`. We use `f.metadata()` (also `fstat` under the hood
+    // `fstat(fileno(fp), &s)` then `s.st_mode & ~0100700`. We use
+    // `f.metadata()` (also `fstat` under the hood
     // — `File::metadata` calls `fstat` not `stat`, so symlink mode
     // bits don't apply, slightly NARROWING the C bug. The C's `fstat`
     // ALSO follows the symlink — `fopen` already did. So neither
@@ -152,9 +149,8 @@ pub fn read_ecdsa_private_key(
         }
     }
 
-    // ─── parse (`:147-159`)
-    // `read_pem` returns exactly 96 bytes or errors. C `ecdsa_read_
-    // pem_private_key`.
+    // ─── parse
+    // `read_pem` returns exactly 96 bytes or errors.
     let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN).map_err(|e| PrivKeyError::Pem(path, e))?;
     // `read_pem` checked the length. Unwrap is the handoff.
     let mut arr = [0u8; PRIVATE_BLOB_LEN];
@@ -162,22 +158,21 @@ pub fn read_ecdsa_private_key(
     Ok(SigningKey::from_blob(&arr))
 }
 
-// Peer public key (`keys.c:165-213`)
+// Peer public key
 
-/// `read_ecdsa_public_key` (`keys.c:165-213`). Three sources in order:
+/// `read_ecdsa_public_key`. Three sources in order:
 ///
-/// 1. `Ed25519PublicKey` inline b64 (C `:179-184`, `tinc init` writes)
-/// 2. `Ed25519PublicKeyFile` explicit path (C `:186-189`)
-/// 3. `hosts/NAME` PEM block (C `:189`, `cmd_exchange` writes)
+/// 1. `Ed25519PublicKey` inline b64 (`tinc init` writes)
+/// 2. `Ed25519PublicKeyFile` explicit path
+/// 3. `hosts/NAME` PEM block (`cmd_exchange` writes)
 ///
-/// `host_config` is the peer's; caller already loaded it (C `:170-
-/// 177` loads conditionally; `id_h:424` already did). Returns `None`
-/// on failure: `id_h:437-439` treats it as "downgrade to legacy"
+/// `host_config` is the peer's; caller already loaded it. Returns
+/// `None` on failure: `id_h` treats it as "downgrade to legacy"
 /// (then rejected at `:443-447`).
 ///
 /// Source-order subtlety: if `hosts/NAME` has BOTH the var and a
-/// PEM block, the var wins silently (C `:179-184` returns early).
-/// No consistency check; ported faithfully.
+/// PEM block, the var wins silently (early return). No consistency
+/// check; ported faithfully.
 #[must_use]
 pub fn read_ecdsa_public_key(
     host_config: &Config,
@@ -186,9 +181,8 @@ pub fn read_ecdsa_public_key(
 ) -> Option<[u8; PUBLIC_LEN]> {
     // ─── Source 1: inline b64 config var (`:179-184`)
     if let Some(e) = host_config.lookup("Ed25519PublicKey").next() {
-        // C: `ecdsa = ecdsa_set_base64_public_key(p); free(p); return
-        // ecdsa;` — returns NULL if the b64 is bad. NO fallthrough to
-        // source 2/3. A present-but-malformed inline key is a hard
+        // Returns NULL if the b64 is bad. NO fallthrough to source
+        // 2/3. A present-but-malformed inline key is a hard
         // None, not a "try the next source". This is correct: a typo
         // in the inline var should be an error, not silently masked
         // by an old PEM block at the bottom of the file.
@@ -210,7 +204,7 @@ pub fn read_ecdsa_public_key(
     // ─── Open + parse (`:191-211`)
     // C logs ERR on `fopen` fail (`:196-199`). We match. `:204` logs
     // ERR on parse fail too (unless `errno == ENOENT`, which means
-    // `read_pem` got EOF before BEGIN — `pem.c:57` sets it).
+    // `read_pem` got EOF before BEGIN).
     let f = match File::open(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -228,9 +222,8 @@ pub fn read_ecdsa_public_key(
             arr.copy_from_slice(&blob);
             Some(arr)
         }
-        // `tinc-conf::PemError::NotFound` is the C `errno = ENOENT`
-        // case (`pem.c:57`): scanned the whole file, no BEGIN line.
-        // C `:204` does `if(errno != ENOENT)` to suppress this log.
+        // `tinc-conf::PemError::NotFound`: scanned the whole file,
+        // no BEGIN line. `if(errno != ENOENT)` suppresses this log.
         // The file existed (we opened it) but has no PEM block —
         // that's a `hosts/NAME` with config lines but no key. Common
         // (`tinc init` writes Port + Subnet + b64 var, no PEM). The
@@ -304,8 +297,8 @@ mod tests {
         assert_eq!(back, pk);
     }
 
-    /// C `ecdsa.c:45`: `if(strlen(p) != 43)` — the FIRST check.
-    /// Anything not 43 chars is rejected before decode is even tried.
+    /// `if(strlen(p) != 43)` — the FIRST check. Anything not 43
+    /// chars is rejected before decode is even tried.
     #[test]
     fn b64_wrong_len() {
         // 42 chars — one short.
@@ -340,8 +333,6 @@ mod tests {
     }
 
     /// `Ed25519PrivateKeyFile = /path` overrides the default.
-    /// C `keys.c:114`: `get_config_string(lookup_config("Ed25519Private
-    /// KeyFile"), &fname)`.
     #[test]
     fn priv_explicit_path() {
         let tmp = TmpDir::new("priv-exp");
@@ -394,7 +385,7 @@ mod tests {
         assert!(msg.contains("No such file or directory"), "msg: {msg}");
     }
 
-    /// Mode 644 → warning. Mode 600 → no warning. C `keys.c:141`:
+    /// Mode 644 → warning. Mode 600 → no warning.
     /// `s.st_mode & ~0100700u`.
     ///
     /// We can't capture log output easily without a mock logger, so:
@@ -430,7 +421,7 @@ mod tests {
 
     /// The actual perm warn fires (loads OK, just warns). Mode 644.
     /// Can't capture the warning, but verify the load succeeds —
-    /// it's a WARN not an ERROR. C `:141-143` logs and CONTINUES.
+    /// it's a WARN not an ERROR.
     #[test]
     fn priv_insecure_perms_loads_anyway() {
         let tmp = TmpDir::new("priv-perm");
@@ -443,7 +434,7 @@ mod tests {
         assert_eq!(loaded.public_key(), sk.public_key());
     }
 
-    /// Garbage in the file → `Pem` variant. C `:152-154`.
+    /// Garbage in the file → `Pem` variant.
     #[test]
     fn priv_malformed() {
         let tmp = TmpDir::new("priv-mal");
@@ -485,8 +476,8 @@ mod tests {
         assert_eq!(loaded, pk);
     }
 
-    /// Source 1 with bad b64 → None, NO fallthrough. C `:183` early
-    /// return regardless of `ecdsa` being NULL or not.
+    /// Source 1 with bad b64 → None, NO fallthrough. Early return
+    /// regardless of `ecdsa` being NULL or not.
     ///
     /// The host file has a (valid!) PEM block at the bottom. If we
     /// were falling through, the PEM would load. Asserting `None`
@@ -511,7 +502,7 @@ mod tests {
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
         // The PEM block is there, but the inline var is malformed.
-        // No fallthrough → None. C `:183`.
+        // No fallthrough → None.
         let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer");
         assert!(loaded.is_none(), "must not fall through to PEM block");
     }
@@ -597,7 +588,7 @@ mod tests {
     }
 
     /// `hosts/NAME` doesn't exist at all. The fopen fails (source 3
-    /// default path). C `:196-199` logs ERR. We log; still None.
+    /// default path). Log; still None.
     #[test]
     fn pub_hosts_file_missing() {
         let tmp = TmpDir::new("pub-nohosts");
@@ -608,9 +599,8 @@ mod tests {
     }
 
     /// Source-order documentation test: when BOTH inline var AND
-    /// PEM block are present (and DIFFERENT), inline wins. C `:179
-    /// -184` returns before `:186` is reached. See module doc
-    /// "source-order subtlety".
+    /// PEM block are present (and DIFFERENT), inline wins (early
+    /// return). See module doc "source-order subtlety".
     ///
     /// This pins the order. If someone "optimizes" by trying PEM
     /// first ("it's the same file we already opened anyway"), this

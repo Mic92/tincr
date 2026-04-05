@@ -369,9 +369,9 @@ mod bench {
         }
     }
 
-    /// Read `minmtu` from a `dump nodes` row. Index 15 in the C
-    /// `node.c:210` format: `name id host "port" PORT cipher digest
-    /// maclen comp options status nexthop via distance mtu minmtu ...`.
+    /// Read `minmtu` from a `dump nodes` row. Index 15 in the row
+    /// format: `name id host "port" PORT cipher digest maclen comp
+    /// options status nexthop via distance mtu minmtu ...`.
     /// PMTU discovery converges `minmtu` toward the path MTU; until it
     /// reaches ≥1500, full-MSS packets fall back to TCP-tunnelled
     /// `SPTPS_PACKET` (b64 over the meta-conn) which is ~100x slower.
@@ -588,10 +588,10 @@ mod bench {
         // sends them via TCP-tunnelled SPTPS_PACKET (b64 over the
         // meta-conn) at ~10 Mbps instead of ~1 Gbps.
         //
-        // The C avoids this wait via `choose_initial_maxmtu` (`net_
-        // packet.c:1249`): `getsockopt(IP_MTU)` on a connected socket
-        // returns the kernel's PMTU cache; on loopback that's 65536,
-        // clamped to MTU=1518, and the very first probe at maxmtu
+        // The C tincd avoids this wait via `choose_initial_maxmtu`:
+        // `getsockopt(IP_MTU)` on a connected socket returns the
+        // kernel's PMTU cache; on loopback that's 65536, clamped to
+        // MTU=1518, and the very first probe at maxmtu
         // confirms in one round-trip. We `STUB(chunk-9c)` that
         // getsockopt, seed `maxmtu=MTU`, and walk the exponential probe
         // ladder (1329, 1407, ...) at 333ms intervals: ~2-3s to 1500.

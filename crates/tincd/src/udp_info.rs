@@ -1,4 +1,4 @@
-//! UDP_INFO/MTU_INFO hint messages. `protocol_misc.c:155-376`.
+//! UDP_INFO/MTU_INFO hint messages.
 //!
 //! ## What they do
 //!
@@ -13,8 +13,7 @@
 //!
 //! ## Why a separate module
 //!
-//! `send_udp_info` (`protocol_misc.c:155-215`) is 60 LOC of gate
-//! checks before a 1-line send. Those gates are testable: take a
+//! `send_udp_info` is 60 LOC of gate checks before a 1-line send. Those gates are testable: take a
 //! snapshot of (to, from, route, options, last_sent), return `bool`.
 //! The daemon does the I/O.
 //!
@@ -110,10 +109,9 @@ impl PmtuSnapshot {
 // ────────────────────────────────────────────────────────────────────
 // UDP_INFO send gates
 
-/// Gates before sending UDP_INFO. `send_udp_info`
-/// (`protocol_misc.c:155-215`).
+/// Gates before sending UDP_INFO. `send_udp_info`.
 ///
-/// Returns `false` if any gate fails. The C returns `true` from each
+/// Returns `false` if any gate fails. Upstream returns `true` from each
 /// gate (it's "I successfully decided not to send"); we return `bool`
 /// = "should I send".
 ///
@@ -214,8 +212,7 @@ pub fn should_send_udp_info(
 // ────────────────────────────────────────────────────────────────────
 // UDP_INFO receive
 
-/// What to do with a received UDP_INFO. `udp_info_h`
-/// (`protocol_misc.c:217-268`).
+/// What to do with a received UDP_INFO. `udp_info_h`.
 ///
 /// Every variant except `UnknownNode` and `DroppedPastRelay` implies
 /// "and then forward up the chain" — `:265` calls `send_udp_info`
@@ -239,9 +236,9 @@ pub enum UdpInfoAction<N> {
     },
     /// `:265` without `:255`. Forward without learning: we're
     /// directly connected (`:251`), or UDP-confirmed (`:251`), or
-    /// the addr matches what we already have (`:254`), or the addr
-    /// didn't parse (C `str2sockaddr` would yield AF_UNKNOWN, which
-    /// fails `sockaddrcmp` and skips `update_node_udp` the same way).
+    /// the addr matches what we already have, or the addr didn't
+    /// parse (yielding AF_UNKNOWN, which fails `sockaddrcmp` and
+    /// skips `update_node_udp` the same way).
     Forward { from: N, to: N },
     /// `:247` `from != from->via`. Message wandered past a static
     /// relay. Log warning, drop. C returns `true` (don't tear down
@@ -254,8 +251,7 @@ pub enum UdpInfoAction<N> {
     UnknownNode,
 }
 
-/// `udp_info_h` decision (`protocol_misc.c:238-265`). Pure: parsing
-/// already happened (`UdpInfo::parse`); we get the parsed message and
+/// `udp_info_h` decision. Pure: parsing already happened (`UdpInfo::parse`); we get the parsed message and
 /// the `from`-node snapshot.
 ///
 /// `from`: `None` ⇔ `lookup_node(from_name) == NULL` (`:238`). The
@@ -289,8 +285,8 @@ pub fn on_receive_udp_info<N>(
     // `AddrStr` is the wire-format token; convert to `SocketAddr`
     // here. If parse fails (peer sent garbage, or `unspec`), we
     // can't construct UpdateAndForward — fall through to Forward.
-    // C `str2sockaddr` would produce an `AF_UNKNOWN` sockaddr that
-    // fails the `sockaddrcmp` and gets discarded the same way.
+    // (AF_UNKNOWN would fail `sockaddrcmp` and be discarded the
+    // same way.)
     let learned = if !from.directly_connected && !from.udp_confirmed {
         parse_socket_addr(parsed.addr.as_str(), parsed.port.as_str()).filter(|a| {
             // `:254` `sockaddrcmp(&from_addr, &from->address)`. C's
@@ -356,8 +352,7 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
 // ────────────────────────────────────────────────────────────────────
 // MTU_INFO send gates
 
-/// Gates before sending MTU_INFO. `send_mtu_info`
-/// (`protocol_misc.c:272-330`).
+/// Gates before sending MTU_INFO. `send_mtu_info`.
 ///
 /// Same shape as [`should_send_udp_info`] but: no TCPONLY check
 /// (MTU info is useful even on TCP-mostly paths — *some* hop might
@@ -412,8 +407,7 @@ pub fn should_send_mtu_info(
     true
 }
 
-/// MTU adjustment before sending. `send_mtu_info`
-/// (`protocol_misc.c:305-320`).
+/// MTU adjustment before sending. `send_mtu_info`.
 ///
 /// Called by the daemon AFTER `should_send_mtu_info` returns `true`.
 /// Takes the MTU we were about to send and possibly tightens it based
@@ -480,8 +474,7 @@ pub fn adjust_mtu_for_send(
 // ────────────────────────────────────────────────────────────────────
 // MTU_INFO receive
 
-/// What to do with a received MTU_INFO. `mtu_info_h`
-/// (`protocol_misc.c:332-376`).
+/// What to do with a received MTU_INFO. `mtu_info_h`.
 ///
 /// `N` is the caller's node-id type; forwarding variants carry
 /// `from`/`to` so the caller doesn't re-unwrap.
@@ -505,9 +498,9 @@ pub enum MtuInfoAction<N> {
     UnknownNode,
 }
 
-/// `mtu_info_h` decision (`protocol_misc.c:345-375`).
+/// `mtu_info_h` decision.
 ///
-/// `from`: `None` ⇔ `lookup_node(from)` failed (`:357`). `N` rides
+/// `from`: `None` ⇔ `lookup_node(from)` failed. `N` rides
 ///   along so the caller gets it back in the action.
 /// `to`: `None` ⇔ `lookup_node(to)` failed (`:371`).
 ///
@@ -608,8 +601,8 @@ mod tests {
         last_ago: Option<Duration>,
     }
     impl Send {
-        // The "all gates pass" baseline. C `:155-215` with every gate
-        // open. Proven by the first assert in `udp_send_gates`.
+        // The "all gates pass" baseline. Proven by the first assert
+        // in `udp_send_gates`.
         const PASS: Self = Send {
             to_myself: false,
             reachable: true,
@@ -639,8 +632,8 @@ mod tests {
         }
     }
 
-    /// `should_send_udp_info` gates. C `protocol_misc.c:155-215`.
-    /// Each row perturbs ONE field from `Send::PASS`.
+    /// `should_send_udp_info` gates. Each row perturbs ONE field
+    /// from `Send::PASS`.
     #[test]
     #[rustfmt::skip]
     fn udp_send_gates() {
@@ -684,11 +677,11 @@ mod tests {
         }
     }
 
-    /// `on_receive_udp_info` decision table. C `protocol_misc.c:238-265`.
+    /// `on_receive_udp_info` decision table.
     ///
-    /// Unparseable-addr divergence: C `str2sockaddr` would yield
-    /// AF_UNKNOWN and trigger `update_node_udp` with garbage; we can't
-    /// represent AF_UNKNOWN as `SocketAddr` so we drop the learning.
+    /// Unparseable-addr divergence: upstream would yield AF_UNKNOWN
+    /// and trigger `update_node_udp` with garbage; we can't represent
+    /// AF_UNKNOWN as `SocketAddr` so we drop the learning.
     /// Deliberate: garbage addresses don't propagate into our addr tree.
     #[test]
     #[rustfmt::skip]
@@ -730,8 +723,8 @@ mod tests {
 
     // ── MTU_INFO send gates ────────────────────────────────────────
 
-    /// `should_send_mtu_info` gates. C `protocol_misc.c:272-330`.
-    /// No TCPONLY check (`:190` is UDP_INFO-only). Minor gate is **6**
+    /// `should_send_mtu_info` gates. No TCPONLY check (UDP_INFO-only
+    /// gate). Minor gate is **6**
     /// (MTU_INFO landed one release after UDP_INFO).
     #[test]
     fn mtu_send_gates() {
@@ -752,7 +745,7 @@ mod tests {
 
     // ── MTU adjust ─────────────────────────────────────────────────
 
-    /// `adjust_mtu_for_send` branches. C `protocol_misc.c:305-320`.
+    /// `adjust_mtu_for_send` branches.
     #[test]
     #[rustfmt::skip]
     fn mtu_adjust_table() {
@@ -786,7 +779,7 @@ mod tests {
         }
     }
 
-    /// `on_receive_mtu_info` decision table. C `protocol_misc.c:345-375`.
+    /// `on_receive_mtu_info` decision table.
     #[test]
     fn mtu_recv_table() {
         use MtuInfoAction::*;

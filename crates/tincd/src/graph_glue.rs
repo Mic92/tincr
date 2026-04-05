@@ -1,10 +1,9 @@
-//! `graph()` glue: SSSP result → reachability transitions
-//! (`graph.c:327-346` + `check_reachability` `graph.c:237-325`).
+//! `graph()` glue: SSSP result → reachability transitions.
 //!
 //! `tinc-graph::sssp` runs the BFS and returns `Vec<Option<Route>>` —
 //! `Some` = `n->status.visited`, `None` = unvisited. The C then walks
-//! `node_tree` and diffs `visited` against the *previous* `reachable`
-//! bit (`graph.c:251`). A flip in either direction is a transition:
+//! `node_tree` and diffs `visited` against the *previous*
+//! `reachable` bit. A flip in either direction is a transition:
 //! log line, host-up/host-down script, subnet-up/down, SPTPS reset,
 //! MTU probe timer reset.
 //!
@@ -12,13 +11,13 @@
 //! script spawn, per-node SPTPS sessions, timer wheel). Same pattern
 //! as `tinc_sptps::Output`: return a `Vec<Transition>`, daemon match-
 //! arms grow as later chunks land. The script spawn is chunk 8;
-//! `update_node_udp` (`graph.c:291-320`) is chunk 7.
+//! `update_node_udp` is chunk 7.
 //!
 //! The one side-effect that *does* belong here: writing the new
-//! `reachable` bit back into the `Graph` (`graph.c:251`). The next
-//! `sssp` reads it (`graph.c:204` gates `update_node_udp` on
-//! `!n->status.reachable`), and `mst` picks its starting point from
-//! it. So [`diff_reachability`] persists before returning.
+//! `reachable` bit back into the `Graph`. The next `sssp` reads it
+//! (gates `update_node_udp` on `!n->status.reachable`), and `mst`
+//! picks its starting point from it. So [`diff_reachability`]
+//! persists before returning.
 
 #![forbid(unsafe_code)]
 
@@ -28,27 +27,27 @@ use tinc_graph::{EdgeId, Graph, NodeId, Route};
 /// lines + script spawns + per-node-SPTPS resets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transition {
-    /// `n->status.reachable` went false→true. C `graph.c:261-270`:
-    /// log `"Node %s became reachable"`, fire `host-up` script. The
-    /// `via` is from the new `Route` — C log line is actually
+    /// `n->status.reachable` went false→true. Log `"Node %s became
+    /// reachable"`, fire `host-up` script. The `via` is from the
+    /// new `Route` — log line is actually
     /// `"became reachable"` without via, but `via` is what the
     /// daemon needs for the UDP-addr cache update later.
     BecameReachable { node: NodeId, via: NodeId },
-    /// went true→false. C `graph.c:271-289`: log `"became
-    /// unreachable"`, fire `host-down`, `sptps_stop(&n->sptps)`,
-    /// reset `n->mtuprobes`/`n->minmtu`/`n->maxmtu`, kill the MTU
+    /// went true→false. Log `"became unreachable"`, fire
+    /// `host-down`, `sptps_stop(&n->sptps)`, reset `n->mtuprobes`/
+    /// `n->minmtu`/`n->maxmtu`, kill the MTU
     /// probe timer. No `via` — the route is `None`.
     BecameUnreachable { node: NodeId },
 }
 
-/// `check_reachability` (`graph.c:237-325`). Diffs old vs new
-/// reachability per node. WRITES BACK [`Graph::set_reachable`] so
-/// the next sssp's `update_node_udp` gate (`graph.c:204`) reads the
-/// updated bit. Returns transitions for the daemon to act on.
+/// `check_reachability`. Diffs old vs new reachability per node.
+/// WRITES BACK [`Graph::set_reachable`] so the next sssp's
+/// `update_node_udp` gate reads the updated bit. Returns
+/// transitions for the daemon to act on.
 ///
-/// `myself` is excluded: C `graph.c:247` `if(n == myself) continue`.
-/// `myself` always has a route (sssp seeds it) so its `reachable`
-/// never flips, but the C skips it before the diff anyway — never
+/// `myself` is excluded. `myself` always has a route (sssp seeds
+/// it) so its `reachable` never flips, but we skip it before the
+/// diff anyway — never
 /// emit a transition for it, never touch its bit.
 ///
 /// `new_routes` is indexed by raw slot number (same as `sssp`'s
@@ -65,19 +64,16 @@ pub fn diff_reachability(
 ) -> Vec<Transition> {
     let mut out = Vec::new();
 
-    // `node_ids()` yields only live slots. C `graph.c:245`:
-    // `for splay_each(node_t, n, &node_tree)`. Collect first: the
-    // loop body calls `set_reachable` (`&mut Graph`), can't hold the
+    // `node_ids()` yields only live slots. Collect first: the loop
+    // body calls `set_reachable` (`&mut Graph`), can't hold the
     // iterator's `&Graph` borrow across it.
     let nodes: Vec<NodeId> = graph.node_ids().collect();
 
     for n in nodes {
-        // C `graph.c:247`: `if(n == myself) continue;`
         if n == myself {
             continue;
         }
 
-        // C `graph.c:251`: `if(n->status.visited != n->status.reachable)`
         // `visited` ⇔ `new_routes[n].is_some()`.
         let visited = new_routes[n.0 as usize].is_some();
         // `node()` is `Some` — `n` came from `node_ids()`.
@@ -87,17 +83,15 @@ pub fn diff_reachability(
             continue;
         }
 
-        // C `graph.c:251`: `n->status.reachable = n->status.visited;`
-        // Write-back BEFORE emitting — matches C order, and `mst()`
-        // in `run_graph` reads this.
+        // Write-back BEFORE emitting — `mst()` in `run_graph` reads
+        // this.
         graph.set_reachable(n, visited);
 
         if visited {
-            // C `graph.c:261-270`. Route is `Some` (just checked).
+            // Route is `Some` (just checked).
             let via = new_routes[n.0 as usize].as_ref().expect("visited").via;
             out.push(Transition::BecameReachable { node: n, via });
         } else {
-            // C `graph.c:271-289`.
             out.push(Transition::BecameUnreachable { node: n });
         }
     }
@@ -105,13 +99,13 @@ pub fn diff_reachability(
     out
 }
 
-/// Convenience: `sssp` + `diff` + `mst`. C `graph.c:327-346` `graph()`.
-/// Returns (transitions, mst-edges). The mst result feeds chunk
+/// Convenience: `sssp` + `diff` + `mst`. Returns (transitions,
+/// mst-edges). The mst result feeds chunk
 /// 5's `connection_t.status.mst` bit (broadcast tree).
 ///
-/// Order matters: C runs `sssp_bfs()` then `check_reachability()`
-/// then `mst_kruskal()` (`graph.c:341-344`). `mst` reads `reachable`
-/// to pick a starting node, so the diff's write-back must land first.
+/// Order matters: `sssp_bfs()` then `check_reachability()` then
+/// `mst_kruskal()`. `mst` reads `reachable` to pick a starting
+/// node, so the diff's write-back must land first.
 #[must_use]
 pub fn run_graph(
     graph: &mut Graph,
@@ -148,7 +142,6 @@ mod tests {
     #[test]
     fn no_change_empty() {
         // Steady state: all reachable before, all reachable after.
-        // C `graph.c:251` falls through for every node.
         let (mut g, [a, ..]) = chain();
         let routes = g.sssp(a);
         let t = diff_reachability(&mut g, a, &routes);
@@ -168,7 +161,7 @@ mod tests {
             vec![Transition::BecameReachable {
                 node: b,
                 // b is one hop, direct: via is b itself
-                // (`graph.c:196`: `via = indirect ? n->via : e->to`).
+                // (`via = indirect ? n->via : e->to`).
                 via: b,
             }]
         );
@@ -188,9 +181,9 @@ mod tests {
 
     #[test]
     fn myself_excluded() {
-        // C `graph.c:247`. Even if myself's reachable bit somehow
-        // started false, no transition is emitted and the bit is
-        // NOT written back (the C `continue`s before the diff).
+        // Even if myself's reachable bit somehow started false, no
+        // transition is emitted and the bit is NOT written back
+        // (`continue`s before the diff).
         let (mut g, [a, ..]) = chain();
         g.set_reachable(a, false);
         let routes = g.sssp(a);
@@ -202,8 +195,8 @@ mod tests {
 
     #[test]
     fn set_reachable_persisted() {
-        // C `graph.c:251`: write-back happens inside the diff.
-        // After diff, `graph.node(n).reachable` reflects new state.
+        // Write-back happens inside the diff. After diff,
+        // `graph.node(n).reachable` reflects new state.
         let (mut g, [a, b, c, d]) = chain();
         // b,c,d cold.
         g.set_reachable(b, false);
@@ -250,9 +243,9 @@ mod tests {
 
     #[test]
     fn run_graph_mst_sees_writeback() {
-        // `graph.c:341-344` order: sssp, check_reachability, mst.
-        // mst reads `reachable` to pick a start (`graph.c:88-92`).
-        // If diff didn't write back, mst on a cold-boot graph would
+        // Order: sssp, check_reachability, mst. mst reads
+        // `reachable` to pick a start. If diff didn't write back,
+        // mst on a cold-boot graph would
         // see `reachable=false` everywhere and pick wrong / nothing.
         let (mut g, [a, b, c, d]) = chain();
         // Cold boot: nobody reachable yet.
