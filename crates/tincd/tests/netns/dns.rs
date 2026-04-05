@@ -27,7 +27,7 @@ fn tmp(tag: &str) -> TmpGuard {
 
 #[test]
 fn dns_stub_dig() {
-    let Some(_netns) = enter_netns("dns_stub_dig") else {
+    let Some(_netns) = enter_netns("dns::dns_stub_dig") else {
         return;
     };
 
@@ -181,7 +181,7 @@ fn dns_stub_dig() {
 /// and the v4 test would still pass).
 #[test]
 fn dns_stub_dig_v6() {
-    let Some(_netns) = enter_netns("dns_stub_dig_v6") else {
+    let Some(_netns) = enter_netns("dns::dns_stub_dig_v6") else {
         return;
     };
 

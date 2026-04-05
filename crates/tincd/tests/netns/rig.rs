@@ -130,6 +130,18 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
         })
         .arg("--")
         .arg(&self_exe)
+        // --exact with the FULL libtest path. Callers pass
+        // "module::leaf" (e.g. "ping::real_tun_ping"). Previously
+        // callers passed only the leaf name: zero matches, libtest
+        // exit 0 (no tests is success), outer assert passes. Every
+        // netns test was a silent no-op for months. The tell: <50ms
+        // "PASS" for tests that build netns + spawn daemons + pipe
+        // MiBs through them.
+        //
+        // Substring (no --exact) was tried; "dns_stub_dig" matched
+        // "dns_stub_dig_v6" too → both ran in one bwrap → EBUSY on
+        // tinc0. --exact + full path is correct. Watch for future
+        // module renames silently re-breaking this.
         .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
         .env("BWRAP_INNER", "1")
         .status()

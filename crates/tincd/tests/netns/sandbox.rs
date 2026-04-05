@@ -37,7 +37,7 @@ fn tmp(tag: &str) -> TmpGuard {
 fn sandbox_normal_ping() {
     use std::os::unix::fs::PermissionsExt;
 
-    let Some(netns) = enter_netns("sandbox_normal_ping") else {
+    let Some(netns) = enter_netns("sandbox::sandbox_normal_ping") else {
         return;
     };
 
@@ -182,7 +182,7 @@ fn sandbox_normal_ping() {
 fn sandbox_high_blocks_scripts() {
     use std::os::unix::fs::PermissionsExt;
 
-    let Some(_netns) = enter_netns("sandbox_high_blocks_scripts") else {
+    let Some(_netns) = enter_netns("sandbox::sandbox_high_blocks_scripts") else {
         return;
     };
 

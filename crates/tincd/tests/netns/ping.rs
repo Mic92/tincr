@@ -37,7 +37,7 @@ fn tmp(tag: &str) -> TmpGuard {
 ///    this; the test pins it (ping wouldn't reply otherwise).
 #[test]
 fn real_tun_ping() {
-    let Some(netns) = enter_netns("real_tun_ping") else {
+    let Some(netns) = enter_netns("ping::real_tun_ping") else {
         return;
     };
 
@@ -239,7 +239,7 @@ fn real_tun_ping() {
 /// device.write. Faster + less moving parts than `real_tun_ping`.
 #[test]
 fn real_tun_unreachable() {
-    let Some(netns) = enter_netns("real_tun_unreachable") else {
+    let Some(netns) = enter_netns("ping::real_tun_unreachable") else {
         return;
     };
 
@@ -374,7 +374,7 @@ fn real_tun_unreachable() {
 /// One process either side, no JSON parsing, deterministic.
 #[test]
 fn tso_ingest_stream_integrity() {
-    let Some(netns) = enter_netns("tso_ingest_stream_integrity") else {
+    let Some(netns) = enter_netns("ping::tso_ingest_stream_integrity") else {
         return;
     };
 

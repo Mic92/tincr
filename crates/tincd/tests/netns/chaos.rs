@@ -221,7 +221,7 @@ impl ChaosRig {
 ///   indexing).
 #[test]
 fn chaos_ping_under_loss() {
-    let Some(netns) = enter_netns("chaos_ping_under_loss") else {
+    let Some(netns) = enter_netns("chaos::chaos_ping_under_loss") else {
         return;
     };
     let tmp = tmp("chaos-loss");
@@ -328,7 +328,7 @@ fn chaos_ping_under_loss() {
 /// counterintuitive; easy to flip in a refactor).
 #[test]
 fn chaos_replay_under_reorder() {
-    let Some(netns) = enter_netns("chaos_replay_under_reorder") else {
+    let Some(netns) = enter_netns("chaos::chaos_replay_under_reorder") else {
         return;
     };
     let tmp = tmp("chaos-reorder");
@@ -421,7 +421,7 @@ fn chaos_replay_under_reorder() {
 ///    only the clone is rejected.
 #[test]
 fn chaos_replay_under_duplicate() {
-    let Some(netns) = enter_netns("chaos_replay_under_duplicate") else {
+    let Some(netns) = enter_netns("chaos::chaos_replay_under_duplicate") else {
         return;
     };
     let tmp = tmp("chaos-dup");
