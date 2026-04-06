@@ -25,7 +25,7 @@
 //! There's a temptation to do XDG (`~/.config/tinc`) when running
 //! unprivileged. Upstream does **not** — `tinc init` as non-root
 //! fails with EACCES on `/etc/tinc` mkdir, a known papercut. We
-//! don't fix it here. That decision lives in `RUST_REWRITE_PLAN.md`.
+//! don't fix it here.
 
 use std::path::PathBuf;
 

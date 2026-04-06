@@ -88,7 +88,7 @@ pub struct DataPlane {
     /// dance as `rx_scratch`).
     pub udp_rx_batch: Option<net::UdpRxBatch>,
 
-    /// GRO TUN-write coalescer (`RUST_REWRITE_10G.md` Phase 2b).
+    /// GRO TUN-write coalescer.
     /// `recvmmsg_batch` arms it; `send_packet_myself` offers each
     /// inbound-for-us packet; the post-dispatch flush ships the
     /// super. Same `mem::take`-out-of-self dance as `rx_scratch`
@@ -114,8 +114,7 @@ pub struct DataPlane {
     /// dispatch a `mode()` call per packet.
     pub gro_enabled: bool,
 
-    /// Slot arena for `Device::drain` (`RUST_REWRITE_10G.md` Phase
-    /// 0). Replaces `on_device_read`'s 1.5KB stack buf: drain reads
+    /// Slot arena for `Device::drain`. Replaces `on_device_read`'s 1.5KB stack buf: drain reads
     /// frames into slots, the loop body walks them. Phase 1 widens:
     /// encrypt into slots, hand the contiguous run to `egress`.
     /// Phase 0 only uses it on the read side; `tx_scratch` stays
@@ -127,7 +126,7 @@ pub struct DataPlane {
     /// conflicts. Take, walk, put back.
     pub device_arena: Option<DeviceArena>,
 
-    /// `tso_split` output scratch (`RUST_REWRITE_10G.md` Phase 2a).
+    /// `tso_split` output scratch.
     /// `DrainResult::Super` means the device put a ≤64KB IP super-
     /// segment in `device_arena`; `tso_split` writes N × ~1500B
     /// eth frames into THIS buffer (the input slice can't overlap
@@ -144,7 +143,7 @@ pub struct DataPlane {
     /// `tso_scratch`; same lazy alloc.
     pub tso_lens: Box<[usize]>,
 
-    /// TX batch accumulator (`RUST_REWRITE_10G.md` Phase 1). The
+    /// TX batch accumulator. The
     /// `on_device_read` drain loop stages encrypted frames here
     /// instead of `sendto`-per-frame; one `EgressBatch` ships the
     /// run after the loop. `None` outside the drain loop — the send

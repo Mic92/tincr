@@ -1,46 +1,17 @@
-//! `linux::Fast` — `UDP_SEGMENT` cmsg egress (`RUST_REWRITE_10G.md`).
+//! `linux::Fast` — `UDP_SEGMENT` cmsg egress.
 //!
-//! One `sendmsg` with `cmsg{SOL_UDP, UDP_SEGMENT, gso_size: u16}`;
-//! the kernel splits at `gso_size` boundaries (`udp_send_skb` GSO
-//! branch → `__udp_gso_segment`). The receiver sees `count`
-//! independent UDP datagrams — wire-identical to `Portable`'s
+//! One `sendmsg` with `cmsg{SOL_UDP, UDP_SEGMENT, gso_size: u16}`; the
+//! kernel splits at `gso_size` boundaries. Wire-identical to `Portable`'s
 //! `count × sendto`.
 //!
-//! ## Why raw libc, not `nix::sendmsg`
+//! Raw libc instead of `nix::sendmsg` because nix allocs a `Vec` for the
+//! cmsg buffer on every call (~5% throughput loss at 100k batches/s). We
+//! pre-build the fixed-size cmsg once and patch the 2-byte `gso_size`
+//! per send. The `#[repr(C, align(8))]` wrapper gives cmsghdr-aligned
+//! storage at `CMSG_SPACE(2)` const size.
 //!
-//! `nix` 0.29 has `ControlMessage::UdpGsoSegments(&u16)` which builds
-//! the cmsg correctly. But `nix::sendmsg` allocs a fresh `Vec<u8>`
-//! for the cmsg buffer on EVERY call (`mod.rs:1470`: `let mut
-//! cmsg_buffer = vec![0u8; capacity]`). At ~100k batches/s that's
-//! 100k allocs/s on the hot path — measured ~5% throughput loss.
-//!
-//! The cmsg here is trivial: one `{SOL_UDP, UDP_SEGMENT, u16}`, fixed
-//! size. Pre-build it once in `new()`, patch the 2-byte `gso_size` on
-//! each send. Zero per-send allocs. The unsafe surface is one
-//! `sendmsg` call + the cmsg pointer arithmetic that `CMSG_LEN`/
-//! `CMSG_DATA` already encapsulate; the buffer itself is owned and
-//! never escapes.
-//!
-//! ## Cmsg buffer layout
-//!
-//! `[cmsghdr{len=CMSG_LEN(2), level=SOL_UDP, type=UDP_SEGMENT}][u16][pad]`.
-//! Total `CMSG_SPACE(2)` bytes (24 on glibc x86-64: 16-byte cmsghdr,
-//! 2-byte payload, 6-byte trailing align). The kernel reads exactly
-//! `CMSG_LEN(2)` bytes; `__udp_cmsg_send` rejects with `EINVAL` on
-//! length mismatch. Padding is unread.
-//!
-//! A `#[repr(C, align(..))]` wrapper struct gives us cmsghdr-aligned
-//! storage at a `const` size. `CMSG_SPACE` is `const fn` in libc, so
-//! the array length is const-evaluable; the `align(8)` attribute
-//! satisfies `cmsghdr`'s strictest field (`size_t`, 8 bytes on LP64,
-//! 4 on ILP32 — over-aligning to 8 is harmless on ILP32).
-//!
-//! ## No probe, no fallback
-//!
-//! `RUST_REWRITE_10G.md` policy: kernel ≥4.18 floor on Linux. If
-//! `sendmsg` returns `ENOPROTOOPT` (kernel doesn't recognize
-//! `UDP_SEGMENT`), panic at first batch. Silently degrading to
-//! per-frame `sendto` would mask the misconfig.
+//! No fallback: kernel ≥4.18 floor. `ENOPROTOOPT` panics rather than
+//! silently degrading to per-frame sendto.
 
 // One `unsafe` block: `libc::sendmsg` + cmsg pointer writes. Scoped
 // to this module, audited below.
@@ -251,7 +222,7 @@ impl UdpEgress for Fast {
                 e.raw_os_error(),
                 Some(libc::ENOPROTOOPT),
                 "kernel rejects UDP_SEGMENT cmsg (requires Linux ≥4.18; \
-                 RUST_REWRITE_10G.md: no Linux fallback ladder)"
+                 no Linux fallback ladder)"
             );
             return Err(e);
         }

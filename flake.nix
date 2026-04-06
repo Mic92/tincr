@@ -374,7 +374,7 @@
           # `runCommand` + `cargo test --offline` dies in the sandbox
           # (no registry index). For now CI runs the cross-impl tests
           # via the devshell — see crates/tinc-tools/tests/self_roundtrip.rs
-          # module doc for the invocation. Tracked in RUST_REWRITE_PLAN.md.
+          # module doc for the invocation.
 
           treefmt = {
             projectRootFile = "flake.nix";

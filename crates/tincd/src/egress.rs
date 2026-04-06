@@ -1,32 +1,14 @@
-//! `UdpEgress` — the send-side seam for the 10G datapath.
+//! `UdpEgress` — send-side seam: ship `count` UDP datagrams to `dst`.
 //!
-//! `RUST_REWRITE_10G.md`. The trait is the contract: ship `count`
-//! UDP datagrams to `dst`. HOW depends on what the kernel offers.
-//! The daemon builds an `EgressBatch` and doesn't care.
+//! - `Portable`: `count` × `sendto`. Every POSIX.
+//! - `linux::Fast`: one `sendmsg` with `UDP_SEGMENT` cmsg; kernel splits.
 //!
-//! - `Portable`: `count` × `sendto`. Works on every POSIX.
-//! - `linux::Fast`: one `sendmsg` with `cmsg UDP_SEGMENT=stride`;
-//!   the kernel splits at egress.
+//! `Box<dyn>` not generics: one vtable indirect per batch (~20k/s at
+//! 10G) is negligible vs plumbing a `cfg`-selected type alias through
+//! every signature.
 //!
-//! Same `count` datagrams hit the wire either way; the receiver
-//! can't tell the difference.
-//!
-//! ## Why `Box<dyn>` not generics
-//!
-//! The daemon's `egress: Vec<Box<dyn UdpEgress>>` is parallel to
-//! `listeners` (same `sock` index). One vtable indirect per BATCH.
-//! At 10G with 63KB super-packets that's ~20k batches/s × ~2ns
-//! ≈ 0.004% of cycles. The alternative is a `cfg`-selected type
-//! alias plumbed through every signature that touches `egress`.
-//! The vtable is cheaper than the maintenance.
-//!
-//! ## Why `try_clone` not borrow
-//!
-//! `Portable` holds a `socket2::Socket`. The `Listener.udp` it dups
-//! from stays where it is (the `recvmmsg` path needs it). `try_clone`
-//! is `dup(2)` — same file description, separate fd, no ownership
-//! puzzle, no self-referential daemon struct. The kernel doesn't
-//! care which fd `sendto` lands on.
+//! `try_clone` not borrow: `dup(2)` of `Listener.udp` — same file
+//! description, separate fd, no self-referential daemon struct.
 
 // Not `forbid`: the `linux` submodule needs one `unsafe` block for
 // `libc::sendmsg` + cmsg pointer writes (nix::sendmsg allocs a Vec

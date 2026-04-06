@@ -1,43 +1,13 @@
 //! `DeviceArena` — fixed-stride slot arena for the 10G datapath.
 //!
-//! The spine of the GSO/TSO datapath (`RUST_REWRITE_10G.md`):
+//! `Device::drain` reads frames into slots; TSO ingest puts a 64KB
+//! super-segment in slot 0 spilling into 1..N for `tso_split`. Fixed
+//! stride keeps slots independently addressable (future parallel encrypt).
 //!
-//! - `Device::drain` reads frames into slots.
-//! - The TSO ingest path puts a 64KB super-segment in slot 0
-//!   (spilling into 1..N); `tso_split` reads from there.
-//! - Fixed stride means slots are independently addressable for
-//!   future parallel encrypt (no inter-worker offset coordination).
-//! - Page-aligned for `MSG_ZEROCOPY` page-pin should that land —
-//!   costs nothing today, avoids rebuilding the arena (and
-//!   re-auditing slot lifetimes) later.
-//!
-//! One allocation, multiple uses. The layout is the design.
-//!
-//! ## Page alignment
-//!
-//! `Box<[u8]>` from `vec![].into_boxed_slice()` is malloc-aligned
-//! (16B on glibc). `MSG_ZEROCOPY` pins user pages
-//! (`Documentation/networking/msg_zerocopy.rst`); a buffer straddling
-//! a page boundary works but pins one extra page per straddle, and
-//! the page-pin cost is the whole break-even calculation. Aligning
-//! the arena to a page boundary makes slot 0 start on a page, which
-//! makes the math clean and the perf-analysis tractable.
-//!
-//! Three options for page-aligned heap:
-//!   (a) `std::alloc::alloc(Layout::from_size_align(_, 4096))` — raw
-//!       alloc, manual `dealloc` in Drop, `unsafe`.
-//!   (b) Over-allocate by `PAGE-1`, find the aligned offset, slice.
-//!       No unsafe, but the `Box` owns the unaligned block while we
-//!       hand out slices into the middle — Drop is fine, the
-//!       arithmetic isn't pretty.
-//!   (c) `nix::sys::mman::mmap` anonymous — what malloc does under
-//!       the hood for large allocations anyway. Also `unsafe`.
-//!
-//! We pick **(a)**. It's the smallest unsafe surface (one `alloc`,
-//! one matching `dealloc`, both with the same `Layout`), and it's
-//! exactly what `Box` does internally — we're just specifying the
-//! alignment instead of taking malloc's default. The `unsafe` is
-//! scoped to the constructor and Drop; the slot accessors are safe.
+//! Page-aligned via `std::alloc::alloc` with explicit `Layout` rather
+//! than `Box<[u8]>` (malloc-aligned = 16B). Alignment matters for
+//! `MSG_ZEROCOPY` page-pin accounting should that land. Unsafe is
+//! scoped to constructor + Drop; slot accessors are safe.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ptr::NonNull;

@@ -733,28 +733,12 @@ impl Daemon {
             inherit_tos(&mut self.listeners, sock, sockaddr, self.dp.tx_priority);
         }
 
-        // TX batching (`RUST_REWRITE_10G.md`): if we're inside
-        // `on_device_read`'s drain loop AND on the cached-
-        // addr fast path, STAGE into `tx_batch` instead of sending.
-        // The drain loop ships the whole run in one `sendmsg` with
-        // `UDP_SEGMENT` cmsg after walking all slots.
-        //
-        // Gates for staging:
-        //   - `tx_batch.is_some()`: only set during the drain loop.
-        //     UDP-recv→forward, meta-conn→relay, probes hit `None`
-        //     and fall through to immediate send.
-        //   - `cached.is_some()`: the cold path's `cold_sockaddr`
-        //     is a stack local that dies at function return; can't
-        //     stash a reference to it. Cold path is pre-PMTU-
-        //     discovery anyway (rare, ~1 per peer per session).
-        //   - `ct.is_none()`: hot path (encrypt-into-tx_scratch).
-        //     `Some(ct)` is relay/handshake — they ALSO hit the
-        //     cached path but the relay case rebuilds tx_scratch;
-        //     staging that is correct but rare enough to not bother.
-        //     Keep the fast path simple.
-        //
-        // On dst/size mismatch (`!can_coalesce`): flush the
-        // current run, start a new one. Never worse than per-frame.
+        // TX batching: stage into `tx_batch` instead of sending when
+        // all gates pass; the drain loop ships the run in one sendmsg.
+        //   - tx_batch.is_some(): only set during drain loop
+        //   - cached.is_some(): cold-path sockaddr is stack-local
+        //   - ct.is_none(): hot path only (relay/handshake are rare)
+        // dst/size mismatch → flush + restart. Never worse than per-frame.
         if ct.is_none()
             && cached.is_some()
             && let Some(batch) = self.dp.tx_batch.as_mut()

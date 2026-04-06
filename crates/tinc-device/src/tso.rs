@@ -1,51 +1,18 @@
-//! Userspace TSO split — `RUST_REWRITE_10G.md`.
+//! Userspace TSO split.
 //!
-//! When `IFF_VNET_HDR + TUNSETOFFLOAD(TUN_F_TSO4|TUN_F_TSO6)` is set,
-//! the kernel TCP stack stops segmenting at the TUN MTU. It hands us
-//! one ≤64KB skb prefixed by a `virtio_net_hdr` describing the GSO
-//! state. We split it back into MTU-sized TCP segments here.
+//! With `IFF_VNET_HDR + TUNSETOFFLOAD(TUN_F_TSO4|TUN_F_TSO6)` the kernel
+//! hands us one ≤64KB skb prefixed by `virtio_net_hdr`. We split it back
+//! into MTU-sized TCP segments.
 //!
-//! ## Reference: wireguard-go `tun/offload_linux.go:901` `gsoSplit`
+//! Ported from wireguard-go `tun/offload_linux.go` `gsoSplit`. Same
+//! seqno/ID/csum arithmetic. We additionally prepend a synthetic eth
+//! header per chunk because `route_packet` reads ethertype at byte 12.
 //!
-//! Ported carefully. The TCP seqno arithmetic, IPv4 ID++, and csum
-//! recompute are byte-for-byte the same operations. Differences:
+//! Lives in `tinc-device` because the same `virtio_net_hdr` format
+//! appears on FreeBSD `TAPSVNETHDR` and Windows NDIS LSO.
 //!
-//! - wg-go uses `IFF_NO_PI` and gets raw IP packets. We **also** use
-//!   `IFF_NO_PI` on the `vnet_hdr` path (the kernel writes
-//!   `[vnet_hdr][IP packet]` — no `tun_pi`, no eth header). But the
-//!   *daemon* speaks ethernet frames internally (`route_packet` reads
-//!   ethertype at byte 12). So `tso_split` writes a synthetic eth
-//!   header into each output chunk, same as `fd.rs`/`bsd.rs` do for
-//!   their no-PI paths. The IP-layer arithmetic is unchanged; we just
-//!   prepend 14 bytes per chunk.
-//!
-//! - wg-go's checksum is unrolled 128-byte adc. We use a simpler
-//!   2-byte loop. The bottleneck is `ChaCha20` (4.6µs/pkt), not the
-//!   checksum (~0.02µs for a 20-byte IP header). Don't optimize what
-//!   isn't hot.
-//!
-//! ## Why this lives in `tinc-device`, not `tincd`
-//!
-//! `RUST_REWRITE_10G.md` §"Design implication": same `virtio_net_hdr`
-//! wire format on FreeBSD `TAPSVNETHDR`. Same input on Windows NDIS
-//! LSO. One ~200 LOC function, three platforms.
-//! Keep it next to `DrainResult::Super` (its consumer) and `ether.rs`
-//! (its dependency for the synthetic header).
-//!
-//! ## What's NOT here
-//!
-//! - `VIRTIO_NET_HDR_GSO_UDP_L4` (USO, kernel 6.2+): we don't set
-//!   `TUN_F_USO4/6`, so the kernel never hands it to us. The split
-//!   itself is simpler than TCP (no seqno, just UDP length per chunk
-//!   — wg-go `:965` is 3 lines). What's missing is the use case:
-//!   inner-QUIC over tinc is a tunnel-in-tunnel scenario the project
-//!   hasn't seen yet. The kernel-6.2 floor also rules out half the
-//!   deploy targets. The hooks are here (`gso_type` enum has the
-//!   slot, `tso_split` would gain a `proto == UDP` branch); ~+30 LOC
-//!   when someone files the issue.
-//! - `VIRTIO_NET_HDR_GSO_ECN`: we don't set `TUN_F_TSO_ECN`. wg-go
-//!   doesn't either ("TODO: support TSO with ECN bits"). The kernel
-//!   software-segments ECN flows; we just see them as `GSO_NONE`.
+//! Not handled: USO (`GSO_UDP_L4`, kernel 6.2+) and `GSO_ECN` — we
+//! don't enable those `TUN_F_*` flags, so the kernel never sends them.
 
 use crate::arena::GsoType;
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, set_etherheader};
@@ -603,7 +570,7 @@ pub enum GroVerdict {
 /// seq order (per recvmmsg batch). Mismatch → flush → restart
 /// handles the rare interleaved-flow case correctly (just doesn't
 /// coalesce across the gap). The iperf3-is-one-flow assumption
-/// matches `RUST_REWRITE_10G.md`'s profiling target.
+/// matches the throughput bench's profiling target.
 ///
 /// **No csum verification.** wg-go's `checksumValid` gate
 /// (`offload_linux.go:389`) protects against an inner packet with

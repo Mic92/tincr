@@ -272,7 +272,7 @@ fn register_listeners(
         ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
             .map_err(SetupError::Io)?;
         // On Linux, dup into `linux::Fast` (UDP_SEGMENT cmsg,
-        // one sendmsg per batch — `RUST_REWRITE_10G.md`).
+        // one sendmsg per batch).
         // No probe: kernel ≥4.18 floor; ENOPROTOOPT at
         // first batch → panic with a clear message (see
         // `egress/linux.rs::map_errno`). Non-Linux stays

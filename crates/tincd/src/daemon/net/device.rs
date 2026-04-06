@@ -88,36 +88,18 @@ impl Daemon {
                 }
                 tinc_device::DrainResult::Frames { count } => {
                     self.device_errors = 0;
-                    // TX batching (`RUST_REWRITE_10G.md`): same
-                    // per-frame route+encrypt loop, but the SEND is
-                    // deferred. `tx_batch` being `Some` signals the
-                    // send site
-                    // (`send_sptps_data_relay` UDP path) to stage
-                    // instead of `sendto`. After the loop, ship the
-                    // accumulated run in one `EgressBatch` (one
-                    // `sendmsg` with `UDP_SEGMENT` cmsg on Linux).
+                    // TX batching: `tx_batch` Some → send site stages
+                    // instead of `sendto`; ship the run in one
+                    // `EgressBatch` after the loop. Encrypt still goes
+                    // into `tx_scratch` per-frame, batch COPIES from
+                    // there (one ~1.5KB memcpy vs 43× fewer syscalls).
                     //
-                    // The encrypt still goes into `tx_scratch` per-
-                    // frame; the batch COPIES from there. One extra
-                    // ~1.5KB memcpy per frame vs 43× fewer syscalls.
-                    // The memcpy is the price of not restructuring
-                    // `seal_data_into`'s Vec-based API.
-                    //
-                    // Lazy init: the ~100KB buffer only allocates the
-                    // first time a device read fires. A tunnelserver
-                    // (no local TUN) never gets here.
-                    //
-                    // Arm tx_batch when there's a burst to coalesce.
-                    // "Burst" = either count>1 (default drain batched
-                    // multiple frames) OR iters>1 (vnet drain returned
-                    // Frames{1} multiple times this epoll wake — bob's
-                    // ACK-burst case). An idle ping fires epoll per-
-                    // frame, hits count==1 && iters==1, falls through
-                    // to immediate send (no memcpy tax).
-                    //
-                    // Once armed, stays armed across outer iterations:
-                    // the vnet's Frames{1}-then-Frames{1}-then-Super
-                    // sequence accumulates into one sendmsg.
+                    // Arm on a burst: count>1 OR iters>1. An idle ping
+                    // (count==1 && iters==1) falls through to immediate
+                    // send. Once armed, stays armed across iterations
+                    // so vnet's Frames{1}×N then Super coalesce into
+                    // one sendmsg. Lazy-init: tunnelserver (no local
+                    // TUN) never allocs the ~100KB buffer.
                     if !batch_armed && (count > 1 || iters > 1) {
                         if self.dp.tx_batch.is_none() {
                             self.dp.tx_batch = Some(crate::egress::TxBatch::new(

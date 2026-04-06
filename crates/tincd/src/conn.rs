@@ -2,8 +2,7 @@
 //!
 //! C's `sptps_t` callback re-enters `connection_t`; we can't (`&mut
 //! self.sptps` aliases `&mut self`). `receive()` returns `Vec<Output>`
-//! for the daemon to dispatch after the borrow ends. See
-//! `RUST_REWRITE_ISSUES.md` (Rust-is-WRONG #4).
+//! for the daemon to dispatch after the borrow ends.
 //!
 //! `LineBuf::read_line` returns `Range<usize>` not `&str`: C
 //! `buffer_readline`'s `char*` is invalidated by the next add; the
