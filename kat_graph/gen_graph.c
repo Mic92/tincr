@@ -62,10 +62,10 @@ static inline void *xmalloc(size_t n) { return malloc(n); }
 #define ATTR_MALLOC
 #define ATTR_DEALLOCATOR(x)
 #define ATTR_NONNULL
-#include "../src/splay_tree.h"
-#include "../src/list.h"
-#include "../src/splay_tree.c"
-#include "../src/list.c"
+#include "../tinc-c/src/splay_tree.h"
+#include "../tinc-c/src/list.h"
+#include "../tinc-c/src/splay_tree.c"
+#include "../tinc-c/src/list.c"
 
 // ────────────────────────────────────────────────────────────────────
 // Minimal sockaddr_t. The BFS only reads `.sa.sa_family`; everything

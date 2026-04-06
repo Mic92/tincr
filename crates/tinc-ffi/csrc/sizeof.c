@@ -25,6 +25,6 @@
    needed for the sptps_key_t union and the cipher pointers. We let it
    through; the guard-defines we set don't touch CHACHA_POLY1305_H. */
 
-#include "../../../src/sptps.h"
+#include "../../../tinc-c/src/sptps.h"
 
 const size_t SPTPS_T_SIZE = sizeof(sptps_t);

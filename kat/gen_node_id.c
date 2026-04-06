@@ -18,7 +18,7 @@
 #include <string.h>
 #include <stdbool.h>
 
-#include "../src/ed25519/sha512.h"
+#include "../tinc-c/src/ed25519/sha512.h"
 
 static void emit_case(const char *name, bool last) {
 	unsigned char buf[64];

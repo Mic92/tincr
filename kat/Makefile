@@ -23,18 +23,18 @@ SHIM = -include kat/system.h
 SRCS = \
 	kat/gen_kat.c \
 	kat/kat_b64.c \
-	src/chacha-poly1305/chacha.c \
-	src/chacha-poly1305/chacha-poly1305.c \
-	src/chacha-poly1305/poly1305.c \
-	src/ed25519/fe.c \
-	src/ed25519/ge.c \
-	src/ed25519/sc.c \
-	src/ed25519/sha512.c \
-	src/ed25519/keypair.c \
-	src/ed25519/key_exchange.c \
-	src/ed25519/sign.c \
-	src/ed25519/verify.c \
-	src/nolegacy/prf.c
+	tinc-c/src/chacha-poly1305/chacha.c \
+	tinc-c/src/chacha-poly1305/chacha-poly1305.c \
+	tinc-c/src/chacha-poly1305/poly1305.c \
+	tinc-c/src/ed25519/fe.c \
+	tinc-c/src/ed25519/ge.c \
+	tinc-c/src/ed25519/sc.c \
+	tinc-c/src/ed25519/sha512.c \
+	tinc-c/src/ed25519/keypair.c \
+	tinc-c/src/ed25519/key_exchange.c \
+	tinc-c/src/ed25519/sign.c \
+	tinc-c/src/ed25519/verify.c \
+	tinc-c/src/nolegacy/prf.c
 
 OUT_BIN  = kat/gen_kat
 OUT_JSON = crates/tinc-crypto/tests/kat/vectors.json

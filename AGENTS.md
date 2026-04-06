@@ -46,8 +46,8 @@ in `.config/nextest.toml` rather than raising the global default.
 - **`crates/tinc-tools/tests/self_roundtrip.rs`** — Rust↔Rust always
   runs. The Rust↔C cross-impl variants only run when
   `TINC_C_SPTPS_TEST` / `TINC_C_SPTPS_KEYPAIR` point at C binaries.
-  Build those with `meson setup build && ninja -C build` from the repo
-  root (the dev shell has meson/ninja).
+  Build those with `meson setup build && ninja -C build` from `tinc-c/`
+  (the dev shell has meson/ninja).
 
 ## Benchmarks
 

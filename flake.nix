@@ -102,13 +102,13 @@
                   fileset = pkgs.lib.fileset.unions [
                     (pkgs.lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./kat)
                     ./kat/Makefile
-                    ./src/chacha-poly1305
-                    ./src/ed25519
-                    ./src/nolegacy/prf.c
-                    ./src/system.h
-                    ./src/utils.h
-                    ./src/xalloc.h
-                    ./src/prf.h
+                    ./tinc-c/src/chacha-poly1305
+                    ./tinc-c/src/ed25519
+                    ./tinc-c/src/nolegacy/prf.c
+                    ./tinc-c/src/system.h
+                    ./tinc-c/src/utils.h
+                    ./tinc-c/src/xalloc.h
+                    ./tinc-c/src/prf.h
                   ];
                 };
                 # Nix's hardening wrapper sets -D_FORTIFY_SOURCE which warns
@@ -143,25 +143,11 @@
             # it's ~500 small files, derivation rebuild is cheap, and
             # any src/ change SHOULD invalidate it (that's the point of
             # cross-impl: test against the C-that-is, not the C-that-was).
-            src = pkgs.lib.fileset.toSource {
-              root = ./.;
-              fileset = pkgs.lib.fileset.unions [
-                ./meson.build
-                ./meson_options.txt
-                ./src
-                # subdir() in the top-level meson.build is unconditional
-                # for these. Easier to ship them than to patch them out.
-                # The bash_completion.d one just installs a file; the
-                # doc one is gated by -Ddocs (we disable). systemd is
-                # gated by opt_systemd (we disable). test is gated by
-                # opt_tests (we disable). But meson opens the build file
-                # *before* checking the gate for `subdir`, so they have
-                # to exist.
-                ./bash_completion.d
-                ./doc/meson.build
-                ./systemd/meson.build
-              ];
-            };
+            # The whole upstream tree. We used to fileset-minimize this,
+            # but now that it lives in tinc-c/ the boundary is the
+            # directory itself — any change in there is by definition a
+            # C-side change that should invalidate the cross-impl binaries.
+            src = ./tinc-c;
             nativeBuildInputs = with pkgs; [
               meson
               ninja
@@ -278,20 +264,7 @@
           packages.tincd-c = pkgs.stdenv.mkDerivation {
             pname = "tinc-tincd-c";
             version = "1.1pre18";
-            src = pkgs.lib.fileset.toSource {
-              root = ./.;
-              fileset = pkgs.lib.fileset.unions [
-                ./meson.build
-                ./meson_options.txt
-                ./src
-                # Same as sptps-test-c: subdir() opens the meson.build
-                # before checking the gate, so they have to exist even
-                # though docs/tests/systemd are all -Ddisabled.
-                ./bash_completion.d
-                ./doc/meson.build
-                ./systemd/meson.build
-              ];
-            };
+            src = ./tinc-c;
             nativeBuildInputs = with pkgs; [
               meson
               ninja
@@ -333,17 +306,17 @@
                   root = ./.;
                   fileset = pkgs.lib.fileset.unions [
                     ./kat_graph/gen_graph.c
-                    ./src/splay_tree.h
-                    ./src/splay_tree.c
-                    ./src/list.h
-                    ./src/list.c
+                    ./tinc-c/src/splay_tree.h
+                    ./tinc-c/src/splay_tree.c
+                    ./tinc-c/src/list.h
+                    ./tinc-c/src/list.c
                     # splay_tree.c does `#include "system.h"`. Quoted include
                     # searches the .c's own directory first — i.e. src/. The
                     # -DTINC_SYSTEM_H from gen_graph.c guards it out, but the
                     # preprocessor still has to open the file to find the guard.
                     # Same for xalloc.h via list.c.
-                    ./src/system.h
-                    ./src/xalloc.h
+                    ./tinc-c/src/system.h
+                    ./tinc-c/src/xalloc.h
                   ];
                 };
                 hardeningDisable = [ "fortify" ];
@@ -383,16 +356,16 @@
                   root = ./.;
                   fileset = pkgs.lib.fileset.unions [
                     ./kat/gen_node_id.c
-                    ./src/ed25519/sha512.c
-                    ./src/ed25519/sha512.h
-                    ./src/ed25519/fixedint.h
+                    ./tinc-c/src/ed25519/sha512.c
+                    ./tinc-c/src/ed25519/sha512.h
+                    ./tinc-c/src/ed25519/fixedint.h
                   ];
                 };
                 hardeningDisable = [ "fortify" ];
               }
               ''
                 $CC -std=c11 -O1 -Wall -Werror \
-                  $src/kat/gen_node_id.c $src/src/ed25519/sha512.c -o gen
+                  $src/kat/gen_node_id.c $src/tinc-c/src/ed25519/sha512.c -o gen
                 ./gen > $out
               '';
 

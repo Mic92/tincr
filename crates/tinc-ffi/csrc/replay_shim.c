@@ -20,7 +20,7 @@
 /* shim.h is force-included; sptps.h is unsuppressed. The .c file
    itself includes sptps.h, so the struct body and the SPTPS_* constants
    come through normally. */
-#include "../../../src/sptps.c"
+#include "../../../tinc-c/src/sptps.c"
 
 /*
  * Mirror of the bits of sptps_t the replay window touches. Rust packs

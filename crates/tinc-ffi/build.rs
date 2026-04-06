@@ -19,7 +19,7 @@ fn main() {
         .expect("workspace root resolves");
 
     let csrc = root.join("crates/tinc-ffi/csrc");
-    let src = root.join("src");
+    let src = root.join("tinc-c/src");
 
     // The crypto sources are pure computation — no per-OS code. The same
     // file set as the KAT generator, plus sptps.c, plus ecdh.c
