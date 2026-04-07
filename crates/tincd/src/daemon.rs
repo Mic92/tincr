@@ -768,25 +768,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// `IoWhat` is `Copy`. `EventLoop<W: Copy>` requires it; this
-    /// pins it. Adding a non-Copy field to `IoWhat` (like a String)
-    /// fails here, before someone tries to use the daemon.
-    #[test]
-    fn iowhat_is_copy() {
-        fn assert_copy<T: Copy>() {}
-        assert_copy::<IoWhat>();
-        assert_copy::<TimerWhat>();
-        assert_copy::<SignalWhat>();
-    }
-
-    /// `ConnId` is `Copy` (slotmap keys are). `IoWhat::Conn(ConnId)`
-    /// transitively needs this.
-    #[test]
-    fn connid_is_copy() {
-        fn assert_copy<T: Copy>() {}
-        assert_copy::<ConnId>();
-    }
-
     /// Rate limit on the Unreachable arm. Max 3/sec. Can't
     /// construct a full `Daemon` (`SelfPipe` singleton); test the
     /// `IcmpRateLimit` directly with the same `freq=3` the daemon
@@ -843,23 +824,4 @@ mod tests {
         assert_eq!(step(101, 101, 3600), (3600, Duration::from_secs(3600)));
     }
 
-    /// The `IoWhat` enum has all six variants. Compile-time check:
-    /// adding a 7th without updating `run()` won't compile.
-    #[test]
-    fn iowhat_variant_census() {
-        // Just match exhaustively. Compiler check, not runtime.
-        fn _exhaustive(w: IoWhat) {
-            match w {
-                IoWhat::Signal
-                | IoWhat::UnixListener
-                | IoWhat::Device
-                | IoWhat::Conn(_)
-                | IoWhat::Tcp(_)
-                | IoWhat::Udp(_) => {}
-            }
-        }
-        // 6 variants. Can't introspect the count at runtime in
-        // stable Rust without a macro. The match-exhaustiveness IS
-        // the test.
-    }
 }

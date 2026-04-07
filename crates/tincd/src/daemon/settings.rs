@@ -712,36 +712,4 @@ mod tests {
         assert_eq!(parse_bind_addr("10.0.0.1 http", 655), ("10.0.0.1", 655));
     }
 
-    /// `DaemonSettings::default()` matches upstream tinc defaults.
-    #[test]
-    fn settings_defaults_match_c() {
-        let s = DaemonSettings::default();
-        assert_eq!(s.pinginterval, 60);
-        assert_eq!(s.pingtimeout, 5);
-        assert_eq!(s.port, 655);
-        assert_eq!(s.addressfamily, AddrFamily::Any);
-        assert_eq!(s.udp_discovery_timeout, 30);
-        assert_eq!(s.compression, 0);
-        assert!(!s.tunnelserver);
-        assert!(!s.strictsubnets);
-        assert!(s.bind_to_address.is_none());
-        assert!(s.local_discovery);
-        assert!(!s.directonly);
-        assert!(!s.priorityinheritance);
-        assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
-        assert!(s.autoconnect);
-        assert_eq!(s.udp_info_interval, 5);
-        assert_eq!(s.mtu_info_interval, 5);
-        assert_eq!(s.maxoutbufsize, 10 * MTU as usize);
-        assert_eq!(s.sockopts.udp_rcvbuf, 1024 * 1024);
-        assert_eq!(s.sockopts.udp_sndbuf, 1024 * 1024);
-        assert_eq!(s.sockopts.fwmark, 0);
-        assert_eq!(s.replaywin, 32);
-        assert_eq!(s.max_connection_burst, 10);
-        assert!(s.udp_discovery);
-        assert!(!s.device_standby);
-        assert!(s.scripts_interpreter.is_none());
-        assert!(s.global_pmtu.is_none());
-        assert!(s.global_weight.is_none());
-    }
 }

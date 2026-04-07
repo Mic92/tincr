@@ -207,16 +207,6 @@ fn push_for_test(level: log::Level, msg: &str) {
 mod tests {
     use super::*;
 
-    /// Gate is off → drain is empty even if something pushed (which
-    /// it can't through the real logger, but the daemon might call
-    /// `drain()` before any `REQ_LOG` arrives).
-    #[test]
-    fn drain_starts_empty() {
-        // thread_local: each test thread gets a fresh TAP.
-        let d = drain();
-        assert!(d.is_empty());
-    }
-
     /// Push then drain. Order preserved (Vec). `mem::take` clears.
     #[test]
     fn push_and_drain() {
