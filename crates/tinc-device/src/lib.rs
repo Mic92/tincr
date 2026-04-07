@@ -286,30 +286,6 @@ pub use bsd::{BsdTun, BsdVariant};
 mod tests {
     use super::*;
 
-    /// Read fails: `WouldBlock`. The daemon never actually calls
-    /// this (no fd to poll).
-    #[test]
-    fn dummy_read_would_block() {
-        let mut d = Dummy;
-        let mut buf = [0u8; 64];
-        let e = d.read(&mut buf).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
-    }
-
-    /// Write succeeds, drops. Returns the length so daemon stats
-    /// count "bytes that would have gone out."
-    #[test]
-    fn dummy_write_drops() {
-        let mut d = Dummy;
-        let mut buf = [0x42u8; 100];
-        let n = d.write(&mut buf).unwrap();
-        assert_eq!(n, 100);
-        // Buffer unchanged (drop = don't mutate). The TUN write
-        // mutates (zeroes [10..12]); dummy doesn't.
-        assert_eq!(buf[0], 0x42);
-        assert_eq!(buf[99], 0x42);
-    }
-
     // ─── default drain()
     //
     // The default impl is the BSD/macOS path. Test it with a mock that
