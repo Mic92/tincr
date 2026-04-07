@@ -1,27 +1,14 @@
-//! tincd library crate. The binary `main.rs` is a thin entry point;
-//! all the daemon logic lives here so integration tests can construct
-//! a `Daemon` directly.
+//! tincd as a library: the `main.rs` binary is a thin entry point and
+//! all daemon state lives here so integration tests can construct a
+//! [`Daemon`] directly.
 //!
-//! ## Event dispatch
-//!
-//! `tinc-event` is generic over `W: Copy`. The daemon's `IoWhat` has
-//! six variants for six C callbacks. `ConnId` is a generational
-//! `slotmap::DefaultKey`; `conns.get(id)` returning `None` for a
-//! reused slot is the generation guard.
-//!
-//! ## Logger mapping
-//!
-//! Upstream's `logger(DEBUG_TOPIC, LOG_PRIORITY, ...)` has two axes;
-//! the `log` crate has `target=` and `Level`. `LOG_NOTICE` collapses
-//! into `Info`. `RUST_LOG=tincd::meta=debug` ≈ `tincd -d4`.
-//!
-//! | C topic | `log` target | C priority | `log::Level` |
-//! |---|---|---|---|
-//! | `DEBUG_ALWAYS` | `"tincd"` | `LOG_ERR` | `Error` |
-//! | `DEBUG_CONNECTIONS` | `"tincd::conn"` | `LOG_WARNING` | `Warn` |
-//! | `DEBUG_PROTOCOL` | `"tincd::proto"` | `LOG_NOTICE` | `Info` |
-//! | `DEBUG_META` | `"tincd::meta"` | `LOG_INFO` | `Info` |
-//! | `DEBUG_TRAFFIC` | `"tincd::route"` | `LOG_DEBUG` | `Debug` |
+//! I/O readiness goes through `tinc-event` with an `IoWhat` dispatch
+//! tag per kind of socket the daemon owns; connections are addressed
+//! by a generational `ConnId`, so a slot reused after a peer drops
+//! safely returns `None` instead of misrouting an event. Logging is
+//! routed through the `log` crate using per-subsystem targets like
+//! `tincd::conn`, `tincd::proto`, `tincd::meta` and `tincd::route`,
+//! which `RUST_LOG` can filter at the usual `log::Level` granularity.
 
 #![deny(unsafe_code)]
 

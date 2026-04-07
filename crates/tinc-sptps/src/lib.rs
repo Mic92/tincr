@@ -1,48 +1,21 @@
-//! SPTPS — Simple Peer-to-Peer Security. The handshake and record layer
-//! tinc 1.1 uses for both meta-protocol auth and the data channel.
+//! SPTPS — Simple Peer-to-Peer Security — the handshake and record
+//! layer tinc 1.1 uses for both meta-protocol authentication and the
+//! encrypted data channel.
 //!
-//! ## What this is a port of
+//! A session is driven step by step: feed it received bytes, get back
+//! a list of [`Output`] events (datagrams to send, decrypted records
+//! to deliver, state transitions) instead of taking re-entrant
+//! callbacks. The handshake transcript and PRF seed are owned
+//! `Vec`s, the AEAD and KDF come from `tinc-crypto`, and randomness
+//! is supplied by an injected `RngCore` so production code can wire
+//! `OsRng` while tests can drive both peers from the same
+//! deterministic stream.
 //!
-//! `src/sptps.c`, function-for-function. The C is small (774 lines) and
-//! has no dependencies past the crypto primitives — which `tinc-crypto`'s
-//! KAT vectors proved equivalent. So this crate is "structurally boring on
-//! purpose": every method here has a corresponding `static bool` in the C,
-//! named the same, doing the same thing in the same order. The interesting
-//! work was the byte-level KATs; this is plumbing.
-//!
-//! That said, three places diverge from a mechanical translation, because
-//! the C does something Rust can't or shouldn't:
-//!
-//! 1. **No callbacks.** `sptps.c` fires `send_data`/`receive_record`
-//!    re-entrantly during `sptps_receive_data`. Rust doesn't want closures
-//!    captured in a struct that outlives a borrow. We accumulate
-//!    [`Output`]s and return them — same shape as `tinc-ffi`'s `Event`,
-//!    deliberately, so the differential tests in `tests/vs_c.rs` can
-//!    compare event-for-event.
-//!
-//! 2. **No `alloca`.** The SIG transcript and the PRF seed are heap
-//!    `Vec`s on every handshake step. The transcript is at most
-//!    `1 + 65 + 65 + label.len()` bytes; the allocation is not a hot path.
-//!
-//! 3. **RNG injected, not global.** `send_kex` calls `randomize()` which is
-//!    a process-global in the C. We take an `RngCore` so the differential
-//!    test can feed identical bytes to both sides. Production wires
-//!    `OsRng`.
-//!
-//! ## What "compatible" means
-//!
-//! Same wire bytes given same inputs. The differential test
-//! (`tests/vs_c.rs`) seeds Rust and `tinc-ffi`'s C harness with the same
-//! RNG stream and asserts that:
-//!
-//! - Rust-initiator ↔ C-responder completes a handshake and round-trips
-//!   app data
-//! - C-initiator ↔ Rust-responder, same
-//! - Rust ↔ Rust produces *byte-identical* wire output to C ↔ C
-//!
-//! The last one is the real check. Passing handshakes doesn't prove the
-//! transcript bytes match — Ed25519 will accept any signature over the
-//! right message. Byte-identity proves we built the same message.
+//! Wire compatibility with the existing tinc network is the central
+//! invariant and is verified by the differential tests in
+//! `tests/vs_c.rs`: Rust and the C reference implementation, fed the
+//! same keys and RNG, must produce byte-identical handshake and
+//! record output and successfully interoperate in both directions.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

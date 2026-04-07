@@ -1,26 +1,20 @@
-//! Event loop scaffolding — ports `event.c` + `linux/event.c` + `signal.c`.
+//! Daemon-agnostic event-loop scaffolding: an [`EventLoop`] for I/O
+//! readiness, a [`Timers`] wheel for deadlines, and a [`SelfPipe`] for
+//! waking the loop from signal handlers.
 //!
-//! The C API is fn-pointer + `void*` callbacks that reach daemon state
-//! via globals. That doesn't translate (storing `fn(&mut Daemon)` inside
-//! `Daemon` is a self-borrow), so [`EventLoop`] / [`Timers`] are generic
-//! over a `W: Copy` dispatch tag instead. The daemon defines
-//! `enum IoWhat` / `enum TimerWhat`; [`EventLoop::turn`] and
-//! [`Timers::tick`] drain ready events into a `Vec<W>`; the daemon
-//! `match`es. This crate stays daemon-agnostic.
+//! Both [`EventLoop`] and [`Timers`] are generic over a `W: Copy`
+//! dispatch tag chosen by the caller — typically a small enum like
+//! `IoWhat` / `TimerWhat` — so the crate never reaches into daemon
+//! state. [`EventLoop::turn`] runs a single poll iteration, draining
+//! ready events into a `Vec<W>` for the caller to match on, and
+//! quietly returns empty on `EINTR` so the outer `while running` loop
+//! can re-check its flag after a signal.
 //!
-//! [`EventLoop::turn`] is **one** poll iteration. The `while running`
-//! loop is the caller's. `EINTR` returns `Ok(())` with an empty out
-//! buffer so that loop re-checks its flag (the [`SelfPipe`] handler
-//! wrote a byte; it's readable next turn).
-//!
-//! [`Timers`] caches `Instant::now()` once per [`tick`](Timers::tick),
-//! and [`set`](Timers::set) computes deadlines against that cache, not
-//! a fresh clock read. This is correctness, not optimisation: a timer
-//! that fires at `T` and re-arms with `+1s` gets deadline `T + 1s`,
-//! not `(T + cb_runtime) + 1s`. Rate-based timers depend on it.
-//!
-//! See [`EventLoop::turn`] for the generation-guard substitute and the
-//! [`Timers`] field docs for why `BTreeMap` over `BinaryHeap`.
+//! [`Timers`] caches `Instant::now()` once per [`tick`](Timers::tick)
+//! and computes new deadlines against that cached instant rather than
+//! against a fresh clock read, so a timer that fires at `T` and
+//! re-arms with `+1s` always lands at `T + 1s` instead of drifting by
+//! the callback's runtime — rate-based timers rely on this.
 
 #![deny(unsafe_code)]
 

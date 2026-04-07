@@ -1,29 +1,17 @@
-//! TUN/TAP device backends. The `Device` trait is the read/write
-//! vtable; daemon stores `Box<dyn Device>`. Setup/close are the
-//! constructor + `Drop`.
+//! TUN/TAP device backends behind a single [`Device`] read/write
+//! trait that the daemon stores as `Box<dyn Device>`. Setup happens
+//! in the constructor, teardown in `Drop`, and a `Dummy` backend is
+//! always available for tests.
 //!
-//! ## Linux TUN: `vnet_hdr`
-//!
-//! `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`. Reads are `[virtio_net_
-//! hdr(10)][raw IP]`; the eth header is synthesized by `drain()` or
-//! `tso_split`.
-//!
-//! TAP and non-Linux: `IFF_NO_PI`, raw frames at `+0`. No `vnet_hdr`.
-//!
-//! ## Not ported
-//!
-//! - Config-tree reads: daemon's job; we take `DeviceConfig`.
-//! - `IFF_ONE_QUEUE`: no-op since kernel `5d09710` (2.6.27, 2008).
-//! - `EBADFD` → `event_exit()` (`d73cdee5`): policy belongs in the
-//!   daemon; we surface a regular `io::Error`.
-//!
-//! ## API
-//!
-//! Backends take `&mut [u8]` slices, not `vpn_packet_t *`. The
-//! kernel-side framing (`vnet_hdr` on Linux TUN; AF prefix on BSD
-//! utun; raw on TAP) is the backend's concern; the `+12` packet
-//! offset is the daemon's. Linux-gated; `Dummy` is
-//! unconditional for tests.
+//! Backends take `&mut [u8]` slices and own their kernel-side framing:
+//! Linux TUN uses `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR`, so reads come
+//! in as a `virtio_net_hdr` followed by a raw IP packet and the
+//! Ethernet header is synthesized by `drain()` / `tso_split`; TAP and
+//! the non-Linux backends use `IFF_NO_PI` and present raw frames
+//! starting at offset zero. Configuration is taken as a
+//! `DeviceConfig` value supplied by the caller — the device layer
+//! does no config-file parsing and no daemon-policy decisions, errors
+//! surface as ordinary `io::Error`s.
 
 #![deny(unsafe_code)]
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]

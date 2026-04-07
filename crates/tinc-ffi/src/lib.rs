@@ -1,30 +1,21 @@
-//! Safe wrapper around tinc's C SPTPS implementation, for differential testing.
+//! Safe wrapper around tinc's C SPTPS implementation, used as a
+//! byte-for-byte oracle for the pure-Rust `tinc-sptps` crate in
+//! differential tests.
 //!
-//! ## What this is
+//! The C source is compiled fresh and driven through a thin Rust
+//! shim: a [`CSptps`] session exposes start/receive/send and collects
+//! callback output into [`Event`]s the differential tests can compare
+//! against the Rust implementation. This crate is test-only and is
+//! never linked into the daemon — the `unsafe` blocks are contained
+//! but not zero-cost (each call allocates a 64K event sink) and there
+//! is no panic-across-FFI guard because the C callbacks never call
+//! back into Rust.
 //!
-//! `sptps.c` compiled fresh from `src/` and wrapped in just enough Rust to
-//! drive it from a test. The C side runs the real handshake — same code that
-//! ships in `tincd` — and serves as the byte-for-byte oracle for the pure-Rust
-//! `tinc-sptps` crate: feed both the same keys + RNG seed, diff the wire
-//! output.
-//!
-//! ## What this is not
-//!
-//! Production code. The `unsafe` here is contained but not zero-cost: every
-//! call mallocs a 64K event sink, the deterministic RNG is a process-global,
-//! and there's no panic-unwinding-across-FFI guard because none of the
-//! callbacks call back into Rust. Kept for cross-impl differential testing;
-//! never linked into the daemon.
-//!
-//! ## Determinism contract
-//!
-//! `sptps_start` calls `randomize()` (twice: nonce, ECDH seed). The shim
-//! routes that through a ChaCha20 keystream seeded by [`seed_rng`]. **The
-//! seed is process-global**, not per-session — you must call `seed_rng`
-//! before each `CSptps::start` and not run sessions concurrently. This is
-//! a deliberate trade-off: per-session RNG would require threading a context
-//! pointer through `ecdh.c`'s `ecdh_generate_public`, which means patching
-//! upstream. Serial tests don't care.
+//! Determinism comes from a ChaCha20 keystream seeded via
+//! [`seed_rng`], which the shim plumbs into the C's `randomize()`
+//! entry point. The seed is **process-global**, so callers must seed
+//! before each [`CSptps::start`] and must not run sessions
+//! concurrently.
 
 #![warn(missing_docs)]
 

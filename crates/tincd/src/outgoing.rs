@@ -1,64 +1,28 @@
-//! `outgoing_t` (`net.h:121-125`) + the connect-side half of
-//! `net_socket.c`. The daemon initiates a TCP connection to each
-//! `ConnectTo` peer; on failure, exponential backoff and retry.
+//! Outgoing TCP connections to `ConnectTo` peers, with the address
+//! list, exponential backoff and the optional `PROXY_EXEC` subprocess
+//! all in one place.
 //!
-//! Ported: `do_outgoing_connection` (`:564-662`, the `goto begin`
-//! loop), `setup_outgoing_connection` (`:664-681`), `retry_outgoing`
-//! (`:405-417`), `finish_connecting` (`:419-426`), the connecting
-//! branch of `handle_meta_io` (`:517-555`, the EINPROGRESS dance).
+//! Each peer has an `outgoing` slot that walks its configured address
+//! list (resolved lazily through [`addrcache`](crate::addrcache)),
+//! opens a non-blocking socket via `socket2`, optionally binds it via
+//! [`apply_dial_sockopts`] (`bind_to_address`, `bind_to_interface`,
+//! `SO_MARK`; failures are warn-only on the dial side) and then runs
+//! the standard async-connect dance: `connect()` returns
+//! `EINPROGRESS`, the loop arms a writable wakeup, and on wakeup it
+//! either reads a fresh `SO_ERROR` via `Socket::take_error` or treats
+//! a successful zero-byte probe as the connect having landed. On any
+//! failure the slot advances to the next address, and once the list
+//! is exhausted it sleeps with exponential backoff before retrying
+//! from the top.
 //!
-//! ## The async-connect dance
-//!
-//! Nonblocking `connect()` returns `EINPROGRESS` immediately; you
-//! `epoll` for WRITE; when writable, `send(fd, NULL, 0, 0)` probes
-//! whether the connect actually succeeded. The C's platform-behavior
-//! table (`:520-528`):
-//!
-//! | Event      | POSIX     | Linux       | Windows   |
-//! |------------|-----------|-------------|-----------|
-//! | Spurious   | ENOTCONN  | EWOULDBLOCK | ENOTCONN  |
-//! | Failed     | ENOTCONN  | (cause)     | ENOTCONN  |
-//! | Successful | (success) | (success)   | (success) |
-//!
-//! On `ENOTCONN`, `getsockopt(SO_ERROR)` retrieves the real cause
-//! (`ECONNREFUSED`, `EHOSTUNREACH`, etc). socket2's `Socket::take_
-//! error()` wraps this.
-//!
-//! ## socket2, no new shim
-//!
-//! Same call as `listen.rs`: socket2 gives the C's four-step shape
-//! (`socket()` → `set_nonblocking` → `connect()` → register). All
-//! used methods are ungated. The `Socket` is consumed into `OwnedFd`
-//! after the connect probe succeeds — same as `configure_tcp`.
-//!
-//! ## `PROXY_EXEC` (`do_outgoing_pipe`, `:428-483`)
-//!
-//! `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's its end
-//! to stdin/stdout, exec's `/bin/sh -c <cmd>`. Parent treats its end
-//! as the TCP fd — the child IS the proxy. No byte-format handshake
-//! (that's SOCKS4/5: see `socks.rs` and the `tcplen` consume in
-//! `daemon.rs::on_conn_readable`).
-//!
-//! The ONE `unsafe` block in this module: `fork()`. Post-fork in a
-//! multi-threaded program is hairy (only the calling thread survives;
-//! held locks deadlock), so the child does **libc-only** until exec.
-//! No `std`, no `format!`, no allocator. The C does the same dance.
-//!
-//! ## Deferred
-//!
-//! - `bind_to_address` (`:624`): wired. `try_connect` takes
-//!   `Option<SocketAddr>` and binds before `connect()`.
-//! - `bind_to_interface` + `SO_MARK`: wired via `apply_dial_sockopts`.
-//!   Warn-only on dial (the return is discarded); listen-side
-//!   hard-fails (`listen.rs`).
-//! - DNS at connect time: `addrcache.rs` resolves `Address =` lines
-//!   lazily inside `next_addr()`. `resolve_config_addrs` here just
-//!   PARSES `host port`
-//!   strings; no DNS at open time.
-
-// No `forbid(unsafe)`: do_outgoing_pipe needs fork(). The unsafe is
-// scoped to one block; the rest of the module is still allocation-
-// only. lib.rs has `deny(unsafe_code)`; the block has #[allow].
+//! `PROXY_EXEC` is the one place this module reaches for `unsafe`:
+//! it creates a `socketpair`, `fork`s, and the child `dup2`s its end
+//! onto stdin/stdout and `execve`s `/bin/sh -c <cmd>`, so the parent
+//! ends up holding a plain stream socket whose other end is the proxy
+//! process. The child path between `fork` and `exec` is libc-only
+//! — no `std`, no allocator, no formatting — because the surviving
+//! thread inherits arbitrary held locks from the multi-threaded
+//! parent.
 
 use std::ffi::CString;
 use std::io;

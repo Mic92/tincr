@@ -1,51 +1,20 @@
-//! Kernel steering for shard-per-thread tincd. **No eBPF** despite the name.
+//! Kernel-side flow steering for the shard-per-thread tincd. Despite
+//! the crate name, no eBPF is involved.
 //!
-//! Two attach points, both unprivileged-within-userns:
+//! On the UDP ingress side this installs a tiny classic-BPF program
+//! via `SO_ATTACH_REUSEPORT_CBPF` that hashes a few bytes of the tinc
+//! wire prefix into the `SO_REUSEPORT` socket group, so every packet
+//! from a given peer lands on the same shard deterministically and
+//! without a `bpf()` syscall. On the TUN egress side it relies on the
+//! kernel's built-in `automq` flow table: each shard's writes teach
+//! the kernel which queue handles a given flow, and replies come back
+//! on the same queue, so the only ioctl exposed for TUN is a
+//! defensive `TUNSETSTEERINGEBPF(fd, -1)` that clears any stale
+//! program left over from a previous daemon crash.
 //!
-//!   - **UDP ingress** (`SO_ATTACH_REUSEPORT_CBPF`): three-instruction
-//!     classic BPF prog. Input: skb past the UDP header
-//!     (`sock_reuseport.c:512` does `pskb_pull(skb, sizeof(udphdr))`).
-//!     Reads `src_id6[0..4]` from the tincd wire prefix at offset 6,
-//!     returns `% N` as the index into `reuse->socks[]` (bind order).
-//!     **No `bpf()` syscall**: this is `setsockopt`, the tcpdump path.
-//!
-//!   - **TUN egress** (`tun_automq_select_queue`, `tun.c:461`): **no
-//!     prog**. The kernel maintains a flow→queue table that it
-//!     populates from our *writes* (`tun_get_user` → `tun_flow_update`)
-//!     and consults on its *sends* (`ndo_select_queue`). Reflexive.
-//!     The only ioctl this crate exposes for TUN is
-//!     `tunsetsteeringebpf(fd, -1)` — a defensive detach to clear any
-//!     leftover prog from a prior daemon crash, ensuring automq runs.
-//!
-//! ────────────── Why not eBPF (history) ──────────────────────────
-//!
-//! The original plan was eBPF: a `TUNSETSTEERINGEBPF` prog
-//! doing LPM-trie subnet lookup + a `nid_to_shard` ARRAY map, plus
-//! `SK_REUSEPORT` + SOCKMAP on the UDP side. Dropped because:
-//!
-//! 1. `bpf(BPF_PROG_LOAD)` needs init-ns `CAP_BPF` when
-//!    `kernel.unprivileged_bpf_disabled` is set (most distros). bwrap
-//!    can't grant init-ns caps. The TUN-side test would self-skip on
-//!    every CI run; only the NixOS-VM tests would exercise it.
-//!
-//! 2. The kernel already does the work. automq has been in the tree
-//!    since `IFF_MULTI_QUEUE` shipped (3.8, 2013). The shard that
-//!    receives a peer's UDP (cBPF-steered, deterministic) writes the
-//!    decrypted inner packet to *its own* TUN queue → kernel learns
-//!    that flow → next reply on the same 4-tuple comes back to the
-//!    same queue. One cold miss per outgoing connection, then
-//!    converged.
-//!
-//! Net: zero `bpf()` syscalls, zero `CAP_BPF`, full nextest coverage
-//! in bwrap-userns. Kernel floor 4.5 (cBPF reuseport sockopt) instead
-//! of 4.19 (eBPF features) — dropping eBPF *widened* compat.
-//!
-//! ────────────── No-op on non-Linux ──────────────────────────────
-//!
-//! `#![cfg(target_os = "linux")]` at crate root would make the crate
-//! empty on BSD/macOS, breaking `tincd`'s `use tincd_bpf::...`. Gate
-//! the bodies; leave a stub returning `Unsupported`. Same shape as
-//! `tinc-device`'s `tap_dummy.rs`.
+//! Non-Linux targets get stub implementations returning `Unsupported`
+//! so that `tincd`'s `use tincd_bpf::...` keeps compiling on BSD and
+//! macOS.
 
 #![deny(unsafe_code)]
 

@@ -9,19 +9,11 @@
 //! `-o` overrides beat file entries and multi-valued keys like `Subnet`
 //! or `ConnectTo` iterate in a stable, predictable sequence. The PEM
 //! reader/writer handles tinc's `BEGIN`/`END` armor around the
-//! crate-local base64 codec used for stored keys.
-//!
-//!
-//! ## PEM
-//!
-//! Not RFC 7468 PEM. tinc's keys are wrapped in `-----BEGIN`/`END`
-//! armor, but the body is `b64encode_tinc` (LSB-first packing — see
-//! `tinc-crypto::b64`), not RFC 4648. `write_pem` chunks at 48 raw
-//! bytes per line (→ 64 chars). `read_pem` accepts any line length but
-//! requires the decoded total to match the expected size *exactly*.
-//!
-//! The base64 codec is already KAT-locked in `tinc-crypto`; here we
-//! test the framing.
+//! crate-local base64 codec used for stored keys. The PEM framing is
+//! tinc-flavoured rather than RFC 7468: the armor lines look standard
+//! but the body uses `tinc-crypto`'s LSB-first base64 chunked at 48
+//! raw bytes per line, and the reader requires the decoded length to
+//! match the expected size exactly.
 
 #![forbid(unsafe_code)]
 

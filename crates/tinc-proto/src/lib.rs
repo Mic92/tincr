@@ -1,33 +1,14 @@
-//! Wire-protocol parse/format.
+//! Parsers and formatters for tinc's meta-protocol — the plain ASCII,
+//! newline-terminated, space-separated request grammar spoken over
+//! the SPTPS-secured control channel.
 //!
-//! tinc's meta-protocol is plain ASCII: `printf` to build, `sscanf` to
-//! parse, newline-terminated. This crate does just that — no I/O, no
-//! crypto, no graph mutation. It exists so the message *grammar* can be
-//! property-tested in isolation from the daemon.
-//!
-//! The C handlers (`*_h` in `protocol_*.c`) `sscanf` and then immediately
-//! `lookup_node()` / `subnet_add()` — there is no parse seam to call
-//! through FFI. So this crate is verified by:
-//!
-//! - **Fixed-string KATs**: lift the exact `send_request(c, "%d %x %s ...")`
-//!   format strings, generate test inputs, assert the parse extracts what
-//!   `sscanf` would.
-//! - **Round-trip proptests**: `parse(format(x)) == x` for every message.
-//!
-//! ## Why hand-rolled, not `nom`
-//!
-//! 23 `sscanf` call sites, all `%d`/`%x`/`%s`/`%hd` over space-separated
-//! tokens. A token splitter and four conversions is ~50 LOC. `nom` would
-//! be more code than the parsers it'd parse with.
-//!
-//! ## What `%2048s` means
-//!
-//! `MAX_STRING` in `protocol.h` is `"%2048s"` — `sscanf %s` stops at
-//! whitespace and writes up to 2048 chars + NUL. So fields are
-//! whitespace-delimited and at most 2048 bytes. The whitespace is always
-//! single spaces (because `printf` `%d %s` puts exactly one). We split on
-//! ASCII space, not the full whitespace class — that's what `%s` would
-//! see and what's actually on the wire.
+//! The crate does no I/O, no crypto and no graph mutation; it just
+//! turns bytes into typed message values and back, so the grammar can
+//! be property-tested in isolation from the daemon. Fields are
+//! whitespace-delimited and capped at 2048 bytes per token, splitting
+//! is on a single ASCII space (which is what actually appears on the
+//! wire), and correctness is pinned by fixed-string KATs plus
+//! round-trip proptests over every message variant.
 
 #![forbid(unsafe_code)]
 
