@@ -909,8 +909,7 @@ mod tests {
         let _ = a;
         let new = g.add_edge(c, c, 99, 0); // recycles bc's slot (self-loop: never collides with triangle)
         assert_eq!(new, bc);
-        let ids: Vec<_> = g.edge_iter().map(|(id, _)| id).collect();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(g.edge_iter().count(), 6);
         // Slot 2 is back, with the new payload.
         let (_, e) = g.edge_iter().find(|&(id, _)| id == bc).unwrap();
         assert_eq!(e.weight, 99);
