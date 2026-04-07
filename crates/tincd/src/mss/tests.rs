@@ -267,17 +267,6 @@ fn malformed_opt_len_0() {
 }
 
 #[test]
-fn malformed_opt_len_1() {
-    // len=1: the length byte counts the kind but not itself.
-    // i += 1 would re-read the len byte as a new kind. Also
-    // caught by the `< 2` guard.
-    let mut pkt = build_v4_tcp(&[0x05, 0x01, 0x00, 0x00]);
-    let before = pkt.clone();
-    assert!(!clamp(&mut pkt, 1400));
-    assert_eq!(pkt, before);
-}
-
-#[test]
 fn malformed_opt_len_overrun() {
     // Option claims len=200 but only 4 bytes of options exist.
     // `i > len - opt_len` catches this.

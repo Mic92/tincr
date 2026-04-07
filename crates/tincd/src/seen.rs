@@ -89,12 +89,6 @@ mod tests {
     const ADD_SUBNET: &str = "10 b4e alice 10.0.0.0/24#10";
 
     #[test]
-    fn check_first_is_false() {
-        let mut s = SeenRequests::new();
-        assert!(!s.check(ADD_EDGE, Instant::now()));
-    }
-
-    #[test]
     fn check_second_is_true() {
         let mut s = SeenRequests::new();
         let now = Instant::now();

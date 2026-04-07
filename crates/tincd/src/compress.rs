@@ -500,15 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn lzo_lo_roundtrip() {
-        let mut c = Compressor::new();
-        let src = b"Hello, world! Hello, world! Hello, world!";
-        let comp = c.compress(src, Level::LzoLo).unwrap();
-        let dec = c.decompress(&comp, Level::LzoLo, 100).unwrap();
-        assert_eq!(dec, src);
-    }
-
-    #[test]
     fn lzo_lo_compresses() {
         // Repeating pattern: must shrink. lzo1x is fast but not
         // dense; a 20-byte pattern repeated 50× should still

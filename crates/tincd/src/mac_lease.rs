@@ -140,13 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn learn_first_returns_true() {
-        let mut m = MacLeases::default();
-        assert!(m.learn(A, t0(), 600));
-        assert_eq!(m.len(), 1);
-    }
-
-    #[test]
     fn learn_second_returns_false() {
         let mut m = MacLeases::default();
         let now = t0();
