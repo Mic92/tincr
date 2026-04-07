@@ -80,9 +80,9 @@ impl Level {
     /// error message (matches the daemon's other enum-parse sites).
     pub fn parse(s: &str) -> Result<Self, &str> {
         match s.to_ascii_lowercase().as_str() {
-            "off" | "none" => Ok(Level::None),
-            "normal" => Ok(Level::Normal),
-            "high" => Ok(Level::High),
+            "off" | "none" => Ok(Self::None),
+            "normal" => Ok(Self::Normal),
+            "high" => Ok(Self::High),
             _ => Err(s),
         }
     }

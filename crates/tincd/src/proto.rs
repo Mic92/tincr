@@ -721,7 +721,7 @@ pub fn send_ack(
     // global default sticks.
     if conn
         .host_clamp_mss
-        .unwrap_or(myself_options.contains(ConnOptions::CLAMP_MSS))
+        .unwrap_or_else(|| myself_options.contains(ConnOptions::CLAMP_MSS))
     {
         opts |= ConnOptions::CLAMP_MSS;
     }

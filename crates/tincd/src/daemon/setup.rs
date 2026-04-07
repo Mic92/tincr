@@ -469,7 +469,7 @@ impl Daemon {
             .lookup("Name")
             .next()
             .map(tinc_conf::Entry::get_str)
-            .ok_or(SetupError::Config("Name for tinc daemon required!".into()))?;
+            .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
         let name = expand_name(name).map_err(SetupError::Config)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
 
@@ -876,8 +876,8 @@ impl Daemon {
                 log::info!(target: "tincd::discovery",
                 "DHT discovery enabled (port {}, bootstrap: {})",
                 self.my_udp_port,
-                bootstrap.map_or(
-                    "mainline".to_owned(),
+                bootstrap.map_or_else(
+                    || "mainline".to_owned(),
                     |b| b.join(", ")
                 ));
                 self.discovery = Some(d);

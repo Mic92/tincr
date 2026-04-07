@@ -99,7 +99,7 @@ impl ScriptEnv {
         if let Some(level) = debug {
             vars.push(("DEBUG", level.to_string()));
         }
-        ScriptEnv { vars }
+        Self { vars }
     }
 
     /// `environment_add` for one var. We take key + formatted

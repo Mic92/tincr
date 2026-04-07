@@ -601,7 +601,7 @@ mod tests {
     impl Send {
         // The "all gates pass" baseline. Proven by the first assert
         // in `udp_send_gates`.
-        const PASS: Self = Send {
+        const PASS: Self = Self {
             to_myself: false,
             reachable: true,
             to_conn: false,
