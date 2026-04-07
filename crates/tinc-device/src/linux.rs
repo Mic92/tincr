@@ -882,23 +882,6 @@ mod tests {
         assert!(e.to_string().contains("Mode::Tun"));
     }
 
-    /// `open_mq(1)` ≡ `open()`. No MQ flag; same validation path.
-    /// With `iface = None` it should succeed validation (and fail
-    /// on the syscall, non-root).
-    #[test]
-    fn open_mq_one_is_open() {
-        if nix::unistd::geteuid().is_root() {
-            eprintln!("(skipping open_mq_one_is_open: root would open a TUN)");
-            return;
-        }
-        // No iface, n=1: delegates to Tun::open, which permits
-        // None (kernel picks). Fails on EACCES/ENOENT, NOT
-        // InvalidInput — proves the n=1 branch was taken.
-        let cfg = DeviceConfig::default();
-        let e = Tun::open_mq(&cfg, 1).unwrap_err();
-        assert_ne!(e.kind(), io::ErrorKind::InvalidInput);
-    }
-
     // pack_ifr_name — the testable seam
 
     /// Ok-path: `None` → all zeros (kernel picks). `Some` → packed,

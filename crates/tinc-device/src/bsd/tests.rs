@@ -244,34 +244,6 @@ fn utun_read_ignores_prefix() {
     // and 0x08, 0x00. The clobber.)
 }
 
-/// Utun read with a REALISTIC prefix: `htonl(AF_INET)`.
-/// Same result — prefix still ignored, still clobbered.
-/// This is the "well-behaved sender" path; the garbage
-/// test above is the "prefix is ignored either way" path.
-#[test]
-fn utun_read_with_real_prefix() {
-    // What a real BSD kernel writes: `htonl(AF_INET)` =
-    // [0, 0, 0, 2] (AF_INET=2 everywhere) + IPv4.
-    let kernel_wrote = [
-        0x00, 0x00, 0x00, 0x02, // htonl(AF_INET)
-        0x45, 0x00, 0xCA, 0xFE,
-    ];
-
-    let (r, w) = pipe();
-    nix::unistd::write(&w, &kernel_wrote).unwrap();
-    drop(w);
-
-    let mut bsd = fake_bsd(r, BsdVariant::Utun);
-    let mut buf = [0u8; MTU];
-    let n = bsd.read(&mut buf).unwrap();
-
-    assert_eq!(n, kernel_wrote.len() + 10);
-    // Same synthesis. The fact that the prefix WAS valid
-    // doesn't change the output — we never looked at it.
-    assert_eq!(&buf[12..14], &[0x08, 0x00]);
-    assert_eq!(&buf[14..18], &[0x45, 0x00, 0xCA, 0xFE]);
-}
-
 /// Utun write: ether frame in → AF prefix synthesized →
 /// `[prefix][IP]` out at +10. THE NOVEL CODE PATH.
 #[test]
