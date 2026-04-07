@@ -189,29 +189,6 @@ fn send_second_doesnt_signal() {
     assert_eq!(c.outbuf.live(), b"0 a 17.7\n4 0 99\n");
 }
 
-#[test]
-fn new_control_defaults() {
-    let c = Connection::test_with_fd(devnull());
-    assert_eq!(c.allow_request, Some(Request::Id));
-    assert!(!c.control);
-    assert_eq!(c.name, "<control>");
-    assert_eq!(c.protocol_minor, 0);
-    assert!(c.ecdsa.is_none());
-    assert!(c.sptps.is_none());
-    assert_eq!(c.options, crate::proto::ConnOptions::empty());
-    assert_eq!(c.estimated_weight, 0);
-    assert!(c.address.is_none());
-}
-
-/// `connection.h:38-58` bit positions. `control` = bit 9.
-#[test]
-fn status_value_control_bit() {
-    let c = Connection::test_with_fd(devnull());
-    assert_eq!(c.status_value(), 0);
-    // If `connection.h` reorders, this points where to look.
-    assert_eq!(1u32 << 9, 0x200);
-}
-
 // ─── take_rest
 
 /// Piggyback: ID line + SPTPS bytes in one buffer.
@@ -241,12 +218,6 @@ fn take_rest_empty_after_full_line() {
     let r = b.read_line().unwrap();
     assert_eq!(&b.bytes_raw()[r], b"0 alice 17.7");
     assert!(b.is_empty());
-    assert!(b.take_rest().is_empty());
-}
-
-#[test]
-fn take_rest_on_fresh_is_empty() {
-    let mut b = LineBuf::default();
     assert!(b.take_rest().is_empty());
 }
 

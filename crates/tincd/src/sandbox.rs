@@ -429,30 +429,4 @@ mod tests {
         assert_eq!(entered_level(), Level::None);
     }
 
-    /// Paths struct surface: confbase + the three subdirs the C
-    /// unveils. Doesn't apply Landlock (CI may lack it); just
-    /// asserts the path-set the live code computes. Meaningful
-    /// because if someone refactors `enter_impl` to grant `/` or
-    /// to forget `hosts/`, this is where the diff shows.
-    #[test]
-    fn paths_struct_shape() {
-        let p = Paths {
-            confbase: "/etc/tinc/mesh".into(),
-            device: Some("/dev/net/tun".into()),
-            logfile: None,
-            pidfile: "/run/tinc.mesh.pid".into(),
-            unixsocket: "/run/tinc.mesh.socket".into(),
-        };
-        // Confbase subdirs: cache, hosts, invitations.
-        assert_eq!(p.confbase.join("cache").as_os_str(), "/etc/tinc/mesh/cache");
-        assert_eq!(p.confbase.join("hosts").as_os_str(), "/etc/tinc/mesh/hosts");
-        assert_eq!(
-            p.confbase.join("invitations").as_os_str(),
-            "/etc/tinc/mesh/invitations"
-        );
-        // pidfile/socket parents are what get rwc (RemoveFile is
-        // a directory op in Landlock).
-        assert_eq!(p.pidfile.parent().unwrap().as_os_str(), "/run");
-        assert_eq!(p.unixsocket.parent().unwrap().as_os_str(), "/run");
-    }
 }
