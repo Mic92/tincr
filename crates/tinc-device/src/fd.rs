@@ -304,7 +304,7 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     // `cmd::network` for `.`-prefix). `'@'` is ASCII (0x40); the
     // encoding guarantee (ASCII bytes are verbatim) holds.
     let bytes = path.as_os_str().as_encoded_bytes();
-    if let Some(b'@') = bytes.first() {
+    if matches!(bytes.first(), Some(b'@')) {
         // ─── Abstract namespace
         // Kernel distinguishes by leading NUL byte. std
         // `from_abstract_name` adds the NUL itself, so strip the
