@@ -96,48 +96,6 @@ struct MacKey {
 // We don't need that — `BTreeMap::get`/`iter` don't take fake
 // entries.
 //
-/// Differential-fuzz hook: the first three tiers of
-/// `subnet_compare_ipv4` as a free function over plain fields.
-///
-/// The `Ord for Ipv4Key` impl below does the same comparison but takes a
-/// `Subnet` enum + `Option<String>` owner. The fuzz harness wants to feed
-/// arbitrary bytes without constructing `Subnet::V4` (which has its own
-/// invariants the parser enforces). Exposing this lets the fuzzer hit
-/// the comparison logic directly with garbage `prefix`/`weight`
-/// values — upstream `int` accepts those, our `u8 prefix` would
-/// clamp them.
-///
-/// `prefix` is `i32` here (matching bare `int`) not `u8`: the wire
-/// format is `%d` and a buggy peer could send `prefixlength = -1`
-/// or `300`. The parser rejects those, but the fuzz
-/// harness wants to know what happens if one slips through. The
-/// `Ipv4Key::cmp` below uses the post-parse `u8` and is therefore a
-/// strictly narrower domain — if fuzz over `i32` is clean, `u8` is too.
-///
-/// Owner tier omitted: C short-circuits when either owner is NULL
-/// (`:154`), and the fuzz shim always passes NULL. It's a `strcmp`.
-#[cfg(fuzzing)]
-#[must_use]
-pub fn cmp_ipv4_fuzz(
-    a_addr: [u8; 4],
-    a_prefix: i32,
-    a_weight: i32,
-    b_addr: [u8; 4],
-    b_prefix: i32,
-    b_weight: i32,
-) -> Ordering {
-    // C :140: `b->prefixlength - a->prefixlength` — descending.
-    a_prefix
-        .cmp(&b_prefix)
-        .reverse()
-        // C :146: memcmp on octets. Array Ord is byte-lex.
-        .then_with(|| a_addr.cmp(&b_addr))
-        // C :152: `a->weight - b->weight`. We use cmp, not subtraction —
-        // the C overflows on (i32::MIN, 1) and we don't. That divergence
-        // is a *finding*, not a bug to hide.
-        .then_with(|| a_weight.cmp(&b_weight))
-}
-
 // HOWEVER: `owner = NULL` is also a real tree state. `net_setup.c:
 // 485-505` inserts `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
 // `224.0.0.0/4`, `ff00::/8` with `subnet_add(NULL, s)`. `route.c:

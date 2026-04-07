@@ -18,7 +18,6 @@ arbitrary = { version = "1", features = ["derive"] }
 
 tinc-sptps = { path = "../crates/tinc-sptps" }
 tinc-ffi = { path = "../crates/tinc-ffi" }
-tincd = { path = "../crates/tincd" }
 
 [workspace]
 # Detached from the parent workspace: cargo-fuzz builds with
@@ -29,13 +28,6 @@ tincd = { path = "../crates/tincd" }
 [[bin]]
 name = "replay_diff"
 path = "fuzz_targets/replay_diff.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "subnet_cmp_diff"
-path = "fuzz_targets/subnet_cmp_diff.rs"
 test = false
 doc = false
 bench = false

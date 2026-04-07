@@ -82,10 +82,8 @@ fn main() {
         // rather than patch it. Our shim is `-Wall`-clean by hand.
         .warnings(false)
         .flag_if_supported("-Wno-unused-result")
-        // subnet_compare_ipv4's `a->weight - b->weight` is signed-overflow
-        // UB in stock C. The fuzzer feeds arbitrary i32 weights; without
-        // -fwrapv the optimizer can assume the subtraction never wraps
-        // and the divergence we're hunting becomes a heisenbug.
+        // Enable wrap-on-overflow for any remaining arithmetic that might
+        // rely on defined overflow behavior.
         .flag_if_supported("-fwrapv");
 
     // Honour cross-compile.

@@ -10,7 +10,6 @@ inputs and compare outputs byte-for-byte.
 | Harness | Rust | C | Status |
 |---|---|---|---|
 | `replay_diff` | `ReplayWindow::check` | `sptps_check_seqno` | clean @ 10min |
-| `subnet_cmp_diff` | `cmp_ipv4_fuzz` | `subnet_compare_ipv4` | 1 known finding |
 
 ## Running
 
@@ -31,24 +30,6 @@ with good coverage (`ft:` in the libFuzzer status line keeps
 climbing), the transcription is likely sound; stop.
 
 ## Findings
-
-### subnet_cmp_diff: weight-subtraction overflow (known, masked)
-
-`subnet_parse.c:152` does `a->weight - b->weight`. With weights near
-`i32::MAX/MIN` that wraps (under `-fwrapv`); Rust's `Ord::cmp` doesn't.
-Reachable on the wire (`%d` parse, no clamp at `subnet_parse.c:250`).
-Practical risk ~zero — weights are small in practice — but pinned in
-`tincd::subnet_tree::tests::ipv4_ord_weight_at_i32_extremes`.
-
-Masked in the harness so libFuzzer doesn't burn its budget rediscovering
-it. Unmask if you fix the parser to clamp.
-
-### subnet_cmp_diff: prefix-subtraction overflow (unreachable, not masked)
-
-Same shape at `:140` (`b->prefixlength - a->prefixlength`), found in
-<1s when prefix was unconstrained `i32`. But `str2net` rejects
-out-of-range prefix at `:254` before the comparator ever runs. The
-harness now constrains prefix to `0..=32`.
 
 ## Architecture
 

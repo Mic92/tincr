@@ -89,7 +89,6 @@ unsafe extern "C" {
     // the harness and poke a single static function with hand-crafted
     // state. Used by `fuzz/` targets, not by the handshake tests above.
     fn ffi_check_seqno(st: *mut FfiReplayState, seqno: u32, update: bool) -> bool;
-    fn ffi_subnet_compare_ipv4(a: *const FfiIpv4Subnet, b: *const FfiIpv4Subnet) -> i32;
 }
 
 /// Layout-match for `csrc/replay_shim.c`'s `ffi_replay_state_t`.
@@ -107,23 +106,6 @@ pub struct FfiReplayState {
     pub replaywin: u32,
     /// Circular bitmap, `replaywin` bytes. **Caller owns; C borrows.**
     pub late: *mut u8,
-}
-
-/// Layout-match for `csrc/replay_shim.c`'s `ffi_ipv4_subnet_t`.
-///
-/// Owner is omitted: the C comparator short-circuits at the owner tier
-/// when either is NULL, and we always pass NULL. The owner compare is
-/// a `strcmp` — not where transcription bugs hide.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct FfiIpv4Subnet {
-    /// Network-order octets. Same as `Ipv4Addr::octets()`.
-    pub addr: [u8; 4],
-    /// 0..=32 in well-formed subnets, but the C type is bare `int` and
-    /// the fuzzer will feed garbage. That's the point.
-    pub prefixlength: i32,
-    /// `%d`-parsed off the wire — negative is silly but legal.
-    pub weight: i32,
 }
 
 /// Run `sptps_check_seqno` on a hand-built state.
@@ -155,15 +137,6 @@ pub fn c_check_seqno(
     };
     let ok = unsafe { ffi_check_seqno(&raw mut st, seqno, update) };
     (ok, st.inseqno, st.farfuture)
-}
-
-/// Run the C IPv4 subnet comparator on two hand-built subnets.
-///
-/// Returns the raw signed difference (not normalized to {-1,0,1}).
-/// Compare against Rust's `Ordering` via `.signum()`.
-#[must_use]
-pub fn c_subnet_compare_ipv4(a: &FfiIpv4Subnet, b: &FfiIpv4Subnet) -> i32 {
-    unsafe { ffi_subnet_compare_ipv4(a, b) }
 }
 
 // ────────────────────────────────────────────────────────────────────
