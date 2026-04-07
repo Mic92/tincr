@@ -169,23 +169,23 @@ enum Sock {
 impl Sock {
     fn fd(&self) -> BorrowedFd<'_> {
         match self {
-            Sock::Tcp(s) => s.as_fd(),
-            Sock::Udp(s) => s.as_fd(),
+            Self::Tcp(s) => s.as_fd(),
+            Self::Udp(s) => s.as_fd(),
         }
     }
     fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            Sock::Tcp(s) => s.read(buf),
-            Sock::Udp(s) => s.recv(buf),
+            Self::Tcp(s) => s.read(buf),
+            Self::Udp(s) => s.recv(buf),
         }
     }
     fn send_all(&mut self, buf: &[u8]) -> io::Result<()> {
         match self {
-            Sock::Tcp(s) => s.write_all(buf),
+            Self::Tcp(s) => s.write_all(buf),
             // UDP: `send()` on a connected socket. One datagram. A
             // partial UDP send means EMSGSIZE — the datagram didn't
             // go. Surface it, don't retry.
-            Sock::Udp(s) => {
+            Self::Udp(s) => {
                 let n = s.send(buf)?;
                 if n != buf.len() {
                     return Err(io::Error::other(format!(

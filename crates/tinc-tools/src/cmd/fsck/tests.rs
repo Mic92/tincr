@@ -889,7 +889,7 @@ fn display_exhaustive() {
         (
             F::ServerVarInHost {
                 name: "X".into(),
-                source: s.clone(),
+                source: s,
             },
             "host config",
         ),
@@ -904,7 +904,7 @@ fn display_exhaustive() {
         (F::FixedPublicKey { path: p.clone() }, "Wrote Ed25519"),
         (
             F::FixFailed {
-                path: p.clone(),
+                path: p,
                 err: "e".into(),
             },
             "could not fix",

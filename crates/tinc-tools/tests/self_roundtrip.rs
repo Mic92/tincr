@@ -100,24 +100,24 @@ enum Impl {
 impl Impl {
     fn sptps_test(self) -> Option<PathBuf> {
         match self {
-            Impl::Rust => Some(bin("sptps_test")),
+            Self::Rust => Some(bin("sptps_test")),
             // `ok()`: unset env var → None → caller skips. `var_os`
             // not `var` — store paths can have any bytes (they don't
             // in practice, but `var` would panic on non-UTF-8 and
             // that's a needlessly brittle dep).
-            Impl::C => std::env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from),
+            Self::C => std::env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from),
         }
     }
     fn sptps_keypair(self) -> Option<PathBuf> {
         match self {
-            Impl::Rust => Some(bin("sptps_keypair")),
-            Impl::C => std::env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
+            Self::Rust => Some(bin("sptps_keypair")),
+            Self::C => std::env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
         }
     }
     const fn label(self) -> &'static str {
         match self {
-            Impl::Rust => "rust",
-            Impl::C => "c",
+            Self::Rust => "rust",
+            Self::C => "c",
         }
     }
 }
