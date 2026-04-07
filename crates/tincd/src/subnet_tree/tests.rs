@@ -83,7 +83,7 @@ fn ipv4_ord_weight_negative() {
 
 /// **[DOCUMENTED]** divergence from upstream `subnet_compare`.
 ///
-/// Found by `fuzz/fuzz_targets/subnet_cmp_diff.rs` in <1s. Upstream does
+/// Found by analysis of the C implementation. Upstream does
 /// `a->weight - b->weight` — signed-overflow UB, observably wrap
 /// under `-fwrapv`. Rust uses `Ord::cmp` which never overflows.
 /// At `i32::MAX` vs `i32::MIN` the C result wraps to `-1` (Less);
@@ -132,7 +132,7 @@ fn ipv4_ord_weight_at_i32_extremes() {
     // What C's `a->weight - b->weight` produces under wrap-on-
     // overflow: MAX - MIN = 2^32 - 1 ≡ -1 (mod 2^32). Negative,
     // so C says Less. Computed here to document the divergence;
-    // the fuzz harness in fuzz/ asserts it against the actual C.
+    // This documents the divergence from the C implementation.
     let c_wrapped = i32::MAX.wrapping_sub(i32::MIN);
     assert_eq!(c_wrapped, -1, "C's view: MAX - MIN wraps to -1");
     assert_ne!(

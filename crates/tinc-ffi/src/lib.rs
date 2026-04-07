@@ -85,58 +85,7 @@ unsafe extern "C" {
 
     fn ffi_drain(h: *mut c_void, out_buf: *mut *const u8, out_overflow: *mut bool) -> usize;
 
-    // Differential-fuzz entry points (csrc/replay_shim.c). These bypass
-    // the harness and poke a single static function with hand-crafted
-    // state. Used by `fuzz/` targets, not by the handshake tests above.
-    fn ffi_check_seqno(st: *mut FfiReplayState, seqno: u32, update: bool) -> bool;
-}
 
-/// Layout-match for `csrc/replay_shim.c`'s `ffi_replay_state_t`.
-///
-/// Public because the fuzz crate constructs these directly. The `late`
-/// pointer is a non-owning borrow of a Rust slice for the duration of
-/// one [`c_check_seqno`] call — the C indexes into it, never frees.
-#[repr(C)]
-pub struct FfiReplayState {
-    /// Expected next seqno.
-    pub inseqno: u32,
-    /// Far-future drop counter.
-    pub farfuture: u32,
-    /// Window width in BYTES. The bitmap is `replaywin * 8` slots.
-    pub replaywin: u32,
-    /// Circular bitmap, `replaywin` bytes. **Caller owns; C borrows.**
-    pub late: *mut u8,
-}
-
-/// Run `sptps_check_seqno` on a hand-built state.
-///
-/// `late` must be exactly `replaywin` bytes. The C indexes
-/// `late[(seqno/8) % replaywin]`; a short buffer is an OOB write.
-///
-/// # Safety
-/// `late.len()` must equal `replaywin`. Asserted in debug; in release
-/// (where the fuzzer runs) the caller is on the hook — the fuzz harness
-/// derives both from the same input byte so they can't disagree.
-pub fn c_check_seqno(
-    inseqno: u32,
-    farfuture: u32,
-    late: &mut [u8],
-    seqno: u32,
-    update: bool,
-) -> (bool, u32, u32) {
-    debug_assert!(
-        !late.is_empty(),
-        "replaywin=0 makes the C skip the bitmap entirely; not interesting"
-    );
-    let mut st = FfiReplayState {
-        inseqno,
-        farfuture,
-        #[allow(clippy::cast_possible_truncation)] // replaywin: tinc.conf u8 (≤255), test caps at 32
-        replaywin: late.len() as u32,
-        late: late.as_mut_ptr(),
-    };
-    let ok = unsafe { ffi_check_seqno(&raw mut st, seqno, update) };
-    (ok, st.inseqno, st.farfuture)
 }
 
 // ────────────────────────────────────────────────────────────────────

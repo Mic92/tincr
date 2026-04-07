@@ -172,9 +172,7 @@ enum State {
 /// `farfuture` is a heuristic for "peer rebooted and seqnos reset": if we
 /// see too many packets way ahead, give up and resync. The threshold is
 /// `replaywin >> 2`, hardcoded in C.
-/// Exposed under `cfg(fuzzing)` so the differential-fuzz harness can
-/// build identical Rust and C state from the same input bytes. The
-/// fields are otherwise private; the daemon never touches them.
+/// Fields are private; the daemon never touches them directly.
 #[derive(Default)]
 pub struct ReplayWindow {
     /// Expected next seqno.
@@ -187,39 +185,6 @@ pub struct ReplayWindow {
 }
 
 impl ReplayWindow {
-    /// Fuzz-only constructor: build a window in an arbitrary mid-stream
-    /// state, as if `n` packets had already been processed. The harness
-    /// derives `inseqno`/`late`/`farfuture` from the fuzz input and
-    /// builds the same state on the C side via `ffi_replay_state_t`.
-    #[cfg(fuzzing)]
-    pub fn from_raw(inseqno: u32, late: Vec<u8>, farfuture: u32) -> Self {
-        Self {
-            inseqno,
-            late,
-            farfuture,
-        }
-    }
-
-    /// Fuzz-only state inspector. The harness compares post-state
-    /// byte-for-byte against the C — same `inseqno`, same `late[]`
-    /// bitmap, same `farfuture`. A divergence here that doesn't show
-    /// up in the return value is the *interesting* kind: both impls
-    /// accepted the packet but disagree on what comes next.
-    #[cfg(fuzzing)]
-    pub fn raw(&self) -> (u32, &[u8], u32) {
-        (self.inseqno, &self.late, self.farfuture)
-    }
-
-    /// Fuzz-only public wrapper around [`Self::check`]. The real method
-    /// stays private — the daemon goes through `Sptps::receive`.
-    ///
-    /// # Errors
-    /// `BadSeqno` on replay/out-of-window. Same as [`Self::check`].
-    #[cfg(fuzzing)]
-    pub fn check_fuzz(&mut self, seqno: u32, update: bool) -> Result<(), SptpsError> {
-        self.check(seqno, update)
-    }
-
     fn new(win: usize) -> Self {
         Self {
             inseqno: 0,

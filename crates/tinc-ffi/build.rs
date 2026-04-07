@@ -29,11 +29,8 @@ fn main() {
         // shim
         csrc.join("shim.c"),
         csrc.join("sizeof.c"),
-        // sptps state machine — brought in via #include in replay_shim.c
-        // so we can wrap its statics (sptps_check_seqno). Compiling
-        // sptps.c directly as well would duplicate-define every
-        // non-static (sptps_start, sptps_stop, ...).
-        csrc.join("replay_shim.c"),
+        // sptps state machine
+        src.join("sptps.c"),
         // chacha-poly1305
         src.join("chacha-poly1305/chacha.c"),
         src.join("chacha-poly1305/chacha-poly1305.c"),
