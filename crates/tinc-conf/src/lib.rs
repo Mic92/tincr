@@ -1,46 +1,16 @@
-//! `conf.c` + the PEM-ish key file format from `ecdsa.c`.
+//! Tinc's `key = value` config format and its PEM-ish key file framing.
 //!
-//! ## What's here, what's not
+//! Lines are tokenized with a forgiving separator (any mix of spaces,
+//! tabs and an optional `=`), `#` comments and blanks are skipped, and
+//! PEM-armored blocks are stepped over so a `hosts/foo` file can hold
+//! both `Address =` lines and a trailing public key. Parsed entries
+//! land in a `Vec` ordered by `(case-insensitive name,
+//! cmdline-before-file, line, file)`, which is the order lookups walk:
+//! `-o` overrides beat file entries and multi-valued keys like `Subnet`
+//! or `ConnectTo` iterate in a stable, predictable sequence. The PEM
+//! reader/writer handles tinc's `BEGIN`/`END` armor around the
+//! crate-local base64 codec used for stored keys.
 //!
-//! `conf.c` is a `key = value` line format with three layers:
-//!
-//!   1. **`parse_config_line`** — single-line tokenizer. Surprisingly
-//!      fiddly: trailing whitespace stripped, separator is *zero or
-//!      more* `[\t ]` then *optional* `=` then more `[\t ]`. So
-//!      `"Port=655"`, `"Port 655"`, `"Port \t = \t 655"` all parse
-//!      identically. Upstream's `tincctl` writes `Key = Value` but old
-//!      hand-written configs use the bare-space form.
-//!
-//!   2. **`read_config_file`** — line loop, skips `#` comments and
-//!      blanks, *and* skips PEM-armored blocks (`-----BEGIN`..`END`).
-//!      That last bit is why a `hosts/foo` file can have both the
-//!      `Address = 1.2.3.4` lines *and* the public key glued on the
-//!      end — the parser steps over the PEM armor.
-//!
-//!   3. **Config tree + lookup** — a splay tree keyed by
-//!      `(strcasecmp(var), cmdline-before-file, line, file)`. The
-//!      ordering matters because `lookup_config`/`lookup_config_next`
-//!      walk a contiguous same-variable run in that order. Net effect:
-//!      `tincd -o Port=656` overrides `Port = 655` in `tinc.conf`,
-//!      and multi-valued keys (`Subnet`, `ConnectTo`) iterate in
-//!      cmdline-then-file-line order.
-//!
-//! Layers 1+2 are pure string handling — ported here byte-for-byte.
-//! Layer 3's *ordering* is preserved (it's protocol-adjacent: a peer's
-//! `hosts/foo` is read into a config tree, and `Subnet` iteration
-//! order affects which routes win on conflict). The *splay tree* is
-//! replaced with a `Vec` + stable sort — config files are tens of
-//! lines; `O(n)` lookup is invisible next to the `fopen`.
-//!
-//! ## What lives elsewhere
-//!
-//!  - `get_config_address` → `str2addrinfo` → `getaddrinfo` — daemon-side
-//!    (`crates/tincd`). Network I/O, not config parsing.
-//!  - `get_config_subnet` → `str2net` lives in `tinc-proto`. Daemon glues
-//!    those together; not this crate's job.
-//!  - `names.c` (`confbase`, `pidfilename`, etc.) — `tinc-tools::names`.
-//!    Nothing in *this* crate hardcodes paths.
-//!  - `append_config_file` — `tincctl` territory, not the daemon.
 //!
 //! ## PEM
 //!

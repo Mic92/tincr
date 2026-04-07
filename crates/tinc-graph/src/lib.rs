@@ -1,86 +1,17 @@
-//! `graph.c`: Kruskal's MST + BFS-based SSSP. `edge.c`/`node.c`: the
-//! arena and its delete operations.
+//! Mesh graph: a slab of nodes and edges with typed `NodeId`/`EdgeId`
+//! handles, plus the two routing algorithms that run over it —
+//! Kruskal's MST and a BFS-based single-source shortest path producing
+//! per-node distance, `via` relay, and indirect/direct status.
 //!
-//! ## What's here, what's not
-//!
-//! `graph.c` has three functions: `mst_kruskal`, `sssp_bfs`, and
-//! `check_reachability`. The first two are graph algorithms with one
-//! stray side-effect each (Kruskal sets `connection_t.status.mst`; BFS
-//! calls `update_node_udp` under a gate). The third is *all*
-//! side-effects: diffs `visited` against `reachable`, fires up/down
-//! scripts, resets SPTPS sessions, kicks the MTU probe.
-//!
-//! Here we port the two algorithms. They produce per-node routing
-//! results plus a list of MST edge IDs. `check_reachability` is daemon
-//! territory — see `crates/tincd/src/graph_glue.rs`.
-//!
-//! ## The arena
-//!
-//! `node_t` ↔ `edge_t` ↔ `connection_t` is a pointer rats' nest in C.
-//! We use a slab + `u32` IDs — same shape, no borrow drama, no `Rc`
-//! cycle headaches.
-//!
-//! `NodeId` / `EdgeId` are typed wrappers, not bare `u32`, so swapping
-//! them is a compile error.
-//!
-//! ## Iteration order matters
-//!
-//! Two paths with equal `(distance, weighted_distance, indirect)` are
-//! tie-broken by which edge was visited first. The C iterates a node's
-//! edges via `splay_each` over a tree keyed on `to->name`. So the
-//! tiebreak is alphabetical by destination. We sort the per-node edge
-//! lists the same way.
-//!
-//! Kruskal walks `edge_weight_tree`, sorted by `(weight, from->name,
-//! to->name)`. Same deal — `BTreeMap` with that key.
-//!
-//! ## The indirect→direct upgrade quirk
-//!
-//! `sssp_bfs` line 180:
-//! ```c
-//! if (e->to->status.visited && (!e->to->status.indirect || indirect)
-//!     && (... distance/weight check ...)) continue;
-//! ```
-//!
-//! That `!e->to->status.indirect || indirect` clause means: if the
-//! target was previously reached *indirectly* and we now have a
-//! *direct* path, *always* take the new path — even if the new
-//! distance is worse. Directness trumps hop count. The KAT
-//! `diamond_indirect` case verifies this: a node can end up with
-//! `distance=3` after first being visited at `distance=1` indirectly.
-//!
-//! Subtle but load-bearing for UDP hole-punching: `via` (the last
-//! direct relay) must be correct, and it's set from the path. A short
-//! indirect path gives a wrong `via`.
-//!
-//! ## Deletion: free-list, not slotmap
-//!
-//! `del_edge` is hot — every TCP reconnect tears down and rebuilds
-//! both halves. The slab is `Vec<Option<Edge>>` with a LIFO free-list:
-//! delete writes `None` and pushes the index; add pops the free-list
-//! before growing. O(1) both ways, and crucially: **existing
-//! `EdgeId`s stay valid**. A stale ID just reads `None`.
-//!
-//! Why not `slotmap`? It's the right tool, but:
-//!
-//! - Generational keys are a non-goal here. The C protocol layer
-//!   already prevents use-after-free at a higher level (`del_edge_h`
-//!   looks up by name pair, not by stored ID). We don't need the ABA
-//!   protection.
-//! - The KAT JSON encodes sequential `u32` indices. With `slotmap`
-//!   we'd need an insertion-order side-map for translation. Free-list
-//!   keeps `EdgeId(u32)` as-is.
-//! - `sssp`/`mst` already skip `None`-ish edges (`!e->reverse`).
-//!   One more `None` check is the same shape, no new pattern.
-//!
-//! `del_node` is the same shape but rarer (peer leaves the mesh
-//! entirely vs. edge churn on every reconnect). It cascades: deletes
-//! all the node's outgoing edges first. It does *not* hunt down
-//! incoming edges — the protocol layer (`del_edge_h`) deletes both
-//! halves of a pair before
-//! `node_del` runs. An incoming half-edge with a dangling `to` is the
-//! caller's bug, and it's harmless here (sssp skips reverseless edges
-//! and the cascade nulled the reverse).
+//! Edges and nodes are stored in `Vec<Option<_>>` slabs with a LIFO
+//! free-list, so churn from TCP reconnects is O(1) and stale IDs
+//! harmlessly read `None`. Per-node edge lists are kept sorted by
+//! destination name and Kruskal walks a `BTreeMap` keyed by
+//! `(weight, from-name, to-name)`, which makes equal-cost tie-breaks
+//! deterministic. SSSP additionally upgrades a node from indirect to
+//! direct whenever a direct path appears, even at a worse distance, so
+//! the `via` hint used for UDP hole-punching always points at the last
+//! real relay.
 
 #![forbid(unsafe_code)]
 
