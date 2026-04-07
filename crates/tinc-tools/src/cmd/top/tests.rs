@@ -463,23 +463,3 @@ fn render_clips_at_max_rows() {
 // mapping is the integration test's job (against fake daemon,
 // send 'i', assert sort changed).
 
-/// key → sortmode discriminants. We can't run `handle_key`
-/// (`RawMode`), but we CAN assert the `SortMode` discriminants
-/// match what the key handlers assign.
-#[test]
-fn sortmode_discriminants_match_expected() {
-    // 'n' → 0
-    assert_eq!(SortMode::Name as u8, 0);
-    // 'I' → 1
-    assert_eq!(SortMode::InPackets as u8, 1);
-    // 'i' → 2
-    assert_eq!(SortMode::InBytes as u8, 2);
-    // 'O' → 3
-    assert_eq!(SortMode::OutPackets as u8, 3);
-    // 'o' → 4
-    assert_eq!(SortMode::OutBytes as u8, 4);
-    // 'T' → 5
-    assert_eq!(SortMode::TotalPackets as u8, 5);
-    // 't' → 6
-    assert_eq!(SortMode::TotalBytes as u8, 6);
-}

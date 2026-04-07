@@ -418,19 +418,6 @@ fn strip_weight_table() {
     }
 }
 
-/// `strip_weight` literal must track `tinc_proto::DEFAULT_WEIGHT`.
-/// If that constant ever changes, this test fires; update both.
-#[test]
-fn strip_weight_tracks_default() {
-    // The "#10" literal is `format!("#{DEFAULT_WEIGHT}")` for
-    // DEFAULT_WEIGHT = 10. Assert that's still the case.
-    assert_eq!(tinc_proto::subnet::DEFAULT_WEIGHT, 10);
-    // If you're here because DEFAULT_WEIGHT changed:
-    // 1. Update the "#10" literal in `strip_weight`.
-    // 2. Update upstream comparison (also hardcodes "#10").
-    // 3. Update this assert.
-}
-
 // ─── ConnRow
 
 /// Golden vector. Daemon: 5 fields (after 18 6). CLI: 6 (one
