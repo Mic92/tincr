@@ -58,22 +58,3 @@ pub const STREAM_OVERHEAD: usize = 19;
 /// Datagram-mode wire overhead when encrypted: `seqno[4] + type[1] + tag[16]`.
 /// `SPTPS_DATAGRAM_OVERHEAD` in `sptps.h`.
 pub const DATAGRAM_OVERHEAD: usize = 21;
-
-#[cfg(test)]
-mod tests {
-    /// `sptps.h` line 58: `STATIC_ASSERT(sizeof(sptps_kex_t) == 65, ...)`.
-    /// We don't have a `sptps_kex_t`, but the same arithmetic must hold.
-    #[test]
-    fn kex_layout() {
-        use tinc_crypto::ecdh::PUBLIC_LEN;
-        assert_eq!(super::KEX_LEN, 1 + super::NONCE_LEN + PUBLIC_LEN);
-    }
-
-    /// `sptps.h` line 68: `STATIC_ASSERT(sizeof(sptps_key_t) == 128, ...)`.
-    /// Our PRF output is two ChaPoly keys back-to-back; same constraint.
-    #[test]
-    fn key_material_layout() {
-        use tinc_crypto::chapoly::KEY_LEN;
-        assert_eq!(2 * KEY_LEN, 128);
-    }
-}

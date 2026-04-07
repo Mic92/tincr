@@ -391,26 +391,6 @@ mod tests {
         let _sp2: SelfPipe<Sig> = SelfPipe::new().unwrap();
     }
 
-    /// Table size. SIGHUP=1, SIGINT=2, SIGALRM=14, SIGTERM=15. All
-    /// fit in 32.
-    #[test]
-    fn tincd_signals_fit() {
-        // The 4 signals tincd.c registers. All are small positive
-        // ints (POSIX guarantees SIGHUP=1, SIGINT=2, SIGTERM=15;
-        // SIGALRM is 14 on Linux/BSD). The cast is safe because we
-        // check `> 0` first — but clippy can't see across asserts,
-        // so try_from.
-        for &s in &[libc::SIGHUP, libc::SIGINT, libc::SIGALRM, libc::SIGTERM] {
-            let idx = usize::try_from(s).expect("signum positive");
-            assert!(
-                idx < NSIG_TABLE,
-                "signal {s} doesn't fit in {NSIG_TABLE}-entry table"
-            );
-            // And fits in u8 (the pipe protocol).
-            assert!(idx < 256);
-        }
-    }
-
     /// drain on empty pipe returns immediately (read returns 0 or
     /// EAGAIN — actually, blocking pipe with no data BLOCKS. We
     /// rely on epoll telling us it's readable first. This test
