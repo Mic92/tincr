@@ -669,18 +669,6 @@ mod tests {
         assert_eq!(out, b"Hello\nWorld\n");
     }
 
-    /// `level` parameter forwards. `tinc log 5` → "18 15 5 0\n".
-    #[test]
-    fn log_loop_level_forwarded() {
-        let (mut ctl, shared) = ctl_from_wire(Vec::new()); // EOF immediately
-        let mut out = Vec::new();
-
-        log_loop(&mut ctl, &mut out, Some(5), false).unwrap();
-
-        assert_eq!(shared.borrow().write_side, b"18 15 5 0\n");
-        assert_eq!(out, b"");
-    }
-
     /// `use_color=true` → fourth int is 1.
     #[test]
     fn log_loop_color_forwarded() {

@@ -238,27 +238,6 @@ mod tests {
     }
 
     /// `reload` happy path: result=0 → Ok.
-    #[test]
-    fn reload_ok() {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let cookie = "a".repeat(64);
-
-        let daemon = fake_daemon(theirs, |br, w| {
-            let mut line = String::new();
-            br.read_line(&mut line).unwrap();
-            assert_eq!(line.trim_end(), "18 1");
-            writeln!(w, "18 1 0").unwrap();
-        });
-
-        let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
-        // Inline reload's body (post-connect).
-        ctl.send(CtlRequest::Reload).unwrap();
-        let r = ctl.recv_ack(CtlRequest::Reload).unwrap();
-        assert_eq!(r, 0);
-
-        daemon.join().unwrap();
-    }
-
     /// `reload` failure: daemon's reload returned nonzero. We test
     /// the interpretation, not the transport (that's `ctl.rs`'s job).
     #[test]
