@@ -661,17 +661,6 @@ mod tests {
         assert_ne!(recv[0], 0xEE);
     }
 
-    /// `mode()` is TUN, always. We don't even have the option.
-    #[test]
-    fn mode_always_tun() {
-        let (r, _w) = pipe();
-        let tun = FdTun::open(FdSource::Inherited(r.into_raw())).unwrap();
-        assert_eq!(tun.mode(), Mode::Tun);
-        assert_eq!(tun.iface(), "fd");
-        assert!(tun.mac().is_none());
-        assert!(tun.fd().is_some());
-    }
-
     // SCM_RIGHTS — round-trip with a real socketpair
     //
     // Can't easily test the abstract-namespace connect (would

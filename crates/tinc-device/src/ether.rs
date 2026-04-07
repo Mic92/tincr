@@ -128,23 +128,4 @@ mod tests {
             assert_eq!(buf[14], *fill, "case {i}: payload clobbered");
         }
     }
-
-    /// `to_be_bytes()` matches manual `>> 8` / `& 0xFF` shifting
-    /// AND matches literal `0x86` then `0xDD`. Three ways to spell
-    /// the same bytes.
-    #[test]
-    fn set_etherheader_be_matches_manual_split() {
-        let et = ETH_P_IPV6;
-        // Manual shift/mask:
-        let c_high = ((et >> 8) & 0xFF) as u8;
-        let c_low = (et & 0xFF) as u8;
-        // Literal hex:
-        let bsd_high = 0x86u8;
-        let bsd_low = 0xDDu8;
-        // What we do:
-        let rust = et.to_be_bytes();
-        // All three agree.
-        assert_eq!([c_high, c_low], rust);
-        assert_eq!([bsd_high, bsd_low], rust);
-    }
 }

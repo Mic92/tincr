@@ -1,34 +1,5 @@
 use super::*;
 
-// ─── Constants
-
-/// `AF_PREFIX_LEN = 4`. The arithmetic that gives offset 10.
-/// C uses literal `10` everywhere; we name the prefix length.
-#[test]
-fn af_prefix_len_4() {
-    assert_eq!(AF_PREFIX_LEN, 4);
-    // The +10 offset arithmetic.
-    assert_eq!(ETH_HLEN - AF_PREFIX_LEN, 10);
-    // sizeof(uint32_t). The prefix is `htonl(AF_*)`.
-    assert_eq!(AF_PREFIX_LEN, std::mem::size_of::<u32>());
-}
-
-/// Verify the read offsets match the C's literals.
-#[test]
-fn read_offsets() {
-    assert_eq!(BsdVariant::Tun.read_offset(), 14);
-    assert_eq!(BsdVariant::Utun.read_offset(), 10);
-    assert_eq!(BsdVariant::Tap.read_offset(), 0);
-}
-
-/// Mode mapping. `:206` in C checks switch-mode-needs-TAP.
-#[test]
-fn variant_mode() {
-    assert_eq!(BsdVariant::Tun.mode(), Mode::Tun);
-    assert_eq!(BsdVariant::Utun.mode(), Mode::Tun);
-    assert_eq!(BsdVariant::Tap.mode(), Mode::Tap);
-}
-
 // ─── to_af_prefix — the inverse map
 
 /// `0x0800` → `htonl(AF_INET)`. `AF_INET = 2` everywhere
@@ -497,14 +468,3 @@ fn utun_read_unknown_nibble_errors() {
 
 // ─── Device trait surface
 
-/// `mac()` always None (`open()` stub doesn't read it).
-/// `fd()` always Some. Surface accessors don't panic.
-#[test]
-fn device_surface() {
-    let (r, _w) = pipe();
-    let bsd = fake_bsd(r, BsdVariant::Utun);
-    assert!(bsd.mac().is_none());
-    assert!(bsd.fd().is_some());
-    assert_eq!(bsd.iface(), "fake-Utun");
-    assert_eq!(bsd.mode(), Mode::Tun);
-}

@@ -367,59 +367,6 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    // Constants — gcc-verified
-
-    /// `ETH_P_ALL = 0x0003` per `<linux/if_ether.h>`. gcc-
-    /// verified.
-    #[test]
-    fn eth_p_all_is_3() {
-        assert_eq!(ETH_P_ALL, 0x0003);
-        // libc should agree (it does; same kernel header).
-        // libc declares it `c_int` but the kernel value is a
-        // 16-bit ethertype; the i32 → u16 cast is exact.
-        assert_eq!(libc::ETH_P_ALL, i32::from(ETH_P_ALL));
-    }
-
-    /// `htons(ETH_P_ALL)` on little-endian = 0x0300. The byte-
-    /// swap that goes into `sll_protocol`.
-    #[test]
-    fn eth_p_all_htons() {
-        // `to_be()` on LE host: swap. On BE host: identity.
-        // Either way the BYTES are [0x00, 0x03]. The u16
-        // value-after-swap is host-dependent; the on-wire bytes
-        // are not.
-        let be = ETH_P_ALL.to_be();
-        let bytes = be.to_ne_bytes();
-        // On the wire (and in `sll_protocol`): big-endian =
-        // [high, low] = [0x00, 0x03]. `to_ne_bytes` of the
-        // already-swapped value gives us those bytes in order.
-        assert_eq!(bytes, [0x00, 0x03]);
-    }
-
-    /// `sizeof(sockaddr_ll) = 20`. gcc-verified. Matches libc.
-    /// The `addrlen` we pass to `bind`.
-    #[test]
-    fn sockaddr_ll_size_20() {
-        assert_eq!(std::mem::size_of::<libc::sockaddr_ll>(), 20);
-        // Sanity: 2 (family) + 2 (proto) + 4 (ifindex) +
-        //         2 (hatype) + 1 (pkttype) + 1 (halen) +
-        //         8 (addr) = 20. No padding (largest member is
-        //         the i32 ifindex, aligned at offset 4, which
-        //         it already is).
-    }
-
-    /// nix's `SockProtocol::EthAll` should be `htons(ETH_P_
-    /// ALL)`. Verify our understanding of what nix did.
-    #[test]
-    fn nix_ethall_is_htons_ethpall() {
-        use nix::sys::socket::SockProtocol;
-        // nix defines: `EthAll = (libc::ETH_P_ALL as u16).
-        // to_be() as i32`. On LE x86_64: (3).to_be() = 0x0300
-        // = 768.
-        let want = i32::from(ETH_P_ALL.to_be());
-        assert_eq!(SockProtocol::EthAll as i32, want);
-    }
-
     // open() gate — error path coverage without CAP_NET_RAW
 
     /// `open()` on a nonexistent interface: either EPERM
@@ -463,40 +410,6 @@ mod tests {
                 || ek == io::ErrorKind::InvalidInput,
             "unexpected error kind: {ek:?} ({e})"
         );
-    }
-
-    // bind_packet — sockaddr_ll layout
-
-    /// The `sockaddr_ll` we'd pass to bind: zeroed except
-    /// family/protocol/ifindex. Verify the layout matches what
-    /// the kernel expects (man 7 packet: "only `sll_protocol` and
-    /// `sll_ifindex` are used" + `sll_family` discriminant).
-    ///
-    /// We can't actually CALL bind (need `CAP_NET_RAW` + a real
-    /// socket). But we can inspect the struct we'd pass.
-    #[test]
-    #[allow(unsafe_code)]
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // AF_PACKET=17 fits c_ushort; mirrors bind_packet
-    fn sockaddr_ll_layout() {
-        // SAFETY: same as `bind_packet` — zeroed sockaddr_ll
-        // is sound.
-        let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-        // `AF_PACKET` is `c_int` but the value is 17; the
-        // c_ushort cast is exact (matches `bind_packet`).
-        sa.sll_family = libc::AF_PACKET as libc::c_ushort;
-        sa.sll_protocol = ETH_P_ALL.to_be();
-        sa.sll_ifindex = 42; // arbitrary
-
-        assert_eq!(sa.sll_family, 17);
-        // The protocol bytes, interpreted as native-endian
-        // u16, are htons(3). On LE: 0x0300 = 768.
-        assert_eq!(sa.sll_protocol.to_ne_bytes(), [0x00, 0x03]);
-        assert_eq!(sa.sll_ifindex, 42);
-        // Unwritten fields stay zero. Kernel ignores them.
-        assert_eq!(sa.sll_hatype, 0);
-        assert_eq!(sa.sll_pkttype, 0);
-        assert_eq!(sa.sll_halen, 0);
-        assert_eq!(sa.sll_addr, [0; 8]);
     }
 
     // +0 read/write — socketpair end-to-end

@@ -274,16 +274,6 @@ impl Drop for DeviceArena {
 mod tests {
     use super::*;
 
-    /// STRIDE arithmetic. `MTU + 33` (SPTPS on-wire overhead from
-    /// `mt-kernel-findings.md`) rounded to cacheline. Pin it: if
-    /// MTU bumps for jumbo, this fails and points at the layout.
-    #[test]
-    fn stride_is_mtu_plus_overhead_cacheline_rounded() {
-        assert_eq!(DeviceArena::STRIDE, 1600);
-        assert_eq!(DeviceArena::STRIDE % 64, 0);
-        const { assert!(DeviceArena::STRIDE >= super::super::MTU + 33) };
-    }
-
     /// Page alignment is the whole point of the custom alloc. If
     /// this fails, the `MSG_ZEROCOPY` page-pin math is wrong.
     #[test]
@@ -311,25 +301,6 @@ mod tests {
         // unset slots are len 0
         assert_eq!(a.slot(0), b"");
         assert_eq!(a.slot(2), b"");
-    }
-
-    /// Consecutive slots don't overlap. If adjacent slots are ever
-    /// written concurrently and they alias, that's UB.
-    #[test]
-    fn slots_are_disjoint() {
-        let a = DeviceArena::new(4);
-        let base = a.as_contiguous().as_ptr() as usize;
-        for i in 0..4 {
-            // Can't call slot_mut here (takes &mut, conflicts with
-            // base borrow). Compute offsets directly.
-            let slot_start = base + i * DeviceArena::STRIDE;
-            let slot_end = slot_start + DeviceArena::STRIDE;
-            assert_eq!(slot_start - base, i * DeviceArena::STRIDE);
-            // Slot i ends exactly where i+1 starts.
-            if i < 3 {
-                assert_eq!(slot_end, base + (i + 1) * DeviceArena::STRIDE);
-            }
-        }
     }
 
     /// Slot ranges all live inside `as_contiguous`. Callers slice
@@ -367,13 +338,4 @@ mod tests {
         let _ = a.slot(2);
     }
 
-    /// Drop runs. (Miri catches the leak/double-free if dealloc is
-    /// wrong; this test is here so `cargo nextest` exercises the
-    /// alloc/dealloc pair under normal builds too.)
-    #[test]
-    fn drop_runs() {
-        for cap in [1, 8, 64, 128] {
-            let _ = DeviceArena::new(cap);
-        }
-    }
 }

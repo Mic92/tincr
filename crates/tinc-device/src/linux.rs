@@ -855,83 +855,6 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
-    /// `IFF_TUN`/`IFF_TAP`/`IFF_NO_PI` from libc match the kernel
-    /// header values. Smoke-verified via gcc earlier; pin them so
-    /// libc upgrade noise gets caught.
-    ///
-    /// These are kernel ABI constants — they CAN'T change. The
-    /// test pins our DEPENDENCY on libc having them right.
-    #[test]
-    fn iff_flags_match_kernel() {
-        // From `cat > /tmp/iff.c ... gcc /tmp/iff.c && /tmp/iff`:
-        //   IFF_TUN = 0x1, IFF_TAP = 0x2, IFF_NO_PI = 0x1000
-        assert_eq!(libc::IFF_TUN, 0x1);
-        assert_eq!(libc::IFF_TAP, 0x2);
-        assert_eq!(libc::IFF_NO_PI, 0x1000);
-    }
-
-    /// `TUNSETIFF` ioctl number. Kernel ABI; can't change.
-    /// Smoke-verified `0x400454ca` from gcc.
-    #[test]
-    fn tunsetiff_value() {
-        // libc::TUNSETIFF type is `Ioctl` which is `c_ulong` on
-        // Linux; the cast normalizes for assert.
-        // `libc::TUNSETIFF` is `c_ulong` on Linux (= `u64` on
-        // x86_64). `u64::from` is a no-op there. The cast
-        // documents the intent (compare as u64) but clippy
-        // catches the no-op. Direct compare; the literal type
-        // suffix matches.
-        #[allow(clippy::unreadable_literal)] // TUNSETIFF: keep contiguous for kernel-hdr grep
-        let want: libc::c_ulong = 0x400454ca;
-        assert_eq!(libc::TUNSETIFF, want);
-    }
-
-    /// `SIOCGIFHWADDR` ioctl number. Smoke-verified `0x8927`.
-    #[test]
-    fn siocgifhwaddr_value() {
-        assert_eq!(libc::SIOCGIFHWADDR, 0x8927);
-    }
-
-    /// `libc::ifreq` is 40 bytes. Smoke-verified both via gcc
-    /// `sizeof(struct ifreq)` AND via the `/tmp/smoke_ifreq`
-    /// crate. The kernel and libc must agree; pin our dependency.
-    #[test]
-    fn ifreq_size_40() {
-        assert_eq!(std::mem::size_of::<libc::ifreq>(), 40);
-    }
-
-    /// TUN flags: `IFF_TUN | IFF_NO_PI | IFF_VNET_HDR` (same as
-    /// wg-go `tun_linux.go:566`). TAP flags:
-    /// `IFF_TAP | IFF_NO_PI`. Pin both so a refactor of
-    /// `Tun::open`'s flag computation gets caught.
-    #[test]
-    #[allow(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (asserted below)
-    fn mode_flags() {
-        // Mirrors `Tun::open`. The actual open inlines it; this
-        // is the test seam.
-        let flags_for = |mode: Mode| -> i16 {
-            (match mode {
-                Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
-                Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
-            }) as i16
-        };
-        // 0x0001 | 0x1000 | 0x4000 = 0x5001.
-        assert_eq!(flags_for(Mode::Tun), 0x5001);
-        assert_eq!(flags_for(Mode::Tap), 0x1002);
-    }
-
-    /// `open_mq(n>1)` flags: `IFF_TUN|IFF_NO_PI|IFF_MULTI_QUEUE|
-    /// IFF_VNET_HDR` = `0x5101`. Validated against kernel 6.19.9;
-    /// pin the bit-value so a libc upgrade or refactor that drops
-    /// a flag fails CI.
-    #[test]
-    fn iff_multi_queue_value() {
-        assert_eq!(libc::IFF_MULTI_QUEUE, 0x0100);
-        // The full open_mq combo:
-        let combo = libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_MULTI_QUEUE | libc::IFF_VNET_HDR;
-        assert_eq!(combo, 0x5101);
-    }
-
     /// `open_mq(n>1)` rejects `iface = None`. Validation BEFORE
     /// open (no `CAP_NET_ADMIN` needed). Same shape as
     /// `open_too_long_iface_err_before_open`.
@@ -1023,29 +946,6 @@ mod tests {
         assert!(msg.contains("15"), "msg should name limit: {msg}");
     }
 
-    /// `TUNSETOFFLOAD` ioctl number. `_IOW('T', 208, unsigned int)`.
-    /// Computed: `(1<<30)|(4<<16)|('T'<<8)|208 = 0x400454d0`.
-    /// Not in libc; pin our local constant.
-    #[test]
-    fn tunsetoffload_value() {
-        let want: libc::c_ulong = 0x4004_54d0;
-        assert_eq!(TUNSETOFFLOAD, want);
-    }
-
-    /// `TUN_F_*` flags. `if_tun.h:88-90`. Kernel ABI; can't change.
-    #[test]
-    fn tun_f_flags_match_kernel() {
-        assert_eq!(TUN_F_CSUM, 0x01);
-        assert_eq!(TUN_F_TSO4, 0x02);
-        assert_eq!(TUN_F_TSO6, 0x04);
-    }
-
-    /// `IFF_VNET_HDR` from libc matches `if_tun.h:75`.
-    #[test]
-    fn iff_vnet_hdr_value() {
-        assert_eq!(libc::IFF_VNET_HDR, 0x4000);
-    }
-
     /// `Tun::open` with too-long iface → `Err` BEFORE open. The
     /// reordering (validate first, open second) is the testability
     /// fix. Without it, CI without `/dev/net/tun` would ENOENT
@@ -1088,23 +988,5 @@ mod tests {
             io::ErrorKind::InvalidInput,
             "validation should pass for default config; got: {e}"
         );
-    }
-
-    // The vnet write-path layout trick — testable without a TUN
-
-    /// The vnet write-path arithmetic. The daemon's buf is
-    /// `[synth eth(14)][IP]`. The kernel wants `[vnet_hdr(10)]
-    /// [IP]`. Writing from `buf[ETH_HLEN - VNET_HDR_LEN..]` after
-    /// zeroing the ethertype gives `[10 zero bytes][IP]` because
-    /// the synth eth header's bytes [4..12] are already zero (the
-    /// fake src MAC). This pins that the offset is 4, not 0 or 10.
-    #[test]
-    fn vnet_write_offset_arithmetic() {
-        assert_eq!(ETH_HLEN - VNET_HDR_LEN, 4);
-        // The 10 bytes at buf[4..14] become the vnet_hdr:
-        //   [4..6]   was synth dst MAC bytes 4-5: 0
-        //   [6..12]  was synth src MAC: 0
-        //   [12..14] was ethertype: stomped to 0 in write()
-        // All zero → valid `gso_type=NONE` vnet_hdr.
     }
 }

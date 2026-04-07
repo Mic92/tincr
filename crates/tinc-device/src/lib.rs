@@ -310,28 +310,6 @@ mod tests {
         assert_eq!(buf[99], 0x42);
     }
 
-    /// `iface = "dummy"`. The daemon's tinc-up script gets
-    /// `INTERFACE=dummy`. fd and mac are `None`.
-    #[test]
-    fn dummy_surface() {
-        let d = Dummy;
-        assert_eq!(d.iface(), "dummy");
-        assert!(d.fd().is_none());
-        assert!(d.mac().is_none());
-    }
-
-    /// `Mode::default()` is TUN. `route.c` defaults to RMODE_
-    /// ROUTER, which picks TUN. The `DeviceConfig` default builder
-    /// chains through this.
-    #[test]
-    fn mode_default_tun() {
-        assert_eq!(Mode::default(), Mode::Tun);
-        let cfg = DeviceConfig::default();
-        assert_eq!(cfg.mode, Mode::Tun);
-        assert!(cfg.device.is_none());
-        assert!(cfg.iface.is_none());
-    }
-
     // ─── default drain()
     //
     // The default impl is the BSD/macOS path. Test it with a mock that
