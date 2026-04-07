@@ -78,9 +78,9 @@ impl Subnet {
     #[must_use]
     pub fn is_canonical(&self) -> bool {
         match self {
-            Subnet::Mac { .. } => true,
-            Subnet::V4 { addr, prefix, .. } => maskcheck(&addr.octets(), *prefix),
-            Subnet::V6 { addr, prefix, .. } => maskcheck(&addr.octets(), *prefix),
+            Self::Mac { .. } => true,
+            Self::V4 { addr, prefix, .. } => maskcheck(&addr.octets(), *prefix),
+            Self::V6 { addr, prefix, .. } => maskcheck(&addr.octets(), *prefix),
         }
     }
 
@@ -88,7 +88,7 @@ impl Subnet {
     #[must_use]
     pub const fn weight(&self) -> i32 {
         match self {
-            Subnet::Mac { weight, .. } | Subnet::V4 { weight, .. } | Subnet::V6 { weight, .. } => {
+            Self::Mac { weight, .. } | Self::V4 { weight, .. } | Self::V6 { weight, .. } => {
                 *weight
             }
         }
@@ -304,7 +304,7 @@ impl FromStr for Subnet {
             if prefix.is_some() {
                 return Err(ParseError);
             }
-            return Ok(Subnet::Mac { addr, weight });
+            return Ok(Self::Mac { addr, weight });
         }
 
         if let Ok(addr) = s.parse::<Ipv4Addr>() {
@@ -313,7 +313,7 @@ impl FromStr for Subnet {
                 Some(p) if p <= 32 => u8::try_from(p).unwrap(),
                 _ => return Err(ParseError),
             };
-            return Ok(Subnet::V4 {
+            return Ok(Self::V4 {
                 addr,
                 prefix,
                 weight,
@@ -326,7 +326,7 @@ impl FromStr for Subnet {
                 Some(p) if p <= 128 => u8::try_from(p).unwrap(),
                 _ => return Err(ParseError),
             };
-            return Ok(Subnet::V6 {
+            return Ok(Self::V6 {
                 addr,
                 prefix,
                 weight,
@@ -376,7 +376,7 @@ impl fmt::Display for Subnet {
     #[allow(clippy::many_single_char_names)] // MAC byte destructuring
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Subnet::Mac { addr, weight } => {
+            Self::Mac { addr, weight } => {
                 let [a, b, c, d, e, g] = addr;
                 write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")?;
                 if *weight != DEFAULT_WEIGHT {
@@ -384,7 +384,7 @@ impl fmt::Display for Subnet {
                 }
                 Ok(())
             }
-            Subnet::V4 {
+            Self::V4 {
                 addr,
                 prefix,
                 weight,
@@ -398,7 +398,7 @@ impl fmt::Display for Subnet {
                 }
                 Ok(())
             }
-            Subnet::V6 {
+            Self::V6 {
                 addr,
                 prefix,
                 weight,

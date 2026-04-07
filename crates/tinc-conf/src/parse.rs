@@ -52,8 +52,8 @@ pub enum Source {
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Source::Cmdline { line } => write!(f, "in command line option {line}"),
-            Source::File { path, line } => {
+            Self::Cmdline { line } => write!(f, "in command line option {line}"),
+            Self::File { path, line } => {
                 write!(
                     f,
                     "on line {line} while reading config file {}",

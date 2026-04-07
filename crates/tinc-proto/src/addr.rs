@@ -83,7 +83,7 @@ impl fmt::Display for AddrStr {
 }
 
 impl From<AddrStr> for String {
-    fn from(a: AddrStr) -> String {
+    fn from(a: AddrStr) -> Self {
         a.0
     }
 }
