@@ -93,7 +93,7 @@ pub enum Role {
 
 impl Role {
     const fn is_initiator(self) -> bool {
-        matches!(self, Role::Initiator)
+        matches!(self, Self::Initiator)
     }
 }
 

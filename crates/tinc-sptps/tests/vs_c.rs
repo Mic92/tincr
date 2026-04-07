@@ -484,7 +484,7 @@ fn byte_identical_wire_output() {
                 .iter()
                 .zip(c.iter())
                 .position(|(a, b)| a != b)
-                .unwrap_or(r.len().min(c.len()));
+                .unwrap_or_else(|| r.len().min(c.len()));
             panic!(
                 "{} diverges at byte {mismatch}: rust={:02x?}.. c={:02x?}.. (lens {} vs {})",
                 names[i],
@@ -659,7 +659,7 @@ impl Impl {
         seed: &[u8; 32],
     ) -> Peer<'k> {
         match self {
-            Impl::Rust => {
+            Self::Rust => {
                 let mut rng = BridgeRng::new(seed);
                 let key = SigningKey::from_blob(my_priv);
                 let (s, outs) = Sptps::start(
@@ -673,7 +673,7 @@ impl Impl {
                 );
                 Peer::Rust(Box::new(s), wire(outs))
             }
-            Impl::C => {
+            Self::C => {
                 // Leak the keys: CSptps borrows them with lifetime 'k, but
                 // this function needs to return Peer<'k> and the keys are
                 // local. Box::leak gives them 'static. The test process is
