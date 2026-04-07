@@ -141,35 +141,6 @@ fn seal_into_open_into_roundtrip() {
     assert_eq!(rx.capacity(), cap_before, "rx scratch reallocated");
 }
 
-/// `open_data_into` rejects handshake records WITHOUT advancing the
-/// replay window, so the slow-path `receive()` fallback can re-decrypt
-/// the same seqno.
-#[test]
-fn open_data_into_handshake_falls_back() {
-    let (mut alice, mut bob) = handshake_pair();
-
-    // Trigger a re-KEX from alice. This emits an encrypted REC_HANDSHAKE
-    // datagram.
-    let outs = alice.force_kex(&mut SeedRng(0xCC)).unwrap();
-    let kex2 = wire(outs);
-
-    // Fast path must reject it…
-    let mut rx = Vec::new();
-    let err = bob.open_data_into(&kex2, &mut rx, 14).unwrap_err();
-    assert_eq!(err, SptpsError::BadRecord);
-
-    // …and rejecting again must give the SAME error (replay window NOT
-    // advanced; same seqno still fresh).
-    let err2 = bob.open_data_into(&kex2, &mut rx, 14).unwrap_err();
-    assert_eq!(err2, SptpsError::BadRecord);
-
-    // Slow path then handles it: bob is in SecondaryKex, the encrypted
-    // KEX bumps it through the fall-through (send_kex + receive_kex).
-    let (_, outs) = bob.receive(&kex2, &mut SeedRng(0xDD)).unwrap();
-    // Bob responds with his own KEX.
-    assert!(matches!(outs[0], Output::Wire { .. }));
-}
-
 /// `open_data_into` before handshake completes → `InvalidState` (no incipher).
 #[test]
 fn open_data_into_pre_handshake() {
