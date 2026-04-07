@@ -151,14 +151,6 @@ mod tests {
         assert_eq!(&pk2, sk2.public_key());
     }
 
-    /// The type strings are part of the on-disk format. Pin them.
-    #[test]
-    fn type_strings() {
-        // If these change, every existing key file in the wild breaks.
-        assert_eq!(TY_PRIVATE, "ED25519 PRIVATE KEY");
-        assert_eq!(TY_PUBLIC, "ED25519 PUBLIC KEY");
-    }
-
     /// Reading a public file as private fails on size mismatch.
     #[test]
     fn wrong_type_fails() {

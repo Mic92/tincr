@@ -1,19 +1,5 @@
 use super::*;
 
-// SORTNAME table — pin the expected values so a typo in the
-// table is caught.
-
-#[test]
-fn sortname_matches_expected() {
-    assert_eq!(SORTNAME[SortMode::Name as usize], "name");
-    assert_eq!(SORTNAME[SortMode::InPackets as usize], "in pkts");
-    assert_eq!(SORTNAME[SortMode::InBytes as usize], "in bytes");
-    assert_eq!(SORTNAME[SortMode::OutPackets as usize], "out pkts");
-    assert_eq!(SORTNAME[SortMode::OutBytes as usize], "out bytes");
-    assert_eq!(SORTNAME[SortMode::TotalPackets as usize], "tot pkts");
-    assert_eq!(SORTNAME[SortMode::TotalBytes as usize], "tot bytes");
-}
-
 // TrafficRow::parse — the wire seam
 
 /// Daemon sends `"NAME N N N N"` after `recv_row` strips

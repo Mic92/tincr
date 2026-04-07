@@ -418,18 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn separator_is_65_chars() {
-        // Belt-and-suspenders: const assert above + this. The const
-        // assert catches it at compile time; this is just so a
-        // `cargo test` run shows it explicitly.
-        assert_eq!(SEPARATOR.len(), 65);
-        assert!(SEPARATOR.starts_with("#-"));
-        assert!(SEPARATOR.ends_with("-#"));
-        // Exactly 63 dashes between the #s.
-        assert_eq!(SEPARATOR[1..64], "-".repeat(63));
-    }
-
-    #[test]
     fn name_line_filter() {
         // The cases from the export_one comment.
         assert!(is_name_line("Name = foo"));

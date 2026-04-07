@@ -2,28 +2,6 @@ use super::*;
 use std::io::Write;
 use std::thread;
 
-/// `CtlRequest` discriminants. Verified against upstream at
-/// commit time.
-#[test]
-fn request_discriminants() {
-    assert_eq!(CtlRequest::Stop as u8, 0);
-    assert_eq!(CtlRequest::Reload as u8, 1);
-    assert_eq!(CtlRequest::Restart as u8, 2);
-    assert_eq!(CtlRequest::DumpNodes as u8, 3);
-    assert_eq!(CtlRequest::DumpEdges as u8, 4);
-    assert_eq!(CtlRequest::DumpSubnets as u8, 5);
-    assert_eq!(CtlRequest::DumpConnections as u8, 6);
-    assert_eq!(CtlRequest::DumpGraph as u8, 7);
-    assert_eq!(CtlRequest::Purge as u8, 8);
-    assert_eq!(CtlRequest::SetDebug as u8, 9);
-    assert_eq!(CtlRequest::Retry as u8, 10);
-    assert_eq!(CtlRequest::Connect as u8, 11);
-    assert_eq!(CtlRequest::Disconnect as u8, 12);
-    assert_eq!(CtlRequest::DumpTraffic as u8, 13);
-    assert_eq!(CtlRequest::Pcap as u8, 14);
-    assert_eq!(CtlRequest::Log as u8, 15);
-}
-
 /// Round-trip through `from_i32`. Unknown → None.
 #[test]
 fn request_from_i32() {

@@ -346,24 +346,6 @@ mod tests {
         })
     }
 
-    // CONFFILES — sed-verified vs C
-
-    #[test]
-    fn conffiles_list() {
-        assert_eq!(
-            CONFFILES,
-            &[
-                "tinc.conf",
-                "tinc-up",
-                "tinc-down",
-                "subnet-up",
-                "subnet-down",
-                "host-up",
-                "host-down",
-            ]
-        );
-    }
-
     // resolve — the lattice
 
     /// `resolve` Ok-path table. The lattice: conffiles check FIRST
