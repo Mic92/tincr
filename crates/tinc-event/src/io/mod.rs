@@ -46,7 +46,8 @@ impl Io {
     const fn wants(self, ready: Ready) -> bool {
         matches!(
             (self, ready),
-            (Self::Read | Self::ReadWrite, Ready::Read) | (Self::Write | Self::ReadWrite, Ready::Write)
+            (Self::Read | Self::ReadWrite, Ready::Read)
+                | (Self::Write | Self::ReadWrite, Ready::Write)
         )
     }
 }
@@ -197,8 +198,22 @@ impl<W: Copy> EventLoop<W> {
             return; // already del'd
         };
         if slot.interest.is_some() {
-            // Best-effort.
-            let _ = del(self.ep.as_raw_fd(), slot.fd);
+            // Best-effort. ENOENT is fine (last fd closed → kernel
+            // auto-removed). EBADF is NOT fine: caller closed the fd
+            // BEFORE ev.del(). epoll keys on the open-file-
+            // description; if a dup of that fd survives, the
+            // interest leaks and level-triggered epoll busy-loops on
+            // ERR|HUP into a freed slot. Tripwire it in debug —
+            // would have caught the connecting_socks leak in tincd
+            // at first integration-test run instead of in prod.
+            if let Err(e) = del(self.ep.as_raw_fd(), slot.fd) {
+                debug_assert_ne!(
+                    e.raw_os_error(),
+                    Some(libc::EBADF),
+                    "ev.del(fd={}) after fd closed — deregister BEFORE drop",
+                    slot.fd
+                );
+            }
         }
         self.free.push(id.0);
     }
@@ -344,7 +359,12 @@ mod tests {
         // pulls the `fs` feature; raw libc keeps the dev-dep small.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(rc, 0, "pipe() failed: {err}", err = io::Error::last_os_error());
+        assert_eq!(
+            rc,
+            0,
+            "pipe() failed: {err}",
+            err = io::Error::last_os_error()
+        );
         // SAFETY: pipe() returned 0, both fds are valid and owned
         // by us. from_raw_fd takes ownership; File::drop closes.
         #[allow(unsafe_code)]
@@ -377,8 +397,10 @@ mod tests {
 
         // Drain it. The id is what we got.
         assert_eq!(ev.what(id), Some(What::Device));
-        drop((rd, wr));
+        // Deregister BEFORE close — the order the EBADF tripwire in
+        // `del()` enforces.
         ev.del(id);
+        drop((rd, wr));
     }
 
     /// `io_set` with same flags is a no-op. No syscall (we can't

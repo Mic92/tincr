@@ -440,8 +440,13 @@ impl Connection {
         // `UnixStream::from(fd)` would take ownership (double-close).
         let n = match read(self.fd.as_raw_fd(), buf) {
             Ok(0) => {
-                log::info!(target: "tincd::conn",
-                           "Connection closed by {}", self.name);
+                if self.control {
+                    log::debug!(target: "tincd::conn",
+                                "Connection closed by {}", self.name);
+                } else {
+                    log::info!(target: "tincd::conn",
+                               "Connection closed by {}", self.name);
+                }
                 return FeedResult::Dead;
             }
             Ok(n) => n,

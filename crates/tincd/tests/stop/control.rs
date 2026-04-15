@@ -158,7 +158,7 @@ fn udp_stray_packet_drained() {
 ///
 /// Test shape: connect ctl#1, send `REQ_LOG`. Connect ctl#2 — the
 /// daemon's `on_unix_accept` logs "Connection from ... (control)"
-/// at Info level. ctl#1 receives that line as `"18 15 <len>\n"` +
+/// at Debug level. ctl#1 receives that line as `"18 15 <len>\n"` +
 /// `<len>` raw bytes (no trailing `\n`, `send_meta`).
 #[test]
 fn req_log_streams() {
@@ -171,7 +171,7 @@ fn req_log_streams() {
     write_config(&confbase);
 
     // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
-    // the stderr filter. The "Connection from" log is Info; stderr
+    // the stderr filter. The "Connection from" log is Debug; stderr
     // won't print it but the tap MUST capture it (set_active bumps
     // max_level to Trace).
     let mut child = tincd_cmd()
@@ -209,15 +209,15 @@ fn req_log_streams() {
     log_r.read_line(&mut ack).unwrap();
     assert!(ack.starts_with("4 0 "));
 
-    // `"18 15 <level> <use_color>"`. level=0 maps
-    // to Info on the daemon side; the "Connection from" log we'll
-    // trigger is Info. use_color=0 (ignored anyway).
-    writeln!(log_w, "18 15 0 0").unwrap();
+    // `"18 15 <level> <use_color>"`. level=2 maps
+    // to Debug on the daemon side; the "Connection from" log we'll
+    // trigger is Debug. use_color=0 (ignored anyway).
+    writeln!(log_w, "18 15 2 0").unwrap();
     // No reply (`return true` without control_ok).
 
     // ─── ctl#2: trigger an Info-level log inside the daemon ────
     // `on_unix_accept` logs "Connection from localhost port unix
-    // (control)" at Info. That happens INSIDE the event loop turn
+    // (control)" at Debug. That happens INSIDE the event loop turn
     // that processes the accept; flush_log_tap drains it at the
     // bottom of the same turn.
     let trigger = UnixStream::connect(&socket).unwrap();
@@ -417,4 +417,64 @@ fn tinc_up_runs_with_confbase_cwd() {
     let want = confbase.canonicalize().unwrap();
     let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
     assert_eq!(got, want, "tinc-up cwd should be confbase");
+}
+
+/// fd-leak guard: open+close N control connections, assert
+/// `/proc/PID/fd` count returns to baseline. Covers `terminate()`'s
+/// `conns`/`conn_io`/`ev.del` coherence and `OwnedFd` drop.
+///
+#[cfg(target_os = "linux")]
+#[test]
+fn control_conn_churn_no_fd_leak() {
+    let tmp = tmp("fd-churn");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert!(wait_for_file(&socket));
+
+    let pid_str = std::fs::read_to_string(&pidfile).unwrap();
+    let daemon_pid: u32 = pid_str.split_whitespace().next().unwrap().parse().unwrap();
+    let fd_dir = format!("/proc/{daemon_pid}/fd");
+    let count_fds = || std::fs::read_dir(&fd_dir).unwrap().count();
+    let baseline = count_fds();
+
+    let cookie = read_cookie(&pidfile);
+    for _ in 0..100 {
+        let mut s = UnixStream::connect(&socket).unwrap();
+        // Greeting so on_unix_accept's read path runs (not just
+        // accept+EOF).
+        writeln!(s, "0 ^{cookie} 0").unwrap();
+        let mut r = BufReader::new(&s);
+        let mut line = String::new();
+        let _ = r.read_line(&mut line);
+        let _ = r.read_line(&mut line);
+        // drop(s) → daemon sees EOF → terminate()
+    }
+
+    // Daemon needs a turn to reap each EOF; poll.
+    let after = poll_until(Duration::from_secs(5), || {
+        let n = count_fds();
+        // Allow +1 slack: read_dir on /proc/self/fd races with the
+        // dirfd it opens; daemon-side has no such race but be lenient.
+        (n <= baseline + 1).then_some(n)
+    });
+    assert!(
+        after <= baseline + 1,
+        "fd leak: baseline={baseline} after-100-churn={after}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
 }

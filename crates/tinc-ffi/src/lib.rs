@@ -76,7 +76,6 @@ unsafe extern "C" {
 
     fn ffi_drain(h: *mut c_void, out_buf: *mut *const u8, out_overflow: *mut bool) -> usize;
 
-
 }
 
 // ────────────────────────────────────────────────────────────────────

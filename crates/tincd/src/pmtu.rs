@@ -97,6 +97,10 @@ pub struct PmtuState {
     /// `node_status_t::ping_sent` — next reply is the RTT measurement.
     pub ping_sent: bool,
     pub udp_ping_sent: Instant,
+    /// Last time a probe **reply** arrived. `try_udp` checks this
+    /// against `udp_discovery_timeout` to drop `udp_confirmed` when
+    /// the path goes silently dead.
+    pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
     /// RTT µs; `None` = unknown (`node.c` init: `-1`).
@@ -144,6 +148,7 @@ impl PmtuState {
             udp_confirmed: false,
             ping_sent: false,
             udp_ping_sent: now,
+            udp_reply_rx: now,
             mtu_ping_sent: now,
             maxrecentlen: 0,
             udp_ping_rtt: None,
@@ -272,6 +277,7 @@ impl PmtuState {
 
         // ── UDP confirmed ──── :199-210 ────────────────────────
         self.udp_confirmed = true;
+        self.udp_reply_rx = now;
 
         // ── PMTU-increase detector. `mtuprobes := 1` (not 0) so
         // the maxmtu re-seed doesn't undo this.
@@ -538,6 +544,16 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(s.phase, PmtuPhase::Steady);
         assert_eq!(s.mtu_ping_sent, now + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn on_probe_reply_stamps_udp_reply_rx() {
+        let t0 = Instant::now();
+        let mut s = PmtuState::new(t0, MTU);
+        let t1 = t0 + Duration::from_secs(7);
+        s.on_probe_reply(800, t1);
+        assert_eq!(s.udp_reply_rx, t1);
+        assert!(s.udp_confirmed);
     }
 
     #[test]

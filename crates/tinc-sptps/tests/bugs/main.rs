@@ -3,6 +3,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod adversarial_framing;
 mod fastpath_replay_window;
 mod open_data_into_err_buffer;
 mod send_record_oversized;

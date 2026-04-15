@@ -397,6 +397,25 @@ fn register_signals(
     signals.add(libc::SIGHUP, SignalWhat::Reload)?;
     signals.add(libc::SIGALRM, SignalWhat::Retry)?;
 
+    // USR1/USR2/WINCH: ignore. C tinc 1.1 sets these to SIG_IGN in
+    // detach() (process.c:205-207). Older 1.0.x dumped state on
+    // USR1/USR2; that moved to the control socket. Left at default
+    // disposition they terminate the process — a stray `kill -USR1`
+    // from a monitoring script expecting the old behaviour would
+    // kill the daemon.
+    //
+    // SAFETY: nix::signal is `unsafe` because the `Handler` variant
+    // can install an arbitrary fn pointer; `SigIgn` carries none, so
+    // there is no async-signal-safety concern. We are still single-
+    // threaded at setup (called before the event loop runs).
+    #[allow(unsafe_code)]
+    unsafe {
+        use nix::sys::signal::{SigHandler, Signal, signal};
+        let _ = signal(Signal::SIGUSR1, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGUSR2, SigHandler::SigIgn);
+        let _ = signal(Signal::SIGWINCH, SigHandler::SigIgn);
+    }
+
     // Register the self-pipe read end.
     ev.add(signals.read_fd(), Io::Read, IoWhat::Signal)?;
     Ok(())
@@ -715,7 +734,6 @@ impl Daemon {
             device_errors: 0,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
-            connecting_socks: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
             last_routes: std::sync::Arc::new(Vec::new()),
             last_mst: Vec::new(),

@@ -894,11 +894,24 @@ impl Daemon {
                     log::info!(target: "tincd::graph",
                                "Node {name} became reachable (via {via_name})");
 
-                    // Use edge addr from on_ack (direct neighbors).
+                    // Seed `udp_addr`. Direct neighbors:
+                    // `NodeState.edge_addr` (set in on_ack). Transitive
+                    // nodes: prevedge's wire addr from `edge_addrs`.
+                    // Without this, `choose_udp_address` for a
+                    // transitive non-INDIRECT node returns None and
+                    // direct UDP probes are silently dropped.
                     // We key incoming UDP on [dst_id6][src_id6]
                     // prefix — no tree to re-index.
                     let name_owned = name.to_owned();
-                    let addr = self.nodes.get(&node).and_then(|ns| ns.edge_addr);
+                    let addr = self
+                        .nodes
+                        .get(&node)
+                        .and_then(|ns| ns.edge_addr)
+                        .or_else(|| {
+                            let prev = self.route_of(node)?.prevedge?;
+                            let (a, p, _, _) = self.edge_addrs.get(&prev)?;
+                            local_addr::parse_addr_port(a.as_str(), p.as_str())
+                        });
                     if let Some(addr) = addr {
                         let tunnel = self.dp.tunnels.entry(node).or_default();
                         tunnel.udp_addr = Some(addr);
@@ -990,6 +1003,11 @@ impl Daemon {
                 format!("MYSELF port {}", self.my_udp_port)
             } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr.as_ref()) {
                 fmt_addr(ea) // "%s port %s", no v6 brackets
+            } else if let Some(addr) = self.dp.tunnels.get(&nid).and_then(|t| t.udp_addr) {
+                // Indirect node: address learned via UDP (hole-punch /
+                // UDP_INFO), not meta-conn ACK. C: update_node_udp().
+                // IpAddr Display has no v6 brackets, matches "%s port %s".
+                format!("{} port {}", addr.ip(), addr.port())
             } else {
                 "unknown port unknown".to_string()
             };
@@ -1377,20 +1395,32 @@ impl Daemon {
             // early-returned and broke hub-spoke (three_daemon_relay
             // regression). Check edge_addrs too.
             let e = self.graph.edge(existing).expect("just looked up");
-            let same_addr = self.edge_addrs.get(&existing).is_some_and(|(a, p, _, _)| {
-                // Compare addr+port only. Stricter than necessary —
-                // harmless (extra forward, seen dedups).
-                a == &edge.addr && p == &edge.port
-            });
+            let same_addr = self
+                .edge_addrs
+                .get(&existing)
+                .is_some_and(|(a, p, la, lp)| {
+                    // A changed local_address counts as "not same":
+                    // dropping local-only updates leaves
+                    // LocalDiscovery probing a stale LAN address. An
+                    // absent/unspec incoming local (6-token form,
+                    // older peers) is NOT a change.
+                    let addr_same = a == &edge.addr && p == &edge.port;
+                    let local_same = match &edge.local {
+                        None => true,
+                        Some((nla, _)) if nla.as_str() == AddrStr::UNSPEC => true,
+                        Some((nla, nlp)) => nla == la && nlp == lp,
+                    };
+                    addr_same && local_same
+                });
             if e.weight == edge.weight && e.options == edge.options && same_addr {
                 return Ok(false); // no forward, no graph()
             }
 
             // Peer's view of OUR edge is wrong.
             if from_id == self.myself {
-                log::warn!(target: "tincd::proto",
-                           "Got ADD_EDGE from {conn_name} for ourself \
-                            which does not match existing entry");
+                log::debug!(target: "tincd::proto",
+                            "Got ADD_EDGE from {conn_name} for ourself \
+                             which does not match existing entry");
                 // Send back what WE know (existing, not wire body).
                 let nw = self.send_add_edge(from_conn, existing);
                 return Ok(nw);
@@ -1399,9 +1429,9 @@ impl Daemon {
             // In-place update. NOT del+add: edge_addrs is keyed on
             // EdgeId; del+add recycles same slot only by
             // LIFO-freelist accident. update_edge makes it explicit.
-            log::warn!(target: "tincd::proto",
-                       "Got ADD_EDGE from {conn_name} which does not \
-                        match existing entry");
+            log::debug!(target: "tincd::proto",
+                        "Got ADD_EDGE from {conn_name} which does not \
+                         match existing entry");
             self.graph
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
@@ -1412,9 +1442,9 @@ impl Daemon {
         } else if from_id == self.myself {
             // Contradiction — peer says we have an edge we don't.
             // Counter read by on_periodic_tick.
-            log::warn!(target: "tincd::proto",
-                       "Got ADD_EDGE from {conn_name} for ourself \
-                        which does not exist");
+            log::debug!(target: "tincd::proto",
+                        "Got ADD_EDGE from {conn_name} for ourself \
+                         which does not exist");
             self.contradicting_add_edge += 1;
             // Send DEL with the wire body's names.
             let nw = self.send_del_edge(from_conn, &edge.from, &edge.to);
@@ -1474,29 +1504,29 @@ impl Daemon {
 
         // missing → warn-and-drop (view already consistent).
         let Some(&from_id) = self.node_ids.get(&edge.from) else {
-            log::warn!(target: "tincd::proto",
-                       "Got DEL_EDGE from {conn_name} which does not \
-                        appear in the edge tree (unknown from: {})", edge.from);
+            log::debug!(target: "tincd::proto",
+                        "Got DEL_EDGE from {conn_name} which does not \
+                         appear in the edge tree (unknown from: {})", edge.from);
             return Ok(false);
         };
         let Some(&to_id) = self.node_ids.get(&edge.to) else {
-            log::warn!(target: "tincd::proto",
-                       "Got DEL_EDGE from {conn_name} which does not \
-                        appear in the edge tree (unknown to: {})", edge.to);
+            log::debug!(target: "tincd::proto",
+                        "Got DEL_EDGE from {conn_name} which does not \
+                         appear in the edge tree (unknown to: {})", edge.to);
             return Ok(false);
         };
 
         let Some(eid) = self.graph.lookup_edge(from_id, to_id) else {
-            log::warn!(target: "tincd::proto",
-                       "Got DEL_EDGE from {conn_name} which does not \
-                        appear in the edge tree");
+            log::debug!(target: "tincd::proto",
+                        "Got DEL_EDGE from {conn_name} which does not \
+                         appear in the edge tree");
             return Ok(false);
         };
 
         // Peer says we DON'T have an edge we DO have.
         if from_id == self.myself {
-            log::warn!(target: "tincd::proto",
-                       "Got DEL_EDGE from {conn_name} for ourself");
+            log::debug!(target: "tincd::proto",
+                        "Got DEL_EDGE from {conn_name} for ourself");
             self.contradicting_del_edge += 1;
             // Edge exists (just looked up); send what we know.
             let nw = self.send_add_edge(from_conn, eid);

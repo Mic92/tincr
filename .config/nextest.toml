@@ -24,3 +24,14 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = 'test(rust_vs_c_throughput)'
 slow-timeout = { period = "180s", terminate-after = 2 }
+
+# netns stress tests: each one builds the bwrap rig (~2s) then runs
+# multi-second flap/idle/PMTU phases. Budget 90s; the slowest
+# (link_flap, handshake_under_loss) take ~25-40s wall-clock.
+[[profile.default.overrides]]
+filter = 'test(stress::stress_)'
+slow-timeout = { period = "90s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'test(stress::stress_)'
+slow-timeout = { period = "120s", terminate-after = 2 }

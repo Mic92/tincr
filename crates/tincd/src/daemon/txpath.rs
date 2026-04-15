@@ -110,7 +110,11 @@ impl Daemon {
 
         // udp_confirmed lives in BOTH `status` (dump_nodes packing)
         // and `pmtu` (authoritative).
-        let now = self.timers.now();
+        // Fresh Instant::now() — RTT measurement needs sub-ms accuracy;
+        // self.timers.now() is cached once per event-loop turn and can be
+        // a full epoll batch stale (yielding rtt=0 when probe-send and an
+        // unrelated reply land in the same batch).
+        let now = Instant::now();
         let actions = if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
         {
             p.on_probe_reply(len, now)
@@ -138,8 +142,8 @@ impl Daemon {
             let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
             h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
         }
-        // No per-node UDP-timeout timer (PMTU is driven inline by
-        // try_tx/pmtu.tick()).
+        // UDP-discovery timeout is checked inline in `try_udp`
+        // against `udp_reply_rx` — no per-node timer.
         false
     }
 
@@ -356,6 +360,29 @@ impl Daemon {
         }
 
         let tunnel = self.dp.tunnels.entry(target).or_default();
+
+        // ─── UDP-discovery timeout ──────────────────────────────────
+        // No reply for `udp_discovery_timeout` → path is silently
+        // dead (NAT rebind, firewall reload). Drop `udp_confirmed`
+        // so we fall back to TCP/relay instead of blackholing.
+        let timeout = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
+        if let Some(p) = tunnel.pmtu.as_mut()
+            && p.udp_confirmed
+            && now.duration_since(p.udp_reply_rx) >= timeout
+        {
+            log::info!(target: "tincd::net",
+                       "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
+            p.on_udp_timeout();
+            tunnel.status.udp_confirmed = false;
+            tunnel.udp_addr_cached = None;
+            if let Some(h) = self.tunnel_handles.get(&target) {
+                h.minmtu.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Fall through: udp_confirmed now false → probe interval
+            // below switches to udp_discovery_interval (aggressive
+            // 2s re-discovery).
+        }
+
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
 
         // ─── gratuitous reply keepalive ──────────────────────────
@@ -392,7 +419,11 @@ impl Daemon {
         };
         let elapsed = now.duration_since(p.udp_ping_sent);
         if elapsed >= Duration::from_secs(u64::from(interval)) {
-            p.udp_ping_sent = now;
+            // Fresh Instant::now() for the RTT stamp only — the cadence gate
+            // above keeps using the cached loop clock to avoid per-packet
+            // clock_gettime(). C tinc does the same: gettimeofday() right
+            // before `n->udp_ping_sent = now` (net_packet.c:1236).
+            p.udp_ping_sent = Instant::now();
             p.ping_sent = true;
             nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
             // localdiscovery && !udp_confirmed && has_prevedge.
@@ -649,9 +680,13 @@ impl Daemon {
                 }
             }
             AutoAction::CancelPending { name } => {
-                // drop slot, no conn to kill.
-                log::info!(target: "tincd",
-                           "Cancelled outgoing connection to {name}");
+                // drop slot, no conn to kill. C logs at
+                // DEBUG_CONNECTIONS; this fires routinely once ≥3
+                // conns are up (including for ConnectTo targets — see
+                // `AutoAction::CancelPending` doc), so don't make it
+                // look like an error at INFO.
+                log::debug!(target: "tincd",
+                            "Cancelled outgoing connection to {name}");
                 let oid = self
                     .outgoings
                     .iter()
@@ -1121,10 +1156,34 @@ impl Daemon {
         }
 
         // ─── edge's reverse->address ─────────────────────────────
-        // Direct-neighbor shortcut: NodeState.edge_addr is the
-        // peer-ACK addr. Transitives go via relay (try_tx
-        // via-recursion) anyway.
-        let addr = self.nodes.get(&to_nid)?.edge_addr?;
+        // Direct-neighbor fast path first (NodeState.edge_addr is
+        // the peer-ACK addr); else walk node_edges → reverse →
+        // edge_addrs. Without the walk a transitive non-INDIRECT
+        // node (`via == target` in try_tx, so no relay recursion)
+        // returns None and the probe is silently dropped.
+        let addr = self
+            .nodes
+            .get(&to_nid)
+            .and_then(|ns| ns.edge_addr)
+            .or_else(|| {
+                let mut cands: Vec<SocketAddr> = self
+                    .graph
+                    .node_edges(to_nid)
+                    .iter()
+                    .filter_map(|&eid| self.graph.edge(eid)?.reverse)
+                    .filter_map(|rev| {
+                        let (a, p, _, _) = self.edge_addrs.get(&rev)?;
+                        local_addr::parse_addr_port(a.as_str(), p.as_str())
+                    })
+                    .collect();
+                if cands.is_empty() {
+                    return None;
+                }
+                // Spread probes when multiple neighbors report
+                // different addrs (NAT).
+                let i = (OsRng.next_u32() as usize) % cands.len();
+                Some(cands.swap_remove(i))
+            })?;
         let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
         Some((addr, sock))
     }

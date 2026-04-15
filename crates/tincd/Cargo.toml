@@ -65,7 +65,7 @@ libc = "0.2"
 # user: drop_privs (-U), main.rs needs User::from_name + setuid/setgid/initgroups.
 # process: daemon() for detach, fexecve cousins (unused but feature-coupled).
 # mman: mlockall (-L).
-nix = { version = "0.29", default-features = false, features = ["fs", "socket", "net", "user", "process", "mman"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "socket", "net", "user", "process", "mman", "signal"] }
 
 # Landlock path allowlist for Sandbox=normal|high (sandbox.rs).
 # Linux only: the target.cfg means non-Linux builds don't even try

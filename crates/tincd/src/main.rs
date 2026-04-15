@@ -613,10 +613,10 @@ fn cut_umbilical() {
 
 fn detach() -> Result<(), String> {
     // SIGPIPE is already SIG_IGN — Rust runtime does that for us
-    // (`library/std/src/sys/pal/unix/mod.rs::reset_sigpipe`). The
-    // Explicitly ignore SIGPIPE/USR1/USR2/
-    // WINCH. USR1/USR2 are caught by SelfPipe in daemon.rs (they
-    // dump state). WINCH we don't care about (no curses).
+    // (`library/std/src/sys/pal/unix/mod.rs::reset_sigpipe`).
+    // USR1/USR2/WINCH are set to SIG_IGN in `register_signals`
+    // (daemon/setup.rs); they no longer dump state — that moved
+    // to the control socket in tinc 1.1.
 
     // SAFETY: `daemon(3)` forks; the child returns 0, the parent
     // calls `_exit(0)` inside libc. Single-threaded at this point
