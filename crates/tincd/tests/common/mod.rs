@@ -92,15 +92,31 @@ pub fn tincd_cmd() -> Command {
     c
 }
 
-/// Pre-allocate a TCP port: bind to 0, read it back, drop the
-/// listener. Race window between drop and the daemon's re-bind is
-/// sub-millisecond on loopback; fine in practice.
+/// Pre-allocate a port that is free for **both** TCP and UDP.
+///
+/// The daemon binds the configured `Port` on TCP *and* UDP
+/// (`listen.rs`). The previous TCP-only probe handed out ports that
+/// were already held for UDP by another parallel nextest worker's
+/// daemon, surfacing as a flaky
+/// `UDP bind on 0.0.0.0:NNNN: Address already in use` setup failure
+/// (e.g. `three_node::three_daemon_forwarding_off_drops_transit`).
+///
+/// We let the kernel pick a TCP port, then verify the same port is
+/// also free for UDP before returning. The drop-to-daemon-rebind
+/// window remains (sub-millisecond on loopback) but the cross-
+/// protocol collision — the actually observed flake — is closed.
 pub fn alloc_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind 0")
-        .local_addr()
-        .unwrap()
-        .port()
+    for _ in 0..32 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tcp:0");
+        let port = tcp.local_addr().unwrap().port();
+        // Daemon binds UDP on the wildcard (`0.0.0.0`); probe the
+        // same so we collide with what the daemon will collide with.
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+        // UDP taken (another test's daemon). Drop `tcp`, retry.
+    }
+    panic!("alloc_port: no port free on both TCP and UDP after 32 tries");
 }
 
 /// Kill the child, wait, return its captured stderr. For panic
