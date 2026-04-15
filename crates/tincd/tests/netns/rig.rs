@@ -343,8 +343,11 @@ impl Node {
         if connect_to {
             writeln!(tinc_conf, "ConnectTo = {}", other.name).unwrap();
         }
-        tinc_conf.push_str("PingTimeout = 1\n");
+        // `extra` BEFORE the default PingTimeout: tinc-conf lookup is
+        // first-occurrence-wins, so a stress test that needs a longer
+        // timeout (handshake-under-loss) can shadow the default 1s.
         tinc_conf.push_str(extra);
+        tinc_conf.push_str("PingTimeout = 1\n");
         // Linux TUN unconditionally uses IFF_VNET_HDR.
         // `real_tun_ping`/`real_tun_unreachable` exercise the
         // GSO_NONE path (ICMP → gso_none_checksum + eth synth);
@@ -372,14 +375,9 @@ impl Node {
     /// N-peer config. Same as `write_config_with` but writes
     /// `hosts/PEER` for every peer in `peers` and `ConnectTo` for
     /// every name in `connect_to`. `Address = 127.0.0.1 PORT` only
-    /// for ConnectTo targets. Used by the 3-node relay stress test
+    /// for `ConnectTo` targets. Used by the 3-node relay stress test
     /// (alice/bob spokes + mid hub).
-    pub(crate) fn write_config_multi(
-        &self,
-        peers: &[&Node],
-        connect_to: &[&str],
-        extra: &str,
-    ) {
+    pub(crate) fn write_config_multi(&self, peers: &[&Node], connect_to: &[&str], extra: &str) {
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!(
