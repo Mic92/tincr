@@ -280,7 +280,7 @@ pub(crate) struct Node {
     name: &'static str,
     seed: [u8; 32],
     pub(crate) confbase: PathBuf,
-    pidfile: PathBuf,
+    pub(crate) pidfile: PathBuf,
     pub(crate) socket: PathBuf,
     port: u16,
     /// Real TUN: this is the precreated persistent device name.
@@ -365,6 +365,79 @@ impl Node {
             writeln!(other_cfg, "Address = 127.0.0.1 {}", other.port).unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(other.name), other_cfg).unwrap();
+
+        write_ed25519_privkey(&self.confbase, &self.seed);
+    }
+
+    /// N-peer config. Same as `write_config_with` but writes
+    /// `hosts/PEER` for every peer in `peers` and `ConnectTo` for
+    /// every name in `connect_to`. `Address = 127.0.0.1 PORT` only
+    /// for ConnectTo targets. Used by the 3-node relay stress test
+    /// (alice/bob spokes + mid hub).
+    pub(crate) fn write_config_multi(
+        &self,
+        peers: &[&Node],
+        connect_to: &[&str],
+        extra: &str,
+    ) {
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        let mut tinc_conf = format!(
+            "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\n",
+            self.name, self.iface
+        );
+        for ct in connect_to {
+            writeln!(tinc_conf, "ConnectTo = {ct}").unwrap();
+        }
+        tinc_conf.push_str("PingTimeout = 1\n");
+        tinc_conf.push_str(extra);
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        std::fs::write(
+            self.confbase.join("hosts").join(self.name),
+            format!("Port = {}\nSubnet = {}\n", self.port, self.subnet),
+        )
+        .unwrap();
+
+        for peer in peers {
+            let pk = tinc_crypto::b64::encode(&peer.pubkey());
+            let mut cfg = format!("Ed25519PublicKey = {pk}\n");
+            if connect_to.contains(&peer.name) {
+                writeln!(cfg, "Address = 127.0.0.1 {}", peer.port).unwrap();
+            }
+            std::fs::write(self.confbase.join("hosts").join(peer.name), cfg).unwrap();
+        }
+
+        write_ed25519_privkey(&self.confbase, &self.seed);
+    }
+
+    /// Hub config: `DeviceType = dummy`, no Interface, no Subnet.
+    /// For relay-only middle nodes (`stress_relay_mid_restart`).
+    pub(crate) fn write_config_hub(&self, peers: &[&Node], extra: &str) {
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+
+        let mut tinc_conf = format!(
+            "Name = {}\nDeviceType = dummy\nAddressFamily = ipv4\n",
+            self.name
+        );
+        tinc_conf.push_str("PingTimeout = 1\n");
+        tinc_conf.push_str(extra);
+        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+
+        std::fs::write(
+            self.confbase.join("hosts").join(self.name),
+            format!("Port = {}\n", self.port),
+        )
+        .unwrap();
+
+        for peer in peers {
+            let pk = tinc_crypto::b64::encode(&peer.pubkey());
+            std::fs::write(
+                self.confbase.join("hosts").join(peer.name),
+                format!("Ed25519PublicKey = {pk}\n"),
+            )
+            .unwrap();
+        }
 
         write_ed25519_privkey(&self.confbase, &self.seed);
     }

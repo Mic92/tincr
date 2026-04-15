@@ -9,6 +9,23 @@ fn tmp(tag: &str) -> TmpGuard {
     TmpGuard::new("netns", tag)
 }
 
+/// Parse `(mtu, minmtu, maxmtu)` from a `dump nodes` row. Body
+/// tokens 14/15/16 (hostname is always 3 tokens: `HOST port PORT`).
+pub(crate) fn node_pmtu(rows: &[String], name: &str) -> Option<(u16, u16, u16)> {
+    rows.iter().find_map(|r| {
+        let body = r.strip_prefix("18 3 ")?;
+        let toks: Vec<&str> = body.split_whitespace().collect();
+        if toks.first() != Some(&name) {
+            return None;
+        }
+        Some((
+            toks.get(14)?.parse().ok()?,
+            toks.get(15)?.parse().ok()?,
+            toks.get(16)?.parse().ok()?,
+        ))
+    })
+}
+
 /// `tc qdisc add dev DEV root netem SPEC...`. Drop guard `del`s it.
 ///
 /// netem is egress-only (it's a qdisc). On `lo` that means EACH
@@ -18,12 +35,12 @@ fn tmp(tag: &str) -> TmpGuard {
 /// independent draws).
 ///
 /// `spec` is split on whitespace and passed verbatim. No shell.
-struct Netem {
+pub(crate) struct Netem {
     dev: String,
 }
 
 impl Netem {
-    fn apply(dev: &str, spec: &str) -> Self {
+    pub(crate) fn apply(dev: &str, spec: &str) -> Self {
         let mut args = vec!["qdisc", "add", "dev", dev, "root", "netem"];
         args.extend(spec.split_whitespace());
         let out = Command::new("tc").args(&args).output().expect("spawn tc");
@@ -63,21 +80,29 @@ impl Drop for Netem {
 /// Returns the daemon children so the test owns them — panic-path
 /// stderr drainage stays at the call site (where the failing assert
 /// knows what context to print).
-struct ChaosRig {
-    netns: NetNs,
-    alice_child: Child,
-    bob_child: Child,
-    alice_ctl: Ctl,
-    bob_ctl: Ctl,
+pub(crate) struct ChaosRig {
+    pub(crate) netns: NetNs,
+    pub(crate) alice: Node,
+    pub(crate) bob: Node,
+    pub(crate) alice_child: Child,
+    pub(crate) bob_child: Child,
+    pub(crate) alice_ctl: Ctl,
+    pub(crate) bob_ctl: Ctl,
 }
 
 impl ChaosRig {
     fn setup(netns: NetNs, tmp: &TmpGuard) -> Self {
+        Self::setup_with(netns, tmp, "")
+    }
+
+    /// `extra` appended verbatim to BOTH daemons' tinc.conf. Used by
+    /// stress tests that need `PingInterval = 1` / `MaxTimeout = 2`.
+    pub(crate) fn setup_with(netns: NetNs, tmp: &TmpGuard, extra: &str) -> Self {
         let alice = Node::new(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
         let bob = Node::new(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
 
-        bob.write_config(&alice, false);
-        alice.write_config(&bob, true);
+        bob.write_config_with(&alice, false, extra);
+        alice.write_config_with(&bob, true, extra);
 
         // `info` not `debug`: ~100-ping bursts at debug log a line
         // per packet per side. Not a pipe-fill risk at this volume
@@ -161,11 +186,24 @@ impl ChaosRig {
 
         Self {
             netns,
+            alice,
+            bob,
             alice_child,
             bob_child,
             alice_ctl,
             bob_ctl,
         }
+    }
+
+    /// PID of alice's daemon (first pidfile token). For
+    /// `/proc/<pid>/fd` leak checks.
+    pub(crate) fn alice_pid(&self) -> u32 {
+        std::fs::read_to_string(&self.alice.pidfile)
+            .expect("read pidfile")
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("pidfile pid")
     }
 
     /// `dump nodes` row → (`in_packets`, `out_packets`) for `name`.
@@ -185,9 +223,48 @@ impl ChaosRig {
             .expect("node row")
     }
 
+    /// Kill bob, return his captured stderr. Leaves alice running
+    /// (and the rig consumable for the rest). Used by the reconnect-
+    /// storm test which churns bob while observing alice.
+    pub(crate) fn kill_bob(&mut self) -> String {
+        // Drop bob's ctl FIRST: it holds an AF_UNIX conn into the
+        // daemon; killing the daemon makes the next `dump()` on
+        // that ctl panic on a broken pipe.
+        let _ = self.bob_child.kill();
+        let mut dead = std::mem::replace(
+            &mut self.bob_child,
+            // Placeholder; immediately overwritten by respawn_bob().
+            Command::new("true").spawn().expect("spawn placeholder"),
+        );
+        let _ = dead.wait();
+        let mut s = String::new();
+        if let Some(mut e) = dead.stderr.take() {
+            use std::io::Read;
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    }
+
+    /// Respawn bob (same config). Reconnects `bob_ctl`. Caller
+    /// must wait for alice to re-see bob as reachable.
+    pub(crate) fn respawn_bob(&mut self) {
+        std::fs::remove_file(&self.bob.socket).ok();
+        let log = "tincd=info,tincd::net=debug";
+        self.bob_child = self.bob.spawn_with_log(log);
+        assert!(
+            wait_for_file(&self.bob.socket),
+            "bob respawn failed; stderr:\n{}",
+            drain_stderr(std::mem::replace(
+                &mut self.bob_child,
+                Command::new("true").spawn().unwrap()
+            ))
+        );
+        self.bob_ctl = self.bob.ctl();
+    }
+
     /// Kill both, return (`alice_stderr`, `bob_stderr`). Consumes self
     /// so the test can't accidentally poll a dead daemon.
-    fn finish(mut self) -> (String, String) {
+    pub(crate) fn finish(mut self) -> (String, String) {
         drop(self.alice_ctl);
         drop(self.bob_ctl);
         let _ = self.bob_child.kill();

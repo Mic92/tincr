@@ -100,3 +100,4 @@ mod chaos;
 mod dns;
 mod ping;
 mod sandbox;
+mod stress;
