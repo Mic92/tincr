@@ -251,6 +251,7 @@ impl Daemon {
         let was_active = conn.active;
         let was_log = conn.log_level.is_some();
         let conn_name = conn.name.clone();
+        let conn_outgoing = conn.outgoing.map(OutgoingId::from);
         // Pre-ACK conns have no node_ids entry (only on_ack inserts).
         let conn_nid = self.node_ids.get(&conn_name).copied();
         // Drop now: OwnedFd closes; broadcast_line below skips this id.
@@ -329,21 +330,18 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
-        // Outgoing retry. Gate on was_active: a probe-fail is already
-        // handled by `on_connecting`→`do_outgoing_connection`
-        // directly (no double-retry).
-        if was_active
-            && conn_nid.is_some_and(|nid| self.nodes.contains_key(&nid))
-            // Can't read `conn.outgoing` (conn already dropped).
-            // Look it up by name in `outgoings`.
-            && let Some(oid) = self
-                .outgoings
-                .iter()
-                .find(|(_, o)| o.node_name == conn_name)
-                .map(|(id, _)| id)
-        {
-            // Reset backoff: a conn that got to ACK had a working addr.
-            if let Some(o) = self.outgoings.get_mut(oid) {
+        // Outgoing retry. C tinc retries UNCONDITIONALLY on `c->
+        // outgoing` (net.c:160). The previous `was_active` gate here
+        // wedged a pre-ACK timeout from the ping sweep forever:
+        // `on_ping_tick` calls `terminate()` directly (not via
+        // `on_connecting`), so nothing else re-drives the outgoing.
+        // Exposed by `stress_link_flap`: lo-down during connect →
+        // "Timeout while connecting" → conn dropped, no retry ever
+        // scheduled → reconnect never happens after lo-up.
+        if let Some(oid) = conn_outgoing.filter(|oid| self.outgoings.contains_key(*oid)) {
+            // Reset backoff only if the conn got to ACK (proven-good
+            // addr). Pre-ACK → keep the bumped backoff.
+            if was_active && let Some(o) = self.outgoings.get_mut(oid) {
                 o.timeout = 0;
             }
             self.do_outgoing_connection(oid);
@@ -625,17 +623,10 @@ impl Daemon {
                     .unwrap_or_default();
                 log::debug!(target: "tincd::conn",
                             "Error while connecting to {name} ({hostname}): {e}");
-                // Probe-fail doesn't trigger terminate's retry (not
-                // was_active); drive do_outgoing_connection directly.
-                let oid = self
-                    .conns
-                    .get(id)
-                    .and_then(|c| c.outgoing)
-                    .map(OutgoingId::from);
+                // terminate() now re-drives do_outgoing_connection
+                // for any conn that maps to an Outgoing (C parity);
+                // no need to drive it again here.
                 self.terminate(id);
-                if let Some(oid) = oid {
-                    self.do_outgoing_connection(oid);
-                }
                 false
             }
         }
