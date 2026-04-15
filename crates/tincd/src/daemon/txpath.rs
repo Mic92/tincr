@@ -657,9 +657,13 @@ impl Daemon {
                 }
             }
             AutoAction::CancelPending { name } => {
-                // drop slot, no conn to kill.
-                log::info!(target: "tincd",
-                           "Cancelled outgoing connection to {name}");
+                // drop slot, no conn to kill. C logs at
+                // DEBUG_CONNECTIONS; this fires routinely once ≥3
+                // conns are up (including for ConnectTo targets — see
+                // `AutoAction::CancelPending` doc), so don't make it
+                // look like an error at INFO.
+                log::debug!(target: "tincd",
+                            "Cancelled outgoing connection to {name}");
                 let oid = self
                     .outgoings
                     .iter()

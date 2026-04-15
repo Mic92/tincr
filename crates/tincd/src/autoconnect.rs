@@ -72,6 +72,19 @@ pub enum AutoAction {
     Disconnect { name: String },
     /// Cancel a between-retries pending outgoing. Daemon: just
     /// remove from `outgoings` slotmap (no conn to terminate).
+    ///
+    /// **`ConnectTo`-seeded slots are NOT exempt.** This matches
+    /// upstream `drop_superfluous_pending_connections` (`autoconnect.c
+    /// :150-168`), which walks the whole `outgoing_list` and deletes
+    /// any entry lacking a `connection_t` — it does not check whether
+    /// the slot came from `ConnectTo` or from autoconnect. Once we hit
+    /// ≥3 active conns, a `ConnectTo` target that is currently
+    /// unreachable stops being retried until SIGHUP re-reads the
+    /// config (`try_outgoing_connections` / our `reload_configuration`
+    /// `ConnectTo` diff). SIGALRM (`retry()`) only resets backoff on
+    /// *existing* slots in both C and Rust, so it does not resurrect
+    /// the entry either. This is intentional upstream behavior, not a
+    /// port bug.
     CancelPending { name: String },
     /// Nothing to do this tick. Can mean: at exactly 3 with nothing to
     /// heal; or under 3 but no eligible nodes; or
