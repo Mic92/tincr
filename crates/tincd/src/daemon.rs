@@ -823,5 +823,4 @@ mod tests {
         assert_eq!(step(101, 101, 2000), (3600, Duration::from_secs(2000)));
         assert_eq!(step(101, 101, 3600), (3600, Duration::from_secs(3600)));
     }
-
 }

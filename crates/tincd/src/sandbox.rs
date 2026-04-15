@@ -428,5 +428,4 @@ mod tests {
         assert!(can(Action::UseNewPaths));
         assert_eq!(entered_level(), Level::None);
     }
-
 }

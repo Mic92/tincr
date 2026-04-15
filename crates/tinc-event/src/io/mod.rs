@@ -46,7 +46,8 @@ impl Io {
     const fn wants(self, ready: Ready) -> bool {
         matches!(
             (self, ready),
-            (Self::Read | Self::ReadWrite, Ready::Read) | (Self::Write | Self::ReadWrite, Ready::Write)
+            (Self::Read | Self::ReadWrite, Ready::Read)
+                | (Self::Write | Self::ReadWrite, Ready::Write)
         )
     }
 }
@@ -344,7 +345,12 @@ mod tests {
         // pulls the `fs` feature; raw libc keeps the dev-dep small.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(rc, 0, "pipe() failed: {err}", err = io::Error::last_os_error());
+        assert_eq!(
+            rc,
+            0,
+            "pipe() failed: {err}",
+            err = io::Error::last_os_error()
+        );
         // SAFETY: pipe() returned 0, both fds are valid and owned
         // by us. from_raw_fd takes ownership; File::drop closes.
         #[allow(unsafe_code)]

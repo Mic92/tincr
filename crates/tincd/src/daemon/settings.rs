@@ -711,5 +711,4 @@ mod tests {
         // resolution; fall back.
         assert_eq!(parse_bind_addr("10.0.0.1 http", 655), ("10.0.0.1", 655));
     }
-
 }

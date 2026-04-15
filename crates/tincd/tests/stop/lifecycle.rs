@@ -386,6 +386,79 @@ fn sigterm_stops() {
     assert!(!pidfile.exists());
 }
 
+/// SIGUSR1/SIGUSR2/SIGWINCH must NOT terminate the daemon. C tinc
+/// sets these to `SIG_IGN` in `detach()` (process.c:205-207). Older
+/// 1.0.x tincd dumped state on USR1/USR2; in 1.1 that moved to the
+/// control socket and the signals are simply ignored. A monitoring
+/// script that still sends USR1 expecting a stats dump should be
+/// harmless, not fatal.
+///
+/// Regression: the Rust port left these at default disposition
+/// (terminate), so `kill -USR1` killed the daemon.
+#[test]
+fn sigusr_ignored() {
+    let tmp = tmp("sigusr");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .env("RUST_LOG", "tincd=info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tincd");
+
+    assert!(wait_for_file(&socket), "tincd didn't bind socket");
+
+    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
+    let pid = child.id() as libc::pid_t;
+
+    // Fire each signal, give the daemon a moment, assert it's still
+    // alive. If any disposition is default, the process is gone and
+    // try_wait() returns Some with a signal-terminated status.
+    for &sig in &[libc::SIGUSR1, libc::SIGUSR2, libc::SIGWINCH] {
+        // SAFETY: kill(2) on a pid we just spawned and confirmed
+        // alive (wait_for_file). Sending a signal is the test.
+        #[allow(unsafe_code)]
+        unsafe {
+            assert_eq!(
+                libc::kill(pid, sig),
+                0,
+                "kill({sig}) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("tincd terminated by signal {sig}: {status:?}");
+        }
+    }
+
+    // Now SIGTERM should still cleanly stop it (proves the signal
+    // machinery wasn't broken by the SIG_IGN installs).
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "tincd didn't exit on SIGTERM");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "tincd should exit cleanly on SIGTERM");
+}
+
 /// Second tincd on the same socket refuses to start. The connect-
 /// probe in `ControlSocket::bind` sees the first daemon listening.
 #[test]

@@ -337,5 +337,4 @@ mod tests {
         let a = DeviceArena::new(2);
         let _ = a.slot(2);
     }
-
 }

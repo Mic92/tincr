@@ -88,9 +88,7 @@ impl Subnet {
     #[must_use]
     pub const fn weight(&self) -> i32 {
         match self {
-            Self::Mac { weight, .. } | Self::V4 { weight, .. } | Self::V6 { weight, .. } => {
-                *weight
-            }
+            Self::Mac { weight, .. } | Self::V4 { weight, .. } | Self::V6 { weight, .. } => *weight,
         }
     }
 

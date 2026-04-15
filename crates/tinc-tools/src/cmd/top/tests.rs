@@ -462,4 +462,3 @@ fn render_clips_at_max_rows() {
 // machine tests above. The MUTATIONS are tested above. The
 // mapping is the integration test's job (against fake daemon,
 // send 'i', assert sort changed).
-
