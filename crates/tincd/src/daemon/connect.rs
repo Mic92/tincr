@@ -227,11 +227,23 @@ impl Daemon {
     /// Connection teardown. `conn.active` gates `DEL_EDGE` broadcast
     /// (only past-ACK conns have an edge to delete).
     pub(super) fn terminate(&mut self, id: ConnId) {
+        // Deregister from epoll BEFORE closing any fd. epoll keys on
+        // the open-file-description; closing the dup'd Connection.fd
+        // first makes epoll_ctl(DEL) EBADF (silently swallowed), and
+        // if connecting_socks still holds the original socket the
+        // description — and thus the epoll interest — survives →
+        // level-triggered busy-loop on ERR|HUP into a freed slot.
+        if let Some(io_id) = self.conn_io.remove(id) {
+            self.ev.del(io_id);
+        }
+        // The pre-ACK timeout path (on_ping_tick → terminate)
+        // bypasses on_connecting/finish_connecting, which were the
+        // only places that removed this. Drop unconditionally; no-op
+        // if already gone.
+        self.connecting_socks.remove(id);
+
         let Some(conn) = self.conns.remove(id) else {
             // Slotmap is generational; stale ConnId → None. Idempotent.
-            if let Some(io_id) = self.conn_io.remove(id) {
-                self.ev.del(io_id);
-            }
             return;
         };
         if conn.control {
@@ -248,10 +260,6 @@ impl Daemon {
         let conn_nid = self.node_ids.get(&conn_name).copied();
         // Drop now: OwnedFd closes; broadcast_line below skips this id.
         drop(conn);
-
-        if let Some(io_id) = self.conn_io.remove(id) {
-            self.ev.del(io_id);
-        }
 
         // If this was a log conn, re-check whether any remain and
         // close the gate if not. Doing this in `terminate` (not just
