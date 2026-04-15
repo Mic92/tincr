@@ -234,8 +234,13 @@ impl Daemon {
             }
             return;
         };
-        log::info!(target: "tincd::conn",
-                   "Closing connection with {}", conn.name);
+        if conn.control {
+            log::debug!(target: "tincd::conn",
+                        "Closing connection with {}", conn.name);
+        } else {
+            log::info!(target: "tincd::conn",
+                       "Closing connection with {}", conn.name);
+        }
         let was_active = conn.active;
         let was_log = conn.log_level.is_some();
         let conn_name = conn.name.clone();

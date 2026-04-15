@@ -49,9 +49,9 @@ impl Daemon {
         match self.ev.add(conn_fd, Io::Read, IoWhat::Conn(id)) {
             Ok(io_id) => {
                 self.conn_io.insert(id, io_id);
-                log::info!(target: "tincd::conn",
-                           "Connection from {} (control)",
-                           self.conns[id].hostname);
+                log::debug!(target: "tincd::conn",
+                            "Connection from {} (control)",
+                            self.conns[id].hostname);
             }
             Err(e) => {
                 self.conns.remove(id);

@@ -158,7 +158,7 @@ fn udp_stray_packet_drained() {
 ///
 /// Test shape: connect ctl#1, send `REQ_LOG`. Connect ctl#2 — the
 /// daemon's `on_unix_accept` logs "Connection from ... (control)"
-/// at Info level. ctl#1 receives that line as `"18 15 <len>\n"` +
+/// at Debug level. ctl#1 receives that line as `"18 15 <len>\n"` +
 /// `<len>` raw bytes (no trailing `\n`, `send_meta`).
 #[test]
 fn req_log_streams() {
@@ -171,7 +171,7 @@ fn req_log_streams() {
     write_config(&confbase);
 
     // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
-    // the stderr filter. The "Connection from" log is Info; stderr
+    // the stderr filter. The "Connection from" log is Debug; stderr
     // won't print it but the tap MUST capture it (set_active bumps
     // max_level to Trace).
     let mut child = tincd_cmd()
@@ -209,15 +209,15 @@ fn req_log_streams() {
     log_r.read_line(&mut ack).unwrap();
     assert!(ack.starts_with("4 0 "));
 
-    // `"18 15 <level> <use_color>"`. level=0 maps
-    // to Info on the daemon side; the "Connection from" log we'll
-    // trigger is Info. use_color=0 (ignored anyway).
-    writeln!(log_w, "18 15 0 0").unwrap();
+    // `"18 15 <level> <use_color>"`. level=2 maps
+    // to Debug on the daemon side; the "Connection from" log we'll
+    // trigger is Debug. use_color=0 (ignored anyway).
+    writeln!(log_w, "18 15 2 0").unwrap();
     // No reply (`return true` without control_ok).
 
     // ─── ctl#2: trigger an Info-level log inside the daemon ────
     // `on_unix_accept` logs "Connection from localhost port unix
-    // (control)" at Info. That happens INSIDE the event loop turn
+    // (control)" at Debug. That happens INSIDE the event loop turn
     // that processes the accept; flush_log_tap drains it at the
     // bottom of the same turn.
     let trigger = UnixStream::connect(&socket).unwrap();
