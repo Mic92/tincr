@@ -1395,11 +1395,23 @@ impl Daemon {
             // early-returned and broke hub-spoke (three_daemon_relay
             // regression). Check edge_addrs too.
             let e = self.graph.edge(existing).expect("just looked up");
-            let same_addr = self.edge_addrs.get(&existing).is_some_and(|(a, p, _, _)| {
-                // Compare addr+port only. Stricter than necessary —
-                // harmless (extra forward, seen dedups).
-                a == &edge.addr && p == &edge.port
-            });
+            let same_addr = self
+                .edge_addrs
+                .get(&existing)
+                .is_some_and(|(a, p, la, lp)| {
+                    // A changed local_address counts as "not same":
+                    // dropping local-only updates leaves
+                    // LocalDiscovery probing a stale LAN address. An
+                    // absent/unspec incoming local (6-token form,
+                    // older peers) is NOT a change.
+                    let addr_same = a == &edge.addr && p == &edge.port;
+                    let local_same = match &edge.local {
+                        None => true,
+                        Some((nla, _)) if nla.as_str() == AddrStr::UNSPEC => true,
+                        Some((nla, nlp)) => nla == la && nlp == lp,
+                    };
+                    addr_same && local_same
+                });
             if e.weight == edge.weight && e.options == edge.options && same_addr {
                 return Ok(false); // no forward, no graph()
             }

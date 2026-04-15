@@ -718,6 +718,40 @@ fn peer_edge_triggers_reachable() {
         "update_edge: weight changed, addr preserved (EdgeId stable)"
     );
 
+    // ─── local_address-only change must NOT be idempotent ─────
+    // Regression: idempotency check compared only (addr,port) and
+    // early-returned, so LocalDiscovery kept probing a stale LAN
+    // address after a peer roamed (Wi-Fi → dock).
+    //
+    // Same addr/port/options/weight as the row above (99), 8-token
+    // form with NEW local addr. Different nonce (seen dedup).
+    fx.send_record(b"12 44444444 testpeer faraway 10.99.0.2 655 0 99 192.168.1.9 655\n");
+    let after_local = fx.drain_records(100);
+    assert!(
+        after_local.is_empty(),
+        "forward_request should skip from-conn; got: {after_local:?}"
+    );
+
+    writeln!(ctl_w, "18 4").unwrap();
+    let mut edge_rows3 = Vec::new();
+    loop {
+        let mut line = String::new();
+        ctl_r.read_line(&mut line).expect("dump edge row 3");
+        let line = line.trim_end().to_owned();
+        if line == "18 4" {
+            break;
+        }
+        edge_rows3.push(line);
+    }
+    let tf3 = edge_rows3
+        .iter()
+        .find(|r| r.starts_with("18 4 testpeer faraway "))
+        .unwrap_or_else(|| panic!("no testpeer→faraway post-local-upd: {edge_rows3:?}"));
+    assert_eq!(
+        tf3, "18 4 testpeer faraway 10.99.0.2 port 655 192.168.1.9 port 655 0 99",
+        "local_address-only change must update edge_addrs"
+    );
+
     // ─── stderr: BecameReachable fired for faraway ──────────────
     let stderr = fx.kill_and_stderr();
     // The on_ack graph bridge fires testpeer-reachable first.
