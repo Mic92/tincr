@@ -371,14 +371,6 @@ pub struct Daemon {
     /// first thing.
     pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerId>,
 
-    /// In-flight outgoing connect: socket NOT YET in `Connection`.
-    /// The async-connect dance keeps the `socket2::Socket` for the
-    /// `send(NULL,0,0)` probe and `take_error()` (which need the wrapper, not the raw fd). Once the
-    /// probe succeeds, the `Socket` is consumed into the `Connection`
-    /// fd. Keyed by `ConnId` (the connection slot is allocated
-    /// fd-less at dial time; this map fills it).
-    pub(crate) connecting_socks: slotmap::SecondaryMap<ConnId, socket2::Socket>,
-
     /// Names of nodes whose `hosts/NAME` file has an `Address =`
     /// line. Populated by `load_all_nodes` at setup + reload. Read
     /// by `autoconnect::decide` (the eligible-to-dial gate).

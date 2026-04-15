@@ -9,8 +9,8 @@
 //! `SO_MARK`; failures are warn-only on the dial side) and then runs
 //! the standard async-connect dance: `connect()` returns
 //! `EINPROGRESS`, the loop arms a writable wakeup, and on wakeup it
-//! either reads a fresh `SO_ERROR` via `Socket::take_error` or treats
-//! a successful zero-byte probe as the connect having landed. On any
+//! either reads a fresh `SO_ERROR` via `getsockopt(SocketError)` or
+//! treats a successful zero-byte probe as the connect having landed. On any
 //! failure the slot advances to the next address, and once the list
 //! is exhausted it sleeps with exponential backoff before retrying
 //! from the top.
@@ -27,9 +27,10 @@
 use std::ffi::CString;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
+use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
 use slotmap::new_key_type;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -333,45 +334,45 @@ pub fn try_connect_via_proxy(
 /// # Errors
 /// Connect failed (`ECONNREFUSED`, `EHOSTUNREACH`, etc). Caller
 /// terminates and retries the next addr.
-pub fn probe_connecting(sock: &Socket) -> io::Result<bool> {
-    // `if(send(c->socket, NULL, 0, 0) != 0)`. socket2's `send(&[])`
-    // does the same — a zero-byte write that touches
-    // the connection state without sending data.
-    match sock.send(&[]) {
+///
+/// Takes `BorrowedFd`, not `&Socket`: the connecting fd is owned by
+/// `Connection.fd` (the ONE owner). An earlier shape kept a separate
+/// `socket2::Socket` around just for this probe, dup'd the fd into
+/// `Connection`, and registered the dup with epoll — two fds on one
+/// open-file-description. epoll keys on the description, so closing
+/// only the dup left a stale interest → 100% CPU busy-loop on
+/// ERR|HUP. One fd, one owner, no aliasing hazard.
+pub fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    // `if(send(c->socket, NULL, 0, 0) != 0)`. nix's `send(fd, &[],
+    // empty)` does the same — a zero-byte write that touches the
+    // connection state without sending data.
+    match send(fd.as_raw_fd(), &[], MsgFlags::empty()) {
         Ok(_) => {
             // Connected. `_` not `0`: send() returns bytes sent;
             // we sent 0, so it's 0. Don't pin that.
             Ok(true)
         }
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+        Err(nix::Error::EAGAIN | nix::Error::EINPROGRESS) => {
             // Linux-specific spurious wakeup. Stay registered.
             Ok(false)
         }
-        Err(e) => {
-            // Either the immediate error IS the cause (Linux:
-            // ECONNREFUSED bubbles up directly), or it's
-            // ENOTCONN and we read SO_ERROR for the real cause.
+        Err(nix::Error::ENOTCONN) => {
+            // POSIX path: send() says ENOTCONN, real cause is in
+            // SO_ERROR. `if(!socknotconn(sockerrno)) socket_error =
+            // sockerrno` — socknotconn is `errno == ENOTCONN`.
             //
-            // `if(!socknotconn(sockerrno)) socket_error = sockerrno`.
-            // socknotconn is `errno == ENOTCONN`.
-            let cause = if e.raw_os_error() == Some(libc::ENOTCONN) {
-                // `getsockopt(SOL_SOCKET, SO_ERROR)`. socket2's
-                // `take_error()` wraps this. `Ok(None)`
-                // means SO_ERROR was 0 — shouldn't happen here
-                // (we got ENOTCONN from send, SOMETHING failed).
-                // `if(socket_error)`; if 0, falls through to
-                // `return` (no log, no terminate).
-                // We treat it as spurious too.
-                match sock.take_error() {
-                    Ok(Some(cause)) => cause,
-                    Ok(None) => return Ok(false), // fallthrough
-                    Err(ge) => ge,                // getsockopt itself failed; use that
-                }
-            } else {
-                e
-            };
-            Err(cause)
+            // `getsockopt(SOL_SOCKET, SO_ERROR)`. 0 means SO_ERROR
+            // was clear — shouldn't happen here (we got ENOTCONN,
+            // SOMETHING failed). C's `if(socket_error)` falls
+            // through (no log, no terminate); we treat as spurious.
+            match getsockopt(&fd, sockopt::SocketError) {
+                Ok(0) => Ok(false),
+                Ok(errno) => Err(io::Error::from_raw_os_error(errno)),
+                Err(ge) => Err(ge.into()), // getsockopt itself failed
+            }
         }
+        // Linux: ECONNREFUSED etc bubble up directly from send().
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -708,6 +709,7 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u1
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsFd;
 
     /// `apply_dial_sockopts`: `SO_BINDTODEVICE` to `lo` reads back
     /// correctly. Mirror of `listen.rs::open_bind_to_interface_lo`
@@ -863,7 +865,7 @@ mod tests {
         client.connect(&SockAddr::from(addr)).expect("connect");
 
         // Probe: should report connected.
-        match probe_connecting(&client) {
+        match probe_connecting(client.as_fd()) {
             Ok(true) => {}
             other => panic!("expected Ok(true), got {other:?}"),
         }
@@ -1051,7 +1053,7 @@ mod tests {
         // until it returns Err or we time out (rare on loopback).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            match probe_connecting(&client) {
+            match probe_connecting(client.as_fd()) {
                 Ok(false) => {
                     // Spurious / not yet. Retry.
                     assert!(

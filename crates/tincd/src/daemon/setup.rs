@@ -734,7 +734,6 @@ impl Daemon {
             device_errors: 0,
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
-            connecting_socks: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
             last_routes: std::sync::Arc::new(Vec::new()),
             last_mst: Vec::new(),

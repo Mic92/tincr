@@ -1,7 +1,7 @@
 use super::{ConnId, Daemon, IoWhat, NodeState};
 
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::Duration;
 
 use crate::conn::Connection;
@@ -236,11 +236,6 @@ impl Daemon {
         if let Some(io_id) = self.conn_io.remove(id) {
             self.ev.del(io_id);
         }
-        // The pre-ACK timeout path (on_ping_tick → terminate)
-        // bypasses on_connecting/finish_connecting, which were the
-        // only places that removed this. Drop unconditionally; no-op
-        // if already gone.
-        self.connecting_socks.remove(id);
 
         let Some(conn) = self.conns.remove(id) else {
             // Slotmap is generational; stale ConnId → None. Idempotent.
@@ -522,22 +517,17 @@ impl Daemon {
                     // WRITE registration triggers `on_connecting`
                     // when kernel finishes async connect.
                     let now = self.timers.now();
-                    // Probe needs `&Socket` (take_error); Connection.fd is
-                    // OwnedFd. dup: the dup goes on Connection (long-lived,
-                    // epoll-registered); original drops at finish_connecting.
-                    // Register the DUP, not the original (original closes
-                    // when connecting_socks removes it — stale epoll slot).
-                    let dup = match sock.try_clone() {
-                        Ok(d) => OwnedFd::from(d),
-                        Err(e) => {
-                            log::error!(target: "tincd::conn",
-                                        "dup failed for {addr}: {e}");
-                            continue;
-                        }
-                    };
-                    let fd = dup.as_raw_fd();
+                    // ONE fd, ONE owner. probe_connecting() takes a
+                    // BorrowedFd from Connection.fd; no dup, no
+                    // second map. (An earlier shape dup'd into a
+                    // separate `connecting_socks` map — two fds on
+                    // one open-file-description → epoll-interest
+                    // leak → 100% CPU busy-loop on the pre-ACK
+                    // timeout path. See netns/busyloop.rs.)
+                    let fd = OwnedFd::from(sock);
+                    let raw = fd.as_raw_fd();
                     let conn = Connection::new_outgoing(
-                        dup,
+                        fd,
                         name,
                         fmt_addr(&addr),
                         addr,
@@ -545,11 +535,10 @@ impl Daemon {
                         now,
                     );
                     let id = self.conns.insert(conn);
-                    self.connecting_socks.insert(id, sock);
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    match self.ev.add(fd, Io::ReadWrite, IoWhat::Conn(id)) {
+                    match self.ev.add(raw, Io::ReadWrite, IoWhat::Conn(id)) {
                         Ok(io_id) => {
                             self.conn_io.insert(id, io_id);
                         }
@@ -557,7 +546,6 @@ impl Daemon {
                             log::error!(target: "tincd::conn",
                                         "io_add failed: {e}");
                             self.conns.remove(id);
-                            self.connecting_socks.remove(id);
                             continue;
                         }
                     }
@@ -615,13 +603,13 @@ impl Daemon {
     /// is writable now and the ID line is queued. (LT would re-fire
     /// next turn anyway; this just avoids the round-trip.)
     pub(super) fn on_connecting(&mut self, id: ConnId) -> bool {
-        let Some(sock) = self.connecting_socks.get(id) else {
+        let Some(conn) = self.conns.get(id) else {
             log::warn!(target: "tincd::conn",
-                       "on_connecting: no socket for {id:?}");
+                       "on_connecting: no conn for {id:?}");
             self.terminate(id);
             return false;
         };
-        match probe_connecting(sock) {
+        match probe_connecting(conn.owned_fd().as_fd()) {
             Ok(true) => {
                 self.finish_connecting(id);
                 true
@@ -644,7 +632,6 @@ impl Daemon {
                     .get(id)
                     .and_then(|c| c.outgoing)
                     .map(OutgoingId::from);
-                self.connecting_socks.remove(id);
                 self.terminate(id);
                 if let Some(oid) = oid {
                     self.do_outgoing_connection(oid);
@@ -657,9 +644,6 @@ impl Daemon {
     /// `add_recent_address` is deferred to `on_ack` (the right port
     /// alone doesn't mean tinc).
     pub(super) fn finish_connecting(&mut self, id: ConnId) {
-        // Drop probe socket; dup'd OwnedFd on Connection is live now.
-        self.connecting_socks.remove(id);
-
         let Some(conn) = self.conns.get_mut(id) else {
             return;
         };
