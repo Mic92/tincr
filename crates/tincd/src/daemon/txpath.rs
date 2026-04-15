@@ -1156,10 +1156,34 @@ impl Daemon {
         }
 
         // ─── edge's reverse->address ─────────────────────────────
-        // Direct-neighbor shortcut: NodeState.edge_addr is the
-        // peer-ACK addr. Transitives go via relay (try_tx
-        // via-recursion) anyway.
-        let addr = self.nodes.get(&to_nid)?.edge_addr?;
+        // Direct-neighbor fast path first (NodeState.edge_addr is
+        // the peer-ACK addr); else walk node_edges → reverse →
+        // edge_addrs. Without the walk a transitive non-INDIRECT
+        // node (`via == target` in try_tx, so no relay recursion)
+        // returns None and the probe is silently dropped.
+        let addr = self
+            .nodes
+            .get(&to_nid)
+            .and_then(|ns| ns.edge_addr)
+            .or_else(|| {
+                let mut cands: Vec<SocketAddr> = self
+                    .graph
+                    .node_edges(to_nid)
+                    .iter()
+                    .filter_map(|&eid| self.graph.edge(eid)?.reverse)
+                    .filter_map(|rev| {
+                        let (a, p, _, _) = self.edge_addrs.get(&rev)?;
+                        local_addr::parse_addr_port(a.as_str(), p.as_str())
+                    })
+                    .collect();
+                if cands.is_empty() {
+                    return None;
+                }
+                // Spread probes when multiple neighbors report
+                // different addrs (NAT).
+                let i = (OsRng.next_u32() as usize) % cands.len();
+                Some(cands.swap_remove(i))
+            })?;
         let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
         Some((addr, sock))
     }

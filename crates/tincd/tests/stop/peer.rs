@@ -468,12 +468,17 @@ fn assert_dump_nodes_reachable(ctl_r: &mut BufReader<&UnixStream>, mut ctl_w: &U
     );
 
     // faraway: transitive (no NodeState). hostname is the
-    // literal `"unknown port unknown"`. nexthop
-    // =testpeer (first hop), via=faraway (direct — no INDIRECT
-    // option set), distance=2.
+    // prevedge address seeded by `BecameReachable`. The
+    // ADD_EDGE wire body said `testpeer faraway 10.99.0.2
+    // 655` — that's faraway's addr as seen by testpeer.
+    // Regression: was `"unknown port unknown"` (udp_addr never
+    // seeded for transitives → choose_udp_address returned
+    // None → direct UDP probes silently dropped).
+    // nexthop=testpeer (first hop), via=faraway (direct — no
+    // INDIRECT option set), distance=2.
     assert!(
-        far_row.contains(" unknown port unknown "),
-        "faraway hostname (transitive, no NodeState); row: {far_row}"
+        far_row.contains(" 10.99.0.2 port 655 "),
+        "faraway hostname (prevedge-seeded udp_addr); row: {far_row}"
     );
     assert!(
         far_row.contains(" testpeer faraway 2 "),
