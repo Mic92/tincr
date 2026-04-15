@@ -142,8 +142,8 @@ impl Daemon {
             let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
             h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
         }
-        // No per-node UDP-timeout timer (PMTU is driven inline by
-        // try_tx/pmtu.tick()).
+        // UDP-discovery timeout is checked inline in `try_udp`
+        // against `udp_reply_rx` — no per-node timer.
         false
     }
 
@@ -360,6 +360,29 @@ impl Daemon {
         }
 
         let tunnel = self.dp.tunnels.entry(target).or_default();
+
+        // ─── UDP-discovery timeout ──────────────────────────────────
+        // No reply for `udp_discovery_timeout` → path is silently
+        // dead (NAT rebind, firewall reload). Drop `udp_confirmed`
+        // so we fall back to TCP/relay instead of blackholing.
+        let timeout = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
+        if let Some(p) = tunnel.pmtu.as_mut()
+            && p.udp_confirmed
+            && now.duration_since(p.udp_reply_rx) >= timeout
+        {
+            log::info!(target: "tincd::net",
+                       "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
+            p.on_udp_timeout();
+            tunnel.status.udp_confirmed = false;
+            tunnel.udp_addr_cached = None;
+            if let Some(h) = self.tunnel_handles.get(&target) {
+                h.minmtu.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Fall through: udp_confirmed now false → probe interval
+            // below switches to udp_discovery_interval (aggressive
+            // 2s re-discovery).
+        }
+
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
 
         // ─── gratuitous reply keepalive ──────────────────────────
