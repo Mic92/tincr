@@ -418,3 +418,63 @@ fn tinc_up_runs_with_confbase_cwd() {
     let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
     assert_eq!(got, want, "tinc-up cwd should be confbase");
 }
+
+/// fd-leak guard: open+close N control connections, assert
+/// `/proc/PID/fd` count returns to baseline. Covers `terminate()`'s
+/// `conns`/`conn_io`/`ev.del` coherence and `OwnedFd` drop.
+///
+#[cfg(target_os = "linux")]
+#[test]
+fn control_conn_churn_no_fd_leak() {
+    let tmp = tmp("fd-churn");
+    let confbase = tmp.path().join("vpn");
+    let pidfile = tmp.path().join("tinc.pid");
+    let socket = tmp.path().join("tinc.socket");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(&pidfile)
+        .arg("--socket")
+        .arg(&socket)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert!(wait_for_file(&socket));
+
+    let pid_str = std::fs::read_to_string(&pidfile).unwrap();
+    let daemon_pid: u32 = pid_str.split_whitespace().next().unwrap().parse().unwrap();
+    let fd_dir = format!("/proc/{daemon_pid}/fd");
+    let count_fds = || std::fs::read_dir(&fd_dir).unwrap().count();
+    let baseline = count_fds();
+
+    let cookie = read_cookie(&pidfile);
+    for _ in 0..100 {
+        let mut s = UnixStream::connect(&socket).unwrap();
+        // Greeting so on_unix_accept's read path runs (not just
+        // accept+EOF).
+        writeln!(s, "0 ^{cookie} 0").unwrap();
+        let mut r = BufReader::new(&s);
+        let mut line = String::new();
+        let _ = r.read_line(&mut line);
+        let _ = r.read_line(&mut line);
+        // drop(s) → daemon sees EOF → terminate()
+    }
+
+    // Daemon needs a turn to reap each EOF; poll.
+    let after = poll_until(Duration::from_secs(5), || {
+        let n = count_fds();
+        // Allow +1 slack: read_dir on /proc/self/fd races with the
+        // dirfd it opens; daemon-side has no such race but be lenient.
+        (n <= baseline + 1).then_some(n)
+    });
+    assert!(
+        after <= baseline + 1,
+        "fd leak: baseline={baseline} after-100-churn={after}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
