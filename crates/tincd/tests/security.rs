@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    Ctl, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr, tincd_cmd,
-    wait_for_file, write_ed25519_privkey,
+    Ctl, PeerFixture, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr,
+    tincd_cmd, wait_for_file, write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -705,4 +705,123 @@ fn splice_mitm_rejected() {
         !bob_stderr.contains("SPTPS handshake completed"),
         "bob should NOT complete; stderr:\n{bob_stderr}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Adversarial-input regression: malformed protocol lines after ACK.
+//
+// `security.py` and the tests above probe the *pre-auth* gates
+// (`id_h`). This test probes *post-auth*: an authenticated peer that
+// sends garbage gossip. Threat model: a node in the mesh whose key
+// was compromised, or a buggy alternate implementation. The daemon
+// MUST drop the connection cleanly and stay up; it must not panic
+// inside a parser.
+//
+// One garbage line per spawn: `dispatch_sptps_outputs` terminates
+// on the first parse error, so a single test sending N bad lines
+// only exercises the first. Spawning a fresh daemon per case is the
+// honest way to prove each handler's reject path independently.
+
+/// Send `body` over an activated SPTPS meta connection, then assert:
+/// (a) the daemon closed *that* connection (read → EOF), (b) the
+/// daemon process is still alive, (c) a fresh control-socket dump
+/// works (event loop didn't wedge).
+///
+/// Separate fn so the per-case daemon spawn boilerplate doesn't
+/// drown the table of inputs.
+fn assert_malformed_record_drops_conn(tag: &str, body: &[u8]) {
+    use std::io::Read;
+
+    let mut fx = PeerFixture::spawn(tag);
+    // Complete the activation: send our ACK so `allow_request`
+    // goes to `None` (ALL) and the gossip handlers are reachable.
+    // Without this, the garbage line would be rejected by
+    // `check_gate` (`allow_request == Some(Ack)`), which proves the
+    // gate but not the per-handler parsers.
+    fx.send_record(b"4 0 1 700000c\n");
+    // The reverse ADD_EDGE a real peer would send. Makes
+    // `BecameReachable` fire so the daemon is in steady state.
+    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
+    // Drain the daemon's `send_everything` burst so the read below
+    // sees only the close.
+    let _ = fx.drain_records(300);
+
+    // ─── the malformed line ───
+    fx.send_record(body);
+
+    // ─── (a) connection dropped: EOF on the TCP stream ───
+    // The daemon may flush a few queued bytes before close (e.g.
+    // a pending Wire frame); read until EOF or timeout.
+    fx.stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let mut closed = false;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        match (&fx.stream).read(&mut buf) {
+            Ok(0) => {
+                closed = true;
+                break;
+            }
+            Ok(_) => {} // drain
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                // RST counts as closed for our purposes.
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        closed,
+        "{tag}: daemon did not drop conn after malformed record {body:?}"
+    );
+
+    // ─── (b) process still alive ───
+    // Panic in a handler → process abort → try_wait returns Some.
+    assert!(
+        fx.child.try_wait().unwrap().is_none(),
+        "{tag}: daemon DIED on malformed record {body:?}; stderr:\n{}",
+        fx.kill_and_stderr()
+    );
+
+    // ─── (c) event loop still serving: fresh control dump works ───
+    let nodes = Ctl::connect(&fx.socket, &fx.pidfile).dump(3);
+    assert!(
+        nodes.iter().any(|r| r.contains("testnode")),
+        "{tag}: control dump after drop didn't list self: {nodes:?}"
+    );
+
+    let _ = fx.child.kill();
+    let _ = fx.child.wait();
+}
+
+/// Malformed gossip lines, one per handler. Each is chosen to fail
+/// inside the per-type `parse()` (not at `check_gate`), so we're
+/// exercising `on_add_edge` / `on_add_subnet` / etc. directly.
+#[test]
+fn malformed_gossip_drops_conn_daemon_survives() {
+    #[rustfmt::skip]
+    let cases: &[(&str, &[u8])] = &[
+        // ADD_EDGE: weight overflows i32. `Tok::d` → ParseError.
+        ("adv-edge-ovf",   b"12 0 a b 1.2.3.4 655 0 99999999999999999999\n"),
+        // ADD_EDGE: too few fields.
+        ("adv-edge-short", b"12 0 a b\n"),
+        // ADD_SUBNET: prefix > 128.
+        ("adv-sub-pfx",    b"10 0 alice ::/200\n"),
+        // ANS_KEY: only 6 fields (7 mandatory).
+        ("adv-ans-short",  b"16 a b k 0 0 0\n"),
+        // MTU_INFO: non-integer mtu.
+        ("adv-mtu-bad",    b"23 a b notanint\n"),
+        // PACKET: length token missing entirely.
+        ("adv-pkt-short",  b"17\n"),
+        // Unknown request number: check_gate → UnknownRequest.
+        ("adv-req-unk",    b"99 whatever\n"),
+        // Non-UTF-8 body: `parse_add_edge`'s from_utf8 gate.
+        ("adv-nonutf8",    b"12 0 a b \xff\xfe 655 0 1\n"),
+    ];
+    for &(tag, body) in cases {
+        assert_malformed_record_drops_conn(tag, body);
+    }
 }

@@ -38,3 +38,19 @@ fn truncates_on_badrecord() {
     assert_eq!(err, SptpsError::BadRecord);
     assert_eq!(out, vec![0u8; HEADROOM]);
 }
+
+/// Short-packet / tag-mismatch shapes on the hot path: clean `Err`,
+/// never panic. Buffer contract on these paths is weaker (the < 21
+/// gate fires before `out.clear()`), so only the result is checked.
+#[test]
+fn rejects_garbage() {
+    let (_alice, mut bob) = handshake_pair(Framing::Datagram, b"bug");
+    let mut out = Vec::new();
+    for pkt in [&[0u8; 0][..], &[0u8; 4][..], &[0u8; 20][..], &[0u8; 64][..]] {
+        assert!(
+            bob.open_data_into(pkt, &mut out, HEADROOM).is_err(),
+            "{} bytes",
+            pkt.len()
+        );
+    }
+}
