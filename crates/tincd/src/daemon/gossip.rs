@@ -990,6 +990,11 @@ impl Daemon {
                 format!("MYSELF port {}", self.my_udp_port)
             } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr.as_ref()) {
                 fmt_addr(ea) // "%s port %s", no v6 brackets
+            } else if let Some(addr) = self.dp.tunnels.get(&nid).and_then(|t| t.udp_addr) {
+                // Indirect node: address learned via UDP (hole-punch /
+                // UDP_INFO), not meta-conn ACK. C: update_node_udp().
+                // IpAddr Display has no v6 brackets, matches "%s port %s".
+                format!("{} port {}", addr.ip(), addr.port())
             } else {
                 "unknown port unknown".to_string()
             };

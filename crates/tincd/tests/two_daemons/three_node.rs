@@ -246,6 +246,26 @@ fn three_daemon_relay() {
     );
     assert_eq!(&recv[20..], payload);
 
+    // ─── dump nodes: indirect node shows learned UDP addr ───────
+    // bob is NOT a direct meta-neighbor of alice (no NodeState
+    // entry), but alice learned bob's UDP address via the relay-
+    // appended ANS_KEY field (`tunnels[bob].udp_addr`). Before the
+    // fix, dump_nodes_rows only consulted NodeState.edge_addr and
+    // printed "unknown port unknown" here despite udp_confirmed.
+    let a_nodes = alice_ctl.dump(3);
+    let bob_row = a_nodes
+        .iter()
+        .find(|r| {
+            r.strip_prefix("18 3 ")
+                .is_some_and(|b| b.split_whitespace().next() == Some("bob"))
+        })
+        .unwrap_or_else(|| panic!("no bob row; nodes:\n{a_nodes:#?}"));
+    assert!(
+        bob_row.contains(" 127.0.0.1 port "),
+        "alice's bob row should show learned udp_addr (tunnel fallback), \
+         not 'unknown port unknown'; row: {bob_row}"
+    );
+
     // ─── mid stderr: the relay log ──────────────────────────────
     drop(alice_ctl);
     drop(bob_ctl);
