@@ -552,10 +552,8 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
 /// failure is signaled via `_exit(1)` → the parent's read returns
 /// EOF → normal terminate path.
 ///
-/// # Panics
-/// If `cmd`, `my_name`, or `node_name` contain interior NUL bytes
-/// (`CString::new` panics). They're config-derived strings; NUL
-/// would have been rejected by `tinc_conf` parsing already.
+/// Interior NUL in `cmd`, `my_name` or `node_name` returns
+/// `InvalidInput` rather than panicking.
 pub fn do_outgoing_pipe(
     cmd: &str,
     addr: SocketAddr,
@@ -568,7 +566,8 @@ pub fn do_outgoing_pipe(
     // my_name is `Name = ` from tinc.conf (also `check_id`).
     let sh = CString::new("/bin/sh").unwrap();
     let dash_c = CString::new("-c").unwrap();
-    let cmd_c = CString::new(cmd).expect("proxy cmd has interior NUL");
+    let nul_err = |s: &str| io::Error::new(io::ErrorKind::InvalidInput, s);
+    let cmd_c = CString::new(cmd).map_err(|_| nul_err("proxy cmd has interior NUL"))?;
     let argv = [
         sh.as_ptr(),
         dash_c.as_ptr(),
@@ -581,8 +580,8 @@ pub fn do_outgoing_pipe(
     // copy). We pre-format the strings; child setenv's the pointers.
     let remote_addr = CString::new(addr.ip().to_string()).unwrap();
     let remote_port = CString::new(addr.port().to_string()).unwrap();
-    let name_env = CString::new(my_name).expect("my_name has interior NUL");
-    let node_env = CString::new(node_name).expect("node_name has interior NUL");
+    let name_env = CString::new(my_name).map_err(|_| nul_err("my_name has interior NUL"))?;
+    let node_env = CString::new(node_name).map_err(|_| nul_err("node_name has interior NUL"))?;
     let k_remote_addr = CString::new("REMOTEADDRESS").unwrap();
     let k_remote_port = CString::new("REMOTEPORT").unwrap();
     let k_name = CString::new("NAME").unwrap();
