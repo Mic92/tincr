@@ -1,16 +1,28 @@
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
 /// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. SEQPACKET = datagram
 /// boundaries (one read = one packet) on a connection-oriented unix
 /// socket. Exactly the semantics a real TUN fd has.
-pub(crate) fn sockpair_seqpacket() -> [i32; 2] {
+///
+/// Returns `(test_end, daemon_end)` as `OwnedFd`s with `O_NONBLOCK`
+/// already set on both (every caller needs that: the daemon end
+/// because `on_device_read` loops to `EAGAIN`, the test end because
+/// `read_fd_nb` polls). Dropping an end closes it.
+pub(crate) fn sockpair_seqpacket() -> (OwnedFd, OwnedFd) {
     let mut fds = [0i32; 2];
     // SAFETY: `socketpair` writes 2 ints. AF_UNIX/SOCK_SEQPACKET is
     // standard on Linux.
     let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
     assert_eq!(ret, 0, "socketpair: {}", std::io::Error::last_os_error());
-    fds
+    // SAFETY: socketpair just handed us two fresh, open, owned fds.
+    let (a, b) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    set_nonblocking(&a);
+    set_nonblocking(&b);
+    (a, b)
 }
 
-pub(crate) fn set_nonblocking(fd: i32) {
+fn set_nonblocking(fd: &OwnedFd) {
+    let fd = fd.as_raw_fd();
     // SAFETY: fcntl on a valid fd.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -19,7 +31,8 @@ pub(crate) fn set_nonblocking(fd: i32) {
     }
 }
 
-pub(crate) fn write_fd(fd: i32, buf: &[u8]) {
+pub(crate) fn write_fd(fd: &OwnedFd, buf: &[u8]) {
+    let fd = fd.as_raw_fd();
     // SAFETY: write(2) on a valid fd. SEQPACKET is one-shot (no
     // short writes for in-flight datagrams).
     let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
@@ -34,7 +47,8 @@ pub(crate) fn write_fd(fd: i32, buf: &[u8]) {
 }
 
 /// Non-blocking read; `None` on EAGAIN. The poll loop wraps this.
-pub(crate) fn read_fd_nb(fd: i32) -> Option<Vec<u8>> {
+pub(crate) fn read_fd_nb(fd: &OwnedFd) -> Option<Vec<u8>> {
+    let fd = fd.as_raw_fd();
     let mut buf = vec![0u8; 2048];
     // SAFETY: read(2) on a valid fd into our buffer.
     let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };

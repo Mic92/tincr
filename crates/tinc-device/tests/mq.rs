@@ -37,6 +37,7 @@
 #![allow(clippy::too_many_lines)] // hairpin echo is long but linear
 
 use std::io::Read;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,7 +153,7 @@ fn mq_vnet_hdr_on_queue0() {
     // Dup the fds: echo thread owns its dups, main thread keeps the
     // Tun structs (whose Drop closes the originals). Independent
     // file-table entries to the same kernel `tun_file`.
-    let echo_fds: Vec<_> = queues
+    let echo_fds: Vec<OwnedFd> = queues
         .iter()
         .map(|q| {
             let fd = q.fd().expect("Tun has fd");
@@ -161,7 +162,11 @@ fn mq_vnet_hdr_on_queue0() {
             #[allow(unsafe_code)]
             let dup = unsafe { libc::dup(fd) };
             assert!(dup >= 0, "dup failed");
-            dup
+            // SAFETY: dup just returned a fresh owned fd.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::os::fd::FromRawFd::from_raw_fd(dup)
+            }
         })
         .collect();
 
@@ -176,7 +181,8 @@ fn mq_vnet_hdr_on_queue0() {
     let echo = std::thread::spawn(move || {
         let mut buf = vec![0u8; 70_000]; // 64KB TSO + slack
         while !echo_stop.load(Ordering::Relaxed) {
-            for &fd in &echo_fds {
+            for fd in &echo_fds {
+                let fd = fd.as_raw_fd();
                 // SAFETY: fd is a valid open dup; read into our buf.
                 // O_NONBLOCK → EAGAIN when empty (n < 0, skip).
                 #[allow(unsafe_code)]
@@ -232,13 +238,7 @@ fn mq_vnet_hdr_on_queue0() {
             }
             std::thread::sleep(Duration::from_micros(100));
         }
-        for fd in echo_fds {
-            // SAFETY: each fd is a dup we own; close once.
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::close(fd);
-            }
-        }
+        drop(echo_fds); // OwnedFd::drop closes each dup.
     });
 
     // ── Generate traffic: TCP via hairpin ───────────────────────────

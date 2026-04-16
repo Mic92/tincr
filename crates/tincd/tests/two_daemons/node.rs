@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 
@@ -218,7 +219,11 @@ impl Node {
     /// Spawn with an inherited fd. Clears CLOEXEC on `fd` so the
     /// child sees it; the child's `FdTun::open(Inherited(fd))`
     /// wraps it. The TEST process keeps the other socketpair end.
-    pub(crate) fn spawn_with_fd(&self, fd: i32) -> Child {
+    /// Borrows `fd`: the child inherits it by number across
+    /// `fork+exec`; the caller still owns the parent's copy and
+    /// should `drop()` it once the child has spawned.
+    pub(crate) fn spawn_with_fd(&self, fd: &OwnedFd) -> Child {
+        let fd = fd.as_raw_fd();
         // Clear CLOEXEC so the fd survives `exec()`. Rust's `Command::
         // spawn` doesn't close inherited fds (only stdin/out/err are
         // managed). C tincd's `Device = N` mode assumes the parent

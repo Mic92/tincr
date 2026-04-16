@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -56,14 +57,8 @@ fn three_daemon_relay() {
     let mid = Node::new(tmp.path(), "mid", 0xC3);
     let bob = Node::new(tmp.path(), "bob", 0xB3);
 
-    let alice_pair = sockpair_seqpacket();
-    let bob_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
-    for &fd in &bob_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (bob_tun, bob_far) = sockpair_seqpacket();
 
     // mid is the hub: no device (dummy), no subnet, no ConnectTo.
     // Both alice and bob ConnectTo mid. mid knows everyone's pubkey.
@@ -73,14 +68,14 @@ fn three_daemon_relay() {
     alice.write_config_multi(
         &[&mid, &bob],
         &["mid"],
-        Some(alice_pair[1]),
+        Some(alice_far.as_raw_fd()),
         Some("10.0.0.1/32"),
     );
     // bob: ConnectTo=mid, owns 10.0.0.2/32. Knows alice's pubkey.
     bob.write_config_multi(
         &[&mid, &alice],
         &["mid"],
-        Some(bob_pair[1]),
+        Some(bob_far.as_raw_fd()),
         Some("10.0.0.2/32"),
     );
 
@@ -103,20 +98,20 @@ fn three_daemon_relay() {
         drain_stderr(mid_child)
     );
 
-    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    let mut bob_child = bob.spawn_with_fd(&bob_far);
     if !wait_for_file(&bob.socket) {
         let _ = mid_child.kill();
         panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
     }
-    unsafe { libc::close(bob_pair[1]) };
+    drop(bob_far);
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     // ─── wait for full mesh reachability ────────────────────────
     let mut alice_ctl = alice.ctl();
@@ -174,7 +169,7 @@ fn three_daemon_relay() {
     // forwards verbatim to bob via mid's bob-conn. Bob starts
     // responder SPTPS, ANS_KEY back via mid.
     let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
-    write_fd(alice_pair[0], &kick);
+    write_fd(&alice_tun, &kick);
 
     let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
@@ -215,10 +210,10 @@ fn three_daemon_relay() {
     let recv_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(5), || {
             // Resend on each poll; drains bob's TUN until match.
-            write_fd(alice_pair[0], &ip_pkt);
+            write_fd(&alice_tun, &ip_pkt);
             // May drain stale frames (kick, prior sends). Only
             // accept exact match.
-            while let Some(r) = read_fd_nb(bob_pair[0]) {
+            while let Some(r) = read_fd_nb(&bob_tun) {
                 if r == ip_pkt {
                     return Some(r);
                 }
@@ -269,8 +264,8 @@ fn three_daemon_relay() {
     // ─── mid stderr: the relay log ──────────────────────────────
     drop(alice_ctl);
     drop(bob_ctl);
-    unsafe { libc::close(alice_pair[0]) };
-    unsafe { libc::close(bob_pair[0]) };
+    drop(alice_tun);
+    drop(bob_tun);
     let _ = mid_child.kill();
     let _ = bob_child.kill();
     let mid_stderr = drain_stderr(mid_child);
@@ -326,10 +321,7 @@ fn three_daemon_tunnelserver() {
     let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
     let bob = Node::new(tmp.path(), "bob", 0xB4);
 
-    let alice_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
     // spokes' pubkeys (for the meta-SPTPS auth).
@@ -364,7 +356,7 @@ fn three_daemon_tunnelserver() {
     alice.write_config_multi(
         &[&mid, &bob],
         &["mid"],
-        Some(alice_pair[1]),
+        Some(alice_far.as_raw_fd()),
         Some("10.0.0.1/32"),
     );
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device (we only
@@ -395,13 +387,13 @@ fn three_daemon_tunnelserver() {
         panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
     }
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
@@ -532,9 +524,9 @@ fn three_daemon_tunnelserver() {
     // byte [20] = ICMP type (3 = DEST_UNREACH),
     // byte [21] = ICMP code (6 = NET_UNKNOWN).
     let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"nowhere");
-    write_fd(alice_pair[0], &probe);
+    write_fd(&alice_tun, &probe);
 
-    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
     assert!(
         icmp.len() >= 22,
         "expected ICMP reply, got {} bytes: {icmp:02x?}",
@@ -554,7 +546,7 @@ fn three_daemon_tunnelserver() {
     drop(alice_ctl);
     drop(bob_ctl);
     drop(mid_ctl);
-    unsafe { libc::close(alice_pair[0]) };
+    drop(alice_tun);
     let _ = mid_child.kill();
     let _ = bob_child.kill();
     let mid_stderr = drain_stderr(mid_child);
@@ -610,10 +602,7 @@ fn three_daemon_strictsubnets() {
     let mid = Node::new(tmp.path(), "mid", 0xC5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
-    let alice_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both.
     mid.write_config_multi(&[&alice, &bob], &[], None, None);
@@ -625,7 +614,7 @@ fn three_daemon_strictsubnets() {
     alice.write_config_multi(
         &[&mid, &bob],
         &["mid"],
-        Some(alice_pair[1]),
+        Some(alice_far.as_raw_fd()),
         Some("10.0.0.1/32"),
     );
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device.
@@ -643,13 +632,13 @@ fn three_daemon_strictsubnets() {
         let _ = mid_child.kill();
         panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
     }
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     let mut alice_ctl = alice.ctl();
     let mut mid_ctl = mid.ctl();
@@ -710,8 +699,8 @@ fn three_daemon_strictsubnets() {
     // ─── data plane: ICMP NET_UNKNOWN ────────────────────────────
     // Same shape as tunnelserver: no route → synth ICMP unreachable.
     let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"nowhere");
-    write_fd(alice_pair[0], &probe);
-    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    write_fd(&alice_tun, &probe);
+    let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
     assert!(icmp.len() >= 22, "ICMP reply too short: {icmp:02x?}");
     assert_eq!(icmp[9], 1, "IP proto should be ICMP: {icmp:02x?}");
     assert_eq!(icmp[20], 3, "ICMP type DEST_UNREACH: {icmp:02x?}");
@@ -728,7 +717,7 @@ fn three_daemon_strictsubnets() {
         alice_stderr1.contains("Ignoring unauthorized"),
         "alice should have logged the strictsubnets gate firing; stderr:\n{alice_stderr1}"
     );
-    unsafe { libc::close(alice_pair[0]) };
+    drop(alice_tun);
 
     let bob_hosts = alice.confbase.join("hosts").join("bob");
     let mut bob_cfg = std::fs::read_to_string(&bob_hosts).unwrap();
@@ -736,16 +725,13 @@ fn three_daemon_strictsubnets() {
     std::fs::write(&bob_hosts, bob_cfg).unwrap();
 
     // Fresh socketpair for the new alice.
-    let alice_pair2 = sockpair_seqpacket();
-    for &fd in &alice_pair2 {
-        set_nonblocking(fd);
-    }
+    let (alice_tun2, alice_far2) = sockpair_seqpacket();
     // Re-write tinc.conf with the new fd (DeviceType=fd / Device=N).
     // hosts/ files persist (we just appended to hosts/bob above).
     alice.write_config_multi(
         &[&mid, &bob],
         &["mid"],
-        Some(alice_pair2[1]),
+        Some(alice_far2.as_raw_fd()),
         Some("10.0.0.1/32"),
     );
     // write_config_multi re-truncates hosts/bob. Re-append.
@@ -754,7 +740,7 @@ fn three_daemon_strictsubnets() {
     std::fs::write(&bob_hosts, bob_cfg).unwrap();
 
     std::fs::remove_file(&alice.socket).ok();
-    let alice_child2 = alice.spawn_with_fd(alice_pair2[1]);
+    let alice_child2 = alice.spawn_with_fd(&alice_far2);
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
@@ -763,7 +749,7 @@ fn three_daemon_strictsubnets() {
             drain_stderr(alice_child2)
         );
     }
-    unsafe { libc::close(alice_pair2[1]) };
+    drop(alice_far2);
 
     let mut alice_ctl2 = alice.ctl();
     // Wait for alice↔mid handshake; bob's gossip via mid follows.
@@ -778,7 +764,7 @@ fn three_daemon_strictsubnets() {
     // ─── cleanup ─────────────────────────────────────────────────
     drop(alice_ctl2);
     drop(mid_ctl);
-    unsafe { libc::close(alice_pair2[0]) };
+    drop(alice_tun2);
     let _ = mid_child.kill();
     let _ = bob_child.kill();
     let _ = drain_stderr(mid_child);
@@ -992,14 +978,8 @@ fn three_daemon_forwarding_off_drops_transit() {
     let mid = Node::new(tmp.path(), "mid", 0xCF).with_conf("Forwarding = off\n");
     let bob = Node::new(tmp.path(), "bob", 0xBF);
 
-    let alice_pair = sockpair_seqpacket();
-    let bob_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
-    for &fd in &bob_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (bob_tun, bob_far) = sockpair_seqpacket();
 
     // mid: hub. dummy device, no subnet, no ConnectTo.
     mid.write_config_multi(&[&alice, &bob], &[], None, None);
@@ -1007,14 +987,14 @@ fn three_daemon_forwarding_off_drops_transit() {
     alice.write_config_multi(
         &[&mid, &bob],
         &["mid"],
-        Some(alice_pair[1]),
+        Some(alice_far.as_raw_fd()),
         Some("10.0.0.1/32"),
     );
     // bob: ConnectTo=mid, owns 10.0.0.2/32, fd device.
     bob.write_config_multi(
         &[&mid, &alice],
         &["mid"],
-        Some(bob_pair[1]),
+        Some(bob_far.as_raw_fd()),
         Some("10.0.0.2/32"),
     );
 
@@ -1053,19 +1033,19 @@ fn three_daemon_forwarding_off_drops_transit() {
         "mid setup failed; stderr:\n{}",
         drain_stderr(mid_child)
     );
-    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    let mut bob_child = bob.spawn_with_fd(&bob_far);
     if !wait_for_file(&bob.socket) {
         let _ = mid_child.kill();
         panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
     }
-    unsafe { libc::close(bob_pair[1]) };
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    drop(bob_far);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = mid_child.kill();
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     let mut alice_ctl = alice.ctl();
     let mut mid_ctl = mid.ctl();
@@ -1098,7 +1078,7 @@ fn three_daemon_forwarding_off_drops_transit() {
     // alice routes 10.0.0.2 → mid → REQ_KEY for mid → per-tunnel
     // SPTPS handshake. validkey settles.
     let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
-    write_fd(alice_pair[0], &kick);
+    write_fd(&alice_tun, &kick);
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(3);
         node_status(&a, "mid")
@@ -1116,8 +1096,8 @@ fn three_daemon_forwarding_off_drops_transit() {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut bob_got_transit = false;
     while Instant::now() < deadline {
-        write_fd(alice_pair[0], &probe);
-        while let Some(r) = read_fd_nb(bob_pair[0]) {
+        write_fd(&alice_tun, &probe);
+        while let Some(r) = read_fd_nb(&bob_tun) {
             // Any frame on bob's TUN ending in our payload ⇒
             // mid forwarded transit traffic. Gate failed.
             if r.ends_with(payload) {
@@ -1129,8 +1109,8 @@ fn three_daemon_forwarding_off_drops_transit() {
 
     drop(alice_ctl);
     drop(mid_ctl);
-    unsafe { libc::close(alice_pair[0]) };
-    unsafe { libc::close(bob_pair[0]) };
+    drop(alice_tun);
+    drop(bob_tun);
     let _ = mid_child.kill();
     let _ = bob_child.kill();
     let mid_stderr = drain_stderr(mid_child);
