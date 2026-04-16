@@ -232,17 +232,46 @@ pub struct Ctl {
 impl Ctl {
     /// Connect + greeting dance. Greeting: `"0 ^COOKIE 0\n"`, then
     /// two reply lines (`"0 NAME 17.7\n"` ID echo, `"4 0 PID\n"` ACK).
+    ///
+    /// Retries the whole sequence (cookie read + connect + greeting)
+    /// for up to ~5s. Under high test concurrency the daemon may not
+    /// have finished `setup()` even though the socket file exists, or
+    /// the listener backlog overflows → ECONNRESET/ECONNREFUSED on
+    /// the first few attempts. Callers already gate on
+    /// `wait_for_file(socket)`; this covers the remaining race.
     pub fn connect(socket: &Path, pidfile: &Path) -> Self {
-        let cookie = read_cookie(pidfile);
-        let stream = UnixStream::connect(socket).expect("ctl connect");
-        let r = BufReader::new(stream.try_clone().unwrap());
+        let mut last_err = None;
+        for _ in 0..50 {
+            match Self::try_connect(socket, pidfile) {
+                Ok(ctl) => return ctl,
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("ctl connect to {socket:?} failed after 50 tries: {last_err:?}");
+    }
+
+    fn try_connect(socket: &Path, pidfile: &Path) -> std::io::Result<Self> {
+        // Re-read each attempt: pidfile may be absent or partially
+        // written on the first try.
+        let cookie = std::fs::read_to_string(pidfile)?
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "pidfile missing cookie")
+            })?
+            .to_owned();
+        let stream = UnixStream::connect(socket)?;
+        let r = BufReader::new(stream.try_clone()?);
         let mut ctl = Self { r, w: stream };
-        writeln!(ctl.w, "0 ^{cookie} 0").unwrap();
+        writeln!(ctl.w, "0 ^{cookie} 0")?;
         let mut line = String::new();
-        ctl.r.read_line(&mut line).unwrap();
+        ctl.r.read_line(&mut line)?;
         line.clear();
-        ctl.r.read_line(&mut line).unwrap();
-        ctl
+        ctl.r.read_line(&mut line)?;
+        Ok(ctl)
     }
 
     /// `REQ_DUMP_*`: send `"18 SUBTYPE\n"`, collect rows until the
