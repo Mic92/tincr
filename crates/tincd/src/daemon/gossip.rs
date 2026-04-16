@@ -255,12 +255,7 @@ impl Daemon {
         let msg = ReqKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         // lookup, NOT lookup_or_add.
         let Some(&from_nid) = self.node_ids.get(&msg.from) else {
@@ -497,12 +492,7 @@ impl Daemon {
         let msg = AnsKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         let Some(&from_nid) = self.node_ids.get(&msg.from) else {
             log::error!(target: "tincd::proto",
@@ -1143,12 +1133,7 @@ impl Daemon {
         // lookup_or_add_node — don't pollute graph with indirect
         // names. ORDER: seen_request first — mark seen even on drop.
         if self.settings.tunnelserver {
-            let conn_name = self
-                .conns
-                .get(from_conn)
-                .expect("dispatched from live conn")
-                .name
-                .as_str();
+            let conn_name = self.conn(from_conn).name.as_str();
             if owner_name != self.name && owner_name != conn_name {
                 log::warn!(target: "tincd::proto",
                            "Ignoring indirect ADD_SUBNET from {conn_name} \
@@ -1170,12 +1155,7 @@ impl Daemon {
 
         // Peer wrong about us — retaliate DEL_SUBNET.
         if owner == self.myself {
-            let conn_name = self
-                .conns
-                .get(from_conn)
-                .expect("dispatched from live conn")
-                .name
-                .clone();
+            let conn_name = self.conn(from_conn).name.clone();
             log::warn!(target: "tincd::proto",
                        "Got ADD_SUBNET from {conn_name} for ourself ({subnet})");
             // Dark in single-peer tests; reachable via stale gossip
@@ -1259,12 +1239,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         // tunnelserver indirect filter. ORDER: seen first.
         if self.settings.tunnelserver && owner_name != self.name && owner_name != conn_name {
@@ -1362,12 +1337,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         // Drop if NEITHER endpoint is us-or-direct-peer. Before
         // lookup_or_add. ORDER: seen first.
@@ -1482,12 +1452,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         // ORDER: seen first.
         if self.settings.tunnelserver

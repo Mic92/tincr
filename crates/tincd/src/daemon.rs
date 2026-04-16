@@ -553,6 +553,18 @@ impl Daemon {
         self.graph.node(nid).map_or("<gone>", |n| n.name.as_str())
     }
 
+    /// Panics if `id` is not in the slotmap. Callers hold an id obtained
+    /// from a live dispatch and must not have `terminate()`d it since.
+    #[inline]
+    pub(super) fn conn_mut(&mut self, id: ConnId) -> &mut Connection {
+        self.conns.get_mut(id).expect("ConnId not live")
+    }
+
+    #[inline]
+    pub(super) fn conn(&self, id: ConnId) -> &Connection {
+        self.conns.get(id).expect("ConnId not live")
+    }
+
     /// The `while(running)` loop. `tinc-event` deliberately doesn't
     /// have this; `turn()` is one iteration. This is the stitch.
     ///

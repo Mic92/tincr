@@ -84,7 +84,7 @@ impl Daemon {
     /// One `recv()` + dispatch. Splitting would thread id/conn/self
     /// borrows.
     fn on_conn_readable_once(&mut self, id: ConnId) -> FeedDrain {
-        let conn = self.conns.get_mut(id).expect("checked contains_key");
+        let conn = self.conn_mut(id);
         match conn.feed(&mut OsRng) {
             FeedResult::WouldBlock => return FeedDrain::Done,
             FeedResult::Dead => {
@@ -102,7 +102,8 @@ impl Daemon {
 
         // ─── drain inbuf
         loop {
-            let conn = self.conns.get_mut(id).expect("not terminated mid-loop");
+            // Split borrow: helper would lock all of `self`.
+            let conn = self.conns.get_mut(id).expect("ConnId not live");
             let Some(range) = conn.inbuf.read_line() else {
                 break;
             };
@@ -224,7 +225,8 @@ impl Daemon {
     /// piggyback, or `dispatch_sptps_outputs` killed it). Caller
     /// must `return FeedDrain::Done`.
     fn dispatch_request_id(&mut self, id: ConnId, line: &[u8]) -> Option<(DispatchResult, bool)> {
-        let conn = self.conns.get_mut(id).expect("dispatched from live conn");
+        // Split borrow: helper would lock all of `self`.
+        let conn = self.conns.get_mut(id).expect("ConnId not live");
         let ctx = IdCtx {
             cookie: &self.cookie,
             my_name: &self.name,
@@ -315,14 +317,14 @@ impl Daemon {
         rows: Vec<String>,
         req: i32,
     ) -> (DispatchResult, bool) {
-        let conn = self.conns.get_mut(id).expect("not terminated");
+        let conn = self.conn_mut(id);
         let nw = conn.send_dump(rows, req);
         (DispatchResult::Ok, nw)
     }
 
     /// Simple-ack tail: `"{Control} {req} {result}"`.
     fn ctl_ack(&mut self, id: ConnId, req: i32, result: i32) -> (DispatchResult, bool) {
-        let conn = self.conns.get_mut(id).expect("not terminated");
+        let conn = self.conn_mut(id);
         let nw = conn.send(format_args!("{} {} {}", Request::Control as u8, req, result));
         (DispatchResult::Ok, nw)
     }
@@ -331,7 +333,7 @@ impl Daemon {
     /// borrowed, drop it, then `ctl_send_dump`. Ack arms: do the
     /// side-effect, then `ctl_ack`.
     fn dispatch_control(&mut self, id: ConnId, line: &[u8]) -> (DispatchResult, bool) {
-        let conn = self.conns.get_mut(id).expect("dispatched from live conn");
+        let conn = self.conn_mut(id);
         let (r, nw) = handle_control(conn, line);
         if matches!(r, DispatchResult::DumpSubnets) {
             let rows: Vec<String> = self
@@ -431,7 +433,7 @@ impl Daemon {
             // debug_level_to_filter`. -1 (UNSET) = "use daemon's
             // level"; we use Trace (everything the tap captures —
             // the daemon's stderr filter already applied).
-            let conn = self.conns.get_mut(id).expect("not terminated");
+            let conn = self.conn_mut(id);
             conn.log_level = Some(match level {
                 i32::MIN..=-1 => log::Level::Trace,
                 0 => log::Level::Info,
@@ -445,7 +447,7 @@ impl Daemon {
             // then immediately starts reading `"18 14 LEN"` lines —
             // a `"18 14 0"` ack would be misparsed as a 0-byte
             // capture.
-            let conn = self.conns.get_mut(id).expect("not terminated");
+            let conn = self.conn_mut(id);
             conn.pcap = true;
             conn.pcap_snaplen = snaplen;
             self.any_pcap = true;
@@ -466,7 +468,8 @@ impl Daemon {
         // ─── pre-SPTPS tcplen consume (SOCKS proxy reply)
         // Mutually exclusive with the Sptps arm: SOCKS sets
         // tcplen before SPTPS starts.
-        let conn = self.conns.get_mut(id).expect("just fed");
+        // Split borrow: helper would lock all of `self`.
+        let conn = self.conns.get_mut(id).expect("ConnId not live");
         if conn.tcplen != 0 && conn.outgoing.is_some() && conn.allow_request == Some(Request::Id) {
             let n = usize::from(conn.tcplen);
             let Some(range) = conn.inbuf.read_n(n) else {
@@ -650,11 +653,11 @@ impl Daemon {
                         Request::UdpInfo => self.on_udp_info(id, body),
                         Request::MtuInfo => self.on_mtu_info(id, body),
                         Request::Ping => {
-                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            let conn = self.conn_mut(id);
                             Ok(conn.send(format_args!("{}", Request::Pong as u8)))
                         }
                         Request::Pong => {
-                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            let conn = self.conn_mut(id);
                             conn.pinged = false;
                             // Gate on non-zero timeout (healthy conn
                             // pongs every pinginterval; don't churn).
@@ -674,7 +677,7 @@ impl Daemon {
                         }
                         Request::Packet => {
                             // set tcplen; NEXT record is the blob.
-                            let conn = self.conns.get_mut(id).expect("gate passed");
+                            let conn = self.conn_mut(id);
                             std::str::from_utf8(body)
                                 .ok()
                                 .and_then(|s| tinc_proto::msg::TcpPacket::parse(s).ok())

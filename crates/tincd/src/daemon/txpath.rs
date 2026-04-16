@@ -981,12 +981,7 @@ impl Daemon {
             .map_err(|_| DispatchError::BadKey("UDP_INFO parse failed".into()))?;
 
         // `from_conn` came from dispatch THIS turn; live.
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             let directly_connected = self.nodes.get(&nid).and_then(|ns| ns.conn).is_some();
@@ -1048,12 +1043,7 @@ impl Daemon {
             .map_err(|_| DispatchError::BadKey("MTU_INFO parse failed".into()))?;
 
         // `from_conn` came from dispatch THIS turn; live.
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             // Supply zero defaults for missing tunnel state.
