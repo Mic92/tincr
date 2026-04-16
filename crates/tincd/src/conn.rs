@@ -687,7 +687,7 @@ impl Connection {
     /// Returns `true` if outbuf went empty→nonempty across the batch.
     /// `rows` is owned-Vec because every callsite collects up front
     /// to drop the `&self` borrow before re-fetching `&mut conn`.
-    pub fn send_dump(&mut self, rows: Vec<String>, req: i32) -> bool {
+    pub(crate) fn send_dump(&mut self, rows: Vec<String>, req: crate::proto::CtlReq) -> bool {
         let mut nw = false;
         for row in rows {
             nw |= self.send(format_args!("{row}"));

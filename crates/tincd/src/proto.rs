@@ -133,23 +133,79 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOpti
     opts
 }
 
-/// `control_common.h`. Dup of `tinc-tools::ctl::CtlRequest` (daemon
-/// doesn't dep on tinc-tools). TODO: hoist to tinc-proto.
-pub(crate) const REQ_STOP: i32 = 0;
-pub(crate) const REQ_RELOAD: i32 = 1;
-pub(crate) const REQ_DUMP_NODES: i32 = 3;
-pub(crate) const REQ_DUMP_EDGES: i32 = 4;
-pub(crate) const REQ_DUMP_SUBNETS: i32 = 5;
-pub(crate) const REQ_DUMP_CONNECTIONS: i32 = 6;
-pub(crate) const REQ_PURGE: i32 = 8;
-pub(crate) const REQ_SET_DEBUG: i32 = 9;
-pub(crate) const REQ_RETRY: i32 = 10;
-pub(crate) const REQ_DISCONNECT: i32 = 12;
-pub(crate) const REQ_DUMP_TRAFFIC: i32 = 13;
-/// `level, use_color`.
-pub(crate) const REQ_LOG: i32 = 15;
-pub(crate) const REQ_PCAP: i32 = 14;
-/// `control_common.h`: `REQ_INVALID = -1`.
+/// `control_common.h` request subtypes. Dup of
+/// `tinc-tools::ctl::CtlRequest` (daemon doesn't dep on tinc-tools).
+/// TODO: hoist to tinc-proto.
+///
+/// `Display` formats as the bare integer — wire format is
+/// `"{Control as u8} {req} ..."` and must stay byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub(crate) enum CtlReq {
+    Stop = 0,
+    Reload = 1,
+    DumpNodes = 3,
+    DumpEdges = 4,
+    DumpSubnets = 5,
+    DumpConnections = 6,
+    Purge = 8,
+    SetDebug = 9,
+    Retry = 10,
+    Disconnect = 12,
+    DumpTraffic = 13,
+    Pcap = 14,
+    Log = 15,
+}
+
+impl CtlReq {
+    /// Parse the second int of a `CONTROL` line. `None` for unknown
+    /// (incl. dead-upstream `Restart=2`/`DumpGraph=7`/`Connect=11`
+    /// which the daemon never matches anyway).
+    pub(crate) const fn from_i32(n: i32) -> Option<Self> {
+        Some(match n {
+            0 => Self::Stop,
+            1 => Self::Reload,
+            3 => Self::DumpNodes,
+            4 => Self::DumpEdges,
+            5 => Self::DumpSubnets,
+            6 => Self::DumpConnections,
+            8 => Self::Purge,
+            9 => Self::SetDebug,
+            10 => Self::Retry,
+            12 => Self::Disconnect,
+            13 => Self::DumpTraffic,
+            14 => Self::Pcap,
+            15 => Self::Log,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for CtlReq {
+    /// Wire format: bare integer. `"{REQ_DUMP_NODES}"` → `"3"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", *self as i32)
+    }
+}
+
+// `REQ_*` aliases: keep the C-style names at call sites (gossip/
+// txpath/route format these into dump rows). Typed as `CtlReq`, so
+// `send_dump`/`ctl_ack` no longer accept arbitrary `i32`.
+pub(crate) const REQ_STOP: CtlReq = CtlReq::Stop;
+pub(crate) const REQ_RELOAD: CtlReq = CtlReq::Reload;
+pub(crate) const REQ_DUMP_NODES: CtlReq = CtlReq::DumpNodes;
+pub(crate) const REQ_DUMP_EDGES: CtlReq = CtlReq::DumpEdges;
+pub(crate) const REQ_DUMP_SUBNETS: CtlReq = CtlReq::DumpSubnets;
+pub(crate) const REQ_DUMP_CONNECTIONS: CtlReq = CtlReq::DumpConnections;
+pub(crate) const REQ_PURGE: CtlReq = CtlReq::Purge;
+pub(crate) const REQ_SET_DEBUG: CtlReq = CtlReq::SetDebug;
+pub(crate) const REQ_RETRY: CtlReq = CtlReq::Retry;
+pub(crate) const REQ_DISCONNECT: CtlReq = CtlReq::Disconnect;
+pub(crate) const REQ_DUMP_TRAFFIC: CtlReq = CtlReq::DumpTraffic;
+pub(crate) const REQ_LOG: CtlReq = CtlReq::Log;
+pub(crate) const REQ_PCAP: CtlReq = CtlReq::Pcap;
+/// `control_common.h`: `REQ_INVALID = -1`. Reply-only sentinel, never
+/// a request — stays a bare `i32`, not a `CtlReq` variant.
 const REQ_INVALID: i32 = -1;
 
 /// `TINC_CTL_VERSION_CURRENT` (`control_common.h:46`). Unchanged since 2007.
@@ -857,9 +913,9 @@ fn nth_token(line: &[u8], n: usize) -> Option<&str> {
 #[allow(clippy::single_match_else)] // this is the C switch; arms accrete as ctl subcommands land
 pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
     // `sscanf("%*d %d", &type)`.
-    let subtype = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());
+    let raw = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());
 
-    match subtype {
+    match raw.and_then(CtlReq::from_i32) {
         // Daemon does the walk/reload (it has the slotmap).
         Some(REQ_RELOAD) => (DispatchResult::Reload, false),
         Some(REQ_DUMP_NODES) => (DispatchResult::DumpNodes, false),
@@ -933,7 +989,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // Malformed (`subtype = None`) lands here too — same as C
             // (uninit `type` falls through to default).
             log::debug!(target: "tincd::proto",
-                        "Unknown CONTROL subtype {subtype:?} from {}", conn.name);
+                        "Unknown CONTROL subtype {raw:?} from {}", conn.name);
             let needs_write = conn.send(format_args!("{} {}", Request::Control as u8, REQ_INVALID));
             (DispatchResult::Ok, needs_write)
         }

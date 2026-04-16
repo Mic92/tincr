@@ -11,8 +11,8 @@ use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::invitation_serve::InvitePhase;
 use crate::outgoing::{OutgoingId, ProxyConfig};
 use crate::proto::{
-    DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, record_body,
-    send_ack,
+    CtlReq, DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
+    record_body, send_ack,
 };
 use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
@@ -313,7 +313,7 @@ impl Daemon {
         &mut self,
         id: ConnId,
         rows: Vec<String>,
-        req: i32,
+        req: CtlReq,
     ) -> (DispatchResult, bool) {
         let conn = self.conns.get_mut(id).expect("not terminated");
         let nw = conn.send_dump(rows, req);
@@ -321,7 +321,7 @@ impl Daemon {
     }
 
     /// Simple-ack tail: `"{Control} {req} {result}"`.
-    fn ctl_ack(&mut self, id: ConnId, req: i32, result: i32) -> (DispatchResult, bool) {
+    fn ctl_ack(&mut self, id: ConnId, req: CtlReq, result: i32) -> (DispatchResult, bool) {
         let conn = self.conns.get_mut(id).expect("not terminated");
         let nw = conn.send(format_args!("{} {} {}", Request::Control as u8, req, result));
         (DispatchResult::Ok, nw)
