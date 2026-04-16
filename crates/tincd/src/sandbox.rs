@@ -36,16 +36,13 @@
 //!
 //! ## What we DON'T port
 //!
-//! `open_exec_paths` (`/bin`, `/sbin`, etc). At `normal`, exec is
-//! granted to the standard PATH so scripts can call `ip`, `route`,
-//! etc. On Linux+Landlock that's a
-//! distro-specific guess; the operator's `tinc-up` shebang might
-//! point at `/nix/store/.../bin/sh`. We grant `Execute` on confbase
-//! (so `confbase/tinc-up` itself can be exec'd) and rely on the
-//! fact that Landlock ABI V1-V4 only restricts FILE access — the
-//! script's child-exec of `/sbin/ip` opens the binary read-only,
-//! which we DO allow via the `from_read` umbrella below. Tested in
-//! `tests/netns.rs::sandbox_normal_ping`.
+//! `open_exec_paths` (`/bin`, `/sbin`, etc). At `normal`, C grants
+//! exec to the standard PATH so scripts can call `ip`, `route`, etc.
+//! On Linux+Landlock that's a distro-specific guess. We grant
+//! `Execute` per-file on the fixed hook-script paths under confbase
+//! (so `confbase/tinc-up` itself can be exec'd); a `#!/bin/sh`
+//! shebang will EACCES — `tests/netns/sandbox.rs::sandbox_normal_
+//! ping` pins that as intentional.
 
 #![forbid(unsafe_code)]
 
@@ -236,7 +233,8 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // `RulesetStatus::NotEnforced`, no error.
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
-    let access_r = AccessFs::from_read(abi); // Execute|ReadFile|ReadDir
+    // Read-only without Execute (`from_read` would include it).
+    let access_rd: BitFlags<AccessFs> = AccessFs::ReadFile | AccessFs::ReadDir;
 
     // unveil "rwc" → write + create-file + create-dir + remove-*.
     // Not `from_write(abi)` — that includes MakeChar/MakeBlock/
@@ -253,10 +251,6 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
 
     let can_exec = level < Level::High;
 
-    // confbase: r at high, rx at normal. Subdirs cache/hosts/invitations: rwc (+x at
-    // normal for hosts/ because `hosts/NAME-up` per-node scripts
-    // live there — `periodic.rs:254`).
-    //
     // path_beneath_rules SILENTLY SKIPS paths it can't open
     // (`fs.rs:613` `Err(_) => None`). This is what we want for
     // logfile (parent dir might not exist yet; the file itself
@@ -284,53 +278,68 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
         }
     }
 
-    // Rule lists by access set. `path_beneath_rules` is uniform
-    // per access-set, so group paths by what they need.
-    let confbase_access = if can_exec {
-        access_r // includes Execute
+    // confbase + subdirs are NO EXEC. Landlock rules are additive,
+    // so Execute on confbase would leak into hosts/ — which also
+    // has WriteFile|MakeReg — giving a compromised event loop a
+    // write-then-exec primitive via `run_host_script("hosts/{node}-
+    // up")`. Execute is granted per-file on the fixed hook-script
+    // names below instead. Per-node `hosts/{node}-up` therefore
+    // won't run under Sandbox; use `host-up` + $NODE.
+    let confbase_access = access_rd;
+    let hosts_access = access_rd | access_rwc;
+
+    // path_beneath_rules skips nonexistent paths; scripts created
+    // after enter() are intentionally not exec'able (UseNewPaths).
+    let script_names: &[&str] = &[
+        "tinc-up",
+        "tinc-down",
+        "host-up",
+        "host-down",
+        "subnet-up",
+        "subnet-down",
+        "invitation-accepted",
+    ];
+    let script_paths: Vec<PathBuf> = if can_exec {
+        script_names
+            .iter()
+            .map(|n| paths.confbase.join(n))
+            .collect()
     } else {
-        AccessFs::ReadFile | AccessFs::ReadDir
-    };
-    let hosts_access = if can_exec {
-        access_r | access_rwc
-    } else {
-        (AccessFs::ReadFile | AccessFs::ReadDir) | access_rwc
+        Vec::new()
     };
 
-    // Paths granted full r+w+c. C: device "rw", logfile/pidfile/
-    // unixsocket "rwc". We don't separate "rw" from "rwc" — the
-    // device path is a char dev, MakeReg on it is meaningless,
-    // and one fewer access-set means one fewer add_rules call.
-    // The pidfile/socket paths might be the FILES (which already
-    // exist by now) or — if the operator passed a directory in
-    // --pidfile (they shouldn't, but) — the parent. Landlock
-    // PathBeneath on a regular file restricts only that file
-    // (the crate handles the file-vs-dir mask via `is_file`,
-    // `fs.rs:606`), which is correct: Daemon::Drop's unlink is
-    // a RemoveFile on the PARENT dir, not on the file itself.
-    // So: grant rwc on the parent dirs, not on the files. The
-    // C unveil takes the file path and the kernel handles
-    // unlink-the-file-itself; Landlock doesn't, RemoveFile
-    // gates the directory operation.
+    // Paths granted r+w+c (no exec). cache/ and invitations/ are
+    // pure data dirs; the device is a char dev (MakeReg meaningless
+    // on it but harmless, and one access-set means one add_rules).
     let mut rwc_paths: Vec<PathBuf> = vec![cache, invitations];
     if let Some(dev) = &paths.device {
         rwc_paths.push(dev.clone());
     }
-    if let Some(lf) = &paths.logfile {
-        // Parent dir, for create+append. The file fd is already
-        // open in env_logger but a SIGHUP-time rotation (which
-        // we don't do, but) would need this.
-        if let Some(p) = lf.parent() {
-            rwc_paths.push(p.to_owned());
-        }
-    }
-    // Parents of pidfile + socket — for Daemon::Drop's
-    // remove_file. The files themselves are already created.
+
+    // pidfile / unixsocket / logfile: grant Read|Write on the FILE
+    // inodes (all exist by enter() time), not their parent dirs —
+    // those default to /var/run, /var/log. unlink is a directory op,
+    // so the parent dirs get RemoveFile ONLY for Drop cleanup.
+    let mut runtime_files: Vec<PathBuf> =
+        vec![paths.pidfile.clone(), paths.unixsocket.clone()];
+    let mut unlink_parents: Vec<PathBuf> = Vec::new();
     if let Some(p) = paths.pidfile.parent() {
-        rwc_paths.push(p.to_owned());
+        unlink_parents.push(p.to_owned());
     }
     if let Some(p) = paths.unixsocket.parent() {
-        rwc_paths.push(p.to_owned());
+        unlink_parents.push(p.to_owned());
+    }
+    if let Some(lf) = &paths.logfile {
+        // Touch so PathBeneath can open it (init_logging already did).
+        if let Err(e) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(lf)
+        {
+            log::warn!(target: "tincd",
+                "Sandbox: touch {}: {e}", lf.display());
+        }
+        runtime_files.push(lf.clone());
     }
 
     // /dev/{u,}random "r". On Linux getrandom(2) is
@@ -347,10 +356,25 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
         .map_err(|e| format!("Landlock create: {e}"))?
         .add_rules(path_beneath_rules(&[&paths.confbase], confbase_access))
         .map_err(|e| format!("Landlock add confbase: {e}"))?
+        .add_rules(path_beneath_rules(
+            &script_paths,
+            AccessFs::Execute | AccessFs::ReadFile,
+        ))
+        .map_err(|e| format!("Landlock add scripts: {e}"))?
         .add_rules(path_beneath_rules(&[&hosts], hosts_access))
         .map_err(|e| format!("Landlock add hosts: {e}"))?
-        .add_rules(path_beneath_rules(&rwc_paths, access_r | access_rwc))
+        .add_rules(path_beneath_rules(&rwc_paths, access_rd | access_rwc))
         .map_err(|e| format!("Landlock add rwc: {e}"))?
+        .add_rules(path_beneath_rules(
+            &runtime_files,
+            AccessFs::ReadFile | AccessFs::WriteFile,
+        ))
+        .map_err(|e| format!("Landlock add runtime files: {e}"))?
+        .add_rules(path_beneath_rules(
+            &unlink_parents,
+            BitFlags::from(AccessFs::RemoveFile),
+        ))
+        .map_err(|e| format!("Landlock add unlink parents: {e}"))?
         .add_rules(path_beneath_rules(random_paths, AccessFs::ReadFile))
         .map_err(|e| format!("Landlock add random: {e}"))?
         .restrict_self()
