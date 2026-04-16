@@ -1146,6 +1146,7 @@ name = "tincd-bpf"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "nix",
  "tinc-device",
 ]
 

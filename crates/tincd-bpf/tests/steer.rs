@@ -37,7 +37,7 @@
 
 use std::io::Read;
 use std::net::IpAddr;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -159,14 +159,11 @@ fn cbpf_steers_by_src_id6() {
     let mut by_sock: Vec<Vec<u8>> = vec![Vec::new(); N as usize];
     let mut buf = [0u8; 64];
     for (k, sock) in group.socks.iter().enumerate() {
-        let fd = sock.as_raw_fd();
-        loop {
-            // SAFETY: fd is a valid open SOCK_DGRAM | SOCK_NONBLOCK
-            // socket (just opened by open_reuseport_group). EAGAIN
-            // when drained.
-            #[allow(unsafe_code)]
-            let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
-            if n <= 0 {
+        // SOCK_NONBLOCK: EAGAIN when drained → Err → break.
+        while let Ok(n) =
+            nix::sys::socket::recv(sock.as_raw_fd(), &mut buf, nix::sys::socket::MsgFlags::empty())
+        {
+            if n == 0 {
                 break;
             }
             by_sock[k].push(buf[9]); // src_id6[3] — the steering byte
@@ -232,9 +229,9 @@ struct HairpinEcho {
 }
 
 impl HairpinEcho {
-    /// `queues`: dup'd raw fds, both queues. Echo polls both, writes
+    /// `queues`: dup'd owned fds, both queues. Echo polls both, writes
     /// to `queues[write_queue]`. Consumes the fds (closes on drop).
-    fn spawn(queues: [i32; 2], write_queue: usize) -> Self {
+    fn spawn(queues: [OwnedFd; 2], write_queue: usize) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let read_count = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
         let estop = stop.clone();
@@ -243,16 +240,11 @@ impl HairpinEcho {
         let echo = std::thread::spawn(move || {
             let mut buf = vec![0u8; 70_000];
             while !estop.load(Ordering::Relaxed) {
-                for (k, &fd) in queues.iter().enumerate() {
-                    // SAFETY: fd is a valid open dup of a TUN queue;
-                    // O_NONBLOCK → EAGAIN when empty.
-                    #[allow(unsafe_code)]
-                    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-                    if n <= 0 {
+                for (k, fd) in queues.iter().enumerate() {
+                    // O_NONBLOCK → EAGAIN when empty → Err → skip.
+                    let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
                         continue;
-                    }
-                    #[allow(clippy::cast_sign_loss)]
-                    let n = n as usize;
+                    };
                     if n < VNET_HDR_LEN + 20 {
                         continue;
                     }
@@ -284,21 +276,12 @@ impl HairpinEcho {
                     // write_queue). The kernel learns. Next TX on
                     // this flow: tun_automq_select_queue finds the
                     // entry → write_queue.
-                    // SAFETY: fd valid, buf[..n] initialized.
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        libc::write(queues[write_queue], buf.as_ptr().cast(), n);
-                    }
+                    let _ = nix::unistd::write(&queues[write_queue], &buf[..n]);
                 }
                 std::thread::sleep(Duration::from_micros(50));
             }
-            for fd in queues {
-                // SAFETY: each fd is a dup we own; close once.
-                #[allow(unsafe_code)]
-                unsafe {
-                    libc::close(fd);
-                }
-            }
+            // `queues: [OwnedFd; 2]` drops here → close(2) each.
+            drop(queues);
         });
 
         Self {
@@ -325,14 +308,16 @@ impl Drop for HairpinEcho {
     }
 }
 
-fn dup_queue(q: &Tun) -> i32 {
+fn dup_queue(q: &Tun) -> OwnedFd {
     let fd = q.fd().expect("Tun has fd");
-    // SAFETY: fd is a valid open TUN queue fd; dup gives an
-    // independent file-table slot to the same kernel tun_file.
+    let d = nix::unistd::dup(fd).expect("dup");
+    // SAFETY: `d` is a fresh fd just returned by dup(2); we are its
+    // sole owner. Boundary shim because `Tun::fd()` exposes only a
+    // `RawFd` (no `AsFd` impl) and nix 0.29's `dup` returns `RawFd`.
     #[allow(unsafe_code)]
-    let d = unsafe { libc::dup(fd) };
-    assert!(d >= 0, "dup failed");
-    d
+    unsafe {
+        OwnedFd::from_raw_fd(d)
+    }
 }
 
 /// Drive a TCP exchange through the hairpin: connect to .2:port (via
@@ -493,15 +478,11 @@ fn automq_cold_miss_converges() {
     let echo = std::thread::spawn(move || {
         let mut buf = vec![0u8; 70_000];
         while !estop.load(Ordering::Relaxed) {
-            for (k, &fd) in dups.iter().enumerate() {
-                // SAFETY: valid dup'd TUN queue fd, nonblock.
-                #[allow(unsafe_code)]
-                let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-                if n <= 0 {
+            for (k, fd) in dups.iter().enumerate() {
+                // O_NONBLOCK → EAGAIN when empty → Err → skip.
+                let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
                     continue;
-                }
-                #[allow(clippy::cast_sign_loss)]
-                let n = n as usize;
+                };
                 if n < VNET_HDR_LEN + 20 || buf[VNET_HDR_LEN] >> 4 != 4 {
                     continue;
                 }
@@ -520,21 +501,12 @@ fn automq_cold_miss_converges() {
                     buf[tcp + 2..tcp + 4].copy_from_slice(&tmp2);
                 }
                 // Write back to the SAME queue. Convergence.
-                // SAFETY: same fd, buf valid.
-                #[allow(unsafe_code)]
-                unsafe {
-                    libc::write(fd, buf.as_ptr().cast(), n);
-                }
+                let _ = nix::unistd::write(fd, &buf[..n]);
             }
             std::thread::sleep(Duration::from_micros(50));
         }
-        for fd in dups {
-            // SAFETY: dup we own.
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::close(fd);
-            }
-        }
+        // `dups: [OwnedFd; 2]` drops here → close(2) each.
+        drop(dups);
     });
 
     // ── flow A: cold ────────────────────────────────────────────────
