@@ -830,7 +830,8 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
         .next()
         .and_then(|t| std::str::from_utf8(t).ok())
         .and_then(|s| s.parse::<i32>().ok())
-        .ok_or_else(|| DispatchError::BadAck("bad weight".into()))?;
+        .ok_or_else(|| DispatchError::BadAck("bad weight".into()))?
+        .max(0); // negative weight would bias MST/nexthop tie-breaks
     let options = toks // `%x`
         .next()
         .and_then(|t| std::str::from_utf8(t).ok())

@@ -41,7 +41,8 @@ pub struct AddEdge {
     pub port: AddrStr,
     /// `e->options`, hex on the wire.
     pub options: u32,
-    /// Dijkstra edge weight. Signed because `%d`; negative is silly but
+    /// Dijkstra edge weight. `%d` on the wire; clamped to `>= 0` at
+    /// parse so a peer can't bias MST/nexthop tie-breaks.
     /// the protocol doesn't reject it (never range-checked).
     pub weight: i32,
     /// `from`'s LAN-side address, if known. Newer peers send it so the
@@ -72,7 +73,7 @@ impl AddEdge {
         let addr = AddrStr::new(t.s()?)?;
         let port = AddrStr::new(t.s()?)?;
         let options = t.x()?;
-        let weight = t.d()?;
+        let weight = t.d()?.max(0); // see field doc
 
         // Optional pair. Both or neither — sscanf returns 6 or 8, not 7.
         let local = match (t.s_opt()?, t.s_opt()?) {
@@ -187,6 +188,12 @@ mod tests {
         assert_eq!(la.as_str(), "192.168.1.1");
         assert_eq!(lp.as_str(), "655");
         assert_eq!(m.format(0), line);
+    }
+
+    #[test]
+    fn add_edge_negative_weight_clamped() {
+        let m = AddEdge::parse("12 0 a b 1.2.3.4 655 0 -2147483648").unwrap();
+        assert_eq!(m.weight, 0);
     }
 
     #[test]

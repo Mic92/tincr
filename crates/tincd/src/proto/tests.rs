@@ -791,9 +791,11 @@ fn parse_ack_malformed() {
         parse_ack(b"4 http 50 c"),
         Err(DispatchError::BadAck(_))
     ));
-    // Negative weight: valid (i32, %d).
+    // Negative weight: parses (`%d`), clamped to 0.
     let p = parse_ack(b"4 655 -1 c").unwrap();
-    assert_eq!(p.his_weight, -1);
+    assert_eq!(p.his_weight, 0);
+    let p = parse_ack(b"4 655 -2147483648 0").unwrap();
+    assert_eq!(p.his_weight, 0);
     assert!(matches!(
         parse_ack(b"4 655 50 0xZZ"),
         Err(DispatchError::BadAck(_))

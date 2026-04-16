@@ -196,7 +196,8 @@ prop_compose! {
         addr in arb_addr(),
         port in arb_addr(),
         options in any::<u32>(),
-        weight in any::<i32>(),
+        // Clamped to >=0 at parse; generate the post-clamp domain.
+        weight in 0i32..,
         local in proptest::option::of((arb_addr(), arb_addr())),
     ) -> AddEdge {
         AddEdge { from, to, addr, port, options, weight, local }
