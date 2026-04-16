@@ -280,7 +280,7 @@ fn umbilical_daemon_side() {
     // a safe wrapper — it's a probe-style call, not ownership.
     let theirs_fd = theirs.as_raw_fd();
     nix::fcntl::fcntl(
-        theirs_fd,
+        &theirs,
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
     )
     .unwrap();

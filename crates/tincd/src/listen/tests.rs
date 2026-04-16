@@ -179,14 +179,14 @@ fn open_any_one_or_two() {
 #[test]
 fn open_cloexec() {
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
-    let (tcp_fd, udp_fd) = listeners[0].fds();
+    let l = &listeners[0];
 
     // F_GETFD bit 0 = FD_CLOEXEC.
-    for &fd in &[tcp_fd, udp_fd] {
+    for fd in [l.tcp.as_fd(), l.udp.as_fd()] {
         let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap());
         assert!(
             flags.contains(FdFlag::FD_CLOEXEC),
-            "fd {fd} missing CLOEXEC"
+            "fd missing CLOEXEC"
         );
     }
 }
@@ -211,8 +211,7 @@ fn open_v6only_set() {
 #[test]
 fn open_udp_nonblocking() {
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
-    let (_, udp_fd) = listeners[0].fds();
-    let flags = OFlag::from_bits_truncate(fcntl(udp_fd, FcntlArg::F_GETFL).unwrap());
+    let flags = OFlag::from_bits_truncate(fcntl(listeners[0].udp.as_fd(), FcntlArg::F_GETFL).unwrap());
     assert!(flags.contains(OFlag::O_NONBLOCK));
 }
 
@@ -223,6 +222,7 @@ fn open_udp_nonblocking() {
 /// without this, Linux defaults to `IP_PMTUDISC_WANT` and the
 /// pmtu.rs probes get L3-fragmented through.
 #[test]
+#[cfg(target_os = "linux")]
 fn open_udp_pmtudisc_do() {
     // v4: always available.
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
@@ -294,6 +294,7 @@ fn open_udp_rcvbuf_set() {
 /// `SO_BINDTODEVICE` to `lo`. Always exists. Read back.
 /// nix returns it with a trailing NUL — strip before compare.
 #[test]
+#[cfg(target_os = "linux")]
 fn open_bind_to_interface_lo() {
     let o = SockOpts {
         bind_to_interface: Some("lo".into()),
@@ -313,6 +314,7 @@ fn open_bind_to_interface_lo() {
 /// `open_one` returns `None` (the C closes the fd at `:244,391`).
 /// No panic; the listener pair just doesn't materialize.
 #[test]
+#[cfg(target_os = "linux")]
 fn open_bind_to_interface_bad_is_graceful() {
     let o = SockOpts {
         bind_to_interface: Some("nonexistent-iface-9z".into()),
@@ -327,6 +329,7 @@ fn open_bind_to_interface_bad_is_graceful() {
 /// shape; the cap-aware check would be `prctl(PR_CAPBSET_READ)`
 /// but that's overkill for a unit test.)
 #[test]
+#[cfg(target_os = "linux")]
 fn open_fwmark_set() {
     let euid = nix::unistd::geteuid();
     if !euid.is_root() {
@@ -351,6 +354,7 @@ fn open_fwmark_set() {
 /// setsockopt. (Weak assertion — kernel default IS 0 — but
 /// proves we don't crash on the unprivileged path.)
 #[test]
+#[cfg(target_os = "linux")]
 fn open_fwmark_zero_is_skip() {
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
     let mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
@@ -479,11 +483,11 @@ fn adopt_listeners_from_high_fd() {
     // dup() to get a fresh high fd. We don't care WHERE it
     // lands, just that it's distinct from `tcp`'s fd (so when
     // we drop `tcp`, the duped fd survives) and not fd 3.
-    let high_fd = nix::unistd::dup(tcp.as_raw_fd()).expect("dup");
+    let high_fd = nix::unistd::dup(&tcp).expect("dup");
     // Original drops here; high_fd is the only handle now.
     drop(tcp);
 
-    let listeners = adopt_listeners_from(high_fd, 1, &opts()).unwrap();
+    let listeners = adopt_listeners_from(high_fd.as_raw_fd(), 1, &opts()).unwrap();
     assert_eq!(listeners.len(), 1);
     assert_eq!(listeners[0].local, want_addr);
     assert!(!listeners[0].bindto, "socket-activated → bindto=false");
@@ -493,7 +497,7 @@ fn adopt_listeners_from_high_fd() {
     assert_eq!(udp_addr.port(), want_addr.port());
 
     // CLOEXEC was set. Probe via F_GETFD.
-    let flags = fcntl(listeners[0].tcp.as_raw_fd(), FcntlArg::F_GETFD).unwrap();
+    let flags = fcntl(listeners[0].tcp.as_fd(), FcntlArg::F_GETFD).unwrap();
     assert!(
         FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC),
         "adopted TCP fd should be CLOEXEC"
@@ -515,13 +519,13 @@ fn adopt_listeners_too_many() {
 fn adopt_listeners_not_a_socket() {
     // /dev/null at a high fd. getsockname → ENOTSOCK.
     let f = std::fs::File::open("/dev/null").unwrap();
-    let high_fd = nix::unistd::dup(f.as_raw_fd()).expect("dup");
+    let high_fd = nix::unistd::dup(&f).expect("dup");
     drop(f);
 
     // adopt_listeners_from took ownership of high_fd via
     // Socket::from_raw_fd; the error path drops the Socket,
     // which closes high_fd. No leak.
-    let e = adopt_listeners_from(high_fd, 1, &opts())
+    let e = adopt_listeners_from(high_fd.as_raw_fd(), 1, &opts())
         .err()
         .expect("expected ENOTSOCK")
         .to_string();

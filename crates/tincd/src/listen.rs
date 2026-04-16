@@ -194,7 +194,7 @@ pub(crate) fn set_int_sockopt(
 
 /// Raw `getsockopt` sibling of [`set_int_sockopt`]. Test-only readback
 /// for `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn get_int_sockopt(
     fd: BorrowedFd<'_>,
     level: libc::c_int,

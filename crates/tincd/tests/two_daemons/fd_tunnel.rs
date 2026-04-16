@@ -42,7 +42,7 @@ pub(crate) fn write_fd(fd: &OwnedFd, buf: &[u8]) {
 pub(crate) fn read_fd_nb(fd: &OwnedFd) -> Option<Vec<u8>> {
     let raw = fd.as_raw_fd();
     let mut buf = vec![0u8; 2048];
-    match nix::unistd::read(raw, &mut buf) {
+    match nix::unistd::read(fd, &mut buf) {
         Ok(0) => panic!("read fd={raw}: EOF (peer closed)"),
         Ok(n) => {
             buf.truncate(n);
