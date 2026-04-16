@@ -537,6 +537,7 @@ fn feed_sptpslen_straddle() {
 fn feed_sptpslen_then_record() {
     use tinc_sptps::Output;
     let (mut conn, mut alice, wr) = sptps_conn_pair();
+    conn.allow_request = None; // peek is gated to post-ACK
 
     let wire = |outs: Vec<Output>| -> Vec<u8> {
         outs.into_iter()

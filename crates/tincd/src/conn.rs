@@ -525,7 +525,9 @@ impl Connection {
                             } = o
                             {
                                 let body = crate::proto::record_body(bytes);
-                                if body.starts_with(b"21 ")
+                                // Same gate check_gate would apply.
+                                if self.allow_request.is_none()
+                                    && body.starts_with(b"21 ")
                                     && let Some(pkt) = std::str::from_utf8(body)
                                         .ok()
                                         .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
