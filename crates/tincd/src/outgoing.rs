@@ -27,7 +27,7 @@
 use std::ffi::CString;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
@@ -588,25 +588,30 @@ pub fn do_outgoing_pipe(
     let k_name = CString::new("NAME").unwrap();
     let k_node = CString::new("NODE").unwrap();
 
+    // `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`. nix returns the
+    // pair already wrapped in `OwnedFd`, so the fork-failure path
+    // below closes both via Drop with no manual `libc::close`.
+    let (parent_fd, child_fd) = nix::sys::socket::socketpair(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::Stream,
+        None,
+        nix::sys::socket::SockFlag::empty(),
+    )?;
+    // Snapshot the raw ints BEFORE fork: the child path below is
+    // libc-only (see fn doc) and must not call into std, even for a
+    // trivial `.as_raw_fd()` getter — keep it on plain integers.
+    let (parent_raw, child_raw) = (parent_fd.as_raw_fd(), child_fd.as_raw_fd());
+
     // SAFETY: see fn doc. The child does libc-only until exec.
     // Everything that allocates was done above, in the parent.
     #[allow(unsafe_code)]
     unsafe {
-        // `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`.
-        let mut fds = [-1i32; 2];
-        if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let (parent_fd, child_fd) = (fds[0], fds[1]);
-
         // `if(fork()) { ... parent ... return; }`. We check for
         // fork failure (`-1`).
         match libc::fork() {
             -1 => {
-                let e = io::Error::last_os_error();
-                libc::close(parent_fd);
-                libc::close(child_fd);
-                Err(e)
+                // `parent_fd` + `child_fd` are OwnedFd; Drop closes.
+                Err(io::Error::last_os_error())
             }
             0 => {
                 // ────── CHILD ──────
@@ -616,10 +621,10 @@ pub fn do_outgoing_pipe(
                 // dup2(fd[1], 0), dup2(fd[1], 1), close(fd[1]).
                 libc::close(0);
                 libc::close(1);
-                libc::close(parent_fd);
-                libc::dup2(child_fd, 0);
-                libc::dup2(child_fd, 1);
-                libc::close(child_fd);
+                libc::close(parent_raw);
+                libc::dup2(child_raw, 0);
+                libc::dup2(child_raw, 1);
+                libc::close(child_raw);
 
                 // `setsid()`. Detach from controlling tty.
                 // The proxy script shouldn't get our SIGINT.
@@ -649,11 +654,8 @@ pub fn do_outgoing_pipe(
                 // normal terminate path fires. The zombie reaper:
                 // SIGCHLD is SIG_DFL; init eventually reaps after
                 // we exit. Same as the C (which also doesn't wait).
-                libc::close(child_fd);
-                // SAFETY: parent_fd is a valid fd from socketpair,
-                // ownership not aliased (child_fd closed, child
-                // process has its own copies via dup2).
-                Ok(OwnedFd::from_raw_fd(parent_fd))
+                drop(child_fd);
+                Ok(parent_fd)
             }
         }
     }
@@ -965,21 +967,14 @@ mod tests {
     #[test]
     fn proxy_exec_roundtrip() {
         use std::io::{Read, Write};
-        use std::os::fd::AsRawFd;
 
         let fd = do_outgoing_pipe("cat", "127.0.0.1:655".parse().unwrap(), "bob", "alice")
             .expect("do_outgoing_pipe");
 
-        // Wrap in a UnixStream for ergonomic read/write. SAFETY:
-        // fd is a valid AF_UNIX SOCK_STREAM; UnixStream is the
-        // right wrapper. The OwnedFd is consumed (no double-close).
-        let raw = fd.as_raw_fd();
-        std::mem::forget(fd); // UnixStream takes ownership of raw
-        // SAFETY: raw is a valid AF_UNIX stream socket fd, just
-        // returned from do_outgoing_pipe; ownership transferred
-        // (fd was forgotten above so no double-close).
-        #[allow(unsafe_code)]
-        let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+        // Wrap in a UnixStream for ergonomic read/write. fd is a
+        // valid AF_UNIX SOCK_STREAM; `From<OwnedFd>` consumes it
+        // (no double-close, no unsafe).
+        let mut stream = std::os::unix::net::UnixStream::from(fd);
 
         // Write → cat echoes → read back. Set a timeout so a hung
         // child (exec failed, fd half-open) doesn't wedge the test.
@@ -1006,7 +1001,6 @@ mod tests {
     #[test]
     fn proxy_exec_env() {
         use std::io::{BufRead, BufReader};
-        use std::os::fd::AsRawFd;
 
         let fd = do_outgoing_pipe(
             "echo \"$NAME $NODE $REMOTEADDRESS $REMOTEPORT\"",
@@ -1016,11 +1010,7 @@ mod tests {
         )
         .expect("do_outgoing_pipe");
 
-        let raw = fd.as_raw_fd();
-        std::mem::forget(fd);
-        // SAFETY: same as proxy_exec_roundtrip.
-        #[allow(unsafe_code)]
-        let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) };
+        let stream = std::os::unix::net::UnixStream::from(fd);
         let mut r = BufReader::new(stream);
         let mut line = String::new();
         r.read_line(&mut line).expect("read env line");
