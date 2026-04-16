@@ -64,13 +64,10 @@ fn wait_for_line(path: &Path, timeout: Duration) -> bool {
 /// SIGTERM → `run()` returns → `Daemon::Drop` → `AddressCache::Drop`
 /// → `save()` → disk write.
 fn sigterm_and_wait(mut child: Child) {
-    // PIDs are < 2^22 on Linux; never wraps.
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
-    let pid = child.id() as libc::pid_t;
-    // SAFETY: kill(2) on a known-live child PID.
-    unsafe {
-        assert_eq!(libc::kill(pid, libc::SIGTERM), 0, "SIGTERM failed");
-    }
+    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+        .expect("SIGTERM failed");
     let status = child.wait().expect("wait");
     assert!(status.success(), "tincd exited non-zero: {status:?}");
 }

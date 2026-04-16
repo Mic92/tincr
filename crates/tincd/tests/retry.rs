@@ -147,14 +147,10 @@ fn sigalrm_retries_now() {
     let armed_at = Instant::now();
 
     // ─── SIGALRM ────────────────────────────────────────────────
-    // PIDs are < 2^22 on Linux; never wraps.
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
-    let pid = child.id() as libc::pid_t;
-    // SAFETY: kill(2) on a known-live child (wait_for_file above).
-    #[allow(unsafe_code)]
-    unsafe {
-        assert_eq!(libc::kill(pid, libc::SIGALRM), 0, "kill SIGALRM");
-    }
+    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGALRM)
+        .expect("kill SIGALRM");
 
     // ─── second connect attempt arrives FAST ────────────────────
     // `on_retry()` sets the timer to Duration::ZERO; next turn() it

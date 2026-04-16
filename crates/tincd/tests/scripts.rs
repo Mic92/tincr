@@ -543,14 +543,11 @@ fn tinc_down_on_shutdown() {
     let pre_count = started.len();
 
     // SIGTERM → run() returns → Daemon::Drop. Can't use
-    // `child.kill()` (= SIGKILL, no Drop). Use libc directly.
-    // PIDs are < 2^22 on Linux; never wraps.
+    // `child.kill()` (= SIGKILL, no Drop).
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
-    let pid = alice_child.id() as libc::pid_t;
-    // SAFETY: kill(2) on a known-live child PID.
-    unsafe {
-        assert_eq!(libc::kill(pid, libc::SIGTERM), 0, "SIGTERM failed");
-    }
+    let pid = nix::unistd::Pid::from_raw(alice_child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+        .expect("SIGTERM failed");
     let status = alice_child.wait().expect("wait");
     assert!(status.success(), "tincd exited non-zero: {status:?}");
 

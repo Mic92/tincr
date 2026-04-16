@@ -209,11 +209,10 @@ fn outgoing_timeout_no_busy_loop() {
     // events into `out`, the freed-slot continue only skips THAT
     // entry. So SIGTERM still works pre-fix; the assert below is
     // the real check).
-    #[allow(unsafe_code)]
     #[allow(clippy::cast_possible_wrap)]
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
+    let pid = nix::unistd::Pid::from_raw(pid as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+        .expect("kill SIGTERM");
     let wait_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(s) = child.try_wait().unwrap() {

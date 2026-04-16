@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+
 use super::common::*;
 use super::node::*;
 
@@ -96,7 +99,7 @@ fn sighup_reload_subnets() {
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGHUP) }, 0);
+    kill(Pid::from_raw(alice_pid), Signal::SIGHUP).expect("kill SIGHUP");
 
     // Poll bob until 10.1.0.0/24 appears. This proves: alice
     // re-read config, diff_subnets found the new one, sent
@@ -124,7 +127,7 @@ fn sighup_reload_subnets() {
         format!("Port = {}\nSubnet = 10.0.0.0/24\n", alice.port),
     )
     .unwrap();
-    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGHUP) }, 0);
+    kill(Pid::from_raw(alice_pid), Signal::SIGHUP).expect("kill SIGHUP");
 
     // Poll until 10.1.0.0/24 is GONE. Proves DEL_SUBNET path.
     poll_until(Duration::from_secs(10), || {
@@ -449,7 +452,7 @@ fn del_subnet_legitimate_still_works() {
         .unwrap()
         .parse()
         .unwrap();
-    unsafe { libc::kill(alice_pid, libc::SIGHUP) };
+    kill(Pid::from_raw(alice_pid), Signal::SIGHUP).expect("kill SIGHUP");
 
     // bob should DEL it. Proves `on_del_subnet`'s `subnets.del()` runs
     // (lookup-gate didn't break the legitimate path).

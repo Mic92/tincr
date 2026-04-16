@@ -230,12 +230,10 @@ fn sandbox_high_blocks_scripts() {
     //
     // SAFETY: kill(2). We spawned this child; wait_for_file
     // confirmed it's alive and serving.
-    #[allow(unsafe_code)]
     #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
-    unsafe {
-        let rc = libc::kill(alice_child.id() as libc::pid_t, libc::SIGTERM);
-        assert_eq!(rc, 0, "kill: {}", std::io::Error::last_os_error());
-    }
+    let pid = nix::unistd::Pid::from_raw(alice_child.id() as i32);
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+        .expect("kill SIGTERM");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(s) = alice_child.try_wait().unwrap() {

@@ -1,10 +1,35 @@
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+
 use super::common::*;
 use super::write_config;
+
+/// RAII env-var setter. `set_var`/`remove_var` are unsafe in edition
+/// 2024 (multi-threaded env-mutation race). Consolidate the unsafe
+/// here so call sites are safe and cleanup is panic-safe.
+struct EnvGuard(&'static str);
+impl EnvGuard {
+    #[allow(unsafe_code)]
+    fn set(k: &'static str, v: impl AsRef<OsStr>) -> Self {
+        // SAFETY: nextest runs each test in its own process; no
+        // env-mutation race with parallel tests.
+        unsafe { std::env::set_var(k, v) };
+        Self(k)
+    }
+}
+impl Drop for EnvGuard {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: same as `set` — single-threaded test process.
+        unsafe { std::env::remove_var(self.0) }
+    }
+}
 
 fn tmp(tag: &str) -> super::common::TmpGuard {
     super::common::TmpGuard::new("stop", tag)
@@ -168,12 +193,7 @@ fn umbilical_ready_signal() {
     // ─── point start() at our tincd
     // `find_tincd` checks TINCD_PATH first. CARGO_BIN_EXE_tincd
     // is the binary cargo just built for THIS crate.
-    //
-    // SAFETY: nextest runs each test in its own process; no
-    // env-mutation race with parallel tests.
-    unsafe {
-        std::env::set_var("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
-    }
+    let _env = EnvGuard::set("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
 
     // ─── the call under test
     // `start()` forks, child exec's tincd, tincd detaches (default
@@ -184,10 +204,6 @@ fn umbilical_ready_signal() {
     // shape. The detached daemon keeps running after `start()`
     // returns; we connect-and-stop it below.
     let result = tinc_tools::cmd::start::start(&paths, &[]);
-
-    unsafe {
-        std::env::remove_var("TINCD_PATH");
-    }
 
     // The umbilical handshake itself. If the nul byte didn't
     // arrive (cut_umbilical didn't fire, or fired before setup
@@ -211,13 +227,7 @@ fn umbilical_ready_signal() {
     // ─── idempotent start
     // Second `start` with daemon running is a no-op success. `CtlSocket::connect` succeeds → early
     // return Ok with the "already running" message.
-    unsafe {
-        std::env::set_var("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
-    }
     let second = tinc_tools::cmd::start::start(&paths, &[]);
-    unsafe {
-        std::env::remove_var("TINCD_PATH");
-    }
     assert!(second.is_ok(), "second start should be idempotent Ok");
 
     // ─── stop it
@@ -363,15 +373,9 @@ fn sigterm_stops() {
     let pid: u32 = content.split_whitespace().next().unwrap().parse().unwrap();
     assert_eq!(pid, child.id(), "pidfile has the right pid");
 
-    // SAFETY: kill(2) on a valid pid. We just spawned this child;
-    // it's alive (wait_for_file confirmed it bound the socket).
-    // SIGTERM is the polite shutdown signal.
-    #[allow(unsafe_code)]
     #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
-    unsafe {
-        let rc = libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        assert_eq!(rc, 0, "kill failed: {}", std::io::Error::last_os_error());
-    }
+    let pid = Pid::from_raw(pid as i32);
+    kill(pid, Signal::SIGTERM).expect("kill SIGTERM");
 
     // ─── daemon exits ────────────────────────────────────────────
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -419,23 +423,13 @@ fn sigusr_ignored() {
     assert!(wait_for_file(&socket), "tincd didn't bind socket");
 
     #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
-    let pid = child.id() as libc::pid_t;
+    let pid = Pid::from_raw(child.id() as i32);
 
     // Fire each signal, give the daemon a moment, assert it's still
     // alive. If any disposition is default, the process is gone and
     // try_wait() returns Some with a signal-terminated status.
-    for &sig in &[libc::SIGUSR1, libc::SIGUSR2, libc::SIGWINCH] {
-        // SAFETY: kill(2) on a pid we just spawned and confirmed
-        // alive (wait_for_file). Sending a signal is the test.
-        #[allow(unsafe_code)]
-        unsafe {
-            assert_eq!(
-                libc::kill(pid, sig),
-                0,
-                "kill({sig}) failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+    for &sig in &[Signal::SIGUSR1, Signal::SIGUSR2, Signal::SIGWINCH] {
+        assert!(kill(pid, sig).is_ok(), "kill({sig}) failed");
         std::thread::sleep(Duration::from_millis(100));
         if let Some(status) = child.try_wait().unwrap() {
             panic!("tincd terminated by signal {sig}: {status:?}");
@@ -444,10 +438,7 @@ fn sigusr_ignored() {
 
     // Now SIGTERM should still cleanly stop it (proves the signal
     // machinery wasn't broken by the SIG_IGN installs).
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
+    kill(pid, Signal::SIGTERM).expect("kill SIGTERM");
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
