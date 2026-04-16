@@ -114,6 +114,11 @@ impl MacLeases {
     }
 
     #[must_use]
+    pub fn contains(&self, mac: &Mac) -> bool {
+        self.leases.contains_key(mac)
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.leases.is_empty()
     }

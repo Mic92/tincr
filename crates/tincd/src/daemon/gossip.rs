@@ -1260,25 +1260,23 @@ impl Daemon {
             return Ok(nw);
         }
 
+        // Reject peer claims on MACs we still actively lease.
+        if let Subnet::Mac { addr, .. } = subnet
+            && owner != self.myself
+            && self.mac_leases.contains(&addr)
+        {
+            log::warn!(target: "tincd::proto",
+                "Rejecting ADD_SUBNET from {owner_name} for MAC \
+                 {addr:02x?}: we hold the lease");
+            return Ok(false);
+        }
+
         self.subnets.add(subnet, owner_name.clone());
         self.tx_snap_refresh_subnets();
 
         // mac_table sync for route_mac.rs.
         if let Subnet::Mac { addr, .. } = subnet {
             self.mac_table.insert(addr, owner_name.clone());
-
-            // Fast handoff. Peer learned a MAC we also leased (VM
-            // migrated). Our mac_leases only holds myself's leases,
-            // so refresh()==true IS the "do we own this" check.
-            // refresh(addr,now,0) → expires next age() tick.
-            if owner != self.myself {
-                let now = self.timers.now();
-                if self.mac_leases.refresh(addr, now, 0) {
-                    log::debug!(target: "tincd::proto",
-                        "Fast handoff: peer {owner_name} learned our \
-                         leased MAC {addr:02x?}; expiring ours");
-                }
-            }
         }
 
         // subnet-up only if reachable (else BecameReachable fires it
