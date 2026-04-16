@@ -535,11 +535,11 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
 ///
 /// `fork()` in a multi-threaded program is dangerous: only the
 /// calling thread survives in the child; if any other thread held a
-/// lock at fork time (allocator, log buffer, anything), the child
+/// lock at fork time (allocator, log buffer, libc env lock), the child
 /// inherits the locked state and deadlocks on first touch. The
 /// standard mitigation is `exec()` immediately, before touching
 /// any std/allocator state. The child here does exactly that:
-/// libc-only (`close`, `dup2`, `setsid`, `setenv`, `execvp`,
+/// libc-only (`close`, `dup2`, `setsid`, `execve`,
 /// `_exit`). The `CString` allocations happen in the PARENT before
 /// the fork; the child only borrows their `.as_ptr()`.
 ///
@@ -554,6 +554,7 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
 ///
 /// Interior NUL in `cmd`, `my_name` or `node_name` returns
 /// `InvalidInput` rather than panicking.
+#[allow(clippy::missing_panics_doc)] // unwraps are on NUL-free literals
 pub fn do_outgoing_pipe(
     cmd: &str,
     addr: SocketAddr,
@@ -575,17 +576,35 @@ pub fn do_outgoing_pipe(
         core::ptr::null(),
     ];
 
-    // setenv("REMOTEADDRESS", host); setenv("REMOTEPORT", port);
-    // etc. The child does these post-fork (it has its own env
-    // copy). We pre-format the strings; child setenv's the pointers.
-    let remote_addr = CString::new(addr.ip().to_string()).unwrap();
-    let remote_port = CString::new(addr.port().to_string()).unwrap();
-    let name_env = CString::new(my_name).map_err(|_| nul_err("my_name has interior NUL"))?;
-    let node_env = CString::new(node_name).map_err(|_| nul_err("node_name has interior NUL"))?;
-    let k_remote_addr = CString::new("REMOTEADDRESS").unwrap();
-    let k_remote_port = CString::new("REMOTEPORT").unwrap();
-    let k_name = CString::new("NAME").unwrap();
-    let k_node = CString::new("NODE").unwrap();
+    // Build the full envp BEFORE fork (setenv post-fork is not
+    // async-signal-safe). Inherit parent env, override our four keys.
+    let name_env = CString::new(format!("NAME={my_name}"))
+        .map_err(|_| nul_err("my_name has interior NUL"))?;
+    let node_env = CString::new(format!("NODE={node_name}"))
+        .map_err(|_| nul_err("node_name has interior NUL"))?;
+    let ours = [
+        CString::new(format!("REMOTEADDRESS={}", addr.ip())).unwrap(),
+        CString::new(format!("REMOTEPORT={}", addr.port())).unwrap(),
+        name_env,
+        node_env,
+    ];
+    let override_key = |kv: &[u8]| {
+        ours.iter().any(|o| {
+            let k = &o.as_bytes()[..=o.as_bytes().iter().position(|&b| b == b'=').unwrap()];
+            kv.starts_with(k)
+        })
+    };
+    let mut env_strs: Vec<CString> = std::env::vars_os()
+        .filter_map(|(k, v)| {
+            let mut kv = k.into_encoded_bytes();
+            kv.push(b'=');
+            kv.extend_from_slice(v.as_encoded_bytes());
+            if override_key(&kv) { None } else { CString::new(kv).ok() }
+        })
+        .collect();
+    env_strs.extend(ours);
+    let mut envp: Vec<*const libc::c_char> = env_strs.iter().map(|s| s.as_ptr()).collect();
+    envp.push(core::ptr::null());
 
     // `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`. nix returns the
     // pair already wrapped in `OwnedFd`, so the fork-failure path
@@ -629,19 +648,11 @@ pub fn do_outgoing_pipe(
                 // The proxy script shouldn't get our SIGINT.
                 libc::setsid();
 
-                // setenv. NETNAME omitted (not threaded
-                // through the daemon yet; same as run_script).
-                libc::setenv(k_remote_addr.as_ptr(), remote_addr.as_ptr(), 1);
-                libc::setenv(k_remote_port.as_ptr(), remote_port.as_ptr(), 1);
-                libc::setenv(k_name.as_ptr(), name_env.as_ptr(), 1);
-                libc::setenv(k_node.as_ptr(), node_env.as_ptr(), 1);
+                // execve with pre-built envp; no setenv in the child.
+                // NETNAME omitted (not threaded through yet; same as run_script).
+                libc::execve(sh.as_ptr(), argv.as_ptr(), envp.as_ptr());
 
-                // We use execvp (replaces the process image entirely;
-                // no double-fork from system()'s internal fork).
-                // `/bin/sh -c <cmd>` is what system() does anyway.
-                libc::execvp(sh.as_ptr(), argv.as_ptr());
-
-                // execvp returned → failed. _exit (NOT exit — exit()
+                // execve returned → failed. _exit (NOT exit — exit()
                 // runs atexit handlers, which might allocate).
                 libc::_exit(1);
             }
