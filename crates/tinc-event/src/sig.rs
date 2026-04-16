@@ -152,7 +152,7 @@ impl<W: Copy> SelfPipe<W> {
         // STRICTER: O_CLOEXEC. Without it the pipe leaks into spawned
         // script children — they'd just have an extra unused fd, but
         // it's untidy.
-        let (rd, wr) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
+        let (rd, wr) = Self::pipe_cloexec()?;
 
         // "already initialized?" singleton check.
         let prev = PIPE_WR.swap(wr.as_raw_fd(), Ordering::Relaxed);
@@ -163,6 +163,22 @@ impl<W: Copy> SelfPipe<W> {
             _wr: wr,
             table: [None; NSIG_TABLE],
         })
+    }
+
+    /// `pipe2(O_CLOEXEC)` on Linux; `pipe()` + `fcntl(FD_CLOEXEC)` on macOS.
+    fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            use nix::fcntl::{FdFlag, fcntl, FcntlArg};
+            let (rd, wr) = nix::unistd::pipe()?;
+            fcntl(rd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+            fcntl(wr.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+            Ok((rd, wr))
+        }
     }
 
     /// Read-end fd for `EventLoop::add(..., Io::Read, IoWhat::Signal)`.

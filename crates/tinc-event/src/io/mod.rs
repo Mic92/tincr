@@ -25,6 +25,11 @@ mod epoll;
 #[cfg(target_os = "linux")]
 use epoll::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait};
 
+#[cfg(target_os = "macos")]
+mod kqueue;
+#[cfg(target_os = "macos")]
+use kqueue::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait};
+
 use crate::MAX_EVENTS_PER_TURN;
 
 /// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h:26-27`.
@@ -586,8 +591,10 @@ mod tests {
     }
 
     /// `add` failure rolls back the slot allocation. EEXIST: register
-    /// the same fd twice (epoll rejects).
+    /// the same fd twice (epoll rejects). kqueue silently replaces
+    /// with EV_ADD, so this test is Linux-only.
     #[test]
+    #[cfg(target_os = "linux")]
     fn add_failure_frees_slot() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();
