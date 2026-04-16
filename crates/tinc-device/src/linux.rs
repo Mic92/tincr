@@ -358,6 +358,27 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 
 // ioctls — the third-instance unsafe shims
 
+/// Zeroed `struct ifreq` with `ifr_name` set. The shared prefix of
+/// `tunsetiff` / `siocgifhwaddr`: C's `struct ifreq ifr = {0}` then
+/// `strncpy(ifr.ifr_name, ...)`. One `unsafe` for the `mem::zeroed`,
+/// shared by both ioctl shims.
+///
+/// `libc::ifreq` has no `Default` (the union member blocks derive).
+/// Can't struct-literal (which union variant?). Zeroed-then-assign
+/// is the idiom.
+///
+/// SAFETY (zeroed): `ifreq` is `repr(C)` with no niche. All fields
+/// are integers, byte arrays, or pointers (the `ifru_data: *mut
+/// c_char` union arm — NULL is valid). All-bits-zero is a valid
+/// representation.
+#[allow(unsafe_code)]
+fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
+    // SAFETY: see fn comment.
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    ifr.ifr_name = ifr_name;
+    ifr
+}
+
 /// `TUNSETIFF` — instantiate a TUN/TAP device. Kernel reads `ifr_
 /// flags` and `ifr_name` (may be empty), writes `ifr_name` back
 /// (the actually-assigned name).
@@ -376,19 +397,7 @@ fn tunsetiff(
     flags: i16,
     ifr_name: [libc::c_char; libc::IFNAMSIZ],
 ) -> io::Result<String> {
-    // `libc::ifreq` construction. `MaybeUninit::zeroed()` because
-    // the union has a `*mut c_char` member (`ifru_data`); zeroing
-    // it gives a NULL pointer, which is valid. Can't `Default`
-    // (libc doesn't impl it for unions); can't struct-literal
-    // (union member needs to be set, but which one?). Zeroed-
-    // then-field-assign is the standard `struct ifreq ifr = {0}`
-    // pattern.
-    //
-    // SAFETY (zeroed): `ifreq` is `repr(C)` with no niche. All
-    // fields are integers, byte arrays, or pointers (NULL valid).
-    // All-bits-zero is a valid representation.
-    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-    ifr.ifr_name = ifr_name;
+    let mut ifr = ifreq_with_name(ifr_name);
     // SAFETY (union write): writing `ifru_flags` initializes the
     // union to that variant. Subsequent reads of OTHER variants
     // would be UB; we don't do that. The kernel reads via
@@ -504,10 +513,7 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     // (On a regular socket, `SIOCGIFHWADDR` reads `ifr_name` to
     // pick which interface. TUN/TAP fd is already bound to one
     // interface post-TUNSETIFF; the name is implicit.)
-    //
-    // SAFETY (zeroed): same as `tunsetiff`. All-zero `ifreq` is
-    // valid.
-    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    let mut ifr = ifreq_with_name([0; libc::IFNAMSIZ]);
 
     // SAFETY (ioctl):
     //   - `fd` is the post-TUNSETIFF fd. Valid.
