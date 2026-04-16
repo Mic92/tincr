@@ -31,7 +31,7 @@ impl Daemon {
         // children for free.
         let (sock, peer_sockaddr) = match listener.tcp.accept() {
             Ok(pair) => {
-                crate::set_nosigpipe(pair.0.as_raw_fd());
+                crate::set_nosigpipe(&pair.0);
                 pair
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {

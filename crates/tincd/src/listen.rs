@@ -32,6 +32,9 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
+use crate::bind_to_interface;
+#[cfg(target_os = "linux")]
+use crate::set_int_sockopt;
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -118,78 +121,6 @@ where
             log::warn!(target: "tincd::net", "Can't read back UDP {name}: {e}");
         }
     }
-}
-
-/// `bind_to_interface`. `SO_BINDTODEVICE`. Returns `Err` on failure
-/// (caller closes the socket) — unlike the other sockopts, this is
-/// intentional: see `SockOpts.bind_to_interface`.
-#[cfg(target_os = "linux")]
-pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    let name = std::ffi::OsString::from(iface);
-    setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
-        .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF binds a
-    // socket to a specific interface index.
-    let cname = std::ffi::CString::new(iface)
-        .map_err(|_| io::Error::other(format!("interface name {iface} contains NUL")))?;
-    #[allow(unsafe_code)]
-    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if ifindex == 0 {
-        return Err(io::Error::other(format!("Unknown interface {iface}")));
-    }
-    let val = ifindex as libc::c_int;
-    // IP_BOUND_IF for IPv4, IPV6_BOUND_IF for IPv6.
-    let is_v6 = s.local_addr().map_or(false, |a| a.is_ipv6());
-    let (level, optname) = if is_v6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
-    } else {
-        (libc::IPPROTO_IP, libc::IP_BOUND_IF)
-    };
-    #[allow(unsafe_code)]
-    let rc = unsafe {
-        libc::setsockopt(
-            s.as_raw_fd(),
-            level,
-            optname,
-            std::ptr::from_ref(&val).cast(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc != 0 {
-        Err(io::Error::other(format!("Can't bind to interface {iface}: {}", io::Error::last_os_error())))
-    } else {
-        Ok(())
-    }
-}
-
-/// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
-/// wrap (`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`). Single unsafe site.
-#[cfg(target_os = "linux")]
-pub(crate) fn set_int_sockopt(
-    fd: BorrowedFd<'_>,
-    level: libc::c_int,
-    optname: libc::c_int,
-    val: libc::c_int,
-) -> io::Result<()> {
-    // SAFETY: fd is borrowed (caller owns it); val is a stack c_int
-    // whose address+len we pass for the duration of the call. The
-    // syscall copies out before return.
-    // truncation: size_of::<c_int>() == 4, fits socklen_t.
-    #[allow(unsafe_code, clippy::cast_possible_truncation)]
-    let rc = unsafe {
-        libc::setsockopt(
-            fd.as_raw_fd(),
-            level,
-            optname,
-            (&raw const val).cast::<libc::c_void>(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 /// Raw `getsockopt` sibling of [`set_int_sockopt`]. Test-only readback
@@ -391,7 +322,7 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     // `Socket::new` does `SOCK_CLOEXEC` on Linux/BSD. Same effect
     // as separate `fcntl(F_SETFD, FD_CLOEXEC)`, atomic.
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    crate::set_nosigpipe(s.as_raw_fd());
+    crate::set_nosigpipe(&s);
 
     apply_common_sockopts(&s, domain, opts, "")?;
 

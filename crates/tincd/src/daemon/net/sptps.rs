@@ -1,7 +1,6 @@
 use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
 
 use std::io;
-#[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 
 use crate::compress;
@@ -845,55 +844,8 @@ fn inherit_tos(
     }
 }
 
-/// setsockopt `IP_TOS`/`IPV6_TCLASS`. Sets the DSCP for OUTGOING
-/// UDP datagrams. `is_ipv6`: family of the dest sockaddr.
-///
-/// Log-on-error at debug, never fail — a busy system flipping TOS
-/// per-packet would spam if the kernel ever started rejecting these.
-#[cfg(not(target_os = "linux"))]
+/// setsockopt `IP_TOS`/`IPV6_TCLASS` on the listener's UDP socket.
+/// Thin shim over [`crate::set_udp_tos`] that picks the right fd.
 fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
-    // nix 0.29 only wraps IpTos/Ipv6TClass on Linux. macOS supports
-    // these via raw setsockopt.
-    use std::os::fd::AsRawFd;
-    let val = libc::c_int::from(prio);
-    let (level, optname, label) = if is_ipv6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS, "IPV6_TCLASS")
-    } else {
-        (libc::IPPROTO_IP, libc::IP_TOS, "IP_TOS")
-    };
-    log::debug!(target: "tincd::net",
-                "Setting outgoing packet priority to {prio} ({label})");
-    #[allow(unsafe_code)]
-    let rc = unsafe {
-        libc::setsockopt(
-            l.udp.as_raw_fd(),
-            level,
-            optname,
-            std::ptr::from_ref(&val).cast(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc != 0 {
-        log::debug!(target: "tincd::net",
-                    "setsockopt {label} failed: {}",
-                    io::Error::last_os_error());
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
-    use nix::sys::socket::{setsockopt, sockopt};
-    let val = libc::c_int::from(prio);
-    let (label, res) = if is_ipv6 {
-        ("IPV6_TCLASS", setsockopt(&l.udp.as_fd(), sockopt::Ipv6TClass, &val))
-    } else {
-        ("IP_TOS", setsockopt(&l.udp.as_fd(), sockopt::IpTos, &val))
-    };
-    log::debug!(target: "tincd::net",
-                "Setting outgoing packet priority to {prio} ({label})");
-    if let Err(e) = res {
-        log::debug!(target: "tincd::net",
-                    "setsockopt {label} failed: {}",
-                    io::Error::from(e));
-    }
+    crate::set_udp_tos(l.udp.as_fd(), is_ipv6, prio);
 }

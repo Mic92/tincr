@@ -121,7 +121,7 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     }
     // `bind_to_interface(c->socket)`. Return discarded.
     if let Some(iface) = &sockopts.bind_to_interface
-        && let Err(e) = crate::listen::bind_to_interface(sock, iface)
+        && let Err(e) = crate::bind_to_interface(sock, iface)
     {
         log::warn!(target: "tincd::conn", "{e}");
     }
@@ -158,7 +158,7 @@ pub fn try_connect(
     };
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(s) => {
-            crate::set_nosigpipe(s.as_raw_fd());
+            crate::set_nosigpipe(&s);
             s
         }
         Err(e) => {
@@ -288,7 +288,7 @@ pub fn try_connect_via_proxy(
     };
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(s) => {
-            crate::set_nosigpipe(s.as_raw_fd());
+            crate::set_nosigpipe(&s);
             s
         }
         Err(e) => {

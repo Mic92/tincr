@@ -620,23 +620,7 @@ fn detach() -> Result<(), String> {
     //
     // (nochdir=true, noclose=false): keep cwd (we've resolved
     // paths), close stdio.
-    #[cfg(target_os = "linux")]
-    {
-        nix::unistd::daemon(true, false)
-            .map_err(|e| format!("Couldn't detach from terminal: {e}"))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // nix::unistd::daemon is Linux-only in nix 0.29.
-        // Use libc::daemon directly.
-        #[allow(unsafe_code, deprecated)]
-        let rc = unsafe { libc::daemon(1, 0) };
-        if rc < 0 {
-            Err(format!("Couldn't detach from terminal: {}", std::io::Error::last_os_error()))
-        } else {
-            Ok(())
-        }
-    }
+    tincd::daemonize()
 }
 
 /// `drop_privs()`. Called AFTER `setup_network`
@@ -671,22 +655,13 @@ fn drop_privs(
         // Single-threaded (event loop not started). Username is from
         // argv (UTF-8-validated in parse_args), nul-terminated here.
         let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
-        // nix::unistd::initgroups is not available on Apple targets.
-        // Use libc directly.
-        #[allow(unsafe_code)]
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            let rc = unsafe { libc::initgroups(cuser.as_ptr(), pw.gid.as_raw() as _) };
-            if rc != 0 {
-                return Err(format!("System call `initgroups' failed: {}", std::io::Error::last_os_error()));
-            }
-        }
+        tincd::initgroups(&cuser, pw.gid)
+            .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
         #[cfg(target_os = "linux")]
         nix::unistd::setresgid(pw.gid, pw.gid, pw.gid)
             .map_err(|e| format!("System call `setresgid' failed: {e}"))?;
         #[cfg(not(target_os = "linux"))]
-        nix::unistd::setgid(pw.gid)
-            .map_err(|e| format!("System call `setgid' failed: {e}"))?;
+        nix::unistd::setgid(pw.gid).map_err(|e| format!("System call `setgid' failed: {e}"))?;
 
         Some((pw.uid, pw.gid))
     } else {
@@ -708,8 +683,7 @@ fn drop_privs(
         }
         unsafe { tzset() };
 
-        nix::unistd::chroot(confbase)
-            .map_err(|e| format!("System call `chroot' failed: {e}"))?;
+        nix::unistd::chroot(confbase).map_err(|e| format!("System call `chroot' failed: {e}"))?;
         // `chdir("/")`. Inside the jail now; cwd was
         // outside. Don't leave a handle to outside-the-jail.
         std::env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
@@ -735,8 +709,7 @@ fn drop_privs(
         #[cfg(not(target_os = "linux"))]
         {
             let _ = gid; // gid already set via setgid above
-            nix::unistd::setuid(uid)
-                .map_err(|e| format!("System call `setuid' failed: {e}"))?;
+            nix::unistd::setuid(uid).map_err(|e| format!("System call `setuid' failed: {e}"))?;
         }
     }
 
