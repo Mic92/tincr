@@ -286,6 +286,30 @@ fn finalize_secondary_chunks() {
     assert!(!bob_host.contains("vpn.example"));
 }
 
+/// Chunk-2 is verbatim except `*KeyFile` vars, which name local paths.
+#[test]
+fn finalize_secondary_chunk_drops_file_pointer_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths_at(&dir.path().join("vpn"));
+
+    let sep = invite::SEPARATOR;
+    let blob = format!(
+        "Name = bob\n\
+         {sep}\n\
+         Name = alice\n\
+         Ed25519PublicKeyFile = /etc/shadow\n\
+         ed25519privatekeyfile=/etc/shadow\n\
+         PublicKeyFile = /etc/shadow\n\
+         PrivateKeyFile = /etc/shadow\n\
+         Ed25519PublicKey = AAAA\n\
+         Address = vpn.example\n"
+    );
+    finalize_join(blob.as_bytes(), &p, false).unwrap();
+
+    let alice = fs::read_to_string(p.host_file("alice")).unwrap();
+    assert_eq!(alice, "Ed25519PublicKey = AAAA\nAddress = vpn.example\n");
+}
+
 /// Secondary chunk with our own name → bail. Malicious inviter
 /// trying to clobber our host file.
 ///
