@@ -21,6 +21,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// Hard cap on cache entries. At the cap, [`SeenRequests::check`]
+/// reports unseen lines as duplicates: drop, don't forward — refuse
+/// to amplify the flood that filled the cache. 4096 × ~2KB ≈ 8MB.
+pub const SEEN_CAP: usize = 4096;
+
 /// Dedup cache. Key = full wire line.
 pub struct SeenRequests {
     cache: HashMap<String, Instant>,
@@ -42,6 +47,10 @@ impl SeenRequests {
     /// `past_request_t p` for the lookup, `xstrdup` on miss only.
     pub fn check(&mut self, line: &str, now: Instant) -> bool {
         if self.cache.contains_key(line) {
+            return true;
+        }
+        if self.cache.len() >= SEEN_CAP {
+            // Refuse insert, report as seen. Next `age()` frees room.
             return true;
         }
         self.cache.insert(line.to_owned(), now);
@@ -146,6 +155,21 @@ mod tests {
         let t1 = t0 + Duration::from_secs(61);
         s.age(t1, Duration::from_secs(60));
         assert!(!s.check(ADD_EDGE, t1));
+    }
+
+    #[test]
+    fn check_refuses_past_cap() {
+        let mut s = SeenRequests::new();
+        let now = Instant::now();
+        for i in 0..SEEN_CAP {
+            assert!(!s.check(&format!("12 {i:x} a b"), now));
+        }
+        assert!(s.check("12 ffffffff brand new", now));
+        assert!(s.check("12 0 a b", now));
+        let (_, left) = s.age(now, Duration::from_secs(3600));
+        assert_eq!(left, SEEN_CAP);
+        s.age(now + Duration::from_secs(3601), Duration::from_secs(60));
+        assert!(!s.check("12 ffffffff brand new", now));
     }
 
     #[test]
