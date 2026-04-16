@@ -119,7 +119,7 @@ impl Daemon {
             // `send` formats straight to outbuf.
             nw |= conn.send(format_args!(
                 "{} {} {len}",
-                tinc_proto::Request::Control as u8,
+                tinc_proto::Request::Control,
                 crate::proto::REQ_PCAP
             ));
             // Raw body, no `\n`. `send` is infallible (queues to

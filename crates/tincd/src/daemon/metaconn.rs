@@ -11,8 +11,8 @@ use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::invitation_serve::InvitePhase;
 use crate::outgoing::{OutgoingId, ProxyConfig};
 use crate::proto::{
-    DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id, record_body,
-    send_ack,
+    CtlReq, DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
+    record_body, send_ack,
 };
 use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
@@ -315,7 +315,7 @@ impl Daemon {
         &mut self,
         id: ConnId,
         rows: Vec<String>,
-        req: i32,
+        req: CtlReq,
     ) -> (DispatchResult, bool) {
         let conn = self.conn_mut(id);
         let nw = conn.send_dump(rows, req);
@@ -323,9 +323,9 @@ impl Daemon {
     }
 
     /// Simple-ack tail: `"{Control} {req} {result}"`.
-    fn ctl_ack(&mut self, id: ConnId, req: i32, result: i32) -> (DispatchResult, bool) {
+    fn ctl_ack(&mut self, id: ConnId, req: CtlReq, result: i32) -> (DispatchResult, bool) {
         let conn = self.conn_mut(id);
-        let nw = conn.send(format_args!("{} {} {}", Request::Control as u8, req, result));
+        let nw = conn.send(format_args!("{} {} {}", Request::Control, req, result));
         (DispatchResult::Ok, nw)
     }
 
@@ -342,7 +342,7 @@ impl Daemon {
                 .map(|(subnet, owner)| {
                     format!(
                         "{} {} {} {}",
-                        Request::Control as u8,
+                        Request::Control,
                         crate::proto::REQ_DUMP_SUBNETS,
                         subnet,
                         owner
@@ -364,7 +364,7 @@ impl Daemon {
                     // hostname is the fused "host port port" string.
                     format!(
                         "{} {} {} {} {:x} {} {:x}",
-                        Request::Control as u8,
+                        Request::Control,
                         crate::proto::REQ_DUMP_CONNECTIONS,
                         c.name,
                         c.hostname,
@@ -654,7 +654,7 @@ impl Daemon {
                         Request::MtuInfo => self.on_mtu_info(id, body),
                         Request::Ping => {
                             let conn = self.conn_mut(id);
-                            Ok(conn.send(format_args!("{}", Request::Pong as u8)))
+                            Ok(conn.send(format_args!("{}", Request::Pong)))
                         }
                         Request::Pong => {
                             let conn = self.conn_mut(id);
