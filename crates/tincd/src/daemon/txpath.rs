@@ -41,7 +41,10 @@ use nix::sys::socket::{
 /// Falls back to `MTU` on every error.
 #[cfg(not(target_os = "linux"))]
 fn choose_initial_maxmtu(_peer: SocketAddr) -> u16 {
-    // macOS: no IP_MTU sockopt. Use default MTU.
+    // macOS has no IP_MTU sockopt to query the kernel's PMTU cache.
+    // Fall back to default MTU; the PMTU probing loop in pmtu.rs will
+    // converge to the real path MTU within ~10 probes × 333ms. This
+    // costs one extra RTT vs Linux where we seed from the kernel cache.
     MTU
 }
 

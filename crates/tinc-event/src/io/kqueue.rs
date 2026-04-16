@@ -163,7 +163,10 @@ pub(super) fn wait(
         tv_sec: d.as_secs() as libc::time_t,
         tv_nsec: d.subsec_nanos() as libc::c_long,
     });
-    // SAFETY: RawEvent is repr(transparent) over KEvent.
+    // SAFETY: RawEvent is #[repr(transparent)] over KEvent, so the
+    // slice layout is identical. std::mem::transmute can't handle
+    // unsized slices; this cast is the canonical pattern for
+    // repr(transparent) newtype slices (same as nix's own wrappers).
     #[allow(unsafe_code)]
     let kevents = unsafe {
         std::slice::from_raw_parts_mut(events.as_mut_ptr().cast::<KEvent>(), events.len())
