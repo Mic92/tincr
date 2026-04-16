@@ -424,6 +424,14 @@ pub fn handle_id(
         return id_control(conn, cookie, ctx, now);
     }
     if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
+        // Invitations are accept-side only; an outgoing ConnectTo peer
+        // answering `?` is impersonating a joiner.
+        if conn.outgoing.is_some() {
+            return Err(DispatchError::BadId(format!(
+                "invitation greeting on outgoing connection ({})",
+                conn.hostname
+            )));
+        }
         return id_invitation(conn, throwaway_b64, ctx, rng);
     }
 
