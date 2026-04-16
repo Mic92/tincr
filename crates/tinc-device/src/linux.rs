@@ -49,7 +49,9 @@ use std::os::unix::io::{AsRawFd, RawFd};
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
-use crate::{Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode};
+use crate::{
+    Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode, read_fd, write_fd,
+};
 
 /// The kernel's TUN/TAP multiplexer. Opening it doesn't give you a
 /// device; `TUNSETIFF` does. The fd is just a handle into the driver until then.
@@ -794,59 +796,6 @@ impl Device for Tun {
             }
         }
     }
-}
-
-// read/write — direct syscalls, not File::read
-
-// Direct `libc::read`/`write` instead of `File::read`: TUN is a
-// datagram device (one read = one packet, no retry on short read).
-// `File::read` is correct (thin `read(2)` wrapper) but doesn't
-// document the datagram semantics. The syscall IS the documentation.
-
-/// `read(2)` on the TUN fd. Datagram semantics: one read = one
-/// packet, atomic. Kernel-side `tun_chr_read_iter` dequeues one
-/// `skb`, copies, returns. Never short except on truncation
-/// (packet > buf, then `len` returned but only `buf.len()` copied
-/// — that's `MSG_TRUNC` semantics without the flag).
-#[allow(unsafe_code)]
-fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    // SAFETY:
-    //   - `fd` is a valid open fd (the `Tun` struct owns the
-    //     `File`; `File`'s drop closes; we're called from `&mut
-    //     Tun` so the `File` is alive).
-    //   - `buf.as_mut_ptr()` points to `buf.len()` writable bytes.
-    //     The slice borrow is exclusive (`&mut`); no aliasing.
-    //   - Kernel writes at most `buf.len()` bytes (the third arg
-    //     is the cap).
-    //   - Thread-safety: `read(2)` is atomic per call. Concurrent
-    //     reads on the same fd would each get a packet (kernel
-    //     locks the queue). We're `&mut self`, so no concurrent
-    //     calls from Rust. (Another process with a dup'd fd could
-    //     race; not our problem.)
-    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // ret ≥ 0 checked above; ssize_t→usize preserves value
-    Ok(ret as usize)
-}
-
-/// `write(2)` on the TUN fd. Datagram: one write = one packet.
-/// Kernel `tun_chr_write_iter` allocs an `skb`, copies, queues.
-/// Atomic; never short (`EFAULT` on bad pointer, `EINVAL` on too-
-/// large; whole-packet or error).
-#[allow(unsafe_code)]
-fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    // SAFETY: same as `read_fd`, but the kernel READS from us.
-    //   - `buf.as_ptr()` points to `buf.len()` readable bytes.
-    //   - Kernel reads exactly `buf.len()` (third arg).
-    //   - No mutation; `&[u8]` is correct.
-    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
 }
 
 // Tests — what we CAN test without CAP_NET_ADMIN

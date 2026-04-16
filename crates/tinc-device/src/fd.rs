@@ -32,7 +32,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode};
+use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 
 // FdSource — the union type the config-string dispatch implies
 
@@ -419,45 +419,6 @@ impl Device for FdTun {
     }
 }
 
-// read/write — same as linux.rs, but module-private
-//
-// These are duplicates of `linux.rs::{read_fd, write_fd}`. NOT
-// shared. The "re-declare module-private constants when modules
-// are independent" rule generalizes: re-declare module-private
-// FNS when modules are independent. `linux.rs` and `fd.rs` are
-// independent backends; they happen to call read(2)/write(2) the
-// same way today. Factoring would couple them.
-//
-// (If a third backend needs these, then maybe a `syscall` module.
-// Two instances is not a pattern.)
-
-/// `read(2)` on the fd. Datagram semantics: one read = one packet.
-/// Same as `linux.rs::read_fd`. See there for the SAFETY argument.
-#[allow(unsafe_code)]
-fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    // SAFETY: `fd` is the FdTun's owned fd (alive while &mut
-    // FdTun is borrowed). `buf` is exclusive `&mut`. Kernel
-    // writes at most `buf.len()` bytes.
-    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
-}
-
-/// `write(2)` on the fd. Same as `linux.rs::write_fd`.
-#[allow(unsafe_code)]
-fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    // SAFETY: same as read_fd, but kernel reads from us.
-    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
-}
-
 // Tests — pure fns + pipe-based integration
 
 #[cfg(test)]
@@ -790,20 +751,9 @@ mod tests {
     fn write_all(fd: &impl AsRawFd, buf: &[u8]) {
         let mut off = 0;
         while off < buf.len() {
-            // SAFETY: fd valid (held by &PipeFd), buf is &[u8].
-            #[allow(unsafe_code)]
-            let ret = unsafe {
-                libc::write(
-                    fd.as_raw_fd(),
-                    buf.as_ptr().add(off).cast(),
-                    buf.len() - off,
-                )
-            };
+            let ret = write_fd(fd.as_raw_fd(), &buf[off..]).expect("write failed");
             assert!(ret > 0, "write failed");
-            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
-            {
-                off += ret as usize;
-            }
+            off += ret;
         }
     }
 
@@ -811,14 +761,9 @@ mod tests {
     fn read_exact_n(fd: &impl AsRawFd, buf: &mut [u8], n: usize) -> usize {
         let mut off = 0;
         while off < n {
-            #[allow(unsafe_code)]
-            let ret =
-                unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().add(off).cast(), n - off) };
-            assert!(ret > 0, "read failed or EOF");
-            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
-            {
-                off += ret as usize;
-            }
+            let ret = read_fd(fd.as_raw_fd(), &mut buf[off..n]).expect("read failed");
+            assert!(ret > 0, "read EOF");
+            off += ret;
         }
         off
     }

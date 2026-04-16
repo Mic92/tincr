@@ -44,7 +44,7 @@ use std::io;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode};
+use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 
 // Constants — the +10 prefix length
 
@@ -439,56 +439,6 @@ impl BsdTun {
              see bsd.rs block comment for the per-variant plan)",
         ))
     }
-}
-
-// read/write — module-private, the FOURTH instance
-//
-// Fourth `read_fd`/`write_fd`. `linux.rs`, `fd.rs`, `raw.rs` are
-// `cfg(linux)`; this is `cfg(unix)` (compiles on Linux for tests
-// AND on BSD for production). The cfg-boundary rule from `ed9af4fb`
-// said "they never compile together" — that was true for raw vs
-// linux/fd. NOT TRUE for bsd vs the other three: this file
-// compiles on Linux (for the tests).
-//
-// SO: this IS the file where the cfg boundary doesn't separate.
-// On a Linux build, `linux::read_fd`, `fd::read_fd`, `raw::
-// read_fd`, `bsd::read_fd` ALL exist.
-//
-// Still don't factor. Four 8-line fns, all module-private, all
-// SAFETY-argued in their own context. The factoring would be a
-// `#[allow(unsafe_code)] fn` in `lib.rs` that EVERY backend
-// reaches — the `forbid(unsafe_code)` boundary becomes "the
-// whole crate." Right now the unsafe is scoped to each backend
-// module. The 32 LOC of duplication BUYS that scoping. Worth it.
-//
-// (When `lib.rs` itself needs raw read/write — say, a benchmark
-// harness or a `Dummy` variant that actually does I/O — THAT'S
-// the factoring trigger. Not "fourth instance.")
-
-/// `read(2)`. BSD TUN/utun fds are datagram (one read = one
-/// frame). Same as the other three; same SAFETY argument.
-#[allow(unsafe_code)]
-fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    // SAFETY: `fd` is the BsdTun's owned fd (alive while &mut
-    // BsdTun borrowed). `buf` is exclusive `&mut`.
-    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
-}
-
-/// `write(2)`. Same.
-#[allow(unsafe_code)]
-fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    // SAFETY: same as read_fd.
-    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
 }
 
 // Tests — three offsets, on Linux

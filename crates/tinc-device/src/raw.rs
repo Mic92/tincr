@@ -30,7 +30,7 @@
 use std::io;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
-use crate::{Device, MTU, Mac, Mode};
+use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 
 // Constants — kernel ABI, sed-verified
 
@@ -296,56 +296,6 @@ impl Device for RawSocket {
     fn fd(&self) -> Option<RawFd> {
         Some(self.fd.as_raw_fd())
     }
-}
-
-// read/write — module-private duplicates
-//
-// THIRD instance of read_fd/write_fd. The "two is not a pattern"
-// rule from `fd.rs` was about TWO instances. Three IS a pattern.
-//
-// BUT: factoring would couple `linux.rs`, `fd.rs`, `raw.rs` —
-// three independent backends. The duplication is 8 lines per fn,
-// 16 LOC per backend, 48 LOC total. The coupling cost: a shared
-// `syscall` module that all three depend on, where a change to
-// the shared module ripples to all three.
-//
-// The decision: STILL don't factor. The "re-declare module-
-// private when modules are independent" rule WINS over "three
-// is a pattern." The independence is more valuable than the 48
-// LOC. WHEN we add a fourth backend AND it's NOT independent
-// (e.g., it shares state with another backend), the calculus
-// changes. NOT YET.
-//
-// (The `multicast_device.c` backend, if ported, WOULD share
-// state — it's a UDP socket like the daemon's listen sockets.
-// THAT'S when the factoring discussion reopens. Noted; deferred.)
-
-/// `read(2)` on the fd. Same as the other two; see `linux.rs`
-/// for the SAFETY argument. `PF_PACKET` sockets ARE datagram (one
-/// read = one frame, atomic) like TUN — the "the syscall IS the
-/// documentation" argument applies.
-#[allow(unsafe_code)]
-fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    // SAFETY: `fd` is the RawSocket's owned fd (alive while
-    // &mut RawSocket borrowed). `buf` is exclusive `&mut`.
-    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
-}
-
-/// `write(2)`. Same.
-#[allow(unsafe_code)]
-fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    // SAFETY: same as read_fd.
-    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    Ok(ret as usize)
 }
 
 // Tests — constants + open-gate + +0 via socketpair

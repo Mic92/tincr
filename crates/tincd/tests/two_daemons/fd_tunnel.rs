@@ -32,37 +32,25 @@ fn set_nonblocking(fd: &OwnedFd) {
 }
 
 pub(crate) fn write_fd(fd: &OwnedFd, buf: &[u8]) {
-    let fd = fd.as_raw_fd();
-    // SAFETY: write(2) on a valid fd. SEQPACKET is one-shot (no
-    // short writes for in-flight datagrams).
-    let ret = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-    assert!(
-        ret >= 0,
-        "write fd={fd}: {}",
-        std::io::Error::last_os_error()
-    );
-    #[allow(clippy::cast_sign_loss)] // guarded by ret >= 0 above
-    let wrote = ret as usize;
-    assert_eq!(wrote, buf.len(), "short write fd={fd}");
+    // SEQPACKET is one-shot (no short writes for in-flight datagrams).
+    let wrote =
+        nix::unistd::write(fd, buf).unwrap_or_else(|e| panic!("write fd={}: {e}", fd.as_raw_fd()));
+    assert_eq!(wrote, buf.len(), "short write fd={}", fd.as_raw_fd());
 }
 
 /// Non-blocking read; `None` on EAGAIN. The poll loop wraps this.
 pub(crate) fn read_fd_nb(fd: &OwnedFd) -> Option<Vec<u8>> {
-    let fd = fd.as_raw_fd();
+    let raw = fd.as_raw_fd();
     let mut buf = vec![0u8; 2048];
-    // SAFETY: read(2) on a valid fd into our buffer.
-    let ret = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            return None;
+    match nix::unistd::read(raw, &mut buf) {
+        Ok(0) => panic!("read fd={raw}: EOF (peer closed)"),
+        Ok(n) => {
+            buf.truncate(n);
+            Some(buf)
         }
-        panic!("read fd={fd}: {e}");
+        Err(nix::errno::Errno::EAGAIN) => None,
+        Err(e) => panic!("read fd={raw}: {e}"),
     }
-    assert!(ret != 0, "read fd={fd}: EOF (peer closed)");
-    #[allow(clippy::cast_sign_loss)] // guarded by ret < 0 check above
-    buf.truncate(ret as usize);
-    Some(buf)
 }
 
 /// Minimal IPv4 packet: 20-byte header + payload. Only the fields

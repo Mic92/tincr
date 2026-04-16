@@ -246,6 +246,32 @@ impl Device for Dummy {
     }
 }
 
+// read/write — shared syscall shims for all backends
+//
+// Thin `read(2)`/`write(2)` wrappers via `nix::unistd`. All backends
+// (linux/fd/raw/bsd) operate on datagram-style fds where one read =
+// one packet and one write = one packet, so no retry/short-handling
+// here — callers treat the count as the packet length. nix's `Errno`
+// converts to `io::Error` with identical `last_os_error` semantics.
+
+/// `read(2)`. Datagram semantics: one call = one packet.
+#[inline]
+#[cfg(unix)]
+pub(crate) fn read_fd(fd: std::os::unix::io::RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    nix::unistd::read(fd, buf).map_err(Into::into)
+}
+
+/// `write(2)`. Datagram semantics: one call = one packet.
+#[inline]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) fn write_fd(fd: std::os::unix::io::RawFd, buf: &[u8]) -> io::Result<usize> {
+    // SAFETY: callers pass an fd they own (held by the backend struct
+    // for the duration of the borrow). `BorrowedFd` does not close.
+    let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    nix::unistd::write(bfd, buf).map_err(Into::into)
+}
+
 // Linux TUN/TAP — `linux/device.c` (225 LOC)
 
 #[cfg(target_os = "linux")]

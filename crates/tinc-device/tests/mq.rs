@@ -182,16 +182,10 @@ fn mq_vnet_hdr_on_queue0() {
         let mut buf = vec![0u8; 70_000]; // 64KB TSO + slack
         while !echo_stop.load(Ordering::Relaxed) {
             for fd in &echo_fds {
-                let fd = fd.as_raw_fd();
-                // SAFETY: fd is a valid open dup; read into our buf.
-                // O_NONBLOCK → EAGAIN when empty (n < 0, skip).
-                #[allow(unsafe_code)]
-                let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-                if n <= 0 {
+                // O_NONBLOCK → EAGAIN when empty (Err, skip).
+                let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
                     continue;
-                }
-                #[allow(clippy::cast_sign_loss)]
-                let n = n as usize;
+                };
                 if n < VNET_HDR_LEN + 20 {
                     continue; // too short for vnet_hdr + IPv4 header
                 }
@@ -229,11 +223,7 @@ fn mq_vnet_hdr_on_queue0() {
                         buf.copy_within(tcp + 2..tcp + 4, tcp);
                         buf[tcp + 2..tcp + 4].copy_from_slice(&tmp2);
                     }
-                    // SAFETY: fd valid, buf[..n] initialized.
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        libc::write(fd, buf.as_ptr().cast(), n);
-                    }
+                    let _ = nix::unistd::write(fd, &buf[..n]);
                 }
             }
             std::thread::sleep(Duration::from_micros(100));
