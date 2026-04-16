@@ -46,13 +46,12 @@
 //! `Daemon::setup` which merges them with `Source::Cmdline`; the
 //! 4-tuple sort in `tinc-conf::Config` makes cmdline beat file.
 
-// detach/mlockall/setpriority/drop_privs are libc one-liners. The
-// nix crate covers most, but `daemon(3)` is `#[cfg(not(apple))]`
-// there and `setpriority`'s arg types vary by libc target (gnu uses
-// __priority_which_t=c_uint, musl/bsd use c_int). Going through libc
-// directly with explicit `as _` casts keeps the call sites portable
-// without a cfg ladder. Four unsafe blocks, all single-syscall, all
-// next to a process.c/tincd.c line ref.
+// detach/mlockall/drop_privs go through nix's safe wrappers
+// (`daemon`/`initgroups`/`chroot`/`setgid`/`setuid`). Remaining
+// unsafe: `setpriority` (nix 0.29 has no wrapper; arg types vary by
+// libc target — gnu uses __priority_which_t=c_uint, musl/bsd c_int —
+// so the raw call with `as _` is the portable form) and `tzset`
+// (POSIX TZ-cache load, not bound by the libc crate on unix).
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
@@ -618,21 +617,16 @@ fn detach() -> Result<(), String> {
     // (daemon/setup.rs); they no longer dump state — that moved
     // to the control socket in tinc 1.1.
 
-    // SAFETY: `daemon(3)` forks; the child returns 0, the parent
-    // calls `_exit(0)` inside libc. Single-threaded at this point
+    // `daemon(3)` forks; the child returns 0, the parent calls
+    // `_exit(0)` inside libc. Single-threaded at this point
     // (env_logger isn't initialized yet, no async runtime). The
     // only thread is this one. Post-fork the child is a fresh
     // single-threaded process — safe to keep going.
     //
-    // (1, 0): keep cwd (we've resolved paths), close stdio.
-    let r = unsafe { libc::daemon(1, 0) };
-    if r != 0 {
-        return Err(format!(
-            "Couldn't detach from terminal: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
+    // (nochdir=true, noclose=false): keep cwd (we've resolved
+    // paths), close stdio.
+    nix::unistd::daemon(true, false)
+        .map_err(|e| format!("Couldn't detach from terminal: {e}"))
 }
 
 /// `drop_privs()`. Called AFTER `setup_network`
@@ -663,20 +657,12 @@ fn drop_privs(
         // || setgid(pw->pw_gid)`. initgroups sets supplementary
         // groups from /etc/group; setgid sets the primary.
         //
-        // SAFETY: `initgroups(3)` modifies the process's group list.
+        // `initgroups(3)` modifies the process's group list.
         // Single-threaded (event loop not started). Username is from
         // argv (UTF-8-validated in parse_args), nul-terminated here.
-        // The gid type varies (c_int on macOS, gid_t elsewhere);
-        // `as _` lets the compiler pick.
         let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
-        let gid: libc::gid_t = pw.gid.as_raw();
-        let r = unsafe { libc::initgroups(cuser.as_ptr(), gid as _) };
-        if r != 0 {
-            return Err(format!(
-                "System call `initgroups' failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        nix::unistd::initgroups(&cuser, pw.gid)
+            .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
         nix::unistd::setgid(pw.gid).map_err(|e| format!("System call `setgid' failed: {e}"))?;
 
         Some(pw.uid)
@@ -699,17 +685,8 @@ fn drop_privs(
         }
         unsafe { tzset() };
 
-        let confbase_c = CString::new(confbase.as_os_str().as_encoded_bytes())
-            .map_err(|_| "confbase contains NUL".to_string())?;
-        // SAFETY: chroot(2). Single syscall, we're root (or it fails
-        // and we report).
-        let r = unsafe { libc::chroot(confbase_c.as_ptr()) };
-        if r != 0 {
-            return Err(format!(
-                "System call `chroot' failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        nix::unistd::chroot(confbase)
+            .map_err(|e| format!("System call `chroot' failed: {e}"))?;
         // `chdir("/")`. Inside the jail now; cwd was
         // outside. Don't leave a handle to outside-the-jail.
         std::env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
