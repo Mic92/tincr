@@ -388,6 +388,9 @@ pub fn tso_split(
     // daemon may want to inspect for debugging). Instead: copy the
     // header into a stack buffer, clear THAT, copy from there.
     let mut hdr_buf = [0u8; 60 + 60]; // max IPv6 hdr + max TCP hdr
+    if hdr_len > hdr_buf.len() || csum_at + 2 > hdr_buf.len() {
+        return Err(TsoError::TooShort);
+    }
     hdr_buf[..hdr_len].copy_from_slice(&pkt[..hdr_len]);
     if !is_v6 {
         // wg-go `:906`: zero IPv4 header checksum. It's recomputed
