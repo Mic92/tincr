@@ -1001,10 +1001,9 @@ impl Daemon {
 
                             // Stay open (joiner closes; we EOF
                             // normally). Don't terminate — type-2
-                            // still in outbuf. Set invite back to a
-                            // rejecting phase so stray records die
-                            // cleanly.
-                            conn.invite = Some(InvitePhase::WaitingCookie);
+                            // still in outbuf. Terminal phase: any
+                            // further record hits the catch-all arm.
+                            conn.invite = Some(InvitePhase::Done);
                         }
 
                         (rt, ph) => {

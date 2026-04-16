@@ -39,6 +39,8 @@ pub enum InvitePhase {
     /// `c->status.invitation_used = true`. Carries `.used` path for
     /// the post-`finalize` unlink (`:305`).
     WaitingPubkey { name: String, used_path: PathBuf },
+    /// Post-ACK terminal state; any further record terminates the conn.
+    Done,
 }
 
 #[derive(Debug, thiserror::Error)]
