@@ -673,9 +673,10 @@ fn drop_privs(
         let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
         nix::unistd::initgroups(&cuser, pw.gid)
             .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
-        nix::unistd::setgid(pw.gid).map_err(|e| format!("System call `setgid' failed: {e}"))?;
+        nix::unistd::setresgid(pw.gid, pw.gid, pw.gid)
+            .map_err(|e| format!("System call `setresgid' failed: {e}"))?;
 
-        Some(pw.uid)
+        Some((pw.uid, pw.gid))
     } else {
         None
     };
@@ -702,9 +703,20 @@ fn drop_privs(
         std::env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
     }
 
-    // setuid LAST. After this we can't undo.
-    if let Some(uid) = uid_gid {
-        nix::unistd::setuid(uid).map_err(|e| format!("System call `setuid' failed: {e}"))?;
+    // setresuid LAST (real, effective, saved). After this we can't undo.
+    if let Some((uid, gid)) = uid_gid {
+        nix::unistd::setresuid(uid, uid, uid)
+            .map_err(|e| format!("System call `setresuid' failed: {e}"))?;
+
+        // Verify the kernel applied the drop to all three of each.
+        let ru = nix::unistd::getresuid().map_err(|e| format!("getresuid: {e}"))?;
+        let rg = nix::unistd::getresgid().map_err(|e| format!("getresgid: {e}"))?;
+        if ru.real != uid || ru.effective != uid || ru.saved != uid {
+            return Err(format!("setresuid did not stick: got {ru:?}, want {uid}"));
+        }
+        if rg.real != gid || rg.effective != gid || rg.saved != gid {
+            return Err(format!("setresgid did not stick: got {rg:?}, want {gid}"));
+        }
     }
 
     // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`.
