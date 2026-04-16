@@ -61,6 +61,23 @@ const CHUNK2_DROP_KEYS: &[&str] = &[
 // the line iterator). Upstream is 400 lines for the same reason; it
 // does it with goto.
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
+    let mut created: Vec<std::path::PathBuf> = Vec::new();
+    let r = finalize_join_inner(data, paths, force, &mut created);
+    if r.is_err() {
+        // Best-effort rollback of files this run created.
+        for p in created.iter().rev() {
+            let _ = fs::remove_file(p);
+        }
+    }
+    r
+}
+
+fn finalize_join_inner(
+    data: &[u8],
+    paths: &Paths,
+    force: bool,
+    created: &mut Vec<std::path::PathBuf>,
+) -> Result<JoinResult, CmdError> {
     // ─── Validate blob is text
     // Upstream treats `data` as a NUL-terminated C string. Embedded
     // NUL would truncate the parser silently. We accept any UTF-8
@@ -136,17 +153,20 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     // matching upstream's write order. Close `f` (tinc.conf) right
     // after chunk 1.
     let mut f = create_nofollow(&tinc_conf)?;
+    created.push(tinc_conf.clone());
     // FIRST line of tinc.conf. Everything else is appended below.
     writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
 
     let host_file = paths.host_file(&name);
     let mut fh = create_nofollow(&host_file)?;
+    created.push(host_file.clone());
 
     // `invitation-data` — the raw blob, for debugging "what did the
     // daemon send?". Write the whole thing now; nothing reads it
     // programmatically.
     let inv_data_path = paths.confbase.join("invitation-data");
     fs::write(&inv_data_path, data).map_err(io_err(&inv_data_path))?;
+    created.push(inv_data_path);
 
     // ─── Chunk 1: filter through variables[]
     // The hand-rolled tokenizer again (sixth instance). We use
@@ -271,6 +291,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
 
         let host_path = paths.host_file(host_name);
         let mut hf = create_nofollow(&host_path)?;
+        created.push(host_path.clone());
         hosts_written.push(host_name.to_owned());
 
         // Inner loop: lines until next `Name = X` or EOF.
@@ -330,6 +351,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
             opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let f = opts.open(&priv_path).map_err(io_err(&priv_path))?;
+        created.push(priv_path.clone());
         let mut w = std::io::BufWriter::new(f);
         tinc_conf::pem::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob())
             .map_err(io_err(&priv_path))?;
@@ -344,7 +366,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     // Same content as `init`'s placeholder. The `Ifconfig`/`Route`
     // lines from chunk 1 would have populated this with real
     // commands; we write the "edit me" comment instead.
-    write_tinc_up_placeholder(paths)?;
+    write_tinc_up_placeholder(paths, created)?;
 
     Ok(JoinResult {
         name,
@@ -359,7 +381,10 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
 /// different surrounding context (init is the only writer; join might
 /// later grow ifconfig integration that writes a *different* body).
 /// Dead-code rule applies: unify when there's a third caller.
-fn write_tinc_up_placeholder(paths: &Paths) -> Result<(), CmdError> {
+fn write_tinc_up_placeholder(
+    paths: &Paths,
+    created: &mut Vec<std::path::PathBuf>,
+) -> Result<(), CmdError> {
     let path = paths.tinc_up();
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -369,6 +394,7 @@ fn write_tinc_up_placeholder(paths: &Paths) -> Result<(), CmdError> {
         opts.mode(0o755);
     }
     let mut f = opts.open(&path).map_err(io_err(&path))?;
+    created.push(path.clone());
     // Same body as init.
     writeln!(f, "#!/bin/sh").map_err(io_err(&path))?;
     writeln!(f, "echo 'Unconfigured tinc-up script, please edit '$0'!'").map_err(io_err(&path))?;

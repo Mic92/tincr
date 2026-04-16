@@ -338,6 +338,10 @@ Ed25519PublicKey = EVIL
         panic!()
     };
     assert!(msg.contains("overwrite our own"));
+    // Rollback: files created before the error are removed.
+    assert!(!p.tinc_conf().exists());
+    assert!(!p.host_file("bob").exists());
+    assert!(!p.host_file("alice").exists());
 }
 
 /// First line not `Name = X` → bail.
