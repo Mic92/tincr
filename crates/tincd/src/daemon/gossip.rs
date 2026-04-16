@@ -1283,7 +1283,7 @@ impl Daemon {
         // later).
         let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
         if reachable {
-            self.run_subnet_script(true, &owner_name, &subnet);
+            self.run_subnet_script_async(true, &owner_name, &subnet);
         }
 
         // seen.check above prevents the loop.
@@ -1381,7 +1381,7 @@ impl Daemon {
 
         let reachable = self.graph.node(owner).is_some_and(|n| n.reachable);
         if reachable {
-            self.run_subnet_script(false, &owner_name, &subnet);
+            self.run_subnet_script_async(false, &owner_name, &subnet);
         }
 
         // mac_table sync; only remove if owner matches (defensive).

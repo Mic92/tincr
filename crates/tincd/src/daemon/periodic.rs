@@ -141,6 +141,9 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
+        // collect any exited detached hook scripts (script::spawn)
+        script::reap_children();
+
         // re-arm +1s
         self.timers.set(self.pingtimer, Duration::from_secs(1));
     }
@@ -289,6 +292,15 @@ impl Daemon {
     /// `BecameReachable`. We always pass the weight integer (more
     /// useful than an empty string; scripts guard anyway).
     pub(super) fn run_subnet_script(&self, up: bool, owner: &str, subnet: &Subnet) {
+        self.run_subnet_script_impl(up, owner, subnet, false);
+    }
+
+    /// [`run_subnet_script`] without waiting; for gossip-driven bulk fires.
+    pub(super) fn run_subnet_script_async(&self, up: bool, owner: &str, subnet: &Subnet) {
+        self.run_subnet_script_impl(up, owner, subnet, true);
+    }
+
+    fn run_subnet_script_impl(&self, up: bool, owner: &str, subnet: &Subnet, detach: bool) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
         env.add("NODE", owner.to_owned());
         // REMOTEADDRESS/REMOTEPORT only if owner != myself
@@ -310,7 +322,8 @@ impl Daemon {
 
         let name = if up { "subnet-up" } else { "subnet-down" };
         let interp = self.settings.scripts_interpreter.as_deref();
-        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
+        let run = if detach { script::spawn } else { script::execute };
+        Self::log_script(name, run(&self.confbase, name, &env, interp));
     }
 
     /// host-up/down AND hosts/NAME-up/down. `addr` None →
@@ -335,7 +348,7 @@ impl Daemon {
     /// Script outcome logging.
     pub(super) fn log_script(name: &str, r: io::Result<ScriptResult>) {
         match r {
-            Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
+            Ok(ScriptResult::NotFound | ScriptResult::Ok | ScriptResult::Spawned) => {}
             // Log Sandboxed at debug so an operator who wonders why
             // their host-up didn't fire under Sandbox=high can find
             // out without reading the source.

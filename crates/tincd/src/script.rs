@@ -133,6 +133,43 @@ pub enum ScriptResult {
     /// Carries [`ExitStatus`] so the daemon can format
     /// `WEXITSTATUS` / `WTERMSIG` to match the C log message.
     Failed(ExitStatus),
+    /// Fire-and-forget child launched ([`spawn`]); exit status not
+    /// collected here. Reaped by [`reap_children`].
+    Spawned,
+}
+
+/// Shared front half of [`execute`] / [`spawn`]: gating + Command
+/// build. `Err` = short-circuit result (NotFound/Sandboxed).
+fn prepare(
+    confbase: &Path,
+    name: &str,
+    env: &ScriptEnv,
+    interpreter: Option<&str>,
+) -> Result<Command, ScriptResult> {
+    if !sandbox::can(sandbox::Action::StartProcesses) {
+        return Err(ScriptResult::Sandboxed);
+    }
+    let scriptname = confbase.join(name);
+    if !scriptname.try_exists().unwrap_or(false) {
+        return Err(ScriptResult::NotFound);
+    }
+    log::info!("Executing script {name}");
+    let mut cmd = match interpreter {
+        Some(interp) => {
+            let mut c = Command::new(interp);
+            c.arg(&scriptname);
+            c
+        }
+        None => Command::new(&scriptname),
+    };
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
+    cmd.current_dir(confbase);
+    Ok(cmd)
 }
 
 /// `execute_script`.
@@ -167,58 +204,10 @@ pub fn execute(
     #[cfg(windows)]
     compile_error!("Windows PATHEXT search not ported");
 
-    // EARLIEST gate: don't even stat the file. Upstream
-    // returns `false` (which callers ignore); we return a variant
-    // so `Daemon::log_script` can surface it once at debug level.
-    // tinc-up still runs: sandbox::enter() is called from main()
-    // AFTER Daemon::setup, and can() returns true before enter().
-    if !sandbox::can(sandbox::Action::StartProcesses) {
-        return Ok(ScriptResult::Sandboxed);
-    }
-
-    // `:152` snprintf("%s/%s%s", confbase, name, scriptextension)
-    let scriptname = confbase.join(name);
-
-    // `:201-203` access(F_OK). C uses access(); we use try_exists
-    // (stat). Same observable behavior for "is there a file here".
-    // `try_exists` propagates EACCES on the parent dir (C's access
-    // would return -1/EACCES too, which `if(access(...))` treats as
-    // "doesn't exist" → return true). We match: any error here is
-    // "not found".
-    if !scriptname.try_exists().unwrap_or(false) {
-        return Ok(ScriptResult::NotFound);
-    }
-
-    log::info!("Executing script {name}");
-
-    // `:215-221`. C builds a quoted string for system(); we build a
-    // Command. The interpreter case is `<interp> <script>` — two
-    // argv entries, no shell.
-    let mut cmd = match interpreter {
-        Some(interp) => {
-            let mut c = Command::new(interp);
-            c.arg(&scriptname);
-            c
-        }
-        None => Command::new(&scriptname),
+    let mut cmd = match prepare(confbase, name, env, interpreter) {
+        Ok(c) => c,
+        Err(r) => return Ok(r),
     };
-
-    // Start from an empty environment (don't leak LD_PRELOAD, IFS,
-    // etc. into hook scripts). Provide a fixed sane PATH, then the
-    // tinc vars. `:211-213` putenv loop equivalent.
-    cmd.env_clear();
-    cmd.env(
-        "PATH",
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    );
-    cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
-
-    // Scripts inherit the daemon's cwd, which is confbase because
-    // of main()'s early chdir. This is normally a no-op chdir in the
-    // child. Belt-and-suspenders: makes the contract self-contained
-    // (unit tests run execute() without going through main(); future
-    // code that chdirs mid-loop won't break script cwd).
-    cmd.current_dir(confbase);
 
     // `:221` system(). status() is fork+exec+waitpid. Blocks.
     let status = cmd.status()?;
@@ -229,6 +218,39 @@ pub fn execute(
         Ok(ScriptResult::Ok)
     } else {
         Ok(ScriptResult::Failed(status))
+    }
+}
+
+/// Non-blocking [`execute`]: fork+exec and return immediately. The
+/// child is detached; [`reap_children`] collects it later. Used for
+/// per-subnet / per-host hooks that fire in bulk on the event loop.
+///
+/// # Errors
+/// Same spawn-failure surface as [`execute`].
+pub fn spawn(
+    confbase: &Path,
+    name: &str,
+    env: &ScriptEnv,
+    interpreter: Option<&str>,
+) -> io::Result<ScriptResult> {
+    let mut cmd = match prepare(confbase, name, env, interpreter) {
+        Ok(c) => c,
+        Err(r) => return Ok(r),
+    };
+    // Drop the Child handle: no implicit wait; pid reaped via reap_children().
+    let _ = cmd.spawn()?;
+    Ok(ScriptResult::Spawned)
+}
+
+/// Drain exited children spawned by [`spawn`] (and any other
+/// detached forks). `waitpid(-1, WNOHANG)` until no more.
+pub fn reap_children() {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(_) => break,
+            Ok(_) => {}
+        }
     }
 }
 
