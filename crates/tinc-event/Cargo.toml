@@ -9,6 +9,7 @@ edition.workspace = true
 
 [dependencies]
 libc = "0.2"
+nix = { version = "0.29", default-features = false, features = ["event", "signal", "fs"] }
 
 [lints]
 workspace = true

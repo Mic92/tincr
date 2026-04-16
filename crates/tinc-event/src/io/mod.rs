@@ -17,13 +17,13 @@
 //! Closing is the `connection_t` equivalent's job.
 
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod epoll;
 #[cfg(target_os = "linux")]
-use epoll::{RawEvent, create, ctl, del, ev_readable, ev_token, ev_writable, wait};
+use epoll::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait};
 
 use crate::MAX_EVENTS_PER_TURN;
 
@@ -82,8 +82,9 @@ struct Slot<W> {
 ///
 /// Generic over `W: Copy` — the daemon's `enum IoWhat`. See lib.rs.
 pub struct EventLoop<W> {
-    ep: OwnedFd,
-    events: Vec<RawEvent>,
+    ep: Poller,
+    events: Box<[RawEvent; MAX_EVENTS_PER_TURN]>,
+    n_events: usize,
     /// Hand-rolled slab. `None` = freed slot. The epoll token indexes
     /// directly. Same data structure as `Timers::slots` but with
     /// `Option<Slot>` instead of a separate freelist — the `None`
@@ -101,7 +102,8 @@ impl<W: Copy> EventLoop<W> {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             ep: create()?,
-            events: Vec::with_capacity(MAX_EVENTS_PER_TURN),
+            events: Box::new([RawEvent::empty(); MAX_EVENTS_PER_TURN]),
+            n_events: 0,
             slots: Vec::new(),
             free: Vec::new(),
         })
@@ -133,7 +135,7 @@ impl<W: Copy> EventLoop<W> {
         // goes back to the freelist. C's order is: populate `io_t`,
         // then `io_set` which `epoll_ctl`s — but C doesn't check
         // errors on populate, so the order doesn't matter there.
-        if let Err(e) = ctl(self.ep.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, idx, interest) {
+        if let Err(e) = add(&self.ep, fd, idx, interest) {
             self.free.push(idx);
             return Err(e);
         }
@@ -170,14 +172,13 @@ impl<W: Copy> EventLoop<W> {
         // above would have fired. But: ADD-not-MOD if interest was
         // None, for symmetry with what del would do).
         let fd = slot.fd;
-        let op = if slot.interest.is_some() {
-            libc::EPOLL_CTL_MOD
+        if slot.interest.is_some() {
+            modify(&self.ep, fd, id.0, interest)?;
         } else {
             // Unreachable in current API (del frees slot). Kept for
             // when/if we expose a "deregister but keep slot" path.
-            libc::EPOLL_CTL_ADD
-        };
-        ctl(self.ep.as_raw_fd(), op, fd, id.0, interest)?;
+            add(&self.ep, fd, id.0, interest)?;
+        }
         slot.interest = Some(interest);
         Ok(())
     }
@@ -209,7 +210,7 @@ impl<W: Copy> EventLoop<W> {
             // ERR|HUP into a freed slot. Tripwire it in debug —
             // would have caught the connecting_socks leak in tincd
             // at first integration-test run instead of in prod.
-            if let Err(e) = del(self.ep.as_raw_fd(), slot.fd) {
+            if let Err(e) = del(&self.ep, slot.fd) {
                 debug_assert_ne!(
                     e.raw_os_error(),
                     Some(libc::EBADF),
@@ -282,8 +283,8 @@ impl<W: Copy> EventLoop<W> {
         // same: a signal might have re-armed a timer (it didn't, the
         // handler is just write-one-byte, but the structure is sound).
         // The self-pipe byte will be there next turn.
-        match wait(self.ep.as_raw_fd(), &mut self.events, timeout) {
-            Ok(()) => {}
+        match wait(&self.ep, &mut self.events[..], timeout) {
+            Ok(n) => self.n_events = n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // Empty `out`, caller loops. The self-pipe is
                 // readable next turn (the signal handler wrote a
@@ -293,7 +294,7 @@ impl<W: Copy> EventLoop<W> {
             Err(e) => return Err(e),
         }
 
-        for ev in &self.events {
+        for ev in &self.events[..self.n_events] {
             let idx = ev_token(ev);
             // Generation-guard substitute, part 1: slot still exists.
             let Some(slot) = self.slots.get(idx).and_then(Option::as_ref) else {
@@ -345,6 +346,7 @@ impl<W: Copy> EventLoop<W> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum What {
