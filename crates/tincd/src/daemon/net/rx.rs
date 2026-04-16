@@ -30,7 +30,10 @@ impl Daemon {
         // socket2 accept4(SOCK_CLOEXEC) avoids fd leaks into script
         // children for free.
         let (sock, peer_sockaddr) = match listener.tcp.accept() {
-            Ok(pair) => pair,
+            Ok(pair) => {
+                crate::set_nosigpipe(pair.0.as_raw_fd());
+                pair
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Spurious EAGAIN: peer connect+RST'd between epoll
                 // wake and accept (TOCTOU).

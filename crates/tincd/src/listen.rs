@@ -356,6 +356,7 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     // `Socket::new` does `SOCK_CLOEXEC` on Linux/BSD. Same effect
     // as separate `fcntl(F_SETFD, FD_CLOEXEC)`, atomic.
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    crate::set_nosigpipe(s.as_raw_fd());
 
     apply_common_sockopts(&s, domain, opts, "")?;
 

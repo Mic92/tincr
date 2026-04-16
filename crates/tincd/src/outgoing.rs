@@ -152,7 +152,10 @@ pub fn try_connect(
         SocketAddr::V6(_) => Domain::IPV6,
     };
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-        Ok(s) => s,
+        Ok(s) => {
+            crate::set_nosigpipe(s.as_raw_fd());
+            s
+        }
         Err(e) => {
             // "Creating socket for %s failed".
             log::error!(target: "tincd::conn",
@@ -279,7 +282,10 @@ pub fn try_connect_via_proxy(
         SocketAddr::V6(_) => Domain::IPV6,
     };
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-        Ok(s) => s,
+        Ok(s) => {
+            crate::set_nosigpipe(s.as_raw_fd());
+            s
+        }
         Err(e) => {
             log::error!(target: "tincd::conn",
                         "Creating socket for proxy {proxy_addr} failed: {e}");
@@ -617,6 +623,8 @@ pub fn do_outgoing_pipe(
         // CLOEXEC: child dup2's what it needs to 0/1; originals shouldn't leak past exec.
         crate::sock_cloexec_flag(),
     )?;
+    crate::set_cloexec(parent_fd.as_raw_fd());
+    crate::set_cloexec(child_fd.as_raw_fd());
     // Snapshot the raw ints BEFORE fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
     // trivial `.as_raw_fd()` getter — keep it on plain integers.
