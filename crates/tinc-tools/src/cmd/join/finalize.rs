@@ -16,6 +16,17 @@ use crate::names::{Paths, check_id};
 
 use super::JoinResult;
 
+/// Keys dropped from chunk-2 host blocks: paths/exec the daemon would
+/// honour. Chunk-2 is otherwise written verbatim.
+const CHUNK2_DROP_KEYS: &[&str] = &[
+    "Proxy",
+    "ScriptsInterpreter",
+    "Ed25519PublicKeyFile",
+    "Ed25519PrivateKeyFile",
+    "PublicKeyFile",
+    "PrivateKeyFile",
+];
+
 /// Parse `data` and write a fresh confbase.
 ///
 /// `data` is the invitation file body (what `cmd_invite` wrote, what
@@ -250,8 +261,9 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
             ));
         }
         // Secondary chunk with our own name would clobber the
-        // hosts/NAME we just opened. Malicious inviter detection.
-        if host_name == name {
+        // hosts/NAME we just opened. Case-insensitive: `hosts/Bob`
+        // and `hosts/bob` are the same inode on case-folding FS.
+        if host_name.eq_ignore_ascii_case(&name) {
             return Err(CmdError::BadInput(
                 "Secondary chunk would overwrite our own host config file.".into(),
             ));
@@ -281,11 +293,17 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
             // of those). For `Name = X` and `Name=X`: both produce
             // key="Name". Good enough — `cmd_invite` writes the
             // canonical form.
-            if let Some((k, v)) = split_var(line)
-                && k.eq_ignore_ascii_case("Name")
-            {
-                boundary = Some((k, v));
-                break;
+            if let Some((k, v)) = split_var(line) {
+                if k.eq_ignore_ascii_case("Name") {
+                    boundary = Some((k, v));
+                    break;
+                }
+                if CHUNK2_DROP_KEYS.iter().any(|d| k.eq_ignore_ascii_case(d)) {
+                    eprintln!(
+                        "Ignoring unsafe variable '{k}' in invitation host file for {host_name}."
+                    );
+                    continue;
+                }
             }
 
             // `.lines()` strips the newline; add it back. (Yes, this
