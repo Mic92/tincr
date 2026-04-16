@@ -439,7 +439,7 @@ pub fn handle_id(
     } else {
         conn.send(format_args!(
             "{} {} {}.{}",
-            Request::Id as u8,
+            Request::Id,
             ctx.my_name,
             PROT_MAJOR,
             PROT_MINOR
@@ -530,7 +530,7 @@ fn id_control(
     // `if(!c->outgoing) send_id(c)`: `"%d %s %d.%d"`.
     let needs_write = conn.send(format_args!(
         "{} {} {}.{}",
-        Request::Id as u8,
+        Request::Id,
         ctx.my_name,
         PROT_MAJOR,
         PROT_MINOR
@@ -538,7 +538,7 @@ fn id_control(
     // `"%d %d %d", ACK, CTL_VER, getpid()`.
     conn.send(format_args!(
         "{} {} {}",
-        Request::Ack as u8,
+        Request::Ack,
         CTL_VERSION,
         std::process::id()
     ));
@@ -584,14 +584,14 @@ fn id_invitation(
     // Line 1. PLAINTEXT (sptps not installed yet).
     let mut needs_write = conn.send(format_args!(
         "{} {} {}.{}",
-        Request::Id as u8,
+        Request::Id,
         ctx.my_name,
         PROT_MAJOR,
         PROT_MINOR
     ));
 
     // Line 2, ACK with our invitation pubkey. Plaintext.
-    needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
+    needs_write |= conn.send(format_args!("{} {}", Request::Ack, inv_pub_b64));
 
     // Cosmetic for us (`feed()` checks `sptps.is_some()`).
     conn.protocol_minor = 2;
@@ -737,7 +737,7 @@ pub fn send_ack(
     let wire_options = conn.options.with_minor(PROT_MINOR).bits();
     conn.send(format_args!(
         "{} {} {} {:x}",
-        Request::Ack as u8,
+        Request::Ack,
         my_udp_port,
         weight,
         wire_options
@@ -925,7 +925,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
             log::info!(target: "tincd", "Got REQ_STOP, shutting down");
-            let needs_write = conn.send(format_args!("{} {} 0", Request::Control as u8, REQ_STOP));
+            let needs_write = conn.send(format_args!("{} {} 0", Request::Control, REQ_STOP));
             (DispatchResult::Stop, needs_write)
         }
         _ => {
@@ -934,7 +934,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // (uninit `type` falls through to default).
             log::debug!(target: "tincd::proto",
                         "Unknown CONTROL subtype {subtype:?} from {}", conn.name);
-            let needs_write = conn.send(format_args!("{} {}", Request::Control as u8, REQ_INVALID));
+            let needs_write = conn.send(format_args!("{} {}", Request::Control, REQ_INVALID));
             (DispatchResult::Ok, needs_write)
         }
     }
