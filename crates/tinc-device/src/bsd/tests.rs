@@ -111,13 +111,18 @@ fn pipe_rev() -> (OwnedFd, OwnedFd) {
     (w, r)
 }
 
-/// `socketpair(SEQPACKET)` for Tap (same as `raw.rs`).
-fn seqpacket_pair() -> (OwnedFd, OwnedFd) {
+/// Datagram socketpair for Tap tests. SEQPACKET on Linux,
+/// DGRAM on macOS (which lacks SEQPACKET for AF_UNIX).
+fn dgram_pair() -> (OwnedFd, OwnedFd) {
+    #[cfg(target_os = "linux")]
+    let sock_type = nix::sys::socket::SockType::SeqPacket;
+    #[cfg(not(target_os = "linux"))]
+    let sock_type = nix::sys::socket::SockType::Datagram;
     nix::sys::socket::socketpair(
         nix::sys::socket::AddressFamily::Unix,
-        nix::sys::socket::SockType::SeqPacket,
+        sock_type,
         None,
-        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        nix::sys::socket::SockFlag::empty(),
     )
     .unwrap()
 }
@@ -347,7 +352,7 @@ fn tap_read_ether_via_seqpacket() {
         0xCA, 0xFE,
     ];
 
-    let (peer, sock) = seqpacket_pair();
+    let (peer, sock) = dgram_pair();
     nix::unistd::write(&peer, &frame).unwrap();
 
     let mut bsd = fake_bsd(sock, BsdVariant::Tap);
@@ -369,7 +374,7 @@ fn tap_write_ether_via_seqpacket() {
     ];
     let len = frame.len();
 
-    let (peer, sock) = seqpacket_pair();
+    let (peer, sock) = dgram_pair();
     let mut bsd = fake_bsd(sock, BsdVariant::Tap);
     let n = bsd.write(&mut frame).unwrap();
 
@@ -388,8 +393,9 @@ fn tap_write_ether_via_seqpacket() {
 /// EOF on close; pipe also gives EOF on close (read
 /// returns 0). Both work.
 #[test]
+#[cfg(target_os = "linux")] // SEQPACKET signals EOF on peer close; DGRAM on macOS doesn't
 fn read_eof_via_seqpacket() {
-    let (peer, sock) = seqpacket_pair();
+    let (peer, sock) = dgram_pair();
     drop(peer);
     let mut bsd = fake_bsd(sock, BsdVariant::Tap);
     let mut buf = [0u8; MTU];

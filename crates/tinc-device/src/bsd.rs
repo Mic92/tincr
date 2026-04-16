@@ -426,24 +426,160 @@ impl AsFd for BsdTun {
     target_os = "netbsd",
     target_os = "openbsd",
     target_os = "dragonfly",
-    target_os = "macos",
 ))]
 impl BsdTun {
     /// PLACEHOLDER: BSD open paths land when CI has a BSD
-    /// runner. The Device impl above is fully tested on Linux
-    /// via fakes; only the open() ioctl/socket paths need a
-    /// BSD box. See the block comment above for the per-variant
-    /// plan.
+    /// runner. See the block comment above.
     ///
     /// # Errors
-    /// Always errors `Unsupported`. The real impls replace
-    /// this.
+    /// Always errors `Unsupported`.
     pub fn open(_variant: BsdVariant) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "BsdTun::open: BSD open paths not yet implemented (read/write logic is; \
              see bsd.rs block comment for the per-variant plan)",
         ))
+    }
+}
+
+// macOS utun constructor via SYSPROTO_CONTROL socket.
+//
+// `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` then
+// `ioctl(CTLIOCGINFO)` to resolve the utun control ID, then
+// `connect(sockaddr_ctl{...})` with the unit number.
+// `getsockopt(UTUN_OPT_IFNAME)` reads back the kernel-chosen name.
+//
+// All types/constants are Apple-only; nix has no wrappers.
+#[cfg(target_os = "macos")]
+mod utun {
+    #![allow(unsafe_code)]
+
+    use std::io;
+    use std::mem;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    use super::{BsdTun, BsdVariant};
+
+    // Apple-specific constants not in libc crate.
+    const PF_SYSTEM: libc::c_int = libc::AF_SYSTEM;
+    const SYSPROTO_CONTROL: libc::c_int = 2;
+    const AF_SYS_CONTROL: u16 = 2;
+    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
+
+    // CTLIOCGINFO: _IOWR('N', 3, struct ctl_info)
+    // struct ctl_info is 100 bytes (96-byte name + u32 id).
+    // _IOWR encodes: direction(in|out) | size | group | nr
+    const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
+
+    // UTUN_OPT_IFNAME = 2, level = SYSPROTO_CONTROL
+    const UTUN_OPT_IFNAME: libc::c_int = 2;
+
+    #[repr(C)]
+    struct CtlInfo {
+        ctl_id: u32,
+        ctl_name: [u8; 96],
+    }
+
+    #[repr(C)]
+    struct SockaddrCtl {
+        sc_len: u8,
+        sc_family: u8,
+        ss_sysaddr: u16,
+        sc_id: u32,
+        sc_unit: u32,
+        sc_reserved: [u32; 5],
+    }
+
+    impl BsdTun {
+        /// Open a macOS utun device. `unit` is the utun unit number
+        /// (0 → utun0, etc.). `None` lets the kernel pick.
+        ///
+        /// Requires root or appropriate entitlements.
+        ///
+        /// # Errors
+        /// I/O errors from socket/ioctl/connect/getsockopt.
+        pub fn open_utun(unit: Option<u32>) -> io::Result<Self> {
+            // socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)
+            let fd = unsafe {
+                libc::socket(PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL)
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+            // Set non-blocking + cloexec
+            unsafe {
+                let flags = libc::fcntl(fd_raw(&fd), libc::F_GETFL);
+                libc::fcntl(fd_raw(&fd), libc::F_SETFL, flags | libc::O_NONBLOCK);
+                libc::fcntl(fd_raw(&fd), libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+
+            // ioctl(CTLIOCGINFO) to get the control ID
+            let mut info = CtlInfo {
+                ctl_id: 0,
+                ctl_name: [0u8; 96],
+            };
+            info.ctl_name[..UTUN_CONTROL_NAME.len()]
+                .copy_from_slice(UTUN_CONTROL_NAME);
+            if unsafe { libc::ioctl(fd_raw(&fd), CTLIOCGINFO, &mut info) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // connect(sockaddr_ctl) with unit+1 (kernel uses 1-based;
+            // unit=0 → sc_unit=0 means "pick for me", unit=N → sc_unit=N+1)
+            let sc_unit = unit.map_or(0, |u| u + 1);
+            let addr = SockaddrCtl {
+                sc_len: mem::size_of::<SockaddrCtl>() as u8,
+                sc_family: libc::AF_SYSTEM as u8,
+                ss_sysaddr: AF_SYS_CONTROL,
+                sc_id: info.ctl_id,
+                sc_unit,
+                sc_reserved: [0; 5],
+            };
+            if unsafe {
+                libc::connect(
+                    fd_raw(&fd),
+                    &addr as *const SockaddrCtl as *const libc::sockaddr,
+                    mem::size_of::<SockaddrCtl>() as libc::socklen_t,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+
+            // getsockopt(UTUN_OPT_IFNAME) to read back interface name
+            let mut name_buf = [0u8; 32];
+            let mut name_len: libc::socklen_t = name_buf.len() as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd_raw(&fd),
+                    SYSPROTO_CONTROL,
+                    UTUN_OPT_IFNAME,
+                    name_buf.as_mut_ptr().cast(),
+                    &mut name_len,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let iface = String::from_utf8_lossy(
+                &name_buf[..name_len.saturating_sub(1) as usize],
+            )
+            .into_owned();
+
+            Ok(BsdTun {
+                fd,
+                variant: BsdVariant::Utun,
+                iface,
+            })
+        }
+    }
+
+    #[inline]
+    fn fd_raw(fd: &OwnedFd) -> libc::c_int {
+        use std::os::fd::AsRawFd;
+        fd.as_raw_fd()
     }
 }
 
