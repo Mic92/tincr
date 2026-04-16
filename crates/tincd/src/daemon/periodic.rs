@@ -134,21 +134,25 @@ impl Daemon {
 
     /// Contradicting-edge storm detection + autoconnect.
     ///
-    /// Both counters >100 → two daemons same Name. Fix is
-    /// **synchronous sleep** — blocking the loop IS the point (stop
-    /// sending corrections). Doubled per trigger (cap 3600s), halved
-    /// per clean period (floor 10s).
+    /// Both counters >100 → two daemons same Name. C tinc does a
+    /// blocking `nanosleep`; we instead defer all outgoing retries
+    /// and the next periodic tick by `sleeptime` (peer can drive the
+    /// counters; blocking the loop is a DoS). Doubled per trigger
+    /// (cap 3600s), halved per clean period (floor 10s).
     ///
-    /// Returns would-sleep duration for the unit test only.
+    /// Returns the deferral duration for the unit test only.
     pub(super) fn on_periodic_tick(&mut self) -> Duration {
         let slept = if self.contradicting_del_edge > 100 && self.contradicting_add_edge > 100 {
             log::warn!(target: "tincd",
                        "Possible node with same Name as us! Sleeping {} seconds.",
                        self.sleeptime);
             let d = Duration::from_secs(u64::from(self.sleeptime));
-            // Blocking sleep is intentional — see doc.
-            #[cfg(not(test))]
-            std::thread::sleep(d);
+            for (oid, outgoing) in &mut self.outgoings {
+                outgoing.timeout = outgoing.timeout.max(self.sleeptime);
+                if let Some(&tid) = self.outgoing_timers.get(oid) {
+                    self.timers.set(tid, d);
+                }
+            }
             self.sleeptime = self.sleeptime.saturating_mul(2).min(3600);
             d
         } else {
@@ -218,7 +222,8 @@ impl Daemon {
             }
         }
 
-        self.timers.set(self.periodictimer, Duration::from_secs(5));
+        self.timers
+            .set(self.periodictimer, Duration::from_secs(5).max(slept));
 
         slept
     }
