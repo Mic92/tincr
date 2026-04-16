@@ -63,6 +63,9 @@ use std::path::{Path, PathBuf};
 /// (config might list 20 `Address` lines; we try them all, persist
 /// the 8 most recent successes).
 const MAX_CACHED_ADDRESSES: usize = 8;
+/// Bound the in-memory `known`/`config_resolved` lists; keeps the
+/// O(n) dedup scans cheap regardless of gossip/DNS fan-out.
+const MAX_KNOWN_ADDRESSES: usize = 8 * MAX_CACHED_ADDRESSES;
 
 /// `address_cache_t` (`address_cache.h:29-42`). The C struct holds a
 /// fixed-size `sockaddr_t[8]` plus the `addrinfo*` chain plus
@@ -169,6 +172,9 @@ impl AddressCache {
     pub fn add_known_addresses(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         self.known.clear();
         for a in addrs {
+            if self.known.len() >= MAX_KNOWN_ADDRESSES {
+                break;
+            }
             if !self.cached.contains(&a) && !self.known.contains(&a) {
                 self.known.push(a);
             }
@@ -233,6 +239,9 @@ impl AddressCache {
                 match (host.as_str(), *port).to_socket_addrs() {
                     Ok(iter) => {
                         for a in iter {
+                            if self.config_resolved.len() >= MAX_KNOWN_ADDRESSES {
+                                break;
+                            }
                             if !self.cached.contains(&a)
                                 && !self.known.contains(&a)
                                 && !self.config_resolved.contains(&a)
