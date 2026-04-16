@@ -66,6 +66,9 @@ pub enum Ready {
 pub struct IoId(usize);
 
 struct Slot<W> {
+    // non-owning: the EventLoop never closes registered fds (see
+    // module doc "The loop doesn't own fds"). Kept only as the
+    // epoll_ctl key for later MOD/DEL.
     fd: RawFd,
     /// `None` = registered but interest was set to zero (which means
     /// deregistered from epoll, slot still alive). Only `del` does

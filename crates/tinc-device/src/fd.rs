@@ -27,7 +27,7 @@
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -123,16 +123,7 @@ impl FdTun {
             // boilerplate collapses into `recv_scm_rights`.
             FdSource::UnixSocket(path) => {
                 let fd = recv_scm_rights(&path)?;
-                // SAFETY: `recvmsg` with SCM_RIGHTS gives us a
-                // fresh fd number (the kernel dup'd it into our
-                // process). It's open (the kernel just opened
-                // it) and it's ours (no one else in our process
-                // has this number; the SENDER's number is
-                // theirs, different process, different fd
-                // table). Wrapping is sound.
-                #[allow(unsafe_code)]
-                let file = unsafe { File::from_raw_fd(fd) };
-                (file, format!("fd:{}", path.display()))
+                (File::from(fd), format!("fd:{}", path.display()))
             }
         };
 
@@ -147,15 +138,15 @@ impl FdTun {
 /// Connect to the Unix socket, receive one fd via `SCM_RIGHTS`.
 ///
 /// `UnixStream` + `nix::recvmsg` collapse what would otherwise be
-/// three functions of `goto end; close()` RAII. Returns bare `RawFd`;
-/// the SAFETY argument for `from_raw_fd` belongs at the call site
-/// where the source is known.
+/// three functions of `goto end; close()` RAII. Returns `OwnedFd`:
+/// the kernel dup'd the fd into our table during `recvmsg`, so it's
+/// freshly ours; ownership is established here, not at the call site.
 ///
 /// # Errors
 /// - `connect`: `NotFound`, `ConnectionRefused`, `PermissionDenied`
 /// - `InvalidData`: cmsg wasn't `SCM_RIGHTS`, ≠1 fd, or `MSG_CTRUNC`
 ///   set
-fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
+fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 
     // ─── Connect
@@ -262,35 +253,28 @@ fn recv_scm_rights(path: &Path) -> io::Result<RawFd> {
             )
         })?;
 
+    // Wrap as owned IMMEDIATELY: the kernel dup'd these into our
+    // fd table during recvmsg (before any of our checks ran). If we
+    // error below, `Vec<OwnedFd>::drop` closes them — no leak.
+    // SAFETY: SCM_RIGHTS dup; each fd is open and exclusively ours.
+    #[allow(unsafe_code)]
+    let mut fds: Vec<OwnedFd> = fds
+        .into_iter()
+        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+        .collect();
+
     // Exactly one. The Java side sends one tun fd; that's the
     // contract. Multiple would be a bug on their side.
-    let [fd] = fds[..] else {
-        // We received the fds (the kernel dup'd them into our
-        // process). If we error here without closing them: fd
-        // leak. Close before erroring.
-        //
-        // (Hand-rolled cmsghdr doesn't have this case — a CMSG_LEN check
-        // fails BEFORE the kernel dups. Actually no: the kernel
-        // dups during recvmsg, before our checks. Hand-rolled code leaks
-        // too. We're STRICTER: close them.)
-        for &leaked in &fds {
-            // Ignore close errors (we're already erroring).
-            // SAFETY: these fds came from recvmsg's SCM_RIGHTS
-            // dup; they're ours to close.
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::close(leaked);
-            }
-        }
+    if fds.len() != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("expected exactly 1 fd via SCM_RIGHTS, got {}", fds.len()),
         ));
-    };
+    }
 
     // `stream` drops here. Its close doesn't affect `fd` (the
     // SCM_RIGHTS dup is independent of the carrier socket).
-    Ok(fd)
+    Ok(fds.pop().unwrap())
 }
 
 /// The `@` → abstract-namespace dispatch.
@@ -479,6 +463,7 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::io::IntoRawFd;
 
     // (Ethernet constant tests + nibble tests + set_etherheader
     // tests hoisted to `crate::ether::tests` with their subjects.
@@ -544,7 +529,7 @@ mod tests {
         write_all(&w, &ip_packet);
 
         // Wrap `r` as FdTun via Inherited.
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
 
         // Read. Buffer must be ≥ MTU.
         let mut buf = [0u8; MTU];
@@ -584,7 +569,7 @@ mod tests {
         let (r, w) = pipe();
         write_all(&w, &ip_packet);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
         let mut buf = [0u8; MTU];
         let n = tun.read(&mut buf).unwrap();
 
@@ -602,7 +587,7 @@ mod tests {
         let (r, w) = pipe();
         write_all(&w, &garbage);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
         let mut buf = [0u8; MTU];
         let e = tun.read(&mut buf).unwrap_err();
 
@@ -621,7 +606,7 @@ mod tests {
         // Close the write end immediately. Next read returns 0.
         drop(w);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
         let mut buf = [0u8; MTU];
         let e = tun.read(&mut buf).unwrap_err();
 
@@ -638,7 +623,7 @@ mod tests {
         let (r, w) = pipe();
 
         // FdTun owns the WRITE end this time.
-        let mut tun = FdTun::open(FdSource::Inherited(w.into_raw())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(w.into_raw_fd())).unwrap();
 
         // Buffer: synthetic ether header + IP packet. The
         // ether header is GARBAGE — the write should skip it.
@@ -771,7 +756,7 @@ mod tests {
         // Write through the RECEIVED fd, read from the canary
         // pipe. If they're connected (same underlying file),
         // this works.
-        write_all_file(&received_w, b"ping");
+        write_all(&received_w, b"ping");
         let mut got = [0u8; 4];
         let n = read_exact_n(&canary_r, &mut got, 4);
         assert_eq!(n, 4);
@@ -784,56 +769,25 @@ mod tests {
 
     // Test plumbing — pipe helpers
 
-    /// Newtype around the pipe fd for the tests. Owns; drop
-    /// closes. `into_raw` releases ownership for passing to
-    /// `FdSource::Inherited`.
-    ///
-    /// (Not using `OwnedFd`: it's stable since 1.63 but the
-    /// `into_raw_fd` consuming-conversion is what we need, and
-    /// `OwnedFd` doesn't have a direct "release without close."
-    /// Well, `into_raw_fd()` does that. Hm. Actually `OwnedFd`
-    /// would work fine. But the explicit Drop here makes the
-    /// "this test fd closes on drop" lifecycle visible.)
-    struct PipeFd(RawFd);
-
-    impl PipeFd {
-        fn into_raw(self) -> RawFd {
-            let fd = self.0;
-            std::mem::forget(self); // don't close
-            fd
-        }
-        fn as_raw_fd(&self) -> RawFd {
-            self.0
-        }
-    }
-
-    impl Drop for PipeFd {
-        fn drop(&mut self) {
-            // SAFETY: we own this fd (pipe() gave it to us;
-            // into_raw forgets self before returning, so we
-            // only get here for un-released fds).
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::close(self.0);
-            }
-        }
-    }
-
-    /// `pipe(2)`. Returns (read, write). No CLOEXEC (test fds,
-    /// no exec coming).
-    fn pipe() -> (PipeFd, PipeFd) {
+    /// `pipe(2)`. Returns (read, write) as `OwnedFd` — drop closes;
+    /// `into_raw_fd()` releases ownership for `FdSource::Inherited`.
+    fn pipe() -> (OwnedFd, OwnedFd) {
         let mut fds = [0; 2];
         // SAFETY: `fds` is a 2-int buffer; pipe() writes exactly 2.
         #[allow(unsafe_code)]
         let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "pipe() failed: {}", io::Error::last_os_error());
-        (PipeFd(fds[0]), PipeFd(fds[1]))
+        // SAFETY: pipe() returned 0; both fds are fresh and ours.
+        #[allow(unsafe_code)]
+        unsafe {
+            (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+        }
     }
 
     /// Write all bytes. Loop on short writes (pipes can short-
     /// write under pressure; our tiny test packets won't, but
     /// correctness).
-    fn write_all(fd: &PipeFd, buf: &[u8]) {
+    fn write_all(fd: &impl AsRawFd, buf: &[u8]) {
         let mut off = 0;
         while off < buf.len() {
             // SAFETY: fd valid (held by &PipeFd), buf is &[u8].
@@ -853,24 +807,8 @@ mod tests {
         }
     }
 
-    /// Same but for `&File` (the `SCM_RIGHTS` test wraps in File).
-    fn write_all_file(f: &File, buf: &[u8]) {
-        let mut off = 0;
-        while off < buf.len() {
-            #[allow(unsafe_code)]
-            let ret = unsafe {
-                libc::write(f.as_raw_fd(), buf.as_ptr().add(off).cast(), buf.len() - off)
-            };
-            assert!(ret > 0, "write failed");
-            #[allow(clippy::cast_sign_loss)] // guarded by ret > 0 assert above
-            {
-                off += ret as usize;
-            }
-        }
-    }
-
     /// Read exactly n bytes. Loop on short reads.
-    fn read_exact_n(fd: &PipeFd, buf: &mut [u8], n: usize) -> usize {
+    fn read_exact_n(fd: &impl AsRawFd, buf: &mut [u8], n: usize) -> usize {
         let mut off = 0;
         while off < n {
             #[allow(unsafe_code)]
