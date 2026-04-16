@@ -35,7 +35,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
@@ -164,10 +164,10 @@ impl ControlSocket {
         // error — ECONNREFUSED, ENOENT, EACCES all mean "nothing
         // is healthily listening there", which is what we want.
 
-        // ─── unlink stale
-        // Errors ignored (`ENOENT` is expected on first run; if it's
-        // something else, bind will fail and we'll see why).
-        let _ = std::fs::remove_file(path);
+        // ─── unlink stale (only if it's actually a socket)
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = std::fs::remove_file(path);
+        }
 
         // ─── bind with umask 077
         // The socket file's perms come from `0o777 & ~umask`. With
@@ -378,6 +378,17 @@ mod tests {
         let cs = ControlSocket::bind(&path).expect("bind over stale");
         drop(cs);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A non-socket at the path is left alone; bind fails instead.
+    #[test]
+    fn bind_preserves_non_socket() {
+        let dir = tmpdir("nonsock");
+        let path = dir.join("tinc.socket");
+        std::fs::write(&path, b"not a socket").unwrap();
+        assert!(matches!(ControlSocket::bind(&path), Err(BindError::Io(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
         std::fs::remove_dir_all(&dir).ok();
     }
 
