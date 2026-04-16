@@ -250,6 +250,27 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
             Box::new(tun)
         }
+        #[cfg(target_os = "macos")]
+        Some("tun") => {
+            // Parse optional "Interface = utunN" → unit number N.
+            // Unset → None → kernel picks the next available utun.
+            let unit = config
+                .lookup("Interface")
+                .next()
+                .map(|e| e.get_str())
+                .and_then(|s| s.strip_prefix("utun"))
+                .and_then(|n| n.parse::<u32>().ok());
+            let tun = tinc_device::BsdTun::open_utun(unit)
+                .map_err(SetupError::Io)?;
+            Box::new(tun)
+        }
+        #[cfg(target_os = "macos")]
+        Some("tap") => {
+            return Err(SetupError::Config(
+                "DeviceType=tap is not supported on macOS (no vmnet backend). \
+                 Use DeviceType=tun (utun) instead.".into(),
+            ));
+        }
         Some(other) => {
             return Err(SetupError::Config(format!(
                 "DeviceType={other} not supported yet; use dummy or fd"
