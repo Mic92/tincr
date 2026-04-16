@@ -4,23 +4,25 @@
 //! kernel splits at `gso_size` boundaries. Wire-identical to `Portable`'s
 //! `count × sendto`.
 //!
-//! Raw libc instead of `nix::sendmsg` because nix allocs a `Vec` for the
-//! cmsg buffer on every call (~5% throughput loss at 100k batches/s). We
-//! pre-build the fixed-size cmsg once and patch the 2-byte `gso_size`
-//! per send. The `#[repr(C, align(8))]` wrapper gives cmsghdr-aligned
-//! storage at `CMSG_SPACE(2)` const size.
+//! Implemented via `nix::sys::socket::sendmsg` +
+//! `ControlMessage::UdpGsoSegments`, which builds the ~24-byte cmsg
+//! buffer per call. The earlier hand-rolled `libc::sendmsg` path
+//! pre-built the cmsghdr once and patched the 2-byte `gso_size`
+//! in-place to avoid that work; the `sendmsg` syscall itself dwarfs
+//! the encode, so we trade the micro-optimization for zero `unsafe`.
+//! Re-check `rust_vs_c_throughput` if this is ever suspect.
 //!
 //! No fallback: kernel ≥4.18 floor. `ENOPROTOOPT` panics rather than
 //! silently degrading to per-frame sendto.
 
-// One `unsafe` block: `libc::sendmsg` + cmsg pointer writes. Scoped
-// to this module, audited below.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use std::io;
-use std::mem;
+use std::io::IoSlice;
 use std::os::fd::AsRawFd;
 
+use nix::errno::Errno;
+use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, SockaddrStorage};
 use socket2::Socket;
 
 use super::{EgressBatch, UdpEgress};
@@ -32,80 +34,16 @@ pub struct Fast {
     /// same `IP_TOS` (the daemon's `set_udp_tos` sets it on the
     /// listener fd, which is the same FILE DESCRIPTION).
     sock: Socket,
-
-    /// Pre-built `cmsghdr + u16 gso_size + padding`, `CMSG_SPACE(2)`
-    /// bytes, cmsghdr-aligned. The header is written once in `new()`;
-    /// `send_batch` only patches the 2-byte `gso_size` at offset
-    /// `GSO_DATA_OFF`. Zero per-send allocs; the kernel reads from
-    /// this buffer directly via `msg_control`.
-    cmsg: GsoCmsgBuf,
 }
 
-// `CMSG_LEN`/`CMSG_SPACE` return `c_uint` (macro arithmetic type).
-// `mem::size_of::<u16>()` is 2 — fits `c_uint` trivially; the cast
-// is for the macro's signature, not a real truncation risk. SAFETY:
-// these are `const fn` in libc 0.2.178+ (`unix/linux_like/mod.rs:
-// 1715,1719`), pure arithmetic (`CMSG_ALIGN(sizeof(cmsghdr)) + len`),
-// no pointer deref. The `unsafe` is libc's `f!` macro wrapping.
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
-const GSO_CMSG_LEN: usize =
-    unsafe { libc::CMSG_LEN(mem::size_of::<u16>() as libc::c_uint) } as usize;
-#[allow(unsafe_code, clippy::cast_possible_truncation)]
-const GSO_CMSG_SPACE: usize =
-    unsafe { libc::CMSG_SPACE(mem::size_of::<u16>() as libc::c_uint) } as usize;
-/// Offset of the `gso_size` payload within the cmsg buffer.
-/// `CMSG_LEN(0)` = `CMSG_ALIGN(sizeof(cmsghdr))` = where `CMSG_DATA`
-/// points. Precompute so `send_batch` is a 2-byte slice copy.
-#[allow(unsafe_code)]
-const GSO_DATA_OFF: usize = unsafe { libc::CMSG_LEN(0) } as usize;
-
-/// Aligned cmsg storage. `align(8)` ≥ `align_of::<cmsghdr>()` on
-/// every Linux arch (cmsghdr's strictest field is `cmsg_len: size_t`,
-/// 8 bytes on LP64, 4 on ILP32). The kernel walks `msg_control` as
-/// a `cmsghdr*` (`CMSG_FIRSTHDR` casts directly); a misaligned
-/// buffer is UB on archs that trap unaligned access. `Box<[u8]>`
-/// from `vec![]` would be align-1 — clippy's `cast_ptr_alignment`
-/// caught the original mistake.
-#[repr(C, align(8))]
-struct GsoCmsgBuf([u8; GSO_CMSG_SPACE]);
-
 impl Fast {
-    /// Dup the listener's UDP fd; pre-build the cmsg header.
+    /// Dup the listener's UDP fd.
     ///
     /// # Errors
     /// `io::Error` from `dup(2)` (fd exhaustion).
     pub fn new(udp: &Socket) -> io::Result<Self> {
-        // CMSG_SPACE(2) zeroed bytes. The kernel doesn't read past
-        // CMSG_LEN(2); the trailing pad is for alignment of a NEXT
-        // cmsg (which we don't have).
-        let mut cmsg = GsoCmsgBuf([0u8; GSO_CMSG_SPACE]);
-
-        // Write the header in-place. `cmsghdr` is `repr(C)`;
-        // `GsoCmsgBuf` is `repr(C, align(8))` ≥ align_of::<cmsghdr>.
-        //
-        // SAFETY:
-        //   - `cmsg.0` is `GSO_CMSG_SPACE` writable bytes;
-        //     `sizeof(cmsghdr)` ≤ `CMSG_LEN(0)` ≤ that.
-        //   - Alignment: `#[repr(align(8))]` guarantees the struct
-        //     (and its field at offset 0) is 8-aligned, ≥
-        //     `align_of::<cmsghdr>()`. The `cast_ptr_alignment`
-        //     lint can't see past the `[u8]`, hence the allow.
-        //   - We write the three public fields; there are no others
-        //     (`gnu/mod.rs:77`: `cmsg_len, cmsg_level, cmsg_type`).
-        #[allow(unsafe_code, clippy::cast_ptr_alignment)]
-        unsafe {
-            let hdr = cmsg.0.as_mut_ptr().cast::<libc::cmsghdr>();
-            // `cmsg_len` is `size_t` on glibc; GSO_CMSG_LEN already
-            // const-widened to usize. `as _`: musl uses `socklen_t`
-            // (u32) here — the value (≈18) fits either way.
-            (*hdr).cmsg_len = GSO_CMSG_LEN as _;
-            (*hdr).cmsg_level = libc::SOL_UDP;
-            (*hdr).cmsg_type = libc::UDP_SEGMENT;
-        }
-
         Ok(Self {
             sock: udp.try_clone()?,
-            cmsg,
         })
     }
 }
@@ -158,73 +96,40 @@ impl UdpEgress for Fast {
         //     builds a batch wider than one drain pass.
         //   - `sk_no_check_tx == 0`. We never set `SO_NO_CHECK`.
 
-        // Patch gso_size into the pre-built cmsg. `CMSG_DATA` is
-        // `(cmsg as *cmsghdr).offset(1)` — i.e. `CMSG_LEN(0)` bytes
-        // from the start. The kernel reads exactly
-        // `*(u16*)CMSG_DATA(cmsg)`. `to_ne_bytes` + slice copy is a
-        // 2-byte memcpy: alignment-agnostic, no UB
-        // even though the offset happens to be even on every arch.
-        self.cmsg.0[GSO_DATA_OFF..GSO_DATA_OFF + 2].copy_from_slice(&b.stride.to_ne_bytes());
+        // `EgressBatch::dst` is a `socket2::SockAddr` (cached on the
+        // hot path). nix wants a `SockaddrLike`; round-trip via
+        // `std::net::SocketAddr` — UDP egress is always IP, so
+        // `as_socket()` is `Some`. Stack-only, no alloc.
+        let dst = SockaddrStorage::from(
+            b.dst
+                .as_socket()
+                .expect("UDP egress destination is always an IP socket address"),
+        );
 
-        // Build the msghdr. All pointers are into stack/self memory
-        // that lives for the duration of `sendmsg`. The kernel
-        // copies everything it needs before returning (no async
-        // buffer ownership; that's MSG_ZEROCOPY, not used here).
-        //
-        // `socket2::SockAddr::as_ptr()` → `*const sockaddr`, `len()`
-        // → `socklen_t`. socket2 stores a `sockaddr_storage`
-        // internally (`sockaddr.rs:33`); the pointer is valid for
-        // `len()` bytes. We pass it as `msg_name` (`*mut c_void` —
-        // the kernel only READS, the `mut` is C API legacy).
-        let mut iov = libc::iovec {
-            iov_base: b.frames.as_ptr().cast_mut().cast(),
-            iov_len: b.frames.len(),
-        };
-        // SAFETY: `mem::zeroed` for `msghdr` is valid (all-zero is
-        // a legal "empty msghdr": NULL name, 0 iov, NULL control).
-        // We then set every field we use; unused (`msg_flags`) stays
-        // 0, which is the correct value for `sendmsg` input (it's
-        // an OUTPUT field on `recvmsg`, ignored on send).
-        #[allow(unsafe_code)]
-        let mut mhdr: libc::msghdr = unsafe { mem::zeroed() };
-        mhdr.msg_name = b.dst.as_ptr().cast_mut().cast();
-        mhdr.msg_namelen = b.dst.len();
-        mhdr.msg_iov = &raw mut iov;
-        mhdr.msg_iovlen = 1;
-        mhdr.msg_control = self.cmsg.0.as_mut_ptr().cast();
-        // `msg_controllen` is `size_t` on glibc, `socklen_t` on
-        // musl; `GSO_CMSG_SPACE` (≈24) fits either. `as _` lets
-        // libc pick the type.
-        mhdr.msg_controllen = GSO_CMSG_SPACE as _;
+        let iov = [IoSlice::new(b.frames)];
+        let cmsg = [ControlMessage::UdpGsoSegments(&b.stride)];
 
-        // SAFETY:
-        //   - `fd` is a live UDP socket (Socket owns it).
-        //   - `mhdr` is fully initialized above; every pointer field
-        //     is valid for the kernel to read for the duration of
-        //     this call (stack/self, no escapes).
-        //   - `iov_base` points to `b.frames`, which the borrow on
-        //     `b: &EgressBatch` keeps alive.
-        //   - `msg_control` points to `self.cmsg`, kept alive by
-        //     `&mut self`.
-        //   - `flags=0`: the socket is already non-blocking;
-        //     EWOULDBLOCK surfaces as -1/EAGAIN.
-        #[allow(unsafe_code)]
-        let ret = unsafe { libc::sendmsg(self.sock.as_raw_fd(), &raw const mhdr, 0) };
-
-        if ret < 0 {
-            let e = io::Error::last_os_error();
+        // `flags=0`: the socket is already non-blocking; EWOULDBLOCK
+        // surfaces as `Errno::EAGAIN`.
+        if let Err(e) = sendmsg(
+            self.sock.as_raw_fd(),
+            &iov,
+            &cmsg,
+            MsgFlags::empty(),
+            Some(&dst),
+        ) {
             // ENOPROTOOPT: kernel <4.18, doesn't recognize
             // UDP_SEGMENT. Deployment policy excludes this; panic
             // with a clear message rather than silently dropping.
             // The throughput gate would eventually flag it but the
             // failure is loud enough to halt on.
             assert_ne!(
-                e.raw_os_error(),
-                Some(libc::ENOPROTOOPT),
+                e,
+                Errno::ENOPROTOOPT,
                 "kernel rejects UDP_SEGMENT cmsg (requires Linux ≥4.18; \
                  no Linux fallback ladder)"
             );
-            return Err(e);
+            return Err(e.into());
         }
         Ok(())
     }
@@ -235,29 +140,6 @@ mod tests {
     use super::*;
     use socket2::SockAddr;
     use std::net::UdpSocket;
-
-    /// Cmsg layout invariants. If these break, libc changed the
-    /// macro arithmetic and the in-place `gso_size` patch in
-    /// `send_batch` writes to the wrong offset → kernel reads
-    /// garbage `gso_size` → splits at the wrong boundary.
-    #[test]
-    fn cmsg_layout_invariants() {
-        // CMSG_LEN(n) = CMSG_LEN(0) + n. Data offset arithmetic.
-        const { assert!(GSO_CMSG_LEN == GSO_DATA_OFF + 2) };
-        // SPACE ≥ LEN (SPACE adds trailing align for a next cmsg).
-        const { assert!(GSO_CMSG_SPACE >= GSO_CMSG_LEN) };
-        // Data offset is u16-aligned (it's after a size_t-aligned
-        // header, so always even). The to_ne_bytes copy doesn't
-        // need this, but the kernel's `*(__u16*)` read does.
-        const { assert!(GSO_DATA_OFF.is_multiple_of(2)) };
-        // Our align attribute covers cmsghdr's needs.
-        const { assert!(mem::align_of::<GsoCmsgBuf>() >= mem::align_of::<libc::cmsghdr>()) };
-        // The buffer at offset 0 of the wrapper IS the wrapper's
-        // address — #[repr(C)] guarantees no leading padding.
-        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
-        let f = Fast::new(&tx).unwrap();
-        assert_eq!(f.cmsg.0.as_ptr().addr(), (&raw const f.cmsg).addr());
-    }
 
     /// `Fast::send_batch` with `count=1` is one plain `sendto` (no
     /// cmsg). Same wire bytes as `Portable`. The seam is transparent
@@ -420,11 +302,10 @@ mod tests {
         }
     }
 
-    /// Stride changes between batches: the cmsg buffer is reused,
-    /// `gso_size` patched in-place. Ship batch A at stride=8, then
-    /// batch B at stride=12; both split correctly. Regression test
-    /// for the obvious bug where the patch offset is wrong and the
-    /// SECOND batch reuses the FIRST's `gso_size`.
+    /// Stride changes between batches: ship batch A at stride=8,
+    /// then batch B at stride=12; both split correctly. Guards
+    /// against any per-`Fast` state accidentally carrying `gso_size`
+    /// across calls.
     #[test]
     fn fast_gso_stride_changes() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
