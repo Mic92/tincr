@@ -61,7 +61,7 @@
 //! tinc doesn't use real-time signals).
 
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
@@ -167,8 +167,8 @@ impl<W: Copy> SelfPipe<W> {
 
     /// Read-end fd for `EventLoop::add(..., Io::Read, IoWhat::Signal)`.
     #[must_use]
-    pub fn read_fd(&self) -> RawFd {
-        self.rd.as_raw_fd()
+    pub fn read_fd(&self) -> BorrowedFd<'_> {
+        self.rd.as_fd()
     }
 
     /// Installs the handler for `signum` and stores `what` in the

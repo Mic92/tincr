@@ -17,7 +17,7 @@
 //! Closing is the `connection_t` equivalent's job.
 
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -125,7 +125,8 @@ impl<W: Copy> EventLoop<W> {
     /// # Errors
     /// Propagates `epoll_ctl(ADD)` failures — `EEXIST` if the fd is
     /// already registered, `EBADF`/`ENOMEM` from the kernel.
-    pub fn add(&mut self, fd: RawFd, interest: Io, what: W) -> io::Result<IoId> {
+    pub fn add(&mut self, fd: BorrowedFd<'_>, interest: Io, what: W) -> io::Result<IoId> {
+        let raw = fd.as_raw_fd();
         let idx = self.free.pop().unwrap_or_else(|| {
             self.slots.push(None);
             self.slots.len() - 1
@@ -140,7 +141,7 @@ impl<W: Copy> EventLoop<W> {
             return Err(e);
         }
         self.slots[idx] = Some(Slot {
-            fd,
+            fd: raw,
             interest: Some(interest),
             what,
         });
@@ -171,7 +172,11 @@ impl<W: Copy> EventLoop<W> {
         // so we never get here with None and a live id. The expect
         // above would have fired. But: ADD-not-MOD if interest was
         // None, for symmetry with what del would do).
-        let fd = slot.fd;
+        // SAFETY: `slot.fd` was stored from a live `BorrowedFd` in
+        // `add()`. Caller contract is the fd outlives its `IoId`
+        // (deregister BEFORE close — see `del()` EBADF tripwire).
+        #[allow(unsafe_code)]
+        let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
         if slot.interest.is_some() {
             modify(&self.ep, fd, id.0, interest)?;
         } else {
@@ -210,7 +215,11 @@ impl<W: Copy> EventLoop<W> {
             // ERR|HUP into a freed slot. Tripwire it in debug —
             // would have caught the connecting_socks leak in tincd
             // at first integration-test run instead of in prod.
-            if let Err(e) = del(&self.ep, slot.fd) {
+            // SAFETY: same contract as `set()` above. If the caller
+            // already closed it we get EBADF, asserted below.
+            #[allow(unsafe_code)]
+            let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
+            if let Err(e) = del(&self.ep, fd) {
                 debug_assert_ne!(
                     e.raw_os_error(),
                     Some(libc::EBADF),
@@ -346,7 +355,7 @@ impl<W: Copy> EventLoop<W> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::AsFd;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum What {
@@ -388,7 +397,7 @@ mod tests {
     fn add_and_turn_reads() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, mut wr) = mkpipe();
-        let id = ev.add(rd.as_raw_fd(), Io::Read, What::Device).unwrap();
+        let id = ev.add(rd.as_fd(), Io::Read, What::Device).unwrap();
 
         // Nothing ready yet — short timeout, expect empty.
         let mut out = Vec::new();
@@ -415,7 +424,7 @@ mod tests {
     fn set_same_interest_noop() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();
-        let id = ev.add(rd.as_raw_fd(), Io::Read, What::Device).unwrap();
+        let id = ev.add(rd.as_fd(), Io::Read, What::Device).unwrap();
 
         // Same interest, repeatedly.
         ev.set(id, Io::Read).unwrap();
@@ -436,7 +445,7 @@ mod tests {
         let (rd, wr) = mkpipe();
         // Register the WRITE end for WRITE interest. Pipes are
         // immediately writable (until the buffer fills).
-        let id = ev.add(wr.as_raw_fd(), Io::Write, What::Conn(1)).unwrap();
+        let id = ev.add(wr.as_fd(), Io::Write, What::Conn(1)).unwrap();
 
         let mut out = Vec::new();
         ev.turn(Some(Duration::from_millis(100)), &mut out).unwrap();
@@ -464,7 +473,7 @@ mod tests {
     fn del_idempotent() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();
-        let id = ev.add(rd.as_raw_fd(), Io::Read, What::Device).unwrap();
+        let id = ev.add(rd.as_fd(), Io::Read, What::Device).unwrap();
         assert_eq!(ev.len(), 1);
 
         ev.del(id);
@@ -504,7 +513,7 @@ mod tests {
     fn del_makes_what_none() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();
-        let id = ev.add(rd.as_raw_fd(), Io::Read, What::Device).unwrap();
+        let id = ev.add(rd.as_fd(), Io::Read, What::Device).unwrap();
         assert_eq!(ev.what(id), Some(What::Device));
         ev.del(id);
         assert_eq!(ev.what(id), None);
@@ -518,9 +527,9 @@ mod tests {
         let (rd1, _wr1) = mkpipe();
         let (rd2, _wr2) = mkpipe();
 
-        let id1 = ev.add(rd1.as_raw_fd(), Io::Read, What::Conn(1)).unwrap();
+        let id1 = ev.add(rd1.as_fd(), Io::Read, What::Conn(1)).unwrap();
         ev.del(id1);
-        let id2 = ev.add(rd2.as_raw_fd(), Io::Read, What::Conn(2)).unwrap();
+        let id2 = ev.add(rd2.as_fd(), Io::Read, What::Conn(2)).unwrap();
 
         assert_eq!(id1.0, id2.0, "freelist reused slot");
         // But the what is the new one.
@@ -552,7 +561,7 @@ mod tests {
         let mut ev = EventLoop::new().unwrap();
         // Register `b` for both. It's immediately writable (empty
         // sendbuf). Make it readable too by writing to `a`.
-        let id = ev.add(b.as_raw_fd(), Io::ReadWrite, What::Conn(7)).unwrap();
+        let id = ev.add(b.as_fd(), Io::ReadWrite, What::Conn(7)).unwrap();
         a.write_all(b"hello").unwrap();
 
         let mut out = Vec::new();
@@ -582,13 +591,12 @@ mod tests {
     fn add_failure_frees_slot() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();
-        let fd = rd.as_raw_fd();
 
-        let id1 = ev.add(fd, Io::Read, What::Device).unwrap();
+        let id1 = ev.add(rd.as_fd(), Io::Read, What::Device).unwrap();
         assert_eq!(ev.len(), 1);
 
         // Same fd again — epoll EEXIST.
-        let err = ev.add(fd, Io::Read, What::Conn(99)).unwrap_err();
+        let err = ev.add(rd.as_fd(), Io::Read, What::Conn(99)).unwrap_err();
         // Linux: EEXIST. Don't pin the exact errno, just that it
         // failed and didn't leak a slot.
         let _ = err;
