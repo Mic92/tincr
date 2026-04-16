@@ -1045,6 +1045,14 @@ impl Daemon {
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
 
+        // Only honour the clamp if the reporting conn is on-path to `from`.
+        let on_path = parsed.from == conn_name
+            || self
+                .node_ids
+                .get(&parsed.from)
+                .and_then(|&nid| self.conn_for_nexthop(nid))
+                == Some(from_conn);
+
         let from = self.node_ids.get(&parsed.from).copied().map(|nid| {
             // Supply zero defaults for missing tunnel state.
             let t = self.dp.tunnels.get(&nid);
@@ -1074,12 +1082,18 @@ impl Daemon {
                 Ok(false)
             }
             MtuInfoAction::ClampAndForward { from, to, new_mtu } => {
-                // Provisional mtu (probing will overwrite). Only
-                // matters if pmtu seeded; unseeded reads MTU anyway.
-                log::debug!(target: "tincd::proto",
-                            "Using provisional MTU {new_mtu} for {}", parsed.from);
-                if let Some(p) = self.dp.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
-                    p.mtu = new_mtu;
+                if on_path {
+                    // Provisional mtu (probing will overwrite). Only
+                    // matters if pmtu seeded; unseeded reads MTU anyway.
+                    log::debug!(target: "tincd::proto",
+                                "Using provisional MTU {new_mtu} for {}", parsed.from);
+                    if let Some(p) = self.dp.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
+                        p.mtu = new_mtu;
+                    }
+                } else {
+                    log::debug!(target: "tincd::proto",
+                                "Ignoring off-path MTU_INFO for {} via {conn_name}",
+                                parsed.from);
                 }
                 Ok(self.send_mtu_info_from(from, to, &parsed.to, i32::from(new_mtu), false))
             }
