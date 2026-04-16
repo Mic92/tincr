@@ -307,9 +307,29 @@ impl Daemon {
         Some((DispatchResult::Ok, nw))
     }
 
+    /// Dump-arm tail: re-fetch `&mut conn`, `send_dump` rows +
+    /// bare-header terminator.
+    fn ctl_send_dump(
+        &mut self,
+        id: ConnId,
+        rows: Vec<String>,
+        req: i32,
+    ) -> (DispatchResult, bool) {
+        let conn = self.conns.get_mut(id).expect("not terminated");
+        let nw = conn.send_dump(rows, req);
+        (DispatchResult::Ok, nw)
+    }
+
+    /// Simple-ack tail: `"{Control} {req} {result}"`.
+    fn ctl_ack(&mut self, id: ConnId, req: i32, result: i32) -> (DispatchResult, bool) {
+        let conn = self.conns.get_mut(id).expect("not terminated");
+        let nw = conn.send(format_args!("{} {} {}", Request::Control as u8, req, result));
+        (DispatchResult::Ok, nw)
+    }
+
     /// CONTROL request dispatch. Dump arms: build rows with `&self`
-    /// borrowed, drop it, re-fetch `&mut conn`, then `send_dump`
-    /// writes rows + the bare-header terminator.
+    /// borrowed, drop it, then `ctl_send_dump`. Ack arms: do the
+    /// side-effect, then `ctl_ack`.
     fn dispatch_control(&mut self, id: ConnId, line: &[u8]) -> (DispatchResult, bool) {
         let conn = self.conns.get_mut(id).expect("dispatched from live conn");
         let (r, nw) = handle_control(conn, line);
@@ -327,19 +347,13 @@ impl Daemon {
                     )
                 })
                 .collect();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_SUBNETS);
-            (DispatchResult::Ok, nw2)
+            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_SUBNETS)
         } else if matches!(r, DispatchResult::DumpNodes) {
             let rows = self.dump_nodes_rows();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_NODES);
-            (DispatchResult::Ok, nw2)
+            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_NODES)
         } else if matches!(r, DispatchResult::DumpEdges) {
             let rows = self.dump_edges_rows();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_EDGES);
-            (DispatchResult::Ok, nw2)
+            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_EDGES)
         } else if matches!(r, DispatchResult::DumpConnections) {
             let rows: Vec<String> = self
                 .conns
@@ -358,37 +372,18 @@ impl Daemon {
                     )
                 })
                 .collect();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_CONNECTIONS);
-            (DispatchResult::Ok, nw2)
+            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_CONNECTIONS)
         } else if matches!(r, DispatchResult::Reload) {
             // CLI only checks zero/nonzero.
             let result = i32::from(!self.reload_configuration());
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send(format_args!(
-                "{} {} {result}",
-                Request::Control as u8,
-                crate::proto::REQ_RELOAD
-            ));
-            (DispatchResult::Ok, nw2)
+            self.ctl_ack(id, crate::proto::REQ_RELOAD, result)
         } else if matches!(r, DispatchResult::Retry) {
             self.on_retry();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send(format_args!(
-                "{} {} 0",
-                Request::Control as u8,
-                crate::proto::REQ_RETRY
-            ));
-            (DispatchResult::Ok, nw2)
+            self.ctl_ack(id, crate::proto::REQ_RETRY, 0)
         } else if matches!(r, DispatchResult::Purge) {
             let nw_purge = self.purge();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send(format_args!(
-                "{} {} 0",
-                Request::Control as u8,
-                crate::proto::REQ_PURGE
-            ));
-            (DispatchResult::Ok, nw_purge | nw2)
+            let (r, nw2) = self.ctl_ack(id, crate::proto::REQ_PURGE, 0);
+            (r, nw_purge | nw2)
         } else if let DispatchResult::SetDebug(level) = r {
             // Reply with PREVIOUS level. `level >= 0` → update;
             // `< 0` → query-only. None → terminate ctl conn (the
@@ -398,13 +393,7 @@ impl Daemon {
                 return (DispatchResult::Drop, false);
             };
             let prev = crate::log_tap::set_debug_level(level);
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send(format_args!(
-                "{} {} {prev}",
-                Request::Control as u8,
-                crate::proto::REQ_SET_DEBUG
-            ));
-            (DispatchResult::Ok, nw2)
+            self.ctl_ack(id, crate::proto::REQ_SET_DEBUG, prev)
         } else if let DispatchResult::Disconnect(name) = r {
             // Walk conns, terminate by name. `terminate()` keys
             // DEL_EDGE on `conn.active` already. Control conns are
@@ -428,18 +417,10 @@ impl Daemon {
             };
             // `terminate()` only touches the matched conn;
             // the ctl conn `id` is still here.
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send(format_args!(
-                "{} {} {result}",
-                Request::Control as u8,
-                crate::proto::REQ_DISCONNECT
-            ));
-            (DispatchResult::Ok, nw2)
+            self.ctl_ack(id, crate::proto::REQ_DISCONNECT, result)
         } else if matches!(r, DispatchResult::DumpTraffic) {
             let rows = self.dump_traffic_rows();
-            let conn = self.conns.get_mut(id).expect("not terminated");
-            let nw2 = conn.send_dump(rows, crate::proto::REQ_DUMP_TRAFFIC);
-            (DispatchResult::Ok, nw2)
+            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_TRAFFIC)
         } else if let DispatchResult::Log(level) = r {
             // No reply. The conn now passively receives log records
             // via `flush_log_tap`.
