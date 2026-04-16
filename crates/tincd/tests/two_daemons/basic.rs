@@ -1,5 +1,8 @@
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+
 use super::common::*;
 use super::node::*;
 
@@ -380,11 +383,9 @@ fn ping_pong_keepalive() {
     // → terminate. The TCP socket stays open (kernel buffers the
     // PING bytes until alice wakes); only the application-layer
     // timeout fires.
-    // SAFETY: kill() with SIGSTOP on a valid pid. The child is
-    // alive (we just polled it).
     #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
-    let alice_pid = alice_child.id() as libc::pid_t;
-    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGSTOP) }, 0);
+    let alice_pid = Pid::from_raw(alice_child.id() as i32);
+    kill(alice_pid, Signal::SIGSTOP).expect("kill SIGSTOP");
 
     // PingTimeout=3 + 2s slop. Bob's sweep needs: one tick to
     // notice idle (>pinginterval since last_ping_time) and send
@@ -399,7 +400,7 @@ fn ping_pong_keepalive() {
     // sees EOF → terminate → outgoing retry. The retry connects; the handshake runs; ACK; both active
     // again. The retry is immediate (`timeout = 0` after a conn
     // that reached ACK).
-    assert_eq!(unsafe { libc::kill(alice_pid, libc::SIGCONT) }, 0);
+    kill(alice_pid, Signal::SIGCONT).expect("kill SIGCONT");
 
     poll_until(Duration::from_secs(10), || {
         let b = bob_ctl.dump(6);

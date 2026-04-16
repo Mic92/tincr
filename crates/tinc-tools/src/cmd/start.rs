@@ -255,27 +255,38 @@ fn use_ansi_escapes_stderr() -> bool {
 // that's where CARGO_BIN_EXE_tincd is available.
 
 #[cfg(test)]
-// set_var/remove_var are unsafe in edition 2024 (multi-threaded
-// env-mutation race). nextest runs each test in its own process so
-// the race doesn't apply, but the lint doesn't know that. The
-// `unsafe` is purely for env mutation — `start()` itself is
-// unsafe-free.
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    /// RAII env-var setter. `set_var`/`remove_var` are unsafe in
+    /// edition 2024 (multi-threaded env-mutation race). Consolidate
+    /// the unsafe here so call sites are safe and cleanup is
+    /// panic-safe (Drop runs even if an assert between set and
+    /// remove panics).
+    struct EnvGuard(&'static str);
+    impl EnvGuard {
+        #[allow(unsafe_code)]
+        fn set(k: &'static str, v: impl AsRef<OsStr>) -> Self {
+            // SAFETY: nextest runs each test in its own process; no
+            // env-mutation race with parallel tests.
+            unsafe { std::env::set_var(k, v) };
+            Self(k)
+        }
+    }
+    impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: same as `set` — single-threaded test process.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
 
     /// `TINCD_PATH` env wins.
     #[test]
     fn find_tincd_env_override() {
-        // SAFETY: nextest runs each test in its own process; no
-        // env-mutation race with parallel tests.
-        unsafe {
-            std::env::set_var("TINCD_PATH", "/custom/tincd");
-        }
+        let _env = EnvGuard::set("TINCD_PATH", "/custom/tincd");
         assert_eq!(find_tincd(), PathBuf::from("/custom/tincd"));
-        unsafe {
-            std::env::remove_var("TINCD_PATH");
-        }
     }
 
     /// Daemon-not-running → proceed past the connect check, attempt
@@ -299,14 +310,8 @@ mod tests {
 
         // /bin/true: exits 0 without writing to the umbilical →
         // EOF immediately → failure stays at its true initializer.
-        // SAFETY: nextest runs each test in its own process.
-        unsafe {
-            std::env::set_var("TINCD_PATH", "/bin/true");
-        }
+        let _env = EnvGuard::set("TINCD_PATH", "/bin/true");
         let r = start(&paths, &[]);
-        unsafe {
-            std::env::remove_var("TINCD_PATH");
-        }
 
         let err = r.unwrap_err();
         assert!(err.to_string().contains("Error starting"), "got: {err}");
@@ -331,14 +336,8 @@ mod tests {
             ..Default::default()
         });
 
-        // SAFETY: nextest runs each test in its own process.
-        unsafe {
-            std::env::set_var("TINCD_PATH", "/bin/true");
-        }
+        let _env = EnvGuard::set("TINCD_PATH", "/bin/true");
         let r = start(&paths, &[]);
-        unsafe {
-            std::env::remove_var("TINCD_PATH");
-        }
 
         // Got past the connect check (didn't early-return Ok), and
         // the error is from the umbilical drain, not a CtlError.
