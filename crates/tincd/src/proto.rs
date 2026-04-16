@@ -840,6 +840,16 @@ pub fn record_body(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
 
+/// Nth whitespace-separated token of `line` as `&str` (skips empty tokens,
+/// i.e. runs of whitespace collapse). Helper for `handle_control`'s
+/// `sscanf("%*d %*d %d", ...)`-style parses.
+fn nth_token(line: &[u8], n: usize) -> Option<&str> {
+    line.split(|&b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .nth(n)
+        .and_then(|t| std::str::from_utf8(t).ok())
+}
+
 /// `control_h`. Line: `"18 <subtype> [args...]"`. Never `Drop` —
 /// `control_h` always returns `true`; CLI closes its end.
 ///
@@ -847,11 +857,7 @@ pub fn record_body(bytes: &[u8]) -> &[u8] {
 #[allow(clippy::single_match_else)] // this is the C switch; arms accrete as ctl subcommands land
 pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
     // `sscanf("%*d %d", &type)`.
-    let subtype = line
-        .split(|&b| b.is_ascii_whitespace())
-        .nth(1)
-        .and_then(|t| std::str::from_utf8(t).ok())
-        .and_then(|s| s.parse::<i32>().ok());
+    let subtype = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());
 
     match subtype {
         // Daemon does the walk/reload (it has the slotmap).
@@ -868,12 +874,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // token. `%d` accepts negative — the CLI never sends
             // one, but the gate is `>= 0` so it's a
             // valid query-only path.
-            let level = line
-                .split(|&b| b.is_ascii_whitespace())
-                .filter(|t| !t.is_empty())
-                .nth(2)
-                .and_then(|t| std::str::from_utf8(t).ok())
-                .and_then(|s| s.parse::<i32>().ok());
+            let level = nth_token(line, 2).and_then(|s| s.parse::<i32>().ok());
             // Surface to daemon: it has the log_tap atomic. The
             // daemon arm Drops on None (`return false`).
             (DispatchResult::SetDebug(level), false)
@@ -883,11 +884,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // whitespace token. `%s` stops at whitespace; we do too.
             // `check_id` not in C here — it just strcmp's against the
             // conn-list — so don't add it (a bad name simply won't match).
-            let name = line
-                .split(|&b| b.is_ascii_whitespace())
-                .filter(|t| !t.is_empty())
-                .nth(2)
-                .and_then(|t| std::str::from_utf8(t).ok())
+            let name = nth_token(line, 2)
                 .filter(|s| s.len() <= tinc_proto::MAX_STRING)
                 .map(str::to_owned);
             (DispatchResult::Disconnect(name), false)
@@ -902,11 +899,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // DEBUG_SCARY_THINGS)` = `[-1, 10]`. The daemon arm
             // maps to `log::Level`; clamp happens implicitly (the
             // C-to-Level table has a `_` arm).
-            let level = line
-                .split(|&b| b.is_ascii_whitespace())
-                .filter(|t| !t.is_empty())
-                .nth(2)
-                .and_then(|t| std::str::from_utf8(t).ok())
+            let level = nth_token(line, 2)
                 .and_then(|s| s.parse::<i32>().ok())
                 .unwrap_or(0);
             (DispatchResult::Log(level), false)
@@ -922,11 +915,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // `int` and would overflow). The CLI sends 0 or small
             // positive (`stream.rs:537`). We clamp negative → 0, and
             // saturate to u16 (snaplen > MTU is functionally ∞ anyway).
-            let snaplen = line
-                .split(|&b| b.is_ascii_whitespace())
-                .filter(|t| !t.is_empty())
-                .nth(2)
-                .and_then(|t| std::str::from_utf8(t).ok())
+            let snaplen = nth_token(line, 2)
                 .and_then(|s| s.parse::<i32>().ok())
                 .filter(|&n| n > 0)
                 .map_or(0u16, |n| u16::try_from(n).unwrap_or(u16::MAX));
