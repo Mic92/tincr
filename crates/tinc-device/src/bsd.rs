@@ -41,7 +41,7 @@
 //! dropped (external library deps).
 
 use std::io;
-use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
@@ -225,7 +225,7 @@ impl Device for BsdTun {
 
         let offset = self.variant.read_offset();
         // The slice does the offset arithmetic.
-        let n = read_fd(self.fd.as_raw_fd(), &mut buf[offset..MTU])?;
+        let n = read_fd(self.fd.as_fd(), &mut buf[offset..MTU])?;
 
         // `read_fd` already converted `<0`. `==0` is EOF. BSD
         // TUN/utun: doesn't EOF in normal operation (like Linux
@@ -316,7 +316,7 @@ impl Device for BsdTun {
             // ─── TUN: write at +14, strip ether
             // The daemon wrote a full ether header (route.c always
             // does); we strip it. Byte-identical to `fd.rs`.
-            BsdVariant::Tun => write_fd(self.fd.as_raw_fd(), &buf[ETH_HLEN..]),
+            BsdVariant::Tun => write_fd(self.fd.as_fd(), &buf[ETH_HLEN..]),
 
             // ─── UTUN: synthesize prefix, write at +10
             // The novel arm. Read ethertype from `[12..14]`, map
@@ -349,12 +349,12 @@ impl Device for BsdTun {
                 // both are throwaway now.
                 let offset = ETH_HLEN - AF_PREFIX_LEN; // = 10
                 buf[offset..ETH_HLEN].copy_from_slice(&prefix);
-                write_fd(self.fd.as_raw_fd(), &buf[offset..])
+                write_fd(self.fd.as_fd(), &buf[offset..])
             }
 
             // ─── TAP: +0, write all
             // `raw.rs` verbatim.
-            BsdVariant::Tap => write_fd(self.fd.as_raw_fd(), buf),
+            BsdVariant::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
 
@@ -378,6 +378,12 @@ impl Device for BsdTun {
 
     fn fd(&self) -> Option<RawFd> {
         Some(self.fd.as_raw_fd())
+    }
+}
+
+impl AsFd for BsdTun {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 }
 

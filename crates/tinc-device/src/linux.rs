@@ -45,7 +45,7 @@
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
@@ -161,7 +161,7 @@ impl Tun {
         // `*const` which documents the wrong contract).
         //
         // Returns the kernel-chosen `ifr_name` (read back post-ioctl).
-        let iface = tunsetiff(fd.as_raw_fd(), flags, ifr_name)?;
+        let iface = tunsetiff(fd.as_fd(), flags, ifr_name)?;
 
         // ─── SIOCGIFHWADDR (TAP only)
         // The MAC is kernel-generated (random with the locally-
@@ -173,7 +173,7 @@ impl Tun {
         // would send all-zeros source MAC, which is invalid but
         // Port the warning-not-error.
         let mac = match cfg.mode {
-            Mode::Tap => siocgifhwaddr(fd.as_raw_fd()).ok(),
+            Mode::Tap => siocgifhwaddr(fd.as_fd()).ok(),
             Mode::Tun => None,
         };
 
@@ -187,7 +187,7 @@ impl Tun {
         // drain() handles that: strip header, single frame. Degrades
         // gracefully.
         if cfg.mode == Mode::Tun {
-            match tunsetoffload(fd.as_raw_fd()) {
+            match tunsetoffload(fd.as_fd()) {
                 Ok(()) => {
                     log::info!(target: "tinc_device",
                                "TSO ingest enabled: IFF_VNET_HDR + TUNSETOFFLOAD");
@@ -291,13 +291,13 @@ impl Tun {
                 .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
                 .open(device)?;
 
-            let iface = tunsetiff(fd.as_raw_fd(), flags, ifr_name)?;
+            let iface = tunsetiff(fd.as_fd(), flags, ifr_name)?;
 
             // Offload is per-netdev. Once. Same feature-detect
             // warning as Tun::open: failure means vnet_hdr is on
             // but gso_type stays NONE — drain handles that.
             if k == 0
-                && let Err(e) = tunsetoffload(fd.as_raw_fd())
+                && let Err(e) = tunsetoffload(fd.as_fd())
             {
                 log::warn!(target: "tinc_device",
                            "TUNSETOFFLOAD failed on multiqueue: {e}; \
@@ -395,7 +395,7 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
 /// `CStr::from_bytes_until_nul` and convert.
 #[allow(unsafe_code)]
 fn tunsetiff(
-    fd: RawFd,
+    fd: BorrowedFd<'_>,
     flags: i16,
     ifr_name: [libc::c_char; libc::IFNAMSIZ],
 ) -> io::Result<String> {
@@ -427,7 +427,7 @@ fn tunsetiff(
     //
     // `&raw mut` not `&mut`: same `clippy::borrow_as_ptr` as
     // `tui.rs`'s `winsize`. Explicit place-to-pointer.
-    let ret = unsafe { libc::ioctl(fd, libc::TUNSETIFF, &raw mut ifr) };
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TUNSETIFF, &raw mut ifr) };
     if ret < 0 {
         // `from_raw_os_error(errno)`. `last_os_error()` reads
         // `errno` (thread-local on Linux glibc, process-global
@@ -481,7 +481,7 @@ const TUN_F_TSO4: libc::c_uint = 0x02;
 const TUN_F_TSO6: libc::c_uint = 0x04;
 
 #[allow(unsafe_code)]
-fn tunsetoffload(fd: RawFd) -> io::Result<()> {
+fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
     let flags = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
     // SAFETY:
     //   - `fd` is the post-TUNSETIFF TUN fd. Valid.
@@ -494,7 +494,7 @@ fn tunsetoffload(fd: RawFd) -> io::Result<()> {
     //   - Kernel writes nothing back (no pointer to write to).
     //   - `EINVAL` if any unknown flag bit is set (`tun.c:2886`).
     //     Our three flags are kernel 2.6.27.
-    let ret = unsafe { libc::ioctl(fd, TUNSETOFFLOAD, libc::c_ulong::from(flags)) };
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETOFFLOAD, libc::c_ulong::from(flags)) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -506,7 +506,7 @@ fn tunsetoffload(fd: RawFd) -> io::Result<()> {
 /// Uses `ifr_ifru.ifru_hwaddr: sockaddr`. The MAC is in `sa_data
 /// [0..6]` (the rest of `sockaddr` is unused/garbage for hwaddr).
 #[allow(unsafe_code)]
-fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
+fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // The kernel reads NOTHING from this ifreq — `SIOCGIFHWADDR`
     // on a TUN/TAP fd
     // ignores `ifr_name` (the fd already names the device). Zeroed
@@ -528,7 +528,7 @@ fn siocgifhwaddr(fd: RawFd) -> io::Result<Mac> {
     //     (reading the MAC doesn't lock). Concurrent calls on the
     //     same fd would race-read the same MAC → same result.
     //     Doesn't happen (called once from `Tun::open`).
-    let ret = unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR, &raw mut ifr) };
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFHWADDR, &raw mut ifr) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -584,7 +584,7 @@ impl Device for Tun {
             buf.len()
         );
         let dst = &mut buf[..MTU];
-        let n = read_fd(self.fd.as_raw_fd(), dst)?;
+        let n = read_fd(self.fd.as_fd(), dst)?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -625,12 +625,12 @@ impl Device for Tun {
                 buf[13] = 0;
                 // `4 = ETH_HLEN - VNET_HDR_LEN`. Write from there:
                 // 10 zero bytes (vnet_hdr) + IP packet.
-                write_fd(self.fd.as_raw_fd(), &buf[ETH_HLEN - VNET_HDR_LEN..])
+                write_fd(self.fd.as_fd(), &buf[ETH_HLEN - VNET_HDR_LEN..])
             }
 
             // ─── TAP
             // Direct write.
-            Mode::Tap => write_fd(self.fd.as_raw_fd(), buf),
+            Mode::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
 
@@ -645,7 +645,7 @@ impl Device for Tun {
     /// default.
     fn write_super(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.mode {
-            Mode::Tun => write_fd(self.fd.as_raw_fd(), buf),
+            Mode::Tun => write_fd(self.fd.as_fd(), buf),
             Mode::Tap => Err(io::ErrorKind::Unsupported.into()),
         }
     }
@@ -721,7 +721,7 @@ impl Device for Tun {
         // daemon side handles the loop — see the `Super` arm in
         // `net.rs::on_device_read`.
         let buf = arena.as_contiguous_mut();
-        let n = match read_fd(self.fd.as_raw_fd(), buf) {
+        let n = match read_fd(self.fd.as_fd(), buf) {
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -801,6 +801,12 @@ impl Device for Tun {
                 })
             }
         }
+    }
+}
+
+impl AsFd for Tun {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 }
 
