@@ -103,7 +103,11 @@ impl<W: Copy> Timers<W> {
         if let Some(old_key) = slot.at.take() {
             self.by_deadline.remove(&old_key);
         }
-        let when = self.now + after;
+        // Saturate instead of panicking on absurd `after` values.
+        let when = self
+            .now
+            .checked_add(after)
+            .unwrap_or_else(|| self.now + Duration::from_secs(86400 * 365));
         self.seq += 1;
         let key = (when, self.seq);
         slot.at = Some(key);

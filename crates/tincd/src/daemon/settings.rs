@@ -16,6 +16,10 @@ use crate::{broadcast, compress, mac_lease};
 
 use super::SetupError;
 
+// Upper bound for duration-ish config values fed into Instant arithmetic.
+const MAX_DURATION_SECS: u32 = 365 * 24 * 3600; // 1 year
+const MAX_REPLAY_WINDOW: usize = 1 << 20;
+
 /// Reloadable config knobs. Separate from `Daemon` so SIGHUP can
 /// swap it wholesale. `Default` matches upstream tinc defaults.
 #[derive(Debug, Clone)]
@@ -293,7 +297,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         && let Ok(v) = u32::try_from(v)
         && v >= 1
     {
-        settings.pinginterval = v;
+        settings.pinginterval = v.min(MAX_DURATION_SECS);
     }
     // Clamped to [1, pinginterval].
     if let Some(e) = config.lookup("PingTimeout").next()
@@ -321,7 +325,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         && let Ok(v) = u32::try_from(v)
         && v >= 1
     {
-        settings.maxtimeout = v;
+        settings.maxtimeout = v.min(MAX_DURATION_SECS);
     }
     if let Some(e) = config.lookup("DecrementTTL").next()
         && let Ok(v) = e.get_bool()
@@ -406,7 +410,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         && let Ok(v) = e.get_int()
         && let Ok(v) = usize::try_from(v)
     {
-        settings.replaywin = v;
+        settings.replaywin = v.min(MAX_REPLAY_WINDOW);
     }
     if let Some(e) = config.lookup("UDPInfoInterval").next()
         && let Ok(v) = e.get_int()
@@ -437,7 +441,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         && let Ok(v) = e.get_int()
         && let Ok(v) = u64::try_from(v)
     {
-        settings.macexpire = v;
+        settings.macexpire = v.min(u64::from(MAX_DURATION_SECS));
     }
     if let Some(e) = config.lookup("MaxOutputBufferSize").next()
         && let Ok(v) = e.get_int()
@@ -455,7 +459,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         && let Ok(v) = e.get_int()
         && let Ok(v) = u32::try_from(v)
     {
-        settings.keylifetime = v;
+        settings.keylifetime = v.min(MAX_DURATION_SECS);
     }
 }
 
