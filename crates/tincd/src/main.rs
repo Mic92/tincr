@@ -578,6 +578,16 @@ fn cut_umbilical() {
     else {
         return;
     };
+    // Reject stdio (and negatives). C tinc's `if(fcntl(...)<0)
+    // umbilical = 0` partially guarded this (fd 0 ≡ disabled);
+    // we tighten to fd>2 — `tinc start` always passes a socketpair
+    // half (≥3), and taking ownership of 0/1/2 via from_raw_fd
+    // would close stdio and let the next open() reuse the slot.
+    if fd <= 2 {
+        log::warn!(target: "tincd",
+            "TINC_UMBILICAL={spec}: fd {fd} is stdio/invalid, ignoring");
+        return;
+    }
     // `if(fcntl(umbilical, F_GETFL) < 0) umbilical = 0`.
     // Validates the fd is real — inherited across the exec, not just
     // a stale number in the env. F_GETFL on a closed fd is EBADF.
