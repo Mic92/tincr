@@ -636,6 +636,10 @@ impl Daemon {
         match action {
             AutoAction::Noop => {}
             AutoAction::Connect { name } => {
+                // dedup: a served (pre-ACK) slot isn't in pending_outgoings, so decide() can re-pick it
+                if self.outgoings.values().any(|o| o.node_name == name) {
+                    return;
+                }
                 // Same path as setup()'s ConnectTo loop.
                 log::info!(target: "tincd",
                            "Autoconnecting to {name}");
