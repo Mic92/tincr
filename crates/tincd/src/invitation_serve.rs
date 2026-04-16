@@ -198,7 +198,7 @@ pub fn serve_cookie(
 ///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
 pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf, ServeError> {
     // :122-126
-    if pubkey_b64.contains('\n') {
+    if pubkey_b64.len() > 128 || pubkey_b64.contains('\n') {
         return Err(ServeError::BadPubkey);
     }
 
