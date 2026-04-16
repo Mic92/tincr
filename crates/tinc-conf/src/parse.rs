@@ -208,6 +208,11 @@ pub fn parse_file(path: impl AsRef<Path>) -> Result<Vec<Entry>, ReadError> {
     parse_reader(f, path)
 }
 
+/// Hard cap on a single config line. Comfortably fits PEM armor and long Subnet lists.
+pub const MAX_LINE_LEN: usize = 4096;
+/// Hard cap on parsed entries per file.
+pub const MAX_ENTRIES: usize = 4096;
+
 /// Same as [`parse_file`] but over an arbitrary `Read`. The `path` is
 /// for diagnostics only (stamped into each [`Entry::source`]).
 ///
@@ -225,6 +230,13 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
         // enumerate() is usize; truncates only at 4B-line config files.
         #[allow(clippy::cast_possible_truncation)] // 4B-line config files don't exist
         let lineno = (i + 1) as u32;
+        if line.len() > MAX_LINE_LEN {
+            return Err(ReadError::LineTooLong {
+                path: path.to_owned(),
+                line: lineno,
+                max: MAX_LINE_LEN,
+            });
+        }
 
         // C order matters here: blank/comment check is *before* the
         // PEM state machine, so a `#` or blank inside a PEM block would
@@ -253,7 +265,15 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
         ) {
             None => {} // all-whitespace; skip
             Some(Err(e)) => return Err(ReadError::Parse(e)),
-            Some(Ok(e)) => entries.push(e),
+            Some(Ok(e)) => {
+                if entries.len() >= MAX_ENTRIES {
+                    return Err(ReadError::TooManyEntries {
+                        path: path.to_owned(),
+                        max: MAX_ENTRIES,
+                    });
+                }
+                entries.push(e);
+            }
         }
     }
 
@@ -273,6 +293,12 @@ pub enum ReadError {
     /// `parse_config_line` returned NULL.
     #[error("{0}")]
     Parse(#[source] ParseError),
+    /// Line exceeded [`MAX_LINE_LEN`].
+    #[error("line {line} exceeds {max} bytes in config file {}", path.display())]
+    LineTooLong { path: PathBuf, line: u32, max: usize },
+    /// Entry count exceeded [`MAX_ENTRIES`].
+    #[error("config file {} has more than {max} entries", path.display())]
+    TooManyEntries { path: PathBuf, max: usize },
 }
 
 // ────────────────────────────────────────────────────────────────────
