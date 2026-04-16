@@ -26,6 +26,7 @@
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha512;
+use zeroize::Zeroizing;
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -46,7 +47,7 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
     // Mirror the C buffer exactly: [A(i) | seed]. Starting with A(0) = zeros
     // is the load-bearing tinc-specific quirk. Allocating per call is fine;
     // this runs once per handshake, not per packet.
-    let mut data = vec![0u8; MD_LEN + seed.len()];
+    let mut data = Zeroizing::new(vec![0u8; MD_LEN + seed.len()]);
     data[MD_LEN..].copy_from_slice(seed);
 
     let mut written = 0;
@@ -54,13 +55,13 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
         // Inner HMAC: A(i) = HMAC(secret, A(i-1) ++ seed).
         // Result overwrites the first MD_LEN bytes of `data`, so the seed
         // tail stays put for the next iteration — same trick the C code uses.
-        let a_i = hmac(secret, &data);
-        data[..MD_LEN].copy_from_slice(&a_i);
+        let a_i = Zeroizing::new(hmac(secret, &data));
+        data[..MD_LEN].copy_from_slice(&*a_i);
 
         // Outer HMAC: emit one chunk. Same input as inner, but with the
         // *updated* A(i) prefix. (Yes, two HMACs over the same buffer per
         // chunk. RFC 4346 designed it that way.)
-        let chunk = hmac(secret, &data);
+        let chunk = Zeroizing::new(hmac(secret, &data));
 
         // Partial-chunk handling for the final iteration. The C code has an
         // explicit if/else here with a temp buffer; slicing achieves the same.
