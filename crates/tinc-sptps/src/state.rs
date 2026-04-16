@@ -1102,10 +1102,16 @@ impl Sptps {
     ) -> Result<(), SptpsError> {
         match self.state {
             State::SecondaryKex | State::Kex => {
-                // C uses fall-through: SECONDARY_KEX sends KEX then falls
-                // into the KEX case. We replicate by checking the state
-                // *before* doing anything, then converging.
+                // C fall-through: SECONDARY_KEX does send_kex then the
+                // KEX case. Validate `body` first so a malformed peer
+                // KEX doesn't leave `mykex` set (which would make every
+                // later `send_kex` return `InvalidState`). Can't just
+                // call `receive_kex` first: its initiator branch calls
+                // `send_sig`, which needs `mykex`.
                 if self.state == State::SecondaryKex {
+                    if body.len() != KEX_LEN || body[0] != VERSION || self.hiskex.is_some() {
+                        return Err(SptpsError::BadKex);
+                    }
                     self.send_kex(rng, out)?;
                 }
                 self.receive_kex(body, out)?;
