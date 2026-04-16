@@ -851,10 +851,33 @@ fn inherit_tos(
 /// Log-on-error at debug, never fail — a busy system flipping TOS
 /// per-packet would spam if the kernel ever started rejecting these.
 #[cfg(not(target_os = "linux"))]
-fn set_udp_tos(_l: &Listener, _is_ipv6: bool, _prio: u8) {
-    // IP_TOS / IPV6_TCLASS: nix 0.29 only exposes these on Linux.
-    // macOS supports them via raw setsockopt but it's best-effort;
-    // skip for now.
+fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
+    // nix 0.29 only wraps IpTos/Ipv6TClass on Linux. macOS supports
+    // these via raw setsockopt.
+    use std::os::fd::AsRawFd;
+    let val = libc::c_int::from(prio);
+    let (level, optname, label) = if is_ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS, "IPV6_TCLASS")
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TOS, "IP_TOS")
+    };
+    log::debug!(target: "tincd::net",
+                "Setting outgoing packet priority to {prio} ({label})");
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::setsockopt(
+            l.udp.as_raw_fd(),
+            level,
+            optname,
+            std::ptr::from_ref(&val).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        log::debug!(target: "tincd::net",
+                    "setsockopt {label} failed: {}",
+                    io::Error::last_os_error());
+    }
 }
 
 #[cfg(target_os = "linux")]
