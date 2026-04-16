@@ -356,6 +356,18 @@ fn set_debug_level_roundtrip() {
     let n = reader.read_line(&mut reply).unwrap();
     assert_eq!(n, 0, "EOF: daemon dropped the conn (`return false`)");
 
+    // ─── reconnect: level was restored on close ────────────
+    let stream = UnixStream::connect(&socket).expect("reconnect");
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
+    writeln!(writer, "0 ^{cookie} 0").unwrap();
+    reader.read_line(&mut String::new()).unwrap();
+    reader.read_line(&mut String::new()).unwrap();
+    writeln!(writer, "18 9 -1").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    assert_eq!(reply, "18 9 0\n", "debug level restored after conn close");
+
     // ─── cleanup ─────────────────────────────────────────────
     let _ = child.kill();
     let _ = child.wait();

@@ -408,6 +408,10 @@ impl Daemon {
                 return (DispatchResult::Drop, false);
             };
             let prev = crate::log_tap::set_debug_level(level);
+            if level >= 0 {
+                // Remember the FIRST prev so close restores the original.
+                self.conn_mut(id).prev_debug_level.get_or_insert(prev);
+            }
             self.ctl_ack(id, crate::proto::REQ_SET_DEBUG, prev)
         } else if let DispatchResult::Disconnect(name) = r {
             // Walk conns, terminate by name. `terminate()` keys

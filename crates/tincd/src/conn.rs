@@ -228,6 +228,8 @@ pub struct Connection {
     /// not stored: we don't ANSI-format (`env_logger` does, but we
     /// send the bare `args()` — see `log_tap.rs`).
     pub log_level: Option<log::Level>,
+    /// Debug level before this conn's `REQ_SET_DEBUG`; restored on close.
+    pub prev_debug_level: Option<i32>,
 }
 
 /// Events from one `feed()`. Order matters: an `ADD_EDGE` before a
@@ -291,6 +293,7 @@ impl Connection {
             host_weight: None,
             pmtu_cap: None,
             log_level: None,
+            prev_debug_level: None,
         }
     }
 
@@ -330,6 +333,7 @@ impl Connection {
             host_weight: None,
             pmtu_cap: None,
             log_level: None,
+            prev_debug_level: None,
         }
     }
 
@@ -377,6 +381,7 @@ impl Connection {
             host_weight: None,
             pmtu_cap: None,
             log_level: None,
+            prev_debug_level: None,
         }
     }
 
