@@ -458,7 +458,7 @@ impl Connection {
 
         // `nix::unistd::read`: `OwnedFd` doesn't impl `io::Read`, and
         // `UnixStream::from(fd)` would take ownership (double-close).
-        let n = match read(self.fd.as_raw_fd(), buf) {
+        let n = match read(&self.fd, buf) {
             Ok(0) => {
                 if self.control {
                     log::debug!(target: "tincd::conn",

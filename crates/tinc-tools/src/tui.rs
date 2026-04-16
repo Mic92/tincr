@@ -29,7 +29,7 @@
 #![cfg(unix)]
 
 use std::io::{self, Write};
-use std::os::unix::io::{AsFd, AsRawFd};
+use std::os::unix::io::AsFd;
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::termios::{self, LocalFlags, SetArg, SpecialCharacterIndices, Termios};
@@ -175,7 +175,7 @@ impl RawMode {
         // Preflight isatty: tcgetattr would ENOTTY anyway, but
         // "stdin is not a terminal" beats "Inappropriate ioctl".
         // (`nix::Errno` → `io::Error` via nix's From; bare `?` works.)
-        if !unistd::isatty(fd.as_raw_fd())? {
+        if !unistd::isatty(&fd)? {
             return Err(io::Error::other("stdin is not a terminal"));
         }
 
@@ -291,7 +291,7 @@ pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
             // std's BufReader may hold stale bytes left by
             // `with_cooked`'s `read_line`. Raw fd bypasses that.
             let mut c = [0u8; 1];
-            match unistd::read(stdin.as_raw_fd(), &mut c) {
+            match unistd::read(&stdin, &mut c) {
                 Ok(1) => Ok(Some(c[0])),
                 Ok(0) => Ok(Some(b'q')), // EOF → quit (see doc)
                 Ok(_) => unreachable!("read into 1-byte buffer"),

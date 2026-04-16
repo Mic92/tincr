@@ -477,7 +477,7 @@ pub(crate) fn adopt_listeners_from(
         // call), but C is defensive. Best-effort like the C (no
         // return-value check there either).
         if let Err(e) = nix::fcntl::fcntl(
-            tcp.as_raw_fd(),
+            &tcp,
             nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
         ) {
             log::warn!(target: "tincd::net",

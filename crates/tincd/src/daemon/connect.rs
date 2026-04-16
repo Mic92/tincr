@@ -1,7 +1,7 @@
 use super::{ConnId, Daemon, IoWhat, NodeState};
 
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use crate::conn::Connection;
@@ -444,9 +444,9 @@ impl Daemon {
                     }
                 };
                 let flags = OFlag::from_bits_truncate(
-                    fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0),
+                    fcntl(&fd, FcntlArg::F_GETFL).unwrap_or(0),
                 );
-                let _ = fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
+                let _ = fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // No async connect; ready NOW.
                 let now = self.timers.now();
                 let mut conn = Connection::new_outgoing(

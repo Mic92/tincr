@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
+use nix::sys::event::{EventFilter, EvFlags, FilterFlag, KEvent, Kqueue};
 
 /// The kqueue fd.
 pub(super) type Poller = Kqueue;
@@ -33,7 +33,7 @@ impl RawEvent {
         Self(KEvent::new(
             0,
             EventFilter::EVFILT_READ,
-            EventFlag::empty(),
+            EvFlags::empty(),
             FilterFlag::empty(),
             0,
             0,
@@ -49,7 +49,7 @@ pub(super) fn create() -> io::Result<Poller> {
 fn add_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
     let ident = fd.as_raw_fd() as usize;
     let udata = token as isize;
-    let flags = EventFlag::EV_ADD | EventFlag::EV_CLEAR;
+    let flags = EvFlags::EV_ADD | EvFlags::EV_CLEAR;
     let read_ev = KEvent::new(ident, EventFilter::EVFILT_READ, flags, FilterFlag::empty(), 0, udata);
     let write_ev = KEvent::new(ident, EventFilter::EVFILT_WRITE, flags, FilterFlag::empty(), 0, udata);
     match i {
@@ -78,9 +78,9 @@ fn interest_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 
         ident,
         EventFilter::EVFILT_READ,
         if want_read {
-            EventFlag::EV_ADD | EventFlag::EV_CLEAR
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR
         } else {
-            EventFlag::EV_DELETE
+            EvFlags::EV_DELETE
         },
         FilterFlag::empty(),
         0,
@@ -90,9 +90,9 @@ fn interest_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 
         ident,
         EventFilter::EVFILT_WRITE,
         if want_write {
-            EventFlag::EV_ADD | EventFlag::EV_CLEAR
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR
         } else {
-            EventFlag::EV_DELETE
+            EvFlags::EV_DELETE
         },
         FilterFlag::empty(),
         0,
@@ -133,7 +133,7 @@ pub(super) fn del(kq: &Poller, fd: BorrowedFd<'_>) -> io::Result<()> {
         KEvent::new(
             ident,
             EventFilter::EVFILT_READ,
-            EventFlag::EV_DELETE,
+            EvFlags::EV_DELETE,
             FilterFlag::empty(),
             0,
             0,
@@ -141,7 +141,7 @@ pub(super) fn del(kq: &Poller, fd: BorrowedFd<'_>) -> io::Result<()> {
         KEvent::new(
             ident,
             EventFilter::EVFILT_WRITE,
-            EventFlag::EV_DELETE,
+            EvFlags::EV_DELETE,
             FilterFlag::empty(),
             0,
             0,

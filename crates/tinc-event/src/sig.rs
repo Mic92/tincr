@@ -175,8 +175,8 @@ impl<W: Copy> SelfPipe<W> {
         {
             use nix::fcntl::{FdFlag, fcntl, FcntlArg};
             let (rd, wr) = nix::unistd::pipe()?;
-            fcntl(rd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-            fcntl(wr.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+            fcntl(&rd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+            fcntl(&wr, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
             Ok((rd, wr))
         }
     }
@@ -245,7 +245,7 @@ impl<W: Copy> SelfPipe<W> {
         // Err: shouldn't happen — pipe is valid, was reported
         // readable. Ok(0): EOF (write end closed — daemon is dying).
         // Ok(n > 0): that many signums.
-        let Ok(n) = nix::unistd::read(self.rd.as_raw_fd(), &mut buf) else {
+        let Ok(n) = nix::unistd::read(&self.rd, &mut buf) else {
             return;
         };
         for &signum in &buf[..n] {

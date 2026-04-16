@@ -588,34 +588,19 @@ fn cut_umbilical() {
             "TINC_UMBILICAL={spec}: fd {fd} is stdio/invalid, ignoring");
         return;
     }
-    // `if(fcntl(umbilical, F_GETFL) < 0) umbilical = 0`.
-    // Validates the fd is real — inherited across the exec, not just
-    // a stale number in the env. F_GETFL on a closed fd is EBADF.
-    // After this check we know `from_raw_fd` below won't double-close
-    // some other fd that happened to land on the same number.
-    //
-    // nix 0.29's `fcntl` takes `RawFd` directly: it's a probe, not
-    // an ownership claim. Even garbage input is just EBADF.
-    if fcntl(fd, FcntlArg::F_GETFL).is_err() {
-        return;
-    }
-    // `fcntl(umbilical, F_SETFD, FD_CLOEXEC)`. So tinc-up
-    // and friends don't inherit it. Best-effort (the C doesn't check
-    // the return either).
-    let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
-    // `write(umbilical, "", 1)` then `close(umbilical)`.
-    // The empty string literal is a 1-byte buffer (the nul). `tinc
-    // start` reads in a loop; a nul byte as
-    // the *last* byte before EOF means success. Any other last byte
-    // (or read error, or no bytes at all) means the daemon died
-    // mid-startup.
-    //
-    // SAFETY: fd validated open by F_GETFL above. The TINC_UMBILICAL
+    // Take ownership of the fd immediately. The TINC_UMBILICAL
     // protocol IS the ownership transfer — the spawner set the env
     // var to hand us this fd; nobody else in this process knows the
-    // number. Taking ownership means drop closes it: the C's
-    // explicit `close(umbilical)`.
+    // number. Drop closes it (the C's explicit `close(umbilical)`).
+    //
+    // SAFETY: fd > 2 checked above; the env var is the ownership
+    // claim. If the fd is stale, the F_GETFL probe below catches it
+    // and we drop (close) harmlessly.
     let f = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    if fcntl(&f, FcntlArg::F_GETFL).is_err() {
+        return; // drop closes the fd
+    }
+    let _ = fcntl(&f, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
     let _ = nix::unistd::write(&f, b"\0");
     // Drop closes. snip!
 }

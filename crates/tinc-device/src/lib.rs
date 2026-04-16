@@ -258,10 +258,7 @@ impl Device for Dummy {
 #[inline]
 #[cfg(unix)]
 pub(crate) fn read_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
-    use std::os::fd::AsRawFd;
-    // nix 0.29 `unistd::read` still takes `RawFd`; the liveness
-    // contract is carried by the `BorrowedFd` parameter.
-    nix::unistd::read(fd.as_raw_fd(), buf).map_err(Into::into)
+    nix::unistd::read(fd, buf).map_err(Into::into)
 }
 
 /// `write(2)`. Datagram semantics: one call = one packet.

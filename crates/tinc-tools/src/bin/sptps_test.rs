@@ -40,7 +40,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -451,7 +451,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             // for, breaking the readsize=1460 datagram chunking. The
             // fd is alive: we own `stdin: Stdin` for the loop's
             // lifetime.
-            let n = nix::unistd::read(stdin.as_raw_fd(), &mut buf[..readsize])
+            let n = nix::unistd::read(&stdin, &mut buf[..readsize])
                 .map_err(io::Error::from)?;
 
             if n == 0 {

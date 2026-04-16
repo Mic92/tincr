@@ -43,14 +43,14 @@ pub fn set_nosigpipe(_fd: std::os::fd::RawFd) {}
 /// Set `FD_CLOEXEC` via `fcntl`. Use after socket/socketpair on
 /// platforms without `SOCK_CLOEXEC`.
 #[cfg(not(target_os = "linux"))]
-pub fn set_cloexec(fd: std::os::fd::RawFd) {
+pub fn set_cloexec(fd: impl std::os::fd::AsFd) {
     use nix::fcntl::{FdFlag, fcntl, FcntlArg};
     let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
 }
 
 #[cfg(target_os = "linux")]
 #[inline]
-pub fn set_cloexec(_fd: std::os::fd::RawFd) {}
+pub fn set_cloexec(_fd: impl std::os::fd::AsFd) {}
 
 /// `MSG_NOSIGNAL` on Linux, empty on macOS (macOS uses
 /// `SO_NOSIGPIPE` on the socket instead).

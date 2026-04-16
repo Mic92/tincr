@@ -102,9 +102,8 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
 
     let theirs_fd = theirs.as_raw_fd();
     // F_SETFD with empty FdFlag clears all fd flags, i.e. unsets
-    // CLOEXEC. nix 0.29 takes RawFd here (it's a probe-style call,
-    // not ownership-claiming).
-    fcntl(theirs_fd, FcntlArg::F_SETFD(FdFlag::empty()))
+    // CLOEXEC so the fd survives exec into tincd.
+    fcntl(&theirs, FcntlArg::F_SETFD(FdFlag::empty()))
         .map_err(|e| CmdError::BadInput(format!("Could not clear CLOEXEC on umbilical: {e}")))?;
 
     // ─── TINC_UMBILICAL value

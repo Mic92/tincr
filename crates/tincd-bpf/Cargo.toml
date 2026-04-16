@@ -35,7 +35,7 @@ tinc-device = { path = "../tinc-device" }
 # Safe fd ops in tests/steer.rs (read/write/dup/recv) — replaces ~16
 # `unsafe { libc::* }` sites with RAII OwnedFd + nix::Result. Same
 # 0.29 the rest of the workspace pins.
-nix = { version = "0.29", default-features = false, features = ["fs", "socket"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "socket"] }
 
 [lints]
 workspace = true

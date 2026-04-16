@@ -628,8 +628,8 @@ pub fn do_outgoing_pipe(
         // CLOEXEC: child dup2's what it needs to 0/1; originals shouldn't leak past exec.
         crate::sock_cloexec_flag(),
     )?;
-    crate::set_cloexec(parent_fd.as_raw_fd());
-    crate::set_cloexec(child_fd.as_raw_fd());
+    crate::set_cloexec(&parent_fd);
+    crate::set_cloexec(&child_fd);
     // Snapshot the raw ints BEFORE fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
     // trivial `.as_raw_fd()` getter — keep it on plain integers.
