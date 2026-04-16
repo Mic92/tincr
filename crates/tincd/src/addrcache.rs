@@ -182,7 +182,8 @@ impl AddressCache {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for line in BufReader::new(f).lines() {
+        // We never write more than MAX_CACHED_ADDRESSES; ignore excess on read.
+        for line in BufReader::new(f).lines().take(2 * MAX_CACHED_ADDRESSES) {
             let Ok(line) = line else { return Vec::new() };
             let Ok(addr) = line.trim().parse() else {
                 // C-written binary garbage hits here. Drop the lot,
