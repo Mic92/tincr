@@ -719,6 +719,13 @@ fn drop_privs(
         }
     }
 
+    // PR_SET_NO_NEW_PRIVS: execve can't grant privileges (setuid
+    // bits, file caps) from here on. Set unconditionally; the
+    // sandbox path sets it again, harmlessly.
+    if let Err(e) = nix::sys::prctl::set_no_new_privs() {
+        log::warn!(target: "tincd", "prctl(PR_SET_NO_NEW_PRIVS): {e}");
+    }
+
     // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`.
     // Moved into sandbox::enter() (the Landlock arm) because the
     // pre-create is what makes the PathBeneath fd-open succeed.
