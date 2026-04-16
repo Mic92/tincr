@@ -121,7 +121,7 @@ impl Daemon {
                 let conn = self.conns.get_mut(id).expect("just checked");
                 conn.pinged = true;
                 conn.last_ping_time = now;
-                nw |= conn.send(format_args!("{}", Request::Ping as u8));
+                nw |= conn.send(format_args!("{}", Request::Ping));
             }
         }
         if nw {

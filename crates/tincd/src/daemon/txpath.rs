@@ -1253,7 +1253,7 @@ impl Daemon {
                 // no newline.
                 nw |= conn.send(format_args!(
                     "{} {} {}",
-                    tinc_proto::Request::Control as u8,
+                    tinc_proto::Request::Control,
                     crate::proto::REQ_LOG,
                     msg.len()
                 ));

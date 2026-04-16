@@ -692,7 +692,7 @@ impl Connection {
         for row in rows {
             nw |= self.send(format_args!("{row}"));
         }
-        nw |= self.send(format_args!("{} {req}", Request::Control as u8));
+        nw |= self.send(format_args!("{} {req}", Request::Control));
         nw
     }
 

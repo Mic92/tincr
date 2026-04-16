@@ -109,7 +109,7 @@ impl Daemon {
                         Request::ReqKey,
                         self.name,
                         to_name,
-                        Request::ReqKey as u8,
+                        Request::ReqKey,
                         b64,
                     ));
                 } else {
@@ -1039,7 +1039,7 @@ impl Daemon {
             // udp_ping_rtt=-1 is the unmeasured sentinel.
             rows.push(format!(
                 "{} {} {} {} {} {} {} {} {} {:x} {:x} {} {} {} {} {} {} {} {} {} {} {} {}",
-                Request::Control as u8,       // %d CONTROL
+                Request::Control,       // %d CONTROL
                 crate::proto::REQ_DUMP_NODES, // %d
                 name,                         // %s
                 self.id6_table.id_of(nid).unwrap_or(NodeId6::NULL), // %s id
@@ -1091,7 +1091,7 @@ impl Daemon {
 
             rows.push(format!(
                 "{} {} {} {} {} {} {:x} {}",
-                Request::Control as u8,
+                Request::Control,
                 crate::proto::REQ_DUMP_EDGES,
                 from,
                 to,
@@ -1115,7 +1115,7 @@ impl Daemon {
             let t = self.dp.tunnels.get(&nid);
             rows.push(format!(
                 "{} {} {} {} {} {} {}",
-                Request::Control as u8,
+                Request::Control,
                 crate::proto::REQ_DUMP_TRAFFIC,
                 node.name.as_str(),
                 t.map_or(0, |t| t.in_packets),
