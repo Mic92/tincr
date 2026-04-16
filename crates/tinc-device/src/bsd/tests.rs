@@ -133,7 +133,7 @@ fn drain(fd: &OwnedFd) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 256];
     loop {
-        let n = nix::unistd::read(fd.as_raw_fd(), &mut buf).unwrap();
+        let n = nix::unistd::read(&fd, &mut buf).unwrap();
         if n == 0 {
             break;
         }
@@ -380,7 +380,7 @@ fn tap_write_ether_via_seqpacket() {
 
     assert_eq!(n, len);
     let mut recv = [0u8; 64];
-    let rn = nix::unistd::read(peer.as_raw_fd(), &mut recv).unwrap();
+    let rn = nix::unistd::read(&peer, &mut recv).unwrap();
     assert_eq!(rn, len);
     assert_eq!(&recv[..rn], &frame);
     // Tap doesn't mutate the buffer (no prefix write).

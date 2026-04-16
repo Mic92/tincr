@@ -142,12 +142,19 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
         return Err(io::Error::other(format!("Unknown interface {iface}")));
     }
     let val = ifindex as libc::c_int;
+    // IP_BOUND_IF for IPv4, IPV6_BOUND_IF for IPv6.
+    let is_v6 = s.local_addr().map_or(false, |a| a.is_ipv6());
+    let (level, optname) = if is_v6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+    };
     #[allow(unsafe_code)]
     let rc = unsafe {
         libc::setsockopt(
             s.as_raw_fd(),
-            libc::IPPROTO_IP,
-            libc::IP_BOUND_IF,
+            level,
+            optname,
             std::ptr::from_ref(&val).cast(),
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
