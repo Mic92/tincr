@@ -391,6 +391,12 @@ impl Graph {
         self.nodes.get(n.0 as usize)?.as_ref()
     }
 
+    /// Live edge count (slab len minus freed slots).
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        self.edges.len() - self.edge_free.len()
+    }
+
     /// `None` if the slot was freed (stale `EdgeId`).
     #[must_use]
     pub fn edge(&self, e: EdgeId) -> Option<&Edge> {

@@ -25,6 +25,7 @@ use tinc_sptps::{Framing, Role, Sptps};
 /// Direct peers (`on_ack`) and locally-provisioned names go through
 /// `lookup_or_add_node` directly and aren't gated.
 pub(super) const MAX_NODES: usize = 65_536;
+pub(super) const MAX_EDGES: usize = 4 * MAX_NODES;
 
 impl Daemon {
     /// Lookup-or-add fused. Does NOT add a `NodeState` — transitives
@@ -1430,6 +1431,15 @@ impl Daemon {
         }
         let from_id = self.lookup_or_add_node(&edge.from);
         let to_id = self.lookup_or_add_node(&edge.to);
+
+        if self.graph.lookup_edge(from_id, to_id).is_none()
+            && self.graph.edge_count() >= MAX_EDGES
+        {
+            log::warn!(target: "tincd::proto",
+                       "Dropping ADD_EDGE {} → {}: edge table full ({MAX_EDGES})",
+                       edge.from, edge.to);
+            return Ok(false);
+        }
 
         if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
             // Idempotent only if weight+options+ADDRESS all match.
