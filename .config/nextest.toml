@@ -15,6 +15,16 @@ retries = 1
 [profile.ci.junit]
 path = "junit.xml"
 
+# netns tests each spin up a bwrap sandbox + 2-3 tincd daemons; running
+# many concurrently starves the rigs and causes ctl-connect resets.
+[[profile.default.overrides]]
+filter = 'binary(netns)'
+threads-required = 8
+
+[[profile.ci.overrides]]
+filter = 'binary(netns)'
+threads-required = 8
+
 # throughput gate: 3× (setup ~3s + iperf3 5s + teardown) ≈ 30s
 # wall-clock inside the bwrap inner. Outer wraps it; budget 2min.
 [[profile.default.overrides]]
