@@ -1138,7 +1138,9 @@ fn main() -> ExitCode {
     // do we.
     if let Err(e) = drop_privs(args.switchuser.as_deref(), args.do_chroot, &args.confbase) {
         log::error!(target: "tincd", "{e}");
-        return ExitCode::FAILURE;
+        // Hard exit: do NOT unwind through Daemon::Drop (which runs
+        // tinc-down/subnet-down) with privileges in an unknown state.
+        std::process::exit(1);
     }
 
     // ─── sandbox_enter
