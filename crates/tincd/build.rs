@@ -9,5 +9,8 @@ fn main() {
     cc::Build::new()
         .file("minilzo/minilzo.c")
         .warnings(false) // upstream code, not ours to lint
+        .flag_if_supported("-D_FORTIFY_SOURCE=2")
+        .flag_if_supported("-fstack-protector-strong")
+        .flag_if_supported("-fwrapv")
         .compile("minilzo");
 }
