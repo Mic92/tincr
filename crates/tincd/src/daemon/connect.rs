@@ -30,7 +30,7 @@ impl Daemon {
         body: &[u8],
     ) -> Result<bool, crate::proto::DispatchError> {
         let parsed = parse_ack(body)?;
-        let conn = self.conns.get_mut(id).expect("caller checked");
+        let conn = self.conn_mut(id);
 
         // PMTU only sticks if BOTH sides set it.
         let mut his = parsed.his_options;
@@ -203,7 +203,7 @@ impl Daemon {
 
     /// Meta-conn WRITE handler.
     pub(super) fn on_conn_writable(&mut self, id: ConnId) {
-        let conn = self.conns.get_mut(id).expect("checked contains_key");
+        let conn = self.conn_mut(id);
         match conn.flush() {
             Ok(true) => {
                 // outbuf empty → drop WRITE interest.
@@ -468,7 +468,7 @@ impl Daemon {
                                 conn.name, conn.hostname);
                     let needs_write = conn.send(format_args!(
                         "{} {} {}.{}",
-                        Request::Id as u8,
+                        Request::Id,
                         self.name,
                         tinc_proto::request::PROT_MAJOR,
                         tinc_proto::request::PROT_MINOR
@@ -709,10 +709,11 @@ impl Daemon {
         }
 
         // send_id. WE go first (initiator); peer replies.
-        let conn = self.conns.get_mut(id).expect("not terminated");
+        // Split borrow: helper would lock all of `self`.
+        let conn = self.conns.get_mut(id).expect("ConnId not live");
         needs_write |= conn.send(format_args!(
             "{} {} {}.{}",
-            Request::Id as u8,
+            Request::Id,
             self.name,
             tinc_proto::request::PROT_MAJOR,
             tinc_proto::request::PROT_MINOR

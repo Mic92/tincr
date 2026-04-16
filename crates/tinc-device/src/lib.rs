@@ -257,19 +257,18 @@ impl Device for Dummy {
 /// `read(2)`. Datagram semantics: one call = one packet.
 #[inline]
 #[cfg(unix)]
-pub(crate) fn read_fd(fd: std::os::unix::io::RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    nix::unistd::read(fd, buf).map_err(Into::into)
+pub(crate) fn read_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    // nix 0.29 `unistd::read` still takes `RawFd`; the liveness
+    // contract is carried by the `BorrowedFd` parameter.
+    nix::unistd::read(fd.as_raw_fd(), buf).map_err(Into::into)
 }
 
 /// `write(2)`. Datagram semantics: one call = one packet.
 #[inline]
 #[cfg(unix)]
-#[allow(unsafe_code)]
-pub(crate) fn write_fd(fd: std::os::unix::io::RawFd, buf: &[u8]) -> io::Result<usize> {
-    // SAFETY: callers pass an fd they own (held by the backend struct
-    // for the duration of the borrow). `BorrowedFd` does not close.
-    let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-    nix::unistd::write(bfd, buf).map_err(Into::into)
+pub(crate) fn write_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &[u8]) -> io::Result<usize> {
+    nix::unistd::write(fd, buf).map_err(Into::into)
 }
 
 // Linux TUN/TAP — `linux/device.c` (225 LOC)

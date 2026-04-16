@@ -118,10 +118,10 @@ impl Daemon {
             }
 
             if stale >= pinginterval {
-                let conn = self.conns.get_mut(id).expect("just checked");
+                let conn = self.conn_mut(id);
                 conn.pinged = true;
                 conn.last_ping_time = now;
-                nw |= conn.send(format_args!("{}", Request::Ping as u8));
+                nw |= conn.send(format_args!("{}", Request::Ping));
             }
         }
         if nw {

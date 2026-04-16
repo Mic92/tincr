@@ -111,7 +111,7 @@ impl Daemon {
                         Request::ReqKey,
                         self.name,
                         to_name,
-                        Request::ReqKey as u8,
+                        Request::ReqKey,
                         b64,
                     ));
                 } else {
@@ -257,12 +257,7 @@ impl Daemon {
         let msg = ReqKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         // lookup, NOT lookup_or_add.
         let Some(&from_nid) = self.node_ids.get(&msg.from) else {
@@ -499,12 +494,7 @@ impl Daemon {
         let msg = AnsKey::parse(body_str)
             .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         let Some(&from_nid) = self.node_ids.get(&msg.from) else {
             log::error!(target: "tincd::proto",
@@ -1041,7 +1031,7 @@ impl Daemon {
             // udp_ping_rtt=-1 is the unmeasured sentinel.
             rows.push(format!(
                 "{} {} {} {} {} {} {} {} {} {:x} {:x} {} {} {} {} {} {} {} {} {} {} {} {}",
-                Request::Control as u8,       // %d CONTROL
+                Request::Control,       // %d CONTROL
                 crate::proto::REQ_DUMP_NODES, // %d
                 name,                         // %s
                 self.id6_table.id_of(nid).unwrap_or(NodeId6::NULL), // %s id
@@ -1093,7 +1083,7 @@ impl Daemon {
 
             rows.push(format!(
                 "{} {} {} {} {} {} {:x} {}",
-                Request::Control as u8,
+                Request::Control,
                 crate::proto::REQ_DUMP_EDGES,
                 from,
                 to,
@@ -1117,7 +1107,7 @@ impl Daemon {
             let t = self.dp.tunnels.get(&nid);
             rows.push(format!(
                 "{} {} {} {} {} {} {}",
-                Request::Control as u8,
+                Request::Control,
                 crate::proto::REQ_DUMP_TRAFFIC,
                 node.name.as_str(),
                 t.map_or(0, |t| t.in_packets),
@@ -1146,12 +1136,7 @@ impl Daemon {
         if !self.settings.tunnelserver {
             return false;
         }
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .as_str();
+        let conn_name = self.conn(from_conn).name.as_str();
         if about.iter().any(|n| *n == self.name || *n == conn_name) {
             return false;
         }
@@ -1172,6 +1157,9 @@ impl Daemon {
             return Ok(false);
         }
 
+        // tunnelserver indirect filter. Check BEFORE
+        // lookup_or_add_node — don't pollute graph with indirect
+        // names. ORDER: seen_request first — mark seen even on drop.
         if self.tunnelserver_reject_indirect(
             from_conn,
             "ADD_SUBNET",
@@ -1194,12 +1182,7 @@ impl Daemon {
 
         // Peer wrong about us — retaliate DEL_SUBNET.
         if owner == self.myself {
-            let conn_name = self
-                .conns
-                .get(from_conn)
-                .expect("dispatched from live conn")
-                .name
-                .clone();
+            let conn_name = self.conn(from_conn).name.clone();
             log::warn!(target: "tincd::proto",
                        "Got ADD_SUBNET from {conn_name} for ourself ({subnet})");
             // Dark in single-peer tests; reachable via stale gossip
@@ -1283,12 +1266,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         if self.tunnelserver_reject_indirect(
             from_conn,
@@ -1387,12 +1365,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         if self.tunnelserver_reject_indirect(
             from_conn,
@@ -1502,12 +1475,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        let conn_name = self
-            .conns
-            .get(from_conn)
-            .expect("dispatched from live conn")
-            .name
-            .clone();
+        let conn_name = self.conn(from_conn).name.clone();
 
         if self.tunnelserver_reject_indirect(
             from_conn,

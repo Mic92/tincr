@@ -28,7 +28,7 @@
 //! is hand-rolled (shim #6) since nix's `LinkAddr` is getters-only.
 
 use std::io;
-use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 
@@ -138,7 +138,7 @@ impl RawSocket {
         // Build `sockaddr_ll`, bind. nix's `LinkAddr` is GETTERS
         // ONLY (no constructor). Raw `libc::bind`. The sixth shim,
         // but trivial (8 lines, one syscall).
-        bind_packet(fd.as_raw_fd(), ifindex)?;
+        bind_packet(fd.as_fd(), ifindex)?;
 
         // No log here; daemon logs post-open if it wants.
 
@@ -180,7 +180,7 @@ impl RawSocket {
 ///   discriminates on `sa_family`, finds `AF_PACKET`, reads as
 ///   `sockaddr_ll`).
 #[allow(unsafe_code)]
-fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
+fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     let sa = sockaddr_ll_packet(ifindex);
 
     // `bind(fd, (struct sockaddr *)&sa, sizeof(sa))`. The cast is
@@ -197,7 +197,8 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // `u32`. 20 fits.
     #[allow(clippy::cast_possible_truncation)]
     let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-    let ret = unsafe { libc::bind(fd, (&raw const sa).cast::<libc::sockaddr>(), addrlen) };
+    let ret =
+        unsafe { libc::bind(fd.as_raw_fd(), (&raw const sa).cast::<libc::sockaddr>(), addrlen) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -250,7 +251,7 @@ impl Device for RawSocket {
         );
         // `read(fd, DATA, MTU)`. Offset 0. Cap at MTU. (Jumbo
         // frames on `eth0` would truncate — `MTU` is 1518.)
-        let n = read_fd(self.fd.as_raw_fd(), &mut buf[..MTU])?;
+        let n = read_fd(self.fd.as_fd(), &mut buf[..MTU])?;
 
         // `read_fd` already converted `<0`. `==0` on a `PF_PACKET`
         // socket is EOF — happens
@@ -281,7 +282,7 @@ impl Device for RawSocket {
     /// `buf[10..12]`); we just slice.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // The whole thing. No header strip.
-        write_fd(self.fd.as_raw_fd(), buf)
+        write_fd(self.fd.as_fd(), buf)
     }
 
     /// TAP-only. C doesn't check (probably should — see crate
@@ -308,6 +309,12 @@ impl Device for RawSocket {
     /// The fd, for the daemon's poll loop.
     fn fd(&self) -> Option<RawFd> {
         Some(self.fd.as_raw_fd())
+    }
+}
+
+impl AsFd for RawSocket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 }
 
