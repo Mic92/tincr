@@ -74,10 +74,12 @@ impl Daemon {
             }
             match self.on_conn_readable_once(id) {
                 FeedDrain::Again => {}
-                FeedDrain::Done => return,
+                FeedDrain::Done => break,
             }
         }
-        // Cap hit. LT re-fires next turn — no rearm needed.
+        // Cap hit (or Done). LT re-fires next turn — no rearm needed.
+        // Belt-and-braces over the per-batch flush in `on_feed_sptps`.
+        self.flush_graph_dirty();
     }
 
     /// One `recv()` + dispatch. Splitting would thread id/conn/self
@@ -301,6 +303,7 @@ impl Daemon {
         if self.dispatch_sptps_outputs(id, outs) {
             nw = true;
         }
+        self.flush_graph_dirty();
         if !self.conns.contains_key(id) {
             return None;
         }
@@ -536,9 +539,12 @@ impl Daemon {
                 }
             }
             if !self.conns.contains_key(id) {
+                // `terminate` ran `run_graph_and_log` itself.
                 return FeedDrain::Done;
             }
         }
+        // One BFS for all ADD_EDGEs in this batch (`graph_dirty`).
+        self.flush_graph_dirty();
         // Dispatch may have queued to ANY conn (broadcast,
         // forward, relay); sweep all.
         if needs_write {

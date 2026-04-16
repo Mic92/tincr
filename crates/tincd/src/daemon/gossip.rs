@@ -889,6 +889,9 @@ impl Daemon {
 
     /// sssp + diff + mst.
     pub(super) fn run_graph_and_log(&mut self) {
+        // Covers any pending `on_add_edge` deferrals from the same
+        // batch when called directly (on_del_edge/on_ack/terminate).
+        self.graph_dirty = false;
         let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself);
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
@@ -1509,9 +1512,17 @@ impl Daemon {
             self.forward_request(from_conn, body)
         };
 
-        self.run_graph_and_log();
+        // Defer BFS to end of dispatch batch; see `graph_dirty`.
+        self.graph_dirty = true;
 
         Ok(nw)
+    }
+
+    /// One BFS per dispatch batch. See [`Daemon::graph_dirty`].
+    pub(super) fn flush_graph_dirty(&mut self) {
+        if self.graph_dirty {
+            self.run_graph_and_log();
+        }
     }
 
     /// Missing node/edge is warn-and-drop (NOT `lookup_or_add`).

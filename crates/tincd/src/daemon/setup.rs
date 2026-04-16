@@ -727,6 +727,7 @@ impl Daemon {
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
+            graph_dirty: false,
             sleeptime: 10,
             started_at: timers.now(),
             icmp_ratelimit: icmp::IcmpRateLimit::new(),
