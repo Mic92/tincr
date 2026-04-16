@@ -29,6 +29,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
 
+/// Max records sealed per `outcipher` before app-data sends return
+/// `InvalidState`. Wire nonce is `outseqno as u32`; 2^32 = nonce reuse.
+/// Margin covers shard `fetch_add` slop + the rekey handshake itself.
+const SEAL_KEY_LIMIT: u64 = (1u64 << 32) - (1u64 << 16);
+
 // ────────────────────────────────────────────────────────────────────
 // Public types
 
@@ -352,6 +357,9 @@ pub struct Sptps {
     // differ from the cross-shard ALLOC order, and the receiver's
     // 128-slot replay window absorbs the interleave.
     outseqno: Arc<AtomicU64>,
+    /// `outseqno` at the moment `outcipher` was installed; see
+    /// [`SEAL_KEY_LIMIT`].
+    out_key_base: u64,
 
     // ─── Handshake-transient state ───
     // mykex/hiskex/ecdh/key are all heap-allocated in C, freed at specific
@@ -410,6 +418,7 @@ impl Sptps {
             inseqno: 0,
             outcipher: None,
             outseqno: Arc::new(AtomicU64::new(0)),
+            out_key_base: 0,
             mykex: None,
             hiskex: None,
             ecdh: None,
@@ -494,7 +503,7 @@ impl Sptps {
     /// a `u16` length header — the C silently truncates with a
     /// `uint16_t` cast and the receiver desyncs; we'd rather refuse).
     pub fn send_record(&mut self, record_type: u8, body: &[u8]) -> Result<Vec<Output>, SptpsError> {
-        if self.outcipher.is_none() || record_type >= REC_HANDSHAKE {
+        if self.outcipher.is_none() || record_type >= REC_HANDSHAKE || self.needs_rekey() {
             return Err(SptpsError::InvalidState);
         }
         // Stream framing's `len:u16be` header can't carry more than this.
@@ -551,7 +560,7 @@ impl Sptps {
         if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
             return Err(SptpsError::InvalidState);
         }
-        if self.outcipher.is_none() {
+        if self.outcipher.is_none() || self.needs_rekey() {
             return Err(SptpsError::InvalidState);
         }
         let seqno = self.alloc_seqnos(1);
@@ -583,6 +592,17 @@ impl Sptps {
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
         let base = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed) as u32;
         base
+    }
+
+    /// True once [`SEAL_KEY_LIMIT`] records have been sealed under the
+    /// current `outcipher`. App-data sends return `InvalidState` past
+    /// this; the daemon should `force_kex` when it flips.
+    #[must_use]
+    pub fn needs_rekey(&self) -> bool {
+        self.outseqno
+            .load(Ordering::Relaxed)
+            .wrapping_sub(self.out_key_base)
+            >= SEAL_KEY_LIMIT
     }
 
     /// Clone the outgoing seqno counter for shard hand-off. The shard
@@ -1086,6 +1106,7 @@ impl Sptps {
             (&key[..CIPHER_KEY_LEN]).try_into().unwrap()
         };
         self.outcipher = Some(ChaPoly::new(half)); // NOW the new key
+        self.out_key_base = self.outseqno.load(Ordering::Relaxed);
 
         Ok(was_rekey)
     }
