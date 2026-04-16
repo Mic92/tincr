@@ -1,7 +1,7 @@
 use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
 
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 
 use crate::compress;
 use crate::listen::Listener;
@@ -850,30 +850,18 @@ fn inherit_tos(
 /// Log-on-error at debug, never fail — a busy system flipping TOS
 /// per-packet would spam if the kernel ever started rejecting these.
 fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
-    let optval: libc::c_int = libc::c_int::from(prio);
-    let (level, optname, label) = if is_ipv6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS, "IPV6_TCLASS")
+    use nix::sys::socket::{setsockopt, sockopt};
+    let val = libc::c_int::from(prio);
+    let (label, res) = if is_ipv6 {
+        ("IPV6_TCLASS", setsockopt(&l.udp.as_fd(), sockopt::Ipv6TClass, &val))
     } else {
-        (libc::IPPROTO_IP, libc::IP_TOS, "IP_TOS")
+        ("IP_TOS", setsockopt(&l.udp.as_fd(), sockopt::IpTos, &val))
     };
     log::debug!(target: "tincd::net",
                 "Setting outgoing packet priority to {prio} ({label})");
-    // SAFETY: fd is live (Socket owns it); optval is a stack c_int
-    // whose address+len we pass for the duration of the call.
-    // truncation: size_of::<c_int>() == 4, fits socklen_t.
-    #[allow(unsafe_code, clippy::cast_possible_truncation)]
-    let rc = unsafe {
-        libc::setsockopt(
-            l.udp.as_raw_fd(),
-            level,
-            optname,
-            (&raw const optval).cast::<libc::c_void>(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc != 0 {
+    if let Err(e) = res {
         log::debug!(target: "tincd::net",
                     "setsockopt {label} failed: {}",
-                    io::Error::last_os_error());
+                    io::Error::from(e));
     }
 }

@@ -224,40 +224,18 @@ fn open_udp_nonblocking() {
 /// pmtu.rs probes get L3-fragmented through.
 #[test]
 fn open_udp_pmtudisc_do() {
-    fn get_mtu_discover(fd: RawFd, level: libc::c_int, optname: libc::c_int) -> libc::c_int {
-        let mut val: libc::c_int = -1;
-        // SAFETY: fd is live (held by `listeners` for the test's
-        // duration); val/len are stack locals.
-        // truncation: size_of::<c_int>() == 4, fits socklen_t.
-        #[allow(unsafe_code, clippy::cast_possible_truncation)]
-        let rc = unsafe {
-            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            libc::getsockopt(
-                fd,
-                level,
-                optname,
-                (&raw mut val).cast::<libc::c_void>(),
-                &raw mut len,
-            )
-        };
-        assert_eq!(rc, 0, "getsockopt: {}", io::Error::last_os_error());
-        val
-    }
-
     // v4: always available.
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
-    let (_, udp_fd) = listeners[0].fds();
     assert_eq!(
-        get_mtu_discover(udp_fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER),
+        get_int_sockopt(listeners[0].udp.as_fd(), libc::IPPROTO_IP, libc::IP_MTU_DISCOVER).unwrap(),
         libc::IP_PMTUDISC_DO,
     );
 
     // v6: may be disabled. Skip if no listener.
     let listeners6 = open_listeners(0, AddrFamily::Ipv6, &opts());
     if let Some(l) = listeners6.first() {
-        let (_, udp_fd) = l.fds();
         assert_eq!(
-            get_mtu_discover(udp_fd, libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER),
+            get_int_sockopt(l.udp.as_fd(), libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER).unwrap(),
             libc::IPV6_PMTUDISC_DO,
         );
     }
@@ -350,10 +328,8 @@ fn open_bind_to_interface_bad_is_graceful() {
 /// but that's overkill for a unit test.)
 #[test]
 fn open_fwmark_set() {
-    // SAFETY: geteuid is infallible, no pointers.
-    #[allow(unsafe_code)]
-    let euid = unsafe { libc::geteuid() };
-    if euid != 0 {
+    let euid = nix::unistd::geteuid();
+    if !euid.is_root() {
         eprintln!("SKIP open_fwmark_set: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
         return;
     }
@@ -503,11 +479,7 @@ fn adopt_listeners_from_high_fd() {
     // dup() to get a fresh high fd. We don't care WHERE it
     // lands, just that it's distinct from `tcp`'s fd (so when
     // we drop `tcp`, the duped fd survives) and not fd 3.
-    // SAFETY: tcp's fd is open (we just bound it). dup never
-    // closes the source.
-    #[allow(unsafe_code)]
-    let high_fd = unsafe { libc::dup(tcp.as_raw_fd()) };
-    assert!(high_fd >= 0, "dup: {}", io::Error::last_os_error());
+    let high_fd = nix::unistd::dup(tcp.as_raw_fd()).expect("dup");
     // Original drops here; high_fd is the only handle now.
     drop(tcp);
 
@@ -543,10 +515,7 @@ fn adopt_listeners_too_many() {
 fn adopt_listeners_not_a_socket() {
     // /dev/null at a high fd. getsockname → ENOTSOCK.
     let f = std::fs::File::open("/dev/null").unwrap();
-    // SAFETY: f's fd is open. dup is safe to call on any open fd.
-    #[allow(unsafe_code)]
-    let high_fd = unsafe { libc::dup(f.as_raw_fd()) };
-    assert!(high_fd >= 0);
+    let high_fd = nix::unistd::dup(f.as_raw_fd()).expect("dup");
     drop(f);
 
     // adopt_listeners_from took ownership of high_fd via
