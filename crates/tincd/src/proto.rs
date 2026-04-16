@@ -961,10 +961,8 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
         Some(REQ_DISCONNECT) => {
             // `sscanf("%*d %*d " MAX_STRING, name)`. Third
             // whitespace token. `%s` stops at whitespace; we do too.
-            // `check_id` not in C here — it just strcmp's against the
-            // conn-list — so don't add it (a bad name simply won't match).
             let name = nth_token(line, 2)
-                .filter(|s| s.len() <= tinc_proto::MAX_STRING)
+                .filter(|s| s.len() <= tinc_proto::MAX_STRING && check_id(s))
                 .map(str::to_owned);
             (DispatchResult::Disconnect(name), false)
         }

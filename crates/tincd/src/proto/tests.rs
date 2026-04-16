@@ -453,6 +453,12 @@ fn control_disconnect() {
     c.allow_request = Some(Request::Control);
     let (r, _) = handle_control(&mut c, b"18 12");
     assert_eq!(r, DispatchResult::Disconnect(None));
+
+    // Name failing check_id → None (rejects `<unknown>` etc.).
+    let mut c = mkconn();
+    c.allow_request = Some(Request::Control);
+    let (r, _) = handle_control(&mut c, b"18 12 <unknown>");
+    assert_eq!(r, DispatchResult::Disconnect(None));
 }
 
 #[test]
