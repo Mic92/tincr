@@ -607,9 +607,8 @@ impl Daemon {
         let listener_slots = register_listeners(listeners, &mut ev)?;
 
         // ─── init_control
-        let cookie = generate_cookie();
-        write_pidfile(pidfile, &cookie, &address).map_err(SetupError::Io)?;
-
+        // Bind (the AlreadyRunning check) BEFORE writing the pidfile,
+        // so a second tincd fails before clobbering the live cookie.
         let control = ControlSocket::bind(socket).map_err(|e| match e {
             crate::control::BindError::AlreadyRunning => SetupError::Config(format!(
                 "Control socket {} already in use",
@@ -617,6 +616,8 @@ impl Daemon {
             )),
             crate::control::BindError::Io(err) => SetupError::Io(err),
         })?;
+        let cookie = generate_cookie();
+        write_pidfile(pidfile, &cookie, &address).map_err(SetupError::Io)?;
         ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
             .map_err(SetupError::Io)?;
 

@@ -89,13 +89,21 @@ pub fn generate_cookie() -> String {
 /// non-root, pidfile path is in `/var/run`) is the common one; the
 /// caller logs and exits.
 pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()> {
-    // OpenOptions::mode(0o600). create+truncate is `fopen("w")`.
+    use std::os::fd::AsRawFd;
+    // create+truncate is `fopen("w")`. O_NOFOLLOW: this runs as root
+    // pre-privdrop; following a planted symlink would be an
+    // arbitrary-file truncate+write.
     let mut f = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
+    // `.mode()` only applies on create; force 0600 on a pre-existing
+    // file too (cookie is the auth secret).
+    nix::sys::stat::fchmod(f.as_raw_fd(), Mode::from_bits_truncate(0o600))
+        .map_err(io::Error::from)?;
     writeln!(f, "{} {} {}", std::process::id(), cookie, address)?;
     // fclose flushes; we let Drop close. `sync_data` is overkill. The
     // pidfile is read by another process; the write must be visible
@@ -297,6 +305,34 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pidfile_fchmod_on_existing() {
+        let dir = tmpdir("pidfile-chmod");
+        let path = dir.join("tinc.pid");
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_pidfile(&path, &"a".repeat(64), "127.0.0.1 port 0").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pidfile_nofollow() {
+        let dir = tmpdir("pidfile-symlink");
+        let target = dir.join("target");
+        let path = dir.join("tinc.pid");
+        std::fs::write(&target, "x").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let err = write_pidfile(&path, "c", "a").unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
         std::fs::remove_dir_all(&dir).ok();
     }
 
