@@ -131,9 +131,32 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn bind_to_interface(_s: &Socket, iface: &str) -> io::Result<()> {
-    log::warn!(target: "tincd", "SO_BINDTODEVICE not available on this platform, ignoring BindToInterface={iface}");
-    Ok(())
+pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
+    // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF binds a
+    // socket to a specific interface index.
+    let cname = std::ffi::CString::new(iface)
+        .map_err(|_| io::Error::other(format!("interface name {iface} contains NUL")))?;
+    #[allow(unsafe_code)]
+    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if ifindex == 0 {
+        return Err(io::Error::other(format!("Unknown interface {iface}")));
+    }
+    let val = ifindex as libc::c_int;
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::setsockopt(
+            s.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_BOUND_IF,
+            std::ptr::from_ref(&val).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        Err(io::Error::other(format!("Can't bind to interface {iface}: {}", io::Error::last_os_error())))
+    } else {
+        Ok(())
+    }
 }
 
 /// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
@@ -322,6 +345,11 @@ fn apply_common_sockopts(
         && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
     {
         log::warn!(target: "tincd::net", "SO_MARK={}{label}: {e}", opts.fwmark);
+    }
+    #[cfg(not(target_os = "linux"))]
+    if opts.fwmark != 0 {
+        log::warn!(target: "tincd::net",
+                   "FWMark={} ignored: SO_MARK is Linux-only", opts.fwmark);
     }
 
     // SO_BINDTODEVICE: hard failure. Propagate; Socket's Drop closes.

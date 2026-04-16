@@ -114,6 +114,11 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
                        "SO_MARK={}: {e}", sockopts.fwmark);
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    if sockopts.fwmark != 0 {
+        log::warn!(target: "tincd::conn",
+                   "FWMark={} ignored: SO_MARK is Linux-only", sockopts.fwmark);
+    }
     // `bind_to_interface(c->socket)`. Return discarded.
     if let Some(iface) = &sockopts.bind_to_interface
         && let Err(e) = crate::listen::bind_to_interface(sock, iface)
