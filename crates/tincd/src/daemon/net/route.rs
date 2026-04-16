@@ -102,6 +102,7 @@ impl Daemon {
     /// Hot path WHEN armed (which is rare — debugging only). The
     /// `any_pcap` gate keeps the unarmed cost at one branch.
     fn send_pcap(&mut self, data: &[u8]) -> bool {
+        let now = self.timers.now();
         let mut nw = false;
         let mut still_armed = false;
         for (_, conn) in &mut self.conns {
@@ -109,6 +110,8 @@ impl Daemon {
                 continue;
             }
             still_armed = true;
+            // Refresh idle-reap window while we're actively streaming.
+            conn.last_ping_time = now + Duration::from_secs(3600);
 
             // snaplen=0 → no clip.
             let snap = usize::from(conn.pcap_snaplen);

@@ -164,7 +164,7 @@ pub struct Connection {
     pub name: String,
     /// `c->hostname`. Set at accept; never changes.
     pub hostname: String,
-    /// `c->last_ping_time`. Control conns get +1h.
+    /// `c->last_ping_time`. Control conns get +1h, refreshed on stream writes.
     pub last_ping_time: Instant,
     /// `c->protocol_minor`. `>= 2` means SPTPS; `< 2` is rejected.
     pub protocol_minor: u8,

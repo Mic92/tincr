@@ -70,6 +70,11 @@ impl Daemon {
             }
 
             if conn.control {
+                // `id_control` sets last_ping_time = now+1h; pcap/log writes
+                // refresh it. Past that window the client is gone — reap.
+                if stale > pingtimeout {
+                    self.terminate(id);
+                }
                 continue;
             }
 

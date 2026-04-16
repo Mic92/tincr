@@ -1245,6 +1245,7 @@ impl Daemon {
             // and the conn died in the same turn). Drop on the floor.
             return;
         }
+        let now = self.timers.now();
         let mut nw = false;
         for (level, msg) in &drained {
             for &(id, conn_level) in &log_conns {
@@ -1257,6 +1258,8 @@ impl Daemon {
                 let Some(conn) = self.conns.get_mut(id) else {
                     continue;
                 };
+                // Refresh idle-reap window while we're actively streaming.
+                conn.last_ping_time = now + Duration::from_secs(3600);
                 // Header line; send() appends `\n`. Then raw body,
                 // no newline.
                 nw |= conn.send(format_args!(

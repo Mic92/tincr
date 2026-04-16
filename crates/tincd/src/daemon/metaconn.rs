@@ -28,6 +28,8 @@ enum FeedDrain {
     Done,
 }
 
+const MAX_CONTROL_CONNS: usize = 64;
+
 impl Daemon {
     pub(super) fn on_unix_accept(&mut self) {
         let stream = match self.control.accept() {
@@ -39,6 +41,12 @@ impl Daemon {
                 return;
             }
         };
+
+        if self.conns.values().filter(|c| c.is_unix_ctl).count() >= MAX_CONTROL_CONNS {
+            log::warn!(target: "tincd::conn",
+                       "Too many control connections; rejecting");
+            return;
+        }
 
         let fd: OwnedFd = stream.into();
         let conn = Connection::new_control(fd, self.timers.now());
@@ -335,7 +343,10 @@ impl Daemon {
     /// borrowed, drop it, then `ctl_send_dump`. Ack arms: do the
     /// side-effect, then `ctl_ack`.
     fn dispatch_control(&mut self, id: ConnId, line: &[u8]) -> (DispatchResult, bool) {
+        let now = self.timers.now();
         let conn = self.conn_mut(id);
+        // Refresh idle-reap window on any client activity.
+        conn.last_ping_time = now + std::time::Duration::from_secs(3600);
         let (r, nw) = handle_control(conn, line);
         if matches!(r, DispatchResult::DumpSubnets) {
             let rows: Vec<String> = self
