@@ -119,11 +119,9 @@ impl Level {
 pub struct Compressor {
     /// `lzo_wrkmem` (`tincd.c`: static `lzo_align_t lzo_wrkmem[...]`).
     /// Lazy: `None` until first `LzoLo` compress. Boxed because 128KB
-    /// on the stack is too much. `lzo_align_t` is a max-align union
-    /// in C; Vec's heap allocation is sufficiently aligned (the
-    /// global allocator returns at least `align_of::<usize>()`, and
-    /// minilzo only stores pointer-sized dict entries).
-    lzo_wrkmem: Option<Vec<u8>>,
+    /// on the stack is too much. `u64` element type guarantees the
+    /// 8-byte alignment minilzo expects for its `lzo_dict_t*` cast.
+    lzo_wrkmem: Option<Vec<u64>>,
 }
 
 impl Compressor {
@@ -155,7 +153,7 @@ impl Compressor {
                 lzo::ensure_init();
                 let wrkmem = self
                     .lzo_wrkmem
-                    .get_or_insert_with(|| vec![0u8; lzo::LZO1X_1_MEM_COMPRESS]);
+                    .get_or_insert_with(|| vec![0u64; lzo::LZO1X_1_MEM_COMPRESS_U64]);
                 lzo::compress_1(src, wrkmem)
             }
 
@@ -269,6 +267,8 @@ mod lzo {
     /// `minilzo.h:76`: `16384L * lzo_sizeof_dict_t` where
     /// `lzo_sizeof_dict_t = sizeof(lzo_bytep) = sizeof(char*)`.
     pub const LZO1X_1_MEM_COMPRESS: usize = 16384 * size_of::<*const u8>();
+    /// Same scratch size in `u64` units (rounded up) for an aligned `Vec<u64>` backing.
+    pub const LZO1X_1_MEM_COMPRESS_U64: usize = LZO1X_1_MEM_COMPRESS.div_ceil(size_of::<u64>());
 
     const LZO_E_OK: c_int = 0;
     /// `lzoconf.h:32`: 2.10.
@@ -358,8 +358,8 @@ mod lzo {
     /// `src_len + src_len/16 + 64 + 3` (LZO docs). Never fails when
     /// the dest buffer is sized to that bound — but we still gate on
     /// `LZO_E_OK` for paranoia.
-    pub fn compress_1(src: &[u8], wrkmem: &mut [u8]) -> Option<Vec<u8>> {
-        debug_assert!(wrkmem.len() >= LZO1X_1_MEM_COMPRESS);
+    pub fn compress_1(src: &[u8], wrkmem: &mut [u64]) -> Option<Vec<u8>> {
+        debug_assert!(wrkmem.len() >= LZO1X_1_MEM_COMPRESS_U64);
         let bound = src.len() + src.len() / 16 + 64 + 3;
         let mut out = vec![0u8; bound];
         let mut out_len: usize = bound;
@@ -373,7 +373,7 @@ mod lzo {
                 src.len(),
                 out.as_mut_ptr(),
                 &raw mut out_len,
-                wrkmem.as_mut_ptr(),
+                wrkmem.as_mut_ptr().cast::<u8>(),
             )
         };
         if r == LZO_E_OK && out_len <= bound {
