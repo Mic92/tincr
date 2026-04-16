@@ -30,6 +30,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(test)]
+use std::os::fd::IntoRawFd;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::bind_to_interface;

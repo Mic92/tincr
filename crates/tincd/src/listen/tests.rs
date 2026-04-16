@@ -418,6 +418,7 @@ fn assign_static_port_cases() {
 /// fall through to the original addr (port 0
 /// → fresh ephemeral). Prove the listener still materializes.
 #[test]
+#[cfg(target_os = "linux")] // 127.42.x.x only routable on Linux
 fn bind_reusing_port_fallback() {
     // Occupy a port. 127.42.x avoids racing two_daemons'
     // 127.0.0.1 alloc_port (bind-read-drop-rebind TOCTOU).
@@ -445,6 +446,7 @@ fn bind_reusing_port_fallback() {
 /// bind-drop-rebind here would TOCTOU-race the parallel
 /// `alloc_port` calls in `tests/two_daemons.rs`).
 #[test]
+#[cfg(target_os = "linux")] // 127.42.x.x only routable on Linux
 fn open_pair_bindto_flag_plumbed() {
     // 127.42.x avoids racing two_daemons' 127.0.0.1 alloc_port.
     let l = open_listener_pair("127.42.3.1:0".parse().unwrap(), &opts(), None, true).expect("bind");
@@ -487,7 +489,10 @@ fn adopt_listeners_from_high_fd() {
     // Original drops here; high_fd is the only handle now.
     drop(tcp);
 
-    let listeners = adopt_listeners_from(high_fd.as_raw_fd(), 1, &opts()).unwrap();
+    // `adopt_listeners_from` takes ownership via `from_raw_fd`;
+    // release our OwnedFd to avoid double-close.
+    let raw = high_fd.into_raw_fd();
+    let listeners = adopt_listeners_from(raw, 1, &opts()).unwrap();
     assert_eq!(listeners.len(), 1);
     assert_eq!(listeners[0].local, want_addr);
     assert!(!listeners[0].bindto, "socket-activated → bindto=false");
@@ -522,10 +527,10 @@ fn adopt_listeners_not_a_socket() {
     let high_fd = nix::unistd::dup(&f).expect("dup");
     drop(f);
 
-    // adopt_listeners_from took ownership of high_fd via
-    // Socket::from_raw_fd; the error path drops the Socket,
-    // which closes high_fd. No leak.
-    let e = adopt_listeners_from(high_fd.as_raw_fd(), 1, &opts())
+    // adopt_listeners_from takes ownership via from_raw_fd;
+    // release our OwnedFd to avoid double-close.
+    let raw = high_fd.into_raw_fd();
+    let e = adopt_listeners_from(raw, 1, &opts())
         .err()
         .expect("expected ENOTSOCK")
         .to_string();
