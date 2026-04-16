@@ -1130,6 +1130,7 @@ dependencies = [
  "sha2",
  "slotmap",
  "socket2",
+ "subtle",
  "thiserror",
  "tinc-conf",
  "tinc-crypto",

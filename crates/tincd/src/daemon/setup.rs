@@ -140,11 +140,14 @@ fn build_listeners(
 /// unset. The result is sanitized: any non-alnum char becomes `_`,
 /// so a hostname like `my-host` is a valid node name.
 ///
-/// Names without a `$` prefix are returned unchanged (NOT sanitized;
-/// only the env branch is sanitized).
+/// Names without a `$` prefix are validated with `check_id` and
+/// returned unchanged.
 #[allow(unsafe_code)] // libc::gethostname; nix `hostname` feature not enabled
 fn expand_name(name: &str) -> Result<String, String> {
     let Some(var) = name.strip_prefix('$') else {
+        if !tinc_proto::check_id(name) {
+            return Err(format!("Invalid Name: {name}"));
+        }
         return Ok(name.to_owned());
     };
 
@@ -178,7 +181,7 @@ fn expand_name(name: &str) -> Result<String, String> {
 
     Ok(raw
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
         .collect())
 }
 
@@ -482,8 +485,6 @@ impl Daemon {
         config.merge(cmdline_conf.entries().iter().cloned());
 
         // ─── Name
-        // TODO: validate with check_id (alphanumeric + `_`). Currently
-        // only the ConnectTo path uses it; Name itself is unvalidated.
         let name = config
             .lookup("Name")
             .next()
@@ -1005,11 +1006,10 @@ mod tests {
     /// `expand_name` $-expansion + sanitize.
     #[test]
     fn expand_name_passthrough() {
-        // No `$` prefix → returned as-is, NO sanitization. Only
-        // the env-expanded branch is sanitized; literal Name goes
-        // straight to check_id (which rejects `-`).
+        // No `$` prefix → validated with check_id, returned as-is.
         assert_eq!(expand_name("node1").unwrap(), "node1");
-        assert_eq!(expand_name("my-host").unwrap(), "my-host");
+        assert!(expand_name("my-host").is_err());
+        assert!(expand_name("").is_err());
     }
 
     #[test]
