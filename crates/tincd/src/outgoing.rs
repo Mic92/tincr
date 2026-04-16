@@ -384,6 +384,14 @@ pub fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
             }
         }
         // Linux: ECONNREFUSED etc bubble up directly from send().
+        // macOS: EPIPE from send() on a reset socket. The real
+        // error is in SO_ERROR; read it like the ENOTCONN path.
+        #[cfg(target_os = "macos")]
+        Err(nix::Error::EPIPE) => match getsockopt(&fd, sockopt::SocketError) {
+            Ok(0) => Ok(false),
+            Ok(errno) => Err(io::Error::from_raw_os_error(errno)),
+            Err(ge) => Err(ge.into()),
+        },
         Err(e) => Err(e.into()),
     }
 }
