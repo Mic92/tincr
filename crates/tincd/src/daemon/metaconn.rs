@@ -135,7 +135,7 @@ impl Daemon {
                     }
                     let status = String::from_utf8_lossy(&line[9..]);
                     log::error!(target: "tincd::conn",
-                        "HTTP proxy request rejected for {}: {}",
+                        "HTTP proxy request rejected for {}: {:?}",
                         conn.name, status.trim_end_matches('\r'));
                     self.terminate(id);
                     return FeedDrain::Done;

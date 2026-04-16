@@ -201,7 +201,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
                 // your interface" message.
                 continue;
             }
-            eprintln!("Ignoring unknown variable '{key}' in invitation.");
+            eprintln!("Ignoring unknown variable {key:?} in invitation.");
             continue;
         };
 
@@ -210,9 +210,9 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         // the "I trust this inviter" knob.
         if !var.flags.contains(VarFlags::SAFE) {
             if force {
-                eprintln!("Warning: unsafe variable '{key}' in invitation.");
+                eprintln!("Warning: unsafe variable {key:?} in invitation.");
             } else {
-                eprintln!("Ignoring unsafe variable '{key}' in invitation.");
+                eprintln!("Ignoring unsafe variable {key:?} in invitation.");
                 continue;
             }
         }

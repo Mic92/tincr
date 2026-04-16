@@ -727,7 +727,7 @@ impl Daemon {
             return false;
         }
         log::debug!(target: "tincd::proto",
-                    "Forwarding to {} peer(s): {s}", targets.len());
+                    "Forwarding to {} peer(s): {s:?}", targets.len());
         let mut nw = false;
         for id in targets {
             if let Some(c) = self.conns.get_mut(id) {

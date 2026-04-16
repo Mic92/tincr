@@ -256,7 +256,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // hash would differ. Hash exactly what arrived.
     if fingerprint_hash(fingerprint) != parsed.key_hash {
         return Err(CmdError::BadInput(format!(
-            "Peer has an invalid key. Please make sure you're using the correct URL.\n{fingerprint}"
+            "Peer has an invalid key. Please make sure you're using the correct URL.\n{fingerprint:?}"
         )));
     }
 
