@@ -613,7 +613,8 @@ pub fn do_outgoing_pipe(
         nix::sys::socket::AddressFamily::Unix,
         nix::sys::socket::SockType::Stream,
         None,
-        nix::sys::socket::SockFlag::empty(),
+        // CLOEXEC: child dup2's what it needs to 0/1; originals shouldn't leak past exec.
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
     )?;
     // Snapshot the raw ints BEFORE fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
