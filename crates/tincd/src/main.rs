@@ -635,8 +635,23 @@ fn detach() -> Result<(), String> {
     //
     // (nochdir=true, noclose=false): keep cwd (we've resolved
     // paths), close stdio.
-    nix::unistd::daemon(true, false)
-        .map_err(|e| format!("Couldn't detach from terminal: {e}"))
+    #[cfg(target_os = "linux")]
+    {
+        nix::unistd::daemon(true, false)
+            .map_err(|e| format!("Couldn't detach from terminal: {e}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // nix::unistd::daemon is Linux-only in nix 0.29.
+        // Use libc::daemon directly.
+        #[allow(unsafe_code, deprecated)]
+        let rc = unsafe { libc::daemon(1, 0) };
+        if rc < 0 {
+            Err(format!("Couldn't detach from terminal: {}", std::io::Error::last_os_error()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// `drop_privs()`. Called AFTER `setup_network`
@@ -671,10 +686,22 @@ fn drop_privs(
         // Single-threaded (event loop not started). Username is from
         // argv (UTF-8-validated in parse_args), nul-terminated here.
         let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
-        nix::unistd::initgroups(&cuser, pw.gid)
-            .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
+        // nix::unistd::initgroups is not available on Apple targets.
+        // Use libc directly.
+        #[allow(unsafe_code)]
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            let rc = unsafe { libc::initgroups(cuser.as_ptr(), pw.gid.as_raw() as _) };
+            if rc != 0 {
+                return Err(format!("System call `initgroups' failed: {}", std::io::Error::last_os_error()));
+            }
+        }
+        #[cfg(target_os = "linux")]
         nix::unistd::setresgid(pw.gid, pw.gid, pw.gid)
             .map_err(|e| format!("System call `setresgid' failed: {e}"))?;
+        #[cfg(not(target_os = "linux"))]
+        nix::unistd::setgid(pw.gid)
+            .map_err(|e| format!("System call `setgid' failed: {e}"))?;
 
         Some((pw.uid, pw.gid))
     } else {
@@ -705,23 +732,33 @@ fn drop_privs(
 
     // setresuid LAST (real, effective, saved). After this we can't undo.
     if let Some((uid, gid)) = uid_gid {
-        nix::unistd::setresuid(uid, uid, uid)
-            .map_err(|e| format!("System call `setresuid' failed: {e}"))?;
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::setresuid(uid, uid, uid)
+                .map_err(|e| format!("System call `setresuid' failed: {e}"))?;
 
-        // Verify the kernel applied the drop to all three of each.
-        let ru = nix::unistd::getresuid().map_err(|e| format!("getresuid: {e}"))?;
-        let rg = nix::unistd::getresgid().map_err(|e| format!("getresgid: {e}"))?;
-        if ru.real != uid || ru.effective != uid || ru.saved != uid {
-            return Err(format!("setresuid did not stick: got {ru:?}, want {uid}"));
+            // Verify the kernel applied the drop to all three of each.
+            let ru = nix::unistd::getresuid().map_err(|e| format!("getresuid: {e}"))?;
+            let rg = nix::unistd::getresgid().map_err(|e| format!("getresgid: {e}"))?;
+            if ru.real != uid || ru.effective != uid || ru.saved != uid {
+                return Err(format!("setresuid did not stick: got {ru:?}, want {uid}"));
+            }
+            if rg.real != gid || rg.effective != gid || rg.saved != gid {
+                return Err(format!("setresgid did not stick: got {rg:?}, want {gid}"));
+            }
         }
-        if rg.real != gid || rg.effective != gid || rg.saved != gid {
-            return Err(format!("setresgid did not stick: got {rg:?}, want {gid}"));
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = gid; // gid already set via setgid above
+            nix::unistd::setuid(uid)
+                .map_err(|e| format!("System call `setuid' failed: {e}"))?;
         }
     }
 
     // PR_SET_NO_NEW_PRIVS: execve can't grant privileges (setuid
     // bits, file caps) from here on. Set unconditionally; the
     // sandbox path sets it again, harmlessly.
+    #[cfg(target_os = "linux")]
     if let Err(e) = nix::sys::prctl::set_no_new_privs() {
         log::warn!(target: "tincd", "prctl(PR_SET_NO_NEW_PRIVS): {e}");
     }

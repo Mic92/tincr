@@ -52,5 +52,7 @@ pub mod subnet_tree;
 pub mod tcp_tunnel;
 pub mod tunnel;
 pub mod udp_info;
+mod platform;
+pub use platform::{msg_nosignal, sock_cloexec_flag};
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};

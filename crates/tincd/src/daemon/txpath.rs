@@ -4,6 +4,7 @@ use super::{ConnId, Daemon, PKT_PROBE, TimerWhat, parse_subnets_from_config};
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use tinc_graph::{NodeId, Route};
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 
+#[cfg(target_os = "linux")]
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
 };
@@ -37,6 +39,13 @@ use nix::sys::socket::{
 /// that window is stuck at MSS 536.
 ///
 /// Falls back to `MTU` on every error.
+#[cfg(not(target_os = "linux"))]
+fn choose_initial_maxmtu(_peer: SocketAddr) -> u16 {
+    // macOS: no IP_MTU sockopt. Use default MTU.
+    MTU
+}
+
+#[cfg(target_os = "linux")]
 fn choose_initial_maxmtu(peer: SocketAddr) -> u16 {
     // Ephemeral DGRAM socket, only for the kernel's route+PMTU
     // lookup. Never sends.

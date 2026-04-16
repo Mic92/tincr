@@ -73,9 +73,6 @@ nix = { version = "0.29", default-features = false, features = ["fs", "socket", 
 # to compile the crate. sandbox.rs cfg-gates enter_impl on the same
 # predicate. Kernel ≥5.13; older kernels get RulesetStatus::
 # NotEnforced at runtime (warn at normal, hard-fail at high).
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
-
 # discovery.rs: BitTorrent Mainline DHT for BEP 42 reflexive address voting
 # ("what's my public IP") + BEP 44 publish ("where am I", keyed by Ed25519
 # pubkey). Runs on its own std::thread; polled from on_periodic_tick. The
@@ -120,6 +117,9 @@ lz4_flex = { version = "0.11", default-features = false }
 # tinc 1.0 DEFAULT — wire-compat is non-negotiable, so we call THE
 # SAME C code C tinc calls. minilzo lacks lzo1x_999_compress (level
 # 11 compress); see minilzo/README.
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 [build-dependencies]
 cc = "1.0"
 

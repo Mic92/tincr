@@ -1,6 +1,7 @@
 use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
 
 use std::io;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 
 use crate::compress;
@@ -849,6 +850,14 @@ fn inherit_tos(
 ///
 /// Log-on-error at debug, never fail — a busy system flipping TOS
 /// per-packet would spam if the kernel ever started rejecting these.
+#[cfg(not(target_os = "linux"))]
+fn set_udp_tos(_l: &Listener, _is_ipv6: bool, _prio: u8) {
+    // IP_TOS / IPV6_TCLASS: nix 0.29 only exposes these on Linux.
+    // macOS supports them via raw setsockopt but it's best-effort;
+    // skip for now.
+}
+
+#[cfg(target_os = "linux")]
 fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
     use nix::sys::socket::{setsockopt, sockopt};
     let val = libc::c_int::from(prio);

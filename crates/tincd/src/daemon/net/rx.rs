@@ -1,7 +1,9 @@
 use super::super::{Daemon, IoWhat};
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 
-use std::io::{self, IoSliceMut};
+use std::io;
+#[cfg(target_os = "linux")]
+use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd};
 
@@ -17,6 +19,7 @@ use tinc_event::Io;
 use tinc_graph::NodeId;
 
 use nix::errno::Errno;
+#[cfg(target_os = "linux")]
 use nix::sys::socket::{MsgFlags, recvmmsg};
 
 impl Daemon {
@@ -187,56 +190,77 @@ impl Daemon {
     /// One `recvmmsg(64)` + dispatch. Returns the number of
     /// messages the kernel gave us (0..=64). Separate fn so the
     /// `batch` borrow doesn't overlap `&mut self` at the call site.
+    /// Phase 1 of UDP receive: syscall + extract (len, peer) per message.
+    /// Linux: one recvmmsg(64). macOS: recvfrom loop.
+    #[cfg(target_os = "linux")]
+    fn udp_recv_phase1(
+        fd: std::os::fd::RawFd,
+        batch: &mut UdpRxBatch,
+        meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
+    ) -> usize {
+        let mut iovs: [[IoSliceMut<'_>; 1]; UDP_RX_BATCH] =
+            batch.bufs.each_mut().map(|b| [IoSliceMut::new(&mut b[..])]);
+
+        match recvmmsg(
+            fd,
+            &mut batch.headers,
+            iovs.iter_mut(),
+            MsgFlags::MSG_DONTWAIT,
+            None,
+        ) {
+            Ok(msgs) => {
+                let mut k = 0usize;
+                for (idx, msg) in msgs.enumerate() {
+                    k = idx + 1;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let n = msg.bytes.min(UDP_RX_BUFSZ) as u16;
+                    let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
+                    meta[idx] = (n, peer);
+                }
+                k
+            }
+            Err(Errno::EAGAIN) => 0,
+            Err(e) => {
+                log::error!(target: "tincd::net", "Receiving packet failed: {e}");
+                0
+            }
+        }
+    }
+
+    /// Phase 1 on macOS: recvfrom loop (no recvmmsg).
+    #[cfg(not(target_os = "linux"))]
+    fn udp_recv_phase1(
+        fd: std::os::fd::RawFd,
+        batch: &mut UdpRxBatch,
+        meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
+    ) -> usize {
+        use nix::sys::socket::{SockaddrStorage as NixSS, recvfrom};
+        let mut count = 0;
+        while count < UDP_RX_BATCH {
+            match recvfrom::<NixSS>(fd, &mut batch.bufs[count]) {
+                Ok((n, addr)) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let n = n.min(UDP_RX_BUFSZ) as u16;
+                    let peer = addr.as_ref().and_then(ss_to_std).map(unmap);
+                    meta[count] = (n, peer);
+                    count += 1;
+                }
+                Err(Errno::EAGAIN) => break,
+                Err(e) => {
+                    log::error!(target: "tincd::net", "Receiving packet failed: {e}");
+                    break;
+                }
+            }
+        }
+        count
+    }
+
     fn recvmmsg_batch(&mut self, i: u8, batch: &mut UdpRxBatch) -> usize {
         let fd = self.listeners[usize::from(i)].listener.udp.as_raw_fd();
 
         // ─── Phase 1: syscall + extract (len, peer) per message.
-        //
-        // The IoSliceMut borrows `batch.bufs` for `'a`; nix's
-        // `recvmmsg` ties `MultiResults<'a>` to that same lifetime
-        // (it borrows `MultiHeaders`). We can't hold MultiResults
-        // alive across `&mut self` calls anyway (it borrows
-        // `batch.headers`), so collect what we need into a stack
-        // array first, drop the iterator, then dispatch from `bufs`.
-        //
-        // The inner block scopes the iov borrows so phase 2 can
-        // re-read `batch.bufs`.
         let mut meta: [(u16, Option<SocketAddr>); UDP_RX_BATCH] = [(0u16, None); UDP_RX_BATCH];
-        let count = {
-            // 64 × 1-element [IoSliceMut]. Array of arrays (not
-            // array of IoSliceMut) because nix wants `I: AsMut<
-            // [IoSliceMut]>` — each msg gets a SLICE of iovs.
-            let mut iovs: [[IoSliceMut<'_>; 1]; UDP_RX_BATCH] =
-                batch.bufs.each_mut().map(|b| [IoSliceMut::new(&mut b[..])]);
-
-            match recvmmsg(
-                fd,
-                &mut batch.headers,
-                iovs.iter_mut(),
-                MsgFlags::MSG_DONTWAIT,
-                None,
-            ) {
-                Ok(msgs) => {
-                    let mut k = 0usize;
-                    for (idx, msg) in msgs.enumerate() {
-                        k = idx + 1;
-                        // .min(UDP_RX_BUFSZ=2048) clamps to u16
-                        #[allow(clippy::cast_possible_truncation)]
-                        let n = msg.bytes.min(UDP_RX_BUFSZ) as u16;
-                        let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
-                        meta[idx] = (n, peer);
-                    }
-                    k
-                }
-                // EAGAIN ≡ EWOULDBLOCK on Linux (alias in nix).
-                Err(Errno::EAGAIN) => 0,
-                Err(e) => {
-                    log::error!(target: "tincd::net",
-                                "Receiving packet failed: {e}");
-                    0
-                }
-            }
-        };
+        let count = Self::udp_recv_phase1(fd, batch, &mut meta);
 
         // ─── Phase 2: dispatch. iov borrows are dead; `batch.bufs`
         // is now free to read while we hold `&mut self`.

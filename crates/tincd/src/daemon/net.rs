@@ -3,7 +3,9 @@ pub(super) use super::ListenerSlot;
 
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use nix::sys::socket::{MultiHeaders, SockaddrStorage};
+#[cfg(target_os = "linux")]
+use nix::sys::socket::MultiHeaders;
+use nix::sys::socket::SockaddrStorage;
 
 mod device;
 mod icmp;
@@ -27,7 +29,8 @@ pub(crate) struct UdpRxBatch {
     /// 64 × 2KB packet buffers. Boxed so `Option<UdpRxBatch>` is
     /// `mem::take`-cheap (one ptr, not 128KB).
     bufs: Box<[[u8; UDP_RX_BUFSZ]; UDP_RX_BATCH]>,
-    /// nix's `mmsghdr` + `sockaddr_storage` arrays.
+    /// nix's `mmsghdr` + `sockaddr_storage` arrays. Linux only.
+    #[cfg(target_os = "linux")]
     headers: MultiHeaders<SockaddrStorage>,
 }
 
@@ -43,6 +46,7 @@ impl UdpRxBatch {
             .expect("vec![_; 64].into_boxed_slice() has length 64");
         Self {
             bufs,
+            #[cfg(target_os = "linux")]
             headers: MultiHeaders::preallocate(UDP_RX_BATCH, None),
         }
     }

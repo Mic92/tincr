@@ -9,7 +9,7 @@ use crate::{icmp, neighbor};
 use tinc_graph::NodeId;
 
 use nix::sys::socket::{
-    AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockname, socket,
+    AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket,
 };
 
 impl Daemon {
@@ -254,7 +254,7 @@ fn local_ip_facing(orig_src: IpAddr) -> Option<IpAddr> {
         IpAddr::V4(_) => AddressFamily::Inet,
         IpAddr::V6(_) => AddressFamily::Inet6,
     };
-    let sock = socket(af, SockType::Datagram, SockFlag::SOCK_CLOEXEC, None).ok()?;
+    let sock = socket(af, SockType::Datagram, crate::sock_cloexec_flag(), None).ok()?;
     let ss = SockaddrStorage::from(SocketAddr::new(orig_src, 1));
     connect(sock.as_raw_fd(), &ss).ok()?;
     let local: SockaddrStorage = getsockname(sock.as_raw_fd()).ok()?;

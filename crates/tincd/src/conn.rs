@@ -16,7 +16,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::time::Instant;
 
 use nix::errno::Errno;
-use nix::sys::socket::{MsgFlags, send};
+use nix::sys::socket::send;
 use nix::unistd::read;
 
 use rand_core::RngCore;
@@ -689,7 +689,7 @@ impl Connection {
 
         let live = self.outbuf.live();
         // `send(2)`: ENOTSOCK is a useful sanity check.
-        let n = match send(self.fd.as_raw_fd(), live, MsgFlags::MSG_NOSIGNAL) {
+        let n = match send(self.fd.as_raw_fd(), live, crate::msg_nosignal()) {
             Ok(n) => n,
             Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
                 return Ok(false); // C :494-496

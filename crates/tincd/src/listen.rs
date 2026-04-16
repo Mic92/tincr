@@ -123,14 +123,22 @@ where
 /// `bind_to_interface`. `SO_BINDTODEVICE`. Returns `Err` on failure
 /// (caller closes the socket) — unlike the other sockopts, this is
 /// intentional: see `SockOpts.bind_to_interface`.
+#[cfg(target_os = "linux")]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn bind_to_interface(_s: &Socket, iface: &str) -> io::Result<()> {
+    log::warn!(target: "tincd", "SO_BINDTODEVICE not available on this platform, ignoring BindToInterface={iface}");
+    Ok(())
+}
+
 /// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
 /// wrap (`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`). Single unsafe site.
+#[cfg(target_os = "linux")]
 pub(crate) fn set_int_sockopt(
     fd: BorrowedFd<'_>,
     level: libc::c_int,
@@ -309,6 +317,7 @@ fn apply_common_sockopts(
     }
 
     // SO_MARK: Linux netfilter mark for policy routing. 0 = unset = skip.
+    #[cfg(target_os = "linux")]
     if opts.fwmark != 0
         && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
     {
@@ -513,14 +522,9 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     }
 
     // `:349-378`: IP_MTU_DISCOVER / IPV6_MTU_DISCOVER = PMTUDISC_DO.
-    // Forces DF on every datagram. Without this, oversized PMTU probes
-    // get IP-fragmented and arrive successfully — pmtu.rs walks minmtu
-    // up past the physical MTU, the kernel never populates its PMTU
-    // cache (so choose_initial_maxmtu reads nothing), and EMSGSIZE
-    // never reaches reduce_mtu. The whole PMTU machinery becomes
-    // decorative. C gates on OPTION_PMTU_DISCOVERY (default ON unless
-    // TCPOnly); we set unconditionally — if TCPOnly, this socket
-    // carries no data anyway. Best-effort like the C: warn, don't bail.
+    // Linux-only: forces DF on every datagram for PMTU discovery.
+    // macOS sets DF by default on UDP sockets.
+    #[cfg(target_os = "linux")]
     {
         let (level, optname, optval, label) = if domain == Domain::IPV6 {
             (

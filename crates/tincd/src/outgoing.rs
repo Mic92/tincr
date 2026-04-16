@@ -105,6 +105,7 @@ pub enum ConnectAttempt {
 /// proceeds (kernel picks via routing table, same as no-bind).
 fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     // `if(fwmark) setsockopt(SO_MARK)`. 0 = unset = skip.
+    #[cfg(target_os = "linux")]
     if sockopts.fwmark != 0 {
         use nix::sys::socket::{setsockopt, sockopt};
         use std::os::fd::AsFd;
@@ -614,7 +615,7 @@ pub fn do_outgoing_pipe(
         nix::sys::socket::SockType::Stream,
         None,
         // CLOEXEC: child dup2's what it needs to 0/1; originals shouldn't leak past exec.
-        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        crate::sock_cloexec_flag(),
     )?;
     // Snapshot the raw ints BEFORE fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
