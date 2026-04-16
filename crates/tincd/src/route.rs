@@ -254,9 +254,12 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
             // :343-349. TTL at [ethlen+8]. C bug (since 2012): the
             // storm-guard reads proto at [ethlen+11] (ip_sum low byte;
             // should be +9) and ICMP type at [ethlen+32] (wrong too).
-            // The check almost never matches. Ported AS-IS.
+            // The check almost never matches. Ported AS-IS; `.get()`
+            // for the +32 read (checklength only guarantees +20).
             if data[ethlen + 8] <= 1 {
-                if data[ethlen + 11] != IPPROTO_ICMP || data[ethlen + 32] != ICMP_TIME_EXCEEDED {
+                if data[ethlen + 11] != IPPROTO_ICMP
+                    || data.get(ethlen + 32).copied() != Some(ICMP_TIME_EXCEEDED)
+                {
                     return TtlResult::SendIcmp {
                         icmp_type: ICMP_TIME_EXCEEDED,
                         icmp_code: ICMP_EXC_TTL,
@@ -293,8 +296,11 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 
             // :372-381. hlim at [ethlen+7], nxt at [+6], ICMP type
             // at [+40] (correct this time — v6 hdr is fixed 40B).
+            // `.get()`: checklength only guarantees +40.
             if data[ethlen + 7] <= 1 {
-                if data[ethlen + 6] != IPPROTO_ICMPV6 || data[ethlen + 40] != ICMP6_TIME_EXCEEDED {
+                if data[ethlen + 6] != IPPROTO_ICMPV6
+                    || data.get(ethlen + 40).copied() != Some(ICMP6_TIME_EXCEEDED)
+                {
                     return TtlResult::SendIcmp {
                         icmp_type: ICMP6_TIME_EXCEEDED,
                         icmp_code: ICMP6_TIME_EXCEED_TRANSIT,
@@ -781,5 +787,37 @@ mod tests {
         let mut p = vec![0u8; ETHER_SIZE + 10];
         p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
         assert_eq!(extract_tos(&p), None);
+    }
+
+    #[test]
+    fn decrement_ttl_v4_minimal_frame_ttl_expired() {
+        // 34B = eth(14)+ip(20); TTL=1; [+11]=ICMP so storm-guard reads [+32] (past end)
+        let mut p = vec![0u8; ETHER_SIZE + IP_SIZE];
+        p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
+        p[ETHER_SIZE + 8] = 1;
+        p[ETHER_SIZE + 11] = IPPROTO_ICMP;
+        assert_eq!(
+            decrement_ttl(&mut p),
+            TtlResult::SendIcmp {
+                icmp_type: ICMP_TIME_EXCEEDED,
+                icmp_code: ICMP_EXC_TTL,
+            }
+        );
+    }
+
+    #[test]
+    fn decrement_ttl_v6_minimal_frame_hlim_expired() {
+        // 54B = eth(14)+ip6(40); hlim=1; nxt=ICMPv6 so storm-guard reads [+40] (== len)
+        let mut p = vec![0u8; ETHER_SIZE + IP6_SIZE];
+        p[12..14].copy_from_slice(&ETH_P_IPV6.to_be_bytes());
+        p[ETHER_SIZE + 7] = 1;
+        p[ETHER_SIZE + 6] = IPPROTO_ICMPV6;
+        assert_eq!(
+            decrement_ttl(&mut p),
+            TtlResult::SendIcmp {
+                icmp_type: ICMP6_TIME_EXCEEDED,
+                icmp_code: ICMP6_TIME_EXCEED_TRANSIT,
+            }
+        );
     }
 }
