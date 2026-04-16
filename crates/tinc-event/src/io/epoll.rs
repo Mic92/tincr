@@ -1,108 +1,79 @@
-//! Raw epoll syscalls. The shared slab + dispatch lives in `mod.rs`;
-//! this is just the platform syscall surface so a future `kqueue.rs`
-//! can slot in.
+//! Epoll syscall surface via `nix::sys::epoll`. The shared slab +
+//! dispatch lives in `mod.rs`; this is just the platform layer so a
+//! future `kqueue.rs` can slot in.
 //!
 //! We don't register `EPOLLPRI`/`EPOLLRDHUP`/oneshot — peer-close is
 //! detected via `read() → 0`, same as C tinc.
 
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{BorrowedFd, RawFd};
 use std::time::Duration;
 
-pub(super) type RawEvent = libc::epoll_event;
+use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 
-const FLAGS_BASE: u32 = 0; // level-triggered, matches src/linux/event.c:97
+pub(super) type RawEvent = EpollEvent;
+pub(super) type Poller = Epoll;
 
-pub(super) fn create() -> io::Result<OwnedFd> {
-    // SAFETY: epoll_create1 returns a fresh fd or -1. No invariants
-    // beyond "the kernel works".
-    #[allow(unsafe_code)]
-    let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd is fresh, valid, exclusively ours; OwnedFd drop
-    // closes it.
-    #[allow(unsafe_code)]
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+const FLAGS_BASE: EpollFlags = EpollFlags::empty(); // level-triggered, matches src/linux/event.c:97
+
+pub(super) fn create() -> io::Result<Poller> {
+    Ok(Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?)
 }
 
-fn interest_to_flags(i: super::Io) -> u32 {
+fn interest_to_flags(i: super::Io) -> EpollFlags {
     FLAGS_BASE
         | match i {
-            super::Io::Read => libc::EPOLLIN as u32,
-            super::Io::Write => libc::EPOLLOUT as u32,
-            super::Io::ReadWrite => (libc::EPOLLIN | libc::EPOLLOUT) as u32,
+            super::Io::Read => EpollFlags::EPOLLIN,
+            super::Io::Write => EpollFlags::EPOLLOUT,
+            super::Io::ReadWrite => EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT,
         }
 }
 
-pub(super) fn ctl(
-    ep: RawFd,
-    op: libc::c_int,
-    fd: RawFd,
-    token: usize,
-    i: super::Io,
-) -> io::Result<()> {
-    let mut ev = libc::epoll_event {
-        events: interest_to_flags(i),
-        u64: token as u64,
-    };
-    // SAFETY: ep and fd are valid by caller contract (see io/mod.rs
-    // — ep is `self.ep.as_raw_fd()`, fd came from `add()`); ev is a
-    // local that outlives the call.
+/// Borrow a `RawFd` for the duration of an `epoll_ctl` call.
+///
+/// The event loop stores `RawFd` per slot by design (see `mod.rs`
+/// module doc "The loop doesn't own fds") — the fds belong to
+/// `connection_t` etc. nix's `Epoll` methods want `AsFd`, so we wrap
+/// at this boundary. The caller contract is: `fd` is open for the
+/// duration of this call (`mod.rs` only ever passes fds it was just
+/// handed via `add`/`set`, or that it's deregistering in `del`).
+#[inline]
+fn borrow(fd: RawFd) -> BorrowedFd<'static> {
+    // SAFETY: caller contract above. nix only uses the fd for one
+    // `epoll_ctl` syscall and does not retain it.
     #[allow(unsafe_code)]
-    let r = unsafe { libc::epoll_ctl(ep, op, fd, &raw mut ev) };
-    if r < 0 {
-        return Err(io::Error::last_os_error());
+    unsafe {
+        BorrowedFd::borrow_raw(fd)
     }
-    Ok(())
 }
 
-pub(super) fn del(ep: RawFd, fd: RawFd) -> io::Result<()> {
-    // Kernel ≥2.6.9 ignores the event ptr for DEL. We pass a real
-    // one anyway — older kernels NULL-deref'd. Belt-and-suspenders.
-    let mut ev = libc::epoll_event { events: 0, u64: 0 };
-    // SAFETY: same as ctl()
-    #[allow(unsafe_code)]
-    let r = unsafe { libc::epoll_ctl(ep, libc::EPOLL_CTL_DEL, fd, &raw mut ev) };
-    if r < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+pub(super) fn add(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+    let ev = EpollEvent::new(interest_to_flags(i), token as u64);
+    Ok(ep.add(borrow(fd), ev)?)
+}
+
+pub(super) fn modify(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+    let mut ev = EpollEvent::new(interest_to_flags(i), token as u64);
+    Ok(ep.modify(borrow(fd), &mut ev)?)
+}
+
+pub(super) fn del(ep: &Poller, fd: RawFd) -> io::Result<()> {
+    // nix passes NULL for DEL; kernel ≥2.6.9 ignores it. We don't
+    // support pre-2.6.9 kernels (no epoll_create1 there anyway).
+    Ok(ep.delete(borrow(fd))?)
 }
 
 pub(super) fn wait(
-    ep: RawFd,
-    events: &mut Vec<RawEvent>,
+    ep: &Poller,
+    events: &mut [RawEvent],
     timeout: Option<Duration>,
-) -> io::Result<()> {
-    // Clamp to c_int range. Our timer wheel caps at ~pingtimeout so
+) -> io::Result<usize> {
+    // Clamp to i32 range. Our timer wheel caps at ~pingtimeout so
     // this never triggers in practice, but saturating is free.
-    #[allow(clippy::cast_possible_truncation)] // c_int::MAX = 24.8 days; we min() to it
-    let ms: libc::c_int = timeout.map_or(-1, |d| {
-        d.as_millis().min(libc::c_int::MAX as u128) as libc::c_int
+    let to = timeout.map_or(EpollTimeout::NONE, |d| {
+        EpollTimeout::try_from(d).unwrap_or(EpollTimeout::MAX)
     });
-    events.clear();
-    // capacity() = MAX_EVENTS_PER_TURN = 32; try_from cannot fail.
-    let maxevents =
-        libc::c_int::try_from(events.capacity()).expect("MAX_EVENTS_PER_TURN fits c_int");
-    // SAFETY: events.as_mut_ptr() is valid for `maxevents` writes;
-    // capacity is set by Vec::with_capacity in EventLoop::new and
-    // never shrunk. epoll_wait fills [0..n) and returns n.
-    #[allow(unsafe_code)]
-    let n = unsafe { libc::epoll_wait(ep, events.as_mut_ptr(), maxevents, ms) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: kernel wrote exactly n entries into events[0..n).
-    // n ≥ 0 was just checked. n ≤ capacity by epoll_wait's contract
-    // (maxevents arg).
-    #[allow(unsafe_code)]
-    #[allow(clippy::cast_sign_loss)] // n ≥ 0 checked above
-    unsafe {
-        events.set_len(n as usize);
-    }
-    Ok(())
+    Ok(ep.wait(events, to)?)
 }
 
 // Event accessors. Only EPOLLIN/EPOLLOUT — see module doc.
@@ -110,15 +81,15 @@ pub(super) fn wait(
 #[inline]
 #[allow(clippy::cast_possible_truncation)] // tokens are slot indices, fit usize on any platform
 pub(super) fn ev_token(e: &RawEvent) -> usize {
-    e.u64 as usize
+    e.data() as usize
 }
 
 #[inline]
 pub(super) fn ev_readable(e: &RawEvent) -> bool {
-    e.events & libc::EPOLLIN as u32 != 0
+    e.events().contains(EpollFlags::EPOLLIN)
 }
 
 #[inline]
 pub(super) fn ev_writable(e: &RawEvent) -> bool {
-    e.events & libc::EPOLLOUT as u32 != 0
+    e.events().contains(EpollFlags::EPOLLOUT)
 }

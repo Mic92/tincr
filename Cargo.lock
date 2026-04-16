@@ -1053,6 +1053,7 @@ name = "tinc-event"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "nix",
 ]
 
 [[package]]

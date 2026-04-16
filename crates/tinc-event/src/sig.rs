@@ -61,8 +61,10 @@
 //! tinc doesn't use real-time signals).
 
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicI32, Ordering};
+
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 /// The write-end fd for the handler. `-1` means "not initialized" — the handler reads this and bails
 /// if so (defensive; shouldn't happen because `SelfPipe::new`
@@ -124,6 +126,10 @@ extern "C" fn handler(signum: libc::c_int) {
     // valid pipe write-end (set in new() before this handler was
     // installed; never closed while handler is installed). The
     // pointer is to a stack local. Length is 1.
+    //
+    // Intentionally raw `libc::write`, NOT `nix::unistd::write`: this
+    // is signal-handler context. nix's wrapper is thin, but staying
+    // on the bare syscall keeps the async-signal-safety audit trivial.
     #[allow(unsafe_code)]
     unsafe {
         libc::write(fd, std::ptr::addr_of!(byte).cast(), 1);
@@ -146,20 +152,10 @@ impl<W: Copy> SelfPipe<W> {
         // STRICTER: O_CLOEXEC. Without it the pipe leaks into spawned
         // script children — they'd just have an extra unused fd, but
         // it's untidy.
-        let mut fds = [0i32; 2];
-        // SAFETY: pipe2 writes two valid fds on success.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        if rc < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: pipe2 returned 0; both fds are valid and ours.
-        // OwnedFd::drop closes them.
-        #[allow(unsafe_code)]
-        let (rd, wr) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let (rd, wr) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?;
 
         // "already initialized?" singleton check.
-        let prev = PIPE_WR.swap(fds[1], Ordering::Relaxed);
+        let prev = PIPE_WR.swap(wr.as_raw_fd(), Ordering::Relaxed);
         assert_eq!(prev, -1, "SelfPipe already exists — singleton");
 
         Ok(Self {
@@ -172,7 +168,6 @@ impl<W: Copy> SelfPipe<W> {
     /// Read-end fd for `EventLoop::add(..., Io::Read, IoWhat::Signal)`.
     #[must_use]
     pub fn read_fd(&self) -> RawFd {
-        use std::os::fd::AsRawFd;
         self.rd.as_raw_fd()
     }
 
@@ -194,22 +189,18 @@ impl<W: Copy> SelfPipe<W> {
 
         // sigaction with SA_RESTART. sa_mask empty (don't block
         // anything during the handler — it's just a write()).
-        // SAFETY: libc::sigaction is the standard syscall wrapper.
-        // `act` is fully initialized (zeroed sigset_t is the empty
-        // set; sa_sigaction is set; sa_flags is set). `old` we
-        // don't care about (NULL).
+        let sig = Signal::try_from(signum).map_err(io::Error::from)?;
+        let act = SigAction::new(
+            SigHandler::Handler(handler),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        // SAFETY: installing a signal handler is inherently unsafe —
+        // the handler must be async-signal-safe. Ours is (atomic load
+        // + raw write(2)); see `handler` above.
         #[allow(unsafe_code)]
         unsafe {
-            let mut act: libc::sigaction = std::mem::zeroed();
-            // sighandler_t is `usize` on Linux/BSD (it's the type of
-            // the `sa_handler` union variant that takes a fn ptr).
-            // fn-item → usize is the rustc lint `function_casts_as_
-            // integer`; the *const () intermediary states the intent.
-            act.sa_sigaction = handler as *const () as libc::sighandler_t;
-            act.sa_flags = libc::SA_RESTART;
-            if libc::sigaction(signum, &raw const act, std::ptr::null_mut()) < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            sigaction(sig, &act)?;
         }
 
         self.table[idx] = Some(what);
@@ -235,22 +226,12 @@ impl<W: Copy> SelfPipe<W> {
     /// One read of a 64-byte buffer drains everything.
     pub fn drain(&self, out: &mut Vec<W>) {
         let mut buf = [0u8; 64];
-        // SAFETY: read(2) on a valid fd. buf is 64 bytes; we ask
-        // for 64. read returns how many it actually gave us (>=0)
-        // or -1 on error.
-        #[allow(unsafe_code)]
-        let n = unsafe {
-            use std::os::fd::AsRawFd;
-            libc::read(self.rd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
-        };
-        // n < 0: error (shouldn't happen — pipe is valid, was
-        // reported readable). n == 0: EOF (write end closed —
-        // daemon is dying). n > 0: that many signums.
-        if n <= 0 {
+        // Err: shouldn't happen — pipe is valid, was reported
+        // readable. Ok(0): EOF (write end closed — daemon is dying).
+        // Ok(n > 0): that many signums.
+        let Ok(n) = nix::unistd::read(self.rd.as_raw_fd(), &mut buf) else {
             return;
-        }
-        #[allow(clippy::cast_sign_loss)] // n > 0 checked above
-        let n = n as usize;
+        };
         for &signum in &buf[..n] {
             let idx = signum as usize;
             // Unknown signum (table[idx] is None) — silently skipped.
@@ -275,13 +256,14 @@ impl<W: Copy> SelfPipe<W> {
         if slot.is_none() {
             return; // already del'd / never added
         }
-        // SAFETY: same as `add` — sigaction with SIG_DFL.
-        #[allow(unsafe_code)]
-        unsafe {
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = libc::SIG_DFL;
-            // No SA_RESTART here — SIG_DFL doesn't return.
-            let _ = libc::sigaction(signum, &raw const act, std::ptr::null_mut());
+        if let Ok(sig) = Signal::try_from(signum) {
+            let act = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
+            // SAFETY: restoring SIG_DFL is always safe — default
+            // disposition is async-signal-safe by definition.
+            #[allow(unsafe_code)]
+            unsafe {
+                let _ = sigaction(sig, &act);
+            }
         }
         *slot = None;
     }
