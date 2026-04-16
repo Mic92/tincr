@@ -1095,6 +1095,7 @@ fn three_daemon_forwarding_off_drops_transit() {
     let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut bob_got_transit = false;
+    let mut alice_got_unreach = false;
     while Instant::now() < deadline {
         write_fd(&alice_tun, &probe);
         while let Some(r) = read_fd_nb(&bob_tun) {
@@ -1102,6 +1103,13 @@ fn three_daemon_forwarding_off_drops_transit() {
             // mid forwarded transit traffic. Gate failed.
             if r.ends_with(payload) {
                 bob_got_transit = true;
+            }
+        }
+        // mid's ICMP DEST_UNREACH must come back over the mesh to
+        // alice. FdTun strips eth: [0]=0x45, [9]=1 (ICMP), [20]=3.
+        while let Some(r) = read_fd_nb(&alice_tun) {
+            if r.first() == Some(&0x45) && r.get(9) == Some(&1) && r.get(20) == Some(&3) {
+                alice_got_unreach = true;
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -1127,5 +1135,9 @@ fn three_daemon_forwarding_off_drops_transit() {
     assert!(
         mid_stderr.contains("Forwarding=off"),
         "mid should log the FMODE_OFF gate firing; stderr:\n{mid_stderr}"
+    );
+    assert!(
+        alice_got_unreach,
+        "alice should receive mid's ICMP DEST_UNREACH; mid stderr:\n{mid_stderr}"
     );
 }

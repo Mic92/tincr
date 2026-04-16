@@ -127,10 +127,11 @@ impl Daemon {
         icmp_type: u8,
         icmp_code: u8,
         discover_src: bool,
-    ) {
+        from: Option<NodeId>,
+    ) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
-            return;
+            return false;
         }
         // orig src lives at fixed offsets: eth(14)+ip_src(12)=[26..30]
         // for v4, eth(14)+ip6_src(8)=[22..38] for v6. None on any
@@ -168,15 +169,22 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "route: sending ICMP type={icmp_type} \
                          code={icmp_code} ({} bytes)", reply.len());
-            self.write_icmp_reply(reply);
+            self.write_icmp_reply(reply, from)
+        } else {
+            false
         }
     }
 
     /// v4 `FRAG_NEEDED`. Separate helper: passes `frag_mtu` through.
-    pub(super) fn write_icmp_frag_needed(&mut self, data: &[u8], frag_mtu: u16) {
+    pub(super) fn write_icmp_frag_needed(
+        &mut self,
+        data: &[u8],
+        frag_mtu: u16,
+        from: Option<NodeId>,
+    ) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
-            return;
+            return false;
         }
         if let Some(reply) = icmp::build_v4_unreachable(
             data,
@@ -188,15 +196,22 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "route: FRAG_NEEDED, mtu={frag_mtu} ({} bytes)",
                         reply.len());
-            self.write_icmp_reply(reply);
+            self.write_icmp_reply(reply, from)
+        } else {
+            false
         }
     }
 
     /// v6 `PACKET_TOO_BIG`.
-    pub(super) fn write_icmp_pkt_too_big(&mut self, data: &[u8], mtu: u32) {
+    pub(super) fn write_icmp_pkt_too_big(
+        &mut self,
+        data: &[u8],
+        mtu: u32,
+        from: Option<NodeId>,
+    ) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
-            return;
+            return false;
         }
         if let Some(reply) =
             icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu), None)
@@ -204,15 +219,24 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "route: PACKET_TOO_BIG, mtu={mtu} ({} bytes)",
                         reply.len());
-            self.write_icmp_reply(reply);
+            self.write_icmp_reply(reply, from)
+        } else {
+            false
         }
     }
 
-    pub(super) fn write_icmp_reply(&mut self, mut reply: Vec<u8>) {
+    /// `from = Some(peer)`: packet originated from the mesh, so the
+    /// ICMP error must go back over the mesh, not to local TUN.
+    /// Best-effort: no `try_tx` (don't kick `REQ_KEY`/PMTU for an error reply).
+    pub(super) fn write_icmp_reply(&mut self, mut reply: Vec<u8>, from: Option<NodeId>) -> bool {
+        if let Some(from) = from {
+            return self.send_sptps_packet(from, &reply);
+        }
         if let Err(e) = self.device.write(&mut reply) {
             log::debug!(target: "tincd::net",
                         "Error writing ICMP to device: {e}");
         }
+        false
     }
 }
 

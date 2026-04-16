@@ -348,8 +348,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "route: unreachable, sending ICMP type={icmp_type} \
                              code={icmp_code} ({} bytes)", reply.len());
-                self.write_icmp_reply(reply);
-                false
+                self.write_icmp_reply(reply, from)
             }
             RouteResult::NeighborSolicit => {
                 self.handle_ndp(data, from);
@@ -418,7 +417,7 @@ impl Daemon {
                 } else {
                     (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
                 };
-                self.write_icmp_to_device(data, t, c, false);
+                return self.write_icmp_to_device(data, t, c, false, from);
             }
             return false;
         }
@@ -460,8 +459,7 @@ impl Daemon {
             } else {
                 (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
             };
-            self.write_icmp_to_device(data, t, c, false);
-            return false;
+            return self.write_icmp_to_device(data, t, c, false, from);
         }
         // Packet too big for next hop's PMTU. Only when
         // relaying (clamp_mss + kernel PMTU handle our own
@@ -491,43 +489,40 @@ impl Daemon {
                     if df_set {
                         // limit-14 = IP-layer MTU. limit≥590
                         // so sub never wraps.
-                        self.write_icmp_frag_needed(data, limit - 14);
-                    } else {
-                        // RFC 791 §2.3: routers MUST fragment.
-                        // Rare path (modern OS sets DF on TCP)
-                        // but UDP without DF through narrow-
-                        // MTU relay needs this.
-                        let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
-                            log::debug!(target: "tincd::net",
-                                "fragment_v4: malformed input, dropping");
-                            return false;
-                        };
-                        // Mirror the normal send path below:
-                        // send_sptps_packet + try_tx for PMTU
-                        // drive.
-                        let n = frags.len();
-                        log::debug!(target: "tincd::net",
-                            "Fragmenting packet of {} bytes into \
-                             {n} pieces for {to}", data.len());
-                        {
-                            let tunnel = self.dp.tunnels.entry(to_nid).or_default();
-                            for frag in &frags {
-                                tunnel.out_packets += 1;
-                                tunnel.out_bytes += frag.len() as u64;
-                            }
-                        }
-                        let mut nw = false;
-                        for frag in &frags {
-                            nw |= self.send_sptps_packet(to_nid, frag);
-                        }
-                        nw |= self.try_tx(to_nid, true);
-                        return nw;
+                        return self.write_icmp_frag_needed(data, limit - 14, from);
                     }
-                } else {
-                    // v6: no in-transit frag (RFC 8200 §5).
-                    self.write_icmp_pkt_too_big(data, u32::from(limit - 14));
+                    // RFC 791 §2.3: routers MUST fragment.
+                    // Rare path (modern OS sets DF on TCP)
+                    // but UDP without DF through narrow-
+                    // MTU relay needs this.
+                    let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
+                        log::debug!(target: "tincd::net",
+                            "fragment_v4: malformed input, dropping");
+                        return false;
+                    };
+                    // Mirror the normal send path below:
+                    // send_sptps_packet + try_tx for PMTU
+                    // drive.
+                    let n = frags.len();
+                    log::debug!(target: "tincd::net",
+                        "Fragmenting packet of {} bytes into \
+                         {n} pieces for {to}", data.len());
+                    {
+                        let tunnel = self.dp.tunnels.entry(to_nid).or_default();
+                        for frag in &frags {
+                            tunnel.out_packets += 1;
+                            tunnel.out_bytes += frag.len() as u64;
+                        }
+                    }
+                    let mut nw = false;
+                    for frag in &frags {
+                        nw |= self.send_sptps_packet(to_nid, frag);
+                    }
+                    nw |= self.try_tx(to_nid, true);
+                    return nw;
                 }
-                return false;
+                // v6: no in-transit frag (RFC 8200 §5).
+                return self.write_icmp_pkt_too_big(data, u32::from(limit - 14), from);
             }
         }
 
@@ -548,8 +543,7 @@ impl Daemon {
                     icmp_type,
                     icmp_code,
                 } => {
-                    self.write_icmp_to_device(data, icmp_type, icmp_code, true);
-                    return false;
+                    return self.write_icmp_to_device(data, icmp_type, icmp_code, true, from);
                 }
             }
         }
