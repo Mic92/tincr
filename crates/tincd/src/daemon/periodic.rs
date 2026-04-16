@@ -54,6 +54,21 @@ impl Daemon {
                 continue; // earlier terminate in this sweep
             };
 
+            let stale = now.saturating_duration_since(conn.last_ping_time);
+
+            // Outbuf cap. Control conns: unconditional (their `stale` is
+            // pinned at 0 by the +1h window). Meta conns: only once stale.
+            if (conn.control || stale > pingtimeout)
+                && conn.outbuf.live_len() > self.settings.maxoutbufsize
+            {
+                log::warn!(target: "tincd::conn",
+                           "{} ({}) could not flush for {} seconds ({} bytes pending)",
+                           conn.name, conn.hostname, stale.as_secs(),
+                           conn.outbuf.live_len());
+                self.terminate(id);
+                continue;
+            }
+
             if conn.control {
                 continue;
             }
@@ -68,7 +83,6 @@ impl Daemon {
             }
 
             // not yet stale
-            let stale = now.saturating_duration_since(conn.last_ping_time);
             if stale <= pingtimeout {
                 continue;
             }
@@ -87,19 +101,6 @@ impl Daemon {
                                "Timeout from {} ({}) during authentication",
                                conn.name, conn.hostname);
                 }
-                self.terminate(id);
-                continue;
-            }
-
-            // C `timeout_handler` (`net.c`): kill an active conn
-            // that's both stale AND backed up past
-            // `MaxOutputBufferSize`. `LineBuf::add` / `conn.send`
-            // have no cap of their own.
-            if conn.outbuf.live_len() > self.settings.maxoutbufsize {
-                log::warn!(target: "tincd::conn",
-                           "{} ({}) could not flush for {} seconds ({} bytes pending)",
-                           conn.name, conn.hostname, stale.as_secs(),
-                           conn.outbuf.live_len());
                 self.terminate(id);
                 continue;
             }
