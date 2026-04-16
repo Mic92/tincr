@@ -250,7 +250,10 @@ impl Ctl {
                 }
             }
         }
-        panic!("ctl connect to {socket:?} failed after 50 tries: {last_err:?}");
+        panic!(
+            "ctl connect to {} failed after 50 tries: {last_err:?}",
+            socket.display()
+        );
     }
 
     fn try_connect(socket: &Path, pidfile: &Path) -> std::io::Result<Self> {
