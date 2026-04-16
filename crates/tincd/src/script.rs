@@ -203,7 +203,14 @@ pub fn execute(
         None => Command::new(&scriptname),
     };
 
-    // `:211-213` putenv loop. Per-spawn, doesn't touch process env.
+    // Start from an empty environment (don't leak LD_PRELOAD, IFS,
+    // etc. into hook scripts). Provide a fixed sane PATH, then the
+    // tinc vars. `:211-213` putenv loop equivalent.
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
     cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
 
     // Scripts inherit the daemon's cwd, which is confbase because
@@ -301,6 +308,29 @@ mod tests {
         assert!(matches!(r, ScriptResult::Ok));
         let got = fs::read_to_string(&out).unwrap();
         assert_eq!(got.trim(), "alpha beta");
+    }
+
+    #[test]
+    fn env_is_cleared() {
+        // Child sees only the fixed PATH + tinc vars, nothing
+        // inherited from the test runner (HOME etc.).
+        let dir = tmpdir("envclear");
+        let out = dir.join("out");
+        write_script(
+            &dir,
+            "tinc-up",
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$PATH\" \"${{HOME:-unset}}\" > '{}'\n",
+                out.display()
+            ),
+        );
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+        let r = execute(&dir, "tinc-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::Ok));
+        assert_eq!(
+            fs::read_to_string(&out).unwrap(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|unset"
+        );
     }
 
     #[test]
