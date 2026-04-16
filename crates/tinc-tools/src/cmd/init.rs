@@ -109,7 +109,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // overwrite), but the threat model doesn't include hostile
     // concurrent `tinc init`s.
     {
-        let mut f = fs::File::create(&tinc_conf).map_err(io_err(&tinc_conf))?;
+        let mut f = super::create_nofollow(&tinc_conf)?;
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
     }
 
@@ -146,11 +146,13 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // (when we add it) appends `Port = N` to the same file.
     {
         let host_path = paths.host_file(name);
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&host_path)
-            .map_err(io_err(&host_path))?;
+        let mut f = {
+            let mut o = OpenOptions::new();
+            o.create(true).append(true);
+            #[cfg(unix)]
+            o.custom_flags(libc::O_NOFOLLOW);
+            o.open(&host_path).map_err(io_err(&host_path))?
+        };
         let pubkey_b64 = b64::encode(sk.public_key());
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
@@ -215,7 +217,10 @@ fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdErro
     #[cfg(unix)]
     let opts = {
         let mut o = OpenOptions::new();
-        o.write(true).create_new(true).mode(mode);
+        o.write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW);
         o
     };
     #[cfg(not(unix))]

@@ -10,7 +10,7 @@ use std::io::Write;
 use tinc_conf::vars::{self, VarFlags};
 use tinc_crypto::b64;
 
-use crate::cmd::{CmdError, io_err, makedir};
+use crate::cmd::{CmdError, create_nofollow, io_err, makedir};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
@@ -135,12 +135,12 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
     // keygen step — the pubkey goes in *after* the chunk-1 vars,
     // matching upstream's write order. Close `f` (tinc.conf) right
     // after chunk 1.
-    let mut f = fs::File::create(&tinc_conf).map_err(io_err(&tinc_conf))?;
+    let mut f = create_nofollow(&tinc_conf)?;
     // FIRST line of tinc.conf. Everything else is appended below.
     writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
 
     let host_file = paths.host_file(&name);
-    let mut fh = fs::File::create(&host_file).map_err(io_err(&host_file))?;
+    let mut fh = create_nofollow(&host_file)?;
 
     // `invitation-data` — the raw blob, for debugging "what did the
     // daemon send?". Write the whole thing now; nothing reads it
@@ -270,7 +270,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         }
 
         let host_path = paths.host_file(host_name);
-        let mut hf = fs::File::create(&host_path).map_err(io_err(&host_path))?;
+        let mut hf = create_nofollow(&host_path)?;
         hosts_written.push(host_name.to_owned());
 
         // Inner loop: lines until next `Name = X` or EOF.
@@ -327,7 +327,7 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let f = opts.open(&priv_path).map_err(io_err(&priv_path))?;
         let mut w = std::io::BufWriter::new(f);

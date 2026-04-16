@@ -125,6 +125,18 @@ pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError>
     }
 }
 
+/// `File::create` + `O_NOFOLLOW` (truncate, create, no symlink follow).
+pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, CmdError> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW);
+    }
+    o.open(path).map_err(io_err(path))
+}
+
 pub(crate) fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(io::Error) -> CmdError {
     let path = path.into();
     move |err| CmdError::Io { path, err }

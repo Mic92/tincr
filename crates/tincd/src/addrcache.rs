@@ -304,6 +304,7 @@ impl AddressCache {
     /// Propagates I/O errors from `create_dir_all` / `write`.
     /// `None` cache file (in-memory mode) → `Ok(())`.
     pub fn save(&self) -> io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         let Some(path) = &self.cache_file else {
             return Ok(());
         };
@@ -316,7 +317,14 @@ impl AddressCache {
         for a in self.cached.iter().take(MAX_CACHED_ADDRESSES) {
             writeln!(buf, "{a}")?;
         }
-        fs::write(path, buf)
+        // O_NOFOLLOW: cache filename is a remote-supplied node name.
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?
+            .write_all(&buf)
     }
 }
 

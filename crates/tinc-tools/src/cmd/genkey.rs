@@ -306,7 +306,10 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
     #[cfg(unix)]
     let opts = {
         let mut o = OpenOptions::new();
-        o.append(true).create(true).mode(mode);
+        o.append(true)
+            .create(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW);
         o
     };
     #[cfg(not(unix))]

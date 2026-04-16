@@ -197,10 +197,14 @@ fn fix_public_key(
     //
     // The PEM-not-config-line choice: see module doc.
     let result = (|| -> std::io::Result<()> {
-        let f = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(host_file)?;
+        let mut o = fs::OpenOptions::new();
+        o.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.custom_flags(libc::O_NOFOLLOW);
+        }
+        let f = o.open(host_file)?;
         let mut w = std::io::BufWriter::new(f);
         tinc_conf::pem::write_pem(&mut w, TY_PUBLIC, pubkey)?;
         w.flush()

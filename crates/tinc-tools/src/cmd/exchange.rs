@@ -348,6 +348,11 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             // `!force` → O_EXCL (create_new); `force` → truncate.
             let mut opts = fs::OpenOptions::new();
             opts.write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.custom_flags(libc::O_NOFOLLOW);
+            }
             if force {
                 opts.create(true).truncate(true);
             } else {

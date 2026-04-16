@@ -199,6 +199,7 @@ pub fn serve_cookie(
 /// - `HostFileExists`: don't overwrite (**security**: attacker could
 ///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
 pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf, ServeError> {
+    use std::os::unix::fs::OpenOptionsExt;
     // :122-126
     if pubkey_b64.len() > 128 || pubkey_b64.contains('\n') {
         return Err(ServeError::BadPubkey);
@@ -210,6 +211,7 @@ pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&host_path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
