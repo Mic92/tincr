@@ -4,6 +4,8 @@
 # SPTPS FFI harness in Phase 0b).
 {
   mkShell,
+  lib,
+  stdenv,
   cargo,
   cargo-nextest,
   rustc,
@@ -15,12 +17,12 @@
   meson,
   ninja,
   pkg-config,
-  bubblewrap,
-  iproute2,
-  iputils,
-  util-linux,
+  bubblewrap ? null,
+  iproute2 ? null,
+  iputils ? null,
+  util-linux ? null,
   iperf3,
-  perf,
+  perf ? null,
   # local
   tincd-c,
   sptps-test-c,
@@ -58,21 +60,15 @@ mkShell {
     meson
     ninja
     pkg-config
-    # netns integration tests (crates/tincd/tests/netns.rs).
-    # bwrap re-execs the test binary inside an unprivileged
-    # user+net namespace; ip/unshare/mount build a child
-    # netns for one TUN device so ping doesn't shortcut.
+    iperf3
+  ]
+  # Linux-only: netns integration tests need bwrap+userns,
+  # throughput bench needs perf.
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
     bubblewrap
     iproute2
     iputils # ping
     util-linux # unshare(1), mount(8)
-    # throughput gate (crates/tincd/benches/throughput.rs).
-    # `cargo bench --bench throughput --profile profiling`.
-    # iperf3 measures the tunnel; perf records the daemon
-    # during the 5s window. perf is best-effort: if
-    # `kernel.perf_event_paranoid >= 2` (Debian default)
-    # the bench still measures throughput, just no profile.
-    iperf3
     perf
   ];
 }

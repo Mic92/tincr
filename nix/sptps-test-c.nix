@@ -47,6 +47,8 @@ stdenv.mkDerivation {
     "-Ddocs=disabled"
     "-Dtests=disabled"
     "-Dsystemd=disabled"
+    "-Dtunemu=disabled"
+    "-Dvmnet=disabled"
   ];
   # build_by_default=false — ask for them explicitly.
   ninjaFlags = [

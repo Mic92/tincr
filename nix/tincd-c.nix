@@ -38,6 +38,8 @@ stdenv.mkDerivation {
     "-Ddocs=disabled"
     "-Dtests=disabled"
     "-Dsystemd=disabled"
+    "-Dtunemu=disabled"
+    "-Dvmnet=disabled"
   ];
   # Default mesonInstallPhase. tincd lands in $out/sbin
   # (meson.build sets install_dir: dir_sbin); also installs
