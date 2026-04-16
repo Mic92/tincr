@@ -418,7 +418,7 @@ impl Daemon {
                 } else {
                     (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
                 };
-                self.write_icmp_to_device(data, t, c);
+                self.write_icmp_to_device(data, t, c, false);
             }
             return false;
         }
@@ -460,7 +460,7 @@ impl Daemon {
             } else {
                 (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
             };
-            self.write_icmp_to_device(data, t, c);
+            self.write_icmp_to_device(data, t, c, false);
             return false;
         }
         // Packet too big for next hop's PMTU. Only when
@@ -548,7 +548,7 @@ impl Daemon {
                     icmp_type,
                     icmp_code,
                 } => {
-                    self.write_icmp_to_device(data, icmp_type, icmp_code);
+                    self.write_icmp_to_device(data, icmp_type, icmp_code, true);
                     return false;
                 }
             }

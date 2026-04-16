@@ -118,46 +118,55 @@ impl Daemon {
     /// v4/v6 dispatch on ethertype, not `icmp_type`: `ICMP_DEST_UNREACH`
     /// =3 collides with `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`).
     /// data.len()≥14 holds: every caller is `post-route()` (`TooShort`
-    /// gate) or post-decrement_ttl.
-    pub(super) fn write_icmp_to_device(&mut self, data: &[u8], icmp_type: u8, icmp_code: u8) {
+    /// gate) or post-decrement_ttl. `discover_src`: do the
+    /// `local_ip_facing` lookup so traceroute shows OUR hop —
+    /// `TIME_EXCEEDED` only; `DEST_UNREACH` uses orig-dst (`None`).
+    pub(super) fn write_icmp_to_device(
+        &mut self,
+        data: &[u8],
+        icmp_type: u8,
+        icmp_code: u8,
+        discover_src: bool,
+    ) {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return;
         }
-        // Only TIME_EXCEEDED gets the source-override dance — so
-        // traceroute shows OUR hop. This helper's only caller is the
-        // TtlResult::SendIcmp arm, which is always TIME_EXCEEDED, so
-        // do it unconditionally here. orig src lives at fixed
-        // offsets: eth(14)+ip_src(12)=[26..30] for v4,
-        // eth(14)+ip6_src(8)=[22..38] for v6. None on any failure
-        // (slice short, kernel says no) → falls back to the
-        // orig-dst-as-src behavior.
+        // orig src lives at fixed offsets: eth(14)+ip_src(12)=[26..30]
+        // for v4, eth(14)+ip6_src(8)=[22..38] for v6. None on any
+        // failure → falls back to orig-dst-as-src.
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
         let reply = if ethertype == 0x86DD {
             // ETH_P_IPV6
-            let src = data
-                .get(22..38)
-                .and_then(|s| <[u8; 16]>::try_from(s).ok())
-                .map(Ipv6Addr::from)
-                .and_then(|a| match local_ip_facing(IpAddr::V6(a))? {
-                    IpAddr::V6(v6) => Some(v6.octets()),
-                    IpAddr::V4(_) => None,
-                });
+            let src = discover_src
+                .then(|| {
+                    data.get(22..38)
+                        .and_then(|s| <[u8; 16]>::try_from(s).ok())
+                        .map(Ipv6Addr::from)
+                        .and_then(|a| match local_ip_facing(IpAddr::V6(a))? {
+                            IpAddr::V6(v6) => Some(v6.octets()),
+                            IpAddr::V4(_) => None,
+                        })
+                })
+                .flatten();
             icmp::build_v6_unreachable(data, icmp_type, icmp_code, None, src)
         } else {
-            let src = data
-                .get(26..30)
-                .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                .map(Ipv4Addr::from)
-                .and_then(|a| match local_ip_facing(IpAddr::V4(a))? {
-                    IpAddr::V4(v4) => Some(v4.octets()),
-                    IpAddr::V6(_) => None,
-                });
+            let src = discover_src
+                .then(|| {
+                    data.get(26..30)
+                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                        .map(Ipv4Addr::from)
+                        .and_then(|a| match local_ip_facing(IpAddr::V4(a))? {
+                            IpAddr::V4(v4) => Some(v4.octets()),
+                            IpAddr::V6(_) => None,
+                        })
+                })
+                .flatten();
             icmp::build_v4_unreachable(data, icmp_type, icmp_code, None, src)
         };
         if let Some(reply) = reply {
             log::debug!(target: "tincd::net",
-                        "route: TTL exceeded, sending ICMP type={icmp_type} \
+                        "route: sending ICMP type={icmp_type} \
                          code={icmp_code} ({} bytes)", reply.len());
             self.write_icmp_reply(reply);
         }
