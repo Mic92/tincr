@@ -360,15 +360,17 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     {
         settings.autoconnect = v;
     }
-    // No sandbox gate here: at Sandbox=normal Landlock grants
-    // Execute on confbase so an interpreter under confbase works;
-    // /usr/bin/python won't, but that's true on first boot too, not
-    // just on reload. At Sandbox=high, scripts don't run at all so
-    // this is moot. ScriptsExtension is NOT parsed (Windows-only).
-    settings.scripts_interpreter = config
+    // ScriptsExtension is NOT parsed (Windows-only).
+    let new_interp = config
         .lookup("ScriptsInterpreter")
         .next()
         .map(|e| e.get_str().to_owned());
+    if new_interp == settings.scripts_interpreter || crate::sandbox::can(crate::sandbox::Action::UseNewPaths) {
+        settings.scripts_interpreter = new_interp;
+    } else {
+        log::warn!(target: "tincd",
+            "Ignoring ScriptsInterpreter change: not allowed at current sandbox level");
+    }
     if let Some(e) = config.lookup("UDPDiscovery").next()
         && let Ok(v) = e.get_bool()
     {
