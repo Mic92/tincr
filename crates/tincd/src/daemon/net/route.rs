@@ -9,6 +9,9 @@ use crate::{broadcast, icmp, mss, route_mac};
 use tinc_graph::{EdgeId, NodeId};
 use tinc_proto::{Request, Subnet};
 
+/// Cap on locally-learned MAC subnets (switch mode).
+pub(in crate::daemon) const MAX_MAC_LEASES: usize = 4096;
+
 impl Daemon {
     /// `from`: `None` = device read; `Some` = peer. Returns the
     /// `io_set` signal.
@@ -177,6 +180,15 @@ impl Daemon {
     /// New source MAC on TAP → `Subnet::Mac` + broadcast `ADD_SUBNET` +
     /// arm `age_subnets` timer.
     fn learn_mac(&mut self, mac: route_mac::Mac) -> bool {
+        if self.mac_leases.len() >= MAX_MAC_LEASES {
+            if !self.mac_cap_warned {
+                self.mac_cap_warned = true;
+                log::warn!(target: "tincd::net",
+                           "Learned MAC table full ({MAX_MAC_LEASES}); \
+                            dropping new MACs until some expire");
+            }
+            return false;
+        }
         log::info!(target: "tincd::net",
                    "Learned new MAC address \
                     {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",

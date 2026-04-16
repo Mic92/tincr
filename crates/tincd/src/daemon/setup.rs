@@ -747,6 +747,7 @@ impl Daemon {
             last_mst: Vec::new(),
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),
+            mac_cap_warned: false,
             age_subnets_timer: None,
             dns,
             settings,

@@ -427,6 +427,9 @@ pub struct Daemon {
     /// kept separate (see `mac_lease.rs` doc).
     pub(crate) mac_leases: mac_lease::MacLeases,
 
+    /// Log-once latch for the `MAX_MAC_LEASES` cap in `learn_mac`.
+    pub(crate) mac_cap_warned: bool,
+
     /// Lazy-created on the first `learn()` (when `learn()` returns
     /// `true` = "table was empty"). `Option` skips an idempotency
     /// check.
