@@ -705,11 +705,7 @@ impl Daemon {
                             // for ~10s; default KeyExpire is 3600s,
                             // so set `KeyExpire = 5` in the C peer's
                             // tinc.conf for that test.
-                            if self.seen_request(body) || self.settings.tunnelserver {
-                                Ok(false)
-                            } else {
-                                Ok(self.forward_request(id, body))
-                            }
+                            self.on_key_changed(id, body)
                         }
                         Request::Status => {
                             // log, noop. Bug audit `deef1268`: was

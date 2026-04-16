@@ -812,6 +812,8 @@ fn malformed_gossip_drops_conn_daemon_survives() {
         ("adv-sub-pfx",    b"10 0 alice ::/200\n"),
         // ANS_KEY: only 6 fields (7 mandatory).
         ("adv-ans-short",  b"16 a b k 0 0 0\n"),
+        // KEY_CHANGED: name fails check_id.
+        ("adv-kc-badname", b"14 0 bad-name\n"),
         // MTU_INFO: non-integer mtu.
         ("adv-mtu-bad",    b"23 a b notanint\n"),
         // PACKET: length token missing entirely.

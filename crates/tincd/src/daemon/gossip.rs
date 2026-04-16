@@ -16,7 +16,7 @@ use std::fmt;
 use rand_core::{OsRng, RngCore};
 use tinc_crypto::sign::SigningKey;
 use tinc_graph::{EdgeId, NodeId};
-use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, ReqKey, SubnetMsg};
+use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, KeyChanged, ReqKey, SubnetMsg};
 use tinc_proto::{AddrStr, Request, Subnet};
 use tinc_sptps::{Framing, Role, Sptps};
 
@@ -675,6 +675,36 @@ impl Daemon {
             .filter(|&(id, c)| Some(id) != from && c.active)
             .map(|(id, _)| id)
             .collect()
+    }
+
+    /// `key_changed_h`. SPTPS-only build doesn't act on it; just
+    /// dedup + forward. Re-formatted rather than forwarded raw so
+    /// trailing padding (sscanf-compat parsers ignore extra tokens)
+    /// isn't stored in `seen` or re-broadcast.
+    pub(super) fn on_key_changed(
+        &mut self,
+        from_conn: ConnId,
+        body: &[u8],
+    ) -> Result<bool, DispatchError> {
+        let s = std::str::from_utf8(body)
+            .map_err(|_| DispatchError::BadKey("non-UTF-8 KEY_CHANGED".into()))?;
+        let kc = KeyChanged::parse(s)
+            .map_err(|_| DispatchError::BadKey("KEY_CHANGED parse failed".into()))?;
+        if !tinc_proto::check_id(&kc.node) {
+            return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
+        }
+
+        // Canonical form: wire nonce preserved (dedup key), padding
+        // stripped. `Tok` capped each token at 2048B.
+        let mut t = s.split_ascii_whitespace();
+        let req = t.next().unwrap_or("14");
+        let nonce = t.next().unwrap_or("0");
+        let canonical = format!("{req} {nonce} {}", kc.node);
+
+        if self.seen.check(&canonical, self.timers.now()) || self.settings.tunnelserver {
+            return Ok(false);
+        }
+        Ok(self.forward_request(from_conn, canonical.as_bytes()))
     }
 
     /// Re-send to every active conn except `from`. Receivers'
