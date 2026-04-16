@@ -110,14 +110,12 @@ impl EcdhPrivate {
     /// Consumes `self`, mirroring the C semantics: `ecdh_compute_shared`
     /// calls `ecdh_free` before returning. Ephemeral keys are single-use.
     ///
-    /// **No input validation.** This will produce *some* 32-byte output for
-    /// any `peer_public`, including all-zeros, small-order points, and
-    /// off-curve garbage. That matches `key_exchange.c`, which also performs
-    /// no validation. SPTPS authenticates the handshake transcript with
-    /// long-term Ed25519 signatures, so an attacker who feeds us a bad point
-    /// can only break their own session.
+    /// Returns `None` if the resulting shared secret is all-zero (peer
+    /// supplied a small-order point). No other input validation is done,
+    /// matching `key_exchange.c`; SPTPS authenticates the transcript with
+    /// long-term Ed25519 signatures regardless.
     #[must_use]
-    pub fn compute_shared(self, peer_public: &[u8; PUBLIC_LEN]) -> [u8; SHARED_LEN] {
+    pub fn compute_shared(self, peer_public: &[u8; PUBLIC_LEN]) -> Option<[u8; SHARED_LEN]> {
         // Re-clamp. On a properly generated key this is idempotent
         // (clamp(clamp(x)) == clamp(x)), but `key_exchange.c` does it
         // unconditionally and so must we — a key file written by buggy
@@ -143,7 +141,11 @@ impl EcdhPrivate {
         // which is harmless (idempotent) and saves us reaching for the
         // unclamped `Scalar` API. The output is the u-coordinate of the
         // product point, encoded little-endian — matching `fe_tobytes`.
-        MontgomeryPoint(mont_u).mul_clamped(scalar).to_bytes()
+        let shared = MontgomeryPoint(mont_u).mul_clamped(scalar).to_bytes();
+        if shared.iter().all(|&b| b == 0) {
+            return None;
+        }
+        Some(shared)
     }
 }
 

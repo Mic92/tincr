@@ -1068,7 +1068,7 @@ impl Sptps {
         // The peer's pubkey is bytes 33..65 of their KEX.
         let peer_pub: [u8; ECDH_PUBLIC_LEN] = hiskex[1 + NONCE_LEN..].try_into().unwrap();
         let ecdh = self.ecdh.take().expect("receive_sig with no ecdh");
-        let shared = Zeroizing::new(ecdh.compute_shared(&peer_pub));
+        let shared = Zeroizing::new(ecdh.compute_shared(&peer_pub).ok_or(SptpsError::BadKex)?);
 
         self.generate_key_material(&shared);
 

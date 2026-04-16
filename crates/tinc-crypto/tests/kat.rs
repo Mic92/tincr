@@ -204,8 +204,8 @@ fn ecdh_from_seed_matches_c() {
         // Shared secret, both directions. The C generator already asserted
         // commutativity, but checking again here catches the case where our
         // Edwards→Montgomery map is internally consistent but wrong.
-        let shared_ab = priv_a.compute_shared(&pub_b);
-        let shared_ba = priv_b.compute_shared(&pub_a);
+        let shared_ab = priv_a.compute_shared(&pub_b).unwrap();
+        let shared_ba = priv_b.compute_shared(&pub_a).unwrap();
         assert_eq!(
             hex::encode(shared_ab),
             hex::encode(want_shared),
@@ -215,7 +215,7 @@ fn ecdh_from_seed_matches_c() {
 
         // Also exercise the from_expanded path — that's how on-disk keys load.
         let priv_a_expanded = ecdh::EcdhPrivate::from_expanded(&want_priv_a);
-        let shared_expanded = priv_a_expanded.compute_shared(&want_pub_b);
+        let shared_expanded = priv_a_expanded.compute_shared(&want_pub_b).unwrap();
         assert_eq!(shared_expanded, want_shared, "ecdh[{i}] from_expanded");
     }
 }
