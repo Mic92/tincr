@@ -468,7 +468,7 @@ impl Daemon {
                                 conn.name, conn.hostname);
                     let needs_write = conn.send(format_args!(
                         "{} {} {}.{}",
-                        Request::Id as u8,
+                        Request::Id,
                         self.name,
                         tinc_proto::request::PROT_MAJOR,
                         tinc_proto::request::PROT_MINOR
@@ -712,7 +712,7 @@ impl Daemon {
         let conn = self.conns.get_mut(id).expect("not terminated");
         needs_write |= conn.send(format_args!(
             "{} {} {}.{}",
-            Request::Id as u8,
+            Request::Id,
             self.name,
             tinc_proto::request::PROT_MAJOR,
             tinc_proto::request::PROT_MINOR

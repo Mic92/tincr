@@ -27,7 +27,7 @@
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -325,7 +325,7 @@ impl Device for FdTun {
         // `[ETH_HLEN..MTU]` upper bound caps the read. Same as
         // `linux.rs`. Android packets larger than MTU-14 would
         // truncate.
-        let n = read_fd(self.fd.as_raw_fd(), &mut buf[ETH_HLEN..MTU])?;
+        let n = read_fd(self.fd.as_fd(), &mut buf[ETH_HLEN..MTU])?;
 
         // `read_fd` already converted `<0`. `0` is EOF — the Java
         // side closed the tun. Unlike kernel TUN (which never EOFs),
@@ -388,7 +388,7 @@ impl Device for FdTun {
             buf.len()
         );
         // Strip 14, write the rest.
-        write_fd(self.fd.as_raw_fd(), &buf[ETH_HLEN..])
+        write_fd(self.fd.as_fd(), &buf[ETH_HLEN..])
     }
 
     /// TUN-only. The contract.
@@ -416,6 +416,12 @@ impl Device for FdTun {
     /// an fd (unlike Dummy).
     fn fd(&self) -> Option<RawFd> {
         Some(self.fd.as_raw_fd())
+    }
+}
+
+impl AsFd for FdTun {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
     }
 }
 
@@ -748,20 +754,20 @@ mod tests {
     /// Write all bytes. Loop on short writes (pipes can short-
     /// write under pressure; our tiny test packets won't, but
     /// correctness).
-    fn write_all(fd: &impl AsRawFd, buf: &[u8]) {
+    fn write_all(fd: &impl AsFd, buf: &[u8]) {
         let mut off = 0;
         while off < buf.len() {
-            let ret = write_fd(fd.as_raw_fd(), &buf[off..]).expect("write failed");
+            let ret = write_fd(fd.as_fd(), &buf[off..]).expect("write failed");
             assert!(ret > 0, "write failed");
             off += ret;
         }
     }
 
     /// Read exactly n bytes. Loop on short reads.
-    fn read_exact_n(fd: &impl AsRawFd, buf: &mut [u8], n: usize) -> usize {
+    fn read_exact_n(fd: &impl AsFd, buf: &mut [u8], n: usize) -> usize {
         let mut off = 0;
         while off < n {
-            let ret = read_fd(fd.as_raw_fd(), &mut buf[off..n]).expect("read failed");
+            let ret = read_fd(fd.as_fd(), &mut buf[off..n]).expect("read failed");
             assert!(ret > 0, "read EOF");
             off += ret;
         }

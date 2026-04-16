@@ -562,7 +562,7 @@ impl Daemon {
             let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
             let mut nw = conn.send(format_args!(
                 "{} {}",
-                Request::SptpsPacket as u8,
+                Request::SptpsPacket,
                 frame.len()
             ));
             nw |= conn.send_raw(&frame);
@@ -606,7 +606,7 @@ impl Daemon {
             Request::ReqKey,
             from_name,
             to_name,
-            Request::SptpsPacket as u8,
+            Request::SptpsPacket,
             b64,
         ))
     }

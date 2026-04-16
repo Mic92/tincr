@@ -323,7 +323,7 @@ impl Daemon {
     /// Simple-ack tail: `"{Control} {req} {result}"`.
     fn ctl_ack(&mut self, id: ConnId, req: CtlReq, result: i32) -> (DispatchResult, bool) {
         let conn = self.conns.get_mut(id).expect("not terminated");
-        let nw = conn.send(format_args!("{} {} {}", Request::Control as u8, req, result));
+        let nw = conn.send(format_args!("{} {} {}", Request::Control, req, result));
         (DispatchResult::Ok, nw)
     }
 
@@ -340,7 +340,7 @@ impl Daemon {
                 .map(|(subnet, owner)| {
                     format!(
                         "{} {} {} {}",
-                        Request::Control as u8,
+                        Request::Control,
                         crate::proto::REQ_DUMP_SUBNETS,
                         subnet,
                         owner
@@ -362,7 +362,7 @@ impl Daemon {
                     // hostname is the fused "host port port" string.
                     format!(
                         "{} {} {} {} {:x} {} {:x}",
-                        Request::Control as u8,
+                        Request::Control,
                         crate::proto::REQ_DUMP_CONNECTIONS,
                         c.name,
                         c.hostname,
@@ -651,7 +651,7 @@ impl Daemon {
                         Request::MtuInfo => self.on_mtu_info(id, body),
                         Request::Ping => {
                             let conn = self.conns.get_mut(id).expect("gate passed");
-                            Ok(conn.send(format_args!("{}", Request::Pong as u8)))
+                            Ok(conn.send(format_args!("{}", Request::Pong)))
                         }
                         Request::Pong => {
                             let conn = self.conns.get_mut(id).expect("gate passed");

@@ -495,7 +495,7 @@ pub fn handle_id(
     } else {
         conn.send(format_args!(
             "{} {} {}.{}",
-            Request::Id as u8,
+            Request::Id,
             ctx.my_name,
             PROT_MAJOR,
             PROT_MINOR
@@ -586,7 +586,7 @@ fn id_control(
     // `if(!c->outgoing) send_id(c)`: `"%d %s %d.%d"`.
     let needs_write = conn.send(format_args!(
         "{} {} {}.{}",
-        Request::Id as u8,
+        Request::Id,
         ctx.my_name,
         PROT_MAJOR,
         PROT_MINOR
@@ -594,7 +594,7 @@ fn id_control(
     // `"%d %d %d", ACK, CTL_VER, getpid()`.
     conn.send(format_args!(
         "{} {} {}",
-        Request::Ack as u8,
+        Request::Ack,
         CTL_VERSION,
         std::process::id()
     ));
@@ -640,14 +640,14 @@ fn id_invitation(
     // Line 1. PLAINTEXT (sptps not installed yet).
     let mut needs_write = conn.send(format_args!(
         "{} {} {}.{}",
-        Request::Id as u8,
+        Request::Id,
         ctx.my_name,
         PROT_MAJOR,
         PROT_MINOR
     ));
 
     // Line 2, ACK with our invitation pubkey. Plaintext.
-    needs_write |= conn.send(format_args!("{} {}", Request::Ack as u8, inv_pub_b64));
+    needs_write |= conn.send(format_args!("{} {}", Request::Ack, inv_pub_b64));
 
     // Cosmetic for us (`feed()` checks `sptps.is_some()`).
     conn.protocol_minor = 2;
@@ -793,7 +793,7 @@ pub fn send_ack(
     let wire_options = conn.options.with_minor(PROT_MINOR).bits();
     conn.send(format_args!(
         "{} {} {} {:x}",
-        Request::Ack as u8,
+        Request::Ack,
         my_udp_port,
         weight,
         wire_options
@@ -847,6 +847,17 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
 // Thin parse wrappers. Same parse/mutate split as parse_ack. Body has
 // `\n` stripped; tinc-proto parsers do `check_id` + `from != to`.
 
+/// `from_utf8` → tinc-proto parse, mapping both failures to the given
+/// `DispatchError` variant with fixed message text.
+fn parse_body<T, E>(
+    body: &[u8],
+    err: fn(String) -> DispatchError,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<T, DispatchError> {
+    let s = std::str::from_utf8(body).map_err(|_| err("not UTF-8".into()))?;
+    parse(s).map_err(|_| err("parse failed".into()))
+}
+
 /// `add_subnet_h` parse. NB: `add_subnet_h`
 /// does NOT `subnetcheck` (host bits zero) — relies on `lookup_subnet`
 /// not finding non-canonical nets. We match.
@@ -854,10 +865,9 @@ pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
 /// # Errors
 /// `BadSubnet`: not UTF-8 or `SubnetMsg::parse` failed.
 pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
-    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
-    let m = tinc_proto::msg::SubnetMsg::parse(s)
-        .map_err(|_| DispatchError::BadSubnet("parse failed".into()))?;
-    Ok((m.owner, m.subnet))
+    parse_body(body, DispatchError::BadSubnet, |s| {
+        tinc_proto::msg::SubnetMsg::parse(s).map(|m| (m.owner, m.subnet))
+    })
 }
 
 /// `del_subnet_h` parse. Same format as ADD.
@@ -865,10 +875,7 @@ pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
 /// # Errors
 /// See [`parse_add_subnet`].
 pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
-    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadSubnet("not UTF-8".into()))?;
-    let m = tinc_proto::msg::SubnetMsg::parse(s)
-        .map_err(|_| DispatchError::BadSubnet("parse failed".into()))?;
-    Ok((m.owner, m.subnet))
+    parse_add_subnet(body)
 }
 
 /// `add_edge_h` parse.
@@ -876,8 +883,7 @@ pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
 /// # Errors
 /// `BadEdge`: not UTF-8 or `AddEdge::parse` failed.
 pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
-    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
-    tinc_proto::msg::AddEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
+    parse_body(body, DispatchError::BadEdge, tinc_proto::msg::AddEdge::parse)
 }
 
 /// `del_edge_h` parse.
@@ -885,8 +891,7 @@ pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchE
 /// # Errors
 /// `BadEdge`: not UTF-8 or `DelEdge::parse` failed.
 pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
-    let s = std::str::from_utf8(body).map_err(|_| DispatchError::BadEdge("not UTF-8".into()))?;
-    tinc_proto::msg::DelEdge::parse(s).map_err(|_| DispatchError::BadEdge("parse failed".into()))
+    parse_body(body, DispatchError::BadEdge, tinc_proto::msg::DelEdge::parse)
 }
 
 /// Strip trailing `\n` from SPTPS record body.
@@ -981,7 +986,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // `event_exit(); return control_ok(c, REQ_STOP)`
             // → `"18 0 0"`.
             log::info!(target: "tincd", "Got REQ_STOP, shutting down");
-            let needs_write = conn.send(format_args!("{} {} 0", Request::Control as u8, REQ_STOP));
+            let needs_write = conn.send(format_args!("{} {} 0", Request::Control, REQ_STOP));
             (DispatchResult::Stop, needs_write)
         }
         _ => {
@@ -990,7 +995,7 @@ pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bo
             // (uninit `type` falls through to default).
             log::debug!(target: "tincd::proto",
                         "Unknown CONTROL subtype {raw:?} from {}", conn.name);
-            let needs_write = conn.send(format_args!("{} {}", Request::Control as u8, REQ_INVALID));
+            let needs_write = conn.send(format_args!("{} {}", Request::Control, REQ_INVALID));
             (DispatchResult::Ok, needs_write)
         }
     }
