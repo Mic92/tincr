@@ -345,24 +345,27 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
 
             let path = paths.host_file(name);
 
-            // `exists()` not `try_exists()`: on permission-denied to
-            // the parent dir, `exists()` returns false and we proceed
-            // to open (which then fails with a useful error). Upstream
-            // does the same. Fidelity.
-            if !force && path.exists() {
-                eprintln!(
-                    "Host configuration file {} already exists, skipping.",
-                    path.display()
-                );
-                out = None;
-                current_path = None;
-                continue;
+            // `!force` → O_EXCL (create_new); `force` → truncate.
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true);
+            if force {
+                opts.create(true).truncate(true);
+            } else {
+                opts.create_new(true);
             }
-
-            // Truncate-and-create. Not `O_EXCL` — the `!force` check
-            // above already gated existence; with `force`, truncating
-            // is the *point*.
-            let f = fs::File::create(&path).map_err(io_err(&path))?;
+            let f = match opts.open(&path) {
+                Ok(f) => f,
+                Err(e) if !force && e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    eprintln!(
+                        "Host configuration file {} already exists, skipping.",
+                        path.display()
+                    );
+                    out = None;
+                    current_path = None;
+                    continue;
+                }
+                Err(e) => return Err(io_err(&path)(e)),
+            };
             out = Some(BufWriter::new(f));
             current_path = Some(path);
             count += 1;
