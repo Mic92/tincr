@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use super::common::*;
@@ -55,27 +56,19 @@ fn first_packet_across_tunnel() {
     // ─── socketpairs: one per daemon ────────────────────────────
     // [0] = test end (we read/write IP packets), [1] = daemon end
     // (FdTun wraps it). SOCK_SEQPACKET for datagram boundaries.
-    let alice_pair = sockpair_seqpacket();
-    let bob_pair = sockpair_seqpacket();
-
-    // Daemon ends need O_NONBLOCK (on_device_read loops to EAGAIN).
-    // Test ends too (read_fd_nb polls).
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
-    for &fd in &bob_pair {
-        set_nonblocking(fd);
-    }
+    // sockpair_seqpacket sets O_NONBLOCK on both ends.
+    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (bob_tun, bob_far) = sockpair_seqpacket();
 
     // ─── configs: subnets pin route() decisions ────────────────
     // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
     // 10.0.0.2 routes Forward{to: bob} on alice's side, then
     // Forward{to: myself} on bob's side.
-    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
-    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
     // ─── spawn ──────────────────────────────────────────────────
-    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
         wait_for_file(&bob.socket),
         "bob setup failed; stderr:\n{}",
@@ -84,14 +77,14 @@ fn first_packet_across_tunnel() {
     // Close OUR copy of bob's daemon-end fd. The child has its own
     // (dup'd by fork). If we keep ours open, bob's read() never
     // sees EOF and the test process leaks an fd. Same for alice.
-    unsafe { libc::close(bob_pair[1]) };
+    drop(bob_far);
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     // ─── wait for meta-conn handshake (chunk-6 milestone) ────────
     let mut alice_ctl = alice.ctl();
@@ -119,7 +112,7 @@ fn first_packet_across_tunnel() {
     // no tun_pi). `FdTun::read` writes them at `+14` and sets
     // ethertype from byte-0 nibble. dst at IP header offset 16.
     let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
-    write_fd(alice_pair[0], &kick_pkt);
+    write_fd(&alice_tun, &kick_pkt);
 
     // ─── wait for validkey ──────────────────────────────────────
     // Status bit 1 (validkey) = per-tunnel SPTPS handshake done.
@@ -148,18 +141,18 @@ fn first_packet_across_tunnel() {
 
     // Drain the kick: PACKET 17 delivered it (direct conn bypasses
     // validkey). Don't let it shadow THE PACKET assert below.
-    let kicked = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    let kicked = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
     assert_eq!(kicked, kick_pkt, "kick packet went via PACKET 17");
 
     // ─── THE PACKET ─────────────────────────────────────────────
     // Now validkey is set. Send a packet; it crosses.
     let payload = b"hello from alice";
     let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
-    write_fd(alice_pair[0], &ip_pkt);
+    write_fd(&alice_tun, &ip_pkt);
 
     // Read from bob's TUN. `FdTun::write` strips the 14-byte
     // ether header (writes `data[14..]`); we get RAW IP bytes.
-    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
 
     // The IP packet round-trips byte-exact (the 14-byte ether
     // header is added by alice's FdTun::read, stripped by
@@ -259,8 +252,8 @@ fn first_packet_across_tunnel() {
     // ─── stderr: the SPTPS-key-exchange-successful log ──────────
     drop(alice_ctl);
     drop(bob_ctl);
-    unsafe { libc::close(alice_pair[0]) };
-    unsafe { libc::close(bob_pair[0]) };
+    drop(alice_tun);
+    drop(bob_tun);
     let _ = bob_child.kill();
     let bob_stderr = drain_stderr(bob_child);
     let alice_stderr = drain_stderr(alice_child);
@@ -301,32 +294,26 @@ fn compression_roundtrip() {
     let alice = Node::new(tmp.path(), "alice", 0xAC).with_conf("Compression = 6\n");
     let bob = Node::new(tmp.path(), "bob", 0xBC).with_conf("Compression = 12\n");
 
-    let alice_pair = sockpair_seqpacket();
-    let bob_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
-    for &fd in &bob_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (bob_tun, bob_far) = sockpair_seqpacket();
 
-    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
-    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
-    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
         wait_for_file(&bob.socket),
         "bob setup failed; stderr:\n{}",
         drain_stderr(bob_child)
     );
-    unsafe { libc::close(bob_pair[1]) };
+    drop(bob_far);
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
@@ -341,11 +328,11 @@ fn compression_roundtrip() {
     });
 
     let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
-    write_fd(alice_pair[0], &kick_pkt);
+    write_fd(&alice_tun, &kick_pkt);
     // The kick goes via PACKET 17 (direct conn, minmtu=0). Drain it
     // so it doesn't shadow the round-trip read below. Compression
     // doesn't apply on PACKET 17 (raw frame, no PKT_COMPRESSED bit).
-    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
 
     let validkey_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(5), || {
@@ -398,9 +385,9 @@ fn compression_roundtrip() {
     // at incompression=12.
     let payload = vec![0u8; 200];
     let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], &payload);
-    write_fd(alice_pair[0], &ip_pkt);
+    write_fd(&alice_tun, &ip_pkt);
 
-    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
     assert_eq!(
         recv,
         ip_pkt,
@@ -413,9 +400,9 @@ fn compression_roundtrip() {
     // The reverse direction. Bob compresses at 6 (alice's ask);
     // alice decompresses at incompression=6.
     let ip_pkt2 = mk_ipv4_pkt([10, 0, 0, 2], [10, 0, 0, 1], &payload);
-    write_fd(bob_pair[0], &ip_pkt2);
+    write_fd(&bob_tun, &ip_pkt2);
 
-    let recv2 = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    let recv2 = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
     assert_eq!(
         recv2,
         ip_pkt2,
@@ -426,8 +413,8 @@ fn compression_roundtrip() {
 
     drop(alice_ctl);
     drop(bob_ctl);
-    unsafe { libc::close(alice_pair[0]) };
-    unsafe { libc::close(bob_pair[0]) };
+    drop(alice_tun);
+    drop(bob_tun);
     let _ = bob_child.kill();
     let _ = drain_stderr(bob_child);
     let _ = drain_stderr(alice_child);
@@ -449,15 +436,12 @@ fn ipv6_unreachable_builds_icmpv6() {
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
-    let alice_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
 
     // alice has NO IPv6 subnet — any IPv6 dst routes Unreachable.
     // bob is just here so alice has a peer (config requires it).
     bob.write_config_with(&alice, false, None, None);
-    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn();
     assert!(
@@ -466,12 +450,12 @@ fn ipv6_unreachable_builds_icmpv6() {
         drain_stderr(bob_child)
     );
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     // ─── craft a minimal IPv6 packet ───────────────────────────
     // FdTun reads RAW IP bytes (no ether, no tun_pi); it synthesizes
@@ -493,11 +477,11 @@ fn ipv6_unreachable_builds_icmpv6() {
     ipv6.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99]);
     ipv6.extend_from_slice(&[0; 8]); // payload
 
-    write_fd(alice_pair[0], &ipv6);
+    write_fd(&alice_tun, &ipv6);
 
     // ─── read back the ICMP reply ──────────────────────────────
     // FdTun::write strips the 14-byte ether header. We get raw IP.
-    let reply = poll_until(Duration::from_secs(5), || read_fd_nb(alice_pair[0]));
+    let reply = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
 
     // ─── assert: it's ICMPv6 ───────────────────────────────────
     // IPv6 header: byte 0 = 0x6?, byte 6 = next-header.
@@ -540,7 +524,7 @@ fn ipv6_unreachable_builds_icmpv6() {
         "reply dst should be original src"
     );
 
-    unsafe { libc::close(alice_pair[0]) };
+    drop(alice_tun);
     let _ = bob_child.kill();
     let _ = bob_child.wait();
     let _alice_stderr = drain_stderr(alice_child);
@@ -565,32 +549,26 @@ fn keyexpire_forces_rekey() {
     let alice = Node::new(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
     let bob = Node::new(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
 
-    let alice_pair = sockpair_seqpacket();
-    let bob_pair = sockpair_seqpacket();
-    for &fd in &alice_pair {
-        set_nonblocking(fd);
-    }
-    for &fd in &bob_pair {
-        set_nonblocking(fd);
-    }
+    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (bob_tun, bob_far) = sockpair_seqpacket();
 
-    bob.write_config_with(&alice, false, Some(bob_pair[1]), Some("10.0.0.2/32"));
-    alice.write_config_with(&bob, true, Some(alice_pair[1]), Some("10.0.0.1/32"));
+    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
-    let mut bob_child = bob.spawn_with_fd(bob_pair[1]);
+    let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
         wait_for_file(&bob.socket),
         "bob setup failed; stderr:\n{}",
         drain_stderr(bob_child)
     );
-    unsafe { libc::close(bob_pair[1]) };
+    drop(bob_far);
 
-    let alice_child = alice.spawn_with_fd(alice_pair[1]);
+    let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
-    unsafe { libc::close(alice_pair[1]) };
+    drop(alice_far);
 
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
@@ -606,7 +584,7 @@ fn keyexpire_forces_rekey() {
 
     // Kick the per-tunnel handshake (first packet starts REQ_KEY).
     let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
-    write_fd(alice_pair[0], &kick);
+    write_fd(&alice_tun, &kick);
 
     // Wait for validkey both sides.
     let vk = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -628,7 +606,7 @@ fn keyexpire_forces_rekey() {
     }
 
     // Drain the kick (PACKET 17 delivers it via meta-conn).
-    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    let _ = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
 
     // ─── wait past KeyExpire (1s) + rekey RTT ──────────────────
     // The timer fires at +1s, force_kex sends KEX, the rekey is 3
@@ -642,15 +620,15 @@ fn keyexpire_forces_rekey() {
     // outputs delivered the new keys end to end. If force_kex broke
     // the SPTPS state, this packet decrypts to garbage or drops.
     let pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"post-rekey");
-    write_fd(alice_pair[0], &pkt);
-    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(bob_pair[0]));
+    write_fd(&alice_tun, &pkt);
+    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
     assert_eq!(recv, pkt, "post-rekey packet body mismatch");
 
     // ─── stderr: the timer fired, the rekey happened ───────────
     drop(alice_ctl);
     drop(bob_ctl);
-    unsafe { libc::close(alice_pair[0]) };
-    unsafe { libc::close(bob_pair[0]) };
+    drop(alice_tun);
+    drop(bob_tun);
     let _ = bob_child.kill();
     let bob_stderr = drain_stderr(bob_child);
     let alice_stderr = drain_stderr(alice_child);
