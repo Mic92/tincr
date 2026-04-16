@@ -91,6 +91,19 @@ impl Daemon {
                 continue;
             }
 
+            // C `timeout_handler` (`net.c`): kill an active conn
+            // that's both stale AND backed up past
+            // `MaxOutputBufferSize`. `LineBuf::add` / `conn.send`
+            // have no cap of their own.
+            if conn.outbuf.live_len() > self.settings.maxoutbufsize {
+                log::warn!(target: "tincd::conn",
+                           "{} ({}) could not flush for {} seconds ({} bytes pending)",
+                           conn.name, conn.hostname, stale.as_secs(),
+                           conn.outbuf.live_len());
+                self.terminate(id);
+                continue;
+            }
+
             // UDP keepalive (no PMTU). Gate on validkey:
             // unconditional REQ_KEY races with gossip during mesh
             // formation. Per-packet try_tx (in route_packet) handles
