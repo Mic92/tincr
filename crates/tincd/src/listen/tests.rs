@@ -106,7 +106,7 @@ fn fmt_addr_cases() {
 /// `pidfile_addr` does the unspec→loopback mapping. We can't
 /// test it directly without a real `Listener` (needs sockets),
 /// but the mapping logic is the same as `init_control:164-173`.
-/// Integration test (`stop.rs::tcp_connect_stop`) verifies via
+/// Integration test (`stop.rs::tcp_listener_accepts_and_rejects_control`) verifies via
 /// the actual pidfile.
 ///
 /// What we CAN test: empty slice → "127.0.0.1 port 0". The C

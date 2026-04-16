@@ -84,6 +84,24 @@ fn gate_cases() {
 // Rejection paths only
 
 #[test]
+fn id_control_rejected_on_non_unix_conn() {
+    let mut c = mkconn();
+    c.is_unix_ctl = false;
+    let cookie = "a".repeat(64);
+    let line = format!("0 ^{cookie} 0");
+    let r = handle_id(
+        &mut c,
+        line.as_bytes(),
+        &mkctx(&cookie),
+        Instant::now(),
+        &mut OsRng,
+    );
+    assert!(matches!(r, Err(DispatchError::BadId(_))), "got {r:?}");
+    assert!(!c.control);
+    assert!(c.outbuf.is_empty());
+}
+
+#[test]
 fn id_cookie_mismatch() {
     let mut c = mkconn();
     let cookie = "a".repeat(64);

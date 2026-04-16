@@ -413,6 +413,14 @@ pub fn handle_id(
     // `id_h` keeps them inline; we split because the only thing they
     // shared was the `(major, minor)` parse above.
     if let Some(cookie) = name_tok.strip_prefix(b"^") {
+        // Control is local-only: reject `^` unless accepted on the
+        // unix socket. The cookie is filesystem-auth, not network-auth.
+        if !conn.is_unix_ctl {
+            return Err(DispatchError::BadId(format!(
+                "control greeting on non-local connection ({})",
+                conn.hostname
+            )));
+        }
         return id_control(conn, cookie, ctx, now);
     }
     if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
@@ -564,9 +572,10 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
 }
 
 /// `id_h` `:325-338` — the `^cookie` control-connection branch.
-/// Cookie check is not constant-time; the secret is mode-0600 and the
-/// listener is a unix socket gated by fs perms, so timing leaks the
-/// length of a value the attacker already needs read access to know.
+/// Reachable only from the unix control socket: `handle_id` rejects
+/// `^` when `!conn.is_unix_ctl`. Cookie compare is not constant-time;
+/// the secret is mode-0600 and the path is unix-socket-only, so
+/// timing leaks nothing an attacker couldn't already read.
 fn id_control(
     conn: &mut Connection,
     cookie: &[u8],

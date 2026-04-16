@@ -145,6 +145,9 @@ pub struct Connection {
     pub allow_request: Option<Request>,
     /// `c->status.control`.
     pub control: bool,
+    /// Set only by `new_control` (unix-socket accept). Gates the
+    /// `^cookie` branch in `handle_id` — control is local-only.
+    pub is_unix_ctl: bool,
     /// `c->status.pcap` (bit 10). Set by `REQ_PCAP`; read by
     /// `send_pcap`.
     pub pcap: bool,
@@ -261,6 +264,7 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            is_unix_ctl: true,
             pcap: false,
             pcap_snaplen: 0,
             invite: None,
@@ -299,6 +303,7 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            is_unix_ctl: false,
             pcap: false,
             pcap_snaplen: 0,
             invite: None,
@@ -345,6 +350,7 @@ impl Connection {
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
+            is_unix_ctl: false,
             pcap: false,
             pcap_snaplen: 0,
             invite: None,

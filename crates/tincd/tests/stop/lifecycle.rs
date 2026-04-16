@@ -620,28 +620,19 @@ fn bad_cookie_dropped() {
     let _ = child.wait();
 }
 
-/// TCP control connection. Same protocol bytes as `spawn_connect_stop`
-/// but over TCP instead of unix socket. Proves:
+/// TCP meta listener bring-up. Proves:
 ///
 /// - `open_listeners` actually binds (port in pidfile is real)
-/// - `IoWhat::Tcp(i)` arm dispatches to `on_tcp_accept`
-/// - `on_tcp_accept` does `unmap` + `is_local` + `configure_tcp`
-/// - `Connection::new_meta` sets the right initial state
-/// - The greeting + STOP path is transport-agnostic (the dispatch
-///   from `id_h`'s `^` branch onward doesn't care which `accept`
-///   produced the fd)
 /// - `pidfile_addr` writes a connectable addr (the unspec→loopback
 ///   mapping; THIS is the test for `init_control:164-173`)
+/// - `IoWhat::Tcp(i)` arm dispatches to `on_tcp_accept`
 /// - Tarpit doesn't fire (peer is `127.0.0.1`, `is_local` exempts)
-///
-/// Runs alongside `spawn_connect_stop`; each picks a different
-/// kernel-assigned port (Port=0). The daemon also opens a unix
-/// socket; we don't touch it here.
+/// - The `^cookie` control branch is rejected on TCP (unix-only)
 ///
 /// What this DOESN'T prove: tarpit firing (loopback is exempt). The
 /// `listen.rs::tarpit_*` unit tests cover the bucket arithmetic.
 #[test]
-fn tcp_connect_stop() {
+fn tcp_listener_accepts_and_rejects_control() {
     use std::net::TcpStream;
 
     let tmp = tmp("tcp-stop");
@@ -690,28 +681,32 @@ fn tcp_connect_stop() {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
 
-    // ─── same greeting dance as unix ───────────────────────────
-    // The protocol is transport-agnostic. `^cookie` over TCP gets
-    // the same `id_h` `^` branch as over unix. The C does the same:
-    // `handle_new_meta_connection` and `handle_new_unix_connection`
-    // both register `handle_meta_io`, which calls the same
-    // `receive_meta` → `receive_request` → `id_h`.
+    // ─── ^cookie over TCP → dropped, no reply ────────────────
     writeln!(writer, "0 ^{cookie} 0").unwrap();
-
     let mut line1 = String::new();
-    reader.read_line(&mut line1).unwrap();
-    assert_eq!(line1, "0 testnode 17.7\n", "daemon greeting (TCP)");
+    let n = reader.read_line(&mut line1).unwrap();
+    assert_eq!(
+        n, 0,
+        "daemon must drop ^cookie over TCP without replying; got {line1:?}"
+    );
+    drop(stream);
 
-    let mut line2 = String::new();
-    reader.read_line(&mut line2).unwrap();
-    assert!(line2.starts_with("4 0 "), "ACK line: {line2:?}");
-
-    // ─── STOP + drain ─────────────────────────────────────────
+    // ─── STOP via unix socket ─────────────────────────────────
+    let ustream = UnixStream::connect(&socket).expect("unix connect");
+    let mut reader = BufReader::new(&ustream);
+    let mut writer = &ustream;
+    writeln!(writer, "0 ^{cookie} 0").unwrap();
+    let mut g1 = String::new();
+    reader.read_line(&mut g1).unwrap();
+    assert_eq!(g1, "0 testnode 17.7\n", "daemon greeting (unix)");
+    let mut g2 = String::new();
+    reader.read_line(&mut g2).unwrap();
+    assert!(g2.starts_with("4 0 "), "ACK line: {g2:?}");
     writeln!(writer, "18 0").unwrap();
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) => panic!("read error after STOP: {e}"),
         }
