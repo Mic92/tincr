@@ -94,12 +94,10 @@ pub fn decode(src: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // Trailing partial group. i==1 means 6 bits → 0 whole output bytes (the
-    // C code returns 0 here too, treating it as "no extra bytes" rather than
-    // an error — odd but harmless given valid input lengths never produce
-    // a 1-char tail).
+    // Trailing partial group. 1 mod 4 chars is never a valid encoding.
     let tail = match i {
-        0 | 1 => 0,
+        0 => 0,
+        1 => return None,
         2 => 1,
         3 => 2,
         _ => unreachable!(),
