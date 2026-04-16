@@ -557,6 +557,7 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
     let _reqno = toks.next(); // %*d — skip
     let name_tok = toks
         .next()
+        .filter(|t| t.len() <= tinc_proto::MAX_STRING)
         .ok_or_else(|| DispatchError::BadId("no name token".into()))?;
     let ver = toks
         .next()
