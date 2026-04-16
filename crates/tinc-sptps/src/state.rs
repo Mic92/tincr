@@ -650,8 +650,8 @@ impl Sptps {
     /// `seal_into` API is what [`seal_with_seqno`] calls internally;
     /// same body span, same headroom math.
     #[must_use]
-    pub fn outcipher_key(&self) -> Option<[u8; CIPHER_KEY_LEN]> {
-        self.outcipher.as_ref().map(|c| *c.key_bytes())
+    pub fn outcipher_key(&self) -> Option<Zeroizing<[u8; CIPHER_KEY_LEN]>> {
+        self.outcipher.as_ref().map(|c| Zeroizing::new(*c.key_bytes()))
     }
 
     /// Copy the inbound cipher key. Mirror of [`outcipher_key`] for
@@ -659,8 +659,8 @@ impl Sptps {
     ///
     /// `None` until [`Output::HandshakeDone`].
     #[must_use]
-    pub fn incipher_key(&self) -> Option<[u8; CIPHER_KEY_LEN]> {
-        self.incipher.as_ref().map(|c| *c.key_bytes())
+    pub fn incipher_key(&self) -> Option<Zeroizing<[u8; CIPHER_KEY_LEN]>> {
+        self.incipher.as_ref().map(|c| Zeroizing::new(*c.key_bytes()))
     }
 
     /// Seal one datagram with a caller-supplied seqno. `&self`: no

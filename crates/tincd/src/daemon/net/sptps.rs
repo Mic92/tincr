@@ -160,8 +160,8 @@ impl Daemon {
                         let handles = std::sync::Arc::new(crate::shard::TunnelHandles {
                             outseqno: sptps.outseqno_handle(),
                             replay: sptps.replay_handle(),
-                            outkey: sptps.outcipher_key().expect("post-HandshakeDone"),
-                            inkey: sptps.incipher_key().expect("post-HandshakeDone"),
+                            outkey: *sptps.outcipher_key().expect("post-HandshakeDone"),
+                            inkey: *sptps.incipher_key().expect("post-HandshakeDone"),
                             udp_addr: std::sync::Mutex::new(tunnel.udp_addr_cached.clone()),
                             validkey: std::sync::atomic::AtomicBool::new(true),
                             minmtu: std::sync::atomic::AtomicU16::new(tunnel.minmtu()),
