@@ -30,7 +30,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -127,6 +127,57 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
+}
+
+/// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
+/// wrap (`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`). Single unsafe site.
+pub(crate) fn set_int_sockopt(
+    fd: BorrowedFd<'_>,
+    level: libc::c_int,
+    optname: libc::c_int,
+    val: libc::c_int,
+) -> io::Result<()> {
+    // SAFETY: fd is borrowed (caller owns it); val is a stack c_int
+    // whose address+len we pass for the duration of the call. The
+    // syscall copies out before return.
+    // truncation: size_of::<c_int>() == 4, fits socklen_t.
+    #[allow(unsafe_code, clippy::cast_possible_truncation)]
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            level,
+            optname,
+            (&raw const val).cast::<libc::c_void>(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+/// Raw `getsockopt` sibling of [`set_int_sockopt`]. Test-only readback
+/// for `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`.
+#[cfg(test)]
+pub(crate) fn get_int_sockopt(
+    fd: BorrowedFd<'_>,
+    level: libc::c_int,
+    optname: libc::c_int,
+) -> io::Result<libc::c_int> {
+    let mut val: libc::c_int = 0;
+    // SAFETY: fd is borrowed; val/len are stack locals the kernel
+    // writes through for the duration of the call.
+    // truncation: size_of::<c_int>() == 4, fits socklen_t.
+    #[allow(unsafe_code, clippy::cast_possible_truncation)]
+    let rc = unsafe {
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            level,
+            optname,
+            (&raw mut val).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if rc == 0 { Ok(val) } else { Err(io::Error::last_os_error()) }
 }
 
 /// `MAXSOCKETS` (`net.h:47`). C comment: "Probably overkill...".
@@ -472,22 +523,8 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
                 "IP_MTU_DISCOVER",
             )
         };
-        // SAFETY: fd is live (Socket owns it); optval is a stack c_int
-        // whose address+len we pass for the duration of the call. The
-        // syscall copies out before return.
-        // truncation: size_of::<c_int>() == 4, fits socklen_t.
-        #[allow(unsafe_code, clippy::cast_possible_truncation)]
-        let rc = unsafe {
-            libc::setsockopt(
-                s.as_raw_fd(),
-                level,
-                optname,
-                (&raw const optval).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            log::warn!(target: "tincd::net", "{label}: {}", io::Error::last_os_error());
+        if let Err(e) = set_int_sockopt(s.as_fd(), level, optname, optval) {
+            log::warn!(target: "tincd::net", "{label}: {e}");
         }
     }
 
