@@ -32,6 +32,12 @@ impl Daemon {
         let parsed = parse_ack(body)?;
         let conn = self.conn_mut(id);
 
+        // `ack_h:237`: replayed ACK after `allow_request=None` would
+        // re-run add_edge + send_everything.
+        if conn.active {
+            return Err(crate::proto::DispatchError::Unauthorized);
+        }
+
         // PMTU only sticks if BOTH sides set it.
         let mut his = parsed.his_options;
         if !(conn.options & his).contains(ConnOptions::PMTU_DISCOVERY) {
