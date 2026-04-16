@@ -11,6 +11,8 @@ use crate::proto::{
 use crate::tunnel::{MTU, TunnelState, make_udp_label};
 use crate::{compress, local_addr};
 
+use std::fmt;
+
 use rand_core::{OsRng, RngCore};
 use tinc_crypto::sign::SigningKey;
 use tinc_graph::{EdgeId, NodeId};
@@ -1127,6 +1129,37 @@ impl Daemon {
         rows
     }
 
+    /// Tunnelserver indirect filter: in tunnelserver mode, gossip about
+    /// third parties is dropped. Returns `true` if the message should be
+    /// IGNORED (and logs the warning). `about` is the set of node names
+    /// the message concerns (1 for subnets, 2 for edges); the message is
+    /// allowed iff ANY of them is us or the direct peer `from_conn`.
+    /// Call BEFORE `lookup_or_add_node` so indirect names don't pollute
+    /// the graph, but AFTER `seen_request` (mark seen even on drop).
+    fn tunnelserver_reject_indirect(
+        &self,
+        from_conn: ConnId,
+        kind: &str,
+        about: &[&str],
+        detail: fmt::Arguments<'_>,
+    ) -> bool {
+        if !self.settings.tunnelserver {
+            return false;
+        }
+        let conn_name = self
+            .conns
+            .get(from_conn)
+            .expect("dispatched from live conn")
+            .name
+            .as_str();
+        if about.iter().any(|n| *n == self.name || *n == conn_name) {
+            return false;
+        }
+        log::warn!(target: "tincd::proto",
+                   "Ignoring indirect {kind} from {conn_name} {detail}");
+        true
+    }
+
     /// Subnets don't change topology — NO `graph()` call.
     pub(super) fn on_add_subnet(
         &mut self,
@@ -1139,22 +1172,13 @@ impl Daemon {
             return Ok(false);
         }
 
-        // tunnelserver indirect filter. Check BEFORE
-        // lookup_or_add_node — don't pollute graph with indirect
-        // names. ORDER: seen_request first — mark seen even on drop.
-        if self.settings.tunnelserver {
-            let conn_name = self
-                .conns
-                .get(from_conn)
-                .expect("dispatched from live conn")
-                .name
-                .as_str();
-            if owner_name != self.name && owner_name != conn_name {
-                log::warn!(target: "tincd::proto",
-                           "Ignoring indirect ADD_SUBNET from {conn_name} \
-                            for {owner_name} ({subnet})");
-                return Ok(false);
-            }
+        if self.tunnelserver_reject_indirect(
+            from_conn,
+            "ADD_SUBNET",
+            &[&owner_name],
+            format_args!("for {owner_name} ({subnet})"),
+        ) {
+            return Ok(false);
         }
 
         // Lookup-first idempotency. With strictsubnets this lets
@@ -1266,11 +1290,12 @@ impl Daemon {
             .name
             .clone();
 
-        // tunnelserver indirect filter. ORDER: seen first.
-        if self.settings.tunnelserver && owner_name != self.name && owner_name != conn_name {
-            log::warn!(target: "tincd::proto",
-                       "Ignoring indirect DEL_SUBNET from {conn_name} \
-                        for {owner_name} ({subnet})");
+        if self.tunnelserver_reject_indirect(
+            from_conn,
+            "DEL_SUBNET",
+            &[&owner_name],
+            format_args!("for {owner_name} ({subnet})"),
+        ) {
             return Ok(false);
         }
 
@@ -1369,17 +1394,12 @@ impl Daemon {
             .name
             .clone();
 
-        // Drop if NEITHER endpoint is us-or-direct-peer. Before
-        // lookup_or_add. ORDER: seen first.
-        if self.settings.tunnelserver
-            && edge.from != self.name
-            && edge.from != conn_name
-            && edge.to != self.name
-            && edge.to != conn_name
-        {
-            log::warn!(target: "tincd::proto",
-                       "Ignoring indirect ADD_EDGE from {conn_name} \
-                        ({} → {})", edge.from, edge.to);
+        if self.tunnelserver_reject_indirect(
+            from_conn,
+            "ADD_EDGE",
+            &[&edge.from, &edge.to],
+            format_args!("({} → {})", edge.from, edge.to),
+        ) {
             return Ok(false);
         }
 
@@ -1489,16 +1509,12 @@ impl Daemon {
             .name
             .clone();
 
-        // ORDER: seen first.
-        if self.settings.tunnelserver
-            && edge.from != self.name
-            && edge.from != conn_name
-            && edge.to != self.name
-            && edge.to != conn_name
-        {
-            log::warn!(target: "tincd::proto",
-                       "Ignoring indirect DEL_EDGE from {conn_name} \
-                        ({} → {})", edge.from, edge.to);
+        if self.tunnelserver_reject_indirect(
+            from_conn,
+            "DEL_EDGE",
+            &[&edge.from, &edge.to],
+            format_args!("({} → {})", edge.from, edge.to),
+        ) {
             return Ok(false);
         }
 
