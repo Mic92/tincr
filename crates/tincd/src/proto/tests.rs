@@ -1,15 +1,9 @@
 use super::*;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 /// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
 fn nullfd() -> OwnedFd {
-    let f = std::fs::File::open("/dev/null").unwrap();
-    let fd = std::os::fd::IntoRawFd::into_raw_fd(f);
-    // SAFETY: fd from File, valid, ownership transferred.
-    #[allow(unsafe_code)]
-    unsafe {
-        OwnedFd::from_raw_fd(fd)
-    }
+    OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
 }
 
 fn mkconn() -> Connection {
