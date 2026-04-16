@@ -6,7 +6,7 @@
 //! detected via `read() → 0`, same as C tinc.
 
 use std::io;
-use std::os::fd::{BorrowedFd, RawFd};
+use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
@@ -29,38 +29,20 @@ fn interest_to_flags(i: super::Io) -> EpollFlags {
         }
 }
 
-/// Borrow a `RawFd` for the duration of an `epoll_ctl` call.
-///
-/// The event loop stores `RawFd` per slot by design (see `mod.rs`
-/// module doc "The loop doesn't own fds") — the fds belong to
-/// `connection_t` etc. nix's `Epoll` methods want `AsFd`, so we wrap
-/// at this boundary. The caller contract is: `fd` is open for the
-/// duration of this call (`mod.rs` only ever passes fds it was just
-/// handed via `add`/`set`, or that it's deregistering in `del`).
-#[inline]
-fn borrow(fd: RawFd) -> BorrowedFd<'static> {
-    // SAFETY: caller contract above. nix only uses the fd for one
-    // `epoll_ctl` syscall and does not retain it.
-    #[allow(unsafe_code)]
-    unsafe {
-        BorrowedFd::borrow_raw(fd)
-    }
-}
-
-pub(super) fn add(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
     let ev = EpollEvent::new(interest_to_flags(i), token as u64);
-    Ok(ep.add(borrow(fd), ev)?)
+    Ok(ep.add(fd, ev)?)
 }
 
-pub(super) fn modify(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn modify(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
     let mut ev = EpollEvent::new(interest_to_flags(i), token as u64);
-    Ok(ep.modify(borrow(fd), &mut ev)?)
+    Ok(ep.modify(fd, &mut ev)?)
 }
 
-pub(super) fn del(ep: &Poller, fd: RawFd) -> io::Result<()> {
+pub(super) fn del(ep: &Poller, fd: BorrowedFd<'_>) -> io::Result<()> {
     // nix passes NULL for DEL; kernel ≥2.6.9 ignores it. We don't
     // support pre-2.6.9 kernels (no epoll_create1 there anyway).
-    Ok(ep.delete(borrow(fd))?)
+    Ok(ep.delete(fd)?)
 }
 
 pub(super) fn wait(

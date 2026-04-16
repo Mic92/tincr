@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
 use std::ops::Range;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::time::Instant;
 
 use nix::errno::Errno;
@@ -378,6 +378,15 @@ impl Connection {
     pub fn fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
+}
+
+impl AsFd for Connection {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl Connection {
 
     /// For `socket2::SockRef::from` (`getsockname` in `ack_h:1040-1045`).
     #[must_use]

@@ -226,11 +226,11 @@ impl ControlSocket {
         Ok(stream)
     }
 
-    /// Raw fd for `EventLoop::add`.
-    #[must_use]
-    pub fn fd(&self) -> std::os::fd::RawFd {
-        use std::os::fd::AsRawFd;
-        self.listener.as_raw_fd()
+}
+
+impl std::os::fd::AsFd for ControlSocket {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.listener)
     }
 }
 

@@ -439,7 +439,6 @@ impl Daemon {
                 let _ = fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // No async connect; ready NOW.
                 let now = self.timers.now();
-                let raw_fd = fd.as_raw_fd();
                 let mut conn = Connection::new_outgoing(
                     fd,
                     name.clone(),
@@ -450,7 +449,7 @@ impl Daemon {
                 );
                 conn.connecting = false;
                 let id = self.conns.insert(conn);
-                match self.ev.add(raw_fd, Io::Read, IoWhat::Conn(id)) {
+                match self.ev.add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id)) {
                     Ok(io_id) => {
                         self.conn_io.insert(id, io_id);
                     }
@@ -523,7 +522,6 @@ impl Daemon {
                     // leak → 100% CPU busy-loop on the pre-ACK
                     // timeout path. See netns/busyloop.rs.)
                     let fd = OwnedFd::from(sock);
-                    let raw = fd.as_raw_fd();
                     let conn = Connection::new_outgoing(
                         fd,
                         name,
@@ -536,7 +534,7 @@ impl Daemon {
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    match self.ev.add(raw, Io::ReadWrite, IoWhat::Conn(id)) {
+                    match self.ev.add(self.conns[id].as_fd(), Io::ReadWrite, IoWhat::Conn(id)) {
                         Ok(io_id) => {
                             self.conn_io.insert(id, io_id);
                         }

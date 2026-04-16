@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -264,12 +265,11 @@ fn register_listeners(
 ) -> Result<Vec<ListenerSlot>, SetupError> {
     let mut listener_slots = Vec::with_capacity(listeners.len());
     for (i, l) in listeners.into_iter().enumerate() {
-        let (tcp_fd, udp_fd) = l.fds();
         #[allow(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
         let i = i as u8;
-        ev.add(tcp_fd, Io::Read, IoWhat::Tcp(i))
+        ev.add(l.tcp_fd(), Io::Read, IoWhat::Tcp(i))
             .map_err(SetupError::Io)?;
-        ev.add(udp_fd, Io::Read, IoWhat::Udp(i))
+        ev.add(l.udp_fd(), Io::Read, IoWhat::Udp(i))
             .map_err(SetupError::Io)?;
         // On Linux, dup into `linux::Fast` (UDP_SEGMENT cmsg,
         // one sendmsg per batch).
@@ -557,6 +557,11 @@ impl Daemon {
         // ─── device fd
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
         if let Some(fd) = device.fd() {
+            // tinc-device's trait-object accessor returns `RawFd`
+            // (cross-crate, multi-backend). The fd is owned by
+            // `device` and live for this call.
+            #[allow(unsafe_code)]
+            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
             ev.add(fd, Io::Read, IoWhat::Device)
                 .map_err(SetupError::Io)?;
         }
@@ -612,7 +617,7 @@ impl Daemon {
             )),
             crate::control::BindError::Io(err) => SetupError::Io(err),
         })?;
-        ev.add(control.fd(), Io::Read, IoWhat::UnixListener)
+        ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
             .map_err(SetupError::Io)?;
 
         // ─── graph: add myself

@@ -4,7 +4,7 @@ use super::{ConnId, Daemon, IoWhat};
 
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::time::SystemTime;
 
 use crate::conn::{Connection, FeedResult, SptpsEvent};
@@ -42,11 +42,10 @@ impl Daemon {
 
         let fd: OwnedFd = stream.into();
         let conn = Connection::new_control(fd, self.timers.now());
-        let conn_fd = conn.fd();
 
         let id = self.conns.insert(conn);
         // io_add IO_READ only; `send` adds WRITE later.
-        match self.ev.add(conn_fd, Io::Read, IoWhat::Conn(id)) {
+        match self.ev.add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id)) {
             Ok(io_id) => {
                 self.conn_io.insert(id, io_id);
                 log::debug!(target: "tincd::conn",
