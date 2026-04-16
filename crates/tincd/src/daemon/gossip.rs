@@ -20,6 +20,12 @@ use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, KeyChanged, ReqKey, SubnetMsg};
 use tinc_proto::{AddrStr, Request, Subnet};
 use tinc_sptps::{Framing, Role, Sptps};
 
+/// Hard cap on gossip-learned nodes. Past this, `ADD_EDGE`/
+/// `ADD_SUBNET` naming a new node are dropped (not forwarded).
+/// Direct peers (`on_ack`) and locally-provisioned names go through
+/// `lookup_or_add_node` directly and aren't gated.
+pub(super) const MAX_NODES: usize = 65_536;
+
 impl Daemon {
     /// Lookup-or-add fused. Does NOT add a `NodeState` — transitives
     /// are in the graph only.
@@ -1208,6 +1214,12 @@ impl Daemon {
             return Ok(false);
         }
 
+        if self.node_ids.len() >= MAX_NODES && !self.node_ids.contains_key(&owner_name) {
+            log::warn!(target: "tincd::proto",
+                       "Dropping ADD_SUBNET for new node {owner_name}: \
+                        node table full ({MAX_NODES})");
+            return Ok(false);
+        }
         let owner = self.lookup_or_add_node(&owner_name);
 
         // Peer wrong about us — retaliate DEL_SUBNET.
@@ -1406,6 +1418,15 @@ impl Daemon {
             return Ok(false);
         }
 
+        // Reject before `lookup_or_add_node` so neither name lands.
+        let new_names = usize::from(!self.node_ids.contains_key(&edge.from))
+            + usize::from(!self.node_ids.contains_key(&edge.to));
+        if new_names > 0 && self.node_ids.len() + new_names > MAX_NODES {
+            log::warn!(target: "tincd::proto",
+                       "Dropping ADD_EDGE {} → {}: node table full ({MAX_NODES})",
+                       edge.from, edge.to);
+            return Ok(false);
+        }
         let from_id = self.lookup_or_add_node(&edge.from);
         let to_id = self.lookup_or_add_node(&edge.to);
 
