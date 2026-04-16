@@ -573,16 +573,15 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
 
 /// `id_h` `:325-338` — the `^cookie` control-connection branch.
 /// Reachable only from the unix control socket: `handle_id` rejects
-/// `^` when `!conn.is_unix_ctl`. Cookie compare is not constant-time;
-/// the secret is mode-0600 and the path is unix-socket-only, so
-/// timing leaks nothing an attacker couldn't already read.
+/// `^` when `!conn.is_unix_ctl`.
 fn id_control(
     conn: &mut Connection,
     cookie: &[u8],
     ctx: &IdCtx<'_>,
     now: Instant,
 ) -> Result<IdOk, DispatchError> {
-    if cookie != ctx.cookie.as_bytes() {
+    use subtle::ConstantTimeEq;
+    if cookie.ct_eq(ctx.cookie.as_bytes()).unwrap_u8() == 0 {
         return Err(DispatchError::BadId("cookie mismatch".into()));
     }
 
