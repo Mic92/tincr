@@ -179,12 +179,42 @@ impl RawSocket {
 ///   `&raw const sa` cast to `*const sockaddr` (the kernel
 ///   discriminates on `sa_family`, finds `AF_PACKET`, reads as
 ///   `sockaddr_ll`).
+#[allow(unsafe_code)]
+fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
+    let sa = sockaddr_ll_packet(ifindex);
+
+    // `bind(fd, (struct sockaddr *)&sa, sizeof(sa))`. The cast is
+    // the standard sockaddr type-erasure (the kernel discriminates
+    // on `sa_family`).
+    //
+    // SAFETY: `sa` is fully initialized (zeroed + 3 writes).
+    // `bind` reads `addrlen` bytes from the pointer; we pass
+    // `size_of::<sockaddr_ll>()` (20). The pointer is valid
+    // for that many bytes (`sa` is on our stack). `fd` is the
+    // socket from `open()` (alive, ours).
+    //
+    // `socklen_t` cast: `size_of` is `usize`; `socklen_t` is
+    // `u32`. 20 fits.
+    #[allow(clippy::cast_possible_truncation)]
+    let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    let ret = unsafe { libc::bind(fd, (&raw const sa).cast::<libc::sockaddr>(), addrlen) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Build a `sockaddr_ll` for `bind`: `{AF_PACKET, htons(ETH_P_ALL),
+/// ifindex, 0..}`. Pure; the one `unsafe` is the `mem::zeroed`
+/// (sound: `sockaddr_ll` is `repr(C)`, no niche, all integers/
+/// bytes — zero is valid for every field). Split from `bind_packet`
+/// so the struct construction is independently inspectable and the
+/// syscall shim stays one-unsafe.
 // ifindex: c_uint→c_int glibc signedness quirk; kernel allocs small positive ints
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #[allow(unsafe_code)]
-fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
-    // SAFETY: see fn comment. `sockaddr_ll` is repr(C), no
-    // niche, all integers/bytes; zero is valid for all fields.
+fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
+    // SAFETY: see fn comment.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
     // `sll_family = AF_PACKET`. The discriminant.
@@ -204,24 +234,7 @@ fn bind_packet(fd: RawFd, ifindex: libc::c_uint) -> io::Result<()> {
     // cast-allow comment for the `c_uint → c_int` signedness.
     sa.sll_ifindex = ifindex as libc::c_int;
 
-    // `bind(fd, (struct sockaddr *)&sa, sizeof(sa))`. The cast is
-    // the standard sockaddr type-erasure (the kernel discriminates
-    // on `sa_family`).
-    //
-    // SAFETY: `sa` is fully initialized (zeroed + 3 writes).
-    // `bind` reads `addrlen` bytes from the pointer; we pass
-    // `size_of::<sockaddr_ll>()` (20). The pointer is valid
-    // for that many bytes (`sa` is on our stack). `fd` is the
-    // socket from `open()` (alive, ours).
-    //
-    // `socklen_t` cast: `size_of` is `usize`; `socklen_t` is
-    // `u32`. 20 fits.
-    let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-    let ret = unsafe { libc::bind(fd, (&raw const sa).cast::<libc::sockaddr>(), addrlen) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    sa
 }
 
 // Device impl — the +0 read/write
