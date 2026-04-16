@@ -820,9 +820,11 @@ fn init_logging(args: &Args) {
     // opened append, created if missing. Ownership moves into the
     // logger (it's `Box<dyn Write + Send>`).
     if let Some(path) = &args.logfile {
+        use std::os::unix::fs::OpenOptionsExt;
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)
         {
             Ok(f) => {
