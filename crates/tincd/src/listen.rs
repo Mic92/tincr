@@ -219,6 +219,45 @@ impl Listener {
     }
 }
 
+/// Common best-effort sockopts shared by `setup_tcp` and `setup_udp`:
+/// REUSEADDR, V6ONLY, `SO_MARK` (all warn-on-error), then
+/// `SO_BINDTODEVICE` (hard error). `label` is appended to warnings
+/// (`""` for TCP, `" (udp)"` for UDP) to keep the log lines
+/// distinguishable.
+fn apply_common_sockopts(
+    s: &Socket,
+    domain: Domain,
+    opts: &SockOpts,
+    label: &str,
+) -> io::Result<()> {
+    // SO_REUSEADDR: restart after crash without EADDRINUSE from TIME_WAIT.
+    if let Err(e) = s.set_reuse_address(true) {
+        log::warn!(target: "tincd::net", "SO_REUSEADDR{label}: {e}");
+    }
+
+    // IPV6_V6ONLY: load-bearing. Without this the v6 socket grabs v4
+    // traffic via mapped addresses, and the v4 bind sees the port as taken.
+    if domain == Domain::IPV6
+        && let Err(e) = s.set_only_v6(true)
+    {
+        log::warn!(target: "tincd::net", "IPV6_V6ONLY{label}: {e}");
+    }
+
+    // SO_MARK: Linux netfilter mark for policy routing. 0 = unset = skip.
+    if opts.fwmark != 0
+        && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
+    {
+        log::warn!(target: "tincd::net", "SO_MARK={}{label}: {e}", opts.fwmark);
+    }
+
+    // SO_BINDTODEVICE: hard failure. Propagate; Socket's Drop closes.
+    if let Some(iface) = &opts.bind_to_interface {
+        bind_to_interface(s, iface)?;
+    }
+
+    Ok(())
+}
+
 // setup_listen_socket (TCP)
 
 /// `setup_listen_socket`. One TCP listener.
@@ -244,37 +283,7 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     // as separate `fcntl(F_SETFD, FD_CLOEXEC)`, atomic.
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 
-    // `:210`: `setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)`. Restart
-    // after crash without `EADDRINUSE` from TIME_WAIT.
-    if let Err(e) = s.set_reuse_address(true) {
-        log::warn!(target: "tincd::net", "SO_REUSEADDR: {e}");
-    }
-
-    // `:214`: `if(family == AF_INET6) setsockopt(IPV6_V6ONLY, 1)`.
-    // Load-bearing: without this, the v6 socket grabs v4 traffic via
-    // mapped addresses, and the v4 bind sees the port as taken.
-    if domain == Domain::IPV6
-        && let Err(e) = s.set_only_v6(true)
-    {
-        log::warn!(target: "tincd::net", "IPV6_V6ONLY: {e}");
-    }
-
-    // `:248`: SO_MARK. Linux netfilter mark for policy routing.
-    // 0 = unset = skip (C: `if(fwmark)`). Best-effort — the C
-    // doesn't check the return value.
-    if opts.fwmark != 0
-        && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
-    {
-        log::warn!(target: "tincd::net", "SO_MARK={}: {e}", opts.fwmark);
-    }
-
-    // SO_BINDTODEVICE. `setup_listen_socket` does this inline (NOT
-    // via the `bind_to_interface` helper — that's
-    // UDP-only at `:389`). Same semantics: hard failure (`:244`:
-    // `closesocket; return -1`). Propagate; Socket's Drop closes.
-    if let Some(iface) = &opts.bind_to_interface {
-        bind_to_interface(&s, iface)?;
-    }
+    apply_common_sockopts(&s, domain, opts, "")?;
 
     // bind. We let `?` propagate. Socket's Drop closes on failure.
     s.bind(addr)?;
@@ -430,24 +439,12 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     // socket2 same.
     s.set_nonblocking(true)?;
 
-    // `:331`: SO_REUSEADDR.
-    if let Err(e) = s.set_reuse_address(true) {
-        log::warn!(target: "tincd::net", "SO_REUSEADDR (udp): {e}");
-    }
-
     // `:332`: SO_BROADCAST. For LocalDiscovery (probe peers on LAN).
     // We don't use it yet but setting it doesn't hurt and matching the
     // C's socket state means dump tools (`ss -tuln`) show identical
     // flags.
     if let Err(e) = s.set_broadcast(true) {
         log::warn!(target: "tincd::net", "SO_BROADCAST: {e}");
-    }
-
-    // `:341`: IPV6_V6ONLY. Same rationale as TCP.
-    if domain == Domain::IPV6
-        && let Err(e) = s.set_only_v6(true)
-    {
-        log::warn!(target: "tincd::net", "IPV6_V6ONLY (udp): {e}");
     }
 
     // `:349-378`: IP_MTU_DISCOVER / IPV6_MTU_DISCOVER = PMTUDISC_DO.
@@ -511,17 +508,10 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
         opts.udp_buf_warnings,
     );
 
-    // `:383-387` (UDP site): SO_MARK. Same as TCP `:248`.
-    if opts.fwmark != 0
-        && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
-    {
-        log::warn!(target: "tincd::net", "SO_MARK={} (udp): {e}", opts.fwmark);
-    }
-
-    // `:389-392`: SO_BINDTODEVICE. Hard failure: propagate.
-    if let Some(iface) = &opts.bind_to_interface {
-        bind_to_interface(&s, iface)?;
-    }
+    // REUSEADDR, V6ONLY, SO_MARK, BINDTODEVICE. All pre-bind,
+    // idempotent, order-independent; BINDTODEVICE stays last
+    // (right before bind).
+    apply_common_sockopts(&s, domain, opts, " (udp)")?;
 
     s.bind(addr)?;
 
