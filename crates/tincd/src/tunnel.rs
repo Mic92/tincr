@@ -102,6 +102,28 @@ pub struct TunnelState {
     pub in_bytes: u64,
     pub out_packets: u64,
     pub out_bytes: u64,
+
+    /// Rust-only. Lifetime bytes we ORIGINATED toward this node that
+    /// left via a relay (TCP `SPTPS_PACKET` through `nexthop`, or UDP
+    /// to a `relay_nid != to`). Bumped in `send_sptps_data_relay`
+    /// only — once a direct meta-conn exists, the PACKET 17 short-
+    /// circuit in `send_sptps_packet` fires and this stops growing,
+    /// which is exactly the oscillation damper the autoconnect-
+    /// shortcut heuristic needs (theory doc §3, damping (c)).
+    ///
+    /// NOT a `dump_nodes` column. NOT reset on unreachable (lifetime,
+    /// like `out_bytes`). EWMA derivation lives in the cold-path
+    /// `decide_autoconnect`; the hot path does 1 add + 1 store.
+    pub relay_tx_bytes: u64,
+
+    /// Previous-tick samples + EWMA rates for autoconnect-shortcut.
+    /// Touched only from `decide_autoconnect` (every ~5s). Kept here
+    /// because `TunnelState` is the only per-ANY-node map; `NodeState`
+    /// is direct-peers-only.
+    pub relay_tx_bytes_prev: u64,
+    pub out_bytes_prev: u64,
+    pub relay_rate_bps: u64,
+    pub tx_rate_bps: u64,
 }
 
 impl TunnelState {
@@ -274,6 +296,11 @@ mod tests {
             in_bytes: 50000,
             out_packets: 80,
             out_bytes: 40000,
+            relay_tx_bytes: 12345,
+            relay_tx_bytes_prev: 0,
+            out_bytes_prev: 0,
+            relay_rate_bps: 0,
+            tx_rate_bps: 0,
         };
 
         t.reset_unreachable();
@@ -295,6 +322,10 @@ mod tests {
         assert_eq!(t.in_bytes, 50000);
         assert_eq!(t.out_packets, 80);
         assert_eq!(t.out_bytes, 40000);
+        // relay_tx_bytes is lifetime too — the EWMA delta in
+        // decide_autoconnect would go negative (saturate to 0) if
+        // this reset, masking real relay traffic across a flap.
+        assert_eq!(t.relay_tx_bytes, 12345);
     }
 
     #[test]

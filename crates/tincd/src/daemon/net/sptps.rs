@@ -690,6 +690,21 @@ impl Daemon {
             || (!direct && !relay_supported)
             || too_big;
 
+        // ── relay_tx_bytes ─────────────────────────────────────────
+        // Autoconnect-shortcut signal: bytes WE originated for `to`
+        // that left via a relay (not direct). `!direct` already
+        // encodes "from==myself && relay!=to"; the only exclusions
+        // are probes (drive PMTU, not demand) and handshakes (rare,
+        // always-TCP). 1 add + 1 store, no clock, no EWMA — the
+        // cold-path `decide_autoconnect` does the rate derivation.
+        if !direct
+            && from_is_myself
+            && record_type != PKT_PROBE
+            && record_type != tinc_sptps::REC_HANDSHAKE
+        {
+            self.dp.tunnels.entry(to_nid).or_default().relay_tx_bytes += origlen as u64;
+        }
+
         if go_tcp {
             return self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself);
         }
