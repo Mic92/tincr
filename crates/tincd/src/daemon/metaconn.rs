@@ -684,7 +684,13 @@ impl Daemon {
                             Ok(conn.send(format_args!("{}", Request::Pong)))
                         }
                         Request::Pong => {
-                            let now = self.timers.now();
+                            // Real clock, not `self.timers.now()`: that
+                            // is cached at `tick()` BEFORE `epoll_wait`
+                            // blocked, so it can be stale by up to one
+                            // wakeup interval and under-reads RTT by
+                            // exactly the latency of whichever OTHER
+                            // conn's PONG woke epoll first.
+                            let now = std::time::Instant::now();
                             let conn = self.conn_mut(id);
                             conn.pinged = false;
                             if let Some(sent) = conn.last_ping_sent.take() {
@@ -705,7 +711,7 @@ impl Daemon {
                                     out.addr_cache.add_recent(a);
                                 }
                             }
-                            Ok(false)
+                            Ok(self.on_pong_rtt(id, now))
                         }
                         Request::Packet => {
                             // set tcplen; NEXT record is the blob.
