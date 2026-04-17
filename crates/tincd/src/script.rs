@@ -172,6 +172,27 @@ fn prepare(
     Ok(cmd)
 }
 
+/// Retry an exec on `ETXTBSY`. If another thread `fork()`s while we
+/// hold a script open for writing (e.g. the daemon rewriting an
+/// invitation hook, or — the case that bit us — parallel unit tests
+/// each `write_script`+`execute`), the forked child briefly inherits
+/// the write fd until its `exec()` closes CLOEXEC fds. Our own
+/// `exec()` of that inode then fails `ETXTBSY`. The window is the
+/// fork→exec gap in the *other* thread; bounded and short. Retrying
+/// is what `system(3)`/shells do.
+fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut tries = 0;
+    loop {
+        match f() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
+}
+
 /// `execute_script`.
 ///
 /// Builds `<confbase>/<name>` (e.g. `/etc/tinc/foo/host-up`).
@@ -210,7 +231,7 @@ pub fn execute(
     };
 
     // `:221` system(). status() is fork+exec+waitpid. Blocks.
-    let status = cmd.status()?;
+    let status = retry_txtbsy(|| cmd.status())?;
 
     // `:228-247`. WIFEXITED+WEXITSTATUS==0 → Ok, else Failed.
     // ExitStatus::success() is exactly that check on Unix.
@@ -272,7 +293,7 @@ pub fn spawn(
         Ok(c) => c,
         Err(r) => return Ok(r),
     };
-    let child = cmd.spawn()?;
+    let child = retry_txtbsy(|| cmd.spawn())?;
     // `Child::id` is u32; pid_t is i32. Kernel pids fit.
     #[allow(clippy::cast_possible_wrap)]
     register_child(nix::unistd::Pid::from_raw(child.id() as i32));

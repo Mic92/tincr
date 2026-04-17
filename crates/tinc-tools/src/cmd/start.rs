@@ -52,10 +52,9 @@
 use std::io::{IsTerminal, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 use crate::cmd::CmdError;
 use crate::ctl::CtlSocket;
@@ -82,6 +81,18 @@ use crate::names::Paths;
 /// "Already running" is **not** an error: prints a message, returns
 /// Ok. Idempotent start.
 pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
+    start_with(paths, extra_args, &find_tincd())
+}
+
+/// [`start`] with an explicit `tincd` binary path, bypassing
+/// [`find_tincd`]'s env/PATH probing. Exists so tests can point at
+/// `CARGO_BIN_EXE_tincd` without mutating process-global env (which
+/// races other test threads under `cargo test`'s default thread
+/// pool).
+///
+/// # Errors
+/// See [`start`].
+pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<(), CmdError> {
     // ─── already running?
     // Any connect error means "not running, proceed". PidfileMissing,
     // PidfileMalformed, DaemonDead, SocketConnect — all mean "go".
@@ -89,8 +100,6 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
         eprintln!("A tincd is already running with pid {}.", ctl.pid);
         return Ok(());
     }
-
-    let tincd = find_tincd();
 
     // ─── socketpair
     // `UnixStream::pair` wraps `socketpair(AF_UNIX, SOCK_STREAM, 0)`.
@@ -101,10 +110,6 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
         .map_err(|e| CmdError::BadInput(format!("Could not create umbilical socket: {e}")))?;
 
     let theirs_fd = theirs.as_raw_fd();
-    // F_SETFD with empty FdFlag clears all fd flags, i.e. unsets
-    // CLOEXEC so the fd survives exec into tincd.
-    fcntl(&theirs, FcntlArg::F_SETFD(FdFlag::empty()))
-        .map_err(|e| CmdError::BadInput(format!("Could not clear CLOEXEC on umbilical: {e}")))?;
 
     // ─── TINC_UMBILICAL value
     // "{fd} {colorize}". The fd number is stable across spawn —
@@ -124,16 +129,37 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
     //
     // `Command` does fork+exec internally. The child inherits our
     // env (including `TINC_UMBILICAL` via `.env()`) and our open
-    // fds (including `theirs_fd`, now non-CLOEXEC).
-    let mut child = Command::new(&tincd)
-        .arg("-c")
+    // fds (including `theirs_fd`, made non-CLOEXEC in `pre_exec`).
+    let mut cmd = Command::new(tincd);
+    cmd.arg("-c")
         .arg(&paths.confbase)
         .arg("--pidfile")
         .arg(paths.pidfile())
         .arg("--socket")
         .arg(paths.unix_socket())
         .args(extra_args)
-        .env("TINC_UMBILICAL", &umbilical_val)
+        .env("TINC_UMBILICAL", &umbilical_val);
+    // Clear CLOEXEC on `theirs` *in the child*, post-fork. Doing it
+    // in the parent pre-fork (the obvious place) opens a race: any
+    // other thread that forks while the fd is non-CLOEXEC leaks the
+    // write end into an unrelated child, and the drain loop below
+    // never sees EOF — it hangs until that child exits. `cargo
+    // test`'s thread pool hits this; a multi-threaded caller could
+    // too. `fcntl(2)` is async-signal-safe, so it's legal in
+    // `pre_exec`.
+    //
+    // SAFETY: closure only calls `fcntl` (async-signal-safe) on a
+    // raw fd we own; no allocation, no locks.
+    #[allow(unsafe_code)]
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::fcntl(theirs_fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| CmdError::BadInput(format!("Error starting {}: {e}", tincd.display())))?;
 
@@ -309,8 +335,7 @@ mod tests {
 
         // /bin/true: exits 0 without writing to the umbilical →
         // EOF immediately → failure stays at its true initializer.
-        let _env = EnvGuard::set("TINCD_PATH", "/bin/true");
-        let r = start(&paths, &[]);
+        let r = start_with(&paths, &[], Path::new("/bin/true"));
 
         let err = r.unwrap_err();
         assert!(err.to_string().contains("Error starting"), "got: {err}");
@@ -335,8 +360,7 @@ mod tests {
             ..Default::default()
         });
 
-        let _env = EnvGuard::set("TINCD_PATH", "/bin/true");
-        let r = start(&paths, &[]);
+        let r = start_with(&paths, &[], Path::new("/bin/true"));
 
         // Got past the connect check (didn't early-return Ok), and
         // the error is from the umbilical drain, not a CtlError.

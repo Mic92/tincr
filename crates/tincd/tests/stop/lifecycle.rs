@@ -1,6 +1,6 @@
-use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -9,27 +9,6 @@ use nix::unistd::Pid;
 
 use super::common::*;
 use super::write_config;
-
-/// RAII env-var setter. `set_var`/`remove_var` are unsafe in edition
-/// 2024 (multi-threaded env-mutation race). Consolidate the unsafe
-/// here so call sites are safe and cleanup is panic-safe.
-struct EnvGuard(&'static str);
-impl EnvGuard {
-    #[allow(unsafe_code)]
-    fn set(k: &'static str, v: impl AsRef<OsStr>) -> Self {
-        // SAFETY: nextest runs each test in its own process; no
-        // env-mutation race with parallel tests.
-        unsafe { std::env::set_var(k, v) };
-        Self(k)
-    }
-}
-impl Drop for EnvGuard {
-    #[allow(unsafe_code)]
-    fn drop(&mut self) {
-        // SAFETY: same as `set` — single-threaded test process.
-        unsafe { std::env::remove_var(self.0) }
-    }
-}
 
 fn tmp(tag: &str) -> super::common::TmpGuard {
     super::common::TmpGuard::new("stop", tag)
@@ -191,9 +170,11 @@ fn umbilical_ready_signal() {
     let socket = paths.unix_socket();
 
     // ─── point start() at our tincd
-    // `find_tincd` checks TINCD_PATH first. CARGO_BIN_EXE_tincd
-    // is the binary cargo just built for THIS crate.
-    let _env = EnvGuard::set("TINCD_PATH", env!("CARGO_BIN_EXE_tincd"));
+    // CARGO_BIN_EXE_tincd is the binary cargo just built for THIS
+    // crate. Passed explicitly via `start_with` instead of mutating
+    // process-global `TINCD_PATH` — `set_var` races other test
+    // threads under `cargo test`'s default thread pool.
+    let tincd = Path::new(env!("CARGO_BIN_EXE_tincd"));
 
     // ─── the call under test
     // `start()` forks, child exec's tincd, tincd detaches (default
@@ -203,7 +184,7 @@ fn umbilical_ready_signal() {
     // No `-D` in extra_args — we WANT detach, that's the production
     // shape. The detached daemon keeps running after `start()`
     // returns; we connect-and-stop it below.
-    let result = tinc_tools::cmd::start::start(&paths, &[]);
+    let result = tinc_tools::cmd::start::start_with(&paths, &[], tincd);
 
     // The umbilical handshake itself. If the nul byte didn't
     // arrive (cut_umbilical didn't fire, or fired before setup
@@ -227,7 +208,7 @@ fn umbilical_ready_signal() {
     // ─── idempotent start
     // Second `start` with daemon running is a no-op success. `CtlSocket::connect` succeeds → early
     // return Ok with the "already running" message.
-    let second = tinc_tools::cmd::start::start(&paths, &[]);
+    let second = tinc_tools::cmd::start::start_with(&paths, &[], tincd);
     assert!(second.is_ok(), "second start should be idempotent Ok");
 
     // ─── stop it
@@ -259,7 +240,7 @@ fn umbilical_ready_signal() {
 /// above breaks, this one tells you which half is at fault.
 #[test]
 fn umbilical_daemon_side() {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::OwnedFd;
 
     let tmp = tmp("umbilical-daemon");
     let confbase = tmp.path().join("vpn");
@@ -273,37 +254,44 @@ fn umbilical_daemon_side() {
     // AF_UNIX, SOCK_STREAM).
     let (mut ours, theirs) = UnixStream::pair().unwrap();
 
-    // The child's fd number for `theirs` is stable across spawn
-    // ONLY if we don't set CLOEXEC on it. UnixStream::pair sets
-    // CLOEXEC by default (Rust's std does for everything). We
-    // need it inherited, so clear CLOEXEC. nix::fcntl on RawFd is
-    // a safe wrapper — it's a probe-style call, not ownership.
-    let theirs_fd = theirs.as_raw_fd();
-    nix::fcntl::fcntl(
-        &theirs,
-        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-    )
-    .unwrap();
+    // We need `theirs` inherited at a *known* fd number in the
+    // child so we can put it in `TINC_UMBILICAL`. Clearing CLOEXEC
+    // in the parent is racy under `cargo test`: any other test
+    // thread that forks while it's clear leaks the write end into
+    // an unrelated child, and our EOF read below blocks until that
+    // child exits. Instead, hand `theirs` to `Command` as the
+    // child's stdin — `Stdio::from(OwnedFd)` dup2's it post-fork
+    // and closes the parent copy, no CLOEXEC games in the parent
+    // at all. tincd rejects fd ≤ 2 for the umbilical, so a tiny
+    // `pre_exec` dup2's stdin to fd 3 (async-signal-safe).
 
     // -D so the child doesn't detach — we want to waitpid it
     // directly. (The cross-crate test above does detach; this
     // one is the simpler shape.)
-    let mut child = tincd_cmd()
-        .arg("-c")
+    let mut cmd = tincd_cmd();
+    cmd.arg("-c")
         .arg(&confbase)
         .arg("--pidfile")
         .arg(&pidfile)
         .arg("--socket")
         .arg(&socket)
-        .env("TINC_UMBILICAL", format!("{theirs_fd} 0"))
+        // fd 3: dup2'd in pre_exec below.
+        .env("TINC_UMBILICAL", "3 0")
         .env("RUST_LOG", "tincd=debug")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
-    // CRITICAL: drop `theirs` in the parent so we see EOF when the
-    // child closes its copy. Same as `close(pfd[1])`.
-    drop(theirs);
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stderr(Stdio::piped());
+    // SAFETY: closure only calls dup2(2), async-signal-safe.
+    #[allow(unsafe_code)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::dup2(0, 3) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn tincd");
 
     // Read the umbilical. cut_umbilical writes exactly 1 nul byte
     // then closes. We don't tee logs, so 1 byte then EOF is the
