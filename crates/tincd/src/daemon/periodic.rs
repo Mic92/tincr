@@ -528,6 +528,44 @@ impl Daemon {
             config.merge(entries);
         }
 
+        // Warn about edits to keys that need a full restart, so an
+        // operator who changed Port= and ran `tinc reload` is told
+        // why nothing happened instead of silently keeping the old
+        // bind. Compared as raw strings (first value) against what
+        // we are actually running with; only the keys that map to
+        // listener/device/key state are checked.
+        {
+            let lookup = |k: &str| config.lookup(k).next().map(|e| e.get_str().to_owned());
+            let warn = |k: &str| {
+                log::warn!(target: "tincd",
+                    "{k} changed in configuration but requires a restart to take effect");
+            };
+            if let Some(p) = lookup("Port")
+                && p.parse::<u16>().ok() != Some(self.settings.port)
+            {
+                warn("Port");
+            }
+            if let Some(af) = lookup("AddressFamily")
+                && crate::listen::AddrFamily::from_config(&af) != Some(self.settings.addressfamily)
+            {
+                warn("AddressFamily");
+            }
+            // Keys with no live value to compare against — just
+            // detect that they were touched since the last check by
+            // diffing against what setup() stashed. We don't stash
+            // those, so use the simpler heuristic: warn if the key
+            // is present and differs from the device/iface we have.
+            if let Some(iface) = lookup("Interface")
+                && iface != self.iface
+            {
+                warn("Interface");
+            }
+            // BindToAddress / ListenAddress / Device / DeviceType /
+            // Mode / key paths are also restart-only but have no
+            // single live value to diff against here; covered in
+            // docs/OPERATING.md instead of a noisy per-reload note.
+        }
+
         apply_reloadable_settings(&config, &mut self.settings);
 
         // Operator may have run `tinc invite` since boot.
