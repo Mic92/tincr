@@ -45,10 +45,25 @@ pub(super) fn create() -> io::Result<Poller> {
     Kqueue::new().map_err(Into::into)
 }
 
+/// fd → kevent ident. fds are non-negative; the kqueue ABI takes
+/// `uintptr_t` (nix exposes it as `usize`).
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn fd_ident(fd: BorrowedFd<'_>) -> usize {
+    fd.as_raw_fd() as usize
+}
+
+/// token → kevent udata. nix wraps `udata` as `isize`; tokens are
+/// slab indices well under `isize::MAX`.
+#[inline]
+fn token_udata(token: usize) -> isize {
+    token.cast_signed()
+}
+
 /// Build a changelist that only ADDs wanted filters (for initial registration).
 fn add_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
-    let ident = fd.as_raw_fd() as usize;
-    let udata = token as isize;
+    let ident = fd_ident(fd);
+    let udata = token_udata(token);
     let flags = EvFlags::EV_ADD | EvFlags::EV_CLEAR;
     let read_ev = KEvent::new(
         ident,
@@ -67,9 +82,9 @@ fn add_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
         udata,
     );
     match i {
-        super::Io::Read => [read_ev, write_ev],      // only [0] used
-        super::Io::Write => [write_ev, read_ev],     // only [0] used
-        super::Io::ReadWrite => [read_ev, write_ev], // both used
+        // ReadWrite uses both slots; Read/Write only [0] (see add_count).
+        super::Io::Read | super::Io::ReadWrite => [read_ev, write_ev],
+        super::Io::Write => [write_ev, read_ev],
     }
 }
 
@@ -83,8 +98,8 @@ fn add_count(i: super::Io) -> usize {
 /// Build the changelist for modify. Wanted filters get
 /// `EV_ADD | EV_CLEAR`; unwanted get `EV_DELETE`.
 fn interest_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
-    let ident = fd.as_raw_fd() as usize;
-    let udata = token as isize;
+    let ident = fd_ident(fd);
+    let udata = token_udata(token);
     let want_read = matches!(i, super::Io::Read | super::Io::ReadWrite);
     let want_write = matches!(i, super::Io::Write | super::Io::ReadWrite);
 
@@ -144,7 +159,7 @@ pub(super) fn modify(
 }
 
 pub(super) fn del(kq: &Poller, fd: BorrowedFd<'_>) -> io::Result<()> {
-    let ident = fd.as_raw_fd() as usize;
+    let ident = fd_ident(fd);
     let changes = [
         KEvent::new(
             ident,
@@ -176,8 +191,10 @@ pub(super) fn wait(
     timeout: Option<Duration>,
 ) -> io::Result<usize> {
     let ts = timeout.map(|d| libc::timespec {
+        // time_t::MAX seconds ≈ 292 Gyr; event-loop timeouts are seconds.
+        #[allow(clippy::cast_possible_wrap)]
         tv_sec: d.as_secs() as libc::time_t,
-        tv_nsec: d.subsec_nanos() as libc::c_long,
+        tv_nsec: libc::c_long::from(d.subsec_nanos()),
     });
     // SAFETY: RawEvent is #[repr(transparent)] over KEvent, so the
     // slice layout is identical. std::mem::transmute can't handle
@@ -194,7 +211,7 @@ pub(super) fn wait(
 
 #[inline]
 pub(super) fn ev_token(e: &RawEvent) -> usize {
-    e.0.udata() as usize
+    e.0.udata().cast_unsigned()
 }
 
 #[inline]

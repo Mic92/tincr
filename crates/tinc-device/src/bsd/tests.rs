@@ -112,7 +112,7 @@ fn pipe_rev() -> (OwnedFd, OwnedFd) {
 }
 
 /// Datagram socketpair for Tap tests. SEQPACKET on Linux,
-/// DGRAM on macOS (which lacks SEQPACKET for AF_UNIX).
+/// DGRAM on macOS (which lacks SEQPACKET for `AF_UNIX`).
 fn dgram_pair() -> (OwnedFd, OwnedFd) {
     #[cfg(target_os = "linux")]
     let sock_type = nix::sys::socket::SockType::SeqPacket;
@@ -133,7 +133,7 @@ fn drain(fd: &OwnedFd) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 256];
     loop {
-        let n = nix::unistd::read(&fd, &mut buf).unwrap();
+        let n = nix::unistd::read(fd, &mut buf).unwrap();
         if n == 0 {
             break;
         }

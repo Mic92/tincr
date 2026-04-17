@@ -526,6 +526,8 @@ mod utun {
             // connect(sockaddr_ctl) with unit+1 (kernel uses 1-based;
             // unit=0 → sc_unit=0 means "pick for me", unit=N → sc_unit=N+1)
             let sc_unit = unit.map_or(0, |u| u + 1);
+            // sizeof(sockaddr_ctl)==32 and AF_SYSTEM==32: both fit u8.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let addr = SockaddrCtl {
                 sc_len: mem::size_of::<SockaddrCtl>() as u8,
                 sc_family: libc::AF_SYSTEM as u8,
@@ -534,11 +536,14 @@ mod utun {
                 sc_unit,
                 sc_reserved: [0; 5],
             };
+            // socklen_t is u32; sizeof(SockaddrCtl)==32.
+            #[allow(clippy::cast_possible_truncation)]
+            let addr_len = mem::size_of::<SockaddrCtl>() as libc::socklen_t;
             if unsafe {
                 libc::connect(
                     fd_raw(&fd),
-                    &addr as *const SockaddrCtl as *const libc::sockaddr,
-                    mem::size_of::<SockaddrCtl>() as libc::socklen_t,
+                    (&raw const addr).cast::<libc::sockaddr>(),
+                    addr_len,
                 )
             } < 0
             {
@@ -547,14 +552,14 @@ mod utun {
 
             // getsockopt(UTUN_OPT_IFNAME) to read back interface name
             let mut name_buf = [0u8; 32];
-            let mut name_len: libc::socklen_t = name_buf.len() as libc::socklen_t;
+            let mut name_len: libc::socklen_t = 32;
             if unsafe {
                 libc::getsockopt(
                     fd_raw(&fd),
                     SYSPROTO_CONTROL,
                     UTUN_OPT_IFNAME,
                     name_buf.as_mut_ptr().cast(),
-                    &mut name_len,
+                    &raw mut name_len,
                 )
             } < 0
             {

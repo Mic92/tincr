@@ -16,6 +16,7 @@ use socket2::Socket;
 /// `fcntl(FD_CLOEXEC)` separately if needed, but for
 /// short-lived sockets it's acceptable to skip).
 #[inline]
+#[must_use]
 pub fn sock_cloexec_flag() -> SockFlag {
     #[cfg(target_os = "linux")]
     {
@@ -41,7 +42,10 @@ pub fn set_nosigpipe(fd: impl AsFd) {
             libc::SOL_SOCKET,
             libc::SO_NOSIGPIPE,
             std::ptr::from_ref(&val).cast(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            #[allow(clippy::cast_possible_truncation)] // sizeof(c_int)==4
+            {
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t
+            },
         );
     }
 }
@@ -65,6 +69,7 @@ pub fn set_cloexec(_fd: impl AsFd) {}
 /// `MSG_NOSIGNAL` on Linux, empty on macOS (macOS uses
 /// `SO_NOSIGPIPE` on the socket instead).
 #[inline]
+#[must_use]
 pub fn msg_nosignal() -> nix::sys::socket::MsgFlags {
     #[cfg(target_os = "linux")]
     {
@@ -79,6 +84,9 @@ pub fn msg_nosignal() -> nix::sys::socket::MsgFlags {
 /// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
 /// wrap (`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`, `IP_BOUND_IF`, …).
 /// Single unsafe site shared by the platform shims below.
+///
+/// # Errors
+/// `last_os_error()` from `setsockopt(2)`.
 pub fn set_int_sockopt(
     fd: impl AsFd,
     level: libc::c_int,
@@ -163,6 +171,8 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
 }
 
+/// # Errors
+/// Unknown interface, NUL in name, or `setsockopt` failure.
 #[cfg(not(target_os = "linux"))]
 pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF binds a
@@ -174,9 +184,11 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     if ifindex == 0 {
         return Err(io::Error::other(format!("Unknown interface {iface}")));
     }
+    // ifindex fits c_int on any real system (iOS caps at ~16k).
+    #[allow(clippy::cast_possible_wrap)]
     let val = ifindex as libc::c_int;
     // IP_BOUND_IF for IPv4, IPV6_BOUND_IF for IPv6.
-    let is_v6 = s.local_addr().map_or(false, |a| a.is_ipv6());
+    let is_v6 = s.local_addr().is_ok_and(|a| a.is_ipv6());
     let (level, optname) = if is_v6 {
         (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
     } else {
@@ -192,6 +204,9 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 ///
 /// nix wraps this on Linux only; macOS deprecates `daemon(3)` (it
 /// wants launchd) but the libc symbol still works.
+///
+/// # Errors
+/// fork/setsid failure, formatted for the CLI.
 pub fn daemonize() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -219,6 +234,9 @@ pub fn daemonize() -> Result<(), String> {
 /// Apple targets (the libc signature differs: gid is `c_int` there,
 /// `gid_t` elsewhere); a single raw libc call with an `as _` cast
 /// covers both.
+///
+/// # Errors
+/// `last_os_error()` from `initgroups(3)`.
 pub fn initgroups(user: &CStr, gid: nix::unistd::Gid) -> io::Result<()> {
     #[allow(unsafe_code, clippy::cast_possible_wrap)]
     let rc = unsafe { libc::initgroups(user.as_ptr(), gid.as_raw() as _) };

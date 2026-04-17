@@ -263,7 +263,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             let unit = config
                 .lookup("Interface")
                 .next()
-                .map(|e| e.get_str())
+                .map(tinc_conf::Entry::get_str)
                 .and_then(|s| s.strip_prefix("utun"))
                 .and_then(|n| n.parse::<u32>().ok());
             let tun = tinc_device::BsdTun::open_utun(unit).map_err(SetupError::Io)?;

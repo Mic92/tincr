@@ -175,7 +175,7 @@ impl RawMode {
         // Preflight isatty: tcgetattr would ENOTTY anyway, but
         // "stdin is not a terminal" beats "Inappropriate ioctl".
         // (`nix::Errno` → `io::Error` via nix's From; bare `?` works.)
-        if !unistd::isatty(&fd)? {
+        if !unistd::isatty(fd)? {
             return Err(io::Error::other("stdin is not a terminal"));
         }
 
