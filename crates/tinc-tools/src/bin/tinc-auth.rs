@@ -347,46 +347,74 @@ fn check_socket_activation() -> Option<usize> {
 
 struct Args {
     input: PathsInput,
-    /// `--sockpath PATH`. Tailscale's `-sockpath`. Mutually
-    /// exclusive with socket activation in practice (if both are
-    /// available we prefer the activated socket — systemd already
-    /// owns it).
-    sockpath: Option<PathBuf>,
+    /// `--listen-socket PATH` (alias `--sockpath`, after Tailscale's
+    /// `-sockpath`). The socket nginx connects to — NOT tincd's
+    /// control socket, which is derived from `--pidfile` like the
+    /// `tinc` CLI does. Mutually exclusive with socket activation in
+    /// practice (if both are available we prefer the activated socket
+    /// — systemd already owns it).
+    listen_socket: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut input = PathsInput::default();
-    let mut sockpath = None;
+    let mut listen_socket = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             // Mirrors `tinc.rs`'s flag handling — same `-n` / `-c`
-            // / `--pidfile` semantics so muscle memory transfers.
+            // / `--pidfile` semantics (including the `--flag=value`
+            // glued forms) so muscle memory transfers.
             "-c" | "--config" => {
                 let v = args.next().ok_or("option -c requires an argument")?;
                 input.confbase = Some(PathBuf::from(v));
+            }
+            s if s.starts_with("--config=") => {
+                input.confbase = Some(PathBuf::from(&s["--config=".len()..]));
             }
             "-n" | "--net" => {
                 let v = args.next().ok_or("option -n requires an argument")?;
                 input.netname = Some(v);
             }
+            s if s.starts_with("--net=") => {
+                input.netname = Some(s["--net=".len()..].to_owned());
+            }
             "--pidfile" => {
                 let v = args.next().ok_or("option --pidfile requires an argument")?;
                 input.pidfile = Some(PathBuf::from(v));
             }
-            "--sockpath" => {
-                let v = args.next().ok_or("option --sockpath requires a path")?;
-                sockpath = Some(PathBuf::from(v));
+            s if s.starts_with("--pidfile=") => {
+                input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
+            }
+            // `--listen-socket` is the canonical name; `--sockpath`
+            // kept as an alias for the unit file that already uses
+            // it. The distinct name avoids confusion with tincd's
+            // `--socket` (its control socket), which this binary
+            // locates via `--pidfile` instead.
+            "--listen-socket" | "--sockpath" => {
+                let v = args
+                    .next()
+                    .ok_or("option --listen-socket requires a path")?;
+                listen_socket = Some(PathBuf::from(v));
+            }
+            s if s.starts_with("--listen-socket=") => {
+                listen_socket = Some(PathBuf::from(&s["--listen-socket=".len()..]));
+            }
+            s if s.starts_with("--sockpath=") => {
+                listen_socket = Some(PathBuf::from(&s["--sockpath=".len()..]));
             }
             "-h" | "--help" => {
                 println!(
-                    "Usage: tinc-auth [-n NETNAME] [-c DIR] [--pidfile FILE] [--sockpath SOCK]\n\
+                    "Usage: tinc-auth [-n NETNAME] [-c DIR] [--pidfile FILE] [--listen-socket SOCK]\n\
                      \n\
                      nginx auth_request backend. Listens on a unix socket (via\n\
-                     systemd socket activation, or --sockpath). Replies 204 with\n\
+                     systemd socket activation, or --listen-socket). Replies 204 with\n\
                      Tinc-Node/Tinc-Net/Tinc-Subnet headers when Remote-Addr is\n\
                      routed by a known tinc subnet, 401 otherwise.\n\
+                     \n\
+                     --listen-socket is the socket nginx connects to. tincd's control\n\
+                     socket is located via --pidfile (or -n/-c), same as `tinc`.\n\
                      \n\
                      This authenticates the tinc NODE, not a human user. If `alice`\n\
                      is your laptop, this is what you want. If `alice` is a server\n\
@@ -394,11 +422,18 @@ fn parse_args() -> Result<Args, String> {
                 );
                 std::process::exit(0);
             }
+            "--version" => {
+                println!("tinc-auth {} (Rust)", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
 
-    Ok(Args { input, sockpath })
+    Ok(Args {
+        input,
+        listen_socket,
+    })
 }
 
 fn main() -> ExitCode {
@@ -452,7 +487,7 @@ fn main() -> ExitCode {
         unsafe {
             UnixListener::from_raw_fd(SD_LISTEN_FDS_START)
         }
-    } else if let Some(path) = &args.sockpath {
+    } else if let Some(path) = &args.listen_socket {
         // `unlink` first — same as Tailscale's `os.Remove`
         // (`nginx-auth.go:96`). A previous instance might have
         // died without cleanup. Ignore the error: ENOENT is fine,
@@ -466,7 +501,7 @@ fn main() -> ExitCode {
             }
         }
     } else {
-        eprintln!("tinc-auth: no listener (use --sockpath or systemd socket activation)");
+        eprintln!("tinc-auth: no listener (use --listen-socket or systemd socket activation)");
         return ExitCode::FAILURE;
     };
 

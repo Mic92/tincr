@@ -210,7 +210,7 @@ const COMMANDS: &[CmdEntry] = &[
         name: "restart",
         needs_daemon: true,
         run: cmd_restart,
-        help: "restart [tincd OPTIONS] Restart tincd.",
+        help: "restart [tincd OPTIONS]  Restart tincd.",
     },
     CmdEntry {
         name: "pid",
@@ -246,7 +246,7 @@ const COMMANDS: &[CmdEntry] = &[
         name: "debug",
         needs_daemon: true,
         run: cmd_debug,
-        help: "debug N                Set debug level.",
+        help: "debug [N]              Show or set debug level.",
     },
     CmdEntry {
         name: "disconnect",
@@ -287,7 +287,7 @@ const COMMANDS: &[CmdEntry] = &[
         name: "del",
         needs_daemon: true,
         run: cmd_del,
-        help: "del VARIABLE [VALUE]   Remove VARIABLE [only ones with watching VALUE]",
+        help: "del VARIABLE [VALUE]   Remove VARIABLE [only ones with matching VALUE]",
     },
     // The `config` umbrella: `tinc config get Port` ≡ `tinc get
     // Port`. Upstream's `ctl=true` on this one is the exception
@@ -433,7 +433,7 @@ const COMMANDS: &[CmdEntry] = &[
         name: "network",
         needs_daemon: false,
         run: cmd_network,
-        help: "network                     List all known networks",
+        help: "network                List all known networks (to switch, use -n NETNAME)",
     },
 ];
 
@@ -443,9 +443,30 @@ const COMMANDS: &[CmdEntry] = &[
 /// Upstream does `if(argc > 2)` / `if(argc < 2)` inline. We do it
 /// here so `cmd::init::run` gets a nice `&str` and never sees argv.
 fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
+    use std::io::{IsTerminal, Read};
     match args {
-        [] => Err(CmdError::MissingArg("Name")),
         [name] => cmd::init::run(paths, name),
+        [] => {
+            // C `cmd_init` prompts on a tty or reads one line from
+            // stdin. We don't prompt (no interactive mode), but we DO
+            // accept the piped form so `echo NAME | tinc -c X init`
+            // scripts written for C tinc keep working — same as
+            // `cmd_join` already does for the invitation URL.
+            if std::io::stdin().is_terminal() {
+                return Err(CmdError::MissingArg("Name"));
+            }
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| CmdError::BadInput(format!("Error reading stdin: {e}")))?;
+            // C reads one `fgets` line; take the first so trailing
+            // garbage on stdin doesn't fold into the name.
+            let name = buf.lines().next().unwrap_or("").trim();
+            if name.is_empty() {
+                return Err(CmdError::MissingArg("Name"));
+            }
+            cmd::init::run(paths, name)
+        }
         [_, _, ..] => Err(CmdError::TooManyArgs),
     }
 }
@@ -1176,10 +1197,10 @@ fn parse_global_options(
     //
     // No bundled short flags here (`-cn` doesn't mean `-c -n`) because
     // both `-c` and `-n` take arguments. Short-with-arg can be `-cFOO`
-    // or `-c FOO` in getopt; we only support the spaced form. The C
-    // accepts both (getopt does); nobody uses the squished form for
-    // path arguments, and supporting it correctly is fiddly (`-c-n`
-    // — is that `-c` with arg `-n`, or two flags?). Not worth it.
+    // or `-c FOO` in getopt; we accept both — C `getopt_long` does,
+    // and `-c-n` unambiguously means `-c` with arg `-n` under getopt
+    // semantics (the option takes a required argument, so the rest of
+    // the token IS the argument).
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-c" | "--config" => {
@@ -1192,6 +1213,9 @@ fn parse_global_options(
             s if s.starts_with("--config=") => {
                 input.confbase = Some(PathBuf::from(&s["--config=".len()..]));
             }
+            s if s.starts_with("-c") && s.len() > 2 => {
+                input.confbase = Some(PathBuf::from(&s[2..]));
+            }
             "-n" | "--net" => {
                 let val = args.next().ok_or("option -n requires an argument")?;
                 input.netname = Some(val);
@@ -1199,7 +1223,13 @@ fn parse_global_options(
             s if s.starts_with("--net=") => {
                 input.netname = Some(s["--net=".len()..].to_owned());
             }
-            "--help" => {
+            s if s.starts_with("-n") && s.len() > 2 => {
+                input.netname = Some(s[2..].to_owned());
+            }
+            // `-h` alias. tincd accepts it; keeping the two binaries
+            // consistent is cheaper than explaining why one does and
+            // the other doesn't.
+            "-h" | "--help" => {
                 // C sets a flag, prints help in main, returns 0. We
                 // short-circuit by returning a sentinel rest vec —
                 // ugly but avoids a third Result variant. The caller
@@ -1283,6 +1313,14 @@ fn parse_global_options(
 }
 
 fn print_help() {
+    // The `help` strings were written ad-hoc with varying column
+    // widths; re-pad here so the description column lines up no
+    // matter which entry was added last. Each help string is
+    // `"NAME ARGS   description"` (≥2 spaces separate the columns);
+    // continuation lines (the `dump` sub-list) are passed through
+    // verbatim.
+    const COL: usize = 25;
+
     // The C help text is ~40 lines covering every command. We only
     // have one. Generate from COMMANDS so adding an entry adds it to
     // help automatically.
@@ -1292,6 +1330,7 @@ fn print_help() {
     println!("  -c, --config=DIR    Read configuration from DIR.");
     println!("  -n, --net=NETNAME   Connect to net NETNAME.");
     println!("  -b, --batch         Don't ask for anything (no-op; we never prompt).");
+    println!("      --pidfile=FILE  Read control cookie from FILE.");
     println!("      --force         Force some commands to work despite warnings.");
     println!("      --help          Display this help and exit.");
     println!("      --version       Output version information and exit.");
@@ -1300,15 +1339,21 @@ fn print_help() {
     for c in COMMANDS {
         // `config` has empty help (it's the umbrella nobody types).
         // Same skip-on-empty as upstream's `if(commands[i].help)`.
-        if !c.help.is_empty() {
-            println!("  {}", c.help);
+        if c.help.is_empty() {
+            continue;
+        }
+        for (i, line) in c.help.lines().enumerate() {
+            if i == 0
+                && let Some((lhs, rhs)) = line.split_once("  ")
+            {
+                println!("  {lhs:<COL$} {}", rhs.trim_start());
+            } else {
+                println!("  {line}");
+            }
         }
     }
     println!();
-    // Footer: only the daemon-gated commands left. The streaming
-    // ones (dump/top/log/pcap) all landed; remove them from the
-    // "coming soon" list.
-    println!("Report bugs to https://github.com/gsliepen/tinc/issues.");
+    println!("Report bugs to https://github.com/Mic92/tincr/issues.");
 }
 
 fn print_version() {
@@ -1404,7 +1449,24 @@ fn main() -> ExitCode {
     match (entry.run)(&paths, &globals, cmd_args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{e}");
+            // Arity errors (`MissingArg` / `TooManyArgs`) on their own
+            // tell the user *what* went wrong but not what to type
+            // instead; append the command's one-line synopsis so they
+            // don't have to re-run `--help` and scan 30 lines.
+            //
+            // `BadInput("")` is the fsck "already printed everything"
+            // sentinel — don't add a spurious blank line.
+            let msg = e.to_string();
+            if !msg.is_empty() {
+                eprintln!("{msg}");
+            }
+            if matches!(e, CmdError::MissingArg(_) | CmdError::TooManyArgs)
+                && let Some(usage) = entry.help.lines().next()
+                && !usage.is_empty()
+            {
+                let usage = usage.split_once("  ").map_or(usage, |(l, _)| l);
+                eprintln!("Usage: tinc {usage}");
+            }
             ExitCode::FAILURE
         }
     }

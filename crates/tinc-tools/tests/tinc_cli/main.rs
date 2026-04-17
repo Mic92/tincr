@@ -58,6 +58,7 @@ pub(crate) fn bin(name: &str) -> PathBuf {
             "tinc" => "CARGO_BIN_EXE_tinc",
             "sptps_test" => "CARGO_BIN_EXE_sptps_test",
             "sptps_keypair" => "CARGO_BIN_EXE_sptps_keypair",
+            "tinc-auth" => "CARGO_BIN_EXE_tinc-auth",
             _ => panic!("unknown bin {name}"),
         };
         if let Ok(p) = std::env::var(var) {

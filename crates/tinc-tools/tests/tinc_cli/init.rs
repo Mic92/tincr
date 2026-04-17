@@ -1,4 +1,4 @@
-use super::{bare_dir, tinc};
+use super::{bare_dir, tinc, tinc_stdin};
 
 #[test]
 fn init_via_dash_c() {
@@ -41,12 +41,36 @@ fn init_via_glued_config() {
 #[test]
 fn init_missing_name() {
     let (dir, cb) = bare_dir();
-    let out = tinc(&["-c", &cb, "init"]);
+    // Empty stdin: `tinc_stdin` pipes (so is_terminal()=false) but
+    // writes nothing, exercising the "piped but blank" path.
+    let out = tinc_stdin(&["-c", &cb, "init"], b"");
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No Name given"));
+    // The arity error now appends a usage hint so the user knows
+    // *what* to type, not just that something was missing.
+    assert!(stderr.contains("Usage: tinc init NAME"), "{stderr}");
     // Nothing created — arity check fires before any filesystem op.
     assert!(!dir.path().join("tinc.conf").exists());
+}
+
+/// `echo NAME | tinc init` — C tinc reads the name from stdin when no
+/// arg is given (and stdin isn't a tty). Scripts written for C tinc
+/// rely on this; we accept it too (but never prompt on a tty).
+#[test]
+fn init_name_from_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let out = tinc_stdin(&["-c", confbase.to_str().unwrap(), "init"], b"alice\n");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(confbase.join("tinc.conf")).unwrap(),
+        "Name = alice\n"
+    );
 }
 
 #[test]

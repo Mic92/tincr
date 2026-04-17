@@ -1,6 +1,49 @@
 use super::{bin, tinc};
 use std::process::Command;
 
+// ─── tinc-auth argv surface
+// No fake_daemon coverage here (tinc-auth speaks HTTP, separate
+// concern); just prove the flag parser matches the other binaries.
+
+/// `--config=DIR` glued form must parse, same as `tinc`/`tincd`.
+/// The old parser only matched the spaced form and treated the
+/// glued one as "unknown argument".
+#[test]
+fn tinc_auth_glued_long_opts() {
+    // No listener and no socket activation → fails with the
+    // "no listener" message, NOT "unknown argument". That's enough
+    // to prove the option was consumed.
+    let out = Command::new(bin("tinc-auth"))
+        .args(["--config=/tmp", "--net=mesh", "--pidfile=/tmp/p"])
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("unknown argument"), "{stderr}");
+    assert!(stderr.contains("no listener"), "{stderr}");
+}
+
+/// `--sockpath` stays as a compat alias for `--listen-socket` so
+/// existing systemd unit files don't break.
+#[test]
+fn tinc_auth_sockpath_alias() {
+    for flag in ["--sockpath=/dev/null/x", "--listen-socket=/dev/null/x"] {
+        let out = Command::new(bin("tinc-auth"))
+            .arg(flag)
+            .env_remove("LISTEN_PID")
+            .env_remove("LISTEN_FDS")
+            .output()
+            .unwrap();
+        // bind() on a path under /dev/null fails; the point is the
+        // flag was recognised (error mentions "bind", not "unknown").
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("unknown argument"), "{flag}: {stderr}");
+        assert!(stderr.contains("bind"), "{flag}: {stderr}");
+    }
+}
+
 fn tinc_with_env(env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
     let mut cmd = Command::new(bin("tinc"));
     cmd.args(args).env_remove("NETNAME");
@@ -25,14 +68,19 @@ fn version_subcommand_same_as_option() {
     assert!(s.contains("(Rust)"), "stdout: {s}");
 }
 
-/// `tinc help` ≡ `tinc --help`. Same `usage(false)` call.
+/// `tinc help` ≡ `tinc --help` ≡ `tinc -h`. Same `usage(false)` call.
+/// `-h` is an addition over C tinc but matches `tincd -h`; keeping the
+/// two binaries consistent is cheaper than explaining the difference.
 #[test]
 fn help_subcommand_same_as_option() {
     let out_cmd = tinc(&["help"]);
     let out_opt = tinc(&["--help"]);
+    let out_h = tinc(&["-h"]);
     assert!(out_cmd.status.success());
     assert!(out_opt.status.success());
+    assert!(out_h.status.success());
     assert_eq!(out_cmd.stdout, out_opt.stdout);
+    assert_eq!(out_h.stdout, out_opt.stdout);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -117,8 +165,67 @@ fn help_exits_zero() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("Usage: tinc"));
     assert!(stdout.contains("init NAME"));
+    // `--pidfile` is parsed but was missing from the option list,
+    // leaving no documented way to point at a non-standard runtime
+    // dir.
+    assert!(stdout.contains("--pidfile"));
     // Help goes to stdout, not stderr. C does this; `man` convention.
     assert!(out.stderr.is_empty());
+}
+
+/// The command list aligns descriptions in one column. The help
+/// strings in COMMANDS were hand-spaced and drifted; `print_help`
+/// now repads, so every first-line description starts at the same
+/// offset.
+#[test]
+fn help_commands_aligned() {
+    let out = tinc(&["--help"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let mut in_cmds = false;
+    let mut col = None;
+    for line in stdout.lines() {
+        if line == "Commands:" {
+            in_cmds = true;
+            continue;
+        }
+        if !in_cmds {
+            continue;
+        }
+        if line.is_empty() {
+            break;
+        }
+        // Skip dump's indented sub-list (4-space indent).
+        if line.starts_with("      ") {
+            continue;
+        }
+        // `  NAME ARGS<pad>  DESC` — desc starts after the run of
+        // ≥2 spaces past the leading indent. Every top-level command
+        // line MUST have that separator: a help string with only
+        // single spaces (e.g. `"restart [OPTS] Restart."`) would slip
+        // past `print_help`'s split_once and print unaligned, so make
+        // the test fail rather than silently skip it.
+        let body = &line[2..];
+        let Some(i) = body.find("  ") else {
+            panic!("no column separator in: {line:?}");
+        };
+        let rest = &body[i..];
+        let i = i + rest.len() - rest.trim_start().len();
+        match col {
+            None => col = Some(i),
+            Some(c) => assert_eq!(c, i, "misaligned: {line:?}"),
+        }
+    }
+    assert!(col.is_some(), "no command lines found");
+}
+
+/// Arity errors print a one-line usage hint so the user doesn't have
+/// to re-run --help and scan.
+#[test]
+fn arity_error_shows_usage() {
+    let out = tinc(&["disconnect"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("Usage: tinc disconnect NODE"), "{stderr}");
 }
 
 #[test]
@@ -222,6 +329,21 @@ fn netname_dot_is_noop() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     // The warning string from `Paths::for_cli`.
     assert!(!stderr.contains("Both netname and configuration"));
+}
+
+/// `-cFOO` glued short form. C `getopt_long` accepts it; rejecting it
+/// breaks scripts written against C tinc.
+#[test]
+fn glued_short_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let confbase = dir.path().join("vpn");
+    let out = tinc(&[&format!("-c{}", confbase.display()), "init", "alice"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(confbase.join("tinc.conf").exists());
 }
 
 #[test]
