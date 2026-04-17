@@ -28,7 +28,7 @@
 //! is hand-rolled (shim #6) since nix's `LinkAddr` is getters-only.
 
 use std::io;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 
@@ -312,8 +312,8 @@ impl Device for RawSocket {
     }
 
     /// The fd, for the daemon's poll loop.
-    fn fd(&self) -> Option<RawFd> {
-        Some(self.fd.as_raw_fd())
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
     }
 }
 

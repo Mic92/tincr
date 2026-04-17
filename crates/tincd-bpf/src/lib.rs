@@ -40,7 +40,6 @@ pub use attach::{TUNSETSTEERINGEBPF, tunsetsteeringebpf};
 #[cfg(not(target_os = "linux"))]
 mod stubs {
     use std::io;
-    use std::os::fd::RawFd;
 
     /// Stub: BSD/macOS get the dispatch-thread fallback,
     /// no kernel steering. The error message names the platform so
@@ -61,7 +60,10 @@ mod stubs {
     /// Returns `Ok` (not `Unsupported`) because the daemon calls this
     /// defensively at startup; "nothing to detach" is success.
     #[allow(clippy::missing_errors_doc, clippy::unnecessary_wraps)]
-    pub fn tunsetsteeringebpf(_tun_fd: RawFd, _prog_fd: i32) -> io::Result<()> {
+    pub fn tunsetsteeringebpf(
+        _tun_fd: std::os::fd::BorrowedFd<'_>,
+        _prog_fd: i32,
+    ) -> io::Result<()> {
         Ok(())
     }
 }

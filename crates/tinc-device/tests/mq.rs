@@ -157,16 +157,7 @@ fn mq_vnet_hdr_on_queue0() {
         .iter()
         .map(|q| {
             let fd = q.fd().expect("Tun has fd");
-            // SAFETY: fd is a valid open TUN queue fd; dup gives an
-            // independent file-table slot to the same kernel file.
-            #[allow(unsafe_code)]
-            let dup = unsafe { libc::dup(fd) };
-            assert!(dup >= 0, "dup failed");
-            // SAFETY: dup just returned a fresh owned fd.
-            #[allow(unsafe_code)]
-            unsafe {
-                std::os::fd::FromRawFd::from_raw_fd(dup)
-            }
+            nix::unistd::dup(fd).expect("dup")
         })
         .collect();
 

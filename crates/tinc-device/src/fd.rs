@@ -396,8 +396,8 @@ impl Device for FdTun {
 
     /// The fd, for the daemon's poll loop. `Some` — there IS
     /// an fd (unlike Dummy).
-    fn fd(&self) -> Option<RawFd> {
-        Some(self.fd.as_raw_fd())
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
     }
 }
 

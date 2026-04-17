@@ -45,7 +45,7 @@
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
@@ -662,8 +662,8 @@ impl Device for Tun {
         self.mac
     }
 
-    fn fd(&self) -> Option<RawFd> {
-        Some(self.fd.as_raw_fd())
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
     }
 
     /// `vnet_hdr` drain. Overrides the default `read()`-loop only

@@ -608,13 +608,8 @@ impl Daemon {
             .map_err(|e| SetupError::io("register signal handlers", e))?;
 
         // ─── device fd
-        // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
+        // Dummy returns None; Tun/Fd/Raw/Bsd return Some(BorrowedFd).
         if let Some(fd) = device.fd() {
-            // tinc-device's trait-object accessor returns `RawFd`
-            // (cross-crate, multi-backend). The fd is owned by
-            // `device` and live for this call.
-            #[allow(unsafe_code)]
-            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
             ev.add(fd, Io::Read, IoWhat::Device)
                 .map_err(|e| SetupError::io("register device fd with event loop", e))?;
         }

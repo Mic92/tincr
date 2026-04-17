@@ -41,7 +41,7 @@
 //! dropped (external library deps).
 
 use std::io;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
@@ -376,8 +376,8 @@ impl Device for BsdTun {
         None
     }
 
-    fn fd(&self) -> Option<RawFd> {
-        Some(self.fd.as_raw_fd())
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.fd.as_fd())
     }
 }
 

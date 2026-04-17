@@ -157,9 +157,10 @@ pub trait Device: Send {
     /// for TUN.
     fn mac(&self) -> Option<Mac>;
 
-    /// Raw fd for `EventLoop::add`. `Dummy` returns `None`;
-    /// daemon skips the register.
-    fn fd(&self) -> Option<std::os::unix::io::RawFd>;
+    /// Borrowed fd for `EventLoop::add`. `Dummy` returns `None`;
+    /// daemon skips the register. `BorrowedFd` ties the lifetime to
+    /// `&self` so callers cannot outlive the backing `OwnedFd`.
+    fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>>;
 
     /// Drain available frames into the arena. The 10G ingest seam.
     ///
@@ -241,7 +242,7 @@ impl Device for Dummy {
     }
 
     /// No fd. C leaves `device_fd = -1`; `None` here.
-    fn fd(&self) -> Option<std::os::unix::io::RawFd> {
+    fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         None
     }
 }
@@ -352,7 +353,7 @@ mod tests {
         fn mac(&self) -> Option<Mac> {
             None
         }
-        fn fd(&self) -> Option<std::os::unix::io::RawFd> {
+        fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
             None
         }
     }

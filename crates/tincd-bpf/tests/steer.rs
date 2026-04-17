@@ -37,7 +37,7 @@
 
 use std::io::Read;
 use std::net::IpAddr;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -312,11 +312,7 @@ impl Drop for HairpinEcho {
 
 fn dup_queue(q: &Tun) -> OwnedFd {
     let fd = q.fd().expect("Tun has fd");
-    // SAFETY: `Tun::fd()` exposes only a `RawFd` (no `AsFd` impl); the
-    // fd is valid for the lifetime of `q`, which outlives this borrow.
-    #[allow(unsafe_code)]
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    nix::unistd::dup(borrowed).expect("dup")
+    nix::unistd::dup(fd).expect("dup")
 }
 
 /// Drive a TCP exchange through the hairpin: connect to .2:port (via

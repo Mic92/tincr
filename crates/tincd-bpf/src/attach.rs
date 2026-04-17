@@ -13,7 +13,7 @@
 //! we got past `open_mq`, we can call this.
 
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 /// `_IOR('T', 224, int)` — `tun.c:3293`. `_IOR` encoding is honest:
 /// the kernel `copy_from_user`s 4 bytes from the user pointer and
@@ -35,13 +35,13 @@ pub const TUNSETSTEERINGEBPF: libc::c_ulong = 0x8004_54e0;
 /// `prog_fd = -1` on a TUN with no prog attached: succeeds (kernel
 /// `__tun_set_ebpf(NULL)` is idempotent).
 #[allow(unsafe_code)]
-pub fn tunsetsteeringebpf(tun_fd: RawFd, prog_fd: i32) -> io::Result<()> {
+pub fn tunsetsteeringebpf(tun_fd: BorrowedFd<'_>, prog_fd: i32) -> io::Result<()> {
     let mut prog_fd = prog_fd; // kernel reads via copy_from_user
     // SAFETY: TUNSETSTEERINGEBPF takes `int *` (4 bytes); kernel
     // `copy_from_user`s it (`tun.c:2978` `tun_set_ebpf`). `&raw mut
     // prog_fd` is a valid aligned `*mut i32` on our stack. Kernel
     // writes nothing back.
-    let ret = unsafe { libc::ioctl(tun_fd, TUNSETSTEERINGEBPF, &raw mut prog_fd) };
+    let ret = unsafe { libc::ioctl(tun_fd.as_raw_fd(), TUNSETSTEERINGEBPF, &raw mut prog_fd) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
