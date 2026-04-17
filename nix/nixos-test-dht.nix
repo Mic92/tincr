@@ -53,7 +53,16 @@ let
       subnets = [ { address = "10.20.0.3"; } ];
       settings.Ed25519PublicKey = keys.delta.ed25519Public;
     };
+    dave = {
+      subnets = [ { address = "10.20.0.4"; } ];
+      settings.Ed25519PublicKey = keys.epsilon.ed25519Public;
+    };
   };
+
+  # dave's view: pubkeys only, NO addresses anywhere. AutoConnect's
+  # `has_address` gate would filter every candidate; the test asserts
+  # `has_dht_key` widens it.
+  hostSettingsDave = builtins.mapAttrs (_: v: builtins.removeAttrs v [ "addresses" ]) hostSettings;
 
   # carol's view: relay's pubkey but no `addresses`. All three addr-
   # cache tiers empty → next_addr()=None → retry_outgoing → DHT.
@@ -285,6 +294,52 @@ testers.runNixOSTest {
 
         environment.systemPackages = [ tincd ];
       };
+
+    # DHT-only bootstrap. vlan-1 (no NAT, same wire as relay). NO
+    # ConnectTo, NO Address= anywhere in hosts/. AutoConnect must pick
+    # a name on pubkey presence alone, fire a DHT resolve, then dial.
+    dave =
+      { ... }:
+      {
+        virtualisation.vlans = [ 1 ];
+        networking = {
+          useDHCP = false;
+          firewall.enable = false;
+        };
+
+        services.tinc.networks.mesh = {
+          name = "dave";
+          package = tincd;
+          ed25519PrivateKeyFile = builtins.toFile "ed25519.priv" keys.epsilon.ed25519Private;
+          hostSettings = hostSettingsDave;
+          settings = {
+            DeviceType = "tun";
+            AutoConnect = true;
+          };
+          extraConfig = ''
+            DhtDiscovery = yes
+            ${dhtBootstrapLines}
+          '';
+          chroot = false;
+        };
+
+        networking.interfaces."tinc.mesh" = {
+          virtual = true;
+          virtualType = "tun";
+          ipv4.addresses = [
+            {
+              address = "10.20.0.4";
+              prefixLength = 24;
+            }
+          ];
+        };
+        systemd.services."tinc.mesh" = {
+          after = [ "network-addresses-tinc.mesh.service" ];
+          requires = [ "network-addresses-tinc.mesh.service" ];
+        };
+
+        environment.systemPackages = [ tincd ];
+      };
   };
 
   testScript = ''
@@ -441,6 +496,25 @@ testers.runNixOSTest {
         "echo '=== carol cold-start timeline ===' >&2 && "
         "journalctl -u tinc.mesh --no-pager | "
         "grep -E 'Could not set up|DHT resolved|Trying to connect|activated' >&2"
+    )
+
+    # ─── Gate: dave DHT-only bootstrap. No ConnectTo, no Address=.
+    # AutoConnect must pick a name on pubkey presence alone (the
+    # `has_dht_key` widening), DHT-resolve it, then dial. relay's
+    # record has been published by now (asserted above).
+    dave.wait_for_unit("tinc.mesh.service")
+    # `dump connections` includes the control conn itself → useless
+    # for "≥1 meta". Gate on the activation log line instead.
+    dave.wait_until_succeeds(
+        "journalctl -u tinc.mesh --no-pager | "
+        "grep -E 'Connection with .* activated'",
+        timeout=60,
+    )
+    dave.wait_until_succeeds("ping -c1 -W2 10.20.0.254", timeout=30)
+    dave.succeed(
+        "echo '=== dave DHT-only bootstrap timeline ===' >&2 && "
+        "journalctl -u tinc.mesh --no-pager | "
+        "grep -E 'Autoconnecting|DHT resolved|Trying to connect|activated' >&2"
     )
 
     relay.succeed("journalctl -u dht-seed.service --no-pager >&2")
