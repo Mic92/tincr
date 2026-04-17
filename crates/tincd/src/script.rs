@@ -388,8 +388,11 @@ mod tests {
         write_script(&dir, "tinc-up", "exit 0\n");
         let env = ScriptEnv::base(None, "alpha", None, None, None);
 
-        // Without interpreter: spawn fails. Typically ENOEXEC, but
-        // the exact errno isn't the contract — only that it errs.
+        // Without interpreter: Linux execve() rejects shebang-less
+        // file with ENOEXEC — proves we don't wrap in `sh -c`.
+        // macOS kernel does its own /bin/sh fallback, so the assert
+        // can't distinguish our behavior there; skip it.
+        #[cfg(target_os = "linux")]
         assert!(execute(&dir, "tinc-up", &env, None).is_err());
 
         // With interpreter: works.
