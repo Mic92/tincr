@@ -969,17 +969,16 @@ mod tests {
     /// with `Port=0`, the second pair gets the first pair's port.
     #[test]
     fn build_listeners_two_bindto_shares_port() {
-        // Two distinct loopback addrs. Linux routes the whole
-        // 127.0.0.0/8 to lo; binding 127.42.x.x works without
-        // setup. Avoid 127.0.0.x - the integration tests'
-        // `alloc_port()` does bind-read-drop-rebind on 127.0.0.1
-        // and we'd race for the same ephemeral.
-        let cfg = cfg_from(&["BindToAddress = 127.42.0.1", "BindToAddress = 127.42.0.2"]);
-        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        // Two distinct loopback addrs. Use v4 + v6 loopback so this
+        // is portable (macOS only has 127.0.0.1 on lo, not the full
+        // 127/8). Different families also guarantees the second bind
+        // on the reused port can't EADDRINUSE against the first.
+        let cfg = cfg_from(&["BindToAddress = 127.0.0.1", "BindToAddress = ::1"]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Any, &SockOpts::default());
         assert_eq!(ls.len(), 2, "two BindToAddress → two pairs");
         assert!(ls[0].bindto && ls[1].bindto);
-        assert_eq!(ls[0].local.ip().to_string(), "127.42.0.1");
-        assert_eq!(ls[1].local.ip().to_string(), "127.42.0.2");
+        assert_eq!(ls[0].local.ip().to_string(), "127.0.0.1");
+        assert_eq!(ls[1].local.ip().to_string(), "::1");
 
         let p = ls[0].local.port();
         assert_ne!(p, 0, "kernel assigned ephemeral");
@@ -994,8 +993,8 @@ mod tests {
     /// `bindto` flag.
     #[test]
     fn build_listeners_bindto_vs_listen() {
-        let cfg = cfg_from(&["BindToAddress = 127.42.1.1", "ListenAddress = 127.42.1.2"]);
-        let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
+        let cfg = cfg_from(&["BindToAddress = 127.0.0.1", "ListenAddress = ::1"]);
+        let ls = build_listeners(&cfg, 0, AddrFamily::Any, &SockOpts::default());
         assert_eq!(ls.len(), 2);
         // BindToAddress walked first.
         assert!(ls[0].bindto, "BindToAddress → bindto=true");
@@ -1018,8 +1017,8 @@ mod tests {
     #[test]
     fn build_listeners_dedups() {
         let cfg = cfg_from(&[
-            "BindToAddress = 127.42.2.1",
-            "BindToAddress = 127.42.2.1", // duplicate
+            "BindToAddress = 127.0.0.1",
+            "BindToAddress = 127.0.0.1", // duplicate
         ]);
         let ls = build_listeners(&cfg, 0, AddrFamily::Ipv4, &SockOpts::default());
         assert_eq!(ls.len(), 1, "duplicate skipped");
