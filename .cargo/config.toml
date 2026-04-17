@@ -34,6 +34,12 @@
 # sampling overhead itself was 2.5× worse than C (perf falls back to
 # slow heuristic stack scanning). Fedora made FP-on the system default
 # in 2023 for exactly this reason. Cost: one of 16 GPRs — negligible.
+# macOS: run test binaries under sudo when passwordless sudo is
+# available, so utun tests work transparently. Without sudo the
+# tests skip themselves (check euid).
+[target.aarch64-apple-darwin]
+runner = "scripts/macos-test-runner.sh"
+
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
     "-C", "target-cpu=x86-64-v3",
