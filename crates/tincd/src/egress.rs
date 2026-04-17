@@ -10,12 +10,11 @@
 //! `try_clone` not borrow: `dup(2)` of `Listener.udp` — same file
 //! description, separate fd, no self-referential daemon struct.
 
-// Not `forbid`: the `linux` submodule needs one `unsafe` block for
-// `libc::sendmsg` + cmsg pointer writes (nix::sendmsg allocs a Vec
-// per call, ~5% throughput loss on the hot path). The `Portable`
-// impl and `TxBatch` below are still pure-safe; the `deny` makes
-// any new unsafe a compile error unless `#[allow]`'d at the site.
-#![deny(unsafe_code)]
+// `forbid`: the `linux` submodule used to hand-roll `libc::sendmsg`
+// + cmsg pointer writes, but now goes through `nix::sendmsg` +
+// `ControlMessage::UdpGsoSegments` (see `linux.rs` doc), so there is
+// no remaining `unsafe` anywhere on the egress path.
+#![forbid(unsafe_code)]
 
 use std::io;
 

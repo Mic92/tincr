@@ -11,6 +11,7 @@
 //! which `RUST_LOG` can filter at the usual `log::Level` granularity.
 
 #![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod addrcache;
 pub mod autoconnect;
