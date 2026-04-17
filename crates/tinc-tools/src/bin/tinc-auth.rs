@@ -63,7 +63,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
-use std::os::fd::FromRawFd;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -75,7 +75,7 @@ use tinc_tools::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
 use tinc_tools::names::{Paths, PathsInput};
 
 /// systemd socket activation: first passed fd. `sd_listen_fds(3)`.
-const SD_LISTEN_FDS_START: i32 = 3;
+const SD_LISTEN_FDS_START: RawFd = 3;
 
 /// Max request size we'll buffer. nginx `auth_request` subrequests
 /// are tiny (no body, `proxy_pass_request_body off`). 4 KB is
@@ -466,27 +466,22 @@ fn main() -> ExitCode {
             eprintln!("tinc-auth: expected exactly 1 socket from systemd, got {n}");
             return ExitCode::FAILURE;
         }
-        // SAFETY: socket activation contract. systemd owns fd 3;
-        // `LISTEN_PID` matched our pid (proving we were exec'd
-        // directly by systemd, not inheriting a stale env from a
-        // parent); we claim it once. `forbid(unsafe_code)` is
-        // crate-level — this is the one place we'd want it. We
-        // can't `#[allow]` past a `forbid`, so the crate gate is
-        // `forbid` and this stays a comment. The cast: from_raw_fd
-        // takes RawFd which is i32 on every unix; the constant is
-        // already i32.
+        // Claim the inherited fd as an `OwnedFd` first, then convert
+        // — the unsafe step is only the ownership assertion, not the
+        // "this is a SOCK_STREAM AF_UNIX listener" assumption (that
+        // part is safe-on-error: accept() would just EINVAL).
         //
-        // Actually: `forbid` at the top makes this a compile error.
-        // `from_raw_fd` is the *only* way to claim an inherited fd
-        // (std has no safe wrapper because the safety contract is
-        // "you uniquely own this fd" which the type system can't
-        // express). Tradeoff: relax to `deny` and `#[allow]` here.
-        // See lib.rs's identical reasoning for `localtime_r`.
+        // SAFETY: socket activation contract. `LISTEN_PID` matched
+        // our pid (`check_socket_activation`), proving we were exec'd
+        // directly by systemd and not inheriting a stale env from a
+        // parent. systemd guarantees fd 3 is open and ours alone; we
+        // claim it exactly once. std has no safe wrapper because
+        // "this fd is uniquely yours" is a runtime contract the type
+        // system can't express. See lib.rs's identical reasoning for
+        // `localtime_r`.
         #[allow(unsafe_code)]
-        // SAFETY: see above.
-        unsafe {
-            UnixListener::from_raw_fd(SD_LISTEN_FDS_START)
-        }
+        let owned = unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) };
+        UnixListener::from(owned)
     } else if let Some(path) = &args.listen_socket {
         // `unlink` first — same as Tailscale's `os.Remove`
         // (`nginx-auth.go:96`). A previous instance might have
