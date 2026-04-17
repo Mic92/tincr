@@ -67,6 +67,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use rand_core::RngCore;
@@ -132,6 +133,9 @@ pub struct NodeSnapshot {
     /// EWMA bytes/s sent TO this node, any path. The shortcut drop
     /// test keys on this (see module doc).
     pub tx_rate_bps: u64,
+    /// SSSP `n->nexthop`: who we'd hand a packet for this node to.
+    /// `None` if unreachable. Used to mark a meta-conn load-bearing.
+    pub nexthop: Option<String>,
     /// Don't re-add as a shortcut before this. Set on
     /// `Disconnect{AutoShortcut}` / `CancelPending` of a shortcut.
     pub backoff_until: Option<Instant>,
@@ -255,6 +259,15 @@ pub fn decide(
         return make_new_connection(myself_name, nodes, pending_outgoings, rng);
     }
 
+    // A meta-conn that is currently `nexthop` for ANY peer with hot
+    // tx is load-bearing — dropping it reroutes that peer through a
+    // worse path. Both drop arms below consult this.
+    let hot_nexthops: HashSet<&str> = nodes
+        .iter()
+        .filter(|n| n.tx_rate_bps > knobs.relay_lo_bps)
+        .filter_map(|n| n.nexthop.as_deref())
+        .collect();
+
     // ─── shortcut add ────────────────────────────────────────────
     // `max_by` (not random): the heaviest relay is the one most
     // worth collapsing; ties broken by name for determinism. Count
@@ -290,10 +303,9 @@ pub fn decide(
     }
 
     // ─── drop ────────────────────────────────────────────────────
-    // C :188-190. > D_HI → drop a superfluous outgoing. UNCHANGED
-    // rule (random, edge_count>=2).
+    // C :188-190. > D_HI → drop a superfluous outgoing.
     if nc > knobs.d_hi {
-        let act = drop_superfluous_outgoing(nodes, active_outgoing_conns, rng);
+        let act = drop_superfluous_outgoing(nodes, active_outgoing_conns, &hot_nexthops, rng);
         if act != AutoAction::Noop {
             return act;
         }
@@ -307,6 +319,7 @@ pub fn decide(
             .iter()
             .filter(|o| {
                 o.origin == OutOrigin::AutoShortcut
+                    && !hot_nexthops.contains(o.name.as_str())
                     && nodes
                         .iter()
                         .find(|n| n.name == o.name)
@@ -414,19 +427,23 @@ fn connect_to_unreachable(
     }
 }
 
-/// `drop_superfluous_outgoing_connection`. Only OUTGOING + multi-homed.
+/// `drop_superfluous_outgoing_connection`. Only OUTGOING, multi-homed,
+/// AND not currently `nexthop` for any hot peer — a conn carrying
+/// someone's traffic is by definition not superfluous.
 fn drop_superfluous_outgoing(
     nodes: &[NodeSnapshot],
     active_outgoing_conns: &[OutgoingSnapshot],
+    hot_nexthops: &HashSet<&str>,
     rng: &mut impl RngCore,
 ) -> AutoAction {
     let droppable: Vec<&OutgoingSnapshot> = active_outgoing_conns
         .iter()
         .filter(|o| {
-            nodes
-                .iter()
-                .find(|n| n.name == o.name)
-                .is_some_and(|n| n.edge_count >= 2)
+            !hot_nexthops.contains(o.name.as_str())
+                && nodes
+                    .iter()
+                    .find(|n| n.name == o.name)
+                    .is_some_and(|n| n.edge_count >= 2)
         })
         .collect();
 
@@ -463,6 +480,7 @@ mod tests {
             edge_count,
             relay_rate_bps: 0,
             tx_rate_bps: 0,
+            nexthop: None,
             backoff_until: None,
         }
     }
@@ -1013,5 +1031,94 @@ mod tests {
             hits > 30,
             "partition-heal must still fire inside the band; got {hits}"
         );
+    }
+
+    // ═══════════════════════ hot-nexthop guard ═══════════════════
+
+    /// nc=8 (>`D_HI`), 5 outgoing all multi-homed, one is `nexthop`
+    /// for a peer pushing 100 KiB/s → that one is never the random
+    /// `Disconnect` pick. Regression for the eva→prism flip.
+    #[test]
+    fn drop_superfluous_spares_hot_nexthop() {
+        let mut nodes = vec![node("me", true, true, false, 8)];
+        for n in ["a", "b", "c", "d", "eva", "in1", "in2", "in3"] {
+            nodes.push(node(n, true, true, true, 3));
+        }
+        let mut blob = node("blob64", true, false, false, 2);
+        blob.tx_rate_bps = 100_000;
+        blob.nexthop = Some("eva".into());
+        nodes.push(blob);
+        let outgoing = outs(&["a", "b", "c", "d", "eva"]);
+        for seed in 0..50 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            match dflt("me", &nodes, &outgoing, &[], &mut rng) {
+                AutoAction::Disconnect { name, .. } => {
+                    assert_ne!(name, "eva", "seed {seed}: dropped hot nexthop");
+                }
+                other => panic!("seed {seed}: expected Disconnect, got {other:?}"),
+            }
+        }
+    }
+
+    /// Every outgoing is some hot peer's nexthop → nothing is
+    /// superfluous → falls through (Noop / cancel / unreachable),
+    /// degree stays >`D_HI`. Load-bearing conns are not "superfluous".
+    #[test]
+    fn drop_superfluous_noop_when_all_hot() {
+        let mut nodes = vec![node("me", true, true, false, 8)];
+        for n in ["a", "b", "c", "d", "e", "in1", "in2", "in3"] {
+            nodes.push(node(n, true, true, true, 3));
+        }
+        for (i, nh) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            let mut p = node(&format!("peer{i}"), true, false, false, 2);
+            p.tx_rate_bps = 100_000;
+            p.nexthop = Some((*nh).into());
+            nodes.push(p);
+        }
+        let outgoing = outs(&["a", "b", "c", "d", "e"]);
+        for seed in 0..50 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let act = dflt("me", &nodes, &outgoing, &[], &mut rng);
+            assert!(
+                !matches!(act, AutoAction::Disconnect { .. }),
+                "seed {seed}: dropped a load-bearing conn: {act:?}"
+            );
+        }
+    }
+
+    /// nc=5, one `AutoShortcut` outgoing whose OWN `tx_rate` is idle
+    /// (2 KiB/s) but it's `nexthop` for peer X at 100 KiB/s → NOT
+    /// reaped. A shortcut that became someone else's relay is still
+    /// load-bearing.
+    #[test]
+    fn idle_shortcut_kept_if_nexthop_for_other() {
+        let mut nodes = vec![
+            node("me", true, true, false, 5),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("d", true, true, true, 2),
+            node("sc", true, true, true, 2),
+        ];
+        nodes[5].tx_rate_bps = 2_000; // idle by old rule
+        let mut x = node("x", true, false, false, 2);
+        x.tx_rate_bps = 100_000;
+        x.nexthop = Some("sc".into());
+        nodes.push(x);
+        let outgoing = vec![
+            out("a", OutOrigin::AutoBackbone),
+            out("b", OutOrigin::AutoBackbone),
+            out("c", OutOrigin::AutoBackbone),
+            out("d", OutOrigin::AutoBackbone),
+            out("sc", OutOrigin::AutoShortcut),
+        ];
+        for seed in 0..20 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let act = dflt("me", &nodes, &outgoing, &[], &mut rng);
+            assert!(
+                !matches!(act, AutoAction::Disconnect { .. }),
+                "seed {seed}: reaped load-bearing shortcut: {act:?}"
+            );
+        }
     }
 }

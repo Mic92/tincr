@@ -648,6 +648,10 @@ impl Daemon {
                     edge_count,
                     relay_rate_bps: tunnel.map_or(0, |t| t.relay_rate_bps),
                     tx_rate_bps: tunnel.map_or(0, |t| t.tx_rate_bps),
+                    nexthop: self
+                        .route_of(nid)
+                        .and_then(|r| self.graph.node(r.nexthop))
+                        .map(|n| n.name.clone()),
                     backoff_until: self.shortcut_backoff.get(name).copied(),
                 })
             })
