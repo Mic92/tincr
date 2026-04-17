@@ -30,6 +30,8 @@ libc = "0.2.184"
 # the one irreducible unsafe (SO_ATTACH_REUSEPORT_CBPF).
 [target.'cfg(target_os = "linux")'.dependencies]
 socket2 = { version = "0.5", features = ["all"] }
+# `setsockopt(AttachReusePortCbpf)` so cbpf.rs has zero unsafe.
+nix = { version = "0.31", default-features = false, features = ["socket"] }
 
 [dev-dependencies]
 # Tests use Tun::open_mq + the hairpin-echo rig. dev-dep only:

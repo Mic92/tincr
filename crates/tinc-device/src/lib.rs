@@ -14,6 +14,7 @@
 //! surface as ordinary `io::Error`s.
 
 #![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::io;

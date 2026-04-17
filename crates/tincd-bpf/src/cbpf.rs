@@ -75,13 +75,9 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use socket2::{Domain, Protocol, Socket, Type};
-
-/// `SO_ATTACH_REUSEPORT_CBPF` — `asm-generic/socket.h:85`. Not in
-/// libc 0.2.184.
-const SO_ATTACH_REUSEPORT_CBPF: libc::c_int = 51;
 
 // cBPF opcodes — `linux/bpf_common.h`.
 const BPF_LD: u16 = 0x00;
@@ -116,7 +112,6 @@ const SRC_ID6_OFFSET: u32 = 6;
 /// Never `EPERM`: cBPF attach goes through `sk_attach_filter`, the
 /// same path as `SO_ATTACH_FILTER` (libpcap, tcpdump). Unprivileged
 /// since forever.
-#[allow(unsafe_code)]
 pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Result<()> {
     debug_assert!(n_shards > 0 && n_shards <= 256, "shard count out of range");
 
@@ -159,27 +154,17 @@ pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Resu
         filter: filter.as_mut_ptr(),
     };
 
-    // SAFETY: SO_ATTACH_REUSEPORT_CBPF takes `struct sock_fprog *`.
-    // The kernel `copy_bpf_fprog_from_user` reads `sizeof(sock_fprog)`
-    // bytes (16: u16 len + pad + ptr), then dereferences `.filter` to
-    // read `len * sizeof(sock_filter)` = 24 bytes of instructions.
-    // Both `fprog` and `filter` live on our stack and outlive this
-    // call. Kernel makes its own copy (`bpf_prog_create_from_user`).
-    let ret = unsafe {
-        libc::setsockopt(
-            sock0_fd.as_raw_fd(),
-            libc::SOL_SOCKET,
-            SO_ATTACH_REUSEPORT_CBPF,
-            (&raw const fprog).cast::<libc::c_void>(),
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                std::mem::size_of::<libc::sock_fprog>() as libc::socklen_t
-            },
-        )
-    };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // `nix::sys::socket::sockopt::AttachReusePortCbpf` is the safe
+    // `setsockopt(SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, &sock_fprog)`
+    // wrapper. The kernel `copy_bpf_fprog_from_user` reads
+    // `sizeof(sock_fprog)` then `.len * sizeof(sock_filter)` from
+    // `.filter` and makes its own copy (`bpf_prog_create_from_user`);
+    // both `fprog` and `filter` live on our stack across the call.
+    nix::sys::socket::setsockopt(
+        &sock0_fd,
+        nix::sys::socket::sockopt::AttachReusePortCbpf,
+        &fprog,
+    )?;
     Ok(())
 }
 
