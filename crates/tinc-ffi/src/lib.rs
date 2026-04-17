@@ -169,6 +169,9 @@ impl CKey {
     /// If C-side `xzalloc` returns NULL (i.e. OOM on a test box — won't happen).
     #[must_use]
     pub fn from_private_blob(blob: &[u8; 96]) -> Self {
+        // SAFETY: `blob` is exactly 96 readable bytes; the shim
+        // `memcpy`s them into a fresh `xzalloc`'d `ecdsa_t` and
+        // returns sole ownership of that allocation.
         let ptr = unsafe { ffi_ecdsa_from_blob(blob.as_ptr()) };
         Self {
             ptr: NonNull::new(ptr).expect("xzalloc never returns NULL on test boxes"),
@@ -189,6 +192,9 @@ impl CKey {
 
 impl Drop for CKey {
     fn drop(&mut self) {
+        // SAFETY: `ptr` was returned by `ffi_ecdsa_from_blob`, is
+        // non-null (`NonNull`), uniquely owned (no `Clone`), and is
+        // freed exactly once here.
         unsafe { ffi_ecdsa_free(self.ptr.as_ptr()) }
     }
 }
@@ -236,8 +242,16 @@ impl<'k> CSptps<'k> {
         hiskey: &'k CKey,
         label: &[u8],
     ) -> (Self, Vec<Event>) {
+        // SAFETY: no preconditions — allocates a zeroed `harness_t`
+        // via `calloc` and returns sole ownership.
         let h = unsafe { ffi_harness_new() };
         let h = NonNull::new(h).expect("calloc");
+        // SAFETY:
+        //   - `h` is a live harness we uniquely own.
+        //   - `mykey`/`hiskey` point at live `ecdsa_t`s; the `'k`
+        //     lifetime on `Self` keeps them alive past `Drop`.
+        //   - `label` is `label.len()` readable bytes; the shim
+        //     copies them (`sptps_start` `memcpy`s into its own buf).
         let ok = unsafe {
             ffi_start(
                 h.as_ptr(),
@@ -270,6 +284,8 @@ impl<'k> CSptps<'k> {
     /// We return it anyway because the C signature does, and "this is what
     /// C said" is the oracle contract.
     pub fn receive(&mut self, data: &[u8]) -> (usize, Vec<Event>) {
+        // SAFETY: `h` is live and uniquely borrowed (`&mut self`);
+        // `data` is `data.len()` readable bytes the shim only reads.
         let n = unsafe { ffi_receive(self.h.as_ptr(), data.as_ptr(), data.len()) };
         (n, self.drain())
     }
@@ -283,6 +299,8 @@ impl<'k> CSptps<'k> {
     /// or `sptps_send_record` returns false (state machine misuse).
     pub fn send_record(&mut self, record_type: u8, data: &[u8]) -> Vec<Event> {
         let len: u16 = data.len().try_into().expect("SPTPS records cap at 64K");
+        // SAFETY: `h` is live and uniquely borrowed; `data` is `len`
+        // readable bytes the shim only reads.
         let ok = unsafe { ffi_send_record(self.h.as_ptr(), record_type, data.as_ptr(), len) };
         assert!(ok, "sptps_send_record returned false");
         self.drain()
@@ -297,6 +315,7 @@ impl<'k> CSptps<'k> {
     /// # Panics
     /// If `sptps_force_kex` returns false (not in `SECONDARY_KEX` state).
     pub fn force_kex(&mut self) -> Vec<Event> {
+        // SAFETY: `h` is live and uniquely borrowed.
         let ok = unsafe { ffi_force_kex(self.h.as_ptr()) };
         assert!(ok, "sptps_force_kex returned false (not in SECONDARY_KEX?)");
         self.drain()
@@ -309,6 +328,9 @@ impl<'k> CSptps<'k> {
     fn drain(&self) -> Vec<Event> {
         let mut buf_ptr: *const u8 = std::ptr::null();
         let mut overflow = false;
+        // SAFETY: `h` is live; both out-pointers are valid, aligned,
+        // and writable for their types. The shim writes them
+        // unconditionally before returning.
         let len = unsafe { ffi_drain(self.h.as_ptr(), &raw mut buf_ptr, &raw mut overflow) };
 
         assert!(
@@ -318,6 +340,11 @@ impl<'k> CSptps<'k> {
              not an sptps.c bug."
         );
 
+        // SAFETY: `ffi_drain` set `buf_ptr` to `h->sink.buf`, a
+        // 64 KiB array embedded in the harness allocation (non-null,
+        // aligned, initialized). `len <= 64K` is the fill mark; the
+        // harness outlives this borrow (we hold `&self`) and nothing
+        // else writes the sink until the next FFI call.
         let raw = unsafe { std::slice::from_raw_parts(buf_ptr, len) };
         let mut out = Vec::new();
         let mut p = 0;
@@ -346,6 +373,8 @@ impl<'k> CSptps<'k> {
 
 impl Drop for CSptps<'_> {
     fn drop(&mut self) {
+        // SAFETY: `h` came from `ffi_harness_new`, is uniquely owned
+        // (no `Clone`), and is freed exactly once here.
         unsafe { ffi_harness_free(self.h.as_ptr()) }
     }
 }
@@ -360,5 +389,7 @@ impl Drop for CSptps<'_> {
 /// The shim aborts the process if `randomize()` is called unseeded; that's
 /// the right severity for a determinism violation in a test oracle.
 pub fn seed_rng(key: &[u8; 32]) {
+    // SAFETY: `key` is exactly 32 readable bytes; the shim copies
+    // them into its static ChaCha20 context.
     unsafe { ffi_seed_rng(key.as_ptr()) }
 }
