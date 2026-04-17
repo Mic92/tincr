@@ -127,11 +127,29 @@ pub fn drain_stderr(mut child: Child) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Read the pidfile, polling until it exists AND is non-empty.
+///
+/// Callers gate readiness on `wait_for_file(&socket)`, but `setup()`
+/// binds the control socket BEFORE `write_pidfile()` (setup.rs: bind
+/// → write). Under load that window is wide enough for a bare
+/// `read_to_string` to hit ENOENT or a 0-byte partial write.
+fn read_pidfile(pidfile: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::read_to_string(pidfile) {
+            Ok(s) if s.contains('\n') => return s,
+            _ if Instant::now() >= deadline => {
+                panic!("pidfile {} not written within 5s", pidfile.display())
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 /// Pidfile format: `<pid> <cookie> <host> port <port>\n`.
 /// Second whitespace token is the cookie.
 pub fn read_cookie(pidfile: &Path) -> String {
-    std::fs::read_to_string(pidfile)
-        .unwrap()
+    read_pidfile(pidfile)
         .split_whitespace()
         .nth(1)
         .expect("pidfile has cookie")
@@ -143,7 +161,7 @@ pub fn read_cookie(pidfile: &Path) -> String {
 /// no_brackets`) but `SocketAddr::from_str` wants brackets. All
 /// tests set `AddressFamily = ipv4`.
 pub fn read_tcp_addr(pidfile: &Path) -> std::net::SocketAddr {
-    let content = std::fs::read_to_string(pidfile).unwrap();
+    let content = read_pidfile(pidfile);
     // `<pid> <cookie> <host> port <port>\n`; split off pid+cookie.
     let after_cookie = content.splitn(3, ' ').nth(2).expect("pidfile has addr");
     let mut parts = after_cookie.trim_end().split(" port ");
