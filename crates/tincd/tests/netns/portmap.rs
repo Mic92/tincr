@@ -59,7 +59,7 @@ fn nsexec(ns: &str, argv: &[&str]) -> String {
 struct Miniupnpd(ChildWithLog);
 
 impl Miniupnpd {
-    fn spawn(tmp: &std::path::Path, bin: &str) -> Option<Self> {
+    fn spawn(tmp: &std::path::Path, bin: &str, natpmp: bool) -> Option<Self> {
         let ruleset = tmp.join("nft.rules");
         std::fs::write(
             &ruleset,
@@ -102,21 +102,29 @@ impl Miniupnpd {
         // anyway, but igd-next/natpmp don't always pass the right
         // internal-client field on every router; secure_mode=no
         // sidesteps a class of test-only failures.
-        // `ext_allow_private_ipv4=yes`: 10.77.0.2 IS rfc1918; by
-        // default miniupnpd refuses port-forwarding when the WAN
-        // address is private (it assumes double-NAT).
+        // `ext_allow_private_ipv4=yes` + `ext_ip=`: 10.77.0.2 IS
+        // rfc1918; by default miniupnpd refuses port-forwarding
+        // when the WAN address is private (it assumes double-NAT),
+        // and even with the allow flag `GetExternalIPAddress`
+        // returns the empty string for a reserved interface addr
+        // unless `ext_ip` pins it explicitly (upnpsoap.c:372,
+        // ≤2.3.9).
         let conf = tmp.join("miniupnpd.conf");
+        let natpmp = if natpmp { "yes" } else { "no" };
         std::fs::write(
             &conf,
-            "ext_ifname=veth-wan\n\
+            format!(
+                "ext_ifname=veth-wan\n\
              listening_ip=veth-lan\n\
              enable_upnp=yes\n\
-             enable_natpmp=yes\n\
+             enable_natpmp={natpmp}\n\
              secure_mode=no\n\
              ext_allow_private_ipv4=yes\n\
+             ext_ip=10.77.0.2\n\
              uuid=00000000-0000-0000-0000-000000000000\n\
              allow 0-65535 192.168.77.0/24 0-65535\n\
-             deny 0-65535 0.0.0.0/0 0-65535\n",
+             deny 0-65535 0.0.0.0/0 0-65535\n"
+            ),
         )
         .unwrap();
 
@@ -166,14 +174,30 @@ fn write_alice_config(confbase: &std::path::Path, refresh: u32) {
 
 #[test]
 fn upnp_miniupnpd_gateway() {
+    run("portmap::upnp_miniupnpd_gateway", true, "PCP");
+}
+
+/// `enable_natpmp=no` ⇒ forces the SSDP→SOAP fallback path. This is
+/// the acceptance test for the hand-rolled `portmap::igd` client:
+/// real miniupnpd, real wire format, real DNAT rule installed.
+#[test]
+fn upnp_miniupnpd_gateway_igd_only() {
+    run(
+        "portmap::upnp_miniupnpd_gateway_igd_only",
+        false,
+        "UPnP-IGD",
+    );
+}
+
+fn run(test_name: &str, natpmp: bool, expect_via: &str) {
     // ─── feature-detect BEFORE bwrap ─────────────────────────────
     if std::env::var_os("BWRAP_INNER").is_none() {
         let Ok(bin) = which("miniupnpd") else {
-            eprintln!("SKIP upnp_miniupnpd_gateway: miniupnpd not on PATH");
+            eprintln!("SKIP {test_name}: miniupnpd not on PATH");
             return;
         };
         if which("nft").is_err() {
-            eprintln!("SKIP upnp_miniupnpd_gateway: nft not on PATH");
+            eprintln!("SKIP {test_name}: nft not on PATH");
             return;
         }
         // SAFETY: nextest = process-per-test.
@@ -182,7 +206,7 @@ fn upnp_miniupnpd_gateway() {
             std::env::set_var("MINIUPNPD_BIN", bin);
         }
     }
-    if !enter_bwrap("portmap::upnp_miniupnpd_gateway") {
+    if !enter_bwrap(test_name) {
         return;
     }
     let miniupnpd_bin =
@@ -225,17 +249,19 @@ fn upnp_miniupnpd_gateway() {
     nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
 
     // ─── miniupnpd (nft chains + spawn) ──────────────────────────
-    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin) else {
+    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin, natpmp) else {
         for s in &mut sleepers {
             let _ = s.kill();
         }
         return;
     };
-    // Wait for it to bind 5351 (NAT-PMP) — proves init succeeded.
+    // Wait for it to bind — proves init succeeded. NAT-PMP on
+    // :5351 when enabled, otherwise SSDP on :1900.
+    let ready_port = if natpmp { ":5351" } else { ":1900" };
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let ss = nsexec("gw", &["ss", "-uln"]);
-        if ss.contains(":5351") {
+        if ss.contains(ready_port) {
             break;
         }
         if let Ok(Some(st)) = upnpd.0.child.try_wait() {
@@ -244,7 +270,10 @@ fn upnp_miniupnpd_gateway() {
                 upnpd.0.kill_and_log()
             );
         }
-        assert!(Instant::now() < deadline, "miniupnpd didn't bind 5351");
+        assert!(
+            Instant::now() < deadline,
+            "miniupnpd didn't bind {ready_port}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -281,18 +310,20 @@ fn upnp_miniupnpd_gateway() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let ext_port: u16 = loop {
         let log = alice.log_snapshot();
-        if let Some(port) = log
-            .lines()
-            .find(|l| l.contains("Portmapped Tcp 6550"))
-            .and_then(|l| l.rsplit_once("10.77.0.2:"))
-            .and_then(|(_, rest)| {
-                rest.split(|c: char| !c.is_ascii_digit())
-                    .next()?
-                    .parse()
-                    .ok()
-            })
-        {
-            break port;
+        if let Some(line) = log.lines().find(|l| l.contains("Portmapped Tcp 6550")) {
+            assert!(
+                line.contains(expect_via),
+                "expected mapping via {expect_via}, got: {line}"
+            );
+            break line
+                .rsplit_once("10.77.0.2:")
+                .and_then(|(_, rest)| {
+                    rest.split(|c: char| !c.is_ascii_digit())
+                        .next()?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or_else(|| panic!("no ext port in: {line}"));
         }
         assert!(
             Instant::now() < deadline,
