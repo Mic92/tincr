@@ -99,6 +99,7 @@ mod busyloop;
 mod chaos;
 mod dns;
 mod ping;
+mod rekey;
 mod sandbox;
 mod stress;
 mod tcp_fallback;

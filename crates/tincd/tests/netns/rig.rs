@@ -142,7 +142,18 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
         // "dns_stub_dig_v6" too → both ran in one bwrap → EBUSY on
         // tinc0. --exact + full path is correct. Watch for future
         // module renames silently re-breaking this.
-        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        // `--include-ignored`: the outer pass already decided to run
+        // THIS test (by name, via `--exact`); if it was `#[ignore]`d
+        // and the outer libtest was given `--ignored`, the inner
+        // libtest must not re-filter it. Harmless for non-ignored
+        // tests (the flag is additive).
+        .args([
+            "--exact",
+            test_name,
+            "--nocapture",
+            "--test-threads=1",
+            "--include-ignored",
+        ])
         .env("BWRAP_INNER", "1")
         .status()
         .expect("spawn bwrap");
@@ -282,7 +293,7 @@ pub(crate) struct Node {
     pub(crate) confbase: PathBuf,
     pub(crate) pidfile: PathBuf,
     pub(crate) socket: PathBuf,
-    port: u16,
+    pub(crate) port: u16,
     /// Real TUN: this is the precreated persistent device name.
     /// Goes into `Interface = ...` in tinc.conf. The daemon's
     /// `LinuxTun::open` TUNSETIFF-attaches to it.
