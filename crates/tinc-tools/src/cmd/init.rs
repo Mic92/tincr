@@ -81,6 +81,13 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     match tinc_conf.try_exists() {
         Ok(true) => return Err(CmdError::Exists(tinc_conf)),
         Ok(false) => {}
+        // EACCES here means the *parent* exists but is unreadable
+        // (e.g. `/etc/tinc` mode 0700 root). The raw errno is
+        // correct but unhelpful; add the `-c DIR` hint so
+        // first-run-as-user isn't a dead end.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(eacces_hint(&tinc_conf, &e));
+        }
         Err(e) => return Err(io_err(&tinc_conf)(e)),
     }
 
@@ -96,10 +103,13 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // an existing `/etc/tinc/myvpn` with mode 0777 to 0755.
     //
     // `confdir` is `Some` iff `-c` wasn't given. See `Paths::confdir` doc.
+    // The common non-root failure is here, not at the `try_exists`
+    // above: `/etc/tinc` typically doesn't exist yet (so `try_exists`
+    // returns Ok(false)), and the *mkdir* is what hits EACCES.
     if let Some(confdir) = &paths.confdir {
-        makedir(confdir, 0o755)?;
+        makedir(confdir, 0o755).map_err(|e| hint_on_eacces(confdir, e))?;
     }
-    makedir(&paths.confbase, 0o755)?;
+    makedir(&paths.confbase, 0o755).map_err(|e| hint_on_eacces(&paths.confbase, e))?;
     makedir(&paths.hosts_dir(), 0o755)?;
     makedir(&paths.cache_dir(), 0o755)?;
 
@@ -169,16 +179,18 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         // lets us silently skip instead of erroring on EEXIST.
         if !up_path.try_exists().map_err(io_err(&up_path))? {
             let f = open_mode_excl(&up_path, 0o755)?;
-            // The commented-out ifconfig line is a fossil (modern
-            // Linux uses `ip addr add`); changing it is a separate
-            // decision. Fidelity to upstream's stub for now.
+            // Upstream's stub suggests `ifconfig`, which is absent on
+            // most modern Linux. Suggest iproute2 instead so a user
+            // who uncomments the example doesn't get `command not
+            // found` as their first experience.
             let mut w = std::io::BufWriter::new(f);
             w.write_all(
                 b"#!/bin/sh\n\
                   \n\
                   echo 'Unconfigured tinc-up script, please edit '$0'!'\n\
                   \n\
-                  #ifconfig $INTERFACE <your vpn IP address> netmask <netmask of whole VPN>\n",
+                  #ip link set dev $INTERFACE up\n\
+                  #ip addr add <your-vpn-ip>/<prefixlen> dev $INTERFACE\n",
             )
             .map_err(io_err(&up_path))?;
             w.flush().map_err(io_err(&up_path))?;
@@ -195,6 +207,25 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     }
 
     Ok(())
+}
+
+/// Wrap an EACCES from confbase creation with a hint pointing at
+/// `-c DIR`. The bare "Could not access /etc/tinc: Permission denied"
+/// is correct but a dead end for someone evaluating tinc unprivileged.
+fn eacces_hint(path: &std::path::Path, err: &std::io::Error) -> CmdError {
+    CmdError::BadInput(format!(
+        "Could not access {}: {err}\n  hint: use `-c DIR` for an unprivileged config directory",
+        path.display()
+    ))
+}
+
+fn hint_on_eacces(path: &std::path::Path, e: CmdError) -> CmdError {
+    match &e {
+        CmdError::Io { err, .. } if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eacces_hint(path, err)
+        }
+        _ => e,
+    }
 }
 
 // `makedir` lifted to mod.rs — invite.rs needs it for invitations/ at
@@ -341,6 +372,30 @@ mod tests {
         // (The `try_exists` on tinc.conf runs first, so the *parent*
         // dir needs to be stat-able, but nothing is *written*.)
         assert!(!paths.confbase.exists());
+    }
+
+    /// EACCES at the `mkdir(confbase)` step — the path a non-root
+    /// `tinc init` actually hits, since `/etc/tinc` usually doesn't
+    /// exist yet so `try_exists` succeeds with `false` and only the
+    /// mkdir fails. The error must carry the `-c DIR` hint.
+    #[test]
+    fn eacces_on_mkdir_hints_at_dash_c() {
+        let dir = tempfile::tempdir().unwrap();
+        // Read-only parent: mkdir(confbase) will EACCES.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let paths = Paths::for_cli(&PathsInput {
+            confbase: Some(dir.path().join("vpn")),
+            ..Default::default()
+        });
+
+        let err = run(&paths, "alice").expect_err("should fail");
+        // Restore perms so tempdir cleanup works.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let CmdError::BadInput(msg) = err else {
+            panic!("wrong variant: {err:?}")
+        };
+        assert!(msg.contains("-c DIR"), "missing hint: {msg}");
     }
 
     /// Existing confbase dir with wrong perms gets chmod'd to 0755.
