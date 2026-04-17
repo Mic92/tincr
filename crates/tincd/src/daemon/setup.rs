@@ -871,7 +871,8 @@ impl Daemon {
         daemon.load_all_nodes();
 
         // ─── DHT discovery spawn (Rust extension). After listeners
-        // (need `my_udp_port` resolved). Spawn failure is non-fatal.
+        // (need `my_udp_port` resolved) and the ConnectTo loop
+        // (preresolve gates on `outgoings.is_empty()`). Non-fatal.
         daemon.spawn_dht_discovery();
 
         // ─── UPnP/NAT-PMP portmapper. After listeners (need the
@@ -993,12 +994,66 @@ impl Daemon {
                     |b| b.join(", ")
                 ));
                 self.discovery = Some(d);
+                self.preresolve_dht();
             }
             Err(e) => {
                 log::warn!(target: "tincd::discovery",
                            "DHT actor spawn failed (continuing \
                             without): {e}");
             }
+        }
+    }
+
+    /// Cold-start pre-resolve: with no `ConnectTo` and `AutoConnect`
+    /// on, the first dial is ~5s away (periodic tick) and would hit
+    /// an empty addr cache → Exhausted → resolve → wait another 5s.
+    /// Kick a resolve for up to 8 random pubkey-only `hosts/*` NOW so
+    /// by the time `AutoConnect` picks one the hint has landed.
+    /// Shuffled so a freshly-provisioned mesh doesn't all dial the
+    /// alphabetically-first node.
+    fn preresolve_dht(&mut self) {
+        // ConnectTo present → retry_outgoing drives resolves already.
+        if !self.settings.autoconnect || !self.outgoings.is_empty() {
+            return;
+        }
+        let Some(d) = self.discovery.as_mut() else {
+            return;
+        };
+        let hosts_dir = self.confbase.join("hosts");
+        let Ok(dir) = std::fs::read_dir(&hosts_dir) else {
+            return;
+        };
+        let mut cands: Vec<(String, [u8; 32])> = dir
+            .flatten()
+            .filter_map(|ent| {
+                let fname = ent.file_name().to_str()?.to_owned();
+                if !tinc_proto::check_id(&fname) || fname == self.name {
+                    return None;
+                }
+                let entries = tinc_conf::parse_file(ent.path()).ok()?;
+                let mut cfg = tinc_conf::Config::default();
+                cfg.merge(entries);
+                // Address= present → dialable without DHT; skip.
+                if cfg.lookup("Address").next().is_some() {
+                    return None;
+                }
+                let key = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &fname)?;
+                Some((fname, key))
+            })
+            .collect();
+        // Partial Fisher-Yates. Cap 8: resolver thread is serial.
+        let n = cands.len();
+        for i in 0..n.min(8) {
+            #[allow(clippy::cast_possible_truncation)]
+            let j = i
+                + (<rand_core::OsRng as rand_core::RngCore>::next_u32(&mut rand_core::OsRng)
+                    as usize)
+                    % (n - i);
+            cands.swap(i, j);
+            let (name, key) = &cands[i];
+            log::debug!(target: "tincd::discovery",
+                        "cold-start pre-resolve: {name}");
+            d.request_resolve(name, *key);
         }
     }
 }
