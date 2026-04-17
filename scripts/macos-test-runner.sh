@@ -7,22 +7,46 @@
 #   [target.aarch64-apple-darwin]
 #   runner = "scripts/macos-test-runner.sh"
 #
-# First invocation prompts for the password (sudo -v caches it).
-# Subsequent test binaries in the same cargo test run reuse the
-# cached credential. Set TINC_NO_SUDO=1 to skip escalation.
+# First invocation prompts for the password interactively.
+# Subsequent test binaries reuse the cached credential (sudo
+# caches for ~5 min by default). Uses a lock file to ensure
+# only one prompt even when cargo runs binaries in parallel.
+#
+# Set TINC_NO_SUDO=1 to skip escalation entirely.
 
 if [ "${TINC_NO_SUDO:-0}" = 1 ]; then
     exec "$@"
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
-    # Validate/cache credential. Interactive — may prompt once.
-    # If stdin isn't a tty (CI without sudo), this fails and we
-    # fall through to run unprivileged (tests SKIP themselves).
-    if ! sudo -v 2>/dev/null; then
-        exec "$@"
+    # Fast path: credential already cached.
+    if sudo -n true 2>/dev/null; then
+        exec sudo -n --preserve-env=PATH,HOME,TMPDIR "$@"
     fi
-    exec sudo --preserve-env=PATH,HOME,TMPDIR "$@"
+
+    # Slow path: need to prompt. Use a lock so parallel test
+    # binaries don't race multiple prompts.
+    lockfile="${TMPDIR:-/tmp}/tincr-sudo-lock"
+
+    # Spin-wait for lock (mkdir is atomic).
+    while ! mkdir "$lockfile" 2>/dev/null; do
+        sleep 0.1
+        # Another runner may have cached the credential while we waited.
+        if sudo -n true 2>/dev/null; then
+            exec sudo -n --preserve-env=PATH,HOME,TMPDIR "$@"
+        fi
+    done
+
+    # We hold the lock. Prompt once.
+    sudo -v </dev/tty
+    rm -rf "$lockfile"
+
+    if sudo -n true 2>/dev/null; then
+        exec sudo -n --preserve-env=PATH,HOME,TMPDIR "$@"
+    fi
+
+    # sudo failed (no tty, user cancelled). Run unprivileged.
+    exec "$@"
 fi
 
 exec "$@"
