@@ -359,6 +359,12 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 }
 
 // ioctls — the third-instance unsafe shims
+//
+// One `libc::ioctl(fd, req, *mut ifreq)` shim shared by `TUNSETIFF`
+// and `SIOCGIFHWADDR`. The nix `ioctl_*!` macros still emit `unsafe
+// fn`s (no reduction in unsafe sites) and the `_bad` variants need
+// the `ioctl` feature for what is a three-line errno wrapper, so
+// the shim is hand-rolled but kept to a single audited call site.
 
 /// Zeroed `struct ifreq` with `ifr_name` set. The shared prefix of
 /// `tunsetiff` / `siocgifhwaddr`: C's `struct ifreq ifr = {0}` then
@@ -381,6 +387,28 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
     ifr
 }
 
+/// The single `libc::ioctl(fd, req, struct ifreq *)` call site.
+/// `TUNSETIFF` and `SIOCGIFHWADDR` both go through here so the
+/// unsafe surface is one audited block, not one per ioctl.
+#[allow(unsafe_code)]
+fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::c_ulong, ifr: &mut libc::ifreq) -> io::Result<()> {
+    // SAFETY:
+    //   - `fd` borrows an open fd; lifetime tied to the owning
+    //     `File`, so it cannot be closed underneath us.
+    //   - Both callers pass a request number whose third arg is
+    //     `struct ifreq *`. `ifr` is a live `&mut` to a fully
+    //     initialized 40-byte `ifreq` on our stack; `&raw mut`
+    //     yields a valid aligned `*mut ifreq` for the kernel's
+    //     `copy_from_user`/`copy_to_user`.
+    //   - The kernel may write any field of `ifr`; `&mut` gives
+    //     us exclusive access so the write is sound.
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), req, &raw mut *ifr) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// `TUNSETIFF` — instantiate a TUN/TAP device. Kernel reads `ifr_
 /// flags` and `ifr_name` (may be empty), writes `ifr_name` back
 /// (the actually-assigned name).
@@ -393,49 +421,22 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
 /// Returns the assigned interface name as a `String`. The kernel
 /// always NUL-terminates within `IFNAMSIZ` (it `strscpy`s); we
 /// `CStr::from_bytes_until_nul` and convert.
-#[allow(unsafe_code)]
 fn tunsetiff(
     fd: BorrowedFd<'_>,
     flags: i16,
     ifr_name: [libc::c_char; libc::IFNAMSIZ],
 ) -> io::Result<String> {
     let mut ifr = ifreq_with_name(ifr_name);
-    // SAFETY (union write): writing `ifru_flags` initializes the
-    // union to that variant. Subsequent reads of OTHER variants
-    // would be UB; we don't do that. The kernel reads via
-    // `copy_from_user` (byte copy), doesn't care about Rust's
-    // active-variant rules.
+    // Union WRITE is safe in Rust; only reads need `unsafe`. The
+    // kernel reads via `copy_from_user` (byte copy) and doesn't
+    // care about Rust's active-variant rules.
     ifr.ifr_ifru.ifru_flags = flags;
 
-    // SAFETY (ioctl):
-    //   - `fd` is the open `/dev/net/tun` fd. Valid (just opened
-    //     it; not closed; not racing).
-    //   - `TUNSETIFF` expects `struct ifreq *`. `&raw mut ifr` is
-    //     a valid aligned pointer to an initialized `ifreq` of the
-    //     right size (smoke-verified 40 bytes both sides).
-    //   - The kernel READS `ifr_flags` (offset 16, 2 bytes) and
-    //     `ifr_name` (offset 0, 16 bytes including NUL). Both
-    //     initialized above.
-    //   - The kernel WRITES `ifr_name` (the assigned name). We
-    //     read it post-call. Our `ifr` is `mut`; the pointer is
-    //     `*mut`; the kernel writing through it is sound.
-    //   - NOT thread-safe in a useful sense (TUNSETIFF on the
-    //     same fd twice is EBUSY). But this fn is called once
-    //     from `Tun::open` which the daemon calls once. No race.
-    //   - Locking: kernel `tun_chr_ioctl` takes `rtnl_lock` for
-    //     TUNSETIFF. We don't observe; just FYI.
-    //
-    // `&raw mut` not `&mut`: same `clippy::borrow_as_ptr` as
-    // `tui.rs`'s `winsize`. Explicit place-to-pointer.
-    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TUNSETIFF, &raw mut ifr) };
-    if ret < 0 {
-        // `from_raw_os_error(errno)`. `last_os_error()` reads
-        // `errno` (thread-local on Linux glibc, process-global
-        // on musl-nope-also-thread-local). The `ret < 0` means
-        // errno was set; reading it now is correct (no syscalls
-        // between the ioctl and here).
-        return Err(io::Error::last_os_error());
-    }
+    // Kernel reads `ifr_flags` + `ifr_name`, writes `ifr_name`
+    // back. See module doc for why this isn't a nix macro (the
+    // `_IOW` encoding lies about direction). `tun_chr_ioctl`
+    // takes `rtnl_lock` for `TUNSETIFF`; we don't observe.
+    ioctl_ifreq(fd, libc::TUNSETIFF, &mut ifr)?;
 
     // ─── Read back ifr_name
     //
@@ -446,18 +447,22 @@ fn tunsetiff(
     // 16 bytes), we error out — STRICTER than C (which would
     // produce a 15-byte string of garbage).
     //
-    // `CStr::from_ptr` on `ifr_name.as_ptr()` sidesteps the
-    // arch-variable `c_char` signedness entirely.
-    // SAFETY: kernel wrote a NUL-terminated string into the
-    // buffer; reading until NUL is sound. The buffer is 16 bytes;
-    // the kernel never writes past 15 (IFNAMSIZ-1) + NUL.
+    // `c_char` signedness varies by arch; `.map(.. as u8)` is the
+    // safe equivalent of the `CStr::from_ptr(ifr_name.as_ptr())`
+    // reinterpretation it replaces (kernel ifnames are ASCII per
+    // `dev_valid_name`, so the cast preserves).
     //
-    // `to_string_lossy`: kernel ifnames are ASCII (`[A-Za-z0-9.
-    // _-]` — `dev_valid_name` in `net/core/dev.c`). Never lossy
-    // in practice. But lossy is forward-compatible (kernel might
-    // relax someday) and avoids the `into_string().unwrap()`
-    // panic-on-non-UTF8.
-    let name = unsafe { CStr::from_ptr(ifr.ifr_name.as_ptr()) };
+    // `to_string_lossy`: never lossy in practice, but forward-
+    // compatible (kernel might relax someday) and avoids the
+    // `into_string().unwrap()` panic-on-non-UTF8.
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII bytes, sign is platform noise
+    let bytes = ifr.ifr_name.map(|c| c as u8);
+    let name = CStr::from_bytes_until_nul(&bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel returned unterminated ifr_name",
+        )
+    })?;
     Ok(name.to_string_lossy().into_owned())
 }
 
@@ -517,21 +522,9 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // interface post-TUNSETIFF; the name is implicit.)
     let mut ifr = ifreq_with_name([0; libc::IFNAMSIZ]);
 
-    // SAFETY (ioctl):
-    //   - `fd` is the post-TUNSETIFF fd. Valid.
-    //   - `SIOCGIFHWADDR` expects `struct ifreq *`. Same shape as
-    //     above.
-    //   - Kernel reads NOTHING (TUN/TAP fd path; see above).
-    //   - Kernel WRITES `ifr_ifru.ifru_hwaddr` (a `sockaddr`, 16
-    //     bytes at offset 16). Our `ifr` is `mut`; sound.
-    //   - Thread-safe: read-only from the kernel's perspective
-    //     (reading the MAC doesn't lock). Concurrent calls on the
-    //     same fd would race-read the same MAC → same result.
-    //     Doesn't happen (called once from `Tun::open`).
-    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFHWADDR, &raw mut ifr) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // Kernel reads NOTHING (TUN/TAP fd path; see above), WRITES
+    // `ifr_ifru.ifru_hwaddr` (a `sockaddr`, 16 bytes at offset 16).
+    ioctl_ifreq(fd, libc::SIOCGIFHWADDR, &mut ifr)?;
 
     // `sockaddr.sa_data` is `[c_char; 14]`. First 6 bytes are the
     // MAC (ETH_ALEN=6).

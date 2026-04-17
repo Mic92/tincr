@@ -34,12 +34,16 @@ log = "0.4"
 nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
 
 [dev-dependencies]
-# `geteuid()` for the root-skip in tests. `user` feature only.
+# `user` for `geteuid()` (root-skip in unit tests). `fs` for
+# `nix::unistd::dup` in tests/mq.rs — previously this only compiled
+# because tincd-bpf's dev-dep enabled `fs` and Cargo unified features
+# across the workspace; `cargo clippy -p tinc-device` alone would
+# fail to build the integration test.
 # Not in main dep: the device crate doesn't check uid at runtime
 # (CAP_NET_ADMIN, not root, is what matters; the daemon checks
 # capabilities via `nix::sys::capability` or just lets the open
 # fail with EACCES). The test skip is the only consumer.
-nix = { version = "0.31", default-features = false, features = ["user"] }
+nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
 
 [lints]
 workspace = true
