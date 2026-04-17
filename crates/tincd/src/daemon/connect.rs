@@ -126,77 +126,50 @@ impl Daemon {
             log::debug!(target: "tincd::conn",
                                 "Established a second connection with {name}, \
                                  closing old connection");
-            // ─── dedup: pick which conn survives ────────────────
-            // C tinc unconditionally keeps the NEW conn and transfers
-            // the old's `outgoing` onto it (`protocol_auth.c::ack_h`:
-            // `c->outgoing = n->connection->outgoing; n->connection->
-            // outgoing = NULL;`). That stops `terminate()`'s redial
-            // for the *local* dedup, but with mutual `ConnectTo`
-            // under symmetric latency BOTH ends keep the conn that
-            // ACK'd second — which is the OTHER end's outgoing — so
-            // each side closes the TCP stream the other side just
-            // chose to keep. Both then redial from `terminate()`'s
-            // `do_outgoing_connection`, both ACK, both dedup, and
-            // every dedup runs `terminate` → `del_edge` → `run_graph`
-            // → `BecameUnreachable` → `reset_unreachable()`, which
-            // tears down the per-tunnel SPTPS and clears `validkey`.
-            // Traffic on the next `BecameReachable` re-kicks
-            // `send_req_key` from `try_tx` and the REQ_KEYs cross
-            // again — the recurring "Got REQ_KEY … already started"
-            // seen in production (`tests/reqkey_simultaneous.rs`).
-            //
-            // Fix: deterministic tie-break by NAME so both ends keep
-            // the SAME TCP stream. The side with the lexically
-            // smaller name owns the surviving outgoing; both sides
-            // evaluate `self.name < name` with swapped operands, so
-            // exactly one side's `outgoing` conn is kept on BOTH
-            // ends. When only one of (old, new) is an outgoing (the
-            // common case), this still keeps the C semantics for the
-            // non-mutual path: the loser conn is dropped without
-            // triggering a redial because we strip `outgoing` from
-            // it first.
-            let we_own_outgoing = self.name.as_str() < name.as_str();
+            // `protocol_auth.c::ack_h`: move the dropped conn's
+            // `outgoing` onto the survivor before terminating, so
+            // `terminate()`'s tail `do_outgoing_connection` doesn't
+            // redial. C always keeps the new conn; under mutual
+            // `ConnectTo` with symmetric latency that makes each
+            // end keep the stream the other end just dropped, so we
+            // additionally pick by name: the side with the smaller
+            // name keeps its OUTGOING conn. Both ends evaluate this
+            // with swapped operands and agree on one TCP stream.
+            // Without it every dedup round del-edges →
+            // `BecameUnreachable` → `reset_unreachable()` and the
+            // tunnel never settles (`tests/reqkey_simultaneous.rs`).
             let new_is_outgoing = conn_outgoing.is_some();
             let old_is_outgoing = self
                 .conns
                 .get(old_conn)
                 .is_some_and(|oc| oc.outgoing.is_some());
-            // Keep `id` (new) UNLESS it's the wrong direction AND the
-            // old conn is the right one. If both or neither are
-            // outgoings (shouldn't happen in steady state), fall back
-            // to C's "new wins".
-            let keep_old = old_is_outgoing != new_is_outgoing && old_is_outgoing == we_own_outgoing;
+            let keep_old = old_is_outgoing != new_is_outgoing
+                && old_is_outgoing == (self.name.as_str() < name.as_str());
             let (keep, drop_id) = if keep_old {
                 (old_conn, id)
             } else {
                 (id, old_conn)
             };
-            // Transfer `outgoing` from the dropped conn onto the
-            // kept conn so `terminate()` doesn't redial.
             if let Some(dropped_oid) = self
                 .conns
                 .get_mut(drop_id)
                 .and_then(|dc| dc.outgoing.take())
-                && let Some(kc) = self.conns.get_mut(keep)
             {
-                if kc.outgoing.is_some() {
-                    log::warn!(target: "tincd::conn",
-                               "Two outgoing connections to the same node {name}!");
-                } else {
-                    kc.outgoing = Some(dropped_oid);
+                match self.conns.get_mut(keep) {
+                    Some(kc) if kc.outgoing.is_none() => kc.outgoing = Some(dropped_oid),
+                    _ => log::warn!(target: "tincd::conn",
+                            "Two outgoing connections to the same node {name}!"),
                 }
             }
             self.terminate(drop_id);
-            // graph() covered by unconditional call below.
             if keep_old {
-                // We just terminated the conn this `on_ack` was
-                // called for. The OLD conn's edge/NodeState are
-                // already in place (its own `on_ack` ran earlier);
-                // nothing more to set up. Don't fall through and
-                // re-`nodes.insert` with the dead `id`.
+                // Old conn's edge/NodeState already in place from
+                // its own on_ack; don't fall through and clobber
+                // with the now-dead `id`.
                 self.run_graph_and_log();
                 return Ok(false);
             }
+            // graph() covered by unconditional call below.
         }
 
         // Add ONLY the forward edge. The reverse comes from the

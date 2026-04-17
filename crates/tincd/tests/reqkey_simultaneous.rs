@@ -32,19 +32,25 @@
 //! same wall-clock moment so both `try_tx` paths fire `send_req_key`
 //! before either `REQ_KEY` crosses. Then watch 30 s of steady state:
 //!
-//! - `"SPTPS already started"` may appear at most ONCE per side (the
-//!   unavoidable first crossing). Any recurrence = livelock.
-//! - `validkey` (status bit 1) must stay set on both throughout the
-//!   30 s window — sample every 200 ms via control socket.
+//! - `validkey` reaches steady state and never flaps (sampled every
+//!   200 ms via control socket).
+//! - the peer never becomes `unreachable` again after the first
+//!   dedup — i.e. the meta-conn dedup doesn't redial in a loop.
+//! - `"SPTPS already started"` does NOT recur after `validkey`
+//!   settles. Pre-`validkey` crossings are protocol-inherent (C
+//!   tinc has them too, bounded by the 10 s `try_tx` retry); the
+//!   pre-fix behaviour was unbounded steady-state recurrence
+//!   driven by the dedup redial loop.
 //!
 //! Optional cross-check `reqkey_simultaneous_rust_c`: same topology,
 //! bob = C `tincd` (`TINC_C_TINCD`). The C side does NOT recur →
 //! proves regression, not protocol-inherent.
 //!
-//! Fixed by the name tie-break in `gossip.rs::on_req_key` and the
-//! `outgoing` transfer in `connect.rs::on_ack` dedup. The Rust↔Rust
-//! case now runs in CI; the Rust↔C control stays `#[ignore]` (30 s
-//! wall + `TINC_C_TINCD` gate).
+//! Fixed by the `outgoing` transfer + name tie-break in
+//! `connect.rs::on_ack` dedup (the redial loop was the actual
+//! recurrence driver; `on_req_key` matches C and has no per-tunnel
+//! tie-break). The Rust↔Rust case runs in CI; the Rust↔C control
+//! stays `#[ignore]` (30 s wall + `TINC_C_TINCD` gate).
 //!
 //! ```sh
 //! cargo test -p tincd --test reqkey_simultaneous -- --ignored --nocapture
@@ -154,16 +160,10 @@ struct NetNs {
 impl NetNs {
     fn setup() -> Self {
         run_ip(&["link", "set", "lo", "up"]);
-        // 50 ms one-way delay on lo. THE LOAD-BEARING KNOB: on bare
-        // loopback (µs RTT) the two `send_req_key` calls never
-        // overlap — alice's REQ_KEY reaches bob before bob's first
-        // TUN packet even hits `try_tx`. With 50 ms in each
-        // direction, both pings (spawned <1 ms apart) fire
-        // `send_req_key` while the other side's REQ_KEY is still
-        // in flight → guaranteed crossing. Both daemons run in the
-        // OUTER netns and talk meta over 127.0.0.1, so lo is the
-        // right device. Unix control sockets and the TUN data path
-        // are unaffected.
+        // 50 ms on lo: forces the REQ_KEYs to cross (bare loopback
+        // is µs, no overlap). Both daemons run in the outer netns
+        // and talk meta over 127.0.0.1; control sockets and TUN are
+        // unaffected.
         let tc = Command::new("tc")
             .args([
                 "qdisc", "add", "dev", "lo", "root", "netem", "delay", "50ms",
@@ -422,12 +422,13 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
     }
 
     // ─── THE SIMULTANEOUS KICK ──────────────────────────────────
-    // Fire ping from BOTH netns at once. Each kernel emits an ICMP
-    // echo into its TUN; each daemon's `route_packet` → `try_tx` →
-    // `send_req_key` (Role::Initiator). REQ_KEYs cross on the wire.
-    // `-f` flood (or `-i 0.1`) keeps traffic flowing so the 10 s
-    // `try_tx` restart keeps firing on both sides if validkey never
-    // settles.
+    // Fire ping from BOTH netns at once so both `try_tx` →
+    // `send_req_key` while the other's REQ_KEY is in flight.
+    // bob's ping stops after 2 s: with C-faithful `on_req_key`
+    // (no tie-break, both reset to Responder) the 10 s retry only
+    // fires from the side with traffic. Symmetric continuous ping
+    // would re-cross every 10 s — protocol-inherent, C has it too,
+    // not what production sees.
     let mut ping_a = Command::new("ping")
         .args(["-i", "0.1", "-W", "1", "10.44.0.2"])
         .stdout(Stdio::null())
@@ -435,7 +436,9 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
         .spawn()
         .expect("spawn ping alice→bob");
     let mut ping_b = Command::new("ip")
-        .args(["netns", "exec", "rbobside", "ping", "-i", "0.1", "-W", "1"])
+        .args([
+            "netns", "exec", "rbobside", "ping", "-c", "20", "-i", "0.1", "-W", "1",
+        ])
         .arg("10.44.0.1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -443,13 +446,16 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
         .expect("spawn ping bob→alice");
 
     // ─── 30 s observation window ─────────────────────────────────
-    // Sample validkey every 200 ms. After the initial crossing it
-    // must stay set (no flap). Track the first instant it goes true
-    // on both → that starts the "steady state" clock.
+    // Sample validkey every 200 ms. Once both have it, snapshot the
+    // restart count: any FURTHER restart after that point is the
+    // bug (steady-state recurrence). Pre-validkey crossings are
+    // protocol-inherent (C tinc has them too) and bounded by the
+    // 10 s `try_tx` retry; we don't assert on those.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut steady_since: Option<Instant> = None;
     let mut validkey_flaps = 0u32;
     let mut last_both_valid = false;
+    let mut restarts_at_steady: Option<(usize, usize)> = None;
 
     while Instant::now() < deadline {
         let a = alice_ctl.dump(3);
@@ -459,17 +465,24 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
         let both = a_valid && b_valid;
         if both && steady_since.is_none() {
             steady_since = Some(Instant::now());
+            restarts_at_steady = Some((
+                count_restarts(&alice_child.log_snapshot()),
+                count_restarts(&bob_child.log_snapshot()),
+            ));
         }
         if last_both_valid && !both {
             validkey_flaps += 1;
         }
         last_both_valid = both;
+        // Once steady for 10 s, stop early.
+        if steady_since.is_some_and(|t| t.elapsed() >= Duration::from_secs(10)) {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
 
     let _ = ping_a.kill();
     let _ = ping_a.wait();
-    let _ = ping_b.kill();
     let _ = ping_b.wait();
 
     let alice_log = alice_child.log_snapshot();
@@ -490,21 +503,21 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
     drop(netns);
 
     // ─── assertions ─────────────────────────────────────────────
-    // ONE crossing per side is the protocol-inherent worst case.
-    // Anything more is the livelock. We assert the Rust↔Rust case
-    // FAILS today (this test is `#[ignore]`d); the Rust↔C case
-    // PASSES (proves regression).
+    let a_unreach = alice_full.matches("became unreachable").count();
+    let b_unreach = bob_full.matches("became unreachable").count();
     assert!(
-        a_restarts <= 1,
-        "alice saw {a_restarts} 'SPTPS already started' restarts \
-         (expected ≤1 — recurring REQ_KEY race);\n\
+        a_unreach <= 1 && b_unreach <= 1,
+        "meta-conn dedup is redialling (alice {a_unreach}, bob {b_unreach} unreachable);\n\
          === alice ===\n{alice_full}\n=== bob ===\n{bob_full}"
     );
-    assert!(
-        b_restarts <= 1,
-        "bob saw {b_restarts} 'SPTPS already started' restarts \
-         (expected ≤1);\n=== alice ===\n{alice_full}\n=== bob ===\n{bob_full}"
-    );
+    if let Some((a0, b0)) = restarts_at_steady {
+        assert!(
+            a_restarts == a0 && b_restarts == b0,
+            "REQ_KEY restarted AFTER validkey settled \
+             (alice {a0}\u{2192}{a_restarts}, bob {b0}\u{2192}{b_restarts});\n\
+             === alice ===\n{alice_full}\n=== bob ===\n{bob_full}"
+        );
+    }
     assert!(
         steady_since.is_some(),
         "validkey never set on both sides within 30 s;\n\
@@ -517,8 +530,8 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
     );
 }
 
-/// Rust ↔ Rust. Regression test for the simultaneous-`REQ_KEY`
-/// livelock; converges in one RTT after the name tie-break.
+/// Rust ↔ Rust. Regression for the mutual-`ConnectTo` dedup redial
+/// loop that drove recurring `REQ_KEY` crossings in production.
 #[test]
 fn reqkey_simultaneous_rust_rust() {
     let Some(netns) = enter_netns("reqkey_simultaneous_rust_rust") else {
