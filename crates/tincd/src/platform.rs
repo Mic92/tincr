@@ -130,7 +130,7 @@ pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
                 setsockopt(&fd.as_fd(), sockopt::Ipv6TClass, &val),
             )
         } else {
-            ("IP_TOS", setsockopt(&fd.as_fd(), sockopt::IpTos, &val))
+            ("IP_TOS", setsockopt(&fd.as_fd(), sockopt::Ipv4Tos, &val))
         };
         log::debug!(target: "tincd::net",
                     "Setting outgoing packet priority to {prio} ({label})");
@@ -163,6 +163,9 @@ pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
 /// `if_nametoindex`). Returns `Err` on failure (caller closes the
 /// socket) — unlike the other sockopts, this is intentional: see
 /// `SockOpts.bind_to_interface`.
+///
+/// # Errors
+/// `setsockopt(SO_BINDTODEVICE)` failure.
 #[cfg(target_os = "linux")]
 pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     use nix::sys::socket::{setsockopt, sockopt};

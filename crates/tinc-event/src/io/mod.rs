@@ -594,7 +594,7 @@ mod tests {
 
     /// `add` failure rolls back the slot allocation. EEXIST: register
     /// the same fd twice (epoll rejects). kqueue silently replaces
-    /// with EV_ADD, so this test is Linux-only.
+    /// with `EV_ADD`, so this test is Linux-only.
     #[test]
     #[cfg(target_os = "linux")]
     fn add_failure_frees_slot() {
