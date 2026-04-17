@@ -47,7 +47,14 @@ pub struct TmpGuard(PathBuf);
 
 impl TmpGuard {
     pub fn new(prefix: &str, tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
+        // macOS sun_path is 104 bytes. The default TMPDIR
+        // (/var/folders/…/T/) is ~50 chars, so confdir + node
+        // name + ".socket" overflows. Use /tmp on macOS.
+        #[cfg(target_os = "macos")]
+        let base = PathBuf::from("/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let base = std::env::temp_dir();
+        let dir = base.join(format!(
             "tincd-{prefix}-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
