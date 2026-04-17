@@ -858,18 +858,12 @@ impl Daemon {
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {
-                // Tunnel-stuck restart, gated on last_req_key+10s.
+                // Only restart if `!validkey`; see
+                // `maybe_restart_stuck_tunnel` doc.
                 log::debug!(target: "tincd::net",
                             "Failed to decode SPTPS_PACKET from \
                              {from_name}: {e:?}");
-                let now = self.timers.now();
-                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
-                    t.last_req_key
-                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
-                });
-                if gate_ok {
-                    nw |= self.send_req_key(from_nid);
-                }
+                nw |= self.maybe_restart_stuck_tunnel(from_nid);
                 return nw;
             }
         };

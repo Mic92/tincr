@@ -30,6 +30,27 @@ pub struct TunnelState {
     /// on unreachable. Boxed: ~1KB, most nodes never tunnel.
     pub sptps: Option<Box<Sptps>>,
 
+    /// Previous per-tunnel SPTPS, salvaged at
+    /// `send_req_key`/`on_req_key` so UDP datagrams already in flight
+    /// under the OLD key still decrypt instead of surfacing as the
+    /// production `Invalid packet seqno: N != 0` / `BadSeqno` burst.
+    /// Rust-only; C tinc has the same `sptps_stop`/`sptps_start`
+    /// window (`protocol_key.c:259-264`) and just eats the loss.
+    ///
+    /// **RX-only** — we never seal with it; sealing past the restart
+    /// would extend the old key's nonce stream after we already
+    /// announced a new one.
+    ///
+    /// **Lifetime bound** — set only when the outgoing session had a
+    /// working `incipher`. NOT cleared at `HandshakeDone` (old-key
+    /// stragglers can still arrive ~RTT after our side completes);
+    /// instead reaped by `on_ping_tick` once `status.validkey &&
+    /// last_req_key + 2×PingInterval` has passed, by
+    /// `reset_unreachable`, or by the next salvage. Without the bound
+    /// the old key material would survive a full `KeyExpire` and
+    /// defeat the forward-secrecy point of rekeying.
+    pub prev_sptps: Option<Box<Sptps>>,
+
     /// `n->address`. UDP send-to. Set by `update_node_udp` (via
     /// SSSP). NOT `NodeState.edge_addr` (that's TCP `getpeername`);
     /// may be NAT-reflexive from `ans_key_h`.
@@ -88,6 +109,7 @@ impl TunnelState {
     /// survives). Traffic counters NOT reset (lifetime totals).
     pub fn reset_unreachable(&mut self) {
         self.sptps = None; // `sptps_stop`
+        self.prev_sptps = None;
         self.last_req_key = None;
         // Probe state reset; `mtu` preserved.
         if let Some(p) = &mut self.pmtu {
@@ -222,6 +244,7 @@ mod tests {
     fn reset_unreachable_clears_everything() {
         let mut t = TunnelState {
             sptps: None, // can't construct without keys; test the Option
+            prev_sptps: None,
             udp_addr: Some("10.0.0.1:655".parse().unwrap()),
             udp_addr_cached: None,
             status: TunnelStatus {

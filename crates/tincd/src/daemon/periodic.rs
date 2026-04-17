@@ -148,6 +148,24 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
+        // Reap salvaged old SPTPS sessions: see
+        // `TunnelState::prev_sptps`. Once the new session is healthy
+        // (`validkey`) and 2×PingInterval has passed since the
+        // restart, no peer-sealed datagram under the old key can
+        // still be in flight. Dropping it here restores the
+        // forward-secrecy bound that `KeyExpire` is meant to give.
+        let prev_ttl = pinginterval.saturating_mul(2);
+        for tunnel in self.dp.tunnels.values_mut() {
+            if tunnel.prev_sptps.is_some()
+                && tunnel.status.validkey
+                && tunnel
+                    .last_req_key
+                    .is_none_or(|t| now.saturating_duration_since(t) > prev_ttl)
+            {
+                tunnel.prev_sptps = None;
+            }
+        }
+
         // collect any exited detached hook scripts (script::spawn)
         script::reap_children();
 

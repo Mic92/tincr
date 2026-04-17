@@ -54,20 +54,21 @@
 //! the old `inkey` half-alive, and C's `send_req_key` is *only*
 //! reached from the `last_req_key < now-10` gate or `try_tx`'s
 //! `!validkey` arm — never from a single tag-fail on a still-valid
-//! tunnel. Our `rx.rs` decode-error gate (`:522-528`) means one
-//! corrupt/forged datagram tears down a perfectly good session. The
-//! assertion below therefore demands **zero** decode failures across
-//! the rekey, not "≤ RTT × rate" — the bound we actually want to
-//! converge on once the fix lands.
+//! tunnel. Our pre-fix `rx.rs` decode-error path went straight to
+//! `send_req_key`, so one corrupt/forged datagram tore down a
+//! perfectly good session.
 //!
-//! FIXME(rekey-seqno-race): the fix lives in
-//!   - `crates/tincd/src/daemon/net/sptps.rs::dispatch_tunnel_outputs`
-//!     `HandshakeDone` arm (handles swap timing), and
-//!   - `crates/tincd/src/daemon/gossip.rs::{send_req_key,on_req_key}`
-//!     (don't drop a working `incipher` on the floor; either keep the
-//!     old session decrypting until the new one's first authenticated
-//!     packet, or stop tearing the session down on a single
-//!     `DecryptFailed` in `rx.rs`).
+//! ## Fix encoded here
+//!
+//! - `Daemon::maybe_restart_stuck_tunnel`: gate the decode-error →
+//!   `send_req_key` escalation on `!validkey` (DoS hardening; a
+//!   spoofed UDP datagram can no longer reset a healthy session
+//!   every 10 s).
+//! - `TunnelState::prev_sptps`: when a restart *does* happen,
+//!   `send_req_key`/`on_req_key` salvage the old session for RX so
+//!   in-flight datagrams under the old key still decrypt. RX-only,
+//!   reaped by `on_ping_tick` after `2×PingInterval` once the new
+//!   key is valid (forward-secrecy bound).
 
 use std::io::Write as _;
 use std::net::UdpSocket;
@@ -78,11 +79,8 @@ use super::chaos::{ChaosRig, Netem};
 use super::common::TmpGuard;
 use super::rig::enter_netns;
 
-/// See module doc. `#[ignore]` until the rekey race is fixed; run
-/// explicitly with
-/// `cargo test -p tincd --test netns rekey -- --ignored --nocapture`.
+/// See module doc.
 #[test]
-#[ignore = "FIXME(rekey-seqno-race): SPTPS restart under load drops in-flight datagrams; see module doc"]
 fn sptps_restart_under_load_no_seqno_burst() {
     let Some(netns) = enter_netns("rekey::sptps_restart_under_load_no_seqno_burst") else {
         return;
@@ -102,10 +100,11 @@ fn sptps_restart_under_load_no_seqno_burst() {
     let _delay = Netem::apply("lo", "delay 30ms");
 
     // ─── arm the rx.rs decode-error gate ────────────────────────
-    // `last_req_key` was stamped during the initial handshake
-    // (`gossip.rs:95` / `:434`); the `gate_ok` in `rx.rs:522-528`
-    // needs ≥10 s since then before a decode failure re-fires
-    // `send_req_key`. Same gate as C (`net_packet.c:444`).
+    // `last_req_key` was stamped during the initial handshake; the
+    // C-parity `last_req_key+10` half of `maybe_restart_stuck_tunnel`
+    // needs >=10 s since then. Post-fix the `!validkey` half keeps
+    // the gate shut anyway, but the test must prove the time gate
+    // alone is not what saved us.
     eprintln!("waiting 11 s for the rx-error → send_req_key gate to open");
     std::thread::sleep(Duration::from_secs(11));
 
@@ -175,20 +174,17 @@ fn sptps_restart_under_load_no_seqno_burst() {
     let (alice_stderr, bob_stderr) = rig.finish();
 
     // ─── ASSERTS ────────────────────────────────────────────────
-    // 1. The trigger actually fired. `send_req_key` clears
-    //    `validkey` (`gossip.rs:92`); the very next echo-reply bob
-    //    tries to send hits `send_sptps_packet`'s `!validkey` guard
-    //    and logs `"No valid key known yet for alice"` at
-    //    `tincd::net` debug — which IS in the rig's log filter.
-    //    (The `tincd::proto` "Got REQ_KEY ... already started" line
-    //    on alice's side is debug-level under a target the rig
-    //    doesn't enable, so we can't gate on it.)
+    // 1. The trigger reached bob's slow path. The forged datagram is
+    //    real garbage → `DecryptFailed` against the current session.
+    //    After the fix that one log line is the *only* decode failure
+    //    we expect; before the fix it kicked `send_req_key` and was
+    //    followed by ~RTT×rate of `BadSeqno` from alice's real
+    //    traffic hitting bob's freshly reset session.
     assert!(
-        bob_stderr.contains("No valid key known yet for alice"),
-        "trigger did not fire: bob's send_req_key never cleared \
-         validkey. Either the 10 s gate (rx.rs:522) didn't open or \
-         the forged packet was dropped before reaching the slow \
-         path.\n=== bob ===\n{bob_stderr}\n=== alice ===\n{alice_stderr}"
+        bob_stderr.contains("Failed to decode UDP packet from alice: DecryptFailed"),
+        "forged datagram never reached bob's slow path — either it \
+         was dropped before the AEAD check or the rig's log filter \
+         changed.\n=== bob ===\n{bob_stderr}\n=== alice ===\n{alice_stderr}"
     );
 
     // 2. THE BUG: decode-failure burst on bob.
@@ -205,10 +201,10 @@ fn sptps_restart_under_load_no_seqno_burst() {
     //
     // C tinc has the same `sptps_stop`-then-`sptps_start` window
     // (`protocol_key.c:259-264`) so strict zero is *not* C-parity.
-    // We assert zero anyway: the point of this reproducer is to
-    // pin the behaviour we want after the fix (keep old `incipher`
-    // alive until first authenticated new-key packet, à la
-    // `force_kex`'s `State::Ack`), not to bless the C race.
+    // We assert zero anyway: the point of this test is to pin the
+    // behaviour we want (a single bad datagram on a healthy session
+    // is dropped, not escalated into a session reset), not to bless
+    // the C race.
     let decode_fails = bob_stderr
         .lines()
         .filter(|l| l.contains("Failed to decode UDP packet from alice"))
@@ -222,15 +218,19 @@ fn sptps_restart_under_load_no_seqno_burst() {
     );
     assert!(
         decode_fails <= 1,
-        "SPTPS restart dropped {} of alice's in-flight datagrams \
+        "single bad datagram escalated into a session reset and \
+         dropped {} of alice's in-flight datagrams \
          (BadSeqno={bad_seqno} DecryptFailed={decrypt_failed}). \
-         These were all valid traffic sealed under the previous \
-         session key; bob threw the old incipher away in \
-         send_req_key (gossip.rs:91) before the new handshake \
-         completed.\n\
-         FIXME(rekey-seqno-race): see module doc.\n\
+         maybe_restart_stuck_tunnel must gate on !validkey.\n\
          === bob ===\n{bob_stderr}",
         decode_fails - 1,
+    );
+    // And neither side ever lost its key.
+    assert!(
+        !bob_stderr.contains("No valid key known yet for alice")
+            && !alice_stderr.contains("No valid key known yet for bob"),
+        "a forged datagram cleared validkey on a healthy session.\n\
+         === bob ===\n{bob_stderr}\n=== alice ===\n{alice_stderr}"
     );
 
     // 3. End-to-end loss bound. Even if the log burst were
@@ -242,26 +242,104 @@ fn sptps_restart_under_load_no_seqno_burst() {
     //    allow a small fixed budget for the *handshake* gap but not
     //    for the in-flight rejects.
     //
-    //    `replaywin >> 2` (`state.rs:247` farfuture) = 32>>2 = 8 is
-    //    the C-side bound on how many far-future packets are
-    //    silently eaten before resync; use that as the parity
-    //    budget on top of the unavoidable `validkey=false` send
-    //    gap.
-    #[allow(clippy::items_after_statements)]
-    const REPLAYWIN_FARFUTURE: u32 = 8; // settings.rs:316 replaywin=32 → 32>>2
-    let max_loss = 60 /* ~2×RTT validkey gap @ 2 ms interval */ + REPLAYWIN_FARFUTURE;
+    //    Post-fix the session was never torn down, so the only
+    //    legitimate loss is netem scheduling jitter on `lo`. Allow a
+    //    small fixed budget; before the fix this was 470/500 lost.
+    let max_loss = 5u32;
     assert!(
         received + max_loss >= 500,
-        "ping flood lost {} of 500 across one SPTPS restart \
-         (received {received}); budget was {max_loss} \
-         (= 2×RTT send gap + replaywin>>2 farfuture). \
-         Sustained loss means the session never recovered.\n\
+        "ping flood lost {} of 500 across one forged datagram \
+         (received {received}); budget was {max_loss}. The session \
+         was either reset or never recovered.\n\
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}",
         500 - received,
     );
+    let _ = std::io::stderr().flush();
+}
 
-    // Dump on success too: this test is `#[ignore]`d and run by
-    // hand; the operator wants to see the burst shape.
-    eprintln!("=== bob stderr ===\n{bob_stderr}");
+/// `KeyExpire`-driven in-band rekey under load. Exercises the
+/// `force_kex` → `State::Ack` path through the slow RX path while a
+/// flood is in flight: both sides keep the OLD `incipher` until the
+/// peer's ACK arrives (`tinc-sptps/src/state.rs::receive_ack`), so
+/// loss across a proper rekey must be zero — unlike a
+/// `send_req_key`-style hard restart. Also proves that the
+/// `dispatch_tunnel_outputs` `HandshakeDone` arm rebuilding
+/// `tunnel_handles` mid-flood doesn't race the RX fast path into
+/// `BadSeqno`.
+#[test]
+fn keyexpire_rekey_under_load_is_lossless() {
+    let Some(netns) = enter_netns("rekey::keyexpire_rekey_under_load_is_lossless") else {
+        return;
+    };
+    let tmp = TmpGuard::new("netns", "rekey-kex");
+    // `KeyExpire = 1` arms `on_keyexpire` once per second on BOTH
+    // sides while the flood is running.
+    let rig = ChaosRig::setup_with(netns, &tmp, "KeyExpire = 1\n");
+
+    let _delay = Netem::apply("lo", "delay 30ms");
+
+    // 3 s of flood → ≥2 rekeys per side mid-stream.
+    let flood = Command::new("ping")
+        .args(["-c", "1000", "-i", "0.003", "-W", "2", "10.42.0.2"])
+        .output()
+        .expect("spawn ping flood");
+    let flood_stdout = String::from_utf8_lossy(&flood.stdout);
+    eprintln!(
+        "{}",
+        flood_stdout
+            .lines()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let received: u32 = flood_stdout
+        .lines()
+        .find(|l| l.contains("received"))
+        .and_then(|l| {
+            l.split(',')
+                .find(|f| f.contains("received"))?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
+        .expect("ping summary line");
+
+    let (alice_stderr, bob_stderr) = rig.finish();
+
+    let rekeys = alice_stderr.matches("Expiring symmetric keys").count()
+        + bob_stderr.matches("Expiring symmetric keys").count();
+    assert!(
+        rekeys >= 2,
+        "KeyExpire timer never fired during the flood; nothing tested.\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
+    );
+
+    let decode_fails = bob_stderr
+        .lines()
+        .chain(alice_stderr.lines())
+        .filter(|l| l.contains("Failed to decode UDP packet"))
+        .count();
+    assert_eq!(
+        decode_fails, 0,
+        "in-band force_kex rekey produced {decode_fails} decode \
+         failures. The `State::Ack` window in tinc-sptps keeps the \
+         old incipher live until the peer's ACK; if this fires, \
+         either the slow path's `prev_sptps` retry or the fast-path \
+         handles swap (HandshakeDone arm) regressed.\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
+    );
+
+    // `force_kex` is designed to be lossless; allow a tiny budget
+    // for netem jitter only.
+    let max_loss = 5u32;
+    assert!(
+        received + max_loss >= 1000,
+        "in-band rekey under load lost {} of 1000 (received {received}); \
+         budget {max_loss}. Sustained loss means a key window leaked.\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}",
+        1000 - received,
+    );
     let _ = std::io::stderr().flush();
 }

@@ -437,7 +437,17 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "Got packet from {from_name} but we haven't \
                              exchanged keys yet");
-                let _ = self.send_req_key(from_nid);
+                if self.send_req_key(from_nid) {
+                    // The decode-error arms below thread through
+                    // `maybe_restart_stuck_tunnel`; this cold-start
+                    // arm is the only one that fires `send_req_key`
+                    // unconditionally. Either way the REQ_KEY is
+                    // sitting in a meta-conn outbuf and nothing on
+                    // the UDP-receive path arms EPOLLOUT for it —
+                    // without this flush the new handshake stalls
+                    // until the next ping tick.
+                    self.maybe_set_write_any();
+                }
             }
             return;
         };
@@ -454,7 +464,27 @@ impl Daemon {
         //   - InvalidState: no incipher yet (pre-handshake UDP)
         //   - BadRecord: REC_HANDSHAKE/KEX-renegotiate (rare; replay
         //     window NOT advanced, receive() sees the seqno fresh)
-        match sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14) {
+        //
+        // Across a REQ_KEY restart, `tunnel.sptps` is the *new*
+        // mid-handshake session but the peer's in-flight datagrams
+        // (and anything they keep sealing until our REQ_KEY/ANS_KEY
+        // reaches them) are still under the *old* key. The salvaged
+        // `prev_sptps` covers that gap: try it on `InvalidState` (new
+        // session has no incipher yet) and on `DecryptFailed` (new
+        // session HAS its incipher but old-key stragglers are still
+        // arriving — ordering between `HandshakeDone` and the last
+        // old-key datagram is RTT-dependent). `BadRecord`/`BadSeqno`
+        // do NOT retry: those mean the new session DID authenticate
+        // the packet, so it can't also be an old-key straggler.
+        let mut open_result = sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14);
+        if matches!(
+            open_result,
+            Err(tinc_sptps::SptpsError::InvalidState | tinc_sptps::SptpsError::DecryptFailed)
+        ) && let Some(prev) = tunnel.prev_sptps.as_deref_mut()
+        {
+            open_result = prev.open_data_into(ct, &mut self.dp.rx_scratch, 14);
+        }
+        match open_result {
             Ok(record_type) => {
                 // Only direct (dst == nullid) confirms udp_addr;
                 // relayed-to-us would cache the relay's addr. Once
@@ -510,21 +540,23 @@ impl Daemon {
                 return;
             }
             Err(tinc_sptps::SptpsError::InvalidState | tinc_sptps::SptpsError::BadRecord) => {
-                // Fall through to slow path below.
+                // Fall through to slow path below. After the
+                // `prev_sptps` retry above, `InvalidState` here means
+                // neither session has an incipher (initial cold
+                // start) and `BadRecord` means it's a handshake
+                // record for one of them — `receive()` sorts both.
             }
             Err(e) => {
-                // DecryptFailed / BadSeqno: real error. Same handling
-                // as the existing receive() Err arm (10s req_key gate).
+                // DecryptFailed / BadSeqno on a single datagram. Log
+                // and drop; only restart SPTPS if the session was
+                // already not delivering (`!validkey`). See
+                // `maybe_restart_stuck_tunnel` doc for why a healthy
+                // session must not be torn down here.
                 tunnel.status.udppacket = false;
                 log::debug!(target: "tincd::net",
                             "Failed to decode UDP packet from {from_name}: {e:?}");
-                let now = self.timers.now();
-                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
-                    t.last_req_key
-                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
-                });
-                if gate_ok {
-                    let _ = self.send_req_key(from_nid);
+                if self.maybe_restart_stuck_tunnel(from_nid) {
+                    self.maybe_set_write_any();
                 }
                 return;
             }
@@ -543,16 +575,11 @@ impl Daemon {
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {
-                // Tunnel-stuck restart, gated 10s.
+                // Same gate as the open_data_into arm above.
                 log::debug!(target: "tincd::net",
                             "Failed to decode UDP packet from {from_name}: {e:?}");
-                let now = self.timers.now();
-                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
-                    t.last_req_key
-                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
-                });
-                if gate_ok {
-                    let _ = self.send_req_key(from_nid);
+                if self.maybe_restart_stuck_tunnel(from_nid) {
+                    self.maybe_set_write_any();
                 }
                 return;
             }

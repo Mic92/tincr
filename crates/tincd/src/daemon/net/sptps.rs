@@ -141,6 +141,20 @@ impl Daemon {
                 }
                 Output::HandshakeDone => {
                     let tunnel = self.dp.tunnels.entry(peer).or_default();
+                    // `prev_sptps` is intentionally NOT cleared here:
+                    // our `HandshakeDone` does not imply the peer has
+                    // switched their `outcipher` yet (initiator vs
+                    // responder finish at different times, plus
+                    // jitter). Old-key stragglers can still arrive
+                    // for ~RTT after this point; the slow-path retry
+                    // in `rx.rs` keeps catching them. RX-only — we
+                    // never seal with it — so no nonce-reuse risk,
+                    // and AEAD-tag-then-replay-window means an
+                    // attacker can't inject under the old key.
+                    // Reclaimed by `on_ping_tick` once `validkey &&
+                    // last_req_key + 2×PingInterval` (forward-
+                    // secrecy bound), the next salvage, or
+                    // `reset_unreachable`.
                     if !tunnel.status.validkey {
                         tunnel.status.validkey = true;
                         tunnel.status.waitingforkey = false;

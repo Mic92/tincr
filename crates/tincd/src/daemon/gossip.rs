@@ -88,6 +88,17 @@ impl Daemon {
         );
         let now = self.timers.now();
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
+        // Salvage the outgoing session for RX until the new one's
+        // `HandshakeDone`: peer's in-flight datagrams (and any they
+        // seal before our REQ_KEY reaches them) are still under the
+        // old key. Only keep it if it actually had an `incipher` —
+        // a half-handshaken session can't decrypt anything and would
+        // just waste a `Box`. See `TunnelState::prev_sptps`.
+        if let Some(old) = tunnel.sptps.take()
+            && old.incipher_key().is_some()
+        {
+            tunnel.prev_sptps = Some(old);
+        }
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
         tunnel.status.waitingforkey = true;
@@ -128,6 +139,39 @@ impl Daemon {
             }
         }
         nw
+    }
+
+    /// `send_req_key`, but only if the session is plausibly stuck.
+    ///
+    /// Called from per-packet decode-error paths (`rx.rs` UDP,
+    /// `metaconn.rs` binary `SPTPS_PACKET`, `gossip.rs` b64
+    /// `SPTPS_PACKET`). C tinc fires `send_req_key` on every
+    /// `sptps_receive_data` failure once `last_req_key+10` has passed
+    /// (`net_packet.c:444`). We additionally gate on `!validkey`: a
+    /// session that is currently delivering data must not be torn
+    /// down by a single bad datagram. UDP is unauthenticated up to
+    /// the AEAD tag check, so anyone who can spoof the peer's source
+    /// address (or any on-path corruption) would otherwise reset a
+    /// healthy tunnel and blackhole RTT×2 worth of traffic — the
+    /// production `seqno != 0` bursts.
+    ///
+    /// If the session really is broken (peer rebooted, key mismatch),
+    /// recovery still happens via the meta-conn: the peer's own
+    /// `try_tx`/`send_req_key` reaches our `on_req_key` and we
+    /// restart as responder. The UDP decode-error path was never the
+    /// load-bearing recovery mechanism.
+    pub(super) fn maybe_restart_stuck_tunnel(&mut self, from_nid: NodeId) -> bool {
+        let now = self.timers.now();
+        let restart = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
+            !t.status.validkey
+                && t.last_req_key
+                    .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
+        });
+        if restart {
+            self.send_req_key(from_nid)
+        } else {
+            false
+        }
     }
 
     /// Relay leg of `on_req_key`: `to_nid != self.myself`. Returns
@@ -335,15 +379,7 @@ impl Daemon {
                     log::warn!(target: "tincd::proto",
                                "Failed to decode SPTPS_PACKET from {}: {e:?}",
                                msg.from);
-                    let now = self.timers.now();
-                    let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
-                        t.last_req_key
-                            .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
-                    });
-                    if gate_ok {
-                        return Ok(self.send_req_key(from_nid));
-                    }
-                    return Ok(false);
+                    return Ok(self.maybe_restart_stuck_tunnel(from_nid));
                 }
             };
             // `to.via == myself` trivially holds for `to == myself`.
@@ -432,6 +468,15 @@ impl Daemon {
         // Stash SPTPS before dispatching outputs.
         let now = self.timers.now();
         let tunnel = self.dp.tunnels.entry(from_nid).or_default();
+        // Same salvage as `send_req_key`: peer is re-initiating but
+        // their UDP datagrams already on the wire (and anything the
+        // RX fast path is still mirroring through stale
+        // `tunnel_handles.inkey`) are sealed under the OLD session.
+        if let Some(old) = tunnel.sptps.take()
+            && old.incipher_key().is_some()
+        {
+            tunnel.prev_sptps = Some(old);
+        }
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
         tunnel.status.waitingforkey = true;
@@ -609,19 +654,17 @@ impl Daemon {
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {
-                // Tunnel-stuck restart, gated on last_req_key+10.
-                log::warn!(target: "tincd::proto",
-                           "Failed to decode ANS_KEY SPTPS data from {}: {e:?}; restarting",
-                           msg.from);
-                let now = self.timers.now();
-                let gate_ok = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
-                    t.last_req_key
-                        .is_none_or(|last| now.duration_since(last).as_secs() >= 10)
-                });
-                if gate_ok {
-                    return Ok(self.send_req_key(from_nid));
-                }
-                return Ok(false);
+                // Same gate as the UDP/SPTPS_PACKET decode-error
+                // sites: only escalate if `!validkey`. A stale or
+                // duplicated ANS_KEY (relay re-forward, peer retried
+                // before our REQ_KEY arrived) landing AFTER
+                // HandshakeDone would otherwise nuke a healthy
+                // session here — the production log line that
+                // motivated this fix was exactly this site.
+                log::debug!(target: "tincd::proto",
+                            "Failed to decode ANS_KEY SPTPS data from {}: {e:?}",
+                            msg.from);
+                return Ok(self.maybe_restart_stuck_tunnel(from_nid));
             }
         };
 
