@@ -125,6 +125,9 @@ pub enum PortmapEvent {
     Lost {
         af: Af,
         proto: Proto,
+        local_port: u16,
+        /// The previously `Mapped` ext addr that just vanished.
+        ext: SocketAddr,
     },
 }
 
@@ -319,7 +322,7 @@ fn local_ip_towards(peer: IpAddr) -> Option<Ipv4Addr> {
     }
 }
 
-/// (af × proto) slot table. Per-slot `last`/`warned` arrays index
+/// (af × proto) slot table. Per-slot `last` arrays index
 /// by position; mode-disabled slots are simply skipped.
 const SLOTS: [(Af, Proto); 4] = [
     (Af::V4, Proto::Tcp),
@@ -347,7 +350,6 @@ fn worker(
     // streak? Reset on success so a later loss (network change,
     // router toggled UPnP off) surfaces again instead of staying
     // debug-only forever after the first boot-time round.
-    let mut warned: [bool; 4] = [false; 4];
 
     // Floor at 120 s: RFC 6887 §15 recommended `min_lifetime`, also
     // miniupnpd's hard-coded clamp. Asking for less means the
@@ -382,7 +384,6 @@ fn worker(
                 // discovery's `tcp=` republish keys off the event,
                 // not the value.
                 last = [None; 4];
-                warned = [false; 4];
             }
             gw = cur;
         }
@@ -420,14 +421,22 @@ fn worker(
                 }),
             };
             let Some(res) = res else {
-                if last[i].take().is_some() && tx.send(PortmapEvent::Lost { af, proto }).is_err() {
+                if let Some(ext) = last[i].take()
+                    && tx
+                        .send(PortmapEvent::Lost {
+                            af,
+                            proto,
+                            local_port,
+                            ext,
+                        })
+                        .is_err()
+                {
                     return;
                 }
                 continue;
             };
             match res {
                 Ok((ext, via)) => {
-                    warned[i] = false;
                     if last[i] != Some(ext) {
                         last[i] = Some(ext);
                         if tx
@@ -445,18 +454,20 @@ fn worker(
                     }
                 }
                 Err(e) => {
-                    if warned[i] {
-                        log::debug!(target: "tincd::portmap",
-                                    "map {af:?}/{proto:?} {local_port}: {e}");
-                    } else {
-                        warned[i] = true;
-                        log::info!(target: "tincd::portmap",
-                                   "no PCP/IGD gateway responded for \
-                                    {af:?}/{proto:?} {local_port} ({e}); will \
-                                    keep retrying every {refresh:?}");
-                    }
-                    if last[i].take().is_some()
-                        && tx.send(PortmapEvent::Lost { af, proto }).is_err()
+                    // Failure is the common case (most hosts have no
+                    // helpful gateway): stay at debug, surface only
+                    // `Mapped` and `Lost` to the operator.
+                    log::debug!(target: "tincd::portmap",
+                                "map {af:?}/{proto:?} {local_port}: {e}");
+                    if let Some(ext) = last[i].take()
+                        && tx
+                            .send(PortmapEvent::Lost {
+                                af,
+                                proto,
+                                local_port,
+                                ext,
+                            })
+                            .is_err()
                     {
                         return;
                     }

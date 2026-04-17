@@ -244,9 +244,12 @@ impl Daemon {
                             };
                         }
                     }
-                    PortmapEvent::Lost { af, proto } => {
+                    PortmapEvent::Lost { af, proto,
+                        local_port,
+                        ext,
+                    } => {
                         log::warn!(target: "tincd::portmap",
-                                   "Port mapping lost ({af:?}/{proto:?}); \
+                                   "Port mapping lost ({af:?}/{proto:?} {local_port} → {ext}); \
                                     will retry next refresh");
                         if proto == Proto::Tcp
                             && let Some(d) = self.discovery.as_mut()

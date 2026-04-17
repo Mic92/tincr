@@ -431,7 +431,7 @@ fn upnp_gateway_ip_change() {
     );
     nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
 
-    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin) else {
+    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin, true) else {
         for s in &mut sleepers {
             let _ = s.kill();
         }
