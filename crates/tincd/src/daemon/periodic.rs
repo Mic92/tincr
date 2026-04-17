@@ -141,6 +141,7 @@ impl Daemon {
                 let conn = self.conn_mut(id);
                 conn.pinged = true;
                 conn.last_ping_time = now;
+                conn.last_ping_sent = Some(now);
                 nw |= conn.send(format_args!("{}", Request::Ping));
             }
         }

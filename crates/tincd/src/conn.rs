@@ -187,6 +187,19 @@ pub struct Connection {
     pub active: bool,
     /// `c->status.pinged` (`connection.h:38`, bit 0).
     pub pinged: bool,
+    /// Send-time of the in-flight meta `PING`. `None` once `PONG`
+    /// arrives. Separate from `last_ping_time` (that field is
+    /// overloaded as a generic activity stamp).
+    pub last_ping_sent: Option<Instant>,
+    /// Last meta `PING`→`PONG` round-trip, ms. 0 = unmeasured.
+    pub ping_rtt_ms: u32,
+    /// RFC 6298 SRTT (α=1/8) over `ping_rtt_ms`. Seeded at `on_ack`
+    /// from the connect-time weight so the first few pings can pull
+    /// an inflated handshake sample down. 0 = unseeded.
+    pub srtt_ms: u32,
+    /// Last time this conn re-gossiped its own edge weight. Gates
+    /// the 5·PingInterval re-advertise floor.
+    pub last_weight_gossip: Option<Instant>,
     /// `c->status.connecting` (`connection.h:41`, bit 2). EINPROGRESS
     /// probe runs instead of read/write dispatch when set.
     pub connecting: bool,
@@ -282,6 +295,10 @@ impl Connection {
             address: None,
             active: false,
             pinged: false,
+            last_ping_sent: None,
+            ping_rtt_ms: 0,
+            srtt_ms: 0,
+            last_weight_gossip: None,
             connecting: false,
             outgoing: None,
             tcplen: 0,
@@ -322,6 +339,10 @@ impl Connection {
             address: Some(address),
             active: false,
             pinged: false,
+            last_ping_sent: None,
+            ping_rtt_ms: 0,
+            srtt_ms: 0,
+            last_weight_gossip: None,
             connecting: false,
             outgoing: None,
             tcplen: 0,
@@ -370,6 +391,10 @@ impl Connection {
             address: Some(address),
             active: false,
             pinged: false,
+            last_ping_sent: None,
+            ping_rtt_ms: 0,
+            srtt_ms: 0,
+            last_weight_gossip: None,
             connecting: true, // C :652
             outgoing: Some(outgoing),
             tcplen: 0,

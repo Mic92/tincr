@@ -684,8 +684,13 @@ impl Daemon {
                             Ok(conn.send(format_args!("{}", Request::Pong)))
                         }
                         Request::Pong => {
+                            let now = self.timers.now();
                             let conn = self.conn_mut(id);
                             conn.pinged = false;
+                            if let Some(sent) = conn.last_ping_sent.take() {
+                                let rtt = now.saturating_duration_since(sent).as_millis();
+                                conn.ping_rtt_ms = u32::try_from(rtt).unwrap_or(u32::MAX);
+                            }
                             // Gate on non-zero timeout (healthy conn
                             // pongs every pinginterval; don't churn).
                             let oid = conn.outgoing.map(OutgoingId::from);
