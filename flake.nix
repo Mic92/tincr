@@ -80,6 +80,13 @@
           # never fires.
           nixos-tinc-nat = pkgs.callPackage ./nix/nixos-test-nat.nix { inherit tincd; };
 
+          # Type=notify + WatchdogSec + socket activation. The other
+          # VM tests run under the upstream module (Type=simple, no
+          # .socket); this one mirrors contrib/tincd@.{service,socket}
+          # so sd_notify, the event-loop watchdog timer, and
+          # adopt_listeners are exercised end-to-end.
+          nixos-tinc-systemd = pkgs.callPackage ./nix/nixos-test-systemd.nix { inherit tincd; };
+
           # Tier-2a/2b DHT discovery: 6 VMs (relay + 10-node DHT
           # swarm + 2 NAT'd leaves + 1 cold-start node). Asserts
           # the port-probe learns the NAT mapping for tincd's
