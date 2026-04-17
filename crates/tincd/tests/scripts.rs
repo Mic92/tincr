@@ -85,7 +85,13 @@ impl Node {
             let p = peer.expect("connect_to requires peer");
             let _ = writeln!(tinc_conf, "ConnectTo = {}", p.name);
         }
-        tinc_conf.push_str("PingTimeout = 1\n");
+        // PingTimeout = 3, not 1: scripts run *synchronously* in the
+        // event loop (Command::output() blocks). On macOS under
+        // parallel test load, tinc-up + subnet-up fork/exec eats
+        // enough of the 1s budget that the peer's auth-timeout sweep
+        // reaps the conn mid-handshake. Same root cause as
+        // two_daemons/basic.rs::outgoing_retry_after_refused.
+        tinc_conf.push_str("PingTimeout = 3\n");
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         // hosts/SELF — Port + Subnets.
