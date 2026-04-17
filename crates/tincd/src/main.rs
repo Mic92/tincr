@@ -1238,25 +1238,10 @@ fn main() -> ExitCode {
     cut_umbilical();
 
     // ─── sd_notify WATCHDOG=1
-    // If WatchdogSec= is set, ping at half the interval from a
-    // *separate thread*. Threading this through TimerWhat would mean
-    // the event loop arms its own watchdog — so a hung event loop
-    // (the very thing the watchdog is meant to catch) would stop
-    // pinging only by accident. A detached thread keeps pinging as
-    // long as the *process* is alive, which is what systemd actually
-    // checks. The sd_notify writes are independent (just a sendto on
-    // a Unix dgram socket), so no shared state with the main loop.
-    if let Some(iv) = sd_notify::watchdog_interval() {
-        std::thread::Builder::new()
-            .name("sd-watchdog".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(iv);
-                    sd_notify::notify_watchdog();
-                }
-            })
-            .expect("spawn watchdog thread");
-    }
+    // Armed as `TimerWhat::Watchdog` inside `Daemon::setup` so a
+    // wedged event loop stops pinging and systemd actually restarts
+    // us. (A detached thread here would keep pinging through a hang,
+    // defeating the point of WatchdogSec.)
 
     // ─── main_loop
     let outcome = daemon.run();

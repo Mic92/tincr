@@ -8,9 +8,7 @@
 //! the conns are in `Daemon`'s `&mut self`. The `'static` logger
 //! can't reach in directly.
 //!
-//! What makes this cheap: **the daemon is single-threaded**. The
-//! only other thread is the `sd_notify` watchdog (`8967cb7f`), which
-//! doesn't log. Every `log::info!` happens INSIDE `daemon.run()`'s
+//! What makes this cheap: **the daemon is single-threaded**. Every `log::info!` happens INSIDE `daemon.run()`'s
 //! event loop, on the same thread, in the middle of some handler.
 //!
 //! So the tap doesn't need synchronization. The `log::Log` impl

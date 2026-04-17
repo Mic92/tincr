@@ -607,6 +607,16 @@ impl Daemon {
         let (pingtimer, age_timer, periodictimer, keyexpire_timer) =
             register_timers(&mut timers, &settings);
 
+        // ─── sd_notify WATCHDOG timer
+        // Driven from the event loop, NOT a free thread: a hung
+        // loop must stop pinging so systemd's WatchdogSec actually
+        // catches a wedge. No-op when WATCHDOG_USEC unset.
+        let watchdog = crate::sd_notify::watchdog_interval().map(|iv| {
+            let tid = timers.add(TimerWhat::Watchdog);
+            timers.set(tid, iv);
+            (tid, iv)
+        });
+
         // ─── listeners
         // Socket activation BYPASSES BindToAddress/ListenAddress
         // entirely (the .socket unit IS the bind config). Otherwise
@@ -805,6 +815,7 @@ impl Daemon {
             age_timer,
             periodictimer,
             keyexpire_timer,
+            watchdog,
             running: true,
             any_pcap: false,
             discovery: None,

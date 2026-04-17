@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::inthash::IntHashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use slotmap::{SlotMap, new_key_type};
 use tinc_crypto::sign::SigningKey;
@@ -113,6 +113,11 @@ pub enum TimerWhat {
     AgeSubnets,
     /// Per-outgoing retry backoff.
     RetryOutgoing(OutgoingId),
+    /// `sd_notify(WATCHDOG=1)` keepalive at half of `WatchdogSec`.
+    /// Armed iff `WATCHDOG_USEC` was in the env at startup. Driven
+    /// from the event loop (NOT a side thread) so a wedged loop
+    /// stops pinging and systemd actually restarts us.
+    Watchdog,
     #[allow(dead_code)]
     UdpPing,
 }
@@ -461,6 +466,11 @@ pub struct Daemon {
     pub(crate) periodictimer: TimerId,
     /// Re-arms +`keylifetime`.
     pub(crate) keyexpire_timer: TimerId,
+    /// `sd_notify(WATCHDOG=1)` timer + interval. `None` when not
+    /// running under a systemd unit with `WatchdogSec=` (the env
+    /// var was unset). The interval is cached so the match arm can
+    /// re-arm without re-reading env.
+    pub(crate) watchdog: Option<(TimerId, Duration)>,
 
     /// Loaded from `confbase/invitations/ed25519_key.priv`. `None`
     /// when no invitations have been issued (the file doesn't
@@ -625,6 +635,12 @@ impl Daemon {
                     }
                     TimerWhat::KeyExpire => {
                         self.on_keyexpire();
+                    }
+                    TimerWhat::Watchdog => {
+                        crate::sd_notify::notify_watchdog();
+                        if let Some((tid, iv)) = self.watchdog {
+                            self.timers.set(tid, iv);
+                        }
                     }
                     TimerWhat::UdpPing => {
                         // Not armed yet. Unreachable.
@@ -799,7 +815,6 @@ impl SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// Rate limit on the Unreachable arm. Max 3/sec. Can't
     /// construct a full `Daemon` (`SelfPipe` singleton); test the

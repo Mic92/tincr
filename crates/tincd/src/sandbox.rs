@@ -141,9 +141,8 @@ pub struct Paths {
 /// reads. The C uses three `static` globals (`current_level`,
 /// `entered`, `can_use_new_paths`). We pack into one atomic byte:
 /// bits 0-1 = level, bit 2 = entered. `Relaxed` is fine: `enter()`
-/// runs single-threaded on the main thread before the watchdog
-/// thread spawns, and `can()` callers are all on the epoll thread
-/// (the watchdog thread doesn't call scripts).
+/// runs single-threaded on the main thread before the event loop
+/// starts, and `can()` callers are all on that same thread.
 static STATE: AtomicU8 = AtomicU8::new(0);
 
 const ENTERED_BIT: u8 = 0b100;
