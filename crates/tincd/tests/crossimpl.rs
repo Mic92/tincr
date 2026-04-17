@@ -701,6 +701,88 @@ fn rust_dials_c() {
     run_crossimpl("rdc", Impl::Rust, Impl::C, netns);
 }
 
+/// Rust dials C, but `hosts/bob` has a BARE `Address = 127.0.0.1`
+/// plus `Port = <non-655>`. C parity (`address_cache.c:165-167`):
+/// the bare Address must default to `Port =`, not 655. Before the
+/// `resolve_config_addrs` fix this dialled :655 and the meta
+/// handshake never completed (bob listens on `alloc_port()`, never
+/// 655). Asserting reachable is sufficient — it proves the dial
+/// hit the right port; the full ping path is covered by
+/// `rust_dials_c`.
+#[test]
+fn rust_dials_c_bare_address_port() {
+    let Some(netns) = enter_netns("rust_dials_c_bare_address_port") else {
+        return;
+    };
+    let tmp = tmp("rdcbap");
+    let alice = Node::new(
+        tmp.path(),
+        "alice",
+        0xAA,
+        "tincX0",
+        "10.43.0.1/32",
+        Impl::Rust,
+    );
+    let bob = Node::new(tmp.path(), "bob", 0xBB, "tincX1", "10.43.0.2/32", Impl::C);
+
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
+    // Overwrite alice's view of bob: bare Address, Port directive.
+    // `write_config(.., true)` wrote `Address = 127.0.0.1 <port>`;
+    // we want the no-inline-port form so resolve_config_addrs has
+    // to consult `Port =`.
+    let bob_pub = tinc_crypto::b64::encode(&bob.pubkey());
+    std::fs::write(
+        alice.confbase.join("hosts").join("bob"),
+        format!(
+            "Ed25519PublicKey = {bob_pub}\nPort = {}\nAddress = 127.0.0.1\n",
+            bob.port
+        ),
+    )
+    .unwrap();
+
+    let bob_child = bob.spawn();
+    assert!(
+        wait_for_file(&bob.socket),
+        "bob setup failed; stderr:\n{}",
+        bob_child.kill_and_log()
+    );
+    let alice_child = alice.spawn();
+    if !wait_for_file(&alice.socket) {
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "alice setup failed; stderr:\n{}\n=== bob ===\n{bs}",
+            alice_child.kill_and_log()
+        );
+    }
+
+    let mut alice_ctl = alice.ctl();
+    let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        poll_until(Duration::from_secs(10), || {
+            let a = alice_ctl.dump(3);
+            if node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0) {
+                Some(())
+            } else {
+                None
+            }
+        });
+    }));
+    if meta.is_err() {
+        let asd = alice_child.kill_and_log();
+        let bs = bob_child.kill_and_log();
+        panic!(
+            "meta handshake timed out — resolve_config_addrs likely dialled :655 \
+             instead of Port={};\n=== alice ===\n{asd}\n=== bob ===\n{bs}",
+            bob.port
+        );
+    }
+
+    drop(alice_ctl);
+    let _ = alice_child.kill_and_log();
+    let _ = bob_child.kill_and_log();
+    drop(netns);
+}
+
 /// C dials, Rust listens. Tests our RESPONDER paths. The C's
 /// `do_outgoing_connection` (`net_socket.c`) initiates; our `id_h`
 /// gets the responder-side SPTPS role; our `req_key_h` parses the
