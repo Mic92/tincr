@@ -111,6 +111,14 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # the C's LZ4_compress_fast_extState wire output. KAT proves it.
 lz4_flex = { version = "0.11", default-features = false }
 
+# portmap.rs: UPnP-IGD + NAT-PMP. n0's `portmapper` was evaluated and
+# rejected (drags +190 transitive crates: full tokio/hyper/netwatch).
+# igd-next's sync API uses attohttpc (no async runtime); natpmp with
+# default-features=false drops its tokio dep. Feature-gated, default-ON
+# to mirror C tinc's --enable-miniupnpc autoconf default.
+igd-next = { version = "0.17", default-features = false, optional = true }
+natpmp = { version = "0.5", default-features = false, optional = true }
+
 # LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
 # cc crate. lzo-sys is bindings-only (still needs system liblzo2);
 # rust-lzo/lzo1x are pure-rust ports of unknown quality. LZO is the
@@ -144,6 +152,10 @@ rand_chacha = "0.3"
 # benches/throughput.rs: parse iperf3 --json. Both already in workspace lock.
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+default = ["upnp"]
+upnp = ["dep:igd-next", "dep:natpmp"]
 
 [[bench]]
 name = "throughput"

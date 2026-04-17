@@ -233,6 +233,18 @@ pub struct DaemonSettings {
     /// start when you don't have one static `Address=`. Non-reloadable.
     pub dht_discovery: bool,
 
+    /// `UPnP = yes|udponly|no`. C parity (`net_setup.c:1202`). When
+    /// not `No`, spawns a background thread that asks the LAN gateway
+    /// (NAT-PMP first, then UPnP-IGD) to DNAT our listener port. The
+    /// TCP mapping feeds `discovery.set_portmapped_tcp` → `tcp=` in
+    /// the published record. Default off. Non-reloadable.
+    pub upnp: crate::daemon::UpnpMode,
+    /// `UPnPDiscoverWait`. SSDP M-SEARCH wait. Default 5s.
+    pub upnp_discover_wait: u32,
+    /// `UPnPRefreshPeriod`. Re-add the mapping every N seconds;
+    /// lease is 2×N so a missed refresh doesn't expire it. Default 60.
+    pub upnp_refresh_period: u32,
+
     /// `DhtBootstrap` (Rust extension). `host:port` seeds. Empty ⇒
     /// mainline's defaults. Replace, not augment: BEP 42 has no quorum
     /// threshold, so a single attacker-controlled bootstrap that wins
@@ -320,6 +332,9 @@ impl Default for DaemonSettings {
             global_weight: None,
             device_standby: false,
             dht_discovery: false,
+            upnp: crate::daemon::UpnpMode::No,
+            upnp_discover_wait: 5,
+            upnp_refresh_period: 60,
             dht_bootstrap: Vec::new(),
         }
     }
@@ -700,6 +715,29 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     {
         settings.dht_discovery = v;
     }
+    // UPnP. Non-reloadable (thread spawned once at setup).
+    if let Some(e) = config.lookup("UPnP").next() {
+        match crate::daemon::UpnpMode::from_config(e.get_str()) {
+            Some(m) => settings.upnp = m,
+            None => {
+                return Err(SetupError::Config(format!(
+                    "UPnP = {}: expected yes|udponly|no",
+                    e.get_str()
+                )));
+            }
+        }
+    }
+    if let Some(e) = config.lookup("UPnPDiscoverWait").next()
+        && let Some(v) = get_int_as::<u32>(e)
+    {
+        settings.upnp_discover_wait = v.clamp(1, 60);
+    }
+    if let Some(e) = config.lookup("UPnPRefreshPeriod").next()
+        && let Some(v) = get_int_as::<u32>(e)
+    {
+        settings.upnp_refresh_period = v.clamp(1, MAX_DURATION_SECS);
+    }
+
     settings.dht_bootstrap = config
         .lookup("DhtBootstrap")
         .map(|e| e.get_str().to_owned())

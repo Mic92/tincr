@@ -163,7 +163,6 @@ fn write_alice_config(confbase: &std::path::Path) {
 }
 
 #[test]
-#[ignore = "needs portmapper (un-ignored two commits down)"]
 fn upnp_miniupnpd_gateway() {
     // ─── feature-detect BEFORE bwrap ─────────────────────────────
     if std::env::var_os("BWRAP_INNER").is_none() {

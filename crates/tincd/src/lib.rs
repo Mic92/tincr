@@ -40,6 +40,8 @@ pub mod outgoing;
 pub mod packet;
 mod platform;
 pub mod pmtu;
+#[cfg(feature = "upnp")]
+pub mod portmap;
 pub mod proto;
 pub mod reload;
 pub mod route;

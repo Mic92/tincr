@@ -831,6 +831,8 @@ impl Daemon {
             discovery: None,
             dht_hints: HashMap::new(),
             dht_probe_sent: HashSet::new(),
+            #[cfg(feature = "upnp")]
+            portmapper: None,
             tx_snap: None,
             tunnel_handles: IntHashMap::default(),
         };
@@ -870,6 +872,27 @@ impl Daemon {
         // ─── DHT discovery spawn (Rust extension). After listeners
         // (need `my_udp_port` resolved). Spawn failure is non-fatal.
         daemon.spawn_dht_discovery();
+
+        // ─── UPnP/NAT-PMP portmapper. After listeners (need the
+        // resolved port), before drop_privs (NAT-PMP/SSDP send from
+        // unprivileged sockets, but spawn alongside DHT for symmetry
+        // and so the first refresh runs while tinc-up is still
+        // configuring the iface). C hooks this at the same point
+        // (`net_setup.c:1217`, after `add_listen_address`).
+        #[cfg(feature = "upnp")]
+        if daemon.settings.upnp != crate::portmap::UpnpMode::No {
+            log::info!(target: "tincd::portmap",
+                       "UPnP/NAT-PMP port mapping enabled \
+                        (port {}, mode {:?}, refresh {}s)",
+                       daemon.my_udp_port, daemon.settings.upnp,
+                       daemon.settings.upnp_refresh_period);
+            daemon.portmapper = Some(crate::portmap::Portmapper::spawn(
+                daemon.my_udp_port,
+                daemon.settings.upnp,
+                Duration::from_secs(u64::from(daemon.settings.upnp_refresh_period)),
+                Duration::from_secs(u64::from(daemon.settings.upnp_discover_wait)),
+            ));
+        }
 
         // ─── tinc-up
         // The script typically does `ip addr add` / `ip link set up`

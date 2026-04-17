@@ -44,6 +44,30 @@ mod txpath;
 // `DaemonSettings` from this module's root.
 pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
+
+// `UPnP` config knob. With the feature off the type still exists
+// (settings.rs stores it unconditionally) but only `No` is reachable
+// — `load_settings` warns and ignores the config line, C parity with
+// the `--disable-miniupnpc` build.
+#[cfg(feature = "upnp")]
+pub use crate::portmap::UpnpMode;
+#[cfg(not(feature = "upnp"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpnpMode {
+    #[default]
+    No,
+}
+#[cfg(not(feature = "upnp"))]
+impl UpnpMode {
+    // Signature matches the feature-on variant so settings.rs is
+    // cfg-free; clippy's unnecessary-wraps doesn't see across cfgs.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn from_config(_: &str) -> Option<Self> {
+        log::warn!(target: "tincd",
+            "UPnP was requested, but tincd was built without the `upnp` feature");
+        Some(Self::No)
+    }
+}
 pub(crate) use settings::{
     apply_reloadable_settings, parse_connect_to_from_config, parse_subnets_from_config,
 };
@@ -520,6 +544,14 @@ pub struct Daemon {
     /// round so stale targets don't latch a late reply. Why source addr,
     /// not packet shape: see `handle_incoming_vpn_packet`.
     pub(crate) dht_probe_sent: HashSet<SocketAddr>,
+
+    /// UPnP-IGD/NAT-PMP refresh thread (Rust port of C `upnp.c`).
+    /// `Some` iff `UPnP != no` and the feature is compiled in. Polled
+    /// from `on_periodic_tick`; the TCP `Mapped` event feeds
+    /// `discovery.set_portmapped_tcp` so the BEP44 record gains a
+    /// dialable `tcp=` field.
+    #[cfg(feature = "upnp")]
+    pub(crate) portmapper: Option<crate::portmap::Portmapper>,
 
     /// TX fast-path snapshot. The Super arm `mem::take`s this,
     /// calls `tx_probe(&snap, ...)`, runs the seal-send loop on

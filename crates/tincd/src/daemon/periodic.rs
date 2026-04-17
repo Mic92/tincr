@@ -210,6 +210,47 @@ impl Daemon {
             self.execute_auto_action(action);
         }
 
+        // ─── UPnP/NAT-PMP portmapper drain. Non-blocking; the
+        // refresh thread already did the SSDP/SOAP work. The TCP
+        // mapping feeds `discovery.set_portmapped_tcp` so the next
+        // BEP44 publish carries a `tcp=` peers can dial without a
+        // punch. UDP mapping is logged only — the published `v4=`
+        // already carries the reflexive UDP port (it's the *correct*
+        // socket's mapping; the portmapped UDP port is a second
+        // route to the same listener and consumer routers usually
+        // hand back the same number anyway).
+        #[cfg(feature = "upnp")]
+        if let Some(pm) = self.portmapper.as_ref() {
+            for ev in pm.tick() {
+                match ev {
+                    crate::portmap::PortmapEvent::Mapped {
+                        proto,
+                        local_port,
+                        ext,
+                        via,
+                    } => {
+                        log::info!(target: "tincd::portmap",
+                                   "Portmapped {proto:?} {local_port} → {ext} (via {via})");
+                        if proto == crate::portmap::Proto::Tcp
+                            && let Some(d) = self.discovery.as_mut()
+                        {
+                            d.set_portmapped_tcp(Some(ext));
+                        }
+                    }
+                    crate::portmap::PortmapEvent::Lost { proto } => {
+                        log::warn!(target: "tincd::portmap",
+                                   "Port mapping lost ({proto:?}); \
+                                    will retry next refresh");
+                        if proto == crate::portmap::Proto::Tcp
+                            && let Some(d) = self.discovery.as_mut()
+                        {
+                            d.set_portmapped_tcp(None);
+                        }
+                    }
+                }
+            }
+        }
+
         // ─── DHT discovery poll (Rust extension). tick() may block on
         // put_mutable (~hundreds of ms); same blocking-is-fine precedent
         // as the contradicting-edge sleep above.
