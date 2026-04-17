@@ -176,13 +176,12 @@ impl DeviceArena {
     #[must_use]
     pub fn slot(&self, i: usize) -> &[u8] {
         let len = self.lens[i]; // bounds check: i < cap
-        // SAFETY: `i < cap` (checked above via lens[i]). `len ≤
-        // STRIDE` (set_len asserts it). The slice is within the
-        // allocation (i*STRIDE + STRIDE ≤ cap*STRIDE ≤ layout.size).
-        #[allow(unsafe_code)]
-        unsafe {
-            std::slice::from_raw_parts(self.buf.as_ptr().add(i * Self::STRIDE), len)
-        }
+        let off = i * Self::STRIDE;
+        // `len ≤ STRIDE` (set_len asserts it) and `i < cap` so the
+        // range is within `as_contiguous()` (length `cap*STRIDE`).
+        // Safe sub-slice; the only `from_raw_parts` lives in
+        // `as_contiguous` itself.
+        &self.as_contiguous()[off..off + len]
     }
 
     /// Slot `i`, full STRIDE, for writing. Device `read()` writes
@@ -197,11 +196,8 @@ impl DeviceArena {
             "DeviceArena::slot_mut: {i} >= cap {}",
             self.cap
         );
-        // SAFETY: bounds checked above. `&mut self` excludes aliases.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::slice::from_raw_parts_mut(self.buf.as_ptr().add(i * Self::STRIDE), Self::STRIDE)
-        }
+        let off = i * Self::STRIDE;
+        &mut self.as_contiguous_mut()[off..off + Self::STRIDE]
     }
 
     /// The whole arena as one slice — for `DrainResult::Super`
