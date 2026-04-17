@@ -48,11 +48,9 @@
 
 // detach/mlockall/drop_privs go through nix's safe wrappers
 // (`daemon`/`initgroups`/`chroot`/`setgid`/`setuid`). Remaining
-// unsafe: `setpriority` (nix 0.29 has no wrapper; arg types vary by
-// libc target — gnu uses __priority_which_t=c_uint, musl/bsd c_int —
-// so the raw call with `as _` is the portable form) and `tzset`
-// (POSIX TZ-cache load, not bound by the libc crate on unix).
-#![allow(unsafe_code)]
+// unsafe is per-site `#[allow(unsafe_code)]` so new unsafe in the
+// entrypoint trips the lint instead of slipping in under a blanket.
+#![deny(unsafe_code)]
 
 use std::ffi::CString;
 use std::os::fd::FromRawFd;
@@ -642,6 +640,7 @@ fn cut_umbilical() {
     // SAFETY: fd > 2 checked above; the env var is the ownership
     // claim. If the fd is stale, the F_GETFL probe below catches it
     // and we drop (close) harmlessly.
+    #[allow(unsafe_code)]
     let f = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     if fcntl(&f, FcntlArg::F_GETFL).is_err() {
         return; // drop closes the fd
@@ -724,10 +723,13 @@ fn drop_privs(
         // SAFETY: tzset() reads /etc/localtime, sets the tzname/
         // timezone/daylight globals. Not re-entrant, but we're
         // single-threaded here (event loop hasn't started).
-        unsafe extern "C" {
-            fn tzset();
+        #[allow(unsafe_code)]
+        {
+            unsafe extern "C" {
+                fn tzset();
+            }
+            unsafe { tzset() };
         }
-        unsafe { tzset() };
 
         nix::unistd::chroot(confbase).map_err(|e| format!("System call `chroot' failed: {e}"))?;
         // `chdir("/")`. Inside the jail now; cwd was
@@ -820,6 +822,7 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
     // "current process". The `which` arg type varies (c_uint on
     // gnu, c_int on musl/bsd) — PRIO_PROCESS the libc const has
     // the right type already; just don't annotate it.
+    #[allow(unsafe_code)]
     let r = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, nice) };
     if r != 0 {
         log::warn!(
@@ -1073,6 +1076,7 @@ fn main() -> ExitCode {
     // SAFETY: single-threaded (see above). remove_var is documented
     // unsafe only because of glibc's non-reentrant getenv; with no
     // concurrent readers there's nothing to race.
+    #[allow(unsafe_code)]
     unsafe {
         std::env::remove_var("LISTEN_PID");
         std::env::remove_var("LISTEN_FDS");
