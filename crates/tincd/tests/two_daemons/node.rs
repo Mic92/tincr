@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 
@@ -224,18 +224,15 @@ impl Node {
     /// should `drop()` it once the child has spawned.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn spawn_with_fd(&self, fd: &OwnedFd) -> Child {
-        let fd = fd.as_raw_fd();
         // Clear CLOEXEC so the fd survives `exec()`. Rust's `Command::
         // spawn` doesn't close inherited fds (only stdin/out/err are
         // managed). C tincd's `Device = N` mode assumes the parent
         // did this.
-        // SAFETY: `fcntl(F_SETFD, 0)` clears the CLOEXEC bit. The fd
-        // is valid (just from socketpair).
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            assert!(flags >= 0, "fcntl GETFD");
-            assert_eq!(libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC), 0);
-        }
+        nix::fcntl::fcntl(
+            fd,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+        )
+        .expect("fcntl SETFD");
         tincd_cmd()
             .arg("-c")
             .arg(&self.confbase)

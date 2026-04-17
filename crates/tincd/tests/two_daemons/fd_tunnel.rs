@@ -1,4 +1,6 @@
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
+
+use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
 /// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. SEQPACKET = datagram
 /// boundaries (one read = one packet) on a connection-oriented unix
@@ -9,26 +11,13 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 /// because `on_device_read` loops to `EAGAIN`, the test end because
 /// `read_fd_nb` polls). Dropping an end closes it.
 pub(crate) fn sockpair_seqpacket() -> (OwnedFd, OwnedFd) {
-    let mut fds = [0i32; 2];
-    // SAFETY: `socketpair` writes 2 ints. AF_UNIX/SOCK_SEQPACKET is
-    // standard on Linux.
-    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
-    assert_eq!(ret, 0, "socketpair: {}", std::io::Error::last_os_error());
-    // SAFETY: socketpair just handed us two fresh, open, owned fds.
-    let (a, b) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    set_nonblocking(&a);
-    set_nonblocking(&b);
-    (a, b)
-}
-
-fn set_nonblocking(fd: &OwnedFd) {
-    let fd = fd.as_raw_fd();
-    // SAFETY: fcntl on a valid fd.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        assert!(flags >= 0);
-        assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
-    }
+    socketpair(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        None,
+        SockFlag::SOCK_NONBLOCK,
+    )
+    .expect("socketpair")
 }
 
 pub(crate) fn write_fd(fd: &OwnedFd, buf: &[u8]) {

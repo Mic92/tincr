@@ -374,28 +374,8 @@ mod tests {
     /// makes it ready. The minimal fake. Same idiom as the
     /// `tinc-device` pipe()-tests.
     fn mkpipe() -> (std::fs::File, std::fs::File) {
-        let mut fds = [0i32; 2];
-        // SAFETY: pipe() writes two valid fds on success. We check
-        // the return code. nix::unistd::pipe would be cleaner but
-        // pulls the `fs` feature; raw libc keeps the dev-dep small.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(
-            rc,
-            0,
-            "pipe() failed: {err}",
-            err = io::Error::last_os_error()
-        );
-        // SAFETY: pipe() returned 0, both fds are valid and owned
-        // by us. from_raw_fd takes ownership; File::drop closes.
-        #[allow(unsafe_code)]
-        unsafe {
-            use std::os::fd::FromRawFd;
-            (
-                std::fs::File::from_raw_fd(fds[0]),
-                std::fs::File::from_raw_fd(fds[1]),
-            )
-        }
+        let (r, w) = nix::unistd::pipe().expect("pipe()");
+        (std::fs::File::from(r), std::fs::File::from(w))
     }
 
     /// `io_add` + `event_loop` happy path. Write to pipe, `turn()`
@@ -551,19 +531,7 @@ mod tests {
     /// a single pipe fd is never both).
     #[test]
     fn write_before_read_same_fd() {
-        // SAFETY: socketpair writes two valid fds on success.
-        let mut fds = [0i32; 2];
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-        assert_eq!(rc, 0);
-        #[allow(unsafe_code)]
-        let (mut a, b) = unsafe {
-            use std::os::fd::FromRawFd;
-            (
-                std::fs::File::from_raw_fd(fds[0]),
-                std::fs::File::from_raw_fd(fds[1]),
-            )
-        };
+        let (mut a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
 
         let mut ev = EventLoop::new().unwrap();
         // Register `b` for both. It's immediately writable (empty
