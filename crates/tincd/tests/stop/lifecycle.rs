@@ -303,9 +303,12 @@ fn umbilical_daemon_side() {
     assert_eq!(n, 1, "expected exactly 1 byte (the nul)");
     assert_eq!(buf[0], 0, "expected nul byte, got {:#04x}", buf[0]);
 
-    // Second read: EOF (cut_umbilical closed).
-    let n = std::io::Read::read(&mut ours, &mut buf).expect("read for EOF");
-    assert_eq!(n, 0, "expected EOF after nul byte");
+    // No EOF assertion: we smuggle the umbilical in via stdin and
+    // dup2(0,3) in pre_exec, so fd 0 in the child is *also* the
+    // socket. cut_umbilical() only closes fd 3; fd 0 keeps the peer
+    // open, and a second read() here just hits the SO_RCVTIMEO
+    // timeout (EWOULDBLOCK). The nul byte above is the success
+    // signal we care about; close is incidental.
 
     // The daemon is still running (foreground, -D). The umbilical
     // signal arrived, which means setup succeeded — the socket is
