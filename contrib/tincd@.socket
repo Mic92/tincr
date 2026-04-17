@@ -1,0 +1,24 @@
+# Socket activation for tincd. Enable instead of (or alongside)
+# tincd@NETNAME.service to have systemd own the listening port:
+# the daemon is started on the first inbound meta-connection and
+# can be restarted without dropping the bound port.
+#
+# Only the TCP (meta) listener is passed; tincd opens the paired
+# UDP socket on the same address itself, so do NOT add a
+# ListenDatagram= here.
+#
+# Override ListenStream= per instance with a drop-in if the
+# network uses a non-default Port=.
+
+[Unit]
+Description=tinc VPN listen socket (network %i)
+
+[Socket]
+ListenStream=655
+BindIPv6Only=both
+# tincd treats every passed fd as a TCP listener; FreeBind lets
+# the bind succeed before the interface address exists at boot.
+FreeBind=yes
+
+[Install]
+WantedBy=sockets.target

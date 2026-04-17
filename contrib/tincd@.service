@@ -1,0 +1,30 @@
+# Instanced tincd unit. Enable with `systemctl enable tincd@NETNAME`.
+#
+# Runs foreground (-D) so journald captures stderr; Type=notify
+# waits for READY=1 (sent after listeners are bound and tinc-up
+# has run). WatchdogSec is honoured by the event loop, so a
+# wedged daemon is restarted.
+#
+# Pair with tincd@.socket for socket activation: tincd adopts the
+# TCP fd(s) from LISTEN_FDS and opens the matching UDP socket
+# itself. With the socket unit enabled, restarts do not drop the
+# bound port.
+
+[Unit]
+Description=tinc VPN (network %i)
+Documentation=man:tincd(8) man:tinc(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/sbin/tincd -D -n %i
+ExecReload=/usr/bin/tinc -n %i reload
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
