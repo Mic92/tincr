@@ -800,6 +800,7 @@ impl Daemon {
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
+            has_dht_key: HashSet::new(),
             shortcut_backoff: HashMap::new(),
             last_autoconnect_tick: None,
             last_routes: std::sync::Arc::new(Vec::new()),

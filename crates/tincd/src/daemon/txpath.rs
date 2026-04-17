@@ -602,6 +602,7 @@ impl Daemon {
         // dialing a no-Address node is harmless (addr-cache-empty →
         // backoff).
         self.has_address.clear();
+        self.has_dht_key.clear();
 
         for ent in dir.flatten() {
             let Some(fname) = ent.file_name().to_str().map(str::to_owned) else {
@@ -623,6 +624,12 @@ impl Daemon {
 
             if cfg.lookup("Address").next().is_some() {
                 self.has_address.insert(fname.clone());
+            }
+            // Same predicate as the resolve path: a name autoconnect
+            // picks on this bit must yield a key request_resolve can
+            // actually send.
+            if crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &fname).is_some() {
+                self.has_dht_key.insert(fname.clone());
             }
 
             // Preload authorized subnets. Skip our own name (setup()
@@ -702,6 +709,9 @@ impl Daemon {
                     name: name.to_owned(),
                     reachable: gnode.reachable,
                     has_address: self.has_address.contains(name),
+                    // AND'd with the setting: with DhtDiscovery=no the
+                    // pubkey buys nothing (no resolver to ask).
+                    has_dht_key: self.settings.dht_discovery && self.has_dht_key.contains(name),
                     directly_connected,
                     edge_count,
                     relay_rate_bps: tunnel.map_or(0, |t| t.relay_rate_bps),
@@ -777,6 +787,24 @@ impl Daemon {
                 }
                 self.lookup_or_add_node(&name);
                 let config_addrs = resolve_config_addrs(&self.confbase, &name);
+                // No Address= and no hint → first dial exhausts
+                // immediately → retry_outgoing queues the resolve →
+                // wait 5s. Queue it now; shaves one backoff cycle.
+                if config_addrs.is_empty()
+                    && !self.dht_hints.contains_key(&name)
+                    && let Some(d) = self.discovery.as_mut()
+                {
+                    let host_file = self.confbase.join("hosts").join(&name);
+                    if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+                        let mut cfg = tinc_conf::Config::default();
+                        cfg.merge(entries);
+                        if let Some(key) =
+                            crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name)
+                        {
+                            d.request_resolve(&name, key);
+                        }
+                    }
+                }
                 let addr_cache =
                     crate::addrcache::AddressCache::open(&self.confbase, &name, config_addrs);
                 let oid = self.outgoings.insert(Outgoing {

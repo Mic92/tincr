@@ -422,6 +422,14 @@ pub struct Daemon {
     /// `has_address` annotation on top.
     pub(crate) has_address: HashSet<String>,
 
+    /// Names of nodes whose `hosts/NAME` file has an Ed25519 public
+    /// key. Populated by `load_all_nodes`. Read by
+    /// `autoconnect::decide` (widens the `has_address` dial-candidacy
+    /// gate when `DhtDiscovery=yes`: a pubkey is enough to BEP44-
+    /// resolve an address) and by the cold-start pre-resolve in
+    /// `spawn_dht_discovery`.
+    pub(crate) has_dht_key: HashSet<String>,
+
     /// Per-node "don't re-add as a shortcut before" stamp. Set in
     /// `execute_auto_action` on `Disconnect{AutoShortcut}` and
     /// `CancelPending` of a shortcut slot. Read by
