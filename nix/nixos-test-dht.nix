@@ -90,6 +90,8 @@ let
         # /etc/hosts on mainline's actor thread.
         extraConfig = ''
           DhtDiscovery = yes
+          UPnP = yes
+          UPnPRefreshPeriod = 10
           ${dhtBootstrapLines}
         '';
         chroot = false;
@@ -126,11 +128,36 @@ let
       networking = {
         useDHCP = false;
         firewall.enable = false;
+        # nftables backend: the test VM kernel doesn't autoload
+        # ip_tables (firewall is off), so the libiptc miniupnpd
+        # build dies at iptc_init. The nixpkgs miniupnpd module
+        # switches to the nft build when this is on; nat.enable
+        # below also uses the nft path.
+        nftables.enable = true;
         nat = {
           enable = true;
           externalInterface = "eth1";
           internalInterfaces = [ "eth2" ];
         };
+      };
+      # IGD + NAT-PMP/PCP on the LAN side. The leaf's portmapper
+      # thread asks this for a DNAT to its :655; the resulting WAN
+      # (ip,port) lands in the DHT record's `tcp=` field. The
+      # nixpkgs module hooks the MINIUPNPD chains into the firewall
+      # for us.
+      services.miniupnpd = {
+        enable = true;
+        natpmp = true;
+        externalInterface = "eth1";
+        internalIPs = [ "eth2" ];
+        # 192.168.1.x WAN is RFC1918; miniupnpd refuses to
+        # forward by default in that case. secure_mode=no isn't
+        # strictly needed (the leaf maps to its own LAN IP) but
+        # avoids a class of test-only mismatches.
+        appendConfig = ''
+          ext_allow_private_ipv4=yes
+          secure_mode=no
+        '';
       };
     };
 in
@@ -140,6 +167,7 @@ testers.runNixOSTest {
   nodes = {
     relay =
       {
+        pkgs,
         ...
       }:
       {
@@ -195,7 +223,10 @@ testers.runNixOSTest {
           };
         };
 
-        environment.systemPackages = [ tincd ];
+        environment.systemPackages = [
+          tincd
+          pkgs.netcat
+        ];
       };
 
     alice_gw = mkGateway 2;
@@ -358,6 +389,33 @@ testers.runNixOSTest {
         "${tincd}/bin/tinc-dht-seed --resolve "
         "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} >&2"
     )
+
+    # ─── Gate: portmapped TCP. The portmapper thread does NAT-PMP
+    # to alice_gw, learns (alice_gw_wan, port). on_periodic_tick
+    # logs the Mapped event and feeds discovery; the next publish
+    # carries `tcp=`. miniupnpd installs a real DNAT rule — prove
+    # it delivers by connecting from `relay` (vlan-1, the "WAN").
+    alice.wait_until_succeeds(
+        f"journalctl -u tinc.mesh --no-pager | "
+        f"grep -F 'Portmapped Tcp 655 → {alice_gw_wan}:'",
+        timeout=60,
+    )
+    relay.wait_until_succeeds(
+        "${tincd}/bin/tinc-dht-seed --resolve "
+        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        f"| grep -F 'tcp={alice_gw_wan}:'",
+        timeout=60,
+    )
+    alice_tcp = relay.succeed(
+        "${tincd}/bin/tinc-dht-seed --resolve "
+        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        "| tr ' ' '\\n' | sed -n 's/^tcp=//p'"
+    ).strip()
+    print(f"alice published tcp={alice_tcp}")
+    # nc -zv: 3-way handshake completing proves miniupnpd's DNAT
+    # delivered to alice's :655 (alice_gw has nothing listening
+    # there itself).
+    relay.succeed(f"nc -zv -w3 {alice_tcp.replace(':', ' ')}")
 
     # ─── Tier-0 still works with DHT on (no-regression).
     alice.wait_until_succeeds("ping -c1 -W2 10.20.0.2", timeout=60)
