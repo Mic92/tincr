@@ -180,7 +180,12 @@ const COMMANDS: &[CmdEntry] = &[
     },
     CmdEntry {
         name: "invite",
-        needs_daemon: false,
+        // `needs_daemon: true` not because invite *requires* the
+        // daemon, but so `resolve_runtime()` runs and we can attempt
+        // a best-effort reload after generating a fresh invitation
+        // key. The first invitation on a running daemon is otherwise
+        // unredeemable until manual restart.
+        needs_daemon: true,
         run: cmd_invite,
         help: "invite NODE            Generate an invitation for NODE.",
     },
@@ -596,24 +601,18 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     )?;
 
     if r.key_is_new {
-        // `if(connect_tincd(true)) reload; else fprintf("Could not
-        // signal...")`. Phrasing matches upstream exactly so users
-        // grepping stack overflow find the right
-        // post.
-        //
-        // `invite` is `needs_daemon: false` — `resolve_runtime()`
-        // wasn't called, `paths.pidfile()` would panic. The C
-        // `connect_tincd` does its own runtime resolution inline;
-        // our split puts that behind the `needs_daemon` gate. We
-        // could resolve here, but daemon-side REQ_RELOAD is chunk
-        // 8 anyway (would get nonzero ack). Warn unconditionally
-        // until then.
-        // TODO(chunk-8): inline resolve_runtime + best-effort
-        // ctl.send(Reload) once daemon-side handler exists.
-        eprintln!(
-            "Could not signal the tinc daemon. \
-             Please restart or reload it manually."
-        );
+        // The daemon loads `invitations/ed25519_key.priv` at startup;
+        // a freshly-generated key is invisible to a running daemon
+        // until reload. Best-effort: if it's up, ask; if not (or the
+        // reload nacks), fall back to the manual-restart hint.
+        // Phrasing matches upstream so users grepping forums find
+        // the right post.
+        if cmd::ctl_simple::reload(paths).is_err() {
+            eprintln!(
+                "Could not signal the tinc daemon. \
+                 Please restart or reload it manually."
+            );
+        }
     }
 
     // The URL is the secret. stdout only.

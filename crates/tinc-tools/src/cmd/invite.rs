@@ -499,7 +499,7 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
     // we bail. The error message tells the user what to do.
     let Some(addr_entry) = cfg.lookup("Address").next() else {
         return Err(CmdError::BadInput(format!(
-            "No Address found in {}. Please set Address in your host config file before creating invitations.",
+            "No Address found in {}.\n  hint: run `tinc -n NET add Address <public-ip-or-hostname>` before creating invitations.",
             host_file.display()
         )));
     };

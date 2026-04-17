@@ -78,7 +78,8 @@ fn invite_no_address() {
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("No Address"), "{stderr}");
-    assert!(stderr.contains("set Address"), "{stderr}");
+    // The hint should tell the user the actual command to run.
+    assert!(stderr.contains("add Address"), "{stderr}");
 
     // No invitations/ dir created. Our reorder vs C: we check
     // Address BEFORE makedirs. C checks late and leaves debris.
