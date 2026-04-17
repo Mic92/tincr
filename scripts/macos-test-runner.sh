@@ -37,8 +37,11 @@ if [ "$(id -u)" -ne 0 ]; then
         fi
     done
 
-    # We hold the lock. Prompt once.
-    sudo -v </dev/tty
+    # We hold the lock. Prompt once (only if a tty exists).
+    if [ -e /dev/tty ] && sh -c ': </dev/tty' 2>/dev/null; then
+        # shellcheck disable=SC2024 # redirect is FOR sudo's password prompt
+        sudo -v </dev/tty
+    fi
     rm -rf "$lockfile"
 
     if sudo -n true 2>/dev/null; then
