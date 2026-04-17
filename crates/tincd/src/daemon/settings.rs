@@ -16,6 +16,44 @@ use crate::{broadcast, compress, mac_lease};
 
 use super::SetupError;
 
+/// `e.get_bool()` but a parse failure is *logged* before falling
+/// through to `None`. Previously the `&& let Ok(v) = e.get_bool()`
+/// pattern silently discarded the `ParseError` (which carries
+/// var/file/line), so `DecrementTTL = true` or `PingInterval = 60s`
+/// quietly became "unset" — the user's typo was indistinguishable
+/// from never having written the line. We still keep the default
+/// (reload should not hard-fail on a typo), but the operator now
+/// sees why.
+fn get_bool(e: &tinc_conf::Entry) -> Option<bool> {
+    e.get_bool()
+        .inspect_err(|err| log::error!(target: "tincd", "{err}; using default"))
+        .ok()
+}
+
+/// See [`get_bool`]. Same treatment for integer-typed keys.
+fn get_int(e: &tinc_conf::Entry) -> Option<i32> {
+    e.get_int()
+        .inspect_err(|err| log::error!(target: "tincd", "{err}; using default"))
+        .ok()
+}
+
+/// `get_int` then `T::try_from`. The narrowing failure (negative
+/// into `u32`, etc.) is also logged with provenance so
+/// `ReplayWindow = -1` doesn't silently become the default.
+fn get_int_as<T>(e: &tinc_conf::Entry) -> Option<T>
+where
+    T: TryFrom<i32>,
+{
+    let v = get_int(e)?;
+    T::try_from(v)
+        .inspect_err(|_| {
+            log::error!(target: "tincd",
+                        "value {v} out of range for variable `{}' {}; using default",
+                        e.variable, e.source);
+        })
+        .ok()
+}
+
 // Upper bound for duration-ish config values fed into Instant arithmetic.
 const MAX_DURATION_SECS: u32 = 365 * 24 * 3600; // 1 year
 const MAX_REPLAY_WINDOW: usize = 1 << 20;
@@ -293,74 +331,70 @@ impl Default for DaemonSettings {
 /// need re-bind / re-open which `setup()` does inline.
 pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     if let Some(e) = config.lookup("PingInterval").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
         && v >= 1
     {
         settings.pinginterval = v.min(MAX_DURATION_SECS);
     }
     // Clamped to [1, pinginterval].
     if let Some(e) = config.lookup("PingTimeout").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.pingtimeout = v.clamp(1, settings.pinginterval);
     }
     // Per-host PMTU is read in proto.rs::handle_id; this is the
     // tinc.conf-level clamp.
     if let Some(e) = config.lookup("PMTU").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u16::try_from(v)
+        && let Some(v) = get_int_as::<u16>(e)
     {
         settings.global_pmtu = Some(v);
     }
     // Fallback when per-host Weight absent.
     if let Some(e) = config.lookup("Weight").next()
-        && let Ok(v) = e.get_int()
+        && let Some(v) = get_int(e)
     {
         settings.global_weight = Some(v);
     }
     if let Some(e) = config.lookup("MaxTimeout").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
         && v >= 1
     {
         settings.maxtimeout = v.min(MAX_DURATION_SECS);
     }
     if let Some(e) = config.lookup("DecrementTTL").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.decrement_ttl = v;
     }
     if let Some(e) = config.lookup("TunnelServer").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.tunnelserver = v;
     }
     if let Some(e) = config.lookup("StrictSubnets").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.strictsubnets = v;
     }
     // tunnelserver implies strictsubnets. Applied after BOTH parsed.
     settings.strictsubnets |= settings.tunnelserver;
     if let Some(e) = config.lookup("LocalDiscovery").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.local_discovery = v;
     }
     if let Some(e) = config.lookup("DirectOnly").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.directonly = v;
     }
     if let Some(e) = config.lookup("PriorityInheritance").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.priorityinheritance = v;
     }
     if let Some(e) = config.lookup("AutoConnect").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.autoconnect = v;
     }
@@ -378,51 +412,44 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
             "Ignoring ScriptsInterpreter change: not allowed at current sandbox level");
     }
     if let Some(e) = config.lookup("UDPDiscovery").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.udp_discovery = v;
     }
     if let Some(e) = config.lookup("UDPDiscoveryKeepaliveInterval").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.udp_discovery_keepalive_interval = v;
     }
     if let Some(e) = config.lookup("UDPDiscoveryInterval").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.udp_discovery_interval = v;
     }
     if let Some(e) = config.lookup("UDPDiscoveryTimeout").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.udp_discovery_timeout = v;
     }
-    // Silently keep default on <=0 (less harsh on reload typo).
+    // Keep default on <=0 (less harsh on reload typo); logged above.
     if let Some(e) = config.lookup("MaxConnectionBurst").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
         && v >= 1
     {
         settings.max_connection_burst = v;
     }
     if let Some(e) = config.lookup("ReplayWindow").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = usize::try_from(v)
+        && let Some(v) = get_int_as::<usize>(e)
     {
         settings.replaywin = v.min(MAX_REPLAY_WINDOW);
     }
     if let Some(e) = config.lookup("UDPInfoInterval").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.udp_info_interval = v;
     }
     if let Some(e) = config.lookup("MTUInfoInterval").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.mtu_info_interval = v;
     }
@@ -440,26 +467,22 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         };
     }
     if let Some(e) = config.lookup("MACExpire").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u64::try_from(v)
+        && let Some(v) = get_int_as::<u64>(e)
     {
         settings.macexpire = v.min(u64::from(MAX_DURATION_SECS));
     }
     if let Some(e) = config.lookup("MaxOutputBufferSize").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = usize::try_from(v)
+        && let Some(v) = get_int_as::<usize>(e)
     {
         settings.maxoutbufsize = v;
     }
     if let Some(e) = config.lookup("InvitationExpire").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u64::try_from(v)
+        && let Some(v) = get_int_as::<u64>(e)
     {
         settings.invitation_lifetime = Duration::from_secs(v);
     }
     if let Some(e) = config.lookup("KeyExpire").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.keylifetime = v.min(MAX_DURATION_SECS);
     }
@@ -581,7 +604,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     // operator explicitly configures - the 1MB default tripping
     // the kernel cap on every boot would be log noise.
     if let Some(e) = config.lookup("UDPRcvBuf").next()
-        && let Ok(v) = e.get_int()
+        && let Some(v) = get_int(e)
     {
         match usize::try_from(v) {
             Ok(v) => {
@@ -594,7 +617,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
         }
     }
     if let Some(e) = config.lookup("UDPSndBuf").next()
-        && let Ok(v) = e.get_int()
+        && let Some(v) = get_int(e)
     {
         match usize::try_from(v) {
             Ok(v) => {
@@ -609,8 +632,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
 
     // FWMark. 0 (default/unset) means "skip".
     if let Some(e) = config.lookup("FWMark").next()
-        && let Ok(v) = e.get_int()
-        && let Ok(v) = u32::try_from(v)
+        && let Some(v) = get_int_as::<u32>(e)
     {
         settings.sockopts.fwmark = v;
     }
@@ -630,7 +652,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     // Compression. HOST-tagged. The level WE want peers to
     // compress towards us at. Reject LZO (stubbed) and >12.
     if let Some(e) = config.lookup("Compression").next()
-        && let Ok(v) = e.get_int()
+        && let Some(v) = get_int(e)
     {
         let v = u8::try_from(v).unwrap_or(255);
         match compress::Level::from_wire(v) {
@@ -667,14 +689,14 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     // DeviceStandby. Non-reloadable: decides whether tinc-up
     // fires at setup vs first-peer.
     if let Some(e) = config.lookup("DeviceStandby").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.device_standby = v;
     }
 
     // Rust extension. Non-reloadable.
     if let Some(e) = config.lookup("DhtDiscovery").next()
-        && let Ok(v) = e.get_bool()
+        && let Some(v) = get_bool(e)
     {
         settings.dht_discovery = v;
     }
