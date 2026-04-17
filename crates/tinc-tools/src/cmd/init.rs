@@ -160,7 +160,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
             let mut o = OpenOptions::new();
             o.create(true).append(true);
             #[cfg(unix)]
-            o.custom_flags(libc::O_NOFOLLOW);
+            o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
             o.open(&host_path).map_err(io_err(&host_path))?
         };
         let pubkey_b64 = b64::encode(sk.public_key());
@@ -251,7 +251,7 @@ fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdErro
         o.write(true)
             .create_new(true)
             .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW);
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         o
     };
     #[cfg(not(unix))]

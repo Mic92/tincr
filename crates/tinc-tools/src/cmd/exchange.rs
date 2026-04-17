@@ -351,7 +351,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                opts.custom_flags(libc::O_NOFOLLOW);
+                opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
             }
             if force {
                 opts.create(true).truncate(true);

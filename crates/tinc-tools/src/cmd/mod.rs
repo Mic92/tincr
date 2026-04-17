@@ -132,7 +132,7 @@ pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, C
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW);
+        o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
     }
     o.open(path).map_err(io_err(path))
 }

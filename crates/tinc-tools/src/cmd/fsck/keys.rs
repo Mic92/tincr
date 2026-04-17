@@ -202,7 +202,7 @@ fn fix_public_key(
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            o.custom_flags(libc::O_NOFOLLOW);
+            o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         }
         let f = o.open(host_file)?;
         let mut w = std::io::BufWriter::new(f);

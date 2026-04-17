@@ -291,7 +291,8 @@ fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    opts.mode(0o600)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
 
     let f = opts.open(path).map_err(io_err(path))?;
     let mut w = std::io::BufWriter::new(f);
@@ -308,7 +309,8 @@ fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true); // create_new = O_EXCL
     #[cfg(unix)]
-    opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    opts.mode(0o600)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
 
     let mut f = opts.open(path).map_err(io_err(path))?;
     f.write_all(body.as_bytes()).map_err(io_err(path))

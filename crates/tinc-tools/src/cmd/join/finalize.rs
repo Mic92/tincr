@@ -348,7 +348,8 @@ fn finalize_join_inner(
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            opts.mode(0o600)
+                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         }
         let f = opts.open(&priv_path).map_err(io_err(&priv_path))?;
         created.push(priv_path.clone());

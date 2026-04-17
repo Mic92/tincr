@@ -309,7 +309,7 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
         o.append(true)
             .create(true)
             .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW);
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         o
     };
     #[cfg(not(unix))]

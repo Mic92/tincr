@@ -29,6 +29,7 @@
 #![cfg(unix)]
 
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::io::AsFd;
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -97,12 +98,15 @@ pub struct Winsize {
 #[must_use]
 pub fn winsize() -> Winsize {
     // Macro generates `unsafe fn tiocgwinsz(fd, *mut winsize)`.
+    // Types/constants come from `nix::libc` so this module has no
+    // direct `libc` dependency — `nix` already pins the version.
     #[allow(clippy::items_after_statements)] // one-use ioctl: hoisting puts it 100 lines from its only call
     mod ioctl {
+        use nix::libc;
         nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
     }
 
-    let mut ws = libc::winsize {
+    let mut ws = nix::libc::winsize {
         ws_row: 0,
         ws_col: 0,
         ws_xpixel: 0,
@@ -120,7 +124,7 @@ pub fn winsize() -> Winsize {
     // `&raw mut ws` not `&mut ws`: the macro takes `*mut T`. `&mut`
     // would auto-coerce; `&raw mut` makes it explicit no Rust borrow
     // ever exists (silences `clippy::borrow_as_ptr`). Same machine code.
-    let ok = unsafe { ioctl::tiocgwinsz(libc::STDOUT_FILENO, &raw mut ws) };
+    let ok = unsafe { ioctl::tiocgwinsz(io::stdout().as_raw_fd(), &raw mut ws) };
 
     match ok {
         // 0×0 means "the tty doesn't know" (some serial consoles).
@@ -189,7 +193,7 @@ impl RawMode {
         // handles our timeout, but with ICANON off the inherited
         // VMIN/VTIME are unspecified — set them explicitly.
         //
-        // `SpecialCharacterIndices` not `libc::VMIN`: nix's enum
+        // `SpecialCharacterIndices` not `VMIN`: nix's enum
         // normalizes the linux-sparc64 quirk where `VMIN == VEOF`.
         // Free portability insurance; same value everywhere else.
         raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
