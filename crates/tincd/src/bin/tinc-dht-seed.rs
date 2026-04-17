@@ -69,11 +69,9 @@ fn resolve_mode(args: &[String]) -> ExitCode {
         eprintln!("tinc-dht-seed: pubkey is not valid tinc b64");
         return ExitCode::FAILURE;
     };
+    let decoded_len = decoded.len();
     let Ok(public): Result<[u8; 32], _> = decoded.try_into() else {
-        eprintln!(
-            "tinc-dht-seed: pubkey decoded to {} bytes, want 32",
-            b64.len()
-        );
+        eprintln!("tinc-dht-seed: pubkey decoded to {decoded_len} bytes, want 32");
         return ExitCode::FAILURE;
     };
 
