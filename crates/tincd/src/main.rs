@@ -808,7 +808,7 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
 
     // Unix mapping (the macros for the Windows
     // priority class names): Normal=0, Low=10, High=-10. nice values.
-    let nice: libc::c_int = match prio_str.to_ascii_lowercase().as_str() {
+    let nice: i32 = match prio_str.to_ascii_lowercase().as_str() {
         "normal" => 0,
         "low" => 10,
         "high" => -10,
@@ -864,7 +864,7 @@ fn init_logging(args: &Args) {
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
             .open(path)
         {
             Ok(f) => {

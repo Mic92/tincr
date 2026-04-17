@@ -130,7 +130,7 @@ pub enum SignalWhat {
     /// SIGTERM/INT/QUIT. Carries the raw signum so the exit log
     /// can say which one (post-mortem: `^C` vs `systemctl stop`
     /// vs `kill -QUIT`).
-    Exit(libc::c_int),
+    Exit(i32),
     /// SIGALRM.
     Retry,
 }

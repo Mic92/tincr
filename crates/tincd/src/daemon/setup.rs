@@ -419,11 +419,21 @@ fn register_signals(
     signals: &mut SelfPipe<SignalWhat>,
     ev: &mut EventLoop<IoWhat>,
 ) -> Result<(), io::Error> {
-    signals.add(libc::SIGTERM, SignalWhat::Exit(libc::SIGTERM))?;
-    signals.add(libc::SIGINT, SignalWhat::Exit(libc::SIGINT))?;
-    signals.add(libc::SIGQUIT, SignalWhat::Exit(libc::SIGQUIT))?;
-    signals.add(libc::SIGHUP, SignalWhat::Reload)?;
-    signals.add(libc::SIGALRM, SignalWhat::Retry)?;
+    use nix::sys::signal::Signal;
+    signals.add(
+        Signal::SIGTERM as i32,
+        SignalWhat::Exit(Signal::SIGTERM as i32),
+    )?;
+    signals.add(
+        Signal::SIGINT as i32,
+        SignalWhat::Exit(Signal::SIGINT as i32),
+    )?;
+    signals.add(
+        Signal::SIGQUIT as i32,
+        SignalWhat::Exit(Signal::SIGQUIT as i32),
+    )?;
+    signals.add(Signal::SIGHUP as i32, SignalWhat::Reload)?;
+    signals.add(Signal::SIGALRM as i32, SignalWhat::Retry)?;
 
     // USR1/USR2/WINCH: ignore. C tinc 1.1 sets these to SIG_IGN in
     // detach() (process.c:205-207). Older 1.0.x dumped state on
