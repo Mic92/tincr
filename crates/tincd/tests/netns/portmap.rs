@@ -143,16 +143,18 @@ impl Miniupnpd {
 /// Write a minimal one-node config: `DeviceType=dummy`, fixed
 /// `Port=655`, `UPnP=yes`. We don't need a peer — only the listener
 /// + portmapper thread.
-fn write_alice_config(confbase: &std::path::Path) {
+fn write_alice_config(confbase: &std::path::Path, refresh: u32) {
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
-        "Name = alice\n\
-         DeviceType = dummy\n\
-         AddressFamily = ipv4\n\
-         AutoConnect = no\n\
-         UPnP = yes\n\
-         UPnPRefreshPeriod = 5\n",
+        format!(
+            "Name = alice\n\
+             DeviceType = dummy\n\
+             AddressFamily = ipv4\n\
+             AutoConnect = no\n\
+             UPnP = yes\n\
+             UPnPRefreshPeriod = {refresh}\n"
+        ),
     )
     .unwrap();
     // 6550, not 655: bwrap's userns doesn't grant
@@ -250,7 +252,7 @@ fn upnp_miniupnpd_gateway() {
     let confbase = tmp.path().join("alice");
     let pidfile = tmp.path().join("alice.pid");
     let socket = tmp.path().join("alice.socket");
-    write_alice_config(&confbase);
+    write_alice_config(&confbase, 5);
     let alice = ChildWithLog::spawn(
         Command::new("ip")
             .args(["netns", "exec", "alice"])
@@ -336,6 +338,189 @@ fn upnp_miniupnpd_gateway() {
     // alice's listener via the DNAT rule. (tincd accept-side waits
     // for the initiator's ID line; nothing to read.)
     drop(probe);
+
+    eprint!("{}", alice.kill_and_log());
+    let _ = upnpd.0.kill_and_log();
+    for s in &mut sleepers {
+        let _ = s.kill();
+    }
+}
+
+/// Roaming: after the first mapping succeeds, swap alice's LAN IP
+/// (`.2` → `.3`) underneath the running daemon. The portmap worker
+/// re-derives the LAN IP each refresh round (see `portmap.rs`
+/// worker loop), so the next round must (a) log the route-change
+/// notice, (b) re-emit `Portmapped Tcp` (even though the external
+/// addr is unchanged — `last[]` is force-cleared on LAN-IP change),
+/// and (c) install a fresh DNAT rule pointing at `.3`.
+#[test]
+fn upnp_gateway_ip_change() {
+    if std::env::var_os("BWRAP_INNER").is_none() {
+        let Ok(bin) = which("miniupnpd") else {
+            eprintln!("SKIP upnp_gateway_ip_change: miniupnpd not on PATH");
+            return;
+        };
+        if which("nft").is_err() {
+            eprintln!("SKIP upnp_gateway_ip_change: nft not on PATH");
+            return;
+        }
+        // SAFETY: nextest = process-per-test.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("MINIUPNPD_BIN", bin);
+        }
+    }
+    if !enter_bwrap("portmap::upnp_gateway_ip_change") {
+        return;
+    }
+    let miniupnpd_bin =
+        std::env::var("MINIUPNPD_BIN").expect("outer pass sets MINIUPNPD_BIN; bwrap inherits env");
+
+    let tmp = TmpGuard::new("netns", "portmap-roam");
+
+    let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
+    veth_pair(
+        ("alice", "veth-a", "192.168.77.2/24"),
+        ("gw", "veth-lan", "192.168.77.1/24"),
+    );
+    run_ip(&[
+        "link", "add", "veth-out", "type", "veth", "peer", "name", "veth-wan",
+    ]);
+    run_ip(&["link", "set", "veth-wan", "netns", "gw"]);
+    run_ip(&["addr", "add", "10.77.0.1/24", "dev", "veth-out"]);
+    run_ip(&["link", "set", "veth-out", "up"]);
+    nsexec(
+        "gw",
+        &["ip", "addr", "add", "10.77.0.2/24", "dev", "veth-wan"],
+    );
+    nsexec("gw", &["ip", "link", "set", "veth-wan", "up"]);
+    nsexec(
+        "alice",
+        &["ip", "route", "add", "default", "via", "192.168.77.1"],
+    );
+    nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
+
+    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin) else {
+        for s in &mut sleepers {
+            let _ = s.kill();
+        }
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if nsexec("gw", &["ss", "-uln"]).contains(":5351") {
+            break;
+        }
+        if let Ok(Some(st)) = upnpd.0.child.try_wait() {
+            panic!(
+                "miniupnpd exited early ({st:?}):\n{}",
+                upnpd.0.kill_and_log()
+            );
+        }
+        assert!(Instant::now() < deadline, "miniupnpd didn't bind 5351");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let confbase = tmp.path().join("alice");
+    let pidfile = tmp.path().join("alice.pid");
+    let socket = tmp.path().join("alice.socket");
+    // Refresh every 2 s so the post-swap round lands well inside the
+    // test budget.
+    write_alice_config(&confbase, 2);
+    let alice = ChildWithLog::spawn(
+        Command::new("ip")
+            .args(["netns", "exec", "alice"])
+            .arg(tincd_bin())
+            .arg("-D")
+            .arg("-c")
+            .arg(&confbase)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .arg("--socket")
+            .arg(&socket)
+            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd in netns"),
+    );
+    assert!(
+        wait_for_file_with(&socket, Duration::from_secs(5)),
+        "alice setup failed:\n{}",
+        alice.kill_and_log()
+    );
+
+    // ─── first Portmapped (LAN .2) ────────────────────────────────
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if alice.log_snapshot().contains("Portmapped Tcp 6550") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no first `Portmapped Tcp` within 20s:\n{}",
+            alice.kill_and_log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // ─── swap alice's LAN IP .2 → .3 ─────────────────────────────
+    // Deleting the only on-link addr also drops the default route
+    // (no more nexthop source); re-add both. The daemon's listener
+    // is bound to 0.0.0.0 so it survives the renumber.
+    nsexec(
+        "alice",
+        &["ip", "addr", "del", "192.168.77.2/24", "dev", "veth-a"],
+    );
+    nsexec(
+        "alice",
+        &["ip", "addr", "add", "192.168.77.3/24", "dev", "veth-a"],
+    );
+    nsexec(
+        "alice",
+        &["ip", "route", "add", "default", "via", "192.168.77.1"],
+    );
+
+    // ─── (a) route-change INFO + (b) second Portmapped ──────────
+    // periodic tick is 5 s and the worker refresh is 2 s, so the
+    // re-emitted event surfaces within one tick after the next
+    // refresh round — budget 20 s for slop.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let log = loop {
+        let log = alice.log_snapshot();
+        let mapped = log.matches("Portmapped Tcp 6550").count();
+        if log.contains("default route changed") && mapped >= 2 {
+            break log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no route-change notice / re-map within 20s:\n{}",
+            alice.kill_and_log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        log.contains("192.168.77.2 \u{2192} 192.168.77.3"),
+        "route-change line missing old→new IPs:\n{log}"
+    );
+
+    // ─── (c) miniupnpd's DNAT now targets .3 ─────────────────────
+    let nat = nsexec(
+        "gw",
+        &[
+            "nft",
+            "list",
+            "chain",
+            "inet",
+            "filter",
+            "prerouting_miniupnpd",
+        ],
+    );
+    assert!(
+        nat.contains("192.168.77.3"),
+        "dnat rule for .3 not found in prerouting_miniupnpd:\n{nat}\n\
+         alice stderr:\n{}",
+        alice.kill_and_log()
+    );
 
     eprint!("{}", alice.kill_and_log());
     let _ = upnpd.0.kill_and_log();

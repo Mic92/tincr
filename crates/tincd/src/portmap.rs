@@ -321,14 +321,38 @@ fn worker(
     };
     let lease = (refresh.as_secs() * 2).min(u64::from(u32::MAX)) as u32;
 
-    // NAT-PMP's `get_default_gateway` (via netdev) reads the route
-    // table once; cache the LAN IP towards it for IGD's local_addr.
-    let lan_ip = natpmp::get_default_gateway()
-        .ok()
-        .and_then(|gw| local_ip_towards(IpAddr::V4(gw)));
+    // LAN IP towards the default gateway, re-derived every refresh
+    // round. A laptop hopping wifi→ethernet (or a VPN coming up,
+    // or DHCP handing out a different subnet) changes the default
+    // route mid-process; if we cached this once before the loop,
+    // IGD's `AddPortMapping` would ask the *new* router to DNAT to
+    // the *old* internal address — silently wrong until restart.
+    // The lookup is one netlink read + one UDP connect(2): μs.
+    let mut lan_ip: Option<Ipv4Addr> = None;
 
     loop {
         let started = Instant::now();
+
+        let cur_lan = natpmp::get_default_gateway()
+            .ok()
+            .and_then(|gw| local_ip_towards(IpAddr::V4(gw)));
+        if cur_lan != lan_ip {
+            if let (Some(old), Some(new)) = (lan_ip, cur_lan) {
+                log::info!(target: "tincd::portmap",
+                           "default route changed (LAN IP {old} → {new}); \
+                            re-mapping");
+            }
+            // Force a fresh `Mapped` event even if the new router
+            // hands back the identical external addr: the mapping
+            // is on a different box now, and discovery's `tcp=`
+            // republish keys off the event, not the value.
+            if lan_ip.is_some() {
+                last = [None, None];
+                warned = [false, false];
+            }
+            lan_ip = cur_lan;
+        }
+
         for &(proto, slot) in protos {
             if stop.load(Ordering::Relaxed) {
                 return;
