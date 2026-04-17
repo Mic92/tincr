@@ -220,7 +220,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             #[allow(unsafe_code)]
             let fd = unsafe { OwnedFd::from_raw_fd(raw) };
             let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
-                .map_err(|e| SetupError::io(format!("open inherited device fd {fd}"), e))?;
+                .map_err(|e| SetupError::io(format!("open inherited device fd {raw}"), e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "linux")]

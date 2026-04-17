@@ -27,7 +27,7 @@
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -52,6 +52,12 @@ pub enum FdSource {
     /// On Android pre-2020 `SELinux` policy, this was the only
     /// way. Post-2020, blocked: the policy forbids fd
     /// inheritance across exec for tun fds.
+    ///
+    /// `OwnedFd`, not `RawFd`: the single `from_raw_fd` lives at
+    /// the env/CLI parse site in the daemon, which is the only
+    /// place that can vouch for exclusive ownership. By the time
+    /// the fd reaches this crate it is already owned, so
+    /// double-close is structurally impossible.
     Inherited(OwnedFd),
 
     /// `Device = /path` mode (2020). Java side listens; we connect;
@@ -66,8 +72,6 @@ pub enum FdSource {
 #[derive(Debug)]
 pub struct FdTun {
     /// The tun fd. Raw IP channel — no `tun_pi`, no prefix.
-    /// `File` for ownership; `from_raw_fd` asserts the previous
-    /// owner (Java process or kernel `SCM_RIGHTS` dup) gave it up.
     fd: File,
 
     /// `"fd/5"` or `"fd:/path"` for error messages. C logs
@@ -238,7 +242,7 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
     #[allow(unsafe_code)]
     let mut fds: Vec<OwnedFd> = fds
         .into_iter()
-        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+        .map(|fd| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) })
         .collect();
 
     // Exactly one. The Java side sends one tun fd; that's the
@@ -683,7 +687,7 @@ mod tests {
         //
         // SAFETY: kernel dup'd via SCM_RIGHTS; the fd is ours.
         #[allow(unsafe_code)]
-        let received_w = unsafe { File::from_raw_fd(received_fd) };
+        let received_w = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(received_fd) };
 
         // Write through the RECEIVED fd, read from the canary
         // pipe. If they're connected (same underlying file),
@@ -703,16 +707,7 @@ mod tests {
 
     /// `pipe(2)`. Returns (read, write) as `OwnedFd` — drop closes.
     fn pipe() -> (OwnedFd, OwnedFd) {
-        let mut fds = [0; 2];
-        // SAFETY: `fds` is a 2-int buffer; pipe() writes exactly 2.
-        #[allow(unsafe_code)]
-        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(ret, 0, "pipe() failed: {}", io::Error::last_os_error());
-        // SAFETY: pipe() returned 0; both fds are fresh and ours.
-        #[allow(unsafe_code)]
-        unsafe {
-            (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
-        }
+        nix::unistd::pipe().expect("pipe() failed")
     }
 
     /// Write all bytes. Loop on short writes (pipes can short-
