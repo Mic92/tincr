@@ -383,25 +383,36 @@ pub(crate) fn adopt_listeners_from(
         )));
     }
 
-    let mut listeners = Vec::with_capacity(n);
-    for i in 0..n {
-        // `int tcp_fd = i + 3`. n ≤ MAXSOCKETS=8; RawFd is i32.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let tcp_fd = start_fd + i as RawFd;
+    // Wrap ALL inherited fds before doing any fallible work. If a
+    // mid-loop `?` fired after wrapping fd i but before wrapping
+    // fd i+1..n, the tail fds would leak (we already own them —
+    // main.rs unset LISTEN_FDS so nobody else will close them).
+    // Collecting into a Vec<OwnedFd> first means an early return
+    // from the second loop drops every remaining fd.
+    let owned: Vec<OwnedFd> = (0..n)
+        .map(|i| {
+            // `int tcp_fd = i + 3`. n ≤ MAXSOCKETS=8; RawFd is i32.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let tcp_fd = start_fd + i as RawFd;
+            // SAFETY: fd `start_fd..start_fd+n` was passed by
+            // systemd, is open. Taking ownership is correct: no
+            // other code in this process will use these fds (we're
+            // the first and only consumer; main.rs read LISTEN_FDS
+            // and unset it before calling us).
+            #[allow(unsafe_code)]
+            unsafe {
+                OwnedFd::from_raw_fd(tcp_fd)
+            }
+        })
+        .collect();
 
+    let mut listeners = Vec::with_capacity(n);
+    for fd in owned {
+        let tcp_fd = fd.as_raw_fd();
         // `getsockname(tcp_fd, &sa, &salen)`. socket2 needs the fd
-        // wrapped first; from_raw_fd takes
-        // ownership (Socket's Drop will close it, which is what we
-        // want — we OWN these fds now).
-        //
-        // SAFETY: fd `start_fd..start_fd+n` was passed by systemd,
-        // is a socket (we trust LISTEN_PID gated this in main.rs),
-        // is open. Taking ownership is correct: no other code in
-        // this process will use these fds (we're the first and only
-        // consumer; main.rs read LISTEN_FDS and unset it before
-        // calling us).
-        #[allow(unsafe_code)]
-        let tcp = unsafe { Socket::from_raw_fd(tcp_fd) };
+        // wrapped first; `Socket: From<OwnedFd>` (Socket's Drop
+        // will close it, which is what we want).
+        let tcp = Socket::from(fd);
 
         // getsockname via socket2. AF_UNIX would fail the
         // SocketAddr conversion below — that's fine, hard error.

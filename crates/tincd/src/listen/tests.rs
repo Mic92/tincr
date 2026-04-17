@@ -539,3 +539,49 @@ fn adopt_listeners_not_a_socket() {
         .to_string();
     assert!(e.contains("Could not get address"), "got: {e}");
 }
+
+/// Regression: when adopting N fds and fd i fails, fds i+1..N must
+/// still be closed. We own the whole range the moment we're called
+/// (main.rs already unset `LISTEN_FDS`); leaking the tail on an early
+/// error path is an fd leak even if the process usually exits right
+/// after.
+#[test]
+fn adopt_listeners_mid_error_closes_tail() {
+    // Two adjacent fds: a = /dev/null (ENOTSOCK), b = real TCP
+    // listener. dup() allocates lowest-free so two back-to-back
+    // dups are adjacent in a quiescent test thread; if some other
+    // thread raced an open between them we just skip — the
+    // property under test needs contiguity.
+    let devnull = std::fs::File::open("/dev/null").unwrap();
+    let a = nix::unistd::dup(&devnull).expect("dup a");
+    let mut b = nix::unistd::dup(&devnull).expect("dup b");
+    let (a_raw, b_raw) = (a.as_raw_fd(), b.as_raw_fd());
+    if b_raw != a_raw + 1 {
+        // Can't build a contiguous range; nothing to assert.
+        return;
+    }
+    // Replace b with a real socket so it's distinguishable from
+    // "never opened": after the call, F_GETFD on b_raw must fail.
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    nix::unistd::dup2(&tcp, &mut b).expect("dup2");
+    drop(tcp);
+
+    // Hand ownership of both ints to adopt_listeners_from.
+    std::mem::forget(a);
+    std::mem::forget(b);
+
+    let e = adopt_listeners_from(a_raw, 2, &opts())
+        .err()
+        .expect("fd a is /dev/null → ENOTSOCK");
+    assert!(e.to_string().contains("Could not get address"));
+
+    // The tail fd (b) was wrapped before the failure and dropped
+    // on early return — it must be closed now. Probe via raw
+    // libc::fcntl: `BorrowedFd::borrow_raw` on a closed fd is UB,
+    // so the nix wrapper can't be used here.
+    // SAFETY: F_GETFD on an arbitrary int is harmless; -1/EBADF is
+    // the expected outcome.
+    #[allow(unsafe_code)]
+    let probe = unsafe { libc::fcntl(b_raw, libc::F_GETFD) };
+    assert_eq!(probe, -1, "tail fd {b_raw} leaked (still open)");
+}
