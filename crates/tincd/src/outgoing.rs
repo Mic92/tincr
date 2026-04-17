@@ -746,17 +746,30 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u1
     let mut cfg = tinc_conf::Config::new();
     cfg.merge(entries);
 
+    // C `:165-166`: missing per-Address port falls back to
+    // `lookup_config("Port")` BEFORE the 655 default. We previously
+    // skipped straight to 655, so a `Port = 4443` host with bare
+    // `Address = 1.2.3.4` got dialled at :655 (the gossiped edge
+    // addrs cover this, but only once the peer is reachable via
+    // someone else — cold start was wrong).
+    let default_port = cfg
+        .lookup("Port")
+        .next()
+        .and_then(|e| e.get_str().parse::<u16>().ok())
+        .unwrap_or(655);
+
     let mut addrs = Vec::new();
     for e in cfg.lookup("Address") {
         // `get_config_string(cfg, &address); port = strchr(address,
-        // ' ')` — same `host port`
-        // shape as everywhere else in tinc. Missing port → default
-        // 655 (`:165-166` `if(!port) port = "655"`).
+        // ' ')` — same `host port` shape as everywhere else in tinc.
         let s = e.get_str();
         let mut parts = s.splitn(2, ' ');
         let host = parts.next().unwrap_or("");
-        let port = parts.next().unwrap_or("655");
-        match (host, port.parse::<u16>().ok()) {
+        let port = match parts.next() {
+            None => Some(default_port),
+            Some(p) => p.parse::<u16>().ok(),
+        };
+        match (host, port) {
             (h, Some(p)) if !h.is_empty() => addrs.push((h.to_string(), p)),
             _ => {
                 log::warn!(target: "tincd::conn",
@@ -881,6 +894,35 @@ mod tests {
 
         let addrs = resolve_config_addrs(&tmp, "bob");
         assert_eq!(addrs, vec![("127.0.0.1".to_string(), 655)]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `Port =` is the default for bare `Address` lines (C parity:
+    /// `address_cache.c:165` looks up `Port` before falling back to
+    /// 655). An explicit per-Address port still wins.
+    #[test]
+    fn resolve_port_directive_default() {
+        let tmp = std::env::temp_dir().join(format!(
+            "tincd-outgoing-portdir-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("hosts")).unwrap();
+        std::fs::write(
+            tmp.join("hosts").join("bob"),
+            "Port = 4443\nAddress = 10.0.0.1\nAddress = 10.0.0.2 7000\n",
+        )
+        .unwrap();
+
+        let addrs = resolve_config_addrs(&tmp, "bob");
+        assert_eq!(
+            addrs,
+            vec![
+                ("10.0.0.1".to_string(), 4443),
+                ("10.0.0.2".to_string(), 7000),
+            ]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
