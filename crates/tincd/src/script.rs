@@ -243,12 +243,24 @@ pub fn spawn(
 }
 
 /// Drain exited children spawned by [`spawn`] (and any other
-/// detached forks). `waitpid(-1, WNOHANG)` until no more.
+/// detached forks). `waitpid(-1, WNOHANG)` until no more. Non-zero
+/// exit / signal death is logged at `error!` so a broken async hook
+/// (e.g. `subnet-up` that fails to add a route) is visible at
+/// default log level instead of silently swallowed.
 pub fn reap_children() {
     use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     loop {
         match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) | Err(_) => break,
+            Ok(WaitStatus::Exited(pid, 0)) => {
+                log::debug!("Script (pid {pid}) exited successfully");
+            }
+            Ok(WaitStatus::Exited(pid, code)) => {
+                log::error!("Script (pid {pid}) exited with status {code}");
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) => {
+                log::error!("Script (pid {pid}) killed by signal {sig}");
+            }
             Ok(_) => {}
         }
     }

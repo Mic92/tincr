@@ -367,7 +367,12 @@ impl Daemon {
                     "Script {name}: skipped (Sandbox=high)");
             }
             Ok(ScriptResult::Failed(st)) => {
-                log::warn!(target: "tincd", "Script {name}: {st}");
+                // error!, not warn!: a failing tinc-up usually means
+                // the interface never got an address — the tunnel is
+                // effectively dead and the operator needs to see it
+                // at default log level.
+                log::error!(target: "tincd",
+                    "Script {name} exited with status: {st}");
             }
             Err(e) => {
                 log::error!(target: "tincd", "Script {name} spawn failed: {e}");
