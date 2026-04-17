@@ -54,9 +54,10 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "upnp")]
 
+mod igd;
 mod pcp;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -282,37 +283,27 @@ fn try_igd(
     discover_wait: Duration,
     lan_ip: Option<Ipv4Addr>,
 ) -> Result<SocketAddr, String> {
-    use igd_next::{PortMappingProtocol, SearchOptions, search_gateway};
-
-    let gw = search_gateway(SearchOptions {
-        timeout: Some(discover_wait),
-        ..Default::default()
-    })
-    .map_err(|e| format!("SSDP discover: {e}"))?;
+    let gw = igd::discover(discover_wait)?;
 
     // C tinc passes miniupnpc's `lanaddr` (UPNP_GetValidIGD output).
-    // igd-next doesn't surface it; derive from the gateway's addr
-    // by connecting a throwaway UDP socket and reading local_addr —
-    // the kernel's route lookup picks the right source IP for us.
+    // Derive from the gateway's addr by connecting a throwaway UDP
+    // socket and reading local_addr — the kernel's route lookup
+    // picks the right source IP for us.
     let lan_ip = lan_ip
-        .or_else(|| local_ip_towards(gw.addr.ip()))
+        .or_else(|| local_ip_towards(gw.addr()))
         .ok_or("no LAN IP towards gateway")?;
 
-    let igd_proto = match proto {
-        Proto::Tcp => PortMappingProtocol::TCP,
-        Proto::Udp => PortMappingProtocol::UDP,
-    };
     gw.add_port(
-        igd_proto,
+        proto,
         local_port,
-        SocketAddr::new(IpAddr::V4(lan_ip), local_port),
+        SocketAddrV4::new(lan_ip, local_port),
         lease,
         "tinc",
     )
     .map_err(|e| format!("AddPortMapping: {e}"))?;
 
     let ext_ip = gw
-        .get_external_ip()
+        .external_ip()
         .map_err(|e| format!("GetExternalIPAddress: {e}"))?;
     Ok(SocketAddr::new(ext_ip, local_port))
 }

@@ -111,14 +111,14 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # the C's LZ4_compress_fast_extState wire output. KAT proves it.
 lz4_flex = { version = "0.11", default-features = false }
 
-# portmap: PCP (hand-rolled, RFC 6887) + UPnP-IGD fallback. n0's
-# `portmapper` was evaluated and rejected (drags +190 transitive
-# crates: full tokio/hyper/netwatch). igd-next's sync API uses
-# attohttpc (no async runtime). netdev provides cross-platform
+# portmap: PCP (hand-rolled, RFC 6887) + UPnP-IGD fallback (hand-
+# rolled in src/portmap/igd.rs, std-only). n0's `portmapper` was
+# evaluated and rejected (drags +190 transitive crates: full tokio/
+# hyper/netwatch); igd-next was tried and dropped (~50 deps via
+# attohttpc → url → idna → ICU). netdev provides cross-platform
 # default-gateway lookup (v4 *and* v6 — 0.42 fixed the Linux v6
 # parser); PCP needs the gateway addr to send to. Feature-gated,
 # default-ON to mirror C tinc's --enable-miniupnpc autoconf default.
-igd-next = { version = "0.17", default-features = false, optional = true }
 netdev = { version = "0.42", optional = true }
 
 # LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
@@ -157,7 +157,7 @@ serde_json = { workspace = true }
 
 [features]
 default = ["upnp"]
-upnp = ["dep:igd-next", "dep:netdev"]
+upnp = ["dep:netdev"]
 
 [[bench]]
 name = "throughput"
