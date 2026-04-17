@@ -760,6 +760,13 @@ pub mod linux {
             self.child.id()
         }
 
+        /// Non-destructive log read; child stays running. Used by
+        /// tests that scrape stderr while the daemon is live
+        /// (e.g. `reqkey_simultaneous` counting recurrences).
+        pub fn log_snapshot(&self) -> String {
+            String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
+        }
+
         pub fn kill_and_log(mut self) -> String {
             let _ = self.child.kill();
             let _ = self.child.wait();

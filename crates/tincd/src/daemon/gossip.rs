@@ -384,7 +384,16 @@ impl Daemon {
             return Ok(false);
         };
 
-        // Peer re-initiating; the assignment below resets state.
+        // FIXME(reqkey-race): peer re-initiating. We unconditionally
+        // reset to Responder below, but if BOTH sides hit
+        // `send_req_key` simultaneously (mutual ConnectTo + traffic
+        // on both ends at once) each side lands here, both flip to
+        // Responder, neither sends SIG, and the 10 s debounce in
+        // `txpath::try_tx` restarts the race forever. C tinc has the
+        // same reset (`protocol_key.c::req_key_h`) and logs the same
+        // line, but in practice only ONCE per reconnect — the
+        // recurring case is ours. See failing reproducer
+        // `tests/reqkey_simultaneous.rs`.
         if self
             .dp
             .tunnels
