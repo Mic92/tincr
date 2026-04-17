@@ -9,7 +9,9 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
-use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
+#[allow(deprecated)] // epoll_ctl(RawFd) — see `epoll_ctl_raw` below.
+use nix::sys::epoll::epoll_ctl;
+use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp, EpollTimeout};
 
 pub(super) type RawEvent = EpollEvent;
 pub(super) type Poller = Epoll;
@@ -42,36 +44,25 @@ pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -
 /// open-for-'a invariant the loop cannot guarantee — if the caller
 /// closed the fd first, that is the *caller's* bug (the EBADF
 /// tripwire in `EventLoop::del` catches it), not a soundness hole
-/// in this crate. So go to `libc::epoll_ctl` with the raw integer.
-#[allow(unsafe_code)]
+/// in this crate. So use nix's deprecated free-function `epoll_ctl`,
+/// which still takes `RawFd` and keeps the `unsafe` inside nix.
+#[allow(deprecated)]
 fn epoll_ctl_raw(
     ep: &Poller,
-    op: libc::c_int,
+    op: EpollOp,
     fd: RawFd,
-    ev: *mut libc::epoll_event,
+    ev: Option<&mut EpollEvent>,
 ) -> io::Result<()> {
-    // SAFETY: `ep.0` is an open epoll instance owned by `ep`. `fd`
-    // is whatever the caller registered; if stale the kernel returns
-    // EBADF/ENOENT, which we surface. `ev` is either a valid stack
-    // pointer (MOD) or NULL (DEL, accepted since 2.6.9).
-    let rc = unsafe { libc::epoll_ctl(ep.0.as_raw_fd(), op, fd, ev) };
-    if rc < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    Ok(epoll_ctl(ep.0.as_raw_fd(), op, fd, ev)?)
 }
 
 pub(super) fn modify(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
-    let mut ev = libc::epoll_event {
-        events: interest_to_flags(i).bits().cast_unsigned(),
-        u64: token as u64,
-    };
-    epoll_ctl_raw(ep, libc::EPOLL_CTL_MOD, fd, &raw mut ev)
+    let mut ev = EpollEvent::new(interest_to_flags(i), token as u64);
+    epoll_ctl_raw(ep, EpollOp::EpollCtlMod, fd, Some(&mut ev))
 }
 
 pub(super) fn del(ep: &Poller, fd: RawFd) -> io::Result<()> {
-    epoll_ctl_raw(ep, libc::EPOLL_CTL_DEL, fd, std::ptr::null_mut())
+    epoll_ctl_raw(ep, EpollOp::EpollCtlDel, fd, None)
 }
 
 pub(super) fn wait(

@@ -16,6 +16,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+use nix::sys::time::TimeSpec;
 
 /// The kqueue fd.
 pub(super) type Poller = Kqueue;
@@ -185,12 +186,9 @@ pub(super) fn wait(
     events: &mut [RawEvent],
     timeout: Option<Duration>,
 ) -> io::Result<usize> {
-    let ts = timeout.map(|d| libc::timespec {
-        // time_t::MAX seconds ≈ 292 Gyr; event-loop timeouts are seconds.
-        #[allow(clippy::cast_possible_wrap)]
-        tv_sec: d.as_secs() as libc::time_t,
-        tv_nsec: libc::c_long::from(d.subsec_nanos()),
-    });
+    // `Kqueue::kevent` takes nix's `timespec` re-export; build via
+    // `TimeSpec` so the field types/widths stay nix's problem.
+    let ts = timeout.map(|d| *TimeSpec::from_duration(d).as_ref());
     // SAFETY: RawEvent is #[repr(transparent)] over KEvent, so the
     // slice layout is identical. std::mem::transmute can't handle
     // unsized slices; this cast is the canonical pattern for

@@ -17,6 +17,7 @@
 //! the callback's runtime — rate-based timers rely on this.
 
 #![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 mod io;
 mod timer;

@@ -95,10 +95,10 @@ pub struct SelfPipe<W> {
     /// Read end. Registered with the `EventLoop` for `Io::Read`.
     /// When `turn()` reports it readable, daemon calls `drain()`.
     rd: OwnedFd,
-    /// Write end. The handler writes here. Kept alive so the pipe
-    /// doesn't half-close. `_` prefix because we never read it
-    /// directly — `PIPE_WR` is the handler's copy.
-    _wr: OwnedFd,
+    /// Write end. The handler writes here via `PIPE_WR` (the raw
+    /// copy); we keep the `OwnedFd` so the pipe doesn't half-close
+    /// and so tests can write through it without forging a fd.
+    wr: OwnedFd,
     /// Dispatch table, indexed by signum.
     table: [Option<W>; NSIG_TABLE],
 }
@@ -160,7 +160,7 @@ impl<W: Copy> SelfPipe<W> {
 
         Ok(Self {
             rd,
-            _wr: wr,
+            wr,
             table: [None; NSIG_TABLE],
         })
     }
@@ -185,6 +185,15 @@ impl<W: Copy> SelfPipe<W> {
     #[must_use]
     pub fn read_fd(&self) -> BorrowedFd<'_> {
         self.rd.as_fd()
+    }
+
+    /// Write-end fd. The signal handler writes here via the
+    /// `PIPE_WR` raw copy; this borrowed handle lets callers (and
+    /// tests) inject a wakeup byte without forging a `BorrowedFd`
+    /// from the static int.
+    #[must_use]
+    pub fn write_fd(&self) -> BorrowedFd<'_> {
+        self.wr.as_fd()
     }
 
     /// Installs the handler for `signum` and stores `what` in the
@@ -338,17 +347,18 @@ mod tests {
         // Tests run in parallel; installing SIGHUP/TERM handlers is
         // process-global and races. The handler installation IS
         // tested, but in the integration suite.
-        sp.table[libc::SIGHUP as usize] = Some(Sig::Reload);
-        sp.table[libc::SIGTERM as usize] = Some(Sig::Exit);
+        sp.table[Signal::SIGHUP as usize] = Some(Sig::Reload);
+        sp.table[Signal::SIGTERM as usize] = Some(Sig::Exit);
 
         // Write signums to the pipe directly. This is what the
         // handler does, minus the atomic load.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
-        let bytes = [libc::SIGHUP as u8, libc::SIGTERM as u8, libc::SIGHUP as u8];
-        let wr_fd = PIPE_WR.load(Ordering::Relaxed);
-        assert!(wr_fd >= 0, "new() set PIPE_WR");
-        #[allow(unsafe_code)]
-        let n = unsafe { libc::write(wr_fd, bytes.as_ptr().cast(), bytes.len()) };
+        let bytes = [
+            Signal::SIGHUP as u8,
+            Signal::SIGTERM as u8,
+            Signal::SIGHUP as u8,
+        ];
+        assert!(PIPE_WR.load(Ordering::Relaxed) >= 0, "new() set PIPE_WR");
+        let n = nix::unistd::write(sp.write_fd(), &bytes).unwrap();
         assert_eq!(n, 3);
 
         let mut out = Vec::new();
@@ -363,11 +373,8 @@ mod tests {
         let sp: SelfPipe<Sig> = SelfPipe::new().unwrap();
         // table is all None.
 
-        let wr_fd = PIPE_WR.load(Ordering::Relaxed);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
-        let byte = [libc::SIGUSR1 as u8];
-        #[allow(unsafe_code)]
-        let n = unsafe { libc::write(wr_fd, byte.as_ptr().cast(), 1) };
+        let byte = [Signal::SIGUSR1 as u8];
+        let n = nix::unistd::write(sp.write_fd(), &byte).unwrap();
         assert_eq!(n, 1);
 
         let mut out = Vec::new();
@@ -401,15 +408,10 @@ mod tests {
     fn drain_reads_exactly_pending() {
         let _g = SERIAL.lock().unwrap();
         let mut sp: SelfPipe<Sig> = SelfPipe::new().unwrap();
-        sp.table[libc::SIGHUP as usize] = Some(Sig::Reload);
+        sp.table[Signal::SIGHUP as usize] = Some(Sig::Reload);
 
-        let wr_fd = PIPE_WR.load(Ordering::Relaxed);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // POSIX sigs: 1..=31
-        let byte = [libc::SIGHUP as u8];
-        #[allow(unsafe_code)]
-        unsafe {
-            libc::write(wr_fd, byte.as_ptr().cast(), 1);
-        }
+        let byte = [Signal::SIGHUP as u8];
+        nix::unistd::write(sp.write_fd(), &byte).unwrap();
 
         let mut out = Vec::new();
         sp.drain(&mut out);

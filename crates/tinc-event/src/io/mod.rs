@@ -185,17 +185,13 @@ impl<W: Copy> EventLoop<W> {
         // from it because the loop cannot prove the caller hasn't
         // closed it (that's the caller's contract, asserted via the
         // EBADF tripwire in `del()`).
-        if slot.interest.is_some() {
-            modify(&self.ep, slot.fd, id.0, interest)?;
-        } else {
-            // Unreachable in current API (del frees slot). Kept for
-            // when/if we expose a "deregister but keep slot" path.
-            // SAFETY: in the only path that could reach here the
-            // caller still owns the fd and is re-arming it.
-            #[allow(unsafe_code)]
-            let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
-            add(&self.ep, fd, id.0, interest)?;
-        }
+        // `interest == None` would mean "deregistered but slot kept
+        // alive" — unreachable in the current API (`del` frees the
+        // slot). The old code forged a `BorrowedFd` from the stored
+        // raw int to re-ADD here; rather than keep an `unsafe` for a
+        // dead branch, assert it.
+        debug_assert!(slot.interest.is_some(), "live slot has interest");
+        modify(&self.ep, slot.fd, id.0, interest)?;
         slot.interest = Some(interest);
         Ok(())
     }
@@ -230,7 +226,7 @@ impl<W: Copy> EventLoop<W> {
             if let Err(e) = del(&self.ep, slot.fd) {
                 debug_assert_ne!(
                     e.raw_os_error(),
-                    Some(libc::EBADF),
+                    Some(nix::Error::EBADF as i32),
                     "ev.del(fd={}) after fd closed — deregister BEFORE drop",
                     slot.fd
                 );
