@@ -41,8 +41,10 @@
 //! bob = C `tincd` (`TINC_C_TINCD`). The C side does NOT recur →
 //! proves regression, not protocol-inherent.
 //!
-//! `#[ignore]` until `FIXME(reqkey-race)` in `gossip.rs::on_req_key`
-//! / `periodic.rs` is addressed.
+//! Fixed by the name tie-break in `gossip.rs::on_req_key` and the
+//! `outgoing` transfer in `connect.rs::on_ack` dedup. The Rust↔Rust
+//! case now runs in CI; the Rust↔C control stays `#[ignore]` (30 s
+//! wall + `TINC_C_TINCD` gate).
 //!
 //! ```sh
 //! cargo test -p tincd --test reqkey_simultaneous -- --ignored --nocapture
@@ -126,10 +128,15 @@ fn enter_netns(test_name: &str) -> Option<NetNs> {
         .args(["--tmpfs", "/run"])
         .arg("--")
         .arg(&self_exe)
+        // `--include-ignored`: the Rust↔Rust test is no longer
+        // `#[ignore]`, but the Rust↔C control is. The OUTER process
+        // already decided to run (it was invoked with `--ignored` or
+        // not); the inner re-exec must run whichever test name it was
+        // handed regardless of its ignore attr.
         .args([
             "--exact",
             test_name,
-            "--ignored",
+            "--include-ignored",
             "--nocapture",
             "--test-threads=1",
         ])
@@ -510,10 +517,9 @@ fn run_reqkey_race(tag: &str, bob_impl: Impl, netns: NetNs) {
     );
 }
 
-/// Rust ↔ Rust. THE failing reproducer. `#[ignore]` until
-/// `FIXME(reqkey-race)` is fixed.
+/// Rust ↔ Rust. Regression test for the simultaneous-`REQ_KEY`
+/// livelock; converges in one RTT after the name tie-break.
 #[test]
-#[ignore = "FIXME(reqkey-race): simultaneous REQ_KEY livelocks Rust↔Rust tunnel handshake"]
 fn reqkey_simultaneous_rust_rust() {
     let Some(netns) = enter_netns("reqkey_simultaneous_rust_rust") else {
         return;

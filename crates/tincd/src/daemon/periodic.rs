@@ -112,12 +112,12 @@ impl Daemon {
 
             // UDP keepalive (no PMTU). Gate on validkey:
             // unconditional REQ_KEY races with gossip during mesh
-            // formation.
-            // FIXME(reqkey-race): the gate here only stops the
-            // PERIODIC re-init; the simultaneous-init race itself
-            // (both ends `send_req_key` from `try_tx` before either's
-            // REQ_KEY lands) still livelocks the tunnel handshake.
-            // See `tests/reqkey_simultaneous.rs`. Per-packet try_tx (in route_packet) handles
+            // formation. The simultaneous-init race itself (both
+            // ends `send_req_key` from `try_tx` before either's
+            // REQ_KEY lands) is broken by the name tie-break in
+            // `gossip.rs::on_req_key`; this gate just avoids adding
+            // a third initiator to the mix every PingInterval.
+            // Regression: `tests/reqkey_simultaneous.rs`. Per-packet try_tx (in route_packet) handles
             // the initial handshake instead.
             let try_nid = self
                 .node_ids

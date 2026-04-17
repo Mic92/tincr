@@ -384,16 +384,52 @@ impl Daemon {
             return Ok(false);
         };
 
-        // FIXME(reqkey-race): peer re-initiating. We unconditionally
-        // reset to Responder below, but if BOTH sides hit
-        // `send_req_key` simultaneously (mutual ConnectTo + traffic
-        // on both ends at once) each side lands here, both flip to
-        // Responder, neither sends SIG, and the 10 s debounce in
-        // `txpath::try_tx` restarts the race forever. C tinc has the
-        // same reset (`protocol_key.c::req_key_h`) and logs the same
-        // line, but in practice only ONCE per reconnect — the
-        // recurring case is ours. See failing reproducer
-        // `tests/reqkey_simultaneous.rs`.
+        // ─── simultaneous-init tie-break ───────────────────────
+        // C tinc unconditionally resets to Responder here
+        // (`protocol_key.c::req_key_h`). With mutual `ConnectTo` +
+        // symmetric latency, BOTH sides hit `send_req_key`
+        // (Role::Initiator) before either's REQ_KEY arrives, so
+        // both land here, both flip to Responder, both feed the
+        // other's KEX, both wait for a SIG that neither (as
+        // Responder) sends. The stale ANS_KEY from the peer's
+        // pre-reset Responder start then arrives with seqno 0
+        // against inseqno 1 → `BadSeqno`, dropped by the 10 s
+        // gate. `try_tx` restarts both as Initiator after 10 s and
+        // the race repeats forever.
+        //
+        // Fix: deterministic tie-break by NAME, applied ONLY while
+        // we're mid-handshake (`waitingforkey && !validkey` — i.e.
+        // we just `send_req_key`'d ourselves). The lexically
+        // smaller name keeps Initiator and DROPS the peer's
+        // REQ_KEY; the larger name accepts Responder. Both ends
+        // evaluate `self.name < msg.from` with swapped operands,
+        // so exactly one side drops. The kept Initiator's inseqno
+        // is still 0, so the Responder's ANS_KEY (KEX seqno 0)
+        // feeds cleanly and the handshake completes in one RTT.
+        //
+        // After `validkey` is set, a fresh REQ_KEY from the peer is
+        // a legitimate restart (rekey / their tunnel-stuck recovery)
+        // and we honour it unconditionally — same as C.
+        //
+        // Against a C peer: C always resets to Responder. If our
+        // name is smaller we keep Initiator → converges first try.
+        // If our name is larger we also reset → both Responder,
+        // same behaviour as C↔C (eventually desyncs on retry
+        // jitter). No regression vs C.
+        //
+        // Reproducer: `tests/reqkey_simultaneous.rs`.
+        let mid_handshake = self
+            .dp
+            .tunnels
+            .get(&from_nid)
+            .is_some_and(|t| t.sptps.is_some() && t.status.waitingforkey && !t.status.validkey);
+        if mid_handshake && self.name.as_str() < msg.from.as_str() {
+            log::debug!(target: "tincd::proto",
+                        "Got REQ_KEY from {} while SPTPS already started; \
+                         keeping initiator role (name tie-break)",
+                        msg.from);
+            return Ok(false);
+        }
         if self
             .dp
             .tunnels
