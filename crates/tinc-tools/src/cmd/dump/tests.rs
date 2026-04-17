@@ -626,7 +626,7 @@ fn inv_mixed() {
 /// (Upstream's message has a "Cannot not [sic]" double negative
 /// typo. We don't replicate the message.)
 #[test]
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn inv_dir_perms() {
     let (d, paths) = setup_inv();
     let inv_dir = d.path().join("vpn/invitations");
@@ -653,7 +653,7 @@ fn inv_dir_perms() {
 /// Per-file permission denied → SKIP, not error. The other files
 /// still show.
 #[test]
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn inv_file_perms_skip() {
     let (d, paths) = setup_inv();
     let inv_dir = d.path().join("vpn/invitations");
