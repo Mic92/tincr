@@ -308,6 +308,11 @@ fn worker(
     // Per-proto last-known mapping. Change → emit Mapped; was-Some
     // now-Err → emit Lost.
     let mut last: [Option<SocketAddr>; 2] = [None, None];
+    // Per-proto: have we already INFO-logged the current failure
+    // streak? Reset on success so a later loss (network change,
+    // router toggled UPnP off) surfaces again instead of staying
+    // debug-only forever after the first boot-time round.
+    let mut warned: [bool; 2] = [false, false];
     let protos: &[(Proto, usize)] = match (mode.wants_tcp(), mode.wants_udp()) {
         (true, true) => &[(Proto::Tcp, 0), (Proto::Udp, 1)],
         (false, true) => &[(Proto::Udp, 1)],
@@ -330,6 +335,7 @@ fn worker(
             }
             match try_map(local_port, proto, lease, discover_wait, lan_ip) {
                 Ok((ext, via)) => {
+                    warned[slot] = false;
                     if last[slot] != Some(ext) {
                         last[slot] = Some(ext);
                         if tx
@@ -346,8 +352,16 @@ fn worker(
                     }
                 }
                 Err(e) => {
-                    log::debug!(target: "tincd::portmap",
-                                "map {proto:?} {local_port}: {e}");
+                    if warned[slot] {
+                        log::debug!(target: "tincd::portmap",
+                                    "map {proto:?} {local_port}: {e}");
+                    } else {
+                        warned[slot] = true;
+                        log::info!(target: "tincd::portmap",
+                                   "no NAT-PMP/IGD gateway responded for \
+                                    {proto:?} {local_port} ({e}); will keep \
+                                    retrying every {refresh:?}");
+                    }
                     if last[slot].take().is_some() && tx.send(PortmapEvent::Lost { proto }).is_err()
                     {
                         return;
