@@ -443,13 +443,16 @@ impl Daemon {
     /// SIGTERM/SIGHUP/SIGALRM handlers.
     pub(super) fn on_signal(&mut self, s: SignalWhat) {
         match s {
-            SignalWhat::Exit => {
-                log::info!(target: "tincd", "Got signal, exiting");
+            SignalWhat::Exit(sig) => {
+                let name = nix::sys::signal::Signal::try_from(sig)
+                    .map_or("signal", nix::sys::signal::Signal::as_str);
+                log::info!(target: "tincd", "Got {name}, exiting");
                 self.running = false;
             }
             SignalWhat::Reload => {
-                // No log file to reopen (env_logger → stderr).
-                // Continue either way.
+                // env_logger's file target is set-once; --logfile
+                // is NOT reopened here. logrotate must use
+                // `copytruncate` (see docs/OPERATING.md).
                 log::info!(target: "tincd", "Got SIGHUP, reloading");
                 if !self.reload_configuration() {
                     log::error!(target: "tincd",

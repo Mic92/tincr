@@ -255,8 +255,8 @@ fn req_log_streams() {
         log_r.read_exact(&mut body).expect("log body read");
         let msg = String::from_utf8_lossy(&body);
 
-        // The bare `args()` from the log macro — no env_logger
-        // timestamp/level prefix (log_tap pushes `r.args().to_string()`).
+        // log_tap prefixes `LEVEL target:`; match on the message
+        // substring so the test is independent of that formatting.
         if msg.contains("Connection from") && msg.contains("(control)") {
             found = true;
             break;

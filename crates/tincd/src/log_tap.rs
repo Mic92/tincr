@@ -131,13 +131,20 @@ impl log::Log for TapLogger {
         self.inner.log(r);
 
         if LOG_TAP_ACTIVE.load(Ordering::Relaxed) {
-            // Format ONCE, push. Daemon drains per-turn.
-            //
-            // We don't have access to the env_logger-formatted
-            // output (timestamps, level tag); the CLI side just
-            // reads raw bytes anyway. The `args()` is the bare
-            // message.
-            TAP.with_borrow_mut(|v| v.push((r.level(), r.args().to_string())));
+            // Format ONCE, push. Daemon drains per-turn. Prefix
+            // with level + target so `tinc log 5` on a busy mesh
+            // is grep-able rather than an undifferentiated wall;
+            // the CLI side prints the body verbatim. No timestamp:
+            // the tap drains once per event-loop turn so a
+            // wall-clock stamp here would be misleadingly precise,
+            // and the operator's terminal/journal already stamps
+            // arrival.
+            TAP.with_borrow_mut(|v| {
+                v.push((
+                    r.level(),
+                    format!("{:5} {}: {}", r.level(), r.target(), r.args()),
+                ));
+            });
         }
     }
 

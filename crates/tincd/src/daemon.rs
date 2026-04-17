@@ -127,8 +127,10 @@ pub enum TimerWhat {
 pub enum SignalWhat {
     /// SIGHUP.
     Reload,
-    /// SIGTERM/INT/QUIT.
-    Exit,
+    /// SIGTERM/INT/QUIT. Carries the raw signum so the exit log
+    /// can say which one (post-mortem: `^C` vs `systemctl stop`
+    /// vs `kill -QUIT`).
+    Exit(libc::c_int),
     /// SIGALRM.
     Retry,
 }

@@ -416,9 +416,9 @@ fn register_signals(
     signals: &mut SelfPipe<SignalWhat>,
     ev: &mut EventLoop<IoWhat>,
 ) -> Result<(), io::Error> {
-    signals.add(libc::SIGTERM, SignalWhat::Exit)?;
-    signals.add(libc::SIGINT, SignalWhat::Exit)?;
-    signals.add(libc::SIGQUIT, SignalWhat::Exit)?;
+    signals.add(libc::SIGTERM, SignalWhat::Exit(libc::SIGTERM))?;
+    signals.add(libc::SIGINT, SignalWhat::Exit(libc::SIGINT))?;
+    signals.add(libc::SIGQUIT, SignalWhat::Exit(libc::SIGQUIT))?;
     signals.add(libc::SIGHUP, SignalWhat::Reload)?;
     signals.add(libc::SIGALRM, SignalWhat::Retry)?;
 
