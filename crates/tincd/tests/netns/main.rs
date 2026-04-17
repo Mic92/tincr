@@ -100,6 +100,7 @@ mod busyloop;
 mod chaos;
 mod dns;
 mod ping;
+mod portmap;
 mod rekey;
 mod sandbox;
 mod stress;

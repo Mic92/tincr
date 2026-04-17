@@ -14,8 +14,21 @@ use super::common::{Ctl, alloc_port, pubkey_from_seed, tincd_cmd, write_ed25519_
 /// `Some(NetNs)` → we ARE inside; run the test body.
 /// `None` → outer pass spawned-and-waited (or SKIP); body must not run.
 pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
+    enter_bwrap(test_name).then(NetNs::setup)
+}
+
+/// Just the bwrap re-exec, no `NetNs::setup` (no precreated TUNs,
+/// no `bobside` child ns). Tests that build their own multi-netns
+/// topology (e.g. `portmap::upnp_miniupnpd_gateway`) call this and
+/// then [`make_child_netns`] / veth themselves.
+///
+/// `true` → inside bwrap, run body. `false` → outer pass done/SKIP.
+pub(crate) fn enter_bwrap(test_name: &str) -> bool {
     if std::env::var_os("BWRAP_INNER").is_some() {
-        return Some(NetNs::setup());
+        // lo up: every topology needs it; cheap, idempotent.
+        run_ip(&["link", "set", "lo", "up"]);
+        std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
+        return true;
     }
 
     // ─── feature-detect ────────────────────────────────────────────
@@ -32,7 +45,7 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
     match probe {
         Err(e) => {
             eprintln!("SKIP {test_name}: bwrap not found ({e})");
-            return None;
+            return false;
         }
         Ok(out) if !out.status.success() => {
             let why = String::from_utf8_lossy(&out.stderr);
@@ -41,14 +54,14 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
                  userns disabled?): {}",
                 why.trim()
             );
-            return None;
+            return false;
         }
         Ok(_) => {}
     }
     // /dev/net/tun must exist on the HOST (we dev-bind it).
     if !std::path::Path::new("/dev/net/tun").exists() {
         eprintln!("SKIP {test_name}: /dev/net/tun missing (CONFIG_TUN=n?)");
-        return None;
+        return false;
     }
 
     // ─── spawn bwrap ───────────────────────────────────────────────
@@ -158,7 +171,44 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
         .status()
         .expect("spawn bwrap");
     assert!(status.success(), "inner test failed: {status:?}");
-    None
+    false
+}
+
+/// One `unshare -n sleep` child netns, bind-mounted at
+/// `/run/netns/NAME` so `ip netns exec NAME ...` works. Returns the
+/// sleeper; killing it does NOT destroy the ns (mount keeps it),
+/// but the whole bwrap exiting does. Same dance as `NetNs::setup`'s
+/// `bobside`, generalised — `ip netns add` won't work in a userns
+/// (it wants `mount --make-shared`).
+pub(crate) fn make_child_netns(name: &str) -> Child {
+    let sleeper = Command::new("unshare")
+        .args(["-n", "sleep", "3600"])
+        .spawn()
+        .expect("spawn unshare sleeper");
+    // Race: netns not ready until unshare(2) ran in the child.
+    std::thread::sleep(Duration::from_millis(100));
+    let target = format!("/run/netns/{name}");
+    std::fs::write(&target, b"").expect("touch nsfd target");
+    let st = Command::new("mount")
+        .args(["--bind"])
+        .arg(format!("/proc/{}/ns/net", sleeper.id()))
+        .arg(&target)
+        .status()
+        .expect("spawn mount");
+    assert!(st.success(), "mount --bind nsfd for {name}: {st:?}");
+    run_ip(&["netns", "exec", name, "ip", "link", "set", "lo", "up"]);
+    sleeper
+}
+
+/// `ip link add A type veth peer name B`, move each end into its
+/// netns, addr+up. `addr` is `IP/PREFIX`. `(ns, ifname, addr)`.
+pub(crate) fn veth_pair(a: (&str, &str, &str), b: (&str, &str, &str)) {
+    run_ip(&["link", "add", a.1, "type", "veth", "peer", "name", b.1]);
+    for (ns, ifc, ip) in [a, b] {
+        run_ip(&["link", "set", ifc, "netns", ns]);
+        run_ip(&["netns", "exec", ns, "ip", "addr", "add", ip, "dev", ifc]);
+        run_ip(&["netns", "exec", ns, "ip", "link", "set", ifc, "up"]);
+    }
 }
 
 /// Handle for the inner-side netns state. `setup()` brings up `lo`,
@@ -176,11 +226,7 @@ pub(crate) struct NetNs {
 
 impl NetNs {
     pub(crate) fn setup() -> Self {
-        // ─── lo up ───────────────────────────────────────────────
-        // New netns starts with `lo` DOWN. The daemons listen on
-        // `127.0.0.1`; bind() succeeds with lo down but connect()
-        // gets ENETUNREACH.
-        run_ip(&["link", "set", "lo", "up"]);
+        // lo up + /run/netns mkdir: done by `enter_bwrap`.
 
         // ─── persistent TUN devices ──────────────────────────────
         // `ip tuntap add` sets the TUN_PERSIST flag: the device
@@ -214,25 +260,7 @@ impl NetNs {
         // sleep`, bind-mount its `/proc/PID/ns/net` ourselves.
         // `ip netns exec NAME` then works (it just reads the
         // mount).
-        std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
-        let sleeper = Command::new("unshare")
-            .args(["-n", "sleep", "3600"])
-            .spawn()
-            .expect("spawn unshare sleeper");
-        // Race: sleeper's netns isn't ready until unshare(2) ran.
-        // Poll for /proc/PID/ns/net being a DIFFERENT inode than
-        // ours. In practice 50ms is plenty.
-        std::thread::sleep(Duration::from_millis(100));
-        std::fs::write("/run/netns/bobside", b"").expect("touch nsfd target");
-        let status = Command::new("mount")
-            .args(["--bind"])
-            .arg(format!("/proc/{}/ns/net", sleeper.id()))
-            .arg("/run/netns/bobside")
-            .status()
-            .expect("spawn mount");
-        assert!(status.success(), "mount --bind nsfd: {status:?}");
-
-        run_ip(&["netns", "exec", "bobside", "ip", "link", "set", "lo", "up"]);
+        let sleeper = make_child_netns("bobside");
 
         Self { sleeper }
     }

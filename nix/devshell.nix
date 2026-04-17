@@ -20,6 +20,8 @@
   iproute2 ? null,
   iputils ? null,
   util-linux ? null,
+  miniupnpd-nftables ? null,
+  nftables ? null,
   iperf3,
   perf ? null,
   # local
@@ -67,6 +69,12 @@ mkShell {
     iproute2
     iputils # ping
     util-linux # unshare(1), mount(8)
+    # portmap netns test: real IGD/NAT-PMP daemon + nft for the
+    # DNAT rules it installs. nftables backend specifically — the
+    # legacy libiptc build can't init inside an unprivileged
+    # userns; nft can (per-netns tables). Test SKIPs if absent.
+    miniupnpd-nftables
+    nftables
     perf
   ];
 }
