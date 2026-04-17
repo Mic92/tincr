@@ -418,11 +418,11 @@ fn assign_static_port_cases() {
 /// fall through to the original addr (port 0
 /// → fresh ephemeral). Prove the listener still materializes.
 #[test]
-#[cfg(target_os = "linux")] // 127.42.x.x only routable on Linux
 fn bind_reusing_port_fallback() {
-    // Occupy a port. 127.42.x avoids racing two_daemons'
-    // 127.0.0.1 alloc_port (bind-read-drop-rebind TOCTOU).
-    let addr: SocketAddr = "127.42.4.1:0".parse().unwrap();
+    // Occupy a port. 127.0.0.1:0 → kernel hands out a fresh
+    // ephemeral; pool is large enough that racing alloc_port()
+    // in parallel tests is a non-issue (no bind-drop-rebind here).
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let first = open_listener_pair(addr, &opts(), None, false).unwrap();
     let taken = first.local.port();
 
@@ -446,10 +446,10 @@ fn bind_reusing_port_fallback() {
 /// bind-drop-rebind here would TOCTOU-race the parallel
 /// `alloc_port` calls in `tests/two_daemons.rs`).
 #[test]
-#[cfg(target_os = "linux")] // 127.42.x.x only routable on Linux
 fn open_pair_bindto_flag_plumbed() {
-    // 127.42.x avoids racing two_daemons' 127.0.0.1 alloc_port.
-    let l = open_listener_pair("127.42.3.1:0".parse().unwrap(), &opts(), None, true).expect("bind");
+    // 127.0.0.1:0 → ephemeral port held for the pair's lifetime;
+    // no bind-drop-rebind, so no race with alloc_port() elsewhere.
+    let l = open_listener_pair("127.0.0.1:0".parse().unwrap(), &opts(), None, true).expect("bind");
     assert!(l.bindto, "bindto=true plumbed through");
     assert_eq!(l.udp_port(), l.local.port(), "port reuse within pair");
 }
