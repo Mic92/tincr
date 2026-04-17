@@ -11,7 +11,6 @@
   rustc,
   clippy,
   rustfmt,
-  gcc,
   gnumake,
   jq,
   meson,
@@ -50,7 +49,6 @@ mkShell {
     rustc
     clippy
     rustfmt
-    gcc
     gnumake
     jq # vectors.json sanity-checking
     # tinc-tools cross-impl test wants a C sptps_test to talk
