@@ -1242,7 +1242,25 @@ fn main() -> ExitCode {
     // defeating the point of WatchdogSec.)
 
     // ─── main_loop
-    let outcome = daemon.run();
+    // catch_unwind: the hot path has internal-invariant
+    // `.expect()`s (slotmap liveness, mutex poison). Those are
+    // bugs, not recoverable conditions — but unwinding straight
+    // out of main() means systemd never sees STOPPING=1 and the
+    // operator gets an unannotated abort. Catch, log the panic
+    // payload, fall through to the same shutdown path as a clean
+    // exit. `Daemon`'s Drop (tinc-down, pidfile/socket unlink)
+    // already ran during the unwind; STOPPING=1 + the error log
+    // are what this adds.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.run()))
+        .unwrap_or_else(|payload| {
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            log::error!(target: "tincd", "Panic in event loop: {msg}");
+            RunOutcome::PollError
+        });
 
     // ─── sd_notify STOPPING=1
     // run() returns on SIGTERM/SIGINT (RunOutcome::Clean) or fatal
