@@ -33,21 +33,7 @@ pub fn sock_cloexec_flag() -> SockFlag {
 /// `MSG_NOSIGNAL` per-send instead.
 #[cfg(not(target_os = "linux"))]
 pub fn set_nosigpipe(fd: impl AsFd) {
-    // nix 0.29 doesn't wrap SO_NOSIGPIPE; use raw libc.
-    let val: libc::c_int = 1;
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::setsockopt(
-            fd.as_fd().as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
-            std::ptr::from_ref(&val).cast(),
-            #[allow(clippy::cast_possible_truncation)] // sizeof(c_int)==4
-            {
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t
-            },
-        );
-    }
+    let _ = socket2::SockRef::from(&fd).set_nosigpipe(true);
 }
 
 #[cfg(target_os = "linux")]
@@ -142,16 +128,15 @@ pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // nix 0.29 only wraps IpTos/Ipv6TClass on Linux. macOS supports
-        // these via raw setsockopt.
-        let (level, optname, label) = if is_ipv6 {
-            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS, "IPV6_TCLASS")
+        let s = socket2::SockRef::from(&fd);
+        let (label, res) = if is_ipv6 {
+            ("IPV6_TCLASS", s.set_tclass_v6(u32::from(prio)))
         } else {
-            (libc::IPPROTO_IP, libc::IP_TOS, "IP_TOS")
+            ("IP_TOS", s.set_tos(u32::from(prio)))
         };
         log::debug!(target: "tincd::net",
                     "Setting outgoing packet priority to {prio} ({label})");
-        if let Err(e) = set_int_sockopt(fd, level, optname, libc::c_int::from(prio)) {
+        if let Err(e) = res {
             log::debug!(target: "tincd::net",
                         "setsockopt {label} failed: {e}");
         }

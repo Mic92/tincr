@@ -91,7 +91,7 @@ if-addrs.workspace = true
 # is std-with-seams; only dep is libc (already linked). NOT a new shim-
 # matrix row — same quadrant as slotmap-instead-of-hand-rolling-a-slab.
 # No 'all' feature: V6ONLY/REUSEADDR/NODELAY/BROADCAST are all ungated.
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
 
 # packet.rs: derive FromBytes/IntoBytes on the #[repr(C, packed)]
 # wire structs instead of hand-writing field-by-field codecs. The
