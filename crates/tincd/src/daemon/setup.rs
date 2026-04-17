@@ -172,7 +172,21 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
         .next()
         .map(|e| e.get_str().to_ascii_lowercase());
     let device: Box<dyn Device> = match device_type.as_deref() {
-        None | Some("dummy") => Box::new(tinc_device::Dummy),
+        None => {
+            // Upstream defaults to the platform tun/tap driver. We
+            // keep `dummy` as the default so the integration-test
+            // suite (and `tinc fsck`/CI dry-runs) can boot the daemon
+            // unprivileged without `/dev/net/tun`. But a fresh
+            // `tinc init` + `tincd` then "works" with peers connected
+            // and zero packets flowing, which is a baffling failure
+            // mode — so shout about it. `warn!` lands in the default
+            // log output; users following the quickstart will see it.
+            log::warn!(target: "tincd",
+                       "DeviceType not set; using dummy device — NO packets will flow. \
+                        Set `DeviceType = tun` (or tap) in tinc.conf for a real tunnel.");
+            Box::new(tinc_device::Dummy)
+        }
+        Some("dummy") => Box::new(tinc_device::Dummy),
         #[cfg(target_os = "linux")]
         Some("fd") => {
             // The fd comes from `Device = N` (inherited fd) or
@@ -523,6 +537,18 @@ impl Daemon {
             };
             SetupError::Config(format!("{e}{hint}"))
         })?;
+
+        // ─── surface unknown keys
+        // The daemon never consults VARS for lookup (it asks for
+        // specific names), so a typo'd key is otherwise just inert —
+        // "typo ≡ unset" with no hint why. Warn once at startup.
+        for e in config.entries() {
+            if tinc_conf::lookup_var(&e.variable).is_none() {
+                log::warn!(target: "tincd",
+                           "Unknown configuration variable `{}' {}",
+                           e.variable, e.source);
+            }
+        }
 
         // ─── settings
         let settings = load_settings(&config)?;

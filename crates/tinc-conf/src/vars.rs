@@ -291,7 +291,11 @@ pub static VARS: &[Var] = &[
     v("PublicKeyFile", S.union(H).union(O)),
     v("Subnet", H.union(M).union(F)),
     v("TCPOnly", S.union(H).union(F)),
-    v("Weight", H.union(F)),
+    // Upstream tags Weight HOST-only; we also read it from tinc.conf
+    // as a global fallback (`settings.rs::global_weight`), so tag it
+    // SERVER too or `tinc set Weight` / `fsck` would refuse/flag a
+    // value the daemon legitimately consumes.
+    v("Weight", S.union(H).union(F)),
     // ─── End of C transcription. Rust-side extensions below. ───
     // Appended, not interleaved: indices [0, 74) match the C array
     // exactly (the spot_check test asserts the alpha-break boundary at
@@ -314,14 +318,19 @@ pub static VARS: &[Var] = &[
     // (the port-probe keepalive) on a port the operator may not have
     // intended to expose. Opt-in must be deliberate.
     v("DhtDiscovery", S),
+    // DNS stub (Rust-only). SERVER, MULTIPLE for DNSAddress (one v4
+    // + one v6). NOT SAFE: an invitation that sets DNSAddress points
+    // every name lookup at an attacker-chosen resolver.
+    v("DNSAddress", S.union(M)),
+    v("DNSSuffix", S),
 ];
 
 /// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
 /// (`DhtDiscovery`, `DhtBootstrap`) that upstream never reads. The 74
 /// check is the one that matters — drift here means a config key was
 /// added/removed upstream and our table
-/// is stale. The +2 is fixed (this crate owns those keys).
-const _: () = assert!(VARS.len() == 74 + 2);
+/// is stale. The +N is fixed (this crate owns those keys).
+const _: () = assert!(VARS.len() == 74 + 4);
 
 /// Look up by name, case-insensitive. C does this inline everywhere
 /// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We
