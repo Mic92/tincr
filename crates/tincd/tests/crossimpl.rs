@@ -701,13 +701,10 @@ fn rust_dials_c() {
     run_crossimpl("rdc", Impl::Rust, Impl::C, netns);
 }
 
-/// Rust dials C, but `hosts/bob` has a BARE `Address = 127.0.0.1`
-/// plus `Port = <non-655>`. C parity (`address_cache.c:165-167`):
-/// the bare Address must default to `Port =`, not 655. Before the
-/// `resolve_config_addrs` fix this dialled :655 and the meta
-/// handshake never completed (bob listens on `alloc_port()`, never
-/// 655). Asserting reachable is sufficient — it proves the dial
-/// hit the right port; the full ping path is covered by
+/// Rust dials C with `hosts/bob` = bare `Address` + `Port =` (no
+/// inline port). Regression for `resolve_config_addrs` defaulting
+/// to 655 instead of `Port` (C `address_cache.c:165`). Reachable
+/// suffices — proves dial hit right port; data path covered by
 /// `rust_dials_c`.
 #[test]
 fn rust_dials_c_bare_address_port() {
@@ -727,10 +724,7 @@ fn rust_dials_c_bare_address_port() {
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
-    // Overwrite alice's view of bob: bare Address, Port directive.
-    // `write_config(.., true)` wrote `Address = 127.0.0.1 <port>`;
-    // we want the no-inline-port form so resolve_config_addrs has
-    // to consult `Port =`.
+    // Replace alice's hosts/bob: bare Address, Port directive only.
     let bob_pub = tinc_crypto::b64::encode(&bob.pubkey());
     std::fs::write(
         alice.confbase.join("hosts").join("bob"),

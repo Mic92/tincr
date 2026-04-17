@@ -746,12 +746,8 @@ pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u1
     let mut cfg = tinc_conf::Config::new();
     cfg.merge(entries);
 
-    // C `:165-166`: missing per-Address port falls back to
-    // `lookup_config("Port")` BEFORE the 655 default. We previously
-    // skipped straight to 655, so a `Port = 4443` host with bare
-    // `Address = 1.2.3.4` got dialled at :655 (the gossiped edge
-    // addrs cover this, but only once the peer is reachable via
-    // someone else — cold start was wrong).
+    // C address_cache.c:165: bare-Address port falls back to
+    // `lookup_config("Port")` before the 655 default.
     let default_port = cfg
         .lookup("Port")
         .next()
@@ -793,7 +789,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn dial_sockopts_bind_to_interface_lo() {
         use nix::sys::socket::{getsockopt, sockopt};
-        use std::os::fd::AsFd;
         let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
         let opts = SockOpts {
             bind_to_interface: Some("lo".into()),
@@ -827,7 +822,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn dial_sockopts_fwmark() {
         use nix::sys::socket::{getsockopt, sockopt};
-        use std::os::fd::AsFd;
         let euid = nix::unistd::geteuid();
         if !euid.is_root() {
             eprintln!("SKIP dial_sockopts_fwmark: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
@@ -864,67 +858,37 @@ mod tests {
         assert_eq!(o.bump_timeout(900), 900);
     }
 
-    /// `Address = 127.0.0.1 12345` parses literally. No DNS.
+    /// `resolve_config_addrs` port precedence (C `address_cache.c:165`):
+    /// inline `Address host port` > `Port =` directive > 655.
     #[test]
-    fn resolve_literal_v4() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tincd-outgoing-resolve-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("hosts")).unwrap();
-        std::fs::write(tmp.join("hosts").join("bob"), "Address = 127.0.0.1 12345\n").unwrap();
+    fn resolve_address_port_precedence() {
+        let cases: &[(&str, &[(&str, u16)])] = &[
+            // No Port directive: bare → 655, inline literal preserved.
+            (
+                "Address = 127.0.0.1\nAddress = 127.0.0.2 12345\n",
+                &[("127.0.0.1", 655), ("127.0.0.2", 12345)],
+            ),
+            // Port directive: bare → 4443, inline still wins.
+            (
+                "Port = 4443\nAddress = 10.0.0.1\nAddress = 10.0.0.2 7000\n",
+                &[("10.0.0.1", 4443), ("10.0.0.2", 7000)],
+            ),
+        ];
+        for (i, (body, want)) in cases.iter().enumerate() {
+            let tmp = std::env::temp_dir().join(format!(
+                "tincd-outgoing-resolve-{:?}-{i}",
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(tmp.join("hosts")).unwrap();
+            std::fs::write(tmp.join("hosts").join("bob"), body).unwrap();
 
-        let addrs = resolve_config_addrs(&tmp, "bob");
-        assert_eq!(addrs, vec![("127.0.0.1".to_string(), 12345)]);
+            let got = resolve_config_addrs(&tmp, "bob");
+            let want: Vec<_> = want.iter().map(|(h, p)| (h.to_string(), *p)).collect();
+            assert_eq!(got, want, "case {i}: {body:?}");
 
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// `Address` without a port defaults to 655.
-    #[test]
-    fn resolve_default_port() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tincd-outgoing-defport-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("hosts")).unwrap();
-        std::fs::write(tmp.join("hosts").join("bob"), "Address = 127.0.0.1\n").unwrap();
-
-        let addrs = resolve_config_addrs(&tmp, "bob");
-        assert_eq!(addrs, vec![("127.0.0.1".to_string(), 655)]);
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// `Port =` is the default for bare `Address` lines (C parity:
-    /// `address_cache.c:165` looks up `Port` before falling back to
-    /// 655). An explicit per-Address port still wins.
-    #[test]
-    fn resolve_port_directive_default() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tincd-outgoing-portdir-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("hosts")).unwrap();
-        std::fs::write(
-            tmp.join("hosts").join("bob"),
-            "Port = 4443\nAddress = 10.0.0.1\nAddress = 10.0.0.2 7000\n",
-        )
-        .unwrap();
-
-        let addrs = resolve_config_addrs(&tmp, "bob");
-        assert_eq!(
-            addrs,
-            vec![
-                ("10.0.0.1".to_string(), 4443),
-                ("10.0.0.2".to_string(), 7000),
-            ]
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 
     /// Missing `hosts/NAME` → empty. C: `read_host_config` returns
@@ -975,8 +939,8 @@ mod tests {
         }
     }
 
-    /// `Proxy = exec <cmd>` parses; `Proxy = socks5 ...` rejects
-    /// (not yet wired); `Proxy = none` is `Ok(None)`.
+    /// `Proxy =` config parsing: exec/socks4/socks5/http accept,
+    /// none/empty → `Ok(None)`, socks4a + unknown reject.
     #[test]
     fn proxy_config_parse() {
         // exec with cmd.
