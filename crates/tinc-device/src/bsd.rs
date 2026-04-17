@@ -449,46 +449,25 @@ impl BsdTun {
 // `connect(sockaddr_ctl{...})` with the unit number.
 // `getsockopt(UTUN_OPT_IFNAME)` reads back the kernel-chosen name.
 //
-// All types/constants are Apple-only; nix has no wrappers.
+// nix wraps every step: `SysControlAddr::from_name` does the
+// CTLIOCGINFO ioctl + sockaddr_ctl construction internally,
+// `sockopt::UtunIfname` does the `UTUN_OPT_IFNAME` getsockopt, and
+// `nix::fcntl` handles O_NONBLOCK/CLOEXEC. The original "nix has
+// nothing for these" claim predated nix 0.27.
 #[cfg(target_os = "macos")]
 mod utun {
-    #![allow(unsafe_code)]
-
     use std::io;
-    use std::mem;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
+
+    use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+    use nix::sys::socket::{
+        AddressFamily, SockFlag, SockProtocol, SockType, SysControlAddr, connect, getsockopt,
+        socket, sockopt,
+    };
 
     use super::{BsdTun, BsdVariant};
 
-    // Apple-specific constants not in libc crate.
-    const PF_SYSTEM: libc::c_int = libc::AF_SYSTEM;
-    const SYSPROTO_CONTROL: libc::c_int = 2;
-    const AF_SYS_CONTROL: u16 = 2;
-    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
-
-    // CTLIOCGINFO: _IOWR('N', 3, struct ctl_info)
-    // struct ctl_info is 100 bytes (96-byte name + u32 id).
-    // _IOWR encodes: direction(in|out) | size | group | nr
-    const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
-
-    // UTUN_OPT_IFNAME = 2, level = SYSPROTO_CONTROL
-    const UTUN_OPT_IFNAME: libc::c_int = 2;
-
-    #[repr(C)]
-    struct CtlInfo {
-        ctl_id: u32,
-        ctl_name: [u8; 96],
-    }
-
-    #[repr(C)]
-    struct SockaddrCtl {
-        sc_len: u8,
-        sc_family: u8,
-        ss_sysaddr: u16,
-        sc_id: u32,
-        sc_unit: u32,
-        sc_reserved: [u32; 5],
-    }
+    const UTUN_CONTROL_NAME: &str = "com.apple.net.utun_control";
 
     impl BsdTun {
         /// Open a macOS utun device. `unit` is the utun unit number
@@ -499,73 +478,29 @@ mod utun {
         /// # Errors
         /// I/O errors from socket/ioctl/connect/getsockopt.
         pub fn open_utun(unit: Option<u32>) -> io::Result<Self> {
-            // socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)
-            let fd = unsafe { libc::socket(PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            // socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL).
+            // macOS has no SOCK_CLOEXEC/SOCK_NONBLOCK type bits; set
+            // them via fcntl below (no fork race here — startup-only).
+            let fd = socket(
+                AddressFamily::System,
+                SockType::Datagram,
+                SockFlag::empty(),
+                SockProtocol::KextControl,
+            )?;
+            let prev = OFlag::from_bits_retain(fcntl(&fd, FcntlArg::F_GETFL)?);
+            fcntl(&fd, FcntlArg::F_SETFL(prev | OFlag::O_NONBLOCK))?;
+            fcntl(&fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
 
-            // Set non-blocking + cloexec
-            unsafe {
-                let flags = libc::fcntl(fd_raw(&fd), libc::F_GETFL);
-                libc::fcntl(fd_raw(&fd), libc::F_SETFL, flags | libc::O_NONBLOCK);
-                libc::fcntl(fd_raw(&fd), libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-
-            // ioctl(CTLIOCGINFO) to get the control ID
-            let mut info = CtlInfo {
-                ctl_id: 0,
-                ctl_name: [0u8; 96],
-            };
-            info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
-            if unsafe { libc::ioctl(fd_raw(&fd), CTLIOCGINFO, &mut info) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-
-            // connect(sockaddr_ctl) with unit+1 (kernel uses 1-based;
-            // unit=0 → sc_unit=0 means "pick for me", unit=N → sc_unit=N+1)
+            // CTLIOCGINFO + sockaddr_ctl{sc_unit}. Kernel uses
+            // 1-based unit: sc_unit=0 means "pick for me",
+            // sc_unit=N+1 means utunN.
             let sc_unit = unit.map_or(0, |u| u + 1);
-            // sizeof(sockaddr_ctl)==32 and AF_SYSTEM==32: both fit u8.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let addr = SockaddrCtl {
-                sc_len: mem::size_of::<SockaddrCtl>() as u8,
-                sc_family: libc::AF_SYSTEM as u8,
-                ss_sysaddr: AF_SYS_CONTROL,
-                sc_id: info.ctl_id,
-                sc_unit,
-                sc_reserved: [0; 5],
-            };
-            // socklen_t is u32; sizeof(SockaddrCtl)==32.
-            #[allow(clippy::cast_possible_truncation)]
-            let addr_len = mem::size_of::<SockaddrCtl>() as libc::socklen_t;
-            if unsafe {
-                libc::connect(
-                    fd_raw(&fd),
-                    (&raw const addr).cast::<libc::sockaddr>(),
-                    addr_len,
-                )
-            } < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
+            let addr = SysControlAddr::from_name(fd.as_raw_fd(), UTUN_CONTROL_NAME, sc_unit)?;
+            connect(fd.as_raw_fd(), &addr)?;
 
-            // getsockopt(UTUN_OPT_IFNAME) to read back interface name
-            let mut name_buf = [0u8; 32];
-            let mut name_len: libc::socklen_t = 32;
-            if unsafe {
-                libc::getsockopt(
-                    fd_raw(&fd),
-                    SYSPROTO_CONTROL,
-                    UTUN_OPT_IFNAME,
-                    name_buf.as_mut_ptr().cast(),
-                    &raw mut name_len,
-                )
-            } < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            let iface = String::from_utf8_lossy(&name_buf[..name_len.saturating_sub(1) as usize])
+            // getsockopt(SYSPROTO_CONTROL, UTUN_OPT_IFNAME).
+            let iface = getsockopt(&fd, sockopt::UtunIfname)?
+                .to_string_lossy()
                 .into_owned();
 
             Ok(BsdTun {
@@ -574,12 +509,6 @@ mod utun {
                 iface,
             })
         }
-    }
-
-    #[inline]
-    fn fd_raw(fd: &OwnedFd) -> libc::c_int {
-        use std::os::fd::AsRawFd;
-        fd.as_raw_fd()
     }
 }
 

@@ -33,6 +33,13 @@ log = "0.4"
 # substitution).
 nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
 
+# `ioctl` + `fs` only on macOS, for the utun open path:
+# `SysControlAddr` (CTLIOCGINFO) needs `ioctl`; `nix::fcntl` (O_NONBLOCK
+# / FD_CLOEXEC — macOS has no SOCK_NONBLOCK type bit) needs `fs`. Linux
+# uses neither; keeping the extra surface off the primary target.
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["ioctl", "fs"] }
+
 [dev-dependencies]
 # `user` for `geteuid()` (root-skip in unit tests). `fs` for
 # `nix::unistd::dup` in tests/mq.rs — previously this only compiled
