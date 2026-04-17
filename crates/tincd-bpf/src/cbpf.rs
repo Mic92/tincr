@@ -74,7 +74,10 @@
 //! mind.
 
 use std::io;
-use std::os::fd::RawFd;
+use std::net::SocketAddr;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 /// `SO_ATTACH_REUSEPORT_CBPF` — `asm-generic/socket.h:85`. Not in
 /// libc 0.2.184.
@@ -114,7 +117,7 @@ const SRC_ID6_OFFSET: u32 = 6;
 /// same path as `SO_ATTACH_FILTER` (libpcap, tcpdump). Unprivileged
 /// since forever.
 #[allow(unsafe_code)]
-pub fn attach_reuseport_id6(sock0_fd: RawFd, n_shards: u32) -> io::Result<()> {
+pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Result<()> {
     debug_assert!(n_shards > 0 && n_shards <= 256, "shard count out of range");
 
     // Three instructions. The kernel's `pskb_pull` already moved
@@ -164,7 +167,7 @@ pub fn attach_reuseport_id6(sock0_fd: RawFd, n_shards: u32) -> io::Result<()> {
     // call. Kernel makes its own copy (`bpf_prog_create_from_user`).
     let ret = unsafe {
         libc::setsockopt(
-            sock0_fd,
+            sock0_fd.as_raw_fd(),
             libc::SOL_SOCKET,
             SO_ATTACH_REUSEPORT_CBPF,
             (&raw const fprog).cast::<libc::c_void>(),
@@ -192,134 +195,42 @@ pub fn attach_reuseport_id6(sock0_fd: RawFd, n_shards: u32) -> io::Result<()> {
 /// `EADDRINUSE` if `port` is taken by a non-reuseport socket.
 /// Propagated from `attach_reuseport_id6` if socket 0's bind didn't
 /// create a group (shouldn't happen — we set `SO_REUSEPORT` first).
-#[allow(unsafe_code)]
 pub fn open_reuseport_group(ip: std::net::IpAddr, port: u16, n: u32) -> io::Result<ReuseportGroup> {
     debug_assert!(n > 0 && n <= 256);
 
+    let addr = SocketAddr::new(ip, port);
     let mut socks = Vec::with_capacity(n as usize);
-    let one: libc::c_int = 1;
 
     for i in 0..n {
-        // SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC. Nonblock so the
-        // shard's epoll loop doesn't wedge; cloexec so tinc-up scripts
-        // don't inherit. Same flags as `tincd::listen::open_udp_listener`.
-        // SAFETY: socket(2) with valid args. -1 on error.
-        let fd = unsafe {
-            libc::socket(
-                match ip {
-                    std::net::IpAddr::V4(_) => libc::AF_INET,
-                    std::net::IpAddr::V6(_) => libc::AF_INET6,
-                },
-                libc::SOCK_DGRAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                0,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Wrap immediately so early-return drops close it. RAII over
-        // manual close-on-error ladders.
-        // SAFETY: socket(2) just returned this fd; we own it.
-        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        // Nonblock so the shard's epoll loop doesn't wedge; cloexec so
+        // tinc-up scripts don't inherit. Same flags as
+        // `tincd::listen::open_udp_listener`. socket2 sets CLOEXEC on
+        // Linux by default.
+        let sock = Socket::new(
+            Domain::for_address(addr),
+            Type::DGRAM.nonblocking(),
+            Some(Protocol::UDP),
+        )?;
 
         // SO_REUSEPORT before bind. Without it, the second bind fails
         // EADDRINUSE — the option opts the socket into the group at
         // bind time (`reuseport_alloc`, `net/core/sock_reuseport.c`).
-        // SAFETY: setsockopt(SOL_SOCKET, SO_REUSEPORT, *const int, 4).
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEPORT,
-                (&raw const one).cast::<libc::c_void>(),
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t
-                },
-            )
-        };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        bind_ip(fd, ip, port)?;
+        sock.set_reuse_port(true)?;
+        sock.bind(&addr.into())?;
 
         // Attach AFTER socket 0 is bound: the reuseport group doesn't
         // exist until first bind. `reuseport_attach_prog` checks
         // `rcu_dereference(sk->sk_reuseport_cb)` which is set at
         // `reuseport_alloc` (bind time). Attach-before-bind: ENOENT.
         if i == 0 {
-            attach_reuseport_id6(fd, n)?;
+            attach_reuseport_id6(sock.as_fd(), n)?;
         }
 
-        socks.push(owned);
+        socks.push(OwnedFd::from(sock));
     }
 
     Ok(ReuseportGroup { socks })
 }
-
-/// `bind(2)` shim. Separate fn so the v4/v6 sockaddr building doesn't
-/// bloat the main loop. Same shape as `tincd::listen`'s bind.
-#[allow(unsafe_code)]
-fn bind_ip(fd: RawFd, ip: std::net::IpAddr, port: u16) -> io::Result<()> {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let addr = libc::sockaddr_in {
-                #[allow(clippy::cast_possible_truncation)]
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: port.to_be(),
-                sin_addr: libc::in_addr {
-                    s_addr: u32::from_ne_bytes(octets),
-                },
-                sin_zero: [0; 8],
-            };
-            // SAFETY: bind(2) with sockaddr_in, size matches AF_INET.
-            let ret = unsafe {
-                libc::bind(
-                    fd,
-                    (&raw const addr).cast::<libc::sockaddr>(),
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
-                    },
-                )
-            };
-            if ret < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        std::net::IpAddr::V6(v6) => {
-            let addr = libc::sockaddr_in6 {
-                #[allow(clippy::cast_possible_truncation)]
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: port.to_be(),
-                sin6_flowinfo: 0,
-                sin6_addr: libc::in6_addr {
-                    s6_addr: v6.octets(),
-                },
-                sin6_scope_id: 0,
-            };
-            // SAFETY: bind(2) with sockaddr_in6, size matches AF_INET6.
-            let ret = unsafe {
-                libc::bind(
-                    fd,
-                    (&raw const addr).cast::<libc::sockaddr>(),
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
-                    },
-                )
-            };
-            if ret < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-    }
-    Ok(())
-}
-
-use std::os::fd::FromRawFd;
 
 /// N bound sockets, one per shard. Socket k → shard k. Dropping this
 /// closes all sockets (the reuseport group dissolves at last close).

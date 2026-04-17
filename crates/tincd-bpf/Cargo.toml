@@ -26,6 +26,10 @@ publish = false
 # `libc::SYS_bpf`, `libc::ioctl`, `sock_filter`, `sock_fprog`, the
 # REUSEPORT setsockopt path. Same version as tinc-device's pinned dep.
 libc = "0.2.184"
+# Safe socket()/setsockopt(SO_REUSEPORT)/bind() so cbpf.rs only keeps
+# the one irreducible unsafe (SO_ATTACH_REUSEPORT_CBPF).
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 # Tests use Tun::open_mq + the hairpin-echo rig. dev-dep only:
