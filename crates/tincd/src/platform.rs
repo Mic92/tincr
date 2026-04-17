@@ -180,13 +180,8 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF binds a
     // socket to a specific interface index.
-    let cname = std::ffi::CString::new(iface)
-        .map_err(|_| io::Error::other(format!("interface name {iface} contains NUL")))?;
-    #[allow(unsafe_code)]
-    let ifindex = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if ifindex == 0 {
-        return Err(io::Error::other(format!("Unknown interface {iface}")));
-    }
+    let ifindex = nix::net::if_::if_nametoindex(iface)
+        .map_err(|_| io::Error::other(format!("Unknown interface {iface}")))?;
     // ifindex fits c_int on any real system (iOS caps at ~16k).
     #[allow(clippy::cast_possible_wrap)]
     let val = ifindex as libc::c_int;

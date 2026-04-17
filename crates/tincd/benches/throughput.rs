@@ -1009,12 +1009,10 @@ mod bench {
             if let Some(mut child) = self.child.take() {
                 // Same SIGINT-then-wait as PerfRecord. perf trace flushes
                 // the summary on SIGINT.
-                // SAFETY: see PerfRecord::drop.
-                // PIDs are < 2^22 on Linux; never wraps.
-                #[allow(clippy::cast_possible_wrap)] // PID < pid_max ≤ 2^22
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGINT);
-                }
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(child.id().cast_signed()),
+                    nix::sys::signal::Signal::SIGINT,
+                );
                 let _ = child.wait();
             }
             // Dump the summary inline. It's short (~20 lines, one per
@@ -1102,16 +1100,12 @@ mod bench {
     impl Drop for PerfRecord {
         fn drop(&mut self) {
             if let Some(mut child) = self.child.take() {
-                // SAFETY: `kill(2)` is async-signal-safe and has no
-                // preconditions on a valid PID. The PID is ours (we
-                // spawned it, haven't waited it yet). Worst case the
-                // PID was reused — but we hold the Child, so it
-                // hasn't been reaped, so the PID is still ours.
-                // PIDs are < 2^22 on Linux; never wraps.
-                #[allow(clippy::cast_possible_wrap)] // PID < pid_max ≤ 2^22
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGINT);
-                }
+                // The PID is ours (we spawned it, haven't waited it
+                // yet, so it hasn't been reaped/reused).
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(child.id().cast_signed()),
+                    nix::sys::signal::Signal::SIGINT,
+                );
                 let _ = child.wait();
             }
         }

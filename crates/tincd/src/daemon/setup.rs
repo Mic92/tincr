@@ -142,27 +142,14 @@ fn build_listeners(
 /// `tinc_conf::name` so the daemon and `tinc` CLI agree on the result
 /// (previously they didn't — the CLI kept the domain part, the daemon
 /// truncated at `.`, and exchanged host files mismatched).
-#[allow(unsafe_code)] // libc::gethostname; nix `hostname` feature not enabled
 fn expand_name(name: &str) -> Result<String, String> {
     tinc_conf::name::expand_name(
         name,
         |k| std::env::var(k).ok(),
         || {
-            let mut buf = [0u8; 256];
-            // SAFETY: buf is valid, len is correct. POSIX leaves
-            // gethostname truncation unspecified - force-NUL the
-            // last byte.
-            let rc =
-                unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
-            if rc != 0 {
-                return Err(format!(
-                    "gethostname failed: {}",
-                    io::Error::last_os_error()
-                ));
-            }
-            *buf.last_mut().unwrap() = 0;
-            let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            Ok(String::from_utf8_lossy(&buf[..nul]).into_owned())
+            nix::unistd::gethostname()
+                .map(|h| h.to_string_lossy().into_owned())
+                .map_err(|e| format!("gethostname failed: {e}"))
         },
     )
 }

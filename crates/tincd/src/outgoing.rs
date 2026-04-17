@@ -793,10 +793,8 @@ mod tests {
     fn dial_sockopts_fwmark() {
         use nix::sys::socket::{getsockopt, sockopt};
         use std::os::fd::AsFd;
-        // SAFETY: geteuid is infallible, no pointers.
-        #[allow(unsafe_code)]
-        let euid = unsafe { libc::geteuid() };
-        if euid != 0 {
+        let euid = nix::unistd::geteuid();
+        if !euid.is_root() {
             eprintln!("SKIP dial_sockopts_fwmark: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
             return;
         }
