@@ -173,7 +173,7 @@ impl<W: Copy> SelfPipe<W> {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            use nix::fcntl::{FdFlag, fcntl, FcntlArg};
+            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
             let (rd, wr) = nix::unistd::pipe()?;
             fcntl(&rd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
             fcntl(&wr, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;

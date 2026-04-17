@@ -28,7 +28,9 @@ use epoll::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writab
 #[cfg(target_os = "macos")]
 mod kqueue;
 #[cfg(target_os = "macos")]
-use kqueue::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait};
+use kqueue::{
+    Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait,
+};
 
 use crate::MAX_EVENTS_PER_TURN;
 

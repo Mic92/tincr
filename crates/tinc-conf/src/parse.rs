@@ -295,7 +295,11 @@ pub enum ReadError {
     Parse(#[source] ParseError),
     /// Line exceeded [`MAX_LINE_LEN`].
     #[error("line {line} exceeds {max} bytes in config file {}", path.display())]
-    LineTooLong { path: PathBuf, line: u32, max: usize },
+    LineTooLong {
+        path: PathBuf,
+        line: u32,
+        max: usize,
+    },
     /// Entry count exceeded [`MAX_ENTRIES`].
     #[error("config file {} has more than {max} entries", path.display())]
     TooManyEntries { path: PathBuf, max: usize },

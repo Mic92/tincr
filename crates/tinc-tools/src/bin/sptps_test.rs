@@ -451,8 +451,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             // for, breaking the readsize=1460 datagram chunking. The
             // fd is alive: we own `stdin: Stdin` for the loop's
             // lifetime.
-            let n = nix::unistd::read(&stdin, &mut buf[..readsize])
-                .map_err(io::Error::from)?;
+            let n = nix::unistd::read(&stdin, &mut buf[..readsize]).map_err(io::Error::from)?;
 
             if n == 0 {
                 // EOF on stdin. With `-q` (which `sptps_basic.py`

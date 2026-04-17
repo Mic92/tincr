@@ -160,9 +160,11 @@ fn cbpf_steers_by_src_id6() {
     let mut buf = [0u8; 64];
     for (k, sock) in group.socks.iter().enumerate() {
         // SOCK_NONBLOCK: EAGAIN when drained → Err → break.
-        while let Ok(n) =
-            nix::sys::socket::recv(sock.as_raw_fd(), &mut buf, nix::sys::socket::MsgFlags::empty())
-        {
+        while let Ok(n) = nix::sys::socket::recv(
+            sock.as_raw_fd(),
+            &mut buf,
+            nix::sys::socket::MsgFlags::empty(),
+        ) {
             if n == 0 {
                 break;
             }

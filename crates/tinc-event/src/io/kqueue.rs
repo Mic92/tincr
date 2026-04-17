@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-use nix::sys::event::{EventFilter, EvFlags, FilterFlag, KEvent, Kqueue};
+use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 
 /// The kqueue fd.
 pub(super) type Poller = Kqueue;
@@ -50,12 +50,26 @@ fn add_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
     let ident = fd.as_raw_fd() as usize;
     let udata = token as isize;
     let flags = EvFlags::EV_ADD | EvFlags::EV_CLEAR;
-    let read_ev = KEvent::new(ident, EventFilter::EVFILT_READ, flags, FilterFlag::empty(), 0, udata);
-    let write_ev = KEvent::new(ident, EventFilter::EVFILT_WRITE, flags, FilterFlag::empty(), 0, udata);
+    let read_ev = KEvent::new(
+        ident,
+        EventFilter::EVFILT_READ,
+        flags,
+        FilterFlag::empty(),
+        0,
+        udata,
+    );
+    let write_ev = KEvent::new(
+        ident,
+        EventFilter::EVFILT_WRITE,
+        flags,
+        FilterFlag::empty(),
+        0,
+        udata,
+    );
     match i {
-        super::Io::Read => [read_ev, write_ev],       // only [0] used
-        super::Io::Write => [write_ev, read_ev],      // only [0] used
-        super::Io::ReadWrite => [read_ev, write_ev],  // both used
+        super::Io::Read => [read_ev, write_ev],      // only [0] used
+        super::Io::Write => [write_ev, read_ev],     // only [0] used
+        super::Io::ReadWrite => [read_ev, write_ev], // both used
     }
 }
 
@@ -105,7 +119,9 @@ pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -
     // On add, only register wanted filters — don't EV_DELETE filters
     // that were never registered (kqueue returns ENOENT for that).
     let changes = add_changes(fd, token, i);
-    kq.kevent(&changes[..add_count(i)], &mut [], None).map(|_| ()).map_err(Into::into)
+    kq.kevent(&changes[..add_count(i)], &mut [], None)
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 pub(super) fn modify(

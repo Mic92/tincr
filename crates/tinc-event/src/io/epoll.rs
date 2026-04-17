@@ -34,7 +34,12 @@ pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -
     Ok(ep.add(fd, ev)?)
 }
 
-pub(super) fn modify(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn modify(
+    ep: &Poller,
+    fd: BorrowedFd<'_>,
+    token: usize,
+    i: super::Io,
+) -> io::Result<()> {
     let mut ev = EpollEvent::new(interest_to_flags(i), token as u64);
     Ok(ep.modify(fd, &mut ev)?)
 }
