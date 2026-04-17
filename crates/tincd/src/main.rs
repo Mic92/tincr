@@ -132,11 +132,12 @@ struct Args {
     /// the derivation happens post-loop in `parse_args` so it sees
     /// the final netname.
     logfile: Option<PathBuf>,
-    /// `-s` syslog. We don't have a syslog backend; this becomes a
-    /// warn-unimplemented unless `--logfile` also given (then logfile
-    /// wins: `use_syslog = false` when
-    /// logfile is set).
-    use_syslog: bool,
+    /// `LOCALSTATEDIR/log/tinc.NETNAME.log`. Stored so `main()` can
+    /// fall back to it when detaching with no explicit sink — that
+    /// decision has to wait until after the socket-activation check
+    /// (which clears `do_detach`), so it can't happen inside
+    /// `parse_args`.
+    default_logfile: PathBuf,
 }
 
 /// Parse a `-o KEY=VALUE` argument. Factored out so the separated
@@ -228,7 +229,6 @@ where
     // `--logfile` (derive default after we know netname), Some(Some(p))
     // = explicit path. Collapsed to Option<PathBuf> post-loop.
     let mut logfile: Option<Option<PathBuf>> = None;
-    let mut use_syslog = false;
 
     let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
@@ -293,13 +293,16 @@ where
             _ if arg.starts_with("--debug=") => {
                 debug_level = Some(arg["--debug=".len()..].parse().unwrap_or(0));
             }
-            // `case OPT_SYSLOG`.
+            // `case OPT_SYSLOG`. No syslog backend. Hard-error
+            // rather than warn-and-continue: a unit file copied
+            // from C tinc that passes `-s` and detaches would
+            // otherwise silently discard all logs. Under systemd,
+            // run foreground with `-D` and let journald capture
+            // stderr instead.
             "-s" | "--syslog" => {
-                // `use_logfile = false; use_syslog = true`. Mutually
-                // exclusive, last-wins. We don't have a syslog backend;
-                // see init_logging() for the fallback.
-                logfile = None;
-                use_syslog = true;
+                return Err("-s/--syslog is not supported; use -D (journald \
+                     captures stderr) or --logfile"
+                    .into());
             }
             // `case OPT_LOGFILE`. The optstring
             // marks this `optional_argument`: bare `--logfile` is VALID
@@ -309,7 +312,6 @@ where
             // NOT eat `-d` as the path. Same peek shape as `-d N`
             // above.
             "--logfile" => {
-                use_syslog = false;
                 if let Some(next) = args.peek()
                     && let Some(s) = next.to_str()
                     && !s.starts_with('-')
@@ -323,7 +325,6 @@ where
                 }
             }
             _ if arg.starts_with("--logfile=") => {
-                use_syslog = false;
                 logfile = Some(Some(PathBuf::from(&arg["--logfile=".len()..])));
             }
             // `case OPT_CHANGE_USER`.
@@ -389,7 +390,6 @@ where
                 println!("  -D, --no-detach         Don't fork and detach.");
                 println!("  -d, --debug[=LEVEL]     Increase debug level or set to LEVEL.");
                 println!("  -L, --mlock             Lock tinc into main memory.");
-                println!("  -s, --syslog            Use syslog (not yet implemented; warns).");
                 println!(
                     "      --logfile[=FILE]    Write log to FILE (default: {LOCALSTATEDIR}/log/tinc.NETNAME.log)."
                 );
@@ -489,16 +489,16 @@ where
         None => "tinc".to_owned(),
     };
 
-    // ─── derive logfile. Only when bare `--logfile`
-    // was given (Some(None) above). Netname may have been set by a
-    // later `-n`, hence post-loop.
-    let logfile = logfile.map(|explicit| {
-        explicit.unwrap_or_else(|| {
-            [LOCALSTATEDIR, "log", &format!("{identname}.log")]
-                .iter()
-                .collect()
-        })
-    });
+    // ─── derive logfile. Only when bare `--logfile` was given
+    // (Some(None) above). Netname may be set by a later `-n`, hence
+    // post-loop. The detach-with-no-sink fallback is applied in
+    // `main()` AFTER the socket-activation check has finalised
+    // `do_detach` — doing it here would wrongly divert a socket-
+    // activated (foreground) daemon's logs from journald to a file.
+    let default_logfile: PathBuf = [LOCALSTATEDIR, "log", &format!("{identname}.log")]
+        .iter()
+        .collect();
+    let logfile = logfile.map(|explicit| explicit.unwrap_or_else(|| default_logfile.clone()));
 
     // ─── derive pidfile (daemon=true branch).
     // `access(LOCALSTATEDIR, R_OK|W_OK|X_OK)` — if /var is
@@ -551,7 +551,7 @@ where
         do_chroot,
         debug_level,
         logfile,
-        use_syslog,
+        default_logfile,
     })
 }
 
@@ -830,25 +830,21 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
     }
 }
 
-/// Logging init. Folds the logmode decision and
-/// the `-d`/`--logfile` argv knobs into one `env_logger` build.
-///
-/// Precedence:
-///   logfile set        → `LOGMODE_FILE`
-///   syslog OR detach   → `LOGMODE_SYSLOG`
-///   else               → `LOGMODE_STDERR`
-///
-/// We don't have syslog. The middle case becomes "still stderr but
-/// stderr is /dev/null after detach". That's a regression vs C
-/// (a detached daemon with no `--logfile` is mute). Warn about it
-/// pre-detach.
+/// Logging init. Folds the `-d`/`--logfile` argv knobs into one
+/// `env_logger` build. Destination: `--logfile` if set, else
+/// stderr. The detach-with-no-sink case has already been resolved
+/// to a derived logfile in `main()` before we get here, so stderr
+/// always reaches a live fd.
 ///
 /// Level: `RUST_LOG` env beats `-d` beats default Info. `LogLevel`
 /// from `-o`/tinc.conf was already folded into `args.debug_level`
 /// by [`resolve_debug_level`] before we get here.
 fn init_logging(args: &Args) {
+    // Default filter is global `info`, not `tincd=info`: warnings
+    // and errors from dependent crates (tinc-sptps decrypt failures,
+    // tinc-device ioctl errors) must surface at default verbosity.
     let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("tincd=info"));
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
 
     // `-d` → filter level. RUST_LOG (parsed by from_env above) wins
     // because it's a more specific target filter; `filter_level` is
@@ -877,22 +873,10 @@ fn init_logging(args: &Args) {
                 eprintln!("tincd: --logfile {}: {e}", path.display());
             }
         }
-    } else if args.use_syslog {
-        // No syslog backend. C would `openlog(identname, LOG_PID,
-        // LOG_DAEMON)`. The `syslog` crate exists but it's a new dep
-        // for a feature that's mostly superseded by journald (which
-        // captures stderr anyway when run as a systemd unit). Warn
-        // and use stderr.
-        eprintln!("tincd: -s/--syslog not implemented; using stderr");
-    } else if args.do_detach {
-        // Detached, no logfile, no syslog → logs go to /dev/null.
-        // Tell the user BEFORE we daemonize (this eprintln still
-        // reaches the terminal).
-        eprintln!(
-            "tincd: detaching with no --logfile; logs will be discarded. \
-             Use -D to stay foreground or --logfile PATH."
-        );
     }
+    // The detach-with-no-sink case is handled in `parse_args`
+    // (auto-derives a logfile), so `logfile.is_none()` here means
+    // foreground → stderr, which is fine.
 
     // Not `builder.init()`: the tap wraps the env_logger to forward
     // log lines to REQ_LOG control conns. `build()` then `log_tap::
@@ -1096,6 +1080,20 @@ fn main() -> ExitCode {
     if socket_activation.is_some() {
         // `do_detach = false`.
         args.do_detach = false;
+    }
+
+    // ─── logfile fallback for detach
+    // A daemonized process with stderr → /dev/null is mute, and the
+    // pre-detach warning lands on a terminal the user has already
+    // lost. Done HERE, not in `parse_args`, so socket activation
+    // (which clears `do_detach` above) keeps logging to stderr →
+    // journald instead of being diverted to a file.
+    if args.do_detach && args.logfile.is_none() {
+        eprintln!(
+            "tincd: detaching without --logfile; writing logs to {}",
+            args.default_logfile.display()
+        );
+        args.logfile = Some(args.default_logfile.clone());
     }
 
     // ─── detach
@@ -1370,6 +1368,29 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(a.logfile.as_deref(), Some(std::path::Path::new("/tmp/log")));
+    }
+
+    #[test]
+    fn default_logfile_derived_from_netname() {
+        // The detach-with-no-sink fallback in main() uses this; it
+        // must reflect the FINAL netname (here set after the option
+        // that would consume it).
+        let a = parse_args(argv(&["-n", "foo", "--pidfile=/tmp/p"])).unwrap();
+        assert!(a.default_logfile.ends_with("log/tinc.foo.log"));
+        // parse_args itself does NOT apply the fallback (that would
+        // pre-empt the socket-activation foreground decision in
+        // main()); logfile stays None until main() decides.
+        assert_eq!(a.logfile, None);
+    }
+
+    #[test]
+    fn syslog_flag_hard_errors() {
+        // Warn-and-continue would silently discard logs from a
+        // detached daemon; fail loudly so the unit file gets fixed.
+        let Err(e) = parse_args(argv(&["-s", "-c", "/tmp", "--pidfile=/tmp/p"])) else {
+            panic!("expected -s to be rejected");
+        };
+        assert!(e.contains("--syslog"), "got: {e}");
     }
 
     #[test]
