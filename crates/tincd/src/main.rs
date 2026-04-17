@@ -201,6 +201,7 @@ fn next_str(
         .map_err(|v| format!("{flag}: non-UTF-8 argument: {}", v.display()))
 }
 
+#[allow(clippy::too_many_lines)] // flat getopt-style match; splitting per-option would scatter the C parity comments
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -244,16 +245,22 @@ where
             _ if arg.starts_with("--config=") => {
                 confbase = Some(PathBuf::from(&arg["--config=".len()..]));
             }
-            // `case OPT_NETNAME: netname =
-            // xstrdup(optarg)`. Short `-n`, long `--net`. The C
-            // also accepts `-n NETNAME` glued (`-nfoo`); we don't
-            // (the C uses getopt which splits it). Nobody types
-            // `-nfoo`; if a script does, it gets "unknown argument".
+            // `-cFOO` glued short form. C `getopt_long` accepts it for
+            // every `required_argument` short option; scripts written
+            // against C tincd use it (notably `-oKEY=VALUE`, which the
+            // man page renders without a space). The `len() > 2` guard
+            // keeps bare `-c` on the spaced arm above.
+            _ if arg.starts_with("-c") && arg.len() > 2 => {
+                confbase = Some(PathBuf::from(&arg[2..]));
+            }
             "-n" | "--net" => {
                 netname = Some(next_str(&mut args, "-n")?);
             }
             _ if arg.starts_with("--net=") => {
                 netname = Some(arg["--net=".len()..].to_owned());
+            }
+            _ if arg.starts_with("-n") && arg.len() > 2 => {
+                netname = Some(arg[2..].to_owned());
             }
             // `case OPT_NO_DETACH: do_detach = false`.
             "-D" | "--no-detach" => {
@@ -326,6 +333,9 @@ where
             _ if arg.starts_with("--user=") => {
                 switchuser = Some(arg["--user=".len()..].to_owned());
             }
+            _ if arg.starts_with("-U") && arg.len() > 2 => {
+                switchuser = Some(arg[2..].to_owned());
+            }
             // `case OPT_CHROOT`.
             "-R" | "--chroot" => {
                 do_chroot = true;
@@ -349,6 +359,13 @@ where
                 let v = &arg["--option=".len()..];
                 cmdline_conf.merge(std::iter::once(parse_o_arg(v, o_lineno)?));
             }
+            // `-oKEY=VALUE` glued. The C man page renders the option
+            // as `-o[HOST.]KEY=VALUE` (no space), so this form shows
+            // up in real scripts.
+            _ if arg.starts_with("-o") && arg.len() > 2 => {
+                o_lineno += 1;
+                cmdline_conf.merge(std::iter::once(parse_o_arg(&arg[2..], o_lineno)?));
+            }
             "--pidfile" => {
                 pidfile = Some(PathBuf::from(next_str(&mut args, "--pidfile")?));
             }
@@ -362,22 +379,51 @@ where
                 socket = Some(PathBuf::from(&arg["--socket=".len()..]));
             }
             "--help" | "-h" => {
-                eprintln!("Usage: tincd [-c DIR | -n NETNAME] --pidfile FILE --socket FILE");
-                eprintln!("  -c, --config=DIR    Read configuration from DIR.");
-                eprintln!("  -n, --net=NETNAME   Connect to net NETNAME.");
-                eprintln!("  -o, --option=K=V    Set config option (repeatable).");
-                eprintln!("  -D, --no-detach     Don't fork and detach.");
-                eprintln!("  -d[LEVEL]           Increase debug level or set to LEVEL.");
-                eprintln!("  -L, --mlock         Lock tinc into main memory.");
-                eprintln!("  -s, --syslog        Use syslog (not yet implemented; warns).");
-                eprintln!("      --logfile=FILE  Write log to FILE.");
-                eprintln!("  -U, --user=USER     setuid to USER after setup.");
-                eprintln!("  -R, --chroot        chroot to config dir after setup.");
+                // stdout, not stderr: `tincd --help | less` must work
+                // and C tincd writes usage to stdout (tincd.c:135).
+                println!("Usage: tincd [option]...");
+                println!();
+                println!("  -c, --config=DIR        Read configuration from DIR.");
+                println!("  -n, --net=NETNAME       Connect to net NETNAME.");
+                println!("  -o, --option[=HOST.]K=V Set config option (repeatable).");
+                println!("  -D, --no-detach         Don't fork and detach.");
+                println!("  -d, --debug[=LEVEL]     Increase debug level or set to LEVEL.");
+                println!("  -L, --mlock             Lock tinc into main memory.");
+                println!("  -s, --syslog            Use syslog (not yet implemented; warns).");
+                println!(
+                    "      --logfile[=FILE]    Write log to FILE (default: {LOCALSTATEDIR}/log/tinc.NETNAME.log)."
+                );
+                println!("  -U, --user=USER         setuid to USER after setup.");
+                println!("  -R, --chroot            chroot to config dir after setup.");
+                println!("      --pidfile=FILE      Write PID and control cookie to FILE.");
+                println!("      --socket=FILE       Bind control socket at FILE.");
+                println!("      --help              Display this help and exit.");
+                println!("      --version           Output version information and exit.");
+                println!();
+                println!("Report bugs to https://github.com/Mic92/tincr/issues.");
                 std::process::exit(0);
             }
             "--version" => {
-                eprintln!("tincd {} (Rust skeleton)", env!("CARGO_PKG_VERSION"));
+                // Same suffix as `tinc --version` so bug reports are
+                // unambiguous about which implementation is running.
+                println!(
+                    "tincd {} (Rust) protocol {}.{}",
+                    env!("CARGO_PKG_VERSION"),
+                    tinc_proto::request::PROT_MAJOR,
+                    tinc_proto::request::PROT_MINOR,
+                );
                 std::process::exit(0);
+            }
+            // C tincd accepts `--bypass-security`; this build doesn't
+            // implement it (and shouldn't — it disables auth). Warn
+            // instead of "unknown argument" so users following old
+            // forum/wiki advice know the option was removed, not
+            // mistyped. Same accept-and-warn shape as the
+            // `generate-rsa-keys` stub in tinc-tools.
+            "--bypass-security" => {
+                eprintln!(
+                    "tincd: Warning: --bypass-security is not supported in this build; ignoring."
+                );
             }
             _ => {
                 return Err(format!("unknown argument: {arg}"));
@@ -1270,6 +1316,24 @@ mod tests {
         ]))
         .unwrap();
         // The value itself contains `=`; strip_prefix should leave "Port=1234".
+        assert!(a.cmdline_conf.lookup("Port").next().is_some());
+    }
+
+    /// Glued short options (`-cFOO`, `-nFOO`, `-oK=V`, `-UFOO`): C
+    /// `getopt_long` accepts these and existing scripts rely on the
+    /// `-oKEY=VALUE` form the man page documents.
+    #[test]
+    fn short_options_glued() {
+        let a = parse_args(argv(&["-c/tmp/conf", "--pidfile=/tmp/p"])).unwrap();
+        assert_eq!(a.confbase, PathBuf::from("/tmp/conf"));
+
+        let a = parse_args(argv(&["-nmesh", "--pidfile=/tmp/p"])).unwrap();
+        assert!(a.confbase.ends_with("tinc/mesh"));
+
+        let a = parse_args(argv(&["-Unobody", "--pidfile=/tmp/p", "-c", "/tmp"])).unwrap();
+        assert_eq!(a.switchuser.as_deref(), Some("nobody"));
+
+        let a = parse_args(argv(&["-oPort=1234", "--pidfile=/tmp/p", "-c", "/tmp"])).unwrap();
         assert!(a.cmdline_conf.lookup("Port").next().is_some());
     }
 

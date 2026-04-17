@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::process::Stdio;
 
 use super::common::*;
@@ -7,6 +8,74 @@ use super::write_config;
 
 fn tmp(tag: &str) -> super::common::TmpGuard {
     super::common::TmpGuard::new("stop", tag)
+}
+
+/// `tincd --help` writes to stdout, not stderr, so `tincd --help | less`
+/// works. C tincd does this; the early Rust port `eprintln!`'d.
+/// Also: synopsis must not pretend `--pidfile`/`--socket` are required.
+#[test]
+fn help_goes_to_stdout() {
+    // Don't use tincd_cmd(): it pre-adds `-D`, and we want a bare
+    // `tincd --help`.
+    let out = Command::new(tincd_bin()).arg("--help").output().unwrap();
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty(), "help leaked to stderr: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Usage: tincd"), "stdout: {stdout}");
+    // Every accepted option is listed (regression for the synopsis
+    // that omitted half of them and implied --pidfile was required).
+    for opt in ["--pidfile", "--socket", "--version", "--no-detach"] {
+        assert!(stdout.contains(opt), "--help missing {opt}: {stdout}");
+    }
+}
+
+/// `tincd --version` goes to stdout and matches the `tinc` binary's
+/// `(Rust)` suffix instead of the leftover "skeleton" tag.
+#[test]
+fn version_goes_to_stdout() {
+    let out = Command::new(tincd_bin()).arg("--version").output().unwrap();
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tincd"));
+    assert!(stdout.contains("(Rust)"), "stdout: {stdout}");
+    assert!(!stdout.contains("skeleton"));
+}
+
+/// `--bypass-security` was a C-only debug option. Rejecting it as
+/// "unknown argument" sends users following old wiki posts into a wall;
+/// accept-and-warn so the daemon still starts and the log explains why
+/// nothing changed.
+#[test]
+fn bypass_security_warns_not_errors() {
+    let tmp = tmp("bypass-sec");
+    let confbase = tmp.path().join("vpn");
+    write_config(&confbase);
+
+    let mut child = tincd_cmd()
+        .arg("-c")
+        .arg(&confbase)
+        .arg("--pidfile")
+        .arg(tmp.path().join("p"))
+        .arg("--socket")
+        .arg(tmp.path().join("s"))
+        .arg("--bypass-security")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    assert!(
+        wait_for_file(&tmp.path().join("s")),
+        "daemon should start despite --bypass-security"
+    );
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bypass-security") && stderr.to_lowercase().contains("not supported"),
+        "expected warn-and-ignore; got:\n{stderr}"
+    );
+    assert!(!stderr.contains("unknown argument"));
 }
 
 /// Missing tinc.conf → setup fails. The error message comes from
