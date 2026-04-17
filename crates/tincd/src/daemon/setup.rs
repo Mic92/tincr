@@ -204,7 +204,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 .parse()
                 .map_err(|_| SetupError::Config(format!("Device = {dev_str} is not a valid fd")))?;
             let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
-                .map_err(SetupError::Io)?;
+                .map_err(|e| SetupError::io(format!("open inherited device fd {fd}"), e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "linux")]
@@ -225,7 +225,8 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                     .map(|e| e.get_str().to_owned()),
                 ..Default::default()
             };
-            let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+            let tun = tinc_device::Tun::open(&cfg)
+                .map_err(|e| SetupError::io("open TUN device /dev/net/tun", e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "linux")]
@@ -241,7 +242,8 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 mode: tinc_device::Mode::Tap,
                 ..Default::default()
             };
-            let tun = tinc_device::Tun::open(&cfg).map_err(SetupError::Io)?;
+            let tun = tinc_device::Tun::open(&cfg)
+                .map_err(|e| SetupError::io("open TAP device /dev/net/tun", e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "macos")]
@@ -254,7 +256,8 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 .map(tinc_conf::Entry::get_str)
                 .and_then(|s| s.strip_prefix("utun"))
                 .and_then(|n| n.parse::<u32>().ok());
-            let tun = tinc_device::BsdTun::open_utun(unit).map_err(SetupError::Io)?;
+            let tun = tinc_device::BsdTun::open_utun(unit)
+                .map_err(|e| SetupError::io("open utun device", e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "macos")]
@@ -286,9 +289,9 @@ fn register_listeners(
         #[allow(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
         let i = i as u8;
         ev.add(l.tcp_fd(), Io::Read, IoWhat::Tcp(i))
-            .map_err(SetupError::Io)?;
+            .map_err(|e| SetupError::io("register TCP listener with event loop", e))?;
         ev.add(l.udp_fd(), Io::Read, IoWhat::Udp(i))
-            .map_err(SetupError::Io)?;
+            .map_err(|e| SetupError::io("register UDP listener with event loop", e))?;
         // On Linux, dup into `linux::Fast` (UDP_SEGMENT cmsg,
         // one sendmsg per batch).
         // No probe: kernel ≥4.18 floor; ENOPROTOOPT at
@@ -301,10 +304,14 @@ fn register_listeners(
         // addr, same TOS (the daemon's `set_udp_tos` sets it on
         // the listener fd).
         #[cfg(target_os = "linux")]
-        let egress: Box<dyn UdpEgress> =
-            Box::new(crate::egress::linux::Fast::new(&l.udp).map_err(SetupError::Io)?);
+        let egress: Box<dyn UdpEgress> = Box::new(
+            crate::egress::linux::Fast::new(&l.udp)
+                .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
+        );
         #[cfg(not(target_os = "linux"))]
-        let egress: Box<dyn UdpEgress> = Box::new(Portable::new(&l.udp).map_err(SetupError::Io)?);
+        let egress: Box<dyn UdpEgress> = Box::new(
+            Portable::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
+        );
         listener_slots.push(ListenerSlot {
             listener: l,
             last_tos: 0,
@@ -575,12 +582,14 @@ impl Daemon {
         // ─── event loop scaffolding
         // tinc-event constructors. EventLoop::new can fail (epoll_
         // create); the others can't (BTreeMap, pipe).
-        let mut ev = EventLoop::new().map_err(SetupError::Io)?;
+        let mut ev = EventLoop::new().map_err(|e| SetupError::io("create event loop", e))?;
         let mut timers = Timers::new();
-        let mut signals = SelfPipe::new().map_err(SetupError::Io)?;
+        let mut signals =
+            SelfPipe::new().map_err(|e| SetupError::io("create signal self-pipe", e))?;
 
         // ─── signals
-        register_signals(&mut signals, &mut ev).map_err(SetupError::Io)?;
+        register_signals(&mut signals, &mut ev)
+            .map_err(|e| SetupError::io("register signal handlers", e))?;
 
         // ─── device fd
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(fd).
@@ -591,7 +600,7 @@ impl Daemon {
             #[allow(unsafe_code)]
             let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
             ev.add(fd, Io::Read, IoWhat::Device)
-                .map_err(SetupError::Io)?;
+                .map_err(|e| SetupError::io("register device fd with event loop", e))?;
         }
 
         // ─── timers (ping, age_past_requests, periodic, keyexpire)
@@ -642,12 +651,15 @@ impl Daemon {
                 "Control socket {} already in use",
                 socket.display()
             )),
-            crate::control::BindError::Io(err) => SetupError::Io(err),
+            crate::control::BindError::Io(err) => {
+                SetupError::io(format!("bind control socket {}", socket.display()), err)
+            }
         })?;
         let cookie = generate_cookie();
-        write_pidfile(pidfile, &cookie, &address).map_err(SetupError::Io)?;
+        write_pidfile(pidfile, &cookie, &address)
+            .map_err(|e| SetupError::io(format!("write pidfile {}", pidfile.display()), e))?;
         ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
-            .map_err(SetupError::Io)?;
+            .map_err(|e| SetupError::io("register control socket with event loop", e))?;
 
         // ─── graph: add myself
         // `Graph::add_node` defaults `reachable = true`.

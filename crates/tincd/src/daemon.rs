@@ -762,9 +762,28 @@ pub enum SetupError {
     /// Config read/parse error, or required field missing.
     #[error("{0}")]
     Config(String),
-    /// OS resource: socket, file, epoll.
-    #[error("I/O error: {0}")]
-    Io(#[source] std::io::Error),
+    /// OS resource: socket, file, epoll. `what` says WHICH resource
+    /// so an EACCES from TUN open is distinguishable from one from
+    /// pidfile write — the bare errno alone leaves the operator
+    /// guessing.
+    #[error("{what}: {source}")]
+    Io {
+        /// Human label for the failing operation.
+        what: String,
+        /// Underlying errno.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl SetupError {
+    /// Tag an I/O error with the operation that produced it.
+    pub(crate) fn io(what: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            what: what.into(),
+            source,
+        }
+    }
 }
 
 // tests
