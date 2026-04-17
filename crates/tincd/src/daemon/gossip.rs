@@ -941,7 +941,7 @@ impl Daemon {
         // Covers any pending `on_add_edge` deferrals from the same
         // batch when called directly (on_del_edge/on_ack/terminate).
         self.graph_dirty = false;
-        let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself);
+        let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself, &self.last_routes);
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
         self.last_routes = std::sync::Arc::new(routes);

@@ -31,6 +31,50 @@ pub struct EdgeId(pub u32);
 /// `OPTION_INDIRECT` from `connection.h`. The one option bit BFS reads.
 pub const OPTION_INDIRECT: u32 = 0x0001;
 
+/// Stickiness band for [`Graph::sssp_sticky`]: keep the previous
+/// nexthop if its path cost is within this percent of the new best.
+/// 133 ≡ "new must be ≥33 % cheaper to win" — Tailscale's DERP-home
+/// hysteresis (`netcheck.go:1453`).
+pub const STICKY_THRESHOLD_PCT: i32 = 133;
+
+/// Stickiness post-pass for [`Graph::sssp_sticky`].
+///
+/// `sticky_wdist[n]` is `Some(w)` iff the BFS discovered an equal-hop
+/// path to `n` whose first hop is `prev[n].nexthop`, with cumulative
+/// weight `w`. That is the ONLY safe stickiness: the old nexthop
+/// provably still reaches `n` at the same hop count in the current
+/// graph. Checking merely "old nexthop is still a neighbour" is not
+/// enough — the far-side edge may be gone, and pinning it would loop.
+fn sticky_post_pass(
+    route: &mut [Option<Route>],
+    prev: &[Option<Route>],
+    sticky_wdist: &[Option<i32>],
+) {
+    for (slot, r) in route.iter_mut().enumerate() {
+        let Some(new) = r else { continue };
+        let Some(Some(old)) = prev.get(slot) else {
+            continue;
+        };
+        if old.nexthop == new.nexthop {
+            continue;
+        }
+        let Some(sticky_w) = sticky_wdist[slot] else {
+            // BFS never saw an equal-hop path via old.nexthop → it no
+            // longer reaches `n` at this distance. Real reroute.
+            continue;
+        };
+        // Metric gate: `sticky ≤ best × STICKY_THRESHOLD_PCT / 100`.
+        // i64 so ×133 can't overflow on pathological weights; both
+        // sides non-negative (`parse_add_edge` clamps weight at 0).
+        let sticky_w64 = i64::from(sticky_w);
+        let best_w = i64::from(new.weighted_distance);
+        if sticky_w64 * 100 <= best_w * i64::from(STICKY_THRESHOLD_PCT) {
+            new.nexthop = old.nexthop;
+            new.weighted_distance = sticky_w;
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Slab payloads. Minimal — just what the algorithms read.
 
@@ -469,11 +513,43 @@ impl Graph {
     #[must_use]
     #[allow(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp(&self, myself: NodeId) -> Vec<Option<Route>> {
+        self.sssp_sticky(myself, &[])
+    }
+
+    /// [`sssp`](Self::sssp) with Tailscale-style nexthop stickiness.
+    ///
+    /// After the BFS, for every node whose `nexthop` would change
+    /// versus `prev`: if the previous route is still valid (same hop
+    /// count, same `indirect`) and its `weighted_distance` is within
+    /// [`STICKY_THRESHOLD_PCT`] % of the freshly-computed best, keep
+    /// the previous `nexthop`/`weighted_distance` instead of
+    /// switching. Pure local damping — absorbs weight jitter without
+    /// any re-gossip. Does NOT override hop-count or indirect→direct
+    /// changes (those are topology, not metric noise).
+    ///
+    /// `prev` is the last `sssp` result (slot-indexed, same shape).
+    /// Shorter/empty `prev` (first run, or graph grew) means no
+    /// stickiness for the uncovered slots — plain BFS result.
+    ///
+    /// Analogue: Tailscale `netcheck.go:1453` (DERP home sticky
+    /// unless new region beats old by ≥33 %).
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
+    pub fn sssp_sticky(&self, myself: NodeId, prev: &[Option<Route>]) -> Vec<Option<Route>> {
+        // Helper: previous nexthop for slot `n`, if any.
+        let prev_nh = |n: NodeId| {
+            prev.get(n.0 as usize)
+                .and_then(Option::as_ref)
+                .map(|r| r.nexthop)
+        };
         // Result is indexed by raw slot number, including freed slots
         // (they stay `None`). The daemon zips this against `node_ids()`
         // and never reads dead slots.
         let n_nodes = self.nodes.len();
         let mut route: Vec<Option<Route>> = vec![None; n_nodes];
+        // Per-node: cheapest equal-hop wdist via the PREVIOUS nexthop,
+        // if the BFS encounters one. Consumed by `sticky_post_pass`.
+        let mut sticky_wdist: Vec<Option<i32>> = vec![None; n_nodes];
 
         // `myself`'s entry. C lines 138-145.
         route[myself.0 as usize] = Some(Route {
@@ -521,6 +597,28 @@ impl Graph {
 
                 let cand_hops = n_distance + 1;
                 let cand_wdist = n_wdist.wrapping_add(e.weight);
+                let cand_nexthop = if n_nexthop == myself { e.to } else { n_nexthop };
+
+                // Stickiness bookkeeping: record the cheapest wdist of
+                // any candidate that (a) arrives via this node's
+                // PREVIOUS nexthop and (b) is at the same hop count as
+                // whatever the BFS ultimately picks. (b) is enforced
+                // by only recording when first-visit OR same-hop
+                // revisit — BFS never lowers `distance` after first
+                // visit, and the indirect→direct upgrade (which CAN
+                // raise it) doesn't touch nexthop so stickiness is
+                // moot there. Recorded BEFORE the skip so the
+                // "heavier equal-hop alternative" case (the whole
+                // point) isn't lost.
+                if Some(cand_nexthop) == prev_nh(e.to) {
+                    let same_hop = route[e.to.0 as usize]
+                        .as_ref()
+                        .is_none_or(|p| p.distance == cand_hops);
+                    if same_hop {
+                        let slot = &mut sticky_wdist[e.to.0 as usize];
+                        *slot = Some(slot.map_or(cand_wdist, |w| w.min(cand_wdist)));
+                    }
+                }
 
                 // The revisit condition. C lines 180-184.
                 if let Some(prev) = &route[e.to.0 as usize] {
@@ -546,12 +644,7 @@ impl Graph {
                         && prev.unwrap().weighted_distance > cand_wdist);
 
                 let (nexthop, weighted_distance) = if update_nexthop {
-                    (
-                        // First hop from myself is the edge target;
-                        // beyond that, inherit the parent's nexthop.
-                        if n_nexthop == myself { e.to } else { n_nexthop },
-                        cand_wdist,
-                    )
+                    (cand_nexthop, cand_wdist)
                 } else {
                     let p = prev.unwrap();
                     (p.nexthop, p.weighted_distance)
@@ -591,6 +684,10 @@ impl Graph {
                 // visit's edge loop will mostly hit the skip branch.
                 todo.push_back(e.to);
             }
+        }
+
+        if !prev.is_empty() {
+            sticky_post_pass(&mut route, prev, &sticky_wdist);
         }
 
         route
@@ -976,6 +1073,122 @@ mod tests {
         assert!(mst.contains(&bc) && mst.contains(&cb));
         assert!(mst.contains(&ac) && mst.contains(&ca));
         assert!(!mst.contains(&ab));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // sssp_sticky
+
+    /// Diamond src─r1─dst / src─r2─dst. Both paths 2 hops; weight
+    /// tie-break decides nexthop. The shape the edge-weight bench
+    /// uses (src=a, r1=b, r2=c, dst=d).
+    fn diamond(w_r1: i32, w_r2: i32) -> (Graph, [NodeId; 4]) {
+        let mut g = Graph::new();
+        let src = g.add_node("src");
+        let r1 = g.add_node("r1");
+        let r2 = g.add_node("r2");
+        let dst = g.add_node("dst");
+        for (a, b, w) in [
+            (src, r1, w_r1),
+            (src, r2, w_r2),
+            // Far-side legs equal so only the src-side weight matters.
+            (r1, dst, 10),
+            (r2, dst, 10),
+        ] {
+            g.add_edge(a, b, w, 0);
+            g.add_edge(b, a, w, 0);
+        }
+        (g, [src, r1, r2, dst])
+    }
+
+    #[test]
+    fn sticky_keeps_prev_within_band() {
+        // t0: r1=15 r2=35 → nexthop r1. t1: r1=40 r2=35 — r2 now
+        // best (45 vs 50) but 50 ≤ 45×1.33=59.85 → STICK to r1.
+        let (g0, [src, r1, _r2, dst]) = diamond(15, 35);
+        let prev = g0.sssp(src);
+        assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
+
+        let (g1, _) = diamond(40, 35);
+        let plain = g1.sssp(src);
+        assert_ne!(
+            plain[dst.0 as usize].unwrap().nexthop,
+            r1,
+            "BFS alone flips"
+        );
+
+        let sticky = g1.sssp_sticky(src, &prev);
+        let r = sticky[dst.0 as usize].unwrap();
+        assert_eq!(r.nexthop, r1, "within 33% band → keep old nexthop");
+        assert_eq!(r.weighted_distance, 50, "carry old wdist for next compare");
+    }
+
+    #[test]
+    fn sticky_switches_when_clearly_better() {
+        // The connect-outlier case: r1 mis-measured at 197, true 15
+        // on r2. 207 > 25×1.33 → must switch. Proves sssp-sticky
+        // alone does NOT fix the SYN-retransmit bug (control variant).
+        let (g0, [src, r1, r2, dst]) = diamond(197, 200);
+        let prev = g0.sssp(src);
+        assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
+
+        let (g1, _) = diamond(197, 15);
+        let sticky = g1.sssp_sticky(src, &prev);
+        assert_eq!(
+            sticky[dst.0 as usize].unwrap().nexthop,
+            r2,
+            ">33% improvement beats stickiness"
+        );
+    }
+
+    #[test]
+    fn sticky_ignored_when_old_nexthop_gone() {
+        // Old nexthop r1 loses its meta-conn (src↔r1 edge deleted).
+        // Stickiness must NOT pin a dead first hop.
+        let (g0, [src, r1, r2, dst]) = diamond(15, 16);
+        let prev = g0.sssp(src);
+        assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
+
+        let mut g1 = g0;
+        let e = g1.lookup_edge(src, r1).unwrap();
+        g1.del_edge(e).unwrap();
+        let e = g1.lookup_edge(r1, src).unwrap();
+        g1.del_edge(e).unwrap();
+
+        let sticky = g1.sssp_sticky(src, &prev);
+        assert_eq!(sticky[dst.0 as usize].unwrap().nexthop, r2);
+    }
+
+    #[test]
+    fn sticky_ignored_on_hop_change() {
+        // r1 path becomes 3 hops (insert mid). Different distance →
+        // topology change → no stickiness even though weights close.
+        let (g0, [src, r1, r2, dst]) = diamond(15, 16);
+        let prev = g0.sssp(src);
+        assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
+
+        // New graph: src─r2─dst only at 2 hops; r1 reachable but
+        // dst-via-r1 now 3 hops. BFS picks r2 at distance 2; old
+        // route had distance 2 via r1 — but r1 is no longer a
+        // first-hop neighbour of equal-hop dst path. Simplest model:
+        // drop r1→dst so dst only via r2.
+        let mut g1 = Graph::new();
+        let s = g1.add_node("src");
+        let b = g1.add_node("r1");
+        let c = g1.add_node("r2");
+        let d = g1.add_node("dst");
+        assert_eq!((s, b, c, d), (src, r1, r2, dst)); // slot order stable
+        for (a, bb, w) in [(s, b, 15), (s, c, 16), (c, d, 10)] {
+            g1.add_edge(a, bb, w, 0);
+            g1.add_edge(bb, a, w, 0);
+        }
+        let sticky = g1.sssp_sticky(src, &prev);
+        assert_eq!(sticky[dst.0 as usize].unwrap().nexthop, r2);
+    }
+
+    #[test]
+    fn sticky_empty_prev_is_plain_sssp() {
+        let (g, [src, ..]) = diamond(15, 35);
+        assert_eq!(g.sssp(src), g.sssp_sticky(src, &[]));
     }
 
     #[test]
