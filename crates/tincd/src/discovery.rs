@@ -180,7 +180,12 @@ pub struct Discovery {
     /// tincd's NAT-mapped `(ip, port)` from the port-probe. What `v4=`
     /// in the published record carries.
     reflexive_v4: Option<SocketAddrV4>,
-    /// `set_reflexive_v4` changed the value ⇒ republish immediately.
+    /// External `(ip, port)` from a UPnP-IGD/NAT-PMP TCP mapping. Unlike
+    /// `reflexive_v4` (a NAT-learnt UDP hole), this is a router-installed
+    /// DNAT rule — stable for the lease duration, works for *any* peer
+    /// without a punch. Feeds `tcp=` in the published record.
+    portmapped_tcp: Option<SocketAddr>,
+    /// `set_reflexive_v4` / `set_portmapped_tcp` changed ⇒ republish now.
     reflexive_dirty: bool,
     /// Gates `wants_port_probe` to one per `PROBE_KEEPALIVE`.
     last_probe: Option<Instant>,
@@ -300,6 +305,7 @@ impl Discovery {
             last_vote: None,
             last_firewalled: true,
             reflexive_v4: None,
+            portmapped_tcp: None,
             reflexive_dirty: false,
             last_probe: None,
             last_publish: None,
@@ -342,6 +348,18 @@ impl Discovery {
             return false;
         }
         self.reflexive_v4 = Some(addr);
+        self.reflexive_dirty = true;
+        true
+    }
+
+    /// Daemon calls when the portmapper thread reports a TCP mapping
+    /// (or `None` on mapping-lost). Feeds `tcp=` in the published
+    /// record. Returns `true` if changed (⇒ republish on next tick).
+    pub fn set_portmapped_tcp(&mut self, addr: Option<SocketAddr>) -> bool {
+        if self.portmapped_tcp == addr {
+            return false;
+        }
+        self.portmapped_tcp = addr;
         self.reflexive_dirty = true;
         true
     }
@@ -498,6 +516,16 @@ impl Discovery {
             parts.push(format!("v4={reflexive}"));
         }
 
+        // Router-installed DNAT for our TCP listener. Separate key:
+        // `v4=` is the UDP-reflexive port (correct for the SPTPS
+        // datagram path / Tier-0 punch); `tcp=` is the meta-conn
+        // dial target. They're *different* mappings on the same NAT.
+        // v6 mappings (PCP on a v6-only CPE) are rare but legal —
+        // SocketAddr's Display already brackets v6.
+        if let Some(ext) = self.portmapped_tcp {
+            parts.push(format!("tcp={ext}"));
+        }
+
         // v6: local-enum, no firewall gate (mainline's `firewalled()` is
         // v4-only). v6 doesn't NAT ⇒ bind port = reachable port. Tier-0
         // deals with the firewall.
@@ -578,6 +606,16 @@ pub fn parse_record(value: &str) -> ParsedRecord {
                     out.direct.insert(0, SocketAddr::V6(sa));
                 }
             }
+            "tcp" => {
+                if let Ok(sa) = v.parse::<SocketAddr>() {
+                    out.tcp = Some(sa);
+                    // Also a direct-dial candidate: outgoing meta-
+                    // conns are TCP, and a portmapped address is the
+                    // *most* likely to accept (no punch needed).
+                    // Prepend so it's tried first.
+                    out.direct.insert(0, sa);
+                }
+            }
             _ => {} // unknown key — skip, forward-compat
         }
     }
@@ -587,9 +625,13 @@ pub fn parse_record(value: &str) -> ParsedRecord {
 /// Addresses extracted from a peer's published record.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ParsedRecord {
-    /// Direct-dial candidates (v6 first, then v4). Feed to
+    /// Direct-dial candidates (tcp/v6 first, then v4). Feed to
     /// `addr_cache.known` alongside `ADD_EDGE`'s.
     pub direct: Vec<SocketAddr>,
+    /// Router-installed TCP DNAT (UPnP/NAT-PMP). Subset of `direct`
+    /// surfaced separately so callers that distinguish "dialable
+    /// without punch" from "punch hint" can.
+    pub tcp: Option<SocketAddr>,
 }
 
 #[cfg(test)]
@@ -711,6 +753,24 @@ mod tests {
             .resolve(&alice_pub)
             .expect("bob should find alice's record");
         assert!(parsed.direct.contains(&SocketAddr::V4(reflexive)));
+        assert_eq!(parsed.tcp, None, "alice didn't set portmapped_tcp");
+
+        // ─── tcp= round-trip: portmapped addr publishes + resolves.
+        let mapped: SocketAddr = "203.0.113.7:655".parse().unwrap();
+        assert!(alice.set_portmapped_tcp(Some(mapped)));
+        assert!(!alice.set_portmapped_tcp(Some(mapped)), "unchanged");
+        let (_, value) = alice.publish(Instant::now()).expect("republish with tcp=");
+        assert!(
+            value.contains("tcp=203.0.113.7:655"),
+            "tcp= missing: {value}"
+        );
+        // Don't round-trip through the DHT a second time: get_mutable
+        // may return the older seq from a node that hasn't converged.
+        // Parse the published value directly — the signature path was
+        // already proven by the first resolve above.
+        let parsed = parse_record(&value);
+        assert_eq!(parsed.tcp, Some(mapped));
+        assert!(parsed.direct.contains(&mapped));
 
         // Negative: unknown pubkey returns None (no garbage, no panic).
         assert!(bob.resolve(&[0u8; 32]).is_none());
@@ -811,9 +871,30 @@ mod tests {
                 "203.0.113.7:44132".parse().unwrap(),
             ]
         );
+        assert_eq!(p.tcp, None);
+        // tcp= present: surfaces in .tcp AND first in .direct,
+        // regardless of field order in the record.
+        let p = parse_record("tinc1 v4=203.0.113.7:44132 tcp=203.0.113.7:655");
+        assert_eq!(p.tcp, Some("203.0.113.7:655".parse().unwrap()));
+        assert_eq!(
+            p.direct,
+            vec![
+                "203.0.113.7:655".parse().unwrap(),
+                "203.0.113.7:44132".parse().unwrap(),
+            ]
+        );
+        // tcp= first, v6 second: both prepend; trial order is
+        // last-prepend-wins. Just checks both land in .direct.
+        let p = parse_record("tinc1 tcp=192.0.2.1:655 v6=[2001:db8::1]:655");
+        assert_eq!(p.tcp, Some("192.0.2.1:655".parse().unwrap()));
+        assert_eq!(p.direct.len(), 2);
+        // v6 portmapped (PCP on v6 CPE): brackets parse.
+        let p = parse_record("tinc1 tcp=[2001:db8::7]:655");
+        assert_eq!(p.tcp, Some("[2001:db8::7]:655".parse().unwrap()));
         // Unknown keys + malformed values: skip, don't fail.
-        let p = parse_record("tinc1 v4=garbage future=thing v6=[::1]:655 ext=x:1");
+        let p = parse_record("tinc1 v4=garbage tcp=nope future=thing v6=[::1]:655 ext=x:1");
         assert_eq!(p.direct, vec!["[::1]:655".parse().unwrap()]);
+        assert_eq!(p.tcp, None);
         // Wrong version.
         assert_eq!(parse_record("tinc2 v4=1.2.3.4:5"), ParsedRecord::default());
         assert_eq!(parse_record(""), ParsedRecord::default());
