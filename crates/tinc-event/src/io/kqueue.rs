@@ -12,7 +12,7 @@
 //! for the unwanted ones. `del` deletes both.
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
@@ -49,8 +49,8 @@ pub(super) fn create() -> io::Result<Poller> {
 /// `uintptr_t` (nix exposes it as `usize`).
 #[inline]
 #[allow(clippy::cast_sign_loss)]
-fn fd_ident(fd: BorrowedFd<'_>) -> usize {
-    fd.as_raw_fd() as usize
+fn fd_ident(fd: RawFd) -> usize {
+    fd as usize
 }
 
 /// token → kevent udata. nix wraps `udata` as `isize`; tokens are
@@ -61,7 +61,7 @@ fn token_udata(token: usize) -> isize {
 }
 
 /// Build a changelist that only ADDs wanted filters (for initial registration).
-fn add_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
+fn add_changes(fd: RawFd, token: usize, i: super::Io) -> [KEvent; 2] {
     let ident = fd_ident(fd);
     let udata = token_udata(token);
     let flags = EvFlags::EV_ADD | EvFlags::EV_CLEAR;
@@ -97,7 +97,7 @@ fn add_count(i: super::Io) -> usize {
 
 /// Build the changelist for modify. Wanted filters get
 /// `EV_ADD | EV_CLEAR`; unwanted get `EV_DELETE`.
-fn interest_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 2] {
+fn interest_changes(fd: RawFd, token: usize, i: super::Io) -> [KEvent; 2] {
     let ident = fd_ident(fd);
     let udata = token_udata(token);
     let want_read = matches!(i, super::Io::Read | super::Io::ReadWrite);
@@ -133,18 +133,13 @@ fn interest_changes(fd: BorrowedFd<'_>, token: usize, i: super::Io) -> [KEvent; 
 pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
     // On add, only register wanted filters — don't EV_DELETE filters
     // that were never registered (kqueue returns ENOENT for that).
-    let changes = add_changes(fd, token, i);
+    let changes = add_changes(fd.as_raw_fd(), token, i);
     kq.kevent(&changes[..add_count(i)], &mut [], None)
         .map(|_| ())
         .map_err(Into::into)
 }
 
-pub(super) fn modify(
-    kq: &Poller,
-    fd: BorrowedFd<'_>,
-    token: usize,
-    i: super::Io,
-) -> io::Result<()> {
+pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
     // kqueue: EV_ADD on an existing filter replaces it (no EEXIST).
     // EV_DELETE on a non-existing filter returns ENOENT — tolerate it
     // by submitting changes one at a time.
@@ -158,7 +153,7 @@ pub(super) fn modify(
     Ok(())
 }
 
-pub(super) fn del(kq: &Poller, fd: BorrowedFd<'_>) -> io::Result<()> {
+pub(super) fn del(kq: &Poller, fd: RawFd) -> io::Result<()> {
     let ident = fd_ident(fd);
     let changes = [
         KEvent::new(

@@ -179,16 +179,21 @@ impl<W: Copy> EventLoop<W> {
         // so we never get here with None and a live id. The expect
         // above would have fired. But: ADD-not-MOD if interest was
         // None, for symmetry with what del would do).
-        // SAFETY: `slot.fd` was stored from a live `BorrowedFd` in
-        // `add()`. Caller contract is the fd outlives its `IoId`
-        // (deregister BEFORE close — see `del()` EBADF tripwire).
-        #[allow(unsafe_code)]
-        let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
+        //
+        // The slot stores `RawFd` only as the kernel-side key for
+        // MOD/DEL; we deliberately do NOT materialize a `BorrowedFd`
+        // from it because the loop cannot prove the caller hasn't
+        // closed it (that's the caller's contract, asserted via the
+        // EBADF tripwire in `del()`).
         if slot.interest.is_some() {
-            modify(&self.ep, fd, id.0, interest)?;
+            modify(&self.ep, slot.fd, id.0, interest)?;
         } else {
             // Unreachable in current API (del frees slot). Kept for
             // when/if we expose a "deregister but keep slot" path.
+            // SAFETY: in the only path that could reach here the
+            // caller still owns the fd and is re-arming it.
+            #[allow(unsafe_code)]
+            let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
             add(&self.ep, fd, id.0, interest)?;
         }
         slot.interest = Some(interest);
@@ -222,11 +227,7 @@ impl<W: Copy> EventLoop<W> {
             // ERR|HUP into a freed slot. Tripwire it in debug —
             // would have caught the connecting_socks leak in tincd
             // at first integration-test run instead of in prod.
-            // SAFETY: same contract as `set()` above. If the caller
-            // already closed it we get EBADF, asserted below.
-            #[allow(unsafe_code)]
-            let fd = unsafe { BorrowedFd::borrow_raw(slot.fd) };
-            if let Err(e) = del(&self.ep, fd) {
+            if let Err(e) = del(&self.ep, slot.fd) {
                 debug_assert_ne!(
                     e.raw_os_error(),
                     Some(libc::EBADF),
