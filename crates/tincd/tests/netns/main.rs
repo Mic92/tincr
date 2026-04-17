@@ -95,6 +95,7 @@ mod common;
 
 mod rig;
 
+mod autoconnect_shortcut;
 mod busyloop;
 mod chaos;
 mod dns;
