@@ -311,6 +311,14 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // pure data dirs; the device is a char dev (MakeReg meaningless
     // on it but harmless, and one access-set means one add_rules).
     let mut rwc_paths: Vec<PathBuf> = vec![cache, invitations];
+    // addrcache falls back to `$STATE_DIRECTORY/cache` when confbase
+    // is read-only (NixOS store). Pre-create + allow it so the
+    // fallback survives Landlock too.
+    if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {
+        let sd_cache = PathBuf::from(sd).join("cache");
+        let _ = std::fs::create_dir_all(&sd_cache);
+        rwc_paths.push(sd_cache);
+    }
     if let Some(dev) = &paths.device {
         rwc_paths.push(dev.clone());
     }

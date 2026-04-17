@@ -95,8 +95,21 @@ pub struct AddressCache {
     /// Index into the logical `cached ‖ known ‖ config_resolved`
     /// concatenation. `reset()` zeroes. C: `tried` (`:122`, `:243`).
     cursor: usize,
-    /// `confbase/cache/NODE`. `None` = in-memory only (tests).
+    /// `<cache_dir>/NODE`. `None` = in-memory only (tests).
     cache_file: Option<PathBuf>,
+}
+
+/// Pick the directory for the on-disk cache. C tinc hard-codes
+/// `confbase/cache/` (`address_cache.c:108`). On NixOS confbase is a
+/// read-only store path and tincd runs unprivileged with systemd
+/// `StateDirectory=` — use that when set. No writability probe:
+/// `open()` for the initial `ConnectTo` peers runs pre-`drop_privs`
+/// where `CAP_DAC_OVERRIDE` makes `access(W_OK)` lie. The env var
+/// being set IS the operator signal that confbase is managed; bare
+/// `tincd -n foo` / chroot / BSD have no `$STATE_DIRECTORY` and keep
+/// the C layout.
+fn resolve_cache_dir(confbase: &Path, state_dir: Option<&Path>) -> PathBuf {
+    state_dir.unwrap_or(confbase).join("cache")
 }
 
 impl AddressCache {
@@ -108,7 +121,8 @@ impl AddressCache {
     /// the config addrs, no error. It's a cache.
     #[must_use]
     pub fn open(confbase: &Path, node_name: &str, config_addrs: Vec<(String, u16)>) -> Self {
-        let cache_file = confbase.join("cache").join(node_name);
+        let state_dir = std::env::var_os("STATE_DIRECTORY").map(PathBuf::from);
+        let cache_file = resolve_cache_dir(confbase, state_dir.as_deref()).join(node_name);
         let cached = Self::load(&cache_file);
 
         // Config addrs are unresolved (host, port) pairs; dedup vs
@@ -345,7 +359,10 @@ impl Drop for AddressCache {
     /// `DEBUG_CONNECTIONS` (`:93`).
     fn drop(&mut self) {
         if let Err(e) = self.save() {
-            log::warn!(target: "tincd::conn", "address cache save failed: {e}");
+            // Debug, not warn: read-only confdir (NixOS store) makes
+            // this fire on every outgoing retry. The cache is an
+            // optimisation; losing it costs one extra connect().
+            log::debug!(target: "tincd::conn", "address cache save failed: {e}");
         }
     }
 }
@@ -375,68 +392,32 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn next_advances() {
-        let mut c = AddressCache::new(vec![
-            sa("10.0.0.1:655"),
-            sa("10.0.0.2:655"),
-            sa("10.0.0.3:655"),
-        ]);
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.2:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.3:655")));
-        assert_eq!(c.next_addr(), None);
-        assert_eq!(c.next_addr(), None);
+    /// Drain the cache via `next_addr` until `None`.
+    fn drain(c: &mut AddressCache) -> Vec<SocketAddr> {
+        std::iter::from_fn(|| c.next_addr()).collect()
     }
 
     #[test]
-    fn reset_rewinds() {
+    fn cursor_walk_and_reset() {
+        let addrs = vec![sa("10.0.0.1:655"), sa("10.0.0.2:655"), sa("10.0.0.3:655")];
+        let mut c = AddressCache::new(addrs.clone());
+        assert_eq!(drain(&mut c), addrs);
+        assert_eq!(c.next_addr(), None); // stays exhausted
+        c.reset();
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
+    }
+
+    /// `add_recent_address` (`:84-116`): new addr prepends; existing
+    /// addr rotates to front without growing the list.
+    #[test]
+    fn add_recent_prepend_and_move_to_front() {
         let mut c = AddressCache::new(vec![sa("10.0.0.1:655"), sa("10.0.0.2:655")]);
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.2:655")));
-        assert_eq!(c.next_addr(), None);
-        c.reset();
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-    }
-
-    #[test]
-    fn add_recent_prepends() {
-        let mut c = AddressCache::new(vec![sa("10.0.0.1:655")]);
-        c.add_recent(sa("10.0.0.9:655"));
-        c.reset();
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.9:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-        assert_eq!(c.next_addr(), None);
-    }
-
-    #[test]
-    fn add_recent_dedups() {
-        let mut c = AddressCache::new(vec![sa("10.0.0.1:655")]);
-        c.add_recent(sa("10.0.0.9:655"));
-        c.add_recent(sa("10.0.0.9:655"));
-        // Two adds of the same addr: list grows by one, not two.
-        assert_eq!(c.cached.len(), 2);
-        c.reset();
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.9:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-        assert_eq!(c.next_addr(), None);
-    }
-
-    #[test]
-    fn add_recent_moves_to_front() {
-        // `find_cached` returns position, shift [0..pos) right by
-        // one, write to [0]. Net: rotate.
-        let mut c = AddressCache::new(vec![
-            sa("10.0.0.1:655"),
-            sa("10.0.0.2:655"),
-            sa("10.0.0.3:655"),
-        ]);
-        c.add_recent(sa("10.0.0.3:655")); // was at position 2
-        assert_eq!(c.cached.len(), 3); // same length
-        c.reset();
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.3:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
-        assert_eq!(c.next_addr(), Some(sa("10.0.0.2:655")));
+        c.add_recent(sa("10.0.0.9:655")); // new → prepend
+        c.add_recent(sa("10.0.0.2:655")); // existing → rotate, no growth
+        assert_eq!(
+            c.cached,
+            vec![sa("10.0.0.2:655"), sa("10.0.0.9:655"), sa("10.0.0.1:655")]
+        );
     }
 
     #[test]
@@ -553,39 +534,19 @@ mod tests {
         assert_eq!(body.trim(), "10.0.0.1:655");
     }
 
-    /// Lazy resolve: numeric `Address = 127.0.0.1 655` resolves to
-    /// the same `SocketAddr` as eager. No DNS hit (numeric host).
-    #[test]
-    fn lazy_resolve_numeric() {
-        let tmp = tmpdir("lazy-numeric");
-        let mut c = AddressCache::open(&tmp, "bob", vec![cfg("127.0.0.1", 655)]);
-        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
-        assert_eq!(c.next_addr(), None);
-    }
-
-    /// Two `Address =` lines: walk past tiers 1+2 (empty), tier 3
-    /// yields both, each exactly once per round. Reset → fresh
-    /// resolve, both yielded again.
+    /// Two `Address =` lines: tier 3 yields both exactly once per
+    /// round; `reset()` clears the resolve buffer so the next round
+    /// re-resolves (dynamic DNS pickup).
     #[test]
     fn lazy_resolve_two_lines_once_per_round() {
-        let tmp = tmpdir("lazy-two");
-        let mut c = AddressCache::open(
-            &tmp,
-            "bob",
-            vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)],
-        );
-        // Round 1.
-        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
-        assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
-        assert_eq!(c.next_addr(), None);
-        assert_eq!(c.next_addr(), None);
-        // Round 2: reset clears the resolve buffer.
+        let mut c = AddressCache::new(vec![]);
+        c.config = vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)];
+        let want = vec![sa("127.0.0.1:655"), sa("127.0.0.2:655")];
+        assert_eq!(drain(&mut c), want);
         c.reset();
         assert_eq!(c.config_resolved.len(), 0);
         assert_eq!(c.config_idx, 0);
-        assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
-        assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
-        assert_eq!(c.next_addr(), None);
+        assert_eq!(drain(&mut c), want);
     }
 
     /// Resolve dedup: a config addr that's already in tier 1 (cached)
@@ -598,6 +559,34 @@ mod tests {
         assert_eq!(c.next_addr(), Some(sa("127.0.0.1:655")));
         assert_eq!(c.next_addr(), Some(sa("127.0.0.2:655")));
         assert_eq!(c.next_addr(), None);
+    }
+
+    /// `$STATE_DIRECTORY` set → always used, regardless of confbase
+    /// writability (the probe lied under `CAP_DAC_OVERRIDE` pre-
+    /// `drop_privs`). Unset → C-compatible `confbase/cache/`.
+    #[test]
+    fn resolve_cache_dir_prefers_state_dir() {
+        let conf = Path::new("/etc/tinc/net");
+        let state = Path::new("/var/lib/tinc/net");
+        assert_eq!(resolve_cache_dir(conf, Some(state)), state.join("cache"));
+        assert_eq!(resolve_cache_dir(conf, None), conf.join("cache"));
+    }
+
+    /// Regression: read-only confbase, no state dir (non-systemd
+    /// unprivileged run). `save()` errors but `Drop` swallows it at
+    /// debug — no panic, no warn-spam.
+    #[test]
+    fn drop_swallows_eacces_on_readonly_confbase() {
+        use std::os::unix::fs::PermissionsExt;
+        let conf = tmpdir("ro-conf");
+        fs::set_permissions(&conf, fs::Permissions::from_mode(0o555)).unwrap();
+        {
+            let mut c = AddressCache::new(vec![]);
+            c.cache_file = Some(resolve_cache_dir(&conf, None).join("bob"));
+            c.add_recent(sa("10.0.0.1:655"));
+            assert!(c.save().is_err()); // EACCES surfaces from save()…
+        } // …but Drop swallows it.
+        fs::set_permissions(&conf, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
