@@ -224,14 +224,6 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Raw fds. TCP first, UDP second. Kept for tests/diagnostics
-    /// that need the integer; epoll registration uses
-    /// [`tcp_fd`](Self::tcp_fd)/[`udp_fd`](Self::udp_fd).
-    #[must_use]
-    pub fn fds(&self) -> (RawFd, RawFd) {
-        (self.tcp.as_raw_fd(), self.udp.as_raw_fd())
-    }
-
     /// Borrowed TCP listener fd for `EventLoop::add`.
     #[must_use]
     pub fn tcp_fd(&self) -> BorrowedFd<'_> {

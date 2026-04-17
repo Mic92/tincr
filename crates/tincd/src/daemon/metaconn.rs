@@ -385,7 +385,7 @@ impl Daemon {
                         c.name,
                         c.hostname,
                         c.options.bits(),
-                        c.fd(),
+                        std::os::fd::AsRawFd::as_raw_fd(&c.as_fd()),
                         c.status_value()
                     )
                 })

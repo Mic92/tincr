@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
 use std::ops::Range;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Instant;
 
 use nix::errno::Errno;
@@ -383,11 +383,6 @@ impl Connection {
             log_level: None,
             prev_debug_level: None,
         }
-    }
-
-    #[must_use]
-    pub fn fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
     }
 }
 
