@@ -64,7 +64,12 @@ fn first_packet_across_tunnel() {
     // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
     // 10.0.0.2 routes Forward{to: bob} on alice's side, then
     // Forward{to: myself} on bob's side.
-    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    bob.write_config_with(
+        &alice,
+        false,
+        Some(bob_far.as_raw_fd()),
+        Some("10.0.0.2/32"),
+    );
     alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
     // ─── spawn ──────────────────────────────────────────────────
@@ -297,7 +302,12 @@ fn compression_roundtrip() {
     let (alice_tun, alice_far) = sockpair_seqpacket();
     let (bob_tun, bob_far) = sockpair_seqpacket();
 
-    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    bob.write_config_with(
+        &alice,
+        false,
+        Some(bob_far.as_raw_fd()),
+        Some("10.0.0.2/32"),
+    );
     alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);
@@ -552,7 +562,12 @@ fn keyexpire_forces_rekey() {
     let (alice_tun, alice_far) = sockpair_seqpacket();
     let (bob_tun, bob_far) = sockpair_seqpacket();
 
-    bob.write_config_with(&alice, false, Some(bob_far.as_raw_fd()), Some("10.0.0.2/32"));
+    bob.write_config_with(
+        &alice,
+        false,
+        Some(bob_far.as_raw_fd()),
+        Some("10.0.0.2/32"),
+    );
     alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);

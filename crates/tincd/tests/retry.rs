@@ -149,8 +149,7 @@ fn sigalrm_retries_now() {
     // ─── SIGALRM ────────────────────────────────────────────────
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = nix::unistd::Pid::from_raw(child.id() as i32);
-    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGALRM)
-        .expect("kill SIGALRM");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGALRM).expect("kill SIGALRM");
 
     // ─── second connect attempt arrives FAST ────────────────────
     // `on_retry()` sets the timer to Duration::ZERO; next turn() it

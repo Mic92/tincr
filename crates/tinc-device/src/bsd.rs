@@ -500,9 +500,7 @@ mod utun {
         /// I/O errors from socket/ioctl/connect/getsockopt.
         pub fn open_utun(unit: Option<u32>) -> io::Result<Self> {
             // socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)
-            let fd = unsafe {
-                libc::socket(PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL)
-            };
+            let fd = unsafe { libc::socket(PF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL) };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -520,8 +518,7 @@ mod utun {
                 ctl_id: 0,
                 ctl_name: [0u8; 96],
             };
-            info.ctl_name[..UTUN_CONTROL_NAME.len()]
-                .copy_from_slice(UTUN_CONTROL_NAME);
+            info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
             if unsafe { libc::ioctl(fd_raw(&fd), CTLIOCGINFO, &mut info) } < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -563,10 +560,8 @@ mod utun {
             {
                 return Err(io::Error::last_os_error());
             }
-            let iface = String::from_utf8_lossy(
-                &name_buf[..name_len.saturating_sub(1) as usize],
-            )
-            .into_owned();
+            let iface = String::from_utf8_lossy(&name_buf[..name_len.saturating_sub(1) as usize])
+                .into_owned();
 
             Ok(BsdTun {
                 fd,

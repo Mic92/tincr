@@ -197,8 +197,13 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     // `u32`. 20 fits.
     #[allow(clippy::cast_possible_truncation)]
     let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-    let ret =
-        unsafe { libc::bind(fd.as_raw_fd(), (&raw const sa).cast::<libc::sockaddr>(), addrlen) };
+    let ret = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            (&raw const sa).cast::<libc::sockaddr>(),
+            addrlen,
+        )
+    };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }

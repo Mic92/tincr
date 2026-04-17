@@ -66,8 +66,7 @@ fn wait_for_line(path: &Path, timeout: Duration) -> bool {
 fn sigterm_and_wait(mut child: Child) {
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = nix::unistd::Pid::from_raw(child.id() as i32);
-    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
-        .expect("SIGTERM failed");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("SIGTERM failed");
     let status = child.wait().expect("wait");
     assert!(status.success(), "tincd exited non-zero: {status:?}");
 }

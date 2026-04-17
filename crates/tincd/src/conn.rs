@@ -398,7 +398,6 @@ impl AsFd for Connection {
 }
 
 impl Connection {
-
     /// For `socket2::SockRef::from` (`getsockname` in `ack_h:1040-1045`).
     #[must_use]
     pub const fn owned_fd(&self) -> &OwnedFd {

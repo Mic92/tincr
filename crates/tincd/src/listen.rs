@@ -148,7 +148,11 @@ pub(crate) fn get_int_sockopt(
             &raw mut len,
         )
     };
-    if rc == 0 { Ok(val) } else { Err(io::Error::last_os_error()) }
+    if rc == 0 {
+        Ok(val)
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// `MAXSOCKETS` (`net.h:47`). C comment: "Probably overkill...".

@@ -901,7 +901,11 @@ pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
 /// # Errors
 /// `BadEdge`: not UTF-8 or `AddEdge::parse` failed.
 pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
-    parse_body(body, DispatchError::BadEdge, tinc_proto::msg::AddEdge::parse)
+    parse_body(
+        body,
+        DispatchError::BadEdge,
+        tinc_proto::msg::AddEdge::parse,
+    )
 }
 
 /// `del_edge_h` parse.
@@ -909,7 +913,11 @@ pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchE
 /// # Errors
 /// `BadEdge`: not UTF-8 or `DelEdge::parse` failed.
 pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
-    parse_body(body, DispatchError::BadEdge, tinc_proto::msg::DelEdge::parse)
+    parse_body(
+        body,
+        DispatchError::BadEdge,
+        tinc_proto::msg::DelEdge::parse,
+    )
 }
 
 /// Strip trailing `\n` from SPTPS record body.

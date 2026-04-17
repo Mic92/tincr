@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
 use super::common::*;

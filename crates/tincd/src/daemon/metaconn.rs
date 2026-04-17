@@ -53,7 +53,10 @@ impl Daemon {
 
         let id = self.conns.insert(conn);
         // io_add IO_READ only; `send` adds WRITE later.
-        match self.ev.add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id)) {
+        match self
+            .ev
+            .add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id))
+        {
             Ok(io_id) => {
                 self.conn_io.insert(id, io_id);
                 log::debug!(target: "tincd::conn",

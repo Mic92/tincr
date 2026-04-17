@@ -101,8 +101,7 @@ pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()>
         .open(path)?;
     // `.mode()` only applies on create; force 0600 on a pre-existing
     // file too (cookie is the auth secret).
-    nix::sys::stat::fchmod(&f, Mode::from_bits_truncate(0o600))
-        .map_err(io::Error::from)?;
+    nix::sys::stat::fchmod(&f, Mode::from_bits_truncate(0o600)).map_err(io::Error::from)?;
     writeln!(f, "{} {} {}", std::process::id(), cookie, address)?;
     // fclose flushes; we let Drop close. `sync_data` is overkill. The
     // pidfile is read by another process; the write must be visible
@@ -232,7 +231,6 @@ impl ControlSocket {
         stream.set_nonblocking(true)?;
         Ok(stream)
     }
-
 }
 
 impl std::os::fd::AsFd for ControlSocket {

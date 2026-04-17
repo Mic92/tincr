@@ -181,7 +181,13 @@ fn expand_name(name: &str) -> Result<String, String> {
 
     Ok(raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect())
 }
 
@@ -260,15 +266,15 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 .map(|e| e.get_str())
                 .and_then(|s| s.strip_prefix("utun"))
                 .and_then(|n| n.parse::<u32>().ok());
-            let tun = tinc_device::BsdTun::open_utun(unit)
-                .map_err(SetupError::Io)?;
+            let tun = tinc_device::BsdTun::open_utun(unit).map_err(SetupError::Io)?;
             Box::new(tun)
         }
         #[cfg(target_os = "macos")]
         Some("tap") => {
             return Err(SetupError::Config(
                 "DeviceType=tap is not supported on macOS (no vmnet backend). \
-                 Use DeviceType=tun (utun) instead.".into(),
+                 Use DeviceType=tun (utun) instead."
+                    .into(),
             ));
         }
         Some(other) => {

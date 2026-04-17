@@ -369,7 +369,9 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         .lookup("ScriptsInterpreter")
         .next()
         .map(|e| e.get_str().to_owned());
-    if new_interp == settings.scripts_interpreter || crate::sandbox::can(crate::sandbox::Action::UseNewPaths) {
+    if new_interp == settings.scripts_interpreter
+        || crate::sandbox::can(crate::sandbox::Action::UseNewPaths)
+    {
         settings.scripts_interpreter = new_interp;
     } else {
         log::warn!(target: "tincd",

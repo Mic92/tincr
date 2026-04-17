@@ -22,7 +22,7 @@ use std::io::IoSlice;
 use std::os::fd::AsRawFd;
 
 use nix::errno::Errno;
-use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, SockaddrStorage};
+use nix::sys::socket::{ControlMessage, MsgFlags, SockaddrStorage, sendmsg};
 use socket2::Socket;
 
 use super::{EgressBatch, UdpEgress};

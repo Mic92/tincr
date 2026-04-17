@@ -546,8 +546,7 @@ fn tinc_down_on_shutdown() {
     // `child.kill()` (= SIGKILL, no Drop).
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = nix::unistd::Pid::from_raw(alice_child.id() as i32);
-    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
-        .expect("SIGTERM failed");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("SIGTERM failed");
     let status = alice_child.wait().expect("wait");
     assert!(status.success(), "tincd exited non-zero: {status:?}");
 

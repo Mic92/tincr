@@ -211,8 +211,7 @@ fn outgoing_timeout_no_busy_loop() {
     // the real check).
     #[allow(clippy::cast_possible_wrap)]
     let pid = nix::unistd::Pid::from_raw(pid as i32);
-    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
-        .expect("kill SIGTERM");
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("kill SIGTERM");
     let wait_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(s) = child.try_wait().unwrap() {

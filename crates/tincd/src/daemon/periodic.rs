@@ -328,7 +328,11 @@ impl Daemon {
 
         let name = if up { "subnet-up" } else { "subnet-down" };
         let interp = self.settings.scripts_interpreter.as_deref();
-        let run = if detach { script::spawn } else { script::execute };
+        let run = if detach {
+            script::spawn
+        } else {
+            script::execute
+        };
         Self::log_script(name, run(&self.confbase, name, &env, interp));
     }
 

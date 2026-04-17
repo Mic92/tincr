@@ -88,7 +88,10 @@ impl Daemon {
         let conn = Connection::new_meta(fd, hostname, peer, self.timers.now());
 
         let id = self.conns.insert(conn);
-        match self.ev.add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id)) {
+        match self
+            .ev
+            .add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id))
+        {
             Ok(io_id) => {
                 self.conn_io.insert(id, io_id);
                 log::info!(target: "tincd::conn",

@@ -184,10 +184,7 @@ fn open_cloexec() {
     // F_GETFD bit 0 = FD_CLOEXEC.
     for fd in [l.tcp.as_fd(), l.udp.as_fd()] {
         let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap());
-        assert!(
-            flags.contains(FdFlag::FD_CLOEXEC),
-            "fd missing CLOEXEC"
-        );
+        assert!(flags.contains(FdFlag::FD_CLOEXEC), "fd missing CLOEXEC");
     }
 }
 
@@ -211,7 +208,8 @@ fn open_v6only_set() {
 #[test]
 fn open_udp_nonblocking() {
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
-    let flags = OFlag::from_bits_truncate(fcntl(listeners[0].udp.as_fd(), FcntlArg::F_GETFL).unwrap());
+    let flags =
+        OFlag::from_bits_truncate(fcntl(listeners[0].udp.as_fd(), FcntlArg::F_GETFL).unwrap());
     assert!(flags.contains(OFlag::O_NONBLOCK));
 }
 
@@ -227,7 +225,12 @@ fn open_udp_pmtudisc_do() {
     // v4: always available.
     let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
     assert_eq!(
-        get_int_sockopt(listeners[0].udp.as_fd(), libc::IPPROTO_IP, libc::IP_MTU_DISCOVER).unwrap(),
+        get_int_sockopt(
+            listeners[0].udp.as_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER
+        )
+        .unwrap(),
         libc::IP_PMTUDISC_DO,
     );
 

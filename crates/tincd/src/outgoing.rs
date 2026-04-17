@@ -598,8 +598,8 @@ pub fn do_outgoing_pipe(
 
     // Build the full envp BEFORE fork (setenv post-fork is not
     // async-signal-safe). Inherit parent env, override our four keys.
-    let name_env = CString::new(format!("NAME={my_name}"))
-        .map_err(|_| nul_err("my_name has interior NUL"))?;
+    let name_env =
+        CString::new(format!("NAME={my_name}")).map_err(|_| nul_err("my_name has interior NUL"))?;
     let node_env = CString::new(format!("NODE={node_name}"))
         .map_err(|_| nul_err("node_name has interior NUL"))?;
     let ours = [
@@ -619,7 +619,11 @@ pub fn do_outgoing_pipe(
             let mut kv = k.into_encoded_bytes();
             kv.push(b'=');
             kv.extend_from_slice(v.as_encoded_bytes());
-            if override_key(&kv) { None } else { CString::new(kv).ok() }
+            if override_key(&kv) {
+                None
+            } else {
+                CString::new(kv).ok()
+            }
         })
         .collect();
     env_strs.extend(ours);

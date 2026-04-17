@@ -8,9 +8,7 @@ use crate::{icmp, neighbor};
 
 use tinc_graph::NodeId;
 
-use nix::sys::socket::{
-    AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket,
-};
+use nix::sys::socket::{AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket};
 
 impl Daemon {
     pub(super) fn handle_arp(&mut self, data: &[u8], from: Option<NodeId>) -> bool {

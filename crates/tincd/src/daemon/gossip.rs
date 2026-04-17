@@ -1071,29 +1071,29 @@ impl Daemon {
             // udp_ping_rtt=-1 is the unmeasured sentinel.
             rows.push(format!(
                 "{} {} {} {} {} {} {} {} {} {:x} {:x} {} {} {} {} {} {} {} {} {} {} {} {}",
-                Request::Control,       // %d CONTROL
-                crate::proto::REQ_DUMP_NODES, // %d
-                name,                         // %s
+                Request::Control,                                   // %d CONTROL
+                crate::proto::REQ_DUMP_NODES,                       // %d
+                name,                                               // %s
                 self.id6_table.id_of(nid).unwrap_or(NodeId6::NULL), // %s id
-                hostname,                     // %s ("HOST port PORT")
-                0,                            // %d cipher (DISABLE_LEGACY)
-                0,                            // %d digest
-                0,                            // %lu maclength
-                tunnel.map_or(0, |t| t.outcompression), // %d compression
-                options,                      // %x
-                status,                       // %x
-                nexthop,                      // %s
-                via,                          // %s
-                distance,                     // %d
+                hostname,                                           // %s ("HOST port PORT")
+                0,                                                  // %d cipher (DISABLE_LEGACY)
+                0,                                                  // %d digest
+                0,                                                  // %lu maclength
+                tunnel.map_or(0, |t| t.outcompression),             // %d compression
+                options,                                            // %x
+                status,                                             // %x
+                nexthop,                                            // %s
+                via,                                                // %s
+                distance,                                           // %d
                 tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.mtu), // %d mtu
                 tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.minmtu), // %d minmtu
                 tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.maxmtu), // %d maxmtu
-                0,                            // %ld last_state_change
+                0,                                                  // %ld last_state_change
                 tunnel
                     .and_then(|t| t.pmtu.as_ref())
                     .and_then(|p| p.udp_ping_rtt)
                     .map_or(-1_i32, u32::cast_signed), // %d
-                tunnel.map_or(0, |t| t.in_packets), // %PRIu64
+                tunnel.map_or(0, |t| t.in_packets),                 // %PRIu64
                 tunnel.map_or(0, |t| t.in_bytes),
                 tunnel.map_or(0, |t| t.out_packets),
                 tunnel.map_or(0, |t| t.out_bytes),
@@ -1432,8 +1432,7 @@ impl Daemon {
         let from_id = self.lookup_or_add_node(&edge.from);
         let to_id = self.lookup_or_add_node(&edge.to);
 
-        if self.graph.lookup_edge(from_id, to_id).is_none()
-            && self.graph.edge_count() >= MAX_EDGES
+        if self.graph.lookup_edge(from_id, to_id).is_none() && self.graph.edge_count() >= MAX_EDGES
         {
             log::warn!(target: "tincd::proto",
                        "Dropping ADD_EDGE {} → {}: edge table full ({MAX_EDGES})",

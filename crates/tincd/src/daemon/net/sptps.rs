@@ -560,11 +560,7 @@ impl Daemon {
             let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
             let dst_id = self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL);
             let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
-            let mut nw = conn.send(format_args!(
-                "{} {}",
-                Request::SptpsPacket,
-                frame.len()
-            ));
+            let mut nw = conn.send(format_args!("{} {}", Request::SptpsPacket, frame.len()));
             nw |= conn.send_raw(&frame);
             return nw;
         }

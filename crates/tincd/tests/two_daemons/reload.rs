@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
 use super::common::*;

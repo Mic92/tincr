@@ -443,9 +443,7 @@ impl Daemon {
                         continue; // try next addr
                     }
                 };
-                let flags = OFlag::from_bits_truncate(
-                    fcntl(&fd, FcntlArg::F_GETFL).unwrap_or(0),
-                );
+                let flags = OFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFL).unwrap_or(0));
                 let _ = fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // No async connect; ready NOW.
                 let now = self.timers.now();
@@ -459,7 +457,10 @@ impl Daemon {
                 );
                 conn.connecting = false;
                 let id = self.conns.insert(conn);
-                match self.ev.add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id)) {
+                match self
+                    .ev
+                    .add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id))
+                {
                     Ok(io_id) => {
                         self.conn_io.insert(id, io_id);
                     }
@@ -544,7 +545,10 @@ impl Daemon {
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    match self.ev.add(self.conns[id].as_fd(), Io::ReadWrite, IoWhat::Conn(id)) {
+                    match self
+                        .ev
+                        .add(self.conns[id].as_fd(), Io::ReadWrite, IoWhat::Conn(id))
+                    {
                         Ok(io_id) => {
                             self.conn_io.insert(id, io_id);
                         }

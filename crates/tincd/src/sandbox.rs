@@ -320,8 +320,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // inodes (all exist by enter() time), not their parent dirs —
     // those default to /var/run, /var/log. unlink is a directory op,
     // so the parent dirs get RemoveFile ONLY for Drop cleanup.
-    let mut runtime_files: Vec<PathBuf> =
-        vec![paths.pidfile.clone(), paths.unixsocket.clone()];
+    let mut runtime_files: Vec<PathBuf> = vec![paths.pidfile.clone(), paths.unixsocket.clone()];
     let mut unlink_parents: Vec<PathBuf> = Vec::new();
     if let Some(p) = paths.pidfile.parent() {
         unlink_parents.push(p.to_owned());
