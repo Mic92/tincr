@@ -97,7 +97,7 @@ pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()>
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(path)?;
     // `.mode()` only applies on create; force 0600 on a pre-existing
     // file too (cookie is the auth secret).
@@ -328,7 +328,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &path).unwrap();
 
         let err = write_pidfile(&path, "c", "a").unwrap_err();
-        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(err.raw_os_error(), Some(nix::Error::ELOOP as i32));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
         std::fs::remove_dir_all(&dir).ok();
     }

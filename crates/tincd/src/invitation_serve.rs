@@ -211,7 +211,7 @@ pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(&host_path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {

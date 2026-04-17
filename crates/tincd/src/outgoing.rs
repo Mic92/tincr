@@ -30,6 +30,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
+use nix::errno::Errno;
 use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
 use slotmap::new_key_type;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -215,7 +216,7 @@ pub fn try_connect(
         Ok(()) => {
             // Immediate success. Loopback can do this.
         }
-        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {
+        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => {
             // Normal nonblocking-connect-started.
             // `result == -1 && sockinprogress(sockerrno)` — the
             // `!` makes it FALSE, falls through to `:649-658`.
@@ -317,7 +318,7 @@ pub fn try_connect_via_proxy(
     let sock_addr = SockAddr::from(proxy_addr);
     match sock.connect(&sock_addr) {
         Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => {}
         Err(e) => {
             log::error!(target: "tincd::conn",
                         "Could not connect to proxy {proxy_addr} for {node_name}: {e}");
@@ -364,11 +365,11 @@ pub fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
             // we sent 0, so it's 0. Don't pin that.
             Ok(true)
         }
-        Err(nix::Error::EAGAIN | nix::Error::EINPROGRESS) => {
+        Err(Errno::EAGAIN | Errno::EINPROGRESS) => {
             // Linux-specific spurious wakeup. Stay registered.
             Ok(false)
         }
-        Err(nix::Error::ENOTCONN) => {
+        Err(Errno::ENOTCONN) => {
             // POSIX path: send() says ENOTCONN, real cause is in
             // SO_ERROR. `if(!socknotconn(sockerrno)) socket_error =
             // sockerrno` — socknotconn is `errno == ENOTCONN`.
@@ -387,7 +388,7 @@ pub fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
         // macOS: EPIPE from send() on a reset socket. The real
         // error is in SO_ERROR; read it like the ENOTCONN path.
         #[cfg(target_os = "macos")]
-        Err(nix::Error::EPIPE) => match getsockopt(&fd, sockopt::SocketError) {
+        Err(Errno::EPIPE) => match getsockopt(&fd, sockopt::SocketError) {
             Ok(0) => Ok(false),
             Ok(errno) => Err(io::Error::from_raw_os_error(errno)),
             Err(ge) => Err(ge.into()),

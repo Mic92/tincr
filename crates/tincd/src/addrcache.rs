@@ -331,7 +331,7 @@ impl AddressCache {
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
             .open(path)?
             .write_all(&buf)
     }

@@ -133,7 +133,7 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
     };
     batch.reset();
     match r {
-        Err(e) if e.raw_os_error() == Some(libc::EMSGSIZE) => Err((relay, origlen)),
+        Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => Err((relay, origlen)),
         // sndbuf full. GSO send is all-or-nothing (`udp_send_skb`);
         // no partial-accept to recover. Same as `ship_tx_batch`.
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),

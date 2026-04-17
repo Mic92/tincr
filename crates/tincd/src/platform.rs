@@ -7,7 +7,9 @@
 
 use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 use nix::sys::socket::SockFlag;
 use socket2::Socket;
@@ -67,12 +69,15 @@ pub fn msg_nosignal() -> nix::sys::socket::MsgFlags {
     }
 }
 
-/// Raw `setsockopt` for `c_int`-valued options that nix 0.29 doesn't
-/// wrap (`IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`, `IP_BOUND_IF`, …).
-/// Single unsafe site shared by the platform shims below.
+/// Raw `setsockopt` for `c_int`-valued options that neither nix nor
+/// socket2 wrap. After routing TOS/TCLASS/`BOUND_IF` through socket2
+/// the only remaining caller is `IP{,V6}_MTU_DISCOVER` in `listen.rs`
+/// (Linux-only), so this is gated to keep the unsafe surface minimal
+/// on other targets.
 ///
 /// # Errors
 /// `last_os_error()` from `setsockopt(2)`.
+#[cfg(target_os = "linux")]
 pub fn set_int_sockopt(
     fd: impl AsFd,
     level: libc::c_int,
@@ -106,40 +111,17 @@ pub fn set_int_sockopt(
 /// Log-on-error at debug, never fail — a busy system flipping TOS
 /// per-packet would spam if the kernel ever started rejecting these.
 pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
-    #[cfg(target_os = "linux")]
-    {
-        use nix::sys::socket::{setsockopt, sockopt};
-        let val = libc::c_int::from(prio);
-        let (label, res) = if is_ipv6 {
-            (
-                "IPV6_TCLASS",
-                setsockopt(&fd.as_fd(), sockopt::Ipv6TClass, &val),
-            )
-        } else {
-            ("IP_TOS", setsockopt(&fd.as_fd(), sockopt::Ipv4Tos, &val))
-        };
+    let s = socket2::SockRef::from(&fd);
+    let (label, res) = if is_ipv6 {
+        ("IPV6_TCLASS", s.set_tclass_v6(u32::from(prio)))
+    } else {
+        ("IP_TOS", s.set_tos(u32::from(prio)))
+    };
+    log::debug!(target: "tincd::net",
+                "Setting outgoing packet priority to {prio} ({label})");
+    if let Err(e) = res {
         log::debug!(target: "tincd::net",
-                    "Setting outgoing packet priority to {prio} ({label})");
-        if let Err(e) = res {
-            log::debug!(target: "tincd::net",
-                        "setsockopt {label} failed: {}",
-                        io::Error::from(e));
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let s = socket2::SockRef::from(&fd);
-        let (label, res) = if is_ipv6 {
-            ("IPV6_TCLASS", s.set_tclass_v6(u32::from(prio)))
-        } else {
-            ("IP_TOS", s.set_tos(u32::from(prio)))
-        };
-        log::debug!(target: "tincd::net",
-                    "Setting outgoing packet priority to {prio} ({label})");
-        if let Err(e) = res {
-            log::debug!(target: "tincd::net",
-                        "setsockopt {label} failed: {e}");
-        }
+                    "setsockopt {label} failed: {e}");
     }
 }
 
@@ -160,25 +142,22 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 }
 
 /// # Errors
-/// Unknown interface, NUL in name, or `setsockopt` failure.
+/// Unknown interface or `setsockopt` failure.
 #[cfg(not(target_os = "linux"))]
 pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF binds a
-    // socket to a specific interface index.
+    use std::num::NonZeroU32;
+    // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF /
+    // IPV6_BOUND_IF bind a socket to a specific interface index.
     let ifindex = nix::net::if_::if_nametoindex(iface)
-        .map_err(|_| io::Error::other(format!("Unknown interface {iface}")))?;
-    // ifindex fits c_int on any real system (iOS caps at ~16k).
-    #[allow(clippy::cast_possible_wrap)]
-    let val = ifindex as libc::c_int;
-    // IP_BOUND_IF for IPv4, IPV6_BOUND_IF for IPv6.
-    let is_v6 = s.local_addr().is_ok_and(|a| a.is_ipv6());
-    let (level, optname) = if is_v6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| io::Error::other(format!("Unknown interface {iface}")))?;
+    let res = if s.local_addr().is_ok_and(|a| a.is_ipv6()) {
+        s.bind_device_by_index_v6(Some(ifindex))
     } else {
-        (libc::IPPROTO_IP, libc::IP_BOUND_IF)
+        s.bind_device_by_index_v4(Some(ifindex))
     };
-    set_int_sockopt(s, level, optname, val)
-        .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
+    res.map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
 }
 
 /// `daemon(3)`: fork, parent `_exit(0)`, child `setsid()` and

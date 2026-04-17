@@ -796,7 +796,7 @@ impl Daemon {
         };
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
-        } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+        } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
             // EMSGSIZE = LOCAL kernel rejected (interface MTU).
             // Shrink relay's maxmtu. Don't log: this IS the
             // discovery mechanism.

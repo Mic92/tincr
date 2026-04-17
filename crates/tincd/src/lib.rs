@@ -53,9 +53,11 @@ pub mod subnet_tree;
 pub mod tcp_tunnel;
 pub mod tunnel;
 pub mod udp_info;
+#[cfg(target_os = "linux")]
+pub use platform::set_int_sockopt;
 pub use platform::{
-    bind_to_interface, daemonize, initgroups, msg_nosignal, set_cloexec, set_int_sockopt,
-    set_nosigpipe, set_udp_tos, sock_cloexec_flag,
+    bind_to_interface, daemonize, initgroups, msg_nosignal, set_cloexec, set_nosigpipe,
+    set_udp_tos, sock_cloexec_flag,
 };
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};

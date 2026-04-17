@@ -357,7 +357,7 @@ impl Daemon {
                 // as the per-frame path dropping each one. The
                 // kernel's UDP sndbuf doesn't partial-accept a
                 // GSO send (`udp_send_skb` is all-or-nothing).
-            } else if e.raw_os_error() == Some(libc::EMSGSIZE) {
+            } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
                 // PMTU shrank under us. Shrink the relay's maxmtu
                 // so the NEXT batch's stride is smaller. The frames
                 // in THIS batch are lost (the kernel rejected the
