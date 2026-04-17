@@ -104,7 +104,16 @@ impl Daemon {
                         "Got UDP probe request {} from {peer_name}",
                         body.len());
             #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
-            return self.send_udp_probe_reply(peer, peer_name, body.len() as u16);
+            let body_len = body.len() as u16;
+            // Asymmetric-UDP meta-ack: remember the largest probe
+            // request we've seen so `try_udp` can tell `peer` over
+            // the meta connection. If `peer`'s inbound UDP is
+            // filtered, the type-2 reply we send next never arrives;
+            // the meta-ack is the only way they learn their outbound
+            // leg works. Hot path: 1 max() + store, no I/O here.
+            let t = self.dp.tunnels.entry(peer).or_default();
+            t.udp_rx_maxlen = t.udp_rx_maxlen.max(body_len);
+            return self.send_udp_probe_reply(peer, peer_name, body_len);
         }
 
         // ─── reply (type 1 or 2) ────────────────────────────────
@@ -420,6 +429,15 @@ impl Daemon {
             }
         }
 
+        // ─── meta-side udp-rx ack ────────────────────────────────
+        // Drain `udp_rx_maxlen` into an MTU_INFO 4th-field ack.
+        // Deferred from `udp_probe_h` (no meta-send on the UDP rx
+        // path). Separate from `send_mtu_info`: that gates on
+        // `!to_directly_connected`, but the asymmetric-filter case
+        // is precisely a direct peer whose UDP reply can't reach us
+        // — so we need a path that DOES send to direct peers.
+        nw |= self.send_udp_rx_ack(target, target_name, now);
+
         // ─── probe request ──────────────────────────────────────
         // Seed pmtu if needed (we read udp_ping_sent).
         let tunnel = self.dp.tunnels.entry(target).or_default();
@@ -461,6 +479,46 @@ impl Daemon {
         }
 
         nw
+    }
+
+    /// Drain `udp_rx_maxlen` into an `MTU_INFO` 4th-field ack toward
+    /// `target`. Debounced by `mtu_info_sent` (shared with the C-
+    /// parity `send_mtu_info` — fine: both carry the same payload,
+    /// the ack just adds a field). Bypasses the `to_directly_
+    /// connected` gate on purpose: the asymmetric-filter peer IS
+    /// directly connected.
+    fn send_udp_rx_ack(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
+        let interval = Duration::from_secs(u64::from(self.settings.mtu_info_interval));
+        let Some(tunnel) = self.dp.tunnels.get_mut(&target) else {
+            return false;
+        };
+        if tunnel.udp_rx_maxlen == 0 {
+            return false;
+        }
+        if tunnel
+            .mtu_info_sent
+            .is_some_and(|l| now.saturating_duration_since(l) < interval)
+        {
+            return false;
+        }
+        let udp_rx_len = std::mem::take(&mut tunnel.udp_rx_maxlen);
+        tunnel.mtu_info_sent = Some(now);
+
+        let Some(conn_id) = self.conn_for_nexthop(target) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+        let msg = MtuInfo {
+            from: self.name.clone(),
+            to: target_name.to_owned(),
+            mtu: i32::from(MTU),
+            udp_rx_len,
+        };
+        log::debug!(target: "tincd::net",
+                    "meta-ack UDP rx {udp_rx_len} to {target_name}");
+        conn.send(format_args!("{}", msg.format()))
     }
 
     /// Dispatch the `Log*` PMTU actions. The `SendProbe` actions
@@ -1052,10 +1110,24 @@ impl Daemon {
             .graph
             .node(from_nid)
             .map_or_else(|| self.name.clone(), |n| n.name.clone());
+        // Piggy-back the udp-rx ack on outgoing MTU_INFOs we
+        // originate (forwarded ones carry the ORIGINATOR's view, not
+        // ours). The dedicated `send_udp_rx_ack` covers the direct-
+        // peer case this gate excludes; this catches the relayed-
+        // peer case for free.
+        let udp_rx_len = if from_is_myself {
+            self.dp
+                .tunnels
+                .get_mut(&to_nid)
+                .map_or(0, |t| std::mem::take(&mut t.udp_rx_maxlen))
+        } else {
+            0
+        };
         let msg = MtuInfo {
             from: from_name,
             to: to_name.to_owned(),
             mtu,
+            udp_rx_len,
         };
         conn.send(format_args!("{}", msg.format()))
     }
@@ -1139,6 +1211,27 @@ impl Daemon {
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
 
+        // ─── udp_rx_len meta-ack (Rust extension) ────────────────
+        // `from` says "I received your UDP probe of length N". If
+        // we're `to` and our UDP-reply path to `from` is dead
+        // (inbound filter on our side), this is the ONLY way we
+        // learn our outbound UDP works. Treat it like a probe reply
+        // for the TX-direction: confirm + raise minmtu. Do NOT touch
+        // `udp_addr` — we have no working RX addr; `choose_udp_
+        // address` already prefers the edge-seeded one for sends.
+        if parsed.udp_rx_len > 0
+            && self.node_ids.get(&parsed.to).copied() == Some(self.myself)
+            && let Some(&from_nid) = self.node_ids.get(&parsed.from)
+        {
+            // On-path guard mirrors the clamp guard below: only the
+            // conn that actually routes toward `from` may confirm.
+            let on_path =
+                parsed.from == conn_name || self.conn_for_nexthop(from_nid) == Some(from_conn);
+            if on_path {
+                self.apply_meta_udp_confirm(from_nid, &parsed.from, parsed.udp_rx_len);
+            }
+        }
+
         // Only honour the clamp if the reporting conn is on-path to `from`.
         let on_path = parsed.from == conn_name
             || self
@@ -1176,7 +1269,16 @@ impl Daemon {
                 Ok(false)
             }
             MtuInfoAction::ClampAndForward { from, to, new_mtu } => {
-                if on_path {
+                // C-parity guard: C's `send_mtu_info` never emits to
+                // a directly-connected `to`, so C's `mtu_info_h`
+                // never sees a direct-peer-originated `mtu`. Our
+                // `send_udp_rx_ack` does (intentionally, for the
+                // 4th-field ack). The `mtu` field in that case is
+                // the SENDER's compile-time MTU — not a relay
+                // measurement of our→from path — so don't adopt it
+                // as a provisional.
+                let from_direct = self.nodes.get(&from).and_then(|ns| ns.conn).is_some();
+                if on_path && !from_direct {
                     // Provisional mtu (probing will overwrite). Only
                     // matters if pmtu seeded; unseeded reads MTU anyway.
                     log::debug!(target: "tincd::proto",
@@ -1196,6 +1298,40 @@ impl Daemon {
                 let mtu = parsed.mtu.min(udp_info::MTU_MAX);
                 Ok(self.send_mtu_info_from(from, to, &parsed.to, mtu, false))
             }
+        }
+    }
+
+    /// Asymmetric TX-only UDP confirmation. `len` is what `peer`
+    /// reported receiving from us over UDP; treat it as a probe-
+    /// reply for the SEND direction only. Mirrors the relevant bits
+    /// of `on_probe_reply` (confirm + minmtu raise + maxmtu bump on
+    /// increase + reply-rx stamp so the discovery timeout doesn't
+    /// immediately tear it down) but does NOT touch `udp_addr` or
+    /// the RTT fields — we never saw a packet come back.
+    fn apply_meta_udp_confirm(&mut self, peer: NodeId, peer_name: &str, len: u16) {
+        let now = self.timers.now();
+        let tunnel = self.dp.tunnels.entry(peer).or_default();
+        let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+        let was_confirmed = p.udp_confirmed;
+        p.udp_confirmed = true;
+        p.udp_reply_rx = now;
+        if len > p.maxmtu {
+            p.maxmtu = len;
+        }
+        if len > p.minmtu {
+            p.minmtu = len;
+        }
+        tunnel.status.udp_confirmed = true;
+        if !was_confirmed {
+            log::info!(target: "tincd::net",
+                       "UDP send to {peer_name} confirmed via meta \
+                        (rx-filtered, asymmetric mode)");
+        }
+        // Publish minmtu to the fast path (same as the real probe-
+        // reply arm; seconds-apart, not hot).
+        if let Some(h) = self.tunnel_handles.get(&peer) {
+            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
+            h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

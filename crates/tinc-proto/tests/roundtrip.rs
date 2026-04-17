@@ -232,7 +232,7 @@ prop_compose! {
         to in arb_name(),
         mtu in any::<i32>(),
     ) -> MtuInfo {
-        MtuInfo { from, to, mtu }
+        MtuInfo { from, to, mtu, udp_rx_len: 0 }
     }
 }
 roundtrip!(mtu_info, MtuInfo, arb_mtu_info(), MtuInfo::format);

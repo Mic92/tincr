@@ -27,7 +27,6 @@ use super::common::*;
 use super::rig::*;
 
 #[test]
-#[ignore = "needs meta-side UDP-confirm ack; un-ignored in the next commit"]
 fn udp_asymmetric_meta_confirm() {
     let Some(netns) = enter_netns("udp_asymmetric::udp_asymmetric_meta_confirm") else {
         return;
@@ -151,14 +150,14 @@ fn udp_asymmetric_meta_confirm() {
     // bob's probes to alice are eaten; no meta-ack from alice's
     // side either (alice never receives bob's UDP probe → her
     // udp_rx_maxlen for bob stays 0). Asymmetric is the point.
+    // NOTE: `status.udp_confirmed` (bit 0x80) is set by rx.rs on
+    // ANY direct UDP decrypt — bob DID receive alice's probe — so
+    // it's not the right invariant. The `go_tcp` predicate keys on
+    // `minmtu`; that's what must stay 0.
     let (_, bob_min, _) = node_pmtu(&b, "alice").expect("bob's alice row");
     assert_eq!(
         bob_min, 0,
-        "bob must NOT confirm alice (his UDP replies are filtered); rows: {b:?}"
-    );
-    assert!(
-        node_status(&b, "alice").is_some_and(|s| s & 0x80 == 0),
-        "bob udp_confirmed for alice must be clear; rows: {b:?}"
+        "bob→alice minmtu must stay 0 (his UDP path is filtered); rows: {b:?}"
     );
 
     // ─── (3) alice→bob big ping rides UDP ───────────────────────

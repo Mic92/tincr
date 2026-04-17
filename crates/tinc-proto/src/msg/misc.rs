@@ -175,6 +175,14 @@ pub struct MtuInfo {
     /// roughly); we leave that check to the handler since it's policy,
     /// not parse. We *do* parse as `i32` because that's `%d`.
     pub mtu: i32,
+    /// Rust extension. Largest UDP probe length the SENDER received
+    /// from `to` since its last `MTU_INFO`. Lets a node behind an
+    /// inbound-UDP filter learn that its OUTBOUND probes did arrive
+    /// (the UDP reply was eaten, so the meta channel carries the ack
+    /// instead). C tinc's `sscanf("%*d %s %s %d")` stops after `mtu`
+    /// and ignores trailing tokens → wire-compatible. `0` (or absent)
+    /// = nothing to report.
+    pub udp_rx_len: u16,
 }
 
 impl MtuInfo {
@@ -194,6 +202,10 @@ impl MtuInfo {
         let from = t.s()?;
         let to = t.s()?;
         let mtu = t.d()?;
+        // Rust extension: optional 4th field. C tinc never emits it
+        // (→ 0); a Rust peer does. Negative/oversized → 0 (best-
+        // effort hint, not worth tearing the conn down for).
+        let udp_rx_len = t.d_opt()?.and_then(|v| u16::try_from(v).ok()).unwrap_or(0);
         if !check_id(from) || !check_id(to) {
             return Err(ParseError);
         }
@@ -202,19 +214,35 @@ impl MtuInfo {
             from: from.to_string(),
             to: to.to_string(),
             mtu,
+            udp_rx_len,
         })
     }
 
     /// `send_mtu_info`: `send_request("%d %s %s %d", MTU_INFO, from, to, mtu)`.
+    /// `udp_rx_len` is appended only when nonzero so a Rust→C
+    /// `MTU_INFO` is byte-identical to what C would have sent (keeps
+    /// roundtrip/diff fuzzers happy and avoids surprising any
+    /// stricter third-party parser).
     #[must_use]
     pub fn format(&self) -> String {
-        format!(
-            "{} {} {} {}",
-            Request::MtuInfo,
-            self.from,
-            self.to,
-            self.mtu
-        )
+        if self.udp_rx_len == 0 {
+            format!(
+                "{} {} {} {}",
+                Request::MtuInfo,
+                self.from,
+                self.to,
+                self.mtu
+            )
+        } else {
+            format!(
+                "{} {} {} {} {}",
+                Request::MtuInfo,
+                self.from,
+                self.to,
+                self.mtu,
+                self.udp_rx_len
+            )
+        }
     }
 }
 
@@ -283,5 +311,21 @@ mod tests {
 
         // Non-integer: parse error.
         assert!(MtuInfo::parse("23 a b xx").is_err());
+
+        // Rust extension: 4th field present.
+        let m = MtuInfo::parse("23 alice bob 1400 518").unwrap();
+        assert_eq!(m.mtu, 1400);
+        assert_eq!(m.udp_rx_len, 518);
+        assert_eq!(m.format(), "23 alice bob 1400 518");
+
+        // Absent (C wire form) → 0; format() omits it.
+        let m = MtuInfo::parse("23 alice bob 1400").unwrap();
+        assert_eq!(m.udp_rx_len, 0);
+        assert_eq!(m.format(), "23 alice bob 1400");
+
+        // Garbage 4th field is a parse error (token present but bad
+        // int) — same as every other `%d` in the protocol. C never
+        // emits this; only a buggy Rust peer would.
+        assert!(MtuInfo::parse("23 a b 1400 xx").is_err());
     }
 }

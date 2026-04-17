@@ -774,6 +774,7 @@ mod tests {
             from: "alice".into(),
             to: "bob".into(),
             mtu,
+            udp_rx_len: 0,
         }
     }
 

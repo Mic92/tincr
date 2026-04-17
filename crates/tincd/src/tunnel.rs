@@ -88,6 +88,15 @@ pub struct TunnelState {
     /// debounces.
     pub mtu_info_sent: Option<Instant>,
 
+    /// Rust-only. Largest UDP probe-REQUEST body length we received
+    /// from this peer since the last `MTU_INFO` we sent them. Lets us
+    /// ack "your outbound UDP reached me" over the meta connection
+    /// when our UDP reply can't get back (peer behind a stateless
+    /// inbound-UDP filter). Drained to 0 by `send_mtu_info_from`;
+    /// raised in the `udp_probe_h` request arm. Hot path cost: one
+    /// `max()` + store per probe (seconds apart).
+    pub udp_rx_maxlen: u16,
+
     /// `n->outcompression`. Level PEER advertised in `ANS_KEY`; we
     /// compress TO them at this level.
     pub outcompression: u8,
@@ -144,6 +153,7 @@ impl TunnelState {
             p.udp_ping_rtt = None;
         }
         self.udp_reply_sent = None;
+        self.udp_rx_maxlen = 0;
         self.udp_addr = None; // `update_node_udp(n, NULL)`
         self.udp_addr_cached = None;
         self.status = TunnelStatus::default(); // `memset(&n->status, 0, ...)`
@@ -290,6 +300,7 @@ mod tests {
             udp_reply_sent: Some(Instant::now()),
             udp_info_sent: Some(Instant::now()),
             mtu_info_sent: Some(Instant::now()),
+            udp_rx_maxlen: 999,
             outcompression: 6,
             incompression: 12,
             in_packets: 100,
