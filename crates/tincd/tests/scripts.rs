@@ -149,13 +149,15 @@ fn write_script(confbase: &Path, name: &str, log: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    // `basename "$0"` gets just `tinc-up`/`bob-up`, not the full
-    // path. The `hosts/` prefix is recovered at parse time by
-    // matching against the known per-node script names.
+    // `${{0##*/}}` strips to `tinc-up`/`bob-up`, not the full path.
+    // POSIX param expansion (sh builtin) — `script::prepare` now
+    // env_clear()s to a fixed PATH that lacks coreutils on NixOS, so
+    // `basename` isn't available. The `hosts/` prefix is recovered at
+    // parse time by matching against the known per-node script names.
     let body = format!(
         "#!/bin/sh\n\
          printf '%s|NAME=%s|NODE=%s|SUBNET=%s|WEIGHT=%s|REMOTEADDRESS=%s|REMOTEPORT=%s|INTERFACE=%s\\n' \
-           \"$(basename \"$0\")\" \
+           \"${{0##*/}}\" \
            \"$NAME\" \"$NODE\" \"$SUBNET\" \"$WEIGHT\" \"$REMOTEADDRESS\" \"$REMOTEPORT\" \"$INTERFACE\" \
            >> '{}'\n",
         log.display()

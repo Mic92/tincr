@@ -37,7 +37,7 @@
 
 use std::io::Read;
 use std::net::IpAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -244,7 +244,7 @@ impl HairpinEcho {
             while !estop.load(Ordering::Relaxed) {
                 for (k, fd) in queues.iter().enumerate() {
                     // O_NONBLOCK → EAGAIN when empty → Err → skip.
-                    let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
+                    let Ok(n) = nix::unistd::read(fd.as_fd(), &mut buf) else {
                         continue;
                     };
                     if n < VNET_HDR_LEN + 20 {
@@ -312,14 +312,11 @@ impl Drop for HairpinEcho {
 
 fn dup_queue(q: &Tun) -> OwnedFd {
     let fd = q.fd().expect("Tun has fd");
-    let d = nix::unistd::dup(fd).expect("dup");
-    // SAFETY: `d` is a fresh fd just returned by dup(2); we are its
-    // sole owner. Boundary shim because `Tun::fd()` exposes only a
-    // `RawFd` (no `AsFd` impl) and nix 0.29's `dup` returns `RawFd`.
+    // SAFETY: `Tun::fd()` exposes only a `RawFd` (no `AsFd` impl); the
+    // fd is valid for the lifetime of `q`, which outlives this borrow.
     #[allow(unsafe_code)]
-    unsafe {
-        OwnedFd::from_raw_fd(d)
-    }
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    nix::unistd::dup(borrowed).expect("dup")
 }
 
 /// Drive a TCP exchange through the hairpin: connect to .2:port (via
@@ -482,7 +479,7 @@ fn automq_cold_miss_converges() {
         while !estop.load(Ordering::Relaxed) {
             for (k, fd) in dups.iter().enumerate() {
                 // O_NONBLOCK → EAGAIN when empty → Err → skip.
-                let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
+                let Ok(n) = nix::unistd::read(fd.as_fd(), &mut buf) else {
                     continue;
                 };
                 if n < VNET_HDR_LEN + 20 || buf[VNET_HDR_LEN] >> 4 != 4 {

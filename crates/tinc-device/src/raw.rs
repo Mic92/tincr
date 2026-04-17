@@ -492,7 +492,7 @@ mod tests {
 
         // Read from peer. Same frame, byte-for-byte.
         let mut recv = [0u8; 64];
-        let rn = nix::unistd::read(peer.as_raw_fd(), &mut recv).unwrap();
+        let rn = nix::unistd::read(&peer, &mut recv).unwrap();
         assert_eq!(rn, frame_len);
         assert_eq!(&recv[..rn], &frame);
 

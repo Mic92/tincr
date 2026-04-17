@@ -37,7 +37,7 @@
 #![allow(clippy::too_many_lines)] // hairpin echo is long but linear
 
 use std::io::Read;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -183,7 +183,7 @@ fn mq_vnet_hdr_on_queue0() {
         while !echo_stop.load(Ordering::Relaxed) {
             for fd in &echo_fds {
                 // O_NONBLOCK → EAGAIN when empty (Err, skip).
-                let Ok(n) = nix::unistd::read(fd.as_raw_fd(), &mut buf) else {
+                let Ok(n) = nix::unistd::read(fd.as_fd(), &mut buf) else {
                     continue;
                 };
                 if n < VNET_HDR_LEN + 20 {
