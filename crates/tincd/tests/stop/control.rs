@@ -421,6 +421,10 @@ fn tinc_up_runs_with_confbase_cwd() {
         let out = child.wait_with_output().unwrap();
         String::from_utf8_lossy(&out.stderr).into_owned()
     });
+    // Socket appears at "Ready"; tinc-up fires AFTER that. Wait for
+    // the probe itself, not just the socket, or we kill the daemon
+    // mid-fork on slow (macOS, loaded) hosts.
+    assert!(wait_for_file(&probe), "tinc-up never wrote probe");
 
     let _ = child.kill();
     let _ = child.wait();
