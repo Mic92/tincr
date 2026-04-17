@@ -452,56 +452,18 @@ pub fn replace_name(raw: &str) -> Result<String, String> {
 /// have to mutate process-global env (`set_var` is `unsafe` in edition
 /// 2024 — racy under multithreaded test runners). Production calls go
 /// through the wrapper above with the real `std::env::var`.
+///
+/// Delegates to the shared `tinc_conf::name::expand_name` so the CLI
+/// and the daemon agree on the result — previously this kept the
+/// domain part (`my-host.lan` → `my_host_lan`) while the daemon
+/// truncated (`my_host`), and exchanged host files mismatched.
 #[cfg(unix)]
 fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<String, String> {
-    let resolved = if let Some(var_name) = raw.strip_prefix('$') {
-        // The whole tail is the var name — no `${FOO}` syntax, no
-        // `$FOO_suffix` parsing. `$HOST` means env var `HOST`.
-        match env(var_name) {
-            Some(v) => v,
-            // `$HOST` and unset → fall through to gethostname.
-            // `$host` (lowercase) does NOT get the fallback — exact
-            // match. Non-UTF-8 env values are folded into None: every
-            // byte ≥0x80 would become `_` in the squash anyway.
-            None if var_name == "HOST" => {
-                // Non-UTF-8 hostname → lossy → squash → probably-valid.
-                nix::unistd::gethostname()
-                    .map_err(|e| format!("Could not get hostname: {e}"))?
-                    .to_string_lossy()
-                    .into_owned()
-            }
-            None => {
-                return Err(format!(
-                    "Invalid Name: environment variable {var_name} does not exist"
-                ));
-            }
-        }
-    } else {
-        // No `$` prefix — use as-is. Still goes through check_id below.
-        raw.to_owned()
-    };
-
-    // Squash non-alnum to `_` — ONLY for the `$` branch. A literal
-    // `Name = a-b` does NOT get squashed; it goes to `check_id`
-    // as-is and fails.
-    //
-    // Subtle: `Name = my-laptop` is an error but `Name = $HOST` on a
-    // machine called `my-laptop` succeeds (becomes `my_laptop`). The
-    // squash is a *convenience for hostnames*, not a general sanitizer.
-    let name = if raw.starts_with('$') {
-        resolved
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect::<String>()
-    } else {
-        resolved
-    };
-
-    if check_id(&name) {
-        Ok(name)
-    } else {
-        Err("Invalid name for myself!".to_owned())
-    }
+    tinc_conf::name::expand_name(raw, env, || {
+        nix::unistd::gethostname()
+            .map_err(|e| format!("Could not get hostname: {e}"))
+            .map(|h| h.to_string_lossy().into_owned())
+    })
 }
 
 #[cfg(test)]
@@ -573,11 +535,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn replace_name_envvar_squashes() {
-        // Hostname-ish input gets squashed: dash and dot → underscore.
-        // Uses the parameterized core so we don't touch process env
-        // (`set_var` is `unsafe` in edition 2024 — racy under nextest).
+        // Hostname-ish input: domain stripped at first `.`, dash →
+        // underscore. Same semantics as the daemon's `expand_name` —
+        // previously the CLI kept the domain (`my_host_example`) and
+        // the daemon didn't, so `tinc export` and `tincd` disagreed
+        // on this node's own name.
         let env = |k: &str| (k == "X1").then(|| "my-host.example".to_owned());
-        assert_eq!(replace_name_with("$X1", env).unwrap(), "my_host_example");
+        assert_eq!(replace_name_with("$X1", env).unwrap(), "my_host");
     }
 
     #[cfg(unix)]

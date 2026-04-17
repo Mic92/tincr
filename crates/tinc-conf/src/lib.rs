@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod name;
 pub mod parse;
 pub mod pem;
 pub mod vars;

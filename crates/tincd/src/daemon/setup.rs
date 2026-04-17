@@ -136,25 +136,17 @@ fn build_listeners(
 }
 
 /// `Name = $FOO` reads env var `FOO`. `Name = $HOST` falls back to
-/// `gethostname(2)` truncated at the first `.` when the env var is
-/// unset. The result is sanitized: any non-alnum char becomes `_`,
-/// so a hostname like `my-host` is a valid node name.
-///
-/// Names without a `$` prefix are validated with `check_id` and
-/// returned unchanged.
+/// `gethostname(2)`. Thin wrapper over the shared implementation in
+/// `tinc_conf::name` so the daemon and `tinc` CLI agree on the result
+/// (previously they didn't — the CLI kept the domain part, the daemon
+/// truncated at `.`, and exchanged host files mismatched).
 #[allow(unsafe_code)] // libc::gethostname; nix `hostname` feature not enabled
 fn expand_name(name: &str) -> Result<String, String> {
-    let Some(var) = name.strip_prefix('$') else {
-        if !tinc_proto::check_id(name) {
-            return Err(format!("Invalid Name: {name}"));
-        }
-        return Ok(name.to_owned());
-    };
-
-    let raw = match std::env::var(var) {
-        Ok(v) => v,
-        Err(_) if var == "HOST" => {
-            let mut buf = [0u8; 32];
+    tinc_conf::name::expand_name(
+        name,
+        |k| std::env::var(k).ok(),
+        || {
+            let mut buf = [0u8; 256];
             // SAFETY: buf is valid, len is correct. POSIX leaves
             // gethostname truncation unspecified - force-NUL the
             // last byte.
@@ -166,29 +158,11 @@ fn expand_name(name: &str) -> Result<String, String> {
                     io::Error::last_os_error()
                 ));
             }
-            buf[31] = 0;
+            *buf.last_mut().unwrap() = 0;
             let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            // Strip domain part.
-            let dot = buf[..nul].iter().position(|&b| b == b'.').unwrap_or(nul);
-            String::from_utf8_lossy(&buf[..dot]).into_owned()
-        }
-        Err(_) => {
-            return Err(format!(
-                "Invalid Name: environment variable {var} does not exist"
-            ));
-        }
-    };
-
-    Ok(raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect())
+            Ok(String::from_utf8_lossy(&buf[..nul]).into_owned())
+        },
+    )
 }
 
 /// `setup()`: pure config→Device, no daemon state.
@@ -1051,8 +1025,8 @@ mod tests {
             std::env::set_var("TINC_TEST_NAME_DASHED", "my-host");
         }
         assert_eq!(expand_name("$TINC_TEST_NAME_PLAIN").unwrap(), "alpha42");
-        // Non-alnum → `_`.
-        assert_eq!(expand_name("$TINC_TEST_NAME_DOTTED").unwrap(), "host_local");
+        // Dot truncated (domain stripped); dash squashed to `_`.
+        assert_eq!(expand_name("$TINC_TEST_NAME_DOTTED").unwrap(), "host");
         assert_eq!(expand_name("$TINC_TEST_NAME_DASHED").unwrap(), "my_host");
     }
 
