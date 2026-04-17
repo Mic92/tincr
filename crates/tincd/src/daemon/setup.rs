@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::AsFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -200,9 +202,23 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 .next()
                 .map(tinc_conf::Entry::get_str)
                 .ok_or_else(|| SetupError::Config("DeviceType=fd requires Device = <fd>".into()))?;
-            let fd: std::os::unix::io::RawFd = dev_str
+            let raw: std::os::unix::io::RawFd = dev_str
                 .parse()
                 .map_err(|_| SetupError::Config(format!("Device = {dev_str} is not a valid fd")))?;
+            // Negative fd numbers don't exist; reject before the
+            // unsafe wrap. C logs strerror(errno) which is garbage
+            // here (sscanf doesn't set errno).
+            if raw < 0 {
+                return Err(SetupError::Config(format!(
+                    "Device = {raw}: inherited fd is negative"
+                )));
+            }
+            // SAFETY: the parent process dup2'd a tun fd to this
+            // number before exec; it is open and exclusively ours.
+            // Wrap NOW so any later `?` in setup closes it on drop
+            // rather than leaking the bare int.
+            #[allow(unsafe_code)]
+            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
             let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
                 .map_err(|e| SetupError::io(format!("open inherited device fd {fd}"), e))?;
             Box::new(tun)

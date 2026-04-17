@@ -43,12 +43,16 @@ use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 pub enum FdSource {
     /// `Device = 5` mode (2017). The Java parent process did
     /// `dup2(tun_fd, 5)` before `exec()`. The fd is already
-    /// open in our process; we wrap it.
+    /// open in our process; the caller wraps it at the moment it
+    /// parses the config integer (`daemon/setup.rs`) so ownership
+    /// is established immediately, not deferred to `open()`. If
+    /// setup bails between parsing and `open()`, `OwnedFd::drop`
+    /// closes it.
     ///
     /// On Android pre-2020 `SELinux` policy, this was the only
     /// way. Post-2020, blocked: the policy forbids fd
     /// inheritance across exec for tun fds.
-    Inherited(RawFd),
+    Inherited(OwnedFd),
 
     /// `Device = /path` mode (2020). Java side listens; we connect;
     /// fd arrives via `SCM_RIGHTS`. `@` prefix → abstract namespace.
@@ -76,46 +80,20 @@ impl FdTun {
     /// job; `mode() → Tun` is the contract, not the check.
     ///
     /// # Errors
-    /// - `Inherited(fd)`: `InvalidInput` if `fd < 0`.
     /// - `UnixSocket(path)`: connect failures, recvmsg failures,
     ///   wrong cmsg type.
+    /// - `Inherited(_)` is infallible (already owned).
     pub fn open(source: FdSource) -> io::Result<Self> {
         let (fd, device_label) = match source {
             // ─── Inherited
-            // The daemon already parsed the integer; we get it
-            // directly.
+            // The daemon already parsed the integer and wrapped it;
+            // we just rehome the OwnedFd into a File. The unsafe
+            // (and the negative-fd check) live at the parse site,
+            // not here — ownership is held continuously from parse
+            // onward.
             FdSource::Inherited(fd) => {
-                // Negative fd numbers don't exist; the only way
-                // to get one
-                // is if the config said `Device = -1` and the
-                // daemon's parser passed it through. C logs
-                // strerror(errno) which is GARBAGE here (errno
-                // is whatever the previous failing syscall set;
-                // sscanf doesn't touch it). We say something
-                // useful.
-                if fd < 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("inherited fd {fd} is negative"),
-                    ));
-                }
-                // SAFETY: the daemon's contract is that this fd
-                // IS open and IS ours (the Java parent dup2'd it
-                // before exec). We can't verify open-ness here
-                // (fcntl(F_GETFD) would do it, but that's a
-                // separate concern — the first read/write fails
-                // EBADF if it's closed, which is fine). We can't
-                // verify it's a tun fd either (no ioctl to ask
-                // "are you a tun?"). The daemon trusts the
-                // config; we trust the daemon.
-                //
-                // Ownership: we take it. `File::drop` will
-                // close. If the daemon also holds the RawFd
-                // somewhere and closes it: double-close, EBADF
-                // on the second one. Daemon's responsibility.
-                #[allow(unsafe_code)]
-                let file = unsafe { File::from_raw_fd(fd) };
-                (file, format!("fd/{fd}"))
+                let raw = fd.as_raw_fd();
+                (File::from(fd), format!("fd/{raw}"))
             }
 
             // ─── UnixSocket
@@ -430,23 +408,10 @@ impl AsFd for FdTun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::io::IntoRawFd;
 
     // (Ethernet constant tests + nibble tests + set_etherheader
     // tests hoisted to `crate::ether::tests` with their subjects.
     // Same assertions; the diff is location.)
-    // FdSource::Inherited — the negative-fd check
-
-    /// Negative fds don't exist; reject early. We say something
-    /// useful.
-    #[test]
-    fn inherited_negative_fd() {
-        let e = FdTun::open(FdSource::Inherited(-1)).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
-        let msg = e.to_string();
-        assert!(msg.contains("negative"), "msg: {msg}");
-        assert!(msg.contains("-1"), "msg: {msg}");
-    }
 
     // pipe-based integration — the win over linux.rs
     //
@@ -496,7 +461,7 @@ mod tests {
         write_all(&w, &ip_packet);
 
         // Wrap `r` as FdTun via Inherited.
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
 
         // Read. Buffer must be ≥ MTU.
         let mut buf = [0u8; MTU];
@@ -536,7 +501,7 @@ mod tests {
         let (r, w) = pipe();
         write_all(&w, &ip_packet);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
         let mut buf = [0u8; MTU];
         let n = tun.read(&mut buf).unwrap();
 
@@ -554,7 +519,7 @@ mod tests {
         let (r, w) = pipe();
         write_all(&w, &garbage);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
         let mut buf = [0u8; MTU];
         let e = tun.read(&mut buf).unwrap_err();
 
@@ -573,7 +538,7 @@ mod tests {
         // Close the write end immediately. Next read returns 0.
         drop(w);
 
-        let mut tun = FdTun::open(FdSource::Inherited(r.into_raw_fd())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
         let mut buf = [0u8; MTU];
         let e = tun.read(&mut buf).unwrap_err();
 
@@ -590,7 +555,7 @@ mod tests {
         let (r, w) = pipe();
 
         // FdTun owns the WRITE end this time.
-        let mut tun = FdTun::open(FdSource::Inherited(w.into_raw_fd())).unwrap();
+        let mut tun = FdTun::open(FdSource::Inherited(w)).unwrap();
 
         // Buffer: synthetic ether header + IP packet. The
         // ether header is GARBAGE — the write should skip it.
@@ -736,8 +701,7 @@ mod tests {
 
     // Test plumbing — pipe helpers
 
-    /// `pipe(2)`. Returns (read, write) as `OwnedFd` — drop closes;
-    /// `into_raw_fd()` releases ownership for `FdSource::Inherited`.
+    /// `pipe(2)`. Returns (read, write) as `OwnedFd` — drop closes.
     fn pipe() -> (OwnedFd, OwnedFd) {
         let mut fds = [0; 2];
         // SAFETY: `fds` is a 2-int buffer; pipe() writes exactly 2.
