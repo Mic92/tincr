@@ -221,9 +221,44 @@ pub fn execute(
     }
 }
 
+/// Pids we spawned and have not yet reaped. A process-wide registry
+/// is the least-invasive way to give the daemon's fire-and-forget
+/// children an owner: [`spawn`] / [`register_child`] push,
+/// [`reap_children`] drains. Scoping `waitpid` to this set (instead
+/// of `waitpid(-1)`) means we never steal exit statuses from children
+/// other code is `wait()`ing on — e.g. a `std::process::Child` held
+/// by a test harness, or a future caller that wants the status.
+///
+/// `Mutex` not because we're multithreaded (the event loop isn't) but
+/// because a `static` needs interior mutability and `RefCell` isn't
+/// `Sync`. No contention in practice.
+static CHILDREN: std::sync::Mutex<Vec<nix::unistd::Pid>> = std::sync::Mutex::new(Vec::new());
+
+/// `lock()` that ignores poisoning: the only thing under the lock is
+/// a `Vec<Pid>`, which has no invariants a panic could violate.
+fn children() -> std::sync::MutexGuard<'static, Vec<nix::unistd::Pid>> {
+    CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Record a detached child pid for later reaping. Used by callers
+/// that `fork()` directly (proxy-exec) instead of going through
+/// [`spawn`].
+pub fn register_child(pid: nix::unistd::Pid) {
+    children().push(pid);
+}
+
+/// Number of not-yet-reaped children. Test hook.
+#[cfg(test)]
+fn pending_children() -> usize {
+    children().len()
+}
+
 /// Non-blocking [`execute`]: fork+exec and return immediately. The
-/// child is detached; [`reap_children`] collects it later. Used for
-/// per-subnet / per-host hooks that fire in bulk on the event loop.
+/// child's pid is recorded; [`reap_children`] collects it later. Used
+/// for per-subnet / per-host hooks that fire in bulk on the event
+/// loop.
 ///
 /// # Errors
 /// Same spawn-failure surface as [`execute`].
@@ -237,33 +272,45 @@ pub fn spawn(
         Ok(c) => c,
         Err(r) => return Ok(r),
     };
-    // Drop the Child handle: no implicit wait; pid reaped via reap_children().
-    let _ = cmd.spawn()?;
+    let child = cmd.spawn()?;
+    // `Child::id` is u32; pid_t is i32. Kernel pids fit.
+    #[allow(clippy::cast_possible_wrap)]
+    register_child(nix::unistd::Pid::from_raw(child.id() as i32));
+    // Drop the `Child` handle: std's Drop does NOT wait; the pid is
+    // now owned by CHILDREN and reaped there.
+    drop(child);
     Ok(ScriptResult::Spawned)
 }
 
-/// Drain exited children spawned by [`spawn`] (and any other
-/// detached forks). `waitpid(-1, WNOHANG)` until no more. Non-zero
-/// exit / signal death is logged at `error!` so a broken async hook
-/// (e.g. `subnet-up` that fails to add a route) is visible at
-/// default log level instead of silently swallowed.
+/// Reap exited children we spawned. `waitpid(pid, WNOHANG)` per
+/// recorded pid; still-running ones stay in the set. Never touches
+/// pids we didn't register, so a concurrent `Child::wait()` elsewhere
+/// keeps working. Non-zero exit / signal death is logged at `error!`
+/// so a broken async hook (e.g. `subnet-up` that fails to add a
+/// route) is visible at default log level instead of silently
+/// swallowed.
 pub fn reap_children() {
     use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-    loop {
-        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) | Err(_) => break,
-            Ok(WaitStatus::Exited(pid, 0)) => {
+    children().retain(|&pid| {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            // Not exited yet: keep.
+            Ok(WaitStatus::StillAlive) => true,
+            Ok(WaitStatus::Exited(_, 0)) => {
                 log::debug!("Script (pid {pid}) exited successfully");
+                false
             }
-            Ok(WaitStatus::Exited(pid, code)) => {
+            Ok(WaitStatus::Exited(_, code)) => {
                 log::error!("Script (pid {pid}) exited with status {code}");
+                false
             }
-            Ok(WaitStatus::Signaled(pid, sig, _)) => {
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
                 log::error!("Script (pid {pid}) killed by signal {sig}");
+                false
             }
-            Ok(_) => {}
+            // Other stopped/continued / ECHILD (already gone): drop.
+            Ok(_) | Err(_) => false,
         }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -410,6 +457,42 @@ mod tests {
         // With interpreter: works.
         let r = execute(&dir, "tinc-up", &env, Some("/bin/sh")).unwrap();
         assert!(matches!(r, ScriptResult::Ok));
+    }
+
+    /// `reap_children` collects only pids we registered, never
+    /// `waitpid(-1)`. An unrelated `Child` we hold must keep its
+    /// exit status for our own `wait()`.
+    #[test]
+    fn spawn_registers_and_reaps_targeted() {
+        let dir = tmpdir("spawn");
+        write_script(&dir, "subnet-up", "#!/bin/sh\nexit 0\n");
+        let env = ScriptEnv::base(None, "alpha", None, None, None);
+
+        // An UNRELATED child that we wait() on ourselves. With the
+        // old `waitpid(-1)` reaper, the reap loop below would
+        // harvest its zombie and `other.wait()` would then fail
+        // with ECHILD.
+        let mut other = Command::new("true").spawn().unwrap();
+        // Give `true` time to exit so it IS a zombie when the reaper
+        // runs (otherwise the test wouldn't have caught the old bug).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let r = spawn(&dir, "subnet-up", &env, None).unwrap();
+        assert!(matches!(r, ScriptResult::Spawned));
+        assert!(pending_children() > 0, "pid registered");
+
+        // Poll until our script child is gone from the registry.
+        for _ in 0..100 {
+            reap_children();
+            if pending_children() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The unrelated child's status is still ours to collect.
+        let st = other.wait().expect("unrelated child status stolen");
+        assert!(st.success());
     }
 
     #[test]

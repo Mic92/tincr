@@ -683,15 +683,15 @@ pub fn do_outgoing_pipe(
                 // runs atexit handlers, which might allocate).
                 libc::_exit(1);
             }
-            _pid => {
+            pid => {
                 // ────── PARENT ──────
                 // `c->socket = fd[0]; close(fd[1]); return`. Don't
-                // waitpid — the child is detached.
-                // If it dies, parent's read returns EOF and the
-                // normal terminate path fires. The zombie reaper:
-                // SIGCHLD is SIG_DFL; init eventually reaps after
-                // we exit. Same as the C (which also doesn't wait).
+                // waitpid here — the child is detached. Register the
+                // pid with the script reaper so it's collected by
+                // the periodic `reap_children()` sweep instead of
+                // lingering as a zombie until process exit.
                 drop(child_fd);
+                crate::script::register_child(nix::unistd::Pid::from_raw(pid));
                 Ok(parent_fd)
             }
         }
