@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use crate::autoconnect::{AutoAction, NodeSnapshot};
-use crate::outgoing::{Outgoing, OutgoingId, resolve_config_addrs};
+use crate::autoconnect::{AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
+use crate::outgoing::{OutOrigin, Outgoing, OutgoingId, resolve_config_addrs};
 use crate::pmtu::{PmtuAction, PmtuState};
 use crate::proto::{ConnOptions, DispatchError};
 use crate::tunnel::{MTU, TunnelState};
@@ -583,7 +583,47 @@ impl Daemon {
     /// Build snapshot, call `autoconnect::decide`. Nodes sorted by
     /// name: `decide()` indexes by position (`prng(count)` then walk-
     /// to-index).
-    pub(super) fn decide_autoconnect(&self) -> AutoAction {
+    ///
+    /// `&mut self`: the EWMA bookkeeping (`relay_rate`/`tx_rate`) lives
+    /// in `TunnelState` and is updated HERE, not in the hot path —
+    /// `send_sptps_data_relay` only bumps the lifetime counter.
+    pub(super) fn decide_autoconnect(&mut self) -> AutoAction {
+        let now = self.timers.now();
+
+        // ─── EWMA update (cold path, ~5s cadence) ────────────────
+        // α=0.3 ⇒ τ≈15s at the 5s tick. dt is wall-clock between
+        // ticks (the contradicting-edge backoff can stretch it). On
+        // the very first tick we have no prev sample → seed prev to
+        // now (rate=0) so a single burst doesn't immediately cross
+        // RELAY_HI on a bogus dt.
+        let dt = self
+            .last_autoconnect_tick
+            .map(|p| now.saturating_duration_since(p).as_secs_f64())
+            .filter(|d| *d > 0.5);
+        // 5s deltas at link rate are << 2^52; precision loss is
+        // immaterial for a coarse demand signal compared against
+        // KiB/s thresholds.
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        for t in self.dp.tunnels.values_mut() {
+            if let Some(dt) = dt {
+                let rd = (t.relay_tx_bytes.saturating_sub(t.relay_tx_bytes_prev)) as f64 / dt;
+                let td = (t.out_bytes.saturating_sub(t.out_bytes_prev)) as f64 / dt;
+                t.relay_rate_bps = (0.3 * rd + 0.7 * t.relay_rate_bps as f64) as u64;
+                t.tx_rate_bps = (0.3 * td + 0.7 * t.tx_rate_bps as f64) as u64;
+            }
+            t.relay_tx_bytes_prev = t.relay_tx_bytes;
+            t.out_bytes_prev = t.out_bytes;
+        }
+        self.last_autoconnect_tick = Some(now);
+
+        // GC stale backoff entries so the map doesn't grow unbounded
+        // on a long-lived daemon with churning shortcut targets.
+        self.shortcut_backoff.retain(|_, &mut t| t > now);
+
         let mut names: Vec<&str> = self.node_ids.keys().map(String::as_str).collect();
         names.sort_unstable();
 
@@ -592,31 +632,39 @@ impl Daemon {
             .filter_map(|&name| {
                 let &nid = self.node_ids.get(name)?;
                 let gnode = self.graph.node(nid)?;
-                // outgoing only.
                 let edge_count = self.graph.node_edges(nid).len();
-                // NodeState.conn (set in on_ack, cleared in terminate).
                 let directly_connected = self
                     .nodes
                     .get(&nid)
                     .and_then(|ns| ns.conn)
                     .and_then(|cid| self.conns.get(cid))
                     .is_some();
+                let tunnel = self.dp.tunnels.get(&nid);
                 Some(NodeSnapshot {
                     name: name.to_owned(),
                     reachable: gnode.reachable,
                     has_address: self.has_address.contains(name),
                     directly_connected,
                     edge_count,
+                    relay_rate_bps: tunnel.map_or(0, |t| t.relay_rate_bps),
+                    tx_rate_bps: tunnel.map_or(0, |t| t.tx_rate_bps),
+                    backoff_until: self.shortcut_backoff.get(name).copied(),
                 })
             })
             .collect();
 
-        // Past-ACK + initiated.
-        let active_outgoing_conns: Vec<String> = self
+        // Past-ACK + initiated. Carry provenance for the drop arm.
+        let active_outgoing_conns: Vec<OutgoingSnapshot> = self
             .conns
             .values()
             .filter(|c| c.active && c.outgoing.is_some())
-            .map(|c| c.name.clone())
+            .map(|c| OutgoingSnapshot {
+                name: c.name.clone(),
+                origin: c
+                    .outgoing
+                    .and_then(|kd| self.outgoings.get(OutgoingId::from(kd)))
+                    .map_or(OutOrigin::AutoBackbone, |o| o.origin),
+            })
             .collect();
 
         // pending = Outgoing slots with no live conn. Pre-ACK conns
@@ -626,11 +674,14 @@ impl Daemon {
             .values()
             .filter_map(|c| c.outgoing.map(OutgoingId::from))
             .collect();
-        let pending_outgoings: Vec<String> = self
+        let pending_outgoings: Vec<OutgoingSnapshot> = self
             .outgoings
             .iter()
             .filter(|(oid, _)| !served.contains(oid))
-            .map(|(_, o)| o.node_name.clone())
+            .map(|(_, o)| OutgoingSnapshot {
+                name: o.node_name.clone(),
+                origin: o.origin,
+            })
             .collect();
 
         autoconnect::decide(
@@ -638,6 +689,8 @@ impl Daemon {
             &nodes,
             &active_outgoing_conns,
             &pending_outgoings,
+            &ShortcutKnobs::default(),
+            now,
             &mut OsRng,
         )
     }
@@ -647,20 +700,26 @@ impl Daemon {
     pub(super) fn execute_auto_action(&mut self, action: AutoAction) {
         match action {
             AutoAction::Noop => {}
-            AutoAction::Connect { name } => {
+            AutoAction::Connect { name, origin } => {
                 // dedup: a served (pre-ACK) slot isn't in pending_outgoings, so decide() can re-pick it
                 if self.outgoings.values().any(|o| o.node_name == name) {
                     return;
                 }
                 // Same path as setup()'s ConnectTo loop.
-                log::info!(target: "tincd",
-                           "Autoconnecting to {name}");
+                if origin == OutOrigin::AutoShortcut {
+                    log::info!(target: "tincd",
+                               "Autoconnecting to {name} (relay shortcut)");
+                } else {
+                    log::info!(target: "tincd",
+                               "Autoconnecting to {name}");
+                }
                 self.lookup_or_add_node(&name);
                 let config_addrs = resolve_config_addrs(&self.confbase, &name);
                 let addr_cache =
                     crate::addrcache::AddressCache::open(&self.confbase, &name, config_addrs);
                 let oid = self.outgoings.insert(Outgoing {
                     node_name: name,
+                    origin,
                     timeout: 0,
                     addr_cache,
                 });
@@ -668,7 +727,11 @@ impl Daemon {
                 self.outgoing_timers.insert(oid, tid);
                 self.setup_outgoing_connection(oid);
             }
-            AutoAction::Disconnect { name } => {
+            AutoAction::Disconnect { name, origin } => {
+                if origin == OutOrigin::AutoShortcut {
+                    let until = self.timers.now() + autoconnect::SHORTCUT_BACKOFF;
+                    self.shortcut_backoff.insert(name.clone(), until);
+                }
                 // Order matters: clear conn.outgoing BEFORE terminate
                 // so its retry path doesn't fire (we're CHOOSING to
                 // drop this).
@@ -696,6 +759,17 @@ impl Daemon {
                 }
             }
             AutoAction::CancelPending { name } => {
+                // Stamp backoff if this was a shortcut slot —
+                // cancelling a still-retrying shortcut means the dial
+                // failed; don't immediately re-decide to add it.
+                let is_shortcut = self
+                    .outgoings
+                    .values()
+                    .any(|o| o.node_name == name && o.origin == OutOrigin::AutoShortcut);
+                if is_shortcut {
+                    let until = self.timers.now() + autoconnect::SHORTCUT_BACKOFF;
+                    self.shortcut_backoff.insert(name.clone(), until);
+                }
                 // drop slot, no conn to kill. C logs at
                 // DEBUG_CONNECTIONS; this fires routinely once ≥3
                 // conns are up (including for ConnectTo targets — see

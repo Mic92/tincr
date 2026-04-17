@@ -800,6 +800,8 @@ impl Daemon {
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
+            shortcut_backoff: HashMap::new(),
+            last_autoconnect_tick: None,
             last_routes: std::sync::Arc::new(Vec::new()),
             last_mst: Vec::new(),
             mac_table: HashMap::new(),
@@ -845,6 +847,7 @@ impl Daemon {
                 crate::addrcache::AddressCache::open(&daemon.confbase, &peer, config_addrs);
             let oid = daemon.outgoings.insert(Outgoing {
                 node_name: peer,
+                origin: crate::outgoing::OutOrigin::ConfigConnectTo,
                 timeout: 0,
                 addr_cache,
             });

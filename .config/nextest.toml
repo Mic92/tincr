@@ -45,3 +45,12 @@ slow-timeout = { period = "90s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = 'test(stress::stress_)'
 slow-timeout = { period = "120s", terminate-after = 2 }
+
+# autoconnect_shortcut: 5-node rig + 30s flood-wait + ~45s EWMA decay.
+[[profile.default.overrides]]
+filter = 'test(autoconnect_shortcut)'
+slow-timeout = { period = "90s", terminate-after = 2 }
+
+[[profile.ci.overrides]]
+filter = 'test(autoconnect_shortcut)'
+slow-timeout = { period = "120s", terminate-after = 2 }

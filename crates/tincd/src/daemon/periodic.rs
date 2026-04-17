@@ -690,6 +690,7 @@ impl Daemon {
                 crate::addrcache::AddressCache::open(&self.confbase, &peer, config_addrs);
             let oid = self.outgoings.insert(Outgoing {
                 node_name: peer,
+                origin: crate::outgoing::OutOrigin::ConfigConnectTo,
                 timeout: 0,
                 addr_cache,
             });

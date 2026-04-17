@@ -50,11 +50,32 @@ new_key_type! {
 /// `NodeId` — outgoings are config-derived, the node might not exist
 /// in the graph yet), the backoff seconds, and the address cache.
 ///
+/// Why this `Outgoing` slot exists. autoconnect's drop logic must
+/// distinguish demand-driven shortcuts (eligible for idle-reap) from
+/// the random degree-3 backbone (only dropped when `nc > D_HI`).
+/// `ConfigConnectTo` is currently treated like `AutoBackbone` for
+/// `CancelPending` (see `AutoAction::CancelPending` doc) — carrying
+/// the provenance now lets that be tightened later without another
+/// plumbing pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutOrigin {
+    /// `ConnectTo =` in `tinc.conf` (setup or reload).
+    #[default]
+    ConfigConnectTo,
+    /// `make_new_connection` / `connect_to_unreachable` — the random
+    /// degree-3 resilience backbone.
+    AutoBackbone,
+    /// Demand-driven: peer we're actively relaying >`RELAY_HI` for.
+    AutoShortcut,
+}
+
 /// C hangs `address_cache` on `node_t` (`node.h:108`); only outgoings
 /// ever read it. Per-outgoing is the natural home.
 pub struct Outgoing {
     /// `outgoing->node->name`. The `ConnectTo = bob` value.
     pub node_name: String,
+    /// Provenance. Read by `decide_autoconnect`'s drop arm.
+    pub origin: OutOrigin,
     /// `outgoing->timeout`. Exponential backoff seconds. `retry_
     /// outgoing` adds 5, caps at `maxtimeout` (default 900). Starts 0.
     pub timeout: u32,
@@ -814,6 +835,7 @@ mod tests {
     fn bump_timeout_backoff() {
         let mut o = Outgoing {
             node_name: "bob".into(),
+            origin: OutOrigin::default(),
             timeout: 0,
             addr_cache: AddressCache::new(vec![]),
         };

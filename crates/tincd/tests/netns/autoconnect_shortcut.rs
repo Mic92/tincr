@@ -33,7 +33,6 @@ fn has_direct_conn(ctl: &mut Ctl, name: &str) -> bool {
 }
 
 #[test]
-#[ignore = "demand-driven shortcut not yet implemented"]
 fn autoconnect_shortcut_promotes_hot_relay() {
     let Some(netns) = enter_netns("autoconnect_shortcut::autoconnect_shortcut_promotes_hot_relay")
     else {

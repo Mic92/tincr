@@ -398,6 +398,17 @@ pub struct Daemon {
     /// `has_address` annotation on top.
     pub(crate) has_address: HashSet<String>,
 
+    /// Per-node "don't re-add as a shortcut before" stamp. Set in
+    /// `execute_auto_action` on `Disconnect{AutoShortcut}` and
+    /// `CancelPending` of a shortcut slot. Read by
+    /// `decide_autoconnect`. Keyed by name (the node may not have a
+    /// `TunnelState` after the conn drops).
+    pub(crate) shortcut_backoff: HashMap<String, Instant>,
+
+    /// Previous `decide_autoconnect` sample time, for the EWMA dt.
+    /// `None` until the first periodic tick.
+    pub(crate) last_autoconnect_tick: Option<Instant>,
+
     /// Last `sssp` result. Side table indexed by `NodeId.0` (same
     /// indexing as `sssp`'s output). `dump_nodes` reads this for
     /// the `nexthop`/`via`/`distance` columns. Updated by

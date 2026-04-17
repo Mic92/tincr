@@ -1,47 +1,57 @@
-//! `do_autoconnect` (`autoconnect.c`, 197 LOC). Pure decision logic —
-//! converge to ~3 direct connections.
+//! `do_autoconnect` (`autoconnect.c`, 197 LOC) plus a Rust-only
+//! demand-driven "relay shortcut" layer. Pure decision logic — takes
+//! a snapshot of world state, returns ONE action; the daemon executes.
 //!
-//! Called every `5+jitter` seconds from `periodic_handler`. Takes a
-//! snapshot of world state, returns ONE action
-//! (or `Noop`). The daemon executes it.
+//! ## The 3-connection backbone (unchanged from C)
 //!
-//! ## The 3-connection target
+//! Every node holds ~3 random meta connections. Random 3-regular
+//! graphs are a.a.s. 3-connected expanders (Bollobás 1981); diameter
+//! is `log₂ n` and per-event flood cost is `3n`. That is the
+//! resilience floor and stays untouched.
 //!
-//! Hardcoded magic number, not configurable. Rationale (inferred): 3
-//! is enough redundancy that losing one peer doesn't isolate you, but
-//! few enough that an N-node mesh has O(N) total conns, not O(N²). The
-//! spanning-tree algorithms (sssp, mst) work on ANY connected graph;
-//! this knob trades resilience for load.
+//! Called every `5+jitter` seconds from `periodic_handler`. `nc` is
+//! the count of ALL active meta connections (inbound + outbound —
+//! anything past `ACK`):
 //!
-//! ## The four sub-decisions
-//!
-//! `do_autoconnect` is a priority dispatch. `nc` is the count of ALL active meta connections (inbound +
-//! outbound — anything with `c->edge` set, i.e. past `ACK`):
-//!
-//! 1. `nc < 3` → `make_new_connection`: pick a random eligible node,
-//!    try connecting. **Early return.**
-//! 2. `nc > 3` → `drop_superfluous_outgoing_connection`: pick a random
-//!    *outgoing* conn whose peer is multi-homed (`edge_count >= 2`, so
-//!    dropping us doesn't disconnect them), drop it. NOT an early
-//!    return — falls through to 3+4.
+//! 1. `nc < 3` → `make_new_connection`: random eligible node.
+//!    **Early return.**
+//! 2. `nc > 3` → `drop_superfluous_outgoing_connection`: random
+//!    *outgoing* conn whose peer has `edge_count >= 2`. NOT an early
+//!    return in C — falls through to 3+4.
 //! 3. `drop_superfluous_pending_connections`: cancel `Outgoing` slots
-//!    that have no live conn (the retry timer is waiting). Fires
-//!    whenever `nc >= 3` — including exactly 3. The C calls this
-//!    unconditionally after the `< 3` early-return (`:194`).
-//! 4. `connect_to_unreachable`: random ALL-node pick; if it's
-//!    unreachable AND has-address AND not-connected AND not-us AND
-//!    not-already-pending, try connecting. **The all-node randomization
-//!    IS the back-off**: many reachable + few unreachable → low prob of
-//!    picking; many unreachable → high prob. See [`decide`].
+//!    with no live conn. Fires whenever `nc >= 3`.
+//! 4. `connect_to_unreachable`: random ALL-node pick; if unreachable
+//!    AND has-address AND not-connected, dial. The all-node prng IS
+//!    the back-off — see [`decide`].
 //!
-//! ## "Exactly 3 still heals partitions"
+//! ## Relay shortcuts (Rust-only)
 //!
-//! At `nc == 3` neither branch 1 nor 2 fires, but branch 4 does. So a
-//! node that's happily 3-connected still occasionally pokes at
-//! unreachable nodes. This is what knits a fragmented graph back
-//! together — *every* node is doing this every 5s, with the
-//! probabilistic back-off keeping the thundering herd off any single
-//! unreachable node.
+//! The backbone is for the *control* plane. When UDP to a peer is
+//! blackholed the *data* plane rides the meta graph (`SPTPS_PACKET`
+//! over TCP via `nexthop`), and degree-3-random is oblivious to where
+//! the bytes actually flow. Result in production: `blob64` sits two
+//! TCP hops away forever because `nc==3` → `Noop`.
+//!
+//! Fix (Candidate A from `docs/design/autoconnect-theory.md`): keep
+//! the random base, add up to `D_SHORTCUT` (default 2) extra outgoing
+//! slots to the peers we're currently relaying the most bytes for.
+//! Nebula/Tailscale/ZeroTier all dial-on-first-packet
+//! (`docs/design/autoconnect-survey.md`); this is the same idea on a
+//! 5-second EWMA instead of per-packet.
+//!
+//! Hysteresis: add at `relay_rate > RELAY_HI`, drop at `tx_rate <
+//! RELAY_LO`. The drop test keys on `tx_rate` (any path), not
+//! `relay_rate` — once the shortcut connects, `relay_rate→0` by
+//! construction (the PACKET 17 short-circuit fires before
+//! `send_sptps_data_relay`); `tx_rate` stays >0 while traffic flows.
+//! That, plus a per-node `BACKOFF` after drop, is the oscillation
+//! damper.
+//!
+//! No config knobs: `tools/autoconnect-sim` shows the Pareto front is
+//! shallow (every `d_shortcut>0` cell meets all targets) so there is
+//! no trade-off a user could meaningfully tune. See [`ShortcutKnobs`]
+//! for how the constants were derived. `AutoConnect=no` is the
+//! off-switch.
 //!
 //! ## RNG injection
 //!
@@ -53,25 +63,28 @@
 //! The C may do drop + cancel + connect in one tick (steps 2+3+4 all
 //! fire). We return the FIRST non-`Noop`. The 5-second cadence means
 //! convergence in ~15s instead of ~5s when over-connected, which is
-//! fine. The daemon is free to loop `while decide() != Noop` if faster
-//! convergence ever matters; the per-tick state mutation between calls
-//! keeps it from looping forever.
+//! fine.
 
 #![forbid(unsafe_code)]
 
+use std::time::Instant;
+
 use rand_core::RngCore;
+
+use crate::outgoing::OutOrigin;
 
 /// What `do_autoconnect` decided. The daemon executes.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AutoAction {
-    /// `<3` conns (`make_new_connection`) or `connect_to_unreachable`.
-    /// Daemon: `lookup_or_add_node`, build `Outgoing`,
-    /// `setup_outgoing_connection`.
-    Connect { name: String },
-    /// `>3` conns. Drop this outgoing + terminate its conn.
-    Disconnect { name: String },
-    /// Cancel a between-retries pending outgoing. Daemon: just
-    /// remove from `outgoings` slotmap (no conn to terminate).
+    /// `<D_LO` (`make_new_connection`), shortcut-add, or
+    /// `connect_to_unreachable`. Daemon: build `Outgoing` with the
+    /// given `origin`, `setup_outgoing_connection`.
+    Connect { name: String, origin: OutOrigin },
+    /// `>D_HI` superfluous, or idle shortcut. Drop this outgoing +
+    /// terminate its conn. `origin` echoed back so the daemon can
+    /// stamp `last_auto_dropped` only for shortcuts.
+    Disconnect { name: String, origin: OutOrigin },
+    /// Cancel a between-retries pending outgoing.
     ///
     /// **`ConnectTo`-seeded slots are NOT exempt.** This matches
     /// upstream `drop_superfluous_pending_connections` (`autoconnect.c
@@ -80,140 +93,252 @@ pub enum AutoAction {
     /// the slot came from `ConnectTo` or from autoconnect. Once we hit
     /// ≥3 active conns, a `ConnectTo` target that is currently
     /// unreachable stops being retried until SIGHUP re-reads the
-    /// config (`try_outgoing_connections` / our `reload_configuration`
-    /// `ConnectTo` diff). SIGALRM (`retry()`) only resets backoff on
-    /// *existing* slots in both C and Rust, so it does not resurrect
-    /// the entry either. This is intentional upstream behavior, not a
-    /// port bug.
+    /// config. SIGALRM (`retry()`) only resets backoff on *existing*
+    /// slots, so it does not resurrect the entry either. Intentional
+    /// upstream behaviour, not a port bug; `OutOrigin` is now plumbed
+    /// so this can be tightened later if desired.
     CancelPending { name: String },
-    /// Nothing to do this tick. Can mean: at exactly 3 with nothing to
-    /// heal; or under 3 but no eligible nodes; or
-    /// `connect_to_unreachable` rolled an ineligible index (the
-    /// back-off in action).
+    /// Nothing to do this tick.
     Noop,
 }
 
 /// Snapshot of one node's state. The daemon builds this from `Graph`
-/// + `nodes: HashMap<String, NodeState>` + `conns`.
+/// + `nodes` + `dp.tunnels` + `conns`.
 ///
-/// ## `has_address` — not yet wired
+/// ## `has_address`
 ///
 /// Upstream sets it in `load_all_nodes()`: walk `hosts/`, for each
-/// file with `Address = `, set the bit. We don't `load_all_nodes`
-/// yet — we read `hosts/` on demand in `id_h`. The
-/// serial wire-up (chunk-11) needs either: (a) `load_all_nodes` at
-/// setup, or (b) a cheap "does `hosts/{name}` have `Address`" probe.
-/// **For this module: it's just a `bool`. How the daemon populates it
-/// is the daemon's problem.**
+/// file with `Address =`, set the bit. **For this module: just a
+/// `bool`. How the daemon populates it is the daemon's problem.**
 ///
 /// ## `edge_count` is per-node, not per-connection
 ///
-/// The *peer's* edge count from the gossiped graph. When
-/// considering dropping our conn to
-/// `node`, we ask: does `node` have other edges? If `edge_count < 2`,
-/// our edge is its only one; dropping it isolates the peer.
+/// The *peer's* edge count from the gossiped graph. Dropping our conn
+/// to a peer with `edge_count < 2` would isolate it.
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
     pub name: String,
     /// `n->status.reachable`. From sssp.
     pub reachable: bool,
-    /// `n->status.has_address`. We have a `hosts/` file with
-    /// `Address = ` for this node — could connect to it directly.
-    /// (vs. nodes we only know via gossip.)
+    /// We have a `hosts/` file with `Address =` for this node.
     pub has_address: bool,
-    /// `n->connection != NULL`. We have a direct meta conn (inbound OR
-    /// outbound) to this node.
+    /// We have a direct meta conn (inbound OR outbound).
     pub directly_connected: bool,
-    /// `n->edge_tree.count`. How many edges this node has in the
-    /// gossiped graph. `:121` `< 2` means dropping our edge would
-    /// isolate it.
+    /// How many edges this node has in the gossiped graph.
     pub edge_count: usize,
+    /// EWMA bytes/s we ORIGINATED for this node that left via a relay.
+    /// 0 once a direct path exists (PACKET 17 short-circuit).
+    pub relay_rate_bps: u64,
+    /// EWMA bytes/s sent TO this node, any path. The shortcut drop
+    /// test keys on this (see module doc).
+    pub tx_rate_bps: u64,
+    /// Don't re-add as a shortcut before this. Set on
+    /// `Disconnect{AutoShortcut}` / `CancelPending` of a shortcut.
+    pub backoff_until: Option<Instant>,
+}
+
+/// One outgoing slot: either past-ACK active (`c->edge &&
+/// c->outgoing`) or pending-retry. Carries provenance so the drop arm
+/// can tell shortcut from backbone and the add arm can count toward
+/// the `d_shortcut` cap.
+#[derive(Debug, Clone)]
+pub struct OutgoingSnapshot {
+    pub name: String,
+    pub origin: OutOrigin,
+}
+
+/// Tunables. NOT user-configurable — the struct exists so unit tests
+/// can isolate the upstream branches (`d_shortcut=0`) and probe band
+/// edges. The daemon always passes [`ShortcutKnobs::default`].
+///
+/// ## How the defaults were computed
+///
+/// `tools/autoconnect-sim` runs a discrete-time model of [`decide`]
+/// over N∈{30,100,300} nodes × P(UDP-broken)∈{0.05,0.2,0.5} × Zipf
+/// ON/OFF traffic, 20 seeds, 1h sim, 1305 parameter cells. Full
+/// Pareto table and sensitivity analysis in
+/// `tools/autoconnect-sim/REPORT.md`. Summary:
+///
+/// | knob       | value | why                                         |
+/// | ---------- | ----- | ------------------------------------------- |
+/// | `D_LO`     | 3     | Bollobás 1981: min k for a.a.s. k-connected random regular |
+/// | `D_SHORTCUT`| 2    | 1 strands the 2nd-hottest pair; 3 buys ≤4% hops for +6% flood |
+/// | `D_HI`     | 6     | 1.22× flood vs 1.28× at 7; meets ≤1.2× target |
+/// | `RELAY_HI` | 32 KiB/s | conv 2.2 vs 3.0 ticks at 64k; osc still <0.005/min/node |
+/// | `RELAY_LO` | 4 KiB/s  | keep 8× ratio; flat sensitivity        |
+/// | `BACKOFF`  | 60 s  | flat 30..120; matches gossipsub PRUNE-backoff |
+/// | `α` (EWMA) | 0.3   | flat 0.2..0.5; τ≈15s at the 5s tick     |
+///
+/// Worst-case oscillation across the entire sweep is 0.012
+/// changes/min/node (target was ≤0.2); convergence to 1-hop is 2.2
+/// ticks (~11s, target ≤30s). The Pareto front is shallow — every
+/// `d_shortcut>0` cell meets all targets — so there is no user-facing
+/// trade-off worth a config knob. `AutoConnect=no` is the off-switch.
+///
+/// The sim also surfaces the one limit no knob can fix: shortcuts can
+/// only dial peers with `has_address`, so a NAT-ed hot destination
+/// stays multi-hop. Mitigated in practice by the reverse flow
+/// triggering a dial-back from the NAT-ed side.
+#[derive(Debug, Clone, Copy)]
+pub struct ShortcutKnobs {
+    pub d_lo: usize,
+    pub d_shortcut: usize,
+    pub d_hi: usize,
+    pub relay_hi_bps: u64,
+    pub relay_lo_bps: u64,
+}
+
+/// Don't re-add a peer as a shortcut for this long after dropping it.
+/// Belt-and-braces (the `tx_rate`-keyed drop test already prevents
+/// flap); sim shows flat sensitivity 30..120s.
+pub const SHORTCUT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Default for ShortcutKnobs {
+    fn default() -> Self {
+        Self {
+            d_lo: 3,
+            d_shortcut: 2,
+            d_hi: 6,
+            relay_hi_bps: 32 << 10,
+            relay_lo_bps: 4 << 10,
+        }
+    }
 }
 
 /// `do_autoconnect`.
 ///
 /// # Arguments
 ///
-/// - `myself_name` — skip `n == myself` (`:34`, `:92`).
+/// - `myself_name` — skip `n == myself`.
 /// - `nodes` — ALL known nodes, including indirect/unreachable. May
-///   include `myself` (it's filtered). Order matters for
-///   `connect_to_unreachable` index-picking (use a stable iteration
-///   order — the daemon should sort by name, matching C's splay tree).
-/// - `active_outgoing_conns` — names of nodes we have an OUTGOING conn
-///   to (active, past-ACK, `c->edge && c->outgoing`). NOT all conns:
-///   inbound conns are someone else's choice, we don't unilaterally
-///   close them (`:121` `!c->outgoing` skip).
-/// - `pending_outgoings` — names with an `Outgoing` slot but NO conn.
-///   The retry timer is waiting.
-///
-/// `nc` (the `<3`/`>3` decision) counts ALL direct conns (inbound +
-/// outbound), derived from `nodes` where `directly_connected`. C
-/// `:174-179` walks `connection_list` for `c->edge`.
+///   include `myself` (filtered). Order matters for
+///   `connect_to_unreachable` index-picking (the daemon sorts by
+///   name, matching C's splay tree).
+/// - `active_outgoing_conns` — OUTGOING conns past-ACK. Inbound conns
+///   are someone else's choice; we don't unilaterally close them.
+/// - `pending_outgoings` — `Outgoing` slots with NO live conn
+///   (between retries or pre-ACK).
+/// - `now` — for `backoff_until` comparison only.
 ///
 /// # The `connect_to_unreachable` back-off
 ///
-/// `:86` does `prng(node_tree.count)` — randomizes over ALL nodes,
-/// **including ineligible ones**. If `r` lands on an ineligible node,
-/// it's an immediate `return` (`:95`): `Noop` this tick. THIS IS THE
-/// FEATURE. The probability of a `Connect` action is exactly
+/// `prng(node_tree.count)` — randomizes over ALL nodes, **including
+/// ineligible ones**. If `r` lands on an ineligible node, immediate
+/// `Noop`. THIS IS THE FEATURE: P(connect) =
 /// `count_eligible_unreachable / count_all_nodes`. Don't "fix" by
 /// filtering first.
 ///
-/// If 100 nodes are reachable and 1 is unreachable, every node in the
-/// mesh has a ~1% chance per 5-second tick of trying to connect to it.
-/// With 100 nodes ticking, that's ~1 attempt per tick mesh-wide —
-/// natural rate limiting without coordination. If 4 of 5 are
-/// unreachable, every node has an ~80% chance per tick: high effort
-/// when the mesh is fragmented.
-///
 /// # `make_new_connection` already-pending → `Noop`
 ///
-/// Even if eligible, if we already have a pending `Outgoing` for
-/// the picked node, `break` — don't add a duplicate, but ALSO don't
-/// pick another. Next tick will re-roll. We mirror
-/// this: if the random pick is in `pending_outgoings`, return `Noop`.
+/// If the random pick is already in `pending_outgoings`, return
+/// `Noop` (don't duplicate, don't re-roll).
+#[allow(clippy::too_many_arguments)] // pure fn: every input is explicit world-state
 #[must_use]
 pub fn decide(
     myself_name: &str,
     nodes: &[NodeSnapshot],
-    active_outgoing_conns: &[String],
-    pending_outgoings: &[String],
+    active_outgoing_conns: &[OutgoingSnapshot],
+    pending_outgoings: &[OutgoingSnapshot],
+    knobs: &ShortcutKnobs,
+    now: Instant,
     rng: &mut impl RngCore,
 ) -> AutoAction {
     // C :174-179. Count ALL active meta conns (c->edge != NULL),
-    // inbound + outbound. One conn per peer in tinc, so this is just
-    // "how many peers am I directly connected to".
+    // inbound + outbound.
     let nc = nodes
         .iter()
         .filter(|n| n.directly_connected && n.name != myself_name)
         .count();
 
-    // C :183-186. < 3 → eagerly make a new one. EARLY RETURN.
-    if nc < 3 {
+    // C :183-186. < D_LO → eagerly make a new one. EARLY RETURN.
+    if nc < knobs.d_lo {
         return make_new_connection(myself_name, nodes, pending_outgoings, rng);
     }
 
-    // C :188-190. > 3 → try to drop a superfluous outgoing.
-    // No early return in C, but we return-first-non-Noop.
-    if nc > 3 {
+    // ─── shortcut add ────────────────────────────────────────────
+    // `max_by` (not random): the heaviest relay is the one most
+    // worth collapsing; ties broken by name for determinism. Count
+    // active+pending shortcut slots toward the cap so a 3rd hot peer
+    // doesn't get a slot while two are already (being) dialled.
+    let n_sc = active_outgoing_conns
+        .iter()
+        .chain(pending_outgoings)
+        .filter(|o| o.origin == OutOrigin::AutoShortcut)
+        .count();
+    if n_sc < knobs.d_shortcut && nc < knobs.d_hi {
+        let cand = nodes
+            .iter()
+            .filter(|n| {
+                n.name != myself_name
+                    && !n.directly_connected
+                    && n.has_address
+                    && n.relay_rate_bps > knobs.relay_hi_bps
+                    && n.backoff_until.is_none_or(|t| now >= t)
+                    && !pending_outgoings.iter().any(|p| p.name == n.name)
+            })
+            .max_by(|a, b| {
+                a.relay_rate_bps
+                    .cmp(&b.relay_rate_bps)
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        if let Some(n) = cand {
+            return AutoAction::Connect {
+                name: n.name.clone(),
+                origin: OutOrigin::AutoShortcut,
+            };
+        }
+    }
+
+    // ─── drop ────────────────────────────────────────────────────
+    // C :188-190. > D_HI → drop a superfluous outgoing. UNCHANGED
+    // rule (random, edge_count>=2).
+    if nc > knobs.d_hi {
         let act = drop_superfluous_outgoing(nodes, active_outgoing_conns, rng);
         if act != AutoAction::Noop {
             return act;
         }
     }
 
-    // C :194. nc >= 3 (the < 3 branch returned). Cancel pending
-    // outgoings: if we already have enough conns, no point keeping a
-    // retry timer alive.
-    if let Some(name) = pending_outgoings.first() {
-        // Upstream cancels ALL of them in one tick (it's a list
-        // walk). We return one; next tick gets the next one. The
-        // 5-second cadence stretches this out, but pending outgoings
-        // accumulating while at >=3 conns is itself rare.
-        return AutoAction::CancelPending { name: name.clone() };
+    // Idle shortcut reap. Only fires inside (D_LO, D_HI] — at D_LO
+    // we'd rather keep the slot (it counts toward the resilience
+    // floor too). Judge by tx_rate (any path), NOT relay_rate.
+    if nc > knobs.d_lo {
+        let idle: Vec<&OutgoingSnapshot> = active_outgoing_conns
+            .iter()
+            .filter(|o| {
+                o.origin == OutOrigin::AutoShortcut
+                    && nodes
+                        .iter()
+                        .find(|n| n.name == o.name)
+                        .is_some_and(|n| n.edge_count >= 2 && n.tx_rate_bps < knobs.relay_lo_bps)
+            })
+            .collect();
+        if !idle.is_empty() {
+            #[allow(clippy::cast_possible_truncation)] // ≤ conn count
+            let r = (rng.next_u32() % (idle.len() as u32)) as usize;
+            return AutoAction::Disconnect {
+                name: idle[r].name.clone(),
+                origin: OutOrigin::AutoShortcut,
+            };
+        }
     }
 
-    // C :196. Heal partitions. Fires even at nc == 3.
+    // C :194. nc >= D_LO. Cancel pending outgoings. Exempt shortcut
+    // slots: at nc==D_LO the previous tick may have just returned
+    // Connect{AutoShortcut}; the new slot is pending until the TCP
+    // handshake completes, and cancelling it here would loop.
+    // ConfigConnectTo slots are still cancellable — that's
+    // intentional upstream parity, see [`AutoAction::CancelPending`].
+    if let Some(p) = pending_outgoings
+        .iter()
+        .find(|p| p.origin != OutOrigin::AutoShortcut)
+    {
+        return AutoAction::CancelPending {
+            name: p.name.clone(),
+        };
+    }
+
+    // C :196. Heal partitions. Fires even at nc == D_LO.
     connect_to_unreachable(myself_name, nodes, pending_outgoings, rng)
 }
 
@@ -221,19 +346,14 @@ pub fn decide(
 ///
 /// Eligible: not myself, not directly connected, AND
 /// `(has_address || reachable)`. The reachable-but-no-address case:
-/// we learned of this node via gossip and can route packets to it
-/// indirectly, but maybe it's behind NAT and *it* could connect to
-/// *us* if poked? Actually no — `setup_outgoing_connection` needs an
-/// address. The C eligibility predicate `:34` includes `reachable` so
-/// the address can come from a learned `via` edge. Either way: same
-/// predicate.
+/// the address can come from a learned `via` edge.
 ///
-/// C does count-then-re-walk (the splay tree gives no random access).
-/// We can collect+index. Same distribution.
+/// C does count-then-re-walk (splay tree gives no random access). We
+/// collect+index. Same distribution.
 fn make_new_connection(
     myself_name: &str,
     nodes: &[NodeSnapshot],
-    pending_outgoings: &[String],
+    pending_outgoings: &[OutgoingSnapshot],
     rng: &mut impl RngCore,
 ) -> AutoAction {
     let eligible: Vec<&NodeSnapshot> = nodes
@@ -244,107 +364,81 @@ fn make_new_connection(
         .collect();
 
     if eligible.is_empty() {
-        // C :41-43. No eligible nodes. < 3 conns but nobody to call.
-        // The C falls off the end of make_new_connection() and then
-        // do_autoconnect() returns (the `< 3` branch is `return`, so
-        // step 4 does NOT fire). We mirror: Noop.
+        // C :41-43. The `< 3` branch is `return`, so step 4 does NOT
+        // fire. Mirror: Noop.
         return AutoAction::Noop;
     }
 
-    // C :45 prng(count) — uniform over [0, count).
     #[allow(clippy::cast_possible_truncation)] // eligible.len() ≤ node count (~thousands)
     let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
     let pick = eligible[r];
 
-    // C :59-71. Already have a pending outgoing for this node? Then
-    // `break` — don't duplicate, don't re-roll. Noop this tick.
-    if pending_outgoings.iter().any(|p| p == &pick.name) {
+    // C :59-71. Already pending? `break` — don't duplicate, don't
+    // re-roll. Noop this tick.
+    if pending_outgoings.iter().any(|p| p.name == pick.name) {
         return AutoAction::Noop;
     }
 
     AutoAction::Connect {
         name: pick.name.clone(),
+        origin: OutOrigin::AutoBackbone,
     }
 }
 
-/// `connect_to_unreachable`.
-///
-/// **The all-node prng is the back-off.** See module docs.
-///
-/// `r = prng(node_tree.count)` — index into ALL nodes, NOT a filtered
-/// list. Walk to the `r`th node. If that node is ineligible
-/// (reachable, or no-address, or us, or connected, or
-/// already-pending), return `Noop`. Don't pick another.
+/// `connect_to_unreachable`. **The all-node prng is the back-off.**
 fn connect_to_unreachable(
     myself_name: &str,
     nodes: &[NodeSnapshot],
-    pending_outgoings: &[String],
+    pending_outgoings: &[OutgoingSnapshot],
     rng: &mut impl RngCore,
 ) -> AutoAction {
     if nodes.is_empty() {
         return AutoAction::Noop;
     }
 
-    // C :86. prng over ALL nodes. node_tree includes myself.
     #[allow(clippy::cast_possible_truncation)] // nodes.len() bounded by node count (≪ u32::MAX)
     let r = (rng.next_u32() % (nodes.len() as u32)) as usize;
     let n = &nodes[r];
 
-    // C :94-96. Ineligible → return. NOT continue. THIS is the
-    // back-off: ineligible (typically: reachable) nodes act as
-    // probability mass that resolves to Noop.
+    // Ineligible → return. NOT continue. THIS is the back-off.
     if n.name == myself_name || n.directly_connected || n.reachable || !n.has_address {
         return AutoAction::Noop;
     }
-
-    // C :99-103. Already trying? Noop.
-    if pending_outgoings.iter().any(|p| p == &n.name) {
+    if pending_outgoings.iter().any(|p| p.name == n.name) {
         return AutoAction::Noop;
     }
 
     AutoAction::Connect {
         name: n.name.clone(),
+        origin: OutOrigin::AutoBackbone,
     }
 }
 
-/// `drop_superfluous_outgoing_connection`.
-///
-/// Only OUTGOING conns are eligible: `!c->outgoing` skips
-/// inbound. Inbound conns are someone else's `AutoConnect` decision;
-/// we don't unilaterally close them.
-///
-/// Only conns to multi-homed peers: `:121` `edge_tree.count < 2`
-/// skips. If the peer's only edge is us, dropping it isolates them.
+/// `drop_superfluous_outgoing_connection`. Only OUTGOING + multi-homed.
 fn drop_superfluous_outgoing(
     nodes: &[NodeSnapshot],
-    active_outgoing_conns: &[String],
+    active_outgoing_conns: &[OutgoingSnapshot],
     rng: &mut impl RngCore,
 ) -> AutoAction {
-    // C :119-126. Walk connection_list, filter to:
-    // c->edge && c->outgoing && c->node && c->node->edge_tree.count >= 2.
-    // We have active_outgoing_conns (already past-ACK, already outgoing).
-    // Join against nodes for edge_count.
-    let droppable: Vec<&str> = active_outgoing_conns
+    let droppable: Vec<&OutgoingSnapshot> = active_outgoing_conns
         .iter()
-        .filter(|name| {
+        .filter(|o| {
             nodes
                 .iter()
-                .find(|n| &n.name == *name)
+                .find(|n| n.name == o.name)
                 .is_some_and(|n| n.edge_count >= 2)
         })
-        .map(String::as_str)
         .collect();
 
     if droppable.is_empty() {
-        // C :128-130. Everyone's single-homed, can't drop without
-        // isolating someone. Fall through.
         return AutoAction::Noop;
     }
 
-    #[allow(clippy::cast_possible_truncation)] // droppable.len() bounded by conn count (≪ u32::MAX)
+    #[allow(clippy::cast_possible_truncation)] // droppable.len() ≤ conn count
     let r = (rng.next_u32() % (droppable.len() as u32)) as usize;
     AutoAction::Disconnect {
-        name: droppable[r].to_string(),
+        name: droppable[r].name.clone(),
+        origin: droppable[r].origin,
     }
 }
 
@@ -367,12 +461,59 @@ mod tests {
             has_address,
             directly_connected,
             edge_count,
+            relay_rate_bps: 0,
+            tx_rate_bps: 0,
+            backoff_until: None,
         }
     }
 
+    fn out(name: &str, origin: OutOrigin) -> OutgoingSnapshot {
+        OutgoingSnapshot {
+            name: name.into(),
+            origin,
+        }
+    }
+
+    fn outs(names: &[&str]) -> Vec<OutgoingSnapshot> {
+        names
+            .iter()
+            .map(|n| out(n, OutOrigin::AutoBackbone))
+            .collect()
+    }
+
+    /// Legacy = `d_shortcut=0` so the shortcut-add and idle-drop arms
+    /// are dead and the four C branches run unmodified. Not
+    /// config-reachable; kept so the upstream-ported tests below stay
+    /// independent of the new layer.
+    const LEGACY: ShortcutKnobs = ShortcutKnobs {
+        d_lo: 3,
+        d_shortcut: 0,
+        d_hi: 3,
+        relay_hi_bps: 32 << 10,
+        relay_lo_bps: 4 << 10,
+    };
+
+    fn legacy_decide(
+        myself: &str,
+        nodes: &[NodeSnapshot],
+        outgoing: &[OutgoingSnapshot],
+        pending: &[OutgoingSnapshot],
+        rng: &mut impl RngCore,
+    ) -> AutoAction {
+        decide(
+            myself,
+            nodes,
+            outgoing,
+            pending,
+            &LEGACY,
+            Instant::now(),
+            rng,
+        )
+    }
+
+    // ═══════════════════════ legacy behaviour ════════════════════
+
     /// Exactly 3 conns, no pending, no unreachable → Noop.
-    /// Neither <3 nor >3 fires; `cancel_pending` has nothing;
-    /// `connect_to_unreachable` rolls but finds only reachable nodes.
     #[test]
     fn noop_at_exactly_3() {
         let nodes = vec![
@@ -381,86 +522,54 @@ mod tests {
             node("b", true, true, true, 2),
             node("c", true, true, true, 2),
         ];
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
-        // Try several seeds: every roll should land on a reachable
-        // node and return Noop.
         for seed in 0..20 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let act = decide(
-                "me",
-                &nodes,
-                &["a".into(), "b".into(), "c".into()],
-                &[],
-                &mut rng,
-            );
+            let act = legacy_decide("me", &nodes, &outs(&["a", "b", "c"]), &[], &mut rng);
             assert_eq!(act, AutoAction::Noop, "seed {seed}");
         }
-        // Silence unused.
-        let _ = rng.next_u32();
     }
 
     /// 1 active conn, 5 eligible candidates. Must pick one of them.
-    /// Seeded RNG → deterministic pick.
     #[test]
     fn connect_when_under_3() {
         let nodes = vec![
             node("me", true, true, false, 1),
-            node("conn", true, true, true, 2), // already connected
+            node("conn", true, true, true, 2),
             node("e1", true, true, false, 1),
             node("e2", true, true, false, 1),
             node("e3", false, true, false, 0),
             node("e4", true, false, false, 1), // reachable, no addr — still eligible
             node("e5", true, true, false, 1),
         ];
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let act = decide("me", &nodes, &["conn".into()], &[], &mut rng);
-        // 5 eligible: e1..e5. Seed 42 picks deterministically.
-        match act {
-            AutoAction::Connect { name } => {
-                assert!(
-                    ["e1", "e2", "e3", "e4", "e5"].contains(&name.as_str()),
-                    "picked {name}"
-                );
+        for seed in 0..20 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            match legacy_decide("me", &nodes, &outs(&["conn"]), &[], &mut rng) {
+                AutoAction::Connect { name, origin } => {
+                    assert!(
+                        ["e1", "e2", "e3", "e4", "e5"].contains(&name.as_str()),
+                        "seed {seed}"
+                    );
+                    assert_eq!(origin, OutOrigin::AutoBackbone);
+                }
+                other => panic!("seed {seed}: expected Connect, got {other:?}"),
             }
-            other => panic!("expected Connect, got {other:?}"),
         }
-        // Seed determinism: same seed → same pick.
-        let mut rng2 = ChaCha8Rng::seed_from_u64(42);
-        let act2 = decide("me", &nodes, &["conn".into()], &[], &mut rng2);
-        assert_eq!(
-            act2,
-            decide(
-                "me",
-                &nodes,
-                &["conn".into()],
-                &[],
-                &mut ChaCha8Rng::seed_from_u64(42)
-            )
-        );
-        let _ = act2;
     }
 
-    /// Under 3, but nobody eligible: only us, one connected, one with
-    /// neither address nor reachability. The <3 branch returns Noop
-    /// (and DOES early-return — step 4 does not fire).
+    /// Under 3, nobody eligible → Noop (and DOES early-return).
     #[test]
     fn connect_skips_ineligible() {
         let nodes = vec![
             node("me", true, true, false, 1),
             node("conn", true, true, true, 2),
-            // Not reachable, no address: pure gossip node. Can't
-            // connect.
             node("ghost", false, false, false, 0),
         ];
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let act = decide("me", &nodes, &["conn".into()], &[], &mut rng);
+        let act = legacy_decide("me", &nodes, &outs(&["conn"]), &[], &mut rng);
         assert_eq!(act, AutoAction::Noop);
     }
 
-    /// Under 3, the only eligible node is already in pending. C :63
-    /// `break` — don't duplicate, don't re-roll. Noop. Next tick will
-    /// (probably) roll the same and Noop again until either the
-    /// pending succeeds or another node becomes eligible.
+    /// Under 3, only eligible is already pending → Noop.
     #[test]
     fn connect_skips_already_pending() {
         let nodes = vec![
@@ -468,12 +577,11 @@ mod tests {
             node("only", false, true, false, 0),
         ];
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let act = decide("me", &nodes, &[], &["only".into()], &mut rng);
+        let act = legacy_decide("me", &nodes, &[], &outs(&["only"]), &mut rng);
         assert_eq!(act, AutoAction::Noop);
     }
 
-    /// 5 active outgoing conns, all peers multi-homed (`edge_count`
-    /// >= 2). Must Disconnect one.
+    /// 5 active outgoing, all multi-homed → `Disconnect` one.
     #[test]
     fn disconnect_when_over_3() {
         let nodes = vec![
@@ -484,24 +592,18 @@ mod tests {
             node("d", true, true, true, 2),
             node("e", true, true, true, 3),
         ];
-        let outgoing: Vec<String> = ["a", "b", "c", "d", "e"]
-            .iter()
-            .map(|s| (*s).into())
-            .collect();
+        let outgoing = outs(&["a", "b", "c", "d", "e"]);
         let mut rng = ChaCha8Rng::seed_from_u64(7);
-        let act = decide("me", &nodes, &outgoing, &[], &mut rng);
+        let act = legacy_decide("me", &nodes, &outgoing, &[], &mut rng);
         match act {
-            AutoAction::Disconnect { name } => {
-                assert!(outgoing.contains(&name));
+            AutoAction::Disconnect { name, .. } => {
+                assert!(outgoing.iter().any(|o| o.name == name));
             }
             other => panic!("expected Disconnect, got {other:?}"),
         }
     }
 
-    /// Over 3, but every peer has `edge_count` == 1 (we're their only
-    /// link). Can't drop any without isolating. With no pending
-    /// either, falls through to `connect_to_unreachable`, which finds
-    /// only reachable nodes → Noop.
+    /// Over 3, every peer single-homed → can't drop → Noop.
     #[test]
     fn disconnect_skips_single_homed() {
         let nodes = vec![
@@ -512,19 +614,15 @@ mod tests {
             node("d", true, true, true, 1),
             node("e", true, true, true, 1),
         ];
-        let outgoing: Vec<String> = ["a", "b", "c", "d", "e"]
-            .iter()
-            .map(|s| (*s).into())
-            .collect();
+        let outgoing = outs(&["a", "b", "c", "d", "e"]);
         for seed in 0..10 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let act = decide("me", &nodes, &outgoing, &[], &mut rng);
+            let act = legacy_decide("me", &nodes, &outgoing, &[], &mut rng);
             assert_eq!(act, AutoAction::Noop, "seed {seed}");
         }
     }
 
-    /// 4 active (over 3), all single-homed (can't drop), but 2 pending.
-    /// → `CancelPending` fires.
+    /// 4 active (over 3), all single-homed, 2 pending → `CancelPending`.
     #[test]
     fn cancel_pending_when_over_3() {
         let nodes = vec![
@@ -534,119 +632,79 @@ mod tests {
             node("c", true, true, true, 1),
             node("d", true, true, true, 1),
         ];
-        let outgoing: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| (*s).into()).collect();
+        let outgoing = outs(&["a", "b", "c", "d"]);
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let act = decide(
-            "me",
-            &nodes,
-            &outgoing,
-            &["p1".into(), "p2".into()],
-            &mut rng,
-        );
+        let act = legacy_decide("me", &nodes, &outgoing, &outs(&["p1", "p2"]), &mut rng);
         assert_eq!(act, AutoAction::CancelPending { name: "p1".into() });
     }
 
-    /// THE design intent test. 100 nodes, 1 unreachable. At exactly 3
-    /// conns (so neither <3 nor >3 fires), `connect_to_unreachable` runs
-    /// every tick. P(connect) = 1/100 per tick. 1000 ticks → expect
-    /// ~10. Binomial(1000, 0.01): mean 10, σ ≈ 3.15. Loose bounds.
+    /// 100 nodes, 1 unreachable. P(connect) = 1/100 per tick.
     #[test]
     fn connect_unreachable_backoff_low_prob() {
         let mut nodes = vec![node("me", true, true, false, 3)];
-        // 3 connected (so nc == 3).
         for name in ["c1", "c2", "c3"] {
             nodes.push(node(name, true, true, true, 2));
         }
-        // 95 reachable filler. Not connected, but reachable — so
-        // ineligible for connect_to_unreachable (which wants
-        // !reachable).
         for i in 0..95 {
             nodes.push(node(&format!("fill{i}"), true, false, false, 1));
         }
-        // 1 unreachable, has address. The target.
         nodes.push(node("dark", false, true, false, 0));
         assert_eq!(nodes.len(), 100);
 
-        let outgoing: Vec<String> = ["c1", "c2", "c3"].iter().map(|s| (*s).into()).collect();
-
+        let outgoing = outs(&["c1", "c2", "c3"]);
         let mut hits = 0;
         for seed in 0..1000 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let act = decide("me", &nodes, &outgoing, &[], &mut rng);
-            if act
+            if legacy_decide("me", &nodes, &outgoing, &[], &mut rng)
                 == (AutoAction::Connect {
                     name: "dark".into(),
+                    origin: OutOrigin::AutoBackbone,
                 })
             {
                 hits += 1;
             }
         }
-        // Expect ~10. Allow [5, 20).
         assert!(
             (5..20).contains(&hits),
             "expected ~10 hits (1% of 1000), got {hits}"
         );
     }
 
-    /// Inverse: 5 nodes, 4 unreachable. P(connect) per tick ≈ 4/5 if
-    /// all 4 are eligible. But one slot is "me" (ineligible). So 4/5
-    /// land on an eligible unreachable. ~80%. 100 ticks → expect ~80.
+    /// 20 nodes, 16 unreachable. P(connect) = 80%.
     #[test]
     fn connect_unreachable_backoff_high_prob() {
-        // We need nc >= 3 to reach connect_to_unreachable. But the
-        // scenario is "5 nodes, 4 unreachable". If 4 are unreachable
-        // they're not directly_connected. So nc would be 0... and we'd
-        // hit the <3 branch instead.
-        //
-        // Work around: make_new_connection's eligibility is
-        // (has_address || reachable). Set the 4 unreachable nodes to
-        // also have NO address: ineligible for make_new. Then <3
-        // returns Noop and... wait, <3 early-returns even on Noop.
-        // The C is `if(nc < 3) { make_new(); return; }`. So step 4
-        // never fires when nc < 3.
-        //
-        // Real scenario: a node with 3 conns whose graph view shows
-        // many unreachable nodes (the mesh is partitioned, but THIS
-        // node is in the 3-connected fragment). Model that.
         let mut nodes = vec![node("me", true, true, false, 3)];
-        // 3 connected (our fragment).
         for name in ["c1", "c2", "c3"] {
             nodes.push(node(name, true, true, true, 2));
         }
-        // 16 unreachable, with address. The dark fragment.
         for i in 0..16 {
             nodes.push(node(&format!("dark{i}"), false, true, false, 0));
         }
         assert_eq!(nodes.len(), 20);
-        // P(hit eligible unreachable) = 16/20 = 80%.
 
-        let outgoing: Vec<String> = ["c1", "c2", "c3"].iter().map(|s| (*s).into()).collect();
-
+        let outgoing = outs(&["c1", "c2", "c3"]);
         let mut hits = 0;
         for seed in 0..100 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            if let AutoAction::Connect { .. } = decide("me", &nodes, &outgoing, &[], &mut rng) {
+            if let AutoAction::Connect { .. } =
+                legacy_decide("me", &nodes, &outgoing, &[], &mut rng)
+            {
                 hits += 1;
             }
         }
-        // Expect ~80. Binomial(100, 0.8): mean 80, σ = 4. Allow > 60.
         assert!(hits > 60, "expected ~80 hits (80% of 100), got {hits}");
     }
 
-    /// Only node is myself. Every branch filters it out. Noop.
     #[test]
     fn myself_never_picked() {
         let nodes = vec![node("me", true, true, false, 0)];
         for seed in 0..50 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let act = decide("me", &nodes, &[], &[], &mut rng);
+            let act = legacy_decide("me", &nodes, &[], &[], &mut rng);
             assert_eq!(act, AutoAction::Noop, "seed {seed}");
         }
     }
 
-    /// Exactly 3 conns, but a pending outgoing exists. C calls
-    /// `drop_superfluous_pending` unconditionally after the <3
-    /// early-return — so at nc==3 it fires. Cancel it.
     #[test]
     fn cancel_pending_at_exactly_3() {
         let nodes = vec![
@@ -656,11 +714,11 @@ mod tests {
             node("c", true, true, true, 2),
         ];
         let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let act = decide(
+        let act = legacy_decide(
             "me",
             &nodes,
-            &["a".into(), "b".into(), "c".into()],
-            &["stale".into()],
+            &outs(&["a", "b", "c"]),
+            &outs(&["stale"]),
             &mut rng,
         );
         assert_eq!(
@@ -671,37 +729,289 @@ mod tests {
         );
     }
 
-    /// Disconnect filters: an inbound conn (`directly_connected` but NOT
-    /// in `active_outgoing_conns`) is never picked for Disconnect, even
-    /// if multi-homed.
+    /// Inbound conn never picked for Disconnect.
     #[test]
     fn disconnect_never_picks_inbound() {
         let nodes = vec![
             node("me", true, true, false, 5),
-            // 4 outgoing, multi-homed → droppable.
             node("out1", true, true, true, 3),
             node("out2", true, true, true, 3),
             node("out3", true, true, true, 3),
             node("out4", true, true, true, 3),
-            // 1 inbound, multi-homed. NOT in active_outgoing_conns.
-            node("in1", true, true, true, 3),
+            node("in1", true, true, true, 3), // NOT in outgoing
         ];
-        // nc = 5 (>3). active_outgoing_conns has only the 4 outgoing.
-        let outgoing: Vec<String> = ["out1", "out2", "out3", "out4"]
-            .iter()
-            .map(|s| (*s).into())
-            .collect();
+        let outgoing = outs(&["out1", "out2", "out3", "out4"]);
         for seed in 0..50 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            match decide("me", &nodes, &outgoing, &[], &mut rng) {
-                AutoAction::Disconnect { name } => {
+            match legacy_decide("me", &nodes, &outgoing, &[], &mut rng) {
+                AutoAction::Disconnect { name, .. } => {
                     assert_ne!(name, "in1", "seed {seed}: dropped inbound");
-                    assert!(outgoing.contains(&name));
                 }
-                other => {
-                    panic!("seed {seed}: expected Disconnect, got {other:?}")
-                }
+                other => panic!("seed {seed}: expected Disconnect, got {other:?}"),
             }
         }
+    }
+
+    // ═══════════════════════ shortcut behaviour ══════════════════
+
+    fn dflt(
+        myself: &str,
+        nodes: &[NodeSnapshot],
+        outgoing: &[OutgoingSnapshot],
+        pending: &[OutgoingSnapshot],
+        rng: &mut impl RngCore,
+    ) -> AutoAction {
+        decide(
+            myself,
+            nodes,
+            outgoing,
+            pending,
+            &ShortcutKnobs::default(),
+            Instant::now(),
+            rng,
+        )
+    }
+
+    /// Core scenario: nc=3, one not-connected peer relaying 100 KiB/s
+    /// → `Connect{that, AutoShortcut}`.
+    #[test]
+    fn shortcut_added_at_nc3_when_relaying() {
+        let mut nodes = vec![
+            node("me", true, true, false, 3),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("hot", true, true, false, 2),
+        ];
+        nodes[4].relay_rate_bps = 100_000;
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let act = dflt("me", &nodes, &outs(&["a", "b", "c"]), &[], &mut rng);
+        assert_eq!(
+            act,
+            AutoAction::Connect {
+                name: "hot".into(),
+                origin: OutOrigin::AutoShortcut
+            }
+        );
+    }
+
+    /// nc=6 (== `D_HI`), hot relay peer → falls through (NOT `Connect`).
+    #[test]
+    fn shortcut_not_added_past_d_hi() {
+        let mut nodes = vec![node("me", true, true, false, 6)];
+        for n in ["a", "b", "c", "d", "e", "f"] {
+            nodes.push(node(n, true, true, true, 2));
+        }
+        let mut hot = node("hot", true, true, false, 2);
+        hot.relay_rate_bps = 100_000;
+        nodes.push(hot);
+        let outgoing = outs(&["a", "b", "c", "d", "e", "f"]);
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let act = dflt("me", &nodes, &outgoing, &[], &mut rng);
+        // nc==D_HI: shortcut-add gated (`nc < D_HI`), drop gated
+        // (`nc > D_HI`), no idle shortcuts, no pending → Noop (or
+        // unreachable miss).
+        assert!(
+            !matches!(act, AutoAction::Connect { .. }),
+            "must not add shortcut at nc==D_HI; got {act:?}"
+        );
+    }
+
+    /// nc=5, one `AutoShortcut` outgoing with `tx_rate`=2 KiB/s →
+    /// `Disconnect{it}`.
+    #[test]
+    fn shortcut_dropped_when_idle() {
+        let mut nodes = vec![
+            node("me", true, true, false, 5),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("d", true, true, true, 2),
+            node("sc", true, true, true, 2),
+        ];
+        nodes[5].tx_rate_bps = 2_000; // < RELAY_LO
+        let outgoing = vec![
+            out("a", OutOrigin::AutoBackbone),
+            out("b", OutOrigin::AutoBackbone),
+            out("c", OutOrigin::AutoBackbone),
+            out("d", OutOrigin::AutoBackbone),
+            out("sc", OutOrigin::AutoShortcut),
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let act = dflt("me", &nodes, &outgoing, &[], &mut rng);
+        assert_eq!(
+            act,
+            AutoAction::Disconnect {
+                name: "sc".into(),
+                origin: OutOrigin::AutoShortcut
+            }
+        );
+    }
+
+    /// Same as above but `tx_rate`=100 KiB/s, `relay_rate`=0 → NOT
+    /// disconnected. THIS is the oscillation damper: once direct,
+    /// `relay_rate` is 0 by construction; `tx_rate` keeps the slot.
+    #[test]
+    fn shortcut_kept_while_tx_hot() {
+        let mut nodes = vec![
+            node("me", true, true, false, 5),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("d", true, true, true, 2),
+            node("sc", true, true, true, 2),
+        ];
+        nodes[5].tx_rate_bps = 100_000;
+        nodes[5].relay_rate_bps = 0;
+        let outgoing = vec![
+            out("a", OutOrigin::AutoBackbone),
+            out("b", OutOrigin::AutoBackbone),
+            out("c", OutOrigin::AutoBackbone),
+            out("d", OutOrigin::AutoBackbone),
+            out("sc", OutOrigin::AutoShortcut),
+        ];
+        for seed in 0..20 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let act = dflt("me", &nodes, &outgoing, &[], &mut rng);
+            assert!(
+                !matches!(
+                    act,
+                    AutoAction::Disconnect {
+                        origin: OutOrigin::AutoShortcut,
+                        ..
+                    }
+                ),
+                "seed {seed}: dropped a hot shortcut: {act:?}"
+            );
+        }
+    }
+
+    /// Hot relay peer with `backoff_until` in the future → NOT connected.
+    #[test]
+    fn backoff_respected() {
+        let now = Instant::now();
+        let mut nodes = vec![
+            node("me", true, true, false, 3),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("hot", true, true, false, 2),
+        ];
+        nodes[4].relay_rate_bps = 100_000;
+        nodes[4].backoff_until = Some(now + std::time::Duration::from_secs(30));
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let act = decide(
+            "me",
+            &nodes,
+            &outs(&["a", "b", "c"]),
+            &[],
+            &ShortcutKnobs::default(),
+            now,
+            &mut rng,
+        );
+        assert!(
+            !matches!(
+                act,
+                AutoAction::Connect {
+                    origin: OutOrigin::AutoShortcut,
+                    ..
+                }
+            ),
+            "must respect backoff; got {act:?}"
+        );
+    }
+
+    /// nc=3, one pending `AutoShortcut` still handshaking → NOT
+    /// `CancelPending`. Regression: unfiltered `first()` would cancel
+    /// the slot the previous tick just added and loop.
+    #[test]
+    fn pending_shortcut_not_cancelled() {
+        let mut nodes = vec![
+            node("me", true, true, false, 3),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            node("hot", true, true, false, 2),
+        ];
+        nodes[4].relay_rate_bps = 100_000;
+        let pending = vec![out("hot", OutOrigin::AutoShortcut)];
+        for seed in 0..20 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let act = dflt("me", &nodes, &outs(&["a", "b", "c"]), &pending, &mut rng);
+            assert_eq!(act, AutoAction::Noop, "seed {seed}: {act:?}");
+        }
+    }
+
+    /// nc=3, three hot peers, 2 shortcut slots already dialling →
+    /// NOT `Connect{AutoShortcut}`. The cap is `D_SHORTCUT`, not
+    /// `D_HI`.
+    #[test]
+    fn shortcut_cap_enforced() {
+        let mut nodes = vec![
+            node("me", true, true, false, 3),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+        ];
+        for h in ["hot1", "hot2", "hot3"] {
+            let mut n = node(h, true, true, false, 2);
+            n.relay_rate_bps = 100_000;
+            nodes.push(n);
+        }
+        // 2 shortcuts already in flight (1 active, 1 pending).
+        let active = vec![
+            out("a", OutOrigin::AutoBackbone),
+            out("b", OutOrigin::AutoBackbone),
+            out("c", OutOrigin::AutoBackbone),
+            out("hot1", OutOrigin::AutoShortcut),
+        ];
+        let pending = vec![out("hot2", OutOrigin::AutoShortcut)];
+        // hot1 directly_connected so it's not re-picked anyway.
+        nodes[4].directly_connected = true;
+        for seed in 0..20 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let act = dflt("me", &nodes, &active, &pending, &mut rng);
+            assert!(
+                !matches!(
+                    act,
+                    AutoAction::Connect {
+                        origin: OutOrigin::AutoShortcut,
+                        ..
+                    }
+                ),
+                "seed {seed}: D_SHORTCUT cap breached: {act:?}"
+            );
+        }
+    }
+
+    /// Open question 5 from the theory doc: at nc∈[`D_LO`,`D_HI`] with no
+    /// shortcut candidate, `connect_to_unreachable` still fires.
+    #[test]
+    fn connect_to_unreachable_still_reachable() {
+        let mut nodes = vec![node("me", true, true, false, 4)];
+        for n in ["a", "b", "c", "d"] {
+            nodes.push(node(n, true, true, true, 2));
+        }
+        // No relay traffic anywhere (no shortcut candidate). 6
+        // unreachable → P(hit)=6/11≈55%.
+        for i in 0..6 {
+            nodes.push(node(&format!("dark{i}"), false, true, false, 0));
+        }
+        let outgoing = outs(&["a", "b", "c", "d"]);
+        let mut hits = 0;
+        for seed in 0..100 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            if let AutoAction::Connect {
+                origin: OutOrigin::AutoBackbone,
+                ..
+            } = dflt("me", &nodes, &outgoing, &[], &mut rng)
+            {
+                hits += 1;
+            }
+        }
+        assert!(
+            hits > 30,
+            "partition-heal must still fire inside the band; got {hits}"
+        );
     }
 }
