@@ -661,16 +661,16 @@ impl Daemon {
         let tcponly =
             (self.myself_options.bits() | relay_options) & crate::proto::OPTION_TCPONLY != 0;
 
-        // minmtu==0 means "unknown" not "zero"; we go UDP
-        // optimistically until PMTU runs. First packet over a fresh
-        // relay needs the dance to settle either way.
+        // C parity (`net_packet.c:974`): data stays on TCP until a
+        // probe reply lifts `minmtu` above 0. Probes are exempt so
+        // discovery still runs; behind a UDP-blackholing firewall
+        // minmtu stays 0 and data correctly never goes UDP.
         let relay_minmtu = self
             .dp
             .tunnels
             .get(&relay_nid)
             .map_or(0, TunnelState::minmtu);
-        let too_big =
-            record_type != PKT_PROBE && relay_minmtu > 0 && origlen > usize::from(relay_minmtu);
+        let too_big = record_type != PKT_PROBE && origlen > usize::from(relay_minmtu);
         let go_tcp = record_type == tinc_sptps::REC_HANDSHAKE
             || tcponly
             || (!direct && !relay_supported)
