@@ -17,29 +17,34 @@ For "I run C tinc today, what changes?", see [COMPAT.md](COMPAT.md).
 
 ```mermaid
 flowchart LR
-    tun[(TUN/TAP)]
-    udp[(UDP sockets)]
-    tcp[(TCP listeners)]
-
+    subgraph kernel ["kernel fds (epoll)"]
+        tun["TUN / TAP"]
+        udp["UDP sockets"]
+        tcp["TCP listeners"]
+    end
     subgraph main ["main thread — event loop"]
-        dp["data plane<br/>route / encrypt / batch"]
-        cp["control plane<br/>meta-conns / gossip / graph"]
-        snap["routing snapshot"]
-        cp --> snap
-        snap -->|read-only| dp
+        dp["**data plane**<br/>route / encrypt / batch"]
+        cp["**control plane**<br/>meta-conns / gossip / graph"]
+        cp -- "routing snapshot" --> dp
+    end
+    subgraph workers ["worker threads"]
+        dht["dht"]
+        dns["dns"]
+        pm["portmap"]
     end
 
-    tun <-->|bursts| dp
-    udp <-->|batched send/recv| dp
+    tun <--> dp
+    udp <--> dp
     tcp <--> cp
-
-    dht["DHT worker thread"]
-    pm["portmap worker thread"]
-    cp <-->|non-blocking channel| dht
-    cp <-->|non-blocking channel| pm
-    dht <--> mainline[("Mainline DHT")]
-    pm <--> gw[("gateway<br/>PCP / UPnP")]
+    cp  <-.-> workers
+    dht --- mainline["Mainline DHT"]
+    pm  --- gw["gateway<br/>PCP / UPnP"]
 ```
+
+Solid edges are fds the event loop polls; dashed is the non-blocking
+request/result channel pair each worker shares with the control
+plane. The data plane reads the control plane's state only through an
+immutable routing snapshot, so a burst never contends with gossip.
 
 ## Design Goals
 
@@ -144,15 +149,21 @@ walk through how that happens.
 
 ```mermaid
 flowchart LR
-    A["TUN read<br/>(burst into arena)"] --> B["TSO split"]
-    B --> C["route<br/>dst IP → node → nexthop"]
-    C --> D["encrypt<br/>per-destination SPTPS"]
-    D --> E["stage into batch"]
-    E -->|burst end| F["one sendmsg<br/>(UDP GSO)"]
-    F -. wire .-> G["one recvmmsg<br/>(batch)"]
-    G --> H["decrypt +<br/>replay check"]
-    H --> I["GRO coalesce"]
-    I --> J["TUN write"]
+    subgraph S ["sender (one event-loop wakeup)"]
+        direction LR
+        A["TUN read<br/>burst → arena"] --> B["TSO split"]
+        B --> C["route<br/>dst IP → node"]
+        C --> D["SPTPS seal"]
+        D --> E["stage batch"]
+        E -->|burst end| F["sendmsg<br/>UDP GSO"]
+    end
+    subgraph R ["receiver (one event-loop wakeup)"]
+        direction LR
+        G["recvmmsg"] --> H["SPTPS open<br/>+ replay"]
+        H --> I["GRO coalesce"]
+        I --> J["TUN write"]
+    end
+    F -. wire .-> G
 ```
 
 A local application writes to the TUN interface. The event loop wakes
