@@ -7,7 +7,11 @@
 # (./scripts/deploy-agent-fix.sh) was paying ~55s × 2 arches per
 # commit under buildRustPackage; now src-only changes touch ~10s of
 # workspace recompile.
-{ craneLib, lib }:
+{
+  craneLib,
+  lib,
+  installShellFiles,
+}:
 let
   src = lib.fileset.toSource {
     root = ../.;
@@ -16,6 +20,7 @@ let
       ../Cargo.lock
       ../.cargo # x86-64-v3 + AVX2 flags; see config.toml
       ../crates
+      ../man
     ];
   };
   common = {
@@ -37,6 +42,12 @@ craneLib.buildPackage (
   common
   // {
     inherit cargoArtifacts;
+    nativeBuildInputs = [ installShellFiles ];
+    # Hand-written mdoc; committed so the build stays hermetic and
+    # diffs are reviewable. Regenerate by editing man/*.? directly.
+    postInstall = ''
+      installManPage man/*.[0-9]
+    '';
     meta.mainProgram = "tincd";
   }
 )

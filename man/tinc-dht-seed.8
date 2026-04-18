@@ -1,0 +1,69 @@
+.Dd April 18, 2026
+.Dt TINC-DHT-SEED 8
+.Os
+.Sh NAME
+.Nm tinc-dht-seed
+.Nd Mainline DHT seed swarm and resolver for DhtDiscovery
+.Sh SYNOPSIS
+.Nm
+.Ar BASE_PORT
+.Op Ar COUNT Op Ar SELF_HOST
+.Nm
+.Fl -resolve
+.Op Fl -secret-file Ar PATH
+.Ar PUBKEY
+.Op Ar BOOTSTRAP_HOST:PORT
+.Sh DESCRIPTION
+.Nm
+is a test/bootstrap helper for the
+.Va DhtDiscovery
+mechanism in
+.Xr tincd 8 .
+.Pp
+In its first form it runs
+.Ar COUNT
+.Pq default 1
+Mainline DHT nodes bound to UDP ports
+.Ar BASE_PORT .. BASE_PORT Ns + Ns Ar COUNT Ns \(mi1
+and blocks until killed.
+.Ar SELF_HOST
+.Pq default Li 127.0.0.1
+is the externally reachable address the seeds use to bootstrap to each
+other; set it to the host's LAN/WAN address when clients are remote, so
+that referrals carry a followable address instead of loopback.
+For each bound port a line
+.Dl tinc-dht-seed listening on 0.0.0.0: Ns Ar PORT
+is printed to standard output.
+.Pp
+With
+.Fl -resolve ,
+.Nm
+performs a one-shot lookup:
+it derives the BEP\ 44 target from the tinc-base64 Ed25519 public key
+.Ar PUBKEY
+.Pq and the secret, if given ,
+fetches and decrypts the record, prints the plaintext address line to
+standard output, and exits.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -resolve
+One-shot lookup mode.
+.It Fl -secret-file Ar PATH
+Mesh secret in the same format as
+.Va DhtSecretFile
+.Pq raw 32 bytes or one base64 line .
+.It Ar BOOTSTRAP_HOST:PORT
+Dial only this DHT node.
+When omitted,
+.Fl -resolve
+uses the same public bootstrap list as
+.Xr tincd 8 .
+.El
+.Sh EXIT STATUS
+Seed mode exits non-zero on bind failure.
+.Fl -resolve
+exits 0 when a record was found and decrypted, 1 otherwise.
+.Sh SEE ALSO
+.Xr tinc.conf 5
+.Pq Va DhtDiscovery , Va DhtBootstrap , Va DhtSecretFile ,
+.Xr tincd 8

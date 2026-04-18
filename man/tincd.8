@@ -1,0 +1,268 @@
+.Dd April 18, 2026
+.Dt TINCD 8
+.Os
+.Sh NAME
+.Nm tincd
+.Nd tinc VPN daemon (Rust implementation)
+.Sh SYNOPSIS
+.Nm
+.Op Fl DLR
+.Op Fl c Ar DIR
+.Op Fl n Ar NETNAME
+.Op Fl d Ns Op Ar LEVEL
+.Op Fl o Ar [HOST.]KEY=VALUE
+.Op Fl U Ar USER
+.Op Fl -logfile Ns Op = Ns Ar FILE
+.Op Fl -pidfile Ns = Ns Ar FILE
+.Op Fl -socket Ns = Ns Ar FILE
+.Sh DESCRIPTION
+.Nm
+is the daemon component of tincr, a wire-compatible Rust
+reimplementation of the tinc 1.1 mesh VPN.
+It reads its configuration from
+.Xr tinc.conf 5 ,
+opens a TUN/TAP device, establishes authenticated meta-connections to
+peers, and routes encrypted packets between the virtual device and the
+mesh.
+.Pp
+By default
+.Nm
+forks into the background.
+Under
+.Xr systemd 1
+run it foreground with
+.Fl D
+and use
+.Sy Type=notify ;
+journald captures stderr.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl c , Fl -config Ns = Ns Ar DIR
+Read configuration from
+.Ar DIR
+instead of
+.Pa /etc/tinc Ns Op / Ns Ar NETNAME .
+.It Fl n , Fl -net Ns = Ns Ar NETNAME
+Use the network
+.Ar NETNAME ;
+configuration is read from
+.Pa /etc/tinc/ Ns Ar NETNAME .
+The
+.Ev NETNAME
+environment variable is consulted when
+.Fl n
+is not given.
+A value of
+.Dq \&.
+means no netname.
+.It Fl o , Fl -option Ns = Ns Ar [HOST.]KEY=VALUE
+Set a configuration option, overriding
+.Xr tinc.conf 5 .
+May be repeated.
+The
+.Sq =
+is optional;
+.Dq Fl o Li "Port 655"
+is accepted.
+.It Fl D , Fl -no-detach
+Do not fork into the background.
+Implied under systemd socket activation.
+.It Fl d , Fl -debug Ns Op = Ns Ar LEVEL
+Set debug level (0\(en5), or increment it when given without an
+argument.
+0 maps to
+.Sy info ,
+1\(en2 to
+.Sy debug ,
+3+ to
+.Sy trace .
+.Ev RUST_LOG
+overrides this and accepts per-target filters.
+.It Fl L , Fl -mlock
+Lock the process into RAM with
+.Xr mlockall 2 .
+Exits on failure.
+.It Fl -logfile Ns Op = Ns Ar FILE
+Write log output to
+.Ar FILE
+(default:
+.Pa /var/log/tinc Ns Oo . Ns Ar NETNAME Oc Ns .log ) .
+The file is opened once and is
+.Em not
+reopened on
+.Dv SIGHUP ;
+use
+.Sy copytruncate
+in
+.Xr logrotate 8 .
+.It Fl U , Fl -user Ns = Ns Ar USER
+Drop privileges to
+.Ar USER
+after opening the device, binding sockets, and running
+.Pa tinc-up .
+.It Fl R , Fl -chroot
+.Xr chroot 2
+to the configuration directory after setup.
+.It Fl -pidfile Ns = Ns Ar FILE
+Write PID and control cookie to
+.Ar FILE
+(default:
+.Pa /var/run/tinc Ns Oo . Ns Ar NETNAME Oc Ns .pid ,
+or
+.Pa CONFDIR/pid
+when
+.Pa /var
+is not writable).
+.It Fl -socket Ns = Ns Ar FILE
+Bind the control socket at
+.Ar FILE .
+Default: the pidfile path with
+.Pa .pid
+replaced by
+.Pa .socket .
+.It Fl -bypass-security
+Accepted and ignored with a warning; not implemented in this build.
+.It Fl s , Fl -syslog
+Not supported.
+Use
+.Fl D
+(journald) or
+.Fl -logfile .
+.It Fl -help
+Print usage and exit.
+.It Fl -version
+Print version, protocol version, and exit.
+.El
+.Sh SIGNALS
+.Bl -tag -width "TERM, INT, QUIT" -compact
+.It Dv TERM , INT , QUIT
+Clean shutdown; runs
+.Pa tinc-down .
+.It Dv HUP
+Reload configuration (see
+.Sx RELOAD ) .
+.It Dv ALRM
+Reset outgoing-connection backoff and retry immediately.
+.It Dv USR1 , USR2
+Ignored.
+Use
+.Ql tinc dump ...
+for state inspection.
+.El
+.Ss RELOAD
+.Dv SIGHUP
+re-reads
+.Pa tinc.conf
+and
+.Pa hosts/ Ns Ar NAME
+and applies
+.Va Subnet
+and
+.Va ConnectTo
+changes, the soft timing/behaviour settings, and the invitation key.
+Any peer whose
+.Pa hosts/ Ns Ar NAME
+mtime changed is disconnected.
+It does
+.Em not
+re-apply
+.Va Port ,
+.Va BindToAddress ,
+.Va ListenAddress ,
+.Va AddressFamily ,
+.Va Device ,
+.Va DeviceType ,
+.Va Interface ,
+.Va Mode ,
+or private-key paths; restart for those.
+.Sh ENVIRONMENT
+.Bl -tag -width "STATE_DIRECTORY" -compact
+.It Ev NETNAME
+Fallback for
+.Fl n .
+.It Ev RUST_LOG
+.Xr env_logger 7 Ns -style
+log filter; overrides
+.Fl d
+and
+.Va LogLevel .
+.It Ev LISTEN_PID , Ev LISTEN_FDS
+.Xr sd_listen_fds 3
+socket activation.
+When set and matching,
+.Nm
+adopts the passed TCP listener(s), opens the paired UDP socket itself,
+and forces foreground mode.
+.Va BindToAddress ,
+.Va ListenAddress
+and
+.Va Port
+are ignored.
+.It Ev NOTIFY_SOCKET
+.Xr sd_notify 3
+endpoint;
+.Nm
+sends
+.Sy READY=1
+after setup and
+.Sy WATCHDOG=1
+when
+.Ev WATCHDOG_USEC
+is set.
+.It Ev WATCHDOG_USEC
+Arms periodic watchdog keep-alives at half the given interval.
+.It Ev STATE_DIRECTORY
+When set, the address cache and
+.Pa dht_nodes
+persistence file are stored under it instead of the configuration
+directory.
+.It Ev TINC_UMBILICAL
+Internal pipe protocol used by
+.Ql tinc start .
+.El
+.Sh FILES
+.Bl -tag -width Ds -compact
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /tinc.conf
+Daemon configuration; see
+.Xr tinc.conf 5 .
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /hosts/
+Per-node host files (public keys, addresses, subnets).
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /ed25519_key.priv
+Default Ed25519 private key.
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /tinc-up , tinc-down , host-up , host-down , subnet-up , subnet-down
+Hook scripts; run with the configuration directory as working
+directory.
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /invitations/
+Outstanding invitations and the invitation private key.
+.It Pa /var/run/tinc Ns Oo . Ns Ar NETNAME Oc Ns .pid
+PID and control cookie.
+.It Pa /var/run/tinc Ns Oo . Ns Ar NETNAME Oc Ns .socket
+Unix-domain control socket.
+.It Pa /var/log/tinc Ns Oo . Ns Ar NETNAME Oc Ns .log
+Default log file when detaching.
+.It Pa $STATE_DIRECTORY/cache/
+Per-peer address cache.
+.It Pa $STATE_DIRECTORY/dht_nodes
+Persisted Mainline DHT routing-table seeds
+.Pq tincr extension .
+.El
+.Sh EXIT STATUS
+.Ex -std
+On argument-parse, configuration, device-open, bind, or
+.Xr mlockall 2
+failure
+.Nm
+exits 1.
+.Sh SEE ALSO
+.Xr tinc.conf 5 ,
+.Xr tinc 8 ,
+.Xr tinc-auth 8 ,
+.Xr tinc-dht-seed 8
+.Sh AUTHORS
+.An -nosplit
+tincr is maintained at
+.Lk https://github.com/Mic92/tincr .
+The tinc protocol and configuration format are by
+.An Ivo Timmermans
+and
+.An Guus Sliepen .

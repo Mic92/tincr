@@ -1,0 +1,111 @@
+.Dd April 18, 2026
+.Dt TINC-AUTH 8
+.Os
+.Sh NAME
+.Nm tinc-auth
+.Nd nginx auth_request backend for tinc node identity
+.Sh SYNOPSIS
+.Nm
+.Op Fl n Ar NETNAME
+.Op Fl c Ar DIR
+.Op Fl -pidfile Ns = Ns Ar FILE
+.Op Fl -listen-socket Ns = Ns Ar PATH
+.Sh DESCRIPTION
+.Nm
+listens on a Unix-domain socket and answers
+.Xr nginx 8
+.Sy auth_request
+sub-requests.
+For each request it reads the
+.Sy Remote-Addr
+header (set to
+.Va $remote_addr
+by the nginx configuration), connects to the local
+.Xr tincd 8
+control socket, and performs a longest-prefix match against the
+running daemon's subnet table.
+.Pp
+The listening socket is taken from systemd socket activation
+.Pq Ev LISTEN_FDS , exactly one stream socket
+when available, otherwise from
+.Fl -listen-socket .
+The
+.Xr tincd 8
+control socket is located via
+.Fl -pidfile
+or
+.Fl n Ns \&/ Ns Fl c ,
+exactly as for
+.Xr tinc 8 .
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl n , Fl -net Ns = Ns Ar NETNAME
+Network name; also reported in the
+.Sy Tinc-Net
+header.
+.It Fl c , Fl -config Ns = Ns Ar DIR
+Configuration directory.
+.It Fl -pidfile Ns = Ns Ar FILE
+Path to
+.Xr tincd 8 Ap s
+pidfile (the control socket path is derived from it).
+.It Fl -listen-socket Ns = Ns Ar PATH , Fl -sockpath Ns = Ns Ar PATH
+Unix socket to accept nginx sub-requests on.
+Ignored under socket activation.
+.It Fl -help , Fl -version
+Print help or version and exit.
+.El
+.Sh RESPONSES
+.Bl -tag -width "503 Service Unavailable" -compact
+.It Sy 204 \&No Content
+.Sy Remote-Addr
+matched a tinc subnet.
+The response carries:
+.Bl -tag -width "Tinc-Subnet" -offset indent -compact
+.It Sy Tinc-Node
+Owning node name.
+.It Sy Tinc-Net
+.Ar NETNAME
+(empty if none was given).
+.It Sy Tinc-Subnet
+The matching subnet.
+.El
+.It Sy 401 Unauthorized
+No subnet contains the address, or
+.Sy Remote-Addr
+did not parse as an IP address.
+.It Sy 400 Bad Request
+.Sy Remote-Addr
+header missing, or the request was malformed.
+.It Sy 503 Service Unavailable
+.Xr tincd 8
+is not running or its control socket is unreachable.
+.El
+.Pp
+.Sy (broadcast)
+subnets are never reported as a match.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+location = /_tinc_auth {
+    internal;
+    proxy_pass http://unix:/run/tinc-auth.sock;
+    proxy_pass_request_body off;
+    proxy_set_header Remote-Addr $remote_addr;
+}
+location / {
+    auth_request /_tinc_auth;
+    auth_request_set $tinc_node $upstream_http_tinc_node;
+    proxy_set_header X-Tinc-Node $tinc_node;
+    proxy_pass http://backend;
+}
+.Ed
+.Sh SEE ALSO
+.Xr nginx 8 ,
+.Xr tinc 8 ,
+.Xr tincd 8
+.Sh CAVEATS
+.Nm
+authenticates the tinc
+.Em node ,
+not a human user.
+Any process on a node that owns a matching subnet appears as that node.
