@@ -277,6 +277,46 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // ─── alice host firewall (nixos-fw shape) ────────────────────
+    // Stateful `policy drop` on input: reproduces the real-world
+    // failure where the SSDP multicast query creates a conntrack
+    // entry for (us↔239.255.255.250:1900) but the IGD's *unicast*
+    // reply from gw:1900 is a different 5-tuple → NEW → dropped.
+    // PCP (unicast both ways) is unaffected, so the `natpmp=true`
+    // variant exercises this too without breaking. The fix under
+    // test: `igd::discover()` pre-punches with a unicast M-SEARCH
+    // to gw:1900 on the same socket, so the reply matches
+    // ESTABLISHED. SKIP if the kernel lacks `ct state` in userns.
+    let alice_fw = tmp.path().join("alice-fw.nft");
+    std::fs::write(
+        &alice_fw,
+        "table inet fw {\n\
+           chain input {\n\
+             type filter hook input priority 0; policy drop;\n\
+             ct state established,related accept\n\
+             iif lo accept\n\
+             tcp dport 6550 accept\n\
+           }\n\
+         }\n",
+    )
+    .unwrap();
+    let out = Command::new("ip")
+        .args(["netns", "exec", "alice", "nft", "-f"])
+        .arg(&alice_fw)
+        .output()
+        .expect("spawn nft");
+    if !out.status.success() {
+        eprintln!(
+            "SKIP {test_name}: nft ct-state ruleset failed in alice-ns: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        let _ = upnpd.0.kill_and_log();
+        for s in &mut sleepers {
+            let _ = s.kill();
+        }
+        return;
+    }
+
     // ─── alice tincd ─────────────────────────────────────────────
     let confbase = tmp.path().join("alice");
     let pidfile = tmp.path().join("alice.pid");

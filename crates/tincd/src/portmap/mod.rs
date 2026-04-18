@@ -264,30 +264,24 @@ fn try_map_v4(
             Err(e) => log::debug!(target: "tincd::portmap", "PCP v4: {e}"),
         }
     }
-    try_igd(
-        local_port,
-        proto,
-        lease,
-        discover_wait,
-        gw.map(|(_, lan)| lan),
-    )
-    .map(|ext| (ext, "UPnP-IGD"))
+    try_igd(local_port, proto, lease, discover_wait, gw).map(|ext| (ext, "UPnP-IGD"))
 }
 
 /// UPnP-IGD. SSDP M-SEARCH multicast → fetch root desc → SOAP
-/// `AddPortMapping`. `lan_ip` is the address the router should DNAT
-/// *to*; we learn it from the socket the SSDP reply arrived on
-/// (igd-next doesn't expose that, so caller passes the
-/// route-table-derived LAN IP).
+/// `AddPortMapping`. `gw_lan` is `(default-gw, our-lan-ip)` from the
+/// route table: the gw addr feeds `discover()`'s unicast SSDP
+/// pre-punch (see `igd::discover` doc), the lan ip is what the
+/// router should DNAT *to*.
 fn try_igd(
     local_port: u16,
     proto: Proto,
     lease: u32,
     discover_wait: Duration,
-    lan_ip: Option<Ipv4Addr>,
+    gw_lan: Option<(Ipv4Addr, Ipv4Addr)>,
 ) -> Result<SocketAddr, String> {
-    let gw = igd::discover(discover_wait)?;
+    let gw = igd::discover(discover_wait, gw_lan.map(|(g, _)| g))?;
 
+    let lan_ip = gw_lan.map(|(_, lan)| lan);
     // C tinc passes miniupnpc's `lanaddr` (UPNP_GetValidIGD output).
     // Derive from the gateway's addr by connecting a throwaway UDP
     // socket and reading local_addr — the kernel's route lookup

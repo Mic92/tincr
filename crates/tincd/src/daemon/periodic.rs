@@ -244,7 +244,9 @@ impl Daemon {
                             };
                         }
                     }
-                    PortmapEvent::Lost { af, proto,
+                    PortmapEvent::Lost {
+                        af,
+                        proto,
                         local_port,
                         ext,
                     } => {

@@ -47,11 +47,31 @@ pub struct Gateway {
 
 /// SSDP multicast → parse first IGD reply → fetch root desc →
 /// substring-scan for a WAN service's `controlURL`.
-pub fn discover(timeout: Duration) -> Result<Gateway, String> {
+///
+/// `gw_v4`: the v4 default gateway, if known. When set, the same
+/// M-SEARCH bytes are sent *unicast* to `gw_v4:1900` first, on the
+/// same socket, before the standard multicast. Rationale (Tailscale
+/// `net/portmapper`, tailscale#3197): the SSDP multicast goes to
+/// `239.255.255.250:1900` but the IGD answers *unicast* from
+/// `gw:1900` — a stateful host firewall (nixos-fw, ufw) sees the
+/// reply 5-tuple as NEW (request dst was the multicast group, not
+/// `gw`) and drops it. The unicast send creates the conntrack entry
+/// `{us:eph ↔ gw:1900}` so the reply matches ESTABLISHED. Most
+/// routers also *answer* the unicast M-SEARCH directly (miniupnpd
+/// binds `INADDR_ANY:1900`, `minissdp.c:205`); for the few that
+/// only reply to multicast, the unicast send still serves as the
+/// firewall punch.
+pub fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, String> {
     let sock =
         UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("bind 0.0.0.0:0: {e}"))?;
     // TTL 2: cross one router hop (the gateway), no further.
     let _ = sock.set_multicast_ttl_v4(2);
+    // Unicast pre-punch (see doc comment). Best-effort: gateway may
+    // be unreachable / ICMP-reject; multicast below is the real
+    // query.
+    if let Some(gw) = gw_v4 {
+        let _ = sock.send_to(M_SEARCH, (gw, 1900));
+    }
     sock.send_to(M_SEARCH, (Ipv4Addr::new(239, 255, 255, 250), 1900))
         .map_err(|e| format!("send M-SEARCH: {e}"))?;
 
