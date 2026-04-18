@@ -984,11 +984,23 @@ impl Daemon {
         } else {
             Some(self.settings.dht_bootstrap.as_slice())
         };
+        // Warm-start: feed last run's routing table back as extra
+        // bootstrap nodes so a restart doesn't re-hit DNS seeds.
+        // File lives next to the addrcache (`$STATE_DIRECTORY` if
+        // set, else `confbase`); written post-`drop_privs` by
+        // `Daemon::drop`. Missing/garbage → empty, cold bootstrap.
+        let extra = crate::discovery::load_persisted_nodes(&self.dht_nodes_path());
+        if !extra.is_empty() {
+            log::debug!(target: "tincd::discovery",
+                        "loaded {} persisted DHT node(s) for warm bootstrap",
+                        extra.len());
+        }
         match crate::discovery::Discovery::spawn(
             key,
             self.my_udp_port,
             self.settings.dht_secret,
             bootstrap,
+            &extra,
         ) {
             Ok(d) => {
                 log::info!(target: "tincd::discovery",

@@ -92,6 +92,7 @@ pub mod blind;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, Payload};
@@ -106,6 +107,25 @@ pub use mainline::DhtBuilder;
 use tinc_crypto::sign::SigningKey;
 
 use blind::{BlindSigner, Derived, blind_public_key, current_period, derive};
+
+/// Mainline's hardcoded seed nodes. Vendored: `mainline::rpc` is
+/// `pub(crate)` in 6.0.x and the const isn't re-exported. Kept here so
+/// `spawn()` can *append* persisted routing-table nodes to the defaults
+/// (the builder's `.extra_bootstrap()` on a fresh builder replaces, not
+/// augments — it `unwrap_or_default()`s the unset `Option`), and so
+/// `tinc-dht-seed --resolve` can dial them without an explicit arg.
+pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
+    "router.bittorrent.com:6881",
+    "dht.transmissionbt.com:6881",
+    "dht.libtorrent.org:25401",
+    "relay.pkarr.org:6881",
+];
+
+/// Cap on routing-table addrs written to `dht_nodes`. Transmission's
+/// `dht.dat` keeps the full table (~hundreds); 100 is plenty to skip
+/// the DNS-seed round-trip on restart and small enough to not care
+/// about atomic-rename.
+const MAX_PERSISTED_NODES: usize = 100;
 
 /// Re-publish interval. Mainline mutable items expire after ~2h of no
 /// republish; iroh uses 5min. We match. The BEP 44 `seq` field (monotonic
@@ -327,14 +347,23 @@ impl Discovery {
         udp_port: u16,
         secret: Option<[u8; 32]>,
         bootstrap: Option<&[String]>,
+        extra: &[String],
     ) -> std::io::Result<Self> {
         // Client mode: we put/get, don't help others route. mainline
         // auto-promotes to server if it detects we're not firewalled.
-        let dht = match bootstrap {
-            None => Dht::client()?,
-            // .bootstrap() replaces, not appends — the semantics we want.
-            Some(nodes) => Dht::builder().bootstrap(nodes).build()?,
+        //
+        // `extra` (persisted routing-table nodes from last run) is
+        // *appended* in both branches: with `bootstrap=None` it lets a
+        // restart skip the DNS-seed round-trip; with an explicit list
+        // it can only contain addrs we've previously talked to via that
+        // same list, so hermeticity is preserved. `.bootstrap()` is
+        // replace-semantics — build the combined Vec ourselves.
+        let mut seeds: Vec<String> = match bootstrap {
+            None => DEFAULT_BOOTSTRAP_NODES.iter().map(|&s| s.into()).collect(),
+            Some(nodes) => nodes.to_vec(),
         };
+        seeds.extend_from_slice(extra);
+        let dht = Dht::builder().bootstrap(&seeds).build()?;
         Ok(Self::with_dht(dht, key, udp_port, secret))
     }
 
@@ -389,6 +418,14 @@ impl Discovery {
             });
         }
         self.epoch.as_ref().expect("set above")
+    }
+
+    /// Snapshot of the actor's routing table as `host:port` strings
+    /// (mainline's `to_bootstrap()`; non-stale nodes only). For
+    /// [`save_persisted_nodes`] at shutdown.
+    #[must_use]
+    pub fn routing_nodes(&self) -> Vec<String> {
+        self.dht.to_bootstrap()
     }
 
     /// Live nodes from mainline's routing table to port-probe. Better
@@ -652,6 +689,48 @@ impl Discovery {
         }
         Some(parts.join(" "))
     }
+}
+
+/// Read the persisted routing-table file (one `ip:port` per line, same
+/// shape as the addrcache). Missing / unreadable / unparseable → empty
+/// + debug log; the file is a warm-start hint, never load-bearing.
+#[must_use]
+pub fn load_persisted_nodes(path: &Path) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .lines()
+            .map(str::trim)
+            // Reject anything that doesn't parse as a v4 sockaddr:
+            // mainline's `to_socket_address` would skip it anyway, and
+            // this keeps a corrupted file from feeding garbage to DNS.
+            .filter(|l| l.parse::<SocketAddrV4>().is_ok())
+            .take(MAX_PERSISTED_NODES)
+            .map(String::from)
+            .collect(),
+        Err(e) => {
+            log::debug!(target: "tincd::discovery",
+                        "dht_nodes load {}: {e} (cold bootstrap)", path.display());
+            Vec::new()
+        }
+    }
+}
+
+/// Write up to [`MAX_PERSISTED_NODES`] routing-table addrs, one per
+/// line. Best-effort; caller logs on `Err`.
+///
+/// # Errors
+/// Propagates `create_dir_all` / `write` failures (read-only state dir,
+/// disk full). The caller treats this as non-fatal.
+pub fn save_persisted_nodes(path: &Path, nodes: &[String]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut buf = String::new();
+    for n in nodes.iter().take(MAX_PERSISTED_NODES) {
+        buf.push_str(n);
+        buf.push('\n');
+    }
+    std::fs::write(path, buf)
 }
 
 /// `getifaddrs()` filtered to v6 global unicast (`2000::/3`). Stable
@@ -981,6 +1060,56 @@ mod tests {
         // Garbage / truncated.
         assert!(open_record(&d, 42, b"tinc1 v4=1.2.3.4:5").is_none());
         assert!(open_record(&d, 42, &sealed[..AEAD_OVERHEAD - 1]).is_none());
+    }
+
+    /// Routing table persists across restarts: bootstrap, snapshot,
+    /// write, read back, feed as `extra` to a fresh actor. Proves the
+    /// `to_bootstrap()` → file → `.bootstrap()` loop closes without
+    /// the DNS seeds: the second actor's `bootstrap` is *only* the
+    /// loopback Testnet addrs from the file.
+    #[test]
+    fn testnet_persist_roundtrip() {
+        use mainline::Testnet;
+        let testnet = Testnet::new(10).expect("testnet");
+        let key = SigningKey::from_seed(&[1u8; 32]);
+        let pubk = *key.public_key();
+
+        let mut a = Discovery::with_dht(
+            mainline::Dht::builder()
+                .bootstrap(&testnet.bootstrap)
+                .build()
+                .unwrap(),
+            key,
+            655,
+            None,
+        );
+        a.set_reflexive_v4("192.0.2.1:1".parse().unwrap());
+        // Bootstraps as a side effect (find_node walk fills the table).
+        a.publish(Instant::now()).expect("publish");
+
+        let nodes = a.routing_nodes();
+        assert!(!nodes.is_empty(), "routing table populated");
+
+        let path =
+            std::env::temp_dir().join(format!("tincd-dhtnodes-{:?}", std::thread::current().id()));
+        save_persisted_nodes(&path, &nodes).expect("write");
+        let loaded = load_persisted_nodes(&path);
+        assert_eq!(loaded, nodes, "roundtrip exact");
+        // Garbage line filter: only v4-sockaddr-shaped survive.
+        std::fs::write(&path, "garbage\n192.0.2.9:1\n[::1]:1\n").unwrap();
+        assert_eq!(load_persisted_nodes(&path), vec!["192.0.2.9:1".to_owned()]);
+        let _ = std::fs::remove_file(&path);
+
+        // New actor, *only* the persisted addrs as bootstrap (no
+        // testnet.bootstrap, no DNS seeds). Resolves ⇒ warm-start works.
+        let b = Discovery::with_dht(
+            mainline::Dht::builder().bootstrap(&nodes).build().unwrap(),
+            SigningKey::from_seed(&[2u8; 32]),
+            655,
+            None,
+        );
+        let parsed = b.resolve(&pubk).expect("warm-start resolve");
+        assert!(parsed.direct.contains(&"192.0.2.1:1".parse().unwrap()));
     }
 
     /// First publish gated until a dialable v4/tcp is known. Regression

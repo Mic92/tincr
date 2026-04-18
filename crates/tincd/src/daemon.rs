@@ -577,6 +577,15 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Persisted DHT routing table. Same writable-dir rule as the
+    /// addrcache: `$STATE_DIRECTORY/cache` (the one subdir we chown
+    /// + Landlock-allow) else `confbase`.
+    pub(crate) fn dht_nodes_path(&self) -> PathBuf {
+        std::env::var_os("STATE_DIRECTORY")
+            .map_or_else(|| self.confbase.clone(), |s| PathBuf::from(s).join("cache"))
+            .join("dht_nodes")
+    }
+
     /// Refresh the TX snapshot's subnet trie. Called after each
     /// `subnets.add()`/`del()` (gossip, MAC lease, purge, reload).
     /// Clones the `BTreeMap` (O(n) String clones); subnet churn is
@@ -817,6 +826,21 @@ impl Drop for Daemon {
         // in Drop, so check the actual state.
         if self.device_enabled {
             self.run_script("tinc-down");
+        }
+        // Persist the DHT routing table so the next start can skip
+        // the DNS-seed round-trip. Same lifecycle as the addrcache
+        // (written from Drop, post-drop_privs ownership). Mainline's
+        // actor thread is still alive until `self.discovery` drops
+        // below, so `to_bootstrap()` works.
+        if let Some(d) = &self.discovery {
+            let nodes = d.routing_nodes();
+            if !nodes.is_empty()
+                && let Err(e) =
+                    crate::discovery::save_persisted_nodes(&self.dht_nodes_path(), &nodes)
+            {
+                log::debug!(target: "tincd::discovery",
+                            "dht_nodes save failed: {e}");
+            }
         }
         let _ = std::fs::remove_file(&self.pidfile);
         // Signal handlers stay installed (SelfPipe::drop doesn't del
