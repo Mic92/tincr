@@ -678,8 +678,9 @@ impl Daemon {
 
         while self.running {
             // ─── timers
-            // tick(): cache `now`, drain expired, return next deadline.
-            let timeout = self.timers.tick(&mut fired_timers);
+            // tick(): cache `now`, drain expired. Ignore returned
+            // deadline — handlers below re-arm, recompute after.
+            let _ = self.timers.tick(&mut fired_timers);
             for &t in &fired_timers {
                 match t {
                     TimerWhat::Ping => self.on_ping_tick(),
@@ -712,6 +713,14 @@ impl Daemon {
             }
 
             // ─── poll
+            // Recompute after dispatch (handlers re-arm). Floor 1ms:
+            // sub-ms rounds to epoll_wait(0) and spins; all timers
+            // here are second-granularity so the slop is invisible.
+            // No drain→dispatch loop — re-arm-at-now would livelock.
+            let timeout = self
+                .timers
+                .next_timeout()
+                .map(|d| d.max(Duration::from_millis(1)));
             if let Err(e) = self.ev.turn(timeout, &mut fired_io) {
                 log::error!(target: "tincd",
                             "Error while waiting for input: {e}");

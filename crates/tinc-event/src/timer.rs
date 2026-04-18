@@ -202,6 +202,19 @@ impl<W: Copy> Timers<W> {
         }
     }
 
+    /// Duration until the next armed timer, relative to the cached
+    /// `now` from the last `tick()`. Does not drain.
+    ///
+    /// Call after dispatching `tick()`'s output: handlers re-arm, so
+    /// the timeout `tick()` returned is stale. `Some(ZERO)` if head is
+    /// already due; caller clamps before passing to poll.
+    #[must_use]
+    pub fn next_timeout(&self) -> Option<Duration> {
+        self.by_deadline
+            .first_key_value()
+            .map(|(k, _)| k.0.saturating_duration_since(self.now))
+    }
+
     /// Current cached `now`. Exposed because the daemon's ping-interval
     /// check wants the SAME now the timer comparisons used, not a fresh
     /// `Instant::now()` per check.
@@ -433,5 +446,37 @@ mod tests {
         let mut out = Vec::new();
         t.tick(&mut out);
         assert!(t.now() > before);
+    }
+
+    /// Daemon loop shape: tick → dispatch (handler re-arms) →
+    /// `next_timeout()` → poll. Pins: empty→None, past-rearm→ZERO,
+    /// future-rearm reports head, next tick drains the ZERO one.
+    #[test]
+    fn next_timeout_after_dispatch_rearm() {
+        let mut t = Timers::new();
+        let a = t.add(What::Ping);
+        let b = t.add(What::Periodic);
+        t.set(a, Duration::from_millis(1));
+
+        sleep(Duration::from_millis(5));
+        let mut out = Vec::new();
+        let stale = t.tick(&mut out);
+        assert_eq!(out, vec![What::Ping]);
+        assert_eq!(stale, None, "wheel drained empty");
+        assert_eq!(t.next_timeout(), None, "agrees while empty");
+
+        // "Dispatch": handler arms B already-due (relative to cached now).
+        t.set(b, Duration::ZERO);
+        assert_eq!(t.next_timeout(), Some(Duration::ZERO));
+
+        // A re-armed in the future — head is still B.
+        t.set(a, Duration::from_secs(10));
+        assert_eq!(t.next_timeout(), Some(Duration::ZERO));
+
+        // Next tick drains B; A remains.
+        t.tick(&mut out);
+        assert_eq!(out, vec![What::Periodic]);
+        let next = t.next_timeout().expect("A armed");
+        assert!(next > Duration::from_secs(9) && next <= Duration::from_secs(10));
     }
 }
