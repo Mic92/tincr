@@ -446,6 +446,10 @@ impl Daemon {
             // Empty unless `retry_outgoing` fired → degrades to C
             // edge-walk. `add_known_addresses` dedups.
             .chain(self.dht_hints.get(&name).into_iter().flatten().copied())
+            // Same gate as `discovery::parse_record`: ADD_EDGE addrs
+            // are peer-authored gossip, dht_hints are peer self-
+            // report. Neither may steer us at loopback/link-local.
+            .filter(|sa| !crate::addr::is_unwanted_dial_addr(sa))
             .collect();
         // get_mut after the read-only walk (split borrow).
         if let Some(o) = self.outgoings.get_mut(oid) {

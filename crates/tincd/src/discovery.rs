@@ -91,7 +91,7 @@
 pub mod blind;
 
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, Payload};
@@ -783,21 +783,31 @@ pub fn parse_record(value: &str) -> ParsedRecord {
         let Some((k, v)) = field.split_once('=') else {
             continue;
         };
+        // Address-class gate: the record is peer-authored (and, on
+        // the unauthenticated DHT path, attacker-authored). Never let
+        // loopback / unspecified / multicast / link-local reach the
+        // dial queue. RFC1918/ULA pass — see `addr` module docs.
         match k {
             "v4" => {
-                if let Ok(sa) = v.parse::<SocketAddr>() {
+                if let Ok(sa) = v.parse::<SocketAddr>()
+                    && !crate::addr::is_unwanted_dial_addr(&sa)
+                {
                     out.direct.push(sa);
                 }
             }
             "v6" => {
                 // `[addr]:port` — std parser handles the brackets.
-                if let Ok(sa) = v.parse::<SocketAddrV6>() {
+                if let Ok(sa) = v.parse::<SocketAddrV6>()
+                    && !crate::addr::is_unwanted_dial_target(IpAddr::V6(*sa.ip()))
+                {
                     // Prepend: v6 first in trial order.
                     out.direct.insert(0, SocketAddr::V6(sa));
                 }
             }
             "tcp" | "tcp6" => {
-                if let Ok(sa) = v.parse::<SocketAddr>() {
+                if let Ok(sa) = v.parse::<SocketAddr>()
+                    && !crate::addr::is_unwanted_dial_addr(&sa)
+                {
                     // Either AF is a router-installed accept rule ⇒
                     // best direct-dial candidate. `.tcp` keeps only
                     // the first seen (publish order is tcp, tcp6).
@@ -832,6 +842,29 @@ pub struct ParsedRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D2 regression: peer-authored record must not smuggle
+    /// loopback/unspecified/link-local into the dial queue, but
+    /// RFC1918 stays (flat-LAN meshes are a supported topology).
+    #[test]
+    fn parse_record_filters_unwanted_addr_classes() {
+        let rec = parse_record(
+            "tinc1 tcp=127.0.0.1:22 v4=10.0.0.1:445 v4=0.0.0.0:1 \
+             v6=[::1]:80 v6=[fe80::1]:655 v6=[fd00::1]:655",
+        );
+        let direct: Vec<String> = rec.direct.iter().map(ToString::to_string).collect();
+        // Dropped:
+        for bad in ["127.0.0.1:22", "0.0.0.0:1", "[::1]:80", "[fe80::1]:655"] {
+            assert!(
+                !direct.iter().any(|s| s == bad),
+                "{bad} leaked into .direct"
+            );
+        }
+        assert!(rec.tcp.is_none(), "loopback tcp= must not populate .tcp");
+        // Kept:
+        assert!(direct.iter().any(|s| s == "10.0.0.1:445"));
+        assert!(direct.iter().any(|s| s == "[fd00::1]:655"));
+    }
 
     /// What `testnet_port_probe_roundtrip` can't reach: out-of-spec
     /// inputs (mainline always sorts, always fills `ip`).
@@ -1178,8 +1211,8 @@ mod tests {
             ]
         );
         // Unknown keys + malformed values: skip, don't fail.
-        let p = parse_record("tinc1 v4=garbage tcp=nope future=thing v6=[::1]:655 ext=x:1");
-        assert_eq!(p.direct, vec!["[::1]:655".parse().unwrap()]);
+        let p = parse_record("tinc1 v4=garbage tcp=nope future=thing v6=[fd00::1]:655 ext=x:1");
+        assert_eq!(p.direct, vec!["[fd00::1]:655".parse().unwrap()]);
         assert_eq!(p.tcp, None);
         // Wrong version.
         assert_eq!(parse_record("tinc2 v4=1.2.3.4:5"), ParsedRecord::default());
