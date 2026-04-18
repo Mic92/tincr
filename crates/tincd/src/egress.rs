@@ -42,6 +42,10 @@ pub const UDP_MAX_SEGMENTS: u16 = 128;
 /// 128-segment one.)
 const BATCH_MAX_BYTES: usize = 0xFFFF - 48;
 
+/// `TxBatch::buf` warm capacity: one max run (`can_coalesce` caps at
+/// `BATCH_MAX_BYTES`, so the Vec never grows past this).
+const TX_BATCH_CAP: usize = BATCH_MAX_BYTES;
+
 /// A run of encrypted frames to one destination.
 ///
 /// `frames` is a contiguous slice into the `TxBatch` dense buffer
@@ -167,10 +171,27 @@ pub struct TxBatch {
     origlen: u16,
 }
 
+impl Default for TxBatch {
+    /// Empty, `buf` pre-sized to one max run. Allocated once at
+    /// daemon setup, reused warm.
+    fn default() -> Self {
+        Self {
+            buf: Vec::with_capacity(TX_BATCH_CAP),
+            stride: 0,
+            last_len: 0,
+            count: 0,
+            dst: None,
+            sock: 0,
+            relay: tinc_graph::NodeId(0),
+            origlen: 0,
+        }
+    }
+}
+
 impl TxBatch {
-    /// New, empty. `cap_bytes` should be `DEVICE_DRAIN_CAP ×
-    /// (MTU + overhead)` so the buffer never reallocs after the
-    /// first batch.
+    /// New, empty, with caller-chosen capacity. Tests only —
+    /// production uses `Default`.
+    #[cfg(test)]
     #[must_use]
     pub fn new(cap_bytes: usize) -> Self {
         Self {

@@ -143,17 +143,16 @@ pub struct DataPlane {
     /// `tso_scratch`; same lazy alloc.
     pub tso_lens: Box<[usize]>,
 
-    /// TX batch accumulator. The
-    /// `on_device_read` drain loop stages encrypted frames here
-    /// instead of `sendto`-per-frame; one `EgressBatch` ships the
-    /// run after the loop. `None` outside the drain loop — the send
-    /// site (`send_sptps_data_relay`) checks: `Some` ⇒ stage,
-    /// `None` ⇒ immediate send (the Phase-0 path; still hit by
-    /// UDP-recv → forward, meta-conn → relay, probe sends).
-    ///
-    /// `Option` not for `mem::take` (it's never borrowed across a
-    /// `&mut self` call) but as the in-batch-loop signal. The drain
-    /// loop sets `Some` before walking slots, ships + sets `None`
-    /// after.
-    pub tx_batch: Option<TxBatch>,
+    /// TX batch accumulator. The `on_device_read` drain loop stages
+    /// encrypted frames here instead of `sendto`-per-frame; one
+    /// `EgressBatch` ships the run after the loop. Allocated once at
+    /// setup (~64KB) and reused warm. Storage only — the
+    /// stage-vs-immediate-send gate is `tx_batch_live`.
+    pub tx_batch: TxBatch,
+
+    /// "Inside `on_device_read`'s drain loop": `send_sptps_data_relay`
+    /// stages when true, sends immediately when false. Separate from
+    /// `tx_batch` so the buffer survives across calls; conflating the
+    /// two either reallocs every burst or leaks the gate.
+    pub tx_batch_live: bool,
 }

@@ -767,35 +767,31 @@ impl Daemon {
 
         // TX batching: stage into `tx_batch` instead of sending when
         // all gates pass; the drain loop ships the run in one sendmsg.
-        //   - tx_batch.is_some(): only set during drain loop
+        //   - tx_batch_live: only inside on_device_read's drain loop
         //   - cached.is_some(): cold-path sockaddr is stack-local
         //   - ct.is_none(): hot path only (relay/handshake are rare)
         // dst/size mismatch → flush + restart. Never worse than per-frame.
-        if ct.is_none()
-            && cached.is_some()
-            && let Some(batch) = self.dp.tx_batch.as_mut()
-        {
+        if self.dp.tx_batch_live && ct.is_none() && cached.is_some() {
+            let dp = &mut self.dp;
             // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
             // the immediate-send path uses below.
             #[allow(clippy::cast_possible_truncation)] // ≤ MTU
             let at_len = origlen as u16;
-            if !batch.can_coalesce(sockaddr, sock, self.dp.tx_scratch.len()) {
-                // Take the batch out, flush, put back. Can't call
-                // `flush_tx_batch` (borrows &mut self while batch
-                // is borrowed). Same `mem::take` dance as the
-                // arena.
-                let mut b = self.dp.tx_batch.take().expect("checked Some above");
+            if !dp
+                .tx_batch
+                .can_coalesce(sockaddr, sock, dp.tx_scratch.len())
+            {
+                // Disjoint dp fields; ship directly (flush_tx_batch
+                // would reborrow &mut self).
                 Self::ship_tx_batch(
-                    &mut b,
+                    &mut dp.tx_batch,
                     &mut self.listeners,
-                    &mut self.dp.tunnels,
+                    &mut dp.tunnels,
                     &self.graph,
                 );
-                self.dp.tx_batch = Some(b);
             }
-            // Reborrow after the possible take/restore.
-            let batch = self.dp.tx_batch.as_mut().expect("restored above");
-            batch.stage(sockaddr, sock, relay_nid, at_len, &self.dp.tx_scratch);
+            dp.tx_batch
+                .stage(sockaddr, sock, relay_nid, at_len, &dp.tx_scratch);
             return false; // staged; UDP send doesn't touch outbuf
         }
 

@@ -3,7 +3,7 @@ use super::DEVICE_DRAIN_CAP;
 
 use std::io;
 
-use crate::tunnel::{MTU, TunnelState};
+use crate::tunnel::TunnelState;
 
 use tinc_graph::NodeId;
 
@@ -21,11 +21,14 @@ impl Daemon {
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
     // the control flow reads cleaner inline.
     pub(in crate::daemon) fn on_device_read(&mut self) {
-        // tx_batch.is_some() means "stage, don't send" to
-        // send_sptps_data_relay; must not outlive this fn.
-        debug_assert!(
-            self.dp.tx_batch.is_none(),
-            "tx_batch leaked from previous on_device_read"
+        // tx_batch_live tells send_sptps_data_relay to stage instead
+        // of send; must not outlive this fn. The buffer is warm-
+        // reused but must be empty between calls.
+        debug_assert!(!self.dp.tx_batch_live, "tx_batch_live leaked");
+        debug_assert_eq!(
+            self.dp.tx_batch.count(),
+            0,
+            "tx_batch carries staged frames"
         );
         let mut nw = false;
         // The default `Device::drain` loops INTERNALLY until EAGAIN
@@ -73,7 +76,7 @@ impl Daemon {
                     // Same disarm as the post-loop path: iters>1 may
                     // have armed/staged before the error.
                     self.flush_tx_batch();
-                    self.dp.tx_batch = None;
+                    self.dp.tx_batch_live = false;
                     if nw {
                         self.maybe_set_write_any();
                     }
@@ -100,13 +103,9 @@ impl Daemon {
                     // (count==1 && iters==1) falls through to immediate
                     // send. Once armed, stays armed across iterations
                     // so vnet's Frames{1}×N then Super coalesce into
-                    // one sendmsg. Lazy-init: tunnelserver (no local
-                    // TUN) never allocs the ~100KB buffer.
-                    if (count > 1 || iters > 1) && self.dp.tx_batch.is_none() {
-                        self.dp.tx_batch = Some(crate::egress::TxBatch::new(
-                            DEVICE_DRAIN_CAP
-                                * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                        ));
+                    // one sendmsg.
+                    if count > 1 || iters > 1 {
+                        self.dp.tx_batch_live = true;
                     }
                     for i in 0..count {
                         let n = arena.lens()[i];
@@ -186,11 +185,8 @@ impl Daemon {
                         Ok(count) => {
                             // Same TX-batch staging as `Frames`. Gate on
                             // count>1 (one segment = no batch advantage).
-                            if count > 1 && self.dp.tx_batch.is_none() {
-                                self.dp.tx_batch = Some(crate::egress::TxBatch::new(
-                                    DEVICE_DRAIN_CAP
-                                        * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                                ));
+                            if count > 1 {
+                                self.dp.tx_batch_live = true;
                             }
                             // Stats: count the super-packet as one ingest
                             // (the "read() drops 30×" gate metric counts
@@ -276,14 +272,11 @@ impl Daemon {
             } // match result
         } // while iters
 
-        // Ship + disarm unconditionally. flush is a no-op on
-        // None/empty so the idle count==1 path is unchanged. A leaked
-        // Some would make the next single-packet wake stage-and-hold.
-        // Drops the ~100KB buf each burst; acceptable, minimal fix
-        // (stage gate is is_some(); persistent buf needs a separate
-        // armed-bool threaded through send_sptps_data_relay).
+        // Ship + disarm unconditionally. ship is a no-op on empty so
+        // the idle count==1 path is unchanged. Buffer stays warm; only
+        // the live flag drops.
         self.flush_tx_batch();
-        self.dp.tx_batch = None;
+        self.dp.tx_batch_live = false;
         // Cap hit. LT re-fires next turn — encrypt cost of one super
         // (~43 frames) per wake is the fairness bound, not an ET
         // workaround.
@@ -296,15 +289,12 @@ impl Daemon {
     /// `on_device_read`'s drain loop and on dst/size mismatch
     /// mid-loop. No-op on empty.
     fn flush_tx_batch(&mut self) {
-        if let Some(mut b) = self.dp.tx_batch.take() {
-            Self::ship_tx_batch(
-                &mut b,
-                &mut self.listeners,
-                &mut self.dp.tunnels,
-                &self.graph,
-            );
-            self.dp.tx_batch = Some(b);
-        }
+        Self::ship_tx_batch(
+            &mut self.dp.tx_batch,
+            &mut self.listeners,
+            &mut self.dp.tunnels,
+            &self.graph,
+        );
     }
 
     /// Ship one batch run. Static + explicit field borrows so the
@@ -501,23 +491,18 @@ impl Daemon {
         let Some(slot) = self.listeners.get_mut(usize::from(target.sock)) else {
             return false;
         };
-        // Some: Super arm alloc'd at count>1, alloc>1 gated us in.
-        // take+restore: &mut TxBatch vs &mut tx_scratch.
-        let mut batch = self
-            .dp
-            .tx_batch
-            .take()
-            .expect("Super arm allocs tx_batch at count>1");
+        // Disjoint dp fields (tx_batch / tx_scratch / tunnels);
+        // destructure once instead of take+restore.
+        let dp = &mut self.dp;
         let r = crate::shard::seal_super(
             &target,
             tinc_device::DeviceArena::STRIDE,
             lens,
             scratch,
-            &mut self.dp.tx_scratch,
-            &mut batch,
+            &mut dp.tx_scratch,
+            &mut dp.tx_batch,
             slot.egress.as_mut(),
         );
-        self.dp.tx_batch = Some(batch);
         match r {
             Ok(ok) => {
                 // Out-stats. Slow path bumps these per-chunk in

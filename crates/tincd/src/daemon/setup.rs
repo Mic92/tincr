@@ -776,11 +776,9 @@ impl Daemon {
                 // never spend the 100KB.
                 tso_scratch: None,
                 tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
-                // None: the send site only stages when inside
-                // `on_device_read`'s drain loop. The TxBatch itself
-                // is built lazily on first drain (no point allocating
-                // ~100KB on a tunnelserver that never sees device reads).
-                tx_batch: None,
+                // ~64KB once. The stage gate is `tx_batch_live`.
+                tx_batch: crate::egress::TxBatch::default(),
+                tx_batch_live: false,
             },
             id6_table,
             contradicting_add_edge: 0,
