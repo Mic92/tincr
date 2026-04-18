@@ -75,8 +75,9 @@ not copy files at all.)
 
 ## Start and verify
 
-Open TCP+UDP **655** in your firewall on alpha (the side with
-`Address`). Then:
+Open TCP+UDP **655** on alpha (the side with `Address`) — see
+[FIREWALL.md](FIREWALL.md) for nftables/iptables/firewalld/ufw/NixOS
+recipes. Then:
 
 ```sh
 # both nodes, foreground with logs
