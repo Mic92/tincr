@@ -73,6 +73,24 @@ nix = { version = "0.31", default-features = false, features = ["fs", "socket", 
 # to compile the crate. sandbox.rs cfg-gates enter_impl on the same
 # predicate. Kernel ≥5.13; older kernels get RulesetStatus::
 # NotEnforced at runtime (warn at normal, hard-fail at high).
+# discovery/blind.rs: ed25519 key blinding (Tor v3 KEYBLIND) needs the
+# raw scalar+point arithmetic. dalek `hazmat` is already on (workspace);
+# curve25519-dalek is made direct so its EdwardsPoint/Scalar are nameable
+# here without relying on transitivity. Same version as the workspace pin.
+curve25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+# discovery/blind.rs is SHA-3-only (SHA3-256 for the blinding param,
+# SHAKE256 for salt+AEAD-key derive) so a future SPTPS-KDF migration to
+# SHAKE can drop `hkdf`/`sha2` entirely from tincd. digest 0.11 cohort.
+sha3 = { version = "0.11", default-features = false }
+# discovery.rs envelope: XChaCha20-Poly1305 over the BEP 44 value.
+# 0.10 (NOT 0.11-rc): pulls chacha20 0.9 + poly1305 0.8 — the exact
+# versions tinc-crypto already uses, so no second cipher build.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# DhtSecret (inline + file) is standard b64 (NOT tinc's bit-reversed
+# variant — this is operator-facing, copy-pasteable). Already in lock
+# via mainline.
+base64 = "0.22"
 # discovery.rs: BitTorrent Mainline DHT for BEP 42 reflexive address voting
 # ("what's my public IP") + BEP 44 publish ("where am I", keyed by Ed25519
 # pubkey). Runs on its own std::thread; polled from on_periodic_tick. The
