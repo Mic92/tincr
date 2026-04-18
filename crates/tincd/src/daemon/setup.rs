@@ -875,8 +875,8 @@ impl Daemon {
         // (preresolve gates on `outgoings.is_empty()`). Non-fatal.
         daemon.spawn_dht_discovery();
 
-        // ─── UPnP/NAT-PMP portmapper. After listeners (need the
-        // resolved port), before drop_privs (NAT-PMP/SSDP send from
+        // ─── PCP/UPnP portmapper. After listeners (need the
+        // resolved port), before drop_privs (PCP/SSDP send from
         // unprivileged sockets, but spawn alongside DHT for symmetry
         // and so the first refresh runs while tinc-up is still
         // configuring the iface). C hooks this at the same point
@@ -884,7 +884,7 @@ impl Daemon {
         #[cfg(feature = "upnp")]
         if daemon.settings.upnp != crate::portmap::UpnpMode::No {
             log::info!(target: "tincd::portmap",
-                       "UPnP/NAT-PMP port mapping enabled \
+                       "PCP/UPnP port mapping enabled \
                         (port {}, mode {:?}, refresh {}s)",
                        daemon.my_udp_port, daemon.settings.upnp,
                        daemon.settings.upnp_refresh_period);

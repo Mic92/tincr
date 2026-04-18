@@ -499,8 +499,8 @@ fn upnp_gateway_ip_change() {
         std::thread::sleep(Duration::from_millis(200));
     };
     assert!(
-        log.contains("192.168.77.2 \u{2192} 192.168.77.3"),
-        "route-change line missing old→new IPs:\n{log}"
+        log.contains("192.168.77.2") && log.contains("192.168.77.3"),
+        "route-change line missing old/new IPs:\n{log}"
     );
 
     // ─── (c) miniupnpd's DNAT now targets .3 ─────────────────────

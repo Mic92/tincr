@@ -210,20 +210,24 @@ impl Daemon {
             self.execute_auto_action(action);
         }
 
-        // ─── UPnP/NAT-PMP portmapper drain. Non-blocking; the
-        // refresh thread already did the SSDP/SOAP work. The TCP
-        // mapping feeds `discovery.set_portmapped_tcp` so the next
-        // BEP44 publish carries a `tcp=` peers can dial without a
-        // punch. UDP mapping is logged only — the published `v4=`
-        // already carries the reflexive UDP port (it's the *correct*
-        // socket's mapping; the portmapped UDP port is a second
-        // route to the same listener and consumer routers usually
-        // hand back the same number anyway).
+        // ─── PCP/UPnP portmapper drain. Non-blocking; the refresh
+        // thread already did the protocol work. The v4 TCP mapping
+        // feeds `discovery.set_portmapped_tcp` so the next BEP44
+        // publish carries a `tcp=` peers can dial without a punch;
+        // the v6 TCP pinhole feeds `tcp6=` (separate field: v4 is a
+        // DNAT'd public addr, v6 is our own GUA, both can coexist).
+        // UDP mappings are logged only — the published `v4=` already
+        // carries the reflexive UDP port (it's the *correct* socket's
+        // mapping; the portmapped UDP port is a second route to the
+        // same listener and consumer routers usually hand back the
+        // same number anyway).
         #[cfg(feature = "upnp")]
         if let Some(pm) = self.portmapper.as_ref() {
+            use crate::portmap::{Af, PortmapEvent, Proto};
             for ev in pm.tick() {
                 match ev {
-                    crate::portmap::PortmapEvent::Mapped {
+                    PortmapEvent::Mapped {
+                        af,
                         proto,
                         local_port,
                         ext,
@@ -231,20 +235,26 @@ impl Daemon {
                     } => {
                         log::info!(target: "tincd::portmap",
                                    "Portmapped {proto:?} {local_port} → {ext} (via {via})");
-                        if proto == crate::portmap::Proto::Tcp
+                        if proto == Proto::Tcp
                             && let Some(d) = self.discovery.as_mut()
                         {
-                            d.set_portmapped_tcp(Some(ext));
+                            match af {
+                                Af::V4 => d.set_portmapped_tcp(Some(ext)),
+                                Af::V6 => d.set_portmapped_tcp6(Some(ext)),
+                            };
                         }
                     }
-                    crate::portmap::PortmapEvent::Lost { proto } => {
+                    PortmapEvent::Lost { af, proto } => {
                         log::warn!(target: "tincd::portmap",
-                                   "Port mapping lost ({proto:?}); \
+                                   "Port mapping lost ({af:?}/{proto:?}); \
                                     will retry next refresh");
-                        if proto == crate::portmap::Proto::Tcp
+                        if proto == Proto::Tcp
                             && let Some(d) = self.discovery.as_mut()
                         {
-                            d.set_portmapped_tcp(None);
+                            match af {
+                                Af::V4 => d.set_portmapped_tcp(None),
+                                Af::V6 => d.set_portmapped_tcp6(None),
+                            };
                         }
                     }
                 }

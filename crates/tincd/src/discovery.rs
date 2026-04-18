@@ -180,12 +180,17 @@ pub struct Discovery {
     /// tincd's NAT-mapped `(ip, port)` from the port-probe. What `v4=`
     /// in the published record carries.
     reflexive_v4: Option<SocketAddrV4>,
-    /// External `(ip, port)` from a UPnP-IGD/NAT-PMP TCP mapping. Unlike
+    /// External `(ip, port)` from a PCP/UPnP-IGD v4 TCP mapping. Unlike
     /// `reflexive_v4` (a NAT-learnt UDP hole), this is a router-installed
     /// DNAT rule — stable for the lease duration, works for *any* peer
     /// without a punch. Feeds `tcp=` in the published record.
     portmapped_tcp: Option<SocketAddr>,
-    /// `set_reflexive_v4` / `set_portmapped_tcp` changed ⇒ republish now.
+    /// PCP v6 firewall pinhole. No translation — this is our own GUA;
+    /// the router just promises to accept inbound to it. Feeds `tcp6=`.
+    /// Separate field: a dual-stack node can have both, and dropping
+    /// one shouldn't clobber the other in the published record.
+    portmapped_tcp6: Option<SocketAddr>,
+    /// `set_reflexive_v4` / `set_portmapped_tcp{,6}` changed ⇒ republish now.
     reflexive_dirty: bool,
     /// Gates `wants_port_probe` to one per `PROBE_KEEPALIVE`.
     last_probe: Option<Instant>,
@@ -306,6 +311,7 @@ impl Discovery {
             last_firewalled: true,
             reflexive_v4: None,
             portmapped_tcp: None,
+            portmapped_tcp6: None,
             reflexive_dirty: false,
             last_probe: None,
             last_publish: None,
@@ -352,14 +358,24 @@ impl Discovery {
         true
     }
 
-    /// Daemon calls when the portmapper thread reports a TCP mapping
-    /// (or `None` on mapping-lost). Feeds `tcp=` in the published
-    /// record. Returns `true` if changed (⇒ republish on next tick).
+    /// Daemon calls when the portmapper thread reports a v4 TCP
+    /// mapping (or `None` on mapping-lost). Feeds `tcp=`. Returns
+    /// `true` if changed (⇒ republish on next tick).
     pub fn set_portmapped_tcp(&mut self, addr: Option<SocketAddr>) -> bool {
         if self.portmapped_tcp == addr {
             return false;
         }
         self.portmapped_tcp = addr;
+        self.reflexive_dirty = true;
+        true
+    }
+
+    /// v6 PCP pinhole counterpart. Feeds `tcp6=`.
+    pub fn set_portmapped_tcp6(&mut self, addr: Option<SocketAddr>) -> bool {
+        if self.portmapped_tcp6 == addr {
+            return false;
+        }
+        self.portmapped_tcp6 = addr;
         self.reflexive_dirty = true;
         true
     }
@@ -525,6 +541,11 @@ impl Discovery {
         if let Some(ext) = self.portmapped_tcp {
             parts.push(format!("tcp={ext}"));
         }
+        // v6 pinhole. Distinct key so losing one AF doesn't
+        // withdraw the other from the record.
+        if let Some(ext) = self.portmapped_tcp6 {
+            parts.push(format!("tcp6={ext}"));
+        }
 
         // v6: local-enum, no firewall gate (mainline's `firewalled()` is
         // v4-only). v6 doesn't NAT ⇒ bind port = reachable port. Tier-0
@@ -606,9 +627,14 @@ pub fn parse_record(value: &str) -> ParsedRecord {
                     out.direct.insert(0, SocketAddr::V6(sa));
                 }
             }
-            "tcp" => {
+            "tcp" | "tcp6" => {
                 if let Ok(sa) = v.parse::<SocketAddr>() {
-                    out.tcp = Some(sa);
+                    // Either AF is a router-installed accept rule ⇒
+                    // best direct-dial candidate. `.tcp` keeps only
+                    // the first seen (publish order is tcp, tcp6).
+                    if out.tcp.is_none() {
+                        out.tcp = Some(sa);
+                    }
                     // Also a direct-dial candidate: outgoing meta-
                     // conns are TCP, and a portmapped address is the
                     // *most* likely to accept (no punch needed).
@@ -891,6 +917,17 @@ mod tests {
         // v6 portmapped (PCP on v6 CPE): brackets parse.
         let p = parse_record("tinc1 tcp=[2001:db8::7]:655");
         assert_eq!(p.tcp, Some("[2001:db8::7]:655".parse().unwrap()));
+        // tcp + tcp6 both present: both land in .direct; .tcp keeps
+        // the v4 (publish order). tcp6 prepended after ⇒ first.
+        let p = parse_record("tinc1 tcp=192.0.2.1:655 tcp6=[2001:db8::7]:655");
+        assert_eq!(p.tcp, Some("192.0.2.1:655".parse().unwrap()));
+        assert_eq!(
+            p.direct,
+            vec![
+                "[2001:db8::7]:655".parse().unwrap(),
+                "192.0.2.1:655".parse().unwrap(),
+            ]
+        );
         // Unknown keys + malformed values: skip, don't fail.
         let p = parse_record("tinc1 v4=garbage tcp=nope future=thing v6=[::1]:655 ext=x:1");
         assert_eq!(p.direct, vec!["[::1]:655".parse().unwrap()]);
