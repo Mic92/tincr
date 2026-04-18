@@ -810,7 +810,11 @@ fn decode_dht_secret_b64(s: &str) -> Result<[u8; 32], String> {
 /// mis-decoded to 24. Missing file / wrong length is fatal: silently
 /// publishing under a different key than the rest of the mesh would
 /// be a quiet partition.
-fn read_dht_secret_file(path: &str, confbase: &Path) -> Result<[u8; 32], SetupError> {
+///
+/// # Errors
+/// [`SetupError::Config`] on missing/unreadable file, non-UTF-8
+/// non-32-byte content, or b64 that doesn't decode to 32 bytes.
+pub fn read_dht_secret_file(path: &str, confbase: &Path) -> Result<[u8; 32], SetupError> {
     let p = Path::new(path);
     let p = if p.is_absolute() {
         p.to_path_buf()

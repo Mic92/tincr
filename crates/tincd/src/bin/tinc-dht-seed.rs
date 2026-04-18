@@ -23,28 +23,26 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use mainline::Dht;
 
 fn parse_secret(args: &mut Vec<String>) -> Result<Option<[u8; 32]>, ()> {
-    use base64::Engine;
-    let Some(i) = args.iter().position(|a| a == "--secret") else {
+    let Some(i) = args.iter().position(|a| a == "--secret-file") else {
         return Ok(None);
     };
     args.remove(i);
     if i >= args.len() {
-        eprintln!("tinc-dht-seed: --secret needs a base64 argument");
+        eprintln!("tinc-dht-seed: --secret-file needs a PATH argument");
         return Err(());
     }
-    let b64 = args.remove(i);
-    let raw = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(b64.trim().trim_end_matches('='))
-        .ok()
-        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
-    raw.map(Some).ok_or_else(|| {
-        eprintln!("tinc-dht-seed: --secret must be base64 of 32 bytes");
-    })
+    let path = args.remove(i);
+    // confbase = "." so a bare filename resolves cwd-relative, matching
+    // shell intuition; absolute paths bypass the join.
+    tincd::daemon::read_dht_secret_file(&path, Path::new("."))
+        .map(Some)
+        .map_err(|e| eprintln!("tinc-dht-seed: {e}"))
 }
 
 fn usage() {
@@ -55,9 +53,14 @@ fn usage() {
     eprintln!("      SELF_HOST: externally-reachable address for inter-seed");
     eprintln!("      bootstrap (so referrals to remote clients are followable).");
     eprintln!("      Default 127.0.0.1 — fine if clients are on the same host.");
-    eprintln!("  tinc-dht-seed --resolve [--secret B64] TINC_B64_PUBKEY BOOTSTRAP_HOST:PORT");
+    eprintln!(
+        "  tinc-dht-seed --resolve [--secret-file PATH] TINC_B64_PUBKEY [BOOTSTRAP_HOST:PORT]"
+    );
     eprintln!("      One-shot: blind+derive for PUBKEY, fetch, decrypt, print, exit.");
     eprintln!("      Exits 1 if no record found (publish didn't land).");
+    eprintln!("      BOOTSTRAP omitted: dial mainline's public seed nodes.");
+    eprintln!("      BOOTSTRAP given: dial *only* that (hermetic; no public DNS).");
+    eprintln!("      --secret-file: same format as DhtSecretFile (raw 32B or b64 line).");
 }
 
 fn main() -> ExitCode {
@@ -83,10 +86,19 @@ fn main() -> ExitCode {
 /// didn't verify against the blinded key, or AEAD-open failed — all
 /// indistinguishable from not-found here).
 fn resolve_mode(args: &[String], secret: Option<[u8; 32]>) -> ExitCode {
-    let [b64, bootstrap] = args else {
-        eprintln!("tinc-dht-seed --resolve: need PUBKEY BOOTSTRAP");
-        usage();
-        return ExitCode::FAILURE;
+    // BOOTSTRAP optional. Absent ⇒ mainline's public seed list (so an
+    // operator can `tinc-dht-seed --resolve <pk>` against the real DHT
+    // without remembering router.bittorrent.com:6881). Present ⇒ *only*
+    // that addr — the NixOS test runs in a sealed VM and must not race
+    // public DNS timeouts.
+    let (b64, bootstrap) = match args {
+        [b64] => (b64, None),
+        [b64, bootstrap] => (b64, Some(bootstrap)),
+        _ => {
+            eprintln!("tinc-dht-seed --resolve: need PUBKEY [BOOTSTRAP]");
+            usage();
+            return ExitCode::FAILURE;
+        }
     };
 
     let Some(decoded) = tinc_crypto::b64::decode(b64) else {
@@ -99,10 +111,17 @@ fn resolve_mode(args: &[String], secret: Option<[u8; 32]>) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let Ok(dht) = Dht::builder()
-        .bootstrap(std::slice::from_ref(bootstrap))
-        .build()
-    else {
+    let mut builder = Dht::builder();
+    match bootstrap {
+        // Replace, not augment: keeps the sealed-VM test hermetic.
+        Some(b) => {
+            builder.bootstrap(std::slice::from_ref(b));
+        }
+        None => {
+            builder.bootstrap(&tincd::discovery::DEFAULT_BOOTSTRAP_NODES);
+        }
+    }
+    let Ok(dht) = builder.build() else {
         eprintln!("tinc-dht-seed: bind failed");
         return ExitCode::FAILURE;
     };

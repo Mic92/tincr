@@ -430,7 +430,7 @@ testers.runNixOSTest {
     # ⇒ resolve sees nothing. Unit test covers this on loopback;
     # here the token is bound to the NAT-mapped source IP.
     resolve = (
-        "${tincd}/bin/tinc-dht-seed --resolve --secret '${dhtSecretB64}' "
+        "${tincd}/bin/tinc-dht-seed --resolve --secret-file ${dhtSecretFile} "
     )
     relay.wait_until_succeeds(
         f"{resolve} '${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "

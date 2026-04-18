@@ -43,7 +43,7 @@ mod txpath;
 // items that moved into settings.rs. `lib.rs` re-exports
 // `DaemonSettings` from this module's root.
 pub(crate) use dp::DataPlane;
-pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
+pub use settings::{DaemonSettings, ForwardingMode, RoutingMode, read_dht_secret_file};
 
 // `UPnP` config knob. With the feature off the type still exists
 // (settings.rs stores it unconditionally) but only `No` is reachable
