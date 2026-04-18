@@ -116,7 +116,7 @@ first token is a numeric request code. The vocabulary:
 sequenceDiagram
     participant A as Node A
     participant B as Node B (direct peer)
-    participant C as Node C (reached via B)
+    participant C as Node C (via B)
     Note over A,B: TCP connect
     A->>B: ID A 17.7
     B->>A: ID B 17.7
@@ -129,10 +129,10 @@ sequenceDiagram
         A->>B: ADD_EDGE / ADD_SUBNET × N (A's view)
     end
     Note over A: A now knows C exists, routed via B
-    A->>B: REQ_KEY A→C { SPTPS KEX for data channel }
-    B->>C: REQ_KEY A→C (forwarded, B appends A's observed addr)
-    C->>B: ANS_KEY C→A { SPTPS KEX reply }
-    B->>A: ANS_KEY C→A (forwarded, B appends C's observed addr)
+    A->>B: REQ_KEY A→C { SPTPS KEX }
+    B->>C: REQ_KEY (fwd,<br/>+A's observed addr)
+    C->>B: ANS_KEY C→A { KEX reply }
+    B->>A: ANS_KEY (fwd,<br/>+C's observed addr)
     Note over A,C: A↔C datagram SPTPS established<br/>both sides hole-punch toward the appended addrs
     A-->>C: UDP data (direct, once a path is confirmed)
     loop keepalive
@@ -195,20 +195,24 @@ when the reply direction is filtered), data moves to UDP.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NoSession: node becomes reachable
-    NoSession --> Handshaking: REQ_KEY sent/received
-    note right of NoSession
-        traffic for this node is
-        TCP-tunneled via nexthop
-    end note
-    Handshaking --> TcpFallback: SPTPS established,<br/>minmtu still 0
-    TcpFallback --> DirectUDP: PMTU probe confirmed<br/>(UDP reply or meta ack)
-    DirectUDP --> TcpFallback: UDP timeout /<br/>EMSGSIZE shrinks below minimum
-    DirectUDP --> Handshaking: KeyExpire / KEY_CHANGED
-    TcpFallback --> Handshaking: KeyExpire / KEY_CHANGED
-    DirectUDP --> [*]: node unreachable
-    TcpFallback --> [*]: node unreachable
+    direction LR
+    [*] --> NoSession
+    NoSession: NoSession<br/>(traffic TCP-tunneled<br/>via nexthop)
+    NoSession --> Handshaking: REQ_KEY
+    Handshaking --> TcpFallback: SPTPS up,<br/>minmtu = 0
+    state Established {
+        direction LR
+        TcpFallback --> DirectUDP: PMTU probe<br/>confirmed
+        DirectUDP --> TcpFallback: UDP timeout /<br/>EMSGSIZE
+    }
+    Established --> Handshaking: KeyExpire /<br/>KEY_CHANGED
+    Established --> [*]: node<br/>unreachable
 ```
+
+While in **NoSession** or **Handshaking**, packets for the node are
+wrapped as `SPTPS_PACKET` and relayed over the TCP meta-connection to
+the nexthop. **TcpFallback** has a session but no working UDP path
+yet; **DirectUDP** is the steady state.
 
 ## DHT rendezvous (out of band)
 
