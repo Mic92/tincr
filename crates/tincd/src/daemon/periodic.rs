@@ -150,20 +150,26 @@ impl Daemon {
         }
 
         // Reap salvaged old SPTPS sessions: see
-        // `TunnelState::prev_sptps`. Once the new session is healthy
-        // (`validkey`) and 2×PingInterval has passed since the
-        // restart, no peer-sealed datagram under the old key can
-        // still be in flight. Dropping it here restores the
-        // forward-secrecy bound that `KeyExpire` is meant to give.
+        // `TunnelState::prev_sptps` / `should_reap_prev_sptps`. Two
+        // arms: (a) new session healthy and 2×PingInterval elapsed
+        // (normal path); (b) salvage older than `KeyExpire`
+        // regardless of `validkey` — the FS backstop for a stalled
+        // handshake where `last_req_key` keeps refreshing.
         let prev_ttl = pinginterval.saturating_mul(2);
+        let keylifetime = Duration::from_secs(u64::from(self.settings.keylifetime));
         for tunnel in self.dp.tunnels.values_mut() {
             if tunnel.prev_sptps.is_some()
-                && tunnel.status.validkey
-                && tunnel
-                    .last_req_key
-                    .is_none_or(|t| now.saturating_duration_since(t) > prev_ttl)
+                && crate::tunnel::should_reap_prev_sptps(
+                    tunnel.status.validkey,
+                    tunnel.last_req_key,
+                    tunnel.prev_sptps_installed_at,
+                    now,
+                    prev_ttl,
+                    keylifetime,
+                )
             {
                 tunnel.prev_sptps = None;
+                tunnel.prev_sptps_installed_at = None;
             }
         }
 

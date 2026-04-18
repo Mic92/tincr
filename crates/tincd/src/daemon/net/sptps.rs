@@ -556,19 +556,26 @@ impl Daemon {
             return false;
         };
 
+        // RED gate on the data-plane → metaconn enqueue, both the
+        // binary and b64 SPTPS_PACKET paths. Handshake records are
+        // exempt: O(100B), state-machine-paced, and ANS_KEY drops
+        // would wedge the tunnel.
+        if record_type != tinc_sptps::REC_HANDSHAKE
+            && crate::tcp_tunnel::random_early_drop(
+                conn.outbuf.live_len(),
+                self.settings.maxoutbufsize,
+                &mut OsRng,
+            )
+        {
+            return true; // fake success
+        }
+
         // SPTPS_PACKET (binary). Handshakes stay on b64
         // (ANS_KEY also propagates reflexive UDP addr; binary
         // doesn't). SPTPS_PACKET introduced in proto minor 7;
         // b64 is the universal fallback. send_raw bypasses SPTPS
         // framing (blob is already per-tunnel-encrypted).
         if record_type != tinc_sptps::REC_HANDSHAKE && conn.options.prot_minor() >= 7 {
-            if crate::tcp_tunnel::random_early_drop(
-                conn.outbuf.live_len(),
-                self.settings.maxoutbufsize,
-                &mut OsRng,
-            ) {
-                return true; // fake success
-            }
             // The `direct⇒nullid` for dst is UDP-only; binary
             // TCP path always uses the real dst id.
             let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);

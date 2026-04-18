@@ -157,8 +157,20 @@ impl Daemon {
             {
                 match self.conns.get_mut(keep) {
                     Some(kc) if kc.outgoing.is_none() => kc.outgoing = Some(dropped_oid),
-                    _ => log::warn!(target: "tincd::conn",
-                            "Two outgoing connections to the same node {name}!"),
+                    _ => {
+                        // Both conns own an Outgoing (cold-start
+                        // duplicate `ConnectTo`). The slot was
+                        // already `.take()`n off `drop_id` so
+                        // `terminate()` won't see it; reap it here
+                        // or it leaks for the daemon lifetime.
+                        log::warn!(target: "tincd::conn",
+                            "Two outgoing connections to the same node {name}!");
+                        let dropped_oid = OutgoingId::from(dropped_oid);
+                        if let Some(tid) = self.outgoing_timers.remove(dropped_oid) {
+                            self.timers.del(tid);
+                        }
+                        self.outgoings.remove(dropped_oid);
+                    }
                 }
             }
             self.terminate(drop_id);

@@ -45,11 +45,18 @@ pub struct TunnelState {
     /// working `incipher`. NOT cleared at `HandshakeDone` (old-key
     /// stragglers can still arrive ~RTT after our side completes);
     /// instead reaped by `on_ping_tick` once `status.validkey &&
-    /// last_req_key + 2×PingInterval` has passed, by
-    /// `reset_unreachable`, or by the next salvage. Without the bound
-    /// the old key material would survive a full `KeyExpire` and
-    /// defeat the forward-secrecy point of rekeying.
+    /// last_req_key + 2×PingInterval` has passed **or**
+    /// `prev_sptps_installed_at + KeyExpire` has passed (whichever
+    /// first), by `reset_unreachable`, or by the next salvage. The
+    /// second arm is the forward-secrecy backstop: if the new
+    /// handshake stalls (`validkey` never goes true, `last_req_key`
+    /// keeps refreshing), the old key still dies after one
+    /// `KeyExpire`.
     pub prev_sptps: Option<Box<Sptps>>,
+
+    /// When `prev_sptps` was salvaged. Drives the `KeyExpire`
+    /// backstop in [`should_reap_prev_sptps`]; cleared with it.
+    pub prev_sptps_installed_at: Option<Instant>,
 
     /// `n->address`. UDP send-to. Set by `update_node_udp` (via
     /// SSSP). NOT `NodeState.edge_addr` (that's TCP `getpeername`);
@@ -141,6 +148,7 @@ impl TunnelState {
     pub fn reset_unreachable(&mut self) {
         self.sptps = None; // `sptps_stop`
         self.prev_sptps = None;
+        self.prev_sptps_installed_at = None;
         self.last_req_key = None;
         // Probe state reset; `mtu` preserved.
         if let Some(p) = &mut self.pmtu {
@@ -158,6 +166,33 @@ impl TunnelState {
         self.udp_addr_cached = None;
         self.status = TunnelStatus::default(); // `memset(&n->status, 0, ...)`
     }
+}
+
+/// Reap predicate for [`TunnelState::prev_sptps`], factored out so the
+/// forward-secrecy bound is unit-testable without a full daemon.
+///
+/// Reaps when **either**:
+///  - the new session is healthy (`validkey`) and `last_req_key` is
+///    `>2×PingInterval` old — normal case, no old-key datagram can
+///    still be in flight; **or**
+///  - the salvage itself is older than `KeyExpire` — backstop for the
+///    stalled-handshake case where `validkey` stays `false` and
+///    `last_req_key` is bumped on every retry, which would otherwise
+///    keep the old RX key alive indefinitely and defeat the FS bound
+///    `KeyExpire` is meant to enforce.
+#[must_use]
+pub fn should_reap_prev_sptps(
+    validkey: bool,
+    last_req_key: Option<Instant>,
+    installed_at: Option<Instant>,
+    now: Instant,
+    twice_pinginterval: std::time::Duration,
+    keylifetime: std::time::Duration,
+) -> bool {
+    let healthy = validkey
+        && last_req_key.is_none_or(|lrk| now.saturating_duration_since(lrk) > twice_pinginterval);
+    let expired = installed_at.is_some_and(|at| now.saturating_duration_since(at) > keylifetime);
+    healthy || expired
 }
 
 /// `node_status_t` (`node.h:31-48`). Unpacked; `as_u32()` reconstructs
@@ -277,6 +312,7 @@ mod tests {
         let mut t = TunnelState {
             sptps: None, // can't construct without keys; test the Option
             prev_sptps: None,
+            prev_sptps_installed_at: Some(Instant::now()),
             udp_addr: Some("10.0.0.1:655".parse().unwrap()),
             udp_addr_cached: None,
             status: TunnelStatus {
@@ -317,6 +353,7 @@ mod tests {
         t.reset_unreachable();
 
         assert!(t.sptps.is_none());
+        assert!(t.prev_sptps_installed_at.is_none());
         assert!(t.last_req_key.is_none());
         // `mtu` survives, rest reset.
         let p = t.pmtu.as_ref().expect("pmtu state survives");
@@ -425,5 +462,62 @@ mod tests {
             udppacket: false,
         };
         assert_eq!(steady.as_u32(true), 0xd2);
+    }
+
+    /// S1 regression: stalled handshake (`validkey=false`,
+    /// `last_req_key` bumped every retry) must still reap after
+    /// `KeyExpire`; healthy path reaps after 2×PingInterval as before.
+    #[test]
+    fn prev_sptps_reap_predicate() {
+        use std::time::Duration;
+        let pi2 = Duration::from_secs(120);
+        let ke = Duration::from_secs(3600);
+        let t0 = Instant::now();
+
+        // Stalled: validkey=false, last_req_key fresh → not yet.
+        assert!(!should_reap_prev_sptps(
+            false,
+            Some(t0),
+            Some(t0),
+            t0 + Duration::from_secs(10),
+            pi2,
+            ke
+        ));
+        // Stalled, last_req_key keeps moving (try_tx every 10s) — the
+        // healthy arm can never fire. KeyExpire backstop must.
+        assert!(!should_reap_prev_sptps(
+            false,
+            Some(t0 + ke),
+            Some(t0),
+            t0 + ke,
+            pi2,
+            ke
+        ));
+        assert!(should_reap_prev_sptps(
+            false,
+            Some(t0 + ke),
+            Some(t0),
+            t0 + ke + Duration::from_secs(1),
+            pi2,
+            ke
+        ));
+
+        // Healthy path unchanged: validkey + 2×PI elapsed.
+        assert!(!should_reap_prev_sptps(
+            true,
+            Some(t0),
+            Some(t0),
+            t0 + pi2,
+            pi2,
+            ke
+        ));
+        assert!(should_reap_prev_sptps(
+            true,
+            Some(t0),
+            Some(t0),
+            t0 + pi2 + Duration::from_secs(1),
+            pi2,
+            ke
+        ));
     }
 }

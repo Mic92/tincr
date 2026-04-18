@@ -98,6 +98,7 @@ impl Daemon {
             && old.incipher_key().is_some()
         {
             tunnel.prev_sptps = Some(old);
+            tunnel.prev_sptps_installed_at = Some(now);
         }
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
@@ -476,6 +477,7 @@ impl Daemon {
             && old.incipher_key().is_some()
         {
             tunnel.prev_sptps = Some(old);
+            tunnel.prev_sptps_installed_at = Some(now);
         }
         tunnel.sptps = Some(Box::new(sptps));
         tunnel.status.validkey = false;
