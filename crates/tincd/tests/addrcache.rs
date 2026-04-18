@@ -190,7 +190,7 @@ fn restart_dials_from_cache() {
     let bob = Node::new(tmp.path(), "bob", 0xB0);
 
     let alice_log = tmp.path().join("alice.connected.log");
-    let cache_file = alice.confbase.join("cache").join("bob");
+    let cache_file = alice.confbase.join("addrcache").join("bob");
 
     // ─── Round 1: connect with `Address =` in hosts/ ────────────────
     // Normal config. Alice dials bob. Bob listens.
@@ -230,12 +230,12 @@ fn restart_dials_from_cache() {
     assert!(
         cache_file.exists(),
         "cache file should exist after SIGTERM; cache dir: {:?}",
-        std::fs::read_dir(alice.confbase.join("cache"))
+        std::fs::read_dir(alice.confbase.join("addrcache"))
             .ok()
             .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
     );
     let contents = std::fs::read_to_string(&cache_file).unwrap();
-    let expected = format!("127.0.0.1:{}\n", bob.port);
+    let expected = format!("tinc-addrcache 1\n127.0.0.1:{}\n", bob.port);
     assert_eq!(contents, expected, "cache file should have bob's address");
 
     // ─── Assert: bob did NOT cache alice's outgoing address ─────────
@@ -246,11 +246,11 @@ fn restart_dials_from_cache() {
     // still create the dir/file for other nodes' caches; check
     // contents not just existence).
     sigterm_and_wait(bob_child);
-    let bob_cache = bob.confbase.join("cache").join("alice");
+    let bob_cache = bob.confbase.join("addrcache").join("alice");
     if bob_cache.exists() {
         let bc = std::fs::read_to_string(&bob_cache).unwrap();
         assert!(
-            bc.trim().is_empty(),
+            bc.lines().skip(1).all(|l| l.trim().is_empty()),
             "listener should NOT cache dialer's ephemeral port; found: {bc:?}"
         );
     }
@@ -258,7 +258,7 @@ fn restart_dials_from_cache() {
     // ─── Round 2: delete cache dir, reconnect, dir recreated ────────
     // address_cache.py:80. Same config — `Address =` still present.
     // Just proves `save()` does `create_dir_all`.
-    std::fs::remove_dir_all(alice.confbase.join("cache")).unwrap();
+    std::fs::remove_dir_all(alice.confbase.join("addrcache")).unwrap();
     std::fs::remove_file(&alice_log).ok();
     // Daemon::Drop unlinks pidfile/socket; should be clean. Belt-and-
     // suspenders in case a prior round crashed mid-teardown.

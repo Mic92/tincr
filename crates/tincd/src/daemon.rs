@@ -543,6 +543,22 @@ pub struct Daemon {
     /// Polled from `on_periodic_tick`; drop joins the thread.
     pub(crate) discovery: Option<crate::discovery::Discovery>,
 
+    /// Off-thread `getaddrinfo`. Owns the only call sites that hit
+    /// libc DNS after setup. Drained in `on_periodic_tick`.
+    pub(crate) dns_worker: crate::bgresolve::DnsWorker,
+
+    /// Off-thread DNS results for `Address=` hostnames, by node name.
+    /// Chained into `addr_cache.known` alongside edge-walk + DHT hints
+    /// in `setup_outgoing_connection`. Cleared on `retry_outgoing` so
+    /// each round re-resolves (dynamic DNS).
+    pub(crate) dns_hints: HashMap<String, Vec<SocketAddr>>,
+
+    /// Resolved SOCKS/HTTP proxy address(es). Empty until the worker
+    /// answers (or after a failed lookup) — callers don't distinguish
+    /// "pending" from "NXDOMAIN", they just retry. `do_outgoing_
+    /// connection` dials `[0]`.
+    pub(crate) proxy_addrs: Vec<SocketAddr>,
+
     /// DHT-resolved addrs by node name. Separate map, not stuffed into
     /// `addr_cache.known`: the edge-walk replaces `known` wholesale on
     /// every retry; we merge at read time in `setup_outgoing_connection`.
@@ -578,11 +594,14 @@ pub struct Daemon {
 
 impl Daemon {
     /// Persisted DHT routing table. Same writable-dir rule as the
-    /// addrcache: `$STATE_DIRECTORY/cache` (the one subdir we chown
-    /// + Landlock-allow) else `confbase`.
+    /// addrcache: `$STATE_DIRECTORY/addrcache` (the one subdir we
+    /// chown + Landlock-allow) else `confbase`.
     pub(crate) fn dht_nodes_path(&self) -> PathBuf {
         std::env::var_os("STATE_DIRECTORY")
-            .map_or_else(|| self.confbase.clone(), |s| PathBuf::from(s).join("cache"))
+            .map_or_else(
+                || self.confbase.clone(),
+                |s| PathBuf::from(s).join("addrcache"),
+            )
             .join("dht_nodes")
     }
 

@@ -211,6 +211,9 @@ impl Daemon {
         self.contradicting_add_edge = 0;
         self.contradicting_del_edge = 0;
 
+        // ─── off-thread DNS drain. See `drain_dns_worker`.
+        self.drain_dns_worker();
+
         if self.settings.autoconnect && self.node_ids.len() > 1 {
             let action = self.decide_autoconnect();
             self.execute_auto_action(action);

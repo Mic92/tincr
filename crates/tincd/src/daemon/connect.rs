@@ -415,10 +415,67 @@ impl Daemon {
 
     // ─── outgoing connections
 
+    /// Non-blocking drain of the off-thread resolver into
+    /// `dns_hints` / `proxy_addrs`, plus an `extend_resolved` push
+    /// into any live `AddressCache` for the same node so a result
+    /// that lands mid-round is usable without waiting for the next
+    /// `reset`. Called from `on_periodic_tick` and at the top of
+    /// `setup_outgoing_connection` (timer ordering between
+    /// `RetryOutgoing` and `Periodic` isn't guaranteed).
+    pub(super) fn drain_dns_worker(&mut self) {
+        use crate::bgresolve::{DnsRes, DnsTag};
+        for DnsRes { tag, addrs } in self.dns_worker.drain() {
+            match tag {
+                DnsTag::Outgoing(node) if !addrs.is_empty() => {
+                    for o in self.outgoings.values_mut().filter(|o| o.node_name == node) {
+                        o.addr_cache.extend_resolved(addrs.iter().copied());
+                    }
+                    self.dns_hints.insert(node, addrs);
+                }
+                DnsTag::Outgoing(_) => {}
+                DnsTag::Proxy => self.proxy_addrs = addrs,
+            }
+        }
+    }
+
+    /// Kick off (or short-circuit) the SOCKS/HTTP proxy host resolve.
+    /// Literal IPs fill `proxy_addrs` synchronously so the common
+    /// `Proxy = socks5 127.0.0.1 9050` works on the first dial;
+    /// hostnames are queued on the worker (dedup'd there). No-op when
+    /// no proxy is configured or the cache is already populated.
+    pub(super) fn request_proxy_resolve(&mut self) {
+        if !self.proxy_addrs.is_empty() {
+            return;
+        }
+        let Some((host, port)) = self
+            .settings
+            .proxy
+            .as_ref()
+            .and_then(ProxyConfig::proxy_addr)
+        else {
+            return;
+        };
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            self.proxy_addrs = vec![SocketAddr::new(ip, port)];
+        } else {
+            self.dns_worker.request(
+                crate::bgresolve::DnsTag::Proxy,
+                vec![(host.to_owned(), port)],
+            );
+        }
+    }
+
     pub(super) fn setup_outgoing_connection(&mut self, oid: OutgoingId) {
         // No timer del: the timer can't fire mid-connect (we don't
         // return to run() until exit); next `retry_outgoing` `set`
         // overwrites anyway.
+
+        // Drain DNS results first: this fn is reached from the
+        // `RetryOutgoing` timer at the same +5s cadence as
+        // `Periodic`, and timer ordering isn't guaranteed. A drain
+        // here makes worker results visible to *this* retry instead
+        // of the next one. Non-blocking; near-free when empty.
+        self.drain_dns_worker();
 
         let Some(outgoing) = self.outgoings.get(oid) else {
             return; // gone (chunk 8's mark-sweep)
@@ -462,10 +519,25 @@ impl Daemon {
             // are peer-authored gossip, dht_hints are peer self-
             // report. Neither may steer us at loopback/link-local.
             .filter(|sa| !crate::addr::is_unwanted_dial_addr(sa))
+            // Off-thread getaddrinfo results for `Address=` hostnames
+            // are operator-authored config, NOT peer input — chain
+            // them *after* the unwanted-addr gate so e.g.
+            // `Address = localhost 655` keeps working.
+            .chain(self.dns_hints.get(&name).into_iter().flatten().copied())
             .collect();
         // get_mut after the read-only walk (split borrow).
         if let Some(o) = self.outgoings.get_mut(oid) {
             o.addr_cache.add_known_addresses(known);
+            // Pre-resolve hostname `Address=` lines for *this* round.
+            // No-op for the common all-literal-IP config (NixOS test
+            // fixtures). Fired here (not at `open()`) because
+            // `add_known_addresses` resets the cursor anyway, and
+            // every retry re-enters via this fn.
+            let hosts = o.addr_cache.unresolved_hosts();
+            if !hosts.is_empty() {
+                self.dns_worker
+                    .request(crate::bgresolve::DnsTag::Outgoing(name), hosts);
+            }
         }
 
         self.do_outgoing_connection(oid);
@@ -562,14 +634,24 @@ impl Daemon {
                 .proxy
                 .as_ref()
                 .and_then(ProxyConfig::proxy_addr);
-            let attempt = if let Some((phost, pport)) = proxy_hp {
+            let attempt = if proxy_hp.is_some() {
                 let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
                     log::error!(target: "tincd::conn",
                                 "Could not set up a meta connection to {name}");
                     self.retry_outgoing(oid);
                     return;
                 };
-                try_connect_via_proxy(phost, pport, peer_addr, &name, &self.settings.sockopts)
+                // Pre-resolved off-thread (setup) and refreshed in
+                // `retry_outgoing`. Empty ⇒ worker hasn't answered
+                // yet, or NXDOMAIN — either way back off; the retry
+                // timer re-drives once the worker fills it.
+                let Some(&proxy_addr) = self.proxy_addrs.first() else {
+                    log::error!(target: "tincd::conn",
+                                "Proxy address not resolved (yet) for {name}");
+                    self.retry_outgoing(oid);
+                    return;
+                };
+                try_connect_via_proxy(proxy_addr, peer_addr, &name, &self.settings.sockopts)
             } else {
                 try_connect(
                     &mut outgoing.addr_cache,
@@ -645,6 +727,16 @@ impl Daemon {
             self.timers
                 .set(tid, Duration::from_secs(u64::from(timeout)));
         }
+
+        // Clear the DNS hint map so the next `setup_outgoing_
+        // connection` chains *fresh* DNS, not the addrs that just
+        // failed. The re-queue itself happens there too (single call
+        // site, dedup'd in the worker).
+        self.dns_hints.remove(&name);
+        // Proxy host re-resolve: only fires while the cache is empty
+        // (NXDOMAIN or worker hasn't answered). A working proxy addr
+        // is stable for the daemon lifetime.
+        self.request_proxy_resolve();
 
         // Addr cache exhausted (every `retry_outgoing` call site is
         // reached via `next_addr()==None`). Fire-and-forget resolve;

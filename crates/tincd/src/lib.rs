@@ -16,6 +16,7 @@
 pub mod addr;
 pub mod addrcache;
 pub mod autoconnect;
+pub mod bgresolve;
 pub mod broadcast;
 pub mod compress;
 pub mod conn;

@@ -359,11 +359,14 @@ impl Paths {
         self.confbase.join("hosts").join(name)
     }
 
-    /// `cache/` — recently-seen peer addresses. `tinc init` creates
-    /// it empty.
+    /// `addrcache/` — recently-seen peer addresses. `tinc init`
+    /// creates it empty. Different name from C tinc's `cache/`: the
+    /// on-disk format is incompatible (text + header vs raw
+    /// `sockaddr_storage`), so sharing a path would just have each
+    /// binary nuke the other's file on first save.
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {
-        self.confbase.join("cache")
+        self.confbase.join("addrcache")
     }
 
     /// `<confbase>/invitations`. Directory mode 0700. Only
