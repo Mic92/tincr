@@ -137,7 +137,11 @@ fn parse_map_response(buf: &[u8], nonce: &[u8; 12]) -> Result<(IpAddr, u16), Str
     if result != 0 {
         return Err(format!("result {} {}", result, result_str(result)));
     }
-    if &buf[24..36] != nonce {
+    // Constant-time compare. The reply is unauthenticated UDP from
+    // the gateway anyway, so timing leakage isn't a practical
+    // oracle here, but `subtle` is already in-tree via dalek and
+    // it's the right primitive for a nonce check.
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(&buf[24..36], &nonce[..])) {
         return Err("nonce mismatch (stale/forged response)".into());
     }
     let ext_port = u16::from_be_bytes([buf[42], buf[43]]);

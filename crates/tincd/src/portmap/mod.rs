@@ -57,6 +57,7 @@
 mod igd;
 mod pcp;
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,82 @@ impl UpnpMode {
     }
     const fn wants_udp(self) -> bool {
         matches!(self, Self::Yes | Self::UdpOnly)
+    }
+}
+
+/// Why a gateway-supplied external address was rejected. The IGD
+/// and PCP responses are unauthenticated UDP/HTTP from the LAN; a
+/// rogue responder (any host on the broadcast domain for SSDP, the
+/// default-route hop for PCP) can hand back an arbitrary address
+/// that would otherwise flow verbatim into the DHT-published
+/// `tcp=`/`tcp6=` record. See `is_publishable_ext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BadExt {
+    Loopback,
+    Unspecified,
+    Multicast,
+    LinkLocal,
+    ZeroPort,
+}
+
+impl fmt::Display for BadExt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Loopback => "loopback",
+            Self::Unspecified => "unspecified",
+            Self::Multicast => "multicast",
+            Self::LinkLocal => "link-local",
+            Self::ZeroPort => "port 0",
+        })
+    }
+}
+
+/// Is this `(ip, port)` plausibly a public endpoint we should
+/// publish? Returns the reject reason rather than a bare `bool` so
+/// the worker can log it.
+///
+/// Intentionally **does not** reject RFC1918 / ULA / documentation
+/// ranges: a CGNAT'd or lab gateway legitimately hands back
+/// `100.64/10` / `10/8` here, and the NixOS test mesh runs entirely
+/// in `2001:db8::/32`. Publishing those is harmless — peers'
+/// record-ingest filter (D2, `discovery::parse_record`) drops
+/// unroutable addrs on receipt. Filtering at the source would break
+/// the double-NAT-with-hairpin case where the inner address *is*
+/// reachable from same-site peers. The categories rejected here are
+/// the ones that can never be a useful dial target from *any* peer
+/// and that a rogue responder would use to make peers hit
+/// themselves / their LAN.
+pub(crate) fn is_publishable_ext(ip: IpAddr, port: u16) -> Result<(), BadExt> {
+    if port == 0 {
+        return Err(BadExt::ZeroPort);
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                Err(BadExt::Loopback)
+            } else if v4.is_unspecified() {
+                Err(BadExt::Unspecified)
+            } else if v4.is_multicast() || v4.is_broadcast() {
+                Err(BadExt::Multicast)
+            } else if v4.is_link_local() {
+                Err(BadExt::LinkLocal)
+            } else {
+                Ok(())
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                Err(BadExt::Loopback)
+            } else if v6.is_unspecified() {
+                Err(BadExt::Unspecified)
+            } else if v6.is_multicast() {
+                Err(BadExt::Multicast)
+            } else if v6.is_unicast_link_local() {
+                Err(BadExt::LinkLocal)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
@@ -181,12 +258,14 @@ impl Drop for Portmapper {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
-            // Worst case: SSDP discover_wait (≤5s) or PCP deadline
-            // (2s); the 1s sleep slices in the refresh wait check
-            // `stop`. C tinc doesn't even try to join (`upnp.c:170`:
-            // "we don't have a clean thread shutdown procedure"); we
-            // do, so the lease can be left to expire cleanly rather
-            // than maybe-orphaning a thread.
+            // Worst case: the 1 s sleep slices in the refresh wait,
+            // PCP's 2 s deadline, or one `igd::http_roundtrip`
+            // (capped at 5 s wall-clock by `HTTP_DEADLINE`). The
+            // worker holds nothing the daemon needs after shutdown
+            // — the lease simply expires — so a longer hang would
+            // argue for detaching instead; with the bounded
+            // round-trip, joining is safe and keeps test teardown
+            // deterministic. C tinc doesn't even try (`upnp.c:170`).
             let _ = j.join();
         }
     }
@@ -259,12 +338,16 @@ fn try_map_v4(
     nonce: &[u8; 12],
 ) -> Result<(SocketAddr, &'static str), String> {
     if let Some((gw4, _lan)) = gw {
-        match pcp::map_v4(gw4, proto, local_port, lease, nonce) {
+        match pcp::map_v4(gw4, proto, local_port, lease, nonce)
+            .and_then(|ext| check_ext(ext, "PCP"))
+        {
             Ok(ext) => return Ok((ext, "PCP")),
             Err(e) => log::debug!(target: "tincd::portmap", "PCP v4: {e}"),
         }
     }
-    try_igd(local_port, proto, lease, discover_wait, gw).map(|ext| (ext, "UPnP-IGD"))
+    try_igd(local_port, proto, lease, discover_wait, gw)
+        .and_then(|ext| check_ext(ext, "UPnP-IGD"))
+        .map(|ext| (ext, "UPnP-IGD"))
 }
 
 /// UPnP-IGD. SSDP M-SEARCH multicast → fetch root desc → SOAP
@@ -303,6 +386,15 @@ fn try_igd(
         .external_ip()
         .map_err(|e| format!("GetExternalIPAddress: {e}"))?;
     Ok(SocketAddr::new(ext_ip, local_port))
+}
+
+/// Common post-filter for both protocol arms: bounce obviously
+/// hostile gateway answers before they reach `PortmapEvent::Mapped`.
+fn check_ext(ext: SocketAddr, via: &str) -> Result<SocketAddr, String> {
+    match is_publishable_ext(ext.ip(), ext.port()) {
+        Ok(()) => Ok(ext),
+        Err(why) => Err(format!("rejected ext addr {ext} from {via} ({why})")),
+    }
 }
 
 /// Kernel route lookup: which of our addresses would source a packet
@@ -411,6 +503,7 @@ fn worker(
                 // no v6 default route ⇒ nothing to do, not an error.
                 Af::V6 => gw.v6.map(|(gw6, scope, gua)| {
                     pcp::map_v6(gw6, scope, gua, proto, local_port, lease, &nonces[i])
+                        .and_then(|ext| check_ext(ext, "PCP"))
                         .map(|ext| (ext, "PCP"))
                 }),
             };
@@ -493,5 +586,30 @@ mod tests {
         assert_eq!(UpnpMode::from_config("maybe"), None);
         assert!(UpnpMode::Yes.wants_tcp() && UpnpMode::Yes.wants_udp());
         assert!(!UpnpMode::UdpOnly.wants_tcp() && UpnpMode::UdpOnly.wants_udp());
+    }
+
+    #[test]
+    fn publishable_ext_filter() {
+        let v4 = |a, b, c, d| IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+        for (ip, want) in [
+            (v4(127, 0, 0, 1), Err(BadExt::Loopback)),
+            (v4(0, 0, 0, 0), Err(BadExt::Unspecified)),
+            (v4(169, 254, 1, 1), Err(BadExt::LinkLocal)),
+            (v4(224, 0, 0, 1), Err(BadExt::Multicast)),
+            (IpAddr::V6(Ipv6Addr::LOCALHOST), Err(BadExt::Loopback)),
+            ("fe80::1".parse().unwrap(), Err(BadExt::LinkLocal)),
+            // Accepts: RFC1918 / CGNAT / ULA / doc — see fn doc.
+            (v4(10, 1, 2, 3), Ok(())),
+            (v4(100, 64, 0, 1), Ok(())),
+            (v4(203, 0, 113, 9), Ok(())),
+            ("fd00::1".parse().unwrap(), Ok(())),
+            ("2001:db8::1".parse().unwrap(), Ok(())),
+        ] {
+            assert_eq!(is_publishable_ext(ip, 655), want, "{ip}");
+        }
+        assert_eq!(
+            is_publishable_ext(v4(10, 0, 0, 1), 0),
+            Err(BadExt::ZeroPort)
+        );
     }
 }

@@ -35,6 +35,16 @@ const WAN_SERVICES: [&str; 3] = [
 ];
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(4);
+/// Hard wall-clock cap for one `http_roundtrip` (connect + write +
+/// read). `HTTP_TIMEOUT` above is a per-`read(2)` `SO_RCVTIMEO`; a
+/// rogue responder that trickles 1 B/s keeps every individual read
+/// under that and would otherwise wedge the worker (and
+/// `Portmapper::Drop`'s blocking `join()`) indefinitely.
+const HTTP_DEADLINE: Duration = Duration::from_secs(5);
+/// Cap on the response body. Real IGD `rootDesc.xml` / SOAP
+/// envelopes are <8 KiB; 64 KiB is generous and stops a hostile
+/// gateway from driving an unbounded `Vec` allocation.
+const HTTP_MAX_RESPONSE: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Gateway {
@@ -83,8 +93,8 @@ pub fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, S
             .ok_or_else(|| "SSDP discover: no IGD reply within timeout".to_string())?;
         sock.set_read_timeout(Some(remain.max(Duration::from_millis(1))))
             .map_err(|e| format!("set_read_timeout: {e}"))?;
-        let n = match sock.recv_from(&mut buf) {
-            Ok((n, _)) => n,
+        let (n, src) = match sock.recv_from(&mut buf) {
+            Ok(r) => r,
             Err(e) => {
                 use std::io::ErrorKind::{TimedOut, WouldBlock};
                 if matches!(e.kind(), WouldBlock | TimedOut) {
@@ -93,10 +103,30 @@ pub fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, S
                 return Err(format!("recv: {e}"));
             }
         };
+        // SSDP is link-local multicast — *any* host on the
+        // broadcast domain can answer and point `LOCATION` at an
+        // arbitrary address (loopback, cloud metadata, …). Only the
+        // route-table default gateway is a legitimate IGD; ignore
+        // everyone else. This also closes the SSRF: the only host
+        // we ever HTTP to is `gw_v4`.
+        if let Some(gw) = gw_v4
+            && src.ip() != IpAddr::V4(gw)
+        {
+            log::debug!(target: "tincd::portmap",
+                        "ignored SSDP reply from {src} (not gateway {gw})");
+            continue;
+        }
         let reply = String::from_utf8_lossy(&buf[..n]);
         let Some((addr, root_path)) = parse_ssdp_location(&reply).and_then(split_http_url) else {
             continue;
         };
+        if let Some(gw) = gw_v4
+            && *addr.ip() != gw
+        {
+            log::debug!(target: "tincd::portmap",
+                        "ignored SSDP LOCATION host {addr} (not gateway {gw})");
+            continue;
+        }
         // If this responder's desc has no WAN service (or the GET
         // fails), keep listening — another may follow.
         match fetch_control_url(addr, &root_path) {
@@ -219,14 +249,49 @@ fn fetch_control_url(addr: SocketAddrV4, root_path: &str) -> Result<(String, Str
 }
 
 fn http_roundtrip(addr: SocketAddrV4, req: &str) -> Result<String, String> {
+    let deadline = Instant::now() + HTTP_DEADLINE;
     let mut s = TcpStream::connect_timeout(&SocketAddr::V4(addr), HTTP_TIMEOUT)
         .map_err(|e| format!("connect {addr}: {e}"))?;
-    s.set_read_timeout(Some(HTTP_TIMEOUT)).ok();
     s.set_write_timeout(Some(HTTP_TIMEOUT)).ok();
     s.write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
+    // Manual read loop instead of `read_to_end`: enforce both a
+    // wall-clock deadline (so a 1 B/s trickle can't wedge us past
+    // `HTTP_DEADLINE`) and a size cap (so a fast writer can't OOM).
     let mut out = Vec::with_capacity(4096);
-    s.read_to_end(&mut out).map_err(|e| format!("read: {e}"))?;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let remain = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| format!("read: exceeded {HTTP_DEADLINE:?} wall-clock deadline"))?;
+        s.set_read_timeout(Some(remain.max(Duration::from_millis(1))))
+            .ok();
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                // Cap, don't error: the part we need (status line +
+                // the handful of XML tags) is at the front; a
+                // miniupnpd that pads with whitespace shouldn't fail.
+                let take = n.min(HTTP_MAX_RESPONSE - out.len());
+                out.extend_from_slice(&chunk[..take]);
+                if out.len() >= HTTP_MAX_RESPONSE {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(format!(
+                    "read: exceeded {HTTP_DEADLINE:?} wall-clock deadline"
+                ));
+            }
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -366,5 +431,56 @@ mod tests {
              <controlURL>/upnp/control/WANIPConn1</controlURL></service>";
         let (url, _) = parse_control_url(xml).unwrap();
         assert_eq!(url, "/upnp/control/WANIPConn1");
+    }
+
+    /// A rogue HTTP endpoint that (a) sends an oversize body and
+    /// (b) trickles bytes slowly must neither blow past
+    /// `HTTP_MAX_RESPONSE` nor block past `HTTP_DEADLINE`.
+    #[test]
+    fn http_roundtrip_bounded() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        // (a) size cap: 128 KiB body, sent fast.
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = match l.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        let srv = thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut sink = [0u8; 4096];
+            let _ = s.read(&mut sink);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            let _ = s.write_all(&vec![b'A'; 128 * 1024]);
+        });
+        let resp = http_roundtrip(addr, "GET / HTTP/1.1\r\n\r\n").unwrap();
+        assert!(resp.len() <= HTTP_MAX_RESPONSE, "len={}", resp.len());
+        srv.join().unwrap();
+
+        // (b) wall-clock cap: trickle 1 B/200 ms forever; must give
+        // up by HTTP_DEADLINE (assert <6 s for slop).
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = match l.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        let srv = thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut sink = [0u8; 4096];
+            let _ = s.read(&mut sink);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+            while s.write_all(b"A").is_ok() {
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let t0 = Instant::now();
+        let r = http_roundtrip(addr, "GET / HTTP/1.1\r\n\r\n");
+        let elapsed = t0.elapsed();
+        assert!(r.is_err(), "trickle should hit deadline, got {r:?}");
+        assert!(elapsed < Duration::from_secs(6), "took {elapsed:?}");
+        // Unblock the server thread (write_all will fail on RST).
+        drop(r);
+        srv.join().unwrap();
     }
 }

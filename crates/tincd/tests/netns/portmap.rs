@@ -27,7 +27,10 @@
 //! `miniupnpd-nftables` build + `nft`; the test SKIPs cleanly if
 //! either is missing or if `nft` can't open netlink in this kernel.
 
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::common::linux::{ChildWithLog, run_ip};
@@ -598,6 +601,220 @@ fn upnp_gateway_ip_change() {
     for s in &mut sleepers {
         let _ = s.kill();
     }
+}
+
+/// Hostile gateway: **this test process** serves rogue PCP + SSDP +
+/// rootdesc + SOAP. PCP hands back `::ffff:127.0.0.1` port 0; SSDP
+/// first points `LOCATION` at `127.0.0.1` (not the route-table
+/// gateway from alice's view), then at the real gw; SOAP returns
+/// `<NewExternalIPAddress>127.0.0.1</NewExternalIPAddress>`.
+///
+/// The daemon must drop the off-gateway `LOCATION` (no SSRF
+/// connect), reject both loopback ext addrs via
+/// `is_publishable_ext`, and never emit `Portmapped … 127.0.0.1`.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn upnp_rogue_gateway_ext_addr_rejected() {
+    if !enter_bwrap("portmap::upnp_rogue_gateway_ext_addr_rejected") {
+        return;
+    }
+    let tmp = TmpGuard::new("netns", "portmap-rogue");
+
+    // ── topology: outer bwrap ns = rogue gateway 192.168.77.1,
+    //    child ns "alice" = victim 192.168.77.2, default → .1.
+    let mut sleeper = make_child_netns("alice");
+    run_ip(&[
+        "link", "add", "veth-gw", "type", "veth", "peer", "name", "veth-a",
+    ]);
+    run_ip(&["link", "set", "veth-a", "netns", "alice"]);
+    run_ip(&["addr", "add", "192.168.77.1/24", "dev", "veth-gw"]);
+    run_ip(&["link", "set", "veth-gw", "up"]);
+    nsexec(
+        "alice",
+        &["ip", "addr", "add", "192.168.77.2/24", "dev", "veth-a"],
+    );
+    nsexec("alice", &["ip", "link", "set", "veth-a", "up"]);
+    nsexec(
+        "alice",
+        &["ip", "route", "add", "default", "via", "192.168.77.1"],
+    );
+
+    // ── rogue HTTP/SOAP on the gw addr ─────────────────────────
+    let http = TcpListener::bind(("192.168.77.1", 0)).unwrap();
+    let http_port = http.local_addr().unwrap().port();
+
+    // ── rogue SSDP on the gw addr (unicast pre-punch lands here).
+    //    First reply tries the SSRF (`LOCATION` → 127.0.0.1); after
+    //    that, hand back the real gw URL so the IGD path proceeds
+    //    far enough to exercise the ext-addr filter.
+    // ── rogue PCP on the gw addr: echo the request's nonce, return
+    //    assigned-ext = `::ffff:127.0.0.1`, port = 0. Daemon tries
+    //    PCP before IGD; `check_ext` must reject and fall through.
+    let pcp = UdpSocket::bind(("192.168.77.1", 5351)).expect("bind :5351");
+    pcp.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let (pcp_stop_tx, pcp_stop_rx) = mpsc::channel::<()>();
+    let pcp_thr = std::thread::spawn(move || {
+        let mut buf = [0u8; 1100];
+        loop {
+            if pcp_stop_rx.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
+                return;
+            }
+            let Ok((n, src)) = pcp.recv_from(&mut buf) else {
+                continue;
+            };
+            if n < 60 {
+                continue;
+            }
+            let mut r = [0u8; 60];
+            r[0] = 2; // version
+            r[1] = 0x81; // R|MAP
+            r[24..36].copy_from_slice(&buf[24..36]); // echo nonce
+            r[36] = buf[36]; // proto
+            r[40..42].copy_from_slice(&buf[40..42]); // int port
+            // assigned ext port = 0, ext addr = ::ffff:127.0.0.1
+            r[44..60].copy_from_slice(&Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets());
+            let _ = pcp.send_to(&r, src);
+        }
+    });
+
+    let ssdp = UdpSocket::bind(("192.168.77.1", 1900)).expect("bind :1900");
+    ssdp.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let ssdp_thr = std::thread::spawn(move || {
+        // From alice-ns 127.0.0.1 is *not* the route-table gateway;
+        // `igd::discover`'s host check must drop this reply before
+        // any connect (asserted via the `ignored SSDP LOCATION
+        // host` log line below).
+        let ssrf = "HTTP/1.1 200 OK\r\n\
+             ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\
+             LOCATION: http://127.0.0.1:9/pwn\r\n\r\n";
+        let real = format!(
+            "HTTP/1.1 200 OK\r\n\
+             ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\
+             LOCATION: http://192.168.77.1:{http_port}/rootDesc.xml\r\n\r\n"
+        );
+        let mut buf = [0u8; 1500];
+        loop {
+            if stop_rx.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
+                return;
+            }
+            if let Ok((_, src)) = ssdp.recv_from(&mut buf) {
+                let _ = ssdp.send_to(ssrf.as_bytes(), src);
+                let _ = ssdp.send_to(real.as_bytes(), src);
+            }
+        }
+    });
+
+    let slurp = |s: &mut TcpStream| {
+        s.set_read_timeout(Some(Duration::from_millis(200))).ok();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match s.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+    let http_thr = std::thread::spawn(move || {
+        let rootdesc = "<?xml version=\"1.0\"?><root><device><serviceList><service>\
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+            <controlURL>/ctl</controlURL></service></serviceList></device></root>";
+        let soap_ok = |inner: &str| {
+            format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\
+                 Content-Type: text/xml\r\n\r\n\
+                 <s:Envelope><s:Body>{inner}</s:Body></s:Envelope>"
+            )
+        };
+        for s in http.incoming() {
+            let Ok(mut s) = s else { return };
+            let req = slurp(&mut s);
+            let resp = if req.starts_with("GET /rootDesc.xml") {
+                format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{rootdesc}")
+            } else if req.contains("GetExternalIPAddress") {
+                soap_ok(
+                    "<u:GetExternalIPAddressResponse>\
+                     <NewExternalIPAddress>127.0.0.1</NewExternalIPAddress>\
+                     </u:GetExternalIPAddressResponse>",
+                )
+            } else if req.contains("AddPortMapping") {
+                soap_ok("<u:AddPortMappingResponse/>")
+            } else {
+                "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_owned()
+            };
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    });
+
+    // ── victim daemon ─────────────────────────────────────────
+    let confbase = tmp.path().join("alice");
+    write_alice_config(&confbase, 5);
+    let pidfile = tmp.path().join("alice.pid");
+    let socket = tmp.path().join("alice.socket");
+    let alice = ChildWithLog::spawn(
+        Command::new("ip")
+            .args(["netns", "exec", "alice"])
+            .arg(tincd_bin())
+            .arg("-D")
+            .arg("-c")
+            .arg(&confbase)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .arg("--socket")
+            .arg(&socket)
+            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd"),
+    );
+    assert!(
+        wait_for_file_with(&socket, Duration::from_secs(5)),
+        "alice setup failed:\n{}",
+        alice.kill_and_log()
+    );
+
+    // ── wait for the worker to complete one IGD round ──────────
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let log = loop {
+        let log = alice.log_snapshot();
+        if log.contains("rejected ext addr 127.0.0.1:0 from PCP")
+            && log.contains("rejected ext addr 127.0.0.1:6550 from UPnP-IGD (loopback)")
+        {
+            break log;
+        }
+        assert!(
+            !log.contains("Portmapped Tcp 6550"),
+            "rogue ext addr published verbatim:\n{}",
+            alice.kill_and_log()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "no `rejected ext addr` line within 25 s; alice stderr:\n{}",
+            alice.kill_and_log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        log.contains("ignored SSDP LOCATION host 127.0.0.1"),
+        "off-gateway LOCATION not dropped:\n{log}"
+    );
+    assert!(
+        !log.contains("Portmapped Tcp"),
+        "rogue ext addr published:\n{log}"
+    );
+
+    eprint!("{}", alice.kill_and_log());
+    drop(pcp_stop_tx);
+    pcp_thr.join().unwrap();
+    drop(stop_tx);
+    ssdp_thr.join().unwrap();
+    let _ = TcpStream::connect(SocketAddr::from(([192, 168, 77, 1], http_port)));
+    drop(http_thr);
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
 }
 
 fn which(bin: &str) -> Result<String, ()> {
