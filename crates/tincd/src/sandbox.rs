@@ -255,7 +255,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // logfile (parent dir might not exist yet; the file itself
     // is already open as an fd). We pre-create the confbase
     // subdirs so the rules apply.
-    let cache = paths.confbase.join("cache");
+    let addrcache = paths.confbase.join("addrcache");
     let hosts = paths.confbase.join("hosts");
     let invitations = paths.confbase.join("invitations");
     // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`. main.rs
@@ -265,7 +265,7 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // With Landlock, lazy mkdir AFTER restrict_self needs
     // MakeDir on confbase itself, which we don't grant. Pre-create
     // here so the PathBeneath fd-open succeeds.
-    for d in [&cache, &hosts, &invitations] {
+    for d in [&addrcache, &hosts, &invitations] {
         if let Err(e) = std::fs::create_dir_all(d) {
             // Non-fatal: hosts/ existing is required by setup()
             // already. cache/ and invitations/ are optional. If
@@ -310,12 +310,12 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     // Paths granted r+w+c (no exec). cache/ and invitations/ are
     // pure data dirs; the device is a char dev (MakeReg meaningless
     // on it but harmless, and one access-set means one add_rules).
-    let mut rwc_paths: Vec<PathBuf> = vec![cache, invitations];
-    // addrcache falls back to `$STATE_DIRECTORY/cache` when confbase
-    // is read-only (NixOS store). Pre-create + allow it so the
-    // fallback survives Landlock too.
+    let mut rwc_paths: Vec<PathBuf> = vec![addrcache, invitations];
+    // addrcache + dht_nodes fall back to `$STATE_DIRECTORY/addrcache`
+    // when confbase is read-only (NixOS store). Pre-create + allow it
+    // so the fallback survives Landlock too.
     if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {
-        let sd_cache = PathBuf::from(sd).join("cache");
+        let sd_cache = PathBuf::from(sd).join("addrcache");
         let _ = std::fs::create_dir_all(&sd_cache);
         rwc_paths.push(sd_cache);
     }

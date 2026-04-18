@@ -594,11 +594,14 @@ pub struct Daemon {
 
 impl Daemon {
     /// Persisted DHT routing table. Same writable-dir rule as the
-    /// addrcache: `$STATE_DIRECTORY/cache` (the one subdir we chown
-    /// + Landlock-allow) else `confbase`.
+    /// addrcache: `$STATE_DIRECTORY/addrcache` (the one subdir we
+    /// chown + Landlock-allow) else `confbase`.
     pub(crate) fn dht_nodes_path(&self) -> PathBuf {
         std::env::var_os("STATE_DIRECTORY")
-            .map_or_else(|| self.confbase.clone(), |s| PathBuf::from(s).join("cache"))
+            .map_or_else(
+                || self.confbase.clone(),
+                |s| PathBuf::from(s).join("addrcache"),
+            )
             .join("dht_nodes")
     }
 
