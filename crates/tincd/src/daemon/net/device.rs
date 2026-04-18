@@ -21,6 +21,12 @@ impl Daemon {
     // would mean threading `arena`/`nw`/`tx_batch` through a helper;
     // the control flow reads cleaner inline.
     pub(in crate::daemon) fn on_device_read(&mut self) {
+        // tx_batch.is_some() means "stage, don't send" to
+        // send_sptps_data_relay; must not outlive this fn.
+        debug_assert!(
+            self.dp.tx_batch.is_none(),
+            "tx_batch leaked from previous on_device_read"
+        );
         let mut nw = false;
         // The default `Device::drain` loops INTERNALLY until EAGAIN
         // or cap; one call suffices. The vnet_hdr drain reads ONE
@@ -34,17 +40,9 @@ impl Daemon {
         // re-fires next turn). Either way, no behavior change for
         // the non-vnet path.
         let mut iters = 0usize;
-        // tx_batch armed ACROSS outer-loop iterations. The original
-        // batch-then-ship logic was designed for one drain returning
-        // N frames; the vnet path returns 1 frame per drain but
-        // multiple drains per epoll wake. The burst is in `iters`,
-        // not `count`. Arm here, ship after the loop.
-        //
-        // The non-vnet path is unchanged: it hits the loop once with
-        // count>1, the Frames arm flushes inline (so the sendmsg
-        // happens before this fn returns either way), and the
-        // post-loop flush is a no-op on an already-empty batch.
-        let mut batch_armed = false;
+        // tx_batch spans outer-loop iterations: vnet drain returns 1
+        // frame per call, the burst is in `iters` not `count`. Arm
+        // lazily on first burst; ship+disarm unconditionally after.
         while iters < DEVICE_DRAIN_CAP {
             iters += 1;
             // mem::take: `route_packet` borrows `&mut self`; the
@@ -72,6 +70,10 @@ impl Daemon {
                         self.running = false;
                     }
                     self.dp.device_arena = Some(arena);
+                    // Same disarm as the post-loop path: iters>1 may
+                    // have armed/staged before the error.
+                    self.flush_tx_batch();
+                    self.dp.tx_batch = None;
                     if nw {
                         self.maybe_set_write_any();
                     }
@@ -100,14 +102,11 @@ impl Daemon {
                     // so vnet's Frames{1}×N then Super coalesce into
                     // one sendmsg. Lazy-init: tunnelserver (no local
                     // TUN) never allocs the ~100KB buffer.
-                    if !batch_armed && (count > 1 || iters > 1) {
-                        if self.dp.tx_batch.is_none() {
-                            self.dp.tx_batch = Some(crate::egress::TxBatch::new(
-                                DEVICE_DRAIN_CAP
-                                    * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
-                            ));
-                        }
-                        batch_armed = true;
+                    if (count > 1 || iters > 1) && self.dp.tx_batch.is_none() {
+                        self.dp.tx_batch = Some(crate::egress::TxBatch::new(
+                            DEVICE_DRAIN_CAP
+                                * (12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+                        ));
                     }
                     for i in 0..count {
                         let n = arena.lens()[i];
@@ -122,13 +121,6 @@ impl Daemon {
                         // or falls through to immediate send for the
                         // cold path (no `udp_addr_cached`).
                         nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
-                    }
-                    // count>1: default drain already drained to
-                    // EAGAIN (or hit cap). Ship now. The vnet
-                    // count==1 case ships AFTER the outer loop
-                    // (accumulating across iterations).
-                    if count > 1 {
-                        self.flush_tx_batch();
                     }
                     self.dp.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
@@ -254,9 +246,6 @@ impl Daemon {
                                     let off = i * tinc_device::DeviceArena::STRIDE;
                                     nw |= self.route_packet(&mut scratch[off..off + n], None);
                                 }
-                                // Ship the super's segments. The post-
-                                // loop flush below is a no-op on empty.
-                                self.flush_tx_batch();
                             }
                             self.tx_snap = snap;
                         }
@@ -287,15 +276,14 @@ impl Daemon {
             } // match result
         } // while iters
 
-        // Ship anything accumulated across vnet Frames{1} iterations.
-        // No-op for the non-vnet path (count>1 arm flushed already)
-        // and for the iters==1 idle-ping case (batch never armed).
-        // Disarm so UDP-recv→forward / meta-conn→relay / probes go
-        // back to immediate-send outside this fn.
-        if batch_armed {
-            self.flush_tx_batch();
-            self.dp.tx_batch = None;
-        }
+        // Ship + disarm unconditionally. flush is a no-op on
+        // None/empty so the idle count==1 path is unchanged. A leaked
+        // Some would make the next single-packet wake stage-and-hold.
+        // Drops the ~100KB buf each burst; acceptable, minimal fix
+        // (stage gate is is_some(); persistent buf needs a separate
+        // armed-bool threaded through send_sptps_data_relay).
+        self.flush_tx_batch();
+        self.dp.tx_batch = None;
         // Cap hit. LT re-fires next turn — encrypt cost of one super
         // (~43 frames) per wake is the fairness bound, not an ET
         // workaround.
@@ -513,10 +501,13 @@ impl Daemon {
         let Some(slot) = self.listeners.get_mut(usize::from(target.sock)) else {
             return false;
         };
-        // tx_batch is Some: armed at count > 1, and alloc > 1 gated
-        // us in. take+restore so seal_super's &mut TxBatch doesn't
-        // fight &mut self.dp.tx_scratch.
-        let mut batch = self.dp.tx_batch.take().expect("armed at count>1");
+        // Some: Super arm alloc'd at count>1, alloc>1 gated us in.
+        // take+restore: &mut TxBatch vs &mut tx_scratch.
+        let mut batch = self
+            .dp
+            .tx_batch
+            .take()
+            .expect("Super arm allocs tx_batch at count>1");
         let r = crate::shard::seal_super(
             &target,
             tinc_device::DeviceArena::STRIDE,
