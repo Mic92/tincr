@@ -323,6 +323,12 @@ mod tests {
         assert_eq!(m.udp_rx_len, 0);
         assert_eq!(m.format(), "23 alice bob 1400");
 
+        // udp_rx_len is NOT clamped at the parse layer (matches `mtu`
+        // — policy bounds live at the use-site, not on the wire).
+        // tincd's `PmtuState::on_meta_ack` clamps to MTU before use.
+        let m = MtuInfo::parse("23 mallory us 1518 65535").unwrap();
+        assert_eq!(m.udp_rx_len, 65535);
+
         // Garbage 4th field is a parse error (token present but bad
         // int) — same as every other `%d` in the protocol. C never
         // emits this; only a buggy Rust peer would.

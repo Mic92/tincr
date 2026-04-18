@@ -1335,23 +1335,26 @@ impl Daemon {
 
     /// Asymmetric TX-only UDP confirmation. `len` is what `peer`
     /// reported receiving from us over UDP; treat it as a probe-
-    /// reply for the SEND direction only. Mirrors the relevant bits
-    /// of `on_probe_reply` (confirm + minmtu raise + maxmtu bump on
-    /// increase + reply-rx stamp so the discovery timeout doesn't
-    /// immediately tear it down) but does NOT touch `udp_addr` or
-    /// the RTT fields — we never saw a packet come back.
+    /// reply for the SEND direction only. State-machine bits
+    /// (clamp, solicit-gate, confirm, minmtu raise) live in
+    /// [`PmtuState::on_meta_ack`] so they're unit-testable without a
+    /// full `Daemon`. Does NOT touch `udp_addr` — we never saw a
+    /// packet come back.
     fn apply_meta_udp_confirm(&mut self, peer: NodeId, peer_name: &str, len: u16) {
         let now = self.timers.now();
         let tunnel = self.dp.tunnels.entry(peer).or_default();
-        let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+        // No `get_or_insert`: if we've never seeded PMTU we've never
+        // sent a probe, so any ack is by definition unsolicited.
+        let Some(p) = tunnel.pmtu.as_mut() else {
+            log::debug!(target: "tincd::net",
+                        "ignoring unsolicited udp_rx_len from {peer_name}");
+            return;
+        };
         let was_confirmed = p.udp_confirmed;
-        p.udp_confirmed = true;
-        p.udp_reply_rx = now;
-        if len > p.maxmtu {
-            p.maxmtu = len;
-        }
-        if len > p.minmtu {
-            p.minmtu = len;
+        if !p.on_meta_ack(len, now) {
+            log::debug!(target: "tincd::net",
+                        "ignoring unsolicited udp_rx_len from {peer_name}");
+            return;
         }
         tunnel.status.udp_confirmed = true;
         if !was_confirmed {

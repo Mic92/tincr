@@ -1499,11 +1499,7 @@ impl Daemon {
         let g = u32::try_from(ns.edge_weight).unwrap_or(0).max(1);
         let s = conn.srtt_ms;
 
-        // Asymmetric band: 30 % drop / 50 % rise. Integer form
-        // avoids the f64 round-trip on the per-PingInterval hot-ish
-        // path.
-        let out_of_band = s * 10 < g * 7 || s * 2 > g * 3;
-        if !out_of_band {
+        if !rtt_out_of_band(s, g) {
             return false;
         }
 
@@ -1788,5 +1784,50 @@ impl Daemon {
         }
 
         Ok(nw)
+    }
+}
+
+/// Asymmetric hysteresis band: 30 % drop / 50 % rise around the
+/// last-advertised weight `g`. Integer form avoids the f64 round-trip
+/// on the per-PingInterval hot-ish path. `u64` because `g` derives
+/// from the peer-supplied ACK weight (clamped only `>= 0`, so up to
+/// `i32::MAX/2` after `midpoint`) and `g*7` would overflow `u32`.
+#[inline]
+const fn rtt_out_of_band(srtt_ms: u32, g: u32) -> bool {
+    let s = srtt_ms as u64;
+    let g = g as u64;
+    s * 10 < g * 7 || s * 2 > g * 3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rtt_out_of_band;
+
+    /// Peer sends ACK `his_weight = i32::MAX`; `on_ack` stores
+    /// `i32::midpoint(his_weight, our_estimate)` as `edge_weight`. The
+    /// band check must not panic on that, and a small first-PONG SRTT
+    /// must read as out-of-band (we're way below `0.7·g`) so the
+    /// inflated handshake weight gets corrected.
+    #[test]
+    fn band_check_survives_hostile_ack_weight() {
+        let his_weight: i32 = i32::MAX;
+        let our_estimate: i32 = 10;
+        let edge_weight = i32::midpoint(his_weight, our_estimate);
+        let g = u32::try_from(edge_weight).unwrap_or(0).max(1);
+        assert!(
+            u64::from(g) * 7 > u64::from(u32::MAX),
+            "premise: u32 would wrap"
+        );
+        let s: u32 = 10;
+        assert!(rtt_out_of_band(s, g), "s ≪ 0.7·g → must re-gossip");
+    }
+
+    #[test]
+    fn band_check_edges() {
+        assert!(!rtt_out_of_band(100, 100));
+        assert!(rtt_out_of_band(69, 100)); // 30 % drop
+        assert!(!rtt_out_of_band(70, 100));
+        assert!(rtt_out_of_band(151, 100)); // 50 % rise
+        assert!(!rtt_out_of_band(150, 100));
     }
 }

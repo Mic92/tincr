@@ -222,9 +222,12 @@ impl PmtuState {
                 out.push(PmtuAction::SendProbe {
                     len: self.maxmtu.max(MIN_PROBE_SIZE),
                 });
-                if self.maxmtu + 1 < MTU {
+                // saturating: maxmtu is fed from peer-influenced
+                // paths (on_meta_ack/on_probe_reply) — those clamp,
+                // but don't make this the one place that cares.
+                if self.maxmtu.saturating_add(1) < MTU {
                     out.push(PmtuAction::SendProbe {
-                        len: self.maxmtu + 1,
+                        len: self.maxmtu.saturating_add(1),
                     });
                 }
                 // `mtuprobes--`: -1 → -2.
@@ -260,6 +263,35 @@ impl PmtuState {
             }
         }
         out
+    }
+
+    /// Meta-channel probe ack (`MTU_INFO` 4th field, Rust extension).
+    /// Mirrors the relevant bits of [`Self::on_probe_reply`] (confirm +
+    /// minmtu raise + maxmtu bump + reply-rx stamp) but does NOT
+    /// touch RTT — we never saw a UDP packet come back.
+    ///
+    /// `len` is peer-supplied: clamp to `MTU` so a hostile peer can't
+    /// push minmtu/maxmtu past the link ceiling (blackhole) or to
+    /// `u16::MAX` (the `maxmtu+1` increase-detector would wrap).
+    ///
+    /// Returns `false` (no-op) when no probe is outstanding
+    /// (`ping_sent`): an unsolicited ack must not flip
+    /// `udp_confirmed` — same gate that protects
+    /// [`Self::on_probe_reply`]'s RTT arm.
+    pub fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
+        if !self.ping_sent {
+            return false;
+        }
+        let len = len.min(MTU);
+        self.udp_confirmed = true;
+        self.udp_reply_rx = now;
+        if len > self.maxmtu {
+            self.maxmtu = len;
+        }
+        if len > self.minmtu {
+            self.minmtu = len;
+        }
+        true
     }
 
     /// `udp_probe_h` reply branch. Daemon already extracted type-2
@@ -687,6 +719,36 @@ mod tests {
         assert_eq!(s.minmtu, 0);
         assert_eq!(s.maxmtu, MTU);
         assert_eq!(s.mtu, 1400); // C :124-137 doesn't touch mtu
+    }
+
+    // ─── on_meta_ack ────────────────────────────────────────
+
+    #[test]
+    fn on_meta_ack_clamps_peer_supplied_len() {
+        // Direct peer can send `MTU_INFO from=M to=us 1518 65535`;
+        // the on-path guard at the call site passes (from==conn_name),
+        // so the clamp here is what keeps minmtu sane.
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.ping_sent = true; // we did probe
+        assert!(s.on_meta_ack(u16::MAX, now));
+        assert!(s.minmtu <= MTU, "peer-supplied len must be clamped");
+        assert!(s.maxmtu <= MTU);
+        assert!(s.udp_confirmed);
+        // And the Steady-phase increase-detector doesn't wrap:
+        let _ = s.tick(now, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn on_meta_ack_ignores_unsolicited() {
+        // No probe outstanding → a peer can't flip udp_confirmed
+        // for itself by just claiming "I received N bytes from you".
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        assert!(!s.ping_sent);
+        assert!(!s.on_meta_ack(1400, now));
+        assert!(!s.udp_confirmed);
+        assert_eq!(s.minmtu, 0);
     }
 
     #[test]
