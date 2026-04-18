@@ -23,8 +23,8 @@ flowchart LR
         tcp["TCP listeners"]
     end
     subgraph main ["main thread — event loop"]
-        dp["**data plane**<br/>route / encrypt / batch"]
-        cp["**control plane**<br/>meta-conns / gossip / graph"]
+        dp["<b>data plane</b><br/>route / encrypt / batch"]
+        cp["<b>control plane</b><br/>meta-conns / gossip / graph"]
         cp -- "routing snapshot" --> dp
     end
     subgraph workers ["worker threads"]
@@ -148,8 +148,8 @@ Forty-odd packets in, forty-odd packets out, four syscalls. Let's
 walk through how that happens.
 
 ```mermaid
-flowchart LR
-    subgraph S ["sender (one event-loop wakeup)"]
+flowchart TB
+    subgraph S ["sender — one event-loop wakeup"]
         direction LR
         A["TUN read<br/>burst → arena"] --> B["TSO split"]
         B --> C["route<br/>dst IP → node"]
@@ -157,13 +157,13 @@ flowchart LR
         D --> E["stage batch"]
         E -->|burst end| F["sendmsg<br/>UDP GSO"]
     end
-    subgraph R ["receiver (one event-loop wakeup)"]
+    subgraph R ["receiver — one event-loop wakeup"]
         direction LR
         G["recvmmsg"] --> H["SPTPS open<br/>+ replay"]
         H --> I["GRO coalesce"]
         I --> J["TUN write"]
     end
-    F -. wire .-> G
+    S ==>|wire| R
 ```
 
 A local application writes to the TUN interface. The event loop wakes
