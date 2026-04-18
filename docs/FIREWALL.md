@@ -70,6 +70,27 @@ UPnP-IGD. The mapped external address is logged as
 enabled, published in the node's DHT record so peers dial it
 directly.
 
+### Enabling UPnP/PCP on the router
+
+tincd tries PCP first (most modern firmware answers it on the same
+NAT-PMP socket), then falls back to SSDP/UPnP-IGD. The router-side
+switch is usually one checkbox; vendor names vary:
+
+| Router | Where | Notes |
+|---|---|---|
+| AVM Fritz!Box | Internet → Permit Access → Port Sharing → per-device **Permit independent port sharing** | Speaks PCP (v4+v6), not NAT-PMP — the reason tincr is PCP-first. |
+| OpenWrt | `opkg install luci-app-upnp` → Services → UPnP IGD & PCP → enable | miniupnpd; serves IGD, NAT-PMP and PCP off one socket. `secure_mode` is fine (tincd maps to its own LAN IP). |
+| pfSense / OPNsense | Services → UPnP & NAT-PMP → Enable; set External=WAN, Internal=LAN | miniupnpd. Behind CGNAT enable STUN or set the override WAN address. |
+| UniFi (UDM/UXG) | Network app → Settings → Internet (or Gateway) → UPnP → enable, select LAN networks | Off by default. |
+| MikroTik RouterOS | IP → UPnP → Enabled; add Interfaces: WAN=external, LAN=internal | CLI: `/ip upnp set enabled=yes`; `/ip upnp interfaces add interface=ether1 type=external` etc. |
+| ASUS (stock/Merlin) | Advanced Settings → WAN → Internet Connection → **Enable UPnP** | AiProtection's "router security" scan flags UPnP as a risk; that toggle is advisory, the WAN page is the actual switch. |
+| TP-Link Archer/Deco | Advanced → NAT Forwarding → UPnP (Deco: app → More → Advanced → NAT Forwarding) | Usually on by default. |
+
+If the router is itself behind CGNAT, the mapped address is still
+RFC1918 and unhelpful to peers on the public internet; tincd publishes
+it anyway (lab/LAN meshes use it), and the receiving side filters
+unroutable hints.
+
 ## Traffic *inside* the tunnel
 
 The rules above admit the encrypted transport. Packets that come
