@@ -447,7 +447,11 @@ impl Daemon {
         if !self.proxy_addrs.is_empty() {
             return;
         }
-        let Some((host, port)) = self.settings.proxy.as_ref().and_then(ProxyConfig::proxy_addr)
+        let Some((host, port)) = self
+            .settings
+            .proxy
+            .as_ref()
+            .and_then(ProxyConfig::proxy_addr)
         else {
             return;
         };

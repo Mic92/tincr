@@ -135,11 +135,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    fn drain_until(
-        w: &mut DnsWorker,
-        want: usize,
-        deadline: Duration,
-    ) -> Vec<DnsRes> {
+    fn drain_until(w: &mut DnsWorker, want: usize, deadline: Duration) -> Vec<DnsRes> {
         let mut out = Vec::new();
         let end = Instant::now() + deadline;
         while out.len() < want && Instant::now() < end {
