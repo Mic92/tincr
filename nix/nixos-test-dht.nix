@@ -31,9 +31,27 @@ let
   dhtCount = 10;
   dhtPorts = builtins.genList (i: dhtBase + i) dhtCount;
 
+  # Mesh-wide DhtSecret. With this set, the records are blinded+
+  # encrypted such that even a holder of `hosts/*` (the snakeoil
+  # pubkeys above are committed to git) cannot derive the BEP44
+  # salt/key. The seed swarm itself only ever sees blinded keys +
+  # opaque blobs; --resolve below is the proof it round-trips.
+  #
+  # builtins.toFile lands the secret in the Nix store — fine for a
+  # test fixture (it's snakeoil), wrong for a real deploy. The whole
+  # point of DhtSecretFile-only is that production reads it from a
+  # path the operator provisions out-of-band (agenix/sops/…).
+  dhtSecretB64 = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"; # 32×'B'
+  dhtSecretFile = builtins.toFile "dht.secret" dhtSecretB64;
+
   dhtBootstrapLines = builtins.concatStringsSep "\n" (
     map (p: "DhtBootstrap = relay:${toString p}") dhtPorts
   );
+  dhtCommonExtra = ''
+    DhtDiscovery = yes
+    DhtSecretFile = ${dhtSecretFile}
+    ${dhtBootstrapLines}
+  '';
 
   hostSettings = {
     alice = {
@@ -98,10 +116,9 @@ let
         # toTincConf whitelist. `relay` resolves via test-driver
         # /etc/hosts on mainline's actor thread.
         extraConfig = ''
-          DhtDiscovery = yes
           UPnP = yes
           UPnPRefreshPeriod = 10
-          ${dhtBootstrapLines}
+          ${dhtCommonExtra}
         '';
         chroot = false;
       };
@@ -195,10 +212,7 @@ testers.runNixOSTest {
           settings.DeviceType = "tun";
           # relay publishes too (carol resolves THIS record). v6 from
           # enumerate_v6 (2001:db8:1::, in 2000::/3); carol same /64.
-          extraConfig = ''
-            DhtDiscovery = yes
-            ${dhtBootstrapLines}
-          '';
+          extraConfig = dhtCommonExtra;
           chroot = false;
         };
 
@@ -270,10 +284,7 @@ testers.runNixOSTest {
             DeviceType = "tun";
             ConnectTo = "relay";
           };
-          extraConfig = ''
-            DhtDiscovery = yes
-            ${dhtBootstrapLines}
-          '';
+          extraConfig = dhtCommonExtra;
           chroot = false;
         };
 
@@ -316,10 +327,7 @@ testers.runNixOSTest {
             DeviceType = "tun";
             AutoConnect = true;
           };
-          extraConfig = ''
-            DhtDiscovery = yes
-            ${dhtBootstrapLines}
-          '';
+          extraConfig = dhtCommonExtra;
           chroot = false;
         };
 
@@ -376,7 +384,7 @@ testers.runNixOSTest {
     # waiting. Catches "field exists but config.lookup() doesn't".
     alice.succeed(
         "journalctl -u tinc.mesh --no-pager | "
-        "grep 'DHT discovery enabled.*bootstrap: relay:${toString dhtBase}'"
+        "grep 'DHT discovery enabled.*secret: yes.*bootstrap: relay:${toString dhtBase}'"
     )
 
     # ─── Gate: BEP 42 vote through NAT. Appears at first periodic
@@ -421,9 +429,11 @@ testers.runNixOSTest {
     # signature ⇒ seeds drop the put (BEP 44 checks at store time)
     # ⇒ resolve sees nothing. Unit test covers this on loopback;
     # here the token is bound to the NAT-mapped source IP.
+    resolve = (
+        "${tincd}/bin/tinc-dht-seed --resolve --secret '${dhtSecretB64}' "
+    )
     relay.wait_until_succeeds(
-        "${tincd}/bin/tinc-dht-seed --resolve "
-        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        f"{resolve} '${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
         f"| grep -F 'v4={alice_gw_wan}:'",
         timeout=60,
     )
@@ -432,8 +442,7 @@ testers.runNixOSTest {
     ).strip()
     print(f"bob_gw WAN address: {bob_gw_wan}")
     relay.wait_until_succeeds(
-        "${tincd}/bin/tinc-dht-seed --resolve "
-        "'${keys.beta.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        f"{resolve} '${keys.beta.ed25519Public}' 127.0.0.1:${toString dhtBase} "
         f"| grep -F 'v4={bob_gw_wan}:'",
         timeout=60,
     )
@@ -441,8 +450,16 @@ testers.runNixOSTest {
     # Full record → test log.
     relay.succeed(
         "echo 'alice published:' >&2 && "
+        f"{resolve} '${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} >&2"
+    )
+
+    # ─── Negative: WITHOUT --secret, the resolver derives a different
+    # salt → BEP44 lookup misses (and even on a hash-collision the
+    # AEAD-open would fail). Proves the storer-visible bytes are
+    # useless to a non-member.
+    relay.fail(
         "${tincd}/bin/tinc-dht-seed --resolve "
-        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} >&2"
+        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase}"
     )
 
     # ─── Gate: portmapped TCP. The portmapper thread does NAT-PMP
@@ -456,14 +473,12 @@ testers.runNixOSTest {
         timeout=60,
     )
     relay.wait_until_succeeds(
-        "${tincd}/bin/tinc-dht-seed --resolve "
-        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        f"{resolve} '${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
         f"| grep -F 'tcp={alice_gw_wan}:'",
         timeout=60,
     )
     alice_tcp = relay.succeed(
-        "${tincd}/bin/tinc-dht-seed --resolve "
-        "'${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
+        f"{resolve} '${keys.alpha.ed25519Public}' 127.0.0.1:${toString dhtBase} "
         "| tr ' ' '\\n' | sed -n 's/^tcp=//p'"
     ).strip()
     print(f"alice published tcp={alice_tcp}")
