@@ -115,8 +115,8 @@ first token is a numeric request code. The vocabulary:
 ```mermaid
 sequenceDiagram
     participant A as Node A
-    participant B as Node B (direct peer)
-    participant C as Node C (via B)
+    participant B as B (direct peer)
+    participant C as C (via B)
     Note over A,B: TCP connect
     A->>B: ID A 17.7
     B->>A: ID B 17.7
@@ -206,13 +206,13 @@ stateDiagram-v2
         DirectUDP --> TcpFallback: UDP timeout /<br/>EMSGSIZE
     }
     Established --> Handshaking: KeyExpire /<br/>KEY_CHANGED
-    Established --> [*]: node<br/>unreachable
 ```
 
 While in **NoSession** or **Handshaking**, packets for the node are
 wrapped as `SPTPS_PACKET` and relayed over the TCP meta-connection to
 the nexthop. **TcpFallback** has a session but no working UDP path
-yet; **DirectUDP** is the steady state.
+yet; **DirectUDP** is the steady state. Any state returns to
+**NoSession** when the graph marks the node unreachable.
 
 ## DHT rendezvous (out of band)
 
