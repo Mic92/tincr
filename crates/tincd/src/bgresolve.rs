@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 /// What a resolve is *for*. The worker doesn't care — it just runs
@@ -60,6 +61,11 @@ pub struct DnsRes {
 pub struct DnsWorker {
     req_tx: flume::Sender<DnsReq>,
     res_rx: flume::Receiver<DnsRes>,
+    /// Tags with a request queued or running. Dedup: each retry round
+    /// re-enters via `setup_outgoing_connection`, and a slow resolver
+    /// (the very case this thread exists for) would otherwise let
+    /// requests stack unboundedly.
+    inflight: HashSet<DnsTag>,
     _join: std::thread::JoinHandle<()>,
 }
 
@@ -95,21 +101,32 @@ impl DnsWorker {
         Self {
             req_tx,
             res_rx,
+            inflight: HashSet::new(),
             _join: join,
         }
     }
 
-    /// Non-blocking enqueue. Unbounded channel → never parks. If the
-    /// worker thread died the send is silently dropped; the caller's
-    /// retry backoff keeps the daemon limping (same degradation as a
-    /// dead DHT worker).
-    pub fn request(&self, req: DnsReq) {
-        let _ = self.req_tx.send(req);
+    /// Non-blocking enqueue. Dedup'd: a request for a tag that
+    /// already has one queued/running is a no-op — the next
+    /// [`Self::drain`] will deliver that result and clear the gate.
+    /// If the worker thread died the send is silently dropped; the
+    /// caller's retry backoff keeps the daemon limping (same
+    /// degradation as a dead DHT worker).
+    pub fn request(&mut self, tag: DnsTag, hosts: Vec<(String, u16)>) {
+        if !self.inflight.insert(tag.clone()) {
+            return;
+        }
+        let _ = self.req_tx.send(DnsReq { tag, hosts });
     }
 
-    /// Non-blocking drain. Called from `on_periodic_tick`.
-    pub fn drain(&self) -> impl Iterator<Item = DnsRes> + '_ {
-        self.res_rx.try_iter()
+    /// Non-blocking drain. Clears the inflight gate for each returned
+    /// result so the *next* retry round can re-queue.
+    pub fn drain(&mut self) -> Vec<DnsRes> {
+        let out: Vec<_> = self.res_rx.try_iter().collect();
+        for r in &out {
+            self.inflight.remove(&r.tag);
+        }
+        out
     }
 }
 
@@ -137,15 +154,12 @@ mod tests {
     /// actual `getaddrinfo` path without touching the network.
     #[test]
     fn worker_roundtrip_localhost() {
-        let w = DnsWorker::spawn();
-        w.request(DnsReq::Outgoing {
-            node: "bob".into(),
-            hosts: vec![("localhost".into(), 655)],
-        });
-        w.request(DnsReq::Proxy {
-            host: "localhost".into(),
-            port: 1080,
-        });
+        let mut w = DnsWorker::spawn();
+        w.request(
+            DnsTag::Outgoing("bob".into()),
+            vec![("localhost".into(), 655)],
+        );
+        w.request(DnsTag::Proxy, vec![("localhost".into(), 1080)]);
 
         let res = drain_until(&mut w, 2, Duration::from_secs(5));
         assert_eq!(res.len(), 2, "missing result(s): {res:?}");
@@ -158,5 +172,24 @@ mod tests {
             .find(|r| r.tag == DnsTag::Outgoing("bob".into()))
             .unwrap();
         assert!(out.addrs.iter().all(|a| a.port() == 655));
+    }
+
+    /// A second request for the same tag before drain is a no-op;
+    /// after drain it's accepted again.
+    #[test]
+    fn inflight_dedup() {
+        let mut w = DnsWorker::spawn();
+        let tag = DnsTag::Outgoing("bob".into());
+        let hosts = vec![("127.0.0.1".into(), 655)];
+        w.request(tag.clone(), hosts.clone());
+        w.request(tag.clone(), hosts.clone()); // dedup'd
+        let mut res = drain_until(&mut w, 1, Duration::from_secs(5));
+        // Give a hypothetical second result a moment to land.
+        std::thread::sleep(Duration::from_millis(50));
+        res.extend(w.drain());
+        assert_eq!(res.len(), 1, "duplicate request should have been dropped");
+        // Gate cleared: a fresh request is accepted.
+        w.request(tag.clone(), hosts);
+        assert!(w.inflight.contains(&tag));
     }
 }
