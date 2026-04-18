@@ -7,8 +7,6 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Deps in their own derivation → src-only changes skip the
-    # ~50s vendor+rebuild that buildRustPackage redoes every commit.
     crane.url = "github:ipetkov/crane";
   };
 
