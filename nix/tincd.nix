@@ -13,18 +13,20 @@
   installShellFiles,
 }:
 let
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
-      ../Cargo.toml
-      ../Cargo.lock
-      ../.cargo # x86-64-v3 + AVX2 flags; see config.toml
-      ../crates
-      ../man
-    ];
-  };
+  rustSrc = lib.fileset.unions [
+    ../Cargo.toml
+    ../Cargo.lock
+    ../.cargo # x86-64-v3 + AVX2 flags; see config.toml
+    ../crates
+  ];
+  mkSrc =
+    fs:
+    lib.fileset.toSource {
+      root = ../.;
+      fileset = fs;
+    };
   common = {
-    inherit src;
+    src = mkSrc rustSrc;
     pname = "tincd";
     version = "0.1.0";
     strictDeps = true;
@@ -42,6 +44,8 @@ craneLib.buildPackage (
   common
   // {
     inherit cargoArtifacts;
+    # man/ only here so editing a page doesn't rebuild cargoArtifacts.
+    src = mkSrc (lib.fileset.union rustSrc ../man);
     nativeBuildInputs = [ installShellFiles ];
     # Hand-written mdoc; committed so the build stays hermetic and
     # diffs are reviewable. Regenerate by editing man/*.? directly.
