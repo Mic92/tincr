@@ -272,12 +272,17 @@ impl Daemon {
             }
         }
 
-        // ─── DHT discovery poll (Rust extension). tick() may block on
-        // put_mutable (~hundreds of ms); same blocking-is-fine precedent
-        // as the contradicting-edge sleep above.
+        // ─── DHT discovery poll (Rust extension). tick() is
+        // non-blocking: every mainline call (info/to_bootstrap/
+        // put_mutable/get_mutable) runs on the dht-worker thread; here
+        // we only drain its result channel and read cached state.
         if self.settings.dht_discovery
             && let Some(d) = self.discovery.as_mut()
         {
+            // tick() first: it moves Resolved results off the worker
+            // channel into the buffer that drain_resolved() returns.
+            let r = d.tick(self.timers.now());
+
             for (name, addrs) in d.drain_resolved() {
                 if addrs.is_empty() {
                     log::debug!(target: "tincd::discovery",
@@ -289,7 +294,6 @@ impl Daemon {
                 }
             }
 
-            let r = d.tick(self.timers.now());
             for ev in r.events {
                 match ev {
                     crate::discovery::DiscoveryEvent::PublicV4 { ip, firewalled } => {

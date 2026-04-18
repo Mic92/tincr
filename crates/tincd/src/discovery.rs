@@ -68,8 +68,13 @@
 //! `mainline::Dht` runs on its own `std::thread` (actor over flume channel).
 //! `Discovery::spawn()` is called from `Daemon::setup()` and never blocks.
 //! `Discovery::tick()` is polled from `on_periodic_tick` (the existing 5s
-//! timer); it does one non-blocking `info()` query and decides whether to
-//! republish. tincd's epoll loop never sees the DHT socket.
+//! timer); it reads a *cached* snapshot of `info()`/`to_bootstrap()` and
+//! decides whether to enqueue a republish. **No mainline call happens on
+//! the epoll thread** — every `Dht` round-trip (`info`, `to_bootstrap`,
+//! `put_mutable`, `get_mutable`) is owned by the `dht-worker` thread; the
+//! epoll thread only does non-blocking flume `send`/`try_iter`. tincd's
+//! epoll loop never sees the DHT socket and never parks on the mainline
+//! actor's 50 ms recv tick.
 //!
 //! The port-probe is the daemon's job, not ours — it owns the UDP socket.
 //! `tick()` returns `wants_port_probe`; the daemon sends [`PORT_PROBE_PING`]
@@ -218,6 +223,7 @@ pub struct TickResult {
 }
 
 /// State carried across ticks. Lives on `Daemon`.
+#[allow(clippy::struct_excessive_bools)] // independent flags, not a state machine
 pub struct Discovery {
     dht: Dht,
 
@@ -267,8 +273,30 @@ pub struct Discovery {
     /// For `v6=` lines only — v6 doesn't NAT, bind port = reachable port.
     udp_port: u16,
 
-    /// Lazy: `None` until first `request_resolve`.
-    resolver: Option<Resolver>,
+    /// Owns every blocking `mainline::Dht` call. Spawned eagerly in
+    /// `with_dht()` — `tick()` needs the cached snapshot from the very
+    /// first call.
+    worker: DhtWorker,
+    /// Last `WorkerRes::Snapshot` from the worker. `tick()` reads these
+    /// instead of calling `dht.info()`/`dht.to_bootstrap()` (each of
+    /// which is a flume round-trip that floors at ~50 ms while the
+    /// mainline actor sits in `recv_from`).
+    cached_vote: Option<Ipv4Addr>,
+    cached_firewalled: bool,
+    cached_targets: Vec<SocketAddrV4>,
+    /// `Resolved` results parked here by `tick()`'s drain; consumed by
+    /// `drain_resolved()`. The worker's `res_rx` is shared with
+    /// Snapshot/Published, so `drain_resolved` can't `try_iter` it.
+    resolved_buf: Vec<(String, Vec<SocketAddr>)>,
+    /// A `Publish` is queued or running on the worker. Gates `tick()`
+    /// from stacking puts (each one is seconds on a bad network).
+    publish_inflight: bool,
+    /// Retry backoff after a failed `put_mutable`. Starts at 5 s,
+    /// doubles to `REPUBLISH_INTERVAL`. Without this a host whose
+    /// firewall drops DHT replies retries the ~2 s blocking put every
+    /// 5 s tick forever (the bug this worker split exists to fix).
+    publish_backoff: Duration,
+    last_attempt: Option<Instant>,
 }
 
 struct Epoch {
@@ -277,42 +305,101 @@ struct Epoch {
     derived: Derived,
 }
 
-/// Background `get_mutable` thread. Resolves fire on the retry-outgoing
-/// schedule (5s/10s/15s backoff); a daemon with several stalled `ConnectTo`
-/// peers could stack multiple blocking queries per tick. The thread
-/// serializes them off the epoll loop. The Dht handle is a `flume::Sender`
-/// clone — same actor `tick()` queues against.
-struct Resolver {
-    req_tx: flume::Sender<(String, [u8; 32])>,
-    res_rx: flume::Receiver<(String, Vec<SocketAddr>)>,
-    /// Names with a query inflight or pending in `res_rx`. Dedup: the
-    /// retry backoff is seconds, the query is sub-second; a second
-    /// enqueue before drain is pure waste.
+/// Requests from the epoll thread into `dht-worker`.
+enum WorkerReq {
+    /// Refresh cached `info()` + `to_bootstrap()`.
+    Snapshot,
+    /// Fire-and-forget BEP44 put. (item, seq, plaintext-for-log)
+    Publish(MutableItem, i64, String),
+    /// Background resolve. (`node_name`, `peer_ed25519_pk`)
+    Resolve(String, [u8; 32]),
+}
+
+/// Results from `dht-worker` back to the epoll thread. Drained
+/// non-blocking in `tick()`.
+enum WorkerRes {
+    Snapshot {
+        vote: Option<Ipv4Addr>,
+        firewalled: bool,
+        /// `to_bootstrap()` filtered to v4, capped at `PROBE_FANOUT`.
+        targets: Vec<SocketAddrV4>,
+    },
+    /// `ok=false` ⇒ `put_mutable` returned `Err`; seq/value echoed so
+    /// `tick()` can log + apply backoff without re-building.
+    Published {
+        ok: bool,
+        seq: i64,
+        value: String,
+    },
+    Resolved(String, Vec<SocketAddr>),
+}
+
+/// Background thread that owns **every** call into `mainline::Dht` on the
+/// hot path. The mainline actor processes one `ActorMessage` per
+/// `rpc.tick()`, and `rpc.tick()` blocks up to 50 ms in `recv_from` — so
+/// even `info()` floors at ~50 ms, and `put_mutable` is an iterative
+/// `find_node`+store that takes seconds (or times out at ~2 s when the
+/// firewall drops replies). Serialising all of that here means the epoll
+/// thread never parks on a futex waiting for the actor. The `Dht` handle
+/// is a `flume::Sender` clone — same actor the daemon's shutdown-time
+/// `routing_nodes()` talks to.
+struct DhtWorker {
+    req_tx: flume::Sender<WorkerReq>,
+    res_rx: flume::Receiver<WorkerRes>,
+    /// Names with a `Resolve` inflight or pending in `resolved_buf`.
+    /// Dedup: the retry backoff is seconds, the query is sub-second; a
+    /// second enqueue before drain is pure waste.
     inflight: HashSet<String>,
     /// `Discovery` drop → `req_tx` drops → worker's `recv()` returns
     /// `Disconnected` → thread returns.
     _join: std::thread::JoinHandle<()>,
 }
 
-impl Resolver {
+impl DhtWorker {
     fn spawn(dht: Dht, secret: Option<[u8; 32]>, period_fn: fn() -> u64) -> Self {
-        let (req_tx, req_rx) = flume::unbounded::<(String, [u8; 32])>();
-        let (res_tx, res_rx) = flume::unbounded::<(String, Vec<SocketAddr>)>();
+        let (req_tx, req_rx) = flume::unbounded::<WorkerReq>();
+        let (res_tx, res_rx) = flume::unbounded::<WorkerRes>();
         let join = std::thread::Builder::new()
-            .name("dht-resolve".into())
+            .name("dht-worker".into())
             .spawn(move || {
-                while let Ok((name, key)) = req_rx.recv() {
-                    let direct = resolve_plaintext(&dht, &key, secret.as_ref(), period_fn)
-                        .map(|v| parse_record(&v).direct)
-                        .unwrap_or_default();
-                    // Send even on miss: daemon needs to clear inflight
-                    // so the *next* retry can re-queue.
-                    if res_tx.send((name, direct)).is_err() {
+                while let Ok(req) = req_rx.recv() {
+                    let res = match req {
+                        WorkerReq::Snapshot => {
+                            let info = dht.info();
+                            let targets = dht
+                                .to_bootstrap()
+                                .into_iter()
+                                .filter_map(|s| s.parse().ok())
+                                .take(PROBE_FANOUT)
+                                .collect();
+                            WorkerRes::Snapshot {
+                                vote: info.public_address().map(|sa| *sa.ip()),
+                                firewalled: info.firewalled(),
+                                targets,
+                            }
+                        }
+                        WorkerReq::Publish(item, seq, value) => {
+                            // Blocks here — seconds. CAS=None: two
+                            // daemons sharing a key just thrash; not
+                            // our problem.
+                            let ok = dht.put_mutable(item, None).is_ok();
+                            WorkerRes::Published { ok, seq, value }
+                        }
+                        WorkerReq::Resolve(name, key) => {
+                            let direct = resolve_plaintext(&dht, &key, secret.as_ref(), period_fn)
+                                .map(|v| parse_record(&v).direct)
+                                .unwrap_or_default();
+                            // Send even on miss: daemon needs to clear
+                            // inflight so the *next* retry can re-queue.
+                            WorkerRes::Resolved(name, direct)
+                        }
+                    };
+                    if res_tx.send(res).is_err() {
                         return;
                     }
                 }
             })
-            .expect("dht-resolve thread spawn");
+            .expect("dht-worker thread spawn");
         Self {
             req_tx,
             res_rx,
@@ -376,6 +463,10 @@ impl Discovery {
     /// 3-4 hops to find our neighbourhood).
     #[must_use]
     pub fn with_dht(dht: Dht, key: SigningKey, udp_port: u16, secret: Option<[u8; 32]>) -> Self {
+        let worker = DhtWorker::spawn(dht.clone(), secret, current_period);
+        // Prime: first tick() reads the cache, so kick a snapshot now
+        // rather than waiting one full 5 s period for data.
+        let _ = worker.req_tx.send(WorkerReq::Snapshot);
         Self {
             dht,
             last_vote: None,
@@ -393,7 +484,14 @@ impl Discovery {
             period_fn: current_period,
             epoch: None,
             udp_port,
-            resolver: None,
+            worker,
+            cached_vote: None,
+            cached_firewalled: true,
+            cached_targets: Vec::new(),
+            resolved_buf: Vec::new(),
+            publish_inflight: false,
+            publish_backoff: Duration::from_secs(5),
+            last_attempt: None,
         }
     }
 
@@ -422,7 +520,8 @@ impl Discovery {
 
     /// Snapshot of the actor's routing table as `host:port` strings
     /// (mainline's `to_bootstrap()`; non-stale nodes only). For
-    /// [`save_persisted_nodes`] at shutdown.
+    /// [`save_persisted_nodes`] at shutdown — runs once at exit, so the
+    /// ~50 ms blocking round-trip into the actor is fine here.
     #[must_use]
     pub fn routing_nodes(&self) -> Vec<String> {
         self.dht.to_bootstrap()
@@ -430,16 +529,11 @@ impl Discovery {
 
     /// Live nodes from mainline's routing table to port-probe. Better
     /// targets than `dht_bootstrap` (those need DNS, might be down).
-    /// `[]` until bootstrapped. All v4 — mainline's routing table is
-    /// `SocketAddrV4`-only.
+    /// `[]` until the worker's first `Snapshot` lands. All v4 —
+    /// mainline's routing table is `SocketAddrV4`-only.
     #[must_use]
     pub fn probe_targets(&self) -> Vec<SocketAddrV4> {
-        self.dht
-            .to_bootstrap()
-            .into_iter()
-            .filter_map(|s| s.parse().ok())
-            .take(PROBE_FANOUT)
-            .collect()
+        self.cached_targets.clone()
     }
 
     /// Daemon calls after sending the probe(s). Arms the keepalive timer.
@@ -488,20 +582,18 @@ impl Discovery {
 
     /// Queue a background resolve. Non-blocking. Called from
     /// `retry_outgoing` (addr cache exhausted). Dedup'd: a query already
-    /// inflight is a no-op. Lazy thread spawn on first call.
+    /// inflight is a no-op.
     pub fn request_resolve(&mut self, node_name: &str, peer_public: [u8; 32]) {
-        let secret = self.secret;
-        let period_fn = self.period_fn;
-        let resolver = self
-            .resolver
-            .get_or_insert_with(|| Resolver::spawn(self.dht.clone(), secret, period_fn));
-        if resolver.inflight.contains(node_name) {
+        if self.worker.inflight.contains(node_name) {
             return;
         }
-        resolver.inflight.insert(node_name.to_owned());
+        self.worker.inflight.insert(node_name.to_owned());
         // Unbounded send never blocks. Worker died ⇒ silent drop;
         // tick() will start logging publish failures from the same actor.
-        let _ = resolver.req_tx.send((node_name.to_owned(), peer_public));
+        let _ = self
+            .worker
+            .req_tx
+            .send(WorkerReq::Resolve(node_name.to_owned(), peer_public));
     }
 
     /// Drain resolved records without blocking. Returns `(node_name,
@@ -509,17 +601,11 @@ impl Discovery {
     /// `direct_addrs` may be empty (DHT had no record — peer offline,
     /// never published, or churn lost it). An empty result still clears
     /// the inflight entry so the next `retry_outgoing` can re-queue.
+    ///
+    /// Results are moved from the worker channel into `resolved_buf` by
+    /// `tick()`; call this *after* `tick()` in the periodic handler.
     pub fn drain_resolved(&mut self) -> Vec<(String, Vec<SocketAddr>)> {
-        let Some(resolver) = &mut self.resolver else {
-            return Vec::new();
-        };
-        resolver
-            .res_rx
-            .try_iter()
-            .inspect(|(name, _)| {
-                resolver.inflight.remove(name);
-            })
-            .collect()
+        std::mem::take(&mut self.resolved_buf)
     }
 
     /// Resolve a peer's published record. Blocking iterative query —
@@ -546,10 +632,46 @@ impl Discovery {
     pub fn tick(&mut self, now: Instant) -> TickResult {
         let mut out = TickResult::default();
 
-        // info() is a flume round-trip, no network I/O. Microseconds.
-        let info = self.dht.info();
-        let vote = info.public_address().map(|sa| *sa.ip());
-        let firewalled = info.firewalled();
+        // ── drain worker results (non-blocking). Do this *first* so a
+        // publish/snapshot that completed since the previous tick is
+        // visible before we gate the next one.
+        for res in self.worker.res_rx.try_iter().collect::<Vec<_>>() {
+            match res {
+                WorkerRes::Snapshot {
+                    vote,
+                    firewalled,
+                    targets,
+                } => {
+                    self.cached_vote = vote;
+                    self.cached_firewalled = firewalled;
+                    self.cached_targets = targets;
+                }
+                WorkerRes::Published { ok, seq, value } => {
+                    self.publish_inflight = false;
+                    if ok {
+                        self.last_publish = Some(now);
+                        self.last_seq = seq;
+                        self.publish_backoff = Duration::from_secs(5);
+                        out.events.push(DiscoveryEvent::Published { seq, value });
+                    } else {
+                        log::debug!(target: "tincd::discovery",
+                                    "DHT publish failed (will retry in {:?})",
+                                    self.publish_backoff);
+                        self.publish_backoff = (self.publish_backoff * 2).min(REPUBLISH_INTERVAL);
+                    }
+                }
+                WorkerRes::Resolved(name, addrs) => {
+                    self.worker.inflight.remove(&name);
+                    self.resolved_buf.push((name, addrs));
+                }
+            }
+        }
+
+        // ── ask worker to refresh snapshot for *next* tick.
+        let _ = self.worker.req_tx.send(WorkerReq::Snapshot);
+
+        let vote = self.cached_vote;
+        let firewalled = self.cached_firewalled;
 
         // Vote IP changed ⇒ NAT moved ⇒ cached probe is stale. The
         // is_some() gate: Some→None is the actor losing confidence,
@@ -588,11 +710,24 @@ impl Discovery {
             || self.portmapped_tcp.is_some()
             || self.portmapped_tcp6.is_some()
             || now.duration_since(self.started) >= FIRST_PUBLISH_GRACE;
-        if (self.reflexive_dirty || (due && ready))
-            && let Some((seq, value)) = self.publish(now)
+        let backoff_ok = self
+            .last_attempt
+            .is_none_or(|t| now.duration_since(t) >= self.publish_backoff);
+        if !self.publish_inflight
+            && backoff_ok
+            && (self.reflexive_dirty || (due && ready))
+            && let Some((item, seq, value)) = self.build_item()
         {
-            out.events.push(DiscoveryEvent::Published { seq, value });
+            self.last_attempt = Some(now);
+            self.publish_inflight = true;
+            let _ = self
+                .worker
+                .req_tx
+                .send(WorkerReq::Publish(item, seq, value));
         }
+        // Clear unconditionally: if a publish is already inflight the
+        // fresh address will be picked up by the next `due` window or
+        // the next dirty event — don't let the flag pile up.
         self.reflexive_dirty = false;
 
         // After the invalidation ⇒ vote change triggers immediate re-probe.
@@ -604,11 +739,12 @@ impl Discovery {
         out
     }
 
-    /// Build the record value, sign it, put to the DHT. Returns the (seq,
-    /// value) pair on success for logging; `None` if there's nothing worth
-    /// publishing yet (no v4, no v6 — we'd just be telling the world our
-    /// pubkey is online with no way to reach us).
-    fn publish(&mut self, now: Instant) -> Option<(i64, String)> {
+    /// Build + sign the BEP 44 mutable item. Crypto + `enumerate_v6()`
+    /// only — microseconds; the network I/O (`put_mutable`) happens on
+    /// `dht-worker`. `None` if there's nothing worth publishing yet (no
+    /// v4, no v6 — we'd just be telling the world our pubkey is online
+    /// with no way to reach us).
+    fn build_item(&mut self) -> Option<(MutableItem, i64, String)> {
         let value = self.build_value()?;
 
         // BEP 44 seq: unix seconds, clamped >last_seq for clock skew.
@@ -630,22 +766,19 @@ impl Discovery {
             Some(&ep.derived.salt),
         );
 
-        // Blocking, ~hundreds of ms once bootstrapped. We're on the 5s
-        // periodic timer (same precedent as the contradicting-edge sleep).
-        // CAS=None: two daemons sharing a key just thrash; not our problem.
-        match self.dht.put_mutable(item, None) {
-            Ok(_id) => {
-                self.last_publish = Some(now);
-                self.last_seq = seq;
-                Some((seq, value))
-            }
-            Err(e) => {
-                // Don't bump last_publish — interval gate stays open.
-                log::debug!(target: "tincd::discovery",
-                            "DHT publish failed (will retry): {e:?}");
-                None
-            }
-        }
+        Some((item, seq, value))
+    }
+
+    /// Test/CLI sync path: build + put inline. Testnet `put_mutable` is
+    /// loopback-fast, so blocking here is fine; the daemon never calls
+    /// this.
+    #[cfg(test)]
+    fn publish_sync(&mut self, now: Instant) -> Option<(i64, String)> {
+        let (item, seq, value) = self.build_item()?;
+        self.dht.put_mutable(item, None).ok()?;
+        self.last_publish = Some(now);
+        self.last_seq = seq;
+        Some((seq, value))
     }
 
     /// Render the record value. `None` if every field is empty (publishing
@@ -1085,7 +1218,7 @@ mod tests {
         );
         a.set_reflexive_v4("192.0.2.1:1".parse().unwrap());
         // Bootstraps as a side effect (find_node walk fills the table).
-        a.publish(Instant::now()).expect("publish");
+        a.publish_sync(Instant::now()).expect("publish");
 
         let nodes = a.routing_nodes();
         assert!(!nodes.is_empty(), "routing table populated");
@@ -1144,17 +1277,22 @@ mod tests {
         assert!(d.last_publish.is_none());
 
         // Portmapper thread reports a TCP DNAT — sets `reflexive_dirty`
-        // ⇒ next tick publishes immediately, record carries `tcp=`.
+        // ⇒ next tick enqueues a publish; the worker completes it and a
+        // following tick drains `Published`. Poll until it surfaces.
         assert!(d.set_portmapped_tcp(Some("203.0.113.7:655".parse().unwrap())));
-        let r = d.tick(Instant::now());
-        let value = r
-            .events
-            .iter()
-            .find_map(|e| match e {
-                DiscoveryEvent::Published { value, .. } => Some(value.clone()),
-                DiscoveryEvent::PublicV4 { .. } => None,
-            })
-            .expect("set_portmapped_tcp ⇒ immediate publish");
+        let mut value = None;
+        for _ in 0..50 {
+            for e in d.tick(Instant::now()).events {
+                if let DiscoveryEvent::Published { value: v, .. } = e {
+                    value = Some(v);
+                }
+            }
+            if value.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let value = value.expect("set_portmapped_tcp ⇒ publish via worker");
         assert!(value.contains("tcp=203.0.113.7:655"), "got {value}");
     }
 
@@ -1195,7 +1333,7 @@ mod tests {
         assert!(now.duration_since(alice.last_probe.unwrap()) < PROBE_KEEPALIVE);
 
         let (seq, value) = alice
-            .publish(Instant::now())
+            .publish_sync(Instant::now())
             .expect("publish should succeed against bootstrapped testnet");
         assert!(seq > 0, "seq is unix-seconds, should be nonzero");
         // `value` is the *plaintext* (for the operator's debug log).
@@ -1223,7 +1361,9 @@ mod tests {
         let mapped: SocketAddr = "203.0.113.7:655".parse().unwrap();
         assert!(alice.set_portmapped_tcp(Some(mapped)));
         assert!(!alice.set_portmapped_tcp(Some(mapped)), "unchanged");
-        let (_, value) = alice.publish(Instant::now()).expect("republish with tcp=");
+        let (_, value) = alice
+            .publish_sync(Instant::now())
+            .expect("republish with tcp=");
         assert!(
             value.contains("tcp=203.0.113.7:655"),
             "tcp= missing: {value}"
@@ -1268,7 +1408,7 @@ mod tests {
         );
         alice.set_period_fn(|| 1000);
         alice.set_reflexive_v4("198.51.100.9:7".parse().unwrap());
-        alice.publish(Instant::now()).expect("publish");
+        alice.publish_sync(Instant::now()).expect("publish");
 
         let mut bob = Discovery::with_dht(
             mainline::Dht::builder()
@@ -1286,8 +1426,7 @@ mod tests {
 
     /// The async resolver path: what `retry_outgoing` actually drives.
     /// Same Testnet roundtrip as above, but via `request_resolve` →
-    /// background thread → `drain_resolved`. Proves:
-    /// - lazy spawn (first call creates the thread)
+    /// background thread → `tick` → `drain_resolved`. Proves:
     /// - dedup (second call before drain is a no-op)
     /// - empty-on-miss (clears inflight, doesn't drop the entry)
     #[test]
@@ -1308,7 +1447,7 @@ mod tests {
             secret,
         );
         alice.set_reflexive_v4("198.51.100.2:9999".parse().unwrap());
-        alice.publish(Instant::now()).expect("publish");
+        alice.publish_sync(Instant::now()).expect("publish");
 
         let mut carol = Discovery::with_dht(
             mainline::Dht::builder()
@@ -1319,24 +1458,22 @@ mod tests {
             655,
             secret,
         );
-        // Lazy spawn: resolver doesn't exist until first request.
-        assert!(carol.resolver.is_none());
-
         carol.request_resolve("alice", alice_pub);
-        assert!(carol.resolver.is_some());
-        assert_eq!(carol.resolver.as_ref().unwrap().inflight.len(), 1);
+        assert_eq!(carol.worker.inflight.len(), 1);
         carol.request_resolve("alice", alice_pub);
-        assert_eq!(carol.resolver.as_ref().unwrap().inflight.len(), 1);
+        assert_eq!(carol.worker.inflight.len(), 1);
 
         // Also queue a known miss. The worker resolves both serially.
         carol.request_resolve("nobody", [0u8; 32]);
-        assert_eq!(carol.resolver.as_ref().unwrap().inflight.len(), 2);
+        assert_eq!(carol.worker.inflight.len(), 2);
 
         // Miss case is slow: iterator yields None only after every
         // inflight request times out (DEFAULT_REQUEST_TIMEOUT = 2s).
-        // 8s budget; nextest gives 60.
+        // 8s budget; nextest gives 60. tick() moves Resolved from the
+        // worker channel into resolved_buf; drain_resolved() takes it.
         let mut got = std::collections::HashMap::<String, Vec<SocketAddr>>::new();
         for _ in 0..80 {
+            let _ = carol.tick(Instant::now());
             for (name, addrs) in carol.drain_resolved() {
                 got.insert(name, addrs);
             }
@@ -1347,8 +1484,8 @@ mod tests {
         }
         assert_eq!(got.len(), 2, "got {got:?} of 2 expected");
 
-        // Inflight cleared by drain — next retry can re-queue.
-        assert!(carol.resolver.as_ref().unwrap().inflight.is_empty());
+        // Inflight cleared by tick()'s drain — next retry can re-queue.
+        assert!(carol.worker.inflight.is_empty());
 
         let alice_addrs = &got["alice"];
         assert!(
