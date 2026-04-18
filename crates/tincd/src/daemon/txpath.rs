@@ -736,6 +736,9 @@ impl Daemon {
                     .outgoing
                     .and_then(|kd| self.outgoings.get(OutgoingId::from(kd)))
                     .map_or(OutOrigin::AutoBackbone, |o| o.origin),
+                age: c
+                    .activated_at
+                    .map_or(Duration::MAX, |t| now.saturating_duration_since(t)),
             })
             .collect();
 
@@ -753,6 +756,7 @@ impl Daemon {
             .map(|(_, o)| OutgoingSnapshot {
                 name: o.node_name.clone(),
                 origin: o.origin,
+                age: Duration::MAX,
             })
             .collect();
 

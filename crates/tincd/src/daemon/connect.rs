@@ -223,6 +223,7 @@ impl Daemon {
         // receiver's `seen.check` dups it.
         if let Some(conn) = self.conns.get_mut(id) {
             conn.active = true;
+            conn.activated_at = Some(self.timers.now());
         }
 
         // We added the new edge before this call, so we double-send

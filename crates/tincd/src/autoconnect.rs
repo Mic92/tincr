@@ -68,7 +68,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rand_core::RngCore;
 
@@ -156,6 +156,14 @@ pub struct NodeSnapshot {
 pub struct OutgoingSnapshot {
     pub name: String,
     pub origin: OutOrigin,
+    /// `now - conn.activated_at`. `Duration::MAX` if not yet
+    /// activated (pending slots are listed separately and never
+    /// reach the drop arms, so the sentinel is only a tidy default).
+    /// Gates the idle-shortcut reap and the `>D_HI` superfluous drop
+    /// for `AutoShortcut` conns: a shortcut `decide()` just asked for
+    /// must survive at least `min_hold` regardless of what the EWMA
+    /// says one tick later.
+    pub age: Duration,
 }
 
 /// Tunables. NOT user-configurable — the struct exists so unit tests
@@ -197,12 +205,19 @@ pub struct ShortcutKnobs {
     pub d_hi: usize,
     pub relay_hi_bps: u64,
     pub relay_lo_bps: u64,
+    /// A successful `AutoShortcut` conn is exempt from BOTH drop
+    /// arms until it has been active for this long. Symmetric with
+    /// [`SHORTCUT_BACKOFF`]: don't re-add for 60s after a failed
+    /// try, don't drop for 60s after a successful one. Stops the
+    /// add→activate→tx_rate-still-cold→reap→re-add flap observed
+    /// when a bursty load crosses `RELAY_HI` then stops.
+    pub min_hold: Duration,
 }
 
 /// Don't re-add a peer as a shortcut for this long after dropping it.
 /// Belt-and-braces (the `tx_rate`-keyed drop test already prevents
 /// flap); sim shows flat sensitivity 30..120s.
-pub const SHORTCUT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+pub const SHORTCUT_BACKOFF: Duration = Duration::from_secs(60);
 
 impl Default for ShortcutKnobs {
     fn default() -> Self {
@@ -212,6 +227,7 @@ impl Default for ShortcutKnobs {
             d_hi: 6,
             relay_hi_bps: 32 << 10,
             relay_lo_bps: 4 << 10,
+            min_hold: SHORTCUT_BACKOFF,
         }
     }
 }
@@ -312,7 +328,8 @@ pub fn decide(
     // ─── drop ────────────────────────────────────────────────────
     // C :188-190. > D_HI → drop a superfluous outgoing.
     if nc > knobs.d_hi {
-        let act = drop_superfluous_outgoing(nodes, active_outgoing_conns, &hot_nexthops, rng);
+        let act =
+            drop_superfluous_outgoing(nodes, active_outgoing_conns, &hot_nexthops, knobs, rng);
         if act != AutoAction::Noop {
             return act;
         }
@@ -326,6 +343,7 @@ pub fn decide(
             .iter()
             .filter(|o| {
                 o.origin == OutOrigin::AutoShortcut
+                    && o.age >= knobs.min_hold
                     && !hot_nexthops.contains(o.name.as_str())
                     && nodes
                         .iter()
@@ -447,12 +465,19 @@ fn drop_superfluous_outgoing(
     nodes: &[NodeSnapshot],
     active_outgoing_conns: &[OutgoingSnapshot],
     hot_nexthops: &HashSet<&str>,
+    knobs: &ShortcutKnobs,
     rng: &mut impl RngCore,
 ) -> AutoAction {
     let droppable: Vec<&OutgoingSnapshot> = active_outgoing_conns
         .iter()
         .filter(|o| {
-            !hot_nexthops.contains(o.name.as_str())
+            // A shortcut younger than `min_hold` is the conn the
+            // previous tick asked for — not "superfluous" yet.
+            // ConfigConnectTo/AutoBackbone are unaffected (those are
+            // not demand-driven; dropping them is the C-parity churn
+            // prevention and has no flap mode to damp).
+            (o.origin != OutOrigin::AutoShortcut || o.age >= knobs.min_hold)
+                && !hot_nexthops.contains(o.name.as_str())
                 && nodes
                     .iter()
                     .find(|n| n.name == o.name)
@@ -503,6 +528,15 @@ mod tests {
         OutgoingSnapshot {
             name: name.into(),
             origin,
+            age: Duration::MAX,
+        }
+    }
+
+    fn out_aged(name: &str, origin: OutOrigin, age: Duration) -> OutgoingSnapshot {
+        OutgoingSnapshot {
+            name: name.into(),
+            origin,
+            age,
         }
     }
 
@@ -523,6 +557,7 @@ mod tests {
         d_hi: 3,
         relay_hi_bps: 32 << 10,
         relay_lo_bps: 4 << 10,
+        min_hold: Duration::ZERO,
     };
 
     fn legacy_decide(
@@ -904,6 +939,84 @@ mod tests {
         );
     }
 
+    /// Regression: bursty load crosses `RELAY_HI` → shortcut added
+    /// → burst stops → `tx_rate` is still cold one tick later →
+    /// idle-reap drops the 5s-old conn → next tick re-adds. Each
+    /// cycle = SPTPS handshake + 2×`ADD_EDGE` flood. `min_hold` makes
+    /// the reap wait until the conn has been up long enough that the
+    /// EWMA actually reflects post-shortcut traffic.
+    #[test]
+    fn idle_reap_respects_min_hold() {
+        let mut bob = node("bob", true, true, true, 2);
+        bob.relay_rate_bps = 100_000; // EWMA still draining the burst
+        bob.tx_rate_bps = 0; // load stopped → idle by old rule
+        let nodes = vec![
+            node("me", true, true, false, 4),
+            node("a", true, true, true, 2),
+            node("b", true, true, true, 2),
+            node("c", true, true, true, 2),
+            bob,
+        ];
+        let backbone = [
+            out("a", OutOrigin::AutoBackbone),
+            out("b", OutOrigin::AutoBackbone),
+            out("c", OutOrigin::AutoBackbone),
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+
+        // Case 1: nc=4 ∈ (D_LO, D_HI], age=5s < min_hold → Noop.
+        let mut active = backbone.to_vec();
+        active.push(out_aged(
+            "bob",
+            OutOrigin::AutoShortcut,
+            Duration::from_secs(5),
+        ));
+        let act = dflt("me", &nodes, &active, &[], &mut rng);
+        assert_eq!(act, AutoAction::Noop, "young shortcut must not be reaped");
+
+        // Case 2: same, age=90s ≥ min_hold → reap fires.
+        let mut active = backbone.to_vec();
+        active.push(out_aged(
+            "bob",
+            OutOrigin::AutoShortcut,
+            Duration::from_secs(90),
+        ));
+        let act = dflt("me", &nodes, &active, &[], &mut rng);
+        assert_eq!(
+            act,
+            AutoAction::Disconnect {
+                name: "bob".into(),
+                origin: OutOrigin::AutoShortcut
+            }
+        );
+
+        // Case 3: nc=7 > D_HI, age=5s → drop_superfluous_outgoing
+        // arm. The young shortcut is exempt; a backbone conn is
+        // picked instead.
+        let mut nodes = nodes;
+        for n in ["d", "e", "f"] {
+            nodes.push(node(n, true, true, true, 3));
+        }
+        let mut active = backbone.to_vec();
+        for n in ["d", "e", "f"] {
+            active.push(out(n, OutOrigin::AutoBackbone));
+        }
+        active.push(out_aged(
+            "bob",
+            OutOrigin::AutoShortcut,
+            Duration::from_secs(5),
+        ));
+        for seed in 0..50 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            match dflt("me", &nodes, &active, &[], &mut rng) {
+                AutoAction::Disconnect { name, .. } => {
+                    assert_ne!(name, "bob", "seed {seed}: dropped young shortcut at >D_HI");
+                }
+                other => panic!("seed {seed}: expected Disconnect, got {other:?}"),
+            }
+        }
+    }
+
     /// Same as above but `tx_rate`=100 KiB/s, `relay_rate`=0 → NOT
     /// disconnected. THIS is the oscillation damper: once direct,
     /// `relay_rate` is 0 by construction; `tx_rate` keeps the slot.
@@ -954,7 +1067,7 @@ mod tests {
             node("hot", true, true, false, 2),
         ];
         nodes[4].relay_rate_bps = 100_000;
-        nodes[4].backoff_until = Some(now + std::time::Duration::from_secs(30));
+        nodes[4].backoff_until = Some(now + Duration::from_secs(30));
         let mut rng = ChaCha8Rng::seed_from_u64(0);
         let act = decide(
             "me",

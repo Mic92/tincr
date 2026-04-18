@@ -185,6 +185,10 @@ pub struct Connection {
     /// on. Upstream never sets `unused_active`; the edge
     /// pointer-as-bool IS the check.
     pub active: bool,
+    /// When `active` flipped true (`on_ack`). `None` pre-ACK. Read by
+    /// the autoconnect snapshot builder so a freshly-activated
+    /// shortcut conn isn't reaped before `min_hold`.
+    pub activated_at: Option<Instant>,
     /// `c->status.pinged` (`connection.h:38`, bit 0).
     pub pinged: bool,
     /// Send-time of the in-flight meta `PING`. `None` once `PONG`
@@ -294,6 +298,7 @@ impl Connection {
             start: now,
             address: None,
             active: false,
+            activated_at: None,
             pinged: false,
             last_ping_sent: None,
             ping_rtt_ms: 0,
@@ -338,6 +343,7 @@ impl Connection {
             start: now,
             address: Some(address),
             active: false,
+            activated_at: None,
             pinged: false,
             last_ping_sent: None,
             ping_rtt_ms: 0,
@@ -390,6 +396,7 @@ impl Connection {
             start: now,
             address: Some(address),
             active: false,
+            activated_at: None,
             pinged: false,
             last_ping_sent: None,
             ping_rtt_ms: 0,
