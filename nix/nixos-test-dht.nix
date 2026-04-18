@@ -491,18 +491,18 @@ testers.runNixOSTest {
     alice.wait_until_succeeds("ping -c1 -W2 10.20.0.2", timeout=60)
 
     # ─── Gate: carol cold-start. Chain: addr cache empty → retry_
-    # outgoing → resolve queued → (relay publishes ~5s in) →
-    # drain_resolved → dht_hints → next retry connects. ~15-30s
-    # depending on periodic-vs-retry timer interleaving; 60s budget.
-    carol.wait_until_succeeds(
-        "journalctl -u tinc.mesh --no-pager | "
-        "grep 'DHT resolved relay:.*2001:db8:1::'",
-        timeout=60,
-    )
+    # outgoing → resolve queued → drain_resolved → dht_hints → next
+    # retry connects. relay's first publish is now gated on its port-
+    # probe reply (commit "don't publish until…"); relay may resolve
+    # *carol* and dial inbound before carol's relay-resolve completes.
+    # The connection still proves the resolve chain (somebody's record
+    # was found via DHT — there are no Address= lines in carol's view
+    # of relay nor relay's view of carol). dave's gate below covers
+    # the outgoing-via-dht_hints path explicitly. ~15-30s; 90s budget.
     carol.wait_until_succeeds(
         "journalctl -u tinc.mesh --no-pager | "
         "grep 'Connection with relay.*activated'",
-        timeout=60,
+        timeout=90,
     )
     carol.wait_until_succeeds("ping -c1 -W2 10.20.0.254", timeout=30)
 

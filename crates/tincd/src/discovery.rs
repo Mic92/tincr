@@ -112,6 +112,15 @@ use blind::{BlindSigner, Derived, blind_public_key, current_period, derive};
 /// timestamp) lets DHT nodes drop stale puts cleanly.
 const REPUBLISH_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Hold the *first* publish until a dialable `v4=`/`tcp=` is known, or
+/// this much time has passed since spawn (so a v6-only / no-portmap host
+/// still publishes its v6 instead of never). Live on retiolum: eve's
+/// first `tick()` ran before the port-probe reply landed, published a
+/// v6-only record, set `last_publish`, and the v4 didn't appear in the
+/// DHT for another 5 min — a peer bootstrapping purely from DHT waited
+/// the full republish interval for a dialable addr.
+const FIRST_PUBLISH_GRACE: Duration = Duration::from_secs(30);
+
 /// Port-probe re-send interval. UDP conntrack timeout floors: netfilter
 /// default 30s (unreplied) / 180s (assured), consumer routers 30–60s, CGNAT
 /// 30s. The seed *did* reply so we're in "assured" on most NATs, but a
@@ -218,6 +227,8 @@ pub struct Discovery {
 
     last_publish: Option<Instant>,
     last_seq: i64,
+    /// `with_dht()` time. Gates `FIRST_PUBLISH_GRACE`.
+    started: Instant,
 
     /// We sign BEP 44 records ourselves rather than handing mainline a
     /// `dalek::SigningKey`: tinc's on-disk key is the 64-byte expanded
@@ -347,6 +358,7 @@ impl Discovery {
             last_probe: None,
             last_publish: None,
             last_seq: 0,
+            started: Instant::now(),
             key,
             secret,
             period_fn: current_period,
@@ -520,10 +532,26 @@ impl Discovery {
         // Republish on `reflexive_dirty`, not `vote_changed`: the vote
         // doesn't feed `build_value`, it just invalidated the cache. No
         // point publishing with `v4=` removed; wait for re-probe.
+        //
+        // First publish (`last_publish == None`) is additionally gated
+        // on having a dialable v4/tcp (`ready`): the port-probe and the
+        // PCP mapping both arrive seconds after spawn; publishing before
+        // them puts a v6-only record in the DHT and then the
+        // `REPUBLISH_INTERVAL` gate keeps the v4 out for 5 min.
+        // `reflexive_dirty` is set by `set_reflexive_v4` /
+        // `set_portmapped_tcp{,6}` and bypasses both gates, so the
+        // first useful address triggers an immediate publish anyway.
+        // The 30 s grace lets a host that will *never* get v4/tcp
+        // (v6-only, no PCP) publish its v6 rather than stay silent.
         let due = self
             .last_publish
             .is_none_or(|last| now.duration_since(last) >= REPUBLISH_INTERVAL);
-        if (self.reflexive_dirty || due)
+        let ready = self.last_publish.is_some()
+            || self.reflexive_v4.is_some()
+            || self.portmapped_tcp.is_some()
+            || self.portmapped_tcp6.is_some()
+            || now.duration_since(self.started) >= FIRST_PUBLISH_GRACE;
+        if (self.reflexive_dirty || (due && ready))
             && let Some((seq, value)) = self.publish(now)
         {
             out.events.push(DiscoveryEvent::Published { seq, value });
@@ -953,6 +981,52 @@ mod tests {
         // Garbage / truncated.
         assert!(open_record(&d, 42, b"tinc1 v4=1.2.3.4:5").is_none());
         assert!(open_record(&d, 42, &sealed[..AEAD_OVERHEAD - 1]).is_none());
+    }
+
+    /// First publish gated until a dialable v4/tcp is known. Regression
+    /// for the live-eve case: first `tick()` ran with `due=true` before
+    /// the port-probe reply / PCP mapping landed, published `tinc1 v6=…`
+    /// only, set `last_publish`, and the v4 didn't surface for 5 min.
+    #[test]
+    fn testnet_first_publish_waits_for_dialable() {
+        use mainline::Testnet;
+        let testnet = Testnet::new(10).expect("testnet");
+        let mut d = Discovery::with_dht(
+            mainline::Dht::builder()
+                .bootstrap(&testnet.bootstrap)
+                .build()
+                .unwrap(),
+            SigningKey::from_seed(&[5u8; 32]),
+            655,
+            None,
+        );
+
+        // Cold tick: no reflexive_v4, no portmap, <30s since spawn ⇒
+        // `ready=false` ⇒ NO Published (even if the host has a global
+        // v6 and `build_value` would have returned Some).
+        let r = d.tick(Instant::now());
+        assert!(
+            !r.events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Published { .. })),
+            "first tick must not publish before a dialable addr is known"
+        );
+        assert!(r.wants_port_probe);
+        assert!(d.last_publish.is_none());
+
+        // Portmapper thread reports a TCP DNAT — sets `reflexive_dirty`
+        // ⇒ next tick publishes immediately, record carries `tcp=`.
+        assert!(d.set_portmapped_tcp(Some("203.0.113.7:655".parse().unwrap())));
+        let r = d.tick(Instant::now());
+        let value = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                DiscoveryEvent::Published { value, .. } => Some(value.clone()),
+                DiscoveryEvent::PublicV4 { .. } => None,
+            })
+            .expect("set_portmapped_tcp ⇒ immediate publish");
+        assert!(value.contains("tcp=203.0.113.7:655"), "got {value}");
     }
 
     /// Publish → resolve against a loopback Testnet. The load-bearing
