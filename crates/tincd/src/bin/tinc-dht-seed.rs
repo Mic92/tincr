@@ -27,6 +27,26 @@ use std::process::ExitCode;
 
 use mainline::Dht;
 
+fn parse_secret(args: &mut Vec<String>) -> Result<Option<[u8; 32]>, ()> {
+    use base64::Engine;
+    let Some(i) = args.iter().position(|a| a == "--secret") else {
+        return Ok(None);
+    };
+    args.remove(i);
+    if i >= args.len() {
+        eprintln!("tinc-dht-seed: --secret needs a base64 argument");
+        return Err(());
+    }
+    let b64 = args.remove(i);
+    let raw = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(b64.trim().trim_end_matches('='))
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
+    raw.map(Some).ok_or_else(|| {
+        eprintln!("tinc-dht-seed: --secret must be base64 of 32 bytes");
+    })
+}
+
 fn usage() {
     eprintln!("Usage:");
     eprintln!("  tinc-dht-seed BASE_PORT [COUNT [SELF_HOST]]");
@@ -35,8 +55,8 @@ fn usage() {
     eprintln!("      SELF_HOST: externally-reachable address for inter-seed");
     eprintln!("      bootstrap (so referrals to remote clients are followable).");
     eprintln!("      Default 127.0.0.1 — fine if clients are on the same host.");
-    eprintln!("  tinc-dht-seed --resolve TINC_B64_PUBKEY BOOTSTRAP_HOST:PORT");
-    eprintln!("      One-shot: get_mutable for PUBKEY, print value, exit.");
+    eprintln!("  tinc-dht-seed --resolve [--secret B64] TINC_B64_PUBKEY BOOTSTRAP_HOST:PORT");
+    eprintln!("      One-shot: blind+derive for PUBKEY, fetch, decrypt, print, exit.");
     eprintln!("      Exits 1 if no record found (publish didn't land).");
 }
 
@@ -49,16 +69,20 @@ fn main() -> ExitCode {
     }
 
     if args.first().is_some_and(|a| a == "--resolve") {
-        return resolve_mode(&args[1..]);
+        let mut rest = args[1..].to_vec();
+        let Ok(secret) = parse_secret(&mut rest) else {
+            return ExitCode::FAILURE;
+        };
+        return resolve_mode(&rest, secret);
     }
 
     seed_mode(&args)
 }
 
-/// One-shot resolve. Exits 1 on miss (publish didn't land, or
-/// signature didn't verify — mainline rejects bad sigs before the
-/// iterator yields, indistinguishable from not-found here).
-fn resolve_mode(args: &[String]) -> ExitCode {
+/// One-shot resolve. Exits 1 on miss (publish didn't land, signature
+/// didn't verify against the blinded key, or AEAD-open failed — all
+/// indistinguishable from not-found here).
+fn resolve_mode(args: &[String], secret: Option<[u8; 32]>) -> ExitCode {
     let [b64, bootstrap] = args else {
         eprintln!("tinc-dht-seed --resolve: need PUBKEY BOOTSTRAP");
         usage();
@@ -85,14 +109,20 @@ fn resolve_mode(args: &[String]) -> ExitCode {
     // Without this, get_mutable races the bootstrap find_node.
     dht.bootstrapped();
 
-    // b"tinc" = Discovery::SALT. Hardcoded: re-exporting would link
-    // the whole daemon (discovery.rs → SigningKey → dalek hazmat).
-    let Some(item) = dht.get_mutable(&public, Some(b"tinc"), None).next() else {
-        eprintln!("tinc-dht-seed: no record for pubkey (publish not landed?)");
-        return ExitCode::FAILURE;
-    };
-    println!("{}", String::from_utf8_lossy(item.value()));
-    ExitCode::SUCCESS
+    // Same blind+derive+open path the daemon's resolver uses; tries
+    // current period then `period-1`.
+    if let Some(v) = tincd::discovery::resolve_plaintext(
+        &dht,
+        &public,
+        secret.as_ref(),
+        tincd::discovery::blind::current_period,
+    ) {
+        println!("{v}");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("tinc-dht-seed: no record for pubkey (publish not landed / wrong secret?)");
+        ExitCode::FAILURE
+    }
 }
 
 /// N-node swarm. Node 0 starts with no bootstrap (it's the root);

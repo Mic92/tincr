@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::Path;
 use std::time::Duration;
 
 use tinc_proto::Subnet;
@@ -245,6 +246,18 @@ pub struct DaemonSettings {
     /// lease is 2×N so a missed refresh doesn't expire it. Default 60.
     pub upnp_refresh_period: u32,
 
+    /// `DhtSecretFile` (Rust extension). 32 bytes mixed into the
+    /// BEP 44 salt+AEAD-key derive. With it, a reader needs
+    /// `hosts/NAME` *and* this secret to find/decrypt the record;
+    /// without it, `hosts/NAME` alone suffices (still hidden from DHT
+    /// crawlers, who have neither). `None` = unset. Non-reloadable.
+    ///
+    /// File-only by design: an inline `DhtSecret = …` in `tinc.conf`
+    /// would land in world-readable config dumps, `tinc info`
+    /// output, and (on the NixOS module) the Nix store. Same
+    /// rationale as `Ed25519PrivateKeyFile` having no inline form.
+    pub dht_secret: Option<[u8; 32]>,
+
     /// `DhtBootstrap` (Rust extension). `host:port` seeds. Empty ⇒
     /// mainline's defaults. Replace, not augment: BEP 42 has no quorum
     /// threshold, so a single attacker-controlled bootstrap that wins
@@ -332,6 +345,7 @@ impl Default for DaemonSettings {
             global_weight: None,
             device_standby: false,
             dht_discovery: false,
+            dht_secret: None,
             upnp: crate::daemon::UpnpMode::No,
             upnp_discover_wait: 5,
             upnp_refresh_period: 60,
@@ -570,7 +584,10 @@ pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
 /// are folded in via `apply_reloadable_settings`; the rest (Port,
 /// `AddressFamily`, Mode, sockopts, Proxy, Compression, Forwarding,
 /// DHT, `DeviceStandby`) need re-bind / re-open and are setup-only.
-pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
+pub(super) fn load_settings(
+    config: &tinc_conf::Config,
+    confbase: &Path,
+) -> Result<DaemonSettings, SetupError> {
     let mut settings = DaemonSettings::default();
 
     // Port. HOST-tagged. `Port = 0` is valid: kernel picks (tests
@@ -738,6 +755,16 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
         settings.upnp_refresh_period = v.clamp(1, MAX_DURATION_SECS);
     }
 
+    // DhtSecretFile. Read happens here in `setup()` *before*
+    // `drop_privs` so a root:root 0600 file is reachable. No inline
+    // form: a key in tinc.conf would leak via config dumps / the Nix
+    // store. The file-missing case is fatal (don't silently publish
+    // under a different key than the rest of the mesh).
+    settings.dht_secret = match config.lookup("DhtSecretFile").next() {
+        Some(e) => Some(read_dht_secret_file(e.get_str(), confbase)?),
+        None => None,
+    };
+
     settings.dht_bootstrap = config
         .lookup("DhtBootstrap")
         .map(|e| e.get_str().to_owned())
@@ -759,6 +786,48 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     Ok(settings)
 }
 
+/// b64-decode the `DhtSecretFile` line form. Standard alphabet,
+/// padding optional, must decode to exactly 32 bytes. Standard b64
+/// (NOT `tinc_crypto::b64`): this is operator-facing, generated with
+/// `openssl rand -base64 32`, not tinc's wire-compat bit-reversed
+/// variant.
+fn decode_dht_secret_b64(s: &str) -> Result<[u8; 32], String> {
+    use base64::Engine;
+    // Accept with or without `=` padding — `openssl rand -base64 32`
+    // emits one trailing `=`, copy-paste shouldn't be a footgun.
+    let s = s.trim().trim_end_matches('=');
+    let raw = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(s)
+        .map_err(|e| format!("DhtSecret: not valid base64: {e}"))?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| format!("DhtSecret: decoded to {} bytes, need 32", raw.len()))
+}
+
+/// Read `DhtSecretFile`. Relative paths resolve against `confbase`
+/// (same rule as `Ed25519PrivateKeyFile`). Accepts either raw 32
+/// bytes or one line of base64 decoding to 32 bytes — raw checked
+/// first so a 32-byte blob that *happens* to be valid b64 isn't
+/// mis-decoded to 24. Missing file / wrong length is fatal: silently
+/// publishing under a different key than the rest of the mesh would
+/// be a quiet partition.
+fn read_dht_secret_file(path: &str, confbase: &Path) -> Result<[u8; 32], SetupError> {
+    let p = Path::new(path);
+    let p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        confbase.join(p)
+    };
+    let raw = std::fs::read(&p)
+        .map_err(|e| SetupError::Config(format!("DhtSecretFile {}: {e}", p.display())))?;
+    if let Ok(a) = <[u8; 32]>::try_from(raw.as_slice()) {
+        return Ok(a);
+    }
+    let s = std::str::from_utf8(&raw)
+        .map_err(|_| SetupError::Config(format!("DhtSecretFile {}: not 32 bytes", p.display())))?;
+    decode_dht_secret_b64(s)
+        .map_err(|e| SetupError::Config(format!("DhtSecretFile {}: {e}", p.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,5 +847,62 @@ mod tests {
         // Unparseable port → default. We don't support service-name
         // resolution; fall back.
         assert_eq!(parse_bind_addr("10.0.0.1 http", 655), ("10.0.0.1", 655));
+    }
+
+    #[test]
+    fn dht_secret_b64_cases() {
+        use base64::Engine;
+        let want = [0x42u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(want);
+        // Padding + surrounding whitespace tolerated (openssl emits both).
+        assert_eq!(decode_dht_secret_b64(&format!("  {b64}\n")).unwrap(), want);
+        // Wrong length.
+        assert!(
+            decode_dht_secret_b64("QUJDRA")
+                .unwrap_err()
+                .contains("4 bytes")
+        );
+        // Not b64.
+        assert!(decode_dht_secret_b64("!!!").is_err());
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "tincd-settings-{tag}-{:?}",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dht_secret_file_cases() {
+        use base64::Engine;
+        let dir = tmpdir("dhtsecret");
+        let want = [7u8; 32];
+
+        // Raw 32 bytes.
+        std::fs::write(dir.join("raw"), want).unwrap();
+        assert_eq!(read_dht_secret_file("raw", &dir).unwrap(), want);
+
+        // b64 line with trailing newline.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(want);
+        std::fs::write(dir.join("b64"), format!("{b64}\n")).unwrap();
+        assert_eq!(read_dht_secret_file("b64", &dir).unwrap(), want);
+
+        // Absolute path.
+        let abs = dir.join("raw");
+        assert_eq!(
+            read_dht_secret_file(abs.to_str().unwrap(), Path::new("/nonexistent")).unwrap(),
+            want
+        );
+
+        // Wrong length → error, not silent zero-key.
+        std::fs::write(dir.join("short"), [0u8; 16]).unwrap();
+        assert!(read_dht_secret_file("short", &dir).is_err());
+
+        // Missing file.
+        assert!(read_dht_secret_file("nope", &dir).is_err());
     }
 }

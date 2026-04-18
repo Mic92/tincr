@@ -33,25 +33,35 @@
 //!
 //! ## What gets published (BEP 44 mutable items)
 //!
+//! Two layers, both keyed on things a *mesh member* already has and a
+//! *DHT crawler* doesn't (Tor v3 `HSDir` pattern, rend-spec-v3 §2.2.1):
+//!
 //! ```text
-//! key   = node's Ed25519 pubkey (the same key in hosts/NAME)
-//! salt  = b"tinc"  (so other apps publishing under the same key don't collide)
-//! value = "tinc1 v4=203.0.113.7:44132 v6=[2001:db8::1]:655"
-//!         ^^^^^ format version
-//!               ^^^ port-probe result: tincd's NAT-mapped (ip, port). Both correct.
-//!                                        ^^^ local-enum global-unicast v6 (no NAT ⇒ correct)
+//! period   = floor(unix_time / 86400)
+//! h        = SHA3-256(N ‖ pk_A ‖ period_be8)  clamped, mod ℓ
+//! blind_pk = h · pk_A           ─ layer 1: ed25519 key blinding
+//! (salt, enc_key) = SHAKE256(N ‖ period_be8 ‖ pk_A ‖ DhtSecret?)[..48]
+//!
+//! k    = blind_pk               (storer verifies sig with this; DLOG to recover pk_A)
+//! salt = salt[0..16]
+//! v    = b"tincE1" ‖ nonce24 ‖ XChaCha20-Poly1305(enc_key,
+//!                                  "tinc1 v4=203.0.113.7:44132 …", aad=seq_be8)
 //! ```
 //!
-//! `v4=` is published unconditionally when known: the probe reply arriving
-//! proves the NAT created a mapping. On full-cone NAT, peers can dial it.
-//! On restricted-cone they can't (only the seed's IP is allowed) — but the
-//! port number is *correct*, so when Tier-0 coordinates a simultaneous send
-//! the punch lands first try instead of guessing.
+//! | Reader                              | sees                      |
+//! |-------------------------------------|---------------------------|
+//! | DHT storer / crawler                | random key + opaque blob  |
+//! | has `hosts/NAME`, mesh sets no secret | derives all, reads addrs |
+//! | has `hosts/NAME`, mesh sets `DhtSecret` | wrong salt + key → miss  |
 //!
-//! The value is plain text, not pkarr's DNS-packet encoding. We don't *need*
-//! a DNS frontend (no resolver between us and the DHT), and a hand-parseable
-//! format means `bep44-get <pubkey>` debugging works without a DNS decoder.
-//! The `mainline::MutableItem` signing is BEP 44 standard either way.
+//! Different `h` each day → records unlinkable across periods. Reader
+//! near UTC-midnight tries `period` then `period-1` (publisher republishes
+//! every 5 min; old record expires from DHT in ~2h). `aad=seq` binds the
+//! ciphertext to the BEP 44 seq so a malicious storer can't splice an old
+//! ciphertext under a newer seq. Overhead 6+24+16 = 46B; the inner
+//! plaintext (`"tinc1 v4=… tcp=… v6=…"`) is ~120B — well under BEP 44's
+//! 1000B `v` cap. The inner plaintext stays human-readable (`"tinc1 v4=…"`)
+//! so `tinc-dht-seed --resolve` can grep it after decrypt.
 //!
 //! ## Integration
 //!
@@ -77,17 +87,25 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "discovery/blind.rs"]
+pub mod blind;
+
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
 
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 use mainline::{Dht, MutableItem};
+use rand_core::{OsRng, RngCore};
 // Re-export so Daemon::setup() can build a custom-bootstrap Dht for tests
 // without taking a direct mainline dep. Also gives us one place to bump
 // when mainline's builder API churns.
 pub use mainline::DhtBuilder;
 
 use tinc_crypto::sign::SigningKey;
+
+use blind::{BlindSigner, Derived, blind_public_key, current_period, derive};
 
 /// Re-publish interval. Mainline mutable items expire after ~2h of no
 /// republish; iroh uses 5min. We match. The BEP 44 `seq` field (monotonic
@@ -106,11 +124,14 @@ const PROBE_KEEPALIVE: Duration = Duration::from_secs(25);
 /// just gets us more chances at the echo.
 const PROBE_FANOUT: usize = 3;
 
-/// BEP 44 salt. Segregates our records from anything else published under
-/// the same Ed25519 key (pkarr uses no salt → root namespace; we use
-/// `b"tinc"` so a node that's *also* an iroh node doesn't get its records
-/// stomped).
-const SALT: &[u8] = b"tinc";
+/// `v` envelope: 6-byte magic ‖ 24-byte `XChaCha` nonce ‖ ciphertext ‖ 16-byte
+/// Poly1305 tag. Magic lets `open_record` reject garbage / future versions
+/// before spending an AEAD-open.
+const MAGIC: &[u8; 6] = b"tincE1";
+const NONCE_LEN: usize = 24;
+const TAG_LEN: usize = 16;
+/// Bytes added on top of the inner `"tinc1 …"` plaintext.
+pub const AEAD_OVERHEAD: usize = MAGIC.len() + NONCE_LEN + TAG_LEN;
 
 /// BEP 5 KRPC `ping` query, hand-rolled bencode. 58 bytes, fixed.
 ///
@@ -203,11 +224,26 @@ pub struct Discovery {
     /// form (seed gone), dalek wants the seed. `new_signed_unchecked`
     /// takes raw signature bytes.
     key: SigningKey,
+    /// `DhtSecret`. Mixed into the SHAKE derive only; the blinding scalar
+    /// is `pk_A`-only so a reader with the wrong secret still computes the
+    /// right `blind_pk` — the *salt* mismatch is what hides the record.
+    secret: Option<[u8; 32]>,
+    /// Swappable for the period-rollover test. Prod = `current_period`.
+    period_fn: fn() -> u64,
+    /// Per-period signer + KDF output. Recomputed when `period_fn()`
+    /// disagrees with `epoch.period`.
+    epoch: Option<Epoch>,
     /// For `v6=` lines only — v6 doesn't NAT, bind port = reachable port.
     udp_port: u16,
 
     /// Lazy: `None` until first `request_resolve`.
     resolver: Option<Resolver>,
+}
+
+struct Epoch {
+    period: u64,
+    signer: BlindSigner,
+    derived: Derived,
 }
 
 /// Background `get_mutable` thread. Resolves fire on the retry-outgoing
@@ -228,21 +264,15 @@ struct Resolver {
 }
 
 impl Resolver {
-    fn spawn(dht: Dht) -> Self {
+    fn spawn(dht: Dht, secret: Option<[u8; 32]>, period_fn: fn() -> u64) -> Self {
         let (req_tx, req_rx) = flume::unbounded::<(String, [u8; 32])>();
         let (res_tx, res_rx) = flume::unbounded::<(String, Vec<SocketAddr>)>();
         let join = std::thread::Builder::new()
             .name("dht-resolve".into())
             .spawn(move || {
                 while let Ok((name, key)) = req_rx.recv() {
-                    let direct = dht
-                        .get_mutable(&key, Some(SALT), None)
-                        .next()
-                        .and_then(|item| {
-                            std::str::from_utf8(item.value())
-                                .ok()
-                                .map(|v| parse_record(v).direct)
-                        })
+                    let direct = resolve_plaintext(&dht, &key, secret.as_ref(), period_fn)
+                        .map(|v| parse_record(&v).direct)
                         .unwrap_or_default();
                     // Send even on miss: daemon needs to clear inflight
                     // so the *next* retry can re-queue.
@@ -284,6 +314,7 @@ impl Discovery {
     pub fn spawn(
         key: SigningKey,
         udp_port: u16,
+        secret: Option<[u8; 32]>,
         bootstrap: Option<&[String]>,
     ) -> std::io::Result<Self> {
         // Client mode: we put/get, don't help others route. mainline
@@ -293,7 +324,7 @@ impl Discovery {
             // .bootstrap() replaces, not appends — the semantics we want.
             Some(nodes) => Dht::builder().bootstrap(nodes).build()?,
         };
-        Ok(Self::with_dht(dht, key, udp_port))
+        Ok(Self::with_dht(dht, key, udp_port, secret))
     }
 
     /// Spawn against a caller-provided `Dht`. The unit test uses this with a
@@ -304,7 +335,7 @@ impl Discovery {
     /// `info()` is ~seconds away (one `find_node` round-trip to seed nodes +
     /// 3-4 hops to find our neighbourhood).
     #[must_use]
-    pub const fn with_dht(dht: Dht, key: SigningKey, udp_port: u16) -> Self {
+    pub fn with_dht(dht: Dht, key: SigningKey, udp_port: u16, secret: Option<[u8; 32]>) -> Self {
         Self {
             dht,
             last_vote: None,
@@ -317,9 +348,35 @@ impl Discovery {
             last_publish: None,
             last_seq: 0,
             key,
+            secret,
+            period_fn: current_period,
+            epoch: None,
             udp_port,
             resolver: None,
         }
+    }
+
+    /// Test seam for the period-rollover case: publisher pinned at N,
+    /// resolver at N+1 → must hit via the `period-1` fallback.
+    #[cfg(test)]
+    pub fn set_period_fn(&mut self, f: fn() -> u64) {
+        self.period_fn = f;
+        self.epoch = None;
+    }
+
+    /// Lazily (re)derive the per-period signer + salt + AEAD key. The
+    /// republish interval (5 min) is the only caller; rollover is just
+    /// "next publish lands under tomorrow's key".
+    fn epoch(&mut self) -> &Epoch {
+        let p = (self.period_fn)();
+        if self.epoch.as_ref().is_none_or(|e| e.period != p) {
+            self.epoch = Some(Epoch {
+                period: p,
+                signer: BlindSigner::new(&self.key, p),
+                derived: derive(self.key.public_key(), self.secret.as_ref(), p),
+            });
+        }
+        self.epoch.as_ref().expect("set above")
     }
 
     /// Live nodes from mainline's routing table to port-probe. Better
@@ -384,9 +441,11 @@ impl Discovery {
     /// `retry_outgoing` (addr cache exhausted). Dedup'd: a query already
     /// inflight is a no-op. Lazy thread spawn on first call.
     pub fn request_resolve(&mut self, node_name: &str, peer_public: [u8; 32]) {
+        let secret = self.secret;
+        let period_fn = self.period_fn;
         let resolver = self
             .resolver
-            .get_or_insert_with(|| Resolver::spawn(self.dht.clone()));
+            .get_or_insert_with(|| Resolver::spawn(self.dht.clone(), secret, period_fn));
         if resolver.inflight.contains(node_name) {
             return;
         }
@@ -420,12 +479,12 @@ impl Discovery {
     ///
     /// `peer_public` is the Ed25519 pubkey from `hosts/NAME` — same bytes
     /// the SPTPS handshake verifies against. mainline rejects bad
-    /// signatures before we see the value.
+    /// signatures (against `blind_pk`) before we see the value; AEAD-open
+    /// rejects wrong-secret / spliced-seq after.
     #[must_use]
     pub fn resolve(&self, peer_public: &[u8; 32]) -> Option<ParsedRecord> {
-        let item = self.dht.get_mutable(peer_public, Some(SALT), None).next()?;
-        let value = std::str::from_utf8(item.value()).ok()?;
-        Some(parse_record(value))
+        resolve_plaintext(&self.dht, peer_public, self.secret.as_ref(), self.period_fn)
+            .map(|v| parse_record(&v))
     }
 
     /// Non-blocking poll. Called from `on_periodic_tick` (5s cadence).
@@ -494,12 +553,17 @@ impl Discovery {
             .map_or(0, |d| d.as_secs()) as i64)
             .max(self.last_seq + 1);
 
-        let signable = encode_bep44_signable(seq, value.as_bytes(), Some(SALT));
-        let signature = self.key.sign(&signable);
-        let public = *self.key.public_key();
-
-        let item =
-            MutableItem::new_signed_unchecked(public, signature, value.as_bytes(), seq, Some(SALT));
+        let ep = self.epoch();
+        let sealed = seal_record(&ep.derived, seq, value.as_bytes());
+        let signable = encode_bep44_signable(seq, &sealed, Some(&ep.derived.salt));
+        let signature = ep.signer.sign(&signable);
+        let item = MutableItem::new_signed_unchecked(
+            ep.signer.public_key(),
+            signature,
+            &sealed,
+            seq,
+            Some(&ep.derived.salt),
+        );
 
         // Blocking, ~hundreds of ms once bootstrapped. We're on the 5s
         // periodic timer (same precedent as the contradicting-edge sleep).
@@ -582,6 +646,111 @@ fn enumerate_v6() -> Vec<Ipv6Addr> {
             if_addrs::IfAddr::V4(_) => None,
         })
         .collect()
+}
+
+/// Seal the inner `"tinc1 …"` plaintext for publish. Random 192-bit
+/// nonce per put (`XChaCha` → birthday bound is irrelevant at one put per
+/// 5 min). `aad = seq_be8`: the storer can't splice an old ciphertext
+/// under a newer seq without the AEAD-open failing.
+#[allow(clippy::missing_panics_doc)] // encrypt() only errs on >4GiB input
+#[must_use]
+pub fn seal_record(d: &Derived, seq: i64, plaintext: &[u8]) -> Vec<u8> {
+    let mut nonce = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+    let ct = XChaCha20Poly1305::new((&d.aead_key).into())
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad: &seq.to_be_bytes(),
+            },
+        )
+        .expect("XChaCha20-Poly1305 encrypt is infallible for <4GiB inputs");
+    let mut out = Vec::with_capacity(AEAD_OVERHEAD + plaintext.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+/// Reverse of [`seal_record`]. `None` on wrong magic, short input, or
+/// AEAD failure (wrong key / wrong seq / tampered). Caller treats all
+/// three as "miss".
+#[must_use]
+pub fn open_record(d: &Derived, seq: i64, sealed: &[u8]) -> Option<Vec<u8>> {
+    if sealed.len() < AEAD_OVERHEAD || &sealed[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    let nonce = &sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN];
+    let ct = &sealed[MAGIC.len() + NONCE_LEN..];
+    XChaCha20Poly1305::new((&d.aead_key).into())
+        .decrypt(
+            nonce.into(),
+            Payload {
+                msg: ct,
+                aad: &seq.to_be_bytes(),
+            },
+        )
+        .ok()
+}
+
+/// One-period fetch + open. Factored so the sync `resolve()`, the
+/// background `Resolver` thread, and `tinc-dht-seed --resolve` share the
+/// exact same query → verify → decrypt sequence.
+///
+/// mainline's `get_mutable` iterator yields whatever each responder
+/// hands back, in arrival order, with the signature checked against the
+/// *responder-supplied* `k` (`rpc.rs` → `from_dht_message`). Two hazards:
+///
+/// 1. A hostile node on the iterative path can return a self-signed
+///    item under its own key. The AEAD layer rejects that (it doesn't
+///    know `pk_A` ⇒ wrong `enc_key`), but filtering on `item.key()`
+///    keeps the debug log honest and lets us still reach the genuine
+///    item later in the stream.
+/// 2. A stale or replaying node can return a *genuine* older record
+///    (lower seq, decrypts fine) before a fresh one arrives. Draining
+///    the iterator and picking `max(seq)` makes us converge to the
+///    publisher's most-recent put rather than first-responder's view.
+///
+/// `Dht::get_mutable_most_recent` exists but compares `seq` with `==`
+/// (only breaks ties, never advances), so we hand-roll the reduction.
+fn fetch_and_open(
+    dht: &Dht,
+    peer_pk: &[u8; 32],
+    secret: Option<&[u8; 32]>,
+    period: u64,
+) -> Option<String> {
+    let blind_pk = blind_public_key(peer_pk, period)?;
+    let d = derive(peer_pk, secret, period);
+    let item = dht
+        .get_mutable(&blind_pk, Some(&d.salt), None)
+        .filter(|i| i.key() == &blind_pk)
+        .max_by_key(MutableItem::seq)?;
+    let pt = open_record(&d, item.seq(), item.value()).or_else(|| {
+        log::debug!(target: "tincd::discovery",
+                    "AEAD open failed for period {period} (wrong DhtSecret?)");
+        None
+    })?;
+    String::from_utf8(pt).ok()
+}
+
+/// Try `period_fn()` then `period_fn()-1`. Returns the inner plaintext
+/// (`"tinc1 …"`) on hit. Used by `tinc-dht-seed --resolve` so the NixOS
+/// test can grep `v4=` without re-implementing the crypto.
+#[must_use]
+pub fn resolve_plaintext(
+    dht: &Dht,
+    peer_pk: &[u8; 32],
+    secret: Option<&[u8; 32]>,
+    period_fn: fn() -> u64,
+) -> Option<String> {
+    let p = period_fn();
+    fetch_and_open(dht, peer_pk, secret, p).or_else(|| {
+        // p==0 only on a box with epoch-time clock; don't double-query.
+        (p > 0)
+            .then(|| fetch_and_open(dht, peer_pk, secret, p - 1))
+            .flatten()
+    })
 }
 
 /// BEP 44 signable encoding. Vendored — mainline's `encode_signable` is
@@ -722,15 +891,46 @@ mod tests {
         );
     }
 
+    /// `seal_record`/`open_record` envelope properties. No DHT.
+    #[test]
+    fn seal_open_roundtrip() {
+        let pk = *SigningKey::from_seed(&[3u8; 32]).public_key();
+        let d = derive(&pk, Some(&[0x11; 32]), 5000);
+        let plain = b"tinc1 v4=203.0.113.7:44132";
+        let sealed = seal_record(&d, 42, plain);
+
+        assert!(sealed.starts_with(MAGIC), "magic prefix");
+        assert_eq!(
+            sealed.len(),
+            AEAD_OVERHEAD + plain.len(),
+            "overhead is exactly 46B"
+        );
+        assert_eq!(open_record(&d, 42, &sealed).as_deref(), Some(&plain[..]));
+
+        // aad=seq binds: storer can't replay old ct under bumped seq.
+        assert!(open_record(&d, 43, &sealed).is_none(), "seq+1 → fail");
+
+        // Wrong AEAD key → fail. Covers both "wrong DhtSecret" and
+        // "hostile node self-signed forgery" (different pk_A): both
+        // reduce to a different `derive()` output, and `open_record`
+        // doesn't distinguish.
+        let d_wrong = derive(&pk, Some(&[0x22; 32]), 5000);
+        assert!(open_record(&d_wrong, 42, &sealed).is_none());
+
+        // Garbage / truncated.
+        assert!(open_record(&d, 42, b"tinc1 v4=1.2.3.4:5").is_none());
+        assert!(open_record(&d, 42, &sealed[..AEAD_OVERHEAD - 1]).is_none());
+    }
+
     /// Publish → resolve against a loopback Testnet. The load-bearing
-    /// assertion: tinc's expanded-key `SigningKey::sign` produces bytes
-    /// that mainline's dalek verifier accepts (it can't — wrong sig
-    /// encoding → DHT nodes drop the put → resolve returns None).
+    /// assertion: `BlindSigner::sign` produces bytes that mainline's
+    /// stock dalek verifier accepts against `blind_pk` (it can't → DHT
+    /// nodes drop the put → resolve returns None), AND the resolver's
+    /// `blind_public_key`/`derive` reach the same target/salt/key.
     ///
     /// Doesn't test the port-probe rxpath (lives in the daemon, needs a
     /// socket we don't own); `reflexive_v4` injected directly.
-    #[test]
-    fn testnet_publish_resolve_roundtrip() {
+    fn run_publish_resolve(secret: Option<[u8; 32]>) {
         use mainline::Testnet;
 
         // 10 = mainline's own convergence floor.
@@ -742,7 +942,7 @@ mod tests {
             .expect("alice dht");
         let alice_key = SigningKey::from_seed(&[7u8; 32]);
         let alice_pub = *alice_key.public_key();
-        let mut alice = Discovery::with_dht(alice_dht, alice_key, 655);
+        let mut alice = Discovery::with_dht(alice_dht, alice_key, 655, secret);
 
         // Cold start: no reflexive_v4 ⇒ daemon should probe.
         assert!(alice.tick(Instant::now()).wants_port_probe);
@@ -762,6 +962,7 @@ mod tests {
             .publish(Instant::now())
             .expect("publish should succeed against bootstrapped testnet");
         assert!(seq > 0, "seq is unix-seconds, should be nonzero");
+        // `value` is the *plaintext* (for the operator's debug log).
         assert!(value.starts_with("tinc1 "));
         assert!(
             value.contains("v4=203.0.113.7:44132"),
@@ -772,9 +973,10 @@ mod tests {
             .bootstrap(&testnet.bootstrap)
             .build()
             .expect("bob dht");
-        let bob = Discovery::with_dht(bob_dht, SigningKey::from_seed(&[9u8; 32]), 655);
+        let bob = Discovery::with_dht(bob_dht, SigningKey::from_seed(&[9u8; 32]), 655, secret);
 
-        // Real ed25519 verification inside mainline's from_dht_message.
+        // Real ed25519 verification inside mainline's from_dht_message,
+        // against the *blinded* key, then AEAD-open with the derived key.
         let parsed = bob
             .resolve(&alice_pub)
             .expect("bob should find alice's record");
@@ -797,9 +999,53 @@ mod tests {
         let parsed = parse_record(&value);
         assert_eq!(parsed.tcp, Some(mapped));
         assert!(parsed.direct.contains(&mapped));
+    }
 
-        // Negative: unknown pubkey returns None (no garbage, no panic).
-        assert!(bob.resolve(&[0u8; 32]).is_none());
+    #[test]
+    fn testnet_publish_resolve_roundtrip_nosecret() {
+        run_publish_resolve(None);
+    }
+
+    #[test]
+    fn testnet_publish_resolve_roundtrip_secret() {
+        run_publish_resolve(Some([0x42; 32]));
+    }
+
+    /// Period rollover: publisher at N, resolver at N+1 → resolver's
+    /// first query (blinded for N+1) misses, fallback to N hits.
+    #[test]
+    fn testnet_period_rollover_fallback() {
+        use mainline::Testnet;
+        let testnet = Testnet::new(10).expect("testnet spawn");
+        let secret = Some([0x77u8; 32]);
+
+        let alice_key = SigningKey::from_seed(&[7u8; 32]);
+        let alice_pub = *alice_key.public_key();
+        let mut alice = Discovery::with_dht(
+            mainline::Dht::builder()
+                .bootstrap(&testnet.bootstrap)
+                .build()
+                .unwrap(),
+            alice_key,
+            655,
+            secret,
+        );
+        alice.set_period_fn(|| 1000);
+        alice.set_reflexive_v4("198.51.100.9:7".parse().unwrap());
+        alice.publish(Instant::now()).expect("publish");
+
+        let mut bob = Discovery::with_dht(
+            mainline::Dht::builder()
+                .bootstrap(&testnet.bootstrap)
+                .build()
+                .unwrap(),
+            SigningKey::from_seed(&[9u8; 32]),
+            655,
+            secret,
+        );
+        bob.set_period_fn(|| 1001);
+        let parsed = bob.resolve(&alice_pub).expect("period-1 fallback");
+        assert!(parsed.direct.contains(&"198.51.100.9:7".parse().unwrap()));
     }
 
     /// The async resolver path: what `retry_outgoing` actually drives.
@@ -813,6 +1059,7 @@ mod tests {
         use mainline::Testnet;
 
         let testnet = Testnet::new(10).expect("testnet spawn");
+        let secret = Some([0x55u8; 32]);
         let alice_key = SigningKey::from_seed(&[13u8; 32]);
         let alice_pub = *alice_key.public_key();
         let mut alice = Discovery::with_dht(
@@ -822,6 +1069,7 @@ mod tests {
                 .expect("alice dht"),
             alice_key,
             655,
+            secret,
         );
         alice.set_reflexive_v4("198.51.100.2:9999".parse().unwrap());
         alice.publish(Instant::now()).expect("publish");
@@ -833,6 +1081,7 @@ mod tests {
                 .expect("carol dht"),
             SigningKey::from_seed(&[17u8; 32]),
             655,
+            secret,
         );
         // Lazy spawn: resolver doesn't exist until first request.
         assert!(carol.resolver.is_none());

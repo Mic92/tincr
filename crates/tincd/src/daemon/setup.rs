@@ -571,7 +571,7 @@ impl Daemon {
         }
 
         // ─── settings
-        let settings = load_settings(&config)?;
+        let settings = load_settings(&config, confbase)?;
 
         // ─── device
         let device = open_device(&config)?;
@@ -984,11 +984,17 @@ impl Daemon {
         } else {
             Some(self.settings.dht_bootstrap.as_slice())
         };
-        match crate::discovery::Discovery::spawn(key, self.my_udp_port, bootstrap) {
+        match crate::discovery::Discovery::spawn(
+            key,
+            self.my_udp_port,
+            self.settings.dht_secret,
+            bootstrap,
+        ) {
             Ok(d) => {
                 log::info!(target: "tincd::discovery",
-                "DHT discovery enabled (port {}, bootstrap: {})",
+                "DHT discovery enabled (port {}, secret: {}, bootstrap: {})",
                 self.my_udp_port,
+                if self.settings.dht_secret.is_some() { "yes" } else { "no" },
                 bootstrap.map_or_else(
                     || "mainline".to_owned(),
                     |b| b.join(", ")

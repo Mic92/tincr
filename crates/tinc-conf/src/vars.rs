@@ -318,6 +318,13 @@ pub static VARS: &[Var] = &[
     // (the port-probe keepalive) on a port the operator may not have
     // intended to expose. Opt-in must be deliberate.
     v("DhtDiscovery", S),
+    // DhtSecretFile: SERVER, NOT SAFE — an inviter who can set the
+    // mesh-wide secret can also *change* it, partitioning the invitee
+    // from the existing mesh's published records. Operator-set only.
+    // File-only (no inline DhtSecret) for the same reason
+    // Ed25519PrivateKeyFile has no inline form: tinc.conf is
+    // world-readable on most deploys and ends up in the Nix store.
+    v("DhtSecretFile", S),
     // DNS stub (Rust-only). SERVER, MULTIPLE for DNSAddress (one v4
     // + one v6). NOT SAFE: an invitation that sets DNSAddress points
     // every name lookup at an attacker-chosen resolver.
@@ -330,7 +337,7 @@ pub static VARS: &[Var] = &[
 /// check is the one that matters — drift here means a config key was
 /// added/removed upstream and our table
 /// is stale. The +N is fixed (this crate owns those keys).
-const _: () = assert!(VARS.len() == 74 + 4);
+const _: () = assert!(VARS.len() == 74 + 5);
 
 /// Look up by name, case-insensitive. C does this inline everywhere
 /// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We
