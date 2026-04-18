@@ -59,6 +59,7 @@ nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 
 ```sh
 sudo tinc -n myvpn init alice
+sudo tinc -n myvpn add DeviceType tun
 sudo tinc -n myvpn add Subnet 10.20.0.1
 sudo tinc -n myvpn edit tinc-up      # ip addr add 10.20.0.1/24 dev $INTERFACE
 sudo tincd -n myvpn -D

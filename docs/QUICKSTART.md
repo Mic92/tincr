@@ -10,8 +10,7 @@ needs root; prefix with `sudo` or run from a root shell.
 
 ## Pick a netname and address range
 
-- netname: `myvpn` (becomes `/etc/tinc/myvpn` and the TUN interface
-  name `myvpn`)
+- netname: `myvpn` (config lives in `/etc/tinc/myvpn`)
 - VPN range: `10.20.0.0/24`
 - node `alpha` → `10.20.0.1`, public address `203.0.113.10`
 - node `beta` → `10.20.0.2`
@@ -20,9 +19,16 @@ needs root; prefix with `sudo` or run from a root shell.
 
 ```sh
 tinc -n myvpn init alpha
+tinc -n myvpn add DeviceType tun
+tinc -n myvpn add Interface myvpn
 tinc -n myvpn add Subnet 10.20.0.1
 tinc -n myvpn add Address 203.0.113.10     # alpha's reachable address
 ```
+
+> `DeviceType` is required: tincr defaults to a **dummy** device (so
+> tests can run unprivileged). Without it the daemon starts, peers
+> connect, and no packets flow. `Interface = myvpn` pins the kernel
+> ifname; otherwise you get `tun0`/`tun1`/….
 
 `init` wrote a stub `tinc-up`; make it bring the interface up:
 
@@ -43,6 +49,8 @@ so the kernel routes every `10.20.0.0/24` packet into the TUN.
 
 ```sh
 tinc -n myvpn init beta
+tinc -n myvpn add DeviceType tun
+tinc -n myvpn add Interface myvpn
 tinc -n myvpn add Subnet 10.20.0.2
 tinc -n myvpn add ConnectTo alpha
 tinc -n myvpn edit tinc-up               # ip addr add 10.20.0.2/24 dev $INTERFACE
@@ -66,6 +74,9 @@ tinc -n myvpn export | ssh root@alpha tinc -n myvpn import
 not copy files at all.)
 
 ## Start and verify
+
+Open TCP+UDP **655** in your firewall on alpha (the side with
+`Address`). Then:
 
 ```sh
 # both nodes, foreground with logs
@@ -102,8 +113,10 @@ end.
    tinc -n myvpn add DhtDiscovery yes
    tinc -n myvpn add DhtSecretFile dht.secret
    tinc -n myvpn add UPnP yes        # optional: ask the router for a port map
-   tinc -n myvpn reload              # or restart
    ```
+
+   Then **restart** `tincd` (DHT and `DhtSecretFile` are read once at
+   startup; `tinc reload` does not enable them).
 
    With no `DhtBootstrap` lines the daemon dials the public mainline
    bootstrap list and persists its routing table to
@@ -117,6 +130,8 @@ end.
 
    ```sh
    tinc -n myvpn init carol
+   tinc -n myvpn add DeviceType tun
+   tinc -n myvpn add Interface myvpn
    tinc -n myvpn add Subnet 10.20.0.3
    tinc -n myvpn add ConnectTo alpha          # name only — no Address for alpha
    tinc -n myvpn add DhtDiscovery yes
