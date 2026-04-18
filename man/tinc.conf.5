@@ -1,0 +1,311 @@
+.Dd April 18, 2026
+.Dt TINC.CONF 5
+.Os
+.Sh NAME
+.Nm tinc.conf
+.Nd tinc daemon configuration
+.Sh DESCRIPTION
+.Xr tincd 8
+reads two kinds of plain-text configuration files from its
+configuration directory
+.Pq Pa /etc/tinc/ Ns Ar NETNAME :
+.Bl -tag -width Ds
+.It Pa tinc.conf
+Daemon-wide
+.Pq Dq server
+settings.
+.It Pa hosts/ Ns Ar NAME
+Per-node
+.Pq Dq host
+settings: one file per mesh member, including the local node.
+.El
+.Pp
+Each line is
+.Dl Ar Variable Op = Ar Value
+The
+.Ql =
+is optional; leading/trailing whitespace and lines starting with
+.Ql #
+are ignored.
+Variable names are case-insensitive.
+Unknown variables are ignored.
+For single-valued variables only the first occurrence is used;
+variables marked
+.Bq multiple
+below may repeat.
+.Pp
+Variables marked
+.Bq server, host
+may appear in
+.Pa tinc.conf
+as a default and in
+.Pa hosts/ Ns Ar NAME
+as a per-peer override.
+.Pp
+The
+.Fl o Ar KEY=VALUE
+flag of
+.Xr tincd 8
+overrides any file value for
+.Ar KEY .
+.Sh SERVER VARIABLES
+.Pq Pa tinc.conf
+.Bl -tag -width Ds
+.It Va Name Li = Ar NAME Pq required
+This node's identifier; alphanumerics and underscore.
+A value of
+.Ql $HOST
+substitutes the system hostname.
+.It Va ConnectTo Li = Ar NAME Bq multiple
+Maintain an outgoing meta-connection to
+.Ar NAME .
+.It Va AutoConnect Li = yes | no Pq yes
+Automatically maintain about three meta-connections to randomly chosen
+reachable nodes, and opportunistically open direct
+.Pq Dq shortcut
+connections to nodes that are receiving high relayed traffic
+.Pq tincr extension to the upstream algorithm .
+.It Va AddressFamily Li = ipv4 | ipv6 | any Pq any
+Address families to listen on and dial.
+.It Va BindToAddress Li = Ar HOST Op Ar PORT Bq multiple
+Bind listening sockets to
+.Ar HOST .
+The first entry is also used as the source address for outgoing
+connections.
+.It Va ListenAddress Li = Ar HOST Op Ar PORT Bq multiple
+Additional listening address; unlike
+.Va BindToAddress
+it does not affect outgoing connections.
+.It Va BindToInterface Li = Ar IFACE
+Bind sockets to
+.Ar IFACE
+.Pq Dv SO_BINDTODEVICE .
+.It Va Mode Li = router | switch | hub Pq router
+Routing layer:
+.Sy router
+is L3 over a TUN device;
+.Sy switch
+and
+.Sy hub
+are L2 over a TAP device.
+Not reloadable.
+.It Va Device Li = Ar PATH
+TUN/TAP device node (default
+.Pa /dev/net/tun
+on Linux).
+.It Va DeviceType Li = tun | tap | dummy | fd
+Override device-type autodetection.
+.It Va Interface Li = Ar NAME
+Network interface name to assign to the device.
+.It Va DeviceStandby Li = yes | no Pq no
+Defer
+.Pa tinc-up
+until the first peer becomes reachable, and run
+.Pa tinc-down
+when the last becomes unreachable.
+.It Va Forwarding Li = off | internal | kernel Pq internal
+.Sy off
+drops packets not addressed to us;
+.Sy kernel
+writes every received packet to the device and lets the OS route.
+.It Va Broadcast Li = no | mst | direct Pq mst
+How to deliver broadcast/multicast packets.
+.It Va BroadcastSubnet Li = Ar ADDRESS Ns Oo / Ns Ar PREFIX Oc Bq multiple
+In router mode, treat destinations in
+.Ar ADDRESS
+as broadcast.
+.It Va DecrementTTL Li = yes | no Pq no
+Decrement the inner IP TTL on forwarded packets.
+.It Va DirectOnly Li = yes | no Pq no
+Reply with ICMP
+.Dq net unreachable
+instead of relaying via an intermediate node.
+.It Va PriorityInheritance Li = yes | no Pq no
+Copy the inner packet's TOS/traffic-class to the outer UDP socket.
+.It Va TunnelServer Li = yes | no Pq no
+Hub mode: do not gossip indirect topology to peers.
+Implies
+.Va StrictSubnets .
+.It Va StrictSubnets Li = yes | no Pq no
+Only accept
+.Va Subnet
+claims that are present in the local
+.Pa hosts/
+files.
+.It Va LocalDiscovery Li = yes | no Pq yes
+Probe peers' LAN-side addresses learned from edge gossip.
+.It Va UDPDiscovery Li = yes | no Pq yes
+Enable UDP reachability/hole-punching probes.
+When
+.Sy no ,
+all traffic is tunnelled over TCP.
+.It Va UDPDiscoveryInterval Li = Ar SECONDS Pq 2
+Probe interval while UDP is unconfirmed.
+.It Va UDPDiscoveryKeepaliveInterval Li = Ar SECONDS Pq 10
+Probe interval while UDP is confirmed (NAT keep-alive).
+.It Va UDPDiscoveryTimeout Li = Ar SECONDS Pq 30
+Declare UDP dead after this long without a reply.
+.It Va UDPInfoInterval Li = Ar SECONDS Pq 5
+Debounce for relaying UDP-address gossip.
+.It Va MTUInfoInterval Li = Ar SECONDS Pq 5
+Debounce for relaying path-MTU gossip.
+.It Va PingInterval Li = Ar SECONDS Pq 60
+Send a meta-connection keep-alive after this much idle time.
+.It Va PingTimeout Li = Ar SECONDS Pq 5
+Close a meta-connection that does not answer a ping.
+.It Va MaxTimeout Li = Ar SECONDS Pq 900
+Cap on the exponential reconnect backoff.
+.It Va MaxConnectionBurst Li = Ar N Pq 10
+Tarpit incoming connections beyond
+.Ar N
+per second.
+.It Va MaxOutputBufferSize Li = Ar BYTES Pq 10\(muMTU
+Random-early-drop threshold for buffered TCP-tunnelled packets.
+.It Va KeyExpire Li = Ar SECONDS Pq 3600
+Force an SPTPS rekey on every tunnel at this interval.
+.It Va ReplayWindow Li = Ar PACKETS Pq 32
+Datagram anti-replay window size.
+.It Va MACExpire Li = Ar SECONDS Pq 600
+Lease time for learned MAC addresses in switch mode.
+.It Va InvitationExpire Li = Ar SECONDS Pq 604800
+Reject invitations older than this.
+.It Va Proxy Li = Ar TYPE Ar ...
+Dial outgoing connections through a proxy.
+.Ar TYPE
+is one of
+.Sy socks4 ,
+.Sy socks5 ,
+.Sy http ,
+or
+.Sy exec ;
+arguments depend on the type.
+.It Va FWMark Li = Ar MARK Pq 0
+Set
+.Dv SO_MARK
+on all sockets (Linux).
+.It Va UDPRcvBuf Li = Ar BYTES Pq 1048576
+.It Va UDPSndBuf Li = Ar BYTES Pq 1048576
+UDP socket receive/send buffer sizes.
+.It Va ProcessPriority Li = low | normal | high
+.Xr setpriority 2
+the daemon to nice 10/0/\(mi10.
+.It Va LogLevel Li = Ar N
+Debug level (0\(en5); used when
+.Fl d
+was not given on the command line.
+.It Va Sandbox Li = none | normal | high Pq none
+Restrict the daemon after setup using Landlock and seccomp (Linux).
+.It Va ScriptsInterpreter Li = Ar PATH
+Run hook scripts as
+.Ar PATH Pa script
+instead of executing them directly.
+.It Va Ed25519PrivateKeyFile Li = Ar PATH Pq Pa ed25519_key.priv
+Path to the local Ed25519 private key.
+.It Va UPnP Li = yes | udponly | no Pq no
+Ask the LAN gateway via NAT-PMP/UPnP-IGD to forward the listening
+port.
+.It Va UPnPDiscoverWait Li = Ar SECONDS Pq 5
+SSDP discovery timeout.
+.It Va UPnPRefreshPeriod Li = Ar SECONDS Pq 60
+Re-request the port mapping at this interval.
+.It Va DhtDiscovery Li = yes | no Po no Pc Bq tincr extension
+Publish this node's reflexive address(es) to the BitTorrent Mainline
+DHT (BEP\ 44, keyed by the Ed25519 public key) and resolve peers'
+addresses the same way.
+.It Va DhtBootstrap Li = Ar HOST:PORT Bq multiple, tincr extension
+DHT bootstrap nodes; replaces the built-in public seed list.
+.It Va DhtSecretFile Li = Ar PATH Bq tincr extension
+32-byte mesh-wide secret (raw or one base64 line) mixed into the DHT
+record key derivation, so that
+.Pa hosts/ Ns Ar NAME
+alone is insufficient to locate or decrypt a published record.
+.It Va DNSAddress Li = Ar ADDRESS Bq multiple, tincr extension
+Serve a DNS stub resolver on
+.Ar ADDRESS
+that answers
+.Ar NODE Ns Va .DNSSuffix
+from the subnet table.
+.It Va DNSSuffix Li = Ar DOMAIN Bq tincr extension
+Zone suffix for the stub resolver.
+.El
+.Ss Accepted but ignored
+The following server variables are recognised by the parser for
+compatibility with the C implementation but have no effect in this
+build:
+.Va ExperimentalProtocol
+(always on),
+.Va Hostnames ,
+.Va IffOneQueue ,
+.Va PrivateKeyFile ,
+.Va ScriptsExtension ,
+.Va VDEGroup ,
+.Va VDEPort .
+.Va GraphDumpFile
+and
+.Va PrivateKey
+are obsolete.
+.Sh HOST VARIABLES
+.Pq Pa hosts/ Ns Ar NAME
+.Bl -tag -width Ds
+.It Va Address Li = Ar HOST Op Ar PORT Bq multiple
+Reachable address(es) of
+.Ar NAME .
+Required for any node listed in
+.Va ConnectTo .
+.It Va Port Li = Ar PORT Pq 655
+TCP/UDP port
+.Ar NAME
+listens on.
+The local node's own
+.Va Port
+goes in its own host file, not in
+.Pa tinc.conf .
+.It Va Subnet Li = Ar ADDRESS Ns Oo / Ns Ar PREFIX Oc Ns Oo # Ns Ar WEIGHT Oc Bq multiple
+Subnet owned by
+.Ar NAME ;
+in switch mode, a MAC address.
+.It Va Ed25519PublicKey Li = Ar KEY
+The node's Ed25519 public key (tinc base64).
+Alternatively a PEM block may be appended to the host file.
+.It Va Ed25519PublicKeyFile Li = Ar PATH Bq server, host
+Read the public key from
+.Ar PATH .
+.It Va Weight Li = Ar N Bq server, host
+Fixed edge weight for routing decisions; overrides the measured RTT.
+.It Va PMTU Li = Ar BYTES Bq server, host
+Clamp the path MTU towards this node.
+.It Va PMTUDiscovery Li = yes | no Po yes Pc Bq server, host
+Probe for the actual path MTU.
+.It Va ClampMSS Li = yes | no Po yes Pc Bq server, host
+Rewrite TCP MSS in forwarded SYN segments to fit the path MTU.
+.It Va Compression Li = Ar LEVEL Po 0 Pc Bq server, host
+Compression level peers should use towards us: 0 none, 1\(en9 zlib,
+12 LZ4.
+LZO (10\(en11) is not available in this build.
+.It Va IndirectData Li = yes | no Po no Pc Bq server, host
+Always route data to this node via the meta-connection path, even when
+direct UDP would be possible.
+.It Va TCPOnly Li = yes | no Po no Pc Bq server, host
+Never send UDP to this node.
+.El
+.Ss Accepted but ignored
+.Va Cipher ,
+.Va Digest
+and
+.Va MACLength
+configure the legacy (pre-SPTPS) protocol and are ignored.
+.Va PublicKey
+and
+.Va PublicKeyFile
+.Pq RSA
+are obsolete.
+.Sh FILES
+.Bl -tag -width Ds -compact
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /tinc.conf
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /hosts/ Ns Ar NAME
+.It Pa /etc/tinc/ Ns Ar NETNAME Ns /conf.d/*.conf
+Additional server configuration fragments.
+.El
+.Sh SEE ALSO
+.Xr tinc 8 ,
+.Xr tincd 8

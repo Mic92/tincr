@@ -1,0 +1,224 @@
+.Dd April 18, 2026
+.Dt TINC 8
+.Os
+.Sh NAME
+.Nm tinc
+.Nd tinc VPN control and configuration utility
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar DIR
+.Op Fl n Ar NETNAME
+.Op Fl -pidfile Ns = Ns Ar FILE
+.Op Fl b
+.Op Fl -force
+.Ar COMMAND
+.Op Ar ARG ...
+.Sh DESCRIPTION
+.Nm
+creates and inspects tinc configuration on disk and talks to a running
+.Xr tincd 8
+over its control socket.
+.Pp
+Global options must precede the command name.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl c , Fl -config Ns = Ns Ar DIR
+Use
+.Ar DIR
+as the configuration directory.
+.It Fl n , Fl -net Ns = Ns Ar NETNAME
+Select the network
+.Ar NETNAME ;
+.Ev NETNAME
+is the fallback.
+.It Fl -pidfile Ns = Ns Ar FILE
+Locate the running daemon's pidfile and control socket via
+.Ar FILE .
+.It Fl b , Fl -batch
+Accepted for compatibility; this build never prompts.
+.It Fl -force
+Override safety checks (overwrite on
+.Cm import ,
+allow obsolete variables in
+.Cm set ,
+accept unsafe variables in
+.Cm join ) .
+.It Fl -help , Fl -version
+Print help or version and exit.
+.El
+.Sh COMMANDS
+.Ss Configuration
+.Bl -tag -width Ds
+.It Cm init Ar NAME
+Create
+.Pa tinc.conf ,
+.Pa hosts/ Ns Ar NAME ,
+and a fresh Ed25519 key pair.
+Reads
+.Ar NAME
+from stdin if omitted and stdin is not a terminal.
+.It Cm get Ar [NODE.]VARIABLE
+Print the value(s) of
+.Ar VARIABLE
+from
+.Pa tinc.conf
+or
+.Pa hosts/ Ns Ar NODE .
+.It Cm set Ar [NODE.]VARIABLE VALUE
+Set
+.Ar VARIABLE
+to
+.Ar VALUE ,
+replacing any existing values, then reload the daemon if running.
+.It Cm add Ar [NODE.]VARIABLE VALUE
+Append
+.Ar VALUE
+for a multi-valued
+.Ar VARIABLE
+.Pq e.g.\& Va Subnet , Va ConnectTo .
+.It Cm del Ar [NODE.]VARIABLE Op Ar VALUE
+Remove all occurrences, or only those matching
+.Ar VALUE .
+.It Cm config Op Cm get | set | add | del | replace | change Ar ...
+Umbrella form of the above; bare
+.Cm config Ar VARIABLE
+defaults to
+.Cm get .
+.It Cm edit Ar FILE
+Open
+.Ar FILE
+.Pq Pa tinc.conf , tinc-up , or a host name
+in
+.Ev VISUAL Ns / Ns Ev EDITOR Ns / Ns Cm vi ,
+then reload the daemon.
+.It Cm fsck
+Check configuration files for problems; exits non-zero on error.
+.It Cm network
+List networks (subdirectories with a
+.Pa tinc.conf )
+under
+.Pa /etc/tinc .
+The
+.Dq switch network
+form is not supported; use
+.Fl n .
+.El
+.Ss Key management
+.Bl -tag -width Ds
+.It Cm generate-ed25519-keys
+Generate a new Ed25519 key pair into the configuration directory.
+.It Cm generate-keys
+Same as
+.Cm generate-ed25519-keys
+.Pq RSA is not supported in this build .
+.It Cm generate-rsa-keys Op Ar BITS
+No-op; prints a warning and exits 0.
+Kept for compatibility with init scripts.
+.It Cm sign Op Ar FILE
+Write a signed copy of
+.Ar FILE
+(or stdin) to stdout.
+.It Cm verify Ar NODE | * | \&. Op Ar FILE
+Verify a file produced by
+.Cm sign .
+.Ql *
+accepts any known node;
+.Ql \&.
+means our own key.
+.El
+.Ss Host exchange
+.Bl -tag -width Ds
+.It Cm export
+Write the local node's host file to stdout.
+.It Cm export-all
+Write all host files to stdout, separated by
+.Ql #---------------------------------------------------------------# .
+.It Cm import
+Read host file(s) from stdin and write them under
+.Pa hosts/ .
+With
+.Fl -force ,
+overwrite existing files.
+.It Cm exchange , Cm exchange-all
+.Cm export
+.Pq or Cm export-all
+followed by
+.Cm import .
+.It Cm invite Ar NODE
+Generate an invitation URL for
+.Ar NODE
+and print it to stdout.
+.It Cm join Op Ar URL
+Join a network using an invitation URL (read from stdin if omitted).
+.El
+.Ss Daemon control
+.Bl -tag -width Ds
+.It Cm start Op Ar tincd-options ...
+Spawn
+.Xr tincd 8
+with derived
+.Fl -pidfile
+and
+.Fl -socket ,
+passing extra arguments through.
+.It Cm stop
+Ask the running daemon to terminate.
+.It Cm restart Op Ar tincd-options ...
+.Cm stop
+then
+.Cm start .
+.It Cm reload
+Partial configuration reload (see
+.Xr tincd 8
+.Sx RELOAD ) .
+.It Cm retry
+Reset outgoing-connection backoff and reconnect immediately.
+.It Cm purge
+Forget unreachable nodes and their subnets.
+.It Cm debug Op Ar N
+Show or set the daemon's debug level.
+Without
+.Ar N ,
+prints the current level.
+.It Cm disconnect Ar NODE
+Close the meta-connection with
+.Ar NODE .
+.It Cm pid
+Print the daemon's PID.
+.El
+.Ss Diagnostics
+.Bl -tag -width Ds
+.It Cm dump | list Oo Cm reachable Oc Cm nodes
+.It Cm dump edges | subnets | connections
+.It Cm dump graph | digraph
+.It Cm dump invitations
+List the corresponding daemon state in a script-friendly form.
+.Cm graph
+output is in
+.Xr dot 1
+format.
+.Cm dump invitations
+reads
+.Pa invitations/
+and works without a running daemon.
+.It Cm info Ar NODE | SUBNET | ADDRESS
+Show details about a node, or which node owns an address.
+.It Cm top
+Real-time per-node traffic counters in a curses-style view.
+Press
+.Sy q
+to quit.
+.It Cm log Op Ar LEVEL
+Stream the daemon's log to stdout until interrupted.
+.It Cm pcap Op Ar SNAPLEN
+Stream tunnelled packets in
+.Xr pcap 3
+format to stdout, e.g. into
+.Ql wireshark -k -i - .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr tinc.conf 5 ,
+.Xr tinc-auth 8 ,
+.Xr tincd 8
