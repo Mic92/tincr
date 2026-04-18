@@ -7,6 +7,9 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Deps in their own derivation → src-only changes skip the
+    # ~50s vendor+rebuild that buildRustPackage redoes every commit.
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -14,6 +17,7 @@
       self,
       nixpkgs,
       treefmt-nix,
+      crane,
     }:
     let
       systems = [
@@ -33,7 +37,9 @@
           kat-node-id = pkgs.callPackage ./nix/kat-node-id.nix { };
           sptps-test-c = pkgs.callPackage ./nix/sptps-test-c.nix { };
           tincd-c = pkgs.callPackage ./nix/tincd-c.nix { };
-          tincd = pkgs.callPackage ./nix/tincd.nix { };
+          tincd = pkgs.callPackage ./nix/tincd.nix {
+            craneLib = crane.mkLib pkgs;
+          };
           # TODO: hermetic `checks.cross-impl` derivation. Needs
           # `rustPlatform.buildRustPackage` to vendor deps; a naive
           # `runCommand` + `cargo test --offline` dies in the sandbox
