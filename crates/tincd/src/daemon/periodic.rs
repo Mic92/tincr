@@ -211,6 +211,30 @@ impl Daemon {
         self.contradicting_add_edge = 0;
         self.contradicting_del_edge = 0;
 
+        // ─── off-thread DNS drain. Non-blocking; same shape as the
+        // DHT-worker drain below. Results land in `dns_hints` /
+        // `proxy_addrs`; the *next* `setup_outgoing_connection` (via
+        // the RetryOutgoing timer) reads them. No reactor wake —
+        // outgoing retries are seconds-granular (see bgresolve.rs).
+        for res in self.dns_worker.drain().collect::<Vec<_>>() {
+            match res {
+                crate::bgresolve::DnsRes::Outgoing { node, addrs } => {
+                    if !addrs.is_empty() {
+                        // Feed live AddressCaches too: a result that
+                        // arrives mid-round (cursor parked at tier 3)
+                        // becomes visible without waiting for reset.
+                        for o in self.outgoings.values_mut().filter(|o| o.node_name == node) {
+                            o.addr_cache.extend_resolved(addrs.iter().copied());
+                        }
+                        self.dns_hints.insert(node, addrs);
+                    }
+                }
+                crate::bgresolve::DnsRes::Proxy { addrs } => {
+                    self.proxy_addrs = Some(addrs);
+                }
+            }
+        }
+
         if self.settings.autoconnect && self.node_ids.len() > 1 {
             let action = self.decide_autoconnect();
             self.execute_auto_action(action);

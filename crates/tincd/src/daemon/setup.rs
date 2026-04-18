@@ -828,6 +828,9 @@ impl Daemon {
             running: true,
             any_pcap: false,
             discovery: None,
+            dns_worker: crate::bgresolve::DnsWorker::spawn(),
+            dns_hints: HashMap::new(),
+            proxy_addrs: Vec::new(),
             dht_hints: HashMap::new(),
             dht_probe_sent: HashSet::new(),
             #[cfg(feature = "upnp")]
@@ -835,6 +838,11 @@ impl Daemon {
             tx_snap: None,
             tunnel_handles: IntHashMap::default(),
         };
+
+        // ─── proxy host pre-resolve. Non-blocking; literal IPs
+        // short-circuit so `Proxy = socks5 127.0.0.1 9050` works on
+        // the very first dial without waiting one tick.
+        daemon.request_proxy_resolve();
 
         // ─── try_outgoing_connections - the actual setup
         // Done HERE (not above) because it needs `&mut self` for the

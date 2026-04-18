@@ -26,14 +26,17 @@
 //! ## Lazy hostname resolve (`:157-199`)
 //!
 //! `get_recent_address` calls `getaddrinfo` for each `Address =
-//! bob.example.com 655` line **as the cursor reaches
-//! it** — DNS at connect time, not config load time. Tier 3 stores
-//! unresolved `(host, port)` pairs; [`AddressCache::next_addr`]
-//! resolves on demand. The resolve is **blocking** (so
-//! is C's). Win over eager: `open()` doesn't block, AND each retry
-//! round (after `reset()`) re-resolves, so dynamic DNS picks up the
-//! new IP. Per-round resolve cache: each `Address` line resolves
-//! once per round, results buffered until `reset()`.
+//! bob.example.com 655` line **as the cursor reaches it** — DNS at
+//! connect time, not config load time. We diverge: tier 3 stores
+//! unresolved `(host, port)` pairs; literal IPs are parsed inline
+//! (no libc), and *hostnames* are resolved off-thread by
+//! [`crate::bgresolve::DnsWorker`] then fed back via
+//! [`AddressCache::extend_resolved`]. `next_addr()` itself never
+//! blocks. If the cursor reaches tier 3 before the worker has
+//! answered, it returns `None` (exhausted-for-now); `retry_outgoing`
+//! re-drives a few seconds later by which time results are in. Each
+//! `reset()` clears `config_resolved` so dynamic DNS is re-queried
+//! per retry round (the daemon re-queues the worker on `reset`).
 //!
 //! ## Tier structure: three vecs, not one
 //!
@@ -55,7 +58,7 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 /// `address_cache.h:25`: `#define MAX_CACHED_ADDRESSES 8`. Only the
@@ -84,14 +87,16 @@ pub struct AddressCache {
     /// Tier 3 source: `Address =` config lines, **unresolved**.
     /// Static after `open()`.
     config: Vec<(String, u16)>,
-    /// Tier 3 resolved buffer. `next_addr` extends this lazily as the
-    /// cursor walks into tier 3 (one `to_socket_addrs()` per
-    /// `config[config_idx]` line). C's `cache->ai` (`:159-184`).
+    /// Tier 3 resolved buffer: literal-IP `config[]` entries (parsed
+    /// inline, no libc) plus whatever the off-thread resolver fed via
+    /// [`Self::extend_resolved`]. C's `cache->ai` (`:159-184`).
     /// Cleared on `reset()` → fresh DNS each retry round.
     config_resolved: Vec<SocketAddr>,
-    /// Next `config[]` index to resolve. C: implicit in the
-    /// `lookup_config_next` walk (`:194`).
-    config_idx: usize,
+    /// `config[]` indices that did NOT parse as a literal IP — i.e.
+    /// the lines that need a real `getaddrinfo`. Computed once at
+    /// `open()`. [`Self::unresolved_hosts`] hands these to the
+    /// `DnsWorker` per retry round.
+    config_hostnames: Vec<usize>,
     /// Index into the logical `cached ‖ known ‖ config_resolved`
     /// concatenation. `reset()` zeroes. C: `tried` (`:122`, `:243`).
     cursor: usize,
@@ -108,6 +113,18 @@ pub struct AddressCache {
 /// being set IS the operator signal that confbase is managed; bare
 /// `tincd -n foo` / chroot / BSD have no `$STATE_DIRECTORY` and keep
 /// the C layout.
+/// Indices of `(host, _)` entries that are NOT literal IPv4/IPv6.
+/// `IpAddr::from_str` accepts both (no brackets); anything else needs
+/// `getaddrinfo`.
+fn hostname_indices(config: &[(String, u16)]) -> Vec<usize> {
+    config
+        .iter()
+        .enumerate()
+        .filter(|(_, (h, _))| h.parse::<IpAddr>().is_err())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 fn resolve_cache_dir(confbase: &Path, state_dir: Option<&Path>) -> PathBuf {
     state_dir.unwrap_or(confbase).join("cache")
 }
@@ -138,12 +155,13 @@ impl AddressCache {
             }
         }
 
+        let config_hostnames = hostname_indices(&config);
         Self {
             cached,
             known: Vec::new(),
             config,
             config_resolved: Vec::new(),
-            config_idx: 0,
+            config_hostnames,
             cursor: 0,
             cache_file: Some(cache_file),
         }
@@ -160,7 +178,7 @@ impl AddressCache {
             known: Vec::new(),
             config: Vec::new(),
             config_resolved: Vec::new(),
-            config_idx: 0,
+            config_hostnames: Vec::new(),
             cursor: 0,
             cache_file: None,
         }
@@ -217,13 +235,14 @@ impl AddressCache {
 
     /// `get_recent_address` (`:119-215`). Returns next addr; `None`
     /// when exhausted. Three-phase walk: cached → edge-known →
-    /// config-with-getaddrinfo. Tiers 1/2 are pre-built; tier 3
-    /// resolves lazily HERE (`:157-199`: `str2addrinfo` per
-    /// `Address` line as the cursor reaches it).
+    /// config. Tiers 1/2 are pre-built; tier 3 is the literal-IP
+    /// `Address=` lines plus whatever the off-thread DNS worker has
+    /// fed via [`Self::extend_resolved`].
     ///
-    /// **Blocking**: tier-3 entry may call `to_socket_addrs()`
-    /// (= `getaddrinfo`). Same as C. Don't call from a hot loop
-    /// expecting sub-ms latency.
+    /// **Non-blocking**: if a hostname `Address=` line hasn't been
+    /// resolved yet, this returns `None` (exhausted-for-now) rather
+    /// than calling `getaddrinfo` on the epoll thread. The retry
+    /// timer re-drives after the worker fills `config_resolved`.
     pub fn next_addr(&mut self) -> Option<SocketAddr> {
         let cur = self.cursor;
         let n_cached = self.cached.len();
@@ -233,40 +252,19 @@ impl AddressCache {
         } else if cur < n_known {
             self.known.get(cur - n_cached).copied()
         } else {
-            // Tier 3. Walk `Address =` lines, resolve each via
-            // `getaddrinfo`, return one addr per call. The resolved
-            // chain is kept until reset so we
-            // don't re-resolve mid-round. `config_resolved` is that
-            // chain; `config_idx` is the `lookup_config_next` cursor.
+            // Tier 3. First entry into tier 3 this round: pull the
+            // literal-IP config lines into `config_resolved` (cheap
+            // string parse, no libc). Hostname lines are NOT touched
+            // here — the DnsWorker does those; `extend_resolved`
+            // appends its results. Dedup vs tiers 1/2/3 keeps the
+            // O(n) scan small (capped at MAX_KNOWN_ADDRESSES).
             let want = cur - n_known;
-            // Resolve more `Address` lines until we have addr `want` (or
-            // run out of lines). Each line may yield 0 (NXDOMAIN), 1,
-            // or several (v4+v6) addrs. Dups (vs tiers 1/2/3-so-far)
-            // just don't push — the loop keeps going. C's config tier
-            // doesn't dedup (`:151-199` has no `find_cached`); we do,
-            // harmlessly, saves a doomed connect.
-            while want >= self.config_resolved.len() && self.config_idx < self.config.len() {
-                let (host, port) = &self.config[self.config_idx];
-                self.config_idx += 1;
-                // `getaddrinfo` failure just moves to the next
-                // config line.
-                match (host.as_str(), *port).to_socket_addrs() {
-                    Ok(iter) => {
-                        for a in iter {
-                            if self.config_resolved.len() >= MAX_KNOWN_ADDRESSES {
-                                break;
-                            }
-                            if !self.cached.contains(&a)
-                                && !self.known.contains(&a)
-                                && !self.config_resolved.contains(&a)
-                            {
-                                self.config_resolved.push(a);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(target: "tincd::conn",
-                                   "Address = {host} {port}: {e}");
+            if want == 0 && self.config_resolved.is_empty() {
+                for i in 0..self.config.len() {
+                    let (host, port) = &self.config[i];
+                    if let Ok(ip) = host.parse::<IpAddr>() {
+                        let a = SocketAddr::new(ip, *port);
+                        self.push_resolved(a);
                     }
                 }
             }
@@ -276,6 +274,43 @@ impl AddressCache {
             self.cursor += 1;
         }
         addr
+    }
+
+    /// Tier-3 dedup-append. Shared by the literal-IP fast path and
+    /// [`Self::extend_resolved`].
+    fn push_resolved(&mut self, a: SocketAddr) {
+        if self.config_resolved.len() < MAX_KNOWN_ADDRESSES
+            && !self.cached.contains(&a)
+            && !self.known.contains(&a)
+            && !self.config_resolved.contains(&a)
+        {
+            self.config_resolved.push(a);
+        }
+    }
+
+    /// Feed off-thread DNS results into tier 3. Called from
+    /// `on_periodic_tick`'s `DnsWorker::drain`. Dedups vs all tiers.
+    /// Does NOT touch the cursor: if a previous `next_addr()` already
+    /// returned `None` for this round, the new addrs become visible
+    /// after the daemon's `reset()` → re-queue → next retry. If the
+    /// cursor is still mid-walk (rare — worker beat the connect
+    /// loop), the new addrs are picked up immediately.
+    pub fn extend_resolved(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
+        for a in addrs {
+            self.push_resolved(a);
+        }
+    }
+
+    /// `Address=` lines that need a real `getaddrinfo` (i.e. didn't
+    /// parse as a literal v4/v6). Handed to the `DnsWorker` per retry
+    /// round; empty for the common all-literal-IP config (NixOS test
+    /// fixtures).
+    #[must_use]
+    pub fn unresolved_hosts(&self) -> Vec<(String, u16)> {
+        self.config_hostnames
+            .iter()
+            .map(|&i| self.config[i].clone())
+            .collect()
     }
 
     /// `add_recent_address` (`:84-116`). Prepend a working address.
@@ -312,7 +347,6 @@ impl AddressCache {
     pub fn reset(&mut self) {
         self.cursor = 0;
         self.config_resolved.clear();
-        self.config_idx = 0;
     }
 
     /// Persist to `confbase/cache/NODE`. C does this inline in
@@ -534,25 +568,47 @@ mod tests {
         assert_eq!(body.trim(), "10.0.0.1:655");
     }
 
-    /// Two `Address =` lines: tier 3 yields both exactly once per
-    /// round; `reset()` clears the resolve buffer so the next round
-    /// re-resolves (dynamic DNS pickup).
+    /// Two literal-IP `Address =` lines: tier 3 yields both exactly
+    /// once per round (inline parse, no libc); `reset()` clears the
+    /// resolve buffer so the next round re-parses.
     #[test]
-    fn lazy_resolve_two_lines_once_per_round() {
+    fn literal_ip_two_lines_once_per_round() {
         let mut c = AddressCache::new(vec![]);
         c.config = vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)];
         let want = vec![sa("127.0.0.1:655"), sa("127.0.0.2:655")];
         assert_eq!(drain(&mut c), want);
         c.reset();
         assert_eq!(c.config_resolved.len(), 0);
-        assert_eq!(c.config_idx, 0);
         assert_eq!(drain(&mut c), want);
+    }
+
+    /// Hostname `Address=` lines are NOT resolved by `next_addr()`
+    /// (would block the epoll thread). Tier 3 yields nothing until
+    /// `extend_resolved` feeds results; `unresolved_hosts` reports
+    /// exactly the non-literal lines for the worker to chew on.
+    #[test]
+    fn hostname_not_resolved_inline() {
+        let mut c = AddressCache::open(
+            &tmpdir("host-noinline"),
+            "bob",
+            vec![cfg("10.0.0.1", 655), cfg("bob.example.com", 655)],
+        );
+        // Only the literal IP needs no DNS.
+        assert_eq!(c.unresolved_hosts(), vec![cfg("bob.example.com", 655)]);
+        // Before worker feeds anything: literal IP only, then None.
+        assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
+        assert_eq!(c.next_addr(), None);
+        // Worker landed; addrs become visible (cursor still parked
+        // past tier 3 — mid-round append, picked up immediately).
+        c.extend_resolved([sa("203.0.113.7:655")]);
+        assert_eq!(c.next_addr(), Some(sa("203.0.113.7:655")));
+        assert_eq!(c.next_addr(), None);
     }
 
     /// Resolve dedup: a config addr that's already in tier 1 (cached)
     /// is skipped at resolve time. The cursor doesn't drift.
     #[test]
-    fn lazy_resolve_dedup_vs_cached() {
+    fn literal_ip_dedup_vs_cached() {
         let mut c = AddressCache::new(vec![sa("127.0.0.1:655")]);
         c.config = vec![cfg("127.0.0.1", 655), cfg("127.0.0.2", 655)];
         // Tier 1: 127.0.0.1. Tier 3: 127.0.0.1 (dup, skipped) then 127.0.0.2.

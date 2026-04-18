@@ -26,7 +26,7 @@
 
 use std::ffi::CString;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
@@ -264,8 +264,9 @@ pub fn try_connect(
 /// `finish_connecting`).
 ///
 /// Same socket-create+nonblocking+connect shape as `try_connect`,
-/// but: (a) the connect target is the proxy host:port resolved here,
-/// (b) no addr-cache walk (the proxy is a single global config; if
+/// but: (a) the connect target is a *pre-resolved* proxy address (the
+/// `getaddrinfo` happens off-thread in [`crate::bgresolve::DnsWorker`]
+/// and is cached on `Daemon`), (b) no addr-cache walk (the proxy is a single global config; if
 /// it doesn't resolve or refuses, that's `Exhausted` immediately —
 /// the C does the same: `:593` `if(!proxyai) goto begin`, but begin
 /// just walks the next PEER addr through the SAME unreachable proxy,
@@ -279,26 +280,11 @@ pub fn try_connect(
 /// callers should treat `Exhausted` as the loop terminator.
 #[must_use]
 pub fn try_connect_via_proxy(
-    proxy_host: &str,
-    proxy_port: u16,
+    proxy_addr: SocketAddr,
     peer_addr: SocketAddr,
     node_name: &str,
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    // `proxyai = str2addrinfo(proxyhost, proxyport, ...)`. We
-    // resolve here. Blocking DNS (`getaddrinfo`
-    // inside the connect loop). Take the first addr; the C uses
-    // `proxyai->ai_addr` (also first).
-    let resolved = (proxy_host, proxy_port)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut it| it.next());
-    let Some(proxy_addr) = resolved else {
-        log::error!(target: "tincd::conn",
-                    "Could not resolve proxy {proxy_host}:{proxy_port} for {node_name}");
-        return ConnectAttempt::Exhausted;
-    };
-
     // `"Using proxy at %s port %s"`.
     log::info!(target: "tincd::conn",
                "Using proxy at {proxy_addr} for {node_name} ({peer_addr})");
@@ -723,9 +709,10 @@ pub fn do_outgoing_pipe(
 /// Parse `Address = host port` lines from `hosts/NAME` into
 /// **unresolved** `(host, port)` pairs. Resolve happens
 /// lazily in `get_recent_address` (`:157-199`). We mirror that:
-/// no DNS here, just string parsing. [`AddressCache::next_addr`]
-/// (`crate::addrcache::AddressCache::next_addr`) calls
-/// `to_socket_addrs()` when the cursor reaches tier 3.
+/// no DNS here, just string parsing. Literal IPs are parsed inline by
+/// [`AddressCache::next_addr`]; hostnames are handed to
+/// [`crate::bgresolve::DnsWorker`] via
+/// [`AddressCache::unresolved_hosts`].
 ///
 /// `Address = 10.0.0.1 655` → `("10.0.0.1", 655)`. `Address =
 /// bob.example.com` (no port) → `("bob.example.com", 655)` (default).

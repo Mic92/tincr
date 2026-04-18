@@ -458,6 +458,11 @@ impl Daemon {
             // Empty unless `retry_outgoing` fired → degrades to C
             // edge-walk. `add_known_addresses` dedups.
             .chain(self.dht_hints.get(&name).into_iter().flatten().copied())
+            // Off-thread getaddrinfo results for `Address=` hostnames.
+            // After DHT hints (DHT is observed-live; DNS is the
+            // operator-configured fallback). `add_known_addresses`
+            // dedups against tier 1 and itself.
+            .chain(self.dns_hints.get(&name).into_iter().flatten().copied())
             // Same gate as `discovery::parse_record`: ADD_EDGE addrs
             // are peer-authored gossip, dht_hints are peer self-
             // report. Neither may steer us at loopback/link-local.
@@ -466,6 +471,16 @@ impl Daemon {
         // get_mut after the read-only walk (split borrow).
         if let Some(o) = self.outgoings.get_mut(oid) {
             o.addr_cache.add_known_addresses(known);
+            // Pre-resolve hostname `Address=` lines for *this* round.
+            // No-op for the common all-literal-IP config (NixOS test
+            // fixtures). Fired here (not at `open()`) because
+            // `add_known_addresses` resets the cursor anyway, and
+            // every retry re-enters via this fn.
+            let hosts = o.addr_cache.unresolved_hosts();
+            if !hosts.is_empty() {
+                self.dns_worker
+                    .request(crate::bgresolve::DnsTag::Outgoing(name), hosts);
+            }
         }
 
         self.do_outgoing_connection(oid);
@@ -562,14 +577,24 @@ impl Daemon {
                 .proxy
                 .as_ref()
                 .and_then(ProxyConfig::proxy_addr);
-            let attempt = if let Some((phost, pport)) = proxy_hp {
+            let attempt = if proxy_hp.is_some() {
                 let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
                     log::error!(target: "tincd::conn",
                                 "Could not set up a meta connection to {name}");
                     self.retry_outgoing(oid);
                     return;
                 };
-                try_connect_via_proxy(phost, pport, peer_addr, &name, &self.settings.sockopts)
+                // Pre-resolved off-thread (setup) and refreshed in
+                // `retry_outgoing`. Empty ⇒ worker hasn't answered
+                // yet, or NXDOMAIN — either way back off; the retry
+                // timer re-drives once the worker fills it.
+                let Some(&proxy_addr) = self.proxy_addrs.first() else {
+                    log::error!(target: "tincd::conn",
+                                "Proxy address not resolved (yet) for {name}");
+                    self.retry_outgoing(oid);
+                    return;
+                };
+                try_connect_via_proxy(proxy_addr, peer_addr, &name, &self.settings.sockopts)
             } else {
                 try_connect(
                     &mut outgoing.addr_cache,
@@ -645,6 +670,25 @@ impl Daemon {
             self.timers
                 .set(tid, Duration::from_secs(u64::from(timeout)));
         }
+
+        // Re-queue hostname `Address=` resolve for the *next* round
+        // (reset() above cleared `config_resolved`). Clearing the
+        // hint map first means the next `setup_outgoing_connection`
+        // chains *fresh* DNS, not the addrs that just failed.
+        if let Some(o) = self.outgoings.get(oid) {
+            self.dns_hints.remove(&name);
+            let hosts = o.addr_cache.unresolved_hosts();
+            if !hosts.is_empty() {
+                self.dns_worker.request(crate::bgresolve::DnsReq::Outgoing {
+                    node: name.clone(),
+                    hosts,
+                });
+            }
+        }
+        // Proxy host re-resolve: only when the cache is empty
+        // (NXDOMAIN or worker never answered). A working proxy addr
+        // is stable for the daemon lifetime.
+        self.request_proxy_resolve();
 
         // Addr cache exhausted (every `retry_outgoing` call site is
         // reached via `next_addr()==None`). Fire-and-forget resolve;
