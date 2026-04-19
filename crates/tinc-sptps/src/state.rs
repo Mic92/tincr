@@ -44,6 +44,23 @@ fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroiz
     msg
 }
 
+/// Select one 64-byte half of the PRF output for a cipher direction.
+///
+/// `generate_key_material` derives 128 bytes; the initiator encrypts
+/// with the SECOND half and decrypts with the FIRST, the responder the
+/// mirror. That reduces to: use the second half iff
+/// `initiator == outbound`. One predicate instead of two open-coded
+/// `if initiator { .. } else { .. }` blocks that are easy to get
+/// reversed relative to each other.
+fn key_half(key: &[u8], initiator: bool, outbound: bool) -> &[u8; CIPHER_KEY_LEN] {
+    let half = if initiator == outbound {
+        &key[CIPHER_KEY_LEN..]
+    } else {
+        &key[..CIPHER_KEY_LEN]
+    };
+    half.try_into().unwrap()
+}
+
 /// Max records sealed per `outcipher` before app-data sends return
 /// `InvalidState`. Wire nonce is `outseqno as u32`; 2^32 = nonce reuse.
 /// Margin covers shard `fetch_add` slop + the rekey handshake itself.
@@ -1014,12 +1031,11 @@ impl Sptps {
         let key = self.key.take().expect("receive_ack with no key material");
         // Initiator decrypts with key0, responder with key1.
         // (Mirror of the outcipher assignment in receive_sig.)
-        let half: &[u8; CIPHER_KEY_LEN] = if self.role.is_initiator() {
-            (&key[..CIPHER_KEY_LEN]).try_into().unwrap()
-        } else {
-            (&key[CIPHER_KEY_LEN..]).try_into().unwrap()
-        };
-        self.incipher = Some(ChaPoly::new(half));
+        self.incipher = Some(ChaPoly::new(key_half(
+            &*key,
+            self.role.is_initiator(),
+            false,
+        )));
         // `key` Zeroizes on drop here.
         Ok(())
     }
@@ -1110,12 +1126,11 @@ impl Sptps {
         // C lines 370-374: NOW set the new outcipher.
         // Initiator encrypts with key1, responder with key0.
         let key = self.key.as_ref().expect("just set");
-        let half: &[u8; CIPHER_KEY_LEN] = if self.role.is_initiator() {
-            (&key[CIPHER_KEY_LEN..]).try_into().unwrap()
-        } else {
-            (&key[..CIPHER_KEY_LEN]).try_into().unwrap()
-        };
-        self.outcipher = Some(ChaPoly::new(half)); // NOW the new key
+        self.outcipher = Some(ChaPoly::new(key_half(
+            &**key,
+            self.role.is_initiator(),
+            true,
+        )));
         self.out_key_base = self.outseqno.load(Ordering::Relaxed);
 
         Ok(was_rekey)
