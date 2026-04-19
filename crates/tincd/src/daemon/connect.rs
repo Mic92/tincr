@@ -543,11 +543,37 @@ impl Daemon {
         self.do_outgoing_connection(oid);
     }
 
+    /// Insert `conn` into the slotmap and register its fd with the
+    /// event loop. Shared tail of both `do_outgoing_connection`
+    /// branches (proxy-exec and async-socket); on `ev.add` failure
+    /// the slot is rolled back so the caller can `continue` to the
+    /// next address without leaking a half-registered conn.
+    fn register_outgoing_conn(&mut self, conn: Connection, io_mode: Io) -> Option<super::ConnId> {
+        let id = self.conns.insert(conn);
+        match self
+            .ev
+            .add(self.conns[id].as_fd(), io_mode, IoWhat::Conn(id))
+        {
+            Ok(io_id) => {
+                self.conn_io.insert(id, io_id);
+                Some(id)
+            }
+            Err(e) => {
+                log::error!(target: "tincd::conn", "io_add failed: {e}");
+                self.conns.remove(id);
+                None
+            }
+        }
+    }
+
     /// Walk addr cache, register first non-sync-fail.
     /// `PROXY_EXEC`: socketpair+fork, skip async probe. `PROXY_SOCKS`/
     /// HTTP: connect to PROXY addr; peer addr still walked (it's the
     /// CONNECT target).
     pub(super) fn do_outgoing_connection(&mut self, oid: OutgoingId) {
+        // Cloned once: settings.proxy is immutable for the loop's
+        // lifetime, no need to re-clone per address attempt.
+        let proxy = self.settings.proxy.clone();
         loop {
             let Some(outgoing) = self.outgoings.get_mut(oid) else {
                 return;
@@ -557,7 +583,7 @@ impl Daemon {
             // ─── PROXY_EXEC
             // Walk addr cache for env vars; fd is socketpair half
             // (no probe).
-            if let Some(ProxyConfig::Exec { cmd }) = self.settings.proxy.clone() {
+            if let Some(ProxyConfig::Exec { cmd }) = &proxy {
                 let Some(addr) = outgoing.addr_cache.next_addr() else {
                     log::error!(target: "tincd::conn",
                                 "Could not set up a meta connection to {name}");
@@ -566,7 +592,7 @@ impl Daemon {
                 };
                 log::info!(target: "tincd::conn",
                             "Trying to connect to {name} ({addr}) via proxy exec");
-                let fd = match crate::outgoing::do_outgoing_pipe(&cmd, addr, &name, &self.name) {
+                let fd = match crate::outgoing::do_outgoing_pipe(cmd, addr, &name, &self.name) {
                     Ok(fd) => fd,
                     Err(e) => {
                         log::error!(target: "tincd::conn",
@@ -587,21 +613,9 @@ impl Daemon {
                     now,
                 );
                 conn.connecting = false;
-                let id = self.conns.insert(conn);
-                match self
-                    .ev
-                    .add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id))
-                {
-                    Ok(io_id) => {
-                        self.conn_io.insert(id, io_id);
-                    }
-                    Err(e) => {
-                        log::error!(target: "tincd::conn",
-                                    "io_add failed: {e}");
-                        self.conns.remove(id);
-                        continue;
-                    }
-                }
+                let Some(id) = self.register_outgoing_conn(conn, Io::Read) else {
+                    continue;
+                };
                 // Proxy is transport; peer expects ID.
                 if let Some(conn) = self.conns.get_mut(id) {
                     log::info!(target: "tincd::conn",
@@ -629,11 +643,7 @@ impl Daemon {
             // ─── SOCKS/HTTP: connect to PROXY addr.
             // Addr cache still walks PEER addrs (CONNECT target
             // varies).
-            let proxy_hp = self
-                .settings
-                .proxy
-                .as_ref()
-                .and_then(ProxyConfig::proxy_addr);
+            let proxy_hp = proxy.as_ref().and_then(ProxyConfig::proxy_addr);
             let attempt = if proxy_hp.is_some() {
                 let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
                     log::error!(target: "tincd::conn",
@@ -682,23 +692,11 @@ impl Daemon {
                         slotmap::Key::data(&oid),
                         now,
                     );
-                    let id = self.conns.insert(conn);
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    match self
-                        .ev
-                        .add(self.conns[id].as_fd(), Io::ReadWrite, IoWhat::Conn(id))
-                    {
-                        Ok(io_id) => {
-                            self.conn_io.insert(id, io_id);
-                        }
-                        Err(e) => {
-                            log::error!(target: "tincd::conn",
-                                        "io_add failed: {e}");
-                            self.conns.remove(id);
-                            continue;
-                        }
+                    if self.register_outgoing_conn(conn, Io::ReadWrite).is_none() {
+                        continue;
                     }
                     return;
                 }

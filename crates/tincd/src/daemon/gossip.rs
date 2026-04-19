@@ -43,6 +43,19 @@ impl Daemon {
         id
     }
 
+    /// Read `hosts/{name}` and return its Ed25519 pubkey. Shared by
+    /// `send_req_key` (initiator) and `on_req_key` (responder); both
+    /// need the same "parse host config → read key" pair and both
+    /// hard-error on miss because `REQ_PUBKEY` is unsupported.
+    fn load_peer_ed25519(&self, name: &str) -> Option<[u8; tinc_crypto::sign::PUBLIC_LEN]> {
+        let host_file = self.confbase.join("hosts").join(name);
+        let mut cfg = tinc_conf::Config::default();
+        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
+            cfg.merge(entries);
+        }
+        crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)
+    }
+
     /// Start per-tunnel SPTPS as initiator; send KEX via `REQ_KEY`.
     ///
     /// `Sptps::start` returns `Vec<Output>`. First Wire goes via
@@ -55,17 +68,7 @@ impl Daemon {
         };
 
         // Re-reads every call (10s debounce gates it).
-        let host_config = {
-            let host_file = self.confbase.join("hosts").join(&to_name);
-            let mut cfg = tinc_conf::Config::default();
-            if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-                cfg.merge(entries);
-            }
-            cfg
-        };
-        let Some(hiskey) =
-            crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &to_name)
-        else {
+        let Some(hiskey) = self.load_peer_ed25519(&to_name) else {
             // Hard-error: surface in logs, not as silent drops.
             // Operator provisions by hand.
             log::warn!(target: "tincd::net",
@@ -401,18 +404,7 @@ impl Daemon {
         }
 
         // ─── case REQ_KEY: SPTPS responder start.
-        // Same loader as send_req_key.
-        let host_config = {
-            let host_file = self.confbase.join("hosts").join(&msg.from);
-            let mut cfg = tinc_conf::Config::default();
-            if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-                cfg.merge(entries);
-            }
-            cfg
-        };
-        let Some(hiskey) =
-            crate::keys::read_ecdsa_public_key(&host_config, &self.confbase, &msg.from)
-        else {
+        let Some(hiskey) = self.load_peer_ed25519(&msg.from) else {
             // Hard-error.
             log::error!(target: "tincd::proto",
                        "No Ed25519 key known for {}; cannot start tunnel \
@@ -1337,12 +1329,10 @@ impl Daemon {
             self.run_subnet_script_async(true, &owner_name, &subnet);
         }
 
-        // seen.check above prevents the loop.
-        let nw = if self.settings.tunnelserver {
-            false
-        } else {
-            self.forward_request(from_conn, body)
-        };
+        // seen.check above prevents the loop. tunnelserver already
+        // returned at the unauthorized-subnet gate above, so this
+        // path always forwards.
+        let nw = self.forward_request(from_conn, body);
 
         Ok(nw)
     }

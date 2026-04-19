@@ -351,129 +351,141 @@ impl Daemon {
         // Refresh idle-reap window on any client activity.
         conn.last_ping_time = now + std::time::Duration::from_secs(3600);
         let (r, nw) = handle_control(conn, line);
-        if matches!(r, DispatchResult::DumpSubnets) {
-            let rows: Vec<String> = self
-                .subnets
-                .iter()
-                .map(|(subnet, owner)| {
-                    format!(
-                        "{} {} {} {}",
-                        Request::Control,
-                        crate::proto::REQ_DUMP_SUBNETS,
-                        subnet,
-                        owner
-                    )
-                })
-                .collect();
-            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_SUBNETS)
-        } else if matches!(r, DispatchResult::DumpNodes) {
-            let rows = self.dump_nodes_rows();
-            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_NODES)
-        } else if matches!(r, DispatchResult::DumpEdges) {
-            let rows = self.dump_edges_rows();
-            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_EDGES)
-        } else if matches!(r, DispatchResult::DumpConnections) {
-            let rows: Vec<String> = self
-                .conns
-                .values()
-                .map(|c| {
-                    // hostname is the fused "host port port" string.
-                    format!(
-                        "{} {} {} {} {:x} {} {:x}",
-                        Request::Control,
-                        crate::proto::REQ_DUMP_CONNECTIONS,
-                        c.name,
-                        c.hostname,
-                        c.options.bits(),
-                        std::os::fd::AsRawFd::as_raw_fd(&c.as_fd()),
-                        c.status_value()
-                    )
-                })
-                .collect();
-            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_CONNECTIONS)
-        } else if matches!(r, DispatchResult::Reload) {
-            // CLI only checks zero/nonzero.
-            let result = i32::from(!self.reload_configuration());
-            self.ctl_ack(id, crate::proto::REQ_RELOAD, result)
-        } else if matches!(r, DispatchResult::Retry) {
-            self.on_retry();
-            self.ctl_ack(id, crate::proto::REQ_RETRY, 0)
-        } else if matches!(r, DispatchResult::Purge) {
-            let nw_purge = self.purge();
-            let (r, nw2) = self.ctl_ack(id, crate::proto::REQ_PURGE, 0);
-            (r, nw_purge | nw2)
-        } else if let DispatchResult::SetDebug(level) = r {
-            // Reply with PREVIOUS level. `level >= 0` → update;
-            // `< 0` → query-only. None → terminate ctl conn (the
-            // ONLY ctl arm that does this; the rest reply
-            // REQ_INVALID and stay up).
-            let Some(level) = level else {
-                return (DispatchResult::Drop, false);
-            };
-            let prev = crate::log_tap::set_debug_level(level);
-            if level >= 0 {
-                // Remember the FIRST prev so close restores the original.
-                self.conn_mut(id).prev_debug_level.get_or_insert(prev);
+        match r {
+            DispatchResult::DumpSubnets => {
+                let rows: Vec<String> = self
+                    .subnets
+                    .iter()
+                    .map(|(subnet, owner)| {
+                        format!(
+                            "{} {} {} {}",
+                            Request::Control,
+                            crate::proto::REQ_DUMP_SUBNETS,
+                            subnet,
+                            owner
+                        )
+                    })
+                    .collect();
+                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_SUBNETS)
             }
-            self.ctl_ack(id, crate::proto::REQ_SET_DEBUG, prev)
-        } else if let DispatchResult::Disconnect(name) = r {
-            // Walk conns, terminate by name. `terminate()` keys
-            // DEL_EDGE on `conn.active` already. Control conns are
-            // skipped: their name is `<control>`, so a valid node
-            // name never matches; also covers self-disconnect.
-            let result = match name {
-                None => -1, // parse failed
-                Some(name) => {
-                    let to_term: Vec<ConnId> = self
-                        .conns
-                        .iter()
-                        .filter(|(_, c)| !c.control && c.name == name)
-                        .map(|(cid, _)| cid)
-                        .collect();
-                    let found = !to_term.is_empty();
-                    for cid in to_term {
-                        self.terminate(cid);
-                    }
-                    if found { 0 } else { -2 }
+            DispatchResult::DumpNodes => {
+                let rows = self.dump_nodes_rows();
+                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_NODES)
+            }
+            DispatchResult::DumpEdges => {
+                let rows = self.dump_edges_rows();
+                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_EDGES)
+            }
+            DispatchResult::DumpConnections => {
+                let rows: Vec<String> = self
+                    .conns
+                    .values()
+                    .map(|c| {
+                        // hostname is the fused "host port port" string.
+                        format!(
+                            "{} {} {} {} {:x} {} {:x}",
+                            Request::Control,
+                            crate::proto::REQ_DUMP_CONNECTIONS,
+                            c.name,
+                            c.hostname,
+                            c.options.bits(),
+                            std::os::fd::AsRawFd::as_raw_fd(&c.as_fd()),
+                            c.status_value()
+                        )
+                    })
+                    .collect();
+                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_CONNECTIONS)
+            }
+            DispatchResult::Reload => {
+                // CLI only checks zero/nonzero.
+                let result = i32::from(!self.reload_configuration());
+                self.ctl_ack(id, crate::proto::REQ_RELOAD, result)
+            }
+            DispatchResult::Retry => {
+                self.on_retry();
+                self.ctl_ack(id, crate::proto::REQ_RETRY, 0)
+            }
+            DispatchResult::Purge => {
+                let nw_purge = self.purge();
+                let (r, nw2) = self.ctl_ack(id, crate::proto::REQ_PURGE, 0);
+                (r, nw_purge | nw2)
+            }
+            DispatchResult::SetDebug(level) => {
+                // Reply with PREVIOUS level. `level >= 0` → update;
+                // `< 0` → query-only. None → terminate ctl conn (the
+                // ONLY ctl arm that does this; the rest reply
+                // REQ_INVALID and stay up).
+                let Some(level) = level else {
+                    return (DispatchResult::Drop, false);
+                };
+                let prev = crate::log_tap::set_debug_level(level);
+                if level >= 0 {
+                    // Remember the FIRST prev so close restores the original.
+                    self.conn_mut(id).prev_debug_level.get_or_insert(prev);
                 }
-            };
-            // `terminate()` only touches the matched conn;
-            // the ctl conn `id` is still here.
-            self.ctl_ack(id, crate::proto::REQ_DISCONNECT, result)
-        } else if matches!(r, DispatchResult::DumpTraffic) {
-            let rows = self.dump_traffic_rows();
-            self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_TRAFFIC)
-        } else if let DispatchResult::Log(level) = r {
-            // No reply. The conn now passively receives log records
-            // via `flush_log_tap`.
-            //
-            // Debug levels: -1=UNSET, 0=ALWAYS, 1=CONNECTIONS, ...,
-            // 5=TRAFFIC, ..., 10=SCARY. Map roughly: 0→Info,
-            // 1-2→Debug, 3+→Trace. Same shape as `main.rs::
-            // debug_level_to_filter`. -1 (UNSET) = "use daemon's
-            // level"; we use Trace (everything the tap captures —
-            // the daemon's stderr filter already applied).
-            let conn = self.conn_mut(id);
-            conn.log_level = Some(match level {
-                i32::MIN..=-1 => log::Level::Trace,
-                0 => log::Level::Info,
-                1 | 2 => log::Level::Debug,
-                _ => log::Level::Trace,
-            });
-            crate::log_tap::set_active(true);
-            (DispatchResult::Ok, false)
-        } else if let DispatchResult::Pcap(snaplen) = r {
-            // NO ack reply: the CLI writes the global pcap header
-            // then immediately starts reading `"18 14 LEN"` lines —
-            // a `"18 14 0"` ack would be misparsed as a 0-byte
-            // capture.
-            let conn = self.conn_mut(id);
-            conn.pcap = true;
-            conn.pcap_snaplen = snaplen;
-            self.any_pcap = true;
-            (DispatchResult::Ok, false)
-        } else {
-            (r, nw)
+                self.ctl_ack(id, crate::proto::REQ_SET_DEBUG, prev)
+            }
+            DispatchResult::Disconnect(name) => {
+                // Walk conns, terminate by name. `terminate()` keys
+                // DEL_EDGE on `conn.active` already. Control conns are
+                // skipped: their name is `<control>`, so a valid node
+                // name never matches; also covers self-disconnect.
+                let result = match name {
+                    None => -1, // parse failed
+                    Some(name) => {
+                        let to_term: Vec<ConnId> = self
+                            .conns
+                            .iter()
+                            .filter(|(_, c)| !c.control && c.name == name)
+                            .map(|(cid, _)| cid)
+                            .collect();
+                        let found = !to_term.is_empty();
+                        for cid in to_term {
+                            self.terminate(cid);
+                        }
+                        if found { 0 } else { -2 }
+                    }
+                };
+                // `terminate()` only touches the matched conn;
+                // the ctl conn `id` is still here.
+                self.ctl_ack(id, crate::proto::REQ_DISCONNECT, result)
+            }
+            DispatchResult::DumpTraffic => {
+                let rows = self.dump_traffic_rows();
+                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_TRAFFIC)
+            }
+            DispatchResult::Log(level) => {
+                // No reply. The conn now passively receives log records
+                // via `flush_log_tap`.
+                //
+                // Debug levels: -1=UNSET, 0=ALWAYS, 1=CONNECTIONS, ...,
+                // 5=TRAFFIC, ..., 10=SCARY. Map roughly: 0→Info,
+                // 1-2→Debug, 3+→Trace. Same shape as `main.rs::
+                // debug_level_to_filter`. -1 (UNSET) = "use daemon's
+                // level"; we use Trace (everything the tap captures —
+                // the daemon's stderr filter already applied).
+                let conn = self.conn_mut(id);
+                conn.log_level = Some(match level {
+                    i32::MIN..=-1 => log::Level::Trace,
+                    0 => log::Level::Info,
+                    1 | 2 => log::Level::Debug,
+                    _ => log::Level::Trace,
+                });
+                crate::log_tap::set_active(true);
+                (DispatchResult::Ok, false)
+            }
+            DispatchResult::Pcap(snaplen) => {
+                // NO ack reply: the CLI writes the global pcap header
+                // then immediately starts reading `"18 14 LEN"` lines —
+                // a `"18 14 0"` ack would be misparsed as a 0-byte
+                // capture.
+                let conn = self.conn_mut(id);
+                conn.pcap = true;
+                conn.pcap_snaplen = snaplen;
+                self.any_pcap = true;
+                (DispatchResult::Ok, false)
+            }
+            r => (r, nw),
         }
     }
 

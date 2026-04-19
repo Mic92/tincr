@@ -457,7 +457,8 @@ pub fn handle_id(
 
     // Outgoing? `c->name` already set by `ConnectTo`;
     // peer must confirm (DNS hijack / stale config / NAT confusion).
-    if conn.outgoing.is_some() {
+    let is_outgoing = conn.outgoing.is_some();
+    if is_outgoing {
         if conn.name != name {
             return Err(DispatchError::BadId(format!(
                 "peer {} is {} instead of {}",
@@ -506,7 +507,7 @@ pub fn handle_id(
     // goes BEFORE SPTPS KEX bytes — peer's `receive_meta` reads our ID,
     // fires id_h, sets minor>=2, THEN reads KEX. KEX-first → readline
     // would parse ciphertext.
-    let needs_write = if conn.outgoing.is_some() {
+    let needs_write = if is_outgoing {
         false // initiator already sent in `finish_connecting`
     } else {
         conn.send(format_args!(
@@ -520,7 +521,7 @@ pub fn handle_id(
 
     // `sptps_start(&c->sptps, c, c->outgoing, false, ...)`.
     // Label `:461-465`: always (initiator, responder).
-    let label = if conn.outgoing.is_some() {
+    let label = if is_outgoing {
         tcp_label(ctx.my_name, name)
     } else {
         tcp_label(name, ctx.my_name)
@@ -529,7 +530,7 @@ pub fn handle_id(
     // SigningKey deliberately isn't Clone; blob roundtrip makes copy visible.
     let mykey_clone = SigningKey::from_blob(&ctx.mykey.to_blob());
 
-    let role = if conn.outgoing.is_some() {
+    let role = if is_outgoing {
         Role::Initiator
     } else {
         Role::Responder
