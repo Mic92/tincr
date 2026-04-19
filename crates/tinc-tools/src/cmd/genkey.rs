@@ -164,24 +164,11 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     // ─── Open tmpfile
     // `<path>.tmp` suffix, no mkstemp randomness. There's a race here
     // (concurrent calls on the same path stomp each other's tmpfile)
-    // but the threat model doesn't include that.
-    //
-    // Manual OsString concat, not `with_extension` — that *replaces*
-    // the existing extension. `foo.tar.gz` → `foo.tar.tmp` is wrong
-    // semantics. Append the suffix.
-    let tmp_path = {
-        let mut s = path.as_os_str().to_owned();
-        s.push(".tmp");
-        std::path::PathBuf::from(s)
-    };
-
-    // No `O_EXCL` — overwrite a stale tmpfile. (A stale tmpfile means
-    // a previous run was interrupted; clobbering is the recovery.)
-    let w = fs::File::create(&tmp_path).map_err(io_err(&tmp_path))?;
-
-    // RAII guard: unlink tmpfile if we bail. Disarmed on the success
-    // path right before rename.
-    let mut tmp_guard = TmpGuard(Some(tmp_path.clone()));
+    // but the threat model doesn't include that. No `O_EXCL` — a
+    // stale tmpfile means a previous run was interrupted; clobbering
+    // is the recovery.
+    let (tmp_guard, w) = super::TmpGuard::open(path, ".tmp")?;
+    let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
     // ─── Copy with #-prefixing
     let mut r = BufReader::new(r);
@@ -266,28 +253,9 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     #[cfg(unix)]
     fs::set_permissions(&tmp_path, src_perms).map_err(io_err(&tmp_path))?;
 
-    // Disarm the guard — rename consumes the tmpfile, unlink would race.
-    tmp_guard.0 = None;
-
-    fs::rename(&tmp_path, path).map_err(io_err(path))?;
+    tmp_guard.commit()?;
 
     Ok(true)
-}
-
-/// Unlink-on-drop. Disarmed by setting `.0 = None`.
-///
-/// Not `tempfile::NamedTempFile` — we want `<path>.tmp` (same dir
-/// as the target, for the rename to be atomic-on-same-fs). A crash
-/// leaves an obviously-stale `ed25519_key.priv.tmp`, not a
-/// `tmp.XXXXXX` mystery file.
-struct TmpGuard(Option<std::path::PathBuf>);
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = fs::remove_file(p);
-        }
-    }
 }
 
 /// `O_WRONLY | O_CREAT | O_APPEND`.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use tinc_conf::vars::{self, VarFlags};
 
-use super::{CmdError, exchange, io_err};
+use super::{CmdError, TmpGuard, exchange, io_err};
 use crate::names::{self, Paths};
 
 // Action enum — GET/SET/ADD/DEL after argv normalization.
@@ -364,90 +364,6 @@ pub struct EditResult {
     pub warnings: Vec<Warning>,
 }
 
-/// `<path>.config.tmp` RAII. Same shape as `genkey::TmpGuard` but
-/// the suffix differs (`.config.tmp` vs `.tmp`). Re-declared here
-/// per the "module-private constants stay private" rule — the two
-/// guards have different invariants (genkey's is about commenting
-/// out PEM blocks; this one is about config-line surgery) and
-/// unifying them would create a false coupling.
-///
-/// Drop = `unlink` best-effort. `commit()` consumes self, renames,
-/// drop is a no-op.
-struct TmpGuard {
-    tmp: PathBuf,
-    target: PathBuf,
-}
-
-impl TmpGuard {
-    /// Open `<target>.config.tmp` for writing.
-    ///
-    /// We `O_CREAT | O_TRUNC | O_WRONLY` at mode 0644 — same as
-    /// `fopen("w")` under default umask. The target is a config
-    /// file, not a key file; world-read is fine.
-    fn open(target: &std::path::Path) -> Result<(Self, fs::File), CmdError> {
-        // The `.config.tmp` suffix is exactly upstream's. Can't use
-        // `with_extension` — that'd replace `.conf`, not append.
-        let mut tmp = target.as_os_str().to_owned();
-        tmp.push(".config.tmp");
-        let tmp = PathBuf::from(tmp);
-
-        // Create-or-truncate. If a `.config.tmp` is lying around
-        // from a crashed previous run, we just overwrite it.
-        //
-        // Our `CmdError::Io` says "Could not access <path>: <err>".
-        // The path identifies the file (it ends in `.config.tmp`);
-        // the io::Error says what went wrong.
-        let f = fs::File::create(&tmp).map_err(io_err(&tmp))?;
-
-        Ok((
-            Self {
-                tmp,
-                target: target.to_path_buf(),
-            },
-            f,
-        ))
-    }
-
-    /// Rename tmp → target. Consumes self; drop becomes a no-op.
-    ///
-    /// `mem::take` on the path because we can't destructure a Drop
-    /// type (E0509). After the take, `self.tmp` is empty `PathBuf`;
-    /// when `self` drops at function end (after rename succeeded),
-    /// `remove_file("")` is an `ENOENT` no-op. If rename FAILS, we
-    /// manually unlink before the take'd `tmp` drops.
-    fn commit(mut self) -> Result<(), CmdError> {
-        let tmp = std::mem::take(&mut self.tmp);
-        let target = std::mem::take(&mut self.target);
-        // self.tmp is now empty. Drop will `remove_file("")` →
-        // ENOENT → silently ignored. Harmless.
-
-        fs::rename(&tmp, &target).map_err(|e| {
-            // Best-effort cleanup. If rename fails (cross-device?
-            // perms?) we shouldn't leave `.config.tmp` lying around.
-            // Upstream doesn't do this — it just `return 1`s. We
-            // tighten.
-            let _ = fs::remove_file(&tmp);
-            // Our Io variant only carries one path; we pick the
-            // target (it's the file the user asked about).
-            CmdError::Io {
-                path: target,
-                err: e,
-            }
-        })
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        // Only fires on error returns (`?` propagation). On the
-        // success path, `commit()` consumes self before drop.
-        // Upstream doesn't unlink on error returns; we do. Harmless
-        // if the file's already gone (`ENOENT` from `remove_file`
-        // is silently dropped).
-        let _ = fs::remove_file(&self.tmp);
-    }
-}
-
 /// `Get`: scan the file, collect matching values.
 ///
 /// Doesn't open a tmpfile — read-only.
@@ -504,7 +420,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     // ─── Open tmpfile (RAII; cleaned up on `?`)
-    let (guard, mut tf) = TmpGuard::open(path)?;
+    // The `.config.tmp` suffix is exactly upstream's.
+    let (guard, mut tf) = TmpGuard::open(path, ".config.tmp")?;
 
     // ─── Walk lines
     let mut already_set = false; // Set wrote its one line

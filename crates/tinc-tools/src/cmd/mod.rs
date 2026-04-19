@@ -176,6 +176,76 @@ pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, C
     open_nofollow(path, OpenKind::CreateTrunc, 0o666)
 }
 
+/// `<target><suffix>` write-then-rename RAII. `open()` creates the
+/// scratch file next to `target` (same directory → same filesystem →
+/// `rename(2)` is atomic), `commit()` renames it over the target, and
+/// `Drop` unlinks it on any error path so a `?` bail doesn't leave a
+/// stale `.tmp` behind.
+///
+/// Used by both `cmd::config` (suffix `.config.tmp`) and
+/// `cmd::genkey` (suffix `.tmp`); the suffix is the only thing the
+/// two callers disagree on.
+pub(crate) struct TmpGuard {
+    tmp: PathBuf,
+    target: PathBuf,
+}
+
+impl TmpGuard {
+    /// Open `<target><suffix>` for writing (`O_CREAT | O_TRUNC`).
+    /// A leftover scratch file from a crashed previous run is simply
+    /// overwritten.
+    pub(crate) fn open(
+        target: &std::path::Path,
+        suffix: &str,
+    ) -> Result<(Self, std::fs::File), CmdError> {
+        // Manual OsString concat, not `with_extension` — that would
+        // *replace* an existing extension instead of appending.
+        let mut tmp = target.as_os_str().to_owned();
+        tmp.push(suffix);
+        let tmp = PathBuf::from(tmp);
+
+        let f = std::fs::File::create(&tmp).map_err(io_err(&tmp))?;
+
+        Ok((
+            Self {
+                tmp,
+                target: target.to_path_buf(),
+            },
+            f,
+        ))
+    }
+
+    /// Path to the scratch file, for callers that need to `chmod`
+    /// before committing.
+    pub(crate) fn tmp_path(&self) -> &std::path::Path {
+        &self.tmp
+    }
+
+    /// Rename tmp → target. Consumes self; drop becomes a no-op.
+    ///
+    /// `mem::take` on the paths because we can't destructure a Drop
+    /// type (E0509). After the take, `self.tmp` is empty so the Drop
+    /// at scope end is `remove_file("")` → ENOENT → ignored. If the
+    /// rename FAILS we still best-effort unlink the scratch file.
+    pub(crate) fn commit(mut self) -> Result<(), CmdError> {
+        let tmp = std::mem::take(&mut self.tmp);
+        let target = std::mem::take(&mut self.target);
+        std::fs::rename(&tmp, &target).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CmdError::Io {
+                path: target,
+                err: e,
+            }
+        })
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
 pub(crate) fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(io::Error) -> CmdError {
     let path = path.into();
     move |err| CmdError::Io { path, err }
