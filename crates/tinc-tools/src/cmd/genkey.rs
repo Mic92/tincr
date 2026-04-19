@@ -57,12 +57,9 @@
 //! = rotation history. `tinc fsck` warns on `#-----BEGIN` for the
 //! paper trail.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::cmd::exchange::get_my_name;
 use crate::cmd::{CmdError, io_err};
@@ -106,11 +103,8 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     let sk = keypair::generate();
     eprintln!("Done.");
 
-    // ─── Append private (PEM)
-    // The 0600 is the *create* mode; if the file exists (the rotation
-    // case), the existing mode wins, and `disable_old_keys` already
-    // preserved it on the tmpfile that got renamed in. So mode here
-    // only matters for the first-ever genkey on a path.
+    // ─── Append private (PEM). 0600 is create-mode only; rotation
+    // keeps whatever `disable_old_keys` preserved.
     {
         let f = open_append(&priv_path, 0o600)?;
         let mut w = BufWriter::new(f);
@@ -118,8 +112,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
         w.flush().map_err(io_err(&priv_path))?;
     }
 
-    // ─── Append public (config line)
-    // Same LSB-first b64 as init. Same highest-stakes-line caveat.
+    // ─── Append public (config line, LSB-first b64)
     {
         let mut f = open_append(&host_path, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
@@ -146,45 +139,20 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// Does NOT error on file-not-found — that's `Ok(false)`.
 pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
-    // ─── Open source
-    // Any open failure on the source is `Ok(false)`. The downstream
-    // append will surface the real error (can't append to a file you
-    // can't read either, usually).
+    // Any open failure → `Ok(false)`; the downstream append surfaces
+    // the real error.
     let Ok(r) = fs::File::open(path) else {
         return Ok(false);
     };
 
-    // ─── Preserve mode
-    // `metadata()` on the open file (== fstat). We apply this *after*
-    // writing, not at create. The window is the tmpfile, which we're
-    // about to rename or unlink — observable difference is zero.
     #[cfg(unix)]
     let src_perms = r
         .metadata()
         .map(|m| m.permissions())
         .map_err(io_err(path))?;
 
-    // ─── Open tmpfile
-    // `<path>.tmp` suffix, no mkstemp randomness. There's a race here
-    // (concurrent calls on the same path stomp each other's tmpfile)
-    // but the threat model doesn't include that.
-    //
-    // Manual OsString concat, not `with_extension` — that *replaces*
-    // the existing extension. `foo.tar.gz` → `foo.tar.tmp` is wrong
-    // semantics. Append the suffix.
-    let tmp_path = {
-        let mut s = path.as_os_str().to_owned();
-        s.push(".tmp");
-        std::path::PathBuf::from(s)
-    };
-
-    // No `O_EXCL` — overwrite a stale tmpfile. (A stale tmpfile means
-    // a previous run was interrupted; clobbering is the recovery.)
-    let w = fs::File::create(&tmp_path).map_err(io_err(&tmp_path))?;
-
-    // RAII guard: unlink tmpfile if we bail. Disarmed on the success
-    // path right before rename.
-    let mut tmp_guard = TmpGuard(Some(tmp_path.clone()));
+    let (tmp_guard, w) = super::TmpGuard::open(path, ".tmp")?;
+    let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
     // ─── Copy with #-prefixing
     let mut r = BufReader::new(r);
@@ -192,10 +160,8 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     let mut disabled = false;
     let mut in_block = false;
 
-    // `read_line` keeps the trailing newline (we need byte-exact
-    // round-trip for unmatched lines). It also handles a final line
-    // with no trailing newline correctly: returns it without `\n`,
-    // then next call returns 0. Round-trip preserved.
+    // `read_line` keeps the trailing newline → byte-exact round-trip
+    // for unmatched lines, including a final no-newline line.
     let mut line = String::new();
     loop {
         line.clear();
@@ -204,45 +170,28 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
             break; // EOF
         }
 
-        // ─── PEM block detection
-        // The `!in_block` means a BEGIN inside a block is ignored
-        // (treated as block content). Shouldn't happen in well-formed
-        // PEM but garbage-in-garbage-preserved.
-        //
-        // ` ED25519 ` is space-delimited: `-----BEGIN ED25519 PRIVATE
-        // KEY-----` has it; `-----BEGIN MYED25519FOO-----` doesn't.
+        // ` ED25519 ` is space-delimited so `-----BEGIN MYED25519FOO`
+        // doesn't match. `!in_block`: a nested BEGIN is treated as
+        // block content (garbage-in-garbage-preserved).
         if !in_block && line.starts_with("-----BEGIN ") && line.contains(" ED25519 ") {
             disabled = true;
             in_block = true;
         }
 
-        // ─── Config-line detection
-        // Prefix-16-case-insensitive then delim-at-16. Delim must be
-        // in {' ', '\t', '='}. A line `Ed25519PublicKey\n` (just the
-        // key name, no value) has `'\n'` at index 16 — doesn't match.
-        // Good: not a valid config line anyway.
-        //
-        // `len >= 17` not `>= 16`: we need both the 16-byte prefix
-        // and at least one delimiter byte after it.
-        let pubkey_line = line.len() >= 17 // 16 + at-least-the-delim
+        // `len >= 17`: 16-byte prefix + at least the delimiter byte.
+        let pubkey_line = line.len() >= 17
             && line.as_bytes()[..16].eq_ignore_ascii_case(b"Ed25519PublicKey")
             && matches!(line.as_bytes()[16], b' ' | b'\t' | b'=');
         if pubkey_line {
             disabled = true;
         }
 
-        // ─── Write (with # if disabled)
-        // The # goes before the whole line including its newline,
-        // so `#-----BEGIN ...\n`. Exactly one byte prepended.
         if in_block || pubkey_line {
             w.write_all(b"#").map_err(io_err(&tmp_path))?;
         }
         w.write_all(line.as_bytes()).map_err(io_err(&tmp_path))?;
 
-        // ─── PEM block end detection
-        // AFTER the write: the END line itself gets the `#` (already
-        // written above), and NEXT iteration `in_block` is false. We
-        // don't check that END type matches BEGIN type.
+        // After the write so the END line itself is `#`-prefixed.
         if in_block && line.starts_with("-----END ") {
             in_block = false;
         }
@@ -269,28 +218,9 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     #[cfg(unix)]
     fs::set_permissions(&tmp_path, src_perms).map_err(io_err(&tmp_path))?;
 
-    // Disarm the guard — rename consumes the tmpfile, unlink would race.
-    tmp_guard.0 = None;
-
-    fs::rename(&tmp_path, path).map_err(io_err(path))?;
+    tmp_guard.commit()?;
 
     Ok(true)
-}
-
-/// Unlink-on-drop. Disarmed by setting `.0 = None`.
-///
-/// Not `tempfile::NamedTempFile` — we want `<path>.tmp` (same dir
-/// as the target, for the rename to be atomic-on-same-fs). A crash
-/// leaves an obviously-stale `ed25519_key.priv.tmp`, not a
-/// `tmp.XXXXXX` mystery file.
-struct TmpGuard(Option<std::path::PathBuf>);
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        if let Some(p) = self.0.take() {
-            let _ = fs::remove_file(p);
-        }
-    }
 }
 
 /// `O_WRONLY | O_CREAT | O_APPEND`.
@@ -303,23 +233,7 @@ impl Drop for TmpGuard {
 /// to 0600. Upstream does flip it (arguably a bug — undoes your
 /// hardening); ours respects it.
 fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
-    #[cfg(unix)]
-    let opts = {
-        let mut o = OpenOptions::new();
-        o.append(true)
-            .create(true)
-            .mode(mode)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-        o
-    };
-    #[cfg(not(unix))]
-    let opts = {
-        let _ = mode;
-        let mut o = OpenOptions::new();
-        o.append(true).create(true);
-        o
-    };
-    opts.open(path).map_err(io_err(path))
+    super::open_nofollow(path, super::OpenKind::Append, mode)
 }
 
 // Tests

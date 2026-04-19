@@ -42,11 +42,8 @@
 //! exists`). Re-init would overwrite the private key. No rollback on
 //! partial failure — disk full / perm flip mid-init is rare.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::cmd::{CmdError, io_err};
 use crate::keypair;
@@ -98,14 +95,9 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     }
 
     // ─── makedirs
-    // Order matters: confdir before confbase (parent before child),
-    // confbase before hosts/cache. `makedir` chmod-on-exists clamps
-    // an existing `/etc/tinc/myvpn` with mode 0777 to 0755.
-    //
-    // `confdir` is `Some` iff `-c` wasn't given. See `Paths::confdir` doc.
-    // The common non-root failure is here, not at the `try_exists`
-    // above: `/etc/tinc` typically doesn't exist yet (so `try_exists`
-    // returns Ok(false)), and the *mkdir* is what hits EACCES.
+    // The common non-root failure is here (not `try_exists` above):
+    // `/etc/tinc` typically doesn't exist yet, so the *mkdir* is what
+    // hits EACCES.
     if let Some(confdir) = &paths.confdir {
         makedir(confdir, 0o755).map_err(|e| hint_on_eacces(confdir, e))?;
     }
@@ -124,25 +116,18 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     }
 
     // ─── Generate Ed25519 keypair
-    // Private → PEM at `ed25519_key.priv` (mode 0600). Public → a
-    // config *line* in `hosts/NAME` (NOT a PEM — `Ed25519PublicKey =
-    // <b64>`). Different readers, different formats: the daemon reads
-    // the private PEM at startup, *peers* read the public via the
-    // config parser. `keypair::write_pair` does PEM-both-sides for
-    // `sptps_keypair`; this does PEM-then-config.
+    // Private → PEM (daemon reads it); public → config *line* in
+    // `hosts/NAME` (NOT a PEM — *peers* read it via the config parser).
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
 
-    // Private: PEM, mode 0600. `O_EXCL` because clobbering an existing
-    // key is *catastrophic* — you lose the ability to prove identity
-    // to existing peers. For init, the file shouldn't exist at all
-    // (we just made the dir); excl is the right semantics.
+    // Private: PEM, 0600, `O_EXCL` — clobbering an existing key loses
+    // identity to existing peers.
     {
         let priv_path = paths.ed25519_private();
         let f = open_mode_excl(&priv_path, 0o600)?;
         let mut w = std::io::BufWriter::new(f);
-        // 96-byte blob, same as `keypair::write_pair`.
         write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).map_err(io_err(&priv_path))?;
         w.flush().map_err(io_err(&priv_path))?;
     }
@@ -156,22 +141,12 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // (when we add it) appends `Port = N` to the same file.
     {
         let host_path = paths.host_file(name);
-        let mut f = {
-            let mut o = OpenOptions::new();
-            o.create(true).append(true);
-            #[cfg(unix)]
-            o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-            o.open(&host_path).map_err(io_err(&host_path))?
-        };
+        let mut f = super::open_nofollow(&host_path, super::OpenKind::Append, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
 
-    // ─── tinc-up stub
-    // Unix-only. A shell script that yells at you to configure it.
-    // Only write if it doesn't exist — we just made the directory so
-    // it can't, but the check matters if `cmd_init` is ever called on
-    // a partial-state confbase. `O_EXCL` is the don't-clobber.
+    // ─── tinc-up stub (Unix only)
     #[cfg(unix)]
     {
         let up_path = paths.tinc_up();
@@ -245,23 +220,7 @@ use super::makedir;
 /// `O_EXCL`: for the private key, append-to-existing is just as bad
 /// as truncate. excl is the right semantics for init — see callers.
 fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdError> {
-    #[cfg(unix)]
-    let opts = {
-        let mut o = OpenOptions::new();
-        o.write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-        o
-    };
-    #[cfg(not(unix))]
-    let opts = {
-        let _ = mode;
-        let mut o = OpenOptions::new();
-        o.write(true).create_new(true);
-        o
-    };
-    opts.open(path).map_err(io_err(path))
+    super::open_nofollow(path, super::OpenKind::CreateExcl, mode)
 }
 
 #[cfg(all(test, unix))]

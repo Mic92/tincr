@@ -60,20 +60,12 @@ use std::io::{BufRead, BufWriter, Write};
 use crate::cmd::{CmdError, io_err};
 use crate::names::{self, Paths, check_id};
 
-/// 65 chars: `#` + 63 dashes + `#`.
-///
-/// `import` matches against this exactly. We keep the newline
-/// separate so `export_all` can write `\n` + SEPARATOR + `\n` (it
-/// wants a blank line *before*).
-///
-/// **Don't reformat.** rustfmt won't touch a `const &str`, but a
-/// well-meaning human might "fix" the dash count. The count is
-/// exact; one off and import treats it as content.
-const SEPARATOR: &str = "#---------------------------------------------------------------#";
-
-// At 65, not 64 or 66. Belt and suspenders against the well-meaning
-// human (or a search-and-replace that catches it).
-const _: () = assert!(SEPARATOR.len() == 65);
+// `import` matches against the 65-char `#---...---#` separator
+// exactly; we keep the newline separate so `export_all` can write
+// `\n` + SEPARATOR + `\n` (it wants a blank line *before*). The
+// invitation file format reuses the same string, so the constant
+// lives in `cmd::invite`.
+use super::invite::SEPARATOR;
 
 /// `get_my_name` — read `Name = X` from `tinc.conf`, expand `$HOST`.
 ///

@@ -344,17 +344,10 @@ impl NodeInfo {
         }
 
         // ─── Status flags
-        // Six bits, printed in declaration order. Each prefixed
-        // with a space so the line is `Status:       validkey
-        // visited ...`. The label is `"Status:      "` (12+1 chars)
-        // — one shorter than the others because each value adds
-        // its own leading space. Net column alignment is the same.
+        // Label one char shorter than the others: each value adds its
+        // own leading space, so column alignment matches. Order is
+        // upstream's printf order (`node.h` field-declaration order).
         out.push_str("Status:      ");
-        // The order is upstream's printf order. NOT bit-position
-        // order: validkey (bit 1), visited (bit 3), reachable (4),
-        // indirect (5), sptps (6), udp_confirmed (7). It IS
-        // `node.h` field-declaration order (skipping the unused/
-        // unprinted bits). Preserve.
         for (bit, label) in [
             (StatusBit::VALIDKEY, " validkey"),
             (StatusBit::VISITED, " visited"),
@@ -369,8 +362,6 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Options flags
-        // Same shape, 4 OPTION_* bits.
         out.push_str("Options:     ");
         for (bit, label) in [
             (OPTION_INDIRECT, " indirect"),
@@ -384,16 +375,8 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Protocol version
-        // `PROT_MAJOR.OPTION_VERSION(options)`. The minor lives in
-        // the top 8 bits of `options` (so a node running 17.7 has
-        // `options & 0xff000000 == 0x07000000`). The major is OUR
-        // constant (it's the protocol version we speak — same as
-        // the daemon's by definition, since we wouldn't have
-        // connected otherwise). PROT_MAJOR is 17. Re-declared here
-        // — modules independent (Constraints). Three copies of
-        // `= 17`, all sed-verifiable, beats one pub-use-chain that
-        // ties module visibility together.
+        // ─── Protocol version: minor lives in the top 8 bits of
+        // `options`; major is our constant.
         #[allow(clippy::items_after_statements)] // const next to its only use; hoisting hides the value
         const PROT_MAJOR: u8 = 17;
         let _ = writeln!(
@@ -452,10 +435,6 @@ impl NodeInfo {
 /// `ParseError → CmdError` with upstream's message:
 /// `"Unable to parse X dump from tincd."`.
 fn parse_err(what: &str, body: &str) -> CmdError {
-    // Upstream includes the line for edge dump but not for the
-    // others. Inconsistent; we always include (it's useful). The
-    // body, not the full `"18 3 ..."` line — recv_row already
-    // stripped the prefix.
     CmdError::BadInput(format!("Unable to parse {what} dump from tincd.\n{body}"))
 }
 
@@ -480,19 +459,9 @@ fn find_node<S: std::io::Read + std::io::Write>(
     // third arg". `send_str` does `"18 3 alice\n"`.
     ctl.send_str(CtlRequest::DumpNodes, name)?;
 
-    // ─── Match loop
-    // `loop`-with-`break value` not `let mut found = None` — the
-    // initial None is dead (clippy noticed); the loop ASSIGNS once
-    // then breaks. The break-value form makes that single-assignment
-    // structural.
     let found = loop {
         match ctl.recv_row()? {
-            DumpRow::End(_) => {
-                // Terminator without match. Caller maps to
-                // "Unknown node". No drain needed: terminator IS
-                // the end.
-                return Ok(None);
-            }
+            DumpRow::End(_) => return Ok(None),
             DumpRow::Row(_, body) => {
                 // Full 22-field parse.
                 let row = NodeRow::parse(&body).map_err(|_| parse_err("node", &body))?;
@@ -506,14 +475,8 @@ fn find_node<S: std::io::Read + std::io::Write>(
 
     // ─── Drain
     // Found alice on row 3 of 50; daemon's still sending. Read and
-    // discard until terminator. We don't even tokenize: recv_row
-    // does the End detect for us.
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, _) => {} // discard
-        }
-    }
+    // discard until terminator.
+    ctl.for_each_row(|_, _| Ok::<_, CmdError>(()))?;
 
     Ok(Some(found))
 }
@@ -531,25 +494,20 @@ fn collect_edges<S: std::io::Read + std::io::Write>(
     ctl.send_str(CtlRequest::DumpEdges, name)?;
 
     let mut to_names = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                // First two strings only — see module doc "Partial
-                // parses". NOT `splitn(3, ' ')`: sscanf collapses
-                // whitespace runs; match the semantics not spacing.
-                let mut it = body.split_ascii_whitespace();
-                let (Some(from), Some(to)) = (it.next(), it.next()) else {
-                    return Err(parse_err("edge", &body));
-                };
-                // Only edges FROM us (TO is the far end of OUR
-                // outgoing edges).
-                if from == name {
-                    to_names.push(to.to_owned());
-                }
-            }
+    ctl.for_each_row(|_, body| {
+        // First two strings only — see module doc "Partial parses".
+        // NOT `splitn(3, ' ')`: sscanf collapses whitespace runs;
+        // match the semantics not spacing.
+        let mut it = body.split_ascii_whitespace();
+        let (Some(from), Some(to)) = (it.next(), it.next()) else {
+            return Err(parse_err("edge", body));
+        };
+        // Only edges FROM us (TO is the far end of OUR outgoing edges).
+        if from == name {
+            to_names.push(to.to_owned());
         }
-    }
+        Ok(())
+    })?;
     Ok(to_names)
 }
 
@@ -564,18 +522,14 @@ fn collect_subnets<S: std::io::Read + std::io::Write>(
     ctl.send_str(CtlRequest::DumpSubnets, name)?;
 
     let mut subnets = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;
-                if row.owner == name {
-                    // Apply strip_weight at collect.
-                    subnets.push(strip_weight(&row.subnet).to_owned());
-                }
-            }
+    ctl.for_each_row(|_, body| {
+        let row = SubnetRow::parse(body).map_err(|_| parse_err("subnet", body))?;
+        if row.owner == name {
+            // Apply strip_weight at collect.
+            subnets.push(strip_weight(&row.subnet).to_owned());
         }
-    }
+        Ok::<_, CmdError>(())
+    })?;
     Ok(subnets)
 }
 
@@ -659,42 +613,36 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
     ctl.send_str(CtlRequest::DumpSubnets, item)?;
 
     let mut matches = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;
-                // A parse failure on the DAEMON's subnet is fatal.
-                // (Can't compare what we can't parse.) The daemon
-                // never sends garbage, so this is corruption.
-                let subnet: Subnet = row.subnet.parse().map_err(|_| parse_err("subnet", &body))?;
+    ctl.for_each_row(|_, body| {
+        let row = SubnetRow::parse(body).map_err(|_| parse_err("subnet", body))?;
+        // A parse failure on the DAEMON's subnet is fatal. (Can't
+        // compare what we can't parse.) The daemon never sends
+        // garbage, so this is corruption.
+        let subnet: Subnet = row.subnet.parse().map_err(|_| parse_err("subnet", body))?;
 
-                // ─── Filters
-                // Type mismatch → skip. Handled inside `matches()`
-                // (returns false).
-                //
-                // Weight match, IFF user typed `#`. Outside
-                // `matches()` because it's gated by the string-
-                // shape, not the parsed value.
-                if with_weight && find.weight() != subnet.weight() {
-                    continue;
-                }
-                // The per-type maskcmp/memcmp. Factored into
-                // `Subnet::matches`. NB: argument order is
-                // `subnet.matches(&find, ...)`, NOT the other way.
-                // `subnet.matches(find, true)` uses self's prefix.
-                if !subnet.matches(&find, as_address) {
-                    continue;
-                }
-
-                // We collect; binary prints.
-                matches.push(SubnetMatch {
-                    subnet: strip_weight(&row.subnet).to_owned(),
-                    owner: row.owner,
-                });
-            }
+        // ─── Filters
+        // Type mismatch → skip. Handled inside `matches()` (returns
+        // false). Weight match IFF user typed `#` — outside
+        // `matches()` because it's gated by the string-shape, not
+        // the parsed value.
+        if with_weight && find.weight() != subnet.weight() {
+            return Ok(());
         }
-    }
+        // The per-type maskcmp/memcmp. Factored into
+        // `Subnet::matches`. NB: argument order is
+        // `subnet.matches(&find, ...)`, NOT the other way.
+        // `subnet.matches(find, true)` uses self's prefix.
+        if !subnet.matches(&find, as_address) {
+            return Ok(());
+        }
+
+        // We collect; binary prints.
+        matches.push(SubnetMatch {
+            subnet: strip_weight(&row.subnet).to_owned(),
+            owner: row.owner,
+        });
+        Ok::<_, CmdError>(())
+    })?;
 
     // Caller does the `if(!found)` → error (so caller picks the
     // "address" vs "subnet" wording from the shape it already

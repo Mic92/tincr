@@ -68,10 +68,8 @@ pub fn expand_name(
     // values too so `HOST=foo.bar` and hostname `foo.bar` agree.
     let short = resolved.split('.').next().unwrap_or(&resolved);
 
-    // Squash non-alnum-or-underscore to `_`. Preserving `_` matters:
-    // a hostname like `dev_box` should stay `dev_box`, not `dev_box`
-    // → `dev_box` (no-op) vs the old CLI path which mapped `_` → `_`
-    // only by accident of `is_ascii_alphanumeric` returning false.
+    // Squash non-alnum to `_`; `_` itself is preserved deliberately
+    // (not just by the accident of `is_ascii_alphanumeric` → false).
     let name: String = short
         .chars()
         .map(|c| {

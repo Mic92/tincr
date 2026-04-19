@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use tinc_conf::vars::{self, VarFlags};
 
-use super::{CmdError, exchange, io_err};
+use super::{CmdError, TmpGuard, exchange, io_err};
 use crate::names::{self, Paths};
 
 // Action enum — GET/SET/ADD/DEL after argv normalization.
@@ -93,11 +93,6 @@ impl std::fmt::Display for Warning {
                 variable,
                 old_value,
             } => {
-                // `=` with single space on both sides. The file
-                // might have `Port=655` or `Port  =  655`; the
-                // warning normalizes. (Minor info loss, but upstream
-                // does the same — it prints `variable` and `bvalue`,
-                // both already trimmed.)
                 write!(f, "Warning: removing {variable} = {old_value}")
             }
         }
@@ -107,10 +102,6 @@ impl std::fmt::Display for Warning {
 // Stage 1: argv → (raw action, optional explicit node, var, value)
 
 /// Parse `[NODE.]VAR [= VAL]` from a pre-joined argv string.
-///
-/// Same `strcspn`/`strspn` tokenizer that appears in conf parsing,
-/// invitations, etc. — the SEVENTH instance. See module doc for why
-/// we don't unify them.
 ///
 /// The `node.var` split happens *after* `var = val` tokenization,
 /// so `alice.Port = 655` parses as `(alice, Port, 655)` but
@@ -126,30 +117,15 @@ impl std::fmt::Display for Warning {
 /// # Errors
 /// `var` is empty (e.g. input is `".Port"` or `"= 655"` or `""`).
 fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> {
-    // ─── Find end of key: first \t, space, or =
-    // Same `find` set as `split_var` in join.rs. Those three chars
-    // exactly.
-    let key_end = joined.find(['\t', ' ', '=']).unwrap_or(joined.len());
-    let key = &joined[..key_end];
+    let (key, val) = tinc_conf::split_kv(joined);
 
-    // ─── Walk past separator to find value
-    let rest = &joined[key_end..];
-    let rest = rest.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let val = rest.trim_start_matches([' ', '\t']);
-
-    // ─── Split key on '.' for node.var syntax
-    // The `.` doesn't appear in any var name (verified: `vars.rs`
-    // table is alnum-only) so `find('.')` is unambiguous.
+    // `.` doesn't appear in any var name (vars.rs table is alnum-only)
+    // so `find('.')` is unambiguous.
     let (node, var) = match key.find('.') {
         Some(dot) => (Some(&key[..dot]), &key[dot + 1..]),
         None => (None, key),
     };
 
-    // ─── Empty var → error
-    // `alice.` → empty var. `.` alone → empty node AND empty var,
-    // but the var check fires first. We don't separately validate
-    // the node here (`check_id` later).
     if var.is_empty() {
         return Err(CmdError::BadInput("No variable given.".into()));
     }
@@ -359,12 +335,6 @@ fn validate_subnet(value: &str) -> Result<(), CmdError> {
 
 // Stage 3: the file walk. Read, transform, write-via-tmpfile, rename.
 
-/// Result of a `Get`. Values found, in file order.
-///
-/// The binary prints one per line. Separate type so tests can
-/// assert without capturing stdout.
-pub type GetResult = Vec<String>;
-
 /// Result of a `Set`/`Add`/`Del`. The walk produces warnings as a
 /// side effect (gathered by the caller); the bool is "did anything
 /// change?" — `Del` returns error if it didn't delete anything,
@@ -378,97 +348,13 @@ pub struct EditResult {
     pub warnings: Vec<Warning>,
 }
 
-/// `<path>.config.tmp` RAII. Same shape as `genkey::TmpGuard` but
-/// the suffix differs (`.config.tmp` vs `.tmp`). Re-declared here
-/// per the "module-private constants stay private" rule — the two
-/// guards have different invariants (genkey's is about commenting
-/// out PEM blocks; this one is about config-line surgery) and
-/// unifying them would create a false coupling.
-///
-/// Drop = `unlink` best-effort. `commit()` consumes self, renames,
-/// drop is a no-op.
-struct TmpGuard {
-    tmp: PathBuf,
-    target: PathBuf,
-}
-
-impl TmpGuard {
-    /// Open `<target>.config.tmp` for writing.
-    ///
-    /// We `O_CREAT | O_TRUNC | O_WRONLY` at mode 0644 — same as
-    /// `fopen("w")` under default umask. The target is a config
-    /// file, not a key file; world-read is fine.
-    fn open(target: &std::path::Path) -> Result<(Self, fs::File), CmdError> {
-        // The `.config.tmp` suffix is exactly upstream's. Can't use
-        // `with_extension` — that'd replace `.conf`, not append.
-        let mut tmp = target.as_os_str().to_owned();
-        tmp.push(".config.tmp");
-        let tmp = PathBuf::from(tmp);
-
-        // Create-or-truncate. If a `.config.tmp` is lying around
-        // from a crashed previous run, we just overwrite it.
-        //
-        // Our `CmdError::Io` says "Could not access <path>: <err>".
-        // The path identifies the file (it ends in `.config.tmp`);
-        // the io::Error says what went wrong.
-        let f = fs::File::create(&tmp).map_err(io_err(&tmp))?;
-
-        Ok((
-            Self {
-                tmp,
-                target: target.to_path_buf(),
-            },
-            f,
-        ))
-    }
-
-    /// Rename tmp → target. Consumes self; drop becomes a no-op.
-    ///
-    /// `mem::take` on the path because we can't destructure a Drop
-    /// type (E0509). After the take, `self.tmp` is empty `PathBuf`;
-    /// when `self` drops at function end (after rename succeeded),
-    /// `remove_file("")` is an `ENOENT` no-op. If rename FAILS, we
-    /// manually unlink before the take'd `tmp` drops.
-    fn commit(mut self) -> Result<(), CmdError> {
-        let tmp = std::mem::take(&mut self.tmp);
-        let target = std::mem::take(&mut self.target);
-        // self.tmp is now empty. Drop will `remove_file("")` →
-        // ENOENT → silently ignored. Harmless.
-
-        fs::rename(&tmp, &target).map_err(|e| {
-            // Best-effort cleanup. If rename fails (cross-device?
-            // perms?) we shouldn't leave `.config.tmp` lying around.
-            // Upstream doesn't do this — it just `return 1`s. We
-            // tighten.
-            let _ = fs::remove_file(&tmp);
-            // Our Io variant only carries one path; we pick the
-            // target (it's the file the user asked about).
-            CmdError::Io {
-                path: target,
-                err: e,
-            }
-        })
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        // Only fires on error returns (`?` propagation). On the
-        // success path, `commit()` consumes self before drop.
-        // Upstream doesn't unlink on error returns; we do. Harmless
-        // if the file's already gone (`ENOENT` from `remove_file`
-        // is silently dropped).
-        let _ = fs::remove_file(&self.tmp);
-    }
-}
-
 /// `Get`: scan the file, collect matching values.
 ///
 /// Doesn't open a tmpfile — read-only.
 ///
 /// # Errors
 /// File doesn't exist (`fopen` fails) or read error.
-pub fn run_get(path: &std::path::Path, variable: &str) -> Result<GetResult, CmdError> {
+pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, CmdError> {
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     let mut found = Vec::new();
@@ -518,7 +404,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     // ─── Open tmpfile (RAII; cleaned up on `?`)
-    let (guard, mut tf) = TmpGuard::open(path)?;
+    // The `.config.tmp` suffix is exactly upstream's.
+    let (guard, mut tf) = TmpGuard::open(path, ".config.tmp")?;
 
     // ─── Walk lines
     let mut already_set = false; // Set wrote its one line
@@ -530,8 +417,6 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
         // ─── Tokenize. None → not a key=val line (blank/comment/PEM)
         let parsed = split_line(line);
 
-        // ─── Match against our variable
-        // The big four-arm dispatch.
         let matched = parsed
             .as_ref()
             .is_some_and(|(k, _)| k.eq_ignore_ascii_case(&intent.variable));
@@ -543,11 +428,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
             match intent.action {
                 Action::Get => unreachable!("debug_assert above"),
 
-                // ─── DEL: skip if value matches (or no filter)
-                // The `continue` is the delete — we just don't
-                // write the line. Value filter is case-insensitive.
-                // `tinc del ConnectTo alice` matches `ConnectTo =
-                // Alice`.
+                // DEL: the `continue` is the delete. Value filter is
+                // case-insensitive.
                 Action::Del => {
                     if intent.value.is_empty() || line_val.eq_ignore_ascii_case(&intent.value) {
                         removed_any = true;
@@ -557,15 +439,10 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
                     // line that didn't match the filter survives.
                 }
 
-                // ─── SET: replace first match, delete rest
-                // The first-match-replaces, subsequent-matches-delete
-                // behavior is what makes SET on a MULTIPLE var
-                // dangerous (warnonremove).
+                // SET: replace first match, delete rest — this is what
+                // makes SET on a MULTIPLE var dangerous (warnonremove).
                 Action::Set => {
-                    // Warning fires for *every* deleted/replaced
-                    // line whose value differs from the new one.
-                    // Same value → no warning (you're setting it to
-                    // what it already was; nothing's being lost).
+                    // No warning if same value: nothing is being lost.
                     if intent.warn_on_remove && !line_val.eq_ignore_ascii_case(&intent.value) {
                         warnings.push(Warning::Removing {
                             variable: intent.variable.clone(),
@@ -587,10 +464,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
                     continue;
                 }
 
-                // ─── ADD: check for dup, fall through to copy
-                // If exact match exists, remember it (we'll skip the
-                // append at the end). Either way, the existing line
-                // is preserved.
+                // ADD: remember exact-match dup (skip append later);
+                // existing line is preserved either way.
                 Action::Add => {
                     if line_val.eq_ignore_ascii_case(&intent.value) {
                         add_dup = true;
@@ -600,22 +475,14 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
             }
         }
 
-        // ─── Copy verbatim
-        // Includes the "add newline if missing" — last line might
-        // not have `\n`. `split_inclusive` gives us the trailing
-        // `\n` if it was there, so we write `line` directly. The
-        // "add newline if missing" check translates to: if `line`
-        // doesn't end with `\n` (only true for the last line of a
-        // file with no trailing newline), add one.
+        // ─── Copy verbatim (`split_inclusive` kept the `\n`; only the
+        // last line of a no-trailing-newline file needs one added).
         tf.write_all(line.as_bytes()).map_err(tmpfile_werr)?;
         if !line.ends_with('\n') {
             tf.write_all(b"\n").map_err(tmpfile_werr)?;
         }
     }
 
-    // ─── Append if needed
-    // `Set` that matched nothing appends; `Add` that found no dup
-    // appends.
     let needs_append = match intent.action {
         Action::Set => !already_set,
         Action::Add => !add_dup,
@@ -625,34 +492,20 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
         writeln!(tf, "{} = {}", intent.variable, intent.value).map_err(tmpfile_werr)?;
     }
 
-    // ─── Flush + close
-    // Dropping `tf` flushes implicitly, but `sync_all` makes the
-    // error visible. Upstream checks `fclose`'s return; we go
-    // further (fsync). Config edits matter — `tinc set Port 655`
-    // followed by an immediate daemon start should see the new port.
+    // fsync so an immediate daemon start sees the edit.
     tf.sync_all().map_err(tmpfile_werr)?;
     drop(tf);
 
-    // ─── Del with nothing deleted → error
-    // GET never reaches here (we routed it to run_get).
-    // TmpGuard::drop handles the tmpfile cleanup on the `?`.
     if intent.action == Action::Del && !removed_any {
         return Err(CmdError::BadInput(
             "No configuration variables deleted.".into(),
         ));
     }
 
-    // ─── Commit: rename tmp → target
     guard.commit()?;
 
-    // `changed` is for the binary to decide whether to reload.
-    // Set/Add always change (either replaced or appended). Del
-    // changed iff removed_any (and we already returned error
-    // for !removed_any, so always true here). But: a SET that
-    // replaced a value with itself? The file's still rewritten
-    // (canonical casing might differ), so still "changed" from
-    // the daemon's perspective. Keep it simple: we got here →
-    // changed.
+    // We got here → changed (even SET-to-same rewrites canonical
+    // casing, so the daemon should reload).
     Ok(EditResult {
         changed: true,
         warnings,
@@ -692,26 +545,16 @@ fn tmpfile_werr(e: std::io::Error) -> CmdError {
 /// inherit upstream's behavior — `tinc set -----BEGIN something`
 /// would do something weird, but so would upstream.
 fn split_line(line: &str) -> Option<(&str, &str)> {
-    // ─── rstrip first: \t\r\n and space
-    // We do it on the *whole line* up front, then tokenize.
-    // Upstream does it on bvalue after key extraction — equivalent,
-    // since the key portion never has trailing whitespace anyway
-    // (the stop set IS whitespace).
-    let trimmed = line.trim_end_matches(['\t', '\r', '\n', ' ']);
-
-    // ─── Same key-end finding as parse_var_expr
-    let key_end = trimmed.find(['\t', ' ', '=']).unwrap_or(trimmed.len());
-    let key = &trimmed[..key_end];
+    // rstrip first: \t\r\n and space. We do it on the *whole line* up
+    // front, then tokenize. Upstream does it on bvalue after key
+    // extraction — equivalent, since the key portion never has trailing
+    // whitespace anyway (the stop set IS whitespace).
+    let (key, val) = tinc_conf::split_kv(line.trim_end_matches(['\t', '\r', '\n', ' ']));
     if key.is_empty() {
-        return None;
+        None
+    } else {
+        Some((key, val))
     }
-
-    let rest = &trimmed[key_end..];
-    let rest = rest.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let val = rest.trim_start_matches([' ', '\t']);
-
-    Some((key, val))
 }
 
 // Top-level: glue stages 1+2+3, handle the Port special case,
@@ -722,7 +565,7 @@ fn split_line(line: &str) -> Option<(&str, &str)> {
 #[derive(Debug)]
 pub enum ConfigOutput {
     /// `Get` found these values. Binary prints one per line.
-    Got(GetResult),
+    Got(Vec<String>),
     /// `Set`/`Add`/`Del` succeeded. Binary fires reload if `changed`.
     Edited(EditResult),
 }

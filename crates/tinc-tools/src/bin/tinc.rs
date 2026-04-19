@@ -442,6 +442,18 @@ const COMMANDS: &[CmdEntry] = &[
     },
 ];
 
+/// Arity guard for the many zero-arg adapters: `Err(TooManyArgs)` if
+/// anything was passed, else `Ok(())`. Keeps the per-command wrappers
+/// to a single line instead of repeating the same three-line check a
+/// dozen times.
+fn no_args(args: &[String]) -> Result<(), CmdError> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(CmdError::TooManyArgs)
+    }
+}
+
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
 /// Each command has one of these; it's where arity errors live.
 ///
@@ -489,18 +501,13 @@ fn cmd_genkey_rsa_stub(_: &Paths, _: &Globals, args: &[String]) -> Result<(), Cm
     Ok(())
 }
 
-/// `cmd_generate_ed25519_keys`: zero args. The wrapper is 5 lines.
+/// `cmd_generate_ed25519_keys`: zero args.
 fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::genkey::run(paths)
 }
 
 /// `cmd_sign`: optional file arg.
-/// `t = time(NULL)` → `SystemTime::now().duration_since(UNIX_EPOCH)`.
-/// `as_secs()` returns `u64`; we need `i64` for the `%ld` format.
-/// `as i64` is safe until 292 billion CE.
 fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let input = match args {
@@ -508,11 +515,6 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         [file] => Some(std::path::Path::new(file)),
         [_, _, ..] => return Err(CmdError::TooManyArgs),
     };
-    // `expect` is fine: `now() < UNIX_EPOCH` only on a system whose
-    // clock is set before 1970. `time(NULL)` would return
-    // `(time_t)-1` on the same system (and then `%ld` formats it as
-    // `-1`, and `verify`'s `!t` check passes — a different bug). We
-    // crash. Better.
     #[allow(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -536,9 +538,7 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::fsck::Severity;
 
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
 
     // The argv[0] becomes `exe_name` for the suggestion messages.
     // We hardcode `tinc` — there's only one binary name. (Upstream
@@ -620,18 +620,11 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     Ok(())
 }
 
-// Daemon-RPC adapters — the simple control commands
-//
-// Each is: arity check → `cmd::ctl_simple::*`. The arity check is
-// the only thing the adapter adds; everything else (connect, send,
-// ack) is in the lib function. Same pattern as the filesystem-
-// command adapters.
+// Daemon-RPC adapters — arity check + forward to `cmd::ctl_simple::*`.
 
 /// `cmd_pid`: zero args. Prints daemon's pid + newline.
 fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     let pid = cmd::ctl_simple::pid(paths)?;
     // Stdout, newline.
     println!("{pid}");
@@ -653,33 +646,25 @@ fn cmd_restart(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErr
 
 /// `cmd_stop`: zero args. Stops daemon, drains until socket closes.
 fn cmd_stop(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::stop(paths)
 }
 
 /// `cmd_reload`: zero args.
 fn cmd_reload(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::reload(paths)
 }
 
 /// `cmd_retry`: zero args.
 fn cmd_retry(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::retry(paths)
 }
 
 /// `cmd_purge`: zero args.
 fn cmd_purge(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::purge(paths)
 }
 
@@ -721,21 +706,14 @@ fn cmd_config_with_action(
     action: cmd::config::Action,
     args: &[String],
 ) -> Result<(), CmdError> {
-    // ─── Arity
-    // `if(argc < 2)` after the verb peel. "2" because argv includes
-    // argv[0]; ours doesn't, so "1".
     if args.is_empty() {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     }
 
-    // ─── Join the rest
-    // `strncat` loop with single space. `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
-    // val="foo bar". The space-join recreates the user's intent
-    // (modulo collapsing multiple shell-quoted spaces, but the
-    // C has the same loss).
+    // Space-join recreates `tinc set Name foo bar` → var=Name,
+    // val="foo bar" (collapses shell-quoted spaces; so does the C).
     let joined = args.join(" ");
 
-    // ─── Run
     let (out, warnings) = cmd::config::run(paths, action, &joined, g.force)?;
     config_output(paths, out, &warnings);
     Ok(())
@@ -746,28 +724,19 @@ fn cmd_config_with_action(
 fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd::config::Warning]) {
     use cmd::config::ConfigOutput;
 
-    // ─── Print warnings to stderr
-    // We collect-then-print.
     for w in warnings {
         eprintln!("{w}");
     }
 
-    // ─── Handle output
     match out {
         ConfigOutput::Got(values) => {
-            // One per line, stdout.
             for v in values {
                 println!("{v}");
             }
         }
         ConfigOutput::Edited(result) => {
-            // `if(connect_tincd(false)) sendline(REQ_RELOAD)`.
-            // Best-effort. The `false` means "don't error if the
-            // daemon's down". We swallow the entire Result —
-            // daemon down? fine. daemon up but reload failed?
-            // also fine, the file's already written, the daemon
-            // will pick it up on next start. The C doesn't check
-            // the ack either.
+            // Best-effort: file's already written; daemon down or
+            // reload-nack are both fine, it picks up on next start.
             if result.changed {
                 let _ = cmd::ctl_simple::reload(paths);
             }
@@ -775,18 +744,9 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
     }
 }
 
-// ─── The four toplevel adapters
-// C uses ONE function and an `argv--` shift to re-read the command
-// name. We can't see argv[0] (dispatch ate it), so each toplevel
-// name passes its action explicitly. Four 1-line wrappers; the
-// alternative (threading argv[0] through Globals) is uglier.
-//
-// The first cut of this had ONE adapter that re-parsed args[0] for
-// the verb. That worked for get/set by accident (get→GET default;
-// set→GET→coerced to SET via get-with-value) but `tinc add
-// ConnectTo bob` would have routed GET→SET, *deleting* other
-// ConnectTo lines instead of appending. Caught by reading the
-// fall-through case carefully before building. Separate adapters.
+// Four toplevel adapters: dispatch ate argv[0], so each passes its
+// action explicitly. Don't unify via re-parsing args[0] — the GET
+// fall-through default would mis-route `add` as a destructive SET.
 
 fn cmd_get(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
     cmd_config_with_action(p, g, cmd::config::Action::Get, a)
@@ -855,7 +815,7 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
 /// a hint: scripts parsing `tinc dump invitations | while read` don't
 /// want a non-data line. We match.
 fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use cmd::dump::{DumpOutput, Kind, dump, dump_invitations, parse_kind};
+    use cmd::dump::{Kind, dump, dump_invitations, parse_kind};
 
     // ─── argv → Kind
     // The arity errors and `Unknown dump type` live in here.
@@ -882,8 +842,7 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     }
 
     // ─── Daemon-backed: connect, send, recv, format
-    let DumpOutput::Lines(lines) = dump(paths, kind)?;
-    for line in lines {
+    for line in dump(paths, kind)? {
         println!("{line}");
     }
     // Empty dump → silent. C: zero-iteration while loop, return 0.
@@ -938,9 +897,7 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// the URL fragment, but that's a Paths concern; this is pure
 /// display.)
 fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::top::run(paths, g.netname.as_deref())
 }
 
@@ -1007,9 +964,7 @@ fn cmd_edit(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// The print itself is `print_version()`
 /// from this binary — same fn `--version` calls.
 fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     print_version();
     Ok(())
 }
@@ -1088,27 +1043,21 @@ fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
 
 /// `cmd_export`: zero args, write to stdout.
 fn cmd_export(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     // `lock()` for the BufWriter; export does many small writes.
     cmd::exchange::export(paths, std::io::stdout().lock())
 }
 
 /// `cmd_export_all`: zero args, write to stdout.
 fn cmd_export_all(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::exchange::export_all(paths, std::io::stdout().lock())
 }
 
 /// `cmd_import`: zero args, read from stdin. Maps count→exit-code:
 /// returns 1 if zero imported.
 fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     let count = cmd::exchange::import(paths, std::io::stdin().lock(), g.force)?;
     if count > 0 {
         eprintln!("Imported {count} host configuration files.");
@@ -1174,6 +1123,35 @@ fn cmd_exchange_all(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), C
 /// not `&[String]` because we consume the iterator; the caller indexes
 /// it once.
 ///
+/// Match `arg` against one getopt-style value option in all four
+/// spellings (`-x VAL`, `-xVAL`, `--long VAL`, `--long=VAL`). Returns
+/// `Ok(Some(value))` on match, `Ok(None)` if `arg` is something else,
+/// `Err` if it matched but the separate-argument form had no follower.
+fn take_opt(
+    arg: &str,
+    it: &mut impl Iterator<Item = String>,
+    short: Option<&str>,
+    long: &str,
+) -> Result<Option<String>, String> {
+    if short == Some(arg) || arg == long {
+        let name = short.unwrap_or(long);
+        return it
+            .next()
+            .map(Some)
+            .ok_or_else(|| format!("option {name} requires an argument"));
+    }
+    if let Some(rest) = arg.strip_prefix(long).and_then(|r| r.strip_prefix('=')) {
+        return Ok(Some(rest.to_owned()));
+    }
+    if let Some(s) = short
+        && let Some(rest) = arg.strip_prefix(s)
+        && !rest.is_empty()
+    {
+        return Ok(Some(rest.to_owned()));
+    }
+    Ok(None)
+}
+
 /// `Err(String)` is the message to print before exiting nonzero.
 fn parse_global_options(
     mut args: impl Iterator<Item = String>,
@@ -1201,30 +1179,25 @@ fn parse_global_options(
     // semantics (the option takes a required argument, so the rest of
     // the token IS the argument).
     while let Some(arg) = args.next() {
+        // Value-bearing options: each accepts `-x VAL`, `-xVAL`,
+        // `--long VAL` and `--long=VAL` (the glued form people
+        // copy-paste from systemd unit files).
+        if let Some(v) = take_opt(&arg, &mut args, Some("-c"), "--config")? {
+            input.confbase = Some(PathBuf::from(v));
+            continue;
+        }
+        if let Some(v) = take_opt(&arg, &mut args, Some("-n"), "--net")? {
+            input.netname = Some(v);
+            continue;
+        }
+        // `--pidfile=FILE`. Overrides the /var/run ↔ confbase
+        // resolution dance entirely. Only matters for daemon-RPC
+        // commands. No short form (C: long-only).
+        if let Some(v) = take_opt(&arg, &mut args, None, "--pidfile")? {
+            input.pidfile = Some(PathBuf::from(v));
+            continue;
+        }
         match arg.as_str() {
-            "-c" | "--config" => {
-                let val = args.next().ok_or("option -c requires an argument")?;
-                input.confbase = Some(PathBuf::from(val));
-            }
-            // `--config=DIR` glued form. getopt_long handles this; we
-            // do too because it's the form people copy-paste from
-            // systemd unit files.
-            s if s.starts_with("--config=") => {
-                input.confbase = Some(PathBuf::from(&s["--config=".len()..]));
-            }
-            s if s.starts_with("-c") && s.len() > 2 => {
-                input.confbase = Some(PathBuf::from(&s[2..]));
-            }
-            "-n" | "--net" => {
-                let val = args.next().ok_or("option -n requires an argument")?;
-                input.netname = Some(val);
-            }
-            s if s.starts_with("--net=") => {
-                input.netname = Some(s["--net=".len()..].to_owned());
-            }
-            s if s.starts_with("-n") && s.len() > 2 => {
-                input.netname = Some(s[2..].to_owned());
-            }
             // `-h` alias. tincd accepts it; keeping the two binaries
             // consistent is cheaper than explaining why one does and
             // the other doesn't.
@@ -1239,15 +1212,6 @@ fn parse_global_options(
             "--version" => {
                 rest.push("--version".into());
                 return Ok((input, globals, rest));
-            }
-            // `--pidfile=FILE`. Overrides the /var/run ↔ confbase resolution dance entirely. Only
-            // matters for daemon-RPC commands. No short form (C: long-only).
-            "--pidfile" => {
-                let val = args.next().ok_or("option --pidfile requires an argument")?;
-                input.pidfile = Some(PathBuf::from(val));
-            }
-            s if s.starts_with("--pidfile=") => {
-                input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
             }
             // `OPT_BATCH` sets `tty = false` — disables interactive
             // prompts. We have no prompts (see `cmd/init.rs` doc), so

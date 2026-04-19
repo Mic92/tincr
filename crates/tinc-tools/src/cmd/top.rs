@@ -61,7 +61,7 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cmd::CmdError;
-use crate::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
+use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::Paths;
 use crate::tui;
 
@@ -286,14 +286,10 @@ impl Stats {
         for row in rows {
             let entry = self.nodes.entry(row.name.clone());
 
-            // We CAN'T detect vacancy with `or_insert_with` AND
-            // see the result of the closure firing, in one go —
-            // the closure runs inside `or_insert_with` and we get
-            // the `&mut NodeStats` either way. So: match on the
-            // entry first.
+            // Match on entry (not `or_insert_with`) so we can record
+            // "newly inserted" for `display_order`/`changed`.
             let s = match entry {
                 Entry::Vacant(v) => {
-                    // `Default` is the same zero-init as `xzalloc`.
                     self.display_order.push(row.name.clone());
                     changed = true;
                     v.insert(NodeStats::default())
@@ -304,18 +300,13 @@ impl Stats {
             // This row's dump mentioned us → not gone.
             s.known = true;
 
-            // Rate = delta / interval. The `wrapping_sub` is
-            // unsigned subtraction (well-defined modular wrap).
-            // See module doc — the wrap is observable (one-tick
-            // spike on daemon restart).
-            //
-            // `as f32` after the sub, not before — `(a - b) as f32`
-            // not `a as f32 - b as f32`. Different rounding for
-            // huge values.
-            s.in_packets_rate = row.in_packets.wrapping_sub(s.in_packets) as f32 / interval;
-            s.in_bytes_rate = row.in_bytes.wrapping_sub(s.in_bytes) as f32 / interval;
-            s.out_packets_rate = row.out_packets.wrapping_sub(s.out_packets) as f32 / interval;
-            s.out_bytes_rate = row.out_bytes.wrapping_sub(s.out_bytes) as f32 / interval;
+            // `wrapping_sub`: see module doc — the wrap is observable
+            // as a one-tick spike on daemon restart.
+            let rate = |new: u64, old: u64| new.wrapping_sub(old) as f32 / interval;
+            s.in_packets_rate = rate(row.in_packets, s.in_packets);
+            s.in_bytes_rate = rate(row.in_bytes, s.in_bytes);
+            s.out_packets_rate = rate(row.out_packets, s.out_packets);
+            s.out_bytes_rate = rate(row.out_bytes, s.out_bytes);
 
             // Store for next tick's delta.
             s.in_packets = row.in_packets;
@@ -334,20 +325,8 @@ impl Stats {
     /// upstream's `i` tiebreak emulates this (see module doc). We
     /// just call sort.
     pub fn sort(&mut self) {
-        // ─── Name mode is special
-        // Ascending, NOT negated. The other modes return Equal on
-        // tie and rely on stability to preserve frame-to-frame
-        // position; Name is the only mode that ACTIVELY orders
-        // ties (because "tie" means "same name" which can't happen,
-        // names are unique). So Name doesn't go through `compare()`
-        // — it's just `String::cmp`.
-        //
-        // Why not have `compare()` handle Name? It'd need the
-        // names, which are the BTreeMap keys, not in NodeStats.
-        // Passing them in would be 6 args. Upstream dodges this by
-        // storing `name` IN `nodestats_t`; we don't (it's the map
-        // key, would be redundant). The branch here is the cost of
-        // NOT storing the redundant name. Cheap.
+        // Name handled here, not in `compare()`: the name is the map
+        // key and isn't stored in `NodeStats`.
         if self.sort_mode == SortMode::Name {
             self.display_order.sort();
             return;
@@ -355,18 +334,11 @@ impl Stats {
 
         let mode = self.sort_mode;
         let cumulative = self.cumulative;
-        // `sort_by` borrows `&mut self.display_order`; the closure
-        // borrows `&self.nodes` (shared). Rust splits the borrow
-        // fine (different fields) AS LONG AS we make the splits
-        // explicit. `let nodes = &self.nodes` first, then the
-        // closure captures `nodes` not `self`.
+        // Split the borrow so the closure captures `nodes`, not `self`.
         let nodes = &self.nodes;
         self.display_order.sort_by(|a, b| {
-            // Look up by name. The Vec only contains keys we
-            // pushed, so the get is infallible — but `unwrap()`
-            // would force `# Panics` doc. `unwrap_or_default()`
-            // gives a zeroed stats which sorts last (rate=0.0),
-            // and never fires anyway.
+            // Infallible (display_order ⊆ nodes' keys); zeroed
+            // fallback sorts last and never fires.
             let na = nodes.get(a).cloned().unwrap_or_default();
             let nb = nodes.get(b).cloned().unwrap_or_default();
             compare(&na, &nb, mode, cumulative)
@@ -388,85 +360,39 @@ impl Stats {
 /// first tick, real elapsed after) — no division by zero, no NaN.
 /// `unwrap_or(Equal)` covers the unreachable NaN case.
 fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> std::cmp::Ordering {
+    // Descending (heavier first): compare b's key against a's. The
+    // u64→f64 cast loses precision past 2^53 but counters that large
+    // (9 PB / 9 quadrillion packets) don't happen in practice and the
+    // ordering would still be correct to within rounding.
+    sort_key(b, mode, cumulative)
+        .partial_cmp(&sort_key(a, mode, cumulative))
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Project a `NodeStats` onto the scalar the current sort mode cares
+/// about. `Name` returns 0 — the caller (`Stats::sort`) handles that
+/// mode by sorting keys directly so this arm is unreachable; the
+/// constant keeps the match exhaustive.
+#[allow(clippy::cast_precision_loss)] // see compare()
+fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
     use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
-    use std::cmp::Ordering::Equal;
-
+    let pick = |cum: u64, rate: f32| {
+        if cumulative {
+            cum as f64
+        } else {
+            f64::from(rate)
+        }
+    };
     match mode {
-        // We don't have the name here (it's the BTreeMap key). The
-        // caller (`Stats::sort`) branches on mode FIRST: Name mode
-        // sorts the key Vec directly, other modes call `compare()`
-        // and rely on stable-sort for ties. This arm is unreachable;
-        // Equal keeps the match exhaustive.
-        Name => Equal,
-
-        // Descending (heavier first): `b.cmp(&a)` not `a.cmp(&b)`.
-        InPackets => {
-            if cumulative {
-                b.in_packets.cmp(&a.in_packets)
-            } else {
-                b.in_packets_rate
-                    .partial_cmp(&a.in_packets_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        InBytes => {
-            if cumulative {
-                b.in_bytes.cmp(&a.in_bytes)
-            } else {
-                b.in_bytes_rate
-                    .partial_cmp(&a.in_bytes_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        OutPackets => {
-            if cumulative {
-                b.out_packets.cmp(&a.out_packets)
-            } else {
-                b.out_packets_rate
-                    .partial_cmp(&a.out_packets_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        OutBytes => {
-            if cumulative {
-                b.out_bytes.cmp(&a.out_bytes)
-            } else {
-                b.out_bytes_rate
-                    .partial_cmp(&a.out_bytes_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        // Sum, then descending. `wrapping_add` for the same reason
-        // as `wrapping_sub` in update — u64 overflow at 18
-        // quintillion total packets; not happening in practice,
-        // but unsigned add wraps and we match.
+        Name => 0.0,
+        InPackets => pick(s.in_packets, s.in_packets_rate),
+        InBytes => pick(s.in_bytes, s.in_bytes_rate),
+        OutPackets => pick(s.out_packets, s.out_packets_rate),
+        OutBytes => pick(s.out_bytes, s.out_bytes_rate),
         TotalPackets => {
-            if cumulative {
-                let sa = a.in_packets.wrapping_add(a.out_packets);
-                let sb = b.in_packets.wrapping_add(b.out_packets);
-                sb.cmp(&sa)
-            } else {
-                let sa = a.in_packets_rate + a.out_packets_rate;
-                let sb = b.in_packets_rate + b.out_packets_rate;
-                sb.partial_cmp(&sa).unwrap_or(Equal)
-            }
+            pick(s.in_packets, s.in_packets_rate) + pick(s.out_packets, s.out_packets_rate)
         }
-
-        TotalBytes => {
-            if cumulative {
-                let sa = a.in_bytes.wrapping_add(a.out_bytes);
-                let sb = b.in_bytes.wrapping_add(b.out_bytes);
-                sb.cmp(&sa)
-            } else {
-                let sa = a.in_bytes_rate + a.out_bytes_rate;
-                let sb = b.in_bytes_rate + b.out_bytes_rate;
-                sb.partial_cmp(&sa).unwrap_or(Equal)
-            }
-        }
+        TotalBytes => pick(s.in_bytes, s.in_bytes_rate) + pick(s.out_bytes, s.out_bytes_rate),
     }
 }
 
@@ -522,15 +448,8 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     let mut s = String::with_capacity(256);
 
     // ─── Row 0: status line
-    // `goto(0,0)` is `mvprintw(0, 0, ...)`. The `\x1b[K`
-    // (`CLEAR_EOL`) replaces `erase()` — we clear-per-line instead
-    // of clear-whole-screen. Less flicker. Upstream's `erase()` +
-    // `refresh()` is curses' double-buffered diff; we don't have
-    // that, so per-line clear is the next best.
-    //
-    // `{netname:<16}` is `%-16s`. `{count:>4}` is `%4d`. `{sortname
-    // :<10}` is `%-10s`. The TWO spaces between fields are literal
-    // in the format string: match them.
+    // Per-line `CLEAR_EOL` instead of `erase()` — less flicker without
+    // curses' double-buffer.
     write!(
         s,
         "{}Tinc {netname:<16}  Nodes: {count:>4}  Sort: {sortname:<10}  {mode}{}",
@@ -539,11 +458,8 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     )
     .unwrap(); // String Write is infallible
 
-    // ─── Row 1: blank, cursor parks here
-    // We're hiding the cursor (`CURSOR_HIDE` in `RawMode::enter`)
-    // so the park position doesn't visually matter — but the `'s'`
-    // key prompt overwrites it. Clear it now so previous-frame
-    // leftovers don't show through when nothing's prompting.
+    // ─── Row 1: blank; cleared so stale `'s'`-prompt leftovers
+    // don't show through.
     write!(s, "{}{}", tui::goto(1, 0), tui::CLEAR_EOL).unwrap();
 
     // ─── Row 2: column headers, REVERSEd
@@ -599,34 +515,15 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
 /// only via `%10.0f`.
 #[allow(clippy::cast_precision_loss)] // Display-only.
 fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
-    // ─── Attribute
-    // The nested `if` is awkward to read; the table form is clearer.
-    //
-    // `clippy::float_cmp`: comparing to literal 0.0 is fine here.
-    // The rates ARE 0.0 when nothing happened (`0u64 as f32 /
-    // interval == 0.0`, exact). Any nonzero delta gives a nonzero
-    // rate (interval is finite positive). No epsilon needed.
     #[allow(clippy::float_cmp)] // 0u64/interval = exact 0.0; nonzero delta ⇒ nonzero rate
     let attr = if !s.known {
         tui::DIM
     } else if s.in_packets_rate != 0.0 || s.out_packets_rate != 0.0 {
         tui::BOLD
     } else {
-        // NORMAL is "no SGR" — the RESET at the end of each row
-        // (and the start-of-row goto+CLEAR_EOL clears prior SGR
-        // anyway, but belt-and-suspenders). Empty string.
-        ""
+        "" // NORMAL: RESET at end-of-row already clears SGR
     };
 
-    // ─── Numbers
-    // `%10.0f` × 4. Order is `in_pkts, in_bytes, out_pkts,
-    // out_bytes` — same in both branches.
-    //
-    // `{x:>10.0}` is `%10.0f`. The default alignment for numeric
-    // types in Rust formatting is RIGHT (same as printf), so
-    // `{:10.0}` not `{:>10.0}`. But: explicit `>` matches printf's
-    // behavior even if Rust ever changes the default. Belt-and-
-    // suspenders, costs nothing.
     let (p1, b1, p2, b2): (f32, f32, f32, f32) = if stats.cumulative {
         (
             s.in_packets as f32 * stats.pscale,
@@ -643,12 +540,8 @@ fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
         )
     };
 
-    // `goto + attribute + body + CLEAR_EOL + RESET`. CLEAR_EOL after
-    // body so leftover chars from a longer previous-frame row are
-    // erased (a node named `verylongnodename` last frame, `bob` this
-    // frame, would leave `gnodename` visible without clearing).
-    // RESET so the next row's lack-of-attr (NORMAL) actually IS
-    // normal.
+    // CLEAR_EOL after body erases leftover chars from a longer
+    // previous-frame row.
     format!(
         "{goto}{attr}{name:<16} {p1:>10.0} {b1:>10.0} {p2:>10.0} {b2:>10.0}{clr}{rst}",
         goto = tui::goto(row, 0),
@@ -675,42 +568,20 @@ fn render(netname: Option<&str>, stats: &Stats, max_rows: u16) -> String {
     s.push_str(&render_header(netname, stats));
 
     // ─── Body: rows 3..
-    // The clip is the only thing curses gave us for free.
     for (i, name) in stats.display_order.iter().enumerate() {
-        // Row 3 is the first body row. `i` is `usize`; `3 + i` →
-        // `u16` would clamp at 65k rows. Nobody has that many
-        // nodes. `try_from` to be precise (the cast would silently
-        // wrap; this saturates by breaking the loop).
         let Ok(row) = u16::try_from(3 + i) else { break };
         if row >= max_rows {
             break;
         }
 
-        // The lookup is infallible (display_order is a subset of
-        // nodes' keys, by construction in `update`). `unwrap_or_
-        // default` for a zeroed-stats fallback (DIM, all 0s) —
-        // reads as "this node is gone" if the invariant somehow
-        // broke. Better than panic mid-draw.
+        // Infallible (display_order ⊆ nodes' keys); zeroed fallback
+        // renders DIM if the invariant ever broke.
         let entry = stats.nodes.get(name).cloned().unwrap_or_default();
         s.push_str(&render_row(name, &entry, stats, row));
     }
 
-    // ─── Clear rows past current body
-    // Upstream's `erase()` clears the whole screen up front. We do
-    // per-line `CLEAR_EOL` instead (no flicker). But: if last frame
-    // had 10 nodes and this frame has 8, rows 11-12 still have the
-    // old text. We DON'T clear them — `nodes` never shrinks (departed
-    // nodes stay, DIM). So body row count is monotone-increasing.
-    //
-    // Except: body row count can EXCEED max_rows (terminal shrunk).
-    // Then on grow, the previously-clipped rows from BEFORE the
-    // shrink are stale. ...but no, alt-screen content past the
-    // visible area is undefined anyway; on grow the terminal fills
-    // with whatever it wants (usually blanks). Don't bother.
-    //
-    // And: if `display_order.len()` < previous frame's len? Can't
-    // happen — `display_order` is append-only. Monotone. No clear
-    // needed.
+    // No need to clear rows past the body: `display_order` is
+    // append-only, so body row count is monotone-increasing.
 
     s
 }
@@ -725,35 +596,24 @@ fn render(netname: Option<&str>, stats: &Stats, max_rows: u16) -> String {
 /// `CtlError::Io` if the socket dies mid-dump (daemon crashed).
 /// `CtlError::Parse` if a row is malformed. Both end the `top` loop.
 fn fetch<S: io::Read + io::Write>(ctl: &mut CtlSocket<S>) -> Result<Vec<TrafficRow>, CtlError> {
-    // No third arg — DUMP_TRAFFIC is one of the dumps that doesn't
-    // pretend to filter.
     ctl.send(CtlRequest::DumpTraffic)?;
 
-    // The vec preallocation guess: a typical mesh has 10-100 nodes.
-    // 32 is fine for the common case, growth handles outliers.
     let mut rows = Vec::with_capacity(32);
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => return Ok(rows),
-            DumpRow::Row(_, body) => {
-                // Parse failure ends the whole top session — the
-                // daemon's sending garbage, no point continuing.
-                //
-                // `CtlError` has no Parse variant. `run()` ignores
-                // the error anyway (`Err(_) => break`). The variant
-                // choice doesn't matter for behavior; `Io` is the
-                // "daemon I/O went bad" bucket and a malformed row
-                // is daemon I/O going bad.
-                let row = TrafficRow::parse(&body).map_err(|_| {
-                    CtlError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("malformed traffic row from daemon: {body}"),
-                    ))
-                })?;
-                rows.push(row);
-            }
-        }
-    }
+    ctl.for_each_row(|_, body| {
+        // Parse failure ends the whole top session — the daemon's
+        // sending garbage, no point continuing. `CtlError` has no
+        // Parse variant; `Io` is the "daemon I/O went bad" bucket
+        // and a malformed row is daemon I/O going bad.
+        let row = TrafficRow::parse(body).map_err(|_| {
+            CtlError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed traffic row from daemon: {body}"),
+            ))
+        })?;
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(rows)
 }
 
 // Layer 5: keys
@@ -839,71 +699,6 @@ fn handle_key(
             Ok(true)
         }
 
-        // ─── Sort mode keys
-        // lowercase → bytes (the heavier metric); uppercase → packets.
-        b'n' => {
-            stats.sort_mode = SortMode::Name;
-            Ok(true)
-        }
-        b'i' => {
-            stats.sort_mode = SortMode::InBytes;
-            Ok(true)
-        }
-        b'I' => {
-            stats.sort_mode = SortMode::InPackets;
-            Ok(true)
-        }
-        b'o' => {
-            stats.sort_mode = SortMode::OutBytes;
-            Ok(true)
-        }
-        b'O' => {
-            stats.sort_mode = SortMode::OutPackets;
-            Ok(true)
-        }
-        b't' => {
-            stats.sort_mode = SortMode::TotalBytes;
-            Ok(true)
-        }
-        b'T' => {
-            stats.sort_mode = SortMode::TotalPackets;
-            Ok(true)
-        }
-
-        // ─── Unit/scale keys
-        // Four presets. `b`/`k` keep packets at 1×, only `M`/`G`
-        // scale packets too. The header strings are 4-5 chars:
-        // `pkts`/`kpkt`/`Mpkt`, `bytes`/`kbyte`/`Mbyte`/`Gbyte`.
-        // Widths fit `%s` in the header without overflowing.
-        b'b' => {
-            stats.bunit = "bytes";
-            stats.bscale = 1.0;
-            stats.punit = "pkts";
-            stats.pscale = 1.0;
-            Ok(true)
-        }
-        b'k' => {
-            stats.bunit = "kbyte";
-            stats.bscale = 1e-3;
-            stats.punit = "pkts";
-            stats.pscale = 1.0;
-            Ok(true)
-        }
-        b'M' => {
-            stats.bunit = "Mbyte";
-            stats.bscale = 1e-6;
-            stats.punit = "kpkt";
-            stats.pscale = 1e-3;
-            Ok(true)
-        }
-        b'G' => {
-            stats.bunit = "Gbyte";
-            stats.bscale = 1e-9;
-            stats.punit = "Mpkt";
-            stats.pscale = 1e-6;
-            Ok(true)
-        }
-
         // ─── 'q': quit
         // `KEY_BREAK` is curses' Windows-console Ctrl-Break thing;
         // we're cfg(unix), don't have it.
@@ -916,9 +711,42 @@ fn handle_key(
         // "ignored key" cycles). Upstream has the same behavior:
         // it doesn't call `keypad()`, so curses gives raw escape
         // bytes too.
-        _ => Ok(true),
+        _ => {
+            // ─── Sort mode keys (lowercase → bytes; uppercase → packets)
+            if let Some(&(_, m)) = SORT_KEYS.iter().find(|(k, _)| *k == key) {
+                stats.sort_mode = m;
+            // ─── Unit/scale keys: four presets. `b`/`k` keep packets
+            // at 1×, only `M`/`G` scale packets too.
+            } else if let Some(&(_, bu, bs, pu, ps)) = UNIT_KEYS.iter().find(|(k, ..)| *k == key) {
+                stats.bunit = bu;
+                stats.bscale = bs;
+                stats.punit = pu;
+                stats.pscale = ps;
+            }
+            Ok(true)
+        }
     }
 }
+
+/// Key → sort mode. Kept as a flat table so adding a mode is one row.
+const SORT_KEYS: &[(u8, SortMode)] = &[
+    (b'n', SortMode::Name),
+    (b'i', SortMode::InBytes),
+    (b'I', SortMode::InPackets),
+    (b'o', SortMode::OutBytes),
+    (b'O', SortMode::OutPackets),
+    (b't', SortMode::TotalBytes),
+    (b'T', SortMode::TotalPackets),
+];
+
+/// Key → (byte unit, byte scale, packet unit, packet scale). Header
+/// strings are 4-5 chars; widths fit `%s` without overflowing.
+const UNIT_KEYS: &[(u8, &str, f32, &str, f32)] = &[
+    (b'b', "bytes", 1.0, "pkts", 1.0),
+    (b'k', "kbyte", 1e-3, "pkts", 1.0),
+    (b'M', "Mbyte", 1e-6, "kpkt", 1e-3),
+    (b'G', "Gbyte", 1e-9, "Mpkt", 1e-6),
+];
 
 // Layer 6: the loop
 

@@ -104,6 +104,17 @@ pub enum Kind {
     Invitations,
 }
 
+/// Argv keyword → `Kind`, for `parse_kind`'s case-insensitive lookup.
+const KINDS: &[(&str, Kind)] = &[
+    ("nodes", Kind::Nodes),
+    ("edges", Kind::Edges),
+    ("subnets", Kind::Subnets),
+    ("connections", Kind::Connections),
+    ("graph", Kind::Graph),
+    ("digraph", Kind::Digraph),
+    ("invitations", Kind::Invitations),
+];
+
 impl Kind {
     /// Does this sub-verb need to talk to the daemon? The binary's
     /// `cmd_dump` adapter checks this BEFORE `connect()` — so
@@ -127,22 +138,14 @@ impl Kind {
 /// without `nodes`, wrong arg count, unknown type.
 pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     // ─── `reachable` prefix (only valid before `nodes`)
-    // The check is `argc > 2 && !strcasecmp(argv[1], "reachable")` —
-    // argc>2 because we need a word AFTER reachable. Then check
-    // that word is `nodes`.
     let (only_reachable, args) = match args {
         [first, rest @ ..] if first.eq_ignore_ascii_case("reachable") => {
-            // Must have a second arg, and it must be "nodes".
             let Some(second) = rest.first() else {
-                // `dump reachable` with nothing after. Upstream
-                // checks `argc > 2` before strcasecmp, so it does
-                // NOT shift — falls through to "Invalid number of
-                // arguments." Match that: bail without shifting.
+                // `dump reachable` alone: upstream falls through to
+                // "Invalid number of arguments." without shifting.
                 return Err(CmdError::BadInput("Invalid number of arguments.".into()));
             };
             if !second.eq_ignore_ascii_case("nodes") {
-                // The backtick-apostrophe quoting is 90s GNU style;
-                // preserved.
                 return Err(CmdError::BadInput(
                     "`reachable' only supported for nodes.".into(),
                 ));
@@ -152,40 +155,25 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
         _ => (false, args),
     };
 
-    // ─── Arity: exactly one (after the shift)
     let [what] = args else {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     };
 
     // ─── Dispatch
     // `only_reachable` was already validated to be nodes-only above,
-    // but the code structure means we COULD arrive here with
-    // only_reachable=true and what=="nodes" (the only valid combo)
-    // or only_reachable=false and any what. We just match what; the
-    // only_reachable bit only modifies the Nodes arm.
-    let kind = if what.eq_ignore_ascii_case("nodes") {
-        if only_reachable {
-            Kind::ReachableNodes
-        } else {
-            Kind::Nodes
-        }
-    } else if what.eq_ignore_ascii_case("edges") {
-        Kind::Edges
-    } else if what.eq_ignore_ascii_case("subnets") {
-        Kind::Subnets
-    } else if what.eq_ignore_ascii_case("connections") {
-        Kind::Connections
-    } else if what.eq_ignore_ascii_case("graph") {
-        Kind::Graph
-    } else if what.eq_ignore_ascii_case("digraph") {
-        Kind::Digraph
-    } else if what.eq_ignore_ascii_case("invitations") {
-        Kind::Invitations
-    } else {
-        return Err(CmdError::BadInput(format!("Unknown dump type '{what}'.")));
-    };
+    // so it can only pair with `what == "nodes"`; the post-lookup
+    // remap covers that one case.
+    let kind = KINDS
+        .iter()
+        .find(|(n, _)| what.eq_ignore_ascii_case(n))
+        .map(|&(_, k)| k)
+        .ok_or_else(|| CmdError::BadInput(format!("Unknown dump type '{what}'.")))?;
 
-    Ok(kind)
+    Ok(if only_reachable {
+        Kind::ReachableNodes
+    } else {
+        kind
+    })
 }
 
 // node_status_t bits — only the two we use
@@ -249,12 +237,6 @@ impl StatusBit {
     /// means one came back.
     pub const UDP_CONFIRMED: Self = Self(1 << 7);
 }
-
-// Backward-compat aliases for the existing dump.rs callers. Same
-// values, just the old names. Module-private — new code uses
-// StatusBit.
-const STATUS_REACHABLE: u32 = StatusBit::REACHABLE.0;
-const STATUS_VALIDKEY: u32 = StatusBit::VALIDKEY.0;
 
 // NodeRow — the 22-field beast
 
@@ -399,13 +381,13 @@ impl NodeRow {
     /// Is bit 4 (reachable) set? `dump reachable nodes` filter.
     #[must_use]
     pub const fn reachable(&self) -> bool {
-        self.status & STATUS_REACHABLE != 0
+        self.status & StatusBit::REACHABLE.0 != 0
     }
 
     /// Bit 1 (validkey). Graph mode picks black for !validkey.
     #[must_use]
     pub const fn validkey(&self) -> bool {
-        self.status & STATUS_VALIDKEY != 0
+        self.status & StatusBit::VALIDKEY.0 != 0
     }
 
     /// The plain-text output line.
@@ -877,17 +859,9 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
 // The daemon-backed dumps
 
-/// Result of a daemon dump. Separate type so the binary can route
-/// `Ok(DumpOutput::Lines(v))` → `println!` per line and the
-/// "no entries" case to stderr (the convention for empty dumps is
-/// silence — exit 0, no output).
-#[derive(Debug)]
-pub enum DumpOutput {
-    /// Lines ready for stdout. The binary prints each + `\n`.
-    Lines(Vec<String>),
-}
-
-/// Run one of the daemon-backed dumps.
+/// Run one of the daemon-backed dumps; returns lines ready for
+/// stdout (the binary prints each + `\n`). An empty vec is silence
+/// — exit 0, no output.
 ///
 /// `paths` must be `resolve_runtime()`d (the binary's `needs_daemon`
 /// gate handles this).
@@ -909,15 +883,12 @@ pub enum DumpOutput {
 /// against same-version daemon — if it does, the format strings
 /// drifted, file a bug.
 #[cfg(unix)]
-pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
+pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
 
     let mut ctl = CtlSocket::connect(paths)?;
 
-    // ─── Send: 1 or 2 requests
-    // Graph/digraph send NODES then EDGES; everything else sends
-    // one. The daemon responds in order (each ends with its
-    // terminator).
+    // ─── Send: 1 or 2 requests (graph/digraph send NODES then EDGES)
     match kind {
         Kind::Nodes | Kind::ReachableNodes => {
             ctl.send(CtlRequest::DumpNodes)?;
@@ -932,26 +903,18 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
             ctl.send(CtlRequest::DumpConnections)?;
         }
         Kind::Graph | Kind::Digraph => {
-            // TWO sends. The daemon doesn't pipeline (it's strictly
-            // request-response on CONTROL), so the second request
-            // actually arrives while the daemon is still SENDING
-            // the first response. That's fine — TCP buffers it.
+            // Two sends; TCP buffers the second while the daemon is
+            // still streaming the first response.
             ctl.send(CtlRequest::DumpNodes)?;
             ctl.send(CtlRequest::DumpEdges)?;
         }
         Kind::Invitations => unreachable!("debug_assert above"),
     }
 
-    // ─── Receive loop
-    // The big while-recvline-switch.
-    //
-    // Exit condition: a terminator (2-int row). For graph mode,
-    // the FIRST terminator (DUMP_NODES) is a continue, the SECOND
-    // (DUMP_EDGES) exits. For everything else, first terminator
-    // exits.
+    // ─── Receive loop. Graph mode skips the NODES terminator and
+    // exits on the EDGES one; everything else exits on the first.
     let mut lines = Vec::new();
 
-    // Graph mode header.
     match kind {
         Kind::Graph => lines.push("graph {".to_owned()),
         Kind::Digraph => lines.push("digraph {".to_owned()),
@@ -962,31 +925,21 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
 
     loop {
         match ctl.recv_row()? {
-            // ─── Terminator: maybe done
             DumpRow::End(end_kind) => {
-                // Graph mode continues past the NODES terminator,
-                // exits on EDGES. Non-graph exits on any terminator.
                 if matches!(
                     (kind, end_kind),
-                    // Graph mode, first terminator (NODES). Edges
-                    // still to come.
                     (Kind::Graph | Kind::Digraph, CtlRequest::DumpNodes)
                 ) {
-                    // Empty: fall through to next loop iteration.
+                    // Graph mode, first terminator: edges still to come.
                 } else {
-                    // Anything else: done.
                     break;
                 }
             }
 
-            // ─── Node row
-            // The kind-from-row, NOT the kind-we-asked-for. Graph
-            // mode interleaves; the daemon sends `18 3 ...` then
-            // `18 4 ...` and we dispatch on the 3/4.
+            // Dispatch on the kind-from-row (graph mode interleaves
+            // `18 3 ...` then `18 4 ...`).
             DumpRow::Row(CtlRequest::DumpNodes, body) => {
                 let row = NodeRow::parse(&body).map_err(|_| {
-                    // Includes the bad line. Debugging a wire
-                    // mismatch needs it.
                     CmdError::BadInput(format!("Unable to parse node dump from tincd: {body}"))
                 })?;
 
@@ -1000,10 +953,8 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
                     Kind::Graph | Kind::Digraph => {
                         lines.push(row.fmt_dot());
                     }
-                    // We sent the wrong request?? Daemon bug.
-                    // Upstream doesn't check this, just dispatches
-                    // on `req`. We tighten — getting NODES when we
-                    // asked for EDGES is a protocol violation.
+                    // Tighten over upstream: NODES when we asked for
+                    // something else is a protocol violation.
                     _ => {
                         return Err(CmdError::BadInput("Unexpected node row".into()));
                     }
@@ -1064,7 +1015,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
         _ => {}
     }
 
-    Ok(DumpOutput::Lines(lines))
+    Ok(lines)
 }
 
 // Tests

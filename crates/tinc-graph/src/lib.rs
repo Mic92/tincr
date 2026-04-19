@@ -664,14 +664,8 @@ impl Graph {
                     options: e.options,
                 });
 
-                // C line 200-202: the `update_node_udp` gate.
-                // Suppressed here — daemon side-effect. The condition
-                // is `!reachable || (target had AF_UNSPEC and edge has
-                // a real address)`. We don't track addresses; the
-                // daemon checks against its own table.
-                //
-                // (We could emit `(NodeId, EdgeId)` pairs for the
-                // daemon to act on. Not yet — no consumer.)
+                // C line 200-202 (`update_node_udp`): daemon side-effect,
+                // suppressed here — we don't track addresses.
 
                 // C line 204: re-enqueue. `list_insert_tail` — the
                 // `list_each` macro picks it up because it re-reads

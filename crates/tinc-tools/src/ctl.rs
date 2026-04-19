@@ -602,6 +602,28 @@ impl<S: Read + Write> CtlSocket<S> {
         }
     }
 
+    /// Drain a dump response, invoking `f` for every `Row` until the
+    /// `End` terminator. The closure sees the per-row `CtlRequest`
+    /// and the body string; most callers ignore the former.
+    ///
+    /// Generic over the error type so callers can return their own
+    /// `CmdError` from the closure while `recv_row`'s `CtlError`
+    /// still propagates via `From`.
+    ///
+    /// # Errors
+    /// Whatever `recv_row` or `f` returns.
+    pub fn for_each_row<E: From<CtlError>>(
+        &mut self,
+        mut f: impl FnMut(CtlRequest, &str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        loop {
+            match self.recv_row()? {
+                DumpRow::End(_) => return Ok(()),
+                DumpRow::Row(kind, body) => f(kind, &body)?,
+            }
+        }
+    }
+
     /// Receive exactly `len` raw bytes after a header line.
     ///
     /// `BufReader<T>: Read`, and its `read` impl drains the internal

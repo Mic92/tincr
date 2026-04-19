@@ -24,6 +24,7 @@ pub mod vars;
 
 pub use parse::{
     Config, Entry, ParseError, ReadError, Source, parse_file, parse_line, read_server_config,
+    split_kv,
 };
 pub use pem::{PemError, read_pem, write_pem};
 pub use vars::{VARS, Var, VarFlags, lookup as lookup_var};
