@@ -104,6 +104,17 @@ pub enum Kind {
     Invitations,
 }
 
+/// Argv keyword → `Kind`, for `parse_kind`'s case-insensitive lookup.
+const KINDS: &[(&str, Kind)] = &[
+    ("nodes", Kind::Nodes),
+    ("edges", Kind::Edges),
+    ("subnets", Kind::Subnets),
+    ("connections", Kind::Connections),
+    ("graph", Kind::Graph),
+    ("digraph", Kind::Digraph),
+    ("invitations", Kind::Invitations),
+];
+
 impl Kind {
     /// Does this sub-verb need to talk to the daemon? The binary's
     /// `cmd_dump` adapter checks this BEFORE `connect()` — so
@@ -159,33 +170,19 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
 
     // ─── Dispatch
     // `only_reachable` was already validated to be nodes-only above,
-    // but the code structure means we COULD arrive here with
-    // only_reachable=true and what=="nodes" (the only valid combo)
-    // or only_reachable=false and any what. We just match what; the
-    // only_reachable bit only modifies the Nodes arm.
-    let kind = if what.eq_ignore_ascii_case("nodes") {
-        if only_reachable {
-            Kind::ReachableNodes
-        } else {
-            Kind::Nodes
-        }
-    } else if what.eq_ignore_ascii_case("edges") {
-        Kind::Edges
-    } else if what.eq_ignore_ascii_case("subnets") {
-        Kind::Subnets
-    } else if what.eq_ignore_ascii_case("connections") {
-        Kind::Connections
-    } else if what.eq_ignore_ascii_case("graph") {
-        Kind::Graph
-    } else if what.eq_ignore_ascii_case("digraph") {
-        Kind::Digraph
-    } else if what.eq_ignore_ascii_case("invitations") {
-        Kind::Invitations
-    } else {
-        return Err(CmdError::BadInput(format!("Unknown dump type '{what}'.")));
-    };
+    // so it can only pair with `what == "nodes"`; the post-lookup
+    // remap covers that one case.
+    let kind = KINDS
+        .iter()
+        .find(|(n, _)| what.eq_ignore_ascii_case(n))
+        .map(|&(_, k)| k)
+        .ok_or_else(|| CmdError::BadInput(format!("Unknown dump type '{what}'.")))?;
 
-    Ok(kind)
+    Ok(if only_reachable {
+        Kind::ReachableNodes
+    } else {
+        kind
+    })
 }
 
 // node_status_t bits — only the two we use
