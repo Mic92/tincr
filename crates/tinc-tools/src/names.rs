@@ -411,10 +411,7 @@ impl Paths {
 /// charset restriction is the one thing standing between "node name
 /// from a peer" and "arbitrary attacker-controlled string in a
 /// `format!` that becomes a path".
-#[must_use]
-pub fn check_id(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
+pub use tinc_conf::name::check_id;
 
 /// `replace_name` — expand `$HOST`/`$FOO` in `Name = ...` values, then
 /// `check_id`.
