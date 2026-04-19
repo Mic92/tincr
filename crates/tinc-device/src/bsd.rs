@@ -80,15 +80,8 @@ pub enum BsdVariant {
 }
 
 impl BsdVariant {
-    /// The read offset. `read(fd, buf + offset, MTU - offset)`.
-    /// What route.c expects at `buf[0..14]`: ethernet header.
-    /// What the kernel writes at `buf[offset..]`: prefix (if any)
-    /// then IP, or full ethernet.
-    /// `offset = ETH_HLEN - prefix_len - (does kernel write ether? ETH_HLEN : 0)`.
-    ///
-    /// `const fn` so the test can `assert_eq!` at compile-time
-    /// shape if it wants. `#[inline]` because it's a leaf called
-    /// in the hot read loop.
+    /// `read(fd, buf + offset, MTU - offset)`: leave room for the
+    /// synthetic ether header in front of what the kernel writes.
     #[inline]
     const fn read_offset(self) -> usize {
         match self {
@@ -103,14 +96,8 @@ impl BsdVariant {
         }
     }
 
-    /// L2 vs L3. `Tun`/`Utun` → `Mode::Tun` (we route by IP);
-    /// `Tap` → `Mode::Tap` (we switch by MAC).
-    ///
-    /// `RMODE_SWITCH` requires `Tap`. The check goes one direction
-    /// (switch needs TAP) but not the other
-    /// (router with TAP is allowed in C — `route.c` strips the
-    /// ether header). We expose Mode; the daemon picks. Same as
-    /// every other backend.
+    /// L2 vs L3. The daemon enforces `RMODE_SWITCH` ⇒ `Tap`; we
+    /// just report.
     #[inline]
     const fn mode(self) -> Mode {
         match self {
@@ -122,32 +109,9 @@ impl BsdVariant {
 
 // to_af_prefix — the inverse map (write side, Utun only)
 
-/// Ethertype → 4-byte AF prefix. The dual of `from_ip_nibble`.
-///
-/// `route.c` always writes a 14-byte ether header (even in TUN
-/// mode — the daemon's packet builder doesn't know about offset
-/// tricks; the device backend strips on write). The ethertype is
-/// at `[12..14]`, big-endian. Read it, map to `AF_*`, `htonl`,
-/// memcpy 4 bytes to `[10..14]`. OVERWRITES bytes 12-13
-/// (the ethertype slot) — fine, the kernel reconstructs ethertype
-/// from AF on its end.
-///
-/// `None` for unknown ethertype. The caller errors (NOT silent
-/// drop). Shouldn't happen (`route.c` only emits IPv4/IPv6 in TUN
-/// mode), but defensive.
-///
-/// **Why `[u8; 4]` not `u32`**: the caller does `buf[10..14].
-/// copy_from_slice(&prefix)`. Giving back bytes saves a
-/// `to_be_bytes()` at the call site AND makes the test cleaner
-/// (compare bytes, not a host-order u32 that you have to think
-/// about).
-///
-/// **The `libc::AF_INET6` per-platform thing**: `AF_INET6` is
-/// `10` on Linux, `28` on FreeBSD, `30` on macOS. The bytes this
-/// fn returns DIFFER per platform. That's CORRECT — the kernel
-/// reading them is the same platform. The test can pin the
-/// STRUCTURE (`(libc::AF_INET6 as u32).to_be_bytes()`) but not
-/// literal bytes. See `prefix_ipv6_is_libc_af_inet6_be` test.
+/// Ethertype → `htonl(AF_*)` 4-byte prefix (utun write side; dual of
+/// `from_ip_nibble`). `AF_INET6` varies per platform, so bytes differ
+/// — correct, because the same kernel reads them back.
 #[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
 const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     // We get the ethertype already host-order from the caller
@@ -165,27 +129,8 @@ const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
 
 // BsdTun — the Device impl
 
-/// The variant-dispatched BSD backend.
-///
-/// `fd`: `OwnedFd` (not `File`): two of the three open paths
-/// are sockets (`utun` is `socket(PF_SYSTEM, ...)`; old TUN is
-/// `open("/dev/tun*")`). `OwnedFd` is the lowest common
-/// denominator. Same `Drop` semantics. Same as `raw.rs`.
-///
-/// `iface`: stored as resolved by `open()`. For `/dev/tunN` it's
-/// `tunN` (strip `/dev/`). For utun it's `utunN` (the kernel
-/// picks N; read back via `getsockopt(UTUN_OPT_IFNAME)`). For
-/// TAP it's the `TAPGIFNAME` ioctl result. `Open()` stubs fill
-/// this; tests use a literal.
-///
-/// `mac`: NOT stored. `SIOCGIFADDR` (note: not `SIOCGIFHWADDR`;
-/// BSD-specific behavior on TAP fds) is queried ONLY if
-/// `overwrite_mac` config is set. The default
-/// is don't-read. We return `None` (same as `RawSocket`, same
-/// rationale: TAP-mode bridging doesn't need `mymac` for ARP
-/// because real hosts answer their own ARP). When `overwrite_
-/// mac` lands with the `open()` stubs, it becomes an `Option<Mac>`
-/// field. NOT YET.
+/// The variant-dispatched BSD backend. `OwnedFd` not `File`: utun is
+/// a `PF_SYSTEM` socket, old TUN/TAP are device nodes.
 #[derive(Debug)]
 pub struct BsdTun {
     /// The device fd. `/dev/tun*` device node OR utun
@@ -206,13 +151,7 @@ pub struct BsdTun {
 // Device impl — variant-dispatched read/write
 
 impl Device for BsdTun {
-    /// Read a packet. Three variant arms.
-    ///
-    /// `clippy::too_many_lines`: this matches the C's three-arm
-    /// switch in one fn. Splitting would obscure the parallel
-    /// structure (the three arms are MEANT to look similar;
-    /// that's the point — they're the SAME logic at three
-    /// offsets).
+    /// Read a packet. Three variant arms; same logic at three offsets.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_read_buf(buf, "bsd");
 
@@ -220,11 +159,8 @@ impl Device for BsdTun {
         // The slice does the offset arithmetic.
         let n = read_fd(self.fd.as_fd(), &mut buf[offset..MTU])?;
 
-        // `read_fd` already converted `<0`. `==0` is EOF. BSD
-        // TUN/utun: doesn't EOF in normal operation (like Linux
-        // TUN). BUT: the device CAN be destroyed underneath us
-        // (`ifconfig tun0 destroy`). We say something useful
-        // (rather than `strerror(0)` = "Success").
+        // EOF only happens if the device was destroyed underneath us
+        // (`ifconfig tun0 destroy`); say so rather than "Success".
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -288,14 +224,6 @@ impl Device for BsdTun {
             BsdVariant::Utun => {
                 let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
                 let Some(prefix) = to_af_prefix(ethertype) else {
-                    // NOT silent drop. The error message is
-                    // "Unknown address family %x" — it calls the
-                    // ethertype an "address family" which is a
-                    // bit confused (it's an ETHERTYPE, not an
-                    // AF; the AF is what we're MAPPING TO). We
-                    // say "ethertype" because that's what it is.
-                    // The format `%x` is unprefixed hex; we use
-                    // `{:#06x}` (prefixed, zero-padded).
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
@@ -328,12 +256,8 @@ impl Device for BsdTun {
         &self.iface
     }
 
-    /// No MAC. `SIOCGIFADDR` is read only if `overwrite_mac`
-    /// config is set; default is don't-read. The MAC
-    /// query ioctl is BSD-specific (`SIOCGIFADDR` on a TAP fd
-    /// gives the link-layer addr; on Linux it gives the IP
-    /// addr — DIFFERENT meaning). Stubbed `None` until `open()`
-    /// lands.
+    /// No MAC — `SIOCGIFADDR` is only queried under `overwrite_mac`;
+    /// stubbed `None` until the BSD `open()` paths land.
     fn mac(&self) -> Option<Mac> {
         None
     }
@@ -351,18 +275,8 @@ impl Device for BsdTun {
 // land with a BSD CI runner. The variant-dispatched read/write above
 // is fd-agnostic and already covered by the pipe/seqpacket tests.
 
-// macOS utun constructor via SYSPROTO_CONTROL socket.
-//
-// `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` then
-// `ioctl(CTLIOCGINFO)` to resolve the utun control ID, then
-// `connect(sockaddr_ctl{...})` with the unit number.
-// `getsockopt(UTUN_OPT_IFNAME)` reads back the kernel-chosen name.
-//
-// nix wraps every step: `SysControlAddr::from_name` does the
-// CTLIOCGINFO ioctl + sockaddr_ctl construction internally,
-// `sockopt::UtunIfname` does the `UTUN_OPT_IFNAME` getsockopt, and
-// `nix::fcntl` handles O_NONBLOCK/CLOEXEC. The original "nix has
-// nothing for these" claim predated nix 0.27.
+// macOS utun constructor via SYSPROTO_CONTROL socket. nix wraps
+// every step (`SysControlAddr::from_name`, `sockopt::UtunIfname`).
 #[cfg(target_os = "macos")]
 mod utun {
     use std::io;

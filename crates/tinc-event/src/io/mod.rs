@@ -315,9 +315,7 @@ mod tests {
         Conn(u32),
     }
 
-    /// `pipe()` pair — read end registered for READABLE, write end
-    /// makes it ready. The minimal fake. Same idiom as the
-    /// `tinc-device` pipe()-tests.
+    /// `pipe()` pair — read end registered for READABLE.
     fn mkpipe() -> (std::fs::File, std::fs::File) {
         let (r, w) = nix::unistd::pipe().expect("pipe()");
         (std::fs::File::from(r), std::fs::File::from(w))
@@ -349,9 +347,7 @@ mod tests {
         drop((rd, wr));
     }
 
-    /// `io_set` with same flags is a no-op. No syscall (we can't
-    /// directly observe that, but we can observe
-    /// no error and no behavior change).
+    /// `io_set` with same flags is a no-op (no error, slot unchanged).
     #[test]
     fn set_same_interest_noop() {
         let mut ev = EventLoop::new().unwrap();
@@ -414,33 +410,9 @@ mod tests {
         assert_eq!(ev.len(), 0);
     }
 
-    /// The generation-guard substitute. Register two read ends, write
-    /// to both, `turn()` collects both. Now: del one of them, `turn()`
-    /// again. The deleted one's pending readiness must be dropped
-    /// silently.
-    ///
-    /// This is a WEAKER test than the C scenario (cb deletes another
-    /// slot mid-batch) because we collect-then-dispatch. The
-    /// "mid-batch" delete in our world is "daemon's match arm calls
-    /// del while iterating `out`." The daemon owns `out`; it can
-    /// just `continue` past entries it knows it deleted. The slab
-    /// guard is for the NEXT `turn()` — the slot is gone, the token
-    /// might reappear in epoll's return (stale, level-triggered),
-    /// and we need to drop it.
-    ///
-    /// Actually the stale-token-in-epoll case doesn't happen for del:
-    /// del deregisters. epoll won't return a deregistered fd. The
-    /// case it DOES happen for: del + add reuses the slot index for
-    /// a different fd. If the old fd was readable AND we del'd it
-    /// AND add'd a new fd to the same slot AND `turn()` was already
-    /// in progress... but `turn()` isn't reentrant. So this guard
-    /// is for: epoll returns a stale event from a previous fd that
-    /// was closed (auto-deregistered) but we didn't call del,
-    /// then add reused the slot. That's a daemon bug (close without
-    /// del). The guard catches it.
-    ///
-    /// What we CAN test: del'd slot's `what()` returns None; `turn()`
-    /// doesn't crash if a slot was del'd.
+    /// del'd slot's `what()` returns None; `turn()` doesn't crash on
+    /// a freed slot. (The full mid-batch stale-token scenario isn't
+    /// reproducible without a daemon bug; the slab guard covers it.)
     #[test]
     fn del_makes_what_none() {
         let mut ev = EventLoop::new().unwrap();
