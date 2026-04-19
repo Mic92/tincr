@@ -28,9 +28,21 @@ use epoll::{
     wait,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
 mod kqueue;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
 use kqueue::{
     Poller, RawEvent, add, create, del, empty_event, ev_readable, ev_token, ev_writable, modify,
     wait,
