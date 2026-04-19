@@ -34,8 +34,8 @@ seconds).
 
 **Cause** - the path MTU genuinely changes (ECMP across links with
 different MTUs, a flapping tunnel underneath), or an on-path
-middlebox eats large probes inconsistently. Known open issue on
-some paths; not a tincd bug per se.
+middlebox eats large probes inconsistently. If it re-converges to the
+*same* value every cycle you're on an old build; upgrade.
 
 **Confirm** - `tinc -n NET info PEER` repeatedly; watch `PMTU:` and
 the `min`/`max` columns in `tinc dump nodes`. If `min` keeps
