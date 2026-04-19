@@ -73,11 +73,12 @@ use super::{CmdError, io_err, makedir};
 /// sweep keeps the file. Same default but checked independently.
 pub(crate) const EXPIRY: Duration = Duration::from_secs(604_800);
 
-/// `#` + 63 dashes + `#` = 65 chars. Same string as
-/// `cmd::exchange::SEPARATOR` but the modules are independent —
-/// re-declared. The invitation file format reuses the export/import
-/// separator because `finalize_join` is essentially a special-cased
-/// `import`.
+/// `#` + 63 dashes + `#` = 65 chars. Shared with `cmd::exchange` —
+/// the invitation file format reuses the export/import separator
+/// because `finalize_join` is essentially a special-cased `import`.
+///
+/// **Don't reformat.** The count is exact; one off and import treats
+/// it as content. The `const _` assert below guards against that.
 pub(crate) const SEPARATOR: &str =
     "#---------------------------------------------------------------#";
 const _: () = assert!(SEPARATOR.len() == 65);
