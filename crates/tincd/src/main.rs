@@ -212,10 +212,7 @@ where
     let mut cmdline_conf = Config::new();
     // `-o` ordinal (1-based), used for stable sort within cmdline
     // entries. Matters for multi-valued keys: `-o Subnet=a -o
-    // Subnet=b` keeps both in argv order. The line number is
-    // the `-o` ordinal (1-based), used for stable sort within cmdline
-    // entries. Matters for multi-valued keys (`-o Subnet=a -o
-    // Subnet=b` → both kept, in argv order).
+    // Subnet=b` keeps both in argv order.
     let mut o_lineno: u32 = 0;
 
     let mut do_detach = true;
