@@ -81,10 +81,7 @@ struct Slot<W> {
     // module doc "The loop doesn't own fds"). Kept only as the
     // epoll_ctl key for later MOD/DEL.
     fd: RawFd,
-    /// `None` = registered but interest was set to zero (which means
-    /// deregistered from epoll, slot still alive). Only `del` does
-    /// this internally; the public `set` API takes non-optional `Io`.
-    interest: Option<Io>,
+    interest: Io,
     what: W,
 }
 
@@ -140,7 +137,7 @@ impl<W: Copy> EventLoop<W> {
         }
         self.slots[idx] = Some(Slot {
             fd: raw,
-            interest: Some(interest),
+            interest,
             what,
         });
         Ok(IoId(idx))
@@ -157,15 +154,11 @@ impl<W: Copy> EventLoop<W> {
     /// would be UAF.
     pub fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
         let slot = self.slots[id.0].as_mut().expect("dangling IoId");
-        if slot.interest == Some(interest) {
+        if slot.interest == interest {
             return Ok(());
         }
-        // `interest == None` ("deregistered but slot alive") is
-        // unreachable — `del` frees the slot. Assert rather than
-        // keep the old forged-`BorrowedFd` re-ADD branch alive.
-        debug_assert!(slot.interest.is_some(), "live slot has interest");
         modify(&self.ep, slot.fd, id.0, interest)?;
-        slot.interest = Some(interest);
+        slot.interest = interest;
         Ok(())
     }
 
@@ -176,23 +169,17 @@ impl<W: Copy> EventLoop<W> {
         let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
             return; // already del'd
         };
-        if slot.interest.is_some() {
-            // Best-effort. ENOENT is fine (last fd closed → kernel
-            // auto-removed). EBADF is NOT fine: caller closed the fd
-            // BEFORE ev.del(). epoll keys on the open-file-
-            // description; if a dup of that fd survives, the
-            // interest leaks and level-triggered epoll busy-loops on
-            // ERR|HUP into a freed slot. Tripwire it in debug —
-            // would have caught the connecting_socks leak in tincd
-            // at first integration-test run instead of in prod.
-            if let Err(e) = del(&self.ep, slot.fd) {
-                debug_assert_ne!(
-                    e.raw_os_error(),
-                    Some(nix::Error::EBADF as i32),
-                    "ev.del(fd={}) after fd closed — deregister BEFORE drop",
-                    slot.fd
-                );
-            }
+        // Best-effort. ENOENT is fine (fd closed → kernel auto-
+        // removed). EBADF is NOT: caller closed BEFORE ev.del();
+        // a surviving dup would busy-loop ERR|HUP into a freed
+        // slot. Tripwire in debug.
+        if let Err(e) = del(&self.ep, slot.fd) {
+            debug_assert_ne!(
+                e.raw_os_error(),
+                Some(nix::Error::EBADF as i32),
+                "ev.del(fd={}) after fd closed — deregister BEFORE drop",
+                slot.fd
+            );
         }
         self.free.push(id.0);
     }
@@ -261,14 +248,14 @@ impl<W: Copy> EventLoop<W> {
             let interest = slot.interest;
 
             // WRITE first. Part 2: interest still includes WRITE.
-            if ev_writable(ev) && interest.is_some_and(|i| i.wants(Ready::Write)) {
+            if ev_writable(ev) && interest.wants(Ready::Write) {
                 out.push((what, Ready::Write));
             }
 
             // No re-lookup of interest between WRITE and READ: we
             // collect into `out`, not fire inline, so nothing could
             // have changed it yet.
-            if ev_readable(ev) && interest.is_some_and(|i| i.wants(Ready::Read)) {
+            if ev_readable(ev) && interest.wants(Ready::Read) {
                 out.push((what, Ready::Read));
             }
         }
@@ -359,7 +346,7 @@ mod tests {
 
         // Slot unchanged.
         let slot = ev.slots[id.0].as_ref().unwrap();
-        assert_eq!(slot.interest, Some(Io::Read));
+        assert_eq!(slot.interest, Io::Read);
         ev.del(id);
     }
 
