@@ -65,10 +65,8 @@ impl Request {
     /// guard values `ALL = -1` and `LAST = 24`.
     #[must_use]
     pub const fn from_id(id: i32) -> Option<Self> {
-        // No `#[repr]` magic transmute: explicit match. The compiler
-        // turns this into a jump table; the explicitness means adding
-        // a variant without a case is a compile error, which is what
-        // we want.
+        // Explicit match over transmute: adding a variant without a
+        // case here is a compile error.
         Some(match id {
             0 => Self::Id,
             1 => Self::Metakey,

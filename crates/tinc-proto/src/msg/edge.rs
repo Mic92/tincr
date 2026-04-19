@@ -43,7 +43,6 @@ pub struct AddEdge {
     pub options: u32,
     /// Dijkstra edge weight. `%d` on the wire; clamped to `>= 0` at
     /// parse so a peer can't bias MST/nexthop tie-breaks.
-    /// the protocol doesn't reject it (never range-checked).
     pub weight: i32,
     /// `from`'s LAN-side address, if known. Newer peers send it so the
     /// receiver can prefer LAN paths.

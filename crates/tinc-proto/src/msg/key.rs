@@ -262,10 +262,7 @@ impl AnsKey {
     }
 
     /// `send_ans_key`: `send_request("%d %s %s %s %d %d %lu %d", ANS_KEY, ...)`.
-    ///
-    /// The 7-field form. Relays append addr/port by re-emitting
-    /// `"%s %s %s"` with the original line as the first `%s` —
-    /// `format_with_addr` covers that.
+    /// Relays append addr/port; we emit it inline when set.
     #[must_use]
     pub fn format(&self) -> String {
         use std::fmt::Write as _;
