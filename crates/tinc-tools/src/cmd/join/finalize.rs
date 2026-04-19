@@ -10,7 +10,7 @@ use std::io::Write;
 use tinc_conf::vars::{self, VarFlags};
 use tinc_crypto::b64;
 
-use crate::cmd::{CmdError, OpenKind, create_nofollow, io_err, makedir, open_nofollow};
+use crate::cmd::{CmdError, OpenKind, create_nofollow, io_err, makedir};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
@@ -351,44 +351,16 @@ fn finalize_join_inner(
     writeln!(fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_file))?;
     drop(fh);
 
-    // ─── Write tinc-up placeholder
-    // Same content as `init`'s placeholder. The `Ifconfig`/`Route`
-    // lines from chunk 1 would have populated this with real
-    // commands; we write the "edit me" comment instead.
-    write_tinc_up_placeholder(paths, created)?;
+    // ─── Write tinc-up placeholder (shared with `init`)
+    if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
+        created.push(p);
+    }
 
     Ok(JoinResult {
         name,
         pubkey_b64,
         hosts_written,
     })
-}
-
-/// `init.rs`'s tinc-up content, lifted. Mode 0755, `O_EXCL`.
-///
-/// Not factored to a shared helper because the two call sites have
-/// different surrounding context (init is the only writer; join might
-/// later grow ifconfig integration that writes a *different* body).
-/// Dead-code rule applies: unify when there's a third caller.
-fn write_tinc_up_placeholder(
-    paths: &Paths,
-    created: &mut Vec<std::path::PathBuf>,
-) -> Result<(), CmdError> {
-    let path = paths.tinc_up();
-    let mut f = open_nofollow(&path, OpenKind::CreateExcl, 0o755)?;
-    created.push(path.clone());
-    // Same body as init.
-    writeln!(f, "#!/bin/sh").map_err(io_err(&path))?;
-    writeln!(f, "echo 'Unconfigured tinc-up script, please edit '$0'!'").map_err(io_err(&path))?;
-
-    // chmod after write because umask may have stripped the x bit
-    // from the create mode.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(io_err(&path))?;
-    }
-    Ok(())
 }
 
 /// Parse the `Name = X` line specifically.
