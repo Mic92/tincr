@@ -657,6 +657,40 @@ fn build_response(
 // in-place mutation. DNS fires once per `getaddrinfo()`, not per
 // data packet; alloc doesn't matter.
 
+/// Push a 14-byte ethernet header onto `out` with src/dst MACs
+/// swapped from `original` (or zeroed when `original` is too short).
+/// Shared by `wrap_v4`/`wrap_v6`; the eth header is throwaway in TUN
+/// mode but `device.write` expects the full frame.
+fn write_eth_swap(out: &mut Vec<u8>, original: &[u8], ethertype: u16) {
+    if original.len() >= ETHER_SIZE {
+        out.extend_from_slice(&original[6..12]); // dst ← orig src
+        out.extend_from_slice(&original[0..6]); // src ← orig dst
+    } else {
+        out.extend_from_slice(&[0u8; 12]);
+    }
+    out.extend_from_slice(&ethertype.to_be_bytes());
+}
+
+/// Build the 8-byte UDP header for `dns_reply` with the checksum
+/// folded over `pseudo_ck` (the partial sum of the v4/v6
+/// pseudo-header). RFC 768/8200: a computed checksum of 0 is
+/// transmitted as 0xFFFF.
+fn build_udp(dns_reply: &[u8], dst_port: u16, pseudo_ck: u16) -> [u8; UDP_SIZE] {
+    #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
+    let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
+    let mut udp = [0u8; UDP_SIZE];
+    udp[0..2].copy_from_slice(&53u16.to_be_bytes()); // src = 53
+    udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    udp[4..6].copy_from_slice(&udp_len.to_be_bytes());
+    // csum at [6..8] starts zero; fold header + payload onto the
+    // caller-provided pseudo-header sum.
+    let mut ck = inet_checksum(&udp, pseudo_ck);
+    ck = inet_checksum(dns_reply, ck);
+    let ck = if ck == 0 { 0xFFFF } else { ck };
+    udp[6..8].copy_from_slice(&ck.to_ne_bytes());
+    udp
+}
+
 /// Wrap a DNS response in eth+IPv4+UDP. The eth header is throwaway
 /// (TUN mode strips it), but `device.write` expects the full frame
 /// (`route()`'s framing). MACs swapped from `original` per the
@@ -679,14 +713,7 @@ pub fn wrap_v4(
     let total = ETHER_SIZE + IP4_SIZE + UDP_SIZE + dns_reply.len();
     let mut out = Vec::with_capacity(total);
 
-    // ─── eth: swap MACs from original (or zero if too short)
-    if original.len() >= ETHER_SIZE {
-        out.extend_from_slice(&original[6..12]); // dst ← orig src
-        out.extend_from_slice(&original[0..6]); // src ← orig dst
-    } else {
-        out.extend_from_slice(&[0u8; 12]);
-    }
-    out.extend_from_slice(&crate::packet::ETH_P_IP.to_be_bytes());
+    write_eth_swap(&mut out, original, crate::packet::ETH_P_IP);
 
     // ─── IPv4. Same builder pattern as `icmp.rs:123-137`.
     let mut ip = Ipv4Hdr::default();
@@ -702,31 +729,17 @@ pub fn wrap_v4(
     ip.ip_sum = inet_checksum(ip.as_bytes(), 0xFFFF);
     out.extend_from_slice(ip.as_bytes());
 
-    // ─── UDP. 8 bytes: sport, dport, len, csum.
+    // ─── UDP. RFC 768 + RFC 1071: pseudo-header → UDP header → payload.
     #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
-    let mut udp = [0u8; UDP_SIZE];
-    udp[0..2].copy_from_slice(&53u16.to_be_bytes()); // src = 53
-    udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
-    udp[4..6].copy_from_slice(&udp_len.to_be_bytes());
-    // csum at [6..8] starts zero, filled below.
-
-    // RFC 768 + RFC 1071: pseudo-header → UDP header → payload.
     let mut pseudo = Ipv4Pseudo::default();
     pseudo.ip_src = src_ip.octets();
     pseudo.ip_dst = dst_ip.octets();
     pseudo.proto = IPPROTO_UDP;
     pseudo.set_length(udp_len);
-    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
-    ck = inet_checksum(&udp, ck);
-    ck = inet_checksum(dns_reply, ck);
-    // RFC 768: "if the computed checksum is zero, it is transmitted
-    // as all ones". Our `inet_checksum` returns the COMPLEMENTED sum
-    // already; if it's 0x0000, swap to 0xFFFF.
-    let ck = if ck == 0 { 0xFFFF } else { ck };
-    udp[6..8].copy_from_slice(&ck.to_ne_bytes());
+    let pseudo_ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
 
-    out.extend_from_slice(&udp);
+    out.extend_from_slice(&build_udp(dns_reply, dst_port, pseudo_ck));
     out.extend_from_slice(dns_reply);
     out
 }
@@ -745,14 +758,7 @@ pub fn wrap_v6(
     let total = ETHER_SIZE + IP6_SIZE + UDP_SIZE + dns_reply.len();
     let mut out = Vec::with_capacity(total);
 
-    // ─── eth
-    if original.len() >= ETHER_SIZE {
-        out.extend_from_slice(&original[6..12]);
-        out.extend_from_slice(&original[0..6]);
-    } else {
-        out.extend_from_slice(&[0u8; 12]);
-    }
-    out.extend_from_slice(&ETH_P_IPV6.to_be_bytes());
+    write_eth_swap(&mut out, original, ETH_P_IPV6);
 
     // ─── IPv6. No IP-level checksum (it's the UDP layer's job).
     let mut ip6 = Ipv6Hdr::default();
@@ -765,28 +771,17 @@ pub fn wrap_v6(
     ip6.ip6_dst = dst_ip.octets();
     out.extend_from_slice(ip6.as_bytes());
 
-    // ─── UDP
+    // ─── UDP. Pseudo-header → UDP header → payload. RFC 2460 §8.1 (now 8200).
     #[allow(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
-    let mut udp = [0u8; UDP_SIZE];
-    udp[0..2].copy_from_slice(&53u16.to_be_bytes());
-    udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
-    udp[4..6].copy_from_slice(&udp_len.to_be_bytes());
-
-    // Pseudo-header → UDP header → payload. RFC 2460 §8.1 (now 8200).
     let mut pseudo = Ipv6Pseudo::default();
     pseudo.ip6_src = src_ip.octets();
     pseudo.ip6_dst = dst_ip.octets();
     pseudo.set_length(u32::from(udp_len));
     pseudo.set_next(u32::from(IPPROTO_UDP));
-    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
-    ck = inet_checksum(&udp, ck);
-    ck = inet_checksum(dns_reply, ck);
-    // RFC 8200 §8.1: 0 → 0xFFFF (zero is illegal on the wire for v6).
-    let ck = if ck == 0 { 0xFFFF } else { ck };
-    udp[6..8].copy_from_slice(&ck.to_ne_bytes());
+    let pseudo_ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
 
-    out.extend_from_slice(&udp);
+    out.extend_from_slice(&build_udp(dns_reply, dst_port, pseudo_ck));
     out.extend_from_slice(dns_reply);
     out
 }
