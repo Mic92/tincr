@@ -93,11 +93,6 @@ impl std::fmt::Display for Warning {
                 variable,
                 old_value,
             } => {
-                // `=` with single space on both sides. The file
-                // might have `Port=655` or `Port  =  655`; the
-                // warning normalizes. (Minor info loss, but upstream
-                // does the same — it prints `variable` and `bvalue`,
-                // both already trimmed.)
                 write!(f, "Warning: removing {variable} = {old_value}")
             }
         }
@@ -124,18 +119,13 @@ impl std::fmt::Display for Warning {
 fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> {
     let (key, val) = tinc_conf::split_kv(joined);
 
-    // ─── Split key on '.' for node.var syntax
-    // The `.` doesn't appear in any var name (verified: `vars.rs`
-    // table is alnum-only) so `find('.')` is unambiguous.
+    // `.` doesn't appear in any var name (vars.rs table is alnum-only)
+    // so `find('.')` is unambiguous.
     let (node, var) = match key.find('.') {
         Some(dot) => (Some(&key[..dot]), &key[dot + 1..]),
         None => (None, key),
     };
 
-    // ─── Empty var → error
-    // `alice.` → empty var. `.` alone → empty node AND empty var,
-    // but the var check fires first. We don't separately validate
-    // the node here (`check_id` later).
     if var.is_empty() {
         return Err(CmdError::BadInput("No variable given.".into()));
     }
@@ -427,8 +417,6 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
         // ─── Tokenize. None → not a key=val line (blank/comment/PEM)
         let parsed = split_line(line);
 
-        // ─── Match against our variable
-        // The big four-arm dispatch.
         let matched = parsed
             .as_ref()
             .is_some_and(|(k, _)| k.eq_ignore_ascii_case(&intent.variable));
@@ -440,11 +428,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
             match intent.action {
                 Action::Get => unreachable!("debug_assert above"),
 
-                // ─── DEL: skip if value matches (or no filter)
-                // The `continue` is the delete — we just don't
-                // write the line. Value filter is case-insensitive.
-                // `tinc del ConnectTo alice` matches `ConnectTo =
-                // Alice`.
+                // DEL: the `continue` is the delete. Value filter is
+                // case-insensitive.
                 Action::Del => {
                     if intent.value.is_empty() || line_val.eq_ignore_ascii_case(&intent.value) {
                         removed_any = true;
@@ -454,15 +439,10 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
                     // line that didn't match the filter survives.
                 }
 
-                // ─── SET: replace first match, delete rest
-                // The first-match-replaces, subsequent-matches-delete
-                // behavior is what makes SET on a MULTIPLE var
-                // dangerous (warnonremove).
+                // SET: replace first match, delete rest — this is what
+                // makes SET on a MULTIPLE var dangerous (warnonremove).
                 Action::Set => {
-                    // Warning fires for *every* deleted/replaced
-                    // line whose value differs from the new one.
-                    // Same value → no warning (you're setting it to
-                    // what it already was; nothing's being lost).
+                    // No warning if same value: nothing is being lost.
                     if intent.warn_on_remove && !line_val.eq_ignore_ascii_case(&intent.value) {
                         warnings.push(Warning::Removing {
                             variable: intent.variable.clone(),
@@ -484,10 +464,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
                     continue;
                 }
 
-                // ─── ADD: check for dup, fall through to copy
-                // If exact match exists, remember it (we'll skip the
-                // append at the end). Either way, the existing line
-                // is preserved.
+                // ADD: remember exact-match dup (skip append later);
+                // existing line is preserved either way.
                 Action::Add => {
                     if line_val.eq_ignore_ascii_case(&intent.value) {
                         add_dup = true;
@@ -497,22 +475,14 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
             }
         }
 
-        // ─── Copy verbatim
-        // Includes the "add newline if missing" — last line might
-        // not have `\n`. `split_inclusive` gives us the trailing
-        // `\n` if it was there, so we write `line` directly. The
-        // "add newline if missing" check translates to: if `line`
-        // doesn't end with `\n` (only true for the last line of a
-        // file with no trailing newline), add one.
+        // ─── Copy verbatim (`split_inclusive` kept the `\n`; only the
+        // last line of a no-trailing-newline file needs one added).
         tf.write_all(line.as_bytes()).map_err(tmpfile_werr)?;
         if !line.ends_with('\n') {
             tf.write_all(b"\n").map_err(tmpfile_werr)?;
         }
     }
 
-    // ─── Append if needed
-    // `Set` that matched nothing appends; `Add` that found no dup
-    // appends.
     let needs_append = match intent.action {
         Action::Set => !already_set,
         Action::Add => !add_dup,
@@ -522,34 +492,20 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
         writeln!(tf, "{} = {}", intent.variable, intent.value).map_err(tmpfile_werr)?;
     }
 
-    // ─── Flush + close
-    // Dropping `tf` flushes implicitly, but `sync_all` makes the
-    // error visible. Upstream checks `fclose`'s return; we go
-    // further (fsync). Config edits matter — `tinc set Port 655`
-    // followed by an immediate daemon start should see the new port.
+    // fsync so an immediate daemon start sees the edit.
     tf.sync_all().map_err(tmpfile_werr)?;
     drop(tf);
 
-    // ─── Del with nothing deleted → error
-    // GET never reaches here (we routed it to run_get).
-    // TmpGuard::drop handles the tmpfile cleanup on the `?`.
     if intent.action == Action::Del && !removed_any {
         return Err(CmdError::BadInput(
             "No configuration variables deleted.".into(),
         ));
     }
 
-    // ─── Commit: rename tmp → target
     guard.commit()?;
 
-    // `changed` is for the binary to decide whether to reload.
-    // Set/Add always change (either replaced or appended). Del
-    // changed iff removed_any (and we already returned error
-    // for !removed_any, so always true here). But: a SET that
-    // replaced a value with itself? The file's still rewritten
-    // (canonical casing might differ), so still "changed" from
-    // the daemon's perspective. Keep it simple: we got here →
-    // changed.
+    // We got here → changed (even SET-to-same rewrites canonical
+    // casing, so the daemon should reload).
     Ok(EditResult {
         changed: true,
         warnings,

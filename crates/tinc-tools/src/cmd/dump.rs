@@ -138,22 +138,14 @@ impl Kind {
 /// without `nodes`, wrong arg count, unknown type.
 pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     // ─── `reachable` prefix (only valid before `nodes`)
-    // The check is `argc > 2 && !strcasecmp(argv[1], "reachable")` —
-    // argc>2 because we need a word AFTER reachable. Then check
-    // that word is `nodes`.
     let (only_reachable, args) = match args {
         [first, rest @ ..] if first.eq_ignore_ascii_case("reachable") => {
-            // Must have a second arg, and it must be "nodes".
             let Some(second) = rest.first() else {
-                // `dump reachable` with nothing after. Upstream
-                // checks `argc > 2` before strcasecmp, so it does
-                // NOT shift — falls through to "Invalid number of
-                // arguments." Match that: bail without shifting.
+                // `dump reachable` alone: upstream falls through to
+                // "Invalid number of arguments." without shifting.
                 return Err(CmdError::BadInput("Invalid number of arguments.".into()));
             };
             if !second.eq_ignore_ascii_case("nodes") {
-                // The backtick-apostrophe quoting is 90s GNU style;
-                // preserved.
                 return Err(CmdError::BadInput(
                     "`reachable' only supported for nodes.".into(),
                 ));
@@ -163,7 +155,6 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
         _ => (false, args),
     };
 
-    // ─── Arity: exactly one (after the shift)
     let [what] = args else {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     };
@@ -897,10 +888,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
 
     let mut ctl = CtlSocket::connect(paths)?;
 
-    // ─── Send: 1 or 2 requests
-    // Graph/digraph send NODES then EDGES; everything else sends
-    // one. The daemon responds in order (each ends with its
-    // terminator).
+    // ─── Send: 1 or 2 requests (graph/digraph send NODES then EDGES)
     match kind {
         Kind::Nodes | Kind::ReachableNodes => {
             ctl.send(CtlRequest::DumpNodes)?;
@@ -915,26 +903,18 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
             ctl.send(CtlRequest::DumpConnections)?;
         }
         Kind::Graph | Kind::Digraph => {
-            // TWO sends. The daemon doesn't pipeline (it's strictly
-            // request-response on CONTROL), so the second request
-            // actually arrives while the daemon is still SENDING
-            // the first response. That's fine — TCP buffers it.
+            // Two sends; TCP buffers the second while the daemon is
+            // still streaming the first response.
             ctl.send(CtlRequest::DumpNodes)?;
             ctl.send(CtlRequest::DumpEdges)?;
         }
         Kind::Invitations => unreachable!("debug_assert above"),
     }
 
-    // ─── Receive loop
-    // The big while-recvline-switch.
-    //
-    // Exit condition: a terminator (2-int row). For graph mode,
-    // the FIRST terminator (DUMP_NODES) is a continue, the SECOND
-    // (DUMP_EDGES) exits. For everything else, first terminator
-    // exits.
+    // ─── Receive loop. Graph mode skips the NODES terminator and
+    // exits on the EDGES one; everything else exits on the first.
     let mut lines = Vec::new();
 
-    // Graph mode header.
     match kind {
         Kind::Graph => lines.push("graph {".to_owned()),
         Kind::Digraph => lines.push("digraph {".to_owned()),
@@ -945,31 +925,21 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
 
     loop {
         match ctl.recv_row()? {
-            // ─── Terminator: maybe done
             DumpRow::End(end_kind) => {
-                // Graph mode continues past the NODES terminator,
-                // exits on EDGES. Non-graph exits on any terminator.
                 if matches!(
                     (kind, end_kind),
-                    // Graph mode, first terminator (NODES). Edges
-                    // still to come.
                     (Kind::Graph | Kind::Digraph, CtlRequest::DumpNodes)
                 ) {
-                    // Empty: fall through to next loop iteration.
+                    // Graph mode, first terminator: edges still to come.
                 } else {
-                    // Anything else: done.
                     break;
                 }
             }
 
-            // ─── Node row
-            // The kind-from-row, NOT the kind-we-asked-for. Graph
-            // mode interleaves; the daemon sends `18 3 ...` then
-            // `18 4 ...` and we dispatch on the 3/4.
+            // Dispatch on the kind-from-row (graph mode interleaves
+            // `18 3 ...` then `18 4 ...`).
             DumpRow::Row(CtlRequest::DumpNodes, body) => {
                 let row = NodeRow::parse(&body).map_err(|_| {
-                    // Includes the bad line. Debugging a wire
-                    // mismatch needs it.
                     CmdError::BadInput(format!("Unable to parse node dump from tincd: {body}"))
                 })?;
 
@@ -983,10 +953,8 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                     Kind::Graph | Kind::Digraph => {
                         lines.push(row.fmt_dot());
                     }
-                    // We sent the wrong request?? Daemon bug.
-                    // Upstream doesn't check this, just dispatches
-                    // on `req`. We tighten — getting NODES when we
-                    // asked for EDGES is a protocol violation.
+                    // Tighten over upstream: NODES when we asked for
+                    // something else is a protocol violation.
                     _ => {
                         return Err(CmdError::BadInput("Unexpected node row".into()));
                     }

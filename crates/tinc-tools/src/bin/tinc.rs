@@ -508,9 +508,6 @@ fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
 }
 
 /// `cmd_sign`: optional file arg.
-/// `t = time(NULL)` → `SystemTime::now().duration_since(UNIX_EPOCH)`.
-/// `as_secs()` returns `u64`; we need `i64` for the `%ld` format.
-/// `as i64` is safe until 292 billion CE.
 fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let input = match args {
@@ -518,11 +515,6 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
         [file] => Some(std::path::Path::new(file)),
         [_, _, ..] => return Err(CmdError::TooManyArgs),
     };
-    // `expect` is fine: `now() < UNIX_EPOCH` only on a system whose
-    // clock is set before 1970. `time(NULL)` would return
-    // `(time_t)-1` on the same system (and then `%ld` formats it as
-    // `-1`, and `verify`'s `!t` check passes — a different bug). We
-    // crash. Better.
     #[allow(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -628,12 +620,7 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
     Ok(())
 }
 
-// Daemon-RPC adapters — the simple control commands
-//
-// Each is: arity check → `cmd::ctl_simple::*`. The arity check is
-// the only thing the adapter adds; everything else (connect, send,
-// ack) is in the lib function. Same pattern as the filesystem-
-// command adapters.
+// Daemon-RPC adapters — arity check + forward to `cmd::ctl_simple::*`.
 
 /// `cmd_pid`: zero args. Prints daemon's pid + newline.
 fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
@@ -719,21 +706,14 @@ fn cmd_config_with_action(
     action: cmd::config::Action,
     args: &[String],
 ) -> Result<(), CmdError> {
-    // ─── Arity
-    // `if(argc < 2)` after the verb peel. "2" because argv includes
-    // argv[0]; ours doesn't, so "1".
     if args.is_empty() {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     }
 
-    // ─── Join the rest
-    // `strncat` loop with single space. `tinc set Name foo bar` → `"Name foo bar"` → var=Name,
-    // val="foo bar". The space-join recreates the user's intent
-    // (modulo collapsing multiple shell-quoted spaces, but the
-    // C has the same loss).
+    // Space-join recreates `tinc set Name foo bar` → var=Name,
+    // val="foo bar" (collapses shell-quoted spaces; so does the C).
     let joined = args.join(" ");
 
-    // ─── Run
     let (out, warnings) = cmd::config::run(paths, action, &joined, g.force)?;
     config_output(paths, out, &warnings);
     Ok(())
@@ -744,28 +724,19 @@ fn cmd_config_with_action(
 fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd::config::Warning]) {
     use cmd::config::ConfigOutput;
 
-    // ─── Print warnings to stderr
-    // We collect-then-print.
     for w in warnings {
         eprintln!("{w}");
     }
 
-    // ─── Handle output
     match out {
         ConfigOutput::Got(values) => {
-            // One per line, stdout.
             for v in values {
                 println!("{v}");
             }
         }
         ConfigOutput::Edited(result) => {
-            // `if(connect_tincd(false)) sendline(REQ_RELOAD)`.
-            // Best-effort. The `false` means "don't error if the
-            // daemon's down". We swallow the entire Result —
-            // daemon down? fine. daemon up but reload failed?
-            // also fine, the file's already written, the daemon
-            // will pick it up on next start. The C doesn't check
-            // the ack either.
+            // Best-effort: file's already written; daemon down or
+            // reload-nack are both fine, it picks up on next start.
             if result.changed {
                 let _ = cmd::ctl_simple::reload(paths);
             }
@@ -773,18 +744,9 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
     }
 }
 
-// ─── The four toplevel adapters
-// C uses ONE function and an `argv--` shift to re-read the command
-// name. We can't see argv[0] (dispatch ate it), so each toplevel
-// name passes its action explicitly. Four 1-line wrappers; the
-// alternative (threading argv[0] through Globals) is uglier.
-//
-// The first cut of this had ONE adapter that re-parsed args[0] for
-// the verb. That worked for get/set by accident (get→GET default;
-// set→GET→coerced to SET via get-with-value) but `tinc add
-// ConnectTo bob` would have routed GET→SET, *deleting* other
-// ConnectTo lines instead of appending. Caught by reading the
-// fall-through case carefully before building. Separate adapters.
+// Four toplevel adapters: dispatch ate argv[0], so each passes its
+// action explicitly. Don't unify via re-parsing args[0] — the GET
+// fall-through default would mis-route `add` as a destructive SET.
 
 fn cmd_get(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
     cmd_config_with_action(p, g, cmd::config::Action::Get, a)

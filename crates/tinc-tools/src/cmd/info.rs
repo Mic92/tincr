@@ -344,17 +344,10 @@ impl NodeInfo {
         }
 
         // ─── Status flags
-        // Six bits, printed in declaration order. Each prefixed
-        // with a space so the line is `Status:       validkey
-        // visited ...`. The label is `"Status:      "` (12+1 chars)
-        // — one shorter than the others because each value adds
-        // its own leading space. Net column alignment is the same.
+        // Label one char shorter than the others: each value adds its
+        // own leading space, so column alignment matches. Order is
+        // upstream's printf order (`node.h` field-declaration order).
         out.push_str("Status:      ");
-        // The order is upstream's printf order. NOT bit-position
-        // order: validkey (bit 1), visited (bit 3), reachable (4),
-        // indirect (5), sptps (6), udp_confirmed (7). It IS
-        // `node.h` field-declaration order (skipping the unused/
-        // unprinted bits). Preserve.
         for (bit, label) in [
             (StatusBit::VALIDKEY, " validkey"),
             (StatusBit::VISITED, " visited"),
@@ -369,8 +362,6 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Options flags
-        // Same shape, 4 OPTION_* bits.
         out.push_str("Options:     ");
         for (bit, label) in [
             (OPTION_INDIRECT, " indirect"),
@@ -384,16 +375,8 @@ impl NodeInfo {
         }
         out.push('\n');
 
-        // ─── Protocol version
-        // `PROT_MAJOR.OPTION_VERSION(options)`. The minor lives in
-        // the top 8 bits of `options` (so a node running 17.7 has
-        // `options & 0xff000000 == 0x07000000`). The major is OUR
-        // constant (it's the protocol version we speak — same as
-        // the daemon's by definition, since we wouldn't have
-        // connected otherwise). PROT_MAJOR is 17. Re-declared here
-        // — modules independent (Constraints). Three copies of
-        // `= 17`, all sed-verifiable, beats one pub-use-chain that
-        // ties module visibility together.
+        // ─── Protocol version: minor lives in the top 8 bits of
+        // `options`; major is our constant.
         #[allow(clippy::items_after_statements)] // const next to its only use; hoisting hides the value
         const PROT_MAJOR: u8 = 17;
         let _ = writeln!(
@@ -452,10 +435,6 @@ impl NodeInfo {
 /// `ParseError → CmdError` with upstream's message:
 /// `"Unable to parse X dump from tincd."`.
 fn parse_err(what: &str, body: &str) -> CmdError {
-    // Upstream includes the line for edge dump but not for the
-    // others. Inconsistent; we always include (it's useful). The
-    // body, not the full `"18 3 ..."` line — recv_row already
-    // stripped the prefix.
     CmdError::BadInput(format!("Unable to parse {what} dump from tincd.\n{body}"))
 }
 
@@ -480,19 +459,9 @@ fn find_node<S: std::io::Read + std::io::Write>(
     // third arg". `send_str` does `"18 3 alice\n"`.
     ctl.send_str(CtlRequest::DumpNodes, name)?;
 
-    // ─── Match loop
-    // `loop`-with-`break value` not `let mut found = None` — the
-    // initial None is dead (clippy noticed); the loop ASSIGNS once
-    // then breaks. The break-value form makes that single-assignment
-    // structural.
     let found = loop {
         match ctl.recv_row()? {
-            DumpRow::End(_) => {
-                // Terminator without match. Caller maps to
-                // "Unknown node". No drain needed: terminator IS
-                // the end.
-                return Ok(None);
-            }
+            DumpRow::End(_) => return Ok(None),
             DumpRow::Row(_, body) => {
                 // Full 22-field parse.
                 let row = NodeRow::parse(&body).map_err(|_| parse_err("node", &body))?;
