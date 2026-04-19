@@ -377,11 +377,10 @@ impl NodeInfo {
 
         // ─── Protocol version: minor lives in the top 8 bits of
         // `options`; major is our constant.
-        #[allow(clippy::items_after_statements)] // const next to its only use; hoisting hides the value
-        const PROT_MAJOR: u8 = 17;
         let _ = writeln!(
             out,
-            "Protocol:     {PROT_MAJOR}.{}",
+            "Protocol:     {}.{}",
+            tinc_proto::request::PROT_MAJOR,
             option_version(row.options)
         );
 

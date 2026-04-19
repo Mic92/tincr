@@ -119,16 +119,11 @@ impl CtlRequest {
     }
 }
 
-/// `CONTROL` request type = 18 (count from `ID = 0` through `PACKET`).
-///
-/// `tinc_proto::request::Request::Control` is the canonical place.
-/// We re-declare here because `ctl.rs` doesn't otherwise use
-/// `tinc-proto` and one constant isn't worth the dependency edge.
-const CONTROL: u8 = 18;
-/// `ID` — the greeting opener.
-const ID: u8 = 0;
-/// `ACK` — the greeting closer.
-const ACK: u8 = 4;
+/// Derived from the canonical `tinc_proto::Request` enum so the
+/// numeric values can't drift.
+const CONTROL: u8 = tinc_proto::Request::Control as u8;
+const ID: u8 = tinc_proto::Request::Id as u8;
+const ACK: u8 = tinc_proto::Request::Ack as u8;
 /// `TINC_CTL_VERSION_CURRENT`. Hasn't changed since 2007. We send it
 /// (the upstream daemon checks it, for as long as we care about
 /// cross-compat during transition); our own daemon will check it too.
