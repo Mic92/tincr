@@ -137,12 +137,8 @@ fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
 /// itself — `SigningKey::sign` returns `[u8; 64]` directly.
 pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Result<(), CmdError> {
     let name = get_my_name(paths)?;
-    let sk = keypair::read_private(&paths.ed25519_private())
-        .map_err(|e| CmdError::BadInput(e.to_string()))?;
-    // `LoadError` → `BadInput` because there's no `Io` variant that
-    // takes a pre-stringified inner error. `LoadError::Display`
-    // already includes the path. Slight loss of structure (caller
-    // can't `match` on Io-vs-Pem) but this is leaf-level — the caller
+    let sk = keypair::read_private(&paths.ed25519_private())?;
+    // `LoadError` → `BadInput`: leaf-level — the caller
     // is the binary, which prints + exits.
 
     // ─── Slurp input

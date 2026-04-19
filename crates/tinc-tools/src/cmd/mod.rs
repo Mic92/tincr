@@ -86,6 +86,14 @@ impl From<crate::ctl::CtlError> for CmdError {
     }
 }
 
+/// Same erasure for key-load errors: `LoadError`'s Display already
+/// carries the path, and every caller is print-and-exit-1.
+impl From<crate::keypair::LoadError> for CmdError {
+    fn from(e: crate::keypair::LoadError) -> Self {
+        CmdError::BadInput(e.to_string())
+    }
+}
+
 /// `mkdir`, but EEXIST → chmod-and-succeed.
 ///
 /// The chmod-on-exists is the surprising part. Why: if you previously
