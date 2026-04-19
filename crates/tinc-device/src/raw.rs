@@ -317,12 +317,6 @@ impl Device for RawSocket {
     }
 }
 
-impl AsFd for RawSocket {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 // Tests — constants + open-gate + +0 via socketpair
 //
 // The "fakeable boundary" prediction holds: PF_PACKET writes raw

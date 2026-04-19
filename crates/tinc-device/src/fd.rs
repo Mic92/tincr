@@ -341,12 +341,6 @@ impl Device for FdTun {
     }
 }
 
-impl AsFd for FdTun {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 // Tests — pure fns + pipe-based integration
 
 #[cfg(test)]

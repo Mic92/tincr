@@ -762,12 +762,6 @@ impl Device for Tun {
     }
 }
 
-impl AsFd for Tun {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 // Tests — what we CAN test without CAP_NET_ADMIN
 
 #[cfg(test)]

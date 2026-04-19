@@ -350,12 +350,6 @@ impl Device for BsdTun {
     }
 }
 
-impl AsFd for BsdTun {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 // open() — stubbed, cfg-gated
 //
 // THREE constructors, all `cfg`-gated to BSD targets. The Linux
