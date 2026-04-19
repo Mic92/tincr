@@ -267,27 +267,30 @@ fn misc_msgs_adversarial() {
 // `parse_add_edge` etc. do the `from_utf8` check) and that layer is
 // covered by the integration test.
 
+/// Feed `s` to every public parse entry point. Results discarded; the
+/// proptest assertion is "nothing panicked".
+fn parse_all(s: &str) {
+    let _ = Request::peek(s);
+    let _ = check_id(s);
+    let _ = s.parse::<Subnet>();
+    let _ = AddEdge::parse(s);
+    let _ = DelEdge::parse(s);
+    let _ = SubnetMsg::parse(s);
+    let _ = KeyChanged::parse(s);
+    let _ = ReqKey::parse(s);
+    let _ = AnsKey::parse(s);
+    let _ = TcpPacket::parse(s);
+    let _ = SptpsPacket::parse(s);
+    let _ = UdpInfo::parse(s);
+    let _ = MtuInfo::parse(s);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(4000))]
 
     #[test]
     fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
-        let s = String::from_utf8_lossy(&bytes);
-        let s: &str = &s;
-        // Every public parse entry point. Results discarded.
-        let _ = Request::peek(s);
-        let _ = check_id(s);
-        let _ = s.parse::<Subnet>();
-        let _ = AddEdge::parse(s);
-        let _ = DelEdge::parse(s);
-        let _ = SubnetMsg::parse(s);
-        let _ = KeyChanged::parse(s);
-        let _ = ReqKey::parse(s);
-        let _ = AnsKey::parse(s);
-        let _ = TcpPacket::parse(s);
-        let _ = SptpsPacket::parse(s);
-        let _ = UdpInfo::parse(s);
-        let _ = MtuInfo::parse(s);
+        parse_all(&String::from_utf8_lossy(&bytes));
     }
 
     /// Same, but with the input space biased toward "looks like a
@@ -296,17 +299,6 @@ proptest! {
     /// int parse; this gets deeper.
     #[test]
     fn arbitrary_tokens_never_panic(s in r"[0-9a-fA-F.:/_# +\-]{0,200}") {
-        let _ = Request::peek(&s);
-        let _ = s.parse::<Subnet>();
-        let _ = AddEdge::parse(&s);
-        let _ = DelEdge::parse(&s);
-        let _ = SubnetMsg::parse(&s);
-        let _ = KeyChanged::parse(&s);
-        let _ = ReqKey::parse(&s);
-        let _ = AnsKey::parse(&s);
-        let _ = TcpPacket::parse(&s);
-        let _ = SptpsPacket::parse(&s);
-        let _ = UdpInfo::parse(&s);
-        let _ = MtuInfo::parse(&s);
+        parse_all(&s);
     }
 }
