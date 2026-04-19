@@ -129,16 +129,20 @@ impl FdTun {
 /// - `InvalidData`: cmsg wasn't `SCM_RIGHTS`, ≠1 fd, or `MSG_CTRUNC`
 ///   set
 fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
-    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
-
-    // ─── Connect
     // `@` prefix → abstract namespace; std handles the leading-NUL
     // + length bookkeeping.
     let stream = connect_unix(path)?;
+    // `stream` drops on return; closing it doesn't affect the
+    // SCM_RIGHTS dup (independent of the carrier socket).
+    recv_one_fd(&stream)
+}
 
-    // ─── recvmsg
-    // The cmsghdr dance.
-    //
+/// Receive exactly one fd via `SCM_RIGHTS` on an already-connected
+/// socket. Factored out so the test can drive it on a `socketpair`
+/// without the `connect_unix` step.
+fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
+    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
+
     // ONE BYTE of regular data is read. Why? The Java sender writes
     // one byte of payload alongside the fd cmsg — recvmsg needs SOME
     // iov to anchor the call. The byte's value is ignored
@@ -223,8 +227,6 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         ));
     }
 
-    // `stream` drops here. Its close doesn't affect `fd` (the
-    // SCM_RIGHTS dup is independent of the carrier socket).
     Ok(fds.pop().unwrap())
 }
 
@@ -528,13 +530,9 @@ mod tests {
     // The connect() is NOT covered (that's connect_unix, tested
     // separately if at all — it's a thin std wrapper).
 
-    /// `SCM_RIGHTS` round-trip: send an fd through a socketpair,
-    /// receive it. The received fd is a DIFFERENT NUMBER (kernel
-    /// dup'd) but points at the SAME FILE (write to the original,
-    /// read from the dup).
-    ///
-    /// This is the cmsghdr-handling test. The C's `read_fd`
-    /// (`:39-93`) is the equivalent.
+    /// `SCM_RIGHTS` round-trip via the production `recv_one_fd`
+    /// path: send an fd through a socketpair, receive it, verify
+    /// the dup points at the same open file description.
     #[test]
     fn scm_rights_round_trip() {
         use nix::sys::socket::{
@@ -542,8 +540,6 @@ mod tests {
         };
         use std::io::IoSlice;
 
-        // Socketpair: two connected AF_UNIX stream sockets.
-        // One sends, one receives.
         let (snd, rcv) = socketpair(
             AddressFamily::Unix,
             SockType::Stream,
@@ -552,89 +548,26 @@ mod tests {
         )
         .unwrap();
 
-        // The fd we'll send: a pipe write-end. Arbitrary; we
-        // just need SOME valid fd to ship across.
+        // The fd we'll ship: a pipe write-end.
         let (canary_r, canary_w) = pipe();
 
-        // Send: 1 byte payload (the receiver expects `iov_len=1`) +
+        // Send: 1 byte payload (receiver expects iov_len=1) +
         // SCM_RIGHTS cmsg with one fd.
-        let payload = [b'X'];
-        let iov = [IoSlice::new(&payload)];
+        let iov = [IoSlice::new(b"X")];
         let fds = [canary_w.as_raw_fd()];
         let cmsg = ControlMessage::ScmRights(&fds);
         sendmsg::<()>(snd.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None).unwrap();
 
-        // Receive: this is what `recv_scm_rights` does, but
-        // without the connect (we already have `rcv`). Factor
-        // the recvmsg-only part? No — `recv_scm_rights` is
-        // already small. Inline the relevant bit here.
-        //
-        // ACTUALLY: we can call the inner machinery. But
-        // `recv_scm_rights` takes a path and connects. The
-        // recvmsg part isn't factored. For the test, do it
-        // manually with the same nix calls. The test verifies
-        // OUR UNDERSTANDING of nix's behavior, not our wrapper
-        // (the wrapper is tested by integration when there's a
-        // real socket server).
-        let mut iobuf = [0u8; 1];
-        let mut iov = [IoSliceMut::new(&mut iobuf)];
-        let mut cmsgbuf = nix::cmsg_space!(RawFd);
-        let msg = nix::sys::socket::recvmsg::<()>(
-            rcv.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsgbuf),
-            MsgFlags::empty(),
-        )
-        .unwrap();
+        // Receive via the production cmsghdr handling.
+        let received_w = recv_one_fd(&rcv).unwrap();
 
-        // `RecvMsg<'_, 'outer, ()>` is `Copy` but its `'outer`
-        // lifetime ties to `&mut iov`. NLL releases the borrow
-        // after last USE of `msg`, not at scope end. So: do all
-        // `msg` reads FIRST (bytes, flags, cmsgs), then `iobuf`
-        // is reachable. The original code had `iobuf[0]` between
-        // `msg.bytes` and `msg.cmsgs()` — the later use kept the
-        // borrow alive past the iobuf read.
-        assert_eq!(msg.bytes, 1);
-        assert!(
-            !msg.flags
-                .intersects(MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB)
-        );
-        let fds: Vec<RawFd> = msg
-            .cmsgs()
-            .unwrap()
-            .find_map(|cm| match cm {
-                nix::sys::socket::ControlMessageOwned::ScmRights(f) => Some(f),
-                _ => None,
-            })
-            .unwrap();
-        // ↑ last use of msg; iov borrow released.
-
-        // Now iobuf is reachable.
-        assert_eq!(iobuf[0], b'X');
-        assert_eq!(fds.len(), 1);
-        let received_fd = fds[0];
-
-        // The received fd is a DIFFERENT NUMBER from the
-        // original (kernel dup'd into a fresh slot). Well,
-        // it MIGHT be the same number by coincidence (lowest
-        // free fd). What we CAN verify: it works.
-        //
-        // SAFETY: kernel dup'd via SCM_RIGHTS; the fd is ours.
-        #[allow(unsafe_code)]
-        let received_w = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(received_fd) };
-
-        // Write through the RECEIVED fd, read from the canary
-        // pipe. If they're connected (same underlying file),
-        // this works.
+        // Write through the RECEIVED fd, read from the canary pipe:
+        // proves the dup points at the same file description.
         write_all(&received_w, b"ping");
         let mut got = [0u8; 4];
         let n = read_exact_n(&canary_r, &mut got, 4);
         assert_eq!(n, 4);
         assert_eq!(&got, b"ping");
-
-        // Cleanup: drops close everything. The original
-        // `canary_w` is still open (dup'd, not moved); both
-        // it and `received_w` close on drop.
     }
 
     // Test plumbing — pipe helpers
