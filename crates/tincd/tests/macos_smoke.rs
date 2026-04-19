@@ -40,9 +40,7 @@ fn utun_start_sigterm_shutdown() {
     }
 
     let tmp = TmpGuard::new("macos-smoke", "utun");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_utun_config(&confbase);
 

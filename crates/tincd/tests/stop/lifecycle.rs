@@ -23,9 +23,7 @@ fn tmp(tag: &str) -> super::common::TmpGuard {
 #[test]
 fn spawn_connect_stop() {
     let tmp = tmp("connect-stop");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -233,9 +231,7 @@ fn umbilical_daemon_side() {
     use std::os::fd::OwnedFd;
 
     let tmp = tmp("umbilical-daemon");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -327,9 +323,7 @@ fn umbilical_daemon_side() {
 #[test]
 fn sigterm_stops() {
     let tmp = tmp("sigterm");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -377,9 +371,7 @@ fn sigterm_stops() {
 #[test]
 fn sigusr_ignored() {
     let tmp = tmp("sigusr");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -478,9 +470,7 @@ fn second_daemon_refused() {
 #[test]
 fn stays_alive_across_iterations() {
     let tmp = tmp("alive");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // Override write_config's tinc.conf to add `PingTimeout = 1`.
     // The 6-second sleep was the bottleneck (`stop.rs::stays_alive`
@@ -524,9 +514,7 @@ fn stays_alive_across_iterations() {
 #[test]
 fn bad_cookie_dropped() {
     let tmp = tmp("badcookie");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -581,9 +569,7 @@ fn tcp_listener_accepts_and_rejects_control() {
     use std::net::TcpStream;
 
     let tmp = tmp("tcp-stop");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 

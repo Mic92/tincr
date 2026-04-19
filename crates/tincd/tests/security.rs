@@ -91,9 +91,7 @@ struct OneDaemon {
 impl OneDaemon {
     fn spawn(tag: &str, extra_conf: &str) -> Self {
         let tmp = tmp(tag);
-        let confbase = tmp.path().join("vpn");
-        let pidfile = tmp.path().join("tinc.pid");
-        let socket = tmp.path().join("tinc.socket");
+        let (confbase, pidfile, socket) = tmp.std_paths();
 
         write_config(&confbase, "testnode", 0x42, extra_conf);
 
@@ -250,9 +248,7 @@ fn unknown_id_rejected() {
 #[test]
 fn legacy_minor_rejected() {
     let tmp = tmp("legacy-minor");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase, "testnode", 0x42, "");
     // We DO need a hosts/bar with a pubkey: the version check at
@@ -320,9 +316,7 @@ fn legacy_minor_rejected() {
 #[test]
 fn id_timeout_half_open_survives() {
     let tmp = tmp("id-timeout");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // PingTimeout=1 keeps the test fast.
     write_config(&confbase, "testnode", 0x42, "PingTimeout = 1\n");

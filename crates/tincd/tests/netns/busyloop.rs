@@ -113,9 +113,7 @@ fn outgoing_timeout_no_busy_loop() {
 
     // ─── config: ConnectTo = blackhole, PingTimeout = 2 ─────────
     let tmp = tmp("busyloop");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),

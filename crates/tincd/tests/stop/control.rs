@@ -33,9 +33,7 @@ fn udp_stray_packet_drained() {
     use std::net::UdpSocket;
 
     let tmp = tmp("udp-stray");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -159,9 +157,7 @@ fn req_log_streams() {
     use std::io::Read;
 
     let tmp = tmp("req-log");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
@@ -273,9 +269,7 @@ fn req_log_streams() {
 #[test]
 fn set_debug_level_roundtrip() {
     let tmp = tmp("set-debug");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
@@ -367,9 +361,7 @@ fn tinc_up_runs_with_confbase_cwd() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tmp("tinc-up-cwd");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // Probe file OUTSIDE confbase (absolute path) so the
@@ -418,9 +410,7 @@ fn tinc_up_runs_with_confbase_cwd() {
 #[test]
 fn control_conn_churn_no_fd_leak() {
     let tmp = tmp("fd-churn");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)

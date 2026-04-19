@@ -66,6 +66,16 @@ impl TmpGuard {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// `(vpn/, tinc.pid, tinc.socket)` under this tempdir. The
+    /// 3-line join block that opened ~35 single-daemon tests.
+    pub fn std_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
+        (
+            self.0.join("vpn"),
+            self.0.join("tinc.pid"),
+            self.0.join("tinc.socket"),
+        )
+    }
 }
 
 impl Drop for TmpGuard {

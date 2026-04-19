@@ -100,9 +100,7 @@ fn count_in_log(log: &LogReader, needle: &str) -> usize {
 #[test]
 fn sigalrm_retries_now() {
     let tmp = tmp("sigalrm");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // alloc_port reserves a port and immediately frees it. Nothing
     // re-binds it; connect() gets ECONNREFUSED. Same trick as
@@ -194,9 +192,7 @@ fn sigalrm_retries_now() {
 #[test]
 fn req_retry_retries_now() {
     let tmp = tmp("req-retry");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
@@ -259,9 +255,7 @@ fn req_retry_retries_now() {
 #[test]
 fn req_disconnect_replies() {
     let tmp = tmp("disconnect");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // No ConnectTo. Just the daemon + ctl conn.
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();

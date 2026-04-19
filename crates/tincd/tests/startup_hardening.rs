@@ -34,9 +34,7 @@ fn spawn(confbase: &std::path::Path, pidfile: &std::path::Path, socket: &std::pa
 #[test]
 fn umbilical_rejects_stdio_fd() {
     let tmp = tmp("umb");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_min_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
@@ -84,9 +82,7 @@ fn umbilical_rejects_stdio_fd() {
 #[test]
 fn second_daemon_does_not_clobber_pidfile() {
     let tmp = tmp("clob");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_min_config(&confbase);
 
     let mut a = spawn(&confbase, &pidfile, &socket);

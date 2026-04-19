@@ -77,9 +77,7 @@ fn bypass_security_warns_not_errors() {
 #[test]
 fn missing_config_fails() {
     let tmp = tmp("noconfig");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // confbase exists but no tinc.conf inside.
     std::fs::create_dir_all(&confbase).unwrap();
@@ -113,9 +111,7 @@ fn missing_config_fails() {
 #[test]
 fn dash_o_overrides_config() {
     let tmp = tmp("dash-o");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
     // write_config wrote hosts/testnode but the daemon will look for
@@ -260,9 +256,7 @@ fn dash_n_rejects_slash() {
 #[test]
 fn missing_name_fails() {
     let tmp = tmp("noname");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     std::fs::create_dir_all(&confbase).unwrap();
     // Config without Name.
@@ -304,9 +298,7 @@ fn missing_name_fails() {
 #[test]
 fn missing_hosts_file_ok() {
     let tmp = tmp("nohosts");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // tinc.conf + private key, but NO hosts/ dir. Port goes in
     // tinc.conf (HOST-tagged, but lookup doesn't care which file —
@@ -363,9 +355,7 @@ fn missing_hosts_file_ok() {
 #[test]
 fn dash_d_upper_stays_foreground() {
     let tmp = tmp("dash-D");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // tincd_cmd() bakes in -D. We're proving that's load-bearing.
@@ -396,9 +386,7 @@ fn dash_d_upper_stays_foreground() {
 #[test]
 fn dash_d_level_sets_debug() {
     let tmp = tmp("dash-d-level");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
@@ -426,9 +414,7 @@ fn dash_d_level_sets_debug() {
 #[test]
 fn logfile_redirects_output() {
     let tmp = tmp("logfile");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     let logfile = tmp.path().join("tinc.log");
     write_config(&confbase);
 
@@ -470,9 +456,7 @@ fn logfile_redirects_output() {
 #[test]
 fn dash_u_bad_user_fails() {
     let tmp = tmp("dash-U-bad");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let out = tincd_at(&confbase, &pidfile, &socket)
@@ -504,9 +488,7 @@ fn dash_u_bad_user_fails() {
 #[test]
 fn dash_l_mlock_wired() {
     let tmp = tmp("dash-L");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
@@ -553,9 +535,7 @@ fn dash_l_mlock_wired() {
 #[test]
 fn process_priority_bad_value_warns() {
     let tmp = tmp("priority-bad");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
@@ -587,9 +567,7 @@ fn process_priority_bad_value_warns() {
 #[test]
 fn process_priority_low_succeeds() {
     let tmp = tmp("priority-low");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
