@@ -68,6 +68,21 @@ pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Re
     Ok(())
 }
 
+/// open + `read_pem` + length-checked copy into a fixed array.
+fn read_blob<const N: usize>(path: &Path, ty: &str) -> Result<[u8; N], LoadError> {
+    let f = File::open(path).map_err(|err| LoadError::Io {
+        path: path.to_owned(),
+        err,
+    })?;
+    let blob = read_pem(f, ty, N).map_err(|err| LoadError::Pem {
+        path: path.to_owned(),
+        err,
+    })?;
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(&blob);
+    Ok(arr)
+}
+
 /// `ecdsa_read_pem_private_key`. Loads the full keypair from a private
 /// key file (the file holds both halves).
 ///
@@ -75,19 +90,7 @@ pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Re
 /// `LoadError::Pem` for missing/malformed armor or wrong size,
 /// `LoadError::Io` for `fopen` failure.
 pub fn read_private(path: &Path) -> Result<SigningKey, LoadError> {
-    let f = File::open(path).map_err(|err| LoadError::Io {
-        path: path.to_owned(),
-        err,
-    })?;
-    let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN).map_err(|err| LoadError::Pem {
-        path: path.to_owned(),
-        err,
-    })?;
-    // `read_pem` returned exactly 96 bytes (it checked). Unwrap is the
-    // length-guarantee handoff.
-    let mut arr = [0u8; PRIVATE_BLOB_LEN];
-    arr.copy_from_slice(&blob);
-    Ok(SigningKey::from_blob(&arr))
+    read_blob::<PRIVATE_BLOB_LEN>(path, TY_PRIVATE).map(|b| SigningKey::from_blob(&b))
 }
 
 /// `ecdsa_read_pem_public_key`. Just the 32 bytes.
@@ -95,17 +98,7 @@ pub fn read_private(path: &Path) -> Result<SigningKey, LoadError> {
 /// # Errors
 /// Same as [`read_private`].
 pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
-    let f = File::open(path).map_err(|err| LoadError::Io {
-        path: path.to_owned(),
-        err,
-    })?;
-    let blob = read_pem(f, TY_PUBLIC, PUBLIC_LEN).map_err(|err| LoadError::Pem {
-        path: path.to_owned(),
-        err,
-    })?;
-    let mut arr = [0u8; PUBLIC_LEN];
-    arr.copy_from_slice(&blob);
-    Ok(arr)
+    read_blob(path, TY_PUBLIC)
 }
 
 /// Public-key lookup as the daemon does it: `Ed25519PublicKey` config
