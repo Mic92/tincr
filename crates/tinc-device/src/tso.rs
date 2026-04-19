@@ -94,12 +94,8 @@ impl VirtioNetHdr {
     /// device means the device is misconfigured (kernel always writes
     /// the full header). Caller drops the frame.
     #[must_use]
-    pub fn decode(raw: &[u8]) -> Option<Self> {
-        Self::decode_at(raw)
-    }
-
     #[inline]
-    fn decode_at(raw: &[u8]) -> Option<Self> {
+    pub fn decode(raw: &[u8]) -> Option<Self> {
         if raw.len() < VNET_HDR_LEN {
             return None;
         }
