@@ -126,13 +126,26 @@ impl<W: Copy> SelfPipe<W> {
         })
     }
 
-    /// `pipe2(O_CLOEXEC)` on Linux; `pipe()` + `fcntl(FD_CLOEXEC)` on macOS.
+    /// `pipe2(O_CLOEXEC)` where available; `pipe()` + `fcntl` on macOS
+    /// (which lacks `pipe2`).
     fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        ))]
         {
             Ok(nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly",
+        )))]
         {
             use nix::fcntl::{FcntlArg, FdFlag, fcntl};
             let (rd, wr) = nix::unistd::pipe()?;
