@@ -142,8 +142,6 @@ pub enum TimerWhat {
     /// from the event loop (NOT a side thread) so a wedged loop
     /// stops pinging and systemd actually restarts us.
     Watchdog,
-    #[allow(dead_code)]
-    UdpPing,
 }
 
 /// TERM/QUIT/INT all map to Exit.
@@ -723,10 +721,6 @@ impl Daemon {
                         if let Some((tid, iv)) = self.watchdog {
                             self.timers.set(tid, iv);
                         }
-                    }
-                    TimerWhat::UdpPing => {
-                        // Not armed yet. Unreachable.
-                        unreachable!("timer {t:?} not armed yet")
                     }
                 }
             }
