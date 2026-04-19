@@ -95,7 +95,6 @@ struct Slot<W> {
 pub struct EventLoop<W> {
     ep: Poller,
     events: Box<[RawEvent; MAX_EVENTS_PER_TURN]>,
-    n_events: usize,
     /// Hand-rolled slab. `None` = freed slot. The epoll token indexes
     /// directly. Same data structure as `Timers::slots` but with
     /// `Option<Slot>` instead of a separate freelist — the `None`
@@ -114,7 +113,6 @@ impl<W: Copy> EventLoop<W> {
         Ok(Self {
             ep: create()?,
             events: Box::new([empty_event(); MAX_EVENTS_PER_TURN]),
-            n_events: 0,
             slots: Vec::new(),
             free: Vec::new(),
         })
@@ -300,8 +298,8 @@ impl<W: Copy> EventLoop<W> {
         // same: a signal might have re-armed a timer (it didn't, the
         // handler is just write-one-byte, but the structure is sound).
         // The self-pipe byte will be there next turn.
-        match wait(&self.ep, &mut self.events[..], timeout) {
-            Ok(n) => self.n_events = n,
+        let n_events = match wait(&self.ep, &mut self.events[..], timeout) {
+            Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // Empty `out`, caller loops. The self-pipe is
                 // readable next turn (the signal handler wrote a
@@ -309,9 +307,9 @@ impl<W: Copy> EventLoop<W> {
                 return Ok(());
             }
             Err(e) => return Err(e),
-        }
+        };
 
-        for ev in &self.events[..self.n_events] {
+        for ev in &self.events[..n_events] {
             let idx = ev_token(ev);
             // Generation-guard substitute, part 1: slot still exists.
             let Some(slot) = self.slots.get(idx).and_then(Option::as_ref) else {
