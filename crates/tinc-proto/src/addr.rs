@@ -68,7 +68,6 @@ impl AddrStr {
         Ok(Self(s))
     }
 
-    /// Underlying string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -79,12 +78,6 @@ impl fmt::Display for AddrStr {
     /// Literal pass-through. No escaping — `%s` is `%s`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl From<AddrStr> for String {
-    fn from(a: AddrStr) -> Self {
-        a.0
     }
 }
 
