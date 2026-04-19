@@ -616,9 +616,8 @@ impl Sptps {
 
     /// True once [`SEAL_KEY_LIMIT`] records have been sealed under the
     /// current `outcipher`. App-data sends return `InvalidState` past
-    /// this; the daemon should `force_kex` when it flips.
-    #[must_use]
-    pub fn needs_rekey(&self) -> bool {
+    /// this point (daemon rekeys on a timer, never polls this).
+    fn needs_rekey(&self) -> bool {
         self.outseqno
             .load(Ordering::Relaxed)
             .wrapping_sub(self.out_key_base)
