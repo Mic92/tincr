@@ -219,6 +219,19 @@ const fn ip_addr_span(is_v6: bool) -> (usize, usize) {
     }
 }
 
+/// Big-endian u16 at `b[o..o+2]`. Panics on OOB — callers have
+/// already length-checked the header.
+#[inline]
+fn be16(b: &[u8], o: usize) -> u16 {
+    u16::from_be_bytes(b[o..o + 2].try_into().unwrap())
+}
+
+/// Big-endian u32 at `b[o..o+4]`.
+#[inline]
+fn be32(b: &[u8], o: usize) -> u32 {
+    u32::from_be_bytes(b[o..o + 4].try_into().unwrap())
+}
+
 /// TCP/UDP pseudo-header checksum. wg-go `pseudoHeaderChecksumNoFold`
 /// (`checksum.go:95`). RFC 793 §3.1 / RFC 8200 §8.1: sum over
 /// `src_addr ‖ dst_addr ‖ [0, protocol] ‖ tcp_length_BE`.
@@ -416,12 +429,7 @@ pub fn tso_split(
     // wg-go `:916`: first segment's TCP sequence number. Each
     // subsequent segment adds `gso_size`. RFC 793 §3.3: seqno
     // counts payload bytes.
-    let first_seq = u32::from_be_bytes([
-        pkt[iphlen + TCP_SEQ_OFF],
-        pkt[iphlen + TCP_SEQ_OFF + 1],
-        pkt[iphlen + TCP_SEQ_OFF + 2],
-        pkt[iphlen + TCP_SEQ_OFF + 3],
-    ]);
+    let first_seq = be32(pkt, iphlen + TCP_SEQ_OFF);
 
     // wg-go `:903-904`: src+dst addr slice for pseudo-header.
     let (addr_off, addr_len) = ip_addr_span(is_v6);
@@ -431,11 +439,7 @@ pub fn tso_split(
     // each subsequent. RFC 6864: ID need not be unique for atomic
     // datagrams (DF set, no frag), but the kernel still increments
     // and receivers may use it for diagnostics. Match wg-go.
-    let first_id = if is_v6 {
-        0
-    } else {
-        u16::from_be_bytes([pkt[IPV4_ID_OFF], pkt[IPV4_ID_OFF + 1]])
-    };
+    let first_id = if is_v6 { 0 } else { be16(pkt, IPV4_ID_OFF) };
 
     let ethertype = if is_v6 { ETH_P_IPV6 } else { ETH_P_IP };
     let gso_size = usize::from(hdr.gso_size);
@@ -699,7 +703,7 @@ impl GroBucket {
                 }
                 // wg-go `:546`: totlen sanity. A trailing pad (eth
                 // minimum-frame) would mismatch here.
-                if usize::from(u16::from_be_bytes([ip[2], ip[3]])) != ip.len() {
+                if usize::from(be16(ip, 2)) != ip.len() {
                     return GroVerdict::NotCandidate;
                 }
                 false
@@ -711,7 +715,7 @@ impl GroBucket {
                 // wg-go `:541`: payload-len sanity. v6 has no
                 // header csum, so this is the only consistency
                 // check available.
-                if usize::from(u16::from_be_bytes([ip[4], ip[5]])) != ip.len() - 40 {
+                if usize::from(be16(ip, 4)) != ip.len() - 40 {
                     return GroVerdict::NotCandidate;
                 }
                 true
@@ -738,20 +742,10 @@ impl GroBucket {
             return GroVerdict::NotCandidate;
         }
 
-        let seq = u32::from_be_bytes([
-            ip[iphlen + TCP_SEQ_OFF],
-            ip[iphlen + TCP_SEQ_OFF + 1],
-            ip[iphlen + TCP_SEQ_OFF + 2],
-            ip[iphlen + TCP_SEQ_OFF + 3],
-        ]);
-        let ack = u32::from_be_bytes([
-            ip[iphlen + 8],
-            ip[iphlen + 9],
-            ip[iphlen + 10],
-            ip[iphlen + 11],
-        ]);
-        let sport = u16::from_be_bytes([ip[iphlen], ip[iphlen + 1]]);
-        let dport = u16::from_be_bytes([ip[iphlen + 2], ip[iphlen + 3]]);
+        let seq = be32(ip, iphlen + TCP_SEQ_OFF);
+        let ack = be32(ip, iphlen + 8);
+        let sport = be16(ip, iphlen);
+        let dport = be16(ip, iphlen + 2);
         let (addr_off, addr_len) = ip_addr_span(is_v6);
         // wg-go `ipHeadersCanCoalesce` `:279-307`. v4: tos at [1],
         // ttl at [8], DF at [6]>>5. v6: tclass split across [0..2]
