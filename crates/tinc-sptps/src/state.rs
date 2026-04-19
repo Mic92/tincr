@@ -925,10 +925,8 @@ impl Sptps {
     /// it's `hiskex` first, `mykex` second (with `initiator` flipped).
     /// Both sides agree on what's signed because their roles swap.
     fn send_sig(&mut self, out: &mut Vec<Output>) {
-        let mykex = self.mykex.as_ref().expect("send_sig with no mykex");
-        let hiskex = self.hiskex.as_ref().expect("send_sig with no hiskex");
-
-        let msg = sig_transcript(self.role.is_initiator(), &**mykex, &**hiskex, &self.label);
+        let (mykex, hiskex) = self.kex_pair();
+        let msg = sig_transcript(self.role.is_initiator(), mykex, hiskex, &self.label);
         let sig = self.mykey.sign(&msg);
         self.send_record_priv(REC_HANDSHAKE, &sig, out);
     }
@@ -957,6 +955,15 @@ impl Sptps {
 
     // ────────────────────────────────────────────────────────────────
     // Receive path: handshake records
+
+    /// Both KEX blobs, asserted present. The state machine only reaches
+    /// SIG/key-derivation after stashing both, so absence is a bug.
+    fn kex_pair(&self) -> (&[u8; KEX_LEN], &[u8; KEX_LEN]) {
+        (
+            self.mykex.as_deref().expect("mykex present"),
+            self.hiskex.as_deref().expect("hiskex present"),
+        )
+    }
 
     /// `receive_kex` precondition. Factored so `SecondaryKex` can run
     /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
@@ -989,13 +996,14 @@ impl Sptps {
         // No NUL: C does `sizeof("key expansion") - 1`.
         const PREFIX: &[u8] = b"key expansion";
 
+        let (mykex, hiskex) = self.kex_pair();
         let (init_kex, resp_kex) = if self.role.is_initiator() {
-            (self.mykex.as_ref(), self.hiskex.as_ref())
+            (mykex, hiskex)
         } else {
-            (self.hiskex.as_ref(), self.mykex.as_ref())
+            (hiskex, mykex)
         };
-        let init_nonce = &init_kex.expect("kex present")[1..=NONCE_LEN];
-        let resp_nonce = &resp_kex.expect("kex present")[1..=NONCE_LEN];
+        let init_nonce = &init_kex[1..=NONCE_LEN];
+        let resp_nonce = &resp_kex[1..=NONCE_LEN];
 
         let mut seed = Zeroizing::new(Vec::with_capacity(
             PREFIX.len() + 2 * NONCE_LEN + self.label.len(),
@@ -1074,10 +1082,9 @@ impl Sptps {
         // Verify transcript: `[!initiator][hiskex][mykex][label]`.
         // Swapped vs. send_sig: their initiator-bit is our !initiator-bit,
         // their mykex is our hiskex.
-        let mykex = self.mykex.as_ref().expect("receive_sig with no mykex");
-        let hiskex = self.hiskex.as_ref().expect("receive_sig with no hiskex");
+        let (mykex, hiskex) = self.kex_pair();
         {
-            let msg = sig_transcript(!self.role.is_initiator(), &**hiskex, &**mykex, &self.label);
+            let msg = sig_transcript(!self.role.is_initiator(), hiskex, mykex, &self.label);
             sign::verify(&self.hiskey, &msg, sig).map_err(|_| SptpsError::BadSig)?;
         }
 
