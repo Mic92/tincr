@@ -16,6 +16,11 @@ use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp, 
 pub(super) type RawEvent = EpollEvent;
 pub(super) type Poller = Epoll;
 
+#[inline]
+pub(super) fn empty_event() -> RawEvent {
+    EpollEvent::empty()
+}
+
 const FLAGS_BASE: EpollFlags = EpollFlags::empty(); // level-triggered, matches src/linux/event.c:97
 
 pub(super) fn create() -> io::Result<Poller> {

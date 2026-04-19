@@ -20,26 +20,19 @@ use nix::sys::time::TimeSpec;
 
 /// The kqueue fd.
 pub(super) type Poller = Kqueue;
+pub(super) type RawEvent = KEvent;
 
-/// Wrapper around `KEvent` so we can add an `empty()` constructor.
-/// `repr(transparent)` so the array layout is identical.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug)]
-pub(super) struct RawEvent(KEvent);
-
-impl RawEvent {
-    /// Zero-init for the events array.
-    #[inline]
-    pub(super) fn empty() -> Self {
-        Self(KEvent::new(
-            0,
-            EventFilter::EVFILT_READ,
-            EvFlags::empty(),
-            FilterFlag::empty(),
-            0,
-            0,
-        ))
-    }
+/// Zero-init for the events array.
+#[inline]
+pub(super) fn empty_event() -> RawEvent {
+    KEvent::new(
+        0,
+        EventFilter::EVFILT_READ,
+        EvFlags::empty(),
+        FilterFlag::empty(),
+        0,
+        0,
+    )
 }
 
 pub(super) fn create() -> io::Result<Poller> {
@@ -189,30 +182,22 @@ pub(super) fn wait(
     // `Kqueue::kevent` takes nix's `timespec` re-export; build via
     // `TimeSpec` so the field types/widths stay nix's problem.
     let ts = timeout.map(|d| *TimeSpec::from_duration(d).as_ref());
-    // SAFETY: RawEvent is #[repr(transparent)] over KEvent, so the
-    // slice layout is identical. std::mem::transmute can't handle
-    // unsized slices; this cast is the canonical pattern for
-    // repr(transparent) newtype slices (same as nix's own wrappers).
-    #[allow(unsafe_code)]
-    let kevents = unsafe {
-        std::slice::from_raw_parts_mut(events.as_mut_ptr().cast::<KEvent>(), events.len())
-    };
-    kq.kevent(&[], kevents, ts).map_err(Into::into)
+    kq.kevent(&[], events, ts).map_err(Into::into)
 }
 
 // Event accessors.
 
 #[inline]
 pub(super) fn ev_token(e: &RawEvent) -> usize {
-    e.0.udata().cast_unsigned()
+    e.udata().cast_unsigned()
 }
 
 #[inline]
 pub(super) fn ev_readable(e: &RawEvent) -> bool {
-    matches!(e.0.filter(), Ok(EventFilter::EVFILT_READ))
+    matches!(e.filter(), Ok(EventFilter::EVFILT_READ))
 }
 
 #[inline]
 pub(super) fn ev_writable(e: &RawEvent) -> bool {
-    matches!(e.0.filter(), Ok(EventFilter::EVFILT_WRITE))
+    matches!(e.filter(), Ok(EventFilter::EVFILT_WRITE))
 }

@@ -23,13 +23,17 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 mod epoll;
 #[cfg(target_os = "linux")]
-use epoll::{Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait};
+use epoll::{
+    Poller, RawEvent, add, create, del, empty_event, ev_readable, ev_token, ev_writable, modify,
+    wait,
+};
 
 #[cfg(target_os = "macos")]
 mod kqueue;
 #[cfg(target_os = "macos")]
 use kqueue::{
-    Poller, RawEvent, add, create, del, ev_readable, ev_token, ev_writable, modify, wait,
+    Poller, RawEvent, add, create, del, empty_event, ev_readable, ev_token, ev_writable, modify,
+    wait,
 };
 
 use crate::MAX_EVENTS_PER_TURN;
@@ -109,7 +113,7 @@ impl<W: Copy> EventLoop<W> {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             ep: create()?,
-            events: Box::new([RawEvent::empty(); MAX_EVENTS_PER_TURN]),
+            events: Box::new([empty_event(); MAX_EVENTS_PER_TURN]),
             n_events: 0,
             slots: Vec::new(),
             free: Vec::new(),
