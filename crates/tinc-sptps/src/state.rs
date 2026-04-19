@@ -85,9 +85,6 @@ pub enum SptpsError {
     BadSig,
     /// `receive_ack`: ACK body wasn't empty.
     BadAck,
-    /// `receive_handshake`: handshake record arrived in a state that
-    /// doesn't expect one (e.g. SIG before KEX).
-    UnexpectedHandshake,
     /// Stream/datagram receive: app record arrived before `instate` set,
     /// or record type ≥ 129 (only 128 is HANDSHAKE).
     BadRecord,
