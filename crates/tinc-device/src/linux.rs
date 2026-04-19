@@ -671,26 +671,9 @@ impl Device for Tun {
         if self.mode == Mode::Tap {
             // TAP: no vnet_hdr (see `flags` in `Tun::open`). The
             // trait default's `read()`-in-a-loop is the right
-            // shape, but we can't call the trait default from an
-            // override. Inline it. Same loop the BSD/mock paths
-            // inherit for free.
-            let cap = cap.min(arena.cap());
-            let mut n = 0;
-            while n < cap {
-                match self.read(arena.slot_mut(n)) {
-                    Ok(len) => {
-                        arena.set_len(n, len);
-                        n += 1;
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(e) => return Err(e),
-                }
-            }
-            return Ok(if n == 0 {
-                DrainResult::Empty
-            } else {
-                DrainResult::Frames { count: n }
-            });
+            // shape; we can't call the trait default from an
+            // override, so call the hoisted free fn it wraps.
+            return crate::drain_via_read(self, arena, cap);
         }
 
         // ─── TUN: vnet_hdr path ──────────────────────────────

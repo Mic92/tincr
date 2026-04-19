@@ -183,24 +183,34 @@ pub trait Device: Send {
     /// (it's the loop terminator, not an error). EBADFD etc. surface
     /// to the daemon.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
-        let cap = cap.min(arena.cap());
-        let mut n = 0;
-        while n < cap {
-            match self.read(arena.slot_mut(n)) {
-                Ok(len) => {
-                    arena.set_len(n, len);
-                    n += 1;
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(if n == 0 {
-            DrainResult::Empty
-        } else {
-            DrainResult::Frames { count: n }
-        })
+        drain_via_read(self, arena, cap)
     }
+}
+
+/// `read()`-in-a-loop drain body. Hoisted out of the trait default so
+/// overrides (linux TAP arm) can delegate to it without re-inlining.
+pub(crate) fn drain_via_read<D: Device + ?Sized>(
+    d: &mut D,
+    arena: &mut DeviceArena,
+    cap: usize,
+) -> io::Result<DrainResult> {
+    let cap = cap.min(arena.cap());
+    let mut n = 0;
+    while n < cap {
+        match d.read(arena.slot_mut(n)) {
+            Ok(len) => {
+                arena.set_len(n, len);
+                n += 1;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(if n == 0 {
+        DrainResult::Empty
+    } else {
+        DrainResult::Frames { count: n }
+    })
 }
 
 // Dummy — `dummy_device.c` (58 LOC)
