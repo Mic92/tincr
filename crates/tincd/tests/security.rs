@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     Ctl, PeerFixture, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr,
-    tincd_cmd, wait_for_file, write_ed25519_privkey,
+    tincd_at, wait_for_file, write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -73,13 +73,7 @@ fn spawn_daemon(
     pidfile: &std::path::Path,
     socket: &std::path::Path,
 ) -> Child {
-    tincd_cmd()
-        .arg("-c")
-        .arg(confbase)
-        .arg("--pidfile")
-        .arg(pidfile)
-        .arg("--socket")
-        .arg(socket)
+    tincd_at(confbase, pidfile, socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()

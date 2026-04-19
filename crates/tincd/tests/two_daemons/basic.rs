@@ -642,13 +642,7 @@ fn autoconnect_converges_to_three() {
     // tmpfile captures them for the failure dump.
     let spawn_logged = |n: &Node| {
         let log = std::fs::File::create(tmp.path().join(format!("{}.stderr", n.name))).unwrap();
-        tincd_cmd()
-            .arg("-c")
-            .arg(&n.confbase)
-            .arg("--pidfile")
-            .arg(&n.pidfile)
-            .arg("--socket")
-            .arg(&n.socket)
+        tincd_at(&n.confbase, &n.pidfile, &n.socket)
             .env("RUST_LOG", "tincd=info")
             .stderr(log)
             .spawn()

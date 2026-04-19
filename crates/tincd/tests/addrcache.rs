@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_cmd,
+    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_at,
     wait_for_file_with as wait_for_file, write_ed25519_privkey,
 };
 
@@ -135,13 +135,7 @@ impl Node {
     }
 
     fn spawn(&self) -> Child {
-        tincd_cmd()
-            .arg("-c")
-            .arg(&self.confbase)
-            .arg("--pidfile")
-            .arg(&self.pidfile)
-            .arg("--socket")
-            .arg(&self.socket)
+        tincd_at(&self.confbase, &self.pidfile, &self.socket)
             .env("RUST_LOG", "tincd=info")
             .stderr(Stdio::piped())
             .spawn()

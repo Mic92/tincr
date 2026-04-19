@@ -52,13 +52,7 @@ fn bypass_security_warns_not_errors() {
     let confbase = tmp.path().join("vpn");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(tmp.path().join("p"))
-        .arg("--socket")
-        .arg(tmp.path().join("s"))
+    let mut child = tincd_at(&confbase, tmp.path().join("p"), tmp.path().join("s"))
         .arg("--bypass-security")
         .stderr(Stdio::piped())
         .spawn()
@@ -90,13 +84,7 @@ fn missing_config_fails() {
     // confbase exists but no tinc.conf inside.
     std::fs::create_dir_all(&confbase).unwrap();
 
-    let out = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let out = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .output()
         .unwrap();
@@ -138,13 +126,7 @@ fn dash_o_overrides_config() {
     // root). Write hosts/override with Port=0 too.
     std::fs::write(confbase.join("hosts").join("override"), "Port = 0\n").unwrap();
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         // The override. tinc.conf has `Name = testnode`; this wins.
         .arg("-o")
         .arg("Name = override")
@@ -153,11 +135,11 @@ fn dash_o_overrides_config() {
         .spawn()
         .unwrap();
 
-    assert!(wait_for_file(&socket), "tincd didn't bind; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
+    assert!(
+        wait_for_file(&socket),
+        "tincd didn't bind; stderr: {}",
+        drain_stderr(child)
+    );
 
     // Connect, do the greeting. Line 1 shows the daemon's name.
     let cookie = read_cookie(&pidfile);
@@ -182,13 +164,7 @@ fn dash_o_overrides_config() {
 #[test]
 fn dash_o_bad_value_fails() {
     let tmp = tmp("dash-o-bad");
-    let out = tincd_cmd()
-        .arg("-c")
-        .arg(tmp.path())
-        .arg("--pidfile")
-        .arg(tmp.path().join("p"))
-        .arg("--socket")
-        .arg(tmp.path().join("s"))
+    let out = tincd_at(tmp.path(), tmp.path().join("p"), tmp.path().join("s"))
         .arg("-o")
         .arg("KeyWithoutValue")
         .stderr(Stdio::piped())
@@ -292,13 +268,7 @@ fn missing_name_fails() {
     // Config without Name.
     std::fs::write(confbase.join("tinc.conf"), "DeviceType = dummy\n").unwrap();
 
-    let out = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let out = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .output()
         .unwrap();
@@ -354,13 +324,7 @@ fn missing_hosts_file_ok() {
     // Precondition: hosts/ doesn't exist. THIS is what's tested.
     assert!(!confbase.join("hosts").exists());
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=warn")
         .stderr(Stdio::piped())
         .spawn()
@@ -370,11 +334,7 @@ fn missing_hosts_file_ok() {
     assert!(
         wait_for_file(&socket),
         "daemon should start without hosts/; stderr: {}",
-        {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            String::from_utf8_lossy(&out.stderr).into_owned()
-        }
+        drain_stderr(child)
     );
 
     // The pidfile addr is real (port from tinc.conf was respected).
@@ -409,22 +369,16 @@ fn dash_d_upper_stays_foreground() {
     write_config(&confbase);
 
     // tincd_cmd() bakes in -D. We're proving that's load-bearing.
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    assert!(wait_for_file(&socket), "tincd didn't bind; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
+    assert!(
+        wait_for_file(&socket),
+        "tincd didn't bind; stderr: {}",
+        drain_stderr(child)
+    );
 
     // pidfile's PID == our Child's PID. If detach had run, the
     // pidfile would hold the grandchild's PID and child.id() would
@@ -447,14 +401,8 @@ fn dash_d_level_sets_debug() {
     let socket = tmp.path().join("tinc.socket");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .arg("-d5")
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
         .env_remove("RUST_LOG") // -d5 should win on its own
         .stderr(Stdio::piped())
         .spawn()
@@ -484,13 +432,7 @@ fn logfile_redirects_output() {
     let logfile = tmp.path().join("tinc.log");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .arg("--logfile")
         .arg(&logfile)
         .env_remove("RUST_LOG")
@@ -533,13 +475,7 @@ fn dash_u_bad_user_fails() {
     let socket = tmp.path().join("tinc.socket");
     write_config(&confbase);
 
-    let out = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let out = tincd_at(&confbase, &pidfile, &socket)
         .arg("-U")
         .arg("definitely_not_a_real_user_xyz_9999")
         .stderr(Stdio::piped())
@@ -573,14 +509,8 @@ fn dash_l_mlock_wired() {
     let socket = tmp.path().join("tinc.socket");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .arg("-L")
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -628,13 +558,7 @@ fn process_priority_bad_value_warns() {
     let socket = tmp.path().join("tinc.socket");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .arg("-o")
         .arg("ProcessPriority = bogus")
         .env("RUST_LOG", "tincd=debug")
@@ -668,13 +592,7 @@ fn process_priority_low_succeeds() {
     let socket = tmp.path().join("tinc.socket");
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .arg("-o")
         .arg("ProcessPriority = low")
         .env("RUST_LOG", "tincd=debug")

@@ -133,13 +133,7 @@ fn outgoing_timeout_no_busy_loop() {
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
     // ─── spawn ──────────────────────────────────────────────────
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()

@@ -99,6 +99,25 @@ pub fn tincd_cmd() -> Command {
     c
 }
 
+/// `tincd_cmd()` with the standard `-c/--pidfile/--socket` triple
+/// pre-filled. Returned `Command` is open for further `.arg()` /
+/// `.env()` / `.stderr()` chaining. Replaces the 6-line arg block
+/// at ~40 callsites.
+pub fn tincd_at(
+    confbase: impl AsRef<std::ffi::OsStr>,
+    pidfile: impl AsRef<std::ffi::OsStr>,
+    socket: impl AsRef<std::ffi::OsStr>,
+) -> Command {
+    let mut c = tincd_cmd();
+    c.arg("-c")
+        .arg(confbase)
+        .arg("--pidfile")
+        .arg(pidfile)
+        .arg("--socket")
+        .arg(socket);
+    c
+}
+
 /// Pre-allocate a port that is free for **both** TCP and UDP.
 ///
 /// The daemon binds the configured `Port` on TCP *and* UDP
@@ -449,13 +468,7 @@ impl PeerFixture {
 
         // ─── spawn daemon (RUST_LOG=tincd=info captures the
         //     "handshake completed" / "became reachable" lines) ───
-        let mut child = tincd_cmd()
-            .arg("-c")
-            .arg(&confbase)
-            .arg("--pidfile")
-            .arg(&pidfile)
-            .arg("--socket")
-            .arg(&socket)
+        let mut child = tincd_at(&confbase, &pidfile, &socket)
             .env("RUST_LOG", "tincd=info")
             .stderr(std::process::Stdio::piped())
             .spawn()

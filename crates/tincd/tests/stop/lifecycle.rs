@@ -31,13 +31,7 @@ fn spawn_connect_stop() {
 
     // ─── spawn ────────────────────────────────────────────────────
     // RUST_LOG=tincd=debug so failure stderr is informative.
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -51,11 +45,7 @@ fn spawn_connect_stop() {
         "tincd didn't bind socket; stderr: {}",
         // Best-effort stderr drain. The child is still running
         // (or crashed); kill + wait + read.
-        {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            String::from_utf8_lossy(&out.stderr).into_owned()
-        }
+        drain_stderr(child)
     );
 
     // ─── connect + greeting ──────────────────────────────────────
@@ -343,13 +333,7 @@ fn sigterm_stops() {
 
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
@@ -399,13 +383,7 @@ fn sigusr_ignored() {
 
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
@@ -453,13 +431,7 @@ fn second_daemon_refused() {
 
     write_config(&confbase);
 
-    let mut first = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut first = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -468,13 +440,7 @@ fn second_daemon_refused() {
 
     // Second daemon, same socket, different pidfile (so it doesn't
     // clobber the first's). Should fail in setup().
-    let second = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile2)
-        .arg("--socket")
-        .arg(&socket)
+    let second = tincd_at(&confbase, &pidfile2, &socket)
         .stderr(Stdio::piped())
         .output()
         .unwrap();
@@ -528,13 +494,7 @@ fn stays_alive_across_iterations() {
     )
     .unwrap();
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -570,13 +530,7 @@ fn bad_cookie_dropped() {
 
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -633,13 +587,7 @@ fn tcp_listener_accepts_and_rejects_control() {
 
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -649,11 +597,11 @@ fn tcp_listener_accepts_and_rejects_control() {
     // TCP listener is bound BEFORE the unix socket (setup order:
     // listeners → cookie → pidfile → unix socket); waiting on the
     // socket file means the TCP listener is also ready.
-    assert!(wait_for_file(&socket), "tincd setup failed; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
+    assert!(
+        wait_for_file(&socket),
+        "tincd setup failed; stderr: {}",
+        drain_stderr(child)
+    );
 
     // ─── read TCP addr from pidfile ────────────────────────────
     // The unspec→loopback mapping (`init_control:164-173`) is

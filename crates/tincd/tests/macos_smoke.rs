@@ -46,13 +46,7 @@ fn utun_start_sigterm_shutdown() {
 
     write_utun_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
