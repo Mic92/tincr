@@ -28,37 +28,11 @@
 //!
 //! # Async-signal-safety
 //!
-//! The handler can ONLY call async-signal-safe functions. `write(2)`
-//! is on the list (POSIX.1-2001). `eprintln!` is NOT (it locks).
-//! Neither is anything that allocates. The handler is:
-//!
-//! ```c
-//! write(fd, &signum_as_u8, 1);  // ignore the result
-//! ```
-//!
-//! That's it. The Rust equivalent:
-//!
-//! ```ignore
-//! libc::write(fd, &signum_as_u8 as *const u8 as *const _, 1);
-//! ```
-//!
-//! Same. The fd is stashed in a `static AtomicI32` (atomic load is
-//! async-signal-safe; the C uses a plain `static int` which is a
-//! data race in theory but works in practice because `int` writes
-//! are atomic on every platform tinc runs on. We use `AtomicI32`
-//! because it costs nothing and the data race is technically UB).
-//!
-//! # `NSIG` and the dispatch table
-//!
-//! Dispatch table indexed by signum. The handler writes `signum` as
-//! a `u8`; `signum` fits because real-time signals top out around
-//! 64. The poll-side reads the byte and
-//! indexes the table.
-//!
-//! `tincd.c` registers exactly 4 signals: HUP (reload), TERM (exit),
-//! INT (exit), ALRM (retry). We don't need a 65-entry dispatch table.
-//! `[Option<W>; 32]` is plenty (`SIGRTMIN` is 32 on Linux, 33 on BSD;
-//! tinc doesn't use real-time signals).
+//! The handler may only call async-signal-safe functions; it does
+//! one raw `write(2)` of `signum as u8` and nothing else. The
+//! write-end fd is stashed in a `static AtomicI32` — the C uses a
+//! plain `static int`, which is a (benign) data race; `AtomicI32`
+//! costs nothing and avoids the UB.
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -66,14 +40,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
-/// The write-end fd for the handler. `-1` means "not initialized" — the handler reads this and bails
-/// if so (defensive; shouldn't happen because `SelfPipe::new`
-/// installs the handler AFTER setting the fd).
-///
-/// `AtomicI32` not `static mut` — the handler reads, `new()` writes.
-/// The C uses a plain `static int`; that's a data race. Works in
-/// practice (int stores are atomic on every arch tinc runs on); UB
-/// in theory. `AtomicI32` is free.
+/// Write-end fd for the handler. `-1` = not initialized; `new()`
+/// sets this BEFORE installing the handler so the `<0` bail is
+/// purely defensive.
 static PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 
 /// Max signal number we'll dispatch. `SIGRTMIN - 1` on Linux is 31;
@@ -103,23 +72,15 @@ pub struct SelfPipe<W> {
     table: [Option<W>; NSIG_TABLE],
 }
 
-/// The actual signal handler. Must be `extern "C"` for `sigaction`.
-///
-/// Only async-signal-safe operations: atomic load, raw write.
-///
-/// `write(pipefd[1], &num, 1)`; result ignored — pipe full or broken,
-/// nothing we can do. If the pipe is full (64KB of pending signals), losing
-/// one is fine — they coalesce semantically (two SIGHUPs = one
-/// reload). If the pipe is broken (`EPIPE`), the daemon is dying
-/// anyway.
+/// The actual signal handler. Only async-signal-safe ops: atomic
+/// load + raw `write(2)`. Result ignored — a full pipe means signals
+/// coalesce (two SIGHUPs = one reload), `EPIPE` means the daemon is
+/// dying anyway.
 extern "C" fn handler(signum: libc::c_int) {
     let fd = PIPE_WR.load(Ordering::Relaxed);
     if fd < 0 {
-        // Not initialized. Shouldn't happen — new() sets PIPE_WR
-        // before installing the handler. Defensive.
         return;
     }
-    // C does the same: `unsigned char num = signum;` at :34.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // NSIG < 256
     let byte = signum as u8;
     // SAFETY: write(2) is async-signal-safe (POSIX.1). fd is a
@@ -196,12 +157,8 @@ impl<W: Copy> SelfPipe<W> {
         self.wr.as_fd()
     }
 
-    /// Installs the handler for `signum` and stores `what` in the
-    /// dispatch table.
-    ///
-    /// `sigaction()` not `signal()` — see module doc. `SA_RESTART`
-    /// so syscalls auto-retry on EINTR (the C gets this implicitly
-    /// from glibc/BSD `signal()` semantics).
+    /// Install the handler for `signum` and record `what`.
+    /// `sigaction(SA_RESTART)`, not `signal()` — see module doc.
     ///
     /// # Errors
     /// Returns the underlying I/O error if `sigaction` fails.
@@ -212,8 +169,6 @@ impl<W: Copy> SelfPipe<W> {
         let idx = usize::try_from(signum).expect("signum negative");
         assert!(idx < NSIG_TABLE, "signum {signum} >= {NSIG_TABLE}");
 
-        // sigaction with SA_RESTART. sa_mask empty (don't block
-        // anything during the handler — it's just a write()).
         let sig = Signal::try_from(signum).map_err(io::Error::from)?;
         let act = SigAction::new(
             SigHandler::Handler(handler),
@@ -232,23 +187,11 @@ impl<W: Copy> SelfPipe<W> {
         Ok(())
     }
 
-    /// Called when `turn()` reports the pipe readable. Reads ALL
-    /// pending bytes
-    /// (signals can coalesce in the pipe) and pushes their `what`s
-    /// into `out`.
-    ///
-    /// The C reads ONE byte per call (`read(pipefd[0], &signum, 1)`
-    /// at `:46`). The pipe is level-triggered, so if there are 3
-    /// pending bytes, epoll wakes 3 times. That works but is silly.
-    /// We drain in a loop with `O_NONBLOCK` on the read end —
-    /// actually wait, we didn't set `O_NONBLOCK` on the read end.
-    /// `pipe2(O_CLOEXEC)` doesn't set it. We need `O_NONBLOCK` so the
-    /// drain loop terminates with EAGAIN instead of blocking.
-    ///
-    /// Fix: set `O_NONBLOCK` in `new()`. Or: read exactly as many bytes
-    /// as fit in a buffer, once. The pipe has at most NSIG bytes
-    /// pending (signals don't queue per-signum without `SA_SIGINFO`).
-    /// One read of a 64-byte buffer drains everything.
+    /// Called when `turn()` reports the pipe readable. One blocking
+    /// read of a 64-byte buffer drains everything: signals don't
+    /// queue per-signum without `SA_SIGINFO`, so at most ~NSIG bytes
+    /// are pending. (C reads one byte per wake; we do one read so
+    /// epoll doesn't re-wake per byte.)
     pub fn drain(&self, out: &mut Vec<W>) {
         let mut buf = [0u8; 64];
         // Err: shouldn't happen — pipe is valid, was reported
@@ -259,9 +202,8 @@ impl<W: Copy> SelfPipe<W> {
         };
         for &signum in &buf[..n] {
             let idx = signum as usize;
-            // Unknown signum (table[idx] is None) — silently skipped.
-            // Can happen if a signal
-            // was del'd between handler write and drain read.
+            // None → skip: signal was del'd between handler write
+            // and drain read.
             if let Some(what) = self.table.get(idx).copied().flatten() {
                 out.push(what);
             }

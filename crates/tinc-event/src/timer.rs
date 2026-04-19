@@ -132,39 +132,17 @@ impl<W: Copy> Timers<W> {
         self.free.push(id.0);
     }
 
-    /// Execute expired timers.
+    /// Snapshot `now`, drain expired timers into `out`, return time
+    /// until the next one (`None` = empty) for the poll timeout.
     ///
-    /// Snapshots `Instant::now()` into `self.now`, then drains all
-    /// expired timers into `out`. Returns
-    /// the duration until the next un-expired timer, or `None` if
-    /// the wheel is empty. That `Option<Duration>` is the poll
-    /// timeout — passed straight to `epoll_wait`.
+    /// Unlike C `event.c` we don't fire callbacks inline (the daemon
+    /// owns `&mut Timers` AND `&mut everything_else`); the daemon
+    /// matches on `out`. Consequence: C's implicit "cb didn't re-arm
+    /// → auto-delete" is NOT ported — a fired timer stays disarmed
+    /// but allocated until the daemon's match arm calls `set` again.
     ///
-    /// The C version FIRES the callbacks inline (`timeout->cb(data)`
-    /// at `:125`). We can't — the daemon owns `&mut Timers` AND
-    /// `&mut everything_else`, and the cb wants the latter. So we
-    /// return a list of `W`s instead. The daemon's loop drains it,
-    /// matching on `W`. Consequence: the C's "did cb re-arm?"
-    /// check at `:127-129` has to move to the daemon's loop too:
-    ///
-    /// ```ignore
-    /// for what in timers.tick(&mut fired) {
-    ///     match what {
-    ///         TimerWhat::Ping => { do_ping_stuff(); timers.set(ping_id, secs(1)); }
-    ///         ...
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// The C did `if(timercmp(&timeout->tv, &now, <)) timeout_del()`
-    /// — auto-delete if cb didn't re-arm. We DON'T port that. The C
-    /// behavior is implicit ("forgot to re-arm = one-shot"); we make
-    /// re-arm explicit. A timer that wasn't `set` after firing stays
-    /// disarmed but allocated. Minor semantic difference; documented
-    /// because the daemon will hit it.
-    ///
-    /// `out` is borrowed not returned — caller reuses the same `Vec`
-    /// across ticks, avoiding per-tick allocation. Hot loop.
+    /// `out` is borrowed so the caller can reuse one `Vec` across
+    /// ticks (hot loop).
     // The `expect` below cannot fire: single-threaded, key was just
     // peeked from the same map. clippy can't see that.
     #[allow(clippy::missing_panics_doc)] // expect("just peeked"): single-threaded, key was peeked from same map this iteration
@@ -173,11 +151,9 @@ impl<W: Copy> Timers<W> {
         // Single clock read per execute.
         self.now = Instant::now();
 
-        // Drain everything <= now. C's `while(timeout_tree.head)`
-        // loop at :120-134, except we don't fire inline.
-        // can't `while let Some((k, _)) = first_key_value()` and
-        // `remove(k)` — the &k borrow lives across the remove. Hence
-        // the awkward peek-copy-remove.
+        // peek-copy-remove: can't `while let Some((k,_)) =
+        // first_key_value()` then `remove(k)` — the &k borrow
+        // outlives into remove.
         loop {
             let key = match self.by_deadline.first_key_value() {
                 Some((k, _)) if k.0 <= self.now => *k,
@@ -189,14 +165,9 @@ impl<W: Copy> Timers<W> {
                     return None;
                 }
             };
-            // remove() not pop_first() — pop_first is logically the
-            // same here but remove(key) is what we'd do for the
-            // re-arm path, and using one operation keeps it obvious.
             let idx = self.by_deadline.remove(&key).expect("just peeked");
             let slot = &mut self.slots[idx];
-            // Auto-del NOT ported, see doc. We do clear `at` though —
-            // the timer is disarmed until
-            // the daemon's match arm calls `set` again.
+            // Disarm; auto-del NOT ported (see doc).
             slot.at = None;
             out.push(slot.what);
         }

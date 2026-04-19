@@ -118,33 +118,22 @@ impl<W: Copy> EventLoop<W> {
         })
     }
 
-    /// Register an fd.
-    ///
-    /// Re-adding the same fd is the caller's bug — that's
-    /// "already added, idempotent." We don't have that signal (caller
-    /// doesn't pass an `IoId` until they have one). Calling `add`
-    /// twice for the same fd is a caller bug. epoll returns `EEXIST`
-    /// (`epoll_ctl(EPOLL_CTL_ADD)` on an already-registered fd
-    /// fails); we propagate it.
-    ///
-    /// The fd is registered with the kernel here.
-    /// `EventLoop` stores it for later reregister/deregister; does
-    /// NOT close it on drop or `del`.
+    /// Register an fd. The loop stores the raw fd only as a
+    /// reregister/deregister key — it never closes it (see module
+    /// doc).
     ///
     /// # Errors
     /// Propagates `epoll_ctl(ADD)` failures — `EEXIST` if the fd is
-    /// already registered, `EBADF`/`ENOMEM` from the kernel.
+    /// already registered (caller bug), `EBADF`/`ENOMEM` from the
+    /// kernel.
     pub fn add(&mut self, fd: BorrowedFd<'_>, interest: Io, what: W) -> io::Result<IoId> {
         let raw = fd.as_raw_fd();
         let idx = self.free.pop().unwrap_or_else(|| {
             self.slots.push(None);
             self.slots.len() - 1
         });
-        // Register first, populate slot second. If register fails
-        // (EEXIST, EBADF, ENOMEM) the slot stays None and the index
-        // goes back to the freelist. C's order is: populate `io_t`,
-        // then `io_set` which `epoll_ctl`s — but C doesn't check
-        // errors on populate, so the order doesn't matter there.
+        // Register first so a kernel reject (EEXIST/EBADF) leaves
+        // the slot None and the index goes back to the freelist.
         if let Err(e) = add(&self.ep, fd, idx, interest) {
             self.free.push(idx);
             return Err(e);
@@ -157,13 +146,8 @@ impl<W: Copy> EventLoop<W> {
         Ok(IoId(idx))
     }
 
-    /// Change interest on an already-registered fd.
-    ///
-    /// Returns early if interest is unchanged — `epoll_ctl(MOD)` is a
-    /// syscall; skipping it when nothing changed is meaningful.
-    ///
-    /// We don't have the `flags == 0` case (see `Io` docs), so `MOD`
-    /// is right.
+    /// Change interest on an already-registered fd. No-op if
+    /// unchanged — skips the `epoll_ctl(MOD)` syscall.
     ///
     /// # Errors
     /// Propagates `epoll_ctl(MOD)` failures.
@@ -176,42 +160,18 @@ impl<W: Copy> EventLoop<W> {
         if slot.interest == Some(interest) {
             return Ok(());
         }
-        // Edge case: slot.interest == None means it was deregistered
-        // (only happens internally via del, which frees the slot —
-        // so we never get here with None and a live id. The expect
-        // above would have fired. But: ADD-not-MOD if interest was
-        // None, for symmetry with what del would do).
-        //
-        // The slot stores `RawFd` only as the kernel-side key for
-        // MOD/DEL; we deliberately do NOT materialize a `BorrowedFd`
-        // from it because the loop cannot prove the caller hasn't
-        // closed it (that's the caller's contract, asserted via the
-        // EBADF tripwire in `del()`).
-        // `interest == None` would mean "deregistered but slot kept
-        // alive" — unreachable in the current API (`del` frees the
-        // slot). The old code forged a `BorrowedFd` from the stored
-        // raw int to re-ADD here; rather than keep an `unsafe` for a
-        // dead branch, assert it.
+        // `interest == None` ("deregistered but slot alive") is
+        // unreachable — `del` frees the slot. Assert rather than
+        // keep the old forged-`BorrowedFd` re-ADD branch alive.
         debug_assert!(slot.interest.is_some(), "live slot has interest");
         modify(&self.ep, slot.fd, id.0, interest)?;
         slot.interest = Some(interest);
         Ok(())
     }
 
-    /// Deregister from epoll AND free the slot.
-    ///
-    /// C is two-step: `io_set(io, 0)` (deregisters, `:108`), then
-    /// `io->cb = NULL` (marks slot dead). The `io_t` struct is
-    /// caller-owned and lives on. We free the slab slot.
-    ///
-    /// Idempotent: del on a freed id is a no-op. C checks `if(io->cb)`
-    /// at `:106`.
-    ///
-    /// Ignores deregister errors. C doesn't check `epoll_ctl(DEL)`
-    /// either (`:79` — same call path). The fd might already be
-    /// closed (closing an fd auto-removes from epoll) — `ENOENT`,
-    /// fine. The fd might be junk — `EBADF`, also fine, we're
-    /// removing it anyway.
+    /// Deregister and free the slot. Idempotent. Deregister errors
+    /// are swallowed: `ENOENT` is normal (closing an fd auto-removes
+    /// it from epoll); `EBADF` is tripwired in debug below.
     pub fn del(&mut self, id: IoId) {
         let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
             return; // already del'd
@@ -278,32 +238,14 @@ impl<W: Copy> EventLoop<W> {
     pub fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
         out.clear();
 
-        // `epoll_wait()`; treat `EWOULDBLOCK || EINTR` as continue,
-        // anything else as error. `sockwouldblock` is `EWOULDBLOCK || EINTR`
-        // (`utils.h:62`).
-        //
-        // `epoll::wait` does NOT swallow EINTR — it comes through as
-        // `io::Error` with kind `Interrupted`.
-        //
-        // EINTR happens when a signal arrives during `epoll_wait`.
-        // `SA_RESTART` does NOT auto-retry epoll_wait (it's in the
-        // "never restart" list; man 7 signal). So: every signal that
-        // arrives while we're in `epoll_wait` produces EINTR. The C
-        // `continue`s back to the top of `while(running)`; we return
-        // `Ok(())` with empty `out`, same effect (caller's loop
-        // re-ticks timers, re-calls turn).
-        //
-        // We could LOOP here (retry the epoll_wait without returning).
-        // C doesn't — it goes back through the timer check. We do the
-        // same: a signal might have re-armed a timer (it didn't, the
-        // handler is just write-one-byte, but the structure is sound).
-        // The self-pipe byte will be there next turn.
+        // EINTR: `SA_RESTART` does NOT auto-retry epoll_wait (man 7
+        // signal "never restart" list), so every signal during the
+        // wait surfaces here. Return `Ok` empty rather than looping
+        // so the caller re-ticks timers before re-polling — the
+        // self-pipe byte is readable next turn.
         let n_events = match wait(&self.ep, &mut self.events[..], timeout) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                // Empty `out`, caller loops. The self-pipe is
-                // readable next turn (the signal handler wrote a
-                // byte before epoll_wait returned EINTR).
                 return Ok(());
             }
             Err(e) => return Err(e),
@@ -323,10 +265,9 @@ impl<W: Copy> EventLoop<W> {
                 out.push((what, Ready::Write));
             }
 
-            // C :151-153: then READ. No re-lookup of interest — we are
-            // collecting into `out`, not firing inline, so it cannot
-            // have changed since the WRITE check. The C re-check at
-            // :149 sits BETWEEN cb invocations; we have no cb yet.
+            // No re-lookup of interest between WRITE and READ: we
+            // collect into `out`, not fire inline, so nothing could
+            // have changed it yet.
             if ev_readable(ev) && interest.is_some_and(|i| i.wants(Ready::Read)) {
                 out.push((what, Ready::Read));
             }
