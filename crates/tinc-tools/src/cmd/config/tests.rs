@@ -409,13 +409,13 @@ fn set_warnonremove() {
 
     // Three matches: bob (differs → warn), carol (same → no warn),
     // dave (differs → warn). Case-insensitive diff check.
-    assert_eq!(result.warnings.len(), 2);
+    assert_eq!(result.len(), 2);
     assert!(matches!(
-        &result.warnings[0],
+        &result[0],
         Warning::Removing { old_value, .. } if old_value == "bob"
     ));
     assert!(matches!(
-        &result.warnings[1],
+        &result[1],
         Warning::Removing { old_value, .. } if old_value == "dave"
     ));
 
@@ -806,7 +806,7 @@ fn warnonremove_case_insensitive() {
     let result = run_edit(&f, &intent(Action::Set, "ConnectTo", "ALICE", true)).unwrap();
 
     // Value differs only in case → no warning.
-    assert!(result.warnings.is_empty());
+    assert!(result.is_empty());
 }
 
 /// get→set coercion happens BEFORE the pidfile-port read. So

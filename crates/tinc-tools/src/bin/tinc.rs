@@ -734,12 +734,10 @@ fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd:
                 println!("{v}");
             }
         }
-        ConfigOutput::Edited(result) => {
+        ConfigOutput::Edited => {
             // Best-effort: file's already written; daemon down or
             // reload-nack are both fine, it picks up on next start.
-            if result.changed {
-                let _ = cmd::ctl_simple::reload(paths);
-            }
+            let _ = cmd::ctl_simple::reload(paths);
         }
     }
 }
