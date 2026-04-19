@@ -1337,12 +1337,10 @@ impl Daemon {
             self.run_subnet_script_async(true, &owner_name, &subnet);
         }
 
-        // seen.check above prevents the loop.
-        let nw = if self.settings.tunnelserver {
-            false
-        } else {
-            self.forward_request(from_conn, body)
-        };
+        // seen.check above prevents the loop. tunnelserver already
+        // returned at the unauthorized-subnet gate above, so this
+        // path always forwards.
+        let nw = self.forward_request(from_conn, body);
 
         Ok(nw)
     }
