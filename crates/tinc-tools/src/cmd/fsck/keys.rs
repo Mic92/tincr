@@ -12,15 +12,10 @@ use tinc_crypto::b64;
 use tinc_crypto::sign::PUBLIC_LEN;
 
 use crate::cmd::genkey::disable_old_keys;
-use crate::keypair;
+use crate::keypair::{self, TY_PUBLIC};
 use crate::names::Paths;
 
 use super::Finding;
-
-/// PEM type string for public keys. Second declaration after
-/// `keypair.rs` — factoring 23 bytes of static string into a
-/// re-export is more noise than help.
-pub(super) const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
 /// Full keypair-coherence check. Upstream's four small functions
 /// collapsed: under `DISABLE_LEGACY` each was called from exactly one

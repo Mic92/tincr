@@ -45,17 +45,11 @@
 use std::fs;
 use std::io::Write;
 
-use crate::cmd::{CmdError, io_err};
+use crate::cmd::{CmdError, OpenKind, io_err, write_private_key};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
-use tinc_conf::pem::write_pem;
 use tinc_crypto::b64;
-
-/// PEM type for the private key. Same constant as `keypair.rs`; not
-/// re-exported because the host-file path here doesn't write a public
-/// PEM at all (it writes a config line instead).
-const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
 /// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
 ///
@@ -124,13 +118,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 
     // Private: PEM, 0600, `O_EXCL` — clobbering an existing key loses
     // identity to existing peers.
-    {
-        let priv_path = paths.ed25519_private();
-        let f = open_mode_excl(&priv_path, 0o600)?;
-        let mut w = std::io::BufWriter::new(f);
-        write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).map_err(io_err(&priv_path))?;
-        w.flush().map_err(io_err(&priv_path))?;
-    }
+    write_private_key(&paths.ed25519_private(), &sk, OpenKind::CreateExcl)?;
 
     // Public: config line in `hosts/NAME`. The b64 is tinc's LSB-first
     // variant — `b64::encode`, NOT standard base64. Standard b64 here

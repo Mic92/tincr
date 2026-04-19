@@ -343,12 +343,8 @@ fn finalize_join_inner(
 
     {
         let priv_path = paths.ed25519_private();
-        let f = open_nofollow(&priv_path, OpenKind::CreateExcl, 0o600)?;
-        created.push(priv_path.clone());
-        let mut w = std::io::BufWriter::new(f);
-        tinc_conf::pem::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob())
-            .map_err(io_err(&priv_path))?;
-        w.flush().map_err(io_err(&priv_path))?;
+        crate::cmd::write_private_key(&priv_path, &sk, OpenKind::CreateExcl)?;
+        created.push(priv_path);
     }
 
     // Appended *after* whatever chunk-1 HOST vars went in.

@@ -22,8 +22,8 @@ use tinc_conf::pem::{PemError, read_pem, write_pem};
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 /// PEM type strings. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
-const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
-const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
+pub const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
+pub const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
 /// `sizeof(struct ecdsa)`. The private blob length.
 const PRIVATE_BLOB_LEN: usize = 96;

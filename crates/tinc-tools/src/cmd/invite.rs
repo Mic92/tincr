@@ -285,13 +285,7 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 ///
 /// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
-    use tinc_conf::pem::write_pem;
-
-    let f = super::open_nofollow(path, super::OpenKind::CreateTrunc, 0o600)?;
-    let mut w = std::io::BufWriter::new(f);
-    // Same PEM type string as the node's own key; the daemon
-    // distinguishes them by *path*, not by PEM type.
-    write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).map_err(io_err(path))
+    super::write_private_key(path, sk, super::OpenKind::CreateTrunc)
 }
 
 /// Write the invitation file at 0600 with `O_EXCL`.

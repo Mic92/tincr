@@ -171,6 +171,22 @@ pub(crate) fn open_nofollow(
     o.open(path).map_err(io_err(path))
 }
 
+/// Write `sk` as a PEM private-key file at `path` with mode 0600 and
+/// `O_NOFOLLOW`. The four key-generating commands differ only in the
+/// open `kind` (excl on init/join, append on genkey, trunc on invite).
+pub(crate) fn write_private_key(
+    path: &std::path::Path,
+    sk: &tinc_crypto::sign::SigningKey,
+    kind: OpenKind,
+) -> Result<(), CmdError> {
+    use std::io::Write;
+    let f = open_nofollow(path, kind, 0o600)?;
+    let mut w = std::io::BufWriter::new(f);
+    tinc_conf::pem::write_pem(&mut w, crate::keypair::TY_PRIVATE, &sk.to_blob())
+        .map_err(io_err(path))?;
+    w.flush().map_err(io_err(path))
+}
+
 /// `File::create` + `O_NOFOLLOW` (truncate, create, no symlink follow).
 pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, CmdError> {
     open_nofollow(path, OpenKind::CreateTrunc, 0o666)
