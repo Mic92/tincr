@@ -55,7 +55,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use rand_core::{OsRng, RngCore};
-use tinc_conf::{Config, parse_file};
+use tinc_conf::Config;
 use tinc_crypto::invite::{COOKIE_LEN, SLUG_PART_LEN, build_slug, cookie_filename};
 use tinc_crypto::sign::SigningKey;
 use zeroize::Zeroizing;
@@ -370,10 +370,8 @@ fn build_invitation_file(
 /// `finalize_join` re-parses and emits canonically anyway.
 fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     let tc = paths.tinc_conf();
-    let entries =
-        parse_file(&tc).map_err(|e| CmdError::BadInput(format!("{}: {e}", tc.display())))?;
-    let mut cfg = Config::new();
-    cfg.merge(entries);
+    let cfg =
+        Config::read(&tc).map_err(|e| CmdError::BadInput(format!("{}: {e}", tc.display())))?;
 
     // Just two vars. `lookup` is case-insensitive. Upstream copies
     // every matching line; we copy first only — the daemon's config
@@ -470,10 +468,8 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
     // file" which is the right fix.
 
     let host_file = paths.host_file(myname);
-    let entries = parse_file(&host_file)
+    let cfg = Config::read(&host_file)
         .map_err(|e| CmdError::BadInput(format!("{}: {e}", host_file.display())))?;
-    let mut cfg = Config::new();
-    cfg.merge(entries);
 
     // Address: required. C falls through to HTTP probe + tty prompt;
     // we bail. The error message tells the user what to do.

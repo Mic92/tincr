@@ -376,10 +376,7 @@ fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
     // lines), `parse_file` returns `Ok(vec![])` (PEM lines are
     // skipped — see `tinc-conf::parse_reader`'s "blank/comment BEFORE
     // PEM" ordering). Then `lookup` finds nothing, fall through.
-    let entries =
-        tinc_conf::parse_file(host_path).map_err(|e| CmdError::BadInput(e.to_string()))?;
-    let mut cfg = tinc_conf::Config::new();
-    cfg.merge(entries);
+    let cfg = tinc_conf::Config::read(host_path).map_err(|e| CmdError::BadInput(e.to_string()))?;
 
     if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
         let raw = b64::decode(&entry.value).ok_or_else(|| {

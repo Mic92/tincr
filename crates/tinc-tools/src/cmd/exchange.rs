@@ -81,11 +81,8 @@ use super::invite::SEPARATOR;
 pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     let tinc_conf = paths.tinc_conf();
 
-    let entries = tinc_conf::parse_file(&tinc_conf)
+    let config = tinc_conf::Config::read(&tinc_conf)
         .map_err(|e| CmdError::BadInput(format!("Could not open {}: {e}", tinc_conf.display())))?;
-
-    let mut config = tinc_conf::Config::new();
-    config.merge(entries);
 
     let raw = config
         .lookup("Name")
