@@ -279,10 +279,33 @@ impl PmtuState {
     /// `udp_confirmed` — same gate that protects
     /// [`Self::on_probe_reply`]'s RTT arm.
     pub fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
+        let len = len.min(MTU);
+        // Steady-state confirmation — mirrors on_probe_reply. Without
+        // this an asymmetric-UDP peer (UDP replies filtered, only
+        // meta-acks reach us) never rewinds Revalidate→Steady and
+        // falls through to Lost every cycle even though the ack
+        // proves maxmtu still fits.
+        //
+        // Runs BEFORE the `ping_sent` gate: the maxmtu probe is sent
+        // by `tick()` (which does not set `ping_sent`), and the peer's
+        // ack is debounced by `mtu_info_interval`, so the one ack that
+        // carries `len ≥ maxmtu` may well arrive while no try_udp
+        // keepalive is outstanding. That's fine — rewinding to Steady
+        // at the *current* maxmtu grants the peer nothing it didn't
+        // already have (we're already Fixed at that mtu); the gate
+        // below is what guards `udp_confirmed`/`minmtu` inflation.
+        if self.phase.is_fixed() && len >= self.maxmtu {
+            self.phase = PmtuPhase::Steady;
+            self.mtu_ping_sent = now;
+        }
         if !self.ping_sent {
             return false;
         }
-        let len = len.min(MTU);
+        // Do NOT clear `ping_sent`: meta-acks are debounced on the
+        // peer side (`mtu_info_interval`) and one try_udp keepalive
+        // may cover several discovery probes' worth of acks. The
+        // gate exists to reject acks before we ever probed, not to
+        // enforce 1:1 pairing.
         self.udp_confirmed = true;
         self.udp_reply_rx = now;
         if len > self.maxmtu {
@@ -737,6 +760,52 @@ mod tests {
         assert!(s.udp_confirmed);
         // And the Steady-phase increase-detector doesn't wrap:
         let _ = s.tick(now, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn on_meta_ack_rewinds_revalidate_to_steady() {
+        // Regression: asymmetric-UDP peer (UDP replies filtered, only
+        // meta-acks reach us). The meta-ack at maxmtu must rewind the
+        // miss counter just like a real probe reply, otherwise we
+        // oscillate Fix→Revalidate→Lost→Discovery→Fix forever.
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.mtu = 1439;
+        s.minmtu = 1439;
+        s.maxmtu = 1439;
+        s.phase = PmtuPhase::Revalidate { misses: 2 };
+        // No try_udp keepalive outstanding — the maxmtu probe came
+        // from tick(), which doesn't set ping_sent. The rewind must
+        // still happen.
+        s.ping_sent = false;
+        assert!(!s.on_meta_ack(1439, now + Duration::from_secs(1)));
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        // mtu_ping_sent reset → next Steady tick waits full pinginterval.
+        assert_eq!(s.mtu_ping_sent, now + Duration::from_secs(1));
+        // Gate still protects udp_confirmed when unsolicited.
+        assert!(!s.udp_confirmed);
+
+        // And with a probe outstanding, ping_sent is NOT consumed:
+        // meta-acks are peer-debounced, not 1:1 with our probes.
+        s.phase = PmtuPhase::Revalidate { misses: 1 };
+        s.ping_sent = true;
+        assert!(s.on_meta_ack(1439, now + Duration::from_secs(2)));
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        assert!(s.ping_sent);
+    }
+
+    #[test]
+    fn on_meta_ack_short_len_does_not_rewind() {
+        // A small-probe meta-ack (len-18 keepalive) must NOT clear
+        // misses — it says nothing about whether maxmtu still fits.
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.maxmtu = 1439;
+        s.minmtu = 1439;
+        s.phase = PmtuPhase::Revalidate { misses: 1 };
+        s.ping_sent = true;
+        assert!(s.on_meta_ack(18, now));
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
     }
 
     #[test]
