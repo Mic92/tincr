@@ -18,7 +18,9 @@ use std::path::Path;
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
+use tinc_conf::Config;
 use tinc_conf::pem::{PemError, read_pem, write_pem};
+use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 /// PEM type strings. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
@@ -104,6 +106,26 @@ pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
     let mut arr = [0u8; PUBLIC_LEN];
     arr.copy_from_slice(&blob);
     Ok(arr)
+}
+
+/// Public-key lookup as the daemon does it: `Ed25519PublicKey` config
+/// line (tinc-b64), else PEM at `Ed25519PublicKeyFile` or `default_path`.
+///
+/// Returns `None` for any failure (bad b64, wrong length, file/PEM
+/// missing) — callers either treat all as "no usable key" (fsck) or
+/// emit one generic message (verify).
+#[must_use]
+pub fn load_public_from_config(cfg: &Config, default_path: &Path) -> Option<[u8; PUBLIC_LEN]> {
+    if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
+        // Bad b64 is `None`, not a fall-through — a malformed line is a
+        // config bug, not a "look elsewhere" hint.
+        return b64::decode(entry.get_str())?.try_into().ok();
+    }
+    let pem_path = cfg
+        .lookup("Ed25519PublicKeyFile")
+        .next()
+        .map_or_else(|| default_path.to_owned(), |e| e.get_str().into());
+    read_public(&pem_path).ok()
 }
 
 /// Key file load failure. Wraps the inner errors with the path for

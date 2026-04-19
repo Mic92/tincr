@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 use tinc_conf::Config;
-use tinc_crypto::b64;
 use tinc_crypto::sign::PUBLIC_LEN;
 
 use crate::cmd::genkey::disable_old_keys;
@@ -125,39 +124,11 @@ pub(super) fn check_keypairs(
     }
 }
 
-/// Three-step public key lookup.
-///
-/// Returns `None` for any failure — file missing, bad b64, wrong
-/// length, no PEM block. fsck doesn't distinguish these (all are "no
-/// usable public key").
-///
 /// `cfg` is the *merged* tree (server + host). `Ed25519PublicKey` is
 /// `VAR_HOST`-only so it'll only ever come from the host file in
 /// practice, but the lookup doesn't care.
 pub(super) fn load_ec_pubkey(cfg: &Config, default_host_file: &Path) -> Option<[u8; PUBLIC_LEN]> {
-    // ─── Step 1: Ed25519PublicKey = <b64>
-    // Bad b64 is `None`, NOT a fall-through to PEM — a malformed
-    // `Ed25519PublicKey =` line is a config bug, not a "let me look
-    // elsewhere" situation.
-    if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
-        let raw = b64::decode(entry.get_str())?;
-        return raw.try_into().ok();
-    }
-
-    // ─── Step 2+3: Ed25519PublicKeyFile or default → PEM read
-    // The default (when `Ed25519PublicKeyFile` unset) is `hosts/NAME`,
-    // which is *also* the file we'd parse for the config-line form.
-    // The reason for both: `tinc init` writes config-line, but `fsck
-    // --force` writes PEM (see module doc). And legacy configs from
-    // pre-1.1 used PEM. Both forms exist in the wild.
-    let pem_path: PathBuf = cfg.lookup("Ed25519PublicKeyFile").next().map_or_else(
-        || default_host_file.to_owned(),
-        |e| PathBuf::from(e.get_str()),
-    );
-
-    // `read_public` does open + read_pem + length check. Any failure
-    // → None.
-    keypair::read_public(&pem_path).ok()
+    keypair::load_public_from_config(cfg, default_host_file)
 }
 
 /// Rewrite the public key in `host_file`, post-`force` gate.

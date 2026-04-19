@@ -360,43 +360,12 @@ pub fn verify_cmd(
 }
 
 /// Read `hosts/NAME`, look for `Ed25519PublicKey = <b64>`, fall back
-/// to a `-----BEGIN ED25519 PUBLIC KEY-----` PEM block. We re-read
-/// from the path for the fallback (kernel cached the inode).
+/// to a PEM block (in `Ed25519PublicKeyFile` or the host file itself).
 fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
-    // ─── Try config-line form
-    // `parse_file` errors on file-not-found. That's the right error
-    // here (verify fails if you don't have `hosts/SIGNER`). The
-    // `ReadError` Display includes the path.
-    //
-    // If the file *exists* but has *only* a PEM block (no config
-    // lines), `parse_file` returns `Ok(vec![])` (PEM lines are
-    // skipped — see `tinc-conf::parse_reader`'s "blank/comment BEFORE
-    // PEM" ordering). Then `lookup` finds nothing, fall through.
+    // `Config::read` errors on file-not-found — the right error here
+    // (verify fails if you don't have `hosts/SIGNER`).
     let cfg = tinc_conf::Config::read(host_path).map_err(|e| CmdError::BadInput(e.to_string()))?;
-
-    if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
-        let raw = b64::decode(&entry.value).ok_or_else(|| {
-            CmdError::BadInput(format!(
-                "Could not read public key from {}",
-                host_path.display()
-            ))
-        })?;
-        let pk: [u8; PUBLIC_LEN] = raw.try_into().map_err(|_| {
-            CmdError::BadInput(format!(
-                "Could not read public key from {}",
-                host_path.display()
-            ))
-        })?;
-        return Ok(pk);
-    }
-
-    // ─── Fall back to PEM block
-    // `keypair::read_public` does the open + read_pem + length check.
-    // It errors `LoadError::Pem(NotFound)` if there's no PEM block.
-    // That's our "neither form found" terminal error.
-    keypair::read_public(host_path).map_err(|_| {
-        // Don't expose `LoadError` details — the actionable info is
-        // "this host file has no pubkey".
+    keypair::load_public_from_config(&cfg, host_path).ok_or_else(|| {
         CmdError::BadInput(format!(
             "Could not read public key from {}",
             host_path.display()
