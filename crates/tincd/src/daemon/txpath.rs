@@ -547,6 +547,31 @@ impl Daemon {
         self.nodes.get(&nexthop)?.conn
     }
 
+    /// `to->nexthop->options`. The double indirection (route of `nid`
+    /// → route of its nexthop → options) appears at every
+    /// `UDP_INFO`/`MTU_INFO` gate; centralised so the empty-on-miss
+    /// fallback stays consistent.
+    fn nexthop_options(&self, nid: NodeId) -> ConnOptions {
+        self.route_of(nid)
+            .and_then(|r| self.route_of(r.nexthop))
+            .map_or(ConnOptions::empty(), |nr| {
+                ConnOptions::from_bits_retain(nr.options)
+            })
+    }
+
+    /// Resolve `nid`'s nexthop conn and queue `msg` on it. Shared
+    /// tail of the `UDP_INFO`/`MTU_INFO` senders; returns the
+    /// `conn.send` needs-write flag, or `false` when no conn.
+    fn send_via_nexthop(&mut self, nid: NodeId, msg: impl std::fmt::Display) -> bool {
+        let Some(conn_id) = self.conn_for_nexthop(nid) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
+        conn.send(format_args!("{msg}"))
+    }
+
     /// `Route` lookup. Reads cached `last_routes` (not a fresh sssp).
     ///
     /// By-value: `Route` is `Copy` (32 bytes, all-Copy fields). The
@@ -916,11 +941,7 @@ impl Daemon {
         let to_is_myself = dereffed == self.myself;
         let to_reachable = self.graph.node(dereffed).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&dereffed).and_then(|ns| ns.conn).is_some();
-        let nexthop_options = self.route_of(dereffed).map_or(ConnOptions::empty(), |r| {
-            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
-                ConnOptions::from_bits_retain(nr.options)
-            })
-        });
+        let nexthop_options = self.nexthop_options(dereffed);
 
         let from_options = if from_is_myself {
             self.myself_options
@@ -955,12 +976,6 @@ impl Daemon {
         // The from!=myself case goes via send_udp_info_forward.
         let (addr, port) = (AddrStr::unspec(), AddrStr::unspec());
 
-        let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
-            return false;
-        };
-        let Some(conn) = self.conns.get_mut(conn_id) else {
-            return false;
-        };
         let from_name: &str = if from_is_myself { &self.name } else { to_name };
         let msg = UdpInfo {
             from: from_name.to_owned(),
@@ -970,6 +985,15 @@ impl Daemon {
                 .map_or_else(|| to_name.to_owned(), |n| n.name.clone()),
             addr,
             port,
+        };
+        // Not `send_via_nexthop`: the debounce stamp below must NOT
+        // fire when no conn exists, so we need the explicit
+        // early-returns here.
+        let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
         };
         let nw = conn.send(format_args!("{}", msg.format()));
 
@@ -1008,11 +1032,7 @@ impl Daemon {
         let from_options = self.route_of(from_nid).map_or(ConnOptions::empty(), |r| {
             ConnOptions::from_bits_retain(r.options)
         });
-        let nexthop_options = self.route_of(dereffed).map_or(ConnOptions::empty(), |r| {
-            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
-                ConnOptions::from_bits_retain(nr.options)
-            })
-        });
+        let nexthop_options = self.nexthop_options(dereffed);
 
         if !udp_info::should_send_udp_info(
             to_is_myself,
@@ -1046,19 +1066,13 @@ impl Daemon {
                 },
             );
 
-        let Some(conn_id) = self.conn_for_nexthop(dereffed) else {
-            return false;
-        };
-        let Some(conn) = self.conns.get_mut(conn_id) else {
-            return false;
-        };
         let msg = UdpInfo {
             from: from_name,
             to: to_name,
             addr,
             port,
         };
-        conn.send(format_args!("{}", msg.format()))
+        self.send_via_nexthop(dereffed, msg.format())
     }
 
     /// No static-relay deref unlike `UDP_INFO`.
@@ -1085,11 +1099,7 @@ impl Daemon {
         let to_is_myself = to_nid == self.myself;
         let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
         let to_directly_connected = self.nodes.get(&to_nid).and_then(|ns| ns.conn).is_some();
-        let nexthop_options = self.route_of(to_nid).map_or(ConnOptions::empty(), |r| {
-            self.route_of(r.nexthop).map_or(ConnOptions::empty(), |nr| {
-                ConnOptions::from_bits_retain(nr.options)
-            })
-        });
+        let nexthop_options = self.nexthop_options(to_nid);
 
         let now = self.timers.now();
         let last_sent = self.dp.tunnels.get(&to_nid).and_then(|t| t.mtu_info_sent);
@@ -1132,12 +1142,6 @@ impl Daemon {
             self.dp.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
         }
 
-        let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
-            return false;
-        };
-        let Some(conn) = self.conns.get_mut(conn_id) else {
-            return false;
-        };
         let from_name = self
             .graph
             .node(from_nid)
@@ -1161,7 +1165,7 @@ impl Daemon {
             mtu,
             udp_rx_len,
         };
-        conn.send(format_args!("{}", msg.format()))
+        self.send_via_nexthop(to_nid, msg.format())
     }
 
     // ─── UDP_INFO / MTU_INFO receive ────────────────────────────
