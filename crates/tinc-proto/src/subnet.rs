@@ -373,47 +373,34 @@ impl fmt::Display for Subnet {
     /// omitted if default.
     #[allow(clippy::many_single_char_names)] // MAC byte destructuring
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Per-variant: address, then `/prefix` iff below the type's max.
+        // `inet_ntop` and `Ipv{4,6}Addr::Display` both produce RFC 5952
+        // canonical form (lowercase hex, longest zero-run as `::`, no
+        // leading zeros). Verified in the KATs below.
         match self {
-            Self::Mac { addr, weight } => {
+            Self::Mac { addr, .. } => {
                 let [a, b, c, d, e, g] = addr;
                 write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")?;
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
-            Self::V4 {
-                addr,
-                prefix,
-                weight,
-            } => {
+            Self::V4 { addr, prefix, .. } => {
                 write!(f, "{addr}")?;
                 if *prefix != 32 {
                     write!(f, "/{prefix}")?;
                 }
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
-            Self::V6 {
-                addr,
-                prefix,
-                weight,
-            } => {
-                // `inet_ntop` and `Ipv6Addr::Display` both produce RFC 5952
-                // canonical form (lowercase hex, longest zero-run as `::`,
-                // no leading zeros). Verified in the KATs below.
+            Self::V6 { addr, prefix, .. } => {
                 write!(f, "{addr}")?;
                 if *prefix != 128 {
                     write!(f, "/{prefix}")?;
                 }
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
         }
+        // `#weight` suffix is variant-agnostic; omit when default.
+        let weight = self.weight();
+        if weight != DEFAULT_WEIGHT {
+            write!(f, "#{weight}")?;
+        }
+        Ok(())
     }
 }
 
