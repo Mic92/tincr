@@ -1162,6 +1162,35 @@ fn cmd_exchange_all(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), C
 /// not `&[String]` because we consume the iterator; the caller indexes
 /// it once.
 ///
+/// Match `arg` against one getopt-style value option in all four
+/// spellings (`-x VAL`, `-xVAL`, `--long VAL`, `--long=VAL`). Returns
+/// `Ok(Some(value))` on match, `Ok(None)` if `arg` is something else,
+/// `Err` if it matched but the separate-argument form had no follower.
+fn take_opt(
+    arg: &str,
+    it: &mut impl Iterator<Item = String>,
+    short: Option<&str>,
+    long: &str,
+) -> Result<Option<String>, String> {
+    if short == Some(arg) || arg == long {
+        let name = short.unwrap_or(long);
+        return it
+            .next()
+            .map(Some)
+            .ok_or_else(|| format!("option {name} requires an argument"));
+    }
+    if let Some(rest) = arg.strip_prefix(long).and_then(|r| r.strip_prefix('=')) {
+        return Ok(Some(rest.to_owned()));
+    }
+    if let Some(s) = short
+        && let Some(rest) = arg.strip_prefix(s)
+        && !rest.is_empty()
+    {
+        return Ok(Some(rest.to_owned()));
+    }
+    Ok(None)
+}
+
 /// `Err(String)` is the message to print before exiting nonzero.
 fn parse_global_options(
     mut args: impl Iterator<Item = String>,
@@ -1189,30 +1218,25 @@ fn parse_global_options(
     // semantics (the option takes a required argument, so the rest of
     // the token IS the argument).
     while let Some(arg) = args.next() {
+        // Value-bearing options: each accepts `-x VAL`, `-xVAL`,
+        // `--long VAL` and `--long=VAL` (the glued form people
+        // copy-paste from systemd unit files).
+        if let Some(v) = take_opt(&arg, &mut args, Some("-c"), "--config")? {
+            input.confbase = Some(PathBuf::from(v));
+            continue;
+        }
+        if let Some(v) = take_opt(&arg, &mut args, Some("-n"), "--net")? {
+            input.netname = Some(v);
+            continue;
+        }
+        // `--pidfile=FILE`. Overrides the /var/run ↔ confbase
+        // resolution dance entirely. Only matters for daemon-RPC
+        // commands. No short form (C: long-only).
+        if let Some(v) = take_opt(&arg, &mut args, None, "--pidfile")? {
+            input.pidfile = Some(PathBuf::from(v));
+            continue;
+        }
         match arg.as_str() {
-            "-c" | "--config" => {
-                let val = args.next().ok_or("option -c requires an argument")?;
-                input.confbase = Some(PathBuf::from(val));
-            }
-            // `--config=DIR` glued form. getopt_long handles this; we
-            // do too because it's the form people copy-paste from
-            // systemd unit files.
-            s if s.starts_with("--config=") => {
-                input.confbase = Some(PathBuf::from(&s["--config=".len()..]));
-            }
-            s if s.starts_with("-c") && s.len() > 2 => {
-                input.confbase = Some(PathBuf::from(&s[2..]));
-            }
-            "-n" | "--net" => {
-                let val = args.next().ok_or("option -n requires an argument")?;
-                input.netname = Some(val);
-            }
-            s if s.starts_with("--net=") => {
-                input.netname = Some(s["--net=".len()..].to_owned());
-            }
-            s if s.starts_with("-n") && s.len() > 2 => {
-                input.netname = Some(s[2..].to_owned());
-            }
             // `-h` alias. tincd accepts it; keeping the two binaries
             // consistent is cheaper than explaining why one does and
             // the other doesn't.
@@ -1227,15 +1251,6 @@ fn parse_global_options(
             "--version" => {
                 rest.push("--version".into());
                 return Ok((input, globals, rest));
-            }
-            // `--pidfile=FILE`. Overrides the /var/run ↔ confbase resolution dance entirely. Only
-            // matters for daemon-RPC commands. No short form (C: long-only).
-            "--pidfile" => {
-                let val = args.next().ok_or("option --pidfile requires an argument")?;
-                input.pidfile = Some(PathBuf::from(val));
-            }
-            s if s.starts_with("--pidfile=") => {
-                input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
             }
             // `OPT_BATCH` sets `tty = false` — disables interactive
             // prompts. We have no prompts (see `cmd/init.rs` doc), so
