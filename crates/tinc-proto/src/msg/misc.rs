@@ -22,9 +22,9 @@
 //! `unsigned long` for `%lu`. SPTPS records also cap well below 32K, so
 //! the parse-side `%hd < 0` check still works as a bound.
 
+use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{Request, check_id};
 
 // ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers
@@ -132,11 +132,8 @@ impl UdpInfo {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
+        let from = t.id()?;
+        let to = t.id()?;
         let addr = AddrStr::new(t.s()?)?;
         let port = AddrStr::new(t.s()?)?;
 
@@ -199,16 +196,13 @@ impl MtuInfo {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
+        let from = t.id()?;
+        let to = t.id()?;
         let mtu = t.d()?;
         // Rust extension: optional 4th field. C tinc never emits it
         // (→ 0); a Rust peer does. Negative/oversized → 0 (best-
         // effort hint, not worth tearing the conn down for).
         let udp_rx_len = t.d_opt()?.and_then(|v| u16::try_from(v).ok()).unwrap_or(0);
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
 
         Ok(Self {
             from: from.to_string(),

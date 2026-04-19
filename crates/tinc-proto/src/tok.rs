@@ -28,7 +28,7 @@
 //! it's there because dump is "human-readable-ish" and uses the
 //! fused form everywhere it appears in log messages.
 
-use crate::MAX_STRING;
+use crate::{MAX_STRING, check_id};
 
 /// Parse failure. Not an enum because the C doesn't distinguish either —
 /// `sscanf() != expected_count` is all the daemon cares about.
@@ -195,6 +195,21 @@ impl<'a> Tok<'a> {
         } else {
             Err(ParseError)
         }
+    }
+
+    /// `%s` then `check_id`. The from/to name pair appears in six
+    /// message handlers (`add_edge_h`, `del_edge_h`, `req_key_h`,
+    /// `ans_key_h`, `udp_info_h`, `mtu_info_h`) and every one of them
+    /// follows the `sscanf` with `if(!check_id(from) || !check_id(to))`.
+    /// Folding the check into the read keeps the call sites at
+    /// `let from = t.id()?;` instead of repeating the guard.
+    ///
+    /// # Errors
+    /// `ParseError` if no tokens remain, the token exceeds
+    /// `MAX_STRING`, or it fails [`check_id`].
+    pub fn id(&mut self) -> Result<&'a str, ParseError> {
+        let s = self.s()?;
+        if check_id(s) { Ok(s) } else { Err(ParseError) }
     }
 
     /// Next token if there is one; `Ok(None)` if exhausted.

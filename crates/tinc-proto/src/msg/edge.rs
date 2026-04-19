@@ -23,9 +23,9 @@
 //! `check_id`. A self-loop edge is malformed wire data, not a graph
 //! decision. We enforce it here.
 
+use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{Request, check_id};
 
 /// Body of `ADD_EDGE`. The optional `local` pair is post-1.0.24.
 ///
@@ -64,9 +64,9 @@ impl AddEdge {
         t.skip()?; // %*d
         t.skip()?; // %*x
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) || from == to {
+        let from = t.id()?;
+        let to = t.id()?;
+        if from == to {
             return Err(ParseError);
         }
 
@@ -139,9 +139,9 @@ impl DelEdge {
         t.skip()?;
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) || from == to {
+        let from = t.id()?;
+        let to = t.id()?;
+        if from == to {
             return Err(ParseError);
         }
 
