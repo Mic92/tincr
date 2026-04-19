@@ -193,15 +193,20 @@ fn checksum_nofold(data: &[u8], initial: u64) -> u64 {
 /// final step.
 #[inline]
 fn checksum(data: &[u8], initial: u64) -> u16 {
-    let mut ac = checksum_nofold(data, initial);
+    !fold16(checksum_nofold(data, initial))
+}
+
+/// Fold a 64-bit one's-complement accumulator to 16 bits (no
+/// complement). Four folds is enough for `u64` (each fold halves the
+/// bit width of the carry).
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // folded to 16 bits
+fn fold16(mut ac: u64) -> u16 {
     ac = (ac >> 16) + (ac & 0xffff);
     ac = (ac >> 16) + (ac & 0xffff);
     ac = (ac >> 16) + (ac & 0xffff);
     ac = (ac >> 16) + (ac & 0xffff);
-    #[allow(clippy::cast_possible_truncation)] // folded to 16 bits
-    {
-        !(ac as u16)
-    }
+    ac as u16
 }
 
 /// TCP/UDP pseudo-header checksum. wg-go `pseudoHeaderChecksumNoFold`
@@ -895,12 +900,8 @@ impl GroBucket {
             );
             // Fold-no-complement. wg-go does `checksum([]byte{},
             // psum)` — their `checksum` doesn't complement (`:92`
-            // returns the raw fold). Ours does, so fold by hand.
-            let mut p = pseudo;
-            p = (p >> 16) + (p & 0xffff);
-            p = (p >> 16) + (p & 0xffff);
-            #[allow(clippy::cast_possible_truncation)] // 32-bit one's-complement fold to 16-bit
-            let p = p as u16;
+            // returns the raw fold). Ours does, so fold separately.
+            let p = fold16(pseudo);
             pkt[iphlen + TCP_CSUM_OFF..iphlen + TCP_CSUM_OFF + 2].copy_from_slice(&p.to_be_bytes());
 
             // ─── vnet_hdr ─────────────────────────────────────────────
