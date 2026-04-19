@@ -244,39 +244,20 @@ impl Device for BsdTun {
 
         match self.variant {
             // ─── TUN: +14, synthesize
-            // Byte-identical to fd.rs.
-            BsdVariant::Tun => {
-                // IP first byte at `buf[ETH_HLEN]`. Kernel
-                // wrote IP at `[14..]`.
-                let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{}: unknown IP version nibble {:#x}",
-                            self.iface,
-                            buf[ETH_HLEN] >> 4
-                        ),
-                    ));
-                };
-                set_etherheader(buf, ethertype);
-                Ok(n + ETH_HLEN)
-            }
-
             // ─── UTUN: +10, IGNORE prefix, synthesize
-            // This arm is the SAME as the TUN arm. The kernel wrote
-            // `htonl(AF_*)` at `[10..14]`; we don't read those
-            // bytes. The IP first byte is STILL at `[14]` (=
-            // `[offset + AF_PREFIX_LEN]` = `[10 + 4]`). The
-            // synthesis is identical to the Tun arm.
             //
-            // We could merge this with the Tun match arm above.
-            // We DON'T — the merge would obscure the
-            // IGNORED-prefix observation (the comment above is
-            // the value).
-            BsdVariant::Utun => {
-                // The prefix at `buf[10..14]` is already there
-                // (kernel wrote it). We don't read it. The IP
-                // first byte is at `[14]` — same as Tun.
+            // Both arms are identical. UTUN's kernel wrote
+            // `htonl(AF_*)` at `[10..14]`; we don't read those bytes
+            // — the IP first byte is STILL at `[14]` (= offset +
+            // AF_PREFIX_LEN = 10 + 4). `set_etherheader` then zeroes
+            // `[..12]` and writes ethertype at `[12..14]`, fully
+            // overwriting the prefix. Wasted I/O on the kernel's
+            // part; harmless.
+            //
+            // Return is `n + offset`: for TUN that's +14; for UTUN
+            // it's +10 because the 4-byte prefix already counted in
+            // `n` and sits inside the would-be ether header.
+            BsdVariant::Tun | BsdVariant::Utun => {
                 let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -287,19 +268,7 @@ impl Device for BsdTun {
                         ),
                     ));
                 };
-                // The memset zeroes `[..12]` — that INCLUDES
-                // `[10..12]`, the high two bytes of the AF
-                // prefix. The
-                // ethertype write at `:459-460` clobbers
-                // `[12..14]`, the LOW two bytes. The prefix is
-                // FULLY overwritten. Wasted I/O on the kernel's
-                // part; harmless.
                 set_etherheader(buf, ethertype);
-                // `inlen + 10`. NOT +14. The 4-byte prefix
-                // counted in `inlen` (it's
-                // part of what the kernel wrote). +10 not +14
-                // because `inlen` already includes 4 bytes of
-                // the would-be ether header position.
                 Ok(n + offset)
             }
 
