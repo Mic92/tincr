@@ -96,7 +96,6 @@ pub struct Paths {
     pub confdir: Option<PathBuf>,
 }
 
-/// Where the pidfile resolved to. Distinct because the *daemon* uses
 /// Input axis. These come from getopt (`-c` / `-n`).
 ///
 /// You only ever set one or the other in practice (`-c` overrides
