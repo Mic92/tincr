@@ -380,11 +380,10 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, Cm
 ///
 /// The `Set` and `Add` cases never fail at the walk stage — if no
 /// match exists, they append.
-// missing_panics_doc: the unwrap is provably safe behind is_some_and
-// but clippy can't see across statements.
-#[allow(clippy::missing_panics_doc)] // unwrap guarded by is_some_and; clippy can't see across statements
+///
 /// Returns the per-line `Removing` warnings; success means the file
 /// changed (Del-with-no-match is `Err`, Set/Add always rewrite).
+#[allow(clippy::missing_panics_doc)] // unwrap guarded by is_some_and; clippy can't see across statements
 pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 

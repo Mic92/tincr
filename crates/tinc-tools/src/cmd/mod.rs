@@ -71,15 +71,9 @@ pub enum CmdError {
     TooManyArgs,
 }
 
-/// `CtlError` → `CmdError::BadInput` via `Display`. Daemon-communication
-/// errors are user-facing — the CLI prints them and exits 1. The
-/// `BadInput` variant is the "tell the user, no errno" bucket.
-///
-/// Why `BadInput` not a new `CmdError::Daemon`: `BadInput` already has
-/// the "string message → exit 1" semantics every caller wants. A
-/// separate variant would route to the same place. If we later want a
-/// different exit code for daemon-down (so scripts can distinguish),
-/// then we add the variant. YAGNI for now.
+/// `CtlError` → `CmdError::BadInput` via `Display`. No separate
+/// `Daemon` variant: every consumer is print-and-exit-1, so a new
+/// variant would route to the same place.
 impl From<crate::ctl::CtlError> for CmdError {
     fn from(e: crate::ctl::CtlError) -> Self {
         CmdError::BadInput(e.to_string())

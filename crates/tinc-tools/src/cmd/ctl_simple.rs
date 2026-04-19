@@ -171,25 +171,8 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-// Tests
-//
-// These test the *command logic* — that each function sends the right
-// request and interprets the ack correctly. The transport (`CtlSocket`)
-// is tested in `ctl.rs`. The OS path (`connect()`) isn't testable
-// without a daemon; it's a thin wrapper around tested pieces.
-//
-// We can't test through `connect()` (no real daemon), so each test
-// inlines the body that comes *after* connect — the send/recv/check.
-// This means a tiny bit of duplication (each test does its own
-// handshake), but it tests the actual ack-interpretation logic
-// (`result != 0`, drain-to-EOF, etc.) which is what these commands
-// add over raw `CtlSocket`.
-//
-// The "command's body, minus connect()" pattern: extract the post-
-// connect logic into a `_with(ctl, ...)` helper that takes an
-// already-connected socket. The public fn is `connect()? +
-// _with(ctl)`. Tests call `_with` directly. Same seam as `cmd::sign`'s
-// `verify_blob` vs `verify`.
+// Tests cover the post-connect ack-interpretation; the `connect()` OS
+// path is untestable without a real daemon and is a thin wrapper.
 
 #[cfg(test)]
 mod tests {
