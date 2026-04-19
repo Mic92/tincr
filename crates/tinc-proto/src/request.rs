@@ -98,38 +98,6 @@ impl Request {
         })
     }
 
-    /// `request_entries[req].name`. The C uses these for log output
-    /// (`"Got %s from..."`). All-caps in C; we match.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Id => "ID",
-            Self::Metakey => "METAKEY",
-            Self::Challenge => "CHALLENGE",
-            Self::ChalReply => "CHAL_REPLY",
-            Self::Ack => "ACK",
-            Self::Status => "STATUS",
-            Self::Error => "ERROR",
-            Self::Termreq => "TERMREQ",
-            Self::Ping => "PING",
-            Self::Pong => "PONG",
-            Self::AddSubnet => "ADD_SUBNET",
-            Self::DelSubnet => "DEL_SUBNET",
-            Self::AddEdge => "ADD_EDGE",
-            Self::DelEdge => "DEL_EDGE",
-            Self::KeyChanged => "KEY_CHANGED",
-            Self::ReqKey => "REQ_KEY",
-            Self::AnsKey => "ANS_KEY",
-            Self::Packet => "PACKET",
-            Self::Control => "CONTROL",
-            Self::ReqPubkey => "REQ_PUBKEY",
-            Self::AnsPubkey => "ANS_PUBKEY",
-            Self::SptpsPacket => "SPTPS_PACKET",
-            Self::UdpInfo => "UDP_INFO",
-            Self::MtuInfo => "MTU_INFO",
-        }
-    }
-
     /// `atoi(line)` then `from_id`. Doesn't consume — handlers re-scan
     /// from the start with `%*d` (skip the request number) anyway.
     ///
@@ -198,13 +166,5 @@ mod tests {
         assert_eq!(Request::peek("0x"), None); // not space-terminated
         // atoi would accept this; we don't.
         assert_eq!(Request::peek(" 8"), None);
-    }
-
-    #[test]
-    fn names_match_c() {
-        // Lifted from request_entries[] in protocol.c.
-        assert_eq!(Request::Id.name(), "ID");
-        assert_eq!(Request::ChalReply.name(), "CHAL_REPLY");
-        assert_eq!(Request::SptpsPacket.name(), "SPTPS_PACKET");
     }
 }
