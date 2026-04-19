@@ -103,26 +103,12 @@ impl Tun {
     ///     taken by another process. C commit `a7e906d2` (since
     ///     reverted by ethertap-drop, but the EBUSY case is real).
     pub fn open(cfg: &DeviceConfig) -> io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
-
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
         // ─── ifr_name pack — BEFORE open
         // Validation is pure; open needs CAP_NET_ADMIN. Validate
         // first so tests can hit the error path without root.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
-
-        // ─── open
-        // `O_RDWR | O_NONBLOCK | O_CLOEXEC`. CLOEXEC atomically in
-        // the open flags closes the open→fcntl race window.
-        // `custom_flags` ORs into the underlying `open(2)` flags;
-        // `OpenOptions` already sets `O_RDWR` from
-        // `.read(true).write(true)`.
-        let fd = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(device)?;
 
         // ─── ifr_flags
         // `as i16`: constants fit (1, 2, 0x1000, 0x4000).
@@ -148,20 +134,10 @@ impl Tun {
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
         } as i16;
 
-        // ─── ifr_name
-        // `iface = None` → leave name zeroed → kernel picks `tun0`
-        // / `tap0` / first free.
-        //
-        // (ifr_name packed above, before open)
-
-        // ─── TUNSETIFF
-        // The ioctl. See module doc for why direct `libc::ioctl`
-        // not `nix::ioctl_write_ptr_bad!` (the encoding is _IOW
-        // but the kernel writes ifr_name back; the macro generates
-        // `*const` which documents the wrong contract).
-        //
-        // Returns the kernel-chosen `ifr_name` (read back post-ioctl).
-        let iface = tunsetiff(fd.as_fd(), flags, ifr_name)?;
+        // ─── open + TUNSETIFF
+        // `iface = None` → ifr_name zeroed → kernel picks `tun0` /
+        // `tap0` / first free; the chosen name is read back.
+        let (fd, iface) = open_queue(device, ifr_name, flags)?;
 
         // ─── SIOCGIFHWADDR (TAP only)
         // The MAC is kernel-generated (random with the locally-
@@ -246,7 +222,6 @@ impl Tun {
     /// # Panics
     /// `n == 0` or `n > 256` (kernel `MAX_TAP_QUEUES`).
     pub fn open_mq(cfg: &DeviceConfig, n: usize) -> io::Result<Vec<Tun>> {
-        use std::os::unix::fs::OpenOptionsExt;
         assert!(n > 0 && n <= 256, "queue count {n} out of [1, 256]");
 
         if n == 1 {
@@ -285,13 +260,7 @@ impl Tun {
 
         let mut queues = Vec::with_capacity(n);
         for k in 0..n {
-            let fd = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-                .open(device)?;
-
-            let iface = tunsetiff(fd.as_fd(), flags, ifr_name)?;
+            let (fd, iface) = open_queue(device, ifr_name, flags)?;
 
             // Offload is per-netdev. Once. Same feature-detect
             // warning as Tun::open: failure means vnet_hdr is on
@@ -407,6 +376,29 @@ fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::c_ulong, ifr: &mut libc::ifreq) ->
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Open `/dev/net/tun` (`O_RDWR | O_NONBLOCK | O_CLOEXEC`) and issue
+/// `TUNSETIFF` with `flags`/`ifr_name`. Returns the fd and the
+/// kernel-assigned interface name. Shared by `Tun::open` and the
+/// per-queue loop in `Tun::open_mq`.
+fn open_queue(
+    device: &str,
+    ifr_name: [libc::c_char; libc::IFNAMSIZ],
+    flags: i16,
+) -> io::Result<(File, String)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // CLOEXEC atomically in the open flags closes the open→fcntl
+    // race window. `custom_flags` ORs into the underlying `open(2)`
+    // flags; `OpenOptions` already sets `O_RDWR` from
+    // `.read(true).write(true)`.
+    let fd = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(device)?;
+    let iface = tunsetiff(fd.as_fd(), flags, ifr_name)?;
+    Ok((fd, iface))
 }
 
 /// `TUNSETIFF` — instantiate a TUN/TAP device. Kernel reads `ifr_
