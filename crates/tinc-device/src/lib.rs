@@ -25,9 +25,6 @@ use std::io;
 /// tag. `pub` because the daemon's `MAXSIZE` arithmetic includes it.
 pub const MTU: usize = 1518;
 
-/// `MTU` for the jumbo build. The daemon picks; we accept either.
-pub const MTU_JUMBO: usize = 9018;
-
 // RFC 894 / IANA wire constants — NOT cfg-gated, same everywhere.
 // pub(crate): backends synthesize headers; the daemon doesn't.
 mod ether;
