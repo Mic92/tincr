@@ -31,6 +31,8 @@
 //! it composes (pidfile read, socket connect, handshake) are each
 //! unit-tested.
 
+#![cfg(unix)]
+
 use crate::cmd::CmdError;
 use crate::ctl::{CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};
@@ -40,7 +42,6 @@ use crate::names::{Paths, check_id};
 ///
 /// `paths` must already be `resolve_runtime()`d. The panic from
 /// `pidfile()` is the assertion that the binary did its job.
-#[cfg(unix)]
 fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, CmdError> {
     CtlSocket::connect(paths).map_err(Into::into)
 }
@@ -57,7 +58,6 @@ fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, C
 /// `BadInput` (wrapping `CtlError`) if connect fails. Daemon down,
 /// pidfile missing, socket connect refused, greeting bad — all become
 /// "could not connect" with the specific message.
-#[cfg(unix)]
 pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
     let ctl = connect(paths)?;
     Ok(ctl.pid)
@@ -65,7 +65,6 @@ pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
 
 /// connect → send `req` → expect `result == 0` ack. Three commands
 /// (reload/purge/retry) differ only in the request and the error text.
-#[cfg(unix)]
 fn simple(paths: &Paths, req: CtlRequest, err: &str) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send(req)?;
@@ -81,7 +80,6 @@ fn simple(paths: &Paths, req: CtlRequest, err: &str) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// Connect failure, or daemon-side reload returned nonzero.
-#[cfg(unix)]
 pub fn reload(paths: &Paths) -> Result<(), CmdError> {
     simple(paths, CtlRequest::Reload, "Could not reload configuration.")
 }
@@ -92,7 +90,6 @@ pub fn reload(paths: &Paths) -> Result<(), CmdError> {
 /// # Errors
 /// Connect failure. The daemon-side purge can't fail (it's a tree
 /// walk and free); we still check `result` out of habit.
-#[cfg(unix)]
 pub fn purge(paths: &Paths) -> Result<(), CmdError> {
     simple(paths, CtlRequest::Purge, "Could not purge old information.")
 }
@@ -103,7 +100,6 @@ pub fn purge(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// Connect failure.
-#[cfg(unix)]
 pub fn retry(paths: &Paths) -> Result<(), CmdError> {
     simple(
         paths,
@@ -123,7 +119,6 @@ pub fn retry(paths: &Paths) -> Result<(), CmdError> {
 /// # Errors
 /// Connect failure. After STOP is sent, the daemon closing is the
 /// expected outcome — EOF is success, not error.
-#[cfg(unix)]
 pub fn stop(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send(CtlRequest::Stop)?;
@@ -143,7 +138,6 @@ pub fn stop(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// Connect failure or ack-shape mismatch.
-#[cfg(unix)]
 pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send_int(CtlRequest::SetDebug, level)?;
@@ -162,7 +156,6 @@ pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
 /// `BadInput("Invalid name")` if `check_id` fails (before connect).
 /// Connect failure. `BadInput("Could not disconnect")` if daemon
 /// returns nonzero (node not found, or disconnect failed).
-#[cfg(unix)]
 pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // Validate FIRST — don't waste a socket on a bad name.
     if !check_id(name) {
@@ -198,7 +191,7 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
 // _with(ctl)`. Tests call `_with` directly. Same seam as `cmd::sign`'s
 // `verify_blob` vs `verify`.
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ctl::CtlSocket;
