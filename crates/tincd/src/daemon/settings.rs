@@ -17,6 +17,33 @@ use crate::{broadcast, compress, mac_lease};
 
 use super::SetupError;
 
+/// Look up boolean config key `$key` and assign into `$field` on
+/// success. Parse failures are logged inside [`get_bool`] and the
+/// default is kept. Collapses ~10 identical 5-line `if let` blocks.
+macro_rules! cfg_bool {
+    ($cfg:expr, $key:literal => $field:expr) => {
+        if let Some(e) = $cfg.lookup($key).next()
+            && let Some(v) = get_bool(e)
+        {
+            $field = v;
+        }
+    };
+}
+
+/// Look up integer config key `$key`, narrow to `$ty`, then run
+/// `$body` with the parsed value bound as `$v`. The body absorbs the
+/// per-key clamping / `Some(..)` wrapping that varies between keys,
+/// so the lookup/parse boilerplate stays single-sourced.
+macro_rules! cfg_int {
+    ($cfg:expr, $key:literal, $ty:ty, |$v:ident| $body:expr) => {
+        if let Some(e) = $cfg.lookup($key).next()
+            && let Some($v) = get_int_as::<$ty>(e)
+        {
+            $body;
+        }
+    };
+}
+
 /// `e.get_bool()` but a parse failure is *logged* before falling
 /// through to `None`. Previously the `&& let Ok(v) = e.get_bool()`
 /// pattern silently discarded the `ParseError` (which carries
@@ -359,74 +386,30 @@ impl Default for DaemonSettings {
 /// settings (Port, `AddressFamily`, `DeviceType`) are NOT here - they
 /// need re-bind / re-open which `setup()` does inline.
 pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
-    if let Some(e) = config.lookup("PingInterval").next()
-        && let Some(v) = get_int_as::<u32>(e)
-        && v >= 1
-    {
+    cfg_int!(config, "PingInterval", u32, |v| if v >= 1 {
         settings.pinginterval = v.min(MAX_DURATION_SECS);
-    }
+    });
     // Clamped to [1, pinginterval].
-    if let Some(e) = config.lookup("PingTimeout").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    cfg_int!(config, "PingTimeout", u32, |v| {
         settings.pingtimeout = v.clamp(1, settings.pinginterval);
-    }
+    });
     // Per-host PMTU is read in proto.rs::handle_id; this is the
     // tinc.conf-level clamp.
-    if let Some(e) = config.lookup("PMTU").next()
-        && let Some(v) = get_int_as::<u16>(e)
-    {
-        settings.global_pmtu = Some(v);
-    }
+    cfg_int!(config, "PMTU", u16, |v| settings.global_pmtu = Some(v));
     // Fallback when per-host Weight absent.
-    if let Some(e) = config.lookup("Weight").next()
-        && let Some(v) = get_int(e)
-    {
-        settings.global_weight = Some(v);
-    }
-    if let Some(e) = config.lookup("MaxTimeout").next()
-        && let Some(v) = get_int_as::<u32>(e)
-        && v >= 1
-    {
+    cfg_int!(config, "Weight", i32, |v| settings.global_weight = Some(v));
+    cfg_int!(config, "MaxTimeout", u32, |v| if v >= 1 {
         settings.maxtimeout = v.min(MAX_DURATION_SECS);
-    }
-    if let Some(e) = config.lookup("DecrementTTL").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.decrement_ttl = v;
-    }
-    if let Some(e) = config.lookup("TunnelServer").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.tunnelserver = v;
-    }
-    if let Some(e) = config.lookup("StrictSubnets").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.strictsubnets = v;
-    }
+    });
+    cfg_bool!(config, "DecrementTTL" => settings.decrement_ttl);
+    cfg_bool!(config, "TunnelServer" => settings.tunnelserver);
+    cfg_bool!(config, "StrictSubnets" => settings.strictsubnets);
     // tunnelserver implies strictsubnets. Applied after BOTH parsed.
     settings.strictsubnets |= settings.tunnelserver;
-    if let Some(e) = config.lookup("LocalDiscovery").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.local_discovery = v;
-    }
-    if let Some(e) = config.lookup("DirectOnly").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.directonly = v;
-    }
-    if let Some(e) = config.lookup("PriorityInheritance").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.priorityinheritance = v;
-    }
-    if let Some(e) = config.lookup("AutoConnect").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.autoconnect = v;
-    }
+    cfg_bool!(config, "LocalDiscovery" => settings.local_discovery);
+    cfg_bool!(config, "DirectOnly" => settings.directonly);
+    cfg_bool!(config, "PriorityInheritance" => settings.priorityinheritance);
+    cfg_bool!(config, "AutoConnect" => settings.autoconnect);
     // ScriptsExtension is NOT parsed (Windows-only).
     let new_interp = config
         .lookup("ScriptsInterpreter")
@@ -440,48 +423,29 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         log::warn!(target: "tincd",
             "Ignoring ScriptsInterpreter change: not allowed at current sandbox level");
     }
-    if let Some(e) = config.lookup("UDPDiscovery").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.udp_discovery = v;
-    }
-    if let Some(e) = config.lookup("UDPDiscoveryKeepaliveInterval").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    cfg_bool!(config, "UDPDiscovery" => settings.udp_discovery);
+    cfg_int!(config, "UDPDiscoveryKeepaliveInterval", u32, |v| {
         settings.udp_discovery_keepalive_interval = v;
-    }
-    if let Some(e) = config.lookup("UDPDiscoveryInterval").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    });
+    cfg_int!(config, "UDPDiscoveryInterval", u32, |v| {
         settings.udp_discovery_interval = v;
-    }
-    if let Some(e) = config.lookup("UDPDiscoveryTimeout").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    });
+    cfg_int!(config, "UDPDiscoveryTimeout", u32, |v| {
         settings.udp_discovery_timeout = v;
-    }
+    });
     // Keep default on <=0 (less harsh on reload typo); logged above.
-    if let Some(e) = config.lookup("MaxConnectionBurst").next()
-        && let Some(v) = get_int_as::<u32>(e)
-        && v >= 1
-    {
+    cfg_int!(config, "MaxConnectionBurst", u32, |v| if v >= 1 {
         settings.max_connection_burst = v;
-    }
-    if let Some(e) = config.lookup("ReplayWindow").next()
-        && let Some(v) = get_int_as::<usize>(e)
-    {
+    });
+    cfg_int!(config, "ReplayWindow", usize, |v| {
         settings.replaywin = v.min(MAX_REPLAY_WINDOW);
-    }
-    if let Some(e) = config.lookup("UDPInfoInterval").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
-        settings.udp_info_interval = v;
-    }
-    if let Some(e) = config.lookup("MTUInfoInterval").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
-        settings.mtu_info_interval = v;
-    }
+    });
+    cfg_int!(config, "UDPInfoInterval", u32, |v| settings
+        .udp_info_interval =
+        v);
+    cfg_int!(config, "MTUInfoInterval", u32, |v| settings
+        .mtu_info_interval =
+        v);
     // Log + keep default on unknown (less harsh on reload typo).
     if let Some(e) = config.lookup("Broadcast").next() {
         settings.broadcast_mode = match e.get_str().to_ascii_lowercase().as_str() {
@@ -495,26 +459,18 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
             }
         };
     }
-    if let Some(e) = config.lookup("MACExpire").next()
-        && let Some(v) = get_int_as::<u64>(e)
-    {
+    cfg_int!(config, "MACExpire", u64, |v| {
         settings.macexpire = v.min(u64::from(MAX_DURATION_SECS));
-    }
-    if let Some(e) = config.lookup("MaxOutputBufferSize").next()
-        && let Some(v) = get_int_as::<usize>(e)
-    {
-        settings.maxoutbufsize = v;
-    }
-    if let Some(e) = config.lookup("InvitationExpire").next()
-        && let Some(v) = get_int_as::<u64>(e)
-    {
+    });
+    cfg_int!(config, "MaxOutputBufferSize", usize, |v| settings
+        .maxoutbufsize =
+        v);
+    cfg_int!(config, "InvitationExpire", u64, |v| {
         settings.invitation_lifetime = Duration::from_secs(v);
-    }
-    if let Some(e) = config.lookup("KeyExpire").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    });
+    cfg_int!(config, "KeyExpire", u32, |v| {
         settings.keylifetime = v.min(MAX_DURATION_SECS);
-    }
+    });
 }
 
 /// Parse `Subnet =` lines for `myname` from `config`. Factored from
@@ -663,11 +619,7 @@ pub(super) fn load_settings(
     }
 
     // FWMark. 0 (default/unset) means "skip".
-    if let Some(e) = config.lookup("FWMark").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
-        settings.sockopts.fwmark = v;
-    }
+    cfg_int!(config, "FWMark", u32, |v| settings.sockopts.fwmark = v);
 
     // BindToInterface. Hoisted to setup-time; not reloadable
     // (sockets are already bound).
@@ -720,18 +672,10 @@ pub(super) fn load_settings(
 
     // DeviceStandby. Non-reloadable: decides whether tinc-up
     // fires at setup vs first-peer.
-    if let Some(e) = config.lookup("DeviceStandby").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.device_standby = v;
-    }
+    cfg_bool!(config, "DeviceStandby" => settings.device_standby);
 
     // Rust extension. Non-reloadable.
-    if let Some(e) = config.lookup("DhtDiscovery").next()
-        && let Some(v) = get_bool(e)
-    {
-        settings.dht_discovery = v;
-    }
+    cfg_bool!(config, "DhtDiscovery" => settings.dht_discovery);
     // UPnP. Non-reloadable (thread spawned once at setup).
     if let Some(e) = config.lookup("UPnP").next() {
         match crate::daemon::UpnpMode::from_config(e.get_str()) {
@@ -744,16 +688,12 @@ pub(super) fn load_settings(
             }
         }
     }
-    if let Some(e) = config.lookup("UPnPDiscoverWait").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    cfg_int!(config, "UPnPDiscoverWait", u32, |v| {
         settings.upnp_discover_wait = v.clamp(1, 60);
-    }
-    if let Some(e) = config.lookup("UPnPRefreshPeriod").next()
-        && let Some(v) = get_int_as::<u32>(e)
-    {
+    });
+    cfg_int!(config, "UPnPRefreshPeriod", u32, |v| {
         settings.upnp_refresh_period = v.clamp(1, MAX_DURATION_SECS);
-    }
+    });
 
     // DhtSecretFile. Read happens here in `setup()` *before*
     // `drop_privs` so a root:root 0600 file is reachable. No inline
