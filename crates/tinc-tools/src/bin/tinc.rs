@@ -442,6 +442,18 @@ const COMMANDS: &[CmdEntry] = &[
     },
 ];
 
+/// Arity guard for the many zero-arg adapters: `Err(TooManyArgs)` if
+/// anything was passed, else `Ok(())`. Keeps the per-command wrappers
+/// to a single line instead of repeating the same three-line check a
+/// dozen times.
+fn no_args(args: &[String]) -> Result<(), CmdError> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(CmdError::TooManyArgs)
+    }
+}
+
 /// Thin adapter: `&[String]` argv → typed args for `cmd::init::run`.
 /// Each command has one of these; it's where arity errors live.
 ///
@@ -489,11 +501,9 @@ fn cmd_genkey_rsa_stub(_: &Paths, _: &Globals, args: &[String]) -> Result<(), Cm
     Ok(())
 }
 
-/// `cmd_generate_ed25519_keys`: zero args. The wrapper is 5 lines.
+/// `cmd_generate_ed25519_keys`: zero args.
 fn cmd_genkey(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::genkey::run(paths)
 }
 
@@ -536,9 +546,7 @@ fn cmd_sign(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::fsck::Severity;
 
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
 
     // The argv[0] becomes `exe_name` for the suggestion messages.
     // We hardcode `tinc` — there's only one binary name. (Upstream
@@ -629,9 +637,7 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
 
 /// `cmd_pid`: zero args. Prints daemon's pid + newline.
 fn cmd_pid(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     let pid = cmd::ctl_simple::pid(paths)?;
     // Stdout, newline.
     println!("{pid}");
@@ -653,33 +659,25 @@ fn cmd_restart(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErr
 
 /// `cmd_stop`: zero args. Stops daemon, drains until socket closes.
 fn cmd_stop(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::stop(paths)
 }
 
 /// `cmd_reload`: zero args.
 fn cmd_reload(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::reload(paths)
 }
 
 /// `cmd_retry`: zero args.
 fn cmd_retry(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::retry(paths)
 }
 
 /// `cmd_purge`: zero args.
 fn cmd_purge(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::ctl_simple::purge(paths)
 }
 
@@ -938,9 +936,7 @@ fn cmd_info(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// the URL fragment, but that's a Paths concern; this is pure
 /// display.)
 fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::top::run(paths, g.netname.as_deref())
 }
 
@@ -1007,9 +1003,7 @@ fn cmd_edit(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// The print itself is `print_version()`
 /// from this binary — same fn `--version` calls.
 fn cmd_version(_: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     print_version();
     Ok(())
 }
@@ -1088,27 +1082,21 @@ fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
 
 /// `cmd_export`: zero args, write to stdout.
 fn cmd_export(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     // `lock()` for the BufWriter; export does many small writes.
     cmd::exchange::export(paths, std::io::stdout().lock())
 }
 
 /// `cmd_export_all`: zero args, write to stdout.
 fn cmd_export_all(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     cmd::exchange::export_all(paths, std::io::stdout().lock())
 }
 
 /// `cmd_import`: zero args, read from stdin. Maps count→exit-code:
 /// returns 1 if zero imported.
 fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    if !args.is_empty() {
-        return Err(CmdError::TooManyArgs);
-    }
+    no_args(args)?;
     let count = cmd::exchange::import(paths, std::io::stdin().lock(), g.force)?;
     if count > 0 {
         eprintln!("Imported {count} host configuration files.");
