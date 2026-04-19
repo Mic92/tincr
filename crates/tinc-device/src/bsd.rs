@@ -48,11 +48,8 @@ use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 
 // Constants — the +10 prefix length
 
-/// 4-byte AF prefix for utun/tunifhead. C uses literal `10`
-/// (`:451`); `ETH_HLEN - AF_PREFIX_LEN = 10` is the read offset.
-/// Contents: `htonl(AF_*)` — same SIZE/OFFSET as Linux `tun_pi`
-/// (our linux.rs uses `vnet_hdr` instead); different contents (and
-/// ignored on read anyway).
+/// 4-byte `htonl(AF_*)` prefix for utun/tunifhead.
+/// `ETH_HLEN - AF_PREFIX_LEN = 10` is the read offset.
 const AF_PREFIX_LEN: usize = 4;
 
 // BsdVariant — the offset dispatch
@@ -67,11 +64,8 @@ pub enum BsdVariant {
     /// ethertype from IP nibble. Byte-identical to `fd.rs`.
     Tun,
 
-    /// `+10`, 4-byte AF prefix. Reads at `+10`; the kernel wrote
-    /// `htonl(AF_*)` at `[10..14]` then IP at `[14..]`. We IGNORE
-    /// the prefix on read (synthesize from IP nibble at `[14]`).
-    /// We SYNTHESIZE the prefix on write (read ethertype from
-    /// `[12..14]`, map to AF, write at `[10..14]`).
+    /// `+10`, 4-byte `htonl(AF_*)` prefix. Ignored on read
+    /// (ethertype synthesized from IP nibble); synthesized on write.
     Utun,
 
     /// `+0`, raw ethernet. Full frames, nothing to synthesize.
@@ -114,16 +108,11 @@ impl BsdVariant {
 /// — correct, because the same kernel reads them back.
 #[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
 const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
-    // We get the ethertype already host-order from the caller
-    // (who read it via `u16::from_be_bytes`).
     let af = match ethertype {
         ETH_P_IP => libc::AF_INET,
         ETH_P_IPV6 => libc::AF_INET6,
         _ => return None,
     };
-    // `htonl(AF_*)`. `htonl` of a u32 is `to_be_bytes()` if you
-    // want bytes, `.to_be()` if you want a swapped u32. We want
-    // bytes for `copy_from_slice`.
     Some((af as u32).to_be_bytes())
 }
 
@@ -133,20 +122,10 @@ const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
 /// a `PF_SYSTEM` socket, old TUN/TAP are device nodes.
 #[derive(Debug)]
 pub struct BsdTun {
-    /// The device fd. `/dev/tun*` device node OR utun
-    /// `PF_SYSTEM` socket. `Drop` closes.
     fd: OwnedFd,
-
-    /// Which offset behavior. Chosen at `open()` time, never
-    /// changes.
     variant: BsdVariant,
-
-    /// Interface name as resolved by `open()`. For `iface()`.
     iface: String,
 }
-
-// `open()` constructors are `cfg`-gated below. The Device impl
-// compiles everywhere; the constructors don't.
 
 // Device impl — variant-dispatched read/write
 
@@ -172,20 +151,11 @@ impl Device for BsdTun {
         }
 
         match self.variant {
-            // ─── TUN: +14, synthesize
-            // ─── UTUN: +10, IGNORE prefix, synthesize
-            //
-            // Both arms are identical. UTUN's kernel wrote
-            // `htonl(AF_*)` at `[10..14]`; we don't read those bytes
-            // — the IP first byte is STILL at `[14]` (= offset +
-            // AF_PREFIX_LEN = 10 + 4). `set_etherheader` then zeroes
-            // `[..12]` and writes ethertype at `[12..14]`, fully
-            // overwriting the prefix. Wasted I/O on the kernel's
-            // part; harmless.
-            //
-            // Return is `n + offset`: for TUN that's +14; for UTUN
-            // it's +10 because the 4-byte prefix already counted in
-            // `n` and sits inside the would-be ether header.
+            // TUN +14 / UTUN +10 share this arm: IP first byte is at
+            // `[14]` either way (UTUN's prefix landed at `[10..14]`
+            // and is overwritten by `set_etherheader`). Return
+            // `n + offset` — for UTUN the 4-byte prefix is already
+            // counted in `n`.
             BsdVariant::Tun | BsdVariant::Utun => {
                 let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
                     return Err(io::Error::new(
@@ -201,9 +171,7 @@ impl Device for BsdTun {
                 Ok(n + offset)
             }
 
-            // ─── TAP: +0, nothing to do
-            // Kernel wrote ethernet; route.c wants ethernet.
-            // `raw.rs` body verbatim.
+            // TAP +0: kernel wrote ethernet; route.c wants ethernet.
             BsdVariant::Tap => Ok(n),
         }
     }
@@ -211,16 +179,11 @@ impl Device for BsdTun {
     /// Write a packet. Three arms.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.variant {
-            // ─── TUN: write at +14, strip ether
-            // The daemon wrote a full ether header (route.c always
-            // does); we strip it. Byte-identical to `fd.rs`.
+            // TUN +14: route.c wrote a full ether header; strip it.
             BsdVariant::Tun => write_fd(self.fd.as_fd(), &buf[ETH_HLEN..]),
 
-            // ─── UTUN: synthesize prefix, write at +10
-            // The novel arm. Read ethertype from `[12..14]`, map
-            // to AF, write 4-byte prefix at `[10..14]` (CLOBBERING
-            // ethertype — fine, kernel
-            // reconstructs), write at +10.
+            // UTUN +10: map ethertype → AF prefix at `[10..14]`
+            // (clobbers the ethertype slot; kernel reconstructs).
             BsdVariant::Utun => {
                 let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
                 let Some(prefix) = to_af_prefix(ethertype) else {
@@ -232,18 +195,11 @@ impl Device for BsdTun {
                         ),
                     ));
                 };
-                // Clobbers `[10..14]`: the high two bytes of
-                // ether shost + the ethertype slot. The daemon's
-                // route.c filled those with zeros (synthetic
-                // header) and the real ethertype respectively;
-                // both are throwaway now.
                 let offset = ETH_HLEN - AF_PREFIX_LEN; // = 10
                 buf[offset..ETH_HLEN].copy_from_slice(&prefix);
                 write_fd(self.fd.as_fd(), &buf[offset..])
             }
 
-            // ─── TAP: +0, write all
-            // `raw.rs` verbatim.
             BsdVariant::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
@@ -335,18 +291,6 @@ mod utun {
     }
 }
 
-// Tests — three offsets, on Linux
-//
-// All three variants tested via fakes. Tun/Utun via `pipe()`
-// (stream-ish is fine; we feed one packet at a time). Tap via
-// `socketpair(SEQPACKET)` (datagram boundary + EOF, like
-// `raw.rs`).
-//
-// The Utun tests are the interesting ones: the prefix is INERT
-// on read (we feed garbage prefix bytes, verify they're
-// overwritten by set_etherheader), and SYNTHESIZED on write
-// (we verify the bytes match `(libc::AF_INET as u32).
-// to_be_bytes()` — structure-test, not byte-literal-test).
-
+// Tests — three offsets via pipe/seqpacket fakes; runnable on Linux.
 #[cfg(test)]
 mod tests;

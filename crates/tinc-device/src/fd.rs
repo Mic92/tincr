@@ -17,13 +17,9 @@
 //! ethertype from the IP version nibble (`set_etherheader`). Testable
 //! with `pipe()` — no kernel driver layout to fake.
 //!
-//! ## nix earns its dep here
-//!
-//! Uses `nix::sys::socket::recvmsg` for `SCM_RIGHTS`: hand-rolling is
-//! ~40 LOC of `cmsghdr` boilerplate with a NULL-deref trap (`CMSG_
-//! FIRSTHDR` returns NULL on empty buffer; easy to dereference
-//! unchecked). Shim #4 uses the wrapper (POSIX-clean, no encoding
-//! lies), unlike #3 TUNSETIFF which bypassed it.
+//! `SCM_RIGHTS` goes through `nix::sys::socket::recvmsg` — hand-
+//! rolled `cmsghdr` walking has a `CMSG_FIRSTHDR`-returns-NULL trap
+//! that the safe wrapper avoids.
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
@@ -84,9 +80,6 @@ impl FdTun {
                 (File::from(fd), format!("fd:{}", path.display()))
             }
         };
-
-        // No log here; daemon logs post-open if it wants.
-
         Ok(FdTun { fd, device_label })
     }
 }
@@ -94,22 +87,9 @@ impl FdTun {
 // SCM_RIGHTS — the fourth unsafe shim, the first to USE nix
 
 /// Connect to the Unix socket, receive one fd via `SCM_RIGHTS`.
-///
-/// `UnixStream` + `nix::recvmsg` collapse what would otherwise be
-/// three functions of `goto end; close()` RAII. Returns `OwnedFd`:
-/// the kernel dup'd the fd into our table during `recvmsg`, so it's
-/// freshly ours; ownership is established here, not at the call site.
-///
-/// # Errors
-/// - `connect`: `NotFound`, `ConnectionRefused`, `PermissionDenied`
-/// - `InvalidData`: cmsg wasn't `SCM_RIGHTS`, ≠1 fd, or `MSG_CTRUNC`
-///   set
 fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
-    // `@` prefix → abstract namespace; std handles the leading-NUL
-    // + length bookkeeping.
     let stream = connect_unix(path)?;
-    // `stream` drops on return; closing it doesn't affect the
-    // SCM_RIGHTS dup (independent of the carrier socket).
+    // Dropping `stream` doesn't affect the SCM_RIGHTS dup.
     recv_one_fd(&stream)
 }
 
@@ -260,12 +240,7 @@ impl Device for FdTun {
         Mode::Tun
     }
 
-    /// `"fd"` placeholder. There's no TUNSETIFF here, so no kernel
-    /// name. We say `"fd"` so the daemon's `tinc-up` script can at
-    /// least pattern-match on `INTERFACE=`.
-    ///
-    /// `clippy::unnecessary_literal_bound`: trait signature says
-    /// `&str`; impl can't widen. Same as Dummy.
+    /// `"fd"` placeholder — no TUNSETIFF here, so no kernel name.
     #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "fd"
@@ -288,10 +263,6 @@ impl Device for FdTun {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // (Ethernet constant tests + nibble tests + set_etherheader
-    // tests hoisted to `crate::ether::tests` with their subjects.
-    // Same assertions; the diff is location.)
 
     // pipe-based integration: this backend reads raw IP (no kernel-
     // side layout to fake), so a `pipe()` is enough to exercise the

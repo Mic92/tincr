@@ -60,41 +60,17 @@ pub struct RawSocket {
 
 impl RawSocket {
     /// Create the `PF_PACKET` socket, look up the interface index,
-    /// bind. Config parsing (`Interface =`, `Device =`) is the
-    /// daemon's job; we get the resolved `iface`.
+    /// bind. Config parsing is the daemon's job.
     ///
     /// # Errors
-    /// `io::Error`:
-    ///   - `socket()` fails: `PermissionDenied` (`EPERM`/`EACCES`
-    ///     — `PF_PACKET` needs `CAP_NET_RAW`; `socket(PF_PACKET,
-    ///     ...)` is the FIRST gate, before bind). Unlike `linux.
-    ///     rs` (where the gate is `open("/dev/net/tun")`), there's
-    ///     nothing to validate-first here — `socket()` IS the
-    ///     first thing that can fail.
-    ///   - `if_nametoindex` fails: `NotFound` (`ENODEV` — no such
-    ///     interface). STRICTER: 16+ byte ifname errors here, not
-    ///     silent truncation.
-    ///   - `bind` fails: rare (we just verified the ifindex).
+    /// - `PermissionDenied`: `PF_PACKET` needs `CAP_NET_RAW`.
+    /// - `NotFound`: no such interface (STRICTER: 16+ byte names
+    ///   error here, not silently truncated like C's `strncpy`).
     pub fn open(iface: &str) -> io::Result<Self> {
         use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
-        // ─── socket
-        // `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`.
-        //
-        // nix's `socket()` returns `OwnedFd` (the right type;
-        // see field comment). `SockProtocol::EthAll` IS
-        // `htons(ETH_P_ALL)` — nix does the byte-swap. `SockFlag
-        // ::SOCK_CLOEXEC` sets CLOEXEC atomically — closes the
-        // open-then-fcntl fork-race documented in `linux.rs`. nix
-        // gives us the atomic path for free.
-        //
-        // `PF_PACKET` == `AF_PACKET` (the kernel doesn't
-        // distinguish; the `PF_`/`AF_` split is a 4.2BSD-era
-        // distinction that never materialized). nix's enum is
-        // `AddressFamily`; `Packet` = `libc::AF_PACKET`. Same
-        // number (17).
-        //
-        // `?`: nix `Errno` → `io::Error` via `From`.
+        // `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`. nix's
+        // `EthAll` does the htons; `SOCK_CLOEXEC` is atomic.
         let fd = socket(
             AddressFamily::Packet,
             SockType::Raw,
@@ -102,45 +78,13 @@ impl RawSocket {
             SockProtocol::EthAll,
         )?;
 
-        // ─── ifindex
-        // `if_nametoindex` (POSIX) instead of `SIOCGIFINDEX` ioctl.
-        // Same resolution.
-        //
-        // The substitution: building an `ifreq`, strncpy'ing the
-        // name (TRUNCATING at IFNAMSIZ-1), ioctls, reads back
-        // `ifr_ifindex`. We hand the name to `if_nametoindex`
-        // which errors ENODEV if not found. No truncation; no
-        // ifreq; no ioctl. The kernel resolves the same
-        // name→index mapping (libc's `if_nametoindex` is a thin
-        // wrapper around the netlink path or the ioctl,
-        // depending on the libc, but the RESULT is the same).
-        //
-        // STRICTER: `strncpy` truncation would turn `Interface =
-        // sixteenchars_long` into `sixteenchars_lo`. If that
-        // truncated name happens to match a REAL interface (you
-        // have `sixteenchars_lo` AND `sixteenchars_long`): the C
-        // binds to the WRONG one. We error. Same fix class as
-        // `linux.rs::pack_ifr_name`.
-        //
-        // "Why doesn't this need validate-first like `linux.rs`?"
-        // — there's nothing to open before this. `socket()` is
-        // the gate (CAP_NET_RAW check); `if_nametoindex` after
-        // is fine. The validate-first reorder in `linux.rs` was
-        // about getting a USEFUL error (length validation) before
-        // a USELESS one (EACCES from open). Here the socket()
-        // error IS useful (it's "you need CAP_NET_RAW").
-        //
-        // `?`: `nix::Error` → `io::Error` via `From`. The
-        // `NixPath` trait accepts `&str` directly.
+        // `if_nametoindex` (POSIX) instead of `SIOCGIFINDEX`: same
+        // mapping, but errors on overlong names instead of strncpy-
+        // truncating into the wrong interface.
         let ifindex = nix::net::if_::if_nametoindex(iface)?;
 
-        // ─── bind
-        // Build `sockaddr_ll`, bind. nix's `LinkAddr` is GETTERS
-        // ONLY (no constructor). Raw `libc::bind`. The sixth shim,
-        // but trivial (8 lines, one syscall).
+        // nix `LinkAddr` is getters-only → raw `libc::bind`.
         bind_packet(fd.as_fd(), ifindex)?;
-
-        // No log here; daemon logs post-open if it wants.
 
         Ok(RawSocket {
             fd,
@@ -151,18 +95,9 @@ impl RawSocket {
 
 // bind_packet — shim #6, hand-rolled, trivial
 
-/// `:66-73`. Build `sockaddr_ll`, bind the `PF_PACKET` socket to
-/// the interface.
-///
-/// nix's `LinkAddr` is getters-only — designed for `recvfrom`
-/// outputs (where the kernel WRITES `sockaddr_ll` and we read
-/// it), not `bind` inputs (where WE write `sockaddr_ll` and the
-/// kernel reads it). No `LinkAddr::new(ifindex, proto)`. The
-/// asymmetry is reasonable from nix's perspective — `recvfrom`
-/// on `PF_PACKET` is common (packet sniffers), `bind` is rare
-/// (most sniffers don't bind, they recvfrom on the unbound
-/// socket and filter in userspace) — but it's the wrong
-/// abstraction for us. Raw libc.
+/// Build `sockaddr_ll`, bind the `PF_PACKET` socket to the
+/// interface. nix's `LinkAddr` is getters-only (no constructor),
+/// so this goes through raw libc.
 ///
 /// SAFETY argument:
 /// - `sockaddr_ll` is `repr(C)`, no niche, all fields integers.
@@ -183,18 +118,9 @@ impl RawSocket {
 fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     let sa = sockaddr_ll_packet(ifindex);
 
-    // `bind(fd, (struct sockaddr *)&sa, sizeof(sa))`. The cast is
-    // the standard sockaddr type-erasure (the kernel discriminates
-    // on `sa_family`).
-    //
-    // SAFETY: `sa` is fully initialized (zeroed + 3 writes).
-    // `bind` reads `addrlen` bytes from the pointer; we pass
-    // `size_of::<sockaddr_ll>()` (20). The pointer is valid
-    // for that many bytes (`sa` is on our stack). `fd` is the
-    // socket from `open()` (alive, ours).
-    //
-    // `socklen_t` cast: `size_of` is `usize`; `socklen_t` is
-    // `u32`. 20 fits.
+    // SAFETY: `sa` is fully initialized (zeroed + 3 writes); `bind`
+    // reads exactly `addrlen` (= 20) bytes from a valid stack
+    // pointer; the cast is standard sockaddr type-erasure.
     #[allow(clippy::cast_possible_truncation)]
     let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
     let ret = unsafe {
@@ -223,21 +149,12 @@ fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
     // SAFETY: see fn comment.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
-    // `sll_family = AF_PACKET`. The discriminant.
     #[allow(clippy::cast_sign_loss)] // AF_PACKET=17 (c_int→c_ushort, fits trivially)
     {
         sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     }
-
-    // `sll_protocol = htons(ETH_P_ALL)`. Network byte order.
-    // `to_be()`: on a little-endian host (x86_64, aarch64),
-    // `0x0003` → `0x0300`. On big-endian: identity.
-    // The kernel reads it as `__be16`; `to_be()` writes it as
-    // such regardless of host endianness.
+    // Kernel reads `sll_protocol` as `__be16`.
     sa.sll_protocol = ETH_P_ALL.to_be();
-
-    // `sll_ifindex` = result of `if_nametoindex`. See fn-level
-    // cast-allow comment for the `c_uint → c_int` signedness.
     sa.sll_ifindex = ifindex as libc::c_int;
 
     sa
@@ -250,17 +167,10 @@ impl Device for RawSocket {
     /// offset 0. No offset arithmetic. The simplest backend.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_read_buf(buf, "raw_socket");
-        // `read(fd, DATA, MTU)`. Offset 0. Cap at MTU. (Jumbo
-        // frames on `eth0` would truncate — `MTU` is 1518.)
+        // Cap at MTU (jumbo frames on the iface would truncate).
         let n = read_fd(self.fd.as_fd(), &mut buf[..MTU])?;
 
-        // `read_fd` already converted `<0`. `==0` on a `PF_PACKET`
-        // socket is EOF — happens
-        // if the interface goes DOWN while we're reading
-        // (kernel sends EOF on the socket). Unlike kernel TUN
-        // (never EOFs) and like `fd.rs` (Java side can close),
-        // this is a real condition. We say something useful
-        // (rather than `strerror(0)` = "Success").
+        // PF_PACKET EOFs when the interface goes down.
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -270,19 +180,12 @@ impl Device for RawSocket {
                 ),
             ));
         }
-
-        // No `+ OFFSET` because there is no offset.
         Ok(n)
     }
 
-    /// The +0 write. Full ethernet frame in `buf[0..]`; write it
-    /// all.
-    ///
-    /// THIS impl doesn't mutate `buf`. Same as `FdTun::write`.
-    /// The trait's `&mut [u8]` is for `linux.rs` (which zeroes
-    /// `buf[10..12]`); we just slice.
+    /// +0 write. Doesn't mutate `buf`; the trait's `&mut` is for
+    /// the linux backend's header stomp.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // The whole thing. No header strip.
         write_fd(self.fd.as_fd(), buf)
     }
 
@@ -292,17 +195,11 @@ impl Device for RawSocket {
         Mode::Tap
     }
 
-    /// The interface name. The daemon's `tinc-up` gets this as
-    /// `INTERFACE=eth0`. Unlike `linux.rs` (where the kernel
-    /// picks the name and we read it back), this is the name
-    /// the DAEMON gave us — pass-through.
     fn iface(&self) -> &str {
         &self.iface
     }
 
-    /// No MAC. See struct comment: `raw_socket` is sniffing, not
-    /// hosting. The route.c path that needs `mymac` doesn't
-    /// fire in switch mode (which `raw_socket` implies).
+    /// No MAC — sniffing an existing iface, not hosting one.
     fn mac(&self) -> Option<Mac> {
         None
     }
@@ -313,56 +210,31 @@ impl Device for RawSocket {
     }
 }
 
-// Tests — constants + open-gate + +0 via socketpair
-//
-// The "fakeable boundary" prediction holds: PF_PACKET writes raw
-// ethernet (no kernel-side structure added). A `socketpair(AF_
-// UNIX, SOCK_DGRAM)` can feed ethernet frames. The +0 arithmetic
-// is testable end-to-end.
-//
-// CAN'T test `open()` end-to-end without `CAP_NET_RAW` AND a real
-// interface. Same as `linux.rs::open` (CAP_NET_ADMIN + /dev/net/
-// tun). The test we CAN do: `open("nonexistent")` errors with the
-// RIGHT error. `socket()` either succeeds (have CAP_NET_RAW) or
-// errors EPERM (don't). If it succeeds, `if_nametoindex` errors
-// ENODEV. Either way: error. The test asserts "error, not panic"
-// and "the error mentions the iface name OR is EPERM."
+// Tests — +0 via SEQPACKET socketpair (PF_PACKET writes raw
+// ethernet, so the read/write logic is fd-agnostic). open() can't be
+// driven end-to-end without CAP_NET_RAW + a real interface.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // open() gate — error path coverage without CAP_NET_RAW
-
-    /// `open()` on a nonexistent interface: either EPERM
-    /// (`socket()` failed, no `CAP_NET_RAW`) or ENODEV (`socket()`
-    /// succeeded, `if_nametoindex` failed). Either way: error,
-    /// not panic. The "no truncation" path is implicit — the
-    /// 23-char name passed straight to `if_nametoindex` which
-    /// errors on the FULL name.
+    /// `open()` on a nonexistent interface errors (EPERM if no
+    /// `CAP_NET_RAW`, else ENODEV) instead of panicking.
     #[test]
     fn open_nonexistent_iface_errors() {
         // 23 chars. C would truncate to 15. We don't.
         let e = RawSocket::open("nonexistent_iface_23chr").unwrap_err();
-        // The error path bifurcates on whether we have
-        // CAP_NET_RAW. Don't gate on root (`geteuid` doesn't
-        // tell you about capabilities anyway). Just check both
-        // possibilities.
+        // Bifurcates on CAP_NET_RAW: EPERM/EACCES from socket()
+        // or ENODEV from if_nametoindex.
         let ek = e.kind();
-        // EPERM → PermissionDenied. ENODEV → NotFound (nix
-        // maps it). EACCES also → PermissionDenied (some
-        // kernels return EACCES for PF_PACKET).
         assert!(
             ek == io::ErrorKind::PermissionDenied || ek == io::ErrorKind::NotFound,
             "unexpected error kind: {ek:?} ({e})"
         );
     }
 
-    /// Empty interface name → `if_nametoindex` errors. The C's
-    /// `Interface = ` (empty) → strncpy of empty string →
-    /// `ifr_name[0] = 0` → ioctl errors (kernel rejects empty
-    /// ifname). We hit the same error via `if_nametoindex`. Not
-    /// stricter (both error); just verifying the path.
+    /// Empty interface name → `if_nametoindex` errors (same as the
+    /// C ioctl path).
     #[test]
     fn open_empty_iface_errors() {
         let e = RawSocket::open("").unwrap_err();
@@ -377,30 +249,12 @@ mod tests {
         );
     }
 
-    // +0 read/write — socketpair end-to-end
-    //
-    // The fakeable boundary holds. PF_PACKET writes raw
-    // ethernet; a socketpair(AF_UNIX, SOCK_DGRAM) writes
-    // datagrams. The +0 arithmetic is fd-agnostic.
-    //
-    // SOCK_SEQPACKET (not STREAM, not DGRAM): one write = one
-    // read (datagram boundary preserved, like PF_PACKET) AND
-    // EOF on close (read returns 0, like PF_PACKET when iface
-    // goes down).
-    //
-    // STREAM would coalesce (two writes → one read; wrong).
-    // DGRAM has the boundary BUT blocks on close (UDP-ish:
-    // connectionless, no EOF concept; gcc-verified, see commit
-    // message). The first attempt used DGRAM and the eof test
-    // hung. SEQPACKET is the right fake.
+    // SEQPACKET (not STREAM/DGRAM): preserves datagram boundary like
+    // PF_PACKET AND EOFs on peer close (DGRAM blocks instead, which
+    // hung the eof test on first try).
 
-    /// Test fixture: a `RawSocket` wrapping one end of a
-    /// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. Can't go through
-    /// `open()` (that does `PF_PACKET`, needs `CAP_NET_RAW`); we
-    /// construct the struct directly.
-    ///
-    /// Module-private struct construction: `RawSocket { fd,
-    /// iface }` works because tests are inside the module.
+    /// `RawSocket` wrapping one end of a SEQPACKET socketpair; can't
+    /// go through `open()` without `CAP_NET_RAW`.
     fn fake_raw(fd: OwnedFd) -> RawSocket {
         RawSocket {
             fd,
@@ -408,8 +262,6 @@ mod tests {
         }
     }
 
-    /// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. nix returns
-    /// `OwnedFd` pairs. CLOEXEC for hygiene.
     fn seqpacket_pair() -> (OwnedFd, OwnedFd) {
         nix::sys::socket::socketpair(
             nix::sys::socket::AddressFamily::Unix,
@@ -493,11 +345,8 @@ mod tests {
         assert_eq!(frame[11], 0x0C); // shost byte 6, untouched
     }
 
-    /// EOF: close the peer, next read errors. `PF_PACKET`
-    /// socket can EOF when the interface goes down. Our test
-    /// fake (SEQPACKET) EOFs when the peer closes — read
-    /// returns 0. gcc-verified: `socketpair(SEQPACKET); close(
-    /// peer); read()` → `0`. Our `n == 0` check fires.
+    /// EOF: SEQPACKET returns 0 on peer close, triggering the
+    /// `n == 0` → UnexpectedEof path.
     #[test]
     fn read_eof_via_seqpacket() {
         let (peer, sock) = seqpacket_pair();
