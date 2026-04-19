@@ -97,22 +97,6 @@ pub struct Paths {
 }
 
 /// Where the pidfile resolved to. Distinct because the *daemon* uses
-/// the same dance but needs to know which branch fired — for the
-/// LOCALSTATEDIR-unwritable warning. The CLI doesn't care, it just
-/// opens whichever exists.
-///
-/// Not used by the CLI yet (it just calls `pidfile()`); the variant
-/// is wired for when `for_daemon()` lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PidfileSource {
-    /// `--pidfile=X`. User said where; no probing.
-    Explicit,
-    /// `/var/run/tinc.NETNAME.pid`. The system path.
-    LocalState,
-    /// `confbase/pid`. The fallback (non-root, unwritable /var/run).
-    Confbase,
-}
-
 /// Input axis. These come from getopt (`-c` / `-n`).
 ///
 /// You only ever set one or the other in practice (`-c` overrides
@@ -202,18 +186,15 @@ impl Paths {
     /// `identname` (the `tinc.NETNAME` bit) is derived here from
     /// `netname`. We don't store it — only one consumer. When syslog
     /// lands, lift it.
-    pub fn resolve_runtime(&mut self, input: &PathsInput) -> PidfileSource {
+    pub fn resolve_runtime(&mut self, input: &PathsInput) {
         // --pidfile wins. No probing.
         if let Some(explicit) = &input.pidfile {
             self.pidfile = Some(explicit.clone());
-            return PidfileSource::Explicit;
+            return;
         }
 
         if self.pidfile.is_some() {
-            // Already resolved. Return Confbase as the harmless
-            // default — the source isn't reread on second call. If
-            // someone needs idempotent source-tracking, store it.
-            return PidfileSource::Confbase;
+            return; // already resolved
         }
 
         // identname: `tinc.NETNAME` or `tinc`. The dot is significant:
@@ -234,16 +215,11 @@ impl Paths {
 
         // The truth table from the doc comment, in code. If neither
         // exists, the final else → system_path.
-        let (path, source) = if system_path.exists() {
-            (system_path, PidfileSource::LocalState)
-        } else if confbase_path.exists() {
-            (confbase_path, PidfileSource::Confbase)
+        self.pidfile = Some(if !system_path.exists() && confbase_path.exists() {
+            confbase_path
         } else {
-            (system_path, PidfileSource::LocalState)
-        };
-
-        self.pidfile = Some(path);
-        source
+            system_path
+        });
     }
 
     /// `pidfilename`. Daemon writes; CLI reads.
@@ -656,16 +632,15 @@ mod tests {
         // this test would just take the LocalState branch and the
         // assert below would fail — spurious failure on a runner
         // with a system tincd. Unlikely enough to not gate on.
-        let src = p.resolve_runtime(&PathsInput::default());
+        p.resolve_runtime(&PathsInput::default());
 
         // The interesting assert: confbase/pid exists, system path
         // (probably) doesn't → fallback fires.
-        if src == PidfileSource::Confbase {
-            assert_eq!(p.pidfile(), dir.join("pid"));
+        if p.pidfile() == dir.join("pid") {
             // And the socket derivation appends:
             assert_eq!(p.unix_socket(), dir.join("pid.socket"));
         }
-        // If src is LocalState, this runner has /var/run/tinc.pid.
+        // Else this runner has /var/run/tinc.pid.
         // Don't fail — just don't assert. The string-surgery tests
         // above cover the derivation; this one is for the probe order.
 
