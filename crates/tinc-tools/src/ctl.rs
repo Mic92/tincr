@@ -737,4 +737,4 @@ impl CtlSocket<UnixStream> {
 // Tests
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

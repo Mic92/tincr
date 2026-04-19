@@ -199,29 +199,13 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::thread;
 
-    /// Same fake-daemon helper as `ctl.rs::tests`. Duplicated, not
-    /// shared, because lifting it would mean `pub(crate)` test
-    /// infrastructure crossing module boundaries. The duplication is
-    /// 30 lines; the indirection of a shared `#[cfg(test)] pub` helper
-    /// is more. If a third module needs it, factor then.
+    /// Thin wrapper over the shared `ctl::tests::fake_daemon` with the
+    /// fixed cookie/pid these tests use.
     fn fake_daemon<F>(theirs: UnixStream, serve: F) -> thread::JoinHandle<()>
     where
         F: FnOnce(&mut BufReader<&UnixStream>, &mut &UnixStream) + Send + 'static,
     {
-        let cookie = "a".repeat(64);
-        thread::spawn(move || {
-            let read = &theirs;
-            let mut write = &theirs;
-            let mut br = BufReader::new(read);
-            // Greeting dance.
-            let mut line = String::new();
-            br.read_line(&mut line).unwrap();
-            assert!(line.contains(&format!("^{cookie}")));
-            writeln!(write, "0 fakedaemon 17.7").unwrap();
-            writeln!(write, "4 0 4242").unwrap(); // pid=4242
-            // Hand off.
-            serve(&mut br, &mut write);
-        })
+        crate::ctl::tests::fake_daemon(theirs, &"a".repeat(64), 4242, serve)
     }
 
     /// `reload` happy path: result=0 → Ok.
