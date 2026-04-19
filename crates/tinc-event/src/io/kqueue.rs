@@ -54,81 +54,48 @@ fn token_udata(token: usize) -> isize {
     token.cast_signed()
 }
 
-/// Build a changelist that only ADDs wanted filters (for initial registration).
-fn add_changes(fd: RawFd, token: usize, i: super::Io) -> [KEvent; 2] {
-    let ident = fd_ident(fd);
-    let udata = token_udata(token);
-    let flags = EvFlags::EV_ADD | EvFlags::EV_CLEAR;
-    let read_ev = KEvent::new(
-        ident,
-        EventFilter::EVFILT_READ,
+/// Shorthand `KEvent` constructor — the only fields that vary across
+/// our changelists are filter and flags.
+#[inline]
+fn kev(fd: RawFd, filter: EventFilter, flags: EvFlags, token: usize) -> KEvent {
+    KEvent::new(
+        fd_ident(fd),
+        filter,
         flags,
         FilterFlag::empty(),
         0,
-        udata,
-    );
-    let write_ev = KEvent::new(
-        ident,
-        EventFilter::EVFILT_WRITE,
-        flags,
-        FilterFlag::empty(),
-        0,
-        udata,
-    );
-    match i {
-        // ReadWrite uses both slots; Read/Write only [0] (see add_count).
-        super::Io::Read | super::Io::ReadWrite => [read_ev, write_ev],
-        super::Io::Write => [write_ev, read_ev],
-    }
+        token_udata(token),
+    )
 }
 
-fn add_count(i: super::Io) -> usize {
-    match i {
-        super::Io::ReadWrite => 2,
-        _ => 1,
-    }
-}
-
-/// Build the changelist for modify. Wanted filters get
-/// `EV_ADD | EV_CLEAR`; unwanted get `EV_DELETE`.
-fn interest_changes(fd: RawFd, token: usize, i: super::Io) -> [KEvent; 2] {
-    let ident = fd_ident(fd);
-    let udata = token_udata(token);
+/// Build a READ+WRITE changelist for `i`. Wanted filters get
+/// `EV_ADD | EV_CLEAR`; unwanted get `EV_DELETE` when
+/// `delete_unwanted`, else they're packed at the tail and the
+/// returned `n` excludes them (so `add()` never submits an
+/// `EV_DELETE` for a filter that was never registered — kqueue would
+/// ENOENT).
+fn changes(fd: RawFd, token: usize, i: super::Io, delete_unwanted: bool) -> ([KEvent; 2], usize) {
+    const ADD: EvFlags = EvFlags::EV_ADD.union(EvFlags::EV_CLEAR);
     let want_read = matches!(i, super::Io::Read | super::Io::ReadWrite);
     let want_write = matches!(i, super::Io::Write | super::Io::ReadWrite);
-
-    let read_ev = KEvent::new(
-        ident,
-        EventFilter::EVFILT_READ,
-        if want_read {
-            EvFlags::EV_ADD | EvFlags::EV_CLEAR
-        } else {
-            EvFlags::EV_DELETE
-        },
-        FilterFlag::empty(),
-        0,
-        udata,
-    );
-    let write_ev = KEvent::new(
-        ident,
-        EventFilter::EVFILT_WRITE,
-        if want_write {
-            EvFlags::EV_ADD | EvFlags::EV_CLEAR
-        } else {
-            EvFlags::EV_DELETE
-        },
-        FilterFlag::empty(),
-        0,
-        udata,
-    );
-    [read_ev, write_ev]
+    let flag = |w| if w { ADD } else { EvFlags::EV_DELETE };
+    let read_ev = kev(fd, EventFilter::EVFILT_READ, flag(want_read), token);
+    let write_ev = kev(fd, EventFilter::EVFILT_WRITE, flag(want_write), token);
+    if delete_unwanted {
+        ([read_ev, write_ev], 2)
+    } else {
+        // Wanted first; n counts only wanted.
+        match i {
+            super::Io::Read => ([read_ev, write_ev], 1),
+            super::Io::Write => ([write_ev, read_ev], 1),
+            super::Io::ReadWrite => ([read_ev, write_ev], 2),
+        }
+    }
 }
 
 pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
-    // On add, only register wanted filters — don't EV_DELETE filters
-    // that were never registered (kqueue returns ENOENT for that).
-    let changes = add_changes(fd.as_raw_fd(), token, i);
-    kq.kevent(&changes[..add_count(i)], &mut [], None)
+    let (ch, n) = changes(fd.as_raw_fd(), token, i, false);
+    kq.kevent(&ch[..n], &mut [], None)
         .map(|_| ())
         .map_err(Into::into)
 }
@@ -137,8 +104,8 @@ pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::
     // kqueue: EV_ADD on an existing filter replaces it (no EEXIST).
     // EV_DELETE on a non-existing filter returns ENOENT — tolerate it
     // by submitting changes one at a time.
-    let changes = interest_changes(fd, token, i);
-    for ch in &changes {
+    let (ch, n) = changes(fd, token, i, true);
+    for ch in &ch[..n] {
         match kq.kevent(std::slice::from_ref(ch), &mut [], None) {
             Ok(_) | Err(nix::errno::Errno::ENOENT) => {}
             Err(e) => return Err(e.into()),
@@ -148,24 +115,9 @@ pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::
 }
 
 pub(super) fn del(kq: &Poller, fd: RawFd) -> io::Result<()> {
-    let ident = fd_ident(fd);
     let changes = [
-        KEvent::new(
-            ident,
-            EventFilter::EVFILT_READ,
-            EvFlags::EV_DELETE,
-            FilterFlag::empty(),
-            0,
-            0,
-        ),
-        KEvent::new(
-            ident,
-            EventFilter::EVFILT_WRITE,
-            EvFlags::EV_DELETE,
-            FilterFlag::empty(),
-            0,
-            0,
-        ),
+        kev(fd, EventFilter::EVFILT_READ, EvFlags::EV_DELETE, 0),
+        kev(fd, EventFilter::EVFILT_WRITE, EvFlags::EV_DELETE, 0),
     ];
     // Ignore ENOENT — filter might not have been registered.
     match kq.kevent(&changes, &mut [], None) {
