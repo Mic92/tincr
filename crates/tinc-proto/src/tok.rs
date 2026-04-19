@@ -28,6 +28,7 @@
 //! it's there because dump is "human-readable-ish" and uses the
 //! fused form everywhere it appears in log messages.
 
+use crate::addr::AddrStr;
 use crate::{MAX_STRING, check_id};
 
 /// Parse failure. Not an enum because the C doesn't distinguish either —
@@ -240,6 +241,24 @@ impl<'a> Tok<'a> {
         match self.s_opt()? {
             Some(t) => t.parse().map(Some).map_err(|_| ParseError),
             None => Ok(None),
+        }
+    }
+
+    /// Optional trailing `(addr, port)` pair. `ADD_EDGE` (local addr),
+    /// `ANS_KEY` (relay-appended reflexive UDP addr) and `REQ_KEY` (the
+    /// Rust-extension reflexive append) all end in two optional `%s`
+    /// tokens that are atomic: `sscanf` returns N or N+2, never N+1,
+    /// and the C handlers reject the odd count. Three call sites had
+    /// the identical `match (s_opt, s_opt)` block open-coded.
+    ///
+    /// # Errors
+    /// `ParseError` if exactly one token remains (atomic-pair
+    /// violation) or a token fails [`AddrStr::new`].
+    pub fn addr_pair_opt(&mut self) -> Result<Option<(AddrStr, AddrStr)>, ParseError> {
+        match (self.s_opt()?, self.s_opt()?) {
+            (None, None) => Ok(None),
+            (Some(a), Some(p)) => Ok(Some((AddrStr::new(a)?, AddrStr::new(p)?))),
+            _ => Err(ParseError),
         }
     }
 

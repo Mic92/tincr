@@ -75,15 +75,9 @@ impl AddEdge {
         let options = t.x()?;
         let weight = t.d()?.max(0); // see field doc
 
-        // Optional pair. Both or neither — sscanf returns 6 or 8, not 7.
-        let local = match (t.s_opt()?, t.s_opt()?) {
-            (None, None) => None,
-            (Some(la), Some(lp)) => Some((AddrStr::new(la)?, AddrStr::new(lp)?)),
-            // 7 tokens. `sscanf` would also return 7 here (parses greedily
-            // until a %s fails); rejected via the `parameter_count != 6 &&
-            // parameter_count != 8` check.
-            _ => return Err(ParseError),
-        };
+        // Optional pair. Both or neither — sscanf returns 6 or 8, not 7
+        // (rejected via the `parameter_count != 6 && != 8` check).
+        let local = t.addr_pair_opt()?;
 
         Ok(Self {
             from: from.to_string(),
