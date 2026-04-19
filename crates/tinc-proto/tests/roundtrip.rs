@@ -246,9 +246,8 @@ prop_compose! {
             proptest::option::of(arb_token()),
         ).prop_map(|(reqno, payload)| ReqKeyExt { reqno, payload })),
     ) -> ReqKey {
-        // udp_addr deliberately None: format() never emits it (relay-only
-        // append via format_with_reflexive). Parse is more permissive than
-        // format, by design — same asymmetry as AnsKey.
+        // udp_addr None: only round-trips when ext.payload is Some
+        // (positional tail); relay path guarantees that, generator doesn't.
         ReqKey { from, to, ext, udp_addr: None }
     }
 }
