@@ -346,60 +346,13 @@ impl Device for BsdTun {
     }
 }
 
-// open() — stubbed, cfg-gated
+// open() constructors are cfg-gated per target. Tests construct
+// `BsdTun { fd, variant, iface }` directly (module-private fields).
 //
-// THREE constructors, all `cfg`-gated to BSD targets. The Linux
-// build doesn't see them. Tests construct `BsdTun { fd, variant,
-// iface }` directly (module-private fields).
-//
-// What goes here when stubs become real:
-//
-//   `open_tun(device: &str) -> io::Result<BsdTun>`
-//     `open(device, O_RDWR | O_NONBLOCK)`. The `device` is
-//     `/dev/tun0`, `/dev/tun1`, etc. FreeBSD/NetBSD/OpenBSD all
-//     have these. `TUNSIFHEAD` ioctl toggles tunifhead mode
-//     (4-byte AF prefix); `TUNSIFMODE` sets broadcast/multicast.
-//     Shim #7 candidate — ioctls again. Same matrix question as
-//     TUNSETIFF. `cfg(any(target_os = "freebsd", "netbsd",
-//     "openbsd", "dragonfly"))`.
-//
-//   `open_utun(unit: Option<u32>) -> io::Result<BsdTun>`
-//     `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` then
-//     `ioctl(CTLIOCGINFO)` to resolve the utun control ID, then
-//     `connect(sockaddr_ctl{...})` with the unit number.
-//     macOS-specific. `getsockopt(UTUN_OPT_IFNAME)` reads back
-//     the kernel-chosen `utunN` name. Shim #8 — the
-//     `PF_SYSTEM`/`sockaddr_ctl` types are Apple-only; nix has
-//     nothing for these. Hand-rolled. `cfg(target_os = "macos")`.
-//
-//   `open_tap(device: &str) -> io::Result<BsdTun>`
-//     `open(device)` then `TAPGIFNAME` ioctl to read the iface
-//     name back. `cfg(any(freebsd, ...))`.
-//
-// The stubs aren't TODO comments — they're an ACTUAL plan with
-// the shim-matrix questions noted. When CI gets a BSD runner,
-// this is the worklist.
-
-#[cfg(any(
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "dragonfly",
-))]
-impl BsdTun {
-    /// PLACEHOLDER: BSD open paths land when CI has a BSD
-    /// runner. See the block comment above.
-    ///
-    /// # Errors
-    /// Always errors `Unsupported`.
-    pub fn open(_variant: BsdVariant) -> io::Result<Self> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "BsdTun::open: BSD open paths not yet implemented (read/write logic is; \
-             see bsd.rs block comment for the per-variant plan)",
-        ))
-    }
-}
+// FreeBSD/NetBSD/OpenBSD/DragonFly `/dev/tun*` + `TUNSIFHEAD` and
+// `/dev/tap*` + `TAPGIFNAME` open paths are not yet wired — they
+// land with a BSD CI runner. The variant-dispatched read/write above
+// is fd-agnostic and already covered by the pipe/seqpacket tests.
 
 // macOS utun constructor via SYSPROTO_CONTROL socket.
 //
