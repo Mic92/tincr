@@ -274,21 +274,23 @@ pub enum FeedResult {
 }
 
 impl Connection {
-    /// `handle_new_unix_connection`.
-    #[must_use]
-    pub fn new_control(fd: OwnedFd, now: Instant) -> Self {
+    /// Shared field defaults for the three constructors. Everything
+    /// the variants don't care about lives here so adding a new
+    /// `Connection` field touches one place, not three 40-line
+    /// literals.
+    fn new_base(fd: OwnedFd, name: String, hostname: String, now: Instant) -> Self {
         Self {
             fd,
             inbuf: LineBuf::default(),
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),
             control: false,
-            is_unix_ctl: true,
+            is_unix_ctl: false,
             pcap: false,
             pcap_snaplen: 0,
             invite: None,
-            name: "<control>".to_string(),               // C :800
-            hostname: "localhost port unix".to_string(), // C :802
+            name,
+            hostname,
             last_ping_time: now,
             protocol_minor: 0,
             ecdsa: None,
@@ -319,48 +321,26 @@ impl Connection {
         }
     }
 
+    /// `handle_new_unix_connection`.
+    #[must_use]
+    pub fn new_control(fd: OwnedFd, now: Instant) -> Self {
+        Self {
+            is_unix_ctl: true,
+            ..Self::new_base(
+                fd,
+                "<control>".to_string(),           // C :800
+                "localhost port unix".to_string(), // C :802
+                now,
+            )
+        }
+    }
+
     /// `handle_new_meta_connection`.
     #[must_use]
     pub fn new_meta(fd: OwnedFd, hostname: String, address: SocketAddr, now: Instant) -> Self {
         Self {
-            fd,
-            inbuf: LineBuf::default(),
-            outbuf: LineBuf::default(),
-            allow_request: Some(Request::Id),
-            control: false,
-            is_unix_ctl: false,
-            pcap: false,
-            pcap_snaplen: 0,
-            invite: None,
-            name: "<unknown>".to_string(), // C :759
-            hostname,
-            last_ping_time: now,
-            protocol_minor: 0,
-            ecdsa: None,
-            sptps: None,
-            options: crate::proto::ConnOptions::empty(),
-            estimated_weight: 0,
-            start: now,
             address: Some(address),
-            active: false,
-            activated_at: None,
-            pinged: false,
-            last_ping_sent: None,
-            ping_rtt_ms: 0,
-            srtt_ms: 0,
-            last_weight_gossip: None,
-            connecting: false,
-            outgoing: None,
-            tcplen: 0,
-            sptpslen: 0,
-            sptps_buf: Vec::new(),
-            host_indirect: None,
-            host_tcponly: None,
-            host_clamp_mss: None,
-            host_weight: None,
-            pmtu_cap: None,
-            log_level: None,
-            prev_debug_level: None,
+            ..Self::new_base(fd, "<unknown>".to_string() /* C :759 */, hostname, now)
         }
     }
 
@@ -376,44 +356,10 @@ impl Connection {
         now: Instant,
     ) -> Self {
         Self {
-            fd,
-            inbuf: LineBuf::default(),
-            outbuf: LineBuf::default(),
-            allow_request: Some(Request::Id),
-            control: false,
-            is_unix_ctl: false,
-            pcap: false,
-            pcap_snaplen: 0,
-            invite: None,
-            name,
-            hostname,
-            last_ping_time: now,
-            protocol_minor: 0,
-            ecdsa: None,
-            sptps: None,
-            options: crate::proto::ConnOptions::empty(),
-            estimated_weight: 0,
-            start: now,
             address: Some(address),
-            active: false,
-            activated_at: None,
-            pinged: false,
-            last_ping_sent: None,
-            ping_rtt_ms: 0,
-            srtt_ms: 0,
-            last_weight_gossip: None,
             connecting: true, // C :652
             outgoing: Some(outgoing),
-            tcplen: 0,
-            sptpslen: 0,
-            sptps_buf: Vec::new(),
-            host_indirect: None,
-            host_tcponly: None,
-            host_clamp_mss: None,
-            host_weight: None,
-            pmtu_cap: None,
-            log_level: None,
-            prev_debug_level: None,
+            ..Self::new_base(fd, name, hostname, now)
         }
     }
 }
