@@ -29,6 +29,21 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
 
+/// `fill_msg`: build the SIG transcript `[role-bit][kex_a][kex_b][label]`.
+///
+/// `send_sig` passes `(initiator, mykex, hiskex)`; `receive_sig` passes
+/// `(!initiator, hiskex, mykex)`. Both sides agree on what's signed
+/// because their roles swap — the bit and the kex order flip together.
+/// One builder so the two sides can't drift apart.
+fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + label.len()));
+    msg.push(u8::from(bit));
+    msg.extend_from_slice(kex_a);
+    msg.extend_from_slice(kex_b);
+    msg.extend_from_slice(label);
+    msg
+}
+
 /// Max records sealed per `outcipher` before app-data sends return
 /// `InvalidState`. Wire nonce is `outseqno as u32`; 2^32 = nonce reuse.
 /// Margin covers shard `fetch_add` slop + the rekey handshake itself.
@@ -911,12 +926,7 @@ impl Sptps {
         let mykex = self.mykex.as_ref().expect("send_sig with no mykex");
         let hiskex = self.hiskex.as_ref().expect("send_sig with no hiskex");
 
-        let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + self.label.len()));
-        msg.push(u8::from(self.role.is_initiator()));
-        msg.extend_from_slice(&**mykex);
-        msg.extend_from_slice(&**hiskex);
-        msg.extend_from_slice(&self.label);
-
+        let msg = sig_transcript(self.role.is_initiator(), &**mykex, &**hiskex, &self.label);
         let sig = self.mykey.sign(&msg);
         self.send_record_priv(REC_HANDSHAKE, &sig, out);
     }
@@ -1060,11 +1070,7 @@ impl Sptps {
         let mykex = self.mykex.as_ref().expect("receive_sig with no mykex");
         let hiskex = self.hiskex.as_ref().expect("receive_sig with no hiskex");
         {
-            let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + self.label.len()));
-            msg.push(u8::from(!self.role.is_initiator()));
-            msg.extend_from_slice(&**hiskex);
-            msg.extend_from_slice(&**mykex);
-            msg.extend_from_slice(&self.label);
+            let msg = sig_transcript(!self.role.is_initiator(), &**hiskex, &**mykex, &self.label);
             sign::verify(&self.hiskey, &msg, sig).map_err(|_| SptpsError::BadSig)?;
         }
 
