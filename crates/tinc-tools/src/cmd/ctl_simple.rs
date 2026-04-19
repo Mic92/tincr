@@ -63,6 +63,18 @@ pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
     Ok(ctl.pid)
 }
 
+/// connect → send `req` → expect `result == 0` ack. Three commands
+/// (reload/purge/retry) differ only in the request and the error text.
+#[cfg(unix)]
+fn simple(paths: &Paths, req: CtlRequest, err: &str) -> Result<(), CmdError> {
+    let mut ctl = connect(paths)?;
+    ctl.send(req)?;
+    if ctl.recv_ack(req)? != 0 {
+        return Err(CmdError::BadInput(err.into()));
+    }
+    Ok(())
+}
+
 /// `cmd_reload`. Tell the daemon to re-read its config. The daemon's
 /// `reload_configuration()` returns nonzero on error (config parse
 /// failed, unknown variable, etc.); that surfaces as our error.
@@ -71,13 +83,7 @@ pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
 /// Connect failure, or daemon-side reload returned nonzero.
 #[cfg(unix)]
 pub fn reload(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Reload)?;
-    let result = ctl.recv_ack(CtlRequest::Reload)?;
-    if result != 0 {
-        return Err(CmdError::BadInput("Could not reload configuration.".into()));
-    }
-    Ok(())
+    simple(paths, CtlRequest::Reload, "Could not reload configuration.")
 }
 
 /// `cmd_purge`. Tell the daemon to forget unreachable nodes. The
@@ -88,15 +94,7 @@ pub fn reload(paths: &Paths) -> Result<(), CmdError> {
 /// walk and free); we still check `result` out of habit.
 #[cfg(unix)]
 pub fn purge(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Purge)?;
-    let result = ctl.recv_ack(CtlRequest::Purge)?;
-    if result != 0 {
-        return Err(CmdError::BadInput(
-            "Could not purge old information.".into(),
-        ));
-    }
-    Ok(())
+    simple(paths, CtlRequest::Purge, "Could not purge old information.")
 }
 
 /// `cmd_retry`. Tell the daemon to retry outgoing connections
@@ -107,15 +105,11 @@ pub fn purge(paths: &Paths) -> Result<(), CmdError> {
 /// Connect failure.
 #[cfg(unix)]
 pub fn retry(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Retry)?;
-    let result = ctl.recv_ack(CtlRequest::Retry)?;
-    if result != 0 {
-        return Err(CmdError::BadInput(
-            "Could not retry outgoing connections.".into(),
-        ));
-    }
-    Ok(())
+    simple(
+        paths,
+        CtlRequest::Retry,
+        "Could not retry outgoing connections.",
+    )
 }
 
 /// `cmd_stop`. Tell the daemon to exit. The daemon acks then
