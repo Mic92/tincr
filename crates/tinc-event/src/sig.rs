@@ -270,13 +270,7 @@ mod tests {
     use std::sync::Mutex;
 
     /// `SelfPipe` is a process-global singleton (one `PIPE_WR`
-    /// static, one signal handler per signum). Tests run on parallel
-    /// threads. Serialize. Each test takes the lock for its full
-    /// scope; `SelfPipe::drop` resets `PIPE_WR` before unlock.
-    ///
-    /// Poison: if a test panics holding the lock, the next test
-    /// would get `PoisonError`. We `unwrap()` — panic propagates,
-    /// the suite fails, that's correct.
+    /// static); serialize tests so they don't race on it.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,23 +279,14 @@ mod tests {
         Exit,
     }
 
-    /// Can't easily test the actual signal delivery without a
-    /// subprocess (sending SIGTERM to the test process is rude).
-    /// What we CAN test: the pipe mechanics. Write a byte to the
-    /// pipe directly (bypassing the handler), drain reads it.
-    ///
-    /// This proves the table dispatch and the read-loop work. The
-    /// handler itself is 3 lines of obviously-correct code (atomic
-    /// load + write); the integration test (daemon sends SIGHUP to
-    /// itself) is the proof for that.
+    /// Pipe mechanics + table dispatch, bypassing the handler
+    /// (sending real signals to the test process is rude).
     #[test]
     fn drain_dispatches_from_table() {
         let _g = SERIAL.lock().unwrap();
         let mut sp: SelfPipe<Sig> = SelfPipe::new().unwrap();
-        // Don't actually install handlers — populate table directly.
-        // Tests run in parallel; installing SIGHUP/TERM handlers is
-        // process-global and races. The handler installation IS
-        // tested, but in the integration suite.
+        // Populate table directly; installing real handlers is
+        // process-global and covered by the integration suite.
         sp.table[Signal::SIGHUP as usize] = Some(Sig::Reload);
         sp.table[Signal::SIGTERM as usize] = Some(Sig::Exit);
 

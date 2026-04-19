@@ -50,12 +50,9 @@ use kqueue::{
 
 use crate::MAX_EVENTS_PER_TURN;
 
-/// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h:26-27`.
-///
-/// `io_set(io, 0)` is only ever called internally during `io_del`.
-/// The daemon-level API never sets zero interest; it goes READ ↔︎
-/// READ|WRITE (the meta connection adds WRITE on outbuf, drops it
-/// when drained).
+/// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h`.
+/// No zero-interest state — the daemon only ever toggles between
+/// `Read` and `ReadWrite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Io {
     Read,
@@ -104,11 +101,8 @@ struct Slot<W> {
 pub struct EventLoop<W> {
     ep: Poller,
     events: Box<[RawEvent; MAX_EVENTS_PER_TURN]>,
-    /// Hand-rolled slab. `None` = freed slot. The epoll token indexes
-    /// directly. Same data structure as `Timers::slots` but with
-    /// `Option<Slot>` instead of a separate freelist — the `None`
-    /// IS the freelist marker, and we need `get(token).is_none()`
-    /// to be the cheap is-this-stale check.
+    /// Hand-rolled slab; `None` = freed. The epoll token indexes this
+    /// directly so `get(token).is_none()` is the cheap stale check.
     slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
     /// Count of `Some` entries in `slots` — kept so `len()` is O(1)
@@ -280,11 +274,7 @@ impl<W: Copy> EventLoop<W> {
         Ok(())
     }
 
-    /// Look up the `what` for an id. The daemon needs this when
-    /// `set` is called from inside a match arm and it wants to
-    /// double-check what the slot was (debug paths).
-    ///
-    /// Returns `None` if id is dangling.
+    /// Look up the `what` for an id. `None` if dangling.
     #[must_use]
     pub fn what(&self, id: IoId) -> Option<W> {
         self.slots.get(id.0)?.as_ref().map(|s| s.what)
@@ -386,12 +376,8 @@ mod tests {
         ev.turn(Some(Duration::from_millis(10)), &mut out).unwrap();
         assert!(out.is_empty(), "got stale WRITE after reregister to READ");
 
-        // Hold rd live (otherwise the pipe is half-closed and epoll
-        // might report HUP-as-readable on wr).
         drop(rd);
-        // wr's fd gets closed when wr drops; del before that to avoid
-        // a deregister-on-closed-fd EBADF (which we'd swallow, but
-        // let's not depend on the swallow).
+        // del BEFORE wr drops to avoid the EBADF tripwire.
         ev.del(id);
         drop(wr);
     }
@@ -441,11 +427,8 @@ mod tests {
         ev.del(id2);
     }
 
-    /// Two events in one turn. WRITE before READ per dispatch order.
-    ///
-    /// This tests the dispatch ORDER for one fd that's both readable
-    /// and writable. Socketpair (not pipe — pipes are unidirectional;
-    /// a single pipe fd is never both).
+    /// One fd both readable and writable → WRITE dispatched first.
+    /// Socketpair, not pipe — a pipe fd is never both.
     #[test]
     fn write_before_read_same_fd() {
         let (mut a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
