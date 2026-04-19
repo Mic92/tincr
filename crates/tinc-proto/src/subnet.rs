@@ -295,28 +295,27 @@ impl FromStr for Subnet {
             return Ok(Self::Mac { addr, weight });
         }
 
+        // V4/V6 share the prefix-defaulting rule, only `max` differs.
+        // The C checks `> 32` / `> 128` *after* parsing as `int`; we kept
+        // `prefix` as `i32` above for the same reason and bound-check here.
+        let clamp = |max: u8| match prefix {
+            None => Ok(max),
+            Some(p) if p <= i32::from(max) => Ok(u8::try_from(p).unwrap()),
+            _ => Err(ParseError),
+        };
+
         if let Ok(addr) = s.parse::<Ipv4Addr>() {
-            let prefix = match prefix {
-                None => 32,
-                Some(p) if p <= 32 => u8::try_from(p).unwrap(),
-                _ => return Err(ParseError),
-            };
             return Ok(Self::V4 {
                 addr,
-                prefix,
+                prefix: clamp(32)?,
                 weight,
             });
         }
 
         if let Ok(addr) = s.parse::<Ipv6Addr>() {
-            let prefix = match prefix {
-                None => 128,
-                Some(p) if p <= 128 => u8::try_from(p).unwrap(),
-                _ => return Err(ParseError),
-            };
             return Ok(Self::V6 {
                 addr,
-                prefix,
+                prefix: clamp(128)?,
                 weight,
             });
         }
