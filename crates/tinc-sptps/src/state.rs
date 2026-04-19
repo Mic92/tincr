@@ -602,7 +602,8 @@ impl Sptps {
     ///
     /// Caller MUST emit all `n` reserved seqnos. Gaps are harmless on
     /// the wire (replay window tolerates skips) but waste seqno space.
-    pub fn alloc_seqnos(&mut self, n: u32) -> u32 {
+    #[must_use]
+    pub fn alloc_seqnos(&self, n: u32) -> u32 {
         // u64 fetch_add, truncate at read. `(prev + n) as u32 ==
         // (prev as u32).wrapping_add(n)`: the high bits the wider
         // counter carries are invisible on the wire. `Relaxed`: the
