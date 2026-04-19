@@ -345,12 +345,6 @@ fn validate_subnet(value: &str) -> Result<(), CmdError> {
 
 // Stage 3: the file walk. Read, transform, write-via-tmpfile, rename.
 
-/// Result of a `Get`. Values found, in file order.
-///
-/// The binary prints one per line. Separate type so tests can
-/// assert without capturing stdout.
-pub type GetResult = Vec<String>;
-
 /// Result of a `Set`/`Add`/`Del`. The walk produces warnings as a
 /// side effect (gathered by the caller); the bool is "did anything
 /// change?" — `Del` returns error if it didn't delete anything,
@@ -370,7 +364,7 @@ pub struct EditResult {
 ///
 /// # Errors
 /// File doesn't exist (`fopen` fails) or read error.
-pub fn run_get(path: &std::path::Path, variable: &str) -> Result<GetResult, CmdError> {
+pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, CmdError> {
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     let mut found = Vec::new();
@@ -615,7 +609,7 @@ fn split_line(line: &str) -> Option<(&str, &str)> {
 #[derive(Debug)]
 pub enum ConfigOutput {
     /// `Get` found these values. Binary prints one per line.
-    Got(GetResult),
+    Got(Vec<String>),
     /// `Set`/`Add`/`Del` succeeded. Binary fires reload if `changed`.
     Edited(EditResult),
 }

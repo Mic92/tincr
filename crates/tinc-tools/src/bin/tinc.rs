@@ -853,7 +853,7 @@ fn cmd_disconnect(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), Cmd
 /// a hint: scripts parsing `tinc dump invitations | while read` don't
 /// want a non-data line. We match.
 fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use cmd::dump::{DumpOutput, Kind, dump, dump_invitations, parse_kind};
+    use cmd::dump::{Kind, dump, dump_invitations, parse_kind};
 
     // ─── argv → Kind
     // The arity errors and `Unknown dump type` live in here.
@@ -880,8 +880,7 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     }
 
     // ─── Daemon-backed: connect, send, recv, format
-    let DumpOutput::Lines(lines) = dump(paths, kind)?;
-    for line in lines {
+    for line in dump(paths, kind)? {
         println!("{line}");
     }
     // Empty dump → silent. C: zero-iteration while loop, return 0.

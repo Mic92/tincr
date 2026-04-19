@@ -247,12 +247,6 @@ impl StatusBit {
     pub const UDP_CONFIRMED: Self = Self(1 << 7);
 }
 
-// Backward-compat aliases for the existing dump.rs callers. Same
-// values, just the old names. Module-private — new code uses
-// StatusBit.
-const STATUS_REACHABLE: u32 = StatusBit::REACHABLE.0;
-const STATUS_VALIDKEY: u32 = StatusBit::VALIDKEY.0;
-
 // NodeRow — the 22-field beast
 
 /// One row of `dump nodes`. 22 sscanf fields.
@@ -396,13 +390,13 @@ impl NodeRow {
     /// Is bit 4 (reachable) set? `dump reachable nodes` filter.
     #[must_use]
     pub const fn reachable(&self) -> bool {
-        self.status & STATUS_REACHABLE != 0
+        self.status & StatusBit::REACHABLE.0 != 0
     }
 
     /// Bit 1 (validkey). Graph mode picks black for !validkey.
     #[must_use]
     pub const fn validkey(&self) -> bool {
-        self.status & STATUS_VALIDKEY != 0
+        self.status & StatusBit::VALIDKEY.0 != 0
     }
 
     /// The plain-text output line.
@@ -874,17 +868,9 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
 // The daemon-backed dumps
 
-/// Result of a daemon dump. Separate type so the binary can route
-/// `Ok(DumpOutput::Lines(v))` → `println!` per line and the
-/// "no entries" case to stderr (the convention for empty dumps is
-/// silence — exit 0, no output).
-#[derive(Debug)]
-pub enum DumpOutput {
-    /// Lines ready for stdout. The binary prints each + `\n`.
-    Lines(Vec<String>),
-}
-
-/// Run one of the daemon-backed dumps.
+/// Run one of the daemon-backed dumps; returns lines ready for
+/// stdout (the binary prints each + `\n`). An empty vec is silence
+/// — exit 0, no output.
 ///
 /// `paths` must be `resolve_runtime()`d (the binary's `needs_daemon`
 /// gate handles this).
@@ -906,7 +892,7 @@ pub enum DumpOutput {
 /// against same-version daemon — if it does, the format strings
 /// drifted, file a bug.
 #[cfg(unix)]
-pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
+pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
 
     let mut ctl = CtlSocket::connect(paths)?;
@@ -1061,7 +1047,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<DumpOutput, CmdError> {
         _ => {}
     }
 
-    Ok(DumpOutput::Lines(lines))
+    Ok(lines)
 }
 
 // Tests
