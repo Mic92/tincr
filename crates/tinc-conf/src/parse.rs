@@ -626,17 +626,20 @@ mod tests {
         (e.variable, e.value)
     }
 
-    /// Separator grammar: all four shapes parse identically.
+    /// Separator grammar: all shapes parse identically. Covers `=`,
+    /// space, ` = `, tabs, mixed-whitespace, and no-`=`.
     #[test]
     fn line_separator_forms() {
-        assert_eq!(ok("Port=655"), ("Port".into(), "655".into()));
-        assert_eq!(ok("Port 655"), ("Port".into(), "655".into()));
-        assert_eq!(ok("Port = 655"), ("Port".into(), "655".into()));
-        assert_eq!(ok("Port\t=\t655"), ("Port".into(), "655".into()));
-        // Mixed tabs and spaces, multiple of each.
-        assert_eq!(ok("Port \t  = \t  655"), ("Port".into(), "655".into()));
-        // No `=` at all.
-        assert_eq!(ok("Port\t655"), ("Port".into(), "655".into()));
+        for line in [
+            "Port=655",
+            "Port 655",
+            "Port = 655",
+            "Port\t=\t655",
+            "Port \t  = \t  655",
+            "Port\t655",
+        ] {
+            assert_eq!(ok(line), ("Port".into(), "655".into()), "{line:?}");
+        }
     }
 
     /// `=` is in the strcspn set, so it terminates the variable even
@@ -776,14 +779,18 @@ mod tests {
         assert_eq!(vals, ["b-3", "a-5"]);
     }
 
-    #[test]
-    fn entry_bool() {
-        let e = |v: &str| Entry {
+    fn entry(v: &str) -> Entry {
+        Entry {
             key_folded: "x".into(),
             variable: "X".into(),
             value: v.into(),
             source: s(),
-        };
+        }
+    }
+
+    #[test]
+    fn entry_bool() {
+        let e = entry;
         assert_eq!(e("yes").get_bool(), Ok(true));
         assert_eq!(e("YES").get_bool(), Ok(true));
         assert_eq!(e("Yes").get_bool(), Ok(true));
@@ -799,12 +806,7 @@ mod tests {
     /// `%d` semantics, with the trailing-garbage tightening.
     #[test]
     fn entry_int() {
-        let e = |v: &str| Entry {
-            key_folded: "x".into(),
-            variable: "X".into(),
-            value: v.into(),
-            source: s(),
-        };
+        let e = entry;
         assert_eq!(e("655").get_int(), Ok(655));
         assert_eq!(e("-1").get_int(), Ok(-1));
         // Leading whitespace: `%d` accepts.

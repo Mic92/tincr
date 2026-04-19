@@ -375,84 +375,43 @@ mod tests {
     // The test exercises the OFFSET ARITHMETIC, which is fd-
     // agnostic.)
 
-    /// The full read flow: write IPv4 bytes to a pipe, `FdTun`
-    /// reads at +14, synthesizes 0x0800 ethertype at +12,
-    /// returns len+14.
-    ///
-    /// idiom.
+    /// The full read flow: write IP bytes to a pipe, `FdTun`
+    /// reads at +14, synthesizes the ethertype at +12,
+    /// returns len+14. Only byte 0 of the packet matters (the
+    /// version nibble); the rest is opaque payload.
     #[test]
-    fn read_ipv4_via_pipe() {
-        // Minimal IPv4-ish packet. Only byte 0 matters (the
-        // version nibble); the rest is payload from our
-        // perspective.
-        let ip_packet = [
-            0x45, // version=4, IHL=5
-            0x00, // DSCP/ECN
-            0x00, 0x14, // total length = 20 (header only)
-            0xAB, 0xCD, // identification (arbitrary)
-            0x00, 0x00, // flags + fragment offset
-            0x40, // TTL = 64
-            0x01, // protocol = ICMP
-            0x00, 0x00, // checksum (don't care)
-            10, 0, 0, 1, // src 10.0.0.1
-            10, 0, 0, 2, // dst 10.0.0.2
+    fn read_ip_via_pipe() {
+        // Minimal IPv4-ish packet (`0x45` = version 4, IHL 5;
+        // 20-byte header) and IPv6-ish stub (`0x60`; 40-byte
+        // header). Only the version nibble drives the synth.
+        #[rustfmt::skip]
+        let v4: &[u8] = &[
+            0x45, 0x00, 0x00, 0x14, 0xAB, 0xCD, 0x00, 0x00,
+            0x40, 0x01, 0x00, 0x00, 10, 0, 0, 1, 10, 0, 0, 2,
         ];
-        assert_eq!(ip_packet.len(), 20); // sanity: standard IPv4 hdr
-
-        // pipe(). `r` for FdTun, `w` for test driver.
-        let (r, w) = pipe();
-        // Write the IP packet to the pipe.
-        write_all(&w, &ip_packet);
-
-        // Wrap `r` as FdTun via Inherited.
-        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
-
-        // Read. Buffer must be ≥ MTU.
-        let mut buf = [0u8; MTU];
-        let n = tun.read(&mut buf).unwrap();
-
-        // Length: 20 (IP packet) + 14 (synthetic ether) = 34.
-        assert_eq!(n, 20 + ETH_HLEN);
-
-        // Bytes 0-11: zeroed MACs.
-        assert_eq!(&buf[0..12], &[0u8; 12]);
-
-        // Bytes 12-13: ethertype, IPv4, big-endian.
-        assert_eq!(&buf[12..14], &[0x08, 0x00]);
-
-        // Bytes 14..34: the IP packet, verbatim.
-        assert_eq!(&buf[14..34], &ip_packet);
-
-        // `w` and `tun` drop here. Pipe closes both ends.
-    }
-
-    /// Same but IPv6. Byte 0 = 0x60. Ethertype = 0x86DD.
-    #[test]
-    fn read_ipv6_via_pipe() {
-        // Minimal IPv6-ish prefix. 40-byte header, but we only
-        // need the first byte to be 0x6?. Send a stub.
-        let ip_packet = [
-            0x60, 0x00, 0x00, 0x00, // version=6, tc=0, flow=0
-            0x00, 0x00, // payload length = 0
-            0x3B, // next header = no-next-header
-            0x40, // hop limit = 64
-            // src: ::1 (loopback)
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // dst: ::2
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        #[rustfmt::skip]
+        let v6: &[u8] = &[
+            0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3B, 0x40,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // src ::1
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, // dst ::2
         ];
-        assert_eq!(ip_packet.len(), 40);
+        for (tag, ip_packet, ethertype) in [("v4", v4, [0x08, 0x00]), ("v6", v6, [0x86, 0xDD])] {
+            let (r, w) = pipe();
+            write_all(&w, ip_packet);
 
-        let (r, w) = pipe();
-        write_all(&w, &ip_packet);
+            let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
+            let mut buf = [0u8; MTU];
+            let n = tun.read(&mut buf).unwrap();
 
-        let mut tun = FdTun::open(FdSource::Inherited(r)).unwrap();
-        let mut buf = [0u8; MTU];
-        let n = tun.read(&mut buf).unwrap();
-
-        assert_eq!(n, 40 + ETH_HLEN);
-        assert_eq!(&buf[0..12], &[0u8; 12]);
-        assert_eq!(&buf[12..14], &[0x86, 0xDD]); // ← IPv6 ethertype
-        assert_eq!(&buf[14..54], &ip_packet);
+            // Length: IP packet + 14 (synthetic ether).
+            assert_eq!(n, ip_packet.len() + ETH_HLEN, "{tag}: len");
+            // Bytes 0-11: zeroed MACs.
+            assert_eq!(&buf[0..12], &[0u8; 12], "{tag}: MACs");
+            // Bytes 12-13: ethertype, big-endian.
+            assert_eq!(&buf[12..14], &ethertype, "{tag}: ethertype");
+            // Bytes 14..n: the IP packet, verbatim.
+            assert_eq!(&buf[14..n], ip_packet, "{tag}: payload");
+        }
     }
 
     /// Unknown IP version → `InvalidData`.

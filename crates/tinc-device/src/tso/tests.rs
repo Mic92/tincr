@@ -332,53 +332,28 @@ fn split_seq_wraps() {
 // ─── tso_split: error paths ────────────────────────────────
 
 #[test]
-fn split_err_too_short() {
-    let hdr = hdr_v4(100);
-    let mut out = [0u8; 1600];
-    let mut lens = [0usize; 1];
-    // Can't even read TCP data offset.
-    assert_eq!(
-        tso_split(&[0x45; 30], &hdr, GsoType::TcpV4, &mut out, 1600, &mut lens),
-        Err(TsoError::TooShort)
-    );
-}
-
-#[test]
-fn split_err_bad_tcp_hlen() {
-    let mut pkt = build_v4_tcp(100);
-    pkt[32] = 3 << 4; // doff=3 → 12 bytes, < 20.
-    let hdr = hdr_v4(100);
-    let mut out = [0u8; 1600];
-    let mut lens = [0usize; 1];
-    assert_eq!(
-        tso_split(&pkt, &hdr, GsoType::TcpV4, &mut out, 1600, &mut lens),
-        Err(TsoError::BadTcpHlen)
-    );
-}
-
-#[test]
-fn split_err_ip_mismatch() {
-    let pkt = build_v4_tcp(100);
-    let hdr = hdr_v6(100); // says v6, packet is v4.
-    let mut out = [0u8; 1600];
-    let mut lens = [0usize; 1];
-    assert_eq!(
-        tso_split(&pkt, &hdr, GsoType::TcpV6, &mut out, 1600, &mut lens),
-        Err(TsoError::IpVersionMismatch)
-    );
-}
-
-#[test]
-fn split_err_too_many_segments() {
-    // 1000 bytes / 100 gso = 10 segments, but only 2 slots.
-    let pkt = build_v4_tcp(1000);
-    let hdr = hdr_v4(100);
-    let mut out = vec![0u8; 2 * 1600];
-    let mut lens = [0usize; 2];
-    assert_eq!(
-        tso_split(&pkt, &hdr, GsoType::TcpV4, &mut out, 1600, &mut lens),
-        Err(TsoError::TooManySegments)
-    );
+fn split_errors() {
+    let mut bad_hlen = build_v4_tcp(100);
+    bad_hlen[32] = 3 << 4; // doff=3 → 12 bytes, < 20.
+    #[rustfmt::skip]
+    let cases = [
+        // Can't even read TCP data offset.
+        ("too_short",   vec![0x45; 30],     hdr_v4(100), GsoType::TcpV4, 1, TsoError::TooShort),
+        ("bad_tcphlen", bad_hlen,           hdr_v4(100), GsoType::TcpV4, 1, TsoError::BadTcpHlen),
+        // hdr says v6, packet is v4.
+        ("ip_mismatch", build_v4_tcp(100),  hdr_v6(100), GsoType::TcpV6, 1, TsoError::IpVersionMismatch),
+        // 1000 bytes / 100 gso = 10 segments, but only 2 slots.
+        ("too_many",    build_v4_tcp(1000), hdr_v4(100), GsoType::TcpV4, 2, TsoError::TooManySegments),
+    ];
+    for (name, pkt, hdr, gso, slots, want) in &cases {
+        let mut out = vec![0u8; slots * 1600];
+        let mut lens = vec![0usize; *slots];
+        assert_eq!(
+            tso_split(pkt, hdr, *gso, &mut out, 1600, &mut lens),
+            Err(*want),
+            "{name}"
+        );
+    }
 }
 
 /// `gso_none_checksum`: the partial-csum completion. Build a

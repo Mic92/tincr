@@ -525,12 +525,16 @@ mod tests {
     /// `Io::wants` truth table. Unit-level — no syscalls.
     #[test]
     fn io_wants_table() {
-        assert!(Io::Read.wants(Ready::Read));
-        assert!(!Io::Read.wants(Ready::Write));
-        assert!(!Io::Write.wants(Ready::Read));
-        assert!(Io::Write.wants(Ready::Write));
-        assert!(Io::ReadWrite.wants(Ready::Read));
-        assert!(Io::ReadWrite.wants(Ready::Write));
+        for (io, ready, want) in [
+            (Io::Read, Ready::Read, true),
+            (Io::Read, Ready::Write, false),
+            (Io::Write, Ready::Read, false),
+            (Io::Write, Ready::Write, true),
+            (Io::ReadWrite, Ready::Read, true),
+            (Io::ReadWrite, Ready::Write, true),
+        ] {
+            assert_eq!(io.wants(ready), want, "{io:?}.wants({ready:?})");
+        }
     }
 
     /// `out` is cleared at top of turn — caller reuses one Vec.

@@ -344,47 +344,33 @@ mod tests {
 
     // open() gate — error path coverage without CAP_NET_RAW
 
-    /// `open()` on a nonexistent interface: either EPERM
-    /// (`socket()` failed, no `CAP_NET_RAW`) or ENODEV (`socket()`
-    /// succeeded, `if_nametoindex` failed). Either way: error,
-    /// not panic. The "no truncation" path is implicit — the
-    /// 23-char name passed straight to `if_nametoindex` which
-    /// errors on the FULL name.
+    /// `open()` on a bad interface name: either EPERM/EACCES
+    /// (`socket()` failed, no `CAP_NET_RAW`) or ENODEV/EINVAL
+    /// (`socket()` succeeded, `if_nametoindex` failed). Either
+    /// way: error, not panic.
+    ///
+    /// The 23-char case proves "no truncation" implicitly — the
+    /// full name reaches `if_nametoindex` (C would truncate to
+    /// 15). The empty case mirrors C's `Interface = ` → strncpy
+    /// of empty → ioctl reject; glibc's `if_nametoindex("")`
+    /// sometimes returns EINVAL instead of ENODEV.
     #[test]
-    fn open_nonexistent_iface_errors() {
-        // 23 chars. C would truncate to 15. We don't.
-        let e = RawSocket::open("nonexistent_iface_23chr").unwrap_err();
-        // The error path bifurcates on whether we have
-        // CAP_NET_RAW. Don't gate on root (`geteuid` doesn't
-        // tell you about capabilities anyway). Just check both
-        // possibilities.
-        let ek = e.kind();
-        // EPERM → PermissionDenied. ENODEV → NotFound (nix
-        // maps it). EACCES also → PermissionDenied (some
-        // kernels return EACCES for PF_PACKET).
-        assert!(
-            ek == io::ErrorKind::PermissionDenied || ek == io::ErrorKind::NotFound,
-            "unexpected error kind: {ek:?} ({e})"
-        );
-    }
-
-    /// Empty interface name → `if_nametoindex` errors. The C's
-    /// `Interface = ` (empty) → strncpy of empty string →
-    /// `ifr_name[0] = 0` → ioctl errors (kernel rejects empty
-    /// ifname). We hit the same error via `if_nametoindex`. Not
-    /// stricter (both error); just verifying the path.
-    #[test]
-    fn open_empty_iface_errors() {
-        let e = RawSocket::open("").unwrap_err();
-        // Same bifurcation as above.
-        let ek = e.kind();
-        assert!(
-            ek == io::ErrorKind::PermissionDenied
-                || ek == io::ErrorKind::NotFound
-                // glibc's if_nametoindex on "" sometimes EINVAL
-                || ek == io::ErrorKind::InvalidInput,
-            "unexpected error kind: {ek:?} ({e})"
-        );
+    fn open_bad_iface_errors() {
+        use io::ErrorKind as K;
+        for (name, allowed) in [
+            (
+                "nonexistent_iface_23chr",
+                &[K::PermissionDenied, K::NotFound][..],
+            ),
+            ("", &[K::PermissionDenied, K::NotFound, K::InvalidInput][..]),
+        ] {
+            let e = RawSocket::open(name).unwrap_err();
+            let ek = e.kind();
+            assert!(
+                allowed.contains(&ek),
+                "open({name:?}): unexpected error kind: {ek:?} ({e})"
+            );
+        }
     }
 
     // +0 read/write — socketpair end-to-end

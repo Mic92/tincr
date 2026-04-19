@@ -406,42 +406,31 @@ fn read_eof_via_seqpacket() {
     assert!(msg.contains("Tap"), "msg: {msg}");
 }
 
-/// Unknown IP nibble (Tun and Utun) → `InvalidData`.
-/// Feed a packet with version=5 (ST-II, dead).
+/// Unknown IP nibble → `InvalidData` for both Tun (raw IP at
+/// +14) and Utun (4-byte garbage prefix at +10, ignored; only
+/// the IP nibble matters). Feed dead version numbers (5 = ST-II,
+/// 7 = unassigned).
 #[test]
-fn tun_read_unknown_nibble_errors() {
-    let ip = [0x50u8, 0x00]; // version=5
+fn read_unknown_nibble_errors() {
+    for (variant, bytes, nibble) in [
+        (BsdVariant::Tun, &[0x50u8, 0x00][..], "0x5"),
+        (
+            BsdVariant::Utun,
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0x70, 0x00][..],
+            "0x7",
+        ),
+    ] {
+        let (r, w) = pipe();
+        nix::unistd::write(&w, bytes).unwrap();
+        drop(w);
 
-    let (r, w) = pipe();
-    nix::unistd::write(&w, &ip).unwrap();
-    drop(w);
-
-    let mut bsd = fake_bsd(r, BsdVariant::Tun);
-    let mut buf = [0u8; MTU];
-    let e = bsd.read(&mut buf).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-    let msg = e.to_string();
-    // Mentions the nibble (5).
-    assert!(msg.contains("0x5"), "msg: {msg}");
-}
-
-/// Same for Utun. The garbage prefix doesn't matter
-/// (ignored); the bad nibble does.
-#[test]
-fn utun_read_unknown_nibble_errors() {
-    // Garbage prefix + IP with version=7.
-    let kernel_wrote = [0xFF, 0xFF, 0xFF, 0xFF, 0x70, 0x00];
-
-    let (r, w) = pipe();
-    nix::unistd::write(&w, &kernel_wrote).unwrap();
-    drop(w);
-
-    let mut bsd = fake_bsd(r, BsdVariant::Utun);
-    let mut buf = [0u8; MTU];
-    let e = bsd.read(&mut buf).unwrap_err();
-    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-    let msg = e.to_string();
-    assert!(msg.contains("0x7"), "msg: {msg}");
+        let mut bsd = fake_bsd(r, variant);
+        let mut buf = [0u8; MTU];
+        let e = bsd.read(&mut buf).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{variant:?}");
+        let msg = e.to_string();
+        assert!(msg.contains(nibble), "{variant:?}: msg: {msg}");
+    }
 }
 
 // ─── Device trait surface

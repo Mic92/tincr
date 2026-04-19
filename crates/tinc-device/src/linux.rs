@@ -774,31 +774,25 @@ impl AsFd for Tun {
 mod tests {
     use super::*;
 
-    /// `open_mq(n>1)` rejects `iface = None`. Validation BEFORE
-    /// open (no `CAP_NET_ADMIN` needed). Same shape as
-    /// `open_too_long_iface_err_before_open`.
+    /// `open_mq(n>1)` validation happens BEFORE open (no
+    /// `CAP_NET_ADMIN` needed): rejects `iface = None` and
+    /// rejects TAP (router-mode only).
     #[test]
-    fn open_mq_requires_iface() {
-        let cfg = DeviceConfig {
+    fn open_mq_validation() {
+        let no_iface = DeviceConfig {
             iface: None,
             ..DeviceConfig::default()
         };
-        let e = Tun::open_mq(&cfg, 2).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
-        assert!(e.to_string().contains("explicit iface name"));
-    }
-
-    /// `open_mq(n>1)` rejects TAP. Router-mode only.
-    #[test]
-    fn open_mq_requires_tun_mode() {
-        let cfg = DeviceConfig {
+        let tap = DeviceConfig {
             iface: Some("shard0".to_owned()),
             mode: Mode::Tap,
             ..DeviceConfig::default()
         };
-        let e = Tun::open_mq(&cfg, 2).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
-        assert!(e.to_string().contains("Mode::Tun"));
+        for (cfg, msg) in [(&no_iface, "explicit iface name"), (&tap, "Mode::Tun")] {
+            let e = Tun::open_mq(cfg, 2).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+            assert!(e.to_string().contains(msg), "got: {e}");
+        }
     }
 
     // pack_ifr_name — the testable seam

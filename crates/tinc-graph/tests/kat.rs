@@ -56,6 +56,10 @@ struct KatRoute {
     options: u32,
 }
 
+fn cases() -> Vec<Kat> {
+    serde_json::from_str(include_str!("kat/graph.json")).unwrap()
+}
+
 fn build(k: &Kat) -> Graph {
     let mut g = Graph::new();
     for n in &k.nodes {
@@ -123,9 +127,32 @@ fn check_sssp(k: &Kat, want: &[KatRoute], routes: &[Option<tinc_graph::Route>], 
     }
 }
 
+/// Mirror the C generator's `reachable := visited` step (MST uses
+/// `reachable` to pick its starting node), run MST, compare as a set
+/// (output order is implementation-defined).
+fn check_mst(
+    k: &Kat,
+    g: &mut Graph,
+    routes: &[Option<tinc_graph::Route>],
+    want: &[u32],
+    ctx: &str,
+) {
+    for (i, r) in routes.iter().enumerate() {
+        let id = NodeId(u32::try_from(i).unwrap());
+        // Dead node slots not possible in current KATs (edges-only del);
+        // guard anyway in case node-del KATs land later.
+        if g.node(id).is_some() {
+            g.set_reachable(id, r.is_some());
+        }
+    }
+    let got: HashSet<u32> = g.mst().iter().map(|e| e.0).collect();
+    let want: HashSet<u32> = want.iter().copied().collect();
+    assert_eq!(got, want, "{}{ctx}: mst edges", k.name);
+}
+
 #[test]
 fn sssp_kat() {
-    let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
+    let cases = cases();
     assert!(cases.len() >= 18, "expected ≥18 KAT cases");
 
     for k in &cases {
@@ -137,26 +164,10 @@ fn sssp_kat() {
 
 #[test]
 fn mst_kat() {
-    let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
-
-    for k in &cases {
+    for k in &cases() {
         let mut g = build(k);
-
-        // The C generator runs SSSP first, snapshots `visited`, then
-        // assigns `reachable := visited` before MST. Mirror that — MST
-        // uses `reachable` to pick its starting node.
         let routes = g.sssp(NodeId(k.myself));
-        for (i, r) in routes.iter().enumerate() {
-            g.set_reachable(NodeId(u32::try_from(i).unwrap()), r.is_some());
-        }
-
-        let got: HashSet<u32> = g.mst().iter().map(|e| e.0).collect();
-        let want: HashSet<u32> = k.mst.iter().copied().collect();
-
-        // MST output order is implementation-defined (we push edge then
-        // reverse, C sets bits on connections we read in edge order).
-        // Compare as sets.
-        assert_eq!(got, want, "{}: mst edges", k.name);
+        check_mst(k, &mut g, &routes, &k.mst, "");
     }
 }
 
@@ -166,7 +177,7 @@ fn mst_kat() {
 /// `splay_delete` semantics.
 #[test]
 fn del_kat() {
-    let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
+    let cases = cases();
     let del_cases: Vec<_> = cases.iter().filter(|k| !k.del_edges.is_empty()).collect();
     assert!(
         del_cases.len() >= 3,
@@ -184,18 +195,7 @@ fn del_kat() {
 
         let routes = g.sssp(NodeId(k.myself));
         check_sssp(k, &k.sssp_after, &routes, " (after del)");
-
-        // MST: mirror the C generator's reachable := visited dance.
-        for (i, r) in routes.iter().enumerate() {
-            // Dead node slots not possible here (del KATs delete edges
-            // only); guard anyway in case node-del KATs land later.
-            if g.node(NodeId(u32::try_from(i).unwrap())).is_some() {
-                g.set_reachable(NodeId(u32::try_from(i).unwrap()), r.is_some());
-            }
-        }
-        let got: HashSet<u32> = g.mst().iter().map(|e| e.0).collect();
-        let want: HashSet<u32> = k.mst_after.iter().copied().collect();
-        assert_eq!(got, want, "{}: mst after del", k.name);
+        check_mst(k, &mut g, &routes, &k.mst_after, " (after del)");
     }
 }
 
@@ -206,7 +206,7 @@ fn del_kat() {
 /// would break `via` correctness.
 #[test]
 fn indirect_upgrade_can_increase_distance() {
-    let cases: Vec<Kat> = serde_json::from_str(include_str!("kat/graph.json")).unwrap();
+    let cases = cases();
     let k = cases.iter().find(|c| c.name == "diamond_indirect").unwrap();
 
     // n1 has the indirect edge from n0. It's reached at distance=1
