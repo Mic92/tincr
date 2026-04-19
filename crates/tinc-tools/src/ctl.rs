@@ -575,31 +575,15 @@ impl<S: Read + Write> CtlSocket<S> {
         }
 
         // ─── Request type, then body or terminator
-        // `split_once` for the SECOND space. None → no body →
-        // terminator. Some("") (trailing space) → also terminator.
-        match after_code.split_once(' ') {
-            None => {
-                // "18 3\n" — the trailing \n is already stripped.
-                // Just the type. Terminator.
-                let req = after_code.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                Ok(DumpRow::End(kind))
-            }
-            Some((req_s, "")) => {
-                // "18 3 " — trailing space. Daemon doesn't emit
-                // this. Same as terminator.
-                let req = req_s.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                Ok(DumpRow::End(kind))
-            }
-            Some((req_s, body)) => {
-                let req = req_s.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                // body is the rest of the line, byte-exact. The
-                // caller hands it to `Tok::new`.
-                Ok(DumpRow::Row(kind, body.to_owned()))
-            }
-        }
+        // Second space: absent or trailing-only → terminator.
+        let (req_s, body) = after_code.split_once(' ').unwrap_or((after_code, ""));
+        let req = req_s.parse::<i32>().map_err(|_| bad())?;
+        let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
+        Ok(if body.is_empty() {
+            DumpRow::End(kind)
+        } else {
+            DumpRow::Row(kind, body.to_owned())
+        })
     }
 
     /// Drain a dump response, invoking `f` for every `Row` until the
