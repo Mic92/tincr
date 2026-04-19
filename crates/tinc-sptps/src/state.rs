@@ -1145,6 +1145,38 @@ impl Sptps {
         Ok(was_rekey)
     }
 
+    /// Dispatch a parsed record by `ty`. Shared tail of
+    /// `receive_datagram` (encrypted branch) and `receive_stream`.
+    ///
+    /// `encrypted` gates app records: a `<128` type before `incipher`
+    /// is up is `BadRecord` (stream-mode plaintext phase only carries
+    /// handshake records; datagram passes `true` here since its
+    /// plaintext branch already returned earlier). `129/130`
+    /// (ALERT/CLOSE) are unimplemented in C too → `BadRecord`.
+    fn dispatch_record(
+        &mut self,
+        ty: u8,
+        body: &[u8],
+        encrypted: bool,
+        rng: &mut impl RngCore,
+        out: &mut Vec<Output>,
+    ) -> Result<(), SptpsError> {
+        match ty {
+            t if t < REC_HANDSHAKE => {
+                if !encrypted {
+                    return Err(SptpsError::BadRecord);
+                }
+                out.push(Output::Record {
+                    record_type: t,
+                    bytes: body.to_vec(),
+                });
+                Ok(())
+            }
+            REC_HANDSHAKE => self.receive_handshake(body, rng, out),
+            _ => Err(SptpsError::BadRecord),
+        }
+    }
+
     /// `receive_handshake`: the state-machine switch.
     ///
     /// `rng` is needed because the `SecondaryKex` case sends a fresh KEX
@@ -1291,19 +1323,7 @@ impl Sptps {
             .unwrap_or_else(PoisonError::into_inner)
             .check(seqno, true)?;
 
-        let ty = pt[0];
-        let body = &pt[1..];
-        match ty {
-            t if t < REC_HANDSHAKE => {
-                out.push(Output::Record {
-                    record_type: t,
-                    bytes: body.to_vec(),
-                });
-                Ok(())
-            }
-            REC_HANDSHAKE => self.receive_handshake(body, rng, out),
-            _ => Err(SptpsError::BadRecord), // 129/130: ALERT/CLOSE, unimplemented in C too
-        }
+        self.dispatch_record(pt[0], &pt[1..], true, rng, out)
     }
 
     /// Stream-mode reassembly. The bottom half of `sptps_receive_data`.
@@ -1385,19 +1405,7 @@ impl Sptps {
             (ty, framed[3..].to_vec())
         };
 
-        match ty {
-            t if t < REC_HANDSHAKE => {
-                if self.incipher.is_none() {
-                    return Err(SptpsError::BadRecord);
-                }
-                out.push(Output::Record {
-                    record_type: t,
-                    bytes: body,
-                });
-            }
-            REC_HANDSHAKE => self.receive_handshake(&body, rng, out)?,
-            _ => return Err(SptpsError::BadRecord),
-        }
+        self.dispatch_record(ty, &body, self.incipher.is_some(), rng, out)?;
 
         Ok(consumed)
     }
