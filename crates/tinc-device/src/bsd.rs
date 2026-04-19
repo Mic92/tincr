@@ -90,8 +90,7 @@ impl BsdVariant {
     /// shape if it wants. `#[inline]` because it's a leaf called
     /// in the hot read loop.
     #[inline]
-    #[must_use]
-    pub const fn read_offset(self) -> usize {
+    const fn read_offset(self) -> usize {
         match self {
             // Kernel writes raw IP. Room for full ether header.
             BsdVariant::Tun => ETH_HLEN,
@@ -113,8 +112,7 @@ impl BsdVariant {
     /// ether header). We expose Mode; the daemon picks. Same as
     /// every other backend.
     #[inline]
-    #[must_use]
-    pub const fn mode(self) -> Mode {
+    const fn mode(self) -> Mode {
         match self {
             BsdVariant::Tun | BsdVariant::Utun => Mode::Tun,
             BsdVariant::Tap => Mode::Tap,
@@ -150,9 +148,8 @@ impl BsdVariant {
 /// reading them is the same platform. The test can pin the
 /// STRUCTURE (`(libc::AF_INET6 as u32).to_be_bytes()`) but not
 /// literal bytes. See `prefix_ipv6_is_libc_af_inet6_be` test.
-#[must_use]
 #[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
-pub(crate) const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
+const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     // We get the ethertype already host-order from the caller
     // (who read it via `u16::from_be_bytes`).
     let af = match ethertype {
