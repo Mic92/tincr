@@ -251,7 +251,7 @@ where
 /// Daemon down (`connect`), socket I/O, EPIPE (`tinc log | head`).
 #[cfg(unix)]
 pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
-    let mut ctl = CtlSocket::connect(paths).map_err(|e| CmdError::BadInput(e.to_string()))?;
+    let mut ctl = CtlSocket::connect(paths)?;
 
     // Checked HERE not inside `log_loop` so the test can pass a
     // fixed bool.
@@ -264,7 +264,7 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    log_loop(&mut ctl, &mut out, level, use_color).map_err(|e| CmdError::BadInput(e.to_string()))
+    Ok(log_loop(&mut ctl, &mut out, level, use_color)?)
 }
 
 // `tinc pcap [SNAPLEN]` — stream packet capture in libpcap format
@@ -464,13 +464,12 @@ where
 /// Same as `run_log`.
 #[cfg(unix)]
 pub fn run_pcap(paths: &Paths, snaplen: u32) -> Result<(), CmdError> {
-    let mut ctl = CtlSocket::connect(paths).map_err(|e| CmdError::BadInput(e.to_string()))?;
+    let mut ctl = CtlSocket::connect(paths)?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    pcap_loop(&mut ctl, &mut out, snaplen, SystemTime::now)
-        .map_err(|e| CmdError::BadInput(e.to_string()))
+    Ok(pcap_loop(&mut ctl, &mut out, snaplen, SystemTime::now)?)
 }
 
 // Tests
