@@ -171,10 +171,6 @@ pub trait Device: Send {
     /// (`daemon/net.rs` — over-draining starves TUN of TX time, see
     /// commit `0f120b11`).
     ///
-    /// EAGAIN on the first read → `Empty`. EAGAIN after ≥1 read →
-    /// `Frames{count}`. Any other error propagates (the daemon's
-    /// 10-consecutive-failures → `event_exit` is its policy, not ours).
-    ///
     /// # Errors
     /// `io::Error` from the underlying `read(2)`. EAGAIN is consumed
     /// (it's the loop terminator, not an error). EBADFD etc. surface

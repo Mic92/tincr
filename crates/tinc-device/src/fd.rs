@@ -157,16 +157,8 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
     // `RawFd` worth of space.
     let mut cmsgbuf = nix::cmsg_space!(RawFd);
 
-    // The recvmsg. nix wraps the unsafe (`libc::recvmsg`). We
-    // pass `MsgFlags::empty()` (blocking recv). The socket is fresh
-    // from `connect` so blocking is correct — the Java side sends
-    // immediately on accept.
-    //
-    // `()` for the address type: we don't care about the
-    // sender's address (it's the same socket we connected to).
-    //
-    // `?`: nix `Errno` → `io::Error` via `From`. Same pattern
-    // as the bare `?` on nix calls in `tui.rs`.
+    // Blocking recv is correct: the Java side sends immediately on
+    // accept. `()` address type — we connected, so sender is known.
     let msg = recvmsg::<()>(
         stream.as_raw_fd(),
         &mut iov,
@@ -174,23 +166,9 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         MsgFlags::empty(),
     )?;
 
-    // ─── Check flags
-    // `MSG_CTRUNC | MSG_OOB | MSG_ERRQUEUE`. We're Linux-only
-    // here (the whole
-    // module is `#[cfg(target_os = "linux")]`); include it.
-    //
-    // `MSG_CTRUNC`: control data truncated. Our `cmsgbuf` was
-    // sized for one fd; if the sender sent two fds, the second
-    // got dropped and this flag is set. Error.
-    //
-    // `MSG_OOB`: out-of-band data. Unix sockets don't HAVE OOB
-    // (it's a TCP thing). The check is defensive paranoia,
-    // probably copied from a TCP example. nix's `MsgFlags`
-    // includes it (it's a libc constant); we check it anyway
-    // (zero cost, matches C).
-    //
-    // `MSG_ERRQUEUE`: error queue data. Again, Unix sockets
-    // don't really do this. Same paranoia.
+    // `MSG_CTRUNC` = control data truncated (sender shipped >1 fd
+    // and our cmsgbuf was sized for one). `MSG_OOB`/`MSG_ERRQUEUE`
+    // can't happen on a Unix socket; checked to match C, zero cost.
     let bad = MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB | MsgFlags::MSG_ERRQUEUE;
     if msg.flags.intersects(bad) {
         return Err(io::Error::new(
@@ -199,9 +177,6 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         ));
     }
 
-    // nix already converted `<0` to Err (the `?` above). `ret == 0`
-    // is "peer closed before sending" — error. nix exposes the byte
-    // count as `msg.bytes`.
     if msg.bytes == 0 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -209,14 +184,8 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         ));
     }
 
-    // ─── Extract the fd
-    // `CMSG_FIRSTHDR` returns NULL on empty buffer; easy to deref
-    // unchecked when hand-rolling. nix's
-    // iterator returns `None` → error, not segfault.
-    //
-    // Accept exactly one fd. STRICTER: silently reading the first
-    // of 2+ fds is a bug; we error. Non-ScmRights cmsg → error.
-    // `?` on `cmsgs()` propagates nix decode errors.
+    // Accept exactly one fd. STRICTER than C: 2+ fds is an error,
+    // not "silently take the first".
     let fds = msg
         .cmsgs()?
         .find_map(|cm| match cm {
@@ -301,19 +270,11 @@ impl Device for FdTun {
             buf.len()
         );
 
-        // Read IP packet at +14, leaving room for the synthetic
-        // ethernet header.
-        //
-        // `[ETH_HLEN..MTU]` upper bound caps the read. Same as
-        // `linux.rs`. Android packets larger than MTU-14 would
-        // truncate.
+        // Read at +14, leaving room for the synthetic eth header.
         let n = read_fd(self.fd.as_fd(), &mut buf[ETH_HLEN..MTU])?;
 
-        // `read_fd` already converted `<0`. `0` is EOF — the Java
-        // side closed the tun. Unlike kernel TUN (which never EOFs),
-        // this
-        // CAN happen (the Java VpnService stopped). C errors;
-        // we match. The error message says what we know.
+        // EOF is real here (unlike kernel TUN): the Java VpnService
+        // closed its end.
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -321,21 +282,9 @@ impl Device for FdTun {
             ));
         }
 
-        // Synthesize ethertype from IP version nibble, error on
-        // unknown version.
-        //
-        // `buf[ETH_HLEN]` is byte 0 of the IP packet (we read
-        // at offset 14, so byte 14 of buf is byte 0 of payload).
-        // `from_ip_nibble` extracts.
         let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
-            // The packet is dropped. We Err with the actual nibble
-            // (more useful than the C's bare "unknown").
-            //
-            // Logged at DEBUG_TRAFFIC level upstream (only logs
-            // when traffic-debug enabled). We always include
-            // the nibble in the error string; daemon decides
-            // whether to log. The information is there either
-            // way.
+            // Include the actual nibble (C's message is bare
+            // "unknown"); daemon decides whether to log it.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -347,22 +296,13 @@ impl Device for FdTun {
             ));
         };
 
-        // Write the synthetic header into bytes 0..14.
         set_etherheader(buf, ethertype);
-
-        // The 14 synthetic bytes count toward the packet length.
         Ok(n + ETH_HLEN)
     }
 
-    /// The +14 write — strip the ethernet header, write the IP
-    /// packet.
-    ///
-    /// Unlike `linux.rs` TUN write (which mutates `buf[10..12]`),
-    /// this is a PURE write — the ethernet header just gets
-    /// skipped. The trait signature is `&mut [u8]` for uniformity
-    /// (the daemon calls through `dyn Device`, doesn't know which
-    /// impl), but THIS impl doesn't mutate. The shared signature
-    /// is the constraint.
+    /// +14 write — skip the synthetic eth header. Doesn't actually
+    /// mutate `buf`; the `&mut` is the `dyn Device` shared signature
+    /// (linux TUN write does mutate).
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         debug_assert!(
             buf.len() > ETH_HLEN,

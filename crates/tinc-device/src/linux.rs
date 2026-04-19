@@ -544,15 +544,9 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
 // Device trait — read/write with the offset trick
 
 impl Device for Tun {
-    /// Read a packet. TAP only.
-    ///
-    /// TUN doesn't go through here: `drain()` is overridden and
-    /// reads directly via `read_fd` (`vnet_hdr` layout). The trait
-    /// default `drain` calls `self.read()`, but our override
-    /// doesn't.
+    /// Read a packet. TAP only — the vnet `drain()` override reads
+    /// the TUN fd directly, so `Mode::Tun` never reaches here.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // TUN: dead path — the vnet drain override bypasses this.
-        // If this fires, drain() got de-overridden.
         debug_assert_eq!(
             self.mode,
             Mode::Tap,
@@ -560,9 +554,7 @@ impl Device for Tun {
              directly. Is drain() still overridden?"
         );
 
-        // ─── TAP ───────────────────────────────────────────────
-        // `IFF_NO_PI` → no `tun_pi` prefix; raw ethernet. Direct
-        // read, no offset, no memset.
+        // `IFF_NO_PI` → no `tun_pi` prefix; raw ethernet at [0..].
         debug_assert!(
             buf.len() >= MTU,
             "buf too small for TAP read: {} < {MTU}",
@@ -669,10 +661,8 @@ impl Device for Tun {
     /// The daemon calls `tso_split` on the contiguous buffer.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         if self.mode == Mode::Tap {
-            // TAP: no vnet_hdr (see `flags` in `Tun::open`). The
-            // trait default's `read()`-in-a-loop is the right
-            // shape; we can't call the trait default from an
-            // override, so call the hoisted free fn it wraps.
+            // TAP has no vnet_hdr (see `Tun::open` flags) — use the
+            // trait-default read()-loop body.
             return crate::drain_via_read(self, arena, cap);
         }
 
