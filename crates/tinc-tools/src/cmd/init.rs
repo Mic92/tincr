@@ -42,11 +42,8 @@
 //! exists`). Re-init would overwrite the private key. No rollback on
 //! partial failure — disk full / perm flip mid-init is rare.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::cmd::{CmdError, io_err};
 use crate::keypair;
@@ -156,13 +153,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // (when we add it) appends `Port = N` to the same file.
     {
         let host_path = paths.host_file(name);
-        let mut f = {
-            let mut o = OpenOptions::new();
-            o.create(true).append(true);
-            #[cfg(unix)]
-            o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-            o.open(&host_path).map_err(io_err(&host_path))?
-        };
+        let mut f = super::open_nofollow(&host_path, super::OpenKind::Append, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
@@ -245,23 +236,7 @@ use super::makedir;
 /// `O_EXCL`: for the private key, append-to-existing is just as bad
 /// as truncate. excl is the right semantics for init — see callers.
 fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdError> {
-    #[cfg(unix)]
-    let opts = {
-        let mut o = OpenOptions::new();
-        o.write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-        o
-    };
-    #[cfg(not(unix))]
-    let opts = {
-        let _ = mode;
-        let mut o = OpenOptions::new();
-        o.write(true).create_new(true);
-        o
-    };
-    opts.open(path).map_err(io_err(path))
+    super::open_nofollow(path, super::OpenKind::CreateExcl, mode)
 }
 
 #[cfg(all(test, unix))]

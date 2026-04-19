@@ -10,7 +10,7 @@ use std::io::Write;
 use tinc_conf::vars::{self, VarFlags};
 use tinc_crypto::b64;
 
-use crate::cmd::{CmdError, create_nofollow, io_err, makedir};
+use crate::cmd::{CmdError, OpenKind, create_nofollow, io_err, makedir, open_nofollow};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
@@ -343,15 +343,7 @@ fn finalize_join_inner(
 
     {
         let priv_path = paths.ed25519_private();
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600)
-                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-        }
-        let f = opts.open(&priv_path).map_err(io_err(&priv_path))?;
+        let f = open_nofollow(&priv_path, OpenKind::CreateExcl, 0o600)?;
         created.push(priv_path.clone());
         let mut w = std::io::BufWriter::new(f);
         tinc_conf::pem::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob())
@@ -387,14 +379,7 @@ fn write_tinc_up_placeholder(
     created: &mut Vec<std::path::PathBuf>,
 ) -> Result<(), CmdError> {
     let path = paths.tinc_up();
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o755);
-    }
-    let mut f = opts.open(&path).map_err(io_err(&path))?;
+    let mut f = open_nofollow(&path, OpenKind::CreateExcl, 0o755)?;
     created.push(path.clone());
     // Same body as init.
     writeln!(f, "#!/bin/sh").map_err(io_err(&path))?;

@@ -125,16 +125,55 @@ pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError>
     }
 }
 
-/// `File::create` + `O_NOFOLLOW` (truncate, create, no symlink follow).
-pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, CmdError> {
+/// How `open_nofollow` should create the file. Covers the three
+/// `OpenOptions` recipes the cmd layer actually uses.
+#[derive(Clone, Copy)]
+pub(crate) enum OpenKind {
+    /// `O_WRONLY | O_CREAT | O_TRUNC` — clobber.
+    CreateTrunc,
+    /// `O_WRONLY | O_CREAT | O_EXCL` — fail if it exists.
+    CreateExcl,
+    /// `O_WRONLY | O_CREAT | O_APPEND` — add to the end.
+    Append,
+}
+
+/// Open `path` with `O_NOFOLLOW`, the requested create semantics, and
+/// (on Unix) the given create mode. `mode` is only consulted when the
+/// file is actually created; pass `0o666` for the libc default.
+///
+/// Centralises the `OpenOptions` + `cfg(unix)` + `OpenOptionsExt`
+/// dance that used to be open-coded at every key/host-file write site.
+pub(crate) fn open_nofollow(
+    path: &std::path::Path,
+    kind: OpenKind,
+    mode: u32,
+) -> Result<std::fs::File, CmdError> {
     let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    match kind {
+        OpenKind::CreateTrunc => {
+            o.write(true).create(true).truncate(true);
+        }
+        OpenKind::CreateExcl => {
+            o.write(true).create_new(true);
+        }
+        OpenKind::Append => {
+            o.append(true).create(true);
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
+        o.mode(mode)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     o.open(path).map_err(io_err(path))
+}
+
+/// `File::create` + `O_NOFOLLOW` (truncate, create, no symlink follow).
+pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, CmdError> {
+    open_nofollow(path, OpenKind::CreateTrunc, 0o666)
 }
 
 pub(crate) fn io_err(path: impl Into<PathBuf>) -> impl FnOnce(io::Error) -> CmdError {

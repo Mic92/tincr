@@ -284,17 +284,9 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 ///
 /// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
     use tinc_conf::pem::write_pem;
 
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    opts.mode(0o600)
-        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-
-    let f = opts.open(path).map_err(io_err(path))?;
+    let f = super::open_nofollow(path, super::OpenKind::CreateTrunc, 0o600)?;
     let mut w = std::io::BufWriter::new(f);
     // Same PEM type string as the node's own key; the daemon
     // distinguishes them by *path*, not by PEM type.
@@ -303,16 +295,7 @@ fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
 
 /// Write the invitation file at 0600 with `O_EXCL`.
 fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true); // create_new = O_EXCL
-    #[cfg(unix)]
-    opts.mode(0o600)
-        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-
-    let mut f = opts.open(path).map_err(io_err(path))?;
+    let mut f = super::open_nofollow(path, super::OpenKind::CreateExcl, 0o600)?;
     f.write_all(body.as_bytes()).map_err(io_err(path))
 }
 

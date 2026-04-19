@@ -57,12 +57,9 @@
 //! = rotation history. `tinc fsck` warns on `#-----BEGIN` for the
 //! paper trail.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::cmd::exchange::get_my_name;
 use crate::cmd::{CmdError, io_err};
@@ -303,23 +300,7 @@ impl Drop for TmpGuard {
 /// to 0600. Upstream does flip it (arguably a bug — undoes your
 /// hardening); ours respects it.
 fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
-    #[cfg(unix)]
-    let opts = {
-        let mut o = OpenOptions::new();
-        o.append(true)
-            .create(true)
-            .mode(mode)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-        o
-    };
-    #[cfg(not(unix))]
-    let opts = {
-        let _ = mode;
-        let mut o = OpenOptions::new();
-        o.append(true).create(true);
-        o
-    };
-    opts.open(path).map_err(io_err(path))
+    super::open_nofollow(path, super::OpenKind::Append, mode)
 }
 
 // Tests
