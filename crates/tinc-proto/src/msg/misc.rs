@@ -29,6 +29,20 @@ use crate::tok::{ParseError, Tok};
 // ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers
 
+/// `tcppacket_h` / `sptps_tcppacket_h`: `sscanf("%*d %hd", &len)`,
+/// then `len < 0`. Shared body — the two C handlers are byte-identical;
+/// only the request id in the format string differs.
+fn parse_len_prefix(line: &str) -> Result<u16, ParseError> {
+    let mut t = Tok::new(line);
+    t.skip()?;
+    let len = t.hd()?;
+    if len < 0 {
+        return Err(ParseError);
+    }
+    #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
+    Ok(len as u16)
+}
+
 /// Body of `PACKET` (legacy TCP-tunneled VPN packet header).
 ///
 /// The actual packet bytes follow this line on the wire as a raw blob,
@@ -49,14 +63,7 @@ impl TcpPacket {
     /// (which the `%hd`-then-check-negative idiom would also reject —
     /// 32768 is `-32768` in a `short`).
     pub fn parse(line: &str) -> Result<Self, ParseError> {
-        let mut t = Tok::new(line);
-        t.skip()?;
-        let len = t.hd()?;
-        if len < 0 {
-            return Err(ParseError);
-        }
-        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
-        Ok(Self { len: len as u16 })
+        parse_len_prefix(line).map(|len| Self { len })
     }
 
     /// `send_tcppacket`: `send_request("%d %d", PACKET, packet->len)`.
@@ -82,14 +89,7 @@ impl SptpsPacket {
     /// # Errors
     /// Same as [`TcpPacket::parse`].
     pub fn parse(line: &str) -> Result<Self, ParseError> {
-        let mut t = Tok::new(line);
-        t.skip()?;
-        let len = t.hd()?;
-        if len < 0 {
-            return Err(ParseError);
-        }
-        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
-        Ok(Self { len: len as u16 })
+        parse_len_prefix(line).map(|len| Self { len })
     }
 
     /// `send_sptps_tcppacket`: `send_request("%d %lu", SPTPS_PACKET, (unsigned long)len)`.
