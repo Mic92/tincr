@@ -61,7 +61,7 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cmd::CmdError;
-use crate::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
+use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::Paths;
 use crate::tui;
 
@@ -687,28 +687,21 @@ fn fetch<S: io::Read + io::Write>(ctl: &mut CtlSocket<S>) -> Result<Vec<TrafficR
     // The vec preallocation guess: a typical mesh has 10-100 nodes.
     // 32 is fine for the common case, growth handles outliers.
     let mut rows = Vec::with_capacity(32);
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => return Ok(rows),
-            DumpRow::Row(_, body) => {
-                // Parse failure ends the whole top session — the
-                // daemon's sending garbage, no point continuing.
-                //
-                // `CtlError` has no Parse variant. `run()` ignores
-                // the error anyway (`Err(_) => break`). The variant
-                // choice doesn't matter for behavior; `Io` is the
-                // "daemon I/O went bad" bucket and a malformed row
-                // is daemon I/O going bad.
-                let row = TrafficRow::parse(&body).map_err(|_| {
-                    CtlError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("malformed traffic row from daemon: {body}"),
-                    ))
-                })?;
-                rows.push(row);
-            }
-        }
-    }
+    ctl.for_each_row(|_, body| {
+        // Parse failure ends the whole top session — the daemon's
+        // sending garbage, no point continuing. `CtlError` has no
+        // Parse variant; `Io` is the "daemon I/O went bad" bucket
+        // and a malformed row is daemon I/O going bad.
+        let row = TrafficRow::parse(body).map_err(|_| {
+            CtlError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed traffic row from daemon: {body}"),
+            ))
+        })?;
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(rows)
 }
 
 // Layer 5: keys

@@ -506,14 +506,8 @@ fn find_node<S: std::io::Read + std::io::Write>(
 
     // ─── Drain
     // Found alice on row 3 of 50; daemon's still sending. Read and
-    // discard until terminator. We don't even tokenize: recv_row
-    // does the End detect for us.
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, _) => {} // discard
-        }
-    }
+    // discard until terminator.
+    ctl.for_each_row(|_, _| Ok::<_, CmdError>(()))?;
 
     Ok(Some(found))
 }
@@ -531,25 +525,20 @@ fn collect_edges<S: std::io::Read + std::io::Write>(
     ctl.send_str(CtlRequest::DumpEdges, name)?;
 
     let mut to_names = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                // First two strings only — see module doc "Partial
-                // parses". NOT `splitn(3, ' ')`: sscanf collapses
-                // whitespace runs; match the semantics not spacing.
-                let mut it = body.split_ascii_whitespace();
-                let (Some(from), Some(to)) = (it.next(), it.next()) else {
-                    return Err(parse_err("edge", &body));
-                };
-                // Only edges FROM us (TO is the far end of OUR
-                // outgoing edges).
-                if from == name {
-                    to_names.push(to.to_owned());
-                }
-            }
+    ctl.for_each_row(|_, body| {
+        // First two strings only — see module doc "Partial parses".
+        // NOT `splitn(3, ' ')`: sscanf collapses whitespace runs;
+        // match the semantics not spacing.
+        let mut it = body.split_ascii_whitespace();
+        let (Some(from), Some(to)) = (it.next(), it.next()) else {
+            return Err(parse_err("edge", body));
+        };
+        // Only edges FROM us (TO is the far end of OUR outgoing edges).
+        if from == name {
+            to_names.push(to.to_owned());
         }
-    }
+        Ok(())
+    })?;
     Ok(to_names)
 }
 
@@ -564,18 +553,14 @@ fn collect_subnets<S: std::io::Read + std::io::Write>(
     ctl.send_str(CtlRequest::DumpSubnets, name)?;
 
     let mut subnets = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;
-                if row.owner == name {
-                    // Apply strip_weight at collect.
-                    subnets.push(strip_weight(&row.subnet).to_owned());
-                }
-            }
+    ctl.for_each_row(|_, body| {
+        let row = SubnetRow::parse(body).map_err(|_| parse_err("subnet", body))?;
+        if row.owner == name {
+            // Apply strip_weight at collect.
+            subnets.push(strip_weight(&row.subnet).to_owned());
         }
-    }
+        Ok::<_, CmdError>(())
+    })?;
     Ok(subnets)
 }
 
@@ -659,42 +644,36 @@ fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> 
     ctl.send_str(CtlRequest::DumpSubnets, item)?;
 
     let mut matches = Vec::new();
-    loop {
-        match ctl.recv_row()? {
-            DumpRow::End(_) => break,
-            DumpRow::Row(_, body) => {
-                let row = SubnetRow::parse(&body).map_err(|_| parse_err("subnet", &body))?;
-                // A parse failure on the DAEMON's subnet is fatal.
-                // (Can't compare what we can't parse.) The daemon
-                // never sends garbage, so this is corruption.
-                let subnet: Subnet = row.subnet.parse().map_err(|_| parse_err("subnet", &body))?;
+    ctl.for_each_row(|_, body| {
+        let row = SubnetRow::parse(body).map_err(|_| parse_err("subnet", body))?;
+        // A parse failure on the DAEMON's subnet is fatal. (Can't
+        // compare what we can't parse.) The daemon never sends
+        // garbage, so this is corruption.
+        let subnet: Subnet = row.subnet.parse().map_err(|_| parse_err("subnet", body))?;
 
-                // ─── Filters
-                // Type mismatch → skip. Handled inside `matches()`
-                // (returns false).
-                //
-                // Weight match, IFF user typed `#`. Outside
-                // `matches()` because it's gated by the string-
-                // shape, not the parsed value.
-                if with_weight && find.weight() != subnet.weight() {
-                    continue;
-                }
-                // The per-type maskcmp/memcmp. Factored into
-                // `Subnet::matches`. NB: argument order is
-                // `subnet.matches(&find, ...)`, NOT the other way.
-                // `subnet.matches(find, true)` uses self's prefix.
-                if !subnet.matches(&find, as_address) {
-                    continue;
-                }
-
-                // We collect; binary prints.
-                matches.push(SubnetMatch {
-                    subnet: strip_weight(&row.subnet).to_owned(),
-                    owner: row.owner,
-                });
-            }
+        // ─── Filters
+        // Type mismatch → skip. Handled inside `matches()` (returns
+        // false). Weight match IFF user typed `#` — outside
+        // `matches()` because it's gated by the string-shape, not
+        // the parsed value.
+        if with_weight && find.weight() != subnet.weight() {
+            return Ok(());
         }
-    }
+        // The per-type maskcmp/memcmp. Factored into
+        // `Subnet::matches`. NB: argument order is
+        // `subnet.matches(&find, ...)`, NOT the other way.
+        // `subnet.matches(find, true)` uses self's prefix.
+        if !subnet.matches(&find, as_address) {
+            return Ok(());
+        }
+
+        // We collect; binary prints.
+        matches.push(SubnetMatch {
+            subnet: strip_weight(&row.subnet).to_owned(),
+            owner: row.owner,
+        });
+        Ok::<_, CmdError>(())
+    })?;
 
     // Caller does the `if(!found)` → error (so caller picks the
     // "address" vs "subnet" wording from the shape it already
