@@ -172,22 +172,18 @@ impl ReqKey {
     /// which the relay path guarantees) — mirrors `AnsKey::format`.
     #[must_use]
     pub fn format(&self) -> String {
-        let head = format!("{} {} {}", Request::ReqKey, self.from, self.to);
-        let head = match &self.ext {
-            None => head,
-            Some(ReqKeyExt {
-                reqno,
-                payload: None,
-            }) => format!("{head} {reqno}"),
-            Some(ReqKeyExt {
-                reqno,
-                payload: Some(p),
-            }) => format!("{head} {reqno} {p}"),
-        };
-        match &self.udp_addr {
-            None => head,
-            Some((a, p)) => format!("{head} {a} {p}"),
+        use std::fmt::Write as _;
+        let mut s = format!("{} {} {}", Request::ReqKey, self.from, self.to);
+        if let Some(ReqKeyExt { reqno, payload }) = &self.ext {
+            write!(s, " {reqno}").unwrap();
+            if let Some(p) = payload {
+                write!(s, " {p}").unwrap();
+            }
         }
+        if let Some((a, p)) = &self.udp_addr {
+            write!(s, " {a} {p}").unwrap();
+        }
+        s
     }
 }
 
@@ -272,7 +268,8 @@ impl AnsKey {
     /// `format_with_addr` covers that.
     #[must_use]
     pub fn format(&self) -> String {
-        let head = format!(
+        use std::fmt::Write as _;
+        let mut s = format!(
             "{} {} {} {} {} {} {} {}",
             Request::AnsKey,
             self.from,
@@ -283,13 +280,11 @@ impl AnsKey {
             self.maclen,
             self.compression,
         );
-        match &self.udp_addr {
-            None => head,
-            // Relay-appended form. The C does this by re-printf-ing the
-            // entire input line (`"%s %s %s", request, addr, port`); the
-            // result is identical.
-            Some((a, p)) => format!("{head} {a} {p}"),
+        // Relay-appended tail; C re-printfs `"%s %s %s", request, addr, port`.
+        if let Some((a, p)) = &self.udp_addr {
+            write!(s, " {a} {p}").unwrap();
         }
+        s
     }
 }
 

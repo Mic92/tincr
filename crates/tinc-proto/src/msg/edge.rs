@@ -97,8 +97,9 @@ impl AddEdge {
     /// on whether `e->local_address.sa.sa_family` is set. We mirror.
     #[must_use]
     pub fn format(&self, nonce: u32) -> String {
+        use std::fmt::Write as _;
         // %x lowercase, no `#`/`0x`. %d signed decimal.
-        let head = format!(
+        let mut s = format!(
             "{} {nonce:x} {} {} {} {} {:x} {}",
             Request::AddEdge,
             self.from,
@@ -108,10 +109,10 @@ impl AddEdge {
             self.options,
             self.weight,
         );
-        match &self.local {
-            None => head,
-            Some((la, lp)) => format!("{head} {la} {lp}"),
+        if let Some((la, lp)) = &self.local {
+            write!(s, " {la} {lp}").unwrap();
         }
+        s
     }
 }
 
