@@ -1142,6 +1142,16 @@ impl Daemon {
             self.dp.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
         }
 
+        // Not `send_via_nexthop`: the `mem::take(udp_rx_maxlen)`
+        // below must NOT fire when no conn exists (the high-water
+        // mark would be lost without ever being sent), so we need
+        // the explicit early-returns first.
+        let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
+            return false;
+        };
+        let Some(conn) = self.conns.get_mut(conn_id) else {
+            return false;
+        };
         let from_name = self
             .graph
             .node(from_nid)
@@ -1165,7 +1175,7 @@ impl Daemon {
             mtu,
             udp_rx_len,
         };
-        self.send_via_nexthop(to_nid, msg.format())
+        conn.send(format_args!("{}", msg.format()))
     }
 
     // ─── UDP_INFO / MTU_INFO receive ────────────────────────────
