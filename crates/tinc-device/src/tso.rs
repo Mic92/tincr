@@ -209,6 +209,16 @@ fn fold16(mut ac: u64) -> u16 {
     ac as u16
 }
 
+/// `(offset, len)` of `[src_addr ‖ dst_addr]` inside the IP header.
+#[inline]
+const fn ip_addr_span(is_v6: bool) -> (usize, usize) {
+    if is_v6 {
+        (IPV6_SRCADDR_OFF, 32)
+    } else {
+        (IPV4_SRCADDR_OFF, 8)
+    }
+}
+
 /// TCP/UDP pseudo-header checksum. wg-go `pseudoHeaderChecksumNoFold`
 /// (`checksum.go:95`). RFC 793 §3.1 / RFC 8200 §8.1: sum over
 /// `src_addr ‖ dst_addr ‖ [0, protocol] ‖ tcp_length_BE`.
@@ -414,11 +424,7 @@ pub fn tso_split(
     ]);
 
     // wg-go `:903-904`: src+dst addr slice for pseudo-header.
-    let (addr_off, addr_len) = if is_v6 {
-        (IPV6_SRCADDR_OFF, 32)
-    } else {
-        (IPV4_SRCADDR_OFF, 8)
-    };
+    let (addr_off, addr_len) = ip_addr_span(is_v6);
     let addrs = &pkt[addr_off..addr_off + addr_len];
 
     // wg-go `:936`: IPv4 ID from the FIRST segment, increment for
@@ -746,11 +752,7 @@ impl GroBucket {
         ]);
         let sport = u16::from_be_bytes([ip[iphlen], ip[iphlen + 1]]);
         let dport = u16::from_be_bytes([ip[iphlen + 2], ip[iphlen + 3]]);
-        let (addr_off, addr_len) = if is_v6 {
-            (IPV6_SRCADDR_OFF, 32)
-        } else {
-            (IPV4_SRCADDR_OFF, 8)
-        };
+        let (addr_off, addr_len) = ip_addr_span(is_v6);
         // wg-go `ipHeadersCanCoalesce` `:279-307`. v4: tos at [1],
         // ttl at [8], DF at [6]>>5. v6: tclass split across [0..2]
         // (we store the [0] high nibble + [1] high nibble), hlim
@@ -886,11 +888,7 @@ impl GroBucket {
             // the folded-but-NOT-complemented pseudo — the kernel
             // chains it (RFC 1071) with the TCP-hdr+payload sum.
             // Same shape `gso_none_checksum` reads on ingest.
-            let (addr_off, addr_len) = if self.is_v6 {
-                (IPV6_SRCADDR_OFF, 32)
-            } else {
-                (IPV4_SRCADDR_OFF, 8)
-            };
+            let (addr_off, addr_len) = ip_addr_span(self.is_v6);
             #[allow(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
             let l4_len = (pkt.len() - iphlen) as u16;
             let pseudo = pseudo_header_checksum_nofold(
