@@ -24,9 +24,9 @@
 //! just `lookup_node(name)`, which fails harmlessly if the name is
 //! garbage. We don't add a check the C doesn't have.
 
+use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{Request, check_id};
 
 // ────────────────────────────────────────────────────────────────────
 // KEY_CHANGED
@@ -132,11 +132,8 @@ impl ReqKey {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
+        let from = t.id()?;
+        let to = t.id()?;
 
         let ext = match t.d_opt()? {
             None => None,
@@ -151,11 +148,7 @@ impl ReqKey {
         // a Rust relay appends them, a Rust endpoint consumes them. Atomic
         // pair (both-or-neither) like AnsKey — a single trailing token is
         // garbage from a misbehaving peer, not half a hint.
-        let udp_addr = match (t.s_opt()?, t.s_opt()?) {
-            (None, None) => None,
-            (Some(a), Some(p)) => Some((AddrStr::new(a)?, AddrStr::new(p)?)),
-            _ => return Err(ParseError),
-        };
+        let udp_addr = t.addr_pair_opt()?;
 
         Ok(Self {
             from: from.to_string(),
@@ -252,22 +245,15 @@ impl AnsKey {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
+        let from = t.id()?;
+        let to = t.id()?;
         let key = t.s()?;
         let cipher = t.d()?;
         let digest = t.d()?;
         let maclen = t.lu()?;
         let compression = t.d()?;
 
-        let udp_addr = match (t.s_opt()?, t.s_opt()?) {
-            (None, None) => None,
-            (Some(a), Some(p)) => Some((AddrStr::new(a)?, AddrStr::new(p)?)),
-            _ => return Err(ParseError),
-        };
+        let udp_addr = t.addr_pair_opt()?;
 
         Ok(Self {
             from: from.to_string(),

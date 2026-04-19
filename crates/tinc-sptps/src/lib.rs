@@ -51,10 +51,6 @@ pub const VERSION: u8 = 0;
 /// Application records use 0..=127.
 pub const REC_HANDSHAKE: u8 = 128;
 
-/// Stream-mode wire overhead when encrypted: `len[2] + type[1] + tag[16]`.
-/// The body length goes in the 2-byte header; this is what surrounds it.
-pub const STREAM_OVERHEAD: usize = 19;
-
 /// Datagram-mode wire overhead when encrypted: `seqno[4] + type[1] + tag[16]`.
 /// `SPTPS_DATAGRAM_OVERHEAD` in `sptps.h`.
 pub const DATAGRAM_OVERHEAD: usize = 21;

@@ -134,20 +134,9 @@ impl Subnet {
     #[must_use]
     pub fn matches(&self, find: &Self, as_address: bool) -> bool {
         match (self, find) {
-            // ─── IPv4 ──────────────────────────────────────────────
-            (
-                Self::V4 {
-                    addr: a, prefix: p, ..
-                },
-                Self::V4 { addr: fa, .. },
-            ) if as_address => {
-                // Address lookup: top `p` bits of find.addr must
-                // equal `self`. The SUBNET's prefix, not find's.
-                // (If find is a /32 address,
-                // its own prefix is irrelevant — we're asking
-                // "does the /24 contain it?".)
-                maskcmp(&a.octets(), &fa.octets(), *p)
-            }
+            // ─── IPv4 / IPv6 ───────────────────────────────────────
+            // Same rule for both families, differing only in octet width;
+            // `ip_match` carries the address-mode vs exact-mode logic.
             (
                 Self::V4 {
                     addr: a, prefix: p, ..
@@ -157,25 +146,7 @@ impl Subnet {
                     prefix: fp,
                     ..
                 },
-            ) => {
-                // Exact subnet: prefix equal, addr bytes equal.
-                //
-                // The memcmp checks ALL 4 bytes, NOT just the top
-                // `p` bits. So `10.0.0.1/24` (which is_canonical()
-                // would reject) does NOT match `10.0.0.0/24` here.
-                // The daemon never advertises non-canonical subnets,
-                // so it's moot in practice; but we replicate.
-                p == fp && a == fa
-            }
-
-            // ─── IPv6 ──────────────────────────────────────────────
-            // Same shape, 16 bytes.
-            (
-                Self::V6 {
-                    addr: a, prefix: p, ..
-                },
-                Self::V6 { addr: fa, .. },
-            ) if as_address => maskcmp(&a.octets(), &fa.octets(), *p),
+            ) => ip_match(&a.octets(), *p, &fa.octets(), *fp, as_address),
             (
                 Self::V6 {
                     addr: a, prefix: p, ..
@@ -185,7 +156,7 @@ impl Subnet {
                     prefix: fp,
                     ..
                 },
-            ) => p == fp && a == fa,
+            ) => ip_match(&a.octets(), *p, &fa.octets(), *fp, as_address),
 
             // ─── MAC ───────────────────────────────────────────────
             // Only memcmp. No prefix on MAC, so address-mode and
@@ -228,6 +199,17 @@ fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     }
     // C's `return 0` → our `true`.
     true
+}
+
+/// V4/V6 body of [`Subnet::matches`]. Address mode masks at the
+/// SUBNET's prefix; exact mode is `prefix==prefix && memcmp` — full
+/// width, so non-canonical `10.0.0.1/24` ≠ `10.0.0.0/24` (matches C).
+fn ip_match(a: &[u8], p: u8, fa: &[u8], fp: u8, as_address: bool) -> bool {
+    if as_address {
+        maskcmp(a, fa, p)
+    } else {
+        p == fp && a == fa
+    }
 }
 
 /// `maskcheck` from `subnet_parse.c`: are bytes from bit `prefix`
@@ -305,28 +287,27 @@ impl FromStr for Subnet {
             return Ok(Self::Mac { addr, weight });
         }
 
+        // V4/V6 share the prefix-defaulting rule, only `max` differs.
+        // The C checks `> 32` / `> 128` *after* parsing as `int`; we kept
+        // `prefix` as `i32` above for the same reason and bound-check here.
+        let clamp = |max: u8| match prefix {
+            None => Ok(max),
+            Some(p) if p <= i32::from(max) => Ok(u8::try_from(p).unwrap()),
+            _ => Err(ParseError),
+        };
+
         if let Ok(addr) = s.parse::<Ipv4Addr>() {
-            let prefix = match prefix {
-                None => 32,
-                Some(p) if p <= 32 => u8::try_from(p).unwrap(),
-                _ => return Err(ParseError),
-            };
             return Ok(Self::V4 {
                 addr,
-                prefix,
+                prefix: clamp(32)?,
                 weight,
             });
         }
 
         if let Ok(addr) = s.parse::<Ipv6Addr>() {
-            let prefix = match prefix {
-                None => 128,
-                Some(p) if p <= 128 => u8::try_from(p).unwrap(),
-                _ => return Err(ParseError),
-            };
             return Ok(Self::V6 {
                 addr,
-                prefix,
+                prefix: clamp(128)?,
                 weight,
             });
         }
@@ -373,47 +354,34 @@ impl fmt::Display for Subnet {
     /// omitted if default.
     #[allow(clippy::many_single_char_names)] // MAC byte destructuring
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Per-variant: address, then `/prefix` iff below the type's max.
+        // `inet_ntop` and `Ipv{4,6}Addr::Display` both produce RFC 5952
+        // canonical form (lowercase hex, longest zero-run as `::`, no
+        // leading zeros). Verified in the KATs below.
         match self {
-            Self::Mac { addr, weight } => {
+            Self::Mac { addr, .. } => {
                 let [a, b, c, d, e, g] = addr;
                 write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")?;
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
-            Self::V4 {
-                addr,
-                prefix,
-                weight,
-            } => {
+            Self::V4 { addr, prefix, .. } => {
                 write!(f, "{addr}")?;
                 if *prefix != 32 {
                     write!(f, "/{prefix}")?;
                 }
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
-            Self::V6 {
-                addr,
-                prefix,
-                weight,
-            } => {
-                // `inet_ntop` and `Ipv6Addr::Display` both produce RFC 5952
-                // canonical form (lowercase hex, longest zero-run as `::`,
-                // no leading zeros). Verified in the KATs below.
+            Self::V6 { addr, prefix, .. } => {
                 write!(f, "{addr}")?;
                 if *prefix != 128 {
                     write!(f, "/{prefix}")?;
                 }
-                if *weight != DEFAULT_WEIGHT {
-                    write!(f, "#{weight}")?;
-                }
-                Ok(())
             }
         }
+        // `#weight` suffix is variant-agnostic; omit when default.
+        let weight = self.weight();
+        if weight != DEFAULT_WEIGHT {
+            write!(f, "#{weight}")?;
+        }
+        Ok(())
     }
 }
 

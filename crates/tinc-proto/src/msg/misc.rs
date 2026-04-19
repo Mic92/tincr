@@ -22,12 +22,25 @@
 //! `unsigned long` for `%lu`. SPTPS records also cap well below 32K, so
 //! the parse-side `%hd < 0` check still works as a bound.
 
+use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{Request, check_id};
 
 // ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers
+
+/// `tcppacket_h` / `sptps_tcppacket_h` shared body: `%*d %hd` then
+/// reject `< 0`. Only the request id differs between the two.
+fn parse_len_prefix(line: &str) -> Result<u16, ParseError> {
+    let mut t = Tok::new(line);
+    t.skip()?;
+    let len = t.hd()?;
+    if len < 0 {
+        return Err(ParseError);
+    }
+    #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
+    Ok(len as u16)
+}
 
 /// Body of `PACKET` (legacy TCP-tunneled VPN packet header).
 ///
@@ -49,14 +62,7 @@ impl TcpPacket {
     /// (which the `%hd`-then-check-negative idiom would also reject —
     /// 32768 is `-32768` in a `short`).
     pub fn parse(line: &str) -> Result<Self, ParseError> {
-        let mut t = Tok::new(line);
-        t.skip()?;
-        let len = t.hd()?;
-        if len < 0 {
-            return Err(ParseError);
-        }
-        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
-        Ok(Self { len: len as u16 })
+        parse_len_prefix(line).map(|len| Self { len })
     }
 
     /// `send_tcppacket`: `send_request("%d %d", PACKET, packet->len)`.
@@ -82,14 +88,7 @@ impl SptpsPacket {
     /// # Errors
     /// Same as [`TcpPacket::parse`].
     pub fn parse(line: &str) -> Result<Self, ParseError> {
-        let mut t = Tok::new(line);
-        t.skip()?;
-        let len = t.hd()?;
-        if len < 0 {
-            return Err(ParseError);
-        }
-        #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
-        Ok(Self { len: len as u16 })
+        parse_len_prefix(line).map(|len| Self { len })
     }
 
     /// `send_sptps_tcppacket`: `send_request("%d %lu", SPTPS_PACKET, (unsigned long)len)`.
@@ -132,11 +131,8 @@ impl UdpInfo {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
+        let from = t.id()?;
+        let to = t.id()?;
         let addr = AddrStr::new(t.s()?)?;
         let port = AddrStr::new(t.s()?)?;
 
@@ -199,16 +195,13 @@ impl MtuInfo {
         let mut t = Tok::new(line);
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
+        let from = t.id()?;
+        let to = t.id()?;
         let mtu = t.d()?;
         // Rust extension: optional 4th field. C tinc never emits it
         // (→ 0); a Rust peer does. Negative/oversized → 0 (best-
         // effort hint, not worth tearing the conn down for).
         let udp_rx_len = t.d_opt()?.and_then(|v| u16::try_from(v).ok()).unwrap_or(0);
-        if !check_id(from) || !check_id(to) {
-            return Err(ParseError);
-        }
 
         Ok(Self {
             from: from.to_string(),

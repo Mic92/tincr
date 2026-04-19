@@ -28,7 +28,8 @@
 //! it's there because dump is "human-readable-ish" and uses the
 //! fused form everywhere it appears in log messages.
 
-use crate::MAX_STRING;
+use crate::addr::AddrStr;
+use crate::{MAX_STRING, check_id};
 
 /// Parse failure. Not an enum because the C doesn't distinguish either —
 /// `sscanf() != expected_count` is all the daemon cares about.
@@ -197,6 +198,17 @@ impl<'a> Tok<'a> {
         }
     }
 
+    /// `%s` then [`check_id`] — every handler that reads a node name
+    /// pairs the two; folding it here drops the open-coded guard at
+    /// six call sites.
+    ///
+    /// # Errors
+    /// No token, oversized token, or fails `check_id`.
+    pub fn id(&mut self) -> Result<&'a str, ParseError> {
+        let s = self.s()?;
+        if check_id(s) { Ok(s) } else { Err(ParseError) }
+    }
+
     /// Next token if there is one; `Ok(None)` if exhausted.
     ///
     /// `ADD_EDGE` has 6 mandatory + 2 optional fields (`sscanf` returns
@@ -225,6 +237,19 @@ impl<'a> Tok<'a> {
         match self.s_opt()? {
             Some(t) => t.parse().map(Some).map_err(|_| ParseError),
             None => Ok(None),
+        }
+    }
+
+    /// Optional trailing `(addr, port)` pair. Atomic: both tokens or
+    /// neither (sscanf returns N or N+2; the C rejects N+1).
+    ///
+    /// # Errors
+    /// Exactly one trailing token, or [`AddrStr::new`] rejects.
+    pub fn addr_pair_opt(&mut self) -> Result<Option<(AddrStr, AddrStr)>, ParseError> {
+        match (self.s_opt()?, self.s_opt()?) {
+            (None, None) => Ok(None),
+            (Some(a), Some(p)) => Ok(Some((AddrStr::new(a)?, AddrStr::new(p)?))),
+            _ => Err(ParseError),
         }
     }
 

@@ -29,6 +29,29 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
 
+/// SIG transcript `[role-bit][kex_a][kex_b][label]`. send_sig and
+/// receive_sig pass swapped (bit, kex order); one builder so they
+/// can't drift apart.
+fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + label.len()));
+    msg.push(u8::from(bit));
+    msg.extend_from_slice(kex_a);
+    msg.extend_from_slice(kex_b);
+    msg.extend_from_slice(label);
+    msg
+}
+
+/// Second half of the PRF output iff `initiator == outbound` — the
+/// in/out symmetry as one predicate instead of two mirrored if/else.
+fn key_half(key: &[u8], initiator: bool, outbound: bool) -> &[u8; CIPHER_KEY_LEN] {
+    let half = if initiator == outbound {
+        &key[CIPHER_KEY_LEN..]
+    } else {
+        &key[..CIPHER_KEY_LEN]
+    };
+    half.try_into().unwrap()
+}
+
 /// Max records sealed per `outcipher` before app-data sends return
 /// `InvalidState`. Wire nonce is `outseqno as u32`; 2^32 = nonce reuse.
 /// Margin covers shard `fetch_add` slop + the rekey handshake itself.
@@ -53,9 +76,6 @@ pub enum SptpsError {
     BadSig,
     /// `receive_ack`: ACK body wasn't empty.
     BadAck,
-    /// `receive_handshake`: handshake record arrived in a state that
-    /// doesn't expect one (e.g. SIG before KEX).
-    UnexpectedHandshake,
     /// Stream/datagram receive: app record arrived before `instate` set,
     /// or record type ≥ 129 (only 128 is HANDSHAKE).
     BadRecord,
@@ -911,12 +931,7 @@ impl Sptps {
         let mykex = self.mykex.as_ref().expect("send_sig with no mykex");
         let hiskex = self.hiskex.as_ref().expect("send_sig with no hiskex");
 
-        let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + self.label.len()));
-        msg.push(u8::from(self.role.is_initiator()));
-        msg.extend_from_slice(&**mykex);
-        msg.extend_from_slice(&**hiskex);
-        msg.extend_from_slice(&self.label);
-
+        let msg = sig_transcript(self.role.is_initiator(), &**mykex, &**hiskex, &self.label);
         let sig = self.mykey.sign(&msg);
         self.send_record_priv(REC_HANDSHAKE, &sig, out);
     }
@@ -946,9 +961,15 @@ impl Sptps {
     // ────────────────────────────────────────────────────────────────
     // Receive path: handshake records
 
+    /// `receive_kex` precondition. Factored so `SecondaryKex` can run
+    /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
+    fn kex_body_ok(&self, body: &[u8]) -> bool {
+        body.len() == KEX_LEN && body[0] == VERSION && self.hiskex.is_none()
+    }
+
     /// `receive_kex`: stash peer's KEX, sign-if-initiator.
     fn receive_kex(&mut self, body: &[u8], out: &mut Vec<Output>) -> Result<(), SptpsError> {
-        if body.len() != KEX_LEN || body[0] != VERSION || self.hiskex.is_some() {
+        if !self.kex_body_ok(body) {
             return Err(SptpsError::BadKex);
         }
         let mut kex = Zeroizing::new([0u8; KEX_LEN]);
@@ -1004,12 +1025,11 @@ impl Sptps {
         let key = self.key.take().expect("receive_ack with no key material");
         // Initiator decrypts with key0, responder with key1.
         // (Mirror of the outcipher assignment in receive_sig.)
-        let half: &[u8; CIPHER_KEY_LEN] = if self.role.is_initiator() {
-            (&key[..CIPHER_KEY_LEN]).try_into().unwrap()
-        } else {
-            (&key[CIPHER_KEY_LEN..]).try_into().unwrap()
-        };
-        self.incipher = Some(ChaPoly::new(half));
+        self.incipher = Some(ChaPoly::new(key_half(
+            &*key,
+            self.role.is_initiator(),
+            false,
+        )));
         // `key` Zeroizes on drop here.
         Ok(())
     }
@@ -1060,11 +1080,7 @@ impl Sptps {
         let mykex = self.mykex.as_ref().expect("receive_sig with no mykex");
         let hiskex = self.hiskex.as_ref().expect("receive_sig with no hiskex");
         {
-            let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + self.label.len()));
-            msg.push(u8::from(!self.role.is_initiator()));
-            msg.extend_from_slice(&**hiskex);
-            msg.extend_from_slice(&**mykex);
-            msg.extend_from_slice(&self.label);
+            let msg = sig_transcript(!self.role.is_initiator(), &**hiskex, &**mykex, &self.label);
             sign::verify(&self.hiskey, &msg, sig).map_err(|_| SptpsError::BadSig)?;
         }
 
@@ -1104,15 +1120,41 @@ impl Sptps {
         // C lines 370-374: NOW set the new outcipher.
         // Initiator encrypts with key1, responder with key0.
         let key = self.key.as_ref().expect("just set");
-        let half: &[u8; CIPHER_KEY_LEN] = if self.role.is_initiator() {
-            (&key[CIPHER_KEY_LEN..]).try_into().unwrap()
-        } else {
-            (&key[..CIPHER_KEY_LEN]).try_into().unwrap()
-        };
-        self.outcipher = Some(ChaPoly::new(half)); // NOW the new key
+        self.outcipher = Some(ChaPoly::new(key_half(
+            &**key,
+            self.role.is_initiator(),
+            true,
+        )));
         self.out_key_base = self.outseqno.load(Ordering::Relaxed);
 
         Ok(was_rekey)
+    }
+
+    /// Shared dispatch tail of `receive_datagram`/`receive_stream`.
+    /// `encrypted=false` rejects app records (stream's plaintext phase
+    /// only carries handshake records).
+    fn dispatch_record(
+        &mut self,
+        ty: u8,
+        body: &[u8],
+        encrypted: bool,
+        rng: &mut impl RngCore,
+        out: &mut Vec<Output>,
+    ) -> Result<(), SptpsError> {
+        match ty {
+            t if t < REC_HANDSHAKE => {
+                if !encrypted {
+                    return Err(SptpsError::BadRecord);
+                }
+                out.push(Output::Record {
+                    record_type: t,
+                    bytes: body.to_vec(),
+                });
+                Ok(())
+            }
+            REC_HANDSHAKE => self.receive_handshake(body, rng, out),
+            _ => Err(SptpsError::BadRecord),
+        }
     }
 
     /// `receive_handshake`: the state-machine switch.
@@ -1134,7 +1176,7 @@ impl Sptps {
                 // call `receive_kex` first: its initiator branch calls
                 // `send_sig`, which needs `mykex`.
                 if self.state == State::SecondaryKex {
-                    if body.len() != KEX_LEN || body[0] != VERSION || self.hiskex.is_some() {
+                    if !self.kex_body_ok(body) {
                         return Err(SptpsError::BadKex);
                     }
                     self.send_kex(rng, out)?;
@@ -1261,19 +1303,7 @@ impl Sptps {
             .unwrap_or_else(PoisonError::into_inner)
             .check(seqno, true)?;
 
-        let ty = pt[0];
-        let body = &pt[1..];
-        match ty {
-            t if t < REC_HANDSHAKE => {
-                out.push(Output::Record {
-                    record_type: t,
-                    bytes: body.to_vec(),
-                });
-                Ok(())
-            }
-            REC_HANDSHAKE => self.receive_handshake(body, rng, out),
-            _ => Err(SptpsError::BadRecord), // 129/130: ALERT/CLOSE, unimplemented in C too
-        }
+        self.dispatch_record(pt[0], &pt[1..], true, rng, out)
     }
 
     /// Stream-mode reassembly. The bottom half of `sptps_receive_data`.
@@ -1355,19 +1385,7 @@ impl Sptps {
             (ty, framed[3..].to_vec())
         };
 
-        match ty {
-            t if t < REC_HANDSHAKE => {
-                if self.incipher.is_none() {
-                    return Err(SptpsError::BadRecord);
-                }
-                out.push(Output::Record {
-                    record_type: t,
-                    bytes: body,
-                });
-            }
-            REC_HANDSHAKE => self.receive_handshake(&body, rng, out)?,
-            _ => return Err(SptpsError::BadRecord),
-        }
+        self.dispatch_record(ty, &body, self.incipher.is_some(), rng, out)?;
 
         Ok(consumed)
     }

@@ -23,9 +23,9 @@
 //! `check_id`. A self-loop edge is malformed wire data, not a graph
 //! decision. We enforce it here.
 
+use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
-use crate::{Request, check_id};
 
 /// Body of `ADD_EDGE`. The optional `local` pair is post-1.0.24.
 ///
@@ -64,9 +64,9 @@ impl AddEdge {
         t.skip()?; // %*d
         t.skip()?; // %*x
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) || from == to {
+        let from = t.id()?;
+        let to = t.id()?;
+        if from == to {
             return Err(ParseError);
         }
 
@@ -75,15 +75,9 @@ impl AddEdge {
         let options = t.x()?;
         let weight = t.d()?.max(0); // see field doc
 
-        // Optional pair. Both or neither — sscanf returns 6 or 8, not 7.
-        let local = match (t.s_opt()?, t.s_opt()?) {
-            (None, None) => None,
-            (Some(la), Some(lp)) => Some((AddrStr::new(la)?, AddrStr::new(lp)?)),
-            // 7 tokens. `sscanf` would also return 7 here (parses greedily
-            // until a %s fails); rejected via the `parameter_count != 6 &&
-            // parameter_count != 8` check.
-            _ => return Err(ParseError),
-        };
+        // Optional pair. Both or neither — sscanf returns 6 or 8, not 7
+        // (rejected via the `parameter_count != 6 && != 8` check).
+        let local = t.addr_pair_opt()?;
 
         Ok(Self {
             from: from.to_string(),
@@ -139,9 +133,9 @@ impl DelEdge {
         t.skip()?;
         t.skip()?;
 
-        let from = t.s()?;
-        let to = t.s()?;
-        if !check_id(from) || !check_id(to) || from == to {
+        let from = t.id()?;
+        let to = t.id()?;
+        if from == to {
             return Err(ParseError);
         }
 
