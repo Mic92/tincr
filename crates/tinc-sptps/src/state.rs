@@ -29,12 +29,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
 
-/// `fill_msg`: build the SIG transcript `[role-bit][kex_a][kex_b][label]`.
-///
-/// `send_sig` passes `(initiator, mykex, hiskex)`; `receive_sig` passes
-/// `(!initiator, hiskex, mykex)`. Both sides agree on what's signed
-/// because their roles swap — the bit and the kex order flip together.
-/// One builder so the two sides can't drift apart.
+/// SIG transcript `[role-bit][kex_a][kex_b][label]`. send_sig and
+/// receive_sig pass swapped (bit, kex order); one builder so they
+/// can't drift apart.
 fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + label.len()));
     msg.push(u8::from(bit));
@@ -44,14 +41,8 @@ fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroiz
     msg
 }
 
-/// Select one 64-byte half of the PRF output for a cipher direction.
-///
-/// `generate_key_material` derives 128 bytes; the initiator encrypts
-/// with the SECOND half and decrypts with the FIRST, the responder the
-/// mirror. That reduces to: use the second half iff
-/// `initiator == outbound`. One predicate instead of two open-coded
-/// `if initiator { .. } else { .. }` blocks that are easy to get
-/// reversed relative to each other.
+/// Second half of the PRF output iff `initiator == outbound` — the
+/// in/out symmetry as one predicate instead of two mirrored if/else.
 fn key_half(key: &[u8], initiator: bool, outbound: bool) -> &[u8; CIPHER_KEY_LEN] {
     let half = if initiator == outbound {
         &key[CIPHER_KEY_LEN..]
@@ -970,11 +961,8 @@ impl Sptps {
     // ────────────────────────────────────────────────────────────────
     // Receive path: handshake records
 
-    /// `receive_kex` precondition. Length 65, version byte 0, and no
-    /// peer KEX already stashed (a second KEX before SIG is a protocol
-    /// error). `receive_handshake`'s `SecondaryKex` arm checks the same
-    /// thing BEFORE `send_kex` so a malformed unsolicited rekey doesn't
-    /// burn `mykex` — see the comment there.
+    /// `receive_kex` precondition. Factored so `SecondaryKex` can run
+    /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
     fn kex_body_ok(&self, body: &[u8]) -> bool {
         body.len() == KEX_LEN && body[0] == VERSION && self.hiskex.is_none()
     }
@@ -1142,14 +1130,9 @@ impl Sptps {
         Ok(was_rekey)
     }
 
-    /// Dispatch a parsed record by `ty`. Shared tail of
-    /// `receive_datagram` (encrypted branch) and `receive_stream`.
-    ///
-    /// `encrypted` gates app records: a `<128` type before `incipher`
-    /// is up is `BadRecord` (stream-mode plaintext phase only carries
-    /// handshake records; datagram passes `true` here since its
-    /// plaintext branch already returned earlier). `129/130`
-    /// (ALERT/CLOSE) are unimplemented in C too → `BadRecord`.
+    /// Shared dispatch tail of `receive_datagram`/`receive_stream`.
+    /// `encrypted=false` rejects app records (stream's plaintext phase
+    /// only carries handshake records).
     fn dispatch_record(
         &mut self,
         ty: u8,

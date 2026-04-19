@@ -201,17 +201,9 @@ fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     true
 }
 
-/// Shared body of [`Subnet::matches`] for the IP families.
-///
-/// Address mode (`as_address`): top `p` bits of `find` must equal `a` —
-/// the SUBNET's prefix, not `find`'s. (If `find` is a /32 host its own
-/// prefix is irrelevant; we're asking "does the /24 contain it?".)
-///
-/// Exact mode: prefix equal AND all addr bytes equal. The byte compare
-/// covers the FULL width, not just the top `p` bits, so a non-canonical
-/// `10.0.0.1/24` does NOT match `10.0.0.0/24`. The daemon never
-/// advertises non-canonical subnets so it's moot in practice; we
-/// replicate the C `memcmp` regardless.
+/// V4/V6 body of [`Subnet::matches`]. Address mode masks at the
+/// SUBNET's prefix; exact mode is `prefix==prefix && memcmp` — full
+/// width, so non-canonical `10.0.0.1/24` ≠ `10.0.0.0/24` (matches C).
 fn ip_match(a: &[u8], p: u8, fa: &[u8], fp: u8, as_address: bool) -> bool {
     if as_address {
         maskcmp(a, fa, p)

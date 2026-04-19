@@ -198,16 +198,12 @@ impl<'a> Tok<'a> {
         }
     }
 
-    /// `%s` then `check_id`. The from/to name pair appears in six
-    /// message handlers (`add_edge_h`, `del_edge_h`, `req_key_h`,
-    /// `ans_key_h`, `udp_info_h`, `mtu_info_h`) and every one of them
-    /// follows the `sscanf` with `if(!check_id(from) || !check_id(to))`.
-    /// Folding the check into the read keeps the call sites at
-    /// `let from = t.id()?;` instead of repeating the guard.
+    /// `%s` then [`check_id`] — every handler that reads a node name
+    /// pairs the two; folding it here drops the open-coded guard at
+    /// six call sites.
     ///
     /// # Errors
-    /// `ParseError` if no tokens remain, the token exceeds
-    /// `MAX_STRING`, or it fails [`check_id`].
+    /// No token, oversized token, or fails `check_id`.
     pub fn id(&mut self) -> Result<&'a str, ParseError> {
         let s = self.s()?;
         if check_id(s) { Ok(s) } else { Err(ParseError) }
@@ -244,16 +240,11 @@ impl<'a> Tok<'a> {
         }
     }
 
-    /// Optional trailing `(addr, port)` pair. `ADD_EDGE` (local addr),
-    /// `ANS_KEY` (relay-appended reflexive UDP addr) and `REQ_KEY` (the
-    /// Rust-extension reflexive append) all end in two optional `%s`
-    /// tokens that are atomic: `sscanf` returns N or N+2, never N+1,
-    /// and the C handlers reject the odd count. Three call sites had
-    /// the identical `match (s_opt, s_opt)` block open-coded.
+    /// Optional trailing `(addr, port)` pair. Atomic: both tokens or
+    /// neither (sscanf returns N or N+2; the C rejects N+1).
     ///
     /// # Errors
-    /// `ParseError` if exactly one token remains (atomic-pair
-    /// violation) or a token fails [`AddrStr::new`].
+    /// Exactly one trailing token, or [`AddrStr::new`] rejects.
     pub fn addr_pair_opt(&mut self) -> Result<Option<(AddrStr, AddrStr)>, ParseError> {
         match (self.s_opt()?, self.s_opt()?) {
             (None, None) => Ok(None),

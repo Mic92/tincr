@@ -29,9 +29,8 @@ use crate::tok::{ParseError, Tok};
 // ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers
 
-/// `tcppacket_h` / `sptps_tcppacket_h`: `sscanf("%*d %hd", &len)`,
-/// then `len < 0`. Shared body — the two C handlers are byte-identical;
-/// only the request id in the format string differs.
+/// `tcppacket_h` / `sptps_tcppacket_h` shared body: `%*d %hd` then
+/// reject `< 0`. Only the request id differs between the two.
 fn parse_len_prefix(line: &str) -> Result<u16, ParseError> {
     let mut t = Tok::new(line);
     t.skip()?;
