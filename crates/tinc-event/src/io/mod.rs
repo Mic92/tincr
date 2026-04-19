@@ -111,6 +111,9 @@ pub struct EventLoop<W> {
     /// to be the cheap is-this-stale check.
     slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
+    /// Count of `Some` entries in `slots` — kept so `len()` is O(1)
+    /// for the daemon's `dump connections`.
+    live: usize,
 }
 
 impl<W: Copy> EventLoop<W> {
@@ -124,6 +127,7 @@ impl<W: Copy> EventLoop<W> {
             events: Box::new([empty_event(); MAX_EVENTS_PER_TURN]),
             slots: Vec::new(),
             free: Vec::new(),
+            live: 0,
         })
     }
 
@@ -152,6 +156,7 @@ impl<W: Copy> EventLoop<W> {
             interest,
             what,
         });
+        self.live += 1;
         Ok(IoId(idx))
     }
 
@@ -194,6 +199,7 @@ impl<W: Copy> EventLoop<W> {
             );
         }
         self.free.push(id.0);
+        self.live -= 1;
     }
 
     /// ONE iteration of the event loop. The `while(running)` outer
@@ -288,12 +294,12 @@ impl<W: Copy> EventLoop<W> {
     /// connections` will too eventually.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
+        self.live
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.slots.iter().all(Option::is_none)
+        self.live == 0
     }
 }
 
