@@ -973,9 +973,18 @@ impl Sptps {
     // ────────────────────────────────────────────────────────────────
     // Receive path: handshake records
 
+    /// `receive_kex` precondition. Length 65, version byte 0, and no
+    /// peer KEX already stashed (a second KEX before SIG is a protocol
+    /// error). `receive_handshake`'s `SecondaryKex` arm checks the same
+    /// thing BEFORE `send_kex` so a malformed unsolicited rekey doesn't
+    /// burn `mykex` — see the comment there.
+    fn kex_body_ok(&self, body: &[u8]) -> bool {
+        body.len() == KEX_LEN && body[0] == VERSION && self.hiskex.is_none()
+    }
+
     /// `receive_kex`: stash peer's KEX, sign-if-initiator.
     fn receive_kex(&mut self, body: &[u8], out: &mut Vec<Output>) -> Result<(), SptpsError> {
-        if body.len() != KEX_LEN || body[0] != VERSION || self.hiskex.is_some() {
+        if !self.kex_body_ok(body) {
             return Err(SptpsError::BadKex);
         }
         let mut kex = Zeroizing::new([0u8; KEX_LEN]);
@@ -1155,7 +1164,7 @@ impl Sptps {
                 // call `receive_kex` first: its initiator branch calls
                 // `send_sig`, which needs `mykex`.
                 if self.state == State::SecondaryKex {
-                    if body.len() != KEX_LEN || body[0] != VERSION || self.hiskex.is_some() {
+                    if !self.kex_body_ok(body) {
                         return Err(SptpsError::BadKex);
                     }
                     self.send_kex(rng, out)?;
