@@ -134,20 +134,9 @@ impl Subnet {
     #[must_use]
     pub fn matches(&self, find: &Self, as_address: bool) -> bool {
         match (self, find) {
-            // ─── IPv4 ──────────────────────────────────────────────
-            (
-                Self::V4 {
-                    addr: a, prefix: p, ..
-                },
-                Self::V4 { addr: fa, .. },
-            ) if as_address => {
-                // Address lookup: top `p` bits of find.addr must
-                // equal `self`. The SUBNET's prefix, not find's.
-                // (If find is a /32 address,
-                // its own prefix is irrelevant — we're asking
-                // "does the /24 contain it?".)
-                maskcmp(&a.octets(), &fa.octets(), *p)
-            }
+            // ─── IPv4 / IPv6 ───────────────────────────────────────
+            // Same rule for both families, differing only in octet width;
+            // `ip_match` carries the address-mode vs exact-mode logic.
             (
                 Self::V4 {
                     addr: a, prefix: p, ..
@@ -157,25 +146,7 @@ impl Subnet {
                     prefix: fp,
                     ..
                 },
-            ) => {
-                // Exact subnet: prefix equal, addr bytes equal.
-                //
-                // The memcmp checks ALL 4 bytes, NOT just the top
-                // `p` bits. So `10.0.0.1/24` (which is_canonical()
-                // would reject) does NOT match `10.0.0.0/24` here.
-                // The daemon never advertises non-canonical subnets,
-                // so it's moot in practice; but we replicate.
-                p == fp && a == fa
-            }
-
-            // ─── IPv6 ──────────────────────────────────────────────
-            // Same shape, 16 bytes.
-            (
-                Self::V6 {
-                    addr: a, prefix: p, ..
-                },
-                Self::V6 { addr: fa, .. },
-            ) if as_address => maskcmp(&a.octets(), &fa.octets(), *p),
+            ) => ip_match(&a.octets(), *p, &fa.octets(), *fp, as_address),
             (
                 Self::V6 {
                     addr: a, prefix: p, ..
@@ -185,7 +156,7 @@ impl Subnet {
                     prefix: fp,
                     ..
                 },
-            ) => p == fp && a == fa,
+            ) => ip_match(&a.octets(), *p, &fa.octets(), *fp, as_address),
 
             // ─── MAC ───────────────────────────────────────────────
             // Only memcmp. No prefix on MAC, so address-mode and
@@ -228,6 +199,25 @@ fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     }
     // C's `return 0` → our `true`.
     true
+}
+
+/// Shared body of [`Subnet::matches`] for the IP families.
+///
+/// Address mode (`as_address`): top `p` bits of `find` must equal `a` —
+/// the SUBNET's prefix, not `find`'s. (If `find` is a /32 host its own
+/// prefix is irrelevant; we're asking "does the /24 contain it?".)
+///
+/// Exact mode: prefix equal AND all addr bytes equal. The byte compare
+/// covers the FULL width, not just the top `p` bits, so a non-canonical
+/// `10.0.0.1/24` does NOT match `10.0.0.0/24`. The daemon never
+/// advertises non-canonical subnets so it's moot in practice; we
+/// replicate the C `memcmp` regardless.
+fn ip_match(a: &[u8], p: u8, fa: &[u8], fp: u8, as_address: bool) -> bool {
+    if as_address {
+        maskcmp(a, fa, p)
+    } else {
+        p == fp && a == fa
+    }
 }
 
 /// `maskcheck` from `subnet_parse.c`: are bytes from bit `prefix`
