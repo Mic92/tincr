@@ -555,11 +555,7 @@ impl Device for Tun {
         );
 
         // `IFF_NO_PI` → no `tun_pi` prefix; raw ethernet at [0..].
-        debug_assert!(
-            buf.len() >= MTU,
-            "buf too small for TAP read: {} < {MTU}",
-            buf.len()
-        );
+        crate::assert_read_buf(buf, "TAP");
         let dst = &mut buf[..MTU];
         let n = read_fd(self.fd.as_fd(), dst)?;
         if n == 0 {

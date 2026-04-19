@@ -259,6 +259,18 @@ impl Device for Dummy {
 // here — callers treat the count as the packet length. nix's `Errno`
 // converts to `io::Error` with identical `last_os_error` semantics.
 
+/// Backend `read()` precondition: caller's buffer must hold a full
+/// frame. Shared so the four backends don't each repeat the format.
+#[inline]
+#[track_caller]
+pub(crate) fn assert_read_buf(buf: &[u8], who: &str) {
+    debug_assert!(
+        buf.len() >= MTU,
+        "buf too small for {who} read: {} < {MTU}",
+        buf.len()
+    );
+}
+
 /// `read(2)`. Datagram semantics: one call = one packet.
 #[inline]
 #[cfg(unix)]

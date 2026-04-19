@@ -32,7 +32,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 
 // FdSource — the union type the config-string dispatch implies
 
@@ -266,11 +266,7 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
 impl Device for FdTun {
     /// The +14 read + ethertype synthesis.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        debug_assert!(
-            buf.len() >= MTU,
-            "buf too small for fd read: {} < {MTU}",
-            buf.len()
-        );
+        assert_read_buf(buf, "fd");
 
         // Read at +14, leaving room for the synthetic eth header.
         let n = read_fd(self.fd.as_fd(), &mut buf[ETH_HLEN..MTU])?;

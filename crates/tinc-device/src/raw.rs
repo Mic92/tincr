@@ -30,7 +30,7 @@
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
-use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 
 // Constants — kernel ABI, sed-verified
 
@@ -249,11 +249,7 @@ impl Device for RawSocket {
     /// The +0 read. Kernel writes ethernet at offset 0; we read at
     /// offset 0. No offset arithmetic. The simplest backend.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        debug_assert!(
-            buf.len() >= MTU,
-            "buf too small for raw_socket read: {} < {MTU}",
-            buf.len()
-        );
+        assert_read_buf(buf, "raw_socket");
         // `read(fd, DATA, MTU)`. Offset 0. Cap at MTU. (Jumbo
         // frames on `eth0` would truncate — `MTU` is 1518.)
         let n = read_fd(self.fd.as_fd(), &mut buf[..MTU])?;

@@ -44,7 +44,7 @@ use std::io;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 
 // Constants — the +10 prefix length
 
@@ -217,11 +217,7 @@ impl Device for BsdTun {
     /// that's the point — they're the SAME logic at three
     /// offsets).
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        debug_assert!(
-            buf.len() >= MTU,
-            "buf too small for bsd read: {} < {MTU}",
-            buf.len()
-        );
+        assert_read_buf(buf, "bsd");
 
         let offset = self.variant.read_offset();
         // The slice does the offset arithmetic.
