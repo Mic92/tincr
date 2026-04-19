@@ -98,53 +98,18 @@ impl fmt::Display for Source {
 /// layer up.
 #[must_use]
 pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError>> {
-    // We index into the byte slice but slice the original `&str`. Safe
-    // because every cut point is an ASCII byte (`\t`, ` `, `=`), and
-    // ASCII bytes never appear inside multi-byte UTF-8 sequences — a
-    // byte index found by scanning for ASCII is always a char boundary.
-    let bytes = line.as_bytes();
-
-    // Trailing strip: `\t` and ` ` only.
-    let end = bytes
-        .iter()
-        .rposition(|&b| b != b'\t' && b != b' ')
-        .map_or(0, |i| i + 1);
-    let line = &line[..end];
-    let bytes = &bytes[..end];
-
-    // The empty-line check is on the *original* (pre-trailing-strip)
-    // line. So
-    // a line of pure spaces actually *enters* `parse_config_line` and
-    // hits the `*--eol` underflow. We instead make this fn idempotent
-    // about it: empty-after-strip → skip.
-    if bytes.is_empty() {
+    // Trailing strip: `\t` and ` ` only. The empty-line check is on the
+    // *original* (pre-trailing-strip) line, so a line of pure spaces
+    // actually *enters* `parse_config_line` and hits the `*--eol`
+    // underflow. We instead make this fn idempotent about it:
+    // empty-after-strip → skip.
+    let line = line.trim_end_matches(['\t', ' ']);
+    if line.is_empty() {
         return None;
     }
 
-    // Variable: `strcspn(value, "\t =")` — bytes until first sep char.
-    // `=` is a separator char even with no surrounding whitespace, so
-    // `Port=655` works.
-    let sep = bytes
-        .iter()
-        .position(|&b| b == b'\t' || b == b' ' || b == b'=')
-        .unwrap_or(bytes.len());
-    let variable = line[..sep].to_owned();
-
-    // Separator: skip `[\t ]*`, then optional `=`, then `[\t ]*` again.
-    // `strspn(value, "\t ")` then `if(*value == '=') value++` then
-    // `strspn` again.
-    let mut i = sep;
-    while i < bytes.len() && (bytes[i] == b'\t' || bytes[i] == b' ') {
-        i += 1;
-    }
-    if i < bytes.len() && bytes[i] == b'=' {
-        i += 1;
-    }
-    while i < bytes.len() && (bytes[i] == b'\t' || bytes[i] == b' ') {
-        i += 1;
-    }
-
-    let value = &line[i..];
+    let (variable, value) = split_kv(line);
+    let variable = variable.to_owned();
 
     // Empty value is an error. Variable can be empty (line starting
     // with `=` or space) and that's *not* checked — it'll fail
@@ -164,6 +129,27 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
         value: value.to_owned(),
         source,
     }))
+}
+
+/// The `strcspn(line, "\t =")` tokenizer used everywhere tinc reads a
+/// `key [= ]value` pair: split at first of tab/space/`=`, then skip
+/// `[\t ]*`, an optional `=`, then `[\t ]*` again.
+///
+/// `Port = 655` → ("Port", "655"). `Port=655` → ("Port", "655").
+/// `Port` → ("Port", ""). `=655` → ("", "655"). No trimming of either
+/// end — callers strip trailing newlines/whitespace and check for
+/// empty key/value as their context demands.
+///
+/// Safe to slice at the cut points because every separator is ASCII
+/// and ASCII bytes never appear inside multi-byte UTF-8 sequences.
+#[must_use]
+pub fn split_kv(line: &str) -> (&str, &str) {
+    let key_end = line.find(['\t', ' ', '=']).unwrap_or(line.len());
+    let rest = &line[key_end..];
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('=').unwrap_or(rest);
+    let val = rest.trim_start_matches([' ', '\t']);
+    (&line[..key_end], val)
 }
 
 /// Case-fold for lookup. C uses `strcasecmp` which is locale-dependent

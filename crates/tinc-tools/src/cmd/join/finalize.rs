@@ -423,27 +423,14 @@ pub(super) fn parse_name_line(line: &str) -> Option<&str> {
     }
 }
 
-/// The `strcspn(l, "\t =")` tokenizer: split at first of tab/space/
-/// `=`, then skip ws, optional `=`, ws.
-///
-/// `Port = 655` → ("Port", "655"). `Port=655` → ("Port", "655").
-/// `Port` → ("Port", ""). `  ` → None. `# comment` → ("#", "comment")
-/// — the caller checks `starts_with('#')` first.
-///
-/// Returns `None` only for empty key.
+/// `tinc_conf::split_kv` plus the empty-key → `None` convention this
+/// module's callers want. `# comment` → ("#", "comment") — callers
+/// check `starts_with('#')` first.
 pub(super) fn split_var(line: &str) -> Option<(&str, &str)> {
-    let key_end = line.find(['\t', ' ', '=']).unwrap_or(line.len());
-    let key = &line[..key_end];
+    let (key, val) = tinc_conf::split_kv(line);
     if key.is_empty() {
-        return None;
+        None
+    } else {
+        Some((key, val))
     }
-
-    // Skip past the separator: `strspn` past ws, then optional `=`,
-    // then `strspn` past ws again.
-    let rest = &line[key_end..];
-    let rest = rest.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let val = rest.trim_start_matches([' ', '\t']);
-
-    Some((key, val))
 }

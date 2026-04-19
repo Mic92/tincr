@@ -108,10 +108,6 @@ impl std::fmt::Display for Warning {
 
 /// Parse `[NODE.]VAR [= VAL]` from a pre-joined argv string.
 ///
-/// Same `strcspn`/`strspn` tokenizer that appears in conf parsing,
-/// invitations, etc. — the SEVENTH instance. See module doc for why
-/// we don't unify them.
-///
 /// The `node.var` split happens *after* `var = val` tokenization,
 /// so `alice.Port = 655` parses as `(alice, Port, 655)` but
 /// `alice.Port=655` parses as... `(alice, Port, 655)` too — the
@@ -126,17 +122,7 @@ impl std::fmt::Display for Warning {
 /// # Errors
 /// `var` is empty (e.g. input is `".Port"` or `"= 655"` or `""`).
 fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> {
-    // ─── Find end of key: first \t, space, or =
-    // Same `find` set as `split_var` in join.rs. Those three chars
-    // exactly.
-    let key_end = joined.find(['\t', ' ', '=']).unwrap_or(joined.len());
-    let key = &joined[..key_end];
-
-    // ─── Walk past separator to find value
-    let rest = &joined[key_end..];
-    let rest = rest.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let val = rest.trim_start_matches([' ', '\t']);
+    let (key, val) = tinc_conf::split_kv(joined);
 
     // ─── Split key on '.' for node.var syntax
     // The `.` doesn't appear in any var name (verified: `vars.rs`
@@ -692,26 +678,16 @@ fn tmpfile_werr(e: std::io::Error) -> CmdError {
 /// inherit upstream's behavior — `tinc set -----BEGIN something`
 /// would do something weird, but so would upstream.
 fn split_line(line: &str) -> Option<(&str, &str)> {
-    // ─── rstrip first: \t\r\n and space
-    // We do it on the *whole line* up front, then tokenize.
-    // Upstream does it on bvalue after key extraction — equivalent,
-    // since the key portion never has trailing whitespace anyway
-    // (the stop set IS whitespace).
-    let trimmed = line.trim_end_matches(['\t', '\r', '\n', ' ']);
-
-    // ─── Same key-end finding as parse_var_expr
-    let key_end = trimmed.find(['\t', ' ', '=']).unwrap_or(trimmed.len());
-    let key = &trimmed[..key_end];
+    // rstrip first: \t\r\n and space. We do it on the *whole line* up
+    // front, then tokenize. Upstream does it on bvalue after key
+    // extraction — equivalent, since the key portion never has trailing
+    // whitespace anyway (the stop set IS whitespace).
+    let (key, val) = tinc_conf::split_kv(line.trim_end_matches(['\t', '\r', '\n', ' ']));
     if key.is_empty() {
-        return None;
+        None
+    } else {
+        Some((key, val))
     }
-
-    let rest = &trimmed[key_end..];
-    let rest = rest.trim_start_matches([' ', '\t']);
-    let rest = rest.strip_prefix('=').unwrap_or(rest);
-    let val = rest.trim_start_matches([' ', '\t']);
-
-    Some((key, val))
 }
 
 // Top-level: glue stages 1+2+3, handle the Port special case,
