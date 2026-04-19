@@ -312,10 +312,11 @@ impl Stats {
             // `as f32` after the sub, not before — `(a - b) as f32`
             // not `a as f32 - b as f32`. Different rounding for
             // huge values.
-            s.in_packets_rate = row.in_packets.wrapping_sub(s.in_packets) as f32 / interval;
-            s.in_bytes_rate = row.in_bytes.wrapping_sub(s.in_bytes) as f32 / interval;
-            s.out_packets_rate = row.out_packets.wrapping_sub(s.out_packets) as f32 / interval;
-            s.out_bytes_rate = row.out_bytes.wrapping_sub(s.out_bytes) as f32 / interval;
+            let rate = |new: u64, old: u64| new.wrapping_sub(old) as f32 / interval;
+            s.in_packets_rate = rate(row.in_packets, s.in_packets);
+            s.in_bytes_rate = rate(row.in_bytes, s.in_bytes);
+            s.out_packets_rate = rate(row.out_packets, s.out_packets);
+            s.out_bytes_rate = rate(row.out_bytes, s.out_bytes);
 
             // Store for next tick's delta.
             s.in_packets = row.in_packets;
@@ -388,85 +389,39 @@ impl Stats {
 /// first tick, real elapsed after) — no division by zero, no NaN.
 /// `unwrap_or(Equal)` covers the unreachable NaN case.
 fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> std::cmp::Ordering {
+    // Descending (heavier first): compare b's key against a's. The
+    // u64→f64 cast loses precision past 2^53 but counters that large
+    // (9 PB / 9 quadrillion packets) don't happen in practice and the
+    // ordering would still be correct to within rounding.
+    sort_key(b, mode, cumulative)
+        .partial_cmp(&sort_key(a, mode, cumulative))
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Project a `NodeStats` onto the scalar the current sort mode cares
+/// about. `Name` returns 0 — the caller (`Stats::sort`) handles that
+/// mode by sorting keys directly so this arm is unreachable; the
+/// constant keeps the match exhaustive.
+#[allow(clippy::cast_precision_loss)] // see compare()
+fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
     use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
-    use std::cmp::Ordering::Equal;
-
+    let pick = |cum: u64, rate: f32| {
+        if cumulative {
+            cum as f64
+        } else {
+            f64::from(rate)
+        }
+    };
     match mode {
-        // We don't have the name here (it's the BTreeMap key). The
-        // caller (`Stats::sort`) branches on mode FIRST: Name mode
-        // sorts the key Vec directly, other modes call `compare()`
-        // and rely on stable-sort for ties. This arm is unreachable;
-        // Equal keeps the match exhaustive.
-        Name => Equal,
-
-        // Descending (heavier first): `b.cmp(&a)` not `a.cmp(&b)`.
-        InPackets => {
-            if cumulative {
-                b.in_packets.cmp(&a.in_packets)
-            } else {
-                b.in_packets_rate
-                    .partial_cmp(&a.in_packets_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        InBytes => {
-            if cumulative {
-                b.in_bytes.cmp(&a.in_bytes)
-            } else {
-                b.in_bytes_rate
-                    .partial_cmp(&a.in_bytes_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        OutPackets => {
-            if cumulative {
-                b.out_packets.cmp(&a.out_packets)
-            } else {
-                b.out_packets_rate
-                    .partial_cmp(&a.out_packets_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        OutBytes => {
-            if cumulative {
-                b.out_bytes.cmp(&a.out_bytes)
-            } else {
-                b.out_bytes_rate
-                    .partial_cmp(&a.out_bytes_rate)
-                    .unwrap_or(Equal)
-            }
-        }
-
-        // Sum, then descending. `wrapping_add` for the same reason
-        // as `wrapping_sub` in update — u64 overflow at 18
-        // quintillion total packets; not happening in practice,
-        // but unsigned add wraps and we match.
+        Name => 0.0,
+        InPackets => pick(s.in_packets, s.in_packets_rate),
+        InBytes => pick(s.in_bytes, s.in_bytes_rate),
+        OutPackets => pick(s.out_packets, s.out_packets_rate),
+        OutBytes => pick(s.out_bytes, s.out_bytes_rate),
         TotalPackets => {
-            if cumulative {
-                let sa = a.in_packets.wrapping_add(a.out_packets);
-                let sb = b.in_packets.wrapping_add(b.out_packets);
-                sb.cmp(&sa)
-            } else {
-                let sa = a.in_packets_rate + a.out_packets_rate;
-                let sb = b.in_packets_rate + b.out_packets_rate;
-                sb.partial_cmp(&sa).unwrap_or(Equal)
-            }
+            pick(s.in_packets, s.in_packets_rate) + pick(s.out_packets, s.out_packets_rate)
         }
-
-        TotalBytes => {
-            if cumulative {
-                let sa = a.in_bytes.wrapping_add(a.out_bytes);
-                let sb = b.in_bytes.wrapping_add(b.out_bytes);
-                sb.cmp(&sa)
-            } else {
-                let sa = a.in_bytes_rate + a.out_bytes_rate;
-                let sb = b.in_bytes_rate + b.out_bytes_rate;
-                sb.partial_cmp(&sa).unwrap_or(Equal)
-            }
-        }
+        TotalBytes => pick(s.in_bytes, s.in_bytes_rate) + pick(s.out_bytes, s.out_bytes_rate),
     }
 }
 
@@ -839,71 +794,6 @@ fn handle_key(
             Ok(true)
         }
 
-        // ─── Sort mode keys
-        // lowercase → bytes (the heavier metric); uppercase → packets.
-        b'n' => {
-            stats.sort_mode = SortMode::Name;
-            Ok(true)
-        }
-        b'i' => {
-            stats.sort_mode = SortMode::InBytes;
-            Ok(true)
-        }
-        b'I' => {
-            stats.sort_mode = SortMode::InPackets;
-            Ok(true)
-        }
-        b'o' => {
-            stats.sort_mode = SortMode::OutBytes;
-            Ok(true)
-        }
-        b'O' => {
-            stats.sort_mode = SortMode::OutPackets;
-            Ok(true)
-        }
-        b't' => {
-            stats.sort_mode = SortMode::TotalBytes;
-            Ok(true)
-        }
-        b'T' => {
-            stats.sort_mode = SortMode::TotalPackets;
-            Ok(true)
-        }
-
-        // ─── Unit/scale keys
-        // Four presets. `b`/`k` keep packets at 1×, only `M`/`G`
-        // scale packets too. The header strings are 4-5 chars:
-        // `pkts`/`kpkt`/`Mpkt`, `bytes`/`kbyte`/`Mbyte`/`Gbyte`.
-        // Widths fit `%s` in the header without overflowing.
-        b'b' => {
-            stats.bunit = "bytes";
-            stats.bscale = 1.0;
-            stats.punit = "pkts";
-            stats.pscale = 1.0;
-            Ok(true)
-        }
-        b'k' => {
-            stats.bunit = "kbyte";
-            stats.bscale = 1e-3;
-            stats.punit = "pkts";
-            stats.pscale = 1.0;
-            Ok(true)
-        }
-        b'M' => {
-            stats.bunit = "Mbyte";
-            stats.bscale = 1e-6;
-            stats.punit = "kpkt";
-            stats.pscale = 1e-3;
-            Ok(true)
-        }
-        b'G' => {
-            stats.bunit = "Gbyte";
-            stats.bscale = 1e-9;
-            stats.punit = "Mpkt";
-            stats.pscale = 1e-6;
-            Ok(true)
-        }
-
         // ─── 'q': quit
         // `KEY_BREAK` is curses' Windows-console Ctrl-Break thing;
         // we're cfg(unix), don't have it.
@@ -916,9 +806,42 @@ fn handle_key(
         // "ignored key" cycles). Upstream has the same behavior:
         // it doesn't call `keypad()`, so curses gives raw escape
         // bytes too.
-        _ => Ok(true),
+        _ => {
+            // ─── Sort mode keys (lowercase → bytes; uppercase → packets)
+            if let Some(&(_, m)) = SORT_KEYS.iter().find(|(k, _)| *k == key) {
+                stats.sort_mode = m;
+            // ─── Unit/scale keys: four presets. `b`/`k` keep packets
+            // at 1×, only `M`/`G` scale packets too.
+            } else if let Some(&(_, bu, bs, pu, ps)) = UNIT_KEYS.iter().find(|(k, ..)| *k == key) {
+                stats.bunit = bu;
+                stats.bscale = bs;
+                stats.punit = pu;
+                stats.pscale = ps;
+            }
+            Ok(true)
+        }
     }
 }
+
+/// Key → sort mode. Kept as a flat table so adding a mode is one row.
+const SORT_KEYS: &[(u8, SortMode)] = &[
+    (b'n', SortMode::Name),
+    (b'i', SortMode::InBytes),
+    (b'I', SortMode::InPackets),
+    (b'o', SortMode::OutBytes),
+    (b'O', SortMode::OutPackets),
+    (b't', SortMode::TotalBytes),
+    (b'T', SortMode::TotalPackets),
+];
+
+/// Key → (byte unit, byte scale, packet unit, packet scale). Header
+/// strings are 4-5 chars; widths fit `%s` without overflowing.
+const UNIT_KEYS: &[(u8, &str, f32, &str, f32)] = &[
+    (b'b', "bytes", 1.0, "pkts", 1.0),
+    (b'k', "kbyte", 1e-3, "pkts", 1.0),
+    (b'M', "Mbyte", 1e-6, "kpkt", 1e-3),
+    (b'G', "Gbyte", 1e-9, "Mpkt", 1e-6),
+];
 
 // Layer 6: the loop
 
