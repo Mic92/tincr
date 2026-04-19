@@ -18,7 +18,7 @@
 //!   matching `SecondaryKex | Kex` and gating the send on the variant.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rand_core::RngCore;
 use tinc_crypto::chapoly::{ChaPoly, KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
@@ -653,6 +653,12 @@ impl Sptps {
         Arc::clone(&self.replay)
     }
 
+    /// Lock the replay window, recovering from poison: the window holds
+    /// no invariants a panicking writer could leave half-broken.
+    fn replay_mut(&self) -> MutexGuard<'_, ReplayWindow> {
+        self.replay.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Copy the outbound cipher key. Shard hand-off: workers get a
     /// 64-byte copy per session so they never hold `&Sptps` across a
     /// re-KEX. Re-KEX swaps `outcipher`; an in-flight seal with the
@@ -785,12 +791,7 @@ impl Sptps {
         // first is still required (forged seqnos must not advance the
         // window) but check-before-shift means the memmove below only
         // runs on the Ok path.
-        if let Err(e) = self
-            .replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)
-        {
+        if let Err(e) = self.replay_mut().check(seqno, true) {
             out.truncate(headroom);
             return Err(e);
         }
@@ -877,10 +878,7 @@ impl Sptps {
     /// `BadSeqno` if `seqno` is replayed or out-of-window. Caller
     /// drops the (already-decrypted) plaintext.
     pub fn replay_check(&mut self, seqno: u32) -> Result<(), SptpsError> {
-        self.replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)
+        self.replay_mut().check(seqno, true)
     }
 
     /// `send_kex`: emit `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
@@ -1274,7 +1272,7 @@ impl Sptps {
             // Handshake-phase only: 3 packets, never hot. Hold the
             // lock across the read+write so a (hypothetical) concurrent
             // datagram receive sees a consistent counter.
-            let mut win = self.replay.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut win = self.replay_mut();
             if seqno != win.inseqno {
                 return Err(SptpsError::BadSeqno);
             }
@@ -1297,10 +1295,7 @@ impl Sptps {
         let pt = cipher
             .open(u64::from(seqno), payload)
             .map_err(|_| SptpsError::DecryptFailed)?;
-        self.replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)?;
+        self.replay_mut().check(seqno, true)?;
 
         self.dispatch_record(pt[0], &pt[1..], true, rng, out)
     }
