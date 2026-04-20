@@ -259,24 +259,7 @@ mod tests {
     use tinc_conf::{Source, parse_line};
     use tinc_crypto::b64::encode;
 
-    /// Tempdir per test. Same idiom as `daemon.rs::tests`.
-    struct TmpDir(PathBuf);
-    impl TmpDir {
-        fn new(tag: &str) -> Self {
-            let tid = std::thread::current().id();
-            let p = std::env::temp_dir().join(format!("tincd-keys-{tag}-{tid:?}"));
-            std::fs::create_dir_all(&p).unwrap();
-            Self(p)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testutil::TmpDir;
 
     /// Generate a deterministic keypair for tests. Seeded from a tag.
     fn det_key(tag: u8) -> SigningKey {

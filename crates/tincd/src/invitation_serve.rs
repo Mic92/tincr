@@ -247,26 +247,7 @@ mod tests {
     use super::*;
     use tinc_conf::write_pem;
 
-    struct TmpDir(PathBuf);
-    impl TmpDir {
-        fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "tincd-invserve-{tag}-{:?}",
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&p);
-            fs::create_dir_all(&p).unwrap();
-            Self(p)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testutil::TmpDir;
 
     fn test_key() -> SigningKey {
         SigningKey::from_seed(&[7u8; 32])

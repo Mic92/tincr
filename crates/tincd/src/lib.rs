@@ -66,3 +66,32 @@ pub use platform::{
 };
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
+
+/// Per-test tempdir. PID+TID in the name keeps nextest-parallel runs
+/// disjoint without pulling in the `tempfile` crate.
+#[cfg(test)]
+pub(crate) mod testutil {
+    use std::path::{Path, PathBuf};
+
+    pub(crate) struct TmpDir(pub(crate) PathBuf);
+    impl TmpDir {
+        pub(crate) fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "tincd-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
