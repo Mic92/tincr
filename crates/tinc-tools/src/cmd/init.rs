@@ -313,6 +313,13 @@ mod tests {
     /// mkdir fails. The error must carry the `-c DIR` hint.
     #[test]
     fn eacces_on_mkdir_hints_at_dash_c() {
+        // Root bypasses DAC: mkdir under a 0555 parent succeeds, so
+        // `expect_err` panics. Same gate as `list_skip_unreadable`.
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("(skipping eacces_on_mkdir_hints_at_dash_c: running as root)");
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         // Read-only parent: mkdir(confbase) will EACCES.
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
