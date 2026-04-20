@@ -149,6 +149,65 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     }
 }
 
+/// Shared socket-create + nonblocking-connect sequence used by both
+/// `try_connect` (direct) and `try_connect_via_proxy`. `desc` feeds the
+/// log lines so the two callers keep their distinct messages. NONBLOCK
+/// is set BEFORE `connect()` so it returns `EINPROGRESS` instead of
+/// blocking; V6ONLY is set defensively (C parity); `bind_to` is
+/// best-effort (warn+continue) because the route-table source may still
+/// work.
+fn dial_nonblocking(
+    target: SocketAddr,
+    bind_to: Option<SocketAddr>,
+    sockopts: &SockOpts,
+    desc: &dyn std::fmt::Display,
+) -> Option<Socket> {
+    let domain = match target {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(s) => {
+            crate::set_nosigpipe(&s);
+            s
+        }
+        Err(e) => {
+            log::error!(target: "tincd::conn",
+                        "Creating socket for {desc} failed: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = sock.set_nonblocking(true) {
+        log::error!(target: "tincd::conn",
+                    "set_nonblocking failed for {desc}: {e}");
+        return None;
+    }
+    if let Err(e) = sock.set_nodelay(true) {
+        log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
+    }
+    if matches!(target, SocketAddr::V6(_)) {
+        let _ = sock.set_only_v6(true);
+    }
+    // SO_MARK + bind_to_interface. BEFORE bind_to_address.
+    apply_dial_sockopts(&sock, sockopts);
+    if let Some(local) = bind_to
+        && let Err(e) = sock.bind(&SockAddr::from(local))
+    {
+        log::warn!(target: "tincd::conn", "Can't bind to {local}: {e}");
+    }
+    match sock.connect(&SockAddr::from(target)) {
+        // Immediate success (loopback) or normal EINPROGRESS.
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => {}
+        Err(e) => {
+            log::error!(target: "tincd::conn",
+                        "Could not connect to {desc}: {e}");
+            return None;
+        }
+    }
+    Some(sock)
+}
+
 /// One iteration of `do_outgoing_connection`'s `goto begin` loop.
 /// Creates a socket, sets nonblocking, calls `connect()`. The daemon
 /// loops this until `Started` or `Exhausted`.
@@ -161,101 +220,21 @@ pub fn try_connect(
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
     let Some(addr) = addr_cache.next_addr() else {
-        // "Could not set up a meta connection".
         log::error!(target: "tincd::conn",
                     "Could not set up a meta connection to {node_name}");
         return ConnectAttempt::Exhausted;
     };
-
-    // `c->hostname = sockaddr2hostname(&c->address)`. Logged as
-    // `"Trying to connect to %s (%s)"`.
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
-
-    // `socket(c->address.sa.sa_family, SOCK_STREAM, IPPROTO_TCP)`.
-    // socket2 auto-sets CLOEXEC.
-    let domain = match addr {
-        SocketAddr::V4(_) => Domain::IPV4,
-        SocketAddr::V6(_) => Domain::IPV6,
-    };
-    let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-        Ok(s) => {
-            crate::set_nosigpipe(&s);
-            s
-        }
-        Err(e) => {
-            // "Creating socket for %s failed".
-            log::error!(target: "tincd::conn",
-                        "Creating socket for {addr} failed: {e}");
-            return ConnectAttempt::Retry;
-        }
-    };
-
-    // `configure_tcp(c)`. NONBLOCK + NODELAY. NONBLOCK BEFORE
-    // connect — that's what makes connect() return
-    // EINPROGRESS instead of blocking. The C's `configure_tcp`
-    // (`:71-76`) does it via fcntl; same effect.
-    if let Err(e) = sock.set_nonblocking(true) {
-        log::error!(target: "tincd::conn",
-                    "set_nonblocking failed for {addr}: {e}");
-        return ConnectAttempt::Retry;
+    match dial_nonblocking(
+        addr,
+        bind_to,
+        sockopts,
+        &format_args!("{node_name} ({addr})"),
+    ) {
+        Some(sock) => ConnectAttempt::Started { sock, addr },
+        None => ConnectAttempt::Retry,
     }
-    if let Err(e) = sock.set_nodelay(true) {
-        log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
-    }
-
-    // We're CONNECTING, not binding; V6ONLY only matters for
-    // dual-stack listeners.
-    // The C sets it anyway (defensive against weird kernels). Match.
-    if matches!(addr, SocketAddr::V6(_)) {
-        let _ = sock.set_only_v6(true);
-    }
-
-    // SO_MARK + bind_to_interface. BEFORE bind_to_address.
-    apply_dial_sockopts(&sock, sockopts);
-
-    // `bind_to_addr(c->socket)`. Forces the source addr
-    // for outgoing connections. Niche (multi-homed hosts where the
-    // default route doesn't go via the desired interface). `None`
-    // → no bind → kernel picks from the route table (the default).
-    // BEFORE `connect()`: bind sets the local addr; connect sets
-    // the remote.
-    if let Some(local) = bind_to
-        && let Err(e) = sock.bind(&SockAddr::from(local))
-    {
-        // Warn, continue. The connect may still work via a
-        // different source.
-        log::warn!(target: "tincd::conn",
-                        "Can't bind to {local}: {e}");
-    }
-
-    // `connect(c->socket, &c->address.sa, salen)`. Nonblocking →
-    // returns EINPROGRESS for
-    // anything other than loopback (which might connect synchronously).
-    let sock_addr = SockAddr::from(addr);
-    match sock.connect(&sock_addr) {
-        Ok(()) => {
-            // Immediate success. Loopback can do this.
-        }
-        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => {
-            // Normal nonblocking-connect-started.
-            // `result == -1 && sockinprogress(sockerrno)` — the
-            // `!` makes it FALSE, falls through to `:649-658`.
-        }
-        Err(e) => {
-            // "Could not connect to %s (%s)". `goto begin`. The
-            // error here is immediate (e.g.
-            // ENETUNREACH for an unroutable addr).
-            log::error!(target: "tincd::conn",
-                        "Could not connect to {node_name} ({addr}): {e}");
-            return ConnectAttempt::Retry;
-        }
-    }
-
-    // Register for IO_READ | IO_WRITE. The daemon does the
-    // registration (it owns the EventLoop). We hand back
-    // the socket + addr.
-    ConnectAttempt::Started { sock, addr }
 }
 
 /// `do_outgoing_connection` proxy branch. Connects to the PROXY's
@@ -285,61 +264,22 @@ pub fn try_connect_via_proxy(
     node_name: &str,
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    // `"Using proxy at %s port %s"`.
     log::info!(target: "tincd::conn",
                "Using proxy at {proxy_addr} for {node_name} ({peer_addr})");
-
-    // `socket(proxyai->ai_family, SOCK_STREAM, IPPROTO_TCP)`.
-    let domain = match proxy_addr {
-        SocketAddr::V4(_) => Domain::IPV4,
-        SocketAddr::V6(_) => Domain::IPV6,
-    };
-    let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-        Ok(s) => {
-            crate::set_nosigpipe(&s);
-            s
-        }
-        Err(e) => {
-            log::error!(target: "tincd::conn",
-                        "Creating socket for proxy {proxy_addr} failed: {e}");
-            return ConnectAttempt::Exhausted;
-        }
-    };
-    if let Err(e) = sock.set_nonblocking(true) {
-        log::error!(target: "tincd::conn",
-                    "set_nonblocking failed for proxy {proxy_addr}: {e}");
-        return ConnectAttempt::Exhausted;
-    }
-    if let Err(e) = sock.set_nodelay(true) {
-        log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
-    }
-    if matches!(proxy_addr, SocketAddr::V6(_)) {
-        let _ = sock.set_only_v6(true);
-    }
-
-    // `if(proxytype != PROXY_EXEC)` — SOCKS/HTTP proxy sockets are
-    // real TCP and get sockopts.
-    apply_dial_sockopts(&sock, sockopts);
-
-    // `connect(c->socket, proxyai->ai_addr, ...)`.
-    let sock_addr = SockAddr::from(proxy_addr);
-    match sock.connect(&sock_addr) {
-        Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => {}
-        Err(e) => {
-            log::error!(target: "tincd::conn",
-                        "Could not connect to proxy {proxy_addr} for {node_name}: {e}");
-            return ConnectAttempt::Exhausted;
-        }
-    }
-
-    // The `addr` returned is the PEER addr, not the proxy addr.
-    // `Connection.address` stores it (it's what `c->address` is in C
-    // — `:580` memcpy from `sa`, which is `get_recent_address`, the
-    // peer). The SOCKS CONNECT target is built from `conn.address`.
-    ConnectAttempt::Started {
-        sock,
-        addr: peer_addr,
+    // Proxy path never binds to a local addr (C: only direct does).
+    match dial_nonblocking(
+        proxy_addr,
+        None,
+        sockopts,
+        &format_args!("proxy {proxy_addr} for {node_name}"),
+    ) {
+        // `addr` is the PEER addr (what `c->address` holds in C);
+        // the SOCKS CONNECT target is built from it later.
+        Some(sock) => ConnectAttempt::Started {
+            sock,
+            addr: peer_addr,
+        },
+        None => ConnectAttempt::Exhausted,
     }
 }
 
