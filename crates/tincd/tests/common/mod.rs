@@ -99,66 +99,32 @@ pub fn tincd_cmd() -> Command {
     c
 }
 
-/// Pre-allocate a port that is free for **both** TCP and UDP.
+/// Pre-allocate a port free on **both** TCP and UDP (the daemon binds
+/// both for `Port = N`).
 ///
-/// The daemon binds the configured `Port` on TCP *and* UDP
-/// (`listen.rs`). The previous TCP-only probe handed out ports that
-/// were already held for UDP by another parallel nextest worker's
-/// daemon, surfacing as a flaky
-/// `UDP bind on 0.0.0.0:NNNN: Address already in use` setup failure
-/// (e.g. `three_node::three_daemon_forwarding_off_drops_transit`).
-///
-/// ## Why not `bind(0)`
-///
-/// The original `bind(:0) → read port → drop → daemon rebinds` is a
-/// TOCTOU: under `cargo test`'s thread pool another test in the same
-/// process can call `bind(:0)` between our drop and the daemon's
-/// rebind, and the kernel happily recycles the just-freed ephemeral
-/// port. Observed as `TCP bind on 0.0.0.0:NNNN: Address already in
-/// use` in `two_daemons::*` ~1/30 runs.
-///
-/// Instead: walk a per-process port range with an atomic counter.
-/// - Intra-process: `fetch_add` hands every thread a unique port,
-///   so two parallel tests in the same binary never collide.
-/// - Inter-process: the range sits BELOW the kernel ephemeral pool
-///   (Linux `ip_local_port_range` default 32768–60999, macOS/BSD
-///   49152+), so a sibling test binary's `bind(:0)` won't pick it;
-///   and each binary's walk starts at a pid-derived offset so two
-///   binaries scanning the same range start far apart.
-/// - Host services already on a port: the TCP+UDP probe skips them.
-///
-/// The remaining drop-to-daemon-rebind window is now harmless: the
-/// only thing that could grab the port in that window is something
-/// asking for it *explicitly*, and nothing else does.
+/// `bind(:0)→drop→daemon-rebind` is a TOCTOU under cargo test's
+/// thread pool (kernel recycles the freed ephemeral to a sibling
+/// thread's `bind(:0)`). Walk a pid-seeded atomic counter through
+/// `[12000,28000)` instead: below every target's ephemeral range, and
+/// `fetch_add` gives every thread in this process a unique port.
 pub fn alloc_port() -> u16 {
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Low end of the scan range. Stays below the ephemeral pool on
-    /// every target (see fn doc).
     const BASE: u32 = 12000;
-    /// Range width. 16k ports » the ~100 any single test binary
-    /// allocates; pid-hash spreads concurrent binaries across it.
     const SPAN: u32 = 16000;
 
-    // u32::MAX sentinel = "seed me". Seeded once per process to a
-    // pid-derived offset (Knuth multiplicative hash; pid alone is
-    // too sequential — cargo spawns test binaries with adjacent
-    // pids and we want them far apart in the range).
+    // u32::MAX sentinel → seed once with a pid hash (Knuth mul:
+    // adjacent pids land far apart in the range).
     static NEXT: AtomicU32 = AtomicU32::new(u32::MAX);
     if NEXT.load(Ordering::Relaxed) == u32::MAX {
         let seed = std::process::id().wrapping_mul(2_654_435_761) % SPAN;
-        // Losing the CAS is fine — another thread seeded; both
-        // proceed with whatever landed.
         let _ = NEXT.compare_exchange(u32::MAX, seed, Ordering::Relaxed, Ordering::Relaxed);
     }
 
     for _ in 0..512 {
         #[allow(clippy::cast_possible_truncation)] // BASE+SPAN < u16::MAX
         let port = (BASE + NEXT.fetch_add(1, Ordering::Relaxed) % SPAN) as u16;
-        // Daemon binds UDP on the wildcard (`0.0.0.0`); probe the
-        // same so we collide with what the daemon will collide with.
-        // Both held until `return` so a racing probe in another
-        // process sees them as taken.
+        // Probe wildcard UDP (matches daemon); hold both until return.
         if let (Ok(_tcp), Ok(_udp)) = (
             std::net::TcpListener::bind(("127.0.0.1", port)),
             std::net::UdpSocket::bind(("0.0.0.0", port)),

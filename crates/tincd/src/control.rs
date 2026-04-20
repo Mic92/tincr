@@ -169,20 +169,10 @@ impl ControlSocket {
         }
 
         // ─── bind, then chmod 0700
-        // `UnixListener::bind` doesn't take a mode arg; the inode
-        // gets `0o777 & ~umask`. The C tightens this with a
-        // process-global `umask(077)`/restore pair. That "daemon is
-        // single-threaded" assumption is true in production but
-        // false under `cargo test` where this runs on a thread pool
-        // alongside other file-creating tests — the global umask
-        // flip leaked into them (and vice versa), making
-        // `socket_perms` flaky.
-        //
-        // `chmod()` after bind is local state only. The inode is
-        // briefly `0o777 & ~umask` (typically `0o755` — no `w` bit
-        // for group/other, so `connect(2)` is already refused),
-        // then tightened to `0o700`. Linux and the BSDs both honor
-        // mode bits on `AF_UNIX` socket inodes at `connect()` time.
+        // chmod-after-bind instead of the C's process-global umask
+        // dance: thread-safe (cargo test runs this on a pool). The
+        // brief pre-chmod inode is 0o755 — no w bit, connect(2)
+        // already refused on Linux/BSD.
         let listener = UnixListener::bind(path).map_err(BindError::Io)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(BindError::Io)?;

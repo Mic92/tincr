@@ -316,27 +316,14 @@ fn keyexpire_rekey_under_load_is_lossless() {
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
-    // ─── the actual ordering hazard ──────────────────────────────────
-    // `force_kex` is *almost* lossless, not strictly: handshake
-    // records (KEX/SIG/ACK) ride the meta-TCP conn (`send_sptps_
-    // data_relay`: `record_type == REC_HANDSHAKE → go_tcp`) while
-    // data rides UDP. `receive_sig` swaps `outcipher` to the NEW
-    // key immediately after queueing ACK to the metaconn outbuf;
-    // the next TUN read seals data under the NEW key and `sendto`s
-    // it before the next epoll WRITE event flushes the ACK. The
-    // peer's `incipher` is still OLD until that ACK arrives → one
-    // `DecryptFailed` per direction per rekey is possible whenever
-    // the UDP datagram overtakes the TCP byte. C-parity
-    // (`sptps.c:370` swaps outcipher at the same point).
-    //
-    // What this test guards against is the *unbounded* loss of a
-    // regressed `HandshakeDone` arm or a hard session reset, where
-    // the whole RTT-worth of in-flight traffic (≈30ms/3ms ≈ 10+
-    // packets per direction per rekey) is rejected. So:
-    //   - `BadSeqno` MUST be zero — only a session *reset* (incipher
-    //     → None) produces that, and `force_kex` never resets.
-    //   - `DecryptFailed` is bounded by the number of rekeys, not
-    //     by RTT×rate.
+    // `force_kex` is almost lossless, not strictly: REC_HANDSHAKE
+    // (KEX/SIG/ACK) rides meta-TCP, data rides UDP. `receive_sig`
+    // swaps `outcipher` right after *queueing* ACK to the TCP
+    // outbuf, so the next UDP datagram (NEW key) can overtake the
+    // ACK → one `DecryptFailed` per direction per rekey. C-parity.
+    // We guard against *unbounded* loss (regressed HandshakeDone /
+    // hard reset = RTT×rate rejected): BadSeqno must be 0 (only a
+    // reset produces it), DecryptFailed bounded by 2×rekeys.
     let bad_seqno = bob_stderr
         .lines()
         .chain(alice_stderr.lines())
@@ -355,10 +342,6 @@ fn keyexpire_rekey_under_load_is_lossless() {
          the old incipher live through `State::Ack`.\n\
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
-    // 2× = one per direction; the TCP-queue/UDP-sendto reorder can
-    // lose at most the packets sent in the single epoll turn between
-    // `receive_sig` and the metaconn flush. A regressed key-swap
-    // would blow past this by an order of magnitude (RTT×rate).
     let fail_budget = 2 * rekeys;
     assert!(
         decode_fails <= fail_budget,
@@ -369,10 +352,8 @@ fn keyexpire_rekey_under_load_is_lossless() {
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
-    // Every loss must be accounted for by a logged decode failure
-    // (the cross-channel reorder above) or netem jitter. Anything
-    // else is a silent drop — i.e. a key window leaked without the
-    // RX path even noticing.
+    // Every loss accounted for by a logged decode fail or netem
+    // jitter; unaccounted loss = a key window leaked silently.
     #[allow(clippy::cast_possible_truncation)] // ≤ 2×rekeys, tiny
     let max_loss = decode_fails as u32 + 5;
     assert!(
