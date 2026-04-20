@@ -99,7 +99,6 @@ mod autoconnect_shortcut;
 mod chaos;
 mod ping;
 mod portmap;
-mod rekey;
 mod sandbox;
 mod stress;
 mod tcp_fallback;
