@@ -2,118 +2,16 @@
 //! (`seal_data_into` / `open_data_into`). Unlike `vs_c.rs` these don't
 //! need the C harness, so they always run.
 
-use rand_core::RngCore;
-use tinc_crypto::sign::SigningKey;
-use tinc_sptps::{Framing, Output, Role, Sptps, SptpsError};
+mod common;
 
-const REPLAYWIN: usize = 16;
-
-fn keypair(tag: u8) -> (SigningKey, [u8; 32]) {
-    let mut seed = [0u8; 32];
-    seed[0] = tag;
-    let sk = SigningKey::from_seed(&seed);
-    let pk = *sk.public_key();
-    (sk, pk)
-}
-
-/// Dummy RNG for `receive` calls that won't trigger `send_kex`.
-struct NoRng;
-impl RngCore for NoRng {
-    fn next_u32(&mut self) -> u32 {
-        panic!("RNG touched")
-    }
-    fn next_u64(&mut self) -> u64 {
-        panic!("RNG touched")
-    }
-    fn fill_bytes(&mut self, _: &mut [u8]) {
-        panic!("RNG touched")
-    }
-    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-        panic!("RNG touched")
-    }
-}
-
-/// Minimal seeded RNG for the handshake KEX.
-struct SeedRng(u64);
-#[allow(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
-impl RngCore for SeedRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        self.0
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for b in dest {
-            *b = self.next_u64() as u8;
-        }
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-fn wire(mut outs: Vec<Output>) -> Vec<u8> {
-    assert_eq!(outs.len(), 1, "expected one Wire, got {outs:?}");
-    match outs.remove(0) {
-        Output::Wire { bytes, .. } => bytes,
-        o => panic!("expected Wire, got {o:?}"),
-    }
-}
-
-/// Run the datagram handshake to completion, return both ends.
-fn handshake_pair() -> (Sptps, Sptps) {
-    let (alice_key, alice_pub) = keypair(1);
-    let (bob_key, bob_pub) = keypair(2);
-
-    let (mut alice, outs) = Sptps::start(
-        Role::Initiator,
-        Framing::Datagram,
-        alice_key,
-        bob_pub,
-        b"fast".to_vec(),
-        REPLAYWIN,
-        &mut SeedRng(0xAA),
-    );
-    let kex_a = wire(outs);
-
-    let (mut bob, outs) = Sptps::start(
-        Role::Responder,
-        Framing::Datagram,
-        bob_key,
-        alice_pub,
-        b"fast".to_vec(),
-        REPLAYWIN,
-        &mut SeedRng(0xBB),
-    );
-    let kex_b = wire(outs);
-
-    let (_, outs) = alice.receive(&kex_b, &mut NoRng).unwrap();
-    let sig_a = wire(outs);
-    let (_, outs) = bob.receive(&kex_a, &mut NoRng).unwrap();
-    assert!(outs.is_empty());
-    let (_, outs) = bob.receive(&sig_a, &mut NoRng).unwrap();
-    // Responder emits SIG then HandshakeDone.
-    let sig_b = match outs.into_iter().next().unwrap() {
-        Output::Wire { bytes, .. } => bytes,
-        o => panic!("expected Wire, got {o:?}"),
-    };
-    let (_, outs) = alice.receive(&sig_b, &mut NoRng).unwrap();
-    assert_eq!(outs, vec![Output::HandshakeDone]);
-
-    (alice, bob)
-}
+use common::{REPLAYWIN, SeedRng, handshake_pair, keypair};
+use tinc_sptps::{Framing, Role, Sptps, SptpsError};
 
 /// `seal_data_into` → `open_data_into` round-trip with nonzero headroom
 /// on both sides. Asserts byte equality and that headroom is zero-filled.
 #[test]
 fn seal_into_open_into_roundtrip() {
-    let (mut alice, mut bob) = handshake_pair();
+    let (mut alice, mut bob) = handshake_pair(Framing::Datagram, b"fast");
 
     let body = b"the quick brown fox jumps over the lazy dog";
     let mut tx = Vec::new();
@@ -166,8 +64,8 @@ fn open_data_into_pre_handshake() {
 #[test]
 fn alloc_seqnos_seal_with_seqno_byte_identical() {
     // Two pairs from identical seeds → identical sessions.
-    let (mut a1, _b1) = handshake_pair();
-    let (mut a2, _b2) = handshake_pair();
+    let (mut a1, _b1) = handshake_pair(Framing::Datagram, b"fast");
+    let (mut a2, _b2) = handshake_pair(Framing::Datagram, b"fast");
 
     let bodies: [&[u8]; 5] = [
         b"one",
@@ -214,7 +112,7 @@ fn alloc_seqnos_seal_with_seqno_byte_identical() {
 
     // RX side: open_with_seqno + replay_check produces the same body
     // open_data_into would, modulo the type-byte strip.
-    let (_a3, mut bob) = handshake_pair();
+    let (_a3, mut bob) = handshake_pair(Framing::Datagram, b"fast");
     for body in &bodies {
         let wire = ref_wires.remove(0);
         let mut rx = Vec::new();
@@ -242,8 +140,8 @@ fn handle_based_seal_byte_identical() {
     use std::sync::atomic::Ordering;
     use tinc_crypto::chapoly::ChaPoly;
 
-    let (mut a1, _b1) = handshake_pair();
-    let (a2, mut b2) = handshake_pair();
+    let (mut a1, _b1) = handshake_pair(Framing::Datagram, b"fast");
+    let (a2, mut b2) = handshake_pair(Framing::Datagram, b"fast");
 
     let bodies: [&[u8]; 4] = [b"x", b"", &[0xAB; 1400], b"after-handshake"];
 

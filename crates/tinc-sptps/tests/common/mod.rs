@@ -44,6 +44,24 @@ impl RngCore for SeedRng {
     }
 }
 
+/// RNG that panics on use. For `receive` calls that must not reach
+/// `send_kex` — if they do, the panic surfaces the routing bug.
+pub struct NoRng;
+impl RngCore for NoRng {
+    fn next_u32(&mut self) -> u32 {
+        panic!("RNG touched outside send_kex")
+    }
+    fn next_u64(&mut self) -> u64 {
+        panic!("RNG touched outside send_kex")
+    }
+    fn fill_bytes(&mut self, _: &mut [u8]) {
+        panic!("RNG touched outside send_kex")
+    }
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+        panic!("RNG touched outside send_kex")
+    }
+}
+
 pub fn wire(mut outs: Vec<Output>) -> Vec<u8> {
     match outs.remove(0) {
         Output::Wire { bytes, .. } => bytes,
