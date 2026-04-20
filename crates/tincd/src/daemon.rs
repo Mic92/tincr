@@ -379,6 +379,11 @@ pub struct Daemon {
     /// `&mut self` at script call sites.
     pub(crate) iface: String,
 
+    /// Off-loop FIFO executor for host/subnet hooks. Keeps a slow
+    /// `host-up` from freezing the data plane on every reachability
+    /// flip; FIFO preserves the `host-up → subnet-up` ordering.
+    pub(crate) script_worker: crate::scriptworker::ScriptWorker,
+
     /// Derived, NOT a config var: `(device emits full eth frames) &&
     /// (Mode=router)`. Router-mode IGNORES MACs but the kernel
     /// doesn't - a TAP write with zero dst-MAC is dropped by the rx
@@ -838,7 +843,7 @@ impl Drop for Daemon {
         // (brings the iface down). Mirror of the setup-time
         // subnet-up loop.
         for s in &self.subnets.owned_by(&self.name) {
-            self.run_subnet_script(false, &self.name, s);
+            self.run_subnet_script_sync(false, &self.name, s);
         }
 
         // tinc-down BEFORE device close (the device's own `Drop`

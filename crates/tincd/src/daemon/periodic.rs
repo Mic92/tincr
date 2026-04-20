@@ -173,7 +173,7 @@ impl Daemon {
             }
         }
 
-        // collect any exited detached hook scripts (script::spawn)
+        // collect any exited detached children (proxy-exec)
         script::reap_children();
 
         // re-arm +1s
@@ -383,19 +383,29 @@ impl Daemon {
         self.run_script("tinc-down");
     }
 
-    /// Single-subnet script. The loop-all path is inlined in
-    /// `BecameReachable`. We always pass the weight integer (more
-    /// useful than an empty string; scripts guard anyway).
+    /// Enqueue `subnet-up`/`subnet-down` on the worker thread. We
+    /// always pass the weight integer (more useful than an empty
+    /// string; scripts guard anyway).
     pub(super) fn run_subnet_script(&self, up: bool, owner: &str, subnet: &Subnet) {
-        self.run_subnet_script_impl(up, owner, subnet, false);
+        let (name, env) = self.subnet_script_env(up, owner, subnet);
+        self.submit_script(name.into(), env);
     }
 
-    /// [`run_subnet_script`] without waiting; for gossip-driven bulk fires.
-    pub(super) fn run_subnet_script_async(&self, up: bool, owner: &str, subnet: &Subnet) {
-        self.run_subnet_script_impl(up, owner, subnet, true);
+    /// Blocking variant for setup/shutdown only — those run outside
+    /// the event loop and must complete before/after `tinc-up`/
+    /// `tinc-down` (which stay synchronous).
+    pub(super) fn run_subnet_script_sync(&self, up: bool, owner: &str, subnet: &Subnet) {
+        let (name, env) = self.subnet_script_env(up, owner, subnet);
+        let interp = self.settings.scripts_interpreter.as_deref();
+        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
     }
 
-    fn run_subnet_script_impl(&self, up: bool, owner: &str, subnet: &Subnet, detach: bool) {
+    fn subnet_script_env(
+        &self,
+        up: bool,
+        owner: &str,
+        subnet: &Subnet,
+    ) -> (&'static str, ScriptEnv) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
         env.add("NODE", owner.to_owned());
         // REMOTEADDRESS/REMOTEPORT only if owner != myself
@@ -414,18 +424,10 @@ impl Daemon {
         let netstr = netstr.split_once('#').map_or(netstr.as_str(), |(s, _)| s);
         env.add("SUBNET", netstr.to_owned());
         env.add("WEIGHT", subnet.weight().to_string());
-
-        let name = if up { "subnet-up" } else { "subnet-down" };
-        let interp = self.settings.scripts_interpreter.as_deref();
-        let run = if detach {
-            script::spawn
-        } else {
-            script::execute
-        };
-        Self::log_script(name, run(&self.confbase, name, &env, interp));
+        (if up { "subnet-up" } else { "subnet-down" }, env)
     }
 
-    /// host-up/down AND hosts/NAME-up/down. `addr` None →
+    /// Enqueue host-up/down AND hosts/NAME-up/down. `addr` None →
     /// REMOTEADDRESS omitted.
     pub(super) fn run_host_script(&self, up: bool, node: &str, addr: Option<SocketAddr>) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
@@ -434,20 +436,24 @@ impl Daemon {
             env.add("REMOTEADDRESS", a.ip().to_string());
             env.add("REMOTEPORT", a.port().to_string());
         }
+        let suffix = if up { "up" } else { "down" };
+        self.submit_script(format!("host-{suffix}"), env.clone());
+        self.submit_script(format!("hosts/{node}-{suffix}"), env);
+    }
 
-        let name = if up { "host-up" } else { "host-down" };
-        let interp = self.settings.scripts_interpreter.as_deref();
-        Self::log_script(name, script::execute(&self.confbase, name, &env, interp));
-
-        // per-node hook, same env
-        let per = format!("hosts/{node}-{}", if up { "up" } else { "down" });
-        Self::log_script(&per, script::execute(&self.confbase, &per, &env, interp));
+    fn submit_script(&self, name: String, env: ScriptEnv) {
+        self.script_worker.submit(crate::scriptworker::Job::Script {
+            confbase: self.confbase.clone(),
+            name,
+            env,
+            interpreter: self.settings.scripts_interpreter.clone(),
+        });
     }
 
     /// Script outcome logging.
     pub(super) fn log_script(name: &str, r: io::Result<ScriptResult>) {
         match r {
-            Ok(ScriptResult::NotFound | ScriptResult::Ok | ScriptResult::Spawned) => {}
+            Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
             // Log Sandboxed at debug so an operator who wonders why
             // their host-up didn't fire under Sandbox=high can find
             // out without reading the source.

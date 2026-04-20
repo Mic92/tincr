@@ -792,6 +792,7 @@ impl Daemon {
             // well under the `2*30` suspend-detect threshold.
             last_periodic_run_time: timers.now(),
             iface,
+            script_worker: crate::scriptworker::ScriptWorker::new(),
             overwrite_mac,
             mymac,
             device_errors: 0,
@@ -916,7 +917,7 @@ impl Daemon {
         // iface is configured. Same loop shape as the BecameReachable
         // arm in gossip.rs.
         for s in &daemon.subnets.owned_by(&daemon.name) {
-            daemon.run_subnet_script(true, &daemon.name, s);
+            daemon.run_subnet_script_sync(true, &daemon.name, s);
         }
 
         // ─── TX fast-path snapshot. Built post-load_all_nodes so
