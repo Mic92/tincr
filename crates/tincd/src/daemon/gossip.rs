@@ -303,10 +303,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 REQ_KEY".into()))?;
-        let msg = ReqKey::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
+        let (body_str, msg) = crate::proto::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
@@ -536,10 +533,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 ANS_KEY".into()))?;
-        let msg = AnsKey::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
+        let (body_str, msg) = crate::proto::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
@@ -731,10 +725,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let s = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 KEY_CHANGED".into()))?;
-        let kc = KeyChanged::parse(s)
-            .map_err(|_| DispatchError::BadKey("KEY_CHANGED parse failed".into()))?;
+        let (s, kc) = crate::proto::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
         if !tinc_proto::check_id(&kc.node) {
             return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
         }
