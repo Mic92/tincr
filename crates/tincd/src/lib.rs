@@ -50,6 +50,7 @@ pub mod route;
 pub mod route_mac;
 pub mod sandbox;
 pub mod script;
+pub mod scriptworker;
 pub mod sd_notify;
 pub mod seen;
 pub mod shard;

@@ -59,6 +59,7 @@ use crate::sandbox;
 /// Keys are `&'static str` because every key in the C is a literal
 /// (`"NETNAME="`, `"NODE="`, etc). Values are owned `String` because
 /// they're formatted (`"%s"`, `"%d"`).
+#[derive(Clone)]
 pub struct ScriptEnv {
     vars: Vec<(&'static str, String)>,
 }
@@ -133,9 +134,6 @@ pub enum ScriptResult {
     /// Carries [`ExitStatus`] so the daemon can format
     /// `WEXITSTATUS` / `WTERMSIG` to match the C log message.
     Failed(ExitStatus),
-    /// Fire-and-forget child launched ([`spawn`]); exit status not
-    /// collected here. Reaped by [`reap_children`].
-    Spawned,
 }
 
 /// Shared front half of [`execute`] / [`spawn`]: gating + Command
@@ -242,13 +240,10 @@ pub fn execute(
     }
 }
 
-/// Pids we spawned and have not yet reaped. A process-wide registry
-/// is the least-invasive way to give the daemon's fire-and-forget
-/// children an owner: [`spawn`] / [`register_child`] push,
-/// [`reap_children`] drains. Scoping `waitpid` to this set (instead
-/// of `waitpid(-1)`) means we never steal exit statuses from children
-/// other code is `wait()`ing on — e.g. a `std::process::Child` held
-/// by a test harness, or a future caller that wants the status.
+/// Pids we spawned and have not yet reaped. [`register_child`]
+/// pushes, [`reap_children`] drains. Scoping `waitpid` to this set
+/// (instead of `waitpid(-1)`) means we never steal exit statuses from
+/// children other code is `wait()`ing on.
 ///
 /// `Mutex` not because we're multithreaded (the event loop isn't) but
 /// because a `static` needs interior mutability and `RefCell` isn't
@@ -268,39 +263,6 @@ fn children() -> std::sync::MutexGuard<'static, Vec<nix::unistd::Pid>> {
 /// [`spawn`].
 pub fn register_child(pid: nix::unistd::Pid) {
     children().push(pid);
-}
-
-/// Number of not-yet-reaped children. Test hook.
-#[cfg(test)]
-fn pending_children() -> usize {
-    children().len()
-}
-
-/// Non-blocking [`execute`]: fork+exec and return immediately. The
-/// child's pid is recorded; [`reap_children`] collects it later. Used
-/// for per-subnet / per-host hooks that fire in bulk on the event
-/// loop.
-///
-/// # Errors
-/// Same spawn-failure surface as [`execute`].
-pub fn spawn(
-    confbase: &Path,
-    name: &str,
-    env: &ScriptEnv,
-    interpreter: Option<&str>,
-) -> io::Result<ScriptResult> {
-    let mut cmd = match prepare(confbase, name, env, interpreter) {
-        Ok(c) => c,
-        Err(r) => return Ok(r),
-    };
-    let child = retry_txtbsy(|| cmd.spawn())?;
-    // `Child::id` is u32; pid_t is i32. Kernel pids fit.
-    #[allow(clippy::cast_possible_wrap)]
-    register_child(nix::unistd::Pid::from_raw(child.id() as i32));
-    // Drop the `Child` handle: std's Drop does NOT wait; the pid is
-    // now owned by CHILDREN and reaped there.
-    drop(child);
-    Ok(ScriptResult::Spawned)
 }
 
 /// Reap exited children we spawned. `waitpid(pid, WNOHANG)` per
@@ -484,34 +446,20 @@ mod tests {
     /// `waitpid(-1)`. An unrelated `Child` we hold must keep its
     /// exit status for our own `wait()`.
     #[test]
-    fn spawn_registers_and_reaps_targeted() {
-        let dir = tmpdir("spawn");
-        write_script(&dir, "subnet-up", "#!/bin/sh\nexit 0\n");
-        let env = ScriptEnv::base(None, "alpha", None, None, None);
-
+    fn reap_children_targeted() {
         // An UNRELATED child that we wait() on ourselves. With the
         // old `waitpid(-1)` reaper, the reap loop below would
         // harvest its zombie and `other.wait()` would then fail
         // with ECHILD.
         let mut other = Command::new("true").spawn().unwrap();
-        // Give `true` time to exit so it IS a zombie when the reaper
-        // runs (otherwise the test wouldn't have caught the old bug).
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let r = spawn(&dir, "subnet-up", &env, None).unwrap();
-        assert!(matches!(r, ScriptResult::Spawned));
-        assert!(pending_children() > 0, "pid registered");
+        let mut ours = Command::new("true").spawn().unwrap();
+        #[allow(clippy::cast_possible_wrap)]
+        register_child(nix::unistd::Pid::from_raw(ours.id() as i32));
+        let _ = ours.wait();
+        reap_children();
 
-        // Poll until our script child is gone from the registry.
-        for _ in 0..100 {
-            reap_children();
-            if pending_children() == 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        // The unrelated child's status is still ours to collect.
         let st = other.wait().expect("unrelated child status stolen");
         assert!(st.success());
     }

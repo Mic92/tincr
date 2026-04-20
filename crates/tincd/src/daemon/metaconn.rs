@@ -1023,10 +1023,12 @@ impl Daemon {
                                     Vec::new(),
                                 );
                                 cache.add_recent(addr);
-                                if let Err(e) = cache.save() {
-                                    log::warn!(target: "tincd::auth",
-                                                "Failed to save address cache for {name}: {e}");
+                                if let Some((path, bytes)) = cache.serialize() {
+                                    self.script_worker.submit(
+                                        crate::scriptworker::Job::WriteFile { path, bytes },
+                                    );
                                 }
+                                cache.disarm();
                             }
 
                             self.run_invitation_accepted_script(&name, conn_addr);

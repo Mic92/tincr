@@ -245,42 +245,59 @@ impl AddressCache {
     /// `create_dir_all` / `open` / `write_all` / `rename` failures
     /// (read-only confbase, disk full).
     pub fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+        match self.serialize() {
+            Some((path, bytes)) => write_atomic(&path, &bytes),
+            None => Ok(()),
         }
+    }
+
+    /// `(path, bytes)` for [`write_atomic`]; split so the event loop
+    /// can ship the fsync+rename to the worker thread.
+    #[must_use]
+    pub fn serialize(&self) -> Option<(PathBuf, Vec<u8>)> {
+        let path = self.path.clone()?;
         let mut buf = String::from(HEADER);
         buf.push('\n');
         for a in self.recent.iter().take(MAX_PERSISTED) {
             use std::fmt::Write as _;
             let _ = writeln!(buf, "{a}");
         }
-        // Fixed `.tmp` suffix (not pid/random): the cache dir is
-        // per-daemon and writes are serialised on this thread, so
-        // there's no concurrent writer to collide with, and a fixed
-        // name means a crash leaves at most one stray temp per peer.
-        // Explicit append (not `with_extension`) so a future node-name
-        // scheme containing `.` can't make two peers share a temp.
-        let mut tmp = path.clone().into_os_string();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        let res = (|| {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            f.write_all(buf.as_bytes())?;
-            f.sync_all()
-        })();
-        if let Err(e) = res {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-        fs::rename(&tmp, path)
+        Some((path, buf.into_bytes()))
     }
+
+    /// Detach from disk so `Drop` won't `save()`. Used after the
+    /// serialized bytes have been handed to the worker thread.
+    pub fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+/// Crash-atomic write via `.tmp` sibling + `rename(2)`. Fixed suffix
+/// (writes serialised on one thread → at most one stray temp/peer).
+///
+/// # Errors
+/// `create_dir_all` / `open` / `write_all` / `rename` failures.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let res = (|| {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fs::rename(&tmp, path)
 }
 
 /// Best-effort read. Missing file, wrong/absent header, unparseable

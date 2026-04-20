@@ -43,4 +43,6 @@ mod proxy;
 mod purge;
 mod reload;
 #[cfg(target_os = "linux")]
+mod script_latency;
+#[cfg(target_os = "linux")]
 mod three_node;
