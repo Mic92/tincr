@@ -21,19 +21,17 @@ pub(super) fn empty_event() -> RawEvent {
     EpollEvent::empty()
 }
 
-const FLAGS_BASE: EpollFlags = EpollFlags::empty(); // level-triggered, matches src/linux/event.c:97
-
 pub(super) fn create() -> io::Result<Poller> {
     Ok(Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?)
 }
 
+/// Level-triggered (no `EPOLLET`), matching `src/linux/event.c:97`.
 fn interest_to_flags(i: super::Io) -> EpollFlags {
-    FLAGS_BASE
-        | match i {
-            super::Io::Read => EpollFlags::EPOLLIN,
-            super::Io::Write => EpollFlags::EPOLLOUT,
-            super::Io::ReadWrite => EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT,
-        }
+    match i {
+        super::Io::Read => EpollFlags::EPOLLIN,
+        super::Io::Write => EpollFlags::EPOLLOUT,
+        super::Io::ReadWrite => EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT,
+    }
 }
 
 pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {

@@ -17,13 +17,9 @@
 //! ethertype from the IP version nibble (`set_etherheader`). Testable
 //! with `pipe()` — no kernel driver layout to fake.
 //!
-//! ## nix earns its dep here
-//!
-//! Uses `nix::sys::socket::recvmsg` for `SCM_RIGHTS`: hand-rolling is
-//! ~40 LOC of `cmsghdr` boilerplate with a NULL-deref trap (`CMSG_
-//! FIRSTHDR` returns NULL on empty buffer; easy to dereference
-//! unchecked). Shim #4 uses the wrapper (POSIX-clean, no encoding
-//! lies), unlike #3 TUNSETIFF which bypassed it.
+//! `SCM_RIGHTS` goes through `nix::sys::socket::recvmsg` — hand-
+//! rolled `cmsghdr` walking has a `CMSG_FIRSTHDR`-returns-NULL trap
+//! that the safe wrapper avoids.
 
 use std::fs::File;
 use std::io::{self, IoSliceMut};
@@ -32,7 +28,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 
 // FdSource — the union type the config-string dispatch implies
 
@@ -41,23 +37,9 @@ use crate::{Device, MTU, Mac, Mode, read_fd, write_fd};
 /// resolved variant.
 #[derive(Debug)]
 pub enum FdSource {
-    /// `Device = 5` mode (2017). The Java parent process did
-    /// `dup2(tun_fd, 5)` before `exec()`. The fd is already
-    /// open in our process; the caller wraps it at the moment it
-    /// parses the config integer (`daemon/setup.rs`) so ownership
-    /// is established immediately, not deferred to `open()`. If
-    /// setup bails between parsing and `open()`, `OwnedFd::drop`
-    /// closes it.
-    ///
-    /// On Android pre-2020 `SELinux` policy, this was the only
-    /// way. Post-2020, blocked: the policy forbids fd
-    /// inheritance across exec for tun fds.
-    ///
-    /// `OwnedFd`, not `RawFd`: the single `from_raw_fd` lives at
-    /// the env/CLI parse site in the daemon, which is the only
-    /// place that can vouch for exclusive ownership. By the time
-    /// the fd reaches this crate it is already owned, so
-    /// double-close is structurally impossible.
+    /// `Device = 5` mode (2017): fd inherited across `exec()`.
+    /// `OwnedFd` not `RawFd` so the single `from_raw_fd` lives at
+    /// the daemon's parse site, which alone can vouch for ownership.
     Inherited(OwnedFd),
 
     /// `Device = /path` mode (2020). Java side listens; we connect;
@@ -89,28 +71,15 @@ impl FdTun {
     /// - `Inherited(_)` is infallible (already owned).
     pub fn open(source: FdSource) -> io::Result<Self> {
         let (fd, device_label) = match source {
-            // ─── Inherited
-            // The daemon already parsed the integer and wrapped it;
-            // we just rehome the OwnedFd into a File. The unsafe
-            // (and the negative-fd check) live at the parse site,
-            // not here — ownership is held continuously from parse
-            // onward.
             FdSource::Inherited(fd) => {
                 let raw = fd.as_raw_fd();
                 (File::from(fd), format!("fd/{raw}"))
             }
-
-            // ─── UnixSocket
-            // Connect, recvmsg with SCM_RIGHTS, wrap. The cmsghdr
-            // boilerplate collapses into `recv_scm_rights`.
             FdSource::UnixSocket(path) => {
                 let fd = recv_scm_rights(&path)?;
                 (File::from(fd), format!("fd:{}", path.display()))
             }
         };
-
-        // No log here; daemon logs post-open if it wants.
-
         Ok(FdTun { fd, device_label })
     }
 }
@@ -118,43 +87,24 @@ impl FdTun {
 // SCM_RIGHTS — the fourth unsafe shim, the first to USE nix
 
 /// Connect to the Unix socket, receive one fd via `SCM_RIGHTS`.
-///
-/// `UnixStream` + `nix::recvmsg` collapse what would otherwise be
-/// three functions of `goto end; close()` RAII. Returns `OwnedFd`:
-/// the kernel dup'd the fd into our table during `recvmsg`, so it's
-/// freshly ours; ownership is established here, not at the call site.
-///
-/// # Errors
-/// - `connect`: `NotFound`, `ConnectionRefused`, `PermissionDenied`
-/// - `InvalidData`: cmsg wasn't `SCM_RIGHTS`, ≠1 fd, or `MSG_CTRUNC`
-///   set
 fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
+    let stream = connect_unix(path)?;
+    // Dropping `stream` doesn't affect the SCM_RIGHTS dup.
+    recv_one_fd(&stream)
+}
+
+/// Receive exactly one fd via `SCM_RIGHTS` on an already-connected
+/// socket. Factored out so the test can drive it on a `socketpair`
+/// without the `connect_unix` step.
+fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 
-    // ─── Connect
-    // `@` prefix → abstract namespace; std handles the leading-NUL
-    // + length bookkeeping.
-    let stream = connect_unix(path)?;
-
-    // ─── recvmsg
-    // The cmsghdr dance.
-    //
-    // ONE BYTE of regular data is read. Why? The Java sender writes
-    // one byte of payload alongside the fd cmsg — recvmsg needs SOME
-    // iov to anchor the call. The byte's value is ignored
-    // declared, never read). We do the same: 1-byte iov, ignore
-    // the byte.
-    //
-    // (Could the sender send 0 bytes? `sendmsg` allows it. But
-    // the original Android Java code sends one byte, and the C
-    // expects one byte (`:56`: `ret <= 0` check — `0` would
-    // fail). We match the C's expectation.)
+    // 1-byte iov: the Java sender writes one payload byte alongside
+    // the fd cmsg, and the C `:56` `ret <= 0` check requires it.
     let mut iobuf = [0u8; 1];
     let mut iov = [IoSliceMut::new(&mut iobuf)];
 
-    // Control buffer: room for one `int` (the fd). nix
-    // `cmsg_space!` is the `CMSG_SPACE` macro equivalent. One
-    // `RawFd` worth of space.
+    // Control buffer sized for one fd.
     let mut cmsgbuf = nix::cmsg_space!(RawFd);
 
     // Blocking recv is correct: the Java side sends immediately on
@@ -190,11 +140,6 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         .cmsgs()?
         .find_map(|cm| match cm {
             ControlMessageOwned::ScmRights(fds) => Some(fds),
-            // Any other cmsg type: skip. C would error (`:80`).
-            // We're slightly LOOSER: if the Java side sent
-            // ScmCreds THEN ScmRights, C errors on the first;
-            // we skip to the second. Unlikely scenario; the
-            // looseness costs nothing.
             _ => None,
         })
         .ok_or_else(|| {
@@ -223,52 +168,29 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
         ));
     }
 
-    // `stream` drops here. Its close doesn't affect `fd` (the
-    // SCM_RIGHTS dup is independent of the carrier socket).
     Ok(fds.pop().unwrap())
 }
 
-/// The `@` → abstract-namespace dispatch.
-///
-/// Separate fn for testability: connect-to-abstract is testable
-/// without the full `SCM_RIGHTS` flow (a test can listen on an
-/// abstract addr, this fn connects, both sides agree).
+/// The `@` → abstract-namespace dispatch. Split out for testability.
 fn connect_unix(path: &Path) -> io::Result<UnixStream> {
-    // Check the first byte of the path's OsStr encoding.
-    // `as_encoded_bytes()[0]` is the no-alloc check (same idiom as
-    // `cmd::network` for `.`-prefix). `'@'` is ASCII (0x40); the
-    // encoding guarantee (ASCII bytes are verbatim) holds.
     let bytes = path.as_os_str().as_encoded_bytes();
     if matches!(bytes.first(), Some(b'@')) {
-        // ─── Abstract namespace
-        // Kernel distinguishes by leading NUL byte. std
-        // `from_abstract_name` adds the NUL itself, so strip the
-        // `@`. Abstract addrs are length-delimited bytes.
+        // Abstract namespace: std adds the leading NUL, so strip `@`.
         use std::os::linux::net::SocketAddrExt;
         use std::os::unix::net::SocketAddr;
         let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
         UnixStream::connect_addr(&addr)
     } else {
-        // ─── Filesystem path
-        // Filesystem `sun_path` is NUL-terminated. std `connect()`
-        // handles this.
         UnixStream::connect(path)
     }
 }
 
-// (`from_ip_nibble` + `set_etherheader` hoisted to `crate::ether`
-// when BSD became the second consumer. The fns themselves are
-// pure; the move preserves byte-identical behavior.)
 // Device impl — the +14 read/write
 
 impl Device for FdTun {
     /// The +14 read + ethertype synthesis.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        debug_assert!(
-            buf.len() >= MTU,
-            "buf too small for fd read: {} < {MTU}",
-            buf.len()
-        );
+        assert_read_buf(buf, "fd");
 
         // Read at +14, leaving room for the synthetic eth header.
         let n = read_fd(self.fd.as_fd(), &mut buf[ETH_HLEN..MTU])?;
@@ -318,12 +240,7 @@ impl Device for FdTun {
         Mode::Tun
     }
 
-    /// `"fd"` placeholder. There's no TUNSETIFF here, so no kernel
-    /// name. We say `"fd"` so the daemon's `tinc-up` script can at
-    /// least pattern-match on `INTERFACE=`.
-    ///
-    /// `clippy::unnecessary_literal_bound`: trait signature says
-    /// `&str`; impl can't widen. Same as Dummy.
+    /// `"fd"` placeholder — no TUNSETIFF here, so no kernel name.
     #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "fd"
@@ -341,45 +258,18 @@ impl Device for FdTun {
     }
 }
 
-impl AsFd for FdTun {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-}
-
 // Tests — pure fns + pipe-based integration
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // (Ethernet constant tests + nibble tests + set_etherheader
-    // tests hoisted to `crate::ether::tests` with their subjects.
-    // Same assertions; the diff is location.)
+    // pipe-based integration: this backend reads raw IP (no kernel-
+    // side layout to fake), so a `pipe()` is enough to exercise the
+    // +14 offset arithmetic and ethertype synthesis.
 
-    // pipe-based integration — the win over linux.rs
-    //
-    // `linux.rs` couldn't test the +10 offset trick: the kernel
-    // TUN driver lays out `tun_pi`; can't fake that without the
-    // actual driver. THIS backend reads RAW IP packets — no
-    // kernel-side layout. A `pipe()` is enough.
-    //
-    // The pipe gives us read-end, write-end. Write IP bytes to
-    // one; FdTun::read on the other. The +14 + ethertype synth
-    // runs.
-    //
-    // (Pipes aren't datagram-mode. A real Android tun fd is.
-    // But the read/write paths don't care: read() returns what
-    // it returns. The datagram boundary matters for partial
-    // reads, which don't happen with our small test packets.
-    // The test exercises the OFFSET ARITHMETIC, which is fd-
-    // agnostic.)
-
-    /// The full read flow: write IPv4 bytes to a pipe, `FdTun`
-    /// reads at +14, synthesizes 0x0800 ethertype at +12,
-    /// returns len+14.
-    ///
-    /// idiom.
+    /// Write IPv4 bytes to a pipe, `FdTun` reads at +14, synthesizes
+    /// 0x0800 ethertype at +12, returns len+14.
     #[test]
     fn read_ipv4_via_pipe() {
         // Minimal IPv4-ish packet. Only byte 0 matters (the
@@ -522,25 +412,9 @@ mod tests {
         assert_ne!(recv[0], 0xEE);
     }
 
-    // SCM_RIGHTS — round-trip with a real socketpair
-    //
-    // Can't easily test the abstract-namespace connect (would
-    // need a real listener). But the recvmsg/SCM_RIGHTS itself
-    // is testable with `socketpair()` — both ends in-process,
-    // send an fd one way, receive it the other.
-    //
-    // This covers the cmsghdr handling: msg.flags check, cmsg
-    // iteration, ScmRights extraction, exactly-one-fd check.
-    // The connect() is NOT covered (that's connect_unix, tested
-    // separately if at all — it's a thin std wrapper).
-
-    /// `SCM_RIGHTS` round-trip: send an fd through a socketpair,
-    /// receive it. The received fd is a DIFFERENT NUMBER (kernel
-    /// dup'd) but points at the SAME FILE (write to the original,
-    /// read from the dup).
-    ///
-    /// This is the cmsghdr-handling test. The C's `read_fd`
-    /// (`:39-93`) is the equivalent.
+    /// `SCM_RIGHTS` round-trip via the production `recv_one_fd`
+    /// path: send an fd through a socketpair, receive it, verify
+    /// the dup points at the same open file description.
     #[test]
     fn scm_rights_round_trip() {
         use nix::sys::socket::{
@@ -548,8 +422,6 @@ mod tests {
         };
         use std::io::IoSlice;
 
-        // Socketpair: two connected AF_UNIX stream sockets.
-        // One sends, one receives.
         let (snd, rcv) = socketpair(
             AddressFamily::Unix,
             SockType::Stream,
@@ -558,89 +430,26 @@ mod tests {
         )
         .unwrap();
 
-        // The fd we'll send: a pipe write-end. Arbitrary; we
-        // just need SOME valid fd to ship across.
+        // The fd we'll ship: a pipe write-end.
         let (canary_r, canary_w) = pipe();
 
-        // Send: 1 byte payload (the receiver expects `iov_len=1`) +
+        // Send: 1 byte payload (receiver expects iov_len=1) +
         // SCM_RIGHTS cmsg with one fd.
-        let payload = [b'X'];
-        let iov = [IoSlice::new(&payload)];
+        let iov = [IoSlice::new(b"X")];
         let fds = [canary_w.as_raw_fd()];
         let cmsg = ControlMessage::ScmRights(&fds);
         sendmsg::<()>(snd.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None).unwrap();
 
-        // Receive: this is what `recv_scm_rights` does, but
-        // without the connect (we already have `rcv`). Factor
-        // the recvmsg-only part? No — `recv_scm_rights` is
-        // already small. Inline the relevant bit here.
-        //
-        // ACTUALLY: we can call the inner machinery. But
-        // `recv_scm_rights` takes a path and connects. The
-        // recvmsg part isn't factored. For the test, do it
-        // manually with the same nix calls. The test verifies
-        // OUR UNDERSTANDING of nix's behavior, not our wrapper
-        // (the wrapper is tested by integration when there's a
-        // real socket server).
-        let mut iobuf = [0u8; 1];
-        let mut iov = [IoSliceMut::new(&mut iobuf)];
-        let mut cmsgbuf = nix::cmsg_space!(RawFd);
-        let msg = nix::sys::socket::recvmsg::<()>(
-            rcv.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsgbuf),
-            MsgFlags::empty(),
-        )
-        .unwrap();
+        // Receive via the production cmsghdr handling.
+        let received_w = recv_one_fd(&rcv).unwrap();
 
-        // `RecvMsg<'_, 'outer, ()>` is `Copy` but its `'outer`
-        // lifetime ties to `&mut iov`. NLL releases the borrow
-        // after last USE of `msg`, not at scope end. So: do all
-        // `msg` reads FIRST (bytes, flags, cmsgs), then `iobuf`
-        // is reachable. The original code had `iobuf[0]` between
-        // `msg.bytes` and `msg.cmsgs()` — the later use kept the
-        // borrow alive past the iobuf read.
-        assert_eq!(msg.bytes, 1);
-        assert!(
-            !msg.flags
-                .intersects(MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB)
-        );
-        let fds: Vec<RawFd> = msg
-            .cmsgs()
-            .unwrap()
-            .find_map(|cm| match cm {
-                nix::sys::socket::ControlMessageOwned::ScmRights(f) => Some(f),
-                _ => None,
-            })
-            .unwrap();
-        // ↑ last use of msg; iov borrow released.
-
-        // Now iobuf is reachable.
-        assert_eq!(iobuf[0], b'X');
-        assert_eq!(fds.len(), 1);
-        let received_fd = fds[0];
-
-        // The received fd is a DIFFERENT NUMBER from the
-        // original (kernel dup'd into a fresh slot). Well,
-        // it MIGHT be the same number by coincidence (lowest
-        // free fd). What we CAN verify: it works.
-        //
-        // SAFETY: kernel dup'd via SCM_RIGHTS; the fd is ours.
-        #[allow(unsafe_code)]
-        let received_w = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(received_fd) };
-
-        // Write through the RECEIVED fd, read from the canary
-        // pipe. If they're connected (same underlying file),
-        // this works.
+        // Write through the RECEIVED fd, read from the canary pipe:
+        // proves the dup points at the same file description.
         write_all(&received_w, b"ping");
         let mut got = [0u8; 4];
         let n = read_exact_n(&canary_r, &mut got, 4);
         assert_eq!(n, 4);
         assert_eq!(&got, b"ping");
-
-        // Cleanup: drops close everything. The original
-        // `canary_w` is still open (dup'd, not moved); both
-        // it and `received_w` close on drop.
     }
 
     // Test plumbing — pipe helpers
@@ -650,9 +459,7 @@ mod tests {
         nix::unistd::pipe().expect("pipe() failed")
     }
 
-    /// Write all bytes. Loop on short writes (pipes can short-
-    /// write under pressure; our tiny test packets won't, but
-    /// correctness).
+    /// Write all bytes (loop on short writes).
     fn write_all(fd: &impl AsFd, buf: &[u8]) {
         let mut off = 0;
         while off < buf.len() {

@@ -231,10 +231,6 @@ impl Device for Dummy {
         Mode::Tun
     }
 
-    /// `clippy::unnecessary_literal_bound`: trait signature is
-    /// `&str` borrowed from `&self`; `Tun::iface` returns
-    /// `&self.iface` (not static). Can't widen without diverging
-    /// from the trait.
     #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "dummy"
@@ -251,13 +247,20 @@ impl Device for Dummy {
     }
 }
 
-// read/write — shared syscall shims for all backends
-//
-// Thin `read(2)`/`write(2)` wrappers via `nix::unistd`. All backends
-// (linux/fd/raw/bsd) operate on datagram-style fds where one read =
-// one packet and one write = one packet, so no retry/short-handling
-// here — callers treat the count as the packet length. nix's `Errno`
-// converts to `io::Error` with identical `last_os_error` semantics.
+// Thin `read(2)`/`write(2)` wrappers. All backends are datagram-
+// style (one read = one packet), so no short-read handling here.
+
+/// Backend `read()` precondition: caller's buffer must hold a full
+/// frame. Shared so the four backends don't each repeat the format.
+#[inline]
+#[track_caller]
+pub(crate) fn assert_read_buf(buf: &[u8], who: &str) {
+    debug_assert!(
+        buf.len() >= MTU,
+        "buf too small for {who} read: {} < {MTU}",
+        buf.len()
+    );
+}
 
 /// `read(2)`. Datagram semantics: one call = one packet.
 #[inline]
@@ -394,9 +397,8 @@ mod tests {
         assert_eq!(&a.lens()[..3], &[5, 10, 3]);
     }
 
-    /// More frames available than `cap` → stop at `cap`. The
-    /// `0f120b11` invariant: over-draining starves TX. The daemon
-    /// re-arms and comes back next epoll wake.
+    /// More frames available than `cap` → stop at `cap` (over-
+    /// draining starves TX; daemon re-arms next wake).
     #[test]
     fn drain_respects_cap() {
         let mut d = ScriptedDev::new(vec![
@@ -419,10 +421,7 @@ mod tests {
         assert_eq!(a.slot(0)[0], 0xcc);
     }
 
-    /// EAGAIN on the FIRST read → Empty (not Frames{0}). Distinct
-    /// because the daemon's response differs: Empty re-arms and
-    /// returns; Frames{0} would walk a zero-length loop (harmless
-    /// but wrong semantics — there was nothing to drain).
+    /// EAGAIN on the first read → Empty, not Frames{0}.
     #[test]
     fn drain_immediate_eagain_is_empty() {
         let mut d = ScriptedDev::new(vec![Err(io::ErrorKind::WouldBlock)]);
@@ -430,10 +429,7 @@ mod tests {
         assert_eq!(d.drain(&mut a, 8).unwrap(), DrainResult::Empty);
     }
 
-    /// Non-EAGAIN error mid-batch propagates. The daemon counts
-    /// consecutive failures (`on_device_read`) and exits after 10. We
-    /// don't swallow it; the partial batch is lost (daemon breaks
-    /// the loop on error).
+    /// Non-EAGAIN error mid-batch propagates (daemon counts these).
     #[test]
     fn drain_propagates_real_error() {
         let mut d = ScriptedDev::new(vec![Ok(b"ok".to_vec()), Err(io::ErrorKind::BrokenPipe)]);
@@ -442,10 +438,8 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
     }
 
-    /// `cap` is clamped to `arena.cap()`. Passing a too-large cap
-    /// is a daemon bug, but writing past the arena is UB. Clamp
-    /// silently — the panic would be a denial-of-service vector if
-    /// `cap` ever became data-dependent.
+    /// `cap` is clamped to `arena.cap()` so a bad cap can't write
+    /// past the arena.
     #[test]
     fn drain_clamps_cap_to_arena() {
         let mut d = ScriptedDev::new((0..10).map(|i| Ok(vec![i; 50])).collect());
