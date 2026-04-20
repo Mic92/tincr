@@ -28,7 +28,7 @@ pub(super) const MAX_NODES: usize = 65_536;
 pub(super) const MAX_EDGES: usize = 4 * MAX_NODES;
 
 impl Daemon {
-    /// Lookup-or-add fused. Does NOT add a `NodeState` — transitives
+    /// Lookup-or-add fused. Does NOT add a `NodeState` - transitives
     /// are in the graph only.
     pub(super) fn lookup_or_add_node(&mut self, name: &str) -> NodeId {
         if let Some(&id) = self.node_ids.get(name) {
@@ -113,7 +113,7 @@ impl Daemon {
         // Salvage the outgoing session for RX until the new one's
         // `HandshakeDone`: peer's in-flight datagrams (and any they
         // seal before our REQ_KEY reaches them) are still under the
-        // old key. Only keep it if it actually had an `incipher` —
+        // old key. Only keep it if it actually had an `incipher` -
         // a half-handshaken session can't decrypt anything and would
         // just waste a `Box`. See `TunnelState::prev_sptps`.
         if let Some(old) = tunnel.sptps.take()
@@ -175,7 +175,7 @@ impl Daemon {
     /// down by a single bad datagram. UDP is unauthenticated up to
     /// the AEAD tag check, so anyone who can spoof the peer's source
     /// address (or any on-path corruption) would otherwise reset a
-    /// healthy tunnel and blackhole RTT×2 worth of traffic — the
+    /// healthy tunnel and blackhole RTT×2 worth of traffic - the
     /// production `seqno != 0` bursts.
     ///
     /// If the session really is broken (peer rebooted, key mismatch),
@@ -260,7 +260,7 @@ impl Daemon {
         //
         // Gates (same shape as ANS_KEY's):
         // - `msg.udp_addr.is_none()`: first relay only (no double-append
-        //   over multi-hop — each hop sees a different src addr; only
+        //   over multi-hop - each hop sees a different src addr; only
         //   the first one is what `from` actually mapped through)
         // - `ext.reqno == REQ_KEY`: SPTPS-init only (the message that
         //   has a payload to anchor against; SPTPS_PACKET goes via
@@ -270,7 +270,7 @@ impl Daemon {
         //
         // Dropped from the ANS_KEY recipe: `to->minmtu > 0` ("is `to`
         // already using UDP"). For REQ_KEY the responder hasn't started
-        // yet — minmtu is always 0 here. The append is *speculative*:
+        // yet - minmtu is always 0 here. The append is *speculative*:
         // worst case the responder probes a closed port. Same risk as
         // ADD_EDGE's port guess.
         //
@@ -350,7 +350,7 @@ impl Daemon {
 
         let Some(ext) = &msg.ext else {
             // Legacy 3-token form (cleartext-hex session key
-            // exchange). SPTPS-only build — log + reject.
+            // exchange). SPTPS-only build - log + reject.
             log::error!(target: "tincd::proto",
                         "Got legacy REQ_KEY from {} (no SPTPS extension)",
                         msg.from);
@@ -402,11 +402,11 @@ impl Daemon {
             return Ok(nw);
         }
         if ext.reqno != Request::ReqKey as i32 {
-            // REQ_PUBKEY/ANS_PUBKEY: hard-error — operator provisions
+            // REQ_PUBKEY/ANS_PUBKEY: hard-error - operator provisions
             // by hand.
             log::error!(target: "tincd::proto",
                        "Got REQ_KEY ext reqno={} from {}: REQ_PUBKEY/\
-                        ANS_PUBKEY unsupported — provision hosts/{} with \
+                        ANS_PUBKEY unsupported - provision hosts/{} with \
                         Ed25519PublicKey",
                        ext.reqno, msg.from, msg.from);
             return Ok(false);
@@ -417,23 +417,33 @@ impl Daemon {
             // Hard-error.
             log::error!(target: "tincd::proto",
                        "No Ed25519 key known for {}; cannot start tunnel \
-                        — provision hosts/{} with Ed25519PublicKey",
+                        - provision hosts/{} with Ed25519PublicKey",
                        msg.from, msg.from);
             return Ok(false);
         };
 
-        // Peer (re-)initiating; reset below. Same as
-        // `protocol_key.c::req_key_ext_h` case `REQ_KEY` —
-        // unconditional, no tie-break. The crossed-REQ_KEY case
-        // (both sides Initiator at once) leaves both as Responder
-        // and stalls until `try_tx`'s 10 s retry; that retry has
-        // jitter so it converges within a round or two, same as C.
-        if self
-            .dp
-            .tunnels
-            .get(&from_nid)
-            .is_some_and(|t| t.sptps.is_some())
+        // Crossed-REQ_KEY tie-break. If both sides initiated
+        // simultaneously, an unconditional reset (as C tinc does)
+        // leaves both as Responder → stall → both retry as
+        // Initiator → livelock (no jitter on our `last_req_key`).
+        // Greater name keeps Initiator and drops the REQ_KEY; lesser
+        // resets to Responder below. Only when handshake is still in
+        // flight (`!validkey` + Initiator) — otherwise peer is
+        // legitimately re-initiating. See
+        // `tests/two_daemons/reqkey_race.rs`.
+        if let Some(t) = self.dp.tunnels.get(&from_nid)
+            && let Some(sptps) = t.sptps.as_deref()
         {
+            if !t.status.validkey
+                && sptps.role() == Role::Initiator
+                && self.name.as_str() > msg.from.as_str()
+            {
+                log::debug!(target: "tincd::proto",
+                            "Got REQ_KEY from {} while already Initiator; \
+                             keeping role (name tie-break)",
+                            msg.from);
+                return Ok(false);
+            }
             log::debug!(target: "tincd::proto",
                         "Got REQ_KEY from {} while SPTPS already started; restarting",
                         msg.from);
@@ -491,7 +501,7 @@ impl Daemon {
 
         // Tier-0 punch coordination, responder side: a relay between us and
         // `from` may have appended `from`'s NAT-reflexive UDP address. Stash
-        // it now (REQ_KEY arrives *before* validkey — unlike ANS_KEY's
+        // it now (REQ_KEY arrives *before* validkey - unlike ANS_KEY's
         // gate). The threat: a relay could lie. But the relay is already
         // in the meta path (it's relaying our SPTPS handshake) so it can
         // already drop packets to deny the punch. Worst case we send one
@@ -513,7 +523,7 @@ impl Daemon {
 
         // Responder start() always emits KEX (→ ANS_KEY via
         // send_sptps_data, no init special-case). receive(init's
-        // KEX) just stashes — recv_outs is empty here.
+        // KEX) just stashes - recv_outs is empty here.
         let mut nw = hint_nw;
         nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, init_outs);
         match recv_result {
@@ -533,7 +543,7 @@ impl Daemon {
         // HandshakeDone fires inside the dispatch above when the SIG
         // round-trip completes via init_outs/recv_outs); if it isn't yet,
         // try_udp fires the probe but send_probe_record gates on validkey
-        // and returns false — no harm. The next periodic tick (≤1s) catches
+        // and returns false - no harm. The next periodic tick (≤1s) catches
         // the case where the SIG/ACK is still in flight over the meta link.
         if msg.udp_addr.is_some() {
             let now = self.timers.now();
@@ -570,7 +580,7 @@ impl Daemon {
                             which is not reachable", msg.to);
                 return Ok(false);
             }
-            // Three gates — first relay only (no double-append), we
+            // Three gates - first relay only (no double-append), we
             // have a UDP addr for from, `to.minmtu>0` (to is actively
             // using UDP so reflexive addr is useful).
             let appended = if msg.udp_addr.is_none() {
@@ -652,7 +662,7 @@ impl Daemon {
                 // duplicated ANS_KEY (relay re-forward, peer retried
                 // before our REQ_KEY arrived) landing AFTER
                 // HandshakeDone would otherwise nuke a healthy
-                // session here — the production log line that
+                // session here - the production log line that
                 // motivated this fix was exactly this site.
                 log::debug!(target: "tincd::proto",
                             "Failed to decode ANS_KEY SPTPS data from {}: {e:?}",
@@ -663,7 +673,7 @@ impl Daemon {
 
         let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
 
-        // Two gates — validkey (set above on HandshakeDone; without
+        // Two gates - validkey (set above on HandshakeDone; without
         // it the addr could be a replay) + relay appended one.
         if let Some((addr_s, port_s)) = &msg.udp_addr {
             let validkey = self
@@ -683,9 +693,9 @@ impl Daemon {
 
                 // Tier-0 punch coordination, initiator side: validkey just
                 // went true (HandshakeDone in dispatch_tunnel_outputs above)
-                // and we have a fresh relay-observed address. Probe NOW —
+                // and we have a fresh relay-observed address. Probe NOW -
                 // don't wait for the next periodic try_tx tick (up to 1s
-                // away). The responder fired their probe ~½ RTT ago when
+                // away). The responder fired their probe ~1⁄2 RTT ago when
                 // *their* HandshakeDone landed (REQ_KEY's append + the
                 // try_tx call after dispatch). Both probes in flight
                 // simultaneously is the difference between "NAT sees
@@ -796,7 +806,7 @@ impl Daemon {
         nw
     }
 
-    /// Returns `None` if edge or addr entry missing — the
+    /// Returns `None` if edge or addr entry missing - the
     /// synthesized reverse from `on_ack` has no addr; skip rather
     /// than emit `"unknown port unknown"` (peers would parse to
     /// `AF_UNKNOWN`, never connect).
@@ -864,7 +874,7 @@ impl Daemon {
             .is_some_and(|c| c.send(format_args!("{line}")))
     }
 
-    /// Called from `on_ack`. Flatten over global trees — same wire
+    /// Called from `on_ack`. Flatten over global trees - same wire
     /// output, order irrelevant.
     pub(super) fn send_everything(&mut self, to: ConnId) -> bool {
         if self.settings.tunnelserver {
@@ -971,7 +981,7 @@ impl Daemon {
                     // transitive non-INDIRECT node returns None and
                     // direct UDP probes are silently dropped.
                     // We key incoming UDP on [dst_id6][src_id6]
-                    // prefix — no tree to re-index.
+                    // prefix - no tree to re-index.
                     let name_owned = name.to_owned();
                     let addr = self
                         .nodes
@@ -1223,7 +1233,7 @@ impl Daemon {
         true
     }
 
-    /// Subnets don't change topology — NO `graph()` call.
+    /// Subnets don't change topology - NO `graph()` call.
     pub(super) fn on_add_subnet(
         &mut self,
         from_conn: ConnId,
@@ -1236,8 +1246,8 @@ impl Daemon {
         }
 
         // tunnelserver indirect filter. Check BEFORE
-        // lookup_or_add_node — don't pollute graph with indirect
-        // names. ORDER: seen_request first — mark seen even on drop.
+        // lookup_or_add_node - don't pollute graph with indirect
+        // names. ORDER: seen_request first - mark seen even on drop.
         if self.tunnelserver_reject_indirect(
             from_conn,
             "ADD_SUBNET",
@@ -1264,7 +1274,7 @@ impl Daemon {
         }
         let owner = self.lookup_or_add_node(&owner_name);
 
-        // Peer wrong about us — retaliate DEL_SUBNET.
+        // Peer wrong about us - retaliate DEL_SUBNET.
         if owner == self.myself {
             let conn_name = self.conn(from_conn).name.clone();
             log::warn!(target: "tincd::proto",
@@ -1278,7 +1288,7 @@ impl Daemon {
 
         // tunnelserver second gate. Reached when owner IS the direct
         // peer but subnet wasn't preloaded from hosts/ ("unauthorized"
-        // — tunnelserver implies strictsubnets; load_all_nodes
+        // - tunnelserver implies strictsubnets; load_all_nodes
         // preloaded those; reaching here means NOT on disk). NO
         // forward. (50800c0d fixed a spurious forward here that made
         // three_daemon_tunnelserver intermittent.)
@@ -1289,7 +1299,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        // strictsubnets — hosts/ file is authority. Forward (others
+        // strictsubnets - hosts/ file is authority. Forward (others
         // may not be strict) but don't add locally.
         if self.settings.strictsubnets {
             log::warn!(target: "tincd::proto",
@@ -1393,7 +1403,7 @@ impl Daemon {
         let nw = self.forward_request(from_conn, body);
 
         // AFTER forward, BEFORE del. (not-found-strictsubnets case
-        // folds into del()==false below: same observable behavior —
+        // folds into del()==false below: same observable behavior -
         // forward, no del.)
         if self.settings.strictsubnets {
             return Ok(nw);
@@ -1403,7 +1413,7 @@ impl Daemon {
         // `2f72c2ba`: subnet-down for a subnet we never up'd is a
         // peer-triggers-fork-exec DoS (flood DEL with fresh nonces).
         // Do del() FIRST. We invert script-before-del (del() returns
-        // bool) — script env doesn't read the table; same behavior.
+        // bool) - script env doesn't read the table; same behavior.
         let did_del = self.subnets.del(&subnet, &owner_name);
         if did_del {
             self.tx_snap_refresh_subnets();
@@ -1432,7 +1442,7 @@ impl Daemon {
     }
 
     /// EWMA + asymmetric-hysteresis weight update (§3.C of
-    /// `edge-weight-stability.md`, RFC 9616 / ironwood shape).
+    /// `edge-weight-stability.md`, RFC 9616 / ironwood shape).
     ///
     /// `srtt += (min(rtt, srtt*2) - srtt) >> 3`. Re-gossip our own
     /// edge when `srtt` leaves the `[0.7·g, 1.5·g]` band around the
@@ -1517,7 +1527,7 @@ impl Daemon {
 
         // Same wire shape as `on_ack`'s initial broadcast: one nonce,
         // all active conns. Tunnelserver hubs don't propagate edges,
-        // so a re-gossip would only reach the one peer anyway — skip.
+        // so a re-gossip would only reach the one peer anyway - skip.
         let Some(line) = self.fmt_add_edge(eid, Self::nonce()) else {
             return false;
         };
@@ -1626,7 +1636,7 @@ impl Daemon {
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
             existing
         } else if from_id == self.myself {
-            // Contradiction — peer says we have an edge we don't.
+            // Contradiction - peer says we have an edge we don't.
             // Counter read by on_periodic_tick.
             log::debug!(target: "tincd::proto",
                         "Got ADD_EDGE from {conn_name} for ourself \
@@ -1742,7 +1752,7 @@ impl Daemon {
                 .format(Self::nonce());
                 // `97ef5af0` bug class: this DEL_EDGE was queued but
                 // never armed WRITE. `purge()` below CAN cover it (same
-                // conns, broadcast = all active) — but only if purge has
+                // conns, broadcast = all active) - but only if purge has
                 // anything to broadcast. After `del_edge(rev)` below,
                 // `to` has zero outgoing edges; if it also owns no
                 // subnets, purge pass-1 emits nothing, `nw_purge=false`,
@@ -1755,7 +1765,7 @@ impl Daemon {
 
         // If the deleted edge disconnected `to` from the mesh, GC it
         // now. Without this, a node that disconnects and has its
-        // edges gossiped away stays in `graph` forever — the only
+        // edges gossiped away stays in `graph` forever - the only
         // other purge triggers are REQ_PURGE (operator-manual) and
         // the contradiction storm (rare). Our slotmap walks are
         // O(slots) for `dump_nodes`/`send_everything`. The check is

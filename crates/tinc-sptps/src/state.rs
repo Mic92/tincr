@@ -615,6 +615,13 @@ impl Sptps {
         base
     }
 
+    /// Which side of the handshake this instance is. Used by the
+    /// daemon's crossed-`REQ_KEY` tie-break (`gossip::on_req_key`).
+    #[must_use]
+    pub const fn role(&self) -> Role {
+        self.role
+    }
+
     /// True once [`SEAL_KEY_LIMIT`] records have been sealed under the
     /// current `outcipher`. App-data sends return `InvalidState` past
     /// this point (daemon rekeys on a timer, never polls this).

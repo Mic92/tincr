@@ -794,7 +794,7 @@ pub mod linux {
 
         /// Non-destructive log read; child stays running. Used by
         /// tests that scrape stderr while the daemon is live
-        /// (e.g. `reqkey_simultaneous` counting recurrences).
+        /// (e.g. `reqkey_race` counting recurrences).
         pub fn log_snapshot(&self) -> String {
             String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
         }

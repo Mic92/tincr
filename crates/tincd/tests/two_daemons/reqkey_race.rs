@@ -1,17 +1,16 @@
 //! Portable reproducer for the simultaneous `REQ_KEY` livelock.
 //!
-//! Same bug as `reqkey_simultaneous.rs` (netns version) but uses
-//! `DeviceType=fd` socketpairs instead of bwrap/netns + real TUN +
-//! `ping` + tc netem. Runs on Linux AND macOS.
+//! Uses `DeviceType=fd` socketpairs instead of bwrap/netns + real
+//! TUN + `ping` + tc netem, so it runs on Linux AND macOS.
 //!
 //! Trick: after meta handshake completes, write an IP packet into
 //! BOTH test-end fds before either daemon polls. Both daemons hit
 //! `try_tx` → `send_req_key` simultaneously → the race triggers.
 //!
-//! **Status**: failing reproducer. The race triggers reliably even
-//! without tc netem delay — loopback fd writes land before either
-//! daemon polls. Will pass once the `on_ack` dedup tie-break fix
-//! lands. Marked `#[ignore]` (30 s timeout on unfixed code).
+//! Regression test for the crossed-`REQ_KEY` livelock. The race
+//! triggers reliably even without tc netem delay — loopback fd
+//! writes land before either daemon polls. Fixed by the name-order
+//! tie-break in `on_req_key` (greater name stays Initiator).
 
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
@@ -35,7 +34,6 @@ fn count_restarts(log: &str) -> usize {
 
 /// Portable simultaneous `REQ_KEY` race test. No netns needed.
 #[test]
-#[ignore = "failing reproducer: reqkey livelock not yet fixed (30 s wall-clock)"]
 fn reqkey_race_fd() {
     let tmp = tmp("fd-race");
     let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingInterval = 2\n");
@@ -69,10 +67,7 @@ fn reqkey_race_fd() {
     let alice_child = alice.spawn_with_fd(&alice_far);
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
-        panic!(
-            "alice setup failed; stderr:\n{}",
-            drain_stderr(alice_child)
-        );
+        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
     drop(alice_far);
 
@@ -86,11 +81,7 @@ fn reqkey_race_fd() {
             let b = bob_ctl.dump(3);
             let a_ok = node_status(&a, "bob").is_some_and(|s| s & REACHABLE != 0);
             let b_ok = node_status(&b, "alice").is_some_and(|s| s & REACHABLE != 0);
-            if a_ok && b_ok {
-                Some(())
-            } else {
-                None
-            }
+            if a_ok && b_ok { Some(()) } else { None }
         });
     }));
     if meta.is_err() {
@@ -188,7 +179,7 @@ fn reqkey_race_fd() {
     //    unbounded recurrence. Allow up to 3 per side for margin.
     assert!(
         a_restarts <= 3 && b_restarts <= 3,
-        "excessive SPTPS restarts (alice {a_restarts}, bob {b_restarts}) — \
+        "excessive SPTPS restarts (alice {a_restarts}, bob {b_restarts}) - \
          livelock not resolved;\n\
          === alice ===\n{alice_full}\n=== bob ===\n{bob_full}"
     );
