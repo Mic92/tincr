@@ -237,26 +237,10 @@ pub fn try_connect(
     }
 }
 
-/// `do_outgoing_connection` proxy branch. Connects to the PROXY's
-/// address, not the peer's. The
-/// peer addr goes into the SOCKS/HTTP CONNECT request later (in
-/// `finish_connecting`).
-///
-/// Same socket-create+nonblocking+connect shape as `try_connect`,
-/// but: (a) the connect target is a *pre-resolved* proxy address (the
-/// `getaddrinfo` happens off-thread in [`crate::bgresolve::DnsWorker`]
-/// and is cached on `Daemon`), (b) no addr-cache walk (the proxy is a single global config; if
-/// it doesn't resolve or refuses, that's `Exhausted` immediately —
-/// the C does the same: `:593` `if(!proxyai) goto begin`, but begin
-/// just walks the next PEER addr through the SAME unreachable proxy,
-/// so it's effectively exhausted).
-///
-/// `peer_addr` is the addr-cache pick — we still walk the cache so
-/// `conn.address` (the SOCKS target) varies per attempt. C: same
-/// (`c->address` is the peer addr, the proxy connect uses `proxyai`).
-///
-/// `Retry` is never returned (no per-addr fallback for the proxy);
-/// callers should treat `Exhausted` as the loop terminator.
+/// `do_outgoing_connection` proxy branch. Connects to `proxy_addr`
+/// (pre-resolved off-thread), not the peer; `peer_addr` is stashed as
+/// `c->address` for the later SOCKS/HTTP CONNECT. The proxy is a
+/// single global config so any failure is `Exhausted`, never `Retry`.
 #[must_use]
 pub fn try_connect_via_proxy(
     proxy_addr: SocketAddr,
