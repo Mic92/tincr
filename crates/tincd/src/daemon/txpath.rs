@@ -823,15 +823,11 @@ impl Daemon {
                     && !self.dht_hints.contains_key(&name)
                     && let Some(d) = self.discovery.as_mut()
                 {
-                    let host_file = self.confbase.join("hosts").join(&name);
-                    if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-                        let mut cfg = tinc_conf::Config::default();
-                        cfg.merge(entries);
-                        if let Some(key) =
-                            crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name)
-                        {
-                            d.request_resolve(&name, key);
-                        }
+                    let cfg = crate::keys::read_host_config(&self.confbase, &name);
+                    if let Some(key) =
+                        crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name)
+                    {
+                        d.request_resolve(&name, key);
                     }
                 }
                 let addr_cache =

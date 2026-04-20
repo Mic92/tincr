@@ -48,11 +48,7 @@ impl Daemon {
     /// need the same "parse host config → read key" pair and both
     /// hard-error on miss because `REQ_PUBKEY` is unsupported.
     fn load_peer_ed25519(&self, name: &str) -> Option<[u8; tinc_crypto::sign::PUBLIC_LEN]> {
-        let host_file = self.confbase.join("hosts").join(name);
-        let mut cfg = tinc_conf::Config::default();
-        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-            cfg.merge(entries);
-        }
+        let cfg = crate::keys::read_host_config(&self.confbase, name);
         crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)
     }
 

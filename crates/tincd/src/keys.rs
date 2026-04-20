@@ -19,6 +19,18 @@ use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+/// Read `hosts/{name}` into a fresh [`Config`]; empty on ENOENT/parse-fail.
+/// Dedups the `confbase.join("hosts").join(name)` + `parse_file` + `merge`
+/// preamble that every per-peer reader open-coded.
+#[must_use]
+pub fn read_host_config(confbase: &Path, name: &str) -> Config {
+    let mut cfg = Config::default();
+    if let Ok(entries) = tinc_conf::parse_file(confbase.join("hosts").join(name)) {
+        cfg.merge(entries);
+    }
+    cfg
+}
+
 use tinc_conf::{Config, read_pem};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
