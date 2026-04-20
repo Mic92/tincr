@@ -335,19 +335,6 @@ fn validate_subnet(value: &str) -> Result<(), CmdError> {
 
 // Stage 3: the file walk. Read, transform, write-via-tmpfile, rename.
 
-/// Result of a `Set`/`Add`/`Del`. The walk produces warnings as a
-/// side effect (gathered by the caller); the bool is "did anything
-/// change?" — `Del` returns error if it didn't delete anything,
-/// `Set`/`Add` always succeed.
-#[derive(Debug)]
-pub struct EditResult {
-    /// Any line was added, replaced, or removed.
-    pub changed: bool,
-    /// Per-line `Removing` warnings. Separate from the validation
-    /// warnings because they come from the walk, not the lookup.
-    pub warnings: Vec<Warning>,
-}
-
 /// `Get`: scan the file, collect matching values.
 ///
 /// Doesn't open a tmpfile — read-only.
@@ -393,10 +380,11 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, Cm
 ///
 /// The `Set` and `Add` cases never fail at the walk stage — if no
 /// match exists, they append.
-// missing_panics_doc: the unwrap is provably safe behind is_some_and
-// but clippy can't see across statements.
+///
+/// Returns the per-line `Removing` warnings; success means the file
+/// changed (Del-with-no-match is `Err`, Set/Add always rewrite).
 #[allow(clippy::missing_panics_doc)] // unwrap guarded by is_some_and; clippy can't see across statements
-pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, CmdError> {
+pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
     // ─── Read whole file
@@ -504,12 +492,7 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<EditResult, C
 
     guard.commit()?;
 
-    // We got here → changed (even SET-to-same rewrites canonical
-    // casing, so the daemon should reload).
-    Ok(EditResult {
-        changed: true,
-        warnings,
-    })
+    Ok(warnings)
 }
 
 /// Write error for the tmpfile. `CmdError::Io` needs a path, so we
@@ -566,8 +549,8 @@ fn split_line(line: &str) -> Option<(&str, &str)> {
 pub enum ConfigOutput {
     /// `Get` found these values. Binary prints one per line.
     Got(Vec<String>),
-    /// `Set`/`Add`/`Del` succeeded. Binary fires reload if `changed`.
-    Edited(EditResult),
+    /// `Set`/`Add`/`Del` succeeded; binary fires opportunistic reload.
+    Edited,
 }
 
 /// `cmd_config` end-to-end.
@@ -662,18 +645,9 @@ pub fn run(
             Ok((ConfigOutput::Got(values), warnings))
         }
         Action::Set | Action::Add | Action::Del => {
-            let result = run_edit(&target, &intent)?;
-            // Merge walk-warnings (Removing) into validation
-            // warnings. Order: validation first (they're pre-walk).
-            // Not observable but consistent.
-            warnings.extend(result.warnings);
-            Ok((
-                ConfigOutput::Edited(EditResult {
-                    changed: result.changed,
-                    warnings: Vec::new(), // moved into outer
-                }),
-                warnings,
-            ))
+            // Merge walk-warnings (Removing) after validation warnings.
+            warnings.extend(run_edit(&target, &intent)?);
+            Ok((ConfigOutput::Edited, warnings))
         }
     }
 }

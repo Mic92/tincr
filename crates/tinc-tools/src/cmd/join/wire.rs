@@ -6,12 +6,12 @@ use std::net::TcpStream;
 use crate::cmd::{CmdError, io_err};
 use crate::names::check_id;
 
-/// Wire protocol major version.
-pub(super) const PROT_MAJOR: u32 = 17;
+/// Wire protocol major version (canonical in tinc-proto).
+pub(super) const PROT_MAJOR: u32 = tinc_proto::request::PROT_MAJOR as u32;
 
 /// `ACK = 4` from the protocol enum. The daemon's second greeting
 /// line starts with this.
-pub(super) const ACK: u32 = 4;
+pub(super) const ACK: u32 = tinc_proto::Request::Ack as u32;
 
 /// Read one line from `sock` into a returned String, using `buf` as
 /// the leftover accumulator.

@@ -122,7 +122,7 @@ fn pidfile_missing() {
 /// `serve` gets a `BufReader` and the raw write half. It can do
 /// `read_line` and `writeln!`. When it returns, the daemon side
 /// drops, closing the socket — the CLI side sees EOF.
-fn fake_daemon<F>(
+pub(crate) fn fake_daemon<F>(
     theirs: UnixStream,
     expected_cookie: &str,
     daemon_pid: u32,

@@ -85,15 +85,6 @@ const CONFFILES: &[&str] = &[
 
 // Path resolution — the lattice
 
-/// What `cmd_edit` resolved an input to. We never mkdir-p —
-/// `hosts/` mkdir is `tinc init`'s job. If `hosts/` doesn't exist
-/// the editor errors on save.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Resolved {
-    /// Full path. The caller spawns `$EDITOR` on this.
-    pub(crate) path: PathBuf,
-}
-
 /// The resolution lattice. Separate from `run()` so it's unit-
 /// testable WITHOUT spawning an editor.
 ///
@@ -108,7 +99,7 @@ pub(crate) struct Resolved {
 /// # Errors
 /// `BadInput("Invalid configuration filename.")` — matches
 /// upstream's stderr message plus our extra rejects.
-pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> {
+pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<PathBuf, CmdError> {
     let bad = || CmdError::BadInput("Invalid configuration filename.".into());
 
     // ─── Step 1: strip "hosts/" prefix if present
@@ -141,9 +132,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
     // `"hosts/tinc.conf"` → strip → SKIP conffiles →
     // `hosts_dir/tinc.conf`. Different files.
     if !stripped && let Some(&conf) = CONFFILES.iter().find(|&&f| f == input) {
-        return Ok(Resolved {
-            path: paths.confbase.join(conf),
-        });
+        return Ok(paths.confbase.join(conf));
     }
 
     // ─── Step 4: it's a host file — validate the dash form
@@ -171,9 +160,7 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<Resolved, CmdError> 
 
     // The full input (with dash, if any), NOT the split `name`.
     // The path is `hosts/alice-up`; the split was only for VALIDATION.
-    Ok(Resolved {
-        path: paths.hosts_dir().join(input),
-    })
+    Ok(paths.hosts_dir().join(input))
 }
 
 // Editor spawn — sh -c, the git way
@@ -291,7 +278,7 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
 
     // ─── Edit
     let editor = pick_editor();
-    let status = spawn_editor(&editor, &resolved.path).map_err(|e| {
+    let status = spawn_editor(&editor, &resolved).map_err(|e| {
         // `sh` not found, or some exec-level failure. Not "editor
         // exited nonzero" — that's the `Ok(status)` path below.
         CmdError::Io {
@@ -391,12 +378,12 @@ mod tests {
                 Dir::Conf => p.confbase.join(joined),
                 Dir::Hosts => p.hosts_dir().join(joined),
             };
-            assert_eq!(r.path, expected, "input: {input:?}");
+            assert_eq!(r, expected, "input: {input:?}");
         }
         // All seven conffiles resolve to confbase/X.
         for &f in CONFFILES {
             let r = resolve(&p, f).unwrap();
-            assert_eq!(r.path, p.confbase.join(f), "conffile: {f}");
+            assert_eq!(r, p.confbase.join(f), "conffile: {f}");
         }
     }
 

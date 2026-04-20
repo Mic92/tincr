@@ -31,6 +31,8 @@
 //! it composes (pidfile read, socket connect, handshake) are each
 //! unit-tested.
 
+#![cfg(unix)]
+
 use crate::cmd::CmdError;
 use crate::ctl::{CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};
@@ -40,7 +42,6 @@ use crate::names::{Paths, check_id};
 ///
 /// `paths` must already be `resolve_runtime()`d. The panic from
 /// `pidfile()` is the assertion that the binary did its job.
-#[cfg(unix)]
 fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, CmdError> {
     CtlSocket::connect(paths).map_err(Into::into)
 }
@@ -57,10 +58,20 @@ fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, C
 /// `BadInput` (wrapping `CtlError`) if connect fails. Daemon down,
 /// pidfile missing, socket connect refused, greeting bad — all become
 /// "could not connect" with the specific message.
-#[cfg(unix)]
 pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
     let ctl = connect(paths)?;
     Ok(ctl.pid)
+}
+
+/// connect → send `req` → expect `result == 0` ack. Three commands
+/// (reload/purge/retry) differ only in the request and the error text.
+fn simple(paths: &Paths, req: CtlRequest, err: &str) -> Result<(), CmdError> {
+    let mut ctl = connect(paths)?;
+    ctl.send(req)?;
+    if ctl.recv_ack(req)? != 0 {
+        return Err(CmdError::BadInput(err.into()));
+    }
+    Ok(())
 }
 
 /// `cmd_reload`. Tell the daemon to re-read its config. The daemon's
@@ -69,15 +80,8 @@ pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
 ///
 /// # Errors
 /// Connect failure, or daemon-side reload returned nonzero.
-#[cfg(unix)]
 pub fn reload(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Reload)?;
-    let result = ctl.recv_ack(CtlRequest::Reload)?;
-    if result != 0 {
-        return Err(CmdError::BadInput("Could not reload configuration.".into()));
-    }
-    Ok(())
+    simple(paths, CtlRequest::Reload, "Could not reload configuration.")
 }
 
 /// `cmd_purge`. Tell the daemon to forget unreachable nodes. The
@@ -86,17 +90,8 @@ pub fn reload(paths: &Paths) -> Result<(), CmdError> {
 /// # Errors
 /// Connect failure. The daemon-side purge can't fail (it's a tree
 /// walk and free); we still check `result` out of habit.
-#[cfg(unix)]
 pub fn purge(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Purge)?;
-    let result = ctl.recv_ack(CtlRequest::Purge)?;
-    if result != 0 {
-        return Err(CmdError::BadInput(
-            "Could not purge old information.".into(),
-        ));
-    }
-    Ok(())
+    simple(paths, CtlRequest::Purge, "Could not purge old information.")
 }
 
 /// `cmd_retry`. Tell the daemon to retry outgoing connections
@@ -105,17 +100,12 @@ pub fn purge(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// Connect failure.
-#[cfg(unix)]
 pub fn retry(paths: &Paths) -> Result<(), CmdError> {
-    let mut ctl = connect(paths)?;
-    ctl.send(CtlRequest::Retry)?;
-    let result = ctl.recv_ack(CtlRequest::Retry)?;
-    if result != 0 {
-        return Err(CmdError::BadInput(
-            "Could not retry outgoing connections.".into(),
-        ));
-    }
-    Ok(())
+    simple(
+        paths,
+        CtlRequest::Retry,
+        "Could not retry outgoing connections.",
+    )
 }
 
 /// `cmd_stop`. Tell the daemon to exit. The daemon acks then
@@ -129,7 +119,6 @@ pub fn retry(paths: &Paths) -> Result<(), CmdError> {
 /// # Errors
 /// Connect failure. After STOP is sent, the daemon closing is the
 /// expected outcome — EOF is success, not error.
-#[cfg(unix)]
 pub fn stop(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send(CtlRequest::Stop)?;
@@ -149,7 +138,6 @@ pub fn stop(paths: &Paths) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// Connect failure or ack-shape mismatch.
-#[cfg(unix)]
 pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send_int(CtlRequest::SetDebug, level)?;
@@ -168,7 +156,6 @@ pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
 /// `BadInput("Invalid name")` if `check_id` fails (before connect).
 /// Connect failure. `BadInput("Could not disconnect")` if daemon
 /// returns nonzero (node not found, or disconnect failed).
-#[cfg(unix)]
 pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // Validate FIRST — don't waste a socket on a bad name.
     if !check_id(name) {
@@ -184,27 +171,10 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-// Tests
-//
-// These test the *command logic* — that each function sends the right
-// request and interprets the ack correctly. The transport (`CtlSocket`)
-// is tested in `ctl.rs`. The OS path (`connect()`) isn't testable
-// without a daemon; it's a thin wrapper around tested pieces.
-//
-// We can't test through `connect()` (no real daemon), so each test
-// inlines the body that comes *after* connect — the send/recv/check.
-// This means a tiny bit of duplication (each test does its own
-// handshake), but it tests the actual ack-interpretation logic
-// (`result != 0`, drain-to-EOF, etc.) which is what these commands
-// add over raw `CtlSocket`.
-//
-// The "command's body, minus connect()" pattern: extract the post-
-// connect logic into a `_with(ctl, ...)` helper that takes an
-// already-connected socket. The public fn is `connect()? +
-// _with(ctl)`. Tests call `_with` directly. Same seam as `cmd::sign`'s
-// `verify_blob` vs `verify`.
+// Tests cover the post-connect ack-interpretation; the `connect()` OS
+// path is untestable without a real daemon and is a thin wrapper.
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ctl::CtlSocket;
@@ -212,29 +182,13 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::thread;
 
-    /// Same fake-daemon helper as `ctl.rs::tests`. Duplicated, not
-    /// shared, because lifting it would mean `pub(crate)` test
-    /// infrastructure crossing module boundaries. The duplication is
-    /// 30 lines; the indirection of a shared `#[cfg(test)] pub` helper
-    /// is more. If a third module needs it, factor then.
+    /// Thin wrapper over the shared `ctl::tests::fake_daemon` with the
+    /// fixed cookie/pid these tests use.
     fn fake_daemon<F>(theirs: UnixStream, serve: F) -> thread::JoinHandle<()>
     where
         F: FnOnce(&mut BufReader<&UnixStream>, &mut &UnixStream) + Send + 'static,
     {
-        let cookie = "a".repeat(64);
-        thread::spawn(move || {
-            let read = &theirs;
-            let mut write = &theirs;
-            let mut br = BufReader::new(read);
-            // Greeting dance.
-            let mut line = String::new();
-            br.read_line(&mut line).unwrap();
-            assert!(line.contains(&format!("^{cookie}")));
-            writeln!(write, "0 fakedaemon 17.7").unwrap();
-            writeln!(write, "4 0 4242").unwrap(); // pid=4242
-            // Hand off.
-            serve(&mut br, &mut write);
-        })
+        crate::ctl::tests::fake_daemon(theirs, &"a".repeat(64), 4242, serve)
     }
 
     /// `reload` happy path: result=0 → Ok.

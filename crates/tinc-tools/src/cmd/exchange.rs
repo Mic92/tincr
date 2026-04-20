@@ -81,11 +81,8 @@ use super::invite::SEPARATOR;
 pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     let tinc_conf = paths.tinc_conf();
 
-    let entries = tinc_conf::parse_file(&tinc_conf)
+    let config = tinc_conf::Config::read(&tinc_conf)
         .map_err(|e| CmdError::BadInput(format!("Could not open {}: {e}", tinc_conf.display())))?;
-
-    let mut config = tinc_conf::Config::new();
-    config.merge(entries);
 
     let raw = config
         .lookup("Name")
@@ -95,25 +92,7 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
             CmdError::BadInput(format!("Could not find Name in {}.", tinc_conf.display()))
         })?;
 
-    #[cfg(unix)]
-    {
-        names::replace_name(raw).map_err(CmdError::BadInput)
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows doesn't have gethostname in the same shape. Punt
-        // until we have a Windows builder. The literal-name path
-        // (no `$` prefix) doesn't need it.
-        if raw.starts_with('$') {
-            Err(CmdError::BadInput(
-                "$-expansion not supported on this platform yet".into(),
-            ))
-        } else if check_id(raw) {
-            Ok(raw.to_owned())
-        } else {
-            Err(CmdError::BadInput("Invalid name for myself!".into()))
-        }
-    }
+    names::replace_name(raw).map_err(CmdError::BadInput)
 }
 
 // Export
