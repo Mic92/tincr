@@ -391,9 +391,8 @@ impl Daemon {
         self.submit_script(name.into(), env);
     }
 
-    /// Blocking variant for setup/shutdown only — those run outside
-    /// the event loop and must complete before/after `tinc-up`/
-    /// `tinc-down` (which stay synchronous).
+    /// Blocking variant for setup/shutdown (outside the loop; must
+    /// complete before/after the synchronous `tinc-up`/`tinc-down`).
     pub(super) fn run_subnet_script_sync(&self, up: bool, owner: &str, subnet: &Subnet) {
         let (name, env) = self.subnet_script_env(up, owner, subnet);
         let interp = self.settings.scripts_interpreter.as_deref();

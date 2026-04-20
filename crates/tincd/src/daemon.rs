@@ -379,9 +379,8 @@ pub struct Daemon {
     /// `&mut self` at script call sites.
     pub(crate) iface: String,
 
-    /// Off-loop FIFO executor for host/subnet hooks. Keeps a slow
-    /// `host-up` from freezing the data plane on every reachability
-    /// flip; FIFO preserves the `host-up → subnet-up` ordering.
+    /// Off-loop FIFO executor for host/subnet hooks: slow scripts
+    /// must not freeze the data plane on reachability flips.
     pub(crate) script_worker: crate::scriptworker::ScriptWorker,
 
     /// Derived, NOT a config var: `(device emits full eth frames) &&

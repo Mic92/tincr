@@ -1,9 +1,5 @@
-//! Regression: a slow `host-up` must not stall the data plane.
-//!
-//! Old behaviour: `run_host_script` → `script::execute` →
-//! `cmd.status()` (= fork+exec+**waitpid**) ran on the event-loop
-//! thread inside the `BecameReachable` arm. A 2 s `host-up` froze
-//! tun/UDP forwarding for 2 s on every reachability flip.
+//! Regression: a slow `host-up` (waitpid on the event loop) must not
+//! stall tun/UDP forwarding on reachability flips.
 
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -47,10 +43,8 @@ fn slow_host_up_does_not_stall_forwarding() {
     );
     alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
 
-    // Slow host-up on ALICE: fires on the event-loop thread the
-    // moment bob becomes reachable (post-ACK graph run).
-    // `script::prepare` env_clear()s to a fixed PATH that lacks
-    // coreutils on NixOS, so bake an absolute `sleep`.
+    // Slow host-up on ALICE, fired at the post-ACK graph run.
+    // Absolute `sleep`: scripts get a fixed PATH sans coreutils on NixOS.
     let sleep = which_sleep();
     let hu = alice.confbase.join("host-up");
     std::fs::write(&hu, format!("#!/bin/sh\nexec {sleep} 2\n")).unwrap();

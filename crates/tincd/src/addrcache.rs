@@ -251,10 +251,8 @@ impl AddressCache {
         }
     }
 
-    /// `(path, bytes)` ready for [`write_atomic`]. Split out so the
-    /// event loop can hand the I/O to the script worker thread
-    /// instead of taking the `create_dir_all + write + fsync +
-    /// rename` tail latency inline.
+    /// `(path, bytes)` for [`write_atomic`]; split so the event loop
+    /// can ship the fsync+rename to the worker thread.
     #[must_use]
     pub fn serialize(&self) -> Option<(PathBuf, Vec<u8>)> {
         let path = self.path.clone()?;
@@ -274,11 +272,8 @@ impl AddressCache {
     }
 }
 
-/// Write `bytes` to `path` via a `.tmp` sibling + `rename(2)`.
-/// Crash-atomic; never leaves a truncated cache. Fixed `.tmp` suffix
-/// (not pid/random): the cache dir is per-daemon and writes are
-/// serialised on one thread, so a crash leaves at most one stray
-/// temp per peer.
+/// Crash-atomic write via `.tmp` sibling + `rename(2)`. Fixed suffix
+/// (writes serialised on one thread → at most one stray temp/peer).
 ///
 /// # Errors
 /// `create_dir_all` / `open` / `write_all` / `rename` failures.

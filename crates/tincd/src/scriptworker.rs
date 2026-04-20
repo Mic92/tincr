@@ -1,12 +1,6 @@
-//! Off-loop executor for hook scripts and small disk writes.
-//!
-//! `script::execute` is fork+exec+**waitpid**. Calling it from the
-//! event loop (the `BecameReachable`/`BecameUnreachable` arms,
-//! reload, MAC-learn) freezes tun/UDP forwarding for the script's
-//! full runtime. A single FIFO worker thread keeps the loop hot
-//! while preserving the `host-up → subnet-up` / up→down ordering
-//! that user scripts depend on — which a naive `spawn()`-per-job
-//! would race.
+//! Off-loop FIFO executor for hook scripts and small disk writes:
+//! keeps `waitpid()`/`fsync()` off the event loop without losing the
+//! `host-up → subnet-up` ordering a per-job `spawn()` would race.
 
 #![forbid(unsafe_code)]
 
@@ -18,9 +12,8 @@ use std::thread::JoinHandle;
 
 use crate::script::{self, ScriptEnv, ScriptResult};
 
-/// Bounded so a script that never returns can't make the daemon eat
-/// RAM on a flapping mesh. Sized for a ~200-node mesh going fully
-/// reachable in one graph run (host-up + per-node + subnet-up each).
+/// Bounded so a hung script can't make a flapping mesh eat RAM.
+/// Sized for ~200 nodes × (host-up + per-node + subnet-up).
 const QUEUE_CAP: usize = 1024;
 
 pub enum Job {
@@ -32,17 +25,14 @@ pub enum Job {
         env: ScriptEnv,
         interpreter: Option<String>,
     },
-    /// Atomic write-then-rename. Reuses this thread for addrcache
-    /// flushes so their `create_dir_all + write + fsync + rename`
-    /// tail latency stays off the event loop.
+    /// Atomic write-then-rename; keeps addrcache fsync+rename tail
+    /// latency off the event loop.
     WriteFile { path: PathBuf, bytes: Vec<u8> },
 }
 
-/// FIFO worker. The thread is spawned lazily on first `submit` so it
-/// inherits the Landlock/seccomp domain installed by
-/// `sandbox::enter` (which runs after `Daemon::setup` in `main`).
-/// `Drop` joins, so a daemon shutdown waits for any queued
-/// `host-down`/`subnet-down` to actually run.
+/// FIFO worker. Thread spawns lazily on first `submit` so it
+/// inherits the post-`sandbox::enter` Landlock domain. `Drop` joins
+/// so shutdown drains queued `host-down`/`subnet-down`.
 #[derive(Default)]
 pub struct ScriptWorker {
     inner: Mutex<Option<(SyncSender<Job>, JoinHandle<()>)>>,
@@ -55,10 +45,8 @@ impl ScriptWorker {
         Self::default()
     }
 
-    /// Enqueue. Non-blocking: on a full queue the job is **dropped**
-    /// (warned once) — better a missed `subnet-up` than a frozen
-    /// data plane, which is exactly the failure mode this thread
-    /// exists to avoid.
+    /// Enqueue. On a full queue the job is **dropped** + warned once
+    /// — better a missed `subnet-up` than a frozen data plane.
     ///
     /// # Panics
     /// If the OS refuses to spawn the worker thread on first call.
@@ -142,9 +130,7 @@ mod tests {
 
     use std::os::unix::fs::PermissionsExt;
 
-    /// FIFO ordering across jobs — the property user scripts rely on
-    /// (`host-up` before `subnet-up`). Drop joins, so all queued
-    /// jobs complete before the test reads the result.
+    /// FIFO ordering + Drop drains: the property user scripts rely on.
     #[test]
     fn fifo_and_drain_on_drop() {
         let dir = std::env::temp_dir().join(format!(
