@@ -97,9 +97,9 @@ pub struct PmtuState {
     /// `node_status_t::ping_sent` — next reply is the RTT measurement.
     pub ping_sent: bool,
     pub udp_ping_sent: Instant,
-    /// Last time a probe **reply** arrived. `try_udp` checks this
-    /// against `udp_discovery_timeout` to drop `udp_confirmed` when
-    /// the path goes silently dead.
+    /// Last time a probe **reply** arrived. Diagnostic only —
+    /// [`Self::udp_timed_out`] gates on `ping_sent`/`udp_ping_sent`
+    /// instead (see that method for why).
     pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
@@ -153,6 +153,16 @@ impl PmtuState {
             maxrecentlen: 0,
             udp_ping_rtt: None,
         }
+    }
+
+    /// UDP-discovery timeout predicate. True iff a keepalive probe is
+    /// outstanding (`ping_sent`) AND was sent ≥ `timeout` ago. Checking
+    /// `udp_reply_rx` alone false-positives after an idle gap: `try_udp`
+    /// is the only keepalive sender and is itself data-driven, so a
+    /// silent period means *we* never probed, not that the path is dead.
+    #[must_use]
+    pub fn udp_timed_out(&self, now: Instant, timeout: Duration) -> bool {
+        self.udp_confirmed && self.ping_sent && now.duration_since(self.udp_ping_sent) >= timeout
     }
 
     /// `mtuprobes := 0` — restart discovery from scratch. Used by
@@ -381,6 +391,10 @@ impl PmtuState {
             return;
         }
         self.udp_confirmed = false;
+        // Stale outstanding-probe flag would let the next try_udp
+        // (once re-confirmed) re-evaluate udp_timed_out against the
+        // old udp_ping_sent and immediately re-trip.
+        self.ping_sent = false;
         self.udp_ping_rtt = None;
         self.maxrecentlen = 0;
         self.start_discovery();
@@ -734,14 +748,47 @@ mod tests {
         s.phase = PmtuPhase::Steady;
         s.maxrecentlen = 1200;
         s.udp_ping_rtt = Some(42_000);
+        s.ping_sent = true;
         s.on_udp_timeout();
         assert!(!s.udp_confirmed);
+        assert!(!s.ping_sent);
         assert_eq!(s.udp_ping_rtt, None);
         assert_eq!(s.maxrecentlen, 0);
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 0 });
         assert_eq!(s.minmtu, 0);
         assert_eq!(s.maxmtu, MTU);
         assert_eq!(s.mtu, 1400); // C :124-137 doesn't touch mtu
+    }
+
+    // ─── udp_timed_out ─────────────────────────────────────────
+
+    #[test]
+    fn udp_timed_out_gates_on_outstanding_probe() {
+        let now = t0();
+        let to = Duration::from_secs(30);
+
+        // Regression: idle gap, no probe outstanding. Old check
+        // (`udp_reply_rx` age) would have tripped here and zeroed
+        // minmtu → relay detour on a healthy path.
+        let mut s = PmtuState::new(now, MTU);
+        s.udp_confirmed = true;
+        s.ping_sent = false;
+        s.udp_ping_sent = now;
+        s.udp_reply_rx = now; // 60s old at check time
+        assert!(!s.udp_timed_out(now + Duration::from_secs(60), to));
+
+        // Probe outstanding, fresh.
+        s.ping_sent = true;
+        s.udp_ping_sent = now + Duration::from_secs(55);
+        assert!(!s.udp_timed_out(now + Duration::from_secs(60), to));
+
+        // Probe outstanding, stale.
+        s.udp_ping_sent = now;
+        assert!(s.udp_timed_out(now + Duration::from_secs(31), to));
+
+        // Not confirmed.
+        s.udp_confirmed = false;
+        assert!(!s.udp_timed_out(now + Duration::from_secs(31), to));
     }
 
     // ─── on_meta_ack ────────────────────────────────────────

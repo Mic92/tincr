@@ -383,13 +383,13 @@ impl Daemon {
         let tunnel = self.dp.tunnels.entry(target).or_default();
 
         // ─── UDP-discovery timeout ──────────────────────────────────
-        // No reply for `udp_discovery_timeout` → path is silently
-        // dead (NAT rebind, firewall reload). Drop `udp_confirmed`
-        // so we fall back to TCP/relay instead of blackholing.
+        // Outstanding keepalive probe unanswered for
+        // `udp_discovery_timeout` → path is silently dead (NAT
+        // rebind, firewall reload). Drop `udp_confirmed` so we fall
+        // back to TCP/relay instead of blackholing.
         let timeout = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
         if let Some(p) = tunnel.pmtu.as_mut()
-            && p.udp_confirmed
-            && now.duration_since(p.udp_reply_rx) >= timeout
+            && p.udp_timed_out(now, timeout)
         {
             log::info!(target: "tincd::net",
                        "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
