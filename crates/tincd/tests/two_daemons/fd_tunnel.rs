@@ -3,8 +3,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
 /// `socketpair` with datagram semantics (one write = one read),
-/// faking a TUN fd. SEQPACKET on Linux, DGRAM on macOS (no
-/// SEQPACKET for AF_UNIX). Both ends set `O_NONBLOCK`.
+/// faking a TUN fd. `SEQPACKET` on Linux, `DGRAM` on macOS (no
+/// `SEQPACKET` for `AF_UNIX`). Both ends set `O_NONBLOCK`.
 pub(crate) fn sockpair_datagram() -> (OwnedFd, OwnedFd) {
     #[cfg(target_os = "linux")]
     let sock_type = SockType::SeqPacket;
