@@ -52,6 +52,29 @@ impl Daemon {
         crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)
     }
 
+    /// Resolve a routed message's `from`/`to` names to known `NodeId`s.
+    /// Logs the C-parity "unknown" error and returns `None` so callers
+    /// can `let-else return Ok(false)` without repeating the two blocks.
+    fn resolve_from_to(
+        &self,
+        what: &str,
+        conn_name: &str,
+        from: &str,
+        to: &str,
+    ) -> Option<(NodeId, NodeId)> {
+        let Some(&from_nid) = self.node_ids.get(from) else {
+            log::error!(target: "tincd::proto",
+                        "Got {what} from {conn_name} origin {from} which is unknown");
+            return None;
+        };
+        let Some(&to_nid) = self.node_ids.get(to) else {
+            log::error!(target: "tincd::proto",
+                        "Got {what} from {conn_name} destination {to} which is unknown");
+            return None;
+        };
+        Some((from_nid, to_nid))
+    }
+
     /// Start per-tunnel SPTPS as initiator; send KEX via `REQ_KEY`.
     ///
     /// `Sptps::start` returns `Vec<Output>`. First Wire goes via
@@ -308,16 +331,9 @@ impl Daemon {
         let conn_name = self.conn(from_conn).name.clone();
 
         // lookup, NOT lookup_or_add.
-        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
-            log::error!(target: "tincd::proto",
-                        "Got REQ_KEY from {conn_name} origin {} which is unknown",
-                        msg.from);
-            return Ok(false);
-        };
-        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
-            log::error!(target: "tincd::proto",
-                        "Got REQ_KEY from {conn_name} destination {} which is unknown",
-                        msg.to);
+        let Some((from_nid, to_nid)) =
+            self.resolve_from_to("REQ_KEY", &conn_name, &msg.from, &msg.to)
+        else {
             return Ok(false);
         };
 
@@ -537,16 +553,9 @@ impl Daemon {
 
         let conn_name = self.conn(from_conn).name.clone();
 
-        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
-            log::error!(target: "tincd::proto",
-                        "Got ANS_KEY from {conn_name} origin {} which is unknown",
-                        msg.from);
-            return Ok(false);
-        };
-        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
-            log::error!(target: "tincd::proto",
-                        "Got ANS_KEY from {conn_name} destination {} which is unknown",
-                        msg.to);
+        let Some((from_nid, to_nid)) =
+            self.resolve_from_to("ANS_KEY", &conn_name, &msg.from, &msg.to)
+        else {
             return Ok(false);
         };
 
