@@ -31,6 +31,7 @@ flowchart LR
         dht["tinc-dht"]
         dns["tinc-dns"]
         pm["tinc-portmap"]
+        scr["tinc-script"]
     end
 
     tun <--> dp
@@ -245,6 +246,7 @@ moves over.
 | tinc-dns     | `getaddrinfo` for outgoing/reconnect. Main thread enqueues hostnames, polls results.       |
 | tinc-dht     | The Mainline DHT client. Publish/resolve round-trips. Main thread enqueues, polls results. |
 | tinc-portmap | PCP and UPnP-IGD round-trips. Each exchange wall-clock-bounded.                            |
+| tinc-script  | FIFO runner for `host-up`/`subnet-up` hooks and address-cache writes. Drains on shutdown.  |
 
 What about more than one core? On the current hot path, `perf`
 puts ~53 % of cycles in the ChaCha20 keystream and the bench plateaus
