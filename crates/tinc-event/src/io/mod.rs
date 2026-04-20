@@ -28,9 +28,21 @@ use epoll::{
     wait,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
 mod kqueue;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+))]
 use kqueue::{
     Poller, RawEvent, add, create, del, empty_event, ev_readable, ev_token, ev_writable, modify,
     wait,
@@ -38,12 +50,9 @@ use kqueue::{
 
 use crate::MAX_EVENTS_PER_TURN;
 
-/// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h:26-27`.
-///
-/// `io_set(io, 0)` is only ever called internally during `io_del`.
-/// The daemon-level API never sets zero interest; it goes READ ↔︎
-/// READ|WRITE (the meta connection adds WRITE on outbuf, drops it
-/// when drained).
+/// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h`.
+/// No zero-interest state — the daemon only ever toggles between
+/// `Read` and `ReadWrite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Io {
     Read,
@@ -81,10 +90,7 @@ struct Slot<W> {
     // module doc "The loop doesn't own fds"). Kept only as the
     // epoll_ctl key for later MOD/DEL.
     fd: RawFd,
-    /// `None` = registered but interest was set to zero (which means
-    /// deregistered from epoll, slot still alive). Only `del` does
-    /// this internally; the public `set` API takes non-optional `Io`.
-    interest: Option<Io>,
+    interest: Io,
     what: W,
 }
 
@@ -95,13 +101,13 @@ struct Slot<W> {
 pub struct EventLoop<W> {
     ep: Poller,
     events: Box<[RawEvent; MAX_EVENTS_PER_TURN]>,
-    /// Hand-rolled slab. `None` = freed slot. The epoll token indexes
-    /// directly. Same data structure as `Timers::slots` but with
-    /// `Option<Slot>` instead of a separate freelist — the `None`
-    /// IS the freelist marker, and we need `get(token).is_none()`
-    /// to be the cheap is-this-stale check.
+    /// Hand-rolled slab; `None` = freed. The epoll token indexes this
+    /// directly so `get(token).is_none()` is the cheap stale check.
     slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
+    /// Count of `Some` entries in `slots` — kept so `len()` is O(1)
+    /// for the daemon's `dump connections`.
+    live: usize,
 }
 
 impl<W: Copy> EventLoop<W> {
@@ -115,6 +121,7 @@ impl<W: Copy> EventLoop<W> {
             events: Box::new([empty_event(); MAX_EVENTS_PER_TURN]),
             slots: Vec::new(),
             free: Vec::new(),
+            live: 0,
         })
     }
 
@@ -140,9 +147,10 @@ impl<W: Copy> EventLoop<W> {
         }
         self.slots[idx] = Some(Slot {
             fd: raw,
-            interest: Some(interest),
+            interest,
             what,
         });
+        self.live += 1;
         Ok(IoId(idx))
     }
 
@@ -157,15 +165,11 @@ impl<W: Copy> EventLoop<W> {
     /// would be UAF.
     pub fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
         let slot = self.slots[id.0].as_mut().expect("dangling IoId");
-        if slot.interest == Some(interest) {
+        if slot.interest == interest {
             return Ok(());
         }
-        // `interest == None` ("deregistered but slot alive") is
-        // unreachable — `del` frees the slot. Assert rather than
-        // keep the old forged-`BorrowedFd` re-ADD branch alive.
-        debug_assert!(slot.interest.is_some(), "live slot has interest");
         modify(&self.ep, slot.fd, id.0, interest)?;
-        slot.interest = Some(interest);
+        slot.interest = interest;
         Ok(())
     }
 
@@ -176,25 +180,20 @@ impl<W: Copy> EventLoop<W> {
         let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
             return; // already del'd
         };
-        if slot.interest.is_some() {
-            // Best-effort. ENOENT is fine (last fd closed → kernel
-            // auto-removed). EBADF is NOT fine: caller closed the fd
-            // BEFORE ev.del(). epoll keys on the open-file-
-            // description; if a dup of that fd survives, the
-            // interest leaks and level-triggered epoll busy-loops on
-            // ERR|HUP into a freed slot. Tripwire it in debug —
-            // would have caught the connecting_socks leak in tincd
-            // at first integration-test run instead of in prod.
-            if let Err(e) = del(&self.ep, slot.fd) {
-                debug_assert_ne!(
-                    e.raw_os_error(),
-                    Some(nix::Error::EBADF as i32),
-                    "ev.del(fd={}) after fd closed — deregister BEFORE drop",
-                    slot.fd
-                );
-            }
+        // Best-effort. ENOENT is fine (fd closed → kernel auto-
+        // removed). EBADF is NOT: caller closed BEFORE ev.del();
+        // a surviving dup would busy-loop ERR|HUP into a freed
+        // slot. Tripwire in debug.
+        if let Err(e) = del(&self.ep, slot.fd) {
+            debug_assert_ne!(
+                e.raw_os_error(),
+                Some(nix::Error::EBADF as i32),
+                "ev.del(fd={}) after fd closed — deregister BEFORE drop",
+                slot.fd
+            );
         }
         self.free.push(id.0);
+        self.live -= 1;
     }
 
     /// ONE iteration of the event loop. The `while(running)` outer
@@ -261,25 +260,21 @@ impl<W: Copy> EventLoop<W> {
             let interest = slot.interest;
 
             // WRITE first. Part 2: interest still includes WRITE.
-            if ev_writable(ev) && interest.is_some_and(|i| i.wants(Ready::Write)) {
+            if ev_writable(ev) && interest.wants(Ready::Write) {
                 out.push((what, Ready::Write));
             }
 
             // No re-lookup of interest between WRITE and READ: we
             // collect into `out`, not fire inline, so nothing could
             // have changed it yet.
-            if ev_readable(ev) && interest.is_some_and(|i| i.wants(Ready::Read)) {
+            if ev_readable(ev) && interest.wants(Ready::Read) {
                 out.push((what, Ready::Read));
             }
         }
         Ok(())
     }
 
-    /// Look up the `what` for an id. The daemon needs this when
-    /// `set` is called from inside a match arm and it wants to
-    /// double-check what the slot was (debug paths).
-    ///
-    /// Returns `None` if id is dangling.
+    /// Look up the `what` for an id. `None` if dangling.
     #[must_use]
     pub fn what(&self, id: IoId) -> Option<W> {
         self.slots.get(id.0)?.as_ref().map(|s| s.what)
@@ -289,12 +284,12 @@ impl<W: Copy> EventLoop<W> {
     /// connections` will too eventually.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
+        self.live
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.slots.iter().all(Option::is_none)
+        self.live == 0
     }
 }
 
@@ -310,9 +305,7 @@ mod tests {
         Conn(u32),
     }
 
-    /// `pipe()` pair — read end registered for READABLE, write end
-    /// makes it ready. The minimal fake. Same idiom as the
-    /// `tinc-device` pipe()-tests.
+    /// `pipe()` pair — read end registered for READABLE.
     fn mkpipe() -> (std::fs::File, std::fs::File) {
         let (r, w) = nix::unistd::pipe().expect("pipe()");
         (std::fs::File::from(r), std::fs::File::from(w))
@@ -344,9 +337,7 @@ mod tests {
         drop((rd, wr));
     }
 
-    /// `io_set` with same flags is a no-op. No syscall (we can't
-    /// directly observe that, but we can observe
-    /// no error and no behavior change).
+    /// `io_set` with same flags is a no-op (no error, slot unchanged).
     #[test]
     fn set_same_interest_noop() {
         let mut ev = EventLoop::new().unwrap();
@@ -359,7 +350,7 @@ mod tests {
 
         // Slot unchanged.
         let slot = ev.slots[id.0].as_ref().unwrap();
-        assert_eq!(slot.interest, Some(Io::Read));
+        assert_eq!(slot.interest, Io::Read);
         ev.del(id);
     }
 
@@ -385,12 +376,8 @@ mod tests {
         ev.turn(Some(Duration::from_millis(10)), &mut out).unwrap();
         assert!(out.is_empty(), "got stale WRITE after reregister to READ");
 
-        // Hold rd live (otherwise the pipe is half-closed and epoll
-        // might report HUP-as-readable on wr).
         drop(rd);
-        // wr's fd gets closed when wr drops; del before that to avoid
-        // a deregister-on-closed-fd EBADF (which we'd swallow, but
-        // let's not depend on the swallow).
+        // del BEFORE wr drops to avoid the EBADF tripwire.
         ev.del(id);
         drop(wr);
     }
@@ -409,33 +396,9 @@ mod tests {
         assert_eq!(ev.len(), 0);
     }
 
-    /// The generation-guard substitute. Register two read ends, write
-    /// to both, `turn()` collects both. Now: del one of them, `turn()`
-    /// again. The deleted one's pending readiness must be dropped
-    /// silently.
-    ///
-    /// This is a WEAKER test than the C scenario (cb deletes another
-    /// slot mid-batch) because we collect-then-dispatch. The
-    /// "mid-batch" delete in our world is "daemon's match arm calls
-    /// del while iterating `out`." The daemon owns `out`; it can
-    /// just `continue` past entries it knows it deleted. The slab
-    /// guard is for the NEXT `turn()` — the slot is gone, the token
-    /// might reappear in epoll's return (stale, level-triggered),
-    /// and we need to drop it.
-    ///
-    /// Actually the stale-token-in-epoll case doesn't happen for del:
-    /// del deregisters. epoll won't return a deregistered fd. The
-    /// case it DOES happen for: del + add reuses the slot index for
-    /// a different fd. If the old fd was readable AND we del'd it
-    /// AND add'd a new fd to the same slot AND `turn()` was already
-    /// in progress... but `turn()` isn't reentrant. So this guard
-    /// is for: epoll returns a stale event from a previous fd that
-    /// was closed (auto-deregistered) but we didn't call del,
-    /// then add reused the slot. That's a daemon bug (close without
-    /// del). The guard catches it.
-    ///
-    /// What we CAN test: del'd slot's `what()` returns None; `turn()`
-    /// doesn't crash if a slot was del'd.
+    /// del'd slot's `what()` returns None; `turn()` doesn't crash on
+    /// a freed slot. (The full mid-batch stale-token scenario isn't
+    /// reproducible without a daemon bug; the slab guard covers it.)
     #[test]
     fn del_makes_what_none() {
         let mut ev = EventLoop::new().unwrap();
@@ -464,11 +427,8 @@ mod tests {
         ev.del(id2);
     }
 
-    /// Two events in one turn. WRITE before READ per dispatch order.
-    ///
-    /// This tests the dispatch ORDER for one fd that's both readable
-    /// and writable. Socketpair (not pipe — pipes are unidirectional;
-    /// a single pipe fd is never both).
+    /// One fd both readable and writable → WRITE dispatched first.
+    /// Socketpair, not pipe — a pipe fd is never both.
     #[test]
     fn write_before_read_same_fd() {
         let (mut a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");

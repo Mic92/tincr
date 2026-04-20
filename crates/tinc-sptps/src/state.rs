@@ -18,7 +18,7 @@
 //!   matching `SecondaryKex | Kex` and gating the send on the variant.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rand_core::RngCore;
 use tinc_crypto::chapoly::{ChaPoly, KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
@@ -602,7 +602,8 @@ impl Sptps {
     ///
     /// Caller MUST emit all `n` reserved seqnos. Gaps are harmless on
     /// the wire (replay window tolerates skips) but waste seqno space.
-    pub fn alloc_seqnos(&mut self, n: u32) -> u32 {
+    #[must_use]
+    pub fn alloc_seqnos(&self, n: u32) -> u32 {
         // u64 fetch_add, truncate at read. `(prev + n) as u32 ==
         // (prev as u32).wrapping_add(n)`: the high bits the wider
         // counter carries are invisible on the wire. `Relaxed`: the
@@ -616,9 +617,8 @@ impl Sptps {
 
     /// True once [`SEAL_KEY_LIMIT`] records have been sealed under the
     /// current `outcipher`. App-data sends return `InvalidState` past
-    /// this; the daemon should `force_kex` when it flips.
-    #[must_use]
-    pub fn needs_rekey(&self) -> bool {
+    /// this point (daemon rekeys on a timer, never polls this).
+    fn needs_rekey(&self) -> bool {
         self.outseqno
             .load(Ordering::Relaxed)
             .wrapping_sub(self.out_key_base)
@@ -652,6 +652,12 @@ impl Sptps {
     #[must_use]
     pub fn replay_handle(&self) -> Arc<Mutex<ReplayWindow>> {
         Arc::clone(&self.replay)
+    }
+
+    /// Lock the replay window, recovering from poison: the window holds
+    /// no invariants a panicking writer could leave half-broken.
+    fn replay_mut(&self) -> MutexGuard<'_, ReplayWindow> {
+        self.replay.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Copy the outbound cipher key. Shard hand-off: workers get a
@@ -786,12 +792,7 @@ impl Sptps {
         // first is still required (forged seqnos must not advance the
         // window) but check-before-shift means the memmove below only
         // runs on the Ok path.
-        if let Err(e) = self
-            .replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)
-        {
+        if let Err(e) = self.replay_mut().check(seqno, true) {
             out.truncate(headroom);
             return Err(e);
         }
@@ -878,10 +879,7 @@ impl Sptps {
     /// `BadSeqno` if `seqno` is replayed or out-of-window. Caller
     /// drops the (already-decrypted) plaintext.
     pub fn replay_check(&mut self, seqno: u32) -> Result<(), SptpsError> {
-        self.replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)
+        self.replay_mut().check(seqno, true)
     }
 
     /// `send_kex`: emit `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
@@ -928,10 +926,8 @@ impl Sptps {
     /// it's `hiskex` first, `mykex` second (with `initiator` flipped).
     /// Both sides agree on what's signed because their roles swap.
     fn send_sig(&mut self, out: &mut Vec<Output>) {
-        let mykex = self.mykex.as_ref().expect("send_sig with no mykex");
-        let hiskex = self.hiskex.as_ref().expect("send_sig with no hiskex");
-
-        let msg = sig_transcript(self.role.is_initiator(), &**mykex, &**hiskex, &self.label);
+        let (mykex, hiskex) = self.kex_pair();
+        let msg = sig_transcript(self.role.is_initiator(), mykex, hiskex, &self.label);
         let sig = self.mykey.sign(&msg);
         self.send_record_priv(REC_HANDSHAKE, &sig, out);
     }
@@ -960,6 +956,15 @@ impl Sptps {
 
     // ────────────────────────────────────────────────────────────────
     // Receive path: handshake records
+
+    /// Both KEX blobs, asserted present. The state machine only reaches
+    /// SIG/key-derivation after stashing both, so absence is a bug.
+    fn kex_pair(&self) -> (&[u8; KEX_LEN], &[u8; KEX_LEN]) {
+        (
+            self.mykex.as_deref().expect("mykex present"),
+            self.hiskex.as_deref().expect("hiskex present"),
+        )
+    }
 
     /// `receive_kex` precondition. Factored so `SecondaryKex` can run
     /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
@@ -992,13 +997,14 @@ impl Sptps {
         // No NUL: C does `sizeof("key expansion") - 1`.
         const PREFIX: &[u8] = b"key expansion";
 
+        let (mykex, hiskex) = self.kex_pair();
         let (init_kex, resp_kex) = if self.role.is_initiator() {
-            (self.mykex.as_ref(), self.hiskex.as_ref())
+            (mykex, hiskex)
         } else {
-            (self.hiskex.as_ref(), self.mykex.as_ref())
+            (hiskex, mykex)
         };
-        let init_nonce = &init_kex.expect("kex present")[1..=NONCE_LEN];
-        let resp_nonce = &resp_kex.expect("kex present")[1..=NONCE_LEN];
+        let init_nonce = &init_kex[1..=NONCE_LEN];
+        let resp_nonce = &resp_kex[1..=NONCE_LEN];
 
         let mut seed = Zeroizing::new(Vec::with_capacity(
             PREFIX.len() + 2 * NONCE_LEN + self.label.len(),
@@ -1077,10 +1083,9 @@ impl Sptps {
         // Verify transcript: `[!initiator][hiskex][mykex][label]`.
         // Swapped vs. send_sig: their initiator-bit is our !initiator-bit,
         // their mykex is our hiskex.
-        let mykex = self.mykex.as_ref().expect("receive_sig with no mykex");
-        let hiskex = self.hiskex.as_ref().expect("receive_sig with no hiskex");
+        let (mykex, hiskex) = self.kex_pair();
         {
-            let msg = sig_transcript(!self.role.is_initiator(), &**hiskex, &**mykex, &self.label);
+            let msg = sig_transcript(!self.role.is_initiator(), hiskex, mykex, &self.label);
             sign::verify(&self.hiskey, &msg, sig).map_err(|_| SptpsError::BadSig)?;
         }
 
@@ -1275,7 +1280,7 @@ impl Sptps {
             // Handshake-phase only: 3 packets, never hot. Hold the
             // lock across the read+write so a (hypothetical) concurrent
             // datagram receive sees a consistent counter.
-            let mut win = self.replay.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut win = self.replay_mut();
             if seqno != win.inseqno {
                 return Err(SptpsError::BadSeqno);
             }
@@ -1298,10 +1303,7 @@ impl Sptps {
         let pt = cipher
             .open(u64::from(seqno), payload)
             .map_err(|_| SptpsError::DecryptFailed)?;
-        self.replay
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .check(seqno, true)?;
+        self.replay_mut().check(seqno, true)?;
 
         self.dispatch_record(pt[0], &pt[1..], true, rng, out)
     }

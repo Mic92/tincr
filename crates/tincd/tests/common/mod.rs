@@ -66,6 +66,16 @@ impl TmpGuard {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// `(vpn/, tinc.pid, tinc.socket)` under this tempdir. The
+    /// 3-line join block that opened ~35 single-daemon tests.
+    pub fn std_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
+        (
+            self.0.join("vpn"),
+            self.0.join("tinc.pid"),
+            self.0.join("tinc.socket"),
+        )
+    }
 }
 
 impl Drop for TmpGuard {
@@ -96,6 +106,25 @@ pub fn tincd_bin() -> PathBuf {
 pub fn tincd_cmd() -> Command {
     let mut c = Command::new(tincd_bin());
     c.arg("-D");
+    c
+}
+
+/// `tincd_cmd()` with the standard `-c/--pidfile/--socket` triple
+/// pre-filled. Returned `Command` is open for further `.arg()` /
+/// `.env()` / `.stderr()` chaining. Replaces the 6-line arg block
+/// at ~40 callsites.
+pub fn tincd_at(
+    confbase: impl AsRef<std::ffi::OsStr>,
+    pidfile: impl AsRef<std::ffi::OsStr>,
+    socket: impl AsRef<std::ffi::OsStr>,
+) -> Command {
+    let mut c = tincd_cmd();
+    c.arg("-c")
+        .arg(confbase)
+        .arg("--pidfile")
+        .arg(pidfile)
+        .arg("--socket")
+        .arg(socket);
     c
 }
 
@@ -449,13 +478,7 @@ impl PeerFixture {
 
         // ─── spawn daemon (RUST_LOG=tincd=info captures the
         //     "handshake completed" / "became reachable" lines) ───
-        let mut child = tincd_cmd()
-            .arg("-c")
-            .arg(&confbase)
-            .arg("--pidfile")
-            .arg(&pidfile)
-            .arg("--socket")
-            .arg(&socket)
+        let mut child = tincd_at(&confbase, &pidfile, &socket)
             .env("RUST_LOG", "tincd=info")
             .stderr(std::process::Stdio::piped())
             .spawn()

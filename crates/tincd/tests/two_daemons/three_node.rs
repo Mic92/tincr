@@ -81,13 +81,7 @@ fn three_daemon_relay() {
 
     // ─── spawn: mid first (the hub everyone connects to) ─────────
     // mid runs at debug-level so we can assert the relay log lines.
-    let mut mid_child = tincd_cmd()
-        .arg("-c")
-        .arg(&mid.confbase)
-        .arg("--pidfile")
-        .arg(&mid.pidfile)
-        .arg("--socket")
-        .arg(&mid.socket)
+    let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -364,13 +358,7 @@ fn three_daemon_tunnelserver() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
 
     // ─── spawn: mid first (the hub) ──────────────────────────────
-    let mut mid_child = tincd_cmd()
-        .arg("-c")
-        .arg(&mid.confbase)
-        .arg("--pidfile")
-        .arg(&mid.pidfile)
-        .arg("--socket")
-        .arg(&mid.socket)
+    let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -817,13 +805,7 @@ fn udp_relay_gate_unauthenticated_sender() {
     bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
 
     // mid runs at debug-level so we can assert the gate log line.
-    let mut mid_child = tincd_cmd()
-        .arg("-c")
-        .arg(&mid.confbase)
-        .arg("--pidfile")
-        .arg(&mid.pidfile)
-        .arg("--socket")
-        .arg(&mid.socket)
+    let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -1017,13 +999,7 @@ fn three_daemon_forwarding_off_drops_transit() {
 
     // ─── spawn: mid first ────────────────────────────────────────
     // mid runs at debug so we can assert the gate's log line.
-    let mut mid_child = tincd_cmd()
-        .arg("-c")
-        .arg(&mid.confbase)
-        .arg("--pidfile")
-        .arg(&mid.pidfile)
-        .arg("--socket")
-        .arg(&mid.socket)
+    let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()

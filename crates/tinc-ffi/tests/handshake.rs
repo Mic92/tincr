@@ -70,6 +70,18 @@ fn keypair(seed_tag: u8) -> ([u8; 96], [u8; 32]) {
     (sk.to_blob(), pk)
 }
 
+/// Standard two-party key fixture: returns (alice's `mykey`/`hiskey`,
+/// bob's `mykey`/`hiskey`). Factored out because every C↔C handshake test
+/// starts with the same six lines of `from_private_blob`/`from_public`.
+fn ckeys(a_tag: u8, b_tag: u8) -> ((CKey, CKey), (CKey, CKey)) {
+    let (a_priv, a_pub) = keypair(a_tag);
+    let (b_priv, b_pub) = keypair(b_tag);
+    (
+        (CKey::from_private_blob(&a_priv), CKey::from_public(&b_pub)),
+        (CKey::from_private_blob(&b_priv), CKey::from_public(&a_pub)),
+    )
+}
+
 /// Pull the single Wire event out of an event vec, assert nothing else
 /// is there. Handshake steps that produce multiple events get spelled
 /// out manually in the test bodies — they're the interesting cases.
@@ -107,13 +119,7 @@ fn dribble(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
 #[test]
 fn stream_handshake_c_to_c() {
     let _g = serial_guard();
-    let (alice_priv, alice_pub) = keypair(1);
-    let (bob_priv, bob_pub) = keypair(2);
-
-    let alice_mykey = CKey::from_private_blob(&alice_priv);
-    let alice_hiskey = CKey::from_public(&bob_pub);
-    let bob_mykey = CKey::from_private_blob(&bob_priv);
-    let bob_hiskey = CKey::from_public(&alice_pub);
+    let ((alice_mykey, alice_hiskey), (bob_mykey, bob_hiskey)) = ckeys(1, 2);
 
     let label = b"tinc-ffi handshake test";
 
@@ -251,13 +257,7 @@ fn stream_handshake_survives_byte_dribble() {
     // a harness test. If the sink-draining logic in our shim were
     // dropping events on calls that produce nothing, this would catch it.
 
-    let (alice_priv, alice_pub) = keypair(1);
-    let (bob_priv, bob_pub) = keypair(2);
-
-    let ak1 = CKey::from_private_blob(&alice_priv);
-    let ak2 = CKey::from_public(&bob_pub);
-    let bk1 = CKey::from_private_blob(&bob_priv);
-    let bk2 = CKey::from_public(&alice_pub);
+    let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
 
     seed_rng(&[0xAA; 32]);
     let (mut alice, evs) = CSptps::start(Role::Initiator, Framing::Stream, &ak1, &ak2, b"dribble");
@@ -292,13 +292,7 @@ fn datagram_handshake_c_to_c() {
     // length) and in the receive path (sptps_receive_data_datagram is its
     // own function, no reassembly). Handshake state machine is identical.
 
-    let (alice_priv, alice_pub) = keypair(3);
-    let (bob_priv, bob_pub) = keypair(4);
-
-    let ak1 = CKey::from_private_blob(&alice_priv);
-    let ak2 = CKey::from_public(&bob_pub);
-    let bk1 = CKey::from_private_blob(&bob_priv);
-    let bk2 = CKey::from_public(&alice_pub);
+    let ((ak1, ak2), (bk1, bk2)) = ckeys(3, 4);
 
     seed_rng(&[0xCC; 32]);
     let (mut alice, evs) = CSptps::start(Role::Initiator, Framing::Datagram, &ak1, &ak2, b"dgram");
@@ -361,12 +355,7 @@ fn handshake_is_deterministic_under_same_seeds() {
 
     #[allow(clippy::items_after_statements)] // local helper, clearer inline
     fn run() -> Vec<Vec<u8>> {
-        let (alice_priv, alice_pub) = keypair(1);
-        let (bob_priv, bob_pub) = keypair(2);
-        let ak1 = CKey::from_private_blob(&alice_priv);
-        let ak2 = CKey::from_public(&bob_pub);
-        let bk1 = CKey::from_private_blob(&bob_priv);
-        let bk2 = CKey::from_public(&alice_pub);
+        let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
 
         seed_rng(&[0x11; 32]);
         let (mut alice, e) = CSptps::start(Role::Initiator, Framing::Stream, &ak1, &ak2, b"det");
@@ -453,12 +442,7 @@ fn rekey_uses_ack_state() {
     // a synthetic receive_ack. The Rust state machine has to get both paths
     // right; this test is the oracle for the second one.
 
-    let (alice_priv, alice_pub) = keypair(1);
-    let (bob_priv, bob_pub) = keypair(2);
-    let ak1 = CKey::from_private_blob(&alice_priv);
-    let ak2 = CKey::from_public(&bob_pub);
-    let bk1 = CKey::from_private_blob(&bob_priv);
-    let bk2 = CKey::from_public(&alice_pub);
+    let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
 
     // ─── Initial handshake (compressed; tested above) ───
     seed_rng(&[1; 32]);

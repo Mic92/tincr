@@ -197,6 +197,19 @@ macro_rules! slot {
     };
 }
 
+/// Reserve a slot in a slab: recycle from `free` (LIFO) or push a new
+/// `None`. Returns the index; caller writes the value.
+fn alloc_slot<T>(slab: &mut Vec<Option<T>>, free: &mut Vec<u32>) -> u32 {
+    if let Some(idx) = free.pop() {
+        debug_assert!(slab[idx as usize].is_none());
+        idx
+    } else {
+        let idx = u32::try_from(slab.len()).expect("u32 slots");
+        slab.push(None);
+        idx
+    }
+}
+
 impl Graph {
     #[must_use]
     pub fn new() -> Self {
@@ -210,20 +223,13 @@ impl Graph {
     /// On more than `u32::MAX` nodes — not a realistic limit; tinc
     /// meshes are tens to hundreds.
     pub fn add_node(&mut self, name: impl Into<String>) -> NodeId {
-        let n = Node {
+        let idx = alloc_slot(&mut self.nodes, &mut self.node_free);
+        self.nodes[idx as usize] = Some(Node {
             name: name.into(),
             edges: Vec::new(),
             reachable: true,
-        };
-        if let Some(idx) = self.node_free.pop() {
-            debug_assert!(self.nodes[idx as usize].is_none());
-            self.nodes[idx as usize] = Some(n);
-            NodeId(idx)
-        } else {
-            let id = NodeId(u32::try_from(self.nodes.len()).expect("u32 nodes"));
-            self.nodes.push(Some(n));
-            id
-        }
+        });
+        NodeId(idx)
     }
 
     /// `edge_add`: insert into `from.edge_tree` and `edge_weight_tree`,
@@ -242,14 +248,7 @@ impl Graph {
             self.lookup_edge(from, to).is_none(),
             "duplicate edge {from:?}→{to:?}"
         );
-        let id = if let Some(idx) = self.edge_free.pop() {
-            debug_assert!(self.edges[idx as usize].is_none());
-            EdgeId(idx)
-        } else {
-            let id = EdgeId(u32::try_from(self.edges.len()).expect("u32 edges"));
-            self.edges.push(None);
-            id
-        };
+        let id = EdgeId(alloc_slot(&mut self.edges, &mut self.edge_free));
 
         // Find reverse: an edge from `to` whose destination is `from`.
         // C does `lookup_edge(to, from)` via `to.edge_tree`.

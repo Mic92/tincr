@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::{
-    Ctl, TmpGuard, alloc_port, drain_stderr, read_cookie, tincd_cmd, wait_for_file,
+    Ctl, TmpGuard, alloc_port, drain_stderr, read_cookie, tincd_at, wait_for_file,
     write_ed25519_privkey,
 };
 
@@ -100,9 +100,7 @@ fn count_in_log(log: &LogReader, needle: &str) -> usize {
 #[test]
 fn sigalrm_retries_now() {
     let tmp = tmp("sigalrm");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // alloc_port reserves a port and immediately frees it. Nothing
     // re-binds it; connect() gets ECONNREFUSED. Same trick as
@@ -111,13 +109,7 @@ fn sigalrm_retries_now() {
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
@@ -200,20 +192,12 @@ fn sigalrm_retries_now() {
 #[test]
 fn req_retry_retries_now() {
     let tmp = tmp("req-retry");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
@@ -271,9 +255,7 @@ fn req_retry_retries_now() {
 #[test]
 fn req_disconnect_replies() {
     let tmp = tmp("disconnect");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // No ConnectTo. Just the daemon + ctl conn.
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
@@ -285,13 +267,7 @@ fn req_disconnect_replies() {
     std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()

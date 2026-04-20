@@ -55,7 +55,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use rand_core::{OsRng, RngCore};
-use tinc_conf::{Config, parse_file};
+use tinc_conf::Config;
 use tinc_crypto::invite::{COOKIE_LEN, SLUG_PART_LEN, build_slug, cookie_filename};
 use tinc_crypto::sign::SigningKey;
 use zeroize::Zeroizing;
@@ -285,13 +285,7 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 ///
 /// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
-    use tinc_conf::pem::write_pem;
-
-    let f = super::open_nofollow(path, super::OpenKind::CreateTrunc, 0o600)?;
-    let mut w = std::io::BufWriter::new(f);
-    // Same PEM type string as the node's own key; the daemon
-    // distinguishes them by *path*, not by PEM type.
-    write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).map_err(io_err(path))
+    super::write_private_key(path, sk, super::OpenKind::CreateTrunc)
 }
 
 /// Write the invitation file at 0600 with `O_EXCL`.
@@ -376,10 +370,8 @@ fn build_invitation_file(
 /// `finalize_join` re-parses and emits canonically anyway.
 fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     let tc = paths.tinc_conf();
-    let entries =
-        parse_file(&tc).map_err(|e| CmdError::BadInput(format!("{}: {e}", tc.display())))?;
-    let mut cfg = Config::new();
-    cfg.merge(entries);
+    let cfg =
+        Config::read(&tc).map_err(|e| CmdError::BadInput(format!("{}: {e}", tc.display())))?;
 
     // Just two vars. `lookup` is case-insensitive. Upstream copies
     // every matching line; we copy first only — the daemon's config
@@ -476,10 +468,8 @@ fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> 
     // file" which is the right fix.
 
     let host_file = paths.host_file(myname);
-    let entries = parse_file(&host_file)
+    let cfg = Config::read(&host_file)
         .map_err(|e| CmdError::BadInput(format!("{}: {e}", host_file.display())))?;
-    let mut cfg = Config::new();
-    cfg.merge(entries);
 
     // Address: required. C falls through to HTTP probe + tty prompt;
     // we bail. The error message tells the user what to do.

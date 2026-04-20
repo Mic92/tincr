@@ -119,16 +119,11 @@ impl CtlRequest {
     }
 }
 
-/// `CONTROL` request type = 18 (count from `ID = 0` through `PACKET`).
-///
-/// `tinc_proto::request::Request::Control` is the canonical place.
-/// We re-declare here because `ctl.rs` doesn't otherwise use
-/// `tinc-proto` and one constant isn't worth the dependency edge.
-const CONTROL: u8 = 18;
-/// `ID` — the greeting opener.
-const ID: u8 = 0;
-/// `ACK` — the greeting closer.
-const ACK: u8 = 4;
+/// Derived from the canonical `tinc_proto::Request` enum so the
+/// numeric values can't drift.
+const CONTROL: u8 = tinc_proto::Request::Control as u8;
+const ID: u8 = tinc_proto::Request::Id as u8;
+const ACK: u8 = tinc_proto::Request::Ack as u8;
 /// `TINC_CTL_VERSION_CURRENT`. Hasn't changed since 2007. We send it
 /// (the upstream daemon checks it, for as long as we care about
 /// cross-compat during transition); our own daemon will check it too.
@@ -575,31 +570,15 @@ impl<S: Read + Write> CtlSocket<S> {
         }
 
         // ─── Request type, then body or terminator
-        // `split_once` for the SECOND space. None → no body →
-        // terminator. Some("") (trailing space) → also terminator.
-        match after_code.split_once(' ') {
-            None => {
-                // "18 3\n" — the trailing \n is already stripped.
-                // Just the type. Terminator.
-                let req = after_code.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                Ok(DumpRow::End(kind))
-            }
-            Some((req_s, "")) => {
-                // "18 3 " — trailing space. Daemon doesn't emit
-                // this. Same as terminator.
-                let req = req_s.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                Ok(DumpRow::End(kind))
-            }
-            Some((req_s, body)) => {
-                let req = req_s.parse::<i32>().map_err(|_| bad())?;
-                let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
-                // body is the rest of the line, byte-exact. The
-                // caller hands it to `Tok::new`.
-                Ok(DumpRow::Row(kind, body.to_owned()))
-            }
-        }
+        // Second space: absent or trailing-only → terminator.
+        let (req_s, body) = after_code.split_once(' ').unwrap_or((after_code, ""));
+        let req = req_s.parse::<i32>().map_err(|_| bad())?;
+        let kind = CtlRequest::from_i32(req).ok_or_else(bad)?;
+        Ok(if body.is_empty() {
+            DumpRow::End(kind)
+        } else {
+            DumpRow::Row(kind, body.to_owned())
+        })
     }
 
     /// Drain a dump response, invoking `f` for every `Row` until the
@@ -753,4 +732,4 @@ impl CtlSocket<UnixStream> {
 // Tests
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

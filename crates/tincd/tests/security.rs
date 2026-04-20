@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     Ctl, PeerFixture, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr,
-    tincd_cmd, wait_for_file, write_ed25519_privkey,
+    tincd_at, wait_for_file, write_ed25519_privkey,
 };
 
 fn tmp(tag: &str) -> TmpGuard {
@@ -73,13 +73,7 @@ fn spawn_daemon(
     pidfile: &std::path::Path,
     socket: &std::path::Path,
 ) -> Child {
-    tincd_cmd()
-        .arg("-c")
-        .arg(confbase)
-        .arg("--pidfile")
-        .arg(pidfile)
-        .arg("--socket")
-        .arg(socket)
+    tincd_at(confbase, pidfile, socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
         .spawn()
@@ -97,9 +91,7 @@ struct OneDaemon {
 impl OneDaemon {
     fn spawn(tag: &str, extra_conf: &str) -> Self {
         let tmp = tmp(tag);
-        let confbase = tmp.path().join("vpn");
-        let pidfile = tmp.path().join("tinc.pid");
-        let socket = tmp.path().join("tinc.socket");
+        let (confbase, pidfile, socket) = tmp.std_paths();
 
         write_config(&confbase, "testnode", 0x42, extra_conf);
 
@@ -256,9 +248,7 @@ fn unknown_id_rejected() {
 #[test]
 fn legacy_minor_rejected() {
     let tmp = tmp("legacy-minor");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase, "testnode", 0x42, "");
     // We DO need a hosts/bar with a pubkey: the version check at
@@ -326,9 +316,7 @@ fn legacy_minor_rejected() {
 #[test]
 fn id_timeout_half_open_survives() {
     let tmp = tmp("id-timeout");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     // PingTimeout=1 keeps the test fast.
     write_config(&confbase, "testnode", 0x42, "PingTimeout = 1\n");

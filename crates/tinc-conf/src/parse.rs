@@ -396,6 +396,17 @@ impl Config {
         Self::default()
     }
 
+    /// `parse_file` + `merge` into a fresh `Config`. The common case for
+    /// callers that only need one file.
+    ///
+    /// # Errors
+    /// See [`parse_file`].
+    pub fn read(path: impl AsRef<Path>) -> Result<Self, ReadError> {
+        let mut cfg = Self::new();
+        cfg.merge(parse_file(path)?);
+        Ok(cfg)
+    }
+
     /// Absorb a batch of entries (one parsed file, or a set of cmdline
     /// `-o` options) and re-sort. The C inserts one-at-a-time into the
     /// splay tree; we batch because it doesn't matter — the only reads

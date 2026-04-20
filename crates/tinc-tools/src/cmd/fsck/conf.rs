@@ -46,14 +46,10 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
             continue;
         }
 
-        let Ok(entries) = tinc_conf::parse_file(paths.host_file(node)) else {
-            // Silent skip per-file. The host file might be
-            // unparseable; that's a different fsck phase's job to
-            // catch. (Upstream doesn't catch it either.)
+        let Ok(cfg) = Config::read(paths.host_file(node)) else {
+            // Silent skip; unparseable host files are a separate phase.
             continue;
         };
-        let mut cfg = Config::new();
-        cfg.merge(entries);
         check_conf(&cfg, false, node, findings);
     }
 }

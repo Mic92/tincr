@@ -81,11 +81,8 @@ use super::invite::SEPARATOR;
 pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     let tinc_conf = paths.tinc_conf();
 
-    let entries = tinc_conf::parse_file(&tinc_conf)
+    let config = tinc_conf::Config::read(&tinc_conf)
         .map_err(|e| CmdError::BadInput(format!("Could not open {}: {e}", tinc_conf.display())))?;
-
-    let mut config = tinc_conf::Config::new();
-    config.merge(entries);
 
     let raw = config
         .lookup("Name")
@@ -95,25 +92,7 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
             CmdError::BadInput(format!("Could not find Name in {}.", tinc_conf.display()))
         })?;
 
-    #[cfg(unix)]
-    {
-        names::replace_name(raw).map_err(CmdError::BadInput)
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows doesn't have gethostname in the same shape. Punt
-        // until we have a Windows builder. The literal-name path
-        // (no `$` prefix) doesn't need it.
-        if raw.starts_with('$') {
-            Err(CmdError::BadInput(
-                "$-expansion not supported on this platform yet".into(),
-            ))
-        } else if check_id(raw) {
-            Ok(raw.to_owned())
-        } else {
-            Err(CmdError::BadInput("Invalid name for myself!".into()))
-        }
-    }
+    names::replace_name(raw).map_err(CmdError::BadInput)
 }
 
 // Export
@@ -403,17 +382,23 @@ mod tests {
     use super::*;
     use crate::names::PathsInput;
 
-    /// Set up a confbase with `tinc.conf` and `hosts/NAME`.
-    fn setup(name: &str, host_content: &str) -> (tempfile::TempDir, Paths) {
+    /// Temp confbase with `hosts/` only. Import-side fixture.
+    fn bare() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let confbase = dir.path().join("vpn");
         fs::create_dir_all(confbase.join("hosts")).unwrap();
-        fs::write(confbase.join("tinc.conf"), format!("Name = {name}\n")).unwrap();
-        fs::write(confbase.join("hosts").join(name), host_content).unwrap();
         let paths = Paths::for_cli(&PathsInput {
             confbase: Some(confbase),
             ..Default::default()
         });
+        (dir, paths)
+    }
+
+    /// `bare()` + `tinc.conf` and `hosts/NAME`. Export-side fixture.
+    fn setup(name: &str, host_content: &str) -> (tempfile::TempDir, Paths) {
+        let (dir, paths) = bare();
+        fs::write(paths.tinc_conf(), format!("Name = {name}\n")).unwrap();
+        fs::write(paths.host_file(name), host_content).unwrap();
         (dir, paths)
     }
 
@@ -507,13 +492,7 @@ mod tests {
 
     #[test]
     fn import_basic() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         let blob = "Name = alice\nSubnet = 10.0.1.0/24\nAddress = 192.0.2.1\n";
         let count = import(&paths, blob.as_bytes(), false).unwrap();
@@ -526,13 +505,7 @@ mod tests {
 
     #[test]
     fn import_multi_with_separator() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         let blob = format!(
             "Name = alice\nSubnet = 10.0.1.0/24\n\n{SEPARATOR}\nName = bob\nSubnet = 10.0.2.0/24\n"
@@ -553,13 +526,7 @@ mod tests {
 
     #[test]
     fn import_skip_existing_unless_force() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         // Pre-existing alice.
         fs::write(paths.host_file("alice"), "OLD CONTENT\n").unwrap();
@@ -585,13 +552,7 @@ mod tests {
 
     #[test]
     fn import_bad_name_is_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         let blob = "Name = ../escape\nSubnet = 10.0.0.0/8\n";
         let err = import(&paths, blob.as_bytes(), false).unwrap_err();
@@ -602,13 +563,7 @@ mod tests {
 
     #[test]
     fn import_junk_before_name_is_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         // Junk before first Name = warned and dropped.
         let blob = "this is not a name line\nName = alice\nSubnet = 10.0.1.0/24\n";
@@ -622,13 +577,7 @@ mod tests {
 
     #[test]
     fn import_no_name_at_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         // No Name = line anywhere → count 0, no error (the binary
         // maps count==0 to exit 1, but the function succeeds).
@@ -640,13 +589,7 @@ mod tests {
     #[test]
     fn import_name_format_is_exact() {
         // The header parse is picky. See the doc comment.
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        let (_d, paths) = bare();
 
         // `Name=alice` (no spaces) → not a section header.
         let count = import(&paths, b"Name=alice\nfoo\n".as_slice(), false).unwrap();
@@ -684,13 +627,7 @@ mod tests {
         export(&export_paths, &mut blob).unwrap();
 
         // ─── Import side (different confbase)
-        let import_dir = tempfile::tempdir().unwrap();
-        let import_base = import_dir.path().join("peer");
-        fs::create_dir_all(import_base.join("hosts")).unwrap();
-        let import_paths = Paths::for_cli(&PathsInput {
-            confbase: Some(import_base),
-            ..Default::default()
-        });
+        let (_import_dir, import_paths) = bare();
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 1);
@@ -714,13 +651,7 @@ mod tests {
         let mut blob = Vec::new();
         export_all(&export_paths, &mut blob).unwrap();
 
-        let import_dir = tempfile::tempdir().unwrap();
-        let import_base = import_dir.path().join("peer");
-        fs::create_dir_all(import_base.join("hosts")).unwrap();
-        let import_paths = Paths::for_cli(&PathsInput {
-            confbase: Some(import_base),
-            ..Default::default()
-        });
+        let (_import_dir, import_paths) = bare();
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 2);
@@ -760,15 +691,9 @@ mod tests {
 
     #[test]
     fn get_my_name_no_name_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(&confbase).unwrap();
+        let (_d, paths) = bare();
         // tinc.conf exists but has no Name line.
-        fs::write(confbase.join("tinc.conf"), "Port = 655\n").unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
+        fs::write(paths.tinc_conf(), "Port = 655\n").unwrap();
         let err = get_my_name(&paths).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Could not find Name"));

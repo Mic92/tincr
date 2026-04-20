@@ -137,12 +137,8 @@ fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
 /// itself — `SigningKey::sign` returns `[u8; 64]` directly.
 pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Result<(), CmdError> {
     let name = get_my_name(paths)?;
-    let sk = keypair::read_private(&paths.ed25519_private())
-        .map_err(|e| CmdError::BadInput(e.to_string()))?;
-    // `LoadError` → `BadInput` because there's no `Io` variant that
-    // takes a pre-stringified inner error. `LoadError::Display`
-    // already includes the path. Slight loss of structure (caller
-    // can't `match` on Io-vs-Pem) but this is leaf-level — the caller
+    let sk = keypair::read_private(&paths.ed25519_private())?;
+    // `LoadError` → `BadInput`: leaf-level — the caller
     // is the binary, which prints + exits.
 
     // ─── Slurp input
@@ -364,46 +360,12 @@ pub fn verify_cmd(
 }
 
 /// Read `hosts/NAME`, look for `Ed25519PublicKey = <b64>`, fall back
-/// to a `-----BEGIN ED25519 PUBLIC KEY-----` PEM block. We re-read
-/// from the path for the fallback (kernel cached the inode).
+/// to a PEM block (in `Ed25519PublicKeyFile` or the host file itself).
 fn load_host_pubkey(host_path: &Path) -> Result<[u8; PUBLIC_LEN], CmdError> {
-    // ─── Try config-line form
-    // `parse_file` errors on file-not-found. That's the right error
-    // here (verify fails if you don't have `hosts/SIGNER`). The
-    // `ReadError` Display includes the path.
-    //
-    // If the file *exists* but has *only* a PEM block (no config
-    // lines), `parse_file` returns `Ok(vec![])` (PEM lines are
-    // skipped — see `tinc-conf::parse_reader`'s "blank/comment BEFORE
-    // PEM" ordering). Then `lookup` finds nothing, fall through.
-    let entries =
-        tinc_conf::parse_file(host_path).map_err(|e| CmdError::BadInput(e.to_string()))?;
-    let mut cfg = tinc_conf::Config::new();
-    cfg.merge(entries);
-
-    if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
-        let raw = b64::decode(&entry.value).ok_or_else(|| {
-            CmdError::BadInput(format!(
-                "Could not read public key from {}",
-                host_path.display()
-            ))
-        })?;
-        let pk: [u8; PUBLIC_LEN] = raw.try_into().map_err(|_| {
-            CmdError::BadInput(format!(
-                "Could not read public key from {}",
-                host_path.display()
-            ))
-        })?;
-        return Ok(pk);
-    }
-
-    // ─── Fall back to PEM block
-    // `keypair::read_public` does the open + read_pem + length check.
-    // It errors `LoadError::Pem(NotFound)` if there's no PEM block.
-    // That's our "neither form found" terminal error.
-    keypair::read_public(host_path).map_err(|_| {
-        // Don't expose `LoadError` details — the actionable info is
-        // "this host file has no pubkey".
+    // `Config::read` errors on file-not-found — the right error here
+    // (verify fails if you don't have `hosts/SIGNER`).
+    let cfg = tinc_conf::Config::read(host_path).map_err(|e| CmdError::BadInput(e.to_string()))?;
+    keypair::load_public_from_config(&cfg, host_path).ok_or_else(|| {
         CmdError::BadInput(format!(
             "Could not read public key from {}",
             host_path.display()

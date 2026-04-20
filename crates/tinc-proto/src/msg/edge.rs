@@ -43,7 +43,6 @@ pub struct AddEdge {
     pub options: u32,
     /// Dijkstra edge weight. `%d` on the wire; clamped to `>= 0` at
     /// parse so a peer can't bias MST/nexthop tie-breaks.
-    /// the protocol doesn't reject it (never range-checked).
     pub weight: i32,
     /// `from`'s LAN-side address, if known. Newer peers send it so the
     /// receiver can prefer LAN paths.
@@ -97,8 +96,9 @@ impl AddEdge {
     /// on whether `e->local_address.sa.sa_family` is set. We mirror.
     #[must_use]
     pub fn format(&self, nonce: u32) -> String {
+        use std::fmt::Write as _;
         // %x lowercase, no `#`/`0x`. %d signed decimal.
-        let head = format!(
+        let mut s = format!(
             "{} {nonce:x} {} {} {} {} {:x} {}",
             Request::AddEdge,
             self.from,
@@ -108,10 +108,10 @@ impl AddEdge {
             self.options,
             self.weight,
         );
-        match &self.local {
-            None => head,
-            Some((la, lp)) => format!("{head} {la} {lp}"),
+        if let Some((la, lp)) = &self.local {
+            write!(s, " {la} {lp}").unwrap();
         }
+        s
     }
 }
 

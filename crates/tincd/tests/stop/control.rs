@@ -33,19 +33,11 @@ fn udp_stray_packet_drained() {
     use std::net::UdpSocket;
 
     let tmp = tmp("udp-stray");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -165,32 +157,24 @@ fn req_log_streams() {
     use std::io::Read;
 
     let tmp = tmp("req-log");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
     // the stderr filter. The "Connection from" log is Debug; stderr
     // won't print it but the tap MUST capture it (set_active bumps
     // max_level to Trace).
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "warn")
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    assert!(wait_for_file(&socket), "tincd didn't start; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
+    assert!(
+        wait_for_file(&socket),
+        "tincd didn't start; stderr: {}",
+        drain_stderr(child)
+    );
 
     let cookie = read_cookie(&pidfile);
 
@@ -285,20 +269,12 @@ fn req_log_streams() {
 #[test]
 fn set_debug_level_roundtrip() {
     let tmp = tmp("set-debug");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
 
     // No -d flag, no RUST_LOG → debug_level seeds at 0.
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env_remove("RUST_LOG")
         .stderr(Stdio::piped())
         .spawn()
@@ -385,9 +361,7 @@ fn tinc_up_runs_with_confbase_cwd() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tmp("tinc-up-cwd");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // Probe file OUTSIDE confbase (absolute path) so the
@@ -401,14 +375,7 @@ fn tinc_up_runs_with_confbase_cwd() {
     .unwrap();
     std::fs::set_permissions(&tinc_up, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut child = tincd_cmd()
-        .arg("-D")
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         // Launch from a DIFFERENT cwd. Without the fix, pwd would
         // print THIS, not confbase.
         .current_dir("/")
@@ -416,11 +383,11 @@ fn tinc_up_runs_with_confbase_cwd() {
         .spawn()
         .expect("spawn tincd");
 
-    assert!(wait_for_file(&socket), "tincd should start; stderr: {}", {
-        let _ = child.kill();
-        let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stderr).into_owned()
-    });
+    assert!(
+        wait_for_file(&socket),
+        "tincd should start; stderr: {}",
+        drain_stderr(child)
+    );
     // Socket appears at "Ready"; tinc-up fires AFTER that. Wait for
     // the probe itself, not just the socket, or we kill the daemon
     // mid-fork on slow (macOS, loaded) hosts.
@@ -443,18 +410,10 @@ fn tinc_up_runs_with_confbase_cwd() {
 #[test]
 fn control_conn_churn_no_fd_leak() {
     let tmp = tmp("fd-churn");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();

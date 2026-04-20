@@ -18,12 +18,14 @@ use std::path::Path;
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
+use tinc_conf::Config;
 use tinc_conf::pem::{PemError, read_pem, write_pem};
+use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 /// PEM type strings. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
-const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
-const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
+pub const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
+pub const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 
 /// `sizeof(struct ecdsa)`. The private blob length.
 const PRIVATE_BLOB_LEN: usize = 96;
@@ -66,6 +68,21 @@ pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Re
     Ok(())
 }
 
+/// open + `read_pem` + length-checked copy into a fixed array.
+fn read_blob<const N: usize>(path: &Path, ty: &str) -> Result<[u8; N], LoadError> {
+    let f = File::open(path).map_err(|err| LoadError::Io {
+        path: path.to_owned(),
+        err,
+    })?;
+    let blob = read_pem(f, ty, N).map_err(|err| LoadError::Pem {
+        path: path.to_owned(),
+        err,
+    })?;
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(&blob);
+    Ok(arr)
+}
+
 /// `ecdsa_read_pem_private_key`. Loads the full keypair from a private
 /// key file (the file holds both halves).
 ///
@@ -73,19 +90,7 @@ pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Re
 /// `LoadError::Pem` for missing/malformed armor or wrong size,
 /// `LoadError::Io` for `fopen` failure.
 pub fn read_private(path: &Path) -> Result<SigningKey, LoadError> {
-    let f = File::open(path).map_err(|err| LoadError::Io {
-        path: path.to_owned(),
-        err,
-    })?;
-    let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN).map_err(|err| LoadError::Pem {
-        path: path.to_owned(),
-        err,
-    })?;
-    // `read_pem` returned exactly 96 bytes (it checked). Unwrap is the
-    // length-guarantee handoff.
-    let mut arr = [0u8; PRIVATE_BLOB_LEN];
-    arr.copy_from_slice(&blob);
-    Ok(SigningKey::from_blob(&arr))
+    read_blob::<PRIVATE_BLOB_LEN>(path, TY_PRIVATE).map(|b| SigningKey::from_blob(&b))
 }
 
 /// `ecdsa_read_pem_public_key`. Just the 32 bytes.
@@ -93,17 +98,27 @@ pub fn read_private(path: &Path) -> Result<SigningKey, LoadError> {
 /// # Errors
 /// Same as [`read_private`].
 pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
-    let f = File::open(path).map_err(|err| LoadError::Io {
-        path: path.to_owned(),
-        err,
-    })?;
-    let blob = read_pem(f, TY_PUBLIC, PUBLIC_LEN).map_err(|err| LoadError::Pem {
-        path: path.to_owned(),
-        err,
-    })?;
-    let mut arr = [0u8; PUBLIC_LEN];
-    arr.copy_from_slice(&blob);
-    Ok(arr)
+    read_blob(path, TY_PUBLIC)
+}
+
+/// Public-key lookup as the daemon does it: `Ed25519PublicKey` config
+/// line (tinc-b64), else PEM at `Ed25519PublicKeyFile` or `default_path`.
+///
+/// Returns `None` for any failure (bad b64, wrong length, file/PEM
+/// missing) — callers either treat all as "no usable key" (fsck) or
+/// emit one generic message (verify).
+#[must_use]
+pub fn load_public_from_config(cfg: &Config, default_path: &Path) -> Option<[u8; PUBLIC_LEN]> {
+    if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
+        // Bad b64 is `None`, not a fall-through — a malformed line is a
+        // config bug, not a "look elsewhere" hint.
+        return b64::decode(entry.get_str())?.try_into().ok();
+    }
+    let pem_path = cfg
+        .lookup("Ed25519PublicKeyFile")
+        .next()
+        .map_or_else(|| default_path.to_owned(), |e| e.get_str().into());
+    read_public(&pem_path).ok()
 }
 
 /// Key file load failure. Wraps the inner errors with the path for

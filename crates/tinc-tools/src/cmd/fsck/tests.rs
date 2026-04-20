@@ -1,6 +1,6 @@
-use super::keys::TY_PUBLIC;
 use super::*;
 use crate::keypair;
+use crate::keypair::TY_PUBLIC;
 use crate::names::PathsInput;
 use std::io::Write;
 use tinc_crypto::b64;

@@ -345,8 +345,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     // `tinc-conf::read_server_config` doc for why it's not a function.
     let host_file = paths.host_file(&name);
     let config_result = read_server_config(&paths.confbase).and_then(|mut cfg| {
-        let host_entries = tinc_conf::parse_file(&host_file)?;
-        cfg.merge(host_entries);
+        cfg.merge(tinc_conf::parse_file(&host_file)?);
         Ok(cfg)
     });
 

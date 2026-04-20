@@ -18,39 +18,21 @@ fn prefix_ipv4_is_af_inet_be() {
     assert_eq!(prefix, [0, 0, 0, 2]);
 }
 
-/// `0x86DD` → `htonl(AF_INET6)`. `AF_INET6` VARIES:
-/// Linux 10, FreeBSD 28, macOS 30. **CAN'T pin literal
-/// bytes.** Pin the STRUCTURE: it's `(libc::AF_INET6 as
-/// u32).to_be_bytes()`. On whichever platform this runs,
-/// the bytes are right for THAT platform. The kernel
-/// reading them is the same platform. Correct.
-///
-/// (On Linux, where these tests run in CI, this is
-/// `[0, 0, 0, 10]`. On macOS it'd be `[0, 0, 0, 30]`.
-/// The TEST passes on both because both sides reference
-/// `libc::AF_INET6`.)
+/// `0x86DD` → `htonl(AF_INET6)`. `AF_INET6` varies per platform, so
+/// pin the structure (`(libc::AF_INET6 as u32).to_be_bytes()`), not
+/// literal bytes.
 #[test]
 fn prefix_ipv6_is_libc_af_inet6_be() {
     let prefix = to_af_prefix(ETH_P_IPV6).unwrap();
     #[allow(clippy::cast_sign_loss)] // libc::AF_INET6 is a small positive int
     let want = (libc::AF_INET6 as u32).to_be_bytes();
     assert_eq!(prefix, want);
-    // NOT: `assert_eq!(prefix, [0, 0, 0, 0x1e])`. That's
-    // macOS-only. The test would FAIL on Linux/FreeBSD.
-    // The structure-test above is correct everywhere.
-
-    // What we CAN assert: high three bytes are zero (the
-    // AF values are all small).
+    // High three bytes always zero (AF values are small).
     assert_eq!(&prefix[..3], &[0, 0, 0]);
-    // And: the value is small positive (sanity).
     assert!(prefix[3] > 0);
 }
 
-/// Unknown ethertype → None. ARP (`0x0806`) is the realistic
-/// "this could happen" case:
-/// `route.c` shouldn't emit ARP in TUN mode (no ARP in
-/// L3-only routing) but a confused config might. The C
-/// errors; so do we.
+/// Unknown ethertype → None.
 #[test]
 fn prefix_unknown() {
     assert!(to_af_prefix(0x0806).is_none()); // ARP
@@ -58,13 +40,10 @@ fn prefix_unknown() {
     assert!(to_af_prefix(0xFFFF).is_none());
 }
 
-/// Round-trip: `from_ip_nibble` → `to_af_prefix`. Not an
-/// inverse (different domains: nibble→ethertype vs
-/// ethertype→AF) but the COMPOSITION is the BSD utun read-
-/// then-write path. IPv4 in, IPv4 prefix out.
+/// `from_ip_nibble` → `to_af_prefix` composition is the utun
+/// read-then-write path.
 #[test]
 fn nibble_then_prefix_roundtrip() {
-    // IPv4 packet first byte → ETH_P_IP → AF_INET prefix.
     let et = from_ip_nibble(0x45).unwrap();
     assert_eq!(et, ETH_P_IP);
     let prefix = to_af_prefix(et).unwrap();
@@ -74,10 +53,6 @@ fn nibble_then_prefix_roundtrip() {
     let et = from_ip_nibble(0x60).unwrap();
     assert_eq!(et, ETH_P_IPV6);
     let prefix = to_af_prefix(et).unwrap();
-    // Can't pin the byte; pin that it's the libc value.
-    // The cast goes c_int (signed 32-bit) → u32 (lossless
-    // for the small positive AF values) → to_be_bytes →
-    // last byte.
     #[allow(clippy::cast_sign_loss)] // libc::AF_INET6 is a small positive int
     let af6_low = (libc::AF_INET6 as u32).to_be_bytes()[3];
     assert_eq!(prefix[3], af6_low);
@@ -95,17 +70,11 @@ fn fake_bsd(fd: OwnedFd, variant: BsdVariant) -> BsdTun {
     }
 }
 
-/// `pipe()` for Tun/Utun read tests. Stream-ish is fine
-/// (we feed one packet, read once). nix wraps it.
-/// Returns `(read_end, write_end)`.
 fn pipe() -> (OwnedFd, OwnedFd) {
     nix::unistd::pipe().unwrap()
 }
 
-/// Reverse-direction pipe for write tests: device writes,
-/// test reads. Returns `(device_side, test_side)`. The
-/// device gets the WRITE end of a pipe; the test reads
-/// from the READ end.
+/// Returns `(device_write_end, test_read_end)`.
 fn pipe_rev() -> (OwnedFd, OwnedFd) {
     let (r, w) = nix::unistd::pipe().unwrap();
     (w, r)
@@ -200,23 +169,12 @@ fn tun_write_strips_ether() {
 
 // ─── Utun: +10, IGNORE prefix (read), SYNTHESIZE (write)
 
-/// Utun read: feed `[garbage prefix ×4][IPv4]`. The device
-/// reads at +10, IGNORES the prefix, synthesizes ether from
-/// the IP nibble. Prefix bytes are CLOBBERED by
-/// `set_etherheader`.
-///
-/// THE TEST OF THE IGNORED-PREFIX OBSERVATION. The garbage
-/// `[0xFF; 4]` would be a NONSENSE AF value (`htonl(0xFF)` =
-/// `0x000000ff` which is no AF). If the device were
-/// decoding the prefix it'd error. It doesn't. It reads
-/// `buf[14] >> 4` = `4`, gets `ETH_P_IP`, writes the
-/// synthesized header.
+/// Utun read ignores the AF prefix: feed a garbage `[0xFF;4]`
+/// prefix + valid IPv4. If read decoded the prefix it would error;
+/// instead it synthesizes from the IP nibble at `[14]` and
+/// `set_etherheader` overwrites the garbage.
 #[test]
 fn utun_read_ignores_prefix() {
-    // What the kernel would write: 4-byte prefix + IP.
-    // We feed GARBAGE prefix (all 0xFF) + valid IPv4.
-    // If the read path looked at the prefix: it'd error
-    // (0xFFFFFFFF is no AF). It doesn't.
     let kernel_wrote = [
         0xFF, 0xFF, 0xFF, 0xFF, // garbage prefix
         0x45, 0x00, 0x00, 0x14, // IPv4, IHL=5, len=20
@@ -231,22 +189,12 @@ fn utun_read_ignores_prefix() {
     let mut buf = [0xAAu8; MTU];
     let n = bsd.read(&mut buf).unwrap();
 
-    // Length: kernel bytes + 10. (NOT +14: the 4-byte
-    // prefix is INCLUDED in what the kernel wrote, so it's
-    // already in `n` from the read. `inlen + 10`, not
-    // `inlen + 14`.)
+    // +10, not +14: the 4-byte prefix is already counted in `n`.
     assert_eq!(n, kernel_wrote.len() + 10);
-    // Ether header: synthesized. The garbage prefix at
-    // [10..14] is GONE — set_etherheader's [..12].fill(0)
-    // zeroed [10..12]; the ethertype write at [12..14]
-    // clobbered [12..14].
+    // Garbage prefix at [10..14] fully overwritten by set_etherheader.
     assert_eq!(&buf[0..12], &[0u8; 12]);
     assert_eq!(&buf[12..14], &[0x08, 0x00]); // IPv4
-    // IP packet at +14, verbatim.
     assert_eq!(&buf[14..14 + 8], &kernel_wrote[4..]);
-    // The garbage 0xFF prefix is NOWHERE in the output.
-    // (Well, the high bytes WERE 0xFF — they're now 0x00
-    // and 0x08, 0x00. The clobber.)
 }
 
 /// Utun write: ether frame in → AF prefix synthesized →
@@ -273,19 +221,12 @@ fn utun_write_synthesizes_prefix() {
     drop(bsd);
     let got = drain(&test_r);
 
-    // First 4 bytes: htonl(AF_INET) = [0, 0, 0, 2].
-    // (AF_INET=2 everywhere; this literal is safe.)
+    // htonl(AF_INET) = [0,0,0,2] (AF_INET=2 everywhere).
     assert_eq!(&got[..4], &[0, 0, 0, 2]);
-    // Then the IP payload, verbatim.
     assert_eq!(&got[4..], &[0x45, 0x00, 0xBE, 0xEF]);
 
-    // The frame buffer: bytes [10..14] CLOBBERED by the prefix
-    // write. The clobber is observable to the caller (the
-    // trait's `&mut [u8]`).
+    // [10..14] clobbered by the prefix write (the trait's `&mut`).
     assert_eq!(&frame[10..14], &[0, 0, 0, 2]);
-    // [0..10] untouched (we never wrote there; was already
-    // zero).
-    // [14..] untouched (the IP payload).
     assert_eq!(&frame[14..], &[0x45, 0x00, 0xBE, 0xEF]);
 }
 
@@ -335,8 +276,7 @@ fn utun_write_unknown_ethertype_errors() {
     assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     let msg = e.to_string();
     assert!(msg.contains("0x0806"), "msg: {msg}");
-    // The frame buffer: UNTOUCHED. We errored before
-    // the prefix write.
+    // Buffer untouched: errored before the prefix write.
     assert_eq!(&frame[10..14], &[0, 0, 0x08, 0x06]);
 }
 
@@ -389,9 +329,7 @@ fn tap_write_ether_via_seqpacket() {
 
 // ─── EOF + error paths
 
-/// EOF on any variant → `UnexpectedEof`. Seqpacket gives
-/// EOF on close; pipe also gives EOF on close (read
-/// returns 0). Both work.
+/// EOF → `UnexpectedEof`.
 #[test]
 #[cfg(target_os = "linux")] // SEQPACKET signals EOF on peer close; DGRAM on macOS doesn't
 fn read_eof_via_seqpacket() {

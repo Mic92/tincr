@@ -45,17 +45,11 @@
 use std::fs;
 use std::io::Write;
 
-use crate::cmd::{CmdError, io_err};
+use crate::cmd::{CmdError, OpenKind, io_err, write_private_key};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
-use tinc_conf::pem::write_pem;
 use tinc_crypto::b64;
-
-/// PEM type for the private key. Same constant as `keypair.rs`; not
-/// re-exported because the host-file path here doesn't write a public
-/// PEM at all (it writes a config line instead).
-const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
 /// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
 ///
@@ -124,13 +118,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 
     // Private: PEM, 0600, `O_EXCL` — clobbering an existing key loses
     // identity to existing peers.
-    {
-        let priv_path = paths.ed25519_private();
-        let f = open_mode_excl(&priv_path, 0o600)?;
-        let mut w = std::io::BufWriter::new(f);
-        write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).map_err(io_err(&priv_path))?;
-        w.flush().map_err(io_err(&priv_path))?;
-    }
+    write_private_key(&paths.ed25519_private(), &sk, OpenKind::CreateExcl)?;
 
     // Public: config line in `hosts/NAME`. The b64 is tinc's LSB-first
     // variant — `b64::encode`, NOT standard base64. Standard b64 here
@@ -148,40 +136,40 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 
     // ─── tinc-up stub (Unix only)
     #[cfg(unix)]
-    {
-        let up_path = paths.tinc_up();
-        // `try_exists` then `O_EXCL` is belt-and-suspenders, but it
-        // lets us silently skip instead of erroring on EEXIST.
-        if !up_path.try_exists().map_err(io_err(&up_path))? {
-            let f = open_mode_excl(&up_path, 0o755)?;
-            // Upstream's stub suggests `ifconfig`, which is absent on
-            // most modern Linux. Suggest iproute2 instead so a user
-            // who uncomments the example doesn't get `command not
-            // found` as their first experience.
-            let mut w = std::io::BufWriter::new(f);
-            w.write_all(
-                b"#!/bin/sh\n\
-                  \n\
-                  echo 'Unconfigured tinc-up script, please edit '$0'!'\n\
-                  \n\
-                  #ip link set dev $INTERFACE up\n\
-                  #ip addr add <your-vpn-ip>/<prefixlen> dev $INTERFACE\n",
-            )
-            .map_err(io_err(&up_path))?;
-            w.flush().map_err(io_err(&up_path))?;
-            // The +x bit: `OpenOptions::mode(0o755)` sets the create
-            // mode, but the kernel applies umask, so umask 077 would
-            // give 0700. Explicit chmod to make +x stick regardless.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&up_path, fs::Permissions::from_mode(0o755))
-                    .map_err(io_err(&up_path))?;
-            }
-        }
-    }
+    write_tinc_up_placeholder(paths)?;
 
     Ok(())
+}
+
+/// Create the `tinc-up` stub at mode 0755 if it doesn't already exist.
+/// Returns the path when written so `join` can record it for rollback.
+///
+/// Upstream's stub suggests `ifconfig`; we suggest iproute2 so a user
+/// who uncomments the example doesn't hit `command not found`.
+#[cfg(unix)]
+pub(crate) fn write_tinc_up_placeholder(
+    paths: &Paths,
+) -> Result<Option<std::path::PathBuf>, CmdError> {
+    use std::os::unix::fs::PermissionsExt;
+    let up_path = paths.tinc_up();
+    // `try_exists` then `O_EXCL`: belt-and-suspenders, but lets us
+    // silently skip instead of erroring on EEXIST.
+    if up_path.try_exists().map_err(io_err(&up_path))? {
+        return Ok(None);
+    }
+    let mut f = super::open_nofollow(&up_path, OpenKind::CreateExcl, 0o755)?;
+    f.write_all(
+        b"#!/bin/sh\n\
+          \n\
+          echo 'Unconfigured tinc-up script, please edit '$0'!'\n\
+          \n\
+          #ip link set dev $INTERFACE up\n\
+          #ip addr add <your-vpn-ip>/<prefixlen> dev $INTERFACE\n",
+    )
+    .map_err(io_err(&up_path))?;
+    // Explicit chmod: umask may have stripped the x bit from the create mode.
+    fs::set_permissions(&up_path, fs::Permissions::from_mode(0o755)).map_err(io_err(&up_path))?;
+    Ok(Some(up_path))
 }
 
 /// Wrap an EACCES from confbase creation with a hint pointing at
@@ -208,20 +196,6 @@ fn hint_on_eacces(path: &std::path::Path, e: CmdError) -> CmdError {
 // existing call sites; the test below (`makedir_clamps_mode`) stays
 // because it tests a behavior `init` relies on, not where the fn lives.
 use super::makedir;
-
-/// Open for write, create with explicit mode, fail if exists.
-///
-/// `O_WRONLY | O_CREAT | O_EXCL | O_TRUNC` (trunc is moot with excl,
-/// but harmless). The mode is the *create* mode — kernel still applies
-/// umask, so `mode=0o600` with umask 022 gives 0600 (umask only
-/// clears bits, never sets). For files where we want bits *above* what
-/// umask allows (executables), the caller does a follow-up `chmod`.
-///
-/// `O_EXCL`: for the private key, append-to-existing is just as bad
-/// as truncate. excl is the right semantics for init — see callers.
-fn open_mode_excl(path: &std::path::Path, mode: u32) -> Result<fs::File, CmdError> {
-    super::open_nofollow(path, super::OpenKind::CreateExcl, mode)
-}
 
 #[cfg(all(test, unix))]
 mod tests {

@@ -167,29 +167,23 @@ impl ReqKey {
     /// - `"%s"` — forwarding (the daemon re-emits the input verbatim;
     ///   not our concern)
     ///
-    /// We pick the format string from `ext`.
+    /// We pick the format string from `ext`. `udp_addr` is appended
+    /// last (relay-only; only round-trips when `ext.payload` is Some,
+    /// which the relay path guarantees) — mirrors `AnsKey::format`.
     #[must_use]
     pub fn format(&self) -> String {
-        let head = format!("{} {} {}", Request::ReqKey, self.from, self.to);
-        match &self.ext {
-            None => head,
-            Some(ReqKeyExt {
-                reqno,
-                payload: None,
-            }) => format!("{head} {reqno}"),
-            Some(ReqKeyExt {
-                reqno,
-                payload: Some(p),
-            }) => format!("{head} {reqno} {p}"),
+        use std::fmt::Write as _;
+        let mut s = format!("{} {} {}", Request::ReqKey, self.from, self.to);
+        if let Some(ReqKeyExt { reqno, payload }) = &self.ext {
+            write!(s, " {reqno}").unwrap();
+            if let Some(p) = payload {
+                write!(s, " {p}").unwrap();
+            }
         }
-    }
-
-    /// Relay-appended form. Mirrors `AnsKey::format` with `udp_addr`.
-    /// Only meaningful when `ext.payload.is_some()` (the SPTPS-init case);
-    /// the relay path checks `ext.reqno == REQ_KEY` before appending.
-    #[must_use]
-    pub fn format_with_reflexive(&self, addr: &str, port: &str) -> String {
-        format!("{} {addr} {port}", self.format())
+        if let Some((a, p)) = &self.udp_addr {
+            write!(s, " {a} {p}").unwrap();
+        }
+        s
     }
 }
 
@@ -268,13 +262,11 @@ impl AnsKey {
     }
 
     /// `send_ans_key`: `send_request("%d %s %s %s %d %d %lu %d", ANS_KEY, ...)`.
-    ///
-    /// The 7-field form. Relays append addr/port by re-emitting
-    /// `"%s %s %s"` with the original line as the first `%s` —
-    /// `format_with_addr` covers that.
+    /// Relays append addr/port; we emit it inline when set.
     #[must_use]
     pub fn format(&self) -> String {
-        let head = format!(
+        use std::fmt::Write as _;
+        let mut s = format!(
             "{} {} {} {} {} {} {} {}",
             Request::AnsKey,
             self.from,
@@ -285,13 +277,11 @@ impl AnsKey {
             self.maclen,
             self.compression,
         );
-        match &self.udp_addr {
-            None => head,
-            // Relay-appended form. The C does this by re-printf-ing the
-            // entire input line (`"%s %s %s", request, addr, port`); the
-            // result is identical.
-            Some((a, p)) => format!("{head} {a} {p}"),
+        // Relay-appended tail; C re-printfs `"%s %s %s", request, addr, port`.
+        if let Some((a, p)) = &self.udp_addr {
+            write!(s, " {a} {p}").unwrap();
         }
+        s
     }
 }
 
@@ -367,12 +357,8 @@ mod tests {
         assert_eq!(a.as_str(), "192.0.2.7");
         assert_eq!(p.as_str(), "51234");
 
-        // Round-trip via format_with_reflexive (the relay's emit path).
-        let bare = ReqKey {
-            udp_addr: None,
-            ..m.clone()
-        };
-        assert_eq!(bare.format_with_reflexive("192.0.2.7", "51234"), line);
+        // Round-trip: format() now emits udp_addr (mirrors AnsKey).
+        assert_eq!(m.format(), line);
 
         // One trailing token = error (atomic pair, like AnsKey).
         assert!(ReqKey::parse("15 alice bob 15 SGVsbG8 192.0.2.7").is_err());

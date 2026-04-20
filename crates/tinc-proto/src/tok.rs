@@ -51,9 +51,7 @@ pub struct ParseError;
 /// message-protocol ones upstream, so co-locating their
 /// parser here keeps them in lockstep.
 pub struct Tok<'a> {
-    /// What's left after the last token. Kept around so `rest()` can
-    /// return the unconsumed tail (`ANS_KEY` needs this — it has a
-    /// variable-length suffix the C parses with a second `sscanf`).
+    /// Unconsumed tail; `s_opt` peeks it for optional trailing fields.
     rest: &'a str,
 }
 

@@ -19,38 +19,30 @@
 use crate::common::{SeedRng, handshake_pair, keypair, wire};
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsError};
 
-/// Fresh stream-mode responder, pre-handshake. The attacker model for
-/// "anyone who got past `id_h`": they have a real Ed25519 key on file
-/// but haven't proven possession. Everything they send hits
-/// `receive_stream` in the plaintext phase.
-fn fresh_stream() -> Sptps {
+/// Fresh responder, pre-handshake. The attacker model for "anyone who
+/// got past `id_h`": they have a real Ed25519 key on file but haven't
+/// proven possession. Everything they send hits the plaintext phase.
+fn fresh(framing: Framing, replaywin: usize) -> Sptps {
     let (akey, _apub) = keypair(1);
     let (_bkey, bpub) = keypair(2);
     let (s, _init) = Sptps::start(
         Role::Responder,
-        Framing::Stream,
+        framing,
         akey,
         bpub,
         b"adv".to_vec(),
-        0,
+        replaywin,
         &mut SeedRng(1),
     );
     s
 }
 
+fn fresh_stream() -> Sptps {
+    fresh(Framing::Stream, 0)
+}
+
 fn fresh_datagram() -> Sptps {
-    let (akey, _apub) = keypair(1);
-    let (_bkey, bpub) = keypair(2);
-    let (s, _init) = Sptps::start(
-        Role::Responder,
-        Framing::Datagram,
-        akey,
-        bpub,
-        b"adv".to_vec(),
-        16,
-        &mut SeedRng(1),
-    );
-    s
+    fresh(Framing::Datagram, 16)
 }
 
 /// Feed `bytes` to a stream session, looping until it errors or

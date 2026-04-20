@@ -35,6 +35,9 @@
 //! a raw stream. The underlying `chacha20::ChaCha20Legacy` *is* the right
 //! primitive though. Build a tiny `RngCore` over it.
 
+mod common;
+
+use common::NoRng;
 use rand_core::RngCore;
 use tinc_crypto::sign::SigningKey;
 use tinc_ffi::{CKey, CSptps, Event, seed_rng, serial_guard};
@@ -150,24 +153,6 @@ fn wire(mut outs: Vec<Output>) -> Vec<u8> {
     match outs.remove(0) {
         Output::Wire { bytes, .. } => bytes,
         o => panic!("expected Wire, got {o:?}"),
-    }
-}
-
-/// Dummy RNG for `receive` calls that won't trigger `send_kex`. If this
-/// gets touched, something in the state machine routed unexpectedly.
-struct NoRng;
-impl RngCore for NoRng {
-    fn next_u32(&mut self) -> u32 {
-        panic!("RNG touched outside send_kex")
-    }
-    fn next_u64(&mut self) -> u64 {
-        panic!("RNG touched outside send_kex")
-    }
-    fn fill_bytes(&mut self, _: &mut [u8]) {
-        panic!("RNG touched outside send_kex")
-    }
-    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
-        panic!("RNG touched outside send_kex")
     }
 }
 

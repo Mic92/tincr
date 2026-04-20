@@ -66,14 +66,7 @@ use crate::cmd::{CmdError, io_err};
 use crate::keypair;
 use crate::names::Paths;
 
-use tinc_conf::pem::write_pem;
 use tinc_crypto::b64;
-
-/// Same constant as `init.rs`. Not factored into `mod.rs` because it's
-/// the *PEM type string*, not a `cmd/` concept — if it lives anywhere
-/// shared it's `keypair.rs`, but that already has it as `TY_PRIVATE`
-/// and re-exporting two-word constants is more noise than help.
-const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
 /// `cmd_generate_ed25519_keys`. We require the name; see module doc.
 ///
@@ -105,12 +98,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
 
     // ─── Append private (PEM). 0600 is create-mode only; rotation
     // keeps whatever `disable_old_keys` preserved.
-    {
-        let f = open_append(&priv_path, 0o600)?;
-        let mut w = BufWriter::new(f);
-        write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).map_err(io_err(&priv_path))?;
-        w.flush().map_err(io_err(&priv_path))?;
-    }
+    super::write_private_key(&priv_path, &sk, super::OpenKind::Append)?;
 
     // ─── Append public (config line, LSB-first b64)
     {
@@ -463,27 +451,21 @@ mod tests {
         let sk1 = keypair::generate();
         {
             disable_old_keys(&path).unwrap(); // no-op (file doesn't exist)
-            let f = open_append(&path, 0o600).unwrap();
-            let mut w = BufWriter::new(f);
-            write_pem(&mut w, TY_PRIVATE, &sk1.to_blob()).unwrap();
-            w.flush().unwrap();
+            crate::cmd::write_private_key(&path, &sk1, crate::cmd::OpenKind::Append).unwrap();
         }
         // File has one PEM block.
-        let blob1 = read_pem(fs::File::open(&path).unwrap(), TY_PRIVATE, 96).unwrap();
+        let blob1 = read_pem(fs::File::open(&path).unwrap(), keypair::TY_PRIVATE, 96).unwrap();
         assert_eq!(&blob1[..], &sk1.to_blob()[..]);
 
         // Round 2: rotate.
         let sk2 = keypair::generate();
         {
             assert!(disable_old_keys(&path).unwrap()); // sk1's block disabled
-            let f = open_append(&path, 0o600).unwrap();
-            let mut w = BufWriter::new(f);
-            write_pem(&mut w, TY_PRIVATE, &sk2.to_blob()).unwrap();
-            w.flush().unwrap();
+            crate::cmd::write_private_key(&path, &sk2, crate::cmd::OpenKind::Append).unwrap();
         }
 
         // File now has #-block then live block. read_pem gets the live one.
-        let blob2 = read_pem(fs::File::open(&path).unwrap(), TY_PRIVATE, 96).unwrap();
+        let blob2 = read_pem(fs::File::open(&path).unwrap(), keypair::TY_PRIVATE, 96).unwrap();
         assert_eq!(&blob2[..], &sk2.to_blob()[..]);
         // And it's NOT sk1. (Non-astronomical chance of collision.)
         assert_ne!(&blob2[..], &blob1[..]);
