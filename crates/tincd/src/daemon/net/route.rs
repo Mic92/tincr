@@ -296,8 +296,7 @@ impl Daemon {
         for nid in target_nids {
             let len = data.len();
             let tunnel = self.dp.tunnels.entry(nid).or_default();
-            tunnel.out_packets += 1;
-            tunnel.out_bytes += len as u64;
+            tunnel.stats.add_out(1, len as u64);
             nw |= self.send_sptps_packet(nid, data);
             nw |= self.try_tx(nid, true);
         }
@@ -510,8 +509,7 @@ impl Daemon {
                     {
                         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
                         for frag in &frags {
-                            tunnel.out_packets += 1;
-                            tunnel.out_bytes += frag.len() as u64;
+                            tunnel.stats.add_out(1, frag.len() as u64);
                         }
                     }
                     let mut nw = false;
@@ -564,8 +562,7 @@ impl Daemon {
                     "Sending packet of {len} bytes to {to}");
         // Counts attempts, not deliveries.
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
-        tunnel.out_packets += 1;
-        tunnel.out_bytes += len as u64;
+        tunnel.stats.add_out(1, len as u64);
 
         // try_tx: every forwarded packet drives PMTU
         // discovery one step.

@@ -662,8 +662,7 @@ impl Daemon {
                         };
                         let len = bytes.len() as u64;
                         let tunnel = self.dp.tunnels.entry(from_nid).or_default();
-                        tunnel.in_packets += 1;
-                        tunnel.in_bytes += len;
+                        tunnel.stats.add_in(1, len);
                         needs_write |= self.route_packet(&mut bytes, Some(from_nid));
                         continue;
                     }

@@ -13,11 +13,53 @@
 #![forbid(unsafe_code)]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use tinc_sptps::Sptps;
 
 use crate::pmtu::PmtuState;
+
+/// `n->{in,out}_{packets,bytes}`. Atomic so the shard RX fast-path can
+/// bump through `&TunnelHandles` without `&mut Daemon`. `Relaxed`
+/// everywhere: monotone counters, read only by `dump nodes`/`info`.
+#[derive(Default, Debug)]
+pub struct TrafficStats {
+    in_packets: AtomicU64,
+    in_bytes: AtomicU64,
+    out_packets: AtomicU64,
+    out_bytes: AtomicU64,
+}
+
+impl TrafficStats {
+    #[inline]
+    pub fn add_in(&self, packets: u64, bytes: u64) {
+        self.in_packets.fetch_add(packets, Ordering::Relaxed);
+        self.in_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn add_out(&self, packets: u64, bytes: u64) {
+        self.out_packets.fetch_add(packets, Ordering::Relaxed);
+        self.out_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn in_packets(&self) -> u64 {
+        self.in_packets.load(Ordering::Relaxed)
+    }
+    #[inline]
+    pub fn in_bytes(&self) -> u64 {
+        self.in_bytes.load(Ordering::Relaxed)
+    }
+    #[inline]
+    pub fn out_packets(&self) -> u64 {
+        self.out_packets.load(Ordering::Relaxed)
+    }
+    #[inline]
+    pub fn out_bytes(&self) -> u64 {
+        self.out_bytes.load(Ordering::Relaxed)
+    }
+}
 
 /// `net.h:36` `#define MTU 1518` (1500 + 14 eth + 4 VLAN).
 pub const MTU: u16 = 1518;
@@ -114,10 +156,9 @@ pub struct TunnelState {
     pub incompression: u8,
 
     /// `n->{in,out}_{packets,bytes}` (`node.h:113-116`). `dump_nodes` cols.
-    pub in_packets: u64,
-    pub in_bytes: u64,
-    pub out_packets: u64,
-    pub out_bytes: u64,
+    /// `Arc` so the shard fast-path (which only sees `&TxSnapshot`, no
+    /// `&mut Daemon`) can bump the same counters via [`TunnelHandles`].
+    pub stats: Arc<TrafficStats>,
 
     /// Rust-only. Lifetime bytes we ORIGINATED toward this node that
     /// left via a relay (TCP `SPTPS_PACKET` through `nexthop`, or UDP
@@ -339,10 +380,12 @@ mod tests {
             udp_rx_maxlen: 999,
             outcompression: 6,
             incompression: 12,
-            in_packets: 100,
-            in_bytes: 50000,
-            out_packets: 80,
-            out_bytes: 40000,
+            stats: {
+                let s = TrafficStats::default();
+                s.add_in(100, 50000);
+                s.add_out(80, 40000);
+                Arc::new(s)
+            },
             relay_tx_bytes: 12345,
             relay_tx_bytes_prev: 0,
             out_bytes_prev: 0,
@@ -366,10 +409,10 @@ mod tests {
         assert!(t.udp_addr.is_none()); // `:296`
         assert_eq!(t.status, TunnelStatus::default()); // `:297`
         // Traffic counters NOT reset (lifetime totals).
-        assert_eq!(t.in_packets, 100);
-        assert_eq!(t.in_bytes, 50000);
-        assert_eq!(t.out_packets, 80);
-        assert_eq!(t.out_bytes, 40000);
+        assert_eq!(t.stats.in_packets(), 100);
+        assert_eq!(t.stats.in_bytes(), 50000);
+        assert_eq!(t.stats.out_packets(), 80);
+        assert_eq!(t.stats.out_bytes(), 40000);
         // relay_tx_bytes is lifetime too — the EWMA delta in
         // decide_autoconnect would go negative (saturate to 0) if
         // this reset, masking real relay traffic across a flap.

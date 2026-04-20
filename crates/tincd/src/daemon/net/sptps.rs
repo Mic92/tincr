@@ -180,6 +180,7 @@ impl Daemon {
                             validkey: std::sync::atomic::AtomicBool::new(true),
                             minmtu: std::sync::atomic::AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
+                            stats: std::sync::Arc::clone(&tunnel.stats),
                         });
                         // Mirror first so on_probe_reply's minmtu
                         // store finds it.
@@ -317,9 +318,12 @@ impl Daemon {
         }
 
         let len = frame.len() as u64;
-        let tunnel = self.dp.tunnels.entry(peer).or_default();
-        tunnel.in_packets += 1;
-        tunnel.in_bytes += len;
+        self.dp
+            .tunnels
+            .entry(peer)
+            .or_default()
+            .stats
+            .add_in(1, len);
 
         self.route_packet(&mut frame, Some(peer))
     }
@@ -495,9 +499,12 @@ impl Daemon {
         }
 
         let len = frame.len() as u64;
-        let tunnel = self.dp.tunnels.entry(peer).or_default();
-        tunnel.in_packets += 1;
-        tunnel.in_bytes += len;
+        self.dp
+            .tunnels
+            .entry(peer)
+            .or_default()
+            .stats
+            .add_in(1, len);
 
         let nw = self.route_packet(frame, Some(peer));
         self.dp.rx_scratch = scratch;

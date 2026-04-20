@@ -338,6 +338,7 @@ impl Daemon {
                 && let Ok(len) =
                     crate::shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
             {
+                target.handles.stats.add_in(1, len as u64);
                 // Consumed. Replay window IS advanced — the slow
                 // path won't see this packet. GRO offer/TUN write
                 // inline (no &mut self via send_packet_myself; we

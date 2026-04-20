@@ -15,15 +15,12 @@
 //!
 //! ## Side effects the slow path does that we PUNT
 //!
-//! - `tunnel.in_packets`/`in_bytes` (sptps.rs:483) — `dump nodes`
-//!   stats. Fast-path packets show as 0. The wire is correct;
-//!   the operator just doesn't see RX traffic in stats. Atomic
-//!   mirror later if anyone notices.
 //! - `pmtu.maxrecentlen` (sptps.rs:476) — biggest packet seen.
 //!   `PKT_PROBE` goes slow-path and updates it; the heuristic only
 //!   accelerates PMTU convergence, doesn't gate it. Probes still
 //!   converge via the slow path.
-//! - `myself.out_packets`/`out_bytes` (device.rs:417) — same.
+//! - `myself.out_packets`/`out_bytes` on TUN-write — own-node stats
+//!   aren't in `TunnelHandles`; the per-peer RX bump is.
 //! - `udp_addr` cache populate (rx.rs:325) — gate at probe-time:
 //!   `handles.udp_addr.is_some()`. The FIRST valid packet from a
 //!   peer goes slow-path, slow-path caches, every subsequent packet
@@ -544,6 +541,7 @@ mod tests {
             validkey: AtomicBool::new(true),
             minmtu: AtomicU16::new(1400),
             outcompression: 0,
+            stats: Arc::default(),
         });
         let mut tunnels = IntHashMap::default();
         tunnels.insert(bob, handles);

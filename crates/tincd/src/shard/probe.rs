@@ -239,6 +239,7 @@ mod tests {
             validkey: AtomicBool::new(true),
             minmtu: AtomicU16::new(1400),
             outcompression: 0,
+            stats: Arc::default(),
         });
         let mut tunnels = IntHashMap::default();
         tunnels.insert(bob, handles);

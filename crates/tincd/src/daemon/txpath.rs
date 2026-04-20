@@ -701,12 +701,13 @@ impl Daemon {
         for t in self.dp.tunnels.values_mut() {
             if let Some(dt) = dt {
                 let rd = (t.relay_tx_bytes.saturating_sub(t.relay_tx_bytes_prev)) as f64 / dt;
-                let td = (t.out_bytes.saturating_sub(t.out_bytes_prev)) as f64 / dt;
+                let out_bytes = t.stats.out_bytes();
+                let td = (out_bytes.saturating_sub(t.out_bytes_prev)) as f64 / dt;
                 t.relay_rate_bps = (0.3 * rd + 0.7 * t.relay_rate_bps as f64) as u64;
                 t.tx_rate_bps = (0.3 * td + 0.7 * t.tx_rate_bps as f64) as u64;
             }
             t.relay_tx_bytes_prev = t.relay_tx_bytes;
-            t.out_bytes_prev = t.out_bytes;
+            t.out_bytes_prev = t.stats.out_bytes();
         }
         self.last_autoconnect_tick = Some(now);
 

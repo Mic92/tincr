@@ -119,6 +119,11 @@ pub struct TunnelHandles {
     /// once before the `Arc` is published, happens-before via
     /// `Arc::new`/send.
     pub outcompression: u8,
+
+    /// `TunnelState::stats` clone. RX fast-path bumps `in_*` after a
+    /// successful `rx_open`; without this the operator sees a frozen
+    /// RX counter once the fast path takes over.
+    pub stats: Arc<crate::tunnel::TrafficStats>,
 }
 
 // ────────────────────────────────────────────────────────────────────

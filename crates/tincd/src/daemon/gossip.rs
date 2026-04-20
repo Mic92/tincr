@@ -1131,10 +1131,10 @@ impl Daemon {
                     .and_then(|t| t.pmtu.as_ref())
                     .and_then(|p| p.udp_ping_rtt)
                     .map_or(-1_i32, u32::cast_signed), // %d
-                tunnel.map_or(0, |t| t.in_packets),                 // %PRIu64
-                tunnel.map_or(0, |t| t.in_bytes),
-                tunnel.map_or(0, |t| t.out_packets),
-                tunnel.map_or(0, |t| t.out_bytes),
+                tunnel.map_or(0, |t| t.stats.in_packets()),         // %PRIu64
+                tunnel.map_or(0, |t| t.stats.in_bytes()),
+                tunnel.map_or(0, |t| t.stats.out_packets()),
+                tunnel.map_or(0, |t| t.stats.out_bytes()),
             ));
         }
         rows
@@ -1188,10 +1188,10 @@ impl Daemon {
                 Request::Control,
                 crate::proto::REQ_DUMP_TRAFFIC,
                 node.name.as_str(),
-                t.map_or(0, |t| t.in_packets),
-                t.map_or(0, |t| t.in_bytes),
-                t.map_or(0, |t| t.out_packets),
-                t.map_or(0, |t| t.out_bytes),
+                t.map_or(0, |t| t.stats.in_packets()),
+                t.map_or(0, |t| t.stats.in_bytes()),
+                t.map_or(0, |t| t.stats.out_packets()),
+                t.map_or(0, |t| t.stats.out_bytes()),
             ));
         }
         rows

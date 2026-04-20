@@ -110,8 +110,7 @@ impl Daemon {
                     for i in 0..count {
                         let n = arena.lens()[i];
                         let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
-                        myself_tunnel.in_packets += 1;
-                        myself_tunnel.in_bytes += n as u64;
+                        myself_tunnel.stats.add_in(1, n as u64);
 
                         // `slot_mut` because route_packet mutates
                         // (overwrite_mac, fragment in-place). The send
@@ -193,8 +192,7 @@ impl Daemon {
                             // syscalls, not stat increments). Bytes = the
                             // raw IP payload we got from the kernel.
                             let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
-                            myself_tunnel.in_packets += 1;
-                            myself_tunnel.in_bytes += len as u64;
+                            myself_tunnel.stats.add_in(1, len as u64);
 
                             // The win: `route_packet` runs once per super.
                             // The first call does the trie lookup; the
@@ -373,9 +371,12 @@ impl Daemon {
             data[11] ^= 0xFF;
         }
         let len = data.len() as u64;
-        let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
-        myself_tunnel.out_packets += 1;
-        myself_tunnel.out_bytes += len;
+        self.dp
+            .tunnels
+            .entry(self.myself)
+            .or_default()
+            .stats
+            .add_out(1, len);
 
         // ─── GRO write ─────────────────────────────────────────────
         // Armed only inside `recvmmsg_batch`'s dispatch loop. The
@@ -507,9 +508,7 @@ impl Daemon {
             Ok(ok) => {
                 // Out-stats. Slow path bumps these per-chunk in
                 // route_packet → send_sptps_packet; we sum once.
-                let t = self.dp.tunnels.entry(target.to_nid).or_default();
-                t.out_packets += ok.packets;
-                t.out_bytes += ok.bytes;
+                target.handles.stats.add_out(ok.packets, ok.bytes);
             }
             Err((relay, origlen)) => {
                 // Same dispatch as ship_tx_batch: PMTU shrank under
