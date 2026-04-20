@@ -32,6 +32,10 @@ pub enum Job {
         env: ScriptEnv,
         interpreter: Option<String>,
     },
+    /// Atomic write-then-rename. Reuses this thread for addrcache
+    /// flushes so their `create_dir_all + write + fsync + rename`
+    /// tail latency stays off the event loop.
+    WriteFile { path: PathBuf, bytes: Vec<u8> },
 }
 
 /// FIFO worker. The thread is spawned lazily on first `submit` so it
@@ -104,6 +108,12 @@ fn run(rx: &Receiver<Job>) {
                     &name,
                     script::execute(&confbase, &name, &env, interpreter.as_deref()),
                 );
+            }
+            Job::WriteFile { path, bytes } => {
+                if let Err(e) = crate::addrcache::write_atomic(&path, &bytes) {
+                    log::debug!(target: "tincd::conn",
+                        "address cache save failed: {e}");
+                }
             }
         }
     }
