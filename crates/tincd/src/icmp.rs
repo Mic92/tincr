@@ -48,6 +48,7 @@ fn eth_reply_hdr(original: &[u8]) -> [u8; ETHER_SIZE] {
     eth[12..14].copy_from_slice(&original[12..14]);
     eth
 }
+
 /// `struct icmp` is 28 bytes (8 hdr + 20 quoted-IP tail in the
 /// union); we use only the first 8.
 const ICMP_SIZE: usize = 8;
