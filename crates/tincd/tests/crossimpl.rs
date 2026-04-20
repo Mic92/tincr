@@ -79,6 +79,7 @@
 //!
 //! `c_dials_rust` is the inverse: tests our LISTENER paths.
 
+// Needs bwrap/netns; C tincd lacks DeviceType=fd so can't use socketpairs.
 #![cfg(target_os = "linux")]
 
 use std::fmt::Write as _;

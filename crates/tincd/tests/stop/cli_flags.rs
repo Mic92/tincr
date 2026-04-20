@@ -580,20 +580,11 @@ fn process_priority_low_succeeds() {
 
     assert!(wait_for_file(&socket));
 
-    // Read /proc/PID/stat field 19 (nice). Linux-only; skip elsewhere.
-    #[cfg(target_os = "linux")]
     {
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
-        // Field 19, 0-indexed after the `)`-delimited comm field.
-        // /proc/stat format: pid (comm) state ppid ... nice ...
-        // Safer parse: rsplit on ')' to skip comm (can contain spaces).
-        let after_comm = stat.rsplit_once(')').unwrap().1;
-        let fields: Vec<&str> = after_comm.split_whitespace().collect();
-        // After `)`: state=0, ppid=1, ..., nice=16 (field 19 overall, 16 after comm).
-        let nice: i32 = fields[16].parse().unwrap();
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, child.id()) };
         assert_eq!(
             nice, 10,
-            "ProcessPriority=low → nice 10; /proc/stat said {nice}"
+            "ProcessPriority=low → nice 10; getpriority said {nice}"
         );
     }
 

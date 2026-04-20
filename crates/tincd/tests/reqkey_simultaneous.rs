@@ -56,6 +56,7 @@
 //! cargo test -p tincd --test reqkey_simultaneous -- --ignored --nocapture
 //! ```
 
+// Needs bwrap/netns + tc netem to reliably reproduce the REQ_KEY race.
 #![cfg(target_os = "linux")]
 
 use std::fmt::Write as _;

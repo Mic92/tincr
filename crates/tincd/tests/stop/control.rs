@@ -403,10 +403,8 @@ fn tinc_up_runs_with_confbase_cwd() {
 }
 
 /// fd-leak guard: open+close N control connections, assert
-/// `/proc/PID/fd` count returns to baseline. Covers `terminate()`'s
+/// fd count returns to baseline. Covers `terminate()`'s
 /// `conns`/`conn_io`/`ev.del` coherence and `OwnedFd` drop.
-///
-#[cfg(target_os = "linux")]
 #[test]
 fn control_conn_churn_no_fd_leak() {
     let tmp = tmp("fd-churn");
@@ -421,8 +419,7 @@ fn control_conn_churn_no_fd_leak() {
 
     let pid_str = std::fs::read_to_string(&pidfile).unwrap();
     let daemon_pid: u32 = pid_str.split_whitespace().next().unwrap().parse().unwrap();
-    let fd_dir = format!("/proc/{daemon_pid}/fd");
-    let count_fds = || std::fs::read_dir(&fd_dir).unwrap().count();
+    let count_fds = move || -> usize { count_open_fds(daemon_pid) };
     let baseline = count_fds();
 
     let cookie = read_cookie(&pidfile);
