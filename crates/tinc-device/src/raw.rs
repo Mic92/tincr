@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// EOF: SEQPACKET returns 0 on peer close, triggering the
-    /// `n == 0` → UnexpectedEof path.
+    /// `n == 0` → `UnexpectedEof` path.
     #[test]
     fn read_eof_via_seqpacket() {
         let (peer, sock) = seqpacket_pair();
