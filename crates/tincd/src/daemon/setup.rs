@@ -250,15 +250,30 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             Box::new(tun)
         }
         #[cfg(target_os = "macos")]
-        Some("tun") => {
-            // Parse optional "Interface = utunN" → unit number N.
-            // Unset → None → kernel picks the next available utun.
+        Some("tun" | "utun") => {
+            // C tinc's `DeviceType=utun` reads the unit number from
+            // `Device` (e.g. `Device=utun10` or `/dev/utun10`); on
+            // macOS `Interface` is the user-visible name and may be
+            // unrelated (e.g. `tinc.retiolum`). Accept either field
+            // for the unit, preferring `Device` to match C behaviour.
+            // Unset/unparseable → None → kernel picks the next free
+            // utun.
+            let parse_utun = |s: &str| {
+                s.rsplit_once("utun")
+                    .and_then(|(_, n)| n.parse::<u32>().ok())
+            };
             let unit = config
-                .lookup("Interface")
+                .lookup("Device")
                 .next()
                 .map(tinc_conf::Entry::get_str)
-                .and_then(|s| s.strip_prefix("utun"))
-                .and_then(|n| n.parse::<u32>().ok());
+                .and_then(parse_utun)
+                .or_else(|| {
+                    config
+                        .lookup("Interface")
+                        .next()
+                        .map(tinc_conf::Entry::get_str)
+                        .and_then(parse_utun)
+                });
             let tun = tinc_device::BsdTun::open_utun(unit)
                 .map_err(|e| SetupError::io("open utun device", e))?;
             Box::new(tun)
