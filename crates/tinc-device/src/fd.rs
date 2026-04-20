@@ -119,7 +119,11 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
     // `MSG_CTRUNC` = control data truncated (sender shipped >1 fd
     // and our cmsgbuf was sized for one). `MSG_OOB`/`MSG_ERRQUEUE`
     // can't happen on a Unix socket; checked to match C, zero cost.
+    // `MSG_ERRQUEUE` is Linux-only.
+    #[cfg(target_os = "linux")]
     let bad = MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB | MsgFlags::MSG_ERRQUEUE;
+    #[cfg(not(target_os = "linux"))]
+    let bad = MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB;
     if msg.flags.intersects(bad) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -172,17 +176,25 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
 }
 
 /// The `@` → abstract-namespace dispatch. Split out for testability.
+/// Abstract namespace is Linux-only; on other unices `@` is rejected.
 fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     let bytes = path.as_os_str().as_encoded_bytes();
     if matches!(bytes.first(), Some(b'@')) {
-        // Abstract namespace: std adds the leading NUL, so strip `@`.
-        use std::os::linux::net::SocketAddrExt;
-        use std::os::unix::net::SocketAddr;
-        let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
-        UnixStream::connect_addr(&addr)
-    } else {
-        UnixStream::connect(path)
+        #[cfg(target_os = "linux")]
+        {
+            // Abstract namespace: std adds the leading NUL, so strip `@`.
+            use std::os::linux::net::SocketAddrExt;
+            use std::os::unix::net::SocketAddr;
+            let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
+            return UnixStream::connect_addr(&addr);
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "abstract Unix sockets ('@' prefix) are Linux-only",
+        ));
     }
+    UnixStream::connect(path)
 }
 
 // Device impl — the +14 read/write

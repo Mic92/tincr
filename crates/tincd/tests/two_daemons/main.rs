@@ -30,19 +30,13 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-#[cfg(target_os = "linux")]
 mod fd_tunnel;
 mod node;
 
 mod basic;
-// data_path / three_node use DeviceType=fd (Linux-only) via
-// SOCK_SEQPACKET socketpair (not supported on macOS AF_UNIX).
-#[cfg(target_os = "linux")]
 mod data_path;
 mod proxy;
 mod purge;
 mod reload;
-#[cfg(target_os = "linux")]
 mod script_latency;
-#[cfg(target_os = "linux")]
 mod three_node;

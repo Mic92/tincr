@@ -283,12 +283,11 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::Tun;
 
-// fd — `fd_device.c` (Android backend). Linux-only: abstract
-// socket namespace and `MSG_ERRQUEUE` are Linux-specific.
+// fd — `fd_device.c` (Android backend).
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod fd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub use fd::{FdSource, FdTun};
 
 // raw — `raw_socket_device.c` (PF_PACKET backend). Linux-only.

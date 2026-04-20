@@ -57,8 +57,8 @@ fn three_daemon_relay() {
     let mid = Node::new(tmp.path(), "mid", 0xC3);
     let bob = Node::new(tmp.path(), "bob", 0xB3);
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     // mid is the hub: no device (dummy), no subnet, no ConnectTo.
     // Both alice and bob ConnectTo mid. mid knows everyone's pubkey.
@@ -315,7 +315,7 @@ fn three_daemon_tunnelserver() {
     let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
     let bob = Node::new(tmp.path(), "bob", 0xB4);
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
     // spokes' pubkeys (for the meta-SPTPS auth).
@@ -590,7 +590,7 @@ fn three_daemon_strictsubnets() {
     let mid = Node::new(tmp.path(), "mid", 0xC5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both.
     mid.write_config_multi(&[&alice, &bob], &[], None, None);
@@ -713,7 +713,7 @@ fn three_daemon_strictsubnets() {
     std::fs::write(&bob_hosts, bob_cfg).unwrap();
 
     // Fresh socketpair for the new alice.
-    let (alice_tun2, alice_far2) = sockpair_seqpacket();
+    let (alice_tun2, alice_far2) = sockpair_datagram();
     // Re-write tinc.conf with the new fd (DeviceType=fd / Device=N).
     // hosts/ files persist (we just appended to hosts/bob above).
     alice.write_config_multi(
@@ -960,8 +960,8 @@ fn three_daemon_forwarding_off_drops_transit() {
     let mid = Node::new(tmp.path(), "mid", 0xCF).with_conf("Forwarding = off\n");
     let bob = Node::new(tmp.path(), "bob", 0xBF);
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     // mid: hub. dummy device, no subnet, no ConnectTo.
     mid.write_config_multi(&[&alice, &bob], &[], None, None);

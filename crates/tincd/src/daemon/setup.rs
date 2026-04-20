@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::AsFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -176,7 +176,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             Box::new(tinc_device::Dummy)
         }
         Some("dummy") => Box::new(tinc_device::Dummy),
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         Some("fd") => {
             // The fd comes from `Device = N` (inherited fd) or
             // `--device-fd N`. The integration test creates a

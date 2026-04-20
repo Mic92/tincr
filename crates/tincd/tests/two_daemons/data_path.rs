@@ -56,9 +56,8 @@ fn first_packet_across_tunnel() {
     // ─── socketpairs: one per daemon ────────────────────────────
     // [0] = test end (we read/write IP packets), [1] = daemon end
     // (FdTun wraps it). SOCK_SEQPACKET for datagram boundaries.
-    // sockpair_seqpacket sets O_NONBLOCK on both ends.
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     // ─── configs: subnets pin route() decisions ────────────────
     // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
@@ -299,8 +298,8 @@ fn compression_roundtrip() {
     let alice = Node::new(tmp.path(), "alice", 0xAC).with_conf("Compression = 6\n");
     let bob = Node::new(tmp.path(), "bob", 0xBC).with_conf("Compression = 12\n");
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     bob.write_config_with(
         &alice,
@@ -446,7 +445,7 @@ fn ipv6_unreachable_builds_icmpv6() {
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
 
     // alice has NO IPv6 subnet — any IPv6 dst routes Unreachable.
     // bob is just here so alice has a peer (config requires it).
@@ -559,8 +558,8 @@ fn keyexpire_forces_rekey() {
     let alice = Node::new(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
     let bob = Node::new(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     bob.write_config_with(
         &alice,

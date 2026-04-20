@@ -153,7 +153,6 @@ impl Node {
     /// Borrows `fd`: the child inherits it by number across
     /// `fork+exec`; the caller still owns the parent's copy and
     /// should `drop()` it once the child has spawned.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn spawn_with_fd(&self, fd: &OwnedFd) -> Child {
         // Clear CLOEXEC so the fd survives `exec()`. Rust's `Command::
         // spawn` doesn't close inherited fds (only stdin/out/err are

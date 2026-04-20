@@ -2,26 +2,32 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 
-/// `socketpair(AF_UNIX, SOCK_SEQPACKET)`. SEQPACKET = datagram
-/// boundaries (one read = one packet) on a connection-oriented unix
-/// socket. Exactly the semantics a real TUN fd has.
-///
-/// Returns `(test_end, daemon_end)` as `OwnedFd`s with `O_NONBLOCK`
-/// already set on both (every caller needs that: the daemon end
-/// because `on_device_read` loops to `EAGAIN`, the test end because
-/// `read_fd_nb` polls). Dropping an end closes it.
-pub(crate) fn sockpair_seqpacket() -> (OwnedFd, OwnedFd) {
-    socketpair(
-        AddressFamily::Unix,
-        SockType::SeqPacket,
-        None,
-        SockFlag::SOCK_NONBLOCK,
-    )
-    .expect("socketpair")
+/// `socketpair` with datagram semantics (one write = one read),
+/// faking a TUN fd. SEQPACKET on Linux, DGRAM on macOS (no
+/// SEQPACKET for AF_UNIX). Both ends set `O_NONBLOCK`.
+pub(crate) fn sockpair_datagram() -> (OwnedFd, OwnedFd) {
+    #[cfg(target_os = "linux")]
+    let sock_type = SockType::SeqPacket;
+    #[cfg(not(target_os = "linux"))]
+    let sock_type = SockType::Datagram;
+
+    let (a, b) =
+        socketpair(AddressFamily::Unix, sock_type, None, SockFlag::empty()).expect("socketpair");
+    for fd in [&a, &b] {
+        let flags = nix::fcntl::OFlag::from_bits_retain(
+            nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL).expect("fcntl F_GETFL"),
+        );
+        nix::fcntl::fcntl(
+            fd,
+            nix::fcntl::FcntlArg::F_SETFL(flags | nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("fcntl F_SETFL O_NONBLOCK");
+    }
+    (a, b)
 }
 
 pub(crate) fn write_fd(fd: &OwnedFd, buf: &[u8]) {
-    // SEQPACKET is one-shot (no short writes for in-flight datagrams).
+    // Datagram sockets are one-shot (no short writes for in-flight datagrams).
     let wrote =
         nix::unistd::write(fd, buf).unwrap_or_else(|e| panic!("write fd={}: {e}", fd.as_raw_fd()));
     assert_eq!(wrote, buf.len(), "short write fd={}", fd.as_raw_fd());

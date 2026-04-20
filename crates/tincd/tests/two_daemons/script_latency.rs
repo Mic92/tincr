@@ -32,8 +32,8 @@ fn slow_host_up_does_not_stall_forwarding() {
     let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("PingTimeout = 10\n");
     let bob = Node::new(tmp.path(), "bob", 0xB9).with_conf("PingTimeout = 10\n");
 
-    let (alice_tun, alice_far) = sockpair_seqpacket();
-    let (bob_tun, bob_far) = sockpair_seqpacket();
+    let (alice_tun, alice_far) = sockpair_datagram();
+    let (bob_tun, bob_far) = sockpair_datagram();
 
     bob.write_config_with(
         &alice,
