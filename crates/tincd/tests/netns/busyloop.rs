@@ -113,9 +113,7 @@ fn outgoing_timeout_no_busy_loop() {
 
     // ─── config: ConnectTo = blackhole, PingTimeout = 2 ─────────
     let tmp = tmp("busyloop");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
@@ -133,13 +131,7 @@ fn outgoing_timeout_no_busy_loop() {
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
     // ─── spawn ──────────────────────────────────────────────────
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()

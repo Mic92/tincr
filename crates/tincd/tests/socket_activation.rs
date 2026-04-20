@@ -81,9 +81,7 @@ fn socket_activation_adopts_tcp_fd() {
     };
 
     let tmp = TmpGuard::new("sa", "adopt");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     // Port-TOCTOU: bind ephemeral, read it back, drop. The window
@@ -172,9 +170,7 @@ fn socket_activation_suppresses_detach() {
     };
 
     let tmp = TmpGuard::new("sa", "nodetach");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
     let port = alloc_port();

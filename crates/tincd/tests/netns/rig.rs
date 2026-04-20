@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::common::linux::run_ip;
-use super::common::{Ctl, alloc_port, pubkey_from_seed, tincd_cmd, write_ed25519_privkey};
+use super::common::{Ctl, alloc_port, pubkey_from_seed, tincd_at, write_ed25519_privkey};
 
 // ═════════════════════════ the bwrap re-exec wrapper ══════════════════════
 
@@ -489,13 +489,7 @@ impl Node {
     /// blocks on `write(2, ...)`. Same issue throughput.rs hit
     /// (see `ChildWithLog`); here we just turn the volume down.
     pub(crate) fn spawn_with_log(&self, rust_log: &str) -> Child {
-        tincd_cmd()
-            .arg("-c")
-            .arg(&self.confbase)
-            .arg("--pidfile")
-            .arg(&self.pidfile)
-            .arg("--socket")
-            .arg(&self.socket)
+        tincd_at(&self.confbase, &self.pidfile, &self.socket)
             .env("RUST_LOG", rust_log)
             .stderr(Stdio::piped())
             .spawn()

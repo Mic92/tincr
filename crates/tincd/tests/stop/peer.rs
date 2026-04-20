@@ -785,9 +785,7 @@ fn peer_wrong_key_fails_sig() {
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
     let tmp = tmp("peer-wrong-key");
-    let confbase = tmp.path().join("vpn");
-    let pidfile = tmp.path().join("tinc.pid");
-    let socket = tmp.path().join("tinc.socket");
+    let (confbase, pidfile, socket) = tmp.std_paths();
 
     let daemon_pub = write_config(&confbase);
     // OUR real key (we sign with this).
@@ -802,13 +800,7 @@ fn peer_wrong_key_fails_sig() {
     )
     .unwrap();
 
-    let mut child = tincd_cmd()
-        .arg("-c")
-        .arg(&confbase)
-        .arg("--pidfile")
-        .arg(&pidfile)
-        .arg("--socket")
-        .arg(&socket)
+    let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=info")
         .stderr(Stdio::piped())
         .spawn()
