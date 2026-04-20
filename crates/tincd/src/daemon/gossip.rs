@@ -1575,7 +1575,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
+        let eid = if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
             // Idempotent only if weight+options+ADDRESS all match.
             // The address compare matters: synthesized reverse from
             // on_ack has no edge_addrs entry; when peer's real
@@ -1624,10 +1624,7 @@ impl Daemon {
             self.graph
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
-            let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
-            self.edge_addrs
-                .insert(existing, (edge.addr, edge.port, la, lp));
+            existing
         } else if from_id == self.myself {
             // Contradiction — peer says we have an edge we don't.
             // Counter read by on_periodic_tick.
@@ -1639,14 +1636,14 @@ impl Daemon {
             let nw = self.send_del_edge(from_conn, &edge.from, &edge.to);
             return Ok(nw);
         } else {
-            let eid = self
-                .graph
-                .add_edge(from_id, to_id, edge.weight, edge.options);
-            // local optional (pre-1.0.24); default to "unspec".
-            let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
-            self.edge_addrs.insert(eid, (edge.addr, edge.port, la, lp));
-        }
+            self.graph
+                .add_edge(from_id, to_id, edge.weight, edge.options)
+        };
+        // local optional (pre-1.0.24); default to "unspec".
+        let (la, lp) = edge
+            .local
+            .unwrap_or_else(|| (AddrStr::unspec(), AddrStr::unspec()));
+        self.edge_addrs.insert(eid, (edge.addr, edge.port, la, lp));
 
         let nw = if self.settings.tunnelserver {
             false
