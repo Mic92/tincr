@@ -704,11 +704,7 @@ fn load_peer_host_config(
     ctx: &IdCtx<'_>,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    let host_file = ctx.confbase.join("hosts").join(name);
-    let mut host_config = tinc_conf::Config::default();
-    if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-        host_config.merge(entries);
-    }
+    let host_config = crate::keys::read_host_config(ctx.confbase, name);
     // Parse failure doesn't doom us yet — read_ecdsa_public_key
     // source 3 (raw PEM) gets a chance below.
 
@@ -875,6 +871,22 @@ fn parse_body<T, E>(
 ) -> Result<T, DispatchError> {
     let s = std::str::from_utf8(body).map_err(|_| err("not UTF-8".into()))?;
     parse(s).map_err(|_| err("parse failed".into()))
+}
+
+/// `from_utf8` → parse for the routed-message handlers. Returns the
+/// decoded `&str` too because relay paths forward the original body.
+///
+/// # Errors
+/// `BadKey` with `"non-UTF-8 {what}"` / `"{what} parse failed"`.
+pub(crate) fn parse_key_msg<'a, T, E>(
+    body: &'a [u8],
+    what: &str,
+    parse: impl FnOnce(&'a str) -> Result<T, E>,
+) -> Result<(&'a str, T), DispatchError> {
+    let s = std::str::from_utf8(body)
+        .map_err(|_| DispatchError::BadKey(format!("non-UTF-8 {what}")))?;
+    let m = parse(s).map_err(|_| DispatchError::BadKey(format!("{what} parse failed")))?;
+    Ok((s, m))
 }
 
 /// `add_subnet_h` parse. NB: `add_subnet_h`

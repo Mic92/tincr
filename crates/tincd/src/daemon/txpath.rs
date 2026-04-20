@@ -823,15 +823,11 @@ impl Daemon {
                     && !self.dht_hints.contains_key(&name)
                     && let Some(d) = self.discovery.as_mut()
                 {
-                    let host_file = self.confbase.join("hosts").join(&name);
-                    if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-                        let mut cfg = tinc_conf::Config::default();
-                        cfg.merge(entries);
-                        if let Some(key) =
-                            crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name)
-                        {
-                            d.request_resolve(&name, key);
-                        }
+                    let cfg = crate::keys::read_host_config(&self.confbase, &name);
+                    if let Some(key) =
+                        crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name)
+                    {
+                        d.request_resolve(&name, key);
                     }
                 }
                 let addr_cache =
@@ -1187,10 +1183,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 UDP_INFO".into()))?;
-        let parsed = UdpInfo::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("UDP_INFO parse failed".into()))?;
+        let (_, parsed) = crate::proto::parse_key_msg(body, "UDP_INFO", UdpInfo::parse)?;
 
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
@@ -1249,10 +1242,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 MTU_INFO".into()))?;
-        let parsed = MtuInfo::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("MTU_INFO parse failed".into()))?;
+        let (_, parsed) = crate::proto::parse_key_msg(body, "MTU_INFO", MtuInfo::parse)?;
 
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();

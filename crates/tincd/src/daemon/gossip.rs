@@ -48,12 +48,31 @@ impl Daemon {
     /// need the same "parse host config → read key" pair and both
     /// hard-error on miss because `REQ_PUBKEY` is unsupported.
     fn load_peer_ed25519(&self, name: &str) -> Option<[u8; tinc_crypto::sign::PUBLIC_LEN]> {
-        let host_file = self.confbase.join("hosts").join(name);
-        let mut cfg = tinc_conf::Config::default();
-        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-            cfg.merge(entries);
-        }
+        let cfg = crate::keys::read_host_config(&self.confbase, name);
         crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)
+    }
+
+    /// Resolve a routed message's `from`/`to` names to known `NodeId`s.
+    /// Logs the C-parity "unknown" error and returns `None` so callers
+    /// can `let-else return Ok(false)` without repeating the two blocks.
+    fn resolve_from_to(
+        &self,
+        what: &str,
+        conn_name: &str,
+        from: &str,
+        to: &str,
+    ) -> Option<(NodeId, NodeId)> {
+        let Some(&from_nid) = self.node_ids.get(from) else {
+            log::error!(target: "tincd::proto",
+                        "Got {what} from {conn_name} origin {from} which is unknown");
+            return None;
+        };
+        let Some(&to_nid) = self.node_ids.get(to) else {
+            log::error!(target: "tincd::proto",
+                        "Got {what} from {conn_name} destination {to} which is unknown");
+            return None;
+        };
+        Some((from_nid, to_nid))
     }
 
     /// Start per-tunnel SPTPS as initiator; send KEX via `REQ_KEY`.
@@ -307,24 +326,14 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 REQ_KEY".into()))?;
-        let msg = ReqKey::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("REQ_KEY parse failed".into()))?;
+        let (body_str, msg) = crate::proto::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
         // lookup, NOT lookup_or_add.
-        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
-            log::error!(target: "tincd::proto",
-                        "Got REQ_KEY from {conn_name} origin {} which is unknown",
-                        msg.from);
-            return Ok(false);
-        };
-        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
-            log::error!(target: "tincd::proto",
-                        "Got REQ_KEY from {conn_name} destination {} which is unknown",
-                        msg.to);
+        let Some((from_nid, to_nid)) =
+            self.resolve_from_to("REQ_KEY", &conn_name, &msg.from, &msg.to)
+        else {
             return Ok(false);
         };
 
@@ -540,23 +549,13 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let body_str = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 ANS_KEY".into()))?;
-        let msg = AnsKey::parse(body_str)
-            .map_err(|_| DispatchError::BadKey("ANS_KEY parse failed".into()))?;
+        let (body_str, msg) = crate::proto::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
-        let Some(&from_nid) = self.node_ids.get(&msg.from) else {
-            log::error!(target: "tincd::proto",
-                        "Got ANS_KEY from {conn_name} origin {} which is unknown",
-                        msg.from);
-            return Ok(false);
-        };
-        let Some(&to_nid) = self.node_ids.get(&msg.to) else {
-            log::error!(target: "tincd::proto",
-                        "Got ANS_KEY from {conn_name} destination {} which is unknown",
-                        msg.to);
+        let Some((from_nid, to_nid)) =
+            self.resolve_from_to("ANS_KEY", &conn_name, &msg.from, &msg.to)
+        else {
             return Ok(false);
         };
 
@@ -735,10 +734,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let s = std::str::from_utf8(body)
-            .map_err(|_| DispatchError::BadKey("non-UTF-8 KEY_CHANGED".into()))?;
-        let kc = KeyChanged::parse(s)
-            .map_err(|_| DispatchError::BadKey("KEY_CHANGED parse failed".into()))?;
+        let (s, kc) = crate::proto::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
         if !tinc_proto::check_id(&kc.node) {
             return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
         }
@@ -1579,7 +1575,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
+        let eid = if let Some(existing) = self.graph.lookup_edge(from_id, to_id) {
             // Idempotent only if weight+options+ADDRESS all match.
             // The address compare matters: synthesized reverse from
             // on_ack has no edge_addrs entry; when peer's real
@@ -1628,10 +1624,7 @@ impl Daemon {
             self.graph
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
-            let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
-            self.edge_addrs
-                .insert(existing, (edge.addr, edge.port, la, lp));
+            existing
         } else if from_id == self.myself {
             // Contradiction — peer says we have an edge we don't.
             // Counter read by on_periodic_tick.
@@ -1643,14 +1636,14 @@ impl Daemon {
             let nw = self.send_del_edge(from_conn, &edge.from, &edge.to);
             return Ok(nw);
         } else {
-            let eid = self
-                .graph
-                .add_edge(from_id, to_id, edge.weight, edge.options);
-            // local optional (pre-1.0.24); default to "unspec".
-            let unspec = AddrStr::unspec;
-            let (la, lp) = edge.local.unwrap_or_else(|| (unspec(), unspec()));
-            self.edge_addrs.insert(eid, (edge.addr, edge.port, la, lp));
-        }
+            self.graph
+                .add_edge(from_id, to_id, edge.weight, edge.options)
+        };
+        // local optional (pre-1.0.24); default to "unspec".
+        let (la, lp) = edge
+            .local
+            .unwrap_or_else(|| (AddrStr::unspec(), AddrStr::unspec()));
+        self.edge_addrs.insert(eid, (edge.addr, edge.port, la, lp));
 
         let nw = if self.settings.tunnelserver {
             false

@@ -23,6 +23,18 @@ use tinc_conf::{Config, read_pem};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
+/// Read `hosts/{name}` into a fresh [`Config`]; empty on ENOENT/parse-fail.
+/// Dedups the `confbase.join("hosts").join(name)` + `parse_file` + `merge`
+/// preamble that every per-peer reader open-coded.
+#[must_use]
+pub fn read_host_config(confbase: &Path, name: &str) -> Config {
+    let mut cfg = Config::default();
+    if let Ok(entries) = tinc_conf::parse_file(confbase.join("hosts").join(name)) {
+        cfg.merge(entries);
+    }
+    cfg
+}
+
 // PEM type strings + blob length
 
 /// Same constants as `tinc-tools/keypair.rs`. Upstream's casing —
@@ -247,24 +259,7 @@ mod tests {
     use tinc_conf::{Source, parse_line};
     use tinc_crypto::b64::encode;
 
-    /// Tempdir per test. Same idiom as `daemon.rs::tests`.
-    struct TmpDir(PathBuf);
-    impl TmpDir {
-        fn new(tag: &str) -> Self {
-            let tid = std::thread::current().id();
-            let p = std::env::temp_dir().join(format!("tincd-keys-{tag}-{tid:?}"));
-            std::fs::create_dir_all(&p).unwrap();
-            Self(p)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testutil::TmpDir;
 
     /// Generate a deterministic keypair for tests. Seeded from a tag.
     fn det_key(tag: u8) -> SigningKey {
