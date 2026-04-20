@@ -35,6 +35,7 @@ mod node;
 
 mod basic;
 mod data_path;
+mod dns;
 mod proxy;
 mod purge;
 mod reload;
