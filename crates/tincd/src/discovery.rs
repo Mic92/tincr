@@ -360,7 +360,7 @@ impl DhtWorker {
         let (req_tx, req_rx) = flume::unbounded::<WorkerReq>();
         let (res_tx, res_rx) = flume::unbounded::<WorkerRes>();
         let join = std::thread::Builder::new()
-            .name("dht-worker".into())
+            .name("tinc-dht".into())
             .spawn(move || {
                 while let Ok(req) = req_rx.recv() {
                     let res = match req {

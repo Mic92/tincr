@@ -79,7 +79,7 @@ impl DnsWorker {
         let (req_tx, req_rx) = flume::unbounded::<DnsReq>();
         let (res_tx, res_rx) = flume::unbounded::<DnsRes>();
         let join = std::thread::Builder::new()
-            .name("dns".into())
+            .name("tinc-dns".into())
             .spawn(move || {
                 while let Ok(DnsReq { tag, hosts }) = req_rx.recv() {
                     let mut addrs = Vec::new();

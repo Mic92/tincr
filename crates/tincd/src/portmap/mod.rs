@@ -237,7 +237,7 @@ impl Portmapper {
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let join = std::thread::Builder::new()
-            .name("portmap".into())
+            .name("tinc-portmap".into())
             .spawn(move || worker(local_port, mode, refresh, discover_wait, &tx, &stop2))
             .expect("portmap thread spawn");
         Self {
