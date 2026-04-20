@@ -71,7 +71,7 @@
 //! timer); it reads a *cached* snapshot of `info()`/`to_bootstrap()` and
 //! decides whether to enqueue a republish. **No mainline call happens on
 //! the epoll thread** — every `Dht` round-trip (`info`, `to_bootstrap`,
-//! `put_mutable`, `get_mutable`) is owned by the `dht-worker` thread; the
+//! `put_mutable`, `get_mutable`) is owned by the `tinc-dht` thread; the
 //! epoll thread only does non-blocking flume `send`/`try_iter`. tincd's
 //! epoll loop never sees the DHT socket and never parks on the mainline
 //! actor's 50 ms recv tick.
@@ -305,7 +305,7 @@ struct Epoch {
     derived: Derived,
 }
 
-/// Requests from the epoll thread into `dht-worker`.
+/// Requests from the epoll thread into `tinc-dht`.
 enum WorkerReq {
     /// Refresh cached `info()` + `to_bootstrap()`.
     Snapshot,
@@ -315,7 +315,7 @@ enum WorkerReq {
     Resolve(String, [u8; 32]),
 }
 
-/// Results from `dht-worker` back to the epoll thread. Drained
+/// Results from `tinc-dht` back to the epoll thread. Drained
 /// non-blocking in `tick()`.
 enum WorkerRes {
     Snapshot {
@@ -399,7 +399,7 @@ impl DhtWorker {
                     }
                 }
             })
-            .expect("dht-worker thread spawn");
+            .expect("tinc-dht thread spawn");
         Self {
             req_tx,
             res_rx,
@@ -741,7 +741,7 @@ impl Discovery {
 
     /// Build + sign the BEP 44 mutable item. Crypto + `enumerate_v6()`
     /// only — microseconds; the network I/O (`put_mutable`) happens on
-    /// `dht-worker`. `None` if there's nothing worth publishing yet (no
+    /// `tinc-dht`. `None` if there's nothing worth publishing yet (no
     /// v4, no v6 — we'd just be telling the world our pubkey is online
     /// with no way to reach us).
     fn build_item(&mut self) -> Option<(MutableItem, i64, String)> {

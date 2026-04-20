@@ -9,7 +9,7 @@
 //! [`DnsWorker`] is the same shape as `discovery::DhtWorker`: a named
 //! `std::thread` with a flume request channel in and a result channel
 //! out. The epoll thread only does non-blocking `send` / `try_iter`.
-//! A *separate* thread (not folded into `dht-worker`): a BEP 44
+//! A *separate* thread (not folded into `tinc-dht`): a BEP 44
 //! `put_mutable` is seconds-long; a DNS lookup queued behind one would
 //! inherit that latency. One extra parked thread is free.
 //!

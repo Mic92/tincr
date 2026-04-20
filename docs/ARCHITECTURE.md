@@ -28,9 +28,9 @@ flowchart LR
         cp -- "routing snapshot" --> dp
     end
     subgraph workers ["worker threads"]
-        dht["dht"]
-        dns["dns"]
-        pm["portmap"]
+        dht["tinc-dht"]
+        dns["tinc-dns"]
+        pm["tinc-portmap"]
     end
 
     tun <--> dp
@@ -239,11 +239,12 @@ moves over.
 
 ## Threading Model
 
-| Thread     | Owns                                                                                      |
-| ---------- | ----------------------------------------------------------------------------------------- |
-| main       | Event loop, all sockets, TUN device, all daemon state. Must not block.                    |
-| dht-worker | The Mainline DHT client. Publish/resolve round-trips. Main thread enqueues, polls results.|
-| portmap    | PCP and UPnP-IGD round-trips. Each exchange wall-clock-bounded.                           |
+| Thread       | Owns                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------ |
+| main         | Event loop, all sockets, TUN device, all daemon state. Must not block.                     |
+| tinc-dns     | `getaddrinfo` for outgoing/reconnect. Main thread enqueues hostnames, polls results.       |
+| tinc-dht     | The Mainline DHT client. Publish/resolve round-trips. Main thread enqueues, polls results. |
+| tinc-portmap | PCP and UPnP-IGD round-trips. Each exchange wall-clock-bounded.                            |
 
 What about more than one core? On the current hot path, `perf`
 puts ~53 % of cycles in the ChaCha20 keystream and the bench plateaus

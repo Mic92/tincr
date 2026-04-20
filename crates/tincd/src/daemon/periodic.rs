@@ -277,7 +277,7 @@ impl Daemon {
 
         // ─── DHT discovery poll (Rust extension). tick() is
         // non-blocking: every mainline call (info/to_bootstrap/
-        // put_mutable/get_mutable) runs on the dht-worker thread; here
+        // put_mutable/get_mutable) runs on the tinc-dht thread; here
         // we only drain its result channel and read cached state.
         if self.settings.dht_discovery
             && let Some(d) = self.discovery.as_mut()
