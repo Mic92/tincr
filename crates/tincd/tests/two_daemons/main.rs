@@ -39,5 +39,6 @@ mod dns;
 mod proxy;
 mod purge;
 mod reload;
+mod reqkey_race;
 mod script_latency;
 mod three_node;
