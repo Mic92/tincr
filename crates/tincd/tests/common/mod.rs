@@ -128,31 +128,40 @@ pub fn tincd_at(
     c
 }
 
-/// Pre-allocate a port that is free for **both** TCP and UDP.
+/// Pre-allocate a port free on **both** TCP and UDP (the daemon binds
+/// both for `Port = N`).
 ///
-/// The daemon binds the configured `Port` on TCP *and* UDP
-/// (`listen.rs`). The previous TCP-only probe handed out ports that
-/// were already held for UDP by another parallel nextest worker's
-/// daemon, surfacing as a flaky
-/// `UDP bind on 0.0.0.0:NNNN: Address already in use` setup failure
-/// (e.g. `three_node::three_daemon_forwarding_off_drops_transit`).
-///
-/// We let the kernel pick a TCP port, then verify the same port is
-/// also free for UDP before returning. The drop-to-daemon-rebind
-/// window remains (sub-millisecond on loopback) but the cross-
-/// protocol collision — the actually observed flake — is closed.
+/// `bind(:0)→drop→daemon-rebind` is a TOCTOU under cargo test's
+/// thread pool (kernel recycles the freed ephemeral to a sibling
+/// thread's `bind(:0)`). Walk a pid-seeded atomic counter through
+/// `[12000,28000)` instead: below every target's ephemeral range, and
+/// `fetch_add` gives every thread in this process a unique port.
 pub fn alloc_port() -> u16 {
-    for _ in 0..32 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tcp:0");
-        let port = tcp.local_addr().unwrap().port();
-        // Daemon binds UDP on the wildcard (`0.0.0.0`); probe the
-        // same so we collide with what the daemon will collide with.
-        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const BASE: u32 = 12000;
+    const SPAN: u32 = 16000;
+
+    // u32::MAX sentinel → seed once with a pid hash (Knuth mul:
+    // adjacent pids land far apart in the range).
+    static NEXT: AtomicU32 = AtomicU32::new(u32::MAX);
+    if NEXT.load(Ordering::Relaxed) == u32::MAX {
+        let seed = std::process::id().wrapping_mul(2_654_435_761) % SPAN;
+        let _ = NEXT.compare_exchange(u32::MAX, seed, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    for _ in 0..512 {
+        #[allow(clippy::cast_possible_truncation)] // BASE+SPAN < u16::MAX
+        let port = (BASE + NEXT.fetch_add(1, Ordering::Relaxed) % SPAN) as u16;
+        // Probe wildcard UDP (matches daemon); hold both until return.
+        if let (Ok(_tcp), Ok(_udp)) = (
+            std::net::TcpListener::bind(("127.0.0.1", port)),
+            std::net::UdpSocket::bind(("0.0.0.0", port)),
+        ) {
             return port;
         }
-        // UDP taken (another test's daemon). Drop `tcp`, retry.
     }
-    panic!("alloc_port: no port free on both TCP and UDP after 32 tries");
+    panic!("alloc_port: no port free on both TCP and UDP after 512 tries");
 }
 
 /// Kill the child, wait, return its captured stderr. For panic

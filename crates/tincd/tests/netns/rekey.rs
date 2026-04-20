@@ -316,28 +316,51 @@ fn keyexpire_rekey_under_load_is_lossless() {
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
+    // `force_kex` is almost lossless, not strictly: REC_HANDSHAKE
+    // (KEX/SIG/ACK) rides meta-TCP, data rides UDP. `receive_sig`
+    // swaps `outcipher` right after *queueing* ACK to the TCP
+    // outbuf, so the next UDP datagram (NEW key) can overtake the
+    // ACK → one `DecryptFailed` per direction per rekey. C-parity.
+    // We guard against *unbounded* loss (regressed HandshakeDone /
+    // hard reset = RTT×rate rejected): BadSeqno must be 0 (only a
+    // reset produces it), DecryptFailed bounded by 2×rekeys.
+    let bad_seqno = bob_stderr
+        .lines()
+        .chain(alice_stderr.lines())
+        .filter(|l| l.contains("Failed to decode UDP packet") && l.contains("BadSeqno"))
+        .count();
     let decode_fails = bob_stderr
         .lines()
         .chain(alice_stderr.lines())
         .filter(|l| l.contains("Failed to decode UDP packet"))
         .count();
+    eprintln!("rekeys={rekeys} decode_fails={decode_fails} (BadSeqno={bad_seqno})");
     assert_eq!(
-        decode_fails, 0,
+        bad_seqno, 0,
+        "in-band force_kex rekey produced {bad_seqno} BadSeqno — the \
+         session was hard-reset (incipher=None). force_kex must keep \
+         the old incipher live through `State::Ack`.\n\
+         === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
+    );
+    let fail_budget = 2 * rekeys;
+    assert!(
+        decode_fails <= fail_budget,
         "in-band force_kex rekey produced {decode_fails} decode \
-         failures. The `State::Ack` window in tinc-sptps keeps the \
-         old incipher live until the peer's ACK; if this fires, \
-         either the slow path's `prev_sptps` retry or the fast-path \
-         handles swap (HandshakeDone arm) regressed.\n\
+         failures across {rekeys} rekeys (budget {fail_budget}). \
+         Either the fast-path handles swap (HandshakeDone arm) or \
+         the `State::Ack` old-incipher window regressed.\n\
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
-    // `force_kex` is designed to be lossless; allow a tiny budget
-    // for netem jitter only.
-    let max_loss = 5u32;
+    // Every loss accounted for by a logged decode fail or netem
+    // jitter; unaccounted loss = a key window leaked silently.
+    #[allow(clippy::cast_possible_truncation)] // ≤ 2×rekeys, tiny
+    let max_loss = decode_fails as u32 + 5;
     assert!(
         received + max_loss >= 1000,
-        "in-band rekey under load lost {} of 1000 (received {received}); \
-         budget {max_loss}. Sustained loss means a key window leaked.\n\
+        "in-band rekey under load lost {} of 1000 (received {received}, \
+         {decode_fails} of those logged as decode failures); budget \
+         {max_loss}. Unaccounted loss means a key window leaked.\n\
          === alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}",
         1000 - received,
     );

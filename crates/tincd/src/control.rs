@@ -30,16 +30,16 @@
 //! `0o666` default; we don't need it.
 //!
 //! For the unix socket: `bind()` honors umask and `UnixListener::
-//! bind` doesn't expose mode. We DO need the dance there — one
-//! scoped `umask` call.
+//! bind` doesn't expose mode. The C uses a process-global umask
+//! dance; we `chmod()` the socket inode immediately after bind
+//! instead — same outcome, no global state.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-use nix::sys::stat::{Mode, umask};
 use rand_core::{OsRng, RngCore};
 
 /// 32 random bytes → 64 hex chars.
@@ -101,7 +101,8 @@ pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()>
         .open(path)?;
     // `.mode()` only applies on create; force 0600 on a pre-existing
     // file too (cookie is the auth secret).
-    nix::sys::stat::fchmod(&f, Mode::from_bits_truncate(0o600)).map_err(io::Error::from)?;
+    nix::sys::stat::fchmod(&f, nix::sys::stat::Mode::from_bits_truncate(0o600))
+        .map_err(io::Error::from)?;
     writeln!(f, "{} {} {}", std::process::id(), cookie, address)?;
     // fclose flushes; we let Drop close. `sync_data` is overkill. The
     // pidfile is read by another process; the write must be visible
@@ -111,7 +112,7 @@ pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()>
 }
 
 /// `init_control` unix socket bits. socket → connect-probe → unlink
-/// → umask-bind → listen.
+/// → bind → chmod → listen.
 ///
 /// The connect-probe: before unlinking the stale socket file, try
 /// connecting to it. If connect succeeds, there's a live daemon
@@ -167,24 +168,14 @@ impl ControlSocket {
             let _ = std::fs::remove_file(path);
         }
 
-        // ─── bind with umask 077
-        // The socket file's perms come from `0o777 & ~umask`. With
-        // `umask | 077`, group/other bits are stripped → `0o700`.
-        //
-        // `UnixListener::bind` doesn't take a mode arg. So: umask
-        // dance. The race window (umask is process-global, another
-        // thread might create a file with the wrong perms during
-        // these three lines) doesn't apply — daemon is single-
-        // threaded, this runs at boot before the event loop.
-        //
-        // `nix::sys::stat::umask` wraps `umask(2)`. Returns the
-        // previous mask typed; restore-on-guard pattern stays.
-        let old_mask = umask(Mode::from_bits_truncate(0o077));
-        let bind_result = UnixListener::bind(path);
-        // Restore unconditionally, even if bind failed.
-        umask(old_mask);
-
-        let listener = bind_result.map_err(BindError::Io)?;
+        // ─── bind, then chmod 0700
+        // chmod-after-bind instead of the C's process-global umask
+        // dance: thread-safe (cargo test runs this on a pool). The
+        // brief pre-chmod inode is 0o755 — no w bit, connect(2)
+        // already refused on Linux/BSD.
+        let listener = UnixListener::bind(path).map_err(BindError::Io)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(BindError::Io)?;
 
         // ─── listen
         // `UnixListener::bind` already calls `listen()` internally
@@ -390,7 +381,7 @@ mod tests {
     }
 
     /// Socket file is mode 0700 (or stricter) after bind. The
-    /// umask dance.
+    /// post-bind `chmod()`.
     #[test]
     fn socket_perms() {
         let dir = tmpdir("perms");
