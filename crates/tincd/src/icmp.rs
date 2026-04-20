@@ -38,6 +38,16 @@ use crate::packet::{Icmp6Hdr, IcmpHdr, Ipv4Hdr, Ipv6Hdr, Ipv6Pseudo, inet_checks
 
 const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
+
+/// `swap_mac_addresses`: dst←orig src, src←orig dst, ethertype copied.
+/// Caller has already length-checked `original` to ≥ `ETHER_SIZE`.
+fn eth_reply_hdr(original: &[u8]) -> [u8; ETHER_SIZE] {
+    let mut eth = [0u8; ETHER_SIZE];
+    eth[0..6].copy_from_slice(&original[6..12]);
+    eth[6..12].copy_from_slice(&original[0..6]);
+    eth[12..14].copy_from_slice(&original[12..14]);
+    eth
+}
 /// `struct icmp` is 28 bytes (8 hdr + 20 quoted-IP tail in the
 /// union); we use only the first 8.
 const ICMP_SIZE: usize = 8;
@@ -88,11 +98,7 @@ pub fn build_v4_unreachable(
         return None;
     }
 
-    // ─── Swap eth MACs (`swap_mac_addresses`, `:112-117`).
-    let mut eth = [0u8; ETHER_SIZE];
-    eth[0..6].copy_from_slice(&original[6..12]); // dst ← orig src
-    eth[6..12].copy_from_slice(&original[0..6]); // src ← orig dst
-    eth[12..14].copy_from_slice(&original[12..14]); // ethertype unchanged
+    let eth = eth_reply_hdr(original);
 
     // ─── Parse original IP hdr (`:140`: memcpy(&ip, ...)).
     // Length checked above; .ok()? is unreachable but quiets clippy.
@@ -186,11 +192,7 @@ pub fn build_v6_unreachable(
         return None;
     }
 
-    // ─── Swap eth MACs (`:240`).
-    let mut eth = [0u8; ETHER_SIZE];
-    eth[0..6].copy_from_slice(&original[6..12]);
-    eth[6..12].copy_from_slice(&original[0..6]);
-    eth[12..14].copy_from_slice(&original[12..14]);
+    let eth = eth_reply_hdr(original);
 
     // ─── Parse original IPv6 hdr (`:244`).
     // Length checked above; .ok()? is unreachable but quiets clippy.
