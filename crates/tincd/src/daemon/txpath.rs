@@ -1465,7 +1465,7 @@ impl Daemon {
             .map(|(id, _)| id)
             .collect();
         for id in dirty {
-            if let Some(&io_id) = self.conn_io.get(id)
+            if let Some(io_id) = self.conns[id].io_id
                 && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
             {
                 log::error!(target: "tincd::conn",

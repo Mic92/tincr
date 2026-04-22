@@ -275,7 +275,7 @@ impl Daemon {
         match conn.flush() {
             Ok(true) => {
                 // outbuf empty → drop WRITE interest.
-                if let Some(&io_id) = self.conn_io.get(id)
+                if let Some(io_id) = self.conns[id].io_id
                     && let Err(e) = self.ev.set(io_id, Io::Read)
                 {
                     log::error!(target: "tincd::conn",
@@ -301,7 +301,7 @@ impl Daemon {
         // if connecting_socks still holds the original socket the
         // description — and thus the epoll interest — survives →
         // level-triggered busy-loop on ERR|HUP into a freed slot.
-        if let Some(io_id) = self.conn_io.remove(id) {
+        if let Some(io_id) = self.conns.get(id).and_then(|c| c.io_id) {
             self.ev.del(io_id);
         }
 
@@ -563,7 +563,7 @@ impl Daemon {
             .add(self.conns[id].as_fd(), io_mode, IoWhat::Conn(id))
         {
             Ok(io_id) => {
-                self.conn_io.insert(id, io_id);
+                self.conns[id].io_id = Some(io_id);
                 Some(id)
             }
             Err(e) => {
@@ -631,7 +631,7 @@ impl Daemon {
                         tinc_proto::request::PROT_MINOR
                     ));
                     if needs_write
-                        && let Some(&io_id) = self.conn_io.get(id)
+                        && let Some(io_id) = self.conns[id].io_id
                         && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
                     {
                         log::error!(target: "tincd::conn",
@@ -873,7 +873,7 @@ impl Daemon {
 
         // Re-register: was ReadWrite (probe); now READ (or RW if
         // queued).
-        if let Some(&io_id) = self.conn_io.get(id) {
+        if let Some(io_id) = self.conns[id].io_id {
             let interest = if needs_write { Io::ReadWrite } else { Io::Read };
             if let Err(e) = self.ev.set(io_id, interest) {
                 log::error!(target: "tincd::conn",

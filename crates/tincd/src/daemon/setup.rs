@@ -743,7 +743,6 @@ impl Daemon {
 
         let mut daemon = Self {
             conns: SlotMap::with_key(),
-            conn_io: slotmap::SecondaryMap::new(),
             device,
             control,
             listeners: listener_slots,

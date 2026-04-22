@@ -140,6 +140,11 @@ impl LineBuf {
 #[expect(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
 pub(crate) struct Connection {
     fd: OwnedFd,
+    /// Event-loop registration for `fd`. `None` only in the narrow
+    /// window between `conns.insert` and `ev.add` (the `IoWhat` needs
+    /// the `ConnId`, so the slot exists first). Tests that build a
+    /// `Connection` without an event loop leave it `None`.
+    pub io_id: Option<crate::event::IoId>,
     pub inbuf: LineBuf,
     pub outbuf: LineBuf,
     /// `c->allow_request`. `None` = `ALL` (`protocol.h:42`).
@@ -282,6 +287,7 @@ impl Connection {
     fn new_base(fd: OwnedFd, name: String, hostname: String, now: Instant) -> Self {
         Self {
             fd,
+            io_id: None,
             inbuf: LineBuf::default(),
             outbuf: LineBuf::default(),
             allow_request: Some(Request::Id),

@@ -198,15 +198,6 @@ pub struct Daemon {
     /// connection allocated in the same slot.
     pub(crate) conns: SlotMap<ConnId, Connection>,
 
-    /// Per-connection event-loop handle. Parallel map because
-    /// `Connection` doesn't know about `tinc-event` (layering).
-    ///
-    /// (Could be a field on `Connection`. Argument for parallel map:
-    /// `Connection` is testable without `EventLoop`. Argument against:
-    /// two-map coherence. For now: two maps, debug asserts on
-    /// coherence. Revisit if it bites.)
-    pub(crate) conn_io: slotmap::SecondaryMap<ConnId, crate::event::IoId>,
-
     // ─── substrate
     /// The TUN/TAP. `Box<dyn>` - the variant (`Dummy`/`Tun`/`Fd`/
     /// `Raw`/`Bsd`) is chosen at setup time by `DeviceType`.
@@ -405,9 +396,9 @@ pub struct Daemon {
     /// fires on SIGHUP-reload.
     pub(crate) outgoings: SlotMap<OutgoingId, Outgoing>,
 
-    /// Per-outgoing retry timer. Kept parallel for the same layering
-    /// reason as `conn_io`. `setup_outgoing_connection` disarms it
-    /// first thing.
+    /// Per-outgoing retry timer. Parallel map: `Outgoing` stays
+    /// independent of the timer wheel. `setup_outgoing_connection`
+    /// disarms it first thing.
     pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerId>,
 
     /// Names of nodes whose `hosts/NAME` file has an `Address =`
@@ -909,9 +900,8 @@ impl SetupError {
 // singleton, signal handlers are process-global. The integration test
 // (tests/stop.rs) does the real thing in a subprocess.
 //
-// What IS testable here: the small pieces that don't touch signals.
-// terminate's coherence (conns + conn_io stay in sync), the IoWhat/
-// TimerWhat enum shapes.
+// What IS testable here: the small pieces that don't touch signals
+// — the IoWhat/TimerWhat enum shapes, rate-limit/backoff arithmetic.
 
 #[cfg(test)]
 mod tests {

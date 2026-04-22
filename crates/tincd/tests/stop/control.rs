@@ -400,7 +400,7 @@ fn tinc_up_runs_with_confbase_cwd() {
 
 /// fd-leak guard: open+close N control connections, assert
 /// fd count returns to baseline. Covers `terminate()`'s
-/// `conns`/`conn_io`/`ev.del` coherence and `OwnedFd` drop.
+/// `ev.del`-before-close ordering and `OwnedFd` drop.
 #[test]
 fn control_conn_churn_no_fd_leak() {
     let tmp = tmp!("fd-churn");
