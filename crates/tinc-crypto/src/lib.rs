@@ -20,6 +20,7 @@
     clippy::doc_markdown,
 )]
 
+pub mod aead;
 pub mod b64;
 pub mod chapoly;
 pub mod ecdh;

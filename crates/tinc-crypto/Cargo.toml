@@ -21,6 +21,7 @@ vendored-poly1305-asm = []
 cc = "1"
 
 [dependencies]
+ring.workspace = true
 chacha20.workspace = true
 poly1305.workspace = true
 curve25519-dalek.workspace = true

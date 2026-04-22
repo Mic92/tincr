@@ -74,6 +74,10 @@ debug = true
 # around it doesn't. ~21% throughput hit. Revisit when 0.10 fixes its inlining.
 chacha20 = "0.9"
 poly1305 = "0.8"
+# AES-256-GCM for the opt-in `SPTPSCipher = aes-256-gcm` fast path. ring
+# carries AES-NI/PCLMUL and ARMv8 AES/PMULL kernels and a constant-time
+# bitsliced fallback; we only use `ring::aead::AES_256_GCM`.
+ring = { version = "0.17", default-features = false }
 # digest-0.11 cohort: the upcoming DHT crate (mainline) pins ed25519-dalek
 # 3.0-pre which transitively forces sha2 0.11. Carrying both dalek 2 and
 # dalek 3-pre would mean two curve25519 builds, two sha2, two digest, two
