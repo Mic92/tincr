@@ -298,7 +298,6 @@ pub struct Report {
 /// — e.g., `b64::encode` returning the wrong length. We `expect()`
 /// those instead. If that fires, it's a bug, not a user-facing fsck
 /// finding.)
-#[allow(clippy::missing_panics_doc)] // see above re: expect on b64
 pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     let mut findings = Vec::new();
 

@@ -353,7 +353,7 @@ fn handshake_is_deterministic_under_same_seeds() {
     // The whole point of the harness: same inputs → same wire bytes.
     // If this test ever flakes, the harness is useless as a differential-test oracle.
 
-    #[allow(clippy::items_after_statements)] // local helper, clearer inline
+    #[expect(clippy::items_after_statements)] // local helper, clearer inline
     fn run() -> Vec<Vec<u8>> {
         let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
 
@@ -433,7 +433,7 @@ fn handshake_fails_on_wrong_peer_key() {
 }
 
 #[test]
-#[allow(clippy::similar_names)] // kex_a2/kex_b2, sig_a2/sig_b2: rekey round-2 vs round-1
+#[expect(clippy::similar_names)] // kex_a2/kex_b2, sig_a2/sig_b2: rekey round-2 vs round-1
 fn rekey_uses_ack_state() {
     let _g = serial_guard();
     // Re-KEX after the initial handshake exercises a different state
@@ -522,7 +522,7 @@ fn rekey_uses_ack_state() {
     // ACK is an empty body. Encrypted: len[2]=0 + chacha-poly(type[1]) + tag.
     // The +0 spelled out below is the body length — the formula shape is the
     // same as every other length assertion in this file, just with body=0.
-    #[allow(clippy::identity_op)] // +0 is the body length: keeps the formula shape uniform
+    #[expect(clippy::identity_op)] // +0 is the body length: keeps the formula shape uniform
     {
         assert_eq!(ack_b.len(), 2 + 1 + 0 + 16);
     }

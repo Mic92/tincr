@@ -148,7 +148,7 @@ pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Resu
         },
     ];
     // Clippy: `filter.len()` is 3, fits in u16.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let fprog = libc::sock_fprog {
         len: filter.len() as libc::c_ushort,
         filter: filter.as_mut_ptr(),

@@ -128,8 +128,8 @@ impl PmtuSnapshot {
 /// reachable`, etc. — direct globals. Flattening into 11 parameters
 /// is *correct* but ugly. A `SendCtx` struct would just move the
 /// noise. Live with it.
-#[allow(clippy::too_many_arguments)] // each param maps to one C global-state read; struct just moves the noise
-#[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
+#[expect(clippy::too_many_arguments)] // each param maps to one C global-state read; struct just moves the noise
+#[expect(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub(crate) fn should_send_udp_info(
     // `:170` `if(to == myself) return true;` — would be sending a
@@ -365,8 +365,8 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
 ///
 /// The MTU *value* adjustment (`:305-320`) is NOT here — see
 /// [`adjust_mtu_for_send`].
-#[allow(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param = one C global read
-#[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
+#[expect(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param = one C global read
+#[expect(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub(crate) fn should_send_mtu_info(
     // `:278` — same as UDP_INFO.
@@ -521,7 +521,7 @@ pub(crate) fn on_receive_mtu_info<N>(
     // `:349` `mtu = MIN(mtu, MTU)`. Clamp to compile-time max. We use
     // the jumbo build's max; see [`MTU_MAX`].
     let mtu = parsed.mtu.min(MTU_MAX);
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // clamped to [512,9018]
+    #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // clamped to [512,9018]
     let mtu = mtu as u16;
 
     // `:357` — from lookup.
@@ -586,7 +586,7 @@ mod tests {
     // with all-gates-pass defaults; each row shows only what varies.
 
     #[derive(Clone, Copy)]
-    #[allow(clippy::struct_excessive_bools)] // mirrors C's flat globals
+    #[expect(clippy::struct_excessive_bools)] // mirrors C's flat globals
     struct Send {
         to_myself: bool,
         reachable: bool,

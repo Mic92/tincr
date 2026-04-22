@@ -145,7 +145,6 @@ impl<W: Copy> Timers<W> {
     /// ticks (hot loop).
     // The `expect` below cannot fire: single-threaded, key was just
     // peeked from the same map. clippy can't see that.
-    #[allow(clippy::missing_panics_doc)] // expect("just peeked"): single-threaded, key was peeked from same map this iteration
     pub(crate) fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
         // Single clock read per execute.

@@ -256,10 +256,10 @@ mod fe {
                 s[i] = v + (borrow << 51);
             }
             // borrow == 0 ⇒ t >= p ⇒ take s. Constant-time select.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // borrow∈{0,1}
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // borrow∈{0,1}
             let mask = (borrow as u64).wrapping_sub(1); // 0 if borrow, !0 if not
             for i in 0..5 {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // s[i]∈[0,2^51)
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // s[i]∈[0,2^51)
                 let s_i = s[i] as u64;
                 t[i] = (t[i] & !mask) | (s_i & mask);
             }
@@ -273,7 +273,8 @@ mod fe {
             acc |= u128::from(limb) << acc_bits;
             acc_bits += 51;
             while acc_bits >= 8 && o < 32 {
-                #[allow(clippy::cast_possible_truncation)] // intentional: extract low 8 bits of acc
+                #[expect(clippy::cast_possible_truncation)]
+                // intentional: extract low 8 bits of acc
                 {
                     out[o] = acc as u8;
                 }
@@ -283,7 +284,7 @@ mod fe {
             }
         }
         // Final partial byte (top limb bit 50 lands at out[31] bit 6).
-        #[allow(clippy::cast_possible_truncation)] // intentional: extract low 8 bits of acc
+        #[expect(clippy::cast_possible_truncation)] // intentional: extract low 8 bits of acc
         if o < 32 {
             out[o] = acc as u8;
         }
@@ -424,7 +425,7 @@ mod fe {
             r[4] &= u128::from(MASK);
             r[0] += c * 19;
         }
-        #[allow(clippy::cast_possible_truncation)] // each r[i] masked to 51 bits above, fits u64
+        #[expect(clippy::cast_possible_truncation)] // each r[i] masked to 51 bits above, fits u64
         [
             r[0] as u64,
             r[1] as u64,

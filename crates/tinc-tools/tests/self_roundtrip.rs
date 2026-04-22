@@ -241,7 +241,7 @@ fn reap(mut child: Child, expect_clean: bool) {
 /// CLI. That symmetry is the test design: if the harness doesn't care
 /// which is which, then any failure is a wire-level disagreement, not
 /// a harness artifact.
-#[allow(clippy::too_many_arguments)] // 8 is fine; a struct here would just move the names
+#[expect(clippy::too_many_arguments)] // 8 is fine; a struct here would just move the names
 fn roundtrip(
     server_impl: Impl,
     client_impl: Impl,

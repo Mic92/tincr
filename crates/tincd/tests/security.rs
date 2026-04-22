@@ -447,7 +447,7 @@ fn id_timeout_half_open_survives() {
 /// The MITM-defense invariant is reachability: no edge →
 /// unreachable.)
 #[test]
-#[allow(clippy::too_many_lines, clippy::items_after_statements)] // e2e MITM scenario: splitting fragments narrative; helpers scoped here
+#[expect(clippy::items_after_statements)] // e2e MITM scenario: helpers scoped here
 fn splice_mitm_rejected() {
     use std::net::TcpListener;
 

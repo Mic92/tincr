@@ -455,7 +455,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         let mut ours = Command::new("true").spawn().unwrap();
-        #[allow(clippy::cast_possible_wrap)]
+        #[expect(clippy::cast_possible_wrap)]
         register_child(nix::unistd::Pid::from_raw(ours.id() as i32));
         let _ = ours.wait();
         reap_children();

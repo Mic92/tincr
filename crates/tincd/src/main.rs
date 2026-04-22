@@ -99,7 +99,6 @@ const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)] // CLI flag bag, not a state machine
 struct Args {
     confbase: PathBuf,
     pidfile: PathBuf,
@@ -200,7 +199,7 @@ fn next_str(
         .map_err(|v| format!("{flag}: non-UTF-8 argument: {}", v.display()))
 }
 
-#[allow(clippy::too_many_lines)] // flat getopt-style match; splitting per-option would scatter the C parity comments
+#[expect(clippy::too_many_lines)] // flat getopt-style match; splitting per-option would scatter the C parity comments
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
@@ -890,7 +889,7 @@ fn init_logging(args: &Args) {
     // `debug_level`; ours is in log_tap). `init_debug_level`, NOT
     // `set_debug_level`: the latter calls `log::set_max_level`,
     // which would clobber what `init()` just set from RUST_LOG.
-    #[allow(clippy::cast_possible_wrap)] // debug_level is 0..=5 (CLI-validated)
+    #[expect(clippy::cast_possible_wrap)] // debug_level is 0..=5 (CLI-validated)
     tincd::log_tap::init_debug_level(args.debug_level.map_or(0, |d| d as i32));
 }
 

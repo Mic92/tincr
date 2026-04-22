@@ -173,7 +173,6 @@ pub(crate) fn route_ipv6<T>(
 
     // DATA[38] = ETHER_SIZE + offsetof(ip6_hdr, ip6_dst) = 14+24
     let dst_off = ETHER_SIZE + 24;
-    #[allow(clippy::missing_panics_doc)] // unreachable: ip6 hdr len-checked above
     let dest: [u8; 16] = data[dst_off..dst_off + 16]
         .try_into()
         .expect("len-checked above");
@@ -279,7 +278,7 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
             while csum >> 16 != 0 {
                 csum = (csum & 0xFFFF) + (csum >> 16);
             }
-            #[allow(clippy::cast_possible_truncation)] // fold guarantees <0x10000
+            #[expect(clippy::cast_possible_truncation)] // fold guarantees <0x10000
             {
                 data[ethlen + 10] = (csum >> 8) as u8;
                 data[ethlen + 11] = csum as u8;
@@ -405,7 +404,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    #[allow(clippy::unnecessary_wraps)] // signature must match `resolve`
+    #[expect(clippy::unnecessary_wraps)] // signature must match `resolve`
     fn always(n: &str) -> Option<String> {
         Some(n.to_owned())
     }

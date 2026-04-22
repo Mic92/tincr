@@ -121,7 +121,7 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     // SAFETY: `sa` is fully initialized (zeroed + 3 writes); `bind`
     // reads exactly `addrlen` (= 20) bytes from a valid stack
     // pointer; the cast is standard sockaddr type-erasure.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
     let ret = unsafe {
         libc::bind(
@@ -143,13 +143,13 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
 /// so the struct construction is independently inspectable and the
 /// syscall shim stays one-unsafe.
 // ifindex: c_uint→c_int glibc signedness quirk; kernel allocs small positive ints
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 #[allow(unsafe_code)]
 fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
     // SAFETY: see fn comment.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
-    #[allow(clippy::cast_sign_loss)] // AF_PACKET=17 (c_int→c_ushort, fits trivially)
+    #[expect(clippy::cast_sign_loss)] // AF_PACKET=17 (c_int→c_ushort, fits trivially)
     {
         sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     }

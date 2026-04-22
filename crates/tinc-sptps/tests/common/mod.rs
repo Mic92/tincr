@@ -21,7 +21,7 @@ pub fn keypair(tag: u8) -> (SigningKey, [u8; 32]) {
 /// PCG-ish PRNG. Deterministic from seed; the SPTPS RNG only seeds
 /// nonces and ECDH so crypto quality doesn't matter.
 pub struct SeedRng(pub u64);
-#[allow(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
+#[expect(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
 impl RngCore for SeedRng {
     fn next_u32(&mut self) -> u32 {
         self.next_u64() as u32

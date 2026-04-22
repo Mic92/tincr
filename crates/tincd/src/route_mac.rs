@@ -126,7 +126,7 @@ mod tests {
         f
     }
 
-    #[allow(clippy::unnecessary_wraps)] // signature must match `resolve`
+    #[expect(clippy::unnecessary_wraps)] // signature must match `resolve`
     fn id(n: &str) -> Option<String> {
         Some(n.to_owned())
     }

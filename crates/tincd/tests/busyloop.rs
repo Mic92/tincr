@@ -106,7 +106,7 @@ fn outgoing_timeout_no_busy_loop() {
     let delta = after - before;
     let snap = log.log_snapshot();
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
     nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM).expect("kill SIGTERM");
     let wait_deadline = Instant::now() + Duration::from_secs(5);

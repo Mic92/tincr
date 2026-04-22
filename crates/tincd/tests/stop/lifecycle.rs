@@ -338,7 +338,7 @@ fn sigterm_stops() {
     let pid: u32 = content.split_whitespace().next().unwrap().parse().unwrap();
     assert_eq!(pid, child.id(), "pidfile has the right pid");
 
-    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
+    #[expect(clippy::cast_possible_wrap)] // pid_t fits a child PID
     let pid = Pid::from_raw(pid as i32);
     kill(pid, Signal::SIGTERM).expect("kill SIGTERM");
 
@@ -379,7 +379,7 @@ fn sigusr_ignored() {
 
     assert!(wait_for_file(&socket), "tincd didn't bind socket");
 
-    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
+    #[expect(clippy::cast_possible_wrap)] // pid_t fits a child PID
     let pid = Pid::from_raw(child.id() as i32);
 
     // Fire each signal, give the daemon a moment, assert it's still

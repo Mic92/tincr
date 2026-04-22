@@ -52,7 +52,7 @@ impl Daemon {
                 return true; // fake success
             }
             // len fits u16: MTU=1518.
-            #[allow(clippy::cast_possible_truncation)] // data.len() ≤ MTU (1518)
+            #[expect(clippy::cast_possible_truncation)] // data.len() ≤ MTU (1518)
             let req = tinc_proto::msg::TcpPacket {
                 len: data.len() as u16,
             };
@@ -240,7 +240,7 @@ impl Daemon {
                             "Got SPTPS PROBE from {peer_name} via TCP");
                 return false;
             }
-            #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+            #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
             let body_len_u16 = body_len as u16;
             if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
                 && body_len_u16 > p.maxrecentlen
@@ -359,7 +359,7 @@ impl Daemon {
 
         // maxrecentlen for try_udp's gratuitous probe-reply size.
         // Gated on udppacket: TCP-tunneled frames don't inform PMTU.
-        #[allow(clippy::cast_possible_truncation)] // frame.len() ≤ 14+MTU
+        #[expect(clippy::cast_possible_truncation)] // frame.len() ≤ 14+MTU
         let frame_len = frame.len() as u16;
         if let Some(t) = self.dp.tunnels.get_mut(&peer)
             && t.status.udppacket
@@ -653,7 +653,7 @@ impl Daemon {
             let dp = &mut self.dp;
             // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
             // the immediate-send path uses below.
-            #[allow(clippy::cast_possible_truncation)] // ≤ MTU
+            #[expect(clippy::cast_possible_truncation)] // ≤ MTU
             let at_len = origlen as u16;
             if !dp
                 .tx_batch
@@ -690,7 +690,7 @@ impl Daemon {
         relay_nid: NodeId,
         origlen: usize,
     ) {
-        #[allow(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
+        #[expect(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
         let len = self.dp.tx_scratch.len() as u16;
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
             return;
@@ -707,7 +707,7 @@ impl Daemon {
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
-            #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
+            #[expect(clippy::cast_possible_truncation)] // origlen ≤ MTU
             let at_len = origlen as u16;
             super::helpers::handle_udp_emsgsize(
                 &mut self.dp.tunnels,

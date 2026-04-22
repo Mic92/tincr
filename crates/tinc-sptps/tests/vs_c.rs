@@ -166,7 +166,7 @@ fn wire(mut outs: Vec<Output>) -> Vec<u8> {
 /// that produces compatible keys. It doesn't prove the *bytes* are the
 /// same — just that they're equivalent under the crypto.
 #[test]
-#[allow(clippy::similar_names)] // alice_key/alice_kex: signing key vs KEX wire bytes
+#[expect(clippy::similar_names)] // alice_key/alice_kex: signing key vs KEX wire bytes
 fn rust_initiator_c_responder() {
     let _g = serial_guard();
     let (alice_priv, alice_pub) = keypair(1);
@@ -258,7 +258,7 @@ fn rust_initiator_c_responder() {
 /// path is different (doesn't sign in `receive_kex`, signs in `receive_sig`
 /// instead) so both directions need testing.
 #[test]
-#[allow(clippy::similar_names)] // bob_key/bob_kex: signing key vs KEX wire bytes
+#[expect(clippy::similar_names)] // bob_key/bob_kex: signing key vs KEX wire bytes
 fn c_initiator_rust_responder() {
     let _g = serial_guard();
     let (alice_priv, alice_pub) = keypair(1);
@@ -340,7 +340,7 @@ fn c_initiator_rust_responder() {
 /// stream uses `inseqno` for the implicit per-record counter, datagram
 /// puts the seqno on the wire and uses `ReplayWindow`.
 #[test]
-#[allow(clippy::similar_names)] // alice_key/alice_kex: signing key vs KEX wire bytes
+#[expect(clippy::similar_names)] // alice_key/alice_kex: signing key vs KEX wire bytes
 fn rust_initiator_c_responder_datagram() {
     let _g = serial_guard();
     let (alice_priv, alice_pub) = keypair(3);
@@ -416,7 +416,7 @@ fn byte_identical_wire_output() {
 
     /// Run a full handshake + one app record, return all wire bytes in order.
     /// `who` picks Rust vs C; same script either way.
-    #[allow(clippy::items_after_statements)] // local helper, clearer inline
+    #[expect(clippy::items_after_statements)] // local helper, clearer inline
     fn run(
         who: Impl,
         alice_priv: &[u8; 96],
@@ -489,7 +489,7 @@ fn byte_identical_wire_output() {
 /// rekey instead of going to the `Ack` state, and the C side (sitting in
 /// `Ack` waiting for *our* ACK) would deadlock.
 #[test]
-#[allow(clippy::similar_names)] // kex_a2/kex_b2, sig_a2/sig_b2: rekey round-2 vs round-1
+#[expect(clippy::similar_names)] // kex_a2/kex_b2, sig_a2/sig_b2: rekey round-2 vs round-1
 fn rust_vs_c_rekey() {
     let _g = serial_guard();
     let (alice_priv, alice_pub) = keypair(1);

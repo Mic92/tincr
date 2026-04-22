@@ -78,7 +78,7 @@ pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
         checksum = (checksum & 0xFFFF) + (checksum >> 16);
     }
 
-    #[allow(clippy::cast_possible_truncation)] // fold loop above zeroes high half
+    #[expect(clippy::cast_possible_truncation)] // fold loop above zeroes high half
     {
         !(checksum as u16)
     }
@@ -113,6 +113,20 @@ pub(crate) struct Ipv4Hdr {
 }
 
 const _: () = assert!(size_of::<Ipv4Hdr>() == 20);
+
+const _: () = assert!(size_of::<IcmpHdr>() == 8);
+
+const _: () = assert!(size_of::<Ipv6Hdr>() == 40);
+
+const _: () = assert!(size_of::<Icmp6Hdr>() == 8);
+
+const _: () = assert!(size_of::<ArpHdr>() == 8);
+
+const _: () = assert!(size_of::<EtherArp>() == 28);
+
+const _: () = assert!(size_of::<Ipv6Pseudo>() == 40);
+
+const _: () = assert!(size_of::<Ipv4Pseudo>() == 12);
 
 /// `IP_OFFMASK` (`ipv4.h:96`). Low 13 bits of `ip_off`.
 pub(crate) const IP_OFFMASK: u16 = 0x1fff;
@@ -198,8 +212,6 @@ pub(crate) struct IcmpHdr {
     icmp_nextmtu: u16,
 }
 
-const _: () = assert!(size_of::<IcmpHdr>() == 8);
-
 impl IcmpHdr {
     /// `icmp.icmp_nextmtu = htons(v)`.
     pub(crate) const fn set_nextmtu(&mut self, v: u16) {
@@ -225,8 +237,6 @@ pub(crate) struct Ipv6Hdr {
     pub ip6_src: [u8; 16],
     pub ip6_dst: [u8; 16],
 }
-
-const _: () = assert!(size_of::<Ipv6Hdr>() == 40);
 
 impl Ipv6Hdr {
     /// `ip6.ip6_flow = htonl(v)`.
@@ -277,8 +287,6 @@ pub(crate) struct Icmp6Hdr {
     icmp6_data32: u32,
 }
 
-const _: () = assert!(size_of::<Icmp6Hdr>() == 8);
-
 impl Icmp6Hdr {
     /// `icmp6.icmp6_mtu = htonl(v)`.
     pub(crate) const fn set_mtu(&mut self, v: u32) {
@@ -301,8 +309,6 @@ pub(crate) struct ArpHdr {
     /// Opcode. Network order. `ARPOP_REQUEST`=1, `ARPOP_REPLY`=2.
     ar_op: u16,
 }
-
-const _: () = assert!(size_of::<ArpHdr>() == 8);
 
 /// `ARPOP_REQUEST` (`ethernet.h:82`).
 pub(crate) const ARPOP_REQUEST: u16 = 1;
@@ -362,8 +368,6 @@ pub(crate) struct EtherArp {
     pub arp_tpa: [u8; 4],
 }
 
-const _: () = assert!(size_of::<EtherArp>() == 28);
-
 // ── Pseudo-headers (checksum only) ─────────────────────────────────
 
 /// IPv6 pseudo-header for upper-layer checksum (RFC 2460 §8.1). 40
@@ -379,8 +383,6 @@ pub(crate) struct Ipv6Pseudo {
     /// Next header (`IPPROTO_ICMPV6`), network order.
     next: u32,
 }
-
-const _: () = assert!(size_of::<Ipv6Pseudo>() == 40);
 
 impl Ipv6Pseudo {
     pub(crate) const fn set_length(&mut self, v: u32) {
@@ -404,8 +406,6 @@ pub(crate) struct Ipv4Pseudo {
     /// TCP/UDP length, network order.
     length: u16,
 }
-
-const _: () = assert!(size_of::<Ipv4Pseudo>() == 12);
 
 impl Ipv4Pseudo {
     pub(crate) const fn set_length(&mut self, v: u16) {

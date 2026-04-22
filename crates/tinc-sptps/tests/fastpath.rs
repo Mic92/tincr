@@ -167,7 +167,7 @@ fn handle_based_seal_byte_identical() {
         .map(|body| {
             // u64 fetch_add, truncate to u32: same as alloc_seqnos's
             // body. Relaxed: nonce uniqueness, not a memory fence.
-            #[allow(clippy::cast_possible_truncation)] // wire is 4-byte BE
+            #[expect(clippy::cast_possible_truncation)] // wire is 4-byte BE
             let s = seqno.fetch_add(1, Ordering::Relaxed) as u32;
             // Same layout seal_with_seqno builds: headroom + seqno:4
             // + enc(type+body) + tag:16.
@@ -235,7 +235,7 @@ fn u64_truncate_is_u32_wrap() {
     let mut u: u32 = u32::MAX - 2;
 
     for _ in 0..5 {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let base_a = a.fetch_add(1, Relaxed) as u32;
         let base_u = u;
         u = u.wrapping_add(1);
@@ -246,10 +246,10 @@ fn u64_truncate_is_u32_wrap() {
     // After 5 single-allocs above, u is at 2 (wrapped). Set a to a
     // post-multiple-wrap value with the same low 32 bits.
     let a = AtomicU64::new((7_u64 << 32) | u64::from(u));
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let base_a = a.fetch_add(100, Relaxed) as u32;
     assert_eq!(base_a, u);
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let next_a = a.load(Relaxed) as u32;
     assert_eq!(next_a, u.wrapping_add(100));
 }

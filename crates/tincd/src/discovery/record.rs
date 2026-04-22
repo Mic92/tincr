@@ -23,7 +23,7 @@ pub const AEAD_OVERHEAD: usize = MAGIC.len() + NONCE_LEN + TAG_LEN;
 /// nonce per put (`XChaCha` → birthday bound is irrelevant at one put per
 /// 5 min). `aad = seq_be8`: the storer can't splice an old ciphertext
 /// under a newer seq without the AEAD-open failing.
-#[allow(clippy::missing_panics_doc)] // encrypt() only errs on >4GiB input
+#[expect(clippy::missing_panics_doc)] // encrypt() only errs on >4GiB input
 #[must_use]
 pub fn seal_record(d: &Derived, seq: i64, plaintext: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; NONCE_LEN];

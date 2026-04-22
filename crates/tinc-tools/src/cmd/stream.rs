@@ -318,7 +318,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     let tz_offset: u32 = 0;
     let tz_accuracy: u32 = 0;
     // 0 means "user didn't pass one OR passed 0" — both → max.
-    #[allow(clippy::cast_possible_truncation)] // 9018 < u32::MAX, const
+    #[expect(clippy::cast_possible_truncation)] // 9018 < u32::MAX, const
     let snaplen = if snaplen == 0 {
         PCAP_DATA_MAX as u32
     } else {
@@ -362,7 +362,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 /// per-packet. The timestamp is "when the CLI received it," not
 /// "when the daemon routed it." Socket latency is ~10µs (localhost),
 /// well below the µs resolution. Good enough.
-#[allow(clippy::similar_names)] // tv_sec/tv_usec: libpcap struct field names, kept verbatim for grep
+#[expect(clippy::similar_names)] // tv_sec/tv_usec: libpcap struct field names, kept verbatim for grep
 fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     // `unwrap_or_default`: `duration_since` errs if `now < EPOCH`
     // (clock set to 1960). Default Duration is 0s — the timestamp
@@ -372,7 +372,7 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
 
-    #[allow(clippy::cast_possible_truncation)] // pcap tv_sec is u32; see fn doc re: 2038
+    #[expect(clippy::cast_possible_truncation)] // pcap tv_sec is u32; see fn doc re: 2038
     let tv_sec: u32 = dur.as_secs() as u32;
     let tv_usec: u32 = dur.subsec_micros();
 
@@ -409,7 +409,7 @@ where
     Clock: FnMut() -> SystemTime,
 {
     // ─── Subscribe
-    #[allow(clippy::cast_possible_wrap)] // snaplen ≤ MTU; daemon reads %d (i32 wire)
+    #[expect(clippy::cast_possible_wrap)] // snaplen ≤ MTU; daemon reads %d (i32 wire)
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
     // ─── Global header
@@ -442,7 +442,7 @@ where
         // shows packets in real-time (Wireshark reads from a pipe;
         // no flush → it sees nothing until the pipe buffer fills,
         // ~64KiB ≈ dozens of packets).
-        #[allow(clippy::cast_possible_truncation)] // len ≤ 9018 by parse_header
+        #[expect(clippy::cast_possible_truncation)] // len ≤ 9018 by parse_header
         let len_u32 = len as u32;
         out.write_all(&pcap_packet_header(ts, len_u32))
             .map_err(CtlError::Io)?;

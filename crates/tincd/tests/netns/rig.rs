@@ -269,7 +269,7 @@ impl NetNs {
     /// on both). Moves bob's TUN into the child netns and
     /// configures addresses on both. Moving an interface resets
     /// its UP state and flushes addresses, so configure AFTER move.
-    #[allow(clippy::unused_self)] // method form keeps the call ordered after NetNs::setup
+    #[expect(clippy::unused_self)] // method form keeps the call ordered after NetNs::setup
     pub(crate) fn place_devices(&self) {
         // ─── move tinc1 into bobside ─────────────────────────────
         // The fd→device binding survives. Bob's daemon (in the

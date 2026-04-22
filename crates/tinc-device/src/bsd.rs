@@ -106,7 +106,7 @@ impl BsdVariant {
 /// Ethertype → `htonl(AF_*)` 4-byte prefix (utun write side; dual of
 /// `from_ip_nibble`). `AF_INET6` varies per platform, so bytes differ
 /// — correct, because the same kernel reads them back.
-#[allow(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
+#[expect(clippy::cast_sign_loss)] // libc::AF_* are small positive c_ints; as u32 exact
 const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     let af = match ethertype {
         ETH_P_IP => libc::AF_INET,

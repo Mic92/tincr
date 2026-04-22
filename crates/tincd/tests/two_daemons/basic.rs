@@ -379,7 +379,7 @@ fn ping_pong_keepalive() {
     // → terminate. The TCP socket stays open (kernel buffers the
     // PING bytes until alice wakes); only the application-layer
     // timeout fires.
-    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
+    #[expect(clippy::cast_possible_wrap)] // pid_t fits a child PID
     let alice_pid = Pid::from_raw(alice_child.id() as i32);
     kill(alice_pid, Signal::SIGSTOP).expect("kill SIGSTOP");
 

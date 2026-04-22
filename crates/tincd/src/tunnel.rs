@@ -243,7 +243,7 @@ pub(crate) fn should_reap_prev_sptps(
 // `struct_excessive_bools`: C struct IS independent bits. `validkey`
 // and `udp_confirmed` are orthogonal (TCP-tunneled SPTPS = `validkey
 // && !udp_confirmed`).
-#[allow(clippy::struct_excessive_bools)] // mirrors C bitfield: orthogonal bits (validkey && !udp_confirmed is valid)
+#[expect(clippy::struct_excessive_bools)] // mirrors C bitfield: orthogonal bits (validkey && !udp_confirmed is valid)
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TunnelStatus {
     /// Bit 1. Set by SPTPS `receive_record` cb on `SPTPS_HANDSHAKE`

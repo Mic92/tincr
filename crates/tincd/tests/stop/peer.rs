@@ -861,7 +861,7 @@ fn peer_wrong_key_fails_sig() {
             // But if it does fail: that's also a stop condition
             // (and the stderr check below disambiguates).
             match sptps.receive(&pending[off..], &mut OsRng) {
-                #[allow(clippy::match_same_arms)] // Ok(0)/Err: same break, different why
+                #[expect(clippy::match_same_arms)] // Ok(0)/Err: same break, different why
                 Ok((0, _)) => break,
                 Ok((n, outs)) => {
                     off += n;
@@ -928,7 +928,7 @@ fn peer_wrong_key_fails_sig() {
 /// listener. Direct neighbors short-circuit to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
 /// directly with the frame body.
 #[test]
-#[allow(clippy::similar_names)] // ctl/ctl2 distinguish first/second control conns
+#[expect(clippy::similar_names)] // ctl/ctl2 distinguish first/second control conns
 fn pcap_captures_tcp_packet() {
     use std::io::Read;
 

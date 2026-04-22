@@ -107,9 +107,9 @@ pub(crate) fn random_early_drop<R: RngCore>(outbuf_len: usize, max: usize, rng: 
     // `as` cast is fine: outbuf max is a config int (kB-range), and
     // even a pathological multi-GB outbuf overflowing u32 just
     // saturates the drop probability — which is what you'd want.
-    #[allow(clippy::cast_possible_truncation)] // see comment above: kB-range, overflow saturates
+    #[expect(clippy::cast_possible_truncation)] // see comment above: kB-range, overflow saturates
     let excess = (outbuf_len - half) as u32;
-    #[allow(clippy::cast_possible_truncation)] // half ≤ max/2, config-int kB-range
+    #[expect(clippy::cast_possible_truncation)] // half ≤ max/2, config-int kB-range
     let r = rng.next_u32() % (half as u32);
     excess > r
 }

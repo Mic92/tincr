@@ -417,7 +417,7 @@ const SLOTS: [(Af, Proto); 4] = [
     (Af::V6, Proto::Udp),
 ];
 
-#[allow(clippy::cast_possible_truncation)] // lease seconds fit u32 at the config clamp
+#[expect(clippy::cast_possible_truncation)] // lease seconds fit u32 at the config clamp
 fn worker(
     local_port: u16,
     mode: UpnpMode,

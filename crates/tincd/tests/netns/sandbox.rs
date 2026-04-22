@@ -226,7 +226,7 @@ fn sandbox_high_blocks_scripts() {
     //
     // SAFETY: kill(2). We spawned this child; wait_for_file
     // confirmed it's alive and serving.
-    #[allow(clippy::cast_possible_wrap)] // pid_t fits a child PID
+    #[expect(clippy::cast_possible_wrap)] // pid_t fits a child PID
     let pid = nix::unistd::Pid::from_raw(alice_child.id() as i32);
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("kill SIGTERM");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

@@ -165,7 +165,7 @@ pub fn alloc_port() -> u16 {
     }
 
     for _ in 0..512 {
-        #[allow(clippy::cast_possible_truncation)] // BASE+SPAN < u16::MAX
+        #[expect(clippy::cast_possible_truncation)] // BASE+SPAN < u16::MAX
         let port = (BASE + NEXT.fetch_add(1, Ordering::Relaxed) % SPAN) as u16;
         // Probe wildcard UDP (matches daemon); hold both until return.
         if let (Ok(_tcp), Ok(_udp)) = (

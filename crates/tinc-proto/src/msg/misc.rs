@@ -38,7 +38,7 @@ fn parse_len_prefix(line: &str) -> Result<u16, ParseError> {
     if len < 0 {
         return Err(ParseError);
     }
-    #[allow(clippy::cast_sign_loss)] // guarded by len < 0 check above
+    #[expect(clippy::cast_sign_loss)] // guarded by len < 0 check above
     Ok(len as u16)
 }
 

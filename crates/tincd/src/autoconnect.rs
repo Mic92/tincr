@@ -117,7 +117,7 @@ pub(crate) enum AutoAction {
 /// The *peer's* edge count from the gossiped graph. Dropping our conn
 /// to a peer with `edge_count < 2` would isolate it.
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)] // snapshot of independent flags; an enum would obscure the C parity
+#[expect(clippy::struct_excessive_bools)] // snapshot of independent flags; an enum would obscure the C parity
 pub(crate) struct NodeSnapshot {
     pub name: String,
     /// `n->status.reachable`. From sssp.
@@ -259,7 +259,6 @@ impl Default for ShortcutKnobs {
 ///
 /// If the random pick is already in `pending_outgoings`, return
 /// `Noop` (don't duplicate, don't re-roll).
-#[allow(clippy::too_many_arguments)] // pure fn: every input is explicit world-state
 #[must_use]
 pub(crate) fn decide(
     myself_name: &str,
@@ -352,7 +351,7 @@ pub(crate) fn decide(
             })
             .collect();
         if !idle.is_empty() {
-            #[allow(clippy::cast_possible_truncation)] // ≤ conn count
+            #[expect(clippy::cast_possible_truncation)] // ≤ conn count
             let r = (rng.next_u32() % (idle.len() as u32)) as usize;
             return AutoAction::Disconnect {
                 name: idle[r].name.clone(),
@@ -409,7 +408,7 @@ fn make_new_connection(
         return AutoAction::Noop;
     }
 
-    #[allow(clippy::cast_possible_truncation)] // eligible.len() ≤ node count (~thousands)
+    #[expect(clippy::cast_possible_truncation)] // eligible.len() ≤ node count (~thousands)
     let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
     let pick = eligible[r];
 
@@ -436,7 +435,7 @@ fn connect_to_unreachable(
         return AutoAction::Noop;
     }
 
-    #[allow(clippy::cast_possible_truncation)] // nodes.len() bounded by node count (≪ u32::MAX)
+    #[expect(clippy::cast_possible_truncation)] // nodes.len() bounded by node count (≪ u32::MAX)
     let r = (rng.next_u32() % (nodes.len() as u32)) as usize;
     let n = &nodes[r];
 
@@ -489,7 +488,7 @@ fn drop_superfluous_outgoing(
         return AutoAction::Noop;
     }
 
-    #[allow(clippy::cast_possible_truncation)] // droppable.len() ≤ conn count
+    #[expect(clippy::cast_possible_truncation)] // droppable.len() ≤ conn count
     let r = (rng.next_u32() % (droppable.len() as u32)) as usize;
     AutoAction::Disconnect {
         name: droppable[r].name.clone(),

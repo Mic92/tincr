@@ -759,7 +759,7 @@ pub(crate) fn send_ack(
     debug_assert!(conn.protocol_minor >= 2);
 
     // RTT ms: C `(int)` wraps too
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_truncation)]
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
     // Per-host config OR myself->options. Composes
     // bit-by-bit; the per-host fields were extracted at id_h.
@@ -811,7 +811,7 @@ pub(crate) fn send_ack(
 /// What `ack_h` parsed. Mutation half (`node_add`/`edge_add`/`graph()`)
 /// lives in the daemon (it owns the slotmap; C has globals).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)] // `his_*` mirrors C `ack_h` locals
+#[expect(clippy::struct_field_names)] // `his_*` mirrors C `ack_h` locals
 pub(crate) struct AckParsed {
     pub his_udp_port: u16,        // `%s` in C (string); everyone sends decimal
     pub his_weight: i32,          // averaged with ours for edge weight
@@ -949,7 +949,6 @@ fn nth_token(line: &[u8], n: usize) -> Option<&str> {
 /// `control_h` always returns `true`; CLI closes its end.
 ///
 /// `single_match_else`: this is the `switch`; it grows arms.
-#[allow(clippy::single_match_else)] // this is the C switch; arms accrete as ctl subcommands land
 pub(crate) fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
     // `sscanf("%*d %d", &type)`.
     let raw = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());

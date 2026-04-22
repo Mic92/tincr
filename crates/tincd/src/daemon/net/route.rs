@@ -305,7 +305,7 @@ impl Daemon {
     }
 
     /// `RouteResult` dispatch. Shared by Router and Switch paths.
-    #[allow(clippy::needless_pass_by_value)] // consumed by match (moves out NodeId from variants)
+    #[expect(clippy::needless_pass_by_value)] // consumed by match (moves out NodeId from variants)
     fn dispatch_route_result(
         &mut self,
         result: RouteResult<NodeId>,

@@ -441,7 +441,7 @@ impl PmtuState {
 /// 0.97 multiplier (when `maxmtu == MTU`) is hand-tuned (`:1417-1424`
 /// "math simulations"): probe #0 → 1329, then probe #1 → 1407 —
 /// "just below typical tinc MTUs". Two probes, done.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss

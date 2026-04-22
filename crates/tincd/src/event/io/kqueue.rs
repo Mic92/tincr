@@ -42,7 +42,7 @@ pub(super) fn create() -> io::Result<Poller> {
 /// fd → kevent ident. fds are non-negative; the kqueue ABI takes
 /// `uintptr_t` (nix exposes it as `usize`).
 #[inline]
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 fn fd_ident(fd: RawFd) -> usize {
     fd as usize
 }

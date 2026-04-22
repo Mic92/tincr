@@ -419,7 +419,7 @@ fn server_stub_recovers_file() {
     assert!(used_path.exists());
     // `.used` is literal; case-sensitive is the port-faithful
     // comparison.
-    #[allow(clippy::case_sensitive_file_extension_comparisons)] // ".used": literal we wrote
+    #[expect(clippy::case_sensitive_file_extension_comparisons)] // ".used": literal we wrote
     let has_used = used_path.to_str().unwrap().ends_with(".used");
     assert!(has_used);
 }
@@ -477,7 +477,7 @@ fn server_stub_single_use() {
 /// will cover those. For now, the SPTPS layer + format layer
 /// are the high-value seams.
 #[test]
-#[allow(
+#[expect(
         // The test is long because it transcribes the full SPTPS
         // protocol — 4-phase handshake, cookie, file chunks, pubkey
         // echo, ack — with assertions at each step. Splitting would

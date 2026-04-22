@@ -89,7 +89,7 @@ const MAX_REPLAY_WINDOW: usize = 1 << 20;
 /// Reloadable config knobs. Separate from `Daemon` so SIGHUP can
 /// swap it wholesale. `Default` matches upstream tinc defaults.
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)] // each bool is an
+#[expect(clippy::struct_excessive_bools)] // each bool is an
 // independent config knob; grouping into state enums would obscure
 // the 1:1 config-key mapping.
 pub struct DaemonSettings {

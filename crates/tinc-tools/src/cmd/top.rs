@@ -212,7 +212,7 @@ impl Stats {
     /// Returns true if a new node appeared. The caller doesn't
     /// actually need it (`display_order` is updated as a side effect),
     /// but it's the observable signal for "topology changed".
-    #[allow(clippy::cast_precision_loss)] // u64→f32: 1s deltas ≪ 2^24; cumulative is display-only
+    #[expect(clippy::cast_precision_loss)] // u64→f32: 1s deltas ≪ 2^24; cumulative is display-only
     pub fn update(&mut self, rows: &[TrafficRow], now: Instant) -> bool {
         use std::collections::btree_map::Entry;
 
@@ -332,7 +332,7 @@ fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> st
 /// about. `Name` returns 0 — the caller (`Stats::sort`) handles that
 /// mode by sorting keys directly so this arm is unreachable; the
 /// constant keeps the match exhaustive.
-#[allow(clippy::cast_precision_loss)] // see compare()
+#[expect(clippy::cast_precision_loss)] // see compare()
 fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
     use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
     let pick = |cum: u64, rate: f32| {
@@ -472,9 +472,8 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
 /// `b`/`k`/`M`/`G` keys). Note the cumulative path CASTS u64 to
 /// f32 first, which loses precision past 2^24 — but it's display-
 /// only via `%10.0f`.
-#[allow(clippy::cast_precision_loss)] // Display-only.
+#[expect(clippy::cast_precision_loss)] // Display-only.
 fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
-    #[allow(clippy::float_cmp)] // 0u64/interval = exact 0.0; nonzero delta ⇒ nonzero rate
     let attr = if !s.known {
         tui::DIM
     } else if s.in_packets_rate != 0.0 || s.out_packets_rate != 0.0 {
@@ -640,8 +639,8 @@ fn handle_key(
             // Harmless.
             if let Some(input) = new_secs {
                 let clamped = if input < 0.1 { 0.1 } else { input };
-                #[allow(clippy::cast_possible_truncation)] // Saturating; clamped >= 0.1
-                #[allow(clippy::cast_sign_loss)] // so it's positive anyway.
+                #[expect(clippy::cast_possible_truncation)] // Saturating; clamped >= 0.1
+                #[expect(clippy::cast_sign_loss)] // so it's positive anyway.
                 {
                     stats.delay_ms = (clamped * 1e3) as u16;
                 }

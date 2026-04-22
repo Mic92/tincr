@@ -8,7 +8,7 @@ use crate::testutil::{self, ConfDir};
 /// `\t =`, and `strchr(key, '.')` runs only on the key slice.
 #[test]
 fn parse_var_expr_ok() {
-    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
+    #[expect(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(&str, (Option<&str>, &str, &str))] = &[
         // ─── bare var, no value ───
@@ -117,7 +117,7 @@ fn setup(name: &str) -> ConfDir {
 fn intent_routing() {
     let cd = setup("alice");
     let paths = cd.paths().clone();
-    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
+    #[expect(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, Option<&str>, &str)] = &[
         //          (action,      explicit_node, var,      value,          expect_node,   expect_canonical_var)
@@ -213,7 +213,6 @@ fn intent_action_coercion() {
 fn intent_errors() {
     let cd = setup("alice");
     let paths = cd.paths().clone();
-    #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, &str)] = &[
         //          (action,      explicit_node,    var,      value,          msg_contains)

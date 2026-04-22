@@ -751,7 +751,7 @@ mod bench {
             // good enough for a diagnostic. Not interpolating.
             // Casts: p ∈ [0,100], len ≤ 100 (we send 100 pings) so the
             // f64 product is well within both usize and f64 precision.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 clippy::cast_precision_loss

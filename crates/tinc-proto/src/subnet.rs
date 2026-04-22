@@ -352,7 +352,7 @@ impl fmt::Display for Subnet {
     /// `net2str`. Canonical form: `%02x` for MAC parts, `inet_ntop`
     /// (= `Ipv*Addr::Display`) for IP. Prefix omitted if max, weight
     /// omitted if default.
-    #[allow(clippy::many_single_char_names)] // MAC byte destructuring
+    #[expect(clippy::many_single_char_names)] // MAC byte destructuring
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Per-variant: address, then `/prefix` iff below the type's max.
         // `inet_ntop` and `Ipv{4,6}Addr::Display` both produce RFC 5952
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn maskcmp_mask_equivalence() {
         for m in 1u32..8 {
-            #[allow(clippy::cast_possible_truncation)] // m ∈ 1..7 → result ∈ {0x80..0xfe}, fits u8
+            #[expect(clippy::cast_possible_truncation)] // m ∈ 1..7 → result ∈ {0x80..0xfe}, fits u8
             let c_mask = (0x100u32 - (1u32 << (8 - m))) as u8;
             let rs_mask = 0xffu8 << (8 - m);
             assert_eq!(c_mask, rs_mask, "m={m}");

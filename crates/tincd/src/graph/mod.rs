@@ -451,7 +451,7 @@ impl Graph {
     /// result vector is still `nodes.len()` long (indexed by raw slot,
     /// dead slots get `None` routes); use `.len()` on that if you need
     /// a count.
-    #[allow(clippy::missing_panics_doc)] // u32::try_from on a u32-bounded len
+    #[expect(clippy::missing_panics_doc)] // u32::try_from on a u32-bounded len
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         (0..u32::try_from(self.nodes.len()).unwrap())
             .filter(|&i| self.nodes[i as usize].is_some())
@@ -474,7 +474,7 @@ impl Graph {
     /// matches `dump_edges`' per-direction `send_request`.
     pub fn edge_iter(&self) -> impl Iterator<Item = (EdgeId, &Edge)> + '_ {
         self.edges.iter().enumerate().filter_map(|(i, slot)| {
-            #[allow(clippy::cast_possible_truncation)] // slab is u32-bounded
+            #[expect(clippy::cast_possible_truncation)] // slab is u32-bounded
             slot.as_ref().map(|e| (EdgeId(i as u32), e))
         })
     }
@@ -510,7 +510,6 @@ impl Graph {
     /// path isn't lighter). I.e. revisit when (1) indirect→direct, or
     /// (2) same hop count, lighter weight.
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp(&self, myself: NodeId) -> Vec<Option<Route>> {
         self.sssp_sticky(myself, &[])
     }
@@ -533,7 +532,7 @@ impl Graph {
     /// Analogue: Tailscale `netcheck.go:1453` (DERP home sticky
     /// unless new region beats old by ≥33 %).
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
+    #[expect(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp_sticky(&self, myself: NodeId, prev: &[Option<Route>]) -> Vec<Option<Route>> {
         // Helper: previous nexthop for slot `n`, if any.
         let prev_nh = |n: NodeId| {
@@ -708,7 +707,7 @@ impl Graph {
     /// Both the edge *and* its reverse get their connection's `mst`
     /// bit set. We return both `EdgeId`s.
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // reverse.unwrap() guarded two lines up
+    #[expect(clippy::missing_panics_doc)] // reverse.unwrap() guarded two lines up
     pub fn mst(&self) -> Vec<EdgeId> {
         let mut visited = vec![false; self.nodes.len()];
         let mut mst_edges = Vec::new();
@@ -773,7 +772,7 @@ impl Graph {
 // tests/kat.rs.
 
 #[cfg(test)]
-#[allow(clippy::many_single_char_names)] // graph node labels: a/b/c is clearest
+#[expect(clippy::many_single_char_names)] // graph node labels: a/b/c is clearest
 mod tests {
     use super::*;
 
@@ -1313,7 +1312,7 @@ pub(crate) fn run_graph(
 }
 
 #[cfg(test)]
-#[allow(clippy::many_single_char_names)] // graph node labels
+#[expect(clippy::many_single_char_names)] // graph node labels
 mod glue_tests {
     use super::*;
 

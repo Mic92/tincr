@@ -56,7 +56,7 @@ pub(crate) type SealErr = (NodeId, u16);
 /// # Panics
 /// `tx_scratch.len() != 16` at the `seal_into` call — i.e. `prefix`
 /// isn't 12 bytes. It always is (`TxTarget.prefix: [u8; 12]`).
-#[allow(clippy::cast_possible_truncation)] // body_len ≤ MTU < u16::MAX
+#[expect(clippy::cast_possible_truncation)] // body_len ≤ MTU < u16::MAX
 pub(crate) fn seal_super(
     target: &TxTarget,
     stride: usize,

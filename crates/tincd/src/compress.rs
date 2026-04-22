@@ -184,7 +184,7 @@ impl Compressor {
     /// Returns `None` on corrupt input or backend stubbed. Never
     /// panics on garbage.
     #[must_use]
-    #[allow(clippy::unused_self)] // becomes &mut when state lands
+    #[expect(clippy::unused_self)] // becomes &mut when state lands
     pub(crate) fn decompress(
         &mut self,
         src: &[u8],
@@ -336,7 +336,7 @@ mod lzo {
     /// called once before any other LZO function. Panics on ABI
     /// mismatch — that's a build/porting bug, not a runtime
     /// condition.
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // size_of: all <16; LZO ABI wants c_int
+    #[expect(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // size_of: all <16; LZO ABI wants c_int
     pub(super) fn ensure_init() {
         INIT.call_once(|| {
             // SAFETY: pure function, no preconditions. The whole

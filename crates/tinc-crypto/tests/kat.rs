@@ -46,7 +46,7 @@ struct EcdhVec {
     // priv_b is in the JSON for completeness/debugging but the test only
     // exercises the from_expanded path on side A. Tell serde to skip it so
     // dead_code doesn't fire.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[serde(skip)]
     priv_b: (),
     pub_b: String,

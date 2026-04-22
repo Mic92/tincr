@@ -168,7 +168,7 @@ pub struct TickResult {
 }
 
 /// State carried across ticks. Lives on `Daemon`.
-#[allow(clippy::struct_excessive_bools)] // independent flags, not a state machine
+#[expect(clippy::struct_excessive_bools)] // independent flags, not a state machine
 pub struct Discovery {
     dht: Dht,
 
@@ -589,7 +589,7 @@ impl Discovery {
         let value = self.build_value()?;
 
         // BEP 44 seq: unix seconds, clamped >last_seq for clock skew.
-        #[allow(clippy::cast_possible_wrap)] // 2^63 s ≈ 292 Gyr
+        #[expect(clippy::cast_possible_wrap)] // 2^63 s ≈ 292 Gyr
         let seq = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()) as i64)

@@ -443,7 +443,7 @@ fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 
 /// `cmd_generate_rsa_keys` under `DISABLE_LEGACY`: warn, succeed.
 /// Accepts the optional `[bits]` arg (NixOS module passes `4096`).
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn cmd_genkey_rsa_stub(_: &Paths, _: Option<&str>) -> Result<(), CmdError> {
     eprintln!(
         "Warning: this tinc was built without legacy protocol support; skipping RSA key generation."
@@ -453,7 +453,7 @@ fn cmd_genkey_rsa_stub(_: &Paths, _: Option<&str>) -> Result<(), CmdError> {
 
 fn cmd_sign(paths: &Paths, input: Option<&str>) -> Result<(), CmdError> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    #[allow(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
+    #[expect(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")
@@ -746,14 +746,14 @@ fn cmd_pcap(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     cmd::stream::run_pcap(paths, snaplen)
 }
 
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn cmd_version(_: &Paths) -> Result<(), CmdError> {
     print_version();
     Ok(())
 }
 
 /// Upstream IGNORES args; `tinc help foo` ≡ `tinc help`.
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
     print_help();
     Ok(())

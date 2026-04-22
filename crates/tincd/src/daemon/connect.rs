@@ -839,7 +839,7 @@ impl Daemon {
                         Ok((bytes, resp_len)) => {
                             needs_write |= conn.send_raw(&bytes);
                             // SOCKS reply ≤ 26 bytes (SOCKS5 max), fits u16
-                            #[allow(clippy::cast_possible_truncation)]
+                            #[expect(clippy::cast_possible_truncation)]
                             {
                                 conn.tcplen = resp_len as u16;
                             }

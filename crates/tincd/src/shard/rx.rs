@@ -86,7 +86,8 @@ pub(crate) struct RxTarget<'a> {
     /// Carried so the caller can do per-peer accounting later (or so
     /// a stuck-decrypt can `send_req_key` — but that's slow-path, so
     /// in practice this is just for the test asserts today).
-    #[allow(dead_code)] // tests assert routing; shard slow-path will read for `send_req_key`
+    #[allow(dead_code)]
+    // cfg-dependent: tests assert routing; shard slow-path will read for `send_req_key`
     pub from_nid: NodeId,
     /// The peer's handles. `rx_open` reads `inkey` (decrypt) and
     /// `replay` (commit). Borrow not clone: probe is per-packet, an
@@ -324,8 +325,6 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
 /// path), and the slow path's own error handling produces the
 /// log line. Adding an enum here would just be dead-code at the
 /// call site.
-#[allow(clippy::result_unit_err)] // see doc above; uniform fall-through
-#[allow(clippy::missing_panics_doc)] // mutex poison: only on panic in slow-path open
 pub(crate) fn rx_open(
     target: &RxTarget<'_>,
     snap: &TxSnapshot,

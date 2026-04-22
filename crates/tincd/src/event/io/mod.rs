@@ -58,7 +58,7 @@ pub(crate) enum Io {
     Read,
     // tincd registers `Read` or `ReadWrite`; bare `Write` exists for
     // symmetry in `wants()` and the backend match arms. Tests cover it.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // cfg-dependent: used under #[cfg(test)]
     Write,
     ReadWrite,
 }

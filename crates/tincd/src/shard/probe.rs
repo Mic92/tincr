@@ -72,7 +72,6 @@ pub(crate) struct TxTarget {
 /// (SPTPS replay window is a sliding bitmap, REJECTS reused seqnos,
 /// doesn't accept-twice).
 #[must_use]
-#[allow(clippy::missing_panics_doc)] // mutex; poison only on panic in seal
 pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<TxTarget> {
     // Setup-time fold of every "this packet must go through control"
     // gate. Cheapest possible early-out: one bool.
@@ -150,7 +149,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // AtomicU64 is just headroom for the wrap math. `wrapping_add` on
     // the producer side, sliding-bitmap on the consumer side; the
     // `as u32` here is exactly what `seal_data_into` does.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let seqno_base = handles
         .outseqno
         .fetch_add(u64::from(count), Ordering::Relaxed) as u32;

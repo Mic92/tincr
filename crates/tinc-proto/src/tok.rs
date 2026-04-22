@@ -127,7 +127,7 @@ impl<'a> Tok<'a> {
     /// # Errors
     /// `ParseError` if no tokens remain or the token parses as neither
     /// `u64` nor `i64`.
-    #[allow(clippy::cast_sign_loss)] // intentional: strtoul "negate as unsigned"
+    #[expect(clippy::cast_sign_loss)] // intentional: strtoul "negate as unsigned"
     pub fn lu(&mut self) -> Result<u64, ParseError> {
         let s = self.s()?;
         // Fast path: positive. The only on-wire negative is the SPTPS

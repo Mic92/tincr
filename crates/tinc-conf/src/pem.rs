@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn roundtrip_sizes() {
         for &len in &[32, 48, 96, 1, 47, 49, 100] {
-            #[allow(clippy::cast_possible_truncation)] // test data, len <= 100
+            #[expect(clippy::cast_possible_truncation)] // test data, len <= 100
             let blob: Vec<u8> = (0..len).map(|i| i as u8).collect();
             let mut buf = Vec::new();
             write_pem(&mut buf, "TEST", &blob).unwrap();

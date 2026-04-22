@@ -227,7 +227,7 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         csum = (csum & 0xffff) + (csum >> 16); // fold carry
         csum += csum >> 16; // fold again (the fold can carry once more)
         // After two folds csum fits in 16 bits; truncate-then-complement.
-        #[allow(clippy::cast_possible_truncation)] // two folds above guarantee high half is zero
+        #[expect(clippy::cast_possible_truncation)] // two folds above guarantee high half is zero
         let csum = !(csum as u16);
         let [hi, lo] = csum.to_be_bytes();
         packet[start + 16] = hi;

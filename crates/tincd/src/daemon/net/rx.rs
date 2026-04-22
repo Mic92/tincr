@@ -159,7 +159,7 @@ impl Daemon {
                 let mut k = 0usize;
                 for (idx, msg) in msgs.enumerate() {
                     k = idx + 1;
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(clippy::cast_possible_truncation)]
                     let n = msg.bytes.min(UDP_RX_BUFSZ) as u16;
                     let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
                     meta[idx] = (n, peer);
@@ -186,7 +186,7 @@ impl Daemon {
         while count < UDP_RX_BATCH {
             match recvfrom::<NixSS>(fd, &mut batch.bufs[count]) {
                 Ok((n, addr)) => {
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(clippy::cast_possible_truncation)]
                     let n = n.min(UDP_RX_BUFSZ) as u16;
                     let peer = addr.as_ref().and_then(ss_to_std).map(unmap);
                     meta[count] = (n, peer);

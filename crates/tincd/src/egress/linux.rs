@@ -154,7 +154,7 @@ mod tests {
 
         let payload = b"one frame, no GSO";
         let dst = SockAddr::from(rx_addr);
-        #[allow(clippy::cast_possible_truncation)] // test payload is 17 bytes
+        #[expect(clippy::cast_possible_truncation)] // test payload is 17 bytes
         let len = payload.len() as u16;
         f.send_batch(&EgressBatch {
             dst: &dst,
@@ -268,7 +268,7 @@ mod tests {
         // stride to catch any alignment assumption.
         let mut frames = [0u8; 13 * 3 + 5];
         for (i, b) in frames.iter_mut().enumerate() {
-            #[allow(clippy::cast_possible_truncation)] // i < frames.len()=44, fits u8
+            #[expect(clippy::cast_possible_truncation)] // i < frames.len()=44, fits u8
             {
                 *b = i as u8;
             }

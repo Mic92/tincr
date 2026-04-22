@@ -214,7 +214,7 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
             err: e,
         })?;
         // enumerate() is usize; truncates only at 4B-line config files.
-        #[allow(clippy::cast_possible_truncation)] // 4B-line config files don't exist
+        #[expect(clippy::cast_possible_truncation)] // 4B-line config files don't exist
         let lineno = (i + 1) as u32;
         if line.len() > MAX_LINE_LEN {
             return Err(ReadError::LineTooLong {
@@ -587,7 +587,7 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
         // "use Path::extension + eq_ignore_ascii_case" suggestion
         // would change behavior. Bytes-suffix is the port-faithful
         // form (and trivially also rejects non-ASCII look-alikes).
-        #[allow(clippy::case_sensitive_file_extension_comparisons)] // tinc writes ".conf" exactly
+        #[expect(clippy::case_sensitive_file_extension_comparisons)] // tinc writes ".conf" exactly
         if name.len() > 5 && name.ends_with(".conf") {
             files.push(ent.path());
         }

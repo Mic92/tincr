@@ -305,7 +305,7 @@ fn register_listeners(
 ) -> Result<Vec<ListenerSlot>, SetupError> {
     let mut listener_slots = Vec::with_capacity(listeners.len());
     for (i, l) in listeners.into_iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
+        #[expect(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
         let i = i as u8;
         ev.add(l.tcp_fd(), Io::Read, IoWhat::Tcp(i))
             .map_err(|e| SetupError::io("register TCP listener with event loop", e))?;
@@ -518,7 +518,7 @@ impl Daemon {
     /// happen here: setup is called once. Tests that call setup
     /// twice in one process are wrong; integration tests use
     /// subprocess.
-    #[allow(clippy::too_many_lines)] // straight-line struct init; pulling 3 fields out makes it worse
+    #[expect(clippy::too_many_lines)] // straight-line struct init; pulling 3 fields out makes it worse
     pub fn setup(
         confbase: &Path,
         pidfile: &Path,
@@ -1085,7 +1085,6 @@ impl Daemon {
         // Partial Fisher-Yates. Cap 8: resolver thread is serial.
         let n = cands.len();
         for i in 0..n.min(8) {
-            #[allow(clippy::cast_possible_truncation)]
             let j = i
                 + (<rand_core::OsRng as rand_core::RngCore>::next_u32(&mut rand_core::OsRng)
                     as usize)

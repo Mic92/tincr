@@ -175,7 +175,7 @@ fn sighup_reload_subnets() {
 /// - Single-use: second join with same cookie fails (the rename to
 ///   .used + unlink left no file behind).
 #[test]
-#[allow(clippy::similar_names)] // bob_* vs bob2_*: two distinct nodes, names track
+#[expect(clippy::similar_names)] // bob_* vs bob2_*: two distinct nodes, names track
 fn tinc_join_against_real_daemon() {
     use tinc_crypto::invite::{build_slug, cookie_filename};
     use tinc_crypto::sign::SigningKey;

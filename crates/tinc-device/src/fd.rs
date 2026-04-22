@@ -253,7 +253,7 @@ impl Device for FdTun {
     }
 
     /// `"fd"` placeholder — no TUNSETIFF here, so no kernel name.
-    #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
+    #[expect(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "fd"
     }

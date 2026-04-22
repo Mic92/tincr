@@ -77,7 +77,7 @@ pub(crate) fn goto(row: u16, col: u16) -> String {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Winsize {
     pub rows: u16,
-    #[allow(dead_code)] // populated from TIOCGWINSZ; rows is the only field top.rs reads today
+    #[expect(dead_code)] // populated from TIOCGWINSZ; rows is the only field top.rs reads today
     pub cols: u16,
 }
 
@@ -95,7 +95,6 @@ pub(crate) fn winsize() -> Winsize {
     // Macro generates `unsafe fn tiocgwinsz(fd, *mut winsize)`.
     // Types/constants come from `nix::libc` so this module has no
     // direct `libc` dependency — `nix` already pins the version.
-    #[allow(clippy::items_after_statements)] // one-use ioctl: hoisting puts it 100 lines from its only call
     mod ioctl {
         use nix::libc;
         nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);

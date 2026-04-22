@@ -125,7 +125,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
     // ── Auth (RFC 1929, :192-213): [01][userlen][user][passlen][pass]
     if let Some((user, pass)) = password_auth {
         buf.push(SOCKS5_AUTH_VERSION);
-        #[allow(clippy::cast_possible_truncation)] // checked ≤255 above
+        #[expect(clippy::cast_possible_truncation)] // checked ≤255 above
         {
             buf.push(user.len() as u8);
             buf.extend_from_slice(user.as_bytes());

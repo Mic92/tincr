@@ -211,7 +211,8 @@ pub(crate) struct Listener {
     /// `BindToAddress` config line (vs `ListenAddress` or the
     /// implicit wildcard). Consumed
     /// by outgoing-connect to pick a source address.
-    #[allow(dead_code)] // plumbed from BindToAddress; outgoing-socket pinning not yet wired
+    #[allow(dead_code)]
+    // cfg-dependent: read under #[cfg(test)]; outgoing-socket pinning not yet wired
     pub bindto: bool,
     /// `listen_socket_t.tcp`. TCP listener, accepting peer conns.
     /// `Socket` owns the fd; Drop closes.
@@ -385,7 +386,7 @@ pub(crate) fn adopt_listeners_from(
     let owned: Vec<OwnedFd> = (0..n)
         .map(|i| {
             // `int tcp_fd = i + 3`. n ≤ MAXSOCKETS=8; RawFd is i32.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let tcp_fd = start_fd + i as RawFd;
             // SAFETY: fd `start_fd..start_fd+n` was passed by
             // systemd, is open. Taking ownership is correct: no

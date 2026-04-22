@@ -248,7 +248,7 @@ impl ReplayWindow {
     /// translation creates a subtle interop bug: a peer that accepts
     /// packets the C rejects (or vice versa) is a connection that flaps
     /// under packet loss. Match the C bit-for-bit.
-    #[allow(clippy::cast_possible_truncation)] // late.len() is replay-window bytes (≪ u32::MAX); seqno arith is mod 2^32
+    #[expect(clippy::cast_possible_truncation)] // late.len() is replay-window bytes (≪ u32::MAX); seqno arith is mod 2^32
     fn check(&mut self, seqno: u32, update: bool) -> Result<(), SptpsError> {
         let win = self.late.len() as u32;
         if win > 0 {
@@ -418,7 +418,7 @@ impl Sptps {
     /// `replaywin` is the datagram replay window in *bytes* (default 16
     /// = 128 packets per `sptps_replaywin` in C). Ignored in stream mode
     /// — pass 0 if you like, but matching the C default is harmless.
-    #[allow(clippy::missing_panics_doc)] // unreachable: send_kex on a fresh struct can't fail
+    #[expect(clippy::missing_panics_doc)] // unreachable: send_kex on a fresh struct can't fail
     pub fn start(
         role: Role,
         framing: Framing,
@@ -471,7 +471,7 @@ impl Sptps {
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
         // u64 -> u32 truncate: same wrap as C's `s->outseqno++`
         // unsigned overflow. fetch_add returns the *previous* value.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
         let seqno = self.outseqno.fetch_add(1, Ordering::Relaxed) as u32;
 
@@ -609,7 +609,7 @@ impl Sptps {
         // counter carries are invisible on the wire. `Relaxed`: the
         // seqno is a nonce, not a happens-before edge; uniqueness is
         // what matters and fetch_add gives it monotonically.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
         let base = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed) as u32;
         base

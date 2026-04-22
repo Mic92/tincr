@@ -56,7 +56,7 @@ use tinc_tools::keypair;
 // CLI flags are inherently boolean. The lint's advice ("consider a
 // state machine") doesn't apply — these are five independent toggles,
 // not encoding of one state.
-#[allow(clippy::struct_excessive_bools)] // CLI flags: each bool maps to a -d/-q/-r/-w/-v switch
+#[expect(clippy::struct_excessive_bools)] // CLI flags: each bool maps to a -d/-q/-r/-w/-v switch
 struct Args {
     datagram: bool,
     quit_on_eof: bool,

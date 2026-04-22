@@ -500,7 +500,6 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
 ///
 /// Interior NUL in `cmd`, `my_name` or `node_name` returns
 /// `InvalidInput` rather than panicking.
-#[allow(clippy::missing_panics_doc)] // unwraps are on NUL-free literals
 pub(crate) fn do_outgoing_pipe(
     cmd: &str,
     addr: SocketAddr,
@@ -511,8 +510,8 @@ pub(crate) fn do_outgoing_pipe(
     // child only does libc:: pointer ops. CString panics on interior
     // NUL; cmd is user config, node_name is `check_id`-validated,
     // my_name is `Name = ` from tinc.conf (also `check_id`).
-    let sh = CString::new("/bin/sh").unwrap();
-    let dash_c = CString::new("-c").unwrap();
+    let sh = c"/bin/sh";
+    let dash_c = c"-c";
     let nul_err = |s: &str| io::Error::new(io::ErrorKind::InvalidInput, s);
     let cmd_c = CString::new(cmd).map_err(|_| nul_err("proxy cmd has interior NUL"))?;
     let argv = [

@@ -63,7 +63,7 @@ pub enum UpnpMode {
 impl UpnpMode {
     // Signature matches the feature-on variant so settings.rs is
     // cfg-free; clippy's unnecessary-wraps doesn't see across cfgs.
-    #[allow(clippy::unnecessary_wraps)]
+    #[expect(clippy::unnecessary_wraps)]
     pub(crate) fn from_config(_: &str) -> Option<Self> {
         log::warn!(target: "tincd",
             "UPnP was requested, but tincd was built without the `upnp` feature");
@@ -189,7 +189,7 @@ pub(crate) struct ListenerSlot {
 /// `IoWhat` and reaches into ALL the fields. There's no encapsulation
 /// to defend - the loop IS the daemon. The Rust gain is `&mut self`
 /// exclusivity: the compiler knows no two handlers run concurrently.
-#[allow(clippy::struct_excessive_bools)] // independent gates
+#[expect(clippy::struct_excessive_bools)] // independent gates
 // (overwrite_mac, any_pcap, etc), not a state enum.
 pub struct Daemon {
     // ─── arena

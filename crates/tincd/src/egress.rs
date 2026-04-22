@@ -248,7 +248,7 @@ impl TxBatch {
         frame: &[u8],
     ) {
         debug_assert!(self.can_coalesce(dst, sock, frame.len()));
-        #[allow(clippy::cast_possible_truncation)] // ≤ MTU+33
+        #[expect(clippy::cast_possible_truncation)] // ≤ MTU+33
         let frame_len = frame.len() as u16;
         if self.count == 0 {
             // First frame defines the run.
@@ -385,7 +385,7 @@ mod tests {
 
         let payload = b"exactly what net.rs:1930 sends";
         let dst = SockAddr::from(rx_addr);
-        #[allow(clippy::cast_possible_truncation)] // 30 bytes
+        #[expect(clippy::cast_possible_truncation)] // 30 bytes
         let len = payload.len() as u16;
         let batch = EgressBatch {
             dst: &dst,

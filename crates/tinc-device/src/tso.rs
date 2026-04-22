@@ -200,7 +200,7 @@ fn checksum(data: &[u8], initial: u64) -> u16 {
 /// complement). Four folds is enough for `u64` (each fold halves the
 /// bit width of the carry).
 #[inline]
-#[allow(clippy::cast_possible_truncation)] // folded to 16 bits
+#[expect(clippy::cast_possible_truncation)] // folded to 16 bits
 fn fold16(mut ac: u64) -> u16 {
     ac = (ac >> 16) + (ac & 0xffff);
     ac = (ac >> 16) + (ac & 0xffff);
@@ -486,7 +486,7 @@ pub fn tso_split(
             // RFC 8200 §3: "Length of the IPv6 payload, i.e., the
             // rest of the packet following this IPv6 header".
             // total_len - iphlen = tcp_hlen + seg_data_len.
-            #[allow(clippy::cast_possible_truncation)] // ≤ 65535
+            #[expect(clippy::cast_possible_truncation)] // ≤ 65535
             let plen = (total_len - iphlen) as u16;
             ip[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&plen.to_be_bytes());
             // No IP checksum in v6. No ID. Ext headers: copied
@@ -495,10 +495,10 @@ pub fn tso_split(
             // headers are immutable in transit anyway.
         } else {
             // wg-go `:937-943`: ID++, total_len, recompute csum.
-            #[allow(clippy::cast_possible_truncation)] // i ≤ 47 in practice
+            #[expect(clippy::cast_possible_truncation)] // i ≤ 47 in practice
             let id = first_id.wrapping_add(i as u16);
             ip[IPV4_ID_OFF..IPV4_ID_OFF + 2].copy_from_slice(&id.to_be_bytes());
-            #[allow(clippy::cast_possible_truncation)] // total_len ≤ hdr+gso_size ≤ MTU < 65536
+            #[expect(clippy::cast_possible_truncation)] // total_len ≤ hdr+gso_size ≤ MTU < 65536
             let totlen = total_len as u16;
             ip[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
             // Csum field already zeroed (from hdr_buf). Compute over
@@ -513,7 +513,7 @@ pub fn tso_split(
 
         // wg-go `:956`: seqno = first + gso_size * i. Wrapping is
         // correct (TCP seqno is mod 2^32, RFC 793 §3.3).
-        #[allow(clippy::cast_possible_truncation)] // TCP seqno is mod 2^32 (RFC 793 §3.3)
+        #[expect(clippy::cast_possible_truncation)] // TCP seqno is mod 2^32 (RFC 793 §3.3)
         let seq = first_seq.wrapping_add((gso_size * i) as u32);
         ip[iphlen + TCP_SEQ_OFF..iphlen + TCP_SEQ_OFF + 4].copy_from_slice(&seq.to_be_bytes());
 
@@ -536,7 +536,7 @@ pub fn tso_split(
         // wg-go `:973-977`. Pseudo-header + TCP header + payload.
         // RFC 793 §3.1. The pseudo-header `tcp_len` is "TCP header
         // + data" — same as what we sum over.
-        #[allow(clippy::cast_possible_truncation)] // tcp_hlen+seg_data_len ≤ MTU < 65536
+        #[expect(clippy::cast_possible_truncation)] // tcp_hlen+seg_data_len ≤ MTU < 65536
         let len_for_pseudo = (tcp_hlen + seg_data_len) as u16;
         let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, addrs, len_for_pseudo);
         let tcp_csum = checksum(&ip[iphlen..total_len], pseudo);
@@ -758,7 +758,7 @@ impl GroBucket {
             u16::from(ip[1]) << 8 | u16::from(ip[6] >> 5) << 7 | u16::from(ip[8])
         };
 
-        #[allow(clippy::cast_possible_truncation)] // payload_len < 65535
+        #[expect(clippy::cast_possible_truncation)] // payload_len < 65535
         let gso_size = payload_len as u16;
 
         // ─── empty bucket: seed it ──────────────────────────────────
@@ -766,7 +766,7 @@ impl GroBucket {
             self.buf[VNET_HDR_LEN..VNET_HDR_LEN + ip.len()].copy_from_slice(ip);
             self.len = VNET_HDR_LEN + ip.len();
             self.is_v6 = is_v6;
-            #[allow(clippy::cast_possible_truncation)] // 20 or 40
+            #[expect(clippy::cast_possible_truncation)] // 20 or 40
             {
                 self.iphlen = iphlen as u8;
                 self.tcphlen = tcphlen as u8;
@@ -864,7 +864,7 @@ impl GroBucket {
         if self.num_merged > 1 {
             // ─── fix up the super-packet's IP header ──────────────
             // wg-go `:640-649`.
-            #[allow(clippy::cast_possible_truncation)] // capped at GRO_MAX_IP_LEN
+            #[expect(clippy::cast_possible_truncation)] // capped at GRO_MAX_IP_LEN
             let totlen = pkt.len() as u16;
             if self.is_v6 {
                 pkt[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&(totlen - 40).to_be_bytes());
@@ -883,7 +883,7 @@ impl GroBucket {
             // chains it (RFC 1071) with the TCP-hdr+payload sum.
             // Same shape `gso_none_checksum` reads on ingest.
             let (addr_off, addr_len) = ip_addr_span(self.is_v6);
-            #[allow(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
+            #[expect(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
             let l4_len = (pkt.len() - iphlen) as u16;
             let pseudo = pseudo_header_checksum_nofold(
                 IPPROTO_TCP,
@@ -901,7 +901,7 @@ impl GroBucket {
             // (`virtio_net.h:83`) maps NEEDS_CSUM → CHECKSUM_PARTIAL
             // and gso_type → SKB_GSO_TCPV4/6; `napi_gro_receive`
             // does the rest.
-            #[allow(clippy::cast_possible_truncation)] // iphlen+tcphlen ≤ 100
+            #[expect(clippy::cast_possible_truncation)] // iphlen+tcphlen ≤ 100
             let hdr = VirtioNetHdr {
                 flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
                 gso_type: if self.is_v6 {

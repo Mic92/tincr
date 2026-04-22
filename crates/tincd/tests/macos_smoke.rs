@@ -119,7 +119,7 @@ fn utun_icmp_unreachable() {
     );
 
     // SIGTERM → clean shutdown after real traffic.
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap)]
     let pid = Pid::from_raw(child.id() as i32);
     kill(pid, Signal::SIGTERM).expect("kill SIGTERM");
 

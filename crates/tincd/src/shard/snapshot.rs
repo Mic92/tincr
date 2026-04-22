@@ -61,7 +61,6 @@ pub(crate) struct NodeViewEntry {
     /// `nodes.get(nid).conn.is_some()`. The `TCPOnly` / PACKET-17 gate.
     /// Shard can't read `ConnId` (control owns conns), but it doesn't need
     /// to — the hot path only asks "is there one."
-    #[allow(dead_code)] // read via NodeView accessors once shard tx-path lands
     pub has_direct_conn: bool,
     /// `graph.node(nid).reachable`. NOT redundant with `routes[nid].is_some()`:
     /// the route exists for `myself` too (`distance: 0`), and the relay-recv
@@ -77,13 +76,11 @@ pub(crate) struct NodeViewEntry {
     /// `None` for transitives (no `NodeState` entry; only direct neighbors
     /// get one) — `choose_udp_address` returns `None` and the caller drops
     /// the packet, same as today. `None` for `myself`.
-    #[allow(dead_code)] // read via NodeView::edge_addr once shard tx-path lands
     pub edge_addr: Option<SocketAddr>,
     /// `graph.node(nid).name`. `node_log_name`. `Arc<str>` so cloning
     /// `NodeView` (fanout to N shards) doesn't clone N×100 Strings.
     /// The `Arc::from(&str)` at build time is one alloc; `Arc::clone` at
     /// fanout is a refcount bump.
-    #[allow(dead_code)] // read via NodeView::name_of once shard tx-path lands
     pub name: Arc<str>,
 }
 
@@ -120,7 +117,7 @@ impl NodeView {
     /// hits — but the snapshot has the same shape).
     #[inline]
     #[must_use]
-    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    #[allow(dead_code)] // cfg-dependent: read under #[cfg(test)]; shard tx-path consumer not yet landed
     pub(crate) fn name_of(&self, nid: NodeId) -> &str {
         self.entries
             .get(nid.0 as usize)
@@ -156,7 +153,7 @@ impl NodeView {
     /// `self.nodes.get(&nid).is_some_and(|ns| ns.conn.is_some())`.
     #[inline]
     #[must_use]
-    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    #[allow(dead_code)] // cfg-dependent: read under #[cfg(test)]; shard tx-path consumer not yet landed
     pub(crate) fn has_direct_conn(&self, nid: NodeId) -> bool {
         self.entries
             .get(nid.0 as usize)
@@ -167,7 +164,7 @@ impl NodeView {
     /// `graph.node(nid).reachable`. The relay-receive gate (`rx.rs:468`).
     #[inline]
     #[must_use]
-    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    #[allow(dead_code)] // cfg-dependent: read under #[cfg(test)]; shard tx-path consumer not yet landed
     pub(crate) fn reachable(&self, nid: NodeId) -> bool {
         self.entries
             .get(nid.0 as usize)
@@ -178,7 +175,7 @@ impl NodeView {
     /// `nodes.get(nid).edge_addr`. `choose_udp_address` cold-path fallback.
     #[inline]
     #[must_use]
-    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    #[allow(dead_code)] // cfg-dependent: read under #[cfg(test)]; shard tx-path consumer not yet landed
     pub(crate) fn edge_addr(&self, nid: NodeId) -> Option<SocketAddr> {
         self.entries
             .get(nid.0 as usize)

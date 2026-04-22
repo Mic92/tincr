@@ -103,7 +103,7 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "Got UDP probe request {} from {peer_name}",
                         body.len());
-            #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+            #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
             let body_len = body.len() as u16;
             // Asymmetric-UDP meta-ack: remember the largest probe
             // request we've seen so `try_udp` can tell `peer` over
@@ -119,7 +119,7 @@ impl Daemon {
         // ─── reply (type 1 or 2) ────────────────────────────────
         // type-2 carries probed length in bytes [1..3] (reply itself
         // is MIN_PROBE_SIZE on wire — saves bandwidth).
-        #[allow(clippy::cast_possible_truncation)] // body ≤ MTU
+        #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
         let len: u16 = if body[0] == 2 && body.len() >= 3 {
             u16::from_be_bytes([body[1], body[2]])
         } else {
@@ -693,7 +693,7 @@ impl Daemon {
         // 5s deltas at link rate are << 2^52; precision loss is
         // immaterial for a coarse demand signal compared against
         // KiB/s thresholds.
-        #[allow(
+        #[expect(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss

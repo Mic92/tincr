@@ -137,7 +137,7 @@ impl LineBuf {
 // `struct_excessive_bools`: `connection_status_t` is a packed
 // bitfield. The bits are independent (a conn is active AND pinged
 // in steady state); a state-enum doesn't fit.
-#[allow(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
+#[expect(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
 pub(crate) struct Connection {
     fd: OwnedFd,
     pub inbuf: LineBuf,
@@ -416,7 +416,6 @@ impl Connection {
     /// `receive_meta` recv-and-buffer half.
     ///
     /// `rng`: only touched on SPTPS rekey (HANDSHAKE → `send_kex`).
-    #[allow(clippy::missing_panics_doc)] // expect on take after is_some
     pub(crate) fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
         let mut stack = [0u8; MAXBUFSIZE];
 

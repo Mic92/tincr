@@ -74,7 +74,6 @@ impl DnsWorker {
     /// create a thread (OOM / `RLIMIT_NPROC`), which is unrecoverable
     /// at daemon setup anyway.
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub(crate) fn spawn() -> Self {
         let (req_tx, req_rx) = std::sync::mpsc::channel::<DnsReq>();
         let (res_tx, res_rx) = std::sync::mpsc::channel::<DnsRes>();

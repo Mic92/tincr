@@ -84,7 +84,7 @@ pub(super) fn wait(
 // Event accessors. Only EPOLLIN/EPOLLOUT — see module doc.
 
 #[inline]
-#[allow(clippy::cast_possible_truncation)] // tokens are slot indices, fit usize on any platform
+#[expect(clippy::cast_possible_truncation)] // tokens are slot indices, fit usize on any platform
 pub(super) fn ev_token(e: &RawEvent) -> usize {
     e.data() as usize
 }

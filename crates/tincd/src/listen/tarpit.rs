@@ -125,7 +125,7 @@ impl Tarpit {
             // INCREASE burst. saturating_duration_since clamps that
             // to zero — STRICTER than C, harmless.
             // elapsed: u32 overflows after 136yr uptime; would only under-drain anyway
-            #[allow(clippy::cast_possible_truncation)]
+            #[expect(clippy::cast_possible_truncation)]
             {
                 self.samehost_burst = self.samehost_burst.saturating_sub(elapsed as u32);
             }
@@ -147,7 +147,7 @@ impl Tarpit {
         // ─── all-host bucket
         // Same arithmetic, different bucket.
         let elapsed = now.saturating_duration_since(self.allhost_time).as_secs();
-        #[allow(clippy::cast_possible_truncation)] // see same-host bucket above
+        #[expect(clippy::cast_possible_truncation)] // see same-host bucket above
         {
             self.allhost_burst = self.allhost_burst.saturating_sub(elapsed as u32);
         }

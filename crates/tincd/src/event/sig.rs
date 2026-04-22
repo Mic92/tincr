@@ -82,7 +82,7 @@ extern "C" fn handler(signum: libc::c_int) {
     if fd < 0 {
         return;
     }
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // NSIG < 256
+    #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // NSIG < 256
     let byte = signum as u8;
     // SAFETY: write(2) is async-signal-safe (POSIX.1). fd is a
     // valid pipe write-end (set in new() before this handler was

@@ -232,7 +232,7 @@ impl Device for Dummy {
         Mode::Tun
     }
 
-    #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
+    #[expect(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
     fn iface(&self) -> &str {
         "dummy"
     }
@@ -353,7 +353,7 @@ mod tests {
         fn mode(&self) -> Mode {
             Mode::Tun
         }
-        #[allow(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
+        #[expect(clippy::unnecessary_literal_bound)] // trait method: can't return &'static str when trait says &str
         fn iface(&self) -> &str {
             "mock"
         }

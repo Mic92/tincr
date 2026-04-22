@@ -383,7 +383,6 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, Cm
 ///
 /// Returns the per-line `Removing` warnings; success means the file
 /// changed (Del-with-no-match is `Err`, Set/Add always rewrite).
-#[allow(clippy::missing_panics_doc)] // unwrap guarded by is_some_and; clippy can't see across statements
 pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
@@ -501,7 +500,6 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>,
 ///
 /// `clippy::needless_pass_by_value`: `.map_err(tmpfile_werr)` passes by
 /// value; closure is uglier.
-#[allow(clippy::needless_pass_by_value)] // .map_err(tmpfile_werr) passes by value; closure is uglier
 fn tmpfile_werr(e: std::io::Error) -> CmdError {
     CmdError::Io {
         path: PathBuf::from("<tmpfile>"),

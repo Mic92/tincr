@@ -128,7 +128,7 @@ impl Tun {
         // path on a second TUNSETIFF (`tun.c:2744`) requires
         // re-attach (`:2729`) which fails on an already-attached
         // fd — there's no "change flags only" ioctl.
-        #[allow(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (max 0x5001)
+        #[expect(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (max 0x5001)
         let flags = match cfg.mode {
             Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
@@ -254,7 +254,7 @@ impl Tun {
         // 0x5101. The MQ bit must be set on every TUNSETIFF —
         // tun.c:2719 rejects mismatch. Same vnet_hdr handling as
         // single-queue (drain/write_super are unchanged).
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let flags =
             (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_MULTI_QUEUE | libc::IFF_VNET_HDR) as i16;
 
@@ -299,7 +299,7 @@ impl Tun {
 /// # Errors
 /// `InvalidInput` for too-long name. The error message includes
 /// the name and the limit.
-#[allow(clippy::cast_possible_wrap)] // ASCII bytes → c_char (sign is platform noise)
+#[allow(clippy::cast_possible_wrap)] // ASCII bytes → c_char (c_char sign is arch-dependent)
 fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSIZ]> {
     let mut buf = [0; libc::IFNAMSIZ];
     let Some(name) = iface else {
@@ -447,7 +447,7 @@ fn tunsetiff(
     // `to_string_lossy`: never lossy in practice, but forward-
     // compatible (kernel might relax someday) and avoids the
     // `into_string().unwrap()` panic-on-non-UTF8.
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII bytes, sign is platform noise
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII bytes (c_char sign is arch-dependent)
     let bytes = ifr.ifr_name.map(|c| c as u8);
     let name = CStr::from_bytes_until_nul(&bytes).map_err(|_| {
         io::Error::new(
@@ -526,7 +526,7 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // write). The 14 bytes are: `[0..6]` MAC, `[6..14]` undefined
     // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
     // read `[0..6]`.
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes, sign is platform noise
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes (c_char sign is arch-dependent)
     let mac: Mac = {
         let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data;
         [
@@ -792,7 +792,7 @@ mod tests {
     /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
     /// `c_char` signedness; values are ASCII either way.
     #[test]
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII test bytes
+    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII test bytes (c_char sign is arch-dependent)
     fn pack_ifr_name_ok() {
         #[rustfmt::skip]
         let cases: &[(Option<&str>, &[u8])] = &[
