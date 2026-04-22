@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tinc_device::{Device, DeviceConfig, Mode, Tun, VNET_HDR_LEN};
-use tincd_bpf::{open_reuseport_group, tunsetsteeringebpf};
+use tincd::shard::bpf::{open_reuseport_group, tunsetsteeringebpf};
 
 // ════════════════════════ bwrap re-exec wrapper ══════════════════════
 

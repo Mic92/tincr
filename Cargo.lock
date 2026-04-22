@@ -1437,16 +1437,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tincd-bpf"
-version = "0.0.0"
-dependencies = [
- "libc",
- "nix",
- "socket2",
- "tinc-device",
-]
-
-[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"

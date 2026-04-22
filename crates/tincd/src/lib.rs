@@ -55,7 +55,7 @@ mod script;
 mod scriptworker;
 pub mod sd_notify;
 mod seen;
-mod shard;
+pub mod shard;
 mod socks;
 mod subnet_tree;
 mod tcp_tunnel;

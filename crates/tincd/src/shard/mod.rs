@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bpf;
 mod probe;
 mod rx;
 mod seal;
