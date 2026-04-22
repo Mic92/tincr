@@ -37,8 +37,22 @@
 # macOS: run test binaries under sudo when passwordless sudo is
 # available, so utun tests work transparently. Without sudo the
 # tests skip themselves (check euid).
+#
+# aarch64: NEON is mandatory in ARMv8-A so `target_feature = "neon"` is on
+# by default; `chacha20_force_neon` skips the soft fallback (chacha20 0.9
+# on aarch64 picks soft unless this cfg is set — there is no runtime
+# autodetect like x86's cpufeatures path). sample(1) on the macOS
+# throughput bench showed `try_apply_keystream_inout` at 11% self-time
+# with the soft backend; the NEON 4-block kernel is ~3× faster.
 [target.aarch64-apple-darwin]
 runner = "scripts/macos-test-runner.sh"
+rustflags = ["--cfg", "chacha20_force_neon"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "force-frame-pointers=yes",
+    "--cfg", "chacha20_force_neon",
+]
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
