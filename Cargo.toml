@@ -97,11 +97,6 @@ subtle = "2.5"
 # `^0.11.0-pre` is compatible with both prerelease and final. Re-check on
 # mainline 7.
 mainline = { version = "6.0", default-features = false, features = ["node"] }
-# Local interface enumeration for v6 candidate addresses. The DHT is a v4
-# island (BEP 32 dual-stack was wontfix'd upstream); v6 doesn't NAT, so the
-# kernel's getifaddrs() already knows the reachable address. libc-only dep.
-if-addrs = "0.15"
-
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

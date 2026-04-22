@@ -95,9 +95,6 @@ base64 = "0.22"
 # in-band reflexive path (ADD_EDGE/ANS_KEY append) needs a relay with a
 # static Address=; this gives an estimate *before* first contact.
 mainline.workspace = true
-# discovery.rs: getifaddrs() for v6 candidate enumeration. The DHT is
-# v4-only; v6 doesn't NAT so the kernel already knows the reachable address.
-if-addrs.workspace = true
 
 # socket2 for the four-step socket→setsockopt→bind→listen sequence.
 # std's TcpListener::bind is atomic, no seam for IPV6_V6ONLY. socket2

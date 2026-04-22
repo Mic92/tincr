@@ -9,18 +9,14 @@ use std::net::Ipv6Addr;
 /// (`IFA_F_TEMPORARY` not surfaced) — they rotate daily, the 5-min
 /// republish catches it.
 pub(super) fn enumerate_v6() -> Vec<Ipv6Addr> {
-    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+    let Ok(ifaces) = nix::ifaddrs::getifaddrs() else {
         return Vec::new();
     };
     ifaces
-        .into_iter()
-        .filter_map(|iface| match iface.addr {
-            if_addrs::IfAddr::V6(v6) => {
-                let ip = v6.ip;
-                let s0 = ip.segments()[0];
-                ((s0 & 0xe000) == 0x2000).then_some(ip)
-            }
-            if_addrs::IfAddr::V4(_) => None,
+        .filter_map(|iface| {
+            let ip = iface.address?.as_sockaddr_in6()?.ip();
+            let s0 = ip.segments()[0];
+            ((s0 & 0xe000) == 0x2000).then_some(ip)
         })
         .collect()
 }
