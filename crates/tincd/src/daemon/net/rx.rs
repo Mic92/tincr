@@ -214,7 +214,7 @@ impl Daemon {
         //
         // GRO TUN write: arm the coalescer for the duration
         // of this dispatch loop. `send_packet_myself` (the local-
-        // delivery sink, hit via `route_packet` when the inner dst
+        // delivery sink, hit via `forward_packet` when the inner dst
         // is in our subnet) sees `gro_bucket.is_some()` and offers
         // the IP packet to it instead of writing immediately. Batch
         // boundary = coalesce window: flush after the loop, never
@@ -290,7 +290,7 @@ impl Daemon {
 
             // ─── Slow path. Park the bucket in self for the
             // duration of this one packet's journey through
-            // handle_incoming_vpn_packet → route_packet →
+            // handle_incoming_vpn_packet → forward_packet →
             // send_packet_myself. Same out-and-back as `rx_scratch`.
             // Taken back below before the next iteration so the
             // local `gro` owns it across the loop.

@@ -934,13 +934,13 @@ fn udp_relay_gate_unauthenticated_sender() {
 /// off`. alice's `hosts/mid` claims `Subnet = 10.0.0.0/24` (alice
 /// is `StrictSubnets` so she ignores bob's gossiped /32 and
 /// believes mid owns the whole /24). alice tunnels 10.0.0.2 TO
-/// MID. mid decrypts → `route_packet(..., Some(alice))` → routes
+/// MID. mid decrypts → `forward_packet(..., Some(alice))` → routes
 /// to bob (mid DOES have bob's /32 from gossip) → the `FMODE_OFF`
 /// gate fires.
 ///
 /// Why this contortion: the simpler `three_daemon_relay` shape
 /// (alice tunnels TO BOB, mid relays at the UDP layer) never
-/// calls mid's `route_packet` — mid forwards opaque ciphertext.
+/// calls mid's `forward_packet` — mid forwards opaque ciphertext.
 /// The forwarding gate is L3 forwarding ONLY. Forcing alice
 /// to encapsulate FOR mid is what makes mid decrypt-then-route.
 ///
@@ -1059,7 +1059,7 @@ fn three_daemon_forwarding_off_drops_transit() {
     });
 
     // ─── THE PROBE ────────────────────────────────────────────────
-    // alice encrypts for mid → mid decrypts → route_packet(...,
+    // alice encrypts for mid → mid decrypts → forward_packet(...,
     // Some(alice)) → route_ipv4 → Forward{to: bob} → gate fires.
     // Spam (each iteration drives try_tx); drain bob's TUN. The
     // negative assertion: bob NEVER sees the payload.

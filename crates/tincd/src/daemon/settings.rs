@@ -117,7 +117,7 @@ pub struct DaemonSettings {
     /// compress TOWARDS us at this level. Default 0 (none). 1-9
     /// zlib, 12 LZ4; 10-11 LZO (stubbed, rejected at setup).
     pub compression: u8,
-    /// When set, `route_packet` decrements TTL after the forward
+    /// When set, `forward_packet` decrements TTL after the forward
     /// decision. Makes `traceroute` through the mesh show each hop.
     /// Off by default because it MUTATES forwarded packets (TTL +
     /// IPv4 checksum); some payloads (e.g. ESP) hash the IP header.
@@ -159,7 +159,7 @@ pub struct DaemonSettings {
     /// `Off` drops packets not addressed to us (leaf-only mode).
     /// `Kernel` writes everything from a peer straight to TUN, lets
     /// the OS routing table decide. Checked at the top of
-    /// `route_packet`. Default `Internal`.
+    /// `forward_packet`. Default `Internal`.
     pub forwarding_mode: ForwardingMode,
     /// Dispatch shape: `Router` → ethertype switch; `Switch` →
     /// `route_mac`; `Hub` → always broadcast. NOT reloadable -
@@ -295,7 +295,7 @@ pub struct DaemonSettings {
 }
 
 /// Three-way forwarding knob. `Internal` gates the `SPTPS_PACKET`
-/// relay; `Kernel` is checked at the top of `route_packet`:
+/// relay; `Kernel` is checked at the top of `forward_packet`:
 /// anything from a peer goes straight to the TUN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ForwardingMode {
@@ -393,7 +393,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_int!(config, "PingTimeout", u32, |v| {
         settings.pingtimeout = v.clamp(1, settings.pinginterval);
     });
-    // Per-host PMTU is read in proto.rs::handle_id; this is the
+    // Per-host PMTU is read in dispatch.rs::handle_id; this is the
     // tinc.conf-level clamp.
     cfg_int!(config, "PMTU", u16, |v| settings.global_pmtu = Some(v));
     // Fallback when per-host Weight absent.

@@ -1,7 +1,7 @@
 //! TX fast-path eligibility probe.
 //!
 //! `tx_probe(&TxSnapshot, chunk0, count)` walks the same gate chain
-//! `route_packet` → `send_sptps_packet` → `send_sptps_data_relay`
+//! `forward_packet` → `send_sptps_packet` → `send_sptps_data_relay`
 //! would walk, returning `Some(TxTarget)` only if the WHOLE super
 //! can take the direct-UDP path with no per-chunk side effects. No
 //! `&mut Daemon` reborrow: the `Arc<AtomicU64>` outseqno IS the seqno
@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 
 use super::{TunnelHandles, TxSnapshot};
 use crate::graph::NodeId;
-use crate::route::{RouteResult, route};
+use crate::route_decide::{RouteResult, route};
 
 /// Per-super seal-send target. Everything is a COPY — no borrows into
 /// snapshot state. ~120 bytes, copied once per super (~33 chunks).
@@ -79,7 +79,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None;
     }
 
-    // ARP gate (`route_packet:1009`). `route()` returns `Unsupported`
+    // ARP gate (`forward_packet:1009`). `route()` returns `Unsupported`
     // for ARP anyway, but checking it explicitly skips the trie probe.
     // `chunk0.len() < 14` falls through `route()`'s `TooShort`.
     if chunk0.len() >= 14
@@ -88,7 +88,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None;
     }
 
-    // `route()`. Same closure as `route_packet:1031` — but `NodeView::
+    // `route()`. Same closure as `forward_packet:1031` — but `NodeView::
     // resolve` packages `node_ids.get + graph.node().reachable` so the
     // closure body is one method call instead of two struct probes.
     // The trie lookup is the expensive half; we do it ONCE per super.
@@ -114,7 +114,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None;
     }
     // TCPONLY. Direct ⇒ relay==to ⇒ relay_options == route.options.
-    if (snap.myself_options | route.options) & crate::proto::OPTION_TCPONLY != 0 {
+    if (snap.myself_options | route.options) & crate::dispatch::OPTION_TCPONLY != 0 {
         return None;
     }
 
@@ -264,7 +264,7 @@ mod tests {
     /// and `CLAMP_MSS` gate (default-on, blocks every real peer).
     #[test]
     fn direct_peer_default_options_is_some() {
-        let (snap, bob) = fixture(crate::proto::OPTION_CLAMP_MSS | 0x0004);
+        let (snap, bob) = fixture(crate::dispatch::OPTION_CLAMP_MSS | 0x0004);
         let frame = v4_frame([10, 0, 0, 5]);
 
         let target = tx_probe(&snap, &frame, 4).expect("direct peer must pass");
@@ -277,7 +277,7 @@ mod tests {
     /// Negative: TCPONLY rejects (we're sending UDP).
     #[test]
     fn tcponly_is_none() {
-        let (snap, bob) = fixture(crate::proto::OPTION_TCPONLY);
+        let (snap, bob) = fixture(crate::dispatch::OPTION_TCPONLY);
         let frame = v4_frame([10, 0, 0, 5]);
 
         assert!(tx_probe(&snap, &frame, 1).is_none());

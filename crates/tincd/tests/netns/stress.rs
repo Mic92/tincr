@@ -178,7 +178,7 @@ fn stress_link_flap() {
 /// need the veth-based rig from `BUGS-NETNS.md` TODO.
 ///
 /// PMTU discovery is data-driven (`try_tx(.., mtu=true)` only on
-/// the `route_packet` path). We feed it with a low-rate flood ping
+/// the `forward_packet` path). We feed it with a low-rate flood ping
 /// while polling `dump nodes` for `mtu != 0`. 333ms cadence × 20
 /// probes = ~7s worst case; budget 15s.
 #[test]
@@ -748,7 +748,7 @@ fn stress_relay_mid_restart() {
 ///
 /// The brief observed: PMTU for an idle direct neighbor never
 /// converges. `try_tx` with `mtu=true` only fires from
-/// `route_packet` (data path); the periodic ping tick passes
+/// `forward_packet` (data path); the periodic ping tick passes
 /// `mtu=false` (`periodic.rs:108`). C tinc does the same
 /// (`net.c:248: try_tx(c->node, false)`). So **`mtu == 0` after
 /// idle is C-PARITY behavior**, not a Rust bug.

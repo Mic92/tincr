@@ -64,7 +64,7 @@ impl Daemon {
             rows.push(format!(
                 "{} {} {} {} {} {} {} {} {} {:x} {:x} {} {} {} {} {} {} {} {} {} {} {} {}",
                 Request::Control,                                   // %d CONTROL
-                crate::proto::REQ_DUMP_NODES,                       // %d
+                crate::dispatch::REQ_DUMP_NODES,                    // %d
                 name,                                               // %s
                 self.id6_table.id_of(nid).unwrap_or(NodeId6::NULL), // %s id
                 hostname,                                           // %s ("HOST port PORT")
@@ -116,7 +116,7 @@ impl Daemon {
             rows.push(format!(
                 "{} {} {} {} {} {} {:x} {}",
                 Request::Control,
-                crate::proto::REQ_DUMP_EDGES,
+                crate::dispatch::REQ_DUMP_EDGES,
                 from,
                 to,
                 addr,
@@ -140,7 +140,7 @@ impl Daemon {
             rows.push(format!(
                 "{} {} {} {} {} {} {}",
                 Request::Control,
-                crate::proto::REQ_DUMP_TRAFFIC,
+                crate::dispatch::REQ_DUMP_TRAFFIC,
                 node.name.as_str(),
                 t.map_or(0, |t| t.stats.in_packets()),
                 t.map_or(0, |t| t.stats.in_bytes()),

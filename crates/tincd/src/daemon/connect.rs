@@ -5,12 +5,12 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use crate::conn::Connection;
+use crate::dispatch::parse_ack;
 use crate::listen::fmt_addr;
 use crate::outgoing::{
     ConnectAttempt, OutgoingId, ProxyConfig, probe_connecting, try_connect, try_connect_via_proxy,
 };
 use crate::pmtu::PmtuState;
-use crate::proto::parse_ack;
 use crate::tunnel::MTU;
 use crate::{local_addr, socks};
 
@@ -19,7 +19,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use tinc_proto::msg::DelEdge;
 use tinc_proto::{AddrStr, Request};
 
-use crate::proto::ConnOptions;
+use crate::dispatch::ConnOptions;
 
 impl Daemon {
     /// ACK handler, mutation half. Parse done by `proto::parse_ack`;
@@ -28,14 +28,14 @@ impl Daemon {
         &mut self,
         id: ConnId,
         body: &[u8],
-    ) -> Result<bool, crate::proto::DispatchError> {
+    ) -> Result<bool, crate::dispatch::DispatchError> {
         let parsed = parse_ack(body)?;
         let conn = self.conn_mut(id);
 
         // `ack_h:237`: replayed ACK after `allow_request=None` would
         // re-run add_edge + send_everything.
         if conn.active {
-            return Err(crate::proto::DispatchError::Unauthorized);
+            return Err(crate::dispatch::DispatchError::Unauthorized);
         }
 
         // PMTU only sticks if BOTH sides set it.
@@ -61,7 +61,7 @@ impl Daemon {
         // (try_tx); seed it now with the clamp so the first probe
         // cycle starts from a sane ceiling instead of wasting probes
         // above the user's known path MTU. The min(host, global) is
-        // computed in proto.rs::handle_id.
+        // computed in dispatch.rs::handle_id.
         let pmtu_cap = conn.pmtu_cap;
 
         conn.allow_request = None;

@@ -48,7 +48,7 @@ impl Daemon {
         // lazily on first burst; ship+disarm unconditionally after.
         while iters < DEVICE_DRAIN_CAP {
             iters += 1;
-            // mem::take: `route_packet` borrows `&mut self`; the
+            // mem::take: `forward_packet` borrows `&mut self`; the
             // arena slot borrow conflicts. Same dance as
             // `udp_rx_batch`. The arena is `Some` between calls
             // (set in `setup`, never taken elsewhere).
@@ -112,13 +112,13 @@ impl Daemon {
                         let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                         myself_tunnel.stats.add_in(1, n as u64);
 
-                        // `slot_mut` because route_packet mutates
+                        // `slot_mut` because forward_packet mutates
                         // (overwrite_mac, fragment in-place). The send
                         // site sees `tx_batch.is_some()` and stages;
                         // or flushes-then-stages on dst/size mismatch;
                         // or falls through to immediate send for the
                         // cold path (no `udp_addr_cached`).
-                        nw |= self.route_packet(&mut arena.slot_mut(i)[..n], None);
+                        nw |= self.forward_packet(&mut arena.slot_mut(i)[..n], None);
                     }
                     self.dp.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
@@ -148,7 +148,7 @@ impl Daemon {
                     // TSO ingest: the vnet_hdr device put a ≤64KB
                     // TCP super-segment in `arena`.
                     // `tso_split` re-segments it into MTU-sized frames
-                    // with re-synthesized TCP/IP headers. `route_packet`
+                    // with re-synthesized TCP/IP headers. `forward_packet`
                     // runs ONCE (chunk[0]; same dst for all chunks — TSO
                     // is single-flow) then the rest skip the trie lookup.
                     self.device_errors = 0;
@@ -159,7 +159,7 @@ impl Daemon {
                             .into_boxed_slice()
                     });
                     // Same `mem::take` dance as `device_arena`:
-                    // `route_packet` borrows `&mut self`, the slice
+                    // `forward_packet` borrows `&mut self`, the slice
                     // borrow conflicts.
                     let mut scratch = std::mem::take(scratch);
                     let mut tso_lens = std::mem::take(&mut self.dp.tso_lens);
@@ -194,13 +194,13 @@ impl Daemon {
                             let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                             myself_tunnel.stats.add_in(1, len as u64);
 
-                            // The win: `route_packet` runs once per super.
+                            // The win: `forward_packet` runs once per super.
                             // The first call does the trie lookup; the
                             // rest reuse the same dst (TSO is single-flow,
                             // mixed-dst super-packets don't exist — the
                             // kernel TCP stack segments per-socket).
                             //
-                            // BUT: route_packet has side effects per-packet
+                            // BUT: forward_packet has side effects per-packet
                             // (TX stats, PMTU drive via try_tx, the dense
                             // batch staging). Calling it once and looping
                             // would mean rewriting the send path. For now:
@@ -212,7 +212,7 @@ impl Daemon {
                             // TX fast-path: tx_probe walks the gate
                             // chain on the snapshot once per super.
                             // On Some we seal+ship inline — no
-                            // route_packet, no &mut self reborrow per
+                            // forward_packet, no &mut self reborrow per
                             // chunk. Wire-identical (handle_based_
                             // seal_byte_identical proves the bytes;
                             // netns tests prove the wiring).
@@ -238,7 +238,7 @@ impl Daemon {
                                 for i in 0..count {
                                     let n = tso_lens[i];
                                     let off = i * tinc_device::DeviceArena::STRIDE;
-                                    nw |= self.route_packet(&mut scratch[off..off + n], None);
+                                    nw |= self.forward_packet(&mut scratch[off..off + n], None);
                                 }
                             }
                             self.tx_snap = snap;
@@ -396,7 +396,7 @@ impl Daemon {
 
     /// TX fast-path attempt for one super. Returns `true` if the
     /// super was sealed+shipped (caller skips the slow loop), `false`
-    /// if any gate failed (caller runs `route_packet` per chunk).
+    /// if any gate failed (caller runs `forward_packet` per chunk).
     ///
     /// Lifted out of the Super arm to keep nesting sane: the caller
     /// is already 5 levels deep in `match drain { Super { match split`.
@@ -447,7 +447,7 @@ impl Daemon {
         match r {
             Ok(ok) => {
                 // Out-stats. Slow path bumps these per-chunk in
-                // route_packet → send_sptps_packet; we sum once.
+                // forward_packet → send_sptps_packet; we sum once.
                 target.handles.stats.add_out(ok.packets, ok.bytes);
             }
             Err((relay, origlen)) => {

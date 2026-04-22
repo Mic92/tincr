@@ -5,7 +5,7 @@
 //!
 //! These tests pin the protocol's **security boundary** — the cases
 //! where `id_h` MUST drop the connection rather than trust adversarial
-//! input. Chunk 4a landed all the gates (`proto.rs::handle_id`):
+//! input. Chunk 4a landed all the gates (`dispatch.rs::handle_id`):
 //! own-ID rejection (`:495`), unknown-identity (`:587`), version
 //! rollback (`:606`). `stop.rs::peer_wrong_key_fails_sig` is the
 //! one existing S1 negative case (SIG verify); these add the
@@ -173,7 +173,7 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
 // ═══════════════════════════════════════════════════════════════════
 // security.py ports
 
-/// Reject ID claiming our own name. Gate: `proto.rs::handle_id`
+/// Reject ID claiming our own name. Gate: `dispatch.rs::handle_id`
 /// `if name == ctx.my_name`.
 ///
 /// The daemon sees `"0 testnode 17.7\n"` — its OWN name. The
@@ -203,7 +203,7 @@ fn own_id_rejected() {
 }
 
 /// Reject ID for unknown peer (no `hosts/baz`). Gate:
-/// `proto.rs::handle_id` pubkey-load fails (the
+/// `dispatch.rs::handle_id` pubkey-load fails (the
 /// `let Some(ecdsa) = ecdsa else` arm).
 ///
 /// The C distinguishes "file missing" (`:428`) vs "file has no key"
@@ -427,7 +427,7 @@ fn id_timeout_half_open_survives() {
 ///    NEITHER sends SIG. Deadlock. The C splice has the same
 ///    behavior — `splice.py` only asserts node count, not `BadSig`.
 ///
-/// 2. **Label asymmetry** (`proto.rs::tcp_label`): IF a SIG ever
+/// 2. **Label asymmetry** (`dispatch.rs::tcp_label`): IF a SIG ever
 ///    arrived (e.g. the relay also injected a fake one, or one
 ///    daemon was an initiator via `ConnectTo`), the labels would
 ///    diverge — alice computes `tcp_label("bob", "alice")`, bob

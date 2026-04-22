@@ -128,8 +128,8 @@ impl Daemon {
 
             // UDP keepalive (no PMTU). Gate on validkey:
             // unconditional REQ_KEY races with gossip during mesh
-            // formation. Per-packet try_tx (in route_packet) handles
-            // the initial handshake instead. Per-packet try_tx (in route_packet) handles
+            // formation. Per-packet try_tx (in forward_packet) handles
+            // the initial handshake instead. Per-packet try_tx (in forward_packet) handles
             // the initial handshake instead.
             let try_nid = self
                 .node_ids

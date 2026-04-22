@@ -502,7 +502,7 @@ fn control_set_debug() {
     c.allow_request = Some(Request::Control);
     let (r, nw) = handle_control(&mut c, b"18 9 5");
     assert_eq!(r, DispatchResult::SetDebug(Some(5)));
-    // Daemon arm sends, not proto.rs.
+    // Daemon arm sends, not dispatch.rs.
     assert!(!nw);
     assert!(c.outbuf.is_empty());
 

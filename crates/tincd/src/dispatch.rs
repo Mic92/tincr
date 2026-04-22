@@ -53,7 +53,7 @@ impl ConnOptions {
 
 // Transitional `u32` aliases. `tinc-graph` (`Edge.options`, `Route
 // .options`) and `tinc-proto` (`AddEdge.options`) stay `u32` (separate
-// crates, separate change). The gate sites in `txpath.rs`/`udp_info.rs`/
+// crates, separate change). The gate sites in `tx_control.rs`/`udp_info.rs`/
 // `net.rs` reading those `u32`s use these consts. The three storage
 // sites (`Connection.options`, `Daemon.myself_options`, `NodeState
 // .edge_options`) are `ConnOptions`; calls into the `u32` boundary go
@@ -187,7 +187,7 @@ impl std::fmt::Display for CtlReq {
 }
 
 // `REQ_*` aliases: keep the C-style names at call sites (gossip/
-// txpath/route format these into dump rows). Typed as `CtlReq`, so
+// tx_control/route format these into dump rows). Typed as `CtlReq`, so
 // `send_dump`/`ctl_ack` no longer accept arbitrary `i32`.
 pub(crate) const REQ_STOP: CtlReq = CtlReq::Stop;
 pub(crate) const REQ_RELOAD: CtlReq = CtlReq::Reload;

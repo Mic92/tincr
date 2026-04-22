@@ -39,7 +39,7 @@ mod periodic;
 mod purge;
 mod settings;
 mod setup;
-mod txpath;
+mod tx_control;
 
 // Re-exports so the 7 submodules' `use super::*;` keep resolving
 // items that moved into settings.rs. `lib.rs` re-exports
@@ -99,7 +99,7 @@ pub struct NodeState {
     /// Avg of RTTs, ms.
     pub edge_weight: i32,
     /// Top byte = peer's `PROT_MINOR`.
-    pub edge_options: crate::proto::ConnOptions,
+    pub edge_options: crate::dispatch::ConnOptions,
 }
 
 /// Six variants = six io callbacks the event loop dispatches.
@@ -240,7 +240,7 @@ pub struct Daemon {
     /// Our options bitfield (`PROT_MINOR` in top byte). Built from
     /// global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS` at
     /// `setup()`.
-    pub(crate) myself_options: crate::proto::ConnOptions,
+    pub(crate) myself_options: crate::dispatch::ConnOptions,
 
     /// Read back from `listeners[0].udp_port()` after bind.
     /// `bind_reusing_port` makes UDP follow TCP's ephemeral with
@@ -274,7 +274,7 @@ pub struct Daemon {
     pub(crate) subnets: SubnetTree,
 
     /// DNS stub config. `None` = feature off (the TUN-intercept
-    /// branch in `route_packet` never fires). Non-reloadable: the
+    /// branch in `forward_packet` never fires). Non-reloadable: the
     /// magic IP has to be added to the TUN in `tinc-up`, and
     /// re-running that mid-daemon is the same can-of-worms as
     /// `DeviceType` reload.
@@ -315,7 +315,7 @@ pub struct Daemon {
     /// in `Daemon` proper. The exception is `dp.tunnels`: gossip
     /// pokes it for `BecameReachable`/`Unreachable` transitions and
     /// `ans_key` handshake completion. `self.dp.tunnels` outside
-    /// `net/` and `txpath` is the grep pattern for finding the
+    /// `net/` and `tx_control` is the grep pattern for finding the
     /// boundary between gossip-triggered tunnel state changes and
     /// per-packet reads.
     pub(crate) dp: DataPlane,

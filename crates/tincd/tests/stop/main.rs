@@ -21,7 +21,7 @@
 //!   `tick → turn → match` works
 //! - `tinc-event`: a real epoll wakes on a real unix socket; timers
 //!   tick (Ping fires and re-arms)
-//! - `proto.rs`: the greeting exchange + `REQ_STOP` path
+//! - `dispatch.rs`: the greeting exchange + `REQ_STOP` path
 //! - `conn.rs`: feed/send/flush over a real fd
 //! - `control.rs`: pidfile format readable by the same parser
 //!   `tinc-tools::Pidfile::read` uses

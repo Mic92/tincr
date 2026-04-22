@@ -312,7 +312,7 @@ impl IcmpRateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::route::{ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN};
+    use crate::route_decide::{ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN};
 
     /// Hand-built original frame: eth + IPv4(UDP) + 8-byte UDP hdr.
     /// 42 bytes total. Small enough that the whole IP datagram (28

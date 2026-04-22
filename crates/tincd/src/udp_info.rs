@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use tinc_proto::msg::misc::{MtuInfo, UdpInfo};
 
-use crate::proto::ConnOptions;
+use crate::dispatch::ConnOptions;
 
 /// `net.h:34`: `MTU` in jumbo build (9000 payload + 14 eth + 4 VLAN).
 /// `mtu_info_h` (`:349`) clamps received MTUs to this. We use the

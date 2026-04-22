@@ -24,7 +24,7 @@
 //! ## What's NOT here
 //!
 //! `n->status.send_locally` flag — daemon's `TunnelState`. The `try_udp` probe
-//! loop — `daemon/txpath.rs`. Reflexive `ANS_KEY` append/consume —
+//! loop — `daemon/tx_control.rs`. Reflexive `ANS_KEY` append/consume —
 //! `daemon/gossip.rs` `on_ans_key`.
 #![forbid(unsafe_code)]
 

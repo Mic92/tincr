@@ -6,7 +6,7 @@
 //!
 //! Ported from wireguard-go `tun/offload_linux.go` `gsoSplit`. Same
 //! seqno/ID/csum arithmetic. We additionally prepend a synthetic eth
-//! header per chunk because `route_packet` reads ethertype at byte 12.
+//! header per chunk because `forward_packet` reads ethertype at byte 12.
 //!
 //! Lives in `tinc-device` because the same `virtio_net_hdr` format
 //! appears on FreeBSD `TAPSVNETHDR` and Windows NDIS LSO.
@@ -131,7 +131,7 @@ impl VirtioNetHdr {
     /// `gso_type` → our enum. `None` for unknown types (we only
     /// advertise TSO4/6, so the kernel should never hand us `UDP_L4`
     /// or ECN — but if it does, the caller falls back to `Frames`
-    /// with one frame and lets `route_packet` deal with it).
+    /// with one frame and lets `forward_packet` deal with it).
     #[must_use]
     pub const fn gso(&self) -> Option<GsoType> {
         match self.gso_type {
@@ -471,7 +471,7 @@ pub fn tso_split(
 
         // ─── synthetic eth header ──────────────────────────────
         // The vnet_hdr device speaks raw IP (no PI, no eth). The
-        // daemon speaks eth (`route_packet` reads ethertype at
+        // daemon speaks eth (`forward_packet` reads ethertype at
         // byte 12). Same synth as `fd.rs::FdTun::read`.
         set_etherheader(slot, ethertype);
 

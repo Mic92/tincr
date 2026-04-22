@@ -9,9 +9,9 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use crate::autoconnect::{AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
+use crate::dispatch::{ConnOptions, DispatchError};
 use crate::outgoing::{OutOrigin, Outgoing, OutgoingId, resolve_config_addrs};
 use crate::pmtu::{PmtuAction, PmtuState};
-use crate::proto::{ConnOptions, DispatchError};
 use crate::tunnel::{MTU, TunnelState};
 use crate::udp_info::{FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
 use crate::{autoconnect, local_addr, pmtu, udp_info};
@@ -225,7 +225,7 @@ impl Daemon {
     ///
     /// 1. `on_ping_tick`: once per active conn, `mtu=false`. Keeps
     ///    UDP alive (NAT timeouts).
-    /// 2. `route_packet` Forward arm: once per forwarded packet,
+    /// 2. `forward_packet` Forward arm: once per forwarded packet,
     ///    `mtu=true`. Drives PMTU discovery.
     ///
     /// Chain: `REQ_KEY` if needed → via deref → `try_udp` (probe send)
@@ -1176,7 +1176,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (_, parsed) = crate::proto::parse_key_msg(body, "UDP_INFO", UdpInfo::parse)?;
+        let (_, parsed) = crate::dispatch::parse_key_msg(body, "UDP_INFO", UdpInfo::parse)?;
 
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
@@ -1235,7 +1235,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (_, parsed) = crate::proto::parse_key_msg(body, "MTU_INFO", MtuInfo::parse)?;
+        let (_, parsed) = crate::dispatch::parse_key_msg(body, "MTU_INFO", MtuInfo::parse)?;
 
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
@@ -1523,7 +1523,7 @@ impl Daemon {
                 nw |= conn.send(format_args!(
                     "{} {} {}",
                     tinc_proto::Request::Control,
-                    crate::proto::REQ_LOG,
+                    crate::dispatch::REQ_LOG,
                     msg.len()
                 ));
                 nw |= conn.send_raw(msg.as_bytes());

@@ -22,7 +22,7 @@ use tinc_crypto::chapoly::ChaPoly;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
-/// IP packet — what `route_packet` would have counted), not on-wire
+/// IP packet — what `forward_packet` would have counted), not on-wire
 /// (which is `bytes + packets×33`).
 pub(crate) struct SealOk {
     pub packets: u64,

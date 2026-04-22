@@ -307,7 +307,7 @@ impl Daemon {
         //     headroom [0..14] is zeros. Stamp ethertype at [12..14],
         //     route rx_scratch in full.
         // mem::take swaps out rx_scratch for the &mut borrow during
-        // route_packet; restored after.
+        // forward_packet; restored after.
         let mut frame_vec: Vec<u8>;
         let mut scratch = std::mem::take(&mut self.dp.rx_scratch);
         let frame: &mut [u8] = if let Some(body) = &decompressed {
@@ -377,7 +377,7 @@ impl Daemon {
             .stats
             .add_in(1, len);
 
-        let nw = self.route_packet(frame, Some(peer));
+        let nw = self.forward_packet(frame, Some(peer));
         self.dp.rx_scratch = scratch;
         nw
     }
@@ -558,7 +558,7 @@ impl Daemon {
         // TODO(bitflags-opts): relay_options is u32 from tinc-graph Route;
         // .bits() shim until tinc-graph migrates / udp-info-carry lands.
         let tcponly =
-            (self.myself_options.bits() | relay_options) & crate::proto::OPTION_TCPONLY != 0;
+            (self.myself_options.bits() | relay_options) & crate::dispatch::OPTION_TCPONLY != 0;
 
         // C parity (`net_packet.c:974`): data stays on TCP until a
         // probe reply lifts `minmtu` above 0. Probes are exempt so

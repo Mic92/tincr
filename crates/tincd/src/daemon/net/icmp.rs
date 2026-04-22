@@ -3,7 +3,7 @@ use super::super::Daemon;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 
-use crate::route::{self, TtlResult};
+use crate::route_decide::{self, TtlResult};
 use crate::{icmp, neighbor};
 
 use crate::graph::NodeId;
@@ -107,7 +107,7 @@ impl Daemon {
         // decrement_ttl(v6, hlim=255) → 254 in the original;
         // build_ndp_advert copies that hlim into the reply.
         if self.settings.decrement_ttl {
-            match route::decrement_ttl(data) {
+            match route_decide::decrement_ttl(data) {
                 TtlResult::Decremented | TtlResult::TooShort => {}
                 TtlResult::DropSilent | TtlResult::SendIcmp { .. } => {
                     // No ICMP synth.
@@ -174,14 +174,18 @@ impl Daemon {
             }
             IcmpKind::FragNeeded { mtu } => icmp::build_v4_unreachable(
                 data,
-                route::ICMP_DEST_UNREACH,
-                route::ICMP_FRAG_NEEDED,
+                route_decide::ICMP_DEST_UNREACH,
+                route_decide::ICMP_FRAG_NEEDED,
                 Some(mtu),
                 None,
             ),
-            IcmpKind::TooBigV6 { mtu } => {
-                icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu), None)
-            }
+            IcmpKind::TooBigV6 { mtu } => icmp::build_v6_unreachable(
+                data,
+                route_decide::ICMP6_PACKET_TOO_BIG,
+                0,
+                Some(mtu),
+                None,
+            ),
         };
         let Some(reply) = reply else {
             log::debug!(target: "tincd::net",

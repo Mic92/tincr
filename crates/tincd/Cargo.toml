@@ -109,7 +109,7 @@ socket2 = { version = "0.6", features = ["all"] }
 # transmute. Already in lockfile via dependencies.
 zerocopy = { version = "0.8", features = ["derive"] }
 
-# ConnOptions bitfield (proto.rs). Already in lockfile via deps.
+# ConnOptions bitfield (dispatch.rs). Already in lockfile via deps.
 bitflags = "2"
 
 # zlib levels 1-9. miniz backend (no C dep). The C tinc uses real

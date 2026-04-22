@@ -588,7 +588,7 @@ mod bench {
         // meta-conn) at ~10 Mbps instead of ~1 Gbps.
         //
         // Both impls walk the same ladder here. `choose_initial_maxmtu`
-        // is ported (`txpath.rs`), but on loopback `getsockopt(IP_MTU)`
+        // is ported (`tx_control.rs`), but on loopback `getsockopt(IP_MTU)`
         // returns 65536 → clamped to `MTU=1518` → `probe_size` sees
         // `maxmtu == MTU` → 0.97 multiplier → first probe is ~1329,
         // not maxmtu. The 1-RTT fast path only fires when the kernel
@@ -1334,7 +1334,7 @@ mod bench {
         // data path is zero-alloc via `seal_data_into` + `tx_scratch`
         // (`send_record_priv` is handshake/probe-only now). Remaining
         // cold-perf STUB: `maybe_set_write_any` walking all conns
-        // (`txpath.rs`); irrelevant at n=2 peers.
+        // (`tx_control.rs`); irrelevant at n=2 peers.
         if let (Some(baseline), Some(rust)) = (baseline, rust) {
             eprintln!("Rust/C ratio: {:.1}%", rust / baseline * 100.0);
             // Mixed against the SLOWER endpoint: a mixed pair is

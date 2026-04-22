@@ -3,7 +3,7 @@
 use super::MAX_NODES;
 use crate::daemon::{ConnId, Daemon};
 
-use crate::proto::{DispatchError, parse_add_subnet, parse_del_subnet};
+use crate::dispatch::{DispatchError, parse_add_subnet, parse_del_subnet};
 
 use tinc_proto::{Request, Subnet};
 

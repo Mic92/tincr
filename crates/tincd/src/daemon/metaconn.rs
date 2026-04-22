@@ -8,12 +8,12 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::SystemTime;
 
 use crate::conn::{Connection, FeedResult, SptpsEvent};
-use crate::invitation_serve::InvitePhase;
-use crate::outgoing::ProxyConfig;
-use crate::proto::{
+use crate::dispatch::{
     CtlReq, DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
     record_body, send_ack,
 };
+use crate::invitation_serve::InvitePhase;
+use crate::outgoing::ProxyConfig;
 use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
 use crate::{invitation_serve, script, socks};
@@ -210,7 +210,7 @@ impl Daemon {
     /// `Request::Id` arm: build `IdCtx`, call `handle_id`, then drain
     /// the SPTPS-init piggyback.
     ///
-    /// `handle_id` itself is pure (in `proto.rs`); the piggyback is
+    /// `handle_id` itself is pure (in `dispatch.rs`); the piggyback is
     /// the messy part. SPTPS-start emits the first KEX as `Output::Wire`.
     /// We queue that, then `take_rest` from inbuf — the peer often
     /// sends ID + KEX in one TCP segment, and the bytes after the
@@ -348,21 +348,21 @@ impl Daemon {
                         format!(
                             "{} {} {} {}",
                             Request::Control,
-                            crate::proto::REQ_DUMP_SUBNETS,
+                            crate::dispatch::REQ_DUMP_SUBNETS,
                             subnet,
                             owner
                         )
                     })
                     .collect();
-                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_SUBNETS)
+                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_SUBNETS)
             }
             DispatchResult::DumpNodes => {
                 let rows = self.dump_nodes_rows();
-                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_NODES)
+                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_NODES)
             }
             DispatchResult::DumpEdges => {
                 let rows = self.dump_edges_rows();
-                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_EDGES)
+                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_EDGES)
             }
             DispatchResult::DumpConnections => {
                 let rows: Vec<String> = self
@@ -373,7 +373,7 @@ impl Daemon {
                         format!(
                             "{} {} {} {} {:x} {} {:x}",
                             Request::Control,
-                            crate::proto::REQ_DUMP_CONNECTIONS,
+                            crate::dispatch::REQ_DUMP_CONNECTIONS,
                             c.name,
                             c.hostname,
                             c.options.bits(),
@@ -382,20 +382,20 @@ impl Daemon {
                         )
                     })
                     .collect();
-                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_CONNECTIONS)
+                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_CONNECTIONS)
             }
             DispatchResult::Reload => {
                 // CLI only checks zero/nonzero.
                 let result = i32::from(!self.reload_configuration());
-                self.ctl_ack(id, crate::proto::REQ_RELOAD, result)
+                self.ctl_ack(id, crate::dispatch::REQ_RELOAD, result)
             }
             DispatchResult::Retry => {
                 self.on_retry();
-                self.ctl_ack(id, crate::proto::REQ_RETRY, 0)
+                self.ctl_ack(id, crate::dispatch::REQ_RETRY, 0)
             }
             DispatchResult::Purge => {
                 let nw_purge = self.purge();
-                let (r, nw2) = self.ctl_ack(id, crate::proto::REQ_PURGE, 0);
+                let (r, nw2) = self.ctl_ack(id, crate::dispatch::REQ_PURGE, 0);
                 (r, nw_purge | nw2)
             }
             DispatchResult::SetDebug(level) => {
@@ -411,7 +411,7 @@ impl Daemon {
                     // Remember the FIRST prev so close restores the original.
                     self.conn_mut(id).prev_debug_level.get_or_insert(prev);
                 }
-                self.ctl_ack(id, crate::proto::REQ_SET_DEBUG, prev)
+                self.ctl_ack(id, crate::dispatch::REQ_SET_DEBUG, prev)
             }
             DispatchResult::Disconnect(name) => {
                 // Walk conns, terminate by name. `terminate()` keys
@@ -436,11 +436,11 @@ impl Daemon {
                 };
                 // `terminate()` only touches the matched conn;
                 // the ctl conn `id` is still here.
-                self.ctl_ack(id, crate::proto::REQ_DISCONNECT, result)
+                self.ctl_ack(id, crate::dispatch::REQ_DISCONNECT, result)
             }
             DispatchResult::DumpTraffic => {
                 let rows = self.dump_traffic_rows();
-                self.ctl_send_dump(id, rows, crate::proto::REQ_DUMP_TRAFFIC)
+                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_TRAFFIC)
             }
             DispatchResult::Log(level) => {
                 // No reply. The conn now passively receives log records
@@ -651,7 +651,7 @@ impl Daemon {
                         let len = bytes.len() as u64;
                         let tunnel = self.dp.tunnels.entry(from_nid).or_default();
                         tunnel.stats.add_in(1, len);
-                        needs_write |= self.route_packet(&mut bytes, Some(from_nid));
+                        needs_write |= self.forward_packet(&mut bytes, Some(from_nid));
                         continue;
                     }
 

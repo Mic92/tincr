@@ -20,7 +20,7 @@ use super::ListenerSlot;
 /// index, mirror into the lock-free fast-path handle.
 ///
 /// Gate is `cached.is_none() OR addr changed`, not just addr-change:
-/// `gossip::BecameReachable` / `txpath::UDP_INFO` seed `udp_addr`
+/// `gossip::BecameReachable` / `tx_control::UDP_INFO` seed `udp_addr`
 /// from `edge_addr` while clearing `udp_addr_cached`. If the peer then
 /// sends from that same addr the old `udp_addr != peer_addr` gate
 /// would stay false forever and every send fell through to

@@ -879,7 +879,7 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
     }
 
     // ─── THE PING ───────────────────────────────────────────────
-    // PROVES: PACKET 17 receive → route_packet → TUN write →
+    // PROVES: PACKET 17 receive → forward_packet → TUN write →
     // kernel ICMP reply → PACKET 17 send back. Both directions of
     // the `n->connection` short-circuit. Any silent drop → timeout.
     let ping = Command::new("ping")
@@ -1040,7 +1040,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
 
     // ─── kick the per-tunnel handshake ──────────────────────────
     // alice's kernel ARPs for 10.43.0.2 → ARP frame to tincS0 →
-    // route_packet → route_mac → Broadcast → try_tx → REQ_KEY.
+    // forward_packet → route_mac → Broadcast → try_tx → REQ_KEY.
     // Only alice originates here (bob's TAP just came up in its
     // netns and may emit a router solicit, but the directional
     // ping ensures alice's REQ_KEY wins the race more often than
@@ -1134,7 +1134,7 @@ fn rust_dials_c_switch() {
 
 /// C dials, Rust listens. Switch mode. Tests our RESPONDER-side
 /// `route_mac` broadcast (the C's first ARP arrives over the wire;
-/// our `route_packet` with `from = Some(peer)` must echo to TAP
+/// our `forward_packet` with `from = Some(peer)` must echo to TAP
 /// AND forward to the MST — which is just back to C in 2-node).
 #[test]
 fn c_dials_rust_switch() {

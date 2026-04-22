@@ -1,7 +1,7 @@
 //! TX fast-path snapshot state.
 //!
 //! The `on_device_read` Super arm wants to seal+ship a whole TSO super
-//! without N×`route_packet` reborrows of `&mut Daemon`. The shape that
+//! without N×`forward_packet` reborrows of `&mut Daemon`. The shape that
 //! works: a read-only snapshot of the routing state (`TxSnapshot`),
 //! built/refreshed at gossip-event sites, consulted once per super
 //! ([`tx_probe`]) without touching `&mut self`. On `Some(target)` the

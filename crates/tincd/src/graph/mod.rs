@@ -27,9 +27,9 @@ pub struct NodeId(pub u32);
 pub struct EdgeId(pub u32);
 
 /// `OPTION_INDIRECT` from `connection.h`. The one option bit BFS reads.
-/// Sourced from [`crate::proto::ConnOptions::INDIRECT`] so the bit
+/// Sourced from [`crate::dispatch::ConnOptions::INDIRECT`] so the bit
 /// value lives in exactly one place.
-pub const OPTION_INDIRECT: u32 = crate::proto::ConnOptions::INDIRECT.bits();
+pub const OPTION_INDIRECT: u32 = crate::dispatch::ConnOptions::INDIRECT.bits();
 
 /// Stickiness band for [`Graph::sssp_sticky`]: keep the previous
 /// nexthop if its path cost is within this percent of the new best.

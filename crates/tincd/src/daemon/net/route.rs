@@ -2,7 +2,7 @@ use super::super::{ConnId, Daemon, ForwardingMode, RoutingMode, TimerWhat};
 
 use std::time::Duration;
 
-use crate::route::{self, RouteResult, TtlResult, route};
+use crate::route_decide::{self, RouteResult, TtlResult, route};
 use crate::tunnel::{MTU, TunnelState};
 use crate::{broadcast, mss, route_mac};
 
@@ -15,7 +15,7 @@ pub(in crate::daemon) const MAX_MAC_LEASES: usize = 4096;
 impl Daemon {
     /// `from`: `None` = device read; `Some` = peer. Returns the
     /// `io_set` signal.
-    pub(in crate::daemon) fn route_packet(
+    pub(in crate::daemon) fn forward_packet(
         &mut self,
         data: &mut [u8],
         from: Option<NodeId>,
@@ -126,7 +126,7 @@ impl Daemon {
             nw |= conn.send(format_args!(
                 "{} {} {len}",
                 tinc_proto::Request::Control,
-                crate::proto::REQ_PCAP
+                crate::dispatch::REQ_PCAP
             ));
             // Raw body, no `\n`. `send` is infallible (queues to
             // outbuf, write errors surface at `flush()`).
@@ -342,7 +342,7 @@ impl Daemon {
             RouteResult::Broadcast => {
                 // decrement_ttl() passes ARP via TooShort.
                 if self.settings.decrement_ttl && from.is_some() {
-                    match route::decrement_ttl(data) {
+                    match route_decide::decrement_ttl(data) {
                         TtlResult::Decremented | TtlResult::TooShort => {}
                         TtlResult::DropSilent | TtlResult::SendIcmp { .. } => {
                             // No ICMP synth.
@@ -393,9 +393,12 @@ impl Daemon {
             if self.settings.routing_mode == RoutingMode::Router {
                 let ethertype = u16::from_be_bytes([data[12], data[13]]);
                 let (t, c) = if ethertype == crate::packet::ETH_P_IP {
-                    (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+                    (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
                 } else {
-                    (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+                    (
+                        route_decide::ICMP6_DST_UNREACH,
+                        route_decide::ICMP6_DST_UNREACH_ADMIN,
+                    )
                 };
                 return self.emit_icmp(
                     data,
@@ -443,9 +446,12 @@ impl Daemon {
         if self.settings.directonly && to_nid != via_nid {
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
             let (t, c) = if ethertype == crate::packet::ETH_P_IP {
-                (route::ICMP_DEST_UNREACH, route::ICMP_NET_ANO)
+                (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
             } else {
-                (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
+                (
+                    route_decide::ICMP6_DST_UNREACH,
+                    route_decide::ICMP6_DST_UNREACH_ADMIN,
+                )
             };
             return self.emit_icmp(
                 data,
@@ -531,7 +537,7 @@ impl Daemon {
             }
         }
 
-        if via_options & crate::proto::OPTION_CLAMP_MSS != 0 {
+        if via_options & crate::dispatch::OPTION_CLAMP_MSS != 0 {
             let mtu = via_mtu.min(MTU);
             let _ = mss::clamp(data, mtu);
         }
@@ -539,7 +545,7 @@ impl Daemon {
         // `source != myself` gate: don't decrement on
         // TUN-origin (we ARE the first hop).
         if self.settings.decrement_ttl && from.is_some() {
-            match route::decrement_ttl(data) {
+            match route_decide::decrement_ttl(data) {
                 TtlResult::Decremented => {}
                 TtlResult::TooShort | TtlResult::DropSilent => {
                     return false;
@@ -564,10 +570,10 @@ impl Daemon {
         // Read inner TOS for the outer UDP socket. Threaded
         // via Daemon.tx_priority. Reset to 0 each packet —
         // priority only ever flows from data through to UDP
-        // send. Done here, not at route_packet entry, to stay
+        // send. Done here, not at forward_packet entry, to stay
         // clear of the dump-traffic agent's route boundary.
         self.dp.tx_priority = if self.settings.priorityinheritance {
-            route::extract_tos(data).unwrap_or(0)
+            route_decide::extract_tos(data).unwrap_or(0)
         } else {
             0
         };

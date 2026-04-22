@@ -3,7 +3,7 @@
 use super::{MAX_EDGES, MAX_NODES};
 use crate::daemon::{ConnId, Daemon};
 
-use crate::proto::{DispatchError, parse_add_edge, parse_del_edge};
+use crate::dispatch::{DispatchError, parse_add_edge, parse_del_edge};
 
 use tinc_proto::AddrStr;
 use tinc_proto::msg::DelEdge;

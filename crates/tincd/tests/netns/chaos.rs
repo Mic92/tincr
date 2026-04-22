@@ -154,7 +154,7 @@ impl ChaosRig {
         // ─── wait for udp_confirmed (status bit 7) ────────────
         // CRITICAL for the chaos tests. validkey alone means data
         // CAN go via UDP, but until PMTU probes confirm the path
-        // (`txpath.rs:115`, `tunnel.rs:197`), `try_tx` falls back
+        // (`tx_control.rs:115`, `tunnel.rs:197`), `try_tx` falls back
         // to TCP-tunneling over the meta-conn. Kernel TCP dedups
         // and reorders silently — netem on `lo` would do nothing
         // visible to the SPTPS layer.
@@ -164,9 +164,9 @@ impl ChaosRig {
         // confirmed" line. Data was riding TCP the whole time.
         //
         // Kick PMTU with traffic (probes are demand-driven via
-        // `try_tx`, `txpath.rs:323`). A few pings get the probe/
+        // `try_tx`, `tx_control.rs:323`). A few pings get the probe/
         // reply round-trip done; udp_confirmed flips on the first
-        // probe-reply (`txpath.rs:113-116`).
+        // probe-reply (`tx_control.rs:113-116`).
         poll_until(Duration::from_secs(5), || {
             let _ = Command::new("ping")
                 .args(["-c", "1", "-W", "1", "10.42.0.2"])

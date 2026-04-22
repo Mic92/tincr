@@ -179,7 +179,7 @@ pub(crate) struct Connection {
     /// `c->sptps`. Boxed: ~1KB, most conns are control with `None`.
     pub sptps: Option<Box<Sptps>>,
     /// `c->options` (`connection.h:32-36`). Top byte is `PROT_MINOR`.
-    pub options: crate::proto::ConnOptions,
+    pub options: crate::dispatch::ConnOptions,
     /// `c->estimated_weight`. RTT ms. i32: wire `%d`.
     pub estimated_weight: i32,
     /// `c->start`. Set at construct (~μs earlier than upstream's
@@ -302,7 +302,7 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
-            options: crate::proto::ConnOptions::empty(),
+            options: crate::dispatch::ConnOptions::empty(),
             estimated_weight: 0,
             start: now,
             address: None,
@@ -512,7 +512,7 @@ impl Connection {
                                 ref bytes,
                             } = o
                             {
-                                let body = crate::proto::record_body(bytes);
+                                let body = crate::dispatch::record_body(bytes);
                                 // Same gate check_gate would apply.
                                 if self.allow_request.is_none()
                                     && body.starts_with(b"21 ")
@@ -635,7 +635,7 @@ impl Connection {
         let was_empty = self.outbuf.is_empty();
 
         // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
-        // `send()` BEFORE `Sptps::start` (proto.rs), so `sptps` is
+        // `send()` BEFORE `Sptps::start` (dispatch.rs), so `sptps` is
         // None for the id-reply line. Upstream achieves the same by
         // routing ID through `send_meta_raw`.
         if let Some(sptps) = self.sptps.as_deref_mut() {
@@ -692,7 +692,7 @@ impl Connection {
     /// Returns `true` if outbuf went empty→nonempty across the batch.
     /// `rows` is owned-Vec because every callsite collects up front
     /// to drop the `&self` borrow before re-fetching `&mut conn`.
-    pub(crate) fn send_dump(&mut self, rows: Vec<String>, req: crate::proto::CtlReq) -> bool {
+    pub(crate) fn send_dump(&mut self, rows: Vec<String>, req: crate::dispatch::CtlReq) -> bool {
         let mut nw = false;
         for row in rows {
             nw |= self.send(format_args!("{row}"));

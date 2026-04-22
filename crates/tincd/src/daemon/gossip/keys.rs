@@ -3,8 +3,8 @@
 
 use crate::daemon::{ConnId, Daemon, ForwardingMode};
 
+use crate::dispatch::DispatchError;
 use crate::local_addr;
-use crate::proto::DispatchError;
 use crate::tunnel::{MTU, make_udp_label};
 
 use crate::graph::NodeId;
@@ -266,7 +266,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (body_str, msg) = crate::proto::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
+        let (body_str, msg) = crate::dispatch::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
 
         // lookup, NOT lookup_or_add.
         let Some((conn_name, from_nid, to_nid)) =
@@ -497,7 +497,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (body_str, msg) = crate::proto::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
+        let (body_str, msg) = crate::dispatch::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
 
         let Some((conn_name, from_nid, to_nid)) =
             self.routed_prologue(from_conn, "ANS_KEY", &msg.from, &msg.to)
@@ -658,7 +658,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (s, kc) = crate::proto::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
+        let (s, kc) = crate::dispatch::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
         if !tinc_proto::check_id(&kc.node) {
             return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
         }

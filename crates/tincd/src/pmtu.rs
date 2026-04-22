@@ -74,7 +74,7 @@ pub(crate) enum PmtuPhase {
 
 impl PmtuPhase {
     /// `mtuprobes == 0`: discovery hasn't sent its first probe.
-    /// `txpath.rs` uses this to gate the maxmtu re-seed
+    /// `tx_control.rs` uses this to gate the maxmtu re-seed
     /// (`choose_initial_maxmtu`).
     #[must_use]
     pub(crate) const fn is_discovery_start(self) -> bool {

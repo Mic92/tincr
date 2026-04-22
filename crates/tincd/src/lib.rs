@@ -24,6 +24,7 @@ mod conn;
 mod control;
 pub mod daemon;
 pub mod discovery;
+mod dispatch;
 mod dns;
 mod egress;
 pub(crate) mod event;
@@ -47,9 +48,8 @@ mod platform;
 mod pmtu;
 #[cfg(feature = "upnp")]
 mod portmap;
-mod proto;
 mod reload;
-mod route;
+mod route_decide;
 mod route_mac;
 pub mod sandbox;
 mod script;

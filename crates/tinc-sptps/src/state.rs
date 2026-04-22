@@ -755,7 +755,7 @@ impl Sptps {
     /// the `record_type` byte. Caller (daemon) overwrites the headroom
     /// with whatever wraps the body before delivery (the daemon writes a
     /// synthetic 14-byte ethernet header at `out[..14]` before
-    /// `route_packet(&mut out)`).
+    /// `forward_packet(&mut out)`).
     ///
     /// `out` is **cleared** first: pass a daemon-owned `Vec` and reuse it
     /// across packets. After the first call it has grown to `headroom +

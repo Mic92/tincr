@@ -21,6 +21,7 @@ use tinc_proto::Subnet;
 
 use crate::compress;
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
+use crate::dispatch::myself_options_from_config;
 #[cfg(not(target_os = "linux"))]
 #[cfg(not(target_os = "linux"))]
 use crate::egress::Portable;
@@ -36,7 +37,6 @@ use crate::listen::{
 use crate::mac_lease;
 use crate::node_id::NodeId6Table;
 use crate::outgoing::{Outgoing, resolve_config_addrs};
-use crate::proto::myself_options_from_config;
 use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 

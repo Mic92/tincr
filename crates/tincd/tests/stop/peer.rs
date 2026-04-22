@@ -925,7 +925,7 @@ fn peer_wrong_key_fails_sig() {
 /// (no other peers); we only care that the tap saw it.
 ///
 /// `PACKET 17` injection (not UDP) because the test has no UDP
-/// listener. Direct neighbors short-circuit to TCP; the tcplen path (`metaconn.rs` Record arm) calls `route_packet`
+/// listener. Direct neighbors short-circuit to TCP; the tcplen path (`metaconn.rs` Record arm) calls `forward_packet`
 /// directly with the frame body.
 #[test]
 #[expect(clippy::similar_names)] // ctl/ctl2 distinguish first/second control conns

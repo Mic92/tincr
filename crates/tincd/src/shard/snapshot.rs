@@ -308,7 +308,7 @@ mod tests {
                 conn: None,
                 edge_addr: Some("10.0.0.2:655".parse().unwrap()),
                 edge_weight: 0,
-                edge_options: crate::proto::ConnOptions::empty(),
+                edge_options: crate::dispatch::ConnOptions::empty(),
             },
         );
 

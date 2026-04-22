@@ -3,7 +3,7 @@
 //! Everything here is touched on the per-packet send/recv paths and
 //! NOTHING here is touched by the gossip/meta-conn/timer machinery
 //! *except* `tunnels` — grep `self.dp.tunnels` outside `net/` and
-//! `txpath` to find those sites. Making them `self.dp.tunnels` instead
+//! `tx_control` to find those sites. Making them `self.dp.tunnels` instead
 //! of `self.tunnels` is the point: the boundary between "touches the
 //! data plane" and "touches gossip/conn state" is now grep-visible.
 
@@ -59,10 +59,10 @@ pub(crate) struct DataPlane {
     /// closest equivalent to a stack arena.
     pub tx_scratch: Vec<u8>,
 
-    /// Inner-packet TOS set by `route_packet`, read by the UDP send
+    /// Inner-packet TOS set by `forward_packet`, read by the UDP send
     /// path. Single-threaded so a field works in lieu of threading
     /// it via a packet struct. Reset to 0 at the top of each
-    /// `route_packet`.
+    /// `forward_packet`.
     pub tx_priority: u8,
 
     /// Reused recv-side scratch for the UDP data path. Mirror of
@@ -122,7 +122,7 @@ pub(crate) struct DataPlane {
     /// buffers, no overlap).
     ///
     /// `Option` for the same `mem::take` dance as `udp_rx_batch`:
-    /// `route_packet` borrows `&mut self`; the arena slot borrow
+    /// `forward_packet` borrows `&mut self`; the arena slot borrow
     /// conflicts. Take, walk, put back.
     pub device_arena: Option<DeviceArena>,
 
@@ -131,7 +131,7 @@ pub(crate) struct DataPlane {
     /// segment in `device_arena`; `tso_split` writes N × ~1500B
     /// eth frames into THIS buffer (the input slice can't overlap
     /// the output — same arena would alias). Same `mem::take` dance:
-    /// `route_packet` borrows `&mut self`, the slot borrow conflicts.
+    /// `forward_packet` borrows `&mut self`, the slot borrow conflicts.
     ///
     /// Sized at `DEVICE_DRAIN_CAP * STRIDE` = 64*1600 = 100KB. A
     /// 64KB super-segment at MSS 1400 = 47 segments; fits with room.
