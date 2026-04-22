@@ -174,3 +174,7 @@ upnp = ["dep:netdev"]
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "throughput_macos"
+harness = false

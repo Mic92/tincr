@@ -382,6 +382,34 @@ Using `/run` instead of `/etc` means a forgotten override cannot
 survive a reboot. The NixOS module's unit name may differ
 (`tinc.${NET}.service`); adjust the drop-in path accordingly.
 
+## Benchmarks
+
+The `throughput` bench measures end-to-end iperf3 over a real TUN
+path between two daemons (Rust↔Rust, C↔C, Rust↔C) and reports the
+Rust/C ratio. Absolute Mbps is machine-local; the ratio is what you
+compare across commits.
+
+**Linux** (unprivileged, via bwrap+netns):
+
+```sh
+cargo bench --bench throughput --profile profiling
+TINCD_PERF=1 cargo bench --bench throughput --profile profiling   # + perf record
+```
+
+**macOS** (real utun, requires root):
+
+```sh
+scripts/macos-bench-runner.sh                  # prompts for sudo
+scripts/macos-bench-runner.sh -- rust_rust     # one pairing
+TINCD_PERF=1 scripts/macos-bench-runner.sh     # + sample(1)
+```
+
+The macOS bench rewrites two host routes so traffic between the
+tunnel /32s traverses the utun pair instead of `lo0`, then asserts
+each daemon's `dump traffic` byte counters match iperf3's transfer
+— if the kernel ever short-circuits past the utun, the bench fails
+rather than reporting a loopback number.
+
 ## See also
 
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — symptom → cause → fix
