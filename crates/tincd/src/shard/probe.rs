@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::{TunnelHandles, TxSnapshot};
-use crate::route::{RouteResult, route};
 use crate::graph::NodeId;
+use crate::route::{RouteResult, route};
 
 /// Per-super seal-send target. Everything is a COPY — no borrows into
 /// snapshot state. ~120 bytes, copied once per super (~33 chunks).
@@ -168,12 +168,12 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Route;
     use crate::inthash::IntHashMap;
     use crate::shard::NodeView;
     use crate::subnet_tree::SubnetTree;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
-    use crate::graph::Route;
     use tinc_sptps::ReplayWindow;
 
     /// 100-byte eth+v4 frame: eth(14) + ip(20) + 66 payload.

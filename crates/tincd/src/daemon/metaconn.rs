@@ -18,8 +18,8 @@ use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
 use crate::{invitation_serve, script, socks};
 
-use rand_core::OsRng;
 use crate::event::Io;
+use rand_core::OsRng;
 use tinc_proto::Request;
 
 /// `Again`: caller should loop (kernel may have more). `Done`: stop.

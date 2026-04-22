@@ -269,8 +269,8 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::daemon::NodeState;
-    use crate::inthash::IntHashMap;
     use crate::graph::Graph;
+    use crate::inthash::IntHashMap;
 
     /// Minimal builder. Sets up a 3-node graph (a-b-c chain), `b` directly
     /// connected (has `NodeState`), `c` transitive. `a` is myself.

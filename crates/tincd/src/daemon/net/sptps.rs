@@ -8,8 +8,8 @@ use crate::listen::Listener;
 use crate::node_id::NodeId6;
 use crate::tunnel::{MTU, TunnelState};
 
-use rand_core::OsRng;
 use crate::graph::NodeId;
+use rand_core::OsRng;
 use tinc_proto::Request;
 
 impl Daemon {

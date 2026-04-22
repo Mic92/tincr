@@ -237,7 +237,11 @@ impl<W: Copy> EventLoop<W> {
     /// Returns the underlying I/O error from `epoll_wait` / `kqueue`.
     /// `EINTR` is *not* an error — it returns `Ok(())` with `out`
     /// empty so the caller's `while running` loop re-checks its flag.
-    pub(crate) fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
+    pub(crate) fn turn(
+        &mut self,
+        timeout: Option<Duration>,
+        out: &mut Vec<(W, Ready)>,
+    ) -> io::Result<()> {
         out.clear();
 
         // EINTR: `SA_RESTART` does NOT auto-retry epoll_wait (man 7

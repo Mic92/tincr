@@ -11,11 +11,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
+use crate::graph::{EdgeId, Graph, NodeId, Route};
 use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
-use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
-use crate::graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::AddrStr;
 
 use crate::conn::Connection;
