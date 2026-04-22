@@ -108,6 +108,13 @@ mod bench {
         if connect_to {
             let _ = writeln!(conf, "ConnectTo = {}", peer.name);
         }
+        // Bench-only AEAD override. Env-driven so the same binary
+        // measures both ciphers without a rebuild; written into
+        // tinc.conf (not hosts/) so it applies to every edge the
+        // bench creates and so the C-tinc pairings ignore it.
+        if let Ok(c) = std::env::var("TINCD_BENCH_SPTPS_CIPHER") {
+            let _ = writeln!(conf, "SPTPSCipher = {c}");
+        }
         std::fs::write(me.confbase.join("tinc.conf"), conf).unwrap();
         std::fs::write(
             me.confbase.join("hosts").join(me.name),

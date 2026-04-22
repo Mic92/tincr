@@ -91,6 +91,23 @@ tinc 1.1 still carries for 1.0 compatibility is not implemented at
 all. That's a deliberate reduction in attack surface — see
 [COMPAT.md](COMPAT.md) for the operational consequences.
 
+### `SPTPSCipher` (tincr extension)
+
+tincr can swap the record AEAD for **AES-256-GCM** on a per-edge
+basis via the `SPTPSCipher` host-file key. This is *not* negotiated:
+both ends read the value from static config, and the choice is mixed
+into the SPTPS label (and therefore the SIG transcript and the PRF
+seed). A mismatch fails the handshake at the SIG step with a clean
+authentication error — no record key is ever derived, so misconfigured
+peers can't silently corrupt data.
+
+With the default `chacha20-poly1305` the label suffix is empty and the
+wire is byte-identical to C tinc 1.1, which ignores unknown host-file
+keys. AES-256-GCM keeps the 64-byte PRF key blob (first 32 bytes feed
+AES-256), the 16-byte tag, and maps the 32-bit record seqno onto the
+96-bit GCM nonce as `0⁸ ‖ seqno_be⁴`, so record framing is unchanged
+and the existing `SEAL_KEY_LIMIT` rekey bound covers nonce uniqueness.
+
 ## Meta-protocol
 
 Meta-connections are TCP. The first thing each side sends is a single

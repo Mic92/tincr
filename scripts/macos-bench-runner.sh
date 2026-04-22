@@ -56,5 +56,5 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 echo "re-exec under sudo: $bin" >&2
-exec sudo --preserve-env=PATH,HOME,TMPDIR,TINCD_PERF,TINCD_PERF_DIR,TINCD_TRACE,TINC_C_TINCD \
+exec sudo --preserve-env=PATH,HOME,TMPDIR,TINCD_PERF,TINCD_PERF_DIR,TINCD_TRACE,TINC_C_TINCD,TINCD_BENCH_SPTPS_CIPHER \
     "$bin" --bench "$@"

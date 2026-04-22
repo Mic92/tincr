@@ -382,6 +382,35 @@ Using `/run` instead of `/etc` means a forgotten override cannot
 survive a reboot. The NixOS module's unit name may differ
 (`tinc.${NET}.service`); adjust the drop-in path accordingly.
 
+## `SPTPSCipher` — AES-256-GCM opt-in
+
+On any CPU with AES-NI+PCLMUL (x86_64) or AES+PMULL (ARMv8) — i.e.
+everything since ~2013 — AES-256-GCM seals an SPTPS record 2–3×
+faster than the default ChaCha20-Poly1305. To enable it for an edge
+between two **tincr** nodes `alice` and `bob`, add to *both*
+`hosts/alice` and `hosts/bob` (the host files are synced, so each
+side reads the *peer's* file and both arrive at the same answer):
+
+```
+SPTPSCipher = aes-256-gcm
+```
+
+or set it once in `tinc.conf` as a mesh-wide default and leave
+per-host overrides for the C-tinc peers.
+
+**Both sides must agree.** There is no negotiation; the choice is
+mixed into the SPTPS handshake transcript, so a mismatch fails the
+key exchange with `BadSig` in the log instead of corrupting traffic.
+C tinc 1.1 ignores the key entirely and always behaves as
+`chacha20-poly1305`, so leave it at the default for any edge that
+touches a C node.
+
+If `aes-256-gcm` is configured on a CPU without the AES/PMULL
+extensions, tincr logs a one-time warning at startup: ring's
+bitsliced fallback is constant-time but slow, and on other
+implementations table-based AES is a cache-timing side-channel risk.
+Use the default there.
+
 ## Benchmarks
 
 The `throughput` bench measures end-to-end iperf3 over a real TUN
@@ -402,6 +431,7 @@ TINCD_PERF=1 cargo bench --bench throughput --profile profiling   # + perf recor
 scripts/macos-bench-runner.sh                  # prompts for sudo
 scripts/macos-bench-runner.sh -- rust_rust     # one pairing
 TINCD_PERF=1 scripts/macos-bench-runner.sh     # + sample(1)
+TINCD_BENCH_SPTPS_CIPHER=aes-256-gcm scripts/macos-bench-runner.sh -- rust_rust
 ```
 
 The macOS bench rewrites two host routes so traffic between the

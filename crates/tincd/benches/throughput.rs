@@ -271,6 +271,11 @@ mod bench {
 
         fn write_config(&self, other: &Node, connect_to: bool) {
             std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+            // See throughput_macos.rs::write_macos_config for the
+            // rationale; same env knob so the docs only mention one.
+            let sptps_cipher = std::env::var("TINCD_BENCH_SPTPS_CIPHER")
+                .map(|c| format!("SPTPSCipher = {c}\n"))
+                .unwrap_or_default();
 
             let mut tinc_conf = format!(
                 "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\n",
@@ -288,6 +293,7 @@ mod bench {
                 1
             };
             let _ = writeln!(tinc_conf, "PingTimeout = {pingtimeout}");
+            tinc_conf.push_str(&sptps_cipher);
             std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
             std::fs::write(
