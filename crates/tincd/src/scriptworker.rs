@@ -16,7 +16,7 @@ use crate::script::{self, ScriptEnv, ScriptResult};
 /// Sized for ~200 nodes × (host-up + per-node + subnet-up).
 const QUEUE_CAP: usize = 1024;
 
-pub enum Job {
+pub(crate) enum Job {
     /// One `script::execute` call. `name` is relative to `confbase`
     /// (e.g. `"host-up"`, `"hosts/bob-up"`).
     Script {
@@ -34,14 +34,14 @@ pub enum Job {
 /// inherits the post-`sandbox::enter` Landlock domain. `Drop` joins
 /// so shutdown drains queued `host-down`/`subnet-down`.
 #[derive(Default)]
-pub struct ScriptWorker {
+pub(crate) struct ScriptWorker {
     inner: Mutex<Option<(SyncSender<Job>, JoinHandle<()>)>>,
     full_warned: AtomicBool,
 }
 
 impl ScriptWorker {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -50,7 +50,7 @@ impl ScriptWorker {
     ///
     /// # Panics
     /// If the OS refuses to spawn the worker thread on first call.
-    pub fn submit(&self, job: Job) {
+    pub(crate) fn submit(&self, job: Job) {
         let mut guard = self
             .inner
             .lock()

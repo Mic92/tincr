@@ -66,7 +66,7 @@ const IPPROTO_ICMPV6: u8 = 58;
 
 /// Max bytes of the original IP datagram quoted in the ICMP body.
 /// `IP_MSS - ip_size - icmp_size` = 576−20−8.
-pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
+pub(crate) const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 
 /// `route_ipv4_unreachable`. RFC 792.
 ///
@@ -87,7 +87,7 @@ pub const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 /// source (TTL-exceeded `getsockname` dance, done by the caller).
 /// `None` = use original-dst.
 #[must_use]
-pub fn build_v4_unreachable(
+pub(crate) fn build_v4_unreachable(
     original: &[u8],
     icmp_type: u8,
     icmp_code: u8,
@@ -164,7 +164,7 @@ pub fn build_v4_unreachable(
 
 /// Max bytes of the original IPv6 datagram quoted in the `ICMPv6` body.
 /// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
-pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
+pub(crate) const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
 /// `route_ipv6_unreachable`. RFC 4443.
 ///
@@ -182,7 +182,7 @@ pub const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 /// source (TTL-exceeded `getsockname` dance, done by the caller).
 /// `None` = use original-dst.
 #[must_use]
-pub fn build_v6_unreachable(
+pub(crate) fn build_v6_unreachable(
     original: &[u8],
     icmp_type: u8,
     icmp_code: u8,
@@ -271,7 +271,7 @@ pub fn build_v6_unreachable(
 /// global. We make it a small struct the daemon owns. `now` is a
 /// parameter (no global `now.tv_sec`).
 #[derive(Debug, Default)]
-pub struct IcmpRateLimit {
+pub(crate) struct IcmpRateLimit {
     /// Unix seconds.
     last_sec: u64,
     count: u32,
@@ -279,7 +279,7 @@ pub struct IcmpRateLimit {
 
 impl IcmpRateLimit {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -290,7 +290,7 @@ impl IcmpRateLimit {
     /// The boundary (`>=` not `>`) means `freq=3` allows exactly 3
     /// per second: calls 1,2,3 increment to 1,2,3 (return false);
     /// call 4 sees `count(3) >= freq(3)` and returns true early.
-    pub const fn should_drop(&mut self, now_sec: u64, freq: u32) -> bool {
+    pub(crate) const fn should_drop(&mut self, now_sec: u64, freq: u32) -> bool {
         if self.last_sec == now_sec {
             // :90-92
             if self.count >= freq {

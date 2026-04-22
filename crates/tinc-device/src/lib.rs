@@ -33,7 +33,8 @@ mod ether;
 // the arena is portable (it's just memory layout), and the default
 // `drain()` is the BSD/macOS path — they inherit it for free.
 mod arena;
-pub use arena::{DeviceArena, DrainResult, GsoType};
+pub(crate) use arena::GsoType;
+pub use arena::{DeviceArena, DrainResult};
 
 // Userspace TSO split. Portable: same `virtio_net_hdr` on Linux
 // `IFF_VNET_HDR`, FreeBSD `TAPSVNETHDR`, Windows NDIS LSO. The

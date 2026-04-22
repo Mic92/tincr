@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use crate::route::RouteResult;
 
 /// Ethernet header length. We check this here (we're `pub`).
-pub const ETH_HDR_LEN: usize = 14;
+pub(crate) const ETH_HDR_LEN: usize = 14;
 
-pub type Mac = [u8; 6];
+pub(crate) type Mac = [u8; 6];
 
 /// `learn_mac` extraction. Daemon does the actual subnet-add +
 /// `ADD_SUBNET` broadcast.
@@ -25,7 +25,7 @@ pub type Mac = [u8; 6];
 /// nodes' MACs, not just `myself`'s. The C scopes the lookup to
 /// `myself` (`:525`); the daemon does that check on receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LearnAction {
+pub(crate) enum LearnAction {
     /// `:1031` source != myself.
     NotOurs,
 
@@ -49,7 +49,7 @@ pub enum LearnAction {
 /// # Panics
 /// Never; `try_into` is length-checked. Clippy doc note.
 #[must_use]
-pub fn route_mac<T, S: std::hash::BuildHasher>(
+pub(crate) fn route_mac<T, S: std::hash::BuildHasher>(
     frame: &[u8],
     from_myself: bool,
     source: &str,

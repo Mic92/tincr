@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 use tinc_conf::read_pem;
 use tinc_crypto::invite::cookie_filename;
 
-pub use tinc_crypto::invite::COOKIE_LEN;
+pub(crate) use tinc_crypto::invite::COOKIE_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::check_id;
 
@@ -29,22 +29,21 @@ const PRIVATE_BLOB_LEN: usize = 96;
 const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 
 /// Chunk size matched for wire-shape parity with C tincd.
-pub const CHUNK_SIZE: usize = 1024;
+pub(crate) const CHUNK_SIZE: usize = 1024;
 
 /// Invitation handshake phase.
 #[derive(Debug)]
-pub enum InvitePhase {
+pub(crate) enum InvitePhase {
     /// type != 0 || len != 18 → close.
     WaitingCookie,
-    /// `c->status.invitation_used = true`. Carries `.used` path for
-    /// the post-`finalize` unlink (`:305`).
-    WaitingPubkey { name: String, used_path: PathBuf },
+    /// `c->status.invitation_used = true`.
+    WaitingPubkey { name: String },
     /// Post-ACK terminal state; any further record terminates the conn.
     Done,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ServeError {
+pub(crate) enum ServeError {
     /// `:217-223`. Single-use: already-used cookie → ENOENT here too.
     #[error("non-existing or already-used invitation")]
     NonExisting,
@@ -84,7 +83,7 @@ fn io_err(path: &Path) -> impl Fn(std::io::Error) -> ServeError + '_ {
 /// # Errors
 /// `Io` for fs failures other than ENOENT; `BadInvitationFile` for
 /// PEM parse failures.
-pub fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>, ServeError> {
+pub(crate) fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>, ServeError> {
     let path = confbase.join("invitations").join("ed25519_key.priv");
     let f = match File::open(&path) {
         Ok(f) => f,
@@ -132,7 +131,7 @@ fn parse_name_line(line: &str) -> Option<&str> {
 ///   atomic rename (no check-then-rename TOCTOU).
 /// - `Expired`: `.used` file left in place (evidence; C same).
 /// - `BadInvitationFile`: rename already happened; C doesn't undo.
-pub fn serve_cookie(
+pub(crate) fn serve_cookie(
     confbase: &Path,
     inv_key: &SigningKey,
     cookie: &[u8; COOKIE_LEN],
@@ -198,7 +197,11 @@ pub fn serve_cookie(
 /// - `BadPubkey` (`:125`): newline = config-injection (**security**).
 /// - `HostFileExists`: don't overwrite (**security**: attacker could
 ///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
-pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf, ServeError> {
+pub(crate) fn finalize(
+    confbase: &Path,
+    name: &str,
+    pubkey_b64: &str,
+) -> Result<PathBuf, ServeError> {
     use std::os::unix::fs::OpenOptionsExt;
     // :122-126
     if pubkey_b64.len() > 128 || pubkey_b64.contains('\n') {
@@ -235,7 +238,7 @@ pub fn finalize(confbase: &Path, name: &str, pubkey_b64: &str) -> Result<PathBuf
 /// # Panics
 /// If `chunk_size == 0`.
 #[must_use]
-pub fn chunk_file(contents: &[u8], chunk_size: usize) -> Vec<&[u8]> {
+pub(crate) fn chunk_file(contents: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     assert!(chunk_size > 0, "chunk_size must be nonzero");
     contents.chunks(chunk_size).collect()
 }

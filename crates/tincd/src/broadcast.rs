@@ -52,7 +52,7 @@ pub enum BroadcastMode {
 /// (`from->nexthop->connection`). `None` for locally-originated
 /// broadcasts (`from == myself`; `:1616` `if(from != myself)` already
 /// gave us a copy).
-pub fn mst_targets<C, E>(
+pub(crate) fn mst_targets<C, E>(
     active_conns: impl Iterator<Item = (C, E)>,
     mst: &[E],
     from_conn: Option<C>,
@@ -87,7 +87,7 @@ where
 ///
 /// `:1650` `n != myself` — we never include ourselves in the targets;
 /// the `send_packet(myself, ..)` at `:1617` already happened.
-pub fn direct_targets<N>(
+pub(crate) fn direct_targets<N>(
     nodes: impl Iterator<Item = (N, Option<N>, Option<N>)>,
     myself: N,
     from_is_self: bool,

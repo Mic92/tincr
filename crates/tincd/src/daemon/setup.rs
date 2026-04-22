@@ -22,6 +22,7 @@ use tinc_proto::Subnet;
 use crate::compress;
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 #[cfg(not(target_os = "linux"))]
+#[cfg(not(target_os = "linux"))]
 use crate::egress::Portable;
 use crate::egress::UdpEgress;
 use crate::icmp;

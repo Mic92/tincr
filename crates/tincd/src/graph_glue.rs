@@ -26,7 +26,7 @@ use tinc_graph::{EdgeId, Graph, NodeId, Route};
 /// One reachability transition. The daemon turns these into log
 /// lines + script spawns + per-node-SPTPS resets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Transition {
+pub(crate) enum Transition {
     /// `n->status.reachable` went false→true. Log `"Node %s became
     /// reachable"`, fire `host-up` script. The `via` is from the
     /// new `Route` — log line is actually
@@ -57,7 +57,7 @@ pub enum Transition {
 /// If `new_routes` is shorter than the graph's node slab, or if a
 /// `NodeId` from `node_ids()` reads a freed slot. Neither happens
 /// when `new_routes` is a fresh `sssp()` result on the same graph.
-pub fn diff_reachability(
+pub(crate) fn diff_reachability(
     graph: &mut Graph,
     myself: NodeId,
     new_routes: &[Option<Route>],
@@ -107,7 +107,7 @@ pub fn diff_reachability(
 /// `mst_kruskal()`. `mst` reads `reachable` to pick a starting
 /// node, so the diff's write-back must land first.
 #[must_use]
-pub fn run_graph(
+pub(crate) fn run_graph(
     graph: &mut Graph,
     myself: NodeId,
     prev_routes: &[Option<Route>],

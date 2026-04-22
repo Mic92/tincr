@@ -48,7 +48,7 @@ impl Daemon {
         }
         // No reachability check — ARP just answers "does someone own
         // this", not "are they up".
-        let Some((_, owner)) = self.subnets.lookup_ipv4(&target, |_| true) else {
+        let Some((_, owner)) = self.subnets.lookup_ipv4(target, |_| true) else {
             log::debug!(target: "tincd::net",
                         "route: ARP for unknown {target}");
             return false;

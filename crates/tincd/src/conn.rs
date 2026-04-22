@@ -37,14 +37,14 @@ impl std::fmt::Write for VecFmt<'_> {
 
 /// `MAXBUFSIZE` (`net.h:45`): `(max(MAXSIZE,2048) + 128)` = 2176
 /// (no-jumbo `MAXSIZE = 1673`). Jumbo would be `9163 + 128 = 9291`.
-pub const MAXBUFSIZE: usize = 2176;
+pub(crate) const MAXBUFSIZE: usize = 2176;
 
 // LineBuf
 
 /// `buffer_t` (`buffer.c`). `data[offset..]` is live; `data[..offset]`
 /// is consumed-not-yet-compacted.
 #[derive(Default)]
-pub struct LineBuf {
+pub(crate) struct LineBuf {
     data: Vec<u8>,
     /// `buffer_t.offset`. Index of first unconsumed byte.
     offset: usize,
@@ -53,7 +53,7 @@ pub struct LineBuf {
 impl LineBuf {
     /// Compacts if doing so avoids a realloc (simpler than the
     /// `offset/7 > len/8` heuristic).
-    pub fn add(&mut self, bytes: &[u8]) {
+    pub(crate) fn add(&mut self, bytes: &[u8]) {
         if self.offset > 0 && self.data.len() + bytes.len() > self.data.capacity() {
             self.data.drain(..self.offset);
             self.offset = 0;
@@ -67,7 +67,7 @@ impl LineBuf {
     /// NO reset-on-empty here: the returned range would be into a
     /// cleared buffer. Reset lives in
     /// `add()`/`consume()` instead.
-    pub fn read_line(&mut self) -> Option<Range<usize>> {
+    pub(crate) fn read_line(&mut self) -> Option<Range<usize>> {
         let live = &self.data[self.offset..];
         let nl = live.iter().position(|&b| b == b'\n')?;
         let start = self.offset;
@@ -79,7 +79,7 @@ impl LineBuf {
     /// `buffer_read(buffer, n)`. Exact-N read. Used for the SOCKS
     /// reply (binary, fixed-length, not
     /// line-terminated). Same range-validity contract as `read_line`.
-    pub const fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
+    pub(crate) const fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
         if self.live_len() < n {
             return None;
         }
@@ -89,28 +89,28 @@ impl LineBuf {
     }
 
     #[must_use]
-    pub const fn live_len(&self) -> usize {
+    pub(crate) const fn live_len(&self) -> usize {
         self.data.len() - self.offset
     }
 
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.offset >= self.data.len()
     }
 
     /// Full backing slice. Index with a range from `read_line`.
     #[must_use]
-    pub fn bytes_raw(&self) -> &[u8] {
+    pub(crate) fn bytes_raw(&self) -> &[u8] {
         &self.data
     }
 
     #[must_use]
-    pub fn live(&self) -> &[u8] {
+    pub(crate) fn live(&self) -> &[u8] {
         &self.data[self.offset..]
     }
 
     /// Advance the cursor (after partial `send()`).
-    pub fn consume(&mut self, n: usize) {
+    pub(crate) fn consume(&mut self, n: usize) {
         self.offset += n;
         if self.offset >= self.data.len() {
             self.data.clear();
@@ -122,7 +122,7 @@ impl LineBuf {
     /// line may also carry SPTPS bytes (Nagle-coalesced). C handles
     /// this mid-read in `receive_meta`'s do-while; we split
     /// feed/drain, so the daemon calls this after `id_h` and re-feeds.
-    pub fn take_rest(&mut self) -> Vec<u8> {
+    pub(crate) fn take_rest(&mut self) -> Vec<u8> {
         let rest = self.data[self.offset..].to_vec();
         self.data.clear();
         self.offset = 0;
@@ -137,7 +137,7 @@ impl LineBuf {
 // bitfield. The bits are independent (a conn is active AND pinged
 // in steady state); a state-enum doesn't fit.
 #[allow(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
-pub struct Connection {
+pub(crate) struct Connection {
     fd: OwnedFd,
     pub inbuf: LineBuf,
     pub outbuf: LineBuf,
@@ -253,7 +253,7 @@ pub struct Connection {
 /// blob changes reachability that the blob's `route()` reads. C
 /// dispatches each inside the callback; we batch but preserve order.
 #[derive(Debug)]
-pub enum SptpsEvent {
+pub(crate) enum SptpsEvent {
     Record(Output),
     /// `SPTPS_PACKET` blob (`dst[6]‖src[6]‖ct`).
     Blob(Vec<u8>),
@@ -262,7 +262,7 @@ pub enum SptpsEvent {
 /// `receive_meta` returns `bool`; we disambiguate "would block" vs
 /// "drop me" and add the SPTPS-mode arm.
 #[derive(Debug)]
-pub enum FeedResult {
+pub(crate) enum FeedResult {
     /// Plaintext buffered; drain `read_line`. Pre-SPTPS only.
     Data,
     /// `EWOULDBLOCK` — spurious wakeup.
@@ -323,7 +323,7 @@ impl Connection {
 
     /// `handle_new_unix_connection`.
     #[must_use]
-    pub fn new_control(fd: OwnedFd, now: Instant) -> Self {
+    pub(crate) fn new_control(fd: OwnedFd, now: Instant) -> Self {
         Self {
             is_unix_ctl: true,
             ..Self::new_base(
@@ -337,7 +337,12 @@ impl Connection {
 
     /// `handle_new_meta_connection`.
     #[must_use]
-    pub fn new_meta(fd: OwnedFd, hostname: String, address: SocketAddr, now: Instant) -> Self {
+    pub(crate) fn new_meta(
+        fd: OwnedFd,
+        hostname: String,
+        address: SocketAddr,
+        now: Instant,
+    ) -> Self {
         Self {
             address: Some(address),
             ..Self::new_base(fd, "<unknown>".to_string() /* C :759 */, hostname, now)
@@ -347,7 +352,7 @@ impl Connection {
     /// `do_outgoing_connection`. `name` is the `ConnectTo` value;
     /// `id_h` checks the peer sent it.
     #[must_use]
-    pub fn new_outgoing(
+    pub(crate) fn new_outgoing(
         fd: OwnedFd,
         name: String,
         hostname: String,
@@ -373,7 +378,7 @@ impl AsFd for Connection {
 impl Connection {
     /// For `socket2::SockRef::from` (`getsockname` in `ack_h:1040-1045`).
     #[must_use]
-    pub const fn owned_fd(&self) -> &OwnedFd {
+    pub(crate) const fn owned_fd(&self) -> &OwnedFd {
         &self.fd
     }
 
@@ -381,7 +386,7 @@ impl Connection {
     /// bool N → bit N: 0=pinged, `1=unused_active`, 2=connecting,
     /// 9=control.
     #[must_use]
-    pub const fn status_value(&self) -> u32 {
+    pub(crate) const fn status_value(&self) -> u32 {
         let mut v = 0u32;
         if self.pinged {
             v |= 1 << 0;
@@ -411,7 +416,7 @@ impl Connection {
     ///
     /// `rng`: only touched on SPTPS rekey (HANDSHAKE → `send_kex`).
     #[allow(clippy::missing_panics_doc)] // expect on take after is_some
-    pub fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
+    pub(crate) fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
         let mut stack = [0u8; MAXBUFSIZE];
 
         // Cap shrinks as inbuf fills. SPTPS mode doesn't touch inbuf
@@ -579,7 +584,7 @@ impl Connection {
 
     /// `send_meta_sptps`. Queue already-framed bytes.
     /// `bool` return is the `io_set` signal.
-    pub fn send_raw(&mut self, bytes: &[u8]) -> bool {
+    pub(crate) fn send_raw(&mut self, bytes: &[u8]) -> bool {
         let was_empty = self.outbuf.is_empty();
         self.outbuf.add(bytes);
         was_empty
@@ -592,7 +597,7 @@ impl Connection {
     /// # Panics
     /// `InvalidState` only fires pre-handshake or `type >= 128`.
     /// Callers send post-HandshakeDone with types 0/1/2.
-    pub fn send_sptps_record(&mut self, record_type: u8, body: &[u8]) -> bool {
+    pub(crate) fn send_sptps_record(&mut self, record_type: u8, body: &[u8]) -> bool {
         let was_empty = self.outbuf.is_empty();
         let sptps = self
             .sptps
@@ -620,7 +625,7 @@ impl Connection {
     /// `InvalidState`: cipher not installed or `type >= 128`. Type is 0;
     /// cipher is set at `receive_sig` before `HandshakeDone`. Unreachable
     /// barring a `tinc-sptps` bug.
-    pub fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
+    pub(crate) fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
         let was_empty = self.outbuf.is_empty();
 
         // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
@@ -654,7 +659,7 @@ impl Connection {
     ///
     /// # Errors
     /// `io::Error` from `send()`: `EPIPE`, `ECONNRESET`, etc.
-    pub fn flush(&mut self) -> io::Result<bool> {
+    pub(crate) fn flush(&mut self) -> io::Result<bool> {
         if self.outbuf.is_empty() {
             return Ok(true);
         }

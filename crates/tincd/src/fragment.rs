@@ -40,7 +40,7 @@ const IP_SIZE: usize = 20;
 /// `dest_mtu` is the tinc-layer MTU (eth + ip + payload max).
 /// Callers apply `MAX(dest->mtu, 590)` at the call site.
 #[must_use]
-pub fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
+pub(crate) fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
     if frame.len() < ETH_SIZE + IP_SIZE {
         return None;
     }

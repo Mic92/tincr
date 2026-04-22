@@ -164,20 +164,6 @@ pub fn can(action: Action) -> bool {
     }
 }
 
-/// For tests/asserts. C exposes `current_level` as a static; we
-/// don't, but the netns test wants to verify the daemon ACTUALLY
-/// entered (a level > None on a kernel without Landlock at `normal`
-/// would still record `Normal` here — that's correct, `can()` gates
-/// are about INTENT, the path restriction is best-effort).
-#[must_use]
-pub fn entered_level() -> Level {
-    match STATE.load(Ordering::Relaxed) & 0b11 {
-        2 => Level::High,
-        1 => Level::Normal,
-        _ => Level::None,
-    }
-}
-
 /// `sandbox_enter`. One-shot.
 ///
 /// `chrooted`: upstream's `chrooted()` checks `!confbase`; we
@@ -456,6 +442,6 @@ mod tests {
     fn can_before_enter_is_always_true() {
         assert!(can(Action::StartProcesses));
         assert!(can(Action::UseNewPaths));
-        assert_eq!(entered_level(), Level::None);
+        assert_eq!(STATE.load(Ordering::Relaxed) & 0b11, 0);
     }
 }

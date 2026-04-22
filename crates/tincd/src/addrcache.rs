@@ -52,7 +52,7 @@ const MAX_EPHEMERAL: usize = 64;
 const HEADER: &str = "tinc-addrcache 1";
 
 /// One peer's address book. See module docs for the tier model.
-pub struct AddressCache {
+pub(crate) struct AddressCache {
     /// Tier 1. MRU; only this tier persists.
     recent: Vec<SocketAddr>,
     /// Tier 2. Replaced wholesale per retry by
@@ -111,7 +111,7 @@ impl AddressCache {
     /// 3 from `config_addrs`. Never fails: unreadable / malformed
     /// cache files degrade to empty.
     #[must_use]
-    pub fn open(confbase: &Path, peer: &str, config_addrs: Vec<(String, u16)>) -> Self {
+    pub(crate) fn open(confbase: &Path, peer: &str, config_addrs: Vec<(String, u16)>) -> Self {
         let state_dir = std::env::var_os("STATE_DIRECTORY").map(PathBuf::from);
         let path = resolve_cache_dir(confbase, state_dir.as_deref()).join(peer);
         let (config, hostnames) = split_config(config_addrs);
@@ -126,10 +126,10 @@ impl AddressCache {
         }
     }
 
-    /// In-memory cache seeded with a fixed `recent` list. Tests, and
-    /// callers that already have a `Vec<SocketAddr>` from elsewhere.
+    /// In-memory cache seeded with a fixed `recent` list. Test fixture.
+    #[cfg(test)]
     #[must_use]
-    pub const fn new(recent: Vec<SocketAddr>) -> Self {
+    pub(crate) const fn new(recent: Vec<SocketAddr>) -> Self {
         Self {
             recent,
             known: Vec::new(),
@@ -147,7 +147,7 @@ impl AddressCache {
     /// stale gossip is worse than none. Dedups against tier 1 and
     /// itself; resets the cursor (tier-2 length changed, the old
     /// position is meaningless).
-    pub fn add_known_addresses(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
+    pub(crate) fn add_known_addresses(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         self.known.clear();
         self.resolved.clear();
         for a in addrs {
@@ -166,7 +166,7 @@ impl AddressCache {
     /// already-walked positions; if the round had already returned
     /// `None` the new entries are picked up on the very next call.
     /// Cleared at the next [`Self::reset`] / [`Self::add_known_addresses`].
-    pub fn extend_resolved(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
+    pub(crate) fn extend_resolved(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         for a in addrs {
             if self.resolved.len() >= MAX_EPHEMERAL {
                 break;
@@ -184,13 +184,13 @@ impl AddressCache {
     /// `Address =` lines that need a real resolver. Empty for the
     /// common all-literal-IP config.
     #[must_use]
-    pub fn unresolved_hosts(&self) -> Vec<(String, u16)> {
+    pub(crate) fn unresolved_hosts(&self) -> Vec<(String, u16)> {
         self.hostnames.clone()
     }
 
     /// Next candidate address, or `None` when this round is
     /// exhausted. Never blocks.
-    pub fn next_addr(&mut self) -> Option<SocketAddr> {
+    pub(crate) fn next_addr(&mut self) -> Option<SocketAddr> {
         let i = self.cursor;
         let r = self.recent.len();
         let k = r + self.known.len();
@@ -218,7 +218,7 @@ impl AddressCache {
     /// (or prepends if new), so the next round tries it first.
     /// Doesn't touch the cursor — callers reach this from a success
     /// path that will `reset` before dialling again.
-    pub fn add_recent(&mut self, addr: SocketAddr) {
+    pub(crate) fn add_recent(&mut self, addr: SocketAddr) {
         self.recent.retain(|a| *a != addr);
         self.recent.insert(0, addr);
     }
@@ -226,7 +226,7 @@ impl AddressCache {
     /// Start a fresh round. Tier 2 is *not* cleared here: the daemon
     /// always calls [`Self::add_known_addresses`] right after with a
     /// fresh snapshot, which both clears and refills it.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.cursor = 0;
         self.resolved.clear();
     }
@@ -244,7 +244,7 @@ impl AddressCache {
     /// # Errors
     /// `create_dir_all` / `open` / `write_all` / `rename` failures
     /// (read-only confbase, disk full).
-    pub fn save(&self) -> io::Result<()> {
+    pub(crate) fn save(&self) -> io::Result<()> {
         match self.serialize() {
             Some((path, bytes)) => write_atomic(&path, &bytes),
             None => Ok(()),
@@ -254,7 +254,7 @@ impl AddressCache {
     /// `(path, bytes)` for [`write_atomic`]; split so the event loop
     /// can ship the fsync+rename to the worker thread.
     #[must_use]
-    pub fn serialize(&self) -> Option<(PathBuf, Vec<u8>)> {
+    pub(crate) fn serialize(&self) -> Option<(PathBuf, Vec<u8>)> {
         let path = self.path.clone()?;
         let mut buf = String::from(HEADER);
         buf.push('\n');
@@ -267,7 +267,7 @@ impl AddressCache {
 
     /// Detach from disk so `Drop` won't `save()`. Used after the
     /// serialized bytes have been handed to the worker thread.
-    pub fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.path = None;
     }
 }
@@ -277,7 +277,7 @@ impl AddressCache {
 ///
 /// # Errors
 /// `create_dir_all` / `open` / `write_all` / `rename` failures.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

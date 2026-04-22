@@ -47,7 +47,7 @@ const HTTP_DEADLINE: Duration = Duration::from_secs(5);
 const HTTP_MAX_RESPONSE: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
-pub struct Gateway {
+pub(super) struct Gateway {
     addr: SocketAddrV4,
     control_url: String,
     /// The matched WAN service URN — echoed in `SOAPACTION` and the
@@ -71,7 +71,7 @@ pub struct Gateway {
 /// binds `INADDR_ANY:1900`, `minissdp.c:205`); for the few that
 /// only reply to multicast, the unicast send still serves as the
 /// firewall punch.
-pub fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, String> {
+pub(super) fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, String> {
     let sock =
         UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("bind 0.0.0.0:0: {e}"))?;
     // TTL 2: cross one router hop (the gateway), no further.
@@ -144,12 +144,12 @@ pub fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, S
 }
 
 impl Gateway {
-    pub fn addr(&self) -> IpAddr {
+    pub(super) fn addr(&self) -> IpAddr {
         IpAddr::V4(*self.addr.ip())
     }
 
     /// SOAP `GetExternalIPAddress`.
-    pub fn external_ip(&self) -> Result<IpAddr, String> {
+    pub(super) fn external_ip(&self) -> Result<IpAddr, String> {
         let body = format!(
             "<u:GetExternalIPAddress xmlns:u=\"{}\"></u:GetExternalIPAddress>",
             self.service_type
@@ -162,7 +162,7 @@ impl Gateway {
     }
 
     /// SOAP `AddPortMapping`.
-    pub fn add_port(
+    pub(super) fn add_port(
         &self,
         proto: Proto,
         ext_port: u16,

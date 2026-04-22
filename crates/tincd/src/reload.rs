@@ -64,7 +64,7 @@ use tinc_proto::Subnet;
 /// includes weight in the key, so `lookup_subnet` won't find the
 /// old entry when weight changed → falls through to the add path.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SubnetDiff {
+pub(crate) struct SubnetDiff {
     /// New in config, not in current set. → `subnet_add` +
     /// `send_add_subnet(everyone)` + `subnet_update(true)`.
     pub added: Vec<Subnet>,
@@ -85,7 +85,7 @@ pub struct SubnetDiff {
 /// subnet is independent; the C is splay-tree iter order, also just
 /// "some deterministic order").
 #[must_use]
-pub fn diff_subnets<S: BuildHasher>(
+pub(crate) fn diff_subnets<S: BuildHasher>(
     current: &HashSet<Subnet, S>,
     from_config: &HashSet<Subnet, S>,
 ) -> SubnetDiff {
@@ -113,7 +113,7 @@ pub fn diff_subnets<S: BuildHasher>(
 /// Ordering: `BTreeSet::difference` — deterministic, sorted. Node
 /// names are `[A-Za-z0-9_]+` so byte-lex == ASCII-lex.
 #[must_use]
-pub fn diff_connect_to(
+pub(crate) fn diff_connect_to(
     current: &BTreeSet<String>,
     from_config: &BTreeSet<String>,
 ) -> (Vec<String>, Vec<String>) {
@@ -149,7 +149,7 @@ pub fn diff_connect_to(
 /// (every hosts/ file's mtime is `>=` daemon start time on a fresh
 /// install). Don't fix.
 #[must_use]
-pub fn conns_to_terminate(
+pub(crate) fn conns_to_terminate(
     conns: &[String],
     host_mtimes: &[(String, SystemTime)],
     last_check: SystemTime,

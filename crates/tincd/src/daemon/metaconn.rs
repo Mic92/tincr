@@ -980,14 +980,13 @@ impl Daemon {
 
                             conn.invite = Some(InvitePhase::WaitingPubkey {
                                 name: invited_name.clone(),
-                                used_path,
                             });
 
                             log::info!(target: "tincd::auth",
                                         "Invitation successfully sent to {invited_name} ({hostname})");
                         }
 
-                        (1, Some(InvitePhase::WaitingPubkey { name, .. })) => {
+                        (1, Some(InvitePhase::WaitingPubkey { name })) => {
                             // newline check happens inside finalize().
                             let Ok(pubkey_b64) = std::str::from_utf8(&bytes) else {
                                 log::error!(target: "tincd::auth",

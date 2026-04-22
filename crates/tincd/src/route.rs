@@ -23,26 +23,26 @@ const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_8021Q: u16 = 0x8100;
 
 // ICMPv4 (RFC 792, RFC 1122). `ipv4.h:35-63`.
-pub const ICMP_DEST_UNREACH: u8 = 3;
-pub const ICMP_NET_UNKNOWN: u8 = 6;
+pub(crate) const ICMP_DEST_UNREACH: u8 = 3;
+pub(crate) const ICMP_NET_UNKNOWN: u8 = 6;
 /// Code 9 (admin prohibited). Used for `directonly` and `FMODE_OFF`:
 /// route exists, we refuse to forward.
-pub const ICMP_NET_ANO: u8 = 9;
-pub const ICMP_NET_UNREACH: u8 = 0;
-pub const ICMP_FRAG_NEEDED: u8 = 4;
-pub const ICMP_TIME_EXCEEDED: u8 = 11;
-pub const ICMP_EXC_TTL: u8 = 0;
+pub(crate) const ICMP_NET_ANO: u8 = 9;
+pub(crate) const ICMP_NET_UNREACH: u8 = 0;
+pub(crate) const ICMP_FRAG_NEEDED: u8 = 4;
+pub(crate) const ICMP_TIME_EXCEEDED: u8 = 11;
+pub(crate) const ICMP_EXC_TTL: u8 = 0;
 
 // ICMPv6 (RFC 4443).
-pub const ICMP6_DST_UNREACH: u8 = 1;
-pub const ICMP6_DST_UNREACH_NOROUTE: u8 = 0;
-pub const ICMP6_DST_UNREACH_ADMIN: u8 = 1;
-pub const ICMP6_DST_UNREACH_ADDR: u8 = 3;
+pub(crate) const ICMP6_DST_UNREACH: u8 = 1;
+pub(crate) const ICMP6_DST_UNREACH_NOROUTE: u8 = 0;
+pub(crate) const ICMP6_DST_UNREACH_ADMIN: u8 = 1;
+pub(crate) const ICMP6_DST_UNREACH_ADDR: u8 = 3;
 /// RFC 4443 type 2. `len > MAX(via->mtu, 1294)` — 1294 = 1280 (v6
 /// min MTU, RFC 8200) + 14 eth.
-pub const ICMP6_PACKET_TOO_BIG: u8 = 2;
-pub const ICMP6_TIME_EXCEEDED: u8 = 3;
-pub const ICMP6_TIME_EXCEED_TRANSIT: u8 = 0;
+pub(crate) const ICMP6_PACKET_TOO_BIG: u8 = 2;
+pub(crate) const ICMP6_TIME_EXCEEDED: u8 = 3;
+pub(crate) const ICMP6_TIME_EXCEED_TRANSIT: u8 = 0;
 
 /// RFC 4861 §4.3. Diverts to `route_neighborsol`.
 const ND_NEIGHBOR_SOLICIT: u8 = 135;
@@ -59,7 +59,7 @@ const IPPROTO_ICMPV6: u8 = 58;
 /// use `String`. `resolve: FnMut(&str) -> Option<T>` maps owner name
 /// to `T`; `None` = unreachable.
 #[derive(Debug, PartialEq, Eq)]
-pub enum RouteResult<T> {
+pub(crate) enum RouteResult<T> {
     /// `send_packet(owner, ...)`. `to == myself` → daemon writes to
     /// TUN (`send_packet` special-cases same).
     Forward { to: T },
@@ -88,7 +88,7 @@ pub enum RouteResult<T> {
 /// Reads `ip_dst`, looks up in `subnets`, returns the owner.
 /// `resolve` returns `None` for unreachable; `myself` is always
 /// reachable so the remote-only check falls out.
-pub fn route_ipv4<T>(
+pub(crate) fn route_ipv4<T>(
     data: &[u8],
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
@@ -110,7 +110,7 @@ pub fn route_ipv4<T>(
         data[dst_off + 3],
     );
 
-    let Some((_subnet, owner)) = subnets.lookup_ipv4(&dest, |n| resolve(n).is_some()) else {
+    let Some((_subnet, owner)) = subnets.lookup_ipv4(dest, |n| resolve(n).is_some()) else {
         // no covering subnet
         return RouteResult::Unreachable {
             icmp_type: ICMP_DEST_UNREACH,
@@ -150,7 +150,7 @@ pub fn route_ipv4<T>(
 /// Same shape as [`route_ipv4`]; differences: dst at offset 38,
 /// `ICMPv6` codes, NDP divert, MTU check
 /// uses `MAX(via->mtu, 1294)` (v6 forbids in-net frag, RFC 8200 §5).
-pub fn route_ipv6<T>(
+pub(crate) fn route_ipv6<T>(
     data: &[u8],
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
@@ -214,7 +214,7 @@ pub fn route_ipv6<T>(
 /// `do_decrement_ttl` outcome. Upstream returns bool + side-effects;
 /// we reify the four exits.
 #[derive(Debug, PartialEq, Eq)]
-pub enum TtlResult {
+pub(crate) enum TtlResult {
     /// `:365,384,386`: TTL>1 decremented (or unknown ethertype).
     Decremented,
     /// `:344-347,376-379`: TTL≤1 AND already ICMP-time-exceeded.
@@ -229,7 +229,7 @@ pub enum TtlResult {
 /// `do_decrement_ttl`. In-place TTL/hop-limit decrement + IPv4
 /// checksum adjust (RFC 1624 incremental: `csum +=
 /// old + ~new` then fold — `:354-360`). v6 has no IP checksum.
-pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
+pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
     // Read ethertype, skip 8021Q tag if present.
     if data.len() < ETHER_SIZE {
         return TtlResult::TooShort;
@@ -334,7 +334,7 @@ pub fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 /// priority at 0. Only set `packet->priority` when ethertype+length
 /// both pass.
 #[must_use]
-pub fn extract_tos(data: &[u8]) -> Option<u8> {
+pub(crate) fn extract_tos(data: &[u8]) -> Option<u8> {
     if data.len() < ETHER_SIZE {
         return None;
     }
@@ -353,7 +353,7 @@ pub fn extract_tos(data: &[u8]) -> Option<u8> {
 
 /// Ethertype dispatch (`RMODE_ROUTER` only).
 /// `data` is full eth frame; TUN synthesises the header in router mode.
-pub fn route<T>(
+pub(crate) fn route<T>(
     data: &[u8],
     subnets: &SubnetTree,
     resolve: impl FnMut(&str) -> Option<T>,

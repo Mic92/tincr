@@ -1312,7 +1312,7 @@ impl Daemon {
         // Reject peer claims on MACs we still actively lease.
         if let Subnet::Mac { addr, .. } = subnet
             && owner != self.myself
-            && self.mac_leases.contains(&addr)
+            && self.mac_leases.contains(addr)
         {
             log::warn!(target: "tincd::proto",
                 "Rejecting ADD_SUBNET from {owner_name} for MAC \

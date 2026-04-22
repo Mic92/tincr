@@ -24,14 +24,14 @@ use tinc_graph::NodeId;
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
 /// IP packet — what `route_packet` would have counted), not on-wire
 /// (which is `bytes + packets×33`).
-pub struct SealOk {
+pub(crate) struct SealOk {
     pub packets: u64,
     pub bytes: u64,
 }
 
 /// `EMSGSIZE` from `send_batch`. `(relay, origlen)` is exactly what
 /// `TxBatch::take()` returned — caller dispatches `on_emsgsize`.
-pub type SealErr = (NodeId, u16);
+pub(crate) type SealErr = (NodeId, u16);
 
 /// Seal every chunk strided into `scratch_in`, stage into `batch`,
 /// ship-on-full, final-ship at the end. One `ChaPoly` per super (key
@@ -57,7 +57,7 @@ pub type SealErr = (NodeId, u16);
 /// `tx_scratch.len() != 16` at the `seal_into` call — i.e. `prefix`
 /// isn't 12 bytes. It always is (`TxTarget.prefix: [u8; 12]`).
 #[allow(clippy::cast_possible_truncation)] // body_len ≤ MTU < u16::MAX
-pub fn seal_super(
+pub(crate) fn seal_super(
     target: &TxTarget,
     stride: usize,
     lens: &[usize],

@@ -158,7 +158,7 @@ pub(crate) fn get_int_sockopt(
 /// `MAXSOCKETS` (`net.h:47`). C comment: "Probably overkill...".
 /// 8 listener pairs (TCP+UDP each). One v4, one v6, six spare for
 /// `BindToAddress` entries.
-pub const MAXSOCKETS: usize = 8;
+pub(crate) const MAXSOCKETS: usize = 8;
 
 /// `addressfamily`. Which families to bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,11 +206,12 @@ impl AddrFamily {
 /// outgoing connections too — source-addr selection) from
 /// `ListenAddress` (listen-only). The no-config
 /// default is `bindto = false`.
-pub struct Listener {
+pub(crate) struct Listener {
     /// `listen_socket_t.bindto`. True iff this listener came from a
     /// `BindToAddress` config line (vs `ListenAddress` or the
     /// implicit wildcard). Consumed
     /// by outgoing-connect to pick a source address.
+    #[allow(dead_code)] // plumbed from BindToAddress; outgoing-socket pinning not yet wired
     pub bindto: bool,
     /// `listen_socket_t.tcp`. TCP listener, accepting peer conns.
     /// `Socket` owns the fd; Drop closes.
@@ -226,13 +227,13 @@ pub struct Listener {
 impl Listener {
     /// Borrowed TCP listener fd for `EventLoop::add`.
     #[must_use]
-    pub fn tcp_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn tcp_fd(&self) -> BorrowedFd<'_> {
         self.tcp.as_fd()
     }
 
     /// Borrowed UDP socket fd for `EventLoop::add`.
     #[must_use]
-    pub fn udp_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn udp_fd(&self) -> BorrowedFd<'_> {
         self.udp.as_fd()
     }
 
@@ -242,7 +243,7 @@ impl Listener {
     /// where the port is taken on UDP fall back to ephemeral
     /// (`open_one`'s retry path).
     #[must_use]
-    pub fn udp_port(&self) -> u16 {
+    pub(crate) fn udp_port(&self) -> u16 {
         self.udp
             .local_addr()
             .ok()
@@ -572,7 +573,7 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
 /// (`continue`). The "no listeners" case is the caller's problem
 /// (returns empty Vec).
 #[must_use]
-pub fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Listener> {
+pub(crate) fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Listener> {
     let mut listeners = Vec::with_capacity(2);
 
     if family.try_v4() {
@@ -656,7 +657,7 @@ where
 /// Public for `daemon.rs`'s `BindToAddress` walk; the wildcard
 /// default still goes through `open_listeners`.
 #[must_use]
-pub fn open_listener_pair(
+pub(crate) fn open_listener_pair(
     addr: SocketAddr,
     opts: &SockOpts,
     reuse_port: Option<u16>,
@@ -754,7 +755,7 @@ fn open_one(
 /// `set_nonblocking` failing means the fd is broken; propagate.
 /// `set_nodelay` failing is a warn — the connection works without it,
 /// just with Nagle latency. The return value is ignored.
-pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
+pub(crate) fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
     // `:71-76`: O_NONBLOCK. The conn read path is non-blocking.
     s.set_nonblocking(true)?;
 
@@ -786,7 +787,7 @@ pub fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 /// `IN6_IS_ADDR_V4MAPPED`. Writes the low 32 bits over
 /// `sin_addr` and changes `sa_family` — net effect: a `SocketAddrV4`.
 #[must_use]
-pub fn unmap(sa: SocketAddr) -> SocketAddr {
+pub(crate) fn unmap(sa: SocketAddr) -> SocketAddr {
     if let SocketAddr::V6(v6) = sa
         && let Some(v4) = v6.ip().to_ipv4_mapped()
     {
@@ -809,7 +810,7 @@ pub fn unmap(sa: SocketAddr) -> SocketAddr {
 /// == 127`). `Ipv6Addr::is_loopback` is `::1` only (matches
 /// `IN6_IS_ADDR_LOOPBACK`).
 #[must_use]
-pub const fn is_local(sa: &SocketAddr) -> bool {
+pub(crate) const fn is_local(sa: &SocketAddr) -> bool {
     match sa {
         SocketAddr::V4(v4) => v4.ip().is_loopback(),
         SocketAddr::V6(v6) => v6.ip().is_loopback(),
@@ -839,7 +840,7 @@ pub const fn is_local(sa: &SocketAddr) -> bool {
 /// v4 IF v4 is enabled. If `AddressFamily = ipv6`, it's v6. The
 /// mapping handles both.
 #[must_use]
-pub fn pidfile_addr(listeners: &[Listener]) -> String {
+pub(crate) fn pidfile_addr(listeners: &[Listener]) -> String {
     // `if(getsockname(...))` failure → fall back to
     // `"127.0.0.1 port %s" % myport`. We've already done getsockname
     // in `open_one`; can't fail here.
@@ -877,7 +878,7 @@ pub fn pidfile_addr(listeners: &[Listener]) -> String {
 /// which our `SocketAddr` can't represent. `tinc-proto::addr` has
 /// the full-generality version; this is for SOCKETS we own.
 #[must_use]
-pub fn fmt_addr(sa: &SocketAddr) -> String {
+pub(crate) fn fmt_addr(sa: &SocketAddr) -> String {
     // `xasprintf("%s port %s", host, port)`. The %s comes from
     // getnameinfo NI_NUMERICHOST. For v6 that's "::1" not "[::1]"
     // (NI_NUMERICHOST doesn't bracket). std's Ipv6Addr Display also
@@ -886,7 +887,7 @@ pub fn fmt_addr(sa: &SocketAddr) -> String {
 }
 
 mod tarpit;
-pub use tarpit::Tarpit;
+pub(crate) use tarpit::Tarpit;
 
 #[cfg(test)]
 mod tests;

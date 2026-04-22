@@ -41,7 +41,7 @@ const PIT_SIZE: usize = 10;
 /// The C uses `now.tv_sec` (the cached `struct timeval`). We compare
 /// at second granularity (`.as_secs()`) to match C's `time_t`
 /// arithmetic.
-pub struct Tarpit {
+pub(crate) struct Tarpit {
     /// `prev_sa` (`:684`). The last peer's address, port-stripped.
     /// `None` is the initial state — first peer never matches.
     /// C uses `static sockaddr_t prev_sa = {0}` which is the zero
@@ -80,7 +80,7 @@ impl Tarpit {
     /// happen here if we used `Duration::ZERO`. We don't, because
     /// `Instant` doesn't have a zero).
     #[must_use]
-    pub fn new(now: Instant, max_burst: u32) -> Self {
+    pub(crate) fn new(now: Instant, max_burst: u32) -> Self {
         Self {
             prev_addr: None,
             samehost_burst: 0,
@@ -106,7 +106,7 @@ impl Tarpit {
     ///
     /// `now` from `Timers::now()`. The drain is `(now - last).as_
     /// secs()` — second granularity to match C's `time_t`.
-    pub fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
         // ─── same-host bucket
         // `if(!sockaddrcmp_noport(sa, &prev_sa))`. The `!` is
         // because `sockaddrcmp` is memcmp-style: 0 means equal.
@@ -187,7 +187,7 @@ impl Tarpit {
     ///
     /// 10 slots = 10 simultaneous tarpitted peers. The 11th evicts
     /// the 1st (its `OwnedFd` drops, peer sees RST). Fixed memory.
-    pub fn pit(&mut self, fd: OwnedFd) {
+    pub(crate) fn pit(&mut self, fd: OwnedFd) {
         // `if(pits[next_pit] != -1) closesocket(...)`.
         // Option::replace drops the old OwnedFd; Drop closes. The
         // returned old value is dropped immediately (we don't bind it).

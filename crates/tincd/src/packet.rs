@@ -31,6 +31,9 @@
 //! FIGHTING the compiler. The wire byte is always `(v<<4)|hl`. We
 //! store one `u8` and shift/mask. No fight, no `bitfield` crate.
 
+// Field names mirror the C structs (`ip_ttl`, `icmp6_cksum`, ...) so
+// cross-referencing `route.c` line-by-line stays mechanical.
+#![allow(clippy::struct_field_names)]
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;
@@ -57,7 +60,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// half of the u32, NOT high. Easy to get wrong if you "fix" it to
 /// look like a big-endian high-byte pad.
 #[must_use]
-pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
+pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     let mut checksum: u32 = u32::from(prevsum ^ 0xFFFF);
 
     let mut chunks = data.chunks_exact(2);
@@ -92,7 +95,7 @@ pub fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
 /// is `0x45` (v=4, ihl=5 words = 20 bytes).
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Ipv4Hdr {
+pub(crate) struct Ipv4Hdr {
     /// `(ip_v << 4) | ip_hl`. Bitfield in C; one byte here.
     pub ip_vhl: u8,
     pub ip_tos: u8,
@@ -113,58 +116,61 @@ pub struct Ipv4Hdr {
 const _: () = assert!(size_of::<Ipv4Hdr>() == 20);
 
 /// `IP_OFFMASK` (`ipv4.h:96`). Low 13 bits of `ip_off`.
-pub const IP_OFFMASK: u16 = 0x1fff;
+pub(crate) const IP_OFFMASK: u16 = 0x1fff;
 /// `IP_DF` (`ipv4.h:90`). Don't Fragment.
-pub const IP_DF: u16 = 0x4000;
+#[cfg(test)]
+pub(crate) const IP_DF: u16 = 0x4000;
 /// `IP_MF` (`ipv4.h:91`). More Fragments.
-pub const IP_MF: u16 = 0x2000;
+pub(crate) const IP_MF: u16 = 0x2000;
 
 impl Ipv4Hdr {
     /// `ip_v` — high nibble. 4 for IPv4.
+    #[cfg(test)]
     #[must_use]
-    pub const fn version(self) -> u8 {
+    pub(crate) const fn version(self) -> u8 {
         self.ip_vhl >> 4
     }
     /// `ip_hl` — low nibble. Header length in 32-bit words.
     #[must_use]
-    pub const fn ihl(self) -> u8 {
+    pub(crate) const fn ihl(self) -> u8 {
         self.ip_vhl & 0x0F
     }
     /// Set version + IHL.
-    pub const fn set_vhl(&mut self, version: u8, ihl: u8) {
+    pub(crate) const fn set_vhl(&mut self, version: u8, ihl: u8) {
         self.ip_vhl = (version << 4) | (ihl & 0x0F);
     }
 
     /// `ntohs(ip_len)`. Named `total_len` not `len`: this is the
     /// IPv4 total-length field, not a collection length.
     #[must_use]
-    pub const fn total_len(self) -> u16 {
+    pub(crate) const fn total_len(self) -> u16 {
         // packed: copy out before swap.
         let raw = self.ip_len;
         u16::from_be(raw)
     }
     /// `ip_len = htons(v)`.
-    pub const fn set_total_len(&mut self, v: u16) {
+    pub(crate) const fn set_total_len(&mut self, v: u16) {
         self.ip_len = v.to_be();
     }
 
     /// `ntohs(ip_off)`. Compare against `IP_OFFMASK`/`IP_MF`.
     #[must_use]
-    pub const fn off(self) -> u16 {
+    pub(crate) const fn off(self) -> u16 {
         let raw = self.ip_off;
         u16::from_be(raw)
     }
-    pub const fn set_off(&mut self, v: u16) {
+    pub(crate) const fn set_off(&mut self, v: u16) {
         self.ip_off = v.to_be();
     }
 
     /// `ntohs(ip_id)`.
+    #[cfg(test)]
     #[must_use]
-    pub const fn id(self) -> u16 {
+    pub(crate) const fn id(self) -> u16 {
         let raw = self.ip_id;
         u16::from_be(raw)
     }
-    pub const fn set_id(&mut self, v: u16) {
+    pub(crate) const fn set_id(&mut self, v: u16) {
         self.ip_id = v.to_be();
     }
 }
@@ -182,7 +188,7 @@ impl Ipv4Hdr {
 /// (unused, zero).
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct IcmpHdr {
+pub(crate) struct IcmpHdr {
     pub icmp_type: u8,
     pub icmp_code: u8,
     /// Raw, like `Ipv4Hdr::ip_sum`. `inet_checksum` output.
@@ -197,13 +203,8 @@ const _: () = assert!(size_of::<IcmpHdr>() == 8);
 
 impl IcmpHdr {
     /// `icmp.icmp_nextmtu = htons(v)`.
-    pub const fn set_nextmtu(&mut self, v: u16) {
+    pub(crate) const fn set_nextmtu(&mut self, v: u16) {
         self.icmp_nextmtu = v.to_be();
-    }
-    #[must_use]
-    pub const fn nextmtu(self) -> u16 {
-        let raw = self.icmp_nextmtu;
-        u16::from_be(raw)
     }
 }
 
@@ -215,7 +216,7 @@ impl IcmpHdr {
 /// version 6, tc 0, flow 0.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Ipv6Hdr {
+pub(crate) struct Ipv6Hdr {
     /// `ip6_un1_flow`. Network order. `(v<<28)|(tc<<20)|flow`.
     ip6_flow: u32,
     /// Payload length, network order.
@@ -230,28 +231,31 @@ const _: () = assert!(size_of::<Ipv6Hdr>() == 40);
 
 impl Ipv6Hdr {
     /// `ip6.ip6_flow = htonl(v)`.
-    pub const fn set_flow(&mut self, v: u32) {
+    pub(crate) const fn set_flow(&mut self, v: u32) {
         self.ip6_flow = v.to_be();
     }
+    #[cfg(test)]
     #[must_use]
-    pub const fn flow(self) -> u32 {
+    pub(crate) const fn flow(self) -> u32 {
         let raw = self.ip6_flow;
         u32::from_be(raw)
     }
     /// Version nibble. High 4 bits of byte 0. 6 for IPv6.
+    #[cfg(test)]
     #[must_use]
-    pub const fn version(self) -> u8 {
+    pub(crate) const fn version(self) -> u8 {
         // High byte of BE u32, high nibble.
         let raw = self.ip6_flow;
         (u32::from_be(raw) >> 28) as u8
     }
 
     /// `ip6.ip6_plen = htons(v)`.
-    pub const fn set_plen(&mut self, v: u16) {
+    pub(crate) const fn set_plen(&mut self, v: u16) {
         self.ip6_plen = v.to_be();
     }
+    #[cfg(test)]
     #[must_use]
-    pub const fn plen(self) -> u16 {
+    pub(crate) const fn plen(self) -> u16 {
         let raw = self.ip6_plen;
         u16::from_be(raw)
     }
@@ -265,7 +269,7 @@ impl Ipv6Hdr {
 /// :281`: `icmp6.icmp6_mtu = htonl(len)` for `ICMP6_PACKET_TOO_BIG`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Icmp6Hdr {
+pub(crate) struct Icmp6Hdr {
     pub icmp6_type: u8,
     pub icmp6_code: u8,
     /// Raw checksum. `inet_checksum` output.
@@ -278,13 +282,8 @@ const _: () = assert!(size_of::<Icmp6Hdr>() == 8);
 
 impl Icmp6Hdr {
     /// `icmp6.icmp6_mtu = htonl(v)`.
-    pub const fn set_mtu(&mut self, v: u32) {
+    pub(crate) const fn set_mtu(&mut self, v: u32) {
         self.icmp6_data32 = v.to_be();
-    }
-    #[must_use]
-    pub const fn mtu(self) -> u32 {
-        let raw = self.icmp6_data32;
-        u32::from_be(raw)
     }
 }
 
@@ -293,7 +292,7 @@ impl Icmp6Hdr {
 /// `struct arphdr` (`ethernet.h:75-81`). Fixed 8-byte ARP header.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct ArpHdr {
+pub(crate) struct ArpHdr {
     /// Hardware type. Network order. `ARPHRD_ETHER` = 1.
     ar_hrd: u16,
     /// Protocol type. Network order. `ETH_P_IP` = 0x0800.
@@ -307,43 +306,45 @@ pub struct ArpHdr {
 const _: () = assert!(size_of::<ArpHdr>() == 8);
 
 /// `ARPOP_REQUEST` (`ethernet.h:82`).
-pub const ARPOP_REQUEST: u16 = 1;
+pub(crate) const ARPOP_REQUEST: u16 = 1;
 /// `ARPOP_REPLY` (`ethernet.h:83`).
-pub const ARPOP_REPLY: u16 = 2;
+pub(crate) const ARPOP_REPLY: u16 = 2;
 /// `ARPHRD_ETHER` (`ethernet.h:40`).
-pub const ARPHRD_ETHER: u16 = 1;
+pub(crate) const ARPHRD_ETHER: u16 = 1;
 
 // `ETH_P_IP`/`ETH_P_IPV6` live in `tinc-device/src/ether.rs` (the
 // source of truth) but they're `pub(crate)` there. Re-declared here
 // with a pointer back. RFC constants; can't drift.
 /// `ETH_P_IP` — see `tinc-device/src/ether.rs:32`.
-pub const ETH_P_IP: u16 = 0x0800;
+pub(crate) const ETH_P_IP: u16 = 0x0800;
 /// `ETH_P_ARP` (`ethernet.h:48`). NOT in `tinc-device`.
-pub const ETH_P_ARP: u16 = 0x0806;
+pub(crate) const ETH_P_ARP: u16 = 0x0806;
 
 impl ArpHdr {
     #[must_use]
-    pub const fn hrd(self) -> u16 {
+    pub(crate) const fn hrd(self) -> u16 {
         let raw = self.ar_hrd;
         u16::from_be(raw)
     }
-    pub const fn set_hrd(&mut self, v: u16) {
+    #[cfg(test)]
+    pub(crate) const fn set_hrd(&mut self, v: u16) {
         self.ar_hrd = v.to_be();
     }
     #[must_use]
-    pub const fn pro(self) -> u16 {
+    pub(crate) const fn pro(self) -> u16 {
         let raw = self.ar_pro;
         u16::from_be(raw)
     }
-    pub const fn set_pro(&mut self, v: u16) {
+    #[cfg(test)]
+    pub(crate) const fn set_pro(&mut self, v: u16) {
         self.ar_pro = v.to_be();
     }
     #[must_use]
-    pub const fn op(self) -> u16 {
+    pub(crate) const fn op(self) -> u16 {
         let raw = self.ar_op;
         u16::from_be(raw)
     }
-    pub const fn set_op(&mut self, v: u16) {
+    pub(crate) const fn set_op(&mut self, v: u16) {
         self.ar_op = v.to_be();
     }
 }
@@ -354,7 +355,7 @@ impl ArpHdr {
 /// to flatten access; we just embed.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct EtherArp {
+pub(crate) struct EtherArp {
     pub ea_hdr: ArpHdr,
     pub arp_sha: [u8; 6],
     pub arp_spa: [u8; 4],
@@ -371,7 +372,7 @@ const _: () = assert!(size_of::<EtherArp>() == 28);
 /// only. `length` and `next` are `uint32_t`, written with `htonl`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Ipv6Pseudo {
+pub(crate) struct Ipv6Pseudo {
     pub ip6_src: [u8; 16],
     pub ip6_dst: [u8; 16],
     /// Upper-layer length, network order.
@@ -383,10 +384,10 @@ pub struct Ipv6Pseudo {
 const _: () = assert!(size_of::<Ipv6Pseudo>() == 40);
 
 impl Ipv6Pseudo {
-    pub const fn set_length(&mut self, v: u32) {
+    pub(crate) const fn set_length(&mut self, v: u32) {
         self.length = v.to_be();
     }
-    pub const fn set_next(&mut self, v: u32) {
+    pub(crate) const fn set_next(&mut self, v: u32) {
         self.next = v.to_be();
     }
 }
@@ -396,7 +397,7 @@ impl Ipv6Pseudo {
 /// kernel's `struct tcp_pseudo_hdr`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct Ipv4Pseudo {
+pub(crate) struct Ipv4Pseudo {
     pub ip_src: [u8; 4],
     pub ip_dst: [u8; 4],
     pub zero: u8,
@@ -408,7 +409,7 @@ pub struct Ipv4Pseudo {
 const _: () = assert!(size_of::<Ipv4Pseudo>() == 12);
 
 impl Ipv4Pseudo {
-    pub const fn set_length(&mut self, v: u16) {
+    pub(crate) const fn set_length(&mut self, v: u16) {
         self.length = v.to_be();
     }
 }

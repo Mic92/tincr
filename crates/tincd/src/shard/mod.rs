@@ -28,10 +28,10 @@ mod probe;
 mod rx;
 mod seal;
 mod snapshot;
-pub use probe::{TxTarget, tx_probe};
-pub use rx::{RxDstMemo, RxTarget, rx_open, rx_probe};
-pub use seal::{SealErr, SealOk, seal_super};
-pub use snapshot::{NodeView, NodeViewEntry};
+pub(crate) use probe::tx_probe;
+pub(crate) use rx::{RxDstMemo, rx_open, rx_probe};
+pub(crate) use seal::seal_super;
+pub(crate) use snapshot::NodeView;
 
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
 use std::sync::{Arc, Mutex};
@@ -61,7 +61,7 @@ const CIPHER_KEY_LEN: usize = 64;
 /// swap; the old `Arc` drops when the last reference goes.
 ///
 /// Not `Debug`: holds live key material.
-pub struct TunnelHandles {
+pub(crate) struct TunnelHandles {
     /// `Sptps::outseqno_handle()`. `fetch_add(n, Relaxed)` per super
     /// (not per packet — one alloc, N seals). Shared with the
     /// control-side `Sptps`; both see the same counter. Relaxed:
@@ -140,7 +140,7 @@ pub struct TunnelHandles {
 /// confirm). Direct field assigns; no channels, no fences. Stale by
 /// at most one event-loop iteration.
 ///
-pub struct TxSnapshot {
+pub(crate) struct TxSnapshot {
     /// Spawn-time fold of every config-immutable slow-path gate:
     /// `dns.is_some() | routing_mode != Router | priorityinheritance`.
     /// `any_pcap` is NOT folded — it flips at runtime; checked live
@@ -208,7 +208,7 @@ impl TxSnapshot {
     /// Same body as `Daemon::route_of`; same codegen.
     #[inline]
     #[must_use]
-    pub fn route_of(&self, nid: NodeId) -> Option<Route> {
+    pub(crate) fn route_of(&self, nid: NodeId) -> Option<Route> {
         *self.routes.get(nid.0 as usize)?
     }
 }

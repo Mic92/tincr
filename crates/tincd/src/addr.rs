@@ -25,7 +25,7 @@ use std::net::{IpAddr, SocketAddr};
 /// link-local. Everything else — including RFC1918 and `fc00::/7` —
 /// passes.
 #[must_use]
-pub fn is_unwanted_dial_target(ip: IpAddr) -> bool {
+pub(crate) fn is_unwanted_dial_target(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()
@@ -51,7 +51,7 @@ pub fn is_unwanted_dial_target(ip: IpAddr) -> bool {
 
 /// Convenience: `is_unwanted_dial_target` on a `SocketAddr`.
 #[must_use]
-pub fn is_unwanted_dial_addr(sa: &SocketAddr) -> bool {
+pub(crate) fn is_unwanted_dial_addr(sa: &SocketAddr) -> bool {
     is_unwanted_dial_target(sa.ip())
 }
 

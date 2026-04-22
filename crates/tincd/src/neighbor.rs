@@ -36,17 +36,17 @@ const IPPROTO_ICMPV6: u8 = 58;
 
 // ── NDP constants (RFC 4861) ───────────────────────────────────────
 
-pub const ND_NEIGHBOR_SOLICIT: u8 = 135;
-pub const ND_NEIGHBOR_ADVERT: u8 = 136;
-pub const ND_OPT_SOURCE_LINKADDR: u8 = 1;
-pub const ND_OPT_TARGET_LINKADDR: u8 = 2;
+pub(crate) const ND_NEIGHBOR_SOLICIT: u8 = 135;
+pub(crate) const ND_NEIGHBOR_ADVERT: u8 = 136;
+pub(crate) const ND_OPT_SOURCE_LINKADDR: u8 = 1;
+pub(crate) const ND_OPT_TARGET_LINKADDR: u8 = 2;
 
 // ── ARP ────────────────────────────────────────────────────────────
 
 /// Returns `arp_tpa` iff `frame` is a valid Ethernet/IP ARP
 /// who-has. Caller does subnet lookup.
 #[must_use]
-pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
+pub(crate) fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     if frame.len() < ETHER_SIZE + ARP_SIZE {
         return None;
     }
@@ -71,7 +71,7 @@ pub fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
 /// # Panics
 /// If `original.len() < 42`. Caller validates with [`parse_arp_req`].
 #[must_use]
-pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
+pub(crate) fn build_arp_reply(original: &[u8]) -> Vec<u8> {
     debug_assert!(original.len() >= ETHER_SIZE + ARP_SIZE);
 
     let mut out = original[..ETHER_SIZE + ARP_SIZE].to_vec();
@@ -107,7 +107,7 @@ pub fn build_arp_reply(original: &[u8]) -> Vec<u8> {
 /// §7.1.1) is the kernel's job. We add the `ip6_nxt` check (C gets
 /// it from route dispatch; we're freestanding).
 #[must_use]
-pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
+pub(crate) fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
     if frame.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
         return None;
     }
@@ -166,7 +166,7 @@ pub fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// `:895` `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
 /// before this fn is called — keeps this module pure.
 #[must_use]
-pub fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     if original.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
         return None;
     }

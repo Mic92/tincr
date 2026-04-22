@@ -28,7 +28,7 @@ use socket2::Socket;
 use super::{EgressBatch, UdpEgress};
 
 /// `UDP_SEGMENT` egress. Linux ≥4.18 (`bec1f6f69736`).
-pub struct Fast {
+pub(crate) struct Fast {
     /// `dup(2)` of the listener's UDP socket. Same file description
     /// as the `recvmmsg` side — same bound addr, same `SO_BINDTODEVICE`,
     /// same `IP_TOS` (the daemon's `set_udp_tos` sets it on the
@@ -41,7 +41,7 @@ impl Fast {
     ///
     /// # Errors
     /// `io::Error` from `dup(2)` (fd exhaustion).
-    pub fn new(udp: &Socket) -> io::Result<Self> {
+    pub(crate) fn new(udp: &Socket) -> io::Result<Self> {
         Ok(Self {
             sock: udp.try_clone()?,
         })

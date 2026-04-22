@@ -467,9 +467,8 @@ pub struct Daemon {
 
     /// `route_mac`'s lookup table. `HashMap<Mac, owner-name>`.
     /// Maintained alongside `subnets`: every `Subnet::Mac` add/del
-    /// also updates this. `SubnetTree::lookup_mac` exists but
-    /// `route_mac.rs` takes the flat map directly (testability -
-    /// see `route_mac.rs` doc). Five sync sites: `learn_mac`,
+    /// also updates this. `route_mac.rs` takes the flat map directly
+    /// (testability - see `route_mac.rs` doc). Five sync sites: `learn_mac`,
     /// `on_age_subnets`, `on_add_subnet`, `on_del_subnet`, reload.
     pub(crate) mac_table: HashMap<route_mac::Mac, String>,
 

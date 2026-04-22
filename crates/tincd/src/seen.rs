@@ -24,16 +24,16 @@ use std::time::{Duration, Instant};
 /// Hard cap on cache entries. At the cap, [`SeenRequests::check`]
 /// reports unseen lines as duplicates: drop, don't forward — refuse
 /// to amplify the flood that filled the cache. 4096 × ~2KB ≈ 8MB.
-pub const SEEN_CAP: usize = 4096;
+pub(crate) const SEEN_CAP: usize = 4096;
 
 /// Dedup cache. Key = full wire line.
-pub struct SeenRequests {
+pub(crate) struct SeenRequests {
     cache: HashMap<String, Instant>,
 }
 
 impl SeenRequests {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cache: HashMap::new(),
         }
@@ -45,7 +45,7 @@ impl SeenRequests {
     /// No alloc on hit: `HashMap<String, _>::contains_key(&str)`
     /// works via `String: Borrow<str>`. Mirrors C's stack-borrowed
     /// `past_request_t p` for the lookup, `xstrdup` on miss only.
-    pub fn check(&mut self, line: &str, now: Instant) -> bool {
+    pub(crate) fn check(&mut self, line: &str, now: Instant) -> bool {
         if self.cache.contains_key(line) {
             return true;
         }
@@ -70,7 +70,7 @@ impl SeenRequests {
     /// would panic. The daemon won't do this (both `now`s come from
     /// `timers.now()`, monotonic) but future timestamps shouldn't
     /// crash either — they just don't expire.
-    pub fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
+    pub(crate) fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
         let before = self.cache.len();
         self.cache.retain(|_, firstseen| {
             // Keep if NOT expired. C: `firstseen + pinginterval <=

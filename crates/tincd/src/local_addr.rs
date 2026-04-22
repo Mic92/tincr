@@ -43,7 +43,7 @@ use rand_core::RngCore;
 /// family. Daemon builds it as `daemon.listeners.iter().map(|l|
 /// l.local).collect()` once per call (cheap; ≤8 elements).
 #[must_use]
-pub fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAddr]) -> u8 {
+pub(crate) fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAddr]) -> u8 {
     // `is_ipv4()` is the family check; SocketAddr has no direct family().
     let want_v4 = target.is_ipv4();
 
@@ -89,7 +89,7 @@ pub fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAd
 /// determinism (same pattern as `autoconnect.rs`). The `next_u32() % len`
 /// modulo bias matches C's `prng()` (`utils.h`: `xoshiro() % max`).
 #[must_use]
-pub fn choose_local<R: RngCore>(
+pub(crate) fn choose_local<R: RngCore>(
     candidates: &[SocketAddr],
     rng: &mut R,
     listener_addrs: &[SocketAddr],
@@ -128,7 +128,7 @@ pub fn choose_local<R: RngCore>(
 /// `sockaddr2str` doesn't bracket — but be defensive). `IpAddr::parse`
 /// rejects brackets, so strip them first.
 #[must_use]
-pub fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
+pub(crate) fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
     if addr == tinc_proto::AddrStr::UNSPEC {
         return None;
     }
@@ -145,7 +145,7 @@ pub fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
 /// `sockaddr2str` shape for the `ANS_KEY` append. Dotted-quad / RFC-5952 v6.
 /// `IpAddr::Display` matches.
 #[must_use]
-pub fn format_addr_port(sa: &SocketAddr) -> (String, String) {
+pub(crate) fn format_addr_port(sa: &SocketAddr) -> (String, String) {
     (sa.ip().to_string(), sa.port().to_string())
 }
 

@@ -104,10 +104,6 @@ use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 use mainline::{Dht, MutableItem};
 use rand_core::{OsRng, RngCore};
-// Re-export so Daemon::setup() can build a custom-bootstrap Dht for tests
-// without taking a direct mainline dep. Also gives us one place to bump
-// when mainline's builder API churns.
-pub use mainline::DhtBuilder;
 
 use tinc_crypto::sign::SigningKey;
 

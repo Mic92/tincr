@@ -81,11 +81,12 @@ const ETH_P_IPV6: u16 = 0x86DD;
 /// as a slice so [`rx_open`] doesn't re-slice; the daemon's dispatch
 /// loop already had `pkt` borrowed from `batch.bufs`, so this is the
 /// same memory, no copy.
-pub struct RxTarget<'a> {
+pub(crate) struct RxTarget<'a> {
     /// `id6.lookup(src_id6)`. For the replay lock + cipher key probe.
     /// Carried so the caller can do per-peer accounting later (or so
     /// a stuck-decrypt can `send_req_key` — but that's slow-path, so
     /// in practice this is just for the test asserts today).
+    #[allow(dead_code)] // tests assert routing; shard slow-path will read for `send_req_key`
     pub from_nid: NodeId,
     /// The peer's handles. `rx_open` reads `inkey` (decrypt) and
     /// `replay` (commit). Borrow not clone: probe is per-packet, an
@@ -117,7 +118,7 @@ pub struct RxTarget<'a> {
 /// `Default` for the per-batch reset — `RxDstMemo::default()` at
 /// the top of the dispatch loop. Stack-allocated, ~50 bytes.
 #[derive(Default)]
-pub struct RxDstMemo {
+pub(crate) struct RxDstMemo {
     v4: Option<([u8; 4], bool)>,
     v6: Option<([u8; 16], bool)>,
 }
@@ -151,7 +152,7 @@ impl RxDstMemo {
         // subnet — and we're always reachable to ourselves.
         let mine = snap
             .subnets
-            .lookup_ipv4(&addr, |_| true)
+            .lookup_ipv4(addr, |_| true)
             .and_then(|(_, o)| o)
             .is_some_and(|o| o == &*snap.myself_name);
         self.v4 = Some((dst, mine));
@@ -209,7 +210,7 @@ impl RxDstMemo {
 ///
 /// `pkt` is the raw UDP payload: `[dst_id6:6][src_id6:6][SPTPS]`.
 #[must_use]
-pub fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>> {
+pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>> {
     // Setup-time fold. Same gate as tx_probe; same one-bool early-out.
     // Covers DHT discovery: setup.rs:846 only spawns when
     // `settings.dht_discovery` is true, and that's NOT folded here
@@ -325,7 +326,7 @@ pub fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>>
 /// call site.
 #[allow(clippy::result_unit_err)] // see doc above; uniform fall-through
 #[allow(clippy::missing_panics_doc)] // mutex poison: only on panic in slow-path open
-pub fn rx_open(
+pub(crate) fn rx_open(
     target: &RxTarget<'_>,
     snap: &TxSnapshot,
     scratch: &mut Vec<u8>,

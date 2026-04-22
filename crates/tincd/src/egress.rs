@@ -21,14 +21,14 @@ use std::io;
 use socket2::{SockAddr, Socket};
 
 #[cfg(target_os = "linux")]
-pub mod linux;
+pub(crate) mod linux;
 
 /// `UDP_MAX_SEGMENTS` (`include/linux/udp.h:124`). The kernel rejects
 /// `UDP_SEGMENT` sends with more segments than this (`EINVAL`).
 /// The daemon's `DEVICE_DRAIN_CAP=64` is well under;
 /// this is here for the `can_coalesce` check so a future cap bump
 /// doesn't silently overflow the kernel limit.
-pub const UDP_MAX_SEGMENTS: u16 = 128;
+pub(crate) const UDP_MAX_SEGMENTS: u16 = 128;
 
 /// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` BEFORE the
 /// GSO branch even runs — this is the UDP datagram-length field cap, not a path-MTU thing. The cmsg parse
@@ -52,7 +52,7 @@ const TX_BATCH_CAP: usize = BATCH_MAX_BYTES;
 /// (batched path) or `tx_scratch` (`count=1`, immediate-send path).
 /// The egress impl decides how to ship; the wire result is `count`
 /// UDP datagrams either way.
-pub struct EgressBatch<'a> {
+pub(crate) struct EgressBatch<'a> {
     /// Destination. `SockAddr` not `SocketAddr` — `socket2::send_to`
     /// takes `&SockAddr` and the daemon already has one cached
     /// (`udp_addr_cached`, the hot path; cold path builds with
@@ -80,7 +80,7 @@ pub struct EgressBatch<'a> {
 
 /// Ship batches. `Portable` is the baseline; `linux::Fast` is the
 /// `UDP_SEGMENT` impl.
-pub trait UdpEgress: Send {
+pub(crate) trait UdpEgress: Send {
     /// Ship a batch: `count` UDP datagrams to `dst`. Same wire
     /// result on every impl; the kernel-side mechanism differs.
     ///
@@ -91,20 +91,6 @@ pub trait UdpEgress: Send {
     /// surfaces them per-batch. The daemon's PMTU machinery handles
     /// `EMSGSIZE` either way (`net.rs:1934`).
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()>;
-
-    /// ZC completion poll. Default no-op (Portable doesn't ZC).
-    /// Called from the event loop on errqueue `EPOLLIN`. Returns
-    /// the count of arena slots now reusable (the buffer the kernel
-    /// pinned is released). `MSG_ZEROCOPY` plumbing — not yet
-    /// wired; the daemon never registers an errqueue fd, never
-    /// calls this. Default impl never errs.
-    ///
-    /// # Errors
-    /// `io::Error` from `recvmsg(MSG_ERRQUEUE)` once a ZC impl
-    /// overrides this.
-    fn poll_completions(&mut self) -> io::Result<usize> {
-        Ok(0)
-    }
 }
 
 /// TX batch accumulator. The daemon stages encrypted frames here
@@ -133,7 +119,7 @@ pub trait UdpEgress: Send {
 /// TCP burst to one peer) is one run anyway. Multi-peer interleave
 /// degrades to per-change flushes — still fewer syscalls than per-
 /// frame, never worse than the unbatched path.
-pub struct TxBatch {
+pub(crate) struct TxBatch {
     /// Dense-packed encrypted frames. Capacity sized for one drain
     /// pass at MTU+overhead; never reallocs after warmup.
     buf: Vec<u8>,
@@ -193,7 +179,7 @@ impl TxBatch {
     /// production uses `Default`.
     #[cfg(test)]
     #[must_use]
-    pub fn new(cap_bytes: usize) -> Self {
+    pub(crate) fn new(cap_bytes: usize) -> Self {
         Self {
             buf: Vec::with_capacity(cap_bytes),
             stride: 0,
@@ -212,7 +198,7 @@ impl TxBatch {
     /// the kernel's split-at-stride math expects only the LAST
     /// segment short), and under the kernel cap.
     #[must_use]
-    pub fn can_coalesce(&self, dst: &SockAddr, sock: u8, frame_len: usize) -> bool {
+    pub(crate) fn can_coalesce(&self, dst: &SockAddr, sock: u8, frame_len: usize) -> bool {
         // Empty run coalesces with anything (it BECOMES the run).
         if self.count == 0 {
             return true;
@@ -253,7 +239,7 @@ impl TxBatch {
     ///
     /// # Panics
     /// Debug-asserts the `can_coalesce` precondition.
-    pub fn stage(
+    pub(crate) fn stage(
         &mut self,
         dst: &SockAddr,
         sock: u8,
@@ -285,7 +271,7 @@ impl TxBatch {
     /// `batch`; the daemon's error handler needs the rest for
     /// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
     #[must_use]
-    pub fn take(&mut self) -> Option<(EgressBatch<'_>, u8, tinc_graph::NodeId, u16)> {
+    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, tinc_graph::NodeId, u16)> {
         if self.count == 0 {
             return None;
         }
@@ -308,7 +294,7 @@ impl TxBatch {
 
     /// Reset to empty. Call after `take()`'s borrow is dropped.
     /// Keeps `buf` capacity (the whole point: warm reuse).
-    pub const fn reset(&mut self) {
+    pub(crate) const fn reset(&mut self) {
         self.count = 0;
         self.dst = None;
         // buf cleared on next stage's count==0 branch; no need here.
@@ -317,7 +303,7 @@ impl TxBatch {
     /// Count of staged frames. For the daemon's "did anything
     /// stage?" check.
     #[must_use]
-    pub const fn count(&self) -> u16 {
+    pub(crate) const fn count(&self) -> u16 {
         self.count
     }
 }
@@ -325,7 +311,10 @@ impl TxBatch {
 /// The floor. `count` × `sendto`. Works on macOS, BSD, anything
 /// POSIX. Produces wire output identical to today's `net.rs:1930`
 /// `send_to` — `Portable::send_batch` with `count=1` IS one `sendto`.
-pub struct Portable {
+// Linux uses `linux::Fast`; `Portable` stays for the wire-equivalence
+// test in `egress/linux.rs` and as the non-Linux backend.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(crate) struct Portable {
     /// `dup(2)` of `Listener.udp`. Same file description, so
     /// `SO_BINDTODEVICE`/`IP_TOS`/etc. set on the listener apply
     /// here. Separate fd, so dropping `Portable` (daemon teardown)
@@ -333,13 +322,14 @@ pub struct Portable {
     sock: Socket,
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 impl Portable {
     /// Build from a dup of the listener's UDP socket.
     ///
     /// # Errors
     /// `io::Error` from `dup(2)` (fd exhaustion — same failure mode
     /// as opening one more listener).
-    pub fn new(udp: &Socket) -> io::Result<Self> {
+    pub(crate) fn new(udp: &Socket) -> io::Result<Self> {
         Ok(Self {
             sock: udp.try_clone()?,
         })
@@ -471,17 +461,6 @@ mod tests {
         let mut buf = [0u8; 64];
         let (n, _) = rx.recv_from(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"still alive");
-    }
-
-    /// `poll_completions` default is a no-op returning 0. The daemon
-    /// never calls it (no errqueue fd registered — ZC not wired).
-    /// This test pins the default so a stray refactor that makes
-    /// it `unimplemented!()` fails CI.
-    #[test]
-    fn poll_completions_default_noop() {
-        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
-        let mut p = Portable::new(&tx).unwrap();
-        assert_eq!(p.poll_completions().unwrap(), 0);
     }
 
     /// `TxBatch::can_coalesce`: empty batch accepts anything;

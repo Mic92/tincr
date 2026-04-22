@@ -76,7 +76,7 @@ use crate::outgoing::OutOrigin;
 
 /// What `do_autoconnect` decided. The daemon executes.
 #[derive(Debug, PartialEq, Eq)]
-pub enum AutoAction {
+pub(crate) enum AutoAction {
     /// `<D_LO` (`make_new_connection`), shortcut-add, or
     /// `connect_to_unreachable`. Daemon: build `Outgoing` with the
     /// given `origin`, `setup_outgoing_connection`.
@@ -118,7 +118,7 @@ pub enum AutoAction {
 /// to a peer with `edge_count < 2` would isolate it.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // snapshot of independent flags; an enum would obscure the C parity
-pub struct NodeSnapshot {
+pub(crate) struct NodeSnapshot {
     pub name: String,
     /// `n->status.reachable`. From sssp.
     pub reachable: bool,
@@ -153,7 +153,7 @@ pub struct NodeSnapshot {
 /// can tell shortcut from backbone and the add arm can count toward
 /// the `d_shortcut` cap.
 #[derive(Debug, Clone)]
-pub struct OutgoingSnapshot {
+pub(crate) struct OutgoingSnapshot {
     pub name: String,
     pub origin: OutOrigin,
     /// `now - conn.activated_at`. `Duration::MAX` if not yet
@@ -199,7 +199,7 @@ pub struct OutgoingSnapshot {
 /// stays multi-hop. Mitigated in practice by the reverse flow
 /// triggering a dial-back from the NAT-ed side.
 #[derive(Debug, Clone, Copy)]
-pub struct ShortcutKnobs {
+pub(crate) struct ShortcutKnobs {
     pub d_lo: usize,
     pub d_shortcut: usize,
     pub d_hi: usize,
@@ -217,7 +217,7 @@ pub struct ShortcutKnobs {
 /// Don't re-add a peer as a shortcut for this long after dropping it.
 /// Belt-and-braces (the `tx_rate`-keyed drop test already prevents
 /// flap); sim shows flat sensitivity 30..120s.
-pub const SHORTCUT_BACKOFF: Duration = Duration::from_secs(60);
+pub(crate) const SHORTCUT_BACKOFF: Duration = Duration::from_secs(60);
 
 impl Default for ShortcutKnobs {
     fn default() -> Self {
@@ -261,7 +261,7 @@ impl Default for ShortcutKnobs {
 /// `Noop` (don't duplicate, don't re-roll).
 #[allow(clippy::too_many_arguments)] // pure fn: every input is explicit world-state
 #[must_use]
-pub fn decide(
+pub(crate) fn decide(
     myself_name: &str,
     nodes: &[NodeSnapshot],
     active_outgoing_conns: &[OutgoingSnapshot],

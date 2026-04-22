@@ -216,12 +216,12 @@ fn lookup_longest_wins() {
     t.add(sn("10.0.0.0/8"), "broad".into());
     t.add(sn("10.1.0.0/16"), "narrow".into());
 
-    let (s, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 1, 2, 3), all_up).unwrap();
+    let (s, owner) = t.lookup_ipv4(Ipv4Addr::new(10, 1, 2, 3), all_up).unwrap();
     assert_eq!(owner, Some("narrow"));
     assert_eq!(*s, sn("10.1.0.0/16"));
 
     // 10.2.x.x is NOT in the /16, falls through to /8.
-    let (s, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 2, 0, 0), all_up).unwrap();
+    let (s, owner) = t.lookup_ipv4(Ipv4Addr::new(10, 2, 0, 0), all_up).unwrap();
     assert_eq!(owner, Some("broad"));
     assert_eq!(*s, sn("10.0.0.0/8"));
 }
@@ -232,7 +232,7 @@ fn lookup_miss() {
     let mut t = SubnetTree::new();
     t.add(sn("10.0.0.0/8"), "n".into());
     assert!(
-        t.lookup_ipv4(&Ipv4Addr::new(192, 168, 1, 1), all_up)
+        t.lookup_ipv4(Ipv4Addr::new(192, 168, 1, 1), all_up)
             .is_none()
     );
 }
@@ -245,7 +245,7 @@ fn lookup_weight_prefers_lower() {
     t.add(sn("10.0.0.0/24#20"), "backup".into());
     t.add(sn("10.0.0.0/24#5"), "primary".into());
 
-    let (_, owner) = t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
+    let (_, owner) = t.lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
     assert_eq!(owner, Some("primary"));
 }
 
@@ -260,7 +260,7 @@ fn lookup_skips_unreachable() {
     t.add(sn("10.0.0.0/16"), "bob".into());
 
     let (s, owner) = t
-        .lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), |o| o == "bob")
+        .lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), |o| o == "bob")
         .unwrap();
     assert_eq!(owner, Some("bob"));
     assert_eq!(*s, sn("10.0.0.0/16"));
@@ -279,7 +279,7 @@ fn lookup_returns_unreachable_fallback() {
     // Nobody up. C: `r` ends up pointing at the /16 (last match
     // in iteration order — /24 sorted first, then /16).
     let (s, owner) = t
-        .lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), |_| false)
+        .lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), |_| false)
         .unwrap();
     assert_eq!(owner, Some("bob"));
     assert_eq!(*s, sn("10.0.0.0/16"));
@@ -300,7 +300,7 @@ fn lookup_broadcast_short_circuits_reachable() {
 
     // mDNS to 224.0.0.251: only the /4 covers it.
     let (_, owner) = t
-        .lookup_ipv4(&Ipv4Addr::new(224, 0, 0, 251), |_| {
+        .lookup_ipv4(Ipv4Addr::new(224, 0, 0, 251), |_| {
             panic!("is_reachable called for ownerless subnet")
         })
         .unwrap();
@@ -339,33 +339,16 @@ fn lookup_ipv6_longest_wins() {
     assert_eq!(owner, Some("broad"));
 }
 
-/// MAC: exact match, weight tiebreak.
-#[test]
-fn lookup_mac_exact() {
-    let mut t = SubnetTree::new();
-    t.add(sn("aa:bb:cc:dd:ee:ff#20"), "backup".into());
-    t.add(sn("aa:bb:cc:dd:ee:ff#5"), "primary".into());
-    t.add(sn("11:22:33:44:55:66"), "other".into());
-
-    let (_, owner) = t
-        .lookup_mac(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], all_up)
-        .unwrap();
-    assert_eq!(owner, Some("primary"));
-
-    // Miss.
-    assert!(t.lookup_mac(&[0, 0, 0, 0, 0, 0], all_up).is_none());
-}
-
 // ─── add / del ──────────────────────────────────────────────────
 
 #[test]
 fn del_removes() {
     let mut t = SubnetTree::new();
     t.add(sn("10.0.0.0/24"), "n".into());
-    assert!(t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).is_some());
+    assert!(t.lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), all_up).is_some());
 
     assert!(t.del(&sn("10.0.0.0/24"), "n"));
-    assert!(t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).is_none());
+    assert!(t.lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), all_up).is_none());
     assert!(t.is_empty());
 }
 
@@ -435,7 +418,7 @@ fn families_isolated() {
     assert_eq!(t.len(), 3);
 
     // V4 lookup doesn't see v6/mac entries.
-    let (_, o) = t.lookup_ipv4(&Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
+    let (_, o) = t.lookup_ipv4(Ipv4Addr::new(10, 0, 0, 1), all_up).unwrap();
     assert_eq!(o, Some("v4"));
 
     // Del v4 doesn't touch the others.

@@ -66,7 +66,7 @@ pub struct Creds {
 /// - `CredTooLong`: STRICTER than upstream, which truncates `size_t`
 ///   userlen to u8; a 256B username would send `[00]` and the proxy
 ///   would read 0 bytes. RFC 1929 says 1..255.
-pub fn build_request(
+pub(crate) fn build_request(
     proxy: ProxyType,
     target: SocketAddr,
     creds: Option<&Creds>,
@@ -161,7 +161,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
 
 /// Response from a SOCKS proxy.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SocksResponse {
+pub(crate) enum SocksResponse {
     /// `0x5A` (SOCKS4) or `0x00` (SOCKS5). Tunnel open.
     Granted,
     /// Rejected. Codes not decoded (C doesn't either).
@@ -173,7 +173,11 @@ pub enum SocksResponse {
 /// Slice is exactly `expected_response_len`. `creds` unused:
 /// dispatches on server's choice byte (predictable since nmethods=1).
 #[must_use]
-pub fn check_response(proxy: ProxyType, _creds: Option<&Creds>, buf: &[u8]) -> SocksResponse {
+pub(crate) fn check_response(
+    proxy: ProxyType,
+    _creds: Option<&Creds>,
+    buf: &[u8],
+) -> SocksResponse {
     match proxy {
         ProxyType::Socks4 => check_socks4(buf),
         ProxyType::Socks5 => check_socks5(buf),
@@ -271,7 +275,7 @@ fn check_socks5_conn(buf: &[u8]) -> SocksResponse {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum BuildError {
+pub(crate) enum BuildError {
     /// SOCKS4 + IPv6.
     Socks4Ipv6,
     /// Credential string > 255 bytes. STRICTER than upstream.

@@ -50,7 +50,7 @@ use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, 
 /// `compression_level_t` (`compression.h`). Wire-level int.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Level {
+pub(crate) enum Level {
     None = 0,
     Zlib1 = 1,
     Zlib2 = 2,
@@ -73,7 +73,7 @@ impl Level {
     /// back to raw, but we map unknown to `None` so it doesn't even
     /// hit the failure path on inbound).
     #[must_use]
-    pub const fn from_wire(n: u8) -> Self {
+    pub(crate) const fn from_wire(n: u8) -> Self {
         match n {
             1 => Self::Zlib1,
             2 => Self::Zlib2,
@@ -116,7 +116,7 @@ impl Level {
 /// negotiate LZO pay nothing. The C's static `z_stream` reuse is a
 /// micro-opt we defer.
 #[derive(Debug, Default)]
-pub struct Compressor {
+pub(crate) struct Compressor {
     /// `lzo_wrkmem` (`tincd.c`: static `lzo_align_t lzo_wrkmem[...]`).
     /// Lazy: `None` until first `LzoLo` compress. Boxed because 128KB
     /// on the stack is too much. `u64` element type guarantees the
@@ -126,7 +126,7 @@ pub struct Compressor {
 
 impl Compressor {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -137,7 +137,7 @@ impl Compressor {
     /// so this CAN return `Some(v)` with `v.len() > src.len()` for
     /// incompressible input.
     #[must_use]
-    pub fn compress(&mut self, src: &[u8], level: Level) -> Option<Vec<u8>> {
+    pub(crate) fn compress(&mut self, src: &[u8], level: Level) -> Option<Vec<u8>> {
         match level {
             Level::None => Some(src.to_vec()),
 
@@ -185,7 +185,12 @@ impl Compressor {
     /// panics on garbage.
     #[must_use]
     #[allow(clippy::unused_self)] // becomes &mut when state lands
-    pub fn decompress(&mut self, src: &[u8], level: Level, max_len: usize) -> Option<Vec<u8>> {
+    pub(crate) fn decompress(
+        &mut self,
+        src: &[u8],
+        level: Level,
+        max_len: usize,
+    ) -> Option<Vec<u8>> {
         match level {
             Level::None => {
                 if src.len() <= max_len {
@@ -266,9 +271,10 @@ mod lzo {
 
     /// `minilzo.h:76`: `16384L * lzo_sizeof_dict_t` where
     /// `lzo_sizeof_dict_t = sizeof(lzo_bytep) = sizeof(char*)`.
-    pub const LZO1X_1_MEM_COMPRESS: usize = 16384 * size_of::<*const u8>();
+    pub(super) const LZO1X_1_MEM_COMPRESS: usize = 16384 * size_of::<*const u8>();
     /// Same scratch size in `u64` units (rounded up) for an aligned `Vec<u64>` backing.
-    pub const LZO1X_1_MEM_COMPRESS_U64: usize = LZO1X_1_MEM_COMPRESS.div_ceil(size_of::<u64>());
+    pub(super) const LZO1X_1_MEM_COMPRESS_U64: usize =
+        LZO1X_1_MEM_COMPRESS.div_ceil(size_of::<u64>());
 
     const LZO_E_OK: c_int = 0;
     /// `lzoconf.h:32`: 2.10.
@@ -331,7 +337,7 @@ mod lzo {
     /// mismatch — that's a build/porting bug, not a runtime
     /// condition.
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // size_of: all <16; LZO ABI wants c_int
-    pub fn ensure_init() {
+    pub(super) fn ensure_init() {
         INIT.call_once(|| {
             // SAFETY: pure function, no preconditions. The whole
             // point is to verify the sizeof constants we pass match
@@ -358,7 +364,7 @@ mod lzo {
     /// `src_len + src_len/16 + 64 + 3` (LZO docs). Never fails when
     /// the dest buffer is sized to that bound — but we still gate on
     /// `LZO_E_OK` for paranoia.
-    pub fn compress_1(src: &[u8], wrkmem: &mut [u64]) -> Option<Vec<u8>> {
+    pub(super) fn compress_1(src: &[u8], wrkmem: &mut [u64]) -> Option<Vec<u8>> {
         debug_assert!(wrkmem.len() >= LZO1X_1_MEM_COMPRESS_U64);
         let bound = src.len() + src.len() / 16 + 64 + 3;
         let mut out = vec![0u8; bound];
@@ -386,7 +392,7 @@ mod lzo {
 
     /// `lzo1x_decompress_safe`. The `_safe` variant bounds-checks; the non-safe one trusts input lengths.
     /// Ours come from the wire — MUST use `_safe`.
-    pub fn decompress_safe(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
+    pub(super) fn decompress_safe(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
         let mut out = vec![0u8; max_len];
         let mut out_len: usize = max_len;
         // SAFETY: src/out are valid for their stated lengths.

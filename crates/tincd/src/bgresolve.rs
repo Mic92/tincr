@@ -30,7 +30,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 /// `getaddrinfo` over `hosts` — but the daemon needs to route the
 /// result, and the inflight gate keys on it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DnsTag {
+pub(crate) enum DnsTag {
     /// Tier-3 addrcache resolve for an outgoing to this peer.
     Outgoing(String),
     /// SOCKS/HTTP proxy host. At most one per daemon.
@@ -41,7 +41,7 @@ pub enum DnsTag {
 /// result replaces the daemon-side cache wholesale (no cross-round
 /// accumulation of stale addrs).
 #[derive(Debug)]
-pub struct DnsReq {
+pub(crate) struct DnsReq {
     pub tag: DnsTag,
     pub hosts: Vec<(String, u16)>,
 }
@@ -49,7 +49,7 @@ pub struct DnsReq {
 /// Resolve result. `addrs` empty ⇒ every lookup failed (NXDOMAIN /
 /// timeout); the worker already logged the per-host error.
 #[derive(Debug)]
-pub struct DnsRes {
+pub(crate) struct DnsRes {
     pub tag: DnsTag,
     pub addrs: Vec<SocketAddr>,
 }
@@ -58,7 +58,7 @@ pub struct DnsRes {
 /// `Disconnected` → thread exits → `_join` is collected at process exit
 /// (we don't `.join()` on `Drop`; a hung `getaddrinfo` would wedge
 /// shutdown).
-pub struct DnsWorker {
+pub(crate) struct DnsWorker {
     req_tx: flume::Sender<DnsReq>,
     res_rx: flume::Receiver<DnsRes>,
     /// Tags with a request queued or running. Dedup: each retry round
@@ -75,7 +75,7 @@ impl DnsWorker {
     /// at daemon setup anyway.
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn spawn() -> Self {
+    pub(crate) fn spawn() -> Self {
         let (req_tx, req_rx) = flume::unbounded::<DnsReq>();
         let (res_tx, res_rx) = flume::unbounded::<DnsRes>();
         let join = std::thread::Builder::new()
@@ -112,7 +112,7 @@ impl DnsWorker {
     /// If the worker thread died the send is silently dropped; the
     /// caller's retry backoff keeps the daemon limping (same
     /// degradation as a dead DHT worker).
-    pub fn request(&mut self, tag: DnsTag, hosts: Vec<(String, u16)>) {
+    pub(crate) fn request(&mut self, tag: DnsTag, hosts: Vec<(String, u16)>) {
         if !self.inflight.insert(tag.clone()) {
             return;
         }
@@ -121,7 +121,7 @@ impl DnsWorker {
 
     /// Non-blocking drain. Clears the inflight gate for each returned
     /// result so the *next* retry round can re-queue.
-    pub fn drain(&mut self) -> Vec<DnsRes> {
+    pub(crate) fn drain(&mut self) -> Vec<DnsRes> {
         let out: Vec<_> = self.res_rx.try_iter().collect();
         for r in &out {
             self.inflight.remove(&r.tag);

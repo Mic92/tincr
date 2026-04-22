@@ -29,6 +29,7 @@
 // already does plenty of OS-specific things via nix; one localtime_r
 // is the same shape as one nix::sys::stat::utimes.
 #![deny(unsafe_code)]
+#![warn(unreachable_pub)]
 
 // Backticking proper nouns reads like a ransom note. Same allow as
 // tinc-crypto/tinc-sptps.
@@ -39,4 +40,4 @@ pub mod keypair;
 pub mod names;
 #[cfg(test)]
 pub mod testutil;
-pub mod tui;
+mod tui;

@@ -598,7 +598,7 @@ impl Daemon {
         // v4 path. `match_v4` does the full eth+IP+UDP+port check;
         // None means "not for us" — fall through to v6 then route().
         let hit = if let Some(dns_ip) = cfg.dns_addr4
-            && let Some((src, sport, dns)) = crate::dns::match_v4(data, &dns_ip)
+            && let Some((src, sport, dns)) = crate::dns::match_v4(data, dns_ip)
         {
             let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
                 // Malformed past header recovery (truncated ID, or
@@ -609,7 +609,7 @@ impl Daemon {
                 self.dns = Some(cfg);
                 return true;
             };
-            let mut frame = crate::dns::wrap_v4(data, &reply, &dns_ip, &src, sport);
+            let mut frame = crate::dns::wrap_v4(data, &reply, dns_ip, src, sport);
             log::debug!(target: "tincd::dns",
                         "reply {} bytes to {src}:{sport}", reply.len());
             if let Err(e) = self.device.write(&mut frame) {

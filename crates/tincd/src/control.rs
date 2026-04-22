@@ -43,8 +43,8 @@ use std::path::Path;
 use rand_core::{OsRng, RngCore};
 
 /// 32 random bytes → 64 hex chars.
-pub const COOKIE_BYTES: usize = 32;
-pub const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
+pub(crate) const COOKIE_BYTES: usize = 32;
+pub(crate) const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 
 /// `randomize` + `bin2hex`. The cookie is the auth secret; reading
 /// it from the pidfile is how `tinc` proves it's allowed to control
@@ -58,7 +58,7 @@ pub const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 /// `getrandom(2)`) is unavailable. At that point the daemon can't
 /// generate session keys either; aborting is correct.
 #[must_use]
-pub fn generate_cookie() -> String {
+pub(crate) fn generate_cookie() -> String {
     let mut bytes = [0u8; COOKIE_BYTES];
     OsRng.fill_bytes(&mut bytes);
     let mut hex = String::with_capacity(COOKIE_HEX_LEN);
@@ -88,7 +88,7 @@ pub fn generate_cookie() -> String {
 /// `io::Error` from create/write. Permission denied (running as
 /// non-root, pidfile path is in `/var/run`) is the common one; the
 /// caller logs and exits.
-pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()> {
+pub(crate) fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()> {
     // create+truncate is `fopen("w")`. O_NOFOLLOW: this runs as root
     // pre-privdrop; following a planted symlink would be an
     // arbitrary-file truncate+write.
@@ -122,7 +122,7 @@ pub fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()>
 ///
 /// Returns the listener; caller does `EventLoop::add(fd, READ,
 /// IoWhat::UnixListener)`.
-pub struct ControlSocket {
+pub(crate) struct ControlSocket {
     listener: UnixListener,
     /// Kept so `drop` can unlink. `exit_control` unlinks both
     /// pidfile and socket; our drop does just the socket (pidfile
@@ -136,7 +136,7 @@ pub struct ControlSocket {
 /// bind STILL fails with EADDRINUSE after the unlink, something
 /// raced us — another tincd starting in parallel.
 #[derive(Debug, thiserror::Error)]
-pub enum BindError {
+pub(crate) enum BindError {
     /// Connect-probe succeeded — a live daemon is on the socket.
     #[error("control socket already in use")]
     AlreadyRunning,
@@ -151,7 +151,7 @@ impl ControlSocket {
     /// # Errors
     /// `AlreadyRunning` if the connect-probe succeeds (second daemon).
     /// `Io` for socket/bind/listen failures.
-    pub fn bind(path: &Path) -> Result<Self, BindError> {
+    pub(crate) fn bind(path: &Path) -> Result<Self, BindError> {
         // ─── connect-probe
         // `UnixStream::connect`: if it succeeds, something's
         // there. If `ECONNREFUSED` (or `ENOENT` — no socket file
@@ -213,7 +213,7 @@ impl ControlSocket {
     /// `io::Error` from `accept()`. `WouldBlock` is normal (spurious
     /// wakeup or another thread raced us — but we're single-threaded).
     /// Anything else is an actual problem.
-    pub fn accept(&self) -> io::Result<std::os::unix::net::UnixStream> {
+    pub(crate) fn accept(&self) -> io::Result<std::os::unix::net::UnixStream> {
         let (stream, _addr) = self.listener.accept()?;
         // O_NONBLOCK on the new fd. accept4(SOCK_NONBLOCK) would
         // do this atomically, but std's accept() doesn't expose

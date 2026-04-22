@@ -57,10 +57,11 @@ use tinc_graph::NodeId;
 ///
 /// So the hot read is `has_direct_conn`. Put it first.
 #[derive(Debug, Clone)]
-pub struct NodeViewEntry {
+pub(crate) struct NodeViewEntry {
     /// `nodes.get(nid).conn.is_some()`. The `TCPOnly` / PACKET-17 gate.
     /// Shard can't read `ConnId` (control owns conns), but it doesn't need
     /// to — the hot path only asks "is there one."
+    #[allow(dead_code)] // read via NodeView accessors once shard tx-path lands
     pub has_direct_conn: bool,
     /// `graph.node(nid).reachable`. NOT redundant with `routes[nid].is_some()`:
     /// the route exists for `myself` too (`distance: 0`), and the relay-recv
@@ -76,11 +77,13 @@ pub struct NodeViewEntry {
     /// `None` for transitives (no `NodeState` entry; only direct neighbors
     /// get one) — `choose_udp_address` returns `None` and the caller drops
     /// the packet, same as today. `None` for `myself`.
+    #[allow(dead_code)] // read via NodeView::edge_addr once shard tx-path lands
     pub edge_addr: Option<SocketAddr>,
     /// `graph.node(nid).name`. `node_log_name`. `Arc<str>` so cloning
     /// `NodeView` (fanout to N shards) doesn't clone N×100 Strings.
     /// The `Arc::from(&str)` at build time is one alloc; `Arc::clone` at
     /// fanout is a refcount bump.
+    #[allow(dead_code)] // read via NodeView::name_of once shard tx-path lands
     pub name: Arc<str>,
 }
 
@@ -93,7 +96,7 @@ pub struct NodeViewEntry {
 /// → `<gone>` for log names, `false` for `has_direct_conn` — matches
 /// a node-not-yet-learned state.
 #[derive(Debug, Clone, Default)]
-pub struct NodeView {
+pub(crate) struct NodeView {
     /// Indexed by `NodeId.0`. `None` for freed slots (never happens in
     /// tincd — nodes are monotonic — but `Graph` is a generic slab and
     /// `node_ids()` skips freed slots).
@@ -117,7 +120,8 @@ impl NodeView {
     /// hits — but the snapshot has the same shape).
     #[inline]
     #[must_use]
-    pub fn name_of(&self, nid: NodeId) -> &str {
+    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    pub(crate) fn name_of(&self, nid: NodeId) -> &str {
         self.entries
             .get(nid.0 as usize)
             .and_then(Option::as_ref)
@@ -138,7 +142,7 @@ impl NodeView {
     /// does the same probe against `self.node_ids`).
     #[inline]
     #[must_use]
-    pub fn resolve(&self, name: &str) -> Option<NodeId> {
+    pub(crate) fn resolve(&self, name: &str) -> Option<NodeId> {
         let &nid = self.name_to_nid.get(name)?;
         // `entries[nid]` should always be `Some` for a nid we got from
         // `name_to_nid` (built together, same pass). The `?` is
@@ -152,7 +156,8 @@ impl NodeView {
     /// `self.nodes.get(&nid).is_some_and(|ns| ns.conn.is_some())`.
     #[inline]
     #[must_use]
-    pub fn has_direct_conn(&self, nid: NodeId) -> bool {
+    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    pub(crate) fn has_direct_conn(&self, nid: NodeId) -> bool {
         self.entries
             .get(nid.0 as usize)
             .and_then(Option::as_ref)
@@ -162,7 +167,8 @@ impl NodeView {
     /// `graph.node(nid).reachable`. The relay-receive gate (`rx.rs:468`).
     #[inline]
     #[must_use]
-    pub fn reachable(&self, nid: NodeId) -> bool {
+    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    pub(crate) fn reachable(&self, nid: NodeId) -> bool {
         self.entries
             .get(nid.0 as usize)
             .and_then(Option::as_ref)
@@ -172,7 +178,8 @@ impl NodeView {
     /// `nodes.get(nid).edge_addr`. `choose_udp_address` cold-path fallback.
     #[inline]
     #[must_use]
-    pub fn edge_addr(&self, nid: NodeId) -> Option<SocketAddr> {
+    #[allow(dead_code)] // shard tx-path consumer not yet landed
+    pub(crate) fn edge_addr(&self, nid: NodeId) -> Option<SocketAddr> {
         self.entries
             .get(nid.0 as usize)
             .and_then(Option::as_ref)?
@@ -195,7 +202,7 @@ impl NodeView {
     /// passes `last_routes.len()` here. Dense vec sizing: same indexing
     /// invariant as `last_routes`.
     #[must_use]
-    pub fn build(
+    pub(crate) fn build(
         graph: &tinc_graph::Graph,
         node_ids: &HashMap<String, NodeId>,
         nodes: &crate::inthash::IntHashMap<NodeId, crate::daemon::NodeState>,

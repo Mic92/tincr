@@ -60,7 +60,7 @@ use crate::sandbox;
 /// (`"NETNAME="`, `"NODE="`, etc). Values are owned `String` because
 /// they're formatted (`"%s"`, `"%d"`).
 #[derive(Clone)]
-pub struct ScriptEnv {
+pub(crate) struct ScriptEnv {
     vars: Vec<(&'static str, String)>,
 }
 
@@ -77,7 +77,7 @@ impl ScriptEnv {
     /// is signed in C; `-1` means "don't set". We take `Option<i32>`
     /// and the caller passes `None` for that case.
     #[must_use]
-    pub fn base(
+    pub(crate) fn base(
         netname: Option<&str>,
         myname: &str,
         device: Option<&str>,
@@ -106,7 +106,7 @@ impl ScriptEnv {
     /// `environment_add` for one var. We take key + formatted
     /// value. Call sites: NODE, REMOTEADDRESS, REMOTEPORT,
     /// SUBNET, WEIGHT.
-    pub fn add(&mut self, key: &'static str, value: String) {
+    pub(crate) fn add(&mut self, key: &'static str, value: String) {
         self.vars.push((key, value));
     }
 }
@@ -116,7 +116,7 @@ impl ScriptEnv {
 /// without conflating "no script" with "script
 /// failed".
 #[derive(Debug)]
-pub enum ScriptResult {
+pub(crate) enum ScriptResult {
     /// `access(scriptname, F_OK)` failed. The script doesn't exist.
     /// Normal — most hooks are optional. Upstream returns `true`
     /// (success) here.
@@ -214,7 +214,7 @@ fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 ///
 /// `scriptextension` (`:152`) is empty on Unix (`names.c`). Not a
 /// parameter.
-pub fn execute(
+pub(crate) fn execute(
     confbase: &Path,
     name: &str,
     env: &ScriptEnv,
@@ -261,7 +261,7 @@ fn children() -> std::sync::MutexGuard<'static, Vec<nix::unistd::Pid>> {
 /// Record a detached child pid for later reaping. Used by callers
 /// that `fork()` directly (proxy-exec) instead of going through
 /// [`spawn`].
-pub fn register_child(pid: nix::unistd::Pid) {
+pub(crate) fn register_child(pid: nix::unistd::Pid) {
     children().push(pid);
 }
 
@@ -272,7 +272,7 @@ pub fn register_child(pid: nix::unistd::Pid) {
 /// so a broken async hook (e.g. `subnet-up` that fails to add a
 /// route) is visible at default log level instead of silently
 /// swallowed.
-pub fn reap_children() {
+pub(crate) fn reap_children() {
     use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     children().retain(|&pid| {
         match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {

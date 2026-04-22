@@ -29,11 +29,11 @@ use std::time::{Duration, Instant};
 use crate::route_mac::Mac;
 
 /// Default `macexpire`. 10 minutes.
-pub const DEFAULT_EXPIRE_SECS: u64 = 600;
+pub(crate) const DEFAULT_EXPIRE_SECS: u64 = 600;
 
 /// Learned-MAC expiry table.
 #[derive(Debug, Default)]
-pub struct MacLeases {
+pub(crate) struct MacLeases {
     /// MAC → expires-at. C: `subnet_t.expires` for `myself`-owned MAC
     /// subnets with nonzero expires.
     leases: HashMap<Mac, Instant>,
@@ -50,7 +50,7 @@ impl MacLeases {
     /// `refresh`, not `learn`). But guard against caller mistakes:
     /// if the MAC is
     /// already in the table, log debug + treat as refresh.
-    pub fn learn(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
+    pub(crate) fn learn(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
         let expires = now + Duration::from_secs(expire_secs);
         if let Some(slot) = self.leases.get_mut(&mac) {
             // Already known — caller should have called refresh().
@@ -70,7 +70,7 @@ impl MacLeases {
     /// `false` if the MAC wasn't in the table (`route_mac` thought it was
     /// known — stale routing snapshot? race vs `age()`?). Daemon: log
     /// warn, treat as no-op (the next `New` re-adds).
-    pub fn refresh(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
+    pub(crate) fn refresh(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
         match self.leases.get_mut(&mac) {
             Some(slot) => {
                 *slot = now + Duration::from_secs(expire_secs);
@@ -91,7 +91,7 @@ impl MacLeases {
     ///
     /// Expiry boundary: STRICT less. A lease expiring exactly at
     /// `now` is still alive for one more tick.
-    pub fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
+    pub(crate) fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
         let mut expired = Vec::new();
         // Strict less. `expires == now` → NOT expired yet.
         self.leases.retain(|mac, &mut expires| {
@@ -106,25 +106,24 @@ impl MacLeases {
         (expired, any_left)
     }
 
-    /// `dump_subnets` debugging. C doesn't have a separate dump for
-    /// learned-vs-configured; we might. Doc-only for now; just expose
-    /// the map.
-    pub fn iter(&self) -> impl Iterator<Item = (&Mac, &Instant)> {
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Mac, &Instant)> {
         self.leases.iter()
     }
 
     #[must_use]
-    pub fn contains(&self, mac: &Mac) -> bool {
-        self.leases.contains_key(mac)
+    pub(crate) fn contains(&self, mac: Mac) -> bool {
+        self.leases.contains_key(&mac)
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.leases.is_empty()
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.leases.len()
     }
 }

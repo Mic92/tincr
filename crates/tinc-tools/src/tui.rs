@@ -6,7 +6,6 @@
 //! |---|---|---|
 //! | `initscr()` + `endwin()` | Alt screen + raw mode + restore | [`RawMode`] RAII |
 //! | `timeout(ms)` + `getch()` | Read 1 byte OR timeout | [`getch_timeout`] |
-//! | `erase()` | Clear screen | [`CLEAR`] |
 //! | `mvprintw(r, c, ...)` | Positioned printf | [`goto`] then `write!` |
 //! | `attrset(A_BOLD)` | Bold on | [`BOLD`] |
 //! | `attrset(A_DIM)` | Dim on | [`DIM`] |
@@ -39,24 +38,19 @@ use nix::unistd;
 // Escape sequences — ANSI X3.64 / ECMA-48. CSI is `ESC [` aka
 // `\x1b[`; SGR is `CSI Ps m`. Universal since VT100.
 
-/// `CSI 2 J` — erase entire screen. No buffer/diff: at 1Hz × ~3KB
-/// a full redraw is cheaper than the bookkeeping. `goto(0,0)` is
-/// separate; this doesn't home the cursor.
-pub const CLEAR: &str = "\x1b[2J";
-
 /// `CSI K` — erase from cursor to end of line. Cleared cells take
 /// the current SGR, so `REVERSE` + `CLEAR_EOL` paints the rest of
 /// the line in reverse video (curses' `chgat(-1, A_REVERSE, ...)`).
-pub const CLEAR_EOL: &str = "\x1b[K";
+pub(crate) const CLEAR_EOL: &str = "\x1b[K";
 
 /// `CSI 1 m` — bold. Nodes with traffic this tick.
-pub const BOLD: &str = "\x1b[1m";
+pub(crate) const BOLD: &str = "\x1b[1m";
 /// `CSI 2 m` — dim. Nodes that disappeared since last dump.
-pub const DIM: &str = "\x1b[2m";
+pub(crate) const DIM: &str = "\x1b[2m";
 /// `CSI 7 m` — reverse video. Column header bar.
-pub const REVERSE: &str = "\x1b[7m";
+pub(crate) const REVERSE: &str = "\x1b[7m";
 /// `CSI 0 m` — reset all attributes. Between rows; stops bleed.
-pub const RESET: &str = "\x1b[0m";
+pub(crate) const RESET: &str = "\x1b[0m";
 
 /// `CSI ? 1049 h` / `l` — alternate screen buffer. What makes
 /// `top` go away cleanly on quit without trashing scrollback.
@@ -72,7 +66,7 @@ const CURSOR_SHOW: &str = "\x1b[?25h";
 /// (top-left `(0,0)`); VT100 escapes are 1-indexed, so we add 1.
 /// Returns `String` for inline `write!`; one alloc per row at 1Hz.
 #[must_use]
-pub fn goto(row: u16, col: u16) -> String {
+pub(crate) fn goto(row: u16, col: u16) -> String {
     format!("\x1b[{};{}H", row + 1, col + 1)
 }
 
@@ -81,8 +75,9 @@ pub fn goto(row: u16, col: u16) -> String {
 /// Terminal dimensions. Curses silently clips `mvprintw` past
 /// `LINES`; we'd scroll the terminal. Caller clips explicitly.
 #[derive(Debug, Clone, Copy)]
-pub struct Winsize {
+pub(crate) struct Winsize {
     pub rows: u16,
+    #[allow(dead_code)] // populated from TIOCGWINSZ; rows is the only field top.rs reads today
     pub cols: u16,
 }
 
@@ -96,7 +91,7 @@ pub struct Winsize {
 /// the `unsafe` is the FFI calling convention, not the logic.
 #[allow(unsafe_code)]
 #[must_use]
-pub fn winsize() -> Winsize {
+pub(crate) fn winsize() -> Winsize {
     // Macro generates `unsafe fn tiocgwinsz(fd, *mut winsize)`.
     // Types/constants come from `nix::libc` so this module has no
     // direct `libc` dependency — `nix` already pins the version.
@@ -154,7 +149,7 @@ pub fn winsize() -> Winsize {
 ///
 /// We don't hold a `StdoutLock` — it would block cooked-mode
 /// `read_line`. Writes lock per-call via `print!`; fine at 1Hz.
-pub struct RawMode {
+pub(crate) struct RawMode {
     /// The termios as it was before we touched it. Drop restores.
     original: Termios,
 }
@@ -172,7 +167,7 @@ impl RawMode {
     ///
     /// # Errors
     /// Stdin isn't a tty. Caller maps to `CmdError`.
-    pub fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         let stdin = io::stdin();
         let fd = stdin.as_fd();
 
@@ -219,7 +214,7 @@ impl RawMode {
     /// # Errors
     /// `tcsetattr` failure or `f`'s errors propagate. The re-raw
     /// `tcsetattr` is best-effort (Drop will try again).
-    pub fn with_cooked<T>(
+    pub(crate) fn with_cooked<T>(
         &self,
         f: impl FnOnce(&mut dyn io::BufRead) -> io::Result<T>,
     ) -> io::Result<T> {
@@ -277,7 +272,7 @@ impl Drop for RawMode {
 /// # Errors
 /// Real I/O errors on stdin. EINTR maps to `None` (treated as
 /// timeout — next tick redraws, e.g. after SIGWINCH).
-pub fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
+pub(crate) fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     let stdin = io::stdin();
     let fd = stdin.as_fd();
 

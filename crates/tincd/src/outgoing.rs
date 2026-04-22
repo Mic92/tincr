@@ -58,7 +58,7 @@ new_key_type! {
 /// the provenance now lets that be tightened later without another
 /// plumbing pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OutOrigin {
+pub(crate) enum OutOrigin {
     /// `ConnectTo =` in `tinc.conf` (setup or reload).
     #[default]
     ConfigConnectTo,
@@ -71,7 +71,7 @@ pub enum OutOrigin {
 
 /// C hangs `address_cache` on `node_t` (`node.h:108`); only outgoings
 /// ever read it. Per-outgoing is the natural home.
-pub struct Outgoing {
+pub(crate) struct Outgoing {
     /// `outgoing->node->name`. The `ConnectTo = bob` value.
     pub node_name: String,
     /// Provenance. Read by `decide_autoconnect`'s drop arm.
@@ -86,7 +86,7 @@ pub struct Outgoing {
 }
 
 /// `MaxTimeout` default: 900 = 15 minutes. The retry backoff caps here.
-pub const MAX_TIMEOUT_DEFAULT: u32 = 900;
+pub(crate) const MAX_TIMEOUT_DEFAULT: u32 = 900;
 
 impl Outgoing {
     /// `retry_outgoing` arithmetic. Bumps `timeout += 5`, caps at
@@ -94,7 +94,7 @@ impl Outgoing {
     /// lives in the daemon (it owns `Timers`).
     ///
     /// Returns the new timeout for the caller to arm.
-    pub fn bump_timeout(&mut self, maxtimeout: u32) -> u32 {
+    pub(crate) fn bump_timeout(&mut self, maxtimeout: u32) -> u32 {
         self.timeout = (self.timeout + 5).min(maxtimeout);
         self.timeout
     }
@@ -104,7 +104,7 @@ impl Outgoing {
 /// `do_outgoing_connection` (`:564-662`) expressed as an enum so the
 /// daemon can drive the loop without `goto`.
 #[derive(Debug)]
-pub enum ConnectAttempt {
+pub(crate) enum ConnectAttempt {
     /// `connect()` returned 0 OR `EINPROGRESS`. The socket is
     /// registered for WRITE; the connecting probe finishes it.
     Started { sock: Socket, addr: SocketAddr },
@@ -213,7 +213,7 @@ fn dial_nonblocking(
 /// loops this until `Started` or `Exhausted`.
 ///
 /// `proxytype == NONE` path only. Proxy modes are chunk 10.
-pub fn try_connect(
+pub(crate) fn try_connect(
     addr_cache: &mut AddressCache,
     node_name: &str,
     bind_to: Option<SocketAddr>,
@@ -242,7 +242,7 @@ pub fn try_connect(
 /// `c->address` for the later SOCKS/HTTP CONNECT. The proxy is a
 /// single global config so any failure is `Exhausted`, never `Retry`.
 #[must_use]
-pub fn try_connect_via_proxy(
+pub(crate) fn try_connect_via_proxy(
     proxy_addr: SocketAddr,
     peer_addr: SocketAddr,
     node_name: &str,
@@ -286,7 +286,7 @@ pub fn try_connect_via_proxy(
 /// open-file-description. epoll keys on the description, so closing
 /// only the dup left a stale interest → 100% CPU busy-loop on
 /// ERR|HUP. One fd, one owner, no aliasing hazard.
-pub fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
+pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
     // `if(send(c->socket, NULL, 0, 0) != 0)`. nix's `send(fd, &[],
     // empty)` does the same — a zero-byte write that touches the
     // connection state without sending data.
@@ -418,7 +418,7 @@ impl ProxyConfig {
 /// String describing why the config is invalid (unknown type, missing
 /// arg, or unsupported type). The caller (`setup()`) wraps this in
 /// `SetupError::Config`.
-pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
+pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
     // First word is the type, rest is args.
     let mut parts = value.splitn(2, ' ');
     let kind = parts.next().unwrap_or("");
@@ -507,7 +507,7 @@ pub fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
 /// Interior NUL in `cmd`, `my_name` or `node_name` returns
 /// `InvalidInput` rather than panicking.
 #[allow(clippy::missing_panics_doc)] // unwraps are on NUL-free literals
-pub fn do_outgoing_pipe(
+pub(crate) fn do_outgoing_pipe(
     cmd: &str,
     addr: SocketAddr,
     node_name: &str,
@@ -643,7 +643,7 @@ pub fn do_outgoing_pipe(
 ///
 /// Unparseable lines (bad port) warn-and-skip.
 #[must_use]
-pub fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
+pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
     let host_file = confbase.join("hosts").join(node_name);
     let Ok(entries) = tinc_conf::parse_file(&host_file) else {
         // No hosts/NAME file. The cache file (if any) is the only

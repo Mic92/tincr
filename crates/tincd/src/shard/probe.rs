@@ -16,7 +16,7 @@ use tinc_graph::NodeId;
 
 /// Per-super seal-send target. Everything is a COPY — no borrows into
 /// snapshot state. ~120 bytes, copied once per super (~33 chunks).
-pub struct TxTarget {
+pub(crate) struct TxTarget {
     /// The `Arc` from `snap.tunnels.get()`. Seal loop reads `outkey`.
     /// Holding the `Arc` directly instead of unpacking key/sock: the
     /// seal loop derefs `handles.outkey` once into `ChaPoly::new`;
@@ -73,7 +73,7 @@ pub struct TxTarget {
 /// doesn't accept-twice).
 #[must_use]
 #[allow(clippy::missing_panics_doc)] // mutex; poison only on panic in seal
-pub fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<TxTarget> {
+pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<TxTarget> {
     // Setup-time fold of every "this packet must go through control"
     // gate. Cheapest possible early-out: one bool.
     if snap.slowpath_all {

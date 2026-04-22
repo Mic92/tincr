@@ -228,7 +228,7 @@ impl PartialOrd for MacKey {
 /// ~1KB, called once per `ADD_SUBNET`/`DEL_SUBNET` gossip event —
 /// rare. The hot path reads through `Arc<SubnetTree>`, no fence.
 #[derive(Debug, Default, Clone)]
-pub struct SubnetTree {
+pub(crate) struct SubnetTree {
     ipv4: BTreeSet<Ipv4Key>,
     ipv6: BTreeSet<Ipv6Key>,
     mac: BTreeSet<MacKey>,
@@ -236,7 +236,7 @@ pub struct SubnetTree {
 
 impl SubnetTree {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -248,7 +248,7 @@ impl SubnetTree {
     /// Idempotent — re-adding the same `(subnet, owner)` is a no-op
     /// (`splay_insert` replaces, but the value IS the key so it's
     /// observationally identical).
-    pub fn add(&mut self, subnet: Subnet, owner: String) {
+    pub(crate) fn add(&mut self, subnet: Subnet, owner: String) {
         let owner = Some(owner);
         match subnet {
             Subnet::V4 { .. } => {
@@ -272,7 +272,7 @@ impl SubnetTree {
     ///
     /// `Option::Ord` sorts `None` first — matches upstream's
     /// NULL-short-circuit.
-    pub fn add_broadcast(&mut self, subnet: Subnet) {
+    pub(crate) fn add_broadcast(&mut self, subnet: Subnet) {
         match subnet {
             Subnet::V4 { .. } => {
                 self.ipv4.insert(Ipv4Key {
@@ -298,7 +298,7 @@ impl SubnetTree {
     /// `subnet_del`. Returns `true` if the entry was present.
     /// `splay_delete` is void; we expose the bool because `del_subnet_h` (the
     /// protocol handler) wants to log "got DEL for unknown subnet".
-    pub fn del(&mut self, subnet: &Subnet, owner: &str) -> bool {
+    pub(crate) fn del(&mut self, subnet: &Subnet, owner: &str) -> bool {
         // Allocates a `String` for the lookup key. `BTreeSet::remove`
         // takes `&Q where K: Borrow<Q>` but our key is a struct, not
         // a tuple — implementing `Borrow` for a `(Subnet, &str)`
@@ -334,7 +334,7 @@ impl SubnetTree {
     /// Allocates a `String` for the lookup key (same shape as
     /// `del()`). `ADD_SUBNET` is control-path-rare; the alloc is fine.
     #[must_use]
-    pub fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
+    pub(crate) fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
         let owner = Some(owner.to_owned());
         match *subnet {
             Subnet::V4 { .. } => self.ipv4.contains(&Ipv4Key {
@@ -376,16 +376,16 @@ impl SubnetTree {
     /// is not reachable" with that owner's name. We return `Some`
     /// for that fallback too: the last `maskcmp`
     /// hit, reachable or not.
-    pub fn lookup_ipv4(
+    pub(crate) fn lookup_ipv4(
         &self,
-        addr: &Ipv4Addr,
+        addr: Ipv4Addr,
         mut is_reachable: impl FnMut(&str) -> bool,
     ) -> Option<(&Subnet, Option<&str>)> {
         // Build a /32 query subnet so we can reuse `Subnet::matches`
         // (which is `maskcmp` under the hood). Weight doesn't matter
         // for `matches(_, true)`.
         let q = Subnet::V4 {
-            addr: *addr,
+            addr,
             prefix: 32,
             weight: 0,
         };
@@ -409,7 +409,7 @@ impl SubnetTree {
     }
 
     /// `lookup_subnet_ipv6`. Same as v4.
-    pub fn lookup_ipv6(
+    pub(crate) fn lookup_ipv6(
         &self,
         addr: &Ipv6Addr,
         mut is_reachable: impl FnMut(&str) -> bool,
@@ -422,40 +422,6 @@ impl SubnetTree {
         let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.ipv6 {
             if k.subnet.matches(&q, true) {
-                last_hit = Some((&k.subnet, k.owner.as_deref()));
-                // `!p->owner ||` short-circuit.
-                if k.owner.as_deref().is_none_or(&mut is_reachable) {
-                    break;
-                }
-            }
-        }
-        last_hit
-    }
-
-    /// `lookup_subnet_mac`. MAC has no prefix → exact-match only. Still a scan because
-    /// the same MAC can be advertised by multiple nodes with
-    /// different weights (failover for a service VIP), and we want
-    /// the lowest-weight reachable one. Tree order delivers
-    /// lowest-weight first (`subnet_compare_mac` sorts addr THEN
-    /// weight ascending).
-    ///
-    /// C also takes an optional `owner` to scope the search to one
-    /// node's tree. We don't have per-node trees; the daemon can
-    /// filter the result if it cares.
-    pub fn lookup_mac(
-        &self,
-        addr: &[u8; 6],
-        mut is_reachable: impl FnMut(&str) -> bool,
-    ) -> Option<(&Subnet, Option<&str>)> {
-        let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
-        for k in &self.mac {
-            // `if(!memcmp(address, &p->address, 6))`. Exact match —
-            // `Subnet::matches` would work but this is
-            // clearer (and skips constructing a query subnet).
-            let Subnet::Mac { addr: a, .. } = k.subnet else {
-                unreachable!()
-            };
-            if a == *addr {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
                 // `!p->owner ||` short-circuit.
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
@@ -481,7 +447,7 @@ impl SubnetTree {
     /// filtering here keeps the wire output equivalent. (Cosmetic
     /// fallout: `dump_subnets` won't print `(broadcast)` rows.
     /// Separate fix if anyone cares.)
-    pub fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
         self.mac
             .iter()
             .map(|k| (&k.subnet, k.owner.as_deref()))
@@ -496,7 +462,7 @@ impl SubnetTree {
     /// is intentional: callers immediately call `run_subnet_script` /
     /// `del()` while iterating, which would self-borrow on the iterator.
     #[must_use]
-    pub fn owned_by(&self, name: &str) -> Vec<Subnet> {
+    pub(crate) fn owned_by(&self, name: &str) -> Vec<Subnet> {
         self.iter()
             .filter(|(_, o)| *o == name)
             .map(|(s, _)| *s)
@@ -506,13 +472,14 @@ impl SubnetTree {
     /// Total entry count across all three families. For `dump
     /// subnets` and tests.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.ipv4.len() + self.ipv6.len() + self.mac.len()
     }
 
     /// Is the routing table empty?
+    #[cfg(test)]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.ipv4.is_empty() && self.ipv6.is_empty() && self.mac.is_empty()
     }
 }

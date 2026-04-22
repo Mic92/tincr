@@ -25,7 +25,7 @@ use crate::pmtu::PmtuState;
 /// bump through `&TunnelHandles` without `&mut Daemon`. `Relaxed`
 /// everywhere: monotone counters, read only by `dump nodes`/`info`.
 #[derive(Default, Debug)]
-pub struct TrafficStats {
+pub(crate) struct TrafficStats {
     in_packets: AtomicU64,
     in_bytes: AtomicU64,
     out_packets: AtomicU64,
@@ -34,40 +34,40 @@ pub struct TrafficStats {
 
 impl TrafficStats {
     #[inline]
-    pub fn add_in(&self, packets: u64, bytes: u64) {
+    pub(crate) fn add_in(&self, packets: u64, bytes: u64) {
         self.in_packets.fetch_add(packets, Ordering::Relaxed);
         self.in_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
     #[inline]
-    pub fn add_out(&self, packets: u64, bytes: u64) {
+    pub(crate) fn add_out(&self, packets: u64, bytes: u64) {
         self.out_packets.fetch_add(packets, Ordering::Relaxed);
         self.out_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
     #[inline]
-    pub fn in_packets(&self) -> u64 {
+    pub(crate) fn in_packets(&self) -> u64 {
         self.in_packets.load(Ordering::Relaxed)
     }
     #[inline]
-    pub fn in_bytes(&self) -> u64 {
+    pub(crate) fn in_bytes(&self) -> u64 {
         self.in_bytes.load(Ordering::Relaxed)
     }
     #[inline]
-    pub fn out_packets(&self) -> u64 {
+    pub(crate) fn out_packets(&self) -> u64 {
         self.out_packets.load(Ordering::Relaxed)
     }
     #[inline]
-    pub fn out_bytes(&self) -> u64 {
+    pub(crate) fn out_bytes(&self) -> u64 {
         self.out_bytes.load(Ordering::Relaxed)
     }
 }
 
 /// `net.h:36` `#define MTU 1518` (1500 + 14 eth + 4 VLAN).
-pub const MTU: u16 = 1518;
+pub(crate) const MTU: u16 = 1518;
 
 /// `node_t` data-plane fields. Parallel map to `NodeState`.
 /// Init: zeroed + `maxmtu=MTU`.
 #[derive(Default)]
-pub struct TunnelState {
+pub(crate) struct TunnelState {
     /// `n->sptps`. Set by `sptps_start` (`datagram=true`); cleared
     /// on unreachable. Boxed: ~1KB, most nodes never tunnel.
     pub sptps: Option<Box<Sptps>>,
@@ -186,7 +186,7 @@ pub struct TunnelState {
 impl TunnelState {
     /// `BecameUnreachable`. `n->mtu` NOT reset (learned PMTU
     /// survives). Traffic counters NOT reset (lifetime totals).
-    pub fn reset_unreachable(&mut self) {
+    pub(crate) fn reset_unreachable(&mut self) {
         self.sptps = None; // `sptps_stop`
         self.prev_sptps = None;
         self.prev_sptps_installed_at = None;
@@ -222,7 +222,7 @@ impl TunnelState {
 ///    keep the old RX key alive indefinitely and defeat the FS bound
 ///    `KeyExpire` is meant to enforce.
 #[must_use]
-pub fn should_reap_prev_sptps(
+pub(crate) fn should_reap_prev_sptps(
     validkey: bool,
     last_req_key: Option<Instant>,
     installed_at: Option<Instant>,
@@ -245,7 +245,7 @@ pub fn should_reap_prev_sptps(
 // && !udp_confirmed`).
 #[allow(clippy::struct_excessive_bools)] // mirrors C bitfield: orthogonal bits (validkey && !udp_confirmed is valid)
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct TunnelStatus {
+pub(crate) struct TunnelStatus {
     /// Bit 1. Set by SPTPS `receive_record` cb on `SPTPS_HANDSHAKE`
     /// (NOT `ans_key_h` — it reads). Gates `send_sptps_packet`.
     pub validkey: bool,
@@ -275,19 +275,19 @@ pub struct TunnelStatus {
 impl TunnelState {
     /// `n->mtu`. `MTU` if unseeded.
     #[must_use]
-    pub fn mtu(&self) -> u16 {
+    pub(crate) fn mtu(&self) -> u16 {
         self.pmtu.as_ref().map_or(MTU, |p| p.mtu)
     }
 
     /// `n->minmtu`.
     #[must_use]
-    pub fn minmtu(&self) -> u16 {
+    pub(crate) fn minmtu(&self) -> u16 {
         self.pmtu.as_ref().map_or(0, |p| p.minmtu)
     }
 
     /// `n->maxmtu`.
     #[must_use]
-    pub fn maxmtu(&self) -> u16 {
+    pub(crate) fn maxmtu(&self) -> u16 {
         self.pmtu.as_ref().map_or(MTU, |p| p.maxmtu)
     }
 }
@@ -301,7 +301,7 @@ impl TunnelStatus {
     /// ‡ transient — 0 in practice between event-loop turns.)
     /// `reachable` is a param (owned by graph, not `TunnelStatus`).
     #[must_use]
-    pub const fn as_u32(&self, reachable: bool) -> u32 {
+    pub(crate) const fn as_u32(self, reachable: bool) -> u32 {
         let mut v = 0u32;
         if self.validkey {
             v |= 1 << 1;
@@ -332,7 +332,7 @@ impl TunnelStatus {
 /// (initiator, responder). DIFFERENT from `"tinc TCP key
 /// expansion"` — meta vs tunnel must not share keys.
 #[must_use]
-pub fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
+pub(crate) fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
     // `labellen = 25 + a + b`, passed to `sptps_start` (NOT
     // `strlen(label)`). Format is 24 fixed chars; +1 is snprintf's
     // NUL. The NUL is in the SIG transcript + HKDF seed. Same

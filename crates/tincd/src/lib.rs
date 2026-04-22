@@ -12,59 +12,60 @@
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(unreachable_pub)]
 
-pub mod addr;
-pub mod addrcache;
-pub mod autoconnect;
-pub mod bgresolve;
-pub mod broadcast;
-pub mod compress;
-pub mod conn;
-pub mod control;
+mod addr;
+mod addrcache;
+mod autoconnect;
+mod bgresolve;
+mod broadcast;
+mod compress;
+mod conn;
+mod control;
 pub mod daemon;
 pub mod discovery;
-pub mod dns;
-pub mod egress;
-pub mod fragment;
-pub mod graph_glue;
-pub mod icmp;
-pub mod inthash;
-pub mod invitation_serve;
-pub mod keys;
-pub mod listen;
-pub mod local_addr;
+mod dns;
+mod egress;
+mod fragment;
+mod graph_glue;
+mod icmp;
+mod inthash;
+mod invitation_serve;
+mod keys;
+mod listen;
+mod local_addr;
 pub mod log_tap;
-pub mod mac_lease;
-pub mod mss;
-pub mod neighbor;
+mod mac_lease;
+mod mss;
+mod neighbor;
 pub mod node_id;
-pub mod outgoing;
-pub mod packet;
+mod outgoing;
+mod packet;
 mod platform;
-pub mod pmtu;
+mod pmtu;
 #[cfg(feature = "upnp")]
-pub mod portmap;
-pub mod proto;
-pub mod reload;
-pub mod route;
-pub mod route_mac;
+mod portmap;
+mod proto;
+mod reload;
+mod route;
+mod route_mac;
 pub mod sandbox;
-pub mod script;
-pub mod scriptworker;
+mod script;
+mod scriptworker;
 pub mod sd_notify;
-pub mod seen;
-pub mod shard;
-pub mod socks;
-pub mod subnet_tree;
-pub mod tcp_tunnel;
-pub mod tunnel;
-pub mod udp_info;
+mod seen;
+mod shard;
+mod socks;
+mod subnet_tree;
+mod tcp_tunnel;
+mod tunnel;
+mod udp_info;
 #[cfg(target_os = "linux")]
 pub use platform::set_int_sockopt;
-pub use platform::{
-    bind_to_interface, daemonize, initgroups, msg_nosignal, set_cloexec, set_nosigpipe,
-    set_udp_tos, sock_cloexec_flag,
+pub(crate) use platform::{
+    bind_to_interface, msg_nosignal, set_cloexec, set_nosigpipe, set_udp_tos, sock_cloexec_flag,
 };
+pub use platform::{daemonize, initgroups};
 
 pub use daemon::{Daemon, DaemonSettings, RunOutcome};
 

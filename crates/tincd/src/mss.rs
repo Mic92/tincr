@@ -37,7 +37,7 @@ const ETHER_SIZE: usize = 14;
 /// traffic is untrusted; this fn must be panic-free even on the
 /// fuzz corpus.
 #[must_use]
-pub fn clamp(packet: &mut [u8], mtu: u16) -> bool {
+pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
     // Read ethertype from eth header. We must bounds-check
     // (upstream gates this earlier in routing).
     if packet.len() < ETHER_SIZE {

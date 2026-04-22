@@ -171,7 +171,7 @@ pub(crate) fn is_publishable_ext(ip: IpAddr, port: u16) -> Result<(), BadExt> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Proto {
+pub(crate) enum Proto {
     Tcp,
     Udp,
 }
@@ -180,7 +180,7 @@ pub enum Proto {
 /// rule; `V6` is a firewall pinhole (no translation, `ext` is our
 /// own GUA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Af {
+pub(crate) enum Af {
     V4,
     V6,
 }
@@ -191,7 +191,7 @@ pub enum Af {
 /// `local_port`). `Lost` is emitted when a refresh that previously
 /// succeeded fails (router rebooted, lease table full, LAN moved).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortmapEvent {
+pub(crate) enum PortmapEvent {
     Mapped {
         af: Af,
         proto: Proto,
@@ -209,7 +209,7 @@ pub enum PortmapEvent {
 }
 
 /// Lives on `Daemon`. `tick()` is the non-blocking drain.
-pub struct Portmapper {
+pub(crate) struct Portmapper {
     rx: flume::Receiver<PortmapEvent>,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
@@ -227,7 +227,7 @@ impl Portmapper {
     /// # Panics
     /// `std::thread::spawn` failure (out of threads/memory).
     #[must_use]
-    pub fn spawn(
+    pub(crate) fn spawn(
         local_port: u16,
         mode: UpnpMode,
         refresh: Duration,
@@ -249,7 +249,7 @@ impl Portmapper {
 
     /// Non-blocking drain. Called from `on_periodic_tick` (5s).
     #[must_use]
-    pub fn tick(&self) -> Vec<PortmapEvent> {
+    pub(crate) fn tick(&self) -> Vec<PortmapEvent> {
         self.rx.try_iter().collect()
     }
 }

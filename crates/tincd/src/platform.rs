@@ -19,7 +19,7 @@ use socket2::Socket;
 /// short-lived sockets it's acceptable to skip).
 #[inline]
 #[must_use]
-pub fn sock_cloexec_flag() -> SockFlag {
+pub(crate) fn sock_cloexec_flag() -> SockFlag {
     #[cfg(target_os = "linux")]
     {
         SockFlag::SOCK_CLOEXEC
@@ -34,31 +34,31 @@ pub fn sock_cloexec_flag() -> SockFlag {
 /// of raising `SIGPIPE` on broken TCP connections. Linux uses
 /// `MSG_NOSIGNAL` per-send instead.
 #[cfg(not(target_os = "linux"))]
-pub fn set_nosigpipe(fd: impl AsFd) {
+pub(crate) fn set_nosigpipe(fd: impl AsFd) {
     let _ = socket2::SockRef::from(&fd).set_nosigpipe(true);
 }
 
 #[cfg(target_os = "linux")]
 #[inline]
-pub fn set_nosigpipe(_fd: impl AsFd) {}
+pub(crate) fn set_nosigpipe(_fd: impl AsFd) {}
 
 /// Set `FD_CLOEXEC` via `fcntl`. Use after socket/socketpair on
 /// platforms without `SOCK_CLOEXEC`.
 #[cfg(not(target_os = "linux"))]
-pub fn set_cloexec(fd: impl AsFd) {
+pub(crate) fn set_cloexec(fd: impl AsFd) {
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
 }
 
 #[cfg(target_os = "linux")]
 #[inline]
-pub fn set_cloexec(_fd: impl AsFd) {}
+pub(crate) fn set_cloexec(_fd: impl AsFd) {}
 
 /// `MSG_NOSIGNAL` on Linux, empty on macOS (macOS uses
 /// `SO_NOSIGPIPE` on the socket instead).
 #[inline]
 #[must_use]
-pub fn msg_nosignal() -> nix::sys::socket::MsgFlags {
+pub(crate) fn msg_nosignal() -> nix::sys::socket::MsgFlags {
     #[cfg(target_os = "linux")]
     {
         nix::sys::socket::MsgFlags::MSG_NOSIGNAL
@@ -110,7 +110,7 @@ pub fn set_int_sockopt(
 ///
 /// Log-on-error at debug, never fail — a busy system flipping TOS
 /// per-packet would spam if the kernel ever started rejecting these.
-pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
+pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
     let s = socket2::SockRef::from(&fd);
     let (label, res) = if is_ipv6 {
         ("IPV6_TCLASS", s.set_tclass_v6(u32::from(prio)))
@@ -134,7 +134,7 @@ pub fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
 /// # Errors
 /// `setsockopt(SO_BINDTODEVICE)` failure.
 #[cfg(target_os = "linux")]
-pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
+pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     use nix::sys::socket::{setsockopt, sockopt};
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
@@ -144,7 +144,7 @@ pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 /// # Errors
 /// Unknown interface or `setsockopt` failure.
 #[cfg(not(target_os = "linux"))]
-pub fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
+pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     use std::num::NonZeroU32;
     // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF /
     // IPV6_BOUND_IF bind a socket to a specific interface index.

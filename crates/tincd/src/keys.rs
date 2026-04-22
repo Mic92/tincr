@@ -27,7 +27,7 @@ use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 /// Dedups the `confbase.join("hosts").join(name)` + `parse_file` + `merge`
 /// preamble that every per-peer reader open-coded.
 #[must_use]
-pub fn read_host_config(confbase: &Path, name: &str) -> Config {
+pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Config {
     let mut cfg = Config::default();
     if let Ok(entries) = tinc_conf::parse_file(confbase.join("hosts").join(name)) {
         cfg.merge(entries);
@@ -86,7 +86,7 @@ fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
 /// when this fails, but we forbid legacy, so all variants are
 /// fatal for us.
 #[derive(Debug, thiserror::Error)]
-pub enum PrivKeyError {
+pub(crate) enum PrivKeyError {
     /// `ENOENT`. Carries the path for the gen-keys hint message.
     #[error("Error reading Ed25519 private key file `{}': No such file or directory", .0.display())]
     Missing(PathBuf),
@@ -116,7 +116,7 @@ pub enum PrivKeyError {
 /// # Errors
 /// `Missing` if the file doesn't exist (caller prints the gen-keys
 /// hint), `Io` for other fs errors, `Pem` for malformed contents.
-pub fn read_ecdsa_private_key(
+pub(crate) fn read_ecdsa_private_key(
     config: &Config,
     confbase: &Path,
 ) -> Result<SigningKey, PrivKeyError> {
@@ -186,7 +186,7 @@ pub fn read_ecdsa_private_key(
 /// PEM block, the var wins silently (early return). No consistency
 /// check; ported faithfully.
 #[must_use]
-pub fn read_ecdsa_public_key(
+pub(crate) fn read_ecdsa_public_key(
     host_config: &Config,
     confbase: &Path,
     name: &str,

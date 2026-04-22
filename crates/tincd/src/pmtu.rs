@@ -35,11 +35,11 @@
 use std::time::{Duration, Instant};
 
 /// `net.h:36` — 1500 bytes payload + 14 ethernet + 4 VLAN.
-pub const MTU: u16 = 1518;
+pub(crate) const MTU: u16 = 1518;
 /// `net.h:39` — below this we don't consider UDP to be working.
-pub const MINMTU: u16 = 512;
+pub(crate) const MINMTU: u16 = 512;
 /// eth header (14) + 4 random bytes.
-pub const MIN_PROBE_SIZE: u16 = 18;
+pub(crate) const MIN_PROBE_SIZE: u16 = 18;
 
 const PROBES_PER_CYCLE: u32 = 8;
 
@@ -50,7 +50,7 @@ const PROBES_PER_CYCLE: u32 = 8;
 /// to phase — the same `minmtu` raise can happen in Discovery or
 /// Revalidate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmtuPhase {
+pub(crate) enum PmtuPhase {
     /// `mtuprobes ∈ 0..19`. `sent` = probes sent so far; also
     /// the input to the exponential probe-size formula (cycle
     /// position = `sent % 8`).
@@ -75,20 +75,20 @@ impl PmtuPhase {
     /// `txpath.rs` uses this to gate the maxmtu re-seed
     /// (`choose_initial_maxmtu`).
     #[must_use]
-    pub const fn is_discovery_start(&self) -> bool {
+    pub(crate) const fn is_discovery_start(self) -> bool {
         matches!(self, Self::Discovery { sent: 0 })
     }
 
     /// `mtuprobes < 0`: MTU already fixed (steady/revalidate/lost).
     #[must_use]
-    pub const fn is_fixed(&self) -> bool {
+    pub(crate) const fn is_fixed(self) -> bool {
         matches!(self, Self::Steady | Self::Revalidate { .. } | Self::Lost)
     }
 }
 
 /// Per-node PMTU state. Mirrors `node_t.{mtu,minmtu,maxmtu,mtuprobes,...}`.
 #[derive(Debug)]
-pub struct PmtuState {
+pub(crate) struct PmtuState {
     pub mtu: u16,
     pub minmtu: u16,
     pub maxmtu: u16,
@@ -109,7 +109,7 @@ pub struct PmtuState {
 
 /// Action emitted by the state machine for the daemon to dispatch.
 #[derive(Debug, PartialEq, Eq)]
-pub enum PmtuAction {
+pub(crate) enum PmtuAction {
     /// `send_udp_probe_packet`. `len` already clamped to
     /// `>= MIN_PROBE_SIZE`.
     SendProbe { len: u16 },
@@ -139,7 +139,7 @@ impl PmtuState {
     /// (That ICMP poisoned the kernel's per-dst PMTU cache for 10
     /// minutes)
     #[must_use]
-    pub const fn new(now: Instant, initial_maxmtu: u16) -> Self {
+    pub(crate) const fn new(now: Instant, initial_maxmtu: u16) -> Self {
         Self {
             mtu: 0,
             minmtu: 0,
@@ -161,13 +161,13 @@ impl PmtuState {
     /// is the only keepalive sender and is itself data-driven, so a
     /// silent period means *we* never probed, not that the path is dead.
     #[must_use]
-    pub fn udp_timed_out(&self, now: Instant, timeout: Duration) -> bool {
+    pub(crate) fn udp_timed_out(&self, now: Instant, timeout: Duration) -> bool {
         self.udp_confirmed && self.ping_sent && now.duration_since(self.udp_ping_sent) >= timeout
     }
 
     /// `mtuprobes := 0` — restart discovery from scratch. Used by
     /// `tunnel.rs::reset_unreachable` and `on_udp_timeout`.
-    pub const fn start_discovery(&mut self) {
+    pub(crate) const fn start_discovery(&mut self) {
         self.phase = PmtuPhase::Discovery { sent: 0 };
     }
 
@@ -176,7 +176,7 @@ impl PmtuState {
     /// Caller handles preconditions: `OPTION_PMTU_DISCOVERY` set,
     /// `udp_confirmed` if `udp_discovery` on. The `:1358-1364` reset
     /// for not-confirmed is `on_udp_timeout`.
-    pub fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
+    pub(crate) fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
         // ── Cadence gate ──────────────────────────────────────
         let elapsed = now.duration_since(self.mtu_ping_sent);
         match self.phase {
@@ -288,7 +288,7 @@ impl PmtuState {
     /// (`ping_sent`): an unsolicited ack must not flip
     /// `udp_confirmed` — same gate that protects
     /// [`Self::on_probe_reply`]'s RTT arm.
-    pub fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
+    pub(crate) fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
         let len = len.min(MTU);
         // Steady-state confirmation — mirrors on_probe_reply. Without
         // this an asymmetric-UDP peer (UDP replies filtered, only
@@ -329,7 +329,7 @@ impl PmtuState {
 
     /// `udp_probe_h` reply branch. Daemon already extracted type-2
     /// length. Daemon-side: address-cache, UDP-timeout reset.
-    pub fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
+    pub(crate) fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
         let mut out = Vec::new();
 
         // ── RTT measurement ──── :184-194 ──────────────────────
@@ -371,7 +371,7 @@ impl PmtuState {
     }
 
     /// `reduce_mtu`. EMSGSIZE: cap maxmtu/mtu.
-    pub fn on_emsgsize(&mut self, at_len: u16) -> Vec<PmtuAction> {
+    pub(crate) fn on_emsgsize(&mut self, at_len: u16) -> Vec<PmtuAction> {
         // Upstream callers pass len-1; we take failed size. Floor at MINMTU.
         let mtu = at_len.saturating_sub(1).max(MINMTU);
         if self.maxmtu > mtu {
@@ -386,7 +386,7 @@ impl PmtuState {
     }
 
     /// `udp_probe_timeout_handler`. Idempotent on already-unconfirmed.
-    pub const fn on_udp_timeout(&mut self) {
+    pub(crate) const fn on_udp_timeout(&mut self) {
         if !self.udp_confirmed {
             return;
         }

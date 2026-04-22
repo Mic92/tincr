@@ -48,12 +48,12 @@ use crate::proto::ConnOptions;
 /// jumbo value: clamping to a *smaller* compile-time max would be
 /// wrong if the peer is running a jumbo build, and clamping to a
 /// *larger* one is harmless (PMTU will discover the real ceiling).
-pub const MTU_MAX: i32 = 9018;
+pub(crate) const MTU_MAX: i32 = 9018;
 
 /// `mtu_info_h` (`:345`): `if(mtu < 512) { ERR; return false; }`.
 /// 512 is roughly the IPv4 minimum reassembly buffer (RFC 791); below
 /// this the message is corrupt, not just pessimistic.
-pub const MTU_MIN: i32 = 512;
+pub(crate) const MTU_MIN: i32 = 512;
 
 // ────────────────────────────────────────────────────────────────────
 // Snapshot inputs
@@ -62,7 +62,7 @@ pub const MTU_MIN: i32 = 512;
 /// `on_receive_udp_info`. `None` at the call-site means
 /// `lookup_node(from_name)` failed → `UnknownNode`.
 #[derive(Debug, Clone, Copy)]
-pub struct FromState {
+pub(crate) struct FromState {
     /// `from->connection != NULL` (`:251`). Direct meta connection;
     /// we already know their address from the TCP edge, so a relay's
     /// UDP observation isn't useful.
@@ -79,7 +79,7 @@ pub struct FromState {
 
 /// Per-node MTU state for `from` in `on_receive_mtu_info`.
 #[derive(Debug, Clone, Copy)]
-pub struct FromMtuState {
+pub(crate) struct FromMtuState {
     /// `from->mtu`. Current effective MTU we use for packets to
     /// `from`.
     pub mtu: u16,
@@ -93,7 +93,7 @@ pub struct FromMtuState {
 /// `minmtu == maxmtu` means PMTU discovery has converged
 /// (`net_packet.c`: probe ladder narrows until they meet).
 #[derive(Debug, Clone, Copy)]
-pub struct PmtuSnapshot {
+pub(crate) struct PmtuSnapshot {
     pub minmtu: u16,
     pub maxmtu: u16,
 }
@@ -101,7 +101,7 @@ pub struct PmtuSnapshot {
 impl PmtuSnapshot {
     /// `from->minmtu == from->maxmtu`: probing converged.
     #[must_use]
-    pub const fn converged(&self) -> bool {
+    pub(crate) const fn converged(self) -> bool {
         self.minmtu == self.maxmtu
     }
 }
@@ -131,7 +131,7 @@ impl PmtuSnapshot {
 #[allow(clippy::too_many_arguments)] // each param maps to one C global-state read; struct just moves the noise
 #[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
-pub fn should_send_udp_info(
+pub(crate) fn should_send_udp_info(
     // `:170` `if(to == myself) return true;` — would be sending a
     // hint to ourselves. The relay deref (`:158`) made `to` the
     // actual hop; if that's us, we're the endpoint.
@@ -223,7 +223,7 @@ pub fn should_send_udp_info(
 /// `from`/`to` so the caller doesn't have to re-unwrap `Option`s
 /// whose `Some`-ness this function already proved.
 #[derive(Debug, PartialEq, Eq)]
-pub enum UdpInfoAction<N> {
+pub(crate) enum UdpInfoAction<N> {
     /// `:251-257`. `from` is not directly connected, not UDP-
     /// confirmed, and the message's address differs from what we
     /// have. Daemon calls `update_node_udp(from, new_addr)` then
@@ -261,7 +261,7 @@ pub enum UdpInfoAction<N> {
 ///   = `AF_UNSPEC` (never learned). `:254` `sockaddrcmp` only fires
 ///   `update_node_udp` if the addresses differ.
 #[must_use]
-pub fn on_receive_udp_info<N>(
+pub(crate) fn on_receive_udp_info<N>(
     parsed: &UdpInfo,
     from: Option<(N, FromState)>,
     to: Option<N>,
@@ -368,7 +368,7 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
 #[allow(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param = one C global read
 #[allow(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
-pub fn should_send_mtu_info(
+pub(crate) fn should_send_mtu_info(
     // `:278` — same as UDP_INFO.
     to_is_myself: bool,
     // `:282`
@@ -440,7 +440,7 @@ pub fn should_send_mtu_info(
 ///   4. else: leave `mtu` alone (`:326`: "we're using TCP" — but
 ///      forward anyway, downstream might use UDP).
 #[must_use]
-pub fn adjust_mtu_for_send(
+pub(crate) fn adjust_mtu_for_send(
     mtu: i32,
     from_via_is_myself: bool,
     from_pmtu: Option<PmtuSnapshot>,
@@ -479,7 +479,7 @@ pub fn adjust_mtu_for_send(
 /// `N` is the caller's node-id type; forwarding variants carry
 /// `from`/`to` so the caller doesn't re-unwrap.
 #[derive(Debug, PartialEq, Eq)]
-pub enum MtuInfoAction<N> {
+pub(crate) enum MtuInfoAction<N> {
     /// `:365-370` `if(from->mtu != mtu && from->minmtu != from->
     /// maxmtu) from->mtu = mtu`. Set the *provisional* MTU (we
     /// haven't converged ourselves; trust the relay's number until
@@ -508,7 +508,7 @@ pub enum MtuInfoAction<N> {
 /// That's the only `Malformed` (connection-fatal) outcome; everything
 /// else is drop-and-continue.
 #[must_use]
-pub fn on_receive_mtu_info<N>(
+pub(crate) fn on_receive_mtu_info<N>(
     parsed: &MtuInfo,
     from: Option<(N, FromMtuState)>,
     to: Option<N>,

@@ -24,7 +24,7 @@ use super::net;
 /// Not `Default` — `gro_enabled` is platform-derived at setup, and
 /// the scratch capacities are MTU-derived. `setup.rs` builds this
 /// the same way it built the inline fields before.
-pub struct DataPlane {
+pub(crate) struct DataPlane {
     /// Data-plane half. Separate from `nodes`/`NodeState` because
     /// the lifecycles differ — `TunnelState` exists for ANY
     /// reachable node (we send UDP to nodes we have no TCP

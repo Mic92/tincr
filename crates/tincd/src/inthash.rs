@@ -63,7 +63,7 @@ const fn mix64(mut x: u64) -> u64 {
 /// `hash_one`. No per-map seed (no DoS resistance — see module doc
 /// for why that's fine here).
 #[derive(Default, Clone)]
-pub struct IntHasher(u64);
+pub(crate) struct IntHasher(u64);
 
 impl Hasher for IntHasher {
     #[inline]
@@ -112,7 +112,7 @@ impl Hasher for IntHasher {
 /// `HashMap` with `IntHasher`. Drop-in for `std::collections::
 /// HashMap<K, V>` where `K: Hash` is a small integer or short
 /// fixed-size byte array.
-pub type IntHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
+pub(crate) type IntHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
 
 #[cfg(test)]
 mod tests {

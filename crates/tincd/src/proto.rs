@@ -59,10 +59,8 @@ impl ConnOptions {
 // .edge_options`) are `ConnOptions`; calls into the `u32` boundary go
 // through `.bits()` / `from_bits_retain`. A follow-up cleans the gates
 // after the udp-info-carry agent lands.
-pub const OPTION_INDIRECT: u32 = ConnOptions::INDIRECT.bits();
-pub const OPTION_TCPONLY: u32 = ConnOptions::TCPONLY.bits();
-pub const OPTION_PMTU_DISCOVERY: u32 = ConnOptions::PMTU_DISCOVERY.bits();
-pub const OPTION_CLAMP_MSS: u32 = ConnOptions::CLAMP_MSS.bits();
+pub(crate) const OPTION_TCPONLY: u32 = ConnOptions::TCPONLY.bits();
+pub(crate) const OPTION_CLAMP_MSS: u32 = ConnOptions::CLAMP_MSS.bits();
 
 /// `myself->options` with all-defaults (no `IndirectData`/`TCPOnly`/etc
 /// in tinc.conf). All-defaults falls through every `get_config_bool`:
@@ -214,7 +212,7 @@ const CTL_VERSION: u8 = 0;
 /// Result of dispatching one line. C handlers return `bool` (`false` =
 /// drop); we disambiguate the `true` flavors that flip daemon state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchResult {
+pub(crate) enum DispatchResult {
     Ok,
     /// `event_exit()`. Loop finishes this turn then exits.
     Stop,
@@ -263,7 +261,7 @@ pub enum DispatchResult {
 
 /// Why dispatch returned `Drop`. For logging; caller action is the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchError {
+pub(crate) enum DispatchError {
     /// `atoi()` failed or out of range.
     UnknownRequest,
     /// `c->allow_request != ALL && != reqno`. The gate keeping peers
@@ -279,10 +277,6 @@ pub enum DispatchError {
     BadEdge(String),
     /// `req/ans_key_h`: parse failed.
     BadKey(String),
-    /// `control_h`: unknown subtype. NOT a `Drop` (`control_h`
-    /// returns `true`). Test-only variant.
-    #[cfg(test)]
-    UnknownControl,
 }
 
 /// `receive_request` step 1-3: parse reqno,
@@ -291,7 +285,7 @@ pub enum DispatchError {
 ///
 /// # Errors
 /// `UnknownRequest` for bad/out-of-range reqno; `Unauthorized` if gated.
-pub fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchError> {
+pub(crate) fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, DispatchError> {
     // `atoi(request)` then `if(reqno || *request == '0')`. STRICTER:
     // `atoi("18foo")` → 18 in C; we reject. C never sends that
     // (`send_request` always `"%d "`).
@@ -346,7 +340,7 @@ fn check_id(name: &str) -> bool {
 /// What `handle_id` did. Peer/Invitation branches hand back the SPTPS
 /// init outputs (`Sptps::start` emits KEX synchronously).
 #[derive(Debug)]
-pub enum IdOk {
+pub(crate) enum IdOk {
     /// `^cookie` matched. id reply + ACK queued.
     Control { needs_write: bool },
     /// Peer ID accepted, SPTPS installed. Daemon must: queue `init` to
@@ -369,7 +363,7 @@ pub enum IdOk {
 /// Daemon-side context for `handle_id`. Borrowed from `Daemon` to escape
 /// the slotmap borrow. `mykey` is `&` not cloned: blob-roundtrip clone
 /// happens inside the peer branch only.
-pub struct IdCtx<'a> {
+pub(crate) struct IdCtx<'a> {
     pub cookie: &'a str,       // `controlcookie`, 64 hex chars
     pub my_name: &'a str,      // `myself->name`
     pub mykey: &'a SigningKey, // `myself->connection->ecdsa`
@@ -397,7 +391,7 @@ const INVITE_LABEL: &[u8] = b"tinc invitation";
 /// # Errors
 /// `BadId`: malformed, cookie mismatch, bad name, peer==self, version
 /// mismatch, no pubkey, rollback.
-pub fn handle_id(
+pub(crate) fn handle_id(
     conn: &mut Connection,
     line: &[u8],
     ctx: &IdCtx<'_>,
@@ -754,7 +748,7 @@ fn load_peer_host_config(
 ///
 /// `global_weight`: tinc.conf `Weight` —
 /// fallback when per-host `Weight` absent. `None` = RTT wins.
-pub fn send_ack(
+pub(crate) fn send_ack(
     conn: &mut Connection,
     my_udp_port: u16,
     myself_options: ConnOptions,
@@ -817,7 +811,8 @@ pub fn send_ack(
 /// What `ack_h` parsed. Mutation half (`node_add`/`edge_add`/`graph()`)
 /// lives in the daemon (it owns the slotmap; C has globals).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AckParsed {
+#[allow(clippy::struct_field_names)] // `his_*` mirrors C `ack_h` locals
+pub(crate) struct AckParsed {
     pub his_udp_port: u16,        // `%s` in C (string); everyone sends decimal
     pub his_weight: i32,          // averaged with ours for edge weight
     pub his_options: ConnOptions, // PROT_MINOR in top byte
@@ -828,7 +823,7 @@ pub struct AckParsed {
 ///
 /// # Errors
 /// `BadAck` if sscanf would return `< 3`.
-pub fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
+pub(crate) fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
     // STRICTER: `%s` reads any non-whitespace; we want u16. Never
     // sends non-numeric.
     let mut toks = line
@@ -895,7 +890,7 @@ pub(crate) fn parse_key_msg<'a, T, E>(
 ///
 /// # Errors
 /// `BadSubnet`: not UTF-8 or `SubnetMsg::parse` failed.
-pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
+pub(crate) fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
     parse_body(body, DispatchError::BadSubnet, |s| {
         tinc_proto::msg::SubnetMsg::parse(s).map(|m| (m.owner, m.subnet))
     })
@@ -905,7 +900,7 @@ pub fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
 ///
 /// # Errors
 /// See [`parse_add_subnet`].
-pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
+pub(crate) fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), DispatchError> {
     parse_add_subnet(body)
 }
 
@@ -913,7 +908,7 @@ pub fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subnet), Dis
 ///
 /// # Errors
 /// `BadEdge`: not UTF-8 or `AddEdge::parse` failed.
-pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
+pub(crate) fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchError> {
     parse_body(
         body,
         DispatchError::BadEdge,
@@ -925,7 +920,7 @@ pub fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, DispatchE
 ///
 /// # Errors
 /// `BadEdge`: not UTF-8 or `DelEdge::parse` failed.
-pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
+pub(crate) fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchError> {
     parse_body(
         body,
         DispatchError::BadEdge,
@@ -936,7 +931,7 @@ pub fn parse_del_edge(body: &[u8]) -> Result<tinc_proto::msg::DelEdge, DispatchE
 /// Strip trailing `\n` from SPTPS record body.
 /// C check is conditional; in practice `send_request` always appends.
 #[must_use]
-pub fn record_body(bytes: &[u8]) -> &[u8] {
+pub(crate) fn record_body(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
 
@@ -955,7 +950,7 @@ fn nth_token(line: &[u8], n: usize) -> Option<&str> {
 ///
 /// `single_match_else`: this is the `switch`; it grows arms.
 #[allow(clippy::single_match_else)] // this is the C switch; arms accrete as ctl subcommands land
-pub fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
+pub(crate) fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
     // `sscanf("%*d %d", &type)`.
     let raw = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());
 

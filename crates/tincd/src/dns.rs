@@ -87,7 +87,7 @@ use tinc_proto::Subnet;
 /// Tailscale gets away with `100.100.100.100` because they control
 /// the CGNAT allocation.
 #[derive(Debug, Clone)]
-pub struct DnsConfig {
+pub(crate) struct DnsConfig {
     /// The magic IP. Must be added to the TUN in `tinc-up` (`ip
     /// addr add ... dev $INTERFACE`).
     pub dns_addr4: Option<Ipv4Addr>,
@@ -144,7 +144,7 @@ const ETH_P_IPV6: u16 = 0x86DD;
 /// options (`ihl != 5`) are rejected — keeps the offset math fixed,
 /// and the kernel's resolver doesn't set them.
 #[must_use]
-pub fn match_v4<'a>(data: &'a [u8], dns_addr: &Ipv4Addr) -> Option<(Ipv4Addr, u16, &'a [u8])> {
+pub(crate) fn match_v4(data: &[u8], dns_addr: Ipv4Addr) -> Option<(Ipv4Addr, u16, &[u8])> {
     // eth + ip + udp + DNS header (12 bytes) is the floor.
     // Shorter → not a DNS query, fall through to route().
     let off = ETHER_SIZE;
@@ -165,7 +165,7 @@ pub fn match_v4<'a>(data: &'a [u8], dns_addr: &Ipv4Addr) -> Option<(Ipv4Addr, u1
         data[off + 18],
         data[off + 19],
     );
-    if &dst != dns_addr {
+    if dst != dns_addr {
         return None;
     }
     // UDP dport at [eth+ip+2..+4]
@@ -192,7 +192,10 @@ pub fn match_v4<'a>(data: &'a [u8], dns_addr: &Ipv4Addr) -> Option<(Ipv4Addr, u1
 /// them, and chasing the chain is a parser. Same call as the
 /// `ihl == 5` gate above.
 #[must_use]
-pub fn match_v6<'a>(data: &'a [u8], dns_addr: &Ipv6Addr) -> Option<(Ipv6Addr, u16, &'a [u8])> {
+pub(crate) fn match_v6<'a>(
+    data: &'a [u8],
+    dns_addr: &Ipv6Addr,
+) -> Option<(Ipv6Addr, u16, &'a [u8])> {
     let off = ETHER_SIZE;
     if data.len() < off + IP6_SIZE + UDP_SIZE + DNS_HDR_LEN {
         return None;
@@ -413,7 +416,12 @@ fn encode_name(name: &str) -> Vec<u8> {
 /// alternative (filter myself out) breaks `ssh $(hostname)` and is
 /// surprising.
 #[must_use]
-pub fn answer(dns: &[u8], cfg: &DnsConfig, subnets: &SubnetTree, myname: &str) -> Option<Vec<u8>> {
+pub(crate) fn answer(
+    dns: &[u8],
+    cfg: &DnsConfig,
+    subnets: &SubnetTree,
+    myname: &str,
+) -> Option<Vec<u8>> {
     let parsed = parse_query(dns)?;
 
     let q = match parsed {
@@ -554,7 +562,7 @@ fn answer_ptr(q: &ParsedQuery<'_>, cfg: &DnsConfig, subnets: &SubnetTree) -> Vec
         // hit to prefix==32. The reachability gate is `|_| true`
         // because PTR is "who owns this", not "are they up"
         // (matches the ARP handler's gate at `daemon/net.rs:2492`).
-        subnets.lookup_ipv4(&ip, |_| true).and_then(|(s, o)| {
+        subnets.lookup_ipv4(ip, |_| true).and_then(|(s, o)| {
             if let Subnet::V4 { prefix: 32, .. } = s {
                 o
             } else {
@@ -703,11 +711,11 @@ fn build_udp(dns_reply: &[u8], dst_port: u16, pseudo_ck: u16) -> [u8; UDP_SIZE] 
 /// compute it anyway — three more `inet_checksum` calls is cheap and
 /// it's mandatory in IPv6, so the code is shared.
 #[must_use]
-pub fn wrap_v4(
+pub(crate) fn wrap_v4(
     original: &[u8],
     dns_reply: &[u8],
-    src_ip: &Ipv4Addr,
-    dst_ip: &Ipv4Addr,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
     dst_port: u16,
 ) -> Vec<u8> {
     let total = ETHER_SIZE + IP4_SIZE + UDP_SIZE + dns_reply.len();
@@ -748,7 +756,7 @@ pub fn wrap_v4(
 /// IPv4, the default behavior when UDP packets are originated by an
 /// IPv6 node is that the UDP checksum is NOT optional").
 #[must_use]
-pub fn wrap_v6(
+pub(crate) fn wrap_v6(
     original: &[u8],
     dns_reply: &[u8],
     src_ip: &Ipv6Addr,
@@ -1106,7 +1114,7 @@ mod tests {
         let dns_ip = Ipv4Addr::new(10, 255, 255, 53);
         let payload = mk_query("x.tinc.internal", TYPE_A);
         let pkt = mk_udp4(dns_ip, 53, &payload);
-        let (src, sport, dns) = match_v4(&pkt, &dns_ip).unwrap();
+        let (src, sport, dns) = match_v4(&pkt, dns_ip).unwrap();
         assert_eq!(src, Ipv4Addr::new(10, 0, 0, 1));
         assert_eq!(sport, 54321);
         assert_eq!(dns, &payload[..]);
@@ -1116,14 +1124,14 @@ mod tests {
     fn match_v4_wrong_dst() {
         let dns_ip = Ipv4Addr::new(10, 255, 255, 53);
         let pkt = mk_udp4(Ipv4Addr::new(10, 0, 0, 99), 53, &mk_query("x", TYPE_A));
-        assert!(match_v4(&pkt, &dns_ip).is_none());
+        assert!(match_v4(&pkt, dns_ip).is_none());
     }
 
     #[test]
     fn match_v4_wrong_port() {
         let dns_ip = Ipv4Addr::new(10, 255, 255, 53);
         let pkt = mk_udp4(dns_ip, 80, &mk_query("x", TYPE_A));
-        assert!(match_v4(&pkt, &dns_ip).is_none());
+        assert!(match_v4(&pkt, dns_ip).is_none());
     }
 
     /// IP options (`ihl > 5`): rejected. Keeps offset math fixed;
@@ -1133,7 +1141,7 @@ mod tests {
         let dns_ip = Ipv4Addr::new(10, 255, 255, 53);
         let mut pkt = mk_udp4(dns_ip, 53, &mk_query("x.tinc.internal", TYPE_A));
         pkt[ETHER_SIZE] = 0x46; // ihl=6
-        assert!(match_v4(&pkt, &dns_ip).is_none());
+        assert!(match_v4(&pkt, dns_ip).is_none());
     }
 
     fn mk_udp6(dst: Ipv6Addr, dport: u16, payload: &[u8]) -> Vec<u8> {
@@ -1175,8 +1183,8 @@ mod tests {
         let frame = wrap_v4(
             &[0u8; 14],
             dns_reply,
-            &Ipv4Addr::new(10, 255, 255, 53),
-            &Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 255, 255, 53),
+            Ipv4Addr::new(10, 0, 0, 1),
             54321,
         );
         assert_eq!(frame.len(), 14 + 20 + 8 + 12);
