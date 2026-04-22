@@ -74,7 +74,7 @@ pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 // b64 length for n bytes (no padding) is `(n*4).div_ceil(3)`. 18*4/3 = 24
 // exactly, no ceil needed. If someone bumps COOKIE_LEN this fires.
 const _: () = assert!(COOKIE_LEN * 4 / 3 == SLUG_PART_LEN);
-const _: () = assert!(COOKIE_LEN * 4 % 3 == 0); // exactness, not just division
+const _: () = assert!((COOKIE_LEN * 4).is_multiple_of(3)); // exactness, not just division
 
 /// Encodes the 32-byte public key with the standard `+/` alphabet — *not*
 /// url-safe. This string is what the daemon transmits in its meta-greeting

@@ -174,11 +174,11 @@ impl VirtioNetHdr {
 #[inline]
 fn checksum_nofold(data: &[u8], initial: u64) -> u64 {
     let mut sum = initial;
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
-        sum += u64::from(u16::from_be_bytes([pair[0], pair[1]]));
+    let (chunks, rem) = data.as_chunks::<2>();
+    for pair in chunks {
+        sum += u64::from(u16::from_be_bytes(*pair));
     }
-    if let [tail] = chunks.remainder() {
+    if let [tail] = rem {
         // RFC 1071 §4.1: tail byte is the HIGH byte of a zero-padded
         // 16-bit word. wg-go: `binary.NativeEndian.Uint16([b[0], 0])`
         // then byteswap → `b[0] << 8` in BE space.

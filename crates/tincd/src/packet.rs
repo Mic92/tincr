@@ -63,14 +63,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     let mut checksum: u32 = u32::from(prevsum ^ 0xFFFF);
 
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
+    let (chunks, rem) = data.as_chunks::<2>();
+    for pair in chunks {
         // memcpy(&word, data, 2) — NATIVE-endian, not BE.
-        let word = u16::from_ne_bytes([pair[0], pair[1]]);
-        checksum += u32::from(word);
+        checksum += u32::from(u16::from_ne_bytes(*pair));
     }
     // Tail byte goes in the LOW half. RFC 1071 §4.1.
-    if let [tail] = chunks.remainder() {
+    if let [tail] = rem {
         checksum += u32::from(*tail);
     }
 

@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "GPL-2.0-or-later"
-rust-version = "1.85"
+rust-version = "1.88"
 
 # Single source of truth for lint policy. Every crate sets
 # `[lints] workspace = true`. CI runs `clippy --all-targets -- -D warnings`,

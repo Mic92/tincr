@@ -92,16 +92,12 @@ impl MacLeases {
     /// Expiry boundary: STRICT less. A lease expiring exactly at
     /// `now` is still alive for one more tick.
     pub(crate) fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
-        let mut expired = Vec::new();
         // Strict less. `expires == now` → NOT expired yet.
-        self.leases.retain(|mac, &mut expires| {
-            if expires < now {
-                expired.push(*mac);
-                false
-            } else {
-                true
-            }
-        });
+        let expired: Vec<Mac> = self
+            .leases
+            .extract_if(|_, &mut expires| expires < now)
+            .map(|(mac, _)| mac)
+            .collect();
         let any_left = !self.leases.is_empty();
         (expired, any_left)
     }
