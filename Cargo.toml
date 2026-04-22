@@ -5,7 +5,6 @@ members = [
     "crates/tinc-ffi",
     "crates/tinc-sptps",
     "crates/tinc-proto",
-    "crates/tinc-graph",
     "crates/tinc-conf",
     "crates/tinc-device",
     "crates/tinc-event",

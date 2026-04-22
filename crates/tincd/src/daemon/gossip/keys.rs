@@ -7,9 +7,9 @@ use crate::local_addr;
 use crate::proto::DispatchError;
 use crate::tunnel::{MTU, make_udp_label};
 
+use crate::graph::NodeId;
 use rand_core::OsRng;
 use tinc_crypto::sign::SigningKey;
-use tinc_graph::NodeId;
 use tinc_proto::Request;
 use tinc_proto::msg::{AnsKey, KeyChanged, ReqKey};
 use tinc_sptps::{Framing, Role, Sptps};

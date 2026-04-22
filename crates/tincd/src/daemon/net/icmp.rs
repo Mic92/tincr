@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use crate::route::{self, TtlResult};
 use crate::{icmp, neighbor};
 
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 use nix::sys::socket::{AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket};
 

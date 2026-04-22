@@ -146,8 +146,8 @@ pub(crate) struct TxBatch {
     sock: u8,
     /// The relay node whose `pmtu` shrinks on `EMSGSIZE`. Stored
     /// per-run so `flush` can call `on_emsgsize` without re-
-    /// resolving the route. `tinc_graph::NodeId` is `Copy`.
-    relay: tinc_graph::NodeId,
+    /// resolving the route. `crate::graph::NodeId` is `Copy`.
+    relay: crate::graph::NodeId,
     /// Plaintext body length of the LARGEST frame in the run.
     /// `on_emsgsize` shrinks `maxmtu` to this (the kernel rejected
     /// at the OUTER size, but PMTU is tracked at the inner-body
@@ -168,7 +168,7 @@ impl Default for TxBatch {
             count: 0,
             dst: None,
             sock: 0,
-            relay: tinc_graph::NodeId(0),
+            relay: crate::graph::NodeId(0),
             origlen: 0,
         }
     }
@@ -187,7 +187,7 @@ impl TxBatch {
             count: 0,
             dst: None,
             sock: 0,
-            relay: tinc_graph::NodeId(0),
+            relay: crate::graph::NodeId(0),
             origlen: 0,
         }
     }
@@ -243,7 +243,7 @@ impl TxBatch {
         &mut self,
         dst: &SockAddr,
         sock: u8,
-        relay: tinc_graph::NodeId,
+        relay: crate::graph::NodeId,
         origlen: u16,
         frame: &[u8],
     ) {
@@ -271,7 +271,7 @@ impl TxBatch {
     /// `batch`; the daemon's error handler needs the rest for
     /// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
     #[must_use]
-    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, tinc_graph::NodeId, u16)> {
+    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, crate::graph::NodeId, u16)> {
         if self.count == 0 {
             return None;
         }
@@ -471,7 +471,7 @@ mod tests {
     /// boundary and the wire is garbage.
     #[test]
     fn txbatch_coalesce_gates() {
-        use tinc_graph::NodeId;
+        use crate::graph::NodeId;
         let dst1 = SockAddr::from("127.0.0.1:1111".parse::<SocketAddr>().unwrap());
         let dst2 = SockAddr::from("127.0.0.1:2222".parse::<SocketAddr>().unwrap());
         let mut b = TxBatch::new(4096);
@@ -512,7 +512,7 @@ mod tests {
     /// is the end-to-end "batch construction → wire" check.
     #[test]
     fn txbatch_dense_packing_roundtrip() {
-        use tinc_graph::NodeId;
+        use crate::graph::NodeId;
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
         let dst = SockAddr::from(rx.local_addr().unwrap());
         let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
@@ -559,7 +559,7 @@ mod tests {
     /// test for the death-spiral the throughput gate caught.
     #[test]
     fn txbatch_caps_at_udp_datagram_limit() {
-        use tinc_graph::NodeId;
+        use crate::graph::NodeId;
         let dst = SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
         let mut b = TxBatch::new(70_000);
         let frame = [0u8; 1519]; // body+33 for body=1486 (MSS-ish)

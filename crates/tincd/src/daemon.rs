@@ -15,7 +15,7 @@ use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
-use tinc_graph::{EdgeId, Graph, NodeId, Route};
+use crate::graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::AddrStr;
 
 use crate::conn::Connection;

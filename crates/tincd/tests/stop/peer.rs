@@ -334,7 +334,7 @@ fn peer_ack_exchange() {
     // Chunk 5: `on_ack` → `graph.add_edge` → `run_graph` → `BecameReachable`.
     // `"Node %s became reachable"`. Our log says `"Node testpeer
     // became reachable"`. THIS is the proof that
-    // graph_glue::run_graph fired and the diff produced a transition.
+    // graph::run_graph fired and the diff produced a transition.
     assert!(
         stderr.contains("Node testpeer became reachable"),
         "on_ack graph bridge didn't fire BecameReachable; stderr:\n{stderr}"

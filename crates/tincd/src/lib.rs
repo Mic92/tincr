@@ -27,7 +27,7 @@ pub mod discovery;
 mod dns;
 mod egress;
 mod fragment;
-mod graph_glue;
+pub mod graph;
 mod icmp;
 mod ids;
 mod inthash;

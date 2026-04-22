@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use socket2::SockAddr;
 use tinc_device::{Device, GroBucket, GroVerdict};
-use tinc_graph::{Graph, NodeId};
+use crate::graph::{Graph, NodeId};
 
 use crate::inthash::IntHashMap;
 use crate::local_addr;

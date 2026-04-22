@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 
 use super::{TunnelHandles, TxSnapshot};
 use crate::route::{RouteResult, route};
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 /// Per-super seal-send target. Everything is a COPY — no borrows into
 /// snapshot state. ~120 bytes, copied once per super (~33 chunks).
@@ -173,7 +173,7 @@ mod tests {
     use crate::subnet_tree::SubnetTree;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
-    use tinc_graph::Route;
+    use crate::graph::Route;
     use tinc_sptps::ReplayWindow;
 
     /// 100-byte eth+v4 frame: eth(14) + ip(20) + 66 payload.
@@ -214,7 +214,7 @@ mod tests {
         // NodeView: route()'s resolve closure does name→nid +
         // reachability gate. add_node defaults reachable=true.
         let ns = {
-            let mut g = tinc_graph::Graph::new();
+            let mut g = crate::graph::Graph::new();
             let _a = g.add_node("alice");
             let _b = g.add_node("bob");
             let mut ni = std::collections::HashMap::new();

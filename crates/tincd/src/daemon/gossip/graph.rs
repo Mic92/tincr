@@ -3,7 +3,7 @@
 
 use crate::daemon::Daemon;
 
-use crate::graph_glue::{Transition, run_graph};
+use crate::graph::{Transition, run_graph};
 use crate::local_addr;
 
 impl Daemon {

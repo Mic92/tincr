@@ -17,8 +17,8 @@ use super::{ConnId, Daemon};
 
 use std::fmt;
 
+use crate::graph::NodeId;
 use rand_core::{OsRng, RngCore};
-use tinc_graph::NodeId;
 
 mod edges;
 mod graph;

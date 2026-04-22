@@ -18,7 +18,7 @@ use crate::{autoconnect, local_addr, pmtu, udp_info};
 
 use rand_core::{OsRng, RngCore};
 use tinc_event::Io;
-use tinc_graph::{NodeId, Route};
+use crate::graph::{NodeId, Route};
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 

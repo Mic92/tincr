@@ -39,7 +39,7 @@ pub(crate) use snapshot::NodeView;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use tinc_graph::{NodeId, Route};
+use crate::graph::{NodeId, Route};
 use tinc_sptps::ReplayWindow;
 
 use crate::inthash::IntHashMap;

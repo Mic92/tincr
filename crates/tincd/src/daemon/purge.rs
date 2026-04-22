@@ -41,7 +41,7 @@ use super::Daemon;
 
 use std::collections::HashSet;
 
-use tinc_graph::{EdgeId, NodeId};
+use crate::graph::{EdgeId, NodeId};
 use tinc_proto::msg::{DelEdge, SubnetMsg};
 use tinc_proto::{Request, Subnet};
 
