@@ -1390,7 +1390,6 @@ dependencies = [
  "ed25519-dalek",
  "env_logger",
  "flate2",
- "flume",
  "if-addrs",
  "landlock",
  "libc",

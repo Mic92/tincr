@@ -72,7 +72,7 @@
 //! decides whether to enqueue a republish. **No mainline call happens on
 //! the epoll thread** — every `Dht` round-trip (`info`, `to_bootstrap`,
 //! `put_mutable`, `get_mutable`) is owned by the `tinc-dht` thread; the
-//! epoll thread only does non-blocking flume `send`/`try_iter`. tincd's
+//! epoll thread only does non-blocking mpsc `send`/`try_iter`. tincd's
 //! epoll loop never sees the DHT socket and never parks on the mainline
 //! actor's 50 ms recv tick.
 //!
@@ -224,7 +224,7 @@ pub struct Discovery {
     worker: DhtWorker,
     /// Last `WorkerRes::Snapshot` from the worker. `tick()` reads these
     /// instead of calling `dht.info()`/`dht.to_bootstrap()` (each of
-    /// which is a flume round-trip that floors at ~50 ms while the
+    /// which is a channel round-trip that floors at ~50 ms while the
     /// mainline actor sits in `recv_from`).
     cached_vote: Option<Ipv4Addr>,
     cached_firewalled: bool,

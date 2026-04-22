@@ -7,7 +7,7 @@
 //! stall class as the DHT-publish bug fixed in `682eed0a`.
 //!
 //! [`DnsWorker`] is the same shape as `discovery::DhtWorker`: a named
-//! `std::thread` with a flume request channel in and a result channel
+//! `std::thread` with an mpsc request channel in and a result channel
 //! out. The epoll thread only does non-blocking `send` / `try_iter`.
 //! A *separate* thread (not folded into `tinc-dht`): a BEP 44
 //! `put_mutable` is seconds-long; a DNS lookup queued behind one would
@@ -59,8 +59,8 @@ pub(crate) struct DnsRes {
 /// (we don't `.join()` on `Drop`; a hung `getaddrinfo` would wedge
 /// shutdown).
 pub(crate) struct DnsWorker {
-    req_tx: flume::Sender<DnsReq>,
-    res_rx: flume::Receiver<DnsRes>,
+    req_tx: std::sync::mpsc::Sender<DnsReq>,
+    res_rx: std::sync::mpsc::Receiver<DnsRes>,
     /// Tags with a request queued or running. Dedup: each retry round
     /// re-enters via `setup_outgoing_connection`, and a slow resolver
     /// (the very case this thread exists for) would otherwise let
@@ -76,8 +76,8 @@ impl DnsWorker {
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub(crate) fn spawn() -> Self {
-        let (req_tx, req_rx) = flume::unbounded::<DnsReq>();
-        let (res_tx, res_rx) = flume::unbounded::<DnsRes>();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<DnsReq>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<DnsRes>();
         let join = std::thread::Builder::new()
             .name("tinc-dns".into())
             .spawn(move || {

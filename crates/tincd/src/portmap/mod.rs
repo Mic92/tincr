@@ -26,7 +26,7 @@
 //! ## Integration
 //!
 //! Same shape as `discovery.rs`: a `std::thread` does the blocking
-//! protocol work, a `flume` channel reports `PortmapEvent`s, the
+//! protocol work, an mpsc channel reports `PortmapEvent`s, the
 //! daemon's `on_periodic_tick` drains them. The thread sleeps in 1 s
 //! slices and checks `stop` between, so daemon shutdown joins
 //! within ~1 s rather than blocking on a 60 s refresh interval.
@@ -210,7 +210,7 @@ pub(crate) enum PortmapEvent {
 
 /// Lives on `Daemon`. `tick()` is the non-blocking drain.
 pub(crate) struct Portmapper {
-    rx: flume::Receiver<PortmapEvent>,
+    rx: std::sync::mpsc::Receiver<PortmapEvent>,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -233,7 +233,7 @@ impl Portmapper {
         refresh: Duration,
         discover_wait: Duration,
     ) -> Self {
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = std::sync::mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let join = std::thread::Builder::new()
@@ -423,7 +423,7 @@ fn worker(
     mode: UpnpMode,
     refresh: Duration,
     discover_wait: Duration,
-    tx: &flume::Sender<PortmapEvent>,
+    tx: &std::sync::mpsc::Sender<PortmapEvent>,
     stop: &AtomicBool,
 ) {
     if !(mode.wants_tcp() || mode.wants_udp()) {

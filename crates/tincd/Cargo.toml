@@ -95,9 +95,6 @@ base64 = "0.22"
 # in-band reflexive path (ADD_EDGE/ANS_KEY append) needs a relay with a
 # static Address=; this gives an estimate *before* first contact.
 mainline.workspace = true
-# Background DHT-resolve thread ↔ daemon. Same channel crate mainline
-# uses internally (already in tree as a transitive dep). Non-tokio.
-flume = { version = "0.11", default-features = false }
 # discovery.rs: getifaddrs() for v6 candidate enumeration. The DHT is
 # v4-only; v6 doesn't NAT so the kernel already knows the reachable address.
 if-addrs.workspace = true

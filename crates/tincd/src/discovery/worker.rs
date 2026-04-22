@@ -49,8 +49,8 @@ pub(super) enum WorkerRes {
 /// is a `flume::Sender` clone — same actor the daemon's shutdown-time
 /// `routing_nodes()` talks to.
 pub(super) struct DhtWorker {
-    pub(super) req_tx: flume::Sender<WorkerReq>,
-    pub(super) res_rx: flume::Receiver<WorkerRes>,
+    pub(super) req_tx: std::sync::mpsc::Sender<WorkerReq>,
+    pub(super) res_rx: std::sync::mpsc::Receiver<WorkerRes>,
     /// Names with a `Resolve` inflight or pending in `resolved_buf`.
     /// Dedup: the retry backoff is seconds, the query is sub-second; a
     /// second enqueue before drain is pure waste.
@@ -62,8 +62,8 @@ pub(super) struct DhtWorker {
 
 impl DhtWorker {
     pub(super) fn spawn(dht: Dht, secret: Option<[u8; 32]>, period_fn: fn() -> u64) -> Self {
-        let (req_tx, req_rx) = flume::unbounded::<WorkerReq>();
-        let (res_tx, res_rx) = flume::unbounded::<WorkerRes>();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<WorkerReq>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<WorkerRes>();
         let join = std::thread::Builder::new()
             .name("tinc-dht".into())
             .spawn(move || {
