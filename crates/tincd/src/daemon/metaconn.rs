@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use super::{ConnId, Daemon, IoWhat};
+use super::{ConnId, Daemon};
 
 use std::io;
 use std::net::SocketAddr;
@@ -51,23 +51,11 @@ impl Daemon {
         let fd: OwnedFd = stream.into();
         let conn = Connection::new_control(fd, self.timers.now());
 
-        let id = self.conns.insert(conn);
         // io_add IO_READ only; `send` adds WRITE later.
-        match self
-            .ev
-            .add(self.conns[id].as_fd(), Io::Read, IoWhat::Conn(id))
-        {
-            Ok(io_id) => {
-                self.conn_io.insert(id, io_id);
-                log::debug!(target: "tincd::conn",
-                            "Connection from {} (control)",
-                            self.conns[id].hostname);
-            }
-            Err(e) => {
-                self.conns.remove(id);
-                log::error!(target: "tincd::conn",
-                            "Failed to register connection: {e}");
-            }
+        if let Some(id) = self.register_conn(conn, Io::Read) {
+            log::debug!(target: "tincd::conn",
+                        "Connection from {} (control)",
+                        self.conns[id].hostname);
         }
     }
 
@@ -713,14 +701,9 @@ impl Daemon {
                             let oid = conn.outgoing;
                             let addr = conn.address;
                             if let Some(oid) = oid
-                                && let Some(out) = self.outgoings.get_mut(oid)
-                                && out.timeout != 0
+                                && self.outgoings.get(oid).is_some_and(|o| o.timeout != 0)
                             {
-                                out.timeout = 0;
-                                out.addr_cache.reset();
-                                if let Some(a) = addr {
-                                    out.addr_cache.add_recent(a);
-                                }
+                                self.confirm_outgoing_address(oid, addr);
                             }
                             Ok(self.on_pong_rtt(id, now))
                         }

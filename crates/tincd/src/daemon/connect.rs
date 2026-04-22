@@ -86,17 +86,9 @@ impl Daemon {
         let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
         let edge_options = conn.options;
 
-        // Reset backoff + add_recent_address. The conn got all the
-        // way to ACK — the address WORKED. Idempotent; pinned by
-        // tests/addrcache.rs.
-        if let Some(oid) = conn_outgoing
-            && let Some(o) = self.outgoings.get_mut(oid)
-        {
-            o.timeout = 0;
-            if let Some(a) = conn_addr {
-                o.addr_cache.add_recent(a);
-            }
-            o.addr_cache.reset();
+        // ACK reached — address worked. Pinned by tests/addrcache.rs.
+        if let Some(oid) = conn_outgoing {
+            self.confirm_outgoing_address(oid, conn_addr);
         }
 
         // Idempotent (peer may already be in graph from transitive
@@ -259,6 +251,22 @@ impl Daemon {
         self.run_graph_and_log();
 
         Ok(nw)
+    }
+
+    /// "This outgoing address worked": reset retry backoff, rewind
+    /// the addr-cache cursor, and pin `addr` to the front of the
+    /// cache. Called from `on_ack` (handshake completed) and the
+    /// `Pong` arm (first-liveness-after-backoff). Centralised so the
+    /// two sites can't drift; see conn-lifecycle P4.
+    pub(super) fn confirm_outgoing_address(&mut self, oid: OutgoingId, addr: Option<SocketAddr>) {
+        let Some(o) = self.outgoings.get_mut(oid) else {
+            return;
+        };
+        o.timeout = 0;
+        if let Some(a) = addr {
+            o.addr_cache.add_recent(a);
+        }
+        o.addr_cache.reset();
     }
 
     /// Meta-conn WRITE handler.
@@ -543,11 +551,12 @@ impl Daemon {
     }
 
     /// Insert `conn` into the slotmap and register its fd with the
-    /// event loop. Shared tail of both `do_outgoing_connection`
-    /// branches (proxy-exec and async-socket); on `ev.add` failure
-    /// the slot is rolled back so the caller can `continue` to the
-    /// next address without leaking a half-registered conn.
-    fn register_outgoing_conn(&mut self, conn: Connection, io_mode: Io) -> Option<super::ConnId> {
+    /// event loop. Shared by every conn-creation site (outgoing
+    /// proxy-exec, outgoing async-socket, TCP accept, control-socket
+    /// accept); on `ev.add` failure the slot is rolled back so the
+    /// caller sees `None` and can clean up / try the next address
+    /// without leaking a half-registered conn.
+    pub(super) fn register_conn(&mut self, conn: Connection, io_mode: Io) -> Option<super::ConnId> {
         let id = self.conns.insert(conn);
         match self
             .ev
@@ -606,7 +615,7 @@ impl Daemon {
                 let mut conn =
                     Connection::new_outgoing(fd, name.clone(), fmt_addr(&addr), addr, oid, now);
                 conn.connecting = false;
-                let Some(id) = self.register_outgoing_conn(conn, Io::Read) else {
+                let Some(id) = self.register_conn(conn, Io::Read) else {
                     continue;
                 };
                 // Proxy is transport; peer expects ID.
@@ -681,7 +690,7 @@ impl Daemon {
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    if self.register_outgoing_conn(conn, Io::ReadWrite).is_none() {
+                    if self.register_conn(conn, Io::ReadWrite).is_none() {
                         continue;
                     }
                     return;
