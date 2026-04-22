@@ -688,13 +688,9 @@ fn inv_roundtrip_with_invite() {
     use crate::cmd::invite;
 
     // ─── init
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let input = PathsInput {
-        confbase: Some(cb.clone()),
-        ..Default::default()
-    };
-    let paths = Paths::for_cli(&input);
+    let cd = crate::testutil::ConfDir::bare();
+    let paths = cd.paths().clone();
+    let cb = cd.confbase();
     crate::cmd::init::run(&paths, "alice").unwrap();
     // invite needs Address (we dropped the HTTP probe).
     fs::write(

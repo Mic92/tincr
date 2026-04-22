@@ -6,6 +6,7 @@ use crate::cmd::init;
 use crate::cmd::invite;
 use crate::keypair;
 use crate::names::PathsInput;
+use crate::testutil::ConfDir;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,6 +17,8 @@ use tinc_crypto::invite::{COOKIE_LEN, SLUG_LEN, SLUG_PART_LEN};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
+/// Used by tests that need two confbases sharing one tempdir
+/// (invite roundtrip). Simple cases use `ConfDir::bare()`.
 fn paths_at(dir: &Path) -> Paths {
     Paths::for_cli(&PathsInput {
         confbase: Some(dir.to_owned()),
@@ -136,8 +139,8 @@ fn greeting_line2() {
 /// is a `while`, not a `do while`.
 #[test]
 fn finalize_minimal_blob() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let blob = b"Name = bob\n";
     let r = finalize_join(blob, &p, false).unwrap();
@@ -167,8 +170,8 @@ fn finalize_minimal_blob() {
 /// `Device` is SERVER but NOT SAFE → dropped (without --force).
 #[test]
 fn finalize_var_safe_filter() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let blob = b"\
 Name = bob
@@ -197,8 +200,8 @@ ConnectTo = alice
 /// capture here — eprintln in lib code).
 #[test]
 fn finalize_force_accepts_unsafe() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     // Device is SERVER but not SAFE.
     let blob = b"Name = bob\nDevice = /dev/evil\n";
@@ -211,8 +214,8 @@ fn finalize_force_accepts_unsafe() {
 /// Unknown vars dropped silently (well, with eprintln, but no error).
 #[test]
 fn finalize_unknown_var_dropped() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let blob = b"Name = bob\nNonexistentVariable = foo\n";
     finalize_join(blob, &p, false).unwrap();
@@ -225,8 +228,8 @@ fn finalize_unknown_var_dropped() {
 /// not acted on (stub). The placeholder tinc-up is what gets written.
 #[test]
 fn finalize_ifconfig_recognized_stubbed() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let blob = b"\
 Name = bob
@@ -254,8 +257,8 @@ Route = 10.0.0.0/8
 /// dropped, multiple chunks.
 #[test]
 fn finalize_secondary_chunks() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let sep = invite::SEPARATOR;
     let blob = format!(
@@ -289,8 +292,8 @@ fn finalize_secondary_chunks() {
 /// Chunk-2 is verbatim except `*KeyFile` vars, which name local paths.
 #[test]
 fn finalize_secondary_chunk_drops_file_pointer_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let sep = invite::SEPARATOR;
     let blob = format!(
@@ -321,8 +324,8 @@ fn finalize_secondary_chunk_drops_file_pointer_keys() {
 /// `chunk 2 = alice` (legit) then `chunk 3 = bob` (clobber).
 #[test]
 fn finalize_self_clobber_detected() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     // chunk 1: Name=bob. chunk 2: Name=alice (legit). chunk 3:
     // Name=bob — the clobber attempt.
@@ -347,8 +350,8 @@ Ed25519PublicKey = EVIL
 /// First line not `Name = X` → bail.
 #[test]
 fn finalize_no_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let err = finalize_join(b"Mode = switch\n", &p, false).unwrap_err();
     let CmdError::BadInput(msg) = err else {
@@ -360,8 +363,8 @@ fn finalize_no_name() {
 /// Invalid name → bail. Same `check_id` as everywhere else.
 #[test]
 fn finalize_bad_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("vpn"));
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
 
     let err = finalize_join(b"Name = ../etc\n", &p, false).unwrap_err();
     let CmdError::BadInput(msg) = err else {
@@ -373,10 +376,8 @@ fn finalize_bad_name() {
 /// tinc.conf already exists → bail before writing anything.
 #[test]
 fn finalize_existing_tinc_conf() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("vpn");
-    let p = paths_at(&confbase);
-    fs::create_dir_all(&confbase).unwrap();
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
     fs::write(p.tinc_conf(), "Name = existing\n").unwrap();
 
     let err = finalize_join(b"Name = bob\n", &p, false).unwrap_err();

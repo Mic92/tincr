@@ -37,4 +37,6 @@ pub mod cmd;
 pub mod ctl;
 pub mod keypair;
 pub mod names;
+#[cfg(test)]
+pub mod testutil;
 pub mod tui;

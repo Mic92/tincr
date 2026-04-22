@@ -1,5 +1,6 @@
 use super::*;
 use crate::names::PathsInput;
+use crate::testutil::{self, ConfDir};
 
 // Stage 1: parse_var_expr — pure string munging, no fs
 
@@ -105,18 +106,8 @@ fn split_line_pem_passthrough() {
 // Stage 2: build_intent — needs Paths for the get_my_name call
 
 /// Minimal confbase: tinc.conf with `Name = alice`, hosts/alice.
-/// Same setup helper as exchange.rs tests.
-fn setup(name: &str) -> (tempfile::TempDir, Paths) {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    fs::create_dir_all(cb.join("hosts")).unwrap();
-    fs::write(cb.join("tinc.conf"), format!("Name = {name}\n")).unwrap();
-    fs::write(cb.join("hosts").join(name), "").unwrap();
-    let paths = Paths::for_cli(&PathsInput {
-        confbase: Some(cb),
-        ..Default::default()
-    });
-    (dir, paths)
+fn setup(name: &str) -> ConfDir {
+    ConfDir::with_name(name)
 }
 
 /// Routing + canonicalization table: which file does this var go to?
@@ -124,7 +115,8 @@ fn setup(name: &str) -> (tempfile::TempDir, Paths) {
 /// `get_my_name`; explicit node prefix wins.
 #[test]
 fn intent_routing() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, Option<&str>, &str)] = &[
@@ -150,7 +142,8 @@ fn intent_routing() {
 /// tinc.conf, not hosts/$me.
 #[test]
 fn intent_dual_tagged_goes_to_tinc_conf() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     // Precondition: Cipher really is S|H. If the table changes,
     // this test's premise breaks. (Port is HOST-only. First
     // version of this test wrongly assumed Port was dual.
@@ -173,7 +166,8 @@ fn intent_dual_tagged_goes_to_tinc_conf() {
 /// pass for the wrong reason.
 #[test]
 fn intent_port_is_host_only() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     let v = vars::lookup("Port").unwrap();
     assert!(!v.flags.contains(VarFlags::SERVER));
     assert!(v.flags.contains(VarFlags::HOST));
@@ -189,7 +183,8 @@ fn intent_port_is_host_only() {
 /// wiping a list).
 #[test]
 fn intent_action_coercion() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     #[rustfmt::skip]
     let cases: &[(Action, &str, &str, Action, bool)] = &[
         //          (in_action,  var,         value, out_action,  warn_on_remove)
@@ -216,7 +211,8 @@ fn intent_action_coercion() {
 /// are user-facing strings.
 #[test]
 fn intent_errors() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     #[allow(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(Action, Option<&str>, &str, &str, &str)] = &[
@@ -250,7 +246,8 @@ fn intent_errors() {
 /// Unknown var WITH force → warning, proceed.
 #[test]
 fn intent_unknown_var_force_proceeds() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     let (intent, warns) = build_intent(&paths, Action::Set, None, "NoSuchVar", "x", true).unwrap();
     assert_eq!(intent.variable, "NoSuchVar"); // user's casing survives
     assert_eq!(intent.node, None); // unknown → tinc.conf
@@ -264,7 +261,8 @@ fn intent_unknown_var_force_proceeds() {
 /// cleaning it up.
 #[test]
 fn intent_unknown_var_get_proceeds() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     let (intent, warns) = build_intent(&paths, Action::Get, None, "NoSuchVar", "", false).unwrap();
     assert_eq!(intent.action, Action::Get);
     assert!(matches!(&warns[0], Warning::Unknown(_)));
@@ -273,7 +271,8 @@ fn intent_unknown_var_get_proceeds() {
 /// Obsolete var → error without force. Find one in the table.
 #[test]
 fn intent_obsolete_var_fails() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     // PrivateKey is OBSOLETE (the *file* var; the `PrivateKeyFile`
     // pointer-to-file is current). Check the table to be sure
     // this test isn't a false positive.
@@ -291,7 +290,8 @@ fn intent_obsolete_var_fails() {
 /// Obsolete var on GET: fine. The check is set/add only.
 #[test]
 fn intent_obsolete_var_get_ok() {
-    let (_d, paths) = setup("alice");
+    let cd = setup("alice");
+    let paths = cd.paths().clone();
     let (intent, warns) = build_intent(&paths, Action::Get, None, "PrivateKey", "", false).unwrap();
     assert_eq!(intent.action, Action::Get);
     // No obsolete warning — the check doesn't fire for get.
@@ -350,9 +350,7 @@ fn intent(action: Action, var: &str, val: &str, warn: bool) -> Intent {
 
 #[test]
 fn set_replaces_in_place() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "Name = alice\nPort = 655\nDevice = /dev/tun\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "Name = alice\nPort = 655\nDevice = /dev/tun\n");
 
     run_edit(&f, &intent(Action::Set, "Port", "1234", false)).unwrap();
 
@@ -367,9 +365,7 @@ fn set_replaces_in_place() {
 /// SET when no match exists → append.
 #[test]
 fn set_appends_when_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "Name = alice\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "Name = alice\n");
 
     run_edit(&f, &intent(Action::Set, "Port", "655", false)).unwrap();
 
@@ -383,11 +379,9 @@ fn set_appends_when_absent() {
 /// what makes SET dangerous on MULTIPLE vars.
 #[test]
 fn set_collapses_duplicates() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
     // Weird config (Port shouldn't be dup, but a hand-edited
     // file might have it).
-    fs::write(&f, "Port = 1\nPort = 2\nPort = 3\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "Port = 1\nPort = 2\nPort = 3\n");
 
     run_edit(&f, &intent(Action::Set, "Port", "999", false)).unwrap();
 
@@ -399,9 +393,7 @@ fn set_collapses_duplicates() {
 /// whose value DIFFERS. Same value → no warning.
 #[test]
 fn set_warnonremove() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\nConnectTo = carol\nConnectTo = dave\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\nConnectTo = carol\nConnectTo = dave\n");
 
     // SET on a MULTIPLE var: stage-2 would set warnonremove.
     // We construct directly with warn=true to test the walk.
@@ -426,9 +418,7 @@ fn set_warnonremove() {
 /// `Port = 1234` out.
 #[test]
 fn set_canonicalizes_key_case() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "port = 655\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "port = 655\n");
 
     // The `variable` we pass is already canonical (stage 2 did
     // that). The walk writes it as-is.
@@ -439,9 +429,7 @@ fn set_canonicalizes_key_case() {
 
 #[test]
 fn add_appends() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\n");
 
     run_edit(&f, &intent(Action::Add, "ConnectTo", "carol", false)).unwrap();
 
@@ -454,9 +442,7 @@ fn add_appends() {
 /// ADD when exact value already present → no-op.
 #[test]
 fn add_dedup_noop() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\n");
 
     run_edit(&f, &intent(Action::Add, "ConnectTo", "bob", false)).unwrap();
 
@@ -471,9 +457,7 @@ fn add_dedup_noop() {
 /// (`check_id` doesn't enforce case).
 #[test]
 fn add_dedup_case_insensitive() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = alice\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = alice\n");
 
     run_edit(&f, &intent(Action::Add, "ConnectTo", "ALICE", false)).unwrap();
 
@@ -484,9 +468,7 @@ fn add_dedup_case_insensitive() {
 
 #[test]
 fn del_removes_all() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\nName = x\nConnectTo = carol\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\nName = x\nConnectTo = carol\n");
 
     run_edit(&f, &intent(Action::Del, "ConnectTo", "", false)).unwrap();
 
@@ -496,9 +478,7 @@ fn del_removes_all() {
 /// DEL with value filter: only matching lines removed.
 #[test]
 fn del_filtered() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\nConnectTo = carol\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\nConnectTo = carol\n");
 
     run_edit(&f, &intent(Action::Del, "ConnectTo", "bob", false)).unwrap();
 
@@ -508,9 +488,7 @@ fn del_filtered() {
 /// DEL that matches nothing → error.
 #[test]
 fn del_nothing_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "Name = alice\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "Name = alice\n");
 
     let e = run_edit(&f, &intent(Action::Del, "ConnectTo", "", false)).unwrap_err();
     assert!(matches!(e, CmdError::BadInput(m) if m == "No configuration variables deleted."));
@@ -523,9 +501,7 @@ fn del_nothing_fails() {
 /// `tinc del ConnectTo nonexistent`.
 #[test]
 fn del_filter_no_match_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = bob\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\n");
 
     let e = run_edit(&f, &intent(Action::Del, "ConnectTo", "carol", false)).unwrap_err();
     assert!(matches!(e, CmdError::BadInput(_)));
@@ -537,9 +513,7 @@ fn del_filter_no_match_fails() {
 /// `TmpGuard::drop`.
 #[test]
 fn tmpfile_cleaned_up_on_del_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "Name = alice\n").unwrap();
+    let (dir, f) = testutil::scratch_file("tinc.conf", "Name = alice\n");
 
     let _ = run_edit(&f, &intent(Action::Del, "Nonexistent", "", false));
 
@@ -551,9 +525,7 @@ fn tmpfile_cleaned_up_on_del_failure() {
 /// append. Otherwise you get `Name = alicePort = 655`.
 #[test]
 fn edit_adds_newline_before_append() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "Name = alice").unwrap(); // no trailing \n
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "Name = alice"); // no trailing \n
 
     run_edit(&f, &intent(Action::Set, "Port", "655", false)).unwrap();
 
@@ -569,15 +541,15 @@ fn edit_adds_newline_before_append() {
 /// match `Port`, so they copy verbatim.
 #[test]
 fn edit_preserves_pem() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("hosts_alice");
-    let pem = "\
+    let (_dir, f) = testutil::scratch_file(
+        "hosts_alice",
+        "\
 Port = 655
 -----BEGIN ED25519 PUBLIC KEY-----
 MCowBQYDK2VwAyEAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
 -----END ED25519 PUBLIC KEY-----
-";
-    fs::write(&f, pem).unwrap();
+",
+    );
 
     run_edit(&f, &intent(Action::Set, "Port", "1234", false)).unwrap();
 
@@ -595,9 +567,7 @@ MCowBQYDK2VwAyEAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=
 /// they're just lines whose key is `#` and don't match.
 #[test]
 fn edit_preserves_comments() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "# this is alice's config\nName = alice\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "# this is alice's config\nName = alice\n");
 
     run_edit(&f, &intent(Action::Set, "Port", "655", false)).unwrap();
 
@@ -618,28 +588,20 @@ fn edit_file_missing() {
 
 // run() — full pipeline
 
-/// `setup_full`: confbase with tinc.conf + hosts/alice + a
-/// resolved pidfile path (pointing nowhere real, so the
-/// Port-from-pidfile path falls back to config).
-fn setup_full(name: &str, conf_body: &str) -> (tempfile::TempDir, Paths) {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    fs::create_dir_all(cb.join("hosts")).unwrap();
-    fs::write(cb.join("tinc.conf"), format!("Name = {name}\n{conf_body}")).unwrap();
-    fs::write(cb.join("hosts").join(name), "").unwrap();
-
+/// `ConfDir::with_name` + conf body, with a resolved pidfile
+/// pointing at a nonexistent path so the Port-from-pidfile
+/// read fails silently and falls back to config scan.
+fn setup_full(name: &str, conf_body: &str) -> (ConfDir, Paths) {
+    let cd = ConfDir::with_name(name).append_conf(conf_body);
     let input = PathsInput {
-        confbase: Some(cb),
-        // Pidfile that doesn't exist — Port-from-pidfile read
-        // fails silently, falls back to config scan.
-        pidfile: Some(dir.path().join("no.pid")),
+        confbase: Some(cd.confbase().to_owned()),
+        pidfile: Some(cd.path().join("no.pid")),
         ..Default::default()
     };
     let mut paths = Paths::for_cli(&input);
-    // The `get Port` path calls `paths.pidfile()`, which panics
-    // if not resolved. Tests must resolve.
+    // `get Port` calls `paths.pidfile()`, which panics if unresolved.
     paths.resolve_runtime(&input);
-    (dir, paths)
+    (cd, paths)
 }
 
 #[test]
@@ -695,20 +657,15 @@ fn run_full_explicit_node() {
 /// `Port = 0` is the use case — daemon picks a free port.
 #[test]
 fn run_get_port_from_pidfile() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    fs::create_dir_all(cb.join("hosts")).unwrap();
     // Config says Port = 0.
-    fs::write(cb.join("tinc.conf"), "Name = alice\nPort = 0\n").unwrap();
-    fs::write(cb.join("hosts/alice"), "").unwrap();
-
+    let cd = ConfDir::with_name("alice").append_conf("Port = 0\n");
     // Pidfile says the actual port is 47123.
-    let pidfile = dir.path().join("tinc.pid");
+    let pidfile = cd.path().join("tinc.pid");
     let cookie = "a".repeat(64);
     fs::write(&pidfile, format!("1 {cookie} 127.0.0.1 port 47123\n")).unwrap();
 
     let input = PathsInput {
-        confbase: Some(cb),
+        confbase: Some(cd.confbase().to_owned()),
         pidfile: Some(pidfile),
         ..Default::default()
     };
@@ -748,20 +705,15 @@ fn run_get_port_fallback_to_config() {
 /// before any node resolution; the explicit node short-circuits.
 #[test]
 fn run_get_port_explicit_node_skips_pidfile() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    fs::create_dir_all(cb.join("hosts")).unwrap();
-    fs::write(cb.join("tinc.conf"), "Name = alice\n").unwrap();
-    // hosts/alice has Port = 1234. The pidfile would say 47123
-    // but we should never read it for an explicit-node get.
-    fs::write(cb.join("hosts/alice"), "Port = 1234\n").unwrap();
-
-    let pidfile = dir.path().join("tinc.pid");
+    // hosts/alice has Port = 1234. Pidfile would say 47123 but we
+    // must never read it for an explicit-node get.
+    let cd = ConfDir::with_name("alice").with_host("alice", "Port = 1234\n");
+    let pidfile = cd.path().join("tinc.pid");
     let cookie = "a".repeat(64);
     fs::write(&pidfile, format!("1 {cookie} 127.0.0.1 port 47123\n")).unwrap();
 
     let input = PathsInput {
-        confbase: Some(cb),
+        confbase: Some(cd.confbase().to_owned()),
         pidfile: Some(pidfile),
         ..Default::default()
     };
@@ -799,9 +751,7 @@ fn run_get_with_value_is_set() {
 /// same node).
 #[test]
 fn warnonremove_case_insensitive() {
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("tinc.conf");
-    fs::write(&f, "ConnectTo = alice\n").unwrap();
+    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = alice\n");
 
     let result = run_edit(&f, &intent(Action::Set, "ConnectTo", "ALICE", true)).unwrap();
 
@@ -816,20 +766,14 @@ fn warnonremove_case_insensitive() {
 /// This test pins that they're equivalent.)
 #[test]
 fn get_port_with_value_skips_pidfile() {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    fs::create_dir_all(cb.join("hosts")).unwrap();
-    fs::write(cb.join("tinc.conf"), "Name = alice\n").unwrap();
-    fs::write(cb.join("hosts/alice"), "").unwrap();
-
-    // Pidfile is BROKEN — if run() reads it, parse fails. If
-    // run() correctly skips (because value is non-empty), we
-    // never touch it.
-    let pidfile = dir.path().join("tinc.pid");
+    let cd = ConfDir::with_name("alice");
+    // Pidfile is BROKEN — if run() reads it, parse fails. If it
+    // correctly skips (value non-empty), we never touch it.
+    let pidfile = cd.path().join("tinc.pid");
     fs::write(&pidfile, "garbage\n").unwrap();
 
     let input = PathsInput {
-        confbase: Some(cb),
+        confbase: Some(cd.confbase().to_owned()),
         pidfile: Some(pidfile),
         ..Default::default()
     };

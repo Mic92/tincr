@@ -229,15 +229,12 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmp() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
+    use crate::testutil;
 
     /// Nonexistent file → `Ok(false)`, no tmpfile left behind.
     #[test]
     fn disable_nonexistent() {
-        let dir = tmp();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope");
         assert!(!disable_old_keys(&path).unwrap());
         assert!(!path.exists());
@@ -245,30 +242,20 @@ mod tests {
     }
 
     /// File with no matching lines → `Ok(false)`, file untouched.
-    /// (No mtime bump — we check by content not mtime, but the
-    /// guarantee is "tmpfile unlinked, original unrenamed".)
+    /// Guarantee: tmpfile unlinked, original unrenamed.
     #[test]
     fn disable_no_match() {
-        let dir = tmp();
-        let path = dir.path().join("f");
         let content = "Subnet = 10.0.0.0/24\nAddress = 1.2.3.4\n";
-        fs::write(&path, content).unwrap();
+        let (dir, path) = testutil::scratch_file("f", content);
         assert!(!disable_old_keys(&path).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
-        // Tmpfile gone.
         assert!(!dir.path().join("f.tmp").exists());
     }
 
     /// Single config line → `#` prepended, rest preserved.
     #[test]
     fn disable_config_line() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(
-            &path,
-            "Subnet = 10.0.0.0/24\nEd25519PublicKey = abc123\nAddress = 1.2.3.4\n",
-        )
-        .unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "Subnet = 10.0.0.0/24\nEd25519PublicKey = abc123\nAddress = 1.2.3.4\n");
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -279,14 +266,11 @@ mod tests {
     /// PEM block → every line `#`-prefixed, including BEGIN and END.
     #[test]
     fn disable_pem_block() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        // Real-ish PEM. The body is two lines.
-        fs::write(
-            &path,
+        // Real-ish PEM. Body is two lines.
+        let (_dir, path) = testutil::scratch_file(
+            "f",
             "-----BEGIN ED25519 PRIVATE KEY-----\nbody1\nbody2\n-----END ED25519 PRIVATE KEY-----\n",
-        )
-        .unwrap();
+        );
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -299,13 +283,7 @@ mod tests {
     /// genkey: comment, PEM, then a new PEM was appended.
     #[test]
     fn disable_pem_block_surrounded() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(
-            &path,
-            "# old key from 2024\n-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END ED25519 PRIVATE KEY-----\n# end\n",
-        )
-        .unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "# old key from 2024\n-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END ED25519 PRIVATE KEY-----\n# end\n");
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -317,9 +295,7 @@ mod tests {
     /// This is the prefix-16+delim-at-16 specificity — see module doc.
     #[test]
     fn disable_config_line_exact_len() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(&path, "Ed25519PublicKeyBackup = abc\n").unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "Ed25519PublicKeyBackup = abc\n");
         assert!(!disable_old_keys(&path).unwrap());
         // Unchanged.
         assert_eq!(
@@ -338,9 +314,7 @@ mod tests {
             ("Ed25519PublicKey\n", false),      // newline at 16: not in " \t="
             ("Ed25519PublicKeys = x\n", false), // 's' at 16
         ] {
-            let dir = tmp();
-            let path = dir.path().join("f");
-            fs::write(&path, delim).unwrap();
+            let (_dir, path) = testutil::scratch_file("f", delim);
             assert_eq!(disable_old_keys(&path).unwrap(), want, "input: {delim:?}");
         }
     }
@@ -348,9 +322,7 @@ mod tests {
     /// Case-insensitive on the key name.
     #[test]
     fn disable_config_line_case() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(&path, "ed25519publickey = abc\n").unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "ed25519publickey = abc\n");
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -362,13 +334,7 @@ mod tests {
     /// We dropped the RSA branch entirely.
     #[test]
     fn disable_ignores_rsa() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(
-            &path,
-            "-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\n",
-        )
-        .unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\n");
         assert!(!disable_old_keys(&path).unwrap());
     }
 
@@ -376,13 +342,7 @@ mod tests {
     /// matched. ` ED25519 ` is space-delimited.
     #[test]
     fn disable_space_delimited_type() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(
-            &path,
-            "-----BEGIN MYED25519FOO-----\nbody\n-----END MYED25519FOO-----\n",
-        )
-        .unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN MYED25519FOO-----\nbody\n-----END MYED25519FOO-----\n");
         assert!(!disable_old_keys(&path).unwrap());
     }
 
@@ -390,13 +350,7 @@ mod tests {
     /// an ED25519 block. Garbage-in-garbage-preserved.
     #[test]
     fn disable_end_type_unchecked() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(
-            &path,
-            "-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END WHATEVER-----\nafter\n",
-        )
-        .unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END WHATEVER-----\nafter\n");
         assert!(disable_old_keys(&path).unwrap());
         // `after` is NOT prefixed — block ended at the (mismatched) END.
         assert_eq!(
@@ -411,9 +365,7 @@ mod tests {
     #[test]
     fn disable_preserves_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tmp();
-        let path = dir.path().join("f");
-        fs::write(&path, "Ed25519PublicKey = x\n").unwrap();
+        let (_dir, path) = testutil::scratch_file("f", "Ed25519PublicKey = x\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
         assert!(disable_old_keys(&path).unwrap());
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -424,10 +376,8 @@ mod tests {
     /// `read_line` returns the partial line, then 0. Round-trip.
     #[test]
     fn disable_no_trailing_newline() {
-        let dir = tmp();
-        let path = dir.path().join("f");
-        // Note: no \n after `abc`.
-        fs::write(&path, "Ed25519PublicKey = abc").unwrap();
+        // No \n after `abc`.
+        let (_dir, path) = testutil::scratch_file("f", "Ed25519PublicKey = abc");
         assert!(disable_old_keys(&path).unwrap());
         // # prepended, no \n added.
         assert_eq!(
@@ -444,7 +394,7 @@ mod tests {
     #[test]
     fn rotation_roundtrip() {
         use tinc_conf::pem::read_pem;
-        let dir = tmp();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ed25519_key.priv");
 
         // Round 1: genkey on empty (init-equivalent).

@@ -1,46 +1,17 @@
 use super::*;
-use crate::names::PathsInput;
+use crate::testutil::ConfDir;
 use std::fs;
-
-/// Set up a confbase with `init`-equivalent contents: tinc.conf
-/// with `Name = NAME`, `ed25519_key.priv`, hosts/NAME with the
-/// pubkey config line. Same shape as `cmd::init::run` produces,
-/// but inline so we don't depend on init's correctness here.
-fn fake_init(dir: &tempfile::TempDir, name: &str) -> Paths {
-    let confbase = dir.path().join(name);
-    let paths = Paths::for_cli(&PathsInput {
-        confbase: Some(confbase.clone()),
-        ..Default::default()
-    });
-
-    fs::create_dir_all(confbase.join("hosts")).unwrap();
-    fs::write(confbase.join("tinc.conf"), format!("Name = {name}\n")).unwrap();
-
-    let sk = keypair::generate();
-    // Private key PEM.
-    let mut buf = Vec::new();
-    tinc_conf::pem::write_pem(&mut buf, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
-    fs::write(confbase.join("ed25519_key.priv"), buf).unwrap();
-    // Host file with pubkey config line.
-    fs::write(
-        confbase.join("hosts").join(name),
-        format!("Ed25519PublicKey = {}\n", b64::encode(sk.public_key())),
-    )
-    .unwrap();
-
-    paths
-}
 
 /// **The contract test.** Sign, then verify. Body round-trips
 /// byte-exact. This is what `tinc sign | tinc verify .` does.
 #[test]
 fn sign_verify_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
     let data = b"hello world\nsecond line\n";
     // Write to a file (not stdin — testing the file path).
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, data).unwrap();
 
     let mut signed = Vec::new();
@@ -68,10 +39,10 @@ fn sign_verify_roundtrip() {
 /// `verify_cmd` adds stdin-slurp on top, which blocks under test).
 #[test]
 fn verify_any_signer() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"data").unwrap();
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
@@ -85,10 +56,10 @@ fn verify_any_signer() {
 /// `Signer::Named` mismatch → `"Signature is not made by NAME"`.
 #[test]
 fn verify_signer_mismatch() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"data").unwrap();
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
@@ -107,10 +78,10 @@ fn verify_signer_mismatch() {
 /// body; flip one byte and the crypto rejects it.
 #[test]
 fn verify_tampered_body() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"hello").unwrap();
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
@@ -135,10 +106,10 @@ fn verify_tampered_body() {
 /// it freely.
 #[test]
 fn verify_tampered_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"hello").unwrap();
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
@@ -165,15 +136,16 @@ fn verify_tampered_time() {
 /// but has a different key — that's the realistic attack.)
 #[test]
 fn verify_tampered_signer_name() {
-    let dir = tempfile::tempdir().unwrap();
     // Two nodes. alice signs; we tamper the header to say bob.
-    let alice = fake_init(&dir, "alice");
-    let bob = fake_init(&dir, "bob");
+    let cd_alice = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let cd_bob = ConfDir::with_name("bob").with_ed25519_key("bob");
+    let alice = cd_alice.paths();
+    let bob = cd_bob.paths();
 
-    let input = dir.path().join("payload");
+    let input = cd_alice.path().join("payload");
     fs::write(&input, b"hello").unwrap();
     let mut signed = Vec::new();
-    sign(&alice, Some(&input), 1_700_000_000, &mut signed).unwrap();
+    sign(alice, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
     // Tamper: header says bob now. We verify from bob's confbase
     // (which has hosts/bob, with bob's real pubkey).
@@ -184,7 +156,7 @@ fn verify_tampered_signer_name() {
     // → looks up hosts/bob → bob's pubkey. Sig was made by alice's
     // key over `... alice 1700000000`. Reconstructed trailer is
     // `... bob 1700000000`. Wrong key AND wrong message. Fails.
-    let err = verify_blob(&bob, &Signer::Any, tampered.as_bytes()).unwrap_err();
+    let err = verify_blob(bob, &Signer::Any, tampered.as_bytes()).unwrap_err();
     let CmdError::BadInput(msg) = err else {
         panic!()
     };
@@ -197,8 +169,8 @@ fn verify_tampered_signer_name() {
 /// the space). This pins the format.
 #[test]
 fn trailer_leading_space() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
     let sk = keypair::read_private(&paths.ed25519_private()).unwrap();
 
     let body = b"hello";
@@ -257,8 +229,8 @@ fn signed_message_format() {
 /// *looks* like one but the sig is wrong.
 #[test]
 fn verify_malformed_header() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
     for bad in [
         // No newline at all.
@@ -289,8 +261,8 @@ fn verify_malformed_header() {
 /// Header longer than `MAX_HEADER_LEN` → "Invalid input".
 #[test]
 fn verify_header_too_long() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
     // 2049-char header (one over the limit).
     let long_header = format!("{}\nbody", "x".repeat(MAX_HEADER_LEN + 1));
@@ -304,8 +276,8 @@ fn verify_header_too_long() {
 /// `Signer::parse` cases. `.`, `*`, valid name, invalid name.
 #[test]
 fn signer_parse() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
     // `.` → own name.
     match Signer::parse(".", &paths).unwrap() {
@@ -328,47 +300,31 @@ fn signer_parse() {
 /// `Ed25519PublicKey =` line but does have a PEM block.
 #[test]
 fn load_host_pubkey_pem_fallback() {
-    let dir = tempfile::tempdir().unwrap();
-    // Don't `fake_init` — we want a non-standard host file.
-    let confbase = dir.path().join("alice");
-    fs::create_dir_all(confbase.join("hosts")).unwrap();
-    fs::write(confbase.join("tinc.conf"), "Name = alice\n").unwrap();
-
+    // Non-standard host file: PEM block, NO config line.
     let sk = keypair::generate();
-    // Private key normal.
-    let mut buf = Vec::new();
-    tinc_conf::pem::write_pem(&mut buf, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
-    fs::write(confbase.join("ed25519_key.priv"), buf).unwrap();
-
-    // Host file: PEM block, NO config line.
-    let mut buf = Vec::new();
-    tinc_conf::pem::write_pem(&mut buf, "ED25519 PUBLIC KEY", sk.public_key()).unwrap();
-    fs::write(confbase.join("hosts/alice"), buf).unwrap();
-
-    let paths = Paths::for_cli(&PathsInput {
-        confbase: Some(confbase),
-        ..Default::default()
-    });
+    let mut priv_pem = Vec::new();
+    tinc_conf::pem::write_pem(&mut priv_pem, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
+    let mut pub_pem = Vec::new();
+    tinc_conf::pem::write_pem(&mut pub_pem, "ED25519 PUBLIC KEY", sk.public_key()).unwrap();
+    let cd = ConfDir::with_name("alice").with_host("alice", &String::from_utf8(pub_pem).unwrap());
+    fs::write(cd.confbase().join("ed25519_key.priv"), priv_pem).unwrap();
+    let paths = cd.paths();
 
     // Now sign + verify roundtrips through the PEM-fallback path.
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"data").unwrap();
     let mut signed = Vec::new();
-    sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
-    let v = verify_blob(&paths, &Signer::Any, &signed).unwrap();
+    sign(paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
+    let v = verify_blob(paths, &Signer::Any, &signed).unwrap();
     assert_eq!(v.body, b"data");
 }
 
 /// `load_host_pubkey` neither-form → error.
 #[test]
 fn load_host_pubkey_no_key() {
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("alice");
-    fs::create_dir_all(confbase.join("hosts")).unwrap();
     // Host file with no key at all. Just an Address.
-    fs::write(confbase.join("hosts/alice"), "Address = 1.2.3.4\n").unwrap();
-
-    let err = load_host_pubkey(&confbase.join("hosts/alice")).unwrap_err();
+    let cd = ConfDir::bare().with_host("alice", "Address = 1.2.3.4\n");
+    let err = load_host_pubkey(&cd.confbase().join("hosts/alice")).unwrap_err();
     let CmdError::BadInput(msg) = err else {
         panic!()
     };
@@ -381,12 +337,12 @@ fn load_host_pubkey_no_key() {
 /// text but the body isn't.
 #[test]
 fn binary_body_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
     // All 256 byte values, including NUL.
     let data: Vec<u8> = (0u8..=255).collect();
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, &data).unwrap();
 
     let mut signed = Vec::new();
@@ -443,17 +399,9 @@ hello there\n";
     const BODY: &[u8] = b"fake testing data\nhello there\n";
 
     // ─── Set up confbase exactly as the Python does
-    let dir = tempfile::tempdir().unwrap();
-    let confbase = dir.path().join("foo");
-    fs::create_dir_all(confbase.join("hosts")).unwrap();
-    fs::write(confbase.join("tinc.conf"), "Name = foo\n").unwrap();
-    fs::write(confbase.join("hosts/foo"), HOST).unwrap();
-    fs::write(confbase.join("ed25519_key.priv"), PRIV_KEY).unwrap();
-
-    let paths = Paths::for_cli(&PathsInput {
-        confbase: Some(confbase),
-        ..Default::default()
-    });
+    let cd = ConfDir::with_name("foo").with_host("foo", HOST);
+    fs::write(cd.confbase().join("ed25519_key.priv"), PRIV_KEY).unwrap();
+    let paths = cd.paths().clone();
 
     // ─── Verify the upstream-signed blob
     // The Python tests `.` and `foo` and `*`. We do all three.
@@ -473,7 +421,7 @@ hello there\n";
     // ─── Re-sign and confirm round-trip
     // Ed25519 is deterministic given key+message. Same key, same
     // body, same time, same trailer → same sig. Prove it.
-    let body_file = dir.path().join("body");
+    let body_file = cd.path().join("body");
     fs::write(&body_file, BODY).unwrap();
     let mut resigned = Vec::new();
     sign(&paths, Some(&body_file), 1_653_397_516, &mut resigned).unwrap();
@@ -487,10 +435,10 @@ hello there\n";
 /// Empty body. Degenerate but valid — you can sign nothing.
 #[test]
 fn empty_body_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = fake_init(&dir, "alice");
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let paths = cd.paths().clone();
 
-    let input = dir.path().join("payload");
+    let input = cd.path().join("payload");
     fs::write(&input, b"").unwrap();
 
     let mut signed = Vec::new();

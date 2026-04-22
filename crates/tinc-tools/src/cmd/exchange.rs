@@ -380,26 +380,16 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::names::PathsInput;
+    use crate::testutil::ConfDir;
 
-    /// Temp confbase with `hosts/` only. Import-side fixture.
-    fn bare() -> (tempfile::TempDir, Paths) {
-        let dir = tempfile::tempdir().unwrap();
-        let confbase = dir.path().join("vpn");
-        fs::create_dir_all(confbase.join("hosts")).unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase),
-            ..Default::default()
-        });
-        (dir, paths)
+    /// `ConfDir::with_name` + overwrite `hosts/NAME` with `host_content`.
+    fn setup(name: &str, host_content: &str) -> ConfDir {
+        ConfDir::with_name(name).with_host(name, host_content)
     }
 
-    /// `bare()` + `tinc.conf` and `hosts/NAME`. Export-side fixture.
-    fn setup(name: &str, host_content: &str) -> (tempfile::TempDir, Paths) {
-        let (dir, paths) = bare();
-        fs::write(paths.tinc_conf(), format!("Name = {name}\n")).unwrap();
-        fs::write(paths.host_file(name), host_content).unwrap();
-        (dir, paths)
+    /// Empty confbase with `hosts/` only. Import-side fixture.
+    fn bare() -> ConfDir {
+        ConfDir::bare()
     }
 
     #[test]
@@ -419,14 +409,14 @@ mod tests {
 
     #[test]
     fn export_injects_name_strips_name() {
-        let (_d, paths) = setup(
+        let cd = setup(
             "alice",
             // Host file with a Name line (unusual but legal) — should
             // get stripped. Other lines pass through.
             "Name = stale\nAddress = 192.0.2.1\nSubnet = 10.0.0.0/24\n",
         );
         let mut out = Vec::new();
-        export(&paths, &mut out).unwrap();
+        export(cd.paths(), &mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "Name = alice\nAddress = 192.0.2.1\nSubnet = 10.0.0.0/24\n"
@@ -435,7 +425,7 @@ mod tests {
 
     #[test]
     fn export_preserves_pem() {
-        let (_d, paths) = setup(
+        let cd = setup(
             "alice",
             "Ed25519PublicKey = abcdef\n\
              -----BEGIN ED25519 PUBLIC KEY-----\n\
@@ -443,7 +433,7 @@ mod tests {
              -----END ED25519 PUBLIC KEY-----\n",
         );
         let mut out = Vec::new();
-        export(&paths, &mut out).unwrap();
+        export(cd.paths(), &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         // The PEM block passes through opaque.
         assert!(s.contains("-----BEGIN"));
@@ -453,7 +443,8 @@ mod tests {
 
     #[test]
     fn export_all_separator_between() {
-        let (_d, paths) = setup("alice", "Subnet = 10.0.1.0/24\n");
+        let cd = setup("alice", "Subnet = 10.0.1.0/24\n");
+        let paths = cd.paths().clone();
         // Add bob.
         fs::write(paths.host_file("bob"), "Subnet = 10.0.2.0/24\n").unwrap();
 
@@ -473,7 +464,8 @@ mod tests {
 
     #[test]
     fn export_all_skips_non_id_dirents() {
-        let (_d, paths) = setup("alice", "Subnet = 10.0.1.0/24\n");
+        let cd = setup("alice", "Subnet = 10.0.1.0/24\n");
+        let paths = cd.paths().clone();
         // Garbage in hosts/: editor swap, README, dotfile.
         fs::write(paths.hosts_dir().join(".alice.swp"), "junk").unwrap();
         fs::write(paths.hosts_dir().join("README"), "junk").unwrap();
@@ -492,7 +484,8 @@ mod tests {
 
     #[test]
     fn import_basic() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         let blob = "Name = alice\nSubnet = 10.0.1.0/24\nAddress = 192.0.2.1\n";
         let count = import(&paths, blob.as_bytes(), false).unwrap();
@@ -505,7 +498,8 @@ mod tests {
 
     #[test]
     fn import_multi_with_separator() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         let blob = format!(
             "Name = alice\nSubnet = 10.0.1.0/24\n\n{SEPARATOR}\nName = bob\nSubnet = 10.0.2.0/24\n"
@@ -526,7 +520,8 @@ mod tests {
 
     #[test]
     fn import_skip_existing_unless_force() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         // Pre-existing alice.
         fs::write(paths.host_file("alice"), "OLD CONTENT\n").unwrap();
@@ -552,7 +547,8 @@ mod tests {
 
     #[test]
     fn import_bad_name_is_error() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         let blob = "Name = ../escape\nSubnet = 10.0.0.0/8\n";
         let err = import(&paths, blob.as_bytes(), false).unwrap_err();
@@ -563,7 +559,8 @@ mod tests {
 
     #[test]
     fn import_junk_before_name_is_ignored() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         // Junk before first Name = warned and dropped.
         let blob = "this is not a name line\nName = alice\nSubnet = 10.0.1.0/24\n";
@@ -577,7 +574,8 @@ mod tests {
 
     #[test]
     fn import_no_name_at_all() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         // No Name = line anywhere → count 0, no error (the binary
         // maps count==0 to exit 1, but the function succeeds).
@@ -589,7 +587,8 @@ mod tests {
     #[test]
     fn import_name_format_is_exact() {
         // The header parse is picky. See the doc comment.
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
 
         // `Name=alice` (no spaces) → not a section header.
         let count = import(&paths, b"Name=alice\nfoo\n".as_slice(), false).unwrap();
@@ -622,12 +621,14 @@ mod tests {
                         Ed25519PublicKey = Pg2fEkaQ9lLAnEDV+ZOfu8I0il9rmrQaY+WYDOzeavK\n";
 
         // ─── Export side
-        let (_export_dir, export_paths) = setup("alice", original);
+        let export_cd = setup("alice", original);
+        let export_paths = export_cd.paths().clone();
         let mut blob = Vec::new();
         export(&export_paths, &mut blob).unwrap();
 
         // ─── Import side (different confbase)
-        let (_import_dir, import_paths) = bare();
+        let import_cd = bare();
+        let import_paths = import_cd.paths().clone();
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 1);
@@ -645,13 +646,15 @@ mod tests {
         let alice_content = "Subnet = 10.0.1.0/24\nAddress = 192.0.2.1\n";
         let bob_content = "Subnet = 10.0.2.0/24\nAddress = 192.0.2.2\n";
 
-        let (_d, export_paths) = setup("alice", alice_content);
+        let export_cd = setup("alice", alice_content);
+        let export_paths = export_cd.paths().clone();
         fs::write(export_paths.host_file("bob"), bob_content).unwrap();
 
         let mut blob = Vec::new();
         export_all(&export_paths, &mut blob).unwrap();
 
-        let (_import_dir, import_paths) = bare();
+        let import_cd = bare();
+        let import_paths = import_cd.paths().clone();
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 2);
@@ -672,26 +675,24 @@ mod tests {
 
     #[test]
     fn get_my_name_reads_config() {
-        let (_d, paths) = setup("alice", "");
+        let cd = setup("alice", "");
+        let paths = cd.paths().clone();
         assert_eq!(get_my_name(&paths).unwrap(), "alice");
     }
 
     #[test]
     fn get_my_name_missing_tinc_conf() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        });
+        let cd = ConfDir::bare();
         // No tinc.conf → error mentioning the path.
-        let err = get_my_name(&paths).unwrap_err();
+        let err = get_my_name(cd.paths()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("tinc.conf"));
     }
 
     #[test]
     fn get_my_name_no_name_key() {
-        let (_d, paths) = bare();
+        let cd = bare();
+        let paths = cd.paths().clone();
         // tinc.conf exists but has no Name line.
         fs::write(paths.tinc_conf(), "Port = 655\n").unwrap();
         let err = get_my_name(&paths).unwrap_err();

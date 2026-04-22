@@ -1,24 +1,12 @@
 use super::*;
 use crate::keypair;
 use crate::keypair::TY_PUBLIC;
-use crate::names::PathsInput;
+use crate::testutil::ConfDir;
 use std::io::Write;
 use tinc_crypto::b64;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-
-/// Build a `Paths` rooted at a tempdir's child. The child doesn't
-/// exist yet — tests that need it call `tinc init` (via the
-/// helpers below) to create it.
-fn paths_at(dir: &tempfile::TempDir) -> (PathBuf, Paths) {
-    let confbase = dir.path().join("vpn");
-    let paths = Paths::for_cli(&PathsInput {
-        confbase: Some(confbase.clone()),
-        ..Default::default()
-    });
-    (confbase, paths)
-}
 
 /// `tinc init NAME` via the function, not the binary. Creates
 /// the full dir tree + keys. Unit-test scope; the binary is for
@@ -41,8 +29,8 @@ fn count<F: Fn(&Finding) -> bool>(report: &Report, f: F) -> usize {
 /// catches it.
 #[test]
 fn clean_init_passes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
     init(&paths, "alice");
 
     let r = run(&paths, false).unwrap();
@@ -58,9 +46,8 @@ fn clean_init_passes() {
 /// suggestion mentions `init`.
 #[test]
 fn no_tincconf() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
-    fs::create_dir_all(&confbase).unwrap();
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
     // Dir exists but is empty.
 
     let r = run(&paths, false).unwrap();
@@ -74,9 +61,9 @@ fn no_tincconf() {
 /// `tinc.conf` exists but no `Name =` → `NoName`.
 #[test]
 fn no_name() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
-    fs::create_dir_all(&confbase).unwrap();
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     // tinc.conf with stuff but no Name.
     fs::write(confbase.join("tinc.conf"), "Port = 655\n").unwrap();
 
@@ -91,8 +78,9 @@ fn no_name() {
 /// suggestion mentions `generate-ed25519-keys`.
 #[test]
 fn no_private_key() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
     fs::remove_file(confbase.join("ed25519_key.priv")).unwrap();
 
@@ -121,8 +109,9 @@ fn no_private_key() {
 /// here so when we fix sign, this test is the reference.
 #[test]
 fn private_key_file_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Move the private key elsewhere.
@@ -152,8 +141,9 @@ fn private_key_file_config() {
 /// a `--force` fix.)
 #[test]
 fn host_file_deleted() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
     fs::remove_file(confbase.join("hosts/alice")).unwrap();
 
@@ -169,8 +159,9 @@ fn host_file_deleted() {
 /// check runs and finds nothing. NOT fixable without `--force`.
 #[test]
 fn no_public_key() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
     // Replace hosts/alice with config-only content. No pubkey,
     // no PEM block. `parse_file` succeeds (it's valid config),
@@ -197,8 +188,9 @@ fn no_public_key() {
 /// `hosts/alice` from a different node.
 #[test]
 fn key_mismatch() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Overwrite hosts/alice with a different pubkey. We use a
@@ -226,8 +218,9 @@ fn key_mismatch() {
 /// **Contract test**: re-run fsck on the fixed file; it must pass.
 #[test]
 fn key_mismatch_force_fixes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let other = keypair::generate();
@@ -264,8 +257,9 @@ fn key_mismatch_force_fixes() {
 /// to comment).
 #[test]
 fn no_public_key_force_fixes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
     // Existing config with no pubkey.
     fs::write(confbase.join("hosts/alice"), "Subnet = 10.0.0.0/24\n").unwrap();
@@ -295,8 +289,9 @@ fn no_public_key_force_fixes() {
 /// `read_ecdsa_public_key` returns that NULL, no PEM fallback.
 #[test]
 fn bad_b64_is_no_pubkey() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Bad b64: `!` isn't in the alphabet.
@@ -319,8 +314,9 @@ fn bad_b64_is_no_pubkey() {
 /// covers it explicitly with a hand-written PEM.
 #[test]
 fn pem_pubkey_read() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Read the *correct* pubkey from the priv key.
@@ -343,8 +339,9 @@ fn pem_pubkey_read() {
 #[cfg(unix)]
 #[test]
 fn unsafe_key_mode_warns() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let priv_path = confbase.join("ed25519_key.priv");
@@ -379,8 +376,9 @@ fn unsafe_key_mode_warns() {
 #[cfg(unix)]
 #[test]
 fn unsafe_key_mode_force_fixes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let priv_path = confbase.join("ed25519_key.priv");
@@ -402,8 +400,9 @@ fn unsafe_key_mode_force_fixes() {
 #[cfg(unix)]
 #[test]
 fn script_not_exec_warns() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // init creates tinc-up at 0755. Chmod it down.
@@ -424,8 +423,9 @@ fn script_not_exec_warns() {
 #[cfg(unix)]
 #[test]
 fn script_not_exec_force_fixes() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let up = confbase.join("tinc-up");
@@ -443,8 +443,9 @@ fn script_not_exec_force_fixes() {
 /// suffix matches but the prefix isn't tinc/host/subnet.
 #[test]
 fn unknown_script() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     fs::write(confbase.join("mystery-up"), "#!/bin/sh\n").unwrap();
@@ -468,8 +469,9 @@ fn unknown_script() {
 #[cfg(unix)]
 #[test]
 fn all_known_scripts() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // init created tinc-up. Add the others.
@@ -501,8 +503,9 @@ fn all_known_scripts() {
 #[cfg(unix)]
 #[test]
 fn host_scripts_any_prefix() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // `whatever-up` would be unknown in confbase. In hosts/ it's
@@ -525,8 +528,9 @@ fn host_scripts_any_prefix() {
 /// `ed25519_key.priv` etc. don't end in `-up`/`-down`.
 #[test]
 fn non_scripts_ignored() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // A junk file with no -up/-down suffix.
@@ -554,8 +558,9 @@ fn non_scripts_ignored() {
 /// `GraphDumpFile` in tinc.conf → `ObsoleteVar`.
 #[test]
 fn obsolete_var() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut tc = fs::OpenOptions::new()
@@ -585,8 +590,9 @@ fn obsolete_var() {
 /// goes in `hosts/YOU`, not `tinc.conf`.
 #[test]
 fn host_var_in_server() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut tc = fs::OpenOptions::new()
@@ -619,8 +625,9 @@ fn host_var_in_server() {
 /// for symmetry.
 #[test]
 fn server_var_in_host() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut hf = fs::OpenOptions::new()
@@ -642,8 +649,9 @@ fn server_var_in_host() {
 /// daemon would silently use the first.
 #[test]
 fn duplicate_non_multiple() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut tc = fs::OpenOptions::new()
@@ -672,8 +680,9 @@ fn duplicate_non_multiple() {
 /// `VAR_MULTIPLE`. Multi-homed nodes have many subnets.
 #[test]
 fn duplicate_multiple_ok() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut hf = fs::OpenOptions::new()
@@ -692,8 +701,9 @@ fn duplicate_multiple_ok() {
 /// case.
 #[test]
 fn unknown_var_silent() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     let mut tc = fs::OpenOptions::new()
@@ -713,8 +723,9 @@ fn unknown_var_silent() {
 /// Variable check runs on ALL hosts files, not just `hosts/MYNAME`.
 #[test]
 fn checks_all_hosts() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Create hosts/bob with a server-only var.
@@ -744,8 +755,9 @@ fn checks_all_hosts() {
 /// `with-dash`, etc. — not valid node names, so not host files.
 #[test]
 fn hosts_non_id_skipped() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     // Dash isn't valid in node names (`check_id`: `[A-Za-z0-9_]+`).
@@ -765,8 +777,9 @@ fn hosts_non_id_skipped() {
 /// fsck on a `conf.d/` config actually checks `conf.d/`.
 #[test]
 fn confd_checked() {
-    let dir = tempfile::tempdir().unwrap();
-    let (confbase, paths) = paths_at(&dir);
+    let cd = ConfDir::bare();
+    let paths = cd.paths().clone();
+    let confbase = cd.confbase();
     init(&paths, "alice");
 
     fs::create_dir(confbase.join("conf.d")).unwrap();

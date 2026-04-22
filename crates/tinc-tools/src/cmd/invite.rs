@@ -548,19 +548,8 @@ impl std::fmt::Display for AddressPort {
 mod tests {
     use super::*;
     use crate::cmd::init;
-    use crate::names::PathsInput;
+    use crate::testutil::ConfDir;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    /// Per-test confbase. Test name + thread id for hermeticity.
-    fn paths_at(dir: &tempfile::TempDir) -> (PathBuf, Paths) {
-        let confbase = dir.path().join("vpn");
-        let paths = Paths::for_cli(&PathsInput {
-            confbase: Some(confbase.clone()),
-            ..Default::default()
-        });
-        (confbase, paths)
-    }
 
     /// `tinc init NAME` then append `Address = HOST` to `hosts/NAME`.
     /// init doesn't write Address (it's per-installation, not
@@ -582,9 +571,7 @@ mod tests {
     #[test]
     fn copy_host_table() {
         let case = |input: &str, port: &str, expected: &str| {
-            let dir = tempfile::tempdir().unwrap();
-            let f = dir.path().join("h");
-            fs::write(&f, input).unwrap();
+            let (_dir, f) = crate::testutil::scratch_file("h", input);
             let mut out = String::new();
             copy_host_replacing_port(&f, port, &mut out).unwrap();
             assert_eq!(out, expected, "input: {input:?} port: {port:?}");
@@ -620,8 +607,8 @@ mod tests {
 
     #[test]
     fn address_basic() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost.example");
         let a = get_my_address(&paths, "alice").unwrap();
         assert_eq!(a.host, "myhost.example");
@@ -631,8 +618,8 @@ mod tests {
 
     #[test]
     fn address_with_port_on_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "1.2.3.4 9999");
         let a = get_my_address(&paths, "alice").unwrap();
         assert_eq!(a.host, "1.2.3.4");
@@ -641,8 +628,8 @@ mod tests {
 
     #[test]
     fn address_ipv6_brackets() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "fe80::1");
         let a = get_my_address(&paths, "alice").unwrap();
         // Colon in host → bracketed in URL.
@@ -651,8 +638,8 @@ mod tests {
 
     #[test]
     fn address_port_from_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         let mut f = fs::OpenOptions::new()
             .append(true)
@@ -665,8 +652,8 @@ mod tests {
 
     #[test]
     fn address_port_zero_bails() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         let mut f = fs::OpenOptions::new()
             .append(true)
@@ -683,8 +670,8 @@ mod tests {
 
     #[test]
     fn address_missing_bails() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init::run(&paths, "alice").unwrap(); // no Address
         let err = get_my_address(&paths, "alice").unwrap_err();
         let CmdError::BadInput(msg) = err else {
@@ -768,8 +755,9 @@ mod tests {
     /// `invite()` is the seam — every helper is exercised.
     #[test]
     fn invite_full_flow() {
-        let dir = tempfile::tempdir().unwrap();
-        let (confbase, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        let confbase = cd.confbase();
         init_with_address(&paths, "alice", "myhost.example");
 
         let r = invite(&paths, Some("testnet"), "bob", SystemTime::now()).unwrap();
@@ -847,8 +835,8 @@ mod tests {
     /// "rotate on empty" logic only fires when count == 0.
     #[test]
     fn second_invite_reuses_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
 
         let r1 = invite(&paths, None, "bob", SystemTime::now()).unwrap();
@@ -873,8 +861,8 @@ mod tests {
     /// You can't invite a node you already know about.
     #[test]
     fn invite_existing_host_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         // hosts/alice exists (init created it). Inviting alice fails.
         let err = invite(&paths, None, "alice", SystemTime::now()).unwrap_err();
@@ -888,8 +876,9 @@ mod tests {
     /// The "fail early" reorder.
     #[test]
     fn invite_no_address_fails_clean() {
-        let dir = tempfile::tempdir().unwrap();
-        let (confbase, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        let confbase = cd.confbase();
         init::run(&paths, "alice").unwrap(); // no Address
 
         let err = invite(&paths, None, "bob", SystemTime::now()).unwrap_err();
@@ -910,8 +899,8 @@ mod tests {
     /// Invalid invitee name → fail before anything else.
     #[test]
     fn invite_bad_name_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         let err = invite(&paths, None, "../etc", SystemTime::now()).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(_)));
@@ -921,8 +910,9 @@ mod tests {
     /// else does.
     #[test]
     fn mesh_vars_copied() {
-        let dir = tempfile::tempdir().unwrap();
-        let (confbase, paths) = paths_at(&dir);
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        let confbase = cd.confbase();
         init_with_address(&paths, "alice", "myhost");
 
         let mut tc = fs::OpenOptions::new()
