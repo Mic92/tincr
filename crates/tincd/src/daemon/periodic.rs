@@ -11,7 +11,7 @@ use super::{
 use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::outgoing::{Outgoing, resolve_config_addrs};
 use crate::script::{ScriptEnv, ScriptResult};
@@ -23,6 +23,21 @@ use tinc_proto::msg::SubnetMsg;
 use tinc_proto::{Request, Subnet};
 
 impl Daemon {
+    /// Ping-interval timer entry point. Split into conn-sweep and
+    /// tunnel-housekeeping so the two can move to separate intervals
+    /// later (they share one tick only because C tinc did).
+    pub(super) fn on_ping_tick(&mut self) {
+        let now = self.timers.now();
+        self.on_conn_sweep_tick(now);
+        self.on_tunnel_housekeeping_tick(now);
+
+        // collect any exited detached children (proxy-exec)
+        script::reap_children();
+
+        // re-arm +1s
+        self.timers.set(self.pingtimer, PING_SWEEP);
+    }
+
     /// Dead-conn sweep + ping.
     ///
     /// Per-conn cases: skip control; pre-ACK timeout (handshake
@@ -31,9 +46,7 @@ impl Daemon {
     /// Laptop-suspend detector: timer skipped >1min → daemon was
     /// asleep → peers dropped us → force-close all (sending into
     /// stale SPTPS contexts is just noise).
-    pub(super) fn on_ping_tick(&mut self) {
-        let now = self.timers.now();
-
+    fn on_conn_sweep_tick(&mut self, now: Instant) {
         // Laptop-suspend detection. Saturating sub: clock-goes-
         // backwards (NTP) reads as zero (safe).
         let sleep_time = now.saturating_duration_since(self.last_periodic_run_time);
@@ -151,6 +164,11 @@ impl Daemon {
         if nw {
             self.maybe_set_write_any();
         }
+    }
+
+    /// Per-node tunnel state housekeeping (no meta-conn access).
+    fn on_tunnel_housekeeping_tick(&mut self, now: Instant) {
+        let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
 
         // Reap salvaged old SPTPS sessions: see
         // `TunnelState::prev_sptps` / `should_reap_prev_sptps`. Two
@@ -175,12 +193,6 @@ impl Daemon {
                 tunnel.prev_sptps_installed_at = None;
             }
         }
-
-        // collect any exited detached children (proxy-exec)
-        script::reap_children();
-
-        // re-arm +1s
-        self.timers.set(self.pingtimer, PING_SWEEP);
     }
 
     /// Contradicting-edge storm detection + autoconnect.
