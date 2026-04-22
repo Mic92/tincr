@@ -10,11 +10,10 @@
 //! `try_clone` not borrow: `dup(2)` of `Listener.udp` — same file
 //! description, separate fd, no self-referential daemon struct.
 
-// `forbid`: the `linux` submodule used to hand-roll `libc::sendmsg`
-// + cmsg pointer writes, but now goes through `nix::sendmsg` +
-// `ControlMessage::UdpGsoSegments` (see `linux.rs` doc), so there is
-// no remaining `unsafe` anywhere on the egress path.
-#![forbid(unsafe_code)]
+// `deny` (was `forbid`): linux stays safe via `nix::sendmsg`, but the
+// macOS `sendmsg_x` path is private API not wrapped by libc/nix and
+// needs a scoped `#[allow(unsafe_code)]` on its module.
+#![deny(unsafe_code)]
 
 use std::io;
 
@@ -22,6 +21,8 @@ use socket2::{SockAddr, Socket};
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 
 /// `UDP_MAX_SEGMENTS` (`include/linux/udp.h:124`). The kernel rejects
 /// `UDP_SEGMENT` sends with more segments than this (`EINVAL`).
@@ -333,6 +334,15 @@ impl Portable {
         Ok(Self {
             sock: udp.try_clone()?,
         })
+    }
+
+    /// Borrow the dup'd socket so platform-specific egress impls can
+    /// `try_clone` it again (e.g. `macos::MacosFast` needs a fresh fd
+    /// per `connect()`-ed peer). Same file description as the
+    /// listener; safe to dup repeatedly.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) const fn sock(&self) -> &Socket {
+        &self.sock
     }
 }
 
