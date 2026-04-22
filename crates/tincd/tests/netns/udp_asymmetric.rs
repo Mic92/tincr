@@ -33,8 +33,8 @@ fn udp_asymmetric_meta_confirm() {
     };
 
     let tmp = tmp!("udpasym");
-    let alice = Node::new(tmp.path(), "alice", 0xAA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xAB, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xAA, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xAB, "tinc1", "10.42.0.2/32");
 
     // Both daemons share 127.0.0.1; drop UDP to alice's port only.
     // alice→bob:port passes (dport ≠ alice.port); bob→alice:port is
@@ -65,8 +65,10 @@ fn udp_asymmetric_meta_confirm() {
     // the test budget. PingInterval=1: `on_ping_tick`'s `try_tx`
     // is what drains bob's `udp_rx_maxlen` into the ack.
     let extra = "MTUInfoInterval = 1\nPingInterval = 1\n";
-    bob.write_config_with(&alice, false, extra);
-    alice.write_config_with(&bob, true, extra);
+    let bob = bob.with_conf(extra);
+    let alice = alice.with_conf(extra);
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let log = "tincd=info,tincd::net=debug";
     let mut bob_child = bob.spawn_with_log(log);

@@ -41,17 +41,18 @@ fn tcp_fallback_udp_blackhole() {
     }
 
     let tmp = tmp!("tcpfb");
-    let alice = Node::new(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32");
-    let mid = Node::new(tmp.path(), "mid", 0xFC, "tinc0", "10.42.0.0/32");
-
+    let alice = tun_node(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32");
     // AutoConnect=no: otherwise bob learns alice's address via
     // ADD_EDGE and dials direct → PACKET 17 short-circuit, predicate
     // never reached.
     let extra = "AutoConnect = no\n";
-    mid.write_config_hub(&[&alice, &bob], extra);
-    alice.write_config_multi(&[&mid, &bob], &["mid"], extra);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], extra);
+    let alice = alice.with_conf(extra);
+    let bob = bob.with_conf(extra);
+    let mid = Node::new(tmp.path(), "mid", 0xFC).with_conf(extra);
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     let log = "tincd=info,tincd::net=debug";
     let mut mid_child = mid.spawn_with_log(log);

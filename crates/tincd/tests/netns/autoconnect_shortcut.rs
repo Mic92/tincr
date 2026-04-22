@@ -40,25 +40,25 @@ fn autoconnect_shortcut_promotes_hot_relay() {
     };
 
     let tmp = tmp!("ac-shortcut");
-    let alice = Node::new(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32");
-    let mid = Node::new(tmp.path(), "mid", 0xFC, "tinc0", "10.42.0.0/32");
-    let mid2 = Node::new(tmp.path(), "mid2", 0xFD, "tinc0", "10.42.0.0/32");
-    let mid3 = Node::new(tmp.path(), "mid3", 0xFE, "tinc0", "10.42.0.0/32");
-
+    let alice = tun_node(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
     // Hubs: dummy device, AutoConnect=no. Only mid is on the data
     // path to bob; mid2/mid3 exist purely to fill alice's degree-3
     // backbone so the shortcut arm is reachable.
     let off = "AutoConnect = no\n";
-    mid.write_config_hub(&[&alice, &bob, &mid2, &mid3], off);
-    mid2.write_config_hub(&[&alice, &mid, &mid3], off);
-    mid3.write_config_hub(&[&alice, &mid, &mid2], off);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], off);
+    let bob = tun_node(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32").with_conf(off);
+    let mid = Node::new(tmp.path(), "mid", 0xFC).with_conf(off);
+    let mid2 = Node::new(tmp.path(), "mid2", 0xFD).with_conf(off);
+    let mid3 = Node::new(tmp.path(), "mid3", 0xFE).with_conf(off);
+
+    mid.write_config_multi(&[&alice, &bob, &mid2, &mid3], &[]);
+    mid2.write_config_multi(&[&alice, &mid, &mid3], &[]);
+    mid3.write_config_multi(&[&alice, &mid, &mid2], &[]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
     // alice: AutoConnect=yes (default), ConnectTo all three hubs.
     // bob's hosts/ file MUST carry `Address` so `has_address` is set
     // — write_config_multi only writes Address for ConnectTo targets,
     // so patch it in afterwards.
-    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &["mid", "mid2", "mid3"], "");
+    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &["mid", "mid2", "mid3"]);
     std::fs::write(
         alice.confbase.join("hosts").join("bob"),
         format!(
@@ -239,18 +239,18 @@ fn shortcut_survives_traffic_gap() {
     };
 
     let tmp = tmp!("ac-shortcut-gap");
-    let alice = Node::new(tmp.path(), "alice", 0xEA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xEB, "tinc1", "10.42.0.2/32");
-    let mid = Node::new(tmp.path(), "mid", 0xEC, "tinc0", "10.42.0.0/32");
-    let mid2 = Node::new(tmp.path(), "mid2", 0xED, "tinc0", "10.42.0.0/32");
-    let mid3 = Node::new(tmp.path(), "mid3", 0xEE, "tinc0", "10.42.0.0/32");
-
+    let alice = tun_node(tmp.path(), "alice", 0xEA, "tinc0", "10.42.0.1/32");
     let off = "AutoConnect = no\n";
-    mid.write_config_hub(&[&alice, &bob, &mid2, &mid3], off);
-    mid2.write_config_hub(&[&alice, &mid, &mid3], off);
-    mid3.write_config_hub(&[&alice, &mid, &mid2], off);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], off);
-    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &["mid", "mid2", "mid3"], "");
+    let bob = tun_node(tmp.path(), "bob", 0xEB, "tinc1", "10.42.0.2/32").with_conf(off);
+    let mid = Node::new(tmp.path(), "mid", 0xEC).with_conf(off);
+    let mid2 = Node::new(tmp.path(), "mid2", 0xED).with_conf(off);
+    let mid3 = Node::new(tmp.path(), "mid3", 0xEE).with_conf(off);
+
+    mid.write_config_multi(&[&alice, &bob, &mid2, &mid3], &[]);
+    mid2.write_config_multi(&[&alice, &mid, &mid3], &[]);
+    mid3.write_config_multi(&[&alice, &mid, &mid2], &[]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &["mid", "mid2", "mid3"]);
     std::fs::write(
         alice.confbase.join("hosts").join("bob"),
         format!(

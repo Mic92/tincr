@@ -110,7 +110,8 @@ fn dns_stub_fd() {
     let (tun, far) = sockpair_datagram();
 
     // connect_to=false: no outgoing, bob never runs.
-    alice.write_config_with(&bob, false, Some(far.as_raw_fd()), Some("10.42.0.1/32"));
+    let alice = alice.fd(far.as_raw_fd()).subnet("10.42.0.1/32");
+    alice.write_config(&bob, false);
     // `write_config_multi` wrote hosts/bob with pubkey only.
     // Re-write it with Subnet lines so `load_all_nodes` picks them
     // up (the netns test does the same).

@@ -28,8 +28,9 @@ fn sighup_reload_subnets() {
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
     // alice has ONE subnet initially.
-    alice.write_config_with(&bob, false, None, Some("10.0.0.0/24"));
-    bob.write_config_with(&alice, true, None, None);
+    let alice = alice.subnet("10.0.0.0/24");
+    alice.write_config(&bob, false);
+    bob.write_config(&alice, true);
 
     let mut alice_child = alice.spawn();
     assert!(

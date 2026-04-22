@@ -594,9 +594,9 @@ fn autoconnect_converges_to_three() {
     // them so THEY don't start dialing each other (we only want
     // alice's autoconnect to fire; cross-dialing would muddy the
     // "exactly 3 conns from alice" assertion).
-    bob.write_config_multi(&[&alice], &[], None, None);
-    carol.write_config_multi(&[&alice], &[], None, None);
-    dave.write_config_multi(&[&alice], &[], None, None);
+    bob.write_config_multi(&[&alice], &[]);
+    carol.write_config_multi(&[&alice], &[]);
+    dave.write_config_multi(&[&alice], &[]);
 
     // alice: NO ConnectTo. Her hosts/ files for bob/carol/dave
     // all need `Address =` so `load_all_nodes` populates

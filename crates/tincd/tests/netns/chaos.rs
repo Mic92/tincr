@@ -94,11 +94,11 @@ impl ChaosRig {
     /// `extra` appended verbatim to BOTH daemons' tinc.conf. Used by
     /// stress tests that need `PingInterval = 1` / `MaxTimeout = 2`.
     pub(crate) fn setup_with(netns: NetNs, tmp: &TmpGuard, extra: &str) -> Self {
-        let alice = Node::new(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
-        let bob = Node::new(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
+        let alice = tun_node(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32").with_conf(extra);
+        let bob = tun_node(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32").with_conf(extra);
 
-        bob.write_config_with(&alice, false, extra);
-        alice.write_config_with(&bob, true, extra);
+        bob.write_config(&alice, false);
+        alice.write_config(&bob, true);
 
         // `info` not `debug`: ~100-ping bursts at debug log a line
         // per packet per side. Not a pipe-fill risk at this volume

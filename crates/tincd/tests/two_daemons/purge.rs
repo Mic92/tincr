@@ -39,9 +39,9 @@ fn purge_removes_unreachable_node() {
     let bob = Node::new(tmp.path(), "bob", 0xB9).with_conf("AutoConnect = no\n");
 
     // Chain: alice ConnectTo mid; bob ConnectTo mid. mid is the hub.
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
-    alice.write_config_multi(&[&mid, &bob], &["mid"], None, None);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], None, None);
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     let mut mid_child = mid.spawn();
     assert!(
@@ -148,9 +148,9 @@ fn purge_respects_autoconnect_gate() {
     let mid = Node::new(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xBA).with_conf("AutoConnect = no\n");
 
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
-    alice.write_config_multi(&[&mid, &bob], &["mid"], None, None);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], None, None);
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     let mut mid_child = mid.spawn();
     assert!(

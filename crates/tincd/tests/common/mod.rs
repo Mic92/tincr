@@ -13,14 +13,6 @@
 //!
 //! ## What's NOT here
 //!
-//! `struct Node` and `write_config`. The variants diverge on
-//! load-bearing fields (`extra_conf` vs `iface`/`subnet` vs
-//! `which: Impl`) and on spawn shape (`Child` vs `ChildWithLog`,
-//! Rust vs C tincd). One union struct with `Option<_>` extras would
-//! make every callsite uglier than the duplication it removes.
-//! Tests do share `write_ed25519_privkey()` and `pubkey_from_seed()`
-//! to gut the bulk of each `write_config`.
-//!
 //! `enter_netns` / `NetNs`. The bwrap re-exec is parametrized by
 //! test name (the `--exact` arg), device names, env gates
 //! (`TINC_C_TINCD` vs `iperf3`), and `--ignored` for throughput. The crossimpl.rs
@@ -35,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+pub mod node;
 
 /// `tmp!("tag")` → `TmpGuard` prefixed by the caller's module name.
 ///

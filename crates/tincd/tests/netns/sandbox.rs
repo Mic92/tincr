@@ -38,11 +38,13 @@ fn sandbox_normal_ping() {
     };
 
     let tmp = tmp!("sboxping");
-    let alice = Node::new(tmp.path(), "alice", 0xAC, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xBC, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xAC, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xBC, "tinc1", "10.42.0.2/32");
 
-    bob.write_config_with(&alice, false, "Sandbox = normal\n");
-    alice.write_config_with(&bob, true, "Sandbox = normal\n");
+    let bob = bob.with_conf("Sandbox = normal\n");
+    let alice = alice.with_conf("Sandbox = normal\n");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     // host-up reaching outside the allowlist via #!/bin/sh. The
     // body is irrelevant: the kernel never gets past the shebang.
@@ -53,13 +55,13 @@ fn sandbox_normal_ping() {
     std::fs::set_permissions(&host_up, perm).unwrap();
 
     // ─── spawn (same as real_tun_ping) ────────────────────────
-    let mut bob_child = bob.spawn();
+    let mut bob_child = bob.spawn_with_log("tincd=debug");
     assert!(
         wait_for_file(&bob.socket),
         "bob setup: {}",
         drain_stderr(bob_child)
     );
-    let alice_child = alice.spawn();
+    let alice_child = alice.spawn_with_log("tincd=debug");
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup: {}", drain_stderr(alice_child));
@@ -183,10 +185,11 @@ fn sandbox_high_blocks_scripts() {
     };
 
     let tmp = tmp!("sboxhigh");
-    let alice = Node::new(tmp.path(), "alice", 0xAD, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xBD, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xAD, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xBD, "tinc1", "10.42.0.2/32");
 
-    alice.write_config_with(&bob, false, "Sandbox = high\n");
+    let alice = alice.with_conf("Sandbox = high\n");
+    alice.write_config(&bob, false);
 
     // tinc-down witness. At high, script::execute returns
     // Sandboxed BEFORE stat'ing the file. The shebang here would
@@ -205,7 +208,7 @@ fn sandbox_high_blocks_scripts() {
     perm.set_mode(0o755);
     std::fs::set_permissions(&tinc_down, perm).unwrap();
 
-    let mut alice_child = alice.spawn();
+    let mut alice_child = alice.spawn_with_log("tincd=debug");
     if !wait_for_file(&alice.socket) {
         // Sandbox=high HARD-FAILS when Landlock is unavailable
         // (sandbox.rs enter_impl, the NotEnforced → Err arm).

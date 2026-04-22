@@ -38,8 +38,8 @@ fn real_tun_ping() {
     };
 
     let tmp = tmp!("ping");
-    let alice = Node::new(tmp.path(), "alice", 0xA8, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xB8, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xA8, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xB8, "tinc1", "10.42.0.2/32");
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
@@ -47,14 +47,14 @@ fn real_tun_ping() {
     // ─── spawn ──────────────────────────────────────────────────
     // Bob first (listener); alice has ConnectTo. Same ordering
     // rationale as two_daemons.rs (avoid the 5s retry backoff).
-    let mut bob_child = bob.spawn();
+    let mut bob_child = bob.spawn_with_log("tincd=debug");
     assert!(
         wait_for_file(&bob.socket),
         "bob setup failed; stderr:\n{}",
         drain_stderr(bob_child)
     );
 
-    let alice_child = alice.spawn();
+    let alice_child = alice.spawn_with_log("tincd=debug");
     if !wait_for_file(&alice.socket) {
         let _ = bob_child.kill();
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
@@ -240,18 +240,18 @@ fn real_tun_unreachable() {
     };
 
     let tmp = tmp!("unreach");
-    let alice = Node::new(tmp.path(), "alice", 0xA9, "tinc0", "10.42.0.1/32");
+    let alice = tun_node(tmp.path(), "alice", 0xA9, "tinc0", "10.42.0.1/32");
     // Bob's TUN exists (NetNs::setup precreated it) but no daemon
     // attaches. We need `bob` only for `write_config`'s pubkey/
     // hosts cross-registration; alice's id_h reads `hosts/bob` if
     // bob ever connects (it won't here).
-    let bob = Node::new(tmp.path(), "bob", 0xB9, "tinc1", "10.42.0.2/32");
+    let bob = tun_node(tmp.path(), "bob", 0xB9, "tinc1", "10.42.0.2/32");
 
     // alice has NO ConnectTo. She just listens. The unreachable
     // path is local: TUN read → route() → Unreachable → TUN write.
     alice.write_config(&bob, false);
 
-    let alice_child = alice.spawn();
+    let alice_child = alice.spawn_with_log("tincd=debug");
     assert!(
         wait_for_file(&alice.socket),
         "alice setup failed; stderr:\n{}",
@@ -375,8 +375,8 @@ fn tso_ingest_stream_integrity() {
     };
 
     let tmp = tmp!("tso");
-    let alice = Node::new(tmp.path(), "alice", 0xA7, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xB7, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xA7, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xB7, "tinc1", "10.42.0.2/32");
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);

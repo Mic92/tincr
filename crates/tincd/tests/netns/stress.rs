@@ -302,15 +302,17 @@ fn stress_handshake_under_loss() {
     // Apply netem to lo BEFORE spawning. 20% per direction.
     let _chaos = Netem::apply("lo", "loss 20%");
 
-    let alice = Node::new(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
     // PingTimeout=5 (default), NOT the rig's 1s: at 20% loss the
     // SYN/SYNACK 3-way has ~50% first-try success and RTO is 1s —
     // PingTimeout=1 races the kernel's SYN retransmit and
     // terminates the conn before it ever connects.
     let extra = "PingTimeout = 5\nPingInterval = 5\n";
-    bob.write_config_with(&alice, false, extra);
-    alice.write_config_with(&bob, true, extra);
+    let bob = bob.with_conf(extra);
+    let alice = alice.with_conf(extra);
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let log = "tincd=info,tincd::net=debug";
     let mut bob_child = bob.spawn_with_log(log);
@@ -538,11 +540,10 @@ fn stress_relay_mid_restart() {
     };
     let tmp = tmp!("midrestart");
 
-    let alice = Node::new(tmp.path(), "alice", 0xA6, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xB6, "tinc1", "10.42.0.2/32");
-    // mid: dummy device, no subnet. iface/subnet fields unused by
-    // write_config_hub but Node::new wants them.
-    let mid = Node::new(tmp.path(), "mid", 0xC6, "tinc0", "10.42.0.0/32");
+    let alice = tun_node(tmp.path(), "alice", 0xA6, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xB6, "tinc1", "10.42.0.2/32");
+    // mid: dummy device, no subnet (no iface/subnet → builder emits dummy).
+    let mid = Node::new(tmp.path(), "mid", 0xC6);
 
     // UDPDiscoveryInterval=1: first try_udp probe to mid fires 1s
     // after the tunnel is created (default 2s). Mid's relay gate
@@ -551,9 +552,12 @@ fn stress_relay_mid_restart() {
     // probe round-trip. Tightening the interval keeps the warm-up
     // inside the 8×0.5s ping window.
     let extra = "PingInterval = 1\nMaxTimeout = 2\nUDPDiscoveryInterval = 1\n";
-    mid.write_config_hub(&[&alice, &bob], extra);
-    alice.write_config_multi(&[&mid, &bob], &["mid"], extra);
-    bob.write_config_multi(&[&mid, &alice], &["mid"], extra);
+    let mid = mid.with_conf(extra);
+    let alice = alice.with_conf(extra);
+    let bob = bob.with_conf(extra);
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     let log = "tincd=info,tincd::net=debug";
     let mut mid_child = mid.spawn_with_log(log);
@@ -775,8 +779,8 @@ fn stress_idle_pmtu_convergence() {
     };
     let tmp = tmp!("idlepmtu");
 
-    let alice = Node::new(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
-    let bob = Node::new(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
+    let alice = tun_node(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
+    let bob = tun_node(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");
     // PingInterval=1 → on_ping_tick fires try_tx(.., false) every
     // second once validkey is set. But validkey requires REQ_KEY,
     // which requires a data packet to kick it… UNLESS the daemon
@@ -787,8 +791,10 @@ fn stress_idle_pmtu_convergence() {
     // C parity. We send ONE ping to kick REQ_KEY (the brief's "no
     // data traffic, only keepalives" is post-handshake). Then
     // idle.
-    bob.write_config_with(&alice, false, "PingInterval = 1\n");
-    alice.write_config_with(&bob, true, "PingInterval = 1\n");
+    let bob = bob.with_conf("PingInterval = 1\n");
+    let alice = alice.with_conf("PingInterval = 1\n");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let log = "tincd=info";
     let mut bob_child = bob.spawn_with_log(log);

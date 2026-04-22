@@ -58,22 +58,14 @@ fn three_daemon_relay() {
 
     // mid is the hub: no device (dummy), no subnet, no ConnectTo.
     // Both alice and bob ConnectTo mid. mid knows everyone's pubkey.
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    mid.write_config_multi(&[&alice, &bob], &[]);
     // alice: ConnectTo=mid, owns 10.0.0.1/32. Knows bob's pubkey
     // (needed for the per-tunnel SPTPS handshake).
-    alice.write_config_multi(
-        &[&mid, &bob],
-        &["mid"],
-        Some(alice_far.as_raw_fd()),
-        Some("10.0.0.1/32"),
-    );
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. Knows alice's pubkey.
-    bob.write_config_multi(
-        &[&mid, &alice],
-        &["mid"],
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     // ─── spawn: mid first (the hub everyone connects to) ─────────
     // mid runs at debug-level so we can assert the relay log lines.
@@ -315,7 +307,7 @@ fn three_daemon_tunnelserver() {
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
     // spokes' pubkeys (for the meta-SPTPS auth).
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    mid.write_config_multi(&[&alice, &bob], &[]);
     // mid: append `Subnet =` to hosts/{alice,bob}. With
     // `:880 strictsubnets|=tunnelserver`, mid's `load_all_nodes`
     // preloads these; bob's gossip'd ADD_SUBNET hits the `:93`
@@ -343,15 +335,12 @@ fn three_daemon_tunnelserver() {
     // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device. Knows
     // bob's pubkey (irrelevant here — she'll never start a tunnel
     // to bob because she never learns he exists).
-    alice.write_config_multi(
-        &[&mid, &bob],
-        &["mid"],
-        Some(alice_far.as_raw_fd()),
-        Some("10.0.0.1/32"),
-    );
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device (we only
     // assert from alice's side).
-    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+    let bob = bob.subnet("10.0.0.2/32");
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     // ─── spawn: mid first (the hub) ──────────────────────────────
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
@@ -589,20 +578,16 @@ fn three_daemon_strictsubnets() {
     let (alice_tun, alice_far) = sockpair_datagram();
 
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both.
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    let bob = bob.subnet("10.0.0.2/32");
+    mid.write_config_multi(&[&alice, &bob], &[]);
     // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device. Knows
     // bob's pubkey. CRITICALLY: alice's hosts/bob (written by
-    // write_config_multi) has NO `Subnet =` line — see the
-    // "no Subnet line needed here" comment in that fn. That's
-    // exactly what we want: bob's subnet is unauthorized.
-    alice.write_config_multi(
-        &[&mid, &bob],
-        &["mid"],
-        Some(alice_far.as_raw_fd()),
-        Some("10.0.0.1/32"),
-    );
+    // write_config_multi) has NO `Subnet =` line. That's exactly
+    // what we want: bob's subnet is unauthorized.
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device.
-    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     // ─── spawn: mid first ────────────────────────────────────────
     let mut mid_child = mid.spawn();
@@ -712,12 +697,8 @@ fn three_daemon_strictsubnets() {
     let (alice_tun2, alice_far2) = sockpair_datagram();
     // Re-write tinc.conf with the new fd (DeviceType=fd / Device=N).
     // hosts/ files persist (we just appended to hosts/bob above).
-    alice.write_config_multi(
-        &[&mid, &bob],
-        &["mid"],
-        Some(alice_far2.as_raw_fd()),
-        Some("10.0.0.1/32"),
-    );
+    let alice = alice.fd(alice_far2.as_raw_fd());
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
     // write_config_multi re-truncates hosts/bob. Re-append.
     let mut bob_cfg = std::fs::read_to_string(&bob_hosts).unwrap();
     bob_cfg.push_str("Subnet = 10.0.0.2/32\n");
@@ -796,9 +777,11 @@ fn udp_relay_gate_unauthenticated_sender() {
     let bob = Node::new(tmp.path(), "bob", 0xB4);
 
     // mid is the hub (no device, no subnet, no ConnectTo).
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
-    alice.write_config_multi(&[&mid, &bob], &["mid"], None, Some("10.0.0.1/32"));
-    bob.write_config_multi(&[&mid, &alice], &["mid"], None, Some("10.0.0.2/32"));
+    let alice = alice.subnet("10.0.0.1/32");
+    let bob = bob.subnet("10.0.0.2/32");
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     // mid runs at debug-level so we can assert the gate log line.
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
@@ -960,21 +943,13 @@ fn three_daemon_forwarding_off_drops_transit() {
     let (bob_tun, bob_far) = sockpair_datagram();
 
     // mid: hub. dummy device, no subnet, no ConnectTo.
-    mid.write_config_multi(&[&alice, &bob], &[], None, None);
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    mid.write_config_multi(&[&alice, &bob], &[]);
     // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device.
-    alice.write_config_multi(
-        &[&mid, &bob],
-        &["mid"],
-        Some(alice_far.as_raw_fd()),
-        Some("10.0.0.1/32"),
-    );
+    alice.write_config_multi(&[&mid, &bob], &["mid"]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32, fd device.
-    bob.write_config_multi(
-        &[&mid, &alice],
-        &["mid"],
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
+    bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
     // alice's hosts/mid: claim 10.0.0.0/24. With StrictSubnets,
     // `load_all_nodes` preloads this; bob's gossiped /32 is

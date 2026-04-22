@@ -59,13 +59,10 @@ fn first_packet_across_tunnel() {
     // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
     // 10.0.0.2 routes Forward{to: bob} on alice's side, then
     // Forward{to: myself} on bob's side.
-    bob.write_config_with(
-        &alice,
-        false,
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
-    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     // ─── spawn ──────────────────────────────────────────────────
     let mut bob_child = bob.spawn_with_fd(&bob_far);
@@ -297,13 +294,10 @@ fn compression_roundtrip() {
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
 
-    bob.write_config_with(
-        &alice,
-        false,
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
-    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
@@ -445,8 +439,9 @@ fn ipv6_unreachable_builds_icmpv6() {
 
     // alice has NO IPv6 subnet — any IPv6 dst routes Unreachable.
     // bob is just here so alice has a peer (config requires it).
-    bob.write_config_with(&alice, false, None, None);
-    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn();
     assert!(
@@ -557,13 +552,10 @@ fn keyexpire_forces_rekey() {
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
 
-    bob.write_config_with(
-        &alice,
-        false,
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
-    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(

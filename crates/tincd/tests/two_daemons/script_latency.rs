@@ -31,13 +31,10 @@ fn slow_host_up_does_not_stall_forwarding() {
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
 
-    bob.write_config_with(
-        &alice,
-        false,
-        Some(bob_far.as_raw_fd()),
-        Some("10.0.0.2/32"),
-    );
-    alice.write_config_with(&bob, true, Some(alice_far.as_raw_fd()), Some("10.0.0.1/32"));
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
+    bob.write_config(&alice, false);
+    alice.write_config(&bob, true);
 
     // Slow host-up on ALICE, fired at the post-ACK graph run.
     // Absolute `sleep`: scripts get a fixed PATH sans coreutils on NixOS.

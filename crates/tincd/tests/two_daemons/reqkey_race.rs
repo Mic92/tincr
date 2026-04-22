@@ -39,18 +39,10 @@ fn reqkey_race_fd() {
     let (bob_tun, bob_far) = sockpair_datagram();
 
     // Symmetric: both ConnectTo each other (triggers dedup path).
-    alice.write_config_multi(
-        &[&bob],
-        &["bob"],
-        Some(alice_far.as_raw_fd()),
-        Some("10.44.0.1/32"),
-    );
-    bob.write_config_multi(
-        &[&alice],
-        &["alice"],
-        Some(bob_far.as_raw_fd()),
-        Some("10.44.0.2/32"),
-    );
+    let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.44.0.1/32");
+    let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.44.0.2/32");
+    alice.write_config_multi(&[&bob], &["bob"]);
+    bob.write_config_multi(&[&alice], &["alice"]);
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
