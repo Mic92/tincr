@@ -16,7 +16,7 @@ use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_event::{EventLoop, Io, SelfPipe, TimerId, Timers};
-use tinc_graph::Graph;
+use crate::graph::Graph;
 use tinc_proto::Subnet;
 
 use crate::compress;

@@ -5,7 +5,7 @@ use std::io;
 
 use crate::tunnel::TunnelState;
 
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 impl Daemon {
     /// Drain loop. LT epoll re-fires next turn if we leave bytes
@@ -305,7 +305,7 @@ impl Daemon {
         batch: &mut crate::egress::TxBatch,
         listeners: &mut [super::ListenerSlot],
         tunnels: &mut crate::inthash::IntHashMap<NodeId, TunnelState>,
-        graph: &tinc_graph::Graph,
+        graph: &crate::graph::Graph,
     ) {
         let Some((b, sock, relay_nid, origlen)) = batch.take() else {
             return;

@@ -28,7 +28,7 @@ use std::fmt;
 use crate::inthash::IntHashMap;
 
 use sha2::{Digest, Sha512};
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 /// `node_id_t` (`net.h:61-63`): `struct { uint8_t x[6]; }`.
 ///

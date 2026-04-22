@@ -1352,14 +1352,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinc-graph"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tinc-proto"
 version = "0.0.0"
 dependencies = [
@@ -1429,7 +1421,6 @@ dependencies = [
  "tinc-crypto",
  "tinc-device",
  "tinc-event",
- "tinc-graph",
  "tinc-proto",
  "tinc-sptps",
  "tinc-tools",

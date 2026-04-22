@@ -15,7 +15,7 @@ use crate::tunnel::MTU;
 use rand_core::OsRng;
 use tinc_device::{Device, GroBucket};
 use tinc_event::Io;
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]

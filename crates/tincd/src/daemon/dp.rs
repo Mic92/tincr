@@ -8,7 +8,7 @@
 //! data plane" and "touches gossip/conn state" is now grep-visible.
 
 use tinc_device::{DeviceArena, GroBucket};
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 use crate::compress;
 use crate::egress::TxBatch;

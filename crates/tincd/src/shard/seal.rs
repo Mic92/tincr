@@ -18,7 +18,7 @@ use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
 use crate::egress::{TxBatch, UdpEgress};
 use tinc_crypto::chapoly::ChaPoly;
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner

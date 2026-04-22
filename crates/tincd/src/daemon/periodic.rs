@@ -15,7 +15,7 @@ use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
 use rand_core::OsRng;
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 use tinc_proto::msg::SubnetMsg;
 use tinc_proto::{Request, Subnet};
 

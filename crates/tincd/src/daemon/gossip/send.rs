@@ -2,7 +2,7 @@
 
 use crate::daemon::{ConnId, Daemon};
 
-use tinc_graph::EdgeId;
+use crate::graph::EdgeId;
 use tinc_proto::msg::{AddEdge, DelEdge, SubnetMsg};
 use tinc_proto::{AddrStr, Request, Subnet};
 

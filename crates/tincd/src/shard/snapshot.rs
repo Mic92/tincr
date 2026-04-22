@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tinc_graph::NodeId;
+use crate::graph::NodeId;
 
 /// Per-nid dense entry. Indexed by `NodeId.0` (slab index, never deleted in
 /// tincd, so dead slots stay `None`). Same layout discipline as `last_routes`.
@@ -203,7 +203,7 @@ impl NodeView {
     /// invariant as `last_routes`.
     #[must_use]
     pub(crate) fn build(
-        graph: &tinc_graph::Graph,
+        graph: &crate::graph::Graph,
         node_ids: &HashMap<String, NodeId>,
         nodes: &crate::inthash::IntHashMap<NodeId, crate::daemon::NodeState>,
         n_nodes: usize,
@@ -270,7 +270,7 @@ mod tests {
     use super::*;
     use crate::daemon::NodeState;
     use crate::inthash::IntHashMap;
-    use tinc_graph::Graph;
+    use crate::graph::Graph;
 
     /// Minimal builder. Sets up a 3-node graph (a-b-c chain), `b` directly
     /// connected (has `NodeState`), `c` transitive. `a` is myself.

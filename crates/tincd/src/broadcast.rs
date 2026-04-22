@@ -45,7 +45,7 @@ pub enum BroadcastMode {
 /// Generic over `(ConnId, EdgeId)` pairs — daemon builds from its
 /// `nodes` map (`NodeState{conn, edge}`).
 ///
-/// `mst` is the `Vec<EdgeId>` from `tinc_graph::mst()`. Convert to a
+/// `mst` is the `Vec<EdgeId>` from `crate::graph::mst()`. Convert to a
 /// set for O(1) membership; ≤ conn count elements so `HashSet` is fine.
 ///
 /// `from_conn`: the connection the packet ARRIVED on

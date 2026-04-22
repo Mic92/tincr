@@ -32,7 +32,6 @@ tinc-conf = { path = "../tinc-conf" }
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-device = { path = "../tinc-device" }
 tinc-event = { path = "../tinc-event" }
-tinc-graph = { path = "../tinc-graph" }
 tinc-proto = { path = "../tinc-proto" }
 tinc-sptps = { path = "../tinc-sptps" }
 
@@ -166,14 +165,14 @@ tinc-sptps = { path = "../tinc-sptps" }
 # daemon. Stronger than the in-process pump test in join.rs (real
 # TCP, real epoll, real daemon's `?` branch).
 tinc-tools = { path = "../tinc-tools" }
+# graph_kat.rs differential test (parses tests/graph_kat/graph.json)
+# + benches/throughput.rs iperf3 --json on Linux.
+serde = { workspace = true }
+serde_json = { workspace = true }
 # autoconnect.rs tests: deterministic RNG. rand_chacha is already in the
 # lockfile (transitively via rand 0.8). rand_core 0.6 trait compat.
 rand_chacha = "0.3"
 
-# benches/throughput.rs (Linux-only) parses iperf3 --json.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [features]
 default = ["upnp"]

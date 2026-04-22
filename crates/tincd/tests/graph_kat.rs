@@ -14,7 +14,7 @@
 
 use serde::Deserialize;
 use std::collections::HashSet;
-use tinc_graph::{EdgeId, Graph, NodeId};
+use tincd::graph::{EdgeId, Graph, NodeId};
 
 #[derive(Deserialize)]
 struct Kat {
@@ -57,7 +57,7 @@ struct KatRoute {
 }
 
 fn cases() -> Vec<Kat> {
-    serde_json::from_str(include_str!("kat/graph.json")).unwrap()
+    serde_json::from_str(include_str!("graph_kat/graph.json")).unwrap()
 }
 
 fn build(k: &Kat) -> Graph {
@@ -84,7 +84,7 @@ fn build(k: &Kat) -> Graph {
     g
 }
 
-fn check_sssp(k: &Kat, want: &[KatRoute], routes: &[Option<tinc_graph::Route>], phase: &str) {
+fn check_sssp(k: &Kat, want: &[KatRoute], routes: &[Option<tincd::graph::Route>], phase: &str) {
     for (i, want) in want.iter().enumerate() {
         let got = &routes[i];
         let ctx = format!("{}{phase}: node {} ({})", k.name, i, k.nodes[i]);
@@ -133,7 +133,7 @@ fn check_sssp(k: &Kat, want: &[KatRoute], routes: &[Option<tinc_graph::Route>], 
 fn check_mst(
     k: &Kat,
     g: &mut Graph,
-    routes: &[Option<tinc_graph::Route>],
+    routes: &[Option<tincd::graph::Route>],
     want: &[u32],
     ctx: &str,
 ) {

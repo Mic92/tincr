@@ -6,7 +6,7 @@ use crate::route::{self, RouteResult, TtlResult, route};
 use crate::tunnel::{MTU, TunnelState};
 use crate::{broadcast, mss, route_mac};
 
-use tinc_graph::{EdgeId, NodeId};
+use crate::graph::{EdgeId, NodeId};
 use tinc_proto::{Request, Subnet};
 
 /// Cap on locally-learned MAC subnets (switch mode).
