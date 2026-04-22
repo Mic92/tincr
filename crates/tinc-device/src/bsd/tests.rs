@@ -64,6 +64,12 @@ fn fake_bsd(fd: OwnedFd, variant: BsdVariant) -> BsdTun {
         fd,
         variant,
         iface: format!("fake-{variant:?}"),
+        // Fake fds (pipe/socketpair) aren't kctl sockets;
+        // `recvmsg_x` would EOPNOTSUPP. Tests exercise the
+        // per-packet path, which is what the batch path falls
+        // back to anyway.
+        #[cfg(target_os = "macos")]
+        batch: None,
     }
 }
 

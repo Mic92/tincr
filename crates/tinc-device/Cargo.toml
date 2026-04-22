@@ -30,8 +30,8 @@ libc = "0.2.184"
 # substitution).
 nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# `log::warn!` for the vnet_hdr feature-detect failures in linux.rs.
+# `log::warn!` for the vnet_hdr feature-detect failures in linux.rs and
+# the `recvmsg_x` runt/ENOSYS debug lines on macOS.
 log = "0.4"
 
 # `ioctl` + `fs` only on macOS, for the utun open path:

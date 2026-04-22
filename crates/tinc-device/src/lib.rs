@@ -179,6 +179,36 @@ pub trait Device: Send {
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         drain_via_read(self, arena, cap)
     }
+
+    /// Stage one frame for a later [`write_flush`]. Backends that can
+    /// batch-inject (Darwin utun via `sendmsg_x`) override this to
+    /// copy into an internal ring; everyone else gets the default,
+    /// which is just [`write`] — i.e. "staging" is a no-op and
+    /// `write_flush` has nothing to do.
+    ///
+    /// Callers MUST pair every burst of `write_stage` with one
+    /// `write_flush` before yielding (the daemon does so at the end
+    /// of each UDP recv batch). Ordering between `write_stage` and a
+    /// direct `write` on the same device is **not** preserved across a
+    /// pending stage; flush first if interleaving.
+    ///
+    /// # Errors
+    /// Same as [`write`] for the default impl. Batching backends may
+    /// defer errors to [`write_flush`].
+    fn write_stage(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.write(buf)
+    }
+
+    /// Ship anything queued by [`write_stage`]. Default: nothing to
+    /// do (the default `write_stage` already wrote).
+    ///
+    /// # Errors
+    /// `io::Error` from the batch syscall. Backends are expected to
+    /// swallow `ENOBUFS`/`EAGAIN` (best-effort inject; inner
+    /// transport retransmits) and replay-then-latch on `ENOSYS`.
+    fn write_flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// `read()`-in-a-loop drain body. Hoisted out of the trait default so

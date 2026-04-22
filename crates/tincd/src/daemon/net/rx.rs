@@ -284,11 +284,25 @@ impl Daemon {
                 // path won't see this packet. GRO offer/TUN write
                 // inline (no &mut self via send_packet_myself; we
                 // own the bucket and the device borrow directly).
-                Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
+                //
+                // No GRO (Darwin utun, no vnet_hdr): use the staged
+                // write so the whole batch ships in one `sendmsg_x`.
+                // Elsewhere `write_stage` IS `write` (trait default).
+                if gro.is_some() {
+                    Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
+                } else if let Err(e) = self.device.write_stage(&mut rx_fast_scratch[..len]) {
+                    log::debug!(target: "tincd::net", "Error writing to device: {e}");
+                }
                 continue;
             }
 
-            // ─── Slow path. Park the bucket in self for the
+            // ─── Slow path. Flush staged TUN writes first so a
+            // slow-path `device.write` doesn't reorder past staged
+            // fast-path frames from the same flow.
+            if let Err(e) = self.device.write_flush() {
+                log::debug!(target: "tincd::net", "device write_flush: {e}");
+            }
+            // Park the bucket in self for the
             // duration of this one packet's journey through
             // handle_incoming_vpn_packet → forward_packet →
             // send_packet_myself. Same out-and-back as `rx_scratch`.
@@ -305,6 +319,9 @@ impl Daemon {
             self.tx_snap = snap;
         }
         self.dp.rx_fast_scratch = rx_fast_scratch;
+        if let Err(e) = self.device.write_flush() {
+            log::debug!(target: "tincd::net", "device write_flush: {e}");
+        }
         if let Some(mut bucket) = gro {
             self.gro_flush(&mut bucket);
             // 64KB stays warm for the next batch.

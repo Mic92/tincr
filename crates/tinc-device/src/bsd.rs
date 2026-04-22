@@ -120,12 +120,22 @@ const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
 
 /// The variant-dispatched BSD backend. `OwnedFd` not `File`: utun is
 /// a `PF_SYSTEM` socket, old TUN/TAP are device nodes.
-#[derive(Debug)]
+///
+/// On macOS the `Utun` variant additionally carries persistent
+/// `recvmsg_x`/`sendmsg_x` scratch (see [`macos_x`]) so `drain()` and
+/// the staged-write path are one syscall per batch instead of one per
+/// packet. Other variants / other BSDs use the trait-default
+/// `read()`-loop drain unchanged.
 pub struct BsdTun {
     fd: OwnedFd,
     variant: BsdVariant,
     iface: String,
+    #[cfg(target_os = "macos")]
+    batch: Option<macos_x::UtunBatch>,
 }
+
+#[cfg(target_os = "macos")]
+mod macos_x;
 
 // Device impl — variant-dispatched read/write
 
@@ -221,6 +231,42 @@ impl Device for BsdTun {
     fn fd(&self) -> Option<BorrowedFd<'_>> {
         Some(self.fd.as_fd())
     }
+
+    /// macOS utun: one `recvmsg_x` for up to `cap` packets. Other
+    /// variants / latched-ENOSYS fall through to the default
+    /// `read()`-loop. Either way the arena slots end up byte-identical
+    /// (same `+10` offset, same eth-header synthesis).
+    #[cfg(target_os = "macos")]
+    fn drain(
+        &mut self,
+        arena: &mut crate::DeviceArena,
+        cap: usize,
+    ) -> io::Result<crate::DrainResult> {
+        if let Some(b) = self.batch.as_mut()
+            && let Some(r) = b.drain(self.fd.as_fd(), arena, cap)
+        {
+            return r;
+        }
+        crate::drain_via_read(self, arena, cap)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_stage(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(b) = self.batch.as_mut()
+            && b.stage(buf)
+        {
+            return Ok(buf.len());
+        }
+        self.write(buf)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_flush(&mut self) -> io::Result<()> {
+        match self.batch.as_mut() {
+            Some(b) => b.flush(self.fd.as_fd()),
+            None => Ok(()),
+        }
+    }
 }
 
 // open() constructors are cfg-gated per target. Tests construct
@@ -247,6 +293,8 @@ mod utun {
     use super::{BsdTun, BsdVariant};
 
     const UTUN_CONTROL_NAME: &str = "com.apple.net.utun_control";
+    /// `if_utun.h`: kctl rcvbuf depth in packets. Default 1.
+    const UTUN_OPT_MAX_PENDING_PACKETS: libc::c_int = 16;
 
     impl BsdTun {
         /// Open a macOS utun device. `unit` is the utun unit number
@@ -277,6 +325,30 @@ mod utun {
             let addr = SysControlAddr::from_name(fd.as_raw_fd(), UTUN_CONTROL_NAME, sc_unit)?;
             connect(fd.as_raw_fd(), &addr)?;
 
+            // UTUN_OPT_MAX_PENDING_PACKETS: kctl rcvbuf depth in
+            // *packets*. Kernel default is 1, which serialises the
+            // daemon to one utun read per round-trip and makes
+            // `recvmsg_x` batching pointless. Non-fatal on error.
+            let depth: u32 = 128;
+            // SAFETY: standard setsockopt(2) shape; `depth` is a live
+            // 4-byte stack value, `optlen` matches. The kernel only
+            // reads through the pointer.
+            #[allow(unsafe_code)]
+            let rc = unsafe {
+                libc::setsockopt(
+                    fd.as_raw_fd(),
+                    libc::SYSPROTO_CONTROL,
+                    UTUN_OPT_MAX_PENDING_PACKETS,
+                    (&raw const depth).cast(),
+                    4,
+                )
+            };
+            if rc != 0 {
+                log::debug!(target: "tinc::device",
+                            "utun: UTUN_OPT_MAX_PENDING_PACKETS rejected: {}",
+                            io::Error::last_os_error());
+            }
+
             // getsockopt(SYSPROTO_CONTROL, UTUN_OPT_IFNAME).
             let iface = getsockopt(&fd, sockopt::UtunIfname)?
                 .to_string_lossy()
@@ -286,6 +358,7 @@ mod utun {
                 fd,
                 variant: BsdVariant::Utun,
                 iface,
+                batch: Some(super::macos_x::UtunBatch::new()),
             })
         }
     }
