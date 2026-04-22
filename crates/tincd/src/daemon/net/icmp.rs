@@ -10,6 +10,20 @@ use tinc_graph::NodeId;
 
 use nix::sys::socket::{AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket};
 
+/// Variant of ICMP error to emit. Ratelimit + ethertype dispatch +
+/// logging live in `emit_icmp`; this enum selects the builder.
+#[derive(Clone, Copy)]
+pub(super) enum IcmpKind {
+    /// Generic unreachable / time-exceeded. `discover_src=true` asks
+    /// `emit_icmp` to fill the ICMP source via `local_ip_facing`
+    /// (TTL-exceeded traceroute hop attribution).
+    Unreach { t: u8, c: u8, discover_src: bool },
+    /// v4 `DEST_UNREACH`/`FRAG_NEEDED` with next-hop MTU.
+    FragNeeded { mtu: u16 },
+    /// v6 `PACKET_TOO_BIG` with next-hop MTU.
+    TooBigV6 { mtu: u32 },
+}
+
 impl Daemon {
     pub(super) fn handle_arp(&mut self, data: &[u8], from: Option<NodeId>) -> bool {
         // ARP from a peer in router mode is a misconfig (their
@@ -113,114 +127,79 @@ impl Daemon {
         }
     }
 
-    /// v4/v6 dispatch on ethertype, not `icmp_type`: `ICMP_DEST_UNREACH`
-    /// =3 collides with `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`).
-    /// data.len()≥14 holds: every caller is `post-route()` (`TooShort`
-    /// gate) or post-decrement_ttl. `discover_src`: do the
-    /// `local_ip_facing` lookup so traceroute shows OUR hop —
-    /// `TIME_EXCEEDED` only; `DEST_UNREACH` uses orig-dst (`None`).
-    pub(super) fn write_icmp_to_device(
+    /// Single entry point for ICMP error synth. v4/v6 dispatch on
+    /// ethertype, not `icmp_type`: `ICMP_DEST_UNREACH`=3 collides with
+    /// `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`). data.len()≥14
+    /// holds: every caller is `post-route()` (`TooShort` gate) or
+    /// post-decrement_ttl. For `Unreach { discover_src: true }`: do
+    /// the `local_ip_facing` lookup so traceroute shows OUR hop —
+    /// `TIME_EXCEEDED` only; plain `DEST_UNREACH` uses orig-dst.
+    pub(super) fn emit_icmp(
         &mut self,
         data: &[u8],
-        icmp_type: u8,
-        icmp_code: u8,
-        discover_src: bool,
+        kind: IcmpKind,
         from: Option<NodeId>,
     ) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return false;
         }
-        // orig src lives at fixed offsets: eth(14)+ip_src(12)=[26..30]
-        // for v4, eth(14)+ip6_src(8)=[22..38] for v6. None on any
-        // failure → falls back to orig-dst-as-src.
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
-        let reply = if ethertype == 0x86DD {
-            // ETH_P_IPV6
-            let src = discover_src
-                .then(|| {
-                    data.get(22..38)
-                        .and_then(|s| <[u8; 16]>::try_from(s).ok())
-                        .map(Ipv6Addr::from)
-                        .and_then(|a| match local_ip_facing(IpAddr::V6(a))? {
-                            IpAddr::V6(v6) => Some(v6.octets()),
-                            IpAddr::V4(_) => None,
-                        })
-                })
-                .flatten();
-            icmp::build_v6_unreachable(data, icmp_type, icmp_code, None, src)
-        } else {
-            let src = discover_src
-                .then(|| {
-                    data.get(26..30)
-                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                        .map(Ipv4Addr::from)
-                        .and_then(|a| match local_ip_facing(IpAddr::V4(a))? {
-                            IpAddr::V4(v4) => Some(v4.octets()),
-                            IpAddr::V6(_) => None,
-                        })
-                })
-                .flatten();
-            icmp::build_v4_unreachable(data, icmp_type, icmp_code, None, src)
+        let is_v6 = ethertype == 0x86DD; // ETH_P_IPV6
+        let reply = match kind {
+            IcmpKind::Unreach { t, c, discover_src } if is_v6 => {
+                // orig src at eth(14)+ip6_src(8)=[22..38].
+                let src = discover_src
+                    .then(|| {
+                        data.get(22..38)
+                            .and_then(|s| <[u8; 16]>::try_from(s).ok())
+                            .map(Ipv6Addr::from)
+                            .and_then(|a| match local_ip_facing(IpAddr::V6(a))? {
+                                IpAddr::V6(v6) => Some(v6.octets()),
+                                IpAddr::V4(_) => None,
+                            })
+                    })
+                    .flatten();
+                icmp::build_v6_unreachable(data, t, c, None, src)
+            }
+            IcmpKind::Unreach { t, c, discover_src } => {
+                // orig src at eth(14)+ip_src(12)=[26..30].
+                let src = discover_src
+                    .then(|| {
+                        data.get(26..30)
+                            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                            .map(Ipv4Addr::from)
+                            .and_then(|a| match local_ip_facing(IpAddr::V4(a))? {
+                                IpAddr::V4(v4) => Some(v4.octets()),
+                                IpAddr::V6(_) => None,
+                            })
+                    })
+                    .flatten();
+                icmp::build_v4_unreachable(data, t, c, None, src)
+            }
+            IcmpKind::FragNeeded { mtu } => icmp::build_v4_unreachable(
+                data,
+                route::ICMP_DEST_UNREACH,
+                route::ICMP_FRAG_NEEDED,
+                Some(mtu),
+                None,
+            ),
+            IcmpKind::TooBigV6 { mtu } => icmp::build_v6_unreachable(
+                data,
+                route::ICMP6_PACKET_TOO_BIG,
+                0,
+                Some(mtu),
+                None,
+            ),
         };
-        if let Some(reply) = reply {
+        let Some(reply) = reply else {
             log::debug!(target: "tincd::net",
-                        "route: sending ICMP type={icmp_type} \
-                         code={icmp_code} ({} bytes)", reply.len());
-            self.write_icmp_reply(reply, from)
-        } else {
-            false
-        }
-    }
-
-    /// v4 `FRAG_NEEDED`. Separate helper: passes `frag_mtu` through.
-    pub(super) fn write_icmp_frag_needed(
-        &mut self,
-        data: &[u8],
-        frag_mtu: u16,
-        from: Option<NodeId>,
-    ) -> bool {
-        let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
-        if self.icmp_ratelimit.should_drop(now_sec, 3) {
+                        "route: ICMP synth failed (short input)");
             return false;
-        }
-        if let Some(reply) = icmp::build_v4_unreachable(
-            data,
-            route::ICMP_DEST_UNREACH,
-            route::ICMP_FRAG_NEEDED,
-            Some(frag_mtu),
-            None,
-        ) {
-            log::debug!(target: "tincd::net",
-                        "route: FRAG_NEEDED, mtu={frag_mtu} ({} bytes)",
-                        reply.len());
-            self.write_icmp_reply(reply, from)
-        } else {
-            false
-        }
-    }
-
-    /// v6 `PACKET_TOO_BIG`.
-    pub(super) fn write_icmp_pkt_too_big(
-        &mut self,
-        data: &[u8],
-        mtu: u32,
-        from: Option<NodeId>,
-    ) -> bool {
-        let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
-        if self.icmp_ratelimit.should_drop(now_sec, 3) {
-            return false;
-        }
-        if let Some(reply) =
-            icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu), None)
-        {
-            log::debug!(target: "tincd::net",
-                        "route: PACKET_TOO_BIG, mtu={mtu} ({} bytes)",
-                        reply.len());
-            self.write_icmp_reply(reply, from)
-        } else {
-            false
-        }
+        };
+        log::debug!(target: "tincd::net",
+                    "route: sending ICMP ({} bytes)", reply.len());
+        self.write_icmp_reply(reply, from)
     }
 
     /// `from = Some(peer)`: packet originated from the mesh, so the

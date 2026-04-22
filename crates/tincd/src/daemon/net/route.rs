@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::route::{self, RouteResult, TtlResult, route};
 use crate::tunnel::{MTU, TunnelState};
-use crate::{broadcast, icmp, mss, route_mac};
+use crate::{broadcast, mss, route_mac};
 
 use tinc_graph::{EdgeId, NodeId};
 use tinc_proto::{Request, Subnet};
@@ -320,35 +320,15 @@ impl Daemon {
             RouteResult::Unreachable {
                 icmp_type,
                 icmp_code,
-            } => {
-                // ratelimit(3), keyed on same-second.
-                let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
-                if self.icmp_ratelimit.should_drop(now_sec, 3) {
-                    log::debug!(target: "tincd::net",
-                                "route: unreachable (type={icmp_type} \
-                                 code={icmp_code}), rate-limited");
-                    return false;
-                }
-                // v4/v6 dispatch on ethertype here (bug audit
-                // `deef1268`). data.len() ≥ 14 guaranteed: route()
-                // returns TooShort for shorter.
-                let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                let reply = if ethertype == 0x86DD {
-                    // ETH_P_IPV6
-                    icmp::build_v6_unreachable(data, icmp_type, icmp_code, None, None)
-                } else {
-                    icmp::build_v4_unreachable(data, icmp_type, icmp_code, None, None)
-                };
-                let Some(reply) = reply else {
-                    log::debug!(target: "tincd::net",
-                                "route: unreachable, ICMP synth failed (short input)");
-                    return false;
-                };
-                log::debug!(target: "tincd::net",
-                            "route: unreachable, sending ICMP type={icmp_type} \
-                             code={icmp_code} ({} bytes)", reply.len());
-                self.write_icmp_reply(reply, from)
-            }
+            } => self.emit_icmp(
+                data,
+                super::icmp::IcmpKind::Unreach {
+                    t: icmp_type,
+                    c: icmp_code,
+                    discover_src: false,
+                },
+                from,
+            ),
             RouteResult::NeighborSolicit => {
                 self.handle_ndp(data, from);
                 false
@@ -416,7 +396,11 @@ impl Daemon {
                 } else {
                     (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
                 };
-                return self.write_icmp_to_device(data, t, c, false, from);
+                return self.emit_icmp(
+                    data,
+                    super::icmp::IcmpKind::Unreach { t, c, discover_src: false },
+                    from,
+                );
             }
             return false;
         }
@@ -458,7 +442,11 @@ impl Daemon {
             } else {
                 (route::ICMP6_DST_UNREACH, route::ICMP6_DST_UNREACH_ADMIN)
             };
-            return self.write_icmp_to_device(data, t, c, false, from);
+            return self.emit_icmp(
+                data,
+                super::icmp::IcmpKind::Unreach { t, c, discover_src: false },
+                from,
+            );
         }
         // Packet too big for next hop's PMTU. Only when
         // relaying (clamp_mss + kernel PMTU handle our own
@@ -488,7 +476,11 @@ impl Daemon {
                     if df_set {
                         // limit-14 = IP-layer MTU. limit≥590
                         // so sub never wraps.
-                        return self.write_icmp_frag_needed(data, limit - 14, from);
+                        return self.emit_icmp(
+                            data,
+                            super::icmp::IcmpKind::FragNeeded { mtu: limit - 14 },
+                            from,
+                        );
                     }
                     // RFC 791 §2.3: routers MUST fragment.
                     // Rare path (modern OS sets DF on TCP)
@@ -520,7 +512,11 @@ impl Daemon {
                     return nw;
                 }
                 // v6: no in-transit frag (RFC 8200 §5).
-                return self.write_icmp_pkt_too_big(data, u32::from(limit - 14), from);
+                return self.emit_icmp(
+                    data,
+                    super::icmp::IcmpKind::TooBigV6 { mtu: u32::from(limit - 14) },
+                    from,
+                );
             }
         }
 
@@ -541,7 +537,15 @@ impl Daemon {
                     icmp_type,
                     icmp_code,
                 } => {
-                    return self.write_icmp_to_device(data, icmp_type, icmp_code, true, from);
+                    return self.emit_icmp(
+                        data,
+                        super::icmp::IcmpKind::Unreach {
+                            t: icmp_type,
+                            c: icmp_code,
+                            discover_src: true,
+                        },
+                        from,
+                    );
                 }
             }
         }
