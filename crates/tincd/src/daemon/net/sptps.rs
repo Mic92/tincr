@@ -709,7 +709,12 @@ impl Daemon {
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
             #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
             let at_len = origlen as u16;
-            super::helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay_nid, at_len);
+            super::helpers::handle_udp_emsgsize(
+                &mut self.dp.tunnels,
+                &self.graph,
+                relay_nid,
+                at_len,
+            );
         } else {
             let relay_name = self.node_log_name(relay_nid);
             log::warn!(target: "tincd::net",

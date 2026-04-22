@@ -134,12 +134,7 @@ impl Daemon {
     /// post-decrement_ttl. For `Unreach { discover_src: true }`: do
     /// the `local_ip_facing` lookup so traceroute shows OUR hop —
     /// `TIME_EXCEEDED` only; plain `DEST_UNREACH` uses orig-dst.
-    pub(super) fn emit_icmp(
-        &mut self,
-        data: &[u8],
-        kind: IcmpKind,
-        from: Option<NodeId>,
-    ) -> bool {
+    pub(super) fn emit_icmp(&mut self, data: &[u8], kind: IcmpKind, from: Option<NodeId>) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return false;
@@ -184,13 +179,9 @@ impl Daemon {
                 Some(mtu),
                 None,
             ),
-            IcmpKind::TooBigV6 { mtu } => icmp::build_v6_unreachable(
-                data,
-                route::ICMP6_PACKET_TOO_BIG,
-                0,
-                Some(mtu),
-                None,
-            ),
+            IcmpKind::TooBigV6 { mtu } => {
+                icmp::build_v6_unreachable(data, route::ICMP6_PACKET_TOO_BIG, 0, Some(mtu), None)
+            }
         };
         let Some(reply) = reply else {
             log::debug!(target: "tincd::net",

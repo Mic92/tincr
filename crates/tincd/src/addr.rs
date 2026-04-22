@@ -63,7 +63,7 @@ mod tests {
     /// (std's `Ipv6Addr::is_loopback` is `false` for
     /// `::ffff:127.0.0.1`); RFC1918/ULA must pass. The plain
     /// loopback/link-local cases are covered end-to-end by
-    /// `discovery::tests::parse_record_filters_unwanted_addr_classes`.
+    /// `discovery::record::tests::parse_record_filters_unwanted_addr_classes`.
     #[test]
     fn v4_mapped_and_private_ranges() {
         let drop = |s: &str| is_unwanted_dial_target(s.parse().unwrap());

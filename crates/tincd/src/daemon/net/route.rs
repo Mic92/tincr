@@ -398,7 +398,11 @@ impl Daemon {
                 };
                 return self.emit_icmp(
                     data,
-                    super::icmp::IcmpKind::Unreach { t, c, discover_src: false },
+                    super::icmp::IcmpKind::Unreach {
+                        t,
+                        c,
+                        discover_src: false,
+                    },
                     from,
                 );
             }
@@ -444,7 +448,11 @@ impl Daemon {
             };
             return self.emit_icmp(
                 data,
-                super::icmp::IcmpKind::Unreach { t, c, discover_src: false },
+                super::icmp::IcmpKind::Unreach {
+                    t,
+                    c,
+                    discover_src: false,
+                },
                 from,
             );
         }
@@ -514,7 +522,9 @@ impl Daemon {
                 // v6: no in-transit frag (RFC 8200 §5).
                 return self.emit_icmp(
                     data,
-                    super::icmp::IcmpKind::TooBigV6 { mtu: u32::from(limit - 14) },
+                    super::icmp::IcmpKind::TooBigV6 {
+                        mtu: u32::from(limit - 14),
+                    },
                     from,
                 );
             }

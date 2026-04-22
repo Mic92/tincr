@@ -92,22 +92,30 @@
 
 #![forbid(unsafe_code)]
 
-#[path = "discovery/blind.rs"]
 pub mod blind;
+mod netif;
+mod persist;
+mod probe;
+mod record;
+mod worker;
 
-use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::path::Path;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
-use chacha20poly1305::aead::{Aead, Payload};
-use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 use mainline::{Dht, MutableItem};
-use rand_core::{OsRng, RngCore};
 
 use tinc_crypto::sign::SigningKey;
 
-use blind::{BlindSigner, Derived, blind_public_key, current_period, derive};
+use blind::{BlindSigner, Derived, current_period, derive};
+use netif::enumerate_v6;
+use probe::PROBE_KEEPALIVE;
+use record::encode_bep44_signable;
+use worker::{DhtWorker, WorkerReq, WorkerRes};
+
+pub use persist::{load_persisted_nodes, save_persisted_nodes};
+pub use probe::{PORT_PROBE_PING, parse_port_probe_reply};
+pub use record::{AEAD_OVERHEAD, ParsedRecord, open_record, parse_record, seal_record};
+pub use worker::resolve_plaintext;
 
 /// Mainline's hardcoded seed nodes. Vendored: `mainline::rpc` is
 /// `pub(crate)` in 6.0.x and the const isn't re-exported. Kept here so
@@ -122,12 +130,6 @@ pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
     "relay.pkarr.org:6881",
 ];
 
-/// Cap on routing-table addrs written to `dht_nodes`. Transmission's
-/// `dht.dat` keeps the full table (~hundreds); 100 is plenty to skip
-/// the DNS-seed round-trip on restart and small enough to not care
-/// about atomic-rename.
-const MAX_PERSISTED_NODES: usize = 100;
-
 /// Re-publish interval. Mainline mutable items expire after ~2h of no
 /// republish; iroh uses 5min. We match. The BEP 44 `seq` field (monotonic
 /// timestamp) lets DHT nodes drop stale puts cleanly.
@@ -138,62 +140,9 @@ const REPUBLISH_INTERVAL: Duration = Duration::from_secs(300);
 /// still publishes its v6 instead of never). Live on retiolum: eve's
 /// first `tick()` ran before the port-probe reply landed, published a
 /// v6-only record, set `last_publish`, and the v4 didn't appear in the
-/// DHT for another 5 min — a peer bootstrapping purely from DHT waited
+/// DHT for another 5 min — a peer bootstrapping purely from DHT waited
 /// the full republish interval for a dialable addr.
 const FIRST_PUBLISH_GRACE: Duration = Duration::from_secs(30);
-
-/// Port-probe re-send interval. UDP conntrack timeout floors: netfilter
-/// default 30s (unreplied) / 180s (assured), consumer routers 30–60s, CGNAT
-/// 30s. The seed *did* reply so we're in "assured" on most NATs, but a
-/// paranoid box might track per-direction. 25s sits under everything.
-const PROBE_KEEPALIVE: Duration = Duration::from_secs(25);
-
-/// How many DHT nodes to probe per round. One honest reply is enough; three
-/// covers transient packet loss. The full-cone hole is per-mapping, not
-/// per-destination, so probing more nodes doesn't open more holes — it
-/// just gets us more chances at the echo.
-const PROBE_FANOUT: usize = 3;
-
-/// `v` envelope: 6-byte magic ‖ 24-byte `XChaCha` nonce ‖ ciphertext ‖ 16-byte
-/// Poly1305 tag. Magic lets `open_record` reject garbage / future versions
-/// before spending an AEAD-open.
-const MAGIC: &[u8; 6] = b"tincE1";
-const NONCE_LEN: usize = 24;
-const TAG_LEN: usize = 16;
-/// Bytes added on top of the inner `"tinc1 …"` plaintext.
-pub const AEAD_OVERHEAD: usize = MAGIC.len() + NONCE_LEN + TAG_LEN;
-
-/// BEP 5 KRPC `ping` query, hand-rolled bencode. 58 bytes, fixed.
-///
-/// `a.id` is 20 zero bytes: `ping` responses don't depend on requester id,
-/// and a zero id fails BEP 42's secure-id check so we're omitted from the
-/// responder's routing table (intended — we're a freeloader). `t=b"tnc1"`
-/// is arbitrary; the daemon demuxes replies on source addr, not tid.
-pub const PORT_PROBE_PING: &[u8; 58] = b"d1:ad2:id20:\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
-      \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
-      e1:q4:ping1:t4:tnc11:y1:qe";
-
-/// Parse the BEP 42 `ip` field out of a KRPC response. Substring scan,
-/// not full bencode decode: bencode dict keys are sorted, so `ip` is
-/// always at offset 1 in conformant replies; the scan tolerates encoders
-/// that don't sort. P(false-match in the 20-byte id) ≈ 5×10⁻¹⁴, and the
-/// daemon's source-addr gate is the real defence anyway.
-///
-/// `mainline` unconditionally fills `ip`; libtorrent/transmission have
-/// since ~2015. Nodes that omit it → `None` → retry next round.
-#[must_use]
-pub fn parse_port_probe_reply(pkt: &[u8]) -> Option<SocketAddrV4> {
-    const MARKER: &[u8; 6] = b"2:ip6:";
-    if pkt.first() != Some(&b'd') {
-        return None;
-    }
-    let idx = pkt.windows(6).position(|w| w == MARKER)?;
-    let payload = pkt.get(idx + 6..idx + 12)?;
-    // BEP 42 `ip` encoding: 4 octets + 2-byte big-endian port.
-    let ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
-    let port = u16::from_be_bytes([payload[4], payload[5]]);
-    Some(SocketAddrV4::new(ip, port))
-}
 
 /// What `Discovery::tick` learned this period.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,110 +248,6 @@ struct Epoch {
     period: u64,
     signer: BlindSigner,
     derived: Derived,
-}
-
-/// Requests from the epoll thread into `tinc-dht`.
-enum WorkerReq {
-    /// Refresh cached `info()` + `to_bootstrap()`.
-    Snapshot,
-    /// Fire-and-forget BEP44 put. (item, seq, plaintext-for-log)
-    Publish(MutableItem, i64, String),
-    /// Background resolve. (`node_name`, `peer_ed25519_pk`)
-    Resolve(String, [u8; 32]),
-}
-
-/// Results from `tinc-dht` back to the epoll thread. Drained
-/// non-blocking in `tick()`.
-enum WorkerRes {
-    Snapshot {
-        vote: Option<Ipv4Addr>,
-        firewalled: bool,
-        /// `to_bootstrap()` filtered to v4, capped at `PROBE_FANOUT`.
-        targets: Vec<SocketAddrV4>,
-    },
-    /// `ok=false` ⇒ `put_mutable` returned `Err`; seq/value echoed so
-    /// `tick()` can log + apply backoff without re-building.
-    Published {
-        ok: bool,
-        seq: i64,
-        value: String,
-    },
-    Resolved(String, Vec<SocketAddr>),
-}
-
-/// Background thread that owns **every** call into `mainline::Dht` on the
-/// hot path. The mainline actor processes one `ActorMessage` per
-/// `rpc.tick()`, and `rpc.tick()` blocks up to 50 ms in `recv_from` — so
-/// even `info()` floors at ~50 ms, and `put_mutable` is an iterative
-/// `find_node`+store that takes seconds (or times out at ~2 s when the
-/// firewall drops replies). Serialising all of that here means the epoll
-/// thread never parks on a futex waiting for the actor. The `Dht` handle
-/// is a `flume::Sender` clone — same actor the daemon's shutdown-time
-/// `routing_nodes()` talks to.
-struct DhtWorker {
-    req_tx: flume::Sender<WorkerReq>,
-    res_rx: flume::Receiver<WorkerRes>,
-    /// Names with a `Resolve` inflight or pending in `resolved_buf`.
-    /// Dedup: the retry backoff is seconds, the query is sub-second; a
-    /// second enqueue before drain is pure waste.
-    inflight: HashSet<String>,
-    /// `Discovery` drop → `req_tx` drops → worker's `recv()` returns
-    /// `Disconnected` → thread returns.
-    _join: std::thread::JoinHandle<()>,
-}
-
-impl DhtWorker {
-    fn spawn(dht: Dht, secret: Option<[u8; 32]>, period_fn: fn() -> u64) -> Self {
-        let (req_tx, req_rx) = flume::unbounded::<WorkerReq>();
-        let (res_tx, res_rx) = flume::unbounded::<WorkerRes>();
-        let join = std::thread::Builder::new()
-            .name("tinc-dht".into())
-            .spawn(move || {
-                while let Ok(req) = req_rx.recv() {
-                    let res = match req {
-                        WorkerReq::Snapshot => {
-                            let info = dht.info();
-                            let targets = dht
-                                .to_bootstrap()
-                                .into_iter()
-                                .filter_map(|s| s.parse().ok())
-                                .take(PROBE_FANOUT)
-                                .collect();
-                            WorkerRes::Snapshot {
-                                vote: info.public_address().map(|sa| *sa.ip()),
-                                firewalled: info.firewalled(),
-                                targets,
-                            }
-                        }
-                        WorkerReq::Publish(item, seq, value) => {
-                            // Blocks here — seconds. CAS=None: two
-                            // daemons sharing a key just thrash; not
-                            // our problem.
-                            let ok = dht.put_mutable(item, None).is_ok();
-                            WorkerRes::Published { ok, seq, value }
-                        }
-                        WorkerReq::Resolve(name, key) => {
-                            let direct = resolve_plaintext(&dht, &key, secret.as_ref(), period_fn)
-                                .map(|v| parse_record(&v).direct)
-                                .unwrap_or_default();
-                            // Send even on miss: daemon needs to clear
-                            // inflight so the *next* retry can re-queue.
-                            WorkerRes::Resolved(name, direct)
-                        }
-                    };
-                    if res_tx.send(res).is_err() {
-                        return;
-                    }
-                }
-            })
-            .expect("tinc-dht thread spawn");
-        Self {
-            req_tx,
-            res_rx,
-            inflight: HashSet::new(),
-            _join: join,
-        }
-    }
 }
 
 impl Discovery {
@@ -692,11 +537,11 @@ impl Discovery {
         // on having a dialable v4/tcp (`ready`): the port-probe and the
         // PCP mapping both arrive seconds after spawn; publishing before
         // them puts a v6-only record in the DHT and then the
-        // `REPUBLISH_INTERVAL` gate keeps the v4 out for 5 min.
+        // `REPUBLISH_INTERVAL` gate keeps the v4 out for 5 min.
         // `reflexive_dirty` is set by `set_reflexive_v4` /
         // `set_portmapped_tcp{,6}` and bypasses both gates, so the
         // first useful address triggers an immediate publish anyway.
-        // The 30 s grace lets a host that will *never* get v4/tcp
+        // The 30 s grace lets a host that will *never* get v4/tcp
         // (v6-only, no PCP) publish its v6 rather than stay silent.
         let due = self
             .last_publish
@@ -820,376 +665,9 @@ impl Discovery {
     }
 }
 
-/// Read the persisted routing-table file (one `ip:port` per line, same
-/// shape as the addrcache). Missing / unreadable / unparseable → empty
-/// + debug log; the file is a warm-start hint, never load-bearing.
-#[must_use]
-pub fn load_persisted_nodes(path: &Path) -> Vec<String> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => s
-            .lines()
-            .map(str::trim)
-            // Reject anything that doesn't parse as a v4 sockaddr:
-            // mainline's `to_socket_address` would skip it anyway, and
-            // this keeps a corrupted file from feeding garbage to DNS.
-            .filter(|l| l.parse::<SocketAddrV4>().is_ok())
-            .take(MAX_PERSISTED_NODES)
-            .map(String::from)
-            .collect(),
-        Err(e) => {
-            log::debug!(target: "tincd::discovery",
-                        "dht_nodes load {}: {e} (cold bootstrap)", path.display());
-            Vec::new()
-        }
-    }
-}
-
-/// Write up to [`MAX_PERSISTED_NODES`] routing-table addrs, one per
-/// line. Best-effort; caller logs on `Err`.
-///
-/// # Errors
-/// Propagates `create_dir_all` / `write` failures (read-only state dir,
-/// disk full). The caller treats this as non-fatal.
-pub fn save_persisted_nodes(path: &Path, nodes: &[String]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut buf = String::new();
-    for n in nodes.iter().take(MAX_PERSISTED_NODES) {
-        buf.push_str(n);
-        buf.push('\n');
-    }
-    std::fs::write(path, buf)
-}
-
-/// `getifaddrs()` filtered to v6 global unicast (`2000::/3`). Stable
-/// `Ipv6Addr::is_unicast_global` is feature-gated; `(s0 & 0xe000) ==
-/// 0x2000` is the same predicate. RFC 4941 temp addrs aren't skipped
-/// (`IFA_F_TEMPORARY` not surfaced) — they rotate daily, the 5-min
-/// republish catches it.
-fn enumerate_v6() -> Vec<Ipv6Addr> {
-    let Ok(ifaces) = if_addrs::get_if_addrs() else {
-        return Vec::new();
-    };
-    ifaces
-        .into_iter()
-        .filter_map(|iface| match iface.addr {
-            if_addrs::IfAddr::V6(v6) => {
-                let ip = v6.ip;
-                let s0 = ip.segments()[0];
-                ((s0 & 0xe000) == 0x2000).then_some(ip)
-            }
-            if_addrs::IfAddr::V4(_) => None,
-        })
-        .collect()
-}
-
-/// Seal the inner `"tinc1 …"` plaintext for publish. Random 192-bit
-/// nonce per put (`XChaCha` → birthday bound is irrelevant at one put per
-/// 5 min). `aad = seq_be8`: the storer can't splice an old ciphertext
-/// under a newer seq without the AEAD-open failing.
-#[allow(clippy::missing_panics_doc)] // encrypt() only errs on >4GiB input
-#[must_use]
-pub fn seal_record(d: &Derived, seq: i64, plaintext: &[u8]) -> Vec<u8> {
-    let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
-    let ct = XChaCha20Poly1305::new((&d.aead_key).into())
-        .encrypt(
-            (&nonce).into(),
-            Payload {
-                msg: plaintext,
-                aad: &seq.to_be_bytes(),
-            },
-        )
-        .expect("XChaCha20-Poly1305 encrypt is infallible for <4GiB inputs");
-    let mut out = Vec::with_capacity(AEAD_OVERHEAD + plaintext.len());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
-    out
-}
-
-/// Reverse of [`seal_record`]. `None` on wrong magic, short input, or
-/// AEAD failure (wrong key / wrong seq / tampered). Caller treats all
-/// three as "miss".
-#[must_use]
-pub fn open_record(d: &Derived, seq: i64, sealed: &[u8]) -> Option<Vec<u8>> {
-    if sealed.len() < AEAD_OVERHEAD || &sealed[..MAGIC.len()] != MAGIC {
-        return None;
-    }
-    let nonce = &sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN];
-    let ct = &sealed[MAGIC.len() + NONCE_LEN..];
-    XChaCha20Poly1305::new((&d.aead_key).into())
-        .decrypt(
-            nonce.into(),
-            Payload {
-                msg: ct,
-                aad: &seq.to_be_bytes(),
-            },
-        )
-        .ok()
-}
-
-/// One-period fetch + open. Factored so the sync `resolve()`, the
-/// background `Resolver` thread, and `tinc-dht-seed --resolve` share the
-/// exact same query → verify → decrypt sequence.
-///
-/// mainline's `get_mutable` iterator yields whatever each responder
-/// hands back, in arrival order, with the signature checked against the
-/// *responder-supplied* `k` (`rpc.rs` → `from_dht_message`). Two hazards:
-///
-/// 1. A hostile node on the iterative path can return a self-signed
-///    item under its own key. The AEAD layer rejects that (it doesn't
-///    know `pk_A` ⇒ wrong `enc_key`), but filtering on `item.key()`
-///    keeps the debug log honest and lets us still reach the genuine
-///    item later in the stream.
-/// 2. A stale or replaying node can return a *genuine* older record
-///    (lower seq, decrypts fine) before a fresh one arrives. Draining
-///    the iterator and picking `max(seq)` makes us converge to the
-///    publisher's most-recent put rather than first-responder's view.
-///
-/// `Dht::get_mutable_most_recent` exists but compares `seq` with `==`
-/// (only breaks ties, never advances), so we hand-roll the reduction.
-fn fetch_and_open(
-    dht: &Dht,
-    peer_pk: &[u8; 32],
-    secret: Option<&[u8; 32]>,
-    period: u64,
-) -> Option<String> {
-    let blind_pk = blind_public_key(peer_pk, period)?;
-    let d = derive(peer_pk, secret, period);
-    let item = dht
-        .get_mutable(&blind_pk, Some(&d.salt), None)
-        .filter(|i| i.key() == &blind_pk)
-        .max_by_key(MutableItem::seq)?;
-    let pt = open_record(&d, item.seq(), item.value()).or_else(|| {
-        log::debug!(target: "tincd::discovery",
-                    "AEAD open failed for period {period} (wrong DhtSecret?)");
-        None
-    })?;
-    String::from_utf8(pt).ok()
-}
-
-/// Try `period_fn()` then `period_fn()-1`. Returns the inner plaintext
-/// (`"tinc1 …"`) on hit. Used by `tinc-dht-seed --resolve` so the NixOS
-/// test can grep `v4=` without re-implementing the crypto.
-#[must_use]
-pub fn resolve_plaintext(
-    dht: &Dht,
-    peer_pk: &[u8; 32],
-    secret: Option<&[u8; 32]>,
-    period_fn: fn() -> u64,
-) -> Option<String> {
-    let p = period_fn();
-    fetch_and_open(dht, peer_pk, secret, p).or_else(|| {
-        // p==0 only on a box with epoch-time clock; don't double-query.
-        (p > 0)
-            .then(|| fetch_and_open(dht, peer_pk, secret, p - 1))
-            .flatten()
-    })
-}
-
-/// BEP 44 signable encoding. Vendored — mainline's `encode_signable` is
-/// `pub fn` in a non-`pub mod`. NOT a full bencode dict (no `d`/`e`
-/// wrapping); just the sorted fragment DHT nodes verify against.
-fn encode_bep44_signable(seq: i64, value: &[u8], salt: Option<&[u8]>) -> Vec<u8> {
-    let mut signable = Vec::new();
-    if let Some(salt) = salt {
-        signable.extend(format!("4:salt{}:", salt.len()).into_bytes());
-        signable.extend(salt);
-    }
-    signable.extend(format!("3:seqi{seq}e1:v{}:", value.len()).into_bytes());
-    signable.extend(value);
-    signable
-}
-
-/// Parse a record value. Tolerant: unknown keys + malformed addrs
-/// skipped. v6 sorted before v4 in trial order (no NAT, more likely
-/// to just work).
-#[must_use]
-pub fn parse_record(value: &str) -> ParsedRecord {
-    let mut out = ParsedRecord::default();
-    let mut iter = value.split_ascii_whitespace();
-
-    if iter.next() != Some("tinc1") {
-        return out;
-    }
-
-    for field in iter {
-        let Some((k, v)) = field.split_once('=') else {
-            continue;
-        };
-        // Address-class gate: the record is peer-authored (and, on
-        // the unauthenticated DHT path, attacker-authored). Never let
-        // loopback / unspecified / multicast / link-local reach the
-        // dial queue. RFC1918/ULA pass — see `addr` module docs.
-        match k {
-            "v4" => {
-                if let Ok(sa) = v.parse::<SocketAddr>()
-                    && !crate::addr::is_unwanted_dial_addr(&sa)
-                {
-                    out.direct.push(sa);
-                }
-            }
-            "v6" => {
-                // `[addr]:port` — std parser handles the brackets.
-                if let Ok(sa) = v.parse::<SocketAddrV6>()
-                    && !crate::addr::is_unwanted_dial_target(IpAddr::V6(*sa.ip()))
-                {
-                    // Prepend: v6 first in trial order.
-                    out.direct.insert(0, SocketAddr::V6(sa));
-                }
-            }
-            "tcp" | "tcp6" => {
-                if let Ok(sa) = v.parse::<SocketAddr>()
-                    && !crate::addr::is_unwanted_dial_addr(&sa)
-                {
-                    // Either AF is a router-installed accept rule ⇒
-                    // best direct-dial candidate. `.tcp` keeps only
-                    // the first seen (publish order is tcp, tcp6).
-                    if out.tcp.is_none() {
-                        out.tcp = Some(sa);
-                    }
-                    // Also a direct-dial candidate: outgoing meta-
-                    // conns are TCP, and a portmapped address is the
-                    // *most* likely to accept (no punch needed).
-                    // Prepend so it's tried first.
-                    out.direct.insert(0, sa);
-                }
-            }
-            _ => {} // unknown key — skip, forward-compat
-        }
-    }
-    out
-}
-
-/// Addresses extracted from a peer's published record.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ParsedRecord {
-    /// Direct-dial candidates (tcp/v6 first, then v4). Feed to
-    /// `addr_cache.known` alongside `ADD_EDGE`'s.
-    pub direct: Vec<SocketAddr>,
-    /// Router-installed TCP DNAT (UPnP/NAT-PMP). Subset of `direct`
-    /// surfaced separately so callers that distinguish "dialable
-    /// without punch" from "punch hint" can.
-    pub tcp: Option<SocketAddr>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// D2 regression: peer-authored record must not smuggle
-    /// loopback/unspecified/link-local into the dial queue, but
-    /// RFC1918 stays (flat-LAN meshes are a supported topology).
-    #[test]
-    fn parse_record_filters_unwanted_addr_classes() {
-        let rec = parse_record(
-            "tinc1 tcp=127.0.0.1:22 v4=10.0.0.1:445 v4=0.0.0.0:1 \
-             v6=[::1]:80 v6=[fe80::1]:655 v6=[fd00::1]:655",
-        );
-        let direct: Vec<String> = rec.direct.iter().map(ToString::to_string).collect();
-        // Dropped:
-        for bad in ["127.0.0.1:22", "0.0.0.0:1", "[::1]:80", "[fe80::1]:655"] {
-            assert!(
-                !direct.iter().any(|s| s == bad),
-                "{bad} leaked into .direct"
-            );
-        }
-        assert!(rec.tcp.is_none(), "loopback tcp= must not populate .tcp");
-        // Kept:
-        assert!(direct.iter().any(|s| s == "10.0.0.1:445"));
-        assert!(direct.iter().any(|s| s == "[fd00::1]:655"));
-    }
-
-    /// What `testnet_port_probe_roundtrip` can't reach: out-of-spec
-    /// inputs (mainline always sorts, always fills `ip`).
-    #[test]
-    fn port_probe_reply_parse_edges() {
-        // Unsorted keys (`ip` not at offset 1): scan still finds it.
-        let unsorted: Vec<u8> =
-            [b"d1:y1:r2:ip6:".as_ref(), &[10, 20, 30, 40, 0, 80], b"e"].concat();
-        assert_eq!(
-            parse_port_probe_reply(&unsorted),
-            Some("10.20.30.40:80".parse().unwrap())
-        );
-        // No `ip` (responder doesn't implement BEP 42): None.
-        assert_eq!(
-            parse_port_probe_reply(b"d1:rd2:id20:....................e1:y1:re"),
-            None
-        );
-    }
-
-    /// Hand-rolled `PORT_PROBE_PING` → real `serde_bencode` deserializer →
-    /// real mainline server → real `serde_bencode` serializer → our
-    /// `windows(6)` scanner. No mocks. If either end of the contract
-    /// drifts, this catches it.
-    #[test]
-    fn testnet_port_probe_roundtrip() {
-        use mainline::Testnet;
-        use std::net::UdpSocket;
-
-        let testnet = Testnet::new(1).expect("testnet");
-        let target: SocketAddr = testnet.bootstrap[0].parse().expect("testnet addr");
-
-        // recvfrom timeout: a busted PORT_PROBE_PING gets silently
-        // dropped, becomes a test failure not a hang.
-        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind");
-        sock.set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set_read_timeout");
-        let local = match sock.local_addr().expect("local_addr") {
-            SocketAddr::V4(a) => a,
-            SocketAddr::V6(_) => unreachable!("bound to 127.0.0.1"),
-        };
-
-        sock.send_to(PORT_PROBE_PING, target).expect("send_to");
-
-        let mut buf = [0u8; 256];
-        let (n, from) = sock.recv_from(&mut buf).expect(
-            "no reply from testnet — PORT_PROBE_PING bencode \
-             likely rejected by mainline's deserializer",
-        );
-        assert_eq!(from, target, "reply from wrong source");
-
-        let echoed =
-            parse_port_probe_reply(&buf[..n]).expect("reply lacks `ip` field (or scan is wrong)");
-        assert_eq!(
-            echoed, local,
-            "BEP 42 echo mismatch — \
-             check sockaddr_to_bytes encoding (port endianness?)"
-        );
-    }
-
-    /// `seal_record`/`open_record` envelope properties. No DHT.
-    #[test]
-    fn seal_open_roundtrip() {
-        let pk = *SigningKey::from_seed(&[3u8; 32]).public_key();
-        let d = derive(&pk, Some(&[0x11; 32]), 5000);
-        let plain = b"tinc1 v4=203.0.113.7:44132";
-        let sealed = seal_record(&d, 42, plain);
-
-        assert!(sealed.starts_with(MAGIC), "magic prefix");
-        assert_eq!(
-            sealed.len(),
-            AEAD_OVERHEAD + plain.len(),
-            "overhead is exactly 46B"
-        );
-        assert_eq!(open_record(&d, 42, &sealed).as_deref(), Some(&plain[..]));
-
-        // aad=seq binds: storer can't replay old ct under bumped seq.
-        assert!(open_record(&d, 43, &sealed).is_none(), "seq+1 → fail");
-
-        // Wrong AEAD key → fail. Covers both "wrong DhtSecret" and
-        // "hostile node self-signed forgery" (different pk_A): both
-        // reduce to a different `derive()` output, and `open_record`
-        // doesn't distinguish.
-        let d_wrong = derive(&pk, Some(&[0x22; 32]), 5000);
-        assert!(open_record(&d_wrong, 42, &sealed).is_none());
-
-        // Garbage / truncated.
-        assert!(open_record(&d, 42, b"tinc1 v4=1.2.3.4:5").is_none());
-        assert!(open_record(&d, 42, &sealed[..AEAD_OVERHEAD - 1]).is_none());
-    }
 
     /// Routing table persists across restarts: bootstrap, snapshot,
     /// write, read back, feed as `extra` to a fresh actor. Proves the
@@ -1244,7 +722,7 @@ mod tests {
     /// First publish gated until a dialable v4/tcp is known. Regression
     /// for the live-eve case: first `tick()` ran with `due=true` before
     /// the port-probe reply / PCP mapping landed, published `tinc1 v6=…`
-    /// only, set `last_publish`, and the v4 didn't surface for 5 min.
+    /// only, set `last_publish`, and the v4 didn't surface for 5 min.
     #[test]
     fn testnet_first_publish_waits_for_dialable() {
         use mainline::Testnet;
@@ -1491,67 +969,5 @@ mod tests {
 
         // Empty, NOT absent: miss clears inflight so next retry re-queues.
         assert_eq!(got["nobody"], Vec::<SocketAddr>::new());
-    }
-
-    #[test]
-    fn bep44_signable_matches_mainline() {
-        // Spec example from bep_0044.rst.
-        let got = encode_bep44_signable(1, b"Hello World!", Some(b"foobar"));
-        assert_eq!(got, b"4:salt6:foobar3:seqi1e1:v12:Hello World!");
-
-        // No salt: just seq+v.
-        let got = encode_bep44_signable(42, b"x", None);
-        assert_eq!(got, b"3:seqi42e1:v1:x");
-    }
-
-    #[test]
-    fn record_parse() {
-        // v6 sorted before v4 (load-bearing: connect.rs trial order).
-        let p = parse_record("tinc1 v4=203.0.113.7:44132 v6=[2001:db8::1]:655");
-        assert_eq!(
-            p.direct,
-            vec![
-                "[2001:db8::1]:655".parse().unwrap(),
-                "203.0.113.7:44132".parse().unwrap(),
-            ]
-        );
-        assert_eq!(p.tcp, None);
-        // tcp= present: surfaces in .tcp AND first in .direct,
-        // regardless of field order in the record.
-        let p = parse_record("tinc1 v4=203.0.113.7:44132 tcp=203.0.113.7:655");
-        assert_eq!(p.tcp, Some("203.0.113.7:655".parse().unwrap()));
-        assert_eq!(
-            p.direct,
-            vec![
-                "203.0.113.7:655".parse().unwrap(),
-                "203.0.113.7:44132".parse().unwrap(),
-            ]
-        );
-        // tcp= first, v6 second: both prepend; trial order is
-        // last-prepend-wins. Just checks both land in .direct.
-        let p = parse_record("tinc1 tcp=192.0.2.1:655 v6=[2001:db8::1]:655");
-        assert_eq!(p.tcp, Some("192.0.2.1:655".parse().unwrap()));
-        assert_eq!(p.direct.len(), 2);
-        // v6 portmapped (PCP on v6 CPE): brackets parse.
-        let p = parse_record("tinc1 tcp=[2001:db8::7]:655");
-        assert_eq!(p.tcp, Some("[2001:db8::7]:655".parse().unwrap()));
-        // tcp + tcp6 both present: both land in .direct; .tcp keeps
-        // the v4 (publish order). tcp6 prepended after ⇒ first.
-        let p = parse_record("tinc1 tcp=192.0.2.1:655 tcp6=[2001:db8::7]:655");
-        assert_eq!(p.tcp, Some("192.0.2.1:655".parse().unwrap()));
-        assert_eq!(
-            p.direct,
-            vec![
-                "[2001:db8::7]:655".parse().unwrap(),
-                "192.0.2.1:655".parse().unwrap(),
-            ]
-        );
-        // Unknown keys + malformed values: skip, don't fail.
-        let p = parse_record("tinc1 v4=garbage tcp=nope future=thing v6=[fd00::1]:655 ext=x:1");
-        assert_eq!(p.direct, vec!["[fd00::1]:655".parse().unwrap()]);
-        assert_eq!(p.tcp, None);
-        // Wrong version.
-        assert_eq!(parse_record("tinc2 v4=1.2.3.4:5"), ParsedRecord::default());
-        assert_eq!(parse_record(""), ParsedRecord::default());
     }
 }

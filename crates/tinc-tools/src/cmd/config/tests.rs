@@ -350,7 +350,8 @@ fn intent(action: Action, var: &str, val: &str, warn: bool) -> Intent {
 
 #[test]
 fn set_replaces_in_place() {
-    let (_dir, f) = testutil::scratch_file("tinc.conf", "Name = alice\nPort = 655\nDevice = /dev/tun\n");
+    let (_dir, f) =
+        testutil::scratch_file("tinc.conf", "Name = alice\nPort = 655\nDevice = /dev/tun\n");
 
     run_edit(&f, &intent(Action::Set, "Port", "1234", false)).unwrap();
 
@@ -393,7 +394,10 @@ fn set_collapses_duplicates() {
 /// whose value DIFFERS. Same value → no warning.
 #[test]
 fn set_warnonremove() {
-    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\nConnectTo = carol\nConnectTo = dave\n");
+    let (_dir, f) = testutil::scratch_file(
+        "tinc.conf",
+        "ConnectTo = bob\nConnectTo = carol\nConnectTo = dave\n",
+    );
 
     // SET on a MULTIPLE var: stage-2 would set warnonremove.
     // We construct directly with warn=true to test the walk.
@@ -468,7 +472,10 @@ fn add_dedup_case_insensitive() {
 
 #[test]
 fn del_removes_all() {
-    let (_dir, f) = testutil::scratch_file("tinc.conf", "ConnectTo = bob\nName = x\nConnectTo = carol\n");
+    let (_dir, f) = testutil::scratch_file(
+        "tinc.conf",
+        "ConnectTo = bob\nName = x\nConnectTo = carol\n",
+    );
 
     run_edit(&f, &intent(Action::Del, "ConnectTo", "", false)).unwrap();
 

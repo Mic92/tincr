@@ -255,7 +255,10 @@ mod tests {
     /// Single config line → `#` prepended, rest preserved.
     #[test]
     fn disable_config_line() {
-        let (_dir, path) = testutil::scratch_file("f", "Subnet = 10.0.0.0/24\nEd25519PublicKey = abc123\nAddress = 1.2.3.4\n");
+        let (_dir, path) = testutil::scratch_file(
+            "f",
+            "Subnet = 10.0.0.0/24\nEd25519PublicKey = abc123\nAddress = 1.2.3.4\n",
+        );
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -283,7 +286,10 @@ mod tests {
     /// genkey: comment, PEM, then a new PEM was appended.
     #[test]
     fn disable_pem_block_surrounded() {
-        let (_dir, path) = testutil::scratch_file("f", "# old key from 2024\n-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END ED25519 PRIVATE KEY-----\n# end\n");
+        let (_dir, path) = testutil::scratch_file(
+            "f",
+            "# old key from 2024\n-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END ED25519 PRIVATE KEY-----\n# end\n",
+        );
         assert!(disable_old_keys(&path).unwrap());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
@@ -334,7 +340,10 @@ mod tests {
     /// We dropped the RSA branch entirely.
     #[test]
     fn disable_ignores_rsa() {
-        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\n");
+        let (_dir, path) = testutil::scratch_file(
+            "f",
+            "-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\n",
+        );
         assert!(!disable_old_keys(&path).unwrap());
     }
 
@@ -342,7 +351,10 @@ mod tests {
     /// matched. ` ED25519 ` is space-delimited.
     #[test]
     fn disable_space_delimited_type() {
-        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN MYED25519FOO-----\nbody\n-----END MYED25519FOO-----\n");
+        let (_dir, path) = testutil::scratch_file(
+            "f",
+            "-----BEGIN MYED25519FOO-----\nbody\n-----END MYED25519FOO-----\n",
+        );
         assert!(!disable_old_keys(&path).unwrap());
     }
 
@@ -350,7 +362,10 @@ mod tests {
     /// an ED25519 block. Garbage-in-garbage-preserved.
     #[test]
     fn disable_end_type_unchecked() {
-        let (_dir, path) = testutil::scratch_file("f", "-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END WHATEVER-----\nafter\n");
+        let (_dir, path) = testutil::scratch_file(
+            "f",
+            "-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END WHATEVER-----\nafter\n",
+        );
         assert!(disable_old_keys(&path).unwrap());
         // `after` is NOT prefixed — block ended at the (mismatched) END.
         assert_eq!(
