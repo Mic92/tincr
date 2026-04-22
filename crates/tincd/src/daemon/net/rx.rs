@@ -9,12 +9,11 @@ use std::os::fd::{AsFd, AsRawFd};
 
 use crate::conn::Connection;
 use crate::listen::{configure_tcp, fmt_addr, is_local, unmap};
-use crate::local_addr;
 use crate::node_id::NodeId6;
 use crate::tunnel::MTU;
 
 use rand_core::OsRng;
-use tinc_device::{Device, GroBucket, GroVerdict};
+use tinc_device::{Device, GroBucket};
 use tinc_event::Io;
 use tinc_graph::NodeId;
 
@@ -116,54 +115,9 @@ impl Daemon {
     /// (the device write stomps it for the vnet header anyway).
     ///
     /// `gro = None` (`gro_enabled` false, or count == 1): immediate
-    /// device write, no coalesce attempt. Same fall-through as
-    /// `send_packet_myself`.
-    ///
-    /// FlushFirst/NotCandidate flush inline (no `gro_flush` — that's
-    /// `&mut self`). The `flush()` + `write_super` body is two lines;
-    /// inlined. The error log matches `gro_flush`'s wording so grep
-    /// finds both.
+    /// device write, no coalesce attempt.
     fn rx_fast_sink(device: &mut Box<dyn Device>, gro: &mut Option<GroBucket>, data: &mut [u8]) {
-        const ETH_HLEN: usize = 14;
-        // Inline gro_flush body: `&mut self` not available here.
-        // The `gro_enabled` setup gate makes the Unsupported error
-        // unreachable in practice (same wording as device.rs:491).
-        let flush = |device: &mut Box<dyn Device>, b: &mut GroBucket| {
-            if let Some(buf) = b.flush()
-                && let Err(e) = device.write_super(buf)
-            {
-                log::warn!(target: "tincd::net",
-                           "GRO super write failed: {e} — \
-                            gro_enabled gate let a non-vnet device through?");
-            }
-        };
-        if let Some(bucket) = gro.as_mut()
-            && data.len() > ETH_HLEN
-        {
-            match bucket.offer(&data[ETH_HLEN..]) {
-                GroVerdict::Coalesced => return, // absorbed; written on batch flush
-                GroVerdict::FlushFirst => {
-                    // Ship the run, re-offer to seed the next run.
-                    // Same dance as send_packet_myself (device.rs:444).
-                    flush(device, bucket);
-                    let v = bucket.offer(&data[ETH_HLEN..]);
-                    debug_assert_ne!(v, GroVerdict::FlushFirst);
-                    if v == GroVerdict::Coalesced {
-                        return;
-                    }
-                    // NotCandidate: fall through to write.
-                }
-                GroVerdict::NotCandidate => {
-                    // Ordering: anything in the bucket goes out
-                    // first. A non-candidate from the same flow
-                    // (FIN) mustn't reorder past lower-seq data.
-                    flush(device, bucket);
-                }
-            }
-        }
-        if let Err(e) = device.write(data) {
-            log::debug!(target: "tincd::net", "Error writing to device: {e}");
-        }
+        super::helpers::gro_offer_or_write(device, gro, data);
     }
 
     /// Wire layout: `[dst_id:6][src_id:6][sptps...]`. The 12-byte
@@ -488,47 +442,21 @@ impl Daemon {
         match open_result {
             Ok(record_type) => {
                 // Only direct (dst == nullid) confirms udp_addr;
-                // relayed-to-us would cache the relay's addr. Once
-                // confirmed at the same address this is a no-op:
-                // skip the listener Vec alloc + adapt_socket scan.
-                //
-                // Gate on `cached.is_none() OR addr changed`, NOT just
-                // addr changed. `gossip.rs:803` (BecameReachable) and
-                // `txpath.rs:1027` (UDP_INFO) seed `udp_addr` from
-                // edge_addr while clearing `udp_addr_cached`. If the
-                // peer then sends from that same addr (common: edge
-                // addr IS the source addr in a direct setup), the old
-                // `udp_addr != Some(peer_addr)` gate was false and the
-                // cache stayed None forever — every send fell through
-                // to `choose_udp_address` (the "2.18% self-time" cold
-                // path this cache was built to avoid).
+                // relayed-to-us would cache the relay's addr.
                 let direct = dst_id.is_null();
-                if let Some(peer_addr) = peer.filter(|_| direct)
-                    && (tunnel.udp_addr_cached.is_none() || tunnel.udp_addr != Some(peer_addr))
-                {
-                    let listener_addrs: Vec<SocketAddr> =
-                        self.listeners.iter().map(|s| s.listener.local).collect();
-                    let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
-                    if !tunnel.status.udp_confirmed {
-                        log::debug!(target: "tincd::net",
-                                    "UDP address of {from_name} confirmed: {peer_addr}");
-                        tunnel.status.udp_confirmed = true;
-                    }
-                    tunnel.udp_addr = Some(peer_addr);
-                    let cached = (socket2::SockAddr::from(peer_addr), sock);
-                    tunnel.udp_addr_cached = Some(cached.clone());
-                    // Mirror into the fast-path handles. tx_probe
-                    // gates on `udp_addr.is_some()`; HandshakeDone
-                    // typically fans None (UDP not yet confirmed).
-                    // Uncontended lock single-threaded.
-                    if let Some(h) = self.tunnel_handles.get(&from_nid) {
-                        *h.udp_addr.lock().unwrap() = Some(cached);
-                    }
+                if let Some(peer_addr) = peer.filter(|_| direct) {
+                    super::helpers::confirm_udp_addr(
+                        &mut self.dp.tunnels,
+                        &self.listeners,
+                        &self.tunnel_handles,
+                        from_nid,
+                        &from_name,
+                        peer_addr,
+                    );
                 }
-                // send_mtu_info if relayed-to-us.
-                // (`tunnel` borrow ends here by NLL last-use.)
                 let mut nw = false;
                 if !direct {
+                    // Relayed-to-us: tell sender our MTU floor.
                     nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
                 }
                 nw |= self.receive_sptps_record(from_nid, &from_name, record_type);
@@ -588,30 +516,20 @@ impl Daemon {
             }
         };
 
-        // `direct` set true ONLY when dst_id == nullid. When
-        // `dst != null && to == myself` (relayed-to-us), `peer_addr`
-        // is the RELAY's address; caching it would route the next
-        // direct send to the relay forever (bug audit `deef1268`).
+        // `direct` only when dst_id == nullid. On relayed-to-us
+        // (`dst != null && to == myself`), `peer_addr` is the
+        // RELAY's address; caching would pin direct sends to the
+        // relay forever (bug audit `deef1268`).
         let direct = dst_id.is_null();
         if let Some(peer_addr) = peer.filter(|_| direct) {
-            // Resolve listener index once instead of per-send;
-            // answer doesn't change while udp_addr doesn't.
-            let listener_addrs: Vec<SocketAddr> =
-                self.listeners.iter().map(|s| s.listener.local).collect();
-            let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
-            let tunnel = self.dp.tunnels.entry(from_nid).or_default();
-            if !tunnel.status.udp_confirmed {
-                log::debug!(target: "tincd::net",
-                            "UDP address of {from_name} confirmed: {peer_addr}");
-                tunnel.status.udp_confirmed = true;
-            }
-            tunnel.udp_addr = Some(peer_addr);
-            // Pre-converted SockAddr: was 0.37% self-time per-packet.
-            let cached = (socket2::SockAddr::from(peer_addr), sock);
-            tunnel.udp_addr_cached = Some(cached.clone());
-            if let Some(h) = self.tunnel_handles.get(&from_nid) {
-                *h.udp_addr.lock().unwrap() = Some(cached);
-            }
+            super::helpers::confirm_udp_addr(
+                &mut self.dp.tunnels,
+                &self.listeners,
+                &self.tunnel_handles,
+                from_nid,
+                &from_name,
+                peer_addr,
+            );
         }
         // Tell `from` our MTU floor so they can switch to direct
         // UDP. Bug audit `deef1268`: was missing entirely.
