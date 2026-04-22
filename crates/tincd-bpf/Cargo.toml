@@ -33,7 +33,7 @@ socket2 = { version = "0.5", features = ["all"] }
 # `setsockopt(AttachReusePortCbpf)` so cbpf.rs has zero unsafe.
 nix = { version = "0.31", default-features = false, features = ["socket"] }
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 # Tests use Tun::open_mq + the hairpin-echo rig. dev-dep only:
 # tincd-bpf has no compile-time link to tinc-device (the daemon
 # wires them at runtime).

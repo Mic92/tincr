@@ -10,9 +10,6 @@ publish = false
 # `IFF_NO_PI`/`IFF_ONE_QUEUE`. Already in lockfile at 0.2.184
 # transitively via nix; this just makes it a direct dep.
 libc = "0.2.184"
-# `log::warn!` for the vnet_hdr feature-detect failures. The daemon
-# initializes the logger; these are level-gated no-ops in tests.
-log = "0.4"
 # `nix::ioctl_write_ptr_bad!` — same macro family as tui.rs's
 # `ioctl_read_bad!`. The `ioctl` feature is the only one we need.
 # `ioctl` would be the feature for `ioctl_write_ptr_bad!` — but we
@@ -32,6 +29,10 @@ log = "0.4"
 # `net` for `if_nametoindex` (raw_socket backend's SIOCGIFINDEX
 # substitution).
 nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `log::warn!` for the vnet_hdr feature-detect failures in linux.rs.
+log = "0.4"
 
 # `ioctl` + `fs` only on macOS, for the utun open path:
 # `SysControlAddr` (CTLIOCGINFO) needs `ioctl`; `nix::fcntl` (O_NONBLOCK
