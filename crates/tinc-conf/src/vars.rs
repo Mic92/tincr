@@ -330,6 +330,13 @@ pub static VARS: &[Var] = &[
     // every name lookup at an attacker-chosen resolver.
     v("DNSAddress", S.union(M)),
     v("DNSSuffix", S),
+    // SPTPSCipher: SERVER+HOST so it can be set as a global default in
+    // tinc.conf or per-peer in `hosts/NAME`. NOT `Cipher` — that's the
+    // C tinc legacy-protocol bulk cipher and reusing the name would
+    // make a tincr host file change the legacy cipher on a C node
+    // reading the same file. NOT SAFE — an inviter setting this would
+    // wedge the invitee's first tunnel against every C tinc peer.
+    v("SPTPSCipher", S.union(H)),
 ];
 
 /// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
@@ -337,7 +344,7 @@ pub static VARS: &[Var] = &[
 /// check is the one that matters — drift here means a config key was
 /// added/removed upstream and our table
 /// is stale. The +N is fixed (this crate owns those keys).
-const _: () = assert!(VARS.len() == 74 + 5);
+const _: () = assert!(VARS.len() == 74 + 6);
 
 /// Look up by name, case-insensitive. C does this inline everywhere
 /// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We

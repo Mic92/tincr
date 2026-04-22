@@ -234,6 +234,7 @@ impl Daemon {
             confbase: &self.confbase,
             invitation_key: self.invitation_key.as_ref(),
             global_pmtu: self.settings.global_pmtu,
+            sptps_cipher: self.settings.sptps_cipher,
         };
         let now = self.timers.now();
         let id_result = handle_id(conn, line, &ctx, now, &mut OsRng);

@@ -3,12 +3,13 @@
 //! [`tx_probe`](super::tx_probe) decided this super CAN take the fast
 //! path and burned the seqnos. This module does the per-chunk seal +
 //! `TxBatch` stage + ship-on-full + final ship. No `&mut Daemon`, no
-//! `Sptps` borrow — `ChaPoly::new(&handles.outkey)` directly.
+//! `Sptps` borrow — `SptpsCipher::new(handles.aead, &handles.outkey)`
+//! directly.
 //!
 //! Wire-identical to the slow path's `seal_data_into` →
 //! `send_sptps_data_relay` → `ship_tx_batch` chain because:
-//!   - `ChaPoly::seal_into` IS what `Sptps::seal_with_seqno` calls
-//!     internally; we just inline the prefix/seqno header writes
+//!   - `SptpsCipher::seal_into` IS what `Sptps::seal_with_seqno`
+//!     calls internally; we just inline the prefix/seqno header writes
 //!   - same `TxBatch::can_coalesce`/`stage`/`take` calls, same
 //!     `(dst, sock, relay, origlen)` tuple, same egress trait
 //!   - `PKT_NORMAL` only ([`tx_probe`](super::tx_probe) gates
@@ -18,7 +19,7 @@ use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::graph::NodeId;
-use tinc_crypto::chapoly::ChaPoly;
+use tinc_crypto::aead::SptpsCipher;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
@@ -66,7 +67,7 @@ pub(crate) fn seal_super(
     batch: &mut TxBatch,
     egress: &mut dyn UdpEgress,
 ) -> Result<SealOk, SealErr> {
-    let cipher = ChaPoly::new(&target.handles.outkey);
+    let cipher = SptpsCipher::new(target.handles.aead, &target.handles.outkey);
     let mut bytes = 0u64;
 
     for (i, &len) in lens.iter().enumerate() {

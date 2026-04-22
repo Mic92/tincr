@@ -6,7 +6,7 @@
 
 use rand_core::RngCore;
 use tinc_crypto::sign::SigningKey;
-use tinc_sptps::{Framing, Output, Role, Sptps};
+use tinc_sptps::{Framing, Output, Role, Sptps, SptpsAead, SptpsLabel};
 
 pub const REPLAYWIN: usize = 16;
 
@@ -81,23 +81,45 @@ pub fn wire_only(outs: &[Output]) -> Vec<Vec<u8>> {
 /// Feed `bytes` to a stream-mode session, looping until drained
 /// (stream `receive` consumes at most one record per call).
 pub fn feed_stream(sptps: &mut Sptps, bytes: &[u8]) -> Vec<Output> {
+    feed_stream_try(sptps, bytes).unwrap()
+}
+
+/// As [`feed_stream`] but propagates `receive` errors instead of
+/// panicking. The AEAD-mismatch test wants to observe the `BadSig`.
+pub fn feed_stream_try(
+    sptps: &mut Sptps,
+    bytes: &[u8],
+) -> Result<Vec<Output>, tinc_sptps::SptpsError> {
     let mut rng = SeedRng(0);
     let mut all = Vec::new();
     let mut off = 0;
     while off < bytes.len() {
-        let (n, outs) = sptps.receive(&bytes[off..], &mut rng).unwrap();
+        let (n, outs) = sptps.receive(&bytes[off..], &mut rng)?;
         if n == 0 {
             break;
         }
         off += n;
         all.extend(outs);
     }
-    all
+    Ok(all)
 }
 
 /// Run handshake to completion. Works for both framings — `feed_stream`
 /// loops, datagram consumes the whole buffer in one call.
 pub fn handshake_pair(framing: Framing, label: &[u8]) -> (Sptps, Sptps) {
+    handshake_pair_aead(framing, label, SptpsAead::default(), SptpsAead::default())
+        .expect("default-aead handshake never BadSig's against itself")
+}
+
+/// As [`handshake_pair`] but with per-side AEAD selection. Returns
+/// `Err` if the handshake itself fails — used by the AEAD-mismatch
+/// test, which wants exactly that.
+pub fn handshake_pair_aead(
+    framing: Framing,
+    label: &[u8],
+    a_aead: SptpsAead,
+    b_aead: SptpsAead,
+) -> Result<(Sptps, Sptps), tinc_sptps::SptpsError> {
     let (akey, apub) = keypair(1);
     let (bkey, bpub) = keypair(2);
 
@@ -106,7 +128,7 @@ pub fn handshake_pair(framing: Framing, label: &[u8]) -> (Sptps, Sptps) {
         framing,
         akey,
         bpub,
-        label.to_vec(),
+        SptpsLabel::with_aead(label, a_aead),
         REPLAYWIN,
         &mut SeedRng(0xAA),
     );
@@ -115,7 +137,7 @@ pub fn handshake_pair(framing: Framing, label: &[u8]) -> (Sptps, Sptps) {
         framing,
         bkey,
         apub,
-        label.to_vec(),
+        SptpsLabel::with_aead(label, b_aead),
         REPLAYWIN,
         &mut SeedRng(0xBB),
     );
@@ -123,10 +145,10 @@ pub fn handshake_pair(framing: Framing, label: &[u8]) -> (Sptps, Sptps) {
     let kex_a = wire(a0);
     let kex_b = wire(b0);
 
-    let sig_a = wire(feed_stream(&mut alice, &kex_b));
-    feed_stream(&mut bob, &kex_a);
-    let sig_b = wire(feed_stream(&mut bob, &sig_a));
-    feed_stream(&mut alice, &sig_b);
+    let sig_a = wire(feed_stream_try(&mut alice, &kex_b)?);
+    feed_stream_try(&mut bob, &kex_a)?;
+    let sig_b = wire(feed_stream_try(&mut bob, &sig_a)?);
+    feed_stream_try(&mut alice, &sig_b)?;
 
-    (alice, bob)
+    Ok((alice, bob))
 }

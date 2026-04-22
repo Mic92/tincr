@@ -29,7 +29,8 @@
 
 mod state;
 
-pub use state::{Framing, Output, ReplayWindow, Role, Sptps, SptpsError};
+pub use state::{Framing, Output, ReplayWindow, Role, Sptps, SptpsError, SptpsLabel};
+pub use tinc_crypto::aead::SptpsAead;
 
 /// Body of a KEX record: `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
 ///

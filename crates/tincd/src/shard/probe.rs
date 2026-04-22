@@ -229,6 +229,7 @@ mod tests {
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
+            aead: tinc_sptps::SptpsAead::default(),
             outkey: [0u8; 64],
             inkey: [0u8; 64],
             udp_addr: Mutex::new(Some((

@@ -20,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use tinc_conf::{Config, read_pem};
+use tinc_crypto::aead::{SptpsAead, hw_aes_available};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
@@ -33,6 +34,48 @@ pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Config {
         cfg.merge(entries);
     }
     cfg
+}
+
+/// `SPTPSCipher` from a host config. `None` if absent (caller falls
+/// back to the global default). Logs and returns `None` on an unknown
+/// value rather than erroring: a per-peer host file is often synced
+/// from a peer running a newer tincr, and refusing to start over an
+/// unrecognised cipher name would be worse than the documented
+/// mismatch failure (`BadSig`).
+///
+/// Emits the hardware-AES warning **once per process** the first time
+/// AES-256-GCM is selected on a CPU without AES-NI/PMULL — cheaper
+/// than scanning every host file at startup, and still fires before
+/// any traffic flows.
+#[must_use]
+pub(crate) fn read_sptps_cipher(host_config: &Config, name: &str) -> Option<SptpsAead> {
+    let e = host_config.lookup("SPTPSCipher").next()?;
+    let Some(aead) = SptpsAead::from_config_str(e.get_str()) else {
+        log::warn!(target: "tincd::keys",
+                   "hosts/{name}: unknown SPTPSCipher `{}' \u{2014} ignoring",
+                   e.get_str());
+        return None;
+    };
+    if aead == SptpsAead::Aes256Gcm {
+        warn_aes_no_hw_once();
+    }
+    Some(aead)
+}
+
+/// One-shot CPU-feature warning. `Once` so the per-handshake host-file
+/// read in [`read_sptps_cipher`] doesn't spam the log.
+pub(crate) fn warn_aes_no_hw_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !hw_aes_available() {
+            log::warn!(target: "tincd::keys",
+                "SPTPSCipher = aes-256-gcm but this CPU lacks AES/PMULL \
+                 acceleration; ring will fall back to bitsliced AES \
+                 (slow, and table-based AES on other implementations is \
+                 a cache-timing side-channel risk). Prefer \
+                 chacha20-poly1305 here.");
+        }
+    });
 }
 
 // PEM type strings + blob length

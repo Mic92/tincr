@@ -239,6 +239,11 @@ pub(crate) struct Connection {
     pub host_clamp_mss: Option<bool>,
     /// `hosts/NAME` `Weight`.
     pub host_weight: Option<i32>,
+    /// `hosts/NAME` `SPTPSCipher` (or the global default). Consumed by
+    /// `handle_id` when starting the meta-conn SPTPS. Stored on the
+    /// connection because `load_peer_host_config` runs before
+    /// `Sptps::start` and the host config isn't kept around.
+    pub sptps_cipher: tinc_sptps::SptpsAead,
     /// PMTU clamp. MIN of per-host
     /// `PMTU` and global tinc.conf `PMTU` — both clamp, both `&& mtu
     /// < n->mtu`. `None` = neither set. Named `cap` not `host_` since
@@ -322,6 +327,7 @@ impl Connection {
             host_tcponly: None,
             host_clamp_mss: None,
             host_weight: None,
+            sptps_cipher: tinc_sptps::SptpsAead::default(),
             pmtu_cap: None,
             log_level: None,
             prev_debug_level: None,

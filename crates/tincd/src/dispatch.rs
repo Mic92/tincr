@@ -12,7 +12,7 @@ use rand_core::RngCore;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
-use tinc_sptps::{Framing, Output, Role, Sptps};
+use tinc_sptps::{Framing, Output, Role, Sptps, SptpsLabel};
 
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
@@ -374,6 +374,10 @@ pub(crate) struct IdCtx<'a> {
     /// Global tinc.conf `PMTU`. Clamps in
     /// addition to per-host (both `&& mtu < n->mtu`, min wins).
     pub global_pmtu: Option<u16>,
+    /// Global `SPTPSCipher` default. Per-peer override comes from
+    /// `hosts/NAME` in [`load_peer_host_config`]; this is the fallback
+    /// when the host file doesn't set one.
+    pub sptps_cipher: tinc_sptps::SptpsAead,
 }
 
 /// `sptps_start(..., "tinc invitation", 15, ...)`.
@@ -534,7 +538,7 @@ pub(crate) fn handle_id(
         Framing::Stream,
         mykey_clone,
         ecdsa,
-        label,
+        SptpsLabel::with_aead(label, conn.sptps_cipher),
         0, // replaywin: ignored in stream mode
         rng,
     );
@@ -671,6 +675,9 @@ fn id_invitation(
         Framing::Stream,
         inv_key_clone,
         throwaway,
+        // Invitations interoperate with C tinc by definition (the
+        // invitee doesn't have a host file yet), so always the
+        // default AEAD — which the bare-label `Into<SptpsLabel>` gives.
         INVITE_LABEL,
         0, // replaywin: ignored in stream mode
         rng,
@@ -723,6 +730,13 @@ fn load_peer_host_config(
         .lookup("Weight")
         .next()
         .and_then(|e| e.get_int().ok());
+    // Per-peer AEAD override, falling back to the global default.
+    // Unknown values are dropped (the daemon already warned at the
+    // global parse if its own setting was bad; a bad per-peer value
+    // surfaces as a `BadSig` against a correctly-configured peer,
+    // which is the documented mismatch failure mode).
+    conn.sptps_cipher =
+        crate::keys::read_sptps_cipher(&host_config, name).unwrap_or(ctx.sptps_cipher);
     let host_pmtu = host_config
         .lookup("PMTU")
         .next()

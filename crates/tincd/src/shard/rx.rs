@@ -34,7 +34,7 @@ use crate::graph::NodeId;
 use crate::node_id::NodeId6;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use tinc_crypto::chapoly::ChaPoly;
+use tinc_crypto::aead::SptpsCipher;
 
 /// `PKT_NORMAL`. Re-stated (not re-exported from `daemon.rs`) so
 /// `shard` doesn't reach into `daemon` private constants. The byte
@@ -350,7 +350,7 @@ pub(crate) fn rx_open(
     // slow path's `open_data_into` will re-clear it anyway.
     scratch.clear();
     scratch.resize(ETH_HLEN, 0);
-    let cipher = ChaPoly::new(&target.handles.inkey);
+    let cipher = SptpsCipher::new(target.handles.aead, &target.handles.inkey);
     cipher
         .open_into(u64::from(seqno), &ct[4..], scratch, ETH_HLEN)
         .map_err(|_| ())?;
@@ -478,7 +478,7 @@ mod tests {
     /// `seal_data_into` → `send_sptps_data_relay` produces for a
     /// direct-send (dst=NULL).
     fn wire_packet(src_name: &str, seqno: u32, ty: u8, body: &[u8], key: &[u8; 64]) -> Vec<u8> {
-        let cipher = ChaPoly::new(key);
+        let cipher = SptpsCipher::new(tinc_sptps::SptpsAead::default(), key);
         let src_id6 = NodeId6::from_name(src_name);
         let mut pkt = Vec::with_capacity(12 + 4 + 1 + body.len() + 16);
         pkt.extend_from_slice(&[0u8; 6]); // dst = NULL (direct)
@@ -532,6 +532,7 @@ mod tests {
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
+            aead: tinc_sptps::SptpsAead::default(),
             outkey: [0u8; 64],
             inkey,
             udp_addr: Mutex::new(Some((

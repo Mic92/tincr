@@ -244,6 +244,10 @@ pub struct DaemonSettings {
     /// Global `PMTU` from tinc.conf. Clamps ALL peers. Per-host
     /// `PMTU` also clamps (both apply, min wins).
     pub global_pmtu: Option<u16>,
+    /// Global `SPTPSCipher` default. Per-peer override comes from
+    /// `hosts/NAME`. Default `ChaCha20Poly1305` — the only value
+    /// wire-compatible with C tinc 1.1.
+    pub sptps_cipher: tinc_sptps::SptpsAead,
     /// Global `Weight` from tinc.conf. Fallback when per-host
     /// `Weight` is absent. Overrides the RTT measurement.
     pub global_weight: Option<i32>,
@@ -369,6 +373,7 @@ impl Default for DaemonSettings {
             max_connection_burst: 10,
             udp_discovery: true,
             global_pmtu: None,
+            sptps_cipher: tinc_sptps::SptpsAead::default(),
             global_weight: None,
             device_standby: false,
             dht_discovery: false,
@@ -396,6 +401,23 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     // Per-host PMTU is read in dispatch.rs::handle_id; this is the
     // tinc.conf-level clamp.
     cfg_int!(config, "PMTU", u16, |v| settings.global_pmtu = Some(v));
+    // Static AEAD selection. Reloadable in the sense that new tunnels
+    // pick it up; existing sessions keep their negotiated-at-start
+    // cipher until the next `KeyExpire` rekey restarts them.
+    if let Some(e) = config.lookup("SPTPSCipher").next() {
+        match tinc_sptps::SptpsAead::from_config_str(e.get_str()) {
+            Some(a) => {
+                settings.sptps_cipher = a;
+                if a == tinc_sptps::SptpsAead::Aes256Gcm {
+                    crate::keys::warn_aes_no_hw_once();
+                }
+            }
+            None => log::error!(target: "tincd::conf",
+                "SPTPSCipher = {}: unknown value \
+                 (want chacha20-poly1305 | aes-256-gcm); using default",
+                e.get_str()),
+        }
+    }
     // Fallback when per-host Weight absent.
     cfg_int!(config, "Weight", i32, |v| settings.global_weight = Some(v));
     cfg_int!(config, "MaxTimeout", u32, |v| if v >= 1 {

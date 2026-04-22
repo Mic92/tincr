@@ -27,7 +27,7 @@ impl Daemon {
         };
 
         // Re-reads every call (10s debounce gates it).
-        let Some(hiskey) = self.load_peer_ed25519(&to_name) else {
+        let Some((hiskey, aead)) = self.load_peer_tunnel_cfg(&to_name) else {
             // Hard-error: surface in logs, not as silent drops.
             // Operator provisions by hand.
             log::warn!(target: "tincd::net",
@@ -44,7 +44,7 @@ impl Daemon {
             Framing::Datagram,
             mykey,
             hiskey,
-            label,
+            tinc_sptps::SptpsLabel::with_aead(label, aead),
             self.settings.replaywin,
             &mut OsRng,
         );
@@ -351,7 +351,7 @@ impl Daemon {
         }
 
         // ─── case REQ_KEY: SPTPS responder start.
-        let Some(hiskey) = self.load_peer_ed25519(&msg.from) else {
+        let Some((hiskey, aead)) = self.load_peer_tunnel_cfg(&msg.from) else {
             // Hard-error.
             log::error!(target: "tincd::proto",
                        "No Ed25519 key known for {}; cannot start tunnel \
@@ -407,7 +407,7 @@ impl Daemon {
             Framing::Datagram,
             mykey,
             hiskey,
-            label,
+            tinc_sptps::SptpsLabel::with_aead(label, aead),
             self.settings.replaywin,
             &mut OsRng,
         );

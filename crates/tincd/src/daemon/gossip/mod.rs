@@ -54,12 +54,19 @@ impl Daemon {
     /// `send_req_key` (initiator) and `on_req_key` (responder); both
     /// need the same "parse host config → read key" pair and both
     /// hard-error on miss because `REQ_PUBKEY` is unsupported.
-    pub(super) fn load_peer_ed25519(
+    /// Per-tunnel SPTPS handshake inputs from `hosts/NAME`: the peer's
+    /// Ed25519 pubkey and the `SPTPSCipher` to use for that edge
+    /// (per-host override, else the global default). One host-file
+    /// read for both so the UDP-tunnel start path doesn't open the
+    /// same file twice.
+    pub(super) fn load_peer_tunnel_cfg(
         &self,
         name: &str,
-    ) -> Option<[u8; tinc_crypto::sign::PUBLIC_LEN]> {
+    ) -> Option<([u8; tinc_crypto::sign::PUBLIC_LEN], tinc_sptps::SptpsAead)> {
         let cfg = crate::keys::read_host_config(&self.confbase, name);
-        crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)
+        let key = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)?;
+        let aead = crate::keys::read_sptps_cipher(&cfg, name).unwrap_or(self.settings.sptps_cipher);
+        Some((key, aead))
     }
 
     /// Resolve a routed message's `from`/`to` names to known `NodeId`s.

@@ -21,13 +21,50 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rand_core::RngCore;
-use tinc_crypto::chapoly::{ChaPoly, KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
+use tinc_crypto::aead::{SptpsAead, SptpsCipher};
+use tinc_crypto::chapoly::{KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
 use tinc_crypto::prf::prf;
 use tinc_crypto::sign::{self, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN, SigningKey};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
+
+/// The session label and AEAD selector, bundled because both feed the
+/// SIG transcript and PRF seed and must agree on both ends.
+///
+/// `From<impl Into<Vec<u8>>>` gives the C-tinc-compatible default
+/// (`SptpsAead::ChaCha20Poly1305`, empty label suffix), so every
+/// caller that doesn't care about the AEAD — tests, the C-interop
+/// harness, invitations — keeps passing a bare `Vec<u8>`/`&[u8]` to
+/// [`Sptps::start`]. Only the daemon's per-edge tunnel start uses
+/// [`with_aead`](Self::with_aead).
+pub struct SptpsLabel {
+    bytes: Vec<u8>,
+    aead: SptpsAead,
+}
+
+impl SptpsLabel {
+    /// Explicit AEAD. The label suffix is appended inside
+    /// [`Sptps::start`], not here, so `bytes` stays exactly what the
+    /// caller built (e.g. `make_udp_label`'s NUL-terminated string).
+    #[must_use]
+    pub fn with_aead(label: impl Into<Vec<u8>>, aead: SptpsAead) -> Self {
+        Self {
+            bytes: label.into(),
+            aead,
+        }
+    }
+}
+
+impl<T: Into<Vec<u8>>> From<T> for SptpsLabel {
+    fn from(label: T) -> Self {
+        Self {
+            bytes: label.into(),
+            aead: SptpsAead::default(),
+        }
+    }
+}
 
 /// SIG transcript `[role-bit][kex_a][kex_b][label]`. send_sig and
 /// receive_sig pass swapped (bit, kex order); one builder so they
@@ -364,9 +401,9 @@ pub struct Sptps {
     // The seqnos live alongside even when None because they tick during
     // the plaintext handshake too (`outseqno++` happens unconditionally
     // in send_record_priv).
-    incipher: Option<ChaPoly>,
+    incipher: Option<SptpsCipher>,
     inseqno: u32, // stream mode only; datagram uses ReplayWindow.inseqno
-    outcipher: Option<ChaPoly>,
+    outcipher: Option<SptpsCipher>,
     // `Arc<AtomicU64>`: shard hand-off. `fetch_add(n, Relaxed)` from
     // any thread allocates a contiguous run; the truncation to u32 at
     // use is the same wrap C's unsigned overflow gives. Wider counter
@@ -404,6 +441,10 @@ pub struct Sptps {
     mykey: SigningKey,
     hiskey: [u8; SIGN_PUBLIC_LEN],
     label: Vec<u8>,
+    /// Static, per-session. Selects the record AEAD and contributes
+    /// [`SptpsAead::label_suffix`] to `label` (so a peer configured
+    /// for a different AEAD fails SIG verify, not record decrypt).
+    aead: SptpsAead,
 }
 
 impl Sptps {
@@ -424,10 +465,21 @@ impl Sptps {
         framing: Framing,
         mykey: SigningKey,
         hiskey: [u8; SIGN_PUBLIC_LEN],
-        label: impl Into<Vec<u8>>,
+        label: impl Into<SptpsLabel>,
         replaywin: usize,
         rng: &mut impl RngCore,
     ) -> (Self, Vec<Output>) {
+        // Mix the AEAD choice into the label. The label feeds both the
+        // SIG transcript and the PRF seed, so a static-config mismatch
+        // surfaces as `BadSig` during the handshake — clean failure,
+        // no chance of deriving keys one side can't open. Default
+        // suffix is empty: byte-identical to C tinc, pinned by
+        // `tests/vs_c.rs`.
+        let SptpsLabel {
+            bytes: mut label,
+            aead,
+        } = label.into();
+        label.extend_from_slice(aead.label_suffix());
         let mut s = Self {
             role,
             framing,
@@ -445,7 +497,8 @@ impl Sptps {
             key: None,
             mykey,
             hiskey,
-            label: label.into(),
+            label,
+            aead,
         };
         let mut out = Vec::new();
         // send_kex can only fail if mykex is already set. We just zeroed it.
@@ -613,6 +666,14 @@ impl Sptps {
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
         let base = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed) as u32;
         base
+    }
+
+    /// Which AEAD this session seals records with. The shard fast
+    /// path needs it alongside [`outcipher_key`]/[`incipher_key`] to
+    /// rebuild a matching [`SptpsCipher`] without holding `&Sptps`.
+    #[must_use]
+    pub const fn aead(&self) -> SptpsAead {
+        self.aead
     }
 
     /// Which side of the handshake this instance is. Used by the
@@ -1038,11 +1099,10 @@ impl Sptps {
         let key = self.key.take().expect("receive_ack with no key material");
         // Initiator decrypts with key0, responder with key1.
         // (Mirror of the outcipher assignment in receive_sig.)
-        self.incipher = Some(ChaPoly::new(key_half(
-            &*key,
-            self.role.is_initiator(),
-            false,
-        )));
+        self.incipher = Some(SptpsCipher::new(
+            self.aead,
+            key_half(&*key, self.role.is_initiator(), false),
+        ));
         // `key` Zeroizes on drop here.
         Ok(())
     }
@@ -1132,11 +1192,10 @@ impl Sptps {
         // C lines 370-374: NOW set the new outcipher.
         // Initiator encrypts with key1, responder with key0.
         let key = self.key.as_ref().expect("just set");
-        self.outcipher = Some(ChaPoly::new(key_half(
-            &**key,
-            self.role.is_initiator(),
-            true,
-        )));
+        self.outcipher = Some(SptpsCipher::new(
+            self.aead,
+            key_half(&**key, self.role.is_initiator(), true),
+        ));
         self.out_key_base = self.outseqno.load(Ordering::Relaxed);
 
         Ok(was_rekey)
