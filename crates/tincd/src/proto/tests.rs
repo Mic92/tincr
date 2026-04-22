@@ -104,7 +104,7 @@ fn id_control_rejected_on_non_unix_conn() {
 #[test]
 fn id_invitation_rejected_on_outgoing_conn() {
     let mut c = mkconn();
-    c.outgoing = Some(slotmap::KeyData::from_ffi(1));
+    c.outgoing = Some(slotmap::KeyData::from_ffi(1).into());
     let line = b"0 ?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 17.7";
     let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut OsRng);
     assert!(matches!(r, Err(DispatchError::BadId(_))), "got {r:?}");

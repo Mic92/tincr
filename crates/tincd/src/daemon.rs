@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
@@ -81,10 +81,7 @@ const PKT_PROBE: u8 = 4;
 
 // dispatch enums - the W in EventLoop<W> / Timers<W> / SelfPipe<W>
 
-new_key_type! {
-    /// Connection handle. Generational: stale id → `conns.get(id) == None`.
-    pub struct ConnId;
-}
+pub use crate::ids::ConnId;
 
 /// Per-peer runtime annotation. Split from graph topology so
 /// `tinc-graph` stays `#![no_std]`-clean.

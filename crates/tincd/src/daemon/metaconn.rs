@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use crate::conn::{Connection, FeedResult, SptpsEvent};
 use crate::invitation_serve::InvitePhase;
-use crate::outgoing::{OutgoingId, ProxyConfig};
+use crate::outgoing::ProxyConfig;
 use crate::proto::{
     CtlReq, DispatchError, DispatchResult, IdCtx, IdOk, check_gate, handle_control, handle_id,
     record_body, send_ack,
@@ -710,7 +710,7 @@ impl Daemon {
                             }
                             // Gate on non-zero timeout (healthy conn
                             // pongs every pinginterval; don't churn).
-                            let oid = conn.outgoing.map(OutgoingId::from);
+                            let oid = conn.outgoing;
                             let addr = conn.address;
                             if let Some(oid) = oid
                                 && let Some(out) = self.outgoings.get_mut(oid)

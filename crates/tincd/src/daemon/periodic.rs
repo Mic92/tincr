@@ -10,7 +10,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 
-use crate::outgoing::{Outgoing, OutgoingId, resolve_config_addrs};
+use crate::outgoing::{Outgoing, resolve_config_addrs};
 use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
@@ -739,7 +739,7 @@ impl Daemon {
                 let to_terminate: Vec<ConnId> = self
                     .conns
                     .iter()
-                    .filter(|(_, c)| c.outgoing.map(OutgoingId::from) == Some(oid))
+                    .filter(|(_, c)| c.outgoing == Some(oid))
                     .map(|(id, _)| id)
                     .collect();
                 for cid in to_terminate {

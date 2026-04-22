@@ -32,18 +32,12 @@ use std::path::Path;
 
 use nix::errno::Errno;
 use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
-use slotmap::new_key_type;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::addrcache::AddressCache;
 use crate::listen::SockOpts;
 
-new_key_type! {
-    /// `outgoing_t*`. Slotmap key for `Daemon.outgoings`. Carried
-    /// in `TimerWhat::RetryOutgoing(OutgoingId)` and on
-    /// `Connection.outgoing` so `terminate` knows to retry.
-    pub struct OutgoingId;
-}
+pub(crate) use crate::ids::OutgoingId;
 
 /// `outgoing_t` (`net.h:121-125`). Three fields in C: `node_t *node`,
 /// `int timeout`, `timeout_t ev`. We store the node NAME (not a

@@ -760,7 +760,7 @@ impl Daemon {
                 name: c.name.clone(),
                 origin: c
                     .outgoing
-                    .and_then(|kd| self.outgoings.get(OutgoingId::from(kd)))
+                    .and_then(|oid| self.outgoings.get(oid))
                     .map_or(OutOrigin::AutoBackbone, |o| o.origin),
                 age: c
                     .activated_at
@@ -770,11 +770,7 @@ impl Daemon {
 
         // pending = Outgoing slots with no live conn. Pre-ACK conns
         // DO count as serving.
-        let served: HashSet<OutgoingId> = self
-            .conns
-            .values()
-            .filter_map(|c| c.outgoing.map(OutgoingId::from))
-            .collect();
+        let served: HashSet<OutgoingId> = self.conns.values().filter_map(|c| c.outgoing).collect();
         let pending_outgoings: Vec<OutgoingSnapshot> = self
             .outgoings
             .iter()
@@ -860,11 +856,7 @@ impl Daemon {
                     .find(|(_, c)| c.active && c.outgoing.is_some() && c.name == name)
                     .map(|(id, _)| id);
                 if let Some(cid) = cid {
-                    let oid = self
-                        .conns
-                        .get_mut(cid)
-                        .and_then(|c| c.outgoing.take())
-                        .map(OutgoingId::from);
+                    let oid = self.conns.get_mut(cid).and_then(|c| c.outgoing.take());
                     if let Some(oid) = oid {
                         if let Some(tid) = self.outgoing_timers.remove(oid) {
                             self.timers.del(tid);

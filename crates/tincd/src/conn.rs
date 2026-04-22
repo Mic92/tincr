@@ -24,6 +24,7 @@ use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
 use tinc_sptps::{Output, Sptps, SptpsError};
 
+use crate::ids::OutgoingId;
 use crate::invitation_serve::InvitePhase;
 
 /// `fmt::Write` adapter for `Vec<u8>` (which only impls `io::Write`).
@@ -207,8 +208,8 @@ pub(crate) struct Connection {
     /// `c->status.connecting` (`connection.h:41`, bit 2). EINPROGRESS
     /// probe runs instead of read/write dispatch when set.
     pub connecting: bool,
-    /// `c->outgoing` (`connection.h:92`). `KeyData` to avoid daemon dep.
-    pub outgoing: Option<slotmap::KeyData>,
+    /// `c->outgoing` (`connection.h:92`).
+    pub outgoing: Option<OutgoingId>,
     /// `c->tcplen`. After `PACKET 17 <len>`, the next record is a
     /// raw VPN-packet blob. We don't SEND TCP probes but a C peer
     /// does (found by cross-impl tests).
@@ -357,7 +358,7 @@ impl Connection {
         name: String,
         hostname: String,
         address: SocketAddr,
-        outgoing: slotmap::KeyData,
+        outgoing: OutgoingId,
         now: Instant,
     ) -> Self {
         Self {

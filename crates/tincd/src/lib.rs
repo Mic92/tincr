@@ -29,6 +29,7 @@ mod egress;
 mod fragment;
 mod graph_glue;
 mod icmp;
+mod ids;
 mod inthash;
 mod invitation_serve;
 mod keys;

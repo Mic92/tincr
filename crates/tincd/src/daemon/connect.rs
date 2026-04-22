@@ -73,7 +73,7 @@ impl Daemon {
         // Dup-conn: already have a live conn to this node → new
         // wins, terminate old.
         let name = conn.name.clone();
-        let conn_outgoing = conn.outgoing.map(OutgoingId::from);
+        let conn_outgoing = conn.outgoing;
         let conn_addr = conn.address;
         let edge_addr = conn.address.map(|mut a| {
             // Peer's TCP-source addr, port rewritten to their UDP
@@ -165,7 +165,6 @@ impl Daemon {
                         // or it leaks for the daemon lifetime.
                         log::warn!(target: "tincd::conn",
                             "Two outgoing connections to the same node {name}!");
-                        let dropped_oid = OutgoingId::from(dropped_oid);
                         if let Some(tid) = self.outgoing_timers.remove(dropped_oid) {
                             self.timers.del(tid);
                         }
@@ -313,7 +312,7 @@ impl Daemon {
         let was_log = conn.log_level.is_some();
         let restore_debug = conn.prev_debug_level;
         let conn_name = conn.name.clone();
-        let conn_outgoing = conn.outgoing.map(OutgoingId::from);
+        let conn_outgoing = conn.outgoing;
         // Pre-ACK conns have no node_ids entry (only on_ack inserts).
         let conn_nid = self.node_ids.get(&conn_name).copied();
         // Drop now: OwnedFd closes; broadcast_line below skips this id.
@@ -604,14 +603,8 @@ impl Daemon {
                 let _ = fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // No async connect; ready NOW.
                 let now = self.timers.now();
-                let mut conn = Connection::new_outgoing(
-                    fd,
-                    name.clone(),
-                    fmt_addr(&addr),
-                    addr,
-                    slotmap::Key::data(&oid),
-                    now,
-                );
+                let mut conn =
+                    Connection::new_outgoing(fd, name.clone(), fmt_addr(&addr), addr, oid, now);
                 conn.connecting = false;
                 let Some(id) = self.register_outgoing_conn(conn, Io::Read) else {
                     continue;
@@ -684,14 +677,7 @@ impl Daemon {
                     // leak → 100% CPU busy-loop on the pre-ACK
                     // timeout path. See netns/busyloop.rs.)
                     let fd = OwnedFd::from(sock);
-                    let conn = Connection::new_outgoing(
-                        fd,
-                        name,
-                        fmt_addr(&addr),
-                        addr,
-                        slotmap::Key::data(&oid),
-                        now,
-                    );
+                    let conn = Connection::new_outgoing(fd, name, fmt_addr(&addr), addr, oid, now);
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete OR fail. READ too (loopback connect+
                     // immediate-data is possible).
