@@ -24,6 +24,7 @@ fn mkctx(cookie: &str) -> IdCtx<'_> {
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     }
 }
 
@@ -213,6 +214,7 @@ fn id_peer_major_mismatch() {
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     };
 
     // 18.7 — major 18, we're 17.
@@ -240,6 +242,7 @@ fn id_peer_unknown_identity() {
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     };
 
     let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng);
@@ -269,6 +272,7 @@ fn id_peer_rollback_rejected() {
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     };
 
     let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut OsRng);
@@ -301,6 +305,7 @@ fn id_peer_no_dot_minor_zero() {
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     };
 
     let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut OsRng);
@@ -332,6 +337,7 @@ fn id_invitation_bad_throwaway() {
         invitation_key: Some(&inv_key),
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
     };
 
     // Too short (32 bytes b64 → 43 chars; this is 7).

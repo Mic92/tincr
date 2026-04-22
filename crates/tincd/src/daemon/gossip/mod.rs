@@ -69,6 +69,22 @@ impl Daemon {
         Some((key, aead))
     }
 
+    /// Per-tunnel `SPTPSKex` for `name`: per-host override, else the
+    /// tinc.conf global. Reads `hosts/NAME` again (separate from
+    /// `load_peer_ed25519`) rather than threading the `Config` through
+    /// — this runs once per `REQ_KEY` (10s-debounced), and keeping the
+    /// two reads independent means the meta-conn and UDP-tunnel paths
+    /// can't drift on which one consults the host file.
+    pub(super) fn peer_sptps_kex(&self, name: &str) -> tinc_sptps::SptpsKex {
+        let cfg = crate::keys::read_host_config(&self.confbase, name);
+        crate::daemon::read_sptps_kex(&cfg, self.settings.sptps_kex).unwrap_or_else(|v| {
+            log::warn!(target: "tincd::net",
+                           "hosts/{name}: SPTPSKex = {v}: invalid, using {}",
+                           self.settings.sptps_kex);
+            self.settings.sptps_kex
+        })
+    }
+
     /// Resolve a routed message's `from`/`to` names to known `NodeId`s.
     /// Logs the C-parity "unknown" error and returns `None` so callers
     /// can `let-else return Ok(false)` without repeating the two blocks.

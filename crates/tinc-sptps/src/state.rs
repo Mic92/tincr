@@ -24,6 +24,10 @@ use rand_core::RngCore;
 use tinc_crypto::aead::{SptpsAead, SptpsCipher};
 use tinc_crypto::chapoly::{KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
+use tinc_crypto::hybrid::{
+    self, CT_LEN as MLKEM_CT_LEN, EK_LEN as MLKEM_EK_LEN, HYBRID_SHARED_LEN, MlKemPrivate,
+    SS_LEN as MLKEM_SS_LEN, SptpsKex,
+};
 use tinc_crypto::prf::prf;
 use tinc_crypto::sign::{self, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN, SigningKey};
 use zeroize::{Zeroize, Zeroizing};
@@ -70,7 +74,9 @@ impl<T: Into<Vec<u8>>> From<T> for SptpsLabel {
 /// receive_sig pass swapped (bit, kex order); one builder so they
 /// can't drift apart.
 fn sig_transcript(bit: bool, kex_a: &[u8], kex_b: &[u8], label: &[u8]) -> Zeroizing<Vec<u8>> {
-    let mut msg = Zeroizing::new(Vec::with_capacity(1 + 2 * KEX_LEN + label.len()));
+    let mut msg = Zeroizing::new(Vec::with_capacity(
+        1 + kex_a.len() + kex_b.len() + label.len(),
+    ));
     msg.push(u8::from(bit));
     msg.extend_from_slice(kex_a);
     msg.extend_from_slice(kex_b);
@@ -425,13 +431,27 @@ pub struct Sptps {
     // `mykex`/`hiskex` are 65-byte KEX bodies. They live from KEX-send to
     // SIG-receive: the SIG transcript needs both. C frees them in
     // `receive_sig` after the verify.
-    mykex: Option<Zeroizing<[u8; KEX_LEN]>>,
-    hiskex: Option<Zeroizing<[u8; KEX_LEN]>>,
+    // `Vec`, not `[u8; KEX_LEN]`: hybrid mode's KEX body is 1249 bytes
+    // (classical 65 + ML-KEM ek 1184). The body length is fully
+    // determined by `self.kex`, checked in `kex_body_ok`.
+    mykex: Option<Zeroizing<Vec<u8>>>,
+    hiskex: Option<Zeroizing<Vec<u8>>>,
     /// ECDH ephemeral. Lives from `send_kex` (where it generates the
     /// pubkey that goes in `mykex`) to `receive_sig` (where it computes
     /// the shared secret and is consumed). `EcdhPrivate::compute_shared`
     /// takes `self` by value, so the Option dance is natural.
     ecdh: Option<EcdhPrivate>,
+    /// ML-KEM-768 decapsulation key. Same lifecycle as `ecdh`: born
+    /// in `send_kex`, consumed in `receive_sig`. `None` in classical
+    /// mode. Boxed inside `MlKemPrivate` (2400 B), so the `Option`
+    /// here is pointer-sized.
+    mlkem: Option<MlKemPrivate>,
+    /// Our ML-KEM ciphertext + the shared secret it encapsulates,
+    /// produced in `receive_kex` (against the peer's `ek`) and
+    /// consumed in `send_sig` / `receive_sig` respectively. Paired so
+    /// one `Option` covers both — they're born and die together.
+    #[expect(clippy::type_complexity)]
+    mlkem_encap: Option<(Zeroizing<[u8; MLKEM_CT_LEN]>, Zeroizing<[u8; MLKEM_SS_LEN]>)>,
     /// 128 bytes of PRF output: `key0[64] ‖ key1[64]`. Lives from
     /// `generate_key_material` to `receive_ack` (the `incipher` half is
     /// only consumed when we know the peer is ready). Freed there.
@@ -442,9 +462,32 @@ pub struct Sptps {
     hiskey: [u8; SIGN_PUBLIC_LEN],
     label: Vec<u8>,
     /// Static, per-session. Selects the record AEAD and contributes
-    /// [`SptpsAead::label_suffix`] to `label` (so a peer configured
+    /// the cipher discriminator byte to `label` (so a peer configured
     /// for a different AEAD fails SIG verify, not record decrypt).
     aead: SptpsAead,
+    kex: SptpsKex,
+}
+
+/// Expected KEX body length for `kex`. Hybrid appends the ML-KEM
+/// encapsulation key after the classical `[ver|nonce|ecdh_pk]`.
+const fn kex_len(kex: SptpsKex) -> usize {
+    match kex {
+        SptpsKex::X25519 => KEX_LEN,
+        SptpsKex::X25519MlKem768 => KEX_LEN + MLKEM_EK_LEN,
+    }
+}
+
+/// Expected SIG body length. Hybrid appends our ML-KEM ciphertext
+/// after the Ed25519 signature — the SPTPS flow sends both KEX
+/// records blind (each side calls `send_kex` from `start`), so the
+/// earliest point either side can encapsulate is on receipt of the
+/// peer's KEX, and the earliest record that can carry the resulting
+/// `ct` is SIG.
+const fn sig_len(kex: SptpsKex) -> usize {
+    match kex {
+        SptpsKex::X25519 => SIG_LEN,
+        SptpsKex::X25519MlKem768 => SIG_LEN + MLKEM_CT_LEN,
+    }
 }
 
 impl Sptps {
@@ -459,7 +502,6 @@ impl Sptps {
     /// `replaywin` is the datagram replay window in *bytes* (default 16
     /// = 128 packets per `sptps_replaywin` in C). Ignored in stream mode
     /// — pass 0 if you like, but matching the C default is harmless.
-    #[expect(clippy::missing_panics_doc)] // unreachable: send_kex on a fresh struct can't fail
     pub fn start(
         role: Role,
         framing: Framing,
@@ -469,17 +511,54 @@ impl Sptps {
         replaywin: usize,
         rng: &mut impl RngCore,
     ) -> (Self, Vec<Output>) {
-        // Mix the AEAD choice into the label. The label feeds both the
-        // SIG transcript and the PRF seed, so a static-config mismatch
-        // surfaces as `BadSig` during the handshake — clean failure,
-        // no chance of deriving keys one side can't open. Default
-        // suffix is empty: byte-identical to C tinc, pinned by
-        // `tests/vs_c.rs`.
+        Self::start_with(
+            role,
+            framing,
+            SptpsKex::X25519,
+            mykey,
+            hiskey,
+            label,
+            replaywin,
+            rng,
+        )
+    }
+
+    /// [`start`](Self::start) with an explicit key-exchange mode.
+    ///
+    /// When either `kex` or the label's `aead` is non-default,
+    /// `[kex.discriminator(), aead.discriminator()]` is appended to
+    /// `label`. Both the SIG transcript and the PRF seed include the
+    /// label, so a static-config mismatch (in either dimension)
+    /// surfaces as `BadSig` during the handshake — clean failure, no
+    /// chance of deriving keys one side can't open. With both at
+    /// default the suffix is empty: byte-identical to C tinc, pinned
+    /// by `tests/vs_c.rs`. See `docs/PROTOCOL.md`.
+    #[expect(clippy::missing_panics_doc, clippy::too_many_arguments)]
+    pub fn start_with(
+        role: Role,
+        framing: Framing,
+        kex: SptpsKex,
+        mykey: SigningKey,
+        hiskey: [u8; SIGN_PUBLIC_LEN],
+        label: impl Into<SptpsLabel>,
+        replaywin: usize,
+        rng: &mut impl RngCore,
+    ) -> (Self, Vec<Output>) {
         let SptpsLabel {
             bytes: mut label,
             aead,
         } = label.into();
-        label.extend_from_slice(aead.label_suffix());
+        let kd = kex.discriminator();
+        let cd = aead.discriminator();
+        if kd != 0 || cd != 0 {
+            // Suffix, not prefix: the C label format is
+            // `"tinc TCP key expansion <a> <b>\0"`; appending after
+            // the NUL keeps the human-readable prefix intact in
+            // packet captures while still perturbing every byte of
+            // PRF output.
+            label.push(kd);
+            label.push(cd);
+        }
         let mut s = Self {
             role,
             framing,
@@ -494,11 +573,14 @@ impl Sptps {
             mykex: None,
             hiskex: None,
             ecdh: None,
+            mlkem: None,
+            mlkem_encap: None,
             key: None,
             mykey,
             hiskey,
             label,
             aead,
+            kex,
         };
         let mut out = Vec::new();
         // send_kex can only fail if mykex is already set. We just zeroed it.
@@ -967,21 +1049,30 @@ impl Sptps {
             return Err(SptpsError::InvalidState);
         }
 
-        let mut kex = Zeroizing::new([0u8; KEX_LEN]);
+        let mut kex = Zeroizing::new(vec![0u8; kex_len(self.kex)]);
         kex[0] = VERSION;
 
         // RNG order matters: nonce first, ECDH seed second. C's
         // `randomize(s->mykex->nonce)` then `ecdh_generate_public()`.
+        // ML-KEM keygen draws *after* both, so the first 64 RNG bytes
+        // are identical to classical mode — the `vs_c` harness relies
+        // on that ordering and never runs hybrid.
         rng.fill_bytes(&mut kex[1..=NONCE_LEN]);
 
         let mut seed = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(&mut *seed);
         let (ecdh, pubkey) = EcdhPrivate::from_seed(&seed);
-        kex[1 + NONCE_LEN..].copy_from_slice(&pubkey);
+        kex[1 + NONCE_LEN..KEX_LEN].copy_from_slice(&pubkey);
+
+        if self.kex == SptpsKex::X25519MlKem768 {
+            let (dk, ek) = MlKemPrivate::generate(rng);
+            kex[KEX_LEN..].copy_from_slice(&ek);
+            self.mlkem = Some(dk);
+        }
 
         // Wire it before stashing — C does `s->mykex = ...; send_record(mykex)`
         // but the order doesn't observably matter, both touch only mykex.
-        self.send_record_priv(REC_HANDSHAKE, &*kex, out);
+        self.send_record_priv(REC_HANDSHAKE, &kex, out);
         self.mykex = Some(kex);
         self.ecdh = Some(ecdh);
         Ok(())
@@ -997,7 +1088,19 @@ impl Sptps {
         let (mykex, hiskex) = self.kex_pair();
         let msg = sig_transcript(self.role.is_initiator(), mykex, hiskex, &self.label);
         let sig = self.mykey.sign(&msg);
-        self.send_record_priv(REC_HANDSHAKE, &sig, out);
+        match self.kex {
+            SptpsKex::X25519 => self.send_record_priv(REC_HANDSHAKE, &sig, out),
+            SptpsKex::X25519MlKem768 => {
+                // `[sig(64) ‖ mlkem_ct(1088)]`. `send_sig` is only
+                // reached after `hiskex` is stashed, so `receive_kex`
+                // has already encapsulated.
+                let (ct, _ss) = self.mlkem_encap.as_ref().expect("encap set in receive_kex");
+                let mut body = Zeroizing::new(Vec::with_capacity(sig_len(self.kex)));
+                body.extend_from_slice(&sig);
+                body.extend_from_slice(&**ct);
+                self.send_record_priv(REC_HANDSHAKE, &body, out);
+            }
+        }
     }
 
     /// `send_ack`: empty handshake record. Only used during rekey
@@ -1027,7 +1130,7 @@ impl Sptps {
 
     /// Both KEX blobs, asserted present. The state machine only reaches
     /// SIG/key-derivation after stashing both, so absence is a bug.
-    fn kex_pair(&self) -> (&[u8; KEX_LEN], &[u8; KEX_LEN]) {
+    fn kex_pair(&self) -> (&[u8], &[u8]) {
         (
             self.mykex.as_deref().expect("mykex present"),
             self.hiskex.as_deref().expect("hiskex present"),
@@ -1037,17 +1140,31 @@ impl Sptps {
     /// `receive_kex` precondition. Factored so `SecondaryKex` can run
     /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
     fn kex_body_ok(&self, body: &[u8]) -> bool {
-        body.len() == KEX_LEN && body[0] == VERSION && self.hiskex.is_none()
+        body.len() == kex_len(self.kex) && body[0] == VERSION && self.hiskex.is_none()
     }
 
     /// `receive_kex`: stash peer's KEX, sign-if-initiator.
-    fn receive_kex(&mut self, body: &[u8], out: &mut Vec<Output>) -> Result<(), SptpsError> {
+    fn receive_kex(
+        &mut self,
+        body: &[u8],
+        rng: &mut impl RngCore,
+        out: &mut Vec<Output>,
+    ) -> Result<(), SptpsError> {
         if !self.kex_body_ok(body) {
             return Err(SptpsError::BadKex);
         }
-        let mut kex = Zeroizing::new([0u8; KEX_LEN]);
-        kex.copy_from_slice(body);
-        self.hiskex = Some(kex);
+        self.hiskex = Some(Zeroizing::new(body.to_vec()));
+
+        if self.kex == SptpsKex::X25519MlKem768 {
+            // Encapsulate now: both roles have the peer's ek at this
+            // point, and both will need `my_ct` before their next
+            // send (`send_sig`). Doing it here keeps `send_sig` a
+            // pure formatter with no RNG dependency.
+            let peer_ek: &[u8; MLKEM_EK_LEN] =
+                body[KEX_LEN..].try_into().expect("kex_body_ok checked len");
+            let (ct, ss) = hybrid::encapsulate(peer_ek, rng);
+            self.mlkem_encap = Some((Zeroizing::new(ct), Zeroizing::new(ss)));
+        }
 
         if self.role.is_initiator() {
             self.send_sig(out);
@@ -1061,7 +1178,7 @@ impl Sptps {
     /// Note the nonce order: *initiator's nonce first*, regardless of which
     /// side we are. Both sides must compute the same key, so the seed must
     /// be role-symmetric. C: `(initiator ? mykex : hiskex)->nonce` first.
-    fn generate_key_material(&mut self, shared: &[u8; SHARED_LEN]) {
+    fn generate_key_material(&mut self, shared: &[u8]) {
         // No NUL: C does `sizeof("key expansion") - 1`.
         const PREFIX: &[u8] = b"key expansion";
 
@@ -1142,10 +1259,10 @@ impl Sptps {
     /// `incipher` yet (that happens on `receive_ack`), so sending under the
     /// new key would be undecryptable on their end.
     fn receive_sig(&mut self, body: &[u8], out: &mut Vec<Output>) -> Result<bool, SptpsError> {
-        if body.len() != SIG_LEN {
+        if body.len() != sig_len(self.kex) {
             return Err(SptpsError::BadSig);
         }
-        let sig: &[u8; SIG_LEN] = body.try_into().unwrap();
+        let sig: &[u8; SIG_LEN] = body[..SIG_LEN].try_into().unwrap();
 
         // Verify transcript: `[!initiator][hiskex][mykex][label]`.
         // Swapped vs. send_sig: their initiator-bit is our !initiator-bit,
@@ -1158,11 +1275,37 @@ impl Sptps {
 
         // ECDH. `compute_shared` consumes the private key (zeroizes inside).
         // The peer's pubkey is bytes 33..65 of their KEX.
-        let peer_pub: [u8; ECDH_PUBLIC_LEN] = hiskex[1 + NONCE_LEN..].try_into().unwrap();
+        let peer_pub: [u8; ECDH_PUBLIC_LEN] = hiskex[1 + NONCE_LEN..KEX_LEN].try_into().unwrap();
         let ecdh = self.ecdh.take().expect("receive_sig with no ecdh");
-        let shared = Zeroizing::new(ecdh.compute_shared(&peer_pub).ok_or(SptpsError::BadKex)?);
+        let x25519 = Zeroizing::new(ecdh.compute_shared(&peer_pub).ok_or(SptpsError::BadKex)?);
 
-        self.generate_key_material(&shared);
+        match self.kex {
+            SptpsKex::X25519 => self.generate_key_material(&*x25519),
+            SptpsKex::X25519MlKem768 => {
+                // Decapsulate the peer's ct (carried after their sig).
+                let peer_ct: &[u8; MLKEM_CT_LEN] = body[SIG_LEN..].try_into().unwrap();
+                let dk = self.mlkem.take().expect("mlkem dk set in send_kex");
+                let ss_decap = Zeroizing::new(dk.decapsulate(peer_ct));
+                // `mlkem_encap` stays put: responder's `send_sig` below
+                // still needs `my_ct`. Dropped with `mykex`/`hiskex`.
+                let (_ct, ss_encap) = self.mlkem_encap.as_ref().expect("set in receive_kex");
+
+                // Role-symmetric ordering, same trick as the PRF nonce
+                // order: `ss_i2r` is "initiator encapsulated, responder
+                // decapsulated". Initiator's encap == responder's decap.
+                let (ss_i2r, ss_r2i): (&[u8; MLKEM_SS_LEN], &[u8; MLKEM_SS_LEN]) =
+                    if self.role.is_initiator() {
+                        (ss_encap, &ss_decap)
+                    } else {
+                        (&ss_decap, ss_encap)
+                    };
+                let mut shared = Zeroizing::new([0u8; HYBRID_SHARED_LEN]);
+                shared[..SHARED_LEN].copy_from_slice(&*x25519);
+                shared[SHARED_LEN..SHARED_LEN + MLKEM_SS_LEN].copy_from_slice(ss_i2r);
+                shared[SHARED_LEN + MLKEM_SS_LEN..].copy_from_slice(ss_r2i);
+                self.generate_key_material(&*shared);
+            }
+        }
 
         // ─── ORDER-SENSITIVE FROM HERE ───────────────────────────────
         // C lines 357..375. Don't reorder without re-reading the doc
@@ -1182,6 +1325,9 @@ impl Sptps {
         // C lines 360-363: free mykex/hiskex. Zeroize-on-drop here.
         self.mykex = None;
         self.hiskex = None;
+        // Hybrid transients: dk already `take`n above; the (ct, ss)
+        // pair is done now that the responder's `send_sig` has run.
+        self.mlkem_encap = None;
 
         // C line 366: `if(s->outstate && !send_ack(s)) return false;`
         // STILL the old outcipher.
@@ -1252,7 +1398,7 @@ impl Sptps {
                     }
                     self.send_kex(rng, out)?;
                 }
-                self.receive_kex(body, out)?;
+                self.receive_kex(body, rng, out)?;
                 self.state = State::Sig;
                 Ok(())
             }

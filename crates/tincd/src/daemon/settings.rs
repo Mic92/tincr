@@ -251,6 +251,13 @@ pub struct DaemonSettings {
     /// Global `Weight` from tinc.conf. Fallback when per-host
     /// `Weight` is absent. Overrides the RTT measurement.
     pub global_weight: Option<i32>,
+    /// `SPTPSKex` from tinc.conf: KEX mode for *all* SPTPS sessions
+    /// (meta-connection and per-tunnel). Default `x25519` is wire-
+    /// identical to C tinc; `x25519-mlkem768` adds the post-quantum
+    /// leg. Per-host override (in `hosts/PEER`) takes precedence —
+    /// see [`read_sptps_kex`]. Non-reloadable: changing it mid-run
+    /// would desync the next rekey.
+    pub sptps_kex: tinc_sptps::SptpsKex,
     /// `DeviceStandby`. When set, `tinc-up` is NOT fired at setup:
     /// the script defers until the FIRST peer becomes reachable.
     /// Mirror for tinc-down: fired when the LAST peer becomes
@@ -375,6 +382,7 @@ impl Default for DaemonSettings {
             global_pmtu: None,
             sptps_cipher: tinc_sptps::SptpsAead::default(),
             global_weight: None,
+            sptps_kex: tinc_sptps::SptpsKex::default(),
             device_standby: false,
             dht_discovery: false,
             dht_secret: None,
@@ -515,6 +523,21 @@ pub(crate) fn parse_subnets_from_config(
         }
     }
     subnets
+}
+
+/// Read `SPTPSKex` from `config` (host file or tinc.conf), falling
+/// back to `default` when absent. Returns `Err(value)` on an
+/// unparseable value so call sites can decide between hard-error
+/// (tinc.conf at setup) and warn-and-default (per-host at handshake
+/// time — a malformed peer host file shouldn't take the daemon down).
+pub(crate) fn read_sptps_kex(
+    config: &tinc_conf::Config,
+    default: tinc_sptps::SptpsKex,
+) -> Result<tinc_sptps::SptpsKex, String> {
+    match config.lookup("SPTPSKex").next() {
+        None => Ok(default),
+        Some(e) => e.get_str().parse().map_err(|()| e.get_str().to_owned()),
+    }
 }
 
 /// Parse `ConnectTo =` names from `config`. Filters invalid names
@@ -695,6 +718,13 @@ pub(super) fn load_settings(
     // DeviceStandby. Non-reloadable: decides whether tinc-up
     // fires at setup vs first-peer.
     cfg_bool!(config, "DeviceStandby" => settings.device_standby);
+
+    // SPTPSKex. Non-reloadable. Unknown values are a hard error,
+    // not a silent default — a typo here would silently strip the PQ
+    // leg the operator asked for.
+    settings.sptps_kex = read_sptps_kex(config, tinc_sptps::SptpsKex::default()).map_err(|v| {
+        SetupError::Config(format!("SPTPSKex = {v}: expected x25519|x25519-mlkem768"))
+    })?;
 
     // Rust extension. Non-reloadable.
     cfg_bool!(config, "DhtDiscovery" => settings.dht_discovery);

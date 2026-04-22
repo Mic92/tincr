@@ -39,9 +39,10 @@ impl Daemon {
         let label = make_udp_label(&self.name, &to_name);
 
         let mykey = SigningKey::from_blob(&self.mykey.to_blob());
-        let (sptps, outs) = Sptps::start(
+        let (sptps, outs) = Sptps::start_with(
             Role::Initiator,
             Framing::Datagram,
+            self.peer_sptps_kex(&to_name),
             mykey,
             hiskey,
             tinc_sptps::SptpsLabel::with_aead(label, aead),
@@ -402,9 +403,10 @@ impl Daemon {
         // Label has initiator's name first (same both sides).
         let label = make_udp_label(&msg.from, &self.name);
         let mykey = SigningKey::from_blob(&self.mykey.to_blob());
-        let (mut sptps, init_outs) = Sptps::start(
+        let (mut sptps, init_outs) = Sptps::start_with(
             Role::Responder,
             Framing::Datagram,
+            self.peer_sptps_kex(&msg.from),
             mykey,
             hiskey,
             tinc_sptps::SptpsLabel::with_aead(label, aead),

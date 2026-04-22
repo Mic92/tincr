@@ -31,13 +31,21 @@ mod state;
 
 pub use state::{Framing, Output, ReplayWindow, Role, Sptps, SptpsError, SptpsLabel};
 pub use tinc_crypto::aead::SptpsAead;
+pub use tinc_crypto::hybrid::SptpsKex;
 
-/// Body of a KEX record: `version[1] ‖ nonce[32] ‖ ecdh_pubkey[32]`.
+/// Body of a *classical* KEX record: `version[1] ‖ nonce[32] ‖
+/// ecdh_pubkey[32]`. Hybrid (`SptpsKex::X25519MlKem768`) appends an
+/// ML-KEM-768 `ek` for [`KEX_LEN_HYBRID`] total.
 ///
 /// The KEX wire payload. 65 bytes. A flat byte array rather than a
 /// struct so there's no `#[repr(packed)]` to forget — it goes on the wire byte-for-byte
 /// either way, and the field accessors are just slice math.
 pub const KEX_LEN: usize = 65;
+
+/// Body of a hybrid KEX record: classical 65 + ML-KEM-768 `ek` 1184.
+/// Both directions — SPTPS sends KEX records simultaneously, so both
+/// sides publish an `ek` and the ciphertexts ride on the SIG record.
+pub const KEX_LEN_HYBRID: usize = KEX_LEN + tinc_crypto::hybrid::EK_LEN;
 
 /// Nonce length. `ECDH_SIZE` in C — same as the public key length, which
 /// is a coincidence the C exploits by reusing the constant. We give them

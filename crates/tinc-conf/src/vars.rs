@@ -337,6 +337,12 @@ pub static VARS: &[Var] = &[
     // reading the same file. NOT SAFE — an inviter setting this would
     // wedge the invitee's first tunnel against every C tinc peer.
     v("SPTPSCipher", S.union(H)),
+    // SPTPSKex: SERVER (tinc.conf default) | HOST (per-peer override).
+    // NOT SAFE: an inviter that could set this could force `x25519`
+    // and strip the PQ leg — a downgrade. Both ends must agree out of
+    // band; that's an operator decision, not something an untrusted
+    // invitation gets to make.
+    v("SPTPSKex", S.union(H)),
 ];
 
 /// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
@@ -344,7 +350,7 @@ pub static VARS: &[Var] = &[
 /// check is the one that matters — drift here means a config key was
 /// added/removed upstream and our table
 /// is stale. The +N is fixed (this crate owns those keys).
-const _: () = assert!(VARS.len() == 74 + 6);
+const _: () = assert!(VARS.len() == 74 + 7);
 
 /// Look up by name, case-insensitive. C does this inline everywhere
 /// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We

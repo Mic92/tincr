@@ -72,6 +72,7 @@ impl UpnpMode {
 }
 pub(crate) use settings::{
     apply_reloadable_settings, parse_connect_to_from_config, parse_subnets_from_config,
+    read_sptps_kex,
 };
 
 // SPTPS record-type bits for the per-tunnel data channel.

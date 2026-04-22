@@ -12,7 +12,7 @@ use rand_core::RngCore;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
-use tinc_sptps::{Framing, Output, Role, Sptps, SptpsLabel};
+use tinc_sptps::{Framing, Output, Role, Sptps, SptpsLabel, SptpsKex};
 
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
@@ -378,6 +378,9 @@ pub(crate) struct IdCtx<'a> {
     /// `hosts/NAME` in [`load_peer_host_config`]; this is the fallback
     /// when the host file doesn't set one.
     pub sptps_cipher: tinc_sptps::SptpsAead,
+    /// Global tinc.conf `SPTPSKex`. Per-host override is read in
+    /// `load_peer_host_config` and stashed on the connection.
+    pub sptps_kex: SptpsKex,
 }
 
 /// `sptps_start(..., "tinc invitation", 15, ...)`.
@@ -533,9 +536,10 @@ pub(crate) fn handle_id(
     } else {
         Role::Responder
     };
-    let (sptps, init) = Sptps::start(
+    let (sptps, init) = Sptps::start_with(
         role,
         Framing::Stream,
+        conn.sptps_kex,
         mykey_clone,
         ecdsa,
         SptpsLabel::with_aead(label, conn.sptps_cipher),
@@ -748,6 +752,16 @@ fn load_peer_host_config(
     // should mean "no clamp", not "win"). `flatten().min()` skips
     // Nones — correct.
     conn.pmtu_cap = [host_pmtu, ctx.global_pmtu].into_iter().flatten().min();
+
+    // Per-host override; tinc.conf default if absent. Warn-and-
+    // default on parse error: a malformed `hosts/PEER` shouldn't be
+    // fatal at handshake time (it wasn't for any other key above).
+    conn.sptps_kex =
+        crate::daemon::read_sptps_kex(&host_config, ctx.sptps_kex).unwrap_or_else(|v| {
+            log::warn!(target: "tincd::auth",
+                       "hosts/{name}: SPTPSKex = {v}: invalid, using {}", ctx.sptps_kex);
+            ctx.sptps_kex
+        });
 
     ecdsa
 }

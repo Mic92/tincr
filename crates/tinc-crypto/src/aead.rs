@@ -104,6 +104,16 @@ impl SptpsAead {
             Self::Aes256Gcm => b"\x00\x01",
         }
     }
+
+    /// Second byte of the `[kex, cipher]` label suffix appended in
+    /// [`Sptps::start_with`](../tinc_sptps). 0 = C-tinc default.
+    #[must_use]
+    pub const fn discriminator(self) -> u8 {
+        match self {
+            Self::ChaCha20Poly1305 => 0,
+            Self::Aes256Gcm => 1,
+        }
+    }
 }
 
 /// Runtime check for the CPU features `ring`'s fast AES-GCM path

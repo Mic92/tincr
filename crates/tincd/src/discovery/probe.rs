@@ -59,8 +59,9 @@ mod tests {
     #[test]
     fn port_probe_reply_parse_edges() {
         // Unsorted keys (`ip` not at offset 1): scan still finds it.
-        let unsorted: Vec<u8> =
-            [b"d1:y1:r2:ip6:".as_ref(), &[10, 20, 30, 40, 0, 80], b"e"].concat();
+        // Slice-typed: an extra `AsRef<Array<_>>` impl on `[T; N]` (pulled
+        // in transitively via `hybrid-array`) otherwise defeats inference.
+        let unsorted: Vec<u8> = [&b"d1:y1:r2:ip6:"[..], &[10, 20, 30, 40, 0, 80], b"e"].concat();
         assert_eq!(
             parse_port_probe_reply(&unsorted),
             Some("10.20.30.40:80".parse().unwrap())

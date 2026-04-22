@@ -249,6 +249,10 @@ pub(crate) struct Connection {
     /// < n->mtu`. `None` = neither set. Named `cap` not `host_` since
     /// the value may come from the global config.
     pub pmtu_cap: Option<u16>,
+    /// `hosts/NAME` `SPTPSKex`, with the tinc.conf global already
+    /// folded in (`load_peer_host_config` applies the fallback). Read
+    /// by `id_h`'s `Sptps::start_with`.
+    pub sptps_kex: tinc_sptps::SptpsKex,
     /// `c->status.log` + `c->log_level` (`connection.h:51,112`). When
     /// `Some`, this conn receives `REQ_LOG` records for messages at or
     /// above the level. C uses C debug-level ints (`-1..=10`); we map
@@ -329,6 +333,7 @@ impl Connection {
             host_weight: None,
             sptps_cipher: tinc_sptps::SptpsAead::default(),
             pmtu_cap: None,
+            sptps_kex: tinc_sptps::SptpsKex::default(),
             log_level: None,
             prev_debug_level: None,
         }
