@@ -36,40 +36,13 @@ use std::os::fd::AsRawFd;
 use socket2::Socket;
 
 use super::{EgressBatch, Portable, UdpEgress};
-
-/// `struct msghdr_x` (xnu `bsd/sys/socket_private.h`). Layout matches
-/// the LP64 user struct exactly; checked against shadowsocks-rust and
-/// the xnu source. Field names kept verbatim from C for greppability.
-#[repr(C)]
-#[allow(clippy::struct_field_names)]
-struct MsghdrX {
-    msg_name: *mut libc::c_void,
-    msg_namelen: libc::socklen_t,
-    msg_iov: *mut libc::iovec,
-    msg_iovlen: libc::c_int,
-    msg_control: *mut libc::c_void,
-    msg_controllen: libc::socklen_t,
-    msg_flags: libc::c_int,
-    /// Output for `recvmsg_x`; must be zero on input to `sendmsg_x`.
-    msg_datalen: libc::size_t,
-}
+use crate::darwin_x::{MsghdrX, sendmsg_x, zeroed_boxed_array};
 
 // SAFETY: the raw pointers in `MsghdrX`/`iovec` are scratch slots
 // fully overwritten before every `sendmsg_x` call and never read by
 // Rust code; they don't alias any shared state. `UdpEgress: Send` is
 // the bound; the daemon is single-threaded so this is belt-only.
 unsafe impl Send for Fast {}
-
-unsafe extern "C" {
-    /// Returns number of datagrams sent, or -1/errno. `flags` accepts
-    /// only `MSG_DONTWAIT`.
-    fn sendmsg_x(
-        s: libc::c_int,
-        msgp: *const MsghdrX,
-        cnt: libc::c_uint,
-        flags: libc::c_int,
-    ) -> libc::ssize_t;
-}
 
 /// Max datagrams per `sendmsg_x` call. The daemon caps a `TxBatch` run
 /// at `UDP_MAX_SEGMENTS = 128`; we size the header/iov scratch arrays
@@ -100,23 +73,12 @@ impl Fast {
     pub(crate) fn new(udp: &Socket) -> io::Result<Self> {
         // SAFETY: zeroed `msghdr_x`/`iovec` are valid (all-null
         // pointers, zero lengths) and are fully overwritten before
-        // each `sendmsg_x` call. `Box::<[T; N]>::new_zeroed()` is
-        // unstable; go via collect→boxed-slice→try_into so the
-        // ~7 KiB scratch lands on the heap, not the stack.
-        let hdrs: Box<[MsghdrX]> = (0..HDR_CAP)
-            .map(|_| unsafe { std::mem::zeroed::<MsghdrX>() })
-            .collect();
-        let iovs: Box<[libc::iovec]> = (0..HDR_CAP)
-            .map(|_| unsafe { std::mem::zeroed::<libc::iovec>() })
-            .collect();
-        // `try_into` fails only on length mismatch; we just collected
-        // exactly `HDR_CAP` elements. Setup-time, never hot-path.
-        // `map_err` because `Box<[MsghdrX]>` (raw ptrs) isn't `Debug`.
+        // each `sendmsg_x` call.
         Ok(Self {
             fallback: Portable::new(udp)?,
             disabled: false,
-            hdrs: hdrs.try_into().map_err(|_| ()).expect("HDR_CAP elements"),
-            iovs: iovs.try_into().map_err(|_| ()).expect("HDR_CAP elements"),
+            hdrs: unsafe { zeroed_boxed_array() },
+            iovs: unsafe { zeroed_boxed_array() },
         })
     }
 }

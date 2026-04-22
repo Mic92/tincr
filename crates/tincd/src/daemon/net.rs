@@ -25,7 +25,7 @@ pub(super) const DEVICE_DRAIN_CAP: usize = 64;
 /// decrypt fails (same outcome as the old stack buf).
 pub(super) const UDP_RX_BUFSZ: usize = 2048;
 
-/// Persistent recvmmsg state. Heap-once, reuse-forever.
+/// Persistent `recvmmsg`/`recvmsg_x` state. Heap-once, reuse-forever.
 pub(crate) struct UdpRxBatch {
     /// 64 × 2KB packet buffers. Boxed so `Option<UdpRxBatch>` is
     /// `mem::take`-cheap (one ptr, not 128KB).
@@ -33,7 +33,13 @@ pub(crate) struct UdpRxBatch {
     /// nix's `mmsghdr` + `sockaddr_storage` arrays. Linux only.
     #[cfg(target_os = "linux")]
     headers: MultiHeaders<SockaddrStorage>,
+    /// Darwin `recvmsg_x` scratch. See [`macos_rx`].
+    #[cfg(target_os = "macos")]
+    pub(super) x: macos_rx::Scratch,
 }
+
+#[cfg(target_os = "macos")]
+pub(super) mod macos_rx;
 
 impl UdpRxBatch {
     pub(crate) fn new() -> Self {
@@ -49,6 +55,8 @@ impl UdpRxBatch {
             bufs,
             #[cfg(target_os = "linux")]
             headers: MultiHeaders::preallocate(UDP_RX_BATCH, None),
+            #[cfg(target_os = "macos")]
+            x: macos_rx::Scratch::new(),
         }
     }
 }

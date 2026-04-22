@@ -174,7 +174,9 @@ impl Daemon {
         }
     }
 
-    /// Phase 1 on macOS: recvfrom loop (no recvmmsg).
+    /// Phase 1, non-Linux: `recvmsg_x` on macOS (one syscall for up
+    /// to `UDP_RX_BATCH` datagrams), `recvfrom` loop everywhere else
+    /// and as the macOS `ENOSYS` fallback.
     #[cfg(not(target_os = "linux"))]
     fn udp_recv_phase1(
         fd: std::os::fd::RawFd,
@@ -182,6 +184,10 @@ impl Daemon {
         meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
     ) -> usize {
         use nix::sys::socket::{SockaddrStorage as NixSS, recvfrom};
+        #[cfg(target_os = "macos")]
+        if let Some(n) = super::macos_rx::phase1(fd, batch, meta) {
+            return n;
+        }
         let mut count = 0;
         while count < UDP_RX_BATCH {
             match recvfrom::<NixSS>(fd, &mut batch.bufs[count]) {
