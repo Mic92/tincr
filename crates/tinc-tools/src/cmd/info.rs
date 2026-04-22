@@ -54,7 +54,7 @@ use std::fmt::{self, Write as _};
 use tinc_proto::Subnet;
 
 use crate::cmd::CmdError;
-use crate::cmd::dump::{NodeRow, StatusBit, SubnetRow, strip_weight};
+use crate::ctl::rows::{NodeRow, StatusBit, SubnetRow, strip_weight};
 use crate::ctl::{CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
 

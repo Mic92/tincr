@@ -113,23 +113,11 @@ pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), 
     writeln!(out, "Name = {name}").map_err(io_err("<stdout>"))?;
 
     for line in content.lines() {
-        // "Length of leading run containing none of TAB/SPACE/=".
-        // If that's exactly 4, AND the first 4 bytes are "Name"
-        // (case-insensitive), skip.
-        //
-        //    `Name = foo`   → stop=4, prefix matches → skip
-        //    `Name=foo`     → stop=4, prefix matches → skip
-        //    `Name foo`     → stop=4, prefix matches → skip
-        //    `Namespace =`  → stop=9, doesn't match  → keep
-        //    `name = foo`   → stop=4, prefix matches → skip
-        //    `Named = foo`  → stop=5, doesn't match  → keep
-        //    ` Name = foo`  → stop=0, doesn't match  → keep ← note!
-        //
-        // The leading-space case is a (harmless, unlikely) upstream
-        // bug: the config parser strips leading whitespace, so
-        // ` Name = foo` *is* a Name line to the daemon. But this
-        // filter doesn't strip, so it doesn't catch it. We replicate
-        // for fidelity — the cost is just this comment.
+        // Skip any line whose `split_kv` key is `Name` (case-
+        // insensitive): `Name = foo`, `Name=foo`, `name\tfoo`, but
+        // not `Namespace = ` nor ` Name = foo` (leading space — a
+        // harmless upstream quirk we keep for fidelity; the config
+        // parser would lstrip, this filter doesn't).
         if is_name_line(line) {
             continue;
         }
@@ -147,19 +135,9 @@ pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), 
 /// `Name =` line filter. See the call site in `export_one` for the
 /// full breakdown of what this matches.
 fn is_name_line(line: &str) -> bool {
-    // Length of the prefix containing none of TAB/SPACE/=. Working
-    // in bytes: TAB/SPACE/= are ASCII so byte-index == char-index.
-    let stop = line
-        .bytes()
-        .position(|b| b == b'\t' || b == b' ' || b == b'=')
-        .unwrap_or(line.len());
-
-    if stop != 4 {
-        return false;
-    }
-
-    // First 4 bytes, case-insensitive. stop==4 so slice is in-bounds.
-    line[..4].eq_ignore_ascii_case("Name")
+    // `split_kv` is the canonical `strcspn(line, "\t =")` tokenizer.
+    // Same key-span semantics as the open-coded byte scan it replaced.
+    tinc_conf::split_kv(line).0.eq_ignore_ascii_case("Name")
 }
 
 /// `cmd_export`. Just `get_my_name` then `export_one`.

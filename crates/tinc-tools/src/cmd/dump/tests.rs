@@ -521,6 +521,9 @@ fn inv_valid_table() {
         // (label,                      file content)
         ("plain LF",                    "Name = bob\n# rest of file\n"),
         ("rstrip: CRLF + trailing tab", "Name = bob\t \r\n"),
+        // P4: same tokenizer as `tinc.conf` — `Name=bob` must list
+        // even though `cmd_invite` always writes the spaced form.
+        ("no-space `=`",                "Name=bob\n"),
     ];
     for (label, content) in cases {
         let (d, paths) = setup_inv();
@@ -558,9 +561,8 @@ fn inv_skipped() {
         // ─── 24 chars, NOT valid b64 ───
         (&bad_b64,               "Name = bob\n",     "bad b64 (`*` not in alphabet)"),
         // ─── valid filename, bad content ───
-        // `Name=bob` (no spaces): exact-prefix `"Name = "` (7 chars).
-        // The format `cmd_invite` writes is the format dump reads.
-        (&valid_name,            "Name=bob\n",       "strict `Name = ` prefix"),
+        // First line not a `Name` key at all.
+        (&valid_name,            "Address = x\n",   "first line not Name"),
         // `check_id` failure: name with hyphen.
         (&valid_name,            "Name = bad-name\n", "bad invitee name"),
         // Empty file.

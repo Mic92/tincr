@@ -70,7 +70,7 @@ use std::process::ExitCode;
 
 use tinc_proto::Subnet;
 use tinc_proto::subnet::DEFAULT_WEIGHT;
-use tinc_tools::cmd::dump::{SubnetRow, strip_weight};
+use tinc_tools::ctl::rows::{SubnetRow, strip_weight};
 use tinc_tools::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
 use tinc_tools::names::{Paths, PathsInput};
 

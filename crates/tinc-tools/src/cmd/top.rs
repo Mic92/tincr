@@ -65,50 +65,9 @@ use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::Paths;
 use crate::tui;
 
-use tinc_proto::{ParseError, Tok};
-
-// Layer 1: wire parse
-
-/// One row of `DUMP_TRAFFIC`. Daemon sends `code req name in_packets
-/// in_bytes out_packets out_bytes`. `recv_row` strips the first two,
-/// so we parse 5 fields.
-///
-/// Simplest dump format in the codebase: no `" port "` (it's not a
-/// hostname), no hex (no status field), just one `%s` then four
-/// `%"PRIu64"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrafficRow {
-    pub name: String,
-    pub in_packets: u64,
-    pub in_bytes: u64,
-    pub out_packets: u64,
-    pub out_bytes: u64,
-}
-
-impl TrafficRow {
-    /// Parse the body (post-`recv_row`-strip).
-    ///
-    /// # Errors
-    /// `ParseError` if any field is missing or not the right type.
-    /// Daemon's `dump_traffic` is broken or the wire's corrupt.
-    /// Same error type as `dump.rs`'s row parsers.
-    pub fn parse(body: &str) -> Result<Self, ParseError> {
-        let mut t = Tok::new(body);
-        // `%s` then 4× `%"PRIu64"`. `lu` is `Tok`'s u64 parser
-        // (named for `%lu`, which is what `%"PRIu64"` expands to
-        // on every 64-bit platform).
-        Ok(Self {
-            name: t.s()?.to_owned(),
-            in_packets: t.lu()?,
-            in_bytes: t.lu()?,
-            out_packets: t.lu()?,
-            out_bytes: t.lu()?,
-        })
-        // No `.end()`: sscanf-style doesn't care about trailing
-        // garbage. Future daemon versions adding fields wouldn't
-        // break us.
-    }
-}
+// Layer 1: wire parse — `TrafficRow` lives in `ctl::rows` alongside
+// the other dump-row schemas; re-exported for `top/tests.rs`.
+pub use crate::ctl::rows::TrafficRow;
 
 // Layer 2: state machine — `update()` + `sortfunc()`
 

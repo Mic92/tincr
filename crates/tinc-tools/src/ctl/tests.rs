@@ -432,7 +432,7 @@ fn stop_drains_to_eof() {
 //
 // Same harness as `recv_lines_until_eof`, but using the typed
 // `recv_row` instead of hand-tokenizing. The parse step (body →
-// NodeRow etc.) lives in cmd::dump tests; this is just the
+// NodeRow etc.) lives in ctl::rows / cmd::dump tests; this is just the
 // "18 N " prefix and the End vs Row distinction.
 
 /// Three rows, terminator. The body is byte-exact: spaces inside

@@ -49,6 +49,8 @@ use std::path::Path;
 
 use crate::names::Paths;
 
+pub mod rows;
+
 /// `request_type` enum. The second int after `CONTROL` in every
 /// control line.
 ///
