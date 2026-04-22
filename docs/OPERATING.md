@@ -174,6 +174,25 @@ A weight in the hundreds when the real RTT is tens of ms means the
 connect-time sample included a SYN retransmit; it is re-measured
 from PING/PONG and re-gossiped within a few `PingInterval`s.
 
+## Post-quantum key exchange
+
+Opt-in via `SPTPSKex = x25519-mlkem768`, settable in `tinc.conf`
+(mesh-wide default) and overridable per peer in `hosts/PEER`. **Both
+ends must agree**; there is no negotiation. A mismatch logs `BadKex`
+and the connection retries on the usual back-off, so a half-rolled-out
+mesh degrades to "those two nodes can't reach each other directly"
+rather than anything noisier.
+
+Rollout: set it in every node's `tinc.conf`, then restart the mesh
+(or per peer-pair in `hosts/*` if you need to stage it). C tinc
+ignores the unknown key, so a mixed C/Rust mesh must leave the key
+unset for any C↔Rust pair. Default (`x25519`) is byte-identical to C
+tinc on the wire.
+
+Cost: ~2.4 KB extra per handshake, sub-millisecond CPU. No
+steady-state overhead. The invitation handshake is always classical
+(the joiner has no host file yet).
+
 ## Metrics / observability
 
 There is no Prometheus / metrics endpoint. For monitoring, poll the

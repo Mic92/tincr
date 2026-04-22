@@ -12,7 +12,7 @@ use rand_core::RngCore;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
-use tinc_sptps::{Framing, Output, Role, Sptps, SptpsLabel, SptpsKex};
+use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
 
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;

@@ -108,6 +108,63 @@ AES-256), the 16-byte tag, and maps the 32-bit record seqno onto the
 96-bit GCM nonce as `0⁸ ‖ seqno_be⁴`, so record framing is unchanged
 and the existing `SEAL_KEY_LIMIT` rekey bound covers nonce uniqueness.
 
+### Post-quantum key exchange (`SPTPSKex`)
+
+X25519 alone is harvest-now-decrypt-later vulnerable: traffic recorded
+today can be decrypted whenever a cryptographically-relevant quantum
+computer materialises. `SPTPSKex = x25519-mlkem768` mixes an
+ML-KEM-768 (FIPS 203) shared secret into the same KDF input so that
+*both* primitives must fall before recorded traffic is readable.
+Ed25519 transcript signatures stay as-is — PQ authentication is a
+separate concern (a future quantum adversary can't retroactively MITM
+a recording).
+
+SPTPS sends both KEX records blind — each side calls `send_kex` from
+`start` before seeing anything from the peer — so the OpenSSH-style
+single-KEM layout (initiator sends `ek`, responder replies with `ct`)
+doesn't fit. Instead **two** encapsulations run, one per direction:
+
+| Record | Body (hybrid) | Size |
+|---|---|--:|
+| KEX (both) | `ver(1) ‖ nonce(32) ‖ X25519_pk(32) ‖ MLKEM768_ek(1184)` | 1249 |
+| SIG (both) | `Ed25519_sig(64) ‖ MLKEM768_ct(1088)` | 1152 |
+
+On receiving the peer's KEX, each side encapsulates against the peer's
+`ek` and appends the resulting `ct` to its own SIG record. On
+receiving the peer's SIG it decapsulates with its own `dk`. The PRF
+secret becomes `X25519_ss(32) ‖ ss_i2r(32) ‖ ss_r2i(32)` (96 B), where
+`ss_i2r` is the secret the initiator encapsulated and the responder
+decapsulated — ordered by role so both sides agree, same trick the
+classical PRF already uses for the nonces.
+
+The Ed25519 signature still covers only `[role-bit ‖ mykex ‖ hiskex ‖
+label]` — i.e. both `ek`s but neither `ct`. That's sufficient: ML-KEM
+is IND-CCA2, so a substituted `ct` yields a different `ss` on the
+decapsulator's side, the PRF derives different traffic keys, and the
+first AEAD tag fails. The X25519 leg *is* signed, so an attacker who
+can break ML-KEM but not discrete-log still can't MITM.
+
+**Label discriminator.** Both `SPTPSKex` and `SPTPSCipher` are mixed
+into the KDF/SIG label as a two-byte suffix `[kex_byte, cipher_byte]`,
+appended **only when at least one byte is non-zero** so that the
+default configuration remains byte-identical to C tinc on the wire.
+`kex_byte` is 0 for `x25519`, 1 for `x25519-mlkem768`; `cipher_byte`
+is 0 for `chacha20-poly1305`, 1 for `aes-256-gcm`. The two knobs are
+independent and may be combined.
+
+**No negotiation.** `SPTPSKex` is static per-host configuration; both
+ends must set the same value out of band. A mismatch fails at
+`BadKex` (wrong KEX body length) or, if a future change made the
+length check lenient, at `BadSig` (the label suffix desyncs the
+transcript). C tinc silently ignores unknown host-file keys, so a
+C↔Rust pair with the key set on the Rust side just fails the
+handshake — it doesn't crash the C daemon.
+
+The handshake runs over the TCP meta-connection (and the
+meta-forwarded `REQ_KEY`/`ANS_KEY` for per-tunnel SPTPS), so the
+~1.2 KB records are not MTU-constrained. Handshake-time only;
+steady-state throughput is unchanged.
+
 ## Meta-protocol
 
 Meta-connections are TCP. The first thing each side sends is a single
