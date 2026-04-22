@@ -6,10 +6,6 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 /// **THREE DAEMONS, RELAY PATH.** alice ← mid → bob, NO direct
 /// alice↔bob `ConnectTo`. Alice's packet to bob's subnet routes
 /// `Forward{to: bob}`; `send_sptps_data`'s relay decision sends
@@ -52,7 +48,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// it's 65536 on Linux loopback so no problem.
 #[test]
 fn three_daemon_relay() {
-    let tmp = tmp("relay3");
+    let tmp = tmp!("relay3");
     let alice = Node::new(tmp.path(), "alice", 0xA3);
     let mid = Node::new(tmp.path(), "mid", 0xC3);
     let bob = Node::new(tmp.path(), "bob", 0xB3);
@@ -309,7 +305,7 @@ fn three_daemon_relay() {
 /// on "only 2 nodes".
 #[test]
 fn three_daemon_tunnelserver() {
-    let tmp = tmp("tunnelserver3");
+    let tmp = tmp!("tunnelserver3");
     let alice = Node::new(tmp.path(), "alice", 0xA4);
     // mid: TunnelServer = yes. The whole point.
     let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
@@ -583,7 +579,7 @@ fn three_daemon_tunnelserver() {
 /// wrongly accepts the gossip).
 #[test]
 fn three_daemon_strictsubnets() {
-    let tmp = tmp("strictsubnets3");
+    let tmp = tmp!("strictsubnets3");
     // alice: StrictSubnets = yes. The RECEIVER of gossip.
     let alice = Node::new(tmp.path(), "alice", 0xA5).with_conf("StrictSubnets = yes\n");
     // mid: plain relay. NOT strict (so we can prove it accepts).
@@ -794,7 +790,7 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
 /// (compared before/after the spoofed send).
 #[test]
 fn udp_relay_gate_unauthenticated_sender() {
-    let tmp = tmp("relay-gate");
+    let tmp = tmp!("relay-gate");
     let alice = Node::new(tmp.path(), "alice", 0xA4);
     let mid = Node::new(tmp.path(), "mid", 0xC4);
     let bob = Node::new(tmp.path(), "bob", 0xB4);
@@ -952,7 +948,7 @@ fn udp_relay_gate_unauthenticated_sender() {
 /// After fix: bob receives nothing; mid logs the drop.
 #[test]
 fn three_daemon_forwarding_off_drops_transit() {
-    let tmp = tmp("fmode-off");
+    let tmp = tmp!("fmode-off");
     // alice: StrictSubnets so she ignores bob's gossiped subnet
     // and routes purely off her hosts/ preloads (mid's /24).
     let alice = Node::new(tmp.path(), "alice", 0xAF).with_conf("StrictSubnets = yes\n");

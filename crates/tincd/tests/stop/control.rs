@@ -6,10 +6,6 @@ use std::time::Duration;
 use super::common::*;
 use super::write_config;
 
-fn tmp(tag: &str) -> super::common::TmpGuard {
-    super::common::TmpGuard::new("stop", tag)
-}
-
 /// UDP packets sent to the daemon don't crash it and don't busy-spin.
 /// `IoWhat::Udp(i)` is wired now (the listener IS bound). The arm
 /// drains and discards. Proves: a stray UDP packet (from a peer that
@@ -32,7 +28,7 @@ fn tmp(tag: &str) -> super::common::TmpGuard {
 fn udp_stray_packet_drained() {
     use std::net::UdpSocket;
 
-    let tmp = tmp("udp-stray");
+    let tmp = tmp!("udp-stray");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -156,7 +152,7 @@ fn udp_stray_packet_drained() {
 fn req_log_streams() {
     use std::io::Read;
 
-    let tmp = tmp("req-log");
+    let tmp = tmp!("req-log");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -268,7 +264,7 @@ fn req_log_streams() {
 /// CLI's `recv_ack(SetDebug)` failed the ack-shape check.
 #[test]
 fn set_debug_level_roundtrip() {
-    let tmp = tmp("set-debug");
+    let tmp = tmp!("set-debug");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -360,7 +356,7 @@ fn set_debug_level_roundtrip() {
 fn tinc_up_runs_with_confbase_cwd() {
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = tmp("tinc-up-cwd");
+    let tmp = tmp!("tinc-up-cwd");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -407,7 +403,7 @@ fn tinc_up_runs_with_confbase_cwd() {
 /// `conns`/`conn_io`/`ev.del` coherence and `OwnedFd` drop.
 #[test]
 fn control_conn_churn_no_fd_leak() {
-    let tmp = tmp("fd-churn");
+    let tmp = tmp!("fd-churn");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 

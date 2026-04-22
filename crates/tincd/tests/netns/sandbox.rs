@@ -5,10 +5,6 @@ use super::common::linux::*;
 use super::common::*;
 use super::rig::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("netns", tag)
-}
-
 /// `Sandbox = normal` end-to-end. Same shape as `real_tun_ping` but
 /// with the path allowlist active. Proves:
 ///
@@ -41,7 +37,7 @@ fn sandbox_normal_ping() {
         return;
     };
 
-    let tmp = tmp("sboxping");
+    let tmp = tmp!("sboxping");
     let alice = Node::new(tmp.path(), "alice", 0xAC, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xBC, "tinc1", "10.42.0.2/32");
 
@@ -186,7 +182,7 @@ fn sandbox_high_blocks_scripts() {
         return;
     };
 
-    let tmp = tmp("sboxhigh");
+    let tmp = tmp!("sboxhigh");
     let alice = Node::new(tmp.path(), "alice", 0xAD, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xBD, "tinc1", "10.42.0.2/32");
 

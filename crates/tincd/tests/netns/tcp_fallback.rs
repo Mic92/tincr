@@ -40,7 +40,7 @@ fn tcp_fallback_udp_blackhole() {
         return;
     }
 
-    let tmp = TmpGuard::new("netns", "tcpfb");
+    let tmp = tmp!("tcpfb");
     let alice = Node::new(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32");
     let mid = Node::new(tmp.path(), "mid", 0xFC, "tinc0", "10.42.0.0/32");

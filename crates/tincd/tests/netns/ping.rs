@@ -5,10 +5,6 @@ use super::common::linux::*;
 use super::common::*;
 use super::rig::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("netns", tag)
-}
-
 /// Real kernel TUN, real ping. Kernel→daemon→SPTPS→UDP→daemon→kernel.
 ///
 /// ## What's proven (vs `first_packet_across_tunnel`)
@@ -41,7 +37,7 @@ fn real_tun_ping() {
         return;
     };
 
-    let tmp = tmp("ping");
+    let tmp = tmp!("ping");
     let alice = Node::new(tmp.path(), "alice", 0xA8, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xB8, "tinc1", "10.42.0.2/32");
 
@@ -243,7 +239,7 @@ fn real_tun_unreachable() {
         return;
     };
 
-    let tmp = tmp("unreach");
+    let tmp = tmp!("unreach");
     let alice = Node::new(tmp.path(), "alice", 0xA9, "tinc0", "10.42.0.1/32");
     // Bob's TUN exists (NetNs::setup precreated it) but no daemon
     // attaches. We need `bob` only for `write_config`'s pubkey/
@@ -378,7 +374,7 @@ fn tso_ingest_stream_integrity() {
         return;
     };
 
-    let tmp = tmp("tso");
+    let tmp = tmp!("tso");
     let alice = Node::new(tmp.path(), "alice", 0xA7, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xB7, "tinc1", "10.42.0.2/32");
 

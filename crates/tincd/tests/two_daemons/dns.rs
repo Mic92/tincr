@@ -22,10 +22,6 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 // ── tiny DNS wire helpers (RFC 1035) ────────────────────────────────
 // Duplicated from the `dns.rs` unit-test helpers on purpose: those
 // are `#[cfg(test)]`-private to the lib crate, and re-exporting test
@@ -99,7 +95,7 @@ fn roundtrip(tun: &std::os::fd::OwnedFd, frame: &[u8]) -> Vec<u8> {
 
 #[test]
 fn dns_stub_fd() {
-    let tmp = tmp("dns-fd");
+    let tmp = tmp!("dns-fd");
     // Single daemon. bob is just a hosts/ entry so `load_all_nodes`
     // (under `StrictSubnets=yes`) preloads his /32 + /128 into the
     // subnet tree — no peer, no gossip. Mirrors the netns test.

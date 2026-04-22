@@ -6,10 +6,6 @@ use std::process::Stdio;
 use super::common::*;
 use super::write_config;
 
-fn tmp(tag: &str) -> super::common::TmpGuard {
-    super::common::TmpGuard::new("stop", tag)
-}
-
 /// `tincd --help` writes to stdout, not stderr, so `tincd --help | less`
 /// works. C tincd does this; the early Rust port `eprintln!`'d.
 /// Also: synopsis must not pretend `--pidfile`/`--socket` are required.
@@ -48,7 +44,7 @@ fn version_goes_to_stdout() {
 /// nothing changed.
 #[test]
 fn bypass_security_warns_not_errors() {
-    let tmp = tmp("bypass-sec");
+    let tmp = tmp!("bypass-sec");
     let confbase = tmp.path().join("vpn");
     write_config(&confbase);
 
@@ -76,7 +72,7 @@ fn bypass_security_warns_not_errors() {
 /// `tinc-conf::read_server_config`.
 #[test]
 fn missing_config_fails() {
-    let tmp = tmp("noconfig");
+    let tmp = tmp!("noconfig");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // confbase exists but no tinc.conf inside.
@@ -110,7 +106,7 @@ fn missing_config_fails() {
 /// wins. The greeting line shows the override.
 #[test]
 fn dash_o_overrides_config() {
-    let tmp = tmp("dash-o");
+    let tmp = tmp!("dash-o");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -159,7 +155,7 @@ fn dash_o_overrides_config() {
 /// `-o` with malformed value (no `=`, no value) fails argv parsing.
 #[test]
 fn dash_o_bad_value_fails() {
-    let tmp = tmp("dash-o-bad");
+    let tmp = tmp!("dash-o-bad");
     let out = tincd_at(tmp.path(), tmp.path().join("p"), tmp.path().join("s"))
         .arg("-o")
         .arg("KeyWithoutValue")
@@ -182,7 +178,7 @@ fn dash_o_bad_value_fails() {
 /// checking the error message: missing tinc.conf at the derived path.
 #[test]
 fn dash_n_derives_confbase() {
-    let tmp = tmp("dash-n");
+    let tmp = tmp!("dash-n");
     let out = tincd_cmd()
         .arg("-n")
         .arg("testnet")
@@ -208,7 +204,7 @@ fn dash_n_derives_confbase() {
 /// `NETNAME` env var as `-n` fallback.
 #[test]
 fn netname_env_fallback() {
-    let tmp = tmp("netname-env");
+    let tmp = tmp!("netname-env");
     let out = tincd_cmd()
         .arg("--pidfile")
         .arg(tmp.path().join("p"))
@@ -231,7 +227,7 @@ fn netname_env_fallback() {
 /// `strpbrk(netname, "\\/")`.
 #[test]
 fn dash_n_rejects_slash() {
-    let tmp = tmp("dash-n-slash");
+    let tmp = tmp!("dash-n-slash");
     let out = tincd_cmd()
         .arg("-n")
         .arg("foo/bar")
@@ -255,7 +251,7 @@ fn dash_n_rejects_slash() {
 /// `"Name for tinc daemon required!"`.
 #[test]
 fn missing_name_fails() {
-    let tmp = tmp("noname");
+    let tmp = tmp!("noname");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     std::fs::create_dir_all(&confbase).unwrap();
@@ -297,7 +293,7 @@ fn missing_name_fails() {
 /// hand-crafted minimal config (tinc.conf only) is also fine.
 #[test]
 fn missing_hosts_file_ok() {
-    let tmp = tmp("nohosts");
+    let tmp = tmp!("nohosts");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // tinc.conf + private key, but NO hosts/ dir. Port goes in
@@ -354,7 +350,7 @@ fn missing_hosts_file_ok() {
 /// this one makes that reliance explicit.
 #[test]
 fn dash_d_upper_stays_foreground() {
-    let tmp = tmp("dash-D");
+    let tmp = tmp!("dash-D");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -385,7 +381,7 @@ fn dash_d_upper_stays_foreground() {
 /// "starting" banner.
 #[test]
 fn dash_d_level_sets_debug() {
-    let tmp = tmp("dash-d-level");
+    let tmp = tmp!("dash-d-level");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -413,7 +409,7 @@ fn dash_d_level_sets_debug() {
 /// up in the file, NOT on stderr.
 #[test]
 fn logfile_redirects_output() {
-    let tmp = tmp("logfile");
+    let tmp = tmp!("logfile");
     let (confbase, pidfile, socket) = tmp.std_paths();
     let logfile = tmp.path().join("tinc.log");
     write_config(&confbase);
@@ -455,7 +451,7 @@ fn logfile_redirects_output() {
 /// The error path proves the call site is wired.
 #[test]
 fn dash_u_bad_user_fails() {
-    let tmp = tmp("dash-U-bad");
+    let tmp = tmp!("dash-U-bad");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -487,7 +483,7 @@ fn dash_u_bad_user_fails() {
 /// Hard-fail on error.
 #[test]
 fn dash_l_mlock_wired() {
-    let tmp = tmp("dash-L");
+    let tmp = tmp!("dash-L");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -534,7 +530,7 @@ fn dash_l_mlock_wired() {
 /// typo'd "Hihg" is hostile.
 #[test]
 fn process_priority_bad_value_warns() {
-    let tmp = tmp("priority-bad");
+    let tmp = tmp!("priority-bad");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -566,7 +562,7 @@ fn process_priority_bad_value_warns() {
 /// Prove the syscall path executes without error.
 #[test]
 fn process_priority_low_succeeds() {
-    let tmp = tmp("priority-low");
+    let tmp = tmp!("priority-low");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 

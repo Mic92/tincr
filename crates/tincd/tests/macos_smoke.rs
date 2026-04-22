@@ -19,6 +19,7 @@
 #![cfg(target_os = "macos")]
 
 #[path = "common/mod.rs"]
+#[macro_use]
 mod common;
 
 use common::*;
@@ -60,7 +61,7 @@ fn utun_icmp_unreachable() {
         return;
     }
 
-    let tmp = TmpGuard::new("macos-smoke", "unreach");
+    let tmp = tmp!("unreach");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_utun_config(&confbase);
 

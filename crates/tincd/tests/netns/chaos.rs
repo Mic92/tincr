@@ -5,10 +5,6 @@ use super::common::linux::*;
 use super::common::*;
 use super::rig::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("netns", tag)
-}
-
 /// Parse `(mtu, minmtu, maxmtu)` from a `dump nodes` row. Body
 /// tokens 14/15/16 (hostname is always 3 tokens: `HOST port PORT`).
 pub(crate) fn node_pmtu(rows: &[String], name: &str) -> Option<(u16, u16, u16)> {
@@ -301,7 +297,7 @@ fn chaos_ping_under_loss() {
     let Some(netns) = enter_netns("chaos::chaos_ping_under_loss") else {
         return;
     };
-    let tmp = tmp("chaos-loss");
+    let tmp = tmp!("chaos-loss");
     let mut rig = ChaosRig::setup(netns, &tmp);
 
     // ─── baseline counters BEFORE chaos ──────────────────────────
@@ -408,7 +404,7 @@ fn chaos_replay_under_reorder() {
     let Some(netns) = enter_netns("chaos::chaos_replay_under_reorder") else {
         return;
     };
-    let tmp = tmp("chaos-reorder");
+    let tmp = tmp!("chaos-reorder");
     let mut rig = ChaosRig::setup(netns, &tmp);
 
     let (b_in_pre, _) = ChaosRig::traffic(&mut rig.bob_ctl, "alice");
@@ -501,7 +497,7 @@ fn chaos_replay_under_duplicate() {
     let Some(netns) = enter_netns("chaos::chaos_replay_under_duplicate") else {
         return;
     };
-    let tmp = tmp("chaos-dup");
+    let tmp = tmp!("chaos-dup");
     let mut rig = ChaosRig::setup(netns, &tmp);
 
     let (b_in_pre, _) = ChaosRig::traffic(&mut rig.bob_ctl, "alice");

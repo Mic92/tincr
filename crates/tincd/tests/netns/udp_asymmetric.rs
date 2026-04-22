@@ -32,7 +32,7 @@ fn udp_asymmetric_meta_confirm() {
         return;
     };
 
-    let tmp = TmpGuard::new("netns", "udpasym");
+    let tmp = tmp!("udpasym");
     let alice = Node::new(tmp.path(), "alice", 0xAA, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xAB, "tinc1", "10.42.0.2/32");
 

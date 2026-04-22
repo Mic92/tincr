@@ -10,45 +10,13 @@
 //! Works on Linux and macOS.
 
 #[path = "common/mod.rs"]
+#[macro_use]
 mod common;
 
-use std::io::Read;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("busyloop", tag)
-}
-
-/// Background stderr drain with live snapshot.
-struct LogReader {
-    log: Arc<Mutex<Vec<u8>>>,
-    _drain: std::thread::JoinHandle<()>,
-}
-
-impl LogReader {
-    fn spawn(stderr: std::process::ChildStderr) -> Self {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let log2 = Arc::clone(&log);
-        let drain = std::thread::spawn(move || {
-            let mut r = stderr;
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = r.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                log2.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        });
-        Self { log, _drain: drain }
-    }
-    fn snapshot(&self) -> String {
-        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
-    }
-}
 
 /// CPU time (user + system). Linux: clock ticks. macOS: centiseconds.
 fn cpu_time(pid: u32) -> u64 {
@@ -82,7 +50,7 @@ fn cpu_time(pid: u32) -> u64 {
 
 #[test]
 fn outgoing_timeout_no_busy_loop() {
-    let tmp = tmp("outgoing_timeout");
+    let tmp = tmp!("outgoing_timeout");
     let (confbase, pidfile, socket) = tmp.std_paths();
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
@@ -100,28 +68,30 @@ fn outgoing_timeout_no_busy_loop() {
     .unwrap();
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-    let log = LogReader::spawn(child.stderr.take().unwrap());
+    let mut log = ChildWithLog::spawn(
+        tincd_at(&confbase, &pidfile, &socket)
+            .env("RUST_LOG", "tincd=info")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd"),
+    );
 
-    if !wait_for_file(&socket) {
-        let _ = child.kill();
-        panic!("tincd setup failed; stderr:\n{}", log.snapshot());
-    }
+    assert!(
+        wait_for_file(&socket),
+        "tincd setup failed; stderr:\n{}",
+        log.kill_and_log()
+    );
 
     // Wait for pre-ACK timeout.
     let deadline = Instant::now() + Duration::from_secs(15);
     while !log
-        .snapshot()
+        .log_snapshot()
         .contains("Timeout while connecting to blackhole")
     {
         assert!(
             Instant::now() < deadline,
             "no connect-timeout log in 15s; stderr:\n{}",
-            log.snapshot()
+            log.log_snapshot()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -129,19 +99,19 @@ fn outgoing_timeout_no_busy_loop() {
     // Let post-timeout activity settle, then measure CPU over 2s.
     std::thread::sleep(Duration::from_secs(1));
 
-    let pid = child.id();
+    let pid = log.pid();
     let before = cpu_time(pid);
     std::thread::sleep(Duration::from_secs(2));
     let after = cpu_time(pid);
     let delta = after - before;
-    let snap = log.snapshot();
+    let snap = log.log_snapshot();
 
     #[allow(clippy::cast_possible_wrap)]
     let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
     nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM).expect("kill SIGTERM");
     let wait_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(s) = child.try_wait().unwrap() {
+        if let Some(s) = log.child.try_wait().unwrap() {
             assert!(s.success(), "daemon exit: {s:?}; stderr:\n{snap}");
             break;
         }

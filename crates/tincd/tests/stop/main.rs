@@ -34,6 +34,7 @@
 //! own process; `SelfPipe` is fresh.
 
 #[path = "../common/mod.rs"]
+#[macro_use]
 mod common;
 
 mod cli_flags;

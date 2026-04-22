@@ -3,10 +3,6 @@ use std::time::Duration;
 use super::common::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 /// `purge()` via `REQ_PURGE`.
 ///
 /// Three daemons in a chain: alice — mid — bob. Kill bob; mid's
@@ -34,7 +30,7 @@ fn tmp(tag: &str) -> TmpGuard {
 fn purge_removes_unreachable_node() {
     use std::io::{BufRead, Write};
 
-    let tmp = tmp("purge");
+    let tmp = tmp!("purge");
     // AutoConnect = no: pass 2's gate is `!autoconnect`. Default is
     // true, under which purge NEVER deletes nodes (it wants to dial
     // them).
@@ -146,7 +142,7 @@ fn purge_removes_unreachable_node() {
 fn purge_respects_autoconnect_gate() {
     use std::io::{BufRead, Write};
 
-    let tmp = tmp("purge-ac");
+    let tmp = tmp!("purge-ac");
     // No `AutoConnect = no` line → default true.
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let mid = Node::new(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");

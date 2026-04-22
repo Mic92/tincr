@@ -33,8 +33,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::common::linux::{ChildWithLog, run_ip};
-use super::common::{TmpGuard, tincd_bin, wait_for_file_with, write_ed25519_privkey};
+use super::common::ChildWithLog;
+use super::common::linux::run_ip;
+use super::common::{tincd_bin, wait_for_file_with, write_ed25519_privkey};
 use super::rig::{enter_bwrap, make_child_netns, veth_pair};
 
 /// Run a command inside `ip netns exec NS`. Panic on nonzero.
@@ -215,7 +216,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
     let miniupnpd_bin =
         std::env::var("MINIUPNPD_BIN").expect("outer pass sets MINIUPNPD_BIN; bwrap inherits env");
 
-    let tmp = TmpGuard::new("netns", "portmap");
+    let tmp = tmp!("portmap");
 
     // ─── topology ────────────────────────────────────────────────
     let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
@@ -450,7 +451,7 @@ fn upnp_gateway_ip_change() {
     let miniupnpd_bin =
         std::env::var("MINIUPNPD_BIN").expect("outer pass sets MINIUPNPD_BIN; bwrap inherits env");
 
-    let tmp = TmpGuard::new("netns", "portmap-roam");
+    let tmp = tmp!("portmap-roam");
 
     let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
     veth_pair(
@@ -618,7 +619,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
     if !enter_bwrap("portmap::upnp_rogue_gateway_ext_addr_rejected") {
         return;
     }
-    let tmp = TmpGuard::new("netns", "portmap-rogue");
+    let tmp = tmp!("portmap-rogue");
 
     // ── topology: outer bwrap ns = rogue gateway 192.168.77.1,
     //    child ns "alice" = victim 192.168.77.2, default → .1.

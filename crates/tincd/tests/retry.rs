@@ -15,19 +15,16 @@
 //! found path needs a real second daemon, which is `two_daemons.rs`
 //! territory (off-limits for this commit).
 
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[macro_use]
 mod common;
 use common::{
-    Ctl, TmpGuard, alloc_port, drain_stderr, read_cookie, tincd_at, wait_for_file,
+    ChildWithLog, Ctl, alloc_port, drain_stderr, read_cookie, tincd_at, wait_for_file,
     write_ed25519_privkey,
 };
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("retry", tag)
-}
 
 /// Minimal config: `ConnectTo` a peer whose Address points at a port
 /// nobody's listening on. `do_outgoing_connection` → ECONNREFUSED →
@@ -57,39 +54,9 @@ fn write_config_dead_peer(confbase: &std::path::Path, dead_port: u16) {
     write_ed25519_privkey(confbase, &[0x42; 32]);
 }
 
-/// Background stderr drain. Same shape as `common::linux::ChildWithLog`
-/// but not linux-gated and exposes a snapshot read (so we can poll
-/// for log lines without killing the child first).
-struct LogReader {
-    log: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    _drain: std::thread::JoinHandle<()>,
-}
-
-impl LogReader {
-    fn spawn(stderr: std::process::ChildStderr) -> Self {
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log2 = std::sync::Arc::clone(&log);
-        let drain = std::thread::spawn(move || {
-            let mut r = stderr;
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = r.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                log2.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        });
-        Self { log, _drain: drain }
-    }
-
-    fn snapshot(&self) -> String {
-        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
-    }
-}
-
 /// Count occurrences of `needle` in the live log. Polled.
-fn count_in_log(log: &LogReader, needle: &str) -> usize {
-    log.snapshot().matches(needle).count()
+fn count_in_log(log: &ChildWithLog, needle: &str) -> usize {
+    log.log_snapshot().matches(needle).count()
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -99,7 +66,7 @@ fn count_in_log(log: &LogReader, needle: &str) -> usize {
 /// backoff would have expired naturally.
 #[test]
 fn sigalrm_retries_now() {
-    let tmp = tmp("sigalrm");
+    let tmp = tmp!("sigalrm");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // alloc_port reserves a port and immediately frees it. Nothing
@@ -109,17 +76,19 @@ fn sigalrm_retries_now() {
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-    let log = LogReader::spawn(child.stderr.take().unwrap());
+    let log = ChildWithLog::spawn(
+        tincd_at(&confbase, &pidfile, &socket)
+            .env("RUST_LOG", "tincd=info")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd"),
+    );
 
-    if !wait_for_file(&socket) {
-        let _ = child.kill();
-        panic!("tincd setup failed; stderr:\n{}", log.snapshot());
-    }
+    assert!(
+        wait_for_file(&socket),
+        "tincd setup failed; stderr:\n{}",
+        log.kill_and_log()
+    );
 
     // ─── wait for first connect attempt + 5s backoff arm ────────
     // First failure backs off 5s.
@@ -129,7 +98,7 @@ fn sigalrm_retries_now() {
         std::thread::sleep(Duration::from_millis(20));
     }
     while !log
-        .snapshot()
+        .log_snapshot()
         .contains("re-establish outgoing connection in 5 seconds")
     {
         assert!(Instant::now() < deadline, "no backoff log");
@@ -140,7 +109,7 @@ fn sigalrm_retries_now() {
 
     // ─── SIGALRM ────────────────────────────────────────────────
     #[allow(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
-    let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+    let pid = nix::unistd::Pid::from_raw(log.pid() as i32);
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGALRM).expect("kill SIGALRM");
 
     // ─── second connect attempt arrives FAST ────────────────────
@@ -155,7 +124,7 @@ fn sigalrm_retries_now() {
             Instant::now() < retry_deadline,
             "SIGALRM didn't trigger retry within 2s (backoff still 5s?); \
              stderr:\n{}",
-            log.snapshot()
+            log.log_snapshot()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -166,7 +135,7 @@ fn sigalrm_retries_now() {
     );
 
     // ─── stderr: the SIGALRM handler log ────────────────────────
-    let snap = log.snapshot();
+    let snap = log.log_snapshot();
     assert!(
         snap.contains("Got SIGALRM, retrying outgoing connections"),
         "SIGALRM handler log missing; stderr:\n{snap}"
@@ -184,35 +153,36 @@ fn sigalrm_retries_now() {
         "backoff bumped to 10s — outgoing.timeout NOT zeroed; stderr:\n{snap}"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = log.kill_and_log();
 }
 
 /// `REQ_RETRY` (`"18 10"`) → same `on_retry()` path. Ack `"18 10 0"`.
 #[test]
 fn req_retry_retries_now() {
-    let tmp = tmp("req-retry");
+    let tmp = tmp!("req-retry");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     let dead_port = alloc_port();
     write_config_dead_peer(&confbase, dead_port);
 
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env("RUST_LOG", "tincd=info")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-    let log = LogReader::spawn(child.stderr.take().unwrap());
+    let log = ChildWithLog::spawn(
+        tincd_at(&confbase, &pidfile, &socket)
+            .env("RUST_LOG", "tincd=info")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd"),
+    );
 
-    if !wait_for_file(&socket) {
-        let _ = child.kill();
-        panic!("tincd setup failed; stderr:\n{}", log.snapshot());
-    }
+    assert!(
+        wait_for_file(&socket),
+        "tincd setup failed; stderr:\n{}",
+        log.kill_and_log()
+    );
 
     // Wait for first attempt + backoff arm. Same as above.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !log
-        .snapshot()
+        .log_snapshot()
         .contains("re-establish outgoing connection in 5 seconds")
     {
         assert!(Instant::now() < deadline, "no backoff log");
@@ -236,14 +206,13 @@ fn req_retry_retries_now() {
         assert!(
             Instant::now() < retry_deadline,
             "REQ_RETRY didn't trigger retry within 2s; stderr:\n{}",
-            log.snapshot()
+            log.log_snapshot()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
 
     drop(ctl);
-    let _ = child.kill();
-    let _ = child.wait();
+    let _ = log.kill_and_log();
 }
 
 /// `REQ_DISCONNECT` not-found (`"18 12 nobody"` → `"18 12 -2"`) and
@@ -254,7 +223,7 @@ fn req_retry_retries_now() {
 /// The protocol parse + reply codes are what's new.
 #[test]
 fn req_disconnect_replies() {
-    let tmp = tmp("disconnect");
+    let tmp = tmp!("disconnect");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // No ConnectTo. Just the daemon + ctl conn.

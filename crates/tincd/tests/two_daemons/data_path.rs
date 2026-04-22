@@ -5,10 +5,6 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 /// **THE FIRST PACKET.** End-to-end: alice's TUN → bob's TUN.
 ///
 /// Full chain: `IoWhat::Device` → `route()` → `Forward{to: bob}`
@@ -49,7 +45,7 @@ fn tmp(tag: &str) -> TmpGuard {
 #[test]
 #[allow(clippy::similar_names)] // at_out_* vs bt_in_*: parallel names, test compares them
 fn first_packet_across_tunnel() {
-    let tmp = tmp("first-pkt");
+    let tmp = tmp!("first-pkt");
     let alice = Node::new(tmp.path(), "alice", 0xA7);
     let bob = Node::new(tmp.path(), "bob", 0xB7);
 
@@ -291,7 +287,7 @@ fn first_packet_across_tunnel() {
 /// + bit handling + per-tunnel level dispatch.
 #[test]
 fn compression_roundtrip() {
-    let tmp = tmp("compress");
+    let tmp = tmp!("compress");
     // Compression is HOST-tagged but our `setup` reads from the
     // merged config tree (host file is merged into tinc.conf at
     // setup). Put it in tinc.conf via `with_conf`.
@@ -441,7 +437,7 @@ fn compression_roundtrip() {
 /// proper `ICMPv6` (next-header=58, type=1 `DST_UNREACH`).
 #[test]
 fn ipv6_unreachable_builds_icmpv6() {
-    let tmp = tmp("v6-unreach");
+    let tmp = tmp!("v6-unreach");
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
@@ -554,7 +550,7 @@ fn ipv6_unreachable_builds_icmpv6() {
 /// DISABLE_LEGACY`). This test would fail against `.#tincd-c` too.
 #[test]
 fn keyexpire_forces_rekey() {
-    let tmp = tmp("keyexpire");
+    let tmp = tmp!("keyexpire");
     let alice = Node::new(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
     let bob = Node::new(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
 

@@ -29,11 +29,25 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// `tmp!("tag")` → `TmpGuard` prefixed by the caller's module name.
+///
+/// Replaces the 24 per-file `fn tmp(tag: &str) -> TmpGuard` thunks
+/// whose only job was to bake in a string prefix. Uses the last
+/// segment of `module_path!()` so socket paths stay short enough
+/// for macOS' 104-byte `sun_path`.
+#[macro_export]
+macro_rules! tmp {
+    ($tag:expr) => {
+        $crate::common::TmpGuard::new(module_path!().rsplit("::").next().unwrap(), $tag)
+    };
+}
 
 // ═══════════════════════════ tempdir ═══════════════════════════════
 
@@ -709,6 +723,63 @@ impl PeerFixture {
     }
 }
 
+// ═══════════════════════════ stderr drain ══════════════════════════
+
+/// Child + background stderr drain. The C tincd at `-d5` floods
+/// stderr; with `PingTimeout = 1` it logs the full SPTPS dump
+/// every second. The 64 KiB pipe buffer fills in ~2s, the next
+/// `fprintf(stderr, ...)` blocks, the daemon's event loop
+/// freezes mid-handshake. Symptom: `Ctl::dump` blocks forever.
+/// Found the very first time crossimpl.rs ran for real.
+pub struct ChildWithLog {
+    pub child: Child,
+    log: Arc<Mutex<Vec<u8>>>,
+    drain: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ChildWithLog {
+    pub fn spawn(mut child: Child) -> Self {
+        let stderr = child.stderr.take().expect("stderr piped");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log2 = Arc::clone(&log);
+        let drain = std::thread::spawn(move || {
+            let mut r = stderr;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = r.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                log2.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Self {
+            child,
+            log,
+            drain: Some(drain),
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Non-destructive log read; child stays running. Used by
+    /// tests that scrape stderr while the daemon is live
+    /// (e.g. `reqkey_race` counting recurrences).
+    pub fn log_snapshot(&self) -> String {
+        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
+    }
+
+    pub fn kill_and_log(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(h) = self.drain.take() {
+            let _ = h.join();
+        }
+        String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
+    }
+}
+
 // ═══════════════════════════ linux netns helpers ═══════════════════
 // Only used by netns/crossimpl/throughput, all of which are already
 // `#![cfg(target_os = "linux")]`. cfg-gating here too keeps the
@@ -716,9 +787,7 @@ impl PeerFixture {
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use std::io::Read;
-    use std::process::{Child, Command};
-    use std::sync::{Arc, Mutex};
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     /// `ip <args...>` and assert success. Stderr in the panic
@@ -751,61 +820,6 @@ pub mod linux {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// Child + background stderr drain. The C tincd at `-d5` floods
-    /// stderr; with `PingTimeout = 1` it logs the full SPTPS dump
-    /// every second. The 64 KiB pipe buffer fills in ~2s, the next
-    /// `fprintf(stderr, ...)` blocks, the daemon's event loop
-    /// freezes mid-handshake. Symptom: `Ctl::dump` blocks forever.
-    /// Found the very first time crossimpl.rs ran for real.
-    pub struct ChildWithLog {
-        pub child: Child,
-        log: Arc<Mutex<Vec<u8>>>,
-        drain: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl ChildWithLog {
-        pub fn spawn(mut child: Child) -> Self {
-            let stderr = child.stderr.take().expect("stderr piped");
-            let log = Arc::new(Mutex::new(Vec::new()));
-            let log2 = Arc::clone(&log);
-            let drain = std::thread::spawn(move || {
-                let mut r = stderr;
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = r.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    log2.lock().unwrap().extend_from_slice(&buf[..n]);
-                }
-            });
-            Self {
-                child,
-                log,
-                drain: Some(drain),
-            }
-        }
-
-        pub fn pid(&self) -> u32 {
-            self.child.id()
-        }
-
-        /// Non-destructive log read; child stays running. Used by
-        /// tests that scrape stderr while the daemon is live
-        /// (e.g. `reqkey_race` counting recurrences).
-        pub fn log_snapshot(&self) -> String {
-            String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
-        }
-
-        pub fn kill_and_log(mut self) -> String {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            if let Some(h) = self.drain.take() {
-                let _ = h.join();
-            }
-            String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
         }
     }
 }

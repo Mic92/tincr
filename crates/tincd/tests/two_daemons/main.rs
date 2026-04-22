@@ -28,6 +28,7 @@
 // differences (TunnelServer/StrictSubnets/Forwarding/AutoConnect).
 
 #[path = "../common/mod.rs"]
+#[macro_use]
 mod common;
 
 mod fd_tunnel;

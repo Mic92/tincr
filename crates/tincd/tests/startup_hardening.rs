@@ -5,12 +5,9 @@ use std::io::Read;
 use std::process::{Child, Stdio};
 use std::time::Duration;
 
+#[macro_use]
 mod common;
-use common::{TmpGuard, drain_stderr, read_cookie, tincd_at, wait_for_file};
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("startup-harden", tag)
-}
+use common::{drain_stderr, read_cookie, tincd_at, wait_for_file};
 
 fn write_min_config(confbase: &std::path::Path) {
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
@@ -33,7 +30,7 @@ fn spawn(confbase: &std::path::Path, pidfile: &std::path::Path, socket: &std::pa
 /// `TINC_UMBILICAL=2` must be ignored (not write-NUL-then-close stderr).
 #[test]
 fn umbilical_rejects_stdio_fd() {
-    let tmp = tmp("umb");
+    let tmp = tmp!("umb");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_min_config(&confbase);
 
@@ -81,7 +78,7 @@ fn umbilical_rejects_stdio_fd() {
 /// `AlreadyRunning` bind check **before** touching the pidfile.
 #[test]
 fn second_daemon_does_not_clobber_pidfile() {
-    let tmp = tmp("clob");
+    let tmp = tmp!("clob");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_min_config(&confbase);
 

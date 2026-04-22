@@ -34,15 +34,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
+#[macro_use]
 mod common;
 use common::{
-    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_at,
-    wait_for_file_with as wait_for_file, write_ed25519_privkey,
+    alloc_port, drain_stderr, pubkey_from_seed, tincd_at, wait_for_file_with as wait_for_file,
+    write_ed25519_privkey,
 };
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("addrcache", tag)
-}
 
 /// Poll for `path` existing AND non-empty. Simpler than scripts.rs's
 /// full event parser — we just need a "connected" pulse.
@@ -179,7 +176,7 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
 /// the wire test.
 #[test]
 fn restart_dials_from_cache() {
-    let tmp = tmp("restart_dials_from_cache");
+    let tmp = tmp!("restart_dials_from_cache");
     let alice = Node::new(tmp.path(), "alice", 0xA1);
     let bob = Node::new(tmp.path(), "bob", 0xB0);
 

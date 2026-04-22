@@ -17,8 +17,9 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[macro_use]
 mod common;
-use common::{TmpGuard, alloc_port, tincd_bin, wait_for_file, write_ed25519_privkey};
+use common::{alloc_port, tincd_bin, wait_for_file, write_ed25519_privkey};
 
 /// Find `systemd-socket-activate` in PATH and verify it supports
 /// `--now`. None → self-skip.
@@ -80,7 +81,7 @@ fn socket_activation_adopts_tcp_fd() {
         return;
     };
 
-    let tmp = TmpGuard::new("sa", "adopt");
+    let tmp = tmp!("adopt");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
@@ -169,7 +170,7 @@ fn socket_activation_suppresses_detach() {
         return;
     };
 
-    let tmp = TmpGuard::new("sa", "nodetach");
+    let tmp = tmp!("nodetach");
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 

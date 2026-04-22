@@ -6,10 +6,6 @@ use std::time::{Duration, Instant};
 use super::common::{self, *};
 use super::write_config;
 
-fn tmp(tag: &str) -> super::common::TmpGuard {
-    super::common::TmpGuard::new("stop", tag)
-}
-
 // ════════════════════════════════════════════════════════════════════
 // SPTPS peer handshake → ACK exchange (chunk 4b)
 //
@@ -784,7 +780,7 @@ fn peer_wrong_key_fails_sig() {
     use tinc_crypto::sign::SigningKey;
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
-    let tmp = tmp("peer-wrong-key");
+    let tmp = tmp!("peer-wrong-key");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     let daemon_pub = write_config(&confbase);

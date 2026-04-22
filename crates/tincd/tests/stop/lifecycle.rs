@@ -10,10 +10,6 @@ use nix::unistd::Pid;
 use super::common::*;
 use super::write_config;
 
-fn tmp(tag: &str) -> super::common::TmpGuard {
-    super::common::TmpGuard::new("stop", tag)
-}
-
 /// THE walking-skeleton proof. Spawn tincd, connect to its control
 /// socket, do the greeting dance, send `REQ_STOP`, daemon exits 0.
 ///
@@ -22,7 +18,7 @@ fn tmp(tag: &str) -> super::common::TmpGuard {
 /// `fake_daemon_setup`'s tests pass, both sides agree on the wire.
 #[test]
 fn spawn_connect_stop() {
-    let tmp = tmp("connect-stop");
+    let tmp = tmp!("connect-stop");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -137,7 +133,7 @@ fn spawn_connect_stop() {
 /// the `start()` parent half runs in the test process.
 #[test]
 fn umbilical_ready_signal() {
-    let tmp = tmp("umbilical");
+    let tmp = tmp!("umbilical");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
 
@@ -230,7 +226,7 @@ fn umbilical_ready_signal() {
 fn umbilical_daemon_side() {
     use std::os::fd::OwnedFd;
 
-    let tmp = tmp("umbilical-daemon");
+    let tmp = tmp!("umbilical-daemon");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -322,7 +318,7 @@ fn umbilical_daemon_side() {
 /// signal.
 #[test]
 fn sigterm_stops() {
-    let tmp = tmp("sigterm");
+    let tmp = tmp!("sigterm");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -370,7 +366,7 @@ fn sigterm_stops() {
 /// (terminate), so `kill -USR1` killed the daemon.
 #[test]
 fn sigusr_ignored() {
-    let tmp = tmp("sigusr");
+    let tmp = tmp!("sigusr");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -415,7 +411,7 @@ fn sigusr_ignored() {
 /// probe in `ControlSocket::bind` sees the first daemon listening.
 #[test]
 fn second_daemon_refused() {
-    let tmp = tmp("second");
+    let tmp = tmp!("second");
     let confbase = tmp.path().join("vpn");
     let pidfile = tmp.path().join("tinc.pid");
     let pidfile2 = tmp.path().join("tinc2.pid");
@@ -469,7 +465,7 @@ fn second_daemon_refused() {
 /// `PingTimeout` from config and we can set it to 1s.)
 #[test]
 fn stays_alive_across_iterations() {
-    let tmp = tmp("alive");
+    let tmp = tmp!("alive");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // Override write_config's tinc.conf to add `PingTimeout = 1`.
@@ -513,7 +509,7 @@ fn stays_alive_across_iterations() {
 /// `handle_id` cookie check + `terminate` path.
 #[test]
 fn bad_cookie_dropped() {
-    let tmp = tmp("badcookie");
+    let tmp = tmp!("badcookie");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);
@@ -568,7 +564,7 @@ fn bad_cookie_dropped() {
 fn tcp_listener_accepts_and_rejects_control() {
     use std::net::TcpStream;
 
-    let tmp = tmp("tcp-stop");
+    let tmp = tmp!("tcp-stop");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase);

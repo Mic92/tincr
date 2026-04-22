@@ -19,10 +19,6 @@ use super::common::linux::*;
 use super::common::*;
 use super::rig::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("netns", tag)
-}
-
 fn count_fds(pid: u32) -> usize {
     std::fs::read_dir(format!("/proc/{pid}/fd"))
         .map(std::iter::Iterator::count)
@@ -53,7 +49,7 @@ fn stress_link_flap() {
     let Some(netns) = enter_netns("stress::stress_link_flap") else {
         return;
     };
-    let tmp = tmp("flap");
+    let tmp = tmp!("flap");
     let mut rig = ChaosRig::setup_with(netns, &tmp, "PingInterval = 1\nMaxTimeout = 2\n");
 
     // Baseline ping to prove the rig is up (ChaosRig already waited
@@ -190,7 +186,7 @@ fn stress_asymmetric_mtu() {
     let Some(netns) = enter_netns("stress::stress_asymmetric_mtu") else {
         return;
     };
-    let tmp = tmp("amtu");
+    let tmp = tmp!("amtu");
 
     // Clamp lo BEFORE spawning daemons so `choose_initial_maxmtu`
     // (which reads IP_MTU on a connected DGRAM socket to 127.0.0.1)
@@ -301,7 +297,7 @@ fn stress_handshake_under_loss() {
     let Some(netns) = enter_netns("stress::stress_handshake_under_loss") else {
         return;
     };
-    let tmp = tmp("hsloss");
+    let tmp = tmp!("hsloss");
 
     // Apply netem to lo BEFORE spawning. 20% per direction.
     let _chaos = Netem::apply("lo", "loss 20%");
@@ -448,7 +444,7 @@ fn stress_rapid_reconnect_storm() {
     let Some(netns) = enter_netns("stress::stress_rapid_reconnect_storm") else {
         return;
     };
-    let tmp = tmp("storm");
+    let tmp = tmp!("storm");
     let mut rig = ChaosRig::setup_with(netns, &tmp, "PingInterval = 1\nMaxTimeout = 2\n");
 
     // ─── baselines ──────────────────────────────────────────────
@@ -540,7 +536,7 @@ fn stress_relay_mid_restart() {
     let Some(netns) = enter_netns("stress::stress_relay_mid_restart") else {
         return;
     };
-    let tmp = tmp("midrestart");
+    let tmp = tmp!("midrestart");
 
     let alice = Node::new(tmp.path(), "alice", 0xA6, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xB6, "tinc1", "10.42.0.2/32");
@@ -777,7 +773,7 @@ fn stress_idle_pmtu_convergence() {
     let Some(netns) = enter_netns("stress::stress_idle_pmtu_convergence") else {
         return;
     };
-    let tmp = tmp("idlepmtu");
+    let tmp = tmp!("idlepmtu");
 
     let alice = Node::new(tmp.path(), "alice", 0xCA, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xCB, "tinc1", "10.42.0.2/32");

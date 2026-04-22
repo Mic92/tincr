@@ -3,10 +3,6 @@ use std::time::{Duration, Instant};
 use super::common::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // SOCKS5 proxy roundtrip (chunk-11-proxy)
 // ═══════════════════════════════════════════════════════════════════
@@ -108,7 +104,7 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 ///    `two_daemons_connect_and_reach`.
 #[test]
 fn socks5_proxy_roundtrip() {
-    let tmp = tmp("socks5");
+    let tmp = tmp!("socks5");
     let alice = Node::new(tmp.path(), "alice", 0xA5);
     let bob = Node::new(tmp.path(), "bob", 0xB5);
 
@@ -274,7 +270,7 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 /// 4. **Full handshake through the relay**: ID + SPTPS + ACK.
 #[test]
 fn http_proxy_roundtrip() {
-    let tmp = tmp("httpproxy");
+    let tmp = tmp!("httpproxy");
     let alice = Node::new(tmp.path(), "alice", 0xA6);
     let bob = Node::new(tmp.path(), "bob", 0xB6);
 

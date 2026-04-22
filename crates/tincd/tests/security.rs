@@ -40,15 +40,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[macro_use]
 mod common;
 use common::{
     Ctl, PeerFixture, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr,
     tincd_at, wait_for_file, write_ed25519_privkey,
 };
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("sec", tag)
-}
 
 /// Minimal config for one daemon. Returns the daemon's pubkey
 /// (unused by the negative tests; the splice test reads it).
@@ -90,7 +87,7 @@ struct OneDaemon {
 
 impl OneDaemon {
     fn spawn(tag: &str, extra_conf: &str) -> Self {
-        let tmp = tmp(tag);
+        let tmp = tmp!(tag);
         let (confbase, pidfile, socket) = tmp.std_paths();
 
         write_config(&confbase, "testnode", 0x42, extra_conf);
@@ -247,7 +244,7 @@ fn unknown_id_rejected() {
 /// KNOWN peer name with `17.0` to isolate the version gate.
 #[test]
 fn legacy_minor_rejected() {
-    let tmp = tmp("legacy-minor");
+    let tmp = tmp!("legacy-minor");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase, "testnode", 0x42, "");
@@ -315,7 +312,7 @@ fn legacy_minor_rejected() {
 /// pingtimeout` elapsed → "Timeout during authentication".
 #[test]
 fn id_timeout_half_open_survives() {
-    let tmp = tmp("id-timeout");
+    let tmp = tmp!("id-timeout");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     // PingTimeout=1 keeps the test fast.
@@ -454,7 +451,7 @@ fn id_timeout_half_open_survives() {
 fn splice_mitm_rejected() {
     use std::net::TcpListener;
 
-    let tmp = tmp("splice");
+    let tmp = tmp!("splice");
 
     // ─── two-daemon setup (no ConnectTo on either side) ────────
     // Same shape as `two_daemons.rs::Node` but inlined: we need

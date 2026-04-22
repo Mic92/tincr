@@ -39,7 +39,7 @@ fn autoconnect_shortcut_promotes_hot_relay() {
         return;
     };
 
-    let tmp = TmpGuard::new("netns", "ac-shortcut");
+    let tmp = tmp!("ac-shortcut");
     let alice = Node::new(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32");
     let mid = Node::new(tmp.path(), "mid", 0xFC, "tinc0", "10.42.0.0/32");
@@ -238,7 +238,7 @@ fn shortcut_survives_traffic_gap() {
         return;
     };
 
-    let tmp = TmpGuard::new("netns", "ac-shortcut-gap");
+    let tmp = tmp!("ac-shortcut-gap");
     let alice = Node::new(tmp.path(), "alice", 0xEA, "tinc0", "10.42.0.1/32");
     let bob = Node::new(tmp.path(), "bob", 0xEB, "tinc1", "10.42.0.2/32");
     let mid = Node::new(tmp.path(), "mid", 0xEC, "tinc0", "10.42.0.0/32");

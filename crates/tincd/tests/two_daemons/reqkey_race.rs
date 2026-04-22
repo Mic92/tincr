@@ -19,10 +19,6 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("rqk", tag)
-}
-
 const VALIDKEY: u32 = 0x02;
 const REACHABLE: u32 = 0x10;
 
@@ -35,7 +31,7 @@ fn count_restarts(log: &str) -> usize {
 /// Portable simultaneous `REQ_KEY` race test. No netns needed.
 #[test]
 fn reqkey_race_fd() {
-    let tmp = tmp("fd-race");
+    let tmp = tmp!("fd-race");
     let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingInterval = 2\n");
     let bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingInterval = 2\n");
 

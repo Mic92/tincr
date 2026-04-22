@@ -9,10 +9,6 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 fn which_sleep() -> String {
     for p in std::env::var("PATH").unwrap_or_default().split(':') {
         let cand = std::path::Path::new(p).join("sleep");
@@ -25,7 +21,7 @@ fn which_sleep() -> String {
 
 #[test]
 fn slow_host_up_does_not_stall_forwarding() {
-    let tmp = tmp("script-latency");
+    let tmp = tmp!("script-latency");
     // Longer PingTimeout: with the OLD code alice's loop is dead for
     // 2 s, which would otherwise trip bob's 1 s auth-timeout sweep
     // and tear the conn down — masking the latency we want to see.

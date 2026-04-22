@@ -35,15 +35,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
+#[macro_use]
 mod common;
 use common::{
-    TmpGuard, alloc_port, drain_stderr, pubkey_from_seed, tincd_at,
-    wait_for_file_with as wait_for_file, write_ed25519_privkey,
+    alloc_port, drain_stderr, pubkey_from_seed, tincd_at, wait_for_file_with as wait_for_file,
+    write_ed25519_privkey,
 };
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("scripts", tag)
-}
 
 /// Minimal node fixture. Dummy device only — no fd plumbing here.
 struct Node {
@@ -243,7 +240,7 @@ where
 
 #[test]
 fn tinc_up_then_own_subnet_up() {
-    let tmp = tmp("startup");
+    let tmp = tmp!("startup");
     let log = tmp.path().join("events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA1);
@@ -328,7 +325,7 @@ fn tinc_up_then_own_subnet_up() {
 
 #[test]
 fn host_up_order_on_connect() {
-    let tmp = tmp("connect");
+    let tmp = tmp!("connect");
     let alice_log = tmp.path().join("alice-events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA2);
@@ -423,7 +420,7 @@ fn host_up_order_on_connect() {
 
 #[test]
 fn host_down_order_on_disconnect() {
-    let tmp = tmp("disconnect");
+    let tmp = tmp!("disconnect");
     let alice_log = tmp.path().join("alice-events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA3);
@@ -525,7 +522,7 @@ fn host_down_order_on_disconnect() {
 
 #[test]
 fn tinc_down_on_shutdown() {
-    let tmp = tmp("shutdown");
+    let tmp = tmp!("shutdown");
     let log = tmp.path().join("events.log");
 
     let alice = Node::new(tmp.path(), "alice", 0xA4);

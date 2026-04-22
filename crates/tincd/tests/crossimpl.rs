@@ -87,16 +87,14 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+#[macro_use]
 mod common;
-use common::linux::{ChildWithLog, run_ip, wait_for_carrier};
+use common::ChildWithLog;
+use common::linux::{run_ip, wait_for_carrier};
 use common::{
-    Ctl, TmpGuard, alloc_port, node_status, poll_until, pubkey_from_seed, wait_for_file,
+    Ctl, alloc_port, node_status, poll_until, pubkey_from_seed, wait_for_file,
     write_ed25519_privkey,
 };
-
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("xi", tag)
-}
 
 // ═════════════════════════ the env gate ══════════════════════════════════
 // Separate from the bwrap re-exec gate. The env var has to survive
@@ -555,7 +553,7 @@ const VALIDKEY: u32 = 0x02;
 const UDP_CONFIRMED: u32 = 0x80;
 
 fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
-    let tmp = tmp(tag);
+    let tmp = tmp!(tag);
     let alice = Node::new(
         tmp.path(),
         "alice",
@@ -712,7 +710,7 @@ fn rust_dials_c_bare_address_port() {
     let Some(netns) = enter_netns("rust_dials_c_bare_address_port") else {
         return;
     };
-    let tmp = tmp("rdcbap");
+    let tmp = tmp!("rdcbap");
     let alice = Node::new(
         tmp.path(),
         "alice",
@@ -816,7 +814,7 @@ fn c_dials_rust() {
 // reachable → ping → 3/3.
 
 fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
-    let tmp = tmp(tag);
+    let tmp = tmp!(tag);
     let alice = Node::new(
         tmp.path(),
         "alice",
@@ -984,7 +982,7 @@ fn c_dials_rust_tcponly() {
 // side's bug → one-way silence.
 
 fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
-    let tmp = tmp(tag);
+    let tmp = tmp!(tag);
     // No subnet — switch mode learns. iface = tincS0/tincS1.
     let alice = Node::new(tmp.path(), "alice", 0xAA, "tincS0", "", alice_impl);
     let bob = Node::new(tmp.path(), "bob", 0xBB, "tincS1", "", bob_impl);

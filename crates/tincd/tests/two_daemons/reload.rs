@@ -6,10 +6,6 @@ use nix::unistd::Pid;
 use super::common::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 /// SIGHUP reload: alice changes her own Subnets, sends SIGHUP, bob
 /// sees the diff via `ADD_SUBNET` / `DEL_SUBNET`.
 ///
@@ -27,7 +23,7 @@ fn tmp(tag: &str) -> TmpGuard {
 /// → peer's `on_add_subnet` → `SubnetTree`.
 #[test]
 fn sighup_reload_subnets() {
-    let tmp = tmp("reload");
+    let tmp = tmp!("reload");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
@@ -184,7 +180,7 @@ fn tinc_join_against_real_daemon() {
     use tinc_crypto::invite::{build_slug, cookie_filename};
     use tinc_crypto::sign::SigningKey;
 
-    let tmp = tmp("join");
+    let tmp = tmp!("join");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
 
     // ─── alice's basic config (no peer; she just listens) ──────
@@ -396,7 +392,7 @@ fn del_subnet_legitimate_still_works() {
     // Reuse the SIGHUP-reload mechanism: alice adds, then removes
     // a subnet; bob sees both via gossip. Proves `on_del_subnet`'s
     // happy path survived the lookup-gate reorder.
-    let tmp = tmp("del-subnet-gate");
+    let tmp = tmp!("del-subnet-gate");
     let alice = Node::new(tmp.path(), "alice", 0xA6);
     let bob = Node::new(tmp.path(), "bob", 0xB6);
 

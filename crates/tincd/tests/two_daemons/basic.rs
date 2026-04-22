@@ -6,10 +6,6 @@ use nix::unistd::Pid;
 use super::common::*;
 use super::node::*;
 
-fn tmp(tag: &str) -> TmpGuard {
-    TmpGuard::new("2d", tag)
-}
-
 /// Two real daemons. Alice has `ConnectTo = bob`. Full handshake →
 /// ACK → both reachable. Then stop alice; bob sees the disconnect,
 /// edge gone, alice unreachable.
@@ -40,7 +36,7 @@ fn tmp(tag: &str) -> TmpGuard {
 ///    → `graph()` → `BecameUnreachable`.
 #[test]
 fn two_daemons_connect_and_reach() {
-    let tmp = tmp("connect");
+    let tmp = tmp!("connect");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
@@ -224,7 +220,7 @@ fn two_daemons_connect_and_reach() {
 /// `#[ignore]` if CI is impatient; un-ignore once confident.
 #[test]
 fn outgoing_retry_after_refused() {
-    let tmp = tmp("retry");
+    let tmp = tmp!("retry");
     // PingTimeout=3 (not the default `write_config` PingTimeout=1):
     // alice's connect arrives mid-`turn()` on bob's side, so bob's
     // `Connection::new_meta` stamps `last_ping_time` from the
@@ -328,7 +324,7 @@ fn outgoing_retry_after_refused() {
 /// Exercises PING/PONG and the pinged-but-no-pong terminate path.
 #[test]
 fn ping_pong_keepalive() {
-    let tmp = tmp("pingpong");
+    let tmp = tmp!("pingpong");
     // PingInterval=1 makes PING observable in a 5s window.
     // PingTimeout=3 gives the SIGSTOP phase room: the stopped
     // daemon is paused for ~5s, the OTHER daemon's sweep needs
@@ -425,7 +421,7 @@ fn ping_pong_keepalive() {
 fn tinc_up_runs() {
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = tmp("tincup");
+    let tmp = tmp!("tincup");
     let alice = Node::new(tmp.path(), "alice", 0xA9);
     let bob = Node::new(tmp.path(), "bob", 0xB9);
 
@@ -483,7 +479,7 @@ fn tinc_up_runs() {
 /// and clutter stderr).
 #[test]
 fn load_all_nodes_populates_graph() {
-    let tmp = tmp("loadall");
+    let tmp = tmp!("loadall");
     let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xB9);
 
@@ -577,7 +573,7 @@ fn load_all_nodes_populates_graph() {
 /// 30s; this fits. The CI profile has 60s.
 #[test]
 fn autoconnect_converges_to_three() {
-    let tmp = tmp("autoconnect");
+    let tmp = tmp!("autoconnect");
     // PingTimeout=10 on the peers: an inbound conn arriving at
     // +15s gets stamped with the cached `timers.now()` from the
     // previous event-loop turn (up to 5s stale — the periodic

@@ -91,6 +91,7 @@
 #![cfg(target_os = "linux")]
 
 #[path = "../common/mod.rs"]
+#[macro_use]
 mod common;
 
 mod rig;
