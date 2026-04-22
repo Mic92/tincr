@@ -60,13 +60,14 @@ const NSIG_TABLE: usize = 32;
 /// ```
 ///
 /// and registers `(SIGHUP, Reload)`, `(SIGTERM, Exit)`, etc.
-pub struct SelfPipe<W> {
+pub(crate) struct SelfPipe<W> {
     /// Read end. Registered with the `EventLoop` for `Io::Read`.
     /// When `turn()` reports it readable, daemon calls `drain()`.
     rd: OwnedFd,
     /// Write end. The handler writes here via `PIPE_WR` (the raw
     /// copy); we keep the `OwnedFd` so the pipe doesn't half-close
     /// and so tests can write through it without forging a fd.
+    #[cfg_attr(not(test), allow(dead_code))]
     wr: OwnedFd,
     /// Dispatch table, indexed by signum.
     table: [Option<W>; NSIG_TABLE],
@@ -109,7 +110,7 @@ impl<W: Copy> SelfPipe<W> {
     ///
     /// # Errors
     /// Returns the underlying I/O error if `pipe2(O_CLOEXEC)` fails.
-    pub fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         // STRICTER: O_CLOEXEC. Without it the pipe leaks into spawned
         // script children — they'd just have an extra unused fd, but
         // it's untidy.
@@ -157,16 +158,16 @@ impl<W: Copy> SelfPipe<W> {
 
     /// Read-end fd for `EventLoop::add(..., Io::Read, IoWhat::Signal)`.
     #[must_use]
-    pub fn read_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn read_fd(&self) -> BorrowedFd<'_> {
         self.rd.as_fd()
     }
 
     /// Write-end fd. The signal handler writes here via the
-    /// `PIPE_WR` raw copy; this borrowed handle lets callers (and
-    /// tests) inject a wakeup byte without forging a `BorrowedFd`
-    /// from the static int.
+    /// `PIPE_WR` raw copy; this borrowed handle lets tests inject a
+    /// wakeup byte without forging a `BorrowedFd` from the static int.
+    #[cfg(test)]
     #[must_use]
-    pub fn write_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn write_fd(&self) -> BorrowedFd<'_> {
         self.wr.as_fd()
     }
 
@@ -178,7 +179,7 @@ impl<W: Copy> SelfPipe<W> {
     ///
     /// # Panics
     /// If `signum >= 32` (real-time signals; tincd doesn't use them).
-    pub fn add(&mut self, signum: i32, what: W) -> io::Result<()> {
+    pub(crate) fn add(&mut self, signum: i32, what: W) -> io::Result<()> {
         let idx = usize::try_from(signum).expect("signum negative");
         assert!(idx < NSIG_TABLE, "signum {signum} >= {NSIG_TABLE}");
 
@@ -205,7 +206,7 @@ impl<W: Copy> SelfPipe<W> {
     /// queue per-signum without `SA_SIGINFO`, so at most ~NSIG bytes
     /// are pending. (C reads one byte per wake; we do one read so
     /// epoll doesn't re-wake per byte.)
-    pub fn drain(&self, out: &mut Vec<W>) {
+    pub(crate) fn drain(&self, out: &mut Vec<W>) {
         let mut buf = [0u8; 64];
         // Err: shouldn't happen — pipe is valid, was reported
         // readable. Ok(0): EOF (write end closed — daemon is dying).
@@ -215,38 +216,13 @@ impl<W: Copy> SelfPipe<W> {
         };
         for &signum in &buf[..n] {
             let idx = signum as usize;
-            // None → skip: signal was del'd between handler write
-            // and drain read.
+            // None → skip: signum we never registered (stray byte).
             if let Some(what) = self.table.get(idx).copied().flatten() {
                 out.push(what);
             }
         }
     }
 
-    /// Restores `SIG_DFL`, clears the table entry.
-    ///
-    /// Idempotent. C checks `!sig->cb` at `:84`.
-    pub fn del(&mut self, signum: i32) {
-        let Ok(idx) = usize::try_from(signum) else {
-            return;
-        };
-        let Some(slot) = self.table.get_mut(idx) else {
-            return;
-        };
-        if slot.is_none() {
-            return; // already del'd / never added
-        }
-        if let Ok(sig) = Signal::try_from(signum) {
-            let act = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
-            // SAFETY: restoring SIG_DFL is always safe — default
-            // disposition is async-signal-safe by definition.
-            #[allow(unsafe_code)]
-            unsafe {
-                let _ = sigaction(sig, &act);
-            }
-        }
-        *slot = None;
-    }
 }
 
 impl<W> Drop for SelfPipe<W> {
@@ -255,12 +231,11 @@ impl<W> Drop for SelfPipe<W> {
         // need this; the daemon doesn't — it's a singleton for the
         // process lifetime).
         PIPE_WR.store(-1, Ordering::Relaxed);
-        // OwnedFd drops close the pipe fds. Any installed handlers
-        // are still installed — calling drop without calling del
-        // first means a future signal will write() to a closed fd
-        // (EBADF, ignored). That's a caller bug. We could iterate
-        // `table` and `del` each one, but tincd's lifecycle is
-        // "create at boot, never drop", so don't bother.
+        // OwnedFd drops close the pipe fds. Installed handlers stay
+        // installed; a post-drop signal makes `handler` see
+        // `PIPE_WR == -1` and bail before write(). tincd's lifecycle
+        // is "create at boot, never drop", so restoring SIG_DFL here
+        // is not worth the sigaction churn.
     }
 }
 

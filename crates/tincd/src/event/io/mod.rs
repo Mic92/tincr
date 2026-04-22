@@ -48,14 +48,17 @@ use kqueue::{
     wait,
 };
 
-use crate::MAX_EVENTS_PER_TURN;
+use crate::event::MAX_EVENTS_PER_TURN;
 
 /// Read/write interest. Ports `IO_READ`/`IO_WRITE` from `event.h`.
 /// No zero-interest state — the daemon only ever toggles between
 /// `Read` and `ReadWrite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Io {
+pub(crate) enum Io {
     Read,
+    // tincd registers `Read` or `ReadWrite`; bare `Write` exists for
+    // symmetry in `wants()` and the backend match arms. Tests cover it.
+    #[allow(dead_code)]
     Write,
     ReadWrite,
 }
@@ -75,7 +78,7 @@ impl Io {
 /// What kind of readiness fired. The `IO_READ`/`IO_WRITE` arg passed
 /// to the callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ready {
+pub(crate) enum Ready {
     Read,
     Write,
 }
@@ -83,7 +86,7 @@ pub enum Ready {
 /// Opaque io handle. The epoll token (`epoll_event.u64`) IS this
 /// (same `usize`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IoId(usize);
+pub(crate) struct IoId(usize);
 
 struct Slot<W> {
     // non-owning: the EventLoop never closes registered fds (see
@@ -98,15 +101,15 @@ struct Slot<W> {
 /// slot slab. Does NOT own fds.
 ///
 /// Generic over `W: Copy` — the daemon's `enum IoWhat`. See lib.rs.
-pub struct EventLoop<W> {
+pub(crate) struct EventLoop<W> {
     ep: Poller,
     events: Box<[RawEvent; MAX_EVENTS_PER_TURN]>,
     /// Hand-rolled slab; `None` = freed. The epoll token indexes this
     /// directly so `get(token).is_none()` is the cheap stale check.
     slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
-    /// Count of `Some` entries in `slots` — kept so `len()` is O(1)
-    /// for the daemon's `dump connections`.
+    /// Count of `Some` entries in `slots`. Test-only invariant
+    /// accounting (slot leak / double-free detection).
     live: usize,
 }
 
@@ -115,7 +118,7 @@ impl<W: Copy> EventLoop<W> {
     ///
     /// # Errors
     /// Returns the underlying I/O error if epoll/kqueue creation fails.
-    pub fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         Ok(Self {
             ep: create()?,
             events: Box::new([empty_event(); MAX_EVENTS_PER_TURN]),
@@ -133,7 +136,7 @@ impl<W: Copy> EventLoop<W> {
     /// Propagates `epoll_ctl(ADD)` failures — `EEXIST` if the fd is
     /// already registered (caller bug), `EBADF`/`ENOMEM` from the
     /// kernel.
-    pub fn add(&mut self, fd: BorrowedFd<'_>, interest: Io, what: W) -> io::Result<IoId> {
+    pub(crate) fn add(&mut self, fd: BorrowedFd<'_>, interest: Io, what: W) -> io::Result<IoId> {
         let raw = fd.as_raw_fd();
         let idx = self.free.pop().unwrap_or_else(|| {
             self.slots.push(None);
@@ -163,7 +166,7 @@ impl<W: Copy> EventLoop<W> {
     /// # Panics
     /// If `id` is dangling. C dereferences caller-owned `io_t*` —
     /// would be UAF.
-    pub fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
+    pub(crate) fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
         let slot = self.slots[id.0].as_mut().expect("dangling IoId");
         if slot.interest == interest {
             return Ok(());
@@ -176,7 +179,7 @@ impl<W: Copy> EventLoop<W> {
     /// Deregister and free the slot. Idempotent. Deregister errors
     /// are swallowed: `ENOENT` is normal (closing an fd auto-removes
     /// it from epoll); `EBADF` is tripwired in debug below.
-    pub fn del(&mut self, id: IoId) {
+    pub(crate) fn del(&mut self, id: IoId) {
         let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
             return; // already del'd
         };
@@ -234,7 +237,7 @@ impl<W: Copy> EventLoop<W> {
     /// Returns the underlying I/O error from `epoll_wait` / `kqueue`.
     /// `EINTR` is *not* an error — it returns `Ok(())` with `out`
     /// empty so the caller's `while running` loop re-checks its flag.
-    pub fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
+    pub(crate) fn turn(&mut self, timeout: Option<Duration>, out: &mut Vec<(W, Ready)>) -> io::Result<()> {
         out.clear();
 
         // EINTR: `SA_RESTART` does NOT auto-retry epoll_wait (man 7
@@ -275,21 +278,17 @@ impl<W: Copy> EventLoop<W> {
     }
 
     /// Look up the `what` for an id. `None` if dangling.
+    #[cfg(test)]
     #[must_use]
-    pub fn what(&self, id: IoId) -> Option<W> {
+    pub(crate) fn what(&self, id: IoId) -> Option<W> {
         self.slots.get(id.0)?.as_ref().map(|s| s.what)
     }
 
-    /// Number of live slots. Tests use this; the daemon's `dump
-    /// connections` will too eventually.
+    /// Number of live slots.
+    #[cfg(test)]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.live
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.live == 0
     }
 }
 

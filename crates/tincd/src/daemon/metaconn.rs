@@ -19,7 +19,7 @@ use crate::tunnel::MTU;
 use crate::{invitation_serve, script, socks};
 
 use rand_core::OsRng;
-use tinc_event::Io;
+use crate::event::Io;
 use tinc_proto::Request;
 
 /// `Again`: caller should loop (kernel may have more). `Done`: stop.
