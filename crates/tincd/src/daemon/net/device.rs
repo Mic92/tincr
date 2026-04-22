@@ -334,18 +334,10 @@ impl Daemon {
                 // kernel's UDP sndbuf doesn't partial-accept a
                 // GSO send (`udp_send_skb` is all-or-nothing).
             } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
-                // PMTU shrank under us. Shrink the relay's maxmtu
-                // so the NEXT batch's stride is smaller. The frames
-                // in THIS batch are lost (the kernel rejected the
-                // whole sendmsg) — same as the per-frame path losing
-                // one frame, just `count×` at once. Inner-TCP
-                // retransmits.
-                if let Some(p) = tunnels.get_mut(&relay_nid).and_then(|t| t.pmtu.as_mut()) {
-                    let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
-                    for a in p.on_emsgsize(origlen) {
-                        Self::log_pmtu_action(relay_name, &a);
-                    }
-                }
+                // PMTU shrank under us; frames in THIS batch are
+                // lost (kernel rejected the whole sendmsg) — same
+                // outcome as the per-frame path, just `count×`.
+                super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
             } else {
                 let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
                 log::warn!(target: "tincd::net",
@@ -378,65 +370,13 @@ impl Daemon {
             .stats
             .add_out(1, len);
 
-        // ─── GRO write ─────────────────────────────────────────────
-        // Armed only inside `recvmmsg_batch`'s dispatch loop. The
-        // other call sites (broadcast echo, kernel-mode forward,
-        // ICMP unreachable) reach here with `gro_bucket = None` and
-        // fall through to the immediate write.
-        //
-        // `data` is `[synth eth(14)][IP]` — the offer wants raw IP.
-        // The eth header is throwaway in TUN mode anyway (the
-        // existing `device.write` stomps it for the vnet_hdr stomp).
-        if let Some(mut bucket) = self.dp.gro_bucket.take() {
-            use tinc_device::GroVerdict;
-            const ETH_HLEN: usize = 14;
-            if data.len() > ETH_HLEN {
-                match bucket.offer(&data[ETH_HLEN..]) {
-                    GroVerdict::Coalesced => {
-                        self.dp.gro_bucket = Some(bucket);
-                        return; // absorbed; written on flush
-                    }
-                    GroVerdict::FlushFirst => {
-                        // Ship the run, then re-offer. The packet
-                        // is a valid candidate (passed all the
-                        // shape checks), it just doesn't fit —
-                        // different ack, seq gap, post-PSH. Seeding
-                        // it now starts the NEXT run.
-                        self.gro_flush(&mut bucket);
-                        let v = bucket.offer(&data[ETH_HLEN..]);
-                        // Either it seeds the empty bucket
-                        // (Coalesced) or some race made it stop
-                        // qualifying (NotCandidate, can't happen
-                        // with an immutable slice but we don't
-                        // build correctness on that). Never
-                        // FlushFirst on an empty bucket.
-                        debug_assert_ne!(v, GroVerdict::FlushFirst);
-                        self.dp.gro_bucket = Some(bucket);
-                        if v == GroVerdict::Coalesced {
-                            return;
-                        }
-                        // NotCandidate: fall through to write.
-                    }
-                    GroVerdict::NotCandidate => {
-                        // Non-TCP, FIN/SYN/RST, pure-ACK, fragment,
-                        // IP options. Ordering: anything already in
-                        // the bucket goes out FIRST. Same-flow stuff
-                        // can't be in the bucket (would've been a
-                        // key mismatch → FlushFirst), but a non-
-                        // candidate from the SAME flow (e.g. a FIN)
-                        // mustn't reorder past data with lower seq.
-                        self.gro_flush(&mut bucket);
-                        self.dp.gro_bucket = Some(bucket);
-                    }
-                }
-            } else {
-                self.dp.gro_bucket = Some(bucket);
-            }
-        }
-
-        if let Err(e) = self.device.write(data) {
-            log::debug!(target: "tincd::net", "Error writing to device: {e}");
-        }
+        // GRO write. Bucket armed only inside `recvmmsg_batch`'s
+        // dispatch loop; other callers (broadcast echo, kernel-
+        // mode forward, ICMP unreachable) reach here with
+        // `gro_bucket = None` and fall through to the immediate
+        // write. `data` is `[synth eth(14)][IP]`; the helper skips
+        // the eth header.
+        super::helpers::gro_offer_or_write(&mut self.device, &mut self.dp.gro_bucket, data);
     }
 
     /// Ship the GRO bucket. `bucket.flush()` finalizes `vnet_hdr` +
@@ -511,20 +451,14 @@ impl Daemon {
                 target.handles.stats.add_out(ok.packets, ok.bytes);
             }
             Err((relay, origlen)) => {
-                // Same dispatch as ship_tx_batch: PMTU shrank under
-                // us; cap maxmtu so the NEXT super's stride fits.
-                // Frames lost; inner-TCP retransmits.
-                if let Some(p) = self
-                    .dp
-                    .tunnels
-                    .get_mut(&relay)
-                    .and_then(|t| t.pmtu.as_mut())
-                {
-                    let name = self.graph.node(relay).map_or("<gone>", |n| n.name.as_str());
-                    for a in p.on_emsgsize(origlen) {
-                        Self::log_pmtu_action(name, &a);
-                    }
-                }
+                // PMTU shrank under us; frames lost, inner-TCP
+                // retransmits. Cap maxmtu for the next super.
+                super::helpers::handle_udp_emsgsize(
+                    &mut self.dp.tunnels,
+                    &self.graph,
+                    relay,
+                    origlen,
+                );
             }
         }
         // Batch already shipped inside seal_super.

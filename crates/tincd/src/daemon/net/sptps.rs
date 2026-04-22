@@ -707,25 +707,9 @@ impl Daemon {
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
-            // EMSGSIZE = LOCAL kernel rejected (interface MTU).
-            // Shrink relay's maxmtu. Don't log: this IS the
-            // discovery mechanism.
             #[allow(clippy::cast_possible_truncation)] // origlen ≤ MTU
             let at_len = origlen as u16;
-            if let Some(p) = self
-                .dp
-                .tunnels
-                .get_mut(&relay_nid)
-                .and_then(|t| t.pmtu.as_mut())
-            {
-                let relay_name = self
-                    .graph
-                    .node(relay_nid)
-                    .map_or("<gone>", |n| n.name.as_str());
-                for a in p.on_emsgsize(at_len) {
-                    Self::log_pmtu_action(relay_name, &a);
-                }
-            }
+            super::helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay_nid, at_len);
         } else {
             let relay_name = self.node_log_name(relay_nid);
             log::warn!(target: "tincd::net",
