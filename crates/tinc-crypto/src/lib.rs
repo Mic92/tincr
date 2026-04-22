@@ -9,7 +9,10 @@
 //! bump means the dependency changed something protocol-relevant, not
 //! that the test is wrong.
 
-#![forbid(unsafe_code)]
+// `forbid` would block the `#![allow(unsafe_code)]` on chapoly's
+// vendored-asm Poly1305 FFI. Everything else stays safe; the allow is
+// scoped to that one function and every block carries a SAFETY comment.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(
     clippy::module_name_repetitions,

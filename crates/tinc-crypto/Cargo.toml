@@ -6,6 +6,20 @@ license.workspace = true
 rust-version.workspace = true
 description = "tinc's bespoke crypto primitives — wire-compatible, not RFC-compatible"
 
+[features]
+default = ["vendored-poly1305-asm"]
+# Build the vendored OpenSSL/CRYPTOGAMS poly1305-armv8 NEON kernel
+# (asm/). aarch64-only; no-op on other arches (build.rs gates on
+# CARGO_CFG_TARGET_ARCH). ~2.7× faster seal on Apple M-series — neither
+# `ring` nor `aws-lc` ship a standalone aarch64 Poly1305, only the
+# fused RFC 8439 kernel whose MAC framing is incompatible with SPTPS.
+# Output is byte-identical, pinned by the C-generated KAT vectors.
+# Disable to fall back to the pure-Rust `poly1305` crate.
+vendored-poly1305-asm = []
+
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 chacha20.workspace = true
 poly1305.workspace = true

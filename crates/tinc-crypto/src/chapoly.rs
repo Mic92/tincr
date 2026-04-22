@@ -26,13 +26,30 @@
 //! 4. `tag = Poly1305(poly_key, ciphertext)` — no padding, no AD, no lengths
 //!
 //! The counter is the *block* counter inside ChaCha's state words 12–13, not
-//! a byte offset. The `chacha20` crate's `ChaCha20Legacy` type matches the
-//! 64/64 layout exactly.
+//! a byte offset.
+//!
+//! ## Backend
+//!
+//! ChaCha20 always comes from the `chacha20` crate (`ChaCha20Legacy`; its
+//! NEON/AVX2 backends are competitive with hand-written asm). Poly1305 has
+//! two backends behind [`backend::poly1305`], selected at build time:
+//!
+//! - **aarch64 + `vendored-poly1305-asm`** (default): the OpenSSL/
+//!   CRYPTOGAMS `poly1305-armv8` NEON kernel, vendored under `asm/`.
+//!   On Apple M-series this drops a 1400 B seal from ~2300 ns to
+//!   ~830 ns. Neither `ring` nor `aws-lc` ship a standalone aarch64
+//!   Poly1305 — their fast path is the *fused* RFC 8439 AEAD kernel,
+//!   whose MAC framing (AAD‖pad‖CT‖pad‖lengths) is incompatible with
+//!   the OpenSSH-style `Poly1305(ct)` SPTPS uses. See `asm/README.md`.
+//! - **everything else**: the `poly1305` crate. Has AVX2 on x86_64,
+//!   soft backend elsewhere.
+//!
+//! Both backends are exercised by the same C-generated KAT vectors
+//! (`tests/kat.rs::chapoly_seal_matches_c`), so the wire bytes are pinned
+//! regardless of which one is compiled in.
 
 use chacha20::ChaCha20Legacy;
 use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
-use poly1305::Poly1305;
-use poly1305::universal_hash::KeyInit;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -95,32 +112,29 @@ impl ChaPoly {
     ///
     /// Factored out so seal/open share the exact same setup — the C code
     /// duplicates these ~6 lines, which is fine in C but in Rust we'd rather
-    /// have one place to get the nonce endianness wrong.
-    fn record_state(&self, seqno: u64) -> (Poly1305, ChaCha20Legacy) {
-        // Big-endian, matching `put_u64` in the C source. The `chacha20`
-        // crate then loads these bytes little-endian into state words 14/15
-        // (because that's what the DJB construction does), so the *effective*
-        // word values are byte-swapped relative to `seqno` — but that's
-        // exactly what the wire protocol expects. Don't "fix" this.
+    /// have one place to get the nonce endianness wrong. Returning the cipher
+    /// (rather than re-initing for the body) saves one key-schedule per
+    /// record; measurable at ~800 k records/s.
+    #[inline]
+    fn record_state(&self, seqno: u64) -> ([u8; 32], ChaCha20Legacy) {
+        // Big-endian, matching `put_u64` in the C source. ChaCha20Legacy
+        // (DJB: 32-byte key, 8-byte nonce, 64-bit block counter) then loads
+        // these LE into state words 14/15 — exactly what the wire protocol
+        // expects. Don't "fix" the endianness.
         let nonce = seqno.to_be_bytes();
-
-        // ChaCha20Legacy: 32-byte key, 8-byte nonce, 64-bit block counter
-        // starting at 0. KeyIvInit::new takes GenericArray refs.
         let mut cipher = ChaCha20Legacy::new(self.key[..32].into(), (&nonce).into());
 
         // Block 0: keystream for the Poly1305 key. apply_keystream over zeros
         // is the idiomatic way to read raw keystream out of a StreamCipher.
         let mut poly_key = [0u8; 32];
         cipher.apply_keystream(&mut poly_key);
-        let poly = Poly1305::new((&poly_key).into());
-        poly_key.zeroize();
 
         // Block 1: where the actual ciphertext keystream starts. The C code
         // does this by calling chacha_ivsetup again with counter=one; we use
         // seek (which is in *bytes*, hence the 64-byte block size).
         cipher.seek(64u64);
 
-        (poly, cipher)
+        (poly_key, cipher)
     }
 
     /// Encrypt `plaintext` and append a 16-byte tag.
@@ -131,7 +145,7 @@ impl ChaPoly {
     /// for in-place encryption.
     #[must_use]
     pub fn seal(&self, seqno: u64, plaintext: &[u8]) -> Vec<u8> {
-        let (poly, mut cipher) = self.record_state(seqno);
+        let (mut poly_key, mut cipher) = self.record_state(seqno);
 
         let mut out = Vec::with_capacity(plaintext.len() + TAG_LEN);
         out.extend_from_slice(plaintext);
@@ -139,10 +153,10 @@ impl ChaPoly {
 
         // RFC 8439 would do: poly.update_padded(ad); poly.update_padded(ct);
         // poly.update(len(ad)||len(ct)). tinc does none of that. The MAC is
-        // over the raw ciphertext bytes, period. `compute_unpadded` is the
-        // crate's escape hatch for exactly this kind of legacy construction.
-        let tag = poly.compute_unpadded(&out);
-        out.extend_from_slice(tag.as_slice());
+        // over the raw ciphertext bytes, period.
+        let tag = backend::poly1305(&poly_key, &out);
+        poly_key.zeroize();
+        out.extend_from_slice(&tag);
         out
     }
 
@@ -176,10 +190,11 @@ impl ChaPoly {
         debug_assert_eq!(out.len(), encrypt_from);
         out.push(type_byte);
         out.extend_from_slice(body);
-        let (poly, mut cipher) = self.record_state(seqno);
+        let (mut poly_key, mut cipher) = self.record_state(seqno);
         cipher.apply_keystream(&mut out[encrypt_from..]);
-        let tag = poly.compute_unpadded(&out[encrypt_from..]);
-        out.extend_from_slice(tag.as_slice());
+        let tag = backend::poly1305(&poly_key, &out[encrypt_from..]);
+        poly_key.zeroize();
+        out.extend_from_slice(&tag);
     }
 
     /// Verify the trailing tag and decrypt.
@@ -200,13 +215,14 @@ impl ChaPoly {
         let ct_len = sealed.len().checked_sub(TAG_LEN).ok_or(OpenError)?;
         let (ct, tag) = sealed.split_at(ct_len);
 
-        let (poly, mut cipher) = self.record_state(seqno);
+        let (mut poly_key, mut cipher) = self.record_state(seqno);
 
         // MAC-then-decrypt, matching the C order. Either order is safe here
         // (the cipher is a pure stream XOR with no key-dependent branching),
         // but matching the reference makes side-channel review easier.
-        let expected = poly.compute_unpadded(ct);
-        if expected.as_slice().ct_eq(tag).unwrap_u8() != 1 {
+        let expected = backend::poly1305(&poly_key, ct);
+        poly_key.zeroize();
+        if expected.ct_eq(tag).unwrap_u8() != 1 {
             return Err(OpenError);
         }
 
@@ -246,12 +262,13 @@ impl ChaPoly {
         let ct_len = sealed.len().checked_sub(TAG_LEN).ok_or(OpenError)?;
         let (ct, tag) = sealed.split_at(ct_len);
 
-        let (poly, mut cipher) = self.record_state(seqno);
+        let (mut poly_key, mut cipher) = self.record_state(seqno);
 
         // MAC-then-decrypt, matching the C order. Tag check BEFORE the
         // extend so a forged packet doesn't dirty the caller's buffer.
-        let expected = poly.compute_unpadded(ct);
-        if expected.as_slice().ct_eq(tag).unwrap_u8() != 1 {
+        let expected = backend::poly1305(&poly_key, ct);
+        poly_key.zeroize();
+        if expected.ct_eq(tag).unwrap_u8() != 1 {
             return Err(OpenError);
         }
 
@@ -259,5 +276,46 @@ impl ChaPoly {
         out.extend_from_slice(ct);
         cipher.apply_keystream(&mut out[decrypt_at..]);
         Ok(())
+    }
+}
+
+// ─── backend ────────────────────────────────────────────────────────────────
+
+mod backend {
+    use super::TAG_LEN;
+
+    /// Raw one-shot Poly1305 over `msg` (no padding, no length suffix).
+    #[cfg(tinc_poly1305_asm)]
+    #[inline]
+    pub(super) fn poly1305(key: &[u8; 32], msg: &[u8]) -> [u8; TAG_LEN] {
+        // The crate is `#![deny(unsafe_code)]`; the FFI is the one place we
+        // must opt back in. Scoped to this function.
+        #![allow(unsafe_code)]
+
+        // SAFETY: declaration matches `tinc_poly1305` in
+        // `asm/poly1305_glue.c` exactly (4× pointer/size_t args, no
+        // return). Linked by `build.rs` whenever `tinc_poly1305_asm` is
+        // set, so the symbol is always present when this cfg is active.
+        unsafe extern "C" {
+            fn tinc_poly1305(key: *const u8, inp: *const u8, len: usize, mac: *mut u8);
+        }
+        let mut tag = [0u8; TAG_LEN];
+        // SAFETY: `tinc_poly1305` reads `key[0..32]` and `msg[0..len]`,
+        // writes exactly 16 bytes to `mac`, and touches nothing else (its
+        // 192-byte scratch is on its own stack). All three pointers are
+        // into live slices of the stated lengths; `tag` is exclusively
+        // borrowed. `msg.len()` fits `size_t` by construction.
+        unsafe { tinc_poly1305(key.as_ptr(), msg.as_ptr(), msg.len(), tag.as_mut_ptr()) };
+        tag
+    }
+
+    #[cfg(not(tinc_poly1305_asm))]
+    #[inline]
+    pub(super) fn poly1305(key: &[u8; 32], msg: &[u8]) -> [u8; TAG_LEN] {
+        use poly1305::Poly1305;
+        use poly1305::universal_hash::KeyInit;
+        // `compute_unpadded` is the crate's escape hatch for legacy
+        // constructions that MAC the raw bytes with no AD/len framing.
+        Poly1305::new(key.into()).compute_unpadded(msg).into()
     }
 }

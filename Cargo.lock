@@ -1306,6 +1306,7 @@ dependencies = [
 name = "tinc-crypto"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "chacha20",
  "curve25519-dalek",
  "ed25519-dalek",
