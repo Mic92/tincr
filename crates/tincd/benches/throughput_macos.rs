@@ -291,8 +291,17 @@ mod bench {
         // ─── PMTU convergence ──────────────────────────────────────
         // Until `minmtu` clears the full-MSS threshold, big packets
         // fall back to TCP-tunnelled SPTPS_PACKET (~100× slower).
+        // utun MTU is 1500 → the synthetic eth frame the daemon
+        // routes is 1514B; `send_sptps_packet`'s PACKET-17 gate is
+        // `data.len() > minmtu` (frame-level), so until minmtu≥1514
+        // every full-MSS segment double-encrypts via the meta-conn.
+        // Discovery probes (333ms cadence, 0.97-multiplier sweep)
+        // asymptote at ~1472; only the post-Fix Steady probe at
+        // maxmtu=1518 lifts past 1514. Waiting for ≥1500 catches
+        // that final jump and removes the run-to-run variance from
+        // "how far had PMTU got when iperf3 connected".
         let pmtu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            poll_until(Duration::from_secs(10), || {
+            poll_until(Duration::from_secs(20), || {
                 let _ = Command::new("/sbin/ping")
                     .args(["-c", "1", "-t", "1", BOB_IP])
                     .stdout(Stdio::null())
@@ -300,8 +309,8 @@ mod bench {
                     .status();
                 let a = handle.alice_ctl.dump(3);
                 let b = handle.bob_ctl.dump(3);
-                let a_ok = node_minmtu(&a, "bob").is_some_and(|m| m >= 1400);
-                let b_ok = node_minmtu(&b, "alice").is_some_and(|m| m >= 1400);
+                let a_ok = node_minmtu(&a, "bob").is_some_and(|m| m >= 1500);
+                let b_ok = node_minmtu(&b, "alice").is_some_and(|m| m >= 1500);
                 (a_ok && b_ok).then_some(())
             });
         }));
