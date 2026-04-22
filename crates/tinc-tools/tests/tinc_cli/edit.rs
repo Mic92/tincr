@@ -122,10 +122,14 @@ fn edit_dollar_in_filename_not_expanded() {
 fn edit_argc_check() {
     let out = tinc(&["edit"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("Invalid number of arguments"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Central arity check: MissingArg + the one-line usage synopsis.
+    assert!(err.contains("No FILE given!"), "{err}");
+    assert!(err.contains("Usage: tinc edit FILE"), "{err}");
 
     let out = tinc(&["edit", "a", "b"]);
     assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Too many arguments!"));
 }
 
 /// `tinc edit ../etc/passwd` — our STRICTER reject. The C
