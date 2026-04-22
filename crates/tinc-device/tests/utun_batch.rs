@@ -42,7 +42,7 @@ fn drain_until(dev: &mut BsdTun, want: usize) -> Vec<Vec<u8>> {
                 }
             }
             DrainResult::Empty => std::thread::sleep(Duration::from_millis(5)),
-            r => panic!("unexpected {r:?}"),
+            r @ DrainResult::Super { .. } => panic!("unexpected {r:?}"),
         }
     }
     got
