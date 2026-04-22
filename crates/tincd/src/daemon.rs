@@ -30,6 +30,7 @@ use crate::{icmp, mac_lease, route_mac};
 
 mod connect;
 mod dp;
+mod dump;
 mod gossip;
 mod metaconn;
 mod net;
