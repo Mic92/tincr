@@ -2,7 +2,7 @@
 //! all daemon state lives here so integration tests can construct a
 //! [`Daemon`] directly.
 //!
-//! I/O readiness goes through `tinc-event` with an `IoWhat` dispatch
+//! I/O readiness goes through [`event`] with an `IoWhat` dispatch
 //! tag per kind of socket the daemon owns; connections are addressed
 //! by a generational `ConnId`, so a slot reused after a peer drops
 //! safely returns `None` instead of misrouting an event. Logging is
@@ -26,6 +26,7 @@ pub mod daemon;
 pub mod discovery;
 mod dns;
 mod egress;
+pub(crate) mod event;
 mod fragment;
 pub mod graph;
 mod icmp;

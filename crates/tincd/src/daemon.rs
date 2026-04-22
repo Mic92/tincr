@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
-use tinc_event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
+use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
 use crate::graph::{EdgeId, Graph, NodeId, Route};
 use tinc_proto::AddrStr;
 
@@ -204,7 +204,7 @@ pub struct Daemon {
     /// `Connection` is testable without `EventLoop`. Argument against:
     /// two-map coherence. For now: two maps, debug asserts on
     /// coherence. Revisit if it bites.)
-    pub(crate) conn_io: slotmap::SecondaryMap<ConnId, tinc_event::IoId>,
+    pub(crate) conn_io: slotmap::SecondaryMap<ConnId, crate::event::IoId>,
 
     // ─── substrate
     /// The TUN/TAP. `Box<dyn>` - the variant (`Dummy`/`Tun`/`Fd`/
@@ -691,7 +691,7 @@ impl Daemon {
         // Reusable buffers. `tick`/`turn`/`drain` clear these
         // before pushing.
         let mut fired_timers = Vec::with_capacity(8);
-        let mut fired_io = Vec::with_capacity(tinc_event::MAX_EVENTS_PER_TURN);
+        let mut fired_io = Vec::with_capacity(crate::event::MAX_EVENTS_PER_TURN);
         let mut fired_signals = Vec::with_capacity(4);
 
         while self.running {

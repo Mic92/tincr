@@ -15,7 +15,7 @@ use crate::tunnel::MTU;
 use crate::{local_addr, socks};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
-use tinc_event::Io;
+use crate::event::Io;
 use tinc_proto::msg::DelEdge;
 use tinc_proto::{AddrStr, Request};
 

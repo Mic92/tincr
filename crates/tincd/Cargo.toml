@@ -31,7 +31,6 @@ path = "src/bin/tinc-dht-seed.rs"
 tinc-conf = { path = "../tinc-conf" }
 tinc-crypto = { path = "../tinc-crypto" }
 tinc-device = { path = "../tinc-device" }
-tinc-event = { path = "../tinc-event" }
 tinc-proto = { path = "../tinc-proto" }
 tinc-sptps = { path = "../tinc-sptps" }
 
@@ -65,7 +64,7 @@ libc = "0.2"
 # user: drop_privs (-U), main.rs needs User::from_name + setuid/setgid/initgroups.
 # process: daemon() for detach, fexecve cousins (unused but feature-coupled).
 # mman: mlockall (-L).
-nix = { version = "0.31", default-features = false, features = ["fs", "socket", "net", "uio", "user", "process", "mman", "signal", "hostname"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "socket", "net", "uio", "user", "process", "mman", "signal", "hostname", "event"] }
 
 # Landlock path allowlist for Sandbox=normal|high (sandbox.rs).
 # Linux only: the target.cfg means non-Linux builds don't even try

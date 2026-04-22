@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 /// `TimerId` is a slab index, NOT the `BTreeMap` key — the map key
 /// changes on every re-arm, the id doesn't.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TimerId(usize);
+pub(crate) struct TimerId(usize);
 
 /// One timer slot. `at` is `None` when disarmed (after `del`, or
 /// freshly created and not yet `set`).
@@ -31,7 +31,7 @@ struct Slot<W> {
 ///
 /// Generic over `W: Copy` — the daemon's `enum TimerWhat`. See lib.rs
 /// for the dispatch-enum design rationale.
-pub struct Timers<W> {
+pub(crate) struct Timers<W> {
     /// Ordered by deadline. Value is the slot index. `(Instant, u64)`
     /// because `Instant` alone collides for timers armed in the same
     /// `tick` to the same offset (and `BTreeMap::insert` overwrites,
@@ -61,7 +61,7 @@ pub struct Timers<W> {
 
 impl<W: Copy> Timers<W> {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             by_deadline: BTreeMap::new(),
             slots: Vec::new(),
@@ -79,7 +79,7 @@ impl<W: Copy> Timers<W> {
     ///
     /// Returns a stable handle. Unlike `IoId` this is NOT an epoll token
     /// — timers don't go through the poll fd.
-    pub fn add(&mut self, what: W) -> TimerId {
+    pub(crate) fn add(&mut self, what: W) -> TimerId {
         let idx = if let Some(idx) = self.free.pop() {
             self.slots[idx] = Slot { what, at: None };
             idx
@@ -98,7 +98,7 @@ impl<W: Copy> Timers<W> {
     /// If `id` is dangling (was `del`'d). C doesn't check — it
     /// dereferences the caller's `timeout_t*`, which is UB if freed.
     /// We panic, which is louder.
-    pub fn set(&mut self, id: TimerId, after: Duration) {
+    pub(crate) fn set(&mut self, id: TimerId, after: Duration) {
         let slot = &mut self.slots[id.0];
         if let Some(old_key) = slot.at.take() {
             self.by_deadline.remove(&old_key);
@@ -122,7 +122,7 @@ impl<W: Copy> Timers<W> {
     /// Slot is returned to the freelist. Caller must not use `id`
     /// after this. (C nulls `cb` and zeroes `tv`; the `timeout_t`
     /// struct is caller-owned and lives on.)
-    pub fn del(&mut self, id: TimerId) {
+    pub(crate) fn del(&mut self, id: TimerId) {
         let Some(slot) = self.slots.get_mut(id.0) else {
             return; // already del'd, freelist reused, then del'd again — idempotent
         };
@@ -146,7 +146,7 @@ impl<W: Copy> Timers<W> {
     // The `expect` below cannot fire: single-threaded, key was just
     // peeked from the same map. clippy can't see that.
     #[allow(clippy::missing_panics_doc)] // expect("just peeked"): single-threaded, key was peeked from same map this iteration
-    pub fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
+    pub(crate) fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
         // Single clock read per execute.
         self.now = Instant::now();
@@ -180,7 +180,7 @@ impl<W: Copy> Timers<W> {
     /// the timeout `tick()` returned is stale. `Some(ZERO)` if head is
     /// already due; caller clamps before passing to poll.
     #[must_use]
-    pub fn next_timeout(&self) -> Option<Duration> {
+    pub(crate) fn next_timeout(&self) -> Option<Duration> {
         self.by_deadline
             .first_key_value()
             .map(|(k, _)| k.0.saturating_duration_since(self.now))
@@ -190,14 +190,15 @@ impl<W: Copy> Timers<W> {
     /// check wants the SAME now the timer comparisons used, not a fresh
     /// `Instant::now()` per check.
     #[must_use]
-    pub const fn now(&self) -> Instant {
+    pub(crate) const fn now(&self) -> Instant {
         self.now
     }
 
     /// True if no timers are armed. Tests use this; daemon shouldn't
     /// (it always has `pingtimer` armed).
+    #[cfg(test)]
     #[must_use]
-    pub fn is_idle(&self) -> bool {
+    pub(crate) fn is_idle(&self) -> bool {
         self.by_deadline.is_empty()
     }
 }

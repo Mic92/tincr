@@ -1336,14 +1336,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinc-event"
-version = "0.1.0"
-dependencies = [
- "libc",
- "nix",
-]
-
-[[package]]
 name = "tinc-ffi"
 version = "0.0.0"
 dependencies = [
@@ -1420,7 +1412,6 @@ dependencies = [
  "tinc-conf",
  "tinc-crypto",
  "tinc-device",
- "tinc-event",
  "tinc-proto",
  "tinc-sptps",
  "tinc-tools",

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
-use tinc_event::{EventLoop, Io, SelfPipe, TimerId, Timers};
+use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
 use crate::graph::Graph;
 use tinc_proto::Subnet;
 
