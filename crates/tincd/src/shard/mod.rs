@@ -22,8 +22,11 @@
 //! Staleness is one event-loop iteration: routes change on edge
 //! events, not packets.
 
-#![forbid(unsafe_code)]
+// deny (not forbid): bpf::attach needs an explicit #[allow(unsafe_code)]
+// for the TUNSETSTEERINGEBPF ioctl.
+#![deny(unsafe_code)]
 
+pub mod bpf;
 mod probe;
 mod rx;
 mod seal;

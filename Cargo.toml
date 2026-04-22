@@ -10,7 +10,6 @@ members = [
     "crates/tinc-device",
     "crates/tinc-event",
     "crates/tincd",
-    "crates/tincd-bpf",
     "crates/tinc-tools",
 ]
 
