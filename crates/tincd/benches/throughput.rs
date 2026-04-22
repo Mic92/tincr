@@ -62,7 +62,10 @@
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("SKIP throughput: linux-only (needs netns + TUN)");
+    eprintln!(
+        "SKIP throughput: linux-only (needs netns + TUN); \
+         on macOS use `cargo bench --bench throughput_macos`"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -90,33 +93,17 @@ mod bench {
     use std::time::Duration;
 
     use super::common;
-    use common::linux::{ChildWithLog, run_ip, wait_for_carrier};
+    use common::bench::{
+        Impl, IperfResult, PingStats, c_tincd_bin, iperf3_available, node_minmtu, parse_iperf,
+    };
+    use common::linux::{run_ip, wait_for_carrier};
     use common::{
-        Ctl, TmpGuard, alloc_port, node_status, poll_until, pubkey_from_seed, wait_for_file,
-        write_ed25519_privkey,
+        ChildWithLog, Ctl, TmpGuard, alloc_port, node_status, poll_until, pubkey_from_seed,
+        wait_for_file, write_ed25519_privkey,
     };
 
     fn tmp(tag: &str) -> TmpGuard {
         TmpGuard::new("thr", tag)
-    }
-
-    // ═════════════════════════════ gates ═══════════════════════════════════════
-
-    fn c_tincd_bin() -> Option<PathBuf> {
-        std::env::var_os("TINC_C_TINCD").map(PathBuf::from)
-    }
-
-    /// Probe iperf3 by spawning `iperf3 --version`. Cheaper than pulling
-    /// in the `which` crate for one PATH lookup; also actually checks the
-    /// binary runs (not just exists).
-    fn iperf3_available() -> bool {
-        Command::new("iperf3")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
     }
 
     // ═════════════════════════ bwrap re-exec ═══════════════════════════════════
@@ -240,14 +227,6 @@ mod bench {
 
     // ═════════════════════════ daemon plumbing ═════════════════════════════════
 
-    /// Which binary backs this node. `Rust` is `CARGO_BIN_EXE_tincd`;
-    /// `C(path)` is the env-gated C tincd.
-    #[derive(Clone)]
-    enum Impl {
-        Rust,
-        C(PathBuf),
-    }
-
     struct Node {
         name: &'static str,
         seed: [u8; 32],
@@ -367,23 +346,6 @@ mod bench {
             };
             ChildWithLog::spawn(child)
         }
-    }
-
-    /// Read `minmtu` from a `dump nodes` row. Index 15 in the row
-    /// format: `name id host "port" PORT cipher digest maclen comp
-    /// options status nexthop via distance mtu minmtu ...`.
-    /// PMTU discovery converges `minmtu` toward the path MTU; until it
-    /// reaches ≥1500, full-MSS packets fall back to TCP-tunnelled
-    /// `SPTPS_PACKET` (b64 over the meta-conn) which is ~100x slower.
-    fn node_minmtu(rows: &[String], name: &str) -> Option<u16> {
-        rows.iter().find_map(|r| {
-            let body = r.strip_prefix("18 3 ")?;
-            let toks: Vec<&str> = body.split_whitespace().collect();
-            if toks.first() != Some(&name) {
-                return None;
-            }
-            toks.get(15)?.parse().ok()
-        })
     }
 
     // ═══════════════════════════ tunnel lifecycle ══════════════════════════════
@@ -626,22 +588,6 @@ mod bench {
 
     // ═══════════════════════════ iperf3 measurement ════════════════════════════
 
-    #[derive(Debug, serde::Deserialize)]
-    struct IperfResult {
-        end: IperfEnd,
-    }
-    #[derive(Debug, serde::Deserialize)]
-    struct IperfEnd {
-        /// Server-side received throughput. The client-side `sum_sent`
-        /// can include bytes still in flight; `sum_received` is what
-        /// actually made it through the tunnel + got `ACKed`.
-        sum_received: IperfSum,
-    }
-    #[derive(Debug, serde::Deserialize)]
-    struct IperfSum {
-        bits_per_second: f64,
-    }
-
     /// Run iperf3 server in tbobside, client in the outer ns. 5s, JSON.
     ///
     /// The mechanics: the test process IS in the outer netns (alice's
@@ -707,13 +653,7 @@ mod bench {
             );
         }
 
-        let parsed: IperfResult = serde_json::from_slice(&client.stdout).unwrap_or_else(|e| {
-            panic!(
-                "iperf3 JSON parse: {e}\nstdout: {}",
-                String::from_utf8_lossy(&client.stdout)
-            )
-        });
-        parsed.end.sum_received.bits_per_second
+        parse_iperf(&client.stdout).end.sum_received.bits_per_second
     }
 
     // ═══════════════════════════ latency measurement ══════════════════════════════
@@ -723,55 +663,6 @@ mod bench {
     // either (threshold is ~8 frames in flight). So: ping under
     // iperf3 load, report percentiles. The interesting number is
     // p99-under-load vs p99-idle, and Rust↔Rust vs C↔C under load.
-
-    /// Per-packet RTTs in milliseconds, sorted. Derived from `ping -D`
-    /// output — each reply line has `time=X ms`. The summary line's
-    /// `min/avg/max/mdev` doesn't give percentiles; for tail latency
-    /// (the par-crypto batching cost) we need the distribution.
-    ///
-    /// Sample input (iputils-20250605, captured against loopback):
-    /// ```text
-    /// [1775318329.288389] 64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.021 ms
-    /// ...
-    /// rtt min/avg/max/mdev = 0.018/0.027/0.053/0.014 ms
-    /// ```
-    /// `rsplit_once("time=")` skips the summary's `time 45ms` (no `=`).
-    #[derive(Debug)]
-    struct PingStats {
-        rtts_ms: Vec<f64>,
-        sent: u32,
-    }
-
-    impl PingStats {
-        fn percentile(&self, p: f64) -> f64 {
-            if self.rtts_ms.is_empty() {
-                return f64::NAN;
-            }
-            // Nearest-rank. 100 samples → p99 is the 99th value;
-            // good enough for a diagnostic. Not interpolating.
-            // Casts: p ∈ [0,100], len ≤ 100 (we send 100 pings) so the
-            // f64 product is well within both usize and f64 precision.
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss
-            )]
-            let idx = ((p / 100.0) * (self.rtts_ms.len() - 1) as f64).round() as usize;
-            self.rtts_ms[idx.min(self.rtts_ms.len() - 1)]
-        }
-        fn p50(&self) -> f64 {
-            self.percentile(50.0)
-        }
-        fn p99(&self) -> f64 {
-            self.percentile(99.0)
-        }
-        fn max(&self) -> f64 {
-            self.rtts_ms.last().copied().unwrap_or(f64::NAN)
-        }
-        const fn recv(&self) -> usize {
-            self.rtts_ms.len()
-        }
-    }
 
     /// `ping -c COUNT -i 0.01 -D 10.44.0.2`, parse per-packet RTTs.
     /// 10ms interval × 100 = ~1s wall time. `-D` adds timestamps but
@@ -792,25 +683,13 @@ mod bench {
         // ping exits non-zero if ANY packets are lost. Under load
         // that's not a failure mode we care about; parse what we got.
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut rtts: Vec<f64> = stdout
-            .lines()
-            .filter_map(|l| {
-                // `[1775318329.288389] 64 bytes from ...: ... time=0.021 ms`
-                let t = l.rsplit_once("time=")?.1;
-                let ms = t.split_ascii_whitespace().next()?;
-                ms.parse().ok()
-            })
-            .collect();
-        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let stats = PingStats::parse(&stdout, count);
         assert!(
-            !rtts.is_empty(),
+            !stats.rtts_ms.is_empty(),
             "ping got zero replies (tunnel dead?):\nstdout:\n{stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        PingStats {
-            rtts_ms: rtts,
-            sent: count,
-        }
+        stats
     }
 
     /// Idle RTT: tunnel is up, nothing flowing through it but the
@@ -875,12 +754,7 @@ mod bench {
             );
         }
 
-        let parsed: IperfResult = serde_json::from_slice(&client_out.stdout).unwrap_or_else(|e| {
-            panic!(
-                "iperf3 JSON parse: {e}\nstdout: {}",
-                String::from_utf8_lossy(&client_out.stdout)
-            )
-        });
+        let parsed: IperfResult = parse_iperf(&client_out.stdout);
         (parsed.end.sum_received.bits_per_second, ping)
     }
 

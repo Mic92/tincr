@@ -28,6 +28,7 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod bench;
 pub mod node;
 
 /// `tmp!("tag")` → `TmpGuard` prefixed by the caller's module name.
@@ -365,6 +366,23 @@ impl Ctl {
         }
         rows
     }
+}
+
+/// `dump traffic` row → `(in_bytes, out_bytes)` for `name`.
+/// Row: `"18 13 NAME in_packets in_bytes out_packets out_bytes"`.
+pub fn node_traffic(rows: &[String], name: &str) -> Option<(u64, u64)> {
+    rows.iter().find_map(|r| {
+        let body = r.strip_prefix("18 13 ")?;
+        let mut t = body.split_whitespace();
+        if t.next()? != name {
+            return None;
+        }
+        let _in_pkts = t.next()?;
+        let in_bytes: u64 = t.next()?.parse().ok()?;
+        let _out_pkts = t.next()?;
+        let out_bytes: u64 = t.next()?.parse().ok()?;
+        Some((in_bytes, out_bytes))
+    })
 }
 
 /// `dump nodes` row → status hex (body token 10). Row format (see
@@ -815,6 +833,60 @@ pub mod linux {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+// ═══════════════════════ macos utun helpers ═══════════════════════
+// Used by `macos_smoke.rs` and `benches/throughput_macos.rs`.
+
+#[cfg(target_os = "macos")]
+pub mod macos {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// Exec `argv` and assert success (stderr in panic).
+    pub fn run(argv: &[&str]) {
+        let out = Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+            .unwrap_or_else(|e| panic!("spawn {argv:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "{argv:?} failed: {}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout),
+        );
+    }
+
+    /// Poll `ifconfig DEV` until it exits 0. macOS has no
+    /// `/sys/class/net/$IF/carrier`; utun creation is synchronous
+    /// with the kern-control connect, so existence == carrier.
+    pub fn wait_for_utun(dev: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let ok = Command::new("/sbin/ifconfig")
+                .arg(dev)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Best-effort host-route removal (ignores ESRCH).
+    pub fn route_del_host(dst: &str) {
+        let _ = Command::new("/sbin/route")
+            .args(["-n", "delete", "-host", dst])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
