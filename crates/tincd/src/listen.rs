@@ -761,7 +761,7 @@ pub(crate) fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
 
     // `:89`: TCP_NODELAY. Meta protocol is line-oriented (~80 bytes);
     // Nagle would batch lines into 200ms coalesce windows.
-    if let Err(e) = s.set_nodelay(true) {
+    if let Err(e) = s.set_tcp_nodelay(true) {
         log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
     }
 

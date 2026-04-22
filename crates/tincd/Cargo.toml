@@ -101,7 +101,7 @@ mainline.workspace = true
 # is std-with-seams; only dep is libc (already linked). NOT a new shim-
 # matrix row — same quadrant as slotmap-instead-of-hand-rolling-a-slab.
 # No 'all' feature: V6ONLY/REUSEADDR/NODELAY/BROADCAST are all ungated.
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 # packet.rs: derive FromBytes/IntoBytes on the #[repr(C, packed)]
 # wire structs instead of hand-writing field-by-field codecs. The
@@ -119,7 +119,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 
 # LZ4 level 12. Block format (no frame, no length prefix), matches
 # the C's LZ4_compress_fast_extState wire output. KAT proves it.
-lz4_flex = { version = "0.11", default-features = false }
+lz4_flex = "0.13"
 
 # portmap: PCP (hand-rolled, RFC 6887) + UPnP-IGD fallback (hand-
 # rolled in src/portmap/igd.rs, std-only). n0's `portmapper` was

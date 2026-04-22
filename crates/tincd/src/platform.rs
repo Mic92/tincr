@@ -115,7 +115,7 @@ pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
     let (label, res) = if is_ipv6 {
         ("IPV6_TCLASS", s.set_tclass_v6(u32::from(prio)))
     } else {
-        ("IP_TOS", s.set_tos(u32::from(prio)))
+        ("IP_TOS", s.set_tos_v4(u32::from(prio)))
     };
     log::debug!(target: "tincd::net",
                 "Setting outgoing packet priority to {prio} ({label})");

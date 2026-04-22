@@ -176,7 +176,7 @@ fn dial_nonblocking(
                     "set_nonblocking failed for {desc}: {e}");
         return None;
     }
-    if let Err(e) = sock.set_nodelay(true) {
+    if let Err(e) = sock.set_tcp_nodelay(true) {
         log::warn!(target: "tincd::conn", "TCP_NODELAY: {e}");
     }
     if matches!(target, SocketAddr::V6(_)) {
@@ -717,7 +717,7 @@ mod tests {
         };
         apply_dial_sockopts(&sock, &opts); // would panic if not warn-only
         // Socket still usable: setting a benign opt proves it's open.
-        sock.set_nodelay(true).unwrap();
+        sock.set_tcp_nodelay(true).unwrap();
     }
 
     /// `apply_dial_sockopts`: `SO_MARK` reads back. Needs
