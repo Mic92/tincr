@@ -22,8 +22,7 @@ use tinc_proto::Subnet;
 use crate::compress;
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::dispatch::myself_options_from_config;
-#[cfg(not(target_os = "linux"))]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use crate::egress::Portable;
 use crate::egress::UdpEgress;
 use crate::icmp;
@@ -327,7 +326,12 @@ fn register_listeners(
             crate::egress::linux::Fast::new(&l.udp)
                 .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let egress: Box<dyn UdpEgress> = Box::new(
+            crate::egress::macos::Fast::new(&l.udp)
+                .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let egress: Box<dyn UdpEgress> = Box::new(
             Portable::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
