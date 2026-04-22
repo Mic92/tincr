@@ -12,10 +12,10 @@ use crate::listen::{configure_tcp, fmt_addr, is_local, unmap};
 use crate::node_id::NodeId6;
 use crate::tunnel::MTU;
 
-use rand_core::OsRng;
-use tinc_device::{Device, GroBucket};
 use crate::event::Io;
 use crate::graph::NodeId;
+use rand_core::OsRng;
+use tinc_device::{Device, GroBucket};
 
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]

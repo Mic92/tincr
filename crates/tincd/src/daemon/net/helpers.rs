@@ -5,9 +5,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::graph::{Graph, NodeId};
 use socket2::SockAddr;
 use tinc_device::{Device, GroBucket, GroVerdict};
-use crate::graph::{Graph, NodeId};
 
 use crate::inthash::IntHashMap;
 use crate::local_addr;

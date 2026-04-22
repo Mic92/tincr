@@ -16,9 +16,9 @@ use crate::tunnel::{MTU, TunnelState};
 use crate::udp_info::{FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
 use crate::{autoconnect, local_addr, pmtu, udp_info};
 
-use rand_core::{OsRng, RngCore};
 use crate::event::Io;
 use crate::graph::{NodeId, Route};
+use rand_core::{OsRng, RngCore};
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 

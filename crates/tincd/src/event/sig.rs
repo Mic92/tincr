@@ -222,7 +222,6 @@ impl<W: Copy> SelfPipe<W> {
             }
         }
     }
-
 }
 
 impl<W> Drop for SelfPipe<W> {

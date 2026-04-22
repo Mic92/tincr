@@ -30,11 +30,11 @@
 //!   to TUN (kernel doesn't read the eth header on a TUN write).
 
 use super::{TunnelHandles, TxSnapshot};
+use crate::graph::NodeId;
 use crate::node_id::NodeId6;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tinc_crypto::chapoly::ChaPoly;
-use crate::graph::NodeId;
 
 /// `PKT_NORMAL`. Re-stated (not re-exported from `daemon.rs`) so
 /// `shard` doesn't reach into `daemon` private constants. The byte

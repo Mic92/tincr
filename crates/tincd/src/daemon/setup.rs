@@ -12,11 +12,11 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
+use crate::graph::Graph;
 use slotmap::SlotMap;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
-use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
-use crate::graph::Graph;
 use tinc_proto::Subnet;
 
 use crate::compress;

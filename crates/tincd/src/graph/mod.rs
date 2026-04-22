@@ -1455,4 +1455,3 @@ mod glue_tests {
         assert_eq!(mst.len(), 6);
     }
 }
-

@@ -7,8 +7,8 @@
 //! of `self.tunnels` is the point: the boundary between "touches the
 //! data plane" and "touches gossip/conn state" is now grep-visible.
 
-use tinc_device::{DeviceArena, GroBucket};
 use crate::graph::NodeId;
+use tinc_device::{DeviceArena, GroBucket};
 
 use crate::compress;
 use crate::egress::TxBatch;
