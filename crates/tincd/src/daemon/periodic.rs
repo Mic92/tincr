@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+use super::intervals::{
+    EDGE_STORM_THRESHOLD, HOUSEKEEP_SWEEP, PERIODIC_TICK, PING_SWEEP, SLEEPTIME_MAX, SLEEPTIME_MIN,
+};
 use super::{
     ConnId, Daemon, SignalWhat, TimerWhat, apply_reloadable_settings, parse_connect_to_from_config,
     parse_subnets_from_config,
@@ -177,7 +180,7 @@ impl Daemon {
         script::reap_children();
 
         // re-arm +1s
-        self.timers.set(self.pingtimer, Duration::from_secs(1));
+        self.timers.set(self.pingtimer, PING_SWEEP);
     }
 
     /// Contradicting-edge storm detection + autoconnect.
@@ -190,7 +193,9 @@ impl Daemon {
     ///
     /// Returns the deferral duration for the unit test only.
     pub(super) fn on_periodic_tick(&mut self) -> Duration {
-        let slept = if self.contradicting_del_edge > 100 && self.contradicting_add_edge > 100 {
+        let slept = if self.contradicting_del_edge > EDGE_STORM_THRESHOLD
+            && self.contradicting_add_edge > EDGE_STORM_THRESHOLD
+        {
             log::warn!(target: "tincd",
                        "Possible node with same Name as us! Sleeping {} seconds.",
                        self.sleeptime);
@@ -201,10 +206,10 @@ impl Daemon {
                     self.timers.set(tid, d);
                 }
             }
-            self.sleeptime = self.sleeptime.saturating_mul(2).min(3600);
+            self.sleeptime = self.sleeptime.saturating_mul(2).min(SLEEPTIME_MAX);
             d
         } else {
-            self.sleeptime = (self.sleeptime / 2).max(10);
+            self.sleeptime = (self.sleeptime / 2).max(SLEEPTIME_MIN);
             Duration::ZERO
         };
 
@@ -334,7 +339,7 @@ impl Daemon {
         }
 
         self.timers
-            .set(self.periodictimer, Duration::from_secs(5).max(slept));
+            .set(self.periodictimer, PERIODIC_TICK.max(slept));
 
         slept
     }
@@ -483,7 +488,7 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Aging past requests: deleted {deleted}, left {left}");
         }
-        self.timers.set(self.age_timer, Duration::from_secs(10));
+        self.timers.set(self.age_timer, HOUSEKEEP_SWEEP);
     }
 
     /// Expire learned MAC subnets. Lazy-armed by `learn_mac`.
@@ -525,7 +530,7 @@ impl Daemon {
         // learn_mac re-creates (learn() returns true on empty).
         if any_left {
             if let Some(tid) = self.age_subnets_timer {
-                self.timers.set(tid, Duration::from_secs(10));
+                self.timers.set(tid, HOUSEKEEP_SWEEP);
             }
         } else if let Some(tid) = self.age_subnets_timer.take() {
             self.timers.del(tid);
@@ -587,7 +592,7 @@ impl Daemon {
         // connection` retries from a fresh socket.
         let now = self.timers.now();
         let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
-        if let Some(stale) = now.checked_sub(pingtimeout + Duration::from_secs(1)) {
+        if let Some(stale) = now.checked_sub(pingtimeout + PING_SWEEP) {
             for conn in self.conns.values_mut() {
                 if conn.outgoing.is_some() && !conn.active {
                     conn.last_ping_time = stale;

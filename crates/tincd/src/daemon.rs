@@ -32,6 +32,7 @@ mod connect;
 mod dp;
 mod dump;
 mod gossip;
+pub(crate) mod intervals;
 mod metaconn;
 mod net;
 mod periodic;

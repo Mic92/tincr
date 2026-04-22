@@ -258,10 +258,10 @@ impl Daemon {
                 if !tunnel.status.waitingforkey {
                     return self.send_req_key(target);
                 }
-                // 10s debounce.
+                // REQ_KEY_RETRY debounce.
                 if tunnel
                     .last_req_key
-                    .is_some_and(|l| now.duration_since(l).as_secs() >= 10)
+                    .is_some_and(|l| now.duration_since(l) >= super::intervals::REQ_KEY_RETRY)
                 {
                     log::debug!(target: "tincd::net",
                                 "No key after 10 seconds, restarting SPTPS");

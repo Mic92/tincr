@@ -34,6 +34,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::daemon::intervals::{PMTU_PROBE_TICK, PMTU_REVALIDATE_TICK};
+
 /// `net.h:36` — 1500 bytes payload + 14 ethernet + 4 VLAN.
 pub(crate) const MTU: u16 = 1518;
 /// `net.h:39` — below this we don't consider UDP to be working.
@@ -183,13 +185,13 @@ impl PmtuState {
             PmtuPhase::Discovery { sent } => {
                 // 333ms (C: tv_sec==0 && tv_usec<333333). First probe
                 // (sent==0) is ungated.
-                if sent != 0 && elapsed < Duration::from_micros(333_333) {
+                if sent != 0 && elapsed < PMTU_PROBE_TICK {
                     return vec![];
                 }
             }
             // Fix gates as Discovery (mtuprobes >= 0); sent != 0 here.
             PmtuPhase::Fix => {
-                if elapsed < Duration::from_micros(333_333) {
+                if elapsed < PMTU_PROBE_TICK {
                     return vec![];
                 }
             }
@@ -201,7 +203,7 @@ impl PmtuState {
             }
             PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => {
                 // 1/sec.
-                if elapsed < Duration::from_secs(1) {
+                if elapsed < PMTU_REVALIDATE_TICK {
                     return vec![];
                 }
             }

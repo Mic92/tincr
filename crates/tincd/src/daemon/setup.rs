@@ -408,14 +408,14 @@ fn register_timers(
     // Re-arms +10s. The eviction window is `pinginterval` (the
     // cache key TTL); the timer's 10s is just the sweep frequency.
     let age_timer = timers.add(TimerWhat::AgePastRequests);
-    timers.set(age_timer, Duration::from_secs(10));
+    timers.set(age_timer, super::intervals::HOUSEKEEP_SWEEP);
 
     // ─── periodic timer
     // Arm +5s directly: no contradictions exist at setup, counters
     // are zero, an immediate first call would just halve sleeptime
     // (10 → 5 → floored to 10) and re-arm.
     let periodictimer = timers.add(TimerWhat::Periodic);
-    timers.set(periodictimer, Duration::from_secs(5));
+    timers.set(periodictimer, super::intervals::PERIODIC_TICK);
 
     // ─── keyexpire timer
     // Arm unconditionally: SPTPS needs the rekey to bound the

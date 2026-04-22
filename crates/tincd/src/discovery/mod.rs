@@ -331,7 +331,7 @@ impl Discovery {
             cached_targets: Vec::new(),
             resolved_buf: Vec::new(),
             publish_inflight: false,
-            publish_backoff: Duration::from_secs(5),
+            publish_backoff: crate::daemon::intervals::DISCOVERY_BACKOFF_SEED,
             last_attempt: None,
         }
     }
@@ -492,7 +492,7 @@ impl Discovery {
                     if ok {
                         self.last_publish = Some(now);
                         self.last_seq = seq;
-                        self.publish_backoff = Duration::from_secs(5);
+                        self.publish_backoff = crate::daemon::intervals::DISCOVERY_BACKOFF_SEED;
                         out.events.push(DiscoveryEvent::Published { seq, value });
                     } else {
                         log::debug!(target: "tincd::discovery",

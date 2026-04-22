@@ -221,7 +221,8 @@ impl Daemon {
         // (defensive).
         if arm_timer && self.age_subnets_timer.is_none() {
             let tid = self.timers.add(TimerWhat::AgeSubnets);
-            self.timers.set(tid, Duration::from_secs(10));
+            self.timers
+                .set(tid, crate::daemon::intervals::HOUSEKEEP_SWEEP);
             self.age_subnets_timer = Some(tid);
         }
 
