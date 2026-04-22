@@ -30,9 +30,13 @@ sha2.workspace = true
 hmac.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
+ml-kem.workspace = true
+kem.workspace = true
+rand_core = "0.6"
 
 [dev-dependencies]
 hex.workspace = true
+rand_core = { version = "0.6", features = ["getrandom"] }
 serde.workspace = true
 serde_json.workspace = true
 

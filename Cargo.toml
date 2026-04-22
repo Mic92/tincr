@@ -102,6 +102,12 @@ subtle = "2.5"
 # mainline 7.
 mainline = { version = "6.0", default-features = false, features = ["node"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
+# Post-quantum hybrid KEX (`SPTPSKex = x25519-mlkem768`). Pure-Rust FIPS 203;
+# pulls a second `digest` (0.10 via sha3) but no shared types cross the
+# boundary — ml-kem's API is byte arrays in, byte arrays out. Handshake-time
+# only, so the asm-vs-pure-Rust perf gap (~3× vs aws-lc) is irrelevant.
+ml-kem = { version = "0.2", default-features = false, features = ["zeroize"] }
+kem = "0.3.0-pre.0"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
