@@ -67,7 +67,7 @@ pub struct DataPlane {
 
     /// Reused recv-side scratch for the UDP data path. Mirror of
     /// `tx_scratch`. `open_data_into` writes `[0;14] ‖ decrypted-body`
-    /// here; `receive_sptps_record_fast` then overwrites `[12..14]` with
+    /// here; `receive_sptps_record` then overwrites `[12..14]` with
     /// the synthesized ethertype in-place and routes the whole slice.
     /// Cleared (not freed) between packets — after the first packet at
     /// MTU, capacity is `14 + MTU` and stays there. Net: zero allocs on

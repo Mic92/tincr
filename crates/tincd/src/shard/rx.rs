@@ -379,7 +379,7 @@ pub fn rx_open(
     // ─── Step 3: MTU gate. sptps.rs:332 — body bigger than the
     // configured MTU is a peer misconfig; slow path logs + drops.
     // `MTU` is the daemon's `tunnel::MTU` (1518); we compare body
-    // length against it same as `receive_sptps_record_fast` does.
+    // length against it same as `receive_sptps_record` does.
     if body_len > usize::from(crate::tunnel::MTU) {
         return Err(());
     }

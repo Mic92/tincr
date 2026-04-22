@@ -525,16 +525,18 @@ impl Daemon {
                         *h.udp_addr.lock().unwrap() = Some(cached);
                     }
                 }
-                // Clear udppacket here so the borrow of `tunnel` ends
-                // before receive_sptps_record_fast takes &mut self.
-                tunnel.status.udppacket = false;
-
                 // send_mtu_info if relayed-to-us.
+                // (`tunnel` borrow ends here by NLL last-use.)
                 let mut nw = false;
                 if !direct {
                     nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
                 }
-                nw |= self.receive_sptps_record_fast(from_nid, &from_name, record_type);
+                nw |= self.receive_sptps_record(from_nid, &from_name, record_type);
+                // Clear udppacket AFTER the call: the PROBE gate and
+                // maxrecentlen update inside need to see the true value.
+                if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
+                    t.status.udppacket = false;
+                }
                 if nw {
                     self.maybe_set_write_any();
                 }
