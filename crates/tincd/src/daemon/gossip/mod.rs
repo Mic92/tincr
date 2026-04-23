@@ -147,9 +147,8 @@ impl Daemon {
         Some((conn_name, from_nid, to_nid))
     }
 
-    /// Dedup gate; `true` = already seen, caller drops silently. Key
-    /// is the whole line; the nonce token makes distinct origins
-    /// distinct.
+    /// Dedup gate; `true` = already seen, caller drops silently.
+    /// Nonce token stripped from key (stricter than C).
     pub(super) fn seen_request(&mut self, body: &[u8]) -> bool {
         // Parsers validated UTF-8; failure → not-seen (handler rejects).
         let Ok(s) = std::str::from_utf8(body) else {
@@ -174,7 +173,9 @@ impl Daemon {
     }
 
     /// Re-send to every active conn except `from`. Receivers'
-    /// `seen.check` + the `from` skip = loop break.
+    /// `seen.check` + the `from` skip = loop break. Rate-limited per
+    /// origin (`FloodLimiter`): over-budget drops the forward only,
+    /// caller's local graph update already happened.
     pub(super) fn forward_request(&mut self, from: ConnId, body: &[u8]) -> bool {
         // Post-parse; from_utf8 already succeeded.
         let Ok(s) = std::str::from_utf8(body) else {
@@ -182,6 +183,20 @@ impl Daemon {
                        "forward_request: non-UTF-8 body, dropping");
             return false;
         };
+        let now = self.timers.now();
+        if let Some(c) = self.conns.get_mut(from)
+            && !c.flood.allow(now)
+        {
+            if c.flood.should_warn() {
+                log::warn!(target: "tincd::proto",
+                           "Flood-gossip rate limit hit on {} \
+                            ({}/s, burst {}); dropping forwards",
+                           c.name,
+                           crate::seen::FLOOD_RATE_PER_SEC,
+                           crate::seen::FLOOD_BURST);
+            }
+            return false;
+        }
         let targets = self.broadcast_targets(Some(from));
         if targets.is_empty() {
             return false;

@@ -262,6 +262,8 @@ pub(crate) struct Connection {
     pub log_level: Option<log::Level>,
     /// Debug level before this conn's `REQ_SET_DEBUG`; restored on close.
     pub prev_debug_level: Option<i32>,
+    /// Gossip re-forward rate limit; checked in `forward_request`.
+    pub flood: crate::seen::FloodLimiter,
 }
 
 /// Events from one `feed()`. Order matters: an `ADD_EDGE` before a
@@ -336,6 +338,7 @@ impl Connection {
             sptps_kex: tinc_sptps::SptpsKex::default(),
             log_level: None,
             prev_debug_level: None,
+            flood: crate::seen::FloodLimiter::new(),
         }
     }
 

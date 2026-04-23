@@ -665,8 +665,9 @@ impl Daemon {
             return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
         }
 
-        // Canonical form: wire nonce preserved (dedup key), padding
-        // stripped. `Tok` capped each token at 2048B.
+        // Canonical form: wire nonce kept for the forwarded line (C
+        // peers key on it); `seen.check` strips it for dedup. Padding
+        // dropped. `Tok` capped each token at 2048B.
         let mut t = s.split_ascii_whitespace();
         let req = t.next().unwrap_or("14");
         let nonce = t.next().unwrap_or("0");
