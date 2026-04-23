@@ -1,20 +1,13 @@
-//! Bug-hunt repros for the config parser. Each test is `#[ignore]`d
-//! and demonstrates a defect; see `docs/bugs/FOUND.md`.
+//! Regression tests for config-parser robustness gaps vs C tinc.
 
 use std::path::Path;
 
 /// C tinc reads config files as raw bytes (`fgets`); a Latin-1 byte in
-/// a comment (or anywhere) is harmless. The Rust port reads via
-/// `BufRead::lines()` which validates UTF-8 and returns
-/// `io::ErrorKind::InvalidData` on the first non-UTF-8 byte, so the
-/// whole file is rejected and the daemon refuses to start.
-///
-/// A `hosts/NAME` file produced on a Latin-1 locale (or hand-edited on
-/// an old Windows box) that a 1.1 C daemon happily reads will hard-fail
-/// here.
+/// a comment is harmless. The parser must not hard-fail the whole file
+/// on a non-UTF-8 byte — a `hosts/NAME` file produced on a Latin-1
+/// locale that a 1.1 C daemon reads should also be readable here.
 #[test]
-#[ignore = "bug: non-UTF-8 byte in config (e.g. Latin-1 comment) hard-errors; C tinc accepts"]
-fn non_utf8_comment_rejected() {
+fn non_utf8_bytes_tolerated() {
     // "# café" in ISO-8859-1: 'é' is 0xE9, a lone continuation-less
     // byte in UTF-8 → invalid.
     let input: &[u8] = b"# caf\xe9\nName = alice\n";
@@ -25,13 +18,10 @@ fn non_utf8_comment_rejected() {
     assert_eq!(entries[0].value, "alice");
 }
 
-/// UTF-8 BOM at start of file becomes part of the first variable name,
-/// so `lookup("Name")` finds nothing. Windows Notepad writes a BOM by
-/// default. C tinc has the same defect (parity), noted here as a
-/// robustness gap the port could close cheaply.
+/// Windows Notepad writes a UTF-8 BOM by default. C tinc glues it onto
+/// the first variable name; we strip it so `lookup("Name")` works.
 #[test]
-#[ignore = "bug: UTF-8 BOM glued onto first variable name (parity with C, robustness gap)"]
-fn bom_on_first_line() {
+fn bom_on_first_line_stripped() {
     let input = "\u{feff}Name = alice\n";
     let entries = tinc_conf::parse::parse_reader(input.as_bytes(), Path::new("tinc.conf")).unwrap();
     let mut cfg = tinc_conf::Config::new();

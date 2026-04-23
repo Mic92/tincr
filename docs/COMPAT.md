@@ -118,6 +118,11 @@ Things that work in both daemons but not identically.
   fatal rather than logged-and-continued.
 - **`LocalDiscovery` defaults to `yes`**, matching current upstream
   git but not every 1.1pre tarball.
+- **Config files may carry a UTF-8 BOM.** Notepad-saved files work;
+  C tinc glues the BOM onto the first key. Non-UTF-8 bytes (e.g. a
+  Latin-1 comment) are tolerated like C's `fgets`, but any such byte
+  in a key or value is replaced with U+FFFD rather than passed
+  through verbatim.
 
 ## Config key summary
 

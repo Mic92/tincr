@@ -171,8 +171,10 @@ fn ascii_fold(s: &str) -> String {
 /// the base64 body without trying to interpret `IBazFoo+/...` as
 /// `key=value`.
 ///
-/// C reads with `fgets` into a fixed 1024-byte buffer; we use
-/// `BufRead::lines()` which handles `\r\n` and unbounded lines.
+/// C reads with `fgets` into a fixed 1024-byte buffer; we read raw
+/// bytes and lossily decode (so a stray Latin-1 byte in a comment, as
+/// `fgets` would tolerate, doesn't hard-fail the whole file), strip a
+/// leading UTF-8 BOM, and accept `\r\n`.
 ///
 /// First parse error aborts (matches C: `if(!cfg) break;`). I/O errors
 /// also abort. The C distinguishes "EOF cleanly" from "fgets failed" via
@@ -207,15 +209,29 @@ pub const MAX_ENTRIES: usize = 4096;
 pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> {
     let mut entries = Vec::new();
     let mut in_pem = false;
+    let mut br = BufReader::new(r);
+    let mut buf = Vec::new();
+    let mut lineno = 0u32;
 
-    for (i, line) in BufReader::new(r).lines().enumerate() {
-        let line = line.map_err(|e| ReadError::Io {
+    loop {
+        buf.clear();
+        let n = br.read_until(b'\n', &mut buf).map_err(|e| ReadError::Io {
             path: path.to_owned(),
             err: e,
         })?;
-        // enumerate() is usize; truncates only at 4B-line config files.
-        #[expect(clippy::cast_possible_truncation)] // 4B-line config files don't exist
-        let lineno = (i + 1) as u32;
+        if n == 0 {
+            break;
+        }
+        lineno = lineno.saturating_add(1);
+        // Strip UTF-8 BOM (Notepad) so it doesn't glue onto the first key.
+        let bytes = if lineno == 1 {
+            buf.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(&buf)
+        } else {
+            &buf
+        };
+        // Lossy: C `fgets` is byte-oriented; don't hard-fail on Latin-1.
+        let line = String::from_utf8_lossy(bytes);
+        let line = line.trim_end_matches(['\n', '\r']);
         if line.len() > MAX_LINE_LEN {
             return Err(ReadError::LineTooLong {
                 path: path.to_owned(),
@@ -243,7 +259,7 @@ pub fn parse_reader(r: impl Read, path: &Path) -> Result<Vec<Entry>, ReadError> 
         }
 
         match parse_line(
-            &line,
+            line,
             Source::File {
                 path: path.to_owned(),
                 line: lineno,

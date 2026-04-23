@@ -559,20 +559,18 @@ impl Daemon {
             });
         }
 
-        // Compression capability check. LZO 10/11 stubbed: compress()
-        // returns None, peer's decompress fails. Reject explicitly so
-        // misconfig surfaces in OUR logs, not as silent packet loss
-        // on THEIR side.
+        // Reject LzoHi (11): minilzo lacks `lzo1x_999_compress`, so
+        // surface it here instead of silent packet loss on their side.
         let their_compression = u8::try_from(msg.compression).unwrap_or(0);
-        match crate::compress::Level::from_wire(their_compression) {
-            crate::compress::Level::LzoLo | crate::compress::Level::LzoHi => {
-                log::error!(target: "tincd::proto",
-                            "Node {} uses bogus compression level {}: \
-                             LZO compression is unavailable on this node",
-                            msg.from, their_compression);
-                return Ok(false); // don't terminate meta conn
-            }
-            _ => {}
+        if matches!(
+            crate::compress::Level::from_wire(their_compression),
+            crate::compress::Level::LzoHi
+        ) {
+            log::error!(target: "tincd::proto",
+                        "Node {} uses bogus compression level {}: \
+                         LZO level 11 (lzo1x_999) is unavailable on this node",
+                        msg.from, their_compression);
+            return Ok(false); // don't terminate meta conn
         }
         self.dp.tunnels.entry(from_nid).or_default().outcompression = their_compression;
 

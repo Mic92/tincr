@@ -96,7 +96,7 @@ pub struct DaemonSettings {
     /// Seconds between pings. Default 60.
     pub pinginterval: u32,
     /// Seconds to wait for PONG before assuming peer dead. Clamped
-    /// to `[1, pinginterval]`. Default 5.
+    /// to `pinginterval` when out of `[1, pinginterval]`. Default 5.
     pub pingtimeout: u32,
     /// The `Port` config (HOST-tagged: from `hosts/NAME` not
     /// tinc.conf). Default 655. 0 means "kernel picks" - valid for
@@ -115,7 +115,8 @@ pub struct DaemonSettings {
     pub udp_discovery_timeout: u32,
     /// `Compression = N` config knob. Advertised in `ANS_KEY`; peers
     /// compress TOWARDS us at this level. Default 0 (none). 1-9
-    /// zlib, 12 LZ4; 10-11 LZO (stubbed, rejected at setup).
+    /// zlib, 10 LZO (vendored minilzo), 12 LZ4. 11 (LZO `_999`) is
+    /// rejected at setup: minilzo can decompress it but not produce it.
     pub compression: u8,
     /// When set, `forward_packet` decrements TTL after the forward
     /// decision. Makes `traceroute` through the mesh show each hop.
@@ -402,10 +403,12 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_int!(config, "PingInterval", u32, |v| if v >= 1 {
         settings.pinginterval = v.min(MAX_DURATION_SECS);
     });
-    // Clamped to [1, pinginterval].
-    cfg_int!(config, "PingTimeout", u32, |v| {
-        settings.pingtimeout = v.clamp(1, settings.pinginterval);
-    });
+    cfg_int!(config, "PingTimeout", u32, |v| settings.pingtimeout = v);
+    // C parity: out-of-range snaps to pinginterval (not 1); applied
+    // unconditionally so a small PingInterval pulls the default 5 down.
+    if settings.pingtimeout < 1 || settings.pingtimeout > settings.pinginterval {
+        settings.pingtimeout = settings.pinginterval;
+    }
     // Per-host PMTU is read in dispatch.rs::handle_id; this is the
     // tinc.conf-level clamp.
     cfg_int!(config, "PMTU", u16, |v| settings.global_pmtu = Some(v));
@@ -498,6 +501,16 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_int!(config, "InvitationExpire", u64, |v| {
         settings.invitation_lifetime = Duration::from_secs(v);
     });
+    // Reloadable in C (`setup_myself_reloadable`).
+    if let Some(e) = config.lookup("Forwarding").next() {
+        match e.get_str().to_ascii_lowercase().as_str() {
+            "off" => settings.forwarding_mode = ForwardingMode::Off,
+            "internal" => settings.forwarding_mode = ForwardingMode::Internal,
+            "kernel" => settings.forwarding_mode = ForwardingMode::Kernel,
+            v => log::error!(target: "tincd",
+                             "Forwarding = {v}: invalid (off|internal|kernel)"),
+        }
+    }
     cfg_int!(config, "KeyExpire", u32, |v| {
         // Ceiling 3600s: defense-in-depth for the counter-driven
         // nonce-reuse guard. No floor (tiny values only waste CPU).
@@ -590,7 +603,7 @@ pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
 /// Parse the non-reloadable settings from `config` into a fresh
 /// `DaemonSettings`. Called once from `setup()`. Reloadable settings
 /// are folded in via `apply_reloadable_settings`; the rest (Port,
-/// `AddressFamily`, Mode, sockopts, Proxy, Compression, Forwarding,
+/// `AddressFamily`, Mode, sockopts, Proxy, Compression,
 /// DHT, `DeviceStandby`) need re-bind / re-open and are setup-only.
 pub(super) fn load_settings(
     config: &tinc_conf::Config,
@@ -685,23 +698,24 @@ pub(super) fn load_settings(
         settings.proxy = parse_proxy_config(e.get_str()).map_err(SetupError::Config)?;
     }
 
-    // Compression. HOST-tagged. The level WE want peers to
-    // compress towards us at. Reject LZO (stubbed) and >12.
+    // Compression. HOST-tagged. Reject LzoHi (minilzo lacks `_999`
+    // compress) and anything outside 0..=12.
     if let Some(e) = config.lookup("Compression").next()
-        && let Some(v) = get_int(e)
+        && let Some(raw) = get_int(e)
     {
-        let v = u8::try_from(v).unwrap_or(255);
+        let v = u8::try_from(raw).unwrap_or(u8::MAX);
         match compress::Level::from_wire(v) {
-            compress::Level::LzoLo | compress::Level::LzoHi => {
+            compress::Level::LzoHi => {
                 return Err(SetupError::Config(format!(
-                    "Compression = {v}: LZO compression is \
-                         unavailable on this node"
+                    "Compression = {}: LZO level 11 (lzo1x_999) is \
+                     unavailable on this node",
+                    e.get_str()
                 )));
             }
             compress::Level::None if v != 0 => {
-                // `from_wire` mapped >12 → None. Reject.
                 return Err(SetupError::Config(format!(
-                    "Compression = {v} is unrecognized by this node"
+                    "Compression = {} is unrecognized by this node",
+                    e.get_str()
                 )));
             }
             _ => settings.compression = v,
@@ -768,19 +782,6 @@ pub(super) fn load_settings(
         .lookup("DhtBootstrap")
         .map(|e| e.get_str().to_owned())
         .collect();
-
-    if let Some(e) = config.lookup("Forwarding").next() {
-        match e.get_str().to_ascii_lowercase().as_str() {
-            "off" => settings.forwarding_mode = ForwardingMode::Off,
-            "internal" => settings.forwarding_mode = ForwardingMode::Internal,
-            "kernel" => settings.forwarding_mode = ForwardingMode::Kernel,
-            v => {
-                return Err(SetupError::Config(format!(
-                    "Forwarding = {v}: invalid forwarding mode"
-                )));
-            }
-        }
-    }
 
     Ok(settings)
 }
@@ -919,46 +920,17 @@ mod tests {
         c
     }
 
-    /// `Compression = 10` (LZO low) is rejected by [`load_settings`]
-    /// even though `compress::Level::LzoLo` is fully implemented via
-    /// vendored minilzo (both compress and decompress round-trip; see
-    /// `compress::tests::lzo_lo_compresses`). The gate predates the
-    /// minilzo vendoring and its comment ("LZO stubbed") is stale for
-    /// level 10. Only level 11 (`lzo1x_999_compress`) is actually
-    /// stubbed. The same stale gate in `gossip/keys.rs` drops a C
-    /// peer's `ANS_KEY` when they ask for level 10, so the per-tunnel
-    /// SPTPS handshake never completes — interop break with C tinc
-    /// configured `Compression = 10`.
     #[test]
-    #[ignore = "bug: LzoLo (level 10) works but settings/ANS_KEY gates reject it"]
-    fn bug_compression_10_lzo_lo_rejected_despite_working() {
-        // Precondition: LzoLo compress is functional (not stubbed).
-        let mut comp = compress::Compressor::new();
-        let src = vec![0x42u8; 256];
-        let out = comp
-            .compress(&src, compress::Level::LzoLo)
-            .expect("LzoLo compress must work (vendored minilzo)");
-        assert_eq!(
-            comp.decompress(&out, compress::Level::LzoLo, 256).unwrap(),
-            src
-        );
-
-        // Bug: load_settings rejects it anyway.
-        let dir = tmpdir("compress10");
-        let r = load_settings(&cfg(&["Compression = 10"]), &dir);
-        assert!(
-            r.is_ok(),
-            "Compression = 10 should be accepted: LzoLo compress/decompress \
-             both work via vendored minilzo; got {r:?}"
-        );
+    fn compression_lzo_lo_accepted_hi_rejected() {
+        let dir = Path::new("/nonexistent");
+        let s = load_settings(&cfg(&["Compression = 10"]), dir)
+            .expect("LzoLo round-trips via vendored minilzo");
+        assert_eq!(s.compression, 10);
+        assert!(load_settings(&cfg(&["Compression = 11"]), dir).is_err());
     }
 
-    /// `Compression = -1`: `get_int` yields `-1`, `u8::try_from(-1)`
-    /// falls back to `255`, and the diagnostic reports the *clamped*
-    /// value, not what the operator wrote. The error message lies.
     #[test]
-    #[ignore = "bug: negative Compression reported as '255' in error message"]
-    fn bug_compression_negative_error_message() {
+    fn compression_out_of_range_error_quotes_input() {
         let err = load_settings(&cfg(&["Compression = -1"]), Path::new("/nonexistent"))
             .expect_err("negative compression should be rejected");
         let SetupError::Config(msg) = err else {
@@ -974,13 +946,8 @@ mod tests {
         );
     }
 
-    /// C tinc reads `Forwarding` in `setup_myself_reloadable`
-    /// (`net_setup.c:426`), so a SIGHUP picks up `Forwarding = off`.
-    /// The Rust port parses it only in `load_settings` (setup-time),
-    /// so `apply_reloadable_settings` silently ignores the change.
     #[test]
-    #[ignore = "bug: Forwarding not applied on reload; C tinc reloads it"]
-    fn bug_forwarding_not_reloadable() {
+    fn forwarding_is_reloadable() {
         let mut s = DaemonSettings::default();
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
         apply_reloadable_settings(&cfg(&["Forwarding = off"]), &mut s);
@@ -991,20 +958,20 @@ mod tests {
         );
     }
 
-    /// C tinc: `if(pingtimeout < 1 || pingtimeout > pinginterval)
-    /// pingtimeout = pinginterval;` (`net_setup.c:1251`). So
-    /// `PingTimeout = 0` becomes `pinginterval` (default 60). Rust
-    /// `clamp(1, pinginterval)` yields 1 instead — a 60× tighter
-    /// liveness deadline than the C daemon under the same config.
     #[test]
-    #[ignore = "bug: PingTimeout=0 clamps to 1; C tinc clamps to pinginterval"]
-    fn bug_pingtimeout_zero_divergence() {
+    fn pingtimeout_out_of_range_snaps_to_pinginterval() {
         let mut s = DaemonSettings::default();
         apply_reloadable_settings(&cfg(&["PingTimeout = 0"]), &mut s);
         assert_eq!(
             s.pingtimeout, s.pinginterval,
             "C tinc snaps out-of-range PingTimeout to pinginterval, not 1"
         );
+        let mut s = DaemonSettings::default();
+        apply_reloadable_settings(&cfg(&["PingInterval = 10", "PingTimeout = 30"]), &mut s);
+        assert_eq!(s.pingtimeout, 10);
+        let mut s = DaemonSettings::default();
+        apply_reloadable_settings(&cfg(&["PingTimeout = 3"]), &mut s);
+        assert_eq!(s.pingtimeout, 3);
     }
 
     #[test]
