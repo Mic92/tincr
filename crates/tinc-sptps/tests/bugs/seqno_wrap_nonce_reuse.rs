@@ -54,10 +54,10 @@ fn rekey_due_at_soft_threshold() {
     alice.seal_data_into(0, b"x", &mut tx, 0).unwrap();
 }
 
-/// After an in-band datagram rekey, the sender's wire seqno restarts
-/// at 0 and the receiver's replay window accepts it.
+/// In-band datagram rekey: wire seqno stays monotone, `out_key_base`
+/// rebases so the per-key seal counter starts fresh.
 #[test]
-fn inband_datagram_rekey_resets_seqno_and_replay() {
+fn inband_datagram_rekey_rebases_key_counter() {
     let mut rng = SeedRng(0x5EED);
     let (mut alice, mut bob) = handshake_pair(Framing::Datagram, b"rekey-reset");
 
@@ -76,10 +76,11 @@ fn inband_datagram_rekey_resets_seqno_and_replay() {
     bob.receive(&ack_a, &mut rng).unwrap();
     alice.receive(&ack_b, &mut rng).unwrap();
 
-    assert_eq!(alice.out_key_base(), 0);
+    assert!(alice.out_key_base() > 0);
+    assert_eq!(alice.sealed_count(), 0);
     let mut tx = Vec::new();
     alice.seal_data_into(0, b"post", &mut tx, 0).unwrap();
-    assert_eq!(u32::from_be_bytes(tx[0..4].try_into().unwrap()), 0);
+    assert!(u32::from_be_bytes(tx[0..4].try_into().unwrap()) > 0);
     let mut rx = Vec::new();
     let ty = bob.open_data_into(&tx, &mut rx, 0).unwrap();
     assert_eq!(ty, 0);

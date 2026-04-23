@@ -118,25 +118,10 @@ fn dgram_rekey(alice: &mut Sptps, bob: &mut CSptps<'_>, rng: &mut SeedRng) {
 
 // ────────────────────────────────────────────────────────────────────
 
-/// In-band rekey on a **datagram** session, Rust ↔ C.
-///
-/// `state.rs::receive_sig` resets `outseqno` to 0 on datagram rekey
-/// ("fresh seqno space so the wire-u32 can never wrap"); `receive_ack`
-/// resets the replay window. C `sptps.c` does **neither** — `outseqno`
-/// and `inseqno` are session-monotone.
-///
-/// After the rekey completes, Rust emits app records at wire-seqno
-/// 0,1,2,… . The C side's `sptps_check_seqno` still has `inseqno` ≈ 5
-/// from the handshake traffic, so seqno 0 is rejected as "late or
-/// replayed". With pre-rekey app traffic the gap is wider and the
-/// reject is permanent (`seqno < inseqno - replaywin*8`).
-///
-/// This is the path C tincd actually exercises: `protocol_key.c`'s
-/// `send_key_changed()` calls `sptps_force_kex(&n->sptps)` on every
-/// reachable SPTPS node — those are datagram sessions. A Rust peer
-/// answering that rekey will black-hole its own outbound traffic.
+/// Datagram in-band rekey, Rust→C: wire seqno must stay monotone so
+/// C's `sptps_check_seqno` doesn't reject post-rekey traffic as replay.
+/// Exercised by C tincd via `send_key_changed()` → `sptps_force_kex`.
 #[test]
-#[ignore = "bug: datagram in-band rekey resets seqno/replay; C tinc keeps them monotone → C rejects post-rekey Rust→C traffic as replayed"]
 fn datagram_rekey_rust_to_c_post_rekey_traffic() {
     let _g = serial_guard();
     let (mut alice, mut bob, mut rng) = handshake_dgram_rust_init_c_resp();
@@ -156,19 +141,14 @@ fn datagram_rekey_rust_to_c_post_rekey_traffic() {
 
     dgram_rekey(&mut alice, &mut bob, &mut rng);
 
-    // Post-rekey: Rust sends at seqno 0. C must accept it.
     let ct = wire1(alice.send_record(0, b"after rekey").unwrap());
-    assert_eq!(
-        u32::from_be_bytes(ct[0..4].try_into().unwrap()),
-        0,
-        "Rust did not reset outseqno (test premise broken)"
+    let seqno = u32::from_be_bytes(ct[0..4].try_into().unwrap());
+    assert!(
+        seqno >= 8,
+        "Rust outseqno not monotone across rekey: {seqno}"
     );
     let (n, e) = bob.receive(&ct);
-    assert_eq!(
-        n,
-        ct.len(),
-        "C dropped post-rekey datagram (sptps_check_seqno rejected seqno 0)"
-    );
+    assert_eq!(n, ct.len(), "C dropped post-rekey datagram");
     assert_eq!(
         evs2outs(e),
         vec![Output::Record {
@@ -179,23 +159,14 @@ fn datagram_rekey_rust_to_c_post_rekey_traffic() {
     );
 }
 
-/// Mirror direction: after datagram rekey, C → Rust traffic.
-///
-/// C keeps its `outseqno` monotone, so the first post-rekey record
-/// arrives at wire-seqno ≈ 13 (2 handshake + 8 app + 3 rekey records).
-/// Rust's `receive_ack` reset the replay window to `inseqno = 0`, so
-/// seqno 13 is "far future" (`>= 0 + win*8` is false for win=16, but
-/// the gap-mark loop runs 0..13). With more pre-rekey traffic the
-/// seqno lands ≥ 128 and Rust's far-future drop fires for the first
-/// `replaywin/4 = 4` packets.
+/// Datagram in-band rekey, C→Rust: replay window must stay monotone
+/// so C's first post-rekey packet isn't dropped as far-future.
 #[test]
-#[ignore = "bug: datagram in-band rekey resets replay window; C tinc keeps outseqno monotone → Rust drops first post-rekey C→Rust packets as far-future"]
 fn datagram_rekey_c_to_rust_post_rekey_traffic() {
     let _g = serial_guard();
     let (mut alice, mut bob, mut rng) = handshake_dgram_rust_init_c_resp();
 
-    // Push C's outseqno past replaywin*8 = 128 so Rust's reset window
-    // sees the first post-rekey packet as far-future, not just a gap.
+    // Push C's outseqno past replaywin*8 = 128 (far-future threshold).
     for i in 0u8..200 {
         let ct = wire1(evs2outs(bob.send_record(0, &[i])));
         let (_, o) = alice.receive(&ct, &mut rng).unwrap();
@@ -210,7 +181,6 @@ fn datagram_rekey_c_to_rust_post_rekey_traffic() {
 
     dgram_rekey(&mut alice, &mut bob, &mut rng);
 
-    // Post-rekey: C sends at seqno ≈ 205. Rust must accept it.
     let ct = wire1(evs2outs(bob.send_record(0, b"from c after rekey")));
     let seqno = u32::from_be_bytes(ct[0..4].try_into().unwrap());
     assert!(seqno > 128, "C outseqno should be monotone, got {seqno}");

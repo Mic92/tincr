@@ -1292,21 +1292,13 @@ impl Sptps {
             return Err(SptpsError::BadAck);
         }
         let key = self.key.take().expect("receive_ack with no key material");
-        let was_rekey = self.incipher.is_some();
         // Initiator decrypts with key0, responder with key1.
         // (Mirror of the outcipher assignment in receive_sig.)
         self.incipher = Some(SptpsCipher::new(
             self.aead,
             key_half(&*key, self.role.is_initiator(), false),
         ));
-        // Datagram in-band rekey: fresh replay window so the peer's
-        // reset-to-0 wire seqno (`receive_sig`) is accepted. New Arc,
-        // not in-place: shards hold the old Arc paired with old inkey.
-        if was_rekey && self.framing == Framing::Datagram {
-            let win = self.replay_mut().late.len();
-            self.replay = Arc::new(Mutex::new(ReplayWindow::new(win)));
-        }
-        // `key` Zeroizes on drop here.
+        // Replay window kept across rekey: C seqno is session-monotone.
         Ok(())
     }
 
@@ -1450,18 +1442,10 @@ impl Sptps {
             self.aead,
             key_half(&**key, self.role.is_initiator(), true),
         ));
-        // Datagram in-band rekey: fresh seqno space so the wire-u32
-        // can never wrap across rekeys. New Arc, not `store(0)`:
-        // shards hold the old Arc paired with the old outkey, and an
-        // in-place reset would hand them nonce 0 under that key.
-        // Stream keeps the monotone counter for C-tinc wire parity
-        // (`tests/vs_c.rs::rust_vs_c_rekey`).
-        if was_rekey && self.framing == Framing::Datagram {
-            self.outseqno = Arc::new(AtomicU64::new(0));
-            self.out_key_base = 0;
-        } else {
-            self.out_key_base = self.outseqno.load(Ordering::Relaxed);
-        }
+        // Wire seqno stays session-monotone (C-tinc parity); rebase
+        // the per-key seal limit. `alloc_seqnos`'s `< SEAL_KEY_LIMIT
+        // < 2^32` gate keeps every nonce in one epoch distinct mod 2^32.
+        self.out_key_base = self.outseqno.load(Ordering::Relaxed);
 
         Ok(was_rekey)
     }
