@@ -594,7 +594,8 @@ impl Graph {
                 let indirect = n_indirect || (e.options & OPTION_INDIRECT) != 0;
 
                 let cand_hops = n_distance + 1;
-                let cand_wdist = n_wdist.wrapping_add(e.weight);
+                // Peer-supplied weight: saturate so MAX hops can't wrap negative and win the tie-break.
+                let cand_wdist = n_wdist.saturating_add(e.weight);
                 let cand_nexthop = if n_nexthop == myself { e.to } else { n_nexthop };
 
                 // Stickiness bookkeeping: record the cheapest wdist of

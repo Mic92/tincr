@@ -332,6 +332,8 @@ impl PmtuState {
     /// `udp_probe_h` reply branch. Daemon already extracted type-2
     /// length. Daemon-side: address-cache, UDP-timeout reset.
     pub(crate) fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
+        // Type-2 `len` is peer-supplied; probes never exceed MTU. Clamp or minmtu overruns maxmtu.
+        let len = len.min(MTU);
         let mut out = Vec::new();
 
         // ── RTT measurement ──── :184-194 ──────────────────────
@@ -880,29 +882,11 @@ mod tests {
 
     // ─── phase helpers ─────────────────────────────────────────
 
-    /// Peer-controlled type-2 reply length field is trusted verbatim
-    /// in `on_probe_reply`. A malicious (or buggy) peer that sends a
-    /// PROBE reply with bytes[1..3] = 0xffff drives `minmtu` to 65535
-    /// while `maxmtu` is capped to `MTU` = 1518. The struct is left
-    /// with `minmtu > maxmtu`, violating the binary-search invariant.
-    ///
-    /// Worse: `TunnelState::minmtu()` returns this 65535 directly,
-    /// and `tx_control.rs` publishes it to `TunnelHandles::minmtu`,
-    /// so the fast-path eligibility gate (`probe.rs`: `body_len >
-    /// minmtu`) will accept packets up to 64 KiB and hand them to
-    /// `sendto()` → EMSGSIZE / kernel-level fragmentation / blackhole.
-    ///
-    /// `on_meta_ack` already clamps peer-supplied len to `MTU`;
-    /// `on_probe_reply` forgot the same clamp.
+    /// Peer-supplied type-2 length must not push `minmtu` past `maxmtu`/`MTU`.
     #[test]
-    #[ignore = "bug: on_probe_reply trusts peer-supplied type-2 length field unclamped"]
-    fn on_probe_reply_bogus_len_field_breaks_invariant() {
+    fn on_probe_reply_clamps_peer_supplied_len() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
-        // Peer claims they received 65535 bytes. In reality the
-        // type-2 reply is only 18 bytes on the wire (MIN_PROBE_SIZE);
-        // `udp_probe_h` reads the claim from body[1..3] and passes
-        // it here verbatim.
         let _ = s.on_probe_reply(u16::MAX, now);
         assert!(
             s.minmtu <= s.maxmtu,
