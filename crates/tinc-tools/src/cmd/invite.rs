@@ -176,16 +176,26 @@ pub fn invite(
         let _ = fs::remove_file(&key_path);
     }
 
-    // ENOENT → generate. read_private's Err covers both ENOENT and
-    // bad-PEM. Upstream distinguishes (bails on non-ENOENT); we lump
-    // them — corrupt-key → regenerate is more useful than bailing.
-    let (sk, key_is_new) = if let Ok(sk) = keypair::read_private(&key_path) {
-        (sk, false)
-    } else {
-        let sk = keypair::generate();
-        write_invitation_key(&key_path, &sk)?;
-        // We set the flag; the binary wrapper attempts the reload.
-        (sk, true)
+    // Load existing key, else generate. Corrupt/unreadable key with
+    // live invitations → hard error: rotating would invalidate every
+    // outstanding URL (each embeds key_hash). live_count==0 already
+    // unlinked the file above, so that path hits Err → generate.
+    let (sk, key_is_new) = match keypair::read_private(&key_path) {
+        Ok(sk) => (sk, false),
+        Err(e) if live_count > 0 => {
+            return Err(CmdError::BadInput(format!(
+                "Could not read invitation key: {e}\n  \
+                 {live_count} live invitation(s) depend on this key. \
+                 Restore {} or remove the invitations/ directory to start over.",
+                key_path.display()
+            )));
+        }
+        Err(_) => {
+            let sk = keypair::generate();
+            write_invitation_key(&key_path, &sk)?;
+            // We set the flag; the binary wrapper attempts the reload.
+            (sk, true)
+        }
     };
 
     // ─── The crypto kernel (KAT-tested in tinc-crypto)
@@ -831,16 +841,9 @@ mod tests {
         assert!(chunk2.contains("Ed25519PublicKey = "));
     }
 
-    /// Bug repro: a corrupt invitation key file causes `invite()` to
-    /// silently regenerate the key even when live invitations exist,
-    /// which invalidates every outstanding invitation URL (their
-    /// `key_hash` no longer matches the on-disk key, and the daemon
-    /// will compute a different `cookie_filename`).
-    ///
-    /// C tinc bails with "Could not read private key" in this case
-    /// (`invitation.c:486-496`); we diverge and clobber.
+    /// Corrupt key + live invitations → refuse, don't rotate (would
+    /// brick every outstanding URL). C parity.
     #[test]
-    #[ignore = "bug: invite() regenerates invitation key on corrupt PEM even with live invitations, invalidating outstanding URLs"]
     fn corrupt_key_with_live_invites_not_clobbered() {
         let cd = ConfDir::bare();
         let paths = cd.paths().clone();
@@ -849,34 +852,25 @@ mod tests {
         // First invite: creates key + invitation file for bob.
         let r1 = invite(&paths, None, "bob", SystemTime::now()).unwrap();
         assert!(r1.key_is_new);
-        let slug1 = r1.url.rsplit('/').next().unwrap();
-        let (hash1, _cookie1) = tinc_crypto::invite::parse_slug(slug1).unwrap();
 
-        // Corrupt the invitation key file (simulate truncation / bit-rot).
         let key_path = paths.invitation_key();
         fs::write(&key_path, "garbage, not PEM\n").unwrap();
 
-        // Second invite while bob's invitation is still live.
-        // Expected (C parity): error out, leave bob's URL valid.
-        // Observed: silently generates a fresh key.
-        let r2 = invite(&paths, None, "carol", SystemTime::now());
+        let err = invite(&paths, None, "carol", SystemTime::now()).unwrap_err();
+        let CmdError::BadInput(msg) = err else {
+            panic!("wrong variant: {err:?}")
+        };
+        assert!(msg.contains("invitation key"), "{msg}");
+        assert!(msg.contains("live invitation"), "{msg}");
 
-        // Either it refused (preferred), or if it succeeded the key on
-        // disk must still validate bob's URL. Both branches should hold;
-        // today the Ok branch fails the key_is_new assertion.
-        if let Ok(r2) = r2 {
-            assert!(
-                !r2.key_is_new,
-                "must not rotate invitation key while live invitations exist"
-            );
-        }
-        let sk = keypair::read_private(&key_path)
-            .expect("key file must be readable after invite() returns");
-        assert_eq!(
-            hash1,
-            tinc_crypto::invite::key_hash(sk.public_key()),
-            "bob's outstanding invitation URL must still match on-disk key"
-        );
+        // Nothing on disk touched.
+        assert_eq!(fs::read_to_string(&key_path).unwrap(), "garbage, not PEM\n");
+        let invites: Vec<_> = fs::read_dir(paths.invitations_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.len() == SLUG_PART_LEN)
+            .collect();
+        assert_eq!(invites.len(), 1);
     }
 
     /// Second invite reuses the key (not freshly generated). The
