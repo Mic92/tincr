@@ -99,6 +99,7 @@ const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // mirrors C tincd's flat `do_*` flag globals
 struct Args {
     confbase: PathBuf,
     pidfile: PathBuf,
@@ -112,6 +113,9 @@ struct Args {
     do_detach: bool,
     /// `do_mlock`. `-L` sets it.
     do_mlock: bool,
+    /// `--allow-coredump` / `TINCR_ALLOW_COREDUMP=1`. Opt out of
+    /// [`harden_process`] so `coredumpctl gdb` works.
+    allow_coredump: bool,
     /// `switchuser`. `-U USER`. None → don't drop.
     switchuser: Option<String>,
     /// `do_chroot`. `-R`. Stored, applied in
@@ -216,6 +220,7 @@ where
 
     let mut do_detach = true;
     let mut do_mlock = false;
+    let mut allow_coredump = false;
     let mut switchuser = None;
     let mut do_chroot = false;
     let mut debug_level: Option<u32> = None;
@@ -264,6 +269,10 @@ where
             // built without HAVE_MLOCKALL; we always have it on Unix.
             "-L" | "--mlock" => {
                 do_mlock = true;
+            }
+            // No C equivalent. Dev opt-out for `harden_process`.
+            "--allow-coredump" => {
+                allow_coredump = true;
             }
             // `case OPT_DEBUG`. Allows `-d` (increment), `-dN`
             // (glued), `-d N` (separate; uses optind peek). All three
@@ -384,6 +393,7 @@ where
                 println!("  -D, --no-detach         Don't fork and detach.");
                 println!("  -d, --debug[=LEVEL]     Increase debug level or set to LEVEL.");
                 println!("  -L, --mlock             Lock tinc into main memory.");
+                println!("      --allow-coredump    Don't disable core dumps (debugging).");
                 println!(
                     "      --logfile[=FILE]    Write log to FILE (default: {LOCALSTATEDIR}/log/tinc.NETNAME.log)."
                 );
@@ -534,6 +544,11 @@ where
         PathBuf::from(std::ffi::OsString::from_vec(s))
     });
 
+    // Env alternative for wrappers that can't inject argv.
+    if std::env::var_os("TINCR_ALLOW_COREDUMP").is_some() {
+        allow_coredump = true;
+    }
+
     Ok(Args {
         confbase,
         pidfile,
@@ -541,6 +556,7 @@ where
         cmdline_conf,
         do_detach,
         do_mlock,
+        allow_coredump,
         switchuser,
         do_chroot,
         debug_level,
@@ -1013,6 +1029,27 @@ fn check_socket_activation(
         .filter(|&n| n > 0)
 }
 
+/// Disable core dumps before any key material is loaded: a core file
+/// would contain the Ed25519 private key and every live SPTPS key.
+/// `RLIMIT_CORE=0` (portable) plus Linux `PR_SET_DUMPABLE=0` (also
+/// blocks same-uid ptrace and systemd-coredump pipe handlers, which
+/// ignore `RLIMIT_CORE`). macOS `PT_DENY_ATTACH` skipped: breaks
+/// `lldb -p`, and `RLIMIT_CORE=0` already covers on-disk leakage.
+/// Best-effort; warn-and-continue on failure.
+fn harden_process(allow_coredump: bool) {
+    if allow_coredump {
+        return;
+    }
+    if let Err(e) = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0) {
+        // pre-init_logging → eprintln
+        eprintln!("tincd: setrlimit(RLIMIT_CORE, 0): {e} (continuing)");
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(e) = nix::sys::prctl::set_dumpable(false) {
+        eprintln!("tincd: prctl(PR_SET_DUMPABLE, 0): {e} (continuing)");
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args_os().skip(1)) {
         Ok(a) => a,
@@ -1022,6 +1059,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // ─── anti-coredump. Before any key load (Daemon::setup below).
+    harden_process(args.allow_coredump);
 
     // `chdir(confbase)`. Hard-fail (`return 1`).
     // User-visible: tinc-up/tinc-down/host-* scripts inherit this

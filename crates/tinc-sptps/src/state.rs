@@ -186,7 +186,7 @@ pub enum Framing {
 ///
 /// `sptps.c` doesn't have this type; it fires callbacks instead. The set
 /// of variants is exactly the set of callback signatures.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Output {
     /// Bytes to put on the wire. Fully framed: header + encrypted body +
     /// tag. The `record_type` is *advisory* — it's what `send_data` was
@@ -208,6 +208,26 @@ pub enum Output {
     /// Handshake completed. C signals this with `receive_record(128, NULL, 0)`.
     /// We give it a name because every consumer special-cases it anyway.
     HandshakeDone,
+}
+
+// Manual Debug: `bytes` is decrypted payload / KEX material; print len
+// only so `{:?}` in logs or assert_eq! failures doesn't leak it.
+impl core::fmt::Debug for Output {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Wire { record_type, bytes } => f
+                .debug_struct("Wire")
+                .field("record_type", record_type)
+                .field("len", &bytes.len())
+                .finish(),
+            Self::Record { record_type, bytes } => f
+                .debug_struct("Record")
+                .field("record_type", record_type)
+                .field("len", &bytes.len())
+                .finish(),
+            Self::HandshakeDone => f.write_str("HandshakeDone"),
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1602,5 +1622,28 @@ impl Sptps {
         self.dispatch_record(ty, &body, self.incipher.is_some(), rng, out)?;
 
         Ok(consumed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Output;
+
+    #[test]
+    fn output_debug_redacts_payload_bytes() {
+        let r = Output::Record {
+            record_type: 0,
+            bytes: vec![1, 2, 3],
+        };
+        let s = format!("{r:?}");
+        assert!(!s.contains("1, 2, 3"), "Debug leaked payload: {s}");
+        assert!(s.contains("len"), "Debug should show length: {s}");
+
+        let w = Output::Wire {
+            record_type: 128,
+            bytes: vec![0xde, 0xad],
+        };
+        let s = format!("{w:?}");
+        assert!(!s.contains("222") && !s.contains("173"));
     }
 }

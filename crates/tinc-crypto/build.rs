@@ -18,11 +18,16 @@ fn main() {
         _ => "asm/poly1305-armv8-elf.S",
     };
 
+    // Hardening flags match tincd/build.rs (minilzo). The .S ignores
+    // them; poly1305_glue.c (stack buffer + memcpy) benefits.
     cc::Build::new()
         .file(src)
         .file("asm/poly1305_glue.c")
         .include("asm")
         .flag("-fvisibility=hidden")
+        .flag_if_supported("-D_FORTIFY_SOURCE=2")
+        .flag_if_supported("-fstack-protector-strong")
+        .flag_if_supported("-fPIC")
         .compile("tinc_poly1305_armv8");
 
     println!("cargo::rustc-cfg=tinc_poly1305_asm");

@@ -41,6 +41,10 @@ pedantic = { level = "warn", priority = -1 }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Explicit, not default: tincd's catch_unwind around daemon.run() is
+# load-bearing for Daemon::Drop (tinc-down, pidfile unlink) and
+# sd_notify(STOPPING=1). `abort` would leave stale pidfile + TUN.
+panic = "unwind"
 
 # `--profile profiling` for `TINCD_PERF=1` runs. The default release
 # profile has codegen-units=1 + thin-LTO + no debuginfo: everything
