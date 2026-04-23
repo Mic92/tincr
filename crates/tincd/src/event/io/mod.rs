@@ -308,6 +308,53 @@ mod tests {
         Conn(u32),
     }
 
+    /// BUG (kqueue backend): `kqueue.rs` registers filters with
+    /// `EV_CLEAR` (edge-triggered), but the dispatch design in this
+    /// module — and `daemon.rs` — explicitly relies on level-
+    /// triggered semantics ("anything still actually ready re-fires
+    /// next turn", see `turn()` doc). On macOS/BSD a handler that
+    /// only partially drains a readable fd will NOT be re-woken; the
+    /// remaining data sits unread until a fresh edge arrives. On
+    /// Linux (epoll, level-triggered) this test passes.
+    #[test]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+    ))]
+    #[ignore = "bug: kqueue backend uses EV_CLEAR; partially-drained fd never re-fires"]
+    fn bug_kqueue_edge_trigger_loses_readiness() {
+        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let mut ev = EventLoop::new().unwrap();
+        let id = ev.add(b.as_fd(), Io::Read, What::Conn(1)).unwrap();
+
+        // 8 bytes become available in one edge.
+        a.write_all(b"abcdefgh").unwrap();
+
+        let mut out = Vec::new();
+        ev.turn(Some(Duration::from_millis(100)), &mut out).unwrap();
+        assert_eq!(out, vec![(What::Conn(1), Ready::Read)]);
+
+        // Handler reads only part of the data (4 of 8 bytes).
+        let mut buf = [0u8; 4];
+        b.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"abcd");
+
+        // 4 bytes are still pending. Level-triggered contract says
+        // the fd is still readable and must re-fire on the next turn.
+        ev.turn(Some(Duration::from_millis(50)), &mut out).unwrap();
+        assert_eq!(
+            out,
+            vec![(What::Conn(1), Ready::Read)],
+            "fd still has 4 unread bytes but kqueue EV_CLEAR did not re-fire"
+        );
+
+        ev.del(id);
+        drop((a, b));
+    }
+
     /// `pipe()` pair — read end registered for READABLE.
     fn mkpipe() -> (std::fs::File, std::fs::File) {
         let (r, w) = nix::unistd::pipe().expect("pipe()");

@@ -651,6 +651,45 @@ mod tests {
         );
     }
 
+    /// Bug hunt: a host-file line that *exactly equals* the export
+    /// separator (`#` + 63 dashes + `#`) survives `export_one`
+    /// (it's not a `Name =` line) but is then silently swallowed by
+    /// `import` (`if line == SEPARATOR { continue }`). Round-trip
+    /// is therefore lossy for this byte sequence.
+    ///
+    /// The line is a `#`-comment as far as the config parser is
+    /// concerned, so the *semantic* config survives — but the file
+    /// contents do not, which breaks the "export | import recreates
+    /// the file" contract documented above and in `roundtrip()`.
+    #[test]
+    #[ignore = "bug: import drops a host-file line equal to SEPARATOR, breaking export→import byte round-trip"]
+    fn roundtrip_separator_line_in_body() {
+        // A host file that happens to contain the 65-char separator
+        // string as one of its (comment) lines.
+        let original = format!("Address = 192.0.2.1\n{SEPARATOR}\nSubnet = 10.0.1.0/24\n");
+
+        let export_cd = setup("alice", &original);
+        let mut blob = Vec::new();
+        export(export_cd.paths(), &mut blob).unwrap();
+
+        // Export passed the line through (it's not `Name = …`).
+        let blob_s = std::str::from_utf8(&blob).unwrap();
+        assert!(
+            blob_s.contains(SEPARATOR),
+            "export should have preserved the separator-shaped comment line"
+        );
+
+        let import_cd = bare();
+        let count = import(import_cd.paths(), blob.as_slice(), false).unwrap();
+        assert_eq!(count, 1);
+
+        let imported = fs::read_to_string(import_cd.paths().host_file("alice")).unwrap();
+        assert_eq!(
+            imported, original,
+            "export→import must round-trip; the separator-shaped line was dropped"
+        );
+    }
+
     #[test]
     fn get_my_name_reads_config() {
         let cd = setup("alice", "");

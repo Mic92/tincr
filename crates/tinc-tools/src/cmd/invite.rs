@@ -831,6 +831,54 @@ mod tests {
         assert!(chunk2.contains("Ed25519PublicKey = "));
     }
 
+    /// Bug repro: a corrupt invitation key file causes `invite()` to
+    /// silently regenerate the key even when live invitations exist,
+    /// which invalidates every outstanding invitation URL (their
+    /// `key_hash` no longer matches the on-disk key, and the daemon
+    /// will compute a different `cookie_filename`).
+    ///
+    /// C tinc bails with "Could not read private key" in this case
+    /// (`invitation.c:486-496`); we diverge and clobber.
+    #[test]
+    #[ignore = "bug: invite() regenerates invitation key on corrupt PEM even with live invitations, invalidating outstanding URLs"]
+    fn corrupt_key_with_live_invites_not_clobbered() {
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        init_with_address(&paths, "alice", "myhost");
+
+        // First invite: creates key + invitation file for bob.
+        let r1 = invite(&paths, None, "bob", SystemTime::now()).unwrap();
+        assert!(r1.key_is_new);
+        let slug1 = r1.url.rsplit('/').next().unwrap();
+        let (hash1, _cookie1) = tinc_crypto::invite::parse_slug(slug1).unwrap();
+
+        // Corrupt the invitation key file (simulate truncation / bit-rot).
+        let key_path = paths.invitation_key();
+        fs::write(&key_path, "garbage, not PEM\n").unwrap();
+
+        // Second invite while bob's invitation is still live.
+        // Expected (C parity): error out, leave bob's URL valid.
+        // Observed: silently generates a fresh key.
+        let r2 = invite(&paths, None, "carol", SystemTime::now());
+
+        // Either it refused (preferred), or if it succeeded the key on
+        // disk must still validate bob's URL. Both branches should hold;
+        // today the Ok branch fails the key_is_new assertion.
+        if let Ok(r2) = r2 {
+            assert!(
+                !r2.key_is_new,
+                "must not rotate invitation key while live invitations exist"
+            );
+        }
+        let sk = keypair::read_private(&key_path)
+            .expect("key file must be readable after invite() returns");
+        assert_eq!(
+            hash1,
+            tinc_crypto::invite::key_hash(sk.public_key()),
+            "bob's outstanding invitation URL must still match on-disk key"
+        );
+    }
+
     /// Second invite reuses the key (not freshly generated). The
     /// "rotate on empty" logic only fires when count == 0.
     #[test]

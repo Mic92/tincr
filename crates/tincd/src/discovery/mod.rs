@@ -851,6 +851,70 @@ mod tests {
         assert!(parsed.direct.contains(&mapped));
     }
 
+    /// Bug repro: an address learned while a publish is already inflight
+    /// (or within the 5 s backoff window) is silently dropped because
+    /// `tick()` clears `reflexive_dirty` unconditionally even when it did
+    /// NOT enqueue a publish. The new address then waits the full 5-min
+    /// `REPUBLISH_INTERVAL` before reaching the DHT — the exact failure
+    /// mode `FIRST_PUBLISH_GRACE` was added to prevent.
+    #[test]
+    #[ignore = "bug: reflexive_dirty cleared without enqueue → new addr delayed 5 min"]
+    fn testnet_dirty_flag_lost_while_publish_gated() {
+        use mainline::Testnet;
+        let testnet = Testnet::new(10).expect("testnet");
+        let mut d = Discovery::with_dht(
+            mainline::Dht::builder()
+                .bootstrap(&testnet.bootstrap)
+                .build()
+                .unwrap(),
+            SigningKey::from_seed(&[0x21; 32]),
+            655,
+            None,
+        );
+
+        let t0 = Instant::now();
+        // First dialable addr → dirty → tick enqueues a publish.
+        assert!(d.set_portmapped_tcp(Some("203.0.113.1:655".parse().unwrap())));
+        let _ = d.tick(t0);
+
+        // Second addr arrives immediately after (portmapper v6 pinhole
+        // landing one tick later is the realistic case).
+        assert!(d.set_portmapped_tcp6(Some("[2001:db8::7]:655".parse().unwrap())));
+        // Same `now`: either `publish_inflight` is still true, or the
+        // backoff gate (`0 >= 5 s` → false) blocks. In both cases the
+        // publish is NOT enqueued, yet `reflexive_dirty` is cleared.
+        let _ = d.tick(t0);
+
+        // Poll for ~8 s of wall-clock (well past the 5 s backoff): the
+        // first publish (`tcp=` only) should surface, and — if the dirty
+        // flag had been preserved — a second one carrying `tcp6=` would
+        // follow once the gate opens.
+        let mut published = Vec::new();
+        for _ in 0..40 {
+            for e in d.tick(Instant::now()).events {
+                if let DiscoveryEvent::Published { value, .. } = e {
+                    published.push(value);
+                }
+            }
+            if published.iter().any(|v| v.contains("tcp6=")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        assert!(
+            published.iter().any(|v| v.contains("tcp=203.0.113.1:655")),
+            "first publish never surfaced: {published:?}"
+        );
+        assert!(
+            published
+                .iter()
+                .any(|v| v.contains("tcp6=[2001:db8::7]:655")),
+            "tcp6 set while publish was gated; expected republish within seconds, \
+             got only {published:?} (dirty flag dropped → waits full 5-min interval)"
+        );
+    }
+
     #[test]
     fn testnet_publish_resolve_roundtrip_nosecret() {
         run_publish_resolve(None);

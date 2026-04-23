@@ -310,6 +310,35 @@ mod tests {
         assert!(out.contains(&What::Retry(2)));
     }
 
+    /// BUG: `del()` claims idempotency but unconditionally pushes the
+    /// slot index onto the freelist every time it is called. A double
+    /// `del` therefore leaves the same index on the freelist twice,
+    /// and the next two `add()` calls hand out the *same* `TimerId`
+    /// for two logically distinct timers. The second `add` silently
+    /// clobbers the first's `what`, and arming/deleting one affects
+    /// the other.
+    #[test]
+    #[ignore = "bug: Timers::del double-pushes freelist; two adds alias same TimerId"]
+    fn bug_del_double_free_aliases_ids() {
+        let mut t = Timers::new();
+        let a = t.add(What::Retry(1));
+        t.del(a);
+        t.del(a); // documented as idempotent
+
+        let b = t.add(What::Retry(10));
+        let c = t.add(What::Retry(20));
+        // Two distinct logical timers must get distinct ids.
+        assert_ne!(b.0, c.0, "double-del caused freelist duplicate; ids alias");
+
+        // Consequence if the assert above were removed: arming `b`
+        // would fire `c`'s payload because the slot was overwritten.
+        t.set(b, Duration::from_millis(1));
+        sleep(Duration::from_millis(5));
+        let mut out = Vec::new();
+        t.tick(&mut out);
+        assert_eq!(out, vec![What::Retry(10)]);
+    }
+
     /// del is idempotent.
     #[test]
     fn del_idempotent() {

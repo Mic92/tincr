@@ -919,6 +919,94 @@ mod tests {
         c
     }
 
+    /// `Compression = 10` (LZO low) is rejected by [`load_settings`]
+    /// even though `compress::Level::LzoLo` is fully implemented via
+    /// vendored minilzo (both compress and decompress round-trip; see
+    /// `compress::tests::lzo_lo_compresses`). The gate predates the
+    /// minilzo vendoring and its comment ("LZO stubbed") is stale for
+    /// level 10. Only level 11 (`lzo1x_999_compress`) is actually
+    /// stubbed. The same stale gate in `gossip/keys.rs` drops a C
+    /// peer's `ANS_KEY` when they ask for level 10, so the per-tunnel
+    /// SPTPS handshake never completes — interop break with C tinc
+    /// configured `Compression = 10`.
+    #[test]
+    #[ignore = "bug: LzoLo (level 10) works but settings/ANS_KEY gates reject it"]
+    fn bug_compression_10_lzo_lo_rejected_despite_working() {
+        // Precondition: LzoLo compress is functional (not stubbed).
+        let mut comp = compress::Compressor::new();
+        let src = vec![0x42u8; 256];
+        let out = comp
+            .compress(&src, compress::Level::LzoLo)
+            .expect("LzoLo compress must work (vendored minilzo)");
+        assert_eq!(
+            comp.decompress(&out, compress::Level::LzoLo, 256).unwrap(),
+            src
+        );
+
+        // Bug: load_settings rejects it anyway.
+        let dir = tmpdir("compress10");
+        let r = load_settings(&cfg(&["Compression = 10"]), &dir);
+        assert!(
+            r.is_ok(),
+            "Compression = 10 should be accepted: LzoLo compress/decompress \
+             both work via vendored minilzo; got {r:?}"
+        );
+    }
+
+    /// `Compression = -1`: `get_int` yields `-1`, `u8::try_from(-1)`
+    /// falls back to `255`, and the diagnostic reports the *clamped*
+    /// value, not what the operator wrote. The error message lies.
+    #[test]
+    #[ignore = "bug: negative Compression reported as '255' in error message"]
+    fn bug_compression_negative_error_message() {
+        let err = load_settings(&cfg(&["Compression = -1"]), Path::new("/nonexistent"))
+            .expect_err("negative compression should be rejected");
+        let SetupError::Config(msg) = err else {
+            panic!("expected Config error, got {err:?}")
+        };
+        assert!(
+            msg.contains("-1"),
+            "error message should quote the user's value, got: {msg}"
+        );
+        assert!(
+            !msg.contains("255"),
+            "error message leaks the internal u8 sentinel: {msg}"
+        );
+    }
+
+    /// C tinc reads `Forwarding` in `setup_myself_reloadable`
+    /// (`net_setup.c:426`), so a SIGHUP picks up `Forwarding = off`.
+    /// The Rust port parses it only in `load_settings` (setup-time),
+    /// so `apply_reloadable_settings` silently ignores the change.
+    #[test]
+    #[ignore = "bug: Forwarding not applied on reload; C tinc reloads it"]
+    fn bug_forwarding_not_reloadable() {
+        let mut s = DaemonSettings::default();
+        assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
+        apply_reloadable_settings(&cfg(&["Forwarding = off"]), &mut s);
+        assert_eq!(
+            s.forwarding_mode,
+            ForwardingMode::Off,
+            "SIGHUP with Forwarding=off should take effect (C tinc parity)"
+        );
+    }
+
+    /// C tinc: `if(pingtimeout < 1 || pingtimeout > pinginterval)
+    /// pingtimeout = pinginterval;` (`net_setup.c:1251`). So
+    /// `PingTimeout = 0` becomes `pinginterval` (default 60). Rust
+    /// `clamp(1, pinginterval)` yields 1 instead — a 60× tighter
+    /// liveness deadline than the C daemon under the same config.
+    #[test]
+    #[ignore = "bug: PingTimeout=0 clamps to 1; C tinc clamps to pinginterval"]
+    fn bug_pingtimeout_zero_divergence() {
+        let mut s = DaemonSettings::default();
+        apply_reloadable_settings(&cfg(&["PingTimeout = 0"]), &mut s);
+        assert_eq!(
+            s.pingtimeout, s.pinginterval,
+            "C tinc snaps out-of-range PingTimeout to pinginterval, not 1"
+        );
+    }
+
     #[test]
     fn keyexpire_clamped() {
         for (raw, want) in [("31536000", 3600), ("5", 5), ("1800", 1800)] {
