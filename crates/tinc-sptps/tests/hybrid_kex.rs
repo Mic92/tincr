@@ -188,8 +188,8 @@ fn tampered_ct_no_handshake_done() {
         panic!("expected confirm ACK")
     };
     assert_eq!(outs.len(), 1, "alice: no HandshakeDone on tampered ct");
-    assert_ne!(alice.incipher_key(), bob.outcipher_key());
-    assert_ne!(alice.outcipher_key(), bob.incipher_key());
+    // Keys hidden in Confirm; divergence proven by AEAD failure below.
+    assert!(alice.outcipher_key().is_none() && bob.outcipher_key().is_none());
 
     // Confirm round fails AEAD both sides → no HandshakeDone anywhere.
     assert_eq!(

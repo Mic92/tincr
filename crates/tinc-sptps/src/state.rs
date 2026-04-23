@@ -700,7 +700,7 @@ impl Sptps {
     /// a `u16` length header — the C silently truncates with a
     /// `uint16_t` cast and the receiver desyncs; we'd rather refuse).
     pub fn send_record(&mut self, record_type: u8, body: &[u8]) -> Result<Vec<Output>, SptpsError> {
-        if self.outcipher.is_none() || record_type >= REC_HANDSHAKE || self.needs_rekey() {
+        if !self.app_send_ready() || record_type >= REC_HANDSHAKE || self.needs_rekey() {
             return Err(SptpsError::InvalidState);
         }
         // Stream framing's `len:u16be` header can't carry more than this.
@@ -757,7 +757,7 @@ impl Sptps {
         if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
             return Err(SptpsError::InvalidState);
         }
-        if self.outcipher.is_none() {
+        if !self.app_send_ready() {
             return Err(SptpsError::InvalidState);
         }
         let seqno = self.alloc_seqnos(1).ok_or(SptpsError::InvalidState)?;
@@ -845,6 +845,13 @@ impl Sptps {
         self.sealed_count() >= SEAL_KEY_LIMIT
     }
 
+    /// App-data send permitted. `Confirm` has ciphers but no
+    /// `HandshakeDone` yet; sealing there would bypass key-confirm.
+    /// Classical never enters `Confirm` (C-tinc unchanged).
+    fn app_send_ready(&self) -> bool {
+        self.outcipher.is_some() && self.state != State::Confirm
+    }
+
     /// Clone the outgoing seqno counter for shard hand-off. The shard
     /// `fetch_add(1, Relaxed)`s from its own thread and pairs the
     /// result with [`seal_with_seqno`] (or its own `ChaPoly` built
@@ -899,6 +906,7 @@ impl Sptps {
     pub fn outcipher_key(&self) -> Option<Zeroizing<[u8; CIPHER_KEY_LEN]>> {
         self.outcipher
             .as_ref()
+            .filter(|_| self.state != State::Confirm)
             .map(|c| Zeroizing::new(*c.key_bytes()))
     }
 
@@ -910,6 +918,7 @@ impl Sptps {
     pub fn incipher_key(&self) -> Option<Zeroizing<[u8; CIPHER_KEY_LEN]>> {
         self.incipher
             .as_ref()
+            .filter(|_| self.state != State::Confirm)
             .map(|c| Zeroizing::new(*c.key_bytes()))
     }
 
@@ -940,7 +949,10 @@ impl Sptps {
         out: &mut Vec<u8>,
         headroom: usize,
     ) -> Result<(), SptpsError> {
-        if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
+        if self.framing != Framing::Datagram
+            || record_type >= REC_HANDSHAKE
+            || self.state == State::Confirm
+        {
             return Err(SptpsError::InvalidState);
         }
         let Some(cipher) = self.outcipher.as_ref() else {
@@ -1054,7 +1066,7 @@ impl Sptps {
         out: &mut Vec<u8>,
         headroom: usize,
     ) -> Result<(u32, u8), SptpsError> {
-        if self.framing != Framing::Datagram {
+        if self.framing != Framing::Datagram || self.state == State::Confirm {
             return Err(SptpsError::InvalidState);
         }
         let Some(cipher) = self.incipher.as_ref() else {
@@ -1463,7 +1475,9 @@ impl Sptps {
     ) -> Result<(), SptpsError> {
         match ty {
             t if t < REC_HANDSHAKE => {
-                if !encrypted {
+                // `Confirm`: drop app data reordered ahead of the
+                // peer's ACK; no `Record` before `HandshakeDone`.
+                if !encrypted || self.state == State::Confirm {
                     return Err(SptpsError::BadRecord);
                 }
                 out.push(Output::Record {
