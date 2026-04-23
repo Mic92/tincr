@@ -42,11 +42,10 @@ pub(crate) struct Timers<W> {
     /// remove-mutate-reinsert is O(log n) — same as the C splay.
     by_deadline: BTreeMap<(Instant, u64), usize>,
 
-    /// Slot storage. Freed slots stay allocated (`what` is stale,
-    /// `at` is `None`); freelist tracks them. Same structure as
-    /// `slab` crate but hand-rolled — slab is +1 dep for 30 LOC,
-    /// and the dep audit says no.
-    slots: Vec<Slot<W>>,
+    /// Slot storage. `None` = freed (liveness bit for idempotent
+    /// `del`); freelist tracks those indices. Hand-rolled slab —
+    /// the `slab` crate is +1 dep for 30 LOC.
+    slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
 
     /// Monotonic tiebreak. Increments every `set`. `u64` won't wrap
@@ -80,11 +79,13 @@ impl<W: Copy> Timers<W> {
     /// Returns a stable handle. Unlike `IoId` this is NOT an epoll token
     /// — timers don't go through the poll fd.
     pub(crate) fn add(&mut self, what: W) -> TimerId {
+        let slot = Some(Slot { what, at: None });
         let idx = if let Some(idx) = self.free.pop() {
-            self.slots[idx] = Slot { what, at: None };
+            debug_assert!(self.slots[idx].is_none(), "freelist held live slot");
+            self.slots[idx] = slot;
             idx
         } else {
-            self.slots.push(Slot { what, at: None });
+            self.slots.push(slot);
             self.slots.len() - 1
         };
         TimerId(idx)
@@ -99,7 +100,7 @@ impl<W: Copy> Timers<W> {
     /// dereferences the caller's `timeout_t*`, which is UB if freed.
     /// We panic, which is louder.
     pub(crate) fn set(&mut self, id: TimerId, after: Duration) {
-        let slot = &mut self.slots[id.0];
+        let slot = self.slots[id.0].as_mut().expect("dangling TimerId");
         if let Some(old_key) = slot.at.take() {
             self.by_deadline.remove(&old_key);
         }
@@ -123,10 +124,10 @@ impl<W: Copy> Timers<W> {
     /// after this. (C nulls `cb` and zeroes `tv`; the `timeout_t`
     /// struct is caller-owned and lives on.)
     pub(crate) fn del(&mut self, id: TimerId) {
-        let Some(slot) = self.slots.get_mut(id.0) else {
-            return; // already del'd, freelist reused, then del'd again — idempotent
+        let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
+            return; // already del'd — idempotent
         };
-        if let Some(key) = slot.at.take() {
+        if let Some(key) = slot.at {
             self.by_deadline.remove(&key);
         }
         self.free.push(id.0);
@@ -165,7 +166,8 @@ impl<W: Copy> Timers<W> {
                 }
             };
             let idx = self.by_deadline.remove(&key).expect("just peeked");
-            let slot = &mut self.slots[idx];
+            // Invariant: anything in `by_deadline` has a live slot.
+            let slot = self.slots[idx].as_mut().expect("armed slot is live");
             // Disarm; auto-del NOT ported (see doc).
             slot.at = None;
             out.push(slot.what);
@@ -310,28 +312,20 @@ mod tests {
         assert!(out.contains(&What::Retry(2)));
     }
 
-    /// BUG: `del()` claims idempotency but unconditionally pushes the
-    /// slot index onto the freelist every time it is called. A double
-    /// `del` therefore leaves the same index on the freelist twice,
-    /// and the next two `add()` calls hand out the *same* `TimerId`
-    /// for two logically distinct timers. The second `add` silently
-    /// clobbers the first's `what`, and arming/deleting one affects
-    /// the other.
+    /// Double `del` must not push the same index onto the freelist
+    /// twice — subsequent `add`s would alias one slot.
     #[test]
-    #[ignore = "bug: Timers::del double-pushes freelist; two adds alias same TimerId"]
-    fn bug_del_double_free_aliases_ids() {
+    fn del_double_does_not_alias_ids() {
         let mut t = Timers::new();
         let a = t.add(What::Retry(1));
         t.del(a);
-        t.del(a); // documented as idempotent
+        t.del(a);
 
         let b = t.add(What::Retry(10));
         let c = t.add(What::Retry(20));
-        // Two distinct logical timers must get distinct ids.
         assert_ne!(b.0, c.0, "double-del caused freelist duplicate; ids alias");
 
-        // Consequence if the assert above were removed: arming `b`
-        // would fire `c`'s payload because the slot was overwritten.
+        // And `b` fires its own payload, not `c`'s.
         t.set(b, Duration::from_millis(1));
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
@@ -394,7 +388,7 @@ mod tests {
 
         // Slot is disarmed: `at` is None, NOT in the map.
         assert!(t.is_idle());
-        assert!(t.slots[ping.0].at.is_none());
+        assert!(t.slots[ping.0].as_ref().unwrap().at.is_none());
 
         // But not freed — re-arm works without re-adding.
         t.set(ping, Duration::from_secs(1));

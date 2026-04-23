@@ -2,9 +2,8 @@
 //! dispatch lives in `mod.rs`; this is just the platform layer so it
 //! slots in alongside `epoll.rs`.
 //!
-//! Uses `EV_CLEAR` (edge-triggered) for performance — the kernel
-//! skips re-checking readiness each `kevent()` call. The tinc event
-//! loop fully drains ready fds each turn, so edge-triggered is safe.
+//! Level-triggered (no `EV_CLEAR`): handlers don't drain to
+//! `WouldBlock`, so must match the epoll backend's semantics.
 //!
 //! kqueue uses separate filter registrations for READ and WRITE
 //! (unlike epoll's single interest mask). `add`/`modify` register
@@ -69,16 +68,21 @@ fn kev(fd: RawFd, filter: EventFilter, flags: EvFlags, token: usize) -> KEvent {
 }
 
 /// Build a READ+WRITE changelist for `i`. Wanted filters get
-/// `EV_ADD | EV_CLEAR`; unwanted get `EV_DELETE` when
+/// `EV_ADD`; unwanted get `EV_DELETE` when
 /// `delete_unwanted`, else they're packed at the tail and the
 /// returned `n` excludes them (so `add()` never submits an
 /// `EV_DELETE` for a filter that was never registered — kqueue would
 /// ENOENT).
 fn changes(fd: RawFd, token: usize, i: super::Io, delete_unwanted: bool) -> ([KEvent; 2], usize) {
-    const ADD: EvFlags = EvFlags::EV_ADD.union(EvFlags::EV_CLEAR);
     let want_read = matches!(i, super::Io::Read | super::Io::ReadWrite);
     let want_write = matches!(i, super::Io::Write | super::Io::ReadWrite);
-    let flag = |w| if w { ADD } else { EvFlags::EV_DELETE };
+    let flag = |w| {
+        if w {
+            EvFlags::EV_ADD
+        } else {
+            EvFlags::EV_DELETE
+        }
+    };
     let read_ev = kev(fd, EventFilter::EVFILT_READ, flag(want_read), token);
     let write_ev = kev(fd, EventFilter::EVFILT_WRITE, flag(want_write), token);
     if delete_unwanted {

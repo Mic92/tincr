@@ -308,24 +308,10 @@ mod tests {
         Conn(u32),
     }
 
-    /// BUG (kqueue backend): `kqueue.rs` registers filters with
-    /// `EV_CLEAR` (edge-triggered), but the dispatch design in this
-    /// module — and `daemon.rs` — explicitly relies on level-
-    /// triggered semantics ("anything still actually ready re-fires
-    /// next turn", see `turn()` doc). On macOS/BSD a handler that
-    /// only partially drains a readable fd will NOT be re-woken; the
-    /// remaining data sits unread until a fresh edge arrives. On
-    /// Linux (epoll, level-triggered) this test passes.
+    /// Level-triggered: partially-drained fd re-fires next turn.
+    /// Pins kqueue to no-`EV_CLEAR` / epoll to no-`EPOLLET`.
     #[test]
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly",
-    ))]
-    #[ignore = "bug: kqueue backend uses EV_CLEAR; partially-drained fd never re-fires"]
-    fn bug_kqueue_edge_trigger_loses_readiness() {
+    fn partial_drain_refires_next_turn() {
         let (mut a, mut b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let mut ev = EventLoop::new().unwrap();
         let id = ev.add(b.as_fd(), Io::Read, What::Conn(1)).unwrap();
@@ -348,7 +334,7 @@ mod tests {
         assert_eq!(
             out,
             vec![(What::Conn(1), Ready::Read)],
-            "fd still has 4 unread bytes but kqueue EV_CLEAR did not re-fire"
+            "fd still has 4 unread bytes; level-triggered backend must re-fire"
         );
 
         ev.del(id);
