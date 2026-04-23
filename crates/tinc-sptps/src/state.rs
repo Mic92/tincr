@@ -1354,7 +1354,10 @@ impl Sptps {
         // ECDH. `compute_shared` consumes the private key (zeroizes inside).
         // The peer's pubkey is bytes 33..65 of their KEX.
         let peer_pub: [u8; ECDH_PUBLIC_LEN] = hiskex[1 + NONCE_LEN..KEX_LEN].try_into().unwrap();
-        let ecdh = self.ecdh.take().expect("receive_sig with no ecdh");
+        // Datagram mode lets a peer replay SIG: if a prior SIG took
+        // `ecdh` and bailed on a fallible op below (e.g. small-order
+        // `compute_shared`), the next must error, not panic.
+        let ecdh = self.ecdh.take().ok_or(SptpsError::InvalidState)?;
         let x25519 = Zeroizing::new(ecdh.compute_shared(&peer_pub).ok_or(SptpsError::BadKex)?);
 
         match self.kex {
@@ -1362,7 +1365,8 @@ impl Sptps {
             SptpsKex::X25519MlKem768 => {
                 // Decapsulate the peer's ct (carried after their sig).
                 let peer_ct: &[u8; MLKEM_CT_LEN] = body[SIG_LEN..].try_into().unwrap();
-                let dk = self.mlkem.take().expect("mlkem dk set in send_kex");
+                // Same replayed-SIG reason as the `ecdh` take above.
+                let dk = self.mlkem.take().ok_or(SptpsError::InvalidState)?;
                 let ss_decap = dk.decapsulate(peer_ct);
                 // `mlkem_encap` stays put: responder's `send_sig` below
                 // still needs `my_ct`. Dropped with `mykex`/`hiskex`.
