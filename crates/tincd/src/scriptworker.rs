@@ -133,12 +133,7 @@ mod tests {
     /// FIFO ordering + Drop drains: the property user scripts rely on.
     #[test]
     fn fifo_and_drain_on_drop() {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-scriptworker-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::tmpdir("scriptworker");
         let out = dir.join("out");
         let s = dir.join("hook");
         std::fs::write(
@@ -153,7 +148,7 @@ mod tests {
             let mut env = ScriptEnv::base(None, "x", None, None, None);
             env.add("N", i.to_string());
             w.submit(Job::Script {
-                confbase: dir.clone(),
+                confbase: dir.to_path_buf(),
                 name: "hook".into(),
                 env,
                 interpreter: None,

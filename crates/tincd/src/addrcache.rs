@@ -340,15 +340,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-addrcache-{tag}-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::testutil::tmpdir;
 
     fn drain(c: &mut AddressCache) -> Vec<SocketAddr> {
         std::iter::from_fn(|| c.next_addr()).collect()
@@ -423,8 +415,9 @@ mod tests {
     /// worker, and `next_addr` never blocks waiting on them.
     #[test]
     fn hostname_not_resolved_inline() {
+        let tmp = tmpdir("host");
         let mut c = AddressCache::open(
-            &tmpdir("host"),
+            &tmp,
             "bob",
             vec![("10.0.0.1".into(), 655), ("bob.example.com".into(), 655)],
         );

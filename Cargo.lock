@@ -1488,6 +1488,7 @@ dependencies = [
  "slotmap",
  "socket2",
  "subtle",
+ "tempfile",
  "thiserror",
  "tinc-conf",
  "tinc-crypto",

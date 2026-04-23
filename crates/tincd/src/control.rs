@@ -253,18 +253,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
 
-    /// Unique tempdir per test. Same pattern as the rest of the
-    /// workspace: thread id in the name, no `tempfile` dep.
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-control-{}-{:?}",
-            tag,
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::testutil::tmpdir;
 
     #[test]
     fn cookie_is_64_lowercase_hex() {
@@ -299,8 +288,6 @@ mod tests {
         // OpenOptions::mode does too (see module doc for why).
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -314,7 +301,6 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -328,7 +314,6 @@ mod tests {
         let err = write_pidfile(&path, "c", "a").unwrap_err();
         assert_eq!(err.raw_os_error(), Some(nix::Error::ELOOP as i32));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Bind, then a second bind on the same path returns
@@ -347,8 +332,6 @@ mod tests {
         // Now a third bind works.
         let third = ControlSocket::bind(&path).expect("third bind after drop");
         drop(third);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Stale socket file from a crashed daemon: bind succeeds. The
@@ -372,8 +355,6 @@ mod tests {
         // ControlSocket::bind cleans it up.
         let cs = ControlSocket::bind(&path).expect("bind over stale");
         drop(cs);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A non-socket at the path is left alone; bind fails instead.
@@ -384,7 +365,6 @@ mod tests {
         std::fs::write(&path, b"not a socket").unwrap();
         assert!(matches!(ControlSocket::bind(&path), Err(BindError::Io(_))));
         assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Socket file is mode 0700 (or stricter) after bind. The
@@ -406,7 +386,6 @@ mod tests {
         );
 
         drop(cs);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Accept works. Round-trip a byte through the listener to
@@ -449,6 +428,5 @@ mod tests {
         assert_eq!(buf[0], b'x');
 
         drop(cs);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

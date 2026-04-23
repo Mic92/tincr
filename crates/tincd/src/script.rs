@@ -297,19 +297,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
 
-    /// Unique tempdir per test. Workspace convention: thread id in
-    /// name, no `tempfile` dep. Cleanup is best-effort.
-    fn tmpdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tincd-script-{tag}-{:?}",
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::testutil::tmpdir;
 
     fn write_script(dir: &Path, name: &str, body: &str) {
         let p = dir.join(name);

@@ -144,8 +144,8 @@ landlock = "0.4"
 cc = "1.0"
 
 [dev-dependencies]
-# Integration tests: tempdir for confbase, no other deps.
-# Hand-rolled TmpGuard (per the standing rule: NamedTempFile not used).
+# Unit/integration test tempdirs.
+tempfile = "3"
 # tinc-conf/-crypto/-sptps for test helpers (write_pem, SigningKey,
 # Sptps::start — the integration test IS the SPTPS initiator side).
 # These are also in [dependencies] but listing here documents the
