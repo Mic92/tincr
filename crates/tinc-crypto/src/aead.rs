@@ -157,11 +157,15 @@ pub struct SptpsCipher {
     /// the ChaCha arm of every seal/open call is a direct method call
     /// rather than a fresh `ChaPoly::new` per record.
     chapoly: ChaPoly,
-    /// `Some` iff `aead == Aes256Gcm`. ring's `LessSafeKey` owns the
-    /// expanded round keys; building it once per `SptpsCipher` rather
-    /// than per `seal_into` matters for the per-packet `new` above.
-    /// ring does not document zeroize-on-drop for the schedule, but
-    /// the raw key bytes are wiped via `chapoly`'s `ZeroizeOnDrop`.
+    /// `Some` iff `aead == Aes256Gcm`. ring owns the expanded round
+    /// keys in private heap state with no `ZeroizeOnDrop`; reaching
+    /// into it with `unsafe` is unsound (layout unstable across
+    /// versions/arches). Input key bytes *are* wiped (via
+    /// [`ChaPoly`]'s `ZeroizeOnDrop` and the `Zeroizing` PRF blob in
+    /// `Sptps::key`); round keys persist in freed heap until the
+    /// allocator reuses the region — same threat model as every
+    /// ring-backed TLS stack. Swap to `aes-gcm` (RustCrypto) for
+    /// strict wiping, at the cost of ring's AES-NI/PMULL kernels.
     aes: Option<LessSafeKey>,
 }
 

@@ -425,6 +425,7 @@ pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
 /// `receive` decrypts (no RNG). If this ever fires, the SPTPS state
 /// machine changed — the test should know.
 pub struct NoRng;
+impl rand_core::CryptoRng for NoRng {}
 impl rand_core::RngCore for NoRng {
     fn next_u32(&mut self) -> u32 {
         unreachable!("RNG touched")

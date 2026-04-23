@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use tinc_crypto::aead::{SptpsAead, SptpsCipher};
 use tinc_crypto::chapoly::{KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
@@ -535,7 +535,7 @@ impl Sptps {
         hiskey: [u8; SIGN_PUBLIC_LEN],
         label: impl Into<SptpsLabel>,
         replaywin: usize,
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
     ) -> (Self, Vec<Output>) {
         Self::start_with(
             role,
@@ -568,7 +568,7 @@ impl Sptps {
         hiskey: [u8; SIGN_PUBLIC_LEN],
         label: impl Into<SptpsLabel>,
         replaywin: usize,
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
     ) -> (Self, Vec<Output>) {
         let SptpsLabel {
             bytes: mut label,
@@ -1094,7 +1094,7 @@ impl Sptps {
     /// differential test sees the same byte stream.
     fn send_kex(
         &mut self,
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
         // Re-KEX before the previous one finished. State machine bug,
@@ -1169,7 +1169,10 @@ impl Sptps {
     ///
     /// `InvalidState` unless we're in `SecondaryKex` (handshake done,
     /// no rekey already in flight). C: `if(!outstate || state != SECONDARY_KEX)`.
-    pub fn force_kex(&mut self, rng: &mut impl RngCore) -> Result<Vec<Output>, SptpsError> {
+    pub fn force_kex(
+        &mut self,
+        rng: &mut (impl RngCore + CryptoRng),
+    ) -> Result<Vec<Output>, SptpsError> {
         if self.outcipher.is_none() || self.state != State::SecondaryKex {
             return Err(SptpsError::InvalidState);
         }
@@ -1201,7 +1204,7 @@ impl Sptps {
     fn receive_kex(
         &mut self,
         body: &[u8],
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
         if !self.kex_body_ok(body) {
@@ -1216,8 +1219,9 @@ impl Sptps {
             // pure formatter with no RNG dependency.
             let peer_ek: &[u8; MLKEM_EK_LEN] =
                 body[KEX_LEN..].try_into().expect("kex_body_ok checked len");
+            // `ss` pre-`Zeroizing`; `ct` wrapped for pair-shape symmetry.
             let (ct, ss) = hybrid::encapsulate(peer_ek, rng);
-            self.mlkem_encap = Some((Zeroizing::new(ct), Zeroizing::new(ss)));
+            self.mlkem_encap = Some((Zeroizing::new(ct), ss));
         }
 
         if self.role.is_initiator() {
@@ -1347,7 +1351,7 @@ impl Sptps {
                 // Decapsulate the peer's ct (carried after their sig).
                 let peer_ct: &[u8; MLKEM_CT_LEN] = body[SIG_LEN..].try_into().unwrap();
                 let dk = self.mlkem.take().expect("mlkem dk set in send_kex");
-                let ss_decap = Zeroizing::new(dk.decapsulate(peer_ct));
+                let ss_decap = dk.decapsulate(peer_ct);
                 // `mlkem_encap` stays put: responder's `send_sig` below
                 // still needs `my_ct`. Dropped with `mykex`/`hiskex`.
                 let (_ct, ss_encap) = self.mlkem_encap.as_ref().expect("set in receive_kex");
@@ -1428,7 +1432,7 @@ impl Sptps {
         ty: u8,
         body: &[u8],
         encrypted: bool,
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
         match ty {
@@ -1454,7 +1458,7 @@ impl Sptps {
     fn receive_handshake(
         &mut self,
         body: &[u8],
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
         match self.state {
@@ -1532,7 +1536,7 @@ impl Sptps {
     pub fn receive(
         &mut self,
         data: &[u8],
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
     ) -> Result<(usize, Vec<Output>), SptpsError> {
         let mut out = Vec::new();
         let consumed = match self.framing {
@@ -1549,7 +1553,7 @@ impl Sptps {
     fn receive_datagram(
         &mut self,
         data: &[u8],
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<(), SptpsError> {
         let min = if self.incipher.is_some() { 21 } else { 5 };
@@ -1601,7 +1605,7 @@ impl Sptps {
     fn receive_stream(
         &mut self,
         data: &[u8],
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + CryptoRng),
         out: &mut Vec<Output>,
     ) -> Result<usize, SptpsError> {
         let mut consumed = 0;

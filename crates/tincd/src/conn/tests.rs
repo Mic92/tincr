@@ -225,6 +225,7 @@ fn take_rest_empty_after_full_line() {
 
 /// Panics if touched. Receive-only handshake doesn't `send_kex`.
 struct NoRng;
+impl rand_core::CryptoRng for NoRng {}
 impl rand_core::RngCore for NoRng {
     fn next_u32(&mut self) -> u32 {
         unreachable!("rng touched in receive-only path")

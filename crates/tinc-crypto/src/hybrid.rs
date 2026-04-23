@@ -29,7 +29,7 @@ use ml_kem::array::Array;
 use ml_kem::kem::{DecapsulationKey, EncapsulationKey};
 use ml_kem::{Ciphertext, Encoded, EncodedSizeUser, KemCore, MlKem768, MlKem768Params};
 use rand_core::{CryptoRng, RngCore};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// ML-KEM-768 encapsulation key (`ek`). FIPS 203 §8, table 2.
 pub const EK_LEN: usize = 1184;
@@ -116,12 +116,8 @@ impl MlKemPrivate {
     /// `ML-KEM.KeyGen`. Returns the decapsulation key plus the encoded
     /// encapsulation key that goes on the wire.
     ///
-    /// Takes `RngCore`, not `CryptoRngCore`, to match the existing
-    /// `Sptps` signature (which threads a single `&mut impl RngCore`
-    /// through the whole state machine and whose differential-test
-    /// harness feeds a non-`CryptoRng` keystream). Production callers
-    /// pass `OsRng`; the marker trait is satisfied via [`AsCrypto`].
-    pub fn generate(rng: &mut impl RngCore) -> (Self, [u8; EK_LEN]) {
+    /// `rng` must be `CryptoRng`. Production: `OsRng`.
+    pub fn generate(rng: &mut (impl RngCore + CryptoRng)) -> (Self, [u8; EK_LEN]) {
         let (dk, ek) = MlKem768::generate(&mut AsCrypto(rng));
         let mut ek_bytes = [0u8; EK_LEN];
         ek_bytes.copy_from_slice(&ek.as_bytes());
@@ -135,12 +131,15 @@ impl MlKemPrivate {
     /// same observable outcome as a SIG mismatch.
     #[must_use]
     #[expect(clippy::missing_panics_doc)] // Error = (); ml-kem decaps is total (implicit rejection)
-    pub fn decapsulate(&self, ct: &[u8; CT_LEN]) -> [u8; SS_LEN] {
+    pub fn decapsulate(&self, ct: &[u8; CT_LEN]) -> Zeroizing<[u8; SS_LEN]> {
         // `Array<u8, U1088>: From<&[u8; 1088]>` — no fallible parse.
         let ct: &Ciphertext<MlKem768> = ct.into();
-        let ss = ::kem::Decapsulate::decapsulate(&*self.0, ct).expect("ML-KEM decaps infallible");
-        let mut out = [0u8; SS_LEN];
+        let mut ss =
+            ::kem::Decapsulate::decapsulate(&*self.0, ct).expect("ML-KEM decaps infallible");
+        let mut out = Zeroizing::new([0u8; SS_LEN]);
         out.copy_from_slice(&ss);
+        // Wipe ml-kem's copy; `out` is the only surviving reference.
+        ss.zeroize();
         out
     }
 }
@@ -154,15 +153,20 @@ impl MlKemPrivate {
 /// malformed key, and an unauthenticated attacker fails SIG before any
 /// derived key is used.
 #[expect(clippy::missing_panics_doc)] // Error = (); ml-kem encaps never returns Err
-pub fn encapsulate(ek: &[u8; EK_LEN], rng: &mut impl RngCore) -> ([u8; CT_LEN], [u8; SS_LEN]) {
+pub fn encapsulate(
+    ek: &[u8; EK_LEN],
+    rng: &mut (impl RngCore + CryptoRng),
+) -> ([u8; CT_LEN], Zeroizing<[u8; SS_LEN]>) {
     let ek_arr: &Encoded<EncapsulationKey<MlKem768Params>> = ek.into();
     let ek = EncapsulationKey::<MlKem768Params>::from_bytes(ek_arr);
-    let (ct, ss) =
+    let (ct, mut ss) =
         ::kem::Encapsulate::encapsulate(&ek, &mut AsCrypto(rng)).expect("ML-KEM encaps infallible");
     let mut ct_out = [0u8; CT_LEN];
     ct_out.copy_from_slice(&ct);
-    let mut ss_out = [0u8; SS_LEN];
+    let mut ss_out = Zeroizing::new([0u8; SS_LEN]);
     ss_out.copy_from_slice(&ss);
+    // `ct` is public; `ss` is secret — wipe ml-kem's copy.
+    ss.zeroize();
     (ct_out, ss_out)
 }
 
@@ -177,18 +181,13 @@ const _: () = {
     assert!(core::mem::size_of::<Array<u8, <MlKem768 as KemCore>::SharedKeySize>>() == SS_LEN);
 };
 
-/// Adapter: stamp `CryptoRng` onto an `RngCore` borrow.
-///
-/// SPTPS threads a single `&mut impl RngCore` everywhere so the C
-/// differential test can feed both implementations the same
-/// `ChaCha20Legacy` keystream (which is *not* `CryptoRng`-marked).
-/// `ml-kem` requires the marker. Widening the SPTPS bound to
-/// `CryptoRngCore` would touch every receive-path signature and three
-/// test RNGs for a marker trait that `OsRng` (the only production RNG)
-/// already carries. The adapter is the smaller blast radius.
-struct AsCrypto<'a, R: RngCore>(&'a mut R);
+/// `&mut R` → `ml-kem`'s owned-RNG signature. `CryptoRng` is
+/// forwarded from the inner RNG, never fabricated — a blanket impl
+/// over plain `RngCore` would launder a non-crypto RNG through the
+/// marker.
+struct AsCrypto<'a, R: RngCore + CryptoRng>(&'a mut R);
 
-impl<R: RngCore> RngCore for AsCrypto<'_, R> {
+impl<R: RngCore + CryptoRng> RngCore for AsCrypto<'_, R> {
     fn next_u32(&mut self) -> u32 {
         self.0.next_u32()
     }
@@ -202,7 +201,7 @@ impl<R: RngCore> RngCore for AsCrypto<'_, R> {
         self.0.try_fill_bytes(dest)
     }
 }
-impl<R: RngCore> CryptoRng for AsCrypto<'_, R> {}
+impl<R: RngCore + CryptoRng> CryptoRng for AsCrypto<'_, R> {}
 
 /// Hybrid PRF secret: `X25519_ss(32) ‖ ss_i2r(32) ‖ ss_r2i(32)`.
 pub const HYBRID_SHARED_LEN: usize = crate::ecdh::SHARED_LEN + 2 * SS_LEN;
@@ -219,6 +218,6 @@ mod tests {
     fn mlkem768_round_trip() {
         let (dk, ek) = MlKemPrivate::generate(&mut OsRng);
         let (ct, ss_send) = encapsulate(&ek, &mut OsRng);
-        assert_eq!(ss_send, dk.decapsulate(&ct));
+        assert_eq!(*ss_send, *dk.decapsulate(&ct));
     }
 }

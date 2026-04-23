@@ -436,7 +436,7 @@ impl Connection {
     /// `receive_meta` recv-and-buffer half.
     ///
     /// `rng`: only touched on SPTPS rekey (HANDSHAKE → `send_kex`).
-    pub(crate) fn feed(&mut self, rng: &mut impl RngCore) -> FeedResult {
+    pub(crate) fn feed(&mut self, rng: &mut (impl RngCore + rand_core::CryptoRng)) -> FeedResult {
         let mut stack = [0u8; MAXBUFSIZE];
 
         // Cap shrinks as inbuf fills. SPTPS mode doesn't touch inbuf
@@ -566,7 +566,7 @@ impl Connection {
         sptps: &mut Sptps,
         chunk: &[u8],
         name: &str,
-        rng: &mut impl RngCore,
+        rng: &mut (impl RngCore + rand_core::CryptoRng),
     ) -> FeedResult {
         if chunk.is_empty() {
             // Common: the ID line was ALL of the recv.

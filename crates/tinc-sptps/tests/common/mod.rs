@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsAead, SptpsLabel};
 
@@ -21,6 +21,8 @@ pub fn keypair(tag: u8) -> (SigningKey, [u8; 32]) {
 /// PCG-ish PRNG. Deterministic from seed; the SPTPS RNG only seeds
 /// nonces and ECDH so crypto quality doesn't matter.
 pub struct SeedRng(pub u64);
+// Test-only marker: not crypto-grade, drives deterministic fixtures.
+impl CryptoRng for SeedRng {}
 #[expect(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
 impl RngCore for SeedRng {
     fn next_u32(&mut self) -> u32 {
@@ -47,6 +49,7 @@ impl RngCore for SeedRng {
 /// RNG that panics on use. For `receive` calls that must not reach
 /// `send_kex` — if they do, the panic surfaces the routing bug.
 pub struct NoRng;
+impl CryptoRng for NoRng {}
 impl RngCore for NoRng {
     fn next_u32(&mut self) -> u32 {
         panic!("RNG touched outside send_kex")

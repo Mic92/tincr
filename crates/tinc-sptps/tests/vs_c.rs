@@ -38,7 +38,7 @@
 mod common;
 
 use common::NoRng;
-use rand_core::RngCore;
+use rand_core::{CryptoRng, RngCore};
 use tinc_crypto::sign::SigningKey;
 use tinc_ffi::{CKey, CSptps, Event, seed_rng, serial_guard};
 use tinc_sptps::{Framing, Output, Role, Sptps};
@@ -87,6 +87,8 @@ impl BridgeRng {
     }
 }
 
+// Test-only marker: matches C `randomize()` byte for byte.
+impl CryptoRng for BridgeRng {}
 impl RngCore for BridgeRng {
     fn next_u32(&mut self) -> u32 {
         let mut b = [0u8; 4];

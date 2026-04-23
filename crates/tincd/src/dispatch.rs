@@ -403,7 +403,7 @@ pub(crate) fn handle_id(
     line: &[u8],
     ctx: &IdCtx<'_>,
     now: Instant,
-    rng: &mut impl RngCore,
+    rng: &mut (impl RngCore + rand_core::CryptoRng),
 ) -> Result<IdOk, DispatchError> {
     let (name_tok, major, minor) = parse_id_line(line)?;
 
@@ -632,7 +632,7 @@ fn id_invitation(
     conn: &mut Connection,
     throwaway_b64: &[u8],
     ctx: &IdCtx<'_>,
-    rng: &mut impl RngCore,
+    rng: &mut (impl RngCore + rand_core::CryptoRng),
 ) -> Result<IdOk, DispatchError> {
     // `if(!invitation_key)` → reject.
     let Some(inv_key) = ctx.invitation_key else {
