@@ -753,6 +753,8 @@ impl Daemon {
             // Seed with now: a zero seed would tarpit the first burst
             // window from epoch.
             tarpit: Tarpit::new(timers.now(), settings.max_connection_burst),
+            pending_meta: 0,
+            pending_meta_warned_at: None,
             cookie,
             pidfile: pidfile.to_path_buf(),
             name,

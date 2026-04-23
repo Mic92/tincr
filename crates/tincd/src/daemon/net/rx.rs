@@ -6,6 +6,7 @@ use std::io;
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
+use std::time::Duration;
 
 use crate::conn::Connection;
 use crate::listen::{configure_tcp, fmt_addr, is_local, unmap};
@@ -20,6 +21,11 @@ use tinc_device::{Device, GroBucket};
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::{MsgFlags, recvmmsg};
+
+/// Cap on inbound pre-auth meta conns. `Tarpit` is per-IP; a
+/// many-source slowloris walks past it. 64 ≫ any legit cold-start
+/// burst, ≪ `RLIMIT_NOFILE`.
+pub const MAX_PENDING_META: usize = 64;
 
 impl Daemon {
     /// accept → tarpit-check → `configure_tcp` → allocate → register.
@@ -59,6 +65,23 @@ impl Daemon {
             (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
+        // Checked AFTER accept: refusing to accept would busy-loop
+        // LT epoll. accept+close is cheap; the SPTPS state isn't.
+        if self.pending_meta >= MAX_PENDING_META {
+            let now = self.timers.now();
+            if self
+                .pending_meta_warned_at
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(60))
+            {
+                log::warn!(target: "tincd::conn",
+                           "Too many unauthenticated connections ({}), \
+                            rejecting {peer}",
+                           self.pending_meta);
+                self.pending_meta_warned_at = Some(now);
+            }
+            return; // `sock` drops → close
+        }
+
         // Local conns never tick the buckets (`tinc info` queries
         // don't get tarpitted).
         if !is_local(&peer) {
@@ -86,7 +109,9 @@ impl Daemon {
         let hostname = fmt_addr(&peer);
         let conn = Connection::new_meta(fd, hostname, peer, self.timers.now());
 
-        if self.register_conn(conn, Io::Read).is_some() {
+        if let Some(id) = self.register_conn(conn, Io::Read) {
+            self.conns[id].counted_pending = true;
+            self.pending_meta += 1;
             log::info!(target: "tincd::conn", "Connection from {peer}");
         }
     }

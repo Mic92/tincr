@@ -812,3 +812,84 @@ fn malformed_gossip_drops_conn_daemon_survives() {
         assert_malformed_record_drops_conn(tag, body);
     }
 }
+
+/// Aggregate pre-auth connection cap. `Tarpit` is per-IP; a
+/// many-source slowloris walks past it. Loopback is tarpit-exempt so
+/// one test process can fill the cap.
+#[test]
+fn pending_meta_cap_rejects_then_recovers() {
+    use tincd::daemon::MAX_PENDING_META;
+
+    // Long PingTimeout: the sweep must not reap idle pre-auth conns
+    // and free slots behind our back.
+    let d = OneDaemon::spawn("pending-cap", "PingInterval = 120\nPingTimeout = 120\n");
+
+    // Admitted = read times out; rejected = EOF.
+    let assert_admitted = |s: &TcpStream, tag: &str| {
+        let mut b = [0u8; 1];
+        match (&*s).read(&mut b) {
+            Ok(0) => panic!("{tag}: daemon closed an admitted pre-auth conn"),
+            Ok(n) => panic!("{tag}: unexpected {n} bytes from idle pre-auth conn"),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "{tag}: unexpected read error {e}"
+            ),
+        }
+    };
+
+    // Fill one-by-one. macOS kqueue is edge-triggered and
+    // `on_tcp_accept` does one accept per wake; spacing lets the
+    // backlog drain so each SYN is a fresh edge.
+    let mut held: Vec<TcpStream> = Vec::with_capacity(MAX_PENDING_META);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let s = TcpStream::connect(d.tcp_addr).expect("connect");
+        s.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let mut b = [0u8; 1];
+        match (&s).read(&mut b) {
+            Ok(0) => break, // rejected: cap reached
+            Ok(n) => panic!("unexpected {n} bytes from idle pre-auth conn"),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                held.push(s);
+            }
+            Err(e) => panic!("pre-auth read error: {e}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cap never tripped after {} conns",
+            held.len()
+        );
+    }
+    assert_eq!(held.len(), MAX_PENDING_META, "cap tripped at wrong count");
+
+    assert_admitted(&held[0], "first slot");
+    assert_admitted(held.last().unwrap(), "last slot");
+
+    // Free one slot → next connect admitted again.
+    drop(held.pop());
+    std::thread::sleep(Duration::from_millis(300));
+
+    let again = TcpStream::connect(d.tcp_addr).expect("connect after free");
+    again
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    assert_admitted(&again, "after freeing one slot");
+
+    drop(held);
+    drop(again);
+    let stderr = drain_stderr(d.child);
+    assert!(
+        stderr.contains("Too many unauthenticated connections"),
+        "expected cap warning in stderr:\n{stderr}"
+    );
+}

@@ -97,20 +97,16 @@ fn stream_plaintext_bad_record_types() {
     assert_eq!(feed_stream_err(&mut s, &rec), Some(SptpsError::BadKex));
 }
 
-/// Oversized length header. `reclen` is u16; the reassembly buffer
-/// will try to grow to `reclen + 1` bytes. 64 KiB is fine (Vec can do
-/// that); the point is that a *short* input declaring a huge length
-/// just buffers and waits — no panic, no eager 64K alloc per packet.
+/// Pre-auth `reclen` is attacker plaintext; oversized values are
+/// rejected rather than buffered up to 64 KiB.
 #[test]
 fn stream_huge_reclen_short_body() {
     let mut s = fresh_stream();
-    // len=0xFFFF, then only 1 byte of body. receive() should consume
-    // all 3 bytes and return Ok (waiting for more), not Err, not panic.
-    let (n, outs) = s.receive(&[0xFF, 0xFF, 0x80], &mut SeedRng(0)).unwrap();
-    assert_eq!(n, 3);
-    assert!(outs.is_empty());
-    // Session is now mid-record; feeding nothing more is the half-open
-    // state the daemon's PingTimeout sweep reaps. No crash.
+    // len=0xFFFF + 1 body byte: clamp fires on the length alone.
+    let err = s
+        .receive(&[0xFF, 0xFF, 0x80], &mut SeedRng(0))
+        .expect_err("pre-auth oversized reclen must be rejected");
+    assert_eq!(err, SptpsError::RecordTooLong);
 }
 
 /// Zero-length input is a no-op (consumed=0). Regression guard for an

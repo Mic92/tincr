@@ -35,6 +35,7 @@ mod gossip;
 pub(crate) mod intervals;
 mod metaconn;
 mod net;
+pub use net::MAX_PENDING_META;
 mod periodic;
 mod purge;
 mod settings;
@@ -215,6 +216,13 @@ pub struct Daemon {
     /// Tarpit ring buffer + leaky-bucket state. Mutated on every
     /// TCP accept.
     pub(crate) tarpit: Tarpit,
+
+    /// Inbound meta conns accepted but not yet past `on_ack`.
+    /// Aggregate backstop for many-source slowloris (`Tarpit` is
+    /// per-IP). Decremented via `Connection::counted_pending`.
+    pub(crate) pending_meta: usize,
+    /// Rate-limits the cap-rejection warning to once per minute.
+    pub(crate) pending_meta_warned_at: Option<Instant>,
 
     /// 64 hex chars. Compared in `handle_id`.
     pub(crate) cookie: String,

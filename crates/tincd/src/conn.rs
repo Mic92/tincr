@@ -191,6 +191,10 @@ pub(crate) struct Connection {
     /// on. Upstream never sets `unused_active`; the edge
     /// pointer-as-bool IS the check.
     pub active: bool,
+    /// Counted in `Daemon::pending_meta`. Explicit flag because
+    /// `outgoing`/`control` can be mutated mid-life (dup-conn
+    /// `outgoing` transplant) and would miscount.
+    pub counted_pending: bool,
     /// When `active` flipped true (`on_ack`). `None` pre-ACK. Read by
     /// the autoconnect snapshot builder so a freshly-activated
     /// shortcut conn isn't reaped before `min_hold`.
@@ -318,6 +322,7 @@ impl Connection {
             start: now,
             address: None,
             active: false,
+            counted_pending: false,
             activated_at: None,
             pinged: false,
             last_ping_sent: None,

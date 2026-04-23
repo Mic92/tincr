@@ -137,6 +137,8 @@ pub enum SptpsError {
     /// `send_record`: called before handshake done, or record type ≥ 128.
     /// `force_kex`: called outside `SecondaryKex` state.
     InvalidState,
+    /// Stream receive: pre-auth `reclen` > [`MAX_PREAUTH_RECLEN`].
+    RecordTooLong,
 }
 
 impl std::fmt::Display for SptpsError {
@@ -520,6 +522,15 @@ const fn sig_len(kex: SptpsKex) -> usize {
         SptpsKex::X25519MlKem768 => SIG_LEN + MLKEM_CT_LEN,
     }
 }
+
+/// Largest legitimate handshake record body (hybrid KEX = 1249, SIG = 1152)
+/// plus slack. Pre-auth `reclen` is attacker-chosen plaintext; clamping it
+/// here bounds the reassembly buffer an unauthenticated peer can force.
+pub const MAX_PREAUTH_RECLEN: usize = {
+    let kex = kex_len(SptpsKex::X25519MlKem768);
+    let sig = sig_len(SptpsKex::X25519MlKem768);
+    (if kex > sig { kex } else { sig }) + 16
+};
 
 impl Sptps {
     /// Start a session. Runs the initial KEX immediately — the returned
@@ -1676,6 +1687,13 @@ impl Sptps {
             // doing it lazily means a flood of length-only packets doesn't
             // pre-reserve 64K each.
             self.stream.reclen = u16::from_be_bytes(self.stream.buf[..2].try_into().unwrap());
+            // Pre-auth: `reclen` is attacker plaintext; clamp so an
+            // unauthenticated peer can't make us buffer 64 KiB.
+            if self.incipher.is_none() && usize::from(self.stream.reclen) > MAX_PREAUTH_RECLEN {
+                self.stream.buf.clear();
+                self.stream.reclen = 0;
+                return Err(SptpsError::RecordTooLong);
+            }
             if take == data.len() {
                 return Ok(consumed); // C early-returns here too
             }

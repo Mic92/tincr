@@ -227,6 +227,10 @@ impl Daemon {
         if let Some(conn) = self.conns.get_mut(id) {
             conn.active = true;
             conn.activated_at = Some(self.timers.now());
+            if std::mem::take(&mut conn.counted_pending) {
+                // Auth done: release the pre-auth accept slot.
+                self.pending_meta = self.pending_meta.saturating_sub(1);
+            }
         }
 
         // We added the new edge before this call, so we double-send
@@ -317,6 +321,9 @@ impl Daemon {
                        "Closing connection with {}", conn.name);
         }
         let was_active = conn.active;
+        if conn.counted_pending {
+            self.pending_meta = self.pending_meta.saturating_sub(1);
+        }
         let was_log = conn.log_level.is_some();
         let restore_debug = conn.prev_debug_level;
         let conn_name = conn.name.clone();

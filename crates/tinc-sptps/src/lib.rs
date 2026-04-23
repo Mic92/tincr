@@ -30,8 +30,8 @@
 mod state;
 
 pub use state::{
-    Framing, Output, ReplayWindow, Role, SEAL_KEY_LIMIT, SEAL_REKEY_THRESHOLD, Sptps, SptpsError,
-    SptpsLabel,
+    Framing, MAX_PREAUTH_RECLEN, Output, ReplayWindow, Role, SEAL_KEY_LIMIT, SEAL_REKEY_THRESHOLD,
+    Sptps, SptpsError, SptpsLabel,
 };
 pub use tinc_crypto::aead::SptpsAead;
 pub use tinc_crypto::hybrid::SptpsKex;

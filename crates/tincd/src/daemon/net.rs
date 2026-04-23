@@ -14,6 +14,8 @@ mod route;
 mod rx;
 mod sptps;
 
+pub use rx::MAX_PENDING_META;
+
 pub(super) const UDP_RX_BATCH: usize = 64;
 
 /// Device drain cap. `pub(super)` so `daemon::setup` can size the
