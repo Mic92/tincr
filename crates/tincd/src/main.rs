@@ -1187,6 +1187,13 @@ fn main() -> ExitCode {
         }
     }
 
+    // ─── ProcessPriority
+    // Before setup so it covers TUN open / tinc-up too, and so the
+    // control socket appearing implies priority is already applied
+    // (tests sync on that). Before drop_privs: negative nice needs
+    // root or CAP_SYS_NICE.
+    apply_process_priority(&args.confbase, &args.cmdline_conf);
+
     // ─── setup_network
     // This opens TUN, binds sockets, AND runs tinc-up (daemon.rs:
     // ~1755). All of that needs root (TUN open, port <1024 bind,
@@ -1204,11 +1211,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
-    // ─── ProcessPriority
-    // After setup (config is read), before drop_privs (negative
-    // nice needs root or CAP_SYS_NICE).
-    apply_process_priority(&args.confbase, &args.cmdline_conf);
 
     // ─── drop_privs
     // tinc-up has run (with root). Everything from here is
