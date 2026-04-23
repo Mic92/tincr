@@ -180,6 +180,26 @@ fn send_formats_id_greeting() {
     assert_eq!(c.outbuf.live(), b"0 testnode 17.7\n");
 }
 
+#[test]
+fn outbuf_hard_cap_marks_dead() {
+    let mut c = Connection::test_with_fd(devnull());
+    let chunk = "x".repeat(1024);
+    let max_iters = OUTBUF_HARD_CAP / 1024 + 16;
+    for _ in 0..max_iters {
+        if c.dead {
+            break;
+        }
+        c.send(format_args!("{chunk}"));
+    }
+    assert!(c.dead, "cap not tripped within {max_iters} sends");
+    assert!(c.outbuf.live_len() <= OUTBUF_HARD_CAP);
+
+    let before = c.outbuf.live_len();
+    assert!(!c.send(format_args!("ignored")));
+    assert!(!c.send_raw(b"also ignored"));
+    assert_eq!(c.outbuf.live_len(), before);
+}
+
 /// Second send returns `false` (don't double-register `IO_WRITE`).
 #[test]
 fn send_second_doesnt_signal() {

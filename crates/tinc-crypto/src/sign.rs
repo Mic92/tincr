@@ -148,11 +148,18 @@ impl SigningKey {
 
 /// Verify an Ed25519 signature.
 ///
-/// `verify.c` uses the standard (cofactored, batch-compatible) equation. We
-/// use dalek's `verify`, **not** `verify_strict` — the strict variant rejects
-/// non-canonical S values and small-order R that the C code accepts. In
-/// practice tinc never *produces* such signatures, but a hostile peer could,
-/// and rejecting them when C accepts is an interop divergence.
+/// `verify.c` uses the standard (cofactored, batch-compatible) equation.
+///
+/// Canonicality: the scalar `S` from the signature is reduced mod `L`
+/// inside the verification equation rather than range-checked, and `R`
+/// is not required to be the canonical encoding of its point. Non-
+/// canonical signatures (e.g. `S ≥ L`, or alternate `R` encodings)
+/// therefore VERIFY, matching ref10 and C tinc — confirmed against
+/// Project Wycheproof vectors. This is deliberate: rejecting inputs
+/// that a C peer accepts would be an interop divergence. It's not a
+/// security issue here because tinc does not treat signatures as
+/// identifiers or map keys; signature malleability doesn't create a
+/// replay or confusion primitive in the meta-protocol or SPTPS.
 ///
 /// # Errors
 ///

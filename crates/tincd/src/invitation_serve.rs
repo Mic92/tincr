@@ -203,8 +203,13 @@ pub(crate) fn finalize(
     pubkey_b64: &str,
 ) -> Result<PathBuf, ServeError> {
     use std::os::unix::fs::OpenOptionsExt;
-    // :122-126
-    if pubkey_b64.len() > 128 || pubkey_b64.contains('\n') {
+    // Ed25519 pubkey: 32 bytes → exactly 43 chars of unpadded tinc-
+    // base64. `b64::decode` rejects anything outside the union
+    // alphabet (incl. '\n', '=', whitespace).
+    if pubkey_b64.len() != 43
+        || tinc_crypto::b64::decode(pubkey_b64)
+            .is_none_or(|d| d.len() != tinc_crypto::sign::PUBLIC_LEN)
+    {
         return Err(ServeError::BadPubkey);
     }
 
@@ -379,19 +384,28 @@ mod tests {
 
     // ─── finalize ──────────────────────────────────────────────────
 
+    /// Valid 43-char tinc-base64 of a 32-byte pubkey.
+    fn valid_pubkey_b64() -> String {
+        let pk = [0x11u8; 32];
+        let s = tinc_crypto::b64::encode(&pk);
+        assert_eq!(s.len(), 43);
+        s
+    }
+
     #[test]
     fn finalize_writes_host_file() {
         let tmp = TmpDir::new("fin-write");
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
-        let path = finalize(tmp.path(), "bob", "abcDEF123_etc").unwrap();
+        let pk = valid_pubkey_b64();
+        let path = finalize(tmp.path(), "bob", &pk).unwrap();
 
         assert_eq!(path, tmp.path().join("hosts").join("bob"));
         let written = fs::read_to_string(&path).unwrap();
-        assert_eq!(written, "Ed25519PublicKey = abcDEF123_etc\n");
+        assert_eq!(written, format!("Ed25519PublicKey = {pk}\n"));
     }
 
-    /// Config injection: newline → two config lines. C :122-126.
+    /// Config injection: newline → two config lines.
     #[test]
     fn finalize_rejects_newline() {
         let tmp = TmpDir::new("fin-newline");
@@ -403,13 +417,32 @@ mod tests {
     }
 
     #[test]
+    fn finalize_rejects_bad_pubkey_shapes() {
+        let tmp = TmpDir::new("fin-shape");
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+
+        let good = valid_pubkey_b64();
+        let too_long = format!("{good}A");
+        // 43 chars but '=' is not in the union alphabet.
+        let bad_charset = format!("{}=", &good[..42]);
+
+        for bad in [&good[..42], too_long.as_str(), bad_charset.as_str()] {
+            let err = finalize(tmp.path(), "bob", bad).unwrap_err();
+            assert!(matches!(err, ServeError::BadPubkey), "{bad:?}: {err:?}");
+            assert!(!tmp.path().join("hosts").join("bob").exists());
+        }
+
+        finalize(tmp.path(), "bob", &good).unwrap();
+    }
+
+    #[test]
     fn finalize_rejects_existing() {
         let tmp = TmpDir::new("fin-exists");
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
         let host = tmp.path().join("hosts").join("bob");
         fs::write(&host, "Ed25519PublicKey = original\n").unwrap();
 
-        let err = finalize(tmp.path(), "bob", "attacker_key").unwrap_err();
+        let err = finalize(tmp.path(), "bob", &valid_pubkey_b64()).unwrap_err();
         assert!(matches!(err, ServeError::HostFileExists(_)));
         let after = fs::read_to_string(&host).unwrap();
         assert_eq!(after, "Ed25519PublicKey = original\n");

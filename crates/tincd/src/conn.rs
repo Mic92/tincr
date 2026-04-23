@@ -40,6 +40,13 @@ impl std::fmt::Write for VecFmt<'_> {
 /// (no-jumbo `MAXSIZE = 1673`). Jumbo would be `9163 + 128 = 9291`.
 pub(crate) const MAXBUFSIZE: usize = 2176;
 
+/// Hard cap on queued outbuf bytes. The periodic sweep also checks
+/// `settings.maxoutbufsize` but only on stale conns, leaving a full
+/// sweep-interval window in which an authenticated peer that stops
+/// reading can balloon outbuf. 1 MiB is well above any legitimate
+/// burst (initial graph dump on large meshes stays <<100 KiB).
+pub(crate) const OUTBUF_HARD_CAP: usize = 1 << 20;
+
 // LineBuf
 
 /// `buffer_t` (`buffer.c`). `data[offset..]` is live; `data[..offset]`
@@ -147,6 +154,10 @@ pub(crate) struct Connection {
     pub io_id: Option<crate::event::IoId>,
     pub inbuf: LineBuf,
     pub outbuf: LineBuf,
+    /// Set when an outbuf append would exceed [`OUTBUF_HARD_CAP`].
+    /// The periodic sweep terminates any conn with `dead == true`;
+    /// further appends are dropped.
+    pub dead: bool,
     /// `c->allow_request`. `None` = `ALL` (`protocol.h:42`).
     pub allow_request: Option<Request>,
     /// `c->status.control`.
@@ -305,6 +316,7 @@ impl Connection {
             io_id: None,
             inbuf: LineBuf::default(),
             outbuf: LineBuf::default(),
+            dead: false,
             allow_request: Some(Request::Id),
             control: false,
             is_unix_ctl: false,
@@ -607,9 +619,29 @@ impl Connection {
         FeedResult::Sptps(events)
     }
 
+    /// Returns `true` when caller must skip the append. Sets `dead`
+    /// and logs once on the first overflow.
+    fn check_outbuf_cap(&mut self, adding: usize) -> bool {
+        if self.dead {
+            return true;
+        }
+        if self.outbuf.live_len().saturating_add(adding) > OUTBUF_HARD_CAP {
+            log::info!(target: "tincd::conn",
+                       "{} ({}): outbuf hard cap {} exceeded ({} queued, +{}) — dropping",
+                       self.name, self.hostname, OUTBUF_HARD_CAP,
+                       self.outbuf.live_len(), adding);
+            self.dead = true;
+            return true;
+        }
+        false
+    }
+
     /// `send_meta_sptps`. Queue already-framed bytes.
     /// `bool` return is the `io_set` signal.
     pub(crate) fn send_raw(&mut self, bytes: &[u8]) -> bool {
+        if self.check_outbuf_cap(bytes.len()) {
+            return false;
+        }
         let was_empty = self.outbuf.is_empty();
         self.outbuf.add(bytes);
         was_empty
@@ -623,6 +655,9 @@ impl Connection {
     /// `InvalidState` only fires pre-handshake or `type >= 128`.
     /// Callers send post-HandshakeDone with types 0/1/2.
     pub(crate) fn send_sptps_record(&mut self, record_type: u8, body: &[u8]) -> bool {
+        if self.dead {
+            return false;
+        }
         let was_empty = self.outbuf.is_empty();
         let sptps = self
             .sptps
@@ -633,6 +668,9 @@ impl Connection {
             .expect("send_record post-HandshakeDone, type<128: InvalidState is a bug");
         for o in outs {
             if let Output::Wire { bytes, .. } = o {
+                if self.check_outbuf_cap(bytes.len()) {
+                    return false;
+                }
                 self.outbuf.add(&bytes);
             }
         }
@@ -651,6 +689,9 @@ impl Connection {
     /// cipher is set at `receive_sig` before `HandshakeDone`. Unreachable
     /// barring a `tinc-sptps` bug.
     pub(crate) fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
+        if self.dead {
+            return false;
+        }
         let was_empty = self.outbuf.is_empty();
 
         // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
@@ -667,14 +708,23 @@ impl Connection {
             );
             for o in outs {
                 if let Output::Wire { bytes, .. } = o {
+                    if self.check_outbuf_cap(bytes.len()) {
+                        return false;
+                    }
                     self.outbuf.add(&bytes);
                 }
             }
             return was_empty;
         }
 
-        write!(VecFmt(&mut self.outbuf.data), "{args}").expect("Vec<u8> write infallible");
-        self.outbuf.data.push(b'\n');
+        // Scratch-buffer first so check_outbuf_cap can reject atomically.
+        let mut line = Vec::with_capacity(64);
+        write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
+        line.push(b'\n');
+        if self.check_outbuf_cap(line.len()) {
+            return false;
+        }
+        self.outbuf.data.extend_from_slice(&line);
         was_empty
     }
 

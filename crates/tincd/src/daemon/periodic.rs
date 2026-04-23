@@ -69,6 +69,13 @@ impl Daemon {
                 continue; // earlier terminate in this sweep
             };
 
+            // Hard cap already tripped at append time: reap now,
+            // regardless of staleness.
+            if conn.dead {
+                self.terminate(id);
+                continue;
+            }
+
             let stale = now.saturating_duration_since(conn.last_ping_time);
 
             // Outbuf cap. Control conns: unconditional (their `stale` is
