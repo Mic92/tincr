@@ -26,7 +26,7 @@ use tinc_crypto::chapoly::{KEY_LEN as CIPHER_KEY_LEN, TAG_LEN};
 use tinc_crypto::ecdh::{EcdhPrivate, PUBLIC_LEN as ECDH_PUBLIC_LEN, SHARED_LEN};
 use tinc_crypto::hybrid::{
     self, CT_LEN as MLKEM_CT_LEN, EK_LEN as MLKEM_EK_LEN, HYBRID_SHARED_LEN, MlKemPrivate,
-    SS_LEN as MLKEM_SS_LEN, SptpsKex,
+    SS_LEN as MLKEM_SS_LEN, SptpsKex, kem_transcript_hash,
 };
 use tinc_crypto::prf::prf;
 use tinc_crypto::sign::{self, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN, SigningKey};
@@ -254,6 +254,11 @@ enum State {
     /// Rekey only: sent SIG + ACK under old key, waiting for peer's ACK
     /// before switching `incipher` to new key.
     Ack,
+    /// Hybrid initial handshake only: both ciphers installed, encrypted
+    /// empty ACK sent, waiting for the peer's as explicit key
+    /// confirmation. `HandshakeDone` fires on receipt. Classical never
+    /// reaches here (C-tinc wire compat).
+    Confirm,
 }
 
 /// Replay window for datagram mode. `sptps_check_seqno` in C.
@@ -1236,7 +1241,10 @@ impl Sptps {
     /// Note the nonce order: *initiator's nonce first*, regardless of which
     /// side we are. Both sides must compute the same key, so the seed must
     /// be role-symmetric. C: `(initiator ? mykex : hiskex)->nonce` first.
-    fn generate_key_material(&mut self, shared: &[u8]) {
+    ///
+    /// `kem_hash` is appended after `label`: empty in classical mode
+    /// (seed byte-identical to C tinc), `kem_transcript_hash` in hybrid.
+    fn generate_key_material(&mut self, shared: &[u8], kem_hash: &[u8]) {
         // No NUL: C does `sizeof("key expansion") - 1`.
         const PREFIX: &[u8] = b"key expansion";
 
@@ -1250,12 +1258,13 @@ impl Sptps {
         let resp_nonce = &resp_kex[1..=NONCE_LEN];
 
         let mut seed = Zeroizing::new(Vec::with_capacity(
-            PREFIX.len() + 2 * NONCE_LEN + self.label.len(),
+            PREFIX.len() + 2 * NONCE_LEN + self.label.len() + kem_hash.len(),
         ));
         seed.extend_from_slice(PREFIX);
         seed.extend_from_slice(init_nonce);
         seed.extend_from_slice(resp_nonce);
         seed.extend_from_slice(&self.label);
+        seed.extend_from_slice(kem_hash);
 
         let mut key = Zeroizing::new([0u8; 2 * CIPHER_KEY_LEN]);
         prf(shared, &seed, &mut *key);
@@ -1333,7 +1342,10 @@ impl Sptps {
         // Verify transcript: `[!initiator][hiskex][mykex][label]`.
         // Swapped vs. send_sig: their initiator-bit is our !initiator-bit,
         // their mykex is our hiskex.
-        let (mykex, hiskex) = self.kex_pair();
+        // Direct fields, not `kex_pair()`: borrowck must see them as
+        // disjoint from the `ecdh`/`mlkem` `.take()`s below.
+        let mykex = self.mykex.as_deref().expect("mykex present");
+        let hiskex = self.hiskex.as_deref().expect("hiskex present");
         {
             let msg = sig_transcript(!self.role.is_initiator(), hiskex, mykex, &self.label);
             sign::verify(&self.hiskey, &msg, sig).map_err(|_| SptpsError::BadSig)?;
@@ -1346,7 +1358,7 @@ impl Sptps {
         let x25519 = Zeroizing::new(ecdh.compute_shared(&peer_pub).ok_or(SptpsError::BadKex)?);
 
         match self.kex {
-            SptpsKex::X25519 => self.generate_key_material(&*x25519),
+            SptpsKex::X25519 => self.generate_key_material(&*x25519, &[]),
             SptpsKex::X25519MlKem768 => {
                 // Decapsulate the peer's ct (carried after their sig).
                 let peer_ct: &[u8; MLKEM_CT_LEN] = body[SIG_LEN..].try_into().unwrap();
@@ -1354,22 +1366,37 @@ impl Sptps {
                 let ss_decap = dk.decapsulate(peer_ct);
                 // `mlkem_encap` stays put: responder's `send_sig` below
                 // still needs `my_ct`. Dropped with `mykex`/`hiskex`.
-                let (_ct, ss_encap) = self.mlkem_encap.as_ref().expect("set in receive_kex");
+                let (my_ct, ss_encap) = self.mlkem_encap.as_ref().expect("set in receive_kex");
 
                 // Role-symmetric ordering, same trick as the PRF nonce
                 // order: `ss_i2r` is "initiator encapsulated, responder
                 // decapsulated". Initiator's encap == responder's decap.
-                let (ss_i2r, ss_r2i): (&[u8; MLKEM_SS_LEN], &[u8; MLKEM_SS_LEN]) =
-                    if self.role.is_initiator() {
-                        (ss_encap, &ss_decap)
-                    } else {
-                        (&ss_decap, ss_encap)
-                    };
+                let init = self.role.is_initiator();
+                let (ss_i2r, ss_r2i): (&[u8; MLKEM_SS_LEN], &[u8; MLKEM_SS_LEN]) = if init {
+                    (ss_encap, &ss_decap)
+                } else {
+                    (&ss_decap, ss_encap)
+                };
                 let mut shared = Zeroizing::new([0u8; HYBRID_SHARED_LEN]);
                 shared[..SHARED_LEN].copy_from_slice(&*x25519);
                 shared[SHARED_LEN..SHARED_LEN + MLKEM_SS_LEN].copy_from_slice(ss_i2r);
                 shared[SHARED_LEN + MLKEM_SS_LEN..].copy_from_slice(ss_r2i);
-                self.generate_key_material(&*shared);
+
+                // Bind both `ek`s + both `ct`s (role-ordered) into the
+                // PRF seed; see `docs/PROTOCOL.md` for the rationale.
+                let (init_ek, resp_ek) = if init {
+                    (&mykex[KEX_LEN..], &hiskex[KEX_LEN..])
+                } else {
+                    (&hiskex[KEX_LEN..], &mykex[KEX_LEN..])
+                };
+                let (ct_i2r, ct_r2i): (&[u8], &[u8]) = if init {
+                    (&**my_ct, peer_ct)
+                } else {
+                    (peer_ct, &**my_ct)
+                };
+                let kem_hash = kem_transcript_hash(init_ek, resp_ek, ct_i2r, ct_r2i);
+
+                self.generate_key_material(&*shared, &kem_hash);
             }
         }
 
@@ -1497,13 +1524,34 @@ impl Sptps {
                     // receive_ack runs, so HandshakeDone comes after the
                     // incipher switch.
                     self.receive_ack(&[]).expect("synthetic ack body is empty");
-                    out.push(Output::HandshakeDone);
-                    self.state = State::SecondaryKex;
+                    match self.kex {
+                        SptpsKex::X25519 => {
+                            out.push(Output::HandshakeDone);
+                            self.state = State::SecondaryKex;
+                        }
+                        SptpsKex::X25519MlKem768 => {
+                            // Key confirmation: first record under the
+                            // new `outcipher`. `HandshakeDone` withheld
+                            // until the peer's ACK verifies, so a
+                            // tampered `ct` never yields `validkey`.
+                            self.send_ack(out);
+                            self.state = State::Confirm;
+                        }
+                    }
                 }
                 Ok(())
             }
             State::Ack => {
                 self.receive_ack(body)?;
+                out.push(Output::HandshakeDone);
+                self.state = State::SecondaryKex;
+                Ok(())
+            }
+            State::Confirm => {
+                // Already AEAD-verified; reaching here is the proof.
+                if !body.is_empty() {
+                    return Err(SptpsError::BadAck);
+                }
                 out.push(Output::HandshakeDone);
                 self.state = State::SecondaryKex;
                 Ok(())

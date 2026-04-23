@@ -135,14 +135,33 @@ receiving the peer's SIG it decapsulates with its own `dk`. The PRF
 secret becomes `X25519_ss(32) ‖ ss_i2r(32) ‖ ss_r2i(32)` (96 B), where
 `ss_i2r` is the secret the initiator encapsulated and the responder
 decapsulated — ordered by role so both sides agree, same trick the
-classical PRF already uses for the nonces.
+classical PRF already uses for the nonces. The PRF *seed* is extended
+with `SHA-512(ek_i ‖ ek_r ‖ ct_i2r ‖ ct_r2i)` appended after the
+label (X-Wing–style binding, draft-connolly-cfrg-xwing-kem) so the
+derived traffic keys depend on every public KEM byte that crossed the
+wire, not only on the shared secrets.
 
 The Ed25519 signature still covers only `[role-bit ‖ mykex ‖ hiskex ‖
-label]` — i.e. both `ek`s but neither `ct`. That's sufficient: ML-KEM
-is IND-CCA2, so a substituted `ct` yields a different `ss` on the
-decapsulator's side, the PRF derives different traffic keys, and the
-first AEAD tag fails. The X25519 leg *is* signed, so an attacker who
-can break ML-KEM but not discrete-log still can't MITM.
+label]` — i.e. both `ek`s but neither `ct`. With the seed binding
+above a substituted `ct` perturbs the derived key directly, and
+ML-KEM's implicit rejection additionally yields a different `ss`. The
+X25519 leg *is* signed, so an attacker who can break ML-KEM but not
+discrete-log still can't MITM.
+
+**Key confirmation.** After deriving keys, each side sends one empty
+encrypted handshake record and withholds `HandshakeDone` until the
+peer's verifies. A handshake whose `ct` was tampered therefore never
+completes on either side; the daemon never marks the tunnel valid.
+This adds one record per direction (one extra `ANS_KEY` round-trip
+for the per-tunnel handshake) and applies to the initial handshake
+only — rekey SIG records are already AEAD-protected under the old
+key. The classical `x25519` path is unchanged and remains
+byte-identical to C tinc.
+
+> The KDF binding and confirmation round were added after the initial
+> hybrid commit; tincr builds between `8de95be4` and this change are
+> wire-incompatible in hybrid mode (only). The feature is opt-in and
+> was never released in that window.
 
 **Label discriminator.** Both `SPTPSKex` and `SPTPSCipher` are mixed
 into the KDF/SIG label as a two-byte suffix `[kex_byte, cipher_byte]`,

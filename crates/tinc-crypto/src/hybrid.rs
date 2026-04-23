@@ -206,6 +206,20 @@ impl<R: RngCore + CryptoRng> CryptoRng for AsCrypto<'_, R> {}
 /// Hybrid PRF secret: `X25519_ss(32) ‖ ss_i2r(32) ‖ ss_r2i(32)`.
 pub const HYBRID_SHARED_LEN: usize = crate::ecdh::SHARED_LEN + 2 * SS_LEN;
 
+/// `SHA-512(ek_i ‖ ek_r ‖ ct_i2r ‖ ct_r2i)`: X-Wing–style binding of
+/// all public KEM material into the PRF seed. Hashed (4544 B → 64 B)
+/// so the seed stays small. See `docs/PROTOCOL.md`.
+#[must_use]
+pub fn kem_transcript_hash(ek_i: &[u8], ek_r: &[u8], ct_i2r: &[u8], ct_r2i: &[u8]) -> [u8; 64] {
+    use sha2::{Digest, Sha512};
+    let mut h = Sha512::new();
+    h.update(ek_i);
+    h.update(ek_r);
+    h.update(ct_i2r);
+    h.update(ct_r2i);
+    h.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -60,12 +60,39 @@ fn handshake(
     let Some(Output::Wire { bytes: sig_b, .. }) = it.next() else {
         panic!("bob: expected SIG wire");
     };
-    assert!(matches!(it.next(), Some(Output::HandshakeDone)));
+    match a_kex {
+        SptpsKex::X25519 => {
+            assert!(matches!(it.next(), Some(Output::HandshakeDone)));
+            let (_, outs) = alice
+                .receive(&sig_b, &mut NoRng)
+                .map_err(|e| (e, "alice<-sig"))?;
+            assert!(matches!(outs[0], Output::HandshakeDone));
+        }
+        SptpsKex::X25519MlKem768 => {
+            // Hybrid: confirm-ACK after SIG; HandshakeDone deferred.
+            let Some(Output::Wire { bytes: ack_b, .. }) = it.next() else {
+                panic!("bob: expected confirm ACK wire");
+            };
+            assert!(it.next().is_none(), "no HandshakeDone before confirm");
 
-    let (_, outs) = alice
-        .receive(&sig_b, &mut NoRng)
-        .map_err(|e| (e, "alice<-sig"))?;
-    assert!(matches!(outs[0], Output::HandshakeDone));
+            let (_, outs) = alice
+                .receive(&sig_b, &mut NoRng)
+                .map_err(|e| (e, "alice<-sig"))?;
+            let Output::Wire { bytes: ack_a, .. } = &outs[0] else {
+                panic!("alice: expected confirm ACK wire");
+            };
+            assert_eq!(outs.len(), 1, "no HandshakeDone before confirm");
+
+            let (_, outs) = alice
+                .receive(&ack_b, &mut NoRng)
+                .map_err(|e| (e, "alice<-ack"))?;
+            assert!(matches!(outs[0], Output::HandshakeDone));
+            let (_, outs) = bob
+                .receive(ack_a, &mut NoRng)
+                .map_err(|e| (e, "bob<-ack"))?;
+            assert!(matches!(outs[0], Output::HandshakeDone));
+        }
+    }
 
     Ok((alice, bob, kex_a))
 }
@@ -96,13 +123,14 @@ fn hybrid_round_trip() {
 }
 
 /// A MITM who tampers the ML-KEM `ct` (which the Ed25519 signature
-/// does *not* cover) must still fail. The signature verifies,
-/// decapsulation implicit-rejects to a garbage `ss` (FIPS 203 §7.3 —
-/// no error, no panic), the PRF derives different traffic keys, and
-/// the first AEAD tag check fails. This is the load-bearing argument
-/// for not signing `ct`.
+/// does *not* cover) must still fail. The signature verifies, but the
+/// `ct` is bound into the PRF seed (X-Wing style) AND decapsulation
+/// implicit-rejects to a garbage `ss`, so both sides derive divergent
+/// keys. The hybrid confirm round then fails its AEAD tag and
+/// **`HandshakeDone` never fires on either side** — the daemon never
+/// marks the tunnel valid on a tampered handshake.
 #[test]
-fn tampered_ct_fails_first_mac() {
+fn tampered_ct_no_handshake_done() {
     let (akey, apub) = keypair(1);
     let (bkey, bpub) = keypair(2);
     let mut rng = SeedRng(0xFEED);
@@ -132,14 +160,17 @@ fn tampered_ct_fails_first_mac() {
     let kex_b = wire(b0);
     let sig_a = wire(alice.receive(&kex_b, &mut rng).unwrap().1);
     bob.receive(&kex_a, &mut rng).unwrap();
-    let mut sig_b = {
+    let (mut sig_b, ack_b) = {
         let (_, outs) = bob.receive(&sig_a, &mut NoRng).unwrap();
         let mut it = outs.into_iter();
-        let Some(Output::Wire { bytes, .. }) = it.next() else {
+        let Some(Output::Wire { bytes: sig, .. }) = it.next() else {
             panic!("expected SIG")
         };
-        assert!(matches!(it.next(), Some(Output::HandshakeDone)));
-        bytes
+        let Some(Output::Wire { bytes: ack, .. }) = it.next() else {
+            panic!("expected confirm ACK")
+        };
+        assert!(it.next().is_none(), "bob: no HandshakeDone yet");
+        (sig, ack)
     };
 
     // MITM: flip the last `ct` byte (plaintext during initial
@@ -148,28 +179,46 @@ fn tampered_ct_fails_first_mac() {
     assert_eq!(sig_b.len(), 4 + 1 + 64 + CT_LEN);
     *sig_b.last_mut().unwrap() ^= 0x01;
 
-    // Alice: SIG verifies (covers KEX bodies + label, not ct), decaps
-    // implicit-rejects, handshake *completes* with divergent keys.
+    // SIG verifies (doesn't cover ct); tampered ct feeds decap AND the
+    // PRF seed hash → divergent keys.
     let (_, outs) = alice
         .receive(&sig_b, &mut NoRng)
         .expect("no panic on bad ct");
-    assert!(matches!(outs[0], Output::HandshakeDone));
+    let Output::Wire { bytes: ack_a, .. } = &outs[0] else {
+        panic!("expected confirm ACK")
+    };
+    assert_eq!(outs.len(), 1, "alice: no HandshakeDone on tampered ct");
     assert_ne!(alice.incipher_key(), bob.outcipher_key());
+    assert_ne!(alice.outcipher_key(), bob.incipher_key());
 
-    // First data record fails MAC. Clean error, not panic.
-    let pkt = bob.send_record(0, b"first").unwrap();
+    // Confirm round fails AEAD both sides → no HandshakeDone anywhere.
     assert_eq!(
-        alice.receive(&wire(pkt), &mut NoRng).unwrap_err(),
-        SptpsError::DecryptFailed
+        alice.receive(&ack_b, &mut NoRng).unwrap_err(),
+        SptpsError::DecryptFailed,
     );
-
-    // Reverse direction also broken: the X25519 leg agrees but the
-    // hybrid concat doesn't, proving the PQ secret actually feeds the
-    // KDF and isn't dead code.
-    let pkt = alice.send_record(0, b"first").unwrap();
     assert_eq!(
-        bob.receive(&wire(pkt), &mut NoRng).unwrap_err(),
-        SptpsError::DecryptFailed
+        bob.receive(ack_a, &mut NoRng).unwrap_err(),
+        SptpsError::DecryptFailed,
+    );
+}
+
+/// KAT: pin the derived traffic key for a fixed-seed hybrid handshake
+/// so any change to the KDF input (seed layout, hash binding, secret
+/// concat order) is caught. Update deliberately if the KDF changes.
+#[test]
+fn hybrid_kdf_kat() {
+    let (alice, _, _) =
+        handshake(SptpsKex::X25519MlKem768, SptpsKex::X25519MlKem768).expect("handshake");
+    let out = alice.outcipher_key().unwrap();
+    let hex = out.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    assert_eq!(
+        hex,
+        "97762babaf1f366bf99a574a037286180aaf210bdead8aa592cdc8fff6927a7f\
+         21ab78c3f7e00146ddf1dfcc8196c93dfcdeb036d904ff6f5a43489cb2368008",
     );
 }
 
