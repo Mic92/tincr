@@ -42,6 +42,18 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use tinc_proto::Subnet;
 
+/// Subset of `224.0.0.0/4` or `ff00::/8`? Subset, not intersect: a /0
+/// default is fine; only equal-or-longer prefixes can out-LPM the
+/// ownerless broadcast entries.
+#[must_use]
+pub(crate) fn is_multicast_subnet(subnet: &Subnet) -> bool {
+    match *subnet {
+        Subnet::V4 { addr, prefix, .. } => prefix >= 4 && addr.is_multicast(),
+        Subnet::V6 { addr, prefix, .. } => prefix >= 8 && addr.is_multicast(),
+        Subnet::Mac { .. } => false,
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Keys
 //

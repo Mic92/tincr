@@ -4,6 +4,7 @@ use super::MAX_NODES;
 use crate::daemon::{ConnId, Daemon};
 
 use crate::dispatch::{DispatchError, parse_add_subnet, parse_del_subnet};
+use crate::subnet_tree::is_multicast_subnet;
 
 use tinc_proto::{Request, Subnet};
 
@@ -76,6 +77,16 @@ impl Daemon {
             log::warn!(target: "tincd::proto",
                        "Ignoring unauthorized ADD_SUBNET for {owner_name} \
                         ({subnet}) (strictsubnets)");
+            let nw = self.forward_request(from_conn, body);
+            return Ok(nw);
+        }
+
+        // Multicast more-specifics (e.g. ff02::/16) would out-LPM the
+        // ownerless broadcast entries; forward but don't install.
+        if is_multicast_subnet(&subnet) {
+            log::debug!(target: "tincd::proto",
+                        "Ignoring ADD_SUBNET from {owner_name} for multicast \
+                         range ({subnet}); forwarding only");
             let nw = self.forward_request(from_conn, body);
             return Ok(nw);
         }

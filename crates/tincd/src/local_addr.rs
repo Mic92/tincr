@@ -139,7 +139,8 @@ pub(crate) fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
         .unwrap_or(addr);
     let port: u16 = port.parse().ok()?;
     let ip: IpAddr = addr.parse().ok()?;
-    Some(SocketAddr::new(ip, port))
+    // Unmap ::ffff:a.b.c.d → v4 so adapt_socket picks the v4 listener (v6 is V6ONLY).
+    Some(crate::listen::unmap(SocketAddr::new(ip, port)))
 }
 
 /// `sockaddr2str` shape for the `ANS_KEY` append. Dotted-quad / RFC-5952 v6.
@@ -278,6 +279,15 @@ mod tests {
         assert_eq!(parse_addr_port(&a, &p), Some(sa));
         // parse handles brackets defensively too.
         assert_eq!(parse_addr_port("[::1]", "655"), Some(sa));
+    }
+
+    #[test]
+    fn parse_v4_mapped_unmaps_to_native_v4() {
+        let got = parse_addr_port("::ffff:10.0.0.5", "655").unwrap();
+        assert_eq!(got, v4("10.0.0.5:655"));
+        assert!(got.is_ipv4());
+        let got = parse_addr_port("[::ffff:10.0.0.5]", "655").unwrap();
+        assert_eq!(got, v4("10.0.0.5:655"));
     }
 
     #[test]

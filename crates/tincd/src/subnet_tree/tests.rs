@@ -323,6 +323,35 @@ fn iter_skips_broadcast() {
     assert_eq!(t.len(), 4);
 }
 
+/// `on_add_subnet` gates on `is_multicast_subnet` before `add()`.
+#[test]
+fn peer_cannot_hijack_multicast_via_more_specific() {
+    for (s, want) in [
+        ("ff02::/16", true),
+        ("ff00::/8", true),
+        ("ff02::fb/128", true),
+        ("224.0.0.0/4", true),
+        ("224.0.0.0/24", true),
+        ("239.255.255.250/32", true),
+        // supersets / non-multicast must pass
+        ("::/0", false),
+        ("0.0.0.0/0", false),
+        ("fe80::/16", false),
+        ("2001:db8::/32", false),
+        ("10.0.0.0/8", false),
+    ] {
+        assert_eq!(is_multicast_subnet(&sn(s)), want, "{s}");
+    }
+
+    // The attack the predicate prevents: owned more-specific beats
+    // ownerless broadcast under LPM.
+    let mut t = SubnetTree::new();
+    t.add_broadcast(sn("ff00::/8"));
+    t.add(sn("ff02::/16"), "evil".into());
+    let q: Ipv6Addr = "ff02::fb".parse().unwrap();
+    assert_eq!(t.lookup_ipv6(&q, all_up).unwrap().1, Some("evil"));
+}
+
 /// V6 longest-prefix. Same logic, 16 bytes.
 #[test]
 fn lookup_ipv6_longest_wins() {
