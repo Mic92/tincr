@@ -561,15 +561,14 @@ impl Discovery {
         {
             self.last_attempt = Some(now);
             self.publish_inflight = true;
+            // Clear only on actual enqueue; clearing while gated would
+            // delay the new addr a full REPUBLISH_INTERVAL.
+            self.reflexive_dirty = false;
             let _ = self
                 .worker
                 .req_tx
                 .send(WorkerReq::Publish(item, seq, value));
         }
-        // Clear unconditionally: if a publish is already inflight the
-        // fresh address will be picked up by the next `due` window or
-        // the next dirty event — don't let the flag pile up.
-        self.reflexive_dirty = false;
 
         // After the invalidation ⇒ vote change triggers immediate re-probe.
         out.wants_port_probe = self.reflexive_v4.is_none()
@@ -851,15 +850,11 @@ mod tests {
         assert!(parsed.direct.contains(&mapped));
     }
 
-    /// Bug repro: an address learned while a publish is already inflight
-    /// (or within the 5 s backoff window) is silently dropped because
-    /// `tick()` clears `reflexive_dirty` unconditionally even when it did
-    /// NOT enqueue a publish. The new address then waits the full 5-min
-    /// `REPUBLISH_INTERVAL` before reaching the DHT — the exact failure
-    /// mode `FIRST_PUBLISH_GRACE` was added to prevent.
+    /// Addr learned while publish is gated (inflight/backoff) must not
+    /// lose `reflexive_dirty` and wait a full `REPUBLISH_INTERVAL`.
+    /// `now` injected → only real wait is the worker's two `put_mutable`.
     #[test]
-    #[ignore = "bug: reflexive_dirty cleared without enqueue → new addr delayed 5 min"]
-    fn testnet_dirty_flag_lost_while_publish_gated() {
+    fn testnet_dirty_preserved_while_publish_gated() {
         use mainline::Testnet;
         let testnet = Testnet::new(10).expect("testnet");
         let mut d = Discovery::with_dht(
@@ -872,46 +867,39 @@ mod tests {
             None,
         );
 
+        let drain_published = |d: &mut Discovery, now: Instant| {
+            for _ in 0..100 {
+                for e in d.tick(now).events {
+                    if let DiscoveryEvent::Published { value, .. } = e {
+                        return Some(value);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            None
+        };
+
         let t0 = Instant::now();
-        // First dialable addr → dirty → tick enqueues a publish.
         assert!(d.set_portmapped_tcp(Some("203.0.113.1:655".parse().unwrap())));
         let _ = d.tick(t0);
+        assert!(d.publish_inflight, "first tick should have enqueued");
 
-        // Second addr arrives immediately after (portmapper v6 pinhole
-        // landing one tick later is the realistic case).
+        // Second addr lands while gated (v6 pinhole one tick later).
         assert!(d.set_portmapped_tcp6(Some("[2001:db8::7]:655".parse().unwrap())));
-        // Same `now`: either `publish_inflight` is still true, or the
-        // backoff gate (`0 >= 5 s` → false) blocks. In both cases the
-        // publish is NOT enqueued, yet `reflexive_dirty` is cleared.
         let _ = d.tick(t0);
+        assert!(d.reflexive_dirty, "dirty cleared while gated → addr lost");
 
-        // Poll for ~8 s of wall-clock (well past the 5 s backoff): the
-        // first publish (`tcp=` only) should surface, and — if the dirty
-        // flag had been preserved — a second one carrying `tcp6=` would
-        // follow once the gate opens.
-        let mut published = Vec::new();
-        for _ in 0..40 {
-            for e in d.tick(Instant::now()).events {
-                if let DiscoveryEvent::Published { value, .. } = e {
-                    published.push(value);
-                }
-            }
-            if published.iter().any(|v| v.contains("tcp6=")) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        // First publish drains; backoff still holds at t0.
+        let first = drain_published(&mut d, t0).expect("first publish");
+        assert!(first.contains("tcp=203.0.113.1:655"), "got {first}");
+        assert!(!first.contains("tcp6="), "snapshot predates tcp6");
+        assert!(d.reflexive_dirty, "backoff gate must not eat the flag");
 
+        let t1 = t0 + Duration::from_secs(6);
+        let second = drain_published(&mut d, t1).expect("republish after gate opens");
         assert!(
-            published.iter().any(|v| v.contains("tcp=203.0.113.1:655")),
-            "first publish never surfaced: {published:?}"
-        );
-        assert!(
-            published
-                .iter()
-                .any(|v| v.contains("tcp6=[2001:db8::7]:655")),
-            "tcp6 set while publish was gated; expected republish within seconds, \
-             got only {published:?} (dirty flag dropped → waits full 5-min interval)"
+            second.contains("tcp6=[2001:db8::7]:655"),
+            "tcp6 missing from republish: {second}"
         );
     }
 
