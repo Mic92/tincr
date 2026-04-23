@@ -193,11 +193,8 @@ impl NodeView {
     /// — keeps this module decoupled from the daemon struct, and lets the
     /// tests below build snapshots from minimal inputs.
     ///
-    /// `n_nodes` is `graph.nodes.len()` (slab length, including holes).
-    /// `last_routes.len()` is the same; `Graph` doesn't expose `.len()`
-    /// directly but `sssp()` returns a vec of that length, so the daemon
-    /// passes `last_routes.len()` here. Dense vec sizing: same indexing
-    /// invariant as `last_routes`.
+    /// `n_nodes` is `graph.slab_len()` (slab length, including holes).
+    /// Dense vec sizing: same indexing invariant as `last_routes`.
     #[must_use]
     pub(crate) fn build(
         graph: &crate::graph::Graph,

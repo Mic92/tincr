@@ -52,25 +52,10 @@ fn auth(stream: &UnixStream, cookie: &str) -> BufReader<UnixStream> {
 // BUG REPRO
 // ══════════════════════════════════════════════════════════════════════
 
-/// `tinc purge` against a freshly started daemon (no peers, no SSSP run
-/// yet) panics the daemon.
-///
-/// Root cause: `purge()` ends with `tx_snap_refresh_graph()` which
-/// passes `self.last_routes.len()` as the slab length to
-/// `NodeView::build`. `last_routes` is initialised empty
-/// (`daemon/setup.rs`) and only filled by the first
-/// `run_graph_and_log()` — which is triggered by the first edge
-/// add/del. With zero peers it has never run, so `n_nodes == 0` while
-/// the graph already contains `myself` (NodeId(0)).
-/// `shard/snapshot.rs` then trips its `debug_assert!(idx < n_nodes)`.
-///
-/// In a release build the `debug_assert!` is compiled out and
-/// `entries.get_mut(0)` silently no-ops, so this is debug-only — but
-/// the underlying invariant ("`last_routes.len()` == graph slab len")
-/// is still violated.
+/// `tinc purge` before any peer/SSSP run must ack and keep the daemon
+/// alive (snapshot-refresh path before first `run_graph_and_log`).
 #[test]
-#[ignore = "bug: REQ_PURGE on a fresh daemon panics (debug_assert in shard/snapshot.rs)"]
-fn req_purge_on_fresh_daemon_panics() {
+fn req_purge_on_fresh_daemon() {
     let tmp = tmp!("ctl-purge");
     let (mut child, pidfile, socket) = spawn(&tmp);
     let cookie = read_cookie(&pidfile);
@@ -111,8 +96,6 @@ fn req_purge_on_fresh_daemon_panics() {
 /// cookie, disconnect mid-reply. The daemon must stay alive and keep
 /// serving throughout. Kept as a passing test so the suite covers
 /// these paths going forward.
-///
-/// `REQ_PURGE` is excluded — see `req_purge_on_fresh_daemon_panics`.
 #[test]
 fn control_abuse_probe() {
     let tmp = tmp!("ctl-abuse");
@@ -154,10 +137,9 @@ fn control_abuse_probe() {
         let s = UnixStream::connect(&socket).unwrap();
         let mut r = auth(&s, &cookie);
         // Excluded: 0 (STOP — would shut the daemon down),
-        // 8 (PURGE — known bug, see ignored test above),
         // 9 (SET_DEBUG — terminates the conn on unparseable level by
         //    design, matching C `control.c:82`).
-        for sub in [1, 3, 4, 5, 6, 10, 12, 13, 14, 15, 99, -1] {
+        for sub in [1, 3, 4, 5, 6, 8, 10, 12, 13, 14, 15, 99, -1] {
             writeln!(&s, "18 {sub} !!garbage!!").unwrap();
         }
         // Conn must still be alive: a DUMP_CONNECTIONS round-trips.

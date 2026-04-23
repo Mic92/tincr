@@ -579,37 +579,13 @@ fn control_unknown_subtype() {
     assert_eq!(c.outbuf.live(), b"18 -1\n");
 }
 
-/// Malformed: no second token. Hits the `_` arm same as unknown.
+/// `control.c:53`: `sscanf != 1` → terminate (not `REQ_INVALID`).
 #[test]
-fn control_malformed() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
-
-    let (r, _) = handle_control(&mut c, b"18");
-    assert_eq!(r, DispatchResult::Ok);
-    assert_eq!(c.outbuf.live(), b"18 -1\n");
-}
-
-/// C `control_h` (`control.c:53-56`) does
-/// `if(sscanf(request, "%*d %d", &type) != 1) { logger(...); return false; }`
-/// — a missing/non-integer subtype TERMINATES the connection. Rust's
-/// `handle_control` instead replies `"18 -1"` and keeps the connection
-/// alive (the `_` match arm). The source comment claims "same as C (uninit
-/// `type` falls through to default)" which misreads the C: the `!= 1` guard
-/// fires before the switch.
-///
-/// Low severity (control socket is local-only, post-cookie-auth) but it is
-/// a protocol divergence with an incorrect C-compat rationale in the code,
-/// and the existing `control_malformed` test above pins the divergent
-/// behaviour as if it were correct.
-#[test]
-#[ignore = "bug: handle_control diverges from C control_h on unparseable subtype (replies REQ_INVALID instead of dropping)"]
-fn bug_control_malformed_subtype_should_drop() {
-    for line in [b"18".as_slice(), b"18 ", b"18 garbage", b"18 1x"] {
+fn control_malformed_subtype_drops() {
+    for line in [b"18".as_slice(), b"18 ", b"18 garbage"] {
         let mut c = mkconn();
         c.allow_request = Some(Request::Control);
         let (r, _) = handle_control(&mut c, line);
-        // C: `return false` → connection dropped. Expected `Drop`.
         assert_eq!(
             r,
             DispatchResult::Drop,

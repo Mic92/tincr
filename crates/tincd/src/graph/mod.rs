@@ -434,6 +434,13 @@ impl Graph {
         self.nodes.get(n.0 as usize)?.as_ref()
     }
 
+    /// Slab length (incl. freed holes). Every `NodeId.0 < slab_len()`;
+    /// same length `sssp()` returns. Use to size dense per-node tables.
+    #[must_use]
+    pub fn slab_len(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Live edge count (slab len minus freed slots).
     #[must_use]
     pub fn edge_count(&self) -> usize {

@@ -620,16 +620,17 @@ impl Daemon {
     /// Refresh routes + node view. Called at the END of
     /// `run_graph_and_log` (after the transition loop, so `reachable`
     /// is post-BFS) and after `purge` (the only path that removes from
-    /// `node_ids` without a follow-up BFS). `last_routes.len()` is the
-    /// graph slab length — same indexing invariant as `route_of`.
+    /// `node_ids` without a follow-up BFS).
     pub(super) fn tx_snap_refresh_graph(&mut self) {
         if let Some(s) = self.tx_snap.as_mut() {
             s.routes = Arc::clone(&self.last_routes);
+            // Size from the slab itself: `last_routes` is empty until
+            // the first `run_graph_and_log` (e.g. peerless `tinc purge`).
             s.ns = Arc::new(crate::shard::NodeView::build(
                 &self.graph,
                 &self.node_ids,
                 &self.nodes,
-                self.last_routes.len(),
+                self.graph.slab_len(),
             ));
             // id6_table changes at the same sites that change
             // node_ids: lookup_or_add_node (gossip.rs:33) and purge

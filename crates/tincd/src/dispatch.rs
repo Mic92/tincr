@@ -973,15 +973,17 @@ fn nth_token(line: &[u8], n: usize) -> Option<&str> {
         .and_then(|t| std::str::from_utf8(t).ok())
 }
 
-/// `control_h`. Line: `"18 <subtype> [args...]"`. Never `Drop` —
-/// `control_h` always returns `true`; CLI closes its end.
+/// `control_h`. Line: `"18 <subtype> [args...]"`.
 ///
 /// `single_match_else`: this is the `switch`; it grows arms.
 pub(crate) fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchResult, bool) {
-    // `sscanf("%*d %d", &type)`.
-    let raw = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok());
+    // `sscanf("%*d %d", &type) != 1` → `return false` (drop conn).
+    let Some(raw) = nth_token(line, 1).and_then(|s| s.parse::<i32>().ok()) else {
+        log::warn!(target: "tincd::proto", "Got bad CONTROL from {}", conn.name);
+        return (DispatchResult::Drop, false);
+    };
 
-    match raw.and_then(CtlReq::from_i32) {
+    match CtlReq::from_i32(raw) {
         // Daemon does the walk/reload (it has the slotmap).
         Some(REQ_RELOAD) => (DispatchResult::Reload, false),
         Some(REQ_DUMP_NODES) => (DispatchResult::DumpNodes, false),
@@ -1050,10 +1052,8 @@ pub(crate) fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchRes
         }
         _ => {
             // default → `"%d %d", CONTROL, REQ_INVALID`.
-            // Malformed (`subtype = None`) lands here too — same as C
-            // (uninit `type` falls through to default).
             log::debug!(target: "tincd::proto",
-                        "Unknown CONTROL subtype {raw:?} from {}", conn.name);
+                        "Unknown CONTROL subtype {raw} from {}", conn.name);
             let needs_write = conn.send(format_args!("{} {}", Request::Control, REQ_INVALID));
             (DispatchResult::Ok, needs_write)
         }
