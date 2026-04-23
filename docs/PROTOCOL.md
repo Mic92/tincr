@@ -186,6 +186,12 @@ first token is a numeric request code. The vocabulary:
 | `PING` / `PONG`             | Keepalive. The round-trip also feeds the advertised edge weight.                 |
 | `PACKET`, `SPTPS_PACKET`    | Tunnel a data packet over this TCP stream when no UDP path is usable.            |
 
+> Gossip is accepted on the authority of the direct neighbour, not
+> signed by the named origin — any authenticated member can forge
+> edges and subnets for any other. See [`SECURITY.md`](SECURITY.md)
+> for the trust boundary and the `StrictSubnets` / `TunnelServer`
+> mitigations.
+
 ```mermaid
 sequenceDiagram
     participant A as Node A

@@ -1,5 +1,11 @@
 # Operating tincd
 
+> ⚠️ **Trust model:** every node you admit to a tinc mesh can reroute,
+> intercept, or blackhole *any* traffic in that mesh — gossip is
+> unsigned and flooded. If your nodes are not all mutually trusted,
+> set `StrictSubnets = yes` (and `TunnelServer = yes` on hubs) before
+> going to production. See [`SECURITY.md`](SECURITY.md).
+
 Quick reference for running and debugging the daemon. See
 `tinc --help` / `tincd --help` for the full flag list.
 
