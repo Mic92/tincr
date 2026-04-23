@@ -160,11 +160,7 @@ fn prepare(
         }
         None => Command::new(&scriptname),
     };
-    cmd.env_clear();
-    cmd.env(
-        "PATH",
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    );
+    // Inherit daemon env (matches upstream C `system()`); add tinc vars on top.
     cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
     cmd.current_dir(confbase);
     Ok(cmd)
@@ -375,26 +371,23 @@ mod tests {
     }
 
     #[test]
-    fn env_is_cleared() {
-        // Child sees only the fixed PATH + tinc vars, nothing
-        // inherited from the test runner (HOME etc.).
-        let dir = tmpdir("envclear");
+    fn env_is_inherited() {
+        // Upstream parity: hooks see daemon env + overlaid tinc vars.
+        let dir = tmpdir("envinherit");
         let out = dir.join("out");
         write_script(
             &dir,
             "tinc-up",
             &format!(
-                "#!/bin/sh\nprintf '%s|%s' \"$PATH\" \"${{HOME:-unset}}\" > '{}'\n",
+                "#!/bin/sh\nprintf '%s|%s' \"$NAME\" \"$PATH\" > '{}'\n",
                 out.display()
             ),
         );
         let env = ScriptEnv::base(None, "alpha", None, None, None);
         let r = execute(&dir, "tinc-up", &env, None).unwrap();
         assert!(matches!(r, ScriptResult::Ok));
-        assert_eq!(
-            fs::read_to_string(&out).unwrap(),
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|unset"
-        );
+        let want = format!("alpha|{}", std::env::var("PATH").unwrap());
+        assert_eq!(fs::read_to_string(&out).unwrap(), want);
     }
 
     #[test]
