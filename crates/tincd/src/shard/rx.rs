@@ -531,6 +531,7 @@ mod tests {
         // is the first valid). udp_addr cached so probe passes.
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
+            out_key_base: 0,
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
             aead: tinc_sptps::SptpsAead::default(),
             outkey: [0u8; 64],

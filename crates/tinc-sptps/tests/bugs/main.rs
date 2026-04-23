@@ -7,3 +7,4 @@ mod adversarial_framing;
 mod fastpath_replay_window;
 mod open_data_into_err_buffer;
 mod send_record_oversized;
+mod seqno_wrap_nonce_reuse;

@@ -145,14 +145,18 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // The `Arc<AtomicU64>` is shared with the control-side `Sptps`;
     // both see the same counter. `Relaxed`: uniqueness is the only
     // requirement; the peer's replay window does the ordering.
-    // Intentional truncation: SPTPS wire seqno IS 32-bit; the
-    // AtomicU64 is just headroom for the wrap math. `wrapping_add` on
-    // the producer side, sliding-bitmap on the consumer side; the
-    // `as u32` here is exactly what `seal_data_into` does.
-    #[expect(clippy::cast_possible_truncation)]
-    let seqno_base = handles
+    // Hard nonce-reuse gate (same as `Sptps::alloc_seqnos`): one RMW
+    // + compare; SEAL_KEY_LIMIT's 2^16 margin absorbs racing supers.
+    let prev = handles
         .outseqno
-        .fetch_add(u64::from(count), Ordering::Relaxed) as u32;
+        .fetch_add(u64::from(count), Ordering::Relaxed);
+    if prev.wrapping_sub(handles.out_key_base) >= tinc_sptps::SEAL_KEY_LIMIT {
+        return None;
+    }
+    // Intentional truncation: SPTPS wire seqno IS 32-bit; the
+    // AtomicU64 is just headroom for the wrap math.
+    #[expect(clippy::cast_possible_truncation)]
+    let seqno_base = prev as u32;
 
     Some(TxTarget {
         handles: Arc::clone(handles),
@@ -228,6 +232,7 @@ mod tests {
         // in this test); the gate logic is what we're proving.
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
+            out_key_base: 0,
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
             aead: tinc_sptps::SptpsAead::default(),
             outkey: [0u8; 64],
@@ -327,6 +332,16 @@ mod tests {
         // 87-byte body should fail.
         snap.tunnels[&bob].minmtu.store(85, Ordering::Relaxed);
         assert!(tx_probe(&snap, &frame, 1).is_none());
+    }
+
+    #[test]
+    fn seal_key_limit_is_none() {
+        let (snap, bob) = fixture(0);
+        snap.tunnels[&bob]
+            .outseqno
+            .store(tinc_sptps::SEAL_KEY_LIMIT, Ordering::Relaxed);
+        let frame = v4_frame([10, 0, 0, 5]);
+        assert!(tx_probe(&snap, &frame, 4).is_none());
     }
 
     /// Negative: `slowpath_all` = true → immediate bail, no other

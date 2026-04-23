@@ -236,6 +236,32 @@ pub(crate) fn should_reap_prev_sptps(
     healthy || expired
 }
 
+/// Periodic-sweep predicate for proactive `send_req_key`.
+///
+/// Fires when **either** the current key is past
+/// [`tinc_sptps::SEAL_REKEY_THRESHOLD`] on a healthy session
+/// (counter-driven rekey), **or** a handshake has been in flight for
+/// longer than `pinginterval` (stalled-rekey retry).
+#[must_use]
+pub(crate) fn periodic_rekey_due(
+    validkey: bool,
+    waitingforkey: bool,
+    rekey_due: bool,
+    last_req_key: Option<Instant>,
+    now: Instant,
+    pinginterval: std::time::Duration,
+) -> bool {
+    if validkey && !waitingforkey && rekey_due {
+        return true;
+    }
+    if waitingforkey
+        && last_req_key.is_some_and(|lrk| now.saturating_duration_since(lrk) > pinginterval)
+    {
+        return true;
+    }
+    false
+}
+
 /// `node_status_t` (`node.h:31-48`). Unpacked; `as_u32()` reconstructs
 /// for `dump_nodes`. `visited`/`indirect`/`validkey_in`/`has_address`/
 /// `ping_sent` omitted (graph scratch / PMTU / unused).
@@ -562,5 +588,26 @@ mod tests {
             pi2,
             ke
         ));
+    }
+
+    #[test]
+    fn periodic_rekey_due_gates() {
+        use std::time::Duration;
+        let pi = Duration::from_secs(60);
+        let t0 = Instant::now();
+        let late = t0 + pi + Duration::from_secs(1);
+        // (validkey, waiting, rekey_due, last_req_key, now) -> want
+        let cases = [
+            (true, false, false, None, t0, false), // healthy, under threshold
+            (true, false, true, None, t0, true),   // counter-driven
+            (true, true, true, Some(t0), t0, false), // already in flight: don't thrash
+            (false, true, false, Some(t0), t0 + pi, false), // stalled, not yet pinginterval
+            (true, true, false, Some(t0), late, true), // stalled retry, validkey irrelevant
+            (false, true, false, Some(t0), late, true),
+            (false, false, false, Some(t0), t0, false),
+        ];
+        for (vk, wfk, due, lrk, now, want) in cases {
+            assert_eq!(periodic_rekey_due(vk, wfk, due, lrk, now, pi), want);
+        }
     }
 }

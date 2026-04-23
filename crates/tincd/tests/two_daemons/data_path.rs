@@ -611,19 +611,18 @@ fn keyexpire_forces_rekey() {
     let _ = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
 
     // ─── wait past KeyExpire (1s) + rekey RTT ──────────────────
-    // The timer fires at +1s, force_kex sends KEX, the rekey is 3
-    // RTTs over the meta-conn. validkey stays SET through the rekey
-    // (the C doesn't clear it; SPTPS keeps the old key live until
-    // SIG arrives). 2s gives plenty of slack on loopback.
+    // Timer fires at +1s; `on_keyexpire` → `send_req_key` (fresh
+    // handshake, ~ms on loopback).
     std::thread::sleep(Duration::from_secs(2));
 
     // ─── packet crosses under the NEW key ──────────────────────
-    // Proves the rekey transcript completed and dispatch_tunnel_
-    // outputs delivered the new keys end to end. If force_kex broke
-    // the SPTPS state, this packet decrypts to garbage or drops.
+    // KeyExpire=1 keeps re-firing; retry the write so it can't land
+    // in the brief `!validkey` window.
     let pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"post-rekey");
-    write_fd(&alice_tun, &pkt);
-    let recv = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
+    let recv = poll_until(Duration::from_secs(5), || {
+        write_fd(&alice_tun, &pkt);
+        read_fd_nb(&bob_tun)
+    });
     assert_eq!(recv, pkt, "post-rekey packet body mismatch");
 
     // ─── stderr: the timer fired, the rekey happened ───────────
@@ -644,9 +643,11 @@ fn keyexpire_forces_rekey() {
         bob_stderr.contains("Expiring symmetric keys"),
         "bob's keyexpire timer never fired; stderr:\n{bob_stderr}"
     );
-    // The rekey HandshakeDone is silent (`dispatch_tunnel_outputs`
-    // only logs if `!validkey`, which stays set through the rekey).
-    // The packet-crosses-under-new-key assert above IS the proof:
-    // if force_kex broke SPTPS state, decrypt fails and the packet
-    // drops. The "Expiring" log proves the timer arm + fire path.
+    assert!(
+        alice_stderr
+            .matches("SPTPS key exchange with bob successful")
+            .count()
+            >= 2,
+        "alice did not complete a second handshake; stderr:\n{alice_stderr}"
+    );
 }

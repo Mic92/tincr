@@ -14,7 +14,7 @@ fn peer_rekey_survives_prior_malformed_handshake() {
 
     // Hand-seal an encrypted REC_HANDSHAKE with a 3-byte body
     // (≠ KEX_LEN) — `send_record` refuses type ≥ 128.
-    let seqno = alice.alloc_seqnos(1);
+    let seqno = alice.alloc_seqnos(1).unwrap();
     let cipher = ChaPoly::new(&alice.outcipher_key().unwrap());
     let mut bad = seqno.to_be_bytes().to_vec();
     cipher.seal_into(u64::from(seqno), REC_HANDSHAKE, b"bad", &mut bad, 4);

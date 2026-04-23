@@ -173,6 +173,7 @@ impl Daemon {
                     if let Some(sptps) = tunnel.sptps.as_deref() {
                         let handles = std::sync::Arc::new(crate::shard::TunnelHandles {
                             outseqno: sptps.outseqno_handle(),
+                            out_key_base: sptps.out_key_base(),
                             replay: sptps.replay_handle(),
                             aead: sptps.aead(),
                             outkey: *sptps.outcipher_key().expect("post-HandshakeDone"),

@@ -95,10 +95,16 @@ fn key_half(key: &[u8], initiator: bool, outbound: bool) -> &[u8; CIPHER_KEY_LEN
     half.try_into().unwrap()
 }
 
-/// Max records sealed per `outcipher` before app-data sends return
-/// `InvalidState`. Wire nonce is `outseqno as u32`; 2^32 = nonce reuse.
-/// Margin covers shard `fetch_add` slop + the rekey handshake itself.
-const SEAL_KEY_LIMIT: u64 = (1u64 << 32) - (1u64 << 16);
+/// Max records sealed per `outcipher` before seqno allocation refuses.
+/// Wire nonce is `outseqno as u32`; 2^32 = nonce reuse (Forbidden
+/// Attack under AES-GCM, plaintext-XOR + forgery under ChaPoly). The
+/// 2^16 margin absorbs concurrent shard `fetch_add` slop.
+pub const SEAL_KEY_LIMIT: u64 = (1u64 << 32) - (1u64 << 16);
+
+/// Soft threshold at which the daemon should proactively start a fresh
+/// handshake. Half of [`SEAL_KEY_LIMIT`] so the hard limit stays the
+/// safety net. See [`Sptps::rekey_due`].
+pub const SEAL_REKEY_THRESHOLD: u64 = SEAL_KEY_LIMIT / 2;
 
 // ────────────────────────────────────────────────────────────────────
 // Public types
@@ -735,10 +741,10 @@ impl Sptps {
         if self.framing != Framing::Datagram || record_type >= REC_HANDSHAKE {
             return Err(SptpsError::InvalidState);
         }
-        if self.outcipher.is_none() || self.needs_rekey() {
+        if self.outcipher.is_none() {
             return Err(SptpsError::InvalidState);
         }
-        let seqno = self.alloc_seqnos(1);
+        let seqno = self.alloc_seqnos(1).ok_or(SptpsError::InvalidState)?;
         // Infallible: outcipher checked above, framing/record_type
         // checked at the top of this fn.
         self.seal_with_seqno(seqno, record_type, body, out, headroom)
@@ -757,17 +763,27 @@ impl Sptps {
     ///
     /// Caller MUST emit all `n` reserved seqnos. Gaps are harmless on
     /// the wire (replay window tolerates skips) but waste seqno space.
+    ///
+    /// `None` once [`SEAL_KEY_LIMIT`] records have been sealed under
+    /// the current key — the hard nonce-reuse gate. Caller drops the
+    /// packet; [`SEAL_REKEY_THRESHOLD`] should have rekeyed long before.
     #[must_use]
-    pub fn alloc_seqnos(&self, n: u32) -> u32 {
+    pub fn alloc_seqnos(&self, n: u32) -> Option<u32> {
         // u64 fetch_add, truncate at read. `(prev + n) as u32 ==
         // (prev as u32).wrapping_add(n)`: the high bits the wider
         // counter carries are invisible on the wire. `Relaxed`: the
         // seqno is a nonce, not a happens-before edge; uniqueness is
         // what matters and fetch_add gives it monotonically.
+        let prev = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed);
+        // Gate on `prev`: SEAL_KEY_LIMIT's 2^16 margin absorbs the one
+        // batch that can race past. Burned seqnos on `None` are a gap.
+        if prev.wrapping_sub(self.out_key_base) >= SEAL_KEY_LIMIT {
+            return None;
+        }
         #[expect(clippy::cast_possible_truncation)]
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
-        let base = self.outseqno.fetch_add(u64::from(n), Ordering::Relaxed) as u32;
-        base
+        let base = prev as u32;
+        Some(base)
     }
 
     /// Which AEAD this session seals records with. The shard fast
@@ -785,14 +801,32 @@ impl Sptps {
         self.role
     }
 
-    /// True once [`SEAL_KEY_LIMIT`] records have been sealed under the
-    /// current `outcipher`. App-data sends return `InvalidState` past
-    /// this point (daemon rekeys on a timer, never polls this).
-    fn needs_rekey(&self) -> bool {
+    /// Records sealed under the current `outcipher` so far.
+    #[must_use]
+    pub fn sealed_count(&self) -> u64 {
         self.outseqno
             .load(Ordering::Relaxed)
             .wrapping_sub(self.out_key_base)
-            >= SEAL_KEY_LIMIT
+    }
+
+    /// `outseqno` at which the current `outcipher` was installed.
+    /// Paired with [`outseqno_handle`](Self::outseqno_handle) for the
+    /// shard-side [`SEAL_KEY_LIMIT`] gate.
+    #[must_use]
+    pub fn out_key_base(&self) -> u64 {
+        self.out_key_base
+    }
+
+    /// True once [`SEAL_REKEY_THRESHOLD`] records have been sealed
+    /// under the current key. Daemon's periodic sweep polls this.
+    #[must_use]
+    pub fn rekey_due(&self) -> bool {
+        self.sealed_count() >= SEAL_REKEY_THRESHOLD
+    }
+
+    /// Hard limit reached; app-data sends return `InvalidState`.
+    fn needs_rekey(&self) -> bool {
+        self.sealed_count() >= SEAL_KEY_LIMIT
     }
 
     /// Clone the outgoing seqno counter for shard hand-off. The shard
@@ -1234,12 +1268,20 @@ impl Sptps {
             return Err(SptpsError::BadAck);
         }
         let key = self.key.take().expect("receive_ack with no key material");
+        let was_rekey = self.incipher.is_some();
         // Initiator decrypts with key0, responder with key1.
         // (Mirror of the outcipher assignment in receive_sig.)
         self.incipher = Some(SptpsCipher::new(
             self.aead,
             key_half(&*key, self.role.is_initiator(), false),
         ));
+        // Datagram in-band rekey: fresh replay window so the peer's
+        // reset-to-0 wire seqno (`receive_sig`) is accepted. New Arc,
+        // not in-place: shards hold the old Arc paired with old inkey.
+        if was_rekey && self.framing == Framing::Datagram {
+            let win = self.replay_mut().late.len();
+            self.replay = Arc::new(Mutex::new(ReplayWindow::new(win)));
+        }
         // `key` Zeroizes on drop here.
         Ok(())
     }
@@ -1362,7 +1404,18 @@ impl Sptps {
             self.aead,
             key_half(&**key, self.role.is_initiator(), true),
         ));
-        self.out_key_base = self.outseqno.load(Ordering::Relaxed);
+        // Datagram in-band rekey: fresh seqno space so the wire-u32
+        // can never wrap across rekeys. New Arc, not `store(0)`:
+        // shards hold the old Arc paired with the old outkey, and an
+        // in-place reset would hand them nonce 0 under that key.
+        // Stream keeps the monotone counter for C-tinc wire parity
+        // (`tests/vs_c.rs::rust_vs_c_rekey`).
+        if was_rekey && self.framing == Framing::Datagram {
+            self.outseqno = Arc::new(AtomicU64::new(0));
+            self.out_key_base = 0;
+        } else {
+            self.out_key_base = self.outseqno.load(Ordering::Relaxed);
+        }
 
         Ok(was_rekey)
     }

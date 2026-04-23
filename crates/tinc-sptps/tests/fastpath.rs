@@ -87,7 +87,7 @@ fn alloc_seqnos_seal_with_seqno_byte_identical() {
 
     // Par-shaped: alloc once, seal with explicit seqnos. `&self`.
     let n = u32::try_from(bodies.len()).expect("test fixture < u32::MAX");
-    let base = a2.alloc_seqnos(n);
+    let base = a2.alloc_seqnos(n).unwrap();
     let par_wires: Vec<Vec<u8>> = bodies
         .iter()
         .enumerate()

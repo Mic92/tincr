@@ -499,7 +499,14 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         settings.invitation_lifetime = Duration::from_secs(v);
     });
     cfg_int!(config, "KeyExpire", u32, |v| {
-        settings.keylifetime = v.min(MAX_DURATION_SECS);
+        // Ceiling 3600s: defense-in-depth for the counter-driven
+        // nonce-reuse guard. No floor (tiny values only waste CPU).
+        let clamped = v.clamp(1, 3600);
+        if !(60..=3600).contains(&v) {
+            log::warn!(target: "tincd",
+                       "KeyExpire = {v} outside [60, 3600]; using {clamped}");
+        }
+        settings.keylifetime = clamped;
     });
 }
 
@@ -900,5 +907,32 @@ mod tests {
 
         // Missing file.
         assert!(read_dht_secret_file("nope", &dir).is_err());
+    }
+
+    fn cfg(lines: &[&str]) -> tinc_conf::Config {
+        let mut c = tinc_conf::Config::default();
+        for (i, l) in lines.iter().enumerate() {
+            #[expect(clippy::cast_possible_truncation)]
+            let e = tinc_conf::parse_line(
+                l,
+                tinc_conf::Source::File {
+                    path: "test".into(),
+                    line: i as u32,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            c.merge([e]);
+        }
+        c
+    }
+
+    #[test]
+    fn keyexpire_clamped() {
+        for (raw, want) in [("31536000", 3600), ("5", 5), ("1800", 1800)] {
+            let mut s = DaemonSettings::default();
+            apply_reloadable_settings(&cfg(&[&format!("KeyExpire = {raw}")]), &mut s);
+            assert_eq!(s.keylifetime, want, "KeyExpire = {raw}");
+        }
     }
 }

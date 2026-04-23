@@ -73,6 +73,11 @@ pub(crate) struct TunnelHandles {
     /// seqno uniqueness is the only requirement.
     pub outseqno: Arc<AtomicU64>,
 
+    /// `Sptps::out_key_base()` snapshot. Paired with `outseqno` for
+    /// [`tx_probe`]'s [`tinc_sptps::SEAL_KEY_LIMIT`] gate. Immutable
+    /// for the lifetime of this `TunnelHandles`.
+    pub out_key_base: u64,
+
     /// `Sptps::replay_handle()`. RX-path: `lock()` + `check_public(seqno)`
     /// per incoming packet AFTER decrypt succeeds. Uncontended in steady
     /// state (each peer's flow lands on one socket). Stored here so the

@@ -18,7 +18,6 @@ use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
 use crate::graph::NodeId;
-use rand_core::OsRng;
 use tinc_proto::msg::SubnetMsg;
 use tinc_proto::{Request, Subnet};
 
@@ -169,6 +168,36 @@ impl Daemon {
     /// Per-node tunnel state housekeeping (no meta-conn access).
     fn on_tunnel_housekeeping_tick(&mut self, now: Instant) {
         let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
+
+        // Counter-driven rekey + stalled-handshake retry. Before
+        // prev_sptps reap so `send_req_key` can salvage into it.
+        let mut rekey: Vec<NodeId> = Vec::new();
+        for (&nid, tunnel) in &self.dp.tunnels {
+            let rekey_due = tunnel
+                .sptps
+                .as_deref()
+                .is_some_and(tinc_sptps::Sptps::rekey_due);
+            if crate::tunnel::periodic_rekey_due(
+                tunnel.status.validkey,
+                tunnel.status.waitingforkey,
+                rekey_due,
+                tunnel.last_req_key,
+                now,
+                pinginterval,
+            ) {
+                rekey.push(nid);
+            }
+        }
+        let mut nw = false;
+        for nid in rekey {
+            log::info!(target: "tincd::net",
+                       "Restarting SPTPS for {} (seqno threshold or stalled handshake)",
+                       self.graph.node(nid).map_or("<unknown>", |n| n.name.as_str()));
+            nw |= self.send_req_key(nid);
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
 
         // Reap salvaged old SPTPS sessions: see
         // `TunnelState::prev_sptps` / `should_reap_prev_sptps`. Two
@@ -834,47 +863,24 @@ impl Daemon {
         true
     }
 
-    /// Periodic SPTPS rekey: walk every reachable+validkey tunnel,
-    /// call `sptps_force_kex`.
-    ///
-    /// We arm this timer even though it's traditionally a legacy-
-    /// crypto concern: `outseqno` is the ChaCha20-Poly1305 nonce and
-    /// wraps at `u32::MAX` with no check. Rekeying every `keylifetime`
-    /// seconds keeps it well clear.
+    /// Periodic SPTPS rekey: restart every validkey tunnel via
+    /// `send_req_key`. Fresh `Sptps` (not in-band `force_kex`) so
+    /// `outseqno` and the replay window restart from zero.
+    /// Defense-in-depth behind `on_tunnel_housekeeping_tick`.
     pub(super) fn on_keyexpire(&mut self) {
         log::info!(target: "tincd", "Expiring symmetric keys");
 
-        // Borrow dance: collect (nid, name, outs) first; dispatch_
-        // tunnel_outputs needs `&mut self`.
-        let mut pending: Vec<(NodeId, String, Vec<tinc_sptps::Output>)> = Vec::new();
-        for (&nid, tunnel) in &mut self.dp.tunnels {
-            if !tunnel.status.validkey {
-                continue;
-            }
-            // `validkey` is cleared on BecameUnreachable, so
-            // validkey ⇒ reachable here.
-            let Some(sptps) = tunnel.sptps.as_deref_mut() else {
-                continue;
-            };
-            match sptps.force_kex(&mut OsRng) {
-                Ok(outs) => {
-                    let name = self
-                        .graph
-                        .node(nid)
-                        .map_or_else(|| "<unknown>".to_owned(), |n| n.name.clone());
-                    pending.push((nid, name, outs));
-                }
-                Err(_) => {
-                    // InvalidState: rekey already in flight.
-                    log::debug!(target: "tincd",
-                                "force_kex skipped (rekey already in flight)");
-                }
-            }
-        }
+        let pending: Vec<NodeId> = self
+            .dp
+            .tunnels
+            .iter()
+            .filter(|(_, t)| t.status.validkey)
+            .map(|(&nid, _)| nid)
+            .collect();
 
         let mut nw = false;
-        for (nid, name, outs) in pending {
-            nw |= self.dispatch_tunnel_outputs(nid, &name, outs);
+        for nid in pending {
+            nw |= self.send_req_key(nid);
         }
         if nw {
             self.maybe_set_write_any();
