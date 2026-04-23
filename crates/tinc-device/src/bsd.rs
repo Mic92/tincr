@@ -167,6 +167,13 @@ impl Device for BsdTun {
             // `n + offset` — for UTUN the 4-byte prefix is already
             // counted in `n`.
             BsdVariant::Tun | BsdVariant::Utun => {
+                // Need ≥1 IP byte at [ETH_HLEN]; else utun runt reads stale nibble.
+                if offset + n <= ETH_HLEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: runt {n}-byte read (no IP header)", self.iface),
+                    ));
+                }
                 let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -188,6 +195,18 @@ impl Device for BsdTun {
 
     /// Write a packet. Three arms.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Tun/Utun index into the 14-byte ether header; reject short
+        // frames so a malformed peer packet can't panic on a slice op.
+        if self.variant != BsdVariant::Tap && buf.len() < ETH_HLEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{}: write of {}-byte frame (< ETH_HLEN={ETH_HLEN})",
+                    self.iface,
+                    buf.len()
+                ),
+            ));
+        }
         match self.variant {
             // TUN +14: route.c wrote a full ether header; strip it.
             BsdVariant::Tun => write_fd(self.fd.as_fd(), &buf[ETH_HLEN..]),

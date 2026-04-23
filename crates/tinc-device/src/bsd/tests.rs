@@ -373,75 +373,41 @@ fn read_unknown_nibble_errors() {
     }
 }
 
-// ─── Device trait surface
-
-// ─── Bug repros (#[ignore]d — see docs/bugs/FOUND.md)
-
-/// Utun read with a runt datagram (< `AF_PREFIX_LEN+1` bytes) indexes
-/// `buf[ETH_HLEN]` past what the kernel wrote, picking up a stale
-/// byte from the previous read. With a stale 0x45 there it returns
-/// `Ok(len)` where `len < ETH_HLEN` and the ethertype is bogus.
-/// Expected: error (or at least never `Ok(n)` with `n < ETH_HLEN`).
+/// Utun runt (< `AF_PREFIX_LEN+1` bytes) errors; must not read stale
+/// `buf[ETH_HLEN]` left by a previous packet.
 #[test]
-#[ignore = "bug: utun read of runt (<5B) reads stale buf[14] and returns len < ETH_HLEN"]
-fn bug_utun_read_runt_stale_nibble() {
-    // DGRAM socketpair preserves message boundaries on macOS/Linux.
+fn utun_read_runt_errors() {
     let (peer, sock) = dgram_pair();
     let mut bsd = fake_bsd(sock, BsdVariant::Utun);
     let mut buf = [0u8; MTU];
 
-    // 1st read: a normal [AF prefix][IPv4] datagram — leaves 0x45
-    // at buf[14].
+    // Prime buf[14] with 0x45 via a normal packet.
     nix::unistd::write(&peer, &[0, 0, 0, 2, 0x45, 0x00, 0x00, 0x14]).unwrap();
     let n = bsd.read(&mut buf).unwrap();
     assert_eq!(n, 18);
     assert_eq!(buf[ETH_HLEN], 0x45);
 
-    // 2nd read: a 2-byte runt. Kernel writes buf[10..12]; buf[14]
-    // still holds the stale 0x45 from the previous packet.
+    // 2-byte runt: buf[14] still stale 0x45; must not be consulted.
     nix::unistd::write(&peer, &[0xAA, 0xBB]).unwrap();
-    let r = bsd.read(&mut buf);
+    let e = bsd.read(&mut buf).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
 
-    // EXPECTED: Err (runt, can't synthesize) or Ok(len >= ETH_HLEN)
-    // with the runt's actual bytes. OBSERVED: Ok(12) — a frame
-    // shorter than the eth header it just wrote, ethertype derived
-    // from a previous packet's byte.
-    match r {
-        Err(_) => {} // would be fine
-        Ok(n) => assert!(
-            n >= ETH_HLEN,
-            "utun read returned Ok({n}) < ETH_HLEN({ETH_HLEN}) for a runt; \
-             ethertype at [12..14] = {:02x?} was synthesized from STALE buf[14]",
-            &buf[12..14],
-        ),
-    }
+    // Boundary: prefix-only (AF_PREFIX_LEN bytes) is also a runt.
+    nix::unistd::write(&peer, &[0, 0, 0, 2]).unwrap();
+    let e = bsd.read(&mut buf).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
 }
 
-/// `BsdTun::write` (Utun) with `buf.len() < ETH_HLEN` panics on the
-/// `buf[12]`/`buf[13]` index. C tinc reads the same bytes from a
-/// fixed-size `DATA(packet)` buffer (stale, but no crash) and the
-/// subsequent `write(fd, ..., len-10)` underflows to an error — it
-/// never aborts the process. The Rust port panics instead.
-///
-/// `send_packet_myself` documents "data.len()≥12 holds at every
-/// callsite"; 12–13-byte frames reaching `device.write` would crash
-/// the daemon on macOS.
+/// Tun/Utun write with `buf.len() < ETH_HLEN` errors (no panic on
+/// slice index; C tinc errors here too).
 #[test]
-#[ignore = "bug: utun write panics on buf.len() < ETH_HLEN (C tinc errors, Rust crashes)"]
-fn bug_utun_write_short_buf_panics() {
-    let (dev, _r) = pipe_rev();
-    let mut bsd = fake_bsd(dev, BsdVariant::Utun);
-
-    // 12 bytes: at the documented send_packet_myself lower bound,
-    // but below ETH_HLEN. Utun write reads buf[12]/buf[13].
-    let mut frame = [0u8; 12];
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bsd.write(&mut frame)));
-
-    // EXPECTED: no panic — either Err(InvalidData/InvalidInput) or
-    // Ok(_). OBSERVED: index-out-of-bounds panic.
-    assert!(
-        r.is_ok(),
-        "BsdTun::write(Utun) panicked on a {}-byte buffer",
-        frame.len()
-    );
+fn tun_utun_write_short_buf_errors() {
+    for variant in [BsdVariant::Tun, BsdVariant::Utun] {
+        let (dev, _r) = pipe_rev();
+        let mut bsd = fake_bsd(dev, variant);
+        // 12B: send_packet_myself lower bound, but < ETH_HLEN.
+        let mut frame = [0u8; 12];
+        let e = bsd.write(&mut frame).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{variant:?}");
+    }
 }
