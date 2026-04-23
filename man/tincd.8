@@ -1,4 +1,4 @@
-.Dd April 18, 2026
+.Dd April 23, 2026
 .Dt TINCD 8
 .Os
 .Sh NAME
@@ -82,6 +82,19 @@ overrides this and accepts per-target filters.
 Lock the process into RAM with
 .Xr mlockall 2 .
 Exits on failure.
+.It Fl -allow-coredump
+Skip the default core-dump suppression.
+.Nm
+normally sets
+.Dv RLIMIT_CORE
+to 0 (and
+.Dv PR_SET_DUMPABLE
+to 0 on Linux) before loading any private key, so that a crash cannot
+write key material to disk or to
+.Xr systemd-coredump 8 .
+Use this flag (or
+.Ev TINCR_ALLOW_COREDUMP )
+when debugging.
 .It Fl -logfile Ns Op = Ns Ar FILE
 Write log output to
 .Ar FILE
@@ -216,6 +229,9 @@ When set, the address cache and
 .Pa dht_nodes
 persistence file are stored under it instead of the configuration
 directory.
+.It Ev TINCR_ALLOW_COREDUMP
+If set, equivalent to
+.Fl -allow-coredump .
 .It Ev TINC_UMBILICAL
 Internal pipe protocol used by
 .Ql tinc start .

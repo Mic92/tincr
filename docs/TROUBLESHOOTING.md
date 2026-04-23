@@ -242,6 +242,16 @@ demand-driven shortcut (kicks in above ~32 KiB/s relayed).
 
 ---
 
+## Crash, but no core dump
+
+By design. `tincd` zeroes `RLIMIT_CORE` (and `PR_SET_DUMPABLE` on
+Linux) at startup so a crash can't write the Ed25519 private key and
+live session keys to disk or to `systemd-coredump`. To debug a crash,
+restart with `--allow-coredump` or set `TINCR_ALLOW_COREDUMP=1` in the
+unit's environment; then `coredumpctl gdb tincd` works as usual. On
+Linux the cleared dumpable bit also blocks same-uid `ptrace`; attach
+as root or use the flag.
+
 ## Reading strace for event-loop health
 
 When latency through the tunnel is bad and `tinc info PEER` looks
