@@ -1,4 +1,4 @@
-.Dd April 18, 2026
+.Dd April 23, 2026
 .Dt TINC.CONF 5
 .Os
 .Sh NAME
@@ -287,6 +287,22 @@ Always route data to this node via the meta-connection path, even when
 direct UDP would be possible.
 .It Va TCPOnly Li = yes | no Po no Pc Bq server, host
 Never send UDP to this node.
+.It Va SPTPSCipher Li = chacha20-poly1305 | aes-256-gcm Po chacha20-poly1305 Pc Bq server, host, tincr extension
+AEAD for SPTPS records on edges to this node.
+Both ends must agree; the choice is mixed into the handshake
+transcript, so a mismatch fails authentication rather than corrupting
+traffic.
+The default is wire-identical to C tinc, which ignores this key.
+A one-time warning is logged if
+.Sy aes-256-gcm
+is selected on a CPU without AES/PMULL hardware.
+.It Va SPTPSKex Li = x25519 | x25519-mlkem768 Po x25519 Pc Bq server, host, tincr extension
+Key-exchange mode for SPTPS sessions with this node.
+.Sy x25519-mlkem768
+adds an ML-KEM-768 encapsulation alongside the X25519 ECDH for
+post-quantum ("harvest now, decrypt later") resistance.
+Both ends must agree; there is no negotiation.
+The default is wire-identical to C tinc.
 .El
 .Ss Accepted but ignored
 .Va Cipher ,

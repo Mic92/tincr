@@ -71,6 +71,15 @@ participate.
   [OPERATING.md](OPERATING.md) for unit files.
 - **`LogLevel` config key.** Sets verbosity from `tinc.conf` so the
   unit file doesn't need `-d` flags.
+- **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
+  ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis,
+  2–3× faster on AES-NI/PMULL hardware. Both ends must be tincr and
+  must agree; C tinc ignores the key, so leave it at the default for
+  any C↔Rust edge. See [OPERATING.md](OPERATING.md#sptpscipher--aes-256-gcm-opt-in).
+- **`SPTPSKex` host key.** `x25519-mlkem768` adds an ML-KEM-768
+  encapsulation to the SPTPS key exchange for post-quantum forward
+  secrecy. Both ends must be tincr and must agree. See
+  [OPERATING.md](OPERATING.md#post-quantum-key-exchange).
 
 ## Changed behaviour
 
