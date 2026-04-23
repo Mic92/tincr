@@ -30,9 +30,9 @@
 //! `0o666` default; we don't need it.
 //!
 //! For the unix socket: `bind()` honors umask and `UnixListener::
-//! bind` doesn't expose mode. The C uses a process-global umask
-//! dance; we `chmod()` the socket inode immediately after bind
-//! instead — same outcome, no global state.
+//! bind` doesn't expose mode. We bracket `bind()` with a tightened
+//! `umask(0o077)` so the inode is never observable with group/other
+//! bits, then `chmod()` 0700 for good measure.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -168,12 +168,19 @@ impl ControlSocket {
             let _ = std::fs::remove_file(path);
         }
 
-        // ─── bind, then chmod 0700
-        // chmod-after-bind instead of the C's process-global umask
-        // dance: thread-safe (cargo test runs this on a pool). The
-        // brief pre-chmod inode is 0o755 — no w bit, connect(2)
-        // already refused on Linux/BSD.
-        let listener = UnixListener::bind(path).map_err(BindError::Io)?;
+        // ─── bind under umask 0077
+        // `UnixListener::bind` listens internally → no fchmod window;
+        // tighten umask so the inode is born 0700. Process-global, but
+        // tightening only strips bits → fails safe for other threads.
+        // SAFETY: umask(2) cannot fail.
+        #[allow(unsafe_code)]
+        let listener = unsafe {
+            let prev = libc::umask(0o077);
+            let r = UnixListener::bind(path);
+            libc::umask(prev);
+            r.map_err(BindError::Io)?
+        };
+        // Backstop in case the umask bracket is ever refactored away.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(BindError::Io)?;
 
