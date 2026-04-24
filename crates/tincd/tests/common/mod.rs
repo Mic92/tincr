@@ -793,6 +793,37 @@ impl ChildWithLog {
     }
 }
 
+impl Drop for ChildWithLog {
+    /// Reap on panic / early return so a failing test doesn't leave a
+    /// daemon contending for ports across later runs.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Wraps a raw `Child` to kill+reap on drop. For tests that want
+/// `wait_with_output`/`stderr` directly and so don't use `ChildWithLog`.
+pub struct KillOnDrop(pub Child);
+
+impl std::ops::Deref for KillOnDrop {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for KillOnDrop {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 // ═══════════════════════════ linux netns helpers ═══════════════════
 // Only used by netns/crossimpl/throughput, all of which are already
 // `#![cfg(target_os = "linux")]`. cfg-gating here too keeps the
