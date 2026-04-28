@@ -87,7 +87,6 @@ fn myself_options_default() -> ConnOptions {
 pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOptions {
     let mut opts = ConnOptions::empty().with_minor(PROT_MINOR);
 
-    // `if(get_config_bool(...) && choice)`.
     if config
         .lookup("IndirectData")
         .next()
@@ -96,7 +95,7 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOpti
     {
         opts |= ConnOptions::INDIRECT;
     }
-    // `if(TCPONLY) options |= INDIRECT`.
+    // TCPOnly implies INDIRECT.
     if config
         .lookup("TCPOnly")
         .next()
@@ -105,9 +104,7 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOpti
     {
         opts |= ConnOptions::TCPONLY | ConnOptions::INDIRECT;
     }
-    // `choice = !(options & TCPONLY); get_config_bool("PMTUDiscovery",
-    // &choice); if(choice) options |= PMTU_DISCOVERY`. The default is
-    // on UNLESS TCPOnly already set it to off.
+    // PMTUDiscovery defaults on, unless TCPOnly already turned it off.
     let pmtu_default = !opts.contains(ConnOptions::TCPONLY);
     if config
         .lookup("PMTUDiscovery")
@@ -117,8 +114,7 @@ pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOpti
     {
         opts |= ConnOptions::PMTU_DISCOVERY;
     }
-    // `choice = true; get_config_bool("ClampMSS", &choice); if(choice)
-    // options |= CLAMP_MSS`. Default on.
+    // ClampMSS defaults on.
     if config
         .lookup("ClampMSS")
         .next()

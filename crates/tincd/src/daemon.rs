@@ -42,9 +42,6 @@ mod settings;
 mod setup;
 mod tx_control;
 
-// Re-exports so the 7 submodules' `use super::*;` keep resolving
-// items that moved into settings.rs. `lib.rs` re-exports
-// `DaemonSettings` from this module's root.
 pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode, read_dht_secret_file};
 
