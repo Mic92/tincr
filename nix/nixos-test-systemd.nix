@@ -134,9 +134,14 @@ testers.runNixOSTest {
         beta.fail("pgrep -x tincd")
 
         alpha.systemctl("start tincd@mesh.service")
-        # alpha's outgoing connect to beta:655 triggers activation.
-        beta.wait_for_unit("tincd@mesh.service")
         alpha.wait_for_unit("tincd@mesh.service")
+        # Poll instead of wait_for_unit: a socket-activated service
+        # is legitimately inactive with no pending job until the first
+        # accept, and alpha's first dial loses a race against async
+        # getaddrinfo for `Address = beta` (retry is 5s out).
+        beta.wait_until_succeeds(
+            "systemctl is-active tincd@mesh.service", timeout=30
+        )
 
         # Type=notify: wait_for_unit returning means READY=1 was
         # received (active state), not just that the process forked.
