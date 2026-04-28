@@ -161,15 +161,17 @@ mod tests {
         // Straight off send_add_edge with PROT_MINOR=7 in high byte
         // (0x07000000) of options. Weight 100. No local addr (1.0-compat).
         let line = "12 abc alice bob 10.0.0.2 655 7000000 100";
+        let expected = AddEdge {
+            from: "alice".into(),
+            to: "bob".into(),
+            addr: AddrStr::new("10.0.0.2").unwrap(),
+            port: AddrStr::new("655").unwrap(),
+            options: 0x0700_0000,
+            weight: 100,
+            local: None,
+        };
         let m = AddEdge::parse(line).unwrap();
-        assert_eq!(m.from, "alice");
-        assert_eq!(m.to, "bob");
-        assert_eq!(m.addr.as_str(), "10.0.0.2");
-        assert_eq!(m.port.as_str(), "655");
-        assert_eq!(m.options, 0x0700_0000);
-        assert_eq!(m.weight, 100);
-        assert_eq!(m.local, None);
-
+        assert_eq!(m, expected);
         // Round-trip.
         assert_eq!(m.format(0xabc), line);
     }
