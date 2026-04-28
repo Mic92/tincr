@@ -57,15 +57,7 @@ nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 
 ## Quick start
 
-```sh
-sudo tinc -n myvpn init alice
-sudo tinc -n myvpn add DeviceType tun
-sudo tinc -n myvpn add Subnet 10.20.0.1
-sudo tinc -n myvpn edit tinc-up      # ip addr add 10.20.0.1/24 dev $INTERFACE
-sudo tincd -n myvpn -D
-```
-
-See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full two-node
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the two-node
 walkthrough, a third node joining purely via DHT discovery, and a
 NixOS snippet. See [docs/OPERATING.md](docs/OPERATING.md) for
 signals, reload scope, log rotation, debug levels, and a `tinc`
