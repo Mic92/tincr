@@ -770,7 +770,7 @@ impl Sptps {
     /// Returns the base; caller assigns `base.wrapping_add(i)` to
     /// chunk `i`. The wrap is correct: seqno is u32 on the wire,
     /// wraps at ~4G records per session, and the C wraps too
-    /// (`sptps.c:108` `s->outseqno++` is unsigned overflow).
+    /// (`s->outseqno++` is unsigned overflow there).
     ///
     /// Par-encrypt's serial preamble: one thread bumps `outseqno`;
     /// N workers then call [`seal_with_seqno`] (`&self`) with
@@ -1104,7 +1104,7 @@ impl Sptps {
     /// Separate from [`open_with_seqno`] so the order is preserved:
     /// decrypt is parallel and arbitrary-order; replay-commit is
     /// serial in arrival order. The window's far-future heuristic
-    /// (`sptps.c:476` farfuture counter) is order-sensitive.
+    /// (the farfuture counter) is order-sensitive.
     ///
     /// # Errors
     ///
