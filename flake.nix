@@ -101,9 +101,24 @@
           # the same wire format much faster, this proves the
           # config plumbing + NAT path.
           nixos-tinc-dht = pkgs.callPackage ./nix/nixos-test-dht.nix { inherit tincd; };
+
+          # Module wiring: declarative services.tincr.networks.<name>
+          # plus tincd's TUN-intercept DNS stub. Two nodes, one mesh,
+          # `dig <peer>.<suffix>` resolves to the peer's Subnet.
+          nixos-tincr = pkgs.callPackage ./nix/nixos-test-tincr.nix {
+            inherit tincd;
+            tincrModule = ./nix/module.nix;
+          };
         }
       );
 
       formatter = eachSystem (system: _: treefmt.${system}.config.build.wrapper);
+
+      nixosModules.tincr =
+        { pkgs, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.tincr.package = self.packages.${pkgs.stdenv.hostPlatform.system}.tincd;
+        };
     };
 }
