@@ -5,15 +5,9 @@ batching layer. Control plane and data plane share one thread but
 borrow disjoint state; anything that has to block is exiled to a
 worker. The wire protocol is tinc 1.1's, unchanged.*
 
-Over the past while tincr has grown from "let's see if the SPTPS
-handshake round-trips" into a daemon you can actually run a mesh on.
-The individual pieces have landed one at a time and each commit
-explains its own *why*, but we never wrote down how they're meant to
-fit together. This document does that. If you've read the tinc 1.1
-sources, think of this as: same protocol, different engine room.
-
-For what actually goes over the wire, see [PROTOCOL.md](PROTOCOL.md).
-For "I run C tinc today, what changes?", see [COMPAT.md](COMPAT.md).
+Same protocol as tinc 1.1, different engine room. For the wire
+format see [PROTOCOL.md](PROTOCOL.md); for what changes when
+migrating from C tinc, [COMPAT.md](COMPAT.md).
 
 ```mermaid
 flowchart LR
