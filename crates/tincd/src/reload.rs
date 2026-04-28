@@ -1,50 +1,16 @@
-//! Diff-core for `reload_configuration`.
+//! Diff-core for `reload_configuration`: pure functions for the
+//! subnets / `ConnectTo` / conn-mtime diffs.
 //!
-//! ## The mark-sweep, translated
+//! C uses `subnet->expires` as a mark bit and sweeps a splay tree;
+//! we have `HashSet` and use two `difference` calls.
 //!
-//! C uses `subnet->expires = 1` as a mark bit, then sweeps:
+//! `setup()` is one-shot (creates listeners, opens TUN). The
+//! reloadable subset is settings + subnets + `ConnectTo` +
+//! conn-revoke. `last_config_check` initialises to daemon-start
+//! time; `setup()` updates it.
 //!
-//! ```text
-//! mark all current → for each new: clear mark or add → sweep marked
-//! ```
-//!
-//! That's a workaround for not having a `symmetric_difference` over a
-//! splay tree. We have `HashSet`. The whole sweep is two `difference`
-//! calls.
-//!
-//! ## What's NOT here
-//!
-//! - Re-reading `tinc.conf` / `hosts/NAME` — that's
-//!   `tinc_conf::read_server_config`, daemon already does it in `setup`.
-//! - `setup_myself_reloadable` (`:355`) — re-parsing the ~40 settings.
-//!   Serial chunk-10 task: daemon re-runs the `config.lookup` block
-//!   from `setup`.
-//! - `try_outgoing_connections` (`:432`) — daemon already has this;
-//!   it's `setup_outgoing_connection` per `oid`.
-//! - `terminate_connection` (`:450`) — daemon already has.
-//! - `strictsubnets` reload branch (`:359-395`) —
-//!   `TODO(chunk-12-strictsubnets-reload)`. The C uses an `expires`
-//!   tristate mark-sweep: 1=stale, -1=re-authorized, 0=new. Walk:
-//!   `expires==1` → DEL+broadcast; `==-1` → reset; `==0` →
-//!   ADD+broadcast. We don't have per-subnet `expires`; the same
-//!   shape is two `BTreeSet<(Subnet,String)>` snapshots diffed (see
-//!   `diff_subnets` below). Needs `SubnetTree` to expose a snapshot.
-//!   Scope: diff old/new authorized sets, broadcast ADD/DEL for the
-//!   deltas. Cold-start preload in
-//!   `load_all_nodes` is sufficient for the integration test.
-//!
-//! What IS here: the three diffs (subnets, `ConnectTo`, conn-mtime) as
-//! pure functions.
-//!
-//! ## Reload boundary
-//!
-//! The serial wire-up will NOT re-run `setup()` — `setup()` is
-//! one-shot (creates listeners, opens TUN). The reloadable subset is
-//! settings + subnets + `ConnectTo` + conn-revoke. The daemon re-reads
-//! config, calls these diff functions, applies the deltas.
-//!
-//! `last_config_check` initializes to daemon-start time. The first
-//! SIGHUP compares against that. `setup()` will set it.
+//! `strictsubnets` reload diff is not yet implemented — see
+//! `TODO(strictsubnets-reload)` in `daemon/tx_control.rs`.
 
 #![forbid(unsafe_code)]
 
@@ -90,9 +56,7 @@ pub(crate) fn diff_subnets<S: BuildHasher>(
     from_config: &HashSet<Subnet, S>,
 ) -> SubnetDiff {
     SubnetDiff {
-        // C :410-419: `if(!lookup_subnet(myself, subnet))` → add.
         added: from_config.difference(current).copied().collect(),
-        // C :421-428: `if(subnet->expires == 1)` after sweep → del.
         removed: current.difference(from_config).copied().collect(),
     }
 }
@@ -162,11 +126,9 @@ pub(crate) fn conns_to_terminate(
                 .find(|(n, _)| n == name.as_str())
                 .map(|(_, mtime)| *mtime)
             {
-                // C :447 left of `||`: `stat()` failed (ENOENT).
-                // File deleted → revoke.
+                // `stat()` failed (ENOENT) — file deleted, revoke.
                 None => true,
-                // C :447 right of `||`: `s.st_mtime > last_config_check`.
-                // Strict `>` — see module doc.
+                // Strict `>` — see `conns_to_terminate` doc.
                 Some(mtime) => mtime > last_check,
             }
         })
