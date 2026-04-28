@@ -51,7 +51,7 @@ participate.
   encrypted and published under a key only mesh members can derive;
   setting `DhtSecretFile` additionally gates resolution to nodes
   holding the secret. New keys: `DhtDiscovery`, `DhtSecretFile`,
-  `DhtBootstrapAddress`. New tool: `tinc-dht-seed`.
+  `DhtBootstrap`. New tool: `tinc-dht-seed`.
 - **IPv6 firewall pinhole.** Port mapping speaks PCP in addition to
   UPnP-IGD, and uses it over IPv6 to open inbound through consumer
   router firewalls — so a node with only a global v6 address can
@@ -133,6 +133,6 @@ Things that work in both daemons but not identically.
 | `Cipher`, `Digest`, `MACLength`           | Warned, ignored.                      |
 | `PrivateKey`, `PrivateKeyFile`, `PublicKey` (RSA) | Warned, ignored. Use the Ed25519 equivalents. |
 | `UPnP`                                    | Same values as C; also drives PCP.    |
-| `DhtDiscovery`, `DhtSecretFile`, `DhtBootstrapAddress` | New.                     |
+| `DhtDiscovery`, `DhtSecretFile`, `DhtBootstrap` | New.                          |
 | `Sandbox`                                 | New (`off`/`normal`/`high`).          |
 | `LogLevel`                                | New.                                  |
