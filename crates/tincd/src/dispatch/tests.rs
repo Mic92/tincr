@@ -10,6 +10,13 @@ fn mkconn() -> Connection {
     Connection::test_with_fd(nullfd())
 }
 
+/// Connection past ID gate, ready for `handle_control` cases.
+fn mkctl() -> Connection {
+    let mut c = mkconn();
+    c.allow_request = Some(Request::Control);
+    c
+}
+
 /// `IdCtx` for tests not reaching the peer pubkey load. `OnceLock`
 /// for `'static` lifetime. `confbase="."` → pubkey load fails;
 /// tests reaching it use `PeerSetup`.
@@ -188,6 +195,20 @@ impl PeerSetup {
         &self.tmp
     }
 }
+
+/// `IdCtx` for peer-branch tests: real confbase, my key, no invitations.
+fn peer_ctx<'a>(setup: &'a PeerSetup, mykey: &'a SigningKey, cookie: &'a str) -> IdCtx<'a> {
+    IdCtx {
+        cookie,
+        my_name: "testd",
+        mykey,
+        confbase: setup.confbase(),
+        invitation_key: None,
+        global_pmtu: None,
+        sptps_cipher: tinc_sptps::SptpsAead::default(),
+        sptps_kex: SptpsKex::default(),
+    }
+}
 impl Drop for PeerSetup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.tmp);
@@ -206,16 +227,7 @@ fn id_peer_major_mismatch() {
 
     let mut c = mkconn();
     let cookie = "a".repeat(64);
-    let ctx = IdCtx {
-        cookie: &cookie,
-        my_name: "testd",
-        mykey: &mykey,
-        confbase: setup.confbase(),
-        invitation_key: None,
-        global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
-    };
+    let ctx = peer_ctx(&setup, &mykey, &cookie);
 
     // 18.7 — major 18, we're 17.
     let r = handle_id(&mut c, b"0 alice 18.7", &ctx, Instant::now(), &mut OsRng);
@@ -234,16 +246,7 @@ fn id_peer_unknown_identity() {
 
     let mut c = mkconn();
     let cookie = "a".repeat(64);
-    let ctx = IdCtx {
-        cookie: &cookie,
-        my_name: "testd",
-        mykey: &mykey,
-        confbase: setup.confbase(),
-        invitation_key: None,
-        global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
-    };
+    let ctx = peer_ctx(&setup, &mykey, &cookie);
 
     let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng);
     let Err(DispatchError::BadId(msg)) = r else {
@@ -264,16 +267,7 @@ fn id_peer_rollback_rejected() {
 
     let mut c = mkconn();
     let cookie = "a".repeat(64);
-    let ctx = IdCtx {
-        cookie: &cookie,
-        my_name: "testd",
-        mykey: &mykey,
-        confbase: setup.confbase(),
-        invitation_key: None,
-        global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
-    };
+    let ctx = peer_ctx(&setup, &mykey, &cookie);
 
     let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut OsRng);
     let Err(DispatchError::BadId(msg)) = r else {
@@ -297,16 +291,7 @@ fn id_peer_no_dot_minor_zero() {
 
     let mut c = mkconn();
     let cookie = "a".repeat(64);
-    let ctx = IdCtx {
-        cookie: &cookie,
-        my_name: "testd",
-        mykey: &mykey,
-        confbase: setup.confbase(),
-        invitation_key: None,
-        global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
-    };
+    let ctx = peer_ctx(&setup, &mykey, &cookie);
 
     let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut OsRng);
     let Err(DispatchError::BadId(msg)) = r else {
@@ -417,8 +402,7 @@ fn id_bumps_ping_time() {
 
 #[test]
 fn control_reload() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
 
     let (r, nw) = handle_control(&mut c, b"18 1");
     assert_eq!(r, DispatchResult::Reload);
@@ -429,8 +413,7 @@ fn control_reload() {
 
 #[test]
 fn control_retry() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
 
     let (r, nw) = handle_control(&mut c, b"18 10");
     assert_eq!(r, DispatchResult::Retry);
@@ -441,8 +424,7 @@ fn control_retry() {
 
 #[test]
 fn control_purge() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
 
     let (r, nw) = handle_control(&mut c, b"18 8");
     assert_eq!(r, DispatchResult::Purge);
@@ -453,30 +435,26 @@ fn control_purge() {
 
 #[test]
 fn control_disconnect() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
 
     // `"%*d %*d " MAX_STRING` — token 3 is the name.
     let (r, _) = handle_control(&mut c, b"18 12 bob");
     assert_eq!(r, DispatchResult::Disconnect(Some("bob".into())));
 
     // No third token → sscanf returns 0 → -1 reply.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 12");
     assert_eq!(r, DispatchResult::Disconnect(None));
 
     // Name failing check_id → None (rejects `<unknown>` etc.).
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 12 <unknown>");
     assert_eq!(r, DispatchResult::Disconnect(None));
 }
 
 #[test]
 fn control_dump_traffic() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     // `case REQ_DUMP_TRAFFIC: return dump_traffic(c)`.
     let (r, nw) = handle_control(&mut c, b"18 13");
     assert_eq!(r, DispatchResult::DumpTraffic);
@@ -486,23 +464,20 @@ fn control_dump_traffic() {
 /// `REQ_LOG`: parse level.
 #[test]
 fn control_log() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     // `"18 15 <level> <use_color>"`. Level 5.
     let (r, nw) = handle_control(&mut c, b"18 15 5 0");
     assert_eq!(r, DispatchResult::Log(5));
     assert!(!nw);
 
     // Missing level: C's local-init defaults to 0.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 15");
     assert_eq!(r, DispatchResult::Log(0));
 
     // -1 = DEBUG_UNSET ("use the daemon's level"). The CLI
     // sends this when no -d given.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 15 -1 1");
     assert_eq!(r, DispatchResult::Log(-1));
 }
@@ -510,8 +485,7 @@ fn control_log() {
 #[test]
 fn control_set_debug() {
     // `"18 9 5"` — CONTROL SET_DEBUG level=5.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, nw) = handle_control(&mut c, b"18 9 5");
     assert_eq!(r, DispatchResult::SetDebug(Some(5)));
     // Daemon arm sends, not dispatch.rs.
@@ -519,20 +493,17 @@ fn control_set_debug() {
     assert!(c.outbuf.is_empty());
 
     // Missing level → None (sscanf fails → return false).
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 9");
     assert_eq!(r, DispatchResult::SetDebug(None));
 
     // Negative level → query-only. C accepts it (sscanf %d).
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 9 -1");
     assert_eq!(r, DispatchResult::SetDebug(Some(-1)));
 
     // Garbage level → None (parse fail, same as missing).
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 9 garbage");
     assert_eq!(r, DispatchResult::SetDebug(None));
 }
@@ -540,8 +511,7 @@ fn control_set_debug() {
 #[test]
 fn control_pcap() {
     // Snaplen present.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, nw) = handle_control(&mut c, b"18 14 96");
     assert_eq!(r, DispatchResult::Pcap(96));
     // `return true` — NO control_ok reply.
@@ -549,20 +519,17 @@ fn control_pcap() {
     assert!(c.outbuf.is_empty());
 
     // Snaplen absent: sscanf fails, outmaclength stays 0.
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 14");
     assert_eq!(r, DispatchResult::Pcap(0));
 
     // Snaplen 0 explicit (CLI default "full packet").
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 14 0");
     assert_eq!(r, DispatchResult::Pcap(0));
 
     // Huge snaplen → saturate (functionally ∞: > MTU captures all).
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
     let (r, _) = handle_control(&mut c, b"18 14 999999");
     assert_eq!(r, DispatchResult::Pcap(u16::MAX));
 }
@@ -570,8 +537,7 @@ fn control_pcap() {
 /// Unknown subtype (99). `REQ_INVALID` reply, connection stays.
 #[test]
 fn control_unknown_subtype() {
-    let mut c = mkconn();
-    c.allow_request = Some(Request::Control);
+    let mut c = mkctl();
 
     let (r, nw) = handle_control(&mut c, b"18 99");
     assert_eq!(r, DispatchResult::Ok);
@@ -583,8 +549,7 @@ fn control_unknown_subtype() {
 #[test]
 fn control_malformed_subtype_drops() {
     for line in [b"18".as_slice(), b"18 ", b"18 garbage"] {
-        let mut c = mkconn();
-        c.allow_request = Some(Request::Control);
+        let mut c = mkctl();
         let (r, _) = handle_control(&mut c, line);
         assert_eq!(
             r,
