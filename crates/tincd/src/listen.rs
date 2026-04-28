@@ -190,10 +190,9 @@ impl AddrFamily {
 pub(crate) struct Listener {
     /// `listen_socket_t.bindto`. True iff this listener came from a
     /// `BindToAddress` config line (vs `ListenAddress` or the
-    /// implicit wildcard). Consumed
-    /// by outgoing-connect to pick a source address.
+    /// implicit wildcard). Consumed by outgoing-connect to pick a
+    /// source address; only read from tests today.
     #[allow(dead_code)]
-    // cfg-dependent: read under #[cfg(test)]; outgoing-socket pinning not yet wired
     pub bindto: bool,
     /// `listen_socket_t.tcp`. TCP listener, accepting peer conns.
     /// `Socket` owns the fd; Drop closes.

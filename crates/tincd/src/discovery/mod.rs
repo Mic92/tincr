@@ -1,35 +1,23 @@
 //! Public-address discovery + DHT publish (Tier 2a).
 //!
-//! ## What this solves
+//! In-band reflexive sources (`ADD_EDGE`/`ANS_KEY`/`UDP_INFO`) all need
+//! a first meta-connection to a relay whose `Address=` is statically
+//! configured. This module is the second source: BitTorrent Mainline
+//! DHT.
 //!
-//! The existing in-band reflexive machinery (`ADD_EDGE`'s `getpeername`
-//! address, `ANS_KEY`'s relay-appended observation, `UDP_INFO`) all require
-//! a *first* meta-connection to a relay. That relay's `Address=` is the one
-//! piece of static config every node still needs. This module supplies a
-//! second source: the BitTorrent Mainline DHT.
+//! Every DHT response carries BEP 42's `ip` field echoing the
+//! requester's `(ip, port)`. We use it twice:
 //!
-//! ## How: port-probe + BEP 44 publish
+//! - **mainline's actor** votes `info().public_address()` over its
+//!   iterative queries (STUN-like consensus). This is the NAT mapping
+//!   for *mainline's* socket, not tincd's.
 //!
-//! Every Mainline DHT response carries an optional `ip` field (BEP 42)
-//! echoing the requester's source `(ip, port)` as observed by the responder.
-//! We exploit this twice:
+//! - **tincd's port-probe** sends a BEP 5 KRPC `ping` from tincd's
+//!   own UDP listener every 25 s; the echo gives the NAT mapping for
+//!   the *correct* socket and keeps the conntrack entry warm.
 //!
-//! - **mainline's actor** votes `info().public_address()` across every
-//!   response in its iterative queries. Same job as STUN's `XOR-MAPPED-
-//!   ADDRESS`, with consensus across millions of nodes. But this learns
-//!   the NAT mapping for *mainline's* socket, not tincd's — different fd,
-//!   different conntrack entry.
-//!
-//! - **tincd's port-probe** sends one BEP 5 KRPC `ping` from tincd's
-//!   *own* UDP listener to a few DHT nodes. The echo carries the NAT
-//!   mapping for the *correct* socket. Re-sent every 25s to keep the
-//!   conntrack entry warm — on full-cone NAT, that mapping is open to
-//!   *anyone*, so a peer dialling the published address gets through
-//!   without a relay.
-//!
-//! mainline's vote is the higher-frequency signal (every iterative query
-//! response, ~seconds). When it changes, the NAT IP changed; we invalidate
-//! our cached probe result and re-probe.
+//! mainline's vote is the higher-frequency signal (~seconds); a
+//! change invalidates the cached probe and triggers a re-probe.
 //!
 //! ## What gets published (BEP 44 mutable items)
 //!
@@ -63,32 +51,24 @@
 //! 1000B `v` cap. The inner plaintext stays human-readable (`"tinc1 v4=…"`)
 //! so `tinc-dht-seed --resolve` can grep it after decrypt.
 //!
-//! ## Integration
+//! ## Threading
 //!
-//! `mainline::Dht` runs on its own `std::thread` (actor over flume channel).
-//! `Discovery::spawn()` is called from `Daemon::setup()` and never blocks.
-//! `Discovery::tick()` is polled from `on_periodic_tick` (the existing 5s
-//! timer); it reads a *cached* snapshot of `info()`/`to_bootstrap()` and
-//! decides whether to enqueue a republish. **No mainline call happens on
-//! the epoll thread** — every `Dht` round-trip (`info`, `to_bootstrap`,
-//! `put_mutable`, `get_mutable`) is owned by the `tinc-dht` thread; the
-//! epoll thread only does non-blocking mpsc `send`/`try_iter`. tincd's
-//! epoll loop never sees the DHT socket and never parks on the mainline
-//! actor's 50 ms recv tick.
+//! `mainline::Dht` runs on its own thread (actor over flume).
+//! `Discovery::tick()` polls a cached snapshot from `on_periodic_tick`;
+//! every blocking call (`info`, `to_bootstrap`, `put_mutable`,
+//! `get_mutable`) stays on the worker. The epoll thread only does
+//! non-blocking mpsc `send`/`try_iter`.
 //!
-//! The port-probe is the daemon's job, not ours — it owns the UDP socket.
-//! `tick()` returns `wants_port_probe`; the daemon sends [`PORT_PROBE_PING`]
-//! via its v4 listener and demuxes replies in `handle_incoming_vpn_packet`.
+//! The port-probe is the daemon's job (it owns the UDP socket).
+//! `tick()` returns `wants_port_probe`; the daemon sends
+//! [`PORT_PROBE_PING`] and demuxes replies in
+//! `handle_incoming_vpn_packet`.
 //!
-//! ## v6: local enum, not DHT
+//! ## v6
 //!
-//! Mainline is a v4 island (`Info::public_address` is `SocketAddrV4`; BEP 32
-//! dual-stack was wontfix'd by the `mainline` maintainers). For v6 we ask
-//! the kernel: `getifaddrs()`, filter to `2000::/3` global unicast, done.
-//! v6 doesn't NAT (RFC 6204 home routers do stateful firewalling, not address
-//! translation), so the interface address *is* the reachable address. The
-//! firewall still needs the Tier-0 punch — but the address doesn't need
-//! discovery.
+//! Mainline is v4-only. For v6 we enumerate `getifaddrs()` filtered
+//! to `2000::/3` global unicast — v6 has no NAT, so the interface
+//! address is reachable (firewall still needs Tier-0 punch).
 
 #![forbid(unsafe_code)]
 
