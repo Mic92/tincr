@@ -921,26 +921,3 @@ pub mod macos {
             .status();
     }
 }
-
-// ═══════════════════════ platform helpers ══════════════════════════
-
-/// Count open fds for `pid`.
-pub fn count_open_fds(pid: u32) -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .count()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("lsof")
-            .args(["-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .count()
-            .saturating_sub(1)
-    }
-}

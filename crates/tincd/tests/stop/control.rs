@@ -6,6 +6,28 @@ use std::time::Duration;
 use super::common::*;
 use super::write_config;
 
+/// Count open fds for `pid`. Used by `daemon_stop_drains_fds`; not in
+/// `common::` because it's a one-test helper.
+fn count_open_fds(pid: u32) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .count()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("lsof")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1)
+    }
+}
+
 /// UDP packets sent to the daemon don't crash it and don't busy-spin.
 /// `IoWhat::Udp(i)` is wired now (the listener IS bound). The arm
 /// drains and discards. Proves: a stray UDP packet (from a peer that
