@@ -1,70 +1,25 @@
 //! DNS stub resolver: `<node>.<suffix>` → `Subnet=` IPs.
 //!
-//! ## Architecture: TUN intercept, not socket bind
+//! Architecture: intercept on the TUN ingress dst-IP check (already
+//! hot), not a `:53` socket bind. Avoids port conflicts with
+//! systemd-resolved on `127.0.0.53`, an extra fd through
+//! `drop_privs`/`sandbox::enter`, and `CAP_NET_BIND_SERVICE`.
 //!
-//! Tailscale's MagicDNS never binds `100.100.100.100:53`. Their
-//! userspace netstack inspects every TUN-ingress packet and matches
-//! `dst == serviceIP && dport == 53` (`wgengine/netstack/netstack.go:
-//! 847-858`); the DNS query bytes are handed to an in-process
-//! resolver, the reply is injected straight back into the TUN.
-//!
-//! tincd already inspects every TUN packet's dst IP for routing
-//! (`route.rs` → `subnet_tree.rs`). Adding the intercept is one
-//! branch in code that's already hot. No port-53 conflict with
-//! systemd-resolved's `127.0.0.53`, no socket fd to babysit through
-//! `drop_privs` (`main.rs:1139`) or `sandbox::enter` (`main.rs:1174`),
-//! no `CAP_NET_BIND_SERVICE`.
-//!
-//! ## What we answer
-//!
+//! Answers:
 //! - **A / AAAA** for `<node>.<suffix>`: every `/32` (v4) or `/128`
-//!   (v6) the node advertises. A `Subnet = 10.0.0.0/24` is a *route*,
-//!   not an *identity* — the node doesn't "have" address `10.0.0.0`.
-//!   Nebula picks the first address (`dns_server.go:84-100`); we
-//!   return ALL host-prefix subnets (multi-homed nodes are normal in
-//!   tinc, and DNS clients have handled multiple A records since
-//!   1987).
-//! - **PTR** for `*.in-addr.arpa` / `*.ip6.arpa`: reverse-lookup the
-//!   exact IP in the subnet tree, return the owner. Makes `who`,
-//!   `last`, `journalctl` show node names instead of `10.0.0.5`.
-//!   Tailscale does this (`tsdns.go:524,1005,1164`); Nebula doesn't.
-//! - **NXDOMAIN for everything else.** No upstream forwarding.
-//!   Tailscale's `forwarder.go` is 1375 LOC and only needed when you
-//!   take over `/etc/resolv.conf` entirely. We don't — split-DNS via
-//!   systemd-resolved (`SetLinkDomains` with `~tinc.internal`) means
-//!   the OS only sends `*.tinc.internal` queries here. Everything
-//!   else goes to the real resolver without us touching it.
+//!   (v6) the node advertises. A `Subnet=10.0.0.0/24` is a route,
+//!   not an identity — return all host-prefix subnets.
+//! - **PTR** for `*.in-addr.arpa` / `*.ip6.arpa`: reverse-lookup in
+//!   the subnet tree so `who`/`journalctl` show node names.
+//! - **NXDOMAIN otherwise.** No upstream forwarding; split-DNS via
+//!   systemd-resolved (`~suffix` routing-only domain) means the OS
+//!   only sends our suffix here.
 //!
-//! ## OS integration: not our problem
+//! OS integration is `tinc-up`'s job (`resolvectl dns/domain`).
 //!
-//! `tinc-up` does it. Two lines:
-//!
-//! ```sh
-//! resolvectl dns "$INTERFACE" "$DNS_ADDR"
-//! resolvectl domain "$INTERFACE" "~$DNS_SUFFIX" "$DNS_SUFFIX"
-//! ```
-//!
-//! The `~` prefix is "routing-only domain" (resolved sends ONLY
-//! matching queries here); the bare suffix is also a *search* domain
-//! so `ssh alice` works without `.tinc.internal` (hyprspace's
-//! `RoutingDomain: false` trick — `resolved_linux.go:43`).
-//!
-//! Tailscale spends 1888 LOC on Linux integration alone (`manager_
-//! linux.go` 398 + `resolved.go` 401 + `nm.go` 436 + `direct.go` 653)
-//! with NetworkManager-version-specific workarounds. That's a
-//! maintenance treadmill. The `resolvectl` CLI is stable.
-//!
-//! ## Wire format
-//!
-//! Hand-rolled. RFC 1035 §4. A/AAAA/PTR is ~12 fixed fields; the
-//! `domain` crate pulls a proc-macro, `hickory-proto` pulls 14 deps
-//! including `idna` and `url`. Nebula's whole DNS server is 210 LOC
-//! *with* `miekg/dns` doing the parsing; we're at ~250 without.
-//!
-//! No DNS message compression (RFC 1035 §4.1.4 pointers). Legal —
-//! "a server MAY use compression"; it's an optimization. Our answers
-//! are tiny (one or two RRs); the bytes saved aren't worth the
-//! state machine.
+//! Wire format hand-rolled per RFC 1035 §4; A/AAAA/PTR is ~12 fixed
+//! fields and a DNS crate dep pulls in idna/url. No message
+//! compression (RFC 1035 §4.1.4 — "MAY"); answers are tiny.
 
 #![forbid(unsafe_code)]
 
@@ -78,14 +33,10 @@ use tinc_proto::Subnet;
 
 // ── Config ──────────────────────────────────────────────────────────
 
-/// DNS stub config. `None` (the daemon-side `Option<DnsConfig>`)
-/// disables the whole feature; the TUN-intercept branch never fires.
-///
-/// Why no default `dns_addr`: it has to be (a) routed to the TUN so
-/// the kernel sends packets there, (b) not a real node's `/32`. We
-/// can't pick that — the operator's address plan is opaque to us.
-/// Tailscale gets away with `100.100.100.100` because they control
-/// the CGNAT allocation.
+/// DNS stub config. Daemon-side `Option<DnsConfig>` is `None` when
+/// disabled. No default `dns_addr` because it has to be (a) routed
+/// to the TUN and (b) not collide with any real node's prefix — the
+/// operator's address plan is opaque to us.
 #[derive(Debug, Clone)]
 pub(crate) struct DnsConfig {
     /// The magic IP. Must be added to the TUN in `tinc-up` (`ip
@@ -118,9 +69,8 @@ const TYPE_PTR: u16 = 12;
 const TYPE_AAAA: u16 = 28;
 const CLASS_IN: u16 = 1;
 
-/// 30s. Low so a node disappearing surfaces quickly. Tailscale uses
-/// much higher (their node→IP binding is stable); ours can churn
-/// (a node re-advertises a different `/32` after a config change).
+/// 30s. Low so a node disappearing surfaces quickly: a tinc node
+/// can churn its `/32` after a config change.
 const TTL: u32 = 30;
 
 // ── Packet intercept ────────────────────────────────────────────────
@@ -453,8 +403,7 @@ pub(crate) fn answer(
                 q.qtype,
             ));
         };
-        // No further dots — `<service>.<node>.suffix` isn't a thing
-        // (yet — see hyprspace's two-level names if we ever want it).
+        // Single-label node name; multi-label `<service>.<node>` not supported.
         if node.contains('.') {
             return Some(build_error(
                 q.id,
