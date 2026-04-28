@@ -131,10 +131,3 @@ fields with a routing-only domain (`~mesh`).
   Legal — the spec says a server *may* compress; ours doesn't. The
   bytes saved are not worth the state machine.
 
-## Source
-
-- `crates/tincd/src/dns.rs` — query parsing, answer synthesis.
-- `crates/tincd/src/daemon/net/route.rs` — TUN-ingress intercept
-  and packet inject path.
-- `crates/tincd/src/daemon/setup.rs::load_dns_config` — config
-  parse.
