@@ -58,13 +58,7 @@ panic = "unwind"
 [profile.profiling]
 inherits = "release"
 debug = true
-# rustc 1.94+: -Cforce-frame-pointers in cargo profiles. perf's default
-# fp-unwind needs these; --call-graph=dwarf works without but adds
-# measurable overhead (the test avoids it deliberately).
-# Alternatively put this in RUSTFLAGS but then it's all-or-nothing.
 
-# Centralised version pins. The crypto crates here are load-bearing for wire
-# compatibility — bumping them is a protocol-review event, not a routine update.
 [workspace.dependencies]
 # `ChaCha20Legacy` (DJB original: 64-bit nonce, 64-bit counter), not the
 # default IETF 96/32 variant. Unconditionally exported in 0.9, no feature flag.
