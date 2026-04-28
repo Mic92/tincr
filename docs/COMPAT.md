@@ -59,9 +59,10 @@ participate.
 - **`tinc-auth`.** Small HTTP `auth_request` backend that answers
   "which mesh node owns this source IP", for putting per-node ACLs
   in front of internal web services.
-- **In-mesh DNS.** The daemon answers `name.NETNAME` A/AAAA/PTR
+- **In-mesh DNS.** The daemon answers `<node>.<suffix>` A/AAAA/PTR
   queries for mesh subnets by intercepting them on the TUN device.
-  No socket bound, nothing to configure on the peer.
+  No socket bound, nothing to configure on the peer. See
+  [DNS.md](DNS.md).
 - **Landlock sandbox.** On Linux the daemon confines itself after
   setup. `Sandbox = normal`/`high` tightens further. Relevant if you
   run hook scripts: under `high`, scripts that touch paths outside
