@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
-zeroize = { version = "1", features = ["zeroize_derive"] }
+zeroize = "1"
 rand_core = "0.6"
 
 [dev-dependencies]
