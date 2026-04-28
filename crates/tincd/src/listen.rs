@@ -1,32 +1,13 @@
-//! TCP/UDP listener setup. Ports `setup_listen_socket` (TCP) +
-//! `setup_vpn_in_socket` (UDP) from `net_socket.c`, plus the
-//! no-config default of `add_listen_address` from `net_setup.c`.
-//! The tarpit lives in [`tarpit`].
+//! TCP/UDP listener setup; the tarpit lives in [`tarpit`].
 //!
-//! ## socket2, not hand-rolled setsockopt
+//! Built on `socket2` so the setsockopt seam (notably `IPV6_V6ONLY`,
+//! load-bearing for separate v4+v6 listeners) is exposed; std's
+//! atomic `bind` hides it. We probe per-family by trying both binds
+//! and ignoring failures, rather than gating on a getaddrinfo call.
+//! `BindToAddress` resolution lives in `daemon.rs`; resolved
+//! `SocketAddr`s arrive here through `open_listener_pair`.
 //!
-//! std's `TcpListener::bind` is atomic; no seam for `IPV6_V6ONLY`.
-//! socket2 gives the four-step shape (socket/setsockopt/bind/
-//! listen). Not a shim-matrix row — it's "std with seams".
-//!
-//! Used (all ungated): `Socket::new` (auto-`SOCK_CLOEXEC`),
-//! `set_reuse_address` (`:210`), `set_only_v6` (`:214` — load-
-//! bearing for separate v4+v6 listeners), `set_nodelay`
-//! (`configure_tcp:89`), `set_nonblocking`, `set_broadcast`
-//! `accept` (uses `accept4(SOCK_CLOEXEC)` — closes a small fd leak
-//! upstream has), `SockAddr` (= the `sockaddr_t` union).
-//!
-//! Deferred sockopts: `IP_TOS`/`IPV6_TCLASS` (`configure_tcp:93-100`).
-//!
-//! ## getaddrinfo: skip it
-//!
-//! `add_listen_address(NULL, NULL)` uses getaddrinfo as a
-//! per-family probe (`0.0.0.0` then `::`, gcc-verified). We probe
-//! by trying both binds; `Socket::new(Domain::IPV6, ...)` failing
-//! is the same outcome. Bind failure is `continue`.
-//! `BindToAddress` resolution lives in `daemon.rs` (it owns the
-//! config tree); resolved `SocketAddr`s flow into
-//! `open_listener_pair` here.
+//! Deferred: `IP_TOS`/`IPV6_TCLASS`.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};

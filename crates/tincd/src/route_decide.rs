@@ -1,10 +1,6 @@
-//! `route.c`: the forwarding decision.
-//!
-//! `route_ipv4`/`route_ipv6` call `send_packet()`/`route_..._
-//! unreachable()` directly upstream. We return [`RouteResult`] and
-//! the daemon
-//! dispatches — pure function of `(bytes, subnets, resolve)`.
-//! Config-gated post-route mutations live daemon-side.
+//! Forwarding decision (pure function of `(bytes, subnets, resolve)`).
+//! Returns [`RouteResult`]; the daemon dispatches I/O. Upstream's
+//! `route_ipv4`/`route_ipv6` call `send_packet()` directly.
 
 #![forbid(unsafe_code)]
 

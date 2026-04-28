@@ -1,38 +1,13 @@
-//! `UDP_INFO/MTU_INFO` hint messages.
-//!
-//! ## What they do
+//! `UDP_INFO`/`MTU_INFO` hint messages.
 //!
 //! `UDP_INFO`: relay-observed addresses propagate so endpoints can
-//! hole-punch. Alice → mid → bob: mid sees alice's UDP from
-//! `192.168.1.5:50123`, tells bob. Bob can now send probes there
-//! directly (skip mid).
+//! hole-punch (alice → mid → bob: mid tells bob alice's UDP addr).
+//! `MTU_INFO`: same shape for path-MTU.
 //!
-//! `MTU_INFO`: same for path-MTU. Mid discovers alice-mid is MTU 1400;
-//! tells bob. Bob caps his alice-probes at 1400 (skips the too-big
-//! probes that mid would drop anyway).
-//!
-//! ## Why a separate module
-//!
-//! `send_udp_info` is 60 LOC of gate checks before a 1-line send. Those gates are testable: take a
-//! snapshot of (to, from, route, options, `last_sent`), return `bool`.
-//! The daemon does the I/O.
-//!
-//! `udp_info_h` (`:217-268`) is the same shape: validate, decide
-//! whether to learn the address, then unconditionally re-send up the
-//! chain. We return an action enum; the daemon calls
-//! `update_node_udp` and re-calls `should_send_udp_info`.
-//!
-//! ## NOT in this module
-//!
-//! `update_node_udp` (`net_packet.c`): the udp-address-tree re-index.
-//! That's daemon state mutation. Our `UdpInfoAction::UpdateAndForward
-//! { addr }` tells the daemon to call it. Keeps this module pure.
-//!
-//! The MTU adjustment logic in `send_mtu_info` (`:305-320`): the
-//! `min(mtu, via->minmtu)` clamping that happens *before* sending.
-//! That needs the `from->via` PMTU state, which lives in
-//! `TunnelState`. We expose [`adjust_mtu_for_send`] as a pure helper
-//! the daemon calls with the snapshot.
+//! Pure-decision: snapshot in, action enum out, daemon does I/O.
+//! Gate logic and MTU clamping ([`adjust_mtu_for_send`]) live here
+//! so they're testable; udp-address-tree re-indexing and other
+//! mutations stay daemon-side.
 
 #![forbid(unsafe_code)]
 
@@ -43,16 +18,13 @@ use tinc_proto::msg::misc::{MtuInfo, UdpInfo};
 
 use crate::dispatch::ConnOptions;
 
-/// `net.h:34`: `MTU` in jumbo build (9000 payload + 14 eth + 4 VLAN).
-/// `mtu_info_h` (`:349`) clamps received MTUs to this. We use the
-/// jumbo value: clamping to a *smaller* compile-time max would be
-/// wrong if the peer is running a jumbo build, and clamping to a
-/// *larger* one is harmless (PMTU will discover the real ceiling).
+/// Jumbo-build MTU ceiling (9000 + 14 eth + 4 VLAN). Clamping to
+/// a smaller value would underreport for jumbo peers; clamping
+/// larger is harmless (PMTU finds the real ceiling).
 pub(crate) const MTU_MAX: i32 = 9018;
 
-/// `mtu_info_h` (`:345`): `if(mtu < 512) { ERR; return false; }`.
-/// 512 is roughly the IPv4 minimum reassembly buffer (RFC 791); below
-/// this the message is corrupt, not just pessimistic.
+/// Below the IPv4 minimum reassembly buffer (RFC 791); MTU_INFO
+/// values lower than this are corrupt, not just pessimistic.
 pub(crate) const MTU_MIN: i32 = 512;
 
 // ────────────────────────────────────────────────────────────────────

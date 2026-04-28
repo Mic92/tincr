@@ -1,69 +1,40 @@
-//! `do_autoconnect` (`autoconnect.c`, 197 LOC) plus a Rust-only
-//! demand-driven "relay shortcut" layer. Pure decision logic — takes
-//! a snapshot of world state, returns ONE action; the daemon executes.
+//! Pure-decision autoconnect: snapshot in, one [`AutoAction`] out;
+//! the daemon executes I/O.
 //!
-//! ## The 3-connection backbone (unchanged from C)
+//! ## 3-connection backbone (C parity)
 //!
 //! Every node holds ~3 random meta connections. Random 3-regular
-//! graphs are a.a.s. 3-connected expanders (Bollobás 1981); diameter
-//! is `log₂ n` and per-event flood cost is `3n`. That is the
-//! resilience floor and stays untouched.
+//! graphs are a.a.s. 3-connected expanders (Bollobás 1981);
+//! diameter `log₂ n`, per-event flood cost `3n`. Called every
+//! `5+jitter` seconds. `nc` = active meta conns past ACK:
 //!
-//! Called every `5+jitter` seconds from `periodic_handler`. `nc` is
-//! the count of ALL active meta connections (inbound + outbound —
-//! anything past `ACK`):
+//! 1. `nc < 3` → dial a random eligible node (early return).
+//! 2. `nc > 3` → drop a random outgoing whose peer has edge_count ≥ 2.
+//! 3. `nc ≥ 3` → cancel `Outgoing` slots with no live conn.
+//! 4. Random all-node pick; dial if unreachable + has-address + not
+//!    connected. The all-node prng IS the back-off.
 //!
-//! 1. `nc < 3` → `make_new_connection`: random eligible node.
-//!    **Early return.**
-//! 2. `nc > 3` → `drop_superfluous_outgoing_connection`: random
-//!    *outgoing* conn whose peer has `edge_count >= 2`. NOT an early
-//!    return in C — falls through to 3+4.
-//! 3. `drop_superfluous_pending_connections`: cancel `Outgoing` slots
-//!    with no live conn. Fires whenever `nc >= 3`.
-//! 4. `connect_to_unreachable`: random ALL-node pick; if unreachable
-//!    AND has-address AND not-connected, dial. The all-node prng IS
-//!    the back-off — see [`decide`].
+//! ## Relay shortcuts
 //!
-//! ## Relay shortcuts (Rust-only)
-//!
-//! The backbone is for the *control* plane. When UDP to a peer is
-//! blackholed the *data* plane rides the meta graph (`SPTPS_PACKET`
-//! over TCP via `nexthop`), and degree-3-random is oblivious to where
-//! the bytes actually flow. Result in production: `blob64` sits two
-//! TCP hops away forever because `nc==3` → `Noop`.
-//!
-//! Fix (Candidate A from `docs/design/autoconnect-theory.md`): keep
-//! the random base, add up to `D_SHORTCUT` (default 2) extra outgoing
-//! slots to the peers we're currently relaying the most bytes for.
-//! Nebula/Tailscale/ZeroTier all dial-on-first-packet
-//! (`docs/design/autoconnect-survey.md`); this is the same idea on a
-//! 5-second EWMA instead of per-packet.
+//! Backbone is the control plane. When direct UDP is blackholed the
+//! data plane rides the meta graph (`SPTPS_PACKET` over TCP via
+//! `nexthop`); degree-3-random is oblivious to where bytes actually
+//! flow. Fix: add up to `D_SHORTCUT` (=2) extra outgoing slots
+//! aimed at the peers we relay the most bytes for, on a 5s EWMA.
 //!
 //! Hysteresis: add at `relay_rate > RELAY_HI`, drop at `tx_rate <
-//! RELAY_LO`. The drop test keys on `tx_rate` (any path), not
-//! `relay_rate` — once the shortcut connects, `relay_rate→0` by
-//! construction (the PACKET 17 short-circuit fires before
-//! `send_sptps_data_relay`); `tx_rate` stays >0 while traffic flows.
-//! That, plus a per-node `BACKOFF` after drop, is the oscillation
-//! damper.
+//! RELAY_LO`. Drop keys on `tx_rate` (any path), not `relay_rate`,
+//! because once the shortcut connects relay_rate→0 by construction
+//! (PACKET 17 short-circuit). Per-node BACKOFF after drop damps
+//! oscillation. See [`ShortcutKnobs`] for the constants;
+//! `AutoConnect=no` disables the whole thing.
 //!
-//! No config knobs: `tools/autoconnect-sim` shows the Pareto front is
-//! shallow (every `d_shortcut>0` cell meets all targets) so there is
-//! no trade-off a user could meaningfully tune. See [`ShortcutKnobs`]
-//! for how the constants were derived. `AutoConnect=no` is the
-//! off-switch.
+//! ## Deviations
 //!
-//! ## RNG injection
-//!
-//! `prng()` calls in C (`chacha_prng.c`). We take `&mut impl RngCore`.
-//! Tests seed deterministically.
-//!
-//! ## One action per tick (deviation from C)
-//!
-//! The C may do drop + cancel + connect in one tick (steps 2+3+4 all
-//! fire). We return the FIRST non-`Noop`. The 5-second cadence means
-//! convergence in ~15s instead of ~5s when over-connected, which is
-//! fine.
+//! - `prng()` is `&mut impl RngCore` so tests seed deterministically.
+//! - One action per tick: C may do drop+cancel+connect in one tick;
+//!   we return the first non-`Noop`, ~15s convergence vs C's ~5s
+//!   when over-connected.
 
 #![forbid(unsafe_code)]
 

@@ -1,28 +1,20 @@
-//! Outgoing TCP connections to `ConnectTo` peers, with the address
-//! list, exponential backoff and the optional `PROXY_EXEC` subprocess
-//! all in one place.
+//! Outgoing TCP connections to `ConnectTo` peers: address-list walk,
+//! exponential backoff, and the optional `PROXY_EXEC` subprocess.
 //!
-//! Each peer has an `outgoing` slot that walks its configured address
-//! list (resolved lazily through [`addrcache`](crate::addrcache)),
-//! opens a non-blocking socket via `socket2`, optionally binds it via
-//! [`apply_dial_sockopts`] (`bind_to_address`, `bind_to_interface`,
-//! `SO_MARK`; failures are warn-only on the dial side) and then runs
-//! the standard async-connect dance: `connect()` returns
-//! `EINPROGRESS`, the loop arms a writable wakeup, and on wakeup it
-//! either reads a fresh `SO_ERROR` via `getsockopt(SocketError)` or
-//! treats a successful zero-byte probe as the connect having landed. On any
-//! failure the slot advances to the next address, and once the list
-//! is exhausted it sleeps with exponential backoff before retrying
-//! from the top.
+//! Each peer has an `outgoing` slot walking the address list (resolved
+//! lazily through [`addrcache`](crate::addrcache)). Per address we
+//! open a non-blocking `socket2::Socket`, apply `bind_to_address` /
+//! `bind_to_interface` / `SO_MARK` via [`apply_dial_sockopts`]
+//! (warn-only on failure), then do the async-connect dance: `connect`
+//! returns `EINPROGRESS`, loop arms a writable wakeup, wakeup reads
+//! `SO_ERROR`. On exhaustion we sleep with exponential backoff and
+//! retry from the top.
 //!
-//! `PROXY_EXEC` is the one place this module reaches for `unsafe`:
-//! it creates a `socketpair`, `fork`s, and the child `dup2`s its end
-//! onto stdin/stdout and `execve`s `/bin/sh -c <cmd>`, so the parent
-//! ends up holding a plain stream socket whose other end is the proxy
-//! process. The child path between `fork` and `exec` is libc-only
-//! — no `std`, no allocator, no formatting — because the surviving
-//! thread inherits arbitrary held locks from the multi-threaded
-//! parent.
+//! The one `unsafe` site is `PROXY_EXEC`: socketpair + fork; child
+//! dup2s its end onto stdin/stdout and execs `/bin/sh -c <cmd>`. The
+//! between-fork-and-exec child path is libc-only (no `std`, no
+//! allocator, no formatting) because the surviving thread inherits
+//! arbitrary held locks from the multi-threaded parent.
 
 use std::ffi::CString;
 use std::io;

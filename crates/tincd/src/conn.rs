@@ -1,12 +1,12 @@
-//! `connection_t` (`connection.h:86-127`) + `buffer_t` (`buffer.c`).
+//! Per-connection state and line buffer.
 //!
-//! C's `sptps_t` callback re-enters `connection_t`; we can't (`&mut
-//! self.sptps` aliases `&mut self`). `receive()` returns `Vec<Output>`
-//! for the daemon to dispatch after the borrow ends.
+//! C's `sptps_t` callback re-enters `connection_t`; we can't because
+//! `&mut self.sptps` would alias `&mut self`. `receive()` returns
+//! `Vec<Output>` for the daemon to dispatch after the borrow ends.
 //!
-//! `LineBuf::read_line` returns `Range<usize>` not `&str`: C
-//! `buffer_readline`'s `char*` is invalidated by the next add; the
-//! borrow checker rejects the equivalent.
+//! `LineBuf::read_line` returns `Range<usize>` rather than `&str`:
+//! the equivalent `&str` is invalidated by the next push, like C's
+//! `char*` from `buffer_readline`.
 
 use std::fmt::Write as _;
 use std::io;
