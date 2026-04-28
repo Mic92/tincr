@@ -149,10 +149,7 @@ fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
     // SAFETY: see fn comment.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
 
-    #[expect(clippy::cast_sign_loss)] // AF_PACKET=17 (c_int→c_ushort, fits trivially)
-    {
-        sa.sll_family = libc::AF_PACKET as libc::c_ushort;
-    }
+    sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     // Kernel reads `sll_protocol` as `__be16`.
     sa.sll_protocol = ETH_P_ALL.to_be();
     sa.sll_ifindex = ifindex as libc::c_int;
