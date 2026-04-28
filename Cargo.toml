@@ -105,7 +105,10 @@ subtle = "2.5"
 # `^0.11.0-pre` is compatible with both prerelease and final. Re-check on
 # mainline 7.
 mainline = { version = "6.0", default-features = false, features = ["node"] }
-zeroize = { version = "1.7", features = ["zeroize_derive"] }
+# Plain entry; tinc-crypto adds `features = ["zeroize_derive"]` via
+# inheritance for the few `#[derive(ZeroizeOnDrop)]` sites. Other
+# crates only use the `Zeroize`/`Zeroizing` runtime API.
+zeroize = "1.7"
 # Post-quantum hybrid KEX (`SPTPSKex = x25519-mlkem768`). Pure-Rust FIPS 203;
 # pulls a second `digest` (0.10 via sha3) but no shared types cross the
 # boundary — ml-kem's API is byte arrays in, byte arrays out. Handshake-time

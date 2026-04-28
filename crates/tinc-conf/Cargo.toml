@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
-zeroize = "1"
+zeroize.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

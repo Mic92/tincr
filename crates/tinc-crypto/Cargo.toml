@@ -29,7 +29,7 @@ ed25519-dalek.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 subtle.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 ml-kem.workspace = true
 kem.workspace = true
 rand_core = "0.6"

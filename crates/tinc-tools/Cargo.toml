@@ -34,7 +34,7 @@ tinc-conf = { path = "../tinc-conf" }
 # wire-format, cmd_config validates a wire-format thing.
 tinc-proto = { path = "../tinc-proto" }
 rand_core = { version = "0.6", features = ["getrandom"] }
-zeroize = "1"
+zeroize.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
