@@ -450,9 +450,8 @@ impl Daemon {
         let elapsed = now.duration_since(p.udp_ping_sent);
         if elapsed >= Duration::from_secs(u64::from(interval)) {
             // Fresh Instant::now() for the RTT stamp only — the cadence gate
-            // above keeps using the cached loop clock to avoid per-packet
-            // clock_gettime(). C tinc does the same: gettimeofday() right
-            // before `n->udp_ping_sent = now` (net_packet.c:1236).
+            // above keeps using the cached loop clock to avoid
+            // per-packet clock_gettime().
             p.udp_ping_sent = Instant::now();
             p.ping_sent = true;
             nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);

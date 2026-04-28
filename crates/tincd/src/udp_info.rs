@@ -23,7 +23,7 @@ use crate::dispatch::ConnOptions;
 /// larger is harmless (PMTU finds the real ceiling).
 pub(crate) const MTU_MAX: i32 = 9018;
 
-/// Below the IPv4 minimum reassembly buffer (RFC 791); MTU_INFO
+/// Below the IPv4 minimum reassembly buffer (RFC 791); `MTU_INFO`
 /// values lower than this are corrupt, not just pessimistic.
 pub(crate) const MTU_MIN: i32 = 512;
 

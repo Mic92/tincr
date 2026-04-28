@@ -614,7 +614,6 @@ fn upnp_gateway_ip_change() {
 /// connect), reject both loopback ext addrs via
 /// `is_publishable_ext`, and never emit `Portmapped … 127.0.0.1`.
 #[test]
-#[expect(clippy::too_many_lines)]
 fn upnp_rogue_gateway_ext_addr_rejected() {
     if !enter_bwrap("portmap::upnp_rogue_gateway_ext_addr_rejected") {
         return;

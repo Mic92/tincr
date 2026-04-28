@@ -905,10 +905,9 @@ impl Daemon {
 
         // ─── PCP/UPnP portmapper. After listeners (need the
         // resolved port), before drop_privs (PCP/SSDP send from
-        // unprivileged sockets, but spawn alongside DHT for symmetry
-        // and so the first refresh runs while tinc-up is still
-        // configuring the iface). C hooks this at the same point
-        // (`net_setup.c:1217`, after `add_listen_address`).
+        // unprivileged sockets, spawn alongside DHT for symmetry so
+        // the first refresh runs while tinc-up is still configuring
+        // the iface.
         #[cfg(feature = "upnp")]
         if daemon.settings.upnp != crate::portmap::UpnpMode::No {
             log::info!(target: "tincd::portmap",

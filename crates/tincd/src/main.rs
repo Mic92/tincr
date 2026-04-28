@@ -1,8 +1,8 @@
 //! tincd binary entry point.
 //!
 //! Boot ordering (matches C `tincd.c::main2`):
-//!     detach → mlockall → setup_network (binds + tinc-up as root)
-//!     → ProcessPriority → drop_privs → main_loop.
+//!     detach → mlockall → `setup_network` (binds + tinc-up as root)
+//!     → `ProcessPriority` → `drop_privs` → `main_loop`.
 //!
 //! `-D` (no-detach) is required for the test suite; `tests/common/
 //! mod.rs::tincd_cmd()` sets it. `-n NETNAME` (or `NETNAME` env)
@@ -415,7 +415,7 @@ where
 
 /// `tinc start` umbilical handshake: write a nul byte and close so
 /// the spawning `tinc start` exits 0. We don't tee log output
-/// through the umbilical (env_logger has no hook); the
+/// through the umbilical (`env_logger` has no hook); the
 /// detach-without-logfile warning in `init_logging` covers that gap.
 /// No-op when `TINC_UMBILICAL` is unset.
 fn cut_umbilical() {
@@ -710,7 +710,7 @@ fn check_socket_activation(
 /// the Ed25519 private key and every live SPTPS key. `RLIMIT_CORE=0`
 /// covers on-disk dumps; Linux `PR_SET_DUMPABLE=0` additionally
 /// blocks same-uid ptrace and systemd-coredump pipe handlers (which
-/// ignore RLIMIT_CORE).
+/// ignore `RLIMIT_CORE`).
 fn harden_process(allow_coredump: bool) {
     if allow_coredump {
         return;

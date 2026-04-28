@@ -118,9 +118,9 @@ impl Daemon {
             log::debug!(target: "tincd::conn",
                                 "Established a second connection with {name}, \
                                  closing old connection");
-            // `protocol_auth.c::ack_h`: move the dropped conn's
-            // `outgoing` onto the survivor before terminating, so
-            // `terminate()`'s tail `do_outgoing_connection` doesn't
+            // Move the dropped conn's `outgoing` onto the survivor
+            // before terminating, so `terminate()`'s tail
+            // `do_outgoing_connection` doesn't
             // redial. C always keeps the new conn; under mutual
             // `ConnectTo` with symmetric latency that makes each
             // end keep the stream the other end just dropped, so we

@@ -9,7 +9,7 @@
 //! `5+jitter` seconds. `nc` = active meta conns past ACK:
 //!
 //! 1. `nc < 3` → dial a random eligible node (early return).
-//! 2. `nc > 3` → drop a random outgoing whose peer has edge_count ≥ 2.
+//! 2. `nc > 3` → drop a random outgoing whose peer has `edge_count` ≥ 2.
 //! 3. `nc ≥ 3` → cancel `Outgoing` slots with no live conn.
 //! 4. Random all-node pick; dial if unreachable + has-address + not
 //!    connected. The all-node prng IS the back-off.
@@ -24,7 +24,7 @@
 //!
 //! Hysteresis: add at `relay_rate > RELAY_HI`, drop at `tx_rate <
 //! RELAY_LO`. Drop keys on `tx_rate` (any path), not `relay_rate`,
-//! because once the shortcut connects relay_rate→0 by construction
+//! because once the shortcut connects `relay_rate`→0 by construction
 //! (PACKET 17 short-circuit). Per-node BACKOFF after drop damps
 //! oscillation. See [`ShortcutKnobs`] for the constants;
 //! `AutoConnect=no` disables the whole thing.

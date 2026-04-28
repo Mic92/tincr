@@ -273,7 +273,7 @@ pub struct DaemonSettings {
     /// start when you don't have one static `Address=`. Non-reloadable.
     pub dht_discovery: bool,
 
-    /// `UPnP = yes|udponly|no`. C parity (`net_setup.c:1202`). When
+    /// `UPnP = yes|udponly|no`. When
     /// not `No`, spawns a background thread that asks the LAN gateway
     /// (NAT-PMP first, then UPnP-IGD) to DNAT our listener port. The
     /// TCP mapping feeds `discovery.set_portmapped_tcp` → `tcp=` in
