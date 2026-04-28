@@ -1,7 +1,5 @@
 # Dev shell: enough to run `make -f kat/Makefile && cargo test`.
-# The C toolchain is needed for KAT regeneration, not for the
-# Rust build itself (no build.rs/cc yet — that comes with the
-# SPTPS FFI harness in Phase 0b).
+# The C toolchain is for KAT regeneration, not for the Rust build.
 {
   mkShell,
   lib,
@@ -31,16 +29,8 @@
 mkShell {
   # Cross-impl tests (crates/tincd/tests/crossimpl.rs and
   # crates/tinc-tools/tests/self_roundtrip.rs) gate on these
-  # env vars: unset → SKIP. The earlier comment at the
-  # sptps-test-c derivation about "rebuilding the C binary on
-  # every Rust-only change" was wrong about THIS dependency
-  # edge: both filesets are src/-only, so a Rust edit does NOT
-  # invalidate them — entering the shell after a Rust change
-  # is free. A src/ edit DOES rebuild on entry (~10s warm),
-  # which is correct: any C change should re-run cross-impl.
-  #
-  # The crossimpl.rs tests are THE wire-compat proof; they
-  # need to run with the rest of the suite, not be opt-in.
+  # env vars: unset → SKIP. They are THE wire-compat proof and
+  # must run with the rest of the suite, not be opt-in.
   TINC_C_TINCD = "${tincd-c}/sbin/tincd";
   TINC_C_SPTPS_TEST = "${sptps-test-c}/bin/sptps_test";
   TINC_C_SPTPS_KEYPAIR = "${sptps-test-c}/bin/sptps_keypair";
@@ -53,10 +43,8 @@ mkShell {
     rustfmt
     gnumake
     jq # vectors.json sanity-checking
-    # tinc-tools cross-impl test wants a C sptps_test to talk
-    # to. Building via meson is the path of least resistance —
-    # the build graph is already correct. Nolegacy mode means
-    # no openssl dep; same crypto subset tinc-crypto ported.
+    # cross-impl tests need a C sptps_test to talk to; meson
+    # builds it in nolegacy mode (no openssl).
     meson
     ninja
     pkg-config
