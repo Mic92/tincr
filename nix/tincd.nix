@@ -2,11 +2,8 @@
 # ExecStart hard-codes ${pkg}/bin/tincd, which is where crane puts it.
 #
 # crane splits the build: `buildDepsOnly` compiles every crates.io dep
-# into one derivation keyed on Cargo.lock, then `buildPackage` reuses
-# that and only rebuilds workspace crates. The hot redeploy loop
-# (./scripts/deploy-agent-fix.sh) was paying ~55s × 2 arches per
-# commit under buildRustPackage; now src-only changes touch ~10s of
-# workspace recompile.
+# keyed on Cargo.lock, then `buildPackage` reuses that and only
+# rebuilds workspace crates on src-only changes.
 {
   craneLib,
   lib,
