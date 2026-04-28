@@ -201,25 +201,11 @@ steady-state overhead. The invitation handshake is always classical
 
 ## Metrics / observability
 
-There is no Prometheus / metrics endpoint. For monitoring, poll the
-control socket:
-
-```sh
-# per-node byte/packet counters (parseable)
-tinc -n NET dump nodes
-
-# single peer, human-readable
-tinc -n NET info PEER
-
-# live top-style view
-tinc -n NET top
-```
-
-`dump nodes` output is stable enough to scrape; the
-`in_packets in_bytes out_packets out_bytes` fields are lifetime
-counters (monotone until restart), so a textfile-collector can diff
-them. `dump edges | wc -l` and `dump connections | wc -l` give mesh
-size and local degree.
+No Prometheus endpoint; scrape the control socket. `dump nodes`
+output is stable: `in_packets in_bytes out_packets out_bytes` are
+lifetime counters (monotone until restart), so a textfile collector
+can diff them. `dump edges | wc -l` and `dump connections | wc -l`
+give mesh size and local degree.
 
 ## DHT discovery operations
 
