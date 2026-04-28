@@ -173,54 +173,6 @@ end.
 
 ## NixOS
 
-The upstream `services.tinc.networks` module works as-is; point
-`package` at this flake and drop unknown-to-nixpkgs keys into
-`extraConfig`:
-
-```nix
-{ inputs, pkgs, ... }:
-{
-  services.tinc.networks.myvpn = {
-    name    = "alpha";
-    package = inputs.tincr.packages.${pkgs.system}.tincd;
-
-    ed25519PrivateKeyFile = "/var/lib/tinc/myvpn/ed25519_key.priv";
-
-    hostSettings = {
-      alpha = {
-        subnets = [ { address = "10.20.0.1"; } ];
-        settings.Ed25519PublicKey = "…";
-      };
-      beta = {
-        subnets = [ { address = "10.20.0.2"; } ];
-        settings.Ed25519PublicKey = "…";
-        addresses = [ { address = "beta.example.org"; } ];
-      };
-    };
-
-    settings = {
-      DeviceType  = "tun";
-      ConnectTo   = "beta";
-      AutoConnect = true;
-    };
-    extraConfig = ''
-      DhtDiscovery  = yes
-      DhtSecretFile = /run/secrets/tinc-dht
-    '';
-    chroot = false;   # tinc-up runs from /nix/store
-  };
-
-  networking.interfaces."tinc.myvpn" = {
-    virtual     = true;
-    virtualType = "tun";
-    ipv4.addresses = [ { address = "10.20.0.1"; prefixLength = 24; } ];
-  };
-  systemd.services."tinc.myvpn" = {
-    after    = [ "network-addresses-tinc.myvpn.service" ];
-    requires = [ "network-addresses-tinc.myvpn.service" ];
-  };
-
-  networking.firewall.allowedTCPPorts = [ 655 ];
-  networking.firewall.allowedUDPPorts = [ 655 ];
-}
-```
+Use the flake's own `services.tincr` module — socket activation,
+networkd-owned TUN, and optional resolved hookup are wired for
+you. See [NIXOS.md](NIXOS.md).
