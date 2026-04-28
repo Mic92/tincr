@@ -62,15 +62,6 @@
 //! nothing, and "the table matches the C table" is easier to reason
 //! about than "the table is the C table sorted."
 //!
-//! ## `DISABLE_LEGACY` doesn't gate anything here
-//!
-//! Checked: no `#ifdef DISABLE_LEGACY` in the table. `Cipher`,
-//! `Digest`, `MACLength` (legacy crypto knobs) are all present
-//! unconditionally. The daemon ignores them under nolegacy; fsck
-//! still validates them as "this is a known key, it's not obsolete,
-//! it's HOST-allowed." That's correct: a config file with `Cipher =
-//! aes-256-cbc` is *valid syntax* even on a daemon that ignores it.
-
 /// Bitflags for config-key metadata. `tincctl.h:36-40`.
 ///
 /// `u8` newtype — see module doc for why not `bitflags!`.
