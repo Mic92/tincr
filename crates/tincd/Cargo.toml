@@ -100,7 +100,8 @@ mainline.workspace = true
 # std's TcpListener::bind is atomic, no seam for IPV6_V6ONLY. socket2
 # is std-with-seams; only dep is libc (already linked). NOT a new shim-
 # matrix row — same quadrant as slotmap-instead-of-hand-rolling-a-slab.
-# No 'all' feature: V6ONLY/REUSEADDR/NODELAY/BROADCAST are all ungated.
+# 'all' is needed: cbpf.rs uses set_reuse_port + Type::nonblocking,
+# and tx_control.rs uses set_recv_tclass_v6 — all socket2-feature-gated.
 socket2 = { version = "0.6", features = ["all"] }
 
 # packet.rs: derive FromBytes/IntoBytes on the #[repr(C, packed)]
