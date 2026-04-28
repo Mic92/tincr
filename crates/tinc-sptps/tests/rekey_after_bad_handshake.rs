@@ -1,7 +1,7 @@
 //! A malformed encrypted handshake record (datagram mode, where `Err`
 //! is per-packet) must not leave `mykex` set and wedge later rekeys.
 
-mod common;
+pub mod common;
 
 use common::{SeedRng, handshake_pair, wire_only};
 use tinc_crypto::chapoly::ChaPoly;

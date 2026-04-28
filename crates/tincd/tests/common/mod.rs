@@ -19,8 +19,6 @@
 //! comment is right: "Two ~100-line copies are cheaper than the
 //! plumbing."
 
-#![allow(dead_code)] // not every test file uses every helper
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

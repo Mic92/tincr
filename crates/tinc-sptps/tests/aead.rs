@@ -14,7 +14,7 @@
 //! be silently corrupted. That's the operational contract documented in
 //! `docs/OPERATING.md`.
 
-mod common;
+pub mod common;
 
 use common::{handshake_pair_aead, wire};
 use tinc_sptps::{Framing, Output, SptpsAead, SptpsError};

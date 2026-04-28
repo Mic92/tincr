@@ -6,8 +6,6 @@
 //! `.with_conf()` lines land BEFORE the `PingTimeout = 1` default
 //! (tinc-conf is first-occurrence-wins).
 
-#![allow(dead_code)] // not every test binary uses every builder knob
-
 use std::fmt::Write as _;
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::{Path, PathBuf};

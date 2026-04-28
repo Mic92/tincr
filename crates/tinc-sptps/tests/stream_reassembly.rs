@@ -5,7 +5,7 @@
 //! Property: chopping the wire byte stream at arbitrary offsets
 //! yields the same `Output` sequence as feeding it whole.
 
-mod common;
+pub mod common;
 
 use common::{SeedRng, feed_stream, keypair, wire_only};
 use proptest::prelude::*;

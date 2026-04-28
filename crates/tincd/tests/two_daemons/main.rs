@@ -29,7 +29,7 @@
 
 #[path = "../common/mod.rs"]
 #[macro_use]
-mod common;
+pub mod common;
 
 mod fd_tunnel;
 mod node;

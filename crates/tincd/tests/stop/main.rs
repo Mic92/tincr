@@ -35,7 +35,7 @@
 
 #[path = "../common/mod.rs"]
 #[macro_use]
-mod common;
+pub mod common;
 
 mod cli_flags;
 mod control;

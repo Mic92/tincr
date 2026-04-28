@@ -1,7 +1,7 @@
 //! Regressions for error-path defects found during testing-strategy review.
 
 #[path = "../common/mod.rs"]
-mod common;
+pub mod common;
 
 mod adversarial_framing;
 mod c_interop;

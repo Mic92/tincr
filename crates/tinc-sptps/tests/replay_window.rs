@@ -8,7 +8,7 @@
 //! `BadSeqno`. The `farfuture` and out-of-window paths don't fire
 //! by construction — covering those needs a reference model.
 
-mod common;
+pub mod common;
 
 use common::{SeedRng, handshake_pair, wire_only};
 use proptest::prelude::*;

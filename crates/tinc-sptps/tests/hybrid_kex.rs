@@ -2,7 +2,7 @@
 //! regression. The C differential harness (`vs_c.rs`) only ever
 //! exercises classical mode, so hybrid correctness is pinned here.
 
-mod common;
+pub mod common;
 use common::{NoRng, SeedRng, keypair, wire};
 
 use std::time::Instant;
