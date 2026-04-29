@@ -201,8 +201,121 @@ pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> 
     enter_impl(level, paths)
 }
 
+/// Pure data: which paths get which Landlock access bits, in the
+/// order `restrict_self` consumes them. Computed by `discover_paths`,
+/// consumed by `build_and_apply_ruleset`. Split out so the path-set
+/// logic is unit-testable without invoking the syscall.
+///
+/// Field order matches `add_rules` order in apply (preserved for
+/// partial-rule fallback semantics on older kernels — `restrict_self`
+/// is one-shot and rules merge in addition order).
 #[cfg(target_os = "linux")]
-fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
+struct SandboxPaths {
+    /// `confbase` root: `rd` only, never exec (see hosts/ leak note).
+    confbase: PathBuf,
+    /// Per-file `Execute|ReadFile` on fixed hook-script names. Empty
+    /// at `High` (exec dropped). `path_beneath_rules` silently skips
+    /// nonexistent entries — scripts created post-`enter()` are
+    /// intentionally inert (`UseNewPaths`).
+    scripts: Vec<PathBuf>,
+    /// `confbase/hosts`: `rd | rwc`. Per-node `hosts/{node}-up`
+    /// scripts deliberately don't get `Execute` here.
+    hosts: PathBuf,
+    /// `rd | rwc`: addrcache, invitations, optional `$STATE_DIRECTORY`
+    /// fallback, and the tun device.
+    rwc: Vec<PathBuf>,
+    /// `pidfile` + `unixsocket` + optional `logfile`: `ReadFile|WriteFile`
+    /// on the file inodes themselves (parent dirs may be /var/run
+    /// etc., which we don't grant). Logfile, when present, is
+    /// always the last entry — `build_and_apply_ruleset` touches
+    /// it pre-ruleset.
+    runtime_files: Vec<PathBuf>,
+    /// Whether `runtime_files` ends with a logfile entry that
+    /// needs touching before ruleset build (so `path_beneath_rules`
+    /// can open it).
+    has_logfile: bool,
+    /// Parent dirs of pidfile/unixsocket: `RemoveFile` only, for the
+    /// `Daemon::Drop` / `ControlSocket::Drop` unlink path.
+    unlink_parents: Vec<PathBuf>,
+    /// `/dev/{,u}random`: `ReadFile`. urandom is `rand_core`'s libc
+    /// fallback; bwrap netns harness binds it.
+    random: Vec<&'static str>,
+}
+
+/// Pure: compute the path set for a given `level` and `paths`. No
+/// I/O, no syscalls. The apply half pre-creates dirs and touches
+/// the logfile before handing the set to Landlock.
+#[cfg(target_os = "linux")]
+fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
+    let can_exec = level < Level::High;
+
+    let scripts: Vec<PathBuf> = if can_exec {
+        const SCRIPT_NAMES: &[&str] = &[
+            "tinc-up",
+            "tinc-down",
+            "host-up",
+            "host-down",
+            "subnet-up",
+            "subnet-down",
+            "invitation-accepted",
+        ];
+        SCRIPT_NAMES
+            .iter()
+            .map(|n| paths.confbase.join(n))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut rwc: Vec<PathBuf> = vec![
+        paths.confbase.join("addrcache"),
+        paths.confbase.join("invitations"),
+    ];
+    // addrcache + dht_nodes fall back to `$STATE_DIRECTORY/addrcache`
+    // when confbase is read-only (NixOS store). Allow it so the
+    // fallback survives Landlock too.
+    if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {
+        rwc.push(PathBuf::from(sd).join("addrcache"));
+    }
+    if let Some(dev) = &paths.device {
+        rwc.push(dev.clone());
+    }
+
+    let mut runtime_files: Vec<PathBuf> =
+        vec![paths.pidfile.clone(), paths.unixsocket.clone()];
+    let has_logfile = paths.logfile.is_some();
+    if let Some(lf) = &paths.logfile {
+        runtime_files.push(lf.clone());
+    }
+
+    let mut unlink_parents: Vec<PathBuf> = Vec::new();
+    if let Some(p) = paths.pidfile.parent() {
+        unlink_parents.push(p.to_owned());
+    }
+    if let Some(p) = paths.unixsocket.parent() {
+        unlink_parents.push(p.to_owned());
+    }
+
+    SandboxPaths {
+        confbase: paths.confbase.clone(),
+        scripts,
+        hosts: paths.confbase.join("hosts"),
+        rwc,
+        runtime_files,
+        unlink_parents,
+        random: vec!["/dev/random", "/dev/urandom"],
+        has_logfile,
+    }
+}
+
+/// Pre-create dirs / touch logfile (so `path_beneath_rules` can
+/// open the path), then build and commit the Landlock ruleset.
+///
+/// `add_rules` order is load-bearing: on partial-rule fallback the
+/// kernel applies the prefix it understood. Keep in sync with the
+/// pre-split body.
+#[cfg(target_os = "linux")]
+fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> {
     use landlock::{
         ABI, Access, AccessFs, BitFlags, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
         path_beneath_rules,
@@ -220,7 +333,6 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
     let access_all = AccessFs::from_all(abi);
     // Read-only without Execute (`from_read` would include it).
     let access_rd: BitFlags<AccessFs> = AccessFs::ReadFile | AccessFs::ReadDir;
-
     // unveil "rwc" → write + create-file + create-dir + remove-*.
     // Not `from_write(abi)` — that includes MakeChar/MakeBlock/
     // MakeFifo which the daemon never needs. MakeSock IS needed:
@@ -234,95 +346,32 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
         | AccessFs::RemoveFile
         | AccessFs::RemoveDir;
 
-    let can_exec = level < Level::High;
-
     // path_beneath_rules SILENTLY SKIPS paths it can't open
-    // (`fs.rs:613` `Err(_) => None`). This is what we want for
-    // logfile (parent dir might not exist yet; the file itself
-    // is already open as an fd). We pre-create the confbase
-    // subdirs so the rules apply.
-    let addrcache = paths.confbase.join("addrcache");
-    let hosts = paths.confbase.join("hosts");
-    let invitations = paths.confbase.join("invitations");
-    // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`. main.rs
-    // comment said "Daemon::setup already creates what it needs
-    // ... Skip." That was
-    // true for non-sandboxed runs (addrcache lazily mkdirs cache/).
-    // With Landlock, lazy mkdir AFTER restrict_self needs
-    // MakeDir on confbase itself, which we don't grant. Pre-create
-    // here so the PathBeneath fd-open succeeds.
-    for d in [&addrcache, &hosts, &invitations] {
+    // (`fs.rs:613` `Err(_) => None`). Pre-create confbase subdirs
+    // and pre-create $STATE_DIRECTORY/addrcache so the rules apply.
+    // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`: lazy
+    // mkdir AFTER restrict_self would need MakeDir on confbase
+    // itself, which we don't grant.
+    // /dev/* entries (the tun device) are char devices, not dirs;
+    // skip them. Everything else in `rwc` is a directory we want
+    // to ensure exists (addrcache, invitations, $STATE_DIRECTORY).
+    let dirs_to_create = std::iter::once(&p.hosts)
+        .chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
+    for d in dirs_to_create {
         if let Err(e) = std::fs::create_dir_all(d) {
             // Non-fatal: hosts/ existing is required by setup()
             // already. cache/ and invitations/ are optional. If
-            // mkdir fails, path_beneath_rules will skip the entry
-            // (see above) and the daemon hits EACCES later when
-            // it tries to use the dir. Warn so the operator knows.
+            // mkdir fails, path_beneath_rules skips the entry and
+            // the daemon hits EACCES later. Warn so operator knows.
             log::warn!(target: "tincd",
                 "Sandbox: mkdir {}: {e}", d.display());
         }
     }
 
-    // confbase + subdirs are NO EXEC. Landlock rules are additive,
-    // so Execute on confbase would leak into hosts/ — which also
-    // has WriteFile|MakeReg — giving a compromised event loop a
-    // write-then-exec primitive via `run_host_script("hosts/{node}-
-    // up")`. Execute is granted per-file on the fixed hook-script
-    // names below instead. Per-node `hosts/{node}-up` therefore
-    // won't run under Sandbox; use `host-up` + $NODE.
-    let confbase_access = access_rd;
-    let hosts_access = access_rd | access_rwc;
-
-    // path_beneath_rules skips nonexistent paths; scripts created
-    // after enter() are intentionally not exec'able (UseNewPaths).
-    let script_names: &[&str] = &[
-        "tinc-up",
-        "tinc-down",
-        "host-up",
-        "host-down",
-        "subnet-up",
-        "subnet-down",
-        "invitation-accepted",
-    ];
-    let script_paths: Vec<PathBuf> = if can_exec {
-        script_names
-            .iter()
-            .map(|n| paths.confbase.join(n))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Paths granted r+w+c (no exec). cache/ and invitations/ are
-    // pure data dirs; the device is a char dev (MakeReg meaningless
-    // on it but harmless, and one access-set means one add_rules).
-    let mut rwc_paths: Vec<PathBuf> = vec![addrcache, invitations];
-    // addrcache + dht_nodes fall back to `$STATE_DIRECTORY/addrcache`
-    // when confbase is read-only (NixOS store). Pre-create + allow it
-    // so the fallback survives Landlock too.
-    if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {
-        let sd_cache = PathBuf::from(sd).join("addrcache");
-        let _ = std::fs::create_dir_all(&sd_cache);
-        rwc_paths.push(sd_cache);
-    }
-    if let Some(dev) = &paths.device {
-        rwc_paths.push(dev.clone());
-    }
-
-    // pidfile / unixsocket / logfile: grant Read|Write on the FILE
-    // inodes (all exist by enter() time), not their parent dirs —
-    // those default to /var/run, /var/log. unlink is a directory op,
-    // so the parent dirs get RemoveFile ONLY for Drop cleanup.
-    let mut runtime_files: Vec<PathBuf> = vec![paths.pidfile.clone(), paths.unixsocket.clone()];
-    let mut unlink_parents: Vec<PathBuf> = Vec::new();
-    if let Some(p) = paths.pidfile.parent() {
-        unlink_parents.push(p.to_owned());
-    }
-    if let Some(p) = paths.unixsocket.parent() {
-        unlink_parents.push(p.to_owned());
-    }
-    if let Some(lf) = &paths.logfile {
-        // Touch so PathBeneath can open it (init_logging already did).
+    // Touch logfile so PathBeneath can open it (init_logging
+    // already created it; belt-and-braces).
+    if p.has_logfile {
+        let lf = p.runtime_files.last().expect("has_logfile invariant");
         if let Err(e) = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
@@ -331,43 +380,44 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
             log::warn!(target: "tincd",
                 "Sandbox: touch {}: {e}", lf.display());
         }
-        runtime_files.push(lf.clone());
     }
 
-    // /dev/{u,}random "r". On Linux getrandom(2) is
-    // the primary; the urandom fd is rand_core's libc fallback
-    // for ancient kernels. Harmless to grant. The bwrap netns
-    // harness dev-binds /dev/urandom; without the rule that
-    // bind would be inaccessible.
-    let random_paths = ["/dev/random", "/dev/urandom"];
+    // confbase + subdirs are NO EXEC. Landlock rules are additive,
+    // so Execute on confbase would leak into hosts/ — which also
+    // has WriteFile|MakeReg — giving a compromised event loop a
+    // write-then-exec primitive via `run_host_script("hosts/{node}-
+    // up")`. Execute is granted per-file on the fixed hook-script
+    // names instead.
+    let confbase_access = access_rd;
+    let hosts_access = access_rd | access_rwc;
 
     let status = Ruleset::default()
         .handle_access(access_all)
         .map_err(|e| format!("Landlock handle_access: {e}"))?
         .create()
         .map_err(|e| format!("Landlock create: {e}"))?
-        .add_rules(path_beneath_rules(&[&paths.confbase], confbase_access))
+        .add_rules(path_beneath_rules(&[&p.confbase], confbase_access))
         .map_err(|e| format!("Landlock add confbase: {e}"))?
         .add_rules(path_beneath_rules(
-            &script_paths,
+            &p.scripts,
             AccessFs::Execute | AccessFs::ReadFile,
         ))
         .map_err(|e| format!("Landlock add scripts: {e}"))?
-        .add_rules(path_beneath_rules(&[&hosts], hosts_access))
+        .add_rules(path_beneath_rules(&[&p.hosts], hosts_access))
         .map_err(|e| format!("Landlock add hosts: {e}"))?
-        .add_rules(path_beneath_rules(&rwc_paths, access_rd | access_rwc))
+        .add_rules(path_beneath_rules(&p.rwc, access_rd | access_rwc))
         .map_err(|e| format!("Landlock add rwc: {e}"))?
         .add_rules(path_beneath_rules(
-            &runtime_files,
+            &p.runtime_files,
             AccessFs::ReadFile | AccessFs::WriteFile,
         ))
         .map_err(|e| format!("Landlock add runtime files: {e}"))?
         .add_rules(path_beneath_rules(
-            &unlink_parents,
+            &p.unlink_parents,
             BitFlags::from(AccessFs::RemoveFile),
         ))
         .map_err(|e| format!("Landlock add unlink parents: {e}"))?
-        .add_rules(path_beneath_rules(random_paths, AccessFs::ReadFile))
+        .add_rules(path_beneath_rules(p.random, AccessFs::ReadFile))
         .map_err(|e| format!("Landlock add random: {e}"))?
         .restrict_self()
         .map_err(|e| format!("Landlock restrict_self: {e}"))?;
@@ -397,6 +447,11 @@ fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn enter_impl(level: Level, paths: &Paths) -> Result<(), String> {
+    build_and_apply_ruleset(discover_paths(level, paths), level)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -438,6 +493,53 @@ mod tests {
     /// process, so STATE is fresh. (cargo test without nextest
     /// runs tests in threads of one process — STATE would leak.
     /// AGENTS.md mandates nextest.)
+    /// Discovery half is pure: same input → same path set, no I/O.
+    /// Pins the field-by-field shape so an accidental refactor
+    /// (e.g. dropping `$STATE_DIRECTORY`, reordering scripts) trips a
+    /// test rather than a runtime EACCES.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discover_paths_normal_shape() {
+        let paths = Paths {
+            confbase: PathBuf::from("/etc/tinc/net"),
+            device: Some(PathBuf::from("/dev/net/tun")),
+            logfile: Some(PathBuf::from("/var/log/tinc.log")),
+            pidfile: PathBuf::from("/run/tinc.pid"),
+            unixsocket: PathBuf::from("/run/tinc.sock"),
+        };
+        let p = discover_paths(Level::Normal, &paths);
+        assert_eq!(p.confbase, PathBuf::from("/etc/tinc/net"));
+        assert_eq!(p.hosts, PathBuf::from("/etc/tinc/net/hosts"));
+        assert_eq!(p.scripts.len(), 7, "7 hook-script names");
+        assert!(p.scripts[0].ends_with("tinc-up"));
+        // Don't depend on host $STATE_DIRECTORY: assert membership.
+        assert!(p.rwc.contains(&PathBuf::from("/etc/tinc/net/addrcache")));
+        assert!(p.rwc.contains(&PathBuf::from("/etc/tinc/net/invitations")));
+        assert!(p.rwc.contains(&PathBuf::from("/dev/net/tun")));
+        assert_eq!(p.runtime_files.len(), 3);
+        assert!(p.has_logfile);
+        assert_eq!(p.unlink_parents, vec![PathBuf::from("/run"), PathBuf::from("/run")]);
+        assert_eq!(p.random, vec!["/dev/random", "/dev/urandom"]);
+    }
+
+    /// `High` drops Execute: scripts list is empty so
+    /// `path_beneath_rules` adds no Execute grants.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discover_paths_high_drops_scripts() {
+        let paths = Paths {
+            confbase: PathBuf::from("/c"),
+            device: None,
+            logfile: None,
+            pidfile: PathBuf::from("/run/p"),
+            unixsocket: PathBuf::from("/run/s"),
+        };
+        let p = discover_paths(Level::High, &paths);
+        assert!(p.scripts.is_empty());
+        assert!(!p.has_logfile);
+        assert_eq!(p.runtime_files.len(), 2);
+    }
+
     #[test]
     fn can_before_enter_is_always_true() {
         assert!(can(Action::StartProcesses));
