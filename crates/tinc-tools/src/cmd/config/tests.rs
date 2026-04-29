@@ -110,6 +110,13 @@ fn setup(name: &str) -> ConfDir {
     ConfDir::with_name(name)
 }
 
+/// Common-case `ConfigCmd`: bare `Set var=value`, no node, no force.
+/// Tests that need `Get`/`Add`/explicit node/etc spell those out
+/// against this base via struct-update syntax.
+fn cmd<'a>(action: Action, var: &'a str, value: &'a str) -> ConfigCmd<'a> {
+    ConfigCmd { action, node: None, var, value, force: false }
+}
+
 /// Routing + canonicalization table: which file does this var go to?
 /// SERVER → tinc.conf (node=None); HOST-only → hosts/$me via
 /// `get_my_name`; explicit node prefix wins.
@@ -131,7 +138,11 @@ fn intent_routing() {
         (Action::Set, None,        "port",   "655",          Some("alice"), "Port"),
     ];
     for &(action, explicit, var, val, expect_node, expect_var) in cases {
-        let (intent, _) = build_intent(&paths, action, explicit, var, val, false).unwrap();
+        let (intent, _) = build_intent(
+            &paths,
+            &ConfigCmd { node: explicit, ..cmd(action, var, val) },
+        )
+        .unwrap();
         assert_eq!(intent.node.as_deref(), expect_node, "var: {var:?}");
         assert_eq!(intent.variable, expect_var, "var: {var:?}");
     }
@@ -156,7 +167,7 @@ fn intent_dual_tagged_goes_to_tinc_conf() {
     assert!(v.flags.contains(VarFlags::HOST));
 
     let (intent, _) =
-        build_intent(&paths, Action::Set, None, "Cipher", "aes-256-gcm", false).unwrap();
+        build_intent(&paths, &cmd(Action::Set, "Cipher", "aes-256-gcm")).unwrap();
     // SERVER bit set → tinc.conf, even though HOST is also set.
     assert_eq!(intent.node, None);
 }
@@ -172,7 +183,7 @@ fn intent_port_is_host_only() {
     assert!(!v.flags.contains(VarFlags::SERVER));
     assert!(v.flags.contains(VarFlags::HOST));
 
-    let (intent, _) = build_intent(&paths, Action::Set, None, "Port", "655", false).unwrap();
+    let (intent, _) = build_intent(&paths, &cmd(Action::Set, "Port", "655")).unwrap();
     // HOST-only → hosts/alice via get_my_name.
     assert_eq!(intent.node.as_deref(), Some("alice"));
 }
@@ -196,13 +207,13 @@ fn intent_action_coercion() {
         (Action::Add, "ConnectTo", "bob", Action::Add, false),
     ];
     for &(in_action, var, val, out_action, warn) in cases {
-        let (intent, _) = build_intent(&paths, in_action, None, var, val, false).unwrap();
+        let (intent, _) = build_intent(&paths, &cmd(in_action, var, val)).unwrap();
         assert_eq!(intent.action, out_action, "{in_action:?} {var}");
         assert_eq!(intent.warn_on_remove, warn, "{in_action:?} {var}");
     }
     // `get` with a value → `set`. (Separate because the original
     // didn't pin warn_on_remove; preserving.)
-    let (intent, _) = build_intent(&paths, Action::Get, None, "Port", "655", false).unwrap();
+    let (intent, _) = build_intent(&paths, &cmd(Action::Get, "Port", "655")).unwrap();
     assert_eq!(intent.action, Action::Set);
 }
 
@@ -230,14 +241,18 @@ fn intent_errors() {
         (Action::Add, None,             "Subnet",   "10.0.0.1/24", "Network address and prefix length do not match"),
     ];
     for &(action, explicit, var, val, msg) in cases {
-        let e = build_intent(&paths, action, explicit, var, val, false).unwrap_err();
+        let e = build_intent(
+            &paths,
+            &ConfigCmd { node: explicit, ..cmd(action, var, val) },
+        )
+        .unwrap_err();
         let CmdError::BadInput(m) = e else {
             panic!("expected BadInput for {var:?}={val:?}")
         };
         assert!(m.contains(msg), "var={var:?} val={val:?}: got {m:?}");
     }
     // The unknown-var error also mentions --force (the escape hatch).
-    let e = build_intent(&paths, Action::Set, None, "NoSuchVar", "x", false).unwrap_err();
+    let e = build_intent(&paths, &cmd(Action::Set, "NoSuchVar", "x")).unwrap_err();
     let CmdError::BadInput(m) = e else { panic!() };
     assert!(m.contains("--force"));
 }
@@ -247,7 +262,11 @@ fn intent_errors() {
 fn intent_unknown_var_force_proceeds() {
     let cd = setup("alice");
     let paths = cd.paths().clone();
-    let (intent, warns) = build_intent(&paths, Action::Set, None, "NoSuchVar", "x", true).unwrap();
+    let (intent, warns) = build_intent(
+        &paths,
+        &ConfigCmd { force: true, ..cmd(Action::Set, "NoSuchVar", "x") },
+    )
+    .unwrap();
     assert_eq!(intent.variable, "NoSuchVar"); // user's casing survives
     assert_eq!(intent.node, None); // unknown → tinc.conf
     assert_eq!(warns.len(), 1);
@@ -262,7 +281,7 @@ fn intent_unknown_var_force_proceeds() {
 fn intent_unknown_var_get_proceeds() {
     let cd = setup("alice");
     let paths = cd.paths().clone();
-    let (intent, warns) = build_intent(&paths, Action::Get, None, "NoSuchVar", "", false).unwrap();
+    let (intent, warns) = build_intent(&paths, &cmd(Action::Get, "NoSuchVar", "")).unwrap();
     assert_eq!(intent.action, Action::Get);
     assert!(matches!(&warns[0], Warning::Unknown(_)));
 }
@@ -281,7 +300,7 @@ fn intent_obsolete_var_fails() {
         "test assumption: PrivateKey is obsolete"
     );
 
-    let e = build_intent(&paths, Action::Set, None, "PrivateKey", "x", false).unwrap_err();
+    let e = build_intent(&paths, &cmd(Action::Set, "PrivateKey", "x")).unwrap_err();
     let CmdError::BadInput(m) = e else { panic!() };
     assert!(m.contains("obsolete"));
 }
@@ -291,7 +310,7 @@ fn intent_obsolete_var_fails() {
 fn intent_obsolete_var_get_ok() {
     let cd = setup("alice");
     let paths = cd.paths().clone();
-    let (intent, warns) = build_intent(&paths, Action::Get, None, "PrivateKey", "", false).unwrap();
+    let (intent, warns) = build_intent(&paths, &cmd(Action::Get, "PrivateKey", "")).unwrap();
     assert_eq!(intent.action, Action::Get);
     // No obsolete warning — the check doesn't fire for get.
     assert!(!warns.iter().any(|w| matches!(w, Warning::Obsolete(_))));

@@ -138,6 +138,24 @@ fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> 
 // loop body plus the surrounding `if(!found)` and `if(node &&
 // !check_id)` checks.
 
+/// Bundled args for [`build_intent`]. `paths` stays separate — it's
+/// the environment, not the command.
+pub struct ConfigCmd<'a> {
+    /// Pre-coercion action from the CLI. `Get` with a value coerces
+    /// to `Set` inside `build_intent`.
+    pub action: Action,
+    /// `Some("alice")` for `alice.Var`; `None` for the bare form.
+    pub node: Option<&'a str>,
+    /// Variable name, case is the user's. Looked up case-insensitively.
+    pub var: &'a str,
+    /// Empty `""` means "absent" — mirrors `parse_var_expr`'s output.
+    /// (Kept as `&str` not `Option<&str>` to avoid churning every
+    /// caller; `is_empty()` is the absence test throughout.)
+    pub value: &'a str,
+    /// `--force`: relax obsolete/unknown/non-host gates.
+    pub force: bool,
+}
+
 /// Validate the variable, decide which file to edit, apply the
 /// action coercions.
 ///
@@ -145,7 +163,7 @@ fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> 
 /// expression resolve to `hosts/$(get_my_name)`, which reads
 /// `tinc.conf`.
 ///
-/// `force` gates: unknown vars, obsolete vars, server-var-in-hostfile.
+/// `cmd.force` gates: unknown vars, obsolete vars, server-var-in-hostfile.
 ///
 /// # Errors
 /// Same as the C's `return 1` paths: obsolete without force,
@@ -162,12 +180,15 @@ fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> 
 /// but `cmd_config` writes blindly otherwise.)
 pub fn build_intent(
     paths: &Paths,
-    raw_action: Action,
-    explicit_node: Option<&str>,
-    var: &str,
-    value: &str,
-    force: bool,
+    cmd: &ConfigCmd<'_>,
 ) -> Result<(Intent, Vec<Warning>), CmdError> {
+    let ConfigCmd {
+        action: raw_action,
+        node: explicit_node,
+        var,
+        value,
+        force,
+    } = *cmd;
     let mut warnings = Vec::new();
 
     // ─── Action coercion: get + value → set
@@ -622,7 +643,16 @@ pub fn run(
     }
 
     // ─── Stage 2: validate, resolve node, coerce action
-    let (intent, mut warnings) = build_intent(paths, raw_action, explicit_node, var, value, force)?;
+    let (intent, mut warnings) = build_intent(
+        paths,
+        &ConfigCmd {
+            action: raw_action,
+            node: explicit_node,
+            var,
+            value,
+            force,
+        },
+    )?;
 
     // ─── Figure out which file
     let target = match &intent.node {
